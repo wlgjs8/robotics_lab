@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive the full TcpTargetPose pgmode profiling campaign, episode by episode.
+"""Drive the full TcpPoseTarget pgmode profiling campaign, episode by episode.
 
 For every episode (ordered) this:
   1. ensures the pgmode stack is healthy (state flowing, no latched fault);

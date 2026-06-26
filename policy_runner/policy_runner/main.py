@@ -1013,7 +1013,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     umi_convert.add_argument(
         "--poses-only",
         action="store_true",
-        help="Skip camera image datasets (slim output for TcpTargetPose motion replay/profiling)",
+        help="Skip camera image datasets (slim output for TcpPoseTarget motion replay/profiling)",
     )
 
     args = parser.parse_args(argv)
@@ -1370,7 +1370,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 if pc_variant != "b":
                     # cloud variant back-projects the live wrist depth -> need z16 frames.
                     args.include_depth = True
-            command_family = "tcp_target_pose"
         except (RolloutModeValidationError, ValueError) as exc:
             print(f"policy_runner flow-infer rollout-mode rejected: {exc}", file=sys.stderr)
             return 2
@@ -1396,7 +1395,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
                         episodes_dir=args.episodes_dir,
                         device=args.device,
                         max_samples=args.max_offline_samples,
-                        command_family=command_family,
                         image_size=args.image_size,
                     )
                 elif checkpoint_kind == "direct_bc_ensemble":
@@ -1405,7 +1403,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
                         episodes_dir=args.episodes_dir,
                         device=args.device,
                         max_samples=args.max_offline_samples,
-                        command_family=command_family,
                         image_size=args.image_size,
                         ensemble_name=args.ensemble_name,
                     )
@@ -1416,7 +1413,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
                         sample_steps=args.sample_steps,
                         device=args.device,
                         max_samples=args.max_offline_samples,
-                        command_family=command_family,
                     )
             except (RolloutModeValidationError, ValueError) as exc:
                 print(f"policy_runner flow-infer rollout-mode rejected: {exc}", file=sys.stderr)
@@ -1627,7 +1623,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
         try:
             policy_dt_sec = resolve_flow_policy_dt_sec(
                 rollout_policy.mode,
-                command_family,
                 policy_dt_sec=args.policy_dt_sec,
                 command_rate_hz=config.command_rate_hz,
                 dataset_stats=dataset_stats,
@@ -1635,7 +1630,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
             source_kwargs = {
                 "timeout_sec": config.servo_command.timeout_sec,
                 "camera_client": camera_client,
-                "command_family": command_family,
                 "policy_dt_sec": policy_dt_sec,
                 "max_linear_velocity_m_s": args.max_linear_velocity_m_s,
                 "max_angular_velocity_rad_s": args.max_angular_velocity_rad_s,

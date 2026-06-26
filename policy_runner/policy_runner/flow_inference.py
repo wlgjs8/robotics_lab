@@ -38,7 +38,7 @@ from .pc_dataset import PC_CHECKPOINT_SCHEMA
 from .tcp_target_pose_conditioner import (
     CONDITIONING_MODES,
     REANCHOR_MODES,
-    OnlineTcpTargetPoseConditioner,
+    OnlineTcpPoseTargetConditioner,
 )
 from .gripper import REAL_GRIPPER_ENV, GripperRuntime, gripper_commands_from_flow_step
 from .robot_state_client import StateSnapshot
@@ -61,7 +61,6 @@ def default_action_log_path() -> str:
     return str(logs_dir / f"actions_{time.strftime('%Y%m%d_%H%M%S')}.jsonl")
 
 
-FLOW_COMMAND_FAMILY = "tcp_target_pose"
 FLOW_COMMAND_LABEL = "TcpPoseTarget"
 DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S = 0.30
 DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S = 2.0
@@ -227,25 +226,13 @@ def _proprio_action_frame_from_stats(stats: dict[str, Any] | None) -> str:
     return normalize_action_frame(stats.get("proprio_action_frame", DEFAULT_ACTION_FRAME))
 
 
-def _resolve_runtime_command_family(
-    command_family: str | None,
-    stats: dict[str, Any],
-    *,
-    default_command_family: str = FLOW_COMMAND_FAMILY,
-) -> str:
-    _ = command_family, stats, default_command_family
-    return FLOW_COMMAND_FAMILY
-
-
 def resolve_flow_policy_dt_sec(
     rollout_mode: str | RolloutMode,
-    command_family: str,
     *,
     policy_dt_sec: float | None,
     command_rate_hz: float,
     dataset_stats: dict[str, Any] | None = None,
 ) -> float | None:
-    _ = command_family
     if policy_dt_sec is not None:
         resolved = float(policy_dt_sec)
         if resolved <= 0.0:
@@ -275,8 +262,6 @@ class FlowMatchingActionSource:
     validation and SafetyGate still decides whether the intent may be sent.
     """
 
-    _default_command_family = FLOW_COMMAND_FAMILY
-
     def __init__(
         self,
         checkpoint_path: str | Path,
@@ -284,7 +269,6 @@ class FlowMatchingActionSource:
         timeout_sec: float = 0.2,
         camera_client: Any | None = None,
         sample_steps: int = 16,
-        command_family: str | None = None,
         policy_dt_sec: float | None = None,
         max_linear_velocity_m_s: float | None = None,
         max_angular_velocity_rad_s: float | None = None,
@@ -389,8 +373,6 @@ class FlowMatchingActionSource:
                 "(pika UMI data needs --ee-local-r-align pika_rz180; measured 2026-06-15)",
                 file=stderr,
             )
-        self.command_family_option = _resolve_runtime_command_family(
-            command_family, self.stats, default_command_family=self._default_command_family)
         self.command_family = FLOW_COMMAND_LABEL
         model_config = dict(checkpoint.get("model_config", {}))
         # camera_names may live only inside model_config (flow checkpoints) rather
@@ -411,7 +393,6 @@ class FlowMatchingActionSource:
         self.action_horizon = int(model_config.get("action_horizon", checkpoint.get("action_horizon", 0)) or 0)
         self.chunk_execute_steps = _resolve_chunk_execute_steps(chunk_execute_steps, self.action_horizon)
         self.policy_dt_sec = _resolve_runtime_policy_dt_sec(
-            self.command_family_option,
             policy_dt_sec,
             self.stats,
         )
@@ -682,7 +663,7 @@ class FlowMatchingActionSource:
             # True on the first step of a freshly sampled chunk -> lets you see
             # whether trembling lines up with chunk boundaries (pulsed resample).
             "chunk_boundary": int(self._chunk_index) <= 1,
-            "command_family": self.command_family_option,
+            "command_family": self.command_family,
             # Raw flow output before delta->twist conversion / clamping.
             "raw_delta": raw.tolist(),
             # Actual per-arm payload sent downstream (twist after /policy_dt and
@@ -964,12 +945,12 @@ class FlowMatchingActionSource:
             getattr(self, "_tcp_tp_mode", "legacy_step_hold") == "foh_se3"
         )
 
-    def _ensure_tcp_tp_conditioners(self) -> dict[str, "OnlineTcpTargetPoseConditioner"]:
+    def _ensure_tcp_tp_conditioners(self) -> dict[str, "OnlineTcpPoseTargetConditioner"]:
         conds = getattr(self, "_tcp_tp_conditioners", None)
         if conds is None:
             assert self.policy_dt_sec is not None
             conds = {
-                arm: OnlineTcpTargetPoseConditioner(
+                arm: OnlineTcpPoseTargetConditioner(
                     mode="foh_se3",
                     reanchor_mode=getattr(self, "_tcp_tp_reanchor_mode", "measured_blend"),
                     policy_dt_sec=float(self.policy_dt_sec),
@@ -1057,7 +1038,7 @@ class FlowMatchingActionSource:
             "seq": self._action_log_seq,
             "t_mono": time.monotonic(),
             "t_wall": float(now_monotonic),
-            "command_family": self.command_family_option,
+            "command_family": self.command_family,
             "tcp_target_pose_conditioning": getattr(self, "_tcp_tp_mode", "legacy_step_hold"),
             "reanchor_mode": getattr(self, "_tcp_tp_reanchor_mode", "measured_blend"),
             "chunk_index": int(self._chunk_index),
@@ -1334,15 +1315,12 @@ class FlowMatchingActionSource:
 class DirectBcImageActionSource(FlowMatchingActionSource):
     """Runtime source for supervised image action-chunk imitation checkpoints."""
 
-    _default_command_family = FLOW_COMMAND_FAMILY
-
     def __init__(
         self,
         checkpoint_path: str | Path,
         *,
         timeout_sec: float = 0.2,
         camera_client: Any | None = None,
-        command_family: str | None = None,
         policy_dt_sec: float | None = None,
         image_size: int | None = None,
         max_linear_velocity_m_s: float | None = None,
@@ -1404,8 +1382,6 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
                 "(pika UMI data needs --ee-local-r-align pika_rz180; measured 2026-06-15)",
                 file=stderr,
             )
-        self.command_family_option = _resolve_runtime_command_family(
-            command_family, self.stats, default_command_family=self._default_command_family)
         self.command_family = FLOW_COMMAND_LABEL
         self.camera_names = [str(name) for name in checkpoint.get("camera_names", [])]
         checkpoint_image_size = _positive_int(checkpoint.get("image_size"))
@@ -1421,7 +1397,6 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
             raise ValueError("imitation checkpoint action_horizon must be positive")
         self.chunk_execute_steps = _resolve_chunk_execute_steps(chunk_execute_steps, self.action_horizon)
         self.policy_dt_sec = _resolve_runtime_policy_dt_sec(
-            self.command_family_option,
             policy_dt_sec,
             self.stats,
         )
@@ -1540,8 +1515,6 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
 class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
     """Runtime source for prediction-averaged direct-BC checkpoint ensembles."""
 
-    _default_command_family = FLOW_COMMAND_FAMILY
-
     def __init__(
         self,
         report_path: str | Path,
@@ -1549,7 +1522,6 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
         ensemble_name: str | None = "top5",
         timeout_sec: float = 0.2,
         camera_client: Any | None = None,
-        command_family: str | None = None,
         policy_dt_sec: float | None = None,
         image_size: int | None = None,
         max_linear_velocity_m_s: float | None = None,
@@ -1605,15 +1577,12 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
                 "(pika UMI data needs --ee-local-r-align pika_rz180; measured 2026-06-15)",
                 file=stderr,
             )
-        self.command_family_option = _resolve_runtime_command_family(
-            command_family, self.stats, default_command_family=self._default_command_family)
         self.command_family = FLOW_COMMAND_LABEL
         self.camera_names = list(bundle.camera_names)
         self.image_size = int(bundle.image_size)
         self.action_horizon = int(bundle.action_horizon)
         self.chunk_execute_steps = _resolve_chunk_execute_steps(chunk_execute_steps, self.action_horizon)
         self.policy_dt_sec = _resolve_runtime_policy_dt_sec(
-            self.command_family_option,
             policy_dt_sec,
             self.stats,
         )
@@ -1711,7 +1680,6 @@ def run_flow_offline_eval(
     sample_steps: int = 16,
     device: str = "auto",
     max_samples: int = 1,
-    command_family: str = FLOW_COMMAND_LABEL,
 ) -> FlowOfflineEvalResult:
     if sample_steps <= 0:
         raise ValueError("sample_steps must be positive")
@@ -1780,7 +1748,7 @@ def run_flow_offline_eval(
         camera_names=camera_names,
         image_decode_count=image_decode_count,
         missing_camera_count=missing_camera_count,
-        command_family=command_family,
+        command_family=FLOW_COMMAND_LABEL,
         selected_arms=_arms_from_mask(arm_mask),
         checkpoint_arm_mask=tuple(float(value) for value in arm_mask.tolist()),
         checkpoint_has_nonzero_gripper_commands=_checkpoint_has_nonzero_gripper_commands(
@@ -1796,7 +1764,6 @@ def run_direct_bc_offline_eval(
     episodes_dir: str | Path,
     device: str = "auto",
     max_samples: int = 1,
-    command_family: str = FLOW_COMMAND_LABEL,
     image_size: int | None = None,
 ) -> FlowOfflineEvalResult:
     if max_samples <= 0:
@@ -1870,7 +1837,7 @@ def run_direct_bc_offline_eval(
         camera_names=camera_names,
         image_decode_count=image_decode_count,
         missing_camera_count=missing_camera_count,
-        command_family=command_family,
+        command_family=FLOW_COMMAND_LABEL,
         selected_arms=_arms_from_mask(arm_mask),
         checkpoint_arm_mask=tuple(float(value) for value in arm_mask.tolist()),
         checkpoint_has_nonzero_gripper_commands=_checkpoint_has_nonzero_gripper_commands(
@@ -1886,7 +1853,6 @@ def run_direct_bc_ensemble_offline_eval(
     episodes_dir: str | Path,
     device: str = "auto",
     max_samples: int = 1,
-    command_family: str = FLOW_COMMAND_LABEL,
     image_size: int | None = None,
     ensemble_name: str | None = "top5",
 ) -> FlowOfflineEvalResult:
@@ -1929,7 +1895,7 @@ def run_direct_bc_ensemble_offline_eval(
         camera_names=list(bundle.camera_names),
         image_decode_count=image_decode_count,
         missing_camera_count=missing_camera_count,
-        command_family=command_family,
+        command_family=FLOW_COMMAND_LABEL,
         selected_arms=_arms_from_mask(bundle.arm_mask),
         checkpoint_arm_mask=tuple(float(value) for value in bundle.arm_mask.tolist()),
         checkpoint_has_nonzero_gripper_commands=_checkpoint_has_nonzero_gripper_commands(
@@ -2290,11 +2256,9 @@ def _denormalize_action_numpy(actions: torch.Tensor, stats: dict[str, Any]) -> n
 
 
 def _resolve_runtime_policy_dt_sec(
-    command_family: str,
     policy_dt_sec: float | None,
     stats: dict[str, Any],
 ) -> float | None:
-    _ = command_family
     resolved = _positive_float(policy_dt_sec)
     if resolved is not None:
         return resolved

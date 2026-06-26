@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the offline episode manifest for the TcpTargetPose pgmode profiling campaign.
+"""Build the offline episode manifest for the TcpPoseTarget pgmode profiling campaign.
 
 For every converted ``data_tcp`` episode this:
   1. loads it read-only and runs the richer HDF5 audit (``tools/audit_episode_hdf5``),

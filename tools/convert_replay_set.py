@@ -4,7 +4,7 @@
 Reads the INCLUDE list produced by ``tools/select_replay_episodes.py`` and converts
 each episode with ``umi-convert`` (retarget + tool offset) into one flat output
 folder, renumbered ``episode_0000.hdf5`` ... The conversion is ``--poses-only`` so
-the slim outputs (pose/gripper/timestamp, no camera images) suit TcpTargetPose
+the slim outputs (pose/gripper/timestamp, no camera images) suit TcpPoseTarget
 motion replay/profiling, which never reads images.
 
 Traceability (new index -> original session/episode) is preserved in

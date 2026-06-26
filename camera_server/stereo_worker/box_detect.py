@@ -71,6 +71,8 @@ class BoxDetector:
     MAX_DIM = 0.55            # 클러스터 평면상 최대 변(이보다 크면 박스 아님)
     FIT_MIN = 0.50            # ICP fitness 게이트
     PLANE_REFRESH = 5.0
+    # stand 프레임 RoI (rb_gui Safety ROI 기본값) — 박스는 이 안에만 있음
+    ROI_X = (-0.55, 0.55); ROI_Y = (-1.05, 0.05); ROI_Z = (-0.05, 1.0)
 
     def __init__(self, K, baseline, use_icp=True):
         self.fx, self.fy = K[0, 0], K[1, 1]
@@ -165,49 +167,107 @@ class BoxDetector:
             r = self._fit(pts, n, d, t1, t2)
             if r is not None:
                 T_stand = self._T_sc @ r["T_cam"]
+                c = T_stand[:3, 3]
+                if not (self.ROI_X[0] < c[0] < self.ROI_X[1] and
+                        self.ROI_Y[0] < c[1] < self.ROI_Y[1] and
+                        self.ROI_Z[0] < c[2] < self.ROI_Z[1]):
+                    continue                       # RoI 밖 -> 박스 아님
                 out.append(dict(T=T_stand, dims=BOX_DIMS, footprint=r["footprint"],
                                 n=int(len(pts)), fitness=round(r["fitness"], 3)))
         return out
 
     def _fit(self, pts, n, d, t1, t2):
-        # 평면 접선 좌표 (u,v), 높이 h
-        u = pts @ t1; v = pts @ t2; h = pts @ n + d
-        # PCA로 평면상 주축(yaw) — 옆면 점들의 수평 분포 기준
-        uv = np.stack([u, v], 1)
-        uv0 = uv - uv.mean(0)
-        C = uv0.T @ uv0
-        evals, evecs = np.linalg.eigh(C)
-        major = evecs[:, np.argmax(evals)]              # 평면상 주축
-        x_ax = major[0] * t1 + major[1] * t2
+        """평면 구속 pose. up=평면normal, 바닥은 평면에. yaw=평면상 minAreaRect.
+        부분 시점(옆면 위주)이라 중심은 '안 보이는(가려진) 쪽'으로 알려진 치수만큼 밀어 보정."""
+        u = pts @ t1; v = pts @ t2
+        uv = np.stack([u, v], 1).astype(np.float32)
+        (cu, cv), (w, hgt), ang = cv2.minAreaRect((uv * 1000).reshape(-1, 1, 2))
+        cu, cv, w, hgt = cu/1000, cv/1000, w/1000, hgt/1000
+        if w >= hgt:
+            obs_long, obs_short, yaw = w, hgt, np.radians(ang)
+        else:
+            obs_long, obs_short, yaw = hgt, w, np.radians(ang + 90.0)
+        # 크기 게이트: 보이는 긴 변 ≈ 0.38
+        if not (0.22 <= obs_long <= 0.52) or obs_short > 0.36:
+            return None
+        x_ax = np.cos(yaw) * t1 + np.sin(yaw) * t2       # 박스 긴 변(0.38) 방향
         x_ax /= np.linalg.norm(x_ax)
-        y_ax = np.cross(n, x_ax)
-        # 평면상 사각형 크기 (느슨한 sanity)
-        ext_major = uv0 @ major; ext_minor = uv0 @ evecs[:, np.argmin(evals)]
-        dim_major = ext_major.max() - ext_major.min()
-        dim_minor = ext_minor.max() - ext_minor.min()
-        # 크기 게이트: 보이는 긴 변 ≈ 0.38 (잡동사니/병합 거름). 너무 넓은 면도 제외.
-        if not (0.26 <= dim_major <= 0.48) or dim_minor > 0.32:
-            return None
-        # 중심 init: 평면상 점 중심을 평면에 투영 + height/2 만큼 up
-        p_plane = uv.mean(0)[0]*t1 + uv.mean(0)[1]*t2 - d*n   # 평면 위 점
-        center = p_plane + (BOX_DIMS[2]/2.0) * n
-        R0 = np.column_stack([x_ax, y_ax, n])           # box x,y,z(up) -> cam
-        T0 = np.eye(4); T0[:3, :3] = R0; T0[:3, 3] = center
-        fitness = 1.0
-        T_cam = T0
-        if self.use_icp:
-            obs = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts.astype(np.float64)))
-            reg = o3d.pipelines.registration
-            try:
-                res = reg.registration_icp(
-                    obs, self.model_pcd, 0.03, np.linalg.inv(T0),
-                    reg.TransformationEstimationPointToPoint(),
-                    reg.ICPConvergenceCriteria(max_iteration=20))
-                T_cam = np.linalg.inv(res.transformation)
-                fitness = res.fitness
-            except Exception:
-                pass
-        if fitness < self.FIT_MIN:
-            return None
-        return dict(T_cam=T_cam, footprint=(round(dim_major, 3), round(dim_minor, 3)),
-                    fitness=fitness)
+        y_ax = np.cross(n, x_ax)                          # 짧은 변(0.24)
+        # 관측 rect 중심(평면상)
+        center = cu * t1 + cv * t2 - d * n
+        # 가림 보정: 각 축에서 관측 길이가 박스 치수보다 짧으면, 카메라 반대(가려진) 쪽으로 중심 이동
+        for ax, full in ((x_ax, BOX_DIMS[0]), (y_ax, BOX_DIMS[1])):
+            obs = (uv @ np.array([ax @ t1, ax @ t2]))
+            obs_ext = obs.max() - obs.min()
+            push = max(0.0, full/2.0 - obs_ext/2.0)
+            if push > 1e-4:
+                away = ax if (ax @ center) > 0 else -ax   # 카메라(원점)에서 먼 쪽
+                center = center + away * push
+        center = center + (BOX_DIMS[2]/2.0) * n           # 바닥을 평면에 안착
+        R0 = np.column_stack([x_ax, y_ax, n])             # box x,y,z(up) -> cam
+        T_cam = np.eye(4); T_cam[:3, :3] = R0; T_cam[:3, 3] = center
+        return dict(T_cam=T_cam, footprint=(round(obs_long, 3), round(obs_short, 3)),
+                    fitness=min(obs_long / BOX_DIMS[0], 1.0))
+
+
+class BoxTracker:
+    """검출 깜빡임 안정화: 지속 트랙(최대 N개) + 근접 연관 + EMA 스무딩 + coasting.
+
+    update(dets) -> 안정화된 박스 리스트(confirmed). 한 프레임 미검출이어도 트랙은
+    last pose를 유지(coast)하므로 rb_gui에 깜빡임 없이 표시된다.
+    """
+    def __init__(self, ema=0.6, gate=0.25, min_hits=3, max_miss=12, max_tracks=2):
+        self.ema = ema; self.gate = gate
+        self.min_hits = min_hits; self.max_miss = max_miss; self.max_tracks = max_tracks
+        self.tracks = []
+        self._id = 0
+
+    @staticmethod
+    def _decomp(T):
+        c = T[:3, 3].astype(float)
+        x = T[:3, 0].astype(float); up = T[:3, 2].astype(float)
+        return c, x/np.linalg.norm(x), up/np.linalg.norm(up)
+
+    def update(self, dets):
+        obs = []
+        for d in dets:
+            c, x, up = self._decomp(d["T"])
+            obs.append([c, x, up, d])
+        used = set()
+        for tr in self.tracks:
+            best, bd = -1, self.gate
+            for i, (c, x, up, d) in enumerate(obs):
+                if i in used:
+                    continue
+                dist = np.linalg.norm(c - tr["center"])
+                if dist < bd:
+                    bd, best = dist, i
+            if best >= 0:
+                used.add(best); c, x, up, d = obs[best]
+                if x @ tr["x_ax"] < 0:               # 180° 뒤집힘 정렬
+                    x = -x
+                a = self.ema
+                tr["center"] = a*tr["center"] + (1-a)*c
+                xx = a*tr["x_ax"] + (1-a)*x; tr["x_ax"] = xx/np.linalg.norm(xx)
+                uu = a*tr["up"] + (1-a)*up; tr["up"] = uu/np.linalg.norm(uu)
+                tr["hits"] += 1; tr["miss"] = 0
+                tr["foot"] = d["footprint"]; tr["n"] = d["n"]
+            else:
+                tr["miss"] += 1
+        for i, (c, x, up, d) in enumerate(obs):       # 새 트랙
+            if i in used or len(self.tracks) >= self.max_tracks:
+                continue
+            self._id += 1
+            self.tracks.append(dict(center=c, x_ax=x, up=up, hits=1, miss=0,
+                                    foot=d["footprint"], n=d["n"], id=self._id))
+        self.tracks = [t for t in self.tracks if t["miss"] <= self.max_miss]
+        out = []
+        for t in self.tracks:
+            if t["hits"] >= self.min_hits:
+                up = t["up"]; x = t["x_ax"]
+                x = x - up*(x @ up); x /= np.linalg.norm(x)   # up에 직교화
+                y = np.cross(up, x)
+                T = np.eye(4); T[:3, :3] = np.column_stack([x, y, up]); T[:3, 3] = t["center"]
+                out.append(dict(T=T, dims=BOX_DIMS, footprint=t["foot"], n=t["n"],
+                                fitness=1.0, track_id=t["id"]))
+        return out

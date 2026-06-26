@@ -381,8 +381,8 @@ def write_data_tcp(path: Path, *, offset: float = 0.0) -> Path:
     right = np.stack([pose(-offset), pose(-offset - 0.01), pose(-offset - 0.02)], axis=0).astype(np.float32)
     with h5py.File(path, "w") as handle:
         action = handle.create_group("action")
-        action.create_dataset("target_pose_left", data=left)
-        action.create_dataset("target_pose_right", data=right)
+        action.create_dataset("tcp_target_stand_left", data=left)
+        action.create_dataset("tcp_target_stand_right", data=right)
         action.create_dataset("gripper_left", data=np.zeros(3, dtype=np.float32))
         action.create_dataset("gripper_right", data=np.zeros(3, dtype=np.float32))
         observations = handle.create_group("observations")

@@ -109,6 +109,8 @@ class DualSpaceMousePoseTargetActionSource:
         )
         self._left_state = _SideState()
         self._right_state = _SideState()
+        self.failed = False
+        self.failure_message: str | None = None
         self._debug = os.environ.get("POLICY_RUNNER_TELEOP_DEBUG", "") == "1"
         self._debug_last_print = 0.0
 
@@ -125,6 +127,8 @@ class DualSpaceMousePoseTargetActionSource:
         self.right_reader.close()
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
+        self.failed = False
+        self.failure_message = None
         left = self._target_from_reader(
             self.left_reader,
             self.left_deadman_button,
@@ -142,6 +146,8 @@ class DualSpaceMousePoseTargetActionSource:
             side="right",
         )
         if left.failure or right.failure:
+            self.failed = True
+            self.failure_message = left.failure_message or right.failure_message
             return CommandIntent.hold(timeout_sec=self.timeout_sec)
         if self._debug:
             self._debug_print(left.pose, right.pose)
@@ -177,10 +183,9 @@ class DualSpaceMousePoseTargetActionSource:
     ) -> "_SideResult":
         try:
             sample = reader.read(timeout_sec=0.0)
-        except Exception:
-            was_active = state.active
+        except Exception as exc:
             state.reset_all()
-            return _SideResult(failure=was_active)
+            return _SideResult(failure=True, failure_message=str(exc))
 
         if sample is None:
             if state.active:
@@ -233,8 +238,12 @@ class DualSpaceMousePoseTargetActionSource:
             angular_axis_signs=self.angular_axis_signs,
             angular_axis_order=self.angular_axis_order,
         )
+        has_delta = any(value != 0.0 for value in delta)
+        if not state.active and not has_delta:
+            return _SideResult(gripper_target=gripper_target)
         state.active = True
-        if any(value != 0.0 for value in delta):
+        if has_delta:
+            state.neutral_pose_sent = False
             state.target_pose = _compose_local_delta(state.target_pose, delta)
             state.target_pose = _clamp_target_lead(
                 state.target_pose,
@@ -242,6 +251,11 @@ class DualSpaceMousePoseTargetActionSource:
                 max_target_lead_m=self.max_target_lead_m,
                 max_target_lead_rad=self.max_target_lead_rad,
             )
+        elif state.neutral_pose_sent:
+            state.reset_engagement()
+            return _SideResult(released=True, gripper_target=gripper_target)
+        else:
+            state.neutral_pose_sent = True
         return _SideResult(pose=state.target_pose, gripper_target=gripper_target)
 
     def _gripper_target_from_buttons(
@@ -278,6 +292,7 @@ class DualSpaceMousePoseTargetActionSource:
 class _SideState:
     active: bool = False
     target_pose: tuple[float, ...] | None = None
+    neutral_pose_sent: bool = False
     neutral_confirmed: bool = False
     neutral_since: float | None = None
     last_buttons: tuple[bool, ...] = ()
@@ -285,6 +300,7 @@ class _SideState:
     def reset_engagement(self) -> None:
         self.active = False
         self.target_pose = None
+        self.neutral_pose_sent = False
 
     def reset_all(self) -> None:
         self.reset_engagement()
@@ -299,6 +315,7 @@ class _SideResult:
     gripper_target: float | None = None
     released: bool = False
     failure: bool = False
+    failure_message: str | None = None
 
 
 _ANGULAR_AXIS_NAMES = ("rx", "ry", "rz")

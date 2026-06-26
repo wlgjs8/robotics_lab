@@ -9,11 +9,18 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from .debug_plots import ARMS, ArmScopeSample
-
 
 SCOPE_SCHEMA = "robotics_lab.scope.v1"
 DEFAULT_SCOPE_PORT = 50357
+ARMS = ("left", "right")
+
+
+@dataclass(frozen=True)
+class ArmScopeSample:
+    time_s: float
+    q_sent_deg: tuple[float, ...]
+    q_ref_deg: tuple[float, ...]
+    q_actual_deg: tuple[float, ...]
 
 
 @dataclass(frozen=True)

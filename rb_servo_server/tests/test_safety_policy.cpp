@@ -1691,7 +1691,7 @@ bool testReadOnlyModeSuppressesSendsAndBlocksMotionCommands() {
         const rb_servo::ServoSnapshot current = loop.latestSnapshot();
         return current.command.left.mode == rb_servo::ControlMode::ArmMotion &&
                current.safety_verdict == rb_servo::SafetyVerdict::InvalidCommand;
-    }));
+    }, std::chrono::milliseconds(1000)));
     rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
     RB_CHECK(snapshot.tick > tick_before);
     RB_CHECK(snapshot.send_suppressed);
@@ -1717,7 +1717,7 @@ bool testReadOnlyModeSuppressesSendsAndBlocksMotionCommands() {
         const rb_servo::ServoSnapshot current = loop.latestSnapshot();
         return current.command.left.mode == rb_servo::ControlMode::JointTarget &&
                current.safety_verdict == rb_servo::SafetyVerdict::InvalidCommand;
-    }));
+    }, std::chrono::milliseconds(1000)));
     snapshot = loop.latestSnapshot();
     RB_CHECK(left_backend->sendCount() == 0);
     RB_CHECK(right_backend->sendCount() == 0);

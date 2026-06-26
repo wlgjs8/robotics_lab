@@ -28,12 +28,11 @@ except Exception:
 
 
 @unittest.skipIf(torch is None or np is None, "torch/numpy flow inference extras are not installed")
-class FlowInferenceTcpTargetPoseTest(unittest.TestCase):
+class FlowInferenceTcpPoseTargetTest(unittest.TestCase):
     def test_tcp_target_pose_policy_dt_resolves_without_family_optin(self) -> None:
         self.assertEqual(
             resolve_flow_policy_dt_sec(
                 RolloutMode.SIM_DRYRUN,
-                "tcp_target_pose",
                 policy_dt_sec=None,
                 command_rate_hz=100.0,
                 dataset_stats={"dt_mean_sec": 0.02},
@@ -50,7 +49,6 @@ class FlowInferenceTcpTargetPoseTest(unittest.TestCase):
             source = FlowMatchingActionSource(
                 checkpoint,
                 device="cpu",
-                command_family="tcp_target_pose",
                 policy_dt_sec=0.01,
                 max_linear_velocity_m_s=0.2,
                 max_angular_velocity_rad_s=0.25,
@@ -89,7 +87,6 @@ class FlowInferenceTcpTargetPoseTest(unittest.TestCase):
             source = FlowMatchingActionSource(
                 checkpoint,
                 device="cpu",
-                command_family="tcp_target_pose",
                 policy_dt_sec=0.01,
                 max_linear_velocity_m_s=1.0,
                 max_angular_velocity_rad_s=1.0,
@@ -121,7 +118,6 @@ class FlowInferenceTcpTargetPoseTest(unittest.TestCase):
         source = FlowMatchingActionSource(
             checkpoint,
             device="cpu",
-            command_family="tcp_target_pose",
             policy_dt_sec=0.02,
             max_linear_velocity_m_s=1.0,
             max_angular_velocity_rad_s=1.0,

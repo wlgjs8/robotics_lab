@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""3-tier TcpTargetPose goal-metric analysis + classification for one replay run.
+"""3-tier TcpPoseTarget goal-metric analysis + classification for one replay run.
 
 Consumes a single ``log.csv`` produced by ``replay_episode_tcp_pose_target.py``
 (per-tick, per-arm) and emits ``pgprofile_result.json`` + ``pgprofile_summary.md``

@@ -542,7 +542,7 @@ def _check_action_matches_pose(
         action = handle["action"]
         obs = handle["observations"]
         for side in ("left", "right"):
-            action_name = f"target_pose_{side}"
+            action_name = f"tcp_target_stand_{side}"
             pose_name = f"tcp_stand_{side}"
             if action_name in action and pose_name in obs:
                 if _has_nonzero_action_delta(action, side, length):
@@ -608,16 +608,16 @@ def _action_pose_for_format(
             return action[:, :7] if action.ndim == 2 and action.shape[1] >= 7 else None
     if format_name == "robotics_lab_dual_arm" and "action" in handle:
         action = handle["action"]
-        for name in (f"tcp_target_stand_{side}", f"target_pose_{side}", f"tcp_pose_target_{side}"):
-            if name in action:
-                values = np.asarray(action[name], dtype=np.float32)[:length]
-                if values.ndim == 2 and values.shape[1] >= 7:
-                    return values[:, :7]
-                if values.ndim == 2 and values.shape[1] >= 6:
-                    padded = np.zeros((values.shape[0], 7), dtype=np.float32)
-                    padded[:, :6] = values[:, :6]
-                    padded[:, 6] = 1.0
-                    return padded
+        name = f"tcp_target_stand_{side}"
+        if name in action:
+            values = np.asarray(action[name], dtype=np.float32)[:length]
+            if values.ndim == 2 and values.shape[1] >= 7:
+                return values[:, :7]
+            if values.ndim == 2 and values.shape[1] >= 6:
+                padded = np.zeros((values.shape[0], 7), dtype=np.float32)
+                padded[:, :6] = values[:, :6]
+                padded[:, 6] = 1.0
+                return padded
     return None
 
 

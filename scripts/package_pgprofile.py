@@ -336,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
         "",
         "## real-motion target config (item 9)",
         "- `rb_servo_server/config/local/stack_real_replaybind.yaml` carries the same "
-        "TcpTargetPose replay wiring for real arms. Control params (SMD/IK/servo_j) match "
+        "TcpPoseTarget replay wiring for real arms. Control params (SMD/IK/servo_j) match "
         "this sim profile; the real config additionally ENFORCES floor + self-collision "
         "(monitor_only:false) and ROI, and removes the controller-sim carve-outs. Real motion "
         "stays gated (site-local config + operator + E-stop). See repo file for the exact block.",

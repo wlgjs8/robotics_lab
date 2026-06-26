@@ -87,12 +87,14 @@ def cmd_run(args):
     reader = BundleReader(endpoint=BUNDLE_ENDPOINT)
     pub = CloudPublisher(CLOUD_PUB_BIND, CLOUD_TOPIC)
 
-    detector = None
+    detector = None; tracker = None
     if os.environ.get("STEREO_DETECT", "1") != "0":
         try:
-            from box_detect import BoxDetector
+            from box_detect import BoxDetector, BoxTracker
             detector = BoxDetector(K, baseline, use_icp=os.environ.get("STEREO_DETECT_ICP", "1") != "0")
-            print(f"[run] box detect: ON (icp={detector.use_icp})", flush=True)
+            if os.environ.get("STEREO_TRACK", "1") != "0":
+                tracker = BoxTracker()
+            print(f"[run] box detect: ON (icp={detector.use_icp}, track={tracker is not None})", flush=True)
         except Exception as e:  # noqa: BLE001
             print(f"[run] box detect OFF: {e}", flush=True)
 
@@ -117,7 +119,8 @@ def cmd_run(args):
         pub.publish(seq, time.time_ns(), xyz, rgb)
         if detector is not None:
             try:
-                boxes = detector.detect(disp)
+                raw = detector.detect(disp)
+                boxes = tracker.update(raw) if tracker is not None else raw
                 n_boxes = len(boxes)
                 pub.publish_boxes(seq, boxes)
             except Exception as e:  # noqa: BLE001

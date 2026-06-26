@@ -42,7 +42,6 @@ from .flow_dataset import pose_from_state_payload
 from .flow_inference import (
     DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S,
     DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S,
-    FLOW_COMMAND_FAMILY,
     FLOW_COMMAND_LABEL,
     FlowMatchingActionSource,
     _gripper_value_from_payload,
@@ -250,7 +249,6 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         *,
         timeout_sec: float = 0.2,
         camera_client: Any | None = None,
-        command_family: str | None = None,
         policy_dt_sec: float | None = None,
         max_linear_velocity_m_s: float | None = None,
         max_angular_velocity_rad_s: float | None = None,
@@ -353,8 +351,6 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # and the wall-clock of that sample (to rescale a multi-step displacement to one policy step).
         self._vel_prev_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._vel_prev_sample_t: float | None = None
-        _ = command_family
-        self.command_family_option = FLOW_COMMAND_FAMILY
         self.command_family = FLOW_COMMAND_LABEL
         # Fake-image smoke mode runs camera-less so the runtime does not gate on frames.
         self.camera_names = [] if self._fake_images else [str(name) for name in camera_names]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select raw UMI episodes suitable for TcpTargetPose replay profiling.
+"""Select raw UMI episodes suitable for TcpPoseTarget replay profiling.
 
 Read-only. Scans recorded episodes (nominally 30 Hz) and flags any episode whose
 recording rate broke up into discontinuous segments because of the collection-code

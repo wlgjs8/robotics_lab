@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RB Scope Dashboard</title>
+  <link rel="stylesheet" href="./uPlot.min.css">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f141b;
+      --panel: #151c25;
+      --panel2: #101720;
+      --line: #273241;
+      --text: #e6edf5;
+      --muted: #92a0b3;
+      --sent: #4f8cff;
+      --ref: #a78bfa;
+      --actual: #fb923c;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 13px;
+    }
+    body {
+      display: grid;
+      grid-template-rows: 42px 1fr;
+    }
+    #toolbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 6px 10px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      min-width: 0;
+      white-space: nowrap;
+    }
+    .brand {
+      font-weight: 700;
+      letter-spacing: 0;
+      margin-right: 6px;
+    }
+    label {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--muted);
+    }
+    select, button {
+      height: 28px;
+      color: var(--text);
+      background: var(--panel2);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 0 8px;
+      font: inherit;
+    }
+    button { cursor: pointer; }
+    input[type="checkbox"] { margin: 0; }
+    .trace-sent { color: var(--sent); }
+    .trace-ref { color: var(--ref); }
+    .trace-actual { color: var(--actual); }
+    #status {
+      margin-left: auto;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--muted);
+      min-width: 260px;
+      text-align: right;
+    }
+    #plots {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      grid-template-rows: repeat(4, minmax(0, 1fr));
+      gap: 1px;
+      background: var(--line);
+    }
+    .plot-cell {
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--panel2);
+    }
+    .plot-title {
+      height: 24px;
+      flex: 0 0 24px;
+      display: flex;
+      align-items: center;
+      padding: 0 8px;
+      color: var(--muted);
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      font-size: 12px;
+    }
+    .plot-target {
+      min-width: 0;
+      min-height: 0;
+      flex: 1 1 auto;
+    }
+    .uplot {
+      background: transparent;
+      color: var(--text);
+      font-family: inherit;
+    }
+    .u-under, .u-over { overflow: hidden; }
+    .u-axis text, .u-legend, .u-title { color: var(--text); fill: var(--text); }
+    .u-axis path, .u-axis line { stroke: #3a4658; }
+    .u-legend {
+      font-size: 11px;
+      background: rgba(15,20,27,0.78);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <div class="brand">RB Scope</div>
+    <label>Joint
+      <select id="joint">
+        <option value="0">J1</option>
+        <option value="1">J2</option>
+        <option value="2">J3</option>
+        <option value="3">J4</option>
+        <option value="4">J5</option>
+        <option value="5">J6</option>
+      </select>
+    </label>
+    <label>Window
+      <select id="window">
+        <option value="2">2 s</option>
+        <option value="5" selected>5 s</option>
+        <option value="10">10 s</option>
+      </select>
+    </label>
+    <label><input id="smooth" type="checkbox" checked> Smooth</label>
+    <label class="trace-sent"><input id="trace-sent" type="checkbox" checked> q_sent</label>
+    <label class="trace-ref"><input id="trace-ref" type="checkbox" checked> q_ref</label>
+    <label class="trace-actual"><input id="trace-actual" type="checkbox" checked> q_actual</label>
+    <button id="reset-zoom" type="button">Reset zoom</button>
+    <div id="status">connecting...</div>
+  </div>
+  <div id="plots"></div>
+  <script src="./uPlot.iife.min.js"></script>
+  <script>
+  (() => {
+    "use strict";
+
+    const ARMS = ["left", "right"];
+    const ARM_LABEL = {left: "Left arm", right: "Right arm"};
+    const METRICS = [
+      {key: "position", label: "Position", unit: "deg"},
+      {key: "velocity", label: "Velocity", unit: "deg/s"},
+      {key: "acceleration", label: "Acceleration", unit: "deg/s^2"},
+      {key: "jerk", label: "Jerk", unit: "deg/s^3"},
+    ];
+    const TRACE_INDEX = {sent: 1, ref: 2, actual: 3};
+    const TRACE_COLOR = {sent: "#4f8cff", ref: "#a78bfa", actual: "#fb923c"};
+    const buffers = {
+      left: {t: [], q_sent: [], q_ref: [], q_actual: []},
+      right: {t: [], q_sent: [], q_ref: [], q_actual: []},
+    };
+    const plots = [];
+    const eventTimes = [];
+    let latestStats = null;
+    let renderQueued = false;
+    let zoomed = false;
+    let applyingXScale = false;
+
+    const el = {
+      plots: document.getElementById("plots"),
+      joint: document.getElementById("joint"),
+      window: document.getElementById("window"),
+      smooth: document.getElementById("smooth"),
+      status: document.getElementById("status"),
+      sent: document.getElementById("trace-sent"),
+      ref: document.getElementById("trace-ref"),
+      actual: document.getElementById("trace-actual"),
+      resetZoom: document.getElementById("reset-zoom"),
+    };
+
+    function clearArm(arm) {
+      const b = buffers[arm];
+      b.t.length = 0;
+      b.q_sent.length = 0;
+      b.q_ref.length = 0;
+      b.q_actual.length = 0;
+    }
+
+    function windowSec() {
+      return Math.max(0.5, Number(el.window.value) || 5);
+    }
+
+    function jointIndex() {
+      return Math.max(0, Math.min(5, Number(el.joint.value) || 0));
+    }
+
+    function trimArm(arm) {
+      const b = buffers[arm];
+      if (b.t.length === 0) return;
+      const cutoff = b.t[b.t.length - 1] - windowSec();
+      let drop = 0;
+      while (drop < b.t.length - 1 && b.t[drop] < cutoff) drop++;
+      if (drop > 0) {
+        b.t.splice(0, drop);
+        b.q_sent.splice(0, drop);
+        b.q_ref.splice(0, drop);
+        b.q_actual.splice(0, drop);
+      }
+      const maxSamples = 30000;
+      const extra = Math.max(0, b.t.length - maxSamples);
+      if (extra > 0) {
+        b.t.splice(0, extra);
+        b.q_sent.splice(0, extra);
+        b.q_ref.splice(0, extra);
+        b.q_actual.splice(0, extra);
+      }
+    }
+
+    function validJointRow(row) {
+      return Array.isArray(row) && row.length >= 6 && row.slice(0, 6).every(Number.isFinite);
+    }
+
+    function appendArmBatch(arm, payload) {
+      if (!payload || !Array.isArray(payload.t)) return;
+      const b = buffers[arm];
+      for (let i = 0; i < payload.t.length; i++) {
+        const t = Number(payload.t[i]);
+        const sent = payload.q_sent && payload.q_sent[i];
+        const ref = payload.q_ref && payload.q_ref[i];
+        const actual = payload.q_actual && payload.q_actual[i];
+        if (!Number.isFinite(t) || !validJointRow(sent) || !validJointRow(ref) || !validJointRow(actual)) {
+          continue;
+        }
+        if (b.t.length > 0 && t <= b.t[b.t.length - 1]) {
+          if (t < b.t[b.t.length - 1] - 1.0) clearArm(arm);
+          else continue;
+        }
+        b.t.push(t);
+        b.q_sent.push(sent.slice(0, 6).map(Number));
+        b.q_ref.push(ref.slice(0, 6).map(Number));
+        b.q_actual.push(actual.slice(0, 6).map(Number));
+      }
+      trimArm(arm);
+    }
+
+    function finiteDiff(values, times) {
+      const out = new Array(values.length).fill(NaN);
+      for (let i = 1; i < values.length; i++) {
+        const dt = times[i] - times[i - 1];
+        if (dt > 0 && Number.isFinite(values[i]) && Number.isFinite(values[i - 1])) {
+          out[i] = (values[i] - values[i - 1]) / dt;
+        }
+      }
+      return out;
+    }
+
+    function movingAverage(values, width) {
+      if (width <= 1 || values.length === 0) return values;
+      const out = [];
+      for (let i = 0; i < values.length; i++) {
+        let sum = 0;
+        let n = 0;
+        const start = Math.max(0, i - width + 1);
+        for (let j = start; j <= i; j++) {
+          if (Number.isFinite(values[j])) {
+            sum += values[j];
+            n++;
+          }
+        }
+        out.push(n > 0 ? sum / n : NaN);
+      }
+      return out;
+    }
+
+    function globalEndTime() {
+      let out = -Infinity;
+      for (const arm of ARMS) {
+        const t = buffers[arm].t;
+        if (t.length > 0) out = Math.max(out, t[t.length - 1]);
+      }
+      return Number.isFinite(out) ? out : 0;
+    }
+
+    function selectedTrace(rows, j) {
+      return rows.map(row => Array.isArray(row) && row.length > j ? Number(row[j]) : NaN);
+    }
+
+    function metricData(arm, metric) {
+      const b = buffers[arm];
+      if (b.t.length === 0) return [[], [], [], []];
+      const end = globalEndTime();
+      const cutoff = end - windowSec();
+      let start = 0;
+      while (start < b.t.length - 1 && b.t[start] < cutoff) start++;
+      const times = b.t.slice(start);
+      if (times.length === 0) return [[], [], [], []];
+      const j = jointIndex();
+      const pos = {
+        sent: selectedTrace(b.q_sent.slice(start), j),
+        ref: selectedTrace(b.q_ref.slice(start), j),
+        actual: selectedTrace(b.q_actual.slice(start), j),
+      };
+      const vel = {
+        sent: finiteDiff(pos.sent, times),
+        ref: finiteDiff(pos.ref, times),
+        actual: finiteDiff(pos.actual, times),
+      };
+      const acc = {
+        sent: finiteDiff(vel.sent, times),
+        ref: finiteDiff(vel.ref, times),
+        actual: finiteDiff(vel.actual, times),
+      };
+      const jerk = {
+        sent: finiteDiff(acc.sent, times),
+        ref: finiteDiff(acc.ref, times),
+        actual: finiteDiff(acc.actual, times),
+      };
+      let y = pos;
+      if (metric === "velocity") y = vel;
+      else if (metric === "acceleration") y = acc;
+      else if (metric === "jerk") y = jerk;
+      if (el.smooth.checked) {
+        y = {
+          sent: movingAverage(y.sent, 5),
+          ref: movingAverage(y.ref, 5),
+          actual: movingAverage(y.actual, 5),
+        };
+      }
+      return [
+        times.map(t => t - end),
+        y.sent,
+        y.ref,
+        y.actual,
+      ];
+    }
+
+    function emptyData() {
+      return [[], [], [], []];
+    }
+
+    function makePlot(cell, arm, metric) {
+      const opts = {
+        width: Math.max(80, cell.clientWidth),
+        height: Math.max(80, cell.clientHeight),
+        padding: [8, 12, 20, 50],
+        scales: {
+          x: {time: false, auto: false},
+          y: {auto: true},
+        },
+        axes: [
+          {scale: "x", label: "time (s)", grid: {show: true}},
+          {scale: "y", label: metric.unit, grid: {show: true}},
+        ],
+        series: [
+          {label: "time"},
+          {label: "q_sent", stroke: TRACE_COLOR.sent, width: 2, dash: [6, 4], spanGaps: false},
+          {label: "q_ref", stroke: TRACE_COLOR.ref, width: 2, spanGaps: false},
+          {label: "q_actual", stroke: TRACE_COLOR.actual, width: 2, spanGaps: false},
+        ],
+        legend: {show: true, live: true},
+        cursor: {
+          show: true,
+          drag: {x: true, y: false, setScale: true},
+          sync: {key: "rb_scope", scales: ["x", null]},
+        },
+        hooks: {
+          setScale: [
+            (_u, key) => {
+              if (key === "x" && !applyingXScale) zoomed = true;
+            },
+          ],
+        },
+      };
+      const plot = new uPlot(opts, emptyData(), cell);
+      const ro = new ResizeObserver(entries => {
+        const rect = entries[0].contentRect;
+        plot.setSize({
+          width: Math.max(80, Math.floor(rect.width)),
+          height: Math.max(80, Math.floor(rect.height)),
+        });
+      });
+      ro.observe(cell);
+      return {plot, arm, metric: metric.key};
+    }
+
+    function buildPlots() {
+      for (const metric of METRICS) {
+        for (const arm of ARMS) {
+          const panel = document.createElement("div");
+          panel.className = "plot-cell";
+          const title = document.createElement("div");
+          title.className = "plot-title";
+          title.textContent = ARM_LABEL[arm] + " - " + metric.label;
+          const target = document.createElement("div");
+          target.className = "plot-target";
+          panel.appendChild(title);
+          panel.appendChild(target);
+          el.plots.appendChild(panel);
+          plots.push(makePlot(target, arm, metric));
+        }
+      }
+    }
+
+    function applyTraceVisibility(plot) {
+      plot.setSeries(TRACE_INDEX.sent, {show: el.sent.checked});
+      plot.setSeries(TRACE_INDEX.ref, {show: el.ref.checked});
+      plot.setSeries(TRACE_INDEX.actual, {show: el.actual.checked});
+    }
+
+    function setLiveXRange() {
+      applyingXScale = true;
+      const range = {min: -windowSec(), max: 0};
+      for (const item of plots) item.plot.setScale("x", range);
+      applyingXScale = false;
+    }
+
+    function renderAll() {
+      renderQueued = false;
+      for (const item of plots) {
+        item.plot.setData(metricData(item.arm, item.metric), false);
+        applyTraceVisibility(item.plot);
+      }
+      if (!zoomed) setLiveXRange();
+      updateStatus();
+    }
+
+    function scheduleRender() {
+      if (renderQueued) return;
+      renderQueued = true;
+      requestAnimationFrame(renderAll);
+    }
+
+    function rateFromTimes(times) {
+      if (times.length < 2) return null;
+      const dt = (times[times.length - 1] - times[0]) / 1000;
+      return dt > 0 ? (times.length - 1) / dt : null;
+    }
+
+    function bufferDensity(arm) {
+      const t = buffers[arm].t;
+      if (t.length < 2) return null;
+      const dt = t[t.length - 1] - t[0];
+      return dt > 0 ? (t.length - 1) / dt : null;
+    }
+
+    function fmt(value, suffix) {
+      return Number.isFinite(value) ? value.toFixed(1) + suffix : "n/a";
+    }
+
+    function updateStatus(extra) {
+      const sseHz = rateFromTimes(eventTimes);
+      const leftHz = bufferDensity("left");
+      const rightHz = bufferDensity("right");
+      const batchHz = latestStats && Number.isFinite(latestStats.batch_rate_hz)
+        ? latestStats.batch_rate_hz
+        : NaN;
+      const age = latestStats && Number.isFinite(latestStats.latest_receive_age_sec)
+        ? latestStats.latest_receive_age_sec
+        : NaN;
+      const invalid = latestStats ? latestStats.invalid_packets : 0;
+      el.status.textContent = (extra ? extra + " | " : "")
+        + "SSE " + fmt(sseHz, "Hz")
+        + " | scope " + fmt(batchHz, "Hz")
+        + " | density L/R " + fmt(leftHz, "Hz") + " / " + fmt(rightHz, "Hz")
+        + " | age " + fmt(age, "s")
+        + " | invalid " + invalid;
+    }
+
+    function handlePayload(payload) {
+      if (!payload || payload.schema !== "robotics_lab.scope.dashboard.v1") return;
+      latestStats = payload.stats || latestStats;
+      const arms = payload.arms || {};
+      for (const arm of ARMS) appendArmBatch(arm, arms[arm]);
+      const now = performance.now();
+      eventTimes.push(now);
+      while (eventTimes.length > 240 || (eventTimes.length && now - eventTimes[0] > 4000)) {
+        eventTimes.shift();
+      }
+      scheduleRender();
+    }
+
+    function resetZoom() {
+      zoomed = false;
+      setLiveXRange();
+      scheduleRender();
+    }
+
+    function connectSse() {
+      const es = new EventSource("./events");
+      es.onopen = () => updateStatus("connected");
+      es.onmessage = event => {
+        try {
+          handlePayload(JSON.parse(event.data));
+        } catch (_err) {
+          updateStatus("bad event");
+        }
+      };
+      es.onerror = () => updateStatus("reconnecting");
+    }
+
+    for (const control of [el.joint, el.smooth, el.sent, el.ref, el.actual]) {
+      control.addEventListener("change", scheduleRender);
+    }
+    el.window.addEventListener("change", () => {
+      for (const arm of ARMS) trimArm(arm);
+      resetZoom();
+    });
+    el.resetZoom.addEventListener("click", resetZoom);
+
+    if (typeof uPlot === "undefined") {
+      el.status.textContent = "uPlot asset failed to load";
+      return;
+    }
+    buildPlots();
+    resetZoom();
+    connectSse();
+  })();
+  </script>
+</body>
+</html>

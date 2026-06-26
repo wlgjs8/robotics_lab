@@ -160,13 +160,15 @@ class TeleopMuxOwnershipTest(unittest.TestCase):
         mux.next_intent(snapshot, 0.0)
         self.assertEqual(mux.owner, OWNER_SPACEMOUSE)
 
-        # Cap back to neutral: the current target passes through once, then idle.
+        # Cap back to neutral: the current target passes through once, then an
+        # explicit Hold clears ownership.
         sm_left.push(sm_sample(0.0, monotonic=0.002))
         intent = mux.next_intent(snapshot, 0.002)
         self.assertEqual(intent.mode, "TcpPoseTarget")
         self.assertIn("tcp_target_stand", intent.left)
         sm_left.push(sm_sample(0.0, monotonic=0.004))
-        self.assertIsNone(mux.next_intent(snapshot, 0.004))
+        intent = mux.next_intent(snapshot, 0.004)
+        self.assertEqual(intent.mode, "Hold")
         self.assertEqual(mux.owner, OWNER_IDLE)
 
         # UMI engages after handoff: relative-init re-latches at the CURRENT
@@ -242,7 +244,8 @@ class TeleopMuxOwnershipTest(unittest.TestCase):
         self.assertIsNotNone(intent)
         assert intent is not None
         self.assertEqual(intent.mode, "TcpPoseTarget")
-        self.assertNotIn("gripper_target", intent.left)
+        self.assertEqual(intent.left["gripper_target"], 0.0)
+        self.assertNotEqual(intent.left["gripper_target"], 10.0)
         self.assertEqual(mux.owner, OWNER_UMI)
 
     def test_same_tick_engage_falls_to_tie_break(self):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase-5 plots for the TcpTargetPose pgmode profiling campaign.
+"""Phase-5 plots for the TcpPoseTarget pgmode profiling campaign.
 
 Reads the offline manifest (``episode_manifest.json``) and the live campaign
 results (``episode_results.json``) and writes plots under

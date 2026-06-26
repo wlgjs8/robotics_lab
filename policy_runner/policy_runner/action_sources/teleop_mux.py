@@ -88,7 +88,9 @@ class TeleopMuxActionSource:
 
         if self._owner == OWNER_SPACEMOUSE:
             self.umi_source.reset_engagement()
-            if not spacemouse_engaged and spacemouse_intent is None:
+            if not spacemouse_engaged and (
+                spacemouse_intent is None or spacemouse_intent.mode == "Hold"
+            ):
                 self._set_owner(OWNER_IDLE)
             return spacemouse_intent
         if self._owner == OWNER_UMI:
@@ -129,7 +131,23 @@ class TeleopMuxActionSource:
         if self._spacemouse_failed:
             return None, None
         try:
-            return self.spacemouse_source.next_intent(snapshot, now_monotonic), None
+            intent = self.spacemouse_source.next_intent(snapshot, now_monotonic)
+            if self.spacemouse_source.failed:
+                self._spacemouse_failed = True
+                message = self.spacemouse_source.failure_message or "SpaceMouse HID read failed"
+                print(
+                    f"[mux] spacemouse disabled for this run ({message}); continuing UMI-only",
+                    flush=True,
+                )
+                self.spacemouse_source.reset_engagement()
+                if self._owner == OWNER_SPACEMOUSE:
+                    self._set_owner(OWNER_IDLE)
+                    hold = intent if intent is not None and intent.mode == "Hold" else CommandIntent.hold(
+                        timeout_sec=self.spacemouse_source.timeout_sec
+                    )
+                    return None, hold
+                return None, None
+            return intent, None
         except (RuntimeError, OSError) as exc:
             self._spacemouse_failed = True
             print(

@@ -35,7 +35,7 @@ DEFAULT_OUT_DIR = ROOT / "outputs" / "tcp_tuning"
 # Validated folded stow JointTarget from scripts/replay_episode_rollout.py.
 REST_LEFT_DEG = (-131.663, 72.989, 113.400, -80.880, -107.064, -145.949)
 REST_RIGHT_DEG = (135.099, -64.017, -114.457, 84.379, 112.485, 129.893)
-# TcpTargetPose replay/profiling anchor (2026-06-21): GRIPPER-DOWN (tool z ~ stand -z),
+# TcpPoseTarget replay/profiling anchor (2026-06-21): GRIPPER-DOWN (tool z ~ stand -z),
 # max single-rest coverage over all episodes. Left = controller-consistent rest; right =
 # rest + 10deg about y (within the +/-20deg tool-rotation budget) which recovers episode_0096.
 # Found offline with a server-CALIBRATED model (single-arm rb3_730e.urdf + stack_sim mount,

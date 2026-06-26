@@ -158,8 +158,8 @@ class UmiPipelineTest(unittest.TestCase):
                 )
                 # Action is the absolute tool-offset target pose; ee_local deltas are
                 # derived at load.
-                self.assertIn("target_pose_left", dst["action"])
-                self.assertEqual(dst["action/target_pose_left"].shape, (5, 7))
+                self.assertIn("tcp_target_stand_left", dst["action"])
+                self.assertEqual(dst["action/tcp_target_stand_left"].shape, (5, 7))
 
             index = load_flow_episode_index(output)
             self.assertEqual(index.format_name, "robotics_lab_dual_arm")
@@ -190,8 +190,8 @@ class UmiPipelineTest(unittest.TestCase):
 
             with h5py.File(output, "r") as dst:
                 # Action is the absolute tool-offset target pose.
-                left_target = dst["action/target_pose_left"][:]
-                right_target = dst["action/target_pose_right"][:]
+                left_target = dst["action/tcp_target_stand_left"][:]
+                right_target = dst["action/tcp_target_stand_right"][:]
                 self.assertEqual(left_target.shape, (5, 7))
                 self.assertEqual(right_target.shape, (5, 7))
                 # With no action group the target pose falls back to the observed pose.

@@ -60,8 +60,8 @@ python3 -m policy_runner umi-convert \
 Verify the output contains:
 
 ```text
-action/target_pose_left
-action/target_pose_right
+action/tcp_target_stand_left
+action/tcp_target_stand_right
 ```
 
 ## Ee-Local Dry-Run

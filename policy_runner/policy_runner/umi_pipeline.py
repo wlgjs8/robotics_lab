@@ -128,7 +128,7 @@ def convert_umi_episode(
 
     When ``poses_only`` is set, camera image datasets are skipped. The poses,
     grippers, timestamps, and attrs are written as usual; the output is a slim
-    episode suitable for motion (TcpTargetPose) replay/profiling that never reads
+    episode suitable for motion (TcpPoseTarget) replay/profiling that never reads
     images. The training data flow keeps the default (images included).
     """
 
@@ -854,9 +854,9 @@ def _arm_action(
         return np.asarray(handle["action"], dtype=np.float32)[:length]
     if format_name == "robotics_lab_dual_arm" and "action" in handle:
         action = handle["action"]
-        for name in (f"tcp_target_stand_{side}", f"target_pose_{side}", f"tcp_pose_target_{side}"):
-            if name in action:
-                return np.asarray(action[name], dtype=np.float32)[:length]
+        name = f"tcp_target_stand_{side}"
+        if name in action:
+            return np.asarray(action[name], dtype=np.float32)[:length]
     return None
 
 
@@ -1062,8 +1062,8 @@ def _write_robotics_lab_dual_arm_episode(
         # Action is the absolute (tool-offset) target pose only. Per-step deltas are
         # derived at training time in the end-effector body frame (ee_local).
         action = dst.create_group("action")
-        action.create_dataset("target_pose_left", data=left_action_pose.astype(np.float32), compression="gzip", compression_opts=1)
-        action.create_dataset("target_pose_right", data=right_action_pose.astype(np.float32), compression="gzip", compression_opts=1)
+        action.create_dataset("tcp_target_stand_left", data=left_action_pose.astype(np.float32), compression="gzip", compression_opts=1)
+        action.create_dataset("tcp_target_stand_right", data=right_action_pose.astype(np.float32), compression="gzip", compression_opts=1)
         action.create_dataset("gripper_left", data=_action_gripper_or_current(src, format_name, "left", arm_groups, length, left_gripper))
         action.create_dataset("gripper_right", data=_action_gripper_or_current(src, format_name, "right", arm_groups, length, right_gripper))
 

@@ -748,20 +748,8 @@ def _load_robotics_lab_episode(path: Path, handle: h5py.File) -> FlowEpisodeInde
     left_target_grip = right_target_grip = None
     action_kind = "target_pose"
     if action_group is not None:
-        left_target_pose = _first_dataset(
-            action_group,
-            length,
-            "tcp_target_stand_left",
-            "target_pose_left",
-            "tcp_pose_target_left",
-        )
-        right_target_pose = _first_dataset(
-            action_group,
-            length,
-            "tcp_target_stand_right",
-            "target_pose_right",
-            "tcp_pose_target_right",
-        )
+        left_target_pose = _first_dataset(action_group, length, "tcp_target_stand_left")
+        right_target_pose = _first_dataset(action_group, length, "tcp_target_stand_right")
         left_target_grip = _optional_vector(action_group, length, "gripper_left", "left_gripper")
         right_target_grip = _optional_vector(action_group, length, "gripper_right", "right_gripper")
     if left_target_pose is None and action_kind == "target_pose":

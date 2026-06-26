@@ -12,14 +12,6 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .command_client import CommandClient
-from .debug_plots import (
-    ARMS as DEBUG_ARMS,
-    JOINT_LABELS as DEBUG_JOINT_LABELS,
-    ArmDebugSeries,
-    DebugPlotSnapshot,
-    SignalTraces,
-    build_debug_snapshot,
-)
 from .geometry import (
     _add_matrix3,
     _add_vec3,
@@ -100,7 +92,12 @@ from .scene import (
     update_scene_markers,
 )
 from .state_receiver import StateReceiver, StateStore
-from .scope_receiver import DEFAULT_SCOPE_PORT, ScopeReceiver, ScopeStats, ScopeStore
+from .scope_dashboard import (
+    DEFAULT_DASHBOARD_PORT,
+    ScopeDashboardServer,
+    dashboard_host_from_env,
+)
+from .scope_receiver import DEFAULT_SCOPE_PORT, ScopeReceiver, ScopeStore
 from .status_panel import (
     _JOINT_MONITOR_UNITS,
     _STAND_WORLD_MONITOR_UNITS,
@@ -188,25 +185,6 @@ _OPERATOR_MONITOR_GAP_EM = 1.0
 # rows + status) so it never needs an inner scrollbar, plus a small gap so the two
 # panels sit slightly apart instead of touching. Override with RB_GUI_MONITOR_SPLIT_EM.
 _OPERATOR_MONITOR_SPLIT_EM = 35.5
-_DEBUG_ARM_OPTIONS = ("양팔", "왼팔", "오른팔")
-_DEBUG_WINDOW_OPTIONS = ("2 s", "5 s", "10 s")
-_DEBUG_WINDOW_SEC = {"2 s": 2.0, "5 s": 5.0, "10 s": 10.0}
-_DEBUG_ARM_LABELS = {"left": "왼팔", "right": "오른팔"}
-_DEBUG_ARM_OPTION_TO_ARMS = {
-    "양팔": ("left", "right"),
-    "왼팔": ("left",),
-    "오른팔": ("right",),
-}
-_DEBUG_PLOT_METRICS = (
-    ("position", "위치", "deg", (-360.0, 360.0)),
-    ("velocity", "속도", "deg/s", (-180.0, 180.0)),
-    ("acceleration", "가속도", "deg/s²", (-1000.0, 1000.0)),
-    ("jerk", "jerk", "deg/s³", (-10000.0, 10000.0)),
-)
-_DEBUG_SENT_COLOR = "#2563eb"
-_DEBUG_REF_COLOR = "#8b5cf6"
-_DEBUG_ACTUAL_COLOR = "#f97316"
-_DEBUG_SCOPE_SYNC_KEY = "rb_scope"
 
 
 def _env_int(name: str, fallback: int) -> int:
@@ -1710,399 +1688,44 @@ def _debug_mode_active(handles: dict[str, Any]) -> bool:
     return bool(getattr(toggle, "value", False))
 
 
-def _debug_joint_index(handles: dict[str, Any]) -> int:
-    dropdown = handles.get("debug_joint_dropdown")
-    value = str(getattr(dropdown, "value", DEBUG_JOINT_LABELS[0]))
-    try:
-        return DEBUG_JOINT_LABELS.index(value)
-    except ValueError:
-        return 0
-
-
-def _debug_window_sec(handles: dict[str, Any]) -> float:
-    dropdown = handles.get("debug_window_dropdown")
-    value = str(getattr(dropdown, "value", "10 s"))
-    return _DEBUG_WINDOW_SEC.get(value, 10.0)
-
-
-def _debug_selected_arms(handles: dict[str, Any]) -> tuple[str, ...]:
-    dropdown = handles.get("debug_arm_dropdown")
-    value = str(getattr(dropdown, "value", "양팔"))
-    return _DEBUG_ARM_OPTION_TO_ARMS.get(value, ("left", "right"))
-
-
-def _debug_smooth_enabled(handles: dict[str, Any]) -> bool:
-    toggle = handles.get("debug_smooth_toggle")
-    return bool(getattr(toggle, "value", True))
-
-
-def _debug_fixed_range_enabled(handles: dict[str, Any]) -> bool:
-    toggle = handles.get("debug_fixed_range_toggle")
-    return bool(getattr(toggle, "value", False))
-
-
-def _debug_trace_enabled(handles: dict[str, Any], trace: str) -> bool:
-    toggle = handles.get(f"debug_trace_{trace}_toggle")
-    return bool(getattr(toggle, "value", True))
-
-
-def _debug_trace_visibility(handles: dict[str, Any]) -> dict[str, bool]:
-    return {
-        "sent": _debug_trace_enabled(handles, "sent"),
-        "ref": _debug_trace_enabled(handles, "ref"),
-        "actual": _debug_trace_enabled(handles, "actual"),
-    }
-
-
-def _debug_empty_arrays() -> tuple[Any, Any, Any, Any]:
-    import numpy as np
-
-    empty = np.array([], dtype=np.float64)
-    return empty, empty, empty, empty
-
-
-def _debug_trace_arrays(traces: SignalTraces) -> tuple[Any, Any, Any, Any]:
-    import numpy as np
-
-    return (
-        np.asarray(traces.time_s, dtype=np.float64),
-        np.asarray(traces.sent, dtype=np.float64),
-        np.asarray(traces.ref, dtype=np.float64),
-        np.asarray(traces.actual, dtype=np.float64),
-    )
-
-
-def _debug_uplot_scales(
-    *, window_sec: float, fixed_range: tuple[float, float] | None
-) -> dict[str, Any]:
-    scales: dict[str, Any] = {
-        "x": {"time": False, "auto": False, "range": (-float(window_sec), 0.0)},
-    }
-    if fixed_range is None:
-        scales["y"] = {"auto": True}
-    else:
-        scales["y"] = {"auto": False, "range": fixed_range}
-    return scales
-
-
-def _debug_uplot_axes(unit: str) -> tuple[Any, Any]:
-    return (
-        {"scale": "x", "side": 2, "label": "time (s)"},
-        {"scale": "y", "side": 3, "label": unit},
-    )
-
-
-def _debug_uplot_sync_supported() -> bool:
-    try:
-        import viser.uplot as uplot
-
-        cursor_keys = getattr(uplot.Cursor, "__optional_keys__", frozenset())
-        sync_keys = getattr(uplot.Cursor_Sync, "__optional_keys__", frozenset())
-        return "sync" in cursor_keys and "scales" in sync_keys
-    except Exception:
-        return False
-
-
-def _debug_uplot_cursor() -> dict[str, Any]:
-    return {
-        "show": True,
-        "x": True,
-        "y": False,
-        "drag": {"x": True, "y": False, "setScale": True},
-        "sync": {
-            "key": _DEBUG_SCOPE_SYNC_KEY,
-            "scales": ("x", None),
-            "setSeries": False,
-        },
-    }
-
-
-def _debug_uplot_series(
-    *, show_sent: bool = True, show_ref: bool = True, show_actual: bool = True
-) -> tuple[Any, Any, Any, Any]:
-    return (
-        {"label": "time", "scale": "x"},
-        {
-            "label": "q_sent",
-            "scale": "y",
-            "stroke": _DEBUG_SENT_COLOR,
-            "width": 2.0,
-            "dash": (6.0, 4.0),
-            "spanGaps": False,
-            "show": show_sent,
-        },
-        {
-            "label": "q_ref",
-            "scale": "y",
-            "stroke": _DEBUG_REF_COLOR,
-            "width": 1.8,
-            "spanGaps": False,
-            "show": show_ref,
-        },
-        {
-            "label": "q_actual",
-            "scale": "y",
-            "stroke": _DEBUG_ACTUAL_COLOR,
-            "width": 2.0,
-            "spanGaps": False,
-            "show": show_actual,
-        },
-    )
-
-
-def _add_debug_plot(
-    server: Any,
-    *,
-    title: str,
-    unit: str,
-    fixed_range: tuple[float, float],
-    order: float,
-) -> tuple[str, Any | None]:
-    if not hasattr(server.gui, "add_uplot") or not _debug_uplot_sync_supported():
-        return "none", None
-    try:
-        handle = server.gui.add_uplot(
-            _debug_empty_arrays(),
-            _debug_uplot_series(),
-            title=title,
-            scales=_debug_uplot_scales(window_sec=10.0, fixed_range=None),
-            axes=_debug_uplot_axes(unit),
-            legend={"show": True, "live": True},
-            cursor=_debug_uplot_cursor(),
-            height=170,
-            padding=(8, 12, 24, 54),
-            order=order,
-            visible=False,
-        )
-        return "uplot", handle
-    except Exception:
-        pass
-    return "none", None
-
-
 def _build_debug_panel(
-    server: Any, handles: dict[str, Any], scope_store: ScopeStore | None
+    server: Any, handles: dict[str, Any], dashboard_url: str | None
 ) -> None:
-    handles["debug_scope_store"] = scope_store
     folder = server.gui.add_folder(
-        "디버그 플롯",
+        "디버그",
         expand_by_default=True,
         order=-9.0,
         visible=False,
     )
     handles["debug_folder"] = folder
-    handles["debug_plot_handles"] = {}
-    handles["debug_plot_modes"] = {}
 
     with folder:
         handles["debug_readonly"] = server.gui.add_text(
             "Mode",
-            initial_value="읽기 전용: 500Hz scope 표시만 수행, 모션/lease 명령 전송 없음",
+            initial_value="읽기 전용: 500Hz scope 대시보드 링크만 표시, 모션/lease 명령 전송 없음",
             disabled=True,
         )
-        handles["debug_joint_dropdown"] = server.gui.add_dropdown(
-            "관절",
-            DEBUG_JOINT_LABELS,
-            initial_value=DEBUG_JOINT_LABELS[0],
-        )
-        handles["debug_arm_dropdown"] = server.gui.add_dropdown(
-            "팔",
-            _DEBUG_ARM_OPTIONS,
-            initial_value="양팔",
-        )
-        handles["debug_window_dropdown"] = server.gui.add_dropdown(
-            "표시 창",
-            _DEBUG_WINDOW_OPTIONS,
-            initial_value="5 s",
-        )
-        if hasattr(server.gui, "add_checkbox"):
-            handles["debug_smooth_toggle"] = server.gui.add_checkbox(
-                "평활", initial_value=True
+        if dashboard_url:
+            link_text = (
+                f"[Scope dashboard 열기]({dashboard_url})\n\n"
+                "새 탭에서 full-viewport 8-plot scope를 표시합니다. "
+                "데이터는 같은 rb_gui 프로세스의 SSE 서버에서 읽습니다."
             )
-            handles["debug_fixed_range_toggle"] = server.gui.add_checkbox(
-                "고정 레인지", initial_value=False
-            )
-            handles["debug_trace_sent_toggle"] = server.gui.add_checkbox(
-                "q_sent", initial_value=True
-            )
-            handles["debug_trace_ref_toggle"] = server.gui.add_checkbox(
-                "q_ref", initial_value=True
-            )
-            handles["debug_trace_actual_toggle"] = server.gui.add_checkbox(
-                "q_actual", initial_value=True
-            )
-        handles["debug_status_strip"] = server.gui.add_text(
-            "요약",
-            initial_value=f"No scope stream (UDP {DEFAULT_SCOPE_PORT})",
-            disabled=True,
-        )
-
-        order = 10.0
-        for metric_key, metric_label, unit, fixed_range in _DEBUG_PLOT_METRICS:
-            for arm in DEBUG_ARMS:
-                title = f"{_DEBUG_ARM_LABELS[arm]} {metric_label}"
-                mode, plot_handle = _add_debug_plot(
-                    server,
-                    title=title,
-                    unit=unit,
-                    fixed_range=fixed_range,
-                    order=order,
+            add_markdown = getattr(server.gui, "add_markdown", None)
+            if callable(add_markdown):
+                handles["debug_dashboard_link"] = add_markdown(link_text)
+            else:
+                handles["debug_dashboard_url"] = server.gui.add_text(
+                    "Scope dashboard",
+                    initial_value=dashboard_url,
+                    disabled=True,
                 )
-                if plot_handle is not None:
-                    handles["debug_plot_handles"][(arm, metric_key)] = plot_handle
-                    handles["debug_plot_modes"][(arm, metric_key)] = mode
-                order += 1.0
-        if not handles["debug_plot_handles"]:
-            handles["debug_plot_unavailable"] = server.gui.add_text(
-                "Plot backend",
-                initial_value=(
-                    "viser add_uplot + uplot cursor.sync unavailable; update viser "
-                    "before using synced drag zoom"
-                ),
+        else:
+            handles["debug_dashboard_url"] = server.gui.add_text(
+                "Scope dashboard",
+                initial_value="dashboard server unavailable",
                 disabled=True,
             )
-
-
-def _debug_metric_traces(series: ArmDebugSeries, metric_key: str) -> SignalTraces:
-    if metric_key == "velocity":
-        return series.velocity
-    if metric_key == "acceleration":
-        return series.acceleration
-    if metric_key == "jerk":
-        return series.jerk
-    return series.position
-
-
-def _fmt_optional(value: float | None, suffix: str) -> str:
-    if value is None or not math.isfinite(value):
-        return "n/a"
-    return f"{value:.2f}{suffix}"
-
-
-def _debug_jerk_text(series: ArmDebugSeries) -> str:
-    by_trace = series.max_abs_jerk_by_trace_deg_s3
-    return (
-        "J="
-        f"s:{_fmt_optional(by_trace.get('sent'), '')} "
-        f"r:{_fmt_optional(by_trace.get('ref'), '')} "
-        f"a:{_fmt_optional(by_trace.get('actual'), '')}deg/s³"
-    )
-
-
-def _debug_scope_status_text(stats: ScopeStats | None) -> str:
-    if stats is None:
-        return "scope store unavailable"
-    if stats.bind_error:
-        return f"scope bind failed: {stats.bind_error}"
-    if stats.received_batches <= 0:
-        return (
-            f"waiting for scope UDP {DEFAULT_SCOPE_PORT} "
-            f"({stats.invalid_packets} invalid)"
-        )
-    age = stats.latest_receive_age_sec
-    stale = age is not None and age > 1.0
-    age_text = f"age={age:.2f}s" if age is not None else "age=n/a"
-    rate = _fmt_optional(stats.batch_rate_hz, "Hz")
-    return (
-        ("scope stale " if stale else "scope ")
-        + f"batch={rate} {age_text} "
-        + f"batches={stats.received_batches} invalid={stats.invalid_packets} "
-        + f"drop={stats.dropped_samples}"
-    )
-
-
-def _debug_status_text(
-    snapshot: DebugPlotSnapshot,
-    selected_arms: tuple[str, ...],
-    stats: ScopeStats | None,
-) -> str:
-    parts: list[str] = []
-    for arm in selected_arms:
-        series = snapshot.arms.get(arm)
-        if series is None or series.sample_count == 0:
-            parts.append(f"{_DEBUG_ARM_LABELS.get(arm, arm)}: no samples")
-            continue
-        parts.append(
-            f"{_DEBUG_ARM_LABELS.get(arm, arm)} "
-            f"RMS(s-a)={_fmt_optional(series.rms_sent_actual_deg, 'deg')} "
-            f"{_debug_jerk_text(series)} "
-            f"rate={_fmt_optional(series.sample_rate_hz, 'Hz')} "
-            f"n={series.sample_count}"
-        )
-    parts.append(_debug_scope_status_text(stats))
-    return " | ".join(parts) if parts else _debug_scope_status_text(stats)
-
-
-def _update_debug_plots(
-    handles: dict[str, Any],
-    latest: StateSnapshot | None,
-    *,
-    stale: bool,
-) -> None:
-    del latest, stale
-    scope_store = handles.get("debug_scope_store")
-    if not isinstance(scope_store, ScopeStore):
-        return
-    window_sec = _debug_window_sec(handles)
-    scope_store.set_history_sec(max(20.0, window_sec))
-    selected_arms = _debug_selected_arms(handles)
-    snapshot = build_debug_snapshot(
-        scope_store.snapshot_samples(),
-        joint_index=_debug_joint_index(handles),
-        window_sec=window_sec,
-        smooth=_debug_smooth_enabled(handles),
-        smoothing_window=5,
-    )
-    stats = scope_store.stats()
-    fixed_enabled = _debug_fixed_range_enabled(handles)
-    trace_visibility = _debug_trace_visibility(handles)
-    for metric_key, _, unit, fixed_range in _DEBUG_PLOT_METRICS:
-        fixed = fixed_range if fixed_enabled else None
-        for arm in DEBUG_ARMS:
-            handle = handles.get("debug_plot_handles", {}).get((arm, metric_key))
-            if handle is None:
-                continue
-            visible = _debug_mode_active(handles) and arm in selected_arms
-            _set_gui_visible(handle, visible)
-            arm_series = snapshot.arms.get(arm)
-            traces = _debug_metric_traces(arm_series, metric_key) if arm_series else None
-            mode = handles.get("debug_plot_modes", {}).get((arm, metric_key))
-            if mode == "uplot":
-                try:
-                    handle.data = _debug_trace_arrays(traces) if traces else _debug_empty_arrays()
-                    series_state = (
-                        trace_visibility["sent"],
-                        trace_visibility["ref"],
-                        trace_visibility["actual"],
-                    )
-                    if handle is not None and handles.get("_debug_trace_state") != series_state:
-                        handle.series = _debug_uplot_series(
-                            show_sent=trace_visibility["sent"],
-                            show_ref=trace_visibility["ref"],
-                            show_actual=trace_visibility["actual"],
-                        )
-                    scale_key = (arm, metric_key)
-                    scale_state = (window_sec, fixed)
-                    scale_states = handles.setdefault("_debug_plot_scale_state", {})
-                    if scale_states.get(scale_key) != scale_state:
-                        handle.scales = _debug_uplot_scales(
-                            window_sec=window_sec, fixed_range=fixed
-                        )
-                        handle.axes = _debug_uplot_axes(unit)
-                        scale_states[scale_key] = scale_state
-                except Exception:
-                    pass
-    handles["_debug_trace_state"] = (
-        trace_visibility["sent"],
-        trace_visibility["ref"],
-        trace_visibility["actual"],
-    )
-    status = handles.get("debug_status_strip")
-    if status is not None:
-        try:
-            status.value = _debug_status_text(snapshot, selected_arms, stats)
-        except Exception:
-            pass
 
 
 def _scene_debug_handles(handles: dict[str, Any]) -> dict[tuple[str, str], Any]:
@@ -2173,7 +1796,7 @@ def build_gui(
     safety: OperatorSafety,
     store: StateStore,
     overlay_store: CircleOverlayStore | None = None,
-    scope_store: ScopeStore | None = None,
+    scope_dashboard_url: str | None = None,
 ) -> dict[str, Any]:
     handles: dict[str, Any] = {}
     handles["circle_overlay_enabled"] = overlay_store is not None
@@ -2202,7 +1825,7 @@ def build_gui(
             order=-10.0,
         )
 
-    _build_debug_panel(server, handles, scope_store)
+    _build_debug_panel(server, handles, scope_dashboard_url)
     _build_operator_monitors(server, handles)
 
     _add_tab_theme = getattr(server.gui, "add_html", None)
@@ -3616,8 +3239,29 @@ def _update_lease_owner(
         handle.value = f"held by {owner} — stop or release it before the GUI can take control"
 
 
+_BOX_MESH: Any = "uninit"
+
+
+def _box_mesh():
+    """box.stl(open-tray) -> (verts[m, 중심정렬], faces). 1회 로드 캐시."""
+    global _BOX_MESH
+    if _BOX_MESH != "uninit":
+        return _BOX_MESH
+    try:
+        import numpy as np
+        import trimesh
+        path = os.environ.get("RB_GUI_BOX_STL", "/home/plaif/workspace/box.stl")
+        m = trimesh.load(path, force="mesh")
+        v = np.asarray(m.vertices, dtype=np.float64)
+        v = (v - (v.min(0) + v.max(0)) / 2.0) * 0.001        # 중심정렬 + mm->m
+        _BOX_MESH = (v.astype(np.float32), np.asarray(m.faces, dtype=np.uint32))
+    except Exception:
+        _BOX_MESH = None
+    return _BOX_MESH
+
+
 def _update_stereo_boxes(handles: dict[str, Any]) -> None:
-    """검출된 박스(stereo.boxes, T_stand)를 stand 좌표에 wireframe으로 렌더."""
+    """검출된 박스(stereo.boxes, T_stand)를 box.stl 메쉬로 각각 렌더."""
     server = handles.get("_server")
     store = handles.get("_stereo_store")
     toggle = handles.get("pc_enable")
@@ -3631,19 +3275,23 @@ def _update_stereo_boxes(handles: dict[str, Any]) -> None:
             except Exception:
                 pass
         return
+    mesh = _box_mesh()
     boxes, _seq = store.latest_boxes()
     colors = [(40, 220, 80), (240, 150, 40), (80, 160, 240), (230, 60, 200)]
     seen = set()
     for i, b in enumerate(boxes[:4]):
         T = b["T"]; pos = tuple(float(v) for v in T[:3, 3])
         wxyz = tuple(float(v) for v in mat_to_wxyz(T[:3, :3]))
-        dims = tuple(float(v) for v in b["dims"])
         name = f"box{i}"; seen.add(name)
         if name in hs:
             h = hs[name]; h.position = pos; h.wxyz = wxyz; h.visible = True
-        else:
+        elif mesh is not None:
+            hs[name] = server.scene.add_mesh_simple(
+                f"/stereo_box_{i}", mesh[0], mesh[1], color=colors[i % 4],
+                opacity=0.55, side="double", flat_shading=True, position=pos, wxyz=wxyz)
+        else:  # STL 로드 실패 시 박스로 폴백
             hs[name] = server.scene.add_box(
-                f"/stereo_box_{i}", color=colors[i % 4], dimensions=dims,
+                f"/stereo_box_{i}", color=colors[i % 4], dimensions=tuple(float(v) for v in b["dims"]),
                 wireframe=True, position=pos, wxyz=wxyz)
     for name, h in hs.items():
         if name not in seen:
@@ -3779,7 +3427,6 @@ def update_gui(
         _update_circle_overlay_gui(handles, overlay_store)
     if latest is None:
         _update_operator_monitors(handles, None, stale=True)
-        _update_debug_plots(handles, None, stale=True)
         if "status_summary" in handles:
             handles["status_summary"].content = _status_summary_html(
                 connection="disconnected",
@@ -3912,7 +3559,6 @@ def update_gui(
         if "tcp_linear_status" in handles:
             handles["tcp_linear_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
         _update_operator_monitors(handles, latest, stale=stale)
-        _update_debug_plots(handles, latest, stale=stale)
         handles["tick"].value = latest.tick
         handles["packets"].value = f"{store.received_packets} received / {store.invalid_packets} invalid"
         _set_debug_mode_active(handles, True)
@@ -3993,7 +3639,6 @@ def update_gui(
     if "tcp_linear_status" in handles:
         handles["tcp_linear_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
     _update_operator_monitors(handles, latest, stale=stale)
-    _update_debug_plots(handles, latest, stale=stale)
     _set_debug_mode_active(handles, False)
     _push_gripper_percent(handles, latest)
     _update_gripper_feedback(handles, latest, stale=stale)
@@ -4167,6 +3812,10 @@ def main(argv: list[str] | None = None) -> None:
     state_port = _env_int("RB_GUI_STATE_PORT", 50110)
     scope_host = os.environ.get("RB_GUI_SCOPE_BIND", "0.0.0.0")
     scope_port = _env_int("RB_GUI_SCOPE_PORT", DEFAULT_SCOPE_PORT)
+    scope_dashboard_host = dashboard_host_from_env("127.0.0.1")
+    scope_dashboard_port = _env_int(
+        "RB_GUI_SCOPE_DASHBOARD_PORT", DEFAULT_DASHBOARD_PORT
+    )
     command_host = os.environ.get("RB_GUI_COMMAND_HOST", "127.0.0.1")
     command_port = _env_int("RB_GUI_COMMAND_PORT", 50010)
     observed_mode_raw = os.environ.get("RB_GUI_OBSERVED_MODE", "mock")
@@ -4189,6 +3838,31 @@ def main(argv: list[str] | None = None) -> None:
     scope_store = ScopeStore()
     scope_receiver = ScopeReceiver(scope_store, host=scope_host, port=scope_port)
     scope_receiver.start()
+    scope_dashboard: ScopeDashboardServer | None = ScopeDashboardServer(
+        scope_store,
+        host=scope_dashboard_host,
+        port=scope_dashboard_port,
+    )
+    try:
+        scope_dashboard.start()
+    except OSError as exc:
+        if "RB_GUI_SCOPE_DASHBOARD_PORT" in os.environ:
+            print(
+                "rb_servo_gui: scope dashboard disabled "
+                f"({scope_dashboard_host}:{scope_dashboard_port}: {exc})",
+                flush=True,
+            )
+            scope_dashboard = None
+        else:
+            print(
+                "rb_servo_gui: scope dashboard default port unavailable "
+                f"({scope_dashboard_host}:{scope_dashboard_port}: {exc}); "
+                "retrying with an ephemeral port",
+                flush=True,
+            )
+            scope_dashboard = ScopeDashboardServer(
+                scope_store, host=scope_dashboard_host, port=0
+            ).start()
     # 스테레오 pointcloud 워커(camera_server 컨테이너) 구독. 고급→Pointcloud 토글로 표시.
     stereo_store = StereoCloudStore()
     stereo_endpoint = os.environ.get("RB_GUI_STEREO_CLOUD_ENDPOINT", "tcp://127.0.0.1:5601")
@@ -4224,7 +3898,7 @@ def main(argv: list[str] | None = None) -> None:
         safety,
         store,
         overlay_store=overlay_store,
-        scope_store=scope_store,
+        scope_dashboard_url=scope_dashboard.url if scope_dashboard is not None else None,
     )
     handles["_stereo_store"] = stereo_store
     overlay_status = (
@@ -4234,7 +3908,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     print(
         f"rb_servo_gui listening on http://{host}:{port}, UDP state {state_host}:{state_port}, "
-        f"scope {scope_host}:{scope_port}{overlay_status}",
+        f"scope {scope_host}:{scope_port}, scope dashboard "
+        f"{scope_dashboard.url if scope_dashboard is not None else 'disabled'}{overlay_status}",
         flush=True,
     )
 
@@ -4244,6 +3919,8 @@ def main(argv: list[str] | None = None) -> None:
             time.sleep(0.1)
     finally:
         receiver.stop()
+        if scope_dashboard is not None:
+            scope_dashboard.stop()
         scope_receiver.stop()
         stereo_receiver.stop()
         if overlay_receiver is not None:

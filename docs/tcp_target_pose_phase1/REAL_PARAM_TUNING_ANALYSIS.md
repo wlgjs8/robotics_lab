@@ -1,8 +1,8 @@
-# TcpTargetPose Real 파라미터 튜닝 — Phase 0 분석 (2026-06-22)
+# TcpPoseTarget Real 파라미터 튜닝 — Phase 0 분석 (2026-06-22)
 
 기존 pgmode 전수 프로파일링([[tcp-pgprofile-campaign]], `outputs/tcp_pgprofile*`)과 첫
 Real 재생(`outputs/tcp_pgprofile_REAL/REAL_ANALYSIS.md`, episode_0008)을 종합해, **Real에서
-TcpTargetPose 제어를 튜닝하기 전에 "무엇이 병목이고 어떤 파라미터를 어느 방향으로 움직여야
+TcpPoseTarget 제어를 튜닝하기 전에 "무엇이 병목이고 어떤 파라미터를 어느 방향으로 움직여야
 하는지"를 데이터로 확정**한 분석. 라이브 캠페인·파라미터 sweep의 출발점.
 
 이 문서는 분석/제안이며 코드·config를 바꾸지 않는다. 실제 변경은 후속 단계(컨트롤러 코드 수정 →
@@ -18,8 +18,8 @@ TcpTargetPose 제어를 튜닝하기 전에 "무엇이 병목이고 어떤 파�
    계약이라 건드리지 않는다([[servo-j-transparent-executor-contract]]).
 
 두 요구가 **같은 단일 튜닝 표면**(`cartesian_control.pose_track_smd` + `kinematics.ik` +
-`safety.dq_max`)을 공유한다. openpi 롤아웃 deploy lane이 2026-06-21부터 `flow-infer
---command-family tcp_target_pose`(절대 `TcpPoseTarget` 위치제어, twist 경로 미안정)로 바뀌면서
+`safety.dq_max`)을 공유한다. openpi 롤아웃 deploy lane이 2026-06-21부터 고정 `TcpPoseTarget`
+위치제어로 바뀌면서
 이 표면은 **추론 critical path 위에 직접 올라와 있다**(`flow_inference.py:785-825`).
 
 ---

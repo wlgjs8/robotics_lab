@@ -95,7 +95,7 @@ class ConditionedTarget:
     emitted_delta_from_prev: np.ndarray  # (6,) pose_delta_local(prev_emitted, pose)
 
 
-class OnlineTcpTargetPoseConditioner:
+class OnlineTcpPoseTargetConditioner:
     """Per-arm online FOH conditioner for streamed ``tcp_target_pose`` rollout.
 
     Lifecycle per chunk: ``begin_chunk(...)`` with the per-step absolute targets, then

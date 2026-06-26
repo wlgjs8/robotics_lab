@@ -1443,7 +1443,7 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
         // Over a long run the controller's per-command responses pile up unread
         // in the command-socket receive buffer until it backs up and the command
         // channel corrupts (~10-20 min: controller "parsing error", teaching
-        // pendant link drops, GUI ArmMotion/InitMotion ignored). Drain it every
+        // pendant link drops, GUI ArmMotion/init_motion-profile requests ignored). Drain it every
         // cycle: flush() is a non-blocking read-until-empty. We discard the
         // drained responses (this mode already ignores ACKs), so accept/reject
         // below is unchanged and the streamed command bytes are identical — safe

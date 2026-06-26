@@ -13,8 +13,8 @@ are overridden:
     velocity-proprio context (last K executed ee_local pose-deltas, W-invariant).
 
 Everything downstream of ``_sample_chunk`` (the EE-frame action chunk) is shared
-with the parent, so train/deploy stay consistent and TcpPoseTarget is the deploy
-command family.
+with the parent, so train/deploy stay consistent and every runtime step emits
+``TcpPoseTarget``.
 """
 
 from __future__ import annotations
@@ -66,8 +66,6 @@ def _infer_proprio_layout(total_dim: int) -> tuple[str, int]:
 class PointCloudFlowActionSource(FlowMatchingActionSource):
     """Flow source whose observation is an egocentric point cloud (pc_v1)."""
 
-    _default_command_family = "tcp_target_pose"
-
     def __init__(
         self,
         checkpoint_path: str,
@@ -82,7 +80,7 @@ class PointCloudFlowActionSource(FlowMatchingActionSource):
     ):
         # The parent __init__ loads the checkpoint, builds the model (via our
         # overridden _build_policy_model), and wires the deploy machinery using
-        # the dataset_stats (arm mask, velocity limits, command family, gripper).
+        # the dataset_stats (arm mask, velocity limits, gripper).
         super().__init__(
             checkpoint_path,
             sample_steps=sample_steps,

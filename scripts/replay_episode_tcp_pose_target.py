@@ -421,10 +421,10 @@ def prepare_data_tcp_episode(args: argparse.Namespace) -> Path:
 
 def verify_data_tcp_targets(path: Path) -> None:
     with h5py.File(path, "r") as handle:
-        missing = [key for key in ("action/target_pose_left", "action/target_pose_right") if key not in handle]
+        missing = [key for key in ("action/tcp_target_stand_left", "action/tcp_target_stand_right") if key not in handle]
         if missing:
             raise ReplayRefusal(f"data_tcp episode missing required target pose dataset(s): {', '.join(missing)}")
-        for key in ("action/target_pose_left", "action/target_pose_right"):
+        for key in ("action/tcp_target_stand_left", "action/tcp_target_stand_right"):
             arr = np.asarray(handle[key], dtype=np.float64)
             if arr.ndim != 2 or arr.shape[1] != 7 or arr.shape[0] < 1:
                 raise ReplayRefusal(f"{path}:{key} must have shape (N,7), got {arr.shape}")
@@ -499,8 +499,8 @@ def anchored_ee_local_episode(
     conditioning_cfg: Any,
 ) -> tuple[EpisodeData, dict[str, Any]]:
     with h5py.File(data_tcp_path, "r") as handle:
-        left_target = np.asarray(handle["action/target_pose_left"], dtype=np.float64)
-        right_target = np.asarray(handle["action/target_pose_right"], dtype=np.float64)
+        left_target = np.asarray(handle["action/tcp_target_stand_left"], dtype=np.float64)
+        right_target = np.asarray(handle["action/tcp_target_stand_right"], dtype=np.float64)
         t_source = _data_tcp_timestamps(handle, max(left_target.shape[0], right_target.shape[0]), nominal_rate_hz)
         left_gripper = _optional_dataset(handle, "action/gripper_left")
         right_gripper = _optional_dataset(handle, "action/gripper_right")
@@ -543,8 +543,8 @@ def anchored_ee_local_episode(
         "source_pose_frame": attrs.get("source_pose_frame"),
         "retarget_status": attrs.get("retarget_status"),
         "selected": {
-            "left_pose": "action/target_pose_left",
-            "right_pose": "action/target_pose_right",
+            "left_pose": "action/tcp_target_stand_left",
+            "right_pose": "action/tcp_target_stand_right",
             "left_gripper": "action/gripper_left",
             "right_gripper": "action/gripper_right",
         },

@@ -18,7 +18,7 @@ Cartesian tracking breaks down (the source of the dq_max-saturation tremble). Th
 defaults mirror the deployed config:
 
     v_ref  = smd.max_linear_velocity_m_s  (0.25 m/s)  # SMD pose-tracker Cartesian
-             ceiling — the BINDING speed for the deployed TcpTargetPose lane and the
+             ceiling — the BINDING speed for the deployed TcpPoseTarget lane and the
              path where dq_max saturation/tremble actually occurs (not the MoveL-only
              max_linear_move_speed_m_s).
     dq_max = safety.dq_max_deg_s[0]  (J1)             (60 deg/s)

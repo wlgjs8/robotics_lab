@@ -75,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         return "n/a" if v is None else f"{v:.{d}f}"
 
     L = []
-    L.append("# TcpTargetPose pgmode Profiling — REPORT")
+    L.append("# TcpPoseTarget pgmode Profiling — REPORT")
     L.append("")
     L.append("**Campaign:** action_scale = 1.0 (fixed), time_scale = 1.0 (fixed). "
              "Failed episodes are classified, not fixed. SMD / servo_j / IK / safety "

@@ -4678,7 +4678,6 @@ void DualArmServoLoop::abortFreedrive(ArmId arm_id, const RobotState& state, con
                       << " abort: best-effort teach_off failed: " << off.error.name << "\n";
         }
     }
-    stage_atomic.store(FreedriveStage::Off);
     // Resync the held target to the current actual joints so resuming servo_j does
     // not snap the arm. Safe even from Quiesce (the arm was only holding).
     resyncArmAfterFreedrive(arm_id, state);
@@ -4686,6 +4685,7 @@ void DualArmServoLoop::abortFreedrive(ArmId arm_id, const RobotState& state, con
         std::lock_guard<std::mutex> lock(state_mutex_);
         freedrive_note_ = std::string(toString(arm_id)) + ": freedrive aborted (" + reason + ")";
     }
+    stage_atomic.store(FreedriveStage::Off);
     std::cerr << "[WARN] freedrive " << toString(arm_id) << " aborted: " << reason << "\n";
 }
 

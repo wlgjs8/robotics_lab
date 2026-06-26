@@ -2857,15 +2857,15 @@ class GuiContractsTest(unittest.TestCase):
         self.assertFalse(sim_states["jog"])
         self.assertFalse(sim_states["lifecycle:ArmMotion"])
         self.assertFalse(sim_states["tcp_pose"])
-        self.assertFalse(sim_states["twist"])
-        self.assertFalse(sim_states["circle"])
+        self.assertFalse(sim_states["tcp_linear"])
 
         # A latched fault re-disables every motion control (lifecycle reset stays
         # live so the operator can clear it).
         _, _, fault_safety = self.make_safety(sample_state(fault_latched=True, fault_reason="self_collision"))
         fault_states = fault_safety.control_disabled_states()
         self.assertTrue(fault_states["jog"])
-        self.assertTrue(fault_states["velocity"])
+        self.assertTrue(fault_states["tcp_pose"])
+        self.assertTrue(fault_states["tcp_linear"])
         self.assertTrue(fault_states["lifecycle:ArmMotion"])
         self.assertFalse(fault_states["lifecycle:ResetFault"])
 
