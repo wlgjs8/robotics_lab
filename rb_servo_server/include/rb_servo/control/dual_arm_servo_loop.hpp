@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -389,6 +390,15 @@ private:
         std::size_t index = 0;
         int escape_waypoints = 0;  // leading sub-threshold escape waypoints (follow precisely)
         std::string message;
+        InitMotionPlanResult::FailMode fail_mode = InitMotionPlanResult::FailMode::None;
+        double start_clear_m = std::numeric_limits<double>::quiet_NaN();
+        double goal_clear_m = std::numeric_limits<double>::quiet_NaN();
+        int tree_start_size = 0;
+        int tree_goal_size = 0;
+        int last_iterations = 0;
+        double last_planning_time_s = 0.0;
+        bool exec_timeout = false;
+        bool exec_stalled = false;
         uint64_t start_ns = 0;  // steady-clock stamp when this sequence began (runaway bound)
         // Progress-aware execution timeout: the smallest max-joint distance-to-goal seen so
         // far and when it last improved. A move that keeps closing on the goal is NOT killed

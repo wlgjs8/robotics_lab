@@ -564,10 +564,21 @@ struct InitMotionPlannerConfig {
     double goal_bias = 0.10;              // probability of sampling the goal directly
     int shortcut_passes = 200;            // post-process straightening attempts
     double sample_margin_deg = 30.0;      // per-joint sampling band beyond [start,goal]
+    // Optional per-joint sample margins (left/right share axis index). When all entries
+    // are <=0, sample_margin_deg is used exactly as before; positive entries override
+    // only their axis and zero entries fall back to sample_margin_deg.
+    JointArray sample_margin_deg_per_joint{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    double global_sample_fraction = 0.0;     // probability of sampling the wide band
+    double global_sample_margin_deg = 150.0; // wide-band bbox(start,goal) margin
     double collision_margin_m = 0.005;    // oracle clearance threshold (extra over d_hard)
     unsigned int seed = 12345;            // RNG seed (reproducible plans/tests)
     double waypoint_tol_deg = 1.5;        // arrival tolerance at the FINAL waypoint
     double max_segment_deg = 5.0;         // densify so no segment exceeds this per joint
+    double escape_max_time_sec = 0.75;     // escape-only budget before RRT budget starts
+    int escape_max_steps = 40;             // gradient escape iteration cap
+    int escape_restart_attempts = 4;       // random perturbation restarts after saddle
+    double escape_perturb_deg = 5.0;       // per-joint restart perturbation half-width
+    bool lazy_edges = true;                // validate RRT edges lazily, final path fail-closed
     // Execution pure-pursuit lookahead: each tick the streamed JointTarget aims at the
     // farthest planned waypoint within this joint-space chord of the current pose, so
     // the SMD always sees a large error and runs near max velocity (instead of settling

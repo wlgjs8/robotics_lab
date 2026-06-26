@@ -104,9 +104,9 @@ reference_supervision disable) that only move the next fault path.
   cmake --build rb_servo_server/build -j && ctest --test-dir rb_servo_server/build
   --output-on-failure` (Eigen3 + Pinocchio). Do NOT claim the gate passed unless
   it ran green.
-- Enable the flag in the tracked example pgmode config
-  `rb_servo_server/config/dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml`
-  (with a comment) and document in docs/runbooks/rbpodo_pgmode_umi.md +
+- Enable the flag in the current tracked pgmode/controller-simulation example
+  config, if one exists for the task, with a comment and document it in
+  docs/runbooks/rbpodo_pgmode_umi.md +
   docs/servo_backend_contract.md.
 
 ## Out of scope

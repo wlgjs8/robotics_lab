@@ -25,7 +25,6 @@ Supported action sources:
 
 - `hold`
 - `joint_sine`
-- `master_arm_joint`
 - `dual_spacemouse_pose_target`
 - `umi_dual_cartesian`
 - `teleop_mux`
@@ -65,6 +64,11 @@ or opt-in flag for target-pose rollout.
 Live rollout still requires an explicit `--rollout-mode`. `controller_sim` and
 `real_policy` require a policy dt from CLI or checkpoint stats; dry-run and
 read-only modes may use the command-rate fallback.
+
+For live OpenPI `real_policy`, keep `make run` running and start
+`tools/flow_infer_real_policy.sh` or `make flow-infer-real` from another
+terminal. The stack teleop_mux uses state port `50376`; the flow configs use
+`50378`, so `ACTION_SOURCE=none` is not part of the normal flow-infer path.
 
 ## HDF5 Schema
 

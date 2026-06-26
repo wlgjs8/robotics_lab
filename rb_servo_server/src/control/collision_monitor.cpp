@@ -718,6 +718,64 @@ struct CollisionMonitor::Impl {
         return reduce(nowMonotonicS(), q_eval);
     }
 
+    CollisionDistanceSummary summarizeCurrentDistances() const {
+        CollisionDistanceSummary s;
+        s.valid = true;
+        const std::size_t np = geom.collisionPairs.size();
+        for (std::size_t k = 0; k < np; ++k) {
+            const double d = gdata.distanceResults[k].min_distance;
+            if (d < s.min_clearance_m) s.min_clearance_m = d;
+            const bool ext = k < pair_external_.size() && pair_external_[k];
+            if (ext) {
+                if (d < s.external_min_clearance_m) s.external_min_clearance_m = d;
+                if (d < cfg.external_d_hard_m) s.hard_violation = true;
+            } else {
+                if (d < s.self_min_clearance_m) s.self_min_clearance_m = d;
+                if (d < cfg.d_hard_m) s.hard_violation = true;
+            }
+            if (!std::isfinite(d)) s.hard_violation = true;
+        }
+        return s;
+    }
+
+    CollisionDistanceSummary evalDistancesOnly(const JointArray& l, const JointArray& r) {
+        setQ(l, r);
+        applyGroundPlanePose();
+        applyGripperFingers();
+        pinocchio::computeDistances(model, data, geom, gdata, q);
+        return summarizeCurrentDistances();
+    }
+
+    bool clearsThresholds(const JointArray& l, const JointArray& r,
+                          double self_thresh_m, double external_thresh_m) {
+        if (!(std::isfinite(self_thresh_m) && std::isfinite(external_thresh_m))) {
+            return false;
+        }
+        setQ(l, r);
+        applyGroundPlanePose();
+        applyGripperFingers();
+        pinocchio::updateGeometryPlacements(model, data, geom, gdata, q);
+        const std::size_t np = geom.collisionPairs.size();
+        for (std::size_t k = 0; k < np; ++k) {
+            const auto& cp = geom.collisionPairs[k];
+            if (!gdata.activeCollisionPairs[k] ||
+                geom.geometryObjects[cp.first].disableCollision ||
+                geom.geometryObjects[cp.second].disableCollision) {
+                continue;
+            }
+            const auto& res = pinocchio::computeDistance(
+                geom, gdata, static_cast<pinocchio::PairIndex>(k));
+            const double d = res.min_distance;
+            if (!std::isfinite(d)) return false;
+            const bool ext = k < pair_external_.size() && pair_external_[k];
+            const double threshold = ext
+                ? std::max(external_thresh_m, cfg.external_d_hard_m)
+                : std::max(self_thresh_m, cfg.d_hard_m);
+            if (d <= threshold) return false;
+        }
+        return true;
+    }
+
     void publish(CollisionVerdict v) {
         std::atomic_store(&published, std::make_shared<const CollisionVerdict>(std::move(v)));
     }
@@ -796,6 +854,16 @@ CollisionVerdict CollisionMonitor::evalOnce(const JointArray& left_deg, const Jo
     CollisionVerdict v = impl_->evalLocked(left_deg, right_deg);
     impl_->publish(v);
     return v;
+}
+
+CollisionDistanceSummary CollisionMonitor::evalDistancesOnly(const JointArray& left_deg,
+                                                             const JointArray& right_deg) {
+    return impl_->evalDistancesOnly(left_deg, right_deg);
+}
+
+bool CollisionMonitor::clearsThresholds(const JointArray& left_deg, const JointArray& right_deg,
+                                        double self_thresh_m, double external_thresh_m) {
+    return impl_->clearsThresholds(left_deg, right_deg, self_thresh_m, external_thresh_m);
 }
 
 void CollisionMonitor::start() {

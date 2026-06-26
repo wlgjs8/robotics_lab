@@ -29,7 +29,7 @@ sleep 1.5
 
 echo "[rec] run replay driver (no-init)..."
 PYTHONPATH=policy_runner $VENV -u scripts/replay_episode_rollout.py \
-  --config policy_runner/config/replay_sim.yaml \
+  --config policy_runner/config/stack_sim.yaml \
   --checkpoint "$CKPT" --episode "$EP" --policy-dt-sec "$PDT" --no-init $EXTRA \
   >/tmp/replay_${OUT}.log 2>&1
 RC=$?

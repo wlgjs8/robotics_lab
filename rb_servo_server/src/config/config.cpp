@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <iostream>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -802,9 +803,38 @@ void validateConfig(const DualArmConfig& cfg) {
         if (ip.max_iterations <= 0) {
             throw std::runtime_error("safety.init_motion_planner.max_iterations must be > 0");
         }
-        if (ip.goal_bias < 0.0 || ip.goal_bias > 1.0) {
+        if (ip.escape_max_steps <= 0) {
+            throw std::runtime_error("safety.init_motion_planner.escape_max_steps must be > 0");
+        }
+        if (ip.escape_restart_attempts < 0) {
+            throw std::runtime_error("safety.init_motion_planner.escape_restart_attempts must be >= 0");
+        }
+        if (!std::isfinite(ip.goal_bias) || ip.goal_bias < 0.0 || ip.goal_bias > 1.0) {
             throw std::runtime_error("safety.init_motion_planner.goal_bias must be in [0, 1]");
         }
+        if (!std::isfinite(ip.global_sample_fraction) ||
+            ip.global_sample_fraction < 0.0 || ip.global_sample_fraction > 1.0) {
+            throw std::runtime_error("safety.init_motion_planner.global_sample_fraction must be in [0, 1]");
+        }
+        for (double margin : ip.sample_margin_deg_per_joint) {
+            if (!std::isfinite(margin)) {
+                throw std::runtime_error(
+                    "safety.init_motion_planner.sample_margin_deg_per_joint values must be finite");
+            }
+        }
+        if (ip.goal_bias + ip.global_sample_fraction > 1.0) {
+            std::ostringstream oss;
+            oss << "safety.init_motion_planner.goal_bias + global_sample_fraction must be <= 1.0"
+                << " (goal_bias=" << ip.goal_bias
+                << ", global_sample_fraction=" << ip.global_sample_fraction << ")";
+            throw std::runtime_error(oss.str());
+        }
+        validateNonNegativeFinite(ip.global_sample_margin_deg,
+                                  "safety.init_motion_planner.global_sample_margin_deg");
+        validateNonNegativeFinite(ip.escape_max_time_sec,
+                                  "safety.init_motion_planner.escape_max_time_sec");
+        validateNonNegativeFinite(ip.escape_perturb_deg,
+                                  "safety.init_motion_planner.escape_perturb_deg");
     }
     if (cfg.safety.floor_constraint.enable) {
         const auto& fc = cfg.safety.floor_constraint;
@@ -2158,10 +2188,18 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "goal_bias",
                 "shortcut_passes",
                 "sample_margin_deg",
+                "sample_margin_deg_per_joint",
+                "global_sample_fraction",
+                "global_sample_margin_deg",
                 "collision_margin_m",
                 "seed",
                 "waypoint_tol_deg",
                 "max_segment_deg",
+                "escape_max_time_sec",
+                "escape_max_steps",
+                "escape_restart_attempts",
+                "escape_perturb_deg",
+                "lazy_edges",
                 "execution_lookahead_deg",
                 "execution_timeout_sec",
             }, "safety.init_motion_planner");
@@ -2174,10 +2212,21 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ip, "goal_bias")) ipc.goal_bias = asDouble(ip["goal_bias"], "safety.init_motion_planner.goal_bias");
             if (has(ip, "shortcut_passes")) ipc.shortcut_passes = asInt(ip["shortcut_passes"], "safety.init_motion_planner.shortcut_passes");
             if (has(ip, "sample_margin_deg")) ipc.sample_margin_deg = asDouble(ip["sample_margin_deg"], "safety.init_motion_planner.sample_margin_deg");
+            if (has(ip, "sample_margin_deg_per_joint")) {
+                ipc.sample_margin_deg_per_joint = parseJointArray(ip["sample_margin_deg_per_joint"],
+                    "safety.init_motion_planner.sample_margin_deg_per_joint");
+            }
+            if (has(ip, "global_sample_fraction")) ipc.global_sample_fraction = asDouble(ip["global_sample_fraction"], "safety.init_motion_planner.global_sample_fraction");
+            if (has(ip, "global_sample_margin_deg")) ipc.global_sample_margin_deg = asDouble(ip["global_sample_margin_deg"], "safety.init_motion_planner.global_sample_margin_deg");
             if (has(ip, "collision_margin_m")) ipc.collision_margin_m = asDouble(ip["collision_margin_m"], "safety.init_motion_planner.collision_margin_m");
             if (has(ip, "seed")) ipc.seed = static_cast<unsigned int>(asInt(ip["seed"], "safety.init_motion_planner.seed"));
             if (has(ip, "waypoint_tol_deg")) ipc.waypoint_tol_deg = asDouble(ip["waypoint_tol_deg"], "safety.init_motion_planner.waypoint_tol_deg");
             if (has(ip, "max_segment_deg")) ipc.max_segment_deg = asDouble(ip["max_segment_deg"], "safety.init_motion_planner.max_segment_deg");
+            if (has(ip, "escape_max_time_sec")) ipc.escape_max_time_sec = asDouble(ip["escape_max_time_sec"], "safety.init_motion_planner.escape_max_time_sec");
+            if (has(ip, "escape_max_steps")) ipc.escape_max_steps = asInt(ip["escape_max_steps"], "safety.init_motion_planner.escape_max_steps");
+            if (has(ip, "escape_restart_attempts")) ipc.escape_restart_attempts = asInt(ip["escape_restart_attempts"], "safety.init_motion_planner.escape_restart_attempts");
+            if (has(ip, "escape_perturb_deg")) ipc.escape_perturb_deg = asDouble(ip["escape_perturb_deg"], "safety.init_motion_planner.escape_perturb_deg");
+            if (has(ip, "lazy_edges")) ipc.lazy_edges = asBool(ip["lazy_edges"], "safety.init_motion_planner.lazy_edges");
             if (has(ip, "execution_lookahead_deg")) ipc.execution_lookahead_deg = asDouble(ip["execution_lookahead_deg"], "safety.init_motion_planner.execution_lookahead_deg");
             if (has(ip, "execution_timeout_sec")) ipc.execution_timeout_sec = asDouble(ip["execution_timeout_sec"], "safety.init_motion_planner.execution_timeout_sec");
         }

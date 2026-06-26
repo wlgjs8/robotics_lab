@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -857,6 +858,82 @@ bool testRoiBoxInvalidConfigRejects() {
     return true;
 }
 
+std::string initMotionConfigBody(const std::string& init_block) {
+    const std::string rb3_urdf =
+        (std::filesystem::path(__FILE__).parent_path().parent_path() /
+         "descriptions/urdf/rb3_730e.urdf").string();
+    return std::string(
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+        "kinematics:\n"
+        "  enable: true\n"
+        "  provider: pinocchio\n"
+        "  urdf: \"") + rb3_urdf + "\"\n" +
+        "  base_link: world\n"
+        "  tip_link: tcp\n"
+        "  joint_names: [base_joint, shoulder_joint, elbow_joint, wrist1_joint, wrist2_joint, wrist3_joint]\n"
+        "  q_units: deg\n"
+        "safety:\n"
+        "  self_collision:\n"
+        "    enable: true\n"
+        "    mesh:\n"
+        "      unified_urdf: dummy.urdf\n"
+        "      d_hard_m: 0.010\n"
+        "      d_slow_m: 0.035\n"
+        "      a_brake_m_s2: 4.0\n"
+        "      max_staleness_s: 0.050\n"
+        "  init_motion_planner:\n" +
+        init_block;
+}
+
+bool testInitMotionPlannerConfigExt() {
+    const std::string valid_path = writeTempConfig(
+        "init-motion-valid",
+        initMotionConfigBody(
+            "    enable: true\n"
+            "    goal_bias: 0.25\n"
+            "    sample_margin_deg_per_joint: [45, 75, 75, 45, 75, 30]\n"
+            "    global_sample_fraction: 0.15\n"
+            "    global_sample_margin_deg: 150.0\n"
+            "    escape_max_time_sec: 0.75\n"
+            "    escape_max_steps: 40\n"
+            "    escape_restart_attempts: 4\n"
+            "    escape_perturb_deg: 5.0\n"
+            "    lazy_edges: true\n"
+        )
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(valid_path);
+    ::unlink(valid_path.c_str());
+    RB_CHECK(near(cfg.safety.init_motion_planner.goal_bias, 0.25));
+    RB_CHECK(near(cfg.safety.init_motion_planner.sample_margin_deg_per_joint[2], 75.0));
+    RB_CHECK(near(cfg.safety.init_motion_planner.global_sample_fraction, 0.15));
+    RB_CHECK(cfg.safety.init_motion_planner.lazy_edges);
+
+    const std::string bad_sum_path = writeTempConfig(
+        "init-motion-bad-sum",
+        initMotionConfigBody(
+            "    enable: true\n"
+            "    goal_bias: 0.9\n"
+            "    global_sample_fraction: 0.2\n"
+        )
+    );
+    RB_CHECK(loadRejects(bad_sum_path));
+    ::unlink(bad_sum_path.c_str());
+
+    const std::string bad_len_path = writeTempConfig(
+        "init-motion-bad-margin-len",
+        initMotionConfigBody(
+            "    enable: true\n"
+            "    sample_margin_deg_per_joint: [45, 75, 75, 45, 75]\n"
+        )
+    );
+    RB_CHECK(loadRejects(bad_len_path));
+    ::unlink(bad_len_path.c_str());
+
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -873,5 +950,6 @@ int main() {
     if (!testFloorCheckPointOffsetClosedParses()) return 1;
     if (!testRoiBoxConfigParsesAndDefaults()) return 1;
     if (!testRoiBoxInvalidConfigRejects()) return 1;
+    if (!testInitMotionPlannerConfigExt()) return 1;
     return 0;
 }

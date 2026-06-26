@@ -2,11 +2,16 @@ schema: robotics_lab.policy_runner.v1
 # =====================================================================================
 # FLOW-INFER REAL_POLICY config — native live deploy of the pi0.5/openpi checkpoint on
 # the physical RB3-730 with the LIVE camera_server bundle.
-#   ~/openpi/.venv/bin/python -m policy_runner flow-infer \
-#     --checkpoint openpi://127.0.0.1:8000 --config policy_runner/config/flow_real.yaml \
-#     --rollout-mode real_policy \
-#     --ee-local-r-align pika_rz180 --max-linear-step-m 0.010 --policy-dt-sec 0.0334 \
-#     --chunk-execute-steps 4 --camera-preview      (RB_ALLOW_REAL_GRIPPER=1 in env)
+# Start `make run` first, then in another terminal:
+#   OPENPI_REMOTE_SKIP_WARMUP=1 RB_ALLOW_REAL_GRIPPER=1 \
+#     make flow-infer-real
+#
+# Equivalent direct command:
+#   python3 -m policy_runner flow-infer \
+#     --checkpoint openpi://127.0.0.1:8000 \
+#     --config policy_runner/config/flow_real_realsense.yaml \
+#     --rollout-mode real_policy --allow-tcp-target-pose \
+#     --action-horizon 24 --include-depth --gripper-action-mode absolute
 #
 # Differs from stack_real.yaml (the `make run` teleop config) in exactly what the
 # real_policy gate (rollout_modes._validate_real_policy) requires:
@@ -16,6 +21,8 @@ schema: robotics_lab.policy_runner.v1
 #     — real motion + gripper + collision guard exercised under supervision 2026-06-21).
 #   - a live camera section (camera_server ZMQ bundle on 5600) is enabled.
 # Pairs with rb_servo_server/config/local/stack_real.yaml (pgmode real, PHYSICAL motion).
+# This config binds state on 50378 so it can coexist with make run's teleop_mux
+# state client on 50376.
 # =====================================================================================
 mode: real
 action_source: teleop_mux  # ignored by flow-infer (source comes from --checkpoint)
@@ -29,6 +36,8 @@ recording:
   output_dir: "policy_runner/episodes"
   rate_hz: 30.0
   format: hdf5
+  control_enabled: false
+  status_endpoint: null
   dataset_metadata:
     schema: robotics_lab.policy_runner.dataset_metadata.v1
     backend_type: rbpodo
@@ -40,7 +49,9 @@ recording:
     camera_status: enabled
     command_source_id: policy_runner
 robot_state:
-  bind: "udp://0.0.0.0:50376"
+  # External flow-infer runs alongside make run's teleop_mux. Keep this off
+  # 50376, which is owned by the always-on stack policy_runner.
+  bind: "udp://0.0.0.0:50378"
   stale_timeout_sec: 0.5
 servo_command:
   endpoint: "udp://127.0.0.1:50256"

@@ -705,6 +705,21 @@ struct SelfCollisionNearPairViz {
     bool external = false;  // arm<->external obstacle (floor) vs robot self-collision
 };
 
+struct InitMotionDiag {
+    std::string status = "idle";
+    std::string fail_mode = "none";
+    std::string message;
+    double start_clear_m = std::numeric_limits<double>::quiet_NaN();
+    double goal_clear_m = std::numeric_limits<double>::quiet_NaN();
+    int tree_start = 0;
+    int tree_goal = 0;
+    int iterations = 0;
+    double planning_time_s = 0.0;
+    int waypoint_index = 0;
+    int waypoint_count = 0;
+    double dist_to_goal_deg = std::numeric_limits<double>::quiet_NaN();
+};
+
 struct ServoSnapshot {
     uint64_t tick = 0;
     uint64_t loop_start_time_ns = 0;
@@ -763,6 +778,7 @@ struct ServoSnapshot {
     // or no pair is within the slow zone.
     bool self_collision_mesh = false;
     std::vector<SelfCollisionNearPairViz> self_collision_near_pairs;
+    InitMotionDiag init_motion;
 
     // Stand-frame floor plane constraint telemetry (safety.floor_constraint).
     bool floor_constraint_enabled = false;

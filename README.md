@@ -301,6 +301,23 @@ SpaceMouse / UMI teleop는 `make run`이 띄우는 `policy_runner`에서 상시 
 운용됩니다(별도 teleop 모드 불필요). policy 학습은 GPU 서버에서 native
 `python3 -m policy_runner flow-train`으로 수행하며, inference는
 `python3 -m policy_runner flow-infer`(아래 `--rollout-mode` 참고)로 실행합니다.
+실제 OpenPI `real_policy` rollout은 `make run`을 그대로 띄운 상태에서 별도
+터미널의 얇은 wrapper로 시작합니다. `ACTION_SOURCE=none`은 필요하지 않습니다:
+
+```bash
+make run
+
+# another terminal
+OPENPI_REMOTE_SKIP_WARMUP=1 RB_ALLOW_REAL_GRIPPER=1 \
+  make flow-infer-real
+```
+
+기본 wrapper는
+`policy_runner/config/flow_real_realsense.yaml`의 외부 flow-infer state 포트
+`50378`을 사용합니다(`make run` teleop_mux는 `50376`). checkpoint/config/python은
+각각 `FLOW_INFER_CHECKPOINT`, `FLOW_INFER_CONFIG`, `FLOW_INFER_PYTHON`으로
+바꿀 수 있고, `OPENPI_REMOTE_SKIP_WARMUP`, `RB_ALLOW_REAL_GRIPPER`, `DISPLAY` 등
+호출 환경은 그대로 상속됩니다.
 
 HDF5 policy episodes should be audited before `flow-train`:
 

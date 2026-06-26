@@ -11,14 +11,18 @@ from .action_sources import (
     DualSpaceMousePoseTargetActionSource,
     HoldActionSource,
     JointSineActionSource,
-    MasterArmJointActionSource,
     TeleopMuxActionSource,
     UmiDualCartesianActionSource,
 )
 from .config import PolicyRunnerConfig, load_config
 from .dataset_manifest import parse_camera_names
 from .geometry import GeometryStatus, load_geometry_status
-from .robot_state_client import RobotStateClient, StateSnapshot, StateStreamLeaseReadback
+from .robot_state_client import (
+    RobotStateClient,
+    StateSnapshot,
+    StateStreamLeaseReadback,
+    command_source_lease_from_snapshot,
+)
 from .rollout_modes import (
     ReadOnlyActionSource,
     RolloutMode,
@@ -48,6 +52,7 @@ LEASE_READBACK_TIMEOUT_EXIT_CODE = 3
 # releases the command-source lease so one-shot GUI commands can run between
 # teleop bursts; the next motion intent re-acquires lazily.
 IDLE_LEASE_RELEASE_SEC = 1.0
+LEASE_RETRY_BACKOFF_SEC = 2.0
 
 
 def _intent_record_packet(
@@ -72,6 +77,35 @@ def _intent_record_packet(
     if intent.right is not None:
         packet["right"] = intent.right
     return packet
+
+
+def _active_lease_loss_reason(
+    snapshot: StateSnapshot,
+    command_client: object | None,
+) -> tuple[str, bool] | None:
+    """Return (reason, foreign_owner_active) when our cached lease is no longer valid."""
+    if command_client is None:
+        return None
+    source_id = getattr(command_client, "source_id", None)
+    session_id = getattr(command_client, "session_id", None)
+    if not isinstance(source_id, str) or not source_id:
+        return None
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    lease = command_source_lease_from_snapshot(snapshot)
+    if not lease.enforce_lease:
+        return None
+    lease_token = getattr(command_client, "lease_token", None)
+    if lease.matches(source_id, session_id, lease_token):
+        return None
+    if not lease.active:
+        if lease.expired:
+            return ("server reports our command-source lease expired", False)
+        return ("server reports no active command-source lease", False)
+    owner = f"{lease.active_source_id or '<unknown>'}/{lease.active_session_id or '<unknown>'}"
+    if lease.active_source_id == source_id and lease.active_session_id == session_id:
+        return ("server reports our session with a different lease token", False)
+    return (f"server lease is held by {owner}", True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -257,8 +291,27 @@ def run(
             # (lease_required) with no re-acquire.
             if intent is not None and intent.is_motion:
                 last_motion_intent_time = now
-            elif (
-                send_commands
+            if send_commands and lease_acquired and config.servo_command.acquire_lease:
+                assert command_client is not None
+                loss = _active_lease_loss_reason(snapshot, command_client)
+                if loss is not None:
+                    loss_reason, foreign_owner_active = loss
+                    print(
+                        f"policy_runner lease lost (will reacquire): {loss_reason}",
+                        file=stderr,
+                    )
+                    lease_acquired = False
+                    armed_for_motion = False
+                    if hasattr(command_client, "lease_token"):
+                        command_client.lease_token = None
+                    lease_retry_after = (
+                        now + LEASE_RETRY_BACKOFF_SEC
+                        if foreign_owner_active
+                        else float("-inf")
+                    )
+            if (
+                (intent is None or not intent.is_motion)
+                and send_commands
                 and lease_acquired
                 and config.servo_command.acquire_lease
                 and last_motion_intent_time is not None
@@ -300,7 +353,7 @@ def run(
                             f"policy_runner lease busy (will retry): {exc}",
                             file=stderr,
                         )
-                        lease_retry_after = now + 2.0
+                        lease_retry_after = now + LEASE_RETRY_BACKOFF_SEC
                         _finish_tick(snapshot, now)
                         continue
                 if intent.is_motion and not armed_for_motion:
@@ -358,36 +411,6 @@ def make_action_source(config: PolicyRunnerConfig):
             selected_arm=config.joint_sine.selected_arm,
             timeout_sec=config.servo_command.timeout_sec,
             simulation_only=config.joint_sine.simulation_only,
-        )
-    if config.action_source == "master_arm_joint":
-        ma = config.master_arm_joint
-        return MasterArmJointActionSource(
-            config_path=ma.config_path,
-            python_module_dir=ma.python_module_dir,
-            module_name=ma.module_name,
-            selected_arm=ma.selected_arm,
-            mapping_mode=ma.mapping_mode,
-            robot_init_strategy=ma.robot_init_strategy,
-            deadman_side=ma.deadman_side,
-            deadman_switch=ma.deadman_switch,
-            require_deadman=ma.require_deadman,
-            use_gravity_compensation=ma.use_gravity_compensation,
-            hold_master_on_release=ma.hold_master_on_release,
-            enable_gripper_readers=ma.enable_gripper_readers,
-            left_scale=ma.left_scale,
-            right_scale=ma.right_scale,
-            left_sign=ma.left_sign,
-            right_sign=ma.right_sign,
-            left_offset_deg=ma.left_offset_deg,
-            right_offset_deg=ma.right_offset_deg,
-            left_robot_init_deg=ma.left_robot_init_deg,
-            right_robot_init_deg=ma.right_robot_init_deg,
-            left_joint_map=ma.left_joint_map,
-            right_joint_map=ma.right_joint_map,
-            max_joint_speed_deg_s=ma.max_joint_speed_deg_s,
-            smoothing_alpha=ma.smoothing_alpha,
-            wrap_delta=ma.wrap_delta,
-            timeout_sec=config.servo_command.timeout_sec,
         )
     if config.action_source == "dual_spacemouse_pose_target":
         return _make_dual_spacemouse_pose_target_source(config)
@@ -1002,6 +1025,14 @@ def _main_with_subcommands(argv: list[str]) -> int:
             "Blend the first N actions after each chunk-resample boundary from the "
             "previously emitted action (alpha 0->1) to remove the boundary jerk "
             "without steady-state lag. 0 (default) disables crossfade. Try 2-3."
+        ),
+    )
+    flow_infer.add_argument(
+        "--allow-tcp-target-pose",
+        action="store_true",
+        help=(
+            "Compatibility no-op: live flow-infer always emits absolute "
+            "TcpPoseTarget setpoints."
         ),
     )
     flow_infer.add_argument("--max-linear-step-m", type=float, default=0.015)

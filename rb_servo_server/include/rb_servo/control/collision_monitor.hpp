@@ -247,6 +247,14 @@ CollisionProjectionResult applyCollisionVelocityProjection(
     JointArray& left_target_deg, JointArray& right_target_deg,
     double dt_sec, double verdict_age_s, const JointArray& max_joint_vel_deg_s);
 
+struct CollisionDistanceSummary {
+    bool hard_violation = false;
+    double min_clearance_m = std::numeric_limits<double>::infinity();
+    double self_min_clearance_m = std::numeric_limits<double>::infinity();
+    double external_min_clearance_m = std::numeric_limits<double>::infinity();
+    bool valid = false;
+};
+
 // Owns the geometry model + the monitor thread + the published verdict.
 class CollisionMonitor {
 public:
@@ -289,6 +297,13 @@ public:
 
     // Run one evaluation synchronously on the calling thread (startup / tests).
     CollisionVerdict evalOnce(const JointArray& left_deg, const JointArray& right_deg);
+
+    // Planner-only lightweight queries. They update geometry placements and distances
+    // but do not compute near-pair Jacobians/rates or publish a runtime verdict.
+    CollisionDistanceSummary evalDistancesOnly(const JointArray& left_deg,
+                                               const JointArray& right_deg);
+    bool clearsThresholds(const JointArray& left_deg, const JointArray& right_deg,
+                          double self_thresh_m, double external_thresh_m);
 
     void start();   // spawn the monitor thread
     void stop();    // join the monitor thread

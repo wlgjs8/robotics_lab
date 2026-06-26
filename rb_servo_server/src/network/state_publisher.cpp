@@ -107,6 +107,11 @@ nlohmann::json optionalDoubleJson(const std::optional<double>& value) {
     return *value;
 }
 
+nlohmann::json finiteDoubleJson(double value) {
+    if (!std::isfinite(value)) return nullptr;
+    return value;
+}
+
 std::string orientationModeString(LinearMoveOrientationMode mode) {
     switch (mode) {
         case LinearMoveOrientationMode::Constant:
@@ -1415,6 +1420,20 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["last_cartesian_solve"] = {
         {"left", cartesianSolveJson(snapshot.left_cartesian_solve)},
         {"right", cartesianSolveJson(snapshot.right_cartesian_solve)},
+    };
+    message["init_motion"] = {
+        {"status", snapshot.init_motion.status},
+        {"fail_mode", snapshot.init_motion.fail_mode},
+        {"message", snapshot.init_motion.message},
+        {"start_clear_m", finiteDoubleJson(snapshot.init_motion.start_clear_m)},
+        {"goal_clear_m", finiteDoubleJson(snapshot.init_motion.goal_clear_m)},
+        {"tree_start", snapshot.init_motion.tree_start},
+        {"tree_goal", snapshot.init_motion.tree_goal},
+        {"iterations", snapshot.init_motion.iterations},
+        {"planning_time_s", finiteDoubleJson(snapshot.init_motion.planning_time_s)},
+        {"waypoint_index", snapshot.init_motion.waypoint_index},
+        {"waypoint_count", snapshot.init_motion.waypoint_count},
+        {"dist_to_goal_deg", finiteDoubleJson(snapshot.init_motion.dist_to_goal_deg)},
     };
 
     message["send_skew_us"] = snapshot.send_skew_us;

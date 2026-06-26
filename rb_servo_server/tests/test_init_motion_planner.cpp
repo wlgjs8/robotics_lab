@@ -187,6 +187,8 @@ static bool run() {
         std::cout << "blocked goal: success=" << bad.success << " (" << bad.message << ")\n";
         RB_CHECK(!bad.success);
         RB_CHECK(bad.waypoints.empty());
+        RB_CHECK(bad.fail_mode == InitMotionPlanResult::FailMode::GoalNotClear);
+        RB_CHECK(std::isfinite(bad.goal_clear_m));
     }
 
     // ---- (4) Collision-free TcpLinearMove (planLinearMove). ----

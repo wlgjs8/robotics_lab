@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Launch the full teleop stack with one command:
 #   rb_servo_server (pgmode real|sim) + viser GUI + policy_runner (teleop mux)
+#   + joint scope dashboard on :8081 (per-arm q/velocity/acceleration/jerk)
 #   + (real mode) umi_gripper_follow: replays the UMI Sense angle (UDP 50382)
 #     onto the Pika Grippers wired to this control PC. Toggle with
 #     GRIPPER_FOLLOW=0|1; extra flags via GRIPPER_FOLLOW_ARGS.
@@ -33,12 +34,14 @@ case "$MODE" in
   *) echo "usage: $0 [real|sim]" >&2; exit 2 ;;
 esac
 # Single teleop entrypoint: SpaceMouse + UMI side by side (idle handoff).
+# External flow-infer should run alongside this stack via
+# tools/flow_infer_real_policy.sh / `make flow-infer-real`; no
+# ACTION_SOURCE=none hand-edit is needed.
 # 한 소스만 격리 디버그하려면 env 로 오버라이드:
 #   ACTION_SOURCE=umi_dual_cartesian make run   (UMI 단독, SpaceMouse/mux 제외)
 #   ACTION_SOURCE=dual_spacemouse_pose_target make run
-#   ACTION_SOURCE=none make run                 (policy_runner 미기동: 서버+GUI만,
-#                                                외부 command source[리플레이 드라이버 등]가
-#                                                lease 단독 보유하도록 teleop_mux 경쟁 제거)
+#   ACTION_SOURCE=none make run                 (legacy replay/isolation only:
+#                                                policy_runner 미기동)
 ACTION_SOURCE="${ACTION_SOURCE:-teleop_mux}"
 
 SERVER_BIN="rb_servo_server/build/rbpodo_real_gate/rb_servo_server"
@@ -79,6 +82,14 @@ case "${GRIPPER_SERVER:-${GRIPPER_FOLLOW:-auto}}" in
   0|no|off|false) GRIPPER_SERVER_ON=0 ;;
   *) GRIPPER_SERVER_ON=1 ;;
 esac
+case "${SCOPE_DASHBOARD:-1}" in
+  0|no|off|false) SCOPE_DASHBOARD_ON=0 ;;
+  *) SCOPE_DASHBOARD_ON=1 ;;
+esac
+SCOPE_DASHBOARD_PORT="${SCOPE_DASHBOARD_PORT:-8081}"
+SCOPE_DASHBOARD_HOST="${SCOPE_DASHBOARD_HOST:-0.0.0.0}"
+SCOPE_DASHBOARD_STATE_LISTEN="${SCOPE_DASHBOARD_STATE_LISTEN:-0.0.0.0:50378}"
+SCOPE_DASHBOARD_CSV="${SCOPE_DASHBOARD_CSV:-$LOG_DIR/joint_kinematics.csv}"
 GRIPPER_SERVER_DEBUG_ARGS=""
 case "${GRIPPER_SERVER_DEBUG:-0}" in
   1|yes|on|true) GRIPPER_SERVER_DEBUG_ARGS="--debug-stats" ;;
@@ -143,6 +154,7 @@ preflight_kill_stale() {
 }
 preflight_kill_stale "rb_servo_server" "$SERVER_BIN"
 preflight_kill_stale "viser GUI"       "python3 -m rb_servo_gui.app"
+preflight_kill_stale "scope dashboard" "python3 -u scripts/servo_scope_dashboard.py"
 preflight_kill_stale "policy_runner"   "python3 -u -m policy_runner --config policy_runner/config/stack_"
 [ "$GRIPPER_SERVER_ON" = "1" ] && preflight_kill_stale "gripper_server" "python3 -u -m policy_runner.gripper_server"
 
@@ -189,6 +201,7 @@ trap cleanup EXIT
 
 echo "[stack] mode=$MODE source=$ACTION_SOURCE (spacemouse + umi side by side)"
 echo "[stack] server: $SERVER_CFG"
+echo "[stack] external flow-infer state readback: udp://127.0.0.1:50378"
 ensure_rt_caps
 # 서버측 Cartesian 추종 텔레메트리(per-arm/tick): goal_minus_measured(SMD lag),
 # ik_branch_jump_clamped(seed 유지=0모션), ik_sigma_min(특이값), floor_goal_clamped.
@@ -219,6 +232,9 @@ echo "[stack] server up."
 
 GUI_PORT="${RB_GUI_PORT:-8080}"
 echo "[stack] viser GUI: http://127.0.0.1:${GUI_PORT}"
+if [ "$SCOPE_DASHBOARD_ON" = "1" ]; then
+  echo "[stack] joint scope dashboard: http://127.0.0.1:${SCOPE_DASHBOARD_PORT}"
+fi
 PYTHONPATH=rb_gui \
   RB_GUI_DESCRIPTIONS_DIR="$PWD/rb_servo_server/descriptions" \
   RB_GUI_STATE_BIND=0.0.0.0 RB_GUI_STATE_PORT=50366 \
@@ -227,6 +243,22 @@ PYTHONPATH=rb_gui \
   RB_GUI_SERVER_CONFIG_PATH="$PWD/$SERVER_CFG" \
   python3 -m rb_servo_gui.app >"$LOG_DIR/gui.log" 2>&1 &
 PIDS+=($!)
+
+if [ "$SCOPE_DASHBOARD_ON" = "1" ]; then
+  python3 -u scripts/servo_scope_dashboard.py \
+    --listen "$SCOPE_DASHBOARD_STATE_LISTEN" \
+    --host "$SCOPE_DASHBOARD_HOST" \
+    --port "$SCOPE_DASHBOARD_PORT" \
+    --csv "$SCOPE_DASHBOARD_CSV" \
+    ${SCOPE_DASHBOARD_ARGS:-} >"$LOG_DIR/scope_dashboard.log" 2>&1 &
+  PIDS+=($!)
+  sleep 1
+  if ! kill -0 "${PIDS[-1]}" 2>/dev/null; then
+    echo "[stack] WARNING: joint scope dashboard exited during startup:" >&2
+    tail -5 "$LOG_DIR/scope_dashboard.log" >&2
+    echo "[stack] (stack continues; set SCOPE_DASHBOARD=0 to skip this dashboard)" >&2
+  fi
+fi
 
 if [ "$GRIPPER_SERVER_ON" = "1" ]; then
   echo "[stack] gripper_server: backend=$GRIPPER_BACKEND cmd<-127.0.0.1:50410 feedback->127.0.0.1:50420 ${GRIPPER_SERVER_ARGS:-} ${GRIPPER_SERVER_DEBUG_ARGS:-}"
@@ -247,15 +279,15 @@ fi
 
 VERBOSE_FLAG=""
 if [ "${VERBOSE:-0}" = "1" ]; then VERBOSE_FLAG="--verbose"; fi
-# ACTION_SOURCE=none|off|"" -> run the server (+GUI/gripper) WITHOUT the
-# policy_runner command source, so an EXTERNAL command source (e.g. the recorded
-# replay driver scripts/replay_episode_tcp_pose_target.py) can own the
-# command-source lease without teleop_mux competing for it. The stack stays up on
-# `wait`; Ctrl-C tears it down via the same cleanup trap.
+# ACTION_SOURCE=none|off|"" -> legacy replay/isolation mode: run the server
+# (+GUI/gripper) WITHOUT the policy_runner command source. Live flow-infer no
+# longer uses this path; keep `make run` up and start tools/flow_infer_real_policy.sh
+# in another terminal. The stack stays up on `wait`; Ctrl-C tears it down via the
+# same cleanup trap.
 case "$ACTION_SOURCE" in
   none|off|"")
-    echo "[stack] policy_runner: DISABLED (ACTION_SOURCE=$ACTION_SOURCE) — no teleop/command source."
-    echo "[stack] server (+GUI/gripper) only; drive via an external command source. Ctrl-C stops everything."
+    echo "[stack] policy_runner: DISABLED (ACTION_SOURCE=$ACTION_SOURCE) — legacy replay/isolation mode."
+    echo "[stack] For flow-infer, prefer normal make run + tools/flow_infer_real_policy.sh. Ctrl-C stops everything."
     wait
     ;;
   *)

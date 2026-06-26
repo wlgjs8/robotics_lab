@@ -532,6 +532,7 @@ class StateSnapshot:
     freedrive: Mapping[str, Any] | None
     recording: Mapping[str, Any] | None
     arm_init: Mapping[str, Any] | None
+    init_motion: Mapping[str, Any] | None
     raw: Mapping[str, Any]
 
     @classmethod
@@ -581,6 +582,7 @@ class StateSnapshot:
             freedrive=data.get("freedrive") if isinstance(data.get("freedrive"), Mapping) else None,
             recording=data.get("recording") if isinstance(data.get("recording"), Mapping) else None,
             arm_init=data.get("arm_init") if isinstance(data.get("arm_init"), Mapping) else None,
+            init_motion=data.get("init_motion") if isinstance(data.get("init_motion"), Mapping) else None,
             raw=data,
         )
 

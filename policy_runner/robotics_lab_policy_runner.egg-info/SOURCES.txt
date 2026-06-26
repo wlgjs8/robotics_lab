@@ -2,6 +2,7 @@ README.md
 pyproject.toml
 policy_runner/__init__.py
 policy_runner/__main__.py
+policy_runner/arm_init_control.py
 policy_runner/camera_bundle_client.py
 policy_runner/camera_preview.py
 policy_runner/config.py
@@ -25,6 +26,7 @@ policy_runner/pc_infer.py
 policy_runner/pc_model.py
 policy_runner/pc_model_b.py
 policy_runner/phase_segmentation.py
+policy_runner/record_control.py
 policy_runner/recording.py
 policy_runner/robot_state_client.py
 policy_runner/rollout_modes.py
@@ -38,7 +40,6 @@ policy_runner/action_sources/__init__.py
 policy_runner/action_sources/dual_spacemouse_pose_target.py
 policy_runner/action_sources/hold.py
 policy_runner/action_sources/joint_sine.py
-policy_runner/action_sources/master_arm_joint.py
 policy_runner/action_sources/tcp_pose_target.py
 policy_runner/action_sources/teleop_mux.py
 policy_runner/action_sources/umi_dual_cartesian.py
@@ -67,7 +68,6 @@ tests/test_gripper_startup_open_config.py
 tests/test_hdf5_audit.py
 tests/test_hdf5_recording.py
 tests/test_hdf5_viewer.py
-tests/test_master_arm_joint.py
 tests/test_openpi_remote_fisheye.py
 tests/test_openpi_remote_rtc.py
 tests/test_openpi_remote_velproprio.py

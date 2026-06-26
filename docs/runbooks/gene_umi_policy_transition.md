@@ -89,7 +89,7 @@ Example offline evaluation:
 
 ```bash
 PYTHONPATH=policy_runner python3 -m policy_runner flow-infer \
-  --config policy_runner/config/replay_sim.yaml \
+  --config policy_runner/config/stack_sim.yaml \
   --checkpoint outputs/flow_policy.pt \
   --rollout-mode offline_eval \
   --episodes-dir data/umi_episodes \

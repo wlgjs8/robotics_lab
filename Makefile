@@ -4,7 +4,7 @@ PROJECT ?= robotics_lab
 POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 
-.PHONY: run build vm-up vm-down vm-status policy-hdf5-audit-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
+.PHONY: run flow-infer-real build vm-up vm-down vm-status policy-hdf5-audit-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
 
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
@@ -15,10 +15,15 @@ POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 #   make run MODE=sim         -> pgmode controller-simulation
 #   make run VERBOSE=1        -> live teleop input + send/drop stats
 #   make run GRIPPER_FOLLOW=0 -> skip the gripper follower
-#   ACTION_SOURCE=none make run
 MODE ?= sim
 run:
 	./tools/run_stack.sh $(MODE)
+
+# External OpenPI/flow policy entrypoint. Start `make run` first, then run this
+# in another terminal; teleop_mux releases the lease while idle and flow-infer
+# uses its own state readback port (50378), so ACTION_SOURCE=none is not needed.
+flow-infer-real:
+	./tools/flow_infer_real_policy.sh
 
 # Source-build the full local stack for DIRECT real-controller work (no VM):
 # rb_servo_server (rbpodo backend, RB_SERVO_ENABLE_RBPODO=ON) into the path

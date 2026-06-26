@@ -50,6 +50,22 @@ bool isSyntheticHoldCommand(const DualArmCommand& command) {
            command.right.mode == ControlMode::Hold;
 }
 
+std::string initMotionFailModeString(InitMotionPlanResult::FailMode mode) {
+    switch (mode) {
+        case InitMotionPlanResult::FailMode::None:
+            return "none";
+        case InitMotionPlanResult::FailMode::GoalNotClear:
+            return "goal_not_clear";
+        case InitMotionPlanResult::FailMode::EscapeFailed:
+            return "escape_failed";
+        case InitMotionPlanResult::FailMode::RrtBudget:
+            return "rrt_budget";
+        case InitMotionPlanResult::FailMode::NonFinite:
+            return "nonfinite";
+    }
+    return "unknown";
+}
+
 bool isExplicitDualHoldCommand(const DualArmCommand& command) {
     return command.seq != 0 &&
            command.left.mode == ControlMode::Hold &&
@@ -2385,6 +2401,56 @@ void DualArmServoLoop::loopMain() {
                         {p.p_b.x(), p.p_b.y(), p.p_b.z()},
                         p.d_m, p.external});
                 }
+            }
+            {
+                const auto status_string = [](InitMotionStatus status) {
+                    switch (status) {
+                        case InitMotionStatus::Idle:
+                            return std::string("idle");
+                        case InitMotionStatus::Planning:
+                            return std::string("planning");
+                        case InitMotionStatus::Executing:
+                            return std::string("executing");
+                        case InitMotionStatus::Done:
+                            return std::string("done");
+                        case InitMotionStatus::Failed:
+                            return std::string("failed");
+                    }
+                    return std::string("unknown");
+                };
+                const InitMotionExec& ex = init_motion_exec_;
+                InitMotionDiag diag;
+                diag.status = status_string(ex.status);
+                if (ex.exec_timeout) {
+                    diag.fail_mode = "exec_timeout";
+                } else if (ex.exec_stalled) {
+                    diag.fail_mode = "exec_stalled";
+                } else {
+                    diag.fail_mode = initMotionFailModeString(ex.fail_mode);
+                }
+                diag.message = ex.message;
+                diag.start_clear_m = ex.start_clear_m;
+                diag.goal_clear_m = ex.goal_clear_m;
+                diag.tree_start = ex.tree_start_size;
+                diag.tree_goal = ex.tree_goal_size;
+                diag.iterations = ex.last_iterations;
+                diag.planning_time_s = ex.last_planning_time_s;
+                diag.waypoint_index = static_cast<int>(ex.index);
+                diag.waypoint_count = static_cast<int>(ex.waypoints.size());
+                diag.dist_to_goal_deg = std::numeric_limits<double>::quiet_NaN();
+                if (!ex.waypoints.empty() &&
+                    (ex.status == InitMotionStatus::Executing ||
+                     ex.status == InitMotionStatus::Done ||
+                     ex.status == InitMotionStatus::Failed)) {
+                    const auto& goal_wp = ex.waypoints.back();
+                    double dist = 0.0;
+                    for (int i = 0; i < kDof; ++i) {
+                        dist = std::max(dist, std::abs(left_prev_sent_q_deg_[i] - goal_wp.first[i]));
+                        dist = std::max(dist, std::abs(right_prev_sent_q_deg_[i] - goal_wp.second[i]));
+                    }
+                    diag.dist_to_goal_deg = dist;
+                }
+                latest_snapshot_.init_motion = std::move(diag);
             }
             latest_snapshot_.floor_constraint_enabled = floorConstraintActive();
             latest_snapshot_.floor_constraint_monitor_only = config_.safety.floor_constraint.monitor_only;
@@ -4875,6 +4941,15 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             ex.index = 0;
             ex.status = InitMotionStatus::Planning;
             ex.message = "planning";
+            ex.fail_mode = InitMotionPlanResult::FailMode::None;
+            ex.start_clear_m = std::numeric_limits<double>::quiet_NaN();
+            ex.goal_clear_m = std::numeric_limits<double>::quiet_NaN();
+            ex.tree_start_size = 0;
+            ex.tree_goal_size = 0;
+            ex.last_iterations = 0;
+            ex.last_planning_time_s = 0.0;
+            ex.exec_timeout = false;
+            ex.exec_stalled = false;
             ex.start_ns = nowSteadyNs();
             const JointArray start_left = left_prev_sent_q_deg_;
             const JointArray start_right = right_prev_sent_q_deg_;
@@ -4912,6 +4987,9 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         if (absolute_timeout || stalled) {
             ex.status = InitMotionStatus::Failed;
             ex.message = stalled ? "execution stalled (no progress)" : "execution timeout";
+            ex.exec_timeout = absolute_timeout;
+            ex.exec_stalled = stalled;
+            ex.fail_mode = InitMotionPlanResult::FailMode::None;
             std::cerr << "[WARN] JointTarget init_motion: " << ex.message
                       << " (age=" << age_s << "s, since_progress=" << since_progress_s
                       << "s, wp=" << ex.index << "/" << ex.waypoints.size()
@@ -4923,6 +5001,15 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
     if (ex.status == InitMotionStatus::Planning && ex.future.valid() &&
         ex.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         InitMotionPlanResult result = ex.future.get();
+        ex.fail_mode = result.fail_mode;
+        ex.start_clear_m = result.start_clear_m;
+        ex.goal_clear_m = result.goal_clear_m;
+        ex.tree_start_size = result.tree_start_size;
+        ex.tree_goal_size = result.tree_goal_size;
+        ex.last_iterations = result.iterations;
+        ex.last_planning_time_s = result.planning_time_s;
+        ex.exec_timeout = false;
+        ex.exec_stalled = false;
         if (result.success && !result.waypoints.empty()) {
             ex.waypoints = std::move(result.waypoints);
             ex.index = 0;

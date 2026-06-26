@@ -109,7 +109,8 @@ Wait for `CommandServer listening on udp://127.0.0.1:50256`, then **verify (stil
 ```bash
 cd robotics_lab
 PYTHONPATH=policy_runner \
-  python3 -u -m policy_runner --config policy_runner/config/rbpodo_pgmode_umi_live.example.yaml
+  python3 -u -m policy_runner --config policy_runner/config/stack_real.yaml \
+    --action-source umi_dual_cartesian
 ```
 
 ### 4. motion source — the slow circle (or the real UMI publisher)

@@ -4,11 +4,15 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <random>
+#include <set>
 #include <sstream>
+#include <string>
 
 #include "rb_servo/math/se3.hpp"
 
@@ -43,6 +47,15 @@ double dist(const Config& a, const Config& b) {
         s += d * d;
     }
     return std::sqrt(s);
+}
+
+double dist2(const Config& a, const Config& b) {
+    double s = 0.0;
+    for (int i = 0; i < kCombined; ++i) {
+        const double d = a[i] - b[i];
+        s += d * d;
+    }
+    return s;
 }
 
 Config lerp(const Config& a, const Config& b, double t) {
@@ -91,6 +104,93 @@ struct InitMotionPlanner::Impl {
     struct Node {
         Config q;
         int parent;
+        bool edge_validated = false;
+        bool blocked = false;
+    };
+
+    struct KdTree {
+        struct KdNode {
+            Config point{};
+            int index = -1;
+            int axis = 0;
+            int left = -1;
+            int right = -1;
+        };
+
+        std::vector<KdNode> nodes;
+        int root = -1;
+
+        void insert(const Config& q, int index) {
+            const int ni = static_cast<int>(nodes.size());
+            nodes.push_back(KdNode{q, index, 0, -1, -1});
+            if (root < 0) {
+                root = ni;
+                return;
+            }
+            int cur = root;
+            int depth = 0;
+            while (true) {
+                const int axis = depth % kCombined;
+                nodes[ni].axis = (depth + 1) % kCombined;
+                if (q[axis] < nodes[cur].point[axis]) {
+                    if (nodes[cur].left < 0) {
+                        nodes[cur].left = ni;
+                        return;
+                    }
+                    cur = nodes[cur].left;
+                } else {
+                    if (nodes[cur].right < 0) {
+                        nodes[cur].right = ni;
+                        return;
+                    }
+                    cur = nodes[cur].right;
+                }
+                ++depth;
+            }
+        }
+
+        int nearest(const Config& q, const std::vector<Node>& tree) const {
+            int best = -1;
+            double best_d2 = std::numeric_limits<double>::infinity();
+            const auto better = [&](int idx, double d2) {
+                constexpr double eps = 1e-12;
+                return d2 < best_d2 - eps ||
+                       (std::abs(d2 - best_d2) <= eps && (best < 0 || idx < best));
+            };
+            std::function<void(int)> search = [&](int ni) {
+                if (ni < 0) return;
+                const KdNode& n = nodes[ni];
+                if (n.index >= 0 && n.index < static_cast<int>(tree.size()) &&
+                    !tree[n.index].blocked) {
+                    const double d2 = dist2(tree[n.index].q, q);
+                    if (better(n.index, d2)) {
+                        best = n.index;
+                        best_d2 = d2;
+                    }
+                }
+                const int axis = n.axis;
+                const double delta = q[axis] - n.point[axis];
+                const int near = delta < 0.0 ? n.left : n.right;
+                const int far = delta < 0.0 ? n.right : n.left;
+                search(near);
+                if (delta * delta <= best_d2 + 1e-12) search(far);
+            };
+            search(root);
+            return best;
+        }
+    };
+
+    struct RrtTree {
+        std::vector<Node> nodes;
+        KdTree kd;
+        std::set<std::string> blacklisted_edges;
+
+        void reset(const Config& root_q) {
+            nodes.clear();
+            kd = KdTree{};
+            nodes.push_back(Node{root_q, -1, true, false});
+            kd.insert(root_q, 0);
+        }
     };
 
     Impl(CollisionMonitorConfig monitor_cfg, InitMotionPlannerConfig planner_cfg,
@@ -114,31 +214,25 @@ struct InitMotionPlanner::Impl {
     double minClearance(const Config& c) {
         JointArray l{}, r{};
         split(c, &l, &r);
-        const CollisionVerdict v = oracle->evalOnce(l, r);
-        return v.min_clearance_m;
+        const CollisionDistanceSummary s = oracle->evalDistancesOnly(l, r);
+        return s.min_clearance_m;
     }
 
     bool clear(const Config& c) {
         JointArray l{}, r{};
         split(c, &l, &r);
-        const CollisionVerdict v = oracle->evalOnce(l, r);
-        // Per-category clearance gate: self pairs (robot<->robot/stand) keep the self
-        // planning margin; external pairs (arm<->floor) use the tighter external one.
-        // hard_violation is already per-category (each pair vs its own d_hard).
-        return !v.hard_violation &&
-               v.self_min_clearance_m > clear_threshold_m &&
-               v.external_min_clearance_m > external_clear_threshold_m;
+        return oracle->clearsThresholds(l, r, clear_threshold_m, external_clear_threshold_m);
     }
 
     // One collision evaluation of a combined config, plus the per-category clearance
     // gate applied to its verdict (mirrors clear() but lets the caller reuse the verdict
     // and its min-clearance without re-evaluating).
-    CollisionVerdict eval(const Config& c) {
+    CollisionDistanceSummary eval(const Config& c) {
         JointArray l{}, r{};
         split(c, &l, &r);
-        return oracle->evalOnce(l, r);
+        return oracle->evalDistancesOnly(l, r);
     }
-    bool isClear(const CollisionVerdict& v) const {
+    bool isClear(const CollisionDistanceSummary& v) const {
         return !v.hard_violation &&
                v.self_min_clearance_m > clear_threshold_m &&
                v.external_min_clearance_m > external_clear_threshold_m;
@@ -152,12 +246,17 @@ struct InitMotionPlanner::Impl {
     // Returns start..escaped (>=1 node, last node clear) on success, or empty on failure.
     // Every emitted node has higher clearance than the previous, so executing the escape
     // moves the arm monotonically AWAY from the obstacle.
-    std::vector<Config> escapeToClear(const Config& start, double step_deg, int max_steps) {
+    std::vector<Config> escapeToClearAttempt(const Config& start, double step_deg,
+                                             int max_steps,
+                                             std::chrono::steady_clock::time_point deadline,
+                                             double* last_clear_m) {
         std::vector<Config> path{start};
         Config cur = start;
         const double eps = std::max(1e-2, 0.1 * step_deg);  // perturbation, deg
         for (int it = 0; it < max_steps; ++it) {
-            const CollisionVerdict v0 = eval(cur);
+            if (std::chrono::steady_clock::now() >= deadline) break;
+            const CollisionDistanceSummary v0 = eval(cur);
+            if (last_clear_m) *last_clear_m = v0.min_clearance_m;
             if (isClear(v0)) return path;
             const double c0 = v0.min_clearance_m;
             // Forward-difference gradient of min-clearance wrt each combined joint.
@@ -187,7 +286,9 @@ struct InitMotionPlanner::Impl {
                         next[k] = std::clamp(next[k], q_min_deg[j], q_max_deg[j]);
                     }
                 }
-                if (eval(next).min_clearance_m > c0 + 1e-9) { improved = true; break; }
+                const double next_clear = eval(next).min_clearance_m;
+                if (last_clear_m) *last_clear_m = next_clear;
+                if (next_clear > c0 + 1e-9) { improved = true; break; }
                 s *= 0.5;
                 if (s < 1e-2) break;
             }
@@ -196,6 +297,38 @@ struct InitMotionPlanner::Impl {
             path.push_back(cur);
         }
         return isClear(eval(cur)) ? path : std::vector<Config>{};
+    }
+
+    std::vector<Config> escapeToClear(const Config& start, double step_deg,
+                                      std::chrono::steady_clock::time_point deadline,
+                                      int* restarts_tried, double* last_clear_m) {
+        if (restarts_tried) *restarts_tried = 0;
+        std::vector<Config> path = escapeToClearAttempt(
+            start, step_deg, cfg.escape_max_steps, deadline, last_clear_m);
+        if (!path.empty() && clear(path.back())) return path;
+
+        std::uniform_real_distribution<double> perturb(-cfg.escape_perturb_deg,
+                                                       cfg.escape_perturb_deg);
+        for (int attempt = 0; attempt < cfg.escape_restart_attempts; ++attempt) {
+            if (std::chrono::steady_clock::now() >= deadline) break;
+            if (restarts_tried) *restarts_tried = attempt + 1;
+            Config seeded = start;
+            for (int k = 0; k < kCombined; ++k) {
+                const int j = k % kDof;
+                seeded[k] += perturb(rng);
+                if (q_max_deg[j] > q_min_deg[j]) {
+                    seeded[k] = std::clamp(seeded[k], q_min_deg[j], q_max_deg[j]);
+                }
+            }
+            if (!edgeClear(start, seeded)) continue;
+            std::vector<Config> restarted = escapeToClearAttempt(
+                seeded, step_deg, cfg.escape_max_steps, deadline, last_clear_m);
+            if (restarted.empty() || !clear(restarted.back())) continue;
+            std::vector<Config> combined{start};
+            combined.insert(combined.end(), restarted.begin(), restarted.end());
+            return combined;
+        }
+        return {};
     }
 
     // Validate the open segment (from, to]; the `from` endpoint is intentionally
@@ -220,10 +353,26 @@ struct InitMotionPlanner::Impl {
         return c;
     }
 
-    int nearest(const std::vector<Node>& tree, const Config& q) const {
+    static std::string edgeKey(const Config& a, const Config& b) {
+        std::array<long long, kCombined> qa{};
+        std::array<long long, kCombined> qb{};
+        for (int i = 0; i < kCombined; ++i) {
+            qa[i] = static_cast<long long>(std::llround(a[i] * 1000000.0));
+            qb[i] = static_cast<long long>(std::llround(b[i] * 1000000.0));
+        }
+        if (qb < qa) std::swap(qa, qb);
+        std::ostringstream oss;
+        for (int i = 0; i < kCombined; ++i) oss << qa[i] << ',';
+        oss << '|';
+        for (int i = 0; i < kCombined; ++i) oss << qb[i] << ',';
+        return oss.str();
+    }
+
+    int nearestLinear(const std::vector<Node>& tree, const Config& q) const {
         int best = 0;
         double best_d = std::numeric_limits<double>::infinity();
         for (int i = 0; i < static_cast<int>(tree.size()); ++i) {
+            if (tree[i].blocked) continue;
             const double d = dist(tree[i].q, q);
             if (d < best_d) {
                 best_d = d;
@@ -233,13 +382,26 @@ struct InitMotionPlanner::Impl {
         return best;
     }
 
+    int nearest(const RrtTree& tree, const Config& q) const {
+        const int kd_best = tree.kd.nearest(q, tree.nodes);
+#ifndef NDEBUG
+        const int lin_best = nearestLinear(tree.nodes, q);
+        if (kd_best != lin_best) {
+            std::cerr << "[WARN] InitMotion kd nearest mismatch kd=" << kd_best
+                      << " linear=" << lin_best << "\n";
+        }
+#endif
+        return kd_best;
+    }
+
     enum class Extend { Trapped, Advanced, Reached };
 
     // Steer from the nearest node toward q_target by at most step; add the new node
     // if the edge to it is clear. Reached when the step lands exactly on q_target.
-    Extend extend(std::vector<Node>& tree, const Config& q_target, double step_deg) {
+    Extend extend(RrtTree& tree, const Config& q_target, double step_deg) {
         const int ni = nearest(tree, q_target);
-        const Config& q_near = tree[ni].q;
+        if (ni < 0) return Extend::Trapped;
+        const Config& q_near = tree.nodes[ni].q;
         const double d = dist(q_near, q_target);
         bool reached = false;
         Config q_new;
@@ -249,22 +411,75 @@ struct InitMotionPlanner::Impl {
         } else {
             q_new = lerp(q_near, q_target, step_deg / d);
         }
-        if (!edgeClear(q_near, q_new)) return Extend::Trapped;
-        tree.push_back(Node{q_new, ni});
+        if (tree.blacklisted_edges.count(edgeKey(q_near, q_new)) != 0) {
+            return Extend::Trapped;
+        }
+        const bool valid_edge = cfg.lazy_edges ? clear(q_new) : edgeClear(q_near, q_new);
+        if (!valid_edge) return Extend::Trapped;
+        const int new_index = static_cast<int>(tree.nodes.size());
+        tree.nodes.push_back(Node{q_new, ni, !cfg.lazy_edges, false});
+        tree.kd.insert(q_new, new_index);
         return reached ? Extend::Reached : Extend::Advanced;
     }
 
-    Extend connect(std::vector<Node>& tree, const Config& q_target, double step_deg) {
+    Extend connect(RrtTree& tree, const Config& q_target, double step_deg) {
         Extend s = Extend::Advanced;
         while (s == Extend::Advanced) s = extend(tree, q_target, step_deg);
         return s;
     }
 
-    static std::vector<Config> rootPath(const std::vector<Node>& tree, int leaf) {
+    static std::vector<Config> rootPath(const RrtTree& tree, int leaf) {
         std::vector<Config> path;
-        for (int i = leaf; i >= 0; i = tree[i].parent) path.push_back(tree[i].q);
+        for (int i = leaf; i >= 0; i = tree.nodes[i].parent) path.push_back(tree.nodes[i].q);
         std::reverse(path.begin(), path.end());  // root -> leaf
         return path;
+    }
+
+    void blockSubtree(RrtTree& tree, int root_idx) {
+        if (root_idx <= 0 || root_idx >= static_cast<int>(tree.nodes.size())) return;
+        std::vector<int> stack{root_idx};
+        while (!stack.empty()) {
+            const int cur = stack.back();
+            stack.pop_back();
+            if (cur < 0 || cur >= static_cast<int>(tree.nodes.size()) || tree.nodes[cur].blocked) {
+                continue;
+            }
+            tree.nodes[cur].blocked = true;
+            for (int i = 1; i < static_cast<int>(tree.nodes.size()); ++i) {
+                if (tree.nodes[i].parent == cur) stack.push_back(i);
+            }
+        }
+    }
+
+    bool validatePathToRoot(RrtTree& tree, int leaf) {
+        if (leaf < 0 || leaf >= static_cast<int>(tree.nodes.size())) return false;
+        std::vector<int> ids;
+        for (int i = leaf; i >= 0; i = tree.nodes[i].parent) ids.push_back(i);
+        std::reverse(ids.begin(), ids.end());
+        for (std::size_t p = 1; p < ids.size(); ++p) {
+            const int child = ids[p];
+            const int parent = tree.nodes[child].parent;
+            if (tree.nodes[child].blocked) return false;
+            if (tree.nodes[child].edge_validated) continue;
+            const Config& a = tree.nodes[parent].q;
+            const Config& b = tree.nodes[child].q;
+            if (edgeClear(a, b)) {
+                tree.nodes[child].edge_validated = true;
+                continue;
+            }
+            tree.blacklisted_edges.insert(edgeKey(a, b));
+            blockSubtree(tree, child);
+            return false;
+        }
+        return true;
+    }
+
+    bool pathEdgesClear(const std::vector<Config>& path) {
+        if (path.size() < 2) return true;
+        for (std::size_t i = 1; i < path.size(); ++i) {
+            if (!edgeClear(path[i - 1], path[i])) return false;
+        }
+        return true;
     }
 
     // Replace random index pairs with a straight, oracle-validated shortcut.
@@ -344,15 +559,21 @@ InitMotionPlanResult InitMotionPlanner::plan(
     };
     if (!finite(start) || !finite(goal)) {
         result.message = "init motion plan: non-finite start/goal";
+        result.fail_mode = InitMotionPlanResult::FailMode::NonFinite;
+        result.planning_time_s = std::chrono::duration<double>(Clock::now() - t0).count();
         return result;
     }
+    result.start_clear_m = d.minClearance(start);
+    result.goal_clear_m = d.minClearance(goal);
     if (!d.clear(goal)) {
         // The init pose itself collides / dips below the floor — refuse (fail-closed).
         std::ostringstream m;
         m << "init motion plan: goal config not collision/floor clear"
-          << " (goal_clear_m=" << d.minClearance(goal)
+          << " (goal_clear_m=" << result.goal_clear_m
           << ", thresh_m=" << d.clear_threshold_m << ")";
         result.message = m.str();
+        result.fail_mode = InitMotionPlanResult::FailMode::GoalNotClear;
+        result.planning_time_s = std::chrono::duration<double>(Clock::now() - t0).count();
         return result;
     }
 
@@ -365,39 +586,63 @@ InitMotionPlanResult InitMotionPlanner::plan(
     // moves strictly AWAY from the obstacle) is prepended to the path below.
     std::vector<Config> escape_prefix;
     Config rrt_start = start;
+    double escape_time_s = 0.0;
+    int restarts_tried = 0;
+    double last_escape_clear_m = result.start_clear_m;
     if (!d.clear(start)) {
-        escape_prefix = d.escapeToClear(start, step_deg, /*max_steps=*/40);
+        const auto escape_begin = Clock::now();
+        const auto escape_deadline = escape_begin + std::chrono::duration_cast<Clock::duration>(
+            std::chrono::duration<double>(d.cfg.escape_max_time_sec));
+        escape_prefix = d.escapeToClear(start, step_deg, escape_deadline,
+                                        &restarts_tried, &last_escape_clear_m);
+        escape_time_s = std::chrono::duration<double>(Clock::now() - escape_begin).count();
         if (escape_prefix.size() < 2 || !d.clear(escape_prefix.back())) {
             std::ostringstream m;
             m << "init motion plan: start in near-collision and gradient escape failed"
-              << " (start_clear_m=" << d.minClearance(start)
-              << ", escaped_clear_m="
-              << (escape_prefix.empty() ? d.minClearance(start)
-                                        : d.minClearance(escape_prefix.back()))
+              << " (start_clear_m=" << result.start_clear_m
+              << ", escaped_clear_m=" << last_escape_clear_m
               << ", escape_steps=" << (escape_prefix.empty() ? 0 : escape_prefix.size() - 1)
+              << ", restarts_tried=" << restarts_tried
+              << ", escape_time_s=" << escape_time_s
               << ", thresh_self_m=" << d.clear_threshold_m
               << ", thresh_ext_m=" << d.external_clear_threshold_m << ")";
             result.message = m.str();
+            result.fail_mode = InitMotionPlanResult::FailMode::EscapeFailed;
+            result.planning_time_s = std::chrono::duration<double>(Clock::now() - t0).count();
             return result;
         }
         rrt_start = escape_prefix.back();
         std::cerr << "[INFO] InitMotion: start near-collision (clear_m="
-                  << d.minClearance(start) << "); gradient-escaped in "
+                  << result.start_clear_m << "); gradient-escaped in "
                   << (escape_prefix.size() - 1) << " step(s) to clear_m="
                   << d.minClearance(rrt_start) << "\n";
     }
+    const auto t_rrt_start = Clock::now();
 
     // Per-joint sampling band: [min(rrt_start,goal) - margin, max(rrt_start,goal) + margin]
     // clamped to the configured joint limits — keeps planning fast and avoids the
     // full +/-360 rbpodo range.
-    Config lo{}, hi{};
+    Config lo{}, hi{}, glo{}, ghi{};
+    const bool per_joint_margin_set = std::any_of(
+        d.cfg.sample_margin_deg_per_joint.begin(), d.cfg.sample_margin_deg_per_joint.end(),
+        [](double v) { return v > 0.0; });
     for (int k = 0; k < kCombined; ++k) {
         const int j = k % kDof;
-        const double a = std::min(rrt_start[k], goal[k]) - d.cfg.sample_margin_deg;
-        const double b = std::max(rrt_start[k], goal[k]) + d.cfg.sample_margin_deg;
+        const double margin = (per_joint_margin_set && d.cfg.sample_margin_deg_per_joint[j] > 0.0)
+            ? d.cfg.sample_margin_deg_per_joint[j]
+            : d.cfg.sample_margin_deg;
+        const double base_min = std::min(rrt_start[k], goal[k]);
+        const double base_max = std::max(rrt_start[k], goal[k]);
+        const double a = base_min - margin;
+        const double b = base_max + margin;
         lo[k] = (d.q_max_deg[j] > d.q_min_deg[j]) ? std::max(a, d.q_min_deg[j]) : a;
         hi[k] = (d.q_max_deg[j] > d.q_min_deg[j]) ? std::min(b, d.q_max_deg[j]) : b;
         if (hi[k] < lo[k]) std::swap(hi[k], lo[k]);
+        const double ga = base_min - d.cfg.global_sample_margin_deg;
+        const double gb = base_max + d.cfg.global_sample_margin_deg;
+        glo[k] = (d.q_max_deg[j] > d.q_min_deg[j]) ? std::max(ga, d.q_min_deg[j]) : ga;
+        ghi[k] = (d.q_max_deg[j] > d.q_min_deg[j]) ? std::min(gb, d.q_max_deg[j]) : gb;
+        if (ghi[k] < glo[k]) std::swap(ghi[k], glo[k]);
     }
 
     std::vector<Config> raw;
@@ -408,34 +653,49 @@ InitMotionPlanResult InitMotionPlanner::plan(
     } else {
         // Bidirectional RRT-Connect. trees[0] rooted at rrt_start, trees[1] at goal; the
         // last-added node of each tree is its connection endpoint on success.
-        std::vector<Impl::Node> tree_a{{rrt_start, -1}};
-        std::vector<Impl::Node> tree_b{{goal, -1}};
-        std::vector<Impl::Node>* trees[2] = {&tree_a, &tree_b};
+        Impl::RrtTree tree_a;
+        Impl::RrtTree tree_b;
+        tree_a.reset(rrt_start);
+        tree_b.reset(goal);
+        Impl::RrtTree* trees[2] = {&tree_a, &tree_b};
         std::uniform_real_distribution<double> u(0.0, 1.0);
         bool connected = false;
         int iter = 0;
         for (; iter < d.cfg.max_iterations; ++iter) {
-            if (std::chrono::duration<double>(Clock::now() - t0).count() >
+            if (std::chrono::duration<double>(Clock::now() - t_rrt_start).count() >
                 d.cfg.max_planning_time_sec) {
                 break;
             }
             const int i = iter % 2;
             const int j = 1 - i;
             // Goal-biased growth toward the opposite tree's root accelerates linking.
-            const Config q_rand = (u(d.rng) < d.cfg.goal_bias)
-                ? trees[j]->front().q
-                : d.sample(lo, hi);
+            Config q_rand{};
+            const double r = u(d.rng);
+            if (r < d.cfg.goal_bias) {
+                q_rand = trees[j]->nodes.front().q;
+            } else if (r < d.cfg.goal_bias + d.cfg.global_sample_fraction) {
+                q_rand = d.sample(glo, ghi);
+            } else {
+                q_rand = d.sample(lo, hi);
+            }
             const Impl::Extend ext = d.extend(*trees[i], q_rand, step_deg);
             if (ext == Impl::Extend::Trapped) continue;
-            const Config q_new = trees[i]->back().q;
+            const Config q_new = trees[i]->nodes.back().q;
             if (d.connect(*trees[j], q_new, step_deg) == Impl::Extend::Reached) {
-                connected = true;
-                break;
+                if (d.validatePathToRoot(tree_a, static_cast<int>(tree_a.nodes.size()) - 1) &&
+                    d.validatePathToRoot(tree_b, static_cast<int>(tree_b.nodes.size()) - 1)) {
+                    connected = true;
+                    break;
+                }
             }
         }
         result.iterations = iter;
+        result.tree_start_size = static_cast<int>(tree_a.nodes.size());
+        result.tree_goal_size = static_cast<int>(tree_b.nodes.size());
         if (!connected) {
             result.planning_time_s = std::chrono::duration<double>(Clock::now() - t0).count();
+            result.fail_mode = InitMotionPlanResult::FailMode::RrtBudget;
+            const double rrt_time_s = std::chrono::duration<double>(Clock::now() - t_rrt_start).count();
             // Diagnostics: which budget ran out, how far each tree grew, and whether the
             // endpoints themselves are clear. tree_start staying ~1 means the START pose
             // could not escape (start in/near collision); both trees large but unconnected
@@ -444,18 +704,23 @@ InitMotionPlanResult InitMotionPlanner::plan(
             std::ostringstream m;
             m << "init motion plan: RRT-Connect did not find a path within budget"
               << " (iters=" << iter << "/" << d.cfg.max_iterations
-              << ", time=" << result.planning_time_s << "/" << d.cfg.max_planning_time_sec << "s"
-              << ", tree_start=" << tree_a.size() << ", tree_goal=" << tree_b.size()
+              << ", time=" << rrt_time_s << "/" << d.cfg.max_planning_time_sec << "s"
+              << ", escape_time_s=" << escape_time_s
+              << ", rrt_time_budget_s=" << d.cfg.max_planning_time_sec
+              << ", tree_start=" << tree_a.nodes.size() << ", tree_goal=" << tree_b.nodes.size()
+              << ", blacklisted_edges="
+              << (tree_a.blacklisted_edges.size() + tree_b.blacklisted_edges.size())
               << ", start_clear_m=" << d.minClearance(rrt_start)
-              << ", goal_clear_m=" << d.minClearance(goal)
+              << ", goal_clear_m=" << result.goal_clear_m
               << ", thresh_m=" << d.clear_threshold_m
-              << ", sample_margin_deg=" << d.cfg.sample_margin_deg << ")";
+              << ", sample_margin_deg=" << d.cfg.sample_margin_deg
+              << ", global_sample_fraction=" << d.cfg.global_sample_fraction << ")";
             result.message = m.str();
             return result;
         }
         // start_path: start..q_new ; goal_path: goal..q_new -> reverse tail to append.
-        std::vector<Config> start_path = Impl::rootPath(tree_a, static_cast<int>(tree_a.size()) - 1);
-        std::vector<Config> goal_path = Impl::rootPath(tree_b, static_cast<int>(tree_b.size()) - 1);
+        std::vector<Config> start_path = Impl::rootPath(tree_a, static_cast<int>(tree_a.nodes.size()) - 1);
+        std::vector<Config> goal_path = Impl::rootPath(tree_b, static_cast<int>(tree_b.nodes.size()) - 1);
         std::reverse(goal_path.begin(), goal_path.end());  // q_new..goal
         raw = start_path;
         raw.insert(raw.end(), goal_path.begin() + 1, goal_path.end());  // drop dup q_new
@@ -465,6 +730,13 @@ InitMotionPlanResult InitMotionPlanner::plan(
     // segment untouched. Doing it in this order keeps the escape prefix exact so its
     // densified length (the leading waypoints to follow precisely) is known.
     d.shortcut(raw);
+    if (!d.pathEdgesClear(raw)) {
+        result.success = false;
+        result.fail_mode = InitMotionPlanResult::FailMode::RrtBudget;
+        result.planning_time_s = std::chrono::duration<double>(Clock::now() - t0).count();
+        result.message = "init motion plan: final RRT path validation failed";
+        return result;
+    }
     int escape_waypoints = 0;
     if (!escape_prefix.empty()) {
         // Densified length of the escape segment = the leading waypoints of the final

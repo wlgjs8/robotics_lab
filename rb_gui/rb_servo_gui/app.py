@@ -113,6 +113,7 @@ from .status_panel import (
     _format_circle_overlay_status,
     _format_scene_asset_status,
     _format_fk_status,
+    _format_init_motion_status,
     _format_joint_monitor_value,
     _format_joints,
     _format_floor_constraint_status,
@@ -2103,6 +2104,11 @@ def build_gui(
                 initial_value="왼팔: policy 중 / 오른팔: policy 중",
                 disabled=True,
             )
+            handles["init_motion_runtime"] = server.gui.add_text(
+                "InitMotion runtime",
+                initial_value="InitMotion: no state",
+                disabled=True,
+            )
             init_both_button = server.gui.add_button("InitMotion (양팔)")
             init_left_button = server.gui.add_button("InitMotion (왼팔)")
             init_right_button = server.gui.add_button("InitMotion (오른팔)")
@@ -3731,6 +3737,8 @@ def update_gui(
             )
         if "cartesian_solve" in handles:
             handles["cartesian_solve"].value = _format_cartesian_solve_status(None, stale=True)
+        if "init_motion_runtime" in handles:
+            handles["init_motion_runtime"].value = _format_init_motion_status(None, stale=True)
         if "tcp_status" in handles:
             handles["tcp_status"].value = _format_tcp_command_status(safety, None, stale=True)
         if "tcp_linear_status" in handles:
@@ -3870,6 +3878,8 @@ def update_gui(
         )
     if "cartesian_solve" in handles:
         handles["cartesian_solve"].value = _format_cartesian_solve_status(latest, stale=stale)
+    if "init_motion_runtime" in handles:
+        handles["init_motion_runtime"].value = _format_init_motion_status(latest, stale=stale)
     if "tcp_status" in handles:
         handles["tcp_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
     if "tcp_linear_status" in handles:

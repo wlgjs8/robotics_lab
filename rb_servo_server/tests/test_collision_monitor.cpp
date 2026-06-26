@@ -48,6 +48,11 @@ static CollisionMonitorConfig makeConfig(const fs::path& ws) {
     return c;
 }
 
+static bool sameDistance(double a, double b) {
+    if (std::isinf(a) && std::isinf(b) && std::signbit(a) == std::signbit(b)) return true;
+    return std::abs(a - b) < 1e-12;
+}
+
 static bool run() {
     const fs::path ws = workspaceRoot();
     CollisionMonitorConfig cfg = makeConfig(ws);
@@ -78,6 +83,20 @@ static bool run() {
     RB_CHECK(v.min_clearance_m > 0.015);
     RB_CHECK(!v.near.empty());
     RB_CHECK(v.near.front().n.norm() > 0.5);  // unit approach dir populated
+    {
+        CollisionDistanceSummary s = mon.evalDistancesOnly(init, init);
+        RB_CHECK(s.valid);
+        RB_CHECK(s.hard_violation == v.hard_violation);
+        RB_CHECK(sameDistance(s.min_clearance_m, v.min_clearance_m));
+        RB_CHECK(sameDistance(s.self_min_clearance_m, v.self_min_clearance_m));
+        RB_CHECK(sameDistance(s.external_min_clearance_m, v.external_min_clearance_m));
+        const double self_thresh = cfg.d_hard_m + 0.005;
+        const double ext_thresh = cfg.external_d_hard_m + 0.005;
+        const bool gate = !v.hard_violation &&
+                          v.self_min_clearance_m > self_thresh &&
+                          v.external_min_clearance_m > ext_thresh;
+        RB_CHECK(mon.clearsThresholds(init, init, self_thresh, ext_thresh) == gate);
+    }
 
     // (2) velocity barrier: at large clearance, full speed regardless.
     RB_CHECK(collisionVelocityScale(v, cfg) == 1.0);

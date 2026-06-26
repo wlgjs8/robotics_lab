@@ -108,11 +108,8 @@ local config already relaxed `max_pending_age_ms` 10->100.
   cmake --build rb_servo_server/build -j && ctest --test-dir rb_servo_server/build
   --output-on-failure` (Eigen3 + Pinocchio required). Keep Python suites green
   if touched. Do NOT claim the gate passed unless it actually ran.
-- Enable the new flag in the local pgmode config
-  `rb_servo_server/config/local/dual_real_rbpodo_pgmode_spacemouse_500hz_ack.yaml`
-  AND in the tracked example
-  `rb_servo_server/config/dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml`
-  (the example with a clear comment; the local copy is gitignored). Document the
+- Enable the new flag in the relevant site-local pgmode config and in a tracked
+  example config when the task owns one. Add a clear comment. Document the
   carve-out in `docs/runbooks/rbpodo_pgmode_umi.md` and
   `docs/runbooks/rbpodo_measurement_reliability.md`.
 

@@ -1055,24 +1055,22 @@ fail_if_tracked_real_config_without_example_suffix() {
 }
 
 check_spacemouse_pgmode_config_safety() {
-  local policy_config="policy_runner/config/rbpodo_pgmode_spacemouse_500hz_ack.yaml"
-  local server_template="rb_servo_server/config/dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml"
+  local policy_config="policy_runner/config/stack_sim.yaml"
 
   require_file "${policy_config}"
-  require_file "${server_template}"
 
-  grep_absent "allow_real_motion:[[:space:]]*true" "${policy_config}"
   grep_existing "allow_rbpodo_controller_simulation_cartesian:[[:space:]]*true|controller_simulation_cartesian" \
     "${policy_config}" policy_runner/policy_runner policy_runner/tests policy_runner/README.md
   grep_existing "allow_in_controller_simulation:[[:space:]]*true|controller_simulation_cartesian" \
-    "${server_template}" docs/runbooks/rbpodo_pgmode_spacemouse.md docs/servo_backend_contract.md docs/architecture.md
-  grep_existing "allow_in_real:[[:space:]]*false" "${server_template}" docs/runbooks/rbpodo_pgmode_spacemouse.md
+    docs/runbooks/rbpodo_pgmode_spacemouse.md docs/servo_backend_contract.md docs/architecture.md
+  grep_existing "allow_in_real:[[:space:]]*false" \
+    docs/runbooks/rbpodo_pgmode_spacemouse.md docs/servo_backend_contract.md
   grep_existing "physical_motion_expected:[[:space:]]*false|physical_motion_expected=false" \
-    "${policy_config}" "${server_template}" docs/runbooks/rbpodo_pgmode_spacemouse.md policy_runner/README.md
+    "${policy_config}" docs/runbooks/rbpodo_pgmode_spacemouse.md policy_runner/README.md
   grep_existing "RB_ALLOW_REAL_MOTION|RB_ALLOW_REAL_ROBOT|RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION" \
-    README.md docs/architecture.md docs/servo_backend_contract.md tools/rbpodo_pgmode_spacemouse.sh
+    README.md docs/architecture.md docs/servo_backend_contract.md
   grep_existing "RB_ALLOW_REAL_CARTESIAN.*must not|Do not set.*RB_ALLOW_REAL_CARTESIAN|do not set.*RB_ALLOW_REAL_CARTESIAN" \
-    tools/rbpodo_pgmode_spacemouse.sh docs/runbooks/rbpodo_pgmode_spacemouse.md policy_runner/README.md README.md
+    docs/runbooks/rbpodo_pgmode_spacemouse.md policy_runner/README.md README.md
 }
 
 run_pgmode_spacemouse_python_checks() {
@@ -1092,7 +1090,7 @@ run_pgmode_spacemouse_end_to_end_dryrun_gate() {
   run_policy_runner_tests
   run_gui_tests
   run_servo_gate_or_skip_missing_deps
-  bash -n tools/rbpodo_pgmode_spacemouse.sh
+  bash -n tools/run_stack.sh
   grep_existing "dual_spacemouse_pose_target" \
     policy_runner/policy_runner policy_runner/tests policy_runner/config policy_runner/README.md
   grep_existing "deadman|deadman_button" \
@@ -1146,16 +1144,14 @@ run_viser_pgmode_operator_view_gate() {
   run_python_compile_checks
   run_gui_tests
   grep_existing "50366" \
-    rb_gui rb_gui/tests docs/runbooks/rbpodo_pgmode_spacemouse.md tools/rbpodo_pgmode_spacemouse.sh \
-    rb_servo_server/config/dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml
+    rb_gui rb_gui/tests docs/runbooks/rbpodo_pgmode_spacemouse.md
   grep_existing "50376" \
-    rb_gui rb_gui/tests docs/runbooks/rbpodo_pgmode_spacemouse.md tools/rbpodo_pgmode_spacemouse.sh \
-    rb_servo_server/config/dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml policy_runner/config
+    rb_gui rb_gui/tests docs/runbooks/rbpodo_pgmode_spacemouse.md policy_runner/config tools/run_stack.sh
   grep_existing "physical_motion_expected" rb_gui rb_gui/tests docs/runbooks/rbpodo_pgmode_spacemouse.md
   grep_existing "tcp_ref_stand|selected_tcp_source|selected_source|selected TCP|selected tcp" \
     rb_gui rb_gui/tests docs/runbooks/rbpodo_pgmode_spacemouse.md
   grep_existing "lease|source_id|command_source|policy_runner safety readback" \
-    rb_gui rb_gui/tests docs/runbooks/rbpodo_pgmode_spacemouse.md tools/rbpodo_pgmode_spacemouse.sh
+    rb_gui rb_gui/tests docs/runbooks/rbpodo_pgmode_spacemouse.md tools/run_stack.sh
   grep_existing "controller_simulation_mode|controller simulation|controller_simulation" \
     rb_gui rb_gui/tests docs/runbooks/rbpodo_pgmode_spacemouse.md
   echo "codex_gate: not launching live viewer; 05_viser_pgmode_operator_view is documentation/test evidence only"
@@ -1210,7 +1206,7 @@ run_artifact_manifest_docs_makefile_gate() {
 run_source_hygiene_local_configs_gate() {
   run_shell_syntax_checks
   run_python_compile_checks
-  bash -n tools/create_rbpodo_pgmode_spacemouse_local_config.sh
+  bash -n tools/run_stack.sh
   require_active_gitignore_entry "HDF5 datasets (*.hdf5)" '\*\.hdf5([[:space:]]|$)'
   require_active_gitignore_entry "HDF5 datasets (*.h5)" '\*\.h5([[:space:]]|$)'
   require_active_gitignore_entry "artifact directories" '(\*\*/)?artifacts/'
@@ -1222,11 +1218,11 @@ run_source_hygiene_local_configs_gate() {
   fail_if_tracked_matches "Codex run artifacts" '^artifacts/codex_runs/'
   fail_if_tracked_matches "local rb_servo_server YAML configs" '^rb_servo_server/config/local/.+\.(yaml|yml)$'
   fail_if_tracked_real_config_without_example_suffix
-  grep_existing "create_rbpodo_pgmode_spacemouse_local_config|RB_PGMODE_SPACEMOUSE_LEFT_IP|ignored by git" \
-    tools/create_rbpodo_pgmode_spacemouse_local_config.sh docs/runbooks/rbpodo_pgmode_spacemouse.md tools/rbpodo_pgmode_spacemouse.sh
+  grep_existing "stack_sim.yaml|stack_real.yaml|policy_runner/config/stack_" \
+    README.md docs tools/run_stack.sh policy_runner/README.md
   grep_absent "172\\.28\\.60\\.(200|201)" docs/runbooks/rbpodo_pgmode_spacemouse.md
   grep_existing "\\.example\\.yaml|site-specific|placeholder|config/local|Copy to config/local" \
-    README.md docs rb_servo_server/config/dual_real.example.yaml rb_servo_server/config/dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml
+    README.md docs rb_servo_server/config/dual_real.example.yaml
 }
 
 run_vm_parity_guardrails_gate() {

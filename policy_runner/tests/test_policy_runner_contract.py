@@ -57,6 +57,30 @@ def sample_state(**overrides):
     return StateSnapshot(payload=payload, received_monotonic=time.monotonic())
 
 
+def sample_lease_state(
+    *,
+    active: bool = False,
+    expired: bool = False,
+    active_source_id: str | None = None,
+    active_session_id: str | None = None,
+    active_lease_token: str | None = None,
+):
+    return sample_state(
+        command_source={
+            "active": active,
+            "expired": expired,
+            "enforce_lease": True,
+            "active_source_id": active_source_id,
+            "active_session_id": active_session_id,
+            "active_lease_token": active_lease_token,
+            "verdict": "Ok" if active else ("Expired" if expired else None),
+            "reason": None,
+            "command_requires_lease": False,
+            "command_has_lease": True,
+        }
+    )
+
+
 def sample_config_snapshots(path_kp_pos=6.0):
     return {
         "cartesian_control_snapshot": {
@@ -145,11 +169,37 @@ class FakeLatestSequenceStateClient:
         return self._snapshots.pop(0)
 
 
+class FakeTickSequenceStateClient:
+    def __init__(self, snapshots):
+        self._snapshots = list(snapshots)
+        self.index = 0
+        self.started = False
+        self.closed = False
+
+    @property
+    def latest(self):
+        if not self._snapshots:
+            return None
+        return self._snapshots[min(self.index, len(self._snapshots) - 1)]
+
+    def advance(self):
+        self.index += 1
+
+    def start(self):
+        self.started = True
+
+    def close(self):
+        self.closed = True
+
+
 class FakeCommandClient:
     def __init__(self):
         self.sent = []
         self.acquire_calls = []
         self.closed = False
+        self.source_id = "policy_runner"
+        self.session_id = "fake-session"
+        self.lease_token = None
 
     def send(self, intent):
         self.sent.append(intent)
@@ -158,11 +208,15 @@ class FakeCommandClient:
     def acquire_lease(self, readback, **kwargs):
         self.acquire_calls.append((readback, kwargs))
         self.sent.append(CommandIntent.acquire_lease())
+        self.lease_token = f"fake-token-{len(self.acquire_calls)}"
         return None
 
     def release_lease(self):
-        self.sent.append(CommandIntent.release_lease())
-        return len(self.sent)
+        try:
+            self.sent.append(CommandIntent.release_lease())
+            return len(self.sent)
+        finally:
+            self.lease_token = None
 
     def close(self):
         self.closed = True
@@ -306,19 +360,15 @@ robot:
 
 
 class PolicyRunnerContractTest(unittest.TestCase):
-    def test_config_example_loads_without_yaml_dependency(self):
-        cfg = load_config(Path(__file__).resolve().parents[1] / "config" / "replay_sim.yaml")
-        self.assertEqual(cfg.action_source, "hold")
-
-    def test_rbpodo_pgmode_spacemouse_config_loads_with_explicit_safety_opt_in(self):
+    def test_stack_sim_config_loads_with_teleop_mux_sources(self):
         config_dir = Path(__file__).resolve().parents[1] / "config"
-        cfg = load_config(config_dir / "rbpodo_pgmode_spacemouse_500hz_ack.yaml")
+        cfg = load_config(config_dir / "stack_sim.yaml")
 
         self.assertEqual(cfg.mode, "real")
-        self.assertEqual(cfg.action_source, "dual_spacemouse_pose_target")
-        self.assertFalse(cfg.safety.allow_real_motion)
+        self.assertEqual(cfg.action_source, "teleop_mux")
+        self.assertTrue(cfg.safety.allow_real_motion)
         self.assertTrue(cfg.safety.allow_rbpodo_controller_simulation_cartesian)
-        self.assertFalse(cfg.safety.allow_configured_estimate_geometry_in_real)
+        self.assertTrue(cfg.safety.allow_configured_estimate_geometry_in_real)
         self.assertEqual(cfg.command_rate_hz, 500.0)
         self.assertEqual(cfg.servo_command.endpoint, "udp://127.0.0.1:50256")
         self.assertEqual(cfg.robot_state.bind, "udp://0.0.0.0:50376")
@@ -326,7 +376,9 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertEqual(cfg.spacemouse_pose_target_dual.max_linear_step_m, 0.001)
         self.assertEqual(cfg.spacemouse_pose_target_dual.max_angular_step_rad, 0.01)
         self.assertEqual(cfg.spacemouse_pose_target_dual.sample_stale_timeout_sec, 0.05)
-        self.assertFalse(cfg.spacemouse_pose_target_dual.gripper_buttons.enable)
+        self.assertTrue(cfg.spacemouse_pose_target_dual.gripper_buttons.enable)
+        self.assertEqual(cfg.umi_dual_cartesian.left.endpoint, "udp://0.0.0.0:50380")
+        self.assertEqual(cfg.umi_dual_cartesian.right.endpoint, "udp://0.0.0.0:50381")
         self.assertEqual(cfg.recording.dataset_metadata["backend_type"], "rbpodo")
         self.assertEqual(cfg.recording.dataset_metadata["operation_mode"], "simulation")
         self.assertFalse(cfg.recording.dataset_metadata["physical_motion_expected"])
@@ -500,44 +552,6 @@ class PolicyRunnerContractTest(unittest.TestCase):
         supervisor.stamp_snapshot(state)
         self.assertEqual(state.payload["recording"]["state"], "idle")
 
-    def test_rbpodo_pgmode_spacemouse_server_template_is_controller_sim_only(self):
-        root = Path(__file__).resolve().parents[2]
-        template = root / "rb_servo_server" / "config" / "dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml"
-        text = template.read_text()
-
-        self.assertIn("rate_hz: 500", text)
-        self.assertIn("mode: sdk_ack_worker", text)
-        self.assertIn('command_bind: "udp://127.0.0.1:50256"', text)
-        self.assertIn('"udp://127.0.0.1:50366"', text)
-        self.assertIn('"udp://127.0.0.1:50376"', text)
-        self.assertIn("operation_mode: simulation", text)
-        self.assertIn("allow_in_controller_simulation: true", text)
-        self.assertIn("allow_in_real: false", text)
-        self.assertIn("enforce_lease: true", text)
-        self.assertIn("provider: null", text)
-        self.assertIn("enable: false", text)
-
-    def test_rbpodo_pgmode_spacemouse_tool_exists(self):
-        root = Path(__file__).resolve().parents[2]
-        tool = root / "tools" / "rbpodo_pgmode_spacemouse.sh"
-        text = tool.read_text()
-        generator = root / "tools" / "create_rbpodo_pgmode_spacemouse_local_config.sh"
-        generator_text = generator.read_text()
-
-        self.assertTrue(tool.exists())
-        self.assertTrue(generator.exists())
-        self.assertIn("RB_ALLOW_RBPODO_ASYNC_STREAMING", text)
-        self.assertIn("server-dry-run", text)
-        self.assertIn("policy-dry-run", text)
-        self.assertIn("check", text)
-        self.assertIn("127.0.0.1:50256", text)
-        self.assertIn("0.0.0.0:50376", text)
-        self.assertIn("127.0.0.1:50366", text)
-        self.assertIn("mock_script: pgmode_spacemouse_smoke", text)
-        self.assertIn("--left-ip", generator_text)
-        self.assertIn("RB_PGMODE_SPACEMOUSE_LEFT_IP", generator_text)
-        self.assertIn("ignored by git", generator_text)
-
     def test_runtime_config_defaults_and_parses_startup_timeout(self):
         default_cfg = config_from_mapping({"schema": "robotics_lab.policy_runner.v1"})
         self.assertEqual(default_cfg.runtime.startup_timeout_sec, 5.0)
@@ -681,8 +695,9 @@ class PolicyRunnerContractTest(unittest.TestCase):
         for action_source in (
             "hold",
             "joint_sine",
-            "master_arm_joint",
             "dual_spacemouse_pose_target",
+            "umi_dual_cartesian",
+            "teleop_mux",
         ):
             with self.subTest(action_source=action_source):
                 cfg = config_from_mapping(
@@ -1222,6 +1237,80 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertEqual(
             modes[:6],
             ["AcquireLease", "ArmMotion", "JointTarget", "ReleaseLease", "AcquireLease", "JointTarget"],
+        )
+        self.assertEqual(len(command_client.acquire_calls), 2)
+
+    def test_run_recovers_after_foreign_lease_handoff(self):
+        # Coexistence contract: an external flow-infer process may run while
+        # make run's teleop_mux is alive. If the server state shows another
+        # session took the lease, drop policy ticks with backoff; once teleop
+        # goes idle/released, reacquire and resume without crashing.
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "servo_command": {"acquire_lease": True, "lease_readback_timeout_sec": 0.1},
+                "geometry": {"path": ""},
+                "runtime": {"startup_timeout_sec": 0.1},
+            }
+        )
+        command_client = FakeCommandClient()
+        state_client = FakeTickSequenceStateClient(
+            [
+                sample_lease_state(),
+                sample_lease_state(
+                    active=True,
+                    active_source_id="rb_gui",
+                    active_session_id="gui-session",
+                    active_lease_token="gui-token",
+                ),
+                sample_lease_state(),
+            ]
+        )
+
+        class MotionEveryTickSource:
+            requirements = ActionRequirements(requires_valid_joint_state=False)
+
+            def next_intent(self, snapshot, now_monotonic):
+                _ = snapshot, now_monotonic
+                return CommandIntent.joint_target(left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0])
+
+            def close(self):
+                pass
+
+        times = iter([0.0, 0.0, 0.5, 2.6])
+        sleeps = {"n": 0}
+
+        def sleep_fn(_period):
+            state_client.advance()
+            sleeps["n"] += 1
+            if sleeps["n"] >= 3:
+                raise KeyboardInterrupt
+
+        stderr = StringIO()
+        result = run(
+            cfg,
+            state_client=state_client,
+            command_client=command_client,
+            source=MotionEveryTickSource(),
+            monotonic_fn=lambda: next(times),
+            sleep_fn=sleep_fn,
+            stderr=stderr,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertIn("lease lost", stderr.getvalue())
+        modes = [intent.mode for intent in command_client.sent]
+        self.assertEqual(
+            modes[:7],
+            [
+                "AcquireLease",
+                "ArmMotion",
+                "JointTarget",
+                "AcquireLease",
+                "ArmMotion",
+                "JointTarget",
+                "ReleaseLease",
+            ],
         )
         self.assertEqual(len(command_client.acquire_calls), 2)
 

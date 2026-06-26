@@ -2,10 +2,11 @@
 # Standalone rb_servo_server launcher (NO teleop_mux) for policy/replay sessions,
 # with per-tick diagnostics auto-captured under logs/ — no env vars to type.
 #
-# Why this exists: `make run` (run_stack.sh) also starts a teleop_mux
-# policy_runner that binds the policy state port (50376), which collides with a
-# flow-infer / replay client. For model inference or ground-truth replay you want
-# the server + viser ONLY, and the inference process to own the policy lease.
+# Why this exists: isolated server-only diagnostics/replay. Live flow-infer no
+# longer needs this path: `make run` keeps teleop_mux alive on state port 50376,
+# and tools/flow_infer_real_policy.sh uses the external flow-infer state port
+# 50378. For ground-truth replay or deliberately isolated debugging, this
+# launcher still keeps the policy_runner command source out of the stack.
 #
 # On every launch this auto-sets (so you never type them on the command line):
 #   RB_TWIST_PIPELINE_CSV = logs/twist_pipe_<ts>.csv   (per-tick model->applied

@@ -579,6 +579,63 @@ def _optional_finite(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+def _format_clearance_mm(label: str, value: Any) -> str:
+    parsed = _optional_finite(value)
+    return f"{label}={parsed * 1000.0:.1f}mm" if parsed is not None else f"{label}=n/a"
+
+
+def _format_init_motion_status(latest: StateSnapshot | None, *, stale: bool) -> str:
+    if latest is None:
+        return "InitMotion: no state"
+    if stale:
+        return "InitMotion: State stream stale"
+    diag = latest.init_motion
+    if not isinstance(diag, Mapping):
+        return "InitMotion: no runtime diagnostics"
+    status = str(diag.get("status", "idle"))
+    fail_mode = str(diag.get("fail_mode", "none"))
+    message = str(diag.get("message", "") or "")
+    wp_index = diag.get("waypoint_index")
+    wp_count = diag.get("waypoint_count")
+    iterations = diag.get("iterations")
+    tree_start = diag.get("tree_start")
+    tree_goal = diag.get("tree_goal")
+    planning_time = _optional_finite(diag.get("planning_time_s"))
+    dist_to_goal = _optional_finite(diag.get("dist_to_goal_deg"))
+
+    if status == "failed":
+        if fail_mode == "goal_not_clear":
+            return (
+                "InitMotion FAILED: Init 자세가 충돌/바닥 침범 "
+                f"({_format_clearance_mm('goal_clear', diag.get('goal_clear_m'))}) - Init pose 재설정 필요"
+            )
+        if fail_mode == "escape_failed":
+            return (
+                "InitMotion FAILED: 시작 자세가 끼임 - 탈출 실패 "
+                f"({_format_clearance_mm('start_clear', diag.get('start_clear_m'))})"
+            )
+        if fail_mode == "rrt_budget":
+            time_part = f", {planning_time:.2f}s" if planning_time is not None else ""
+            return (
+                "InitMotion FAILED: 경로 탐색 시간 초과 "
+                f"(tree {tree_start}/{tree_goal}, iters {iterations}{time_part}) - 샘플 밴드/예산 확대 필요"
+            )
+        if fail_mode in {"exec_timeout", "exec_stalled"}:
+            dist_part = f", dist {dist_to_goal:.2f}deg" if dist_to_goal is not None else ""
+            return f"InitMotion FAILED: 실행 중단 (wp {wp_index}/{wp_count}{dist_part})"
+        if fail_mode == "nonfinite":
+            return "InitMotion FAILED: non-finite start/goal"
+        return "InitMotion FAILED: " + (message or fail_mode)
+    if status == "planning":
+        return "InitMotion planning"
+    if status == "executing":
+        dist_part = f", dist {dist_to_goal:.2f}deg" if dist_to_goal is not None else ""
+        return f"InitMotion executing (wp {wp_index}/{wp_count}{dist_part})"
+    if status == "done":
+        return "InitMotion done"
+    return "InitMotion idle"
+
+
 def _format_arm_cartesian_solve(arm: str, raw_arm: Any) -> str:
     if isinstance(raw_arm, ArmSnapshot):
         solve_obj = raw_arm.cartesian_solve

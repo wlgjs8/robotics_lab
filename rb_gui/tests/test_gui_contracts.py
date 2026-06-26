@@ -58,6 +58,7 @@ from rb_servo_gui.app import (
     _format_cartesian_solve_status,
     _format_circle_overlay_status,
     _format_fk_status,
+    _format_init_motion_status,
     _format_scene_asset_status,
     _format_joint_monitor_value,
     _format_joints,
@@ -111,7 +112,7 @@ from rb_servo_gui.app import (
 )
 from rb_servo_gui.command_client import CommandClient
 from rb_servo_gui import geometry as gui_geometry
-from rb_servo_gui.models import CIRCLE_OVERLAY_SCHEMA_VERSION, CircleOverlaySnapshot, Pose6D
+from rb_servo_gui.models import CIRCLE_OVERLAY_SCHEMA_VERSION, CircleOverlaySnapshot, Pose6D, StateSnapshot
 from rb_servo_gui.overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
 from rb_servo_gui.recording_control import (
     ARM_INIT_COMMAND_SCHEMA,
@@ -517,6 +518,53 @@ class GuiContractsTest(unittest.TestCase):
             state[arm]["tcp_deferred"] = False
         state["tcp_fields_deferred"] = False
         return state
+
+    def test_init_motion_runtime_diag_parses_and_formats_failures(self):
+        state = sample_state(
+            init_motion={
+                "status": "failed",
+                "fail_mode": "goal_not_clear",
+                "message": "goal blocked",
+                "start_clear_m": 0.012,
+                "goal_clear_m": -0.002,
+                "tree_start": 0,
+                "tree_goal": 0,
+                "iterations": 0,
+                "planning_time_s": 0.01,
+                "waypoint_index": 0,
+                "waypoint_count": 0,
+                "dist_to_goal_deg": None,
+            }
+        )
+        latest = StateSnapshot.parse(state)
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.init_motion["fail_mode"], "goal_not_clear")
+        text = _format_init_motion_status(latest, stale=False)
+        self.assertIn("Init 자세가 충돌/바닥 침범", text)
+        self.assertIn("goal_clear=-2.0mm", text)
+
+    def test_init_motion_runtime_diag_formats_rrt_and_execution(self):
+        rrt = StateSnapshot.parse(sample_state(init_motion={
+            "status": "failed",
+            "fail_mode": "rrt_budget",
+            "tree_start": 123,
+            "tree_goal": 98,
+            "iterations": 456,
+            "planning_time_s": 5.0,
+        }))
+        self.assertIn("tree 123/98", _format_init_motion_status(rrt, stale=False))
+        self.assertIn("iters 456", _format_init_motion_status(rrt, stale=False))
+
+        exec_failed = StateSnapshot.parse(sample_state(init_motion={
+            "status": "failed",
+            "fail_mode": "exec_timeout",
+            "waypoint_index": 7,
+            "waypoint_count": 11,
+            "dist_to_goal_deg": 2.5,
+        }))
+        text = _format_init_motion_status(exec_failed, stale=False)
+        self.assertIn("실행 중단", text)
+        self.assertIn("wp 7/11", text)
 
     def pgmode_spacemouse_state(self):
         state = self.tcp_available_state(

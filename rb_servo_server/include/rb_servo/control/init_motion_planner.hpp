@@ -24,6 +24,7 @@
 // time parameterization here.
 
 #include <memory>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -36,12 +37,19 @@
 namespace rb_servo {
 
 struct InitMotionPlanResult {
+    enum class FailMode { None, GoalNotClear, EscapeFailed, RrtBudget, NonFinite };
+
     bool success = false;
     // Collision-free, floor-safe waypoints from start to goal (inclusive), each a
     // (left_deg, right_deg) pair. Densified so no segment exceeds max_segment_deg per
     // joint. Empty on failure.
     std::vector<std::pair<JointArray, JointArray>> waypoints;
     std::string message;       // human-readable outcome / failure reason
+    FailMode fail_mode = FailMode::None;
+    double start_clear_m = std::numeric_limits<double>::quiet_NaN();
+    double goal_clear_m = std::numeric_limits<double>::quiet_NaN();
+    int tree_start_size = 0;
+    int tree_goal_size = 0;
     int iterations = 0;        // RRT iterations consumed
     double planning_time_s = 0.0;
     // Number of LEADING waypoints that form the gradient-escape segment (when the start
