@@ -20,6 +20,9 @@ CLOUD_TOPIC = os.environ.get("CLOUD_TOPIC", "stereo.cloud")
 STEREO_CAMERA = os.environ.get("STEREO_CAMERA", "head")
 STEREO_INTRINSICS = os.environ.get("STEREO_INTRINSICS",
                                    "/app/config/d435_ir_640x480_K.txt")
+# TRT fp16 엔진이 있으면 우선 사용(~14ms), 없으면 PyTorch(.pth) 폴백.
+STEREO_ENGINE = os.environ.get("STEREO_ENGINE",
+                               "/app/stereo_worker/engines/fast_foundationstereo.engine")
 
 
 def load_ktxt(path):
@@ -53,13 +56,20 @@ class CloudPublisher:
 def cmd_run(args):
     import sys
     sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-    from stereo_model import FoundationStereoModel
     from bundle_reader import BundleReader
 
     K, baseline = load_ktxt(STEREO_INTRINSICS)
     print(f"[run] intrinsics fx={K[0,0]:.1f} baseline={baseline*1000:.1f}mm  "
           f"bundle={BUNDLE_ENDPOINT}  pub={CLOUD_PUB_BIND}", flush=True)
-    model = FoundationStereoModel(FFS_DIR, WEIGHTS, valid_iters=args.valid_iters)
+    use_trt = os.path.exists(STEREO_ENGINE) and not args.force_torch
+    if use_trt:
+        from stereo_model import TrtStereoModel
+        model = TrtStereoModel(FFS_DIR, STEREO_ENGINE)
+        print(f"[run] backend=TensorRT  engine={STEREO_ENGINE}", flush=True)
+    else:
+        from stereo_model import FoundationStereoModel
+        model = FoundationStereoModel(FFS_DIR, WEIGHTS, valid_iters=args.valid_iters)
+        print(f"[run] backend=PyTorch  weights={WEIGHTS}", flush=True)
     print("[run] model loaded", flush=True)
 
     cam = STEREO_CAMERA
@@ -83,6 +93,8 @@ def cmd_run(args):
             print("[run] color 수신됨 — RGB->IR 정합 미구현, 현재는 IR 명암 사용", flush=True)
             warned_rgb = True
         xyz, rgb = model.disparity_to_cloud(disp, irl.pixels, K, baseline, zfar=args.zfar)
+        if xyz.shape[0] == 0:
+            continue  # 유효 점 없음(예: fp16 NaN/범위밖) -> publish/통계 건너뜀
         pub.publish(seq, time.time_ns(), xyz, rgb)
         seq += 1
         fps_n += 1
@@ -124,6 +136,7 @@ def main():
     ap.add_argument("--run", action="store_const", dest="cmd", const="run")
     ap.add_argument("--valid-iters", type=int, default=8)
     ap.add_argument("--zfar", type=float, default=3.0)
+    ap.add_argument("--force-torch", action="store_true", help="TRT 엔진 무시하고 PyTorch 백엔드 사용")
     ap.add_argument("--max-frames", type=int, default=0, help="0=forever (테스트용 N프레임 후 종료)")
     ap.add_argument("--out-dir", default="/app/stereo_worker/out")
     args = ap.parse_args()
