@@ -927,6 +927,16 @@ def _main_with_subcommands(argv: list[str]) -> int:
              "(DEFAULT). No effect in --gripper-action-mode delta.",
     )
     flow_infer.add_argument(
+        "--gripper-close-snap-percent",
+        type=float,
+        default=0.0,
+        help="ABSOLUTE close-snap deadzone (opening percent): after mapping, any gripper opening "
+             "STRICTLY BELOW this snaps to 0 (fully closed), so small policy jitter near the closed "
+             "end does not leave the jaw cracked open. E.g. 10 -> any commanded opening <10%% closes "
+             "fully. Clamped to [0,100]; 0 = off (DEFAULT). Absolute mode only (no effect in delta; "
+             "binary already snaps to --gripper-close-percent).",
+    )
+    flow_infer.add_argument(
         "--rtc",
         action="store_true",
         help="Enable Real-Time Chunking (RTC) for the openpi remote source: the server freezes the "
@@ -1859,6 +1869,11 @@ def _main_with_subcommands(argv: list[str]) -> int:
             # Close-bias: subtract a few percent from the absolute opening target so
             # a marginal grasp clamps (no effect in delta or binary mode).
             source.gripper_close_bias = float(getattr(args, "gripper_close_bias", 0.0) or 0.0)
+            # Close-snap deadzone: collapse a near-closed absolute opening to fully
+            # closed (0%) so small jitter doesn't leave the jaw cracked open.
+            source.gripper_close_snap_percent = float(
+                getattr(args, "gripper_close_snap_percent", 0.0) or 0.0
+            )
             # Per-axis rotation gate: keep only the selected rx/ry/rz axes of the
             # per-arm rotation action; disabled axes are zeroed so the arm holds
             # that orientation component (translation + gripper unchanged). Applies
@@ -1885,6 +1900,8 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     if source.gripper_close_bias
                     else ""
                 )
+                if source.gripper_close_snap_percent:
+                    detail += f", close-snap<{source.gripper_close_snap_percent:g}%"
             else:
                 detail = ""
             print(

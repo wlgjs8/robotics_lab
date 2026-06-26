@@ -343,6 +343,7 @@ def _build_config_from_args(args: argparse.Namespace) -> GripperServerConfig:
         rate_hz=args.rate,
         stale_timeout_sec=args.stale_timeout,
         on_stale=args.on_stale,
+        home_on_connect=args.home_on_connect,
     )
 
 
@@ -389,6 +390,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--rate", type=float, default=50.0)
     p.add_argument("--stale-timeout", type=float, default=0.5)
     p.add_argument("--on-stale", choices=("hold", "open", "close"), default="hold")
+    p.add_argument(
+        "--home-on-connect",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "home grippers on connect (drive to closed stop + re-zero so absolute-angle "
+            "commands map identically per arm). --no-home-on-connect holds each gripper "
+            "at its current power-on position (no startup motion)."
+        ),
+    )
     p.add_argument("--send", default=None, help="one-shot send, e.g. 'left=50,right=80'")
     p.add_argument("--monitor", action="store_true", help="print published gripper state")
     args = p.parse_args(argv)

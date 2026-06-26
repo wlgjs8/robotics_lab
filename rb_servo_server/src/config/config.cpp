@@ -1811,9 +1811,11 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     const YAML::Node gp = m["ground_plane"];
                     validateAllowedKeys(gp, {
                         "enable", "z_m", "size_m", "thickness_m", "parent_frame",
+                        "follow_safety_floors",
                     }, "safety.self_collision.mesh.ground_plane");
                     auto& g = mc.ground_plane;
                     if (has(gp, "enable")) g.enable = asBool(gp["enable"], "safety.self_collision.mesh.ground_plane.enable");
+                    if (has(gp, "follow_safety_floors")) g.follow_safety_floors = asBool(gp["follow_safety_floors"], "safety.self_collision.mesh.ground_plane.follow_safety_floors");
                     if (has(gp, "z_m")) g.z_m = asDouble(gp["z_m"], "safety.self_collision.mesh.ground_plane.z_m");
                     if (has(gp, "thickness_m")) g.thickness_m = asDouble(gp["thickness_m"], "safety.self_collision.mesh.ground_plane.thickness_m");
                     if (has(gp, "parent_frame")) g.parent_frame = asString(gp["parent_frame"], "safety.self_collision.mesh.ground_plane.parent_frame");

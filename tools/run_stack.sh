@@ -65,7 +65,12 @@ if [ "$MODE" = "real" ]; then
   # backend dies at startup with "No module named 'pika'" and the gripper viz
   # never updates. Pass it through so `make run` alone works.
   PIKA_SDK_PATH="${PIKA_SDK_PATH:-/home/plaif/workspace/pika_sdk}"
-  GRIPPER_SERVER_ARGS="${GRIPPER_SERVER_ARGS---left-port /dev/pika-left --right-port /dev/pika-right --pika-sdk-path $PIKA_SDK_PATH}"
+  # --no-home-on-connect: do NOT actuate the grippers at startup. Homing drives
+  # each jaw to its closed stop to re-zero, but the two Pika motors have opposite
+  # power-on directions, so that startup motion lands asymmetrically (observed:
+  # right opens, left closes). Hold each gripper at its current power-on position
+  # instead. Re-enable with GRIPPER_SERVER_ARGS=... --home-on-connect.
+  GRIPPER_SERVER_ARGS="${GRIPPER_SERVER_ARGS---left-port /dev/pika-left --right-port /dev/pika-right --pika-sdk-path $PIKA_SDK_PATH --no-home-on-connect}"
 else
   GRIPPER_BACKEND="sim"
   GRIPPER_SERVER_ARGS="${GRIPPER_SERVER_ARGS-}"

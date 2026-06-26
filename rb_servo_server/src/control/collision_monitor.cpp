@@ -13,6 +13,7 @@
 #include <pinocchio/math/rpy.hpp>
 #include <pinocchio/algorithm/kinematics.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>
+#include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/geometry.hpp>
 #include <pinocchio/collision/distance.hpp>
 #include <pinocchio/multibody/geometry.hpp>
@@ -208,6 +209,22 @@ struct CollisionMonitor::Impl {
     JointArray right_deg{};
     bool has_targets = false;
 
+    // runtime-controlled "ground_plane" whole-arm floor (ground_plane.follow_safety_floors).
+    // gp_index_ is the geometry index of the injected box (SIZE_MAX if absent);
+    // gp_thickness_ is its box thickness (local z extent). The desired pose is set by
+    // setGroundPlanePose() under in_mtx and applied on the monitor thread before each
+    // eval. gp_controlled_ stays false (static config placement) until the first call.
+    std::size_t gp_index_ = std::numeric_limits<std::size_t>::max();
+    double gp_thickness_ = 0.0;
+    // stand frame pose in the model's universe frame (constant; the stand is fixed to
+    // the root). setGroundPlanePose() takes the floor plane in STAND frame (matching
+    // the servo loop's floor_constraint / user_floor), so we map it through this.
+    pinocchio::SE3 o_M_stand_ = pinocchio::SE3::Identity();
+    bool gp_controlled_ = false;   // guarded by in_mtx
+    bool gp_enabled_ = false;      // guarded by in_mtx
+    Eigen::Vector3d gp_point_ = Eigen::Vector3d::Zero();    // guarded by in_mtx
+    Eigen::Vector3d gp_normal_ = Eigen::Vector3d::UnitZ();  // guarded by in_mtx
+
     // published verdict (lock-free read via atomic shared_ptr)
     std::shared_ptr<const CollisionVerdict> published;
 
@@ -226,8 +243,63 @@ struct CollisionMonitor::Impl {
         buildGeometry();
         gdata = pinocchio::GeometryData(geom);
         for (auto& req : gdata.distanceRequests) req.enable_nearest_points = true;
+        // Locate the injected whole-arm floor box so its pose can be tracked at runtime
+        // (ground_plane.follow_safety_floors). Thickness comes from its extra_collision
+        // entry (size_m[2]); needed to place the TOP face at the requested plane.
+        for (std::size_t i = 0; i < geom.geometryObjects.size(); ++i) {
+            if (geom.geometryObjects[i].name == "ground_plane") { gp_index_ = i; break; }
+        }
+        for (const auto& e : cfg.extra_collision) {
+            if (e.name == "ground_plane") { gp_thickness_ = e.size_m[2]; break; }
+        }
+        // Constant stand-frame pose in the universe frame (FK once at neutral; the
+        // stand is rigidly fixed to the root so this never changes).
+        if (model.existFrame(cfg.stand_frame)) {
+            pinocchio::forwardKinematics(model, data, pinocchio::neutral(model));
+            pinocchio::updateFramePlacements(model, data);
+            o_M_stand_ = data.oMf[model.getFrameId(cfg.stand_frame)];
+        }
         // start with a neutral verdict (invalid -> fail closed until first eval)
         std::atomic_store(&published, std::make_shared<const CollisionVerdict>());
+    }
+
+    // Geometry placement (in the universe frame, == geometryObjects[].placement since
+    // the box is universe-attached) that puts the box TOP face on the STAND-frame plane
+    // {point, normal}, with `normal` as the box local +z (so a tilted plane tilts the
+    // box). The box center is half a thickness below the top face along the normal.
+    // `enabled=false` parks it far below so no collision pair is ever near it (inert).
+    pinocchio::SE3 groundPlanePlacement(bool enabled, const Eigen::Vector3d& point,
+                                        const Eigen::Vector3d& normal) const {
+        if (!enabled) {
+            return pinocchio::SE3(Eigen::Matrix3d::Identity(),
+                                  Eigen::Vector3d(0.0, 0.0, -1000.0));
+        }
+        Eigen::Vector3d n = normal;
+        const double nn = n.norm();
+        n = (nn > 1e-9) ? (n / nn).eval() : Eigen::Vector3d::UnitZ();
+        // Rotation mapping local +z onto n (Eigen builds a valid basis for any target).
+        const Eigen::Matrix3d rot =
+            Eigen::Quaterniond::FromTwoVectors(Eigen::Vector3d::UnitZ(), n).toRotationMatrix();
+        const Eigen::Vector3d center = point - n * (gp_thickness_ * 0.5);
+        // {point, normal} are in STAND frame -> map the whole placement to universe.
+        return o_M_stand_ * pinocchio::SE3(rot, center);
+    }
+
+    // Apply the latest requested ground-plane pose to the geometry model (monitor
+    // thread only, just before computeDistances). No-op until setGroundPlanePose ran.
+    void applyGroundPlanePose() {
+        if (gp_index_ == std::numeric_limits<std::size_t>::max()) return;
+        bool controlled, enabled;
+        Eigen::Vector3d point, normal;
+        {
+            std::lock_guard<std::mutex> lk(in_mtx);
+            controlled = gp_controlled_;
+            enabled = gp_enabled_;
+            point = gp_point_;
+            normal = gp_normal_;
+        }
+        if (!controlled) return;
+        geom.geometryObjects[gp_index_].placement = groundPlanePlacement(enabled, point, normal);
     }
 
     void buildModel() {
@@ -500,6 +572,7 @@ struct CollisionMonitor::Impl {
 
     CollisionVerdict evalLocked(const JointArray& l, const JointArray& r) {
         setQ(l, r);  // writes the target config into q
+        applyGroundPlanePose();  // track the operator's active floor (if controlled)
         const int N = std::max(1, cfg.swept_samples);
         Eigen::VectorXd q_eval = q;  // configuration gdata ends up at (for J_n)
         if (N <= 1 || !have_prev_eval) {
@@ -585,6 +658,19 @@ void CollisionMonitor::submitTargets(const JointArray& left_deg, const JointArra
 }
 
 CollisionVerdict CollisionMonitor::latest() const { return impl_->load(); }
+
+void CollisionMonitor::setGroundPlanePose(bool enabled, const Eigen::Vector3d& point,
+                                          const Eigen::Vector3d& normal) {
+    std::lock_guard<std::mutex> lk(impl_->in_mtx);
+    impl_->gp_controlled_ = true;
+    impl_->gp_enabled_ = enabled;
+    impl_->gp_point_ = point;
+    impl_->gp_normal_ = normal;
+}
+
+bool CollisionMonitor::hasGroundPlane() const {
+    return impl_->gp_index_ != std::numeric_limits<std::size_t>::max();
+}
 
 CollisionVerdict CollisionMonitor::evalOnce(const JointArray& left_deg, const JointArray& right_deg) {
     CollisionVerdict v = impl_->evalLocked(left_deg, right_deg);

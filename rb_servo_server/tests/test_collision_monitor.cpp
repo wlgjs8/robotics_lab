@@ -331,9 +331,75 @@ static bool runProjection() {
     return true;
 }
 
+// Runtime-tracked whole-arm floor (ground_plane.follow_safety_floors): the injected
+// "ground_plane" box can be repositioned/disabled at runtime via setGroundPlanePose
+// so it follows the operator's active viser floor. Verifies: parked (disabled) -> not
+// a near pair; raised into the arm volume (enabled) -> becomes the binding pair;
+// disabling again drops it back out. (Mirrors how dual_arm_servo_loop injects the box.)
+static bool runGroundPlane() {
+    const fs::path ws = workspaceRoot();
+    CollisionMonitorConfig cfg = makeConfig(ws);
+    if (!fs::is_regular_file(cfg.unified_urdf)) {
+        std::cout << "SKIP: unified URDF not found (ground_plane test)\n";
+        return true;
+    }
+    // Inject the whole-arm floor box exactly as the servo loop does (parent_frame is
+    // the stand frame so its pose maps through o_M_stand_).
+    ExtraCollisionShape gp;
+    gp.name = "ground_plane";
+    gp.shape = "box";
+    gp.parent_frame = cfg.stand_frame;  // "stand"
+    gp.size_m = {4.0, 4.0, 0.10};       // [Lx, Ly, thickness]
+    gp.xyz_m = {0.0, 0.0, 0.001 - 0.05};  // top face at z=1mm (center half-thickness below)
+    cfg.extra_collision.push_back(gp);
+
+    CollisionMonitor mon(cfg);
+    RB_CHECK(mon.hasGroundPlane());
+
+    const JointArray init = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+
+    auto groundPlaneNear = [](const CollisionVerdict& v) {
+        for (const auto& p : v.near)
+            if (p.name_a == "ground_plane" || p.name_b == "ground_plane") return true;
+        return false;
+    };
+
+    // (1) Parked/disabled: the box sits far below, never a near pair.
+    mon.setGroundPlanePose(false, Eigen::Vector3d::Zero(), Eigen::Vector3d::UnitZ());
+    const CollisionVerdict off = mon.evalOnce(init, init);
+    RB_CHECK(off.valid);
+    RB_CHECK(!groundPlaneNear(off));
+    const double baseline = off.min_clearance_m;
+    std::cout << "ground_plane OFF: min_clearance=" << baseline * 1000.0
+              << " mm gp_near=" << groundPlaneNear(off) << "\n";
+
+    // (2) Enabled and raised to z=0.5 m (stand frame): the box now intrudes into the
+    // lower arm volume, so it becomes the closest pair and clearance drops below the
+    // parked baseline.
+    mon.setGroundPlanePose(true, Eigen::Vector3d(0.0, 0.0, 0.5), Eigen::Vector3d::UnitZ());
+    const CollisionVerdict on = mon.evalOnce(init, init);
+    RB_CHECK(on.valid);
+    RB_CHECK(groundPlaneNear(on));
+    RB_CHECK(on.min_clearance_m < baseline);
+    std::cout << "ground_plane ON(z=0.5): min_clearance=" << on.min_clearance_m * 1000.0
+              << " mm gp_near=" << groundPlaneNear(on) << "\n";
+
+    // (3) Disable again: the box returns far below and drops out of the near pairs,
+    // restoring the parked baseline clearance.
+    mon.setGroundPlanePose(false, Eigen::Vector3d::Zero(), Eigen::Vector3d::UnitZ());
+    const CollisionVerdict off2 = mon.evalOnce(init, init);
+    RB_CHECK(!groundPlaneNear(off2));
+    RB_CHECK(std::abs(off2.min_clearance_m - baseline) < 1e-6);
+    return true;
+}
+
 int main() {
     if (!runProjection()) {
         std::cerr << "test_collision_monitor (projection) FAILED\n";
+        return 1;
+    }
+    if (!runGroundPlane()) {
+        std::cerr << "test_collision_monitor (ground_plane) FAILED\n";
         return 1;
     }
     if (!run()) {

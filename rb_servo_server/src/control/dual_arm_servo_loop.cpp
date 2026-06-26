@@ -4354,6 +4354,24 @@ ServoTarget DualArmServoLoop::applySafety(
             // read the latest verdict (atomic). The barrier scales the approach toward
             // the target so the arm can always brake before the hard floor; a stale
             // verdict or a hard breach fails closed.
+            // Optional: drive the whole-arm floor box to track the operator's active
+            // viser floor (ground_plane.follow_safety_floors) — user floor when active,
+            // else stand floor, else off. Cheap mutex store; the monitor applies it
+            // before its next eval. Stand floor is a horizontal plane at effectiveFloorZ.
+            if (config_.safety.self_collision.mesh.ground_plane.follow_safety_floors &&
+                collision_monitor_->hasGroundPlane()) {
+                if (userFloorActive()) {
+                    collision_monitor_->setGroundPlanePose(
+                        true, effectiveUserFloorPoint(), effectiveUserFloorNormal());
+                } else if (floorConstraintActive()) {
+                    collision_monitor_->setGroundPlanePose(
+                        true, math::Vector3(0.0, 0.0, effectiveFloorZ()),
+                        math::Vector3::UnitZ());
+                } else {
+                    collision_monitor_->setGroundPlanePose(
+                        false, math::Vector3::Zero(), math::Vector3::UnitZ());
+                }
+            }
             collision_monitor_->submitTargets(out.left_q_target_deg, out.right_q_target_deg);
             const CollisionVerdict v = collision_monitor_->latest();
             last_collision_verdict_ = v;
@@ -5178,6 +5196,22 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             // Explicit non-InitMotion command, or no active sequence -> cancel/reset so
             // the next InitMotion plans fresh. A discarded in-flight future detaches.
             if (ex.status != InitMotionStatus::Idle) {
+                // Diagnostic: a committed go-to-init move was interrupted before it
+                // reached the goal. This is the only silent way the arm stops part-way
+                // (no execution-timeout, no planning failure). Logs WHAT interrupted it
+                // (a real command with seq!=0 from a competing source, or a deadman hold
+                // that failed the synthetic-hold test) so the cause is unambiguous.
+                if (sequence_active) {
+                    std::cerr << "[WARN] InitMotion: committed move CANCELLED mid-"
+                              << (ex.status == InitMotionStatus::Planning ? "planning"
+                                                                          : "execution")
+                              << " by a non-init command (seq=" << command.seq
+                              << ", left_mode=" << static_cast<int>(command.left.mode)
+                              << ", right_mode=" << static_cast<int>(command.right.mode)
+                              << ", deadman_hold=" << (deadman_hold ? 1 : 0)
+                              << ", planner=" << (init_motion_planner_ ? 1 : 0)
+                              << "); holding (arm stops where it is)\n";
+                }
                 ex = InitMotionExec{};
             }
             return command;

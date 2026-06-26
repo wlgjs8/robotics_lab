@@ -932,14 +932,16 @@ def update_user_floor_capture_points(
 # Stand-frame ROI box (safety.roi_box) visual: a translucent box the TCP must
 # stay inside. Applied box = blue (red when an arm is outside); pending-slider
 # preview = yellow, like the floor plane preview.
-_ROI_BOX_BLUE = (40, 110, 245)
 _ROI_BOX_RED = (220, 60, 60)
-_ROI_BOX_PREVIEW_YELLOW = (235, 200, 60)
-# Boundary emphasis: opaque edges + corner vertices drawn over the translucent
-# fill so the ROI outline reads clearly even through other geometry. They recolor
-# red together with the fill on violation. Brighter than the fill on purpose.
+# ROI region edge colors. The region is drawn as an outline ONLY (edges + corner
+# vertices) — no filled face: viser keeps depthWrite=true even on transparent
+# meshes, so a translucent ROI box depth-occludes the robot URDF (the solid arm
+# outside the region, the translucent red self-collision overlay) wherever the
+# region overlaps it. The wireframe marks the region without any occluding face.
+# Recolors red on violation. Applied region is blue; pending preview is yellow.
 _ROI_BOX_EDGE_BLUE = (150, 200, 255)
 _ROI_BOX_EDGE_RED = (255, 120, 120)
+_ROI_BOX_EDGE_PREVIEW_YELLOW = (235, 200, 60)
 
 
 def _roi_box_geometry(
@@ -1007,13 +1009,16 @@ def _apply_roi_box_outline(
     dims: tuple[float, ...],
     center: tuple[float, ...],
     edge_color: tuple[int, int, int],
+    *,
+    edges_key: str = "roi_box_edges",
+    verts_key: str = "roi_box_verts",
 ) -> None:
-    """Resize/recolor the ROI box edge lines + corner vertices to match the fill."""
+    """Resize/recolor a ROI region outline (edge lines + corner vertices)."""
     import numpy as np
 
     seg, corners = _roi_box_outline(dims, center)
     col = np.asarray(edge_color, dtype=np.uint8)
-    edges = scene_handles.get("roi_box_edges")
+    edges = scene_handles.get(edges_key)
     if edges is not None:
         for attr, value in (("points", seg), ("colors", col)):
             try:
@@ -1021,7 +1026,7 @@ def _apply_roi_box_outline(
             except Exception:
                 pass
         _set_visible(edges, True)
-    verts = scene_handles.get("roi_box_verts")
+    verts = scene_handles.get(verts_key)
     if verts is not None:
         for attr, value in (("points", corners), ("colors", col)):
             try:
@@ -1031,121 +1036,92 @@ def _apply_roi_box_outline(
         _set_visible(verts, True)
 
 
-def _hide_roi_box_outline(scene_handles: dict[str, Any]) -> None:
-    for key in ("roi_box_edges", "roi_box_verts"):
+def _hide_roi_box_outline(
+    scene_handles: dict[str, Any],
+    *,
+    edges_key: str = "roi_box_edges",
+    verts_key: str = "roi_box_verts",
+) -> None:
+    for key in (edges_key, verts_key):
         _set_visible(scene_handles.get(key), False)
 
 
 def _add_roi_box(server: Any, handles: dict[str, Any]) -> None:
-    """Stand-frame ROI box (safety.roi_box visual): applied box + pending preview.
+    """Stand-frame ROI region (safety.roi_box visual): applied outline + preview.
 
-    Hidden until the server reports the constraint enabled. Both are created with
-    a placeholder geometry; update_roi_box / update_roi_box_preview move and
-    resize them."""
-    if not hasattr(server.scene, "add_box"):
-        return
+    Rendered as an OUTLINE ONLY — opaque edge lines (line segments) + corner
+    vertices (point cloud), no filled face. A translucent fill would depth-occlude
+    the robot URDF wherever the region overlaps it (viser keeps depthWrite=true on
+    transparent meshes), hiding both the solid arm outside the region and the
+    translucent red self-collision overlay. The wireframe marks the region without
+    any occluding face. Hidden (placeholder geometry) until update_roi_box /
+    update_roi_box_preview move/resize/show it."""
     dims = (1.0, 1.0, 1.0)
     center = (0.0, -0.5, 0.5)
-    for key, name, color, opacity in (
-        ("roi_box", "/stand/roi_box", _ROI_BOX_BLUE, 0.12),
-        ("roi_box_preview", "/stand/roi_box_preview", _ROI_BOX_PREVIEW_YELLOW, 0.10),
-    ):
-        try:
-            try:
-                # side="back" renders only the far interior walls, so the near
-                # walls don't write the depth buffer and occlude the translucent
-                # geometry INSIDE the box (the reference ghost robot and the red
-                # self-collision overlays). viser meshes keep depthWrite=true even
-                # when transparent, so a default front-sided box hides those
-                # overlays whenever the ROI region is shown.
-                handles[key] = server.scene.add_box(
-                    name, dimensions=dims, color=color, opacity=opacity,
-                    side="back", position=center, visible=False,
-                )
-            except TypeError:  # older viser without opacity/side support
-                handles[key] = server.scene.add_box(
-                    name, dimensions=dims, color=color, position=center, visible=False,
-                )
-        except Exception as exc:
-            handles[f"{key}_error"] = f"{type(exc).__name__}: {exc}"
-    # Emphasised boundary for the APPLIED box: opaque edges (line segments) +
-    # corner vertices (point cloud). update_roi_box moves/resizes/recolors them
-    # alongside the fill; placeholder geometry until then.
     seg, corners = _roi_box_outline(dims, center)
-    if hasattr(server.scene, "add_line_segments"):
-        try:
-            handles["roi_box_edges"] = server.scene.add_line_segments(
-                "/stand/roi_box_edges", points=seg, colors=_ROI_BOX_EDGE_BLUE,
-                line_width=4.0, visible=False,
-            )
-        except Exception as exc:
-            handles["roi_box_edges_error"] = f"{type(exc).__name__}: {exc}"
-    if hasattr(server.scene, "add_point_cloud"):
-        try:
-            handles["roi_box_verts"] = server.scene.add_point_cloud(
-                "/stand/roi_box_verts", points=corners, colors=_ROI_BOX_EDGE_BLUE,
-                point_size=0.018, point_shape="circle", visible=False,
-            )
-        except Exception as exc:
-            handles["roi_box_verts_error"] = f"{type(exc).__name__}: {exc}"
-
-
-def _apply_roi_box(handle: Any, dims: tuple[float, ...], center: tuple[float, ...],
-                   color: tuple[int, int, int]) -> None:
-    # Set dimensions when the viser handle supports it (live resize); position and
-    # color always. Wrapped per-attribute so a viser without settable dimensions
-    # still tracks position/color.
-    try:
-        handle.dimensions = dims
-    except Exception:
-        pass
-    try:
-        handle.position = center
-    except Exception:
-        pass
-    try:
-        handle.color = color
-    except Exception:
-        pass
+    # (edges handle, verts handle, scene-node prefix, color) for the applied
+    # region (blue) and the pending-slider preview (yellow).
+    for edges_key, verts_key, prefix, color in (
+        ("roi_box_edges", "roi_box_verts", "/stand/roi_box", _ROI_BOX_EDGE_BLUE),
+        ("roi_box_preview_edges", "roi_box_preview_verts", "/stand/roi_box_preview",
+         _ROI_BOX_EDGE_PREVIEW_YELLOW),
+    ):
+        if hasattr(server.scene, "add_line_segments"):
+            try:
+                handles[edges_key] = server.scene.add_line_segments(
+                    f"{prefix}_edges", points=seg, colors=color,
+                    line_width=4.0, visible=False,
+                )
+            except Exception as exc:
+                handles[f"{edges_key}_error"] = f"{type(exc).__name__}: {exc}"
+        if hasattr(server.scene, "add_point_cloud"):
+            try:
+                handles[verts_key] = server.scene.add_point_cloud(
+                    f"{prefix}_verts", points=corners, colors=color,
+                    point_size=0.018, point_shape="circle", visible=False,
+                )
+            except Exception as exc:
+                handles[f"{verts_key}_error"] = f"{type(exc).__name__}: {exc}"
 
 
 def update_roi_box_preview(
     scene_handles: dict[str, Any], min_m: Any, max_m: Any
 ) -> None:
-    """Show the pending slider bounds as a translucent yellow preview box.
+    """Show the pending slider bounds as a yellow outline preview.
 
     min_m/max_m=None (or malformed) hides the preview."""
-    box = scene_handles.get("roi_box_preview") if isinstance(scene_handles, dict) else None
-    if box is None:
+    if not isinstance(scene_handles, dict):
         return
     geom = _roi_box_geometry(min_m, max_m) if min_m is not None and max_m is not None else None
     if geom is None:
-        _set_visible(box, False)
+        _hide_roi_box_outline(
+            scene_handles, edges_key="roi_box_preview_edges", verts_key="roi_box_preview_verts",
+        )
         return
     dims, center = geom
-    _apply_roi_box(box, dims, center, _ROI_BOX_PREVIEW_YELLOW)
-    _set_visible(box, True)
+    _apply_roi_box_outline(
+        scene_handles, dims, center, _ROI_BOX_EDGE_PREVIEW_YELLOW,
+        edges_key="roi_box_preview_edges", verts_key="roi_box_preview_verts",
+    )
 
 
 def update_roi_box(
     scene_handles: dict[str, Any], roi: Mapping[str, Any] | None, *, visible: bool = True
 ) -> None:
-    """Move/resize/recolor the ROI box from the published roi_box block.
+    """Move/resize/recolor the ROI region outline from the published roi_box block.
 
     Drawn whenever `visible` (the GUI "ROI 영역 표시" toggle) is set and the
     published bounds are valid — independent of server enforcement (enabled), so
     the configured region stays a visible reference by default. Red when an arm
-    is reported outside the box, teal otherwise."""
-    box = scene_handles.get("roi_box") if isinstance(scene_handles, dict) else None
-    if box is None:
+    is reported outside the box, blue otherwise. Outline only (no filled face) so
+    it never occludes the robot URDF where the region overlaps it."""
+    if not isinstance(scene_handles, dict):
         return
     if not visible or not isinstance(roi, Mapping):
-        _set_visible(box, False)
         _hide_roi_box_outline(scene_handles)
         return
     geom = _roi_box_geometry(roi.get("min_m"), roi.get("max_m"))
     if geom is None:
-        _set_visible(box, False)
         _hide_roi_box_outline(scene_handles)
         return
     dims, center = geom
@@ -1153,12 +1129,10 @@ def update_roi_box(
         isinstance(roi.get(key), Mapping) and bool(roi[key].get("violated", False))
         for key in ("left", "right")
     )
-    _apply_roi_box(box, dims, center, _ROI_BOX_RED if violated else _ROI_BOX_BLUE)
     _apply_roi_box_outline(
         scene_handles, dims, center,
         _ROI_BOX_EDGE_RED if violated else _ROI_BOX_EDGE_BLUE,
     )
-    _set_visible(box, True)
 
 
 def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) -> None:

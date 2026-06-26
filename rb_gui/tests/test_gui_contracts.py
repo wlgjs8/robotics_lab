@@ -1098,6 +1098,10 @@ class GuiContractsTest(unittest.TestCase):
         handles = {
             "gripper_slider_left": _Slider(30.0),
             "gripper_slider_right": _Slider(80.0),
+            # Already synced to hardware once (different value) -> the slider's
+            # current value is a genuine operator move and commands.
+            "gripper_synced_value_left": 0.0,
+            "gripper_synced_value_right": 0.0,
             "gripper_cmd_sock": sock,
             "gripper_cmd_endpoint": ("127.0.0.1", 50410),
             "gripper_cmd_seq": 0,
@@ -1111,6 +1115,32 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(msg["left"], {"percent": 30.0, "valid": True})
         self.assertEqual(msg["right"], {"percent": 80.0, "valid": True})
         self.assertEqual(handles["gripper_cmd_seq"], 1)  # seq advances
+
+    def test_send_gripper_command_holds_until_synced(self):
+        # Startup: no gripper feedback synced yet (gripper_synced_value_* absent),
+        # sliders at their initial 100 (=open). A client-connect echo of that
+        # initial value must NOT command the gripper open — hold the power-on
+        # position until the slider has tracked real hardware at least once.
+        class _Slider:
+            def __init__(self, v):
+                self.value = v
+
+        class _Sock:
+            def __init__(self):
+                self.sent = []
+            def sendto(self, data, endpoint):
+                self.sent.append((data, endpoint))
+
+        sock = _Sock()
+        handles = {
+            "gripper_slider_left": _Slider(100.0),
+            "gripper_slider_right": _Slider(100.0),
+            "gripper_cmd_sock": sock,
+            "gripper_cmd_endpoint": ("127.0.0.1", 50410),
+            "gripper_cmd_seq": 0,
+        }
+        _send_gripper_command(handles)
+        self.assertEqual(sock.sent, [])  # pre-sync: no startup-open command
 
     def test_arm_snapshot_parses_gripper_feedback_block(self):
         from rb_servo_gui.models import StateSnapshot
@@ -3471,77 +3501,51 @@ class RoiBoxGuiTest(unittest.TestCase):
             client.build_set_safety_roi_bounds((0.6, 0.0, 0.0), (0.5, 1.0, 1.0))
 
     def test_update_roi_box_resizes_recolors_and_hides(self):
-        class FakeBox:
-            def __init__(self):
-                self.dimensions = (1.0, 1.0, 1.0)
-                self.position = (0.0, 0.0, 0.0)
-                self.color = None
-                self.visible = True
-
-        box = FakeBox()
-        handles = {"roi_box": box}
-        update_roi_box(handles, None)
-        self.assertFalse(box.visible)
-        update_roi_box(handles, {"enabled": False})
-        self.assertFalse(box.visible)
-        # Enabled: dimensions = extent, position = center.
-        update_roi_box(handles, self._roi_block())
-        self.assertTrue(box.visible)
-        self.assertAlmostEqual(box.dimensions[0], 1.0)   # x extent 0.5-(-0.5)
-        self.assertAlmostEqual(box.dimensions[1], 1.0)   # y extent 0-(-1.0)
-        self.assertAlmostEqual(box.position[1], -0.5)    # y center
-        teal = box.color
-        update_roi_box(handles, self._roi_block(
-            right={"checked": True, "violated": True, "min_margin_m": -0.02,
-                   "closest_face": "z_min"},
-        ))
-        self.assertNotEqual(box.color, teal)
-        update_roi_box({}, self._roi_block())  # missing handle is a no-op
-
-    def test_update_roi_box_outline_tracks_box(self):
-        # Emphasised edges (12 segments) + corner vertices (8 points) follow the
-        # applied fill box and hide/recolor with it.
-        class FakeBox:
-            def __init__(self):
-                self.dimensions = (1.0, 1.0, 1.0)
-                self.position = (0.0, 0.0, 0.0)
-                self.color = None
-                self.visible = True
-
+        # The ROI region is an OUTLINE only (no filled face): 12 edge segments +
+        # 8 corner vertices that track the bounds, recolor red on violation, and
+        # hide when bounds are absent/invalid.
         edges = RecordingSceneHandle()
         verts = RecordingSceneHandle()
-        handles = {"roi_box": FakeBox(), "roi_box_edges": edges, "roi_box_verts": verts}
+        handles = {"roi_box_edges": edges, "roi_box_verts": verts}
+        update_roi_box(handles, None)
+        self.assertFalse(edges.visible or verts.visible)
+        update_roi_box(handles, {"enabled": False})
+        self.assertFalse(edges.visible or verts.visible)
+        # Enabled: outline drawn, tracking extent/center.
         update_roi_box(handles, self._roi_block())
         self.assertTrue(edges.visible and verts.visible)
         self.assertEqual(np.asarray(edges.points).shape, (12, 2, 3))
         self.assertEqual(np.asarray(verts.points).shape, (8, 3))
-        normal_edge_color = np.asarray(edges.colors).copy()
-        # Violation recolors the outline.
+        # Corner verts span the bounds: x in [-0.5, 0.5], y in [-1.0, 0.0].
+        corners = np.asarray(verts.points)
+        self.assertAlmostEqual(corners[:, 0].min(), -0.5)
+        self.assertAlmostEqual(corners[:, 0].max(), 0.5)
+        self.assertAlmostEqual(corners[:, 1].min(), -1.0)
+        blue = np.asarray(edges.colors).copy()
+        # Violation recolors the outline red.
         update_roi_box(handles, self._roi_block(
             right={"checked": True, "violated": True, "min_margin_m": -0.02,
                    "closest_face": "z_min"},
         ))
-        self.assertFalse(np.array_equal(np.asarray(edges.colors), normal_edge_color))
-        # Hidden when the toggle is off.
+        self.assertFalse(np.array_equal(np.asarray(edges.colors), blue))
+        # Toggle off hides the outline.
         update_roi_box(handles, self._roi_block(), visible=False)
         self.assertFalse(edges.visible or verts.visible)
+        update_roi_box({}, self._roi_block())  # missing handles is a no-op
 
     def test_update_roi_box_preview(self):
-        class FakeBox:
-            def __init__(self):
-                self.dimensions = (1.0, 1.0, 1.0)
-                self.position = (0.0, 0.0, 0.0)
-                self.color = None
-                self.visible = True
-
-        box = FakeBox()
-        handles = {"roi_box_preview": box}
+        # Preview is its own yellow outline (edges + corner verts), no fill.
+        edges = RecordingSceneHandle()
+        verts = RecordingSceneHandle()
+        handles = {"roi_box_preview_edges": edges, "roi_box_preview_verts": verts}
         update_roi_box_preview(handles, (-0.2, -0.2, 0.1), (0.2, 0.2, 0.5))
-        self.assertTrue(box.visible)
-        self.assertAlmostEqual(box.dimensions[2], 0.4)
-        self.assertAlmostEqual(box.position[2], 0.3)
+        self.assertTrue(edges.visible and verts.visible)
+        self.assertEqual(np.asarray(edges.points).shape, (12, 2, 3))
+        corners = np.asarray(verts.points)
+        self.assertAlmostEqual(corners[:, 2].min(), 0.1)   # z min
+        self.assertAlmostEqual(corners[:, 2].max(), 0.5)   # z max
         update_roi_box_preview(handles, None, None)
-        self.assertFalse(box.visible)
+        self.assertFalse(edges.visible or verts.visible)
         update_roi_box_preview({}, (-0.2, -0.2, 0.1), (0.2, 0.2, 0.5))  # no-op
 
     def test_update_roi_panel_syncs_sliders_once(self):
@@ -3594,52 +3598,40 @@ class RoiBoxGuiTest(unittest.TestCase):
             self.assertIn("min_m: [9, 9, 9]   # decoy outside the block", updated)
 
     def test_update_roi_box_visible_flag(self):
-        class FakeBox:
-            def __init__(self):
-                self.dimensions = (1.0, 1.0, 1.0)
-                self.position = (0.0, 0.0, 0.0)
-                self.color = None
-                self.visible = True
-
-        box = FakeBox()
-        handles = {"roi_box": box}
+        edges = RecordingSceneHandle()
+        verts = RecordingSceneHandle()
+        handles = {"roi_box_edges": edges, "roi_box_verts": verts}
         # visible=False hides even with valid bounds.
         update_roi_box(handles, self._roi_block(), visible=False)
-        self.assertFalse(box.visible)
-        # Disabled enforcement but valid bounds still draws when visible (the box
-        # is a reference region independent of server enforcement).
+        self.assertFalse(edges.visible or verts.visible)
+        # Disabled enforcement but valid bounds still draws when visible (the
+        # region is a reference independent of server enforcement).
         update_roi_box(handles, self._roi_block(enabled=False), visible=True)
-        self.assertTrue(box.visible)
+        self.assertTrue(edges.visible and verts.visible)
 
     def test_update_roi_panel_visibility_toggle(self):
         from rb_servo_gui.models import StateSnapshot
-
-        class FakeBox:
-            def __init__(self):
-                self.dimensions = (1.0, 1.0, 1.0)
-                self.position = (0.0, 0.0, 0.0)
-                self.color = None
-                self.visible = True
 
         class FakeToggle:
             def __init__(self, v):
                 self.value = v
 
-        box = FakeBox()
-        scene = {"roi_box": box, "roi_box_preview": FakeBox()}
+        edges = RecordingSceneHandle()
+        verts = RecordingSceneHandle()
+        scene = {"roi_box_edges": edges, "roi_box_verts": verts}
         handles = {"scene": scene, "roi_box_visible_toggle": FakeToggle(False)}
         state = StateSnapshot.parse(sample_state(roi_box=self._roi_block()))
-        # Toggle OFF -> box hidden even though the server reports it enabled.
+        # Toggle OFF -> region hidden even though the server reports it enabled.
         _update_roi_panel(handles, state)
-        self.assertFalse(box.visible)
-        # Toggle ON -> box drawn.
+        self.assertFalse(edges.visible or verts.visible)
+        # Toggle ON -> region drawn.
         handles["roi_box_visible_toggle"].value = True
         _update_roi_panel(handles, state)
-        self.assertTrue(box.visible)
+        self.assertTrue(edges.visible and verts.visible)
         # Disabled enforcement but toggle ON -> still drawn (reference region).
         disabled = StateSnapshot.parse(sample_state(roi_box=self._roi_block(enabled=False)))
         _update_roi_panel(handles, disabled)
-        self.assertTrue(box.visible)
+        self.assertTrue(edges.visible and verts.visible)
 
 
 class LeaseBracketTest(unittest.TestCase):

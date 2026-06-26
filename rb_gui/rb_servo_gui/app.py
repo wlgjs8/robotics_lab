@@ -2975,7 +2975,14 @@ def _send_gripper_command(handles: dict[str, Any]) -> None:
             continue
         msg[side] = {"percent": value, "valid": True}
         synced = handles.get(f"gripper_synced_value_{side}")
-        if synced is None or abs(value - float(synced)) > _GRIPPER_SYNC_EPS:
+        # synced is None until the slider has tracked real gripper feedback at
+        # least once (startup, before gripper_server publishes; or no gripper_server
+        # at all). Do NOT treat that initial default as an operator move: when a
+        # browser client connects it echoes the slider's initial value (100 = open),
+        # which would otherwise command the gripper OPEN on every startup. Hold the
+        # power-on gripper position until we've synced to hardware, then only a
+        # genuine move (beyond eps from the synced value) commands it.
+        if synced is not None and abs(value - float(synced)) > _GRIPPER_SYNC_EPS:
             operator_moved = True
             handles[f"gripper_manual_hold_until_{side}"] = time.monotonic() + hold_sec
     if not operator_moved:
@@ -3407,37 +3414,52 @@ def update_gui(
     update_user_floor_plane(handles.get("scene", {}), latest.user_floor_constraint)
     update_user_floor_capture_points(
         handles.get("scene", {}), _user_floor_state(handles).get("points", []))
-    # One-shot: restore a persisted, previously-enabled user floor plane once the
-    # state stream is live (the server starts with it disabled until commanded).
+    # Restore a persisted, previously-enabled user floor plane once the state stream
+    # is live (the server starts with it disabled until commanded). RETRY until the
+    # server telemetry confirms enabled: the leaseless command can be dropped while the
+    # server's command intake is still coming up at startup, even though state already
+    # publishes — a one-shot send would then be silently lost and the operator would
+    # have to re-press Fit & Apply. Capped (~5 s) so a genuinely-rejecting server (e.g.
+    # user_floor disabled in config) does not get spammed forever.
     if not stale and not handles.get("user_floor_resent", False):
         uf_state = _user_floor_state(handles)
         plane = uf_state.get("plane")
-        if bool(uf_state.get("enabled", False)) and isinstance(plane, Mapping):
+        want = bool(uf_state.get("enabled", False)) and isinstance(plane, Mapping)
+        uf = latest.user_floor_constraint if latest is not None else None
+        confirmed = isinstance(uf, Mapping) and bool(uf.get("enabled", False))
+        attempts = handles.get("user_floor_resend_attempts", 0)
+        if not want or confirmed or attempts >= 50:
+            if want and not confirmed and attempts >= 50 and "user_floor_set_status" in handles:
+                handles["user_floor_set_status"].value = "restore gave up (server kept rejecting)"
+            handles["user_floor_resent"] = True
+        else:
             ok, msg = safety.send_set_user_floor_plane(
                 tuple(plane["point"]), tuple(plane["normal"]),
                 margin_m=float(uf_state.get("margin_mm", 0.0)) / 1000.0, enable=True,
             )
+            handles["user_floor_resend_attempts"] = attempts + 1
             if "user_floor_set_status" in handles:
-                handles["user_floor_set_status"].value = ("restored: " if ok else "restore failed: ") + msg
-        handles["user_floor_resent"] = True
-    # One-shot: re-apply the operator's persisted "Enforce stand floor" choice once the
-    # state stream is live, so the GUI's last setting wins over the server's config
-    # default on every launch. No-op when there is no saved preference (the checkbox then
-    # just mirrors telemetry) or when the server already reports the desired state.
+                handles["user_floor_set_status"].value = ("restoring... " if ok else "restore failed: ") + msg
+    # Re-apply the operator's persisted "Enforce stand floor" choice once the state
+    # stream is live, so the GUI's last setting wins over the server's config default on
+    # every launch. Same retry-until-confirmed pattern (the startup command can be
+    # dropped). No-op when there is no saved preference (checkbox just mirrors telemetry).
     if not stale and not handles.get("floor_enforce_resent", False):
         pref = handles.get("stand_floor_enforce_pref")
-        if isinstance(pref, bool):
-            floor = latest.floor_constraint if latest is not None else None
-            server_enabled = (
-                bool(floor.get("enabled", False)) if isinstance(floor, Mapping) else None
-            )
-            if server_enabled != pref:
-                ok, msg = safety.send_set_floor_enabled(pref)
-                if "floor_set_status" in handles:
-                    handles["floor_set_status"].value = (
-                        "restored: " if ok else "restore failed: "
-                    ) + msg
-        handles["floor_enforce_resent"] = True
+        floor = latest.floor_constraint if latest is not None else None
+        server_enabled = (
+            bool(floor.get("enabled", False)) if isinstance(floor, Mapping) else None
+        )
+        attempts = handles.get("floor_enforce_resend_attempts", 0)
+        if not isinstance(pref, bool) or server_enabled == pref or attempts >= 50:
+            handles["floor_enforce_resent"] = True
+        else:
+            ok, msg = safety.send_set_floor_enabled(pref)
+            handles["floor_enforce_resend_attempts"] = attempts + 1
+            if "floor_set_status" in handles:
+                handles["floor_set_status"].value = (
+                    "restoring... " if ok else "restore failed: "
+                ) + msg
     if "fk_status" in handles:
         handles["fk_status"].value = _format_fk_status(latest, stale=stale)
     if "tcp_tracking" in handles:

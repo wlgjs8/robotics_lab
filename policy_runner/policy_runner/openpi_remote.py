@@ -322,6 +322,9 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self.gripper_open_percent = 50.0
         self.gripper_close_percent = 7.0
         self.gripper_binary_threshold = 50.0
+        # Close-snap deadzone: a mapped opening percent below this snaps to 0
+        # (fully closed). main.py overrides from --gripper-close-snap-percent.
+        self.gripper_close_snap_percent = 0.0
         self.stderr = stderr
         self.device = device
         self.stats: dict[str, Any] = {}

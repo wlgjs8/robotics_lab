@@ -42,6 +42,7 @@ def _make_source(
     close_percent: float = 7.0,
     binary_threshold: float = 50.0,
     open_hold_steps: int = 0,
+    close_snap_percent: float = 0.0,
 ) -> "FlowMatchingActionSource":
     assert FlowMatchingActionSource is not None
     source = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
@@ -60,6 +61,7 @@ def _make_source(
     source.gripper_open_percent = float(open_percent)
     source.gripper_close_percent = float(close_percent)
     source.gripper_binary_threshold = float(binary_threshold)
+    source.gripper_close_snap_percent = float(close_snap_percent)
     source.gripper_open_hold_steps = int(open_hold_steps)
     source._gripper_integrate_count = 0
     source._gripper_hold_open_now = False
@@ -109,6 +111,34 @@ class GripperActionModeTest(unittest.TestCase):
         source._dispatch_gripper_step(_step(18.0, 88.0))
         values = [r.command.value for r in source.gripper_runtime.results]
         self.assertEqual(values, [17.0, 87.0])
+
+    def test_close_snap_collapses_near_closed_absolute_target(self) -> None:
+        # close-snap=10: a mapped opening strictly below 10% snaps to 0 (fully
+        # closed); values at/above the threshold pass through unchanged.
+        source = _make_source(absolute=True, close_snap_percent=10.0)
+        targets = source._integrate_gripper_targets(_step(8.0, 10.0), payload={})
+        self.assertAlmostEqual(targets["left"], 0.0)    # 8 < 10 -> snap closed
+        self.assertAlmostEqual(targets["right"], 10.0)  # 10 not < 10 -> kept
+
+    def test_close_snap_collapses_near_closed_dispatch_value(self) -> None:
+        source = _make_source(absolute=True, close_snap_percent=10.0)
+        source._dispatch_gripper_step(_step(8.0, 42.0))
+        values = [r.command.value for r in source.gripper_runtime.results]
+        self.assertEqual(values, [0.0, 42.0])  # left snaps to closed, right unchanged
+
+    def test_close_snap_applies_after_close_bias(self) -> None:
+        # The bias lands the opening just under the snap threshold -> closes fully.
+        source = _make_source(absolute=True, close_snap_percent=10.0)
+        source.gripper_close_bias = 3.0
+        targets = source._integrate_gripper_targets(_step(12.0, 0.0), payload={})
+        self.assertAlmostEqual(targets["left"], 0.0)   # 12 - 3 = 9 < 10 -> snap
+        self.assertAlmostEqual(targets["right"], 0.0)
+
+    def test_close_snap_off_by_default_keeps_small_openings(self) -> None:
+        source = _make_source(absolute=True)  # close_snap_percent defaults 0 (off)
+        targets = source._integrate_gripper_targets(_step(8.0, 3.0), payload={})
+        self.assertAlmostEqual(targets["left"], 8.0)
+        self.assertAlmostEqual(targets["right"], 3.0)
 
     def test_close_bias_ignored_in_delta_mode(self) -> None:
         source = _make_source(absolute=False)

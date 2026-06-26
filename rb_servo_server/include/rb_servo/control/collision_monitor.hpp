@@ -226,6 +226,19 @@ public:
     // Latest published verdict (atomic load, no blocking, no compute).
     CollisionVerdict latest() const;
 
+    // Runtime reposition of the injected "ground_plane" whole-arm floor box so it
+    // tracks the operator's active viser floor (see ground_plane.follow_safety_floors).
+    // `enabled=false` moves the box far below (inert: no pair ever near it). When
+    // enabled, the box top face is placed at `point` with `normal` as its up axis (a
+    // tilted user floor tilts the box). Cheap (mutex-guarded store); the monitor thread
+    // applies it before its next distance eval. No-op if the model has no ground_plane.
+    // Safe to call from servo_j. `normal` must be (near) unit and is used as-is.
+    void setGroundPlanePose(bool enabled, const Eigen::Vector3d& point,
+                            const Eigen::Vector3d& normal);
+
+    // True if the model contains a "ground_plane" geometry (i.e. it can be tracked).
+    bool hasGroundPlane() const;
+
     // Run one evaluation synchronously on the calling thread (startup / tests).
     CollisionVerdict evalOnce(const JointArray& left_deg, const JointArray& right_deg);
 

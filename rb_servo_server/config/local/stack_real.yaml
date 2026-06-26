@@ -130,10 +130,10 @@ safety:
     # 체크는 팔당 5점(TCP+팁 4)이며, 최종 FK backstop뿐 아니라
     # TcpTwistLocal/TcpTwistStand의 streaming floor projection도 같은 점들을 쓴다.
     tcp_offset_points:
-      - { name: gripper_tip_a_yp, offset_m: [ 0.059,  0.012, 0.0 ] }
-      - { name: gripper_tip_a_yn, offset_m: [ 0.059, -0.012, 0.0 ] }
-      - { name: gripper_tip_b_yp, offset_m: [-0.059,  0.012, 0.0 ] }
-      - { name: gripper_tip_b_yn, offset_m: [-0.059, -0.012, 0.0 ] }
+      - { name: gripper_tip_a_yp, offset_m: [ 0.057,  0.012, 0.0 ] }
+      - { name: gripper_tip_a_yn, offset_m: [ 0.057, -0.012, 0.0 ] }
+      - { name: gripper_tip_b_yp, offset_m: [-0.057,  0.012, 0.0 ] }
+      - { name: gripper_tip_b_yn, offset_m: [-0.057, -0.012, 0.0 ] }
   # Stand-frame ROI box (workspace limit), viser "Safety ROI box"에서 조정.
   # enable=true라야 viser Send가 허용된다(서버가 enabled 보고). bounds/면(face)
   # velocity-damper/fail-closed/escape 로직은 전부 C++ 서버(config-driven)이고
@@ -155,10 +155,10 @@ safety:
     # floor_constraint와 동일한 PIKA 그리퍼 팁 4점(TCP 프레임 x±59.0mm, y±20.0mm).
     # 박스 6면 체크는 팔당 5점(TCP+팁 4)을 사용한다.
     tcp_offset_points:
-      - { name: gripper_tip_a_yp, offset_m: [ 0.059,  0.012, 0.0 ] }
-      - { name: gripper_tip_a_yn, offset_m: [ 0.059, -0.012, 0.0 ] }
-      - { name: gripper_tip_b_yp, offset_m: [-0.059,  0.012, 0.0 ] }
-      - { name: gripper_tip_b_yn, offset_m: [-0.059, -0.012, 0.0 ] }
+      - { name: gripper_tip_a_yp, offset_m: [ 0.057,  0.012, 0.0 ] }
+      - { name: gripper_tip_a_yn, offset_m: [ 0.057, -0.012, 0.0 ] }
+      - { name: gripper_tip_b_yp, offset_m: [-0.057,  0.012, 0.0 ] }
+      - { name: gripper_tip_b_yn, offset_m: [-0.057, -0.012, 0.0 ] }
   # User-defined TILTED floor plane (viser "User Safety Floor"). enable=true라야
   # viser Send가 허용된다(서버가 enabled 보고). 초기 평면은 비워둠(has_initial_plane
   # false) → viser에서 양팔 접촉점 ≥3 캡처 후 Fit & Apply 하기 전까지는 inert.
@@ -231,10 +231,20 @@ safety:
       # avoids this box too.
       ground_plane:
         enable: true
-        z_m: 0.0095             # == floor_constraint.z_min_m (real table surface)
+        z_m: 0.001             # startup/fallback top face (used until a floor drives it)
         size_m: [4.0, 4.0]      # lateral extents [Lx, Ly]
         thickness_m: 0.10
         parent_frame: world
+        # 2026-06-26: whole-arm floor now TRACKS the operator's active viser floor
+        # instead of a fixed z_m: User Safety Floor plane when it is active, else the
+        # Stand Safety Floor (horizontal at its runtime z), else OFF (box parked far
+        # below, inert) when neither is active. So disabling both floors in viser also
+        # drops the whole-arm floor — the gripper/links can then descend to the table
+        # (limited only by arm<->arm / arm<->stand self-collision). The InitMotion
+        # planner keeps its own static copy (z_m above) and stays conservative.
+        # NOTE: a large User-floor tilt + this 4x4 m box raises the far edges; keep the
+        # captured user floor near-level or reduce size_m if links sit far off-center.
+        follow_safety_floors: true
 
   # Collision-free InitMotion planner (requires self_collision.enable — the mesh
   # model is the planner's collision+floor oracle). A ControlMode::InitMotion command

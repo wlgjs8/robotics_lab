@@ -330,6 +330,15 @@ struct SelfCollisionConfig {
             std::array<double, 2> size_m{4.0, 4.0};  // lateral full extents [Lx, Ly] (m)
             double thickness_m = 0.10;         // box thickness below z_m (m)
             std::string parent_frame = "world";  // static frame (world/stand)
+            // When true the whole-arm floor box is no longer a static plane at z_m:
+            // the servo loop drives its pose at runtime to track the OPERATOR's active
+            // viser floor — the user floor plane when userFloorActive(), else the stand
+            // floor (horizontal at effectiveFloorZ()) when floorConstraintActive(), and
+            // disabled (moved far below, inert) when NEITHER is active. Requires
+            // enable=true (the box geometry must still be built at startup to be moved).
+            // z_m is then only the startup/fallback height. NOTE: the InitMotion planner
+            // keeps its own static copy (config plane), so it stays conservative.
+            bool follow_safety_floors = false;
         };
         GroundPlaneConfig ground_plane;
     };

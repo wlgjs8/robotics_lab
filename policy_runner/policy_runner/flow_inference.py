@@ -449,6 +449,11 @@ class FlowMatchingActionSource:
         self.gripper_open_percent = 50.0
         self.gripper_close_percent = 7.0
         self.gripper_binary_threshold = 50.0
+        # ABSOLUTE close-snap deadzone: a mapped opening percent below this snaps
+        # to 0 (fully closed), so small near-closed policy jitter does not leave
+        # the jaw cracked open. 0 = off. Absolute (non-binary) mode only. Set from
+        # the `--gripper-close-snap-percent` CLI flag in main.py.
+        self.gripper_close_snap_percent = 0.0
         # ROTATION-AXIS MASK: per-axis gate over the policy's per-arm rotation
         # action (rx, ry, rz at action indices 3/4/5 and 10/11/12). Each entry
         # True keeps that axis, False zeros it before the action is applied so the
@@ -940,7 +945,14 @@ class FlowMatchingActionSource:
                 else float(getattr(self, "gripper_close_percent", 7.0))
             )
             return float(np.clip(target, 0.0, 100.0))
-        return float(np.clip(float(raw_percent) - self._gripper_close_bias(), 0.0, 100.0))
+        mapped = float(np.clip(float(raw_percent) - self._gripper_close_bias(), 0.0, 100.0))
+        # Close-snap deadzone: collapse a near-closed opening to fully closed so
+        # small policy jitter near the closed end doesn't leave the jaw cracked
+        # open. 0 = off; absolute (non-binary) mode only.
+        snap = float(getattr(self, "gripper_close_snap_percent", 0.0) or 0.0)
+        if snap > 0.0 and mapped < snap:
+            return 0.0
+        return mapped
 
     def _gripper_hold_open_value(self) -> float:
         """Opening percent commanded while holding the gripper open during the
