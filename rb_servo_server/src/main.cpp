@@ -64,6 +64,9 @@ int main(int argc, char** argv) {
             config,
             [&servo_loop]() {
                 return servo_loop.latestSnapshot();
+            },
+            [&servo_loop](rb_servo::ArmId arm, double percent, bool valid) {
+                servo_loop.setGripperFeedback(arm, percent, valid);
             }
         );
 

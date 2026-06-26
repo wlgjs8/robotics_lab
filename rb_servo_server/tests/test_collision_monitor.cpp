@@ -393,6 +393,61 @@ static bool runGroundPlane() {
     return true;
 }
 
+// External-collision category: the arm<->ground_plane pair is flagged `external` and
+// gated by external_d_hard_m, NOT the (robot) self d_hard. The SAME floor clearance is a
+// hard violation or not depending purely on the external d_hard.
+static bool runExternalDHard() {
+    const fs::path ws = workspaceRoot();
+    CollisionMonitorConfig base = makeConfig(ws);
+    if (!fs::is_regular_file(base.unified_urdf)) {
+        std::cout << "SKIP: unified URDF not found (external d_hard test)\n";
+        return true;
+    }
+    ExtraCollisionShape gp;
+    gp.name = "ground_plane";
+    gp.shape = "box";
+    gp.parent_frame = base.stand_frame;
+    gp.size_m = {4.0, 4.0, 0.10};
+    gp.xyz_m = {0.0, 0.0, 0.001 - 0.05};
+    base.extra_collision.push_back(gp);
+
+    const JointArray init = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+
+    // Measure the lowest arm/gripper point's height above a z=0 floor.
+    CollisionMonitor m0(base);
+    m0.setGroundPlanePose(true, Eigen::Vector3d::Zero(), Eigen::Vector3d::UnitZ());
+    const CollisionVerdict v0 = m0.evalOnce(init, init);
+    const double H = v0.external_min_clearance_m;  // lowest point height above z=0
+    RB_CHECK(std::isfinite(H) && H > 0.010);
+    const double z_top = H - 0.005;  // floor top 5 mm below that point -> ~5 mm clearance
+
+    // Self d_hard large (20 mm), external d_hard tiny (2 mm): the floor pair at ~5 mm is
+    // NOT a hard violation (5 mm > 2 mm) even though it is well inside the self d_hard.
+    CollisionMonitorConfig cA = base;
+    cA.d_hard_m = 0.020;
+    cA.external_d_hard_m = 0.002;
+    CollisionMonitor mA(cA);
+    mA.setGroundPlanePose(true, Eigen::Vector3d(0.0, 0.0, z_top), Eigen::Vector3d::UnitZ());
+    const CollisionVerdict vA = mA.evalOnce(init, init);
+    RB_CHECK(!vA.near.empty());
+    RB_CHECK(vA.near.front().external);  // closest pair is the floor, flagged external
+    RB_CHECK(std::abs(vA.external_min_clearance_m - 0.005) < 0.0015);
+    RB_CHECK(std::isfinite(vA.self_min_clearance_m) && vA.self_min_clearance_m > 0.020);
+    RB_CHECK(!vA.hard_violation);  // governed by external d_hard (2 mm), not self (20 mm)
+
+    // Same geometry/clearance, external d_hard raised to 10 mm (> 5 mm): now the floor
+    // pair IS a hard violation — proving the external d_hard alone governs floor pairs.
+    CollisionMonitorConfig cB = base;
+    cB.external_d_hard_m = 0.010;
+    CollisionMonitor mB(cB);
+    mB.setGroundPlanePose(true, Eigen::Vector3d(0.0, 0.0, z_top), Eigen::Vector3d::UnitZ());
+    const CollisionVerdict vB = mB.evalOnce(init, init);
+    RB_CHECK(vB.hard_violation);
+    std::cout << "external d_hard: floor clearance=" << vA.external_min_clearance_m * 1000.0
+              << "mm  hard@2mm=" << vA.hard_violation << " hard@10mm=" << vB.hard_violation << "\n";
+    return true;
+}
+
 int main() {
     if (!runProjection()) {
         std::cerr << "test_collision_monitor (projection) FAILED\n";
@@ -400,6 +455,10 @@ int main() {
     }
     if (!runGroundPlane()) {
         std::cerr << "test_collision_monitor (ground_plane) FAILED\n";
+        return 1;
+    }
+    if (!runExternalDHard()) {
+        std::cerr << "test_collision_monitor (external d_hard) FAILED\n";
         return 1;
     }
     if (!run()) {

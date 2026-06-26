@@ -77,7 +77,8 @@ struct InitMotionPlanner::Impl {
     InitMotionPlannerConfig cfg;
     JointArray q_min_deg{};
     JointArray q_max_deg{};
-    double clear_threshold_m = 0.0;  // d_hard + collision_margin
+    double clear_threshold_m = 0.0;           // self d_hard + collision_margin
+    double external_clear_threshold_m = 0.0;  // external d_hard + collision_margin
     std::unique_ptr<CollisionMonitor> oracle;
     std::mt19937 rng;
     // Private IK/FK for collision-free TcpLinearMove (own pinocchio Data; never the
@@ -97,6 +98,10 @@ struct InitMotionPlanner::Impl {
         : cfg(planner_cfg), q_min_deg(qmin), q_max_deg(qmax), rng(planner_cfg.seed),
           kin(std::move(kinematics)), left_mount(lmount), right_mount(rmount) {
         clear_threshold_m = monitor_cfg.d_hard_m + cfg.collision_margin_m;
+        // External obstacles (the floor / ground_plane) plan to their own tighter
+        // d_hard so InitMotion can approach the floor closer than it keeps the robot
+        // from itself, matching the runtime external barrier.
+        external_clear_threshold_m = monitor_cfg.external_d_hard_m + cfg.collision_margin_m;
         // Endpoint-only eval: the planner does its own dense edge sampling, so the
         // private oracle must not sweep between arbitrary RRT node checks.
         monitor_cfg.swept_samples = 1;
@@ -116,7 +121,12 @@ struct InitMotionPlanner::Impl {
         JointArray l{}, r{};
         split(c, &l, &r);
         const CollisionVerdict v = oracle->evalOnce(l, r);
-        return !v.hard_violation && v.min_clearance_m > clear_threshold_m;
+        // Per-category clearance gate: self pairs (robot<->robot/stand) keep the self
+        // planning margin; external pairs (arm<->floor) use the tighter external one.
+        // hard_violation is already per-category (each pair vs its own d_hard).
+        return !v.hard_violation &&
+               v.self_min_clearance_m > clear_threshold_m &&
+               v.external_min_clearance_m > external_clear_threshold_m;
     }
 
     // Validate the open segment (from, to]; the `from` endpoint is intentionally
@@ -404,6 +414,15 @@ InitMotionLinearResult InitMotionPlanner::planLinearMove(
             return res;
         }
         res.goal_right = ik.q_solution_deg;
+    }
+
+    // Diagnostic: how far the IK'd goal is from the current pose. ~0 means the requested
+    // TCP target equals the current TCP (marker following current) -> a near no-op move.
+    for (int i = 0; i < kDof; ++i) {
+        res.goal_vs_start_max_deg = std::max(res.goal_vs_start_max_deg,
+            std::abs(res.goal_left[i] - start_left[i]));
+        res.goal_vs_start_max_deg = std::max(res.goal_vs_start_max_deg,
+            std::abs(res.goal_right[i] - start_right[i]));
     }
 
     // Straight Cartesian-path feasibility: sample the exact MoveL path, per-sample IK

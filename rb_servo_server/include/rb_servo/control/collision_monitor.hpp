@@ -86,7 +86,10 @@ struct CollisionMonitorConfig {
     // ticks. 1 = endpoint only (no sweep). >=2 adds interior samples.
     int swept_samples = 2;  // 1=endpoint, >=2 sweeps (cost ~x per sample)
 
-    // ---- shared velocity-barrier params (common to ALL primitives) ----
+    // ---- SELF-collision velocity-barrier params (robot<->robot / robot<->stand) ----
+    // Common to ALL primitives. EXTERNAL-obstacle pairs (the floor / ground_plane —
+    // see external_* below) use their own set so the floor can be approached closer
+    // than the robot approaches itself.
     double d_hard_m = 0.005;       // hard floor: never cross; clamp_hold below this
     double d_slow_m = 0.025;       // above this clearance the barrier is inactive
     double a_brake_m_s2 = 4.0;     // emergency decel the barrier assumes
@@ -103,6 +106,19 @@ struct CollisionMonitorConfig {
 
     int max_near_pairs = 8;        // how many closest pairs to report in a verdict
     std::vector<ExtraCollisionShape> extra_collision;  // non-URDF geometry (camera/table/...)
+
+    // ---- EXTERNAL-collision velocity-barrier params ----
+    // Applied to pairs flagged external in the verdict (currently arm<->ground_plane,
+    // the whole-arm floor). Kept fully separate from the self-collision set above so
+    // the floor — a known flat surface the operator approaches deliberately — can be
+    // cleared by a smaller margin than the robot keeps from itself. Defaults mirror the
+    // self set except for a tighter d_hard.
+    double external_d_hard_m = 0.003;
+    double external_d_slow_m = 0.025;
+    double external_a_brake_m_s2 = 4.0;
+    double external_hyst_m = 0.005;
+    double external_recover_speed_m_s = 0.0;
+    double external_latency_s = 0.010;
 };
 
 // One reported near pair (witness points + approach direction in stand frame).
@@ -115,6 +131,9 @@ struct CollisionNearPair {
     Eigen::Vector3d n = Eigen::Vector3d::Zero();  // unit a->b
     std::string name_a;
     std::string name_b;
+    // True if this is an arm<->EXTERNAL-obstacle pair (the floor / ground_plane), which
+    // uses the external_* barrier params (smaller d_hard) instead of the self set.
+    bool external = false;
     // Per-pair clearance Jacobian rows (Stage 1): d(clearance)/dt = J_n * qdot,
     // split into this command's actuated left/right joint columns (command order,
     // idx_v mapping). For an arm<->stand pair only the arm's row is non-zero, so the
@@ -131,6 +150,12 @@ struct CollisionVerdict {
     double stamp_s = 0.0;                   // monotonic time the snapshot was taken
     bool valid = false;                     // false until first eval
     double min_clearance_m = std::numeric_limits<double>::infinity();
+    // Per-category minima (the smaller of the two drives min_clearance_m). Self =
+    // robot<->robot/stand; external = arm<->floor/obstacle. Each is compared against its
+    // own d_hard for hard_violation and used by the InitMotion planner's per-category
+    // clearance gate.
+    double self_min_clearance_m = std::numeric_limits<double>::infinity();
+    double external_min_clearance_m = std::numeric_limits<double>::infinity();
     // Signed rate of the CURRENTLY-critical (global-min) pair's clearance, tracked
     // per-pair so a switch of which pair is closest does not corrupt it.
     // + = separating, - = approaching.

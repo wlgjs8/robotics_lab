@@ -589,6 +589,51 @@ bool testFloorConstraintInvalidConfigRejects() {
     return true;
 }
 
+bool testFloorCheckPointOffsetClosedParses() {
+    // offset_closed_m is optional: present -> has_closed + both stored; absent ->
+    // mirror offset_m (static point). enable=false skips the kinematics requirement.
+    const std::string path = writeTempConfig(
+        "floor-offset-closed",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+        "safety:\n"
+        "  floor_constraint:\n"
+        "    enable: false\n"
+        "    tcp_offset_points:\n"
+        "      - { name: tip_a, offset_m: [0.057, 0.012, 0.0], offset_closed_m: [0.010, 0.012, 0.0] }\n"
+        "      - { name: tip_b, offset_m: [-0.057, -0.012, 0.0] }\n"
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+    ::unlink(path.c_str());
+    const auto& pts = cfg.safety.floor_constraint.tcp_offset_points;
+    RB_CHECK(pts.size() == 2);
+    RB_CHECK(pts[0].name == "tip_a");
+    RB_CHECK(pts[0].has_closed);
+    RB_CHECK(near(pts[0].offset_m[0], 0.057));
+    RB_CHECK(near(pts[0].offset_closed_m[0], 0.010));
+    // Absent offset_closed_m mirrors offset_m and is flagged static (identity interp).
+    RB_CHECK(!pts[1].has_closed);
+    RB_CHECK(near(pts[1].offset_closed_m[0], -0.057));
+    RB_CHECK(near(pts[1].offset_closed_m[1], -0.012));
+
+    // Malformed offset_closed_m (wrong length) is rejected at parse time.
+    const std::string bad = writeTempConfig(
+        "floor-offset-closed-bad",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+        "safety:\n"
+        "  floor_constraint:\n"
+        "    enable: false\n"
+        "    tcp_offset_points:\n"
+        "      - { name: tip_a, offset_m: [0.057, 0.012, 0.0], offset_closed_m: [0.010, 0.012] }\n"
+    );
+    RB_CHECK(loadRejects(bad));
+    ::unlink(bad.c_str());
+    return true;
+}
+
 bool testRoiBoxConfigParsesAndDefaults() {
     // Values parse (enable=false skips the kinematics requirement).
     const std::string path = writeTempConfig(
@@ -709,6 +754,7 @@ int main() {
     if (!testStatePublisherEndpointsParseAndValidate()) return 1;
     if (!testFloorConstraintConfigParsesAndDefaults()) return 1;
     if (!testFloorConstraintInvalidConfigRejects()) return 1;
+    if (!testFloorCheckPointOffsetClosedParses()) return 1;
     if (!testRoiBoxConfigParsesAndDefaults()) return 1;
     if (!testRoiBoxInvalidConfigRejects()) return 1;
     return 0;

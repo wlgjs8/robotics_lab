@@ -129,11 +129,16 @@ safety:
     # TCP가 회전했을 때 팁이 TCP 점보다 아래로 내려가는 케이스를 잡는다.
     # 체크는 팔당 5점(TCP+팁 4)이며, 최종 FK backstop뿐 아니라
     # TcpTwistLocal/TcpTwistStand의 streaming floor projection도 같은 점들을 쓴다.
+    # 2026-06-26: 그리퍼 개폐에 따라 팁이 jaw축(TCP x)으로 모이므로 offset_m(완전
+    # 개방, percent=100)과 offset_closed_m(완전 닫힘, percent=0) 사이를 실측 그리퍼
+    # 개방률로 선형 보간한다. closed x±0.010 = open x±0.057 − URDF 핑거 travel
+    # 0.047m(rb3_730e_pika_articulated.urdf). ★URDF 유도 기본값이므로 줄자 실측으로
+    # 검증할 것. offset_closed_m 생략 시 정적(개방 고정)=기존 거동.
     tcp_offset_points:
-      - { name: gripper_tip_a_yp, offset_m: [ 0.057,  0.012, 0.0 ] }
-      - { name: gripper_tip_a_yn, offset_m: [ 0.057, -0.012, 0.0 ] }
-      - { name: gripper_tip_b_yp, offset_m: [-0.057,  0.012, 0.0 ] }
-      - { name: gripper_tip_b_yn, offset_m: [-0.057, -0.012, 0.0 ] }
+      - { name: gripper_tip_a_yp, offset_m: [ 0.057,  0.012, 0.0 ], offset_closed_m: [ 0.010,  0.012, 0.0 ] }
+      - { name: gripper_tip_a_yn, offset_m: [ 0.057, -0.012, 0.0 ], offset_closed_m: [ 0.010, -0.012, 0.0 ] }
+      - { name: gripper_tip_b_yp, offset_m: [-0.057,  0.012, 0.0 ], offset_closed_m: [-0.010,  0.012, 0.0 ] }
+      - { name: gripper_tip_b_yn, offset_m: [-0.057, -0.012, 0.0 ], offset_closed_m: [-0.010, -0.012, 0.0 ] }
   # Stand-frame ROI box (workspace limit), viser "Safety ROI box"에서 조정.
   # enable=true라야 viser Send가 허용된다(서버가 enabled 보고). bounds/면(face)
   # velocity-damper/fail-closed/escape 로직은 전부 C++ 서버(config-driven)이고
@@ -152,13 +157,14 @@ safety:
     # 면 접근 시 √(2·a_brake·margin)로 감속 — a_brake↓ + 밴드↑ = 가장자리 jerk↓.
     a_brake_m_s2: 3.0
     d_slow_m: 0.06
-    # floor_constraint와 동일한 PIKA 그리퍼 팁 4점(TCP 프레임 x±59.0mm, y±20.0mm).
-    # 박스 6면 체크는 팔당 5점(TCP+팁 4)을 사용한다.
+    # floor_constraint와 동일한 PIKA 그리퍼 팁 4점. offset_closed_m으로 그리퍼
+    # 개폐를 실측 개방률 선형 보간(floor_constraint 주석 참조). 박스 6면 체크는
+    # 팔당 5점(TCP+팁 4)을 사용하며, 각 면은 보간된 점들 중 가장 노출된 점에 binds.
     tcp_offset_points:
-      - { name: gripper_tip_a_yp, offset_m: [ 0.057,  0.012, 0.0 ] }
-      - { name: gripper_tip_a_yn, offset_m: [ 0.057, -0.012, 0.0 ] }
-      - { name: gripper_tip_b_yp, offset_m: [-0.057,  0.012, 0.0 ] }
-      - { name: gripper_tip_b_yn, offset_m: [-0.057, -0.012, 0.0 ] }
+      - { name: gripper_tip_a_yp, offset_m: [ 0.057,  0.012, 0.0 ], offset_closed_m: [ 0.010,  0.012, 0.0 ] }
+      - { name: gripper_tip_a_yn, offset_m: [ 0.057, -0.012, 0.0 ], offset_closed_m: [ 0.010, -0.012, 0.0 ] }
+      - { name: gripper_tip_b_yp, offset_m: [-0.057,  0.012, 0.0 ], offset_closed_m: [-0.010,  0.012, 0.0 ] }
+      - { name: gripper_tip_b_yn, offset_m: [-0.057, -0.012, 0.0 ], offset_closed_m: [-0.010, -0.012, 0.0 ] }
   # User-defined TILTED floor plane (viser "User Safety Floor"). enable=true라야
   # viser Send가 허용된다(서버가 enabled 보고). 초기 평면은 비워둠(has_initial_plane
   # false) → viser에서 양팔 접촉점 ≥3 캡처 후 Fit & Apply 하기 전까지는 inert.
@@ -245,6 +251,18 @@ safety:
         # NOTE: a large User-floor tilt + this 4x4 m box raises the far edges; keep the
         # captured user floor near-level or reduce size_m if links sit far off-center.
         follow_safety_floors: true
+      # 2026-06-26: EXTERNAL collision (arm<->floor/ground_plane) is now its own category,
+      # separate from robot self-collision (arm<->arm / arm<->stand). It uses this barrier
+      # set instead of the self d_hard above, so the gripper can approach the floor closer
+      # (3 mm) than the robot keeps from itself (7 mm). The InitMotion planner applies the
+      # same external d_hard to floor pairs (vs self pairs at the self margin).
+      external:
+        d_hard_m: 0.003
+        d_slow_m: 0.025
+        a_brake_m_s2: 3.0
+        hyst_m: 0.010
+        recover_speed_m_s: 0.0
+        latency_s: 0.003
 
   # Collision-free InitMotion planner (requires self_collision.enable — the mesh
   # model is the planner's collision+floor oracle). A ControlMode::InitMotion command

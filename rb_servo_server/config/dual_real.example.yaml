@@ -98,6 +98,17 @@ safety:
   #   runtime_max_z_m: 0.5
   #   fail_policy: fault_latch
   #   monitor_only: false
+  #   # Extra TCP-frame check points (e.g. the gripper fingertips), checked in
+  #   # addition to the TCP itself. offset_m is the gripper-OPEN position
+  #   # (percent=100); the OPTIONAL offset_closed_m is the gripper-CLOSED position
+  #   # (percent=0). At runtime each point is linearly interpolated by the live
+  #   # gripper open percent (offset = closed + t*(open-closed), t=pct/100), so the
+  #   # checked fingertips track the actual jaw geometry. Omit offset_closed_m for a
+  #   # static point (= legacy fixed-open behavior). Invalid/absent gripper feedback
+  #   # falls back to the OPEN offsets. Same schema for roi/reach/user_floor below.
+  #   # tcp_offset_points:
+  #   #   - { name: tip_a, offset_m: [ 0.057, 0.012, 0.0], offset_closed_m: [ 0.010, 0.012, 0.0] }
+  #   #   - { name: tip_b, offset_m: [-0.057, 0.012, 0.0], offset_closed_m: [-0.010, 0.012, 0.0] }
 
   # Stand-frame axis-aligned ROI box (workspace limit): the TCP of either arm
   # must stay inside [min_m, max_m] (stand frame). Independent of
@@ -119,8 +130,8 @@ safety:
   #   # Optional extra check points in the TCP frame (e.g. gripper fingertips);
   #   # every face binds on the most-exposed point.
   #   # tcp_offset_points:
-  #   #   - { name: tip_a, offset_m: [0.054, 0.0, 0.0] }
-  #   #   - { name: tip_b, offset_m: [-0.054, 0.0, 0.0] }
+  #   #   - { name: tip_a, offset_m: [ 0.054, 0.0, 0.0], offset_closed_m: [ 0.007, 0.0, 0.0] }
+  #   #   - { name: tip_b, offset_m: [-0.054, 0.0, 0.0], offset_closed_m: [-0.007, 0.0, 0.0] }
 
   # Reachable-workspace shell (reach limit): the TCP of either arm must stay in
   # the spherical shell r_min_m <= ||tcp - arm_base|| <= r_max_m (base = the
@@ -143,8 +154,8 @@ safety:
   #   a_brake_m_s2: 4.0
   #   d_slow_m: 0.05
   #   # tcp_offset_points:
-  #   #   - { name: tip_a, offset_m: [0.054, 0.0, 0.0] }
-  #   #   - { name: tip_b, offset_m: [-0.054, 0.0, 0.0] }
+  #   #   - { name: tip_a, offset_m: [ 0.054, 0.0, 0.0], offset_closed_m: [ 0.007, 0.0, 0.0] }
+  #   #   - { name: tip_b, offset_m: [-0.054, 0.0, 0.0], offset_closed_m: [-0.007, 0.0, 0.0] }
 
   # User-defined TILTED floor plane (viser "User Safety Floor"), for a physical
   # floor that is not parallel to the stand z=0 plane. enable=true lets the operator
@@ -164,8 +175,8 @@ safety:
   #   a_brake_m_s2: 4.0
   #   d_slow_m: 0.05
   #   # tcp_offset_points: (same gripper-tip points as floor_constraint)
-  #   #   - { name: tip_a, offset_m: [0.054, 0.0, 0.0] }
-  #   #   - { name: tip_b, offset_m: [-0.054, 0.0, 0.0] }
+  #   #   - { name: tip_a, offset_m: [ 0.054, 0.0, 0.0], offset_closed_m: [ 0.007, 0.0, 0.0] }
+  #   #   - { name: tip_b, offset_m: [-0.054, 0.0, 0.0], offset_closed_m: [-0.007, 0.0, 0.0] }
 
   # URDF-mesh self-collision guard (async monitor + shared velocity barrier). See
   # the active local configs for the full mesh block. Two additions enable the

@@ -306,6 +306,11 @@ _USER_FLOOR_PLANE_RED = (220, 60, 60)
 _USER_FLOOR_PLANE_DIMENSIONS = (0.8, 0.8, 0.002)
 _USER_FLOOR_POINT_LEFT = (60, 210, 230)
 _USER_FLOOR_POINT_RIGHT = (230, 90, 210)
+# Boundary emphasis for the tilted user floor, mirroring the stand floor / ROI box:
+# opaque edges + corner vertices over the translucent fill. Brighter than the fill;
+# recolor red together with the fill on violation.
+_USER_FLOOR_EDGE_PURPLE = (200, 160, 255)
+_USER_FLOOR_EDGE_RED = (255, 120, 120)
 
 # Floor/ROI collision check points (safety.floor_constraint.tcp_offset_points):
 # the exact samples the server's floor/ROI guards FK-check against the plane —
@@ -313,19 +318,52 @@ _USER_FLOOR_POINT_RIGHT = (230, 90, 210)
 # fingertips). Offsets are expressed in the TCP body frame, so the point cloud is
 # parented under /stand/<arm>_tcp and inherits the live TCP pose for free (no
 # per-tick transform math in the GUI). Mirrors the 4-point set in the real stack
-# config (rb_servo_server/config/local/stack_real.yaml: x +/-0.059, y +/-0.012);
+# config (rb_servo_server/config/local/stack_real.yaml: x +/-0.057, y +/-0.012);
 # the leading (0,0,0) is the TCP point. The GUI is a pure network client and the
 # server does not publish these offsets, so they live here as a constant — keep
-# in sync with floor_constraint.tcp_offset_points if the gripper geometry changes.
-# Rendered as orange dots, hidden until the operator enables the GUI toggle.
+# BOTH the open and closed sets in sync with floor_constraint.tcp_offset_points
+# (offset_m / offset_closed_m) if the gripper geometry changes.
+#
+# The server interpolates each fingertip between its gripper-OPEN (offset_m) and
+# gripper-CLOSED (offset_closed_m) position by the live gripper open percent;
+# update_floor_check_points() mirrors that here so the orange dots track the jaws.
+# CLOSED set: x +/-0.010 = open x +/-0.057 - URDF finger travel 0.047 m (jaw axis
+# = TCP x); the TCP point and y/z stay put. Rendered as orange dots, hidden until
+# the operator enables the GUI toggle.
 _FLOOR_CHECK_POINT_ORANGE = (255, 140, 0)
 _FLOOR_CHECK_POINTS_TCP_FRAME = (
     (0.0, 0.0, 0.0),        # tcp (the TCP point checked against the floor)
-    (0.059, 0.012, 0.0),    # gripper_tip_a_yp
-    (0.059, -0.012, 0.0),   # gripper_tip_a_yn
-    (-0.059, 0.012, 0.0),   # gripper_tip_b_yp
-    (-0.059, -0.012, 0.0),  # gripper_tip_b_yn
+    (0.057, 0.012, 0.0),    # gripper_tip_a_yp (OPEN)
+    (0.057, -0.012, 0.0),   # gripper_tip_a_yn (OPEN)
+    (-0.057, 0.012, 0.0),   # gripper_tip_b_yp (OPEN)
+    (-0.057, -0.012, 0.0),  # gripper_tip_b_yn (OPEN)
 )
+_FLOOR_CHECK_POINTS_TCP_FRAME_CLOSED = (
+    (0.0, 0.0, 0.0),        # tcp (unchanged)
+    (0.010, 0.012, 0.0),    # gripper_tip_a_yp (CLOSED)
+    (0.010, -0.012, 0.0),   # gripper_tip_a_yn (CLOSED)
+    (-0.010, 0.012, 0.0),   # gripper_tip_b_yp (CLOSED)
+    (-0.010, -0.012, 0.0),  # gripper_tip_b_yn (CLOSED)
+)
+
+
+def _interpolated_floor_check_points(gripper_percent: float | None) -> "np.ndarray":
+    """Floor/ROI check points in the TCP frame, linearly interpolated between the
+    gripper-OPEN and gripper-CLOSED sets by the gripper open percent (0..100),
+    matching the server's interpolateOffsetPoints: p = closed + t*(open-closed),
+    t = clamp(pct,0,100)/100. None/invalid percent -> OPEN (the conservative
+    fallback the server uses for absent gripper feedback)."""
+    import numpy as np
+
+    open_pts = np.asarray(_FLOOR_CHECK_POINTS_TCP_FRAME, dtype=np.float32)
+    closed_pts = np.asarray(_FLOOR_CHECK_POINTS_TCP_FRAME_CLOSED, dtype=np.float32)
+    if gripper_percent is None:
+        return open_pts
+    try:
+        t = max(0.0, min(100.0, float(gripper_percent))) / 100.0
+    except (TypeError, ValueError):
+        return open_pts
+    return closed_pts + t * (open_pts - closed_pts)
 
 
 # Reachable-workspace OUTER-SHELL surface (tools/reach_envelope.py output): only
@@ -771,7 +809,12 @@ def update_floor_check_points(scene_handles: dict[str, Any], latest: Any, show: 
     Each arm's points appear only when that arm has a valid actual TCP pose (the
     same gate the TCP frame itself uses), so stale orange dots never linger where
     FK is unavailable. The clouds are children of /stand/<arm>_tcp, so they track
-    the TCP pose without any per-tick repositioning here."""
+    the TCP pose without any per-tick repositioning here.
+
+    While visible, each arm's fingertip points are interpolated to the live gripper
+    open percent (scene_handles["gripper_percent_<arm>"], set by _push_gripper_percent)
+    so the orange dots open/close with the jaws — mirroring the server's
+    interpolateOffsetPoints. Absent percent -> the OPEN set (conservative fallback)."""
     if not isinstance(scene_handles, dict):
         return
     for arm in ("left", "right"):
@@ -788,7 +831,15 @@ def update_floor_check_points(scene_handles: dict[str, Any], latest: Any, show: 
             and actual_pose is not None
             and not getattr(arm_state, "tcp_deferred", True)
         )
-        _set_visible(handle, bool(show) and has_tcp)
+        visible = bool(show) and has_tcp
+        if visible:
+            try:
+                handle.points = _interpolated_floor_check_points(
+                    scene_handles.get(f"gripper_percent_{arm}")
+                )
+            except Exception as exc:
+                scene_handles[f"{arm}_floor_check_points_update_error"] = f"{type(exc).__name__}: {exc}"
+        _set_visible(handle, visible)
 
 
 def _wxyz_from_normal(normal: Any) -> tuple[float, float, float, float]:
@@ -852,6 +903,58 @@ def _add_user_floor_plane(server: Any, handles: dict[str, Any]) -> None:
             )
     except Exception as exc:
         handles["user_floor_points_error"] = f"{type(exc).__name__}: {exc}"
+    # Emphasised boundary (opaque edges + corner vertices), like the stand floor.
+    # The outline geometry is LOCAL (box centered at the node origin); the node's
+    # position + wxyz (set in update_user_floor_plane, same as the fill box) tilt it
+    # onto the fitted plane. Placeholder geometry until then.
+    seg, corners = _roi_box_outline(_USER_FLOOR_PLANE_DIMENSIONS, (0.0, 0.0, 0.0))
+    if hasattr(server.scene, "add_line_segments"):
+        try:
+            handles["user_floor_edges"] = server.scene.add_line_segments(
+                "/stand/user_floor_edges", points=seg, colors=_USER_FLOOR_EDGE_PURPLE,
+                line_width=4.0, visible=False,
+            )
+        except Exception as exc:
+            handles["user_floor_edges_error"] = f"{type(exc).__name__}: {exc}"
+    if hasattr(server.scene, "add_point_cloud"):
+        try:
+            handles["user_floor_verts"] = server.scene.add_point_cloud(
+                "/stand/user_floor_verts", points=corners, colors=_USER_FLOOR_EDGE_PURPLE,
+                point_size=0.02, point_shape="circle", visible=False,
+            )
+        except Exception as exc:
+            handles["user_floor_verts_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def _apply_user_floor_outline(
+    scene_handles: dict[str, Any],
+    pos: tuple[float, ...],
+    wxyz: tuple[float, ...],
+    edge_color: tuple[int, int, int],
+) -> None:
+    """Place/orient/recolor the user-floor edge lines + corner vertices.
+
+    The outline nodes carry LOCAL box geometry; setting their position + wxyz (the
+    same transform as the tilted fill box) lands them on the fitted plane without
+    re-baking the rotated points."""
+    import numpy as np
+
+    col = np.asarray(edge_color, dtype=np.uint8)
+    for key in ("user_floor_edges", "user_floor_verts"):
+        handle = scene_handles.get(key)
+        if handle is None:
+            continue
+        for attr, value in (("position", pos), ("wxyz", wxyz), ("colors", col)):
+            try:
+                setattr(handle, attr, value)
+            except Exception:
+                pass
+        _set_visible(handle, True)
+
+
+def _hide_user_floor_outline(scene_handles: dict[str, Any]) -> None:
+    for key in ("user_floor_edges", "user_floor_verts"):
+        _set_visible(scene_handles.get(key), False)
 
 
 def update_user_floor_plane(
@@ -864,6 +967,7 @@ def update_user_floor_plane(
         return
     if not isinstance(user_floor, Mapping) or not bool(user_floor.get("enabled", False)):
         _set_visible(plane, False)
+        _hide_user_floor_outline(scene_handles)
         return
     point = user_floor.get("point_m")
     normal = user_floor.get("normal")
@@ -872,14 +976,22 @@ def update_user_floor_plane(
         or not isinstance(normal, (list, tuple)) or len(normal) != 3
     ):
         _set_visible(plane, False)
+        _hide_user_floor_outline(scene_handles)
         return
+    wxyz = _wxyz_from_normal(normal)
     try:
         pos = tuple(float(v) for v in point)
-        if not all(math.isfinite(v) for v in pos):
-            _set_visible(plane, False)
-            return
+    except (TypeError, ValueError):
+        _set_visible(plane, False)
+        _hide_user_floor_outline(scene_handles)
+        return
+    if not all(math.isfinite(v) for v in pos):
+        _set_visible(plane, False)
+        _hide_user_floor_outline(scene_handles)
+        return
+    try:
         plane.position = pos
-        plane.wxyz = _wxyz_from_normal(normal)
+        plane.wxyz = wxyz
     except Exception:
         pass
     violated = any(
@@ -891,6 +1003,11 @@ def update_user_floor_plane(
     except Exception:
         pass
     _set_visible(plane, True)
+    # Outline tracks the same tilt/position as the fill; recolor red on violation.
+    _apply_user_floor_outline(
+        scene_handles, pos, wxyz,
+        _USER_FLOOR_EDGE_RED if violated else _USER_FLOOR_EDGE_PURPLE,
+    )
 
 
 def update_user_floor_capture_points(
@@ -1357,6 +1474,12 @@ def _place_capsule(handle: Any, p0: tuple[float, float, float], p1: tuple[float,
 _SELF_COLLISION_NEAR_HARD_RGB = (235, 40, 40)       # clearance < d_hard
 _SELF_COLLISION_NEAR_CAUTION_RGB = (255, 210, 40)   # d_hard <= clearance < d_slow
 _SELF_COLLISION_NEAR_OK_RGB = (70, 200, 90)         # clearance >= d_slow (in viz reach)
+# EXTERNAL pairs (arm<->floor/ground_plane) get a distinct blue/cyan palette so the
+# operator can tell the floor barrier apart from robot self-collision, and are banded
+# against the external d_hard/d_slow (which differ from the self thresholds).
+_EXTERNAL_NEAR_HARD_RGB = (190, 60, 235)            # clearance < external d_hard (violet)
+_EXTERNAL_NEAR_CAUTION_RGB = (60, 200, 235)         # external [d_hard, d_slow) (cyan)
+_EXTERNAL_NEAR_OK_RGB = (60, 110, 235)              # clearance >= external d_slow (blue)
 _SELF_COLLISION_NEAR_RADIUS_M = 0.004
 _SELF_COLLISION_NEAR_OPACITY = 0.9
 
@@ -1397,10 +1520,12 @@ def _ensure_near_pair_handle(
 
 def update_self_collision_near_pairs(scene_handles: dict[str, Any], latest: Any, show: bool) -> None:
     """Show/update the URDF-mesh close-call segments from self_collision.near_pairs.
-    A thin tube spans each checked pair's witness points, colored by clearance band:
-    red < d_hard, amber in [d_hard, d_slow), green >= d_slow (still within the server's
-    viz reach). Driven by the COMMANDED (q_sent) verdict the server publishes, so it
-    mirrors what the guard checks even when the displayed q_actual diverges."""
+    A thin tube spans each checked pair's witness points, colored by clearance band.
+    SELF pairs (robot<->robot/stand): red < d_hard, amber in [d_hard, d_slow), green
+    >= d_slow. EXTERNAL pairs (arm<->floor/ground_plane, pair.external=true): a distinct
+    violet/cyan/blue palette banded against the external d_hard/d_slow. Driven by the
+    COMMANDED (q_sent) verdict the server publishes, so it mirrors what the guard checks
+    even when the displayed q_actual diverges."""
     if not isinstance(scene_handles, dict):
         return
     server = scene_handles.get("_server")
@@ -1412,6 +1537,9 @@ def update_self_collision_near_pairs(scene_handles: dict[str, Any], latest: Any,
             hard = _finite_or(sc.get("margin_m"), 0.005)  # margin_m == mesh d_hard_m
             manifest = sc.get("manifest") if isinstance(sc.get("manifest"), Mapping) else {}
             slow = _finite_or(manifest.get("d_slow_m"), max(hard, 0.025))
+            # EXTERNAL (floor) pairs band against their own d_hard/d_slow.
+            ext_hard = _finite_or(manifest.get("external_d_hard_m"), 0.003)
+            ext_slow = _finite_or(manifest.get("external_d_slow_m"), max(ext_hard, 0.025))
             pairs = sc.get("near_pairs")
             if isinstance(pairs, (list, tuple)):
                 for i, pair in enumerate(pairs):
@@ -1423,13 +1551,23 @@ def update_self_collision_near_pairs(scene_handles: dict[str, Any], latest: Any,
                     if a is None or b is None or not isinstance(clearance, (int, float)):
                         continue
                     c = float(clearance)
-                    if c < hard:
-                        band, rgb = "hard", _SELF_COLLISION_NEAR_HARD_RGB
-                    elif c < slow:
-                        band, rgb = "caution", _SELF_COLLISION_NEAR_CAUTION_RGB
+                    external = bool(pair.get("external", False))
+                    # Per-category thresholds + palette: floor pairs are violet/cyan/blue
+                    # banded against the external d_hard/d_slow; self pairs red/amber/green.
+                    d_hard, d_slow = (ext_hard, ext_slow) if external else (hard, slow)
+                    if external:
+                        palette = (_EXTERNAL_NEAR_HARD_RGB, _EXTERNAL_NEAR_CAUTION_RGB, _EXTERNAL_NEAR_OK_RGB)
+                        kind = "ext"
                     else:
-                        band, rgb = "ok", _SELF_COLLISION_NEAR_OK_RGB
-                    key = f"{i}_{band}"
+                        palette = (_SELF_COLLISION_NEAR_HARD_RGB, _SELF_COLLISION_NEAR_CAUTION_RGB, _SELF_COLLISION_NEAR_OK_RGB)
+                        kind = "self"
+                    if c < d_hard:
+                        band, rgb = "hard", palette[0]
+                    elif c < d_slow:
+                        band, rgb = "caution", palette[1]
+                    else:
+                        band, rgb = "ok", palette[2]
+                    key = f"{i}_{kind}_{band}"
                     handle = _ensure_near_pair_handle(server, scene_handles, key, math.dist(a, b), rgb)
                     if handle is None:
                         continue

@@ -16,8 +16,13 @@ namespace rb_servo {
 class StatePublisher {
 public:
     using SnapshotProvider = std::function<ServoSnapshot()>;
+    // Sink for the latest per-arm gripper feedback (open percent + validity), pushed
+    // each publish cycle so the control loop's safety gate can interpolate the TCP
+    // fingertip offset points. Non-blocking on the consumer side (atomic store).
+    using GripperFeedbackSink = std::function<void(ArmId, double percent, bool valid)>;
 
-    explicit StatePublisher(const DualArmConfig& config, SnapshotProvider provider = {});
+    explicit StatePublisher(const DualArmConfig& config, SnapshotProvider provider = {},
+                            GripperFeedbackSink gripper_sink = {});
     explicit StatePublisher(const NetworkConfig& config);
     ~StatePublisher();
 
@@ -36,6 +41,7 @@ private:
 private:
     DualArmConfig config_;
     SnapshotProvider snapshot_provider_;
+    GripperFeedbackSink gripper_feedback_sink_;
 
     mutable std::mutex snapshot_mutex_;
     ServoSnapshot latest_snapshot_;

@@ -5,6 +5,7 @@
 // the config; this module decides Allow / Hold / Latch per arm. Keeping the
 // decision pure makes the policy unit-testable without a backend.
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <optional>
@@ -16,6 +17,35 @@
 #include "rb_servo/math/se3.hpp"
 
 namespace rb_servo {
+
+// Linearly interpolate each TCP-frame offset point between its gripper-OPEN
+// (offset_m) and gripper-CLOSED (offset_closed_m) positions by the live gripper
+// open percent: out[i].offset_m = closed + t*(open - closed), t = clamp(pct,0,100)/100
+// (t=1 -> open, t=0 -> closed). Points with has_closed=false carry
+// offset_closed_m == offset_m (set by the config parser), so the result equals
+// offset_m for any percent (static point, legacy behavior). The result reuses the
+// caller's `out` buffer (resized in place) to avoid per-tick heap churn on the
+// 500 Hz servo loop; names are copied so downstream telemetry keeps the point name.
+// Pass percent = 100.0 (open) when no valid gripper feedback is available — the
+// conservative, larger-envelope fallback that matches the pre-interpolation behavior.
+inline void interpolateOffsetPoints(
+    const std::vector<FloorCheckPointConfig>& src,
+    double gripper_percent,
+    std::vector<FloorCheckPointConfig>& out
+) {
+    const double t = std::clamp(gripper_percent, 0.0, 100.0) / 100.0;
+    out.resize(src.size());
+    for (std::size_t i = 0; i < src.size(); ++i) {
+        const FloorCheckPointConfig& s = src[i];
+        FloorCheckPointConfig& d = out[i];
+        d.name = s.name;
+        d.has_closed = s.has_closed;
+        for (int k = 0; k < 3; ++k) {
+            d.offset_m[k] = s.offset_closed_m[k] + t * (s.offset_m[k] - s.offset_closed_m[k]);
+            d.offset_closed_m[k] = s.offset_closed_m[k];
+        }
+    }
+}
 
 // FK evaluation of one arm's TCP against the floor plane. checked=false means
 // the TCP z could not be computed (kinematics missing, non-finite joints, FK

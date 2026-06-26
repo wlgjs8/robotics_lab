@@ -56,6 +56,10 @@ struct InitMotionLinearResult {
     std::vector<std::pair<JointArray, JointArray>> waypoints;
     std::string message;
     double planning_time_s = 0.0;
+    // Max per-joint angle (over both arms) between the start pose and the IK'd goal.
+    // ~0 means the requested TCP target is essentially the current pose (e.g., the GUI
+    // target marker is following current TCP) -> the move is a near no-op. Diagnostic.
+    double goal_vs_start_max_deg = 0.0;
 };
 
 class InitMotionPlanner {

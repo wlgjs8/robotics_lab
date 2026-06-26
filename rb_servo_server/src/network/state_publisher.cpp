@@ -404,9 +404,13 @@ nlohmann::json selfCollisionManifestJson(
             {"mesh_scale", 0.001},                // STL in mm -> m
         }},
         {"extra_collision", std::move(extra)},
-        // Clearance thresholds so the viewer colors near pairs consistently.
+        // Clearance thresholds so the viewer colors near pairs consistently. The
+        // external_* set governs arm<->floor (external) pairs; the GUI bands those
+        // against it and draws them in a distinct color.
         {"d_hard_m", m.d_hard_m},
         {"d_slow_m", m.d_slow_m},
+        {"external_d_hard_m", m.external.d_hard_m},
+        {"external_d_slow_m", m.external.d_slow_m},
     };
 }
 
@@ -1374,8 +1378,11 @@ void normalizeStatePublisherNetworkConfig(NetworkConfig* config) {
 
 }  // namespace
 
-StatePublisher::StatePublisher(const DualArmConfig& config, SnapshotProvider provider)
-    : config_(config), snapshot_provider_(std::move(provider)) {
+StatePublisher::StatePublisher(const DualArmConfig& config, SnapshotProvider provider,
+                               GripperFeedbackSink gripper_sink)
+    : config_(config),
+      snapshot_provider_(std::move(provider)),
+      gripper_feedback_sink_(std::move(gripper_sink)) {
     normalizeStatePublisherNetworkConfig(&config_.network);
     if (config_.gripper.enable) {
         gripper_bridge_ = std::make_unique<GripperBridge>(config_.gripper);
@@ -1554,6 +1561,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
                 entry["p_a_m"] = p.p_a_m;
                 entry["p_b_m"] = p.p_b_m;
                 entry["clearance_m"] = p.clearance_m;
+                entry["external"] = p.external;
                 arr.push_back(std::move(entry));
             }
             self_collision["near_pairs"] = std::move(arr);
@@ -1798,6 +1806,18 @@ void StatePublisher::threadMain() {
         // Forward the arbitrated gripper setpoint to gripper_server (rate-limited
         // inside the bridge). Off the RT loop, non-blocking.
         if (gripper_bridge_) gripper_bridge_->forward(snapshot.command);
+
+        // Push the latest gripper open percent into the control loop's safety gate so
+        // the TCP fingertip offset points track the live jaw geometry. Non-blocking
+        // (atomic store on the consumer). invalid feedback -> gate falls back to open.
+        if (gripper_feedback_sink_) {
+            const GripperArmFeedback left_fb =
+                gripper_bridge_ ? gripper_bridge_->latest(ArmId::Left) : GripperArmFeedback{};
+            const GripperArmFeedback right_fb =
+                gripper_bridge_ ? gripper_bridge_->latest(ArmId::Right) : GripperArmFeedback{};
+            gripper_feedback_sink_(ArmId::Left, left_fb.percent, left_fb.valid);
+            gripper_feedback_sink_(ArmId::Right, right_fb.percent, right_fb.valid);
+        }
 
         const std::string payload = serializeSnapshot(snapshot);
         for (const UdpDestination& destination : destinations) {

@@ -341,6 +341,22 @@ struct SelfCollisionConfig {
             bool follow_safety_floors = false;
         };
         GroundPlaneConfig ground_plane;
+
+        // EXTERNAL-collision barrier params, applied to arm<->external-obstacle pairs
+        // (currently the ground_plane whole-arm floor) instead of the self-collision
+        // set above. Lets the floor — a known surface the operator approaches on purpose
+        // — be cleared by a smaller margin than the robot keeps from itself. Also used
+        // by the InitMotion planner's external clearance gate. d_hard defaults tighter
+        // (3 mm) than self (5 mm).
+        struct ExternalConfig {
+            double d_hard_m = 0.003;
+            double d_slow_m = 0.025;
+            double a_brake_m_s2 = 4.0;
+            double hyst_m = 0.005;
+            double recover_speed_m_s = 0.0;
+            double latency_s = 0.010;
+        };
+        ExternalConfig external;
     };
     MeshConfig mesh;
 };
@@ -351,9 +367,18 @@ enum class FloorConstraintFailPolicy {
 };
 
 // One named extra floor-check point, expressed as an offset in the TCP frame.
+// offset_m is the gripper-OPEN position (gripper percent = 100); offset_closed_m
+// is the gripper-CLOSED position (percent = 0). At runtime the point is linearly
+// interpolated by the live gripper open percent: offset = closed + t*(open-closed),
+// t = clamp(percent,0,100)/100 (see interpolateOffsetPoints in floor_constraint.hpp).
+// has_closed=false means no closed value was configured; the parser then mirrors
+// offset_closed_m = offset_m so interpolation is the identity (static point, the
+// legacy behavior) and the gripper percent has no effect on this point.
 struct FloorCheckPointConfig {
     std::string name;
-    std::array<double, 3> offset_m{};
+    std::array<double, 3> offset_m{};         // OPEN (gripper percent = 100)
+    std::array<double, 3> offset_closed_m{};  // CLOSED (gripper percent = 0)
+    bool has_closed = false;
 };
 
 // Stand-frame floor plane constraint: the TCP of either arm must never go below

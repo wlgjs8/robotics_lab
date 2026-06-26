@@ -106,6 +106,8 @@ from rb_servo_gui.models import CIRCLE_OVERLAY_SCHEMA_VERSION, CircleOverlaySnap
 from rb_servo_gui.overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
 from rb_servo_gui.safety import OperatorSafety, normalize_observed_mode_backend
 from rb_servo_gui.scene import (
+    _FLOOR_CHECK_POINTS_TCP_FRAME,
+    _FLOOR_CHECK_POINTS_TCP_FRAME_CLOSED,
     _add_ik_infeasible_region,
     _add_robot_urdfs,
     _add_scene_fallback,
@@ -113,6 +115,7 @@ from rb_servo_gui.scene import (
     _circle_overlay_points,
     _ensure_sc_world_frame,
     _finger_position_m,
+    _interpolated_floor_check_points,
     _ik_infeasible_path,
     _reference_ghost_active,
     _robot_urdf_path,
@@ -127,6 +130,7 @@ from rb_servo_gui.scene import (
     update_self_collision_check_geom,
     update_self_collision_near_pairs,
     update_self_collision_overlay,
+    update_user_floor_plane,
 )
 from rb_servo_gui.status_panel import (
     _format_floor_constraint_status,
@@ -2492,6 +2496,47 @@ class GuiContractsTest(unittest.TestCase):
         self.assertTrue(left_pts.visible)
         self.assertFalse(right_pts.visible)
 
+    def test_interpolated_floor_check_points_matches_server_lerp(self):
+        open_pts = np.asarray(_FLOOR_CHECK_POINTS_TCP_FRAME, dtype=np.float32)
+        closed_pts = np.asarray(_FLOOR_CHECK_POINTS_TCP_FRAME_CLOSED, dtype=np.float32)
+        # percent=100 -> open; percent=0 -> closed; midpoint -> mean.
+        np.testing.assert_allclose(_interpolated_floor_check_points(100.0), open_pts)
+        np.testing.assert_allclose(_interpolated_floor_check_points(0.0), closed_pts)
+        np.testing.assert_allclose(
+            _interpolated_floor_check_points(50.0), (open_pts + closed_pts) / 2.0, atol=1e-6
+        )
+        # Out-of-range percent clamps; None/invalid -> conservative OPEN fallback.
+        np.testing.assert_allclose(_interpolated_floor_check_points(250.0), open_pts)
+        np.testing.assert_allclose(_interpolated_floor_check_points(-10.0), closed_pts)
+        np.testing.assert_allclose(_interpolated_floor_check_points(None), open_pts)
+        np.testing.assert_allclose(_interpolated_floor_check_points("bad"), open_pts)
+        # The TCP point (index 0) never moves with the gripper.
+        np.testing.assert_allclose(_interpolated_floor_check_points(40.0)[0], (0.0, 0.0, 0.0))
+
+    def test_floor_check_points_track_gripper_percent(self):
+        state = sample_state()
+        state["left"]["tcp_actual_stand"] = {"x": 0.3, "y": 0.1, "z": 0.4, "rx": 0.0, "ry": 0.0, "rz": 0.0}
+        state["left"]["has_valid_tcp_pose"] = True
+        state["left"]["tcp_actual_valid"] = True
+        state["left"]["tcp_deferred"] = False
+        store, _, _ = self.make_safety(state)
+        left_pts = RecordingSceneHandle()
+        # gripper_percent_left mirrors what _push_gripper_percent writes into scene.
+        handles = {"left_floor_check_points": left_pts, "gripper_percent_left": 0.0}
+        update_floor_check_points(handles, store.latest(), show=True)
+        self.assertTrue(left_pts.visible)
+        np.testing.assert_allclose(
+            np.asarray(left_pts.points),
+            np.asarray(_FLOOR_CHECK_POINTS_TCP_FRAME_CLOSED, dtype=np.float32),
+        )
+        # Re-run fully open -> the wider open set.
+        handles["gripper_percent_left"] = 100.0
+        update_floor_check_points(handles, store.latest(), show=True)
+        np.testing.assert_allclose(
+            np.asarray(left_pts.points),
+            np.asarray(_FLOOR_CHECK_POINTS_TCP_FRAME, dtype=np.float32),
+        )
+
     def test_scene_fallback_labels_actual_and_reference_tcp_markers(self):
         server = RecordingServer(scene=RecordingScene())
         _add_scene_fallback(server)
@@ -2654,6 +2699,8 @@ class GuiContractsTest(unittest.TestCase):
         handles = {
             "left_tcp_target_pose": yaw_90_pose,
             "left_tcp_target_wxyz": _pose_wxyz(yaw_90_pose),
+            # Marker parked at a destination (operator dragged it) -> send is allowed.
+            "left_tcp_target_user_moved": True,
         }
         ok, reason = _send_tcp_linear_move_from_marker(
             safety,
@@ -2670,6 +2717,58 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(packet["left"]["mode"], "TcpLinearMove")
         self.assertNotIn("tcp_delta_local", packet["left"])
         self.assertEqual(packet["left"]["target_tcp_stand"]["quaternion_xyzw"], list(_wxyz_to_xyzw(handles["left_tcp_target_wxyz"])))
+
+    def test_tcp_linear_send_blocked_when_marker_follows_current_tcp(self):
+        # Regression: with no {arm}_tcp_target_user_moved flag the marker follows current
+        # TCP, so the "destination" equals the current pose and the linear move is a near
+        # no-op (the arm only creeps a few degrees per click). The send must be blocked
+        # with a clear reason, and NO packet may go out.
+        state = self.tcp_available_state()
+        _, client, safety = self.make_safety(
+            state,
+            desired="simulation",
+            observed="simulation",
+            observed_backend="simulator",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+        )
+        pose = (0.31, 0.12, 0.44, 0.0, 0.0, 0.0)
+        handles = {
+            # Marker pose present but NOT user-moved -> it is following current TCP.
+            "left_tcp_target_pose": pose,
+            "left_tcp_target_wxyz": _pose_wxyz(pose),
+            "right_tcp_target_pose": pose,
+            "right_tcp_target_wxyz": _pose_wxyz(pose),
+        }
+        before = len(client.sent_packets)
+        ok, reason = _send_tcp_linear_move_from_marker(
+            safety,
+            handles,
+            "both",
+            duration_sec=2.0,
+            linear_speed_m_s=0.03,
+            angular_speed_rad_s=0.2,
+            orientation_mode="constant",
+        )
+        self.assertFalse(ok)
+        self.assertIn("following current TCP", reason)
+        self.assertEqual(len(client.sent_packets), before, "no command may be sent when blocked")
+
+        # Once the operator parks the marker (drag sets user_moved), the send goes through.
+        handles["left_tcp_target_user_moved"] = True
+        handles["right_tcp_target_user_moved"] = True
+        ok, reason = _send_tcp_linear_move_from_marker(
+            safety,
+            handles,
+            "both",
+            duration_sec=2.0,
+            linear_speed_m_s=0.03,
+            angular_speed_rad_s=0.2,
+            orientation_mode="constant",
+        )
+        self.assertTrue(ok, reason)
+        self.assertEqual(client.sent_packets[-1]["left"]["mode"], "TcpLinearMove")
 
     def test_tcp_frame_defaults_to_stand_and_updates_button_colors(self):
         handles = {
@@ -3296,6 +3395,54 @@ class FloorConstraintGuiTest(unittest.TestCase):
         self.assertFalse(np.array_equal(np.asarray(edges.colors), normal_edge_color))
         # Disabled hides the outline too.
         update_floor_plane(handles, {"enabled": False})
+        self.assertFalse(edges.visible or verts.visible)
+
+    def test_update_user_floor_outline_tracks_tilted_plane(self):
+        # The user floor edges + corner vertices mirror the stand floor, but the
+        # plane is TILTED: the outline nodes carry local box geometry and take the
+        # same position + wxyz as the fill, recolor red on violation, and hide when
+        # the constraint is disabled.
+        class FakePlane:
+            def __init__(self):
+                self.position = None
+                self.wxyz = None
+                self.color = None
+                self.visible = True
+
+        def _uf(*, violated=False, enabled=True):
+            return {
+                "enabled": enabled,
+                "point_m": [0.1, -0.25, 0.2],
+                "normal": [0.0, 0.0, 1.0],
+                "left": {"checked": True, "violated": False},
+                "right": {"checked": True, "violated": violated},
+            }
+
+        plane = FakePlane()
+        edges = RecordingSceneHandle()
+        verts = RecordingSceneHandle()
+        handles = {
+            "user_floor_plane": plane,
+            "user_floor_edges": edges,
+            "user_floor_verts": verts,
+        }
+        update_user_floor_plane(handles, _uf())
+        self.assertTrue(edges.visible and verts.visible)
+        # Outline takes the fill's tilt transform (position + wxyz). Geometry is
+        # local box outline fixed at creation, so update only moves/orients it.
+        self.assertEqual(tuple(edges.position), (0.1, -0.25, 0.2))
+        self.assertEqual(tuple(verts.position), (0.1, -0.25, 0.2))
+        self.assertEqual(tuple(edges.wxyz), tuple(plane.wxyz))
+        compliant_color = np.asarray(edges.colors).copy()
+        # Violation recolors the outline red.
+        update_user_floor_plane(handles, _uf(violated=True))
+        self.assertFalse(np.array_equal(np.asarray(edges.colors), compliant_color))
+        # Disabled hides plane + outline.
+        update_user_floor_plane(handles, _uf(enabled=False))
+        self.assertFalse(plane.visible)
+        self.assertFalse(edges.visible or verts.visible)
+        # None (stale/disconnect) also hides the outline.
+        update_user_floor_plane(handles, None)
         self.assertFalse(edges.visible or verts.visible)
 
     def test_update_floor_plane_preview(self):

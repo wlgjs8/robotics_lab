@@ -802,6 +802,7 @@ struct SelfCollisionNearPairViz {
     std::array<double, 3> p_a_m{};
     std::array<double, 3> p_b_m{};
     double clearance_m = 0.0;
+    bool external = false;  // arm<->external obstacle (floor) vs robot self-collision
 };
 
 struct ServoSnapshot {

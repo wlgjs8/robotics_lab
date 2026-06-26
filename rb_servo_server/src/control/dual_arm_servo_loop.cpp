@@ -1471,6 +1471,14 @@ DualArmServoLoop::DualArmServoLoop(
         collision_monitor_cfg_.max_staleness_s = m.max_staleness_s;
         collision_monitor_cfg_.monitor_core = m.monitor_core;
         collision_monitor_cfg_.max_near_pairs = m.max_near_pairs;
+        // External-collision (arm<->floor) barrier set: separate d_hard so the floor
+        // can be approached closer than the robot approaches itself.
+        collision_monitor_cfg_.external_d_hard_m = m.external.d_hard_m;
+        collision_monitor_cfg_.external_d_slow_m = m.external.d_slow_m;
+        collision_monitor_cfg_.external_a_brake_m_s2 = m.external.a_brake_m_s2;
+        collision_monitor_cfg_.external_hyst_m = m.external.hyst_m;
+        collision_monitor_cfg_.external_recover_speed_m_s = m.external.recover_speed_m_s;
+        collision_monitor_cfg_.external_latency_s = m.external.latency_s;
         collision_monitor_cfg_.extra_collision.clear();
         for (const auto& e : m.extra_collision) {
             ExtraCollisionShape s;
@@ -2502,7 +2510,7 @@ void DualArmServoLoop::loopMain() {
                         p.name_a, p.name_b,
                         {p.p_a.x(), p.p_a.y(), p.p_a.z()},
                         {p.p_b.x(), p.p_b.y(), p.p_b.z()},
-                        p.d_m});
+                        p.d_m, p.external});
                 }
             }
             latest_snapshot_.floor_constraint_enabled = floorConstraintActive();
@@ -4514,6 +4522,25 @@ ServoTarget DualArmServoLoop::applySafety(
     return out;
 }
 
+void DualArmServoLoop::setGripperFeedback(ArmId arm, double percent, bool valid) {
+    if (arm == ArmId::Left) {
+        gripper_percent_left_.store(percent);
+        gripper_percent_valid_left_.store(valid);
+    } else {
+        gripper_percent_right_.store(percent);
+        gripper_percent_valid_right_.store(valid);
+    }
+}
+
+double DualArmServoLoop::effectiveGripperPercent(ArmId arm) const {
+    const bool valid = arm == ArmId::Left ? gripper_percent_valid_left_.load()
+                                          : gripper_percent_valid_right_.load();
+    if (!valid) return 100.0;  // no fresh feedback -> conservative gripper-open envelope
+    const double pct = arm == ArmId::Left ? gripper_percent_left_.load()
+                                          : gripper_percent_right_.load();
+    return std::isfinite(pct) ? pct : 100.0;
+}
+
 FloorArmEvaluation DualArmServoLoop::evaluateFloorArm(ArmId arm, const JointArray& q_deg) const {
     FloorArmEvaluation eval;
     if (!kinematics_ || !finiteJointArray(q_deg)) {
@@ -4527,10 +4554,16 @@ FloorArmEvaluation DualArmServoLoop::evaluateFloorArm(ArmId arm, const JointArra
         }
         // Lowest point over the TCP and the configured TCP-frame offset points
         // (e.g. gripper fingertips, which dip below the TCP when the tool
-        // rotates). tcp_z_m carries the worst (lowest) z so the decision,
-        // escape, and clamp logic all act on the most exposed point.
+        // rotates). The offset points are interpolated to the live gripper open
+        // percent so the checked fingertips track the actual jaw geometry.
+        // tcp_z_m carries the worst (lowest) z so the decision, escape, and clamp
+        // logic all act on the most exposed point.
+        std::vector<FloorCheckPointConfig>& offsets =
+            arm == ArmId::Left ? floor_offset_scratch_left_ : floor_offset_scratch_right_;
+        interpolateOffsetPoints(config_.safety.floor_constraint.tcp_offset_points,
+                                effectiveGripperPercent(arm), offsets);
         const double lowest_z = floorLowestZWithOffsets(
-            tcp, config_.safety.floor_constraint.tcp_offset_points, &eval.lowest_point,
+            tcp, offsets, &eval.lowest_point,
             &eval.lowest_offset_tcp, &eval.lowest_point_stand);
         if (!std::isfinite(lowest_z)) {
             return FloorArmEvaluation{};  // checked=false -> caller fails closed
@@ -4560,9 +4593,14 @@ RoiArmEvaluation DualArmServoLoop::evaluateRoiArm(ArmId arm, const JointArray& q
     const ArmMountConfig& mount = arm == ArmId::Left ? config_.left_mount : config_.right_mount;
     try {
         const Pose6D tcp = kinematics_->computeTcpStand(arm, q_deg, mount);
-        // Evaluate the TCP + configured offset points against the effective
-        // (runtime) box bounds; checked=false (fail closed) when FK is non-finite.
-        if (!roiEvaluateBox(tcp, config_.safety.roi_box.tcp_offset_points,
+        // Evaluate the TCP + configured offset points (interpolated to the live
+        // gripper open percent) against the effective (runtime) box bounds;
+        // checked=false (fail closed) when FK is non-finite.
+        std::vector<FloorCheckPointConfig>& offsets =
+            arm == ArmId::Left ? roi_offset_scratch_left_ : roi_offset_scratch_right_;
+        interpolateOffsetPoints(config_.safety.roi_box.tcp_offset_points,
+                                effectiveGripperPercent(arm), offsets);
+        if (!roiEvaluateBox(tcp, offsets,
                             effectiveRoiMin(), effectiveRoiMax(), &eval)) {
             return RoiArmEvaluation{};
         }
@@ -4584,8 +4622,12 @@ ReachArmEvaluation DualArmServoLoop::evaluateReachArm(ArmId arm, const JointArra
                                            mount.base_pose_in_stand.z};
     try {
         const Pose6D tcp = kinematics_->computeTcpStand(arm, q_deg, mount);
-        if (!reachEvaluateShell(tcp, base_stand,
-                                config_.safety.reach_constraint.tcp_offset_points,
+        // Offset points interpolated to the live gripper open percent.
+        std::vector<FloorCheckPointConfig>& offsets =
+            arm == ArmId::Left ? reach_offset_scratch_left_ : reach_offset_scratch_right_;
+        interpolateOffsetPoints(config_.safety.reach_constraint.tcp_offset_points,
+                                effectiveGripperPercent(arm), offsets);
+        if (!reachEvaluateShell(tcp, base_stand, offsets,
                                 config_.safety.reach_constraint.r_min_m,
                                 config_.safety.reach_constraint.r_max_m, &eval)) {
             return ReachArmEvaluation{};  // checked=false -> caller fails closed
@@ -4634,9 +4676,14 @@ UserFloorArmEvaluation DualArmServoLoop::evaluateUserFloorArm(ArmId arm, const J
     const ArmMountConfig& mount = arm == ArmId::Left ? config_.left_mount : config_.right_mount;
     try {
         const Pose6D tcp = kinematics_->computeTcpStand(arm, q_deg, mount);
-        // Signed distance of the most-exposed point (TCP + configured offset points)
-        // to the runtime plane; checked=false (fail closed) when FK is non-finite.
-        if (!userFloorEvaluatePlane(tcp, config_.safety.user_floor_constraint.tcp_offset_points,
+        // Signed distance of the most-exposed point (TCP + configured offset points,
+        // interpolated to the live gripper open percent) to the runtime plane;
+        // checked=false (fail closed) when FK is non-finite.
+        std::vector<FloorCheckPointConfig>& offsets =
+            arm == ArmId::Left ? user_floor_offset_scratch_left_ : user_floor_offset_scratch_right_;
+        interpolateOffsetPoints(config_.safety.user_floor_constraint.tcp_offset_points,
+                                effectiveGripperPercent(arm), offsets);
+        if (!userFloorEvaluatePlane(tcp, offsets,
                                     effectiveUserFloorPoint(), effectiveUserFloorNormal(),
                                     effectiveUserFloorMargin(), &eval)) {
             return UserFloorArmEvaluation{};
@@ -5531,10 +5578,20 @@ DualArmCommand DualArmServoLoop::applyCollisionFreeLinearMove(
     if (lx.status == LinearMoveStatus::Deciding && lx.future.valid() &&
         lx.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         InitMotionLinearResult r = lx.future.get();
+        // Diagnostic: goal-vs-current joint delta. ~0 deg means the requested TCP target
+        // is essentially the current pose (e.g., the GUI target marker is following
+        // current TCP, not parked at a destination) -> the move is a near no-op.
+        if (r.goal_vs_start_max_deg < 1.0) {
+            std::cerr << "[WARN] TcpLinearMove(collision-free): goal is only "
+                      << r.goal_vs_start_max_deg
+                      << " deg from current pose -> near no-op (is the target marker "
+                         "following current TCP? drag it to a destination first)\n";
+        }
         if (r.decision == InitMotionLinearResult::Decision::Straight) {
             lx.status = LinearMoveStatus::Straight;
             lx.message = "straight";
-            std::cerr << "[INFO] TcpLinearMove(collision-free): straight path clear; running MoveL\n";
+            std::cerr << "[INFO] TcpLinearMove(collision-free): straight path clear; running MoveL"
+                      << " (goal_vs_current=" << r.goal_vs_start_max_deg << " deg)\n";
         } else if (r.decision == InitMotionLinearResult::Decision::Detour) {
             lx.waypoints = std::move(r.waypoints);
             lx.index = 0;
@@ -5542,7 +5599,7 @@ DualArmCommand DualArmServoLoop::applyCollisionFreeLinearMove(
             lx.message = "detour";
             std::cerr << "[INFO] TcpLinearMove(collision-free): straight path blocked; "
                       << "streaming collision-free detour (" << lx.waypoints.size()
-                      << " waypoints)\n";
+                      << " waypoints, goal_vs_current=" << r.goal_vs_start_max_deg << " deg)\n";
         } else {
             lx.status = LinearMoveStatus::Failed;
             lx.message = r.message;

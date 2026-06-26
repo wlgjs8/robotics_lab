@@ -161,6 +161,55 @@ bool testLowestZWithOffsets() {
     return true;
 }
 
+bool testInterpolateOffsetPoints() {
+    std::vector<rb_servo::FloorCheckPointConfig> src;
+    rb_servo::FloorCheckPointConfig p;
+    p.name = "tip_a";
+    p.offset_m = {0.057, 0.012, 0.0};         // OPEN (percent=100)
+    p.offset_closed_m = {0.010, 0.012, 0.0};  // CLOSED (percent=0)
+    p.has_closed = true;
+    src.push_back(p);
+
+    std::vector<rb_servo::FloorCheckPointConfig> out;
+    // percent=100 (t=1) -> the open offset.
+    rb_servo::interpolateOffsetPoints(src, 100.0, out);
+    RB_CHECK(out.size() == 1);
+    RB_CHECK(out[0].name == "tip_a");
+    RB_CHECK(std::abs(out[0].offset_m[0] - 0.057) < 1e-12);
+    // percent=0 (t=0) -> the closed offset.
+    rb_servo::interpolateOffsetPoints(src, 0.0, out);
+    RB_CHECK(std::abs(out[0].offset_m[0] - 0.010) < 1e-12);
+    // percent=50 -> midpoint; y/z stay fixed.
+    rb_servo::interpolateOffsetPoints(src, 50.0, out);
+    RB_CHECK(std::abs(out[0].offset_m[0] - 0.0335) < 1e-12);
+    RB_CHECK(std::abs(out[0].offset_m[1] - 0.012) < 1e-12);
+    RB_CHECK(std::abs(out[0].offset_m[2] - 0.0) < 1e-12);
+    // Out-of-range percent clamps to [0, 100].
+    rb_servo::interpolateOffsetPoints(src, 250.0, out);
+    RB_CHECK(std::abs(out[0].offset_m[0] - 0.057) < 1e-12);
+    rb_servo::interpolateOffsetPoints(src, -50.0, out);
+    RB_CHECK(std::abs(out[0].offset_m[0] - 0.010) < 1e-12);
+
+    // has_closed=false (closed mirrors open, as the parser sets it): identity for
+    // any percent -> the legacy static-point behavior.
+    std::vector<rb_servo::FloorCheckPointConfig> stat;
+    rb_servo::FloorCheckPointConfig s;
+    s.name = "static";
+    s.offset_m = {0.05, 0.0, 0.0};
+    s.offset_closed_m = {0.05, 0.0, 0.0};
+    s.has_closed = false;
+    stat.push_back(s);
+    rb_servo::interpolateOffsetPoints(stat, 0.0, out);
+    RB_CHECK(std::abs(out[0].offset_m[0] - 0.05) < 1e-12);
+    rb_servo::interpolateOffsetPoints(stat, 100.0, out);
+    RB_CHECK(std::abs(out[0].offset_m[0] - 0.05) < 1e-12);
+
+    // Empty source -> empty output (the reused buffer is resized down).
+    rb_servo::interpolateOffsetPoints({}, 50.0, out);
+    RB_CHECK(out.empty());
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -172,6 +221,7 @@ int main() {
     if (!testMonitorOnlyAllowsViolations()) return 1;
     if (!testValidateFloorZRequest()) return 1;
     if (!testLowestZWithOffsets()) return 1;
+    if (!testInterpolateOffsetPoints()) return 1;
     std::cout << "floor_constraint tests passed\n";
     return 0;
 }

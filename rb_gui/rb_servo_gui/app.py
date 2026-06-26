@@ -646,6 +646,22 @@ def _send_tcp_linear_move_from_marker(
     angular_speed_rad_s: float | None,
     orientation_mode: str,
 ) -> tuple[bool, str]:
+    # Guard: when a TCP target marker has NOT been dragged/set, it follows current TCP
+    # every tick (scene.update_scene_markers), so the "destination" equals where the arm
+    # already is and the linear move is a near no-op (the symptom: it only creeps a few
+    # degrees per click). Require the operator to park the marker at a destination first.
+    # The {arm}_tcp_target_user_moved flag is set on drag/set and cleared by InitMotion
+    # ("TCP targets will follow current TCP").
+    selected_arms = ("left", "right") if arm_group == "both" else (arm_group,)
+    following = [arm for arm in selected_arms
+                 if f"{arm}_tcp_target_user_moved" not in scene_handles]
+    if following:
+        arms_txt = " and ".join(following)
+        return False, (
+            f"{arms_txt} TCP target marker is following current TCP "
+            "(not parked at a destination) — drag/set the marker to the target first, "
+            "otherwise the linear move is ~zero"
+        )
     left_pose, right_pose, left_quaternion_xyzw, right_quaternion_xyzw, error = _tcp_marker_payloads(scene_handles, arm_group)
     if error:
         return False, error

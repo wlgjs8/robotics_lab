@@ -72,7 +72,36 @@ public:
     ServoTarget previousSentTarget() const;
     ServoSnapshot latestSnapshot() const;
 
+    // Push the latest per-arm gripper open percent (0 closed .. 100 open) into the
+    // safety gate so the TCP fingertip offset points interpolate between their
+    // gripper-open and gripper-closed positions (see interpolateOffsetPoints). Fed
+    // off the control loop by the StatePublisher's gripper-feedback read (non-blocking
+    // atomic store). valid=false (stale/absent feedback, gripper disabled) makes the
+    // gate fall back to the gripper-OPEN offsets — the conservative, larger envelope.
+    void setGripperFeedback(ArmId arm, double percent, bool valid);
+
 private:
+    // Live gripper open percent per arm and its validity, set by setGripperFeedback
+    // and read in the evaluate*Arm safety gates. Default OPEN (100) / invalid so the
+    // pre-feedback behavior equals the legacy gripper-open offsets.
+    std::atomic<double> gripper_percent_left_{100.0};
+    std::atomic<double> gripper_percent_right_{100.0};
+    std::atomic<bool> gripper_percent_valid_left_{false};
+    std::atomic<bool> gripper_percent_valid_right_{false};
+    // Effective gripper percent for offset interpolation: live percent when valid,
+    // else 100 (open). Used by the evaluate*Arm gates.
+    double effectiveGripperPercent(ArmId arm) const;
+    // Per-constraint, per-arm scratch buffers holding the gripper-interpolated offset
+    // points handed to the inline constraint evaluators each tick. mutable because
+    // the evaluate*Arm methods are const; reused in place to avoid 500 Hz heap churn.
+    mutable std::vector<FloorCheckPointConfig> floor_offset_scratch_left_;
+    mutable std::vector<FloorCheckPointConfig> floor_offset_scratch_right_;
+    mutable std::vector<FloorCheckPointConfig> roi_offset_scratch_left_;
+    mutable std::vector<FloorCheckPointConfig> roi_offset_scratch_right_;
+    mutable std::vector<FloorCheckPointConfig> reach_offset_scratch_left_;
+    mutable std::vector<FloorCheckPointConfig> reach_offset_scratch_right_;
+    mutable std::vector<FloorCheckPointConfig> user_floor_offset_scratch_left_;
+    mutable std::vector<FloorCheckPointConfig> user_floor_offset_scratch_right_;
     struct LatchedCartesianTarget {
         uint64_t seq = 0;
         Pose6D target_tcp_stand;

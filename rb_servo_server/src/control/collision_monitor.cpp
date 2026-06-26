@@ -86,18 +86,24 @@ void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitor
     if (!v.valid) return;
     const double age = std::max(0.0, verdict_age_s);
     for (const auto& p : v.near) {
+        // External pairs (arm<->floor) use the external barrier set so the floor can be
+        // approached closer than the robot approaches itself.
+        const double d_hard = p.external ? cfg.external_d_hard_m : cfg.d_hard_m;
+        const double d_slow = p.external ? cfg.external_d_slow_m : cfg.d_slow_m;
+        const double a_brake = p.external ? cfg.external_a_brake_m_s2 : cfg.a_brake_m_s2;
+        const double recover = p.external ? cfg.external_recover_speed_m_s : cfg.recover_speed_m_s;
         const double closing = p.rate_m_s < 0.0 ? -p.rate_m_s : 0.0;
         const double d_now = p.d_m - closing * age;  // age-extrapolated clearance
-        if (d_now >= cfg.d_slow_m) continue;
+        if (d_now >= d_slow) continue;
         VelocityConstraint c;
         for (int i = 0; i < kDof; ++i) {
             c.J[i] = p.Jn_left[i];
             c.J[kDof + i] = p.Jn_right[i];
         }
         if (c.J.squaredNorm() < 1e-18) continue;  // pair not actuated by this command
-        const double margin = d_now - cfg.d_hard_m;
-        c.xi = margin > 0.0 ? std::sqrt(2.0 * cfg.a_brake_m_s2 * margin)
-                            : -cfg.recover_speed_m_s;  // below floor: block (or push out)
+        const double margin = d_now - d_hard;
+        c.xi = margin > 0.0 ? std::sqrt(2.0 * a_brake * margin)
+                            : -recover;  // below floor: block (or push out)
         c.d_now = d_now;
         out.push_back(std::move(c));
     }
@@ -216,6 +222,8 @@ struct CollisionMonitor::Impl {
     // eval. gp_controlled_ stays false (static config placement) until the first call.
     std::size_t gp_index_ = std::numeric_limits<std::size_t>::max();
     double gp_thickness_ = 0.0;
+    // per-collision-pair external flag (1 = arm<->external obstacle, e.g. ground_plane).
+    std::vector<char> pair_external_;
     // stand frame pose in the model's universe frame (constant; the stand is fixed to
     // the root). setGroundPlanePose() takes the floor plane in STAND frame (matching
     // the servo loop's floor_constraint / user_floor), so we map it through this.
@@ -251,6 +259,16 @@ struct CollisionMonitor::Impl {
         }
         for (const auto& e : cfg.extra_collision) {
             if (e.name == "ground_plane") { gp_thickness_ = e.size_m[2]; break; }
+        }
+        // Tag external-obstacle collision pairs (currently arm<->ground_plane) so the
+        // verdict/barrier can apply the external_* params (smaller d_hard) to them while
+        // keeping robot self-collision on the self set. Indexed by collision-pair index.
+        pair_external_.assign(geom.collisionPairs.size(), 0);
+        if (gp_index_ != std::numeric_limits<std::size_t>::max()) {
+            for (std::size_t k = 0; k < geom.collisionPairs.size(); ++k) {
+                const auto& cp = geom.collisionPairs[k];
+                if (cp.first == gp_index_ || cp.second == gp_index_) pair_external_[k] = 1;
+            }
         }
         // Constant stand-frame pose in the universe frame (FK once at neutral; the
         // stand is rigidly fixed to the root so this never changes).
@@ -496,14 +514,30 @@ struct CollisionMonitor::Impl {
         std::vector<double> cur(np);
         double dmin = std::numeric_limits<double>::infinity();
         std::size_t kmin = 0;
+        // Per-category minima + per-pair hard_violation: an external pair (arm<->floor)
+        // is compared against external_d_hard_m, a self pair against d_hard_m, so the
+        // two categories can hold at different distances.
+        double self_min = std::numeric_limits<double>::infinity();
+        double ext_min = std::numeric_limits<double>::infinity();
+        bool hard = false;
         for (std::size_t k = 0; k < np; ++k) {
             const double d = gdata.distanceResults[k].min_distance;
             cur[k] = d;
             ds.emplace_back(d, k);
             if (d < dmin) { dmin = d; kmin = k; }
+            const bool ext = k < pair_external_.size() && pair_external_[k];
+            if (ext) {
+                if (d < ext_min) ext_min = d;
+                if (d < cfg.external_d_hard_m) hard = true;
+            } else {
+                if (d < self_min) self_min = d;
+                if (d < cfg.d_hard_m) hard = true;
+            }
         }
         v.min_clearance_m = dmin;
-        v.hard_violation = dmin < cfg.d_hard_m;
+        v.self_min_clearance_m = self_min;
+        v.external_min_clearance_m = ext_min;
+        v.hard_violation = hard;
         const std::size_t K = std::min<std::size_t>(cfg.max_near_pairs, ds.size());
         std::partial_sort(ds.begin(), ds.begin() + K, ds.end(),
                           [](const auto& a, const auto& b) { return a.first < b.first; });
@@ -543,6 +577,7 @@ struct CollisionMonitor::Impl {
             p.n = delta.norm() > 1e-9 ? Eigen::Vector3d(delta.normalized()) : Eigen::Vector3d::UnitZ();
             p.name_a = geom.geometryObjects[cp.first].name;
             p.name_b = geom.geometryObjects[cp.second].name;
+            p.external = k < pair_external_.size() && pair_external_[k];
             // d_dot = n^T (v_b - v_a) = J_n * qdot. Slice into command left/right cols.
             const pinocchio::JointIndex ja = geom.geometryObjects[cp.first].parentJoint;
             const pinocchio::JointIndex jb = geom.geometryObjects[cp.second].parentJoint;
