@@ -217,7 +217,8 @@ grep -q "CommandServer listening" "$LOG_DIR/server.log" || {
   echo "[stack] server did not come up in 150s:" >&2; tail -5 "$LOG_DIR/server.log" >&2; exit 1; }
 echo "[stack] server up."
 
-echo "[stack] viser GUI: http://127.0.0.1:8080"
+GUI_PORT="${RB_GUI_PORT:-8080}"
+echo "[stack] viser GUI: http://127.0.0.1:${GUI_PORT}"
 PYTHONPATH=rb_gui \
   RB_GUI_DESCRIPTIONS_DIR="$PWD/rb_servo_server/descriptions" \
   RB_GUI_STATE_BIND=0.0.0.0 RB_GUI_STATE_PORT=50366 \

@@ -328,27 +328,6 @@ CartesianLimitPolicy parseCartesianLimitPolicy(const YAML::Node& node, const std
     fail("Unknown cartesian_control.exceed_limit_policy: " + value, node);
 }
 
-CartesianVelocityTargetIntegrationMode parseCartesianVelocityTargetIntegrationMode(
-    const YAML::Node& node,
-    const std::string& path
-) {
-    const std::string value = lower(asString(node, path));
-    if (value == "measured_actual") return CartesianVelocityTargetIntegrationMode::MeasuredActual;
-    if (value == "measured_actual_lookahead") return CartesianVelocityTargetIntegrationMode::MeasuredActualLookahead;
-    if (value == "previous_command") return CartesianVelocityTargetIntegrationMode::PreviousCommand;
-    fail("Unknown cartesian_control.velocity_target_integration: " + value, node);
-}
-
-CartesianCommandActualErrorPolicy parseCartesianCommandActualErrorPolicy(
-    const YAML::Node& node,
-    const std::string& path
-) {
-    const std::string value = lower(asString(node, path));
-    if (value == "reset") return CartesianCommandActualErrorPolicy::Reset;
-    if (value == "fault") return CartesianCommandActualErrorPolicy::Fault;
-    fail("Unknown cartesian_control.command_actual_error_policy: " + value, node);
-}
-
 CartesianControllerSimulationStateSource parseCartesianControllerSimulationStateSource(
     const YAML::Node& node,
     const std::string& path
@@ -1209,11 +1188,6 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.cartesian_control.velocity_damping, "cartesian_control.velocity_damping");
     validatePositiveFinite(cfg.cartesian_control.max_linear_move_speed_m_s, "cartesian_control.max_linear_move_speed_m_s");
     validatePositiveFinite(cfg.cartesian_control.max_angular_move_speed_rad_s, "cartesian_control.max_angular_move_speed_rad_s");
-    validatePositiveFinite(cfg.cartesian_control.velocity_target_lookahead_sec, "cartesian_control.velocity_target_lookahead_sec");
-    validatePositiveFiniteArray(
-        cfg.cartesian_control.max_command_actual_error_deg,
-        "cartesian_control.max_command_actual_error_deg"
-    );
     if (cfg.cartesian_control.max_cartesian_step_m.has_value()) {
         validatePositiveFinite(*cfg.cartesian_control.max_cartesian_step_m, "cartesian_control.max_cartesian_step_m");
     }
@@ -2370,13 +2344,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "max_cartesian_step_m",
             "max_cartesian_step_rad",
             "exceed_limit_policy",
-            "velocity_target_integration",
             "controller_simulation_servo_state_source",
             "controller_simulation_divergence_source",
-            "velocity_target_lookahead_sec",
-            "max_command_actual_error_deg",
-            "reset_velocity_integrator_on_mode_change",
-            "command_actual_error_policy",
             "linear_move",
             "pose_track_smd",
         }, "cartesian_control");
@@ -2447,13 +2416,6 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             cfg.cartesian_control.exceed_limit_policy =
                 parseCartesianLimitPolicy(sec["exceed_limit_policy"], "cartesian_control.exceed_limit_policy");
         }
-        if (has(sec, "velocity_target_integration")) {
-            cfg.cartesian_control.velocity_target_integration =
-                parseCartesianVelocityTargetIntegrationMode(
-                    sec["velocity_target_integration"],
-                    "cartesian_control.velocity_target_integration"
-                );
-        }
         if (has(sec, "controller_simulation_servo_state_source")) {
             cfg.cartesian_control.controller_simulation_servo_state_source =
                 parseCartesianControllerSimulationStateSource(
@@ -2466,28 +2428,6 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 parseCartesianControllerSimulationStateSource(
                     sec["controller_simulation_divergence_source"],
                     "cartesian_control.controller_simulation_divergence_source"
-                );
-        }
-        if (has(sec, "velocity_target_lookahead_sec")) {
-            cfg.cartesian_control.velocity_target_lookahead_sec =
-                asDouble(sec["velocity_target_lookahead_sec"], "cartesian_control.velocity_target_lookahead_sec");
-        }
-        if (has(sec, "max_command_actual_error_deg")) {
-            cfg.cartesian_control.max_command_actual_error_deg =
-                parseJointArray(sec["max_command_actual_error_deg"], "cartesian_control.max_command_actual_error_deg");
-        }
-        if (has(sec, "reset_velocity_integrator_on_mode_change")) {
-            cfg.cartesian_control.reset_velocity_integrator_on_mode_change =
-                asBool(
-                    sec["reset_velocity_integrator_on_mode_change"],
-                    "cartesian_control.reset_velocity_integrator_on_mode_change"
-                );
-        }
-        if (has(sec, "command_actual_error_policy")) {
-            cfg.cartesian_control.command_actual_error_policy =
-                parseCartesianCommandActualErrorPolicy(
-                    sec["command_actual_error_policy"],
-                    "cartesian_control.command_actual_error_policy"
                 );
         }
         if (has(sec, "linear_move")) {

@@ -83,6 +83,10 @@ class RecordingConfig:
     rate_hz: float = 30.0
     format: str = "hdf5"
     dataset_metadata: dict[str, Any] = field(default_factory=dict)
+    control_enabled: bool = True
+    control_bind: str = "udp://127.0.0.1:50441"
+    status_endpoint: str | None = "udp://127.0.0.1:50442"
+    status_rate_hz: float = 10.0
 
     def __post_init__(self) -> None:
         if self.rate_hz < 1.0 or self.rate_hz > 100.0:
@@ -91,6 +95,8 @@ class RecordingConfig:
             raise ValueError(
                 f"recording.format must be 'hdf5' or 'jsonl', got: {self.format}"
             )
+        if self.status_rate_hz < 1.0 or self.status_rate_hz > 100.0:
+            raise ValueError("recording.status_rate_hz must be in [1.0, 100.0]")
 
 
 @dataclass(frozen=True)
@@ -510,6 +516,14 @@ def _recording_config(raw: dict[str, Any]) -> RecordingConfig:
         raw["format"] = str(raw["format"])
     if "output_dir" in raw:
         raw["output_dir"] = str(raw["output_dir"])
+    if "control_bind" in raw:
+        raw["control_bind"] = str(raw["control_bind"])
+    if "control_enabled" in raw:
+        raw["control_enabled"] = bool(raw["control_enabled"])
+    if "status_endpoint" in raw and raw["status_endpoint"] is not None:
+        raw["status_endpoint"] = str(raw["status_endpoint"])
+    if "status_rate_hz" in raw:
+        raw["status_rate_hz"] = float(raw["status_rate_hz"])
     if "dataset_metadata" in raw:
         value = raw["dataset_metadata"]
         if not isinstance(value, dict):

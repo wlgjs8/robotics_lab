@@ -788,17 +788,6 @@ enum class CartesianLimitPolicy {
     Reject
 };
 
-enum class CartesianVelocityTargetIntegrationMode {
-    MeasuredActual,
-    MeasuredActualLookahead,
-    PreviousCommand
-};
-
-enum class CartesianCommandActualErrorPolicy {
-    Reset,
-    Fault
-};
-
 enum class CartesianControllerSimulationStateSource {
     Actual,
     Reference
@@ -821,17 +810,10 @@ struct CartesianControlConfig {
     std::optional<double> max_cartesian_step_m;
     std::optional<double> max_cartesian_step_rad;
     CartesianLimitPolicy exceed_limit_policy = CartesianLimitPolicy::Clamp;
-    CartesianVelocityTargetIntegrationMode velocity_target_integration =
-        CartesianVelocityTargetIntegrationMode::PreviousCommand;
     CartesianControllerSimulationStateSource controller_simulation_servo_state_source =
         CartesianControllerSimulationStateSource::Actual;
     CartesianControllerSimulationStateSource controller_simulation_divergence_source =
         CartesianControllerSimulationStateSource::Actual;
-    double velocity_target_lookahead_sec = 0.04;
-    JointArray max_command_actual_error_deg{5.0, 5.0, 5.0, 8.0, 8.0, 10.0};
-    bool reset_velocity_integrator_on_mode_change = true;
-    CartesianCommandActualErrorPolicy command_actual_error_policy =
-        CartesianCommandActualErrorPolicy::Reset;
     LinearMoveConfig linear_move;
     PoseTrackSmdConfig pose_track_smd;
 };

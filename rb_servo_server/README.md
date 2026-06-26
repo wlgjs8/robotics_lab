@@ -22,7 +22,7 @@ Implemented in this server:
 - tracking-error guard with configurable policy
 - latched fault state for EmergencyStop / real-mode tracking errors / robot state errors
 - fail-safe command validation so missing payloads do not become zero joint targets
-- Hold mode using previous sent target
+- Hold mode streaming the current actual joint position as a recoverable pause
 - capped filter dt so one late tick does not create a large motion step
 - servo period/jitter/filter-dt/safety logging
 - structured backend result taxonomy for mock and rbpodo paths

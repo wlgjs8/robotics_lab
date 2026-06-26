@@ -189,13 +189,8 @@ cartesian_control:
   max_cartesian_step_m: 0.002
   max_cartesian_step_rad: 0.02
   exceed_limit_policy: clamp
-  velocity_target_integration: previous_command
   controller_simulation_servo_state_source: reference
   controller_simulation_divergence_source: reference
-  velocity_target_lookahead_sec: 0.04
-  max_command_actual_error_deg: [5, 5, 5, 8, 8, 10]
-  reset_velocity_integrator_on_mode_change: true
-  command_actual_error_policy: reset
   linear_move:
     min_duration_sec: 0.05
     max_duration_sec: 10.0

@@ -79,7 +79,6 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
     double dt_sec,
     uint64_t command_seq,
     CartesianServoPathState* path_state,
-    CartesianVelocityIntegratorState* velocity_integrator_state,
     const CartesianServoStateContext* state_context
 ) {
     CartesianArmTargetResult result;
@@ -90,10 +89,6 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
     result.telemetry.fail_ik_duration_us = config_.fail_ik_duration_us;
 
     // Real/sim gating retired: linear move computes in every run mode.
-    // The velocity-integrator plumbing is unused since the move switched to
-    // the position-IK feedforward chain (kept in the signature for ABI/call
-    // compatibility with the servo loop).
-    (void)velocity_integrator_state;
     (void)state_context;
     if (!kinematics_) {
         result.verdict = SafetyVerdict::CartesianUnavailable;
@@ -307,34 +302,6 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
     ik_result.telemetry.linear_move_elapsed_sec = path_state->elapsed_sec;
     ik_result.telemetry.orientation_mode = orientationModeName(path_state->orientation_mode);
     return ik_result;
-}
-
-void CartesianServoController::updateVelocityIntegratorAfterSafety(
-    CartesianVelocityIntegratorState* velocity_integrator_state,
-    const JointArray& safe_q_target_deg,
-    bool was_sent_or_intended,
-    bool target_was_clamped,
-    const std::string& reset_reason
-) {
-    if (!velocity_integrator_state ||
-        config_.velocity_target_integration != CartesianVelocityTargetIntegrationMode::PreviousCommand) {
-        return;
-    }
-    if (!was_sent_or_intended) {
-        if (velocity_integrator_state->valid) {
-            velocity_integrator_state->valid = false;
-            velocity_integrator_state->reset_reason = reset_reason;
-            ++velocity_integrator_state->resets_total;
-        }
-        return;
-    }
-    if (!velocity_integrator_state->valid) {
-        return;
-    }
-    velocity_integrator_state->q_command_deg = safe_q_target_deg;
-    if (target_was_clamped) {
-        ++velocity_integrator_state->clamps_total;
-    }
 }
 
 }  // namespace rb_servo

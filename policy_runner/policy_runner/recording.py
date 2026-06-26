@@ -259,6 +259,14 @@ class Hdf5EpisodeRecorder:
     def has_active_episode(self) -> bool:
         return self._current_episode is not None
 
+    @property
+    def episode_id(self) -> str | None:
+        return None if self._current_episode is None else self._current_episode.episode_id
+
+    @property
+    def frame_count(self) -> int:
+        return 0 if self._current_episode is None else len(self._current_episode.qpos_left)
+
     def start_episode(
         self,
         *,

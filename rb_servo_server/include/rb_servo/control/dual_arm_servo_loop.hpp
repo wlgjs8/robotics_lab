@@ -139,8 +139,6 @@ private:
     bool isValidJointState(const RobotState& state) const;
     void clearLatchedCartesianTargets();
     void clearLatchedCartesianTarget(ArmId arm_id);
-    void resetCartesianVelocityIntegrator(ArmId arm_id, const std::string& reason);
-    void refreshCartesianVelocityIntegratorTelemetry(ArmId arm_id);
     ServoTarget computeServoTarget(
         const RobotState& left_state,
         const RobotState& right_state,
@@ -296,6 +294,11 @@ private:
     void setMotionState(ServerMotionState state);
     ServoTarget currentFaultHoldTarget() const;
     JointArray chooseSafeHoldTarget(const RobotState& state, const JointArray& previous_sent) const;
+    JointArray chooseStreamingHoldTarget(
+        ArmId arm_id,
+        const RobotState& state,
+        const JointArray& previous_sent
+    ) const;
     double computeFilterDtSec(uint64_t actual_period_ns, uint64_t nominal_period_ns) const;
 
 private:
@@ -491,8 +494,6 @@ private:
     LatchedCartesianTarget right_latched_cartesian_target_;
     CartesianServoPathState left_cartesian_servo_path_;
     CartesianServoPathState right_cartesian_servo_path_;
-    CartesianVelocityIntegratorState left_cartesian_velocity_integrator_;
-    CartesianVelocityIntegratorState right_cartesian_velocity_integrator_;
     SmdPoseTracker left_pose_track_smd_{PoseTrackSmdConfig{}};
     SmdPoseTracker right_pose_track_smd_{PoseTrackSmdConfig{}};
     JointMovingAverage left_output_ma_{0};

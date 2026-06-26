@@ -344,19 +344,9 @@ struct CartesianSolveTelemetry {
     bool floor_goal_clamped = false;
     double goal_minus_measured_pos_m = 0.0;
     double goal_minus_measured_ori_rad = 0.0;
-    std::string cartesian_velocity_integration_mode;
     std::string cartesian_servo_state_source = "actual";
     std::string cartesian_divergence_source = "actual";
     bool q_reference_for_servo_valid = false;
-    bool q_integrator_valid = false;
-    std::string integrator_reset_reason;
-    uint64_t integrator_resets_total = 0;
-    uint64_t integrator_clamps_total = 0;
-    uint64_t integrator_divergence_total = 0;
-    double max_command_actual_error_deg_observed = 0.0;
-    double command_reference_error_deg_observed = 0.0;
-    double physical_command_actual_error_deg_observed = 0.0;
-    double velocity_target_lookahead_sec = 0.0;
     // --- A/B/C separation telemetry (Patch 4). Populated by the pose-track SMD path
     // and the final output moving-average stage; absent/false otherwise. Pure
     // telemetry — does not affect control. ---

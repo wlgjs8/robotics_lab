@@ -247,6 +247,8 @@ public:
     void setSendSleepMs(int sleep_ms) { send_sleep_ms_.store(sleep_ms); }
     void setQRefValid(bool valid) { q_ref_valid_ = valid; }
     void setFreezeReferenceOnSend(bool freeze) { freeze_reference_on_send_ = freeze; }
+    void setAcceptSendWithoutStateUpdate(bool accept) { accept_send_without_state_update_ = accept; }
+    void setActualJoints(const rb_servo::JointArray& q_actual) { q_actual_ = q_actual; }
     void setRobotTimeNs(uint64_t robot_time_ns) { robot_time_ns_.store(robot_time_ns); }
     void setAdvanceRobotTimeOnRead(bool advance) { advance_robot_time_on_read_ = advance; }
     int readCount() const { return read_count_; }
@@ -1664,6 +1666,7 @@ bool testLatestSnapshotContainsSendTimingAndPreviousTargets() {
 bool testReadOnlyModeSuppressesSendsAndBlocksMotionCommands() {
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = testConfig();
+    cfg.servo.rate_hz = 50;
     cfg.servo.send_servo_commands = false;
     cfg.safety.dq_max_deg_s = joints(10000.0);
     cfg.safety.ddq_max_deg_s2 = joints(100000.0);
@@ -2193,6 +2196,216 @@ bool testRbpodoAsyncSupervisionFlagDoesNotBypassPhysicalRealLatch() {
     loop.stop();
     RB_CHECK(fault_snapshot.has_value());
     RB_CHECK(fault_snapshot->fault_reason == "rbpodo async streaming supervision fault");
+    return true;
+}
+
+bool testRbpodoAsyncHoldStreamsServoJWithoutLatch() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+    cfg.servo.rate_hz = 50;
+    cfg.servo.worker_read_period_sec = 0.005;
+    enableRbpodoAsyncStreaming(&cfg);
+    const rb_servo::JointArray initial = joints(0.0);
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(loop.start());
+    std::optional<rb_servo::ServoSnapshot> hold_snapshot;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        if (!snapshot.fault_latched &&
+            snapshot.command.left.mode == rb_servo::ControlMode::Hold &&
+            snapshot.command.right.mode == rb_servo::ControlMode::Hold &&
+            snapshot.send_policy == "send_servo_j" &&
+            !snapshot.send_suppressed &&
+            snapshot.left_async_streaming.commands_enqueued_total > 2 &&
+            snapshot.right_async_streaming.commands_enqueued_total > 2 &&
+            snapshot.left_async_streaming.supervision_state !=
+                rb_servo::RbpodoAsyncStreamingSupervisionState::Fault &&
+            snapshot.right_async_streaming.supervision_state !=
+                rb_servo::RbpodoAsyncStreamingSupervisionState::Fault) {
+            hold_snapshot = snapshot;
+            return true;
+        }
+        return false;
+    }, std::chrono::milliseconds(1000)));
+
+    loop.stop();
+    RB_CHECK(hold_snapshot.has_value());
+    RB_CHECK(hold_snapshot->left_send_ok);
+    RB_CHECK(hold_snapshot->right_send_ok);
+    RB_CHECK(loop.latchedFaultReason() == rb_servo::SafetyVerdict::Ok);
+    return true;
+}
+
+bool testRealHoldStreamsCurrentActualAndArmMotionReanchors() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoPhysicalRealConfig();
+    cfg.servo.rate_hz = 100;
+    cfg.safety.dq_max_deg_s = joints(10000.0);
+    cfg.safety.ddq_max_deg_s2 = joints(100000.0);
+    cfg.safety.max_tracking_error_deg = 1000.0;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+    auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    TestBackend* left_backend = left.get();
+    TestBackend* right_backend = right.get();
+    rb_servo::DualArmServoLoop loop(std::move(left), std::move(right), cfg, &buffer, nullptr);
+
+    RB_CHECK(loop.start());
+    rb_servo::DualArmCommand arm_motion = command(rb_servo::ControlMode::ArmMotion);
+    arm_motion.left.timeout_sec = 1.0;
+    arm_motion.right.timeout_sec = 1.0;
+    buffer.setCommand(arm_motion);
+    RB_CHECK(waitUntil(
+        [&] { return loop.motionState() == rb_servo::ServerMotionState::ArmedHold; },
+        std::chrono::milliseconds(1000)
+    ));
+
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.seq = 9101;
+    target.left.q_target_deg = joints(6.0);
+    target.right.q_target_deg = joints(6.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    target.left.timeout_sec = 1.0;
+    target.right.timeout_sec = 1.0;
+    buffer.setCommand(target);
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoTarget previous = loop.previousSentTarget();
+        return loop.motionState() == rb_servo::ServerMotionState::Running &&
+               sameJointArray(previous.left_q_target_deg, joints(6.0)) &&
+               sameJointArray(previous.right_q_target_deg, joints(6.0));
+    }, std::chrono::milliseconds(1000)));
+
+    const rb_servo::JointArray drifted_actual = joints(2.0);
+    left_backend->setAcceptSendWithoutStateUpdate(true);
+    right_backend->setAcceptSendWithoutStateUpdate(true);
+    left_backend->setActualJoints(drifted_actual);
+    right_backend->setActualJoints(drifted_actual);
+
+    rb_servo::DualArmCommand hold = command(rb_servo::ControlMode::Hold);
+    hold.seq = 9102;
+    hold.left.timeout_sec = 1.0;
+    hold.right.timeout_sec = 1.0;
+    buffer.setCommand(hold);
+    std::optional<rb_servo::ServoSnapshot> hold_snapshot;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        const rb_servo::ServoTarget previous = loop.previousSentTarget();
+        if (snapshot.command.seq == 9102 &&
+            snapshot.motion_state == rb_servo::ServerMotionState::ArmedHold &&
+            snapshot.send_policy == "send_servo_j" &&
+            !snapshot.send_suppressed &&
+            !snapshot.fault_latched &&
+            sameJointArray(previous.left_q_target_deg, drifted_actual) &&
+            sameJointArray(previous.right_q_target_deg, drifted_actual)) {
+            hold_snapshot = snapshot;
+            return true;
+        }
+        return false;
+    }, std::chrono::milliseconds(1000)));
+
+    RB_CHECK(hold_snapshot.has_value());
+    RB_CHECK(sameJointArray(hold_snapshot->left_sent_q_deg, drifted_actual));
+    RB_CHECK(sameJointArray(hold_snapshot->right_sent_q_deg, drifted_actual));
+
+    arm_motion.seq = 9103;
+    arm_motion.host_time_ns = rb_servo::nowSteadyNs();
+    buffer.setCommand(arm_motion);
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        const rb_servo::ServoTarget previous = loop.previousSentTarget();
+        return snapshot.motion_state == rb_servo::ServerMotionState::ArmedHold &&
+               !snapshot.fault_latched &&
+               snapshot.send_policy == "send_servo_j" &&
+               sameJointArray(previous.left_q_target_deg, drifted_actual) &&
+               sameJointArray(previous.right_q_target_deg, drifted_actual);
+    }, std::chrono::milliseconds(1000)));
+
+    loop.stop();
+    RB_CHECK(left_backend->resetCount() == 0);
+    RB_CHECK(right_backend->resetCount() == 0);
+    RB_CHECK(loop.latchedFaultReason() == rb_servo::SafetyVerdict::Ok);
+    return true;
+}
+
+bool testEmergencyStopStillRequiresResetAfterArmMotion() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoPhysicalRealConfig();
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+    auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    TestBackend* left_backend = left.get();
+    TestBackend* right_backend = right.get();
+    rb_servo::DualArmServoLoop loop(std::move(left), std::move(right), cfg, &buffer, nullptr);
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    buffer.setCommand(command(rb_servo::ControlMode::EmergencyStop));
+    RB_CHECK(waitUntil([&] { return loop.faultLatched(); }));
+    RB_CHECK(loop.motionState() == rb_servo::ServerMotionState::EmergencyLatched);
+    RB_CHECK(loop.latchedFaultReason() == rb_servo::SafetyVerdict::EmergencyStop);
+
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    loop.stop();
+    RB_CHECK(snapshot.fault_latched);
+    RB_CHECK(snapshot.motion_state == rb_servo::ServerMotionState::EmergencyLatched);
+    RB_CHECK(snapshot.send_policy == "emergency_latched");
+    RB_CHECK(snapshot.send_suppressed);
+    RB_CHECK(left_backend->resetCount() == 0);
+    RB_CHECK(right_backend->resetCount() == 0);
+    return true;
+}
+
+bool testPhysicalRealSendFailureStillHardLatches() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoPhysicalRealConfig();
+    cfg.safety.stop_both_arms_on_single_arm_error = false;
+    const rb_servo::JointArray initial = joints(0.0);
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(
+            rb_servo::ArmId::Left,
+            initial,
+            true,
+            rb_servo::BackendErrorKind::TransportTimeout
+        ),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr
+    );
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.left.q_target_deg = joints(7.0);
+    target.right.q_target_deg = joints(7.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    buffer.setCommand(target);
+    RB_CHECK(waitUntil([&] { return loop.faultLatched(); }));
+    RB_CHECK(loop.motionState() == rb_servo::ServerMotionState::FaultLatched);
+    RB_CHECK(loop.latchedFaultReason() == rb_servo::SafetyVerdict::SendFailure);
+
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    loop.stop();
+    RB_CHECK(snapshot.fault_latched);
+    RB_CHECK(snapshot.motion_state == rb_servo::ServerMotionState::FaultLatched);
+    RB_CHECK(snapshot.send_policy == "fault_latched");
+    RB_CHECK(snapshot.send_suppressed);
     return true;
 }
 
@@ -5197,6 +5410,10 @@ int main() {
     if (!testRbpodoAsyncSupervisionFaultLatchesServoLoop()) return 1;
     if (!testRbpodoAsyncSupervisionFaultIsAdvisoryInControllerSimulationWhenFlagEnabled()) return 1;
     if (!testRbpodoAsyncSupervisionFlagDoesNotBypassPhysicalRealLatch()) return 1;
+    if (!testRbpodoAsyncHoldStreamsServoJWithoutLatch()) return 1;
+    if (!testRealHoldStreamsCurrentActualAndArmMotionReanchors()) return 1;
+    if (!testEmergencyStopStillRequiresResetAfterArmMotion()) return 1;
+    if (!testPhysicalRealSendFailureStillHardLatches()) return 1;
     if (!testRbpodoTrackingErrorIsAdvisoryInControllerSimulationWhenFlagEnabled()) return 1;
     if (!testRbpodoTrackingErrorFlagDoesNotBypassPhysicalRealLatch()) return 1;
     if (!testRbpodoAsyncReferenceSupervisionQRefUpdatesOk()) return 1;

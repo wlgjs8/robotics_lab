@@ -92,12 +92,6 @@ from .scene import (
     update_scene_markers,
 )
 from .state_receiver import StateReceiver, StateStore
-from .scope_dashboard import (
-    DEFAULT_DASHBOARD_PORT,
-    ScopeDashboardServer,
-    dashboard_host_from_env,
-)
-from .scope_receiver import DEFAULT_SCOPE_PORT, ScopeReceiver, ScopeStore
 from .status_panel import (
     _JOINT_MONITOR_UNITS,
     _STAND_WORLD_MONITOR_UNITS,
@@ -1674,129 +1668,11 @@ def _set_dark_mode(server: Any, handles: dict[str, Any], dark: bool) -> None:
             pass
 
 
-def _set_gui_visible(handle: Any, visible: bool) -> None:
-    if handle is None:
-        return
-    try:
-        handle.visible = visible
-    except Exception:
-        pass
-
-
-def _debug_mode_active(handles: dict[str, Any]) -> bool:
-    toggle = handles.get("debug_mode_toggle")
-    return bool(getattr(toggle, "value", False))
-
-
-def _build_debug_panel(
-    server: Any, handles: dict[str, Any], dashboard_url: str | None
-) -> None:
-    folder = server.gui.add_folder(
-        "디버그",
-        expand_by_default=True,
-        order=-9.0,
-        visible=False,
-    )
-    handles["debug_folder"] = folder
-
-    with folder:
-        handles["debug_readonly"] = server.gui.add_text(
-            "Mode",
-            initial_value="읽기 전용: 500Hz scope 대시보드 링크만 표시, 모션/lease 명령 전송 없음",
-            disabled=True,
-        )
-        if dashboard_url:
-            link_text = (
-                f"[Scope dashboard 열기]({dashboard_url})\n\n"
-                "새 탭에서 full-viewport 8-plot scope를 표시합니다. "
-                "데이터는 같은 rb_gui 프로세스의 SSE 서버에서 읽습니다."
-            )
-            add_markdown = getattr(server.gui, "add_markdown", None)
-            if callable(add_markdown):
-                handles["debug_dashboard_link"] = add_markdown(link_text)
-            else:
-                handles["debug_dashboard_url"] = server.gui.add_text(
-                    "Scope dashboard",
-                    initial_value=dashboard_url,
-                    disabled=True,
-                )
-        else:
-            handles["debug_dashboard_url"] = server.gui.add_text(
-                "Scope dashboard",
-                initial_value="dashboard server unavailable",
-                disabled=True,
-            )
-
-
-def _scene_debug_handles(handles: dict[str, Any]) -> dict[tuple[str, str], Any]:
-    out: dict[tuple[str, str], Any] = {}
-    scene_handles = handles.get("scene")
-    if isinstance(scene_handles, dict):
-        for key, handle in scene_handles.items():
-            if hasattr(handle, "visible"):
-                out[("scene", str(key))] = handle
-    for key in ("pc_handle", "pc_cam_frame", "pc_cam_gizmo"):
-        handle = handles.get(key)
-        if hasattr(handle, "visible"):
-            out[("top", key)] = handle
-    return out
-
-
-def _set_scene_debug_visible(handles: dict[str, Any], active: bool) -> None:
-    current = _scene_debug_handles(handles)
-    if active:
-        saved = handles.setdefault("_debug_scene_visible_restore", {})
-        for key, handle in current.items():
-            if key not in saved:
-                saved[key] = getattr(handle, "visible", True)
-            _set_gui_visible(handle, False)
-        show_saved = handles.setdefault("_debug_urdf_show_visual_restore", {})
-        scene_handles = handles.get("scene")
-        if isinstance(scene_handles, dict):
-            for key in ("left_urdf", "right_urdf", "left_urdf_ref", "right_urdf_ref"):
-                urdf = scene_handles.get(key)
-                if urdf is None or not hasattr(urdf, "show_visual"):
-                    continue
-                if key not in show_saved:
-                    show_saved[key] = getattr(urdf, "show_visual", True)
-                try:
-                    urdf.show_visual = False
-                except Exception:
-                    pass
-        return
-
-    saved = handles.pop("_debug_scene_visible_restore", {})
-    for key, visible in saved.items():
-        handle = current.get(key)
-        if handle is not None:
-            _set_gui_visible(handle, bool(visible))
-    show_saved = handles.pop("_debug_urdf_show_visual_restore", {})
-    scene_handles = handles.get("scene")
-    if isinstance(scene_handles, dict):
-        for key, show_visual in show_saved.items():
-            urdf = scene_handles.get(key)
-            if urdf is None:
-                continue
-            try:
-                urdf.show_visual = bool(show_visual)
-            except Exception:
-                pass
-
-
-def _set_debug_mode_active(handles: dict[str, Any], active: bool) -> None:
-    _set_gui_visible(handles.get("debug_folder"), active)
-    for handle in handles.get("debug_normal_panel_handles", ()):
-        _set_gui_visible(handle, not active)
-    _set_scene_debug_visible(handles, active)
-    handles["_debug_mode_active_applied"] = bool(active)
-
-
 def build_gui(
     server: Any,
     safety: OperatorSafety,
     store: StateStore,
     overlay_store: CircleOverlayStore | None = None,
-    scope_dashboard_url: str | None = None,
 ) -> dict[str, Any]:
     handles: dict[str, Any] = {}
     handles["circle_overlay_enabled"] = overlay_store is not None
@@ -1807,25 +1683,6 @@ def build_gui(
     handles["scene"] = _add_scene_fallback(server)
     _install_default_camera(server)
 
-    if hasattr(server.gui, "add_checkbox"):
-        handles["debug_mode_toggle"] = server.gui.add_checkbox(
-            "디버그 모드",
-            initial_value=False,
-            order=-10.0,
-        )
-
-        @handles["debug_mode_toggle"].on_update
-        def _(_: Any) -> None:
-            _set_debug_mode_active(handles, _debug_mode_active(handles))
-    else:
-        handles["debug_mode_unavailable"] = server.gui.add_text(
-            "디버그 모드",
-            initial_value="checkbox unsupported by this viser version",
-            disabled=True,
-            order=-10.0,
-        )
-
-    _build_debug_panel(server, handles, scope_dashboard_url)
     _build_operator_monitors(server, handles)
 
     _add_tab_theme = getattr(server.gui, "add_html", None)
@@ -1834,15 +1691,6 @@ def build_gui(
 
     tabs = server.gui.add_tab_group(order=1.0)
     handles["main_tabs"] = tabs
-    handles["debug_normal_panel_handles"] = [
-        handle
-        for handle in (
-            handles.get("operator_monitor_content"),
-            handles.get("operator_monitor_folder"),
-            tabs,
-        )
-        if handle is not None
-    ]
     with tabs.add_tab("상태"):
         # Dark/light theme toggle (default dark). Re-applies viser's panel theme
         # and the custom tab CSS live so the operator can flip it without restart.
@@ -3382,10 +3230,8 @@ def update_gui(
     store: StateStore,
     overlay_store: CircleOverlayStore | None = None,
 ) -> None:
-    debug_active = _debug_mode_active(handles)
-    if not debug_active:
-        _update_stereo_cloud(handles)  # 로봇 상태와 무관 — 항상 갱신
-        _update_stereo_boxes(handles)  # 검출된 박스 렌더
+    _update_stereo_cloud(handles)  # 로봇 상태와 무관 — 항상 갱신
+    _update_stereo_boxes(handles)  # 검출된 박스 렌더
     disabled_states = safety.control_disabled_states()
     disabled_reasons = safety.control_disabled_reasons()
     for mode, button in handles.get("lifecycle_buttons", {}).items():
@@ -3423,8 +3269,7 @@ def update_gui(
         _refresh_tcp_ptp_axis_fields(handles)
     readiness = safety.readiness()
     _update_lease_owner(handles, latest, safety.command_client.source_id, held=safety.command_client.hold_lease)
-    if not debug_active:
-        _update_circle_overlay_gui(handles, overlay_store)
+    _update_circle_overlay_gui(handles, overlay_store)
     if latest is None:
         _update_operator_monitors(handles, None, stale=True)
         if "status_summary" in handles:
@@ -3437,11 +3282,6 @@ def update_gui(
         )
         handles["connection"].value = "disconnected/stale"
         handles["readiness"].value = readiness.no_go_reason or "No-Go: no state stream"
-        if debug_active:
-            handles["packets"].value = f"{store.received_packets} received / {store.invalid_packets} invalid"
-            _set_debug_mode_active(handles, True)
-            return
-        _set_debug_mode_active(handles, False)
         if "self_collision" in handles:
             handles["self_collision"].value = _format_self_collision_status(None, stale=True)
         if "floor_constraint" in handles:
@@ -3537,32 +3377,6 @@ def update_gui(
         handles["roi_box"].value = _format_roi_box_status(latest, stale=stale)
     if "user_floor_constraint" in handles:
         handles["user_floor_constraint"].value = _format_user_floor_constraint_status(latest, stale=stale)
-    if debug_active:
-        if "fk_status" in handles:
-            handles["fk_status"].value = _format_fk_status(latest, stale=stale)
-        if "tcp_tracking" in handles:
-            handles["tcp_tracking"].value = _format_tcp_tracking_status(
-                latest,
-                stale=stale,
-                display_mode=_tcp_display_mode(handles),
-            )
-        if "pgmode_status" in handles:
-            handles["pgmode_status"].value = _format_pgmode_status(
-                latest,
-                stale=stale,
-                display_mode=_tcp_display_mode(handles),
-            )
-        if "cartesian_solve" in handles:
-            handles["cartesian_solve"].value = _format_cartesian_solve_status(latest, stale=stale)
-        if "tcp_status" in handles:
-            handles["tcp_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
-        if "tcp_linear_status" in handles:
-            handles["tcp_linear_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
-        _update_operator_monitors(handles, latest, stale=stale)
-        handles["tick"].value = latest.tick
-        handles["packets"].value = f"{store.received_packets} received / {store.invalid_packets} invalid"
-        _set_debug_mode_active(handles, True)
-        return
     _update_floor_panel(handles, latest)
     if "roi_box" in handles:
         handles["roi_box"].value = _format_roi_box_status(latest, stale=stale)
@@ -3639,7 +3453,6 @@ def update_gui(
     if "tcp_linear_status" in handles:
         handles["tcp_linear_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
     _update_operator_monitors(handles, latest, stale=stale)
-    _set_debug_mode_active(handles, False)
     _push_gripper_percent(handles, latest)
     _update_gripper_feedback(handles, latest, stale=stale)
     update_scene_markers(handles.get("scene", {}), latest, tcp_display_mode=_tcp_display_mode(handles))
@@ -3810,12 +3623,6 @@ def main(argv: list[str] | None = None) -> None:
     port = _env_int("RB_GUI_PORT", 8080)
     state_host = os.environ.get("RB_GUI_STATE_BIND", "0.0.0.0")
     state_port = _env_int("RB_GUI_STATE_PORT", 50110)
-    scope_host = os.environ.get("RB_GUI_SCOPE_BIND", "0.0.0.0")
-    scope_port = _env_int("RB_GUI_SCOPE_PORT", DEFAULT_SCOPE_PORT)
-    scope_dashboard_host = dashboard_host_from_env("127.0.0.1")
-    scope_dashboard_port = _env_int(
-        "RB_GUI_SCOPE_DASHBOARD_PORT", DEFAULT_DASHBOARD_PORT
-    )
     command_host = os.environ.get("RB_GUI_COMMAND_HOST", "127.0.0.1")
     command_port = _env_int("RB_GUI_COMMAND_PORT", 50010)
     observed_mode_raw = os.environ.get("RB_GUI_OBSERVED_MODE", "mock")
@@ -3835,34 +3642,6 @@ def main(argv: list[str] | None = None) -> None:
     store = StateStore()
     receiver = StateReceiver(store, host=state_host, port=state_port)
     receiver.start()
-    scope_store = ScopeStore()
-    scope_receiver = ScopeReceiver(scope_store, host=scope_host, port=scope_port)
-    scope_receiver.start()
-    scope_dashboard: ScopeDashboardServer | None = ScopeDashboardServer(
-        scope_store,
-        host=scope_dashboard_host,
-        port=scope_dashboard_port,
-    )
-    try:
-        scope_dashboard.start()
-    except OSError as exc:
-        if "RB_GUI_SCOPE_DASHBOARD_PORT" in os.environ:
-            print(
-                "rb_servo_gui: scope dashboard disabled "
-                f"({scope_dashboard_host}:{scope_dashboard_port}: {exc})",
-                flush=True,
-            )
-            scope_dashboard = None
-        else:
-            print(
-                "rb_servo_gui: scope dashboard default port unavailable "
-                f"({scope_dashboard_host}:{scope_dashboard_port}: {exc}); "
-                "retrying with an ephemeral port",
-                flush=True,
-            )
-            scope_dashboard = ScopeDashboardServer(
-                scope_store, host=scope_dashboard_host, port=0
-            ).start()
     # 스테레오 pointcloud 워커(camera_server 컨테이너) 구독. 고급→Pointcloud 토글로 표시.
     stereo_store = StereoCloudStore()
     stereo_endpoint = os.environ.get("RB_GUI_STEREO_CLOUD_ENDPOINT", "tcp://127.0.0.1:5601")
@@ -3898,7 +3677,6 @@ def main(argv: list[str] | None = None) -> None:
         safety,
         store,
         overlay_store=overlay_store,
-        scope_dashboard_url=scope_dashboard.url if scope_dashboard is not None else None,
     )
     handles["_stereo_store"] = stereo_store
     overlay_status = (
@@ -3907,9 +3685,8 @@ def main(argv: list[str] | None = None) -> None:
         else ", circle overlay disabled"
     )
     print(
-        f"rb_servo_gui listening on http://{host}:{port}, UDP state {state_host}:{state_port}, "
-        f"scope {scope_host}:{scope_port}, scope dashboard "
-        f"{scope_dashboard.url if scope_dashboard is not None else 'disabled'}{overlay_status}",
+        f"rb_servo_gui listening on http://{host}:{port}, UDP state {state_host}:{state_port}"
+        f"{overlay_status}",
         flush=True,
     )
 
@@ -3919,9 +3696,6 @@ def main(argv: list[str] | None = None) -> None:
             time.sleep(0.1)
     finally:
         receiver.stop()
-        if scope_dashboard is not None:
-            scope_dashboard.stop()
-        scope_receiver.stop()
         stereo_receiver.stop()
         if overlay_receiver is not None:
             overlay_receiver.stop()

@@ -29,6 +29,7 @@ from .rollout_modes import (
 )
 from .safety import SafetyGate
 from .servo_command_client import CommandIntent, ServoCommandClient
+from .record_control import RecordingSupervisor
 from .spacemouse import HidSpaceMouseReader, ScriptedSpaceMouseReader, SpaceMouseReader, SpaceMouseSample
 from .action_sources.umi_dual_cartesian import MockUmiPoseReader, UdpUmiPoseReader, UmiPoseReader
 
@@ -40,6 +41,30 @@ LEASE_READBACK_TIMEOUT_EXIT_CODE = 3
 # releases the command-source lease so one-shot GUI commands can run between
 # teleop bursts; the next motion intent re-acquires lazily.
 IDLE_LEASE_RELEASE_SEC = 1.0
+
+
+def _intent_record_packet(
+    command_client: ServoCommandClient | object | None,
+    intent: CommandIntent,
+    seq: int,
+) -> dict[str, object]:
+    build_packet = getattr(command_client, "build_packet", None)
+    if callable(build_packet):
+        try:
+            return build_packet(intent, seq)
+        except Exception:
+            pass
+    packet: dict[str, object] = {
+        "seq": int(seq),
+        "mode": intent.mode,
+        "timeout_sec": intent.timeout_sec,
+        "coupled_timeout": intent.coupled_timeout,
+    }
+    if intent.left is not None:
+        packet["left"] = intent.left
+    if intent.right is not None:
+        packet["right"] = intent.right
+    return packet
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -85,6 +110,7 @@ def run(
     send_commands: bool = True,
     rollout_recorder: RolloutSummaryRecorder | None = None,
     geometry_status: GeometryStatus | None = None,
+    recording_supervisor: RecordingSupervisor | None = None,
 ) -> int:
     state_client = state_client or RobotStateClient(config.robot_state.bind, config.robot_state.stale_timeout_sec)
     if send_commands:
@@ -115,6 +141,33 @@ def run(
     # Lazily initialized from the loop's `now`: tests inject finite scripted
     # monotonic_fn sequences, so no extra monotonic_fn() calls here.
     debug_last_print: float | None = None
+    recording_supervisor = recording_supervisor or RecordingSupervisor.from_config(config, stderr=stderr)
+    last_record_packet: dict[str, object] | None = None
+    last_record_packet_time_ns = 0
+    last_record_packet_seq = 0
+
+    def _remember_sent_intent(intent: CommandIntent, seq: int) -> None:
+        nonlocal last_record_packet, last_record_packet_time_ns, last_record_packet_seq
+        last_record_packet = _intent_record_packet(command_client, intent, seq)
+        last_record_packet_time_ns = time.time_ns()
+        last_record_packet_seq = int(seq)
+
+    def _remember_unsent_intent(intent: CommandIntent) -> None:
+        nonlocal last_record_packet, last_record_packet_time_ns, last_record_packet_seq
+        last_record_packet = _intent_record_packet(command_client, intent, 0)
+        last_record_packet_time_ns = time.time_ns()
+        last_record_packet_seq = 0
+
+    def _finish_tick(snapshot: StateSnapshot, now_value: float) -> None:
+        recording_supervisor.record_frame(
+            snapshot,
+            action_packet=last_record_packet,
+            action_host_time_ns=last_record_packet_time_ns,
+            action_seq=last_record_packet_seq,
+        )
+        recording_supervisor.stamp_snapshot(snapshot)
+        recording_supervisor.publish_status(now_monotonic=now_value)
+        sleep_fn(period)
     try:
         while True:
             snapshot = state_client.latest
@@ -130,6 +183,8 @@ def run(
                     return STARTUP_TIMEOUT_EXIT_CODE
                 sleep_fn(period)
                 continue
+            recording_supervisor.drain_commands(snapshot, action_source=str(getattr(source, "name", config.action_source)))
+            recording_supervisor.stamp_snapshot(snapshot)
             if state_sink is not None:
                 state_sink(snapshot)
             if rollout_recorder is not None:
@@ -182,7 +237,8 @@ def run(
                 if not send_commands:
                     if rollout_recorder is not None:
                         rollout_recorder.record_dropped("rollout_mode_command_send_disabled", intent)
-                    sleep_fn(period)
+                    _remember_unsent_intent(intent)
+                    _finish_tick(snapshot, now)
                     continue
                 assert command_client is not None
                 # Lazy lease: acquire on the FIRST motion intent, not at startup.
@@ -191,7 +247,7 @@ def run(
                 # temporary GUI lease holder does not kill the teleop process.
                 if config.servo_command.acquire_lease and not lease_acquired and intent.is_motion:
                     if now < lease_retry_after:
-                        sleep_fn(period)
+                        _finish_tick(snapshot, now)
                         continue
                     try:
                         command_client.acquire_lease(
@@ -207,7 +263,7 @@ def run(
                             file=stderr,
                         )
                         lease_retry_after = now + 2.0
-                        sleep_fn(period)
+                        _finish_tick(snapshot, now)
                         continue
                 if intent.is_motion and not armed_for_motion:
                     arm = CommandIntent.arm_motion(timeout_sec=config.servo_command.timeout_sec)
@@ -215,7 +271,8 @@ def run(
                     if rollout_recorder is not None:
                         rollout_recorder.record_decision(arm_decision)
                     if arm_decision.allowed:
-                        command_client.send(arm)
+                        arm_seq = command_client.send(arm)
+                        _remember_sent_intent(arm, arm_seq)
                         if rollout_recorder is not None:
                             rollout_recorder.record_sent(arm)
                         armed_for_motion = True
@@ -225,19 +282,21 @@ def run(
                         if teleop_debug:
                             debug_dropped += 1
                             debug_last_drop_reason = f"arm:{arm_decision.reason or ''}"
-                        sleep_fn(period)
+                        _finish_tick(snapshot, now)
                         continue
-                command_client.send(intent)
+                seq = command_client.send(intent)
+                _remember_sent_intent(intent, seq)
                 if teleop_debug:
                     debug_sent += 1
                 if rollout_recorder is not None:
                     rollout_recorder.record_sent(intent)
             elif intent is not None and rollout_recorder is not None:
                 rollout_recorder.record_dropped(decision.reason, intent)
-            sleep_fn(period)
+            _finish_tick(snapshot, now)
     except KeyboardInterrupt:
         return 0
     finally:
+        recording_supervisor.close()
         _close_if_supported(source)
         state_client.close()
         if command_client is not None:

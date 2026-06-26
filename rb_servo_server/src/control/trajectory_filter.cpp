@@ -15,6 +15,12 @@ bool nearlyEqualJointArray(const JointArray& a, const JointArray& b, double tol_
     return true;
 }
 
+bool finiteJointArray(const JointArray& joints) {
+    return std::all_of(joints.begin(), joints.end(), [](double value) {
+        return std::isfinite(value);
+    });
+}
+
 // Choose the shortest-path representation of an absolute JointTarget goal.
 //
 // The robot operates on RAW continuous joint angles in [q_min_deg, q_max_deg]
@@ -90,6 +96,11 @@ JointArray TrajectoryFilter::computeJointTarget(
     JointArray out{};
     switch (command.mode) {
         case ControlMode::Hold:
+            joint_smd_.deactivate();
+            out = command.has_joint_target && finiteJointArray(command.q_target_deg)
+                ? command.q_target_deg
+                : holdTarget(previous_sent_target);
+            break;
         case ControlMode::Idle:
         case ControlMode::ArmMotion:
         case ControlMode::DisarmMotion:

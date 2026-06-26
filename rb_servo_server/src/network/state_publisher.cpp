@@ -127,28 +127,6 @@ std::string cartesianLimitPolicyString(CartesianLimitPolicy policy) {
     return "unknown";
 }
 
-std::string velocityIntegrationModeString(CartesianVelocityTargetIntegrationMode mode) {
-    switch (mode) {
-        case CartesianVelocityTargetIntegrationMode::MeasuredActual:
-            return "measured_actual";
-        case CartesianVelocityTargetIntegrationMode::MeasuredActualLookahead:
-            return "measured_actual_lookahead";
-        case CartesianVelocityTargetIntegrationMode::PreviousCommand:
-            return "previous_command";
-    }
-    return "unknown";
-}
-
-std::string commandActualErrorPolicyString(CartesianCommandActualErrorPolicy policy) {
-    switch (policy) {
-        case CartesianCommandActualErrorPolicy::Reset:
-            return "reset";
-        case CartesianCommandActualErrorPolicy::Fault:
-            return "fault";
-    }
-    return "unknown";
-}
-
 std::string controllerSimulationStateSourceString(CartesianControllerSimulationStateSource source) {
     switch (source) {
         case CartesianControllerSimulationStateSource::Actual:
@@ -307,15 +285,10 @@ nlohmann::json cartesianControlSnapshotJson(const CartesianControlConfig& config
         {"max_cartesian_step_m", optionalDoubleJson(config.max_cartesian_step_m)},
         {"max_cartesian_step_rad", optionalDoubleJson(config.max_cartesian_step_rad)},
         {"exceed_limit_policy", cartesianLimitPolicyString(config.exceed_limit_policy)},
-        {"velocity_target_integration", velocityIntegrationModeString(config.velocity_target_integration)},
         {"controller_simulation_servo_state_source",
             controllerSimulationStateSourceString(config.controller_simulation_servo_state_source)},
         {"controller_simulation_divergence_source",
             controllerSimulationStateSourceString(config.controller_simulation_divergence_source)},
-        {"velocity_target_lookahead_sec", config.velocity_target_lookahead_sec},
-        {"max_command_actual_error_deg", jointArrayJson(config.max_command_actual_error_deg)},
-        {"reset_velocity_integrator_on_mode_change", config.reset_velocity_integrator_on_mode_change},
-        {"command_actual_error_policy", commandActualErrorPolicyString(config.command_actual_error_policy)},
         {"linear_move", {
             {"min_duration_sec", config.linear_move.min_duration_sec},
             {"max_duration_sec", config.linear_move.max_duration_sec},
@@ -654,19 +627,9 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"floor_goal_clamped", telemetry.floor_goal_clamped},
         {"goal_minus_measured_pos_m", telemetry.goal_minus_measured_pos_m},
         {"goal_minus_measured_ori_rad", telemetry.goal_minus_measured_ori_rad},
-        {"cartesian_velocity_integration_mode", telemetry.cartesian_velocity_integration_mode},
         {"cartesian_servo_state_source", telemetry.cartesian_servo_state_source},
         {"cartesian_divergence_source", telemetry.cartesian_divergence_source},
         {"q_reference_for_servo_valid", telemetry.q_reference_for_servo_valid},
-        {"q_integrator_valid", telemetry.q_integrator_valid},
-        {"integrator_reset_reason", telemetry.integrator_reset_reason},
-        {"integrator_resets_total", telemetry.integrator_resets_total},
-        {"integrator_clamps_total", telemetry.integrator_clamps_total},
-        {"integrator_divergence_total", telemetry.integrator_divergence_total},
-        {"max_command_actual_error_deg_observed", telemetry.max_command_actual_error_deg_observed},
-        {"command_reference_error_deg_observed", telemetry.command_reference_error_deg_observed},
-        {"physical_command_actual_error_deg_observed", telemetry.physical_command_actual_error_deg_observed},
-        {"velocity_target_lookahead_sec", telemetry.velocity_target_lookahead_sec},
         // A/B/C separation telemetry (Patch 4). Absent/false on non-SMD paths.
         {"smd_active", telemetry.smd_active},
         {"smd_goal_stand", optionalPoseJson(telemetry.smd_goal_stand)},

@@ -37,7 +37,6 @@ void writeCartesianSolveHeader(std::ostream& os, const char* side) {
        << ',' << side << "_cart_sol_jump_deg"
        << ',' << side << "_cart_branch_jump_suspected"
        << ',' << side << "_cart_branch_jump_clamped"
-       << ',' << side << "_cart_integrator_clamps"
        << ',' << side << "_cart_pos_err_m"
        << ',' << side << "_cart_ori_err_rad"
        << ',' << side << "_cart_path_active"
@@ -207,7 +206,6 @@ void writeCartesianSolveColumns(std::ostream& os, const CartesianSolveTelemetry&
        << ',' << t.ik_solution_jump_deg
        << ',' << t.ik_branch_jump_suspected
        << ',' << t.ik_branch_jump_clamped
-       << ',' << t.integrator_clamps_total
        << ',' << t.position_error_m
        << ',' << t.orientation_error_rad
        << ',' << t.path_active

@@ -468,34 +468,6 @@ bool testScalarFirstOrderPlantShowsMeasuredActualAttenuation() {
     return true;
 }
 
-bool testVelocityIntegratorUsesClampedSafeTarget() {
-    rb_servo::CartesianControlConfig config;
-    config.velocity_target_integration =
-        rb_servo::CartesianVelocityTargetIntegrationMode::PreviousCommand;
-    rb_servo::CartesianServoController controller(
-        rb_servo::ArmMountConfig{},
-        rb_servo::ArmMountConfig{},
-        config,
-        std::make_shared<LinearFakeKinematics>()
-    );
-    rb_servo::CartesianVelocityIntegratorState integrator;
-    integrator.valid = true;
-    integrator.q_command_deg = zeroJoints();
-    rb_servo::JointArray clamped = zeroJoints();
-    clamped[0] = 0.2;
-    controller.updateVelocityIntegratorAfterSafety(
-        &integrator,
-        clamped,
-        true,
-        true,
-        ""
-    );
-    RB_CHECK(integrator.valid);
-    RB_CHECK(std::abs(integrator.q_command_deg[0] - 0.2) < kEpsilon);
-    RB_CHECK(integrator.clamps_total == 1);
-    return true;
-}
-
 }  // namespace
 
 int main() {
@@ -507,6 +479,5 @@ int main() {
     if (!testQuaternionAndRpyYawFrameConversionMatch()) return 1;
     if (!testLinearMoveConstantOrientationNearPiStaysFinite()) return 1;
     if (!testScalarFirstOrderPlantShowsMeasuredActualAttenuation()) return 1;
-    if (!testVelocityIntegratorUsesClampedSafeTarget()) return 1;
     return 0;
 }
