@@ -49,7 +49,7 @@ class MasterArmJointActionSource:
         right_robot_init_deg: Sequence[float] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
         left_joint_map: Sequence[int] = (0, 1, 2, 3, 4, 5),
         right_joint_map: Sequence[int] = (0, 1, 2, 3, 4, 5),
-        max_joint_velocity_deg_s: Sequence[float] = (30.0, 30.0, 30.0, 45.0, 45.0, 60.0),
+        max_joint_speed_deg_s: Sequence[float] = (30.0, 30.0, 30.0, 45.0, 45.0, 60.0),
         smoothing_alpha: float = 1.0,
         wrap_delta: bool = True,
         timeout_sec: float = 0.2,
@@ -90,7 +90,7 @@ class MasterArmJointActionSource:
         self.right_robot_init_deg = _tuple6(right_robot_init_deg, "right_robot_init_deg")
         self.left_joint_map = _joint_map(left_joint_map, "left_joint_map")
         self.right_joint_map = _joint_map(right_joint_map, "right_joint_map")
-        self.max_joint_velocity_deg_s = _tuple6(max_joint_velocity_deg_s, "max_joint_velocity_deg_s")
+        self.max_joint_speed_deg_s = _tuple6(max_joint_speed_deg_s, "max_joint_speed_deg_s")
         self.smoothing_alpha = float(smoothing_alpha)
         self.wrap_delta = bool(wrap_delta)
         self.timeout_sec = float(timeout_sec)
@@ -333,7 +333,7 @@ class MasterArmJointActionSource:
         if previous is not None and dt_sec is not None and dt_sec > 0.0:
             limited = []
             for i, (prev, cur) in enumerate(zip(previous, out)):
-                max_step = abs(self.max_joint_velocity_deg_s[i]) * dt_sec
+                max_step = abs(self.max_joint_speed_deg_s[i]) * dt_sec
                 if max_step > 0.0:
                     cur = max(prev - max_step, min(prev + max_step, cur))
                 limited.append(cur)

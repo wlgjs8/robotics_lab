@@ -3,6 +3,7 @@ pyproject.toml
 rb_servo_gui/__init__.py
 rb_servo_gui/app.py
 rb_servo_gui/command_client.py
+rb_servo_gui/debug_plots.py
 rb_servo_gui/geometry.py
 rb_servo_gui/models.py
 rb_servo_gui/overlay_receiver.py
@@ -10,6 +11,7 @@ rb_servo_gui/plane_fit.py
 rb_servo_gui/pointcloud_receiver.py
 rb_servo_gui/safety.py
 rb_servo_gui/scene.py
+rb_servo_gui/scope_receiver.py
 rb_servo_gui/state_receiver.py
 rb_servo_gui/status_panel.py
 rb_servo_gui.egg-info/PKG-INFO
@@ -18,4 +20,5 @@ rb_servo_gui.egg-info/dependency_links.txt
 rb_servo_gui.egg-info/entry_points.txt
 rb_servo_gui.egg-info/requires.txt
 rb_servo_gui.egg-info/top_level.txt
+tests/test_debug_plots.py
 tests/test_gui_contracts.py

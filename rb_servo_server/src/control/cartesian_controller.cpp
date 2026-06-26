@@ -1,8 +1,6 @@
 #include "rb_servo/control/cartesian_controller.hpp"
 
 #include "rb_servo/kinematics/ik_solver.hpp"
-#include "rb_servo/math/se3.hpp"
-
 #include <cmath>
 #include <utility>
 
@@ -92,28 +90,6 @@ CartesianArmTargetResult CartesianController::computeArmJointTarget(
                 },
                 1.0
             );
-            break;
-        case ControlMode::TcpDeltaStand:
-            if (!command.has_tcp_delta_stand || !state.tcp_stand || !state.has_valid_tcp_pose ||
-                !ik_solver::isFinitePose(command.tcp_delta_stand)) {
-                result.verdict = SafetyVerdict::CartesianUnavailable;
-                result.reason = "tcp_pose_unavailable";
-                result.telemetry.status = "unavailable";
-                result.telemetry.reason = result.reason;
-                return result;
-            }
-            target_tcp_stand = applyTcpDeltaStand(*state.tcp_stand, command.tcp_delta_stand);
-            break;
-        case ControlMode::TcpDeltaLocal:
-            if (!command.has_tcp_delta_local || !state.tcp_stand || !state.has_valid_tcp_pose ||
-                !ik_solver::isFinitePose(command.tcp_delta_local)) {
-                result.verdict = SafetyVerdict::CartesianUnavailable;
-                result.reason = "tcp_pose_unavailable";
-                result.telemetry.status = "unavailable";
-                result.telemetry.reason = result.reason;
-                return result;
-            }
-            target_tcp_stand = applyTcpDeltaLocal(*state.tcp_stand, command.tcp_delta_local);
             break;
         default:
             result.verdict = SafetyVerdict::CartesianUnavailable;
@@ -227,20 +203,6 @@ CartesianArmTargetResult CartesianController::solveIkFromTcpStandTarget(
         previous_safe_sent_q_deg,
         run_mode
     );
-}
-
-Pose6D CartesianController::applyTcpDeltaStand(
-    const Pose6D& current_tcp_stand,
-    const Pose6D& delta
-) const {
-    return math::composeDeltaStand(current_tcp_stand, delta);
-}
-
-Pose6D CartesianController::applyTcpDeltaLocal(
-    const Pose6D& current_tcp_stand,
-    const Pose6D& delta
-) const {
-    return math::composeDeltaLocal(current_tcp_stand, delta);
 }
 
 }  // namespace rb_servo

@@ -170,9 +170,6 @@ def load_arms(log_path: Path) -> dict[str, dict[str, Any]]:
                     "smd_goal_linear_velocity_ff_clipped", "smd_goal_angular_velocity_ff_clipped",
                     "smd_velocity_feedforward_used"):
             d[key] = _as_bool_array([r.get(key) for r in arm_rows])
-        d["smd_velocity_feedforward_source"] = [
-            str(r.get("smd_velocity_feedforward_source", "")).strip().lower() for r in arm_rows
-        ]
         d["ik_status"] = [str(r.get("ik_status", "")).strip().lower() for r in arm_rows]
         d["fault_latched"] = _as_bool_array([r.get("fault_latched") for r in arm_rows])
         out[arm] = d
@@ -266,7 +263,6 @@ def tier_b(arm: dict[str, Any], cfg) -> dict[str, Any]:
         "smd_velocity_feedforward_used_ratio": (
             float(np.count_nonzero(arm["smd_velocity_feedforward_used"])) / arm["n"] if arm["n"] else None
         ),
-        "smd_velocity_feedforward_source": _dominant_nonempty(arm.get("smd_velocity_feedforward_source")),
         "smd_goal_linear_velocity_p95_m_s": _pct(arm["smd_goal_linear_velocity_norm_m_s"], 95),
         "smd_goal_angular_velocity_p95_rad_s": _pct(arm["smd_goal_angular_velocity_norm_rad_s"], 95),
         "command_reference_tracking_error_deg_p95": _pct(arm["command_reference_tracking_error_deg"], 95),

@@ -2,7 +2,7 @@
 
 Bridges a running `openpi serve_policy.py` websocket server (pi05_pika_umi config)
 into the standard flow-infer runtime so the pi0.5 checkpoint goes through the SAME
-camera polling, reset anchoring, TcpTwistLocal emission, clamps, rollout-mode gates
+camera polling, reset anchoring, TcpPoseTarget emission, clamps, rollout-mode gates
 and gripper runtime as the in-house checkpoints.
 
 Usage (after starting the server):
@@ -36,17 +36,17 @@ from typing import Any, TextIO
 
 import numpy as np
 
-from .action_sources.tcp_delta import cartesian_action_requirements
+from .action_sources.tcp_pose_target import cartesian_action_requirements
 from .camera_bundle_client import resolve_frame
 from .flow_dataset import pose_from_state_payload
 from .flow_inference import (
     DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S,
     DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S,
+    FLOW_COMMAND_FAMILY,
+    FLOW_COMMAND_LABEL,
     FlowMatchingActionSource,
     _gripper_value_from_payload,
-    canonical_flow_command_family,
     default_action_log_path,
-    normalize_flow_command_family,
     resolve_ee_local_r_align,
     rotate_flow_arm_vectors,
 )
@@ -261,7 +261,6 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         tcp_target_pose_conditioning: str = "legacy_step_hold",
         tcp_target_pose_reanchor_mode: str = "measured_blend",
         tcp_target_pose_blend_steps: int = 2,
-        tcp_target_pose_send_twist: bool = False,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
         ee_local_r_align: Any = None,
@@ -354,10 +353,9 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # and the wall-clock of that sample (to rescale a multi-step displacement to one policy step).
         self._vel_prev_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._vel_prev_sample_t: float | None = None
-        self.command_family_option = (
-            normalize_flow_command_family(command_family) if command_family else "tcp_twist_local"
-        )
-        self.command_family = canonical_flow_command_family(self.command_family_option)
+        _ = command_family
+        self.command_family_option = FLOW_COMMAND_FAMILY
+        self.command_family = FLOW_COMMAND_LABEL
         # Fake-image smoke mode runs camera-less so the runtime does not gate on frames.
         self.camera_names = [] if self._fake_images else [str(name) for name in camera_names]
         # Depth (Option A): an include_depth checkpoint also gets *_wrist_0_depth through the same
@@ -435,7 +433,6 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self.last_missing_camera_count = 0
         self.image_decode_count = 0
         self.missing_camera_count = 0
-        self._last_nonzero_twist_by_arm = {"left": False, "right": False}
         # Real-Time Chunking (RTC). When enabled, each infer sends the previous
         # chunk back to the server (`prev_action_chunk`) so it freezes the first
         # `inference_delay` actions and inpaints the rest -- smooth async replan
@@ -449,15 +446,11 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self.rtc_max_guidance_weight = float(rtc_max_guidance_weight)
         self._rtc_prev_raw_chunk: np.ndarray | None = None
         self._rtc_warned_no_raw = False
-        # Chunk-boundary twist crossfade state (mirrors FlowMatchingActionSource;
+        # Chunk-boundary action crossfade state (mirrors FlowMatchingActionSource;
         # this class skips super().__init__). 0 = off. RTC subsumes the crossfade
         # (it makes boundaries continuous at the flow level), so disable it when on.
         self._chunk_crossfade_steps = 0 if self.rtc_enabled else int(chunk_crossfade_steps)
         self._steps_since_boundary = 0
-        self._prev_emitted_twist_by_arm: dict[str, tuple[float, ...] | None] = {
-            "left": None,
-            "right": None,
-        }
         self._target_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
         # Patch 3: online tcp_target_pose A-stage conditioning (this class skips
@@ -469,7 +462,6 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self._tcp_tp_mode = str(tcp_target_pose_conditioning)
         self._tcp_tp_reanchor_mode = str(tcp_target_pose_reanchor_mode)
         self._tcp_tp_blend_steps = int(tcp_target_pose_blend_steps)
-        self._tcp_tp_send_twist = bool(tcp_target_pose_send_twist)
         self._tcp_tp_conditioners = None
         self._tcp_tp_chunk_seq = 0
         self._current_gripper_targets: dict[str, float | None] = {"left": None, "right": None}
@@ -477,7 +469,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # FlowMatchingActionSource; this class skips super().__init__, so the
         # attributes the inherited _log_action_step touches must be set here.
         # Set POLICY_RUNNER_ACTION_LOG=/path/to/actions.jsonl to capture one JSON
-        # line per executed policy step (raw flow delta, sent twist, chunk index).
+        # line per executed policy step (raw flow delta, sent target, chunk index).
         self._action_log: TextIO | None = None
         self._action_log_seq = 0
         _action_log_path = default_action_log_path()

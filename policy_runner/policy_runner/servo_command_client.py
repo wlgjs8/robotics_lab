@@ -12,13 +12,8 @@ from .robot_state_client import CommandSourceLeaseReadback, StateStreamLeaseRead
 MOTION_MODES = {
     "ArmMotion",
     "JointTarget",
-    "JointVelocity",
     "TcpPoseTarget",
-    "TcpDeltaStand",
-    "TcpDeltaLocal",
     "TcpLinearMove",
-    "TcpTwistStand",
-    "TcpTwistLocal",
 }
 
 
@@ -39,6 +34,21 @@ class CommandIntent:
     @classmethod
     def hold(cls, timeout_sec: float = 0.2) -> "CommandIntent":
         return cls("Hold", timeout_sec=timeout_sec, left={}, right={})
+
+    @classmethod
+    def gripper_target(
+        cls,
+        *,
+        left: float | None = None,
+        right: float | None = None,
+        timeout_sec: float = 0.2,
+    ) -> "CommandIntent":
+        return cls(
+            "Hold",
+            timeout_sec=timeout_sec,
+            left=_gripper_arm(left),
+            right=_gripper_arm(right),
+        )
 
     @classmethod
     def arm_motion(cls, timeout_sec: float = 0.2) -> "CommandIntent":
@@ -71,27 +81,38 @@ class CommandIntent:
         left: list[float] | tuple[float, ...] | None = None,
         right: list[float] | tuple[float, ...] | None = None,
         timeout_sec: float = 0.2,
+        joint_target_profile: str | None = None,
     ) -> "CommandIntent":
         return cls(
-            "Hold",
+            "JointTarget",
             timeout_sec=timeout_sec,
-            left=_joint_arm("JointTarget", "q_target_deg", left),
-            right=_joint_arm("JointTarget", "q_target_deg", right),
+            left=_joint_arm(
+                "JointTarget",
+                "q_target_deg",
+                left,
+                joint_target_profile=joint_target_profile,
+            ),
+            right=_joint_arm(
+                "JointTarget",
+                "q_target_deg",
+                right,
+                joint_target_profile=joint_target_profile,
+            ),
         )
 
     @classmethod
-    def joint_velocity(
+    def init_motion(
         cls,
         *,
         left: list[float] | tuple[float, ...] | None = None,
         right: list[float] | tuple[float, ...] | None = None,
         timeout_sec: float = 0.2,
     ) -> "CommandIntent":
-        return cls(
-            "Hold",
+        return cls.joint_target(
+            left=left,
+            right=right,
             timeout_sec=timeout_sec,
-            left=_joint_arm("JointVelocity", "dq_target_deg_s", left),
-            right=_joint_arm("JointVelocity", "dq_target_deg_s", right),
+            joint_target_profile="init_motion",
         )
 
 
@@ -207,9 +228,25 @@ def _arm_mode(value: dict[str, Any] | None) -> str | None:
     return str(mode) if mode is not None else None
 
 
-def _joint_arm(mode: str, field: str, values: list[float] | tuple[float, ...] | None) -> dict[str, Any]:
+def _joint_arm(
+    mode: str,
+    field: str,
+    values: list[float] | tuple[float, ...] | None,
+    *,
+    joint_target_profile: str | None = None,
+) -> dict[str, Any]:
     if values is None:
         return {"mode": "Hold"}
     if len(values) != 6:
         raise ValueError(f"{field} must contain 6 values")
-    return {"mode": mode, field: [float(v) for v in values]}
+    payload: dict[str, Any] = {"mode": mode, field: [float(v) for v in values]}
+    if joint_target_profile is not None:
+        payload["joint_target_profile"] = str(joint_target_profile)
+    return payload
+
+
+def _gripper_arm(value: float | None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"mode": "Hold"}
+    if value is not None:
+        payload["gripper_target"] = float(value)
+    return payload

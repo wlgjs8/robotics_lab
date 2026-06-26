@@ -296,17 +296,12 @@ nlohmann::json cartesianControlSnapshotJson(const CartesianControlConfig& config
         {"allow_in_simulation", config.allow_in_simulation},
         {"allow_in_real", config.allow_in_real},
         {"allow_in_controller_simulation", config.allow_in_controller_simulation},
-        {"enable_benchmark_primitives", config.enable_benchmark_primitives},
         {"warn_ik_duration_us", config.warn_ik_duration_us},
         {"fail_ik_duration_us", config.fail_ik_duration_us},
         {"path_kp", config.path_kp},
         {"path_kp_pos", config.path_kp_pos},
         {"path_kp_ori", config.path_kp_ori},
-        {"twist_orientation_hold_kp", config.twist_orientation_hold_kp},
-        {"twist_angular_deadband_rad_s", config.twist_angular_deadband_rad_s},
         {"velocity_damping", config.velocity_damping},
-        {"max_twist_linear_m_s", config.max_twist_linear_m_s},
-        {"max_twist_angular_rad_s", config.max_twist_angular_rad_s},
         {"max_linear_move_speed_m_s", config.max_linear_move_speed_m_s},
         {"max_angular_move_speed_rad_s", config.max_angular_move_speed_rad_s},
         {"max_cartesian_step_m", optionalDoubleJson(config.max_cartesian_step_m)},
@@ -328,13 +323,6 @@ nlohmann::json cartesianControlSnapshotJson(const CartesianControlConfig& config
             {"default_angular_speed_rad_s", config.linear_move.default_angular_speed_rad_s},
             {"constant_orientation_tolerance_rad", config.linear_move.constant_orientation_tolerance_rad},
             {"default_orientation_mode", orientationModeString(config.linear_move.default_orientation_mode)},
-        }},
-        {"circle_move", {
-            {"command_family", "server_side_circle"},
-            {"allow_in_simulation", config.circle_move.allow_in_simulation},
-            {"allow_in_real", config.circle_move.allow_in_real},
-            {"max_diameter_m", config.circle_move.max_diameter_m},
-            {"min_period_sec", config.circle_move.min_period_sec},
         }},
     };
 }
@@ -642,7 +630,6 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"ik_solution_jump_deg", telemetry.ik_solution_jump_deg},
         {"ik_branch_jump_suspected", telemetry.ik_branch_jump_suspected},
         {"ik_branch_jump_clamped", telemetry.ik_branch_jump_clamped},
-        {"twist_smd_goal_clamped", telemetry.twist_smd_goal_clamped},
         {"ik_status", telemetry.status},
         {"ik_reason", telemetry.reason},
         {"ik_timed_out", telemetry.ik_timed_out},
@@ -661,17 +648,12 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"linear_move_duration_sec", telemetry.linear_move_duration_sec},
         {"linear_move_elapsed_sec", telemetry.linear_move_elapsed_sec},
         {"orientation_mode", telemetry.orientation_mode},
-        {"twist_clamped", telemetry.twist_clamped},
         {"floor_vz_clamped", telemetry.floor_vz_clamped},
         {"floor_lowest_point", telemetry.floor_lowest_point},
         {"floor_lowest_z_m", telemetry.floor_lowest_z_m},
         {"floor_goal_clamped", telemetry.floor_goal_clamped},
         {"goal_minus_measured_pos_m", telemetry.goal_minus_measured_pos_m},
         {"goal_minus_measured_ori_rad", telemetry.goal_minus_measured_ori_rad},
-        {"requested_twist_linear_norm_m_s", telemetry.requested_twist_linear_norm_m_s},
-        {"requested_twist_angular_norm_rad_s", telemetry.requested_twist_angular_norm_rad_s},
-        {"applied_twist_linear_norm_m_s", telemetry.applied_twist_linear_norm_m_s},
-        {"applied_twist_angular_norm_rad_s", telemetry.applied_twist_angular_norm_rad_s},
         {"cartesian_velocity_integration_mode", telemetry.cartesian_velocity_integration_mode},
         {"cartesian_servo_state_source", telemetry.cartesian_servo_state_source},
         {"cartesian_divergence_source", telemetry.cartesian_divergence_source},
@@ -685,21 +667,11 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"command_reference_error_deg_observed", telemetry.command_reference_error_deg_observed},
         {"physical_command_actual_error_deg_observed", telemetry.physical_command_actual_error_deg_observed},
         {"velocity_target_lookahead_sec", telemetry.velocity_target_lookahead_sec},
-        {"circle_active", telemetry.circle_active},
-        {"circle_phase", telemetry.circle_phase},
-        {"circle_repeat_index", telemetry.circle_repeat_index},
-        {"circle_radius_m", telemetry.circle_radius_m},
-        {"circle_period_sec", telemetry.circle_period_sec},
-        {"circle_position_error_m", telemetry.circle_position_error_m},
-        {"circle_orientation_error_rad", telemetry.circle_orientation_error_rad},
-        {"circle_done", telemetry.circle_done},
         // A/B/C separation telemetry (Patch 4). Absent/false on non-SMD paths.
         {"smd_active", telemetry.smd_active},
         {"smd_goal_stand", optionalPoseJson(telemetry.smd_goal_stand)},
         {"smd_ref_stand", optionalPoseJson(telemetry.smd_ref_stand)},
         {"smd_velocity_feedforward_used", telemetry.smd_velocity_feedforward_used},
-        {"smd_velocity_feedforward_source", telemetry.smd_velocity_feedforward_source},
-        {"smd_velocity_feedforward_fallback", telemetry.smd_velocity_feedforward_fallback},
         {"smd_linear_velocity_clipped", telemetry.smd_linear_velocity_clipped},
         {"smd_linear_accel_clipped", telemetry.smd_linear_accel_clipped},
         {"smd_angular_velocity_clipped", telemetry.smd_angular_velocity_clipped},
@@ -882,22 +854,12 @@ bool isRbpodoControllerSimulation(const BackendConfig& backend_config) {
 
 
 bool isStreamingCartesianMode(ControlMode mode) {
-    return mode == ControlMode::TcpLinearMove ||
-           mode == ControlMode::TcpCircleMove ||
-           mode == ControlMode::TcpCircleTrack ||
-           mode == ControlMode::TcpTwistStand ||
-           mode == ControlMode::TcpTwistLocal;
+    return mode == ControlMode::TcpLinearMove;
 }
 
 bool isCartesianMode(ControlMode mode) {
     return mode == ControlMode::TcpPoseTarget ||
-           mode == ControlMode::TcpLinearMove ||
-           mode == ControlMode::TcpCircleMove ||
-           mode == ControlMode::TcpCircleTrack ||
-           mode == ControlMode::TcpDeltaStand ||
-           mode == ControlMode::TcpDeltaLocal ||
-           mode == ControlMode::TcpTwistStand ||
-           mode == ControlMode::TcpTwistLocal;
+           mode == ControlMode::TcpLinearMove;
 }
 
 bool controllerSimulationCartesianGateOpen(
@@ -913,16 +875,6 @@ bool controllerSimulationCartesianGateOpen(
         isRbpodoControllerSimulation(backend_config);
 }
 
-std::string commandFamilyString(ControlMode mode) {
-    switch (mode) {
-        case ControlMode::TcpCircleMove:
-        case ControlMode::TcpCircleTrack:
-            return "server_side_circle";
-        default:
-            return "";
-    }
-}
-
 std::string cartesianGateUnavailableReason(
     const CartesianControlConfig& cartesian_config,
     const ServoConfig& servo_config,
@@ -935,10 +887,6 @@ std::string cartesianGateUnavailableReason(
     (void)backend_config;
     if (!cartesian_config.enable) {
         return "cartesian_control_unavailable_disabled";
-    }
-    if (command_mode == ControlMode::TcpCircleTrack &&
-        !cartesian_config.enable_server_side_circle_track) {
-        return "tcp_circle_track_disabled";
     }
     return "";
 }
@@ -958,8 +906,7 @@ nlohmann::json cartesianGateJson(
         command_mode
     );
     if (!cartesian_solve.reason.empty() &&
-        (cartesian_solve.reason.rfind("cartesian_control_unavailable", 0) == 0 ||
-         cartesian_solve.reason.rfind("tcp_circle_track_", 0) == 0)) {
+        cartesian_solve.reason.rfind("cartesian_control_unavailable", 0) == 0) {
         unavailable_reason = cartesian_solve.reason;
     }
     const bool controller_sim_cartesian_enabled =
@@ -970,7 +917,7 @@ nlohmann::json cartesianGateJson(
         cartesian_config,
         servo_config,
         backend_config,
-        ControlMode::TcpTwistLocal
+        ControlMode::TcpLinearMove
     );
     const bool controller_sim_streaming_cartesian_available =
         streaming_unavailable_reason.empty() &&
@@ -978,8 +925,8 @@ nlohmann::json cartesianGateJson(
     const bool physical_motion_expected = isRbpodoControllerSimulation(backend_config)
         ? false
         : backend_config.run_mode == RunMode::Real;
-    // True when the physical-real streaming twist path is open (same gates as
-    // TcpPoseTarget). Stays false in controller-simulation operation.
+    // True when physical-real Cartesian motion is open. Stays false in
+    // controller-simulation operation.
     const bool streaming_cartesian_physical_real_enabled =
         backend_config.backend_type == BackendType::Rbpodo &&
         backend_config.run_mode == RunMode::Real &&
@@ -993,7 +940,6 @@ nlohmann::json cartesianGateJson(
         {"allow_in_real", cartesian_config.allow_in_real},
         {"allow_in_controller_simulation", cartesian_config.allow_in_controller_simulation},
         {"allow_controller_simulation_motion", servo_config.allow_controller_simulation_motion},
-        {"enable_server_side_circle_track", cartesian_config.enable_server_side_circle_track},
         {"controller_simulation_servo_state_source",
             controllerSimulationStateSourceString(cartesian_config.controller_simulation_servo_state_source)},
         {"controller_simulation_divergence_source",
@@ -1158,10 +1104,9 @@ nlohmann::json armStateJson(
             backend_config,
             command.mode,
             cartesian_solve
-        );
+    );
     return {
         {"mode", toString(command.mode)},
-        {"command_family", optionalStringJson(commandFamilyString(command.mode))},
         {"gripper", gripperFeedbackJson(gripper_feedback)},
         {"q_actual_deg", jointArrayJson(state.q_actual_deg)},
         {"q_target_deg", jointArrayJson(state.q_target_deg)},

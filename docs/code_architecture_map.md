@@ -57,7 +57,7 @@ The `rbpodo` backend also serves **controller (`pgmode`) simulation** (`run_mode
 
 ### Wire formats
 
-- **Command (UDP → server):** `{seq, mode, timeout_sec, left{…}, right{…}}`. `mode` parsed by `controlModeFromString()` in `rb_servo_server/src/core/types.cpp`. Per-arm payload fields include `q_target_deg`, `dq_target_deg_s`, `tcp_target_stand`, `tcp_delta_{stand,local}`, `tcp_twist_{stand,local}`, plus optional `lease_token`/`source_id`/`session_id`. `SetSafetyFloorZ` is a leaseless non-motion mode with a top-level `floor_z_m` payload (bounded by `safety.floor_constraint.runtime_{min,max}_z_m`).
+- **Command (UDP → server):** `{seq, mode, timeout_sec, left{…}, right{…}}`. `mode` parsed by `controlModeFromString()` in `rb_servo_server/src/core/types.cpp`. Public motion payloads are `q_target_deg` for `JointTarget`, `tcp_target_stand` / `target_tcp_stand` for `TcpPoseTarget` and `TcpLinearMove`, plus optional `joint_target_profile: init_motion` for the collision-free init profile. Lifecycle/safety packets carry their documented top-level payloads and optional `lease_token`/`source_id`/`session_id`.
 - **State (server → UDP fanout):** schema `robotics_lab.servo_state.v1`. Per arm: `q_actual_deg`, `q_target_deg`, `tcp_actual_stand`/`tcp_ref_stand` (with quaternion fields), `cartesian{ik…}` telemetry, `safety_tracking{…}`; top level `fault{latched, verdict, domain…}`, `physical_motion_expected`, `self_collision{…}`, and `floor_constraint{enabled, monitor_only, z_min_m, config_z_min_m, runtime_{min,max}_z_m, left/right{checked, violated, tcp_z_m}, clamp_count, last_set_reject_reason}`.
 - **Camera:** images live in the shared-memory ring; only metadata is published over ZMQ. Consumers subscribe to metadata, then read pixel data from shm by name/offset.
 
@@ -65,14 +65,15 @@ The `rbpodo` backend also serves **controller (`pgmode`) simulation** (`run_mode
 
 | Mode | Status | Notes |
 |---|---|---|
-| `JointTarget` / `JointVelocity` | implemented | passthrough / `dq*dt` integration |
+| `JointTarget` | implemented | passthrough; optional `joint_target_profile: init_motion` |
 | `TcpPoseTarget` | implemented | IK; MoveJ-like (intermediate TCP path not guaranteed linear) |
 | `TcpLinearMove` | implemented | MoveL, real-motion-ready (used on real); `orientation_mode` `constant`/`slerp`; finite path completes from one click across lease/command lapse |
-| `TcpDelta{Stand,Local}` / `TcpTwist{Stand,Local}` | implemented | debug jog / streaming velocity |
-| `TcpCircleMove` | implemented | benchmark-only, gated by `cartesian_control.circle_move.allow_*` |
-| `TcpCircleTrack` | **stub** | returns `SafetyVerdict::CartesianUnavailable`, reason `tcp_circle_track_not_implemented` (matches the docs' "disabled skeleton") |
 
-Real Cartesian execution is no longer run-mode gated (the legacy gate was retired; `cartesian_control.allow_in_real` is now a vestigial telemetry flag, NOT a motion block). `TcpPoseTarget` / `TcpTwist*` / `TcpLinearMove` all compute in every run mode and are exercised on the physical arms (`TcpPoseTarget` dual-arm slow circle; `TcpLinearMove` MoveL with `constant`/`slerp`). Only `TcpCircleMove` stays gated by `cartesian_control.circle_move.allow_in_real` (benchmark-only), and `TcpCircleTrack` is a stub. The mode-independent safety layers (safety filter, floor/ROI/reach, self-collision barrier, tracking-error latch, lease/deadman, E-stop) own real-motion safety.
+Real Cartesian execution is no longer run-mode gated by env. `TcpPoseTarget`
+and `TcpLinearMove` compute in every run mode when site-local config opens the
+Cartesian gate and are exercised on the physical arms. The mode-independent
+safety layers (safety filter, floor/ROI/reach, self-collision barrier,
+tracking-error latch, lease/deadman, E-stop) own real-motion safety.
 
 ## Safety gates (checked in code)
 
@@ -82,7 +83,7 @@ Real motion is fail-closed, but the legacy `RB_ALLOW_REAL_*` server execution en
 
 - Flow-matching action dim **14** (per arm: 3 linear + 3 angular + 1 gripper); proprio dim **16**.
 - Supported HDF5 layouts: `robotics_lab_dual_arm`, `pika_umi_single_arm`, `pika_umi_bimanual`. Audit schema `robotics_lab.policy_runner.hdf5_audit.v1`; manifest schema `robotics_lab.policy_runner.dataset_manifest.v1`.
-- Rollout modes (`rollout_modes.py`): `offline_eval`, `sim_dryrun`, `controller_sim`, `real_readonly`, `real_policy`. `real_policy`'s gate (`_validate_real_policy`) is fully enforced — it requires `mode=real`, `allow_real_motion`, measured/accepted geometry + retarget, validated collision model, workspace envelope, and the gripper gate — but it is *satisfiable*: a live pi0.5/openpi `real_policy` rollout has run end-to-end on the physical robot (`TcpTwistLocal` streaming + gripper; `outputs/rollout_*real*.json` show `may_send_commands: true`, `sent_command_count > 0`, `collision_model_status: validated`). So the lane is open and exercised, not blocked; task success is the remaining (model-side) gap. `controller_sim` is the `run_mode=real` + `operation_mode=simulation` carve-out.
+- Rollout modes (`rollout_modes.py`): `offline_eval`, `sim_dryrun`, `controller_sim`, `real_readonly`, `real_policy`. `real_policy`'s gate (`_validate_real_policy`) is fully enforced — it requires `mode=real`, `allow_real_motion`, measured/accepted geometry + retarget, validated collision model, workspace envelope, and the gripper gate — but it is *satisfiable*: a live pi0.5/openpi `real_policy` rollout has run end-to-end on the physical robot (`TcpPoseTarget` + gripper; `outputs/rollout_*real*.json` show `may_send_commands: true`, `sent_command_count > 0`, `collision_model_status: validated`). So the lane is open and exercised, not blocked; task success is the remaining (model-side) gap. `controller_sim` is the `run_mode=real` + `operation_mode=simulation` carve-out.
 - Real gripper motion goes through the Pika Gripper Backend (`gripper.py`), gated by `RB_ALLOW_REAL_GRIPPER=1` + `allow_real_gripper_motion` + `measured_gripper_available`; it has been driven during real-policy rollout.
 - Self-collision is a server-side async URDF-mesh guard (`rb_servo_server` `CollisionMonitor`, ~33 geoms / 337 pairs) run off the 2 ms servo path; `applySafety` reads the latest verdict and applies a velocity barrier (sim `clamp_hold` / real `fault_latch`). It superseded the in-loop capsule guard, which is kept as a compiled fallback branch.
 

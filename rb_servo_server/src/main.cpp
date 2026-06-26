@@ -1,6 +1,7 @@
 #include <atomic>
 #include <csignal>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -10,6 +11,7 @@
 #include "rb_servo/control/dual_arm_servo_loop.hpp"
 #include "rb_servo/logging/servo_logger.hpp"
 #include "rb_servo/network/command_server.hpp"
+#include "rb_servo/network/scope_publisher.hpp"
 #include "rb_servo/network/state_publisher.hpp"
 #include "rb_servo/robot/backend_factory.hpp"
 
@@ -51,6 +53,13 @@ int main(int argc, char** argv) {
 
         rb_servo::CommandBuffer command_buffer;
         rb_servo::ServoLogger logger(config.logging);
+        std::unique_ptr<rb_servo::ScopePublisher> scope_publisher;
+        if (config.scope.enable) {
+            scope_publisher = std::make_unique<rb_servo::ScopePublisher>(
+                config.scope,
+                config.network
+            );
+        }
         rb_servo::CommandServer command_server(config.network, &command_buffer);
 
         rb_servo::DualArmServoLoop servo_loop(
@@ -58,7 +67,9 @@ int main(int argc, char** argv) {
             std::move(right_robot),
             config,
             &command_buffer,
-            &logger
+            &logger,
+            nullptr,
+            scope_publisher.get()
         );
         rb_servo::StatePublisher state_publisher(
             config,
@@ -73,14 +84,20 @@ int main(int argc, char** argv) {
         if (!logger.start()) {
             return 1;
         }
+        if (scope_publisher && !scope_publisher->start()) {
+            logger.stop();
+            return 1;
+        }
         if (!servo_loop.start()) {
             std::cerr << "[ERROR] failed to start servo loop\n";
+            if (scope_publisher) scope_publisher->stop();
             logger.stop();
             return 1;
         }
         if (!command_server.start()) {
             std::cerr << "[ERROR] failed to start command server\n";
             servo_loop.stop();
+            if (scope_publisher) scope_publisher->stop();
             logger.stop();
             return 1;
         }
@@ -88,6 +105,7 @@ int main(int argc, char** argv) {
             std::cerr << "[ERROR] failed to start state publisher\n";
             command_server.stop();
             servo_loop.stop();
+            if (scope_publisher) scope_publisher->stop();
             logger.stop();
             return 1;
         }
@@ -100,6 +118,7 @@ int main(int argc, char** argv) {
         state_publisher.stop();
         command_server.stop();
         servo_loop.stop();
+        if (scope_publisher) scope_publisher->stop();
         logger.stop();
         std::cout << "rb_servo_server stopped\n";
     } catch (const std::exception& e) {

@@ -1,9 +1,9 @@
 schema: robotics_lab.policy_runner.v1
 # =====================================================================================
 # OFFLINE-REPLAY (SIM) config for scripts/replay_episode_rollout.py.
-# Feeds RECORDED data_tcp HDF5 frames into a trained checkpoint and streams the
-# resulting TcpTwistLocal commands into the VM pgmode-simulation stack so the
-# policy's commanded motion is visualized in viser (and recorded to mp4).
+# Feeds RECORDED data_tcp HDF5 frames into a trained checkpoint and streams
+# TcpPoseTarget commands into the VM pgmode-simulation stack so the policy's
+# commanded motion is visualized in viser (and recorded to mp4).
 # Pairs with rb_servo_server/config/local/stack_sim.yaml (ports 50256 cmd / 50376 state).
 # The live ZMQ camera client is REPLACED in code by a recorded-frame client, so
 # camera.zmq_endpoint is unused here (camera.enable=true only flips the

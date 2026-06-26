@@ -218,7 +218,9 @@ bool testLeaseAdminUpdatesBufferReadbackWithoutDisplacingMotion() {
     rb_servo::DualArmCommand motion;
     motion.seq = 7;
     motion.host_time_ns = 0;  // never times out in this test
-    motion.left.mode = rb_servo::ControlMode::TcpTwistLocal;
+    motion.left.mode = rb_servo::ControlMode::TcpPoseTarget;
+    motion.left.has_tcp_target = true;
+    motion.left.tcp_target_stand = {0.4, 0.0, 0.3, 0.0, 0.0, 0.0};
     motion.right.mode = rb_servo::ControlMode::Hold;
     buffer.setCommand(motion);
 
@@ -231,7 +233,7 @@ bool testLeaseAdminUpdatesBufferReadbackWithoutDisplacingMotion() {
 
     rb_servo::DualArmCommand out = buffer.latestOrHold(now);
     RB_CHECK(out.seq == 7);  // motion command not displaced
-    RB_CHECK(out.left.mode == rb_servo::ControlMode::TcpTwistLocal);
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::TcpPoseTarget);
     RB_CHECK(out.lease.active);
     RB_CHECK(out.lease.source_id == "policy_runner");
     RB_CHECK(out.lease.lease_token == "tok");
@@ -255,8 +257,12 @@ bool testLeaseAdminUpdatesBufferReadbackWithoutDisplacingMotion() {
     rb_servo::DualArmCommand stale;
     stale.seq = 9;
     stale.host_time_ns = now > 10'000'000'000ull ? now - 10'000'000'000ull : 1;  // ~10s ago
-    stale.left.mode = rb_servo::ControlMode::TcpTwistLocal;
-    stale.right.mode = rb_servo::ControlMode::TcpTwistLocal;
+    stale.left.mode = rb_servo::ControlMode::TcpPoseTarget;
+    stale.right.mode = rb_servo::ControlMode::TcpPoseTarget;
+    stale.left.has_tcp_target = true;
+    stale.right.has_tcp_target = true;
+    stale.left.tcp_target_stand = {0.4, 0.0, 0.3, 0.0, 0.0, 0.0};
+    stale.right.tcp_target_stand = {0.4, 0.0, 0.3, 0.0, 0.0, 0.0};
     stale.left.timeout_sec = 0.3;
     stale.right.timeout_sec = 0.3;
     idle.setCommand(stale);

@@ -95,6 +95,8 @@ safety:
   dq_max_deg_s: [120, 120, 120, 120, 120, 120]      # was halved [30,30,30,45,45,60] for first run1
   ddq_max_deg_s2: [300, 300, 300, 500, 500, 700]  # was halved for first run
   joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]
+  # Match real stack cable-safety behavior for JointTarget/InitMotion return.
+  joint_target_literal_axes: [false, false, false, false, false, true]
   joint_wrap_for_startup_validation: false
   joint_wrap_for_motion_safety: false
   command_timeout_sec: 0.2
@@ -142,7 +144,6 @@ safety:
     # tcp 프레임 = 팁 평면(z 247.642mm @attachment_site), 팁 양끝은
     # tool visual의 z+90° 회전 반영 시 TCP x축 방향 ±59.0mm). TCP가 회전했을 때
     # 팁이 TCP 점보다 아래로 내려가는 케이스를 잡는다. 체크는 팔당 3점(TCP+팁 2)이며,
-    # 최종 FK backstop뿐 아니라 TcpTwistLocal/TcpTwistStand의 streaming floor
     # projection도 같은 점들을 사용한다.
     tcp_offset_points:
       - { name: gripper_tip_a, offset_m: [ 0.059, 0.0, 0.0 ] }
@@ -153,7 +154,7 @@ safety:
   # 실제 차단(면 슬라이드/홀드)을 보려면 monitor_only=false로 전환.
   roi_box:
     enable: true
-    min_m: [-0.500, -0.900, -0.200]
+    min_m: [-0.500, -1.000, -0.200]
     max_m: [0.500, 0.050, 0.800]
     runtime_min_m: [-1.2, -1.6, -0.2]
     runtime_max_m: [1.2, 0.6, 1.6]
@@ -172,7 +173,6 @@ safety:
     fail_policy: clamp_hold
     monitor_only: false    # SIM-ONLY (2026-06-20 replay analysis): detect+telemetry but DO NOT block, so full-amplitude pgmode replay runs through the self-colliding region for analysis. pgmode = no physical motion. NEVER set true in stack_real.yaml (real keeps enforce).
     # URDF mesh self-collision (async monitor, servo_j 2ms 경로 밖) + 공통 velocity
-    # barrier를 실제 차단으로 사용. 파라미터는 TcpPoseTarget/TcpTwistLocal 공통 —
     # 속도는 측정 closing speed로 자동 적응.
     mesh:
       unified_urdf: "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e/dual_rb3_730e_ver5.urdf"
@@ -226,7 +226,7 @@ safety:
         parent_frame: world
 
   # Collision-free InitMotion planner (requires self_collision.enable — the mesh
-  # model is the planner's collision+floor oracle). A ControlMode::InitMotion command
+  # model is the planner's collision+floor oracle). A JointTarget init_motion profile command
   # plans a collision-free + floor-safe 12-DOF (both arms) RRT-Connect path to the
   # init pose and streams it through the safety gate, so InitMotion REACHES the pose
   # from any start without self-collision or dipping below the floor (overlapping arm
@@ -335,13 +335,9 @@ kinematics:
     branch_jump_rate_limit: true    # TUNE-2 (2026-06-20): was MISSING in sim (real has it). Scale seed->solution delta so largest joint step = max_solution_jump_deg; smooth advance toward solution instead of "plain allow" branch FLIP. The real lever for these jumps.
 
 cartesian_control:
-  # Anti-windup for the twist_via_smd goal integrator (position m / orientation
   # rad): the integrated goal may not lead the measured TCP by more than this,
   # bounding run-away when the arm stalls and the recovery lurch. Engages only on
-  # the twist_via_smd path (enable twist_via_smd_enable to exercise it in sim).
   # Telemetry smd_goal_clamped (state + twist_pipe.csv).
-  twist_smd_goal_max_lead_m: 0.05
-  twist_smd_goal_max_lead_rad: 0.2
   enable: true
   # 실기 CB pgmode simulation에서는 q_actual이 명령을 추종하지 않으므로(물리 무동작),
   # 스트리밍 Cartesian 적분 기준은 controller reference(jnt_ref)여야 함.
@@ -353,22 +349,15 @@ cartesian_control:
   allow_in_simulation: true
   allow_in_real: true                          # PHYSICAL real Cartesian (config-gated; no env)
   allow_in_controller_simulation: true        # pgmode controller-simulation
-  enable_benchmark_primitives: true   # TcpCircleMove (viser "Circle"); pgmode-sim is permitted via allow_in_controller_simulation
   warn_ik_duration_us: 3000
   fail_ik_duration_us: 5000
-  # path_kp_* now drive only the circle benchmark primitive: TcpLinearMove
   # runs the pose_track_smd feedforward chain (quintic profile, no measured-
   # state feedback), same as streaming TcpPoseTarget.
   path_kp_pos: 3.0                # anti-tremble (was 6.0): less reactive to tiny errors
   path_kp_ori: 3.0                # anti-tremble (was 6.0)
-  twist_orientation_hold_kp: 3.0  # anti-tremble (was 6.0): smoother wrist orientation hold
-  twist_angular_deadband_rad_s: 0.0001
   velocity_damping: 0.04          # anti-tremble (was 0.01): damp IK velocity solution
   # Low-speed first-run Cartesian limits (sim profile used 0.2 / 0.4 / 0.002 / 0.02).
-  # Twist limits doubled (0.05/0.1 -> 0.10/0.2) for 2x spacemouse teleop speed;
   # joint headroom checked (~15deg/s vs dq_max 120deg/s, 0.2mm/tick @500Hz).
-  max_twist_linear_m_s: 0.10
-  max_twist_angular_rad_s: 0.2
   max_linear_move_speed_m_s: 0.05
   max_angular_move_speed_rad_s: 0.1
   max_cartesian_step_m: 0.001
@@ -405,11 +394,6 @@ cartesian_control:
   max_command_actual_error_deg: [5, 5, 5, 8, 8, 10]
   reset_velocity_integrator_on_mode_change: true
   command_actual_error_policy: reset
-  circle_move:
-    allow_in_simulation: true    # benchmark-circle compute-enable (misnamed: applies to every run_mode, NOT sim-only)
-    allow_in_real: false         # must remain false (validator-enforced)
-    max_diameter_m: 0.20
-    min_period_sec: 3.0
   linear_move:
     min_duration_sec: 0.05
     max_duration_sec: 10.0

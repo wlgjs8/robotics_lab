@@ -8,14 +8,10 @@ import time
 from typing import Callable, TextIO
 
 from .action_sources import (
-    DualSpaceMouseCartesianActionSource,
+    DualSpaceMousePoseTargetActionSource,
     HoldActionSource,
     JointSineActionSource,
-    JointVelocityActionSource,
     MasterArmJointActionSource,
-    SpaceMouseCartesianActionSource,
-    SpaceMouseJointVelocityActionSource,
-    TcpDeltaActionSource,
     TeleopMuxActionSource,
     UmiDualCartesianActionSource,
 )
@@ -41,8 +37,8 @@ STARTUP_TIMEOUT_EXIT_CODE = 2
 LEASE_READBACK_TIMEOUT_EXIT_CODE = 3
 
 # Quiet period (no motion intents) after which the teleop loop voluntarily
-# releases the command-source lease so one-shot GUI commands (InitMotion / jog)
-# can run between teleop bursts; the next motion intent re-acquires lazily.
+# releases the command-source lease so one-shot GUI commands can run between
+# teleop bursts; the next motion intent re-acquires lazily.
 IDLE_LEASE_RELEASE_SEC = 1.0
 
 
@@ -56,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
             default=None,
             help=(
                 "override config.action_source (e.g. teleop_mux, "
-                "dual_spacemouse_cartesian, umi_dual_cartesian) — debug aid to "
+                "dual_spacemouse_pose_target, umi_dual_cartesian) — debug aid to "
                 "isolate one teleop source; the stack default is teleop_mux"
             ),
         )
@@ -159,8 +155,8 @@ def run(
                     )
                     debug_last_print = now
             # Idle lease handoff: release the lease after a short quiet period
-            # (no motion intents) so one-shot GUI commands (InitMotion / jog)
-            # work BETWEEN teleop bursts instead of being rejected with
+            # (no motion intents) so one-shot GUI commands work BETWEEN teleop
+            # bursts instead of being rejected with
             # lease_conflict for up to lease_timeout_sec (60s). The lazy-acquire
             # block below re-acquires on the next motion intent. This also fixes
             # resume-after-expiry: once the server lease expired, the stale
@@ -190,8 +186,7 @@ def run(
                     continue
                 assert command_client is not None
                 # Lazy lease: acquire on the FIRST motion intent, not at startup.
-                # An idle policy_runner must not camp on the lease (it would
-                # block one-shot GUI commands like InitMotion). On conflict /
+                # An idle policy_runner must not camp on the lease. On conflict /
                 # readback timeout, drop this tick and retry with backoff so a
                 # temporary GUI lease holder does not kill the teleop process.
                 if config.servo_command.acquire_lease and not lease_acquired and intent.is_motion:
@@ -267,13 +262,6 @@ def make_action_source(config: PolicyRunnerConfig):
             timeout_sec=config.servo_command.timeout_sec,
             simulation_only=config.joint_sine.simulation_only,
         )
-    if config.action_source == "joint_velocity":
-        return JointVelocityActionSource(
-            velocity_deg_s=config.joint_velocity.velocity_deg_s,
-            selected_arm=config.joint_velocity.selected_arm,
-            timeout_sec=config.servo_command.timeout_sec,
-            simulation_only=config.joint_velocity.simulation_only,
-        )
     if config.action_source == "master_arm_joint":
         ma = config.master_arm_joint
         return MasterArmJointActionSource(
@@ -299,85 +287,54 @@ def make_action_source(config: PolicyRunnerConfig):
             right_robot_init_deg=ma.right_robot_init_deg,
             left_joint_map=ma.left_joint_map,
             right_joint_map=ma.right_joint_map,
-            max_joint_velocity_deg_s=ma.max_joint_velocity_deg_s,
+            max_joint_speed_deg_s=ma.max_joint_speed_deg_s,
             smoothing_alpha=ma.smoothing_alpha,
             wrap_delta=ma.wrap_delta,
             timeout_sec=config.servo_command.timeout_sec,
         )
-    if config.action_source == "spacemouse_joint_velocity":
-        return SpaceMouseJointVelocityActionSource(
-            reader=_LazyHidSpaceMouseReader(),
-            selected_arm=config.spacemouse.selected_arm,
-            max_joint_velocity_deg_s=config.spacemouse.max_joint_velocity_deg_s,
-            deadband=config.spacemouse.deadband,
-            smoothing_alpha=config.spacemouse.smoothing_alpha,
-            require_deadman=config.spacemouse.require_deadman,
-            deadman_button=config.spacemouse.deadman_button,
-            timeout_sec=config.servo_command.timeout_sec,
-        )
-    if config.action_source == "tcp_delta":
-        return TcpDeltaActionSource(
-            delta=config.tcp_delta.delta,
-            selected_arm=config.tcp_delta.selected_arm,
-            frame=config.tcp_delta.frame,
-            max_linear_step_m=config.tcp_delta.max_linear_step_m,
-            max_angular_step_rad=config.tcp_delta.max_angular_step_rad,
-            timeout_sec=config.servo_command.timeout_sec,
-            simulation_only=config.tcp_delta.simulation_only,
-        )
-    if config.action_source == "spacemouse_cartesian":
-        return SpaceMouseCartesianActionSource(
-            reader=_LazyHidSpaceMouseReader(),
-            selected_arm=config.spacemouse_cartesian.selected_arm,
-            frame=config.spacemouse_cartesian.frame,
-            max_linear_velocity_m_s=config.spacemouse_cartesian.max_linear_velocity_m_s,
-            max_angular_velocity_rad_s=config.spacemouse_cartesian.max_angular_velocity_rad_s,
-            deadband=config.spacemouse_cartesian.deadband,
-            response_curve_gamma=config.spacemouse_cartesian.response_curve_gamma,
-            sample_hold_timeout_sec=config.spacemouse_cartesian.sample_hold_timeout_sec,
-            require_deadman=config.spacemouse_cartesian.require_deadman,
-            deadman_button=config.spacemouse_cartesian.deadman_button,
-            timeout_sec=config.servo_command.timeout_sec,
-            allow_rbpodo_controller_simulation=(
-                config.safety.allow_rbpodo_controller_simulation_cartesian
-            ),
-        )
-    if config.action_source == "dual_spacemouse_cartesian":
-        return _make_dual_spacemouse_cartesian_source(config)
+    if config.action_source == "dual_spacemouse_pose_target":
+        return _make_dual_spacemouse_pose_target_source(config)
     if config.action_source == "umi_dual_cartesian":
         return _make_umi_dual_cartesian_source(config)
     if config.action_source == "teleop_mux":
         return TeleopMuxActionSource(
-            _make_dual_spacemouse_cartesian_source(config),
+            _make_dual_spacemouse_pose_target_source(config),
             _make_umi_dual_cartesian_source(config),
             tie_break=config.teleop_mux.tie_break,
         )
     raise ValueError(f"unknown action_source: {config.action_source}")
 
 
-def _make_dual_spacemouse_cartesian_source(
+def _make_dual_spacemouse_pose_target_source(
     config: PolicyRunnerConfig,
-) -> DualSpaceMouseCartesianActionSource:
-    left = config.spacemouse_cartesian_dual.left
-    right = config.spacemouse_cartesian_dual.right
-    return DualSpaceMouseCartesianActionSource(
+) -> DualSpaceMousePoseTargetActionSource:
+    sm = config.spacemouse_pose_target_dual
+    left = sm.left
+    right = sm.right
+    return DualSpaceMousePoseTargetActionSource(
         left_reader=_spacemouse_reader_from_device_config(left),
         right_reader=_spacemouse_reader_from_device_config(right),
-        frame=config.spacemouse_cartesian_dual.frame,
-        max_linear_velocity_m_s=config.spacemouse_cartesian_dual.max_linear_velocity_m_s,
-        max_angular_velocity_rad_s=config.spacemouse_cartesian_dual.max_angular_velocity_rad_s,
-        deadband=config.spacemouse_cartesian_dual.deadband,
-        response_curve_gamma=config.spacemouse_cartesian_dual.response_curve_gamma,
-        linear_axis_signs=config.spacemouse_cartesian_dual.linear_axis_signs,
-        angular_axis_signs=config.spacemouse_cartesian_dual.angular_axis_signs,
-        angular_axis_order=config.spacemouse_cartesian_dual.angular_axis_order,
-        sample_hold_timeout_sec=config.spacemouse_cartesian_dual.sample_hold_timeout_sec,
-        require_deadman=config.spacemouse_cartesian_dual.require_deadman,
-        activation_deadband=config.spacemouse_cartesian_dual.activation_deadband,
-        startup_requires_neutral=config.spacemouse_cartesian_dual.startup_requires_neutral,
-        startup_neutral_hold_sec=config.spacemouse_cartesian_dual.startup_neutral_hold_sec,
+        max_linear_step_m=sm.max_linear_step_m,
+        max_angular_step_rad=sm.max_angular_step_rad,
+        max_target_lead_m=sm.max_target_lead_m,
+        max_target_lead_rad=sm.max_target_lead_rad,
+        deadband=sm.deadband,
+        activation_deadband=sm.activation_deadband,
+        response_curve_gamma=sm.response_curve_gamma,
+        linear_axis_signs=sm.linear_axis_signs,
+        angular_axis_signs=sm.angular_axis_signs,
+        angular_axis_order=sm.angular_axis_order,
+        sample_stale_timeout_sec=sm.sample_stale_timeout_sec,
+        require_deadman=sm.require_deadman,
+        startup_requires_neutral=sm.startup_requires_neutral,
+        startup_neutral_hold_sec=sm.startup_neutral_hold_sec,
         left_deadman_button=left.deadman_button,
         right_deadman_button=right.deadman_button,
+        gripper_buttons_enable=sm.gripper_buttons.enable,
+        gripper_open_button=sm.gripper_buttons.open_button,
+        gripper_close_button=sm.gripper_buttons.close_button,
+        gripper_open_percent=sm.gripper_buttons.open_percent,
+        gripper_close_percent=sm.gripper_buttons.close_percent,
         timeout_sec=config.servo_command.timeout_sec,
         allow_rbpodo_controller_simulation=(
             config.safety.allow_rbpodo_controller_simulation_cartesian
@@ -747,32 +704,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
         help="Named ensemble from an imitation ensemble report JSON; default is top5.",
     )
     flow_infer.add_argument(
-        "--command-family",
-        choices=("tcp_twist_local", "tcp_target_pose"),
-        default="tcp_target_pose",
-        help=(
-            "Flow action command family for ee_local body-frame deltas. Defaults to "
-            "tcp_target_pose, which composes each delta into an absolute TcpPoseTarget; "
-            "tcp_twist_local converts each delta into a streaming TcpTwistLocal velocity."
-        ),
-    )
-    flow_infer.add_argument(
-        "--allow-tcp-twist-local",
-        action="store_true",
-        help=(
-            "Allow the TcpTwistLocal flow command family for controller_sim/real_policy "
-            "(ee_local checkpoints; opt-in, no longer the default command family)."
-        ),
-    )
-    flow_infer.add_argument(
-        "--allow-tcp-target-pose",
-        action="store_true",
-        help=(
-            "Allow the TcpPoseTarget flow command family for controller_sim/real_policy "
-            "(ee_local deltas composed into absolute tcp_target_stand setpoints)."
-        ),
-    )
-    flow_infer.add_argument(
         "--ee-local-r-align",
         default="pika_rz180",
         help=(
@@ -850,13 +781,13 @@ def _main_with_subcommands(argv: list[str]) -> int:
         "--max-linear-velocity-m-s",
         type=float,
         default=0.15,
-        help="Override flow twist linear clamp; omitted uses checkpoint action statistics.",
+        help="Override flow action linear clamp; omitted uses checkpoint action statistics.",
     )
     flow_infer.add_argument(
         "--max-angular-velocity-rad-s",
         type=float,
         default=0.8,
-        help="Override flow twist angular clamp; omitted uses checkpoint action statistics.",
+        help="Override flow action angular clamp; omitted uses checkpoint action statistics.",
     )
     flow_infer.add_argument(
         "--chunk-execute-steps",
@@ -971,8 +902,8 @@ def _main_with_subcommands(argv: list[str]) -> int:
         type=int,
         default=0,
         help=(
-            "Blend the first N twists after each chunk-resample boundary from the "
-            "previously emitted twist (alpha 0->1) to remove the boundary jerk "
+            "Blend the first N actions after each chunk-resample boundary from the "
+            "previously emitted action (alpha 0->1) to remove the boundary jerk "
             "without steady-state lag. 0 (default) disables crossfade. Try 2-3."
         ),
     )
@@ -1003,7 +934,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             "A-stage conditioning for the streamed tcp_target_pose path. legacy_step_hold "
             "(default) holds each ~30 Hz step target between policy ticks (ZOH into the SMD). "
             "foh_se3 emits an SE(3)-interpolated absolute target every servo tick (smooth 500 Hz "
-            "command). Only affects async-streamed rollout (real/sim); twist path unchanged."
+            "command). Only affects async-streamed rollout (real/sim)."
         ),
     )
     flow_infer.add_argument(
@@ -1017,17 +948,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
         ),
     )
     flow_infer.add_argument("--tcp-target-pose-blend-steps", type=int, default=0)
-    flow_infer.add_argument(
-        "--send-conditioned-twist",
-        action="store_true",
-        help=(
-            "With --tcp-target-pose-conditioning foh_se3, attach the conditioner's "
-            "estimated goal twist to each TcpPoseTarget (tcp_target_twist_stand). The "
-            "server SMD uses it as the velocity-feedforward source only when its config "
-            "velocity_feedforward_source is command_twist/auto; otherwise it is ignored."
-        ),
-    )
-
     hdf5_audit = sub.add_parser(
         "hdf5-audit",
         help="Inspect UMI/Pika and robotics_lab HDF5 episodes before training.",
@@ -1414,14 +1334,11 @@ def _main_with_subcommands(argv: list[str]) -> int:
             DirectBcImageActionSource,
             FlowMatchingActionSource,
             action_chunk_checkpoint_kind,
-            canonical_flow_command_family,
             load_action_chunk_checkpoint_dataset_stats,
-            resolve_flow_command_family,
             resolve_flow_policy_dt_sec,
             run_direct_bc_ensemble_offline_eval,
             run_direct_bc_offline_eval,
             run_flow_offline_eval,
-            validate_flow_command_family,
         )
         from .gripper import GripperCommand, GripperRuntime
         from .openpi_remote import OPENPI_CHECKPOINT_PREFIX, OpenpiRemoteActionSource
@@ -1453,18 +1370,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 if pc_variant != "b":
                     # cloud variant back-projects the live wrist depth -> need z16 frames.
                     args.include_depth = True
-            command_family = resolve_flow_command_family(
-                rollout_policy.mode,
-                args.command_family,
-                dataset_stats=dataset_stats,
-            )
-            validate_flow_command_family(
-                rollout_policy.mode,
-                command_family,
-                allow_tcp_twist_local=args.allow_tcp_twist_local,
-                allow_tcp_target_pose=args.allow_tcp_target_pose,
-                dataset_stats=dataset_stats,
-            )
+            command_family = "tcp_target_pose"
         except (RolloutModeValidationError, ValueError) as exc:
             print(f"policy_runner flow-infer rollout-mode rejected: {exc}", file=sys.stderr)
             return 2
@@ -1490,7 +1396,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                         episodes_dir=args.episodes_dir,
                         device=args.device,
                         max_samples=args.max_offline_samples,
-                        command_family=canonical_flow_command_family(command_family),
+                        command_family=command_family,
                         image_size=args.image_size,
                     )
                 elif checkpoint_kind == "direct_bc_ensemble":
@@ -1499,7 +1405,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                         episodes_dir=args.episodes_dir,
                         device=args.device,
                         max_samples=args.max_offline_samples,
-                        command_family=canonical_flow_command_family(command_family),
+                        command_family=command_family,
                         image_size=args.image_size,
                         ensemble_name=args.ensemble_name,
                     )
@@ -1510,7 +1416,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                         sample_steps=args.sample_steps,
                         device=args.device,
                         max_samples=args.max_offline_samples,
-                        command_family=canonical_flow_command_family(command_family),
+                        command_family=command_family,
                     )
             except (RolloutModeValidationError, ValueError) as exc:
                 print(f"policy_runner flow-infer rollout-mode rejected: {exc}", file=sys.stderr)
@@ -1750,7 +1656,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 "tcp_target_pose_conditioning": args.tcp_target_pose_conditioning,
                 "tcp_target_pose_reanchor_mode": args.tcp_target_pose_reanchor_mode,
                 "tcp_target_pose_blend_steps": args.tcp_target_pose_blend_steps,
-                "tcp_target_pose_send_twist": args.send_conditioned_twist,
             }
             if checkpoint_kind == "openpi_remote":
                 # Which physical camera feeds the checkpoint's left/right_wrist_0_rgb.

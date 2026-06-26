@@ -36,7 +36,7 @@ from tcp_tuning.se3 import foh_pose, quat_canonical, twist_from_poses
 from tcp_tuning.smoothing import split_segments
 from tcp_tuning.trajectory_log import TrajectoryLogWriter
 
-from policy_runner.action_sources.tcp_delta import tcp_pose_target_stand_intent
+from policy_runner.action_sources.tcp_pose_target import tcp_pose_target_stand_intent
 from policy_runner.flow_dataset import pose_compose_local, pose_delta_local
 from policy_runner.umi_pipeline import convert_umi_episode
 from policy_runner.robot_state_client import RobotStateClient, StateSnapshot, StateStreamLeaseReadback
@@ -237,13 +237,6 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--cubic-smoothing", type=float, default=None)
     parser.add_argument("--gap-median-multiplier", type=float, default=None)
     parser.add_argument("--gap-absolute-threshold-sec", type=float, default=None)
-    parser.add_argument(
-        "--send-conditioned-twist",
-        action="store_true",
-        help="Attach the A-stage conditioned twist (scaled by 1/time_scale to wall-clock) "
-        "to each TcpPoseTarget as tcp_target_twist_stand (Patch 5). The server SMD uses it "
-        "only when velocity_feedforward_source is command_twist/auto; ignored otherwise.",
-    )
     parser.add_argument("--max-linear-speed-m-s", type=float, default=None)
     parser.add_argument("--max-angular-speed-rad-s", type=float, default=None)
     parser.add_argument("--init-move-sec", type=float, default=5.0)
@@ -1253,16 +1246,6 @@ def build_wall_clock_replay_stream(plan: ReplayPlan, time_scale: float, rate_hz:
     )
 
 
-def _conditioned_twist_payload(twist: np.ndarray, time_scale: float) -> list[float] | None:
-    """A-stage conditioned twist (episode-time) scaled to wall-clock for command_twist
-    feedforward: wall goal velocity = episode twist / time_scale. None if non-finite."""
-    arr = np.asarray(twist, dtype=np.float64).reshape(-1)
-    if arr.size != 6 or not np.all(np.isfinite(arr)):
-        return None
-    ts = float(time_scale) if float(time_scale) > 0.0 else 1.0
-    return [float(v) / ts for v in arr]
-
-
 def _stale_repeated_count(stream: WallClockStream, selected_arms: tuple[str, ...]) -> int:
     """Ticks whose emitted goal equals the previous tick on every arm but are NOT a
     genuine source hold/gap/dropout — i.e. unexpected ZOH repeats (should be ~0)."""
@@ -1520,9 +1503,6 @@ def _stream_wall_clock(
         right = stream.goals["right"][k] if "right" in plan.selected_arms else None
         left_g = _finite_float_or_none(stream.grippers["left"][k]) if "left" in plan.selected_arms else None
         right_g = _finite_float_or_none(stream.grippers["right"][k]) if "right" in plan.selected_arms else None
-        send_twist = bool(getattr(args, "send_conditioned_twist", False))
-        left_tw = _conditioned_twist_payload(stream.twists["left"][k], args.time_scale) if (send_twist and "left" in plan.selected_arms) else None
-        right_tw = _conditioned_twist_payload(stream.twists["right"][k], args.time_scale) if (send_twist and "right" in plan.selected_arms) else None
         now = time.perf_counter()
         if last_wall is not None and now > last_wall:
             effective_rates.append(1.0 / (now - last_wall))
@@ -1533,8 +1513,6 @@ def _stream_wall_clock(
                 right=_pose_list(right),
                 left_gripper=left_g,
                 right_gripper=right_g,
-                left_twist=left_tw,
-                right_twist=right_tw,
                 timeout_sec=server.command_timeout_sec,
             )
         )
@@ -1844,7 +1822,7 @@ def log_row(
         "roi_flag": _boolish(bool(roi_arm.get("violated"))),
         # SMD / velocity clamp (the controller-side speed-limit signal): when the
         # streamed goal exceeds the SMD max velocity the reference is rate-limited.
-        "smd_goal_clamped_flag": _boolish(bool(solve.get("twist_smd_goal_clamped")) or bool(solve.get("twist_clamped"))),
+        "smd_goal_clamped_flag": _boolish(bool(solve.get("smd_goal_clamped"))),
         "self_collision_min_clearance_m": _finite_or_nan(self_coll.get("min_clearance_m")),
         "roi_min_margin_m": _finite_or_nan(roi_arm.get("min_margin_m")),
         "floor_tcp_z_m": _finite_or_nan(floor_arm.get("tcp_z_m")),
@@ -1859,9 +1837,6 @@ def log_row(
         "smd_goal_stand": _state_pose_or_nan(solve, "smd_goal_stand"),
         "q_target_before_output_ma_deg": _vec_or_nan(solve.get("q_target_before_output_ma_deg"), 6),
         "q_target_after_output_ma_deg": _vec_or_nan(solve.get("q_target_after_output_ma_deg"), 6),
-        "smd_velocity_feedforward_used": _boolish(solve.get("smd_velocity_feedforward_used")),
-        "smd_velocity_feedforward_source": solve.get("smd_velocity_feedforward_source", ""),
-        "smd_velocity_feedforward_fallback": _boolish(solve.get("smd_velocity_feedforward_fallback")),
         "smd_linear_velocity_clipped": _boolish(solve.get("smd_linear_velocity_clipped")),
         "smd_linear_accel_clipped": _boolish(solve.get("smd_linear_accel_clipped")),
         "smd_angular_velocity_clipped": _boolish(solve.get("smd_angular_velocity_clipped")),

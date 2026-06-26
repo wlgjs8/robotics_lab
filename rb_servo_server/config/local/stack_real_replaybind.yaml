@@ -126,7 +126,6 @@ safety:
     # tcp 프레임 = 팁 평면(z 247.642mm @attachment_site), 팁 양끝은
     # tool visual의 z+90° 회전 반영 시 TCP x축 방향 ±59.0mm). TCP가 회전했을 때
     # 팁이 TCP 점보다 아래로 내려가는 케이스를 잡는다. 체크는 팔당 3점(TCP+팁 2)이며,
-    # 최종 FK backstop뿐 아니라 TcpTwistLocal/TcpTwistStand의 streaming floor
     # projection도 같은 점들을 사용한다.
     tcp_offset_points:
       - { name: gripper_tip_a, offset_m: [ 0.059, 0.0, 0.0 ] }
@@ -163,7 +162,6 @@ safety:
     monitor_only: false
     # URDF mesh self-collision (async monitor, servo_j 2ms 경로 밖) + 공통 velocity
     # barrier. enable=true면 아래 캡슐 필드는 평가하지 않음(폴백용 보존). 파라미터는
-    # 모든 motion primitive(TcpPoseTarget/TcpTwistLocal) 공통 — 속도는 측정된
     # closing speed로 자동 적응. d_hard 미만 hard breach 또는 verdict stale -> fault_latch.
     mesh:
       unified_urdf: "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e/dual_rb3_730e_ver5.urdf"
@@ -260,7 +258,6 @@ kinematics:
     # Selective singularity-robust damping. Shared by every position-IK
     # primitive (TcpPoseTarget / TcpLinearMove / pose-track SMD / twist-via-SMD),
     # so it also covers the occasional MODE=real teleop lurch — not just
-    # TcpTwistLocal. When the task-Jacobian sigma_min drops below
     # singular_region_eps, damping on that direction ramps up to damping_max,
     # keeping the solver on the seed branch (no ~5 deg single-tick joint flip for
     # a ~0 mm Cartesian move) at the cost of a small Cartesian lag near the
@@ -300,39 +297,28 @@ kinematics:
     branch_jump_rate_limit: true
 
 cartesian_control:
-  twist_via_smd_enable: true
-  # Anti-windup for the twist_via_smd goal integrator: never let the integrated
   # goal lead the measured TCP by more than this (position m / orientation rad).
   # Bounds goal run-away when the arm stalls (IK clamp / fault / can't track) and
   # caps the recovery lurch; never engages in healthy tracking (lead = SMD lag,
   # ~mm/sub-deg). Floor-enabled twist also reports floor_goal_clamped and
   # goal_minus_measured_* in state + twist_pipe.csv.
-  twist_smd_goal_max_lead_m: 0.05
-  twist_smd_goal_max_lead_rad: 0.2
   enable: true
   allow_in_simulation: true
   allow_in_real: true                          # PHYSICAL real Cartesian (config-gated; no env)
   allow_in_controller_simulation: false        # must be false for a real (non-sim) config
-  enable_benchmark_primitives: true   # TcpCircleMove (viser "Circle"); enabled by config in every run_mode
   warn_ik_duration_us: 3000
   fail_ik_duration_us: 5000
-  # path_kp_* now drive only the circle benchmark primitive: TcpLinearMove
   # runs the pose_track_smd feedforward chain (quintic profile, no measured-
   # state feedback), same as streaming TcpPoseTarget.
   path_kp_pos: 3.0                # anti-tremble (was 6.0): less reactive to tiny errors
   path_kp_ori: 3.0                # anti-tremble (was 6.0)
-  twist_orientation_hold_kp: 3.0  # anti-tremble (was 6.0): smoother wrist orientation hold
-  twist_angular_deadband_rad_s: 0.01
   velocity_damping: 0.08          # anti-tremble (was 0.01): damp IK velocity solution
   # Low-speed first-run Cartesian limits (sim profile used 0.2 / 0.4 / 0.002 / 0.02).
-  # Twist limits doubled (0.05/0.1 -> 0.10/0.2) for 2x spacemouse teleop speed —
   # PHYSICAL real speed decision (operator-approved); first-run halved values retired.
   # 2026-06-16 raised 0.10/0.2 -> 0.25/0.4 to stop policy-reach truncation: right
   # arm flow-infer commanded up to 0.237 m/s / 0.343 rad/s, clamp lost ~188mm/7deg
   # per rollout (twist_pipeline.csv). 0.25 == SMD max_linear_velocity_m_s ceiling;
   # 0.4 stays well under SMD 1.0 rad/s. OPERATOR-SUPERVISED retry, E-stop ready.
-  max_twist_linear_m_s: 0.5
-  max_twist_angular_rad_s: 0.4
 
   max_linear_move_speed_m_s: 0.05
   max_angular_move_speed_rad_s: 0.1
@@ -356,7 +342,6 @@ cartesian_control:
     natural_frequency_angular_hz: 1.0 # 2026-06-19 P3: 1.5→1.0 cut vff 30Hz transmission (was 2.0)
     # Velocity feedforward: damp on velocity error (goal_dot - x_dot) so a
     # constant-velocity goal tracks with ~0 lag (removes the ~16-38mm ramp lag in
-    # the twist_via_smd reach). Decouples fn from accuracy: with this ON you can
     # LOWER natural_frequency_*_hz (currently 10, raised to brute-force the lag)
     # back toward 2-3 for smoothing WITHOUT re-introducing lag. 2026-06-16 (jhkim).
     velocity_feedforward: true
@@ -395,11 +380,6 @@ cartesian_control:
   max_command_actual_error_deg: [10, 10, 10, 16, 16, 20]
   reset_velocity_integrator_on_mode_change: true
   command_actual_error_policy: reset
-  circle_move:
-    allow_in_simulation: true    # benchmark-circle compute-enable (misnamed: applies to every run_mode, NOT sim-only)
-    allow_in_real: false         # must remain false (validator-enforced); compute-enable is allow_in_simulation above
-    max_diameter_m: 0.20
-    min_period_sec: 3.0
   linear_move:
     min_duration_sec: 0.05
     max_duration_sec: 10.0

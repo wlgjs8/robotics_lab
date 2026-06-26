@@ -5,7 +5,7 @@ import logging
 import unittest
 
 from policy_runner.config import config_from_mapping
-from policy_runner.action_sources.tcp_delta import tcp_twist_stand_intent
+from policy_runner.action_sources.tcp_pose_target import tcp_pose_target_stand_intent
 from policy_runner.gripper import (
     GripperCommand,
     GripperRuntime,
@@ -15,6 +15,7 @@ from policy_runner.gripper import (
     gripper_commands_from_flow_step,
     suppress_pika_sdk_logging,
 )
+from policy_runner.servo_command_client import CommandIntent
 
 
 class FakePikaGripper:
@@ -162,17 +163,27 @@ class GripperRuntimeTest(unittest.TestCase):
         self.assertEqual(backend.commands, [target])  # zero target still sent
 
     def test_cartesian_intent_can_carry_gripper_targets(self) -> None:
-        intent = tcp_twist_stand_intent(
-            left=[0.1, 0.0, 0.0, 0.0, 0.0, 0.0],
+        intent = tcp_pose_target_stand_intent(
+            left=[0.1, 0.0, 0.4, 0.0, 0.0, 0.0],
             right=None,
             left_gripper=0.42,
             right_gripper=0.15,
         )
 
-        self.assertEqual(intent.left["mode"], "TcpTwistStand")
+        self.assertEqual(intent.left["mode"], "TcpPoseTarget")
         self.assertEqual(intent.left["gripper_target"], 0.42)
         self.assertEqual(intent.right["mode"], "Hold")
         self.assertEqual(intent.right["gripper_target"], 0.15)
+
+    def test_gripper_only_intent_is_hold_not_motion(self) -> None:
+        intent = CommandIntent.gripper_target(left=100.0, right=10.0)
+
+        self.assertEqual(intent.mode, "Hold")
+        self.assertFalse(intent.is_motion)
+        self.assertEqual(intent.left["mode"], "Hold")
+        self.assertEqual(intent.left["gripper_target"], 100.0)
+        self.assertEqual(intent.right["mode"], "Hold")
+        self.assertEqual(intent.right["gripper_target"], 10.0)
 
 
 class PikaSerialGripperBackendTest(unittest.TestCase):

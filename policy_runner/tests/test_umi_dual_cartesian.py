@@ -624,7 +624,7 @@ class UmiDualCartesianTest(unittest.TestCase):
             reader,
             MockUmiPoseReader([]),
             gripper_offset=(0.0, 0.0, 0.0),
-            sample_hold_timeout_sec=0.05,
+            sample_stale_timeout_sec=0.05,
         )
 
         first = source.next_intent(sample_state(), 0.0)

@@ -5,7 +5,7 @@ schema: robotics_lab.policy_runner.v1
 # Both teleop sources run side by side (action_source: teleop_mux): the first
 # source to engage (SpaceMouse cap deflection / UMI deadman) owns the whole
 # robot until it returns to idle. To isolate one source for debugging:
-#   --action-source dual_spacemouse_cartesian | umi_dual_cartesian
+#   --action-source dual_spacemouse_pose_target | umi_dual_cartesian
 # Real/sim env gates are retired; no RB_ALLOW_* envs are needed.
 # =====================================================================================
 mode: real
@@ -47,19 +47,27 @@ safety:
   require_valid_joint_state: true
 command_rate_hz: 500
 
-spacemouse_cartesian_dual:
-  frame: local
-  max_linear_velocity_m_s: 0.2
-  max_angular_velocity_rad_s: 0.4
+spacemouse_pose_target_dual:
+  max_linear_step_m: 0.001
+  max_angular_step_rad: 0.01
+  max_target_lead_m: 0.05
+  max_target_lead_rad: 0.35
   deadband: 0.08
   response_curve_gamma: 3.0
   # Operator axis remap (applied to raw cap axes before deadband/gamma).
   linear_axis_signs: [1.0, -1.0, -1.0]
   angular_axis_signs: [-1.0, -1.0, 1.0]
   angular_axis_order: [ry, rx, rz]
-  sample_hold_timeout_sec: 0.05
-  # Buttonless teleop: cap deflection is the intent gate (buttons reserved for
-  # future gripper open/close). IDLE->ACTIVE needs activation_deadband
+  sample_stale_timeout_sec: 0.05
+  # Buttonless arm teleop: cap deflection is the arm-motion intent gate. Buttons
+  # send gripper presets through the same command stream.
+  gripper_buttons:
+    enable: true
+    open_button: 0
+    close_button: 1
+    open_percent: 100.0
+    close_percent: 10.0
+  # IDLE->ACTIVE needs activation_deadband
   # (hysteresis vs deadband); startup/stale-reconnect requires the cap held
   # neutral for startup_neutral_hold_sec before motion is accepted.
   require_deadman: false

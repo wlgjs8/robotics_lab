@@ -854,10 +854,7 @@ def _arm_action(
         return np.asarray(handle["action"], dtype=np.float32)[:length]
     if format_name == "robotics_lab_dual_arm" and "action" in handle:
         action = handle["action"]
-        for name in (f"target_pose_{side}", f"tcp_pose_target_{side}"):
-            if name in action:
-                return np.asarray(action[name], dtype=np.float32)[:length]
-        for name in (f"tcp_delta_stand_{side}", f"tcp_delta_{side}"):
+        for name in (f"tcp_target_stand_{side}", f"target_pose_{side}", f"tcp_pose_target_{side}"):
             if name in action:
                 return np.asarray(action[name], dtype=np.float32)[:length]
     return None
@@ -869,12 +866,7 @@ def _arm_action_delta(
     side: str,
     length: int,
 ):
-    _, np = _require_hdf5()
-    if format_name == "robotics_lab_dual_arm" and "action" in handle:
-        action = handle["action"]
-        for name in (f"tcp_delta_stand_{side}", f"tcp_delta_{side}"):
-            if name in action:
-                return np.asarray(action[name], dtype=np.float32)[:length]
+    _ = handle, format_name, side, length
     return None
 
 
@@ -1068,9 +1060,7 @@ def _write_robotics_lab_dual_arm_episode(
             _copy_images_to_robotics_observations(src, obs, format_name, arm_groups)
 
         # Action is the absolute (tool-offset) target pose only. Per-step deltas are
-        # derived at training time in the end-effector body frame (ee_local); no
-        # world-frame "tcp_delta_stand" is baked here (it carried the unmeasured
-        # steamvr->stand rotation; see wiki umi-tcp-delta-frame).
+        # derived at training time in the end-effector body frame (ee_local).
         action = dst.create_group("action")
         action.create_dataset("target_pose_left", data=left_action_pose.astype(np.float32), compression="gzip", compression_opts=1)
         action.create_dataset("target_pose_right", data=right_action_pose.astype(np.float32), compression="gzip", compression_opts=1)

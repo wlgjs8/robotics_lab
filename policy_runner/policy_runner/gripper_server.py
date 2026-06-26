@@ -114,6 +114,28 @@ class GripperServerConfig:
     rate_hz: float = 50.0
     stale_timeout_sec: float = 0.5
     on_stale: str = "hold"  # hold | open | close
+    debug_stats: bool = False
+    debug_stats_period_sec: float = 1.0
+
+
+@dataclass
+class GripperServerStats:
+    command_packets: int = 0
+    command_arm_setpoints: int = 0
+    backend_send_calls: int = 0
+    physical_sends: int = 0
+    rate_limited: int = 0
+    deadband_holds: int = 0
+    backend_drops: int = 0
+    last_reason: dict[str, str | None] = field(
+        default_factory=lambda: {arm: None for arm in ARMS}
+    )
+    last_target: dict[str, float | None] = field(
+        default_factory=lambda: {arm: None for arm in ARMS}
+    )
+    last_actual: dict[str, float | None] = field(
+        default_factory=lambda: {arm: None for arm in ARMS}
+    )
 
 
 def parse_command(data: bytes) -> dict[str, Any] | None:
@@ -159,6 +181,8 @@ class GripperServer:
         self._cmd_sock: socket.socket | None = None
         self._state_sock: socket.socket | None = None
         self._running = False
+        self.stats = GripperServerStats()
+        self._last_stats_log = 0.0
 
     # -- construction ------------------------------------------------------- #
     def _build_backend(self) -> PikaSerialGripperBackend:
@@ -216,7 +240,12 @@ class GripperServer:
     def apply_command(self, msg: dict[str, Any], now: float) -> None:
         """Fold one decoded command packet into the latest per-arm setpoints."""
         self._deadman = bool(msg.get("deadman", True))
-        for arm, pct in msg.get("arms", {}).items():
+        arms = msg.get("arms", {})
+        self.stats.command_packets += 1
+        self.stats.command_arm_setpoints += len(arms) if isinstance(arms, Mapping) else 0
+        if not isinstance(arms, Mapping):
+            arms = {}
+        for arm, pct in arms.items():
             if arm in ARMS:
                 self._cmd_target[arm] = float(pct)
                 self._cmd_time[arm] = now
@@ -250,6 +279,7 @@ class GripperServer:
         msg: dict[str, Any] = {"schema": STATE_SCHEMA, "host_time_ns": host_time_ns}
         for arm in ARMS:
             actual = self._backend.current_percent(arm)
+            self.stats.last_actual[arm] = None if actual is None else float(actual)
             target = targets.get(arm)
             moving = (
                 actual is not None
@@ -290,13 +320,72 @@ class GripperServer:
             if pct is None:
                 continue
             try:
-                self._backend.send(GripperCommand(arm=arm, value=float(pct), command_type="target", source="gripper_server"))
-            except Exception:  # noqa: BLE001 - backend.send already swallows serial errors
-                pass
+                result = self._backend.send(
+                    GripperCommand(
+                        arm=arm,
+                        value=float(pct),
+                        command_type="target",
+                        source="gripper_server",
+                    )
+                )
+                self._record_backend_result(arm, float(pct), result)
+            except Exception as exc:  # noqa: BLE001 - backend.send already swallows serial errors
+                self._record_backend_exception(arm, float(pct), exc)
         stamp = host_time_ns if host_time_ns is not None else time.time_ns()
         state = self.build_state(targets, stamp)
         self._publish(state)
+        self._maybe_log_debug_stats(now)
         return state
+
+    def _record_backend_result(self, arm: str, pct: float, result: Any) -> None:
+        self.stats.backend_send_calls += 1
+        self.stats.last_target[arm] = pct
+        reason = str(getattr(result, "reason", "") or "")
+        self.stats.last_reason[arm] = reason
+        if bool(getattr(result, "sent_to_physical", False)):
+            self.stats.physical_sends += 1
+        elif reason == "gripper_rate_limited":
+            self.stats.rate_limited += 1
+        elif reason == "gripper_deadband_hold":
+            self.stats.deadband_holds += 1
+        if bool(getattr(result, "dropped", False)):
+            self.stats.backend_drops += 1
+
+    def _record_backend_exception(self, arm: str, pct: float, exc: Exception) -> None:
+        self.stats.backend_send_calls += 1
+        self.stats.backend_drops += 1
+        self.stats.last_target[arm] = pct
+        self.stats.last_reason[arm] = f"backend_exception:{type(exc).__name__}"
+
+    def _maybe_log_debug_stats(self, now: float) -> None:
+        if not self.config.debug_stats:
+            return
+        period = max(0.1, float(self.config.debug_stats_period_sec))
+        if now - self._last_stats_log < period:
+            return
+        self._last_stats_log = now
+
+        def arm_summary(arm: str) -> str:
+            target = self.stats.last_target.get(arm)
+            actual = self.stats.last_actual.get(arm)
+            reason = self.stats.last_reason.get(arm) or "-"
+            target_text = "-" if target is None else f"{target:.2f}"
+            actual_text = "-" if actual is None else f"{actual:.2f}"
+            return f"{arm}:tgt={target_text},actual={actual_text},reason={reason}"
+
+        print(
+            "[gripper_server] stats "
+            f"cmd_packets={self.stats.command_packets} "
+            f"cmd_arms={self.stats.command_arm_setpoints} "
+            f"backend_calls={self.stats.backend_send_calls} "
+            f"physical_sends={self.stats.physical_sends} "
+            f"rate_limited={self.stats.rate_limited} "
+            f"deadband_holds={self.stats.deadband_holds} "
+            f"drops={self.stats.backend_drops} "
+            f"{arm_summary('left')} {arm_summary('right')}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     def _publish(self, state: dict[str, Any]) -> None:
         if self._state_sock is None:
@@ -344,6 +433,8 @@ def _build_config_from_args(args: argparse.Namespace) -> GripperServerConfig:
         stale_timeout_sec=args.stale_timeout,
         on_stale=args.on_stale,
         home_on_connect=args.home_on_connect,
+        debug_stats=args.debug_stats,
+        debug_stats_period_sec=args.debug_stats_period,
     )
 
 
@@ -400,6 +491,8 @@ def main(argv: list[str] | None = None) -> int:
             "at its current power-on position (no startup motion)."
         ),
     )
+    p.add_argument("--debug-stats", action="store_true", help="print 1 Hz command/send diagnostics")
+    p.add_argument("--debug-stats-period", type=float, default=1.0)
     p.add_argument("--send", default=None, help="one-shot send, e.g. 'left=50,right=80'")
     p.add_argument("--monitor", action="store_true", help="print published gripper state")
     args = p.parse_args(argv)

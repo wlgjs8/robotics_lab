@@ -44,7 +44,7 @@ umi_dual_cartesian:
   # geometry (tip frame, no offset) for consistency with stack_real.yaml.
   gripper_offset: [0.0, 0.0, 0.0]
   r_align: [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
-  sample_hold_timeout_sec: 0.05
+  sample_stale_timeout_sec: 0.05
   left:
     mock_script: pgmode_umi_smoke
   right:

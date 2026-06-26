@@ -6,8 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from policy_runner.action_sources.dual_spacemouse_cartesian import (  # noqa: E402
-    DualSpaceMouseCartesianActionSource,
+from policy_runner.action_sources.dual_spacemouse_pose_target import (  # noqa: E402
+    DualSpaceMousePoseTargetActionSource,
 )
 from policy_runner.action_sources.teleop_mux import (  # noqa: E402
     OWNER_IDLE,
@@ -40,8 +40,8 @@ def sample_state(left_pose=None, right_pose=None) -> StateSnapshot:
         "observed_backend": "rbpodo",
         "motion_state": "ConnectedHold",
         "fault_latched": False,
-        "left": {**arm, "tcp_stand": left_pose},
-        "right": {**arm, "tcp_stand": right_pose},
+        "left": {**arm, "tcp_ref_stand": left_pose, "tcp_actual_stand": left_pose},
+        "right": {**arm, "tcp_ref_stand": right_pose, "tcp_actual_stand": right_pose},
     }
     return StateSnapshot(payload=payload, received_monotonic=0.0)
 
@@ -85,10 +85,14 @@ class QueueUmiReader:
         self.closed = True
 
 
-def sm_sample(magnitude=0.0, monotonic=0.0) -> SpaceMouseSample:
+def sm_sample(
+    magnitude=0.0,
+    monotonic=0.0,
+    buttons: tuple[bool, ...] = (False, False),
+) -> SpaceMouseSample:
     return SpaceMouseSample(
         tx=magnitude, ty=0.0, tz=0.0, rx=0.0, ry=0.0, rz=0.0,
-        buttons=(False, False),
+        buttons=buttons,
         timestamp_monotonic=monotonic,
     )
 
@@ -100,16 +104,17 @@ def umi_sample(pose=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0), *, deadman=True, monoto
 IDENTITY_R_ALIGN = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
 
 
-def make_mux(*, tie_break="umi", allow_controller_sim=True):
+def make_mux(*, tie_break="umi", allow_controller_sim=True, spacemouse_gripper_buttons=False):
     sm_left, sm_right = QueueSpaceMouseReader(), QueueSpaceMouseReader()
     umi_left, umi_right = QueueUmiReader(), QueueUmiReader()
-    spacemouse = DualSpaceMouseCartesianActionSource(
+    spacemouse = DualSpaceMousePoseTargetActionSource(
         left_reader=sm_left,
         right_reader=sm_right,
         require_deadman=False,
         startup_requires_neutral=False,
         deadband=0.08,
         activation_deadband=0.12,
+        gripper_buttons_enable=spacemouse_gripper_buttons,
         allow_rbpodo_controller_simulation=allow_controller_sim,
     )
     umi = UmiDualCartesianActionSource(
@@ -134,7 +139,8 @@ class TeleopMuxOwnershipTest(unittest.TestCase):
         sm_left.push(sm_sample(0.5, monotonic=0.0))
         intent = mux.next_intent(snapshot, 0.0)
         self.assertIsNotNone(intent)
-        self.assertEqual(intent.mode, "TcpTwistLocal")
+        self.assertEqual(intent.mode, "TcpPoseTarget")
+        self.assertIn("tcp_target_stand", intent.left)
         self.assertEqual(mux.owner, OWNER_SPACEMOUSE)
 
         # UMI deadman held while SpaceMouse owns: intent stays SpaceMouse and
@@ -142,7 +148,7 @@ class TeleopMuxOwnershipTest(unittest.TestCase):
         sm_left.push(sm_sample(0.5, monotonic=0.002))
         umi_left.push(umi_sample(monotonic=0.002))
         intent = mux.next_intent(snapshot, 0.002)
-        self.assertEqual(intent.mode, "TcpTwistLocal")
+        self.assertEqual(intent.mode, "TcpPoseTarget")
         self.assertEqual(mux.owner, OWNER_SPACEMOUSE)
         self.assertFalse(mux.umi_source.engaged)
 
@@ -154,11 +160,11 @@ class TeleopMuxOwnershipTest(unittest.TestCase):
         mux.next_intent(snapshot, 0.0)
         self.assertEqual(mux.owner, OWNER_SPACEMOUSE)
 
-        # Cap back to neutral: the final zero twist passes through, then idle.
+        # Cap back to neutral: the current target passes through once, then idle.
         sm_left.push(sm_sample(0.0, monotonic=0.002))
         intent = mux.next_intent(snapshot, 0.002)
-        self.assertEqual(intent.mode, "TcpTwistLocal")
-        self.assertEqual(intent.left["tcp_twist_local"], [0.0] * 6)
+        self.assertEqual(intent.mode, "TcpPoseTarget")
+        self.assertIn("tcp_target_stand", intent.left)
         sm_left.push(sm_sample(0.0, monotonic=0.004))
         self.assertIsNone(mux.next_intent(snapshot, 0.004))
         self.assertEqual(mux.owner, OWNER_IDLE)
@@ -209,13 +215,40 @@ class TeleopMuxOwnershipTest(unittest.TestCase):
 
         sm_left.push(sm_sample(0.5, monotonic=0.006))
         intent = mux.next_intent(snapshot, 0.006)
-        self.assertEqual(intent.mode, "TcpTwistLocal")
+        self.assertEqual(intent.mode, "TcpPoseTarget")
         self.assertEqual(mux.owner, OWNER_SPACEMOUSE)
+
+    def test_spacemouse_gripper_button_takes_idle_owner_for_one_tick(self):
+        mux, (sm_left, _), (umi_left, _) = make_mux(spacemouse_gripper_buttons=True)
+        snapshot = sample_state()
+
+        sm_left.push(sm_sample(buttons=(True, False), monotonic=0.0))
+        intent = mux.next_intent(snapshot, 0.0)
+
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent.mode, "Hold")
+        self.assertFalse(intent.is_motion)
+        self.assertEqual(intent.left["gripper_target"], 100.0)
+        self.assertEqual(mux.owner, OWNER_SPACEMOUSE)
+
+        self.assertIsNone(mux.next_intent(snapshot, 0.002))
+        self.assertEqual(mux.owner, OWNER_IDLE)
+
+        umi_left.push(umi_sample(monotonic=0.004))
+        sm_left.push(sm_sample(buttons=(False, True), monotonic=0.004))
+        intent = mux.next_intent(snapshot, 0.004)
+
+        self.assertIsNotNone(intent)
+        assert intent is not None
+        self.assertEqual(intent.mode, "TcpPoseTarget")
+        self.assertNotIn("gripper_target", intent.left)
+        self.assertEqual(mux.owner, OWNER_UMI)
 
     def test_same_tick_engage_falls_to_tie_break(self):
         for tie_break, expected_owner, expected_mode in (
             ("umi", OWNER_UMI, "TcpPoseTarget"),
-            ("spacemouse", OWNER_SPACEMOUSE, "TcpTwistLocal"),
+            ("spacemouse", OWNER_SPACEMOUSE, "TcpPoseTarget"),
         ):
             with self.subTest(tie_break=tie_break):
                 mux, (sm_left, _), (umi_left, _) = make_mux(tie_break=tie_break)
@@ -247,7 +280,7 @@ class TeleopMuxSpaceMouseFailureTest(unittest.TestCase):
         self.assertEqual(mux.owner, OWNER_UMI)
         self.assertEqual(sm_left.reads, reads_after_failure)
 
-    def test_hid_failure_while_owner_emits_one_safety_zero_twist(self):
+    def test_hid_failure_while_owner_emits_one_safety_hold(self):
         mux, (sm_left, _), (umi_left, _) = make_mux()
         snapshot = sample_state()
 
@@ -258,9 +291,7 @@ class TeleopMuxSpaceMouseFailureTest(unittest.TestCase):
         sm_left.push(OSError("device unplugged"))
         intent = mux.next_intent(snapshot, 0.002)
         self.assertIsNotNone(intent)
-        self.assertEqual(intent.mode, "TcpTwistLocal")
-        self.assertEqual(intent.left["tcp_twist_local"], [0.0] * 6)
-        self.assertEqual(intent.right["tcp_twist_local"], [0.0] * 6)
+        self.assertEqual(intent.mode, "Hold")
         self.assertEqual(mux.owner, OWNER_IDLE)
 
         umi_left.push(umi_sample(monotonic=0.004))
@@ -289,7 +320,7 @@ class TeleopMuxContractTest(unittest.TestCase):
             {
                 "action_source": "teleop_mux",
                 "teleop_mux": {"tie_break": "spacemouse"},
-                "spacemouse_cartesian_dual": {
+                "spacemouse_pose_target_dual": {
                     "left": {"mock_script": "pgmode_spacemouse_smoke"},
                     "right": {"mock_script": "pgmode_spacemouse_smoke"},
                 },

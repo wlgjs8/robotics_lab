@@ -16,7 +16,7 @@ acceptance is a per-arm config opt-in
 (`allow_real_motion_with_suspect_diagnostics: true`, no env).
 The policy-side `SafetyGate` real-Cartesian block was relaxed (PR #13), so for
 real motion `rb_servo_server` is the sole safety layer. A full `flow-infer`
-`real_policy` closed-loop rollout (pi0.5/openpi, `TcpTwistLocal` + real gripper via
+`real_policy` closed-loop rollout (pi0.5/openpi, `TcpPoseTarget` + real gripper via
 the Pika Gripper Backend) and the async URDF-mesh `CollisionMonitor` have run on the
 physical robot; the `real_policy` rollout-mode gate stays fully enforced and was
 satisfied via accepted/validated config. Remaining gaps: policy task success

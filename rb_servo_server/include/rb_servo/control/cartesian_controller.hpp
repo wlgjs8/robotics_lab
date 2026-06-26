@@ -49,16 +49,6 @@ public:
         RunMode run_mode
     );
 
-    Pose6D applyTcpDeltaStand(
-        const Pose6D& current_tcp_stand,
-        const Pose6D& delta
-    ) const;
-
-    Pose6D applyTcpDeltaLocal(
-        const Pose6D& current_tcp_stand,
-        const Pose6D& delta
-    ) const;
-
 private:
     CartesianArmTargetResult solveIkFromTcpStandTarget(
         ArmId arm_id,

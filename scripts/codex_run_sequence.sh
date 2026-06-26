@@ -35,7 +35,7 @@ SPACEMOUSE_PGMODE_TASKS=(
   01_fix_controller_sim_safety_semantics
   02_pgmode_spacemouse_end_to_end_dryrun
   03_flow_infer_rollout_modes
-  04_flow_policy_tcp_twistlocal_controller_sim
+  04_flow_policy_tcp_pose_target_controller_sim
   05_viser_pgmode_operator_view
   06_gripper_and_dual_arm_policy_gate
   07_ml_preflight_gate_stability

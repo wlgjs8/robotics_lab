@@ -177,14 +177,8 @@ class OperatorSafety:
     lifecycle_modes = {"ArmMotion", "DisarmMotion", "Hold", "EmergencyStop", "ResetFault"}
     motion_modes = {
         "JointTarget",
-        "JointVelocity",
         "TcpPoseTarget",
-        "TcpDeltaStand",
-        "TcpDeltaLocal",
         "TcpLinearMove",
-        "TcpTwistStand",
-        "TcpTwistLocal",
-        "TcpCircleMove",
     }
     # Actions that are always allowed (no motion gate): emergency/stop + fault reset.
     _non_motion_actions = {"EmergencyStop", "Hold", "ResetFault"}
@@ -202,9 +196,6 @@ class OperatorSafety:
         max_jog_step_deg: float = 2.0,
         max_tcp_linear_step_m: float = 0.005,
         max_tcp_angular_step_rad: float = 0.02,
-        max_tcp_linear_velocity_m_s: float = 0.05,
-        max_tcp_angular_velocity_rad_s: float = 0.2,
-        max_joint_velocity_deg_s: float = 10.0,
         command_timeout_sec: float = 0.2,
         init_left_joint_deg: tuple[float, ...] | None = None,
         init_right_joint_deg: tuple[float, ...] | None = None,
@@ -222,9 +213,6 @@ class OperatorSafety:
         self.max_jog_step_deg = float(max_jog_step_deg)
         self.max_tcp_linear_step_m = float(max_tcp_linear_step_m)
         self.max_tcp_angular_step_rad = float(max_tcp_angular_step_rad)
-        self.max_tcp_linear_velocity_m_s = float(max_tcp_linear_velocity_m_s)
-        self.max_tcp_angular_velocity_rad_s = float(max_tcp_angular_velocity_rad_s)
-        self.max_joint_velocity_deg_s = float(max_joint_velocity_deg_s)
         self.command_timeout_sec = float(command_timeout_sec)
         self.init_left_joint_deg = self._validated_joint6(init_left_joint_deg)
         self.init_right_joint_deg = self._validated_joint6(init_right_joint_deg)
@@ -333,7 +321,7 @@ class OperatorSafety:
         # retired: TCP pose commands are available in every run mode. Availability
         # is derived from the live per-arm server Cartesian gate; the server stays
         # the authority (CartesianUnavailable, safety clamps, fault latch).
-        reason = self.blocked_reason("TcpDeltaStand")
+        reason = self.blocked_reason("TcpPoseTarget")
         if reason:
             return reason
         latest = self.latest_valid()
@@ -352,18 +340,14 @@ class OperatorSafety:
 
         Callback-level blocking remains the authority; this method keeps the GUI
         honest by disabling controls whenever an action would be rejected. Keys
-        cover every motion tab (joint jog/velocity, TCP pose/linear/twist, circle,
-        lifecycle) so a control is never live-but-dead.
+        cover every motion tab so a control is never live-but-dead.
         """
         tcp_reason = self.tcp_command_disabled_reason()
         states: dict[str, bool] = {
             "jog": self.blocked_reason("JointTarget") is not None,
-            "velocity": self.blocked_reason("JointVelocity") is not None,
             "init_motion": self.init_motion_disabled_reason() is not None,
             "tcp_pose": tcp_reason is not None,
             "tcp_linear": tcp_reason is not None,
-            "twist": tcp_reason is not None,
-            "circle": tcp_reason is not None,
         }
         for mode in self.lifecycle_modes:
             states[f"lifecycle:{mode}"] = self.blocked_reason(mode) is not None
@@ -378,12 +362,9 @@ class OperatorSafety:
         tcp_reason = self.tcp_command_disabled_reason()
         return {
             "jog": self.blocked_reason("JointTarget"),
-            "velocity": self.blocked_reason("JointVelocity"),
             "init_motion": self.init_motion_disabled_reason(),
             "tcp_pose": tcp_reason,
             "tcp_linear": tcp_reason,
-            "twist": tcp_reason,
-            "circle": tcp_reason,
         }
 
     def send_lifecycle(self, mode: str) -> tuple[bool, str]:
@@ -560,14 +541,14 @@ class OperatorSafety:
                 timeout_sec=self.init_motion_timeout_sec,
             )
         )
-        return True, "sent InitMotion (collision-free plan)"
+        return True, "sent JointTarget init_motion profile"
 
     def set_init_joints(
         self,
         left_q_deg: tuple[float, ...] | None,
         right_q_deg: tuple[float, ...] | None,
     ) -> tuple[bool, str]:
-        # Update the InitMotion target pose at runtime (used by the WayPoint
+        # Update the init-motion target pose at runtime (used by the WayPoint
         # "set as init" button). Persistence to JSON is handled by the caller.
         left = self._validated_joint6(left_q_deg)
         right = self._validated_joint6(right_q_deg)
@@ -626,220 +607,6 @@ class OperatorSafety:
 
     def tcp_jog_unavailable(self) -> tuple[bool, str]:
         return False, "TCP jog unavailable: FK/IK is deferred; no Cartesian motion command sent"
-
-    def _validated_tcp_delta(self, delta: tuple[float, ...], frame_label: str) -> tuple[bool, str | tuple[float, ...]]:
-        if len(delta) != 6:
-            return False, f"TCP {frame_label} delta must have 6 values"
-        try:
-            delta_values = tuple(float(value) for value in delta)
-        except (TypeError, ValueError):
-            return False, f"non-finite TCP {frame_label} delta rejected"
-        if any(not math.isfinite(value) for value in delta_values):
-            return False, f"non-finite TCP {frame_label} delta rejected"
-        if any(abs(value) > self.max_tcp_linear_step_m for value in delta_values[:3]):
-            return False, f"TCP linear delta exceeds {self.max_tcp_linear_step_m:.3f} m limit"
-        if any(abs(value) > self.max_tcp_angular_step_rad for value in delta_values[3:]):
-            return False, f"TCP angular delta exceeds {self.max_tcp_angular_step_rad:.3f} rad limit"
-        return True, delta_values
-
-    def _tcp_delta_label(self, delta_values: tuple[float, ...]) -> str:
-        axis_names = ("X", "Y", "Z", "roll", "pitch", "yaw")
-        moved = [
-            f"{'+' if value >= 0.0 else '-'}{axis_names[index]} {abs(value):.3f}{' m' if index < 3 else ' rad'}"
-            for index, value in enumerate(delta_values)
-            if abs(value) > 0.0
-        ]
-        return ", ".join(moved) if moved else "zero delta"
-
-    def send_tcp_delta_stand(
-        self,
-        arm: Literal["left", "right"],
-        delta: tuple[float, ...],
-    ) -> tuple[bool, str]:
-        reason = self.tcp_command_disabled_reason(arm)
-        if reason:
-            return False, reason
-        ok, validated = self._validated_tcp_delta(delta, "stand")
-        if not ok:
-            return False, str(validated)
-        delta_values = validated  # type: ignore[assignment]
-        packet = self.command_client.build_tcp_delta_stand(
-            left_delta=delta_values if arm == "left" else None,
-            right_delta=delta_values if arm == "right" else None,
-            timeout_sec=self.command_timeout_sec,
-        )
-        self.command_client.send(packet)
-        self.last_tcp_command = f"TcpDeltaStand {arm} {self._tcp_delta_label(delta_values)}"
-        latest = self.latest_valid()
-        verdict = latest.safety_verdict if latest is not None else "unavailable"
-        return True, f"sent {self.last_tcp_command}; server verdict: {verdict}"
-
-    def send_tcp_delta_local(
-        self,
-        arm: Literal["left", "right"],
-        delta: tuple[float, ...],
-    ) -> tuple[bool, str]:
-        reason = self.tcp_command_disabled_reason(arm)
-        if reason:
-            return False, reason
-        ok, validated = self._validated_tcp_delta(delta, "local")
-        if not ok:
-            return False, str(validated)
-        delta_values = validated  # type: ignore[assignment]
-        packet = self.command_client.build_tcp_delta_local(
-            left_delta=delta_values if arm == "left" else None,
-            right_delta=delta_values if arm == "right" else None,
-            timeout_sec=self.command_timeout_sec,
-        )
-        self.command_client.send(packet)
-        self.last_tcp_command = f"TcpDeltaLocal {arm} {self._tcp_delta_label(delta_values)}"
-        latest = self.latest_valid()
-        verdict = latest.safety_verdict if latest is not None else "unavailable"
-        return True, f"sent {self.last_tcp_command}; server verdict: {verdict}"
-
-    def _validated_tcp_twist(self, twist: tuple[float, ...]) -> tuple[bool, object]:
-        try:
-            twist_values = tuple(float(value) for value in twist)
-        except (TypeError, ValueError):
-            return False, "non-finite TCP twist rejected"
-        if len(twist_values) != 6 or any(not math.isfinite(v) for v in twist_values):
-            return False, "non-finite TCP twist rejected"
-        if any(abs(v) > self.max_tcp_linear_velocity_m_s for v in twist_values[:3]):
-            return False, f"TCP linear velocity exceeds {self.max_tcp_linear_velocity_m_s:.3f} m/s limit"
-        if any(abs(v) > self.max_tcp_angular_velocity_rad_s for v in twist_values[3:]):
-            return False, f"TCP angular velocity exceeds {self.max_tcp_angular_velocity_rad_s:.3f} rad/s limit"
-        return True, twist_values
-
-    def _send_tcp_twist(
-        self,
-        arm: Literal["left", "right"],
-        twist: tuple[float, ...],
-        *,
-        frame: Literal["local", "stand"],
-    ) -> tuple[bool, str]:
-        reason = self.tcp_command_disabled_reason(arm)
-        if reason:
-            return False, reason
-        ok, validated = self._validated_tcp_twist(twist)
-        if not ok:
-            return False, str(validated)
-        twist_values = validated  # type: ignore[assignment]
-        if frame == "local":
-            packet = self.command_client.build_tcp_twist_local(
-                left_twist=twist_values if arm == "left" else None,
-                right_twist=twist_values if arm == "right" else None,
-                timeout_sec=self.command_timeout_sec,
-            )
-            mode_name = "TcpTwistLocal"
-        else:
-            packet = self.command_client.build_tcp_twist_stand(
-                left_twist=twist_values if arm == "left" else None,
-                right_twist=twist_values if arm == "right" else None,
-                timeout_sec=self.command_timeout_sec,
-            )
-            mode_name = "TcpTwistStand"
-        self.command_client.send(packet)
-        self.last_tcp_command = f"{mode_name} {arm}"
-        latest = self.latest_valid()
-        verdict = latest.safety_verdict if latest is not None else "unavailable"
-        return True, f"sent {self.last_tcp_command}; server verdict: {verdict}"
-
-    def send_tcp_twist_local(self, arm: Literal["left", "right"], twist: tuple[float, ...]) -> tuple[bool, str]:
-        return self._send_tcp_twist(arm, twist, frame="local")
-
-    def send_tcp_twist_stand(self, arm: Literal["left", "right"], twist: tuple[float, ...]) -> tuple[bool, str]:
-        return self._send_tcp_twist(arm, twist, frame="stand")
-
-    def send_joint_velocity(
-        self,
-        arm: Literal["left", "right"],
-        velocity: tuple[float, ...],
-    ) -> tuple[bool, str]:
-        reason = self.blocked_reason("JointVelocity")
-        if reason:
-            return False, reason
-        try:
-            vel = tuple(float(value) for value in velocity)
-        except (TypeError, ValueError):
-            return False, "non-finite joint velocity rejected"
-        if len(vel) != 6 or any(not math.isfinite(v) for v in vel):
-            return False, "non-finite joint velocity rejected"
-        if any(abs(v) > self.max_joint_velocity_deg_s for v in vel):
-            return False, f"joint velocity exceeds {self.max_joint_velocity_deg_s:.3f} deg/s limit"
-        packet = self.command_client.build_joint_velocity(
-            left_velocity=vel if arm == "left" else None,
-            right_velocity=vel if arm == "right" else None,
-            timeout_sec=self.command_timeout_sec,
-        )
-        self.command_client.send(packet)
-        self.last_tcp_command = f"JointVelocity {arm}"
-        latest = self.latest_valid()
-        verdict = latest.safety_verdict if latest is not None else "unavailable"
-        return True, f"sent JointVelocity {arm}; server verdict: {verdict}"
-
-    def build_circle_packet(
-        self,
-        diameter_m: float = 0.15,
-        period_sec: float = 4.0,
-        *,
-        arm: Literal["left", "right", "both"] = "both",
-        plane: str = "xy",
-        repeat: int = 50,
-    ) -> tuple[bool, str, dict[str, object] | None]:
-        """Validate + build ONE TcpCircleMove packet (fixed seq, full payload).
-
-        The caller re-sends the SAME returned packet to keep the circle fresh;
-        sending a new seq would reset the circle to the current TCP.
-        """
-        arms = ("left", "right") if arm == "both" else (arm,)
-        for one in arms:
-            reason = self.tcp_command_disabled_reason(one)  # type: ignore[arg-type]
-            if reason:
-                return False, reason, None
-        try:
-            diameter = float(diameter_m)
-            period = float(period_sec)
-        except (TypeError, ValueError):
-            return False, "non-finite circle parameters rejected", None
-        if not (math.isfinite(diameter) and math.isfinite(period)):
-            return False, "non-finite circle parameters rejected", None
-        if diameter <= 0.0 or diameter > 0.20:
-            return False, "circle diameter must be in (0, 0.20] m", None
-        if period < 3.0:
-            return False, "circle period must be >= 3.0 s", None
-        if plane not in {"xy", "xz", "yz"}:
-            return False, "circle plane must be xy, xz, or yz", None
-        if int(repeat) < 1:
-            return False, "circle repeat must be >= 1", None
-        packet = self.command_client.build_tcp_circle_move(
-            left=arm in {"left", "both"},
-            right=arm in {"right", "both"},
-            diameter_m=diameter,
-            period_sec=period,
-            plane=plane,
-            repeat=int(repeat),
-        )
-        return True, f"TcpCircleMove {arm} d={diameter:.3f}m p={period:.2f}s plane={plane}", packet
-
-    def send_tcp_circle_move(
-        self,
-        diameter_m: float = 0.15,
-        period_sec: float = 4.0,
-        *,
-        arm: Literal["left", "right", "both"] = "both",
-        plane: str = "xy",
-        repeat: int = 50,
-    ) -> tuple[bool, str]:
-        ok, message, packet = self.build_circle_packet(
-            diameter_m, period_sec, arm=arm, plane=plane, repeat=repeat
-        )
-        if not ok or packet is None:
-            return False, message
-        self.command_client.send(packet)
-        self.last_tcp_command = message
-        latest = self.latest_valid()
-        verdict = latest.safety_verdict if latest is not None else "unavailable"
-        return True, f"sent {message}; server verdict: {verdict}"
 
     def send_tcp_pose_target(
         self,

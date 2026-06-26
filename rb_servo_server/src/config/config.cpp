@@ -154,6 +154,20 @@ std::vector<std::string> dedupeStatePubEndpoints(std::vector<std::string> endpoi
     return unique;
 }
 
+std::vector<std::string> dedupeScopePubEndpoints(std::vector<std::string> endpoints) {
+    std::vector<std::string> unique;
+    unique.reserve(endpoints.size());
+    std::set<std::string> seen;
+    for (const std::string& endpoint : endpoints) {
+        if (seen.insert(endpoint).second) {
+            unique.push_back(endpoint);
+        } else {
+            warn("duplicate network.scope_pub_endpoints entry ignored: " + endpoint);
+        }
+    }
+    return unique;
+}
+
 JointArray parseJointArray(const YAML::Node& node, const std::string& path) {
     if (!node.IsSequence()) fail(path + " must be a sequence", node);
     if (node.size() != kDof) {
@@ -162,6 +176,19 @@ JointArray parseJointArray(const YAML::Node& node, const std::string& path) {
     JointArray out{};
     for (int i = 0; i < kDof; ++i) {
         out[static_cast<std::size_t>(i)] = asDouble(node[static_cast<std::size_t>(i)], path + "[" + std::to_string(i) + "]");
+    }
+    return out;
+}
+
+JointBoolArray parseJointBoolArray(const YAML::Node& node, const std::string& path) {
+    if (!node.IsSequence()) fail(path + " must be a sequence", node);
+    if (node.size() != kDof) {
+        fail(path + " must contain exactly 6 values", node);
+    }
+    JointBoolArray out{};
+    for (int i = 0; i < kDof; ++i) {
+        out[static_cast<std::size_t>(i)] =
+            asBool(node[static_cast<std::size_t>(i)], path + "[" + std::to_string(i) + "]");
     }
     return out;
 }
@@ -959,6 +986,10 @@ void validateConfig(const DualArmConfig& cfg) {
         "servo.rbpodo_async_streaming.reference_supervision.tcp_ref_target_fault_after_ms"
     );
     validatePositiveFinite(static_cast<double>(cfg.network.state_pub_rate_hz), "network.state_pub_rate_hz");
+    validatePositiveFinite(static_cast<double>(cfg.scope.publish_rate_hz), "scope.publish_rate_hz");
+    if (cfg.scope.max_samples_per_batch == 0 || cfg.scope.max_samples_per_batch > 1024) {
+        throw std::runtime_error("scope.max_samples_per_batch must be in [1, 1024]");
+    }
     validatePositiveFinite(cfg.command_source.lease_timeout_sec, "command_source.lease_timeout_sec");
     {
         const auto validate_read_miss_tolerance = [](const BackendConfig& robot, const std::string& name) {
@@ -1010,6 +1041,18 @@ void validateConfig(const DualArmConfig& cfg) {
         }
         if (!seen_state_pub_endpoints.insert(endpoint).second) {
             warn("duplicate network.state_pub_endpoints entry configured: " + endpoint);
+        }
+    }
+    if (cfg.network.scope_pub_endpoints.empty()) {
+        throw std::runtime_error("network.scope_pub_endpoints must not be empty");
+    }
+    std::set<std::string> seen_scope_pub_endpoints;
+    for (const std::string& endpoint : cfg.network.scope_pub_endpoints) {
+        if (!isValidUdpEndpointUri(endpoint)) {
+            throw std::runtime_error("network.scope_pub_endpoints entries must be udp://host:port endpoints: " + endpoint);
+        }
+        if (!seen_scope_pub_endpoints.insert(endpoint).second) {
+            warn("duplicate network.scope_pub_endpoints entry configured: " + endpoint);
         }
     }
 
@@ -1163,13 +1206,7 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.cartesian_control.path_kp, "cartesian_control.path_kp");
     validatePositiveFinite(cfg.cartesian_control.path_kp_pos, "cartesian_control.path_kp_pos");
     validatePositiveFinite(cfg.cartesian_control.path_kp_ori, "cartesian_control.path_kp_ori");
-    validatePositiveFinite(cfg.cartesian_control.twist_orientation_hold_kp, "cartesian_control.twist_orientation_hold_kp");
-    validatePositiveFinite(cfg.cartesian_control.twist_angular_deadband_rad_s, "cartesian_control.twist_angular_deadband_rad_s");
-    validateNonNegativeFinite(cfg.cartesian_control.twist_smd_goal_max_lead_m, "cartesian_control.twist_smd_goal_max_lead_m");
-    validateNonNegativeFinite(cfg.cartesian_control.twist_smd_goal_max_lead_rad, "cartesian_control.twist_smd_goal_max_lead_rad");
     validatePositiveFinite(cfg.cartesian_control.velocity_damping, "cartesian_control.velocity_damping");
-    validatePositiveFinite(cfg.cartesian_control.max_twist_linear_m_s, "cartesian_control.max_twist_linear_m_s");
-    validatePositiveFinite(cfg.cartesian_control.max_twist_angular_rad_s, "cartesian_control.max_twist_angular_rad_s");
     validatePositiveFinite(cfg.cartesian_control.max_linear_move_speed_m_s, "cartesian_control.max_linear_move_speed_m_s");
     validatePositiveFinite(cfg.cartesian_control.max_angular_move_speed_rad_s, "cartesian_control.max_angular_move_speed_rad_s");
     validatePositiveFinite(cfg.cartesian_control.velocity_target_lookahead_sec, "cartesian_control.velocity_target_lookahead_sec");
@@ -1194,23 +1231,6 @@ void validateConfig(const DualArmConfig& cfg) {
     if (cfg.cartesian_control.linear_move.max_duration_sec < cfg.cartesian_control.linear_move.min_duration_sec) {
         throw std::runtime_error("cartesian_control.linear_move.max_duration_sec must be >= min_duration_sec");
     }
-    if (cfg.cartesian_control.enable_server_side_circle_track && !cfg.cartesian_control.enable) {
-        throw std::runtime_error(
-            "cartesian_control.enable_server_side_circle_track requires cartesian_control.enable=true"
-        );
-    }
-    if (cfg.cartesian_control.enable_server_side_circle_track && anyReal(cfg) &&
-        !cfg.cartesian_control.allow_in_controller_simulation) {
-        throw std::runtime_error(
-            "Refusing cartesian_control.enable_server_side_circle_track in real mode outside "
-            "rbpodo controller-simulation Cartesian gate"
-        );
-    }
-    if (cfg.cartesian_control.circle_move.allow_in_real) {
-        throw std::runtime_error("cartesian_control.circle_move.allow_in_real must remain false");
-    }
-    validatePositiveFinite(cfg.cartesian_control.circle_move.max_diameter_m, "cartesian_control.circle_move.max_diameter_m");
-    validatePositiveFinite(cfg.cartesian_control.circle_move.min_period_sec, "cartesian_control.circle_move.min_period_sec");
     validatePositiveFinite(
         cfg.cartesian_control.pose_track_smd.damping_ratio_linear,
         "cartesian_control.pose_track_smd.damping_ratio_linear");
@@ -1365,6 +1385,11 @@ void validateConfig(const DualArmConfig& cfg) {
         for (const std::string& endpoint : cfg.network.state_pub_endpoints) {
             exposed_network = exposed_network || bindRequiresExposureOverride(endpoint);
         }
+        if (cfg.scope.enable) {
+            for (const std::string& endpoint : cfg.network.scope_pub_endpoints) {
+                exposed_network = exposed_network || bindRequiresExposureOverride(endpoint);
+            }
+        }
         if (exposed_network) {
             if (!envIsOne("RB_ALLOW_NETWORK_EXPOSURE")) {
                 throw std::runtime_error("Refusing exposed network bind in real mode. Set RB_ALLOW_NETWORK_EXPOSURE=1.");
@@ -1410,6 +1435,7 @@ void validateRootKeys(const YAML::Node& root) {
         "network",
         "command_source",
         "logging",
+        "scope",
         "force_control",
         "cartesian_control",
         "kinematics",
@@ -1642,6 +1668,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "dq_max_deg_s",
             "ddq_max_deg_s2",
             "joint_wrap_period_deg",
+            "joint_target_literal_axes",
             "command_timeout_sec",
             "max_tracking_error_deg",
             "stop_both_arms_on_single_arm_error",
@@ -1666,6 +1693,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "dq_max_deg_s")) cfg.safety.dq_max_deg_s = parseJointArray(sec["dq_max_deg_s"], "safety.dq_max_deg_s");
         if (has(sec, "ddq_max_deg_s2")) cfg.safety.ddq_max_deg_s2 = parseJointArray(sec["ddq_max_deg_s2"], "safety.ddq_max_deg_s2");
         if (has(sec, "joint_wrap_period_deg")) cfg.safety.joint_wrap_period_deg = parseJointArray(sec["joint_wrap_period_deg"], "safety.joint_wrap_period_deg");
+        if (has(sec, "joint_target_literal_axes")) cfg.safety.joint_target_literal_axes = parseJointBoolArray(sec["joint_target_literal_axes"], "safety.joint_target_literal_axes");
         if (has(sec, "command_timeout_sec")) cfg.safety.command_timeout_sec = asDouble(sec["command_timeout_sec"], "safety.command_timeout_sec");
         if (has(sec, "max_tracking_error_deg")) cfg.safety.max_tracking_error_deg = asDouble(sec["max_tracking_error_deg"], "safety.max_tracking_error_deg");
         if (has(sec, "stop_both_arms_on_single_arm_error")) cfg.safety.stop_both_arms_on_single_arm_error = asBool(sec["stop_both_arms_on_single_arm_error"], "safety.stop_both_arms_on_single_arm_error");
@@ -2188,6 +2216,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "state_pub_endpoint",
             "state_pub_endpoints",
             "state_pub_bind",
+            "scope_pub_endpoints",
             "state_pub_rate_hz",
             "command_source_allowlist",
         }, "network");
@@ -2217,6 +2246,14 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             cfg.network.state_pub_endpoints = {cfg.network.state_pub_endpoint};
         }
         cfg.network.state_pub_bind = cfg.network.state_pub_endpoint;
+        if (has(sec, "scope_pub_endpoints")) {
+            cfg.network.scope_pub_endpoints = dedupeScopePubEndpoints(
+                asStringArray(sec["scope_pub_endpoints"], "network.scope_pub_endpoints")
+            );
+            if (cfg.network.scope_pub_endpoints.empty()) {
+                fail("network.scope_pub_endpoints must not be empty", sec["scope_pub_endpoints"]);
+            }
+        }
         if (has(sec, "state_pub_rate_hz")) cfg.network.state_pub_rate_hz = asInt(sec["state_pub_rate_hz"], "network.state_pub_rate_hz");
         if (has(sec, "command_source_allowlist")) {
             cfg.network.command_source_allowlist = asStringArray(sec["command_source_allowlist"], "network.command_source_allowlist");
@@ -2288,6 +2325,26 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         }
     }
 
+    if (has(root, "scope")) {
+        const YAML::Node sec = root["scope"];
+        validateAllowedKeys(sec, {
+            "enable",
+            "publish_rate_hz",
+            "max_samples_per_batch",
+        }, "scope");
+        if (has(sec, "enable")) cfg.scope.enable = asBool(sec["enable"], "scope.enable");
+        if (has(sec, "publish_rate_hz")) {
+            cfg.scope.publish_rate_hz = asInt(sec["publish_rate_hz"], "scope.publish_rate_hz");
+        }
+        if (has(sec, "max_samples_per_batch")) {
+            const int max_samples = asInt(sec["max_samples_per_batch"], "scope.max_samples_per_batch");
+            if (max_samples <= 0) {
+                throw std::runtime_error("scope.max_samples_per_batch must be positive");
+            }
+            cfg.scope.max_samples_per_batch = static_cast<size_t>(max_samples);
+        }
+    }
+
     if (has(root, "force_control")) {
         const YAML::Node sec = root["force_control"];
         validateAllowedKeys(sec, {"provider", "enable"}, "force_control");
@@ -2302,21 +2359,12 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "allow_in_simulation",
             "allow_in_real",
             "allow_in_controller_simulation",
-            "enable_server_side_circle_track",
-            "enable_benchmark_primitives",
             "warn_ik_duration_us",
             "fail_ik_duration_us",
             "path_kp",
             "path_kp_pos",
             "path_kp_ori",
-            "twist_orientation_hold_kp",
-            "twist_angular_deadband_rad_s",
-            "twist_via_smd_enable",
-            "twist_smd_goal_max_lead_m",
-            "twist_smd_goal_max_lead_rad",
             "velocity_damping",
-            "max_twist_linear_m_s",
-            "max_twist_angular_rad_s",
             "max_linear_move_speed_m_s",
             "max_angular_move_speed_rad_s",
             "max_cartesian_step_m",
@@ -2330,7 +2378,6 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "reset_velocity_integrator_on_mode_change",
             "command_actual_error_policy",
             "linear_move",
-            "circle_move",
             "pose_track_smd",
         }, "cartesian_control");
         if (has(sec, "enable")) cfg.cartesian_control.enable = asBool(sec["enable"], "cartesian_control.enable");
@@ -2345,14 +2392,6 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "allow_in_controller_simulation")) {
             cfg.cartesian_control.allow_in_controller_simulation =
                 asBool(sec["allow_in_controller_simulation"], "cartesian_control.allow_in_controller_simulation");
-        }
-        if (has(sec, "enable_server_side_circle_track")) {
-            cfg.cartesian_control.enable_server_side_circle_track =
-                asBool(sec["enable_server_side_circle_track"], "cartesian_control.enable_server_side_circle_track");
-        }
-        if (has(sec, "enable_benchmark_primitives")) {
-            cfg.cartesian_control.enable_benchmark_primitives =
-                asBool(sec["enable_benchmark_primitives"], "cartesian_control.enable_benchmark_primitives");
         }
         if (has(sec, "warn_ik_duration_us")) {
             cfg.cartesian_control.warn_ik_duration_us =
@@ -2385,36 +2424,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 cfg.cartesian_control.path_kp_ori = asDouble(sec["path_kp_ori"], "cartesian_control.path_kp_ori");
             }
         }
-        if (has(sec, "twist_orientation_hold_kp")) {
-            cfg.cartesian_control.twist_orientation_hold_kp =
-                asDouble(sec["twist_orientation_hold_kp"], "cartesian_control.twist_orientation_hold_kp");
-        }
-        if (has(sec, "twist_angular_deadband_rad_s")) {
-            cfg.cartesian_control.twist_angular_deadband_rad_s =
-                asDouble(sec["twist_angular_deadband_rad_s"], "cartesian_control.twist_angular_deadband_rad_s");
-        }
-        if (has(sec, "twist_via_smd_enable")) {
-            cfg.cartesian_control.twist_via_smd_enable =
-                asBool(sec["twist_via_smd_enable"], "cartesian_control.twist_via_smd_enable");
-        }
-        if (has(sec, "twist_smd_goal_max_lead_m")) {
-            cfg.cartesian_control.twist_smd_goal_max_lead_m =
-                asDouble(sec["twist_smd_goal_max_lead_m"], "cartesian_control.twist_smd_goal_max_lead_m");
-        }
-        if (has(sec, "twist_smd_goal_max_lead_rad")) {
-            cfg.cartesian_control.twist_smd_goal_max_lead_rad =
-                asDouble(sec["twist_smd_goal_max_lead_rad"], "cartesian_control.twist_smd_goal_max_lead_rad");
-        }
         if (has(sec, "velocity_damping")) {
             cfg.cartesian_control.velocity_damping = asDouble(sec["velocity_damping"], "cartesian_control.velocity_damping");
-        }
-        if (has(sec, "max_twist_linear_m_s")) {
-            cfg.cartesian_control.max_twist_linear_m_s =
-                asDouble(sec["max_twist_linear_m_s"], "cartesian_control.max_twist_linear_m_s");
-        }
-        if (has(sec, "max_twist_angular_rad_s")) {
-            cfg.cartesian_control.max_twist_angular_rad_s =
-                asDouble(sec["max_twist_angular_rad_s"], "cartesian_control.max_twist_angular_rad_s");
         }
         if (has(sec, "max_linear_move_speed_m_s")) {
             cfg.cartesian_control.max_linear_move_speed_m_s =
@@ -2527,31 +2538,6 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     asInt(linear["collision_check_samples"], "cartesian_control.linear_move.collision_check_samples");
             }
         }
-        if (has(sec, "circle_move")) {
-            const YAML::Node circle = sec["circle_move"];
-            validateAllowedKeys(circle, {
-                "allow_in_simulation",
-                "allow_in_real",
-                "max_diameter_m",
-                "min_period_sec",
-            }, "cartesian_control.circle_move");
-            if (has(circle, "allow_in_simulation")) {
-                cfg.cartesian_control.circle_move.allow_in_simulation =
-                    asBool(circle["allow_in_simulation"], "cartesian_control.circle_move.allow_in_simulation");
-            }
-            if (has(circle, "allow_in_real")) {
-                cfg.cartesian_control.circle_move.allow_in_real =
-                    asBool(circle["allow_in_real"], "cartesian_control.circle_move.allow_in_real");
-            }
-            if (has(circle, "max_diameter_m")) {
-                cfg.cartesian_control.circle_move.max_diameter_m =
-                    asDouble(circle["max_diameter_m"], "cartesian_control.circle_move.max_diameter_m");
-            }
-            if (has(circle, "min_period_sec")) {
-                cfg.cartesian_control.circle_move.min_period_sec =
-                    asDouble(circle["min_period_sec"], "cartesian_control.circle_move.min_period_sec");
-            }
-        }
         if (has(sec, "pose_track_smd")) {
             const YAML::Node smd = sec["pose_track_smd"];
             validateAllowedKeys(smd, {
@@ -2565,7 +2551,6 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "max_angular_velocity_rad_s",
                 "max_angular_accel_rad_s2",
                 "velocity_feedforward",
-                "velocity_feedforward_source",
             }, "cartesian_control.pose_track_smd");
             if (has(smd, "enable")) {
                 cfg.cartesian_control.pose_track_smd.enable =
@@ -2608,17 +2593,6 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(smd, "velocity_feedforward")) {
                 cfg.cartesian_control.pose_track_smd.velocity_feedforward = asBool(
                     smd["velocity_feedforward"], "cartesian_control.pose_track_smd.velocity_feedforward");
-            }
-            if (has(smd, "velocity_feedforward_source")) {
-                const std::string source = lower(asString(
-                    smd["velocity_feedforward_source"],
-                    "cartesian_control.pose_track_smd.velocity_feedforward_source"));
-                if (source != "finite_difference" && source != "command_twist" && source != "auto") {
-                    throw std::runtime_error(
-                        "cartesian_control.pose_track_smd.velocity_feedforward_source must be "
-                        "finite_difference, command_twist, or auto");
-                }
-                cfg.cartesian_control.pose_track_smd.velocity_feedforward_source = source;
             }
         }
     }

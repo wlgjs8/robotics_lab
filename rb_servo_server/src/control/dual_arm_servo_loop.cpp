@@ -19,36 +19,17 @@
 #include "rb_servo/core/clock.hpp"
 #include "rb_servo/core/realtime.hpp"
 #include "rb_servo/kinematics/pinocchio_kinematics.hpp"
+#include "rb_servo/network/scope_publisher.hpp"
 
 namespace rb_servo {
 namespace {
 bool isCartesianMode(ControlMode mode) {
     return mode == ControlMode::TcpPoseTarget ||
-           mode == ControlMode::TcpLinearMove ||
-           mode == ControlMode::TcpCircleMove ||
-           mode == ControlMode::TcpCircleTrack ||
-           mode == ControlMode::TcpDeltaStand ||
-           mode == ControlMode::TcpDeltaLocal ||
-           mode == ControlMode::TcpTwistStand ||
-           mode == ControlMode::TcpTwistLocal;
-}
-
-bool isCartesianDeltaMode(ControlMode mode) {
-    return mode == ControlMode::TcpDeltaStand ||
-           mode == ControlMode::TcpDeltaLocal;
+           mode == ControlMode::TcpLinearMove;
 }
 
 bool isCartesianVelocityServoMode(ControlMode mode) {
-    return mode == ControlMode::TcpLinearMove ||
-           mode == ControlMode::TcpCircleMove ||
-           mode == ControlMode::TcpCircleTrack ||
-           mode == ControlMode::TcpTwistStand ||
-           mode == ControlMode::TcpTwistLocal;
-}
-
-bool isTcpTwistMode(ControlMode mode) {
-    return mode == ControlMode::TcpTwistStand ||
-           mode == ControlMode::TcpTwistLocal;
+    return mode == ControlMode::TcpLinearMove;
 }
 
 bool isStreamingCartesianMode(ControlMode mode) {
@@ -57,16 +38,8 @@ bool isStreamingCartesianMode(ControlMode mode) {
 
 bool isMotionMode(ControlMode mode) {
     return mode == ControlMode::JointTarget ||
-           mode == ControlMode::InitMotion ||
-           mode == ControlMode::JointVelocity ||
            mode == ControlMode::TcpPoseTarget ||
-           mode == ControlMode::TcpLinearMove ||
-           mode == ControlMode::TcpCircleMove ||
-           mode == ControlMode::TcpCircleTrack ||
-           mode == ControlMode::TcpDeltaStand ||
-           mode == ControlMode::TcpDeltaLocal ||
-           mode == ControlMode::TcpTwistStand ||
-           mode == ControlMode::TcpTwistLocal;
+           mode == ControlMode::TcpLinearMove;
 }
 
 std::string velocityIntegrationModeName(CartesianVelocityTargetIntegrationMode mode) {
@@ -107,13 +80,6 @@ bool linearPathLeaseExpired(const CartesianServoPathState& path, uint64_t now_ns
            now_ns > path.lease_expires_time_ns;
 }
 
-bool circlePathLeaseExpired(const CartesianCircleMoveState& path, uint64_t now_ns) {
-    return path.active &&
-           path.lease_enforced &&
-           path.lease_expires_time_ns > 0 &&
-           now_ns > path.lease_expires_time_ns;
-}
-
 bool retainCompletedPathTelemetry(
     const CartesianServoPathState& path,
     const CartesianSolveTelemetry& telemetry
@@ -131,27 +97,12 @@ bool isReadOnlyBlockedMode(ControlMode mode) {
 bool isCommandModeMissingPayload(const ArmCommand& command) {
     switch (command.mode) {
         case ControlMode::JointTarget:
-        case ControlMode::InitMotion:
             return !command.has_joint_target;
-        case ControlMode::JointVelocity:
-            return !command.has_joint_velocity;
         case ControlMode::TcpPoseTarget:
             return !command.has_tcp_target;
         case ControlMode::TcpLinearMove:
             return !command.has_tcp_target ||
                    (!command.has_linear_move_duration && !command.has_linear_move_linear_speed);
-        case ControlMode::TcpCircleMove:
-            return !command.has_tcp_circle_move;
-        case ControlMode::TcpCircleTrack:
-            return !command.has_tcp_circle_track;
-        case ControlMode::TcpDeltaStand:
-            return !command.has_tcp_delta_stand;
-        case ControlMode::TcpDeltaLocal:
-            return !command.has_tcp_delta_local;
-        case ControlMode::TcpTwistStand:
-            return !command.has_tcp_twist_stand;
-        case ControlMode::TcpTwistLocal:
-            return !command.has_tcp_twist_local;
         default:
             return false;
     }
@@ -251,16 +202,6 @@ ArmCommand applyPoseTrackSmd(
         }
     }
     tracker->updateGoalFromCommand(command.tcp_target_stand);
-    // Patch 5: feed the optional conditioned command twist to the SMD velocity
-    // feedforward (consumed only when velocity_feedforward_source is
-    // command_twist/auto; ignored otherwise). Cleared when absent so a stale twist
-    // never persists across commands that stop supplying one.
-    if (command.has_tcp_target_twist_stand) {
-        const Vec6& t = command.tcp_target_twist_stand;
-        tracker->setCommandTwist(Eigen::Vector3d(t.x, t.y, t.z), Eigen::Vector3d(t.rx, t.ry, t.rz));
-    } else {
-        tracker->setCommandTwist(std::nullopt, std::nullopt);
-    }
     ArmCommand smoothed = command;
     smoothed.tcp_target_stand = tracker->step(dt_sec);
     return smoothed;
@@ -339,15 +280,6 @@ CartesianAvailability cartesianAvailabilityForArm(
         return availability;
     }
 
-    // TcpCircleTrack stays gated on its feature flag (unimplemented skeleton),
-    // independent of run mode.
-    if (command.mode == ControlMode::TcpCircleTrack &&
-        !config.cartesian_control.enable_server_side_circle_track) {
-        availability.reason = "tcp_circle_track_disabled";
-        availability.physical_motion_expected = false;
-        return availability;
-    }
-
     const bool controller_simulation = isRbpodoControllerSimulationBackend(backend);
     availability.available = true;
     availability.reason = "";
@@ -363,7 +295,7 @@ RunMode cartesianComputationRunModeForArm(
 ) {
     const RunMode run_mode = backendConfigForArm(config, command.arm_id).run_mode;
     if (run_mode == RunMode::Real &&
-        (isStreamingCartesianMode(command.mode) || command.mode == ControlMode::TcpCircleMove) &&
+        isStreamingCartesianMode(command.mode) &&
         controllerSimulationCartesianGateOpen(config, backendConfigForArm(config, command.arm_id))) {
         return RunMode::Simulation;
     }
@@ -398,7 +330,7 @@ bool controllerSimulationReferenceSourceActive(
     if (source != CartesianControllerSimulationStateSource::Reference) return false;
     const BackendConfig& backend = backendConfigForArm(config, command.arm_id);
     return backend.run_mode == RunMode::Real &&
-        (isStreamingCartesianMode(command.mode) || command.mode == ControlMode::TcpCircleMove) &&
+        isStreamingCartesianMode(command.mode) &&
         controllerSimulationCartesianGateOpen(config, backend);
 }
 
@@ -1067,19 +999,6 @@ CartesianSolveTelemetry cartesianUnavailableTelemetry(
     return telemetry;
 }
 
-CartesianArmTargetResult rejectedCircleTrackTarget(
-    const RobotState& state,
-    const CartesianControlConfig& config,
-    const JointArray& previous_safe_sent_q_deg
-) {
-    CartesianArmTargetResult result;
-    result.q_target_deg = previous_safe_sent_q_deg;
-    result.verdict = SafetyVerdict::CartesianUnavailable;
-    result.reason = "tcp_circle_track_not_implemented";
-    result.telemetry = cartesianUnavailableTelemetry(state, config, result.reason);
-    return result;
-}
-
 ArmCommand linearMoveContinuationCommand(
     const ArmCommand& hold_command,
     const CartesianServoPathState& path
@@ -1090,17 +1009,6 @@ ArmCommand linearMoveContinuationCommand(
     command.has_tcp_target = true;
     command.linear_move_duration_sec = path.duration_sec;
     command.has_linear_move_duration = true;
-    return command;
-}
-
-ArmCommand circleMoveContinuationCommand(
-    const ArmCommand& hold_command,
-    const CartesianCircleMoveState& circle
-) {
-    ArmCommand command = hold_command;
-    command.mode = ControlMode::TcpCircleMove;
-    command.tcp_circle_move = circle.command;
-    command.has_tcp_circle_move = true;
     return command;
 }
 
@@ -1402,6 +1310,20 @@ SelfCollisionResult selfCollisionResultFromVerdict(
     }
     return sc;
 }
+
+ScopeSample scopeSampleFromServoSample(const ServoSample& sample) {
+    ScopeSample scope;
+    scope.t_host_ns = sample.loop_start_time_ns;
+    scope.l_robot_ns = sample.left_state.robot_time_ns;
+    scope.r_robot_ns = sample.right_state.robot_time_ns;
+    scope.l_sent = sample.left_sent_q_deg;
+    scope.r_sent = sample.right_sent_q_deg;
+    scope.l_ref = sample.left_state.q_target_deg;
+    scope.r_ref = sample.right_state.q_target_deg;
+    scope.l_actual = sample.left_state.q_actual_deg;
+    scope.r_actual = sample.right_state.q_actual_deg;
+    return scope;
+}
 }  // namespace
 
 DualArmServoLoop::DualArmServoLoop(
@@ -1410,12 +1332,14 @@ DualArmServoLoop::DualArmServoLoop(
     const DualArmConfig& config,
     CommandBuffer* command_buffer,
     ServoLogger* logger,
-    std::shared_ptr<IKinematics> kinematics
+    std::shared_ptr<IKinematics> kinematics,
+    ScopePublisher* scope_publisher
 ) : left_robot_(std::move(left_robot)),
     right_robot_(std::move(right_robot)),
     config_(config),
     command_buffer_(command_buffer),
     logger_(logger),
+    scope_publisher_(scope_publisher),
     kinematics_(nullptr),
     kinematics_injected_(kinematics != nullptr),
     left_traj_filter_(config.servo, config.safety),
@@ -2136,13 +2060,12 @@ void DualArmServoLoop::loopMain() {
             safety_verdict = SafetyVerdict::Ok;
         } else {
             SafetyVerdict command_verdict = SafetyVerdict::Ok;
-            command = resolveCartesianDeltaCommand(command, left_state, right_state);
             // Collision-free TcpLinearMove: decide Straight (pass through to the exact
             // MoveL) vs Detour (rewrite to a streamed JointTarget collision-free path).
             command = applyCollisionFreeLinearMove(command, left_state, right_state);
-            // Collision-free InitMotion: rewrite a ControlMode::InitMotion into a dual
-            // JointTarget toward the current planned waypoint (or a hold while planning /
-            // on failure), so the trajectory + safety pipeline below is unchanged.
+            // Collision-free JointTarget init_motion profile: rewrite to direct
+            // JointTarget waypoints (or hold while planning / on failure), so the
+            // trajectory + safety pipeline below is unchanged.
             command = applyInitMotionSequencer(command, left_state, right_state);
             const bool motion_requested = commandRequestsMotion(command);
             ServoTarget desired = computeServoTarget(left_state, right_state, command, filter_dt_sec, &command_verdict);
@@ -2336,12 +2259,6 @@ void DualArmServoLoop::loopMain() {
         }
         if (right_cartesian_servo_path_.active && right_cartesian_servo_path_.done) {
             resetCartesianVelocityIntegrator(ArmId::Right, "linear_path_done");
-        }
-        if (left_cartesian_circle_move_.active && left_cartesian_circle_move_.done) {
-            resetCartesianVelocityIntegrator(ArmId::Left, "circle_move_done");
-        }
-        if (right_cartesian_circle_move_.active && right_cartesian_circle_move_.done) {
-            resetCartesianVelocityIntegrator(ArmId::Right, "circle_move_done");
         }
         refreshCartesianVelocityIntegratorTelemetry(ArmId::Left);
         refreshCartesianVelocityIntegratorTelemetry(ArmId::Right);
@@ -2639,6 +2556,9 @@ void DualArmServoLoop::loopMain() {
 
         if (logger_) {
             logger_->push(sample);
+        }
+        if (scope_publisher_) {
+            scope_publisher_->push(scopeSampleFromServoSample(sample));
         }
 
         async_supervision_degraded_last_tick = async_supervision_degraded_this_tick;
@@ -3108,10 +3028,6 @@ void DualArmServoLoop::clearLatchedCartesianTargets() {
     right_latched_cartesian_target_ = LatchedCartesianTarget{};
     left_cartesian_servo_path_ = CartesianServoPathState{};
     right_cartesian_servo_path_ = CartesianServoPathState{};
-    left_cartesian_circle_move_ = CartesianCircleMoveState{};
-    right_cartesian_circle_move_ = CartesianCircleMoveState{};
-    left_cartesian_twist_hold_ = CartesianTwistHoldState{};
-    right_cartesian_twist_hold_ = CartesianTwistHoldState{};
     resetCartesianVelocityIntegrator(ArmId::Left, "cartesian_target_clear");
     resetCartesianVelocityIntegrator(ArmId::Right, "cartesian_target_clear");
     left_last_cartesian_solve_ = CartesianSolveTelemetry{};
@@ -3122,15 +3038,11 @@ void DualArmServoLoop::clearLatchedCartesianTarget(ArmId arm_id) {
     if (arm_id == ArmId::Left) {
         left_latched_cartesian_target_ = LatchedCartesianTarget{};
         left_cartesian_servo_path_ = CartesianServoPathState{};
-        left_cartesian_circle_move_ = CartesianCircleMoveState{};
-        left_cartesian_twist_hold_ = CartesianTwistHoldState{};
         resetCartesianVelocityIntegrator(ArmId::Left, "cartesian_target_clear");
         left_last_cartesian_solve_ = CartesianSolveTelemetry{};
     } else {
         right_latched_cartesian_target_ = LatchedCartesianTarget{};
         right_cartesian_servo_path_ = CartesianServoPathState{};
-        right_cartesian_circle_move_ = CartesianCircleMoveState{};
-        right_cartesian_twist_hold_ = CartesianTwistHoldState{};
         resetCartesianVelocityIntegrator(ArmId::Right, "cartesian_target_clear");
         right_last_cartesian_solve_ = CartesianSolveTelemetry{};
     }
@@ -3176,74 +3088,6 @@ void DualArmServoLoop::refreshCartesianVelocityIntegratorTelemetry(ArmId arm_id)
         config_.cartesian_control.velocity_target_lookahead_sec;
 }
 
-DualArmCommand DualArmServoLoop::resolveCartesianDeltaCommand(
-    const DualArmCommand& command,
-    const RobotState& left_state,
-    const RobotState& right_state
-) {
-    DualArmCommand resolved = command;
-    resolved.left = resolveArmCartesianDeltaCommand(command.left, left_state, command.seq, left_latched_cartesian_target_);
-    resolved.right = resolveArmCartesianDeltaCommand(command.right, right_state, command.seq, right_latched_cartesian_target_);
-    return resolved;
-}
-
-ArmCommand DualArmServoLoop::resolveArmCartesianDeltaCommand(
-    const ArmCommand& command,
-    const RobotState& state,
-    uint64_t command_seq,
-    LatchedCartesianTarget& latch
-) {
-    if (!isCartesianDeltaMode(command.mode)) {
-        latch = LatchedCartesianTarget{};
-        return command;
-    }
-
-    ArmCommand resolved = command;
-    if (latch.valid && latch.seq == command_seq) {
-        resolved.mode = ControlMode::TcpPoseTarget;
-        resolved.tcp_target_stand = latch.target_tcp_stand;
-        resolved.has_tcp_target = true;
-        resolved.has_tcp_delta_stand = false;
-        resolved.has_tcp_delta_local = false;
-        return resolved;
-    }
-
-    latch = LatchedCartesianTarget{};
-    if (!state.has_valid_tcp_pose || !state.tcp_stand.has_value()) {
-        return command;
-    }
-    if (command.mode == ControlMode::TcpDeltaStand && !command.has_tcp_delta_stand) {
-        return command;
-    }
-    if (command.mode == ControlMode::TcpDeltaLocal && !command.has_tcp_delta_local) {
-        return command;
-    }
-
-    CartesianController cartesian(
-        config_.left_mount,
-        config_.right_mount,
-        config_.cartesian_control,
-        kinematics_
-    );
-    // Tier-2 floor + ROI clamp: latch a target that is already legal so the
-    // per-tick pose tracking never aims below the plane or outside the box.
-    const Pose6D target_tcp_stand = clampPoseToRoi(clampPoseToFloor(
-        command.mode == ControlMode::TcpDeltaStand
-            ? cartesian.applyTcpDeltaStand(*state.tcp_stand, command.tcp_delta_stand)
-            : cartesian.applyTcpDeltaLocal(*state.tcp_stand, command.tcp_delta_local)));
-
-    latch.seq = command_seq;
-    latch.target_tcp_stand = target_tcp_stand;
-    latch.valid = true;
-
-    resolved.mode = ControlMode::TcpPoseTarget;
-    resolved.tcp_target_stand = target_tcp_stand;
-    resolved.has_tcp_target = true;
-    resolved.has_tcp_delta_stand = false;
-    resolved.has_tcp_delta_local = false;
-    return resolved;
-}
-
 void DualArmServoLoop::mergeAbcTelemetry(
     CartesianSolveTelemetry& solve, const AbcTelemetry& abc, int output_ma_window) {
     solve.smd_active = abc.smd_active;
@@ -3251,8 +3095,6 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.smd_ref_stand = abc.smd_ref_stand;
     const SmdStepInfo& info = abc.smd_step_info;
     solve.smd_velocity_feedforward_used = info.velocity_feedforward_used;
-    solve.smd_velocity_feedforward_source = info.velocity_feedforward_source;
-    solve.smd_velocity_feedforward_fallback = info.command_twist_fallback;
     solve.smd_linear_velocity_clipped = info.linear_velocity_clipped;
     solve.smd_linear_accel_clipped = info.linear_accel_clipped;
     solve.smd_angular_velocity_clipped = info.angular_velocity_clipped;
@@ -3288,26 +3130,11 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         right_cartesian_servo_path_ = CartesianServoPathState{};
         right_last_cartesian_solve_ = CartesianSolveTelemetry{};
     };
-    const auto clear_left_circle_move = [&]() {
-        left_cartesian_circle_move_ = CartesianCircleMoveState{};
-        left_last_cartesian_solve_ = CartesianSolveTelemetry{};
-    };
-    const auto clear_right_circle_move = [&]() {
-        right_cartesian_circle_move_ = CartesianCircleMoveState{};
-        right_last_cartesian_solve_ = CartesianSolveTelemetry{};
-    };
-
     if (left_cartesian_servo_path_.active && !isValidJointState(left_state)) {
         clear_left_linear_path();
     }
     if (right_cartesian_servo_path_.active && !isValidJointState(right_state)) {
         clear_right_linear_path();
-    }
-    if (left_cartesian_circle_move_.active && !isValidJointState(left_state)) {
-        clear_left_circle_move();
-    }
-    if (right_cartesian_circle_move_.active && !isValidJointState(right_state)) {
-        clear_right_circle_move();
     }
     // TcpLinearMove is a FINITE, bounded path (duration_sec <= linear_move.max_duration_sec).
     // Once it is running, let it drive to completion even if the (one-shot) command's
@@ -3323,24 +3150,12 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         linearPathLeaseExpired(right_cartesian_servo_path_, command.host_time_ns)) {
         clear_right_linear_path();
     }
-    if (circlePathLeaseExpired(left_cartesian_circle_move_, command.host_time_ns)) {
-        clear_left_circle_move();
-    }
-    if (circlePathLeaseExpired(right_cartesian_circle_move_, command.host_time_ns)) {
-        clear_right_circle_move();
-    }
     if (!synthetic_hold) {
         if (command.left.mode != ControlMode::TcpLinearMove) {
             clear_left_linear_path();
         }
         if (command.right.mode != ControlMode::TcpLinearMove) {
             clear_right_linear_path();
-        }
-        if (command.left.mode != ControlMode::TcpCircleMove) {
-            clear_left_circle_move();
-        }
-        if (command.right.mode != ControlMode::TcpCircleMove) {
-            clear_right_circle_move();
         }
         if (!isCartesianVelocityServoMode(command.left.mode)) {
             resetCartesianVelocityIntegrator(ArmId::Left, "velocity_mode_exit");
@@ -3374,23 +3189,11 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     const bool continue_right_linear = synthetic_hold &&
         right_cartesian_servo_path_.active &&
         !right_cartesian_servo_path_.done;
-    const bool continue_left_circle = synthetic_hold &&
-        left_cartesian_circle_move_.active &&
-        !left_cartesian_circle_move_.done;
-    const bool continue_right_circle = synthetic_hold &&
-        right_cartesian_circle_move_.active &&
-        !right_cartesian_circle_move_.done;
     if (synthetic_hold && left_cartesian_servo_path_.active && left_cartesian_servo_path_.done) {
         resetCartesianVelocityIntegrator(ArmId::Left, "linear_path_done");
     }
     if (synthetic_hold && right_cartesian_servo_path_.active && right_cartesian_servo_path_.done) {
         resetCartesianVelocityIntegrator(ArmId::Right, "linear_path_done");
-    }
-    if (synthetic_hold && left_cartesian_circle_move_.active && left_cartesian_circle_move_.done) {
-        resetCartesianVelocityIntegrator(ArmId::Left, "circle_move_done");
-    }
-    if (synthetic_hold && right_cartesian_circle_move_.active && right_cartesian_circle_move_.done) {
-        resetCartesianVelocityIntegrator(ArmId::Right, "circle_move_done");
     }
 
     DualArmCommand effective_command = command;
@@ -3399,12 +3202,6 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     }
     if (continue_right_linear) {
         effective_command.right = linearMoveContinuationCommand(command.right, right_cartesian_servo_path_);
-    }
-    if (continue_left_circle) {
-        effective_command.left = circleMoveContinuationCommand(command.left, left_cartesian_circle_move_);
-    }
-    if (continue_right_circle) {
-        effective_command.right = circleMoveContinuationCommand(command.right, right_cartesian_circle_move_);
     }
 
     if (isCartesianMode(effective_command.left.mode) || isCartesianMode(effective_command.right.mode)) {
@@ -3463,22 +3260,6 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             config_.cartesian_control,
             kinematics_
         );
-        // Tier-2 floor assist for streaming twists (5 mm soft margin above the plane).
-        constexpr double kFloorTwistSoftMarginM = 0.005;
-        cartesian_servo.setFloorConstraint(
-            floorConstraintActive() && !config_.safety.floor_constraint.monitor_only,
-            effectiveFloorZ(),
-            kFloorTwistSoftMarginM,
-            config_.safety.floor_constraint.tcp_offset_points
-        );
-
-        if (!isTcpTwistMode(effective_command.left.mode)) {
-            left_cartesian_twist_hold_ = CartesianTwistHoldState{};
-        }
-        if (!isTcpTwistMode(effective_command.right.mode)) {
-            right_cartesian_twist_hold_ = CartesianTwistHoldState{};
-        }
-
         // Tier-2 floor clamp for absolute Cartesian targets: TcpPoseTarget aims
         // at the clamped pose every tick; TcpLinearMove latches its path goal from
         // this command at path start, so clamping here keeps the whole path legal
@@ -3584,7 +3365,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             return target;
         }
 
-        const CartesianArmTargetResult left_cartesian_result = effective_command.left.mode == ControlMode::TcpLinearMove
+        const CartesianArmTargetResult left_cartesian_result =
+            effective_command.left.mode == ControlMode::TcpLinearMove
             ? cartesian_servo.computeLinearMoveTarget(
                 effective_command.left,
                 left_servo_state.state,
@@ -3593,36 +3375,6 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 dt_sec,
                 continue_left_linear ? 0 : command.seq,
                 &left_cartesian_servo_path_,
-                &left_cartesian_velocity_integrator_,
-                &left_servo_state.context
-            )
-            : effective_command.left.mode == ControlMode::TcpCircleTrack
-            ? rejectedCircleTrackTarget(
-                left_servo_state.state,
-                config_.cartesian_control,
-                left_prev_sent_q_deg_
-            )
-            : effective_command.left.mode == ControlMode::TcpCircleMove
-            ? cartesian_servo.computeCircleMoveTarget(
-                effective_command.left,
-                left_servo_state.state,
-                left_prev_sent_q_deg_,
-                left_cartesian_compute_run_mode,
-                dt_sec,
-                continue_left_circle ? 0 : command.seq,
-                &left_cartesian_circle_move_,
-                &left_cartesian_velocity_integrator_,
-                &left_servo_state.context
-            )
-            : (effective_command.left.mode == ControlMode::TcpTwistStand || effective_command.left.mode == ControlMode::TcpTwistLocal)
-            ? cartesian_servo.computeTwistTarget(
-                effective_command.left,
-                left_servo_state.state,
-                left_prev_sent_q_deg_,
-                left_cartesian_compute_run_mode,
-                dt_sec,
-                command.seq,
-                &left_cartesian_twist_hold_,
                 &left_cartesian_velocity_integrator_,
                 &left_servo_state.context
             )
@@ -3645,12 +3397,9 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             left_cartesian_servo_path_.lease_enforced = command.lease.enforce_lease;
             left_cartesian_servo_path_.lease_expires_time_ns = command.lease.expires_time_ns;
         }
-        if (command.left.mode == ControlMode::TcpCircleMove && left_cartesian_circle_move_.active) {
-            left_cartesian_circle_move_.lease_enforced = command.lease.enforce_lease;
-            left_cartesian_circle_move_.lease_expires_time_ns = command.lease.expires_time_ns;
-        }
 
-        const CartesianArmTargetResult right_cartesian_result = effective_command.right.mode == ControlMode::TcpLinearMove
+        const CartesianArmTargetResult right_cartesian_result =
+            effective_command.right.mode == ControlMode::TcpLinearMove
             ? cartesian_servo.computeLinearMoveTarget(
                 effective_command.right,
                 right_servo_state.state,
@@ -3659,36 +3408,6 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 dt_sec,
                 continue_right_linear ? 0 : command.seq,
                 &right_cartesian_servo_path_,
-                &right_cartesian_velocity_integrator_,
-                &right_servo_state.context
-            )
-            : effective_command.right.mode == ControlMode::TcpCircleTrack
-            ? rejectedCircleTrackTarget(
-                right_servo_state.state,
-                config_.cartesian_control,
-                right_prev_sent_q_deg_
-            )
-            : effective_command.right.mode == ControlMode::TcpCircleMove
-            ? cartesian_servo.computeCircleMoveTarget(
-                effective_command.right,
-                right_servo_state.state,
-                right_prev_sent_q_deg_,
-                right_cartesian_compute_run_mode,
-                dt_sec,
-                continue_right_circle ? 0 : command.seq,
-                &right_cartesian_circle_move_,
-                &right_cartesian_velocity_integrator_,
-                &right_servo_state.context
-            )
-            : (effective_command.right.mode == ControlMode::TcpTwistStand || effective_command.right.mode == ControlMode::TcpTwistLocal)
-            ? cartesian_servo.computeTwistTarget(
-                effective_command.right,
-                right_servo_state.state,
-                right_prev_sent_q_deg_,
-                right_cartesian_compute_run_mode,
-                dt_sec,
-                command.seq,
-                &right_cartesian_twist_hold_,
                 &right_cartesian_velocity_integrator_,
                 &right_servo_state.context
             )
@@ -3710,10 +3429,6 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         if (command.right.mode == ControlMode::TcpLinearMove && right_cartesian_servo_path_.active) {
             right_cartesian_servo_path_.lease_enforced = command.lease.enforce_lease;
             right_cartesian_servo_path_.lease_expires_time_ns = command.lease.expires_time_ns;
-        }
-        if (command.right.mode == ControlMode::TcpCircleMove && right_cartesian_circle_move_.active) {
-            right_cartesian_circle_move_.lease_enforced = command.lease.enforce_lease;
-            right_cartesian_circle_move_.lease_expires_time_ns = command.lease.expires_time_ns;
         }
 
         if (left_cartesian_result.verdict != SafetyVerdict::Ok ||
@@ -3901,32 +3616,6 @@ ServoTarget DualArmServoLoop::applySafety(
     }
 
     // Reanchor an arm's twist-SMD pose goal + Cartesian velocity integrator to the
-    // current measured (floor-clamped) pose. Shared by the floor Hold path and the
-    // self-collision hold path so that, while either constraint blocks motion, the
-    // upstream goal cannot wind into the keep-out region and lurch on release.
-    // clampPoseToFloor is a no-op when the floor constraint is off, so this anchors
-    // to the plain measured pose for the self-collision-only case.
-    const auto reanchor_twist_smd_goal = [&](ArmId arm, const RobotState& state) {
-        CartesianTwistHoldState& hold = arm == ArmId::Left
-            ? left_cartesian_twist_hold_
-            : right_cartesian_twist_hold_;
-        if (!hold.twist_smd || !state.tcp_stand || !state.has_valid_tcp_pose) {
-            return;
-        }
-        const Pose6D anchor = clampPoseToRoi(clampPoseToFloor(*state.tcp_stand));
-        hold.twist_smd_goal = anchor;
-        hold.twist_smd->reset(anchor);
-        hold.twist_smd->updateGoalFromCommand(anchor);
-        CartesianSolveTelemetry& telemetry = arm == ArmId::Left
-            ? left_last_cartesian_solve_
-            : right_last_cartesian_solve_;
-        telemetry.twist_smd_goal_clamped = true;
-        telemetry.floor_goal_clamped = true;
-        telemetry.goal_minus_measured_pos_m = math::positionDistance(*state.tcp_stand, anchor);
-        telemetry.goal_minus_measured_ori_rad =
-            math::orientationDistanceRad(*state.tcp_stand, anchor);
-    };
-
     // === Unified safety velocity projection (Stage 3) ===
     // Floor plane and dual-arm self-collision are both expressed as linear velocity
     // constraints (d(constraint)/dt = J . qdot >= -xi) on the commanded joint
@@ -3956,14 +3645,15 @@ ServoTarget DualArmServoLoop::applySafety(
                 ArmId arm, ControlMode mode, const RobotState& state,
                 const FloorArmEvaluation& eval, JointArray& target_q,
                 const JointArray& prev_sent_q) -> bool {
+                (void)mode;
+                (void)state;
                 const std::string arm_name = arm == ArmId::Left ? "left" : "right";
                 const ArmMountConfig& mount = arm == ArmId::Left ? config_.left_mount
                                                                  : config_.right_mount;
                 if (!eval.checked) {
                     // TCP FK unavailable -> fail closed (cannot build a Jacobian).
                     const std::string reason = "floor constraint: " + arm_name + " TCP FK unavailable";
-                    if (fc.fail_policy == FloorConstraintFailPolicy::FaultLatch &&
-                        !isTcpTwistMode(mode)) {
+                    if (fc.fail_policy == FloorConstraintFailPolicy::FaultLatch) {
                         latchFault(SafetyVerdict::FloorViolation, reason, left_state, right_state);
                         out = currentFaultHoldTarget();
                         combined = SafetyVerdict::FaultLatched;
@@ -3971,16 +3661,15 @@ ServoTarget DualArmServoLoop::applySafety(
                     }
                     target_q = prev_sent_q;  // hold this arm
                     resetCartesianVelocityIntegrator(arm, "floor_fk_unavailable");
-                    reanchor_twist_smd_goal(arm, state);
                     if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
                         combined = SafetyVerdict::FloorViolation;
                     }
                     return false;
                 }
-                // Hard latch (preserved): FaultLatch policy + non-twist (PTP/jog) +
-                // descending below the plane (not escaping vs the previous sent pose).
+                // Hard latch (preserved): FaultLatch policy + descending below
+                // the plane (not escaping vs the previous sent pose).
                 if (fc.fail_policy == FloorConstraintFailPolicy::FaultLatch &&
-                    !isTcpTwistMode(mode) && eval.tcp_z_m < floor_z) {
+                    eval.tcp_z_m < floor_z) {
                     const FloorArmEvaluation prev_eval = evaluateFloorArm(arm, prev_sent_q);
                     const bool escaping = prev_eval.checked && std::isfinite(prev_eval.tcp_z_m) &&
                         eval.tcp_z_m > prev_eval.tcp_z_m - kFloorEscapeEpsilonM;
@@ -4018,7 +3707,6 @@ ServoTarget DualArmServoLoop::applySafety(
                         // Jacobian unavailable -> fail closed (revert this arm).
                         target_q = prev_sent_q;
                         resetCartesianVelocityIntegrator(arm, "floor_jacobian_unavailable");
-                        reanchor_twist_smd_goal(arm, state);
                         if (combined == SafetyVerdict::Ok ||
                             combined == SafetyVerdict::JointLimitClamped) {
                             combined = SafetyVerdict::FloorViolation;
@@ -4055,13 +3743,14 @@ ServoTarget DualArmServoLoop::applySafety(
                 ArmId arm, ControlMode mode, const RobotState& state,
                 const RoiArmEvaluation& eval, JointArray& target_q,
                 const JointArray& prev_sent_q) -> bool {
+                (void)mode;
+                (void)state;
                 const std::string arm_name = arm == ArmId::Left ? "left" : "right";
                 const ArmMountConfig& mount = arm == ArmId::Left ? config_.left_mount
                                                                  : config_.right_mount;
                 const auto fail_closed_hold = [&](const char* why) {
                     target_q = prev_sent_q;  // hold this arm
                     resetCartesianVelocityIntegrator(arm, why);
-                    reanchor_twist_smd_goal(arm, state);
                     if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
                         combined = SafetyVerdict::RoiViolation;
                     }
@@ -4069,8 +3758,7 @@ ServoTarget DualArmServoLoop::applySafety(
                 if (!eval.checked) {
                     // TCP FK unavailable -> fail closed (cannot build a Jacobian).
                     const std::string reason = "roi box: " + arm_name + " TCP FK unavailable";
-                    if (rb.fail_policy == FloorConstraintFailPolicy::FaultLatch &&
-                        !isTcpTwistMode(mode)) {
+                    if (rb.fail_policy == FloorConstraintFailPolicy::FaultLatch) {
                         latchFault(SafetyVerdict::RoiViolation, reason, left_state, right_state);
                         out = currentFaultHoldTarget();
                         combined = SafetyVerdict::FaultLatched;
@@ -4079,11 +3767,11 @@ ServoTarget DualArmServoLoop::applySafety(
                     fail_closed_hold("roi_fk_unavailable");
                     return false;
                 }
-                // Hard latch (mirror of floor): FaultLatch policy + non-twist (PTP/
-                // jog) + outside the box + not escaping (outside-depth not shrinking
+                // Hard latch (mirror of floor): FaultLatch policy + outside the
+                // box + not escaping (outside-depth not shrinking
                 // vs the previous sent pose).
                 if (rb.fail_policy == FloorConstraintFailPolicy::FaultLatch &&
-                    !isTcpTwistMode(mode) && eval.violated) {
+                    eval.violated) {
                     const RoiArmEvaluation prev_eval = evaluateRoiArm(arm, prev_sent_q);
                     const bool escaping = prev_eval.checked &&
                         std::isfinite(prev_eval.outside_depth_m) &&
@@ -4162,13 +3850,14 @@ ServoTarget DualArmServoLoop::applySafety(
                 ArmId arm, ControlMode mode, const RobotState& state,
                 const ReachArmEvaluation& eval, JointArray& target_q,
                 const JointArray& prev_sent_q) -> bool {
+                (void)mode;
+                (void)state;
                 const std::string arm_name = arm == ArmId::Left ? "left" : "right";
                 const ArmMountConfig& mount = arm == ArmId::Left ? config_.left_mount
                                                                  : config_.right_mount;
                 const auto fail_closed_hold = [&](const char* why) {
                     target_q = prev_sent_q;  // hold this arm
                     resetCartesianVelocityIntegrator(arm, why);
-                    reanchor_twist_smd_goal(arm, state);
                     if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
                         combined = SafetyVerdict::RoiViolation;
                     }
@@ -4176,8 +3865,7 @@ ServoTarget DualArmServoLoop::applySafety(
                 if (!eval.checked) {
                     // TCP FK unavailable -> fail closed (cannot build a Jacobian).
                     const std::string reason = "reach shell: " + arm_name + " TCP FK unavailable";
-                    if (rc.fail_policy == FloorConstraintFailPolicy::FaultLatch &&
-                        !isTcpTwistMode(mode)) {
+                    if (rc.fail_policy == FloorConstraintFailPolicy::FaultLatch) {
                         latchFault(SafetyVerdict::RoiViolation, reason, left_state, right_state);
                         out = currentFaultHoldTarget();
                         combined = SafetyVerdict::FaultLatched;
@@ -4186,11 +3874,11 @@ ServoTarget DualArmServoLoop::applySafety(
                     fail_closed_hold("reach_fk_unavailable");
                     return false;
                 }
-                // Hard latch (mirror of floor/ROI): FaultLatch policy + non-twist
-                // (PTP/jog) + outside a shell + not escaping (outside-depth not
-                // shrinking vs the previous sent pose).
+                // Hard latch (mirror of floor/ROI): FaultLatch policy + outside
+                // a shell + not escaping (outside-depth not shrinking vs the
+                // previous sent pose).
                 if (rc.fail_policy == FloorConstraintFailPolicy::FaultLatch &&
-                    !isTcpTwistMode(mode) && eval.violated) {
+                    eval.violated) {
                     const ReachArmEvaluation prev_eval = evaluateReachArm(arm, prev_sent_q);
                     const bool escaping = prev_eval.checked &&
                         std::isfinite(prev_eval.outside_depth_m) &&
@@ -4264,13 +3952,14 @@ ServoTarget DualArmServoLoop::applySafety(
                 ArmId arm, ControlMode mode, const RobotState& state,
                 const UserFloorArmEvaluation& eval, JointArray& target_q,
                 const JointArray& prev_sent_q) -> bool {
+                (void)mode;
+                (void)state;
                 const std::string arm_name = arm == ArmId::Left ? "left" : "right";
                 const ArmMountConfig& mount = arm == ArmId::Left ? config_.left_mount
                                                                  : config_.right_mount;
                 const auto fail_closed_hold = [&](const char* why) {
                     target_q = prev_sent_q;  // hold this arm
                     resetCartesianVelocityIntegrator(arm, why);
-                    reanchor_twist_smd_goal(arm, state);
                     if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
                         combined = SafetyVerdict::FloorViolation;
                     }
@@ -4278,8 +3967,7 @@ ServoTarget DualArmServoLoop::applySafety(
                 if (!eval.checked) {
                     // TCP FK unavailable -> fail closed (cannot build a Jacobian).
                     const std::string reason = "user floor: " + arm_name + " TCP FK unavailable";
-                    if (uf.fail_policy == FloorConstraintFailPolicy::FaultLatch &&
-                        !isTcpTwistMode(mode)) {
+                    if (uf.fail_policy == FloorConstraintFailPolicy::FaultLatch) {
                         latchFault(SafetyVerdict::FloorViolation, reason, left_state, right_state);
                         out = currentFaultHoldTarget();
                         combined = SafetyVerdict::FaultLatched;
@@ -4288,11 +3976,11 @@ ServoTarget DualArmServoLoop::applySafety(
                     fail_closed_hold("user_floor_fk_unavailable");
                     return false;
                 }
-                // Hard latch (mirror of floor): FaultLatch policy + non-twist (PTP/jog) +
-                // below the plane (signed_dist < 0) + not escaping (signed distance not
+                // Hard latch (mirror of floor): FaultLatch policy + below the
+                // plane (signed_dist < 0) + not escaping (signed distance not
                 // increasing vs the previous sent pose).
                 if (uf.fail_policy == FloorConstraintFailPolicy::FaultLatch &&
-                    !isTcpTwistMode(mode) && eval.signed_dist_m < 0.0) {
+                    eval.signed_dist_m < 0.0) {
                     const UserFloorArmEvaluation prev_eval = evaluateUserFloorArm(arm, prev_sent_q);
                     const bool escaping = prev_eval.checked && std::isfinite(prev_eval.signed_dist_m) &&
                         eval.signed_dist_m > prev_eval.signed_dist_m - kFloorEscapeEpsilonM;
@@ -4456,8 +4144,6 @@ ServoTarget DualArmServoLoop::applySafety(
                     out.right_q_target_deg = right_prev_sent_q_deg_;
                     resetCartesianVelocityIntegrator(ArmId::Left, "self_collision_stale");
                     resetCartesianVelocityIntegrator(ArmId::Right, "self_collision_stale");
-                    reanchor_twist_smd_goal(ArmId::Left, left_state);
-                    reanchor_twist_smd_goal(ArmId::Right, right_state);
                     self_collision_hold = true;  // skip the combined solve (qdot already 0)
                     if (combined == SafetyVerdict::Ok ||
                         combined == SafetyVerdict::JointLimitClamped) {
@@ -4493,11 +4179,9 @@ ServoTarget DualArmServoLoop::applySafety(
         const bool right_blocked = proj.right_correction_deg_s > kReanchorDegPerSec;
         if (left_blocked) {
             resetCartesianVelocityIntegrator(ArmId::Left, "safety_projection_block");
-            reanchor_twist_smd_goal(ArmId::Left, left_state);
         }
         if (right_blocked) {
             resetCartesianVelocityIntegrator(ArmId::Right, "safety_projection_block");
-            reanchor_twist_smd_goal(ArmId::Right, right_state);
         }
         if (left_blocked || right_blocked) {
             if (floor_engaged) ++floor_clamp_count_;
@@ -5213,14 +4897,21 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
 ) {
     (void)left_state;
     (void)right_state;
-    const bool is_init = command.left.mode == ControlMode::InitMotion ||
-                         command.right.mode == ControlMode::InitMotion;
+    const bool left_init =
+        command.left.mode == ControlMode::JointTarget &&
+        command.left.joint_target_profile == JointTargetProfile::InitMotion;
+    const bool right_init =
+        command.right.mode == ControlMode::JointTarget &&
+        command.right.joint_target_profile == JointTargetProfile::InitMotion;
+    const bool is_init = left_init || right_init;
 
-    // Rewrite both arms to an absolute dual JointTarget (the downstream pipeline only
-    // ever sees JointTarget/Hold — never InitMotion).
+    // Rewrite both arms to absolute direct JointTargets; the downstream pipeline
+    // never sees the init_motion profile marker.
     const auto as_joint_target = [](DualArmCommand& c, const JointArray& l, const JointArray& r) {
         c.left.mode = ControlMode::JointTarget;
         c.right.mode = ControlMode::JointTarget;
+        c.left.joint_target_profile = JointTargetProfile::Direct;
+        c.right.joint_target_profile = JointTargetProfile::Direct;
         c.left.q_target_deg = l;
         c.right.q_target_deg = r;
         c.left.has_joint_target = true;
@@ -5241,10 +4932,9 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
     // A plan that has begun (planning or streaming) is a committed go-to-init move.
     const bool sequence_active = ex.status == InitMotionStatus::Planning ||
                                  ex.status == InitMotionStatus::Executing;
-    // The deadman synthesises a seq==0 Hold/Hold once the one-shot InitMotion command
-    // ages out of its freshness window. That is NOT an operator cancel — keep driving
-    // the in-flight move to completion (the per-tick safety gate stays active). An
-    // EXPLICIT command (real seq: Hold/Disarm/E-stop/new motion) does cancel.
+    // The deadman synthesises a seq==0 Hold/Hold once the one-shot profile command
+    // ages out of its freshness window. That is NOT an operator cancel: keep driving
+    // the in-flight move to completion. An EXPLICIT command cancels.
     const bool deadman_hold = isSyntheticHoldCommand(command);
 
     if (!is_init) {
@@ -5253,8 +4943,8 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             // WITHOUT recomputing the target (command carries no init pose now) and
             // WITHOUT relaunching. exec.target/waypoints already hold the committed move.
         } else {
-            // Explicit non-InitMotion command, or no active sequence -> cancel/reset so
-            // the next InitMotion plans fresh. A discarded in-flight future detaches.
+            // Explicit non-profile command, or no active sequence -> cancel/reset so
+            // the next init_motion profile plans fresh. A discarded in-flight future detaches.
             if (ex.status != InitMotionStatus::Idle) {
                 // Diagnostic: a committed go-to-init move was interrupted before it
                 // reached the goal. This is the only silent way the arm stops part-way
@@ -5262,7 +4952,7 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                 // (a real command with seq!=0 from a competing source, or a deadman hold
                 // that failed the synthetic-hold test) so the cause is unambiguous.
                 if (sequence_active) {
-                    std::cerr << "[WARN] InitMotion: committed move CANCELLED mid-"
+                    std::cerr << "[WARN] JointTarget init_motion: committed move CANCELLED mid-"
                               << (ex.status == InitMotionStatus::Planning ? "planning"
                                                                           : "execution")
                               << " by a non-init command (seq=" << command.seq
@@ -5278,20 +4968,24 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         }
     }
 
-    // Planner disabled -> fall back to a direct JointTarget to the init pose (the
-    // legacy behavior; the reactive barrier + floor still guard each tick).
+    // Planner disabled -> fall back to a direct JointTarget to the requested pose;
+    // the reactive barrier + floor still guard each tick.
     if (is_init && !init_motion_planner_) {
-        as_joint_target(command, command.left.q_target_deg, command.right.q_target_deg);
+        as_joint_target(
+            command,
+            left_init ? command.left.q_target_deg : left_prev_sent_q_deg_,
+            right_init ? command.right.q_target_deg : right_prev_sent_q_deg_
+        );
         return command;
     }
 
     // Launch (or relaunch on a changed target) a plan from the CURRENT sent pose. Only
-    // an EXPLICIT InitMotion command (re)launches; while Planning we never relaunch
+    // an EXPLICIT init_motion profile command (re)launches; while Planning we never relaunch
     // (let the in-flight plan resolve first), and a deadman-hold continuation never
     // launches (it has no fresh target).
     if (is_init) {
-        const JointArray target_left = command.left.q_target_deg;
-        const JointArray target_right = command.right.q_target_deg;
+        const JointArray target_left = left_init ? command.left.q_target_deg : left_prev_sent_q_deg_;
+        const JointArray target_right = right_init ? command.right.q_target_deg : right_prev_sent_q_deg_;
         const bool new_target = !ex.has_target ||
             !reached(target_left, ex.target_left, 1e-6) ||
             !reached(target_right, ex.target_right, 1e-6);
@@ -5311,7 +5005,7 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                 [planner, start_left, start_right, target_left, target_right]() {
                     return planner->plan(start_left, start_right, target_left, target_right);
                 });
-            std::cerr << "[INFO] InitMotion: planning collision-free path from current pose\n";
+            std::cerr << "[INFO] JointTarget init_motion: planning collision-free path from current pose\n";
         };
         if (ex.status == InitMotionStatus::Idle ||
             ((ex.status == InitMotionStatus::Executing ||
@@ -5340,7 +5034,7 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         if (absolute_timeout || stalled) {
             ex.status = InitMotionStatus::Failed;
             ex.message = stalled ? "execution stalled (no progress)" : "execution timeout";
-            std::cerr << "[WARN] InitMotion: " << ex.message
+            std::cerr << "[WARN] JointTarget init_motion: " << ex.message
                       << " (age=" << age_s << "s, since_progress=" << since_progress_s
                       << "s, wp=" << ex.index << "/" << ex.waypoints.size()
                       << "); holding (fail-closed)\n";
@@ -5361,7 +5055,7 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             ex.best_dist_deg = std::numeric_limits<double>::infinity();
             ex.last_progress_ns = nowSteadyNs();
             ex.last_exec_log_ns = 0;
-            std::cerr << "[INFO] InitMotion: plan found ("
+            std::cerr << "[INFO] JointTarget init_motion: plan found ("
                       << ex.waypoints.size() << " waypoints, "
                       << result.escape_waypoints << " escape, "
                       << result.iterations << " iters, "
@@ -5369,7 +5063,7 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         } else {
             ex.status = InitMotionStatus::Failed;
             ex.message = result.message;
-            std::cerr << "[WARN] InitMotion: planning failed (" << result.message
+            std::cerr << "[WARN] JointTarget init_motion: planning failed (" << result.message
                       << "); holding (fail-closed)\n";
         }
     }
@@ -5399,7 +5093,7 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                 // is visible in the log.
                 if (ex.last_exec_log_ns == 0 || (now_ns - ex.last_exec_log_ns) > 1000000000ULL) {
                     ex.last_exec_log_ns = now_ns;
-                    std::cerr << "[INFO] InitMotion: streaming wp " << ex.index << "/"
+                    std::cerr << "[INFO] JointTarget init_motion: streaming wp " << ex.index << "/"
                               << ex.waypoints.size() << " (escape=" << ex.escape_waypoints
                               << ", dist_to_goal=" << dist << " deg, best=" << ex.best_dist_deg
                               << " deg)\n";
@@ -5408,7 +5102,7 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             if (done) {
                 ex.status = InitMotionStatus::Done;
                 ex.message = "done";
-                std::cerr << "[INFO] InitMotion: reached init pose\n";
+                std::cerr << "[INFO] JointTarget init_motion: reached init pose\n";
             }
             as_joint_target(command, wp.first, wp.second);
             break;

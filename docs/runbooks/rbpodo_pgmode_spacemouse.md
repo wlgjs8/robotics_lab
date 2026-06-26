@@ -123,7 +123,7 @@ In the Status tab, confirm the compact pgmode line contains the expected
 controller-simulation boundary:
 
 ```text
-pgmode_sim: backend=rbpodo run_mode=real operation_mode=simulation physical_motion_expected=false cartesian_available=true policy_runner_lease=active source=policy_runner command=TcpTwistLocal selected_tcp=tcp_ref_stand
+pgmode_sim: backend=rbpodo run_mode=real operation_mode=simulation physical_motion_expected=false cartesian_available=true policy_runner_lease=active source=policy_runner command=TcpPoseTarget selected_tcp=tcp_ref_stand
 ```
 
 If any required field is missing, the line reports
@@ -156,12 +156,13 @@ tools/rbpodo_pgmode_spacemouse.sh hdf5-record \
    `tcp_tracking_source_recommendation=reference_for_controller_simulation` or
    an equivalent `tcp_ref_stand` recommendation.
 
-5. Verify deadman release zeros the command. While both SpaceMouse deadmen are
-   pressed, the policy path may send per-arm `TcpTwistLocal`. Release either
-   deadman and confirm the next command for that arm is zero twist. If a
-   SpaceMouse sample goes stale past `sample_hold_timeout_sec`, the source also
-   emits zero twist. When both devices are armed but centered, the dual source
-   may emit per-arm `Hold`; this is the documented no-motion centered behavior.
+5. Verify deadman release stops motion intent. While both SpaceMouse deadmen are
+   pressed, the policy path may send per-arm `TcpPoseTarget`. Release either
+   deadman and confirm the source emits `Hold` or no motion intent according to
+   the current lease/hold policy. If a SpaceMouse sample goes stale past
+   `sample_stale_timeout_sec`, the source also stops target integration and
+   emits `Hold`. When both devices are armed but centered, the dual source may
+   emit per-arm `Hold`; this is the documented no-motion centered behavior.
 
 ## Required Evidence
 
@@ -173,7 +174,7 @@ Before trusting a run, inspect live state or recorder output for:
 - per-arm `controller_simulation_cartesian_enabled=true`
 - per-arm `controller_simulation_streaming_cartesian_available=true`
 - per-arm `controller_simulation_cartesian_enabled_for_current_command=true`
-  while a `TcpTwistLocal` command is active; it may be `false` during startup
+  while a `TcpPoseTarget` command is active; it may be `false` during startup
   `Hold`
 - per-arm `physical_motion_expected=false`
 - command-source lease active for `policy_runner`

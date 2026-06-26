@@ -744,36 +744,24 @@ def _load_robotics_lab_episode(path: Path, handle: h5py.File) -> FlowEpisodeInde
     camera_paths = _camera_paths(handle, "observations/images") if "images" in obs else {}
     length = min([length] + _camera_lengths(handle, camera_paths)) if camera_paths else length
     action_group = handle["action"] if "action" in handle else None
-    left_delta = right_delta = None
     left_target_pose = right_target_pose = None
     left_target_grip = right_target_grip = None
     action_kind = "target_pose"
     if action_group is not None:
-        left_delta = _first_dataset(
+        left_target_pose = _first_dataset(
             action_group,
             length,
-            "tcp_delta_stand_left",
-            "tcp_delta_left",
-            "tcp_twist_stand_left",
-            "tcp_twist_local_left",
-            "tcp_twist_left",
+            "tcp_target_stand_left",
+            "target_pose_left",
+            "tcp_pose_target_left",
         )
-        right_delta = _first_dataset(
+        right_target_pose = _first_dataset(
             action_group,
             length,
-            "tcp_delta_stand_right",
-            "tcp_delta_right",
-            "tcp_twist_stand_right",
-            "tcp_twist_local_right",
-            "tcp_twist_right",
+            "tcp_target_stand_right",
+            "target_pose_right",
+            "tcp_pose_target_right",
         )
-        if left_delta is not None or right_delta is not None:
-            action_kind = "delta"
-            left_delta = _ensure_delta(left_delta, length)
-            right_delta = _ensure_delta(right_delta, length)
-        else:
-            left_target_pose = _first_dataset(action_group, length, "target_pose_left", "tcp_pose_target_left")
-            right_target_pose = _first_dataset(action_group, length, "target_pose_right", "tcp_pose_target_right")
         left_target_grip = _optional_vector(action_group, length, "gripper_left", "left_gripper")
         right_target_grip = _optional_vector(action_group, length, "gripper_right", "right_gripper")
     if left_target_pose is None and action_kind == "target_pose":
@@ -802,8 +790,8 @@ def _load_robotics_lab_episode(path: Path, handle: h5py.File) -> FlowEpisodeInde
         action_kind=action_kind,
         action_left_pose=None if left_target_pose is None else left_target_pose[:length],
         action_right_pose=None if right_target_pose is None else right_target_pose[:length],
-        action_left_delta=None if left_delta is None else left_delta[:length],
-        action_right_delta=None if right_delta is None else right_delta[:length],
+        action_left_delta=None,
+        action_right_delta=None,
         action_left_gripper=left_target_grip[:length] if left_target_grip is not None else left_gripper[:length],
         action_right_gripper=right_target_grip[:length] if right_target_grip is not None else right_gripper[:length],
     )

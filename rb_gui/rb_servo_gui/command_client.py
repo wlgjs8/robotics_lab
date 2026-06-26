@@ -24,9 +24,7 @@ class CommandClient:
         self._seq = time.monotonic_ns()
         self.sent_packets: list[Mapping[str, Any]] = []
         # When True, send() rides an already-held lease instead of bracketing
-        # every command with Acquire/Release. Use for streaming controls
-        # (twist/circle/joint-vel keep-alive) so the lease is not torn down and
-        # re-taken between every packet. Toggled via acquire_lease/release_lease.
+        # every command with Acquire/Release.
         self.hold_lease = False
 
     def next_seq(self) -> int:
@@ -92,8 +90,8 @@ class CommandClient:
             "mode": "JointTarget",
             "timeout_sec": timeout_sec,
             "coupled_timeout": True,
-            "left": {"q_target_deg": [float(v) for v in left_q]},
-            "right": {"q_target_deg": [float(v) for v in right_q]},
+            "left": {"mode": "JointTarget", "q_target_deg": [float(v) for v in left_q]},
+            "right": {"mode": "JointTarget", "q_target_deg": [float(v) for v in right_q]},
         })
 
     def build_init_motion(
@@ -103,20 +101,26 @@ class CommandClient:
         *,
         timeout_sec: float = 0.2,
     ) -> dict[str, Any]:
-        # Collision-free InitMotion: same q_target_deg payload as a JointTarget, but
-        # mode "InitMotion" tells the server to plan a collision-free + floor-safe
-        # joint path to the init pose and stream it. The server falls back to a direct
-        # JointTarget if the planner is disabled. The long timeout must cover plan +
-        # execution (the single command stays fresh for the whole move).
+        # Collision-free init plan: a JointTarget profile asks the server to plan
+        # and stream a collision-free + floor-safe joint path to the init pose.
+        # The long timeout must cover plan + execution.
         if len(left_q) != 6 or len(right_q) != 6:
             raise ValueError("joint targets must have 6 values per arm")
         return self._with_source({
             "seq": self.next_seq(),
-            "mode": "InitMotion",
+            "mode": "JointTarget",
             "timeout_sec": timeout_sec,
             "coupled_timeout": True,
-            "left": {"q_target_deg": [float(v) for v in left_q]},
-            "right": {"q_target_deg": [float(v) for v in right_q]},
+            "left": {
+                "mode": "JointTarget",
+                "q_target_deg": [float(v) for v in left_q],
+                "joint_target_profile": "init_motion",
+            },
+            "right": {
+                "mode": "JointTarget",
+                "q_target_deg": [float(v) for v in right_q],
+                "joint_target_profile": "init_motion",
+            },
         })
 
     def build_tcp_pose_target(
@@ -201,9 +205,8 @@ class CommandClient:
         # async collision-free decision to complete AND hand the path to the Cartesian
         # executor (whose own finite-path continuation then carries it across staleness).
         # The prior fixed 0.2 s expired DURING the decision, so on a slow decision the
-        # executor only ever saw a synthetic Hold and the MoveL never started (the arm
-        # did not move; every click just re-decided Straight). Mirrors the circle's
-        # timeout pattern. Hold/E-stop still cancel; the server execution_timeout bounds runaway.
+        # executor only ever saw a synthetic Hold and the MoveL never started.
+        # Hold/E-stop still cancel; the server execution_timeout bounds runaway.
         if timeout_sec is None:
             base = parsed_duration if parsed_duration is not None else 0.0
             timeout_sec = max(2.0, base + 0.5)
@@ -242,177 +245,10 @@ class CommandClient:
             packet["right"] = arm_payload(right_pose, right_quaternion_xyzw, "right TCP linear target")
         return self._with_source(packet)
 
-    def build_tcp_delta_stand(
-        self,
-        *,
-        left_delta: tuple[float, ...] | None = None,
-        right_delta: tuple[float, ...] | None = None,
-        timeout_sec: float = 0.2,
-    ) -> dict[str, Any]:
-        if left_delta is None and right_delta is None:
-            raise ValueError("at least one TCP stand delta is required")
-        packet: dict[str, Any] = {
-            "schema_version": 1,
-            "seq": self.next_seq(),
-            "mode": "TcpDeltaStand" if left_delta is not None and right_delta is not None else "Hold",
-            "host_time_ns": time.monotonic_ns(),
-            "timeout_sec": timeout_sec,
-            "coupled_timeout": True,
-            "left": {},
-            "right": {},
-        }
-        if left_delta is not None:
-            packet["left"] = {"mode": "TcpDeltaStand", "tcp_delta_stand": self._finite_six(left_delta, "left TCP stand delta")}
-        if right_delta is not None:
-            packet["right"] = {"mode": "TcpDeltaStand", "tcp_delta_stand": self._finite_six(right_delta, "right TCP stand delta")}
-        return self._with_source(packet)
-
-    def build_tcp_delta_local(
-        self,
-        *,
-        left_delta: tuple[float, ...] | None = None,
-        right_delta: tuple[float, ...] | None = None,
-        timeout_sec: float = 0.2,
-    ) -> dict[str, Any]:
-        if left_delta is None and right_delta is None:
-            raise ValueError("at least one TCP local delta is required")
-        packet: dict[str, Any] = {
-            "schema_version": 1,
-            "seq": self.next_seq(),
-            "mode": "TcpDeltaLocal" if left_delta is not None and right_delta is not None else "Hold",
-            "host_time_ns": time.monotonic_ns(),
-            "timeout_sec": timeout_sec,
-            "coupled_timeout": True,
-            "left": {},
-            "right": {},
-        }
-        if left_delta is not None:
-            packet["left"] = {"mode": "TcpDeltaLocal", "tcp_delta_local": self._finite_six(left_delta, "left TCP local delta")}
-        if right_delta is not None:
-            packet["right"] = {"mode": "TcpDeltaLocal", "tcp_delta_local": self._finite_six(right_delta, "right TCP local delta")}
-        return self._with_source(packet)
-
     def _with_source(self, packet: dict[str, Any]) -> dict[str, Any]:
         packet["source_id"] = self.source_id
         packet["session_id"] = self.session_id
         return packet
-
-    def build_tcp_twist_local(
-        self,
-        *,
-        left_twist: tuple[float, ...] | None = None,
-        right_twist: tuple[float, ...] | None = None,
-        timeout_sec: float = 0.2,
-    ) -> dict[str, Any]:
-        if left_twist is None and right_twist is None:
-            raise ValueError("at least one TCP local twist is required")
-        packet: dict[str, Any] = {
-            "schema_version": 1,
-            "seq": self.next_seq(),
-            "mode": "TcpTwistLocal" if left_twist is not None and right_twist is not None else "Hold",
-            "host_time_ns": time.monotonic_ns(),
-            "timeout_sec": timeout_sec,
-            "coupled_timeout": True,
-            "left": {},
-            "right": {},
-        }
-        if left_twist is not None:
-            packet["left"] = {"mode": "TcpTwistLocal", "tcp_twist_local": self._finite_six(left_twist, "left TCP local twist")}
-        if right_twist is not None:
-            packet["right"] = {"mode": "TcpTwistLocal", "tcp_twist_local": self._finite_six(right_twist, "right TCP local twist")}
-        return self._with_source(packet)
-
-    def build_tcp_twist_stand(
-        self,
-        *,
-        left_twist: tuple[float, ...] | None = None,
-        right_twist: tuple[float, ...] | None = None,
-        timeout_sec: float = 0.2,
-    ) -> dict[str, Any]:
-        if left_twist is None and right_twist is None:
-            raise ValueError("at least one TCP stand twist is required")
-        packet: dict[str, Any] = {
-            "schema_version": 1,
-            "seq": self.next_seq(),
-            "mode": "TcpTwistStand" if left_twist is not None and right_twist is not None else "Hold",
-            "host_time_ns": time.monotonic_ns(),
-            "timeout_sec": timeout_sec,
-            "coupled_timeout": True,
-            "left": {},
-            "right": {},
-        }
-        if left_twist is not None:
-            packet["left"] = {"mode": "TcpTwistStand", "tcp_twist_stand": self._finite_six(left_twist, "left TCP stand twist")}
-        if right_twist is not None:
-            packet["right"] = {"mode": "TcpTwistStand", "tcp_twist_stand": self._finite_six(right_twist, "right TCP stand twist")}
-        return self._with_source(packet)
-
-    def build_joint_velocity(
-        self,
-        *,
-        left_velocity: tuple[float, ...] | None = None,
-        right_velocity: tuple[float, ...] | None = None,
-        timeout_sec: float = 0.2,
-    ) -> dict[str, Any]:
-        if left_velocity is None and right_velocity is None:
-            raise ValueError("at least one joint velocity is required")
-        packet: dict[str, Any] = {
-            "schema_version": 1,
-            "seq": self.next_seq(),
-            "mode": "JointVelocity" if left_velocity is not None and right_velocity is not None else "Hold",
-            "host_time_ns": time.monotonic_ns(),
-            "timeout_sec": timeout_sec,
-            "coupled_timeout": True,
-            "left": {},
-            "right": {},
-        }
-        if left_velocity is not None:
-            packet["left"] = {"mode": "JointVelocity", "dq_target_deg_s": self._finite_six(left_velocity, "left joint velocity")}
-        if right_velocity is not None:
-            packet["right"] = {"mode": "JointVelocity", "dq_target_deg_s": self._finite_six(right_velocity, "right joint velocity")}
-        return self._with_source(packet)
-
-    def build_tcp_circle_move(
-        self,
-        *,
-        left: bool = True,
-        right: bool = True,
-        diameter_m: float = 0.15,
-        period_sec: float = 4.0,
-        plane: str = "xy",
-        repeat: int = 50,
-    ) -> dict[str, Any]:
-        # Full server-side circle payload. The server traces the whole circle
-        # autonomously over period*repeat once it receives a command; the caller
-        # must re-send THIS SAME packet (same seq) to keep it fresh — sending a
-        # new seq resets the circle to the current TCP. timeout_sec covers the
-        # full duration so the circle stays fresh between keep-alive sends.
-        if not left and not right:
-            raise ValueError("at least one arm is required for TcpCircleMove")
-        duration_sec = float(period_sec) * int(repeat)
-        arm = {
-            "mode": "TcpCircleMove",
-            "command_family": "server_circle",
-            "plane": str(plane),
-            "diameter_m": float(diameter_m),
-            "period_sec": float(period_sec),
-            "repeat": int(repeat),
-            "phase_advance_sec": 0.0,
-            "center_mode": "start_on_circle",
-            "orientation_mode": "constant",
-            "frame": "stand",
-        }
-        packet: dict[str, Any] = {
-            "schema_version": 1,
-            "seq": self.next_seq(),
-            "mode": "TcpCircleMove" if left and right else "Hold",
-            "host_time_ns": time.monotonic_ns(),
-            "timeout_sec": max(0.2, duration_sec + 0.2),
-            "coupled_timeout": True,
-            "left": dict(arm) if left else {"mode": "Hold"},
-            "right": dict(arm) if right else {"mode": "Hold"},
-        }
-        return self._with_source(packet)
 
     def build_freedrive(
         self,
@@ -552,19 +388,8 @@ class CommandClient:
         # command_source_lease_required whenever no lease is active.
         "ResetFault",
         "JointTarget",
-        # InitMotion requires the lease server-side (commandRequiresLease); it rides
-        # the same one-shot acquire/command/release bracket as JointTarget, and the
-        # buffered command stays fresh (timeout_sec) for the whole plan + execution.
-        "InitMotion",
-        "JointVelocity",
         "TcpPoseTarget",
         "TcpLinearMove",
-        "TcpCircleMove",
-        "TcpCircleTrack",
-        "TcpDeltaStand",
-        "TcpDeltaLocal",
-        "TcpTwistStand",
-        "TcpTwistLocal",
         # Per-arm direct teaching (free-drive) toggles servo authority and
         # requires the lease server-side (commandRequiresLease), so it brackets
         # like ResetFault/ArmMotion.

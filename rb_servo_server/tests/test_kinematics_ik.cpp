@@ -145,10 +145,7 @@ std::string validIkYaml(const std::string& urdf_path) {
         "  warn_ik_duration_us: 2500\n"
         "  fail_ik_duration_us: 4500\n"
         "  path_kp: 7.0\n"
-        "  twist_orientation_hold_kp: 8.0\n"
         "  velocity_damping: 0.02\n"
-        "  max_twist_linear_m_s: 0.04\n"
-        "  max_twist_angular_rad_s: 0.25\n"
         "  max_linear_move_speed_m_s: 0.06\n"
         "  max_angular_move_speed_rad_s: 0.35\n"
         "  linear_move:\n"
@@ -197,23 +194,6 @@ public:
         return result;
     }
 
-    rb_servo::CartesianVelocityResult solveCartesianVelocity(
-        rb_servo::ArmId arm,
-        const rb_servo::JointArray& q_deg,
-        const rb_servo::ArmMountConfig& mount,
-        const rb_servo::Vec6& tcp_twist_local,
-        double damping
-    ) const override {
-        (void)arm;
-        (void)q_deg;
-        (void)mount;
-        (void)tcp_twist_local;
-        (void)damping;
-        rb_servo::CartesianVelocityResult result;
-        result.success = true;
-        return result;
-    }
-
 private:
     double duration_us_;
 };
@@ -237,10 +217,7 @@ bool testIkConfigParsing() {
     RB_CHECK(std::fabs(cfg.cartesian_control.warn_ik_duration_us - 2500.0) < 1e-12);
     RB_CHECK(std::fabs(cfg.cartesian_control.fail_ik_duration_us - 4500.0) < 1e-12);
     RB_CHECK(std::fabs(cfg.cartesian_control.path_kp - 7.0) < 1e-12);
-    RB_CHECK(std::fabs(cfg.cartesian_control.twist_orientation_hold_kp - 8.0) < 1e-12);
     RB_CHECK(std::fabs(cfg.cartesian_control.velocity_damping - 0.02) < 1e-12);
-    RB_CHECK(std::fabs(cfg.cartesian_control.max_twist_linear_m_s - 0.04) < 1e-12);
-    RB_CHECK(std::fabs(cfg.cartesian_control.max_twist_angular_rad_s - 0.25) < 1e-12);
     RB_CHECK(std::fabs(cfg.cartesian_control.max_linear_move_speed_m_s - 0.06) < 1e-12);
     RB_CHECK(std::fabs(cfg.cartesian_control.max_angular_move_speed_rad_s - 0.35) < 1e-12);
     RB_CHECK(std::fabs(cfg.cartesian_control.linear_move.constant_orientation_tolerance_rad - 0.004) < 1e-12);
@@ -278,7 +255,7 @@ bool testIkConfigParsing() {
         "bad-cart-limit",
         "schema: robotics_lab.rb_servo_server.v1\n"
         "cartesian_control:\n"
-        "  max_twist_linear_m_s: -0.01\n"
+        "  max_linear_move_speed_m_s: -0.01\n"
     );
     const bool bad_cartesian_limit_rejected = loadRejects(bad_cartesian_limit_path);
     ::unlink(bad_cartesian_limit_path.c_str());

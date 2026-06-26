@@ -93,7 +93,7 @@ class GeometrySafetyTest(unittest.TestCase):
     def test_joint_only_action_can_run_without_geometry_file(self):
         missing = load_geometry_status(Path(__file__).resolve().parent / "missing_calibration.yaml")
         gate = SafetyGate("simulation", SafetyConfig(), stale_timeout_sec=0.5, geometry_status=missing)
-        intent = CommandIntent.joint_velocity(left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0])
+        intent = CommandIntent.joint_target(left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0])
 
         decision = gate.evaluate(sample_state(), intent, ActionRequirements(), time.monotonic())
 
@@ -106,7 +106,7 @@ class GeometrySafetyTest(unittest.TestCase):
             stale_timeout_sec=0.5,
             camera_readiness=CameraReadiness(available=False),
         )
-        intent = CommandIntent.joint_velocity(left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0])
+        intent = CommandIntent.joint_target(left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0])
 
         decision = gate.evaluate(sample_state(), intent, ActionRequirements(), time.monotonic())
 

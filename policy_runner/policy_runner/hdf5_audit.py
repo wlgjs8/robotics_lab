@@ -397,22 +397,6 @@ def _arm_mask_for_format(
 def _action_kind_for_format(handle: h5py.File, format_name: str) -> str:
     if format_name in {"pika_umi_single_arm", "pika_umi_bimanual"}:
         return "target_pose"
-    if format_name == "robotics_lab_dual_arm" and "action" in handle:
-        action = handle["action"]
-        for name in (
-            "tcp_delta_stand_left",
-            "tcp_delta_left",
-            "tcp_twist_stand_left",
-            "tcp_twist_local_left",
-            "tcp_twist_left",
-            "tcp_delta_stand_right",
-            "tcp_delta_right",
-            "tcp_twist_stand_right",
-            "tcp_twist_local_right",
-            "tcp_twist_right",
-        ):
-            if name in action:
-                return "delta"
     return "target_pose"
 
 
@@ -589,16 +573,6 @@ def _check_action_pose_pair(
         )
 
 
-def _has_nonzero_action_delta(action: h5py.Group, side: str, length: int) -> bool:
-    for name in (f"tcp_delta_stand_{side}", f"tcp_delta_{side}"):
-        if name not in action:
-            continue
-        values = np.asarray(action[name], dtype=np.float32)[:length]
-        if values.ndim == 2 and values.shape[1] >= 3 and bool(np.any(np.abs(values[:, :3]) > 1e-9)):
-            return True
-    return False
-
-
 def _action_step_distribution_for_format(
     handle: h5py.File,
     format_name: str,
@@ -609,34 +583,12 @@ def _action_step_distribution_for_format(
     sides = ("left", "right") if format_name in {"pika_umi_bimanual", "robotics_lab_dual_arm"} else (single_arm_side,)
     out: dict[str, Any] = {}
     for side in sides:
-        delta = _action_delta_for_format(handle, format_name, side, length)
-        if delta is not None:
-            out[side] = {
-                "encoding": "per_step_delta_stand",
-                **_action_step_stats(delta, timestamps, per_step_delta=True),
-            }
-            continue
         pose = _action_pose_for_format(handle, format_name, side, length, single_arm_side)
         out[side] = {
             "encoding": "target_pose",
             **_action_step_stats(pose, timestamps, per_step_delta=False),
         }
     return out
-
-
-def _action_delta_for_format(
-    handle: h5py.File,
-    format_name: str,
-    side: str,
-    length: int,
-) -> np.ndarray | None:
-    if format_name != "robotics_lab_dual_arm" or "action" not in handle:
-        return None
-    action = handle["action"]
-    for name in (f"tcp_delta_stand_{side}", f"tcp_delta_{side}"):
-        if name in action:
-            return np.asarray(action[name], dtype=np.float32)[:length]
-    return None
 
 
 def _action_pose_for_format(
@@ -656,10 +608,16 @@ def _action_pose_for_format(
             return action[:, :7] if action.ndim == 2 and action.shape[1] >= 7 else None
     if format_name == "robotics_lab_dual_arm" and "action" in handle:
         action = handle["action"]
-        for name in (f"target_pose_{side}", f"tcp_pose_target_{side}"):
+        for name in (f"tcp_target_stand_{side}", f"target_pose_{side}", f"tcp_pose_target_{side}"):
             if name in action:
                 values = np.asarray(action[name], dtype=np.float32)[:length]
-                return values[:, :7] if values.ndim == 2 and values.shape[1] >= 7 else None
+                if values.ndim == 2 and values.shape[1] >= 7:
+                    return values[:, :7]
+                if values.ndim == 2 and values.shape[1] >= 6:
+                    padded = np.zeros((values.shape[0], 7), dtype=np.float32)
+                    padded[:, :6] = values[:, :6]
+                    padded[:, 6] = 1.0
+                    return padded
     return None
 
 

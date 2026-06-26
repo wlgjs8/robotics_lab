@@ -36,7 +36,7 @@ The policy process should not know whether the backend is mock or real.
 ## Current active command path
 
 ```text
-JointTarget / JointVelocity / Hold
+JointTarget / Hold
         ↓
 TrajectoryFilter
         ↓
@@ -48,7 +48,7 @@ sendServoJ
 ## Future Cartesian path
 
 ```text
-TcpDeltaStand / TcpDeltaLocal / TcpPoseTarget
+TcpPoseTarget / TcpLinearMove
         ↓
 CartesianController
         ↓

@@ -31,14 +31,20 @@ bool nearlyEqualJointArray(const JointArray& a, const JointArray& b, double tol_
 // raw target unchanged (e.g. a near-limit target keeps the only legal long way around).
 // This selects the GOAL only; the downstream ramp/SMD is still monotonic from the
 // reference (no mid-trajectory period wrapping, which stays rejected).
+// Axes marked in safety.joint_target_literal_axes deliberately opt out and keep
+// the raw command target; this protects cable-sensitive wrist yaw returns.
 JointArray shortestPathJointGoal(
     const JointArray& raw_target,
     const JointArray& reference,
     const JointArray& q_min_deg,
-    const JointArray& q_max_deg
+    const JointArray& q_max_deg,
+    const JointBoolArray& literal_axes
 ) {
     JointArray out = raw_target;
     for (int i = 0; i < kDof; ++i) {
+        if (literal_axes[static_cast<std::size_t>(i)]) {
+            continue;
+        }
         if (!(std::isfinite(raw_target[i]) && std::isfinite(reference[i]))) {
             continue;
         }
@@ -95,30 +101,19 @@ JointArray TrajectoryFilter::computeJointTarget(
             out = holdTarget(previous_sent_target);
             break;
         case ControlMode::JointTarget: {
-            // Reach the commanded joint pose by the shortest in-range path: pick the
-            // nearest equivalent (target +/- 360*k) to where the joint currently is,
-            // so an InitMotion/PTP does not spin a full revolution to an equivalent
-            // pose (docs/joint_range_policy.md "continuous motion-safe unwrapping").
+            // Reach the commanded joint pose by the shortest in-range path unless an
+            // axis is configured literal for cable safety (docs/joint_range_policy.md).
             const JointArray goal = shortestPathJointGoal(
                 command.q_target_deg, previous_sent_target,
-                safety_config_.q_min_deg, safety_config_.q_max_deg);
+                safety_config_.q_min_deg, safety_config_.q_max_deg,
+                safety_config_.joint_target_literal_axes);
             out = safety_config_.joint_target_smd.enable
                 ? smdJointTarget(goal, previous_sent_target, dt_sec)
                 : filterJointTarget(goal, previous_sent_target, dt_sec);
             break;
         }
-        case ControlMode::JointVelocity:
-            joint_smd_.deactivate();
-            out = integrateJointVelocity(command.dq_target_deg_s, previous_sent_target, dt_sec);
-            break;
         case ControlMode::TcpPoseTarget:
         case ControlMode::TcpLinearMove:
-        case ControlMode::TcpCircleMove:
-        case ControlMode::TcpCircleTrack:
-        case ControlMode::TcpDeltaStand:
-        case ControlMode::TcpDeltaLocal:
-        case ControlMode::TcpTwistStand:
-        case ControlMode::TcpTwistLocal:
             // Cartesian modes are intentionally deferred.
             joint_smd_.deactivate();
             out = holdTarget(previous_sent_target);
@@ -174,23 +169,6 @@ JointArray TrajectoryFilter::smdJointTarget(
     }
     joint_smd_.setGoal(raw_target);
     return joint_smd_.step(dt_sec);
-}
-
-JointArray TrajectoryFilter::integrateJointVelocity(
-    const JointArray& dq_target_deg_s,
-    const JointArray& previous_sent_target,
-    double dt_sec
-) const {
-    JointArray out = previous_sent_target;
-    for (int i = 0; i < kDof; ++i) {
-        const double dq = std::clamp(
-            dq_target_deg_s[i],
-            -safety_config_.dq_max_deg_s[i],
-            safety_config_.dq_max_deg_s[i]
-        );
-        out[i] = previous_sent_target[i] + dq * dt_sec;
-    }
-    return out;
 }
 
 }  // namespace rb_servo

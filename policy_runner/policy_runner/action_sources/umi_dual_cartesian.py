@@ -12,9 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from policy_runner.action_sources.tcp_delta import (
+from policy_runner.action_sources.tcp_pose_target import (
     cartesian_action_requirements,
-    clamp_tcp_delta,
+    clamp_pose_delta,
     tcp_pose_target_stand_intent,
 )
 from policy_runner.robot_state_client import StateSnapshot, parse_udp_endpoint
@@ -259,10 +259,19 @@ class UmiDualCartesianActionSource:
         gripper_offset: Sequence[float] = GRIPPER_OFFSET,
         r_align: Sequence[float] = IDENTITY_R_ALIGN,
         workspace_bounds: Mapping[str, Sequence[float]] | Sequence[float] | None = None,
-        sample_hold_timeout_sec: float = 0.05,
+        sample_hold_timeout_sec: float | None = None,
+        sample_stale_timeout_sec: float | None = None,
         timeout_sec: float = 0.05,
         deadman_release_grace_sec: float = 0.2,
     ):
+        if sample_hold_timeout_sec is not None and sample_stale_timeout_sec is not None:
+            raise ValueError(
+                "set only one of sample_hold_timeout_sec or deprecated sample_stale_timeout_sec"
+            )
+        if sample_hold_timeout_sec is None:
+            sample_hold_timeout_sec = (
+                0.05 if sample_stale_timeout_sec is None else sample_stale_timeout_sec
+            )
         if max_linear_step_m < 0.0:
             raise ValueError("max_linear_step_m must be non-negative")
         if max_angular_step_rad < 0.0:
@@ -565,7 +574,7 @@ class UmiDualCartesianActionSource:
             _angle_diff(pose6[4], previous[4]),
             _angle_diff(pose6[5], previous[5]),
         )
-        clamped = clamp_tcp_delta(delta, self.max_linear_step_m, self.max_angular_step_rad)
+        clamped = clamp_pose_delta(delta, self.max_linear_step_m, self.max_angular_step_rad)
         return (
             previous[0] + clamped[0],
             previous[1] + clamped[1],

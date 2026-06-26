@@ -70,6 +70,13 @@ motion-safe (NOT the rejected mid-trajectory wrap):
 - **No-op when range is unset** — a degenerate `q_min >= q_max` (default zero
   arrays) disables it, so configs without explicit raw limits are unaffected.
 
+For cable-sensitive joints, `safety.joint_target_literal_axes` can opt a joint
+out of the shortest-path equivalent selection. `false` keeps the default behavior
+above; `true` keeps the commanded raw `JointTarget` value exactly. The current
+stack configs set J6/wrist yaw to `true` so InitMotion returns to the configured
+raw yaw target instead of choosing a closer `target +/- 360` equivalent that can
+leave the Pika gripper cable wound.
+
 ## Kinematics Alignment
 
 The current `rb3_730e.urdf` model has limits close to `+/-360 deg` for most

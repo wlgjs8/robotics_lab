@@ -25,16 +25,8 @@ std::string toString(ControlMode mode) {
         case ControlMode::ArmMotion: return "ArmMotion";
         case ControlMode::DisarmMotion: return "DisarmMotion";
         case ControlMode::JointTarget: return "JointTarget";
-        case ControlMode::InitMotion: return "InitMotion";
-        case ControlMode::JointVelocity: return "JointVelocity";
         case ControlMode::TcpPoseTarget: return "TcpPoseTarget";
         case ControlMode::TcpLinearMove: return "TcpLinearMove";
-        case ControlMode::TcpCircleMove: return "TcpCircleMove";
-        case ControlMode::TcpCircleTrack: return "TcpCircleTrack";
-        case ControlMode::TcpDeltaStand: return "TcpDeltaStand";
-        case ControlMode::TcpDeltaLocal: return "TcpDeltaLocal";
-        case ControlMode::TcpTwistStand: return "TcpTwistStand";
-        case ControlMode::TcpTwistLocal: return "TcpTwistLocal";
         case ControlMode::EmergencyStop: return "EmergencyStop";
         case ControlMode::ResetFault: return "ResetFault";
         case ControlMode::SetSafetyFloorZ: return "SetSafetyFloorZ";
@@ -44,6 +36,14 @@ std::string toString(ControlMode mode) {
         case ControlMode::Freedrive: return "Freedrive";
     }
     return "Unknown";
+}
+
+std::string toString(JointTargetProfile profile) {
+    switch (profile) {
+        case JointTargetProfile::Direct: return "direct";
+        case JointTargetProfile::InitMotion: return "init_motion";
+    }
+    return "unknown";
 }
 
 std::string toString(ServerMotionState state) {
@@ -118,15 +118,6 @@ std::string toString(TrackingErrorPolicy policy) {
     return "unknown";
 }
 
-std::string toString(TcpCircleTrackTrackingSource source) {
-    switch (source) {
-        case TcpCircleTrackTrackingSource::Auto: return "auto";
-        case TcpCircleTrackTrackingSource::TcpActualStand: return "tcp_actual_stand";
-        case TcpCircleTrackTrackingSource::TcpRefStand: return "tcp_ref_stand";
-    }
-    return "unknown";
-}
-
 ControlMode controlModeFromString(const std::string& mode) {
     const std::string m = lower(mode);
     if (m == "idle") return ControlMode::Idle;
@@ -134,21 +125,8 @@ ControlMode controlModeFromString(const std::string& mode) {
     if (m == "armmotion" || m == "arm_motion" || m == "arm") return ControlMode::ArmMotion;
     if (m == "disarmmotion" || m == "disarm_motion" || m == "disarm") return ControlMode::DisarmMotion;
     if (m == "jointtarget" || m == "joint_target") return ControlMode::JointTarget;
-    if (m == "initmotion" || m == "init_motion") return ControlMode::InitMotion;
-    if (m == "jointvelocity" || m == "joint_velocity") return ControlMode::JointVelocity;
     if (m == "tcpposetarget" || m == "tcp_pose_target") return ControlMode::TcpPoseTarget;
     if (m == "tcplinearmove" || m == "tcp_linear_move") return ControlMode::TcpLinearMove;
-    if (m == "tcpcirclemove" || m == "tcp_circle_move" || m == "tcpbenchmarkcirclemove" || m == "tcp_benchmark_circle_move") {
-        return ControlMode::TcpCircleMove;
-    }
-    if (m == "tcpcircletrack" || m == "tcp_circle_track" ||
-        m == "cartesiancircletrack" || m == "cartesian_circle_track") {
-        return ControlMode::TcpCircleTrack;
-    }
-    if (m == "tcpdeltastand" || m == "tcp_delta_stand") return ControlMode::TcpDeltaStand;
-    if (m == "tcpdeltalocal" || m == "tcp_delta_local") return ControlMode::TcpDeltaLocal;
-    if (m == "tcptwiststand" || m == "tcp_twist_stand") return ControlMode::TcpTwistStand;
-    if (m == "tcptwistlocal" || m == "tcp_twist_local") return ControlMode::TcpTwistLocal;
     if (m == "emergencystop" || m == "emergency_stop" || m == "estop") return ControlMode::EmergencyStop;
     if (m == "resetfault" || m == "reset_fault" || m == "reset") return ControlMode::ResetFault;
     if (m == "setsafetyfloorz" || m == "set_safety_floor_z") return ControlMode::SetSafetyFloorZ;
@@ -163,6 +141,13 @@ ControlMode controlModeFromString(const std::string& mode) {
         return ControlMode::Freedrive;
     }
     throw std::invalid_argument("Unknown ControlMode string: " + mode);
+}
+
+JointTargetProfile jointTargetProfileFromString(const std::string& value) {
+    const std::string v = lower(value);
+    if (v == "direct") return JointTargetProfile::Direct;
+    if (v == "init_motion") return JointTargetProfile::InitMotion;
+    throw std::invalid_argument("Unknown joint_target_profile string: " + value);
 }
 
 ForceControlMode forceControlModeFromString(const std::string& mode) {

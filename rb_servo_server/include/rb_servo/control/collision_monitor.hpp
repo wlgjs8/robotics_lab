@@ -10,9 +10,9 @@
 //   robotics_lab/scripts/bench_self_collision.cpp  (mesh worst ~1.5 ms in-loop)
 //
 // Design note: ALL barrier parameters are a SINGLE shared set, common to every
-// motion primitive (TcpPoseTarget, TcpTwistLocal, ...). Speed adaptation comes
-// from the MEASURED closing speed of the geometry, not from per-primitive config,
-// so nothing needs to be retuned per primitive.
+// motion primitive. Speed adaptation comes from the MEASURED closing speed of the
+// geometry, not from per-primitive config, so nothing needs to be retuned per
+// primitive.
 
 #include <array>
 #include <atomic>

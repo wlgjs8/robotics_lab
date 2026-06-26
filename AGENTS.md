@@ -7,14 +7,13 @@
 The mock / rbpodo controller-simulation (pgmode) stack remains the regression baseline (it must keep passing before any physical work):
 
 - structured backend result and fault telemetry
-- joint commands: `JointTarget`, `JointVelocity`
+- joint commands: `JointTarget`
 - Cartesian point-to-point: `TcpPoseTarget`
 - Cartesian path tracking: `TcpLinearMove`
-- Cartesian streaming velocity: `TcpTwistLocal`, `TcpTwistStand`
 - GUI and policy-runner safety gates
 - command-source lease/arbitration
 
-Real motion is now an active, gated bring-up lane: read-only diagnostics parity, a slow dual-arm physical Cartesian circle, UMI teleop/replay, and a full `flow-infer` `real_policy` closed-loop rollout (pi0.5/openpi, default `TcpTwistLocal` + real gripper) have all run on hardware under operator supervision (`docs/runbooks/rbpodo_real_physical_circle.md`, ladder `docs/runbooks/pgmode_real_transition.md`). `flow-infer` also supports an opt-in `tcp_target_pose` runtime conversion that composes the same ee_local deltas into absolute `TcpPoseTarget` setpoints. The `real_policy` gate stays fully enforced and was satisfied via accepted/validated config — the lane is open, not blocked; runtime is validated and task success is the remaining model-side gap. Real motion stays fail-closed — gates, site-local config, operator supervision, and an E-stop are all required — and passing simulator tests is never permission to move hardware. For real motion the policy-side gate was relaxed (PR #13), so `rb_servo_server` is the sole real-motion safety layer (plus the async URDF-mesh `CollisionMonitor`). Still off: force control; measured hand-eye calibration is unneeded for the deployed pika ee_local image-conditioned policy but still required for general geometry-dependent policy.
+Real motion is now an active, gated bring-up lane: read-only diagnostics parity, a slow dual-arm physical Cartesian circle, UMI teleop/replay, and a full `flow-infer` `real_policy` closed-loop rollout (pi0.5/openpi, `TcpPoseTarget` + real gripper) have all run on hardware under operator supervision (`docs/runbooks/rbpodo_real_physical_circle.md`, ladder `docs/runbooks/pgmode_real_transition.md`). `flow-infer` composes ee_local deltas into absolute `TcpPoseTarget` setpoints. The `real_policy` gate stays fully enforced and was satisfied via accepted/validated config — the lane is open, not blocked; runtime is validated and task success is the remaining model-side gap. Real motion stays fail-closed — gates, site-local config, operator supervision, and an E-stop are all required — and passing simulator tests is never permission to move hardware. For real motion the policy-side gate was relaxed (PR #13), so `rb_servo_server` is the sole real-motion safety layer (plus the async URDF-mesh `CollisionMonitor`). Still off: force control; measured hand-eye calibration is unneeded for the deployed pika ee_local image-conditioned policy but still required for general geometry-dependent policy.
 
 ## Required Reading
 
@@ -135,10 +134,6 @@ Do not blur these modes.
 
 Absolute joint-space target. This is a joint-space point-to-point primitive.
 
-### JointVelocity
-
-Streaming joint velocity command. This is suitable for low-level joint teleop/debug when safety gates allow it.
-
 ### TcpPoseTarget
 
 Cartesian point-to-point final-pose target. It is MoveJ-like in the sense that the final TCP pose is targeted, but the intermediate TCP path is not guaranteed linear and TCP orientation may vary along the joint-space path.
@@ -146,14 +141,6 @@ Cartesian point-to-point final-pose target. It is MoveJ-like in the sense that t
 ### TcpLinearMove
 
 MoveL-like Cartesian path primitive. It has explicit timing/speed semantics and orientation interpolation semantics (`constant`/`slerp`). Real-motion-ready and used on the physical arms (the run-mode execution gate was retired; it computes in every run mode). It is a finite, bounded path (`linear_move.max_duration_sec`): once started it drives to completion from a single command even if the command's freshness/lease lapses, so one click always reaches the target; an explicit command-mode change, fault, or E-stop aborts it, and the per-tick safety gate still applies.
-
-### TcpTwistLocal / TcpTwistStand
-
-Streaming Cartesian velocity primitives. `TcpTwistLocal` is intended for SpaceMouse/local-frame continuous teleop. `TcpTwistStand` is the stand-frame low-level API. Deadman behavior, command-source arbitration, and server-side velocity limits are required for operator control.
-
-### TcpDeltaLocal / TcpDeltaStand
-
-Low-level one-shot/debug jog primitives. They are not the default GUI target movement primitive. GUI target movement should normally update the target marker and send an absolute `TcpPoseTarget` or `TcpLinearMove`.
 
 ## Backend Contract
 

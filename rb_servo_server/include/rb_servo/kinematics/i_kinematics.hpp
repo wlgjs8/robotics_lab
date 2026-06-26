@@ -29,12 +29,6 @@ struct IkResult {
     bool branch_jump_clamped = false;
 };
 
-struct CartesianVelocityResult {
-    bool success = false;
-    JointArray qdot_deg_s{};
-    std::string reason;
-};
-
 class IKinematics {
 public:
     virtual ~IKinematics() = default;
@@ -56,14 +50,6 @@ public:
         const Pose6D& target_tcp_stand,
         const JointArray& seed_q_deg,
         const ArmMountConfig& mount
-    ) const = 0;
-
-    virtual CartesianVelocityResult solveCartesianVelocity(
-        ArmId arm,
-        const JointArray& q_deg,
-        const ArmMountConfig& mount,
-        const Vec6& tcp_twist_local,
-        double damping
     ) const = 0;
 
     // Ordered kinematic chain points (xyz, meters) in the STAND frame used to

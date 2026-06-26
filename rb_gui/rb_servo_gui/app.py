@@ -12,6 +12,14 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .command_client import CommandClient
+from .debug_plots import (
+    ARMS as DEBUG_ARMS,
+    JOINT_LABELS as DEBUG_JOINT_LABELS,
+    ArmDebugSeries,
+    DebugPlotSnapshot,
+    SignalTraces,
+    build_debug_snapshot,
+)
 from .geometry import (
     _add_matrix3,
     _add_vec3,
@@ -92,6 +100,7 @@ from .scene import (
     update_scene_markers,
 )
 from .state_receiver import StateReceiver, StateStore
+from .scope_receiver import DEFAULT_SCOPE_PORT, ScopeReceiver, ScopeStats, ScopeStore
 from .status_panel import (
     _JOINT_MONITOR_UNITS,
     _STAND_WORLD_MONITOR_UNITS,
@@ -163,7 +172,7 @@ _TCP_LINEAR_ORIENTATION_MODES = ("constant", "slerp")
 _DEFAULT_CAMERA_POSITION = (-0.0128, -1.3823, 0.3985)
 _DEFAULT_CAMERA_LOOK_AT = (-0.0128, -0.1381, 0.2257)
 _DEFAULT_CAMERA_UP = (0.0, 0.0, 1.0)
-# TcpTargetPose replay/profiling InitMotion anchor (2026-06-21): GRIPPER-DOWN (tool z ~ stand
+# TcpPoseTarget replay/profiling init-motion anchor (2026-06-21): GRIPPER-DOWN (tool z ~ stand
 # -z), max single-rest coverage. Left = controller-consistent rest; right = rest + 10deg about
 # y (within +/-20deg tool budget; recovers episode_0096). Server-CALIBRATED offline model
 # (single-arm rb3_730e.urdf + stack_sim mount, exact ee_local incl r_align=pika_rz180;
@@ -179,6 +188,25 @@ _OPERATOR_MONITOR_GAP_EM = 1.0
 # rows + status) so it never needs an inner scrollbar, plus a small gap so the two
 # panels sit slightly apart instead of touching. Override with RB_GUI_MONITOR_SPLIT_EM.
 _OPERATOR_MONITOR_SPLIT_EM = 35.5
+_DEBUG_ARM_OPTIONS = ("양팔", "왼팔", "오른팔")
+_DEBUG_WINDOW_OPTIONS = ("2 s", "5 s", "10 s")
+_DEBUG_WINDOW_SEC = {"2 s": 2.0, "5 s": 5.0, "10 s": 10.0}
+_DEBUG_ARM_LABELS = {"left": "왼팔", "right": "오른팔"}
+_DEBUG_ARM_OPTION_TO_ARMS = {
+    "양팔": ("left", "right"),
+    "왼팔": ("left",),
+    "오른팔": ("right",),
+}
+_DEBUG_PLOT_METRICS = (
+    ("position", "위치", "deg", (-360.0, 360.0)),
+    ("velocity", "속도", "deg/s", (-180.0, 180.0)),
+    ("acceleration", "가속도", "deg/s²", (-1000.0, 1000.0)),
+    ("jerk", "jerk", "deg/s³", (-10000.0, 10000.0)),
+)
+_DEBUG_SENT_COLOR = "#2563eb"
+_DEBUG_REF_COLOR = "#8b5cf6"
+_DEBUG_ACTUAL_COLOR = "#f97316"
+_DEBUG_SCOPE_SYNC_KEY = "rb_scope"
 
 
 def _env_int(name: str, fallback: int) -> int:
@@ -382,10 +410,10 @@ def _tcp_target_position_wxyz(
     return (pose[0], pose[1], pose[2]), wxyz
 
 
-def _apply_tcp_delta_to_target(
+def _apply_tcp_pose_step_to_target(
     scene_handles: dict[str, Any],
     arm: str,
-    delta: tuple[float, float, float, float, float, float],
+    step: tuple[float, float, float, float, float, float],
     frame_mode: str,
 ) -> bool:
     target = _tcp_target_position_wxyz(scene_handles, arm)
@@ -393,7 +421,7 @@ def _apply_tcp_delta_to_target(
         return False
     position, wxyz = target
     target_transform = _pose_transform(position, wxyz)
-    delta_transform = _delta_transform(delta)
+    delta_transform = _delta_transform(step)
     if frame_mode == _TCP_FRAME_LOCAL:
         next_transform = _multiply_transform(target_transform, delta_transform)
     else:
@@ -658,7 +686,8 @@ def _send_tcp_linear_move_from_marker(
     # every tick (scene.update_scene_markers), so the "destination" equals where the arm
     # already is and the linear move is a near no-op (the symptom: it only creeps a few
     # degrees per click). Require the operator to park the marker at a destination first.
-    # The {arm}_tcp_target_user_moved flag is set on drag/set and cleared by InitMotion
+    # The {arm}_tcp_target_user_moved flag is set on drag/set and cleared by
+    # the init-motion button.
     # ("TCP targets will follow current TCP").
     selected_arms = ("left", "right") if arm_group == "both" else (arm_group,)
     following = [arm for arm in selected_arms
@@ -685,16 +714,16 @@ def _send_tcp_linear_move_from_marker(
     )
 
 
-def _apply_tcp_delta_and_send_pose_target(
+def _apply_tcp_pose_step_and_send_pose_target(
     safety: OperatorSafety,
     scene_handles: dict[str, Any],
     arm: str,
-    delta: tuple[float, float, float, float, float, float],
+    step: tuple[float, float, float, float, float, float],
     frame_mode: str,
 ) -> tuple[bool, str]:
     arms = ("left", "right") if arm == "both" else (arm,)
     for single_arm in arms:
-        if not _apply_tcp_delta_to_target(scene_handles, single_arm, delta, frame_mode):
+        if not _apply_tcp_pose_step_to_target(scene_handles, single_arm, step, frame_mode):
             return False, f"{single_arm} TCP target unavailable"
     return _send_tcp_pose_target_from_marker(safety, scene_handles, arm)
 
@@ -1032,10 +1061,10 @@ def _parse_joint6(text: str) -> tuple[float, ...] | None:
 def _apply_init_joints_live(
     safety: OperatorSafety, left_text: str, right_text: str
 ) -> tuple[bool, str]:
-    """Set the InitMotion target from edited text and apply it at runtime.
+    """Set the init-motion target from edited text and apply it at runtime.
 
     Updates the live OperatorSafety target (used immediately by the next
-    InitMotion press) AND persists to init_motion.json — no restart needed.
+    init-motion press) AND persists to init_motion.json — no restart needed.
     """
     left = _parse_joint6(left_text)
     right = _parse_joint6(right_text)
@@ -1046,7 +1075,7 @@ def _apply_init_joints_live(
         return False, message
     saved_ok, info = _save_init_joints(left, right)
     suffix = f"saved to {info}" if saved_ok else f"save FAILED: {info}"
-    return True, f"InitMotion updated live; {suffix}"
+    return True, f"Init Motion updated live; {suffix}"
 
 
 def _current_joints_text(store: StateStore) -> tuple[str | None, str | None, str]:
@@ -1555,7 +1584,9 @@ def _build_operator_monitors(server: Any, handles: dict[str, Any]) -> None:
         handles["operator_monitor_content"] = add_html(_operator_monitor_dynamic_html(None, stale=True), order=0.1)
         return
     handles["operator_monitor_panel_mode"] = "root_gui_fallback"
-    with server.gui.add_folder("Operator Monitors", expand_by_default=True, order=0.0):
+    folder = server.gui.add_folder("Operator Monitors", expand_by_default=True, order=0.0)
+    handles["operator_monitor_folder"] = folder
+    with folder:
         _build_joint_monitor(server, handles, order=0.0)
         _build_stand_world_monitor(server, handles, order=0.1)
 
@@ -1665,11 +1696,484 @@ def _set_dark_mode(server: Any, handles: dict[str, Any], dark: bool) -> None:
             pass
 
 
+def _set_gui_visible(handle: Any, visible: bool) -> None:
+    if handle is None:
+        return
+    try:
+        handle.visible = visible
+    except Exception:
+        pass
+
+
+def _debug_mode_active(handles: dict[str, Any]) -> bool:
+    toggle = handles.get("debug_mode_toggle")
+    return bool(getattr(toggle, "value", False))
+
+
+def _debug_joint_index(handles: dict[str, Any]) -> int:
+    dropdown = handles.get("debug_joint_dropdown")
+    value = str(getattr(dropdown, "value", DEBUG_JOINT_LABELS[0]))
+    try:
+        return DEBUG_JOINT_LABELS.index(value)
+    except ValueError:
+        return 0
+
+
+def _debug_window_sec(handles: dict[str, Any]) -> float:
+    dropdown = handles.get("debug_window_dropdown")
+    value = str(getattr(dropdown, "value", "10 s"))
+    return _DEBUG_WINDOW_SEC.get(value, 10.0)
+
+
+def _debug_selected_arms(handles: dict[str, Any]) -> tuple[str, ...]:
+    dropdown = handles.get("debug_arm_dropdown")
+    value = str(getattr(dropdown, "value", "양팔"))
+    return _DEBUG_ARM_OPTION_TO_ARMS.get(value, ("left", "right"))
+
+
+def _debug_smooth_enabled(handles: dict[str, Any]) -> bool:
+    toggle = handles.get("debug_smooth_toggle")
+    return bool(getattr(toggle, "value", True))
+
+
+def _debug_fixed_range_enabled(handles: dict[str, Any]) -> bool:
+    toggle = handles.get("debug_fixed_range_toggle")
+    return bool(getattr(toggle, "value", False))
+
+
+def _debug_trace_enabled(handles: dict[str, Any], trace: str) -> bool:
+    toggle = handles.get(f"debug_trace_{trace}_toggle")
+    return bool(getattr(toggle, "value", True))
+
+
+def _debug_trace_visibility(handles: dict[str, Any]) -> dict[str, bool]:
+    return {
+        "sent": _debug_trace_enabled(handles, "sent"),
+        "ref": _debug_trace_enabled(handles, "ref"),
+        "actual": _debug_trace_enabled(handles, "actual"),
+    }
+
+
+def _debug_empty_arrays() -> tuple[Any, Any, Any, Any]:
+    import numpy as np
+
+    empty = np.array([], dtype=np.float64)
+    return empty, empty, empty, empty
+
+
+def _debug_trace_arrays(traces: SignalTraces) -> tuple[Any, Any, Any, Any]:
+    import numpy as np
+
+    return (
+        np.asarray(traces.time_s, dtype=np.float64),
+        np.asarray(traces.sent, dtype=np.float64),
+        np.asarray(traces.ref, dtype=np.float64),
+        np.asarray(traces.actual, dtype=np.float64),
+    )
+
+
+def _debug_uplot_scales(
+    *, window_sec: float, fixed_range: tuple[float, float] | None
+) -> dict[str, Any]:
+    scales: dict[str, Any] = {
+        "x": {"time": False, "auto": False, "range": (-float(window_sec), 0.0)},
+    }
+    if fixed_range is None:
+        scales["y"] = {"auto": True}
+    else:
+        scales["y"] = {"auto": False, "range": fixed_range}
+    return scales
+
+
+def _debug_uplot_axes(unit: str) -> tuple[Any, Any]:
+    return (
+        {"scale": "x", "side": 2, "label": "time (s)"},
+        {"scale": "y", "side": 3, "label": unit},
+    )
+
+
+def _debug_uplot_sync_supported() -> bool:
+    try:
+        import viser.uplot as uplot
+
+        cursor_keys = getattr(uplot.Cursor, "__optional_keys__", frozenset())
+        sync_keys = getattr(uplot.Cursor_Sync, "__optional_keys__", frozenset())
+        return "sync" in cursor_keys and "scales" in sync_keys
+    except Exception:
+        return False
+
+
+def _debug_uplot_cursor() -> dict[str, Any]:
+    return {
+        "show": True,
+        "x": True,
+        "y": False,
+        "drag": {"x": True, "y": False, "setScale": True},
+        "sync": {
+            "key": _DEBUG_SCOPE_SYNC_KEY,
+            "scales": ("x", None),
+            "setSeries": False,
+        },
+    }
+
+
+def _debug_uplot_series(
+    *, show_sent: bool = True, show_ref: bool = True, show_actual: bool = True
+) -> tuple[Any, Any, Any, Any]:
+    return (
+        {"label": "time", "scale": "x"},
+        {
+            "label": "q_sent",
+            "scale": "y",
+            "stroke": _DEBUG_SENT_COLOR,
+            "width": 2.0,
+            "dash": (6.0, 4.0),
+            "spanGaps": False,
+            "show": show_sent,
+        },
+        {
+            "label": "q_ref",
+            "scale": "y",
+            "stroke": _DEBUG_REF_COLOR,
+            "width": 1.8,
+            "spanGaps": False,
+            "show": show_ref,
+        },
+        {
+            "label": "q_actual",
+            "scale": "y",
+            "stroke": _DEBUG_ACTUAL_COLOR,
+            "width": 2.0,
+            "spanGaps": False,
+            "show": show_actual,
+        },
+    )
+
+
+def _add_debug_plot(
+    server: Any,
+    *,
+    title: str,
+    unit: str,
+    fixed_range: tuple[float, float],
+    order: float,
+) -> tuple[str, Any | None]:
+    if not hasattr(server.gui, "add_uplot") or not _debug_uplot_sync_supported():
+        return "none", None
+    try:
+        handle = server.gui.add_uplot(
+            _debug_empty_arrays(),
+            _debug_uplot_series(),
+            title=title,
+            scales=_debug_uplot_scales(window_sec=10.0, fixed_range=None),
+            axes=_debug_uplot_axes(unit),
+            legend={"show": True, "live": True},
+            cursor=_debug_uplot_cursor(),
+            height=170,
+            padding=(8, 12, 24, 54),
+            order=order,
+            visible=False,
+        )
+        return "uplot", handle
+    except Exception:
+        pass
+    return "none", None
+
+
+def _build_debug_panel(
+    server: Any, handles: dict[str, Any], scope_store: ScopeStore | None
+) -> None:
+    handles["debug_scope_store"] = scope_store
+    folder = server.gui.add_folder(
+        "디버그 플롯",
+        expand_by_default=True,
+        order=-9.0,
+        visible=False,
+    )
+    handles["debug_folder"] = folder
+    handles["debug_plot_handles"] = {}
+    handles["debug_plot_modes"] = {}
+
+    with folder:
+        handles["debug_readonly"] = server.gui.add_text(
+            "Mode",
+            initial_value="읽기 전용: 500Hz scope 표시만 수행, 모션/lease 명령 전송 없음",
+            disabled=True,
+        )
+        handles["debug_joint_dropdown"] = server.gui.add_dropdown(
+            "관절",
+            DEBUG_JOINT_LABELS,
+            initial_value=DEBUG_JOINT_LABELS[0],
+        )
+        handles["debug_arm_dropdown"] = server.gui.add_dropdown(
+            "팔",
+            _DEBUG_ARM_OPTIONS,
+            initial_value="양팔",
+        )
+        handles["debug_window_dropdown"] = server.gui.add_dropdown(
+            "표시 창",
+            _DEBUG_WINDOW_OPTIONS,
+            initial_value="5 s",
+        )
+        if hasattr(server.gui, "add_checkbox"):
+            handles["debug_smooth_toggle"] = server.gui.add_checkbox(
+                "평활", initial_value=True
+            )
+            handles["debug_fixed_range_toggle"] = server.gui.add_checkbox(
+                "고정 레인지", initial_value=False
+            )
+            handles["debug_trace_sent_toggle"] = server.gui.add_checkbox(
+                "q_sent", initial_value=True
+            )
+            handles["debug_trace_ref_toggle"] = server.gui.add_checkbox(
+                "q_ref", initial_value=True
+            )
+            handles["debug_trace_actual_toggle"] = server.gui.add_checkbox(
+                "q_actual", initial_value=True
+            )
+        handles["debug_status_strip"] = server.gui.add_text(
+            "요약",
+            initial_value=f"No scope stream (UDP {DEFAULT_SCOPE_PORT})",
+            disabled=True,
+        )
+
+        order = 10.0
+        for metric_key, metric_label, unit, fixed_range in _DEBUG_PLOT_METRICS:
+            for arm in DEBUG_ARMS:
+                title = f"{_DEBUG_ARM_LABELS[arm]} {metric_label}"
+                mode, plot_handle = _add_debug_plot(
+                    server,
+                    title=title,
+                    unit=unit,
+                    fixed_range=fixed_range,
+                    order=order,
+                )
+                if plot_handle is not None:
+                    handles["debug_plot_handles"][(arm, metric_key)] = plot_handle
+                    handles["debug_plot_modes"][(arm, metric_key)] = mode
+                order += 1.0
+        if not handles["debug_plot_handles"]:
+            handles["debug_plot_unavailable"] = server.gui.add_text(
+                "Plot backend",
+                initial_value=(
+                    "viser add_uplot + uplot cursor.sync unavailable; update viser "
+                    "before using synced drag zoom"
+                ),
+                disabled=True,
+            )
+
+
+def _debug_metric_traces(series: ArmDebugSeries, metric_key: str) -> SignalTraces:
+    if metric_key == "velocity":
+        return series.velocity
+    if metric_key == "acceleration":
+        return series.acceleration
+    if metric_key == "jerk":
+        return series.jerk
+    return series.position
+
+
+def _fmt_optional(value: float | None, suffix: str) -> str:
+    if value is None or not math.isfinite(value):
+        return "n/a"
+    return f"{value:.2f}{suffix}"
+
+
+def _debug_jerk_text(series: ArmDebugSeries) -> str:
+    by_trace = series.max_abs_jerk_by_trace_deg_s3
+    return (
+        "J="
+        f"s:{_fmt_optional(by_trace.get('sent'), '')} "
+        f"r:{_fmt_optional(by_trace.get('ref'), '')} "
+        f"a:{_fmt_optional(by_trace.get('actual'), '')}deg/s³"
+    )
+
+
+def _debug_scope_status_text(stats: ScopeStats | None) -> str:
+    if stats is None:
+        return "scope store unavailable"
+    if stats.bind_error:
+        return f"scope bind failed: {stats.bind_error}"
+    if stats.received_batches <= 0:
+        return (
+            f"waiting for scope UDP {DEFAULT_SCOPE_PORT} "
+            f"({stats.invalid_packets} invalid)"
+        )
+    age = stats.latest_receive_age_sec
+    stale = age is not None and age > 1.0
+    age_text = f"age={age:.2f}s" if age is not None else "age=n/a"
+    rate = _fmt_optional(stats.batch_rate_hz, "Hz")
+    return (
+        ("scope stale " if stale else "scope ")
+        + f"batch={rate} {age_text} "
+        + f"batches={stats.received_batches} invalid={stats.invalid_packets} "
+        + f"drop={stats.dropped_samples}"
+    )
+
+
+def _debug_status_text(
+    snapshot: DebugPlotSnapshot,
+    selected_arms: tuple[str, ...],
+    stats: ScopeStats | None,
+) -> str:
+    parts: list[str] = []
+    for arm in selected_arms:
+        series = snapshot.arms.get(arm)
+        if series is None or series.sample_count == 0:
+            parts.append(f"{_DEBUG_ARM_LABELS.get(arm, arm)}: no samples")
+            continue
+        parts.append(
+            f"{_DEBUG_ARM_LABELS.get(arm, arm)} "
+            f"RMS(s-a)={_fmt_optional(series.rms_sent_actual_deg, 'deg')} "
+            f"{_debug_jerk_text(series)} "
+            f"rate={_fmt_optional(series.sample_rate_hz, 'Hz')} "
+            f"n={series.sample_count}"
+        )
+    parts.append(_debug_scope_status_text(stats))
+    return " | ".join(parts) if parts else _debug_scope_status_text(stats)
+
+
+def _update_debug_plots(
+    handles: dict[str, Any],
+    latest: StateSnapshot | None,
+    *,
+    stale: bool,
+) -> None:
+    del latest, stale
+    scope_store = handles.get("debug_scope_store")
+    if not isinstance(scope_store, ScopeStore):
+        return
+    window_sec = _debug_window_sec(handles)
+    scope_store.set_history_sec(max(20.0, window_sec))
+    selected_arms = _debug_selected_arms(handles)
+    snapshot = build_debug_snapshot(
+        scope_store.snapshot_samples(),
+        joint_index=_debug_joint_index(handles),
+        window_sec=window_sec,
+        smooth=_debug_smooth_enabled(handles),
+        smoothing_window=5,
+    )
+    stats = scope_store.stats()
+    fixed_enabled = _debug_fixed_range_enabled(handles)
+    trace_visibility = _debug_trace_visibility(handles)
+    for metric_key, _, unit, fixed_range in _DEBUG_PLOT_METRICS:
+        fixed = fixed_range if fixed_enabled else None
+        for arm in DEBUG_ARMS:
+            handle = handles.get("debug_plot_handles", {}).get((arm, metric_key))
+            if handle is None:
+                continue
+            visible = _debug_mode_active(handles) and arm in selected_arms
+            _set_gui_visible(handle, visible)
+            arm_series = snapshot.arms.get(arm)
+            traces = _debug_metric_traces(arm_series, metric_key) if arm_series else None
+            mode = handles.get("debug_plot_modes", {}).get((arm, metric_key))
+            if mode == "uplot":
+                try:
+                    handle.data = _debug_trace_arrays(traces) if traces else _debug_empty_arrays()
+                    series_state = (
+                        trace_visibility["sent"],
+                        trace_visibility["ref"],
+                        trace_visibility["actual"],
+                    )
+                    if handle is not None and handles.get("_debug_trace_state") != series_state:
+                        handle.series = _debug_uplot_series(
+                            show_sent=trace_visibility["sent"],
+                            show_ref=trace_visibility["ref"],
+                            show_actual=trace_visibility["actual"],
+                        )
+                    scale_key = (arm, metric_key)
+                    scale_state = (window_sec, fixed)
+                    scale_states = handles.setdefault("_debug_plot_scale_state", {})
+                    if scale_states.get(scale_key) != scale_state:
+                        handle.scales = _debug_uplot_scales(
+                            window_sec=window_sec, fixed_range=fixed
+                        )
+                        handle.axes = _debug_uplot_axes(unit)
+                        scale_states[scale_key] = scale_state
+                except Exception:
+                    pass
+    handles["_debug_trace_state"] = (
+        trace_visibility["sent"],
+        trace_visibility["ref"],
+        trace_visibility["actual"],
+    )
+    status = handles.get("debug_status_strip")
+    if status is not None:
+        try:
+            status.value = _debug_status_text(snapshot, selected_arms, stats)
+        except Exception:
+            pass
+
+
+def _scene_debug_handles(handles: dict[str, Any]) -> dict[tuple[str, str], Any]:
+    out: dict[tuple[str, str], Any] = {}
+    scene_handles = handles.get("scene")
+    if isinstance(scene_handles, dict):
+        for key, handle in scene_handles.items():
+            if hasattr(handle, "visible"):
+                out[("scene", str(key))] = handle
+    for key in ("pc_handle", "pc_cam_frame", "pc_cam_gizmo"):
+        handle = handles.get(key)
+        if hasattr(handle, "visible"):
+            out[("top", key)] = handle
+    return out
+
+
+def _set_scene_debug_visible(handles: dict[str, Any], active: bool) -> None:
+    current = _scene_debug_handles(handles)
+    if active:
+        saved = handles.setdefault("_debug_scene_visible_restore", {})
+        for key, handle in current.items():
+            if key not in saved:
+                saved[key] = getattr(handle, "visible", True)
+            _set_gui_visible(handle, False)
+        show_saved = handles.setdefault("_debug_urdf_show_visual_restore", {})
+        scene_handles = handles.get("scene")
+        if isinstance(scene_handles, dict):
+            for key in ("left_urdf", "right_urdf", "left_urdf_ref", "right_urdf_ref"):
+                urdf = scene_handles.get(key)
+                if urdf is None or not hasattr(urdf, "show_visual"):
+                    continue
+                if key not in show_saved:
+                    show_saved[key] = getattr(urdf, "show_visual", True)
+                try:
+                    urdf.show_visual = False
+                except Exception:
+                    pass
+        return
+
+    saved = handles.pop("_debug_scene_visible_restore", {})
+    for key, visible in saved.items():
+        handle = current.get(key)
+        if handle is not None:
+            _set_gui_visible(handle, bool(visible))
+    show_saved = handles.pop("_debug_urdf_show_visual_restore", {})
+    scene_handles = handles.get("scene")
+    if isinstance(scene_handles, dict):
+        for key, show_visual in show_saved.items():
+            urdf = scene_handles.get(key)
+            if urdf is None:
+                continue
+            try:
+                urdf.show_visual = bool(show_visual)
+            except Exception:
+                pass
+
+
+def _set_debug_mode_active(handles: dict[str, Any], active: bool) -> None:
+    _set_gui_visible(handles.get("debug_folder"), active)
+    for handle in handles.get("debug_normal_panel_handles", ()):
+        _set_gui_visible(handle, not active)
+    _set_scene_debug_visible(handles, active)
+    handles["_debug_mode_active_applied"] = bool(active)
+
+
 def build_gui(
     server: Any,
     safety: OperatorSafety,
     store: StateStore,
     overlay_store: CircleOverlayStore | None = None,
+    scope_store: ScopeStore | None = None,
 ) -> dict[str, Any]:
     handles: dict[str, Any] = {}
     handles["circle_overlay_enabled"] = overlay_store is not None
@@ -1680,6 +2184,25 @@ def build_gui(
     handles["scene"] = _add_scene_fallback(server)
     _install_default_camera(server)
 
+    if hasattr(server.gui, "add_checkbox"):
+        handles["debug_mode_toggle"] = server.gui.add_checkbox(
+            "디버그 모드",
+            initial_value=False,
+            order=-10.0,
+        )
+
+        @handles["debug_mode_toggle"].on_update
+        def _(_: Any) -> None:
+            _set_debug_mode_active(handles, _debug_mode_active(handles))
+    else:
+        handles["debug_mode_unavailable"] = server.gui.add_text(
+            "디버그 모드",
+            initial_value="checkbox unsupported by this viser version",
+            disabled=True,
+            order=-10.0,
+        )
+
+    _build_debug_panel(server, handles, scope_store)
     _build_operator_monitors(server, handles)
 
     _add_tab_theme = getattr(server.gui, "add_html", None)
@@ -1687,6 +2210,16 @@ def build_gui(
         handles["tab_theme"] = _add_tab_theme(_tab_theme_html(dark=dark_default))
 
     tabs = server.gui.add_tab_group(order=1.0)
+    handles["main_tabs"] = tabs
+    handles["debug_normal_panel_handles"] = [
+        handle
+        for handle in (
+            handles.get("operator_monitor_content"),
+            handles.get("operator_monitor_folder"),
+            tabs,
+        )
+        if handle is not None
+    ]
     with tabs.add_tab("상태"):
         # Dark/light theme toggle (default dark). Re-applies viser's panel theme
         # and the custom tab CSS live so the operator can flip it without restart.
@@ -1802,8 +2335,8 @@ def build_gui(
                     handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
 
             # Explicit lease ownership. One-shot GUI commands bracket the lease per
-            # click; streaming controls (twist/circle/joint-vel keep-alive) need it
-            # held so the server lease is not torn down between packets. The server
+            # click; holding the lease gives the operator continuous command
+            # authority until release. The server
             # rejects an Acquire while another source (e.g. policy_runner teleop)
             # owns it — the lease-owner line below makes that visible.
             # Collapsed by default, like 직접교시 below: holding the lease takes
@@ -1880,7 +2413,7 @@ def build_gui(
                 def _(_: Any) -> None:
                     _freedrive(left=False, right=False)
 
-            init_button = server.gui.add_button("InitMotion")
+            init_button = server.gui.add_button("Init Motion")
             handles["init_motion_button"] = init_button
 
             @init_button.on_click
@@ -1888,10 +2421,10 @@ def build_gui(
                 ok, message = _send_init_motion_and_reset_targets(safety, handles["scene"])
                 handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
 
-            # Edit the InitMotion target directly in viser and apply it live (no
+            # Edit the init-motion target directly in viser and apply it live (no
             # restart): set_init_joints updates the runtime target used by the next
-            # InitMotion press, and _save_init_joints persists it to init_motion.json.
-            with server.gui.add_folder("InitMotion 편집 (즉시 적용)"):
+            # init-motion press, and _save_init_joints persists it to init_motion.json.
+            with server.gui.add_folder("Init Motion 편집 (즉시 적용)"):
                 init_left_input = server.gui.add_text(
                     "left J1..J6 (deg)", initial_value=_format_joint6(safety.init_left_joint_deg)
                 )
@@ -1899,16 +2432,16 @@ def build_gui(
                     "right J1..J6 (deg)", initial_value=_format_joint6(safety.init_right_joint_deg)
                 )
                 # Exposed in handles so other tabs (e.g. the WayPoint "set as init"
-                # button) can mirror the live InitMotion target back into these
+                # button) can mirror the live init-motion target back into these
                 # editor boxes — otherwise they keep showing the build-time value
                 # and the update looks like it never happened.
                 handles["init_left_input"] = init_left_input
                 handles["init_right_input"] = init_right_input
                 init_edit_status = server.gui.add_text(
-                    "InitMotion edit status", initial_value="edit + Apply, or load current pose", disabled=True
+                    "Init Motion edit status", initial_value="edit + Apply, or load current pose", disabled=True
                 )
                 load_current_button = server.gui.add_button("현재 자세 불러오기")
-                apply_init_button = server.gui.add_button("InitMotion 적용 (즉시)")
+                apply_init_button = server.gui.add_button("Init Motion 적용 (즉시)")
 
                 @load_current_button.on_click
                 def _(_: Any) -> None:
@@ -1976,7 +2509,7 @@ def build_gui(
                 _, message = _drive_waypoint_joint(handles, safety)
                 handles["waypoint_status"].value = message
 
-            # Saved-waypoints operations on the selected entry: set as the InitMotion
+            # Saved-waypoints operations on the selected entry: set as the init-motion
             # pose (persisted to JSON) and delete (kept at the bottom).
             set_init_button = server.gui.add_button("Init Motion 으로 설정하기")
             delete_button = server.gui.add_button("WayPoint 삭제", color="red")
@@ -1985,7 +2518,7 @@ def build_gui(
             def _(_: Any) -> None:
                 ok, message = _set_waypoint_as_init(handles, safety)
                 if ok:
-                    # Mirror the new target into the InitMotion editor boxes so the
+                    # Mirror the new target into the init-motion editor boxes so the
                     # change is visible there (they are populated once at build time
                     # and would otherwise keep showing the previous pose).
                     left_input = handles.get("init_left_input")
@@ -2414,150 +2947,6 @@ def build_gui(
             for _joint_index in range(6):
                 _add_joint_jog_row(_joint_index)
 
-        with _move_tabs.add_tab("속도"):
-            # Two clearly-separated modes (were crammed in one tab). Each DoF has a
-            # [−] label [+] row; the slider sets magnitude only. A click STARTS (or
-            # switches) a continuous jog: a keep-alive thread re-sends the selected
-            # velocity every 0.1 s (< the server's 0.2 s command timeout) while
-            # holding the command lease, so the arm moves continuously until 정지 —
-            # the same streaming model as the Circle tab, instead of a one-click
-            # ~200 ms burst that was choppy for fine manipulation.
-            vel_arm = server.gui.add_button_group("Arm", ("left", "right"))
-            handles["velocity_status"] = server.gui.add_text("Velocity status", initial_value="idle", disabled=True)
-
-            def _set_vel_status(ok: bool, message: str) -> None:
-                handles["velocity_status"].value = ("OK: " if ok else "BLOCKED: ") + message
-
-            # Shared continuous-jog controller for BOTH folders below (joint velocity
-            # and TCP twist are mutually exclusive — only one motion at a time). The
-            # running loop reads the current command from a single dict key (atomic
-            # under the GIL), so switching direction/axis just updates it without
-            # tearing down the thread or churning the lease. Per-thread stop event +
-            # join-before-restart avoids the start/stop lifecycle race.
-            vel_jog: dict[str, Any] = {"thread": None, "stop": None, "cmd": None}
-            vel_jog_lock = threading.Lock()
-
-            def _vel_jog_loop(stop_event: threading.Event) -> None:
-                client = safety.command_client
-                took_lease = not client.hold_lease
-                if took_lease:
-                    client.acquire_lease()
-                last_target: tuple[Any, str] | None = None
-                try:
-                    while not stop_event.is_set():
-                        cmd = vel_jog["cmd"]  # single atomic read
-                        if cmd is None:
-                            break
-                        sender, arm, vec, label = cmd
-                        last_target = (sender, arm)
-                        ok, message = sender(arm, vec)
-                        _set_vel_status(ok, f"{label}: {message}")
-                        if not ok:  # gate closed / limit: stop streaming, fail-safe
-                            break
-                        stop_event.wait(0.1)
-                    if last_target is not None:  # best-effort zero on stop
-                        sender, arm = last_target
-                        try:
-                            sender(arm, (0.0,) * 6)
-                        except Exception:
-                            pass
-                finally:
-                    if took_lease:
-                        client.release_lease()
-
-            def _vel_jog_start(sender: Any, arm: str, vec: tuple[float, ...], label: str) -> None:
-                with vel_jog_lock:
-                    vel_jog["cmd"] = (sender, arm, vec, label)
-                    thread = vel_jog["thread"]
-                    if thread is not None and thread.is_alive():
-                        _set_vel_status(True, f"jogging {label}")
-                        return  # the running loop picks up the new command
-                    stop = threading.Event()
-                    thread = threading.Thread(target=_vel_jog_loop, args=(stop,), daemon=True)
-                    vel_jog["thread"], vel_jog["stop"] = thread, stop
-                    thread.start()
-                _set_vel_status(True, f"jogging {label} (정지로 멈춤)")
-
-            def _vel_jog_stop() -> None:
-                with vel_jog_lock:
-                    vel_jog["cmd"] = None
-                    stop = vel_jog["stop"]
-                    if stop is not None:
-                        stop.set()
-                    thread = vel_jog["thread"]
-                    if thread is not None and thread.is_alive():
-                        thread.join(timeout=1.0)
-                    vel_jog["thread"], vel_jog["stop"] = None, None
-                _set_vel_status(True, "stopped")
-
-            with server.gui.add_folder("관절 속도"):
-                jv_speed = server.gui.add_slider("deg/s", min=0.5, max=10.0, step=0.5, initial_value=3.0)
-
-                def _send_joint_vel(joint_index: int, sign: float) -> None:
-                    vel = [0.0] * 6
-                    vel[joint_index] = sign * float(jv_speed.value)
-                    arrow = "+" if sign > 0 else "−"
-                    _vel_jog_start(
-                        safety.send_joint_velocity, vel_arm.value, tuple(vel),
-                        f"{vel_arm.value} J{joint_index + 1}{arrow} {float(jv_speed.value):g}deg/s",
-                    )
-
-                def _add_joint_vel_row(joint_index: int) -> None:
-                    group = server.gui.add_button_group("", ("-", _nudge_label(f"J{joint_index + 1}"), "+"))
-
-                    @group.on_click
-                    def _(_: Any, group: Any = group, joint_index: int = joint_index) -> None:
-                        if group.value == "-":
-                            _send_joint_vel(joint_index, -1.0)
-                        elif group.value == "+":
-                            _send_joint_vel(joint_index, 1.0)
-
-                for _vel_joint_index in range(6):
-                    _add_joint_vel_row(_vel_joint_index)
-                jv_stop = server.gui.add_button("정지 (Stop)", color="red")
-
-                @jv_stop.on_click
-                def _(_: Any) -> None:
-                    _vel_jog_stop()
-
-            with server.gui.add_folder("TCP 트위스트"):
-                tw_frame = server.gui.add_button_group("Frame", ("stand", "local"))
-                tw_lin = server.gui.add_slider("Linear m/s", min=0.005, max=0.05, step=0.005, initial_value=0.02)
-                tw_ang = server.gui.add_slider("Angular rad/s", min=0.02, max=0.2, step=0.02, initial_value=0.1)
-                _twist_axes = (("X", 0, False), ("Y", 1, False), ("Z", 2, False),
-                               ("Rx", 3, True), ("Ry", 4, True), ("Rz", 5, True))
-
-                def _send_twist(label: str, axis_index: int, angular: bool, sign: float) -> None:
-                    twist = [0.0] * 6
-                    twist[axis_index] = sign * (float(tw_ang.value) if angular else float(tw_lin.value))
-                    sender = (
-                        safety.send_tcp_twist_local if tw_frame.value == "local"
-                        else safety.send_tcp_twist_stand
-                    )
-                    arrow = "+" if sign > 0 else "−"
-                    _vel_jog_start(
-                        sender, vel_arm.value, tuple(twist),
-                        f"{vel_arm.value} {tw_frame.value} {label}{arrow}",
-                    )
-
-                def _add_twist_row(label: str, axis_index: int, angular: bool) -> None:
-                    group = server.gui.add_button_group("", ("-", _nudge_label(label), "+"))
-
-                    @group.on_click
-                    def _(_: Any, group: Any = group, label: str = label, axis_index: int = axis_index, angular: bool = angular) -> None:
-                        if group.value == "-":
-                            _send_twist(label, axis_index, angular, -1.0)
-                        elif group.value == "+":
-                            _send_twist(label, axis_index, angular, 1.0)
-
-                for _tw_label, _tw_index, _tw_angular in _twist_axes:
-                    _add_twist_row(_tw_label, _tw_index, _tw_angular)
-                tw_stop = server.gui.add_button("정지 (Stop)", color="red")
-
-                @tw_stop.on_click
-                def _(_: Any) -> None:
-                    _vel_jog_stop()
-
         with _move_tabs.add_tab("TCP PTP"):
             handles["tcp_ptp_note"] = server.gui.add_text(
                 "TCP PTP",
@@ -2635,7 +3024,7 @@ def build_gui(
                     )
                     delta = [0.0] * 6
                     delta[axis_index] = sign * step
-                    ok, message = _apply_tcp_delta_and_send_pose_target(
+                    ok, message = _apply_tcp_pose_step_and_send_pose_target(
                         safety, handles["scene"], arm_sel, tuple(delta), frame_mode  # type: ignore[arg-type]
                     )
                     handles["tcp_status"].value = ("OK: " if ok else "BLOCKED: ") + message
@@ -2689,7 +3078,7 @@ def build_gui(
                     for arm, raw in edited:
                         delta = [0.0] * 6
                         delta[axis_index] = math.radians(raw) if angular else raw * 0.001
-                        if not _apply_tcp_delta_to_target(handles["scene"], arm, tuple(delta), frame_mode):  # type: ignore[arg-type]
+                        if not _apply_tcp_pose_step_to_target(handles["scene"], arm, tuple(delta), frame_mode):  # type: ignore[arg-type]
                             handles["tcp_status"].value = f"BLOCKED: {arm} TCP target unavailable"
                             return
                         scope_arms.append(arm)
@@ -2807,147 +3196,6 @@ def build_gui(
 
     with tabs.add_tab("고급"):
         _adv_tabs = server.gui.add_tab_group()
-        with _adv_tabs.add_tab("Circle"):
-            c_diameter = server.gui.add_slider("Diameter m", min=0.02, max=0.20, step=0.01, initial_value=0.15)
-            c_period = server.gui.add_slider("Period s", min=3.0, max=16.0, step=0.5, initial_value=4.0)
-            c_plane = server.gui.add_button_group("Plane", ("xy", "xz", "yz"))
-            c_start = server.gui.add_button("Start circle (both arms)")
-            c_stop = server.gui.add_button("Stop circle")
-            # Start greys out when the TCP/Cartesian gate is closed; Stop always
-            # stays live so the operator can halt a running circle.
-            handles["circle_start_button"] = c_start
-            handles["circle_status"] = server.gui.add_text("Circle status", initial_value="idle", disabled=True)
-            # Per-run stop event stored WITH its thread (not a single shared Event):
-            # Start joins any prior thread before launching, so a quick Stop→Start no
-            # longer hits "already running" and there is no shared-event clear/recheck
-            # race between an outgoing thread and the incoming one.
-            circle_state: dict[str, Any] = {"thread": None, "stop": None}
-
-            def _circle_loop(diameter: float, period: float, plane: str, stop_event: threading.Event) -> None:
-                # Hold the command-source lease for the whole circle so the keep-
-                # alive re-sends carry a FIXED seq. Without a held lease, send()
-                # brackets every packet with Acquire/Release and re-issues a fresh
-                # seq each time (so one-shot commands clear the Acquire seq); for a
-                # streaming circle that fresh seq makes the server treat every
-                # 0.3 s keep-alive as a NEW command and re-init the circle to the
-                # current TCP — the arm only ever traces the first tangent step and
-                # drifts in a straight line. Holding the lease makes bracket=False,
-                # so the seq stays fixed: the server accepts ONE circle command and
-                # re-sends (same seq) are dropped as harmless keep-alives while the
-                # long timeout keeps the single command tracing the full circle.
-                #
-                # Acquire BEFORE ArmMotion/build so seq order is acquire < ArmMotion
-                # < circle (the server drops any command whose seq <= the last
-                # accepted seq). Only release a lease we took here, so an operator's
-                # explicit "Take control" is left untouched.
-                client = safety.command_client
-                took_lease = not client.hold_lease
-                if took_lease:
-                    client.acquire_lease()
-                try:
-                    safety.send_lifecycle("ArmMotion")
-                    time.sleep(0.1)
-                    ok, message, packet = safety.build_circle_packet(
-                        diameter, period, arm="both", plane=plane, repeat=200
-                    )
-                    if not ok or packet is None:
-                        handles["circle_status"].value = "BLOCKED: " + message
-                        return
-                    handles["circle_status"].value = "running: " + message
-                    while not stop_event.is_set():
-                        client.send(packet)
-                        stop_event.wait(0.3)
-                    client.send_lifecycle("Hold")
-                finally:
-                    if took_lease:
-                        client.release_lease()
-
-            @c_start.on_click
-            def _(_: Any) -> None:
-                # Cleanly tear down any prior run BEFORE starting: signal its own
-                # stop event and join so it has released the lease and sent Hold.
-                existing, existing_stop = circle_state["thread"], circle_state["stop"]
-                if existing is not None and existing.is_alive():
-                    if existing_stop is not None:
-                        existing_stop.set()
-                    existing.join(timeout=1.5)
-                reason = safety.tcp_command_disabled_reason()
-                if reason:
-                    handles["circle_status"].value = "BLOCKED: " + reason
-                    return
-                stop_event = threading.Event()
-                thread = threading.Thread(
-                    target=_circle_loop,
-                    args=(float(c_diameter.value), float(c_period.value), str(c_plane.value), stop_event),
-                    daemon=True,
-                )
-                circle_state["thread"], circle_state["stop"] = thread, stop_event
-                thread.start()
-                handles["circle_status"].value = "starting..."
-
-            @c_stop.on_click
-            def _(_: Any) -> None:
-                stop_event = circle_state["stop"]
-                if stop_event is not None:
-                    stop_event.set()
-                handles["circle_status"].value = "stopped"
-
-        with _adv_tabs.add_tab("Delta"):
-            handles["tcp_debug_note"] = server.gui.add_text(
-                "Low-level Delta Debug",
-                initial_value="Raw TcpDeltaLocal/Stand. Usually not used for normal GUI target moves.",
-                disabled=True,
-            )
-            handles["tcp_debug_status"] = server.gui.add_text(
-                "Delta debug status",
-                initial_value="Raw TcpDeltaLocal/TcpDeltaStand debug controls",
-                disabled=True,
-            )
-            tcp_debug_arm_group = server.gui.add_button_group("Arm", ("left", "right"))
-
-            def _send_low_level_delta(delta: tuple[float, float, float, float, float, float]) -> None:
-                arm = tcp_debug_arm_group.value
-                frame_mode = _tcp_frame_mode(handles)
-                if frame_mode == _TCP_FRAME_LOCAL:
-                    ok, message = safety.send_tcp_delta_local(arm, delta)
-                else:
-                    ok, message = safety.send_tcp_delta_stand(arm, delta)
-                if ok:
-                    _apply_tcp_delta_to_target(handles["scene"], arm, delta, frame_mode)
-                status = ("OK: " if ok else "BLOCKED: ") + message
-                handles["tcp_debug_status"].value = status
-                handles["tcp_status"].value = status
-
-            def _add_low_level_delta_button(label: str, axis_index: int, sign: float, angular: bool = False) -> None:
-                button = server.gui.add_button(label)
-                handles["tcp_pose_buttons"].append(button)
-
-                @button.on_click
-                def _(_: Any, axis_index: int = axis_index, sign: float = sign, angular: bool = angular) -> None:
-                    step = _angular_step_radians(float(angular_step.value)) if angular else _linear_step_meters(float(linear_step.value))
-                    delta = [0.0] * 6
-                    delta[axis_index] = sign * step
-                    _send_low_level_delta(tuple(delta))  # type: ignore[arg-type]
-
-            for label, index, sign in (
-                ("+X", 0, 1.0),
-                ("-X", 0, -1.0),
-                ("+Y", 1, 1.0),
-                ("-Y", 1, -1.0),
-                ("+Z", 2, 1.0),
-                ("-Z", 2, -1.0),
-            ):
-                _add_low_level_delta_button(label, index, sign)
-            for label, index, sign in (
-                ("+roll", 3, 1.0),
-                ("-roll", 3, -1.0),
-                ("+pitch", 4, 1.0),
-                ("-pitch", 4, -1.0),
-                ("+yaw", 5, 1.0),
-                ("-yaw", 5, -1.0),
-            ):
-                _add_low_level_delta_button(label, index, sign, angular=True)
-
         with _adv_tabs.add_tab("Debug"):
             handles["tick"] = server.gui.add_number("tick", initial_value=0, disabled=True)
             handles["scene_assets"] = server.gui.add_text(
@@ -3368,6 +3616,43 @@ def _update_lease_owner(
         handle.value = f"held by {owner} — stop or release it before the GUI can take control"
 
 
+def _update_stereo_boxes(handles: dict[str, Any]) -> None:
+    """검출된 박스(stereo.boxes, T_stand)를 stand 좌표에 wireframe으로 렌더."""
+    server = handles.get("_server")
+    store = handles.get("_stereo_store")
+    toggle = handles.get("pc_enable")
+    if server is None or store is None or toggle is None:
+        return
+    hs = handles.setdefault("_box_handles", {})
+    if not toggle.value:
+        for h in hs.values():
+            try:
+                h.visible = False
+            except Exception:
+                pass
+        return
+    boxes, _seq = store.latest_boxes()
+    colors = [(40, 220, 80), (240, 150, 40), (80, 160, 240), (230, 60, 200)]
+    seen = set()
+    for i, b in enumerate(boxes[:4]):
+        T = b["T"]; pos = tuple(float(v) for v in T[:3, 3])
+        wxyz = tuple(float(v) for v in mat_to_wxyz(T[:3, :3]))
+        dims = tuple(float(v) for v in b["dims"])
+        name = f"box{i}"; seen.add(name)
+        if name in hs:
+            h = hs[name]; h.position = pos; h.wxyz = wxyz; h.visible = True
+        else:
+            hs[name] = server.scene.add_box(
+                f"/stereo_box_{i}", color=colors[i % 4], dimensions=dims,
+                wireframe=True, position=pos, wxyz=wxyz)
+    for name, h in hs.items():
+        if name not in seen:
+            try:
+                h.visible = False
+            except Exception:
+                pass
+
+
 def _update_stereo_cloud(handles: dict[str, Any]) -> None:
     """stereo_worker 클라우드를 /stereo_cam(=T_stand_cam) 프레임의 자식으로 렌더.
     클라우드는 카메라 좌표계 점이고, 부모 프레임이 stand 배치를 담당. 캘리브 모드에선
@@ -3449,7 +3734,10 @@ def update_gui(
     store: StateStore,
     overlay_store: CircleOverlayStore | None = None,
 ) -> None:
-    _update_stereo_cloud(handles)  # 로봇 상태와 무관 — 항상 갱신
+    debug_active = _debug_mode_active(handles)
+    if not debug_active:
+        _update_stereo_cloud(handles)  # 로봇 상태와 무관 — 항상 갱신
+        _update_stereo_boxes(handles)  # 검출된 박스 렌더
     disabled_states = safety.control_disabled_states()
     disabled_reasons = safety.control_disabled_reasons()
     for mode, button in handles.get("lifecycle_buttons", {}).items():
@@ -3462,17 +3750,9 @@ def update_gui(
         _set_disabled(button, disabled_states.get("tcp_pose", True))
     for button in handles.get("tcp_linear_buttons", ()):
         _set_disabled(button, disabled_states.get("tcp_linear", True))
-    # Single buttons that can be greyed (viser button_groups cannot).
-    if "circle_start_button" in handles:
-        _set_disabled(handles["circle_start_button"], disabled_states.get("circle", True))
-    # Button-group tabs (jog/velocity/twist) cannot be greyed in viser, so reflect
-    # the live gate reason into their status line proactively — never clobbering a
-    # recent click result, only the prior DISABLED note.
+    # Button-group tabs cannot be greyed in viser, so reflect the live gate
+    # reason into their status line proactively.
     _reflect_gate_reason(handles.get("jog_status"), disabled_reasons.get("jog"))
-    _reflect_gate_reason(
-        handles.get("velocity_status"),
-        disabled_reasons.get("velocity") or disabled_reasons.get("twist"),
-    )
 
     if "mode_buttons" in handles:
         _update_desired_mode_buttons(handles, safety.desired_mode)
@@ -3495,9 +3775,11 @@ def update_gui(
         _refresh_tcp_ptp_axis_fields(handles)
     readiness = safety.readiness()
     _update_lease_owner(handles, latest, safety.command_client.source_id, held=safety.command_client.hold_lease)
-    _update_circle_overlay_gui(handles, overlay_store)
+    if not debug_active:
+        _update_circle_overlay_gui(handles, overlay_store)
     if latest is None:
         _update_operator_monitors(handles, None, stale=True)
+        _update_debug_plots(handles, None, stale=True)
         if "status_summary" in handles:
             handles["status_summary"].content = _status_summary_html(
                 connection="disconnected",
@@ -3505,9 +3787,14 @@ def update_gui(
                 readiness_go=False,
                 motion="unknown",
                 fault_active=False,
-            )
+        )
         handles["connection"].value = "disconnected/stale"
         handles["readiness"].value = readiness.no_go_reason or "No-Go: no state stream"
+        if debug_active:
+            handles["packets"].value = f"{store.received_packets} received / {store.invalid_packets} invalid"
+            _set_debug_mode_active(handles, True)
+            return
+        _set_debug_mode_active(handles, False)
         if "self_collision" in handles:
             handles["self_collision"].value = _format_self_collision_status(None, stale=True)
         if "floor_constraint" in handles:
@@ -3599,6 +3886,37 @@ def update_gui(
         handles["self_collision"].value = _format_self_collision_status(latest, stale=stale)
     if "floor_constraint" in handles:
         handles["floor_constraint"].value = _format_floor_constraint_status(latest, stale=stale)
+    if "roi_box" in handles:
+        handles["roi_box"].value = _format_roi_box_status(latest, stale=stale)
+    if "user_floor_constraint" in handles:
+        handles["user_floor_constraint"].value = _format_user_floor_constraint_status(latest, stale=stale)
+    if debug_active:
+        if "fk_status" in handles:
+            handles["fk_status"].value = _format_fk_status(latest, stale=stale)
+        if "tcp_tracking" in handles:
+            handles["tcp_tracking"].value = _format_tcp_tracking_status(
+                latest,
+                stale=stale,
+                display_mode=_tcp_display_mode(handles),
+            )
+        if "pgmode_status" in handles:
+            handles["pgmode_status"].value = _format_pgmode_status(
+                latest,
+                stale=stale,
+                display_mode=_tcp_display_mode(handles),
+            )
+        if "cartesian_solve" in handles:
+            handles["cartesian_solve"].value = _format_cartesian_solve_status(latest, stale=stale)
+        if "tcp_status" in handles:
+            handles["tcp_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
+        if "tcp_linear_status" in handles:
+            handles["tcp_linear_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
+        _update_operator_monitors(handles, latest, stale=stale)
+        _update_debug_plots(handles, latest, stale=stale)
+        handles["tick"].value = latest.tick
+        handles["packets"].value = f"{store.received_packets} received / {store.invalid_packets} invalid"
+        _set_debug_mode_active(handles, True)
+        return
     _update_floor_panel(handles, latest)
     if "roi_box" in handles:
         handles["roi_box"].value = _format_roi_box_status(latest, stale=stale)
@@ -3675,6 +3993,8 @@ def update_gui(
     if "tcp_linear_status" in handles:
         handles["tcp_linear_status"].value = _format_tcp_command_status(safety, latest, stale=stale)
     _update_operator_monitors(handles, latest, stale=stale)
+    _update_debug_plots(handles, latest, stale=stale)
+    _set_debug_mode_active(handles, False)
     _push_gripper_percent(handles, latest)
     _update_gripper_feedback(handles, latest, stale=stale)
     update_scene_markers(handles.get("scene", {}), latest, tcp_display_mode=_tcp_display_mode(handles))
@@ -3845,6 +4165,8 @@ def main(argv: list[str] | None = None) -> None:
     port = _env_int("RB_GUI_PORT", 8080)
     state_host = os.environ.get("RB_GUI_STATE_BIND", "0.0.0.0")
     state_port = _env_int("RB_GUI_STATE_PORT", 50110)
+    scope_host = os.environ.get("RB_GUI_SCOPE_BIND", "0.0.0.0")
+    scope_port = _env_int("RB_GUI_SCOPE_PORT", DEFAULT_SCOPE_PORT)
     command_host = os.environ.get("RB_GUI_COMMAND_HOST", "127.0.0.1")
     command_port = _env_int("RB_GUI_COMMAND_PORT", 50010)
     observed_mode_raw = os.environ.get("RB_GUI_OBSERVED_MODE", "mock")
@@ -3853,17 +4175,20 @@ def main(argv: list[str] | None = None) -> None:
     ops_available = os.environ.get("RB_GUI_OPS_AVAILABLE", "0") == "1"
     init_left_joints = _env_joint6("RB_GUI_INIT_LEFT_JOINTS", _DEFAULT_INIT_LEFT_JOINTS_DEG)
     init_right_joints = _env_joint6("RB_GUI_INIT_RIGHT_JOINTS", _DEFAULT_INIT_RIGHT_JOINTS_DEG)
-    # Persisted InitMotion pose (set from a waypoint via the GUI) wins over
+    # Persisted init-motion pose (set from a waypoint via the GUI) wins over
     # env/default so it survives restarts without editing code.
     saved_left_init, saved_right_init = _load_init_joints()
     if saved_left_init is not None and saved_right_init is not None:
         init_left_joints, init_right_joints = saved_left_init, saved_right_init
-        print(f"rb_servo_gui: loaded InitMotion pose from {_init_motion_path()}", flush=True)
+        print(f"rb_servo_gui: loaded init-motion pose from {_init_motion_path()}", flush=True)
     init_motion_timeout_sec = _env_float("RB_GUI_INIT_MOTION_TIMEOUT_SEC", 10.0)
 
     store = StateStore()
     receiver = StateReceiver(store, host=state_host, port=state_port)
     receiver.start()
+    scope_store = ScopeStore()
+    scope_receiver = ScopeReceiver(scope_store, host=scope_host, port=scope_port)
+    scope_receiver.start()
     # 스테레오 pointcloud 워커(camera_server 컨테이너) 구독. 고급→Pointcloud 토글로 표시.
     stereo_store = StereoCloudStore()
     stereo_endpoint = os.environ.get("RB_GUI_STEREO_CLOUD_ENDPOINT", "tcp://127.0.0.1:5601")
@@ -3894,7 +4219,13 @@ def main(argv: list[str] | None = None) -> None:
     # kept). Done after ViserServer init (post client-autobuild) and before clients
     # connect. See _disable_viser_wasd_keys.
     _disable_viser_wasd_keys()
-    handles = build_gui(server, safety, store, overlay_store=overlay_store)
+    handles = build_gui(
+        server,
+        safety,
+        store,
+        overlay_store=overlay_store,
+        scope_store=scope_store,
+    )
     handles["_stereo_store"] = stereo_store
     overlay_status = (
         f", circle overlay UDP {circle_overlay_bind[0]}:{circle_overlay_bind[1]}"
@@ -3902,7 +4233,8 @@ def main(argv: list[str] | None = None) -> None:
         else ", circle overlay disabled"
     )
     print(
-        f"rb_servo_gui listening on http://{host}:{port}, UDP state {state_host}:{state_port}{overlay_status}",
+        f"rb_servo_gui listening on http://{host}:{port}, UDP state {state_host}:{state_port}, "
+        f"scope {scope_host}:{scope_port}{overlay_status}",
         flush=True,
     )
 
@@ -3912,6 +4244,7 @@ def main(argv: list[str] | None = None) -> None:
             time.sleep(0.1)
     finally:
         receiver.stop()
+        scope_receiver.stop()
         stereo_receiver.stop()
         if overlay_receiver is not None:
             overlay_receiver.stop()

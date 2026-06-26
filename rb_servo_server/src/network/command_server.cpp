@@ -201,12 +201,6 @@ bool readOptionalWrench6D(const json& object, const char* key, Wrench6D* out, bo
     });
 }
 
-bool readOptionalVec6(const json& object, const char* key, Vec6* out, bool* present) {
-    return readOptionalArray6(object, key, out, present, [](const std::array<double, 6>& values, Vec6* target) {
-        *target = Vec6{values[0], values[1], values[2], values[3], values[4], values[5]};
-    });
-}
-
 bool parseForceControlObject(const json& object, ForceControlCommand* cmd) {
     const auto force_it = object.find("force_control");
     if (force_it == object.end()) return true;
@@ -254,50 +248,6 @@ bool parseLinearMoveOrientationMode(const std::string& value, LinearMoveOrientat
     return false;
 }
 
-bool parseCirclePlane(const std::string& value, TcpCirclePlane* out) {
-    std::string normalized = value;
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    if (normalized == "xy") {
-        if (out) *out = TcpCirclePlane::XY;
-        return true;
-    }
-    if (normalized == "xz") {
-        if (out) *out = TcpCirclePlane::XZ;
-        return true;
-    }
-    if (normalized == "yz") {
-        if (out) *out = TcpCirclePlane::YZ;
-        return true;
-    }
-    return false;
-}
-
-bool parseCircleCenterMode(const std::string& value, TcpCircleCenterMode* out) {
-    std::string normalized = value;
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    if (normalized == "start_on_circle") {
-        if (out) *out = TcpCircleCenterMode::StartOnCircle;
-        return true;
-    }
-    return false;
-}
-
-bool parseCircleFrame(const std::string& value, TcpCircleFrame* out) {
-    std::string normalized = value;
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    if (normalized == "stand") {
-        if (out) *out = TcpCircleFrame::Stand;
-        return true;
-    }
-    return false;
-}
-
 bool parseArmId(const std::string& value, ArmId* out) {
     std::string normalized = value;
     std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
@@ -309,26 +259,6 @@ bool parseArmId(const std::string& value, ArmId* out) {
     }
     if (normalized == "right" || normalized == "right_robot") {
         if (out) *out = ArmId::Right;
-        return true;
-    }
-    return false;
-}
-
-bool parseCircleTrackTrackingSource(const std::string& value, TcpCircleTrackTrackingSource* out) {
-    std::string normalized = value;
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    if (normalized == "auto") {
-        if (out) *out = TcpCircleTrackTrackingSource::Auto;
-        return true;
-    }
-    if (normalized == "tcp_actual_stand" || normalized == "actual") {
-        if (out) *out = TcpCircleTrackTrackingSource::TcpActualStand;
-        return true;
-    }
-    if (normalized == "tcp_ref_stand" || normalized == "reference" || normalized == "ref") {
-        if (out) *out = TcpCircleTrackTrackingSource::TcpRefStand;
         return true;
     }
     return false;
@@ -358,41 +288,6 @@ bool readRequiredPositiveNumber(
     bool present = false;
     if (!readOptionalPositiveNumber(object, key, out, &present)) return false;
     return present;
-}
-
-bool readRequiredNonNegativeNumber(
-    const json& object,
-    const char* key,
-    double* out
-) {
-    const auto it = object.find(key);
-    if (it == object.end()) return false;
-    double value = 0.0;
-    if (!isFiniteNumber(*it, &value) || value < 0.0) return false;
-    if (out) *out = value;
-    return true;
-}
-
-bool readRequiredPoint3(const json& object, const char* key, std::array<double, 3>* out) {
-    const auto it = object.find(key);
-    if (it == object.end()) return false;
-
-    std::array<double, 3> values{};
-    if (it->is_array()) {
-        if (it->size() != values.size()) return false;
-        for (size_t i = 0; i < values.size(); ++i) {
-            if (!isFiniteNumber((*it)[i], &values[i])) return false;
-        }
-    } else if (it->is_object()) {
-        const json& point = *it;
-        if (!readRequiredNumber(point, "x", &values[0])) return false;
-        if (!readRequiredNumber(point, "y", &values[1])) return false;
-        if (!readRequiredNumber(point, "z", &values[2])) return false;
-    } else {
-        return false;
-    }
-    if (out) *out = values;
-    return true;
 }
 
 bool readOptionalLinearMoveFields(const json& object, ArmCommand* out) {
@@ -436,166 +331,21 @@ bool readOptionalLinearMoveFields(const json& object, ArmCommand* out) {
     return true;
 }
 
-bool readOptionalCircleTrackFields(const json& object, ArmCommand* out) {
-    const bool circle_track_fields_present =
-        object.contains("center_stand") ||
-        object.contains("radius_m") ||
-        object.contains("period_sec") ||
-        object.contains("repeat") ||
-        object.contains("plane") ||
-        object.contains("start_phase_rad") ||
-        object.contains("orientation_hold") ||
-        object.contains("feedback_kp_pos") ||
-        object.contains("feedback_kp_ori") ||
-        object.contains("max_linear_m_s") ||
-        object.contains("max_angular_rad_s") ||
-        object.contains("tracking_source");
-    if (!circle_track_fields_present) return true;
-
-    TcpCircleTrackCommand parsed = out->tcp_circle_track;
-    if (!readRequiredPoint3(object, "center_stand", &parsed.center_stand)) return false;
-    if (!readRequiredPositiveNumber(object, "radius_m", &parsed.radius_m)) return false;
-    if (!readRequiredPositiveNumber(object, "period_sec", &parsed.period_sec)) return false;
-
-    const auto repeat_it = object.find("repeat");
-    if (repeat_it == object.end() || !repeat_it->is_number_integer()) return false;
-    parsed.repeat = repeat_it->get<int>();
-    if (parsed.repeat <= 0) return false;
-
-    if (!readRequiredNumber(object, "start_phase_rad", &parsed.start_phase_rad)) return false;
-    if (!readOptionalBool(object, "orientation_hold", &parsed.orientation_hold)) return false;
-    if (!object.contains("orientation_hold")) return false;
-    if (!readRequiredNonNegativeNumber(object, "feedback_kp_pos", &parsed.feedback_kp_pos)) return false;
-    if (!readRequiredNonNegativeNumber(object, "feedback_kp_ori", &parsed.feedback_kp_ori)) return false;
-    if (!readRequiredPositiveNumber(object, "max_linear_m_s", &parsed.max_linear_m_s)) return false;
-    if (!readRequiredPositiveNumber(object, "max_angular_rad_s", &parsed.max_angular_rad_s)) return false;
-
-    std::string value;
-    if (!readOptionalString(object, "plane", &value) || value.empty()) return false;
-    if (!parseCirclePlane(value, &parsed.plane)) return false;
-    value.clear();
-    if (!readOptionalString(object, "tracking_source", &value) || value.empty()) return false;
-    if (!parseCircleTrackTrackingSource(value, &parsed.tracking_source)) return false;
-
-    out->tcp_circle_track = parsed;
-    out->has_tcp_circle_track = true;
-    return true;
-}
-
-bool readOptionalCircleMoveFields(const json& object, ArmCommand* out) {
-    const bool circle_fields_present =
-        object.contains("diameter_m") ||
-        object.contains("period_sec") ||
-        object.contains("repeat") ||
-        object.contains("phase_advance_sec") ||
-        object.contains("plane") ||
-        object.contains("center_mode") ||
-        object.contains("frame");
-    if (!circle_fields_present) return true;
-
-    bool present = false;
-    double number = out->tcp_circle_move.diameter_m;
-    if (!readOptionalPositiveNumber(object, "diameter_m", &number, &present)) return false;
-    if (present) {
-        out->tcp_circle_move.diameter_m = number;
-        out->has_tcp_circle_move = true;
-    }
-    number = out->tcp_circle_move.period_sec;
-    if (!readOptionalPositiveNumber(object, "period_sec", &number, &present)) return false;
-    if (present) {
-        out->tcp_circle_move.period_sec = number;
-        out->has_tcp_circle_move = true;
-    }
-    const auto phase_advance_it = object.find("phase_advance_sec");
-    if (phase_advance_it != object.end()) {
-        number = out->tcp_circle_move.phase_advance_sec;
-        if (!isFiniteNumber(*phase_advance_it, &number)) return false;
-        if (!std::isfinite(number) || number < 0.0) return false;
-        out->tcp_circle_move.phase_advance_sec = number;
-        out->has_tcp_circle_move = true;
-    }
-
-    const auto repeat_it = object.find("repeat");
-    if (repeat_it != object.end()) {
-        if (!repeat_it->is_number_integer()) return false;
-        const int repeat = repeat_it->get<int>();
-        if (repeat <= 0) return false;
-        out->tcp_circle_move.repeat = repeat;
-        out->has_tcp_circle_move = true;
-    }
-
-    std::string value;
-    if (!readOptionalString(object, "plane", &value)) return false;
-    if (!value.empty()) {
-        if (!parseCirclePlane(value, &out->tcp_circle_move.plane)) return false;
-        out->has_tcp_circle_move = true;
-    }
-    value.clear();
-    if (!readOptionalString(object, "center_mode", &value)) return false;
-    if (!value.empty()) {
-        if (!parseCircleCenterMode(value, &out->tcp_circle_move.center_mode)) return false;
-        out->has_tcp_circle_move = true;
-    }
-    value.clear();
-    if (!readOptionalString(object, "orientation_mode", &value)) return false;
-    if (!value.empty()) {
-        if (!parseLinearMoveOrientationMode(value, &out->tcp_circle_move.orientation_mode)) return false;
-        out->has_tcp_circle_move = true;
-    }
-    value.clear();
-    if (!readOptionalString(object, "frame", &value)) return false;
-    if (!value.empty()) {
-        if (!parseCircleFrame(value, &out->tcp_circle_move.frame)) return false;
-        out->has_tcp_circle_move = true;
-    }
-    if (out->has_tcp_circle_move) {
-        return out->tcp_circle_move.diameter_m > 0.0 &&
-               out->tcp_circle_move.period_sec > 0.0 &&
-               out->tcp_circle_move.repeat > 0 &&
-               out->tcp_circle_move.phase_advance_sec <=
-                   0.25 * out->tcp_circle_move.period_sec + 1e-12;
-    }
-    return true;
-}
-
 bool requiresPayload(ControlMode mode) {
     return mode == ControlMode::JointTarget ||
-           mode == ControlMode::InitMotion ||
-           mode == ControlMode::JointVelocity ||
            mode == ControlMode::TcpPoseTarget ||
-           mode == ControlMode::TcpLinearMove ||
-           mode == ControlMode::TcpCircleMove ||
-           mode == ControlMode::TcpCircleTrack ||
-           mode == ControlMode::TcpDeltaStand ||
-           mode == ControlMode::TcpDeltaLocal ||
-           mode == ControlMode::TcpTwistStand ||
-           mode == ControlMode::TcpTwistLocal;
+           mode == ControlMode::TcpLinearMove;
 }
 
 bool hasRequiredPayload(const ArmCommand& command) {
     switch (command.mode) {
         case ControlMode::JointTarget:
-        case ControlMode::InitMotion:
             return command.has_joint_target;
-        case ControlMode::JointVelocity:
-            return command.has_joint_velocity;
         case ControlMode::TcpPoseTarget:
             return command.has_tcp_target;
         case ControlMode::TcpLinearMove:
             return command.has_tcp_target &&
                    (command.has_linear_move_duration || command.has_linear_move_linear_speed);
-        case ControlMode::TcpCircleMove:
-            return command.has_tcp_circle_move;
-        case ControlMode::TcpCircleTrack:
-            return command.has_tcp_circle_track;
-        case ControlMode::TcpDeltaStand:
-            return command.has_tcp_delta_stand;
-        case ControlMode::TcpDeltaLocal:
-            return command.has_tcp_delta_local;
-        case ControlMode::TcpTwistStand:
-            return command.has_tcp_twist_stand;
-        case ControlMode::TcpTwistLocal:
-            return command.has_tcp_twist_local;
         default:
             return true;
     }
@@ -621,16 +371,8 @@ bool commandRequiresLease(ControlMode mode) {
     return mode == ControlMode::ArmMotion ||
            mode == ControlMode::DisarmMotion ||
            mode == ControlMode::JointTarget ||
-           mode == ControlMode::InitMotion ||
-           mode == ControlMode::JointVelocity ||
            mode == ControlMode::TcpPoseTarget ||
            mode == ControlMode::TcpLinearMove ||
-           mode == ControlMode::TcpCircleMove ||
-           mode == ControlMode::TcpCircleTrack ||
-           mode == ControlMode::TcpDeltaStand ||
-           mode == ControlMode::TcpDeltaLocal ||
-           mode == ControlMode::TcpTwistStand ||
-           mode == ControlMode::TcpTwistLocal ||
            mode == ControlMode::ResetFault ||
            mode == ControlMode::Freedrive;
 }
@@ -715,8 +457,11 @@ bool parseArmObject(
         bool present = false;
         if (!readOptionalJointArray(object, "q_target_deg", &out->q_target_deg, &present)) return false;
         out->has_joint_target = present;
-        if (!readOptionalJointArray(object, "dq_target_deg_s", &out->dq_target_deg_s, &present)) return false;
-        out->has_joint_velocity = present;
+        std::string joint_target_profile;
+        if (!readOptionalString(object, "joint_target_profile", &joint_target_profile)) return false;
+        if (!joint_target_profile.empty()) {
+            out->joint_target_profile = jointTargetProfileFromString(joint_target_profile);
+        }
         if (!readOptionalPose6D(object, "tcp_target_stand", &out->tcp_target_stand, &present)) return false;
         out->has_tcp_target = present;
         bool alias_present = false;
@@ -727,25 +472,7 @@ bool parseArmObject(
             out->tcp_target_stand = alias_target;
             out->has_tcp_target = true;
         }
-        if (!readOptionalPose6D(object, "tcp_delta_stand", &out->tcp_delta_stand, &present)) return false;
-        out->has_tcp_delta_stand = present;
-        if (!readOptionalPose6D(object, "tcp_delta_local", &out->tcp_delta_local, &present)) return false;
-        out->has_tcp_delta_local = present;
-        if (!readOptionalVec6(object, "tcp_twist_stand", &out->tcp_twist_stand, &present)) return false;
-        out->has_tcp_twist_stand = present;
-        if (!readOptionalVec6(object, "tcp_twist_local", &out->tcp_twist_local, &present)) return false;
-        out->has_tcp_twist_local = present;
-        if (!readOptionalVec6(object, "tcp_target_twist_stand", &out->tcp_target_twist_stand, &present)) return false;
-        out->has_tcp_target_twist_stand = present;
         if (!readOptionalLinearMoveFields(object, out)) return false;
-        if (out->mode == ControlMode::TcpCircleMove &&
-            !readOptionalCircleMoveFields(object, out)) {
-            return false;
-        }
-        if (out->mode == ControlMode::TcpCircleTrack &&
-            !readOptionalCircleTrackFields(object, out)) {
-            return false;
-        }
         if (!parseForceControlObject(object, &out->force_control)) return false;
     }
     if (out->timeout_sec <= 0.0 || !std::isfinite(out->timeout_sec)) return false;
@@ -1015,40 +742,23 @@ bool CommandServer::parseMessage(
         return false;
     }
 
-    if (!root.contains("left") && !root.contains("right") &&
-        default_mode == ControlMode::TcpCircleTrack) {
-        if (root_arm.empty()) return false;
-        ArmId selected_arm = ArmId::Left;
-        if (!parseArmId(root_arm, &selected_arm)) return false;
-
-        ArmCommand selected;
-        if (!parseArmObject(root, selected_arm, cmd.seq, receive_time_ns, default_mode, timeout_sec, &selected)) {
-            return false;
-        }
-        ArmCommand hold;
-        hold.arm_id = selected_arm == ArmId::Left ? ArmId::Right : ArmId::Left;
-        hold.seq = cmd.seq;
-        hold.host_time_ns = receive_time_ns;
-        hold.mode = ControlMode::Hold;
-        hold.timeout_sec = timeout_sec;
-        if (selected_arm == ArmId::Left) {
-            cmd.left = selected;
-            cmd.right = hold;
-        } else {
-            cmd.right = selected;
-            cmd.left = hold;
-        }
-    } else if (!root.contains("left") && !root.contains("right")) {
+    if (!root.contains("left") && !root.contains("right")) {
         bool present = false;
         if (!readOptionalJointArray(root, "q_target_deg", &cmd.left.q_target_deg, &present)) return false;
         cmd.left.has_joint_target = cmd.left.has_joint_target || present;
         cmd.right.q_target_deg = cmd.left.q_target_deg;
         cmd.right.has_joint_target = cmd.right.has_joint_target || present;
 
-        if (!readOptionalJointArray(root, "dq_target_deg_s", &cmd.left.dq_target_deg_s, &present)) return false;
-        cmd.left.has_joint_velocity = cmd.left.has_joint_velocity || present;
-        cmd.right.dq_target_deg_s = cmd.left.dq_target_deg_s;
-        cmd.right.has_joint_velocity = cmd.right.has_joint_velocity || present;
+        std::string joint_target_profile;
+        if (!readOptionalString(root, "joint_target_profile", &joint_target_profile)) return false;
+        if (!joint_target_profile.empty()) {
+            try {
+                cmd.left.joint_target_profile = jointTargetProfileFromString(joint_target_profile);
+            } catch (const std::exception&) {
+                return false;
+            }
+            cmd.right.joint_target_profile = cmd.left.joint_target_profile;
+        }
 
         if (!readOptionalPose6D(root, "tcp_target_stand", &cmd.left.tcp_target_stand, &present)) return false;
         cmd.left.has_tcp_target = cmd.left.has_tcp_target || present;
@@ -1063,31 +773,6 @@ bool CommandServer::parseMessage(
         cmd.right.tcp_target_stand = cmd.left.tcp_target_stand;
         cmd.right.has_tcp_target = cmd.right.has_tcp_target || present || alias_present;
 
-        if (!readOptionalPose6D(root, "tcp_delta_stand", &cmd.left.tcp_delta_stand, &present)) return false;
-        cmd.left.has_tcp_delta_stand = cmd.left.has_tcp_delta_stand || present;
-        cmd.right.tcp_delta_stand = cmd.left.tcp_delta_stand;
-        cmd.right.has_tcp_delta_stand = cmd.right.has_tcp_delta_stand || present;
-
-        if (!readOptionalPose6D(root, "tcp_delta_local", &cmd.left.tcp_delta_local, &present)) return false;
-        cmd.left.has_tcp_delta_local = cmd.left.has_tcp_delta_local || present;
-        cmd.right.tcp_delta_local = cmd.left.tcp_delta_local;
-        cmd.right.has_tcp_delta_local = cmd.right.has_tcp_delta_local || present;
-
-        if (!readOptionalVec6(root, "tcp_twist_stand", &cmd.left.tcp_twist_stand, &present)) return false;
-        cmd.left.has_tcp_twist_stand = cmd.left.has_tcp_twist_stand || present;
-        cmd.right.tcp_twist_stand = cmd.left.tcp_twist_stand;
-        cmd.right.has_tcp_twist_stand = cmd.right.has_tcp_twist_stand || present;
-
-        if (!readOptionalVec6(root, "tcp_twist_local", &cmd.left.tcp_twist_local, &present)) return false;
-        cmd.left.has_tcp_twist_local = cmd.left.has_tcp_twist_local || present;
-        cmd.right.tcp_twist_local = cmd.left.tcp_twist_local;
-        cmd.right.has_tcp_twist_local = cmd.right.has_tcp_twist_local || present;
-
-        if (!readOptionalVec6(root, "tcp_target_twist_stand", &cmd.left.tcp_target_twist_stand, &present)) return false;
-        cmd.left.has_tcp_target_twist_stand = cmd.left.has_tcp_target_twist_stand || present;
-        cmd.right.tcp_target_twist_stand = cmd.left.tcp_target_twist_stand;
-        cmd.right.has_tcp_target_twist_stand = cmd.right.has_tcp_target_twist_stand || present;
-
         if (!readOptionalLinearMoveFields(root, &cmd.left)) return false;
         cmd.right.linear_move_duration_sec = cmd.left.linear_move_duration_sec;
         cmd.right.linear_move_linear_speed_m_s = cmd.left.linear_move_linear_speed_m_s;
@@ -1099,17 +784,6 @@ bool CommandServer::parseMessage(
         cmd.right.has_linear_move_orientation_mode =
             cmd.right.has_linear_move_orientation_mode || cmd.left.has_linear_move_orientation_mode;
 
-        if (cmd.left.mode == ControlMode::TcpCircleMove) {
-            if (!readOptionalCircleMoveFields(root, &cmd.left)) return false;
-            cmd.right.tcp_circle_move = cmd.left.tcp_circle_move;
-            cmd.right.has_tcp_circle_move = cmd.right.has_tcp_circle_move || cmd.left.has_tcp_circle_move;
-        }
-
-        if (cmd.left.mode == ControlMode::TcpCircleTrack) {
-            if (!readOptionalCircleTrackFields(root, &cmd.left)) return false;
-            cmd.right.tcp_circle_track = cmd.left.tcp_circle_track;
-            cmd.right.has_tcp_circle_track = cmd.right.has_tcp_circle_track || cmd.left.has_tcp_circle_track;
-        }
     }
 
     if (requiresPayload(cmd.left.mode) && !hasRequiredPayload(cmd.left)) return false;

@@ -5,7 +5,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .models import StateSnapshot
 
@@ -17,8 +17,13 @@ class StateStore:
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
         self._latest: StateSnapshot | None = None
+        self._callbacks: list[Callable[[StateSnapshot], None]] = []
         self.invalid_packets = 0
         self.received_packets = 0
+
+    def add_update_callback(self, callback: Callable[[StateSnapshot], None]) -> None:
+        with self._lock:
+            self._callbacks.append(callback)
 
     def update_from_json_bytes(self, payload: bytes, *, received_monotonic: float | None = None) -> bool:
         try:
@@ -39,6 +44,12 @@ class StateStore:
         with self._lock:
             self._latest = snapshot
             self.received_packets += 1
+            callbacks = tuple(self._callbacks)
+        for callback in callbacks:
+            try:
+                callback(snapshot)
+            except Exception:
+                pass
         return True
 
     def latest(self) -> StateSnapshot | None:

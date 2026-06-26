@@ -69,7 +69,7 @@ class BoxDetector:
     H_LO, H_HI = 0.02, 0.25   # 테이블 위 높이 밴드 (m)
     MIN_AREA_PX = 800
     MAX_DIM = 0.55            # 클러스터 평면상 최대 변(이보다 크면 박스 아님)
-    FIT_MIN = 0.45            # ICP fitness 게이트
+    FIT_MIN = 0.50            # ICP fitness 게이트
     PLANE_REFRESH = 5.0
 
     def __init__(self, K, baseline, use_icp=True):
@@ -103,46 +103,65 @@ class BoxDetector:
         y = (self._vv - self.cy) / self.fy * z
         return np.stack([x, y, z], -1), valid
 
-    def _table_plane(self, P, valid, now):
-        """카메라 프레임 테이블 평면 (a,b,c,d), normal을 카메라쪽(up, n_z<0)으로."""
+    PLANE_THR = 0.012
+    N_PLANES = 2                 # 테이블 2개(가까운/먼, 비수평) 제거
+
+    def _fit_planes(self, P, valid, now):
+        """장면의 큰 평면 N개(테이블들)를 RANSAC 반복 제거. 캐시. normal은 up(n_z<0)."""
         if self._plane is not None and (now - self._plane_t) < self.PLANE_REFRESH:
             return self._plane
         pts = P[valid]
-        if len(pts) < 2000 or o3d is None:
+        if len(pts) < 3000 or o3d is None:
             return self._plane
-        pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts[::3].astype(np.float64)))
-        model, _ = pc.segment_plane(0.008, 3, 250)
-        n = np.array(model[:3]); nn = np.linalg.norm(n)
-        if nn < 1e-6:
-            return self._plane
-        model = np.array(model) / nn
-        if model[2] > 0:            # normal이 카메라쪽(-z, up)을 향하도록
-            model = -model
-        self._plane, self._plane_t = model, now
-        return model
+        rem = pts[::3].astype(np.float64)
+        planes = []
+        for _ in range(self.N_PLANES):
+            if len(rem) < 2000:
+                break
+            pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(rem))
+            model, inl = pc.segment_plane(self.PLANE_THR, 3, 250)
+            n = np.array(model[:3]); nn = np.linalg.norm(n)
+            if nn < 1e-6:
+                break
+            model = np.array(model) / nn
+            if model[2] > 0:        # up = 카메라쪽(-z)
+                model = -model
+            planes.append(model)
+            dist = np.abs(rem @ model[:3] + model[3])
+            rem = rem[dist > self.PLANE_THR]   # 이 평면 제거 후 다음 평면
+        if planes:
+            self._plane, self._plane_t = planes, now
+        return self._plane
 
     def detect(self, disp):
         if cv2 is None or o3d is None:
             return []
         now = time.time(); self._reload_cfg(now)
         P, valid = self._cam_points(disp)
-        plane = self._table_plane(P, valid, now)
-        if plane is None:
+        planes = self._fit_planes(P, valid, now)
+        if not planes:
             return []
-        n, d = plane[:3], plane[3]
-        h = P @ n + d                       # 테이블 위 높이 (up = n)
-        obj = (valid & (h > self.H_LO) & (h < self.H_HI)).astype(np.uint8)
+        # 평면별 높이 (organized). on_plane = 어느 평면에든 가까움. 박스 = 평면 위 밴드.
+        Hs = np.stack([P @ pl[:3] + pl[3] for pl in planes], 0)   # (K,H,W)
+        on_plane = (np.abs(Hs).min(0) < self.PLANE_THR)
+        above_band = ((Hs > self.H_LO) & (Hs < self.H_HI)).any(0)
+        obj = (valid & ~on_plane & above_band).astype(np.uint8)
         ncc, lab, stats, _ = cv2.connectedComponentsWithStats(obj, 8)
-        # 평면 접선 기저
-        ref = np.array([1.0, 0, 0]) if abs(n[0]) < 0.9 else np.array([0, 1.0, 0])
-        t1 = np.cross(n, ref); t1 /= np.linalg.norm(t1); t2 = np.cross(n, t1)
         out = []
         for cid in range(1, ncc):
             if stats[cid, cv2.CC_STAT_AREA] < self.MIN_AREA_PX:
                 continue
-            pts = P[lab == cid]; pts = pts[np.isfinite(pts).all(1)]
+            sel = (lab == cid)
+            pts = P[sel]; pts = pts[np.isfinite(pts).all(1)]
             if len(pts) < self.MIN_AREA_PX:
                 continue
+            # 이 클러스터를 받치는 평면 = [H_LO,H_HI] 밴드에 점이 가장 많이 드는 평면
+            hp = [pts @ p[:3] + p[3] for p in planes]
+            score = [int(((hh > self.H_LO) & (hh < self.H_HI)).sum()) for hh in hp]
+            pl = planes[int(np.argmax(score))]
+            n, d = pl[:3], pl[3]
+            ref = np.array([1.0, 0, 0]) if abs(n[0]) < 0.9 else np.array([0, 1.0, 0])
+            t1 = np.cross(n, ref); t1 /= np.linalg.norm(t1); t2 = np.cross(n, t1)
             r = self._fit(pts, n, d, t1, t2)
             if r is not None:
                 T_stand = self._T_sc @ r["T_cam"]
@@ -165,7 +184,9 @@ class BoxDetector:
         # 평면상 사각형 크기 (느슨한 sanity)
         ext_major = uv0 @ major; ext_minor = uv0 @ evecs[:, np.argmin(evals)]
         dim_major = ext_major.max() - ext_major.min()
-        if dim_major > self.MAX_DIM:
+        dim_minor = ext_minor.max() - ext_minor.min()
+        # 크기 게이트: 보이는 긴 변 ≈ 0.38 (잡동사니/병합 거름). 너무 넓은 면도 제외.
+        if not (0.26 <= dim_major <= 0.48) or dim_minor > 0.32:
             return None
         # 중심 init: 평면상 점 중심을 평면에 투영 + height/2 만큼 up
         p_plane = uv.mean(0)[0]*t1 + uv.mean(0)[1]*t2 - d*n   # 평면 위 점
@@ -188,5 +209,5 @@ class BoxDetector:
                 pass
         if fitness < self.FIT_MIN:
             return None
-        return dict(T_cam=T_cam, footprint=(round(dim_major, 3), round(ext_minor.max()-ext_minor.min(), 3)),
+        return dict(T_cam=T_cam, footprint=(round(dim_major, 3), round(dim_minor, 3)),
                     fitness=fitness)

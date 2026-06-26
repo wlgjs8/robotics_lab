@@ -191,12 +191,8 @@ class _EpisodeBuffer:
     command_seq: list[int]
     action_mode: list[str]
     action_source_id: list[str]
-    action_twist_left: list[list[float]]
-    action_twist_right: list[list[float]]
-    action_twist_stand_left: list[list[float]]
-    action_twist_stand_right: list[list[float]]
-    action_joint_velocity_left: list[list[float]]
-    action_joint_velocity_right: list[list[float]]
+    action_tcp_target_stand_left: list[list[float]]
+    action_tcp_target_stand_right: list[list[float]]
     action_joint_target_left: list[list[float]]
     action_joint_target_right: list[list[float]]
     action_spacemouse_axes_left: list[list[float]]
@@ -333,12 +329,8 @@ class Hdf5EpisodeRecorder:
             command_seq=[],
             action_mode=[],
             action_source_id=[],
-            action_twist_left=[],
-            action_twist_right=[],
-            action_twist_stand_left=[],
-            action_twist_stand_right=[],
-            action_joint_velocity_left=[],
-            action_joint_velocity_right=[],
+            action_tcp_target_stand_left=[],
+            action_tcp_target_stand_right=[],
             action_joint_target_left=[],
             action_joint_target_right=[],
             action_spacemouse_axes_left=[],
@@ -423,12 +415,8 @@ class Hdf5EpisodeRecorder:
             mode = _dominant_action_mode(left_mode, right_mode)
             ep.action_mode.append(mode)
             ep.action_source_id.append(str(action_packet.get("source_id", "") or ""))
-            ep.action_twist_left.append(_float_list(left_action.get("tcp_twist_local"), 6))
-            ep.action_twist_right.append(_float_list(right_action.get("tcp_twist_local"), 6))
-            ep.action_twist_stand_left.append(_float_list(left_action.get("tcp_twist_stand"), 6))
-            ep.action_twist_stand_right.append(_float_list(right_action.get("tcp_twist_stand"), 6))
-            ep.action_joint_velocity_left.append(_float_list(left_action.get("dq_target_deg_s"), 6))
-            ep.action_joint_velocity_right.append(_float_list(right_action.get("dq_target_deg_s"), 6))
+            ep.action_tcp_target_stand_left.append(_tcp_target_values(left_action.get("tcp_target_stand")))
+            ep.action_tcp_target_stand_right.append(_tcp_target_values(right_action.get("tcp_target_stand")))
             ep.action_joint_target_left.append(_float_list(left_action.get("q_target_deg"), 6))
             ep.action_joint_target_right.append(_float_list(right_action.get("q_target_deg"), 6))
             ep.action_spacemouse_axes_left.append(_spacemouse_axes(left_action, action_packet, "left"))
@@ -440,12 +428,8 @@ class Hdf5EpisodeRecorder:
         else:
             ep.action_mode.append("Hold")
             ep.action_source_id.append("")
-            ep.action_twist_left.append([0.0] * 6)
-            ep.action_twist_right.append([0.0] * 6)
-            ep.action_twist_stand_left.append([0.0] * 6)
-            ep.action_twist_stand_right.append([0.0] * 6)
-            ep.action_joint_velocity_left.append([0.0] * 6)
-            ep.action_joint_velocity_right.append([0.0] * 6)
+            ep.action_tcp_target_stand_left.append([0.0] * 6)
+            ep.action_tcp_target_stand_right.append([0.0] * 6)
             ep.action_joint_target_left.append([0.0] * 6)
             ep.action_joint_target_right.append([0.0] * 6)
             ep.action_spacemouse_axes_left.append([0.0] * 6)
@@ -652,38 +636,14 @@ class Hdf5EpisodeRecorder:
                 dtype=string_dtype,
             )
             action.create_dataset(
-                "tcp_twist_local_left",
-                data=np.asarray(ep.action_twist_left, dtype=np.float32),
+                "tcp_target_stand_left",
+                data=np.asarray(ep.action_tcp_target_stand_left, dtype=np.float32),
                 compression="gzip",
                 compression_opts=1,
             )
             action.create_dataset(
-                "tcp_twist_local_right",
-                data=np.asarray(ep.action_twist_right, dtype=np.float32),
-                compression="gzip",
-                compression_opts=1,
-            )
-            action.create_dataset(
-                "tcp_twist_stand_left",
-                data=np.asarray(ep.action_twist_stand_left, dtype=np.float32),
-                compression="gzip",
-                compression_opts=1,
-            )
-            action.create_dataset(
-                "tcp_twist_stand_right",
-                data=np.asarray(ep.action_twist_stand_right, dtype=np.float32),
-                compression="gzip",
-                compression_opts=1,
-            )
-            action.create_dataset(
-                "joint_velocity_left",
-                data=np.asarray(ep.action_joint_velocity_left, dtype=np.float32),
-                compression="gzip",
-                compression_opts=1,
-            )
-            action.create_dataset(
-                "joint_velocity_right",
-                data=np.asarray(ep.action_joint_velocity_right, dtype=np.float32),
+                "tcp_target_stand_right",
+                data=np.asarray(ep.action_tcp_target_stand_right, dtype=np.float32),
                 compression="gzip",
                 compression_opts=1,
             )
@@ -893,10 +853,25 @@ def _duration_us(arm_state: dict[str, Any]) -> int:
 
 def _dominant_action_mode(left_mode: str, right_mode: str) -> str:
     modes = (left_mode, right_mode)
-    for candidate in ("TcpTwistLocal", "TcpTwistStand", "JointVelocity", "JointTarget"):
+    for candidate in ("TcpPoseTarget", "TcpLinearMove", "JointTarget"):
         if candidate in modes:
             return candidate
     return left_mode
+
+
+def _tcp_target_values(value: Any) -> list[float]:
+    if isinstance(value, list):
+        return _float_list(value, 6)
+    if not isinstance(value, dict):
+        return [0.0] * 6
+    return [
+        float(value.get("x", 0.0) or 0.0),
+        float(value.get("y", 0.0) or 0.0),
+        float(value.get("z", 0.0) or 0.0),
+        float(value.get("rx", 0.0) or 0.0),
+        float(value.get("ry", 0.0) or 0.0),
+        float(value.get("rz", 0.0) or 0.0),
+    ]
 
 
 def _spacemouse_axes(

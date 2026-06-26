@@ -47,22 +47,12 @@ void SmdPoseTracker::reset(const Pose6D& pose) {
     previous_goal_position_ = position_;
     previous_goal_rotation_ = rotation_;
     previous_command_.reset();
-    command_linear_velocity_.reset();
-    command_angular_velocity_.reset();
     active_ = true;
 }
 
 void SmdPoseTracker::deactivate() {
     active_ = false;
     previous_command_.reset();
-    command_linear_velocity_.reset();
-    command_angular_velocity_.reset();
-}
-
-void SmdPoseTracker::setCommandTwist(const std::optional<Eigen::Vector3d>& linear,
-                                     const std::optional<Eigen::Vector3d>& angular) {
-    command_linear_velocity_ = linear;
-    command_angular_velocity_ = angular;
 }
 
 void SmdPoseTracker::updateGoalFromCommand(const Pose6D& command_pose) {
@@ -97,38 +87,18 @@ Pose6D SmdPoseTracker::step(double dt_sec) {
 
     // Optional velocity feedforward. The damping term acts on the velocity ERROR
     // (x_dot - goal_dot) instead of the absolute x_dot, zeroing steady-state lag
-    // for ramp goals. The goal velocity comes from one of:
-    //   finite_difference: the goal delta accrued since the previous step()
-    //     (legacy; every caller integrates the goal once per step() so the delta
-    //     spans exactly `dt`).
-    //   command_twist: the conditioned twist supplied with the command (Patch 5),
-    //     closing the A/B contract — falls back to finite_difference (and flags it)
-    //     when the twist is absent/non-finite.
-    //   auto: command twist when present, else finite_difference.
-    // The estimate is clamped to the max tracking velocity so a sparse / out-of-
-    // contract update can never inject a feedforward spike.
+    // for ramp goals. The goal velocity is always estimated from the goal delta
+    // accrued since the previous step(). The estimate is clamped to the max
+    // tracking velocity so a sparse update can never inject a feedforward spike.
     Eigen::Vector3d goal_linear_velocity = Eigen::Vector3d::Zero();
     Eigen::Vector3d goal_angular_velocity = Eigen::Vector3d::Zero();
     if (config_.velocity_feedforward) {
-        const std::string& source = config_.velocity_feedforward_source;
-        const bool want_command = (source == "command_twist" || source == "auto");
-        const bool have_command =
-            command_linear_velocity_.has_value() && command_angular_velocity_.has_value() &&
-            command_linear_velocity_->allFinite() && command_angular_velocity_->allFinite();
-        if (want_command && have_command) {
-            goal_linear_velocity = *command_linear_velocity_;
-            goal_angular_velocity = *command_angular_velocity_;
-            info.velocity_feedforward_source = "command_twist";
-        } else {
-            goal_linear_velocity = (goal_position_ - previous_goal_position_) / dt;
-            // Body-frame angular velocity of the goal (so(3) log of the goal
-            // rotation delta); coincides with the state body frame when the
-            // tracking error is small (the regime feedforward operates in).
-            goal_angular_velocity =
-                math::log3((previous_goal_rotation_.conjugate() * goal_rotation_).toRotationMatrix()) / dt;
-            info.velocity_feedforward_source = "finite_difference";
-            if (source == "command_twist") info.command_twist_fallback = true;
-        }
+        goal_linear_velocity = (goal_position_ - previous_goal_position_) / dt;
+        // Body-frame angular velocity of the goal (so(3) log of the goal
+        // rotation delta); coincides with the state body frame when the
+        // tracking error is small (the regime feedforward operates in).
+        goal_angular_velocity =
+            math::log3((previous_goal_rotation_.conjugate() * goal_rotation_).toRotationMatrix()) / dt;
         goal_linear_velocity = clampNorm(goal_linear_velocity, config_.max_linear_velocity_m_s,
                                          &info.goal_linear_velocity_ff_clipped);
         goal_angular_velocity = clampNorm(goal_angular_velocity, config_.max_angular_velocity_rad_s,

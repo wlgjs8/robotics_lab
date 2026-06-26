@@ -35,7 +35,7 @@ sys.path.insert(0, str(ROOT / "policy_runner"))
 import eval_tcp_target_pose_tracking as base  # StampedStateRecorder, build_targets, smoothness_metrics
 from policy_runner.servo_command_client import ServoCommandClient, CommandIntent
 from policy_runner.robot_state_client import RobotStateClient, StateStreamLeaseReadback
-from policy_runner.action_sources.tcp_delta import tcp_pose_target_stand_intent
+from policy_runner.action_sources.tcp_pose_target import tcp_pose_target_stand_intent
 
 CMD = "udp://127.0.0.1:50256"
 STATE_REC = "udp://127.0.0.1:50356"

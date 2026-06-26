@@ -90,8 +90,6 @@ cartesian_control:
   allow_in_simulation: false
   allow_in_controller_simulation: false
   allow_in_real: false
-  max_twist_linear_m_s: 0.01
-  max_twist_angular_rad_s: 0.05
   max_linear_move_speed_m_s: 0.005
   max_angular_move_speed_rad_s: 0.03
   max_cartesian_step_m: 0.001

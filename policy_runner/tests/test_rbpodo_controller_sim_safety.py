@@ -7,10 +7,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from policy_runner.action_sources.tcp_delta import (
+from policy_runner.action_sources.tcp_pose_target import (
     CARTESIAN_ACTION_REQUIREMENTS,
     RBPODO_CONTROLLER_SIMULATION_CARTESIAN_ACTION_REQUIREMENTS,
-    tcp_twist_local_intent,
+    tcp_pose_target_stand_intent,
 )
 from policy_runner.config import SafetyConfig
 from policy_runner.geometry import geometry_status_from_mapping
@@ -71,7 +71,7 @@ def controller_sim_cartesian_gate(**overrides):
 
 def arm_state(**overrides):
     payload = {
-        "mode": "TcpTwistLocal",
+        "mode": "TcpPoseTarget",
         "has_valid_joint_state": True,
         "has_valid_tcp_pose": True,
         "q_actual_deg": [0, -30, 80, 0, 60, 0],
@@ -135,7 +135,7 @@ class RbpodoControllerSimulationSafetyTest(unittest.TestCase):
 
     def test_controller_simulation_allows_cartesian_intents_without_real_motion_approval(self):
         intents = [
-            tcp_twist_local_intent(left=[0.01, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            tcp_pose_target_stand_intent(left=[0.3, 0.1, 0.5, 0.0, 0.0, 0.0]),
             CommandIntent.arm_motion(),
         ]
 
@@ -163,7 +163,7 @@ class RbpodoControllerSimulationSafetyTest(unittest.TestCase):
 
         decision = self.gate.evaluate(
             snapshot,
-            tcp_twist_local_intent(left=[0.01, 0, 0, 0, 0, 0]),
+            tcp_pose_target_stand_intent(left=[0.3, 0.1, 0.5, 0.0, 0.0, 0.0]),
             RBPODO_CONTROLLER_SIMULATION_CARTESIAN_ACTION_REQUIREMENTS,
             time.monotonic(),
         )
@@ -178,7 +178,7 @@ class RbpodoControllerSimulationSafetyTest(unittest.TestCase):
 
         decision = self.gate.evaluate(
             snapshot,
-            tcp_twist_local_intent(left=[0.01, 0, 0, 0, 0, 0]),
+            tcp_pose_target_stand_intent(left=[0.3, 0.1, 0.5, 0.0, 0.0, 0.0]),
             RBPODO_CONTROLLER_SIMULATION_CARTESIAN_ACTION_REQUIREMENTS,
             time.monotonic(),
         )
@@ -193,7 +193,7 @@ class RbpodoControllerSimulationSafetyTest(unittest.TestCase):
 
         decision = self.gate.evaluate(
             snapshot,
-            tcp_twist_local_intent(left=[0.01, 0, 0, 0, 0, 0]),
+            tcp_pose_target_stand_intent(left=[0.3, 0.1, 0.5, 0.0, 0.0, 0.0]),
             RBPODO_CONTROLLER_SIMULATION_CARTESIAN_ACTION_REQUIREMENTS,
             time.monotonic(),
         )
@@ -210,7 +210,7 @@ class RbpodoControllerSimulationSafetyTest(unittest.TestCase):
 
         decision = self.gate.evaluate(
             snapshot,
-            tcp_twist_local_intent(left=[0.01, 0, 0, 0, 0, 0]),
+            tcp_pose_target_stand_intent(left=[0.3, 0.1, 0.5, 0.0, 0.0, 0.0]),
             RBPODO_CONTROLLER_SIMULATION_CARTESIAN_ACTION_REQUIREMENTS,
             time.monotonic(),
         )
@@ -228,7 +228,7 @@ class RbpodoControllerSimulationSafetyTest(unittest.TestCase):
 
         decision = gate.evaluate(
             real_rbpodo_state(),
-            tcp_twist_local_intent(left=[0.01, 0, 0, 0, 0, 0]),
+            tcp_pose_target_stand_intent(left=[0.3, 0.1, 0.5, 0.0, 0.0, 0.0]),
             CARTESIAN_ACTION_REQUIREMENTS,
             time.monotonic(),
         )
@@ -236,7 +236,7 @@ class RbpodoControllerSimulationSafetyTest(unittest.TestCase):
         # Real/sim gating retired: allowed.
         self.assertTrue(decision.allowed)
 
-    def test_startup_hold_state_allows_first_controller_simulation_twist_intent(self):
+    def test_startup_hold_state_allows_first_controller_simulation_pose_target_intent(self):
         hold_gate = controller_sim_cartesian_gate(
             controller_simulation_cartesian_enabled=False,
             controller_simulation_cartesian_enabled_for_current_command=False,
@@ -253,7 +253,7 @@ class RbpodoControllerSimulationSafetyTest(unittest.TestCase):
 
         decision = self.gate.evaluate(
             snapshot,
-            tcp_twist_local_intent(left=[0.01, 0, 0, 0, 0, 0]),
+            tcp_pose_target_stand_intent(left=[0.3, 0.1, 0.5, 0.0, 0.0, 0.0]),
             RBPODO_CONTROLLER_SIMULATION_CARTESIAN_ACTION_REQUIREMENTS,
             time.monotonic(),
         )

@@ -137,6 +137,22 @@ bool testJointWrapConfigParses() {
     return true;
 }
 
+bool testJointTargetLiteralAxesConfigParses() {
+    const std::string path = writeTempConfig(
+        "literal-axes-valid",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "safety:\n"
+        "  joint_target_literal_axes: [false, false, false, false, false, true]\n"
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+    ::unlink(path.c_str());
+    for (int i = 0; i < rb_servo::kDof - 1; ++i) {
+        RB_CHECK(!cfg.safety.joint_target_literal_axes[static_cast<std::size_t>(i)]);
+    }
+    RB_CHECK(cfg.safety.joint_target_literal_axes[5]);
+    return true;
+}
+
 bool testInvalidJointWrapConfigRejects() {
     const std::string negative_path = writeTempConfig(
         "negative-period",
@@ -188,6 +204,28 @@ bool testInvalidJointWrapConfigRejects() {
     );
     RB_CHECK(loadRejects(startup_motion_path));
     ::unlink(startup_motion_path.c_str());
+
+    return true;
+}
+
+bool testInvalidJointTargetLiteralAxesConfigRejects() {
+    const std::string wrong_length_path = writeTempConfig(
+        "literal-axes-wrong-length",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "safety:\n"
+        "  joint_target_literal_axes: [false, false, false, false, false]\n"
+    );
+    RB_CHECK(loadRejects(wrong_length_path));
+    ::unlink(wrong_length_path.c_str());
+
+    const std::string non_bool_path = writeTempConfig(
+        "literal-axes-non-bool",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "safety:\n"
+        "  joint_target_literal_axes: [false, false, false, false, false, not_bool]\n"
+    );
+    RB_CHECK(loadRejects(non_bool_path));
+    ::unlink(non_bool_path.c_str());
 
     return true;
 }
@@ -486,6 +524,81 @@ bool testStatePublisherEndpointsParseAndValidate() {
     return true;
 }
 
+bool testScopeConfigParsesAndValidates() {
+    const std::string default_path = writeTempConfig(
+        "scope-defaults",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+    );
+    const rb_servo::DualArmConfig defaults = rb_servo::loadConfigFromYaml(default_path);
+    ::unlink(default_path.c_str());
+    RB_CHECK(!defaults.scope.enable);
+    RB_CHECK(defaults.scope.publish_rate_hz == 100);
+    RB_CHECK(defaults.scope.max_samples_per_batch == 64);
+    RB_CHECK(defaults.network.scope_pub_endpoints.size() == 1);
+    RB_CHECK(defaults.network.scope_pub_endpoints[0] == "udp://127.0.0.1:50357");
+
+    const std::string valid_path = writeTempConfig(
+        "scope-valid",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "network:\n"
+        "  scope_pub_endpoints:\n"
+        "    - \"udp://127.0.0.1:50357\"\n"
+        "    - \"udp://rb_gui:50358\"\n"
+        "    - \"udp://127.0.0.1:50357\"\n"
+        "scope:\n"
+        "  enable: true\n"
+        "  publish_rate_hz: 125\n"
+        "  max_samples_per_batch: 32\n"
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(valid_path);
+    ::unlink(valid_path.c_str());
+    RB_CHECK(cfg.scope.enable);
+    RB_CHECK(cfg.scope.publish_rate_hz == 125);
+    RB_CHECK(cfg.scope.max_samples_per_batch == 32);
+    RB_CHECK(cfg.network.scope_pub_endpoints.size() == 2);
+    RB_CHECK(cfg.network.scope_pub_endpoints[0] == "udp://127.0.0.1:50357");
+    RB_CHECK(cfg.network.scope_pub_endpoints[1] == "udp://rb_gui:50358");
+
+    const std::string empty_endpoints_path = writeTempConfig(
+        "scope-empty-endpoints",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "network:\n"
+        "  scope_pub_endpoints: []\n"
+    );
+    RB_CHECK(loadRejects(empty_endpoints_path));
+    ::unlink(empty_endpoints_path.c_str());
+
+    const std::string invalid_endpoint_path = writeTempConfig(
+        "scope-invalid-endpoint",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "network:\n"
+        "  scope_pub_endpoints:\n"
+        "    - \"tcp://127.0.0.1:50357\"\n"
+    );
+    RB_CHECK(loadRejects(invalid_endpoint_path));
+    ::unlink(invalid_endpoint_path.c_str());
+
+    const std::string invalid_rate_path = writeTempConfig(
+        "scope-invalid-rate",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "scope:\n"
+        "  publish_rate_hz: 0\n"
+    );
+    RB_CHECK(loadRejects(invalid_rate_path));
+    ::unlink(invalid_rate_path.c_str());
+
+    const std::string invalid_batch_path = writeTempConfig(
+        "scope-invalid-batch",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "scope:\n"
+        "  max_samples_per_batch: 0\n"
+    );
+    RB_CHECK(loadRejects(invalid_batch_path));
+    ::unlink(invalid_batch_path.c_str());
+
+    return true;
+}
+
 bool testFloorConstraintConfigParsesAndDefaults() {
     // Values parse (enable=false skips the kinematics requirement).
     const std::string path = writeTempConfig(
@@ -748,10 +861,13 @@ bool testRoiBoxInvalidConfigRejects() {
 
 int main() {
     if (!testJointWrapConfigParses()) return 1;
+    if (!testJointTargetLiteralAxesConfigParses()) return 1;
     if (!testInvalidJointWrapConfigRejects()) return 1;
+    if (!testInvalidJointTargetLiteralAxesConfigRejects()) return 1;
     if (!testControllerSimulationGateConfig()) return 1;
     if (!testRbpodoAsyncStreamingConfigContract()) return 1;
     if (!testStatePublisherEndpointsParseAndValidate()) return 1;
+    if (!testScopeConfigParsesAndValidates()) return 1;
     if (!testFloorConstraintConfigParsesAndDefaults()) return 1;
     if (!testFloorConstraintInvalidConfigRejects()) return 1;
     if (!testFloorCheckPointOffsetClosedParses()) return 1;

@@ -69,12 +69,9 @@ PYTHONPATH=policy_runner python3 -m policy_runner flow-train \
   --write-eval-report outputs/flow_eval_report.md
 ```
 
-Run `flow-infer` only with an explicit `--rollout-mode`. The default live
-command family is `tcp_twist_stand`, which converts each per-step stand-frame
-6D flow action delta into a bounded stand-frame Cartesian velocity using
-`--policy-dt-sec` or checkpoint `dataset_stats.dt_mean_sec`. Velocity clamps
-come from checkpoint action statistics unless explicit linear/angular limits
-are supplied.
+Run `flow-infer` only with an explicit `--rollout-mode`. Live rollout composes
+each per-step action delta into an absolute `TcpPoseTarget` setpoint using
+`--policy-dt-sec` or checkpoint `dataset_stats.dt_mean_sec`.
 
 ## Rollout Modes
 
@@ -119,7 +116,7 @@ tools/rbpodo_pgmode_spacemouse.sh policy-dry-run
 tools/rbpodo_pgmode_spacemouse.sh gui --dry-run
 ```
 
-The SpaceMouse path sends `TcpTwistLocal` only after command-source lease,
+The SpaceMouse path sends `TcpPoseTarget` only after command-source lease,
 deadman, stale state, fault, controller-simulation Cartesian, and
 `physical_motion_expected=false` gates are satisfied. It must not be run
 concurrently with GUI teleop against the same command port.

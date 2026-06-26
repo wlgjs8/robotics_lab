@@ -32,6 +32,8 @@
 
 namespace rb_servo {
 
+class ScopePublisher;
+
 // Per-arm direct-teaching (free-drive) lifecycle. Real-time servo control
 // (move_servo_j streaming) and direct teaching are mutually exclusive controller
 // regimes: entering free-drive while the controller is still executing servo
@@ -57,7 +59,8 @@ public:
         const DualArmConfig& config,
         CommandBuffer* command_buffer,
         ServoLogger* logger,
-        std::shared_ptr<IKinematics> kinematics = nullptr
+        std::shared_ptr<IKinematics> kinematics = nullptr,
+        ScopePublisher* scope_publisher = nullptr
     );
 
     ~DualArmServoLoop();
@@ -138,18 +141,6 @@ private:
     void clearLatchedCartesianTarget(ArmId arm_id);
     void resetCartesianVelocityIntegrator(ArmId arm_id, const std::string& reason);
     void refreshCartesianVelocityIntegratorTelemetry(ArmId arm_id);
-    DualArmCommand resolveCartesianDeltaCommand(
-        const DualArmCommand& command,
-        const RobotState& left_state,
-        const RobotState& right_state
-    );
-    ArmCommand resolveArmCartesianDeltaCommand(
-        const ArmCommand& command,
-        const RobotState& state,
-        uint64_t command_seq,
-        LatchedCartesianTarget& latch
-    );
-
     ServoTarget computeServoTarget(
         const RobotState& left_state,
         const RobotState& right_state,
@@ -168,15 +159,13 @@ private:
         SafetyVerdict* verdict
     );
 
-    // Collision-free InitMotion sequencer. When `command` is a ControlMode::InitMotion,
-    // this drives an async plan (off the RT loop) from the current sent pose to the
-    // commanded init pose, then REWRITES the command into an ordinary dual JointTarget
-    // toward the current planned waypoint (so the downstream trajectory/safety pipeline
-    // is unchanged). While planning it holds in place; on planning failure it holds and
-    // latches the Failed status (fail-closed, never an un-planned motion). If the
-    // planner is disabled it falls back to a direct JointTarget to the target. Commands
-    // that are not InitMotion reset the sequencer (cancellation). Runs on the servo
-    // thread; only polls the future non-blocking.
+    // Collision-free JointTarget init_motion profile sequencer. When either arm's
+    // JointTarget carries joint_target_profile=init_motion, this drives an async
+    // plan (off the RT loop) from the current sent pose to the commanded init pose,
+    // then REWRITES the command into ordinary direct JointTarget waypoints.
+    // While planning it holds in place; on planning failure it holds and latches
+    // the Failed status (fail-closed, never an un-planned motion). If the planner
+    // is disabled it falls back to a direct JointTarget to the target.
     DualArmCommand applyInitMotionSequencer(
         DualArmCommand command,
         const RobotState& left_state,
@@ -319,6 +308,7 @@ private:
 
     CommandBuffer* command_buffer_ = nullptr;
     ServoLogger* logger_ = nullptr;
+    ScopePublisher* scope_publisher_ = nullptr;
     std::shared_ptr<IKinematics> kinematics_;
     bool kinematics_injected_ = false;
 
@@ -501,10 +491,6 @@ private:
     LatchedCartesianTarget right_latched_cartesian_target_;
     CartesianServoPathState left_cartesian_servo_path_;
     CartesianServoPathState right_cartesian_servo_path_;
-    CartesianCircleMoveState left_cartesian_circle_move_;
-    CartesianCircleMoveState right_cartesian_circle_move_;
-    CartesianTwistHoldState left_cartesian_twist_hold_;
-    CartesianTwistHoldState right_cartesian_twist_hold_;
     CartesianVelocityIntegratorState left_cartesian_velocity_integrator_;
     CartesianVelocityIntegratorState right_cartesian_velocity_integrator_;
     SmdPoseTracker left_pose_track_smd_{PoseTrackSmdConfig{}};

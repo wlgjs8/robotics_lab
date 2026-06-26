@@ -13,12 +13,10 @@ from typing import Any, TextIO
 import numpy as np
 import torch
 
-from .action_sources.tcp_delta import (
-    clamp_tcp_delta,
-    clamp_tcp_twist,
+from .action_sources.tcp_pose_target import (
+    clamp_pose_delta,
     cartesian_action_requirements,
     tcp_pose_target_stand_intent,
-    tcp_twist_local_intent,
 )
 from .flow_dataset import (
     DEFAULT_ACTION_FRAME,
@@ -63,14 +61,8 @@ def default_action_log_path() -> str:
     return str(logs_dir / f"actions_{time.strftime('%Y%m%d_%H%M%S')}.jsonl")
 
 
-# Body-frame (ee_local) policy deltas can be consumed either as velocity
-# commands or as integrated absolute TCP pose targets.
-FLOW_COMMAND_FAMILY_CHOICES = ("tcp_twist_local", "tcp_target_pose")
-_FLOW_COMMAND_FAMILY_LABELS = {
-    "tcp_twist_local": "TcpTwistLocal",
-    "tcp_target_pose": "TcpPoseTarget",
-}
-_ZERO_TWIST = (0.0,) * 6
+FLOW_COMMAND_FAMILY = "tcp_target_pose"
+FLOW_COMMAND_LABEL = "TcpPoseTarget"
 DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S = 0.30
 DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S = 2.0
 _FLOW_STATS_VELOCITY_LIMIT_SCALE = 1.25
@@ -90,7 +82,7 @@ class FlowOfflineEvalResult:
     camera_names: list[str]
     image_decode_count: int
     missing_camera_count: int
-    command_family: str = "TcpTwistLocal"
+    command_family: str = FLOW_COMMAND_LABEL
     selected_arms: list[str] = field(default_factory=list)
     checkpoint_arm_mask: tuple[float, float] | None = None
     checkpoint_has_nonzero_gripper_commands: bool = False
@@ -108,43 +100,9 @@ class _DirectBcEnsembleBundle:
     arm_mask: np.ndarray
 
 
-def resolve_flow_command_family(
-    rollout_mode: str | RolloutMode,
-    command_family: str | None,
-    *,
-    dataset_stats: dict[str, Any] | None = None,
-) -> str:
-    """Return the normalized flow command family for a rollout mode."""
-
-    _ = parse_rollout_mode(rollout_mode)
-    _ = dataset_stats
-    if command_family is None:
-        return "tcp_target_pose"
-    return normalize_flow_command_family(command_family)
-
-
-def normalize_flow_command_family(command_family: str) -> str:
-    family = str(command_family or "").strip().lower().replace("-", "_")
-    family = {
-        "tcptwistlocal": "tcp_twist_local",
-        "tcpposetarget": "tcp_target_pose",
-        "tcp_pose_target": "tcp_target_pose",
-    }.get(family, family)
-    if family not in FLOW_COMMAND_FAMILY_CHOICES:
-        choices = ", ".join(FLOW_COMMAND_FAMILY_CHOICES)
-        raise RolloutModeValidationError(
-            f"invalid command-family {command_family!r}; expected one of: {choices}"
-        )
-    return family
-
-
-def canonical_flow_command_family(command_family: str) -> str:
-    return _FLOW_COMMAND_FAMILY_LABELS[normalize_flow_command_family(command_family)]
-
-
 # ---- ee_local body-frame alignment (training EE frame vs runtime TCP frame) ----
 # Fixed rotation R between the training EE body frame (in the data) and the RB TCP
-# frame the server interprets TcpTwistLocal in. Applied symmetrically:
+# frame the server interprets TcpPoseTarget deltas in. Applied symmetrically:
 #   v_train = R · v_tcp            (runtime proprio -> training frame)
 #   v_tcp   = Rᵀ · v_train         (policy action  -> robot TCP frame)
 #
@@ -273,54 +231,10 @@ def _resolve_runtime_command_family(
     command_family: str | None,
     stats: dict[str, Any],
     *,
-    default_command_family: str = "tcp_target_pose",
+    default_command_family: str = FLOW_COMMAND_FAMILY,
 ) -> str:
-    # When command_family is unset, fall back to the source-specific default:
-    # tcp_target_pose for the flow / openpi rollout sources (position-control deploy
-    # lane), tcp_twist_local for the DirectBC sources (their trained/streamed default).
-    family = (
-        normalize_flow_command_family(command_family)
-        if command_family
-        else normalize_flow_command_family(default_command_family)
-    )
-    if _proprio_action_frame_from_stats(stats) == "ee_local" and family not in {
-        "tcp_twist_local",
-        "tcp_target_pose",
-    }:
-        raise ValueError(
-            "ee_local checkpoints require command-family tcp_twist_local or tcp_target_pose"
-        )
-    return family
-
-
-def validate_flow_command_family(
-    rollout_mode: str | RolloutMode,
-    command_family: str,
-    *,
-    allow_tcp_twist_local: bool = False,
-    allow_tcp_target_pose: bool = False,
-    dataset_stats: dict[str, Any] | None = None,
-) -> None:
-    mode = parse_rollout_mode(rollout_mode)
-    family = normalize_flow_command_family(command_family)
-    _ = dataset_stats
-    # real_readonly never sends commands, so the family is irrelevant there.
-    if mode in {RolloutMode.OFFLINE_EVAL, RolloutMode.SIM_DRYRUN, RolloutMode.REAL_READONLY}:
-        return
-    # Live rollout of body-frame twist is an explicit operator opt-in.
-    if family == "tcp_twist_local" and allow_tcp_twist_local:
-        return
-    if family == "tcp_target_pose" and allow_tcp_target_pose:
-        return
-    if family == "tcp_target_pose":
-        raise RolloutModeValidationError(
-            "command-family tcp_target_pose requires --allow-tcp-target-pose for "
-            "controller_sim or real_policy"
-        )
-    raise RolloutModeValidationError(
-        "command-family tcp_twist_local requires --allow-tcp-twist-local for "
-        "controller_sim or real_policy"
-    )
+    _ = command_family, stats, default_command_family
+    return FLOW_COMMAND_FAMILY
 
 
 def resolve_flow_policy_dt_sec(
@@ -331,9 +245,7 @@ def resolve_flow_policy_dt_sec(
     command_rate_hz: float,
     dataset_stats: dict[str, Any] | None = None,
 ) -> float | None:
-    family = normalize_flow_command_family(command_family)
-    if family not in {"tcp_twist_local", "tcp_target_pose"}:
-        return None
+    _ = command_family
     if policy_dt_sec is not None:
         resolved = float(policy_dt_sec)
         if resolved <= 0.0:
@@ -346,7 +258,7 @@ def resolve_flow_policy_dt_sec(
     mode = parse_rollout_mode(rollout_mode)
     if mode in {RolloutMode.CONTROLLER_SIM, RolloutMode.REAL_POLICY}:
         raise RolloutModeValidationError(
-            f"command-family {family} requires --policy-dt-sec or checkpoint "
+            "TcpPoseTarget flow rollout requires --policy-dt-sec or checkpoint "
             f"dataset_stats.dt_mean_sec for rollout-mode {mode.value}"
         )
     rate = float(command_rate_hz)
@@ -358,16 +270,12 @@ def resolve_flow_policy_dt_sec(
 class FlowMatchingActionSource:
     """Runtime source for high-level flow-policy action chunks.
 
-    The source consumes ee_local body-frame policy deltas and emits either bounded
-    TcpTwistLocal velocity commands or integrated absolute TcpPoseTarget setpoints.
-    Live rollout is behind rollout-mode validation and SafetyGate still decides
-    whether the intent may be sent.
+    The source consumes ee_local body-frame policy deltas and emits integrated
+    absolute TcpPoseTarget setpoints. Live rollout is behind rollout-mode
+    validation and SafetyGate still decides whether the intent may be sent.
     """
 
-    # Default command family when --command-family is unset. The flow / openpi
-    # rollout sources deploy on position control (tcp_target_pose); the DirectBC
-    # subclasses override this to their streamed tcp_twist_local default.
-    _default_command_family = "tcp_target_pose"
+    _default_command_family = FLOW_COMMAND_FAMILY
 
     def __init__(
         self,
@@ -387,7 +295,6 @@ class FlowMatchingActionSource:
         tcp_target_pose_conditioning: str = "legacy_step_hold",
         tcp_target_pose_reanchor_mode: str = "measured_blend",
         tcp_target_pose_blend_steps: int = 2,
-        tcp_target_pose_send_twist: bool = False,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
         ee_local_r_align: Any = None,
@@ -413,7 +320,6 @@ class FlowMatchingActionSource:
         self._tcp_tp_mode = str(tcp_target_pose_conditioning)
         self._tcp_tp_reanchor_mode = str(tcp_target_pose_reanchor_mode)
         self._tcp_tp_blend_steps = int(tcp_target_pose_blend_steps)
-        self._tcp_tp_send_twist = bool(tcp_target_pose_send_twist)
         self.timeout_sec = float(timeout_sec)
         self.camera_client = camera_client
         self.sample_steps = int(sample_steps)
@@ -485,7 +391,7 @@ class FlowMatchingActionSource:
             )
         self.command_family_option = _resolve_runtime_command_family(
             command_family, self.stats, default_command_family=self._default_command_family)
-        self.command_family = canonical_flow_command_family(self.command_family_option)
+        self.command_family = FLOW_COMMAND_LABEL
         model_config = dict(checkpoint.get("model_config", {}))
         # camera_names may live only inside model_config (flow checkpoints) rather
         # than at the top level. Falling through to model_config is REQUIRED: an
@@ -724,16 +630,11 @@ class FlowMatchingActionSource:
         payload: dict[str, Any],
         gripper_targets: dict[str, float | None],
     ) -> CommandIntent | None:
-        if self.command_family_option == "tcp_twist_local":
-            intent = self._tcp_twist_local_step_intent(step, gripper_targets=gripper_targets)
-        elif self.command_family_option == "tcp_target_pose":
-            intent = self._tcp_target_pose_step_intent(
-                step,
-                payload=payload,
-                gripper_targets=gripper_targets,
-            )
-        else:
-            intent = None
+        intent = self._tcp_target_pose_step_intent(
+            step,
+            payload=payload,
+            gripper_targets=gripper_targets,
+        )
         # Advance the crossfade ramp once per executed policy step (not per servo
         # tick): the streamed path re-emits the same held intent between steps.
         self._steps_since_boundary += 1
@@ -809,25 +710,11 @@ class FlowMatchingActionSource:
         return max(0, min(2, limit - 1))
 
     def _stream_hold_intent(self) -> CommandIntent | None:
-        if self.command_family_option == "tcp_target_pose":
-            # Stall (next chunk not ready): re-emit the LAST absolute TcpPoseTarget so the
-            # command stays fresh and the arm holds steady at the target. Returning None
-            # here let the command go stale (real timeout 0.05s) -> the servo jerks/stops,
-            # which is the pulsed "뚝뚝" motion. We do NOT clear the target accumulator: the
-            # next chunk re-anchors at its own boundary (_steps_since_boundary==0) anyway, so
-            # holding the last target until then gives a smooth pause instead of a stale jerk.
-            return getattr(self, "_current_step_intent", None)
-        left = _ZERO_TWIST if (len(self.arm_mask) > 0 and self.arm_mask[0] > 0.0) else None
-        right = _ZERO_TWIST if (len(self.arm_mask) > 1 and self.arm_mask[1] > 0.0) else None
-        self._last_nonzero_twist_by_arm["left"] = False
-        self._last_nonzero_twist_by_arm["right"] = False
-        # The arm is held at zero velocity; anchor the crossfade reference at zero
-        # so the next chunk ramps in from rest (smooth restart after a stall).
-        self._prev_emitted_twist_by_arm["left"] = _ZERO_TWIST
-        self._prev_emitted_twist_by_arm["right"] = _ZERO_TWIST
-        if self.command_family_option == "tcp_twist_local":
-            return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
-        return None
+        # Stall (next chunk not ready): re-emit the LAST absolute TcpPoseTarget so the
+        # command stays fresh and the arm holds steady at the target. Returning None
+        # here lets the command go stale; holding the last target until the next
+        # chunk boundary gives a smooth pause instead of a stale-command jerk.
+        return getattr(self, "_current_step_intent", None)
 
     def _apply_rotation_axis_mask(self, chunk: np.ndarray) -> np.ndarray:
         """Zero the per-arm rotation-action axes disabled in
@@ -1021,24 +908,6 @@ class FlowMatchingActionSource:
         )
         self.gripper_runtime.dispatch(commands)
 
-    def _tcp_twist_local_step_intent(
-        self,
-        step: np.ndarray,
-        *,
-        gripper_targets: dict[str, float | None],
-    ) -> CommandIntent | None:
-        left = self._twist_payload_for_arm("left", step[0:6]) if self.arm_mask[0] > 0.0 else None
-        right = self._twist_payload_for_arm("right", step[7:13]) if self.arm_mask[1] > 0.0 else None
-        if left is None and right is None:
-            return None
-        return tcp_twist_local_intent(
-            left=left,
-            right=right,
-            left_gripper=gripper_targets.get("left"),
-            right_gripper=gripper_targets.get("right"),
-            timeout_sec=self.timeout_sec,
-        )
-
     def _tcp_target_pose_step_intent(
         self,
         step: np.ndarray,
@@ -1090,13 +959,9 @@ class FlowMatchingActionSource:
 
     # ----------------------------------------------- foh_se3 conditioning (Patch 3) --
     def _tcp_tp_foh_active(self) -> bool:
-        """True only for the streamed tcp_target_pose path with foh_se3 selected.
-
-        Uses getattr defaults so the DirectBc subclasses (which never set _tcp_tp_mode)
-        always evaluate False -> unchanged legacy behavior."""
+        """True only when the foh_se3 pose-target conditioner is selected."""
         return (
-            self.command_family_option == "tcp_target_pose"
-            and getattr(self, "_tcp_tp_mode", "legacy_step_hold") == "foh_se3"
+            getattr(self, "_tcp_tp_mode", "legacy_step_hold") == "foh_se3"
         )
 
     def _ensure_tcp_tp_conditioners(self) -> dict[str, "OnlineTcpTargetPoseConditioner"]:
@@ -1155,10 +1020,8 @@ class FlowMatchingActionSource:
         """Emit a fresh SE(3)-interpolated TcpPoseTarget for the current servo tick."""
         conds = self._ensure_tcp_tp_conditioners()
         gripper = getattr(self, "_current_gripper_targets", {"left": None, "right": None})
-        send_twist = bool(getattr(self, "_tcp_tp_send_twist", False))
         results: dict[str, Any] = {}
         payload_arms: dict[str, tuple[float, ...] | None] = {"left": None, "right": None}
-        twist_arms: dict[str, tuple[float, ...] | None] = {"left": None, "right": None}
         for arm, idx, _sl in self._foh_arm_indices():
             if self.arm_mask[idx] <= 0.0:
                 continue
@@ -1168,8 +1031,6 @@ class FlowMatchingActionSource:
             ct = cond.hold() if stall else cond.sample(now_monotonic)
             results[arm] = ct
             payload_arms[arm] = tuple(float(v) for v in ct.pose.tolist())
-            if send_twist and ct.twist is not None and np.all(np.isfinite(ct.twist)):
-                twist_arms[arm] = tuple(float(v) for v in np.asarray(ct.twist).tolist())
         self._foh_last_targets = results
         if payload_arms["left"] is None and payload_arms["right"] is None:
             return None
@@ -1178,8 +1039,6 @@ class FlowMatchingActionSource:
             right=payload_arms["right"],
             left_gripper=gripper.get("left"),
             right_gripper=gripper.get("right"),
-            left_twist=twist_arms["left"],
-            right_twist=twist_arms["right"],
             timeout_sec=self.timeout_sec,
         )
 
@@ -1225,7 +1084,6 @@ class FlowMatchingActionSource:
                     "dropout": bool(ct.dropout),
                     "emitted_target": [float(v) for v in ct.pose.tolist()],
                     "emitted_delta_from_prev": [float(v) for v in ct.emitted_delta_from_prev.tolist()],
-                    "conditioned_twist": (None if ct.twist is None else [float(v) for v in ct.twist.tolist()]),
                 })
             record[f"{arm}_conditioner"] = arm_rec
         self._action_log_seq += 1
@@ -1233,66 +1091,15 @@ class FlowMatchingActionSource:
 
     def _clamp_delta_step(self, delta: np.ndarray) -> tuple[float, ...]:
         assert self.policy_dt_sec is not None
-        return clamp_tcp_delta(
+        return clamp_pose_delta(
             np.asarray(delta, dtype=np.float64).reshape(-1).tolist(),
             self.max_linear_velocity_m_s * self.policy_dt_sec,
             self.max_angular_velocity_rad_s * self.policy_dt_sec,
         )
 
-    def _twist_payload_for_arm(self, arm: str, delta: np.ndarray) -> tuple[float, ...] | None:
-        twist = self._delta_to_twist(delta)
-        if _has_nonzero(twist):
-            twist = self._apply_chunk_crossfade(arm, twist)
-            self._last_nonzero_twist_by_arm[arm] = True
-            self._prev_emitted_twist_by_arm[arm] = twist
-            return twist
-        if self._last_nonzero_twist_by_arm[arm]:
-            self._last_nonzero_twist_by_arm[arm] = False
-            self._prev_emitted_twist_by_arm[arm] = _ZERO_TWIST
-            return _ZERO_TWIST
-        return None
-
-    def _apply_chunk_crossfade(
-        self, arm: str, twist: tuple[float, ...]
-    ) -> tuple[float, ...]:
-        """Blend the first few twists after a chunk boundary from the previously
-        emitted twist so velocity is continuous across the resample. alpha ramps
-        from 1/(K+1) at the boundary step to 1.0 after K steps; outside the window
-        (or with no prior twist) the new twist passes through unchanged."""
-        k = self._chunk_crossfade_steps
-        if k <= 0 or self._steps_since_boundary >= k:
-            return twist
-        prev = self._prev_emitted_twist_by_arm.get(arm)
-        if prev is None:
-            return twist
-        alpha = (self._steps_since_boundary + 1) / (k + 1)
-        return tuple((1.0 - alpha) * p + alpha * t for p, t in zip(prev, twist))
-
-    def _delta_to_twist(self, delta: np.ndarray) -> tuple[float, ...]:
-        assert self.policy_dt_sec is not None
-        values = np.asarray(delta, dtype=np.float64).reshape(-1)
-        if values.shape[0] != 6:
-            raise ValueError("flow Cartesian delta must contain 6 values")
-        twist = values / self.policy_dt_sec
-        return clamp_tcp_twist(
-            twist.tolist(),
-            self.max_linear_velocity_m_s,
-            self.max_angular_velocity_rad_s,
-        )
-
     def _no_policy_input_intent(self) -> CommandIntent | None:
-        if self.command_family_option == "tcp_target_pose":
-            self._clear_target_pose_state()
-            return None
-        if self.command_family_option != "tcp_twist_local":
-            return None
-        left = _ZERO_TWIST if self._last_nonzero_twist_by_arm["left"] else None
-        right = _ZERO_TWIST if self._last_nonzero_twist_by_arm["right"] else None
-        if left is None and right is None:
-            return None
-        self._last_nonzero_twist_by_arm["left"] = False
-        self._last_nonzero_twist_by_arm["right"] = False
-        return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
+        self._clear_target_pose_state()
+        return None
 
     def _integrate_gripper_targets(
         self,
@@ -1527,7 +1334,7 @@ class FlowMatchingActionSource:
 class DirectBcImageActionSource(FlowMatchingActionSource):
     """Runtime source for supervised image action-chunk imitation checkpoints."""
 
-    _default_command_family = "tcp_twist_local"
+    _default_command_family = FLOW_COMMAND_FAMILY
 
     def __init__(
         self,
@@ -1599,7 +1406,7 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
             )
         self.command_family_option = _resolve_runtime_command_family(
             command_family, self.stats, default_command_family=self._default_command_family)
-        self.command_family = canonical_flow_command_family(self.command_family_option)
+        self.command_family = FLOW_COMMAND_LABEL
         self.camera_names = [str(name) for name in checkpoint.get("camera_names", [])]
         checkpoint_image_size = _positive_int(checkpoint.get("image_size"))
         stats_image_size = _positive_int(self.stats.get("image_size"))
@@ -1733,7 +1540,7 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
 class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
     """Runtime source for prediction-averaged direct-BC checkpoint ensembles."""
 
-    _default_command_family = "tcp_twist_local"
+    _default_command_family = FLOW_COMMAND_FAMILY
 
     def __init__(
         self,
@@ -1800,7 +1607,7 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
             )
         self.command_family_option = _resolve_runtime_command_family(
             command_family, self.stats, default_command_family=self._default_command_family)
-        self.command_family = canonical_flow_command_family(self.command_family_option)
+        self.command_family = FLOW_COMMAND_LABEL
         self.camera_names = list(bundle.camera_names)
         self.image_size = int(bundle.image_size)
         self.action_horizon = int(bundle.action_horizon)
@@ -1904,7 +1711,7 @@ def run_flow_offline_eval(
     sample_steps: int = 16,
     device: str = "auto",
     max_samples: int = 1,
-    command_family: str = "TcpTwistLocal",
+    command_family: str = FLOW_COMMAND_LABEL,
 ) -> FlowOfflineEvalResult:
     if sample_steps <= 0:
         raise ValueError("sample_steps must be positive")
@@ -1989,7 +1796,7 @@ def run_direct_bc_offline_eval(
     episodes_dir: str | Path,
     device: str = "auto",
     max_samples: int = 1,
-    command_family: str = "TcpTwistLocal",
+    command_family: str = FLOW_COMMAND_LABEL,
     image_size: int | None = None,
 ) -> FlowOfflineEvalResult:
     if max_samples <= 0:
@@ -2079,7 +1886,7 @@ def run_direct_bc_ensemble_offline_eval(
     episodes_dir: str | Path,
     device: str = "auto",
     max_samples: int = 1,
-    command_family: str = "TcpTwistLocal",
+    command_family: str = FLOW_COMMAND_LABEL,
     image_size: int | None = None,
     ensemble_name: str | None = "top5",
 ) -> FlowOfflineEvalResult:
@@ -2487,9 +2294,7 @@ def _resolve_runtime_policy_dt_sec(
     policy_dt_sec: float | None,
     stats: dict[str, Any],
 ) -> float | None:
-    family = normalize_flow_command_family(command_family)
-    if family not in {"tcp_twist_local", "tcp_target_pose"}:
-        return None
+    _ = command_family
     resolved = _positive_float(policy_dt_sec)
     if resolved is not None:
         return resolved
@@ -2497,7 +2302,7 @@ def _resolve_runtime_policy_dt_sec(
     if resolved is not None:
         return resolved
     raise ValueError(
-        f"policy_dt_sec or checkpoint dataset_stats.dt_mean_sec is required for {family} flow commands"
+        "policy_dt_sec or checkpoint dataset_stats.dt_mean_sec is required for TcpPoseTarget flow commands"
     )
 
 

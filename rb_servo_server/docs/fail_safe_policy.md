@@ -55,7 +55,7 @@ servo:
   send_servo_commands: false
 ```
 
-Read-only mode lets the server connect to backends, read robot state, and publish state snapshots without sending servo motion. `ArmMotion`, `JointTarget`, `JointVelocity`, `TcpPoseTarget`, `TcpDeltaStand`, and `TcpDeltaLocal` are fail-closed and hold the previous safe target. `Hold` remains safe, but it is also not sent to the backend.
+Read-only mode lets the server connect to backends, read robot state, and publish state snapshots without sending servo motion. `ArmMotion`, `JointTarget`, `TcpPoseTarget`, and `TcpLinearMove` are fail-closed and hold the previous safe target. `Hold` remains safe, but it is also not sent to the backend.
 
 State output marks the policy with `send_suppressed: true` and `send_policy: "read_only"` so suppression is distinguishable from a send failure. In read-only mode `send_ok` means "policy suppressed without backend send failure", not "the robot accepted a servo command".
 

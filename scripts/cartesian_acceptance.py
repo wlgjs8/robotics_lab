@@ -120,8 +120,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--line-tolerance-m", type=float, default=0.002)
     parser.add_argument("--run-ptp", action="store_true")
     parser.add_argument("--run-linear", action="store_true")
-    parser.add_argument("--run-twist-local", action="store_true")
-    parser.add_argument("--run-twist-stand", action="store_true")
     parser.add_argument("--run-near-pi-ptp", action="store_true")
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--repeat", type=int, default=1)
@@ -138,20 +136,14 @@ def selected_scenarios(args: argparse.Namespace) -> set[str]:
     if args.all or not any((
         args.run_ptp,
         args.run_linear,
-        args.run_twist_local,
-        args.run_twist_stand,
         args.run_near_pi_ptp,
     )):
-        return {"ptp", "linear", "twist_local", "twist_stand"}
+        return {"ptp", "linear"}
     out: set[str] = set()
     if args.run_ptp:
         out.add("ptp")
     if args.run_linear:
         out.add("linear")
-    if args.run_twist_local:
-        out.add("twist_local")
-    if args.run_twist_stand:
-        out.add("twist_stand")
     if args.run_near_pi_ptp:
         out.add("near_pi_ptp")
     return out
@@ -198,7 +190,7 @@ def preflight(args: argparse.Namespace) -> None:
         "orientation_tolerance_rad: 0.005",
     )
     missing = [item for item in required if item not in server_text]
-    for tool in ("send_tcp_pose_target.py", "send_tcp_linear_move.py", "send_tcp_twist.py"):
+    for tool in ("send_tcp_pose_target.py", "send_tcp_linear_move.py"):
         if not (args.root / "rb_servo_server" / "tools" / tool).is_file():
             missing.append(f"rb_servo_server/tools/{tool}")
     if unsafe:
@@ -345,20 +337,6 @@ def linear_move_command(target: dict[str, Any], duration_sec: float, orientation
             "duration_sec": duration_sec,
             "orientation_mode": orientation_mode,
         },
-        "right": {"mode": "Hold"},
-    }
-
-
-def twist_command(frame: str, twist: list[float], timeout_sec: float = 0.2) -> dict[str, Any]:
-    s = seq()
-    mode = "TcpTwistLocal" if frame == "local" else "TcpTwistStand"
-    key = "tcp_twist_local" if frame == "local" else "tcp_twist_stand"
-    return {
-        "seq": s,
-        "mode": "Hold",
-        "host_time_ns": s,
-        "timeout_sec": timeout_sec,
-        "left": {"mode": mode, key: twist},
         "right": {"mode": "Hold"},
     }
 
@@ -830,66 +808,6 @@ def run_linear_slerp(ctx: Context) -> None:
     )
 
 
-def stream_twist(ctx: Context, frame: str, twist: list[float], duration_sec: float, rate_hz: float) -> tuple[int, int]:
-    first_ns = 0
-    last_ns = 0
-    period = 1.0 / rate_hz
-    deadline = time.monotonic() + duration_sec
-    while time.monotonic() < deadline:
-        packet = twist_command(frame, twist, timeout_sec=0.2)
-        if first_ns == 0:
-            first_ns = int(packet["host_time_ns"])
-        last_ns = int(packet["host_time_ns"])
-        send_udp(ctx.args.command_host, ctx.args.command_port, packet, ctx.commands)
-        time.sleep(period)
-    stop = hold_command()
-    send_udp(ctx.args.command_host, ctx.args.command_port, stop, ctx.commands)
-    return first_ns, last_ns
-
-
-def run_twist(ctx: Context, frame: str) -> None:
-    label = f"twist_{frame}"
-    start = arm_motion(ctx)
-    start_pose = arm_pose(start, "left", f"{label}.start")
-    direction = [1.0, 0.0, 0.0]
-    if frame == "local":
-        rot = quat_to_matrix(start_pose["quaternion_xyzw"])
-        direction = [rot[0][0], rot[1][0], rot[2][0]]
-    start_ns, _last_ns = stream_twist(ctx, frame, [0.02, 0.0, 0.0, 0.0, 0.0, 0.0], 1.0, 30.0)
-    time.sleep(0.3)
-    final = latest_valid_after(ctx.capture, start_ns, f"{label} stream")
-    final_pose = arm_pose(final, "left", f"{label}.final")
-    final_ns = int(final.get("host_time_ns", seq()))
-    samples = collect_path_samples(ctx.capture, start_ns, final_ns, "left")
-    delta = sub(vec(final_pose), vec(start_pose))
-    along = dot(delta, direction)
-    off_axis = norm(sub(delta, [along * direction[i] for i in range(3)]))
-    orientation_error = quat_angle(final_pose["quaternion_xyzw"], start_pose["quaternion_xyzw"])
-    max_orientation_drift = orientation_error
-    for sample in samples:
-        max_orientation_drift = max(
-            max_orientation_drift,
-            quat_angle(sample["pose"]["quaternion_xyzw"], start_pose["quaternion_xyzw"]),
-        )
-    if along < 0.003:
-        raise AcceptanceError(f"{label} did not move primarily forward, projected distance {along}")
-    if off_axis > 0.01:
-        raise AcceptanceError(f"{label} off-axis movement {off_axis} too large")
-    if max_orientation_drift > ctx.args.orientation_tolerance_rad:
-        raise AcceptanceError(f"{label} orientation drift {max_orientation_drift} > {ctx.args.orientation_tolerance_rad}")
-    no_fault(final, label)
-    ctx.scenario_results[label] = scenario_result(
-        max_position_error_m=off_axis,
-        max_orientation_error_rad=max_orientation_drift,
-        max_twist_orientation_drift_rad=max_orientation_drift,
-        max_ik_duration_us=sample_metric_max(samples, "ik_duration_us"),
-        sample_count=len(samples),
-        projected_translation_m=along,
-        off_axis_translation_m=off_axis,
-        orientation_error_rad=orientation_error,
-    )
-
-
 def run_estop_reset(ctx: Context) -> dict[str, Any]:
     if ctx.args.skip_estop_reset:
         return {"skipped": True}
@@ -964,7 +882,6 @@ def scenario_result(
     max_orientation_error_rad: float = 0.0,
     max_line_deviation_m: float = 0.0,
     max_path_orientation_error_rad: float = 0.0,
-    max_twist_orientation_drift_rad: float = 0.0,
     max_ik_duration_us: float = 0.0,
     max_cartesian_servo_duration_us: float | None = None,
     path_done_observed: bool = False,
@@ -979,7 +896,6 @@ def scenario_result(
         "max_orientation_error_rad": max_orientation_error_rad,
         "max_line_deviation_m": max_line_deviation_m,
         "max_path_orientation_error_rad": max_path_orientation_error_rad,
-        "max_twist_orientation_drift_rad": max_twist_orientation_drift_rad,
         "max_ik_duration_us": max_ik_duration_us,
         "max_cartesian_servo_duration_us": max_cartesian_servo_duration_us,
         "path_done_observed": path_done_observed,
@@ -1150,10 +1066,6 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
                     run_linear_slerp(ctx)
                 elif args.require_slerp:
                     raise AcceptanceError("--require-slerp was set but slerp was skipped")
-            if "twist_local" in scenarios:
-                run_twist(ctx, "local")
-            if "twist_stand" in scenarios:
-                run_twist(ctx, "stand")
             iteration_results.append({"iteration": iteration, "scenarios": ctx.scenario_results})
         estop_reset = run_estop_reset(ctx)
     finally:
@@ -1193,10 +1105,6 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
             scenario_metric_max(scenario_results, "max_path_orientation_error_rad"),
         ),
         "max_line_deviation_m": metric_max(capture.snapshots, "path_line_deviation_m"),
-        "max_twist_orientation_drift_rad": scenario_metric_max(
-            scenario_results,
-            "max_twist_orientation_drift_rad",
-        ),
         "near_pi_math_tests_run": bool(args.near_pi_math_tests_run),
         "max_path_tracking_error_m": metric_max(capture.snapshots, "path_position_error_m"),
         "max_ik_duration_us": metric_max(capture.snapshots, "ik_duration_us"),
@@ -1241,7 +1149,6 @@ def write_summaries(artifact_dir: Path, summary: dict[str, Any]) -> None:
                 "max_orientation_error_rad",
                 "max_line_deviation_m",
                 "max_path_orientation_error_rad",
-                "max_twist_orientation_drift_rad",
                 "max_ik_duration_us",
                 "max_cartesian_servo_duration_us",
                 "path_done_observed",
@@ -1268,7 +1175,6 @@ def write_summaries(artifact_dir: Path, summary: dict[str, Any]) -> None:
                         result.get("max_orientation_error_rad", 0.0),
                         result.get("max_line_deviation_m", 0.0),
                         result.get("max_path_orientation_error_rad", 0.0),
-                        result.get("max_twist_orientation_drift_rad", 0.0),
                         result.get("max_ik_duration_us", 0.0),
                         result.get("max_cartesian_servo_duration_us"),
                         result.get("path_done_observed", False),
@@ -1289,7 +1195,6 @@ def write_summaries(artifact_dir: Path, summary: dict[str, Any]) -> None:
                         result.get("max_orientation_error_rad", 0.0),
                         result.get("max_line_deviation_m", 0.0),
                         result.get("max_path_orientation_error_rad", 0.0),
-                        result.get("max_twist_orientation_drift_rad", 0.0),
                         result.get("max_ik_duration_us", 0.0),
                         result.get("max_cartesian_servo_duration_us"),
                         result.get("path_done_observed", False),

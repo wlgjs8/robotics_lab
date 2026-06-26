@@ -35,7 +35,7 @@ esac
 # Single teleop entrypoint: SpaceMouse + UMI side by side (idle handoff).
 # 한 소스만 격리 디버그하려면 env 로 오버라이드:
 #   ACTION_SOURCE=umi_dual_cartesian make run   (UMI 단독, SpaceMouse/mux 제외)
-#   ACTION_SOURCE=dual_spacemouse_cartesian make run
+#   ACTION_SOURCE=dual_spacemouse_pose_target make run
 #   ACTION_SOURCE=none make run                 (policy_runner 미기동: 서버+GUI만,
 #                                                외부 command source[리플레이 드라이버 등]가
 #                                                lease 단독 보유하도록 teleop_mux 경쟁 제거)
@@ -78,6 +78,10 @@ fi
 case "${GRIPPER_SERVER:-${GRIPPER_FOLLOW:-auto}}" in
   0|no|off|false) GRIPPER_SERVER_ON=0 ;;
   *) GRIPPER_SERVER_ON=1 ;;
+esac
+GRIPPER_SERVER_DEBUG_ARGS=""
+case "${GRIPPER_SERVER_DEBUG:-0}" in
+  1|yes|on|true) GRIPPER_SERVER_DEBUG_ARGS="--debug-stats" ;;
 esac
 
 # Ensure the RT capabilities the servo loop needs (real-time scheduling +
@@ -224,10 +228,10 @@ PYTHONPATH=rb_gui \
 PIDS+=($!)
 
 if [ "$GRIPPER_SERVER_ON" = "1" ]; then
-  echo "[stack] gripper_server: backend=$GRIPPER_BACKEND cmd<-127.0.0.1:50410 feedback->127.0.0.1:50420 ${GRIPPER_SERVER_ARGS:-}"
+  echo "[stack] gripper_server: backend=$GRIPPER_BACKEND cmd<-127.0.0.1:50410 feedback->127.0.0.1:50420 ${GRIPPER_SERVER_ARGS:-} ${GRIPPER_SERVER_DEBUG_ARGS:-}"
   python3 -u -m policy_runner.gripper_server \
     --backend "$GRIPPER_BACKEND" --bind 127.0.0.1:50410 --state-endpoint 127.0.0.1:50420 \
-    ${GRIPPER_SERVER_ARGS:-} >"$LOG_DIR/gripper_server.log" 2>&1 &
+    ${GRIPPER_SERVER_DEBUG_ARGS:-} ${GRIPPER_SERVER_ARGS:-} >"$LOG_DIR/gripper_server.log" 2>&1 &
   PIDS+=($!)
   # pika backend binds the serial ports immediately; surface an early crash
   # (missing /dev/pika-*, pika_sdk, port already open) without blocking. The sim

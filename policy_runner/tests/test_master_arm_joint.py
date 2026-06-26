@@ -118,7 +118,7 @@ class MasterArmJointActionSourceTest(unittest.TestCase):
             selected_arm="left",
             deadman_side="left",
             use_gravity_compensation=False,
-            max_joint_velocity_deg_s=(100.0, 100.0, 100.0, 100.0, 100.0, 100.0),
+            max_joint_speed_deg_s=(100.0, 100.0, 100.0, 100.0, 100.0, 100.0),
             smoothing_alpha=1.0,
         )
         initial_left = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]

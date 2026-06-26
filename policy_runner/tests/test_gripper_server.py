@@ -114,6 +114,53 @@ class StatePacketTest(unittest.TestCase):
         self.assertIsNone(last["right"]["target_percent"])   # never commanded
 
 
+class GripperServerStatsTest(unittest.TestCase):
+    def test_idle_without_command_does_not_send_to_backend(self):
+        cfg = GripperServerConfig(backend="sim", home_on_connect=False)
+        srv = GripperServer(cfg, clock=lambda: 0.0)
+        srv._backend.connect()
+
+        state = srv.step(host_time_ns=1)
+
+        self.assertEqual(state["left"]["target_percent"], None)
+        self.assertEqual(srv.stats.command_packets, 0)
+        self.assertEqual(srv.stats.backend_send_calls, 0)
+        self.assertEqual(srv.stats.physical_sends, 0)
+
+    def test_stale_hold_reuses_target_but_deadband_blocks_repeat_send(self):
+        clk = {"t": 0.0}
+        cfg = GripperServerConfig(
+            backend="sim",
+            home_on_connect=False,
+            stale_timeout_sec=0.1,
+            on_stale="hold",
+            backend_max_hz=1000.0,
+        )
+        srv = GripperServer(cfg, clock=lambda: clk["t"])
+        srv._backend.connect()
+
+        srv.apply_command({"deadman": True, "arms": {"left": 50.0}}, now=0.0)
+        srv.step(host_time_ns=1)
+        clk["t"] = 1.0
+        srv.step(host_time_ns=2)
+
+        self.assertEqual(srv.stats.command_packets, 1)
+        self.assertEqual(srv.stats.backend_send_calls, 2)
+        self.assertEqual(srv.stats.physical_sends, 1)
+        self.assertEqual(srv.stats.deadband_holds, 1)
+        self.assertEqual(srv.stats.last_reason["left"], "gripper_deadband_hold")
+
+    def test_apply_command_ignores_non_mapping_arms(self):
+        cfg = GripperServerConfig(backend="sim", home_on_connect=False)
+        srv = GripperServer(cfg, clock=lambda: 0.0)
+
+        srv.apply_command({"deadman": True, "arms": "not-a-map"}, now=0.0)
+
+        self.assertEqual(srv.stats.command_packets, 1)
+        self.assertEqual(srv.stats.command_arm_setpoints, 0)
+        self.assertEqual(srv.effective_targets(now=0.0)["left"], None)
+
+
 class UdpRoundTripTest(unittest.TestCase):
     def test_command_in_state_out_over_loopback(self):
         listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

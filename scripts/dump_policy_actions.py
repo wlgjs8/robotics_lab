@@ -4,7 +4,7 @@
 Teacher-forced: for every timestep t of each selected validation episode the
 model sees the recorded (normalized) image+proprio sample and we keep the first
 action of the predicted chunk. The resulting raw 14-dim action sequence can be
-replayed against rb_servo_server (e.g. as TcpTwistLocal) without torch.
+inspected without torch before running through the target-pose rollout path.
 
 Output JSON schema (robotics_lab.policy_runner.action_dump.v1):
   {checkpoint, action_frame, dt_mean_sec, action_dim_names, episodes: [

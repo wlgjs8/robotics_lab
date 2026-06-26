@@ -269,7 +269,7 @@ struct SelfCollisionConfig {
     // URDF mesh self-collision parameters (consumed only when enable is true). The
     // monitor runs on a separate thread (off the 2 ms servo_j path) + a velocity
     // barrier. Barrier params are a SINGLE shared set, common to every motion
-    // primitive (TcpPoseTarget, TcpTwistLocal, ...) — speed adaptation comes from
+    // primitive (JointTarget, TcpPoseTarget, TcpLinearMove) — speed adaptation comes from
     // the measured closing speed, so nothing is tuned per primitive.
     struct MeshConfig {
         std::string unified_urdf;        // stand+both-arms URDF (e.g. dual_rb3_730e_ver3.urdf)
@@ -546,15 +546,15 @@ struct JointTargetSmdConfig {
     JointArray max_accel_deg_s2{150.0, 150.0, 150.0, 250.0, 250.0, 350.0};
 };
 
-// Collision-free InitMotion planner (server-side). The legacy InitMotion is a
-// single JointTarget PTP whose straight joint-space interpolation can pass through
-// a self-colliding or floor-violating configuration; the reactive barrier then
-// brakes the arms at the boundary and they never REACH the init pose. When enabled,
-// a ControlMode::InitMotion command instead triggers a 12-DOF (both arms) RRT-Connect
-// that plans a collision-free + floor-safe joint path (oracle = a private
-// CollisionMonitor incl. the ground plane), which the server streams as ordinary
-// JointTarget setpoints through the full safety gate. Requires self_collision.enable
-// (the mesh model is the planner's oracle). Fail-closed: planning failure holds.
+// Collision-free JointTarget init_motion profile planner (server-side). A direct
+// JointTarget PTP can pass through a self-colliding or floor-violating
+// configuration; the reactive barrier then brakes the arms at the boundary and
+// they never reach the init pose. When enabled, a JointTarget carrying
+// joint_target_profile=init_motion triggers a 12-DOF (both arms) RRT-Connect plan
+// for a collision-free + floor-safe joint path (oracle = a private CollisionMonitor
+// incl. the ground plane), which the server streams as ordinary JointTarget setpoints
+// through the full safety gate. Requires self_collision.enable (the mesh model is
+// the planner's oracle). Fail-closed: planning failure holds.
 struct InitMotionPlannerConfig {
     bool enable = false;
     double max_planning_time_sec = 2.0;   // wall-clock budget per plan (off the RT loop)
@@ -593,6 +593,9 @@ struct SafetyConfig {
     JointArray dq_max_deg_s{};
     JointArray ddq_max_deg_s2{};
     JointArray joint_wrap_period_deg{};
+    // Per-axis opt-out from JointTarget shortest-path +/-360 goal selection.
+    // true keeps the commanded raw target exactly (used for cable-sensitive J6).
+    JointBoolArray joint_target_literal_axes{};
 
     double command_timeout_sec = 0.2;
     double max_tracking_error_deg = 10.0;
@@ -689,6 +692,7 @@ struct NetworkConfig {
     std::string state_pub_bind = "udp://127.0.0.1:50110";
     // Canonical UDP state destinations. The first entry mirrors state_pub_endpoint.
     std::vector<std::string> state_pub_endpoints{"udp://127.0.0.1:50110"};
+    std::vector<std::string> scope_pub_endpoints{"udp://127.0.0.1:50357"};
     int state_pub_rate_hz = 20;
     std::vector<std::string> command_source_allowlist{"127.0.0.1/32"};
     double command_timeout_sec = 0.2;
@@ -706,6 +710,12 @@ struct LoggingConfig {
     std::string directory = "./logs";
     int flush_period_ms = 100;
     size_t queue_capacity = 4096;
+};
+
+struct ScopeConfig {
+    bool enable = false;
+    int publish_rate_hz = 100;
+    size_t max_samples_per_batch = 64;
 };
 
 struct ForceControlConfig {
@@ -743,13 +753,6 @@ struct LinearMoveConfig {
     int collision_check_samples = 40;  // dense samples along the straight path for the precheck
 };
 
-struct CircleMoveConfig {
-    bool allow_in_simulation = true;
-    bool allow_in_real = false;
-    double max_diameter_m = 0.20;
-    double min_period_sec = 3.0;
-};
-
 // Spring-Mass-Damper smoothing for the streaming TcpPoseTarget path: received
 // command deltas integrate into a goal pose, and the published target follows
 // that goal as a second-order system (mass fixed at 1.0) stepped at the servo
@@ -778,13 +781,6 @@ struct PoseTrackSmdConfig {
     // (auto stand/body frame; valid because every caller integrates the goal once
     // per step()). Off by default = exact legacy 2nd-order SMD.
     bool velocity_feedforward = false;
-    // Feedforward velocity source (Patch 5), used only when velocity_feedforward:
-    //   "finite_difference" (default): per-tick goal delta (legacy behavior).
-    //   "command_twist": the conditioned twist supplied with the TcpPoseTarget
-    //       command; falls back to finite_difference when absent/non-finite.
-    //   "auto": command twist when present, else finite_difference.
-    // Unknown values are treated as finite_difference.
-    std::string velocity_feedforward_source = "finite_difference";
 };
 
 enum class CartesianLimitPolicy {
@@ -813,35 +809,13 @@ struct CartesianControlConfig {
     bool allow_in_simulation = true;
     bool allow_in_real = false;
     bool allow_in_controller_simulation = false;
-    bool enable_server_side_circle_track = false;
-    bool enable_benchmark_primitives = false;
     double warn_ik_duration_us = 3000.0;
     double fail_ik_duration_us = 0.0;
     // Deprecated compatibility field. New control code uses path_kp_pos/path_kp_ori.
     double path_kp = 6.0;
     double path_kp_pos = 6.0;
     double path_kp_ori = 6.0;
-    double twist_orientation_hold_kp = 6.0;
-    double twist_angular_deadband_rad_s = 0.0001;
-    // Route the streaming twist through the SMD pose tracker instead of velocity
-    // IK + joint integration: integrate the (clamped) twist into a stand-frame
-    // pose goal each tick, smooth it with the pose_track_smd filter (same as
-    // streaming TcpPoseTarget), then position-IK the smoothed pose. Default off
-    // (behavior-preserving). Uses pose_track_smd's zeta/fn for the filter.
-    bool twist_via_smd_enable = false;
-    // Anti-windup for the twist_via_smd goal integrator. Clamp the integrated
-    // pose goal so it never LEADS the measured TCP by more than these budgets
-    // (position m / orientation rad). In this feedforward chain the goal would
-    // otherwise run away when the arm stalls (IK clamp / fault / can't track) and
-    // lurch on recovery; clamping the goal to measured+budget is the
-    // back-calculation feedback that bounds both. Normal tracking lead is only
-    // the SMD lag (~mm / sub-deg), well under budget, so it never engages there.
-    // Both default 0 = disabled (behavior-preserving); e.g. 0.05 m / 0.2 rad.
-    double twist_smd_goal_max_lead_m = 0.0;
-    double twist_smd_goal_max_lead_rad = 0.0;
     double velocity_damping = 0.01;
-    double max_twist_linear_m_s = 0.03;
-    double max_twist_angular_rad_s = 0.2;
     double max_linear_move_speed_m_s = 0.05;
     double max_angular_move_speed_rad_s = 0.3;
     std::optional<double> max_cartesian_step_m;
@@ -859,7 +833,6 @@ struct CartesianControlConfig {
     CartesianCommandActualErrorPolicy command_actual_error_policy =
         CartesianCommandActualErrorPolicy::Reset;
     LinearMoveConfig linear_move;
-    CircleMoveConfig circle_move;
     PoseTrackSmdConfig pose_track_smd;
 };
 
@@ -888,6 +861,7 @@ struct DualArmConfig {
     NetworkConfig network;
     CommandSourceConfig command_source;
     LoggingConfig logging;
+    ScopeConfig scope;
     ForceControlConfig force_control;
     CartesianControlConfig cartesian_control;
     KinematicsConfig kinematics;

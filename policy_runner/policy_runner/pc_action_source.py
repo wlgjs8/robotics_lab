@@ -24,7 +24,7 @@ from typing import Any
 
 import numpy as np
 
-from .action_sources.tcp_delta import cartesian_action_requirements
+from .action_sources.tcp_pose_target import cartesian_action_requirements
 from .camera_bundle_client import resolve_frame
 from .flow_dataset import FLOW_PROPRIO_DIM
 from .flow_inference import FlowMatchingActionSource

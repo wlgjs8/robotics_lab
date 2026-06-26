@@ -73,11 +73,11 @@ A packet like this is now converted to Hold:
 {"mode": "JointTarget", "left": {}, "right": {}}
 ```
 
-The parser sets `has_joint_target` / `has_joint_velocity` / TCP payload flags, and the loop refuses to execute a mode whose required payload is absent.
+The parser sets payload flags for the retained motion primitives, and the loop refuses to execute a mode whose required payload is absent.
 
 ### 5. Cartesian/IK unavailable means Hold, not zero
 
-`TcpPoseTarget`, `TcpDeltaStand`, and `TcpDeltaLocal` currently return `CartesianUnavailable` and hold the previous safe target. This prevents the future Cartesian layer from accidentally defaulting to zero joint arrays.
+`TcpPoseTarget` and `TcpLinearMove` return `CartesianUnavailable` and hold the previous safe target when Cartesian solving is unavailable. This prevents the Cartesian layer from accidentally defaulting to zero joint arrays.
 
 When IK is implemented, the same rule should remain:
 

@@ -74,9 +74,7 @@ cartesian_control:
   allow_in_controller_simulation: false
   path_kp_pos: 3.0                       # anti-tremble (was 6.0)
   path_kp_ori: 3.0                       # anti-tremble
-  twist_orientation_hold_kp: 3.0         # anti-tremble
   velocity_damping: 0.04                 # anti-tremble (was 0.01) — biggest lever
-  max_twist_linear_m_s: 0.05
   max_cartesian_step_m: 0.001
 ```
 

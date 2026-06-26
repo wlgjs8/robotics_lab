@@ -173,10 +173,6 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(pgmode.cartesian_control.enable);
         RB_CHECK(pgmode.cartesian_control.allow_in_controller_simulation);
         RB_CHECK(!pgmode.cartesian_control.allow_in_real);
-        RB_CHECK(!pgmode.cartesian_control.enable_benchmark_primitives);
-        RB_CHECK(!pgmode.cartesian_control.circle_move.allow_in_simulation);
-        RB_CHECK(near(pgmode.cartesian_control.max_twist_linear_m_s, 0.2));
-        RB_CHECK(near(pgmode.cartesian_control.max_twist_angular_rad_s, 0.4));
         RB_CHECK(pgmode.cartesian_control.controller_simulation_servo_state_source ==
                  rb_servo::CartesianControllerSimulationStateSource::Reference);
         RB_CHECK(pgmode.cartesian_control.controller_simulation_divergence_source ==
@@ -383,11 +379,8 @@ bool testCartesianControlTuningParsesAndValidates() {
         "schema: robotics_lab.rb_servo_server.v1\n"
         "cartesian_control:\n"
         "  allow_in_controller_simulation: true\n"
-        "  enable_server_side_circle_track: true\n"
         "  path_kp_pos: 2.5\n"
         "  path_kp_ori: 7.5\n"
-        "  twist_orientation_hold_kp: 8.0\n"
-        "  twist_angular_deadband_rad_s: 0.002\n"
         "  velocity_target_integration: measured_actual_lookahead\n"
         "  controller_simulation_servo_state_source: reference\n"
         "  controller_simulation_divergence_source: reference\n"
@@ -401,11 +394,8 @@ bool testCartesianControlTuningParsesAndValidates() {
     const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
     ::unlink(path.c_str());
     RB_CHECK(cfg.cartesian_control.allow_in_controller_simulation);
-    RB_CHECK(cfg.cartesian_control.enable_server_side_circle_track);
     RB_CHECK(near(cfg.cartesian_control.path_kp_pos, 2.5));
     RB_CHECK(near(cfg.cartesian_control.path_kp_ori, 7.5));
-    RB_CHECK(near(cfg.cartesian_control.twist_orientation_hold_kp, 8.0));
-    RB_CHECK(near(cfg.cartesian_control.twist_angular_deadband_rad_s, 0.002));
     RB_CHECK(cfg.cartesian_control.velocity_target_integration ==
              rb_servo::CartesianVelocityTargetIntegrationMode::MeasuredActualLookahead);
     RB_CHECK(cfg.cartesian_control.controller_simulation_servo_state_source ==
@@ -456,16 +446,6 @@ bool testCartesianControlTuningParsesAndValidates() {
     const bool bad_gain_rejected = loadRejects(bad_gain_path);
     ::unlink(bad_gain_path.c_str());
     RB_CHECK(bad_gain_rejected);
-
-    const std::string bad_deadband_path = writeTempConfig(
-        "cartesian-bad-deadband",
-        "schema: robotics_lab.rb_servo_server.v1\n"
-        "cartesian_control:\n"
-        "  twist_angular_deadband_rad_s: 0\n"
-    );
-    const bool bad_deadband_rejected = loadRejects(bad_deadband_path);
-    ::unlink(bad_deadband_path.c_str());
-    RB_CHECK(bad_deadband_rejected);
 
     const std::string bad_velocity_integration_path = writeTempConfig(
         "cartesian-bad-velocity-integration",

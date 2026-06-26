@@ -253,15 +253,23 @@ matching the current controller soft-limit configuration:
 `[-180, 180]` are allowed only for intentional tests or site-owned conservative
 overrides, not as production defaults.
 
-This wrapping policy is for startup diagnostics only by default. State JSON must
+The startup-validation wrapping policy remains diagnostic only. State JSON must
 keep raw `q_actual_deg`, publish any `q_range_wrapped` entries, and may publish
 `q_actual_normalized_for_safety_deg` for the validation view. If the raw value
 is already in range, it is left unchanged. If the configured range width is
 greater than or equal to the wrap period, the normalized value is only a
 deterministic diagnostic representative, not motion-ready evidence.
-`safety.joint_wrap_for_motion_safety` is refused until a future task implements
-continuous motion-safe unwrapping, because silently wrapping command targets can
-create joint discontinuities.
+`safety.joint_wrap_for_motion_safety` remains refused because silently wrapping
+targets mid-trajectory can create joint discontinuities.
+
+Absolute `JointTarget` goals have a narrower, accepted goal-selection step:
+before rate limiting/SMD, the filter may choose the in-range `target +/- 360*k`
+representation closest to the current sent target. This is endpoint-equivalent,
+limit-bounded, and goal-only; it does not normalize state or wrap while moving.
+`safety.joint_target_literal_axes` opts individual joints out of that selection.
+The stack configs mark J6/wrist yaw literal so InitMotion returns to the
+configured raw yaw target instead of a closer equivalent that could wind the
+Pika gripper cable.
 
 When kinematics is enabled, the server warns if the configured rbpodo safety
 range differs from the known `rb3_730e.urdf` model limits. This is diagnostic:
@@ -304,23 +312,21 @@ Real `sendServoJ()` requires:
 - site-local config that enables real motion (the legacy `RB_ALLOW_REAL_*` env
   gates were removed from the server runtime)
 
-Streaming Cartesian primitives are config-gated. In `run_mode: simulation`
-(mock), `TcpTwistStand`, `TcpTwistLocal`, `TcpLinearMove`, and
-`TcpCircleMove` require `cartesian_control.enable: true` and
-`cartesian_control.allow_in_simulation: true`.
+Cartesian primitives are config-gated. `TcpPoseTarget` and `TcpLinearMove`
+require `cartesian_control.enable: true` and the relevant site-local
+Cartesian gate for the active topology.
 
 The only real-controller carve-out is rbpodo controller `pgmode` simulation.
-For those same streaming primitives, `run_mode: real` may execute Cartesian
-target generation only when the selected backend is `rbpodo`, the robot
-`operation_mode` is `simulation`, the controller is confirmed in `pgmode`
-simulation, and these config gates are set (no env):
+`run_mode: real` may execute Cartesian target generation only when the selected
+backend is `rbpodo`, the robot `operation_mode` is `simulation`, the controller
+is confirmed in `pgmode` simulation, and these config gates are set (no env):
 
 - `cartesian_control.allow_in_controller_simulation: true`
 - `servo.allow_controller_simulation_motion: true`
 - `cartesian_control.allow_in_real: false`
 
 This is not physical real Cartesian enablement. `operation_mode: real` remains
-blocked for streaming Cartesian primitives unless the site config explicitly sets
+blocked for Cartesian primitives unless the site config explicitly sets
 `cartesian_control.allow_in_real: true`. State JSON must expose `cartesian_available`,
 `cartesian_unavailable_reason`, and a `cartesian_gate` object with the
 backend/run-mode/config/env decision fields so a controller-simulation
@@ -331,7 +337,7 @@ streaming Cartesian command may be admitted under pgmode simulation, while
 `controller_simulation_cartesian_enabled_for_current_command` is true only when
 the current command is a controller-simulation Cartesian command. This split
 prevents a startup `Hold` state from deadlocking the first policy-runner
-`TcpTwistLocal` command.
+`TcpPoseTarget` command.
 
 Real stop/reset APIs remain conservative until verified. If no verified API is wired, return `DependencyUnavailable` and require operator intervention.
 

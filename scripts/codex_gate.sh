@@ -392,8 +392,7 @@ run_cart_harden_05_gate() {
   run_shell_syntax_checks
   python3 -m compileall -q scripts rb_servo_server/tools
   python3 rb_servo_server/tools/send_tcp_linear_move.py --help >/dev/null
-  python3 rb_servo_server/tools/send_tcp_twist.py --help >/dev/null
-  grep_existing "TcpPoseTarget|TcpLinearMove|TcpTwistLocal|TcpTwistStand|TcpDeltaLocal|TcpDeltaStand" \
+  grep_existing "TcpPoseTarget|TcpLinearMove" \
     rb_servo_server/docs/network_protocol.md
   grep_existing "path_s|path_line_deviation_m|orientation preservation|quaternion" \
     rb_servo_server/docs/network_protocol.md
@@ -424,9 +423,6 @@ run_cart_accept_gate() {
   fi
   if [[ -f rb_servo_server/tools/send_tcp_linear_move.py ]]; then
     python3 rb_servo_server/tools/send_tcp_linear_move.py --help >/dev/null
-  fi
-  if [[ -f rb_servo_server/tools/send_tcp_twist.py ]]; then
-    python3 rb_servo_server/tools/send_tcp_twist.py --help >/dev/null
   fi
   if [[ "${CODEX_RUN_CARTESIAN_ACCEPTANCE:-0}" == "1" ]]; then
     run_servo_pinocchio_gate
@@ -1097,15 +1093,15 @@ run_pgmode_spacemouse_end_to_end_dryrun_gate() {
   run_gui_tests
   run_servo_gate_or_skip_missing_deps
   bash -n tools/rbpodo_pgmode_spacemouse.sh
-  grep_existing "dual_spacemouse_cartesian" \
+  grep_existing "dual_spacemouse_pose_target" \
     policy_runner/policy_runner policy_runner/tests policy_runner/config policy_runner/README.md
   grep_existing "deadman|deadman_button" \
     policy_runner/policy_runner/action_sources policy_runner/tests policy_runner/config policy_runner/README.md
   grep_existing "release[-_ ]?zero|zero.*release|deadman.*released|released.*no motion|emits no motion" \
     policy_runner/policy_runner/action_sources policy_runner/tests policy_runner/README.md docs/runbooks/policy_data_collection.md
-  grep_existing "sample_hold_timeout_sec|sample[-_ ]?hold|state_stream_stale|stale.*timeout|timeout.*stale" \
+  grep_existing "sample_stale_timeout_sec|state_stream_stale|stale.*timeout|timeout.*stale" \
     policy_runner/policy_runner policy_runner/tests policy_runner/config
-  grep_existing "TcpTwistLocal|tcp_twist_local" \
+  grep_existing "TcpPoseTarget|tcp_target_stand" \
     policy_runner/policy_runner policy_runner/tests policy_runner/README.md
   grep_existing "controller_simulation_cartesian_enabled|cartesian_gate|controller_simulation.*readback|lease_readback|50376" \
     policy_runner/policy_runner policy_runner/tests policy_runner/config docs/runbooks/rbpodo_pgmode_spacemouse.md
@@ -1124,20 +1120,18 @@ run_spacemouse_flow_infer_rollout_modes_gate() {
     policy_runner/policy_runner policy_runner/tests docs README.md
 }
 
-run_flow_policy_tcp_twistlocal_controller_sim_gate() {
+run_flow_policy_tcp_pose_target_controller_sim_gate() {
   run_shell_syntax_checks
   run_python_compile_checks
   run_policy_runner_tests
   run_policy_runner_help flow-infer
   run_required_policy_runner_tests_any \
-    "flow policy TcpTwistLocal controller-simulation rollout" \
-    'test_flow_policy_tcp_twistlocal*.py' \
-    'test_flow_policy_tcp_twist_local*.py' \
-    'test_*flow*twistlocal*.py' \
-    'test_*flow*tcp_twistlocal*.py'
-  grep_existing "TcpTwistLocal|tcp_twist_local" \
+    "flow policy TcpPoseTarget controller-simulation rollout" \
+    'test_flow_inference*.py' \
+    'test_flow_inference_tcp_targetpose*.py'
+  grep_existing "TcpPoseTarget|tcp_target_stand" \
     policy_runner/policy_runner policy_runner/tests docs/runbooks/policy_data_collection.md
-  grep_existing "bounded.*TcpTwistLocal|TcpTwistLocal.*bounded|clamp|clip|max_linear_velocity_m_s|max_angular_velocity_rad_s" \
+  grep_existing "clamp|clip|max_linear_step_m|max_angular_step_rad|max_linear_velocity_m_s|max_angular_velocity_rad_s" \
     policy_runner/policy_runner policy_runner/tests docs README.md
   grep_existing "policy_dt_sec|policy[-_ ]dt|command_rate_hz|dt_sec" \
     policy_runner/policy_runner policy_runner/tests policy_runner/config docs README.md
@@ -1604,7 +1598,7 @@ case "$TASK" in
   HARDEN-05)
     run_policy_runner_tests
     run_python_compile_checks
-    grep_existing "spacemouse_joint_velocity|tcp_delta|spacemouse_cartesian" policy_runner policy_runner/README.md
+    grep_existing "dual_spacemouse_pose_target|tcp_pose_target" policy_runner policy_runner/README.md
     ;;
   HARDEN-06)
     run_shell_syntax_checks
@@ -1804,8 +1798,8 @@ case "$TASK" in
   03_flow_infer_rollout_modes)
     run_spacemouse_flow_infer_rollout_modes_gate
     ;;
-  04_flow_policy_tcp_twistlocal_controller_sim)
-    run_flow_policy_tcp_twistlocal_controller_sim_gate
+  04_flow_policy_tcp_pose_target_controller_sim)
+    run_flow_policy_tcp_pose_target_controller_sim_gate
     ;;
   05_viser_pgmode_operator_view)
     run_viser_pgmode_operator_view_gate

@@ -12,6 +12,7 @@ namespace rb_servo {
 
 constexpr int kDof = 6;
 using JointArray = std::array<double, kDof>;
+using JointBoolArray = std::array<bool, kDof>;
 
 struct JointRangeNormalization {
     double normalized_value_deg = 0.0;
@@ -89,22 +90,8 @@ enum class ControlMode {
     ArmMotion,
     DisarmMotion,
     JointTarget,
-    // Collision-free InitMotion: same q_target_deg payload as JointTarget, but the
-    // server plans a collision-free + floor-safe joint path (12-DOF RRT-Connect,
-    // safety.init_motion_planner) and streams its waypoints as JointTargets through
-    // the full safety gate, so the arms REACH the init pose from any start pose
-    // without self-collision or dipping below the floor. Falls back to a direct
-    // JointTarget when the planner is disabled. Carried by ArmCommand.q_target_deg.
-    InitMotion,
-    JointVelocity,
     TcpPoseTarget,
     TcpLinearMove,
-    TcpCircleMove,
-    TcpCircleTrack,
-    TcpDeltaStand,
-    TcpDeltaLocal,
-    TcpTwistStand,
-    TcpTwistLocal,
     EmergencyStop,
     ResetFault,
     SetSafetyFloorZ,
@@ -124,6 +111,11 @@ enum class ControlMode {
     // guide it, then re-acquires it (freedrive_teach_off) with a target resync.
     // Sticky server state; carried by ArmCommand.freedrive_on.
     Freedrive
+};
+
+enum class JointTargetProfile {
+    Direct,
+    InitMotion
 };
 
 enum class ServerMotionState {
@@ -195,26 +187,6 @@ enum class TrackingErrorPolicy {
 enum class LinearMoveOrientationMode {
     Constant,
     Slerp
-};
-
-enum class TcpCirclePlane {
-    XY,
-    XZ,
-    YZ
-};
-
-enum class TcpCircleCenterMode {
-    StartOnCircle
-};
-
-enum class TcpCircleFrame {
-    Stand
-};
-
-enum class TcpCircleTrackTrackingSource {
-    Auto,
-    TcpActualStand,
-    TcpRefStand
 };
 
 struct Pose6D {
@@ -352,7 +324,6 @@ struct CartesianSolveTelemetry {
     double ik_solution_jump_deg = 0.0;
     bool ik_branch_jump_suspected = false;
     bool ik_branch_jump_clamped = false;
-    bool twist_smd_goal_clamped = false;  // twist_via_smd goal anti-windup engaged
     bool ik_timed_out = false;
     bool ik_warn_duration_exceeded = false;
     bool ik_fail_duration_exceeded = false;
@@ -367,17 +338,12 @@ struct CartesianSolveTelemetry {
     double linear_move_duration_sec = 0.0;
     double linear_move_elapsed_sec = 0.0;
     std::string orientation_mode;
-    bool twist_clamped = false;
     bool floor_vz_clamped = false;
     std::string floor_lowest_point = "tcp";
     double floor_lowest_z_m = std::numeric_limits<double>::quiet_NaN();
     bool floor_goal_clamped = false;
     double goal_minus_measured_pos_m = 0.0;
     double goal_minus_measured_ori_rad = 0.0;
-    double requested_twist_linear_norm_m_s = 0.0;
-    double requested_twist_angular_norm_rad_s = 0.0;
-    double applied_twist_linear_norm_m_s = 0.0;
-    double applied_twist_angular_norm_rad_s = 0.0;
     std::string cartesian_velocity_integration_mode;
     std::string cartesian_servo_state_source = "actual";
     std::string cartesian_divergence_source = "actual";
@@ -391,15 +357,6 @@ struct CartesianSolveTelemetry {
     double command_reference_error_deg_observed = 0.0;
     double physical_command_actual_error_deg_observed = 0.0;
     double velocity_target_lookahead_sec = 0.0;
-    bool circle_active = false;
-    double circle_phase = 0.0;
-    int circle_repeat_index = 0;
-    double circle_radius_m = 0.0;
-    double circle_period_sec = 0.0;
-    double circle_position_error_m = 0.0;
-    double circle_orientation_error_rad = 0.0;
-    bool circle_done = false;
-
     // --- A/B/C separation telemetry (Patch 4). Populated by the pose-track SMD path
     // and the final output moving-average stage; absent/false otherwise. Pure
     // telemetry — does not affect control. ---
@@ -407,8 +364,6 @@ struct CartesianSolveTelemetry {
     std::optional<Pose6D> smd_goal_stand;   // integrated SMD goal (B input)
     std::optional<Pose6D> smd_ref_stand;    // SMD step output, BEFORE IK (B output)
     bool smd_velocity_feedforward_used = false;
-    std::string smd_velocity_feedforward_source;  // effective: finite_difference|command_twist|none
-    bool smd_velocity_feedforward_fallback = false;  // configured command_twist but fell back
     bool smd_linear_velocity_clipped = false;
     bool smd_linear_accel_clipped = false;
     bool smd_angular_velocity_clipped = false;
@@ -434,32 +389,6 @@ struct SafetyTrackingTelemetry {
     bool controller_simulation_physical_motion_detected = false;
 };
 
-struct TcpCircleMoveCommand {
-    TcpCirclePlane plane = TcpCirclePlane::XY;
-    double diameter_m = 0.0;
-    double period_sec = 0.0;
-    int repeat = 1;
-    double phase_advance_sec = 0.0;
-    TcpCircleCenterMode center_mode = TcpCircleCenterMode::StartOnCircle;
-    LinearMoveOrientationMode orientation_mode = LinearMoveOrientationMode::Constant;
-    TcpCircleFrame frame = TcpCircleFrame::Stand;
-};
-
-struct TcpCircleTrackCommand {
-    std::array<double, 3> center_stand{0.0, 0.0, 0.0};
-    double radius_m = 0.0;
-    TcpCirclePlane plane = TcpCirclePlane::XY;
-    double period_sec = 0.0;
-    int repeat = 1;
-    double start_phase_rad = 0.0;
-    bool orientation_hold = true;
-    double feedback_kp_pos = 0.0;
-    double feedback_kp_ori = 0.0;
-    double max_linear_m_s = 0.0;
-    double max_angular_rad_s = 0.0;
-    TcpCircleTrackTrackingSource tracking_source = TcpCircleTrackTrackingSource::Auto;
-};
-
 struct ArmCommand {
     ArmId arm_id = ArmId::Left;
 
@@ -469,20 +398,9 @@ struct ArmCommand {
     ControlMode mode = ControlMode::Hold;
 
     JointArray q_target_deg{};
-    JointArray dq_target_deg_s{};
+    JointTargetProfile joint_target_profile = JointTargetProfile::Direct;
 
     Pose6D tcp_target_stand;
-    Pose6D tcp_delta_stand;
-    Pose6D tcp_delta_local;
-    Vec6 tcp_twist_stand;
-    Vec6 tcp_twist_local;
-    // Optional conditioned goal twist accompanying a TcpPoseTarget (Patch 5). Used
-    // by the SMD velocity feedforward when velocity_feedforward_source is
-    // command_twist/auto. Stand-frame linear (x,y,z m/s) + body-frame angular
-    // (rx,ry,rz rad/s). Optional: existing clients omit it (finite_difference).
-    Vec6 tcp_target_twist_stand;
-    TcpCircleMoveCommand tcp_circle_move;
-    TcpCircleTrackCommand tcp_circle_track;
     double linear_move_duration_sec = 0.0;
     double linear_move_linear_speed_m_s = 0.0;
     double linear_move_angular_speed_rad_s = 0.0;
@@ -504,15 +422,7 @@ struct ArmCommand {
     // Parsed command validation flags. A command parser must set these true only
     // when the corresponding array was present and had the expected size.
     bool has_joint_target = false;
-    bool has_joint_velocity = false;
     bool has_tcp_target = false;
-    bool has_tcp_delta_stand = false;
-    bool has_tcp_delta_local = false;
-    bool has_tcp_twist_stand = false;
-    bool has_tcp_twist_local = false;
-    bool has_tcp_target_twist_stand = false;
-    bool has_tcp_circle_move = false;
-    bool has_tcp_circle_track = false;
     bool has_linear_move_duration = false;
     bool has_linear_move_linear_speed = false;
     bool has_linear_move_angular_speed = false;
@@ -965,14 +875,15 @@ struct ServoSnapshot {
 
 std::string toString(ArmId arm_id);
 std::string toString(ControlMode mode);
+std::string toString(JointTargetProfile profile);
 std::string toString(ServerMotionState state);
 std::string toString(ForceControlMode mode);
 std::string toString(BackendAckPolicy policy);
 std::string toString(SafetyVerdict verdict);
 std::string toString(FaultDomain domain);
 std::string toString(TrackingErrorPolicy policy);
-std::string toString(TcpCircleTrackTrackingSource source);
 ControlMode controlModeFromString(const std::string& mode);
+JointTargetProfile jointTargetProfileFromString(const std::string& value);
 ForceControlMode forceControlModeFromString(const std::string& mode);
 TrackingErrorPolicy trackingErrorPolicyFromString(const std::string& value);
 

@@ -26,38 +26,6 @@ struct CartesianServoPathState {
     // pose_track_smd smoothing of the per-tick path reference (same filter as
     // streaming TcpPoseTarget). Null when pose_track_smd.enable is false.
     std::shared_ptr<SmdPoseTracker> smd;
-    // Previous commanded (post-filter) pose, for telemetry velocity norms.
-    Pose6D last_commanded_tcp_stand;
-    bool has_last_commanded = false;
-};
-
-struct CartesianCircleMoveState {
-    bool active = false;
-    bool done = false;
-    uint64_t seq = 0;
-    double elapsed_sec = 0.0;
-    double duration_sec = 0.0;
-    bool lease_enforced = false;
-    uint64_t lease_expires_time_ns = 0;
-    TcpCircleMoveCommand command;
-    Pose6D start_tcp_stand;
-    Pose6D reference_tcp_stand;
-    double center_x = 0.0;
-    double center_y = 0.0;
-    double center_z = 0.0;
-    double radius_m = 0.0;
-    int axis1 = 0;
-    int axis2 = 1;
-};
-
-struct CartesianTwistHoldState {
-    bool orientation_hold_active = false;
-    Pose6D hold_tcp_stand;
-    // twist_via_smd: running integrated pose goal + the SMD tracker. Created on
-    // first use and reset to the current pose on lease/mode (re)entry (the whole
-    // CartesianTwistHoldState is reset to {} then, clearing twist_smd to null).
-    Pose6D twist_smd_goal{};
-    std::shared_ptr<SmdPoseTracker> twist_smd;
 };
 
 struct CartesianVelocityIntegratorState {
@@ -107,30 +75,6 @@ public:
         const CartesianServoStateContext* state_context = nullptr
     );
 
-    CartesianArmTargetResult computeTwistTarget(
-        const ArmCommand& command,
-        const RobotState& state,
-        const JointArray& previous_safe_sent_q_deg,
-        RunMode run_mode,
-        double dt_sec,
-        uint64_t command_seq,
-        CartesianTwistHoldState* hold_state,
-        CartesianVelocityIntegratorState* velocity_integrator_state = nullptr,
-        const CartesianServoStateContext* state_context = nullptr
-    );
-
-    CartesianArmTargetResult computeCircleMoveTarget(
-        const ArmCommand& command,
-        const RobotState& state,
-        const JointArray& previous_safe_sent_q_deg,
-        RunMode run_mode,
-        double dt_sec,
-        uint64_t command_seq,
-        CartesianCircleMoveState* circle_state,
-        CartesianVelocityIntegratorState* velocity_integrator_state = nullptr,
-        const CartesianServoStateContext* state_context = nullptr
-    );
-
     void updateVelocityIntegratorAfterSafety(
         CartesianVelocityIntegratorState* velocity_integrator_state,
         const JointArray& safe_q_target_deg,
@@ -139,12 +83,7 @@ public:
         const std::string& reset_reason
     );
 
-    // Stand-frame floor plane (safety.floor_constraint Tier-2 assist): when any
-    // configured TCP check point (TCP + fingertip offsets) is at/below
-    // z_min_m + soft_margin_m, the streaming twist is projected so that point's
-    // stand-frame vertical velocity is non-negative. This accounts for both
-    // translation and roll/pitch-induced fingertip descent while preserving
-    // lateral translation and yaw.
+    // Stand-frame floor plane metadata used by Cartesian safety telemetry.
     void setFloorConstraint(
         bool enabled,
         double z_min_m,
@@ -161,8 +100,6 @@ private:
     double floor_z_min_m_ = 0.0;
     double floor_soft_margin_m_ = 0.0;
     std::vector<FloorCheckPointConfig> floor_tcp_offset_points_;
-    double floor_goal_pos_budget_m_ = 0.06;
-    double floor_goal_ori_budget_rad_ = 0.30;
 };
 
 }  // namespace rb_servo

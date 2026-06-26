@@ -77,11 +77,17 @@ class StereoCloudStore:
         self._rgb: np.ndarray | None = None
         self._seq: int = -1
         self._recv_monotonic: float = 0.0
+        self._boxes: list = []          # [{"T": 4x4 np, "dims": (x,y,z)}]
+        self._boxes_seq: int = -1
 
     def update(self, xyz: np.ndarray, rgb: np.ndarray, seq: int) -> None:
         with self._lock:
             self._xyz, self._rgb, self._seq = xyz, rgb, seq
             self._recv_monotonic = time.monotonic()
+
+    def update_boxes(self, boxes: list, seq: int) -> None:
+        with self._lock:
+            self._boxes, self._boxes_seq = boxes, seq
 
     def latest(self):
         """returns (xyz_cam, rgb, seq, age_ms) or None."""
@@ -90,6 +96,11 @@ class StereoCloudStore:
                 return None
             age_ms = (time.monotonic() - self._recv_monotonic) * 1000.0
             return self._xyz, self._rgb, self._seq, age_ms
+
+    def latest_boxes(self):
+        """returns (boxes, seq). boxes: [{'T':4x4, 'dims':(x,y,z)}]."""
+        with self._lock:
+            return list(self._boxes), self._boxes_seq
 
 
 class StereoCloudReceiver:
@@ -121,7 +132,8 @@ class StereoCloudReceiver:
             return
         ctx = zmq.Context.instance()
         sock = ctx.socket(zmq.SUB)
-        sock.setsockopt_string(zmq.SUBSCRIBE, self.topic)
+        sock.setsockopt_string(zmq.SUBSCRIBE, self.topic)        # stereo.cloud
+        sock.setsockopt_string(zmq.SUBSCRIBE, "stereo.boxes")    # 박스 pose
         sock.setsockopt(zmq.RCVHWM, 4)
         sock.connect(self.endpoint)
         poller = zmq.Poller()
@@ -131,6 +143,14 @@ class StereoCloudReceiver:
                 continue
             try:
                 parts = sock.recv_multipart()
+                topic = parts[0].decode("utf-8", "replace")
+                if topic == "stereo.boxes" and len(parts) == 2:
+                    meta = json.loads(parts[1].decode("utf-8", "replace"))
+                    boxes = [{"T": np.array(b["T"], float).reshape(4, 4),
+                              "dims": tuple(b.get("dims", (0.38, 0.24, 0.11))),
+                              "fitness": b.get("fitness")} for b in meta.get("boxes", [])]
+                    self.store.update_boxes(boxes, int(meta.get("seq", -1)))
+                    continue
                 if len(parts) != 4:
                     continue
                 _topic, header, xyz_b, rgb_b = parts

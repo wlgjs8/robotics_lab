@@ -171,16 +171,11 @@ cartesian_control:
   allow_in_simulation: true
   allow_in_real: false
   allow_in_controller_simulation: true
-  enable_benchmark_primitives: false
   warn_ik_duration_us: 3000
   fail_ik_duration_us: 5000
   path_kp_pos: 6.0
   path_kp_ori: 6.0
-  twist_orientation_hold_kp: 6.0
-  twist_angular_deadband_rad_s: 0.0001
   velocity_damping: 0.01
-  max_twist_linear_m_s: 0.2
-  max_twist_angular_rad_s: 0.4
   max_linear_move_speed_m_s: 0.2
   max_angular_move_speed_rad_s: 0.4
   max_cartesian_step_m: 0.002
@@ -193,11 +188,6 @@ cartesian_control:
   max_command_actual_error_deg: [5, 5, 5, 8, 8, 10]
   reset_velocity_integrator_on_mode_change: true
   command_actual_error_policy: reset
-  circle_move:
-    allow_in_simulation: false
-    allow_in_real: false
-    max_diameter_m: 0.20
-    min_period_sec: 3.0
   linear_move:
     min_duration_sec: 0.05
     max_duration_sec: 10.0

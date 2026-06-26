@@ -18,10 +18,9 @@
 mock / rbpodo 컨트롤러 시뮬레이션(pgmode) 측에서 반복 검증되어 안정화된 항목:
 
 - 구조화된 backend result 및 fault telemetry
-- `JointTarget` / `JointVelocity`
+- `JointTarget`
 - `TcpPoseTarget`
 - `TcpLinearMove`
-- `TcpTwistLocal` / `TcpTwistStand`
 - GUI 운영자 제어
 - `policy_runner` SpaceMouse 경로
 - command-source lease/arbitration
@@ -38,7 +37,7 @@ mock / 컨트롤러 시뮬레이션에서 지원되는 항목:
 - mock dual-arm servo control
 - direct 및 worker I/O mode (mock/하드웨어프리)
 - quaternion 필드를 포함한 FK/TCP state publication
-- TCP PTP, Linear, Twist command
+- TCP PTP and Linear commands
 - mock camera server
 - mock/simulation용 GUI viewer/operator console
 - `policy_runner` joint 및 Cartesian action source
@@ -52,7 +51,7 @@ pgmode-real(실제 RB3-730E 하드웨어)에서 구동/검증된 항목:
 - UMI 양팔 Cartesian 텔레옵(relative-init) `TcpPoseTarget` 실로봇 구동, UMI `data_tcp`
   리플레이 실차 검증(ee_local + r_align)
 - **pi0.5(openpi) `flow-infer` `real_policy` 풀 클로즈드루프 rollout 실로봇 구동** —
-  `TcpTwistLocal` 스트리밍 + 그리퍼 명령 전송. 런타임/엔지니어링 검증 완료: 모션
+  `TcpPoseTarget` + 그리퍼 명령 전송. 런타임/엔지니어링 검증 완료: 모션
   부드러움 + in-distribution(async chunking으로 500 Hz 루프 진동 제거,
   absolute-proprio 프레임갭은 reset-relative 재학습으로 해소). **task 성공률은 아직
   모델 한계**(아래 참고)
@@ -209,23 +208,14 @@ force_control:
 
 ## Motion Primitive 요약
 
-현재 **9가지** motion primitive를 지원합니다(개발 완료/활성 기준). 모두
+현재 public motion primitive는 **3가지**입니다. 모두
 `run_mode` 무관하게 동작 가능하며, 실제 동작 여부는 config가 결정합니다.
 
 1. `JointTarget` — 절대 joint PTP. 목표 관절각으로 이동.
-2. `JointVelocity` — streaming joint velocity 명령.
-3. `TcpPoseTarget` — Cartesian final-pose PTP (MoveJ-like). Cartesian path는
+2. `TcpPoseTarget` — Cartesian final-pose PTP (MoveJ-like). Cartesian path는
    보장하지 않습니다. UMI 등 streaming teleop은 서버측 SMD pose tracking으로 추종.
-4. `TcpLinearMove` — MoveL-like Cartesian 선형 경로 primitive
+3. `TcpLinearMove` — MoveL-like Cartesian 선형 경로 primitive
    (`constant`/`slerp` orientation mode).
-5. `TcpCircleMove` — 서버측 자율 원 추적 benchmark primitive.
-   `cartesian_control.enable_benchmark_primitives: true`로 활성화되며 viser
-   "Circle" 버튼으로 구동합니다.
-6. `TcpTwistLocal` — local frame streaming Cartesian velocity (SpaceMouse teleop).
-   deadman / lease / 서버측 velocity limit 필요.
-7. `TcpTwistStand` — stand frame streaming Cartesian velocity.
-8. `TcpDeltaLocal` — local frame low-level one-shot/debug jog primitive.
-9. `TcpDeltaStand` — stand frame low-level one-shot/debug jog primitive.
 
 `safety.floor_constraint`가 켜지면 위 모든 primitive는 최종 safety gate에서 floor
 plane에 대해 FK 체크됩니다(Cartesian 경로는 평면을 따라 slide, joint-space는 hold).
@@ -235,8 +225,6 @@ plane에 대해 FK 체크됩니다(Cartesian 경로는 평면을 따라 slide, j
 
 참고:
 
-- `TcpCircleTrack`은 미구현 비활성 스켈레톤입니다
-  (`tcp_circle_track_not_implemented`). 위 9가지에 포함되지 않습니다.
 - `SetSafetyFloorZ`는 motion primitive가 아니라 floor plane 높이를 config 범위
   내에서 조정하는 leaseless non-motion 명령입니다.
 

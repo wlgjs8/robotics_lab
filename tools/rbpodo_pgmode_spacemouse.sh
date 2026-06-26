@@ -210,7 +210,7 @@ write_policy_dry_run_config() {
   cat >"${POLICY_DRY_RUN_CONFIG}" <<'EOF'
 schema: robotics_lab.policy_runner.v1
 mode: real
-action_source: dual_spacemouse_cartesian
+action_source: dual_spacemouse_pose_target
 runtime:
   startup_timeout_sec: 5.0
 geometry:
@@ -230,13 +230,14 @@ safety:
   allow_configured_estimate_geometry_in_real: false
   require_valid_joint_state: true
 command_rate_hz: 500
-spacemouse_cartesian_dual:
-  frame: local
-  max_linear_velocity_m_s: 0.2
-  max_angular_velocity_rad_s: 0.4
+spacemouse_pose_target_dual:
+  max_linear_step_m: 0.001
+  max_angular_step_rad: 0.01
+  max_target_lead_m: 0.05
+  max_target_lead_rad: 0.35
   deadband: 0.08
   response_curve_gamma: 3.0
-  sample_hold_timeout_sec: 0.05
+  sample_stale_timeout_sec: 0.05
   left:
     mock_script: pgmode_spacemouse_smoke
     deadman_button: 0

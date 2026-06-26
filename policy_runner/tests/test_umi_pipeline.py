@@ -156,9 +156,8 @@ class UmiPipelineTest(unittest.TestCase):
                     sorted(dst["observations/images"].keys()),
                     ["left_overhead_rgb", "left_wrist_rgb", "right_overhead_rgb", "right_wrist_rgb"],
                 )
-                # No world-frame "stand" delta is baked anymore; action is the
-                # absolute tool-offset target pose (ee_local deltas derived at load).
-                self.assertNotIn("tcp_delta_stand_left", dst["action"])
+                # Action is the absolute tool-offset target pose; ee_local deltas are
+                # derived at load.
                 self.assertIn("target_pose_left", dst["action"])
                 self.assertEqual(dst["action/target_pose_left"].shape, (5, 7))
 
@@ -190,8 +189,7 @@ class UmiPipelineTest(unittest.TestCase):
             )
 
             with h5py.File(output, "r") as dst:
-                # Action is the absolute tool-offset target pose; no baked stand delta.
-                self.assertNotIn("tcp_delta_stand_left", dst["action"])
+                # Action is the absolute tool-offset target pose.
                 left_target = dst["action/target_pose_left"][:]
                 right_target = dst["action/target_pose_right"][:]
                 self.assertEqual(left_target.shape, (5, 7))

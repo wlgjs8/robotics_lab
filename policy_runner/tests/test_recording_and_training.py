@@ -91,8 +91,8 @@ class RecordingAndTrainingTest(unittest.TestCase):
                 recorder.record_action(
                     {
                         "seq": 1,
-                        "mode": "TcpTwistLocal",
-                        "left": {"mode": "TcpTwistLocal", "tcp_twist_local": [0.01, 0, 0, 0, 0, 0]},
+                        "mode": "TcpPoseTarget",
+                        "left": {"mode": "TcpPoseTarget", "tcp_target_stand": [0.31, 0.2, 0.3, 0, 0, 0]},
                         "right": {"mode": "Hold"},
                     }
                 )
@@ -106,10 +106,10 @@ class RecordingAndTrainingTest(unittest.TestCase):
             self.assertEqual(state_rows[0]["payload"]["tick"], 1)
             self.assertEqual(action_rows[0]["nearest_state_tick"], 1)
 
-    def test_training_extracts_fixed_width_state_and_twist_action(self) -> None:
+    def test_training_extracts_fixed_width_state_and_pose_action(self) -> None:
         packet = {
-            "left": {"mode": "TcpTwistLocal", "tcp_twist_local": [0.01, 0.02, 0, 0, 0, 0]},
-            "right": {"mode": "TcpTwistLocal", "tcp_twist_local": [0, 0, 0, 0.1, 0, 0]},
+            "left": {"mode": "TcpPoseTarget", "tcp_target_stand": [0.31, 0.22, 0.3, 0, 0, 0]},
+            "right": {"mode": "TcpPoseTarget", "tcp_target_stand": [0.1, 0.2, 0.3, 0.1, 0, 0]},
         }
         self.assertEqual(len(state_vector(state_payload())), 40)
         self.assertEqual(len(action_vector(packet) or []), 12)
@@ -118,7 +118,7 @@ class RecordingAndTrainingTest(unittest.TestCase):
             recorder = EpisodeRecorder(tmp, episode_name="episode_train")
             try:
                 recorder.record_state(StateSnapshot(state_payload(), 1.0))
-                recorder.record_action({"seq": 1, "mode": "TcpTwistLocal", **packet})
+                recorder.record_action({"seq": 1, "mode": "TcpPoseTarget", **packet})
             finally:
                 recorder.close()
             obs, actions = load_dataset(tmp)
@@ -197,13 +197,13 @@ class RecordingAndTrainingTest(unittest.TestCase):
 
     def _write_jsonl_episode(self, root: str | Path) -> None:
         packet = {
-            "left": {"mode": "TcpTwistLocal", "tcp_twist_local": [0.01, 0.02, 0, 0, 0, 0]},
-            "right": {"mode": "TcpTwistLocal", "tcp_twist_local": [0, 0, 0, 0.1, 0, 0]},
+            "left": {"mode": "TcpPoseTarget", "tcp_target_stand": [0.31, 0.22, 0.3, 0, 0, 0]},
+            "right": {"mode": "TcpPoseTarget", "tcp_target_stand": [0.1, 0.2, 0.3, 0.1, 0, 0]},
         }
         recorder = EpisodeRecorder(root, episode_name="episode_train")
         try:
             recorder.record_state(StateSnapshot(state_payload(), 1.0))
-            recorder.record_action({"seq": 1, "mode": "TcpTwistLocal", **packet})
+            recorder.record_action({"seq": 1, "mode": "TcpPoseTarget", **packet})
         finally:
             recorder.close()
 

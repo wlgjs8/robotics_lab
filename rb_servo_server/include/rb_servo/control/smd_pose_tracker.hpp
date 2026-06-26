@@ -21,15 +21,10 @@ struct SmdStepInfo {
     bool angular_accel_clipped = false;
     // Whether the feedforward goal-velocity estimate itself was norm-clamped to the
     // max tracking velocity (VFF spike guard) — distinct from the state vel/accel
-    // clips above. Important for verifying command_twist / VFF spikes.
+    // clips above.
     bool goal_linear_velocity_ff_clipped = false;
     bool goal_angular_velocity_ff_clipped = false;
     bool velocity_feedforward_used = false;
-    // Effective feedforward source THIS step: "finite_difference" | "command_twist"
-    // | "none" (ff off). When configured command_twist but the command twist was
-    // missing/non-finite, this is "finite_difference" and command_twist_fallback=true.
-    std::string velocity_feedforward_source = "none";
-    bool command_twist_fallback = false;
     // Estimated goal velocity actually applied as feedforward (stand/body frame).
     Eigen::Vector3d goal_linear_velocity = Eigen::Vector3d::Zero();
     Eigen::Vector3d goal_angular_velocity = Eigen::Vector3d::Zero();
@@ -62,15 +57,6 @@ public:
 
     // Feed one received command pose into the goal delta integrator.
     void updateGoalFromCommand(const Pose6D& command_pose);
-
-    // Optional conditioned goal twist accompanying the current TcpPoseTarget
-    // command (Patch 5). Used as the velocity feedforward source when
-    // config.velocity_feedforward_source is "command_twist"/"auto"; ignored for
-    // "finite_difference". Sticky (held across servo ticks until the next command).
-    // linear = stand-frame m/s, angular = body-frame rad/s. Pass std::nullopt to
-    // clear. Non-finite values are ignored (step() falls back to finite diff).
-    void setCommandTwist(const std::optional<Eigen::Vector3d>& linear,
-                         const std::optional<Eigen::Vector3d>& angular);
 
     // Advance the SMD state by dt toward the integrated goal and return the
     // smoothed pose to publish. Requires active().
@@ -108,9 +94,6 @@ private:
     Eigen::Vector3d previous_goal_position_ = Eigen::Vector3d::Zero();
     Eigen::Quaterniond previous_goal_rotation_ = Eigen::Quaterniond::Identity();
     std::optional<Pose6D> previous_command_;
-    // Patch 5: optional conditioned command twist for velocity feedforward.
-    std::optional<Eigen::Vector3d> command_linear_velocity_;
-    std::optional<Eigen::Vector3d> command_angular_velocity_;
     // Patch 4: diagnostics.
     SmdStepInfo last_step_info_;
     std::uint64_t reanchor_count_ = 0;

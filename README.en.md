@@ -11,10 +11,9 @@ now proceeds on the physical RB3-730E hardware.
 Mock / rbpodo controller-simulation (pgmode) behavior that is repeatedly validated and stabilized:
 
 - structured backend result and fault telemetry
-- `JointTarget` / `JointVelocity`
+- `JointTarget`
 - `TcpPoseTarget`
 - `TcpLinearMove`
-- `TcpTwistLocal` / `TcpTwistStand`
 - GUI operator controls
 - policy_runner SpaceMouse path
 - command-source lease/arbitration
@@ -32,7 +31,7 @@ Supported for mock / controller-simulation:
 - mock dual-arm servo control
 - direct and worker I/O modes (mock / hardware-free)
 - FK/TCP state publication with quaternion fields
-- TCP PTP, Linear, and Twist commands
+- TCP PTP and Linear commands
 - mock camera server
 - GUI viewer/operator console for mock/simulation
 - policy_runner joint and Cartesian action sources
@@ -46,7 +45,7 @@ Run / validated on pgmode-real (physical RB3-730E hardware):
 - UMI dual-arm Cartesian teleop (relative-init) driving `TcpPoseTarget` on the real
   robot; UMI `data_tcp` replay verified on hardware (ee_local + r_align)
 - **pi0.5 (openpi) `flow-infer` `real_policy` full closed-loop rollout on the real
-  robot** — `TcpTwistLocal` streaming + gripper commands. Runtime/engineering
+  robot** — `TcpPoseTarget` + gripper commands. Runtime/engineering
   validated: motion is smooth and in-distribution (async chunking removes the 500 Hz
   loop vibration; the absolute-proprio frame gap is fixed by reset-relative retrain).
   **Task success is still model-limited** (see below)
@@ -148,10 +147,9 @@ force_control:
 
 ## Motion Primitive Summary
 
-- `TcpPoseTarget`: PTP / MoveJ-like Cartesian final-pose target; path not guaranteed. Real mode opens via `cartesian_control.allow_in_real: true` and has been validated on a dual-arm physical circle.
-- `TcpLinearMove`: MoveL-like Cartesian path primitive; not real-motion-ready.
-- `TcpTwistLocal` / `TcpTwistStand`: streaming Cartesian velocity primitives (mock and the rbpodo controller-simulation carve-out; real Cartesian uses the config `allow_in_real` path).
-- `TcpDeltaLocal` / `TcpDeltaStand`: low-level one-shot/debug jog primitives.
+- `JointTarget`: absolute joint-space point-to-point target.
+- `TcpPoseTarget`: PTP / MoveJ-like Cartesian final-pose target; path not guaranteed. Real mode opens via site-local config and has been validated on hardware.
+- `TcpLinearMove`: MoveL-like Cartesian path primitive with `constant` / `slerp` orientation modes.
 
 ## Common Commands
 

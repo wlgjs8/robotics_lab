@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-import warnings
 
 
 @dataclass(frozen=True)
@@ -168,68 +167,6 @@ class JointSineConfig:
 
 
 @dataclass(frozen=True)
-class JointVelocityConfig:
-    selected_arm: str = "both"
-    velocity_deg_s: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    simulation_only: bool = True
-
-
-@dataclass(frozen=True)
-class TcpDeltaConfig:
-    selected_arm: str = "both"
-    frame: str = "stand"
-    delta: tuple[float, ...] = (0.001, 0.0, 0.0, 0.0, 0.0, 0.0)
-    max_linear_step_m: float = 0.002
-    max_angular_step_rad: float = 0.01
-    simulation_only: bool = True
-
-
-@dataclass(frozen=True)
-class SpaceMouseConfig:
-    selected_arm: str = "left"
-    max_joint_velocity_deg_s: tuple[float, ...] = (5.0, 5.0, 5.0, 8.0, 8.0, 10.0)
-    deadband: float = 0.08
-    smoothing_alpha: float = 0.2
-    require_deadman: bool = True
-    deadman_button: int = 0
-
-
-@dataclass(frozen=True)
-class SpaceMouseCartesianConfig:
-    selected_arm: str = "left"
-    frame: str = "local"
-    command_rate_hz: float = 500.0
-    max_linear_velocity_m_s: float = 0.03
-    max_angular_velocity_rad_s: float = 0.2
-    deadband: float = 0.08
-    response_curve_gamma: float = 3.0
-    sample_hold_timeout_sec: float = 0.05
-    require_deadman: bool = True
-    deadman_button: int = 0
-
-    def __post_init__(self) -> None:
-        if self.max_linear_velocity_m_s < 0.0:
-            raise ValueError("spacemouse_cartesian.max_linear_velocity_m_s must be non-negative")
-        if self.max_angular_velocity_rad_s < 0.0:
-            raise ValueError("spacemouse_cartesian.max_angular_velocity_rad_s must be non-negative")
-        if self.deadband < 0.0:
-            raise ValueError("spacemouse_cartesian.deadband must be non-negative")
-        if self.response_curve_gamma < 1.0:
-            raise ValueError("spacemouse_cartesian.response_curve_gamma must be >= 1.0")
-        if self.sample_hold_timeout_sec <= 0.0:
-            raise ValueError("spacemouse_cartesian.sample_hold_timeout_sec must be positive")
-        _validate_command_rate_hz(float(self.command_rate_hz))
-
-    @property
-    def max_linear_step_m(self) -> float:
-        return self.max_linear_velocity_m_s
-
-    @property
-    def max_angular_step_rad(self) -> float:
-        return self.max_angular_velocity_rad_s
-
-
-@dataclass(frozen=True)
 class SpaceMouseDeviceConfig:
     device: str | None = None
     path: str | None = None
@@ -247,60 +184,91 @@ class SpaceMouseDeviceConfig:
 
 
 @dataclass(frozen=True)
-class DualSpaceMouseCartesianConfig:
+class SpaceMouseGripperButtonsConfig:
+    enable: bool = False
+    open_button: int = 0
+    close_button: int = 1
+    open_percent: float = 100.0
+    close_percent: float = 10.0
+
+    def __post_init__(self) -> None:
+        if self.open_button < 0 or self.close_button < 0:
+            raise ValueError("spacemouse_pose_target_dual.gripper_buttons button indices must be non-negative")
+        if self.open_button == self.close_button:
+            raise ValueError("spacemouse_pose_target_dual.gripper_buttons open_button and close_button must differ")
+        for name in ("open_percent", "close_percent"):
+            value = float(getattr(self, name))
+            if value < 0.0 or value > 100.0:
+                raise ValueError(f"spacemouse_pose_target_dual.gripper_buttons.{name} must be in [0, 100]")
+
+
+@dataclass(frozen=True)
+class DualSpaceMousePoseTargetConfig:
     left: SpaceMouseDeviceConfig = field(default_factory=SpaceMouseDeviceConfig)
     right: SpaceMouseDeviceConfig = field(
         default_factory=lambda: SpaceMouseDeviceConfig(device_number=1)
     )
-    frame: str = "local"
-    max_linear_velocity_m_s: float = 0.03
-    max_angular_velocity_rad_s: float = 0.2
+    max_linear_step_m: float = 0.001
+    max_angular_step_rad: float = 0.01
+    max_target_lead_m: float = 0.05
+    max_target_lead_rad: float = 0.35
     deadband: float = 0.08
+    activation_deadband: float | None = None
     response_curve_gamma: float = 3.0
     linear_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0)
     angular_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0)
     angular_axis_order: tuple[str, ...] = ("rx", "ry", "rz")
-    sample_hold_timeout_sec: float = 0.05
-    # Buttonless teleop: require_deadman=False replaces the button gate with an
-    # axis-intent gate (cap deflection beyond activation_deadband starts motion;
-    # neutral sends one zero twist). Startup/reconnect requires the cap held
-    # neutral for startup_neutral_hold_sec first.
+    sample_stale_timeout_sec: float = 0.05
     require_deadman: bool = True
-    activation_deadband: float | None = None
     startup_requires_neutral: bool = True
     startup_neutral_hold_sec: float = 0.3
+    gripper_buttons: SpaceMouseGripperButtonsConfig = field(
+        default_factory=SpaceMouseGripperButtonsConfig
+    )
 
     def __post_init__(self) -> None:
-        if self.max_linear_velocity_m_s < 0.0:
-            raise ValueError("spacemouse_cartesian_dual.max_linear_velocity_m_s must be non-negative")
-        if self.max_angular_velocity_rad_s < 0.0:
-            raise ValueError("spacemouse_cartesian_dual.max_angular_velocity_rad_s must be non-negative")
+        if self.max_linear_step_m < 0.0:
+            raise ValueError("spacemouse_pose_target_dual.max_linear_step_m must be non-negative")
+        if self.max_angular_step_rad < 0.0:
+            raise ValueError("spacemouse_pose_target_dual.max_angular_step_rad must be non-negative")
+        if self.max_target_lead_m < 0.0:
+            raise ValueError("spacemouse_pose_target_dual.max_target_lead_m must be non-negative")
+        if self.max_target_lead_rad < 0.0:
+            raise ValueError("spacemouse_pose_target_dual.max_target_lead_rad must be non-negative")
         if self.deadband < 0.0:
-            raise ValueError("spacemouse_cartesian_dual.deadband must be non-negative")
+            raise ValueError("spacemouse_pose_target_dual.deadband must be non-negative")
+        if self.activation_deadband is not None and self.activation_deadband < 0.0:
+            raise ValueError("spacemouse_pose_target_dual.activation_deadband must be non-negative")
         if self.response_curve_gamma < 1.0:
-            raise ValueError("spacemouse_cartesian_dual.response_curve_gamma must be >= 1.0")
+            raise ValueError("spacemouse_pose_target_dual.response_curve_gamma must be >= 1.0")
         for name in ("linear_axis_signs", "angular_axis_signs"):
             signs = getattr(self, name)
             if len(signs) != 3 or any(sign not in (-1.0, 1.0) for sign in signs):
-                raise ValueError(f"spacemouse_cartesian_dual.{name} must be 3 entries of -1 or 1")
+                raise ValueError(f"spacemouse_pose_target_dual.{name} must be 3 entries of -1 or 1")
         if sorted(str(axis).lower() for axis in self.angular_axis_order) != ["rx", "ry", "rz"]:
             raise ValueError(
-                "spacemouse_cartesian_dual.angular_axis_order must be a permutation of rx/ry/rz"
+                "spacemouse_pose_target_dual.angular_axis_order must be a permutation of rx/ry/rz"
             )
-        if self.activation_deadband is not None and self.activation_deadband < 0.0:
-            raise ValueError("spacemouse_cartesian_dual.activation_deadband must be non-negative")
         if self.startup_neutral_hold_sec < 0.0:
-            raise ValueError("spacemouse_cartesian_dual.startup_neutral_hold_sec must be non-negative")
-        if self.sample_hold_timeout_sec <= 0.0:
-            raise ValueError("spacemouse_cartesian_dual.sample_hold_timeout_sec must be positive")
-
-    @property
-    def max_linear_step_m(self) -> float:
-        return self.max_linear_velocity_m_s
-
-    @property
-    def max_angular_step_rad(self) -> float:
-        return self.max_angular_velocity_rad_s
+            raise ValueError("spacemouse_pose_target_dual.startup_neutral_hold_sec must be non-negative")
+        if self.sample_stale_timeout_sec <= 0.0:
+            raise ValueError("spacemouse_pose_target_dual.sample_stale_timeout_sec must be positive")
+        if self.gripper_buttons.enable and self.require_deadman:
+            gripper_buttons = {
+                self.gripper_buttons.open_button,
+                self.gripper_buttons.close_button,
+            }
+            conflicts = []
+            if self.left.deadman_button in gripper_buttons:
+                conflicts.append("left.deadman_button")
+            if self.right.deadman_button in gripper_buttons:
+                conflicts.append("right.deadman_button")
+            if conflicts:
+                joined = ", ".join(conflicts)
+                raise ValueError(
+                    "spacemouse_pose_target_dual.gripper_buttons conflicts with "
+                    f"{joined}; disable require_deadman or choose different buttons"
+                )
 
 
 @dataclass(frozen=True)
@@ -414,7 +382,7 @@ class MasterArmJointConfig:
     right_robot_init_deg: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     left_joint_map: tuple[int, ...] = (0, 1, 2, 3, 4, 5)
     right_joint_map: tuple[int, ...] = (0, 1, 2, 3, 4, 5)
-    max_joint_velocity_deg_s: tuple[float, ...] = (30.0, 30.0, 30.0, 45.0, 45.0, 60.0)
+    max_joint_speed_deg_s: tuple[float, ...] = (30.0, 30.0, 30.0, 45.0, 45.0, 60.0)
     smoothing_alpha: float = 1.0
     wrap_delta: bool = True
 
@@ -447,12 +415,8 @@ class PolicyRunnerConfig:
     servo_command: ServoCommandConfig = field(default_factory=ServoCommandConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     joint_sine: JointSineConfig = field(default_factory=JointSineConfig)
-    joint_velocity: JointVelocityConfig = field(default_factory=JointVelocityConfig)
-    tcp_delta: TcpDeltaConfig = field(default_factory=TcpDeltaConfig)
-    spacemouse: SpaceMouseConfig = field(default_factory=SpaceMouseConfig)
-    spacemouse_cartesian: SpaceMouseCartesianConfig = field(default_factory=SpaceMouseCartesianConfig)
-    spacemouse_cartesian_dual: DualSpaceMouseCartesianConfig = field(
-        default_factory=DualSpaceMouseCartesianConfig
+    spacemouse_pose_target_dual: DualSpaceMousePoseTargetConfig = field(
+        default_factory=DualSpaceMousePoseTargetConfig
     )
     umi_dual_cartesian: UmiDualCartesianConfig = field(default_factory=UmiDualCartesianConfig)
     teleop_mux: TeleopMuxConfig = field(default_factory=TeleopMuxConfig)
@@ -475,6 +439,7 @@ def load_config(path: str | Path) -> PolicyRunnerConfig:
 def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
     if raw.get("schema", "robotics_lab.policy_runner.v1") != "robotics_lab.policy_runner.v1":
         raise ValueError("unsupported policy_runner schema")
+    _validate_top_level_keys(raw)
     return PolicyRunnerConfig(
         schema=str(raw.get("schema", "robotics_lab.policy_runner.v1")),
         mode=str(raw.get("mode", "simulation")),
@@ -488,18 +453,39 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
         servo_command=_servo_command_config(_section(raw, "servo_command")),
         safety=_safety_config(_section(raw, "safety")),
         joint_sine=_joint_sine_config(_section(raw, "joint_sine")),
-        joint_velocity=_joint_velocity_config(_section(raw, "joint_velocity")),
-        tcp_delta=_tcp_delta_config(_section(raw, "tcp_delta")),
-        spacemouse=_spacemouse_config(_section(raw, "spacemouse")),
-        spacemouse_cartesian=_spacemouse_cartesian_config(_section(raw, "spacemouse_cartesian")),
-        spacemouse_cartesian_dual=_spacemouse_cartesian_dual_config(
-            _section(raw, "spacemouse_cartesian_dual")
+        spacemouse_pose_target_dual=_spacemouse_pose_target_dual_config(
+            _section(raw, "spacemouse_pose_target_dual")
         ),
         umi_dual_cartesian=_umi_dual_cartesian_config(_section(raw, "umi_dual_cartesian")),
         teleop_mux=_teleop_mux_config(_section(raw, "teleop_mux")),
         master_arm_joint=_master_arm_joint_config(_section(raw, "master_arm_joint")),
         command_rate_hz=float(raw.get("command_rate_hz", 500.0)),
     )
+
+
+def _validate_top_level_keys(raw: dict[str, Any]) -> None:
+    allowed = {
+        "schema",
+        "mode",
+        "action_source",
+        "runtime",
+        "geometry",
+        "recording",
+        "camera",
+        "gripper",
+        "robot_state",
+        "servo_command",
+        "safety",
+        "joint_sine",
+        "spacemouse_pose_target_dual",
+        "umi_dual_cartesian",
+        "teleop_mux",
+        "master_arm_joint",
+        "command_rate_hz",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError(f"unsupported policy_runner config key(s): {', '.join(unknown)}")
 
 
 def _section(raw: dict[str, Any], key: str) -> dict[str, Any]:
@@ -603,50 +589,27 @@ def _joint_sine_config(raw: dict[str, Any]) -> JointSineConfig:
     return JointSineConfig(**raw)
 
 
-def _joint_velocity_config(raw: dict[str, Any]) -> JointVelocityConfig:
-    if "velocity_deg_s" in raw:
-        raw["velocity_deg_s"] = _tuple6(raw["velocity_deg_s"], "joint_velocity.velocity_deg_s")
-    return JointVelocityConfig(**raw)
-
-
-def _tcp_delta_config(raw: dict[str, Any]) -> TcpDeltaConfig:
-    if "delta" in raw:
-        raw["delta"] = _tuple6(raw["delta"], "tcp_delta.delta")
-    return TcpDeltaConfig(**raw)
-
-
-def _spacemouse_config(raw: dict[str, Any]) -> SpaceMouseConfig:
-    if "max_joint_velocity_deg_s" in raw:
-        raw["max_joint_velocity_deg_s"] = _tuple6(
-            raw["max_joint_velocity_deg_s"],
-            "spacemouse.max_joint_velocity_deg_s",
-        )
-    return SpaceMouseConfig(**raw)
-
-
-def _spacemouse_cartesian_config(raw: dict[str, Any]) -> SpaceMouseCartesianConfig:
-    _apply_spacemouse_cartesian_velocity_aliases(raw, "spacemouse_cartesian")
-    if "command_rate_hz" in raw:
-        raw["command_rate_hz"] = float(raw["command_rate_hz"])
-    if "response_curve_gamma" in raw:
-        raw["response_curve_gamma"] = float(raw["response_curve_gamma"])
-    if "sample_hold_timeout_sec" in raw:
-        raw["sample_hold_timeout_sec"] = float(raw["sample_hold_timeout_sec"])
-    return SpaceMouseCartesianConfig(**raw)
-
-
-def _spacemouse_cartesian_dual_config(raw: dict[str, Any]) -> DualSpaceMouseCartesianConfig:
+def _spacemouse_pose_target_dual_config(raw: dict[str, Any]) -> DualSpaceMousePoseTargetConfig:
     left = _spacemouse_device_config(_section(raw, "left"))
     right_raw = _section(raw, "right")
     if "device_number" not in right_raw:
         right_raw["device_number"] = 1
     right = _spacemouse_device_config(right_raw)
-    top_level = {key: value for key, value in raw.items() if key not in {"left", "right"}}
-    _apply_spacemouse_cartesian_velocity_aliases(top_level, "spacemouse_cartesian_dual")
+    gripper_buttons = _spacemouse_gripper_buttons_config(_section(raw, "gripper_buttons"))
+    top_level = {
+        key: value
+        for key, value in raw.items()
+        if key not in {"left", "right", "gripper_buttons"}
+    }
+    for key in ("max_linear_step_m", "max_angular_step_rad", "max_target_lead_m", "max_target_lead_rad"):
+        if key in top_level:
+            top_level[key] = float(top_level[key])
     if "response_curve_gamma" in top_level:
         top_level["response_curve_gamma"] = float(top_level["response_curve_gamma"])
-    if "sample_hold_timeout_sec" in top_level:
-        top_level["sample_hold_timeout_sec"] = float(top_level["sample_hold_timeout_sec"])
+    if "deadband" in top_level:
+        top_level["deadband"] = float(top_level["deadband"])
+    if "sample_stale_timeout_sec" in top_level:
+        top_level["sample_stale_timeout_sec"] = float(top_level["sample_stale_timeout_sec"])
     for key in ("linear_axis_signs", "angular_axis_signs"):
         if key in top_level:
             top_level[key] = tuple(float(v) for v in top_level[key])
@@ -662,7 +625,24 @@ def _spacemouse_cartesian_dual_config(raw: dict[str, Any]) -> DualSpaceMouseCart
         top_level["startup_requires_neutral"] = bool(top_level["startup_requires_neutral"])
     if "startup_neutral_hold_sec" in top_level:
         top_level["startup_neutral_hold_sec"] = float(top_level["startup_neutral_hold_sec"])
-    return DualSpaceMouseCartesianConfig(left=left, right=right, **top_level)
+    return DualSpaceMousePoseTargetConfig(
+        left=left,
+        right=right,
+        gripper_buttons=gripper_buttons,
+        **top_level,
+    )
+
+
+def _spacemouse_gripper_buttons_config(raw: dict[str, Any]) -> SpaceMouseGripperButtonsConfig:
+    if "enable" in raw:
+        raw["enable"] = bool(raw["enable"])
+    for key in ("open_button", "close_button"):
+        if key in raw:
+            raw[key] = int(raw[key])
+    for key in ("open_percent", "close_percent"):
+        if key in raw:
+            raw[key] = float(raw[key])
+    return SpaceMouseGripperButtonsConfig(**raw)
 
 
 def _spacemouse_device_config(raw: dict[str, Any]) -> SpaceMouseDeviceConfig:
@@ -705,6 +685,13 @@ def _umi_dual_cartesian_config(raw: dict[str, Any]) -> UmiDualCartesianConfig:
             top_level[key] = _tuple3(top_level[key], f"umi_dual_cartesian.{key}")
     if "delta_frame" in top_level:
         top_level["delta_frame"] = str(top_level["delta_frame"])
+    if "sample_stale_timeout_sec" in top_level:
+        if "sample_hold_timeout_sec" in top_level:
+            raise ValueError(
+                "umi_dual_cartesian must not set both sample_hold_timeout_sec "
+                "and deprecated sample_stale_timeout_sec"
+            )
+        top_level["sample_hold_timeout_sec"] = top_level.pop("sample_stale_timeout_sec")
     if "sample_hold_timeout_sec" in top_level:
         top_level["sample_hold_timeout_sec"] = float(top_level["sample_hold_timeout_sec"])
     if "gripper_offset" in top_level:
@@ -757,7 +744,7 @@ def _master_arm_joint_config(raw: dict[str, Any]) -> MasterArmJointConfig:
         "right_offset_deg",
         "left_robot_init_deg",
         "right_robot_init_deg",
-        "max_joint_velocity_deg_s",
+        "max_joint_speed_deg_s",
     }
     for key in tuple6_keys:
         if key in raw:
@@ -774,24 +761,6 @@ def _master_arm_joint_config(raw: dict[str, Any]) -> MasterArmJointConfig:
         if key in raw:
             raw[key] = float(raw[key])
     return MasterArmJointConfig(**raw)
-
-
-def _apply_spacemouse_cartesian_velocity_aliases(raw: dict[str, Any], section: str) -> None:
-    aliases = (
-        ("max_linear_step_m", "max_linear_velocity_m_s"),
-        ("max_angular_step_rad", "max_angular_velocity_rad_s"),
-    )
-    for old_key, new_key in aliases:
-        if old_key not in raw:
-            continue
-        value = raw.pop(old_key)
-        warnings.warn(
-            f"{section}.{old_key} is deprecated; use {section}.{new_key} "
-            "because TcpTwistLocal/Stand fields are velocities, not one-shot deltas",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-        raw.setdefault(new_key, value)
 
 
 def _tuple6(value: Any, label: str) -> tuple[float, ...]:

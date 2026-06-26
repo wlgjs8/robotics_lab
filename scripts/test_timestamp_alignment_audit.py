@@ -22,7 +22,7 @@ def write_jsonl(path: Path, rows):
 def command_row(host_time_ns: int):
     return {
         "host_time_ns": host_time_ns,
-        "left": {"mode": "TcpTwistStand"},
+        "left": {"mode": "TcpPoseTarget"},
         "right": {"mode": "Hold"},
     }
 

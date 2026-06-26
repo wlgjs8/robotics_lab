@@ -34,12 +34,6 @@ private:
         double dt_sec
     );
 
-    JointArray integrateJointVelocity(
-        const JointArray& dq_target_deg_s,
-        const JointArray& previous_sent_target,
-        double dt_sec
-    ) const;
-
 private:
     ServoConfig servo_config_;
     SafetyConfig safety_config_;

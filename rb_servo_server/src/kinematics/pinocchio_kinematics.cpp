@@ -13,7 +13,6 @@
 #include <vector>
 
 #include <Eigen/Core>
-#include <Eigen/Cholesky>
 #include <Eigen/SVD>
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
@@ -43,15 +42,6 @@ bool finitePose(const Pose6D& pose) {
            std::isfinite(pose.rx) &&
            std::isfinite(pose.ry) &&
            std::isfinite(pose.rz);
-}
-
-bool finiteTwist(const Vec6& twist) {
-    return std::isfinite(twist.x) &&
-           std::isfinite(twist.y) &&
-           std::isfinite(twist.z) &&
-           std::isfinite(twist.rx) &&
-           std::isfinite(twist.ry) &&
-           std::isfinite(twist.rz);
 }
 
 }  // namespace
@@ -615,78 +605,6 @@ IkResult PinocchioKinematics::solveIk(
         held.reason = "branch_jump_clamped_to_seed";
         return held;
     }
-    return result;
-}
-
-CartesianVelocityResult PinocchioKinematics::solveCartesianVelocity(
-    ArmId arm,
-    const JointArray& q_deg,
-    const ArmMountConfig& mount,
-    const Vec6& tcp_twist_local,
-    double damping
-) const {
-    (void)arm;
-    (void)mount;
-    CartesianVelocityResult result;
-    if (!config_.enable || !config_.ik.enable || !impl_) {
-        result.reason = ik_solver::kReasonKinematicsUnavailable;
-        return result;
-    }
-    if (!ik_solver::isFiniteJoints(q_deg) || !finiteTwist(tcp_twist_local)) {
-        result.reason = ik_solver::kReasonInvalidTarget;
-        return result;
-    }
-
-    const Eigen::VectorXd q = toPinocchioQ(q_deg, impl_->model, impl_->joints);
-    pinocchio::forwardKinematics(impl_->model, impl_->data, q);
-    pinocchio::computeJointJacobians(impl_->model, impl_->data, q);
-    pinocchio::updateFramePlacements(impl_->model, impl_->data);
-
-    Eigen::Matrix<double, 6, Eigen::Dynamic> full_jacobian(6, impl_->model.nv);
-    full_jacobian.setZero();
-    pinocchio::getFrameJacobian(
-        impl_->model,
-        impl_->data,
-        impl_->tip_frame,
-        pinocchio::LOCAL,
-        full_jacobian
-    );
-    Eigen::Matrix<double, 6, 6> jacobian;
-    jacobian.setZero();
-    for (std::size_t i = 0; i < impl_->joints.size(); ++i) {
-        const pinocchio::JointIndex joint_id = impl_->joints[i];
-        jacobian.col(static_cast<Eigen::Index>(i)) = full_jacobian.col(impl_->model.idx_vs[joint_id]);
-    }
-    if (!jacobian.array().isFinite().all()) {
-        result.reason = ik_solver::kReasonSingularOrIllConditioned;
-        return result;
-    }
-
-    Eigen::Matrix<double, 6, 1> twist;
-    twist << tcp_twist_local.x,
-             tcp_twist_local.y,
-             tcp_twist_local.z,
-             tcp_twist_local.rx,
-             tcp_twist_local.ry,
-             tcp_twist_local.rz;
-    const double lambda = std::max(0.0, damping);
-    const Eigen::Matrix<double, 6, 6> dls_matrix =
-        jacobian * jacobian.transpose() +
-        (lambda * lambda) * Eigen::Matrix<double, 6, 6>::Identity();
-    const Eigen::LDLT<Eigen::Matrix<double, 6, 6>> ldlt(dls_matrix);
-    if (ldlt.info() != Eigen::Success) {
-        result.reason = ik_solver::kReasonSingularOrIllConditioned;
-        return result;
-    }
-    const Eigen::Matrix<double, 6, 1> qdot_rad_s = jacobian.transpose() * ldlt.solve(twist);
-    if (!qdot_rad_s.array().isFinite().all()) {
-        result.reason = ik_solver::kReasonSingularOrIllConditioned;
-        return result;
-    }
-    for (int i = 0; i < kDof; ++i) {
-        result.qdot_deg_s[i] = radToDeg(qdot_rad_s[i]);
-    }
-    result.success = true;
     return result;
 }
 

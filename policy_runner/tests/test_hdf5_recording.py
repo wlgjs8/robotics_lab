@@ -86,20 +86,20 @@ def _state_snapshot(tick: int = 1, **overrides) -> StateSnapshot:
     return StateSnapshot(payload=payload, received_monotonic=1.0)
 
 
-def _twist_action(seq: int = 7) -> dict:
+def _pose_action(seq: int = 7) -> dict:
     return {
         "seq": seq,
-        "mode": "Hold",
+        "mode": "TcpPoseTarget",
         "source_id": "policy_runner",
         "left": {
-            "mode": "TcpTwistLocal",
-            "tcp_twist_local": [0.01, 0.02, 0.03, 0.1, 0.2, 0.3],
+            "mode": "TcpPoseTarget",
+            "tcp_target_stand": [0.31, 0.22, 0.33, 0.0, 0.1, 0.2],
             "spacemouse_raw": {"axes": [1, 0, 0, 0, 0, 0], "buttons": [True, False]},
             "deadman": True,
         },
         "right": {
-            "mode": "TcpTwistLocal",
-            "tcp_twist_local": [-0.01, -0.02, -0.03, -0.1, -0.2, -0.3],
+            "mode": "TcpPoseTarget",
+            "tcp_target_stand": [-0.31, -0.22, -0.33, 0.3, 0.2, 0.1],
             "deadman": False,
         },
     }
@@ -202,13 +202,13 @@ class Hdf5EpisodeRecorderTest(unittest.TestCase):
         recorder.start_episode(
             reset_snapshot=_state_snapshot(),
             task_description="test task",
-            action_source="dual_spacemouse_cartesian",
+            action_source="dual_spacemouse_pose_target",
             operator_id="operator_a",
         )
         for idx in range(frame_count):
             recorder.record_frame(
                 state_snapshot=_state_snapshot(tick=idx + 1),
-                action_packet=_twist_action(seq=idx + 1),
+                action_packet=_pose_action(seq=idx + 1),
                 action_host_time_ns=1000 + idx,
                 action_seq=idx + 1,
             )
@@ -241,13 +241,13 @@ class Hdf5EpisodeRecorderTest(unittest.TestCase):
             recorder.start_episode(
                 reset_snapshot=_state_snapshot(),
                 task_description="rate test",
-                action_source="dual_spacemouse_cartesian",
+                action_source="dual_spacemouse_pose_target",
             )
             for idx in range(100):
                 clock["now"] = idx * 0.01
                 recorder.record_frame(
                     state_snapshot=_state_snapshot(tick=idx),
-                    action_packet=_twist_action(seq=idx),
+                    action_packet=_pose_action(seq=idx),
                     action_host_time_ns=idx,
                     action_seq=idx,
                 )
@@ -265,13 +265,13 @@ class Hdf5EpisodeRecorderTest(unittest.TestCase):
             recorder.start_episode(
                 reset_snapshot=_state_snapshot(),
                 task_description="dataset test",
-                action_source="dual_spacemouse_cartesian",
+                action_source="dual_spacemouse_pose_target",
             )
             for idx in range(5):
                 clock["now"] = idx * 0.02
                 recorder.record_frame(
                     state_snapshot=_state_snapshot(tick=idx + 1),
-                    action_packet=_twist_action(seq=idx + 1),
+                    action_packet=_pose_action(seq=idx + 1),
                     action_host_time_ns=100 + idx,
                     action_seq=idx + 1,
                 )
@@ -290,7 +290,7 @@ class Hdf5EpisodeRecorderTest(unittest.TestCase):
                 self.assertEqual(handle[f"observations/{dataset}"].shape[0], 5)
             for dataset in (
                 "mode",
-                "tcp_twist_local_left",
+                "tcp_target_stand_left",
                 "deadman_left",
                 "action_host_time_ns",
                 "seq",
@@ -310,7 +310,7 @@ class Hdf5EpisodeRecorderTest(unittest.TestCase):
         recorder.start_episode(
             reset_snapshot=_state_snapshot(**snapshots),
             task_description="config",
-            action_source="dual_spacemouse_cartesian",
+            action_source="dual_spacemouse_pose_target",
         )
         path = recorder.end_episode(success=True, end_reason="operator_success")
         with h5py.File(path, "r") as handle:
@@ -349,12 +349,12 @@ class Hdf5EpisodeRecorderTest(unittest.TestCase):
         recorder.start_episode(
             reset_snapshot=_state_snapshot(),
             task_description="metadata",
-            action_source="dual_spacemouse_cartesian",
+            action_source="dual_spacemouse_pose_target",
             dataset_metadata=metadata,
         )
         recorder.record_frame(
             state_snapshot=_state_snapshot(),
-            action_packet=_twist_action(),
+            action_packet=_pose_action(),
             action_host_time_ns=100,
             action_seq=1,
         )
@@ -438,9 +438,9 @@ class Hdf5EpisodeRecorderTest(unittest.TestCase):
         with h5py.File(path, "r") as handle:
             raw = handle["action/mode"][0]
             mode = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
-            self.assertEqual(mode, "TcpTwistLocal")
+            self.assertEqual(mode, "TcpPoseTarget")
 
-    def test_action_twist_zero_when_mode_is_hold(self) -> None:
+    def test_action_target_zero_when_mode_is_hold(self) -> None:
         recorder = self._recorder()
         recorder.start_episode(
             reset_snapshot=_state_snapshot(),
@@ -455,7 +455,7 @@ class Hdf5EpisodeRecorderTest(unittest.TestCase):
         )
         path = recorder.end_episode(success=True, end_reason="operator_success")
         with h5py.File(path, "r") as handle:
-            np.testing.assert_allclose(handle["action/tcp_twist_local_left"][0], [0, 0, 0, 0, 0, 0])
+            np.testing.assert_allclose(handle["action/tcp_target_stand_left"][0], [0, 0, 0, 0, 0, 0])
 
     def test_close_with_active_episode_aborts(self) -> None:
         recorder = self._recorder()
@@ -520,18 +520,18 @@ class Hdf5EpisodeRecorderTest(unittest.TestCase):
         recorder.start_episode(
             reset_snapshot=_state_snapshot(),
             task_description="camera",
-            action_source="dual_spacemouse_cartesian",
+            action_source="dual_spacemouse_pose_target",
         )
         with mock.patch("policy_runner.recording.time.monotonic", side_effect=[0.0, 0.02, 0.04]):
             recorder.record_frame(
                 state_snapshot=_state_snapshot(tick=1),
-                action_packet=_twist_action(seq=1),
+                action_packet=_pose_action(seq=1),
                 action_host_time_ns=1,
                 action_seq=1,
             )
             recorder.record_frame(
                 state_snapshot=_state_snapshot(tick=2),
-                action_packet=_twist_action(seq=2),
+                action_packet=_pose_action(seq=2),
                 action_host_time_ns=2,
                 action_seq=2,
             )
@@ -558,13 +558,13 @@ class Hdf5EpisodeRecorderTest(unittest.TestCase):
         recorder.start_episode(
             reset_snapshot=_state_snapshot(),
             task_description="zero",
-            action_source="dual_spacemouse_cartesian",
+            action_source="dual_spacemouse_pose_target",
         )
         with mock.patch("policy_runner.recording.time.monotonic", side_effect=[0.0, 0.02, 0.04]):
             for idx in range(2):
                 recorder.record_frame(
                     state_snapshot=_state_snapshot(tick=idx + 1),
-                    action_packet=_twist_action(seq=idx + 1),
+                    action_packet=_pose_action(seq=idx + 1),
                     action_host_time_ns=idx + 1,
                     action_seq=idx + 1,
                 )
@@ -589,11 +589,11 @@ class Hdf5EpisodeRecorderTest(unittest.TestCase):
         recorder.start_episode(
             reset_snapshot=_state_snapshot(),
             task_description="mapped",
-            action_source="dual_spacemouse_cartesian",
+            action_source="dual_spacemouse_pose_target",
         )
         recorder.record_frame(
             state_snapshot=_state_snapshot(tick=1),
-            action_packet=_twist_action(seq=1),
+            action_packet=_pose_action(seq=1),
             action_host_time_ns=1,
             action_seq=1,
         )
@@ -614,11 +614,11 @@ class Hdf5EpisodeRecorderTest(unittest.TestCase):
         recorder.start_episode(
             reset_snapshot=_state_snapshot(),
             task_description="missing",
-            action_source="dual_spacemouse_cartesian",
+            action_source="dual_spacemouse_pose_target",
         )
         recorder.record_frame(
             state_snapshot=_state_snapshot(),
-            action_packet=_twist_action(),
+            action_packet=_pose_action(),
             action_host_time_ns=1,
             action_seq=1,
         )
@@ -639,13 +639,13 @@ class Hdf5EpisodeRecorderTest(unittest.TestCase):
         recorder.start_episode(
             reset_snapshot=_state_snapshot(),
             task_description="chunk",
-            action_source="dual_spacemouse_cartesian",
+            action_source="dual_spacemouse_pose_target",
         )
         with mock.patch("policy_runner.recording.time.monotonic", side_effect=[0.0, 0.02, 0.04, 0.06, 0.08, 0.1]):
             for idx in range(5):
                 recorder.record_frame(
                     state_snapshot=_state_snapshot(tick=idx),
-                    action_packet=_twist_action(seq=idx),
+                    action_packet=_pose_action(seq=idx),
                     action_host_time_ns=idx,
                     action_seq=idx,
                 )

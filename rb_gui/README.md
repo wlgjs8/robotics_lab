@@ -1,88 +1,38 @@
-# rb_servo_gui
+# rb_gui
 
-`rb_gui` is the browser GUI for `rb_servo_server` state visualization and
-operator control. It no longer keeps mode-based client gates: **the server is the
-sole real-motion authority** (safety filter, Cartesian gate, fault latch, lease,
-deadman). The GUI is a faithful frontend — it offers every motion primitive in
-every run mode and lets the server accept or reject each command.
+`rb_gui` is the operator viewer/console for `rb_servo_server`. It subscribes to
+the server state stream, renders robot/TCP/safety status, and sends UDP command
+packets through `rb_servo_gui.command_client`.
 
-The full control set (joint jog/velocity, lifecycle, InitMotion, TCP PTP/Linear/
-Delta, streaming TcpTwist, and the Circle tab for the `TcpCircleMove` benchmark on
-both arms) is wired in every mode. Whether a control is live is **derived from the
-live server state stream** — per-arm FK/TCP-pose validity, the server Cartesian
-gate (`cartesian_available` / `controller_simulation_streaming_cartesian_available`
-/ `cartesian_unavailable_reason`), fault latch, and motion state. There is no
-longer an env unlock: the former `RB_GUI_SIM_READINESS_*`,
-`RB_GUI_CARTESIAN_AVAILABLE`, and `RB_GUI_ENABLE_TCP_POSE_COMMANDS` /
-`RB_GUI_ENABLE_CONTROLLER_SIM_CARTESIAN` locks are retired (`RB_GUI_OBSERVED_MODE`
-/ `RB_GUI_OBSERVED_BACKEND` remain display-only labels).
+## Motion Controls
 
-Real physical motion is still owned entirely by the server (site-local config
-that enables it — e.g. `cartesian_control.allow_in_real: true` — + the
-mode-independent safety layers + operator supervision + E-stop; the legacy
-`RB_ALLOW_REAL_*` env gates were removed from the server runtime). The GUI
-sending a real command does not bypass that authority. See
-`rb_servo_server/docs/gui_operator_console.md`.
+The GUI sends only the public motion primitives:
 
-## Asset Check
+- `JointTarget`
+- `TcpPoseTarget`
+- `TcpLinearMove`
 
-The GUI resolves the RB3 URDF and stand meshes from
-`RB_GUI_DESCRIPTIONS_DIR`. To verify assets resolve from the repository
-checkout:
+The Init Motion button remains an operator label, but the packet is
+`JointTarget` with per-arm `joint_target_profile: init_motion`.
 
-```bash
-PYTHONPATH=rb_gui \
-RB_GUI_DESCRIPTIONS_DIR=rb_servo_server/descriptions \
-python3 -m rb_servo_gui.app --check-assets
-```
+GUI TCP nudge controls move the visible target marker and send absolute
+`TcpPoseTarget` commands. Linear moves send `TcpLinearMove` with explicit timing
+and orientation mode.
 
-The check prints the robot URDF path, stand mesh path, whether each exists,
-and visualization dependency status. Missing dependency output includes:
-`Install with python3 -m pip install -e rb_gui`.
+## Safety And Lease Behavior
 
-After installing this package, the console entry point is `rb-servo-gui`. Bare
-`python3 -m rb_servo_gui` is not the current module entry point unless a future
-`rb_servo_gui/__main__.py` is added.
+The GUI derives button disabled state from live server state: stale/missing
+state, invalid joints, fault latch, FK/TCP-pose availability, Cartesian gate
+status, and command-source lease. The server remains the real-motion authority;
+client checks are operator feedback and do not bypass server gates.
 
-For Rainbow controller `pgmode` simulation, leave TCP display on `Auto`; it
-selects `tcp_ref_stand` when the server recommends it. `tcp_actual_stand`
-remains visible for physical-state inspection.
+Lifecycle/safety controls include arm/disarm, emergency stop, reset fault,
+freedrive, safety floor/ROI/user plane controls, and command-source lease
+take/release.
 
-## rbpodo SpaceMouse pgmode Live View
-
-The SpaceMouse pgmode profile uses separate state fanout ports so
-`policy_runner` and the GUI do not bind the same UDP socket:
-
-```text
-rb_servo_server state fanout
-  udp://127.0.0.1:50366 -> rb_gui / viser live viewer
-  udp://127.0.0.1:50376 -> policy_runner safety readback
-```
-
-Launch the viewer with:
+## Running Tests
 
 ```bash
-tools/rbpodo_pgmode_spacemouse.sh gui
+python3 -m unittest discover rb_gui/tests
+python3 -m compileall -q rb_gui/rb_servo_gui
 ```
-
-The launcher prints the browser URL and binds the viewer state receiver to
-`udp://0.0.0.0:50366`. This disables the circle overlay and only listens to
-server state. The command does not send robot commands, does not read
-SpaceMouse HID devices, and does not route SpaceMouse packets; those commands
-route only through `policy_runner`.
-
-The Status tab includes a compact pgmode line for this workflow, for example:
-
-```text
-pgmode_sim: backend=rbpodo run_mode=real operation_mode=simulation physical_motion_expected=false cartesian_available=true policy_runner_lease=active source=policy_runner command=TcpTwistLocal selected_tcp=tcp_ref_stand
-```
-
-If telemetry needed to prove the controller-simulation boundary is missing,
-the line includes `degraded missing=...`. If `physical_motion_expected` is not
-explicitly `false`, the line includes
-`warning=physical_motion_expected_not_false`.
-
-Leave TCP display on `Auto`; it selects `tcp_ref_stand` when the server
-recommends `reference_for_controller_simulation`. Use `both` when inspecting
-physical-state `tcp_actual_stand` alongside the controller-simulation
-reference `tcp_ref_stand`.

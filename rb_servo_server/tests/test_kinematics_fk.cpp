@@ -189,22 +189,6 @@ public:
         return result;
     }
 
-    rb_servo::CartesianVelocityResult solveCartesianVelocity(
-        rb_servo::ArmId arm,
-        const rb_servo::JointArray& q_deg,
-        const rb_servo::ArmMountConfig& mount,
-        const rb_servo::Vec6& tcp_twist_local,
-        double damping
-    ) const override {
-        (void)arm;
-        (void)q_deg;
-        (void)mount;
-        (void)tcp_twist_local;
-        (void)damping;
-        rb_servo::CartesianVelocityResult result;
-        result.reason = "kinematics_unavailable";
-        return result;
-    }
 };
 
 class TestBackend final : public rb_servo::IRobotBackend {

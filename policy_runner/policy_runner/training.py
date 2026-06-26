@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .action_sources.tcp_delta import CARTESIAN_ACTION_REQUIREMENTS, clamp_tcp_twist, tcp_twist_local_intent
+from .action_sources.tcp_pose_target import CARTESIAN_ACTION_REQUIREMENTS, tcp_pose_target_stand_intent
 from .recording import _hash_canonical_json
 from .robot_state_client import StateSnapshot
 from .servo_command_client import CommandIntent
@@ -48,11 +48,11 @@ class BehaviorCloningActionSource:
         obs = (obs - self.obs_mean) / self.obs_std.clamp_min(1e-6)
         with self.torch.no_grad():
             action = self.model(obs.unsqueeze(0)).squeeze(0).detach().cpu().tolist()
-        left = clamp_tcp_twist(action[:6], 0.03, 0.2)
-        right = clamp_tcp_twist(action[6:12], 0.03, 0.2)
+        left = tuple(float(value) for value in action[:6])
+        right = tuple(float(value) for value in action[6:12])
         if all(value == 0.0 for value in left) and all(value == 0.0 for value in right):
             return None
-        return tcp_twist_local_intent(left=left, right=right, timeout_sec=self.timeout_sec)
+        return tcp_pose_target_stand_intent(left=left, right=right, timeout_sec=self.timeout_sec)
 
     def _warn_once_on_config_drift(self, payload: dict[str, Any]) -> None:
         if self.ignore_config_drift or self._config_drift_checked:
@@ -99,7 +99,7 @@ def train_behavior_cloning(
 
     obs, act = load_dataset(episodes_dir)
     if not obs:
-        raise ValueError(f"no TcpTwistLocal action samples found under {episodes_dir}")
+        raise ValueError(f"no TcpPoseTarget action samples found under {episodes_dir}")
     cartesian_control_hash, kinematics_hash = _read_training_config_hashes(episodes_dir)
     mismatches = _config_hash_mismatches(
         episodes_dir,
@@ -207,12 +207,12 @@ def action_vector(packet: dict[str, Any]) -> list[float] | None:
     saw_action = False
     for side in ("left", "right"):
         arm = packet.get(side, {})
-        if isinstance(arm, dict) and arm.get("mode") == "TcpTwistLocal":
-            twist = _float_list(arm.get("tcp_twist_local"), 6)
+        if isinstance(arm, dict) and arm.get("mode") == "TcpPoseTarget":
+            target = _tcp_target_values(arm.get("tcp_target_stand"))
             saw_action = True
         else:
-            twist = [0.0] * 6
-        values.extend(twist)
+            target = [0.0] * 6
+        values.extend(target)
     return values if saw_action else None
 
 
@@ -305,6 +305,21 @@ def _pose_values(value: Any) -> list[float]:
         float(value.get("rz", 0.0) or 0.0),
         float(value.get("qw", 0.0) or 0.0),
         1.0,
+    ]
+
+
+def _tcp_target_values(value: Any) -> list[float]:
+    if isinstance(value, list):
+        return _float_list(value, 6)
+    if not isinstance(value, dict):
+        return [0.0] * 6
+    return [
+        float(value.get("x", 0.0) or 0.0),
+        float(value.get("y", 0.0) or 0.0),
+        float(value.get("z", 0.0) or 0.0),
+        float(value.get("rx", 0.0) or 0.0),
+        float(value.get("ry", 0.0) or 0.0),
+        float(value.get("rz", 0.0) or 0.0),
     ]
 
 

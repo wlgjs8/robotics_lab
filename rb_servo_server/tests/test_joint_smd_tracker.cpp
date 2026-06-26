@@ -167,6 +167,26 @@ bool testJointTargetTakesShortestInRangePath() {
     return true;
 }
 
+// Literal axes keep the commanded raw target instead of choosing the nearest
+// +/-360 equivalent. This is used for wrist yaw cable safety: J6 must return to
+// the configured raw InitMotion target even when an equivalent pose is closer.
+bool testJointTargetLiteralAxisKeepsRawTarget() {
+    SafetyConfig safety = safetyConfigWithRange();
+    safety.joint_target_literal_axes = {false, false, false, false, false, true};
+    JointArray prev{};
+    prev[0] = 251.8;
+    prev[5] = 251.8;
+    JointArray goal{};
+    goal[0] = -131.663;
+    goal[5] = -131.663;
+
+    const JointArray out = runJointTargetToSettle(prev, goal, safety);
+
+    RB_CHECK(std::abs(out[0] - (goal[0] + 360.0)) < 0.5);  // J1 still shortest-path
+    RB_CHECK(std::abs(out[5] - goal[5]) < 0.5);            // J6 stays literal
+    return true;
+}
+
 // A near-limit target has no closer in-range equivalent (10 + 360 = 370 > q_max 360),
 // so it must KEEP the literal target and take the long way — limits win over shortness.
 bool testJointTargetNearLimitKeepsLiteralTarget() {
@@ -263,6 +283,7 @@ int main() {
     if (!testTrajectoryFilterSmdProfile()) return 1;
     if (!testTrajectoryFilterRebaselinesAfterExternalMove()) return 1;
     if (!testJointTargetTakesShortestInRangePath()) return 1;
+    if (!testJointTargetLiteralAxisKeepsRawTarget()) return 1;
     if (!testJointTargetNearLimitKeepsLiteralTarget()) return 1;
     if (!testJointTargetNoSpuriousWrap()) return 1;
     std::cout << "joint_smd_tracker tests passed\n";

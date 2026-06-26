@@ -74,7 +74,7 @@ umi_dual_cartesian:
   #   r_align: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
   #   linear_axis_signs: [-1.0, -1.0, 1.0]
   #   angular_axis_signs: [-1.0, -1.0, 1.0]
-  sample_hold_timeout_sec: 0.05
+  sample_stale_timeout_sec: 0.05
   # Each side binds its own UDP port; the publisher sends the same combined
   # {"t","left","right"} packet to BOTH ports and each reader extracts its side.
   left:

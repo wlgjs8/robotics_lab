@@ -23,8 +23,8 @@ from rb_servo_gui.app import (
     _TCP_DISPLAY_MODES,
     _TCP_FRAME_LOCAL,
     _TCP_FRAME_STAND,
-    _apply_tcp_delta_and_send_pose_target,
-    _apply_tcp_delta_to_target,
+    _apply_tcp_pose_step_and_send_pose_target,
+    _apply_tcp_pose_step_to_target,
     _gripper_cmd_endpoint,
     _push_gripper_percent,
     _update_gripper_feedback,
@@ -500,7 +500,7 @@ class GuiContractsTest(unittest.TestCase):
             },
         )
         for arm in ("left", "right"):
-            state[arm]["mode"] = "TcpTwistLocal"
+            state[arm]["mode"] = "TcpPoseTarget"
             state[arm]["tcp_ref_stand"] = {"x": 0.41, "y": 0.21, "z": 0.51, "rx": 0.0, "ry": 0.0, "rz": 0.0}
             state[arm]["tcp_ref_valid"] = True
             state[arm]["tcp_tracking_source"] = "tcp_ref_stand"
@@ -533,18 +533,15 @@ class GuiContractsTest(unittest.TestCase):
         #     by the server's FK/Cartesian gate (server cannot do Cartesian).
         #   - simulator stack and VM pgmode controller-sim (FK + open Cartesian
         #     gate): every motion primitive is reachable, no env unlock needed.
-        joint_actions = ("JointTarget", "JointVelocity")
+        joint_actions = ("JointTarget",)
         # Mock backend: valid joints, no TCP pose.
         _, _, mock_safety = self.make_safety(sample_state(), observed="mock", observed_backend="mock")
         for action in joint_actions:
             self.assertIsNone(mock_safety.blocked_reason(action), f"mock {action}")
         mock_states = mock_safety.control_disabled_states()
         self.assertFalse(mock_states["jog"])
-        self.assertFalse(mock_states["velocity"])
         self.assertFalse(mock_states["lifecycle:ArmMotion"])
         self.assertTrue(mock_states["tcp_pose"])  # honest: server has no Cartesian here
-        self.assertTrue(mock_states["twist"])
-        self.assertTrue(mock_states["circle"])
 
         # Simulator stack (pinocchio FK, allow_in_simulation) and VM pgmode
         # controller-sim (rbpodo, operation_mode=simulation, streaming Cartesian).
@@ -563,7 +560,7 @@ class GuiContractsTest(unittest.TestCase):
             self.assertIsNone(safety.tcp_command_disabled_reason("left"), f"{label} tcp left")
             self.assertIsNone(safety.tcp_command_disabled_reason("right"), f"{label} tcp right")
             states = safety.control_disabled_states()
-            for key in ("jog", "velocity", "init_motion", "tcp_pose", "tcp_linear", "twist", "circle"):
+            for key in ("jog", "init_motion", "tcp_pose", "tcp_linear"):
                 # init_motion needs an armed state + configured target; ignore it here.
                 if key == "init_motion":
                     continue
@@ -603,7 +600,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIsNone(safety.tcp_command_disabled_reason("left"), "pgmode-real tcp left")
         self.assertIsNone(safety.tcp_command_disabled_reason("right"), "pgmode-real tcp right")
         states = safety.control_disabled_states()
-        for key in ("tcp_pose", "tcp_linear", "twist", "circle"):
+        for key in ("tcp_pose", "tcp_linear"):
             self.assertFalse(states[key], f"pgmode-real {key} should be enabled")
         self.assertTrue(safety.readiness().cartesian_available, "pgmode-real cartesian")
 
@@ -934,7 +931,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("cartesian_available=true", status)
         self.assertIn("policy_runner_lease=active", status)
         self.assertIn("source=policy_runner", status)
-        self.assertIn("command=TcpTwistLocal", status)
+        self.assertIn("command=TcpPoseTarget", status)
         self.assertIn("selected_tcp=tcp_ref_stand", status)
         self.assertNotIn("degraded", status)
         self.assertNotIn("warning=", status)
@@ -1374,8 +1371,8 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(client.sent_packets, [])
 
     def test_init_motion_sends_in_every_mode_when_state_ready(self):
-        # Env/mode gating retired: InitMotion sends in real AND simulation mode as
-        # long as the live state is ready (armed, valid joints, no fault).
+        # Env/mode gating retired: the init profile sends in real AND simulation
+        # mode as long as the live state is ready (armed, valid joints, no fault).
         for mode in ("real", "simulation"):
             _, client, safety = self.make_safety(
                 sample_state(motion_state="ArmedHold"),
@@ -1386,10 +1383,11 @@ class GuiContractsTest(unittest.TestCase):
             )
             ok, reason = safety.send_init_motion()
             self.assertTrue(ok, f"{mode}: {reason}")
-            self.assertEqual(client.sent_packets[-1]["mode"], "InitMotion")
+            self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
+            self.assertEqual(client.sent_packets[-1]["left"]["joint_target_profile"], "init_motion")
 
     def test_init_motion_blocked_by_latched_fault(self):
-        # State-derived gate: a latched fault blocks InitMotion regardless of mode.
+        # State-derived gate: a latched fault blocks the init profile regardless of mode.
         _, client, safety = self.make_safety(
             sample_state(motion_state="ArmedHold", fault_latched=True, fault_reason="self_collision"),
             init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
@@ -1400,7 +1398,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("fault latched", reason)
         self.assertEqual(client.sent_packets, [])
 
-    def test_init_motion_sends_init_motion_with_long_timeout(self):
+    def test_init_motion_sends_joint_target_profile_with_long_timeout(self):
         _, client, safety = self.make_safety(
             sample_state(motion_state="ArmedHold"),
             init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
@@ -1410,12 +1408,14 @@ class GuiContractsTest(unittest.TestCase):
         ok, reason = safety.send_init_motion()
         self.assertTrue(ok, reason)
         packet = client.sent_packets[-1]
-        # InitMotion is its own mode now: the server plans a collision-free + floor-safe
-        # path to the init pose and streams it (falling back to a direct JointTarget if
-        # the planner is disabled). The q_target/timeout payload mirrors JointTarget.
-        self.assertEqual(packet["mode"], "InitMotion")
+        # The server plans a collision-free + floor-safe path to the init pose
+        # through a JointTarget profile. The q_target/timeout payload mirrors a
+        # direct JointTarget.
+        self.assertEqual(packet["mode"], "JointTarget")
         self.assertEqual(packet["left"]["q_target_deg"], list(_DEFAULT_INIT_LEFT_JOINTS_DEG))
         self.assertEqual(packet["right"]["q_target_deg"], list(_DEFAULT_INIT_RIGHT_JOINTS_DEG))
+        self.assertEqual(packet["left"]["joint_target_profile"], "init_motion")
+        self.assertEqual(packet["right"]["joint_target_profile"], "init_motion")
         self.assertEqual(packet["timeout_sec"], 10.0)
         self.assertTrue(packet["coupled_timeout"])
 
@@ -1435,7 +1435,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertNotIn("left_tcp_target_user_moved", handles)
         self.assertNotIn("right_tcp_target_user_moved", handles)
         self.assertEqual(handles["left_tcp_target_pose"], (1.0, 2.0, 3.0, 0.0, 0.0, 0.0))
-        self.assertEqual(client.sent_packets[-1]["mode"], "InitMotion")
+        self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
         self.assertIn("follow current TCP", reason)
 
     def test_init_motion_blocked_preserves_tcp_target_follow_flags(self):
@@ -1562,30 +1562,6 @@ class GuiContractsTest(unittest.TestCase):
         handles.pop("left_tcp_target_wxyz")
         self.assertEqual(_tcp_target_wxyz(handles, "left"), (1.0, 0.0, 0.0, 0.0))
 
-    def test_tcp_delta_stand_packet_builder_holds_other_arm(self):
-        client = RecordingClient()
-        delta = (0.005, 0.0, 0.0, 0.0, 0.0, 0.0)
-        packet = client.build_tcp_delta_stand(left_delta=delta)
-        self.assertEqual(packet["schema_version"], 1)
-        self.assertEqual(packet["source_id"], "rb_gui")
-        self.assertTrue(packet["session_id"])
-        self.assertEqual(packet["mode"], "Hold")
-        self.assertEqual(packet["left"]["mode"], "TcpDeltaStand")
-        self.assertEqual(packet["left"]["tcp_delta_stand"], list(delta))
-        self.assertEqual(packet["right"], {})
-
-    def test_tcp_delta_local_packet_builder_holds_other_arm(self):
-        client = RecordingClient()
-        delta = (0.0, 0.0, 0.005, 0.0, 0.0, 0.01)
-        packet = client.build_tcp_delta_local(right_delta=delta)
-        self.assertEqual(packet["schema_version"], 1)
-        self.assertEqual(packet["source_id"], "rb_gui")
-        self.assertTrue(packet["session_id"])
-        self.assertEqual(packet["mode"], "Hold")
-        self.assertEqual(packet["left"], {})
-        self.assertEqual(packet["right"]["mode"], "TcpDeltaLocal")
-        self.assertEqual(packet["right"]["tcp_delta_local"], list(delta))
-
     def test_tcp_linear_move_packet_builder_uses_pose_object_with_quaternion(self):
         client = RecordingClient()
         pose = (0.35, 0.10, 0.45, 0.0, 0.0, 0.0)
@@ -1604,7 +1580,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(packet["right"], {})
         # The command must stay fresh through the server's async collision-free decision
         # + path handoff (the old fixed 0.2 s expired mid-decision so the MoveL never ran).
-        # Generous timeout = duration + 0.5 (floored at 2.0), mirroring the circle pattern.
+        # Generous timeout = duration + 0.5 (floored at 2.0), covering planning handoff.
         self.assertEqual(packet["timeout_sec"], 2.5)
         self.assertEqual(packet["left"]["duration_sec"], 2.0)
         self.assertEqual(packet["left"]["linear_speed_m_s"], 0.03)
@@ -1623,7 +1599,7 @@ class GuiContractsTest(unittest.TestCase):
             },
         )
 
-    def test_tcp_delta_stand_enabled_only_for_simulator_with_fk_and_feature_flag(self):
+    def test_tcp_pose_target_enabled_with_valid_fk_and_server_gate(self):
         state = self.tcp_available_state()
         _, client, safety = self.make_safety(
             state,
@@ -1636,30 +1612,6 @@ class GuiContractsTest(unittest.TestCase):
         )
         self.assertIsNone(safety.tcp_command_disabled_reason("left"))
         self.assertFalse(safety.control_disabled_states()["tcp_pose"])
-
-        ok, reason = safety.send_tcp_delta_stand("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertTrue(ok, reason)
-        packet = client.sent_packets[-1]
-        self.assertEqual(packet["mode"], "Hold")
-        self.assertEqual(packet["source_id"], "rb_gui")
-        self.assertTrue(packet["session_id"])
-        self.assertEqual(packet["left"]["mode"], "TcpDeltaStand")
-        self.assertEqual(packet["left"]["tcp_delta_stand"], [0.005, 0.0, 0.0, 0.0, 0.0, 0.0])
-        self.assertEqual(packet["right"], {})
-        self.assertIn("server verdict: Ok", reason)
-
-        ok, reason = safety.send_tcp_delta_local("left", (0.0, 0.005, 0.0, 0.0, 0.0, 0.0))
-        self.assertTrue(ok, reason)
-        packet = client.sent_packets[-1]
-        self.assertEqual(packet["mode"], "Hold")
-        self.assertEqual(packet["left"]["mode"], "TcpDeltaLocal")
-        self.assertEqual(packet["left"]["tcp_delta_local"], [0.0, 0.005, 0.0, 0.0, 0.0, 0.0])
-        self.assertEqual(packet["right"], {})
-        self.assertIn("TcpDeltaLocal left", reason)
-
-        ok, reason = safety.send_tcp_delta_local("left", (0.006, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertFalse(ok)
-        self.assertIn("linear delta exceeds", reason)
 
         pose = (0.31, 0.12, 0.44, 0.0, 0.0, 0.0)
         ok, reason = safety.send_tcp_pose_target(left_pose=pose)
@@ -1702,7 +1654,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(packet["left"]["orientation_mode"], "slerp")
         self.assertEqual(packet["left"]["target_tcp_stand"]["quaternion_xyzw"], [0.0, 0.0, 1.0, 0.0])
 
-    def test_tcp_delta_stand_real_mode_disabled_even_with_feature_flag(self):
+    def test_tcp_pose_target_real_mode_uses_same_gui_gate(self):
         _, client, safety = self.make_safety(
             self.tcp_available_state(),
             desired="real",
@@ -1712,10 +1664,8 @@ class GuiContractsTest(unittest.TestCase):
             cartesian_available=True,
             enable_tcp_pose=True,
         )
-        # Real/sim gating retired: real-mode TCP commands send normally.
-        ok, reason = safety.send_tcp_delta_stand("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertTrue(ok, reason)
-        ok, reason = safety.send_tcp_delta_local("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
+        # Real/sim gating retired: real-mode TCP target commands send normally.
+        ok, reason = safety.send_tcp_pose_target(left_pose=(0.31, 0.12, 0.44, 0.0, 0.0, 0.0))
         self.assertTrue(ok, reason)
         ok, reason = safety.send_tcp_linear_move(left_pose=(0.31, 0.12, 0.44, 0.0, 0.0, 0.0), duration_sec=1.0)
         self.assertTrue(ok, reason)
@@ -1776,7 +1726,7 @@ class GuiContractsTest(unittest.TestCase):
             enable_controller_sim_cartesian=True,
         )
         self.assertIsNone(allowed.tcp_command_disabled_reason("left"))
-        ok, _ = allowed.send_tcp_delta_stand("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
+        ok, _ = allowed.send_tcp_pose_target(left_pose=(0.31, 0.12, 0.44, 0.0, 0.0, 0.0))
         self.assertTrue(ok)
 
         # rbpodo + simulation but controller-sim opt-in OFF -> still blocked.
@@ -1819,101 +1769,7 @@ class GuiContractsTest(unittest.TestCase):
         )
         self.assertIsNone(sim_safety.tcp_command_disabled_reason("left"))
 
-    def test_tcp_twist_and_joint_velocity_in_controller_sim(self):
-        state = self.tcp_available_state()
-        _, client, safety = self.make_safety(
-            state,
-            desired="simulation",
-            observed="simulation",
-            observed_backend="rbpodo",
-            sim_ready=True,
-            cartesian_available=True,
-            enable_tcp_pose=True,
-            enable_controller_sim_cartesian=True,
-        )
-        # TcpTwistStand within velocity limit -> sent.
-        ok, msg = safety.send_tcp_twist_stand("left", (0.02, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertTrue(ok, msg)
-        self.assertEqual(client.sent_packets[-1]["left"]["mode"], "TcpTwistStand")
-        self.assertIn("tcp_twist_stand", client.sent_packets[-1]["left"])
-        # TcpTwistLocal too -> sent.
-        ok, msg = safety.send_tcp_twist_local("left", (0.0, 0.0, 0.01, 0.0, 0.0, 0.0))
-        self.assertTrue(ok, msg)
-        self.assertEqual(client.sent_packets[-1]["left"]["mode"], "TcpTwistLocal")
-        # Over the linear velocity limit -> rejected, nothing sent.
-        before = len(client.sent_packets)
-        ok, msg = safety.send_tcp_twist_stand("left", (99.0, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertFalse(ok)
-        self.assertIn("velocity exceeds", msg)
-        self.assertEqual(len(client.sent_packets), before)
-        # JointVelocity within limit -> sent.
-        ok, msg = safety.send_joint_velocity("left", (5.0, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertTrue(ok, msg)
-        self.assertEqual(client.sent_packets[-1]["left"]["mode"], "JointVelocity")
-        self.assertIn("dq_target_deg_s", client.sent_packets[-1]["left"])
-        # JointVelocity over limit -> rejected.
-        ok, msg = safety.send_joint_velocity("left", (999.0, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertFalse(ok)
-        self.assertIn("velocity exceeds", msg)
-
-    def test_tcp_twist_blocked_in_real_mode(self):
-        # Real/sim gating retired: twist and joint-velocity send in real mode.
-        state = self.tcp_available_state()
-        _, client, safety = self.make_safety(
-            state,
-            desired="real",
-            observed="real",
-            observed_backend="rbpodo",
-            sim_ready=True,
-            cartesian_available=True,
-            enable_tcp_pose=True,
-            enable_controller_sim_cartesian=True,
-        )
-        ok, msg = safety.send_tcp_twist_stand("left", (0.02, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertTrue(ok, msg)
-        ok, msg = safety.send_joint_velocity("left", (5.0, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertTrue(ok, msg)
-
-    def test_tcp_circle_move_in_controller_sim(self):
-        state = self.tcp_available_state()
-        _, client, safety = self.make_safety(
-            state,
-            desired="simulation",
-            observed="simulation",
-            observed_backend="rbpodo",
-            sim_ready=True,
-            cartesian_available=True,
-            enable_tcp_pose=True,
-            enable_controller_sim_cartesian=True,
-        )
-        ok, msg = safety.send_tcp_circle_move(0.15, 4.0, arm="both")
-        self.assertTrue(ok, msg)
-        pkt = client.sent_packets[-1]
-        self.assertEqual(pkt["mode"], "TcpCircleMove")
-        self.assertEqual(pkt["left"]["mode"], "TcpCircleMove")
-        self.assertEqual(pkt["left"]["diameter_m"], 0.15)
-        self.assertEqual(pkt["left"]["period_sec"], 4.0)
-        self.assertEqual(pkt["right"]["diameter_m"], 0.15)
-        ok, msg = safety.send_tcp_circle_move(0.5, 4.0)
-        self.assertFalse(ok)
-        self.assertIn("diameter", msg)
-        ok, msg = safety.send_tcp_circle_move(0.15, 1.0)
-        self.assertFalse(ok)
-        self.assertIn("period", msg)
-        _, _, real_safety = self.make_safety(
-            state,
-            desired="real",
-            observed="real",
-            observed_backend="rbpodo",
-            sim_ready=True,
-            cartesian_available=True,
-            enable_tcp_pose=True,
-            enable_controller_sim_cartesian=True,
-        )
-        ok, msg = real_safety.send_tcp_circle_move(0.15, 4.0)
-        self.assertTrue(ok, msg)
-
-    def test_tcp_delta_stand_blocks_stale_and_faulted_state(self):
+    def test_tcp_commands_block_stale_and_faulted_state(self):
         state = self.tcp_available_state()
         _, client, stale_safety = self.make_safety(
             state,
@@ -1925,10 +1781,7 @@ class GuiContractsTest(unittest.TestCase):
             enable_tcp_pose=True,
             stale=True,
         )
-        ok, reason = stale_safety.send_tcp_delta_stand("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertFalse(ok)
-        self.assertIn("state stream", reason)
-        ok, reason = stale_safety.send_tcp_delta_local("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
+        ok, reason = stale_safety.send_tcp_pose_target(left_pose=(0.31, 0.12, 0.44, 0.0, 0.0, 0.0))
         self.assertFalse(ok)
         self.assertIn("state stream", reason)
         ok, reason = stale_safety.send_tcp_linear_move(left_pose=(0.31, 0.12, 0.44, 0.0, 0.0, 0.0), duration_sec=1.0)
@@ -1946,10 +1799,7 @@ class GuiContractsTest(unittest.TestCase):
             cartesian_available=True,
             enable_tcp_pose=True,
         )
-        ok, reason = fault_safety.send_tcp_delta_stand("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
-        self.assertFalse(ok)
-        self.assertIn("fault", reason)
-        ok, reason = fault_safety.send_tcp_delta_local("left", (0.005, 0.0, 0.0, 0.0, 0.0, 0.0))
+        ok, reason = fault_safety.send_tcp_pose_target(left_pose=(0.31, 0.12, 0.44, 0.0, 0.0, 0.0))
         self.assertFalse(ok)
         self.assertIn("fault", reason)
         ok, reason = fault_safety.send_tcp_linear_move(left_pose=(0.31, 0.12, 0.44, 0.0, 0.0, 0.0), duration_sec=1.0)
@@ -2635,7 +2485,7 @@ class GuiContractsTest(unittest.TestCase):
             "left_tcp_target_pose": (0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2.0),
             "left_tcp_target_wxyz": _pose_wxyz((0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2.0)),
         }
-        self.assertTrue(_apply_tcp_delta_to_target(stand_handles, "left", (1.0, 0.0, 0.0, 0.0, 0.0, 0.0), _TCP_FRAME_STAND))
+        self.assertTrue(_apply_tcp_pose_step_to_target(stand_handles, "left", (1.0, 0.0, 0.0, 0.0, 0.0, 0.0), _TCP_FRAME_STAND))
         self.assertAlmostEqual(stand_handles["left_tcp_target_pose"][0], 1.0, places=7)
         self.assertAlmostEqual(stand_handles["left_tcp_target_pose"][1], 0.0, places=7)
 
@@ -2645,7 +2495,7 @@ class GuiContractsTest(unittest.TestCase):
             "left_tcp_target_pose": (0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2.0),
             "left_tcp_target_wxyz": _pose_wxyz((0.0, 0.0, 0.0, 0.0, 0.0, math.pi / 2.0)),
         }
-        self.assertTrue(_apply_tcp_delta_to_target(local_handles, "left", (1.0, 0.0, 0.0, 0.0, 0.0, 0.0), _TCP_FRAME_LOCAL))
+        self.assertTrue(_apply_tcp_pose_step_to_target(local_handles, "left", (1.0, 0.0, 0.0, 0.0, 0.0, 0.0), _TCP_FRAME_LOCAL))
         self.assertAlmostEqual(local_handles["left_tcp_target_pose"][0], 0.0, places=7)
         self.assertAlmostEqual(local_handles["left_tcp_target_pose"][1], 1.0, places=7)
         self.assertEqual(local_handle.position, local_handles["left_tcp_target_pose"][:3])
@@ -2668,7 +2518,7 @@ class GuiContractsTest(unittest.TestCase):
             "left_tcp_target_wxyz": _pose_wxyz(yaw_90_pose),
         }
 
-        ok, reason = _apply_tcp_delta_and_send_pose_target(
+        ok, reason = _apply_tcp_pose_step_and_send_pose_target(
             safety,
             handles,
             "left",
@@ -2682,8 +2532,6 @@ class GuiContractsTest(unittest.TestCase):
         packet = client.sent_packets[-1]
         self.assertEqual(packet["mode"], "Hold")
         self.assertEqual(packet["left"]["mode"], "TcpPoseTarget")
-        self.assertNotIn("tcp_delta_local", packet["left"])
-        self.assertNotIn("tcp_delta_stand", packet["left"])
         target = packet["left"]["tcp_target_stand"]
         self.assertIsInstance(target, dict)
         self.assertEqual(target["quaternion_xyzw"], list(_wxyz_to_xyzw(handles["left_tcp_target_wxyz"])))
@@ -2720,7 +2568,6 @@ class GuiContractsTest(unittest.TestCase):
         packet = client.sent_packets[-1]
         self.assertEqual(packet["mode"], "Hold")
         self.assertEqual(packet["left"]["mode"], "TcpLinearMove")
-        self.assertNotIn("tcp_delta_local", packet["left"])
         self.assertEqual(packet["left"]["target_tcp_stand"]["quaternion_xyzw"], list(_wxyz_to_xyzw(handles["left_tcp_target_wxyz"])))
 
     def test_tcp_linear_send_blocked_when_marker_follows_current_tcp(self):
@@ -2991,15 +2838,12 @@ class GuiContractsTest(unittest.TestCase):
         _, _, mock_safety = self.make_safety(sample_state())
         mock_states = mock_safety.control_disabled_states()
         # Joint-space controls follow the joint gate; Cartesian controls follow the
-        # FK/Cartesian gate. FK-less sample_state -> TCP/twist/circle disabled.
+        # FK/Cartesian gate. FK-less sample_state -> TCP controls disabled.
         self.assertFalse(mock_states["jog"])
-        self.assertFalse(mock_states["velocity"])
         self.assertFalse(mock_states["lifecycle:ArmMotion"])
         self.assertNotIn("tcp_jog", mock_states)
         self.assertTrue(mock_states["tcp_pose"])
         self.assertTrue(mock_states["tcp_linear"])
-        self.assertTrue(mock_states["twist"])
-        self.assertTrue(mock_states["circle"])
 
         # Simulation mode is no longer env-gated: a valid state enables joint
         # controls, and FK + an open server Cartesian gate enables TCP controls.
@@ -3041,8 +2885,8 @@ class GuiContractsTest(unittest.TestCase):
         for key, reason in reasons.items():
             self.assertEqual(states[key], reason is not None, key)
         self.assertIsNone(reasons["jog"])
-        self.assertIn("FK/TCP pose unavailable", reasons["twist"])
-        self.assertIn("FK/TCP pose unavailable", reasons["circle"])
+        self.assertIn("FK/TCP pose unavailable", reasons["tcp_pose"])
+        self.assertIn("FK/TCP pose unavailable", reasons["tcp_linear"])
 
     def test_reflect_gate_reason_preserves_click_feedback(self):
         class _Text:
@@ -3056,9 +2900,9 @@ class GuiContractsTest(unittest.TestCase):
         _reflect_gate_reason(handle, None)
         self.assertEqual(handle.value, "idle")
         # A fresh click result is never clobbered when the gate is open.
-        handle.value = "OK: sent JointVelocity left"
+        handle.value = "OK: sent JointTarget left"
         _reflect_gate_reason(handle, None)
-        self.assertEqual(handle.value, "OK: sent JointVelocity left")
+        self.assertEqual(handle.value, "OK: sent JointTarget left")
         _reflect_gate_reason(None, "ignored")  # no handle -> no crash
 
     def test_lease_owner_status_flags_foreign_and_self_owner(self):
@@ -3872,15 +3716,16 @@ class LeaseBracketTest(unittest.TestCase):
 
     @unittest.skipUnless(_local_udp_socket_available(), "local UDP unavailable")
     def test_held_lease_keepalive_resends_keep_fixed_seq(self):
-        # Streaming server-side path primitives (TcpCircleMove/TcpLinearMove)
-        # re-send ONE prebuilt packet as keep-alives. Under a held lease, send()
-        # must NOT re-issue the seq: the server keys the circle on its seq, so a
-        # bumped seq each keep-alive would re-init the circle every tick and the
-        # arm drifts in a straight line instead of tracing the circle.
+        # Server-side path primitives re-send ONE prebuilt packet as keep-alives.
+        # Under a held lease, send() must NOT re-issue the seq.
         client, sock = self._client_and_socket()
         try:
             client.acquire_lease()
-            packet = client.build_tcp_circle_move(diameter_m=0.15, period_sec=4.0)
+            packet = client.build_tcp_linear_move(
+                left_pose=(0.35, 0.1, 0.45, 0.0, 0.0, 0.0),
+                right_pose=(0.35, -0.1, 0.45, 0.0, 0.0, 0.0),
+                duration_sec=2.0,
+            )
             fixed_seq = packet["seq"]
             client.send(packet)
             client.send(packet)
@@ -3891,20 +3736,22 @@ class LeaseBracketTest(unittest.TestCase):
             sock.close()
         self.assertEqual(
             [p["mode"] for p in packets],
-            ["AcquireLease", "TcpCircleMove", "TcpCircleMove", "TcpCircleMove", "ReleaseLease"],
+            ["AcquireLease", "TcpLinearMove", "TcpLinearMove", "TcpLinearMove", "ReleaseLease"],
         )
-        circle_seqs = [p["seq"] for p in packets[1:4]]
-        self.assertEqual(circle_seqs, [fixed_seq, fixed_seq, fixed_seq])
+        path_seqs = [p["seq"] for p in packets[1:4]]
+        self.assertEqual(path_seqs, [fixed_seq, fixed_seq, fixed_seq])
 
     @unittest.skipUnless(_local_udp_socket_available(), "local UDP unavailable")
     def test_leaseless_keepalive_resends_bump_seq(self):
         # Without a held lease, send() brackets each packet and re-issues a fresh
-        # seq (one-shot commands need this to clear the Acquire seq). This is the
-        # behavior the circle loop must avoid by holding the lease — assert it so
-        # the contrast (and the reason the circle loop takes a lease) is explicit.
+        # seq (one-shot commands need this to clear the Acquire seq).
         client, sock = self._client_and_socket()
         try:
-            packet = client.build_tcp_circle_move(diameter_m=0.15, period_sec=4.0)
+            packet = client.build_tcp_linear_move(
+                left_pose=(0.35, 0.1, 0.45, 0.0, 0.0, 0.0),
+                right_pose=(0.35, -0.1, 0.45, 0.0, 0.0, 0.0),
+                duration_sec=2.0,
+            )
             client.send(packet)
             client.send(packet)
             packets = self._recv_packets(sock, 6)
@@ -3913,8 +3760,8 @@ class LeaseBracketTest(unittest.TestCase):
         self.assertEqual(
             [p["mode"] for p in packets],
             [
-                "AcquireLease", "TcpCircleMove", "ReleaseLease",
-                "AcquireLease", "TcpCircleMove", "ReleaseLease",
+                "AcquireLease", "TcpLinearMove", "ReleaseLease",
+                "AcquireLease", "TcpLinearMove", "ReleaseLease",
             ],
         )
         self.assertNotEqual(packets[1]["seq"], packets[4]["seq"])

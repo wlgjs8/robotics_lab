@@ -54,7 +54,6 @@ def write_log(path: Path, *, with_smd_ref: bool, n: int = 40) -> Path:
                 "smd_goal_linear_velocity_ff_clipped": i == 0,
                 "smd_goal_angular_velocity_ff_clipped": False,
                 "smd_velocity_feedforward_used": True,
-                "smd_velocity_feedforward_source": "command_twist",
             }
             if with_smd_ref:
                 row["smd_ref_stand"] = _pose(x - 0.0002)
@@ -98,7 +97,6 @@ class AnalyzeABCTest(unittest.TestCase):
         self.assertEqual(clip["linear_accel_clipped_count"], 2)
         self.assertEqual(clip["angular_velocity_clipped_count"], 0)
         self.assertEqual(clip["goal_linear_velocity_ff_clipped_count"], 1)
-        self.assertEqual(b["smd_velocity_feedforward_source"], "command_twist")
         self.assertAlmostEqual(b["smd_velocity_feedforward_used_ratio"], 1.0)
 
     def test_abcd_groups_present_and_backcompat_keys_kept(self) -> None:

@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import os
 
-from policy_runner.action_sources.dual_spacemouse_cartesian import (
-    DualSpaceMouseCartesianActionSource,
+from policy_runner.action_sources.dual_spacemouse_pose_target import (
+    DualSpaceMousePoseTargetActionSource,
 )
-from policy_runner.action_sources.tcp_delta import (
+from policy_runner.action_sources.tcp_pose_target import (
     cartesian_action_requirements,
-    tcp_twist_local_intent,
 )
 from policy_runner.action_sources.umi_dual_cartesian import UmiDualCartesianActionSource
 from policy_runner.robot_state_client import StateSnapshot
@@ -16,9 +15,6 @@ from policy_runner.servo_command_client import CommandIntent
 OWNER_IDLE = "idle"
 OWNER_SPACEMOUSE = "spacemouse"
 OWNER_UMI = "umi"
-
-_ZERO_TWIST = (0.0,) * 6
-
 
 class TeleopMuxActionSource:
     """Run SpaceMouse and UMI teleop side by side under ONE lease/run loop.
@@ -35,21 +31,20 @@ class TeleopMuxActionSource:
       relative-init state — when it later takes over it re-latches fresh from
       the robot's current TCP (no jump).
     - Handoff is idle-gated: ownership is released only after the owner has
-      fully disengaged (its final zero-twist / latch-clear intent is passed
-      through first).
+      fully disengaged (its final hold / latch-clear intent is passed through
+      first).
 
-    Whole-robot exclusivity (not per-arm) is intentional: the command packet
-    carries a single ``mode``, so TcpTwistLocal (SpaceMouse) and TcpPoseTarget
-    (UMI) cannot be mixed in one tick.
+    Whole-robot exclusivity (not per-arm) keeps one operator source in charge
+    of both arms at a time.
 
     A missing/broken SpaceMouse HID degrades to UMI-only operation: the first
     SpaceMouse error disables that side for the rest of the run (logged once;
-    one safety zero-twist is emitted if it died while owning the robot).
+    one safety Hold is emitted if it died while owning the robot).
     """
 
     def __init__(
         self,
-        spacemouse_source: DualSpaceMouseCartesianActionSource,
+        spacemouse_source: DualSpaceMousePoseTargetActionSource,
         umi_source: UmiDualCartesianActionSource,
         *,
         tie_break: str = "umi",
@@ -78,11 +73,17 @@ class TeleopMuxActionSource:
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         spacemouse_intent, spacemouse_safety_intent = self._spacemouse_intent(snapshot, now_monotonic)
         if spacemouse_safety_intent is not None:
-            # SpaceMouse HID died while owning the robot: one zero twist so no
-            # stale motion survives, then fall back to idle next tick.
+            # SpaceMouse HID died while owning the robot: one Hold so no stale
+            # motion survives, then fall back to idle next tick.
             return spacemouse_safety_intent
         umi_intent = self.umi_source.next_intent(snapshot, now_monotonic)
-        spacemouse_engaged = not self._spacemouse_failed and self.spacemouse_source.engaged
+        spacemouse_engaged = (
+            not self._spacemouse_failed
+            and (
+                self.spacemouse_source.engaged
+                or _intent_has_gripper_target(spacemouse_intent)
+            )
+        )
         umi_engaged = self.umi_source.engaged
 
         if self._owner == OWNER_SPACEMOUSE:
@@ -137,11 +138,7 @@ class TeleopMuxActionSource:
             )
             if self._owner == OWNER_SPACEMOUSE:
                 self._set_owner(OWNER_IDLE)
-                return None, tcp_twist_local_intent(
-                    left=_ZERO_TWIST,
-                    right=_ZERO_TWIST,
-                    timeout_sec=self.spacemouse_source.timeout_sec,
-                )
+                return None, CommandIntent.hold(timeout_sec=self.spacemouse_source.timeout_sec)
             return None, None
 
     def _set_owner(self, owner: str) -> None:
@@ -150,3 +147,12 @@ class TeleopMuxActionSource:
         if self._debug:
             print(f"[mux] owner {self._owner} -> {owner}", flush=True)
         self._owner = owner
+
+
+def _intent_has_gripper_target(intent: CommandIntent | None) -> bool:
+    if intent is None:
+        return False
+    for arm in (intent.left, intent.right):
+        if isinstance(arm, dict) and arm.get("gripper_target") is not None:
+            return True
+    return False

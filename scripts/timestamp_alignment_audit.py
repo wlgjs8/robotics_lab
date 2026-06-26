@@ -15,10 +15,9 @@ from typing import Any
 
 SCHEMA = "robotics_lab.timestamp_alignment_audit.v1"
 COMMAND_MODES = {
-    "TcpTwistStand",
-    "TcpTwistLocal",
+    "JointTarget",
+    "TcpPoseTarget",
     "TcpLinearMove",
-    "TcpCircleMove",
 }
 ACK_THRESHOLDS_MS = (5, 10, 20, 40)
 DEFAULT_SPIKE_WINDOW_MS = 100.0

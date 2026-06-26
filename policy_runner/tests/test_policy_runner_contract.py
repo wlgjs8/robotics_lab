@@ -11,10 +11,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from policy_runner.action_sources.tcp_delta import tcp_delta_stand_intent
 from policy_runner.action_sources.hold import HoldActionSource
 from policy_runner.action_sources.joint_sine import JointSineActionSource
-from policy_runner.action_sources.joint_velocity import JointVelocityActionSource
+from policy_runner.action_sources.tcp_pose_target import tcp_pose_target_stand_intent
 from policy_runner.config import config_from_mapping, load_config
 from policy_runner.main import LEASE_READBACK_TIMEOUT_EXIT_CODE, STARTUP_TIMEOUT_EXIT_CODE, make_action_source, run
 from policy_runner.recording import _hash_canonical_json
@@ -188,7 +187,7 @@ class CartesianOnceSource:
 
     def next_intent(self, snapshot, now_monotonic):
         _ = snapshot, now_monotonic
-        return tcp_delta_stand_intent(left=(0.001, 0.0, 0.0, 0.0, 0.0, 0.0))
+        return tcp_pose_target_stand_intent(left=(0.3, 0.1, 0.5, 0.0, 0.0, 0.0))
 
 
 def geometry_file_text():
@@ -220,7 +219,7 @@ class PolicyRunnerContractTest(unittest.TestCase):
         cfg = load_config(config_dir / "rbpodo_pgmode_spacemouse_500hz_ack.yaml")
 
         self.assertEqual(cfg.mode, "real")
-        self.assertEqual(cfg.action_source, "dual_spacemouse_cartesian")
+        self.assertEqual(cfg.action_source, "dual_spacemouse_pose_target")
         self.assertFalse(cfg.safety.allow_real_motion)
         self.assertTrue(cfg.safety.allow_rbpodo_controller_simulation_cartesian)
         self.assertFalse(cfg.safety.allow_configured_estimate_geometry_in_real)
@@ -228,9 +227,10 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertEqual(cfg.servo_command.endpoint, "udp://127.0.0.1:50256")
         self.assertEqual(cfg.robot_state.bind, "udp://0.0.0.0:50376")
         self.assertTrue(cfg.servo_command.acquire_lease)
-        self.assertEqual(cfg.spacemouse_cartesian_dual.max_linear_velocity_m_s, 0.2)
-        self.assertEqual(cfg.spacemouse_cartesian_dual.max_angular_velocity_rad_s, 0.4)
-        self.assertEqual(cfg.spacemouse_cartesian_dual.sample_hold_timeout_sec, 0.05)
+        self.assertEqual(cfg.spacemouse_pose_target_dual.max_linear_step_m, 0.001)
+        self.assertEqual(cfg.spacemouse_pose_target_dual.max_angular_step_rad, 0.01)
+        self.assertEqual(cfg.spacemouse_pose_target_dual.sample_stale_timeout_sec, 0.05)
+        self.assertFalse(cfg.spacemouse_pose_target_dual.gripper_buttons.enable)
         self.assertEqual(cfg.recording.dataset_metadata["backend_type"], "rbpodo")
         self.assertEqual(cfg.recording.dataset_metadata["operation_mode"], "simulation")
         self.assertFalse(cfg.recording.dataset_metadata["physical_motion_expected"])
@@ -256,7 +256,6 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertIn("operation_mode: simulation", text)
         self.assertIn("allow_in_controller_simulation: true", text)
         self.assertIn("allow_in_real: false", text)
-        self.assertIn("enable_benchmark_primitives: false", text)
         self.assertIn("enforce_lease: true", text)
         self.assertIn("provider: null", text)
         self.assertIn("enable: false", text)
@@ -298,6 +297,107 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertTrue(cfg.servo_command.acquire_lease)
         self.assertEqual(cfg.servo_command.lease_readback_timeout_sec, 0.75)
 
+    def test_umi_sample_stale_timeout_alias_maps_to_hold_timeout(self):
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "umi_dual_cartesian": {"sample_stale_timeout_sec": 0.25},
+            }
+        )
+
+        self.assertEqual(cfg.umi_dual_cartesian.sample_hold_timeout_sec, 0.25)
+
+        with self.assertRaisesRegex(ValueError, "must not set both"):
+            config_from_mapping(
+                {
+                    "schema": "robotics_lab.policy_runner.v1",
+                    "umi_dual_cartesian": {
+                        "sample_hold_timeout_sec": 0.2,
+                        "sample_stale_timeout_sec": 0.25,
+                    },
+                }
+            )
+
+    def test_stack_policy_configs_load(self):
+        config_dir = Path(__file__).resolve().parents[1] / "config"
+
+        real_cfg = load_config(config_dir / "stack_real.yaml")
+        sim_cfg = load_config(config_dir / "stack_sim.yaml")
+
+        self.assertEqual(real_cfg.umi_dual_cartesian.sample_hold_timeout_sec, 0.5)
+        self.assertEqual(sim_cfg.umi_dual_cartesian.sample_hold_timeout_sec, 0.05)
+        self.assertEqual(real_cfg.spacemouse_pose_target_dual.sample_stale_timeout_sec, 0.05)
+        self.assertEqual(sim_cfg.spacemouse_pose_target_dual.sample_stale_timeout_sec, 0.05)
+        self.assertTrue(real_cfg.spacemouse_pose_target_dual.gripper_buttons.enable)
+        self.assertTrue(sim_cfg.spacemouse_pose_target_dual.gripper_buttons.enable)
+        self.assertEqual(real_cfg.spacemouse_pose_target_dual.gripper_buttons.open_percent, 100.0)
+        self.assertEqual(real_cfg.spacemouse_pose_target_dual.gripper_buttons.close_percent, 10.0)
+
+    def test_spacemouse_gripper_buttons_config_validation(self):
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "spacemouse_pose_target_dual": {
+                    "require_deadman": False,
+                    "gripper_buttons": {
+                        "enable": True,
+                        "open_button": 2,
+                        "close_button": 3,
+                        "open_percent": 90,
+                        "close_percent": 12,
+                    },
+                },
+            }
+        )
+
+        buttons = cfg.spacemouse_pose_target_dual.gripper_buttons
+        self.assertTrue(buttons.enable)
+        self.assertEqual(buttons.open_button, 2)
+        self.assertEqual(buttons.close_button, 3)
+        self.assertEqual(buttons.open_percent, 90.0)
+        self.assertEqual(buttons.close_percent, 12.0)
+
+        with self.assertRaisesRegex(ValueError, "must differ"):
+            config_from_mapping(
+                {
+                    "schema": "robotics_lab.policy_runner.v1",
+                    "spacemouse_pose_target_dual": {
+                        "gripper_buttons": {
+                            "enable": True,
+                            "open_button": 1,
+                            "close_button": 1,
+                        },
+                    },
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "open_percent"):
+            config_from_mapping(
+                {
+                    "schema": "robotics_lab.policy_runner.v1",
+                    "spacemouse_pose_target_dual": {
+                        "gripper_buttons": {"enable": True, "open_percent": 120},
+                    },
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "conflicts"):
+            config_from_mapping(
+                {
+                    "schema": "robotics_lab.policy_runner.v1",
+                    "spacemouse_pose_target_dual": {
+                        "require_deadman": True,
+                        "left": {"deadman_button": 0},
+                        "right": {"deadman_button": 2},
+                        "gripper_buttons": {
+                            "enable": True,
+                            "open_button": 0,
+                            "close_button": 1,
+                        },
+                    },
+                }
+            )
+
     def test_recording_metadata_must_be_mapping(self):
         cfg = config_from_mapping(
             {
@@ -324,12 +424,8 @@ class PolicyRunnerContractTest(unittest.TestCase):
         for action_source in (
             "hold",
             "joint_sine",
-            "joint_velocity",
             "master_arm_joint",
-            "spacemouse_joint_velocity",
-            "tcp_delta",
-            "spacemouse_cartesian",
-            "dual_spacemouse_cartesian",
+            "dual_spacemouse_pose_target",
         ):
             with self.subTest(action_source=action_source):
                 cfg = config_from_mapping(
@@ -361,26 +457,28 @@ class PolicyRunnerContractTest(unittest.TestCase):
         finally:
             client.close()
 
-    def test_command_sender_emits_rb_servo_compatible_joint_velocity_packet(self):
+    def test_command_sender_emits_joint_target_profile_packet(self):
         fake_socket = FakeSendSocket()
         client = ServoCommandClient(
             "udp://127.0.0.1:50010",
             socket_factory=lambda *_args: fake_socket,
         )
         try:
-            seq = client.send(CommandIntent.joint_velocity(left=[1, 0, 0, 0, 0, 0], right=[-1, 0, 0, 0, 0, 0]))
+            seq = client.send(CommandIntent.init_motion(left=[1, 0, 0, 0, 0, 0], right=[-1, 0, 0, 0, 0, 0]))
             data, address = fake_socket.sent[0]
             packet = json.loads(data.decode("utf-8"))
             self.assertEqual(seq, 1)
             self.assertEqual(address, ("127.0.0.1", 50010))
             self.assertEqual(packet["seq"], 1)
-            self.assertEqual(packet["mode"], "Hold")
+            self.assertEqual(packet["mode"], "JointTarget")
             self.assertEqual(packet["source_id"], "policy_runner")
             self.assertTrue(packet["session_id"])
             self.assertEqual(packet["timeout_sec"], 0.2)
-            self.assertEqual(packet["left"]["mode"], "JointVelocity")
-            self.assertEqual(packet["left"]["dq_target_deg_s"], [1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-            self.assertEqual(packet["right"]["mode"], "JointVelocity")
+            self.assertEqual(packet["left"]["mode"], "JointTarget")
+            self.assertEqual(packet["left"]["q_target_deg"], [1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            self.assertEqual(packet["left"]["joint_target_profile"], "init_motion")
+            self.assertEqual(packet["right"]["mode"], "JointTarget")
+            self.assertEqual(packet["right"]["joint_target_profile"], "init_motion")
         finally:
             client.close()
 
@@ -393,7 +491,7 @@ class PolicyRunnerContractTest(unittest.TestCase):
             CommandIntent.emergency_stop(),
             CommandIntent.reset_fault(),
             CommandIntent.joint_target(left=[0, 1, 2, 3, 4, 5], right=[5, 4, 3, 2, 1, 0]),
-            CommandIntent.joint_velocity(left=[1, 0, 0, 0, 0, 0], right=[0, 1, 0, 0, 0, 0]),
+            CommandIntent.init_motion(left=[1, 0, 0, 0, 0, 0], right=[0, 1, 0, 0, 0, 0]),
         ]
         for seq, intent in enumerate(cases, start=1):
             with self.subTest(mode=intent.mode):
@@ -407,9 +505,10 @@ class PolicyRunnerContractTest(unittest.TestCase):
         target = client.build_packet(cases[-2], 6)
         self.assertEqual(target["left"]["mode"], "JointTarget")
         self.assertEqual(target["left"]["q_target_deg"], [0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
-        velocity = client.build_packet(cases[-1], 7)
-        self.assertEqual(velocity["right"]["mode"], "JointVelocity")
-        self.assertEqual(velocity["right"]["dq_target_deg_s"], [0.0, 1.0, 0.0, 0.0, 0.0, 0.0])
+        profiled = client.build_packet(cases[-1], 7)
+        self.assertEqual(profiled["right"]["mode"], "JointTarget")
+        self.assertEqual(profiled["right"]["q_target_deg"], [0.0, 1.0, 0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(profiled["right"]["joint_target_profile"], "init_motion")
 
     def test_command_sender_emits_acquire_lease_and_reuses_readback_token(self):
         fake_socket = FakeSendSocket()
@@ -490,27 +589,25 @@ class PolicyRunnerContractTest(unittest.TestCase):
 
     def test_joint_sources_are_simulation_only_by_default(self):
         sine = JointSineActionSource((1, 1, 1, 1, 1, 1))
-        velocity = JointVelocityActionSource((1, 0, 0, 0, 0, 0))
         self.assertTrue(sine.requirements.simulation_only)
-        self.assertTrue(velocity.requirements.simulation_only)
 
     def test_real_mode_blocks_motion_without_explicit_allow(self):
         gate = SafetyGate("real", SafetyConfig(allow_real_motion=False), stale_timeout_sec=0.5)
-        intent = CommandIntent.joint_velocity(left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0])
+        intent = CommandIntent.joint_target(left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0])
         decision = gate.evaluate(sample_state(), intent, now_monotonic=time.monotonic())
         # Real/sim gating retired: allowed.
         self.assertTrue(decision.allowed)
 
     def test_observed_real_mode_blocks_motion_without_explicit_allow(self):
         gate = SafetyGate("simulation", SafetyConfig(allow_real_motion=False), stale_timeout_sec=0.5)
-        intent = CommandIntent.joint_velocity(left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0])
+        intent = CommandIntent.joint_target(left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0])
         decision = gate.evaluate(sample_state(run_mode="real"), intent, now_monotonic=time.monotonic())
         # Real/sim gating retired: allowed.
         self.assertTrue(decision.allowed)
 
     def test_safety_blocks_stale_fault_and_invalid_state(self):
         gate = SafetyGate("simulation", SafetyConfig(), stale_timeout_sec=0.01)
-        intent = CommandIntent.joint_velocity(left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0])
+        intent = CommandIntent.joint_target(left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0])
         stale = StateSnapshot(sample_state().payload, time.monotonic() - 1.0)
         self.assertEqual(gate.evaluate(stale, intent).reason, "state_stream_stale")
         self.assertEqual(gate.evaluate(sample_state(fault_latched=True), intent).reason, "fault_latched")
@@ -518,7 +615,7 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertEqual(gate.evaluate(invalid, intent).reason, "invalid_joint_state")
 
     def test_safety_blocks_missing_camera_or_kinematics_requirements(self):
-        intent = CommandIntent.joint_velocity(left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0])
+        intent = CommandIntent.joint_target(left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0])
         camera_gate = SafetyGate("simulation", SafetyConfig(camera_available=False), stale_timeout_sec=0.5)
         camera_decision = camera_gate.evaluate(
             sample_state(),
@@ -612,7 +709,7 @@ class PolicyRunnerContractTest(unittest.TestCase):
             geometry_path.unlink(missing_ok=True)
 
         self.assertEqual(result, 0)
-        self.assertEqual([intent.mode for intent in command_client.sent], ["ArmMotion", "TcpDeltaStand"])
+        self.assertEqual([intent.mode for intent in command_client.sent], ["ArmMotion", "TcpPoseTarget"])
 
     def test_run_acquires_configured_lease_before_motion(self):
         cfg = config_from_mapping(
@@ -624,7 +721,7 @@ class PolicyRunnerContractTest(unittest.TestCase):
             }
         )
         command_client = FakeCommandClient()
-        source = JointVelocityActionSource((1, 0, 0, 0, 0, 0))
+        source = JointSineActionSource((1, 0, 0, 0, 0, 0))
 
         result = run(
             cfg,
@@ -640,7 +737,7 @@ class PolicyRunnerContractTest(unittest.TestCase):
         # does not collide with this session's stale lease).
         self.assertEqual(
             [intent.mode for intent in command_client.sent],
-            ["AcquireLease", "ArmMotion", "Hold", "ReleaseLease"],
+            ["AcquireLease", "ArmMotion", "JointTarget", "ReleaseLease"],
         )
         self.assertEqual(len(command_client.acquire_calls), 1)
         self.assertEqual(command_client.acquire_calls[0][1]["timeout_sec"], 0.1)
@@ -670,9 +767,7 @@ class PolicyRunnerContractTest(unittest.TestCase):
             requirements = None
 
             def next_intent(self, snapshot, now):
-                return CommandIntent.joint_velocity(
-                    left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0]
-                )
+                return CommandIntent.joint_target(left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0])
 
             def close(self):
                 pass
@@ -704,12 +799,12 @@ class PolicyRunnerContractTest(unittest.TestCase):
         # The acquire attempt went out, but no motion command did.
         self.assertIn("AcquireLease", modes)
         self.assertNotIn("ArmMotion", modes)
-        self.assertNotIn("JointVelocity", [m for m in modes])
+        self.assertNotIn("ArmMotion", modes)
         for data, _addr in send_socket.sent:
             packet = json.loads(data.decode())
             for arm in ("left", "right"):
                 if isinstance(packet.get(arm), dict):
-                    self.assertNotEqual(packet[arm].get("mode"), "JointVelocity")
+                    self.assertNotEqual(packet[arm].get("mode"), "JointTarget")
 
     def test_run_releases_lease_after_idle_and_reacquires_on_resume(self):
         # Idle lease handoff contract: after IDLE_LEASE_RELEASE_SEC without a
@@ -736,9 +831,7 @@ class PolicyRunnerContractTest(unittest.TestCase):
                 _ = snapshot, now_monotonic
                 self.calls += 1
                 if self.calls in (1, 4):
-                    return CommandIntent.joint_velocity(
-                        left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0]
-                    )
+                    return CommandIntent.joint_target(left=[1, 0, 0, 0, 0, 0], right=[1, 0, 0, 0, 0, 0])
                 return None
 
             def close(self):
@@ -769,7 +862,7 @@ class PolicyRunnerContractTest(unittest.TestCase):
         # double release; tick4 (t=2.1): motion resumes -> re-acquire + motion.
         self.assertEqual(
             modes[:6],
-            ["AcquireLease", "ArmMotion", "Hold", "ReleaseLease", "AcquireLease", "Hold"],
+            ["AcquireLease", "ArmMotion", "JointTarget", "ReleaseLease", "AcquireLease", "JointTarget"],
         )
         self.assertEqual(len(command_client.acquire_calls), 2)
 

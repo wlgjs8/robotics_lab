@@ -56,7 +56,7 @@ master_arm_joint:
   hold_master_on_release: true
 
   # Command-side extra shaping. rb_servo_server still applies its own safety limits.
-  max_joint_velocity_deg_s: [30, 30, 30, 45, 45, 60]
+  max_joint_speed_deg_s: [30, 30, 30, 45, 45, 60]
   smoothing_alpha: 0.35
   wrap_delta: true
 

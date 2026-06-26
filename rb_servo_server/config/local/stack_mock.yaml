@@ -123,7 +123,6 @@ safety:
     # tcp 프레임 = 팁 평면(z 247.642mm @attachment_site), 팁 양끝은
     # tool visual의 z+90° 회전 반영 시 TCP x축 방향 ±59.0mm). TCP가 회전했을 때
     # 팁이 TCP 점보다 아래로 내려가는 케이스를 잡는다. 체크는 팔당 3점(TCP+팁 2)이며,
-    # 최종 FK backstop뿐 아니라 TcpTwistLocal/TcpTwistStand의 streaming floor
     # projection도 같은 점들을 사용한다.
     tcp_offset_points:
       - { name: gripper_tip_a, offset_m: [ 0.059, 0.0, 0.0 ] }
@@ -222,22 +221,15 @@ cartesian_control:
   # max_command_actual_error 창에 닿을 때마다 리셋되어 '조금 가다 멈춤'이 됨.
   allow_in_simulation: true
   allow_in_real: true                          # PHYSICAL real Cartesian (needs RB_ALLOW_REAL_CARTESIAN=1)
-  enable_benchmark_primitives: false
   warn_ik_duration_us: 3000
   fail_ik_duration_us: 5000
-  # path_kp_* now drive only the circle benchmark primitive: TcpLinearMove
   # runs the pose_track_smd feedforward chain (quintic profile, no measured-
   # state feedback), same as streaming TcpPoseTarget.
   path_kp_pos: 3.0                # anti-tremble (was 6.0): less reactive to tiny errors
   path_kp_ori: 3.0                # anti-tremble (was 6.0)
-  twist_orientation_hold_kp: 3.0  # anti-tremble (was 6.0): smoother wrist orientation hold
-  twist_angular_deadband_rad_s: 0.0001
   velocity_damping: 0.04          # anti-tremble (was 0.01): damp IK velocity solution
   # Low-speed first-run Cartesian limits (sim profile used 0.2 / 0.4 / 0.002 / 0.02).
-  # Twist limits doubled (0.05/0.1 -> 0.10/0.2) for 2x spacemouse teleop speed;
   # joint headroom checked (~15deg/s vs dq_max 120deg/s, 0.2mm/tick @500Hz).
-  max_twist_linear_m_s: 0.10
-  max_twist_angular_rad_s: 0.2
   max_linear_move_speed_m_s: 0.05
   max_angular_move_speed_rad_s: 0.1
   max_cartesian_step_m: 0.001
@@ -268,11 +260,6 @@ cartesian_control:
   max_command_actual_error_deg: [5, 5, 5, 8, 8, 10]
   reset_velocity_integrator_on_mode_change: true
   command_actual_error_policy: reset
-  circle_move:
-    allow_in_simulation: false
-    allow_in_real: false
-    max_diameter_m: 0.20
-    min_period_sec: 3.0
   linear_move:
     min_duration_sec: 0.05
     max_duration_sec: 10.0

@@ -18,10 +18,7 @@ try:
         FLOW_CHECKPOINT_SCHEMA,
         FLOW_PROPRIO_DIM,
         FlowMatchingActionSource,
-        canonical_flow_command_family,
-        resolve_flow_command_family,
         resolve_flow_policy_dt_sec,
-        validate_flow_command_family,
     )
     from policy_runner.flow_model import FlowMatchingPolicy, FlowModelConfig
     from policy_runner.robot_state_client import StateSnapshot
@@ -32,12 +29,7 @@ except Exception:
 
 @unittest.skipIf(torch is None or np is None, "torch/numpy flow inference extras are not installed")
 class FlowInferenceTcpTargetPoseTest(unittest.TestCase):
-    def test_tcp_target_pose_family_resolves_and_requires_live_optin(self) -> None:
-        self.assertEqual(
-            resolve_flow_command_family(RolloutMode.SIM_DRYRUN, "tcp_pose_target"),
-            "tcp_target_pose",
-        )
-        self.assertEqual(canonical_flow_command_family("tcpposetarget"), "TcpPoseTarget")
+    def test_tcp_target_pose_policy_dt_resolves_without_family_optin(self) -> None:
         self.assertEqual(
             resolve_flow_policy_dt_sec(
                 RolloutMode.SIM_DRYRUN,
@@ -48,16 +40,6 @@ class FlowInferenceTcpTargetPoseTest(unittest.TestCase):
             ),
             0.02,
         )
-
-        with self.assertRaisesRegex(RolloutModeValidationError, "allow-tcp-target-pose"):
-            validate_flow_command_family(RolloutMode.REAL_POLICY, "tcp_target_pose")
-        validate_flow_command_family(
-            RolloutMode.REAL_POLICY,
-            "tcp_target_pose",
-            allow_tcp_target_pose=True,
-        )
-        validate_flow_command_family(RolloutMode.SIM_DRYRUN, "tcp_target_pose")
-        validate_flow_command_family(RolloutMode.REAL_READONLY, "tcp_target_pose")
 
     def test_flow_delta_composes_into_clamped_tcp_pose_target(self) -> None:
         assert torch is not None and np is not None
@@ -133,8 +115,7 @@ class FlowInferenceTcpTargetPoseTest(unittest.TestCase):
         np.testing.assert_allclose(second_target[:3], [2.001, 0.0, 0.0], atol=1e-7)
 
     # ------------------------------------------------ Patch 3: foh_se3 conditioning --
-    def _streamed_source(self, tmp: str, conditioning: str, reanchor: str = "measured_legacy",
-                         send_twist: bool = False):
+    def _streamed_source(self, tmp: str, conditioning: str, reanchor: str = "measured_legacy"):
         checkpoint = Path(tmp) / "flow_policy.pt"
         _write_flow_checkpoint(checkpoint, action_horizon=8)
         source = FlowMatchingActionSource(
@@ -147,7 +128,6 @@ class FlowInferenceTcpTargetPoseTest(unittest.TestCase):
             chunk_execute_steps=8,
             tcp_target_pose_conditioning=conditioning,
             tcp_target_pose_reanchor_mode=reanchor,
-            tcp_target_pose_send_twist=send_twist,
         )
         source.enable_async_chunking = True
         return source
@@ -219,27 +199,6 @@ class FlowInferenceTcpTargetPoseTest(unittest.TestCase):
         x = _pose_from_target_payload(at_boundary.left["tcp_target_stand"])[0]
         # S_0 = measured.x + one clamped step (0.01 m, within the 1.0 m/s * 0.02 s cap)
         self.assertAlmostEqual(x, 0.4 + 0.01, places=4)
-
-    def test_foh_se3_send_twist_attaches_tcp_target_twist_stand(self) -> None:
-        assert torch is not None and np is not None
-        measured = _pose7([0.4, 0.0, 0.3], [0.0, 0.0, 0.0, 1.0])
-        chunk = _action_chunk(*([[0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]] * 8))
-        with tempfile.TemporaryDirectory() as tmp:
-            source = self._streamed_source(tmp, "foh_se3", send_twist=True)
-            try:
-                with mock.patch(
-                    "policy_runner.flow_inference.sample_action_chunks", return_value=chunk
-                ):
-                    state = _sample_state(left_pose=measured)
-                    source.next_intent(state, 0.0)
-                    mid = source.next_intent(state, 0.004)
-            finally:
-                source.close()
-        self.assertIn("tcp_target_twist_stand", mid.left)
-        twist = mid.left["tcp_target_twist_stand"]
-        self.assertEqual(len(twist), 6)
-        self.assertGreater(twist[0], 0.0)  # +x goal velocity from the +x ramp
-
 
 def _sample_state(*, left_pose: np.ndarray) -> StateSnapshot:
     right_pose = _pose7([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0])

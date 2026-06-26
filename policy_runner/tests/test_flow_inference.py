@@ -6,7 +6,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from policy_runner.action_sources.tcp_delta import cartesian_action_requirements
+from policy_runner.action_sources.tcp_pose_target import cartesian_action_requirements
 
 
 class FlowInferenceCliTest(unittest.TestCase):
@@ -27,10 +27,7 @@ class FlowInferenceCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--rollout-mode", result.stdout)
         self.assertIn("controller_sim", result.stdout)
-        self.assertIn("--command-family", result.stdout)
-        self.assertIn("tcp_twist_local", result.stdout)
-        self.assertIn("tcp_target_pose", result.stdout)
-        self.assertIn("--allow-tcp-target-pose", result.stdout)
+        self.assertNotIn("--command-family", result.stdout)
         self.assertIn("--policy-dt-sec", result.stdout)
 
     def test_controller_sim_requirement_helper_allows_rbpodo_carveout(self) -> None:

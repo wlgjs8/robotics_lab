@@ -113,7 +113,6 @@ Required behavior:
 
 - malformed JSON / unknown mode / invalid numeric payload → Drop packet.
 - `JointTarget` without `q_target_deg` → Drop packet.
-- `JointVelocity` without `dq_target_deg_s` → Drop packet.
 - malformed 6D arrays → Drop packet.
 - stale command → Hold.
 - Cartesian command while IK is not implemented → Hold + `CartesianUnavailable`.
@@ -235,8 +234,7 @@ Required features:
 - local FK from q
 - TCP target from:
   - `TcpPoseTarget`
-  - `TcpDeltaStand`
-  - `TcpDeltaLocal`
+  - `TcpLinearMove`
 - damped least-squares IK
 - joint velocity / acceleration safety compatibility
 

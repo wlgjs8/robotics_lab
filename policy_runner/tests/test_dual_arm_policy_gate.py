@@ -3,9 +3,9 @@ from __future__ import annotations
 import time
 import unittest
 
-from policy_runner.action_sources.tcp_delta import (
+from policy_runner.action_sources.tcp_pose_target import (
     RBPODO_CONTROLLER_SIMULATION_CARTESIAN_ACTION_REQUIREMENTS,
-    tcp_twist_local_intent,
+    tcp_pose_target_stand_intent,
 )
 from policy_runner.config import SafetyConfig, config_from_mapping
 from policy_runner.geometry import geometry_status_from_mapping
@@ -54,7 +54,7 @@ class DualArmPolicyGateTest(unittest.TestCase):
                 checkpoint_has_nonzero_gripper_commands=True,
             )
 
-    def test_controller_sim_allows_cartesian_streaming_and_logs_gripper_noop(self) -> None:
+    def test_controller_sim_allows_cartesian_pose_target_and_logs_gripper_noop(self) -> None:
         gate = SafetyGate(
             "real",
             SafetyConfig(
@@ -67,7 +67,7 @@ class DualArmPolicyGateTest(unittest.TestCase):
 
         decision = gate.evaluate(
             _controller_sim_state(),
-            tcp_twist_local_intent(left=[0.01, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            tcp_pose_target_stand_intent(left=[0.3, 0.1, 0.5, 0.0, 0.0, 0.0]),
             RBPODO_CONTROLLER_SIMULATION_CARTESIAN_ACTION_REQUIREMENTS,
             time.monotonic(),
         )
