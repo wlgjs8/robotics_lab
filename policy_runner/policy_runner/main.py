@@ -29,6 +29,13 @@ from .rollout_modes import (
 )
 from .safety import SafetyGate
 from .servo_command_client import CommandIntent, ServoCommandClient
+from .arm_init_control import (
+    ArmInitOverrideController,
+    apply_source_arm_mask,
+    intent_uses_source_requirements,
+    reset_source_after_override_change,
+    source_arm_mask_copy,
+)
 from .record_control import RecordingSupervisor
 from .spacemouse import HidSpaceMouseReader, ScriptedSpaceMouseReader, SpaceMouseReader, SpaceMouseSample
 from .action_sources.umi_dual_cartesian import MockUmiPoseReader, UdpUmiPoseReader, UmiPoseReader
@@ -142,6 +149,8 @@ def run(
     # monotonic_fn sequences, so no extra monotonic_fn() calls here.
     debug_last_print: float | None = None
     recording_supervisor = recording_supervisor or RecordingSupervisor.from_config(config, stderr=stderr)
+    arm_init_override = ArmInitOverrideController(timeout_sec=config.servo_command.timeout_sec)
+    source_base_arm_mask = source_arm_mask_copy(source)
     last_record_packet: dict[str, object] | None = None
     last_record_packet_time_ns = 0
     last_record_packet_seq = 0
@@ -158,6 +167,12 @@ def run(
         last_record_packet_time_ns = time.time_ns()
         last_record_packet_seq = 0
 
+    def _clear_tick_record_packet() -> None:
+        nonlocal last_record_packet, last_record_packet_time_ns, last_record_packet_seq
+        last_record_packet = None
+        last_record_packet_time_ns = 0
+        last_record_packet_seq = 0
+
     def _finish_tick(snapshot: StateSnapshot, now_value: float) -> None:
         recording_supervisor.record_frame(
             snapshot,
@@ -166,7 +181,11 @@ def run(
             action_seq=last_record_packet_seq,
         )
         recording_supervisor.stamp_snapshot(snapshot)
-        recording_supervisor.publish_status(now_monotonic=now_value)
+        arm_init_override.stamp_snapshot(snapshot)
+        recording_supervisor.publish_status(
+            now_monotonic=now_value,
+            arm_init=arm_init_override.status_block(),
+        )
         sleep_fn(period)
     try:
         while True:
@@ -183,14 +202,33 @@ def run(
                     return STARTUP_TIMEOUT_EXIT_CODE
                 sleep_fn(period)
                 continue
-            recording_supervisor.drain_commands(snapshot, action_source=str(getattr(source, "name", config.action_source)))
+            action_source_name = str(getattr(source, "name", config.action_source))
+            drain_payloads = getattr(recording_supervisor, "drain_control_payloads", None)
+            dispatch_payloads = getattr(recording_supervisor, "dispatch_control_payloads", None)
+            if callable(drain_payloads) and callable(dispatch_payloads):
+                control_payloads = drain_payloads()
+                dispatch_payloads(control_payloads, snapshot, action_source=action_source_name)
+                if arm_init_override.handle_payloads(control_payloads):
+                    reset_source_after_override_change(source)
+            else:
+                recording_supervisor.drain_commands(snapshot, action_source=action_source_name)
+            apply_source_arm_mask(source, source_base_arm_mask, arm_init_override)
             recording_supervisor.stamp_snapshot(snapshot)
+            arm_init_override.stamp_snapshot(snapshot)
+            _clear_tick_record_packet()
             if state_sink is not None:
                 state_sink(snapshot)
             if rollout_recorder is not None:
                 rollout_recorder.record_state(snapshot)
             intent = source.next_intent(snapshot, now)
-            decision = safety_gate.evaluate(snapshot, intent, getattr(source, "requirements", None), now)
+            intent = arm_init_override.compose_intent(intent)
+            source_requirements = getattr(source, "requirements", None)
+            requirements = (
+                source_requirements
+                if intent_uses_source_requirements(intent, arm_init_override)
+                else None
+            )
+            decision = safety_gate.evaluate(snapshot, intent, requirements, now)
             if rollout_recorder is not None:
                 rollout_recorder.record_decision(decision)
                 rollout_recorder.record_source(source)
@@ -1112,6 +1150,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 state_client=state_client,
                 command_client=command_client,
                 state_sink=recorder.record_state,
+                recording_supervisor=RecordingSupervisor(config),
             )
         finally:
             recorder.close()
@@ -1129,6 +1168,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 zmq_endpoint=args.zmq_endpoint or config.camera.zmq_endpoint,
                 topic=config.camera.bundle_topic,
                 max_age_ms=config.camera.max_age_ms,
+                include_depth=True,
             )
         recorder = Hdf5EpisodeRecorder(
             output_dir,
@@ -1191,6 +1231,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 state_client=state_client,
                 command_client=command_client,
                 state_sink=state_sink,
+                recording_supervisor=RecordingSupervisor(config),
             )
         finally:
             if recorder.has_active_episode:

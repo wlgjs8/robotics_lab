@@ -530,6 +530,8 @@ class StateSnapshot:
     roi_box: Mapping[str, Any] | None
     user_floor_constraint: Mapping[str, Any] | None
     freedrive: Mapping[str, Any] | None
+    recording: Mapping[str, Any] | None
+    arm_init: Mapping[str, Any] | None
     raw: Mapping[str, Any]
 
     @classmethod
@@ -577,6 +579,8 @@ class StateSnapshot:
             roi_box=data.get("roi_box") if isinstance(data.get("roi_box"), Mapping) else None,
             user_floor_constraint=data.get("user_floor_constraint") if isinstance(data.get("user_floor_constraint"), Mapping) else None,
             freedrive=data.get("freedrive") if isinstance(data.get("freedrive"), Mapping) else None,
+            recording=data.get("recording") if isinstance(data.get("recording"), Mapping) else None,
+            arm_init=data.get("arm_init") if isinstance(data.get("arm_init"), Mapping) else None,
             raw=data,
         )
 

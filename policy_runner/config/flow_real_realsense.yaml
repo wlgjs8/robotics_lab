@@ -27,7 +27,7 @@ geometry:
   path: "calibration/active_calibration.yaml"
 recording:
   output_dir: "policy_runner/episodes"
-  rate_hz: 100.0
+  rate_hz: 30.0
   format: hdf5
   dataset_metadata:
     schema: robotics_lab.policy_runner.dataset_metadata.v1
@@ -59,11 +59,18 @@ camera:
   zmq_endpoint: "tcp://127.0.0.1:5600"
   bundle_topic: "camera.bundle"
   max_age_ms: 200.0
+  record_zero_on_missing: true
   wrist_source: realsense
   wrist_crop_frac: 0.0
-  # Drives only --camera-preview (the openpi source reads its wrist cameras directly);
-  # show what the model consumes.
-  expected_cameras: [left_realsense_color, right_realsense_color]
+  # Recorder/preview camera names. The openpi source still consumes only its wrist
+  # camera pair from wrist_source; recording captures wrist RGB-D plus the head D435.
+  expected_cameras:
+    - left_realsense_color
+    - left_realsense_depth
+    - right_realsense_color
+    - right_realsense_depth
+    - head_color
+    - head_depth
 safety:
   allow_real_motion: true
   # NOT allow_rbpodo_controller_simulation_cartesian: real_policy must not rely on it.

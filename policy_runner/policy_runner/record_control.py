@@ -4,7 +4,7 @@ import json
 import socket
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, TextIO
+from typing import Any, Callable, Iterable, Mapping, TextIO
 
 from .config import PolicyRunnerConfig
 from .robot_state_client import StateSnapshot, parse_udp_endpoint
@@ -22,13 +22,7 @@ class RecordCommand:
 
 
 def parse_record_command(data: bytes | dict[str, Any]) -> RecordCommand:
-    if isinstance(data, bytes):
-        try:
-            payload = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError("record command must be JSON") from exc
-    else:
-        payload = data
+    payload = parse_control_payload(data)
     if not isinstance(payload, dict):
         raise ValueError("record command must be a JSON object")
     if payload.get("schema") != RECORD_COMMAND_SCHEMA:
@@ -47,6 +41,19 @@ def parse_record_command(data: bytes | dict[str, Any]) -> RecordCommand:
     return RecordCommand(command=command, task=task, operator=operator or None)
 
 
+def parse_control_payload(data: bytes | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(data, bytes):
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("control command must be JSON") from exc
+    else:
+        payload = data
+    if not isinstance(payload, dict):
+        raise ValueError("control command must be a JSON object")
+    return payload
+
+
 class RecordControlServer:
     """Non-blocking UDP receiver for rb_gui episode start/stop commands."""
 
@@ -62,8 +69,8 @@ class RecordControlServer:
         self._socket.bind((endpoint.host, endpoint.port))
         self._socket.setblocking(False)
 
-    def drain(self, *, max_packets: int = 32) -> list[RecordCommand]:
-        commands: list[RecordCommand] = []
+    def drain_payloads(self, *, max_packets: int = 32) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
         for _ in range(max(1, int(max_packets))):
             try:
                 data, _addr = self._socket.recvfrom(65536)
@@ -72,7 +79,16 @@ class RecordControlServer:
             except OSError:
                 break
             try:
-                commands.append(parse_record_command(data))
+                payloads.append(parse_control_payload(data))
+            except ValueError:
+                continue
+        return payloads
+
+    def drain(self, *, max_packets: int = 32) -> list[RecordCommand]:
+        commands: list[RecordCommand] = []
+        for payload in self.drain_payloads(max_packets=max_packets):
+            try:
+                commands.append(parse_record_command(payload))
             except ValueError:
                 continue
         return commands
@@ -95,12 +111,19 @@ class RecordStatusPublisher:
         self._address = (parsed.host, parsed.port)
         self._socket = socket_factory(socket.AF_INET, socket.SOCK_DGRAM)
 
-    def publish(self, recording: dict[str, Any]) -> None:
+    def publish(
+        self,
+        recording: dict[str, Any],
+        *,
+        arm_init: Mapping[str, Any] | None = None,
+    ) -> None:
         payload = {
             "schema": RECORD_STATUS_SCHEMA,
             "host_time_ns": time.time_ns(),
             "recording": recording,
         }
+        if arm_init is not None:
+            payload["arm_init"] = dict(arm_init)
         try:
             self._socket.sendto(json.dumps(payload, separators=(",", ":")).encode("utf-8"), self._address)
         except OSError:
@@ -136,7 +159,7 @@ class RecordingSupervisor:
         self.error = ""
         self.last_command = ""
         self._last_status_publish = float("-inf")
-        self._last_status = self.status_block()
+        self._last_status: dict[str, Any] = {"recording": self.status_block(), "arm_init": None}
 
     @classmethod
     def from_config(cls, config: PolicyRunnerConfig, *, stderr: TextIO | None = None) -> "RecordingSupervisor":
@@ -172,9 +195,29 @@ class RecordingSupervisor:
         return active
 
     def drain_commands(self, snapshot: StateSnapshot, *, action_source: str) -> None:
+        self.dispatch_control_payloads(
+            self.drain_control_payloads(),
+            snapshot,
+            action_source=action_source,
+        )
+
+    def drain_control_payloads(self, *, max_packets: int = 32) -> list[dict[str, Any]]:
         if self.control_server is None:
-            return
-        for command in self.control_server.drain():
+            return []
+        return self.control_server.drain_payloads(max_packets=max_packets)
+
+    def dispatch_control_payloads(
+        self,
+        payloads: Iterable[dict[str, Any]],
+        snapshot: StateSnapshot,
+        *,
+        action_source: str,
+    ) -> None:
+        for payload in payloads:
+            try:
+                command = parse_record_command(payload)
+            except ValueError:
+                continue
             self.handle_command(command, snapshot, action_source=action_source)
 
     def handle_command(self, command: RecordCommand, snapshot: StateSnapshot, *, action_source: str) -> None:
@@ -265,15 +308,25 @@ class RecordingSupervisor:
             "error": self.error,
         }
 
-    def publish_status(self, *, now_monotonic: float, force: bool = False) -> None:
+    def publish_status(
+        self,
+        *,
+        now_monotonic: float,
+        force: bool = False,
+        arm_init: Mapping[str, Any] | None = None,
+    ) -> None:
         status = self.status_block()
-        changed = status != self._last_status
+        combined_status: dict[str, Any] = {
+            "recording": status,
+            "arm_init": dict(arm_init) if arm_init is not None else None,
+        }
+        changed = combined_status != self._last_status
         period = 1.0 / max(float(self.config.recording.status_rate_hz), 1.0)
         due = now_monotonic - self._last_status_publish >= period
         if self.status_publisher is not None and (force or changed or due):
-            self.status_publisher.publish(status)
+            self.status_publisher.publish(status, arm_init=arm_init)
             self._last_status_publish = now_monotonic
-            self._last_status = dict(status)
+            self._last_status = combined_status
 
     def close(self) -> None:
         self.stop()

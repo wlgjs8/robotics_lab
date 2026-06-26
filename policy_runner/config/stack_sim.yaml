@@ -19,7 +19,7 @@ geometry:
   path: "calibration/active_calibration.yaml"
 recording:
   output_dir: "policy_runner/episodes"
-  rate_hz: 100.0
+  rate_hz: 30.0
   format: hdf5
   dataset_metadata:
     schema: robotics_lab.policy_runner.dataset_metadata.v1
@@ -29,8 +29,21 @@ recording:
     physical_motion_expected: false
     controller_pgmode: simulation
     calibration_status: configured_estimate
-    camera_status: disabled
+    camera_status: enabled
     command_source_id: policy_runner
+camera:
+  enable: true
+  zmq_endpoint: "tcp://127.0.0.1:5600"
+  bundle_topic: "camera.bundle"
+  max_age_ms: 200.0
+  record_zero_on_missing: true
+  expected_cameras:
+    - left_realsense_color
+    - left_realsense_depth
+    - right_realsense_color
+    - right_realsense_depth
+    - head_color
+    - head_depth
 robot_state:
   bind: "udp://0.0.0.0:50376"
   stale_timeout_sec: 0.5

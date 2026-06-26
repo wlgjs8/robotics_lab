@@ -123,6 +123,37 @@ class CommandClient:
             },
         })
 
+    def build_init_motion_arm(
+        self,
+        arm: str,
+        left_q: tuple[float, ...],
+        right_q: tuple[float, ...],
+        *,
+        timeout_sec: float = 0.2,
+    ) -> dict[str, Any]:
+        if arm not in {"left", "right"}:
+            raise ValueError("arm must be left or right")
+        if len(left_q) != 6 or len(right_q) != 6:
+            raise ValueError("joint targets must have 6 values per arm")
+        left_init = {
+            "mode": "JointTarget",
+            "q_target_deg": [float(v) for v in left_q],
+            "joint_target_profile": "init_motion",
+        }
+        right_init = {
+            "mode": "JointTarget",
+            "q_target_deg": [float(v) for v in right_q],
+            "joint_target_profile": "init_motion",
+        }
+        return self._with_source({
+            "seq": self.next_seq(),
+            "mode": "Hold",
+            "timeout_sec": timeout_sec,
+            "coupled_timeout": True,
+            "left": left_init if arm == "left" else {"mode": "Hold"},
+            "right": right_init if arm == "right" else {"mode": "Hold"},
+        })
+
     def build_tcp_pose_target(
         self,
         *,

@@ -57,6 +57,16 @@ from .pointcloud_receiver import (
     wxyz_to_mat,
 )
 from .plane_fit import fit_plane, tilt_deg
+from .recording_control import (
+    ArmInitCommandResult,
+    RecordingCommandClient,
+    RecordingCommandResult,
+    RecordingStatusReceiver,
+    RecordingStatusStore,
+    normalize_arm_init_status,
+    normalize_recording_status,
+    parse_udp_endpoint,
+)
 from .safety import OperatorSafety, normalize_observed_mode_backend
 from .scene import (
     _DEFAULT_LEFT_POSE,
@@ -596,6 +606,163 @@ def _send_init_motion_and_reset_targets(
         _clear_tcp_target_user_moved(scene_handles)
         message = f"{message}; TCP targets will follow current TCP"
     return ok, message
+
+
+def _policy_runner_control_active(
+    handles: dict[str, Any],
+    latest: StateSnapshot | None = None,
+) -> bool:
+    store = handles.get("recording_status_store")
+    if isinstance(store, RecordingStatusStore) and not store.is_stale(threshold_sec=2.0):
+        return True
+    latest = latest or handles.get("_latest_state")
+    if isinstance(latest, StateSnapshot):
+        owner = latest.command_source.display_source_id
+        if owner == "policy_runner":
+            return True
+    return False
+
+
+def _arm_init_status_block(
+    handles: dict[str, Any],
+    latest: StateSnapshot | None = None,
+) -> dict[str, Any]:
+    if latest is not None and isinstance(latest.arm_init, Mapping):
+        return normalize_arm_init_status(latest.arm_init)
+    store = handles.get("recording_status_store")
+    if isinstance(store, RecordingStatusStore):
+        block = store.latest_arm_init()
+        if block is not None:
+            return normalize_arm_init_status(block)
+    local = handles.get("arm_init_local_status")
+    if isinstance(local, Mapping):
+        return normalize_arm_init_status(local)
+    return normalize_arm_init_status(None)
+
+
+def _optimistic_arm_init_toggle(handles: dict[str, Any], arms: str) -> dict[str, Any]:
+    status = _arm_init_status_block(handles, handles.get("_latest_state"))
+    left_on = bool(status.get("init_override_left", False))
+    right_on = bool(status.get("init_override_right", False))
+    if arms == "both":
+        target = not (left_on or right_on)
+        left_on = target
+        right_on = target
+    elif arms == "left":
+        left_on = not left_on
+    elif arms == "right":
+        right_on = not right_on
+    local = normalize_arm_init_status(
+        {
+            "init_override_left": left_on,
+            "init_override_right": right_on,
+            "last_command": arms,
+        }
+    )
+    handles["arm_init_local_status"] = local
+    return local
+
+
+def _apply_arm_init_result(
+    handles: dict[str, Any],
+    result: ArmInitCommandResult | Any,
+    *,
+    arms: str,
+) -> tuple[bool, str]:
+    if isinstance(result, ArmInitCommandResult):
+        ok = result.ok
+        message = result.message
+    else:
+        ok = bool(result)
+        message = f"arm init {arms} toggle sent" if ok else f"arm init {arms} toggle failed"
+    if "arm_init_status" in handles:
+        handles["arm_init_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+    return ok, message
+
+
+def _send_arm_init_override(
+    safety: OperatorSafety,
+    scene_handles: dict[str, Any],
+    handles: dict[str, Any],
+    arms: str,
+) -> tuple[bool, str]:
+    if arms not in {"both", "left", "right"}:
+        return False, f"invalid InitMotion arm selector: {arms}"
+    if safety.init_left_joint_deg is None or safety.init_right_joint_deg is None:
+        return False, "init motion target not configured"
+
+    latest = handles.get("_latest_state")
+    client = handles.get("recording_cmd_client")
+    send_arm_init = getattr(client, "send_arm_init", None)
+    if callable(send_arm_init) and _policy_runner_control_active(handles, latest):
+        try:
+            result = send_arm_init(
+                arms,
+                left_q_deg=safety.init_left_joint_deg,
+                right_q_deg=safety.init_right_joint_deg,
+            )
+        except OSError as exc:
+            result = ArmInitCommandResult(False, f"arm init {arms} send failed: {exc}")
+        ok, message = _apply_arm_init_result(handles, result, arms=arms)
+        if ok:
+            _optimistic_arm_init_toggle(handles, arms)
+            _clear_tcp_target_user_moved(
+                scene_handles,
+                ("left", "right") if arms == "both" else (arms,),
+            )
+            _update_arm_init_panel(
+                handles,
+                latest if isinstance(latest, StateSnapshot) else None,
+                stale=bool(handles.get("_state_stale", True)),
+            )
+        return ok, message
+
+    if arms == "both":
+        return _send_init_motion_and_reset_targets(safety, scene_handles)
+
+    ok, message = safety.send_init_motion_arm(arms)  # type: ignore[arg-type]
+    if ok:
+        _clear_tcp_target_user_moved(scene_handles, (arms,))
+        message = f"{message}; TCP target will follow current TCP"
+    return ok, message
+
+
+def _set_button_color(button: Any, color: str) -> None:
+    try:
+        button.color = color
+    except Exception:
+        pass
+
+
+def _update_arm_init_panel(
+    handles: dict[str, Any],
+    latest: StateSnapshot | None,
+    *,
+    stale: bool,
+) -> None:
+    status = _arm_init_status_block(handles, latest)
+    left_on = bool(status.get("init_override_left", False))
+    right_on = bool(status.get("init_override_right", False))
+    policy_active = _policy_runner_control_active(handles, latest)
+    store = handles.get("recording_status_store")
+    status_stale = isinstance(store, RecordingStatusStore) and store.is_stale(threshold_sec=2.0)
+    left_text = "InitMotion 중" if left_on else "policy 중"
+    right_text = "InitMotion 중" if right_on else "policy 중"
+    suffix = ""
+    if not policy_active:
+        suffix = " / policy_runner 상태 없음"
+    elif stale or status_stale:
+        suffix = " / stale"
+    error = str(status.get("error", "") or "")
+    if error:
+        suffix += f" / error={error}"
+    if "arm_init_status" in handles:
+        handles["arm_init_status"].value = f"왼팔: {left_text} / 오른팔: {right_text}{suffix}"
+    buttons = handles.get("init_motion_buttons", {})
+    if isinstance(buttons, Mapping):
+        _set_button_color(buttons.get("both"), "green" if left_on and right_on else "gray")
+        _set_button_color(buttons.get("left"), "green" if left_on else "gray")
+        _set_button_color(buttons.get("right"), "green" if right_on else "gray")
 
 
 def _send_tcp_pose_target_from_marker(
@@ -1643,6 +1810,48 @@ def _tab_theme_html(dark: bool = True) -> str:
 """
 
 
+def _lifecycle_init_motion_layout_html() -> str:
+    return """
+<style>
+  .rb-init-motion-layout-applied button { box-sizing: border-box; }
+</style>
+<script>
+(function(){
+  function labelOf(button){ return (button.textContent || button.innerText || '').trim(); }
+  function parentBox(button){ return button && (button.parentElement || button); }
+  function apply(){
+    var buttons = Array.prototype.slice.call(document.querySelectorAll('button'));
+    var both = buttons.find(function(b){ return labelOf(b) === 'InitMotion (양팔)'; });
+    var left = buttons.find(function(b){ return labelOf(b) === 'InitMotion (왼팔)'; });
+    var right = buttons.find(function(b){ return labelOf(b) === 'InitMotion (오른팔)'; });
+    if(!both || !left || !right) return;
+    var bothBox = parentBox(both), leftBox = parentBox(left), rightBox = parentBox(right);
+    [both, left, right].forEach(function(b){ b.style.width = '100%'; });
+    if(bothBox){ bothBox.style.width = '100%'; bothBox.classList.add('rb-init-motion-layout-applied'); }
+    if(leftBox){
+      leftBox.style.display = 'inline-block';
+      leftBox.style.width = 'calc(50% - 0.25rem)';
+      leftBox.style.marginRight = '0.5rem';
+      leftBox.style.boxSizing = 'border-box';
+      leftBox.style.verticalAlign = 'top';
+      leftBox.classList.add('rb-init-motion-layout-applied');
+    }
+    if(rightBox){
+      rightBox.style.display = 'inline-block';
+      rightBox.style.width = 'calc(50% - 0.25rem)';
+      rightBox.style.boxSizing = 'border-box';
+      rightBox.style.verticalAlign = 'top';
+      rightBox.classList.add('rb-init-motion-layout-applied');
+    }
+  }
+  if(document.readyState === 'loading'){ document.addEventListener('DOMContentLoaded', apply); }
+  apply();
+  new MutationObserver(apply).observe(document.documentElement, {childList:true, subtree:true});
+})();
+</script>
+"""
+
+
 _GUI_BRAND_COLOR = (96, 200, 140)
 
 
@@ -1673,9 +1882,11 @@ def build_gui(
     safety: OperatorSafety,
     store: StateStore,
     overlay_store: CircleOverlayStore | None = None,
+    recording_status_store: RecordingStatusStore | None = None,
 ) -> dict[str, Any]:
     handles: dict[str, Any] = {}
     handles["circle_overlay_enabled"] = overlay_store is not None
+    handles["recording_status_store"] = recording_status_store
     # Dark mode is the default; set RB_GUI_DARK_MODE=0 to launch in light mode.
     dark_default = os.environ.get("RB_GUI_DARK_MODE", "1") != "0"
     handles["dark_mode"] = dark_default
@@ -1884,12 +2095,37 @@ def build_gui(
                 def _(_: Any) -> None:
                     _freedrive(left=False, right=False)
 
-            init_button = server.gui.add_button("Init Motion")
-            handles["init_motion_button"] = init_button
+            add_html = getattr(server.gui, "add_html", None)
+            if callable(add_html):
+                handles["init_motion_layout"] = add_html(_lifecycle_init_motion_layout_html())
+            handles["arm_init_status"] = server.gui.add_text(
+                "InitMotion override",
+                initial_value="왼팔: policy 중 / 오른팔: policy 중",
+                disabled=True,
+            )
+            init_both_button = server.gui.add_button("InitMotion (양팔)")
+            init_left_button = server.gui.add_button("InitMotion (왼팔)")
+            init_right_button = server.gui.add_button("InitMotion (오른팔)")
+            handles["init_motion_button"] = init_both_button
+            handles["init_motion_buttons"] = {
+                "both": init_both_button,
+                "left": init_left_button,
+                "right": init_right_button,
+            }
 
-            @init_button.on_click
+            @init_both_button.on_click
             def _(_: Any) -> None:
-                ok, message = _send_init_motion_and_reset_targets(safety, handles["scene"])
+                ok, message = _send_arm_init_override(safety, handles["scene"], handles, "both")
+                handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+            @init_left_button.on_click
+            def _(_: Any) -> None:
+                ok, message = _send_arm_init_override(safety, handles["scene"], handles, "left")
+                handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+            @init_right_button.on_click
+            def _(_: Any) -> None:
+                ok, message = _send_arm_init_override(safety, handles["scene"], handles, "right")
                 handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
 
             # Edit the init-motion target directly in viser and apply it live (no
@@ -2741,6 +2977,45 @@ def build_gui(
                     h.wxyz = tuple(mat_to_wxyz(T[:3, :3])); h.position = tuple(T[:3, 3])
                 handles["pc_calib_status"].value = "저장값으로 리셋됨"
 
+    with tabs.add_tab("에피소드"):
+        record_host, record_port = _recording_cmd_endpoint()
+        handles["recording_cmd_client"] = RecordingCommandClient(record_host, record_port)
+        handles["recording_last_toggle_monotonic"] = float("-inf")
+        handles["recording_task"] = server.gui.add_text("Task", initial_value="", disabled=False)
+        handles["recording_operator"] = server.gui.add_text(
+            "Operator", initial_value=os.environ.get("USER", ""), disabled=False
+        )
+        handles["recording_state"] = server.gui.add_text("State", initial_value="idle", disabled=True)
+        handles["recording_episode"] = server.gui.add_text("Episode", initial_value="", disabled=True)
+        handles["recording_frames"] = server.gui.add_text("Frames", initial_value="0 @ 30.0 Hz", disabled=True)
+        handles["recording_command_status"] = server.gui.add_text(
+            "Command",
+            initial_value=f"policy_runner {record_host}:{record_port}",
+            disabled=True,
+        )
+        start_button = server.gui.add_button("수집 시작", color="green")
+        stop_button = server.gui.add_button("수집 종료", color="red")
+        toggle_button = server.gui.add_button("record-toggle-hotkey-b")
+        try:
+            toggle_button.visible = False
+        except Exception:
+            pass
+        handles["recording_start_button"] = start_button
+        handles["recording_stop_button"] = stop_button
+        handles["recording_toggle_hotkey_button"] = toggle_button
+
+        @start_button.on_click
+        def _(_: Any) -> None:
+            _toggle_episode_recording(handles, target="start")
+
+        @stop_button.on_click
+        def _(_: Any) -> None:
+            _toggle_episode_recording(handles, target="stop")
+
+        @toggle_button.on_click
+        def _(_: Any) -> None:
+            _toggle_episode_recording(handles)
+
     handles["_server"] = server
     return handles
 
@@ -2765,6 +3040,148 @@ def _latest_circle_overlay(
     if overlay_store is None:
         return None, True
     return overlay_store.latest(), overlay_store.is_stale()
+
+
+def _recording_cmd_endpoint() -> tuple[str, int]:
+    """policy_runner record_cmd.v1 destination."""
+    return parse_udp_endpoint(
+        os.environ.get("RB_GUI_RECORD_CMD_ENDPOINT", "udp://127.0.0.1:50441"),
+        default_host="127.0.0.1",
+        default_port=50441,
+    )
+
+
+def _recording_status_bind_endpoint() -> tuple[str, int]:
+    """policy_runner recording_state.v1 status bind."""
+    return parse_udp_endpoint(
+        os.environ.get("RB_GUI_RECORD_STATUS_BIND", "udp://0.0.0.0:50442"),
+        default_host="0.0.0.0",
+        default_port=50442,
+    )
+
+
+def _recording_text_value(handle: Any) -> str:
+    try:
+        return str(handle.value or "")
+    except Exception:
+        return ""
+
+
+def _recording_status_block(
+    handles: dict[str, Any],
+    latest: StateSnapshot | None = None,
+) -> dict[str, Any]:
+    if latest is not None and isinstance(latest.recording, Mapping):
+        return normalize_recording_status(latest.recording)
+    store = handles.get("recording_status_store")
+    if isinstance(store, RecordingStatusStore):
+        block = store.latest()
+        if block is not None:
+            return normalize_recording_status(block)
+    local = handles.get("recording_local_status")
+    if isinstance(local, Mapping):
+        return normalize_recording_status(local)
+    return normalize_recording_status(None)
+
+
+def _recording_is_active(handles: dict[str, Any], latest: StateSnapshot | None = None) -> bool:
+    return bool(_recording_status_block(handles, latest).get("recording", False))
+
+
+def _apply_recording_result(
+    handles: dict[str, Any],
+    result: RecordingCommandResult | Any,
+    *,
+    command: str,
+) -> bool:
+    if isinstance(result, RecordingCommandResult):
+        ok = result.ok
+        message = result.message
+    else:
+        ok = bool(result)
+        message = f"recording {command} sent" if ok else f"recording {command} failed"
+    if "recording_command_status" in handles:
+        handles["recording_command_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+    return ok
+
+
+def _toggle_episode_recording(
+    handles: dict[str, Any],
+    *,
+    target: str | None = None,
+    monotonic_fn=time.monotonic,
+) -> bool:
+    now = monotonic_fn()
+    last = handles.get("recording_last_toggle_monotonic", float("-inf"))
+    try:
+        last_value = float(last)
+    except (TypeError, ValueError):
+        last_value = float("-inf")
+    if now - last_value < 1.0:
+        if "recording_command_status" in handles:
+            handles["recording_command_status"].value = "ignored: debounce active (<1s)"
+        return False
+    active = _recording_is_active(handles, handles.get("_latest_state"))
+    command = target if target in {"start", "stop"} else ("stop" if active else "start")
+    if command == "start" and active:
+        if "recording_command_status" in handles:
+            handles["recording_command_status"].value = "already recording"
+        return False
+    if command == "stop" and not active:
+        if "recording_command_status" in handles:
+            handles["recording_command_status"].value = "already idle"
+        return False
+    client = handles.get("recording_cmd_client")
+    send = getattr(client, "send", None)
+    if not callable(send):
+        if "recording_command_status" in handles:
+            handles["recording_command_status"].value = "BLOCKED: no recording command client"
+        return False
+    try:
+        result = send(
+            command,
+            task=_recording_text_value(handles.get("recording_task")),
+            operator=_recording_text_value(handles.get("recording_operator")) or None,
+        )
+    except OSError as exc:
+        result = RecordingCommandResult(False, f"recording {command} send failed: {exc}")
+    ok = _apply_recording_result(handles, result, command=command)
+    if not ok:
+        return False
+    handles["recording_last_toggle_monotonic"] = now
+    handles["recording_local_status"] = normalize_recording_status(
+        {
+            "recording": command == "start",
+            "state": "recording" if command == "start" else "idle",
+            "episode_name": "",
+            "frame_count": 0,
+            "rate_hz": 30.0,
+            "last_command": command,
+        }
+    )
+    _update_recording_panel(handles, handles.get("_latest_state"), stale=bool(handles.get("_state_stale", True)))
+    return True
+
+
+def _update_recording_panel(handles: dict[str, Any], latest: StateSnapshot | None, *, stale: bool) -> None:
+    status = _recording_status_block(handles, latest)
+    recording = bool(status.get("recording", False))
+    state = str(status.get("state", "recording" if recording else "idle"))
+    episode = str(status.get("episode_name", "") or "")
+    frames = int(status.get("frame_count", 0) or 0)
+    rate = float(status.get("rate_hz", 30.0) or 30.0)
+    error = str(status.get("error", "") or "")
+    if "recording_state" in handles:
+        suffix = " (stale)" if stale else ""
+        handles["recording_state"].value = state + suffix + (f" error={error}" if error else "")
+    if "recording_episode" in handles:
+        handles["recording_episode"].value = episode
+    if "recording_frames" in handles:
+        handles["recording_frames"].value = f"{frames} @ {rate:.1f} Hz"
+    if "recording_start_button" in handles:
+        _set_disabled(handles["recording_start_button"], recording)
+    if "recording_stop_button" in handles:
+        _set_disabled(handles["recording_stop_button"], not recording)
 
 
 def _gripper_cmd_endpoint() -> tuple[str, int]:
@@ -3236,7 +3653,10 @@ def update_gui(
     disabled_reasons = safety.control_disabled_reasons()
     for mode, button in handles.get("lifecycle_buttons", {}).items():
         _set_disabled(button, disabled_states.get(f"lifecycle:{mode}", True))
-    if "init_motion_button" in handles:
+    if "init_motion_buttons" in handles:
+        for button in handles["init_motion_buttons"].values():
+            _set_disabled(button, disabled_states.get("init_motion", True))
+    elif "init_motion_button" in handles:
         _set_disabled(handles["init_motion_button"], disabled_states.get("init_motion", True))
     if "jog_button" in handles:
         _set_disabled(handles["jog_button"], disabled_states.get("jog", True))
@@ -3270,6 +3690,8 @@ def update_gui(
     readiness = safety.readiness()
     _update_lease_owner(handles, latest, safety.command_client.source_id, held=safety.command_client.hold_lease)
     _update_circle_overlay_gui(handles, overlay_store)
+    _update_recording_panel(handles, latest, stale=stale)
+    _update_arm_init_panel(handles, latest, stale=stale)
     if latest is None:
         _update_operator_monitors(handles, None, stale=True)
         if "status_summary" in handles:
@@ -3501,6 +3923,7 @@ def update_gui(
 
 _VISER_WASD_PATCH_MARKER = "rb-disable-wasd-keys"
 _VISER_WASD_BUNDLE_MARKER = "rb-wasd-bundle-patched"
+_VISER_KEYBOARD_PATCH_VERSION = "rb-disable-wasd-keys-recording-v2"
 
 
 def _patch_viser_bundle_wasd(html: str) -> str:
@@ -3557,6 +3980,31 @@ def _patch_viser_bundle_wasd(html: str) -> str:
     return new_html.replace("<head>", "<head><!--" + _VISER_WASD_BUNDLE_MARKER + "-->", 1)
 
 
+def _viser_keyboard_patch_script() -> str:
+    return (
+        '<script id="' + _VISER_WASD_PATCH_MARKER + '">'
+        "(function(){var V='" + _VISER_KEYBOARD_PATCH_VERSION + "';"
+        "var B={KeyW:1,KeyA:1,KeyS:1,KeyD:1};"
+        "function t(e){if(!e)return false;var g=(e.tagName||'').toUpperCase();"
+        "return g==='INPUT'||g==='TEXTAREA'||g==='SELECT'||e.isContentEditable||"
+        "(e.closest&&e.closest('input,textarea,select,[contenteditable=true]'));}"
+        "function s(e){e.stopImmediatePropagation();e.preventDefault();}"
+        "function r(){var a=Array.prototype.slice.call(document.querySelectorAll('button'));"
+        "function txt(b){return (b.textContent||b.innerText||'').trim();}"
+        "var h=a.find(function(b){return !b.disabled&&txt(b).indexOf('record-toggle-hotkey-b')>=0;});"
+        "if(h){h.click();return;}"
+        "var stop=a.find(function(b){return !b.disabled&&txt(b).indexOf('수집 종료')>=0;});"
+        "var start=a.find(function(b){return !b.disabled&&txt(b).indexOf('수집 시작')>=0;});"
+        "(stop||start||{}).click&& (stop||start).click();}"
+        "function d(e){if(t(e.target))return;if(B[e.code]){s(e);return;}"
+        "if(e.code==='KeyB'){s(e);r();}}"
+        "function u(e){if(!t(e.target)&&B[e.code])s(e);}"
+        "window.addEventListener('keydown',d,true);"
+        "window.addEventListener('keyup',u,true);"
+        "window.__rbGuiKeyboardPatch=V;})();</script>"
+    )
+
+
 def _disable_viser_wasd_keys() -> None:
     """Disable viser's WASD camera fly-movement (W/A/S/D) in the served client.
 
@@ -3582,24 +4030,20 @@ def _disable_viser_wasd_keys() -> None:
             html = fh.read()
         original = html
         html = _patch_viser_bundle_wasd(html)
-        if _VISER_WASD_PATCH_MARKER not in html:
-            script = (
-                '<script id="' + _VISER_WASD_PATCH_MARKER + '">'
-                "(function(){var B={KeyW:1,KeyA:1,KeyS:1,KeyD:1};"
-                "function t(e){if(!e)return false;var g=(e.tagName||'').toUpperCase();"
-                "return g==='INPUT'||g==='TEXTAREA'||g==='SELECT'||e.isContentEditable;}"
-                "function b(e){if(!B[e.code]||t(e.target))return;"
-                "e.stopImmediatePropagation();e.preventDefault();}"
-                "window.addEventListener('keydown',b,true);"
-                "window.addEventListener('keyup',b,true);})();</script>"
-            )
-            html = html.replace("<head>", "<head>" + script, 1) if "<head>" in html else script + html
+        if _VISER_KEYBOARD_PATCH_VERSION not in html:
+            import re
+
+            script = _viser_keyboard_patch_script()
+            pattern = rf'<script id="{re.escape(_VISER_WASD_PATCH_MARKER)}">.*?</script>'
+            html, count = re.subn(pattern, script, html, count=1, flags=re.S)
+            if count == 0:
+                html = html.replace("<head>", "<head>" + script, 1) if "<head>" in html else script + html
         if html != original:
             with open(index, "w", encoding="utf-8") as fh:
                 fh.write(html)
             print(
-                "rb_servo_gui: disabled viser WASD camera keys (Q/E, arrows, mouse kept; "
-                "reload the GUI page)",
+                "rb_servo_gui: patched viser WASD keys and episode hotkey B "
+                "(Q/E, arrows, mouse kept; reload the GUI page)",
                 flush=True,
             )
     except Exception as exc:  # noqa: BLE001 - cosmetic patch must never block GUI startup
@@ -3655,6 +4099,21 @@ def main(argv: list[str] | None = None) -> None:
         overlay_store = CircleOverlayStore()
         overlay_receiver = CircleOverlayReceiver(overlay_store, host=overlay_host, port=overlay_port)
         overlay_receiver.start()
+    recording_status_store = RecordingStatusStore()
+    recording_status_receiver: RecordingStatusReceiver | None = None
+    recording_status_host, recording_status_port = _recording_status_bind_endpoint()
+    try:
+        recording_status_receiver = RecordingStatusReceiver(
+            recording_status_store,
+            host=recording_status_host,
+            port=recording_status_port,
+        )
+        recording_status_receiver.start()
+    except OSError as exc:
+        print(
+            f"rb_servo_gui: recording status receiver disabled ({type(exc).__name__}: {exc})",
+            flush=True,
+        )
     safety = OperatorSafety(
         store,
         CommandClient(command_host, command_port),
@@ -3677,6 +4136,7 @@ def main(argv: list[str] | None = None) -> None:
         safety,
         store,
         overlay_store=overlay_store,
+        recording_status_store=recording_status_store,
     )
     handles["_stereo_store"] = stereo_store
     overlay_status = (
@@ -3684,9 +4144,14 @@ def main(argv: list[str] | None = None) -> None:
         if circle_overlay_bind is not None
         else ", circle overlay disabled"
     )
+    recording_status = (
+        f", recording status UDP {recording_status_host}:{recording_status_port}"
+        if recording_status_receiver is not None
+        else ", recording status disabled"
+    )
     print(
         f"rb_servo_gui listening on http://{host}:{port}, UDP state {state_host}:{state_port}"
-        f"{overlay_status}",
+        f"{overlay_status}{recording_status}",
         flush=True,
     )
 
@@ -3699,6 +4164,11 @@ def main(argv: list[str] | None = None) -> None:
         stereo_receiver.stop()
         if overlay_receiver is not None:
             overlay_receiver.stop()
+        if recording_status_receiver is not None:
+            recording_status_receiver.stop()
+        close_recording_cmd = getattr(handles.get("recording_cmd_client"), "close", None)
+        if callable(close_recording_cmd):
+            close_recording_cmd()
 
 
 if __name__ == "__main__":

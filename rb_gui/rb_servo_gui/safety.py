@@ -543,6 +543,24 @@ class OperatorSafety:
         )
         return True, "sent JointTarget init_motion profile"
 
+    def send_init_motion_arm(self, arm: Literal["left", "right"]) -> tuple[bool, str]:
+        reason = self.init_motion_disabled_reason()
+        if reason:
+            return False, reason
+        if not self.command_client.hold_lease:
+            return False, "per-arm GUI InitMotion fallback requires Take control (hold lease)"
+        assert self.init_left_joint_deg is not None
+        assert self.init_right_joint_deg is not None
+        self.command_client.send(
+            self.command_client.build_init_motion_arm(
+                arm,
+                self.init_left_joint_deg,
+                self.init_right_joint_deg,
+                timeout_sec=self.init_motion_timeout_sec,
+            )
+        )
+        return True, f"sent {arm} JointTarget init_motion profile; other arm Hold"
+
     def set_init_joints(
         self,
         left_q_deg: tuple[float, ...] | None,

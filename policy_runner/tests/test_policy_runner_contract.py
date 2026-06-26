@@ -14,8 +14,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from policy_runner.action_sources.hold import HoldActionSource
 from policy_runner.action_sources.joint_sine import JointSineActionSource
 from policy_runner.action_sources.tcp_pose_target import tcp_pose_target_stand_intent
+from policy_runner.arm_init_control import (
+    ARM_INIT_COMMAND_SCHEMA,
+    ArmInitOverrideController,
+    parse_arm_init_command,
+)
 from policy_runner.config import config_from_mapping, load_config
 from policy_runner.main import LEASE_READBACK_TIMEOUT_EXIT_CODE, STARTUP_TIMEOUT_EXIT_CODE, make_action_source, run
+from policy_runner.record_control import RecordCommand, RecordingSupervisor, parse_record_command
 from policy_runner.recording import _hash_canonical_json
 from policy_runner.robot_state_client import (
     RobotStateClient,
@@ -162,6 +168,96 @@ class FakeCommandClient:
         self.closed = True
 
 
+class FakeRecordingCameraClient:
+    instances = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.closed = False
+        FakeRecordingCameraClient.instances.append(self)
+
+    def close(self):
+        self.closed = True
+
+
+class FakeHdf5Recorder:
+    instances = []
+
+    def __init__(self, output_dir, **kwargs):
+        self.output_dir = output_dir
+        self.kwargs = kwargs
+        self.has_active_episode = False
+        self.episode_id = None
+        self.frame_count = 0
+        self.start_calls = []
+        self.frames = []
+        self.closed = False
+        FakeHdf5Recorder.instances.append(self)
+
+    def start_episode(self, **kwargs):
+        self.has_active_episode = True
+        self.episode_id = "episode-test"
+        self.start_calls.append(kwargs)
+
+    def record_frame(self, **kwargs):
+        self.frames.append(kwargs)
+        self.frame_count += 1
+
+    def close(self):
+        self.closed = True
+        self.has_active_episode = False
+
+
+class FakeRunRecordingSupervisor:
+    def __init__(self):
+        self.drain_calls = []
+        self.control_payloads = []
+        self.frames = []
+        self.stamped = []
+        self.published = []
+        self.closed = False
+
+    def drain_commands(self, snapshot, *, action_source):
+        self.drain_calls.append((snapshot, action_source))
+
+    def drain_control_payloads(self):
+        return []
+
+    def dispatch_control_payloads(self, payloads, snapshot, *, action_source):
+        self.control_payloads.append((list(payloads), snapshot, action_source))
+        self.drain_calls.append((snapshot, action_source))
+
+    def stamp_snapshot(self, snapshot):
+        snapshot.payload["recording"] = {
+            "recording": True,
+            "state": "recording",
+            "episode_name": "episode-run",
+            "frame_count": len(self.frames),
+            "rate_hz": 30.0,
+        }
+        self.stamped.append(snapshot)
+
+    def record_frame(self, snapshot, *, action_packet, action_host_time_ns, action_seq):
+        self.frames.append((snapshot, action_packet, action_host_time_ns, action_seq))
+
+    def publish_status(self, *, now_monotonic, force=False, arm_init=None):
+        self.published.append((now_monotonic, force, arm_init))
+
+    def close(self):
+        self.closed = True
+
+
+class FakeArmInitControlSupervisor(FakeRunRecordingSupervisor):
+    def __init__(self, payloads):
+        super().__init__()
+        self._payloads = list(payloads)
+
+    def drain_control_payloads(self):
+        payloads = self._payloads
+        self._payloads = []
+        return payloads
+
+
 class CloseableSource:
     requirements = ActionRequirements(requires_valid_joint_state=False)
 
@@ -242,6 +338,167 @@ class PolicyRunnerContractTest(unittest.TestCase):
             close = getattr(source, "close", None)
             if callable(close):
                 close()
+
+    def test_stack_configs_record_six_rgbd_streams_at_30hz(self):
+        config_dir = Path(__file__).resolve().parents[1] / "config"
+        expected = [
+            "left_realsense_color",
+            "left_realsense_depth",
+            "right_realsense_color",
+            "right_realsense_depth",
+            "head_color",
+            "head_depth",
+        ]
+        for name in ("stack_sim.yaml", "stack_real.yaml", "flow_real_realsense.yaml"):
+            with self.subTest(name=name):
+                cfg = load_config(config_dir / name)
+                self.assertEqual(cfg.recording.rate_hz, 30.0)
+                self.assertEqual(cfg.camera.expected_cameras, expected)
+                self.assertTrue(cfg.camera.record_zero_on_missing)
+
+    def test_record_command_parser_accepts_start_stop_schema(self):
+        start = parse_record_command(
+            json.dumps(
+                {
+                    "schema": "robotics_lab.record_cmd.v1",
+                    "command": "start",
+                    "task": "fold towel",
+                    "operator": "operator-a",
+                }
+            ).encode("utf-8")
+        )
+        self.assertEqual(start.command, "start")
+        self.assertEqual(start.task, "fold towel")
+        self.assertEqual(start.operator, "operator-a")
+        stop = parse_record_command({"schema": "robotics_lab.record_cmd.v1", "command": "stop"})
+        self.assertEqual(stop.command, "stop")
+        with self.assertRaises(ValueError):
+            parse_record_command({"schema": "robotics_lab.record_cmd.v1", "command": "pause"})
+
+    def test_arm_init_command_parser_and_toggle_state(self):
+        left_q = [1, 2, 3, 4, 5, 6]
+        right_q = [-1, -2, -3, -4, -5, -6]
+        command = parse_arm_init_command(
+            {
+                "schema": ARM_INIT_COMMAND_SCHEMA,
+                "arms": "left",
+                "action": "toggle",
+                "left_q_deg": left_q,
+                "right_q_deg": right_q,
+            }
+        )
+        self.assertEqual(command.arms, "left")
+        self.assertEqual(command.left_q_deg, tuple(float(v) for v in left_q))
+
+        controller = ArmInitOverrideController()
+        self.assertTrue(controller.handle_command(command))
+        self.assertTrue(controller.status_block()["init_override_left"])
+        self.assertFalse(controller.status_block()["init_override_right"])
+
+        both = parse_arm_init_command(
+            {
+                "schema": ARM_INIT_COMMAND_SCHEMA,
+                "arms": "both",
+                "action": "toggle",
+                "left_q_deg": left_q,
+                "right_q_deg": right_q,
+            }
+        )
+        self.assertTrue(controller.handle_command(both))
+        self.assertFalse(controller.status_block()["init_override_left"])
+        self.assertFalse(controller.status_block()["init_override_right"])
+
+        self.assertTrue(controller.handle_command(both))
+        self.assertTrue(controller.status_block()["init_override_left"])
+        self.assertTrue(controller.status_block()["init_override_right"])
+
+        with self.assertRaises(ValueError):
+            parse_arm_init_command({"schema": ARM_INIT_COMMAND_SCHEMA, "arms": "middle"})
+
+    def test_arm_init_override_composes_mixed_policy_command(self):
+        controller = ArmInitOverrideController()
+        controller.handle_command(
+            parse_arm_init_command(
+                {
+                    "schema": ARM_INIT_COMMAND_SCHEMA,
+                    "arms": "left",
+                    "left_q_deg": [1, 0, 0, 0, 0, 0],
+                    "right_q_deg": [0, 1, 0, 0, 0, 0],
+                }
+            )
+        )
+        source_intent = tcp_pose_target_stand_intent(
+            left=(0.1, 0.2, 0.3, 0, 0, 0),
+            right=(0.4, 0.5, 0.6, 0, 0, 0),
+        )
+
+        mixed = controller.compose_intent(source_intent)
+
+        self.assertIsNotNone(mixed)
+        self.assertEqual(mixed.mode, "Hold")
+        self.assertTrue(mixed.is_motion)
+        self.assertEqual(mixed.left["mode"], "JointTarget")
+        self.assertEqual(mixed.left["joint_target_profile"], "init_motion")
+        self.assertEqual(mixed.left["q_target_deg"], [1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(mixed.right["mode"], "TcpPoseTarget")
+        self.assertEqual(mixed.right["tcp_target_stand"], [0.4, 0.5, 0.6, 0.0, 0.0, 0.0])
+
+    def test_recording_supervisor_starts_records_stamps_and_stops(self):
+        FakeRecordingCameraClient.instances.clear()
+        FakeHdf5Recorder.instances.clear()
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "geometry": {"path": ""},
+                "recording": {"output_dir": "episodes", "rate_hz": 30.0},
+                "camera": {
+                    "expected_cameras": [
+                        "left_realsense_color",
+                        "left_realsense_depth",
+                        "right_realsense_color",
+                        "right_realsense_depth",
+                        "head_color",
+                        "head_depth",
+                    ],
+                    "record_zero_on_missing": True,
+                },
+            }
+        )
+        supervisor = RecordingSupervisor(
+            cfg,
+            camera_client_factory=FakeRecordingCameraClient,
+            recorder_factory=FakeHdf5Recorder,
+        )
+        state = sample_state()
+
+        supervisor.handle_command(
+            RecordCommand("start", task="collect test", operator="op"),
+            state,
+            action_source="teleop_mux",
+        )
+        self.assertTrue(supervisor.recording)
+        self.assertEqual(FakeRecordingCameraClient.instances[0].kwargs["include_depth"], True)
+        recorder = FakeHdf5Recorder.instances[0]
+        self.assertEqual(recorder.kwargs["recording_rate_hz"], 30.0)
+        self.assertEqual(recorder.kwargs["expected_cameras"], cfg.camera.expected_cameras)
+        self.assertTrue(recorder.kwargs["record_zero_on_missing"])
+        self.assertEqual(recorder.start_calls[0]["task_description"], "collect test")
+        self.assertEqual(recorder.start_calls[0]["action_source"], "teleop_mux")
+
+        packet = {"seq": 9, "mode": "Hold", "left": {"mode": "Hold"}, "right": {"mode": "Hold"}}
+        supervisor.record_frame(state, action_packet=packet, action_host_time_ns=123, action_seq=9)
+        self.assertEqual(supervisor.frame_count, 1)
+        supervisor.stamp_snapshot(state)
+        self.assertEqual(state.payload["recording"]["state"], "recording")
+        self.assertEqual(state.payload["recording"]["episode_name"], "episode-test")
+        self.assertEqual(state.payload["recording"]["frame_count"], 1)
+
+        supervisor.handle_command(RecordCommand("stop"), state, action_source="teleop_mux")
+        self.assertFalse(supervisor.recording)
+        self.assertTrue(recorder.closed)
+        self.assertTrue(FakeRecordingCameraClient.instances[0].closed)
+        supervisor.stamp_snapshot(state)
+        self.assertEqual(state.payload["recording"]["state"], "idle")
 
     def test_rbpodo_pgmode_spacemouse_server_template_is_controller_sim_only(self):
         root = Path(__file__).resolve().parents[2]
@@ -710,6 +967,108 @@ class PolicyRunnerContractTest(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual([intent.mode for intent in command_client.sent], ["ArmMotion", "TcpPoseTarget"])
+
+    def test_run_records_this_tick_action_packet_and_stamps_recording_state(self):
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "action_source": "joint_sine",
+                "geometry": {"path": ""},
+                "runtime": {"startup_timeout_sec": 0.1},
+                "recording": {"rate_hz": 30.0},
+            }
+        )
+        state = sample_state()
+        command_client = FakeCommandClient()
+        recorder = FakeRunRecordingSupervisor()
+        seen_states = []
+
+        result = run(
+            cfg,
+            state_client=FakeStateClient([state]),
+            command_client=command_client,
+            source=JointSineActionSource((1, 0, 0, 0, 0, 0)),
+            sleep_fn=lambda _period: (_ for _ in ()).throw(KeyboardInterrupt()),
+            state_sink=seen_states.append,
+            recording_supervisor=recorder,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertTrue(recorder.closed)
+        self.assertEqual([intent.mode for intent in command_client.sent], ["ArmMotion", "JointTarget"])
+        self.assertEqual(len(recorder.frames), 1)
+        _snapshot, action_packet, action_host_time_ns, action_seq = recorder.frames[0]
+        self.assertEqual(action_packet["mode"], "JointTarget")
+        self.assertEqual(action_packet["seq"], 2)
+        self.assertEqual(action_packet["left"]["mode"], "JointTarget")
+        self.assertGreater(action_host_time_ns, 0)
+        self.assertEqual(action_seq, 2)
+        self.assertEqual(seen_states[0].payload["recording"]["state"], "recording")
+        self.assertEqual(recorder.drain_calls[0][1], "joint_sine")
+
+    def test_run_applies_arm_init_override_before_safety_and_send(self):
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "geometry": {"path": ""},
+                "runtime": {"startup_timeout_sec": 0.1},
+                "recording": {"rate_hz": 30.0},
+            }
+        )
+
+        class DualTcpSource:
+            requirements = ActionRequirements(requires_valid_joint_state=True)
+            name = "dual_tcp"
+
+            def next_intent(self, snapshot, now_monotonic):
+                _ = snapshot, now_monotonic
+                return tcp_pose_target_stand_intent(
+                    left=(0.1, 0.2, 0.3, 0, 0, 0),
+                    right=(0.4, 0.5, 0.6, 0, 0, 0),
+                )
+
+            def close(self):
+                pass
+
+        command_client = FakeCommandClient()
+        recorder = FakeArmInitControlSupervisor(
+            [
+                {
+                    "schema": ARM_INIT_COMMAND_SCHEMA,
+                    "arms": "left",
+                    "action": "toggle",
+                    "left_q_deg": [1, 2, 3, 4, 5, 6],
+                    "right_q_deg": [-1, -2, -3, -4, -5, -6],
+                }
+            ]
+        )
+        seen_states = []
+
+        result = run(
+            cfg,
+            state_client=FakeStateClient([sample_state()]),
+            command_client=command_client,
+            source=DualTcpSource(),
+            sleep_fn=lambda _period: (_ for _ in ()).throw(KeyboardInterrupt()),
+            state_sink=seen_states.append,
+            recording_supervisor=recorder,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual([intent.mode for intent in command_client.sent], ["ArmMotion", "Hold"])
+        mixed = command_client.sent[-1]
+        self.assertEqual(mixed.left["mode"], "JointTarget")
+        self.assertEqual(mixed.left["joint_target_profile"], "init_motion")
+        self.assertEqual(mixed.left["q_target_deg"], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+        self.assertEqual(mixed.right["mode"], "TcpPoseTarget")
+        self.assertTrue(seen_states[0].payload["arm_init"]["init_override_left"])
+        self.assertFalse(seen_states[0].payload["arm_init"]["init_override_right"])
+        _snapshot, action_packet, _host_time, action_seq = recorder.frames[0]
+        self.assertEqual(action_packet["mode"], "Hold")
+        self.assertEqual(action_packet["left"]["joint_target_profile"], "init_motion")
+        self.assertEqual(action_packet["right"]["mode"], "TcpPoseTarget")
+        self.assertEqual(action_seq, 2)
+        self.assertTrue(recorder.published[0][2]["init_override_left"])
 
     def test_run_acquires_configured_lease_before_motion(self):
         cfg = config_from_mapping(

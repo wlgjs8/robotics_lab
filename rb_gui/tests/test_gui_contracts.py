@@ -26,8 +26,16 @@ from rb_servo_gui.app import (
     _apply_tcp_pose_step_and_send_pose_target,
     _apply_tcp_pose_step_to_target,
     _gripper_cmd_endpoint,
+    _recording_cmd_endpoint,
+    _recording_status_bind_endpoint,
     _push_gripper_percent,
+    _toggle_episode_recording,
+    _update_recording_panel,
+    _send_arm_init_override,
+    _update_arm_init_panel,
+    _lifecycle_init_motion_layout_html,
     _update_gripper_feedback,
+    _viser_keyboard_patch_script,
     _send_gripper_command,
     _user_floor_display_points,
     _apply_init_joints_live,
@@ -105,6 +113,12 @@ from rb_servo_gui.command_client import CommandClient
 from rb_servo_gui import geometry as gui_geometry
 from rb_servo_gui.models import CIRCLE_OVERLAY_SCHEMA_VERSION, CircleOverlaySnapshot, Pose6D
 from rb_servo_gui.overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
+from rb_servo_gui.recording_control import (
+    ARM_INIT_COMMAND_SCHEMA,
+    ArmInitCommandResult,
+    RecordingCommandClient,
+    RecordingStatusStore,
+)
 from rb_servo_gui.safety import OperatorSafety, normalize_observed_mode_backend
 from rb_servo_gui.scene import (
     _FLOOR_CHECK_POINTS_TCP_FRAME,
@@ -252,6 +266,27 @@ class RecordingClient(CommandClient):
 
     def send(self, packet):
         self.sent_packets.append(dict(packet))
+
+
+class RecordingCommandFake:
+    def __init__(self):
+        self.calls = []
+        self.arm_init_calls = []
+
+    def send(self, command, *, task="", operator=None):
+        self.calls.append({"command": command, "task": task, "operator": operator})
+        return True
+
+    def send_arm_init(self, arms, *, left_q_deg=None, right_q_deg=None, action="toggle"):
+        self.arm_init_calls.append(
+            {
+                "arms": arms,
+                "action": action,
+                "left_q_deg": left_q_deg,
+                "right_q_deg": right_q_deg,
+            }
+        )
+        return ArmInitCommandResult(True, f"arm init {arms} toggle sent")
 
 
 class RecordingSceneHandle:
@@ -1084,6 +1119,262 @@ class GuiContractsTest(unittest.TestCase):
             os.environ.pop("RB_GUI_GRIPPER_CMD_ENDPOINT", None)
             if old is not None:
                 os.environ["RB_GUI_GRIPPER_CMD_ENDPOINT"] = old
+
+    def test_recording_endpoints_default_and_env(self):
+        old_cmd = os.environ.pop("RB_GUI_RECORD_CMD_ENDPOINT", None)
+        old_status = os.environ.pop("RB_GUI_RECORD_STATUS_BIND", None)
+        try:
+            self.assertEqual(_recording_cmd_endpoint(), ("127.0.0.1", 50441))
+            self.assertEqual(_recording_status_bind_endpoint(), ("0.0.0.0", 50442))
+            os.environ["RB_GUI_RECORD_CMD_ENDPOINT"] = "udp://10.0.0.5:51441"
+            os.environ["RB_GUI_RECORD_STATUS_BIND"] = "udp://127.0.0.1:51442"
+            self.assertEqual(_recording_cmd_endpoint(), ("10.0.0.5", 51441))
+            self.assertEqual(_recording_status_bind_endpoint(), ("127.0.0.1", 51442))
+        finally:
+            os.environ.pop("RB_GUI_RECORD_CMD_ENDPOINT", None)
+            os.environ.pop("RB_GUI_RECORD_STATUS_BIND", None)
+            if old_cmd is not None:
+                os.environ["RB_GUI_RECORD_CMD_ENDPOINT"] = old_cmd
+            if old_status is not None:
+                os.environ["RB_GUI_RECORD_STATUS_BIND"] = old_status
+
+    def test_recording_toggle_debounce_and_metadata(self):
+        client = RecordingCommandFake()
+        handles = {
+            "recording_cmd_client": client,
+            "recording_last_toggle_monotonic": float("-inf"),
+            "recording_task": RecordingText("fold towel"),
+            "recording_operator": RecordingText("operator-a"),
+            "recording_state": RecordingText("idle"),
+            "recording_episode": RecordingText(""),
+            "recording_frames": RecordingText(""),
+            "recording_command_status": RecordingText(""),
+            "recording_start_button": RecordingButton(),
+            "recording_stop_button": RecordingButton(),
+        }
+
+        self.assertTrue(_toggle_episode_recording(handles, monotonic_fn=lambda: 10.0))
+        self.assertEqual(client.calls, [{"command": "start", "task": "fold towel", "operator": "operator-a"}])
+        self.assertTrue(handles["recording_start_button"].disabled)
+        self.assertFalse(handles["recording_stop_button"].disabled)
+
+        self.assertFalse(_toggle_episode_recording(handles, monotonic_fn=lambda: 10.5))
+        self.assertEqual(len(client.calls), 1)
+        self.assertIn("debounce", handles["recording_command_status"].value)
+
+        self.assertTrue(_toggle_episode_recording(handles, target="stop", monotonic_fn=lambda: 11.1))
+        self.assertEqual(client.calls[-1]["command"], "stop")
+        self.assertFalse(handles["recording_start_button"].disabled)
+        self.assertTrue(handles["recording_stop_button"].disabled)
+
+    def test_recording_status_panel_prefers_state_block_and_store_fallback(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        store = RecordingStatusStore()
+        store.update(
+            {
+                "recording": True,
+                "episode_name": "episode-store",
+                "frame_count": 12,
+                "rate_hz": 30.0,
+            },
+            received_monotonic=1.0,
+        )
+        handles = {
+            "recording_status_store": store,
+            "recording_state": RecordingText(""),
+            "recording_episode": RecordingText(""),
+            "recording_frames": RecordingText(""),
+            "recording_start_button": RecordingButton(),
+            "recording_stop_button": RecordingButton(),
+        }
+
+        _update_recording_panel(handles, None, stale=False)
+        self.assertEqual(handles["recording_state"].value, "recording")
+        self.assertEqual(handles["recording_episode"].value, "episode-store")
+        self.assertEqual(handles["recording_frames"].value, "12 @ 30.0 Hz")
+        self.assertTrue(handles["recording_start_button"].disabled)
+        self.assertFalse(handles["recording_stop_button"].disabled)
+
+        latest = StateSnapshot.parse(
+            sample_state(
+                recording={
+                    "recording": False,
+                    "state": "idle",
+                    "episode_name": "episode-state",
+                    "frame_count": 99,
+                    "rate_hz": 30.0,
+                }
+            )
+        )
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.recording["episode_name"], "episode-state")
+        _update_recording_panel(handles, latest, stale=True)
+        self.assertEqual(handles["recording_state"].value, "idle (stale)")
+        self.assertEqual(handles["recording_episode"].value, "episode-state")
+        self.assertFalse(handles["recording_start_button"].disabled)
+        self.assertTrue(handles["recording_stop_button"].disabled)
+
+    def test_recording_status_store_parses_wire_packet(self):
+        store = RecordingStatusStore()
+        ok = store.update_from_packet(
+            json.dumps(
+                {
+                    "schema": "robotics_lab.recording_state.v1",
+                    "recording": {"recording": True, "episode_name": "episode-1", "frame_count": 3},
+                }
+            ).encode("utf-8"),
+            received_monotonic=5.0,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(store.latest()["episode_name"], "episode-1")
+        self.assertFalse(store.is_stale(now=5.5))
+        self.assertTrue(store.is_stale(now=7.0))
+        self.assertFalse(store.update_from_packet(b"not json"))
+        self.assertEqual(store.invalid_packets, 1)
+
+    def test_arm_init_command_client_emits_control_schema(self):
+        class _Sock:
+            def __init__(self, *_args):
+                self.sent = []
+
+            def sendto(self, data, endpoint):
+                self.sent.append((json.loads(data.decode()), endpoint))
+                return len(data)
+
+            def close(self):
+                pass
+
+        sock = _Sock()
+        client = RecordingCommandClient(
+            "127.0.0.1",
+            50441,
+            socket_factory=lambda *_args: sock,
+        )
+        result = client.send_arm_init(
+            "left",
+            left_q_deg=(1, 2, 3, 4, 5, 6),
+            right_q_deg=(-1, -2, -3, -4, -5, -6),
+        )
+        self.assertTrue(result.ok, result.message)
+        payload, endpoint = sock.sent[0]
+        self.assertEqual(endpoint, ("127.0.0.1", 50441))
+        self.assertEqual(payload["schema"], ARM_INIT_COMMAND_SCHEMA)
+        self.assertEqual(payload["arms"], "left")
+        self.assertEqual(payload["action"], "toggle")
+        self.assertEqual(payload["left_q_deg"], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+
+    def test_recording_status_store_keeps_arm_init_status_block(self):
+        store = RecordingStatusStore()
+        ok = store.update_from_packet(
+            json.dumps(
+                {
+                    "schema": "robotics_lab.recording_state.v1",
+                    "recording": {"recording": False},
+                    "arm_init": {
+                        "init_override_left": True,
+                        "init_override_right": False,
+                        "last_command": "left",
+                    },
+                }
+            ).encode("utf-8"),
+            received_monotonic=5.0,
+        )
+        self.assertTrue(ok)
+        self.assertTrue(store.latest_arm_init()["init_override_left"])
+        self.assertFalse(store.latest_arm_init()["init_override_right"])
+
+    def test_arm_init_override_uses_policy_control_when_policy_runner_seen(self):
+        _, client, safety = self.make_safety(
+            sample_state(motion_state="Running"),
+            init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
+            init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
+        )
+        status_store = RecordingStatusStore()
+        status_store.update({"recording": False}, received_monotonic=time.monotonic())
+        command_client = RecordingCommandFake()
+        handles = {
+            "recording_status_store": status_store,
+            "recording_cmd_client": command_client,
+            "arm_init_status": RecordingText(""),
+            "_state_stale": False,
+        }
+        scene = {"left_tcp_target_user_moved": True, "right_tcp_target_user_moved": True}
+
+        ok, message = _send_arm_init_override(safety, scene, handles, "left")
+
+        self.assertTrue(ok, message)
+        self.assertEqual(command_client.arm_init_calls[0]["arms"], "left")
+        self.assertEqual(command_client.arm_init_calls[0]["left_q_deg"], _DEFAULT_INIT_LEFT_JOINTS_DEG)
+        self.assertEqual(client.sent_packets, [])
+        self.assertNotIn("left_tcp_target_user_moved", scene)
+        self.assertIn("right_tcp_target_user_moved", scene)
+        self.assertTrue(handles["arm_init_local_status"]["init_override_left"])
+
+    def test_arm_init_fallback_keeps_existing_both_button_and_requires_held_lease_for_one_arm(self):
+        _, client, safety = self.make_safety(
+            sample_state(motion_state="ArmedHold"),
+            init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
+            init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
+        )
+        handles = {"arm_init_status": RecordingText(""), "_state_stale": False}
+        scene = {"left_tcp_target_user_moved": True, "right_tcp_target_user_moved": True}
+
+        ok, message = _send_arm_init_override(safety, scene, handles, "both")
+        self.assertTrue(ok, message)
+        self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
+        self.assertNotIn("left_tcp_target_user_moved", scene)
+        self.assertNotIn("right_tcp_target_user_moved", scene)
+
+        ok, message = _send_arm_init_override(safety, {}, handles, "left")
+        self.assertFalse(ok)
+        self.assertIn("Take control", message)
+
+        client.hold_lease = True
+        ok, message = _send_arm_init_override(safety, {}, handles, "left")
+        self.assertTrue(ok, message)
+        packet = client.sent_packets[-1]
+        self.assertEqual(packet["mode"], "Hold")
+        self.assertEqual(packet["left"]["mode"], "JointTarget")
+        self.assertEqual(packet["left"]["joint_target_profile"], "init_motion")
+        self.assertEqual(packet["right"]["mode"], "Hold")
+
+    def test_arm_init_status_panel_updates_text_and_button_colors(self):
+        handles = {
+            "arm_init_local_status": {
+                "init_override_left": True,
+                "init_override_right": False,
+            },
+            "arm_init_status": RecordingText(""),
+            "init_motion_buttons": {
+                "both": RecordingButton(),
+                "left": RecordingButton(),
+                "right": RecordingButton(),
+            },
+        }
+
+        _update_arm_init_panel(handles, None, stale=False)
+
+        self.assertIn("왼팔: InitMotion 중", handles["arm_init_status"].value)
+        self.assertEqual(handles["init_motion_buttons"]["both"].color, "gray")
+        self.assertEqual(handles["init_motion_buttons"]["left"].color, "green")
+        self.assertEqual(handles["init_motion_buttons"]["right"].color, "gray")
+
+    def test_lifecycle_init_motion_layout_targets_three_buttons(self):
+        html = _lifecycle_init_motion_layout_html()
+        self.assertIn("InitMotion (양팔)", html)
+        self.assertIn("InitMotion (왼팔)", html)
+        self.assertIn("InitMotion (오른팔)", html)
+        self.assertIn("calc(50% - 0.25rem)", html)
+
+    def test_viser_keyboard_patch_includes_b_hotkey_and_input_guard(self):
+        script = _viser_keyboard_patch_script()
+        self.assertIn("KeyB", script)
+        self.assertIn("record-toggle-hotkey-b", script)
+        self.assertIn("수집 시작", script)
+        self.assertIn("수집 종료", script)
+        self.assertIn("INPUT", script)
+        self.assertIn("TEXTAREA", script)
 
     def test_send_gripper_command_builds_and_sends_packet(self):
         class _Slider:
