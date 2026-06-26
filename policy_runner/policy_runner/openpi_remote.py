@@ -332,18 +332,21 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         #   pose          -> 14-D reset-relative pose [pos3, rotvec3, grip] x L,R (default; legacy)
         #   velocity      -> 12-D ee_local velocity   [pos_vel3, rot_vel3]    x L,R (no gripper)
         #   velocity_grip -> 14-D ee_local velocity + abs gripper [pos_vel3, rot_vel3, grip] x L,R
+        #   velocity_grav -> 20-D ee_local velocity + gravity-tilt anchor + abs gripper
+        #                    [pos_vel3, rot_vel3, gravity3, grip] x L,R (openpi --state-mode velocity_grav)
         # nostate (zero_state=True) checkpoints ignore this server-side, so any mode works there.
-        # velocity/velocity_grip are init-pose-INDEPENDENT (egocentric) -> avoid the per-episode
-        # rotated reset frame that makes reset-relative pose non-ego-centric (see the velproprio
-        # configs in openpi training/config.py). The velocity is finite-differenced from the robot
-        # TCP pose between proprio samples and normalized to one policy step (the training per-frame
-        # delta); see _proprio_state_velocity.
-        if str(proprio_mode) not in ("pose", "velocity", "velocity_grip"):
+        # velocity/velocity_grip/velocity_grav are init-pose-INDEPENDENT (egocentric) -> avoid the
+        # per-episode rotated reset frame that makes reset-relative pose non-ego-centric (see the
+        # velproprio configs in openpi training/config.py). The velocity is finite-differenced from the
+        # robot TCP pose between proprio samples and normalized to one policy step (the training per-frame
+        # delta); velocity_grav ADDS an absolute gravity-tilt anchor (world-down in the tool frame, still
+        # yaw-invariant/ego-centric). See _proprio_state_velocity.
+        if str(proprio_mode) not in ("pose", "velocity", "velocity_grip", "velocity_grav"):
             raise ValueError(
-                f"proprio_mode must be 'pose', 'velocity', or 'velocity_grip', got {proprio_mode!r}"
+                f"proprio_mode must be 'pose', 'velocity', 'velocity_grip', or 'velocity_grav', got {proprio_mode!r}"
             )
         self.proprio_mode = str(proprio_mode)
-        self._state_dim = 12 if self.proprio_mode == "velocity" else 14
+        self._state_dim = {"velocity": 12, "velocity_grav": 20}.get(self.proprio_mode, 14)
         # Velocity-proprio finite-difference memory (per arm): the previous proprio-sample TCP pose
         # and the wall-clock of that sample (to rescale a multi-step displacement to one policy step).
         self._vel_prev_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
@@ -544,7 +547,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         reset anchor is latched on the first state this rollout sees, and MUST
         match the episode-first-frame anchor used when building the training
         dataset (examples/pika_umi/convert_pika_umi_data_to_lerobot.py)."""
-        if self.proprio_mode in ("velocity", "velocity_grip"):
+        if self.proprio_mode in ("velocity", "velocity_grip", "velocity_grav"):
             return self._proprio_state_velocity(payload)
         from scipy.spatial.transform import Rotation
 
@@ -597,7 +600,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         return out
 
     def _proprio_state_velocity(self, payload: dict[str, Any]) -> np.ndarray:
-        """ee_local VELOCITY proprio (--state-mode velocity / velocity_grip).
+        """ee_local VELOCITY proprio (--state-mode velocity / velocity_grip / velocity_grav).
 
         Per arm the proprio is the INCOMING per-step motion in the previous body
         frame -- pos_vel(3), rot_vel(3) [, grip] -- the exact quantity the training
@@ -625,7 +628,8 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
 
         from scipy.spatial.transform import Rotation
 
-        include_grip = self.proprio_mode == "velocity_grip"
+        include_grip = self.proprio_mode in ("velocity_grip", "velocity_grav")
+        include_grav = self.proprio_mode == "velocity_grav"
         features: list[np.ndarray] = []
         for side in ("left", "right"):
             pose = np.asarray(pose_from_state_payload(payload, side), dtype=np.float64)
@@ -642,16 +646,27 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 # Body deltas are in the RB TCP frame; the checkpoint trained in the
                 # EE (pika tip) frame -> v_tip = R_align . v_tcp (same as the pose path).
                 vel = self._rotate_vel6(vel, self.ee_local_r_align)
+            parts: list[np.ndarray] = [vel]
+            if include_grav:
+                # GRAVITY-TILT ANCHOR (velocity_grav): world "down" expressed in the current TCP body
+                # frame, then through the SAME R_align (TCP->tip) as the velocity vectors. Inserted between
+                # rot_vel and grip to match the converter's _arm_velocity_grav layout
+                # [pos_vel3, rot_vel3, gravity3, grip1]. world_down=[0,0,-1] (z-up stand); training used
+                # steamvr Y-up [0,-1,0] -> the SAME physical gravity, so the unmeasured steamvr->stand
+                # heading cancels (gravity is yaw-invariant). It is a LINEAR direction -> R_align.linear.
+                grav = Rotation.from_quat(pose[3:7]).inv().apply(np.array([0.0, 0.0, -1.0]))
+                if self.ee_local_r_align is not None:
+                    lin = np.asarray(getattr(self.ee_local_r_align, "linear", self.ee_local_r_align), dtype=np.float64)
+                    grav = grav @ lin.T
+                parts.append(grav)
             if include_grip:
-                # velocity_grip keeps the ABSOLUTE gripper opening (matches the converter's
-                # _state_velocity_grip), read exactly like the pose-state gripper dim.
+                # ABSOLUTE gripper opening (matches the converter's _state_velocity_grip / _arm_velocity_grav).
                 grip = _gripper_value_from_payload(payload, side)
                 if grip is None:
                     live = self._live_gripper_percent(side)
                     grip = live if live is not None else _gripper_from_arm_payload(payload.get(side, {}))
-                features.append(np.concatenate([vel, [float(grip) / 100.0]]))
-            else:
-                features.append(vel)
+                parts.append(np.array([float(grip) / 100.0]))
+            features.append(np.concatenate(parts))
         return np.concatenate(features).astype(np.float32)
 
     def _raw_camera_images(self) -> tuple[dict[str, np.ndarray] | None, int, int]:

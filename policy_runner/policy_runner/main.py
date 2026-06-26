@@ -787,12 +787,14 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--proprio-mode",
         default="velocity",
-        choices=("pose", "velocity", "velocity_grip"),
+        choices=("pose", "velocity", "velocity_grip", "velocity_grav"),
         help=(
             "observation/state representation sent to an openpi server; MUST match the served "
             "checkpoint's training distribution (openpi convert --state-mode). 'pose' (default) = "
             "14-D reset-relative pose; 'velocity' = 12-D ee_local velocity (init-pose-independent, "
-            "no gripper); 'velocity_grip' = 14-D ee_local velocity + absolute gripper. velocity* are "
+            "no gripper); 'velocity_grip' = 14-D ee_local velocity + absolute gripper; 'velocity_grav' = "
+            "20-D ee_local velocity + gravity-tilt anchor + absolute gripper [pos_vel3, rot_vel3, "
+            "gravity3, grip] x L,R (gravity = world-down in the tool frame, yaw-invariant). velocity* are "
             "finite-differenced from the robot TCP pose (use a small --chunk-execute-steps for the "
             "cleanest per-step velocity). nostate (zero_state) checkpoints ignore state, so any value "
             "works there. Only the openpi-remote source uses this."

@@ -13,6 +13,7 @@ import unittest
 
 try:
     import numpy as np
+    from scipy.spatial.transform import Rotation
 
     from policy_runner.flow_inference import resolve_ee_local_r_align
     from policy_runner.openpi_remote import OpenpiRemoteActionSource
@@ -39,7 +40,7 @@ class VelocityProprioTest(unittest.TestCase):
     def _make_source(self, *, proprio_mode: str, r_align=None):
         src = OpenpiRemoteActionSource.__new__(OpenpiRemoteActionSource)
         src.proprio_mode = proprio_mode
-        src._state_dim = 12 if proprio_mode == "velocity" else 14
+        src._state_dim = {"velocity": 12, "velocity_grav": 20}.get(proprio_mode, 14)
         src.ee_local_r_align = resolve_ee_local_r_align(r_align)
         # Huge policy_dt -> scale clamps to 1.0, so the raw one-step delta is returned
         # unscaled and we can assert the exact ee_local formula.
@@ -50,7 +51,7 @@ class VelocityProprioTest(unittest.TestCase):
         return src
 
     def test_state_dims(self) -> None:
-        for mode, dim in (("velocity", 12), ("velocity_grip", 14)):
+        for mode, dim in (("velocity", 12), ("velocity_grip", 14), ("velocity_grav", 20)):
             src = self._make_source(proprio_mode=mode)
             out = src._proprio_state(_payload(_IDENT, _IDENT))
             self.assertEqual(out.shape, (dim,), mode)
@@ -94,6 +95,37 @@ class VelocityProprioTest(unittest.TestCase):
         # Gripper dims (6, 13) present; no gripper in payload + no live percent -> 0.0.
         self.assertEqual(out[6], 0.0)
         self.assertEqual(out[13], 0.0)
+
+
+    def test_velocity_grav_layout_and_gravity(self) -> None:
+        # velocity_grav per arm = [pos_vel(3), rot_vel(3), gravity(3), grip(1)] = 10; dual = 20.
+        # gravity = world-down [0,0,-1] expressed in the tool frame (R_tcp^-1 . down); for an
+        # IDENTITY tool orientation that is exactly [0,0,-1], a UNIT vector.
+        src = self._make_source(proprio_mode="velocity_grav")
+        out = src._proprio_state(_payload(_IDENT, _IDENT))
+        self.assertEqual(out.shape, (20,))
+        np.testing.assert_allclose(out[6:9], [0.0, 0.0, -1.0], atol=1e-6)    # left gravity
+        np.testing.assert_allclose(out[16:19], [0.0, 0.0, -1.0], atol=1e-6)  # right gravity
+        np.testing.assert_allclose(np.linalg.norm(out[6:9]), 1.0, atol=1e-6)
+        self.assertEqual(out[9], 0.0)   # left grip (no payload/live -> 0)
+        self.assertEqual(out[19], 0.0)  # right grip
+
+    def test_velocity_grav_tilt_changes_gravity(self) -> None:
+        # A roll/pitch tilts the in-frame gravity away from [0,0,-1] (the anchor SEES tilt ->
+        # targets the #1 over-tilt). g = R^-1 . [0,0,-1]; assert against the direct scipy value.
+        src = self._make_source(proprio_mode="velocity_grav")
+        pitch = [0, 0, 0, float(np.sin(0.5)), 0.0, 0.0, float(np.cos(0.5))]  # 1.0 rad about tool X
+        out = src._proprio_state(_payload(pitch, _IDENT))
+        expected = Rotation.from_quat(pitch[3:7]).inv().apply([0.0, 0.0, -1.0])
+        np.testing.assert_allclose(out[6:9], expected, atol=1e-6)
+
+    def test_velocity_grav_yaw_invariant(self) -> None:
+        # Rotating the tool about world-Z (stand up = heading) leaves the in-frame gravity
+        # UNCHANGED -> the anchor never encodes the unmeasured steamvr->stand heading.
+        src = self._make_source(proprio_mode="velocity_grav")
+        yaw = [0, 0, 0, 0.0, 0.0, float(np.sin(0.5)), float(np.cos(0.5))]  # 1.0 rad about Z
+        out = src._proprio_state(_payload(yaw, _IDENT))
+        np.testing.assert_allclose(out[6:9], [0.0, 0.0, -1.0], atol=1e-6)
 
 
 if __name__ == "__main__":
