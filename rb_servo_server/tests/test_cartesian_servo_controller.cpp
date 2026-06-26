@@ -497,6 +497,51 @@ bool testFloorConstraintZerosDownwardVzAtPlaneAndKeepsLateral() {
     return true;
 }
 
+// Disable path: the exact same descending twist at the exact same below-margin TCP
+// that gets clamped when the floor is ENABLED must pass through UNTOUCHED when the
+// floor is DISABLED. This is the proof that the runtime enable/disable toggle
+// (SetSafetyFloorEnabled -> floorConstraintActive() -> setFloorConstraint(enabled,...))
+// actually changes the internal motion logic and is not merely cosmetic.
+bool testFloorConstraintDisabledLetsDownwardVzPassThrough() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount;
+    left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount;
+    right_mount.arm_id = rb_servo::ArmId::Right;
+    rb_servo::CartesianServoController controller(
+        left_mount, right_mount, rb_servo::CartesianControlConfig{}, kinematics);
+    // Floor OFF (mirrors floorConstraintActive() == false). Same plane/margin args
+    // are passed but with enabled=false so any clamp would be a leak.
+    controller.setFloorConstraint(false, 0.010, 0.005);
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpTwistLocal;
+    command.has_tcp_twist_local = true;
+    command.tcp_twist_local = {0.02, 0.0, -0.02, 0.0, 0.0, 0.0};
+
+    // Identity-orientation TCP at z = 0.012, the same inside-margin pose that the
+    // ENABLED test clamps. With the floor off, no clamp must occur.
+    rb_servo::CartesianTwistHoldState hold;
+    rb_servo::JointArray q = zeroJoints();
+    q[2] = 1.2;  // fake FK: z = q[2] / 100
+    const rb_servo::CartesianArmTargetResult result = controller.computeTwistTarget(
+        command,
+        stateFromJoints(*kinematics, q, left_mount),
+        q,
+        rb_servo::RunMode::Simulation,
+        0.005,
+        1,
+        &hold
+    );
+    RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(!result.telemetry.floor_vz_clamped);
+    // Both the downward z AND lateral x flow through unmodified.
+    RB_CHECK(std::abs(kinematics->last_twist_local.z + 0.02) < kEpsilon);
+    RB_CHECK(std::abs(kinematics->last_twist_local.x - 0.02) < kEpsilon);
+    return true;
+}
+
 bool testFloorConstraintRespectsTcpOrientationFrame() {
     auto kinematics = std::make_shared<LinearFakeKinematics>();
     rb_servo::ArmMountConfig left_mount;
@@ -1548,6 +1593,7 @@ int main() {
     if (!testLinearMoveConstantOrientationToleranceIsConfigurable()) return 1;
     if (!testTcpTwistLocalMovesLocalXAndHoldsOrientation()) return 1;
     if (!testFloorConstraintZerosDownwardVzAtPlaneAndKeepsLateral()) return 1;
+    if (!testFloorConstraintDisabledLetsDownwardVzPassThrough()) return 1;
     if (!testFloorConstraintRespectsTcpOrientationFrame()) return 1;
     if (!testFloorConstraintUsesTiltedTipLowestPointForDescentProjection()) return 1;
     if (!testFloorConstraintBlocksRotationalTipDescentAndKeepsXYYaw()) return 1;

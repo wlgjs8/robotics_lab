@@ -3335,6 +3335,69 @@ class FloorConstraintGuiTest(unittest.TestCase):
         self.assertAlmostEqual(slider.max, 300.0)
         self.assertAlmostEqual(slider.value, 300.0)
 
+    def test_gui_settings_round_trip(self):
+        import os
+        import tempfile
+        from rb_servo_gui import app as gui_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "settings.json")
+            os.environ["RB_GUI_SETTINGS_PATH"] = path
+            try:
+                self.assertEqual(gui_app._load_gui_settings(), {})
+                gui_app._update_gui_setting("stand_floor_enforce", False)
+                self.assertEqual(
+                    gui_app._load_gui_settings().get("stand_floor_enforce"), False
+                )
+                # Read-modify-write preserves other keys.
+                gui_app._update_gui_setting("other", 1)
+                loaded = gui_app._load_gui_settings()
+                self.assertEqual(loaded.get("stand_floor_enforce"), False)
+                self.assertEqual(loaded.get("other"), 1)
+            finally:
+                os.environ.pop("RB_GUI_SETTINGS_PATH", None)
+
+    def test_update_floor_panel_keeps_saved_enforce_preference(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        class FakeCheckbox:
+            def __init__(self, value):
+                self.value = value
+
+        # Operator previously turned enforce OFF; server config still reports it ON.
+        toggle = FakeCheckbox(False)
+        handles = {
+            "floor_enforce_toggle": toggle,
+            "stand_floor_enforce_pref": False,
+        }
+        state = StateSnapshot.parse(
+            sample_state(floor_constraint=self._floor_block(enabled=True))
+        )
+        _update_floor_panel(handles, state)
+        # Saved preference wins: the checkbox is NOT overwritten from telemetry.
+        self.assertFalse(toggle.value)
+        self.assertTrue(handles.get("floor_enforce_synced"))
+
+    def test_update_floor_panel_syncs_enforce_when_no_preference(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        class FakeCheckbox:
+            def __init__(self, value):
+                self.value = value
+
+        # No saved preference -> fall back to mirroring the server's reported state.
+        toggle = FakeCheckbox(True)
+        handles = {
+            "floor_enforce_toggle": toggle,
+            "stand_floor_enforce_pref": None,
+        }
+        state = StateSnapshot.parse(
+            sample_state(floor_constraint=self._floor_block(enabled=False))
+        )
+        _update_floor_panel(handles, state)
+        self.assertFalse(toggle.value)
+        self.assertTrue(handles.get("floor_enforce_synced"))
+
 
 class RoiBoxGuiTest(unittest.TestCase):
     @staticmethod

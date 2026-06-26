@@ -110,6 +110,10 @@ gripper:
   left_port: /dev/pika-left
   right_port: /dev/pika-right
   pika_sdk_path: /home/plaif/workspace/pika_sdk
+  # false (default): hold each gripper at its current position on startup. Set
+  # true to drive both fully open at rollout start (legacy behavior; lands
+  # asymmetrically right-open/left-close when the grippers are not homed).
+  startup_open: false
 command_rate_hz: 500
 
 spacemouse_cartesian_dual:

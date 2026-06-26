@@ -1607,12 +1607,14 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 allow_real_gripper_motion=config.safety.allow_real_gripper_motion,
             )
         )
-        # Open both grippers fully at startup so every rollout begins from a
-        # known open pose. Routed through the same GripperRuntime gate as policy
-        # commands, so it honors real_policy + allow_real_gripper_motion +
-        # RB_ALLOW_REAL_GRIPPER and is a logged noop when the hardware lane is
-        # closed (percent units: 100 = open = max_rad).
-        if gripper_backend is not None:
+        # Optionally open both grippers fully at startup so every rollout begins
+        # from a known open pose. DEFAULT OFF (gripper.startup_open): hold each
+        # gripper at its current power-on position so the server start does not
+        # force the asymmetric right-opens/left-closes move. Routed through the
+        # same GripperRuntime gate as policy commands, so it honors real_policy +
+        # allow_real_gripper_motion + RB_ALLOW_REAL_GRIPPER and is a logged noop
+        # when the hardware lane is closed (percent units: 100 = open = max_rad).
+        if gripper_backend is not None and config.gripper.startup_open:
             open_results = gripper_runtime.dispatch(
                 [
                     GripperCommand(
@@ -1641,8 +1643,18 @@ def _main_with_subcommands(argv: list[str]) -> int:
             if any(result.sent_to_physical for result in open_results):
                 time.sleep(1.5)
                 print("[flow-infer] startup gripper open settle: waited 1.5s", flush=True)
+        elif gripper_backend is not None:
+            # startup_open disabled: leave both grippers where they powered on (the
+            # backend already seeded its targets from the live motor positions on
+            # connect), so the server start does not move the jaws.
+            print(
+                "[flow-infer] startup gripper open disabled "
+                "(gripper.startup_open=false): holding current gripper position",
+                flush=True,
+            )
         elif (
-            rollout_policy.mode.value == "real_policy"
+            config.gripper.startup_open
+            and rollout_policy.mode.value == "real_policy"
             and bool(config.safety.allow_real_gripper_motion)
             and os.environ.get("RB_ALLOW_REAL_GRIPPER") == "1"
         ):

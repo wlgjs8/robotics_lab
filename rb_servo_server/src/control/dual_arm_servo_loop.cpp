@@ -5290,20 +5290,26 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
     return command;
 }
 
-std::pair<JointArray, JointArray> DualArmServoLoop::pursueWaypoints(
+PursuitStep pursueWaypointsStep(
     const std::vector<std::pair<JointArray, JointArray>>& waypoints,
+    const JointArray& cur_left,
+    const JointArray& cur_right,
     std::size_t& index,
-    bool& done
-) const {
-    done = false;
+    double waypoint_tol_deg,
+    double lookahead_deg
+) {
+    PursuitStep out;
+    out.left = cur_left;
+    out.right = cur_right;
     if (waypoints.empty()) {
-        return {left_prev_sent_q_deg_, right_prev_sent_q_deg_};
+        return out;
     }
-    const double tol = config_.safety.init_motion_planner.waypoint_tol_deg;
-    const double lookahead = config_.safety.init_motion_planner.execution_lookahead_deg;
+    const std::size_t n = waypoints.size();
+    if (index >= n) index = n - 1;
+
     const auto reached = [&](const JointArray& a, const JointArray& b) {
         for (int i = 0; i < kDof; ++i) {
-            if (std::abs(a[i] - b[i]) > tol) return false;
+            if (std::abs(a[i] - b[i]) > waypoint_tol_deg) return false;
         }
         return true;
     };
@@ -5311,32 +5317,68 @@ std::pair<JointArray, JointArray> DualArmServoLoop::pursueWaypoints(
     const auto chord = [&](const std::pair<JointArray, JointArray>& w) {
         double m = 0.0;
         for (int i = 0; i < kDof; ++i) {
-            m = std::max(m, std::abs(left_prev_sent_q_deg_[i] - w.first[i]));
-            m = std::max(m, std::abs(right_prev_sent_q_deg_[i] - w.second[i]));
+            m = std::max(m, std::abs(cur_left[i] - w.first[i]));
+            m = std::max(m, std::abs(cur_right[i] - w.second[i]));
         }
         return m;
     };
-    // Progress pointer: advance past every waypoint we have essentially reached.
-    while (index + 1 < waypoints.size() &&
-           reached(left_prev_sent_q_deg_, waypoints[index].first) &&
-           reached(right_prev_sent_q_deg_, waypoints[index].second)) {
+    // Fraction of segment [a,b] that the current pose projects onto, in the combined
+    // (both-arm) joint space. >= 1 means the pose has advanced past b. This is a
+    // PROJECTION, not a proximity test, so a lookahead chord that cuts a corner still
+    // advances progress instead of stalling at an apex node it never passed within tol.
+    const auto segFraction = [&](const std::pair<JointArray, JointArray>& a,
+                                 const std::pair<JointArray, JointArray>& b) {
+        double num = 0.0;
+        double den = 0.0;
+        for (int i = 0; i < kDof; ++i) {
+            const double dl = b.first[i] - a.first[i];
+            const double dr = b.second[i] - a.second[i];
+            num += (cur_left[i] - a.first[i]) * dl + (cur_right[i] - a.second[i]) * dr;
+            den += dl * dl + dr * dr;
+        }
+        return den > 1e-9 ? num / den : 1.0;  // degenerate segment -> already passed
+    };
+
+    // Progress pointer: monotonic projection advance. Advances past every segment whose
+    // far endpoint the pose has projected beyond. Corner-cutting can never freeze it,
+    // because progress is measured along the path direction, not by proximity to a node.
+    while (index + 1 < n &&
+           segFraction(waypoints[index], waypoints[index + 1]) >= 1.0) {
         ++index;
     }
-    // Pure-pursuit: aim at the farthest forward waypoint still within `lookahead` of the
-    // current pose, so the SMD always sees a large error and runs near max velocity (no
-    // stop-and-go at every densified node). The path stays the planned collision-free
+    // Pure-pursuit: aim at the farthest forward waypoint still within `lookahead_deg` of
+    // the current pose, so the downstream servo runs near max velocity (no stop-and-go at
+    // every densified node). Start at index+1 so the command always leads forward and
+    // never re-aims at the node behind us. The path stays the planned collision-free
     // polyline; any corner the chord cuts into a keep-out is braked by the reactive
     // barrier (slow only at that corner, never collide).
-    std::size_t tgt = index;
-    while (tgt + 1 < waypoints.size() && chord(waypoints[tgt + 1]) <= lookahead) {
+    std::size_t tgt = std::min(index + 1, n - 1);
+    while (tgt + 1 < n && chord(waypoints[tgt + 1]) <= lookahead_deg) {
         ++tgt;
     }
-    if (index + 1 == waypoints.size() &&
-        reached(left_prev_sent_q_deg_, waypoints.back().first) &&
-        reached(right_prev_sent_q_deg_, waypoints.back().second)) {
-        done = true;
-    }
-    return waypoints[tgt];
+    out.left = waypoints[tgt].first;
+    out.right = waypoints[tgt].second;
+    // Finished only when the current sent pose has actually settled at the final
+    // waypoint (within tol on every joint), independent of the progress pointer.
+    out.done = reached(cur_left, waypoints.back().first) &&
+               reached(cur_right, waypoints.back().second);
+    return out;
+}
+
+std::pair<JointArray, JointArray> DualArmServoLoop::pursueWaypoints(
+    const std::vector<std::pair<JointArray, JointArray>>& waypoints,
+    std::size_t& index,
+    bool& done
+) const {
+    const PursuitStep step = pursueWaypointsStep(
+        waypoints,
+        left_prev_sent_q_deg_,
+        right_prev_sent_q_deg_,
+        index,
+        config_.safety.init_motion_planner.waypoint_tol_deg,
+        config_.safety.init_motion_planner.execution_lookahead_deg);
+    done = step.done;
+    return {step.left, step.right};
 }
 
 DualArmCommand DualArmServoLoop::applyCollisionFreeLinearMove(

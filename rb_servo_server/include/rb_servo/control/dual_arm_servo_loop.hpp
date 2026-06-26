@@ -401,10 +401,12 @@ private:
         const RobotState& right_state
     );
 
-    // Pure-pursuit over a planned waypoint list using the current sent pose: advances
-    // `index` past reached waypoints, returns the farthest waypoint within the execution
-    // lookahead (so the SMD runs near max velocity), and sets `done` at the final
-    // waypoint. Shared by InitMotion and the collision-free linear detour.
+    // Pure-pursuit over a planned waypoint list using the current sent pose. Thin wrapper
+    // around pursueWaypointsStep() that supplies the current sent pose and config tolerances:
+    // advances `index` by projection (never stalls on corner-cutting), returns the farthest
+    // waypoint within the execution lookahead (so the servo runs near max velocity), and
+    // sets `done` at the final waypoint. Shared by InitMotion and the collision-free linear
+    // detour.
     std::pair<JointArray, JointArray> pursueWaypoints(
         const std::vector<std::pair<JointArray, JointArray>>& waypoints,
         std::size_t& index,
@@ -489,5 +491,25 @@ private:
     StartupValidationSnapshot startup_validation_;
     ServoSnapshot latest_snapshot_;
 };
+
+// Projection-based pure-pursuit step over a planned collision-free waypoint polyline.
+// Given the current sent pose, it advances `index` by PROJECTING the pose onto the path
+// (monotonic, never stalls — even when the lookahead chord cuts a corner and never comes
+// within `waypoint_tol_deg` of an apex node), then returns the farthest forward waypoint
+// within `lookahead_deg` of the current pose. `done` is set once the pose has settled
+// within `waypoint_tol_deg` of the final waypoint. Stateless apart from the in/out
+// `index`, so it is unit-testable in isolation (see test_init_motion_pursuit).
+struct PursuitStep {
+    JointArray left{};
+    JointArray right{};
+    bool done = false;
+};
+PursuitStep pursueWaypointsStep(
+    const std::vector<std::pair<JointArray, JointArray>>& waypoints,
+    const JointArray& cur_left,
+    const JointArray& cur_right,
+    std::size_t& index,
+    double waypoint_tol_deg,
+    double lookahead_deg);
 
 }  // namespace rb_servo

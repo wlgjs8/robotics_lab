@@ -822,6 +822,51 @@ def _save_user_floor(state: Mapping[str, Any]) -> tuple[bool, str]:
     return True, path
 
 
+# ---- Persisted GUI preferences (operator panel toggles that should survive a
+# restart, e.g. the stand-floor enforce checkbox). One small JSON dict keyed by
+# preference name; mirrors the waypoints/user_floor persistence pattern. ----
+
+
+def _gui_settings_path() -> str:
+    raw = os.environ.get("RB_GUI_SETTINGS_PATH", "").strip()
+    if raw:
+        return raw
+    return os.path.join(os.path.expanduser("~"), ".rb_servo_gui", "settings.json")
+
+
+def _load_gui_settings() -> dict[str, Any]:
+    path = _gui_settings_path()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return dict(data) if isinstance(data, Mapping) else {}
+
+
+def _save_gui_settings(settings: Mapping[str, Any]) -> tuple[bool, str]:
+    path = _gui_settings_path()
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(dict(settings), handle, indent=2, sort_keys=True)
+    except OSError as exc:
+        return False, str(exc)
+    return True, path
+
+
+def _update_gui_setting(key: str, value: Any) -> None:
+    """Read-modify-write a single GUI preference. Best-effort: persistence
+    failures are swallowed so a read-only home dir never breaks the toggle."""
+    settings = _load_gui_settings()
+    settings[key] = value
+    _save_gui_settings(settings)
+
+
 def _user_floor_contact_point(latest: StateSnapshot | None, arm: str) -> tuple[float, float, float] | None:
     """The arm's lowest floor-contact point (xyz, stand frame) from floor telemetry.
 
@@ -1726,7 +1771,10 @@ def build_gui(
             # held so the server lease is not torn down between packets. The server
             # rejects an Acquire while another source (e.g. policy_runner teleop)
             # owns it — the lease-owner line below makes that visible.
-            with server.gui.add_folder("제어권 (Lease)"):
+            # Collapsed by default, like 직접교시 below: holding the lease takes
+            # control authority away from other command sources, so it stays
+            # folded to avoid accidental toggles.
+            with server.gui.add_folder("제어권 (Lease)", expand_by_default=False):
                 handles["lease_owner_status"] = server.gui.add_text(
                     "Lease owner", initial_value="unknown", disabled=True
                 )
@@ -1924,18 +1972,31 @@ def build_gui(
 
         with _op_tabs.add_tab("안전"):
             with server.gui.add_folder("Stand Safety Floor"):
-                # Runtime enforce on/off. Synced from telemetry on the first state
-                # (see _update_floor_panel), then operator-controlled. Only effective
-                # when floor_constraint.enable=true in the server config.
+                # Runtime enforce on/off. The operator's last choice is persisted to
+                # the GUI settings file and restored here as the checkbox default; once
+                # the state stream is live it is re-applied to the server (see the
+                # one-shot block in update_gui) so the saved choice wins over
+                # the config default. With no saved preference we fall back to syncing
+                # from telemetry on the first state (see _update_floor_panel). Only
+                # effective when floor_constraint.enable=true in the server config.
+                _floor_pref = _load_gui_settings().get("stand_floor_enforce")
+                _floor_pref = _floor_pref if isinstance(_floor_pref, bool) else None
+                handles["stand_floor_enforce_pref"] = _floor_pref
                 if hasattr(server.gui, "add_checkbox"):
                     floor_enforce = server.gui.add_checkbox(
-                        "Enforce stand floor", initial_value=True
+                        "Enforce stand floor",
+                        initial_value=_floor_pref if _floor_pref is not None else True,
                     )
                     handles["floor_enforce_toggle"] = floor_enforce
 
                     @floor_enforce.on_update
                     def _(_: Any) -> None:
-                        ok, message = safety.send_set_floor_enabled(bool(floor_enforce.value))
+                        enabled = bool(floor_enforce.value)
+                        ok, message = safety.send_set_floor_enabled(enabled)
+                        # Remember the operator's choice for the next launch (and so the
+                        # restore block stops fighting telemetry from here on).
+                        handles["stand_floor_enforce_pref"] = enabled
+                        _update_gui_setting("stand_floor_enforce", enabled)
                         handles["floor_set_status"].value = ("OK: " if ok else "BLOCKED: ") + message
                 handles["floor_applied"] = server.gui.add_text(
                     "Applied z", initial_value="no state", disabled=True
@@ -2992,15 +3053,19 @@ def _update_floor_panel(handles: dict[str, Any], latest: StateSnapshot | None) -
     update_floor_plane(handles.get("scene", {}), floor)
     # One-shot: bring the enforce checkbox up at the server-reported state, then leave
     # it operator-controlled (guarded by a flag so we don't fight the user's clicks).
+    # Skip this when the operator has a persisted preference: that choice is restored
+    # as the checkbox default and pushed to the server in _build_status_updater, so we
+    # must not overwrite it from telemetry here (see update_gui).
     if (
         "floor_enforce_toggle" in handles
         and isinstance(floor, Mapping)
         and not handles.get("floor_enforce_synced", False)
     ):
-        try:
-            handles["floor_enforce_toggle"].value = bool(floor.get("enabled", False))
-        except Exception:
-            pass
+        if handles.get("stand_floor_enforce_pref") is None:
+            try:
+                handles["floor_enforce_toggle"].value = bool(floor.get("enabled", False))
+            except Exception:
+                pass
         handles["floor_enforce_synced"] = True
     slider = handles.get("floor_slider")
     if not isinstance(floor, Mapping) or not bool(floor.get("enabled", False)):
@@ -3355,6 +3420,24 @@ def update_gui(
             if "user_floor_set_status" in handles:
                 handles["user_floor_set_status"].value = ("restored: " if ok else "restore failed: ") + msg
         handles["user_floor_resent"] = True
+    # One-shot: re-apply the operator's persisted "Enforce stand floor" choice once the
+    # state stream is live, so the GUI's last setting wins over the server's config
+    # default on every launch. No-op when there is no saved preference (the checkbox then
+    # just mirrors telemetry) or when the server already reports the desired state.
+    if not stale and not handles.get("floor_enforce_resent", False):
+        pref = handles.get("stand_floor_enforce_pref")
+        if isinstance(pref, bool):
+            floor = latest.floor_constraint if latest is not None else None
+            server_enabled = (
+                bool(floor.get("enabled", False)) if isinstance(floor, Mapping) else None
+            )
+            if server_enabled != pref:
+                ok, msg = safety.send_set_floor_enabled(pref)
+                if "floor_set_status" in handles:
+                    handles["floor_set_status"].value = (
+                        "restored: " if ok else "restore failed: "
+                    ) + msg
+        handles["floor_enforce_resent"] = True
     if "fk_status" in handles:
         handles["fk_status"].value = _format_fk_status(latest, stale=stale)
     if "tcp_tracking" in handles:

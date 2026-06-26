@@ -139,6 +139,14 @@ class GripperConfig:
     # real_policy additionally requires safety.allow_real_gripper_motion and
     # the RB_ALLOW_REAL_GRIPPER=1 env gate.
     actuate_in_controller_simulation: bool = False
+    # Whether to drive both grippers fully OPEN once at rollout startup so every
+    # rollout begins from a known open pose. DEFAULT OFF: hold each gripper at its
+    # current power-on position instead (the backend seeds its target from the live
+    # motor position on connect). Left/right Pika motors have opposite power-on
+    # directions when not homed, so a blind startup-open lands asymmetrically
+    # (observed: right opens, left closes); holding the existing position avoids
+    # that. Set true to restore the legacy open-at-startup.
+    startup_open: bool = False
 
     def __post_init__(self) -> None:
         if self.backend not in {"none", "pika_serial"}:
@@ -550,6 +558,8 @@ def _gripper_config(raw: dict[str, Any]) -> GripperConfig:
         raw["suppress_sdk_logs"] = bool(raw["suppress_sdk_logs"])
     if "actuate_in_controller_simulation" in raw:
         raw["actuate_in_controller_simulation"] = bool(raw["actuate_in_controller_simulation"])
+    if "startup_open" in raw:
+        raw["startup_open"] = bool(raw["startup_open"])
     return GripperConfig(**raw)
 
 

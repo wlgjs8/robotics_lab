@@ -167,6 +167,10 @@ if(BUILD_TESTING)
     target_link_libraries(test_init_motion_planner PRIVATE rb_servo_core)
     add_test(NAME init_motion_planner COMMAND test_init_motion_planner)
 
+    add_executable(test_init_motion_pursuit tests/test_init_motion_pursuit.cpp)
+    target_link_libraries(test_init_motion_pursuit PRIVATE rb_servo_core)
+    add_test(NAME init_motion_pursuit COMMAND test_init_motion_pursuit)
+
     add_executable(test_floor_constraint tests/test_floor_constraint.cpp)
     target_link_libraries(test_floor_constraint PRIVATE rb_servo_core)
     add_test(NAME floor_constraint COMMAND test_floor_constraint)

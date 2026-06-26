@@ -7,6 +7,7 @@
 #include <limits>
 #include <memory>
 #include <random>
+#include <sstream>
 
 #include "rb_servo/math/se3.hpp"
 
@@ -268,7 +269,11 @@ InitMotionPlanResult InitMotionPlanner::plan(
     }
     if (!d.clear(goal)) {
         // The init pose itself collides / dips below the floor — refuse (fail-closed).
-        result.message = "init motion plan: goal config not collision/floor clear";
+        std::ostringstream m;
+        m << "init motion plan: goal config not collision/floor clear"
+          << " (goal_clear_m=" << d.minClearance(goal)
+          << ", thresh_m=" << d.clear_threshold_m << ")";
+        result.message = m.str();
         return result;
     }
 
@@ -323,7 +328,21 @@ InitMotionPlanResult InitMotionPlanner::plan(
         result.iterations = iter;
         if (!connected) {
             result.planning_time_s = std::chrono::duration<double>(Clock::now() - t0).count();
-            result.message = "init motion plan: RRT-Connect did not find a path within budget";
+            // Diagnostics: which budget ran out, how far each tree grew, and whether the
+            // endpoints themselves are clear. tree_start staying ~1 means the START pose
+            // could not escape (start in/near collision); both trees large but unconnected
+            // means a narrow passage / the sample band (sample_margin_deg) is too tight or
+            // the time/iteration budget is too small.
+            std::ostringstream m;
+            m << "init motion plan: RRT-Connect did not find a path within budget"
+              << " (iters=" << iter << "/" << d.cfg.max_iterations
+              << ", time=" << result.planning_time_s << "/" << d.cfg.max_planning_time_sec << "s"
+              << ", tree_start=" << tree_a.size() << ", tree_goal=" << tree_b.size()
+              << ", start_clear_m=" << d.minClearance(start)
+              << ", goal_clear_m=" << d.minClearance(goal)
+              << ", thresh_m=" << d.clear_threshold_m
+              << ", sample_margin_deg=" << d.cfg.sample_margin_deg << ")";
+            result.message = m.str();
             return result;
         }
         // start_path: start..q_new ; goal_path: goal..q_new -> reverse tail to append.
