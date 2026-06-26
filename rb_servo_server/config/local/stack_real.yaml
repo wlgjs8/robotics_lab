@@ -201,6 +201,15 @@ safety:
       package_dirs:
         - "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e"
       pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_hull.STL"
+      # 2026-06-26: ARTICULATED gripper collision — static base hull + two movable finger
+      # hulls (convex hulls of the visual STLs) attached at attachment_site (identity, no
+      # +90° Z), the fingers tracking the live jaw open percent via setGripperOpenPercent
+      # (mirrors rb3_730e_pika_articulated.urdf). Takes precedence over pika_gripper_mesh.
+      # Remove these three to fall back to the single static hull above.
+      pika_gripper_base_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_base.STL"
+      pika_finger_left_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_finger_left.STL"
+      pika_finger_right_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_finger_right.STL"
+      gripper_finger_travel_m: 0.047
       stand_ignore_arm_substrings: ["link0"]
       d_hard_m: 0.007   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
       # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier

@@ -1452,6 +1452,10 @@ DualArmServoLoop::DualArmServoLoop(
         collision_monitor_cfg_.unified_urdf = m.unified_urdf;
         collision_monitor_cfg_.package_dirs = m.package_dirs;
         collision_monitor_cfg_.pika_gripper_mesh = m.pika_gripper_mesh;
+        collision_monitor_cfg_.pika_gripper_base_mesh = m.pika_gripper_base_mesh;
+        collision_monitor_cfg_.pika_finger_left_mesh = m.pika_finger_left_mesh;
+        collision_monitor_cfg_.pika_finger_right_mesh = m.pika_finger_right_mesh;
+        collision_monitor_cfg_.gripper_finger_travel_m = m.gripper_finger_travel_m;
         collision_monitor_cfg_.stand_frame = m.stand_frame;
         collision_monitor_cfg_.left_prefix = m.left_prefix;
         collision_monitor_cfg_.right_prefix = m.right_prefix;
@@ -4380,6 +4384,15 @@ ServoTarget DualArmServoLoop::applySafety(
                         false, math::Vector3::Zero(), math::Vector3::UnitZ());
                 }
             }
+            // Drive the articulated gripper's finger hulls to the live jaw open percent
+            // so the checked gripper tracks the real gripper (no-op unless the
+            // articulated meshes were configured). Invalid feedback -> open (envelope).
+            if (collision_monitor_->hasArticulatedGripper()) {
+                collision_monitor_->setGripperOpenPercent(
+                    ArmId::Left, effectiveGripperPercent(ArmId::Left));
+                collision_monitor_->setGripperOpenPercent(
+                    ArmId::Right, effectiveGripperPercent(ArmId::Right));
+            }
             collision_monitor_->submitTargets(out.left_q_target_deg, out.right_q_target_deg);
             const CollisionVerdict v = collision_monitor_->latest();
             last_collision_verdict_ = v;
@@ -5583,15 +5596,16 @@ DualArmCommand DualArmServoLoop::applyCollisionFreeLinearMove(
         // current TCP, not parked at a destination) -> the move is a near no-op.
         if (r.goal_vs_start_max_deg < 1.0) {
             std::cerr << "[WARN] TcpLinearMove(collision-free): goal is only "
-                      << r.goal_vs_start_max_deg
-                      << " deg from current pose -> near no-op (is the target marker "
+                      << r.goal_vs_start_max_deg << " deg / " << r.goal_vs_start_cart_m
+                      << " m from current pose -> near no-op (is the target marker "
                          "following current TCP? drag it to a destination first)\n";
         }
         if (r.decision == InitMotionLinearResult::Decision::Straight) {
             lx.status = LinearMoveStatus::Straight;
             lx.message = "straight";
             std::cerr << "[INFO] TcpLinearMove(collision-free): straight path clear; running MoveL"
-                      << " (goal_vs_current=" << r.goal_vs_start_max_deg << " deg)\n";
+                      << " (goal_vs_current=" << r.goal_vs_start_max_deg << " deg / "
+                      << r.goal_vs_start_cart_m << " m)\n";
         } else if (r.decision == InitMotionLinearResult::Decision::Detour) {
             lx.waypoints = std::move(r.waypoints);
             lx.index = 0;
@@ -5599,7 +5613,8 @@ DualArmCommand DualArmServoLoop::applyCollisionFreeLinearMove(
             lx.message = "detour";
             std::cerr << "[INFO] TcpLinearMove(collision-free): straight path blocked; "
                       << "streaming collision-free detour (" << lx.waypoints.size()
-                      << " waypoints, goal_vs_current=" << r.goal_vs_start_max_deg << " deg)\n";
+                      << " waypoints, goal_vs_current=" << r.goal_vs_start_max_deg << " deg / "
+                      << r.goal_vs_start_cart_m << " m)\n";
         } else {
             lx.status = LinearMoveStatus::Failed;
             lx.message = r.message;

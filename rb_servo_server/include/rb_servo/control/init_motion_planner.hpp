@@ -60,6 +60,10 @@ struct InitMotionLinearResult {
     // ~0 means the requested TCP target is essentially the current pose (e.g., the GUI
     // target marker is following current TCP) -> the move is a near no-op. Diagnostic.
     double goal_vs_start_max_deg = 0.0;
+    // Max TCP position distance (m, over active arms) between the current pose and the
+    // requested target. Pairs with goal_vs_start_max_deg to tell "small gizmo drag"
+    // (small metres) apart from a frame/IK oddity (large metres, small degrees). Diagnostic.
+    double goal_vs_start_cart_m = 0.0;
 };
 
 class InitMotionPlanner {

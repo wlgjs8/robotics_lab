@@ -51,6 +51,17 @@ struct CollisionMonitorConfig {
     std::string unified_urdf;             // .../dual_rb3_730e_ver3.urdf
     std::vector<std::string> package_dirs;  // resolve mesh "../../../meshes" paths
     std::string pika_gripper_mesh;        // optional; attached as a convex hull
+    // ARTICULATED gripper collision (optional). When base + both finger meshes are set,
+    // the gripper is modeled as a STATIC base hull + two MOVABLE finger hulls (convex
+    // hulls of the visual STLs) attached at <prefix>attachment_site, mirroring
+    // rb3_730e_pika_articulated.urdf: identity placement (no +90° Z), fingers translate
+    // along the local +X (jaw axis) by setGripperOpenPercent so the checked gripper jaw
+    // tracks the live open percent. Takes precedence over pika_gripper_mesh (single
+    // static hull) when all three are present; otherwise the single-hull path is used.
+    std::string pika_gripper_base_mesh;
+    std::string pika_finger_left_mesh;
+    std::string pika_finger_right_mesh;
+    double gripper_finger_travel_m = 0.047;  // per-finger jaw travel open(0)->closed
     std::string stand_frame = "stand";    // unified-URDF frame for stand geometry
     std::string left_prefix = "dual_rb3_730e_left_";   // attachment_site prefix
     std::string right_prefix = "dual_rb3_730e_right_";
@@ -263,6 +274,18 @@ public:
 
     // True if the model contains a "ground_plane" geometry (i.e. it can be tracked).
     bool hasGroundPlane() const;
+
+    // Runtime jaw open percent (0 closed .. 100 open) for the ARTICULATED gripper
+    // model: repositions that arm's two finger hulls along the local jaw axis (+X) so
+    // the checked gripper tracks the live gripper, mirroring the URDF/GUI articulation.
+    // Cheap (mutex store); applied on the monitor thread before its next eval. No-op
+    // unless the articulated gripper meshes were configured. Safe to call from servo_j.
+    // An oracle that never calls this stays at the conservative OPEN jaw (e.g. the
+    // InitMotion planner) — the largest envelope.
+    void setGripperOpenPercent(ArmId arm, double percent);
+
+    // True if the articulated gripper (movable finger hulls) is in the model.
+    bool hasArticulatedGripper() const;
 
     // Run one evaluation synchronously on the calling thread (startup / tests).
     CollisionVerdict evalOnce(const JointArray& left_deg, const JointArray& right_deg);

@@ -1724,6 +1724,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "unified_urdf",
                     "package_dirs",
                     "pika_gripper_mesh",
+                    "pika_gripper_base_mesh",
+                    "pika_finger_left_mesh",
+                    "pika_finger_right_mesh",
+                    "gripper_finger_travel_m",
                     "left_prefix",
                     "right_prefix",
                     "stand_frame",
@@ -1767,6 +1771,21 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 if (has(m, "pika_gripper_mesh")) {
                     mc.pika_gripper_mesh = resolvePathForConfig(
                         asString(m["pika_gripper_mesh"], "safety.self_collision.mesh.pika_gripper_mesh"), path);
+                }
+                if (has(m, "pika_gripper_base_mesh")) {
+                    mc.pika_gripper_base_mesh = resolvePathForConfig(
+                        asString(m["pika_gripper_base_mesh"], "safety.self_collision.mesh.pika_gripper_base_mesh"), path);
+                }
+                if (has(m, "pika_finger_left_mesh")) {
+                    mc.pika_finger_left_mesh = resolvePathForConfig(
+                        asString(m["pika_finger_left_mesh"], "safety.self_collision.mesh.pika_finger_left_mesh"), path);
+                }
+                if (has(m, "pika_finger_right_mesh")) {
+                    mc.pika_finger_right_mesh = resolvePathForConfig(
+                        asString(m["pika_finger_right_mesh"], "safety.self_collision.mesh.pika_finger_right_mesh"), path);
+                }
+                if (has(m, "gripper_finger_travel_m")) {
+                    mc.gripper_finger_travel_m = asDouble(m["gripper_finger_travel_m"], "safety.self_collision.mesh.gripper_finger_travel_m");
                 }
                 if (has(m, "left_prefix")) mc.left_prefix = asString(m["left_prefix"], "safety.self_collision.mesh.left_prefix");
                 if (has(m, "right_prefix")) mc.right_prefix = asString(m["right_prefix"], "safety.self_collision.mesh.right_prefix");

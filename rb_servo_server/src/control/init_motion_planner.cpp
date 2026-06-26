@@ -432,6 +432,21 @@ InitMotionLinearResult InitMotionPlanner::planLinearMove(
         ? d.kin->computeTcpStand(ArmId::Left, start_left, d.left_mount) : Pose6D{};
     const Pose6D start_pose_right = right_active
         ? d.kin->computeTcpStand(ArmId::Right, start_right, d.right_mount) : Pose6D{};
+
+    // Diagnostic: TCP position distance (m) from current to the requested target. Tells a
+    // small gizmo drag (small metres) apart from a frame/IK oddity (large metres).
+    const auto posDist = [](const Pose6D& a, const Pose6D& b) {
+        const double dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    };
+    if (left_active) {
+        res.goal_vs_start_cart_m = std::max(res.goal_vs_start_cart_m,
+            posDist(start_pose_left, goal_pose_left));
+    }
+    if (right_active) {
+        res.goal_vs_start_cart_m = std::max(res.goal_vs_start_cart_m,
+            posDist(start_pose_right, goal_pose_right));
+    }
     const int n = std::max(1, check_samples);
     JointArray prev_left = start_left;
     JointArray prev_right = start_right;

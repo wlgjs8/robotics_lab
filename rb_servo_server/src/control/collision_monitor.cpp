@@ -224,6 +224,19 @@ struct CollisionMonitor::Impl {
     double gp_thickness_ = 0.0;
     // per-collision-pair external flag (1 = arm<->external obstacle, e.g. ground_plane).
     std::vector<char> pair_external_;
+    // ARTICULATED gripper: per-arm movable finger hull geometry + the (open) base
+    // placement, repositioned along local +X by the live jaw percent. gripper_[0]=Left,
+    // [1]=Right. gripper_pct_ is guarded by in_mtx; defaults OPEN (largest envelope) so
+    // an oracle that never calls setGripperOpenPercent stays conservative.
+    struct GripperFingers {
+        std::size_t left_idx = std::numeric_limits<std::size_t>::max();
+        std::size_t right_idx = std::numeric_limits<std::size_t>::max();
+        pinocchio::SE3 attach_placement = pinocchio::SE3::Identity();
+        bool present = false;
+    };
+    GripperFingers gripper_[2];
+    double gripper_pct_[2] = {100.0, 100.0};  // guarded by in_mtx
+    bool articulated_ = false;
     // stand frame pose in the model's universe frame (constant; the stand is fixed to
     // the root). setGroundPlanePose() takes the floor plane in STAND frame (matching
     // the servo loop's floor_constraint / user_floor), so we map it through this.
@@ -320,6 +333,31 @@ struct CollisionMonitor::Impl {
         geom.geometryObjects[gp_index_].placement = groundPlanePlacement(enabled, point, normal);
     }
 
+    // Reposition each arm's two finger hulls along the local jaw axis (+X) for the live
+    // open percent (monitor thread only, before computeDistances). finger_pos goes 0 at
+    // OPEN (percent 100, the STL pose) to travel at CLOSED (percent 0); left finger +X,
+    // right finger -X, mirroring rb3_730e_pika_articulated.urdf + the GUI articulation.
+    void applyGripperFingers() {
+        if (!articulated_) return;
+        double pct[2];
+        {
+            std::lock_guard<std::mutex> lk(in_mtx);
+            pct[0] = gripper_pct_[0];
+            pct[1] = gripper_pct_[1];
+        }
+        for (int a = 0; a < 2; ++a) {
+            const GripperFingers& g = gripper_[a];
+            if (!g.present) continue;
+            const double t = std::clamp(pct[a], 0.0, 100.0) / 100.0;
+            const double finger_pos = (1.0 - t) * cfg.gripper_finger_travel_m;
+            const Eigen::Matrix3d I = Eigen::Matrix3d::Identity();
+            geom.geometryObjects[g.left_idx].placement =
+                g.attach_placement * pinocchio::SE3(I, Eigen::Vector3d(finger_pos, 0.0, 0.0));
+            geom.geometryObjects[g.right_idx].placement =
+                g.attach_placement * pinocchio::SE3(I, Eigen::Vector3d(-finger_pos, 0.0, 0.0));
+        }
+    }
+
     void buildModel() {
         pinocchio::urdf::buildModel(cfg.unified_urdf, model);
         data = pinocchio::Data(model);
@@ -396,12 +434,49 @@ struct CollisionMonitor::Impl {
                 if (bvh->convex) go.geometry = bvh->convex;
             }
         }
-        // attach Pika gripper convex hull to each arm's attachment_site frame
-        if (!cfg.pika_gripper_mesh.empty()) {
+        // Attach the Pika gripper to each arm's attachment_site frame. Two modes:
+        //  (1) ARTICULATED (base + both finger meshes set): a static base hull plus two
+        //      movable finger hulls placed at identity in the attachment_site frame
+        //      (mirrors rb3_730e_pika_articulated.urdf — no +90° Z). The finger hulls
+        //      are repositioned along local +X by setGripperOpenPercent so the checked
+        //      jaw tracks the live gripper. Default placement = OPEN (finger_pos 0).
+        //  (2) SINGLE HULL (pika_gripper_mesh only): the legacy static convex hull at
+        //      attachment_site with a +90° Z rotation (the combined-hull STL frame).
+        auto loadConvex = [](coal::MeshLoader& ld, const std::string& path) {
+            auto bvh = ld.load(path, coal::Vec3s(0.001, 0.001, 0.001));
+            bvh->buildConvexRepresentation(false);
+            return bvh->convex;
+        };
+        const bool articulated = !cfg.pika_gripper_base_mesh.empty() &&
+                                 !cfg.pika_finger_left_mesh.empty() &&
+                                 !cfg.pika_finger_right_mesh.empty();
+        if (articulated) {
             coal::MeshLoader loader;
-            auto pbvh = loader.load(cfg.pika_gripper_mesh, coal::Vec3s(0.001, 0.001, 0.001));
-            pbvh->buildConvexRepresentation(false);
-            auto hull = pbvh->convex;
+            auto base_hull = loadConvex(loader, cfg.pika_gripper_base_mesh);
+            auto fl_hull = loadConvex(loader, cfg.pika_finger_left_mesh);
+            auto fr_hull = loadConvex(loader, cfg.pika_finger_right_mesh);
+            const std::array<std::pair<std::string, ArmId>, 2> arms = {{
+                {cfg.left_prefix, ArmId::Left}, {cfg.right_prefix, ArmId::Right}}};
+            for (const auto& [prefix, aid] : arms) {
+                const auto fid = model.getFrameId(prefix + "attachment_site");
+                const auto& fr = model.frames[fid];
+                const pinocchio::SE3 place = fr.placement;  // identity local (URDF mirror)
+                geom.addGeometryObject(pinocchio::GeometryObject(
+                    prefix + "pika_gripper_base", fr.parentJoint, fr.parentFrame, place, base_hull));
+                geom.addGeometryObject(pinocchio::GeometryObject(
+                    prefix + "pika_finger_left", fr.parentJoint, fr.parentFrame, place, fl_hull));
+                geom.addGeometryObject(pinocchio::GeometryObject(
+                    prefix + "pika_finger_right", fr.parentJoint, fr.parentFrame, place, fr_hull));
+                GripperFingers& g = gripper_[aid == ArmId::Left ? 0 : 1];
+                g.left_idx = geom.getGeometryId(prefix + "pika_finger_left");
+                g.right_idx = geom.getGeometryId(prefix + "pika_finger_right");
+                g.attach_placement = place;
+                g.present = true;
+            }
+            articulated_ = true;
+        } else if (!cfg.pika_gripper_mesh.empty()) {
+            coal::MeshLoader loader;
+            auto hull = loadConvex(loader, cfg.pika_gripper_mesh);
             const Eigen::Matrix3d rz =
                 Eigen::AngleAxisd(M_PI / 2.0, Eigen::Vector3d::UnitZ()).toRotationMatrix();
             for (const std::string prefix : {cfg.left_prefix, cfg.right_prefix}) {
@@ -492,7 +567,9 @@ struct CollisionMonitor::Impl {
         for (std::size_t i = 0; i < cfg.stand_ignore_arm_substrings.size(); ++i)
             std::cerr << (i ? "," : "") << cfg.stand_ignore_arm_substrings[i];
         std::cerr << "] swept_samples=" << cfg.swept_samples
-                  << (cfg.pika_gripper_mesh.empty() ? " gripper=NONE" : " gripper=attached")
+                  << (articulated_ ? " gripper=articulated(base+2fingers)"
+                                   : (cfg.pika_gripper_mesh.empty() ? " gripper=NONE"
+                                                                    : " gripper=hull"))
                   << std::endl;
     }
 
@@ -608,6 +685,7 @@ struct CollisionMonitor::Impl {
     CollisionVerdict evalLocked(const JointArray& l, const JointArray& r) {
         setQ(l, r);  // writes the target config into q
         applyGroundPlanePose();  // track the operator's active floor (if controlled)
+        applyGripperFingers();   // track the live jaw open percent (articulated gripper)
         const int N = std::max(1, cfg.swept_samples);
         Eigen::VectorXd q_eval = q;  // configuration gdata ends up at (for J_n)
         if (N <= 1 || !have_prev_eval) {
@@ -706,6 +784,13 @@ void CollisionMonitor::setGroundPlanePose(bool enabled, const Eigen::Vector3d& p
 bool CollisionMonitor::hasGroundPlane() const {
     return impl_->gp_index_ != std::numeric_limits<std::size_t>::max();
 }
+
+void CollisionMonitor::setGripperOpenPercent(ArmId arm, double percent) {
+    std::lock_guard<std::mutex> lk(impl_->in_mtx);
+    impl_->gripper_pct_[arm == ArmId::Left ? 0 : 1] = percent;
+}
+
+bool CollisionMonitor::hasArticulatedGripper() const { return impl_->articulated_; }
 
 CollisionVerdict CollisionMonitor::evalOnce(const JointArray& left_deg, const JointArray& right_deg) {
     CollisionVerdict v = impl_->evalLocked(left_deg, right_deg);

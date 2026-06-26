@@ -29,6 +29,7 @@ from rb_servo_gui.app import (
     _push_gripper_percent,
     _update_gripper_feedback,
     _send_gripper_command,
+    _user_floor_display_points,
     _apply_init_joints_live,
     _nudge_label,
     _status_summary_html,
@@ -1601,6 +1602,10 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(packet["mode"], "Hold")
         self.assertEqual(packet["left"]["mode"], "TcpLinearMove")
         self.assertEqual(packet["right"], {})
+        # The command must stay fresh through the server's async collision-free decision
+        # + path handoff (the old fixed 0.2 s expired mid-decision so the MoveL never ran).
+        # Generous timeout = duration + 0.5 (floored at 2.0), mirroring the circle pattern.
+        self.assertEqual(packet["timeout_sec"], 2.5)
         self.assertEqual(packet["left"]["duration_sec"], 2.0)
         self.assertEqual(packet["left"]["linear_speed_m_s"], 0.03)
         self.assertEqual(packet["left"]["angular_speed_rad_s"], 0.2)
@@ -3271,6 +3276,22 @@ class FloorConstraintGuiTest(unittest.TestCase):
         self.assertIsNone(absent.user_floor_constraint)
         self.assertEqual(
             _format_user_floor_constraint_status(absent, stale=False), "user floor: off")
+
+    def test_user_floor_display_points_gated_by_toggle_default_off(self):
+        class _Toggle:
+            def __init__(self, v):
+                self.value = v
+
+        pts = [{"p": [0.0, 0.0, 0.0], "arm": "left"}]
+        handles = {"user_floor": {"points": pts}}
+        # No toggle handle -> hidden (default off): nothing rendered.
+        self.assertEqual(_user_floor_display_points(handles), [])
+        # Toggle present but OFF -> still hidden.
+        handles["user_floor_show_points_toggle"] = _Toggle(False)
+        self.assertEqual(_user_floor_display_points(handles), [])
+        # Toggle ON -> the captured points are returned for rendering.
+        handles["user_floor_show_points_toggle"].value = True
+        self.assertEqual(_user_floor_display_points(handles), pts)
 
     def test_build_freedrive_per_arm_packet(self):
         client = CommandClient(host="127.0.0.1", port=0, source_id="rb_gui_test")

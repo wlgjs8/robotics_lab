@@ -1658,47 +1658,94 @@ def _build_checkgeom_overlay(scene_handles: dict[str, Any], manifest: Mapping[st
 
 def _attach_checkgeom_gripper(scene_handles: dict[str, Any], overlay: Any, manifest: Mapping[str, Any]) -> None:
     """Mirror the monitor's runtime Pika-gripper attach in the viewer WITHOUT touching
-    the safety URDF: load the gripper mesh from the manifest and parent it under the
-    unified overlay's "<prefix>attachment_site" link frame (Z+90deg about Z, manifest
-    scale), so the gripper shows as part of the checked geometry. The link frame is
-    located via ViserUrdf's per-joint frames; skips gracefully if unavailable."""
+    the safety URDF, parenting the gripper geometry under the unified overlay's
+    "<prefix>attachment_site" link frame so it shows as part of the checked geometry.
+
+    Two modes, matching the server (collision_monitor.cpp):
+      * ARTICULATED (manifest has base + both finger meshes): a static base mesh +
+        two finger meshes at IDENTITY (no Z+90deg), the fingers repositioned along
+        local +X by the live jaw percent in update_self_collision_check_geom.
+      * SINGLE HULL (pika_gripper_mesh only): the legacy static hull with Z+90deg.
+    Frames are located via ViserUrdf's per-joint frames; skips gracefully if absent."""
     server = scene_handles.get("_server")
-    mesh_path = manifest.get("pika_gripper_mesh")
+    if server is None:
+        return
     attach = manifest.get("gripper_attach") if isinstance(manifest.get("gripper_attach"), Mapping) else {}
-    if server is None or not isinstance(mesh_path, str) or not mesh_path or not Path(mesh_path).exists():
+    scale = float(attach.get("mesh_scale", 0.001))
+    suffix = str(attach.get("frame_suffix", "attachment_site"))
+    rgb = tuple(int(round(c * 255)) for c in _SELF_COLLISION_CHECK_RGBA[:3])
+    opacity = float(_SELF_COLLISION_CHECK_RGBA[3])
+
+    def _exists(p: Any) -> bool:
+        return isinstance(p, str) and bool(p) and Path(p).exists()
+
+    base_path = manifest.get("pika_gripper_base_mesh")
+    fl_path = manifest.get("pika_finger_left_mesh")
+    fr_path = manifest.get("pika_finger_right_mesh")
+    articulated = _exists(base_path) and _exists(fl_path) and _exists(fr_path)
+    hull_path = manifest.get("pika_gripper_mesh")
+    if not articulated and not _exists(hull_path):
         return
     try:
         import trimesh
 
-        scale = float(attach.get("mesh_scale", 0.001))
-        rpy = attach.get("rpy") or [0.0, 0.0, math.pi / 2.0]
-        suffix = str(attach.get("frame_suffix", "attachment_site"))
-        base_mesh = trimesh.load_mesh(mesh_path)
-        base_mesh.apply_scale(scale)
-        rgb = tuple(int(round(c * 255)) for c in _SELF_COLLISION_CHECK_RGBA[:3])
-        opacity = float(_SELF_COLLISION_CHECK_RGBA[3])
-        wxyz = _pose_wxyz((0.0, 0.0, 0.0, float(rpy[0]), float(rpy[1]), float(rpy[2])))
-        # ViserUrdf names each joint-child frame by its full kinematic path; find the
-        # two attachment_site frames (left/right) by link-name suffix.
         frames = list(getattr(overlay, "_joint_frames", []) or [])
-        handles: list[Any] = []
-        for prefix in (manifest.get("left_prefix", ""), manifest.get("right_prefix", "")):
+
+        def _find_frame(prefix: str) -> Any:
             link = f"{prefix}{suffix}"
-            frame = next(
-                (f for f in frames if str(getattr(f, "name", "")).endswith("/" + link)), None)
-            if frame is None:
+            f = next((f for f in frames if str(getattr(f, "name", "")).endswith("/" + link)), None)
+            if f is None:
                 scene_handles["checkgeom_gripper_error"] = f"attachment frame not found: {link}"
-                continue
-            handles.append(server.scene.add_mesh_simple(
-                f"{frame.name}/pika_gripper",
-                vertices=base_mesh.vertices,
-                faces=base_mesh.faces,
-                color=rgb,
-                opacity=opacity,
-                wxyz=wxyz,
-                position=(0.0, 0.0, 0.0),
-                visible=False,
-            ))
+            return f
+
+        def _load(path: str, ident_no_rot: bool) -> Any:
+            mesh = trimesh.load_mesh(path)
+            mesh.apply_scale(scale)
+            return mesh
+
+        arms = (
+            (manifest.get("left_prefix", ""), "left"),
+            (manifest.get("right_prefix", ""), "right"),
+        )
+        handles: list[Any] = []
+        if articulated:
+            base_mesh = _load(base_path, True)
+            fl_mesh = _load(fl_path, True)
+            fr_mesh = _load(fr_path, True)
+            ident = _pose_wxyz((0.0, 0.0, 0.0, 0.0, 0.0, 0.0))  # no Z+90 for base/fingers
+            fingers_by_arm: dict[str, dict[str, Any]] = {}
+            for prefix, arm_name in arms:
+                frame = _find_frame(prefix)
+                if frame is None:
+                    continue
+                base_h = server.scene.add_mesh_simple(
+                    f"{frame.name}/pika_gripper_base", vertices=base_mesh.vertices,
+                    faces=base_mesh.faces, color=rgb, opacity=opacity, wxyz=ident,
+                    position=(0.0, 0.0, 0.0), visible=False)
+                lh = server.scene.add_mesh_simple(
+                    f"{frame.name}/pika_finger_left", vertices=fl_mesh.vertices,
+                    faces=fl_mesh.faces, color=rgb, opacity=opacity, wxyz=ident,
+                    position=(0.0, 0.0, 0.0), visible=False)
+                rh = server.scene.add_mesh_simple(
+                    f"{frame.name}/pika_finger_right", vertices=fr_mesh.vertices,
+                    faces=fr_mesh.faces, color=rgb, opacity=opacity, wxyz=ident,
+                    position=(0.0, 0.0, 0.0), visible=False)
+                handles.extend((base_h, lh, rh))
+                fingers_by_arm[arm_name] = {"left": lh, "right": rh}
+            scene_handles["checkgeom_gripper_fingers"] = fingers_by_arm
+            scene_handles["checkgeom_finger_travel"] = float(
+                manifest.get("gripper_finger_travel_m", _GRIPPER_FINGER_TRAVEL_M))
+        else:
+            rpy = attach.get("rpy") or [0.0, 0.0, math.pi / 2.0]
+            wxyz = _pose_wxyz((0.0, 0.0, 0.0, float(rpy[0]), float(rpy[1]), float(rpy[2])))
+            hull = _load(hull_path, False)
+            for prefix, _arm_name in arms:
+                frame = _find_frame(prefix)
+                if frame is None:
+                    continue
+                handles.append(server.scene.add_mesh_simple(
+                    f"{frame.name}/pika_gripper", vertices=hull.vertices, faces=hull.faces,
+                    color=rgb, opacity=opacity, wxyz=wxyz, position=(0.0, 0.0, 0.0), visible=False))
         scene_handles["checkgeom_gripper"] = handles
     except Exception as exc:
         scene_handles["checkgeom_gripper_error"] = f"{type(exc).__name__}: {exc}"
@@ -1744,6 +1791,24 @@ def update_self_collision_check_geom(scene_handles: dict[str, Any], latest: Any,
     # The gripper meshes are independent child handles (not part of show_collision).
     for handle in scene_handles.get("checkgeom_gripper", []):
         _set_visible(handle, show)
+    # Articulated gripper: slide each arm's two finger meshes along local +X by the live
+    # jaw percent, mirroring the server's setGripperOpenPercent (finger_pos 0 at OPEN ->
+    # travel at CLOSED; left +X, right -X). Uses gripper_percent_<arm> from _push_gripper_percent.
+    fingers = scene_handles.get("checkgeom_gripper_fingers")
+    if show and isinstance(fingers, dict):
+        travel = float(scene_handles.get("checkgeom_finger_travel", _GRIPPER_FINGER_TRAVEL_M))
+        for arm_name, hd in fingers.items():
+            pct = scene_handles.get(f"gripper_percent_{arm_name}")
+            try:
+                t = max(0.0, min(100.0, float(pct))) / 100.0 if pct is not None else 1.0
+            except (TypeError, ValueError):
+                t = 1.0
+            pos = (1.0 - t) * travel
+            try:
+                hd["left"].position = (pos, 0.0, 0.0)
+                hd["right"].position = (-pos, 0.0, 0.0)
+            except Exception:
+                pass
     # Collision view: hide the solid visual robots while the overlay is on so the
     # hulls (which hug the links) are not occluded; restore them when off.
     for side in ("left", "right"):

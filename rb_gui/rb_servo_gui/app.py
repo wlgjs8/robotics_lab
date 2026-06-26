@@ -932,6 +932,17 @@ def _user_floor_point_counts(state: Mapping[str, Any]) -> str:
     return f"{len(pts)} pts: L{left} R{right}"
 
 
+def _user_floor_display_points(handles: dict[str, Any]) -> list:
+    """Captured contact points to RENDER, gated by the 'Show capture points'
+    toggle (default OFF). Returns [] when the toggle is missing or off, which
+    makes update_user_floor_capture_points hide the cyan/magenta point cloud."""
+    toggle = handles.get("user_floor_show_points_toggle")
+    if toggle is None or not bool(getattr(toggle, "value", False)):
+        return []
+    points = _user_floor_state(handles).get("points", [])
+    return points if isinstance(points, list) else []
+
+
 def _user_floor_xy_span(state: Mapping[str, Any]) -> tuple[float, float]:
     """(x_extent, y_extent) in meters of the captured points' bounding box."""
     pts = [e["p"] for e in state.get("points", []) if isinstance(e.get("p"), (list, tuple))]
@@ -2134,6 +2145,13 @@ def build_gui(
                 capture_right = server.gui.add_button("Capture RIGHT contact")
                 remove_last = server.gui.add_button("Remove last point")
                 clear_points = server.gui.add_button("Clear points")
+                # Show/hide the captured contact-point markers (left=cyan,
+                # right=magenta). Default OFF so the points don't clutter the scene;
+                # they are still stored/fit, just not drawn until toggled on.
+                if hasattr(server.gui, "add_checkbox"):
+                    handles["user_floor_show_points_toggle"] = server.gui.add_checkbox(
+                        "Show capture points", initial_value=False
+                    )
                 handles["user_floor_margin_slider"] = server.gui.add_slider(
                     "Lift margin mm", min=0.0, max=50.0, step=0.5,
                     initial_value=float(uf_state.get("margin_mm", 0.0)),
@@ -2159,9 +2177,16 @@ def build_gui(
                             handles["user_floor_plane_text"].value = "invalid"
                     else:
                         handles["user_floor_plane_text"].value = "none"
-                    update_user_floor_capture_points(handles.get("scene", {}), state.get("points", []))
+                    update_user_floor_capture_points(
+                        handles.get("scene", {}), _user_floor_display_points(handles))
 
                 handles["user_floor_refresh_fn"] = _refresh_user_floor_texts
+
+                if "user_floor_show_points_toggle" in handles:
+                    @handles["user_floor_show_points_toggle"].on_update
+                    def _(_: Any) -> None:
+                        # Re-render immediately so toggling shows/hides the markers.
+                        _refresh_user_floor_texts()
 
                 @capture_left.on_click
                 def _(_: Any) -> None:
@@ -3429,7 +3454,7 @@ def update_gui(
         handles["user_floor_constraint"].value = _format_user_floor_constraint_status(latest, stale=stale)
     update_user_floor_plane(handles.get("scene", {}), latest.user_floor_constraint)
     update_user_floor_capture_points(
-        handles.get("scene", {}), _user_floor_state(handles).get("points", []))
+        handles.get("scene", {}), _user_floor_display_points(handles))
     # Restore a persisted, previously-enabled user floor plane once the state stream
     # is live (the server starts with it disabled until commanded). RETRY until the
     # server telemetry confirms enabled: the leaseless command can be dropped while the

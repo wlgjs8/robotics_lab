@@ -187,7 +187,7 @@ class CommandClient:
         linear_speed_m_s: float | None = None,
         angular_speed_rad_s: float | None = None,
         orientation_mode: str = "constant",
-        timeout_sec: float = 0.2,
+        timeout_sec: float | None = None,
     ) -> dict[str, Any]:
         if left_pose is None and right_pose is None:
             raise ValueError("at least one TCP linear target is required")
@@ -197,6 +197,16 @@ class CommandClient:
         if parsed_duration is None and parsed_linear_speed is None:
             raise ValueError("duration_sec or linear_speed_m_s is required")
         parsed_orientation_mode = self._orientation_mode(orientation_mode)
+        # Keep this one-shot TcpLinearMove command FRESH long enough for the server's
+        # async collision-free decision to complete AND hand the path to the Cartesian
+        # executor (whose own finite-path continuation then carries it across staleness).
+        # The prior fixed 0.2 s expired DURING the decision, so on a slow decision the
+        # executor only ever saw a synthetic Hold and the MoveL never started (the arm
+        # did not move; every click just re-decided Straight). Mirrors the circle's
+        # timeout pattern. Hold/E-stop still cancel; the server execution_timeout bounds runaway.
+        if timeout_sec is None:
+            base = parsed_duration if parsed_duration is not None else 0.0
+            timeout_sec = max(2.0, base + 0.5)
         packet: dict[str, Any] = {
             "schema_version": 1,
             "seq": self.next_seq(),

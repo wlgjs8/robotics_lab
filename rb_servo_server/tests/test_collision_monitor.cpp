@@ -6,6 +6,8 @@
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <map>
+#include <string>
 #include <thread>
 
 #include "rb_servo/control/collision_monitor.hpp"
@@ -448,9 +450,71 @@ static bool runExternalDHard() {
     return true;
 }
 
+// Articulated gripper: the two finger hulls reposition along the jaw axis with the live
+// open percent, so finger<->other-geometry clearances change between OPEN and CLOSED.
+static bool runArticulatedGripper() {
+    const fs::path ws = workspaceRoot();
+    CollisionMonitorConfig cfg = makeConfig(ws);
+    if (!fs::is_regular_file(cfg.unified_urdf)) {
+        std::cout << "SKIP: unified URDF not found (articulated gripper test)\n";
+        return true;
+    }
+    const fs::path tool =
+        ws / "robotics_lab/rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool";
+    cfg.pika_gripper_base_mesh = (tool / "pika_gripper_base.STL").string();
+    cfg.pika_finger_left_mesh = (tool / "pika_finger_left.STL").string();
+    cfg.pika_finger_right_mesh = (tool / "pika_finger_right.STL").string();
+    cfg.gripper_finger_travel_m = 0.047;
+    if (!fs::is_regular_file(cfg.pika_finger_left_mesh)) {
+        std::cout << "SKIP: finger meshes not found (articulated gripper test)\n";
+        return true;
+    }
+    cfg.max_near_pairs = 600;  // report every pair so finger pairs are always present
+
+    CollisionMonitor mon(cfg);
+    RB_CHECK(mon.hasArticulatedGripper());
+    // arms(24) + stand(7) + base+2fingers per arm (6) = 37 (single-hull baseline was 33).
+    std::cout << "articulated geoms=" << mon.numGeometries() << "\n";
+    RB_CHECK(mon.numGeometries() == 37);
+
+    const JointArray init = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+    auto fingerClears = [](const CollisionVerdict& v) {
+        std::map<std::string, double> mp;
+        for (const auto& p : v.near) {
+            if (p.name_a.find("pika_finger") != std::string::npos ||
+                p.name_b.find("pika_finger") != std::string::npos) {
+                mp[p.name_a + "|" + p.name_b] = p.d_m;
+            }
+        }
+        return mp;
+    };
+
+    mon.setGripperOpenPercent(ArmId::Left, 100.0);
+    mon.setGripperOpenPercent(ArmId::Right, 100.0);
+    const auto fo = fingerClears(mon.evalOnce(init, init));
+    mon.setGripperOpenPercent(ArmId::Left, 0.0);
+    mon.setGripperOpenPercent(ArmId::Right, 0.0);
+    const auto fc = fingerClears(mon.evalOnce(init, init));
+    RB_CHECK(!fo.empty());
+    double max_delta = 0.0;
+    for (const auto& [k, d] : fo) {
+        auto it = fc.find(k);
+        if (it != fc.end()) max_delta = std::max(max_delta, std::abs(d - it->second));
+    }
+    // The fingers translate up to 0.047 m; their clearances must move with the jaw.
+    RB_CHECK(max_delta > 0.001);
+    std::cout << "articulated gripper: finger clearance delta open->closed = "
+              << max_delta * 1000.0 << "mm\n";
+    return true;
+}
+
 int main() {
     if (!runProjection()) {
         std::cerr << "test_collision_monitor (projection) FAILED\n";
+        return 1;
+    }
+    if (!runArticulatedGripper()) {
+        std::cerr << "test_collision_monitor (articulated gripper) FAILED\n";
         return 1;
     }
     if (!runGroundPlane()) {
