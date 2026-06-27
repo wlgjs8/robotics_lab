@@ -318,7 +318,7 @@ _USER_FLOOR_EDGE_RED = (255, 120, 120)
 # fingertips). Offsets are expressed in the TCP body frame, so the point cloud is
 # parented under /stand/<arm>_tcp and inherits the live TCP pose for free (no
 # per-tick transform math in the GUI). Mirrors the 4-point set in the real stack
-# config (rb_servo_server/config/local/stack_real.yaml: x +/-0.057, y +/-0.012);
+# config (rb_servo_server/config/stack_real.yaml: x +/-0.057, y +/-0.012);
 # the leading (0,0,0) is the TCP point. The GUI is a pure network client and the
 # server does not publish these offsets, so they live here as a constant — keep
 # BOTH the open and closed sets in sync with floor_constraint.tcp_offset_points

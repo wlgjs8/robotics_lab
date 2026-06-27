@@ -7,7 +7,7 @@ set -uo pipefail
 cd "$(cd "$(dirname "$0")/.." && pwd)"
 
 SERVER_BIN="rb_servo_server/build/rbpodo_real_gate/rb_servo_server"
-CFG="${1:-rb_servo_server/config/local/stack_real.yaml}"
+CFG="${1:-rb_servo_server/config/stack_real.yaml}"
 LOG="/tmp/rb_servo_server.log"
 PIDS=()
 cleanup() { for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done; }

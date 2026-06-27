@@ -95,6 +95,8 @@ safety:
   dq_max_deg_s: [120, 120, 120, 120, 120, 120]      # was halved [30,30,30,45,45,60] for first run1
   ddq_max_deg_s2: [300, 300, 300, 500, 500, 700]  # was halved for first run
   joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]
+  # Match real stack cable-safety behavior for JointTarget/InitMotion return.
+  joint_target_literal_axes: [false, false, false, false, false, true]
   joint_wrap_for_startup_validation: false
   joint_wrap_for_motion_safety: false
   command_timeout_sec: 0.2
@@ -152,12 +154,12 @@ safety:
   # 실제 차단(면 슬라이드/홀드)을 보려면 monitor_only=false로 전환.
   roi_box:
     enable: true
-    min_m: [-0.500, -0.900, -0.200]
+    min_m: [-0.500, -1.000, -0.200]
     max_m: [0.500, 0.050, 0.800]
     runtime_min_m: [-1.2, -1.6, -0.2]
     runtime_max_m: [1.2, 0.6, 1.6]
     fail_policy: clamp_hold
-    monitor_only: false   # 관찰 시작; 강제하려면 false
+    monitor_only: true   # 관찰 시작; 강제하려면 false
     a_brake_m_s2: 4.0
     d_slow_m: 0.05
     tcp_offset_points:
@@ -210,6 +212,43 @@ safety:
       #       size_m: [0.07, 0.10, 0.04], xyz_m: [0.0, 0.05, 0.05], rpy: [0,0,0] }
       #   - { name: work_table, shape: box, parent_frame: stand,
       #       size_m: [1.2, 0.8, 0.04], xyz_m: [0.0, -0.2, 0.0], rpy: [0,0,0] }
+      # WHOLE-ARM floor: a large thin static box (world frame) so the SAME mesh
+      # barrier that guards arm<->arm / arm<->stand also keeps EVERY arm link above
+      # the floor (floor_constraint above only checks the TCP + offset points, so an
+      # elbow/wrist can dip below it). Top face at z_m; kept == floor_constraint.z_min_m
+      # so the two floors agree. The InitMotion planner avoids this box too. Raise z_m
+      # to exercise whole-arm floor braking more aggressively in sim.
+      ground_plane:
+        enable: true
+        z_m: -0.200             # == floor_constraint.z_min_m
+        size_m: [4.0, 4.0]      # lateral extents [Lx, Ly]
+        thickness_m: 0.10
+        parent_frame: world
+
+  # Collision-free InitMotion planner (requires self_collision.enable — the mesh
+  # model is the planner's collision+floor oracle). A JointTarget init_motion profile command
+  # plans a collision-free + floor-safe 12-DOF (both arms) RRT-Connect path to the
+  # init pose and streams it through the safety gate, so InitMotion REACHES the pose
+  # from any start without self-collision or dipping below the floor (overlapping arm
+  # paths allowed). Fail-closed: planning failure holds. Disabled -> direct JointTarget.
+  init_motion_planner:
+    enable: true
+    max_planning_time_sec: 5.0
+    max_iterations: 20000
+    step_size_rad: 0.20
+    edge_resolution_rad: 0.02
+    goal_bias: 0.25
+    shortcut_passes: 200
+    sample_margin_deg: 60.0        # tight band 기본 확대
+    sample_margin_deg_per_joint: [45, 75, 75, 45, 75, 30]  # J2/J3/J5 넓게, J6 좁게(케이블)
+    global_sample_fraction: 0.15   # 15% wide-band 글로벌 샘플
+    global_sample_margin_deg: 150.0
+    collision_margin_m: 0.005
+    seed: 12345
+    waypoint_tol_deg: 1.5
+    max_segment_deg: 5.0
+    execution_lookahead_deg: 25.0   # pure-pursuit: bigger = faster (barrier nets corner cuts)
+    execution_timeout_sec: 45.0     # once started, drive to completion across command staleness (one click); give up after this
 
 network:
   command_bind: "udp://127.0.0.1:50256"
@@ -217,6 +256,7 @@ network:
     - "udp://127.0.0.1:50356"
     - "udp://127.0.0.1:50366"
     - "udp://127.0.0.1:50376"
+    - "udp://127.0.0.1:50378"  # external flow-infer readback alongside make run
   state_pub_rate_hz: 100
   command_source_allowlist: ["127.0.0.1/32"]
 
@@ -247,7 +287,7 @@ force_control:
 kinematics:
   enable: true
   provider: pinocchio
-  urdf: "../descriptions/urdf/rb3_730e.urdf"
+  urdf: "descriptions/urdf/rb3_730e.urdf"
   base_link: "world"
   tip_link: "tcp"
   joint_names:
@@ -261,9 +301,12 @@ kinematics:
   publish_tcp: true
   ik:
     enable: true
-    max_iterations: 50
+    # UNIFIED-TO-REAL (2026-06-21): control/IK tuning matched to stack_real.yaml so
+    # sim validates exactly what real runs. Real's values are the more conservative
+    # (more DLS damping, wider singular region, more iterations, looser tol).
+    max_iterations: 100
     timeout_ms: 20.0
-    damping: 0.001
+    damping: 0.02
     # ANTI-TREMBLE (was 0.002 / 0.005): the tolerance is a DEAD ZONE for the
     # 500Hz streaming TcpPoseTarget path — solveIk returns the seed (q_actual)
     # unchanged whenever the tracking error is inside it. At teleop speeds
@@ -271,8 +314,8 @@ kinematics:
     # sits exactly at the old 2mm boundary, producing a 3-5Hz relay limit
     # cycle (= 1/(2 x loop delay)). Tighter tolerance shrinks the dead zone
     # so the solver actually iterates each tick; typical cost 1-3 DLS steps.
-    position_tolerance_m: 0.0000002
-    orientation_tolerance_rad: 0.000001
+    position_tolerance_m: 0.00002
+    orientation_tolerance_rad: 0.0002
     max_step_deg: [2, 2, 2, 3, 3, 4]
     # Selective singularity-robust damping (shared by all position-IK
     # primitives). Keeps the solver on the seed branch near a singularity so a
@@ -280,9 +323,9 @@ kinematics:
     # flip; the arm keeps tracking with a small Cartesian lag, never holds.
     # DEFAULT OFF until tuned: sigma_min is ~0.004 even in healthy poses, so set
     # eps below that from the ik_sigma_min telemetry at an ik_branch_jump=1 tick.
-    singular_region_eps: 0.06   # TUNE-3 (2026-06-20): left sigma_min drops to ~0.039 before IkFailed -> engage damping just above it
+    singular_region_eps: 0.1   # UNIFIED-TO-REAL (was 0.06 TUNE-3): wider singular region = earlier damping = safer
     damping_max: 0.08           # TUNE-4 reverted: 0.20 made it FAIL EARLIER (over-damped). exact wrist singularity (sigma_min=0) cannot be solved by damping at any strength.
-    max_solution_jump_deg: 2.0
+    max_solution_jump_deg: 4.0
     # Branch-jump CLAMP (acts, not just observes). When a converged solve still
     # jumps > max_solution_jump_deg from the seed: re-solve the SAME tick at
     # branch_jump_damping_scale x damping (escalating per retry) to pull it back
@@ -331,15 +374,21 @@ cartesian_control:
   # rotation are independent. Settling time ~ 1/(zeta*2*pi*fn) * 4.
   pose_track_smd:
     enable: true
+    # UNIFIED-TO-REAL (2026-06-21): vff on + fn=1.0 to match stack_real.yaml.
+    # velocity_feedforward removes SMD phase lag (sim 22-ep clean subset: pos p95
+    # 17.9->1.75mm, lag 90->22ms, 21/22 REAL_READY). fn=1.0 (vs sim's old 3.0) is
+    # the mild low-pass that holds wrist-band HF down so vff's accuracy gain does
+    # not cost camera blur — the accurate+smooth combination for real ts=1.0.
+    velocity_feedforward: true
     damping_ratio_linear: 1.0
-    natural_frequency_linear_hz: 3.0
+    natural_frequency_linear_hz: 1.0
     damping_ratio_angular: 1.0
-    natural_frequency_angular_hz: 3.0
+    natural_frequency_angular_hz: 1.0
     # Saturation clamps (vector-norm, direction-preserving). Mass=1.0 so the
     # accel clamp IS the max-force clamp; zeta/fn dynamics stay exact inside
     # the limits. NOTE with these numbers a full-speed (50mm/s) stop is force-
     # limited to ~12.5mm of glide (v^2/2a) on large moves.
-    max_linear_velocity_m_s: 0.25        # 250 mm/s (was 50 - capped fast teleop)
+    max_linear_velocity_m_s: 0.40 # 250 mm/s (was 50 - capped fast teleop)
     max_linear_accel_m_s2: 1.0           # 1 m/s^2 (was 0.1 - sluggish catch-up)
     max_angular_velocity_rad_s: 1.745329252  # 100 deg/s (was 50)
     max_angular_accel_rad_s2: 6.981317008    # 400 deg/s^2 (was 100)
@@ -350,3 +399,8 @@ cartesian_control:
     default_angular_speed_rad_s: 0.2
     constant_orientation_tolerance_rad: 0.005
     default_orientation_mode: constant
+    # Collision-free MoveL (requires safety.init_motion_planner.enable): run the exact
+    # straight path when it is collision/floor-clear, else stream an RRT joint detour to
+    # the IK'd target. One click always reaches the target; reactive barrier is the net.
+    collision_free: true
+    collision_check_samples: 40

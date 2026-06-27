@@ -335,7 +335,7 @@ force_control:
 kinematics:
   enable: true
   provider: pinocchio
-  urdf: "../descriptions/urdf/rb3_730e.urdf"
+  urdf: "descriptions/urdf/rb3_730e.urdf"
   base_link: "world"
   tip_link: "tcp"
   joint_names:

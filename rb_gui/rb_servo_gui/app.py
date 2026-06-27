@@ -180,7 +180,7 @@ _DEFAULT_CAMERA_UP = (0.0, 0.0, 1.0)
 # (single-arm rb3_730e.urdf + stack_sim mount, exact ee_local incl r_align=pika_rz180;
 # reproduces live REST=12/12, FWD=0/12). Coverage 383/387; the 4 unrecoverable left-wrist
 # singularities (0043,0220,0291,0373) were removed from data_tcp. Mirrors
-# scripts/batch_replay_episodes.py PROFILE_ANCHOR_*. Override with RB_GUI_INIT_*_JOINTS.
+# Override the default init-pose anchors with RB_GUI_INIT_*_JOINTS.
 _DEFAULT_INIT_LEFT_JOINTS_DEG = (259.0, 75.6, 129.5, -55.6, -131.2, -161.7)
 _DEFAULT_INIT_RIGHT_JOINTS_DEG = (-253.7, -76.9, -127.6, 65.7, 143.7, 166.9)
 _OPERATOR_MONITOR_WIDTH_EM = 18.0

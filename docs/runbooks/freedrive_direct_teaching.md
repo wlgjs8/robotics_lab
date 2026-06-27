@@ -54,7 +54,7 @@ no physical teach-pendant button.
 
 - **Config opt-in.** `servo.allow_freedrive: true` is required. Default is `false`;
   the server rejects every `Freedrive` command otherwise. It is enabled in the
-  VM-sim local config (`rb_servo_server/config/local/stack_sim.yaml`).
+  VM-sim stack config (`rb_servo_server/config/stack_sim.yaml`).
 - **Leased.** `Freedrive` requires the command-source lease (like `ArmMotion`/`ResetFault`),
   so a stray client cannot toggle it. The GUI brackets it with Acquire/Release.
 - **Global send suppression.** While *any* arm is in free-drive the server sends **no
@@ -125,7 +125,7 @@ the GUI — not gravity compensation itself.)
    ```
 2. Confirm the gate is set (already added):
    ```bash
-   grep allow_freedrive rb_servo_server/config/local/stack_sim.yaml   # -> allow_freedrive: true
+   grep allow_freedrive rb_servo_server/config/stack_sim.yaml   # -> allow_freedrive: true
    ```
 3. Launch the full stack:
    ```bash
@@ -170,8 +170,8 @@ the arm must not enter free-drive.
 
 Real physical direct teaching requires:
 - `operation_mode: real` (physical gravity-compensation; `simulation` always M151s), and
-- the site-local config opt-in `servo.allow_freedrive: true` (set in
-  `config/local/stack_real.yaml`), plus operator supervision and E-stop.
+- the real stack config opt-in `servo.allow_freedrive: true` (set in
+  `config/stack_real.yaml`), plus operator supervision and E-stop.
 
 Run with `make run` (defaults to `MODE=real` → `stack_real.yaml`). The arming state
 machine handles the M151 root cause (quiesce-before-teach); on the pendant you should

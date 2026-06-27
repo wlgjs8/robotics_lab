@@ -16,7 +16,7 @@
 #   make run MODE=sim
 #
 # Configs (the only two per layer — keep these the source of truth):
-#   rb_servo_server/config/local/stack_real.yaml | stack_sim.yaml
+#   rb_servo_server/config/stack_real.yaml       | stack_sim.yaml
 #   policy_runner/config/stack_real.yaml         | stack_sim.yaml
 #
 # Notes:
@@ -45,7 +45,7 @@ esac
 ACTION_SOURCE="${ACTION_SOURCE:-teleop_mux}"
 
 SERVER_BIN="rb_servo_server/build/rbpodo_real_gate/rb_servo_server"
-SERVER_CFG="rb_servo_server/config/local/stack_${MODE}.yaml"
+SERVER_CFG="rb_servo_server/config/stack_${MODE}.yaml"
 POLICY_CFG="policy_runner/config/stack_${MODE}.yaml"
 LOG_DIR="logs/stack"
 mkdir -p "$LOG_DIR"

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import h5py
 import numpy as np
-
-from .se3 import quat_canonical
+from scipy.spatial.transform import Rotation
 
 try:
     from policy_runner import hdf5_audit as _policy_audit
@@ -20,6 +19,21 @@ TIMESTAMP_NS_THRESHOLD = 1.0e12
 TIMESTAMP_US_THRESHOLD = 1.0e9
 TIMESTAMP_MS_THRESHOLD = 1.0e6
 IDENTITY_COMPONENT_DOMINANCE_MARGIN = 0.05
+QUAT_NORM_EPS = 1e-12
+
+
+@dataclass(frozen=True)
+class AuditConfig:
+    nominal_source_rate_hz: float = 30.0
+    gap_median_multiplier: float = 3.0
+    gap_absolute_threshold_sec: float = 0.100
+    plot_dpi: int = 150
+    gripper_event_min_span: float = 1e-6
+
+
+@dataclass(frozen=True)
+class EpisodeAuditConfig:
+    audit: AuditConfig = field(default_factory=AuditConfig)
 
 
 @dataclass
@@ -31,6 +45,21 @@ class EpisodeData:
     left_gripper: np.ndarray | None
     right_gripper: np.ndarray | None
     detected: dict
+
+
+def load_audit_config(path: str | Path | None) -> EpisodeAuditConfig:
+    cfg = EpisodeAuditConfig()
+    if path is None:
+        return cfg
+    try:
+        import yaml
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("PyYAML is required to load an episode audit config YAML") from exc
+    with Path(path).open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise ValueError("episode audit config YAML must contain a mapping at the root")
+    return _merge_dataclass(cfg, data)
 
 
 def load_episode(path: str, nominal_rate_hz: float = 30.0) -> EpisodeData:
@@ -63,7 +92,12 @@ def load_episode(path: str, nominal_rate_hz: float = 30.0) -> EpisodeData:
         gripper_candidates = _gripper_candidates(handle)
         detected["gripper_candidates"] = [_candidate_public_dict(item) for item in gripper_candidates]
 
-        selected: dict[str, str | None] = {"left_pose": None, "right_pose": None, "left_gripper": None, "right_gripper": None}
+        selected: dict[str, str | None] = {
+            "left_pose": None,
+            "right_pose": None,
+            "left_gripper": None,
+            "right_gripper": None,
+        }
         left_pose = _select_pose(handle, pose_candidates, "left", detected, selected)
         right_pose = _select_pose(handle, pose_candidates, "right", detected, selected)
         left_gripper = _select_gripper(handle, gripper_candidates, "left", selected)
@@ -85,6 +119,35 @@ def load_episode(path: str, nominal_rate_hz: float = 30.0) -> EpisodeData:
         right_gripper=right_gripper,
         detected=detected,
     )
+
+
+def quat_canonical(q_xyzw, ref=None) -> np.ndarray:
+    """Return a normalized xyzw quaternion, flipped so dot(ref, q) is non-negative."""
+
+    q = _normalize_quat(q_xyzw)
+    if ref is not None:
+        ref_q = _normalize_quat(ref)
+        if float(np.dot(ref_q, q)) < 0.0:
+            q = -q
+    elif q[3] < 0.0:
+        q = -q
+    return q
+
+
+def twist_from_poses(p0, q0, p1, q1, dt) -> tuple[np.ndarray, np.ndarray]:
+    """Finite-difference twist from pose0 to pose1."""
+
+    dt_sec = float(dt)
+    if dt_sec <= 0.0 or not np.isfinite(dt_sec):
+        raise ValueError("dt must be positive and finite")
+    p0_arr = np.asarray(p0, dtype=np.float64).reshape(3)
+    p1_arr = np.asarray(p1, dtype=np.float64).reshape(3)
+    q0_arr = quat_canonical(q0)
+    q1_arr = quat_canonical(q1, ref=q0_arr)
+    v = (p1_arr - p0_arr) / dt_sec
+    delta = Rotation.from_quat(q0_arr).inv() * Rotation.from_quat(q1_arr)
+    w = delta.as_rotvec() / dt_sec
+    return v.astype(np.float64), w.astype(np.float64)
 
 
 def _list_datasets(handle: h5py.File) -> list[dict[str, Any]]:
@@ -445,3 +508,30 @@ def _decode_attr(value: Any) -> str:
     if isinstance(value, np.bytes_):
         return bytes(value).decode("utf-8", errors="replace")
     return str(value)
+
+
+def _normalize_quat(q_xyzw) -> np.ndarray:
+    q = np.asarray(q_xyzw, dtype=np.float64).reshape(4)
+    norm = float(np.linalg.norm(q))
+    if not np.isfinite(norm) or norm <= QUAT_NORM_EPS:
+        raise ValueError("quaternion must have positive finite norm")
+    return (q / norm).astype(np.float64)
+
+
+def _merge_dataclass(instance: Any, overrides: dict[str, Any]) -> Any:
+    if not is_dataclass(instance):
+        return overrides
+    valid = {item.name for item in fields(instance)}
+    unknown = sorted(set(overrides) - valid)
+    if unknown:
+        raise ValueError(f"unknown episode audit config key(s): {', '.join(unknown)}")
+    changes: dict[str, Any] = {}
+    for key, value in overrides.items():
+        current = getattr(instance, key)
+        if is_dataclass(current):
+            if not isinstance(value, dict):
+                raise ValueError(f"config key {key} must be a mapping")
+            changes[key] = _merge_dataclass(current, value)
+        else:
+            changes[key] = value
+    return replace(instance, **changes)

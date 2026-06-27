@@ -5,6 +5,7 @@
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -171,6 +172,42 @@ static bool run() {
         }
     }
 
+    // Lazy can be disabled to recover the eager edge-checking path. It should still
+    // return a fully clear, densified path in the same simple scene.
+    {
+        InitMotionPlannerConfig eager_cfg = makePlannerConfig();
+        eager_cfg.lazy_edges = false;
+        eager_cfg.global_sample_fraction = 0.0;
+        eager_cfg.sample_margin_deg_per_joint = JointArray{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        InitMotionPlanner eager(cfg, eager_cfg, qmin, qmax);
+        InitMotionPlanResult eager_res = eager.plan(init, init, goal_l, goal_r);
+        std::cout << "eager plan: success=" << eager_res.success
+                  << " waypoints=" << eager_res.waypoints.size() << " ("
+                  << eager_res.message << ")\n";
+        RB_CHECK(eager_res.success);
+        RB_CHECK(eager_res.fail_mode == InitMotionPlanResult::FailMode::None);
+        RB_CHECK(eager_res.waypoints.size() >= 2);
+        for (const auto& w : eager_res.waypoints) {
+            RB_CHECK(eager.configClear(w.first, w.second));
+        }
+        for (int i = 0; i < kDof; ++i) {
+            RB_CHECK(std::abs(eager_res.waypoints.front().first[i] - init[i]) < 1e-6);
+            RB_CHECK(std::abs(eager_res.waypoints.back().first[i] - goal_l[i]) < 1e-6);
+            RB_CHECK(std::abs(eager_res.waypoints.back().second[i] - goal_r[i]) < 1e-6);
+        }
+    }
+
+    // Structured diagnostics: non-finite inputs fail closed before oracle use.
+    {
+        JointArray bad_goal = goal_l;
+        bad_goal[0] = std::numeric_limits<double>::infinity();
+        InitMotionPlanResult nf = planner.plan(init, init, bad_goal, goal_r);
+        std::cout << "nonfinite goal: success=" << nf.success << " (" << nf.message << ")\n";
+        RB_CHECK(!nf.success);
+        RB_CHECK(nf.waypoints.empty());
+        RB_CHECK(nf.fail_mode == InitMotionPlanResult::FailMode::NonFinite);
+    }
+
     // ---- (3) Fail-closed: a goal that is not collision/floor clear yields no plan
     // (no motion). Reuse the engulfing ground plane so the goal config is blocked. ----
     {
@@ -296,6 +333,19 @@ static bool run() {
                 if (p.configClear(w.first, w.second)) { became_clear = true; break; }
             }
             RB_CHECK(became_clear);
+
+            InitMotionPlannerConfig no_escape_cfg = makePlannerConfig();
+            no_escape_cfg.escape_max_time_sec = 0.0;
+            InitMotionPlanner no_escape(s, no_escape_cfg, qmin, qmax);
+            InitMotionPlanResult failed_escape =
+                no_escape.plan(init, init, esc_goal_l, esc_goal_r);
+            std::cout << "escape timeout: success=" << failed_escape.success
+                      << " (" << failed_escape.message << ")\n";
+            RB_CHECK(!failed_escape.success);
+            RB_CHECK(failed_escape.waypoints.empty());
+            RB_CHECK(failed_escape.fail_mode == InitMotionPlanResult::FailMode::EscapeFailed);
+            RB_CHECK(failed_escape.message.find("restarts_tried=") != std::string::npos);
+            RB_CHECK(failed_escape.message.find("escape_time_s=") != std::string::npos);
         } else {
             std::cout << "SKIP (5): geometry differs; could not stage near-collision start\n";
         }

@@ -19,23 +19,21 @@ for path in (str(REPO_ROOT), str(SCRIPT_DIR)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from tcp_tuning.config import Config, load_config
-from tcp_tuning.hdf5_io import EpisodeData, load_episode
-from tcp_tuning.se3 import quat_canonical, twist_from_poses
+from episode_hdf5 import EpisodeAuditConfig, EpisodeData, load_audit_config, load_episode, quat_canonical, twist_from_poses
 
 
-AUDIT_SCHEMA = "robotics_lab.tcp_tuning.audit.v1"
+AUDIT_SCHEMA = "robotics_lab.episode_hdf5.audit.v1"
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Audit a UMI/TCP HDF5 episode without modifying it.")
     parser.add_argument("--episode", required=True, help="HDF5 episode path")
-    parser.add_argument("--out-dir", required=True, help="Base output directory, e.g. outputs/tcp_tuning")
+    parser.add_argument("--out-dir", required=True, help="Base output directory")
     parser.add_argument("--plots", action="store_true", help="Write audit plots under plots/")
     parser.add_argument("--config", help="Optional YAML config override")
     args = parser.parse_args(argv)
 
-    cfg = load_config(args.config)
+    cfg = load_audit_config(args.config)
     episode_path = Path(args.episode)
     output_dir = Path(args.out_dir) / episode_id(episode_path)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -77,7 +75,7 @@ def hdf5_tree(path: Path) -> list[str]:
     return lines
 
 
-def build_audit_report(episode: EpisodeData, cfg: Config, tree: list[str]) -> dict[str, Any]:
+def build_audit_report(episode: EpisodeData, cfg: EpisodeAuditConfig, tree: list[str]) -> dict[str, Any]:
     t, nominal_rate_used = effective_timestamps(episode, cfg.audit.nominal_source_rate_hz)
     timing = timing_summary(t, cfg)
     gaps = detect_timestamp_gaps(
@@ -121,7 +119,7 @@ def effective_timestamps(episode: EpisodeData, nominal_rate_hz: float) -> tuple[
     return np.arange(count, dtype=np.float64) / float(nominal_rate_hz), True
 
 
-def timing_summary(t: np.ndarray, cfg: Config) -> dict[str, Any]:
+def timing_summary(t: np.ndarray, cfg: EpisodeAuditConfig) -> dict[str, Any]:
     dt = np.diff(np.asarray(t, dtype=np.float64))
     finite = dt[np.isfinite(dt)]
     positive = finite[finite > 0.0]
@@ -323,7 +321,7 @@ def write_outputs(report: dict[str, Any], output_dir: Path) -> None:
 def render_summary(report: dict[str, Any]) -> str:
     timing = report["timing"]
     lines = [
-        "# TCP Tuning Episode Audit",
+        "# Episode HDF5 Audit",
         "",
         f"- Schema: `{report['schema']}`",
         f"- Episode: `{report['episode_path']}`",
@@ -353,7 +351,7 @@ def render_summary(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def write_plots(episode: EpisodeData, report: dict[str, Any], plot_dir: Path, cfg: Config) -> None:
+def write_plots(episode: EpisodeData, report: dict[str, Any], plot_dir: Path, cfg: EpisodeAuditConfig) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -391,7 +389,7 @@ def write_plots(episode: EpisodeData, report: dict[str, Any], plot_dir: Path, cf
             _plot_series(plot_dir / f"audit_{arm}_angular_speed.png", speed_t - t[0], ang_speed[:, None], "angular speed (rad/s)", cfg)
 
 
-def _plot_series(path: Path, t: np.ndarray, values: np.ndarray, ylabel: str, cfg: Config) -> None:
+def _plot_series(path: Path, t: np.ndarray, values: np.ndarray, ylabel: str, cfg: EpisodeAuditConfig) -> None:
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots()

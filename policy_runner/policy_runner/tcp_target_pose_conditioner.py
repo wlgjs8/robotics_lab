@@ -1,9 +1,8 @@
 """Online command-conditioning for the policy ``tcp_target_pose`` rollout path.
 
-This is the **A-stage** (command conditioning) for the imitation-rollout consumer of
-``TcpPoseTarget`` (see ``docs/tcp_target_pose_phase1/`` and the replay-side
-``tools/tcp_tuning/command_conditioner.py``). The policy emits one absolute stand-frame
-target per ~30 Hz chunk step; without conditioning those step targets are held (ZOH)
+This is the online command-conditioning layer for the imitation-rollout consumer of
+``TcpPoseTarget``. The policy emits one absolute stand-frame target per ~30 Hz
+chunk step; without conditioning those step targets are held (ZOH)
 between policy ticks, so the 500 Hz SMD reference generator (B-stage) sees a 30 Hz
 staircase. This module turns the per-step targets into a smooth 500 Hz SE(3) stream by
 first-order-hold interpolation (position lerp + quaternion slerp), with explicit

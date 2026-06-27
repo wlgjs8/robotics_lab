@@ -9,6 +9,7 @@
 #include <map>
 #include <string>
 #include <thread>
+#include <utility>
 
 #include "rb_servo/control/collision_monitor.hpp"
 
@@ -96,6 +97,42 @@ static bool run() {
                           v.self_min_clearance_m > self_thresh &&
                           v.external_min_clearance_m > ext_thresh;
         RB_CHECK(mon.clearsThresholds(init, init, self_thresh, ext_thresh) == gate);
+    }
+    {
+        CollisionMonitorConfig endpoint_cfg = cfg;
+        endpoint_cfg.swept_samples = 1;
+        CollisionMonitor endpoint(endpoint_cfg);
+        const double self_thresh = endpoint_cfg.d_hard_m + 0.005;
+        const double ext_thresh = endpoint_cfg.external_d_hard_m + 0.005;
+        const std::array<std::pair<JointArray, JointArray>, 4> samples{{
+            {init, init},
+            {JointArray{8.0, -38.0, 72.0, 4.0, 55.0, 6.0},
+             JointArray{-7.0, -25.0, 88.0, -6.0, 64.0, -5.0}},
+            {JointArray{18.0, -45.0, 95.0, 16.0, 35.0, -14.0},
+             JointArray{-16.0, -18.0, 62.0, -12.0, 78.0, 12.0}},
+            {JointArray{-22.0, -20.0, 70.0, -25.0, 82.0, 18.0},
+             JointArray{20.0, -44.0, 96.0, 24.0, 38.0, -16.0}},
+        }};
+        for (const auto& sample : samples) {
+            const CollisionVerdict full = endpoint.evalOnce(sample.first, sample.second);
+            const CollisionDistanceSummary light =
+                endpoint.evalDistancesOnly(sample.first, sample.second);
+            RB_CHECK(full.valid);
+            RB_CHECK(light.valid);
+            RB_CHECK(light.hard_violation == full.hard_violation);
+            RB_CHECK(sameDistance(light.min_clearance_m, full.min_clearance_m));
+            RB_CHECK(sameDistance(light.self_min_clearance_m, full.self_min_clearance_m));
+            RB_CHECK(sameDistance(light.external_min_clearance_m, full.external_min_clearance_m));
+            const bool full_gate = !full.hard_violation &&
+                                   full.self_min_clearance_m > self_thresh &&
+                                   full.external_min_clearance_m > ext_thresh;
+            const bool light_gate = !light.hard_violation &&
+                                    light.self_min_clearance_m > self_thresh &&
+                                    light.external_min_clearance_m > ext_thresh;
+            RB_CHECK(light_gate == full_gate);
+            RB_CHECK(endpoint.clearsThresholds(sample.first, sample.second,
+                                               self_thresh, ext_thresh) == full_gate);
+        }
     }
 
     // (2) velocity barrier: at large clearance, full speed regardless.
