@@ -137,10 +137,10 @@ safety:
     # 0.047m(rb3_730e_pika_articulated.urdf). ★URDF 유도 기본값이므로 줄자 실측으로
     # 검증할 것. offset_closed_m 생략 시 정적(개방 고정)=기존 거동.
     tcp_offset_points:
-      - { name: gripper_tip_a_yp, offset_m: [ 0.057,  0.012, 0.0 ], offset_closed_m: [ 0.010,  0.012, 0.0 ] }
-      - { name: gripper_tip_a_yn, offset_m: [ 0.057, -0.012, 0.0 ], offset_closed_m: [ 0.010, -0.012, 0.0 ] }
-      - { name: gripper_tip_b_yp, offset_m: [-0.057,  0.012, 0.0 ], offset_closed_m: [-0.010,  0.012, 0.0 ] }
-      - { name: gripper_tip_b_yn, offset_m: [-0.057, -0.012, 0.0 ], offset_closed_m: [-0.010, -0.012, 0.0 ] }
+      - { name: gripper_tip_a_yp, offset_m: [ 0.058,  0.013, 0.0 ], offset_closed_m: [ 0.010,  0.013, 0.0 ] }
+      - { name: gripper_tip_a_yn, offset_m: [ 0.058, -0.013, 0.0 ], offset_closed_m: [ 0.010, -0.013, 0.0 ] }
+      - { name: gripper_tip_b_yp, offset_m: [-0.058,  0.013, 0.0 ], offset_closed_m: [-0.010,  0.013, 0.0 ] }
+      - { name: gripper_tip_b_yn, offset_m: [-0.058, -0.013, 0.0 ], offset_closed_m: [-0.010, -0.013, 0.0 ] }
   # Stand-frame ROI box (workspace limit), viser "Safety ROI box"에서 조정.
   # enable=true라야 viser Send가 허용된다(서버가 enabled 보고). bounds/면(face)
   # velocity-damper/fail-closed/escape 로직은 전부 C++ 서버(config-driven)이고
@@ -163,10 +163,10 @@ safety:
     # 개폐를 실측 개방률 선형 보간(floor_constraint 주석 참조). 박스 6면 체크는
     # 팔당 5점(TCP+팁 4)을 사용하며, 각 면은 보간된 점들 중 가장 노출된 점에 binds.
     tcp_offset_points:
-      - { name: gripper_tip_a_yp, offset_m: [ 0.057,  0.012, 0.0 ], offset_closed_m: [ 0.010,  0.012, 0.0 ] }
-      - { name: gripper_tip_a_yn, offset_m: [ 0.057, -0.012, 0.0 ], offset_closed_m: [ 0.010, -0.012, 0.0 ] }
-      - { name: gripper_tip_b_yp, offset_m: [-0.057,  0.012, 0.0 ], offset_closed_m: [-0.010,  0.012, 0.0 ] }
-      - { name: gripper_tip_b_yn, offset_m: [-0.057, -0.012, 0.0 ], offset_closed_m: [-0.010, -0.012, 0.0 ] }
+      - { name: gripper_tip_a_yp, offset_m: [ 0.058,  0.013, 0.0 ], offset_closed_m: [ 0.010,  0.013, 0.0 ] }
+      - { name: gripper_tip_a_yn, offset_m: [ 0.058, -0.013, 0.0 ], offset_closed_m: [ 0.010, -0.013, 0.0 ] }
+      - { name: gripper_tip_b_yp, offset_m: [-0.058,  0.013, 0.0 ], offset_closed_m: [-0.010,  0.013, 0.0 ] }
+      - { name: gripper_tip_b_yn, offset_m: [-0.058, -0.013, 0.0 ], offset_closed_m: [-0.010, -0.013, 0.0 ] }
   # User-defined TILTED floor plane (viser "User Safety Floor"). enable=true라야
   # viser Send가 허용된다(서버가 enabled 보고). 초기 평면은 비워둠(has_initial_plane
   # false) → viser에서 양팔 접촉점 ≥3 캡처 후 Fit & Apply 하기 전까지는 inert.
@@ -212,12 +212,12 @@ safety:
       pika_finger_right_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_finger_right.STL"
       gripper_finger_travel_m: 0.047
       stand_ignore_arm_substrings: ["link0"]
-      d_hard_m: 0.025   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
+      d_hard_m: 0.018   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
       # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
       # can brake a head-on approach at the command ceiling before the hard floor.
       # v_max(max_linear_velocity)=0.32, a_brake=4.0 -> d_hard+0.0128=0.0278; 0.035
       # leaves a ~20mm slow zone (stoppable up to ~0.4 m/s). (Stage 0c)
-      d_slow_m: 0.03    # 2026-06-19 anti-chatter: 0.035→0.05 (gentler velocity gradient; ≥d_hard+vmax²/2a_brake=0.032)
+      d_slow_m: 0.025    # 2026-06-19 anti-chatter: 0.035→0.05 (gentler velocity gradient; ≥d_hard+vmax²/2a_brake=0.032)
       a_brake_m_s2: 3.0  # 2026-06-19 anti-chatter: 4.0→3.0 (softer braking ramp = quieter onset at boundary)
       hyst_m: 0.010      # 2026-06-19 anti-chatter: 0.005→0.010 (break on/off limit-cycle toggle)
       latency_s: 0.003   # 2026-06-19 LPF off + new fw(no actuation latency): 0.010→0.003 (cut vc·comp_s feedback that drives the brake↔release limit cycle; comp_s=max(latency_s,verdict_age) so stale verdicts still floor it)
