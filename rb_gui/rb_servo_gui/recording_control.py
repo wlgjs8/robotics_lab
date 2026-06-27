@@ -169,7 +169,7 @@ def normalize_arm_init_status(block: Mapping[str, Any] | None) -> dict[str, Any]
     last_command = str(block.get("last_command", "") or "")
     left_state = str(block.get("left_state", "") or "")
     right_state = str(block.get("right_state", "") or "")
-    return {
+    status = {
         "schema": str(block.get("schema", ARM_INIT_STATE_SCHEMA) or ARM_INIT_STATE_SCHEMA),
         "init_override_left": left_on,
         "init_override_right": right_on,
@@ -182,6 +182,20 @@ def normalize_arm_init_status(block: Mapping[str, Any] | None) -> dict[str, Any]
         "last_command": last_command,
         "error": error,
     }
+    for side in ("left", "right"):
+        for suffix in (
+            "fail_mode",
+            "goal_nearest_pair_name_a",
+            "goal_nearest_pair_name_b",
+            "goal_nearest_pair_category",
+            "goal_clearance_m",
+            "goal_threshold_m",
+            "goal_margin_deficit_m",
+        ):
+            key = f"{side}_{suffix}"
+            if key in block:
+                status[key] = block.get(key)
+    return status
 
 
 class RecordingStatusStore:

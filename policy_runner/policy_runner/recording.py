@@ -204,7 +204,8 @@ class _EpisodeBuffer:
     action_host_time_ns: list[int]
     action_seq: list[int]
     images: dict[str, list[Any]]
-    image_shapes: dict[str, tuple[int, int, int]]
+    image_shapes: dict[str, tuple[int, ...]]
+    image_dtypes: dict[str, Any]
     bundle_seq: list[int]
     bundle_time_ns: list[int]
     bundle_age_us: list[int]
@@ -351,6 +352,7 @@ class Hdf5EpisodeRecorder:
             action_seq=[],
             images={},
             image_shapes={},
+            image_dtypes={},
             bundle_seq=[],
             bundle_time_ns=[],
             bundle_age_us=[],
@@ -621,13 +623,14 @@ class Hdf5EpisodeRecorder:
                 for cam_name, frames in ep.images.items():
                     if not frames:
                         continue
-                    stacked = np.stack(frames, axis=0).astype(np.uint8, copy=False)
-                    _, height, width, channels = stacked.shape
+                    # Preserve native dtype: uint8 H,W,C color and uint16 H,W
+                    # depth coexist; chunk one frame at a time regardless of rank.
+                    stacked = np.ascontiguousarray(np.stack(frames, axis=0))
                     images.create_dataset(
                         cam_name,
                         data=stacked,
-                        dtype=np.uint8,
-                        chunks=(1, height, width, channels),
+                        dtype=stacked.dtype,
+                        chunks=(1, *stacked.shape[1:]),
                         compression="gzip",
                         compression_opts=1,
                     )
@@ -736,17 +739,23 @@ class Hdf5EpisodeRecorder:
             # while bundle keys are '<camera>.<stream>'; resolve_frame maps both.
             frame = resolve_frame(bundle.frames, cam_name) if bundle is not None else None
             if frame is not None:
-                pixels = frame.pixels
+                pixels = np.ascontiguousarray(frame.pixels)
                 shape = tuple(int(dim) for dim in pixels.shape)
-                if len(shape) != 3:
-                    raise RuntimeError(f"camera '{cam_name}' pixels must have shape H,W,C")
+                # Color frames are H,W,C (uint8); depth/mono frames are H,W
+                # (e.g. RealSense z16 -> uint16). Accept both ranks and keep the
+                # native dtype — forcing uint8 would corrupt 16-bit depth.
+                if len(shape) not in (2, 3):
+                    raise RuntimeError(
+                        f"camera '{cam_name}' pixels must have shape H,W (depth/mono) or H,W,C"
+                    )
                 previous_shape = ep.image_shapes.get(cam_name)
                 if previous_shape is not None and previous_shape != shape:
                     raise RuntimeError(
                         f"camera '{cam_name}' shape changed from {previous_shape} to {shape}"
                     )
                 ep.image_shapes.setdefault(cam_name, shape)
-                frame_pixels = np.ascontiguousarray(pixels, dtype=np.uint8)
+                ep.image_dtypes.setdefault(cam_name, pixels.dtype)
+                frame_pixels = pixels
             else:
                 if not self.record_zero_on_missing:
                     raise RuntimeError(
@@ -754,7 +763,10 @@ class Hdf5EpisodeRecorder:
                     )
                 if cam_name not in ep.image_shapes:
                     continue
-                frame_pixels = np.zeros(ep.image_shapes[cam_name], dtype=np.uint8)
+                frame_pixels = np.zeros(
+                    ep.image_shapes[cam_name],
+                    dtype=ep.image_dtypes.get(cam_name, np.uint8),
+                )
             ep.images.setdefault(cam_name, []).append(frame_pixels)
 
 

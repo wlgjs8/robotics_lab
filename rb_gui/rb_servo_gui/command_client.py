@@ -1,11 +1,37 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import socket
 import time
 import uuid
 from typing import Any, Mapping
+
+
+_LOG = logging.getLogger(__name__)
+
+
+def _arm_mode(packet: Mapping[str, Any], arm: str) -> Any:
+    value = packet.get(arm)
+    return value.get("mode") if isinstance(value, Mapping) else None
+
+
+def _arm_profile(packet: Mapping[str, Any], arm: str) -> Any:
+    value = packet.get(arm)
+    return value.get("joint_target_profile") if isinstance(value, Mapping) else None
+
+
+def _log_init_motion_packet(packet: Mapping[str, Any]) -> None:
+    _LOG.info(
+        "InitMotion packet mode=%s left_mode=%s right_mode=%s "
+        "left_joint_target_profile=%s right_joint_target_profile=%s",
+        packet.get("mode"),
+        _arm_mode(packet, "left"),
+        _arm_mode(packet, "right"),
+        _arm_profile(packet, "left"),
+        _arm_profile(packet, "right"),
+    )
 
 
 class CommandClient:
@@ -106,7 +132,7 @@ class CommandClient:
         # The long timeout must cover plan + execution.
         if len(left_q) != 6 or len(right_q) != 6:
             raise ValueError("joint targets must have 6 values per arm")
-        return self._with_source({
+        packet = self._with_source({
             "seq": self.next_seq(),
             "mode": "JointTarget",
             "timeout_sec": timeout_sec,
@@ -122,6 +148,8 @@ class CommandClient:
                 "joint_target_profile": "init_motion",
             },
         })
+        _log_init_motion_packet(packet)
+        return packet
 
     def build_init_motion_arm(
         self,
@@ -145,7 +173,7 @@ class CommandClient:
             "q_target_deg": [float(v) for v in right_q],
             "joint_target_profile": "init_motion",
         }
-        return self._with_source({
+        packet = self._with_source({
             "seq": self.next_seq(),
             "mode": "Hold",
             "timeout_sec": timeout_sec,
@@ -153,6 +181,8 @@ class CommandClient:
             "left": left_init if arm == "left" else {"mode": "Hold"},
             "right": right_init if arm == "right" else {"mode": "Hold"},
         })
+        _log_init_motion_packet(packet)
+        return packet
 
     def build_tcp_pose_target(
         self,

@@ -242,6 +242,8 @@ def run(
         auto_clear_on_done=config.arm_init_override.auto_clear_on_done,
         auto_clear_on_failed=config.arm_init_override.auto_clear_on_failed,
         resume_flow_on_done=config.arm_init_override.resume_flow_on_done,
+        resume_flow_on_failed=config.arm_init_override.resume_flow_on_failed,
+        allow_manual_cancel_after_failed=config.arm_init_override.allow_manual_cancel_after_failed,
         reset_flow_source_on_start=config.arm_init_override.reset_flow_source_on_start,
         reset_flow_source_on_resume=config.arm_init_override.reset_flow_source_on_resume,
     )
@@ -318,6 +320,7 @@ def run(
                 snapshot,
                 reset_on_start=config.arm_init_override.reset_flow_source_on_start,
                 reset_on_resume=config.arm_init_override.reset_flow_source_on_resume,
+                reset_on_failed=config.arm_init_override.resume_flow_on_failed,
             )
             apply_source_arm_mask(source, source_base_arm_mask, arm_init_override)
             recording_supervisor.stamp_snapshot(snapshot)

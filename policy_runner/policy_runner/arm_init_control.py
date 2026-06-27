@@ -39,8 +39,15 @@ class _ArmRuntime:
     q_deg: tuple[float, ...] | None = None
     state: str = "policy"
     fail: bool = False
+    fail_mode: str = ""
     message: str = ""
     server_status: str = "idle"
+    goal_nearest_pair_name_a: str = ""
+    goal_nearest_pair_name_b: str = ""
+    goal_nearest_pair_category: str = ""
+    goal_clearance_m: float | None = None
+    goal_threshold_m: float | None = None
+    goal_margin_deficit_m: float | None = None
 
 
 def parse_arm_init_command(data: bytes | dict[str, Any]) -> ArmInitCommand:
@@ -79,6 +86,8 @@ class ArmInitOverrideController:
         auto_clear_on_done: bool = True,
         auto_clear_on_failed: bool = False,
         resume_flow_on_done: bool = True,
+        resume_flow_on_failed: bool = False,
+        allow_manual_cancel_after_failed: bool = True,
         reset_flow_source_on_start: bool = True,
         reset_flow_source_on_resume: bool = True,
     ) -> None:
@@ -86,6 +95,8 @@ class ArmInitOverrideController:
         self.auto_clear_on_done = bool(auto_clear_on_done)
         self.auto_clear_on_failed = bool(auto_clear_on_failed)
         self.resume_flow_on_done = bool(resume_flow_on_done)
+        self.resume_flow_on_failed = bool(resume_flow_on_failed)
+        self.allow_manual_cancel_after_failed = bool(allow_manual_cancel_after_failed)
         self.reset_flow_source_on_start = bool(reset_flow_source_on_start)
         self.reset_flow_source_on_resume = bool(reset_flow_source_on_resume)
         self._left = _ArmRuntime()
@@ -128,7 +139,10 @@ class ArmInitOverrideController:
         arms = _arms_for_selector(command.arms)
         action = command.action
         if action == "toggle":
-            action = "cancel" if any(self._runtime(arm).on for arm in arms) else "start"
+            failed = any(self._runtime(arm).fail for arm in arms)
+            action = "start" if failed and not self.allow_manual_cancel_after_failed else (
+                "cancel" if any(self._runtime(arm).on for arm in arms) else "start"
+            )
         if action == "cancel":
             return self._cancel_arms(arms)
         return self._start_arms(arms)
@@ -169,7 +183,27 @@ class ArmInitOverrideController:
             if not isinstance(arm_block, dict):
                 arm_block = block
             status = _norm_status(arm_block.get("status"))
-            message = str(arm_block.get("message", "") or "")
+            fail_mode = str(arm_block.get("fail_mode", "") or "")
+            nearest_a = str(arm_block.get("goal_nearest_pair_name_a", "") or "")
+            nearest_b = str(arm_block.get("goal_nearest_pair_name_b", "") or "")
+            nearest_category = str(arm_block.get("goal_nearest_pair_category", "") or "")
+            clearance_m = _optional_float(
+                arm_block.get("goal_nearest_pair_distance_m", arm_block.get("nearest_pair_distance_m"))
+            )
+            threshold_m = _goal_threshold_m(arm_block)
+            margin_deficit_m = _optional_float(arm_block.get("goal_clear_margin_deficit_m"))
+            runtime.fail_mode = fail_mode or runtime.fail_mode
+            runtime.goal_nearest_pair_name_a = nearest_a or runtime.goal_nearest_pair_name_a
+            runtime.goal_nearest_pair_name_b = nearest_b or runtime.goal_nearest_pair_name_b
+            runtime.goal_nearest_pair_category = nearest_category or runtime.goal_nearest_pair_category
+            runtime.goal_clearance_m = clearance_m if clearance_m is not None else runtime.goal_clearance_m
+            runtime.goal_threshold_m = threshold_m if threshold_m is not None else runtime.goal_threshold_m
+            runtime.goal_margin_deficit_m = (
+                margin_deficit_m if margin_deficit_m is not None else runtime.goal_margin_deficit_m
+            )
+            message = _format_failed_message(arm_block)
+            if not message:
+                message = str(arm_block.get("message", "") or "")
             if status:
                 runtime.server_status = status
             if message:
@@ -187,7 +221,7 @@ class ArmInitOverrideController:
                 changed = True
                 continue
             if status == "failed":
-                self._mark_failed(arm, message or str(arm_block.get("fail_mode", "") or "init_failed"))
+                self._mark_failed(arm, message or fail_mode or "init_failed")
                 changed = True
         self.changed = self.changed or changed
         return changed
@@ -239,11 +273,27 @@ class ArmInitOverrideController:
             "right_server_status": self._right.server_status,
             "left_message": self._left.message,
             "right_message": self._right.message,
+            "left_fail_mode": self._left.fail_mode,
+            "right_fail_mode": self._right.fail_mode,
+            "left_goal_nearest_pair_name_a": self._left.goal_nearest_pair_name_a,
+            "left_goal_nearest_pair_name_b": self._left.goal_nearest_pair_name_b,
+            "left_goal_nearest_pair_category": self._left.goal_nearest_pair_category,
+            "left_goal_clearance_m": self._left.goal_clearance_m,
+            "left_goal_threshold_m": self._left.goal_threshold_m,
+            "left_goal_margin_deficit_m": self._left.goal_margin_deficit_m,
+            "right_goal_nearest_pair_name_a": self._right.goal_nearest_pair_name_a,
+            "right_goal_nearest_pair_name_b": self._right.goal_nearest_pair_name_b,
+            "right_goal_nearest_pair_category": self._right.goal_nearest_pair_category,
+            "right_goal_clearance_m": self._right.goal_clearance_m,
+            "right_goal_threshold_m": self._right.goal_threshold_m,
+            "right_goal_margin_deficit_m": self._right.goal_margin_deficit_m,
             "last_command": self.last_command,
             "error": self.error,
             "auto_clear_on_done": self.auto_clear_on_done,
             "auto_clear_on_failed": self.auto_clear_on_failed,
             "resume_flow_on_done": self.resume_flow_on_done,
+            "resume_flow_on_failed": self.resume_flow_on_failed,
+            "allow_manual_cancel_after_failed": self.allow_manual_cancel_after_failed,
         }
 
     def source_mask_for(self, base_mask: Any) -> Any:
@@ -283,9 +333,16 @@ class ArmInitOverrideController:
                 changed = True
             runtime.on = True
             runtime.fail = False
+            runtime.fail_mode = ""
             runtime.state = "init requested"
             runtime.message = ""
             runtime.server_status = "requested"
+            runtime.goal_nearest_pair_name_a = ""
+            runtime.goal_nearest_pair_name_b = ""
+            runtime.goal_nearest_pair_category = ""
+            runtime.goal_clearance_m = None
+            runtime.goal_threshold_m = None
+            runtime.goal_margin_deficit_m = None
         self.changed = changed
         return changed
 
@@ -298,8 +355,16 @@ class ArmInitOverrideController:
                 changed = True
             runtime.on = False
             runtime.fail = False
+            runtime.fail_mode = ""
             runtime.state = "cancelled"
+            runtime.message = ""
             runtime.server_status = "cancelled"
+            runtime.goal_nearest_pair_name_a = ""
+            runtime.goal_nearest_pair_name_b = ""
+            runtime.goal_nearest_pair_category = ""
+            runtime.goal_clearance_m = None
+            runtime.goal_threshold_m = None
+            runtime.goal_margin_deficit_m = None
         self.changed = changed
         return changed
 
@@ -308,8 +373,15 @@ class ArmInitOverrideController:
         if runtime.state != "init done":
             self._pending["done"].add(arm)
         runtime.fail = False
+        runtime.fail_mode = ""
         runtime.message = ""
         runtime.server_status = "done"
+        runtime.goal_nearest_pair_name_a = ""
+        runtime.goal_nearest_pair_name_b = ""
+        runtime.goal_nearest_pair_category = ""
+        runtime.goal_clearance_m = None
+        runtime.goal_threshold_m = None
+        runtime.goal_margin_deficit_m = None
         if self.auto_clear_on_done and self.resume_flow_on_done:
             runtime.on = False
             runtime.state = "policy"
@@ -323,7 +395,7 @@ class ArmInitOverrideController:
         runtime.fail = True
         runtime.message = message
         runtime.server_status = "failed"
-        if self.auto_clear_on_failed:
+        if self.auto_clear_on_failed or self.resume_flow_on_failed:
             runtime.on = False
             runtime.state = "policy"
         else:
@@ -367,6 +439,7 @@ def apply_source_override_transitions(
     *,
     reset_on_start: bool = True,
     reset_on_resume: bool = True,
+    reset_on_failed: bool = False,
 ) -> None:
     if not transitions.any:
         return
@@ -374,7 +447,7 @@ def apply_source_override_transitions(
         ("start", transitions.started, reset_on_start),
         ("done", transitions.done, reset_on_resume),
         ("cancel", transitions.cancelled, reset_on_resume),
-        ("failed", transitions.failed, False),
+        ("failed", transitions.failed, reset_on_failed),
     ):
         if not arms:
             continue
@@ -382,6 +455,8 @@ def apply_source_override_transitions(
         if callable(hook):
             try:
                 hook(tuple(arms), snapshot)
+                if event == "failed" and reset_enabled:
+                    reset_source_after_override_change(source, arms=arms)
                 continue
             except Exception:
                 pass
@@ -445,6 +520,43 @@ def _norm_status(value: Any) -> str:
     if text in {"idle", "planning", "executing", "done", "failed"}:
         return text
     return text.replace("_", " ")
+
+
+def _optional_float(value: Any) -> float | None:
+    if not isinstance(value, (int, float)):
+        return None
+    parsed = float(value)
+    return parsed if math.isfinite(parsed) else None
+
+
+def _goal_threshold_m(block: dict[str, Any]) -> float | None:
+    explicit = _optional_float(block.get("goal_threshold_m"))
+    if explicit is not None:
+        return explicit
+    external = bool(block.get("goal_nearest_pair_external", False))
+    key = "goal_clear_threshold_external_m" if external else "goal_clear_threshold_self_m"
+    return _optional_float(block.get(key))
+
+
+def _format_failed_message(block: dict[str, Any]) -> str:
+    fail_mode = str(block.get("fail_mode", "") or "")
+    if fail_mode != "goal_not_clear":
+        return str(block.get("message", "") or "")
+    name_a = str(block.get("goal_nearest_pair_name_a", "") or "")
+    name_b = str(block.get("goal_nearest_pair_name_b", "") or "")
+    clearance_m = _optional_float(
+        block.get("goal_nearest_pair_distance_m", block.get("nearest_pair_distance_m"))
+    )
+    threshold_m = _goal_threshold_m(block)
+    if name_a or name_b:
+        pair = f"{name_a or 'unknown'} <-> {name_b or 'unknown'}"
+        if clearance_m is not None and threshold_m is not None:
+            return (
+                f"goal_not_clear: pair {pair}, "
+                f"clearance {clearance_m * 1000.0:.1f} mm < required {threshold_m * 1000.0:.1f} mm"
+            )
+        return f"goal_not_clear: pair {pair}"
+    return str(block.get("message", "") or "goal_not_clear")
 
 
 def _arm_payload(value: dict[str, Any] | None) -> dict[str, Any]:

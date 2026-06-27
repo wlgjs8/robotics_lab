@@ -259,6 +259,7 @@ struct CollisionMonitor::Impl {
     double gp_thickness_ = 0.0;
     // per-collision-pair external flag (1 = arm<->external obstacle, e.g. ground_plane).
     std::vector<char> pair_external_;
+    std::vector<std::string> pair_category_;
     // ARTICULATED gripper: per-arm movable finger hull geometry + the (open) base
     // placement, repositioned along local +X by the live jaw percent. gripper_[0]=Left,
     // [1]=Right. gripper_pct_ is guarded by in_mtx; defaults OPEN (largest envelope) so
@@ -312,6 +313,9 @@ struct CollisionMonitor::Impl {
         // fail-closed if a future curation path forgets to mirror the pair vector.
         if (pair_external_.size() != geom.collisionPairs.size()) {
             pair_external_.assign(geom.collisionPairs.size(), 0);
+        }
+        if (pair_category_.size() != geom.collisionPairs.size()) {
+            pair_category_.assign(geom.collisionPairs.size(), "self");
         }
         // Constant stand-frame pose in the universe frame (FK once at neutral; the
         // stand is rigidly fixed to the root so this never changes).
@@ -624,20 +628,24 @@ struct CollisionMonitor::Impl {
         }
         geom.removeAllCollisionPairs();
         pair_external_.clear();
+        pair_category_.clear();
         std::size_t n_lr = 0, n_arm_stand = 0, n_intra = 0, n_external = 0, n_disabled = 0;
         const auto tryAddPair = [&](std::size_t a, std::size_t b, PairCategory category) {
             if (const CollisionPairPattern* rule = disabledRule(a, b)) {
                 ++n_disabled;
-                std::cerr << "[collision_monitor] disabled_pair"
-                          << " rule=" << ruleString(*rule)
-                          << " geom_a=" << geom.geometryObjects[a].name
-                          << " geom_b=" << geom.geometryObjects[b].name
-                          << " category=" << categoryString(category)
-                          << " reason=disabled_collision_pairs\n";
+                if (cfg.debug_pair_curation) {
+                    std::cerr << "[collision_monitor] disabled_pair"
+                              << " rule=" << ruleString(*rule)
+                              << " geom_a=" << geom.geometryObjects[a].name
+                              << " geom_b=" << geom.geometryObjects[b].name
+                              << " category=" << categoryString(category)
+                              << " reason=disabled_collision_pairs\n";
+                }
                 return;
             }
             geom.addCollisionPair(pinocchio::CollisionPair(a, b));
             pair_external_.push_back(category == PairCategory::External ? 1 : 0);
+            pair_category_.push_back(categoryString(category));
             switch (category) {
                 case PairCategory::LeftRight: ++n_lr; break;
                 case PairCategory::ArmStand: ++n_arm_stand; break;
@@ -851,6 +859,11 @@ struct CollisionMonitor::Impl {
                 s.nearest_name_a = geom.geometryObjects[cp.first].name;
                 s.nearest_name_b = geom.geometryObjects[cp.second].name;
                 s.nearest_external = k < pair_external_.size() && pair_external_[k];
+                if (k < pair_category_.size()) {
+                    s.nearest_category = pair_category_[k];
+                } else {
+                    s.nearest_category = s.nearest_external ? "external" : "self";
+                }
             }
             const bool ext = k < pair_external_.size() && pair_external_[k];
             if (ext) {

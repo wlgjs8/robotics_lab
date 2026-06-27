@@ -258,6 +258,7 @@ struct CollisionDistanceSummary {
     std::string nearest_name_b;
     double nearest_distance_m = std::numeric_limits<double>::infinity();
     bool nearest_external = false;
+    std::string nearest_category;
     bool valid = false;
 };
 

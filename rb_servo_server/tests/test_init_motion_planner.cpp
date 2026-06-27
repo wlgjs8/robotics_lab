@@ -255,15 +255,23 @@ static bool run() {
         RB_CHECK(std::isfinite(bad.goal_external_min_clearance_m));
         RB_CHECK(!bad.goal_nearest_pair_name_a.empty());
         RB_CHECK(!bad.goal_nearest_pair_name_b.empty());
+        RB_CHECK(!bad.goal_nearest_pair_category.empty());
+        RB_CHECK(!bad.goal_nearest_pair_disabled_by_rule);
+        RB_CHECK(std::isfinite(bad.goal_nearest_pair_distance_m));
         RB_CHECK(std::isfinite(bad.goal_clear_threshold_self_m));
         RB_CHECK(std::isfinite(bad.goal_clear_threshold_external_m));
+        RB_CHECK(std::isfinite(bad.goal_clear_margin_deficit_m));
         RB_CHECK(bad.message.find("goal_self_min_clearance_m=") != std::string::npos);
         RB_CHECK(bad.message.find("goal_external_min_clearance_m=") != std::string::npos);
         RB_CHECK(bad.message.find("goal_nearest_pair_name_a=") != std::string::npos);
         RB_CHECK(bad.message.find("goal_nearest_pair_name_b=") != std::string::npos);
+        RB_CHECK(bad.message.find("goal_nearest_pair_category=") != std::string::npos);
+        RB_CHECK(bad.message.find("goal_nearest_pair_disabled_by_rule=") != std::string::npos);
+        RB_CHECK(bad.message.find("goal_nearest_pair_distance_m=") != std::string::npos);
         RB_CHECK(bad.message.find("goal_nearest_pair_external=") != std::string::npos);
         RB_CHECK(bad.message.find("goal_clear_threshold_self_m=") != std::string::npos);
         RB_CHECK(bad.message.find("goal_clear_threshold_external_m=") != std::string::npos);
+        RB_CHECK(bad.message.find("goal_clear_margin_deficit_m=") != std::string::npos);
     }
 
     // ---- (4) Collision-free TcpLinearMove (planLinearMove). ----

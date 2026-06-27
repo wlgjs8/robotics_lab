@@ -212,9 +212,15 @@ safety:
       pika_finger_right_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_finger_right.STL"
       gripper_finger_travel_m: 0.047
       stand_ignore_arm_substrings: ["link0"]
+      debug_pair_curation: true
       disabled_collision_pairs:
+        # Structural adjacent/base false-positive pairs. Verify these in the
+        # Viser collision overlay before real operation; do not replace this with
+        # a global d_hard_m or InitMotion planner margin reduction.
         - ["*left*link0*", "*left*link1*"]
         - ["*right*link0*", "*right*link1*"]
+        - ["*left*link0*", "*left*link2*"]
+        - ["*right*link0*", "*right*link2*"]
       d_hard_m: 0.018   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
       # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
       # can brake a head-on approach at the command ceiling before the hard floor.

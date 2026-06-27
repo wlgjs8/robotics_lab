@@ -32,6 +32,7 @@ from rb_servo_gui.app import (
     _toggle_episode_recording,
     _update_recording_panel,
     _send_arm_init_override,
+    _send_arm_init_cancel_resume,
     _update_arm_init_panel,
     _lifecycle_init_motion_layout_html,
     _update_gripper_feedback,
@@ -527,6 +528,12 @@ class GuiContractsTest(unittest.TestCase):
                 "message": "goal blocked",
                 "start_clear_m": 0.012,
                 "goal_clear_m": -0.002,
+                "goal_nearest_pair_name_a": "dual_rb3_730e_right_link0_0",
+                "goal_nearest_pair_name_b": "dual_rb3_730e_right_link2_0",
+                "goal_nearest_pair_category": "intra-arm",
+                "goal_nearest_pair_distance_m": 0.0188,
+                "goal_clear_threshold_self_m": 0.023,
+                "goal_clear_margin_deficit_m": 0.0042,
                 "tree_start": 0,
                 "tree_goal": 0,
                 "iterations": 0,
@@ -540,8 +547,9 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIsNotNone(latest)
         self.assertEqual(latest.init_motion["fail_mode"], "goal_not_clear")
         text = _format_init_motion_status(latest, stale=False)
-        self.assertIn("Init 자세가 충돌/바닥 침범", text)
-        self.assertIn("goal_clear=-2.0mm", text)
+        self.assertIn("goal_not_clear", text)
+        self.assertIn("dual_rb3_730e_right_link0_0", text)
+        self.assertIn("18.8 mm < required 23.0 mm", text)
 
     def test_init_motion_runtime_diag_formats_rrt_and_execution(self):
         rrt = StateSnapshot.parse(sample_state(init_motion={
@@ -1206,7 +1214,8 @@ class GuiContractsTest(unittest.TestCase):
         self.assertTrue(handles["recording_start_button"].disabled)
         self.assertFalse(handles["recording_stop_button"].disabled)
 
-        self.assertFalse(_toggle_episode_recording(handles, monotonic_fn=lambda: 10.5))
+        # A second press 0.4 s later is within the 0.5 s debounce window -> ignored.
+        self.assertFalse(_toggle_episode_recording(handles, monotonic_fn=lambda: 10.4))
         self.assertEqual(len(client.calls), 1)
         self.assertIn("debounce", handles["recording_command_status"].value)
 
@@ -1489,6 +1498,67 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(handles["init_motion_buttons"]["both"].color, "gray")
         self.assertEqual(handles["init_motion_buttons"]["left"].color, "green")
         self.assertEqual(handles["init_motion_buttons"]["right"].color, "gray")
+
+    def test_arm_init_status_panel_shows_failed_nearest_pair(self):
+        handles = {
+            "arm_init_local_status": {
+                "init_override_left": False,
+                "init_override_right": True,
+                "right_state": "init failed",
+                "right_message": (
+                    "goal_not_clear: pair dual_rb3_730e_right_link0_0 <-> "
+                    "dual_rb3_730e_right_link2_0, clearance 18.8 mm < required 23.0 mm"
+                ),
+            },
+            "arm_init_status": RecordingText(""),
+            "init_motion_buttons": {
+                "both": RecordingButton(),
+                "left": RecordingButton(),
+                "right": RecordingButton(),
+            },
+        }
+
+        _update_arm_init_panel(handles, None, stale=False)
+
+        self.assertIn("오른팔: init failed", handles["arm_init_status"].value)
+        self.assertIn("dual_rb3_730e_right_link0_0", handles["arm_init_status"].value)
+        self.assertIn("18.8 mm < required 23.0 mm", handles["arm_init_status"].value)
+
+    def test_arm_init_cancel_resume_sends_cancel_to_policy_runner(self):
+        status_store = RecordingStatusStore()
+        status_store.update(
+            {
+                "recording": False,
+                "arm_init": {
+                    "init_override_left": False,
+                    "init_override_right": True,
+                    "right_state": "init failed",
+                    "last_command": "right",
+                },
+            },
+            received_monotonic=time.monotonic(),
+        )
+        command_client = RecordingCommandFake()
+        handles = {
+            "recording_status_store": status_store,
+            "recording_cmd_client": command_client,
+            "arm_init_status": RecordingText(""),
+            "init_motion_buttons": {
+                "both": RecordingButton(),
+                "left": RecordingButton(),
+                "right": RecordingButton(),
+            },
+            "_state_stale": False,
+        }
+
+        ok, message = _send_arm_init_cancel_resume(handles, "both")
+
+        self.assertTrue(ok, message)
+        self.assertEqual(command_client.arm_init_calls[0]["arms"], "both")
+        self.assertEqual(command_client.arm_init_calls[0]["action"], "cancel")
+        self.assertFalse(handles["arm_init_local_status"]["init_override_left"])
+        self.assertFalse(handles["arm_init_local_status"]["init_override_right"])
+        self.assertIn("routed to", message)
 
     def test_lifecycle_init_motion_layout_targets_three_buttons(self):
         html = _lifecycle_init_motion_layout_html()

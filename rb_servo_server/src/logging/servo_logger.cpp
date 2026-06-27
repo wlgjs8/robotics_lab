@@ -137,6 +137,10 @@ void writeInitMotionHeader(std::ostream& os) {
        << ",right_mode_before_init_sequencer"
        << ",left_mode_after_init_sequencer"
        << ",right_mode_after_init_sequencer"
+       << ",left_joint_target_profile_before_init_sequencer"
+       << ",right_joint_target_profile_before_init_sequencer"
+       << ",left_joint_target_profile_after_init_sequencer"
+       << ",right_joint_target_profile_after_init_sequencer"
        << ",init_motion_left_status"
        << ",init_motion_right_status"
        << ",init_motion_aggregate_status"
@@ -171,7 +175,25 @@ void writeInitMotionHeader(std::ostream& os) {
        << ",init_motion_aggregate_nearest_pair_distance_m"
        << ",init_motion_left_nearest_pair_external"
        << ",init_motion_right_nearest_pair_external"
-       << ",init_motion_aggregate_nearest_pair_external";
+       << ",init_motion_aggregate_nearest_pair_external"
+       << ",init_motion_left_goal_nearest_pair_a"
+       << ",init_motion_left_goal_nearest_pair_b"
+       << ",init_motion_left_goal_pair_category"
+       << ",init_motion_left_goal_clearance_m"
+       << ",init_motion_left_goal_threshold_m"
+       << ",init_motion_left_goal_margin_deficit_m"
+       << ",init_motion_right_goal_nearest_pair_a"
+       << ",init_motion_right_goal_nearest_pair_b"
+       << ",init_motion_right_goal_pair_category"
+       << ",init_motion_right_goal_clearance_m"
+       << ",init_motion_right_goal_threshold_m"
+       << ",init_motion_right_goal_margin_deficit_m"
+       << ",init_motion_aggregate_goal_nearest_pair_a"
+       << ",init_motion_aggregate_goal_nearest_pair_b"
+       << ",init_motion_aggregate_goal_pair_category"
+       << ",init_motion_aggregate_goal_clearance_m"
+       << ",init_motion_aggregate_goal_threshold_m"
+       << ",init_motion_aggregate_goal_margin_deficit_m";
 }
 
 }  // namespace
@@ -472,10 +494,27 @@ void writeTcpPoseTargetDebugColumns(std::ostream& os, const CartesianSolveTeleme
 }
 
 void writeInitMotionColumns(std::ostream& os, const ServoSample& sample) {
+    const auto goal_threshold = [](const auto& diag) {
+        return diag.goal_nearest_pair_external
+            ? diag.goal_clear_threshold_external_m
+            : diag.goal_clear_threshold_self_m;
+    };
+    const auto write_goal_columns = [&](const auto& diag) {
+        os << ',' << csvEscape(diag.goal_nearest_pair_name_a)
+           << ',' << csvEscape(diag.goal_nearest_pair_name_b)
+           << ',' << csvEscape(diag.goal_nearest_pair_category)
+           << ',' << diag.goal_nearest_pair_distance_m
+           << ',' << goal_threshold(diag)
+           << ',' << diag.goal_clear_margin_deficit_m;
+    };
     os << ',' << csvEscape(sample.left_mode_before_init_sequencer)
        << ',' << csvEscape(sample.right_mode_before_init_sequencer)
        << ',' << csvEscape(sample.left_mode_after_init_sequencer)
        << ',' << csvEscape(sample.right_mode_after_init_sequencer)
+       << ',' << csvEscape(sample.left_joint_target_profile_before_init_sequencer)
+       << ',' << csvEscape(sample.right_joint_target_profile_before_init_sequencer)
+       << ',' << csvEscape(sample.left_joint_target_profile_after_init_sequencer)
+       << ',' << csvEscape(sample.right_joint_target_profile_after_init_sequencer)
        << ',' << csvEscape(sample.init_motion_left.status)
        << ',' << csvEscape(sample.init_motion_right.status)
        << ',' << csvEscape(sample.init_motion.status)
@@ -511,6 +550,9 @@ void writeInitMotionColumns(std::ostream& os, const ServoSample& sample) {
        << ',' << sample.init_motion_left.nearest_pair_external
        << ',' << sample.init_motion_right.nearest_pair_external
        << ',' << sample.init_motion.nearest_pair_external;
+    write_goal_columns(sample.init_motion_left);
+    write_goal_columns(sample.init_motion_right);
+    write_goal_columns(sample.init_motion);
 }
 }  // namespace
 

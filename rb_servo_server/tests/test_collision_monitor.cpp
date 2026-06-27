@@ -78,6 +78,14 @@ static bool runPairPatternMatching() {
         glob, "dual_rb3_730e_right_link1", "dual_rb3_730e_right_link0"));
     RB_CHECK(!collisionPairPatternMatches(
         glob, "dual_rb3_730e_left_link0", "dual_rb3_730e_right_link1"));
+
+    CollisionPairPattern link02{"*right*link0*", "*right*link2*"};
+    RB_CHECK(collisionPairPatternMatches(
+        link02, "dual_rb3_730e_right_link0_0", "dual_rb3_730e_right_link2_0"));
+    RB_CHECK(collisionPairPatternMatches(
+        link02, "dual_rb3_730e_right_link2_0", "dual_rb3_730e_right_link0_0"));
+    RB_CHECK(!collisionPairPatternMatches(
+        link02, "dual_rb3_730e_right_link0_0", "dual_rb3_730e_right_link3_0"));
     return true;
 }
 
@@ -101,30 +109,38 @@ static bool run() {
         all_pairs_cfg.swept_samples = 1;
         all_pairs_cfg.max_near_pairs = 10000;
         CollisionPairPattern adjacent_right{"*right*link0*", "*right*link1*"};
+        CollisionPairPattern link02_right{"*right*link0*", "*right*link2*"};
         CollisionMonitor all_pairs(all_pairs_cfg);
         const JointArray init = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
         const CollisionVerdict before = all_pairs.evalOnce(init, init);
         RB_CHECK(before.valid);
         const bool adjacent_present = verdictHasPair(before, adjacent_right);
+        const bool link02_present = verdictHasPair(before, link02_right);
         std::cout << "right link0-link1 baseline pair present=" << adjacent_present << "\n";
+        std::cout << "right link0-link2 baseline pair present=" << link02_present << "\n";
 
         CollisionMonitorConfig disabled_cfg = all_pairs_cfg;
         disabled_cfg.disabled_collision_pairs.push_back(adjacent_right);
+        disabled_cfg.disabled_collision_pairs.push_back(link02_right);
         CollisionMonitor disabled(disabled_cfg);
         const CollisionVerdict after = disabled.evalOnce(init, init);
         RB_CHECK(after.valid);
         RB_CHECK(!verdictHasPair(after, adjacent_right));
-        if (adjacent_present) {
+        RB_CHECK(!verdictHasPair(after, link02_right));
+        if (adjacent_present || link02_present) {
             RB_CHECK(disabled.numPairs() < all_pairs.numPairs());
         } else {
-            // On URDFs where link0/link1 are classified as adjacent same-arm links,
-            // intra-arm chain separation already excludes the pair before SRDF rules.
+            // On URDFs where these structural base pairs are classified as adjacent
+            // same-arm links, intra-arm chain separation already excludes them
+            // before SRDF-style rules.
             RB_CHECK(disabled.numPairs() == all_pairs.numPairs());
         }
 
         CollisionMonitorConfig reversed_cfg = all_pairs_cfg;
         reversed_cfg.disabled_collision_pairs.push_back(
             CollisionPairPattern{"*right*link1*", "*right*link0*"});
+        reversed_cfg.disabled_collision_pairs.push_back(
+            CollisionPairPattern{"*right*link2*", "*right*link0*"});
         CollisionMonitor reversed(reversed_cfg);
         RB_CHECK(reversed.numPairs() == disabled.numPairs());
 

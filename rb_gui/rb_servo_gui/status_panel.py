@@ -584,6 +584,30 @@ def _format_clearance_mm(label: str, value: Any) -> str:
     return f"{label}={parsed * 1000.0:.1f}mm" if parsed is not None else f"{label}=n/a"
 
 
+def _format_goal_not_clear(diag: Mapping[str, Any]) -> str:
+    name_a = str(diag.get("goal_nearest_pair_name_a", "") or "")
+    name_b = str(diag.get("goal_nearest_pair_name_b", "") or "")
+    clearance = _optional_finite(
+        diag.get("goal_nearest_pair_distance_m", diag.get("nearest_pair_distance_m"))
+    )
+    threshold = _optional_finite(diag.get("goal_clear_threshold_external_m")) if bool(
+        diag.get("goal_nearest_pair_external", False)
+    ) else _optional_finite(diag.get("goal_clear_threshold_self_m"))
+    if name_a or name_b:
+        pair = f"{name_a or 'unknown'} <-> {name_b or 'unknown'}"
+        if clearance is not None and threshold is not None:
+            return (
+                "InitMotion FAILED: goal_not_clear: "
+                f"pair {pair}, clearance {clearance * 1000.0:.1f} mm "
+                f"< required {threshold * 1000.0:.1f} mm"
+            )
+        return f"InitMotion FAILED: goal_not_clear: pair {pair}"
+    return (
+        "InitMotion FAILED: Init 자세가 충돌/바닥 침범 "
+        f"({_format_clearance_mm('goal_clear', diag.get('goal_clear_m'))}) - Init pose 재설정 필요"
+    )
+
+
 def _format_init_motion_status(latest: StateSnapshot | None, *, stale: bool) -> str:
     if latest is None:
         return "InitMotion: no state"
@@ -605,10 +629,7 @@ def _format_init_motion_status(latest: StateSnapshot | None, *, stale: bool) -> 
 
     if status == "failed":
         if fail_mode == "goal_not_clear":
-            return (
-                "InitMotion FAILED: Init 자세가 충돌/바닥 침범 "
-                f"({_format_clearance_mm('goal_clear', diag.get('goal_clear_m'))}) - Init pose 재설정 필요"
-            )
+            return _format_goal_not_clear(diag)
         if fail_mode == "escape_failed":
             return (
                 "InitMotion FAILED: 시작 자세가 끼임 - 탈출 실패 "

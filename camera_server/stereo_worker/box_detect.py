@@ -99,6 +99,9 @@ class BoxDetector:
     FPS_CAP = 8000                 # FPS 전 랜덤 상한(속도)
     ICP_MAX_CORR = 0.03            # ICP 대응 최대거리 (m) = 암묵 trimming
     ICP_ITERS = 40
+    ICP_TRIM = 0.7                 # SE(2) ICP 대응 trim 비율(가까운 70%만 사용)
+    ICP_CLIP_MARGIN = 0.04         # ICP 입력을 박스 근방 3D RoI로 클립(박스 바깥 점 배제)
+    ICP_PASSES = 2                 # 클립→ICP→재클립→ICP 반복 횟수
     MAX_COMPONENTS = 8             # candidate ranking cost bound
 
     def __init__(self, K, baseline, use_icp=True, icp_method=None):
@@ -288,7 +291,7 @@ class BoxDetector:
         S = s.copy(); Tacc = np.eye(4); rmse = float("nan"); inl = 1.0
         for _ in range(self.ICP_ITERS):
             d, j = tree.query(S)
-            thr = np.quantile(d, 0.8); m = d <= thr
+            thr = np.quantile(d, self.ICP_TRIM); m = d <= thr
             inl = float(m.mean()); rmse = float(np.sqrt(float((d[m] ** 2).mean())))
             sp, dp = S[m, :2], Mw[j[m], :2]
             cs, cd = sp.mean(0), dp.mean(0)
@@ -302,12 +305,28 @@ class BoxDetector:
                 break
         return np.linalg.inv(Tacc) @ T0, inl, rmse, "yaw_se2", int(len(s))
 
+    def _clip_to_box(self, scene, T, margin):
+        """scene 중 박스(@T) 로컬 근방 3D RoI 안의 점만 남긴다(박스 바깥 점 배제)."""
+        loc = np.abs((scene - T[:3, 3]) @ T[:3, :3])
+        inb = ((loc[:, 0] < BOX_DIMS[0] / 2 + margin) &
+               (loc[:, 1] < BOX_DIMS[1] / 2 + margin) &
+               (loc[:, 2] < BOX_DIMS[2] / 2 + margin))
+        return scene[inb]
+
     def _icp(self, scene, T0):
-        """관측점(scene) → 알려진 open-tray 모델@init ICP. refined = inv(T_icp)@T0."""
-        s = self._fps(scene, self.FPS_K)
-        if self.icp_method == "yaw_se2":
-            return self._icp_se2(s, T0)
-        return self._icp_o3d(s, T0, self.icp_method)
+        """관측점(scene) → 모델 ICP. 박스 근방 3D RoI 클립으로 바깥 점 배제 + 다패스 정제.
+        refined = inv(T_icp)@T (패스마다 현 pose 기준 재클립)."""
+        T, fit, rmse, meth, sample_n = T0, 1.0, float("nan"), self.icp_method, 0
+        for _ in range(max(1, self.ICP_PASSES)):
+            sc = self._clip_to_box(scene, T, self.ICP_CLIP_MARGIN)
+            if len(sc) < self.MIN_PTS:                 # 클립이 과하면 원본 사용
+                sc = scene
+            s = self._fps(sc, self.FPS_K)
+            if self.icp_method == "yaw_se2":
+                T, fit, rmse, meth, sample_n = self._icp_se2(s, T)
+            else:
+                T, fit, rmse, meth, sample_n = self._icp_o3d(s, T, self.icp_method)
+        return T, fit, rmse, meth, sample_n
 
     def _icp_o3d(self, s, T0, method):
         Mw = self.model @ T0[:3, :3].T + T0[:3, 3]

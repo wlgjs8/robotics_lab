@@ -52,9 +52,13 @@ struct InitMotionPlanResult {
     double goal_external_min_clearance_m = std::numeric_limits<double>::quiet_NaN();
     std::string goal_nearest_pair_name_a;
     std::string goal_nearest_pair_name_b;
+    std::string goal_nearest_pair_category;
     bool goal_nearest_pair_external = false;
+    bool goal_nearest_pair_disabled_by_rule = false;
+    double goal_nearest_pair_distance_m = std::numeric_limits<double>::quiet_NaN();
     double goal_clear_threshold_self_m = std::numeric_limits<double>::quiet_NaN();
     double goal_clear_threshold_external_m = std::numeric_limits<double>::quiet_NaN();
+    double goal_clear_margin_deficit_m = std::numeric_limits<double>::quiet_NaN();
     double clear_threshold_m = std::numeric_limits<double>::quiet_NaN();
     double external_clear_threshold_m = std::numeric_limits<double>::quiet_NaN();
     std::string nearest_pair;

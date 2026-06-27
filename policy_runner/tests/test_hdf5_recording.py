@@ -545,6 +545,64 @@ class Hdf5EpisodeRecorderTest(unittest.TestCase):
             np.testing.assert_array_equal(dataset[1], second)
             np.testing.assert_array_equal(handle["observations/bundle_seq"][...], [1, 2])
 
+    def test_recording_writes_depth_as_uint16_hw(self) -> None:
+        # RealSense z16 depth arrives as a 2-D uint16 (H,W) frame. It must be
+        # recorded with its native dtype/shape, not coerced into uint8 H,W,C
+        # (which raised "pixels must have shape H,W,C" and would corrupt depth).
+        first = (np.arange(6, dtype=np.uint16).reshape(2, 3) * 500)
+        second = np.full((2, 3), 1234, dtype=np.uint16)
+        depth_frames = [
+            _camera_bundle(
+                seq=idx + 1,
+                frames={
+                    "left_realsense_depth": CameraFrame(
+                        camera_name="left_realsense_depth",
+                        width=3,
+                        height=2,
+                        pixels=pixels,
+                        format="z16",
+                        frame_number=idx + 1,
+                        host_arrival_time_ns=1000 + idx,
+                        sensor_timestamp_ns=900 + idx,
+                    )
+                },
+            )
+            for idx, pixels in enumerate((first, second))
+        ]
+        camera_client = FakeCameraClient(depth_frames)
+        recorder = Hdf5EpisodeRecorder(
+            self.tmpdir,
+            recording_rate_hz=100.0,
+            camera_client=camera_client,
+            expected_cameras=["left_realsense_depth"],
+        )
+        recorder.start_episode(
+            reset_snapshot=_state_snapshot(),
+            task_description="depth",
+            action_source="dual_spacemouse_pose_target",
+        )
+        with mock.patch("policy_runner.recording.time.monotonic", side_effect=[0.0, 0.02, 0.04]):
+            recorder.record_frame(
+                state_snapshot=_state_snapshot(tick=1),
+                action_packet=_pose_action(seq=1),
+                action_host_time_ns=1,
+                action_seq=1,
+            )
+            recorder.record_frame(
+                state_snapshot=_state_snapshot(tick=2),
+                action_packet=_pose_action(seq=2),
+                action_host_time_ns=2,
+                action_seq=2,
+            )
+            path = recorder.end_episode(success=True, end_reason="operator_success")
+        with h5py.File(path, "r") as handle:
+            dataset = handle["observations/images/left_realsense_depth"]
+            self.assertEqual(dataset.shape, (2, 2, 3))
+            self.assertEqual(dataset.dtype, np.dtype("uint16"))
+            self.assertEqual(dataset.chunks, (1, 2, 3))
+            np.testing.assert_array_equal(dataset[0], first)
+            np.testing.assert_array_equal(dataset[1], second)
+
     def test_recording_zero_fills_when_bundle_missing_camera(self) -> None:
         first = np.ones((2, 3, 3), dtype=np.uint8)
         missing_bundle = _camera_bundle(seq=2, frames={})

@@ -17,6 +17,7 @@ from policy_runner.action_sources.tcp_pose_target import tcp_pose_target_stand_i
 from policy_runner.arm_init_control import (
     ARM_INIT_COMMAND_SCHEMA,
     ArmInitOverrideController,
+    apply_source_override_transitions,
     parse_arm_init_command,
 )
 from policy_runner.config import config_from_mapping, load_config
@@ -558,6 +559,90 @@ class PolicyRunnerContractTest(unittest.TestCase):
         intent = controller.compose_intent(tcp_pose_target_stand_intent(right=(0.4, 0.5, 0.6, 0, 0, 0)))
         self.assertEqual(intent.right["mode"], "Hold")
 
+    def test_arm_init_failed_status_includes_goal_not_clear_pair_and_toggle_cancel(self):
+        controller = ArmInitOverrideController()
+        controller.handle_command(
+            parse_arm_init_command(
+                {
+                    "schema": ARM_INIT_COMMAND_SCHEMA,
+                    "arms": "right",
+                    "action": "start",
+                    "right_q_deg": [0, 1, 0, 0, 0, 0],
+                }
+            )
+        )
+        controller.consume_transitions()
+        controller.update_from_snapshot(
+            StateSnapshot(
+                {
+                    "init_motion": {
+                        "right": {
+                            "status": "failed",
+                            "fail_mode": "goal_not_clear",
+                            "goal_nearest_pair_name_a": "dual_rb3_730e_right_link0_0",
+                            "goal_nearest_pair_name_b": "dual_rb3_730e_right_link2_0",
+                            "goal_nearest_pair_category": "intra-arm",
+                            "goal_nearest_pair_distance_m": 0.0188,
+                            "goal_clear_threshold_self_m": 0.023,
+                            "goal_clear_margin_deficit_m": 0.0042,
+                        }
+                    }
+                },
+                received_monotonic=1.0,
+            )
+        )
+        status = controller.status_block()
+        self.assertEqual(status["right_fail_mode"], "goal_not_clear")
+        self.assertEqual(status["right_goal_nearest_pair_category"], "intra-arm")
+        self.assertEqual(status["right_goal_clearance_m"], 0.0188)
+        self.assertIn("dual_rb3_730e_right_link0_0", status["right_message"])
+        self.assertIn("18.8 mm < required 23.0 mm", status["right_message"])
+
+        self.assertTrue(
+            controller.handle_command(
+                parse_arm_init_command({"schema": ARM_INIT_COMMAND_SCHEMA, "arms": "right", "action": "toggle"})
+            )
+        )
+        transitions = controller.consume_transitions()
+        self.assertEqual(transitions.cancelled, ("right",))
+        cancelled_status = controller.status_block()
+        self.assertFalse(cancelled_status["init_override_right"])
+        self.assertEqual(cancelled_status["right_message"], "")
+        self.assertIsNone(cancelled_status["right_goal_clearance_m"])
+
+    def test_arm_init_failed_resume_mode_clears_and_reanchors_source(self):
+        controller = ArmInitOverrideController(auto_clear_on_failed=True, resume_flow_on_failed=True)
+        controller.handle_command(
+            parse_arm_init_command(
+                {
+                    "schema": ARM_INIT_COMMAND_SCHEMA,
+                    "arms": "left",
+                    "action": "start",
+                    "left_q_deg": [1, 0, 0, 0, 0, 0],
+                }
+            )
+        )
+        controller.consume_transitions()
+        snapshot = StateSnapshot(
+            {"init_motion": {"left": {"status": "failed", "fail_mode": "goal_not_clear"}}},
+            received_monotonic=1.0,
+        )
+        controller.update_from_snapshot(snapshot)
+        transitions = controller.consume_transitions()
+        self.assertEqual(transitions.failed, ("left",))
+        self.assertFalse(controller.status_block()["init_override_left"])
+
+        class Source:
+            def __init__(self):
+                self.reset_arms = None
+
+            def reset_engagement(self, arms):
+                self.reset_arms = tuple(arms)
+
+        source = Source()
+        apply_source_override_transitions(source, transitions, snapshot, reset_on_failed=True)
+        self.assertEqual(source.reset_arms, ("left",))
+
     def test_arm_init_override_composes_mixed_policy_command(self):
         controller = ArmInitOverrideController()
         controller.handle_command(
@@ -648,16 +733,27 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertEqual(default_cfg.runtime.startup_timeout_sec, 5.0)
         self.assertFalse(default_cfg.servo_command.acquire_lease)
         self.assertEqual(default_cfg.servo_command.lease_readback_timeout_sec, 1.0)
+        self.assertFalse(default_cfg.arm_init_override.auto_clear_on_failed)
+        self.assertFalse(default_cfg.arm_init_override.resume_flow_on_failed)
+        self.assertTrue(default_cfg.arm_init_override.allow_manual_cancel_after_failed)
         cfg = config_from_mapping(
             {
                 "schema": "robotics_lab.policy_runner.v1",
                 "runtime": {"startup_timeout_sec": 0.25},
                 "servo_command": {"acquire_lease": True, "lease_readback_timeout_sec": 0.75},
+                "arm_init_override": {
+                    "auto_clear_on_failed": True,
+                    "resume_flow_on_failed": True,
+                    "allow_manual_cancel_after_failed": False,
+                },
             }
         )
         self.assertEqual(cfg.runtime.startup_timeout_sec, 0.25)
         self.assertTrue(cfg.servo_command.acquire_lease)
         self.assertEqual(cfg.servo_command.lease_readback_timeout_sec, 0.75)
+        self.assertTrue(cfg.arm_init_override.auto_clear_on_failed)
+        self.assertTrue(cfg.arm_init_override.resume_flow_on_failed)
+        self.assertFalse(cfg.arm_init_override.allow_manual_cancel_after_failed)
 
     def test_umi_sample_stale_timeout_alias_maps_to_hold_timeout(self):
         cfg = config_from_mapping(

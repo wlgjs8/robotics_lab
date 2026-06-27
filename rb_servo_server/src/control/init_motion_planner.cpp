@@ -582,7 +582,17 @@ InitMotionPlanResult InitMotionPlanner::plan(
         result.goal_external_min_clearance_m = s.external_min_clearance_m;
         result.goal_nearest_pair_name_a = s.nearest_name_a;
         result.goal_nearest_pair_name_b = s.nearest_name_b;
+        result.goal_nearest_pair_category = s.nearest_category;
         result.goal_nearest_pair_external = s.nearest_external;
+        result.goal_nearest_pair_disabled_by_rule = false;
+        result.goal_nearest_pair_distance_m = s.nearest_distance_m;
+        const double goal_threshold = s.nearest_external
+            ? result.goal_clear_threshold_external_m
+            : result.goal_clear_threshold_self_m;
+        result.goal_clear_margin_deficit_m =
+            std::isfinite(goal_threshold) && std::isfinite(s.nearest_distance_m)
+                ? goal_threshold - s.nearest_distance_m
+                : std::numeric_limits<double>::quiet_NaN();
         result.nearest_pair_distance_m = s.nearest_distance_m;
         result.nearest_pair_external = s.nearest_external;
         if (!s.nearest_name_a.empty() || !s.nearest_name_b.empty()) {
@@ -633,9 +643,16 @@ InitMotionPlanResult InitMotionPlanner::plan(
           << ", goal_nearest_pair_name_b="
           << (result.goal_nearest_pair_name_b.empty() ? std::string("unknown")
                                                        : result.goal_nearest_pair_name_b)
+          << ", goal_nearest_pair_category="
+          << (result.goal_nearest_pair_category.empty() ? std::string("unknown")
+                                                        : result.goal_nearest_pair_category)
           << ", goal_nearest_pair_external=" << (result.goal_nearest_pair_external ? 1 : 0)
+          << ", goal_nearest_pair_disabled_by_rule="
+          << (result.goal_nearest_pair_disabled_by_rule ? 1 : 0)
+          << ", goal_nearest_pair_distance_m=" << result.goal_nearest_pair_distance_m
           << ", goal_clear_threshold_self_m=" << result.goal_clear_threshold_self_m
           << ", goal_clear_threshold_external_m=" << result.goal_clear_threshold_external_m
+          << ", goal_clear_margin_deficit_m=" << result.goal_clear_margin_deficit_m
           << ", nearest_pair=" << (result.nearest_pair.empty() ? std::string("unknown") : result.nearest_pair)
           << ", nearest_pair_distance_m=" << result.nearest_pair_distance_m
           << ", nearest_pair_external=" << (result.nearest_pair_external ? 1 : 0) << ")";

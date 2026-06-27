@@ -104,6 +104,8 @@ class ArmInitOverrideConfig:
     auto_clear_on_done: bool = True
     auto_clear_on_failed: bool = False
     resume_flow_on_done: bool = True
+    resume_flow_on_failed: bool = False
+    allow_manual_cancel_after_failed: bool = True
     reset_flow_source_on_start: bool = True
     reset_flow_source_on_resume: bool = True
 
@@ -555,6 +557,8 @@ def _arm_init_override_config(raw: dict[str, Any]) -> ArmInitOverrideConfig:
         "auto_clear_on_done",
         "auto_clear_on_failed",
         "resume_flow_on_done",
+        "resume_flow_on_failed",
+        "allow_manual_cancel_after_failed",
         "reset_flow_source_on_start",
         "reset_flow_source_on_resume",
     ):

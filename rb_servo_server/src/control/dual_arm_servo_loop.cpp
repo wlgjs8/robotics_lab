@@ -2071,6 +2071,10 @@ void DualArmServoLoop::loopMain() {
         std::string init_mode_before_right = toString(command.right.mode);
         std::string init_mode_after_left = init_mode_before_left;
         std::string init_mode_after_right = init_mode_before_right;
+        std::string init_profile_before_left = toString(command.left.joint_target_profile);
+        std::string init_profile_before_right = toString(command.right.joint_target_profile);
+        std::string init_profile_after_left = init_profile_before_left;
+        std::string init_profile_after_right = init_profile_before_right;
         std::string init_non_init_arm_preserved_mode;
         if (!fault_latched_.load()) {
             left_safety_tracking_ = SafetyTrackingTelemetry{};
@@ -2122,6 +2126,10 @@ void DualArmServoLoop::loopMain() {
             command = applyCollisionFreeLinearMove(command, left_state, right_state);
             const ControlMode left_mode_before_init_sequencer = command.left.mode;
             const ControlMode right_mode_before_init_sequencer = command.right.mode;
+            const JointTargetProfile left_profile_before_init_sequencer =
+                command.left.joint_target_profile;
+            const JointTargetProfile right_profile_before_init_sequencer =
+                command.right.joint_target_profile;
             const bool left_init_before_sequencer =
                 command.left.mode == ControlMode::JointTarget &&
                 command.left.joint_target_profile == JointTargetProfile::InitMotion;
@@ -2136,6 +2144,10 @@ void DualArmServoLoop::loopMain() {
             init_mode_before_right = toString(right_mode_before_init_sequencer);
             init_mode_after_left = toString(command.left.mode);
             init_mode_after_right = toString(command.right.mode);
+            init_profile_before_left = toString(left_profile_before_init_sequencer);
+            init_profile_before_right = toString(right_profile_before_init_sequencer);
+            init_profile_after_left = toString(command.left.joint_target_profile);
+            init_profile_after_right = toString(command.right.joint_target_profile);
             init_non_init_arm_preserved_mode.clear();
             if (left_init_before_sequencer != right_init_before_sequencer &&
                 !config_.safety.init_motion_planner.single_arm_freeze_other_arm) {
@@ -2320,6 +2332,10 @@ void DualArmServoLoop::loopMain() {
         sample.right_mode_before_init_sequencer = init_mode_before_right;
         sample.left_mode_after_init_sequencer = init_mode_after_left;
         sample.right_mode_after_init_sequencer = init_mode_after_right;
+        sample.left_joint_target_profile_before_init_sequencer = init_profile_before_left;
+        sample.right_joint_target_profile_before_init_sequencer = init_profile_before_right;
+        sample.left_joint_target_profile_after_init_sequencer = init_profile_after_left;
+        sample.right_joint_target_profile_after_init_sequencer = init_profile_after_right;
         sample.non_init_arm_preserved_mode = init_non_init_arm_preserved_mode;
         sample.single_arm_freeze_other_arm =
             config_.safety.init_motion_planner.single_arm_freeze_other_arm;
@@ -2508,9 +2524,13 @@ void DualArmServoLoop::loopMain() {
                     arm.goal_external_min_clearance_m = ex.goal_external_min_clearance_m;
                     arm.goal_nearest_pair_name_a = ex.goal_nearest_pair_name_a;
                     arm.goal_nearest_pair_name_b = ex.goal_nearest_pair_name_b;
+                    arm.goal_nearest_pair_category = ex.goal_nearest_pair_category;
                     arm.goal_nearest_pair_external = ex.goal_nearest_pair_external;
+                    arm.goal_nearest_pair_disabled_by_rule = ex.goal_nearest_pair_disabled_by_rule;
+                    arm.goal_nearest_pair_distance_m = ex.goal_nearest_pair_distance_m;
                     arm.goal_clear_threshold_self_m = ex.goal_clear_threshold_self_m;
                     arm.goal_clear_threshold_external_m = ex.goal_clear_threshold_external_m;
+                    arm.goal_clear_margin_deficit_m = ex.goal_clear_margin_deficit_m;
                     arm.clear_threshold_m = ex.clear_threshold_m;
                     arm.external_clear_threshold_m = ex.external_clear_threshold_m;
                     arm.nearest_pair = ex.nearest_pair;
@@ -2560,9 +2580,16 @@ void DualArmServoLoop::loopMain() {
                     diag.goal_external_min_clearance_m = aggregate_owner->goal_external_min_clearance_m;
                     diag.goal_nearest_pair_name_a = aggregate_owner->goal_nearest_pair_name_a;
                     diag.goal_nearest_pair_name_b = aggregate_owner->goal_nearest_pair_name_b;
+                    diag.goal_nearest_pair_category = aggregate_owner->goal_nearest_pair_category;
                     diag.goal_nearest_pair_external = aggregate_owner->goal_nearest_pair_external;
+                    diag.goal_nearest_pair_disabled_by_rule =
+                        aggregate_owner->goal_nearest_pair_disabled_by_rule;
+                    diag.goal_nearest_pair_distance_m =
+                        aggregate_owner->goal_nearest_pair_distance_m;
                     diag.goal_clear_threshold_self_m = aggregate_owner->goal_clear_threshold_self_m;
                     diag.goal_clear_threshold_external_m = aggregate_owner->goal_clear_threshold_external_m;
+                    diag.goal_clear_margin_deficit_m =
+                        aggregate_owner->goal_clear_margin_deficit_m;
                     diag.tree_start = aggregate_owner->tree_start_size;
                     diag.tree_goal = aggregate_owner->tree_goal_size;
                     diag.iterations = aggregate_owner->last_iterations;
@@ -5181,9 +5208,13 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                 ex.goal_external_min_clearance_m = std::numeric_limits<double>::quiet_NaN();
                 ex.goal_nearest_pair_name_a.clear();
                 ex.goal_nearest_pair_name_b.clear();
+                ex.goal_nearest_pair_category.clear();
                 ex.goal_nearest_pair_external = false;
+                ex.goal_nearest_pair_disabled_by_rule = false;
+                ex.goal_nearest_pair_distance_m = std::numeric_limits<double>::quiet_NaN();
                 ex.goal_clear_threshold_self_m = std::numeric_limits<double>::quiet_NaN();
                 ex.goal_clear_threshold_external_m = std::numeric_limits<double>::quiet_NaN();
+                ex.goal_clear_margin_deficit_m = std::numeric_limits<double>::quiet_NaN();
                 ex.clear_threshold_m = std::numeric_limits<double>::quiet_NaN();
                 ex.external_clear_threshold_m = std::numeric_limits<double>::quiet_NaN();
                 ex.nearest_pair.clear();
@@ -5256,9 +5287,13 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             ex.goal_external_min_clearance_m = result.goal_external_min_clearance_m;
             ex.goal_nearest_pair_name_a = result.goal_nearest_pair_name_a;
             ex.goal_nearest_pair_name_b = result.goal_nearest_pair_name_b;
+            ex.goal_nearest_pair_category = result.goal_nearest_pair_category;
             ex.goal_nearest_pair_external = result.goal_nearest_pair_external;
+            ex.goal_nearest_pair_disabled_by_rule = result.goal_nearest_pair_disabled_by_rule;
+            ex.goal_nearest_pair_distance_m = result.goal_nearest_pair_distance_m;
             ex.goal_clear_threshold_self_m = result.goal_clear_threshold_self_m;
             ex.goal_clear_threshold_external_m = result.goal_clear_threshold_external_m;
+            ex.goal_clear_margin_deficit_m = result.goal_clear_margin_deficit_m;
             ex.clear_threshold_m = result.clear_threshold_m;
             ex.external_clear_threshold_m = result.external_clear_threshold_m;
             ex.nearest_pair = result.nearest_pair;

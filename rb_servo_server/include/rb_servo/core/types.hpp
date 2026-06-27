@@ -688,9 +688,13 @@ struct InitMotionDiag {
     double goal_external_min_clearance_m = std::numeric_limits<double>::quiet_NaN();
     std::string goal_nearest_pair_name_a;
     std::string goal_nearest_pair_name_b;
+    std::string goal_nearest_pair_category;
     bool goal_nearest_pair_external = false;
+    bool goal_nearest_pair_disabled_by_rule = false;
+    double goal_nearest_pair_distance_m = std::numeric_limits<double>::quiet_NaN();
     double goal_clear_threshold_self_m = std::numeric_limits<double>::quiet_NaN();
     double goal_clear_threshold_external_m = std::numeric_limits<double>::quiet_NaN();
+    double goal_clear_margin_deficit_m = std::numeric_limits<double>::quiet_NaN();
     int tree_start = 0;
     int tree_goal = 0;
     int iterations = 0;
@@ -713,9 +717,13 @@ struct InitMotionArmDiag {
     double goal_external_min_clearance_m = std::numeric_limits<double>::quiet_NaN();
     std::string goal_nearest_pair_name_a;
     std::string goal_nearest_pair_name_b;
+    std::string goal_nearest_pair_category;
     bool goal_nearest_pair_external = false;
+    bool goal_nearest_pair_disabled_by_rule = false;
+    double goal_nearest_pair_distance_m = std::numeric_limits<double>::quiet_NaN();
     double goal_clear_threshold_self_m = std::numeric_limits<double>::quiet_NaN();
     double goal_clear_threshold_external_m = std::numeric_limits<double>::quiet_NaN();
+    double goal_clear_margin_deficit_m = std::numeric_limits<double>::quiet_NaN();
     int waypoint_index = 0;
     int waypoint_count = 0;
     double dist_to_goal_deg = std::numeric_limits<double>::quiet_NaN();
@@ -798,6 +806,10 @@ struct ServoSample {
     std::string right_mode_before_init_sequencer;
     std::string left_mode_after_init_sequencer;
     std::string right_mode_after_init_sequencer;
+    std::string left_joint_target_profile_before_init_sequencer;
+    std::string right_joint_target_profile_before_init_sequencer;
+    std::string left_joint_target_profile_after_init_sequencer;
+    std::string right_joint_target_profile_after_init_sequencer;
     std::string non_init_arm_preserved_mode;
     bool single_arm_freeze_other_arm = false;
 };

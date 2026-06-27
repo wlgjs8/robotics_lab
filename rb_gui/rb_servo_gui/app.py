@@ -854,6 +854,43 @@ def _send_arm_init_override(
     return ok, message
 
 
+def _send_arm_init_cancel_resume(
+    handles: dict[str, Any],
+    arms: str = "both",
+) -> tuple[bool, str]:
+    latest = handles.get("_latest_state")
+    route_label, route_client, route_detail = _arm_init_control_route(
+        handles,
+        latest if isinstance(latest, StateSnapshot) else None,
+    )
+    client = route_client or handles.get("recording_cmd_client")
+    send_arm_init = getattr(client, "send_arm_init", None)
+    if callable(send_arm_init) and _policy_runner_control_active(handles, latest):
+        try:
+            result = send_arm_init(arms, action="cancel")
+        except OSError as exc:
+            result = ArmInitCommandResult(False, f"arm init {arms} cancel failed: {exc}")
+        ok, message = _apply_arm_init_result(handles, result, arms=arms)
+        if ok:
+            handles["arm_init_route_status"] = {"route": route_label, "detail": route_detail}
+            handles["arm_init_local_status"] = normalize_arm_init_status(
+                {
+                    "init_override_left": False,
+                    "init_override_right": False,
+                    "left_state": "cancelled",
+                    "right_state": "cancelled",
+                    "last_command": arms,
+                }
+            )
+            _update_arm_init_panel(
+                handles,
+                latest if isinstance(latest, StateSnapshot) else None,
+                stale=bool(handles.get("_state_stale", True)),
+            )
+        return ok, f"{message}; routed to {route_label} {route_detail}".strip()
+    return False, "no active policy_runner InitMotion override to cancel/resume"
+
+
 def _set_button_color(button: Any, color: str) -> None:
     try:
         button.color = color
@@ -876,6 +913,25 @@ def _arm_init_display_text(state: str, active: bool) -> str:
     if "executing" in normalized or "requested" in normalized or active:
         return "InitMotion 중"
     return normalized or ("InitMotion 중" if active else "policy 중")
+
+
+def _arm_init_failure_detail(status: Mapping[str, Any], side: str) -> str:
+    message = str(status.get(f"{side}_message", "") or "")
+    if message:
+        return message
+    name_a = str(status.get(f"{side}_goal_nearest_pair_name_a", "") or "")
+    name_b = str(status.get(f"{side}_goal_nearest_pair_name_b", "") or "")
+    clearance = status.get(f"{side}_goal_clearance_m")
+    threshold = status.get(f"{side}_goal_threshold_m")
+    if name_a or name_b:
+        pair = f"{name_a or 'unknown'} <-> {name_b or 'unknown'}"
+        if isinstance(clearance, (int, float)) and isinstance(threshold, (int, float)):
+            return (
+                f"goal_not_clear: pair {pair}, clearance {float(clearance) * 1000.0:.1f} mm "
+                f"< required {float(threshold) * 1000.0:.1f} mm"
+            )
+        return f"goal_not_clear: pair {pair}"
+    return str(status.get(f"{side}_fail_mode", "") or "")
 
 
 def _update_arm_init_panel(
@@ -910,6 +966,16 @@ def _update_arm_init_panel(
     error = str(status.get("error", "") or "")
     if error:
         suffix += f" / error={error}"
+    left_failed = "failed" in left_text.lower()
+    right_failed = "failed" in right_text.lower()
+    if left_failed:
+        detail = _arm_init_failure_detail(status, "left")
+        if detail:
+            suffix += f" / left={detail}"
+    if right_failed:
+        detail = _arm_init_failure_detail(status, "right")
+        if detail:
+            suffix += f" / right={detail}"
     if "arm_init_status" in handles:
         handles["arm_init_status"].value = f"왼팔: {left_text} / 오른팔: {right_text}{suffix}"
     buttons = handles.get("init_motion_buttons", {})
@@ -2265,11 +2331,13 @@ def build_gui(
             init_both_button = server.gui.add_button("InitMotion (양팔)")
             init_left_button = server.gui.add_button("InitMotion (왼팔)")
             init_right_button = server.gui.add_button("InitMotion (오른팔)")
+            init_cancel_button = server.gui.add_button("Cancel Init Override / Resume Flow")
             handles["init_motion_button"] = init_both_button
             handles["init_motion_buttons"] = {
                 "both": init_both_button,
                 "left": init_left_button,
                 "right": init_right_button,
+                "cancel": init_cancel_button,
             }
 
             @init_both_button.on_click
@@ -2285,6 +2353,11 @@ def build_gui(
             @init_right_button.on_click
             def _(_: Any) -> None:
                 ok, message = _send_arm_init_override(safety, handles["scene"], handles, "right")
+                handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+            @init_cancel_button.on_click
+            def _(_: Any) -> None:
+                ok, message = _send_arm_init_cancel_resume(handles, "both")
                 handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
 
             # Edit the init-motion target directly in viser and apply it live (no
@@ -3338,9 +3411,9 @@ def _toggle_episode_recording(
         last_value = float(last)
     except (TypeError, ValueError):
         last_value = float("-inf")
-    if now - last_value < 1.0:
+    if now - last_value < 0.5:
         if "recording_command_status" in handles:
-            handles["recording_command_status"].value = "ignored: debounce active (<1s)"
+            handles["recording_command_status"].value = "ignored: debounce active (<0.5s)"
         return False
     active = _recording_is_active(handles, handles.get("_latest_state"))
     command = target if target in {"start", "stop"} else ("stop" if active else "start")
