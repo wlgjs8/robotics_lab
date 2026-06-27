@@ -176,7 +176,9 @@ class DashboardStore:
         self,
         *,
         history_sec: float = DEFAULT_HISTORY_SEC,
-        max_samples_per_arm: int = 20000,
+        # ~80 s at the 500 Hz servo tick rate (scope publishes every control-loop
+        # step), enough to back the 60 s window and a long ALL view.
+        max_samples_per_arm: int = 40000,
         csv_path: str | None = None,
     ) -> None:
         self.history_sec = max(1.0, float(history_sec))
@@ -571,10 +573,13 @@ INDEX_HTML = r"""<!doctype html>
     // Manual x-axis (time) zoom shared by ALL plots. `view` is an absolute-time
     // window {min,max} (same units as buffer t) that freezes/overrides the live
     // window; null => live mode driven by the Window selector. `drag` holds an
-    // in-progress left-drag box-zoom selection. Both are global so the 8 plots
-    // stay synchronized on a single time domain. "Live" / double-click clears.
+    // in-progress left-drag box-zoom selection; `pan` an in-progress
+    // middle-button (wheel-press) grab-to-scroll along the time axis. All are
+    // global so the 8 plots stay synchronized on a single time domain. "Live" /
+    // double-click clears.
     let view = null;
     let drag = null;
+    let pan = null;
     const el = {
       plots: document.getElementById("plots"),
       joint: document.getElementById("joint"),
@@ -662,7 +667,7 @@ INDEX_HTML = r"""<!doctype html>
           for (const key of Object.keys(b)) b[key].splice(0, drop);
         }
       }
-      const extra = Math.max(0, b.t.length - 20000);
+      const extra = Math.max(0, b.t.length - 40000);  // ~80 s at the 500 Hz servo tick rate
       if (extra > 0) {
         for (const key of Object.keys(b)) b[key].splice(0, extra);
       }
@@ -692,6 +697,12 @@ INDEX_HTML = r"""<!doctype html>
         out.push(n ? sum / n : NaN);
       }
       return out;
+    }
+    function axisDecimals(step) {
+      // Decimal places so a tick step is just distinguishable; grows as you zoom
+      // in (down to 1 ms / fine joint units) and shrinks when zoomed out.
+      if (!Number.isFinite(step) || step <= 0) return 1;
+      return Math.max(0, Math.min(6, Math.ceil(-Math.log10(step)) + 1));
     }
     function globalEndTime() {
       let t = -Infinity;
@@ -798,21 +809,29 @@ INDEX_HTML = r"""<!doctype html>
       ctx.fillStyle = "#97a3b3";
       ctx.textAlign = "right";
       ctx.textBaseline = "middle";
+      const ydec = axisDecimals((ymax - ymin) / 4);
       for (let i = 0; i <= 4; i++) {
         const y = y0 + (y1 - y0) * i / 4;
         ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
         const value = ymax - (ymax - ymin) * i / 4;
-        ctx.fillText(value.toPrecision(3), x0 - 6 * dpr, y);
+        ctx.fillText(value.toFixed(ydec), x0 - 6 * dpr, y);
       }
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
+      // Time axis relative to the right edge (0 = newest sample in view, negative
+      // = older). Switch to milliseconds once zoomed below ~200 ms so individual
+      // servo_j ticks read in ms; decimals adapt to the zoom (down to 1 ms).
+      const useMs = xspan <= 0.2;
+      const xscale = useMs ? 1000 : 1;
+      const xunit = useMs ? "ms" : "s";
+      const xdec = axisDecimals((xspan / 5) * xscale);
       for (let i = 0; i <= 5; i++) {
         const x = x0 + (x1 - x0) * i / 5;
         ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y1); ctx.stroke();
-        // Label seconds relative to the right edge (0 = newest sample in view,
-        // negative = older), so the axis reads the same live or zoomed/frozen.
-        const value = (xmin + (xmax - xmin) * i / 5) - xmax;
-        ctx.fillText(value.toFixed(1), x, y1 + 5 * dpr);
+        const value = ((xmin + (xmax - xmin) * i / 5) - xmax) * xscale;
+        let label = value.toFixed(xdec);
+        if (i === 0) label += xunit;  // unit on the leftmost (oldest) tick only
+        ctx.fillText(label, x, y1 + 5 * dpr);
       }
       ctx.textAlign = "left";
       ctx.fillText(item.unit, x0, y0 + 2 * dpr);
@@ -822,15 +841,27 @@ INDEX_HTML = r"""<!doctype html>
         ctx.lineWidth = 1.6 * dpr;
         ctx.beginPath();
         let started = false;
+        const pts = [];
         for (let i = 0; i < tr.x.length; i++) {
           const x = tr.x[i], y = tr.y[i];
           if (!Number.isFinite(x) || !Number.isFinite(y)) { started = false; continue; }
           if (x < xmin || x > xmax) continue;
           const px = sx(x), py = sy(y);
+          pts.push(px, py);
           if (!started) { ctx.moveTo(px, py); started = true; }
           else ctx.lineTo(px, py);
         }
         ctx.stroke();
+        // Once zoomed in enough that few samples are visible, mark each sample so
+        // individual servo_j ticks (one dot per control-loop step) are readable.
+        const n = pts.length / 2;
+        if (n > 0 && n <= 80) {
+          ctx.fillStyle = color;
+          const r = Math.min(3.2, Math.max(1.4, (x1 - x0) / n / 3)) * dpr;
+          for (let k = 0; k < pts.length; k += 2) {
+            ctx.beginPath(); ctx.arc(pts[k], pts[k + 1], r, 0, 6.2832); ctx.fill();
+          }
+        }
       }
       let lx = x1 - 170 * dpr;
       for (const name of visibleTraces()) {
@@ -910,7 +941,12 @@ INDEX_HTML = r"""<!doctype html>
       const packetHz = latestStats && Number.isFinite(latestStats.packet_rate_hz) ? latestStats.packet_rate_hz : NaN;
       const age = latestStats && Number.isFinite(latestStats.latest_receive_age_sec) ? latestStats.latest_receive_age_sec : NaN;
       const invalid = latestStats ? latestStats.invalid_packets : 0;
-      const zoom = view ? " | ZOOM " + (view.max - view.min).toFixed(2) + "s (Live/dbl-click to reset)" : "";
+      let zoom = "";
+      if (view) {
+        const sp = view.max - view.min;
+        const spTxt = sp < 0.2 ? (sp * 1000).toFixed(1) + "ms" : sp.toFixed(2) + "s";
+        zoom = " | VIEW " + spTxt + " (Live/dbl-click to reset)";
+      }
       el.status.textContent = (prefix ? prefix + " | " : "")
         + "SSE " + fmt(sseHz, "Hz")
         + " | UDP " + fmt(packetHz, "Hz")
@@ -951,7 +987,21 @@ INDEX_HTML = r"""<!doctype html>
       frac = Math.max(0, Math.min(1, frac));
       return dom.min + frac * (dom.max - dom.min);
     }
-    function setLive() { view = null; drag = null; scheduleRender(); }
+    function plotWidthPx(canvas) {
+      return Math.max(1, canvas.getBoundingClientRect().width - 64);  // padL 54 + padR 10
+    }
+    // Deepest zoom: a 5 ms span renders as exactly 1 ms per division (5
+    // divisions), so fully zoomed in the time axis reads in 1 ms units.
+    const MIN_SPAN_SEC = 0.005;
+    function setView(min, max) {
+      if (max - min < MIN_SPAN_SEC) {
+        const c = (min + max) / 2;
+        min = c - MIN_SPAN_SEC / 2;
+        max = c + MIN_SPAN_SEC / 2;
+      }
+      view = {min, max};
+    }
+    function setLive() { view = null; drag = null; pan = null; scheduleRender(); }
     function attachZoom(canvas) {
       // Wheel: zoom the time axis about the cursor (up = in, down = out). The
       // cursor's time stays put; both edges scale, freezing into a manual view.
@@ -962,37 +1012,56 @@ INDEX_HTML = r"""<!doctype html>
         if (!(span > 0)) return;
         const tc = clientXToTime(canvas, ev.clientX, dom);
         const f = ev.deltaY < 0 ? 1 / 1.2 : 1.2;
-        let nmin = tc - (tc - dom.min) * f;
-        let nmax = tc + (dom.max - tc) * f;
-        if (nmax - nmin < 1e-3) { const c = (nmin + nmax) / 2; nmin = c - 5e-4; nmax = c + 5e-4; }
-        view = {min: nmin, max: nmax};
+        const nmin = tc - (tc - dom.min) * f;
+        const nmax = tc + (dom.max - tc) * f;
+        setView(nmin, nmax);  // clamps to MIN_SPAN_SEC (1 ms-per-division floor)
         scheduleRender();
       }, {passive: false});
       // Left-drag: rubber-band box-zoom on the time axis; release zooms all
       // plots to the selected span. Domain is frozen at mousedown so the band
       // and mapping stay stable while data streams in.
       canvas.addEventListener("mousedown", (ev) => {
-        if (ev.button !== 0) return;
-        ev.preventDefault();
-        const dom = xDomain();
-        const t = clientXToTime(canvas, ev.clientX, dom);
-        drag = {canvas, dom, startT: t, curT: t};
-        scheduleRender();
+        if (ev.button === 0) {
+          ev.preventDefault();
+          const dom = xDomain();
+          const t = clientXToTime(canvas, ev.clientX, dom);
+          drag = {canvas, dom, startT: t, curT: t};
+          scheduleRender();
+        } else if (ev.button === 1) {
+          // Middle button (wheel press): grab-to-pan along the time axis. Freeze
+          // on the current domain so the cursor drags the same data on all plots.
+          ev.preventDefault();
+          const dom = xDomain();
+          if (!(dom.max - dom.min > 0)) return;
+          pan = {canvas, startX: ev.clientX, dom0: {min: dom.min, max: dom.max}};
+          view = {min: dom.min, max: dom.max};
+          document.body.style.cursor = "grabbing";
+          scheduleRender();
+        }
       });
       canvas.addEventListener("dblclick", (ev) => { ev.preventDefault(); setLive(); });
     }
     for (const item of plots) attachZoom(item.canvas);
     window.addEventListener("mousemove", (ev) => {
+      if (pan) {
+        // Grab-to-pan: shift the frozen window so the data under the cursor
+        // follows it; absolute math off dom0 avoids drift accumulation.
+        const dt = ((ev.clientX - pan.startX) / plotWidthPx(pan.canvas)) * (pan.dom0.max - pan.dom0.min);
+        view = {min: pan.dom0.min - dt, max: pan.dom0.max - dt};
+        scheduleRender();
+        return;
+      }
       if (!drag) return;
       drag.curT = clientXToTime(drag.canvas, ev.clientX, drag.dom);
       scheduleRender();
     });
     window.addEventListener("mouseup", (ev) => {
+      if (pan) { pan = null; document.body.style.cursor = ""; scheduleRender(); return; }
       if (!drag) return;
       const a = Math.min(drag.startT, drag.curT), b = Math.max(drag.startT, drag.curT);
       const minSpan = (drag.dom.max - drag.dom.min) * 0.01;
       drag = null;
-      if (b - a > Math.max(1e-3, minSpan)) view = {min: a, max: b};  // else treat as a click
+      if (b - a > Math.max(1e-3, minSpan)) setView(a, b);  // else treat as a click
       scheduleRender();
     });
 

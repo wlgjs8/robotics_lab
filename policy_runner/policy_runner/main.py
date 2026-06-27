@@ -1068,14 +1068,14 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--tcp-target-pose-reanchor-mode",
         choices=["measured_legacy", "last_emitted_continuous", "measured_blend"],
-        default="measured_legacy",
+        default="measured_blend",
         help=(
             "Chunk-boundary handling for foh_se3. measured_legacy (default): reanchor straight to measured. "
             "measured_blend: anchor the new chunk to the measured pose for drift correction but blend in from the last emitted "
             "target (no one-tick jump). last_emitted_continuous: perfect continuity, no drift correction (tests/sim)."
         ),
     )
-    flow_infer.add_argument("--tcp-target-pose-blend-steps", type=int, default=0)
+    flow_infer.add_argument("--tcp-target-pose-blend-steps", type=int, default=8)
     hdf5_audit = sub.add_parser(
         "hdf5-audit",
         help="Inspect UMI/Pika and robotics_lab HDF5 episodes before training.",

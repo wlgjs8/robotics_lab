@@ -100,7 +100,7 @@ STEREO_CAM_K ?= /app/stereo_worker/d435_ir_1280x720_K.txt
 cam-up:
 	CAMERA_CONFIG=$(STEREO_CAM_CONFIG) CAMERA_REALSENSE_JSON=$(STEREO_CAM_JSON) \
 	STEREO_INTRINSICS=$(STEREO_CAM_K) \
-		$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile real_camera up -d camera_server
+		$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile real_camera up -d --build camera_server
 	@echo "camera_server (capture + stereo_worker) up. 상태: make cam-status / 로그: docker logs -f camera_server"
 
 # IR 1280x720(->736 패딩)용 TRT 엔진 재빌드. GPU+torch+tensorrt 필요 -> camera_server

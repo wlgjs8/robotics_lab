@@ -104,6 +104,7 @@ class BoxDetector:
         self._dmin, self._dmax = _load_depth_range(GUI_SETTINGS_PATH)
         self._calib = _load_color_calib(COLOR_CALIB_PATH)
         self._cfg_t = 0.0
+        self._min_area = self.MIN_AREA_PX   # detect()에서 해상도 비례로 갱신
 
     def _reload_cfg(self, now):
         if now - self._cfg_t > 1.0:
@@ -189,10 +190,10 @@ class BoxDetector:
         ncc, lab, stats, _ = cv2.connectedComponentsWithStats(m, 8)
         best, best_n = None, 0
         for cid in range(1, ncc):
-            if stats[cid, cv2.CC_STAT_AREA] < self.MIN_AREA_PX:
+            if stats[cid, cv2.CC_STAT_AREA] < self._min_area:
                 continue
             pts = P[lab == cid]; pts = pts[np.isfinite(pts).all(1)]
-            if len(pts) < self.MIN_AREA_PX:
+            if len(pts) < self._min_area:
                 continue
             b = self._box_from_cluster(pts, planes, label)
             if b is None:
@@ -208,6 +209,9 @@ class BoxDetector:
             return []
         now = time.time(); self._reload_cfg(now)
         P, valid = self._cam_points(disp)
+        # MIN_AREA_PX는 640x480 기준 -> 현재 해상도 면적비로 스케일(1280x720 등 대응).
+        self._min_area = max(self.MIN_AREA_PX,
+                             int(self.MIN_AREA_PX * P.shape[0] * P.shape[1] / (640 * 480)))
         planes = self._fit_planes(P, valid, now)
         if not planes:
             return []
@@ -231,10 +235,10 @@ class BoxDetector:
         m = base.astype(np.uint8)
         ncc, lab, stats, _ = cv2.connectedComponentsWithStats(m, 8)
         for cid in range(1, ncc):
-            if stats[cid, cv2.CC_STAT_AREA] < self.MIN_AREA_PX:
+            if stats[cid, cv2.CC_STAT_AREA] < self._min_area:
                 continue
             pts = P[lab == cid]; pts = pts[np.isfinite(pts).all(1)]
-            if len(pts) < self.MIN_AREA_PX:
+            if len(pts) < self._min_area:
                 continue
             b = self._box_from_cluster(pts, planes, None)
             if b is not None:

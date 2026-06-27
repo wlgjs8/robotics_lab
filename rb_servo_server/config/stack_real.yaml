@@ -449,20 +449,17 @@ cartesian_control:
   pose_track_smd:
     enable: true
     damping_ratio_linear: 1.0
-    # natural_frequency_linear_hz: 1.0 # 2026-06-19 P3: 1.5→1.0 cut vff 30Hz transmission(2ζωn↓); vff keeps lag~0 (was 2.0)
-    # natural_frequency_linear_hz: 0.8 # 2026-06-21 1.0→0.8 increased lag to ~0.05s (5cm @ 1m/s) to reduce high-frequency tremble in right-arm fast teleop. Operator-approved.
-    # natural_frequency_linear_hz: 1.5 # 2026-06-21 teleop-responsive (revert here if teleop feels laggy)
-    natural_frequency_linear_hz: 0.8 # 2026-06-22 1.5→0.8: flow-infer rollout output jittery (SMOOTHNESS_HF, ~276 sign-rev/s) -> stronger low-pass to damp HF jerk. vff keeps lag ~6mm @ rollout 0.12 m/s. (operator-approved value from 2026-06-21)
-    damping_ratio_angular: 1.0 #1.0
-    # natural_frequency_angular_hz: 1.0 # 2026-06-19 P3: 1.5→1.0 cut vff 30Hz transmission (was 2.0)
-    # natural_frequency_angular_hz: 0.8 # 2026-06-21 1.0→0.8 increased lag to ~0.05s (5cm @ 1m/s) to reduce high-frequency tremble in right-arm fast teleop. Operator-approved.
-    # natural_frequency_angular_hz: 1.5 # 2026-06-21 teleop-responsive (revert here if teleop feels laggy)
-    natural_frequency_angular_hz: 0.8 # 2026-06-22 1.5→0.8: damp HF angular jerk in flow-infer rollout (right-arm ori jitter + branch jumps). vff keeps lag small. (operator-approved value from 2026-06-21)
+    damping_ratio_angular: 1.0
+
+    natural_frequency_linear_hz: 1.0
+    natural_frequency_angular_hz: 1.0
+
     # Velocity feedforward: damp on velocity error (goal_dot - x_dot) so a
     # constant-velocity goal tracks with ~0 lag (removes the ~16-38mm ramp lag in
     # LOWER natural_frequency_*_hz (currently 10, raised to brute-force the lag)
     # back toward 2-3 for smoothing WITHOUT re-introducing lag. 2026-06-16 (jhkim).
     velocity_feedforward: true
+
     # Saturation clamps (vector-norm, direction-preserving). Mass=1.0 so the
     # accel clamp IS the max-force clamp; zeta/fn dynamics stay exact inside
     # the limits. NOTE with these numbers a full-speed (50mm/s) stop is force-
@@ -491,10 +488,10 @@ cartesian_control:
     # peak-velocity change = no saturation) + raise velocity cap to 0.32 (right stays
     # ~31 deg/s << 60, so no right-arm saturation). Caveat: left j3 is high-gain and
     # already pins dq_max 90 at 0.25, so 0.32 makes left j3 saturate a touch more.
-    max_linear_velocity_m_s: 0.40        # 250 mm/s (was 50 - capped fast teleop)
-    max_linear_accel_m_s2: 1.0           # 1 m/s^2 (was 0.1 - sluggish catch-up)
-    max_angular_velocity_rad_s: 1.745329252  # 100 deg/s (was 50)
-    max_angular_accel_rad_s2: 6.981317008    # 400 deg/s^2 (was 100)
+    max_linear_velocity_m_s: 0.35        # 250 mm/s (was 50 - capped fast teleop)
+    max_linear_accel_m_s2: 0.8           # 1 m/s^2 (was 0.1 - sluggish catch-up)
+    max_angular_velocity_rad_s: 1.3
+    max_angular_accel_rad_s2: 5.0
   linear_move:
     min_duration_sec: 0.05
     max_duration_sec: 10.0

@@ -8,7 +8,7 @@ import socket
 import time
 from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -45,6 +45,12 @@ class UmiSample:
     gripper: float
     deadman: bool
     monotonic: float
+    # Receiver-side monotonically increasing packet counter, stamped by the
+    # reader once per distinct packet actually received (0 = never assigned).
+    # The action source compares it across reads to tell a genuinely NEW packet
+    # apart from a reader-cached "latest" replay (reuse / packet hold), which a
+    # plain `read() is not None` cannot distinguish.
+    seq: int = 0
 
 
 class UmiPoseReader(Protocol):

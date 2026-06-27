@@ -88,6 +88,16 @@ def load_ktxt(path):
     return K, baseline
 
 
+def wait_for_file(path, timeout_s=30.0, poll_s=0.5):
+    """camera_server가 기동 시 덤프하는 intrinsics K.txt를 기다린다(아직 없을 수 있음)."""
+    t0 = time.time()
+    while not os.path.exists(path):
+        if time.time() - t0 > timeout_s:
+            print(f"[run] WARN: intrinsics {path} 미존재({timeout_s:.0f}s 초과) -> 그대로 load 시도", flush=True)
+            return
+        time.sleep(poll_s)
+
+
 class CloudPublisher:
     """ZMQ PUB: [topic, header_json, xyz_f32, rgb_u8]."""
     def __init__(self, bind, topic):
@@ -128,8 +138,16 @@ def cmd_run(args):
     sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
     from bundle_reader import BundleReader
 
+    wait_for_file(STEREO_INTRINSICS)
+    if not os.path.exists(STEREO_INTRINSICS):
+        print(f"[run] FATAL: intrinsics {STEREO_INTRINSICS} 가 없음.\n"
+              f"       1280x720 헤드는 camera_server(C++)가 기동 시 이 파일을 덤프해야 한다.\n"
+              f"       덤프가 없으면 보통 Docker 이미지가 새 C++로 재빌드되지 않은 것:\n"
+              f"       `make cam-up`(--build 포함) 으로 이미지를 재빌드하라.", flush=True)
+        raise SystemExit(2)
     K, baseline = load_ktxt(STEREO_INTRINSICS)
-    print(f"[run] intrinsics fx={K[0,0]:.1f} baseline={baseline*1000:.1f}mm  "
+    print(f"[run] intrinsics fx={K[0,0]:.1f} cx={K[0,2]:.1f} cy={K[1,2]:.1f} "
+          f"baseline={baseline*1000:.1f}mm  src={STEREO_INTRINSICS}  "
           f"bundle={BUNDLE_ENDPOINT}  pub={CLOUD_PUB_BIND}", flush=True)
     use_trt = os.path.exists(STEREO_ENGINE) and not args.force_torch
     if use_trt:

@@ -78,7 +78,7 @@ class TrtStereoModel:
     MEAN = np.array([123.675, 116.28, 103.53], np.float32)
     STD = np.array([58.395, 57.12, 57.375], np.float32)
 
-    def __init__(self, ffs_dir: str, engine_path: str, height: int = 480, width: int = 640):
+    def __init__(self, ffs_dir: str, engine_path: str, height: int = 736, width: int = 1280):
         self.ffs_dir = os.path.realpath(ffs_dir)
         if self.ffs_dir not in sys.path:
             sys.path.insert(0, self.ffs_dir)
@@ -103,11 +103,21 @@ class TrtStereoModel:
                 trt.DataType.BOOL: torch.bool}[dt]
 
     def _prep(self, img):
-        """HxW(IR) 또는 HxWx3 uint8 -> 정규화 NCHW cuda fp32 (1,3,H,W)."""
+        """HxW(IR) 또는 HxWx3 uint8 -> 정규화 NCHW cuda fp32 (1,3,H,W).
+
+        엔진 입력(self.h,self.w)이 캡처와 다르면 **패딩**으로 맞춘다(리사이즈 왜곡 금지):
+        부족분을 아래/오른쪽에 replicate. disparity는 width 패딩에만 영향받는데, 1280은
+        32의 배수라 보통 width 패딩=0이고 height만 720->736 패딩된다(disparity 불변).
+        엔진보다 큰 입력만 부득이 리사이즈 폴백(disparity 스케일 왜곡, 비권장)."""
+        import cv2
         x = to3(img).astype(np.float32)
-        if x.shape[0] != self.h or x.shape[1] != self.w:
-            import cv2
-            x = cv2.resize(x, (self.w, self.h), interpolation=cv2.INTER_LINEAR)
+        H, W = x.shape[:2]
+        self._src_hw = (H, W)
+        if H != self.h or W != self.w:
+            if H <= self.h and W <= self.w:
+                x = cv2.copyMakeBorder(x, 0, self.h - H, 0, self.w - W, cv2.BORDER_REPLICATE)
+            else:
+                x = cv2.resize(x, (self.w, self.h), interpolation=cv2.INTER_LINEAR)
         x = (x - self.MEAN) / self.STD
         return self.torch.as_tensor(x, device="cuda").permute(2, 0, 1)[None].contiguous().float()
 
@@ -127,6 +137,9 @@ class TrtStereoModel:
         assert self.context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
         torch.cuda.synchronize()
         disp = next(iter(outs.values())).float().reshape(self.h, self.w).cpu().numpy()
+        H, W = getattr(self, "_src_hw", (self.h, self.w))
+        if (H, W) != (self.h, self.w) and H <= self.h and W <= self.w:
+            disp = disp[:H, :W]   # 패딩 영역 제거 -> 캡처 해상도로 복원
         return disp.clip(0, None)
 
     def disparity_to_cloud(self, disp, rgb, K, baseline, zfar=3.0, remove_invisible=True):

@@ -118,7 +118,7 @@ def label_color(rgb_cluster):
 
 def main():
     print(f"[band] subscribing {CLOUD_EP} ({CLOUD_TOPIC}) ...", flush=True)
-    xyz, rgb = grab_cloud(n_accum=int(os.environ.get("PROBE_ACCUM", "5")))
+    xyz, rgb = grab_cloud(n_accum=int(os.environ.get("PROBE_ACCUM", "2")))
     if xyz is None:
         print("[band] NO CLOUD — stereo_worker publish 중인지 확인", flush=True)
         return 1
@@ -167,14 +167,19 @@ def main():
 
     # ---- 시각화 ----
     fig, ax = plt.subplots(1, 3, figsize=(21, 7))
+    rng = np.random.default_rng(0)
+    def _sub(n, cap=40000):
+        return rng.choice(n, cap, replace=False) if n > cap else np.arange(n)
     # (1) full cloud top-down, height-colored
-    sub = roi
-    sc = ax[0].scatter(Ps[sub, 0], Ps[sub, 1], c=Ps[sub, 2] - floor, s=1,
+    Pr = Ps[roi]
+    si = _sub(len(Pr))
+    sc = ax[0].scatter(Pr[si, 0], Pr[si, 1], c=Pr[si, 2] - floor, s=1,
                        cmap="turbo", vmin=-0.02, vmax=0.35)
     ax[0].set_title("full cloud top-down (color=height above floor)")
     plt.colorbar(sc, ax=ax[0], fraction=0.046)
     # (2) band candidates, true RGB + cluster rects
-    ax[1].scatter(Pb[:, 0], Pb[:, 1], c=Cb / 255.0, s=2)
+    bi = _sub(len(Pb))
+    ax[1].scatter(Pb[bi, 0], Pb[bi, 1], c=Cb[bi] / 255.0, s=2)
     for c in clusters:
         box = np.vstack([c["box"], c["box"][0]])
         col = c["plotcol"]
@@ -184,7 +189,8 @@ def main():
                    color=col, fontsize=10, va="center")
     ax[1].set_title(f"band [floor+{Z_LO*1000:.0f}mm .. +{(BOX_H+Z_HI_PAD)*1000:.0f}mm]  candidates (true RGB)")
     # (3) side view Y-Z with band lines
-    ax[2].scatter(Ps[sub, 1], Ps[sub, 2] - floor, c=Cb_color(Ps[sub], rgb[sub]), s=1)
+    Cr = rgb[roi]
+    ax[2].scatter(Pr[si, 1], Pr[si, 2] - floor, c=Cr[si] / 255.0, s=1)
     ax[2].axhline(Z_LO, color="r", ls="--", lw=1); ax[2].axhline(BOX_H + Z_HI_PAD, color="r", ls="--", lw=1)
     ax[2].axhline(0.0, color="k", ls=":", lw=1)
     ax[2].set_title("side view (Y vs height); red dashed = band, dotted = floor")

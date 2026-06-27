@@ -62,19 +62,19 @@ command_rate_hz: 500
 
 spacemouse_pose_target_dual:
   max_linear_step_m: 0.001
-  max_angular_step_rad: 0.01
+  max_angular_step_rad: 0.008
   # Target-lead: how far the commanded target may run AHEAD of the current pose.
   # On release the arm finishes catching up to this lead ("keeps going a bit").
   # Kept small so stops are crisp (was 0.05 m / 0.35 rad ~= 20deg -> ~5cm/20deg coast).
-  max_target_lead_m: 0.015
-  max_target_lead_rad: 0.08
-  deadband: 0.08
-  response_curve_gamma: 3.0
+  max_target_lead_m: 0.010
+  max_target_lead_rad: 0.05
+  deadband: 0.06
+  response_curve_gamma: 2.0
   # Operator axis remap (applied to raw cap axes before deadband/gamma).
   linear_axis_signs: [1.0, -1.0, -1.0]
   angular_axis_signs: [-1.0, -1.0, 1.0]
   angular_axis_order: [ry, rx, rz]
-  sample_stale_timeout_sec: 0.05
+  sample_stale_timeout_sec: 0.02
   # Buttonless arm teleop: cap deflection is the arm-motion intent gate. Buttons
   # send gripper presets through the same command stream.
   gripper_buttons:
@@ -89,7 +89,7 @@ spacemouse_pose_target_dual:
   # (hysteresis vs deadband); startup/stale-reconnect requires the cap held
   # neutral for startup_neutral_hold_sec before motion is accepted.
   require_deadman: false
-  activation_deadband: 0.12
+  activation_deadband: 0.10
   startup_requires_neutral: true
   startup_neutral_hold_sec: 0.3
   left:
@@ -116,7 +116,7 @@ umi_dual_cartesian:
   # 떨림 재발 시 hard deadband 대신 input_moving_average_window 상향 권장.
   deadband_linear_m: 0.0000
   deadband_angular_rad: 0.000
-  input_moving_average_window: 16  # 2026-06-19 P3: 12→16 clean tracker noise at source → less goal_dot HF for vff to inject (~67ms→still acceptable)
+  input_moving_average_window: 8
   delta_frame: tool
   # ---- Pose-frame geometry (paired with pika publisher --pose-frame tip) ----
   # The publisher applies the official pika_sdk tracker→gripper-tip transform
