@@ -237,6 +237,7 @@ class DualSpaceMousePolicyIntegrationTest(unittest.TestCase):
         self.assertIsNotNone(intent)
         assert intent is not None
         self.assertEqual(intent.mode, "TcpPoseTarget")
+        self.assertEqual(intent.tcp_target_profile, "spacemouse_precise")
         self.assertTrue(intent.is_motion)
         self.assertEqual(intent.left["mode"], "TcpPoseTarget")
         self.assertIn("tcp_target_stand", intent.left)

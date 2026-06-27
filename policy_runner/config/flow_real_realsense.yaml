@@ -36,8 +36,9 @@ recording:
   output_dir: "policy_runner/episodes"
   rate_hz: 30.0
   format: hdf5
-  control_enabled: false
-  status_endpoint: null
+  control_enabled: true
+  control_bind: "udp://127.0.0.1:50443"
+  status_endpoint: "udp://127.0.0.1:50442"
   dataset_metadata:
     schema: robotics_lab.policy_runner.dataset_metadata.v1
     backend_type: rbpodo

@@ -294,8 +294,8 @@ class FakeRunRecordingSupervisor:
     def record_frame(self, snapshot, *, action_packet, action_host_time_ns, action_seq):
         self.frames.append((snapshot, action_packet, action_host_time_ns, action_seq))
 
-    def publish_status(self, *, now_monotonic, force=False, arm_init=None):
-        self.published.append((now_monotonic, force, arm_init))
+    def publish_status(self, *, now_monotonic, force=False, arm_init=None, **kwargs):
+        self.published.append((now_monotonic, force, arm_init, kwargs))
 
     def close(self):
         self.closed = True
@@ -492,6 +492,71 @@ class PolicyRunnerContractTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             parse_arm_init_command({"schema": ARM_INIT_COMMAND_SCHEMA, "arms": "middle"})
+
+    def test_arm_init_start_cancel_and_auto_clear_done(self):
+        controller = ArmInitOverrideController()
+        start = parse_arm_init_command(
+            {
+                "schema": ARM_INIT_COMMAND_SCHEMA,
+                "arms": "left",
+                "action": "start",
+                "left_q_deg": [1, 0, 0, 0, 0, 0],
+            }
+        )
+        self.assertTrue(controller.handle_command(start))
+        transitions = controller.consume_transitions()
+        self.assertEqual(transitions.started, ("left",))
+        self.assertTrue(controller.status_block()["init_override_left"])
+
+        controller.update_from_snapshot(
+            StateSnapshot(
+                {"init_motion": {"left": {"status": "done"}, "right": {"status": "idle"}}},
+                received_monotonic=1.0,
+            )
+        )
+        transitions = controller.consume_transitions()
+        self.assertEqual(transitions.done, ("left",))
+        status = controller.status_block()
+        self.assertFalse(status["init_override_left"])
+        self.assertEqual(status["left_state"], "policy")
+
+        self.assertTrue(controller.handle_command(start))
+        cancel = parse_arm_init_command(
+            {
+                "schema": ARM_INIT_COMMAND_SCHEMA,
+                "arms": "left",
+                "action": "cancel",
+            }
+        )
+        self.assertTrue(controller.handle_command(cancel))
+        transitions = controller.consume_transitions()
+        self.assertIn("left", transitions.cancelled)
+        self.assertFalse(controller.status_block()["init_override_left"])
+
+    def test_arm_init_failed_stays_fail_closed_by_default(self):
+        controller = ArmInitOverrideController()
+        controller.handle_command(
+            parse_arm_init_command(
+                {
+                    "schema": ARM_INIT_COMMAND_SCHEMA,
+                    "arms": "right",
+                    "action": "start",
+                    "right_q_deg": [0, 1, 0, 0, 0, 0],
+                }
+            )
+        )
+        controller.consume_transitions()
+        controller.update_from_snapshot(
+            StateSnapshot(
+                {"init_motion": {"right": {"status": "failed", "message": "planning_failed"}}},
+                received_monotonic=1.0,
+            )
+        )
+        transitions = controller.consume_transitions()
+        self.assertEqual(transitions.failed, ("right",))
+        self.assertTrue(controller.status_block()["init_override_right"])
+        intent = controller.compose_intent(tcp_pose_target_stand_intent(right=(0.4, 0.5, 0.6, 0, 0, 0)))
+        self.assertEqual(intent.right["mode"], "Hold")
 
     def test_arm_init_override_composes_mixed_policy_command(self):
         controller = ArmInitOverrideController()
@@ -811,6 +876,19 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertEqual(profiled["right"]["mode"], "JointTarget")
         self.assertEqual(profiled["right"]["q_target_deg"], [0.0, 1.0, 0.0, 0.0, 0.0, 0.0])
         self.assertEqual(profiled["right"]["joint_target_profile"], "init_motion")
+        tcp_profiled = client.build_packet(
+            tcp_pose_target_stand_intent(
+                left=[0.3, 0.1, 0.5, 0.0, 0.0, 0.0],
+                tcp_target_profile="umi_large_smooth",
+                metadata={"action_source": "unit_test", "source_conditioning_mode": "foh_se3"},
+            ),
+            8,
+        )
+        self.assertEqual(tcp_profiled["mode"], "TcpPoseTarget")
+        self.assertEqual(tcp_profiled["tcp_target_profile"], "umi_large_smooth")
+        self.assertEqual(tcp_profiled["action_source"], "unit_test")
+        self.assertEqual(tcp_profiled["source_conditioning_mode"], "foh_se3")
+        self.assertIn("client_send_monotonic_ns", tcp_profiled)
 
     def test_command_sender_emits_acquire_lease_and_reuses_readback_token(self):
         fake_socket = FakeSendSocket()

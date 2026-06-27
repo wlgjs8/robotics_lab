@@ -378,6 +378,17 @@ struct CartesianSolveTelemetry {
     // and the final output moving-average stage; absent/false otherwise. Pure
     // telemetry — does not affect control. ---
     bool smd_active = false;
+    std::string tcp_target_profile;
+    bool tcp_target_profile_found = false;
+    double smd_profile_nf_linear_hz = 0.0;
+    double smd_profile_nf_angular_hz = 0.0;
+    bool smd_profile_velocity_feedforward = false;
+    double smd_profile_max_linear_velocity_m_s = 0.0;
+    double smd_profile_max_linear_accel_m_s2 = 0.0;
+    double smd_profile_max_angular_velocity_rad_s = 0.0;
+    double smd_profile_max_angular_accel_rad_s2 = 0.0;
+    double smd_profile_max_goal_lead_m = 0.0;
+    double smd_profile_max_goal_lead_rad = 0.0;
     std::optional<Pose6D> smd_goal_stand;   // integrated SMD goal (B input)
     std::optional<Pose6D> smd_ref_stand;    // SMD step output, BEFORE IK (B output)
     bool smd_velocity_feedforward_used = false;
@@ -477,6 +488,15 @@ struct DualArmCommand {
 
     ArmCommand left;
     ArmCommand right;
+
+    std::string tcp_target_profile = "default";
+    bool tcp_target_profile_provided = false;
+    uint64_t client_send_monotonic_ns = 0;
+    bool has_client_send_monotonic_ns = false;
+    uint64_t input_sample_monotonic_ns = 0;
+    bool has_input_sample_monotonic_ns = false;
+    std::string action_source;
+    std::string source_conditioning_mode;
 
     // SetSafetyFloorZ payload: requested stand-frame floor plane height (meters).
     double floor_z_m = 0.0;
@@ -658,6 +678,30 @@ struct StartupValidationSnapshot {
     ArmStartupValidationSnapshot right;
 };
 
+struct InitMotionDiag {
+    std::string status = "idle";
+    std::string fail_mode = "none";
+    std::string message;
+    double start_clear_m = std::numeric_limits<double>::quiet_NaN();
+    double goal_clear_m = std::numeric_limits<double>::quiet_NaN();
+    int tree_start = 0;
+    int tree_goal = 0;
+    int iterations = 0;
+    double planning_time_s = 0.0;
+    int waypoint_index = 0;
+    int waypoint_count = 0;
+    double dist_to_goal_deg = std::numeric_limits<double>::quiet_NaN();
+};
+
+struct InitMotionArmDiag {
+    std::string status = "idle";
+    std::string fail_mode = "none";
+    std::string message;
+    int waypoint_index = 0;
+    int waypoint_count = 0;
+    double dist_to_goal_deg = std::numeric_limits<double>::quiet_NaN();
+};
+
 struct ServoSample {
     uint64_t tick = 0;
     uint64_t loop_start_time_ns = 0;
@@ -718,6 +762,15 @@ struct ServoSample {
     std::optional<LatchedFaultContextSnapshot> latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> left_latched_fault_context;
     std::optional<LatchedFaultContextSnapshot> right_latched_fault_context;
+    InitMotionDiag init_motion;
+    InitMotionArmDiag init_motion_left;
+    InitMotionArmDiag init_motion_right;
+    std::string left_mode_before_init_sequencer;
+    std::string right_mode_before_init_sequencer;
+    std::string left_mode_after_init_sequencer;
+    std::string right_mode_after_init_sequencer;
+    std::string non_init_arm_preserved_mode;
+    bool single_arm_freeze_other_arm = false;
 };
 
 // One near pair from the URDF mesh self-collision monitor: the two closest
@@ -731,21 +784,6 @@ struct SelfCollisionNearPairViz {
     std::array<double, 3> p_b_m{};
     double clearance_m = 0.0;
     bool external = false;  // arm<->external obstacle (floor) vs robot self-collision
-};
-
-struct InitMotionDiag {
-    std::string status = "idle";
-    std::string fail_mode = "none";
-    std::string message;
-    double start_clear_m = std::numeric_limits<double>::quiet_NaN();
-    double goal_clear_m = std::numeric_limits<double>::quiet_NaN();
-    int tree_start = 0;
-    int tree_goal = 0;
-    int iterations = 0;
-    double planning_time_s = 0.0;
-    int waypoint_index = 0;
-    int waypoint_count = 0;
-    double dist_to_goal_deg = std::numeric_limits<double>::quiet_NaN();
 };
 
 struct ServoSnapshot {
@@ -807,6 +845,8 @@ struct ServoSnapshot {
     bool self_collision_mesh = false;
     std::vector<SelfCollisionNearPairViz> self_collision_near_pairs;
     InitMotionDiag init_motion;
+    InitMotionArmDiag init_motion_left;
+    InitMotionArmDiag init_motion_right;
 
     // Stand-frame floor plane constraint telemetry (safety.floor_constraint).
     bool floor_constraint_enabled = false;

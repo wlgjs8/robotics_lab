@@ -116,11 +116,23 @@ class RecordStatusPublisher:
         recording: dict[str, Any],
         *,
         arm_init: Mapping[str, Any] | None = None,
+        runner_role: str = "unknown",
+        action_source: str = "",
+        command_source_id: str = "",
+        command_session_id: str = "",
+        control_endpoint: str | None = None,
+        status_endpoint: str | None = None,
     ) -> None:
         payload = {
             "schema": RECORD_STATUS_SCHEMA,
             "host_time_ns": time.time_ns(),
             "recording": recording,
+            "runner_role": runner_role,
+            "action_source": action_source,
+            "command_source_id": command_source_id,
+            "command_session_id": command_session_id,
+            "control_endpoint": control_endpoint,
+            "status_endpoint": status_endpoint or self.endpoint,
         }
         if arm_init is not None:
             payload["arm_init"] = dict(arm_init)
@@ -314,17 +326,35 @@ class RecordingSupervisor:
         now_monotonic: float,
         force: bool = False,
         arm_init: Mapping[str, Any] | None = None,
+        runner_role: str = "unknown",
+        action_source: str = "",
+        command_client: Any | None = None,
     ) -> None:
         status = self.status_block()
         combined_status: dict[str, Any] = {
             "recording": status,
             "arm_init": dict(arm_init) if arm_init is not None else None,
+            "runner_role": runner_role,
+            "action_source": action_source,
+            "command_source_id": str(getattr(command_client, "source_id", "") or ""),
+            "command_session_id": str(getattr(command_client, "session_id", "") or ""),
+            "control_endpoint": self.control_server.bind if self.control_server is not None else None,
+            "status_endpoint": self.config.recording.status_endpoint,
         }
         changed = combined_status != self._last_status
         period = 1.0 / max(float(self.config.recording.status_rate_hz), 1.0)
         due = now_monotonic - self._last_status_publish >= period
         if self.status_publisher is not None and (force or changed or due):
-            self.status_publisher.publish(status, arm_init=arm_init)
+            self.status_publisher.publish(
+                status,
+                arm_init=arm_init,
+                runner_role=runner_role,
+                action_source=action_source,
+                command_source_id=combined_status["command_source_id"],
+                command_session_id=combined_status["command_session_id"],
+                control_endpoint=combined_status["control_endpoint"],
+                status_endpoint=combined_status["status_endpoint"],
+            )
             self._last_status_publish = now_monotonic
             self._last_status = combined_status
 

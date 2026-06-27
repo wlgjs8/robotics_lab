@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/control/command_buffer.hpp"
@@ -16,7 +17,8 @@ class CommandServer {
 public:
     CommandServer(
         const NetworkConfig& config,
-        CommandBuffer* command_buffer
+        CommandBuffer* command_buffer,
+        const CartesianControlConfig& cartesian_control = CartesianControlConfig{}
     );
 
     ~CommandServer();
@@ -39,6 +41,8 @@ private:
 private:
     NetworkConfig config_;
     CommandSourceConfig command_source_config_;
+    std::string tcp_target_profile_default_ = "default";
+    std::vector<std::string> tcp_target_profiles_;
     CommandBuffer* command_buffer_ = nullptr;
     std::unordered_map<std::string, uint64_t> last_accepted_seq_by_source_;
     CommandSourceLeaseState active_lease_;

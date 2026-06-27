@@ -92,7 +92,7 @@ class RecordingCommandClient:
     ) -> ArmInitCommandResult:
         if arms not in {"both", "left", "right"}:
             return ArmInitCommandResult(False, f"invalid arm init arms: {arms}")
-        if action != "toggle":
+        if action not in {"start", "cancel", "toggle"}:
             return ArmInitCommandResult(False, f"invalid arm init action: {action}")
         try:
             left = _finite_joint6(left_q_deg, "left_q_deg")
@@ -115,7 +115,7 @@ class RecordingCommandClient:
         except OSError as exc:
             return ArmInitCommandResult(False, f"arm init {arms} send failed: {exc}", payload)
         self.sent_packets.append(payload)
-        return ArmInitCommandResult(True, f"arm init {arms} toggle sent", payload)
+        return ArmInitCommandResult(True, f"arm init {arms} {action} sent", payload)
 
     def close(self) -> None:
         self._socket.close()
@@ -167,12 +167,18 @@ def normalize_arm_init_status(block: Mapping[str, Any] | None) -> dict[str, Any]
     right_on = bool(block.get("init_override_right", False))
     error = str(block.get("error", "") or "")
     last_command = str(block.get("last_command", "") or "")
+    left_state = str(block.get("left_state", "") or "")
+    right_state = str(block.get("right_state", "") or "")
     return {
         "schema": str(block.get("schema", ARM_INIT_STATE_SCHEMA) or ARM_INIT_STATE_SCHEMA),
         "init_override_left": left_on,
         "init_override_right": right_on,
-        "left_state": "init_motion" if left_on else "policy",
-        "right_state": "init_motion" if right_on else "policy",
+        "left_state": left_state or ("init executing" if left_on else "policy"),
+        "right_state": right_state or ("init executing" if right_on else "policy"),
+        "left_server_status": str(block.get("left_server_status", "") or ""),
+        "right_server_status": str(block.get("right_server_status", "") or ""),
+        "left_message": str(block.get("left_message", "") or ""),
+        "right_message": str(block.get("right_message", "") or ""),
         "last_command": last_command,
         "error": error,
     }
@@ -184,6 +190,8 @@ class RecordingStatusStore:
         self.invalid_packets = 0
         self._latest: dict[str, Any] | None = None
         self._latest_arm_init: dict[str, Any] | None = None
+        self._latest_packet: dict[str, Any] | None = None
+        self._by_session: dict[tuple[str, str], dict[str, Any]] = {}
         self._received_monotonic = float("-inf")
         self._lock = threading.Lock()
 
@@ -192,15 +200,29 @@ class RecordingStatusStore:
         block: Mapping[str, Any],
         *,
         arm_init: Mapping[str, Any] | None = None,
+        metadata: Mapping[str, Any] | None = None,
         received_monotonic: float | None = None,
     ) -> None:
         status = normalize_recording_status(block)
+        meta = _normalize_runner_metadata(metadata)
+        status.update(meta)
         arm_init_status = normalize_arm_init_status(arm_init) if arm_init is not None else None
+        received = time.monotonic() if received_monotonic is None else received_monotonic
+        packet = {
+            "recording": dict(status),
+            "arm_init": None if arm_init_status is None else dict(arm_init_status),
+            **meta,
+            "received_monotonic": received,
+        }
         with self._lock:
             self._latest = status
             if arm_init_status is not None:
                 self._latest_arm_init = arm_init_status
-            self._received_monotonic = time.monotonic() if received_monotonic is None else received_monotonic
+            self._latest_packet = packet
+            key = (meta.get("command_source_id", ""), meta.get("command_session_id", ""))
+            if key[0] and key[1]:
+                self._by_session[key] = packet
+            self._received_monotonic = received
             self.received_packets += 1
 
     def update_from_packet(self, data: bytes, *, received_monotonic: float | None = None) -> bool:
@@ -220,9 +242,19 @@ class RecordingStatusStore:
                 self.invalid_packets += 1
             return False
         arm_init = payload.get("arm_init")
+        metadata = {
+            "runner_role": payload.get("runner_role"),
+            "action_source": payload.get("action_source"),
+            "command_source_id": payload.get("command_source_id"),
+            "command_session_id": payload.get("command_session_id"),
+            "control_endpoint": payload.get("control_endpoint"),
+            "status_endpoint": payload.get("status_endpoint"),
+            "host_time_ns": payload.get("host_time_ns"),
+        }
         self.update(
             recording,
             arm_init=arm_init if isinstance(arm_init, Mapping) else None,
+            metadata=metadata,
             received_monotonic=received_monotonic,
         )
         return True
@@ -235,6 +267,49 @@ class RecordingStatusStore:
         with self._lock:
             return None if self._latest_arm_init is None else dict(self._latest_arm_init)
 
+    def latest_packet(self) -> dict[str, Any] | None:
+        with self._lock:
+            return None if self._latest_packet is None else _copy_packet(self._latest_packet)
+
+    def latest_for_session(
+        self,
+        source_id: str | None,
+        session_id: str | None,
+        *,
+        now: float | None = None,
+        threshold_sec: float = 2.0,
+    ) -> dict[str, Any] | None:
+        if not source_id or not session_id:
+            return None
+        now_value = time.monotonic() if now is None else now
+        with self._lock:
+            packet = self._by_session.get((str(source_id), str(session_id)))
+            if packet is None:
+                return None
+            if now_value - float(packet.get("received_monotonic", float("-inf"))) > threshold_sec:
+                return None
+            return _copy_packet(packet)
+
+    def latest_for_role(
+        self,
+        role: str,
+        *,
+        now: float | None = None,
+        threshold_sec: float = 2.0,
+    ) -> dict[str, Any] | None:
+        now_value = time.monotonic() if now is None else now
+        with self._lock:
+            candidates = [
+                packet
+                for packet in self._by_session.values()
+                if packet.get("runner_role") == role
+                and now_value - float(packet.get("received_monotonic", float("-inf"))) <= threshold_sec
+            ]
+            if not candidates:
+                return None
+            newest = max(candidates, key=lambda p: float(p.get("received_monotonic", float("-inf"))))
+            return _copy_packet(newest)
+
     def is_stale(self, *, now: float | None = None, threshold_sec: float = 1.5) -> bool:
         with self._lock:
             if self._latest is None:
@@ -242,6 +317,29 @@ class RecordingStatusStore:
             received = self._received_monotonic
         now_value = time.monotonic() if now is None else now
         return now_value - received > threshold_sec
+
+
+def _normalize_runner_metadata(block: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(block, Mapping):
+        block = {}
+    return {
+        "runner_role": str(block.get("runner_role", "") or "unknown"),
+        "action_source": str(block.get("action_source", "") or ""),
+        "command_source_id": str(block.get("command_source_id", "") or ""),
+        "command_session_id": str(block.get("command_session_id", "") or ""),
+        "control_endpoint": str(block.get("control_endpoint", "") or ""),
+        "status_endpoint": str(block.get("status_endpoint", "") or ""),
+        "host_time_ns": block.get("host_time_ns"),
+    }
+
+
+def _copy_packet(packet: Mapping[str, Any]) -> dict[str, Any]:
+    copied = dict(packet)
+    if isinstance(copied.get("recording"), Mapping):
+        copied["recording"] = dict(copied["recording"])
+    if isinstance(copied.get("arm_init"), Mapping):
+        copied["arm_init"] = dict(copied["arm_init"])
+    return copied
 
 
 class RecordingStatusReceiver:

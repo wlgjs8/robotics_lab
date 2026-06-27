@@ -114,6 +114,24 @@ bool testRepositoryConfigsParse() {
     }
 
     {
+        const rb_servo::DualArmConfig stack_real =
+            rb_servo::loadConfigFromYaml((config_dir / "stack_real.yaml").string());
+        RB_CHECK(stack_real.cartesian_control.tcp_pose_target_profile_default == "umi_large_smooth");
+        RB_CHECK(stack_real.cartesian_control.tcp_pose_target_profiles.size() == 3);
+        bool has_spacemouse = false;
+        bool has_umi = false;
+        bool has_flow = false;
+        for (const auto& profile : stack_real.cartesian_control.tcp_pose_target_profiles) {
+            has_spacemouse = has_spacemouse || profile.name == "spacemouse_precise";
+            has_umi = has_umi || profile.name == "umi_large_smooth";
+            has_flow = has_flow || profile.name == "flow_infer_smooth";
+        }
+        RB_CHECK(has_spacemouse);
+        RB_CHECK(has_umi);
+        RB_CHECK(has_flow);
+    }
+
+    {
         EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
         EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", "1");
         EnvGuard physical_cartesian_gate("RB_ALLOW_REAL_CARTESIAN", nullptr);

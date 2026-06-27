@@ -131,6 +131,70 @@ bool asBool(const YAML::Node& node, const std::string& path) {
     return asValue<bool>(node, path);
 }
 
+void parsePoseTrackSmdConfig(const YAML::Node& smd, const std::string& path, PoseTrackSmdConfig* out) {
+    if (!out) return;
+    validateAllowedKeys(smd, {
+        "enable",
+        "damping_ratio_linear",
+        "natural_frequency_linear_hz",
+        "damping_ratio_angular",
+        "natural_frequency_angular_hz",
+        "max_linear_velocity_m_s",
+        "max_linear_accel_m_s2",
+        "max_angular_velocity_rad_s",
+        "max_angular_accel_rad_s2",
+        "velocity_feedforward",
+    }, path);
+    if (has(smd, "enable")) {
+        out->enable = asBool(smd["enable"], path + ".enable");
+    }
+    if (has(smd, "damping_ratio_linear")) {
+        out->damping_ratio_linear = asDouble(smd["damping_ratio_linear"], path + ".damping_ratio_linear");
+    }
+    if (has(smd, "natural_frequency_linear_hz")) {
+        out->natural_frequency_linear_hz =
+            asDouble(smd["natural_frequency_linear_hz"], path + ".natural_frequency_linear_hz");
+    }
+    if (has(smd, "damping_ratio_angular")) {
+        out->damping_ratio_angular = asDouble(smd["damping_ratio_angular"], path + ".damping_ratio_angular");
+    }
+    if (has(smd, "natural_frequency_angular_hz")) {
+        out->natural_frequency_angular_hz =
+            asDouble(smd["natural_frequency_angular_hz"], path + ".natural_frequency_angular_hz");
+    }
+    if (has(smd, "max_linear_velocity_m_s")) {
+        out->max_linear_velocity_m_s =
+            asDouble(smd["max_linear_velocity_m_s"], path + ".max_linear_velocity_m_s");
+    }
+    if (has(smd, "max_linear_accel_m_s2")) {
+        out->max_linear_accel_m_s2 = asDouble(smd["max_linear_accel_m_s2"], path + ".max_linear_accel_m_s2");
+    }
+    if (has(smd, "max_angular_velocity_rad_s")) {
+        out->max_angular_velocity_rad_s =
+            asDouble(smd["max_angular_velocity_rad_s"], path + ".max_angular_velocity_rad_s");
+    }
+    if (has(smd, "max_angular_accel_rad_s2")) {
+        out->max_angular_accel_rad_s2 =
+            asDouble(smd["max_angular_accel_rad_s2"], path + ".max_angular_accel_rad_s2");
+    }
+    if (has(smd, "velocity_feedforward")) {
+        out->velocity_feedforward = asBool(smd["velocity_feedforward"], path + ".velocity_feedforward");
+    }
+}
+
+void ensureTcpPoseTargetProfiles(DualArmConfig* cfg) {
+    if (!cfg) return;
+    if (cfg->cartesian_control.tcp_pose_target_profile_default.empty()) {
+        cfg->cartesian_control.tcp_pose_target_profile_default = "default";
+    }
+    if (cfg->cartesian_control.tcp_pose_target_profiles.empty()) {
+        TcpPoseTargetProfileConfig profile;
+        profile.name = cfg->cartesian_control.tcp_pose_target_profile_default;
+        profile.pose_track_smd = cfg->cartesian_control.pose_track_smd;
+        cfg->cartesian_control.tcp_pose_target_profiles.push_back(profile);
+    }
+}
+
 std::vector<std::string> asStringArray(const YAML::Node& node, const std::string& path) {
     if (!node.IsSequence()) fail(path + " must be a sequence", node);
     std::vector<std::string> values;
@@ -1235,32 +1299,57 @@ void validateConfig(const DualArmConfig& cfg) {
     if (cfg.cartesian_control.linear_move.max_duration_sec < cfg.cartesian_control.linear_move.min_duration_sec) {
         throw std::runtime_error("cartesian_control.linear_move.max_duration_sec must be >= min_duration_sec");
     }
-    validatePositiveFinite(
-        cfg.cartesian_control.pose_track_smd.damping_ratio_linear,
-        "cartesian_control.pose_track_smd.damping_ratio_linear");
-    validatePositiveFinite(
-        cfg.cartesian_control.pose_track_smd.natural_frequency_linear_hz,
-        "cartesian_control.pose_track_smd.natural_frequency_linear_hz");
-    validatePositiveFinite(
-        cfg.cartesian_control.pose_track_smd.damping_ratio_angular,
-        "cartesian_control.pose_track_smd.damping_ratio_angular");
-    validatePositiveFinite(
-        cfg.cartesian_control.pose_track_smd.natural_frequency_angular_hz,
-        "cartesian_control.pose_track_smd.natural_frequency_angular_hz");
-    for (const auto& [value, name] : {
-             std::pair<double, const char*>{
-                 cfg.cartesian_control.pose_track_smd.max_linear_velocity_m_s,
-                 "cartesian_control.pose_track_smd.max_linear_velocity_m_s"},
-             {cfg.cartesian_control.pose_track_smd.max_linear_accel_m_s2,
-              "cartesian_control.pose_track_smd.max_linear_accel_m_s2"},
-             {cfg.cartesian_control.pose_track_smd.max_angular_velocity_rad_s,
-              "cartesian_control.pose_track_smd.max_angular_velocity_rad_s"},
-             {cfg.cartesian_control.pose_track_smd.max_angular_accel_rad_s2,
-              "cartesian_control.pose_track_smd.max_angular_accel_rad_s2"},
-         }) {
-        if (!std::isfinite(value) || value < 0.0) {
-            throw std::runtime_error(std::string(name) + " must be finite and >= 0 (0 = unlimited)");
+    const auto validate_pose_track_smd = [](const PoseTrackSmdConfig& smd, const std::string& path) {
+        validatePositiveFinite(smd.damping_ratio_linear, path + ".damping_ratio_linear");
+        validatePositiveFinite(smd.natural_frequency_linear_hz, path + ".natural_frequency_linear_hz");
+        validatePositiveFinite(smd.damping_ratio_angular, path + ".damping_ratio_angular");
+        validatePositiveFinite(smd.natural_frequency_angular_hz, path + ".natural_frequency_angular_hz");
+        for (const auto& [value, name] : {
+                 std::pair<double, const char*>{smd.max_linear_velocity_m_s, ".max_linear_velocity_m_s"},
+                 {smd.max_linear_accel_m_s2, ".max_linear_accel_m_s2"},
+                 {smd.max_angular_velocity_rad_s, ".max_angular_velocity_rad_s"},
+                 {smd.max_angular_accel_rad_s2, ".max_angular_accel_rad_s2"},
+             }) {
+            if (!std::isfinite(value) || value < 0.0) {
+                throw std::runtime_error(path + name + " must be finite and >= 0 (0 = unlimited)");
+            }
         }
+    };
+    validate_pose_track_smd(cfg.cartesian_control.pose_track_smd, "cartesian_control.pose_track_smd");
+    if (cfg.cartesian_control.tcp_pose_target_profile_default.empty()) {
+        throw std::runtime_error("cartesian_control.tcp_pose_target_profile_default must not be empty");
+    }
+    if (cfg.cartesian_control.tcp_pose_target_profiles.empty()) {
+        throw std::runtime_error("cartesian_control.tcp_pose_target_profiles must not be empty");
+    }
+    std::set<std::string> tcp_profile_names;
+    bool has_default_tcp_profile = false;
+    for (const TcpPoseTargetProfileConfig& profile : cfg.cartesian_control.tcp_pose_target_profiles) {
+        if (profile.name.empty()) {
+            throw std::runtime_error("cartesian_control.tcp_pose_target_profiles contains an empty profile name");
+        }
+        if (!tcp_profile_names.insert(profile.name).second) {
+            throw std::runtime_error("duplicate cartesian_control.tcp_pose_target_profiles entry: " + profile.name);
+        }
+        validate_pose_track_smd(
+            profile.pose_track_smd,
+            "cartesian_control.tcp_pose_target_profiles." + profile.name + ".pose_track_smd"
+        );
+        validateNonNegativeFinite(
+            profile.max_smd_goal_lead_m,
+            "cartesian_control.tcp_pose_target_profiles." + profile.name + ".max_smd_goal_lead_m"
+        );
+        validateNonNegativeFinite(
+            profile.max_smd_goal_lead_rad,
+            "cartesian_control.tcp_pose_target_profiles." + profile.name + ".max_smd_goal_lead_rad"
+        );
+        has_default_tcp_profile = has_default_tcp_profile ||
+            profile.name == cfg.cartesian_control.tcp_pose_target_profile_default;
+    }
+    if (!has_default_tcp_profile) {
+        throw std::runtime_error(
+            "cartesian_control.tcp_pose_target_profile_default must name an entry in tcp_pose_target_profiles"
+        );
     }
 
     if (cfg.kinematics.enable) {
@@ -2202,6 +2291,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "lazy_edges",
                 "execution_lookahead_deg",
                 "execution_timeout_sec",
+                "single_arm_freeze_other_arm",
             }, "safety.init_motion_planner");
             auto& ipc = cfg.safety.init_motion_planner;
             if (has(ip, "enable")) ipc.enable = asBool(ip["enable"], "safety.init_motion_planner.enable");
@@ -2229,6 +2319,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ip, "lazy_edges")) ipc.lazy_edges = asBool(ip["lazy_edges"], "safety.init_motion_planner.lazy_edges");
             if (has(ip, "execution_lookahead_deg")) ipc.execution_lookahead_deg = asDouble(ip["execution_lookahead_deg"], "safety.init_motion_planner.execution_lookahead_deg");
             if (has(ip, "execution_timeout_sec")) ipc.execution_timeout_sec = asDouble(ip["execution_timeout_sec"], "safety.init_motion_planner.execution_timeout_sec");
+            if (has(ip, "single_arm_freeze_other_arm")) ipc.single_arm_freeze_other_arm = asBool(ip["single_arm_freeze_other_arm"], "safety.init_motion_planner.single_arm_freeze_other_arm");
         }
     }
 
@@ -2397,6 +2488,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "controller_simulation_divergence_source",
             "linear_move",
             "pose_track_smd",
+            "tcp_pose_target_profile_default",
+            "tcp_pose_target_profiles",
         }, "cartesian_control");
         if (has(sec, "enable")) cfg.cartesian_control.enable = asBool(sec["enable"], "cartesian_control.enable");
         if (has(sec, "allow_in_simulation")) {
@@ -2528,60 +2621,54 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             }
         }
         if (has(sec, "pose_track_smd")) {
-            const YAML::Node smd = sec["pose_track_smd"];
-            validateAllowedKeys(smd, {
-                "enable",
-                "damping_ratio_linear",
-                "natural_frequency_linear_hz",
-                "damping_ratio_angular",
-                "natural_frequency_angular_hz",
-                "max_linear_velocity_m_s",
-                "max_linear_accel_m_s2",
-                "max_angular_velocity_rad_s",
-                "max_angular_accel_rad_s2",
-                "velocity_feedforward",
-            }, "cartesian_control.pose_track_smd");
-            if (has(smd, "enable")) {
-                cfg.cartesian_control.pose_track_smd.enable =
-                    asBool(smd["enable"], "cartesian_control.pose_track_smd.enable");
-            }
-            if (has(smd, "damping_ratio_linear")) {
-                cfg.cartesian_control.pose_track_smd.damping_ratio_linear = asDouble(
-                    smd["damping_ratio_linear"], "cartesian_control.pose_track_smd.damping_ratio_linear");
-            }
-            if (has(smd, "natural_frequency_linear_hz")) {
-                cfg.cartesian_control.pose_track_smd.natural_frequency_linear_hz = asDouble(
-                    smd["natural_frequency_linear_hz"],
-                    "cartesian_control.pose_track_smd.natural_frequency_linear_hz");
-            }
-            if (has(smd, "damping_ratio_angular")) {
-                cfg.cartesian_control.pose_track_smd.damping_ratio_angular = asDouble(
-                    smd["damping_ratio_angular"], "cartesian_control.pose_track_smd.damping_ratio_angular");
-            }
-            if (has(smd, "natural_frequency_angular_hz")) {
-                cfg.cartesian_control.pose_track_smd.natural_frequency_angular_hz = asDouble(
-                    smd["natural_frequency_angular_hz"],
-                    "cartesian_control.pose_track_smd.natural_frequency_angular_hz");
-            }
-            if (has(smd, "max_linear_velocity_m_s")) {
-                cfg.cartesian_control.pose_track_smd.max_linear_velocity_m_s = asDouble(
-                    smd["max_linear_velocity_m_s"], "cartesian_control.pose_track_smd.max_linear_velocity_m_s");
-            }
-            if (has(smd, "max_linear_accel_m_s2")) {
-                cfg.cartesian_control.pose_track_smd.max_linear_accel_m_s2 = asDouble(
-                    smd["max_linear_accel_m_s2"], "cartesian_control.pose_track_smd.max_linear_accel_m_s2");
-            }
-            if (has(smd, "max_angular_velocity_rad_s")) {
-                cfg.cartesian_control.pose_track_smd.max_angular_velocity_rad_s = asDouble(
-                    smd["max_angular_velocity_rad_s"], "cartesian_control.pose_track_smd.max_angular_velocity_rad_s");
-            }
-            if (has(smd, "max_angular_accel_rad_s2")) {
-                cfg.cartesian_control.pose_track_smd.max_angular_accel_rad_s2 = asDouble(
-                    smd["max_angular_accel_rad_s2"], "cartesian_control.pose_track_smd.max_angular_accel_rad_s2");
-            }
-            if (has(smd, "velocity_feedforward")) {
-                cfg.cartesian_control.pose_track_smd.velocity_feedforward = asBool(
-                    smd["velocity_feedforward"], "cartesian_control.pose_track_smd.velocity_feedforward");
+            parsePoseTrackSmdConfig(
+                sec["pose_track_smd"],
+                "cartesian_control.pose_track_smd",
+                &cfg.cartesian_control.pose_track_smd
+            );
+        }
+        if (has(sec, "tcp_pose_target_profile_default")) {
+            cfg.cartesian_control.tcp_pose_target_profile_default =
+                asString(sec["tcp_pose_target_profile_default"], "cartesian_control.tcp_pose_target_profile_default");
+        }
+        if (has(sec, "tcp_pose_target_profiles")) {
+            const YAML::Node profiles = sec["tcp_pose_target_profiles"];
+            requireMapping(profiles, "cartesian_control.tcp_pose_target_profiles");
+            cfg.cartesian_control.tcp_pose_target_profiles.clear();
+            for (const auto& item : profiles) {
+                if (!item.first.IsScalar()) {
+                    fail("cartesian_control.tcp_pose_target_profiles contains a non-scalar profile name", item.first);
+                }
+                const std::string name = item.first.as<std::string>();
+                const YAML::Node profile_node = item.second;
+                validateAllowedKeys(profile_node, {
+                    "pose_track_smd",
+                    "max_smd_goal_lead_m",
+                    "max_smd_goal_lead_rad",
+                }, "cartesian_control.tcp_pose_target_profiles." + name);
+                TcpPoseTargetProfileConfig profile;
+                profile.name = name;
+                profile.pose_track_smd = cfg.cartesian_control.pose_track_smd;
+                if (has(profile_node, "pose_track_smd")) {
+                    parsePoseTrackSmdConfig(
+                        profile_node["pose_track_smd"],
+                        "cartesian_control.tcp_pose_target_profiles." + name + ".pose_track_smd",
+                        &profile.pose_track_smd
+                    );
+                }
+                if (has(profile_node, "max_smd_goal_lead_m")) {
+                    profile.max_smd_goal_lead_m = asDouble(
+                        profile_node["max_smd_goal_lead_m"],
+                        "cartesian_control.tcp_pose_target_profiles." + name + ".max_smd_goal_lead_m"
+                    );
+                }
+                if (has(profile_node, "max_smd_goal_lead_rad")) {
+                    profile.max_smd_goal_lead_rad = asDouble(
+                        profile_node["max_smd_goal_lead_rad"],
+                        "cartesian_control.tcp_pose_target_profiles." + name + ".max_smd_goal_lead_rad"
+                    );
+                }
+                cfg.cartesian_control.tcp_pose_target_profiles.push_back(profile);
             }
         }
     }
@@ -2651,6 +2738,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         cfg.safety.tracking_error_policy = TrackingErrorPolicy::FaultLatch;
     }
 
+    ensureTcpPoseTargetProfiles(&cfg);
     validateConfig(cfg);
 
     std::cerr << "[INFO] loaded config: " << path << "\n";

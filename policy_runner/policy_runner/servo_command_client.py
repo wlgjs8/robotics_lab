@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -24,6 +25,8 @@ class CommandIntent:
     left: dict[str, Any] | None = None
     right: dict[str, Any] | None = None
     coupled_timeout: bool = True
+    tcp_target_profile: str | None = None
+    metadata: dict[str, Any] | None = None
 
     @property
     def is_motion(self) -> bool:
@@ -216,6 +219,12 @@ class ServoCommandClient:
             packet["left"] = intent.left
         if intent.right is not None:
             packet["right"] = intent.right
+        if intent.tcp_target_profile is not None:
+            packet["tcp_target_profile"] = str(intent.tcp_target_profile)
+        if intent.metadata:
+            packet.update(intent.metadata)
+        if intent.mode == "TcpPoseTarget" or _arm_mode(intent.left) == "TcpPoseTarget" or _arm_mode(intent.right) == "TcpPoseTarget":
+            packet.setdefault("client_send_monotonic_ns", time.monotonic_ns())
         if self.lease_token:
             packet["lease_token"] = self.lease_token
         return packet

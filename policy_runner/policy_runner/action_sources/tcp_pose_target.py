@@ -44,12 +44,16 @@ def tcp_pose_target_stand_intent(
     left_gripper: float | None = None,
     right_gripper: float | None = None,
     timeout_sec: float = 0.2,
+    tcp_target_profile: str | None = None,
+    metadata: dict | None = None,
 ) -> CommandIntent:
     return CartesianCommandIntent(
         "TcpPoseTarget",
         timeout_sec=timeout_sec,
         left=_pose_target_arm_payload(left, gripper_target=left_gripper),
         right=_pose_target_arm_payload(right, gripper_target=right_gripper),
+        tcp_target_profile=tcp_target_profile,
+        metadata=metadata,
     )
 
 

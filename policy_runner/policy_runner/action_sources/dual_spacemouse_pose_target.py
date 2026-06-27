@@ -169,6 +169,11 @@ class DualSpaceMousePoseTargetActionSource:
             left_gripper=left_gripper,
             right_gripper=right_gripper,
             timeout_sec=self.timeout_sec,
+            tcp_target_profile="spacemouse_precise",
+            metadata={
+                "action_source": "dual_spacemouse_pose_target",
+                "source_conditioning_mode": "none",
+            },
         )
 
     def _target_from_reader(

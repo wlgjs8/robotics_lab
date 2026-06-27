@@ -60,7 +60,7 @@ int main(int argc, char** argv) {
                 config.network
             );
         }
-        rb_servo::CommandServer command_server(config.network, &command_buffer);
+        rb_servo::CommandServer command_server(config.network, &command_buffer, config.cartesian_control);
 
         rb_servo::DualArmServoLoop servo_loop(
             std::move(left_robot),

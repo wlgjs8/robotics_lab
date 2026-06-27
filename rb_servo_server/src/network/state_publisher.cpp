@@ -648,6 +648,17 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"q_reference_for_servo_valid", telemetry.q_reference_for_servo_valid},
         // A/B/C separation telemetry (Patch 4). Absent/false on non-SMD paths.
         {"smd_active", telemetry.smd_active},
+        {"tcp_target_profile", telemetry.tcp_target_profile},
+        {"tcp_target_profile_found", telemetry.tcp_target_profile_found},
+        {"smd_profile_nf_linear_hz", telemetry.smd_profile_nf_linear_hz},
+        {"smd_profile_nf_angular_hz", telemetry.smd_profile_nf_angular_hz},
+        {"smd_profile_velocity_feedforward", telemetry.smd_profile_velocity_feedforward},
+        {"smd_profile_max_linear_velocity_m_s", telemetry.smd_profile_max_linear_velocity_m_s},
+        {"smd_profile_max_linear_accel_m_s2", telemetry.smd_profile_max_linear_accel_m_s2},
+        {"smd_profile_max_angular_velocity_rad_s", telemetry.smd_profile_max_angular_velocity_rad_s},
+        {"smd_profile_max_angular_accel_rad_s2", telemetry.smd_profile_max_angular_accel_rad_s2},
+        {"smd_profile_max_goal_lead_m", telemetry.smd_profile_max_goal_lead_m},
+        {"smd_profile_max_goal_lead_rad", telemetry.smd_profile_max_goal_lead_rad},
         {"smd_goal_stand", optionalPoseJson(telemetry.smd_goal_stand)},
         {"smd_ref_stand", optionalPoseJson(telemetry.smd_ref_stand)},
         {"smd_velocity_feedforward_used", telemetry.smd_velocity_feedforward_used},
@@ -1463,6 +1474,30 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         {"waypoint_index", snapshot.init_motion.waypoint_index},
         {"waypoint_count", snapshot.init_motion.waypoint_count},
         {"dist_to_goal_deg", finiteDoubleJson(snapshot.init_motion.dist_to_goal_deg)},
+        {"left", {
+            {"status", snapshot.init_motion_left.status},
+            {"fail_mode", snapshot.init_motion_left.fail_mode},
+            {"message", snapshot.init_motion_left.message},
+            {"waypoint_index", snapshot.init_motion_left.waypoint_index},
+            {"waypoint_count", snapshot.init_motion_left.waypoint_count},
+            {"dist_to_goal_deg", finiteDoubleJson(snapshot.init_motion_left.dist_to_goal_deg)},
+        }},
+        {"right", {
+            {"status", snapshot.init_motion_right.status},
+            {"fail_mode", snapshot.init_motion_right.fail_mode},
+            {"message", snapshot.init_motion_right.message},
+            {"waypoint_index", snapshot.init_motion_right.waypoint_index},
+            {"waypoint_count", snapshot.init_motion_right.waypoint_count},
+            {"dist_to_goal_deg", finiteDoubleJson(snapshot.init_motion_right.dist_to_goal_deg)},
+        }},
+        {"aggregate", {
+            {"status", snapshot.init_motion.status},
+            {"fail_mode", snapshot.init_motion.fail_mode},
+            {"message", snapshot.init_motion.message},
+            {"waypoint_index", snapshot.init_motion.waypoint_index},
+            {"waypoint_count", snapshot.init_motion.waypoint_count},
+            {"dist_to_goal_deg", finiteDoubleJson(snapshot.init_motion.dist_to_goal_deg)},
+        }},
     };
 
     message["send_skew_us"] = snapshot.send_skew_us;

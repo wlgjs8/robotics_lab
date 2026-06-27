@@ -1332,6 +1332,47 @@ class GuiContractsTest(unittest.TestCase):
         self.assertTrue(store.latest_arm_init()["init_override_left"])
         self.assertFalse(store.latest_arm_init()["init_override_right"])
 
+    def test_recording_status_store_tracks_runner_sessions(self):
+        store = RecordingStatusStore()
+        self.assertTrue(
+            store.update_from_packet(
+                json.dumps(
+                    {
+                        "schema": "robotics_lab.recording_state.v1",
+                        "runner_role": "stack",
+                        "action_source": "teleop_mux",
+                        "command_source_id": "policy_runner",
+                        "command_session_id": "stack-session",
+                        "control_endpoint": "udp://127.0.0.1:50441",
+                        "recording": {"recording": False},
+                    }
+                ).encode("utf-8"),
+                received_monotonic=10.0,
+            )
+        )
+        self.assertTrue(
+            store.update_from_packet(
+                json.dumps(
+                    {
+                        "schema": "robotics_lab.recording_state.v1",
+                        "runner_role": "flow_infer",
+                        "action_source": "flow_infer",
+                        "command_source_id": "policy_runner",
+                        "command_session_id": "flow-session",
+                        "control_endpoint": "udp://127.0.0.1:50443",
+                        "recording": {"recording": False},
+                    }
+                ).encode("utf-8"),
+                received_monotonic=11.0,
+            )
+        )
+
+        stack = store.latest_for_session("policy_runner", "stack-session", now=11.2)
+        flow = store.latest_for_session("policy_runner", "flow-session", now=11.2)
+        self.assertEqual(stack["control_endpoint"], "udp://127.0.0.1:50441")
+        self.assertEqual(flow["control_endpoint"], "udp://127.0.0.1:50443")
+        self.assertEqual(store.latest_for_role("flow_infer", now=11.2)["command_session_id"], "flow-session")
+
     def test_arm_init_override_uses_policy_control_when_recording_active(self):
         # policy_runner ACTIVELY controlling (recording in progress) -> route the
         # InitMotion press to its arm_init latch so it coordinates with the rollout.

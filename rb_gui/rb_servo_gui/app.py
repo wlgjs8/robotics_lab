@@ -626,6 +626,77 @@ def _policy_runner_control_active(
     return False
 
 
+def _active_runner_status_packet(
+    handles: dict[str, Any],
+    latest: StateSnapshot | None = None,
+) -> dict[str, Any] | None:
+    store = handles.get("recording_status_store")
+    if not isinstance(store, RecordingStatusStore):
+        return None
+    latest = latest or handles.get("_latest_state")
+    if isinstance(latest, StateSnapshot):
+        source_id = latest.command_source.display_source_id
+        session_id = latest.command_source.display_session_id
+        packet = store.latest_for_session(source_id, session_id, threshold_sec=2.0)
+        if packet is not None:
+            return packet
+        if source_id == "policy_runner":
+            packet = store.latest_for_role("flow_infer", threshold_sec=2.0)
+            if packet is not None:
+                return packet
+    packet = store.latest_packet()
+    if packet is None or store.is_stale(threshold_sec=2.0):
+        return None
+    return packet
+
+
+def _recording_client_for_endpoint(handles: dict[str, Any], endpoint: str) -> RecordingCommandClient:
+    host, port = parse_udp_endpoint(endpoint, default_host="127.0.0.1", default_port=50441)
+    key = f"{host}:{port}"
+    clients = handles.setdefault("recording_cmd_clients", {})
+    if not isinstance(clients, dict):
+        clients = {}
+        handles["recording_cmd_clients"] = clients
+    client = clients.get(key)
+    if not isinstance(client, RecordingCommandClient):
+        client = RecordingCommandClient(host, port)
+        clients[key] = client
+    return client
+
+
+def _arm_init_control_route(
+    handles: dict[str, Any],
+    latest: StateSnapshot | None,
+) -> tuple[str, RecordingCommandClient | None, str]:
+    latest = latest or handles.get("_latest_state")
+    packet = _active_runner_status_packet(handles, latest)
+    if packet is not None:
+        endpoint = str(packet.get("control_endpoint", "") or "")
+        if endpoint:
+            role = str(packet.get("runner_role", "unknown") or "unknown")
+            session = str(packet.get("command_session_id", "") or "")
+            return (
+                f"{role} policy_runner",
+                _recording_client_for_endpoint(handles, endpoint),
+                f"{endpoint} session={session}",
+            )
+    if isinstance(latest, StateSnapshot) and latest.command_source.display_source_id == "policy_runner":
+        flow_endpoint = os.environ.get("RB_GUI_FLOW_RECORD_CMD_ENDPOINT", "").strip()
+        if flow_endpoint:
+            return (
+                "flow-infer policy_runner (env fallback)",
+                _recording_client_for_endpoint(handles, flow_endpoint),
+                flow_endpoint,
+            )
+        default_endpoint = os.environ.get("RB_GUI_RECORD_CMD_ENDPOINT", "udp://127.0.0.1:50441")
+        return (
+            "stack policy_runner (env/default fallback)",
+            _recording_client_for_endpoint(handles, default_endpoint),
+            default_endpoint,
+        )
+    return ("direct server one-shot", None, "")
+
+
 def _policy_runner_actively_controlling(
     handles: dict[str, Any],
     latest: StateSnapshot | None = None,
@@ -667,6 +738,9 @@ def _arm_init_status_block(
     handles: dict[str, Any],
     latest: StateSnapshot | None = None,
 ) -> dict[str, Any]:
+    packet = _active_runner_status_packet(handles, latest)
+    if isinstance(packet, Mapping) and isinstance(packet.get("arm_init"), Mapping):
+        return normalize_arm_init_status(packet["arm_init"])
     if latest is not None and isinstance(latest.arm_init, Mapping):
         return normalize_arm_init_status(latest.arm_init)
     store = handles.get("recording_status_store")
@@ -732,7 +806,11 @@ def _send_arm_init_override(
         return False, "init motion target not configured"
 
     latest = handles.get("_latest_state")
-    client = handles.get("recording_cmd_client")
+    route_label, route_client, route_detail = _arm_init_control_route(
+        handles,
+        latest if isinstance(latest, StateSnapshot) else None,
+    )
+    client = route_client or handles.get("recording_cmd_client")
     send_arm_init = getattr(client, "send_arm_init", None)
     if callable(send_arm_init) and _policy_runner_actively_controlling(handles, latest):
         try:
@@ -745,6 +823,10 @@ def _send_arm_init_override(
             result = ArmInitCommandResult(False, f"arm init {arms} send failed: {exc}")
         ok, message = _apply_arm_init_result(handles, result, arms=arms)
         if ok:
+            handles["arm_init_route_status"] = {
+                "route": route_label,
+                "detail": route_detail,
+            }
             _optimistic_arm_init_toggle(handles, arms)
             _clear_tcp_target_user_moved(
                 scene_handles,
@@ -755,13 +837,18 @@ def _send_arm_init_override(
                 latest if isinstance(latest, StateSnapshot) else None,
                 stale=bool(handles.get("_state_stale", True)),
             )
-        return ok, message
+        return ok, f"{message}; routed to {route_label} {route_detail}".strip()
+
+    if isinstance(latest, StateSnapshot) and latest.command_source.display_source_id == "policy_runner":
+        return False, "policy_runner owns the command lease but no arm_init control endpoint is available"
 
     if arms == "both":
+        handles["arm_init_route_status"] = {"route": "direct server one-shot", "detail": ""}
         return _send_init_motion_and_reset_targets(safety, scene_handles)
 
     ok, message = safety.send_init_motion_arm(arms)  # type: ignore[arg-type]
     if ok:
+        handles["arm_init_route_status"] = {"route": "direct server one-shot", "detail": ""}
         _clear_tcp_target_user_moved(scene_handles, (arms,))
         message = f"{message}; TCP target will follow current TCP"
     return ok, message
@@ -772,6 +859,23 @@ def _set_button_color(button: Any, color: str) -> None:
         button.color = color
     except Exception:
         pass
+
+
+def _arm_init_display_text(state: str, active: bool) -> str:
+    normalized = str(state or "").strip().lower()
+    if normalized in {"policy", ""} and not active:
+        return "policy 중"
+    if "failed" in normalized:
+        return "init failed"
+    if "cancel" in normalized:
+        return "cancelled"
+    if "done" in normalized:
+        return "init done"
+    if "planning" in normalized:
+        return "init planning"
+    if "executing" in normalized or "requested" in normalized or active:
+        return "InitMotion 중"
+    return normalized or ("InitMotion 중" if active else "policy 중")
 
 
 def _update_arm_init_panel(
@@ -786,13 +890,23 @@ def _update_arm_init_panel(
     policy_active = _policy_runner_control_active(handles, latest)
     store = handles.get("recording_status_store")
     status_stale = isinstance(store, RecordingStatusStore) and store.is_stale(threshold_sec=2.0)
-    left_text = "InitMotion 중" if left_on else "policy 중"
-    right_text = "InitMotion 중" if right_on else "policy 중"
+    left_text = _arm_init_display_text(str(status.get("left_state", "") or ""), left_on)
+    right_text = _arm_init_display_text(str(status.get("right_state", "") or ""), right_on)
     suffix = ""
     if not policy_active:
         suffix = " / policy_runner 상태 없음"
     elif stale or status_stale:
         suffix = " / stale"
+    route = handles.get("arm_init_route_status")
+    if isinstance(route, Mapping):
+        route_label = str(route.get("route", "") or "")
+        route_detail = str(route.get("detail", "") or "")
+    else:
+        route_label, _client, route_detail = _arm_init_control_route(handles, latest)
+    if route_label:
+        suffix += f" / route={route_label}"
+        if route_detail:
+            suffix += f" ({route_detail})"
     error = str(status.get("error", "") or "")
     if error:
         suffix += f" / error={error}"
@@ -4357,6 +4471,10 @@ def main(argv: list[str] | None = None) -> None:
         close_recording_cmd = getattr(handles.get("recording_cmd_client"), "close", None)
         if callable(close_recording_cmd):
             close_recording_cmd()
+        for client in list(getattr(handles.get("recording_cmd_clients"), "values", lambda: [])()):
+            close_client = getattr(client, "close", None)
+            if callable(close_client):
+                close_client()
 
 
 if __name__ == "__main__":

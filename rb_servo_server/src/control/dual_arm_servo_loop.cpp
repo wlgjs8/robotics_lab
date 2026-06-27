@@ -206,6 +206,29 @@ ArmCommand applyPoseTrackSmd(
     return smoothed;
 }
 
+TcpPoseTargetProfileConfig selectTcpPoseTargetProfile(
+    const CartesianControlConfig& config,
+    const std::string& requested_profile,
+    bool* found
+) {
+    const std::string name = requested_profile.empty()
+        ? config.tcp_pose_target_profile_default
+        : requested_profile;
+    for (const TcpPoseTargetProfileConfig& profile : config.tcp_pose_target_profiles) {
+        if (profile.name == name) {
+            if (found) *found = true;
+            return profile;
+        }
+    }
+    if (found) *found = false;
+    TcpPoseTargetProfileConfig fallback;
+    fallback.name = config.tcp_pose_target_profile_default.empty()
+        ? "default"
+        : config.tcp_pose_target_profile_default;
+    fallback.pose_track_smd = config.pose_track_smd;
+    return fallback;
+}
+
 std::string lowerAscii(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
@@ -1344,8 +1367,13 @@ DualArmServoLoop::DualArmServoLoop(
     left_traj_filter_(config.servo, config.safety),
     right_traj_filter_(config.servo, config.safety),
     safety_filter_(config.safety) {
-    left_pose_track_smd_ = SmdPoseTracker(config.cartesian_control.pose_track_smd);
-    right_pose_track_smd_ = SmdPoseTracker(config.cartesian_control.pose_track_smd);
+    bool profile_found = false;
+    const TcpPoseTargetProfileConfig initial_profile =
+        selectTcpPoseTargetProfile(config.cartesian_control, config.cartesian_control.tcp_pose_target_profile_default, &profile_found);
+    left_pose_track_smd_ = SmdPoseTracker(initial_profile.pose_track_smd);
+    right_pose_track_smd_ = SmdPoseTracker(initial_profile.pose_track_smd);
+    left_pose_track_profile_name_ = initial_profile.name;
+    right_pose_track_profile_name_ = initial_profile.name;
     left_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
     right_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
     kinematics_ = kinematics ? std::move(kinematics) : makeKinematicsProvider(config);
@@ -2037,6 +2065,11 @@ void DualArmServoLoop::loopMain() {
 
         ServoTarget safe_target;
         SafetyVerdict safety_verdict = SafetyVerdict::Ok;
+        std::string init_mode_before_left = toString(command.left.mode);
+        std::string init_mode_before_right = toString(command.right.mode);
+        std::string init_mode_after_left = init_mode_before_left;
+        std::string init_mode_after_right = init_mode_before_right;
+        std::string init_non_init_arm_preserved_mode;
         if (!fault_latched_.load()) {
             left_safety_tracking_ = SafetyTrackingTelemetry{};
             right_safety_tracking_ = SafetyTrackingTelemetry{};
@@ -2085,10 +2118,28 @@ void DualArmServoLoop::loopMain() {
             // Collision-free TcpLinearMove: decide Straight (pass through to the exact
             // MoveL) vs Detour (rewrite to a streamed JointTarget collision-free path).
             command = applyCollisionFreeLinearMove(command, left_state, right_state);
+            const ControlMode left_mode_before_init_sequencer = command.left.mode;
+            const ControlMode right_mode_before_init_sequencer = command.right.mode;
+            const bool left_init_before_sequencer =
+                command.left.mode == ControlMode::JointTarget &&
+                command.left.joint_target_profile == JointTargetProfile::InitMotion;
+            const bool right_init_before_sequencer =
+                command.right.mode == ControlMode::JointTarget &&
+                command.right.joint_target_profile == JointTargetProfile::InitMotion;
             // Collision-free JointTarget init_motion profile: rewrite to direct
             // JointTarget waypoints (or hold while planning / on failure), so the
             // trajectory + safety pipeline below is unchanged.
             command = applyInitMotionSequencer(command, left_state, right_state);
+            init_mode_before_left = toString(left_mode_before_init_sequencer);
+            init_mode_before_right = toString(right_mode_before_init_sequencer);
+            init_mode_after_left = toString(command.left.mode);
+            init_mode_after_right = toString(command.right.mode);
+            init_non_init_arm_preserved_mode.clear();
+            if (left_init_before_sequencer != right_init_before_sequencer &&
+                !config_.safety.init_motion_planner.single_arm_freeze_other_arm) {
+                init_non_init_arm_preserved_mode =
+                    left_init_before_sequencer ? toString(command.right.mode) : toString(command.left.mode);
+            }
             const bool motion_requested = commandRequestsMotion(command);
             const ServoTarget desired =
                 computeServoTarget(left_state, right_state, command, filter_dt_sec, &command_verdict);
@@ -2263,6 +2314,13 @@ void DualArmServoLoop::loopMain() {
         sample.left_state = left_state;
         sample.right_state = right_state;
         sample.command = command;
+        sample.left_mode_before_init_sequencer = init_mode_before_left;
+        sample.right_mode_before_init_sequencer = init_mode_before_right;
+        sample.left_mode_after_init_sequencer = init_mode_after_left;
+        sample.right_mode_after_init_sequencer = init_mode_after_right;
+        sample.non_init_arm_preserved_mode = init_non_init_arm_preserved_mode;
+        sample.single_arm_freeze_other_arm =
+            config_.safety.init_motion_planner.single_arm_freeze_other_arm;
         sample.left_sent_q_deg = attempted_target.left_q_target_deg;
         sample.right_sent_q_deg = attempted_target.right_q_target_deg;
         sample.left_send_ok = left_ok;
@@ -2451,19 +2509,48 @@ void DualArmServoLoop::loopMain() {
                 diag.waypoint_index = static_cast<int>(ex.index);
                 diag.waypoint_count = static_cast<int>(ex.waypoints.size());
                 diag.dist_to_goal_deg = std::numeric_limits<double>::quiet_NaN();
+                InitMotionArmDiag left_diag;
+                InitMotionArmDiag right_diag;
+                left_diag.status = ex.left_active ? diag.status : std::string("idle");
+                right_diag.status = ex.right_active ? diag.status : std::string("idle");
+                left_diag.fail_mode = diag.fail_mode;
+                right_diag.fail_mode = diag.fail_mode;
+                left_diag.message = ex.left_active ? diag.message : std::string();
+                right_diag.message = ex.right_active ? diag.message : std::string();
+                left_diag.waypoint_index = static_cast<int>(ex.index);
+                right_diag.waypoint_index = static_cast<int>(ex.index);
+                left_diag.waypoint_count = static_cast<int>(ex.waypoints.size());
+                right_diag.waypoint_count = static_cast<int>(ex.waypoints.size());
+                left_diag.dist_to_goal_deg = std::numeric_limits<double>::quiet_NaN();
+                right_diag.dist_to_goal_deg = std::numeric_limits<double>::quiet_NaN();
                 if (!ex.waypoints.empty() &&
                     (ex.status == InitMotionStatus::Executing ||
                      ex.status == InitMotionStatus::Done ||
                      ex.status == InitMotionStatus::Failed)) {
                     const auto& goal_wp = ex.waypoints.back();
                     double dist = 0.0;
+                    double left_dist = 0.0;
+                    double right_dist = 0.0;
                     for (int i = 0; i < kDof; ++i) {
-                        dist = std::max(dist, std::abs(left_prev_sent_q_deg_[i] - goal_wp.first[i]));
-                        dist = std::max(dist, std::abs(right_prev_sent_q_deg_[i] - goal_wp.second[i]));
+                        left_dist = std::max(left_dist, std::abs(left_prev_sent_q_deg_[i] - goal_wp.first[i]));
+                        right_dist = std::max(right_dist, std::abs(right_prev_sent_q_deg_[i] - goal_wp.second[i]));
+                        if (ex.left_active) {
+                            dist = std::max(dist, left_dist);
+                        }
+                        if (ex.right_active) {
+                            dist = std::max(dist, right_dist);
+                        }
                     }
                     diag.dist_to_goal_deg = dist;
+                    if (ex.left_active) left_diag.dist_to_goal_deg = left_dist;
+                    if (ex.right_active) right_diag.dist_to_goal_deg = right_dist;
                 }
-                latest_snapshot_.init_motion = std::move(diag);
+                sample.init_motion = diag;
+                sample.init_motion_left = left_diag;
+                sample.init_motion_right = right_diag;
+                latest_snapshot_.init_motion = diag;
+                latest_snapshot_.init_motion_left = left_diag;
+                latest_snapshot_.init_motion_right = right_diag;
             }
             latest_snapshot_.floor_constraint_enabled = floorConstraintActive();
             latest_snapshot_.floor_constraint_monitor_only = config_.safety.floor_constraint.monitor_only;
@@ -3078,6 +3165,17 @@ void DualArmServoLoop::clearLatchedCartesianTarget(ArmId arm_id) {
 void DualArmServoLoop::mergeAbcTelemetry(
     CartesianSolveTelemetry& solve, const AbcTelemetry& abc, int output_ma_window) {
     solve.smd_active = abc.smd_active;
+    solve.tcp_target_profile = abc.tcp_target_profile;
+    solve.tcp_target_profile_found = abc.tcp_target_profile_found;
+    solve.smd_profile_nf_linear_hz = abc.smd_profile.natural_frequency_linear_hz;
+    solve.smd_profile_nf_angular_hz = abc.smd_profile.natural_frequency_angular_hz;
+    solve.smd_profile_velocity_feedforward = abc.smd_profile.velocity_feedforward;
+    solve.smd_profile_max_linear_velocity_m_s = abc.smd_profile.max_linear_velocity_m_s;
+    solve.smd_profile_max_linear_accel_m_s2 = abc.smd_profile.max_linear_accel_m_s2;
+    solve.smd_profile_max_angular_velocity_rad_s = abc.smd_profile.max_angular_velocity_rad_s;
+    solve.smd_profile_max_angular_accel_rad_s2 = abc.smd_profile.max_angular_accel_rad_s2;
+    solve.smd_profile_max_goal_lead_m = abc.max_smd_goal_lead_m;
+    solve.smd_profile_max_goal_lead_rad = abc.max_smd_goal_lead_rad;
     solve.smd_goal_stand = abc.smd_goal_stand;
     solve.smd_ref_stand = abc.smd_ref_stand;
     const SmdStepInfo& info = abc.smd_step_info;
@@ -3250,9 +3348,31 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         clamp_command_pose(effective_command.left);
         clamp_command_pose(effective_command.right);
 
+        bool left_profile_found = false;
+        bool right_profile_found = false;
+        const TcpPoseTargetProfileConfig left_tcp_profile = selectTcpPoseTargetProfile(
+            config_.cartesian_control,
+            effective_command.tcp_target_profile,
+            &left_profile_found
+        );
+        const TcpPoseTargetProfileConfig right_tcp_profile = selectTcpPoseTargetProfile(
+            config_.cartesian_control,
+            effective_command.tcp_target_profile,
+            &right_profile_found
+        );
+        if (effective_command.left.mode == ControlMode::TcpPoseTarget &&
+            left_pose_track_profile_name_ != left_tcp_profile.name) {
+            left_pose_track_smd_ = SmdPoseTracker(left_tcp_profile.pose_track_smd);
+            left_pose_track_profile_name_ = left_tcp_profile.name;
+        }
+        if (effective_command.right.mode == ControlMode::TcpPoseTarget &&
+            right_pose_track_profile_name_ != right_tcp_profile.name) {
+            right_pose_track_smd_ = SmdPoseTracker(right_tcp_profile.pose_track_smd);
+            right_pose_track_profile_name_ = right_tcp_profile.name;
+        }
         const ArmCommand left_pose_track_command = applyPoseTrackSmd(
             effective_command.left,
-            config_.cartesian_control.pose_track_smd,
+            left_tcp_profile.pose_track_smd,
             &left_pose_track_smd_,
             kinematics_,
             config_.left_mount,
@@ -3261,7 +3381,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         );
         const ArmCommand right_pose_track_command = applyPoseTrackSmd(
             effective_command.right,
-            config_.cartesian_control.pose_track_smd,
+            right_tcp_profile.pose_track_smd,
             &right_pose_track_smd_,
             kinematics_,
             config_.right_mount,
@@ -3272,8 +3392,18 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         // Patch 4: capture SMD (B-stage) telemetry right after the step, before any
         // later cartesian-solve return path can reset the per-arm solve telemetry.
         // Merged into the published cartesian_solve sample in loopMain.
-        auto capture_smd_abc = [](const SmdPoseTracker& tracker, AbcTelemetry& abc) {
+        auto capture_smd_abc = [](
+            const SmdPoseTracker& tracker,
+            const TcpPoseTargetProfileConfig& profile,
+            bool profile_found,
+            AbcTelemetry& abc
+        ) {
             abc.smd_active = tracker.active();
+            abc.tcp_target_profile = profile.name;
+            abc.tcp_target_profile_found = profile_found;
+            abc.smd_profile = profile.pose_track_smd;
+            abc.max_smd_goal_lead_m = profile.max_smd_goal_lead_m;
+            abc.max_smd_goal_lead_rad = profile.max_smd_goal_lead_rad;
             if (tracker.active()) {
                 abc.smd_ref_stand = tracker.currentPose();
                 abc.smd_goal_stand = tracker.goalPose();
@@ -3285,8 +3415,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 abc.smd_step_info = SmdStepInfo{};
             }
         };
-        capture_smd_abc(left_pose_track_smd_, left_abc_telemetry_);
-        capture_smd_abc(right_pose_track_smd_, right_abc_telemetry_);
+        capture_smd_abc(left_pose_track_smd_, left_tcp_profile, left_profile_found, left_abc_telemetry_);
+        capture_smd_abc(right_pose_track_smd_, right_tcp_profile, right_profile_found, right_abc_telemetry_);
 
         const RunMode left_cartesian_compute_run_mode =
             cartesianComputationRunModeForArm(config_, effective_command.left);
@@ -4872,21 +5002,35 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         command.right.joint_target_profile == JointTargetProfile::InitMotion;
     const bool is_init = left_init || right_init;
 
-    // Rewrite both arms to absolute direct JointTargets; the downstream pipeline
-    // never sees the init_motion profile marker.
-    const auto as_joint_target = [](DualArmCommand& c, const JointArray& l, const JointArray& r) {
-        c.left.mode = ControlMode::JointTarget;
-        c.right.mode = ControlMode::JointTarget;
-        c.left.joint_target_profile = JointTargetProfile::Direct;
-        c.right.joint_target_profile = JointTargetProfile::Direct;
-        c.left.q_target_deg = l;
-        c.right.q_target_deg = r;
-        c.left.has_joint_target = true;
-        c.right.has_joint_target = true;
+    auto& ex = init_motion_exec_;
+    const bool freeze_other_arm = config_.safety.init_motion_planner.single_arm_freeze_other_arm;
+
+    // Rewrite only the arm(s) covered by the active init_motion profile. The
+    // downstream pipeline never sees the init_motion profile marker, while a
+    // non-selected arm can keep its original TcpPoseTarget/flow command.
+    const auto set_joint_target = [](ArmCommand& arm, const JointArray& q) {
+        arm.mode = ControlMode::JointTarget;
+        arm.joint_target_profile = JointTargetProfile::Direct;
+        arm.q_target_deg = q;
+        arm.has_joint_target = true;
     };
-    const auto as_hold = [](DualArmCommand& c) {
-        c.left.mode = ControlMode::Hold;
-        c.right.mode = ControlMode::Hold;
+    const auto rewrite_selected = [&](DualArmCommand& c, const JointArray& l, const JointArray& r) {
+        if (ex.left_active || freeze_other_arm) {
+            set_joint_target(c.left, l);
+        }
+        if (ex.right_active || freeze_other_arm) {
+            set_joint_target(c.right, r);
+        }
+    };
+    const auto hold_selected = [&](DualArmCommand& c) {
+        if (ex.left_active || freeze_other_arm) {
+            c.left.mode = ControlMode::Hold;
+            c.left.joint_target_profile = JointTargetProfile::Direct;
+        }
+        if (ex.right_active || freeze_other_arm) {
+            c.right.mode = ControlMode::Hold;
+            c.right.joint_target_profile = JointTargetProfile::Direct;
+        }
     };
     const auto reached = [](const JointArray& a, const JointArray& b, double tol) {
         for (int i = 0; i < kDof; ++i) {
@@ -4894,8 +5038,6 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         }
         return true;
     };
-
-    auto& ex = init_motion_exec_;
     // A plan that has begun (planning or streaming) is a committed go-to-init move.
     const bool sequence_active = ex.status == InitMotionStatus::Planning ||
                                  ex.status == InitMotionStatus::Executing;
@@ -4938,7 +5080,9 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
     // Planner disabled -> fall back to a direct JointTarget to the requested pose;
     // the reactive barrier + floor still guard each tick.
     if (is_init && !init_motion_planner_) {
-        as_joint_target(
+        ex.left_active = left_init;
+        ex.right_active = right_init;
+        rewrite_selected(
             command,
             left_init ? command.left.q_target_deg : left_prev_sent_q_deg_,
             right_init ? command.right.q_target_deg : right_prev_sent_q_deg_
@@ -4955,10 +5099,14 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         const JointArray target_right = right_init ? command.right.q_target_deg : right_prev_sent_q_deg_;
         const bool new_target = !ex.has_target ||
             !reached(target_left, ex.target_left, 1e-6) ||
-            !reached(target_right, ex.target_right, 1e-6);
+            !reached(target_right, ex.target_right, 1e-6) ||
+            ex.left_active != left_init ||
+            ex.right_active != right_init;
         const auto launch_plan = [&]() {
             ex.target_left = target_left;
             ex.target_right = target_right;
+            ex.left_active = left_init;
+            ex.right_active = right_init;
             ex.has_target = true;
             ex.waypoints.clear();
             ex.index = 0;
@@ -5060,16 +5208,38 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         case InitMotionStatus::Executing: {
             bool done = false;
             // Follow the gradient-escape head precisely (escape_waypoints), then pure-pursuit.
-            const std::pair<JointArray, JointArray> wp =
-                pursueWaypoints(ex.waypoints, ex.index, done, ex.escape_waypoints);
+            JointArray pursue_left = left_prev_sent_q_deg_;
+            JointArray pursue_right = right_prev_sent_q_deg_;
+            if (!ex.left_active && !freeze_other_arm) {
+                pursue_left = ex.target_left;
+            }
+            if (!ex.right_active && !freeze_other_arm) {
+                pursue_right = ex.target_right;
+            }
+            PursuitStep pursuit =
+                pursueWaypointsStep(
+                    ex.waypoints,
+                    pursue_left,
+                    pursue_right,
+                    ex.index,
+                    config_.safety.init_motion_planner.waypoint_tol_deg,
+                    config_.safety.init_motion_planner.execution_lookahead_deg,
+                    ex.escape_waypoints
+                );
+            std::pair<JointArray, JointArray> wp = {pursuit.left, pursuit.right};
+            done = pursuit.done;
             if (!ex.waypoints.empty()) {
                 // Progress = max-joint distance from the current sent pose to the final
                 // waypoint. Closing on it (by > a noise floor) refreshes the stall timer.
                 const auto& goal_wp = ex.waypoints.back();
                 double dist = 0.0;
                 for (int i = 0; i < kDof; ++i) {
-                    dist = std::max(dist, std::abs(left_prev_sent_q_deg_[i] - goal_wp.first[i]));
-                    dist = std::max(dist, std::abs(right_prev_sent_q_deg_[i] - goal_wp.second[i]));
+                    if (ex.left_active || freeze_other_arm) {
+                        dist = std::max(dist, std::abs(left_prev_sent_q_deg_[i] - goal_wp.first[i]));
+                    }
+                    if (ex.right_active || freeze_other_arm) {
+                        dist = std::max(dist, std::abs(right_prev_sent_q_deg_[i] - goal_wp.second[i]));
+                    }
                 }
                 const uint64_t now_ns = nowSteadyNs();
                 if (dist < ex.best_dist_deg - 0.05) {
@@ -5092,19 +5262,19 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                 ex.message = "done";
                 std::cerr << "[INFO] JointTarget init_motion: reached init pose\n";
             }
-            as_joint_target(command, wp.first, wp.second);
+            rewrite_selected(command, wp.first, wp.second);
             break;
         }
         case InitMotionStatus::Done:
             // Hold at the (planned) goal so the arm resists drift until the command
             // expires or the operator issues something else.
-            as_joint_target(command, ex.target_left, ex.target_right);
+            rewrite_selected(command, ex.target_left, ex.target_right);
             break;
         case InitMotionStatus::Planning:
         case InitMotionStatus::Failed:
         default:
             // Hold in place: while planning, or fail-closed after a planning failure.
-            as_hold(command);
+            hold_selected(command);
             break;
     }
     return command;

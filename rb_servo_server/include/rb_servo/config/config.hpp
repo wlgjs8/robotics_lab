@@ -596,6 +596,9 @@ struct InitMotionPlannerConfig {
     // seconds it gives up (Failed -> hold), so a permanently barrier-blocked corner
     // cannot hold motion authority forever.
     double execution_timeout_sec = 30.0;
+    // false: single-arm InitMotion preserves the non-selected arm command so
+    // flow-infer can keep controlling it; true: hold/rewrite the other arm too.
+    bool single_arm_freeze_other_arm = false;
 };
 
 struct SafetyConfig {
@@ -794,6 +797,16 @@ struct PoseTrackSmdConfig {
     bool velocity_feedforward = false;
 };
 
+struct TcpPoseTargetProfileConfig {
+    std::string name = "default";
+    PoseTrackSmdConfig pose_track_smd;
+    // Server-side backlog cap for future enforcement/telemetry. A value <= 0
+    // leaves clamping disabled; source-side lead clamps remain the primary
+    // UMI control-quality limiter.
+    double max_smd_goal_lead_m = 0.0;
+    double max_smd_goal_lead_rad = 0.0;
+};
+
 enum class CartesianLimitPolicy {
     Clamp,
     Reject
@@ -827,6 +840,8 @@ struct CartesianControlConfig {
         CartesianControllerSimulationStateSource::Actual;
     LinearMoveConfig linear_move;
     PoseTrackSmdConfig pose_track_smd;
+    std::string tcp_pose_target_profile_default = "default";
+    std::vector<TcpPoseTargetProfileConfig> tcp_pose_target_profiles;
 };
 
 // Bridge to the out-of-process gripper_server (docs/plans/gripper_server_design.md).

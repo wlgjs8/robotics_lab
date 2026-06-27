@@ -19,6 +19,10 @@ from policy_runner.action_sources.tcp_pose_target import (
 )
 from policy_runner.robot_state_client import StateSnapshot, parse_udp_endpoint
 from policy_runner.servo_command_client import CommandIntent
+from policy_runner.config import (
+    UmiTargetLeadClampConfig,
+    UmiTcpPoseTargetConditioningConfig,
+)
 
 
 # Default: no receiver-side offset — the pika publisher already streams the
@@ -37,6 +41,15 @@ IDENTITY_R_ALIGN = (
     0.0,
     1.0,
 )
+TCP_TARGET_PROFILE = "umi_large_smooth"
+
+
+def _legacy_conditioning_config() -> UmiTcpPoseTargetConditioningConfig:
+    return UmiTcpPoseTargetConditioningConfig(enable=False, mode="none")
+
+
+def _legacy_lead_clamp_config() -> UmiTargetLeadClampConfig:
+    return UmiTargetLeadClampConfig(enable=False)
 
 
 @dataclass(frozen=True)
@@ -81,6 +94,15 @@ class _ArmTeleopState:
     # Monotonic time the deadman first dropped while still armed (None when the
     # clutch is engaged). Drives the brief-drop grace window in _target_for_side.
     deadman_drop_mono: float | None = None
+    conditioner_engaged: bool = False
+    last_raw_target_stand: tuple[float, ...] | None = None
+    last_emitted_target_stand: tuple[float, ...] | None = None
+    schedule_start_target_stand: tuple[float, ...] | None = None
+    schedule_end_target_stand: tuple[float, ...] | None = None
+    schedule_start_time_ns: int | None = None
+    schedule_end_time_ns: int | None = None
+    last_fresh_sample_time_ns: int | None = None
+    last_fresh_seq: int = 0
 
 
 class _PoseMovingAverage:
@@ -169,7 +191,10 @@ class _TeleopStepLogger:
             "age_ms=<수신지연>  dt_ms=<직전 fresh 샘플간격>  "
             "has=<reader가 샘플 반환?>  fresh=<신규 packet?>  seq=<수신 packet 카운터>  "
             "raw_mm/raw_deg=<클램프전 요구 변위>  app_mm/app_deg=<적용 변위>  "
-            "clamp=<xyz|rpy 포화축>  db=<deadband동결>  tokens(GAP/REUSE/CLAMP/DB)\n"
+            "clamp=<xyz|rpy 포화축>  db=<deadband동결>  "
+            "profile cond cond_active cond_alpha cond_horizon_ms cond_elapsed_ms "
+            "fresh_packet reuse_tick emitted_delta raw_to_emitted lead_clamp "
+            "tokens(GAP/REUSE/CLAMP/DB)\n"
         )
 
     def _dt_ms(self, side: str, mono: float) -> float:
@@ -203,7 +228,9 @@ class _TeleopStepLogger:
         deadband_angular_rad: float,
         max_linear_step_m: float,
         max_angular_step_rad: float,
+        conditioner: Mapping[str, Any] | None = None,
     ) -> None:
+        conditioner = conditioner or {}
         age = (now_monotonic - sample_mono) * 1000.0
         # dt only advances on a genuinely fresh packet, so it reports the real
         # publisher inter-packet interval (a reuse step shares sample_mono and
@@ -248,8 +275,28 @@ class _TeleopStepLogger:
             f"{_kst_now().strftime('%H:%M:%S.%f')[:-3]}  side={side[0].upper()}  st={st}  "
             f"age_ms={age:6.1f}  dt_ms={dt:6.1f}  "
             f"has={int(has_sample)}  fresh={int(fresh_packet)}  seq={sample_seq}  "
+            f"profile={conditioner.get('profile', TCP_TARGET_PROFILE)}  "
+            f"cond={conditioner.get('cond', 'none')}  "
+            f"cond_active={int(bool(conditioner.get('cond_active', False)))}  "
+            f"cond_alpha={float(conditioner.get('cond_alpha', 0.0)):5.3f}  "
+            f"cond_horizon_ms={float(conditioner.get('cond_horizon_ms', 0.0)):6.2f}  "
+            f"cond_elapsed_ms={float(conditioner.get('cond_elapsed_ms', 0.0)):6.2f}  "
+            f"fresh_packet={int(bool(conditioner.get('fresh_packet', fresh_packet)))}  "
+            f"reuse_tick={int(bool(conditioner.get('reuse_tick', not fresh_packet)))}  "
             f"raw_mm={raw_lin * 1000:6.2f} raw_deg={math.degrees(raw_ang):5.2f}  "
             f"app_mm={app_lin * 1000:6.2f} app_deg={math.degrees(app_ang):5.2f}  "
+            f"emitted_delta_mm={float(conditioner.get('emitted_delta_mm', app_lin * 1000.0)):6.2f} "
+            f"emitted_delta_deg={float(conditioner.get('emitted_delta_deg', math.degrees(app_ang))):5.2f}  "
+            f"raw_to_emitted_mm={float(conditioner.get('raw_to_emitted_mm', 0.0)):6.2f} "
+            f"raw_to_emitted_deg={float(conditioner.get('raw_to_emitted_deg', 0.0)):5.2f}  "
+            f"lead_before_mm={float(conditioner.get('lead_before_mm', -1.0)):6.2f} "
+            f"lead_before_deg={float(conditioner.get('lead_before_deg', -1.0)):5.2f}  "
+            f"lead_after_mm={float(conditioner.get('lead_after_mm', -1.0)):6.2f} "
+            f"lead_after_deg={float(conditioner.get('lead_after_deg', -1.0)):5.2f}  "
+            f"lead_clamp={int(bool(conditioner.get('lead_clamp', False)))}  "
+            f"lead_clamp_axes={conditioner.get('lead_clamp_axes', '')}  "
+            f"schedule_reset={int(bool(conditioner.get('schedule_reset', False)))}  "
+            f"stale_stop={int(bool(conditioner.get('stale_stop', False)))}  "
             f"clamp={clamp}  db={int(db_hit)}{tokens}\n"
         )
 
@@ -283,6 +330,8 @@ class UmiDualCartesianActionSource:
         sample_stale_timeout_sec: float | None = None,
         timeout_sec: float = 0.05,
         deadman_release_grace_sec: float = 0.2,
+        tcp_pose_target_conditioning: UmiTcpPoseTargetConditioningConfig | None = None,
+        target_lead_clamp: UmiTargetLeadClampConfig | None = None,
     ):
         if sample_hold_timeout_sec is not None and sample_stale_timeout_sec is not None:
             raise ValueError(
@@ -320,6 +369,10 @@ class UmiDualCartesianActionSource:
         self.sample_hold_timeout_sec = float(sample_hold_timeout_sec)
         self.timeout_sec = float(timeout_sec)
         self.deadman_release_grace_sec = float(deadman_release_grace_sec)
+        self.tcp_pose_target_conditioning = (
+            tcp_pose_target_conditioning if tcp_pose_target_conditioning is not None else _legacy_conditioning_config()
+        )
+        self.target_lead_clamp = target_lead_clamp if target_lead_clamp is not None else _legacy_lead_clamp_config()
         self.input_moving_average_window = int(input_moving_average_window)
         self._left = _ArmTeleopState()
         self._right = _ArmTeleopState()
@@ -330,7 +383,7 @@ class UmiDualCartesianActionSource:
         self._step_log = _TeleopStepLogger(log_path) if log_path else None
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
-        left_pose, left_gripper, left_changed = self._target_for_side(
+        left_pose, left_gripper, left_changed, left_diag = self._target_for_side(
             "left",
             self.left_reader,
             self._left,
@@ -338,7 +391,7 @@ class UmiDualCartesianActionSource:
             snapshot,
             now_monotonic,
         )
-        right_pose, right_gripper, right_changed = self._target_for_side(
+        right_pose, right_gripper, right_changed, right_diag = self._target_for_side(
             "right",
             self.right_reader,
             self._right,
@@ -348,13 +401,28 @@ class UmiDualCartesianActionSource:
         )
         if not left_changed and not right_changed:
             return None
-        return tcp_pose_target_stand_intent(
+        metadata = {
+            "action_source": "umi_dual_cartesian",
+            "source_conditioning_mode": self._conditioning_mode(),
+        }
+        sample_ns = max(
+            [int(v) for v in (left_diag.get("input_sample_monotonic_ns"), right_diag.get("input_sample_monotonic_ns")) if v],
+            default=0,
+        )
+        if sample_ns:
+            metadata["input_sample_monotonic_ns"] = sample_ns
+        intent = tcp_pose_target_stand_intent(
             left=left_pose,
             right=right_pose,
             left_gripper=left_gripper,
             right_gripper=right_gripper,
             timeout_sec=self.timeout_sec,
+            tcp_target_profile=TCP_TARGET_PROFILE,
+            metadata=metadata,
         )
+        _annotate_arm_payload(intent.left, left_diag)
+        _annotate_arm_payload(intent.right, right_diag)
+        return intent
 
     @property
     def engaged(self) -> bool:
@@ -385,7 +453,8 @@ class UmiDualCartesianActionSource:
         moving_average: _PoseMovingAverage,
         snapshot: StateSnapshot,
         now_monotonic: float,
-    ) -> tuple[tuple[float, ...] | None, float | None, bool]:
+    ) -> tuple[tuple[float, ...] | None, float | None, bool, dict[str, Any]]:
+        diag = _conditioner_diag(self._conditioning_mode())
         sample = reader.read()
         # has_sample: the reader returned data at all (fresh packet OR its own
         # cached latest replayed between packets).
@@ -406,10 +475,11 @@ class UmiDualCartesianActionSource:
                         self._step_log.log_event(
                             side, "HOLD_TIMEOUT",
                             sample.monotonic if sample is not None else None, now_monotonic)
+                    diag["stale_stop"] = True
                     _clear_latches(state)
-                    return None, None, True
+                    return None, None, True, diag
                 _clear_latches(state)
-                return None, None, False
+                return None, None, False, diag
         else:
             state.last_sample = sample
 
@@ -417,14 +487,19 @@ class UmiDualCartesianActionSource:
             if state.was_armed:
                 if self._step_log is not None:
                     self._step_log.log_event(side, "STALE", sample.monotonic, now_monotonic)
+                diag["stale_stop"] = True
                 _clear_latches(state)
-                return None, None, True
+                return None, None, True, diag
             _clear_latches(state)
-            return None, None, False
+            return None, None, False, diag
 
         # Input conditioning before any latch/compose math: the moving average
         # buffer also fills while the deadman is released (warm at engage).
         sample = moving_average.filter(sample)
+        diag["fresh_packet"] = fresh_packet
+        diag["reuse_tick"] = not fresh_packet
+        diag["input_sample_monotonic_ns"] = int(sample.monotonic * 1_000_000_000)
+        diag["input_age_ms"] = (now_monotonic - sample.monotonic) * 1000.0
 
         if not sample.deadman:
             if state.was_armed:
@@ -443,13 +518,14 @@ class UmiDualCartesianActionSource:
                     if now_monotonic - state.deadman_drop_mono < self.deadman_release_grace_sec:
                         if self._step_log is not None:
                             self._step_log.log_event(side, "HOLD", sample.monotonic, now_monotonic)
-                        return state.previous_target, _gripper_percent(sample.gripper), True
+                        held = state.last_emitted_target_stand or state.previous_target
+                        return held, _gripper_percent(sample.gripper), True, diag
                 if self._step_log is not None:
                     self._step_log.log_event(side, "RELEASE", sample.monotonic, now_monotonic)
                 _clear_latches(state)
-                return None, _gripper_percent(sample.gripper), True
+                return None, _gripper_percent(sample.gripper), True, diag
             _clear_latches(state)
-            return None, None, False
+            return None, None, False, diag
 
         # Clutch is engaged this step: reset the brief-drop grace window so a
         # later spurious drop starts a fresh grace measurement.
@@ -461,11 +537,14 @@ class UmiDualCartesianActionSource:
             arm_init = _tcp_stand_transform(snapshot, side)
             if arm_init is None:
                 _clear_latches(state)
-                return None, None, False
+                return None, None, False, diag
             state.arm_init = arm_init
             state.pika_init = pika_now
             state.previous_target = _transform_to_pose6(arm_init)
             state.was_armed = True
+            if self.tcp_pose_target_conditioning.reset_on_engage:
+                _reset_conditioner(state, state.previous_target, now_monotonic)
+                diag["schedule_reset"] = True
 
         assert state.arm_init is not None
         assert state.pika_init is not None
@@ -476,7 +555,23 @@ class UmiDualCartesianActionSource:
         prev_target = state.previous_target
         prev_deadband = state.deadband_target
         deadband_pose6 = self._apply_target_deadband(state, raw_pose6)
-        pose6 = self._clamp_against_previous(state, deadband_pose6)
+        raw_target_pose6 = self._clamp_against_previous(state, deadband_pose6)
+        pose6 = self._condition_pose_target(
+            state,
+            raw_target_pose6,
+            sample=sample,
+            fresh_packet=fresh_packet,
+            now_monotonic=now_monotonic,
+            diag=diag,
+        )
+        pose6 = self._apply_target_lead_clamp(
+            state,
+            pose6,
+            snapshot=snapshot,
+            side=side,
+            diag=diag,
+        )
+        _update_delta_diag(prev_target, raw_target_pose6, pose6, diag)
         if self._step_log is not None:
             self._step_log.log_step(
                 side,
@@ -495,9 +590,11 @@ class UmiDualCartesianActionSource:
                 deadband_angular_rad=self.deadband_angular_rad,
                 max_linear_step_m=self.max_linear_step_m,
                 max_angular_step_rad=self.max_angular_step_rad,
+                conditioner=diag,
             )
         state.previous_target = pose6
-        return pose6, _gripper_percent(sample.gripper), True
+        state.last_emitted_target_stand = pose6
+        return pose6, _gripper_percent(sample.gripper), True, diag
 
     def _apply_axis_signs(self, delta: _Transform) -> _Transform:
         """Mirror the latched relative delta per axis.
@@ -577,6 +674,119 @@ class UmiDualCartesianActionSource:
             _wrap_pi(previous[4] + clamped[4]),
             _wrap_pi(previous[5] + clamped[5]),
         )
+
+    def _conditioning_mode(self) -> str:
+        config = self.tcp_pose_target_conditioning
+        if not config.enable or config.mode == "none":
+            return "none"
+        return config.mode
+
+    def _condition_pose_target(
+        self,
+        state: _ArmTeleopState,
+        raw_target_pose6: tuple[float, ...],
+        *,
+        sample: UmiSample,
+        fresh_packet: bool,
+        now_monotonic: float,
+        diag: dict[str, Any],
+    ) -> tuple[float, ...]:
+        config = self.tcp_pose_target_conditioning
+        if not config.enable or config.mode != "foh_se3":
+            state.last_raw_target_stand = raw_target_pose6
+            state.last_emitted_target_stand = raw_target_pose6
+            return raw_target_pose6
+
+        now_ns = int(now_monotonic * 1_000_000_000)
+        sample_ns = int(sample.monotonic * 1_000_000_000)
+        if not state.conditioner_engaged:
+            anchor = state.last_emitted_target_stand or state.previous_target or raw_target_pose6
+            _reset_conditioner(state, anchor, now_monotonic)
+            diag["schedule_reset"] = True
+
+        if fresh_packet:
+            horizon_sec = config.default_interpolation_horizon_sec
+            if state.last_fresh_sample_time_ns is not None and sample_ns > state.last_fresh_sample_time_ns:
+                horizon_sec = (sample_ns - state.last_fresh_sample_time_ns) / 1_000_000_000.0
+            horizon_sec = max(
+                config.min_interpolation_horizon_sec,
+                min(config.max_interpolation_horizon_sec, horizon_sec),
+            )
+            start = state.last_emitted_target_stand or state.previous_target or raw_target_pose6
+            state.schedule_start_target_stand = start
+            state.schedule_end_target_stand = raw_target_pose6
+            state.schedule_start_time_ns = now_ns
+            state.schedule_end_time_ns = now_ns + max(1, int(horizon_sec * 1_000_000_000))
+            state.last_fresh_sample_time_ns = sample_ns
+            state.last_fresh_seq = sample.seq
+            state.last_raw_target_stand = raw_target_pose6
+
+        if (
+            state.schedule_start_target_stand is None
+            or state.schedule_end_target_stand is None
+            or state.schedule_start_time_ns is None
+            or state.schedule_end_time_ns is None
+        ):
+            emitted = state.last_emitted_target_stand or raw_target_pose6
+            state.last_emitted_target_stand = emitted
+            return emitted
+
+        duration_ns = max(1, state.schedule_end_time_ns - state.schedule_start_time_ns)
+        elapsed_ns = max(0, now_ns - state.schedule_start_time_ns)
+        alpha = min(1.0, elapsed_ns / duration_ns)
+        emitted = _interpolate_pose6_se3(
+            state.schedule_start_target_stand,
+            state.schedule_end_target_stand,
+            alpha,
+        )
+        state.last_emitted_target_stand = emitted
+        diag["cond_active"] = alpha < 1.0
+        diag["cond_alpha"] = alpha
+        diag["cond_horizon_ms"] = duration_ns / 1_000_000.0
+        diag["cond_elapsed_ms"] = elapsed_ns / 1_000_000.0
+        if alpha >= 1.0:
+            state.schedule_start_target_stand = None
+            state.schedule_end_target_stand = None
+            state.schedule_start_time_ns = None
+            state.schedule_end_time_ns = None
+        return emitted
+
+    def _apply_target_lead_clamp(
+        self,
+        state: _ArmTeleopState,
+        pose6: tuple[float, ...],
+        *,
+        snapshot: StateSnapshot,
+        side: str,
+        diag: dict[str, Any],
+    ) -> tuple[float, ...]:
+        config = self.target_lead_clamp
+        ref = _tcp_stand_transform(snapshot, side)
+        if ref is None:
+            return pose6
+        ref_pose6 = _transform_to_pose6(ref)
+        lead_before_m, lead_before_rad = _pose6_distance(ref_pose6, pose6)
+        diag["lead_before_mm"] = lead_before_m * 1000.0
+        diag["lead_before_deg"] = math.degrees(lead_before_rad)
+        if not config.enable:
+            diag["lead_after_mm"] = diag["lead_before_mm"]
+            diag["lead_after_deg"] = diag["lead_before_deg"]
+            return pose6
+        clamped, axes = _clamp_pose6_lead(
+            ref_pose6,
+            pose6,
+            max_translation_m=config.max_target_lead_m,
+            max_rotation_rad=config.max_target_lead_rad,
+        )
+        lead_after_m, lead_after_rad = _pose6_distance(ref_pose6, clamped)
+        diag["lead_after_mm"] = lead_after_m * 1000.0
+        diag["lead_after_deg"] = math.degrees(lead_after_rad)
+        if axes:
+            diag["lead_clamp"] = True
+            diag["lead_clamp_axes"] = axes
+            if config.rebase_conditioner_on_clamp:
+                _rebase_conditioner(state, clamped)
+        return clamped
 
 
 class MockUmiPoseReader:
@@ -697,6 +907,114 @@ def _clear_latches(state: _ArmTeleopState) -> None:
     state.was_armed = False
     state.deadband_target = None
     state.deadman_drop_mono = None
+    _reset_conditioner(state, None, 0.0)
+
+
+def _reset_conditioner(
+    state: _ArmTeleopState,
+    anchor_pose6: tuple[float, ...] | None,
+    now_monotonic: float,
+) -> None:
+    now_ns = int(now_monotonic * 1_000_000_000)
+    state.conditioner_engaged = anchor_pose6 is not None
+    state.last_raw_target_stand = anchor_pose6
+    state.last_emitted_target_stand = anchor_pose6
+    state.schedule_start_target_stand = anchor_pose6
+    state.schedule_end_target_stand = anchor_pose6
+    state.schedule_start_time_ns = now_ns if anchor_pose6 is not None else None
+    state.schedule_end_time_ns = now_ns if anchor_pose6 is not None else None
+    state.last_fresh_sample_time_ns = None
+    state.last_fresh_seq = 0
+
+
+def _rebase_conditioner(state: _ArmTeleopState, pose6: tuple[float, ...]) -> None:
+    state.conditioner_engaged = True
+    state.last_raw_target_stand = pose6
+    state.last_emitted_target_stand = pose6
+    state.schedule_start_target_stand = None
+    state.schedule_end_target_stand = None
+    state.schedule_start_time_ns = None
+    state.schedule_end_time_ns = None
+
+
+def _conditioner_diag(mode: str) -> dict[str, Any]:
+    return {
+        "profile": TCP_TARGET_PROFILE,
+        "cond": mode,
+        "cond_active": False,
+        "cond_alpha": 0.0,
+        "cond_horizon_ms": 0.0,
+        "cond_elapsed_ms": 0.0,
+        "fresh_packet": False,
+        "reuse_tick": False,
+        "raw_delta_mm": 0.0,
+        "raw_delta_deg": 0.0,
+        "emitted_delta_mm": 0.0,
+        "emitted_delta_deg": 0.0,
+        "raw_to_emitted_mm": 0.0,
+        "raw_to_emitted_deg": 0.0,
+        "lead_before_mm": -1.0,
+        "lead_before_deg": -1.0,
+        "lead_after_mm": -1.0,
+        "lead_after_deg": -1.0,
+        "lead_clamp": False,
+        "lead_clamp_axes": "",
+        "schedule_reset": False,
+        "stale_stop": False,
+    }
+
+
+def _annotate_arm_payload(payload: dict[str, Any] | None, diag: Mapping[str, Any]) -> None:
+    if not payload or payload.get("mode") != "TcpPoseTarget":
+        return
+    for key in (
+        "input_sample_monotonic_ns",
+        "input_age_ms",
+        "fresh_packet",
+        "reuse_tick",
+        "source_conditioning_mode",
+        "raw_target_stand",
+        "emitted_target_stand",
+        "raw_delta_mm",
+        "raw_delta_deg",
+        "emitted_delta_mm",
+        "emitted_delta_deg",
+        "raw_to_emitted_mm",
+        "raw_to_emitted_deg",
+        "target_lead_before_mm",
+        "target_lead_before_deg",
+        "target_lead_after_mm",
+        "target_lead_after_deg",
+        "lead_clamped",
+    ):
+        if key in diag:
+            payload[key] = diag[key]
+
+
+def _update_delta_diag(
+    previous: tuple[float, ...] | None,
+    raw_pose6: tuple[float, ...],
+    emitted_pose6: tuple[float, ...],
+    diag: dict[str, Any],
+) -> None:
+    base = previous or emitted_pose6
+    raw_m, raw_rad = _pose6_distance(base, raw_pose6)
+    emitted_m, emitted_rad = _pose6_distance(base, emitted_pose6)
+    raw_to_emitted_m, raw_to_emitted_rad = _pose6_distance(raw_pose6, emitted_pose6)
+    diag["raw_delta_mm"] = raw_m * 1000.0
+    diag["raw_delta_deg"] = math.degrees(raw_rad)
+    diag["emitted_delta_mm"] = emitted_m * 1000.0
+    diag["emitted_delta_deg"] = math.degrees(emitted_rad)
+    diag["raw_to_emitted_mm"] = raw_to_emitted_m * 1000.0
+    diag["raw_to_emitted_deg"] = math.degrees(raw_to_emitted_rad)
+    diag["source_conditioning_mode"] = diag.get("cond", "none")
+    diag["raw_target_stand"] = [float(v) for v in raw_pose6]
+    diag["emitted_target_stand"] = [float(v) for v in emitted_pose6]
+    diag["target_lead_before_mm"] = diag.get("lead_before_mm", -1.0)
+    diag["target_lead_before_deg"] = diag.get("lead_before_deg", -1.0)
+    diag["target_lead_after_mm"] = diag.get("lead_after_mm", -1.0)
+    diag["target_lead_after_deg"] = diag.get("lead_after_deg", -1.0)
+    diag["lead_clamped"] = bool(diag.get("lead_clamp", False))
 
 
 def _script_to_samples(script: str | Iterable[Mapping[str, Any] | UmiSample | None]) -> list[UmiSample | None]:
@@ -763,7 +1081,7 @@ def _tcp_stand_transform(snapshot: StateSnapshot, side: str) -> _Transform | Non
     arm = snapshot.payload.get(side)
     if not isinstance(arm, Mapping):
         return None
-    raw = arm.get("tcp_stand") or arm.get("tcp_actual_stand")
+    raw = arm.get("tcp_ref_stand") or arm.get("tcp_actual_stand") or arm.get("tcp_stand")
     if not isinstance(raw, Mapping):
         return None
     translation = (
@@ -820,6 +1138,96 @@ def _transform_to_pose6(transform: _Transform) -> tuple[float, ...]:
         pitch,
         yaw,
     )
+
+
+def _pose6_to_quat(pose6: Sequence[float]) -> tuple[float, float, float, float]:
+    return _matrix_to_quat(_rpy_to_matrix(float(pose6[3]), float(pose6[4]), float(pose6[5])))
+
+
+def _quat_normalize(q: Sequence[float]) -> tuple[float, float, float, float]:
+    qx, qy, qz, qw = (float(v) for v in q)
+    norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if norm <= 0.0:
+        return (0.0, 0.0, 0.0, 1.0)
+    return (qx / norm, qy / norm, qz / norm, qw / norm)
+
+
+def _quat_slerp(
+    q0: Sequence[float],
+    q1: Sequence[float],
+    alpha: float,
+) -> tuple[float, float, float, float]:
+    a = _quat_normalize(q0)
+    b = _quat_normalize(q1)
+    dot = sum(x * y for x, y in zip(a, b))
+    if dot < 0.0:
+        b = tuple(-v for v in b)  # type: ignore[assignment]
+        dot = -dot
+    dot = max(-1.0, min(1.0, dot))
+    t = max(0.0, min(1.0, float(alpha)))
+    if dot > 0.9995:
+        return _quat_normalize(tuple((1.0 - t) * x + t * y for x, y in zip(a, b)))
+    theta_0 = math.acos(dot)
+    sin_theta_0 = math.sin(theta_0)
+    theta = theta_0 * t
+    s0 = math.cos(theta) - dot * math.sin(theta) / sin_theta_0
+    s1 = math.sin(theta) / sin_theta_0
+    return _quat_normalize(tuple(s0 * x + s1 * y for x, y in zip(a, b)))
+
+
+def _interpolate_pose6_se3(
+    start: tuple[float, ...],
+    end: tuple[float, ...],
+    alpha: float,
+) -> tuple[float, ...]:
+    t = max(0.0, min(1.0, float(alpha)))
+    xyz = tuple(float(start[i]) + (float(end[i]) - float(start[i])) * t for i in range(3))
+    quat = _quat_slerp(_pose6_to_quat(start), _pose6_to_quat(end), t)
+    rpy = _matrix_to_rpy(_quat_to_matrix(quat))
+    return (xyz[0], xyz[1], xyz[2], rpy[0], rpy[1], rpy[2])
+
+
+def _quat_angle(q0: Sequence[float], q1: Sequence[float]) -> float:
+    a = _quat_normalize(q0)
+    b = _quat_normalize(q1)
+    dot = abs(sum(x * y for x, y in zip(a, b)))
+    dot = max(-1.0, min(1.0, dot))
+    return 2.0 * math.acos(dot)
+
+
+def _pose6_distance(a: Sequence[float], b: Sequence[float]) -> tuple[float, float]:
+    linear = math.sqrt(sum((float(b[i]) - float(a[i])) ** 2 for i in range(3)))
+    angular = _quat_angle(_pose6_to_quat(a), _pose6_to_quat(b))
+    return linear, angular
+
+
+def _clamp_pose6_lead(
+    reference: tuple[float, ...],
+    target: tuple[float, ...],
+    *,
+    max_translation_m: float,
+    max_rotation_rad: float,
+) -> tuple[tuple[float, ...], str]:
+    x, y, z = float(target[0]), float(target[1]), float(target[2])
+    axes = ""
+    dx = (x - float(reference[0]), y - float(reference[1]), z - float(reference[2]))
+    dist = math.sqrt(dx[0] * dx[0] + dx[1] * dx[1] + dx[2] * dx[2])
+    if max_translation_m >= 0.0 and dist > max_translation_m > 0.0:
+        scale = max_translation_m / dist
+        x = float(reference[0]) + dx[0] * scale
+        y = float(reference[1]) + dx[1] * scale
+        z = float(reference[2]) + dx[2] * scale
+        axes += "xyz"
+
+    q_ref = _pose6_to_quat(reference)
+    q_target = _pose6_to_quat(target)
+    angle = _quat_angle(q_ref, q_target)
+    roll, pitch, yaw = float(target[3]), float(target[4]), float(target[5])
+    if max_rotation_rad >= 0.0 and angle > max_rotation_rad > 0.0:
+        q_clamped = _quat_slerp(q_ref, q_target, max_rotation_rad / angle)
+        roll, pitch, yaw = _matrix_to_rpy(_quat_to_matrix(q_clamped))
+        axes += ("|" if axes else "") + "rpy"
+    return (x, y, z, roll, pitch, yaw), axes
 
 
 def _quat_to_matrix(q: Sequence[float]) -> tuple[float, ...]:

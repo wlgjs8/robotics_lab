@@ -378,6 +378,8 @@ private:
     struct InitMotionExec {
         InitMotionStatus status = InitMotionStatus::Idle;
         bool has_target = false;
+        bool left_active = false;
+        bool right_active = false;
         JointArray target_left{};
         JointArray target_right{};
         std::future<InitMotionPlanResult> future;
@@ -501,6 +503,8 @@ private:
     CartesianServoPathState right_cartesian_servo_path_;
     SmdPoseTracker left_pose_track_smd_{PoseTrackSmdConfig{}};
     SmdPoseTracker right_pose_track_smd_{PoseTrackSmdConfig{}};
+    std::string left_pose_track_profile_name_;
+    std::string right_pose_track_profile_name_;
     JointMovingAverage left_output_ma_{0};
     JointMovingAverage right_output_ma_{0};
     // A/B/C separation telemetry (Patch 4), captured each tick from the SMD step
@@ -511,6 +515,11 @@ private:
         std::optional<Pose6D> smd_goal_stand;
         SmdStepInfo smd_step_info;
         std::uint64_t smd_reanchor_count = 0;
+        std::string tcp_target_profile;
+        bool tcp_target_profile_found = false;
+        PoseTrackSmdConfig smd_profile;
+        double max_smd_goal_lead_m = 0.0;
+        double max_smd_goal_lead_rad = 0.0;
         bool output_ma_present = false;
         JointArray q_target_before_output_ma_deg{};
         JointArray q_target_after_output_ma_deg{};

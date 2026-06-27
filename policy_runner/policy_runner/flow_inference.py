@@ -465,6 +465,66 @@ class FlowMatchingActionSource:
         )
 
     # --------------------------------------------------------- override hooks --
+    def on_arm_init_override_start(self, arms: tuple[str, ...], snapshot: StateSnapshot) -> None:
+        before_mask = self.arm_mask.tolist() if hasattr(self.arm_mask, "tolist") else list(self.arm_mask)
+        after_mask = list(before_mask)
+        for arm in arms:
+            idx = 0 if arm == "left" else 1
+            if idx < len(after_mask):
+                after_mask[idx] = 0.0
+        self._clear_target_pose_state(arms)
+        self._invalidate_policy_chunks(reason="arm_init_start")
+        self._log_arm_init_event(
+            "arm_init_override_start",
+            arms,
+            snapshot,
+            before_mask=before_mask,
+            after_mask=after_mask,
+            chunk_invalidated=True,
+        )
+
+    def on_arm_init_override_done(self, arms: tuple[str, ...], snapshot: StateSnapshot) -> None:
+        before = self._pose_snapshot_for_arms(arms)
+        after = self._reanchor_arms_to_snapshot(arms, snapshot)
+        self._invalidate_policy_chunks(reason="arm_init_done")
+        self._log_arm_init_event(
+            "arm_init_override_done",
+            arms,
+            snapshot,
+            chunk_invalidated=True,
+            reanchor_before=before,
+            reanchor_after=after,
+        )
+        self._log_arm_init_event(
+            "arm_init_override_resume",
+            arms,
+            snapshot,
+            chunk_invalidated=True,
+            reanchor_after=after,
+        )
+
+    def on_arm_init_override_cancel(self, arms: tuple[str, ...], snapshot: StateSnapshot) -> None:
+        before = self._pose_snapshot_for_arms(arms)
+        after = self._reanchor_arms_to_snapshot(arms, snapshot)
+        self._invalidate_policy_chunks(reason="arm_init_cancel")
+        self._log_arm_init_event(
+            "arm_init_override_cancel",
+            arms,
+            snapshot,
+            chunk_invalidated=True,
+            reanchor_before=before,
+            reanchor_after=after,
+        )
+
+    def on_arm_init_override_failed(self, arms: tuple[str, ...], snapshot: StateSnapshot) -> None:
+        self._invalidate_policy_chunks(reason="arm_init_failed")
+        self._log_arm_init_event(
+            "arm_init_override_failed",
+            arms,
+            snapshot,
+            chunk_invalidated=True,
+        )
+
     def _validate_checkpoint_schema(self, schema: str) -> None:
         """Reject checkpoints whose schema this source cannot run. The base flow
         source only accepts RGB-image flow checkpoints; subclasses override to
@@ -732,6 +792,7 @@ class FlowMatchingActionSource:
         self._stream_shutdown = False
         self._stream_request = None
         self._stream_stall_count = 0
+        self._stream_generation = 0
         self._stream_lock = threading.Lock()
         self._stream_cv = threading.Condition(self._stream_lock)
         self._stream_thread = threading.Thread(
@@ -746,8 +807,12 @@ class FlowMatchingActionSource:
                     self._stream_cv.wait()
                 if self._stream_shutdown:
                     return
-                payload = self._stream_request
+                request = self._stream_request
                 self._stream_request = None
+            if isinstance(request, tuple) and len(request) == 2:
+                generation, payload = request
+            else:
+                generation, payload = int(getattr(self, "_stream_generation", 0)), request
             try:
                 chunk = self._sample_and_align_chunk(payload)
             except Exception as exc:  # noqa: BLE001 - inference must not kill the worker
@@ -758,7 +823,8 @@ class FlowMatchingActionSource:
                 )
                 chunk = None
             with self._stream_lock:
-                self._stream_next_chunk = chunk
+                if int(generation) == int(getattr(self, "_stream_generation", 0)):
+                    self._stream_next_chunk = chunk
                 self._stream_pending = False
 
     def _request_prefetch(self, payload: dict[str, Any]) -> None:
@@ -766,7 +832,7 @@ class FlowMatchingActionSource:
             if self._stream_pending or self._stream_next_chunk is not None:
                 return
             self._stream_pending = True
-            self._stream_request = payload
+            self._stream_request = (int(getattr(self, "_stream_generation", 0)), payload)
             self._stream_cv.notify()
 
     def _take_prefetched(self) -> np.ndarray | None:
@@ -914,6 +980,11 @@ class FlowMatchingActionSource:
             left_gripper=gripper_targets.get("left"),
             right_gripper=gripper_targets.get("right"),
             timeout_sec=self.timeout_sec,
+            tcp_target_profile="flow_infer_smooth",
+            metadata={
+                "action_source": "flow_infer",
+                "source_conditioning_mode": getattr(self, "_tcp_tp_mode", "legacy_step_hold"),
+            },
         )
 
     def _target_payload_for_arm(
@@ -932,11 +1003,121 @@ class FlowMatchingActionSource:
         targets[arm] = pose_compose_local(targets[arm], np.asarray(clamped_delta, dtype=np.float32))
         return tuple(float(value) for value in targets[arm].tolist())
 
-    def _clear_target_pose_state(self) -> None:
+    def _clear_target_pose_state(self, arms: tuple[str, ...] | list[str] | None = None) -> None:
+        selected = tuple(arms or ("left", "right"))
         targets = getattr(self, "_target_pose_by_arm", None)
         if targets is not None:
-            targets["left"] = None
-            targets["right"] = None
+            for arm in selected:
+                if arm in targets:
+                    targets[arm] = None
+        gripper_targets = getattr(self, "_gripper_targets_by_arm", None)
+        if gripper_targets is not None:
+            for arm in selected:
+                if arm in gripper_targets:
+                    gripper_targets[arm] = None
+        conds = getattr(self, "_tcp_tp_conditioners", None)
+        if isinstance(conds, dict):
+            for arm in selected:
+                cond = conds.get(arm)
+                if cond is not None:
+                    cond.reset()
+
+    def _pose_snapshot_for_arms(self, arms: tuple[str, ...]) -> dict[str, list[float] | None]:
+        targets = getattr(self, "_target_pose_by_arm", None)
+        out: dict[str, list[float] | None] = {}
+        for arm in arms:
+            pose = targets.get(arm) if isinstance(targets, dict) else None
+            out[arm] = None if pose is None else [float(v) for v in np.asarray(pose).reshape(-1).tolist()]
+        return out
+
+    def _reanchor_arms_to_snapshot(
+        self,
+        arms: tuple[str, ...],
+        snapshot: StateSnapshot,
+    ) -> dict[str, list[float] | None]:
+        payload = snapshot.payload
+        targets = getattr(self, "_target_pose_by_arm", None)
+        if targets is None:
+            self._target_pose_by_arm = {"left": None, "right": None}
+            targets = self._target_pose_by_arm
+        gripper_targets = getattr(self, "_gripper_targets_by_arm", None)
+        conds = getattr(self, "_tcp_tp_conditioners", None)
+        after: dict[str, list[float] | None] = {}
+        for arm in arms:
+            try:
+                pose = np.asarray(pose_from_state_payload(payload, arm), dtype=np.float64)
+            except Exception:
+                after[arm] = None
+                continue
+            targets[arm] = pose.copy()
+            if isinstance(gripper_targets, dict):
+                gripper_targets[arm] = None
+            if isinstance(conds, dict) and arm in conds:
+                cond = conds[arm]
+                cond.reset()
+                try:
+                    cond._prev_emitted = pose.copy()
+                except Exception:
+                    pass
+            after[arm] = [float(v) for v in pose.reshape(-1).tolist()]
+        return after
+
+    def _invalidate_policy_chunks(self, *, reason: str) -> None:
+        _ = reason
+        self._chunk = None
+        self._chunk_index = 0
+        self._steps_since_boundary = 0
+        self._current_step_intent = None
+        self._current_gripper_targets = {"left": None, "right": None}
+        if hasattr(self, "_stream_lock"):
+            try:
+                with self._stream_lock:
+                    self._stream_generation = int(getattr(self, "_stream_generation", 0)) + 1
+                    self._stream_next_chunk = None
+                    self._stream_pending = False
+                    self._stream_request = None
+            except Exception:
+                pass
+        if hasattr(self, "_stream_cv"):
+            try:
+                with self._stream_cv:
+                    self._stream_cv.notify_all()
+            except Exception:
+                pass
+
+    def _log_arm_init_event(
+        self,
+        event: str,
+        arms: tuple[str, ...],
+        snapshot: StateSnapshot,
+        *,
+        before_mask: list[float] | None = None,
+        after_mask: list[float] | None = None,
+        chunk_invalidated: bool = False,
+        reanchor_before: dict[str, list[float] | None] | None = None,
+        reanchor_after: dict[str, list[float] | None] | None = None,
+    ) -> None:
+        log = self._action_log
+        if log is None:
+            return
+        command_source = snapshot.payload.get("command_source", {})
+        record = {
+            "seq": self._action_log_seq,
+            "t_mono": time.monotonic(),
+            "event": event,
+            "arms": list(arms),
+            "runner_role": "flow_infer",
+            "command_source_id": command_source.get("source_id") if isinstance(command_source, dict) else None,
+            "command_session_id": command_source.get("session_id") if isinstance(command_source, dict) else None,
+            "flow_chunk_id": int(getattr(self, "_tcp_tp_chunk_seq", -1)),
+            "chunk_invalidated": bool(chunk_invalidated),
+            "source_arm_mask_before": before_mask,
+            "source_arm_mask_after": after_mask,
+            "reanchor_pose_before": reanchor_before,
+            "reanchor_pose_after": reanchor_after,
+        }
+        self._action_log_seq += 1
+        log.write(json.dumps(record) + "\n")
 
     # ----------------------------------------------- foh_se3 conditioning (Patch 3) --
     def _tcp_tp_foh_active(self) -> bool:
@@ -1021,6 +1202,11 @@ class FlowMatchingActionSource:
             left_gripper=gripper.get("left"),
             right_gripper=gripper.get("right"),
             timeout_sec=self.timeout_sec,
+            tcp_target_profile="flow_infer_smooth",
+            metadata={
+                "action_source": "flow_infer",
+                "source_conditioning_mode": getattr(self, "_tcp_tp_mode", "legacy_step_hold"),
+            },
         )
 
     def _log_foh_action(
@@ -1039,6 +1225,7 @@ class FlowMatchingActionSource:
             "t_mono": time.monotonic(),
             "t_wall": float(now_monotonic),
             "command_family": self.command_family,
+            "tcp_target_profile": "flow_infer_smooth",
             "tcp_target_pose_conditioning": getattr(self, "_tcp_tp_mode", "legacy_step_hold"),
             "reanchor_mode": getattr(self, "_tcp_tp_reanchor_mode", "measured_blend"),
             "chunk_index": int(self._chunk_index),

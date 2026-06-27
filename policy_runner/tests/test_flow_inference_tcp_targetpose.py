@@ -64,6 +64,7 @@ class FlowInferenceTcpPoseTargetTest(unittest.TestCase):
         self.assertIsNotNone(intent)
         assert intent is not None
         self.assertEqual(intent.mode, "TcpPoseTarget")
+        self.assertEqual(intent.tcp_target_profile, "flow_infer_smooth")
         self.assertEqual(intent.left["mode"], "TcpPoseTarget")
         target_payload = intent.left["tcp_target_stand"]
         self.assertIsInstance(target_payload, dict)

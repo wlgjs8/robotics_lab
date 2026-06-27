@@ -876,6 +876,7 @@ bool testCartesianCommandParser() {
     RB_CHECK(std::abs(out.left.tcp_target_stand.x - 0.3) < kEpsilon);
     RB_CHECK(std::abs(out.right.tcp_target_stand.y + 0.1) < kEpsilon);
     RB_CHECK(!out.left.tcp_target_stand.quaternion_xyzw.has_value());
+    RB_CHECK(out.tcp_target_profile == "default");
 
     RB_CHECK(!server.parseMessage(
         R"({"schema_version":1,"seq":4,"mode":"TcpPoseTarget","timeout_sec":0.2,"left":{"tcp_target_stand":{"x":0.3,"y":0.1,"z":0.5,"rx":0,"ry":0,"rz":0,"quaternion_xyzw":[0,0,0,0]}},"right":{"tcp_target_stand":{"x":0.3,"y":-0.1,"z":0.5,"rx":0,"ry":0,"rz":0,"quaternion_xyzw":[0,0,0,1]}}})",
@@ -893,6 +894,40 @@ bool testCartesianCommandParser() {
     RB_CHECK(std::abs(out.left.tcp_target_stand.quaternion_xyzw->at(2) - 1.0) < kEpsilon);
     RB_CHECK(out.right.tcp_target_stand.quaternion_xyzw.has_value());
     RB_CHECK(std::abs(out.right.tcp_target_stand.quaternion_xyzw->at(3) - 1.0) < kEpsilon);
+
+    rb_servo::CartesianControlConfig cartesian_profiles;
+    cartesian_profiles.tcp_pose_target_profile_default = "umi_large_smooth";
+    for (const std::string& name : {"spacemouse_precise", "umi_large_smooth", "flow_infer_smooth"}) {
+        rb_servo::TcpPoseTargetProfileConfig profile;
+        profile.name = name;
+        cartesian_profiles.tcp_pose_target_profiles.push_back(profile);
+    }
+    rb_servo::CommandBuffer profiled_buffer;
+    rb_servo::CommandServer profiled_server(network, &profiled_buffer, cartesian_profiles);
+    RB_CHECK(profiled_server.parseMessage(
+        R"({"schema_version":1,"seq":1,"mode":"TcpPoseTarget","timeout_sec":0.2,"left":{"tcp_target_stand":[0.3,0.1,0.5,0,0,0]},"right":{"mode":"Hold"}})",
+        now,
+        &out
+    ));
+    RB_CHECK(out.tcp_target_profile == "umi_large_smooth");
+    RB_CHECK(!out.tcp_target_profile_provided);
+    RB_CHECK(profiled_server.parseMessage(
+        R"({"schema_version":1,"seq":2,"mode":"TcpPoseTarget","tcp_target_profile":"spacemouse_precise","timeout_sec":0.2,"left":{"tcp_target_stand":[0.3,0.1,0.5,0,0,0]},"right":{"mode":"Hold"},"client_send_monotonic_ns":123,"input_sample_monotonic_ns":100})",
+        now,
+        &out
+    ));
+    RB_CHECK(out.tcp_target_profile == "spacemouse_precise");
+    RB_CHECK(out.tcp_target_profile_provided);
+    RB_CHECK(out.has_client_send_monotonic_ns);
+    RB_CHECK(out.client_send_monotonic_ns == 123);
+    RB_CHECK(out.has_input_sample_monotonic_ns);
+    RB_CHECK(out.input_sample_monotonic_ns == 100);
+    RB_CHECK(!profiled_server.parseMessage(
+        R"({"schema_version":1,"seq":3,"mode":"TcpPoseTarget","tcp_target_profile":"unknown","timeout_sec":0.2,"left":{"tcp_target_stand":[0.3,0.1,0.5,0,0,0]},"right":{"mode":"Hold"}})",
+        now,
+        &out
+    ));
+    RB_CHECK(profiled_server.lastRejectReason() == "unknown_tcp_target_profile");
 
     RB_CHECK(server.parseMessage(
         R"({"schema_version":1,"seq":5,"mode":"TcpLinearMove","timeout_sec":0.2,"left":{"target_tcp_stand":{"x":0.35,"y":0.11,"z":0.55,"rx":0,"ry":0,"rz":0,"quaternion_xyzw":[0,0,0.70710678118,0.70710678118]},"duration_sec":2.0,"orientation_mode":"slerp"},"right":{"mode":"Hold"}})",
@@ -3685,6 +3720,14 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     sample.loop_end_time_ns = 3000;
     sample.period_ms = 2.0;
     sample.command.seq = 42;
+    sample.left_cartesian_solve.tcp_target_profile = "umi_large_smooth";
+    sample.left_cartesian_solve.smd_profile_nf_linear_hz = 1.0;
+    sample.left_cartesian_solve.smd_profile_nf_angular_hz = 1.1;
+    sample.left_cartesian_solve.smd_profile_velocity_feedforward = true;
+    sample.left_cartesian_solve.smd_profile_max_linear_velocity_m_s = 0.35;
+    sample.left_cartesian_solve.smd_profile_max_linear_accel_m_s2 = 0.8;
+    sample.left_cartesian_solve.smd_profile_max_angular_velocity_rad_s = 1.3;
+    sample.left_cartesian_solve.smd_profile_max_angular_accel_rad_s2 = 5.0;
     sample.left_cartesian_solve.ik_branch_jump_rate_limited = true;
     sample.left_cartesian_solve.ik_branch_jump_raw_deg = 12.0;
     sample.left_cartesian_solve.ik_branch_jump_limit_deg = 4.0;
@@ -3706,6 +3749,18 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     sample.left_cartesian_solve.safety_clamp.accel_clamp_max_delta_deg = 0.5;
     sample.left_cartesian_solve.safety_clamp.velocity_limited_joint = 0;
     sample.left_cartesian_solve.safety_clamp.accel_limited_joint = 1;
+    sample.left_mode_before_init_sequencer = "JointTarget";
+    sample.right_mode_before_init_sequencer = "TcpPoseTarget";
+    sample.left_mode_after_init_sequencer = "JointTarget";
+    sample.right_mode_after_init_sequencer = "TcpPoseTarget";
+    sample.init_motion_left.status = "executing";
+    sample.init_motion_right.status = "idle";
+    sample.init_motion.status = "executing";
+    sample.init_motion_left.waypoint_index = 2;
+    sample.init_motion_left.waypoint_count = 7;
+    sample.init_motion_left.dist_to_goal_deg = 3.5;
+    sample.non_init_arm_preserved_mode = "TcpPoseTarget";
+    sample.single_arm_freeze_other_arm = false;
     logger.push(sample);
 
     const std::filesystem::path latest = std::filesystem::path(cfg.directory) / "servo_log.csv";
@@ -3736,19 +3791,49 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     const std::size_t clamp_present = index_of("left_safety_clamp_present");
     const std::size_t velocity_clamped = index_of("left_safety_velocity_clamped");
     const std::size_t accel_joint = index_of("left_safety_accel_limited_joint");
+    const std::size_t profile_name = index_of("left_tcp_target_profile");
+    const std::size_t profile_nf_linear = index_of("left_smd_profile_nf_linear_hz");
+    const std::size_t profile_velocity_ff = index_of("left_smd_profile_velocity_feedforward");
+    const std::size_t profile_max_angular_accel = index_of("left_smd_profile_max_angular_accel_rad_s2");
+    const std::size_t init_left_status = index_of("init_motion_left_status");
+    const std::size_t init_right_status = index_of("init_motion_right_status");
+    const std::size_t before_left = index_of("left_mode_before_init_sequencer");
+    const std::size_t after_right = index_of("right_mode_after_init_sequencer");
+    const std::size_t preserved_mode = index_of("non_init_arm_preserved_mode");
+    const std::size_t freeze_other = index_of("single_arm_freeze_other_arm");
     RB_CHECK(old_last < header.size());
+    RB_CHECK(profile_name < old_last);
+    RB_CHECK(profile_nf_linear < old_last);
+    RB_CHECK(profile_velocity_ff < old_last);
+    RB_CHECK(profile_max_angular_accel < old_last);
     RB_CHECK(branch_rate > old_last);
     RB_CHECK(raw_jump > old_last);
     RB_CHECK(q_seed > old_last);
     RB_CHECK(clamp_present > old_last);
     RB_CHECK(velocity_clamped > old_last);
     RB_CHECK(accel_joint > old_last);
+    RB_CHECK(init_left_status > old_last);
+    RB_CHECK(init_right_status > old_last);
+    RB_CHECK(before_left > old_last);
+    RB_CHECK(after_right > old_last);
+    RB_CHECK(preserved_mode > old_last);
+    RB_CHECK(freeze_other > old_last);
     RB_CHECK(row.at(branch_rate) == "1");
     RB_CHECK(row.at(raw_jump) == "12");
     RB_CHECK(row.at(q_seed) == "1");
     RB_CHECK(row.at(clamp_present) == "1");
     RB_CHECK(row.at(velocity_clamped) == "1");
     RB_CHECK(row.at(accel_joint) == "1");
+    RB_CHECK(row.at(profile_name) == "umi_large_smooth");
+    RB_CHECK(row.at(profile_nf_linear) == "1");
+    RB_CHECK(row.at(profile_velocity_ff) == "1");
+    RB_CHECK(row.at(profile_max_angular_accel) == "5");
+    RB_CHECK(row.at(init_left_status) == "executing");
+    RB_CHECK(row.at(init_right_status) == "idle");
+    RB_CHECK(row.at(before_left) == "JointTarget");
+    RB_CHECK(row.at(after_right) == "TcpPoseTarget");
+    RB_CHECK(row.at(preserved_mode) == "TcpPoseTarget");
+    RB_CHECK(row.at(freeze_other) == "0");
     std::filesystem::remove_all(cfg.directory);
     return true;
 }

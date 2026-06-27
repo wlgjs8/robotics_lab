@@ -381,6 +381,11 @@ bool dualCommandRequiresLease(const DualArmCommand& command) {
     return commandRequiresLease(command.left.mode) || commandRequiresLease(command.right.mode);
 }
 
+bool commandUsesTcpPoseTarget(const DualArmCommand& command) {
+    return command.left.mode == ControlMode::TcpPoseTarget ||
+           command.right.mode == ControlMode::TcpPoseTarget;
+}
+
 bool isEmergencyStopCommand(const DualArmCommand& command) {
     return command.left.mode == ControlMode::EmergencyStop || command.right.mode == ControlMode::EmergencyStop;
 }
@@ -483,11 +488,23 @@ bool parseArmObject(
 
 CommandServer::CommandServer(
     const NetworkConfig& config,
-    CommandBuffer* command_buffer
+    CommandBuffer* command_buffer,
+    const CartesianControlConfig& cartesian_control
 ) : config_(config), command_buffer_(command_buffer) {
     command_source_config_.enforce_lease = config.command_source_enforce_lease;
     command_source_config_.lease_timeout_sec = config.command_source_lease_timeout_sec;
     active_lease_.enforce_lease = command_source_config_.enforce_lease;
+    tcp_target_profile_default_ = cartesian_control.tcp_pose_target_profile_default.empty()
+        ? "default"
+        : cartesian_control.tcp_pose_target_profile_default;
+    for (const auto& profile : cartesian_control.tcp_pose_target_profiles) {
+        if (!profile.name.empty()) {
+            tcp_target_profiles_.push_back(profile.name);
+        }
+    }
+    if (tcp_target_profiles_.empty()) {
+        tcp_target_profiles_.push_back(tcp_target_profile_default_);
+    }
 }
 
 CommandServer::~CommandServer() {
@@ -650,6 +667,16 @@ bool CommandServer::parseMessage(
     if (!readOptionalString(root, "source_id", &cmd.source.source_id)) return false;
     if (!readOptionalString(root, "session_id", &cmd.source.session_id)) return false;
     if (!readOptionalString(root, "lease_token", &cmd.source.lease_token)) return false;
+    if (!readOptionalString(root, "action_source", &cmd.action_source)) return false;
+    if (!readOptionalString(root, "source_conditioning_mode", &cmd.source_conditioning_mode)) return false;
+    cmd.has_client_send_monotonic_ns = root.contains("client_send_monotonic_ns");
+    if (!readOptionalUint64(root, "client_send_monotonic_ns", &cmd.client_send_monotonic_ns)) return false;
+    cmd.has_input_sample_monotonic_ns = root.contains("input_sample_monotonic_ns");
+    if (!readOptionalUint64(root, "input_sample_monotonic_ns", &cmd.input_sample_monotonic_ns)) return false;
+    cmd.tcp_target_profile_provided = root.contains("tcp_target_profile");
+    std::string tcp_target_profile;
+    if (!readOptionalString(root, "tcp_target_profile", &tcp_target_profile)) return false;
+    cmd.tcp_target_profile = cmd.tcp_target_profile_provided ? tcp_target_profile : tcp_target_profile_default_;
     const auto priority_it = root.find("source_priority");
     if (priority_it != root.end()) {
         if (!priority_it->is_number_integer()) return false;
@@ -788,6 +815,17 @@ bool CommandServer::parseMessage(
 
     if (requiresPayload(cmd.left.mode) && !hasRequiredPayload(cmd.left)) return false;
     if (requiresPayload(cmd.right.mode) && !hasRequiredPayload(cmd.right)) return false;
+    if (commandUsesTcpPoseTarget(cmd)) {
+        const auto profile_it = std::find(
+            tcp_target_profiles_.begin(),
+            tcp_target_profiles_.end(),
+            cmd.tcp_target_profile
+        );
+        if (profile_it == tcp_target_profiles_.end()) {
+            last_reject_reason_ = "unknown_tcp_target_profile";
+            return false;
+        }
+    }
 
     const std::string key = sourceKey(cmd.source);
     const auto last_seq_it = last_accepted_seq_by_source_.find(key);

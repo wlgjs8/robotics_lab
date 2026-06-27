@@ -16,7 +16,11 @@ from policy_runner.action_sources.umi_dual_cartesian import (  # noqa: E402
     UmiDualCartesianActionSource,
     UmiSample,
 )
-from policy_runner.config import config_from_mapping  # noqa: E402
+from policy_runner.config import (  # noqa: E402
+    UmiTargetLeadClampConfig,
+    UmiTcpPoseTargetConditioningConfig,
+    config_from_mapping,
+)
 from policy_runner.main import make_action_source, run  # noqa: E402
 from policy_runner.robot_state_client import StateSnapshot  # noqa: E402
 from policy_runner.servo_command_client import ServoCommandClient  # noqa: E402
@@ -678,6 +682,193 @@ class UmiDualCartesianTest(unittest.TestCase):
         self.assertIn("has=1  fresh=0  seq=1", log_text)
         self.assertIn("[REUSE]", log_text)
         self.assertNotIn("seq=0", log_text)
+
+    def test_foh_conditioning_spreads_fresh_umi_sample_across_reuse_ticks(self):
+        reader = MockUmiPoseReader(
+            [
+                {"pose": [0, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.0000},
+                {"pose": [0.03, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.0055},
+                None,
+                None,
+                None,
+            ]
+        )
+        source = UmiDualCartesianActionSource(
+            reader,
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            tcp_pose_target_conditioning=UmiTcpPoseTargetConditioningConfig(
+                enable=True,
+                mode="foh_se3",
+                min_interpolation_horizon_sec=0.004,
+                max_interpolation_horizon_sec=0.012,
+                default_interpolation_horizon_sec=0.006,
+            ),
+        )
+
+        first = source.next_intent(sample_state(), 0.0000)
+        fresh = source.next_intent(sample_state(), 0.0055)
+        reuse_a = source.next_intent(sample_state(), 0.0075)
+        reuse_b = source.next_intent(sample_state(), 0.0095)
+        reuse_c = source.next_intent(sample_state(), 0.0115)
+
+        assert first is not None and fresh is not None and reuse_a is not None
+        assert reuse_b is not None and reuse_c is not None
+        xs = [intent.left["tcp_target_stand"][0] for intent in (first, fresh, reuse_a, reuse_b, reuse_c)]
+        self.assertEqual(xs[0], 1.0)
+        self.assertEqual(xs[1], 1.0)  # fresh packet schedules the move; it does not jump 30 mm.
+        self.assertGreater(xs[2], xs[1])
+        self.assertGreater(xs[3], xs[2])
+        self.assertAlmostEqual(xs[4], 1.03, places=6)
+        deltas = [b - a for a, b in zip(xs, xs[1:])]
+        self.assertGreater(deltas[1], 0.0)
+        self.assertLess(deltas[1], 0.03)
+        self.assertEqual(fresh.tcp_target_profile, "umi_large_smooth")
+        self.assertEqual(fresh.left["source_conditioning_mode"], "foh_se3")
+        self.assertFalse(fresh.left["fresh_packet"] is False)
+        self.assertTrue(reuse_a.left["reuse_tick"])
+
+    def test_conditioner_stops_on_stale_and_does_not_keep_moving(self):
+        reader = MockUmiPoseReader(
+            [
+                {"pose": [0, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.0},
+                {"pose": [0.04, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.0055},
+                None,
+            ]
+        )
+        source = UmiDualCartesianActionSource(
+            reader,
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            sample_hold_timeout_sec=0.05,
+            tcp_pose_target_conditioning=UmiTcpPoseTargetConditioningConfig(enable=True, mode="foh_se3"),
+        )
+
+        _ = source.next_intent(sample_state(), 0.0)
+        _ = source.next_intent(sample_state(), 0.0055)
+        stale = source.next_intent(sample_state(), 0.20)
+
+        self.assertIsNotNone(stale)
+        assert stale is not None
+        self.assertEqual(stale.left["mode"], "Hold")
+        self.assertIsNone(source._left.last_emitted_target_stand)
+        self.assertFalse(source._left.conditioner_engaged)
+
+    def test_engage_reset_anchors_conditioner_to_current_tcp_ref(self):
+        reader = MockUmiPoseReader(
+            [
+                {"pose": [0, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.0},
+                {"pose": [0.03, 0, 0, 0, 0, 0, 1], "deadman": False, "monotonic": 0.01},
+                {"pose": [0.03, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.02},
+            ]
+        )
+        source = UmiDualCartesianActionSource(
+            reader,
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            deadman_release_grace_sec=0.0,
+            tcp_pose_target_conditioning=UmiTcpPoseTargetConditioningConfig(enable=True, mode="foh_se3"),
+        )
+        first_snapshot = sample_state()
+        second_snapshot = sample_state(
+            left_pose={"x": 9.0, "y": 9.0, "z": 9.0, "quaternion_xyzw": [0, 0, 0, 1]}
+        )
+        second_snapshot.payload["left"]["tcp_ref_stand"] = {
+            "x": 2.0,
+            "y": 2.0,
+            "z": 3.0,
+            "quaternion_xyzw": [0, 0, 0, 1],
+        }
+
+        first = source.next_intent(first_snapshot, 0.0)
+        release = source.next_intent(first_snapshot, 0.01)
+        relatch = source.next_intent(second_snapshot, 0.02)
+
+        assert first is not None and release is not None and relatch is not None
+        self.assertEqual(release.left["mode"], "Hold")
+        self.assertEqual(relatch.left["tcp_target_stand"], [2.0, 2.0, 3.0, 0.0, 0.0, 0.0])
+
+    def test_target_lead_clamp_limits_translation_and_rebases_conditioner(self):
+        reader = MockUmiPoseReader(
+            [
+                {"pose": [0, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.0},
+                {"pose": [0.20, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.0055},
+                None,
+                None,
+            ]
+        )
+        source = UmiDualCartesianActionSource(
+            reader,
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            tcp_pose_target_conditioning=UmiTcpPoseTargetConditioningConfig(
+                enable=True,
+                mode="foh_se3",
+                min_interpolation_horizon_sec=0.004,
+                max_interpolation_horizon_sec=0.012,
+                default_interpolation_horizon_sec=0.006,
+            ),
+            target_lead_clamp=UmiTargetLeadClampConfig(
+                enable=True,
+                max_target_lead_m=0.060,
+                max_target_lead_rad=0.25,
+                rebase_conditioner_on_clamp=True,
+            ),
+        )
+
+        _ = source.next_intent(sample_state(), 0.0)
+        _ = source.next_intent(sample_state(), 0.0055)
+        clamped = source.next_intent(sample_state(), 0.0095)
+        next_tick = source.next_intent(sample_state(), 0.0115)
+
+        assert clamped is not None and next_tick is not None
+        self.assertAlmostEqual(clamped.left["tcp_target_stand"][0], 1.06, places=6)
+        self.assertTrue(clamped.left["lead_clamped"])
+        self.assertAlmostEqual(next_tick.left["tcp_target_stand"][0], 1.06, places=6)
+        assert source._left.last_emitted_target_stand is not None
+        self.assertAlmostEqual(source._left.last_emitted_target_stand[0], 1.06, places=6)
+
+    def test_target_lead_clamp_limits_orientation_and_is_per_arm(self):
+        qz_40 = math.sin(math.radians(40.0) / 2.0)
+        qw_40 = math.cos(math.radians(40.0) / 2.0)
+        left = MockUmiPoseReader(
+            [
+                {"pose": [0, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.0},
+                {"pose": [0, 0, 0, 0, 0, qz_40, qw_40], "deadman": True, "monotonic": 0.01},
+            ]
+        )
+        right = MockUmiPoseReader(
+            [
+                {"pose": [0, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.0},
+                {"pose": [0.02, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.01},
+            ]
+        )
+        source = UmiDualCartesianActionSource(
+            left,
+            right,
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            max_angular_step_rad=math.pi,
+            target_lead_clamp=UmiTargetLeadClampConfig(
+                enable=True,
+                max_target_lead_m=0.060,
+                max_target_lead_rad=0.25,
+                rebase_conditioner_on_clamp=True,
+            ),
+        )
+
+        _ = source.next_intent(sample_state(), 0.0)
+        intent = source.next_intent(sample_state(), 0.01)
+
+        assert intent is not None
+        self.assertAlmostEqual(intent.left["tcp_target_stand"][5], 0.25, places=6)
+        self.assertTrue(intent.left["lead_clamped"])
+        self.assertAlmostEqual(intent.right["tcp_target_stand"][0], -0.98, places=6)
+        self.assertFalse(intent.right["lead_clamped"])
 
     def test_config_and_factory_default_to_mock_umi_source(self):
         cfg = config_from_mapping(

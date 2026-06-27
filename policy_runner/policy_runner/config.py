@@ -100,6 +100,15 @@ class RecordingConfig:
 
 
 @dataclass(frozen=True)
+class ArmInitOverrideConfig:
+    auto_clear_on_done: bool = True
+    auto_clear_on_failed: bool = False
+    resume_flow_on_done: bool = True
+    reset_flow_source_on_start: bool = True
+    reset_flow_source_on_resume: bool = True
+
+
+@dataclass(frozen=True)
 class CameraConfig:
     enable: bool = False
     zmq_endpoint: str = "tcp://127.0.0.1:5600"
@@ -295,6 +304,57 @@ class UmiPoseReaderConfig:
 
 
 @dataclass(frozen=True)
+class UmiTcpPoseTargetConditioningConfig:
+    enable: bool = True
+    mode: str = "foh_se3"
+    emit_rate_hz: float = 500.0
+    min_interpolation_horizon_sec: float = 0.004
+    max_interpolation_horizon_sec: float = 0.012
+    default_interpolation_horizon_sec: float = 0.006
+    reset_on_engage: bool = True
+    stop_on_release: bool = True
+    stop_on_stale: bool = True
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"none", "foh_se3"}:
+            raise ValueError("umi_dual_cartesian.tcp_pose_target_conditioning.mode must be none or foh_se3")
+        if self.emit_rate_hz <= 0.0:
+            raise ValueError("umi_dual_cartesian.tcp_pose_target_conditioning.emit_rate_hz must be positive")
+        if self.min_interpolation_horizon_sec <= 0.0:
+            raise ValueError(
+                "umi_dual_cartesian.tcp_pose_target_conditioning.min_interpolation_horizon_sec must be positive"
+            )
+        if self.max_interpolation_horizon_sec < self.min_interpolation_horizon_sec:
+            raise ValueError(
+                "umi_dual_cartesian.tcp_pose_target_conditioning.max_interpolation_horizon_sec "
+                "must be >= min_interpolation_horizon_sec"
+            )
+        if not (
+            self.min_interpolation_horizon_sec
+            <= self.default_interpolation_horizon_sec
+            <= self.max_interpolation_horizon_sec
+        ):
+            raise ValueError(
+                "umi_dual_cartesian.tcp_pose_target_conditioning.default_interpolation_horizon_sec "
+                "must be within [min_interpolation_horizon_sec, max_interpolation_horizon_sec]"
+            )
+
+
+@dataclass(frozen=True)
+class UmiTargetLeadClampConfig:
+    enable: bool = True
+    max_target_lead_m: float = 0.060
+    max_target_lead_rad: float = 0.25
+    rebase_conditioner_on_clamp: bool = True
+
+    def __post_init__(self) -> None:
+        if self.max_target_lead_m < 0.0:
+            raise ValueError("umi_dual_cartesian.target_lead_clamp.max_target_lead_m must be non-negative")
+        if self.max_target_lead_rad < 0.0:
+            raise ValueError("umi_dual_cartesian.target_lead_clamp.max_target_lead_rad must be non-negative")
+
+
+@dataclass(frozen=True)
 class UmiDualCartesianConfig:
     left: UmiPoseReaderConfig = field(
         default_factory=lambda: UmiPoseReaderConfig(mock_script="pgmode_umi_smoke")
@@ -321,6 +381,10 @@ class UmiDualCartesianConfig:
     # last setpoint keeps streaming (arm holds, server stays fresh) instead of
     # tearing down to Hold. 0.0 restores the legacy immediate-release behavior.
     deadman_release_grace_sec: float = 0.2
+    tcp_pose_target_conditioning: UmiTcpPoseTargetConditioningConfig = field(
+        default_factory=UmiTcpPoseTargetConditioningConfig
+    )
+    target_lead_clamp: UmiTargetLeadClampConfig = field(default_factory=UmiTargetLeadClampConfig)
 
     def __post_init__(self) -> None:
         if self.max_linear_step_m < 0.0:
@@ -369,6 +433,7 @@ class PolicyRunnerConfig:
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     geometry: GeometryConfig = field(default_factory=GeometryConfig)
     recording: RecordingConfig = field(default_factory=RecordingConfig)
+    arm_init_override: ArmInitOverrideConfig = field(default_factory=ArmInitOverrideConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     gripper: GripperConfig = field(default_factory=GripperConfig)
     robot_state: RobotStateConfig = field(default_factory=RobotStateConfig)
@@ -406,6 +471,7 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
         runtime=_runtime_config(_section(raw, "runtime")),
         geometry=GeometryConfig(**_section(raw, "geometry")),
         recording=_recording_config(_section(raw, "recording")),
+        arm_init_override=_arm_init_override_config(_section(raw, "arm_init_override")),
         camera=_camera_config(_section(raw, "camera")),
         gripper=_gripper_config(_section(raw, "gripper")),
         robot_state=RobotStateConfig(**_section(raw, "robot_state")),
@@ -429,6 +495,7 @@ def _validate_top_level_keys(raw: dict[str, Any]) -> None:
         "runtime",
         "geometry",
         "recording",
+        "arm_init_override",
         "camera",
         "gripper",
         "robot_state",
@@ -481,6 +548,19 @@ def _recording_config(raw: dict[str, Any]) -> RecordingConfig:
             raise ValueError("recording.dataset_metadata must be a mapping")
         raw["dataset_metadata"] = dict(value)
     return RecordingConfig(**raw)
+
+
+def _arm_init_override_config(raw: dict[str, Any]) -> ArmInitOverrideConfig:
+    for key in (
+        "auto_clear_on_done",
+        "auto_clear_on_failed",
+        "resume_flow_on_done",
+        "reset_flow_source_on_start",
+        "reset_flow_source_on_resume",
+    ):
+        if key in raw:
+            raw[key] = bool(raw[key])
+    return ArmInitOverrideConfig(**raw)
 
 
 def _camera_config(raw: dict[str, Any]) -> CameraConfig:
@@ -635,7 +715,13 @@ def _spacemouse_device_config(raw: dict[str, Any]) -> SpaceMouseDeviceConfig:
 def _umi_dual_cartesian_config(raw: dict[str, Any]) -> UmiDualCartesianConfig:
     left = _umi_reader_config(_section(raw, "left"))
     right = _umi_reader_config(_section(raw, "right"))
-    top_level = {key: value for key, value in raw.items() if key not in {"left", "right"}}
+    conditioning = _umi_conditioning_config(_section(raw, "tcp_pose_target_conditioning"))
+    target_lead_clamp = _umi_target_lead_clamp_config(_section(raw, "target_lead_clamp"))
+    top_level = {
+        key: value
+        for key, value in raw.items()
+        if key not in {"left", "right", "tcp_pose_target_conditioning", "target_lead_clamp"}
+    }
     if "max_linear_step_m" in top_level:
         top_level["max_linear_step_m"] = float(top_level["max_linear_step_m"])
     if "max_angular_step_rad" in top_level:
@@ -666,7 +752,43 @@ def _umi_dual_cartesian_config(raw: dict[str, Any]) -> UmiDualCartesianConfig:
         top_level["r_align"] = tuple(float(item) for item in value)
     if "workspace_bounds" in top_level:
         top_level["workspace_bounds"] = _umi_workspace_bounds(top_level["workspace_bounds"])
-    return UmiDualCartesianConfig(left=left, right=right, **top_level)
+    return UmiDualCartesianConfig(
+        left=left,
+        right=right,
+        tcp_pose_target_conditioning=conditioning,
+        target_lead_clamp=target_lead_clamp,
+        **top_level,
+    )
+
+
+def _umi_conditioning_config(raw: dict[str, Any]) -> UmiTcpPoseTargetConditioningConfig:
+    if "enable" in raw:
+        raw["enable"] = bool(raw["enable"])
+    if "mode" in raw:
+        raw["mode"] = str(raw["mode"])
+    for key in (
+        "emit_rate_hz",
+        "min_interpolation_horizon_sec",
+        "max_interpolation_horizon_sec",
+        "default_interpolation_horizon_sec",
+    ):
+        if key in raw:
+            raw[key] = float(raw[key])
+    for key in ("reset_on_engage", "stop_on_release", "stop_on_stale"):
+        if key in raw:
+            raw[key] = bool(raw[key])
+    return UmiTcpPoseTargetConditioningConfig(**raw)
+
+
+def _umi_target_lead_clamp_config(raw: dict[str, Any]) -> UmiTargetLeadClampConfig:
+    if "enable" in raw:
+        raw["enable"] = bool(raw["enable"])
+    for key in ("max_target_lead_m", "max_target_lead_rad"):
+        if key in raw:
+            raw[key] = float(raw[key])
+    if "rebase_conditioner_on_clamp" in raw:
+        raw["rebase_conditioner_on_clamp"] = bool(raw["rebase_conditioner_on_clamp"])
+    return UmiTargetLeadClampConfig(**raw)
 
 
 def _umi_reader_config(raw: dict[str, Any]) -> UmiPoseReaderConfig:

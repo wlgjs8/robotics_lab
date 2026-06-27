@@ -35,9 +35,9 @@ from .safety import SafetyGate
 from .servo_command_client import CommandIntent, ServoCommandClient
 from .arm_init_control import (
     ArmInitOverrideController,
+    apply_source_override_transitions,
     apply_source_arm_mask,
     intent_uses_source_requirements,
-    reset_source_after_override_change,
     source_arm_mask_copy,
 )
 from .record_control import RecordingSupervisor
@@ -106,6 +106,32 @@ def _active_lease_loss_reason(
     if lease.active_source_id == source_id and lease.active_session_id == session_id:
         return ("server reports our session with a different lease token", False)
     return (f"server lease is held by {owner}", True)
+
+
+def _runner_role(config: PolicyRunnerConfig, source: object, action_source_name: str) -> str:
+    explicit = str(getattr(source, "runner_role", "") or "")
+    if explicit in {"stack", "flow_infer", "unknown"}:
+        return explicit
+    haystack = " ".join(
+        str(value)
+        for value in (
+            action_source_name,
+            config.action_source,
+            getattr(source, "command_family", ""),
+            getattr(source, "policy_label", ""),
+            type(source).__name__,
+        )
+    ).lower()
+    if (
+        "flow" in haystack
+        or "openpi" in haystack
+        or "directbc" in haystack
+        or "pointcloud" in haystack
+    ):
+        return "flow_infer"
+    if action_source_name and action_source_name != "hold":
+        return "stack"
+    return "unknown"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -183,7 +209,14 @@ def run(
     # monotonic_fn sequences, so no extra monotonic_fn() calls here.
     debug_last_print: float | None = None
     recording_supervisor = recording_supervisor or RecordingSupervisor.from_config(config, stderr=stderr)
-    arm_init_override = ArmInitOverrideController(timeout_sec=config.servo_command.timeout_sec)
+    arm_init_override = ArmInitOverrideController(
+        timeout_sec=config.servo_command.timeout_sec,
+        auto_clear_on_done=config.arm_init_override.auto_clear_on_done,
+        auto_clear_on_failed=config.arm_init_override.auto_clear_on_failed,
+        resume_flow_on_done=config.arm_init_override.resume_flow_on_done,
+        reset_flow_source_on_start=config.arm_init_override.reset_flow_source_on_start,
+        reset_flow_source_on_resume=config.arm_init_override.reset_flow_source_on_resume,
+    )
     source_base_arm_mask = source_arm_mask_copy(source)
     last_record_packet: dict[str, object] | None = None
     last_record_packet_time_ns = 0
@@ -208,6 +241,7 @@ def run(
         last_record_packet_seq = 0
 
     def _finish_tick(snapshot: StateSnapshot, now_value: float) -> None:
+        action_source_name = str(getattr(source, "name", config.action_source))
         recording_supervisor.record_frame(
             snapshot,
             action_packet=last_record_packet,
@@ -219,6 +253,9 @@ def run(
         recording_supervisor.publish_status(
             now_monotonic=now_value,
             arm_init=arm_init_override.status_block(),
+            runner_role=_runner_role(config, source, action_source_name),
+            action_source=action_source_name,
+            command_client=command_client,
         )
         sleep_fn(period)
     try:
@@ -242,10 +279,18 @@ def run(
             if callable(drain_payloads) and callable(dispatch_payloads):
                 control_payloads = drain_payloads()
                 dispatch_payloads(control_payloads, snapshot, action_source=action_source_name)
-                if arm_init_override.handle_payloads(control_payloads):
-                    reset_source_after_override_change(source)
+                arm_init_override.handle_payloads(control_payloads)
             else:
                 recording_supervisor.drain_commands(snapshot, action_source=action_source_name)
+            arm_init_override.update_from_snapshot(snapshot)
+            transitions = arm_init_override.consume_transitions()
+            apply_source_override_transitions(
+                source,
+                transitions,
+                snapshot,
+                reset_on_start=config.arm_init_override.reset_flow_source_on_start,
+                reset_on_resume=config.arm_init_override.reset_flow_source_on_resume,
+            )
             apply_source_arm_mask(source, source_base_arm_mask, arm_init_override)
             recording_supervisor.stamp_snapshot(snapshot)
             arm_init_override.stamp_snapshot(snapshot)
@@ -480,6 +525,8 @@ def _make_umi_dual_cartesian_source(config: PolicyRunnerConfig) -> UmiDualCartes
         sample_hold_timeout_sec=umi.sample_hold_timeout_sec,
         timeout_sec=config.servo_command.timeout_sec,
         deadman_release_grace_sec=umi.deadman_release_grace_sec,
+        tcp_pose_target_conditioning=umi.tcp_pose_target_conditioning,
+        target_lead_clamp=umi.target_lead_clamp,
     )
 
 
@@ -970,7 +1017,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--gripper-close-bias",
         type=float,
-        default=3.0,
+        default=7.0,
         help="Percent subtracted from the ABSOLUTE gripper opening target so grasps close more "
              "firmly (lower opening = more closed). E.g. 1.0 turns an 18%% command into 17%%; use it "
              "when the policy stops a hair short of clamping the object. Clamped to [0,100]; 0 = off "
@@ -1849,6 +1896,8 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     **source_kwargs,
                     **tcp_tp_kwargs,
                 )
+            source.runner_role = "flow_infer"
+            source.name = "flow_infer"
             # Runtime execution mask: suppress the non-selected arm's per-step
             # commands so it holds in place. Only source.arm_mask (the emission
             # gate) is changed; source.checkpoint_arm_mask / selected_arms (the

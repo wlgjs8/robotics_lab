@@ -72,7 +72,17 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
     writePoseHeader(os, side, "tcp_command_stand");
     writePoseHeader(os, side, "tcp_actual_stand");
     writePoseHeader(os, side, "tcp_ref_stand");
-    os << ',' << side << "_smd_active"
+    os << ',' << side << "_tcp_target_profile"
+       << ',' << side << "_smd_profile_nf_linear_hz"
+       << ',' << side << "_smd_profile_nf_angular_hz"
+       << ',' << side << "_smd_profile_velocity_feedforward"
+       << ',' << side << "_smd_profile_max_linear_velocity_m_s"
+       << ',' << side << "_smd_profile_max_linear_accel_m_s2"
+       << ',' << side << "_smd_profile_max_angular_velocity_rad_s"
+       << ',' << side << "_smd_profile_max_angular_accel_rad_s2"
+       << ',' << side << "_smd_profile_max_goal_lead_m"
+       << ',' << side << "_smd_profile_max_goal_lead_rad"
+       << ',' << side << "_smd_active"
        << ',' << side << "_smd_velocity_feedforward_used"
        << ',' << side << "_smd_linear_velocity_clipped"
        << ',' << side << "_smd_linear_accel_clipped"
@@ -120,6 +130,33 @@ void writeTcpPoseTargetDebugHeader(std::ostream& os, const char* side) {
        << ',' << side << "_safety_joint_limit_limited_joint"
        << ',' << side << "_safety_velocity_limited_joint"
        << ',' << side << "_safety_accel_limited_joint";
+}
+
+void writeInitMotionHeader(std::ostream& os) {
+    os << ",left_mode_before_init_sequencer"
+       << ",right_mode_before_init_sequencer"
+       << ",left_mode_after_init_sequencer"
+       << ",right_mode_after_init_sequencer"
+       << ",init_motion_left_status"
+       << ",init_motion_right_status"
+       << ",init_motion_aggregate_status"
+       << ",init_motion_left_fail_mode"
+       << ",init_motion_right_fail_mode"
+       << ",init_motion_aggregate_fail_mode"
+       << ",init_motion_left_message"
+       << ",init_motion_right_message"
+       << ",init_motion_aggregate_message"
+       << ",init_motion_left_waypoint_index"
+       << ",init_motion_left_waypoint_count"
+       << ",init_motion_right_waypoint_index"
+       << ",init_motion_right_waypoint_count"
+       << ",init_motion_aggregate_waypoint_index"
+       << ",init_motion_aggregate_waypoint_count"
+       << ",init_motion_left_dist_to_goal_deg"
+       << ",init_motion_right_dist_to_goal_deg"
+       << ",init_motion_aggregate_dist_to_goal_deg"
+       << ",non_init_arm_preserved_mode"
+       << ",single_arm_freeze_other_arm";
 }
 
 }  // namespace
@@ -233,6 +270,7 @@ void ServoLogger::writeHeader() {
     writeArmProfilingHeader(file_, "right");
     writeTcpPoseTargetDebugHeader(file_, "left");
     writeTcpPoseTargetDebugHeader(file_, "right");
+    writeInitMotionHeader(file_);
     file_ << '\n';
 }
 
@@ -352,7 +390,17 @@ void writeArmProfilingColumns(
     writePoseColumns(os, state.tcp_command_stand);
     writePoseColumns(os, tcpActualStand(state));
     writePoseColumns(os, state.tcp_ref_stand);
-    os << ',' << telemetry.smd_active
+    os << ',' << csvEscape(telemetry.tcp_target_profile)
+       << ',' << telemetry.smd_profile_nf_linear_hz
+       << ',' << telemetry.smd_profile_nf_angular_hz
+       << ',' << telemetry.smd_profile_velocity_feedforward
+       << ',' << telemetry.smd_profile_max_linear_velocity_m_s
+       << ',' << telemetry.smd_profile_max_linear_accel_m_s2
+       << ',' << telemetry.smd_profile_max_angular_velocity_rad_s
+       << ',' << telemetry.smd_profile_max_angular_accel_rad_s2
+       << ',' << telemetry.smd_profile_max_goal_lead_m
+       << ',' << telemetry.smd_profile_max_goal_lead_rad
+       << ',' << telemetry.smd_active
        << ',' << telemetry.smd_velocity_feedforward_used
        << ',' << telemetry.smd_linear_velocity_clipped
        << ',' << telemetry.smd_linear_accel_clipped
@@ -406,6 +454,33 @@ void writeTcpPoseTargetDebugColumns(std::ostream& os, const CartesianSolveTeleme
        << ',' << clamp.joint_limit_limited_joint
        << ',' << clamp.velocity_limited_joint
        << ',' << clamp.accel_limited_joint;
+}
+
+void writeInitMotionColumns(std::ostream& os, const ServoSample& sample) {
+    os << ',' << csvEscape(sample.left_mode_before_init_sequencer)
+       << ',' << csvEscape(sample.right_mode_before_init_sequencer)
+       << ',' << csvEscape(sample.left_mode_after_init_sequencer)
+       << ',' << csvEscape(sample.right_mode_after_init_sequencer)
+       << ',' << csvEscape(sample.init_motion_left.status)
+       << ',' << csvEscape(sample.init_motion_right.status)
+       << ',' << csvEscape(sample.init_motion.status)
+       << ',' << csvEscape(sample.init_motion_left.fail_mode)
+       << ',' << csvEscape(sample.init_motion_right.fail_mode)
+       << ',' << csvEscape(sample.init_motion.fail_mode)
+       << ',' << csvEscape(sample.init_motion_left.message)
+       << ',' << csvEscape(sample.init_motion_right.message)
+       << ',' << csvEscape(sample.init_motion.message)
+       << ',' << sample.init_motion_left.waypoint_index
+       << ',' << sample.init_motion_left.waypoint_count
+       << ',' << sample.init_motion_right.waypoint_index
+       << ',' << sample.init_motion_right.waypoint_count
+       << ',' << sample.init_motion.waypoint_index
+       << ',' << sample.init_motion.waypoint_count
+       << ',' << sample.init_motion_left.dist_to_goal_deg
+       << ',' << sample.init_motion_right.dist_to_goal_deg
+       << ',' << sample.init_motion.dist_to_goal_deg
+       << ',' << csvEscape(sample.non_init_arm_preserved_mode)
+       << ',' << sample.single_arm_freeze_other_arm;
 }
 }  // namespace
 
@@ -575,6 +650,7 @@ void ServoLogger::writeSample(const ServoSample& sample) {
         right_derivatives);
     writeTcpPoseTargetDebugColumns(file_, sample.left_cartesian_solve);
     writeTcpPoseTargetDebugColumns(file_, sample.right_cartesian_solve);
+    writeInitMotionColumns(file_, sample);
     file_ << '\n';
 }
 
