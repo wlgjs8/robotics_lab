@@ -212,7 +212,7 @@ safety:
       pika_finger_right_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_finger_right.STL"
       gripper_finger_travel_m: 0.047
       stand_ignore_arm_substrings: ["link0"]
-      d_hard_m: 0.007   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
+      d_hard_m: 0.010   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
       # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
       # can brake a head-on approach at the command ceiling before the hard floor.
       # v_max(max_linear_velocity)=0.32, a_brake=4.0 -> d_hard+0.0128=0.0278; 0.035
@@ -267,8 +267,8 @@ safety:
       # (3 mm) than the robot keeps from itself (7 mm). The InitMotion planner applies the
       # same external d_hard to floor pairs (vs self pairs at the self margin).
       external:
-        d_hard_m: 0.002
-        d_slow_m: 0.015
+        d_hard_m: 0.0025
+        d_slow_m: 0.005
         a_brake_m_s2: 3.0
         hyst_m: 0.010
         recover_speed_m_s: 0.0
