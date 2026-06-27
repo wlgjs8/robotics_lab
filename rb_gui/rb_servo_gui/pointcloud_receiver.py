@@ -209,10 +209,17 @@ class StereoCloudReceiver:
                 topic = parts[0].decode("utf-8", "replace")
                 if topic == "stereo.boxes" and len(parts) == 2:
                     meta = json.loads(parts[1].decode("utf-8", "replace"))
-                    boxes = [{"T": np.array(b["T"], float).reshape(4, 4),
-                              "dims": tuple(b.get("dims", (0.38, 0.24, 0.11))),
-                              "fitness": b.get("fitness"),
-                              "label": b.get("label")} for b in meta.get("boxes", [])]
+                    boxes = []
+                    for b in meta.get("boxes", []):
+                        box = {"T": np.array(b["T"], float).reshape(4, 4),
+                               "dims": tuple(b.get("dims", (0.38, 0.24, 0.11))),
+                               "fitness": b.get("fitness"),
+                               "label": b.get("label")}
+                        for key in ("rmse", "track_id", "icp_method", "source_n", "n",
+                                    "footprint", "icp_sample_n", "coasting"):
+                            if key in b:
+                                box[key] = b.get(key)
+                        boxes.append(box)
                     self.store.update_boxes(boxes, int(meta.get("seq", -1)))
                     continue
                 if len(parts) != 4:

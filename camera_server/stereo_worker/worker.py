@@ -118,11 +118,31 @@ class CloudPublisher:
 
     def publish_boxes(self, seq, boxes, frame="stand"):
         """박스 pose(T_stand_box)를 stereo.boxes 토픽으로 publish (같은 PUB 소켓)."""
-        payload = {"seq": int(seq), "frame": frame, "boxes": [
-            {"T": [float(v) for v in b["T"].flatten()],
-             "dims": [float(v) for v in b["dims"]],
-             "footprint": [float(v) for v in b["footprint"]],
-             "n": int(b["n"]), "label": b.get("label")} for b in boxes]}
+        def encode_box(b):
+            out = {
+                "T": [float(v) for v in b["T"].flatten()],
+                "dims": [float(v) for v in b["dims"]],
+                "footprint": [float(v) for v in b["footprint"]],
+                "n": int(b["n"]),
+                "label": b.get("label"),
+            }
+            for key in ("fitness", "rmse", "track_id", "icp_method", "source_n",
+                        "icp_sample_n", "coasting"):
+                if key not in b:
+                    continue
+                v = b[key]
+                if v is None:
+                    out[key] = None
+                elif isinstance(v, (bool, np.bool_)):
+                    out[key] = bool(v)
+                elif isinstance(v, (int, np.integer)):
+                    out[key] = int(v)
+                elif isinstance(v, (float, np.floating)):
+                    out[key] = float(v)
+                else:
+                    out[key] = v
+            return out
+        payload = {"seq": int(seq), "frame": frame, "boxes": [encode_box(b) for b in boxes]}
         self._sock.send_multipart([b"stereo.boxes", self._json.dumps(payload).encode()])
 
     def publish_wrist(self, arm, seq, xyz, rgb):
@@ -180,7 +200,11 @@ def cmd_run(args):
     if os.environ.get("STEREO_DETECT", "1") != "0":
         try:
             from box_detect import BoxDetector, BoxTracker
-            detector = BoxDetector(K, baseline, use_icp=os.environ.get("STEREO_DETECT_ICP", "1") != "0")
+            detector = BoxDetector(
+                K, baseline,
+                use_icp=os.environ.get("STEREO_DETECT_ICP", "1") != "0",
+                icp_method=os.environ.get("STEREO_DETECT_ICP_METHOD", "point_to_point"),
+            )
             if os.environ.get("STEREO_TRACK", "1") != "0":
                 tracker = BoxTracker()
             print(f"[run] box detect: ON (icp={detector.use_icp}, track={tracker is not None})", flush=True)

@@ -20,9 +20,12 @@ import numpy as np
 
 try:
     import cv2
-    import open3d as o3d
 except Exception:  # noqa: BLE001
     cv2 = None
+
+try:
+    import open3d as o3d
+except Exception:  # noqa: BLE001
     o3d = None
 
 BOX_DIMS = (0.380, 0.240, 0.110)
@@ -95,12 +98,16 @@ class BoxDetector:
     FPS_CAP = 8000                 # FPS 전 랜덤 상한(속도)
     ICP_MAX_CORR = 0.03            # ICP 대응 최대거리 (m) = 암묵 trimming
     ICP_ITERS = 40
+    MAX_COMPONENTS = 8             # candidate ranking cost bound
 
-    def __init__(self, K, baseline, use_icp=True):
+    def __init__(self, K, baseline, use_icp=True, icp_method=None):
         self.fx, self.fy = K[0, 0], K[1, 1]
         self.cx, self.cy = K[0, 2], K[1, 2]
         self.baseline = baseline
         self.use_icp = use_icp and (o3d is not None)
+        self.icp_method = self._normalize_icp_method(
+            icp_method or os.environ.get("STEREO_DETECT_ICP_METHOD", "point_to_point")
+        )
         self.model = _open_tray_model()
         self._uu = self._vv = None
         self._T_sc = _load_T(T_STAND_CAM_PATH)
@@ -109,6 +116,25 @@ class BoxDetector:
         self._cfg_t = 0.0
         self._rng = np.random.default_rng(0)
         self._warned_torch = False
+        self._warned_cuda = False
+        self._warned_icp_method = False
+        self._torch = None
+        self._torch_cuda_ok = None
+
+    @staticmethod
+    def _normalize_icp_method(method):
+        m = str(method or "point_to_point").strip().lower().replace("-", "_")
+        aliases = {
+            "p2p": "point_to_point",
+            "point": "point_to_point",
+            "point_to_point": "point_to_point",
+            "point2point": "point_to_point",
+            "p2l": "point_to_plane",
+            "plane": "point_to_plane",
+            "point_to_plane": "point_to_plane",
+            "point2plane": "point_to_plane",
+        }
+        return aliases.get(m, "point_to_point")
 
     def _reload_cfg(self, now):
         if now - self._cfg_t > 1.0:
@@ -205,17 +231,32 @@ class BoxDetector:
             return pts.astype(np.float64)
         if len(pts) > self.FPS_CAP:
             pts = pts[self._rng.choice(len(pts), self.FPS_CAP, replace=False)]
+        if self._torch_cuda_ok is None:
+            try:
+                import torch
+                self._torch = torch
+                self._torch_cuda_ok = bool(torch.cuda.is_available())
+            except Exception as e:  # noqa: BLE001
+                self._torch = None
+                self._torch_cuda_ok = False
+                if not self._warned_torch:
+                    print(f"[box_detect] torch FPS 불가 → numpy 폴백: {e}", flush=True)
+                    self._warned_torch = True
+        if not self._torch_cuda_ok:
+            if self._torch is not None and not self._warned_cuda:
+                print("[box_detect] CUDA torch FPS 비활성 → numpy 폴백", flush=True)
+                self._warned_cuda = True
+            return self._fps_numpy(pts, k)
         try:
-            import torch
-            t = torch.as_tensor(pts, device="cuda", dtype=torch.float32)
+            t = self._torch.as_tensor(pts, device="cuda", dtype=self._torch.float32)
             n = t.shape[0]
-            idx = torch.empty(k, dtype=torch.long, device=t.device)
-            d = torch.full((n,), 1e10, device=t.device)
-            far = torch.zeros((), dtype=torch.long, device=t.device)
+            idx = self._torch.empty(k, dtype=self._torch.long, device=t.device)
+            d = self._torch.full((n,), 1e10, device=t.device)
+            far = self._torch.zeros((), dtype=self._torch.long, device=t.device)
             for i in range(k):
                 idx[i] = far
-                d = torch.minimum(d, ((t - t[far]) ** 2).sum(1))
-                far = torch.argmax(d)
+                d = self._torch.minimum(d, ((t - t[far]) ** 2).sum(1))
+                far = self._torch.argmax(d)
             return t[idx].double().cpu().numpy()
         except Exception as e:  # noqa: BLE001
             if not self._warned_torch:
@@ -239,40 +280,107 @@ class BoxDetector:
         Mw = self.model @ T0[:3, :3].T + T0[:3, 3]
         src = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(s))
         tgt = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(Mw))
-        reg = o3d.pipelines.registration.registration_icp(
-            src, tgt, self.ICP_MAX_CORR, np.eye(4),
-            o3d.pipelines.registration.TransformationEstimationPointToPoint(),
-            o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=self.ICP_ITERS))
-        return np.linalg.inv(reg.transformation) @ T0, float(reg.fitness)
+        method = self.icp_method
+        if method == "point_to_plane":
+            try:
+                tgt.estimate_normals(
+                    o3d.geometry.KDTreeSearchParamHybrid(radius=0.06, max_nn=30)
+                )
+                estimator = o3d.pipelines.registration.TransformationEstimationPointToPlane()
+            except Exception as e:  # noqa: BLE001
+                if not self._warned_icp_method:
+                    print(f"[box_detect] point-to-plane ICP 불가 → point-to-point 폴백: {e}", flush=True)
+                    self._warned_icp_method = True
+                method = "point_to_point_fallback"
+                estimator = o3d.pipelines.registration.TransformationEstimationPointToPoint()
+        else:
+            estimator = o3d.pipelines.registration.TransformationEstimationPointToPoint()
+        try:
+            reg = o3d.pipelines.registration.registration_icp(
+                src, tgt, self.ICP_MAX_CORR, np.eye(4),
+                estimator,
+                o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=self.ICP_ITERS))
+        except Exception as e:  # noqa: BLE001
+            if method != "point_to_plane":
+                raise
+            if not self._warned_icp_method:
+                print(f"[box_detect] point-to-plane ICP 실패 → point-to-point 폴백: {e}", flush=True)
+                self._warned_icp_method = True
+            method = "point_to_point_fallback"
+            reg = o3d.pipelines.registration.registration_icp(
+                src, tgt, self.ICP_MAX_CORR, np.eye(4),
+                o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+                o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=self.ICP_ITERS))
+        return (np.linalg.inv(reg.transformation) @ T0,
+                float(reg.fitness),
+                float(getattr(reg, "inlier_rmse", np.nan)),
+                method,
+                int(len(s)))
 
-    def _detect_one(self, pts, cam_xy, plane, label):
-        """후보 점 → 최대 클러스터 → init fit → ICP → box dict (RoI 게이트)."""
+    def _component_candidates(self, pts, cam_xy, plane, label):
+        """후보 점을 cluster별 init-fit 후보로 변환한다. ICP는 최종 선택 후 한 번만 수행."""
         if len(pts) < self.MIN_PTS:
-            return None
+            return []
         pl, comps = self._cluster_xy(pts[:, :2])
-        scene = None
-        for cid in comps:
+        out = []
+        for cid in comps[:self.MAX_COMPONENTS]:
             m = pl == cid
-            if m.sum() >= self.MIN_PTS:
-                scene = pts[m]; break
-        if scene is None:
+            n = int(m.sum())
+            if n < self.MIN_PTS:
+                continue
+            scene = pts[m]
+            T0, foot = self._init_fit(scene[:, :2], cam_xy, plane)
+            if T0 is None:
+                continue
+            out.append(dict(scene=scene, T0=T0, footprint=foot, n=n, label=label))
+        return out
+
+    @staticmethod
+    def _candidate_fit_score(cand):
+        """known dims에 맞는 cluster를 선호하되, partial observation은 허용한다."""
+        obs_long, obs_short = cand["footprint"]
+        long_cov = min(obs_long / BOX_DIMS[0], 1.0)
+        short_cov = min(obs_short / BOX_DIMS[1], 1.0)
+        long_over = max(0.0, obs_long - BOX_DIMS[0]) / BOX_DIMS[0]
+        short_over = max(0.0, obs_short - BOX_DIMS[1]) / BOX_DIMS[1]
+        n_bonus = min(cand["n"] / 6000.0, 1.0)
+        oversize_penalty = 8.0 * long_over * long_over + 12.0 * short_over * short_over
+        return 0.55 * long_cov + 0.35 * short_cov + 0.10 * n_bonus - oversize_penalty
+
+    def _select_candidate(self, pts, cam_xy, plane, label, prefer_fit=False):
+        cands = self._component_candidates(pts, cam_xy, plane, label)
+        if not cands:
             return None
-        T0, foot = self._init_fit(scene[:, :2], cam_xy, plane)
+        if prefer_fit:
+            return max(cands, key=self._candidate_fit_score)
+        return max(cands, key=lambda c: (c["n"], self._candidate_fit_score(c)))
+
+    def _detect_one(self, pts, cam_xy, plane, label, prefer_fit=False):
+        """후보 점 → cluster ranking → init fit → ICP → box dict (RoI 게이트)."""
+        cand = self._select_candidate(pts, cam_xy, plane, label, prefer_fit=prefer_fit)
+        if cand is None:
+            return None
+        scene = cand["scene"]
+        T0 = cand["T0"]
+        foot = cand["footprint"]
         if T0 is None:
             return None
         if self.use_icp:
-            T, fit = self._icp(scene, T0)
+            T, fit, rmse, method, sample_n = self._icp(scene, T0)
         else:
-            T, fit = T0, 1.0
+            T, fit, rmse, method, sample_n = T0, 1.0, None, "disabled", 0
         c = T[:3, 3]
         if not (self.ROI_X[0] < c[0] < self.ROI_X[1] and self.ROI_Y[0] < c[1] < self.ROI_Y[1]
                 and self.ROI_Z[0] < c[2] < self.ROI_Z[1]):
             return None
         return dict(T=T, dims=BOX_DIMS, footprint=foot, n=int(len(scene)),
-                    fitness=round(fit, 3), label=label)
+                    source_n=int(len(scene)), icp_sample_n=int(sample_n),
+                    fitness=round(fit, 3),
+                    rmse=(None if rmse is None or not np.isfinite(rmse) else round(float(rmse), 5)),
+                    icp_method=method, label=label)
 
     def detect(self, disp, color_img=None):
-        if cv2 is None or o3d is None:
+        if cv2 is None:
             return []
         now = time.time(); self._reload_cfg(now)
         Pc, valid = self._cam_points(disp)                       # 카메라 프레임 organized
@@ -326,7 +434,7 @@ class BoxDetector:
             r = 0.5 * float(np.hypot(BOX_DIMS[0], BOX_DIMS[1])) * 0.92
             keep &= np.linalg.norm(Pb[:, :2] - green_center, axis=1) > r
         if int(keep.sum()) >= self.MIN_PTS:
-            gr = self._detect_one(Pb[keep], cam_xy, plane, "gray")
+            gr = self._detect_one(Pb[keep], cam_xy, plane, "gray", prefer_fit=True)
             if gr:
                 out.append(gr)
         return out
@@ -374,6 +482,11 @@ class BoxTracker:
                 uu = a*tr["up"] + (1-a)*up; tr["up"] = uu/np.linalg.norm(uu)
                 tr["hits"] += 1; tr["miss"] = 0
                 tr["foot"] = d["footprint"]; tr["n"] = d["n"]; tr["label"] = d.get("label")
+                tr["fitness"] = d.get("fitness")
+                tr["rmse"] = d.get("rmse")
+                tr["icp_method"] = d.get("icp_method")
+                tr["source_n"] = d.get("source_n", d.get("n"))
+                tr["icp_sample_n"] = d.get("icp_sample_n")
             else:
                 tr["miss"] += 1
         for i, (c, x, up, d) in enumerate(obs):       # 새 트랙
@@ -382,7 +495,10 @@ class BoxTracker:
             self._id += 1
             self.tracks.append(dict(center=c, x_ax=x, up=up, hits=1, miss=0,
                                     foot=d["footprint"], n=d["n"], id=self._id,
-                                    label=d.get("label")))
+                                    label=d.get("label"), fitness=d.get("fitness"),
+                                    rmse=d.get("rmse"), icp_method=d.get("icp_method"),
+                                    source_n=d.get("source_n", d.get("n")),
+                                    icp_sample_n=d.get("icp_sample_n")))
         self.tracks = [t for t in self.tracks if t["miss"] <= self.max_miss]
         out = []
         for t in self.tracks:
@@ -392,5 +508,10 @@ class BoxTracker:
                 y = np.cross(up, x)
                 T = np.eye(4); T[:3, :3] = np.column_stack([x, y, up]); T[:3, 3] = t["center"]
                 out.append(dict(T=T, dims=BOX_DIMS, footprint=t["foot"], n=t["n"],
-                                fitness=1.0, track_id=t["id"], label=t.get("label")))
+                                fitness=t.get("fitness"), rmse=t.get("rmse"),
+                                icp_method=t.get("icp_method"),
+                                source_n=t.get("source_n", t.get("n")),
+                                icp_sample_n=t.get("icp_sample_n"),
+                                track_id=t["id"], coasting=t["miss"] > 0,
+                                label=t.get("label")))
         return out

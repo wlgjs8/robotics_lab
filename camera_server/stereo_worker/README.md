@@ -36,6 +36,15 @@ docker compose --profile real_camera run --rm \
 ## 환경변수
 - `FFS_DIR` (기본 `/app/Fast-FoundationStereo`) — 마운트된 submodule 경로.
 - `STEREO_WEIGHTS` — 기본 `weights/23-36-37/...`(정확). 빠른 모델은 `weights/20-30-48/...`.
+- `STEREO_DETECT` (기본 `1`) — head stereo 박스 검출 publish(`stereo.boxes`) 활성화.
+- `STEREO_DETECT_ICP` (기본 `1`) — 검출 후보에 known-model ICP refinement 적용.
+- `STEREO_DETECT_ICP_METHOD` (기본 `point_to_point`) — `point_to_point` 또는
+  `point_to_plane`. `point_to_plane`은 opt-in 실험 경로이며 실패 시
+  `point_to_point`로 fallback한다.
+
+`stereo.boxes` payload는 기존 `T`/`dims`/`footprint`/`n`/`label`에 더해, 가능하면
+`fitness`, `rmse`, `track_id`, `icp_method`, `source_n`, `icp_sample_n`, `coasting`
+telemetry를 additive field로 싣는다. 기존 consumer는 필드를 무시해도 된다.
 
 ## 다음 단계
 1. 스모크테스트 통과 확인 (PyTorch 경로).
