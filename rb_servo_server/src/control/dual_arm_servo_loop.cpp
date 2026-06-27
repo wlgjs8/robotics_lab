@@ -1686,6 +1686,8 @@ void DualArmServoLoop::loopMain() {
         bool async_supervision_degraded_this_tick = false;
         bool async_supervision_degraded_warned_this_tick = false;
         tracking_error_degraded_this_tick_ = false;
+        left_abc_telemetry_.safety_clamp_present = false;
+        right_abc_telemetry_.safety_clamp_present = false;
         const auto handleAsyncSupervisionFault =
             [&](const LatchedDualFaultContext& async_fault_contexts,
                 const RobotState& current_left_state,
@@ -3095,6 +3097,9 @@ void DualArmServoLoop::mergeAbcTelemetry(
         solve.q_target_before_output_ma_deg = abc.q_target_before_output_ma_deg;
         solve.q_target_after_output_ma_deg = abc.q_target_after_output_ma_deg;
     }
+    if (abc.safety_clamp_present) {
+        solve.safety_clamp = abc.safety_clamp;
+    }
 }
 
 ServoTarget DualArmServoLoop::computeServoTarget(
@@ -3489,6 +3494,10 @@ ServoTarget DualArmServoLoop::applySafety(
     );
     left_safety_tracking_ = left_result.tracking;
     right_safety_tracking_ = right_result.tracking;
+    left_abc_telemetry_.safety_clamp_present = left_result.clamp.present;
+    left_abc_telemetry_.safety_clamp = left_result.clamp;
+    right_abc_telemetry_.safety_clamp_present = right_result.clamp.present;
+    right_abc_telemetry_.safety_clamp = right_result.clamp;
 
     out.left_q_target_deg = left_result.filtered_q_deg;
     out.right_q_target_deg = right_result.filtered_q_deg;
@@ -3514,18 +3523,24 @@ ServoTarget DualArmServoLoop::applySafety(
             // diagnostics_suspect controller's reference readback, with no physical
             // motion. Surfaced as degraded telemetry + throttled WARN; real mode keeps
             // the latch (gate closed above).
-            out.left_q_target_deg = safety_filter_.clampMotion(
+            const SafetyClampTelemetry left_clamp = safety_filter_.clampMotionDetailed(
                 desired.left_q_target_deg,
                 left_prev_sent_q_deg_,
                 left_prevprev_sent_q_deg_,
                 dt_sec
             );
-            out.right_q_target_deg = safety_filter_.clampMotion(
+            const SafetyClampTelemetry right_clamp = safety_filter_.clampMotionDetailed(
                 desired.right_q_target_deg,
                 right_prev_sent_q_deg_,
                 right_prevprev_sent_q_deg_,
                 dt_sec
             );
+            out.left_q_target_deg = left_clamp.q_after_accel_limit_deg;
+            out.right_q_target_deg = right_clamp.q_after_accel_limit_deg;
+            left_abc_telemetry_.safety_clamp_present = left_clamp.present;
+            left_abc_telemetry_.safety_clamp = left_clamp;
+            right_abc_telemetry_.safety_clamp_present = right_clamp.present;
+            right_abc_telemetry_.safety_clamp = right_clamp;
             tracking_error_degraded_this_tick_ = true;
             const std::string reason = combined_reason.empty()
                 ? "tracking error exceeded threshold"

@@ -44,6 +44,54 @@ bool finitePose(const Pose6D& pose) {
            std::isfinite(pose.rz);
 }
 
+JointArray jointDelta(const JointArray& q, const JointArray& seed) {
+    JointArray out{};
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        out[i] = q[i] - seed[i];
+    }
+    return out;
+}
+
+double maxAbsJointDelta(const JointArray& q, const JointArray& seed) {
+    double max_abs = 0.0;
+    for (std::size_t i = 0; i < kDof; ++i) {
+        max_abs = std::max(max_abs, std::abs(q[i] - seed[i]));
+    }
+    return max_abs;
+}
+
+void populateBranchJumpDetails(
+    IkResult& result,
+    const JointArray& seed_q_deg,
+    double limit_deg,
+    int retry_count,
+    const JointArray& raw_solution_q_deg
+) {
+    result.branch_jump_details_valid = true;
+    result.q_seed_deg = seed_q_deg;
+    result.q_raw_solution_deg = raw_solution_q_deg;
+    result.q_raw_delta_deg = jointDelta(raw_solution_q_deg, seed_q_deg);
+    result.q_solution_delta_deg = jointDelta(result.q_solution_deg, seed_q_deg);
+    result.raw_solution_jump_deg = maxAbsJointDelta(raw_solution_q_deg, seed_q_deg);
+    result.branch_jump_limit_deg = limit_deg;
+    result.branch_jump_retry_count = retry_count;
+}
+
+void populateBranchJumpDetails(
+    IkResult& result,
+    const JointArray& seed_q_deg,
+    double limit_deg,
+    int retry_count
+) {
+    populateBranchJumpDetails(
+        result,
+        seed_q_deg,
+        limit_deg,
+        retry_count,
+        result.q_solution_deg
+    );
+}
+
 }  // namespace
 
 struct PinocchioKinematics::Impl {
@@ -421,16 +469,16 @@ IkResult PinocchioKinematics::solveIkDamped(
             result.iterations = iterations;
             result.min_singular_value = last_min_singular_value;
             result.applied_damping = last_applied_damping;
-            double solution_jump_deg = 0.0;
-            for (std::size_t i = 0; i < kDof; ++i) {
-                solution_jump_deg = std::max(
-                    solution_jump_deg,
-                    std::abs(result.q_solution_deg[i] - seed_q_deg[i]));
-            }
-            result.solution_jump_deg = solution_jump_deg;
+            result.solution_jump_deg = maxAbsJointDelta(result.q_solution_deg, seed_q_deg);
             result.branch_jump_suspected =
                 config_.ik.max_solution_jump_deg > 0.0 &&
-                solution_jump_deg > config_.ik.max_solution_jump_deg;
+                result.solution_jump_deg > config_.ik.max_solution_jump_deg;
+            populateBranchJumpDetails(
+                result,
+                seed_q_deg,
+                config_.ik.max_solution_jump_deg,
+                0
+            );
             return result;
         }
         if (iterations == config_.ik.max_iterations) break;
@@ -547,17 +595,21 @@ IkResult PinocchioKinematics::solveIk(
     // most-damped successful attempt as best-effort.
     const double scale = config_.ik.branch_jump_damping_scale;
     const int retries = config_.ik.branch_jump_max_retries;
+    int retry_count = 0;
     if (scale > 1.0 && retries > 0) {
         double cur_scale = 1.0;
         for (int r = 0; r < retries; ++r) {
             cur_scale *= scale;
             IkResult retry =
                 solveIkDamped(arm, target_tcp_stand, seed_q_deg, mount, cur_scale);
+            retry_count = r + 1;
             if (retry.success && retry.solution_jump_deg <= thresh) {
+                retry.branch_jump_retry_count = retry_count;
                 return retry;  // higher damping resolved the jump -> smooth small step
             }
             if (retry.success) {
                 result = retry;  // best-effort: carry the most-damped solution
+                result.branch_jump_retry_count = retry_count;
             }
         }
     }
@@ -570,10 +622,8 @@ IkResult PinocchioKinematics::solveIk(
     // bounded joint speed: no deadlock (seed advances every tick) and no abrupt
     // flip. max_solution_jump_deg is the smoothness/lag knob.
     if (config_.ik.branch_jump_rate_limit) {
-        double max_abs = 0.0;
-        for (std::size_t i = 0; i < kDof; ++i) {
-            max_abs = std::max(max_abs, std::abs(result.q_solution_deg[i] - seed_q_deg[i]));
-        }
+        const JointArray raw_solution = result.q_solution_deg;
+        const double max_abs = maxAbsJointDelta(raw_solution, seed_q_deg);
         if (max_abs > thresh && max_abs > 0.0) {
             const double s = thresh / max_abs;
             IkResult limited = result;
@@ -585,7 +635,10 @@ IkResult PinocchioKinematics::solveIk(
             limited.solution_jump_deg = thresh;
             limited.branch_jump_suspected = true;
             limited.branch_jump_clamped = false;
+            limited.branch_jump_rate_limited = true;
+            limited.branch_jump_scale = s;
             limited.reason = "branch_jump_rate_limited";
+            populateBranchJumpDetails(limited, seed_q_deg, thresh, retry_count, raw_solution);
             return limited;
         }
         return result;
@@ -596,13 +649,16 @@ IkResult PinocchioKinematics::solveIk(
     // than a violent branch-flip. Gated, so the default (clamp off) stays pure
     // observability (returns the flagged solution unchanged).
     if (config_.ik.branch_jump_clamp_to_seed) {
+        const JointArray raw_solution = result.q_solution_deg;
         IkResult held = result;
         held.success = true;
         held.q_solution_deg = seed_q_deg;
         held.solution_jump_deg = 0.0;
         held.branch_jump_suspected = true;
         held.branch_jump_clamped = true;
+        held.branch_jump_scale = 0.0;
         held.reason = "branch_jump_clamped_to_seed";
+        populateBranchJumpDetails(held, seed_q_deg, thresh, retry_count, raw_solution);
         return held;
     }
     return result;

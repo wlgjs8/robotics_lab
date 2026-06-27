@@ -14,6 +14,14 @@ bool isFiniteJoints(const JointArray& joints) {
     return true;
 }
 
+JointArray jointDelta(const JointArray& q, const JointArray& seed) {
+    JointArray out{};
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        out[i] = q[i] - seed[i];
+    }
+    return out;
+}
+
 const ArmMountConfig& mountForArm(
     ArmId arm_id,
     const ArmMountConfig& left_mount,
@@ -145,6 +153,22 @@ CartesianArmTargetResult solveIkArmTargetFromTcpStand(
     result.telemetry.ik_solution_jump_deg = ik.solution_jump_deg;
     result.telemetry.ik_branch_jump_suspected = ik.branch_jump_suspected;
     result.telemetry.ik_branch_jump_clamped = ik.branch_jump_clamped;
+    result.telemetry.ik_branch_jump_rate_limited = ik.branch_jump_rate_limited;
+    result.telemetry.ik_branch_jump_raw_deg =
+        ik.branch_jump_details_valid ? ik.raw_solution_jump_deg : ik.solution_jump_deg;
+    result.telemetry.ik_branch_jump_limit_deg = ik.branch_jump_limit_deg;
+    result.telemetry.ik_branch_jump_scale = ik.branch_jump_scale;
+    result.telemetry.ik_branch_jump_retry_count = ik.branch_jump_retry_count;
+    result.telemetry.q_ik_seed_deg = ik.branch_jump_details_valid ? ik.q_seed_deg : seed_q_deg;
+    result.telemetry.q_ik_raw_solution_deg =
+        ik.branch_jump_details_valid ? ik.q_raw_solution_deg : ik.q_solution_deg;
+    result.telemetry.q_ik_solution_deg = ik.q_solution_deg;
+    result.telemetry.q_ik_raw_delta_deg = ik.branch_jump_details_valid
+        ? ik.q_raw_delta_deg
+        : jointDelta(ik.q_solution_deg, seed_q_deg);
+    result.telemetry.q_ik_delta_deg = ik.branch_jump_details_valid
+        ? ik.q_solution_delta_deg
+        : jointDelta(ik.q_solution_deg, seed_q_deg);
     result.telemetry.ik_timed_out = ik.timed_out || ik.reason == ik_solver::kReasonTimeout;
     result.telemetry.ik_warn_duration_exceeded =
         config.warn_ik_duration_us > 0.0 && ik.duration_us > config.warn_ik_duration_us;

@@ -76,6 +76,19 @@ bool contains(const std::string& text, const std::string& needle) {
     return text.find(needle) != std::string::npos;
 }
 
+std::vector<std::string> splitCommaSeparated(const std::string& line) {
+    std::vector<std::string> fields;
+    std::stringstream stream(line);
+    std::string field;
+    while (std::getline(stream, field, ',')) {
+        fields.push_back(field);
+    }
+    if (!line.empty() && line.back() == ',') {
+        fields.push_back("");
+    }
+    return fields;
+}
+
 bool containsValue(const std::vector<std::string>& values, const std::string& needle) {
     return std::find(values.begin(), values.end(), needle) != values.end();
 }
@@ -1557,9 +1570,21 @@ bool testSafetyFilterVelocityClampMaxStep() {
     );
 
     RB_CHECK(result.ok);
+    RB_CHECK(result.clamp.present);
+    RB_CHECK(!result.clamp.joint_limit_clamped);
+    RB_CHECK(result.clamp.velocity_clamped);
+    RB_CHECK(!result.clamp.accel_clamped);
+    RB_CHECK(result.clamp.velocity_limited_joint >= 0);
+    RB_CHECK(std::abs(result.clamp.velocity_clamp_max_delta_deg - 99.9) < kEpsilon);
     for (double q : result.filtered_q_deg) {
         RB_CHECK(q <= 0.1 + kEpsilon);
         RB_CHECK(q >= -kEpsilon);
+    }
+    for (int i = 0; i < rb_servo::kDof; ++i) {
+        RB_CHECK(std::abs(result.clamp.q_before_safety_deg[i] - 100.0) < kEpsilon);
+        RB_CHECK(std::abs(result.clamp.q_after_joint_limit_deg[i] - 100.0) < kEpsilon);
+        RB_CHECK(std::abs(result.clamp.q_after_velocity_limit_deg[i] - 0.1) < kEpsilon);
+        RB_CHECK(std::abs(result.clamp.q_after_accel_limit_deg[i] - result.filtered_q_deg[i]) < kEpsilon);
     }
     return true;
 }
@@ -1577,7 +1602,7 @@ bool testSafetyFilterAccelerationClampDoesNotOvershoot() {
     state.q_actual_deg = joints(0.0);
 
     const rb_servo::SafetyCheckResult result = filter.filterJointTarget(
-        joints(0.005),
+        joints(0.02),
         joints(0.0),
         joints(0.0),
         state,
@@ -1585,9 +1610,21 @@ bool testSafetyFilterAccelerationClampDoesNotOvershoot() {
     );
 
     RB_CHECK(result.ok);
+    RB_CHECK(result.clamp.present);
+    RB_CHECK(!result.clamp.joint_limit_clamped);
+    RB_CHECK(!result.clamp.velocity_clamped);
+    RB_CHECK(result.clamp.accel_clamped);
+    RB_CHECK(result.clamp.accel_limited_joint >= 0);
+    RB_CHECK(result.clamp.accel_clamp_max_delta_deg > 0.0);
     for (double q : result.filtered_q_deg) {
-        RB_CHECK(q <= 0.005 + kEpsilon);
+        RB_CHECK(q <= 0.02 + kEpsilon);
         RB_CHECK(q >= -kEpsilon);
+    }
+    for (int i = 0; i < rb_servo::kDof; ++i) {
+        RB_CHECK(std::abs(result.clamp.q_before_safety_deg[i] - 0.02) < kEpsilon);
+        RB_CHECK(std::abs(result.clamp.q_after_joint_limit_deg[i] - 0.02) < kEpsilon);
+        RB_CHECK(std::abs(result.clamp.q_after_velocity_limit_deg[i] - 0.02) < kEpsilon);
+        RB_CHECK(std::abs(result.clamp.q_after_accel_limit_deg[i] - result.filtered_q_deg[i]) < kEpsilon);
     }
     return true;
 }
@@ -3043,6 +3080,27 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     snapshot.left_cartesian_solve.ik_iterations = 7;
     snapshot.left_cartesian_solve.position_error_m = 0.001;
     snapshot.left_cartesian_solve.orientation_error_rad = 0.002;
+    snapshot.left_cartesian_solve.ik_branch_jump_rate_limited = true;
+    snapshot.left_cartesian_solve.ik_branch_jump_raw_deg = 18.0;
+    snapshot.left_cartesian_solve.ik_branch_jump_limit_deg = 4.0;
+    snapshot.left_cartesian_solve.ik_branch_jump_scale = 4.0 / 18.0;
+    snapshot.left_cartesian_solve.ik_branch_jump_retry_count = 2;
+    snapshot.left_cartesian_solve.q_ik_seed_deg = joints(1.0);
+    snapshot.left_cartesian_solve.q_ik_raw_solution_deg = joints(19.0);
+    snapshot.left_cartesian_solve.q_ik_solution_deg = joints(5.0);
+    snapshot.left_cartesian_solve.q_ik_raw_delta_deg = joints(18.0);
+    snapshot.left_cartesian_solve.q_ik_delta_deg = joints(4.0);
+    snapshot.left_cartesian_solve.safety_clamp.present = true;
+    snapshot.left_cartesian_solve.safety_clamp.q_before_safety_deg = joints(6.0);
+    snapshot.left_cartesian_solve.safety_clamp.q_after_joint_limit_deg = joints(6.0);
+    snapshot.left_cartesian_solve.safety_clamp.q_after_velocity_limit_deg = joints(5.0);
+    snapshot.left_cartesian_solve.safety_clamp.q_after_accel_limit_deg = joints(4.5);
+    snapshot.left_cartesian_solve.safety_clamp.velocity_clamped = true;
+    snapshot.left_cartesian_solve.safety_clamp.accel_clamped = true;
+    snapshot.left_cartesian_solve.safety_clamp.velocity_clamp_max_delta_deg = 1.0;
+    snapshot.left_cartesian_solve.safety_clamp.accel_clamp_max_delta_deg = 0.5;
+    snapshot.left_cartesian_solve.safety_clamp.velocity_limited_joint = 0;
+    snapshot.left_cartesian_solve.safety_clamp.accel_limited_joint = 1;
     snapshot.left_cartesian_solve.path_active = true;
     snapshot.left_cartesian_solve.path_s = 0.5;
     snapshot.left_cartesian_solve.path_position_error_m = 0.003;
@@ -3292,6 +3350,17 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("left").at("cartesian_solve").at("ik_iterations").get<int>() == 7);
     RB_CHECK(json.at("left").at("cartesian_solve").at("position_error_m").get<double>() == 0.001);
     RB_CHECK(json.at("left").at("cartesian_solve").at("orientation_error_rad").get<double>() == 0.002);
+    RB_CHECK(json.at("left").at("cartesian_solve").at("ik_branch_jump_rate_limited").get<bool>());
+    RB_CHECK(json.at("left").at("cartesian_solve").at("ik_branch_jump_raw_deg").get<double>() == 18.0);
+    RB_CHECK(json.at("left").at("cartesian_solve").at("ik_branch_jump_limit_deg").get<double>() == 4.0);
+    RB_CHECK(json.at("left").at("cartesian_solve").at("ik_branch_jump_retry_count").get<int>() == 2);
+    RB_CHECK(jsonArrayHasSixFinite(json.at("left").at("cartesian_solve").at("q_ik_seed_deg")));
+    RB_CHECK(json.at("left").at("cartesian_solve").at("q_ik_delta_deg").at(0).get<double>() == 4.0);
+    RB_CHECK(json.at("left").at("cartesian_solve").at("safety_clamp_present").get<bool>());
+    RB_CHECK(json.at("left").at("cartesian_solve").at("safety_velocity_clamped").get<bool>());
+    RB_CHECK(json.at("left").at("cartesian_solve").at("safety_accel_clamped").get<bool>());
+    RB_CHECK(json.at("left").at("cartesian_solve").at("q_after_velocity_limit_deg").at(0).get<double>() == 5.0);
+    RB_CHECK(json.at("left").at("cartesian_solve").at("safety_velocity_limited_joint").get<int>() == 0);
     RB_CHECK(json.at("left").at("cartesian_solve").at("path_active").get<bool>());
     RB_CHECK(json.at("left").at("cartesian_solve").at("path_s").get<double>() == 0.5);
     RB_CHECK(json.at("left").at("cartesian_solve").at("path_position_error_m").get<double>() == 0.003);
@@ -3596,6 +3665,91 @@ bool testLoggerZeroCapacityDropsWithoutBlocking() {
     logger.stop();
     std::filesystem::remove_all(cfg.directory);
     RB_CHECK(logger.droppedSamples() == 1);
+    return true;
+}
+
+bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
+    rb_servo::LoggingConfig cfg;
+    cfg.enable = true;
+    cfg.directory = "/tmp/rb-servo-logger-columns-test-" + std::to_string(getpid());
+    cfg.queue_capacity = 4;
+    cfg.flush_period_ms = 1;
+    std::filesystem::remove_all(cfg.directory);
+
+    rb_servo::ServoLogger logger(cfg);
+    RB_CHECK(logger.start());
+
+    rb_servo::ServoSample sample;
+    sample.tick = 1;
+    sample.loop_start_time_ns = 1000;
+    sample.loop_end_time_ns = 3000;
+    sample.period_ms = 2.0;
+    sample.command.seq = 42;
+    sample.left_cartesian_solve.ik_branch_jump_rate_limited = true;
+    sample.left_cartesian_solve.ik_branch_jump_raw_deg = 12.0;
+    sample.left_cartesian_solve.ik_branch_jump_limit_deg = 4.0;
+    sample.left_cartesian_solve.ik_branch_jump_scale = 0.3333333333333333;
+    sample.left_cartesian_solve.ik_branch_jump_retry_count = 3;
+    sample.left_cartesian_solve.q_ik_seed_deg = joints(1.0);
+    sample.left_cartesian_solve.q_ik_raw_solution_deg = joints(13.0);
+    sample.left_cartesian_solve.q_ik_solution_deg = joints(5.0);
+    sample.left_cartesian_solve.q_ik_raw_delta_deg = joints(12.0);
+    sample.left_cartesian_solve.q_ik_delta_deg = joints(4.0);
+    sample.left_cartesian_solve.safety_clamp.present = true;
+    sample.left_cartesian_solve.safety_clamp.q_before_safety_deg = joints(6.0);
+    sample.left_cartesian_solve.safety_clamp.q_after_joint_limit_deg = joints(6.0);
+    sample.left_cartesian_solve.safety_clamp.q_after_velocity_limit_deg = joints(5.0);
+    sample.left_cartesian_solve.safety_clamp.q_after_accel_limit_deg = joints(4.5);
+    sample.left_cartesian_solve.safety_clamp.velocity_clamped = true;
+    sample.left_cartesian_solve.safety_clamp.accel_clamped = true;
+    sample.left_cartesian_solve.safety_clamp.velocity_clamp_max_delta_deg = 1.0;
+    sample.left_cartesian_solve.safety_clamp.accel_clamp_max_delta_deg = 0.5;
+    sample.left_cartesian_solve.safety_clamp.velocity_limited_joint = 0;
+    sample.left_cartesian_solve.safety_clamp.accel_limited_joint = 1;
+    logger.push(sample);
+
+    const std::filesystem::path latest = std::filesystem::path(cfg.directory) / "servo_log.csv";
+    std::string header_line;
+    std::string row_line;
+    const bool wrote_row = waitUntil([&] {
+        std::ifstream in(latest);
+        if (!in) return false;
+        if (!std::getline(in, header_line)) return false;
+        return static_cast<bool>(std::getline(in, row_line));
+    }, std::chrono::milliseconds(1000));
+    logger.stop();
+    RB_CHECK(wrote_row);
+
+    const std::vector<std::string> header = splitCommaSeparated(header_line);
+    const std::vector<std::string> row = splitCommaSeparated(row_line);
+    RB_CHECK(header.size() == row.size());
+    const auto index_of = [&](const std::string& name) {
+        const auto it = std::find(header.begin(), header.end(), name);
+        return it == header.end()
+            ? static_cast<std::size_t>(header.size())
+            : static_cast<std::size_t>(std::distance(header.begin(), it));
+    };
+    const std::size_t old_last = index_of("right_q_actual_jerk_deg_s3_5");
+    const std::size_t branch_rate = index_of("left_cart_branch_jump_rate_limited");
+    const std::size_t raw_jump = index_of("left_cart_branch_jump_raw_deg");
+    const std::size_t q_seed = index_of("left_q_ik_seed_deg_0");
+    const std::size_t clamp_present = index_of("left_safety_clamp_present");
+    const std::size_t velocity_clamped = index_of("left_safety_velocity_clamped");
+    const std::size_t accel_joint = index_of("left_safety_accel_limited_joint");
+    RB_CHECK(old_last < header.size());
+    RB_CHECK(branch_rate > old_last);
+    RB_CHECK(raw_jump > old_last);
+    RB_CHECK(q_seed > old_last);
+    RB_CHECK(clamp_present > old_last);
+    RB_CHECK(velocity_clamped > old_last);
+    RB_CHECK(accel_joint > old_last);
+    RB_CHECK(row.at(branch_rate) == "1");
+    RB_CHECK(row.at(raw_jump) == "12");
+    RB_CHECK(row.at(q_seed) == "1");
+    RB_CHECK(row.at(clamp_present) == "1");
+    RB_CHECK(row.at(velocity_clamped) == "1");
+    RB_CHECK(row.at(accel_joint) == "1");
+    std::filesystem::remove_all(cfg.directory);
     return true;
 }
 
@@ -5479,6 +5633,7 @@ int main() {
     if (!testStatePublisherUsesLatestSnapshotWithoutBackendReadsAndDoesNotStallLoop()) return 1;
     if (!testStatePublisherUsesConfiguredPublishRate()) return 1;
     if (!testLoggerZeroCapacityDropsWithoutBlocking()) return 1;
+    if (!testServoLoggerAppendsTcpPoseTargetDebugColumns()) return 1;
     if (!testReadOnlyDiagnosticStartupAllowsFaultedStateAndPublishesUnsafeSnapshot()) return 1;
     if (!testMotionStartupRejectsFaultedState()) return 1;
     if (!testRbpodoControllerSimulationMotionRequiresConfigAndRealEnvGates()) return 1;

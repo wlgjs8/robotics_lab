@@ -2972,6 +2972,10 @@ def build_gui(
             _pc = _load_gui_settings()
             handles["pc_enable"] = server.gui.add_checkbox(
                 "스테레오 pointcloud 표시", initial_value=bool(_pc.get("pc_enable", False)))
+            handles["pc_box_enable"] = server.gui.add_checkbox(
+                "매칭 박스 표시",
+                initial_value=bool(_pc.get("pc_box_enable", _pc.get("pc_enable", False))),
+            )
             handles["pc_size"] = server.gui.add_slider(
                 "point size", min=0.001, max=0.02, step=0.001,
                 initial_value=float(_pc.get("pc_size", 0.004)))
@@ -2987,7 +2991,7 @@ def build_gui(
             handles["pc_status"] = server.gui.add_text(
                 "pointcloud status", initial_value="off", disabled=True)
             # 설정 영속화: 변경 시 settings.json에 저장 (재시작 후에도 유지)
-            for _k in ("pc_enable", "pc_size", "pc_max_k", "pc_dmin", "pc_dmax"):
+            for _k in ("pc_enable", "pc_box_enable", "pc_size", "pc_max_k", "pc_dmin", "pc_dmax"):
                 handles[_k].on_update(lambda _evt: _persist_pc_settings(handles))
 
             with server.gui.add_folder("수동 캘리브레이션 (T_stand_cam)", expand_by_default=False):
@@ -3121,6 +3125,8 @@ def _persist_pc_settings(handles: dict[str, Any]) -> None:
     try:
         s = _load_gui_settings()
         s["pc_enable"] = bool(handles["pc_enable"].value)
+        if handles.get("pc_box_enable") is not None:
+            s["pc_box_enable"] = bool(handles["pc_box_enable"].value)
         s["pc_size"] = float(handles["pc_size"].value)
         s["pc_max_k"] = int(handles["pc_max_k"].value)
         s["pc_dmin"] = float(handles["pc_dmin"].value)
@@ -3627,11 +3633,13 @@ def _update_stereo_boxes(handles: dict[str, Any]) -> None:
     """검출된 박스(stereo.boxes, T_stand)를 box.stl 메쉬로 각각 렌더."""
     server = handles.get("_server")
     store = handles.get("_stereo_store")
-    toggle = handles.get("pc_enable")
+    toggle = handles.get("pc_box_enable")
+    if toggle is None:
+        toggle = handles.get("pc_enable")
     if server is None or store is None or toggle is None:
         return
     hs = handles.setdefault("_box_handles", {})
-    if not toggle.value:
+    if not bool(getattr(toggle, "value", False)):
         for h in hs.values():
             try:
                 h.visible = False

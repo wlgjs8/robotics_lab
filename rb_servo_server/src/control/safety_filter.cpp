@@ -39,6 +39,30 @@ SafetyTrackingTelemetry makeTrackingTelemetry(
     return telemetry;
 }
 
+void recordStageDelta(
+    const JointArray& before,
+    const JointArray& after,
+    bool* clamped,
+    double* max_delta_deg,
+    int* limited_joint
+) {
+    *clamped = false;
+    *max_delta_deg = 0.0;
+    *limited_joint = -1;
+    for (int i = 0; i < kDof; ++i) {
+        const double delta = std::abs(after[i] - before[i]);
+        if (delta > *max_delta_deg) {
+            *max_delta_deg = delta;
+            *limited_joint = i;
+        }
+    }
+    constexpr double kClampEpsilonDeg = 1e-12;
+    *clamped = *max_delta_deg > kClampEpsilonDeg;
+    if (!*clamped) {
+        *limited_joint = -1;
+    }
+}
+
 }  // namespace
 
 SafetyFilter::SafetyFilter(const SafetyConfig& config) : config_(config) {}
@@ -105,13 +129,15 @@ SafetyCheckResult SafetyFilter::filterJointTarget(
             "reference tracking error (advisory, controller-simulation)";
     }
 
-    bool clamped = false;
-    JointArray out = clampMotion(
-        desired_q_deg, previous_q_deg, previous_previous_q_deg, dt_sec, &clamped);
-
-    result.filtered_q_deg = out;
-    result.joint_limit_clamped = clamped;
-    result.verdict = clamped ? SafetyVerdict::JointLimitClamped : SafetyVerdict::Ok;
+    result.clamp = clampMotionDetailed(
+        desired_q_deg,
+        previous_q_deg,
+        previous_previous_q_deg,
+        dt_sec
+    );
+    result.filtered_q_deg = result.clamp.q_after_accel_limit_deg;
+    result.joint_limit_clamped = result.clamp.joint_limit_clamped;
+    result.verdict = result.joint_limit_clamped ? SafetyVerdict::JointLimitClamped : SafetyVerdict::Ok;
     result.ok = true;
     return result;
 }
@@ -123,10 +149,59 @@ JointArray SafetyFilter::clampMotion(
     double dt_sec,
     bool* clamped
 ) const {
-    JointArray out = clampJointLimits(desired_q_deg, clamped);
-    out = clampVelocity(out, previous_q_deg, dt_sec);
-    out = clampAcceleration(out, previous_q_deg, previous_previous_q_deg, dt_sec);
-    return out;
+    const SafetyClampTelemetry telemetry = clampMotionDetailed(
+        desired_q_deg,
+        previous_q_deg,
+        previous_previous_q_deg,
+        dt_sec
+    );
+    if (clamped) *clamped = telemetry.joint_limit_clamped;
+    return telemetry.q_after_accel_limit_deg;
+}
+
+SafetyClampTelemetry SafetyFilter::clampMotionDetailed(
+    const JointArray& desired_q_deg,
+    const JointArray& previous_q_deg,
+    const JointArray& previous_previous_q_deg,
+    double dt_sec
+) const {
+    SafetyClampTelemetry telemetry;
+    telemetry.present = true;
+    telemetry.q_before_safety_deg = desired_q_deg;
+    telemetry.q_after_joint_limit_deg = clampJointLimits(desired_q_deg, nullptr);
+    telemetry.q_after_velocity_limit_deg = clampVelocity(
+        telemetry.q_after_joint_limit_deg,
+        previous_q_deg,
+        dt_sec
+    );
+    telemetry.q_after_accel_limit_deg = clampAcceleration(
+        telemetry.q_after_velocity_limit_deg,
+        previous_q_deg,
+        previous_previous_q_deg,
+        dt_sec
+    );
+    recordStageDelta(
+        telemetry.q_before_safety_deg,
+        telemetry.q_after_joint_limit_deg,
+        &telemetry.joint_limit_clamped,
+        &telemetry.joint_limit_clamp_max_delta_deg,
+        &telemetry.joint_limit_limited_joint
+    );
+    recordStageDelta(
+        telemetry.q_after_joint_limit_deg,
+        telemetry.q_after_velocity_limit_deg,
+        &telemetry.velocity_clamped,
+        &telemetry.velocity_clamp_max_delta_deg,
+        &telemetry.velocity_limited_joint
+    );
+    recordStageDelta(
+        telemetry.q_after_velocity_limit_deg,
+        telemetry.q_after_accel_limit_deg,
+        &telemetry.accel_clamped,
+        &telemetry.accel_clamp_max_delta_deg,
+        &telemetry.accel_limited_joint
+    );
+    return telemetry;
 }
 
 SafetyVerdict SafetyFilter::checkState(const RobotState& state) const {

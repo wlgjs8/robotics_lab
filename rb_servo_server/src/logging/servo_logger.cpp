@@ -95,6 +95,33 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
     writeJointArrayHeader(os, side, "q_actual_jerk_deg_s3");
 }
 
+void writeTcpPoseTargetDebugHeader(std::ostream& os, const char* side) {
+    os << ',' << side << "_cart_branch_jump_rate_limited"
+       << ',' << side << "_cart_branch_jump_raw_deg"
+       << ',' << side << "_cart_branch_jump_limit_deg"
+       << ',' << side << "_cart_branch_jump_scale"
+       << ',' << side << "_cart_branch_jump_retry_count";
+    writeJointArrayHeader(os, side, "q_ik_seed_deg");
+    writeJointArrayHeader(os, side, "q_ik_raw_solution_deg");
+    writeJointArrayHeader(os, side, "q_ik_solution_deg");
+    writeJointArrayHeader(os, side, "q_ik_raw_delta_deg");
+    writeJointArrayHeader(os, side, "q_ik_delta_deg");
+    os << ',' << side << "_safety_clamp_present";
+    writeJointArrayHeader(os, side, "q_before_safety_deg");
+    writeJointArrayHeader(os, side, "q_after_joint_limit_deg");
+    writeJointArrayHeader(os, side, "q_after_velocity_limit_deg");
+    writeJointArrayHeader(os, side, "q_after_accel_limit_deg");
+    os << ',' << side << "_safety_joint_limit_clamped"
+       << ',' << side << "_safety_velocity_clamped"
+       << ',' << side << "_safety_accel_clamped"
+       << ',' << side << "_safety_joint_limit_clamp_max_delta_deg"
+       << ',' << side << "_safety_velocity_clamp_max_delta_deg"
+       << ',' << side << "_safety_accel_clamp_max_delta_deg"
+       << ',' << side << "_safety_joint_limit_limited_joint"
+       << ',' << side << "_safety_velocity_limited_joint"
+       << ',' << side << "_safety_accel_limited_joint";
+}
+
 }  // namespace
 
 ServoLogger::ServoLogger(const LoggingConfig& config) : config_(config) {}
@@ -204,6 +231,8 @@ void ServoLogger::writeHeader() {
     writeCartesianSolveHeader(file_, "right");
     writeArmProfilingHeader(file_, "left");
     writeArmProfilingHeader(file_, "right");
+    writeTcpPoseTargetDebugHeader(file_, "left");
+    writeTcpPoseTargetDebugHeader(file_, "right");
     file_ << '\n';
 }
 
@@ -349,6 +378,34 @@ void writeArmProfilingColumns(
     writeJointArrayColumns(os, derivatives.q_actual_velocity_deg_s);
     writeJointArrayColumns(os, derivatives.q_actual_accel_deg_s2);
     writeJointArrayColumns(os, derivatives.q_actual_jerk_deg_s3);
+}
+
+void writeTcpPoseTargetDebugColumns(std::ostream& os, const CartesianSolveTelemetry& telemetry) {
+    const SafetyClampTelemetry& clamp = telemetry.safety_clamp;
+    os << ',' << telemetry.ik_branch_jump_rate_limited
+       << ',' << telemetry.ik_branch_jump_raw_deg
+       << ',' << telemetry.ik_branch_jump_limit_deg
+       << ',' << telemetry.ik_branch_jump_scale
+       << ',' << telemetry.ik_branch_jump_retry_count;
+    writeJointArrayColumns(os, telemetry.q_ik_seed_deg);
+    writeJointArrayColumns(os, telemetry.q_ik_raw_solution_deg);
+    writeJointArrayColumns(os, telemetry.q_ik_solution_deg);
+    writeJointArrayColumns(os, telemetry.q_ik_raw_delta_deg);
+    writeJointArrayColumns(os, telemetry.q_ik_delta_deg);
+    os << ',' << clamp.present;
+    writeJointArrayColumns(os, clamp.q_before_safety_deg);
+    writeJointArrayColumns(os, clamp.q_after_joint_limit_deg);
+    writeJointArrayColumns(os, clamp.q_after_velocity_limit_deg);
+    writeJointArrayColumns(os, clamp.q_after_accel_limit_deg);
+    os << ',' << clamp.joint_limit_clamped
+       << ',' << clamp.velocity_clamped
+       << ',' << clamp.accel_clamped
+       << ',' << clamp.joint_limit_clamp_max_delta_deg
+       << ',' << clamp.velocity_clamp_max_delta_deg
+       << ',' << clamp.accel_clamp_max_delta_deg
+       << ',' << clamp.joint_limit_limited_joint
+       << ',' << clamp.velocity_limited_joint
+       << ',' << clamp.accel_limited_joint;
 }
 }  // namespace
 
@@ -516,6 +573,8 @@ void ServoLogger::writeSample(const ServoSample& sample) {
         sample.right_state,
         sample.right_cartesian_solve,
         right_derivatives);
+    writeTcpPoseTargetDebugColumns(file_, sample.left_cartesian_solve);
+    writeTcpPoseTargetDebugColumns(file_, sample.right_cartesian_solve);
     file_ << '\n';
 }
 

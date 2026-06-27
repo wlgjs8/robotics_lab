@@ -708,7 +708,12 @@ bool testIkBranchJumpRateLimitBoundsStepTowardSolution() {
     RB_CHECK(result.success);
     RB_CHECK(result.branch_jump_suspected);
     RB_CHECK(!result.branch_jump_clamped);          // not held at the seed
+    RB_CHECK(result.branch_jump_rate_limited);
+    RB_CHECK(result.branch_jump_details_valid);
     RB_CHECK(result.reason == "branch_jump_rate_limited");
+    RB_CHECK(std::fabs(result.raw_solution_jump_deg - full.solution_jump_deg) < 1e-6);
+    RB_CHECK(std::fabs(result.branch_jump_limit_deg - 2.0) < 1e-12);
+    RB_CHECK(result.branch_jump_retry_count == 0);
 
     // Largest per-joint step is bounded to the threshold, and it actually moved.
     double max_abs = 0.0;
@@ -721,9 +726,14 @@ bool testIkBranchJumpRateLimitBoundsStepTowardSolution() {
 
     // Direction preserved: result == seed + s*(full - seed) for one scalar s.
     const double s = 2.0 / full.solution_jump_deg;
+    RB_CHECK(std::fabs(result.branch_jump_scale - s) < 1e-12);
     for (std::size_t i = 0; i < rb_servo::kDof; ++i) {
         const double expected = seed[i] + (full.q_solution_deg[i] - seed[i]) * s;
         RB_CHECK(std::fabs(result.q_solution_deg[i] - expected) < 1e-9);
+        RB_CHECK(std::fabs(result.q_seed_deg[i] - seed[i]) < 1e-12);
+        RB_CHECK(std::fabs(result.q_raw_solution_deg[i] - full.q_solution_deg[i]) < 1e-6);
+        RB_CHECK(std::fabs(result.q_raw_delta_deg[i] - (full.q_solution_deg[i] - seed[i])) < 1e-6);
+        RB_CHECK(std::fabs(result.q_solution_delta_deg[i] - (result.q_solution_deg[i] - seed[i])) < 1e-12);
     }
     return true;
 }

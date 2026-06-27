@@ -30,6 +30,7 @@ struct SafetyCheckResult {
     bool joint_limit_clamped = false;
     std::string reason;
     SafetyTrackingTelemetry tracking;
+    SafetyClampTelemetry clamp;
 };
 
 class SafetyFilter {
@@ -69,6 +70,13 @@ public:
         const JointArray& previous_previous_q_deg,
         double dt_sec,
         bool* clamped = nullptr
+    ) const;
+
+    SafetyClampTelemetry clampMotionDetailed(
+        const JointArray& desired_q_deg,
+        const JointArray& previous_q_deg,
+        const JointArray& previous_previous_q_deg,
+        double dt_sec
     ) const;
 
 private:

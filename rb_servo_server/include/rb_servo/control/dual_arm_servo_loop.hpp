@@ -514,6 +514,8 @@ private:
         bool output_ma_present = false;
         JointArray q_target_before_output_ma_deg{};
         JointArray q_target_after_output_ma_deg{};
+        bool safety_clamp_present = false;
+        SafetyClampTelemetry safety_clamp;
     };
     AbcTelemetry left_abc_telemetry_;
     AbcTelemetry right_abc_telemetry_;

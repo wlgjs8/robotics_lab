@@ -27,6 +27,16 @@ struct IkResult {
     double solution_jump_deg = 0.0;      // max |q_solution - seed| over joints
     bool branch_jump_suspected = false;
     bool branch_jump_clamped = false;
+    bool branch_jump_rate_limited = false;
+    bool branch_jump_details_valid = false;
+    double raw_solution_jump_deg = 0.0;  // max |raw IK solution - seed|
+    double branch_jump_limit_deg = 0.0;
+    double branch_jump_scale = 1.0;      // final seed->solution scale after limiting
+    int branch_jump_retry_count = 0;
+    JointArray q_seed_deg{};
+    JointArray q_raw_solution_deg{};
+    JointArray q_raw_delta_deg{};
+    JointArray q_solution_delta_deg{};
 };
 
 class IKinematics {

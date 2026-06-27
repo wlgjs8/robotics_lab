@@ -593,6 +593,7 @@ nlohmann::json transportTelemetryJson(const std::optional<BackendTransportTeleme
 }
 
 nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
+    const SafetyClampTelemetry& clamp = telemetry.safety_clamp;
     return {
         {"attempted", telemetry.attempted},
         {"success", telemetry.success},
@@ -608,6 +609,16 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"ik_solution_jump_deg", telemetry.ik_solution_jump_deg},
         {"ik_branch_jump_suspected", telemetry.ik_branch_jump_suspected},
         {"ik_branch_jump_clamped", telemetry.ik_branch_jump_clamped},
+        {"ik_branch_jump_rate_limited", telemetry.ik_branch_jump_rate_limited},
+        {"ik_branch_jump_raw_deg", telemetry.ik_branch_jump_raw_deg},
+        {"ik_branch_jump_limit_deg", telemetry.ik_branch_jump_limit_deg},
+        {"ik_branch_jump_scale", telemetry.ik_branch_jump_scale},
+        {"ik_branch_jump_retry_count", telemetry.ik_branch_jump_retry_count},
+        {"q_ik_seed_deg", jointArrayJson(telemetry.q_ik_seed_deg)},
+        {"q_ik_raw_solution_deg", jointArrayJson(telemetry.q_ik_raw_solution_deg)},
+        {"q_ik_solution_deg", jointArrayJson(telemetry.q_ik_solution_deg)},
+        {"q_ik_raw_delta_deg", jointArrayJson(telemetry.q_ik_raw_delta_deg)},
+        {"q_ik_delta_deg", jointArrayJson(telemetry.q_ik_delta_deg)},
         {"ik_status", telemetry.status},
         {"ik_reason", telemetry.reason},
         {"ik_timed_out", telemetry.ik_timed_out},
@@ -658,6 +669,24 @@ nlohmann::json cartesianSolveJson(const CartesianSolveTelemetry& telemetry) {
         {"q_target_after_output_ma_deg",
          telemetry.output_ma_present ? jointArrayJson(telemetry.q_target_after_output_ma_deg)
                                      : nlohmann::json(nullptr)},
+        {"safety_clamp_present", clamp.present},
+        {"q_before_safety_deg", clamp.present ? jointArrayJson(clamp.q_before_safety_deg)
+                                             : nlohmann::json(nullptr)},
+        {"q_after_joint_limit_deg", clamp.present ? jointArrayJson(clamp.q_after_joint_limit_deg)
+                                                  : nlohmann::json(nullptr)},
+        {"q_after_velocity_limit_deg", clamp.present ? jointArrayJson(clamp.q_after_velocity_limit_deg)
+                                                     : nlohmann::json(nullptr)},
+        {"q_after_accel_limit_deg", clamp.present ? jointArrayJson(clamp.q_after_accel_limit_deg)
+                                                  : nlohmann::json(nullptr)},
+        {"safety_joint_limit_clamped", clamp.joint_limit_clamped},
+        {"safety_velocity_clamped", clamp.velocity_clamped},
+        {"safety_accel_clamped", clamp.accel_clamped},
+        {"safety_joint_limit_clamp_max_delta_deg", clamp.joint_limit_clamp_max_delta_deg},
+        {"safety_velocity_clamp_max_delta_deg", clamp.velocity_clamp_max_delta_deg},
+        {"safety_accel_clamp_max_delta_deg", clamp.accel_clamp_max_delta_deg},
+        {"safety_joint_limit_limited_joint", clamp.joint_limit_limited_joint},
+        {"safety_velocity_limited_joint", clamp.velocity_limited_joint},
+        {"safety_accel_limited_joint", clamp.accel_limited_joint},
     };
 }
 

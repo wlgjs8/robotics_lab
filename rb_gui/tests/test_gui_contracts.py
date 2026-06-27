@@ -3831,6 +3831,100 @@ class FloorConstraintGuiTest(unittest.TestCase):
         self.assertTrue(handles.get("floor_enforce_synced"))
 
 
+class PointcloudGuiTest(unittest.TestCase):
+    class _Value:
+        def __init__(self, value):
+            self.value = value
+
+    def test_persist_pc_settings_includes_box_toggle(self):
+        import os
+        import tempfile
+        from rb_servo_gui import app as gui_app
+
+        handles = {
+            "pc_enable": self._Value(False),
+            "pc_box_enable": self._Value(True),
+            "pc_size": self._Value(0.006),
+            "pc_max_k": self._Value(90),
+            "pc_dmin": self._Value(0.25),
+            "pc_dmax": self._Value(2.75),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "settings.json")
+            os.environ["RB_GUI_SETTINGS_PATH"] = path
+            try:
+                gui_app._persist_pc_settings(handles)
+                loaded = gui_app._load_gui_settings()
+                self.assertEqual(loaded.get("pc_enable"), False)
+                self.assertEqual(loaded.get("pc_box_enable"), True)
+                self.assertAlmostEqual(loaded.get("pc_size"), 0.006)
+                self.assertEqual(loaded.get("pc_max_k"), 90)
+                self.assertAlmostEqual(loaded.get("pc_dmin"), 0.25)
+                self.assertAlmostEqual(loaded.get("pc_dmax"), 2.75)
+            finally:
+                os.environ.pop("RB_GUI_SETTINGS_PATH", None)
+
+    def test_update_stereo_boxes_uses_box_toggle_independent_of_cloud_toggle(self):
+        from rb_servo_gui import app as gui_app
+
+        class _Scene:
+            def __init__(self):
+                self.meshes = {}
+
+            def add_mesh_simple(self, name, vertices, faces, **kwargs):
+                handle = RecordingSceneHandle()
+                handle.position = kwargs.get("position")
+                handle.wxyz = kwargs.get("wxyz")
+                handle.visible = kwargs.get("visible", True)
+                handle.color = kwargs.get("color")
+                self.meshes[name] = handle
+                return handle
+
+        class _Server:
+            def __init__(self, scene):
+                self.scene = scene
+
+        class _Store:
+            def __init__(self, boxes):
+                self.boxes = boxes
+
+            def latest_boxes(self):
+                return list(self.boxes), 7
+
+        t0 = np.eye(4)
+        t1 = np.eye(4)
+        t1[:3, 3] = [0.1, 0.2, 0.3]
+        boxes = [
+            {"T": t0, "dims": (0.38, 0.24, 0.11), "label": "green"},
+            {"T": t1, "dims": (0.38, 0.24, 0.11), "label": "gray"},
+        ]
+        old_mesh = gui_app._BOX_MESH
+        gui_app._BOX_MESH = (
+            np.zeros((3, 3), dtype=np.float32),
+            np.array([[0, 1, 2]], dtype=np.uint32),
+        )
+        self.addCleanup(lambda: setattr(gui_app, "_BOX_MESH", old_mesh))
+
+        scene = _Scene()
+        handles = {
+            "_server": _Server(scene),
+            "_stereo_store": _Store(boxes),
+            "pc_enable": self._Value(False),
+            "pc_box_enable": self._Value(True),
+        }
+        gui_app._update_stereo_boxes(handles)
+
+        self.assertEqual(set(scene.meshes), {"/stereo_box_0", "/stereo_box_1"})
+        self.assertEqual(set(handles["_box_handles"]), {"box0", "box1"})
+        self.assertTrue(handles["_box_handles"]["box0"].visible)
+        self.assertTrue(handles["_box_handles"]["box1"].visible)
+
+        handles["pc_box_enable"].value = False
+        gui_app._update_stereo_boxes(handles)
+        self.assertFalse(handles["_box_handles"]["box0"].visible)
+        self.assertFalse(handles["_box_handles"]["box1"].visible)
+
+
 class RoiBoxGuiTest(unittest.TestCase):
     @staticmethod
     def _roi_block(**overrides):

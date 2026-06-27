@@ -308,6 +308,23 @@ struct RobotState {
     std::optional<RbpodoDiagnosticsSnapshot> rbpodo_diagnostics;
 };
 
+struct SafetyClampTelemetry {
+    bool present = false;
+    JointArray q_before_safety_deg{};
+    JointArray q_after_joint_limit_deg{};
+    JointArray q_after_velocity_limit_deg{};
+    JointArray q_after_accel_limit_deg{};
+    bool joint_limit_clamped = false;
+    bool velocity_clamped = false;
+    bool accel_clamped = false;
+    double joint_limit_clamp_max_delta_deg = 0.0;
+    double velocity_clamp_max_delta_deg = 0.0;
+    double accel_clamp_max_delta_deg = 0.0;
+    int joint_limit_limited_joint = -1;
+    int velocity_limited_joint = -1;
+    int accel_limited_joint = -1;
+};
+
 struct CartesianSolveTelemetry {
     bool attempted = false;
     bool success = false;
@@ -324,6 +341,16 @@ struct CartesianSolveTelemetry {
     double ik_solution_jump_deg = 0.0;
     bool ik_branch_jump_suspected = false;
     bool ik_branch_jump_clamped = false;
+    bool ik_branch_jump_rate_limited = false;
+    double ik_branch_jump_raw_deg = 0.0;
+    double ik_branch_jump_limit_deg = 0.0;
+    double ik_branch_jump_scale = 1.0;
+    int ik_branch_jump_retry_count = 0;
+    JointArray q_ik_seed_deg{};
+    JointArray q_ik_raw_solution_deg{};
+    JointArray q_ik_solution_deg{};
+    JointArray q_ik_raw_delta_deg{};
+    JointArray q_ik_delta_deg{};
     bool ik_timed_out = false;
     bool ik_warn_duration_exceeded = false;
     bool ik_fail_duration_exceeded = false;
@@ -368,6 +395,7 @@ struct CartesianSolveTelemetry {
     int output_ma_window = 0;
     JointArray q_target_before_output_ma_deg{};
     JointArray q_target_after_output_ma_deg{};
+    SafetyClampTelemetry safety_clamp;
 };
 
 struct SafetyTrackingTelemetry {
