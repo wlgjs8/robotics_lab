@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import json
 import tempfile
 import time
 import unittest
@@ -22,6 +24,7 @@ try:
     )
     from policy_runner.flow_model import FlowMatchingPolicy, FlowModelConfig
     from policy_runner.robot_state_client import StateSnapshot
+    from policy_runner.servo_command_client import CommandIntent
 except Exception:
     np = None
     torch = None
@@ -111,6 +114,52 @@ class FlowInferenceTcpPoseTargetTest(unittest.TestCase):
         second_target = _pose_from_target_payload(second_intent.left["tcp_target_stand"])
         np.testing.assert_allclose(first_target[:3], [1.001, 0.0, 0.0], atol=1e-7)
         np.testing.assert_allclose(second_target[:3], [2.001, 0.0, 0.0], atol=1e-7)
+
+    def test_final_intent_action_log_records_composed_command(self) -> None:
+        source = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
+        source._action_log = io.StringIO()
+        source._action_log_seq = 7
+        source.command_family = "TcpPoseTarget"
+        override = type("Override", (), {"left_on": True, "right_on": False})()
+        snapshot = StateSnapshot(
+            payload={"command_source": {"active_source_id": "flow", "active_session_id": "sess"}},
+            received_monotonic=time.monotonic(),
+        )
+        intent = CommandIntent(
+            "TcpPoseTarget",
+            left={
+                "mode": "JointTarget",
+                "q_target_deg": [1, 2, 3, 4, 5, 6],
+                "joint_target_profile": "init_motion",
+            },
+            right={
+                "mode": "TcpPoseTarget",
+                "tcp_target_stand": [0.4, 0.5, 0.6, 0, 0, 0],
+            },
+        )
+
+        source.log_final_intent(
+            intent,
+            snapshot,
+            arm_init_override=override,
+            decision_allowed=True,
+            sent=True,
+            command_seq=10023,
+        )
+
+        record = json.loads(source._action_log.getvalue())
+        self.assertEqual(record["event"], "final_intent")
+        self.assertEqual(record["seq"], 7)
+        self.assertEqual(record["command_seq"], 10023)
+        self.assertEqual(record["left_mode"], "JointTarget")
+        self.assertEqual(record["left_joint_target_profile"], "init_motion")
+        self.assertEqual(record["right_mode"], "TcpPoseTarget")
+        self.assertTrue(record["arm_init_override_left"])
+        self.assertFalse(record["arm_init_override_right"])
+        self.assertTrue(record["sent"])
+        self.assertTrue(record["decision_allowed"])
+        self.assertEqual(record["command_source_id"], "flow")
+        self.assertEqual(record["command_session_id"], "sess")
 
     # ------------------------------------------------ Patch 3: foh_se3 conditioning --
     def _streamed_source(self, tmp: str, conditioning: str, reanchor: str = "measured_legacy"):

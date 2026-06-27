@@ -980,7 +980,11 @@ bool testSelfCollisionConfig() {
         "    mesh:\n"
         "      unified_urdf: \"" + rb3UrdfPath() + "\"\n"
         "      d_hard_m: 0.006\n"
-        "      d_slow_m: 0.03\n";
+        "      d_slow_m: 0.03\n"
+        "      disabled_collision_pairs:\n"
+        "        - [\"*left*link0*\", \"*left*link1*\"]\n"
+        "        - [\"*right*link0*\", \"*right*link1*\"]\n"
+        "      debug_pair_curation: true\n";
 
     // Enabled + kinematics + mesh: accepted and parsed.
     {
@@ -1001,6 +1005,10 @@ bool testSelfCollisionConfig() {
         RB_CHECK(!cfg.safety.self_collision.mesh.unified_urdf.empty());
         RB_CHECK(near(cfg.safety.self_collision.mesh.d_hard_m, 0.006));
         RB_CHECK(near(cfg.safety.self_collision.mesh.d_slow_m, 0.03));
+        RB_CHECK(cfg.safety.self_collision.mesh.disabled_collision_pairs.size() == 2);
+        RB_CHECK(cfg.safety.self_collision.mesh.disabled_collision_pairs[1].pattern_a == "*right*link0*");
+        RB_CHECK(cfg.safety.self_collision.mesh.disabled_collision_pairs[1].pattern_b == "*right*link1*");
+        RB_CHECK(cfg.safety.self_collision.mesh.debug_pair_curation);
     }
 
     // Disabled by default when the block is absent.
@@ -1045,6 +1053,25 @@ bool testSelfCollisionConfig() {
                 "      unified_urdf: \"" + rb3UrdfPath() + "\"\n"
                 "      d_hard_m: 0.03\n"
                 "      d_slow_m: 0.006\n"));
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+
+    // disabled_collision_pairs must be a list of 2-element string lists.
+    {
+        const std::string path = writeTempConfig(
+            "self-collision-bad-disabled-pair",
+            selfCollisionConfigBody(
+                true,
+                "  self_collision:\n"
+                "    enable: true\n"
+                "    mesh:\n"
+                "      unified_urdf: \"" + rb3UrdfPath() + "\"\n"
+                "      d_hard_m: 0.006\n"
+                "      d_slow_m: 0.03\n"
+                "      disabled_collision_pairs:\n"
+                "        - [\"*right*link0*\"]\n"));
         const bool rejected = loadRejects(path);
         ::unlink(path.c_str());
         RB_CHECK(rejected);

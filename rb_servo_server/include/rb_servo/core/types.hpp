@@ -684,6 +684,13 @@ struct InitMotionDiag {
     std::string message;
     double start_clear_m = std::numeric_limits<double>::quiet_NaN();
     double goal_clear_m = std::numeric_limits<double>::quiet_NaN();
+    double goal_self_min_clearance_m = std::numeric_limits<double>::quiet_NaN();
+    double goal_external_min_clearance_m = std::numeric_limits<double>::quiet_NaN();
+    std::string goal_nearest_pair_name_a;
+    std::string goal_nearest_pair_name_b;
+    bool goal_nearest_pair_external = false;
+    double goal_clear_threshold_self_m = std::numeric_limits<double>::quiet_NaN();
+    double goal_clear_threshold_external_m = std::numeric_limits<double>::quiet_NaN();
     int tree_start = 0;
     int tree_goal = 0;
     int iterations = 0;
@@ -691,15 +698,37 @@ struct InitMotionDiag {
     int waypoint_index = 0;
     int waypoint_count = 0;
     double dist_to_goal_deg = std::numeric_limits<double>::quiet_NaN();
+    double clear_threshold_m = std::numeric_limits<double>::quiet_NaN();
+    double external_clear_threshold_m = std::numeric_limits<double>::quiet_NaN();
+    std::string nearest_pair;
+    double nearest_pair_distance_m = std::numeric_limits<double>::quiet_NaN();
+    bool nearest_pair_external = false;
 };
 
 struct InitMotionArmDiag {
     std::string status = "idle";
     std::string fail_mode = "none";
     std::string message;
+    double goal_self_min_clearance_m = std::numeric_limits<double>::quiet_NaN();
+    double goal_external_min_clearance_m = std::numeric_limits<double>::quiet_NaN();
+    std::string goal_nearest_pair_name_a;
+    std::string goal_nearest_pair_name_b;
+    bool goal_nearest_pair_external = false;
+    double goal_clear_threshold_self_m = std::numeric_limits<double>::quiet_NaN();
+    double goal_clear_threshold_external_m = std::numeric_limits<double>::quiet_NaN();
     int waypoint_index = 0;
     int waypoint_count = 0;
     double dist_to_goal_deg = std::numeric_limits<double>::quiet_NaN();
+    double clear_threshold_m = std::numeric_limits<double>::quiet_NaN();
+    double external_clear_threshold_m = std::numeric_limits<double>::quiet_NaN();
+    std::string nearest_pair;
+    double nearest_pair_distance_m = std::numeric_limits<double>::quiet_NaN();
+    bool nearest_pair_external = false;
+};
+
+struct CollisionPairPattern {
+    std::string pattern_a;
+    std::string pattern_b;
 };
 
 struct ServoSample {

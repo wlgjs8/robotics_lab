@@ -54,6 +54,33 @@ static bool sameDistance(double a, double b) {
     return std::abs(a - b) < 1e-12;
 }
 
+static bool nearPairMatches(const CollisionNearPair& p, const CollisionPairPattern& rule) {
+    return collisionPairPatternMatches(rule, p.name_a, p.name_b);
+}
+
+static bool verdictHasPair(const CollisionVerdict& v, const CollisionPairPattern& rule) {
+    for (const auto& p : v.near) {
+        if (nearPairMatches(p, rule)) return true;
+    }
+    return false;
+}
+
+static bool runPairPatternMatching() {
+    CollisionPairPattern exact{"right_link0", "right_link1"};
+    RB_CHECK(collisionPairPatternMatches(exact, "right_link0", "right_link1"));
+    RB_CHECK(collisionPairPatternMatches(exact, "right_link1", "right_link0"));
+    RB_CHECK(!collisionPairPatternMatches(exact, "right_link0", "right_link2"));
+
+    CollisionPairPattern glob{"*right*link0*", "*right*link1*"};
+    RB_CHECK(collisionPairPatternMatches(
+        glob, "dual_rb3_730e_right_link0", "dual_rb3_730e_right_link1"));
+    RB_CHECK(collisionPairPatternMatches(
+        glob, "dual_rb3_730e_right_link1", "dual_rb3_730e_right_link0"));
+    RB_CHECK(!collisionPairPatternMatches(
+        glob, "dual_rb3_730e_left_link0", "dual_rb3_730e_right_link1"));
+    return true;
+}
+
 static bool run() {
     const fs::path ws = workspaceRoot();
     CollisionMonitorConfig cfg = makeConfig(ws);
@@ -68,6 +95,48 @@ static bool run() {
     std::cout << "geoms=" << mon.numGeometries() << " pairs=" << mon.numPairs() << "\n";
     RB_CHECK(mon.numGeometries() == 33);
     RB_CHECK(mon.numPairs() > 0);
+
+    {
+        CollisionMonitorConfig all_pairs_cfg = cfg;
+        all_pairs_cfg.swept_samples = 1;
+        all_pairs_cfg.max_near_pairs = 10000;
+        CollisionPairPattern adjacent_right{"*right*link0*", "*right*link1*"};
+        CollisionMonitor all_pairs(all_pairs_cfg);
+        const JointArray init = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+        const CollisionVerdict before = all_pairs.evalOnce(init, init);
+        RB_CHECK(before.valid);
+        const bool adjacent_present = verdictHasPair(before, adjacent_right);
+        std::cout << "right link0-link1 baseline pair present=" << adjacent_present << "\n";
+
+        CollisionMonitorConfig disabled_cfg = all_pairs_cfg;
+        disabled_cfg.disabled_collision_pairs.push_back(adjacent_right);
+        CollisionMonitor disabled(disabled_cfg);
+        const CollisionVerdict after = disabled.evalOnce(init, init);
+        RB_CHECK(after.valid);
+        RB_CHECK(!verdictHasPair(after, adjacent_right));
+        if (adjacent_present) {
+            RB_CHECK(disabled.numPairs() < all_pairs.numPairs());
+        } else {
+            // On URDFs where link0/link1 are classified as adjacent same-arm links,
+            // intra-arm chain separation already excludes the pair before SRDF rules.
+            RB_CHECK(disabled.numPairs() == all_pairs.numPairs());
+        }
+
+        CollisionMonitorConfig reversed_cfg = all_pairs_cfg;
+        reversed_cfg.disabled_collision_pairs.push_back(
+            CollisionPairPattern{"*right*link1*", "*right*link0*"});
+        CollisionMonitor reversed(reversed_cfg);
+        RB_CHECK(reversed.numPairs() == disabled.numPairs());
+
+        CollisionMonitorConfig lr_cfg = all_pairs_cfg;
+        CollisionPairPattern left_right{"*left*link6*", "*right*link6*"};
+        lr_cfg.disabled_collision_pairs.push_back(left_right);
+        CollisionMonitor lr_disabled(lr_cfg);
+        const CollisionVerdict lr_after = lr_disabled.evalOnce(init, init);
+        RB_CHECK(lr_after.valid);
+        RB_CHECK(!verdictHasPair(lr_after, left_right));
+        RB_CHECK(lr_disabled.numPairs() < all_pairs.numPairs());
+    }
 
     const JointArray init = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
 
@@ -565,6 +634,10 @@ static bool runArticulatedGripper() {
 }
 
 int main() {
+    if (!runPairPatternMatching()) {
+        std::cerr << "test_collision_monitor (pair pattern matching) FAILED\n";
+        return 1;
+    }
     if (!runProjection()) {
         std::cerr << "test_collision_monitor (projection) FAILED\n";
         return 1;

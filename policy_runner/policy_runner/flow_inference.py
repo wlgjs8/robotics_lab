@@ -1085,6 +1085,18 @@ class FlowMatchingActionSource:
             except Exception:
                 pass
 
+    @staticmethod
+    def _command_source_ids(snapshot: StateSnapshot) -> tuple[str | None, str | None]:
+        command_source = snapshot.payload.get("command_source", {})
+        if not isinstance(command_source, dict):
+            return None, None
+        source_id = command_source.get("source_id") or command_source.get("active_source_id")
+        session_id = command_source.get("session_id") or command_source.get("active_session_id")
+        return (
+            str(source_id) if source_id is not None else None,
+            str(session_id) if session_id is not None else None,
+        )
+
     def _log_arm_init_event(
         self,
         event: str,
@@ -1100,21 +1112,72 @@ class FlowMatchingActionSource:
         log = self._action_log
         if log is None:
             return
-        command_source = snapshot.payload.get("command_source", {})
+        command_source_id, command_session_id = self._command_source_ids(snapshot)
         record = {
             "seq": self._action_log_seq,
             "t_mono": time.monotonic(),
             "event": event,
             "arms": list(arms),
             "runner_role": "flow_infer",
-            "command_source_id": command_source.get("source_id") if isinstance(command_source, dict) else None,
-            "command_session_id": command_source.get("session_id") if isinstance(command_source, dict) else None,
+            "command_source_id": command_source_id,
+            "command_session_id": command_session_id,
             "flow_chunk_id": int(getattr(self, "_tcp_tp_chunk_seq", -1)),
             "chunk_invalidated": bool(chunk_invalidated),
             "source_arm_mask_before": before_mask,
             "source_arm_mask_after": after_mask,
             "reanchor_pose_before": reanchor_before,
             "reanchor_pose_after": reanchor_after,
+        }
+        self._action_log_seq += 1
+        log.write(json.dumps(record) + "\n")
+
+    def log_final_intent(
+        self,
+        intent: CommandIntent | None,
+        snapshot: StateSnapshot,
+        *,
+        arm_init_override: Any | None = None,
+        decision_allowed: bool,
+        sent: bool,
+        command_seq: int = 0,
+        drop_reason: str | None = None,
+    ) -> None:
+        """Append the post-arm-init, post-safety command view to the action JSONL."""
+        log = self._action_log
+        if log is None or intent is None:
+            return
+
+        def arm_mode(payload: dict[str, Any] | None) -> str | None:
+            if not isinstance(payload, dict):
+                return None
+            mode = payload.get("mode")
+            return None if mode is None else str(mode)
+
+        def joint_profile(payload: dict[str, Any] | None) -> str | None:
+            if not isinstance(payload, dict):
+                return None
+            value = payload.get("joint_target_profile")
+            return None if value is None else str(value)
+
+        command_source_id, command_session_id = self._command_source_ids(snapshot)
+        record = {
+            "seq": self._action_log_seq,
+            "t_mono": time.monotonic(),
+            "event": "final_intent",
+            "command_seq": int(command_seq),
+            "command_family": self.command_family,
+            "left_mode": arm_mode(intent.left),
+            "right_mode": arm_mode(intent.right),
+            "left_joint_target_profile": joint_profile(intent.left),
+            "right_joint_target_profile": joint_profile(intent.right),
+            "arm_init_override_left": bool(getattr(arm_init_override, "left_on", False)),
+            "arm_init_override_right": bool(getattr(arm_init_override, "right_on", False)),
+            "decision_allowed": bool(decision_allowed),
+            "sent": bool(sent),
+            "drop_reason": drop_reason,
+            "runner_role": "flow_infer",
+            "command_source_id": command_source_id,
+            "command_session_id": command_session_id,
         }
         self._action_log_seq += 1
         log.write(json.dumps(record) + "\n")

@@ -93,7 +93,8 @@ class BoxDetector:
     GRID = 0.006                   # XY occupancy 클러스터 해상도 (m/cell)
     MIN_CLUSTER_CELL = 150         # 클러스터 최소 cell 수
     MIN_PTS = 500                  # 박스 후보 최소 점 수
-    SIZE_LONG = (0.18, 0.55)       # 관측 긴변 게이트 (m)
+    SIZE_LONG = (0.16, 0.60)       # 관측 긴변 게이트 (m): 붙은 2박스(~0.8)는 거르되 부분관측 허용
+    SIZE_SHORT_MAX = 0.42          # 관측 짧은변 상한 (m)
     FPS_K = 1024                   # ICP 전 FPS 다운샘플 점 수
     FPS_CAP = 8000                 # FPS 전 랜덤 상한(속도)
     ICP_MAX_CORR = 0.03            # ICP 대응 최대거리 (m) = 암묵 trimming
@@ -106,7 +107,7 @@ class BoxDetector:
         self.baseline = baseline
         self.use_icp = use_icp and (o3d is not None)
         self.icp_method = self._normalize_icp_method(
-            icp_method or os.environ.get("STEREO_DETECT_ICP_METHOD", "point_to_point")
+            icp_method or os.environ.get("STEREO_DETECT_ICP_METHOD", "yaw_se2")
         )
         self.model = _open_tray_model()
         self._uu = self._vv = None
@@ -123,18 +124,16 @@ class BoxDetector:
 
     @staticmethod
     def _normalize_icp_method(method):
-        m = str(method or "point_to_point").strip().lower().replace("-", "_")
+        m = str(method or "yaw_se2").strip().lower().replace("-", "_")
         aliases = {
-            "p2p": "point_to_point",
-            "point": "point_to_point",
-            "point_to_point": "point_to_point",
-            "point2point": "point_to_point",
-            "p2l": "point_to_plane",
-            "plane": "point_to_plane",
-            "point_to_plane": "point_to_plane",
-            "point2plane": "point_to_plane",
+            "yaw": "yaw_se2", "se2": "yaw_se2", "yaw_se2": "yaw_se2",
+            "yaw_constrained": "yaw_se2", "planar": "yaw_se2",
+            "p2p": "point_to_point", "point": "point_to_point",
+            "point_to_point": "point_to_point", "point2point": "point_to_point",
+            "p2l": "point_to_plane", "plane": "point_to_plane",
+            "point_to_plane": "point_to_plane", "point2plane": "point_to_plane",
         }
-        return aliases.get(m, "point_to_point")
+        return aliases.get(m, "yaw_se2")
 
     def _reload_cfg(self, now):
         if now - self._cfg_t > 1.0:
@@ -206,13 +205,13 @@ class BoxDetector:
             obs_long, obs_short, yaw = w, hgt, np.radians(ang)
         else:
             obs_long, obs_short, yaw = hgt, w, np.radians(ang + 90.0)
-        if not (self.SIZE_LONG[0] <= obs_long <= self.SIZE_LONG[1]) or obs_short > 0.40:
+        if not (self.SIZE_LONG[0] <= obs_long <= self.SIZE_LONG[1]) or obs_short > self.SIZE_SHORT_MAX:
             return None, None
         a, b, c = plane
-        n = np.array([-a, -b, 1.0]); n /= np.linalg.norm(n)
-        x0 = np.array([np.cos(yaw), np.sin(yaw), 0.0])
-        x = x0 - n * (x0 @ n); x /= np.linalg.norm(x)      # 긴변(0.38) 방향(평면 투영)
-        y = np.cross(n, x)                                  # 짧은변(0.24)
+        # 박스는 User Floor(수평) 위 → up축 = stand z (0,0,1) 고정(평면 tilt를 자세에 안 넣음).
+        n = np.array([0.0, 0.0, 1.0])
+        x = np.array([np.cos(yaw), np.sin(yaw), 0.0])      # 긴변(0.38) 방향(수평)
+        y = np.array([-np.sin(yaw), np.cos(yaw), 0.0])     # 짧은변(0.24)
         center2 = np.array([cx, cy])
         xy = lambda v: v[:2] / (np.linalg.norm(v[:2]) + 1e-9)
         for ax2, obs, full in ((xy(x), obs_long, BOX_DIMS[0]), (xy(y), obs_short, BOX_DIMS[1])):
@@ -274,13 +273,46 @@ class BoxDetector:
             idx[i] = int(np.argmax(d))
         return pts[idx].astype(np.float64)
 
+    def _icp_se2(self, s, T0):
+        """yaw-고정 ICP: box up = stand z 고정, (x,y,yaw)만 정합(SE(2)). User Floor 위 박스용.
+        DOF가 적어 부분관측/노이즈에 robust. NN은 scipy cKDTree, 갱신은 2D Kabsch."""
+        try:
+            from scipy.spatial import cKDTree
+        except Exception as e:  # noqa: BLE001
+            if not getattr(self, "_warned_se2", False):
+                print(f"[box_detect] scipy 없음 → yaw_se2 ICP 불가, point-to-point 폴백: {e}", flush=True)
+                self._warned_se2 = True
+            return self._icp_o3d(s, T0, "point_to_point")
+        Mw = self.model @ T0[:3, :3].T + T0[:3, 3]
+        tree = cKDTree(Mw)
+        S = s.copy(); Tacc = np.eye(4); rmse = float("nan"); inl = 1.0
+        for _ in range(self.ICP_ITERS):
+            d, j = tree.query(S)
+            thr = np.quantile(d, 0.8); m = d <= thr
+            inl = float(m.mean()); rmse = float(np.sqrt(float((d[m] ** 2).mean())))
+            sp, dp = S[m, :2], Mw[j[m], :2]
+            cs, cd = sp.mean(0), dp.mean(0)
+            H = (sp - cs).T @ (dp - cd)
+            phi = np.arctan2(H[0, 1] - H[1, 0], H[0, 0] + H[1, 1])
+            Rz = np.array([[np.cos(phi), -np.sin(phi)], [np.sin(phi), np.cos(phi)]])
+            t2 = cd - Rz @ cs
+            S[:, :2] = S[:, :2] @ Rz.T + t2                 # z·up 불변
+            Tn = np.eye(4); Tn[:2, :2] = Rz; Tn[:2, 3] = t2; Tacc = Tn @ Tacc
+            if abs(phi) < 1e-5 and float(np.linalg.norm(t2)) < 1e-5:
+                break
+        return np.linalg.inv(Tacc) @ T0, inl, rmse, "yaw_se2", int(len(s))
+
     def _icp(self, scene, T0):
         """관측점(scene) → 알려진 open-tray 모델@init ICP. refined = inv(T_icp)@T0."""
         s = self._fps(scene, self.FPS_K)
+        if self.icp_method == "yaw_se2":
+            return self._icp_se2(s, T0)
+        return self._icp_o3d(s, T0, self.icp_method)
+
+    def _icp_o3d(self, s, T0, method):
         Mw = self.model @ T0[:3, :3].T + T0[:3, 3]
         src = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(s))
         tgt = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(Mw))
-        method = self.icp_method
         if method == "point_to_plane":
             try:
                 tgt.estimate_normals(
@@ -421,18 +453,24 @@ class BoxDetector:
 
         C = rgb[m][band]
         hsv = cv2.cvtColor(np.ascontiguousarray(C).reshape(-1, 1, 3), cv2.COLOR_RGB2HSV).reshape(-1, 3)
-        is_green = cv2.inRange(hsv, self.GREEN_LO, self.GREEN_HI).reshape(-1) > 0
+        # cv2.inRange는 3채널 이미지를 기대 → 평탄화된 (N,3)엔 못 씀(예외).
+        # GREEN_LO/HI (3,) 에 대한 numpy 브로드캐스트 비교로 동일 결과.
+        is_green = np.all((hsv >= self.GREEN_LO) & (hsv <= self.GREEN_HI), axis=1)
 
         out = []
-        green_center = None
+        green_T = None
         if int(is_green.sum()) >= self.MIN_PTS:
             g = self._detect_one(Pb[is_green], cam_xy, plane, "green")
             if g:
-                out.append(g); green_center = g["T"][:2, 3]
+                out.append(g); green_T = g["T"]
         keep = ~is_green
-        if green_center is not None:                              # 초록 박스 영역 제외(회색 분리)
-            r = 0.5 * float(np.hypot(BOX_DIMS[0], BOX_DIMS[1])) * 0.92
-            keep &= np.linalg.norm(Pb[:, :2] - green_center, axis=1) > r
+        if green_T is not None:
+            # 두 박스가 붙어 있어 공간분리 불가 → 초록 박스의 known-dims 사각형(ICP pose)을
+            # 제외해 회색 박스만 남긴다(원형 제외는 초록 내부 회색점이 남아 oversized).
+            d = Pb[:, :2] - green_T[:2, 3]
+            xl = d @ green_T[:2, 0]; yl = d @ green_T[:2, 1]
+            mgn = 0.04
+            keep &= ~((np.abs(xl) < BOX_DIMS[0] / 2 + mgn) & (np.abs(yl) < BOX_DIMS[1] / 2 + mgn))
         if int(keep.sum()) >= self.MIN_PTS:
             gr = self._detect_one(Pb[keep], cam_xy, plane, "gray", prefer_fit=True)
             if gr:

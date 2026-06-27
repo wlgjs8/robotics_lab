@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 
@@ -46,7 +47,41 @@ bool nameContainsAny(const std::string& name, const std::vector<std::string>& su
     }
     return false;
 }
+
+bool globMatch(const std::string& pattern, const std::string& text) {
+    std::size_t p = 0;
+    std::size_t t = 0;
+    std::size_t star = std::string::npos;
+    std::size_t match = 0;
+    while (t < text.size()) {
+        if (p < pattern.size() && pattern[p] == text[t]) {
+            ++p;
+            ++t;
+        } else if (p < pattern.size() && pattern[p] == '*') {
+            star = p++;
+            match = t;
+        } else if (star != std::string::npos) {
+            p = star + 1;
+            t = ++match;
+        } else {
+            return false;
+        }
+    }
+    while (p < pattern.size() && pattern[p] == '*') ++p;
+    return p == pattern.size();
+}
+
+std::string ruleString(const CollisionPairPattern& rule) {
+    return "[\"" + rule.pattern_a + "\",\"" + rule.pattern_b + "\"]";
+}
 }  // namespace
+
+bool collisionPairPatternMatches(const CollisionPairPattern& rule,
+                                 const std::string& name_a,
+                                 const std::string& name_b) {
+    return (globMatch(rule.pattern_a, name_a) && globMatch(rule.pattern_b, name_b)) ||
+           (globMatch(rule.pattern_a, name_b) && globMatch(rule.pattern_b, name_a));
+}
 
 bool collisionVerdictStale(const CollisionVerdict& v, double now_s, double max_staleness_s) {
     if (!v.valid) return true;
@@ -273,15 +308,10 @@ struct CollisionMonitor::Impl {
         for (const auto& e : cfg.extra_collision) {
             if (e.name == "ground_plane") { gp_thickness_ = e.size_m[2]; break; }
         }
-        // Tag external-obstacle collision pairs (currently arm<->ground_plane) so the
-        // verdict/barrier can apply the external_* params (smaller d_hard) to them while
-        // keeping robot self-collision on the self set. Indexed by collision-pair index.
-        pair_external_.assign(geom.collisionPairs.size(), 0);
-        if (gp_index_ != std::numeric_limits<std::size_t>::max()) {
-            for (std::size_t k = 0; k < geom.collisionPairs.size(); ++k) {
-                const auto& cp = geom.collisionPairs[k];
-                if (cp.first == gp_index_ || cp.second == gp_index_) pair_external_[k] = 1;
-            }
+        // curatePairs() tags external-obstacle pairs as it adds them. Keep this
+        // fail-closed if a future curation path forgets to mirror the pair vector.
+        if (pair_external_.size() != geom.collisionPairs.size()) {
+            pair_external_.assign(geom.collisionPairs.size(), 0);
         }
         // Constant stand-frame pose in the universe frame (FK once at neutral; the
         // stand is rigidly fixed to the root so this never changes).
@@ -521,6 +551,50 @@ struct CollisionMonitor::Impl {
     }
 
     void curatePairs() {
+        enum class PairCategory { LeftRight, ArmStand, IntraArm, External };
+        const auto sideString = [](Side side) {
+            switch (side) {
+                case Side::Left: return "left";
+                case Side::Right: return "right";
+                case Side::Stand: return "stand";
+            }
+            return "unknown";
+        };
+        const auto categoryString = [](PairCategory c) {
+            switch (c) {
+                case PairCategory::LeftRight: return "left-right";
+                case PairCategory::ArmStand: return "arm-stand";
+                case PairCategory::IntraArm: return "intra-arm";
+                case PairCategory::External: return "external";
+            }
+            return "unknown";
+        };
+        const auto isExternalGeometry = [&](std::size_t i) {
+            // External barrier category is currently reserved for the injected
+            // whole-arm floor. Other stand geometry remains arm-stand and keeps
+            // the self-collision threshold set.
+            return geom.geometryObjects[i].name == "ground_plane";
+        };
+        const auto parentFrameName = [&](std::size_t i) -> std::string {
+            const auto fid = geom.geometryObjects[i].parentFrame;
+            if (fid < model.frames.size()) return model.frames[fid].name;
+            return "<invalid>";
+        };
+        const auto parentJointName = [&](std::size_t i) -> std::string {
+            const auto jid = geom.geometryObjects[i].parentJoint;
+            if (jid < model.names.size()) return model.names[jid];
+            return "<invalid>";
+        };
+        const auto disabledRule = [&](std::size_t a, std::size_t b)
+            -> const CollisionPairPattern* {
+            const std::string& an = geom.geometryObjects[a].name;
+            const std::string& bn = geom.geometryObjects[b].name;
+            for (const auto& rule : cfg.disabled_collision_pairs) {
+                if (collisionPairPatternMatches(rule, an, bn)) return &rule;
+            }
+            return nullptr;
+        };
+
         std::vector<std::size_t> li, ri, si;
         for (std::size_t i = 0; i < geom.geometryObjects.size(); ++i) {
             switch (classify(i)) {
@@ -529,17 +603,62 @@ struct CollisionMonitor::Impl {
                 case Side::Stand: si.push_back(i); break;
             }
         }
+        if (cfg.debug_pair_curation) {
+            std::cerr << "[collision_monitor] pair_curation geometry_classification\n";
+            for (std::size_t i = 0; i < geom.geometryObjects.size(); ++i) {
+                const Side side = classify(i);
+                std::cerr << "[collision_monitor] geom"
+                          << " id=" << i
+                          << " name=" << geom.geometryObjects[i].name
+                          << " parentFrame=" << parentFrameName(i)
+                          << " parentJoint=" << parentJointName(i)
+                          << " side=" << sideString(side)
+                          << " chain_depth=";
+                if (side == Side::Left || side == Side::Right) {
+                    std::cerr << chainDepth(i, side);
+                } else {
+                    std::cerr << "-";
+                }
+                std::cerr << "\n";
+            }
+        }
         geom.removeAllCollisionPairs();
-        std::size_t n_lr = 0, n_arm_stand = 0, n_intra = 0;
+        pair_external_.clear();
+        std::size_t n_lr = 0, n_arm_stand = 0, n_intra = 0, n_external = 0, n_disabled = 0;
+        const auto tryAddPair = [&](std::size_t a, std::size_t b, PairCategory category) {
+            if (const CollisionPairPattern* rule = disabledRule(a, b)) {
+                ++n_disabled;
+                std::cerr << "[collision_monitor] disabled_pair"
+                          << " rule=" << ruleString(*rule)
+                          << " geom_a=" << geom.geometryObjects[a].name
+                          << " geom_b=" << geom.geometryObjects[b].name
+                          << " category=" << categoryString(category)
+                          << " reason=disabled_collision_pairs\n";
+                return;
+            }
+            geom.addCollisionPair(pinocchio::CollisionPair(a, b));
+            pair_external_.push_back(category == PairCategory::External ? 1 : 0);
+            switch (category) {
+                case PairCategory::LeftRight: ++n_lr; break;
+                case PairCategory::ArmStand: ++n_arm_stand; break;
+                case PairCategory::IntraArm: ++n_intra; break;
+                case PairCategory::External: ++n_external; break;
+            }
+        };
         // left <-> right (whole arms)
         for (auto a : li)
-            for (auto b : ri) { geom.addCollisionPair(pinocchio::CollisionPair(a, b)); ++n_lr; }
+            for (auto b : ri) tryAddPair(a, b, PairCategory::LeftRight);
         // arm <-> stand (skip the bolted-on mount neighbors)
         for (const auto& arm : {li, ri}) {
             for (auto a : arm) {
                 if (nameContainsAny(geom.geometryObjects[a].name, cfg.stand_ignore_arm_substrings))
                     continue;
-                for (auto b : si) { geom.addCollisionPair(pinocchio::CollisionPair(a, b)); ++n_arm_stand; }
+                for (auto b : si) {
+                    const PairCategory category = isExternalGeometry(b)
+                        ? PairCategory::External
+                        : PairCategory::ArmStand;
+                    tryAddPair(a, b, category);
+                }
             }
         }
         // intra-arm (arm folding onto itself): only NON-adjacent links of the same arm
@@ -549,8 +668,7 @@ struct CollisionMonitor::Impl {
                 for (std::size_t x = 0; x < g.size(); ++x)
                     for (std::size_t y = x + 1; y < g.size(); ++y) {
                         if (std::abs(chainDepth(g[x], sd) - chainDepth(g[y], sd)) < sep) continue;
-                        geom.addCollisionPair(pinocchio::CollisionPair(g[x], g[y]));
-                        ++n_intra;
+                        tryAddPair(g[x], g[y], PairCategory::IntraArm);
                     }
             };
             intra(li, Side::Left);
@@ -562,7 +680,9 @@ struct CollisionMonitor::Impl {
                   << (have_arm_roots ? ", classify=frame-ancestry" : ", classify=name-substring(FALLBACK)")
                   << ") pairs=" << geom.collisionPairs.size()
                   << " [left-right=" << n_lr << " arm-stand=" << n_arm_stand
-                  << " intra-arm=" << n_intra << "]"
+                  << " intra-arm=" << n_intra << " external=" << n_external
+                  << " disabled=" << n_disabled << "]"
+                  << " disabled_collision_pairs=" << cfg.disabled_collision_pairs.size()
                   << " stand_ignore=[";
         for (std::size_t i = 0; i < cfg.stand_ignore_arm_substrings.size(); ++i)
             std::cerr << (i ? "," : "") << cfg.stand_ignore_arm_substrings[i];
@@ -724,7 +844,14 @@ struct CollisionMonitor::Impl {
         const std::size_t np = geom.collisionPairs.size();
         for (std::size_t k = 0; k < np; ++k) {
             const double d = gdata.distanceResults[k].min_distance;
-            if (d < s.min_clearance_m) s.min_clearance_m = d;
+            if (d < s.min_clearance_m) {
+                s.min_clearance_m = d;
+                s.nearest_distance_m = d;
+                const auto& cp = geom.collisionPairs[k];
+                s.nearest_name_a = geom.geometryObjects[cp.first].name;
+                s.nearest_name_b = geom.geometryObjects[cp.second].name;
+                s.nearest_external = k < pair_external_.size() && pair_external_[k];
+            }
             const bool ext = k < pair_external_.size() && pair_external_[k];
             if (ext) {
                 if (d < s.external_min_clearance_m) s.external_min_clearance_m = d;

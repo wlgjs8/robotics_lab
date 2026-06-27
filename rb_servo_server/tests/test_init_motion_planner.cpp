@@ -172,6 +172,28 @@ static bool run() {
         }
     }
 
+    // Single-arm planning: the inactive arm is an obstacle/reference fixed at launch
+    // q, not a sampled DOF. This prevents right-only InitMotion from replanning or
+    // emitting left waypoints just because left flow continues elsewhere.
+    {
+        InitMotionPlanResult right_only =
+            planner.plan(init, init, false, goal_l, true, goal_r);
+        std::cout << "right-only plan: success=" << right_only.success
+                  << " waypoints=" << right_only.waypoints.size() << " ("
+                  << right_only.message << ")\n";
+        RB_CHECK(right_only.success);
+        RB_CHECK(right_only.waypoints.size() >= 2);
+        for (const auto& w : right_only.waypoints) {
+            RB_CHECK(planner.configClear(w.first, w.second));
+            for (int i = 0; i < kDof; ++i) {
+                RB_CHECK(std::abs(w.first[i] - init[i]) < 1e-6);
+            }
+        }
+        for (int i = 0; i < kDof; ++i) {
+            RB_CHECK(std::abs(right_only.waypoints.back().second[i] - goal_r[i]) < 1e-6);
+        }
+    }
+
     // Lazy can be disabled to recover the eager edge-checking path. It should still
     // return a fully clear, densified path in the same simple scene.
     {
@@ -226,6 +248,22 @@ static bool run() {
         RB_CHECK(bad.waypoints.empty());
         RB_CHECK(bad.fail_mode == InitMotionPlanResult::FailMode::GoalNotClear);
         RB_CHECK(std::isfinite(bad.goal_clear_m));
+        RB_CHECK(std::isfinite(bad.clear_threshold_m));
+        RB_CHECK(std::isfinite(bad.nearest_pair_distance_m));
+        RB_CHECK(!bad.nearest_pair.empty());
+        RB_CHECK(std::isfinite(bad.goal_self_min_clearance_m));
+        RB_CHECK(std::isfinite(bad.goal_external_min_clearance_m));
+        RB_CHECK(!bad.goal_nearest_pair_name_a.empty());
+        RB_CHECK(!bad.goal_nearest_pair_name_b.empty());
+        RB_CHECK(std::isfinite(bad.goal_clear_threshold_self_m));
+        RB_CHECK(std::isfinite(bad.goal_clear_threshold_external_m));
+        RB_CHECK(bad.message.find("goal_self_min_clearance_m=") != std::string::npos);
+        RB_CHECK(bad.message.find("goal_external_min_clearance_m=") != std::string::npos);
+        RB_CHECK(bad.message.find("goal_nearest_pair_name_a=") != std::string::npos);
+        RB_CHECK(bad.message.find("goal_nearest_pair_name_b=") != std::string::npos);
+        RB_CHECK(bad.message.find("goal_nearest_pair_external=") != std::string::npos);
+        RB_CHECK(bad.message.find("goal_clear_threshold_self_m=") != std::string::npos);
+        RB_CHECK(bad.message.find("goal_clear_threshold_external_m=") != std::string::npos);
     }
 
     // ---- (4) Collision-free TcpLinearMove (planLinearMove). ----

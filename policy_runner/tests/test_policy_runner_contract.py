@@ -1142,6 +1142,7 @@ class PolicyRunnerContractTest(unittest.TestCase):
         class DualTcpSource:
             requirements = ActionRequirements(requires_valid_joint_state=True)
             name = "dual_tcp"
+            final_intents = []
 
             def next_intent(self, snapshot, now_monotonic):
                 _ = snapshot, now_monotonic
@@ -1149,6 +1150,9 @@ class PolicyRunnerContractTest(unittest.TestCase):
                     left=(0.1, 0.2, 0.3, 0, 0, 0),
                     right=(0.4, 0.5, 0.6, 0, 0, 0),
                 )
+
+            def log_final_intent(self, intent, snapshot, **kwargs):
+                self.final_intents.append((intent, snapshot, kwargs))
 
             def close(self):
                 pass
@@ -1166,12 +1170,13 @@ class PolicyRunnerContractTest(unittest.TestCase):
             ]
         )
         seen_states = []
+        source = DualTcpSource()
 
         result = run(
             cfg,
             state_client=FakeStateClient([sample_state()]),
             command_client=command_client,
-            source=DualTcpSource(),
+            source=source,
             sleep_fn=lambda _period: (_ for _ in ()).throw(KeyboardInterrupt()),
             state_sink=seen_states.append,
             recording_supervisor=recorder,
@@ -1192,6 +1197,14 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertEqual(action_packet["right"]["mode"], "TcpPoseTarget")
         self.assertEqual(action_seq, 2)
         self.assertTrue(recorder.published[0][2]["init_override_left"])
+        self.assertEqual(len(source.final_intents), 1)
+        final_intent, _snapshot, final_kwargs = source.final_intents[0]
+        self.assertEqual(final_kwargs["command_seq"], 2)
+        self.assertTrue(final_kwargs["sent"])
+        self.assertTrue(final_kwargs["decision_allowed"])
+        self.assertEqual(final_intent.left["mode"], "JointTarget")
+        self.assertEqual(final_intent.left["joint_target_profile"], "init_motion")
+        self.assertEqual(final_intent.right["mode"], "TcpPoseTarget")
 
     def test_run_acquires_configured_lease_before_motion(self):
         cfg = config_from_mapping(

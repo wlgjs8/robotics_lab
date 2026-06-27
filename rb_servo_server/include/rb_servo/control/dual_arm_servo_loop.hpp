@@ -390,6 +390,18 @@ private:
         InitMotionPlanResult::FailMode fail_mode = InitMotionPlanResult::FailMode::None;
         double start_clear_m = std::numeric_limits<double>::quiet_NaN();
         double goal_clear_m = std::numeric_limits<double>::quiet_NaN();
+        double goal_self_min_clearance_m = std::numeric_limits<double>::quiet_NaN();
+        double goal_external_min_clearance_m = std::numeric_limits<double>::quiet_NaN();
+        std::string goal_nearest_pair_name_a;
+        std::string goal_nearest_pair_name_b;
+        bool goal_nearest_pair_external = false;
+        double goal_clear_threshold_self_m = std::numeric_limits<double>::quiet_NaN();
+        double goal_clear_threshold_external_m = std::numeric_limits<double>::quiet_NaN();
+        double clear_threshold_m = std::numeric_limits<double>::quiet_NaN();
+        double external_clear_threshold_m = std::numeric_limits<double>::quiet_NaN();
+        std::string nearest_pair;
+        double nearest_pair_distance_m = std::numeric_limits<double>::quiet_NaN();
+        bool nearest_pair_external = false;
         int tree_start_size = 0;
         int tree_goal_size = 0;
         int last_iterations = 0;
@@ -405,7 +417,8 @@ private:
         uint64_t last_progress_ns = 0;
         uint64_t last_exec_log_ns = 0;  // throttle for the streaming-progress diagnostic
     };
-    InitMotionExec init_motion_exec_;
+    InitMotionExec left_init_motion_exec_;
+    InitMotionExec right_init_motion_exec_;
 
     // Collision-free TcpLinearMove (cartesian_control.linear_move.collision_free): decide
     // async whether the straight Cartesian path is clear (Straight -> run the exact MoveL)

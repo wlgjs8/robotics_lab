@@ -21,6 +21,7 @@ namespace {
 
 constexpr int kCombined = 2 * kDof;  // 12-DOF combined config (left6 + right6)
 using Config = std::array<double, kCombined>;
+using ActiveMask = std::array<bool, kCombined>;
 
 constexpr double kRadToDeg = 57.29577951308232;
 
@@ -62,6 +63,15 @@ Config lerp(const Config& a, const Config& b, double t) {
     Config c{};
     for (int i = 0; i < kCombined; ++i) c[i] = a[i] + t * (b[i] - a[i]);
     return c;
+}
+
+ActiveMask makeActiveMask(bool left_active, bool right_active) {
+    ActiveMask active{};
+    for (int i = 0; i < kDof; ++i) {
+        active[i] = left_active;
+        active[kDof + i] = right_active;
+    }
+    return active;
 }
 
 // Nearest-branch goal selection per joint (mirrors trajectory_filter's file-local
@@ -246,7 +256,8 @@ struct InitMotionPlanner::Impl {
     // Returns start..escaped (>=1 node, last node clear) on success, or empty on failure.
     // Every emitted node has higher clearance than the previous, so executing the escape
     // moves the arm monotonically AWAY from the obstacle.
-    std::vector<Config> escapeToClearAttempt(const Config& start, double step_deg,
+    std::vector<Config> escapeToClearAttempt(const Config& start, const ActiveMask& active,
+                                             double step_deg,
                                              int max_steps,
                                              std::chrono::steady_clock::time_point deadline,
                                              double* last_clear_m) {
@@ -263,6 +274,7 @@ struct InitMotionPlanner::Impl {
             Config grad{};
             double gnorm = 0.0;
             for (int k = 0; k < kCombined; ++k) {
+                if (!active[k]) continue;
                 const int j = k % kDof;
                 Config cp = cur;
                 cp[k] += eps;
@@ -280,6 +292,7 @@ struct InitMotionPlanner::Impl {
             for (int ls = 0; ls < 8; ++ls) {
                 next = cur;
                 for (int k = 0; k < kCombined; ++k) {
+                    if (!active[k]) continue;
                     const int j = k % kDof;
                     next[k] += grad[k] / gnorm * s;
                     if (q_max_deg[j] > q_min_deg[j]) {
@@ -299,12 +312,13 @@ struct InitMotionPlanner::Impl {
         return isClear(eval(cur)) ? path : std::vector<Config>{};
     }
 
-    std::vector<Config> escapeToClear(const Config& start, double step_deg,
+    std::vector<Config> escapeToClear(const Config& start, const ActiveMask& active,
+                                      double step_deg,
                                       std::chrono::steady_clock::time_point deadline,
                                       int* restarts_tried, double* last_clear_m) {
         if (restarts_tried) *restarts_tried = 0;
         std::vector<Config> path = escapeToClearAttempt(
-            start, step_deg, cfg.escape_max_steps, deadline, last_clear_m);
+            start, active, step_deg, cfg.escape_max_steps, deadline, last_clear_m);
         if (!path.empty() && clear(path.back())) return path;
 
         std::uniform_real_distribution<double> perturb(-cfg.escape_perturb_deg,
@@ -314,6 +328,7 @@ struct InitMotionPlanner::Impl {
             if (restarts_tried) *restarts_tried = attempt + 1;
             Config seeded = start;
             for (int k = 0; k < kCombined; ++k) {
+                if (!active[k]) continue;
                 const int j = k % kDof;
                 seeded[k] += perturb(rng);
                 if (q_max_deg[j] > q_min_deg[j]) {
@@ -322,7 +337,7 @@ struct InitMotionPlanner::Impl {
             }
             if (!edgeClear(start, seeded)) continue;
             std::vector<Config> restarted = escapeToClearAttempt(
-                seeded, step_deg, cfg.escape_max_steps, deadline, last_clear_m);
+                seeded, active, step_deg, cfg.escape_max_steps, deadline, last_clear_m);
             if (restarted.empty() || !clear(restarted.back())) continue;
             std::vector<Config> combined{start};
             combined.insert(combined.end(), restarted.begin(), restarted.end());
@@ -539,17 +554,52 @@ double InitMotionPlanner::minClearance(const JointArray& left, const JointArray&
 InitMotionPlanResult InitMotionPlanner::plan(
     const JointArray& start_left, const JointArray& start_right,
     const JointArray& goal_left, const JointArray& goal_right) {
+    return plan(start_left, start_right, true, goal_left, true, goal_right);
+}
+
+InitMotionPlanResult InitMotionPlanner::plan(
+    const JointArray& start_left, const JointArray& start_right,
+    bool left_active, const JointArray& goal_left,
+    bool right_active, const JointArray& goal_right) {
     using Clock = std::chrono::steady_clock;
     const auto t0 = Clock::now();
     InitMotionPlanResult result;
 
     Impl& d = *impl_;
+    result.clear_threshold_m = d.clear_threshold_m;
+    result.external_clear_threshold_m = d.external_clear_threshold_m;
+    result.goal_clear_threshold_self_m = d.clear_threshold_m;
+    result.goal_clear_threshold_external_m = d.external_clear_threshold_m;
+    if (!left_active && !right_active) {
+        result.message = "init motion plan: no active arm";
+        result.fail_mode = InitMotionPlanResult::FailMode::NonFinite;
+        result.planning_time_s = std::chrono::duration<double>(Clock::now() - t0).count();
+        return result;
+    }
+    const ActiveMask active = makeActiveMask(left_active, right_active);
+    const auto fill_nearest = [&](const CollisionDistanceSummary& s) {
+        result.goal_self_min_clearance_m = s.self_min_clearance_m;
+        result.goal_external_min_clearance_m = s.external_min_clearance_m;
+        result.goal_nearest_pair_name_a = s.nearest_name_a;
+        result.goal_nearest_pair_name_b = s.nearest_name_b;
+        result.goal_nearest_pair_external = s.nearest_external;
+        result.nearest_pair_distance_m = s.nearest_distance_m;
+        result.nearest_pair_external = s.nearest_external;
+        if (!s.nearest_name_a.empty() || !s.nearest_name_b.empty()) {
+            result.nearest_pair = s.nearest_name_a + " <-> " + s.nearest_name_b;
+        }
+    };
 
     // Wrap the goal to the nearest in-range joint branch (per arm) vs the start.
-    JointArray gl = goal_left, gr = goal_right;
+    JointArray gl = left_active ? goal_left : start_left;
+    JointArray gr = right_active ? goal_right : start_right;
     for (int i = 0; i < kDof; ++i) {
-        gl[i] = nearestBranch(goal_left[i], start_left[i], d.q_min_deg[i], d.q_max_deg[i]);
-        gr[i] = nearestBranch(goal_right[i], start_right[i], d.q_min_deg[i], d.q_max_deg[i]);
+        if (left_active) {
+            gl[i] = nearestBranch(goal_left[i], start_left[i], d.q_min_deg[i], d.q_max_deg[i]);
+        }
+        if (right_active) {
+            gr[i] = nearestBranch(goal_right[i], start_right[i], d.q_min_deg[i], d.q_max_deg[i]);
+        }
     }
     const Config start = join(start_left, start_right);
     const Config goal = join(gl, gr);
@@ -563,14 +613,32 @@ InitMotionPlanResult InitMotionPlanner::plan(
         result.planning_time_s = std::chrono::duration<double>(Clock::now() - t0).count();
         return result;
     }
-    result.start_clear_m = d.minClearance(start);
-    result.goal_clear_m = d.minClearance(goal);
-    if (!d.clear(goal)) {
+    const CollisionDistanceSummary start_summary = d.eval(start);
+    const CollisionDistanceSummary goal_summary = d.eval(goal);
+    result.start_clear_m = start_summary.min_clearance_m;
+    result.goal_clear_m = goal_summary.min_clearance_m;
+    fill_nearest(goal_summary);
+    if (!d.isClear(goal_summary)) {
         // The init pose itself collides / dips below the floor — refuse (fail-closed).
         std::ostringstream m;
         m << "init motion plan: goal config not collision/floor clear"
           << " (goal_clear_m=" << result.goal_clear_m
-          << ", thresh_m=" << d.clear_threshold_m << ")";
+          << ", thresh_m=" << d.clear_threshold_m
+          << ", thresh_ext_m=" << d.external_clear_threshold_m
+          << ", goal_self_min_clearance_m=" << result.goal_self_min_clearance_m
+          << ", goal_external_min_clearance_m=" << result.goal_external_min_clearance_m
+          << ", goal_nearest_pair_name_a="
+          << (result.goal_nearest_pair_name_a.empty() ? std::string("unknown")
+                                                       : result.goal_nearest_pair_name_a)
+          << ", goal_nearest_pair_name_b="
+          << (result.goal_nearest_pair_name_b.empty() ? std::string("unknown")
+                                                       : result.goal_nearest_pair_name_b)
+          << ", goal_nearest_pair_external=" << (result.goal_nearest_pair_external ? 1 : 0)
+          << ", goal_clear_threshold_self_m=" << result.goal_clear_threshold_self_m
+          << ", goal_clear_threshold_external_m=" << result.goal_clear_threshold_external_m
+          << ", nearest_pair=" << (result.nearest_pair.empty() ? std::string("unknown") : result.nearest_pair)
+          << ", nearest_pair_distance_m=" << result.nearest_pair_distance_m
+          << ", nearest_pair_external=" << (result.nearest_pair_external ? 1 : 0) << ")";
         result.message = m.str();
         result.fail_mode = InitMotionPlanResult::FailMode::GoalNotClear;
         result.planning_time_s = std::chrono::duration<double>(Clock::now() - t0).count();
@@ -593,7 +661,7 @@ InitMotionPlanResult InitMotionPlanner::plan(
         const auto escape_begin = Clock::now();
         const auto escape_deadline = escape_begin + std::chrono::duration_cast<Clock::duration>(
             std::chrono::duration<double>(d.cfg.escape_max_time_sec));
-        escape_prefix = d.escapeToClear(start, step_deg, escape_deadline,
+        escape_prefix = d.escapeToClear(start, active, step_deg, escape_deadline,
                                         &restarts_tried, &last_escape_clear_m);
         escape_time_s = std::chrono::duration<double>(Clock::now() - escape_begin).count();
         if (escape_prefix.size() < 2 || !d.clear(escape_prefix.back())) {
@@ -627,6 +695,13 @@ InitMotionPlanResult InitMotionPlanner::plan(
         d.cfg.sample_margin_deg_per_joint.begin(), d.cfg.sample_margin_deg_per_joint.end(),
         [](double v) { return v > 0.0; });
     for (int k = 0; k < kCombined; ++k) {
+        if (!active[k]) {
+            lo[k] = rrt_start[k];
+            hi[k] = rrt_start[k];
+            glo[k] = rrt_start[k];
+            ghi[k] = rrt_start[k];
+            continue;
+        }
         const int j = k % kDof;
         const double margin = (per_joint_margin_set && d.cfg.sample_margin_deg_per_joint[j] > 0.0)
             ? d.cfg.sample_margin_deg_per_joint[j]
@@ -864,7 +939,8 @@ InitMotionLinearResult InitMotionPlanner::planLinearMove(
     }
 
     // Straight path blocked -> joint-space collision-free detour to the IK'd goal.
-    InitMotionPlanResult plan_res = plan(start_left, start_right, res.goal_left, res.goal_right);
+    InitMotionPlanResult plan_res = plan(
+        start_left, start_right, left_active, res.goal_left, right_active, res.goal_right);
     res.planning_time_s = std::chrono::duration<double>(Clock::now() - t0).count();
     if (plan_res.success && !plan_res.waypoints.empty()) {
         res.decision = InitMotionLinearResult::Decision::Detour;

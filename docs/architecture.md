@@ -58,9 +58,11 @@ Run / validated on pgmode-real (physical RB3-730E hardware):
   runtime into absolute `TcpPoseTarget` setpoints.
 - real gripper motion via the Pika Gripper Backend, gated by `RB_ALLOW_REAL_GRIPPER`
   + `measured_gripper_available` + `allow_real_gripper_motion`
-- server-side async URDF-mesh self-collision guard (`CollisionMonitor`, 33 geoms /
-  337 pairs) enforced in real motion via a velocity barrier; stale / hard-breach
-  fail closed
+- server-side async URDF-mesh self-collision guard (`CollisionMonitor`) enforced
+  in real motion via a velocity barrier; stale / hard-breach fail closed.
+  Structural false positives are curated by exact/glob
+  `safety.self_collision.mesh.disabled_collision_pairs`, not by lowering global
+  hard-distance or planner margins.
 - policy-side real-Cartesian safety gate relaxation (PR #13): `rb_servo_server`
   is the sole real-motion safety layer; controller-simulation safety unchanged
 - controller `-2001` suspect-diagnostics acceptance in real mode (PR #12) with
@@ -178,10 +180,13 @@ physical Cartesian circle (`docs/runbooks/rbpodo_real_physical_circle.md`).
 The policy-side `SafetyGate` no longer blocks real Cartesian motion (PR #13,
 scoped to `cartesian_gate.operation_mode == "real"`); for real motion
 `rb_servo_server` is therefore the sole safety layer — safety filter (dq/ddq/
-joint limits), tracking-error fault latch, the async URDF-mesh self-collision guard (`CollisionMonitor`),
-lease arbitration, and deadman. EMS/SOS/soft-estop/`collision_occur`/unknown-mode/
-init-error continue to latch regardless of config. Controller-simulation
-safety is unchanged.
+joint limits), tracking-error fault latch, the async URDF-mesh self-collision
+guard (`CollisionMonitor`), lease arbitration, and deadman. Mesh
+self-collision pair curation is SRDF-style: disabled pairs remove only named
+geometry pairs from the monitor/planner oracle, while non-disabled intra-arm,
+arm-arm, arm-stand, floor, and external pairs keep the configured margins.
+EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error continue to latch
+regardless of config. Controller-simulation safety is unchanged.
 
 Accepting the controller `-2001` suspect diagnostics
 (`op_stat_self_collision`/`robot_time` field-layout garbage) in real mode is a

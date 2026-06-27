@@ -3062,26 +3062,6 @@ def build_gui(
 
     with tabs.add_tab("고급"):
         _adv_tabs = server.gui.add_tab_group()
-        with _adv_tabs.add_tab("Debug"):
-            handles["tick"] = server.gui.add_number("tick", initial_value=0, disabled=True)
-            handles["scene_assets"] = server.gui.add_text(
-                "scene assets",
-                initial_value=_format_scene_asset_status(handles.get("scene", {})),
-                disabled=True,
-            )
-            handles["left_q"] = server.gui.add_text("left q_actual", initial_value="[]", disabled=True)
-            handles["right_q"] = server.gui.add_text("right q_actual", initial_value="[]", disabled=True)
-            handles["left_sent"] = server.gui.add_text("left q_sent", initial_value="[]", disabled=True)
-            handles["right_sent"] = server.gui.add_text("right q_sent", initial_value="[]", disabled=True)
-            handles["left_prev_sent"] = server.gui.add_text("left previous sent", initial_value="[]", disabled=True)
-            handles["right_prev_sent"] = server.gui.add_text("right previous sent", initial_value="[]", disabled=True)
-            handles["timestamps"] = server.gui.add_text("timestamps", initial_value="n/a", disabled=True)
-            handles["timing"] = server.gui.add_text("period/jitter/filter", initial_value="n/a", disabled=True)
-            handles["send_durations"] = server.gui.add_text("send durations", initial_value="n/a", disabled=True)
-            handles["arm_modes"] = server.gui.add_text("arm modes/connections", initial_value="unknown", disabled=True)
-            handles["logger"] = server.gui.add_text("logger health", initial_value="unknown", disabled=True)
-            handles["packets"] = server.gui.add_text("state packets", initial_value="0 received / 0 invalid", disabled=True)
-
         with _adv_tabs.add_tab("Pointcloud"):
             _pc = _load_gui_settings()
             handles["pc_enable"] = server.gui.add_checkbox(
@@ -3150,18 +3130,22 @@ def build_gui(
                 "wrist cloud status", initial_value="off", disabled=True)
             handles["pc_wrist_enable"].on_update(lambda _evt: _persist_pc_settings(handles))
 
+            # 좌/우 손목 D405는 동일 하드웨어·동일 마운트 → 단일 T_tcp_cam 공유.
+            # 기즈모는 양손에 모두 두되(각 팔 클라우드와 정렬 확인용), 한쪽을 조작하면
+            # 같은 로컬 pose(=T_tcp_cam)가 양쪽 기즈모+프레임에 동기 전파된다.
             handles["_wrist_gizmo"] = {}
             handles["_wrist_frame"] = {}
-            for _arm, _label in (("left", "왼손"), ("right", "오른손")):
-                with server.gui.add_folder(f"손목 핸드아이 ({_label} T_tcp_cam)", expand_by_default=False):
-                    handles[f"pc_wrist_calib_{_arm}"] = server.gui.add_checkbox(
-                        "캘리브레이션 모드(기즈모)", initial_value=False)
-                    handles[f"pc_wrist_save_{_arm}"] = server.gui.add_button("💾 핸드아이 저장")
-                    handles[f"pc_wrist_reset_{_arm}"] = server.gui.add_button("↩ 저장값으로 리셋")
-                    handles[f"pc_wrist_status_{_arm}"] = server.gui.add_text(
-                        "calib pose", initial_value="(기즈모로 클라우드를 로봇팔과 정렬 후 저장)", disabled=True)
+            handles["_wrist_sync_last"] = None
+            with server.gui.add_folder("손목 핸드아이 (통합 T_tcp_cam · 양손 동기화)", expand_by_default=False):
+                handles["pc_wrist_calib"] = server.gui.add_checkbox(
+                    "캘리브레이션 모드(양손 기즈모)", initial_value=False)
+                handles["pc_wrist_save"] = server.gui.add_button("💾 핸드아이 저장(공유)")
+                handles["pc_wrist_reset"] = server.gui.add_button("↩ 저장값으로 리셋")
+                handles["pc_wrist_status_calib"] = server.gui.add_text(
+                    "calib pose", initial_value="(한쪽 기즈모로 정렬하면 양손이 같이 움직임)", disabled=True)
 
-                Tw = load_T_tcp_cam(_arm)
+            Tw = load_T_tcp_cam("")          # 공유 핸드아이(arm 무시)
+            for _arm in ("left", "right"):
                 # 핸드아이 프레임 + 기즈모: /stand/{arm}_tcp 자식이므로 로컬 pose = T_tcp_cam.
                 handles["_wrist_frame"][_arm] = server.scene.add_frame(
                     f"/stand/{_arm}_tcp/wrist_cam", show_axes=False,
@@ -3171,25 +3155,44 @@ def build_gui(
                     depth_test=False, visible=False,
                     wxyz=tuple(mat_to_wxyz(Tw[:3, :3])), position=tuple(Tw[:3, 3]))
 
-                def _make_save(arm):
-                    def _(_evt) -> None:
-                        import numpy as np
-                        g = handles["_wrist_gizmo"][arm]
-                        T = np.eye(4); T[:3, :3] = wxyz_to_mat(g.wxyz); T[:3, 3] = np.array(g.position)
-                        ok, msg = save_T_tcp_cam(arm, T)
-                        handles[f"pc_wrist_status_{arm}"].value = (f"✅ 저장: {msg}" if ok else f"❌ {msg}")
-                    return _
+            def _wrist_save(_evt) -> None:
+                import numpy as np
+                g = handles["_wrist_gizmo"]["left"]    # 양손 동기화 → 어느 쪽이든 동일 pose
+                T = np.eye(4); T[:3, :3] = wxyz_to_mat(g.wxyz); T[:3, 3] = np.array(g.position)
+                ok, msg = save_T_tcp_cam("", T)
+                handles["pc_wrist_status_calib"].value = (f"✅ 저장: {msg}" if ok else f"❌ {msg}")
 
-                def _make_reset(arm):
-                    def _(_evt) -> None:
-                        T = load_T_tcp_cam(arm)
-                        for h in (handles["_wrist_gizmo"][arm], handles["_wrist_frame"][arm]):
-                            h.wxyz = tuple(mat_to_wxyz(T[:3, :3])); h.position = tuple(T[:3, 3])
-                        handles[f"pc_wrist_status_{arm}"].value = "저장값으로 리셋됨"
-                    return _
+            def _wrist_reset(_evt) -> None:
+                T = load_T_tcp_cam("")
+                w = tuple(mat_to_wxyz(T[:3, :3])); p = tuple(T[:3, 3])
+                for _a in ("left", "right"):
+                    for h in (handles["_wrist_gizmo"][_a], handles["_wrist_frame"][_a]):
+                        h.wxyz = w; h.position = p
+                handles["_wrist_sync_last"] = {"left": (w, p), "right": (w, p)}
+                handles["pc_wrist_status_calib"].value = "저장값으로 리셋됨"
 
-                handles[f"pc_wrist_save_{_arm}"].on_click(_make_save(_arm))
-                handles[f"pc_wrist_reset_{_arm}"].on_click(_make_reset(_arm))
+            handles["pc_wrist_save"].on_click(_wrist_save)
+            handles["pc_wrist_reset"].on_click(_wrist_reset)
+
+        with _adv_tabs.add_tab("Debug"):
+            handles["tick"] = server.gui.add_number("tick", initial_value=0, disabled=True)
+            handles["scene_assets"] = server.gui.add_text(
+                "scene assets",
+                initial_value=_format_scene_asset_status(handles.get("scene", {})),
+                disabled=True,
+            )
+            handles["left_q"] = server.gui.add_text("left q_actual", initial_value="[]", disabled=True)
+            handles["right_q"] = server.gui.add_text("right q_actual", initial_value="[]", disabled=True)
+            handles["left_sent"] = server.gui.add_text("left q_sent", initial_value="[]", disabled=True)
+            handles["right_sent"] = server.gui.add_text("right q_sent", initial_value="[]", disabled=True)
+            handles["left_prev_sent"] = server.gui.add_text("left previous sent", initial_value="[]", disabled=True)
+            handles["right_prev_sent"] = server.gui.add_text("right previous sent", initial_value="[]", disabled=True)
+            handles["timestamps"] = server.gui.add_text("timestamps", initial_value="n/a", disabled=True)
+            handles["timing"] = server.gui.add_text("period/jitter/filter", initial_value="n/a", disabled=True)
+            handles["send_durations"] = server.gui.add_text("send durations", initial_value="n/a", disabled=True)
+            handles["arm_modes"] = server.gui.add_text("arm modes/connections", initial_value="unknown", disabled=True)
+            handles["logger"] = server.gui.add_text("logger health", initial_value="unknown", disabled=True)
+            handles["packets"] = server.gui.add_text("state packets", initial_value="0 received / 0 invalid", disabled=True)
 
     with tabs.add_tab("에피소드"):
         record_host, record_port = _recording_cmd_endpoint()
@@ -3883,23 +3886,40 @@ def _update_stereo_wrist(handles: dict[str, Any]) -> None:
     max_pts = int(handles["pc_max_k"].value) * 1000 if handles.get("pc_max_k") else 80000
     psize = float(handles["pc_size"].value) if handles.get("pc_size") else 0.004
 
+    # 캘리브 모드: 양손 기즈모 표시 + 동기화. 한쪽 기즈모가 움직이면 같은 로컬
+    # pose(=공유 T_tcp_cam)를 양쪽 기즈모와 핸드아이 프레임에 전파한다.
+    calib_on = bool(getattr(handles.get("pc_wrist_calib"), "value", False)) and on
+    giz_l, giz_r = gizmos.get("left"), gizmos.get("right")
+    if giz_l is not None and giz_r is not None:
+        giz_l.visible = giz_r.visible = calib_on
+
+        def _pose(g):
+            return (tuple(np.round(np.asarray(g.wxyz), 7)), tuple(np.round(np.asarray(g.position), 7)))
+
+        last = handles.get("_wrist_sync_last")
+        pl, pr = _pose(giz_l), _pose(giz_r)
+        driver = None
+        if last is None:
+            driver = "left"
+        elif pl != last["left"]:
+            driver = "left"
+        elif pr != last["right"]:
+            driver = "right"
+        if driver is not None:                       # 구동 기즈모 → 양쪽 동기화
+            g = gizmos[driver]
+            w, p = tuple(np.asarray(g.wxyz)), tuple(np.asarray(g.position))
+            for _a in ("left", "right"):
+                gizmos[_a].wxyz = w; gizmos[_a].position = p
+                frames[_a].wxyz = w; frames[_a].position = p
+            snap = (tuple(np.round(w, 7)), tuple(np.round(p, 7)))
+            handles["_wrist_sync_last"] = {"left": snap, "right": snap}
+            cs = handles.get("pc_wrist_status_calib")
+            if cs is not None:
+                ap = np.asarray(p)
+                cs.value = f"xyz=({ap[0]:.4f}, {ap[1]:.4f}, {ap[2]:.4f}) m  (양손 동기화)"
+
     parts_status = []
     for arm in ("left", "right"):
-        # 캘리브 모드: 기즈모 표시 + 로컬 pose를 핸드아이 프레임에 복사
-        giz = gizmos.get(arm)
-        frm = frames.get(arm)
-        calib = handles.get(f"pc_wrist_calib_{arm}")
-        calib_on = bool(getattr(calib, "value", False)) and on
-        if giz is not None:
-            giz.visible = calib_on
-            if calib_on and frm is not None:
-                frm.wxyz = giz.wxyz
-                frm.position = giz.position
-                cs = handles.get(f"pc_wrist_status_{arm}")
-                if cs is not None:
-                    p = np.array(giz.position)
-                    cs.value = f"xyz=({p[0]:.4f}, {p[1]:.4f}, {p[2]:.4f}) m"
-
         h = hs.get(arm)
         if not on:
             if h is not None:

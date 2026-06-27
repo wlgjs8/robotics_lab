@@ -887,6 +887,74 @@ std::string initMotionConfigBody(const std::string& init_block) {
         init_block;
 }
 
+std::string selfCollisionMeshConfigBody(const std::string& mesh_extra) {
+    const std::string rb3_urdf =
+        (std::filesystem::path(__FILE__).parent_path().parent_path() /
+         "descriptions/urdf/rb3_730e.urdf").string();
+    return std::string(
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  send_servo_commands: false\n"
+        "kinematics:\n"
+        "  enable: true\n"
+        "  provider: pinocchio\n"
+        "  urdf: \"") + rb3_urdf + "\"\n" +
+        "  base_link: world\n"
+        "  tip_link: tcp\n"
+        "  joint_names: [base_joint, shoulder_joint, elbow_joint, wrist1_joint, wrist2_joint, wrist3_joint]\n"
+        "  q_units: deg\n"
+        "safety:\n"
+        "  self_collision:\n"
+        "    enable: true\n"
+        "    mesh:\n"
+        "      unified_urdf: dummy.urdf\n"
+        "      d_hard_m: 0.010\n"
+        "      d_slow_m: 0.035\n" +
+        mesh_extra;
+}
+
+bool testDisabledCollisionPairsConfig() {
+    const std::string valid_path = writeTempConfig(
+        "disabled-collision-pairs-valid",
+        selfCollisionMeshConfigBody(
+            "      disabled_collision_pairs:\n"
+            "        - [\"*left*link0*\", \"*left*link1*\"]\n"
+            "        - [\"*right*link0*\", \"*right*link1*\"]\n"
+            "      debug_pair_curation: true\n"
+        )
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(valid_path);
+    ::unlink(valid_path.c_str());
+    const auto& mesh = cfg.safety.self_collision.mesh;
+    RB_CHECK(mesh.disabled_collision_pairs.size() == 2);
+    RB_CHECK(mesh.disabled_collision_pairs[0].pattern_a == "*left*link0*");
+    RB_CHECK(mesh.disabled_collision_pairs[0].pattern_b == "*left*link1*");
+    RB_CHECK(mesh.disabled_collision_pairs[1].pattern_a == "*right*link0*");
+    RB_CHECK(mesh.disabled_collision_pairs[1].pattern_b == "*right*link1*");
+    RB_CHECK(mesh.debug_pair_curation);
+
+    const std::string bad_length_path = writeTempConfig(
+        "disabled-collision-pairs-bad-length",
+        selfCollisionMeshConfigBody(
+            "      disabled_collision_pairs:\n"
+            "        - [\"*right*link0*\"]\n"
+        )
+    );
+    RB_CHECK(loadRejects(bad_length_path));
+    ::unlink(bad_length_path.c_str());
+
+    const std::string bad_shape_path = writeTempConfig(
+        "disabled-collision-pairs-bad-shape",
+        selfCollisionMeshConfigBody(
+            "      disabled_collision_pairs: \"*right*link0*\"\n"
+        )
+    );
+    RB_CHECK(loadRejects(bad_shape_path));
+    ::unlink(bad_shape_path.c_str());
+
+    return true;
+}
+
 bool testInitMotionPlannerConfigExt() {
     const std::string valid_path = writeTempConfig(
         "init-motion-valid",
@@ -950,6 +1018,7 @@ int main() {
     if (!testFloorCheckPointOffsetClosedParses()) return 1;
     if (!testRoiBoxConfigParsesAndDefaults()) return 1;
     if (!testRoiBoxInvalidConfigRejects()) return 1;
+    if (!testDisabledCollisionPairsConfig()) return 1;
     if (!testInitMotionPlannerConfigExt()) return 1;
     return 0;
 }

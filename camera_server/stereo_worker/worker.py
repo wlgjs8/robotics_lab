@@ -203,7 +203,7 @@ def cmd_run(args):
             detector = BoxDetector(
                 K, baseline,
                 use_icp=os.environ.get("STEREO_DETECT_ICP", "1") != "0",
-                icp_method=os.environ.get("STEREO_DETECT_ICP_METHOD", "point_to_point"),
+                icp_method=os.environ.get("STEREO_DETECT_ICP_METHOD", "yaw_se2"),
             )
             if os.environ.get("STEREO_TRACK", "1") != "0":
                 tracker = BoxTracker()

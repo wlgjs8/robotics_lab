@@ -1415,6 +1415,8 @@ DualArmServoLoop::DualArmServoLoop(
         collision_monitor_cfg_.right_arm_root_frame = m.right_arm_root_frame;
         collision_monitor_cfg_.check_intra_arm = m.check_intra_arm;
         collision_monitor_cfg_.intra_arm_min_chain_separation = m.intra_arm_min_chain_separation;
+        collision_monitor_cfg_.disabled_collision_pairs = m.disabled_collision_pairs;
+        collision_monitor_cfg_.debug_pair_curation = m.debug_pair_curation;
         collision_monitor_cfg_.swept_samples = m.swept_samples;
         collision_monitor_cfg_.d_hard_m = m.d_hard_m;
         collision_monitor_cfg_.d_slow_m = m.d_slow_m;
@@ -2489,61 +2491,98 @@ void DualArmServoLoop::loopMain() {
                     }
                     return std::string("unknown");
                 };
-                const InitMotionExec& ex = init_motion_exec_;
-                InitMotionDiag diag;
-                diag.status = status_string(ex.status);
-                if (ex.exec_timeout) {
-                    diag.fail_mode = "exec_timeout";
-                } else if (ex.exec_stalled) {
-                    diag.fail_mode = "exec_stalled";
-                } else {
-                    diag.fail_mode = initMotionFailModeString(ex.fail_mode);
-                }
-                diag.message = ex.message;
-                diag.start_clear_m = ex.start_clear_m;
-                diag.goal_clear_m = ex.goal_clear_m;
-                diag.tree_start = ex.tree_start_size;
-                diag.tree_goal = ex.tree_goal_size;
-                diag.iterations = ex.last_iterations;
-                diag.planning_time_s = ex.last_planning_time_s;
-                diag.waypoint_index = static_cast<int>(ex.index);
-                diag.waypoint_count = static_cast<int>(ex.waypoints.size());
-                diag.dist_to_goal_deg = std::numeric_limits<double>::quiet_NaN();
                 InitMotionArmDiag left_diag;
                 InitMotionArmDiag right_diag;
-                left_diag.status = ex.left_active ? diag.status : std::string("idle");
-                right_diag.status = ex.right_active ? diag.status : std::string("idle");
-                left_diag.fail_mode = diag.fail_mode;
-                right_diag.fail_mode = diag.fail_mode;
-                left_diag.message = ex.left_active ? diag.message : std::string();
-                right_diag.message = ex.right_active ? diag.message : std::string();
-                left_diag.waypoint_index = static_cast<int>(ex.index);
-                right_diag.waypoint_index = static_cast<int>(ex.index);
-                left_diag.waypoint_count = static_cast<int>(ex.waypoints.size());
-                right_diag.waypoint_count = static_cast<int>(ex.waypoints.size());
-                left_diag.dist_to_goal_deg = std::numeric_limits<double>::quiet_NaN();
-                right_diag.dist_to_goal_deg = std::numeric_limits<double>::quiet_NaN();
-                if (!ex.waypoints.empty() &&
-                    (ex.status == InitMotionStatus::Executing ||
-                     ex.status == InitMotionStatus::Done ||
-                     ex.status == InitMotionStatus::Failed)) {
+                auto fail_mode_string = [&](const InitMotionExec& ex) {
+                    if (ex.exec_timeout) return std::string("exec_timeout");
+                    if (ex.exec_stalled) return std::string("exec_stalled");
+                    return initMotionFailModeString(ex.fail_mode);
+                };
+                auto fill_arm = [&](InitMotionArmDiag& arm, const InitMotionExec& ex, bool left_arm) {
+                    arm.status = status_string(ex.status);
+                    arm.fail_mode = fail_mode_string(ex);
+                    arm.message = ex.message;
+                    arm.waypoint_index = static_cast<int>(ex.index);
+                    arm.waypoint_count = static_cast<int>(ex.waypoints.size());
+                    arm.goal_self_min_clearance_m = ex.goal_self_min_clearance_m;
+                    arm.goal_external_min_clearance_m = ex.goal_external_min_clearance_m;
+                    arm.goal_nearest_pair_name_a = ex.goal_nearest_pair_name_a;
+                    arm.goal_nearest_pair_name_b = ex.goal_nearest_pair_name_b;
+                    arm.goal_nearest_pair_external = ex.goal_nearest_pair_external;
+                    arm.goal_clear_threshold_self_m = ex.goal_clear_threshold_self_m;
+                    arm.goal_clear_threshold_external_m = ex.goal_clear_threshold_external_m;
+                    arm.clear_threshold_m = ex.clear_threshold_m;
+                    arm.external_clear_threshold_m = ex.external_clear_threshold_m;
+                    arm.nearest_pair = ex.nearest_pair;
+                    arm.nearest_pair_distance_m = ex.nearest_pair_distance_m;
+                    arm.nearest_pair_external = ex.nearest_pair_external;
+                    arm.dist_to_goal_deg = std::numeric_limits<double>::quiet_NaN();
+                    if (ex.waypoints.empty() ||
+                        !(ex.status == InitMotionStatus::Executing ||
+                          ex.status == InitMotionStatus::Done ||
+                          ex.status == InitMotionStatus::Failed)) {
+                        return;
+                    }
                     const auto& goal_wp = ex.waypoints.back();
                     double dist = 0.0;
-                    double left_dist = 0.0;
-                    double right_dist = 0.0;
                     for (int i = 0; i < kDof; ++i) {
-                        left_dist = std::max(left_dist, std::abs(left_prev_sent_q_deg_[i] - goal_wp.first[i]));
-                        right_dist = std::max(right_dist, std::abs(right_prev_sent_q_deg_[i] - goal_wp.second[i]));
-                        if (ex.left_active) {
-                            dist = std::max(dist, left_dist);
-                        }
-                        if (ex.right_active) {
-                            dist = std::max(dist, right_dist);
-                        }
+                        dist = std::max(dist, std::abs(
+                            (left_arm ? left_prev_sent_q_deg_[i] : right_prev_sent_q_deg_[i]) -
+                            (left_arm ? goal_wp.first[i] : goal_wp.second[i])));
                     }
-                    diag.dist_to_goal_deg = dist;
-                    if (ex.left_active) left_diag.dist_to_goal_deg = left_dist;
-                    if (ex.right_active) right_diag.dist_to_goal_deg = right_dist;
+                    arm.dist_to_goal_deg = dist;
+                };
+                const InitMotionExec* left_owner = nullptr;
+                const InitMotionExec* right_owner = nullptr;
+                for (const InitMotionExec* ex : {&left_init_motion_exec_, &right_init_motion_exec_}) {
+                    if (ex->status == InitMotionStatus::Idle) continue;
+                    if (ex->left_active && left_owner == nullptr) left_owner = ex;
+                    if (ex->right_active && right_owner == nullptr) right_owner = ex;
+                }
+                if (left_owner != nullptr) fill_arm(left_diag, *left_owner, true);
+                if (right_owner != nullptr) fill_arm(right_diag, *right_owner, false);
+
+                InitMotionDiag diag;
+                const InitMotionExec* aggregate_owner =
+                    left_owner != nullptr ? left_owner : right_owner;
+                if (left_owner != nullptr && right_owner != nullptr &&
+                    left_owner->status == InitMotionStatus::Idle &&
+                    right_owner->status != InitMotionStatus::Idle) {
+                    aggregate_owner = right_owner;
+                }
+                if (aggregate_owner != nullptr) {
+                    diag.status = status_string(aggregate_owner->status);
+                    diag.fail_mode = fail_mode_string(*aggregate_owner);
+                    diag.message = aggregate_owner->message;
+                    diag.start_clear_m = aggregate_owner->start_clear_m;
+                    diag.goal_clear_m = aggregate_owner->goal_clear_m;
+                    diag.goal_self_min_clearance_m = aggregate_owner->goal_self_min_clearance_m;
+                    diag.goal_external_min_clearance_m = aggregate_owner->goal_external_min_clearance_m;
+                    diag.goal_nearest_pair_name_a = aggregate_owner->goal_nearest_pair_name_a;
+                    diag.goal_nearest_pair_name_b = aggregate_owner->goal_nearest_pair_name_b;
+                    diag.goal_nearest_pair_external = aggregate_owner->goal_nearest_pair_external;
+                    diag.goal_clear_threshold_self_m = aggregate_owner->goal_clear_threshold_self_m;
+                    diag.goal_clear_threshold_external_m = aggregate_owner->goal_clear_threshold_external_m;
+                    diag.tree_start = aggregate_owner->tree_start_size;
+                    diag.tree_goal = aggregate_owner->tree_goal_size;
+                    diag.iterations = aggregate_owner->last_iterations;
+                    diag.planning_time_s = aggregate_owner->last_planning_time_s;
+                    diag.waypoint_index = static_cast<int>(aggregate_owner->index);
+                    diag.waypoint_count = static_cast<int>(aggregate_owner->waypoints.size());
+                    diag.clear_threshold_m = aggregate_owner->clear_threshold_m;
+                    diag.external_clear_threshold_m = aggregate_owner->external_clear_threshold_m;
+                    diag.nearest_pair = aggregate_owner->nearest_pair;
+                    diag.nearest_pair_distance_m = aggregate_owner->nearest_pair_distance_m;
+                    diag.nearest_pair_external = aggregate_owner->nearest_pair_external;
+                    diag.dist_to_goal_deg = std::numeric_limits<double>::quiet_NaN();
+                    if (std::isfinite(left_diag.dist_to_goal_deg)) {
+                        diag.dist_to_goal_deg = left_diag.dist_to_goal_deg;
+                    }
+                    if (std::isfinite(right_diag.dist_to_goal_deg)) {
+                        diag.dist_to_goal_deg = std::isfinite(diag.dist_to_goal_deg)
+                            ? std::max(diag.dist_to_goal_deg, right_diag.dist_to_goal_deg)
+                            : right_diag.dist_to_goal_deg;
+                    }
                 }
                 sample.init_motion = diag;
                 sample.init_motion_left = left_diag;
@@ -5002,7 +5041,6 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         command.right.joint_target_profile == JointTargetProfile::InitMotion;
     const bool is_init = left_init || right_init;
 
-    auto& ex = init_motion_exec_;
     const bool freeze_other_arm = config_.safety.init_motion_planner.single_arm_freeze_other_arm;
 
     // Rewrite only the arm(s) covered by the active init_motion profile. The
@@ -5014,7 +5052,8 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         arm.q_target_deg = q;
         arm.has_joint_target = true;
     };
-    const auto rewrite_selected = [&](DualArmCommand& c, const JointArray& l, const JointArray& r) {
+    const auto rewrite_selected = [&](DualArmCommand& c, const InitMotionExec& ex,
+                                      const JointArray& l, const JointArray& r) {
         if (ex.left_active || freeze_other_arm) {
             set_joint_target(c.left, l);
         }
@@ -5022,7 +5061,7 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             set_joint_target(c.right, r);
         }
     };
-    const auto hold_selected = [&](DualArmCommand& c) {
+    const auto hold_selected = [&](DualArmCommand& c, const InitMotionExec& ex) {
         if (ex.left_active || freeze_other_arm) {
             c.left.mode = ControlMode::Hold;
             c.left.joint_target_profile = JointTargetProfile::Direct;
@@ -5038,32 +5077,40 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         }
         return true;
     };
+    const auto sequence_active = [](const InitMotionExec& e) {
+        return e.status == InitMotionStatus::Planning ||
+               e.status == InitMotionStatus::Executing;
+    };
+    const auto non_idle = [](const InitMotionExec& e) {
+        return e.status != InitMotionStatus::Idle;
+    };
     // A plan that has begun (planning or streaming) is a committed go-to-init move.
-    const bool sequence_active = ex.status == InitMotionStatus::Planning ||
-                                 ex.status == InitMotionStatus::Executing;
     // The deadman synthesises a seq==0 Hold/Hold once the one-shot profile command
     // ages out of its freshness window. That is NOT an operator cancel: keep driving
     // the in-flight move to completion. An EXPLICIT command cancels.
     const bool deadman_hold = isSyntheticHoldCommand(command);
 
     if (!is_init) {
-        if (sequence_active && deadman_hold && init_motion_planner_) {
+        const bool any_sequence_active =
+            sequence_active(left_init_motion_exec_) || sequence_active(right_init_motion_exec_);
+        if (any_sequence_active && deadman_hold && init_motion_planner_) {
             // Continuation across command staleness: fall through to the status machine
             // WITHOUT recomputing the target (command carries no init pose now) and
             // WITHOUT relaunching. exec.target/waypoints already hold the committed move.
         } else {
             // Explicit non-profile command, or no active sequence -> cancel/reset so
             // the next init_motion profile plans fresh. A discarded in-flight future detaches.
-            if (ex.status != InitMotionStatus::Idle) {
+            for (InitMotionExec* ex : {&left_init_motion_exec_, &right_init_motion_exec_}) {
+                if (ex->status == InitMotionStatus::Idle) continue;
                 // Diagnostic: a committed go-to-init move was interrupted before it
                 // reached the goal. This is the only silent way the arm stops part-way
                 // (no execution-timeout, no planning failure). Logs WHAT interrupted it
                 // (a real command with seq!=0 from a competing source, or a deadman hold
                 // that failed the synthetic-hold test) so the cause is unambiguous.
-                if (sequence_active) {
+                if (sequence_active(*ex)) {
                     std::cerr << "[WARN] JointTarget init_motion: committed move CANCELLED mid-"
-                              << (ex.status == InitMotionStatus::Planning ? "planning"
-                                                                          : "execution")
+                              << (ex->status == InitMotionStatus::Planning ? "planning"
+                                                                           : "execution")
                               << " by a non-init command (seq=" << command.seq
                               << ", left_mode=" << static_cast<int>(command.left.mode)
                               << ", right_mode=" << static_cast<int>(command.right.mode)
@@ -5071,211 +5118,272 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                               << ", planner=" << (init_motion_planner_ ? 1 : 0)
                               << "); holding (arm stops where it is)\n";
                 }
-                ex = InitMotionExec{};
+                *ex = InitMotionExec{};
             }
             return command;
+        }
+    }
+
+    if (is_init) {
+        if (left_init && right_init) {
+            if (non_idle(right_init_motion_exec_)) right_init_motion_exec_ = InitMotionExec{};
+        } else if (left_init) {
+            if (left_init_motion_exec_.right_active) left_init_motion_exec_ = InitMotionExec{};
+            if (non_idle(right_init_motion_exec_)) right_init_motion_exec_ = InitMotionExec{};
+        } else if (right_init) {
+            if (right_init_motion_exec_.left_active) right_init_motion_exec_ = InitMotionExec{};
+            if (non_idle(left_init_motion_exec_)) left_init_motion_exec_ = InitMotionExec{};
         }
     }
 
     // Planner disabled -> fall back to a direct JointTarget to the requested pose;
     // the reactive barrier + floor still guard each tick.
     if (is_init && !init_motion_planner_) {
-        ex.left_active = left_init;
-        ex.right_active = right_init;
-        rewrite_selected(
-            command,
-            left_init ? command.left.q_target_deg : left_prev_sent_q_deg_,
-            right_init ? command.right.q_target_deg : right_prev_sent_q_deg_
-        );
+        InitMotionExec direct;
+        direct.left_active = left_init;
+        direct.right_active = right_init;
+        rewrite_selected(command, direct,
+                         left_init ? command.left.q_target_deg : left_prev_sent_q_deg_,
+                         right_init ? command.right.q_target_deg : right_prev_sent_q_deg_);
         return command;
     }
 
-    // Launch (or relaunch on a changed target) a plan from the CURRENT sent pose. Only
-    // an EXPLICIT init_motion profile command (re)launches; while Planning we never relaunch
-    // (let the in-flight plan resolve first), and a deadman-hold continuation never
-    // launches (it has no fresh target).
-    if (is_init) {
-        const JointArray target_left = left_init ? command.left.q_target_deg : left_prev_sent_q_deg_;
-        const JointArray target_right = right_init ? command.right.q_target_deg : right_prev_sent_q_deg_;
-        const bool new_target = !ex.has_target ||
-            !reached(target_left, ex.target_left, 1e-6) ||
-            !reached(target_right, ex.target_right, 1e-6) ||
-            ex.left_active != left_init ||
-            ex.right_active != right_init;
-        const auto launch_plan = [&]() {
-            ex.target_left = target_left;
-            ex.target_right = target_right;
-            ex.left_active = left_init;
-            ex.right_active = right_init;
-            ex.has_target = true;
-            ex.waypoints.clear();
-            ex.index = 0;
-            ex.status = InitMotionStatus::Planning;
-            ex.message = "planning";
-            ex.fail_mode = InitMotionPlanResult::FailMode::None;
-            ex.start_clear_m = std::numeric_limits<double>::quiet_NaN();
-            ex.goal_clear_m = std::numeric_limits<double>::quiet_NaN();
-            ex.tree_start_size = 0;
-            ex.tree_goal_size = 0;
-            ex.last_iterations = 0;
-            ex.last_planning_time_s = 0.0;
+    const auto process_exec = [&](InitMotionExec& ex, bool request_left, bool request_right,
+                                  bool fresh_profile) {
+        // Launch (or relaunch on a changed target) a plan from the CURRENT sent pose.
+        // For single-arm init the non-selected arm is frozen only inside the planner's
+        // combined collision oracle; it is not a target identity and must not trigger
+        // replans as flow moves it on later ticks.
+        if (fresh_profile && (request_left || request_right)) {
+            const JointArray target_left =
+                request_left ? command.left.q_target_deg : left_prev_sent_q_deg_;
+            const JointArray target_right =
+                request_right ? command.right.q_target_deg : right_prev_sent_q_deg_;
+            const bool new_target = !ex.has_target ||
+                (request_left && !reached(target_left, ex.target_left, 1e-6)) ||
+                (request_right && !reached(target_right, ex.target_right, 1e-6)) ||
+                ex.left_active != request_left ||
+                ex.right_active != request_right;
+            const auto launch_plan = [&]() {
+                ex.target_left = target_left;
+                ex.target_right = target_right;
+                ex.left_active = request_left;
+                ex.right_active = request_right;
+                ex.has_target = true;
+                ex.waypoints.clear();
+                ex.index = 0;
+                ex.status = InitMotionStatus::Planning;
+                ex.message = "planning";
+                ex.fail_mode = InitMotionPlanResult::FailMode::None;
+                ex.start_clear_m = std::numeric_limits<double>::quiet_NaN();
+                ex.goal_clear_m = std::numeric_limits<double>::quiet_NaN();
+                ex.goal_self_min_clearance_m = std::numeric_limits<double>::quiet_NaN();
+                ex.goal_external_min_clearance_m = std::numeric_limits<double>::quiet_NaN();
+                ex.goal_nearest_pair_name_a.clear();
+                ex.goal_nearest_pair_name_b.clear();
+                ex.goal_nearest_pair_external = false;
+                ex.goal_clear_threshold_self_m = std::numeric_limits<double>::quiet_NaN();
+                ex.goal_clear_threshold_external_m = std::numeric_limits<double>::quiet_NaN();
+                ex.clear_threshold_m = std::numeric_limits<double>::quiet_NaN();
+                ex.external_clear_threshold_m = std::numeric_limits<double>::quiet_NaN();
+                ex.nearest_pair.clear();
+                ex.nearest_pair_distance_m = std::numeric_limits<double>::quiet_NaN();
+                ex.nearest_pair_external = false;
+                ex.tree_start_size = 0;
+                ex.tree_goal_size = 0;
+                ex.last_iterations = 0;
+                ex.last_planning_time_s = 0.0;
+                ex.exec_timeout = false;
+                ex.exec_stalled = false;
+                ex.start_ns = nowSteadyNs();
+                const JointArray start_left = left_prev_sent_q_deg_;
+                const JointArray start_right = right_prev_sent_q_deg_;
+                InitMotionPlanner* planner = init_motion_planner_.get();
+                ex.future = std::async(std::launch::async,
+                    [planner, start_left, start_right, request_left, target_left,
+                     request_right, target_right]() {
+                        return planner->plan(
+                            start_left, start_right, request_left, target_left,
+                            request_right, target_right);
+                    });
+                std::cerr << "[INFO] JointTarget init_motion: planning collision-free path from current pose\n";
+            };
+            if (ex.status == InitMotionStatus::Idle ||
+                ((ex.status == InitMotionStatus::Executing ||
+                  ex.status == InitMotionStatus::Done ||
+                  ex.status == InitMotionStatus::Failed) && new_target)) {
+                launch_plan();
+            }
+        }
+
+        // Runaway bound (progress-aware): a committed sequence gives up (Failed -> hold) so a
+        // permanently barrier-blocked corner cannot hold motion authority forever. A move that
+        // keeps CLOSING on the goal is not killed by the wall-clock budget (a slow escape that
+        // crawls out of a near-collision still completes); a genuine STALL (no progress for the
+        // stall window) fails closed FAST instead of waiting out the full budget.
+        if (sequence_active(ex) && ex.start_ns != 0) {
+            const uint64_t now_ns = nowSteadyNs();
+            const double age_s = static_cast<double>(now_ns - ex.start_ns) * 1e-9;
+            const double stall_window_s =
+                std::min(6.0, config_.safety.init_motion_planner.execution_timeout_sec);
+            const double since_progress_s = ex.last_progress_ns != 0
+                ? static_cast<double>(now_ns - ex.last_progress_ns) * 1e-9 : 0.0;
+            const bool absolute_timeout =
+                age_s > config_.safety.init_motion_planner.execution_timeout_sec;
+            const bool stalled = ex.status == InitMotionStatus::Executing &&
+                                 ex.last_progress_ns != 0 && since_progress_s > stall_window_s;
+            if (absolute_timeout || stalled) {
+                ex.status = InitMotionStatus::Failed;
+                ex.message = stalled ? "execution stalled (no progress)" : "execution timeout";
+                ex.exec_timeout = absolute_timeout;
+                ex.exec_stalled = stalled;
+                ex.fail_mode = InitMotionPlanResult::FailMode::None;
+                std::cerr << "[WARN] JointTarget init_motion: " << ex.message
+                          << " (age=" << age_s << "s, since_progress=" << since_progress_s
+                          << "s, wp=" << ex.index << "/" << ex.waypoints.size()
+                          << "); holding (fail-closed)\n";
+            }
+        }
+
+        // Poll the async plan (non-blocking) and transition Planning -> Executing/Failed.
+        if (ex.status == InitMotionStatus::Planning && ex.future.valid() &&
+            ex.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            InitMotionPlanResult result = ex.future.get();
+            ex.fail_mode = result.fail_mode;
+            ex.start_clear_m = result.start_clear_m;
+            ex.goal_clear_m = result.goal_clear_m;
+            ex.goal_self_min_clearance_m = result.goal_self_min_clearance_m;
+            ex.goal_external_min_clearance_m = result.goal_external_min_clearance_m;
+            ex.goal_nearest_pair_name_a = result.goal_nearest_pair_name_a;
+            ex.goal_nearest_pair_name_b = result.goal_nearest_pair_name_b;
+            ex.goal_nearest_pair_external = result.goal_nearest_pair_external;
+            ex.goal_clear_threshold_self_m = result.goal_clear_threshold_self_m;
+            ex.goal_clear_threshold_external_m = result.goal_clear_threshold_external_m;
+            ex.clear_threshold_m = result.clear_threshold_m;
+            ex.external_clear_threshold_m = result.external_clear_threshold_m;
+            ex.nearest_pair = result.nearest_pair;
+            ex.nearest_pair_distance_m = result.nearest_pair_distance_m;
+            ex.nearest_pair_external = result.nearest_pair_external;
+            ex.tree_start_size = result.tree_start_size;
+            ex.tree_goal_size = result.tree_goal_size;
+            ex.last_iterations = result.iterations;
+            ex.last_planning_time_s = result.planning_time_s;
             ex.exec_timeout = false;
             ex.exec_stalled = false;
-            ex.start_ns = nowSteadyNs();
-            const JointArray start_left = left_prev_sent_q_deg_;
-            const JointArray start_right = right_prev_sent_q_deg_;
-            InitMotionPlanner* planner = init_motion_planner_.get();
-            ex.future = std::async(std::launch::async,
-                [planner, start_left, start_right, target_left, target_right]() {
-                    return planner->plan(start_left, start_right, target_left, target_right);
-                });
-            std::cerr << "[INFO] JointTarget init_motion: planning collision-free path from current pose\n";
-        };
-        if (ex.status == InitMotionStatus::Idle ||
-            ((ex.status == InitMotionStatus::Executing ||
-              ex.status == InitMotionStatus::Done ||
-              ex.status == InitMotionStatus::Failed) && new_target)) {
-            launch_plan();
+            if (result.success && !result.waypoints.empty()) {
+                ex.waypoints = std::move(result.waypoints);
+                ex.index = 0;
+                ex.escape_waypoints = result.escape_waypoints;
+                ex.status = InitMotionStatus::Executing;
+                ex.message = "executing";
+                // Reset progress tracking for the progress-aware execution timeout.
+                ex.best_dist_deg = std::numeric_limits<double>::infinity();
+                ex.last_progress_ns = nowSteadyNs();
+                ex.last_exec_log_ns = 0;
+                std::cerr << "[INFO] JointTarget init_motion: plan found ("
+                          << ex.waypoints.size() << " waypoints, "
+                          << result.escape_waypoints << " escape, "
+                          << result.iterations << " iters, "
+                          << result.planning_time_s << " s); streaming\n";
+            } else {
+                ex.status = InitMotionStatus::Failed;
+                ex.message = result.message;
+                std::cerr << "[WARN] JointTarget init_motion: planning failed (" << result.message
+                          << "); holding (fail-closed)\n";
+            }
         }
-    }
 
-    // Runaway bound (progress-aware): a committed sequence gives up (Failed -> hold) so a
-    // permanently barrier-blocked corner cannot hold motion authority forever. A move that
-    // keeps CLOSING on the goal is not killed by the wall-clock budget (a slow escape that
-    // crawls out of a near-collision still completes); a genuine STALL (no progress for the
-    // stall window) fails closed FAST instead of waiting out the full budget.
-    if (sequence_active && ex.start_ns != 0) {
-        const uint64_t now_ns = nowSteadyNs();
-        const double age_s = static_cast<double>(now_ns - ex.start_ns) * 1e-9;
-        const double stall_window_s =
-            std::min(6.0, config_.safety.init_motion_planner.execution_timeout_sec);
-        const double since_progress_s = ex.last_progress_ns != 0
-            ? static_cast<double>(now_ns - ex.last_progress_ns) * 1e-9 : 0.0;
-        const bool absolute_timeout =
-            age_s > config_.safety.init_motion_planner.execution_timeout_sec;
-        const bool stalled = ex.status == InitMotionStatus::Executing &&
-                             ex.last_progress_ns != 0 && since_progress_s > stall_window_s;
-        if (absolute_timeout || stalled) {
-            ex.status = InitMotionStatus::Failed;
-            ex.message = stalled ? "execution stalled (no progress)" : "execution timeout";
-            ex.exec_timeout = absolute_timeout;
-            ex.exec_stalled = stalled;
-            ex.fail_mode = InitMotionPlanResult::FailMode::None;
-            std::cerr << "[WARN] JointTarget init_motion: " << ex.message
-                      << " (age=" << age_s << "s, since_progress=" << since_progress_s
-                      << "s, wp=" << ex.index << "/" << ex.waypoints.size()
-                      << "); holding (fail-closed)\n";
+        switch (ex.status) {
+            case InitMotionStatus::Executing: {
+                bool done = false;
+                // Follow the gradient-escape head precisely (escape_waypoints), then pure-pursuit.
+                JointArray pursue_left = left_prev_sent_q_deg_;
+                JointArray pursue_right = right_prev_sent_q_deg_;
+                if (!ex.left_active && !freeze_other_arm) {
+                    pursue_left = ex.target_left;
+                }
+                if (!ex.right_active && !freeze_other_arm) {
+                    pursue_right = ex.target_right;
+                }
+                PursuitStep pursuit =
+                    pursueWaypointsStep(
+                        ex.waypoints,
+                        pursue_left,
+                        pursue_right,
+                        ex.index,
+                        config_.safety.init_motion_planner.waypoint_tol_deg,
+                        config_.safety.init_motion_planner.execution_lookahead_deg,
+                        ex.escape_waypoints
+                    );
+                std::pair<JointArray, JointArray> wp = {pursuit.left, pursuit.right};
+                done = pursuit.done;
+                if (!ex.waypoints.empty()) {
+                    // Progress = max-joint distance from the current sent pose to the final
+                    // waypoint. Closing on it (by > a noise floor) refreshes the stall timer.
+                    const auto& goal_wp = ex.waypoints.back();
+                    double dist = 0.0;
+                    for (int i = 0; i < kDof; ++i) {
+                        if (ex.left_active || freeze_other_arm) {
+                            dist = std::max(dist, std::abs(left_prev_sent_q_deg_[i] - goal_wp.first[i]));
+                        }
+                        if (ex.right_active || freeze_other_arm) {
+                            dist = std::max(dist, std::abs(right_prev_sent_q_deg_[i] - goal_wp.second[i]));
+                        }
+                    }
+                    const uint64_t now_ns = nowSteadyNs();
+                    if (dist < ex.best_dist_deg - 0.05) {
+                        ex.best_dist_deg = dist;
+                        ex.last_progress_ns = now_ns;
+                    }
+                    // Throttled (~1 Hz) streaming-progress diagnostic: which waypoint, whether
+                    // still in the escape head, and how far from the goal — so a stall location
+                    // is visible in the log.
+                    if (ex.last_exec_log_ns == 0 || (now_ns - ex.last_exec_log_ns) > 1000000000ULL) {
+                        ex.last_exec_log_ns = now_ns;
+                        std::cerr << "[INFO] JointTarget init_motion: streaming wp " << ex.index << "/"
+                                  << ex.waypoints.size() << " (escape=" << ex.escape_waypoints
+                                  << ", dist_to_goal=" << dist << " deg, best=" << ex.best_dist_deg
+                                  << " deg)\n";
+                    }
+                }
+                if (done) {
+                    ex.status = InitMotionStatus::Done;
+                    ex.message = "done";
+                    std::cerr << "[INFO] JointTarget init_motion: reached init pose\n";
+                }
+                rewrite_selected(command, ex, wp.first, wp.second);
+                break;
+            }
+            case InitMotionStatus::Done:
+                // Hold at the (planned) goal so the arm resists drift until the command
+                // expires or the operator issues something else.
+                rewrite_selected(command, ex, ex.target_left, ex.target_right);
+                break;
+            case InitMotionStatus::Planning:
+            case InitMotionStatus::Failed:
+            default:
+                // Hold in place: while planning, or fail-closed after a planning failure.
+                hold_selected(command, ex);
+                break;
         }
-    }
+    };
 
-    // Poll the async plan (non-blocking) and transition Planning -> Executing/Failed.
-    if (ex.status == InitMotionStatus::Planning && ex.future.valid() &&
-        ex.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-        InitMotionPlanResult result = ex.future.get();
-        ex.fail_mode = result.fail_mode;
-        ex.start_clear_m = result.start_clear_m;
-        ex.goal_clear_m = result.goal_clear_m;
-        ex.tree_start_size = result.tree_start_size;
-        ex.tree_goal_size = result.tree_goal_size;
-        ex.last_iterations = result.iterations;
-        ex.last_planning_time_s = result.planning_time_s;
-        ex.exec_timeout = false;
-        ex.exec_stalled = false;
-        if (result.success && !result.waypoints.empty()) {
-            ex.waypoints = std::move(result.waypoints);
-            ex.index = 0;
-            ex.escape_waypoints = result.escape_waypoints;
-            ex.status = InitMotionStatus::Executing;
-            ex.message = "executing";
-            // Reset progress tracking for the progress-aware execution timeout.
-            ex.best_dist_deg = std::numeric_limits<double>::infinity();
-            ex.last_progress_ns = nowSteadyNs();
-            ex.last_exec_log_ns = 0;
-            std::cerr << "[INFO] JointTarget init_motion: plan found ("
-                      << ex.waypoints.size() << " waypoints, "
-                      << result.escape_waypoints << " escape, "
-                      << result.iterations << " iters, "
-                      << result.planning_time_s << " s); streaming\n";
+    if (is_init) {
+        if (left_init && right_init) {
+            process_exec(left_init_motion_exec_, true, true, true);
         } else {
-            ex.status = InitMotionStatus::Failed;
-            ex.message = result.message;
-            std::cerr << "[WARN] JointTarget init_motion: planning failed (" << result.message
-                      << "); holding (fail-closed)\n";
+            if (left_init) process_exec(left_init_motion_exec_, true, false, true);
+            if (right_init) process_exec(right_init_motion_exec_, false, true, true);
         }
-    }
-
-    switch (ex.status) {
-        case InitMotionStatus::Executing: {
-            bool done = false;
-            // Follow the gradient-escape head precisely (escape_waypoints), then pure-pursuit.
-            JointArray pursue_left = left_prev_sent_q_deg_;
-            JointArray pursue_right = right_prev_sent_q_deg_;
-            if (!ex.left_active && !freeze_other_arm) {
-                pursue_left = ex.target_left;
-            }
-            if (!ex.right_active && !freeze_other_arm) {
-                pursue_right = ex.target_right;
-            }
-            PursuitStep pursuit =
-                pursueWaypointsStep(
-                    ex.waypoints,
-                    pursue_left,
-                    pursue_right,
-                    ex.index,
-                    config_.safety.init_motion_planner.waypoint_tol_deg,
-                    config_.safety.init_motion_planner.execution_lookahead_deg,
-                    ex.escape_waypoints
-                );
-            std::pair<JointArray, JointArray> wp = {pursuit.left, pursuit.right};
-            done = pursuit.done;
-            if (!ex.waypoints.empty()) {
-                // Progress = max-joint distance from the current sent pose to the final
-                // waypoint. Closing on it (by > a noise floor) refreshes the stall timer.
-                const auto& goal_wp = ex.waypoints.back();
-                double dist = 0.0;
-                for (int i = 0; i < kDof; ++i) {
-                    if (ex.left_active || freeze_other_arm) {
-                        dist = std::max(dist, std::abs(left_prev_sent_q_deg_[i] - goal_wp.first[i]));
-                    }
-                    if (ex.right_active || freeze_other_arm) {
-                        dist = std::max(dist, std::abs(right_prev_sent_q_deg_[i] - goal_wp.second[i]));
-                    }
-                }
-                const uint64_t now_ns = nowSteadyNs();
-                if (dist < ex.best_dist_deg - 0.05) {
-                    ex.best_dist_deg = dist;
-                    ex.last_progress_ns = now_ns;
-                }
-                // Throttled (~1 Hz) streaming-progress diagnostic: which waypoint, whether
-                // still in the escape head, and how far from the goal — so a stall location
-                // is visible in the log.
-                if (ex.last_exec_log_ns == 0 || (now_ns - ex.last_exec_log_ns) > 1000000000ULL) {
-                    ex.last_exec_log_ns = now_ns;
-                    std::cerr << "[INFO] JointTarget init_motion: streaming wp " << ex.index << "/"
-                              << ex.waypoints.size() << " (escape=" << ex.escape_waypoints
-                              << ", dist_to_goal=" << dist << " deg, best=" << ex.best_dist_deg
-                              << " deg)\n";
-                }
-            }
-            if (done) {
-                ex.status = InitMotionStatus::Done;
-                ex.message = "done";
-                std::cerr << "[INFO] JointTarget init_motion: reached init pose\n";
-            }
-            rewrite_selected(command, wp.first, wp.second);
-            break;
+    } else {
+        if (sequence_active(left_init_motion_exec_)) {
+            process_exec(left_init_motion_exec_, left_init_motion_exec_.left_active,
+                         left_init_motion_exec_.right_active, false);
         }
-        case InitMotionStatus::Done:
-            // Hold at the (planned) goal so the arm resists drift until the command
-            // expires or the operator issues something else.
-            rewrite_selected(command, ex.target_left, ex.target_right);
-            break;
-        case InitMotionStatus::Planning:
-        case InitMotionStatus::Failed:
-        default:
-            // Hold in place: while planning, or fail-closed after a planning failure.
-            hold_selected(command);
-            break;
+        if (sequence_active(right_init_motion_exec_)) {
+            process_exec(right_init_motion_exec_, right_init_motion_exec_.left_active,
+                         right_init_motion_exec_.right_active, false);
+        }
     }
     return command;
 }

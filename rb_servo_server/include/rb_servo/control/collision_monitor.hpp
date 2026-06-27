@@ -90,6 +90,8 @@ struct CollisionMonitorConfig {
     // links touch by construction).
     bool check_intra_arm = true;
     int intra_arm_min_chain_separation = 2;
+    std::vector<CollisionPairPattern> disabled_collision_pairs;
+    bool debug_pair_curation = false;
 
     // Swept-volume guard: each evaluation also samples intermediate configurations
     // between the previous evaluated config and the current target and keeps the
@@ -252,8 +254,16 @@ struct CollisionDistanceSummary {
     double min_clearance_m = std::numeric_limits<double>::infinity();
     double self_min_clearance_m = std::numeric_limits<double>::infinity();
     double external_min_clearance_m = std::numeric_limits<double>::infinity();
+    std::string nearest_name_a;
+    std::string nearest_name_b;
+    double nearest_distance_m = std::numeric_limits<double>::infinity();
+    bool nearest_external = false;
     bool valid = false;
 };
+
+bool collisionPairPatternMatches(const CollisionPairPattern& rule,
+                                 const std::string& name_a,
+                                 const std::string& name_b);
 
 // Owns the geometry model + the monitor thread + the published verdict.
 class CollisionMonitor {

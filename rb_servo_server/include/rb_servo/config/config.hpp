@@ -296,6 +296,10 @@ struct SelfCollisionConfig {
         // (chain separation < intra_arm_min_chain_separation) are skipped.
         bool check_intra_arm = true;
         int intra_arm_min_chain_separation = 2;
+        // SRDF-style curated structural false-positive pairs. Matching is symmetric;
+        // each side supports exact strings or '*' globs against geometry names.
+        std::vector<CollisionPairPattern> disabled_collision_pairs;
+        bool debug_pair_curation = false;
         // Swept-volume guard: samples between consecutive evaluations (1 = endpoint
         // only). >=2 prevents fast motion tunneling a thin obstacle between ticks.
         int swept_samples = 2;  // 1=endpoint, >=2 sweeps (cost ~x per sample)

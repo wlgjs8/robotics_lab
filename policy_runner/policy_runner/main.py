@@ -108,6 +108,34 @@ def _active_lease_loss_reason(
     return (f"server lease is held by {owner}", True)
 
 
+def _log_final_intent(
+    source: object,
+    intent: CommandIntent | None,
+    snapshot: StateSnapshot,
+    arm_init_override: ArmInitOverrideController,
+    decision: object,
+    *,
+    sent: bool,
+    command_seq: int = 0,
+    drop_reason: str | None = None,
+) -> None:
+    hook = getattr(source, "log_final_intent", None)
+    if not callable(hook):
+        return
+    try:
+        hook(
+            intent,
+            snapshot,
+            arm_init_override=arm_init_override,
+            decision_allowed=bool(getattr(decision, "allowed", False)),
+            sent=sent,
+            command_seq=int(command_seq),
+            drop_reason=drop_reason,
+        )
+    except Exception as exc:  # noqa: BLE001 - debug logging must never break control
+        print(f"policy_runner final_intent_log_failed: {exc}", file=sys.stderr)
+
+
 def _runner_role(config: PolicyRunnerConfig, source: object, action_source_name: str) -> str:
     explicit = str(getattr(source, "runner_role", "") or "")
     if explicit in {"stack", "flow_infer", "unknown"}:
@@ -374,6 +402,16 @@ def run(
                     if rollout_recorder is not None:
                         rollout_recorder.record_dropped("rollout_mode_command_send_disabled", intent)
                     _remember_unsent_intent(intent)
+                    _log_final_intent(
+                        source,
+                        intent,
+                        snapshot,
+                        arm_init_override,
+                        decision,
+                        sent=False,
+                        command_seq=0,
+                        drop_reason="rollout_mode_command_send_disabled",
+                    )
                     _finish_tick(snapshot, now)
                     continue
                 assert command_client is not None
@@ -383,6 +421,16 @@ def run(
                 # temporary GUI lease holder does not kill the teleop process.
                 if config.servo_command.acquire_lease and not lease_acquired and intent.is_motion:
                     if now < lease_retry_after:
+                        _log_final_intent(
+                            source,
+                            intent,
+                            snapshot,
+                            arm_init_override,
+                            decision,
+                            sent=False,
+                            command_seq=0,
+                            drop_reason="lease_retry_backoff",
+                        )
                         _finish_tick(snapshot, now)
                         continue
                     try:
@@ -399,6 +447,16 @@ def run(
                             file=stderr,
                         )
                         lease_retry_after = now + LEASE_RETRY_BACKOFF_SEC
+                        _log_final_intent(
+                            source,
+                            intent,
+                            snapshot,
+                            arm_init_override,
+                            decision,
+                            sent=False,
+                            command_seq=0,
+                            drop_reason="lease_busy",
+                        )
                         _finish_tick(snapshot, now)
                         continue
                 if intent.is_motion and not armed_for_motion:
@@ -418,16 +476,47 @@ def run(
                         if teleop_debug:
                             debug_dropped += 1
                             debug_last_drop_reason = f"arm:{arm_decision.reason or ''}"
+                        _log_final_intent(
+                            source,
+                            intent,
+                            snapshot,
+                            arm_init_override,
+                            decision,
+                            sent=False,
+                            command_seq=0,
+                            drop_reason=f"arm:{arm_decision.reason or ''}",
+                        )
                         _finish_tick(snapshot, now)
                         continue
                 seq = command_client.send(intent)
                 _remember_sent_intent(intent, seq)
+                _log_final_intent(
+                    source,
+                    intent,
+                    snapshot,
+                    arm_init_override,
+                    decision,
+                    sent=True,
+                    command_seq=seq,
+                    drop_reason=None,
+                )
                 if teleop_debug:
                     debug_sent += 1
                 if rollout_recorder is not None:
                     rollout_recorder.record_sent(intent)
-            elif intent is not None and rollout_recorder is not None:
-                rollout_recorder.record_dropped(decision.reason, intent)
+            elif intent is not None:
+                if rollout_recorder is not None:
+                    rollout_recorder.record_dropped(decision.reason, intent)
+                _log_final_intent(
+                    source,
+                    intent,
+                    snapshot,
+                    arm_init_override,
+                    decision,
+                    sent=False,
+                    command_seq=0,
+                    drop_reason=decision.reason,
+                )
             _finish_tick(snapshot, now)
     except KeyboardInterrupt:
         return 0

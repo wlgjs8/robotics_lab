@@ -13,6 +13,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <yaml-cpp/yaml.h>
@@ -840,6 +841,12 @@ void validateConfig(const DualArmConfig& cfg) {
         if (m.d_slow_m < m.d_hard_m) {
             throw std::runtime_error(
                 "safety.self_collision.mesh.d_slow_m must be >= d_hard_m");
+        }
+        for (const auto& rule : m.disabled_collision_pairs) {
+            if (rule.pattern_a.empty() || rule.pattern_b.empty()) {
+                throw std::runtime_error(
+                    "safety.self_collision.mesh.disabled_collision_pairs patterns must be non-empty");
+            }
         }
     }
     if (cfg.safety.joint_target_smd.enable) {
@@ -1857,6 +1864,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "right_arm_root_frame",
                     "check_intra_arm",
                     "intra_arm_min_chain_separation",
+                    "disabled_collision_pairs",
+                    "debug_pair_curation",
                     "swept_samples",
                     "d_hard_m",
                     "d_slow_m",
@@ -1926,6 +1935,27 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 if (has(m, "right_arm_root_frame")) mc.right_arm_root_frame = asString(m["right_arm_root_frame"], "safety.self_collision.mesh.right_arm_root_frame");
                 if (has(m, "check_intra_arm")) mc.check_intra_arm = asBool(m["check_intra_arm"], "safety.self_collision.mesh.check_intra_arm");
                 if (has(m, "intra_arm_min_chain_separation")) mc.intra_arm_min_chain_separation = asInt(m["intra_arm_min_chain_separation"], "safety.self_collision.mesh.intra_arm_min_chain_separation");
+                if (has(m, "disabled_collision_pairs")) {
+                    const YAML::Node rules = m["disabled_collision_pairs"];
+                    if (!rules.IsSequence()) {
+                        fail("safety.self_collision.mesh.disabled_collision_pairs must be a sequence", rules);
+                    }
+                    mc.disabled_collision_pairs.clear();
+                    for (std::size_t i = 0; i < rules.size(); ++i) {
+                        const YAML::Node rule = rules[i];
+                        if (!rule.IsSequence() || rule.size() != 2) {
+                            fail("safety.self_collision.mesh.disabled_collision_pairs entries must be 2-element string lists", rule);
+                        }
+                        CollisionPairPattern p;
+                        p.pattern_a = asString(rule[0], "safety.self_collision.mesh.disabled_collision_pairs[0]");
+                        p.pattern_b = asString(rule[1], "safety.self_collision.mesh.disabled_collision_pairs[1]");
+                        mc.disabled_collision_pairs.push_back(std::move(p));
+                    }
+                }
+                if (has(m, "debug_pair_curation")) {
+                    mc.debug_pair_curation = asBool(m["debug_pair_curation"],
+                                                    "safety.self_collision.mesh.debug_pair_curation");
+                }
                 if (has(m, "swept_samples")) mc.swept_samples = asInt(m["swept_samples"], "safety.self_collision.mesh.swept_samples");
                 if (has(m, "d_hard_m")) mc.d_hard_m = asDouble(m["d_hard_m"], "safety.self_collision.mesh.d_hard_m");
                 if (has(m, "d_slow_m")) mc.d_slow_m = asDouble(m["d_slow_m"], "safety.self_collision.mesh.d_slow_m");

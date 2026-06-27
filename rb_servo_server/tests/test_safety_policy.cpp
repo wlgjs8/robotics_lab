@@ -836,6 +836,7 @@ bool testCommandValidation() {
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"JointTarget","timeout_sec":0,"q_target_deg":[0,0,0,0,0,0]})", now, &out));
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpPoseTarget"})", now, &out));
     RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"TcpLinearMove"})", now, &out));
+    RB_CHECK(!server.parseMessage(R"({"seq":1,"mode":"InitMotion","q_target_deg":[0,0,0,0,0,0]})", now, &out));
 
     RB_CHECK(server.parseMessage(R"({"seq":1,"mode":"EmergencyStop"})", now, &out));
     RB_CHECK(out.left.mode == rb_servo::ControlMode::EmergencyStop);
@@ -3759,6 +3760,14 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     sample.init_motion_left.waypoint_index = 2;
     sample.init_motion_left.waypoint_count = 7;
     sample.init_motion_left.dist_to_goal_deg = 3.5;
+    sample.init_motion_left.clear_threshold_m = 0.023;
+    sample.init_motion_left.external_clear_threshold_m = 0.0075;
+    sample.init_motion_left.nearest_pair = "left_link <-> stand";
+    sample.init_motion_left.nearest_pair_distance_m = 0.018;
+    sample.init_motion.clear_threshold_m = 0.023;
+    sample.init_motion.external_clear_threshold_m = 0.0075;
+    sample.init_motion.nearest_pair = "left_link <-> stand";
+    sample.init_motion.nearest_pair_distance_m = 0.018;
     sample.non_init_arm_preserved_mode = "TcpPoseTarget";
     sample.single_arm_freeze_other_arm = false;
     logger.push(sample);
@@ -3801,6 +3810,9 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     const std::size_t after_right = index_of("right_mode_after_init_sequencer");
     const std::size_t preserved_mode = index_of("non_init_arm_preserved_mode");
     const std::size_t freeze_other = index_of("single_arm_freeze_other_arm");
+    const std::size_t init_left_thresh = index_of("init_motion_left_clear_threshold_m");
+    const std::size_t init_left_pair = index_of("init_motion_left_nearest_pair");
+    const std::size_t init_left_pair_dist = index_of("init_motion_left_nearest_pair_distance_m");
     RB_CHECK(old_last < header.size());
     RB_CHECK(profile_name < old_last);
     RB_CHECK(profile_nf_linear < old_last);
@@ -3818,6 +3830,9 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(after_right > old_last);
     RB_CHECK(preserved_mode > old_last);
     RB_CHECK(freeze_other > old_last);
+    RB_CHECK(init_left_thresh > old_last);
+    RB_CHECK(init_left_pair > old_last);
+    RB_CHECK(init_left_pair_dist > old_last);
     RB_CHECK(row.at(branch_rate) == "1");
     RB_CHECK(row.at(raw_jump) == "12");
     RB_CHECK(row.at(q_seed) == "1");
@@ -3834,6 +3849,9 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(row.at(after_right) == "TcpPoseTarget");
     RB_CHECK(row.at(preserved_mode) == "TcpPoseTarget");
     RB_CHECK(row.at(freeze_other) == "0");
+    RB_CHECK(row.at(init_left_thresh) == "0.023");
+    RB_CHECK(row.at(init_left_pair) == "left_link <-> stand");
+    RB_CHECK(row.at(init_left_pair_dist) == "0.018");
     std::filesystem::remove_all(cfg.directory);
     return true;
 }

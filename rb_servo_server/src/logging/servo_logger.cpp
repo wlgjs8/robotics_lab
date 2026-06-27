@@ -156,7 +156,22 @@ void writeInitMotionHeader(std::ostream& os) {
        << ",init_motion_right_dist_to_goal_deg"
        << ",init_motion_aggregate_dist_to_goal_deg"
        << ",non_init_arm_preserved_mode"
-       << ",single_arm_freeze_other_arm";
+       << ",single_arm_freeze_other_arm"
+       << ",init_motion_left_clear_threshold_m"
+       << ",init_motion_right_clear_threshold_m"
+       << ",init_motion_aggregate_clear_threshold_m"
+       << ",init_motion_left_external_clear_threshold_m"
+       << ",init_motion_right_external_clear_threshold_m"
+       << ",init_motion_aggregate_external_clear_threshold_m"
+       << ",init_motion_left_nearest_pair"
+       << ",init_motion_right_nearest_pair"
+       << ",init_motion_aggregate_nearest_pair"
+       << ",init_motion_left_nearest_pair_distance_m"
+       << ",init_motion_right_nearest_pair_distance_m"
+       << ",init_motion_aggregate_nearest_pair_distance_m"
+       << ",init_motion_left_nearest_pair_external"
+       << ",init_motion_right_nearest_pair_external"
+       << ",init_motion_aggregate_nearest_pair_external";
 }
 
 }  // namespace
@@ -480,7 +495,22 @@ void writeInitMotionColumns(std::ostream& os, const ServoSample& sample) {
        << ',' << sample.init_motion_right.dist_to_goal_deg
        << ',' << sample.init_motion.dist_to_goal_deg
        << ',' << csvEscape(sample.non_init_arm_preserved_mode)
-       << ',' << sample.single_arm_freeze_other_arm;
+       << ',' << sample.single_arm_freeze_other_arm
+       << ',' << sample.init_motion_left.clear_threshold_m
+       << ',' << sample.init_motion_right.clear_threshold_m
+       << ',' << sample.init_motion.clear_threshold_m
+       << ',' << sample.init_motion_left.external_clear_threshold_m
+       << ',' << sample.init_motion_right.external_clear_threshold_m
+       << ',' << sample.init_motion.external_clear_threshold_m
+       << ',' << csvEscape(sample.init_motion_left.nearest_pair)
+       << ',' << csvEscape(sample.init_motion_right.nearest_pair)
+       << ',' << csvEscape(sample.init_motion.nearest_pair)
+       << ',' << sample.init_motion_left.nearest_pair_distance_m
+       << ',' << sample.init_motion_right.nearest_pair_distance_m
+       << ',' << sample.init_motion.nearest_pair_distance_m
+       << ',' << sample.init_motion_left.nearest_pair_external
+       << ',' << sample.init_motion_right.nearest_pair_external
+       << ',' << sample.init_motion.nearest_pair_external;
 }
 }  // namespace
 
