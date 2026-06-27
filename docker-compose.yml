@@ -60,6 +60,10 @@ services:
       CAMERA_SERVER_REALSENSE_JSON: ${CAMERA_REALSENSE_JSON:-/app/config/realsense_d405_advanced.json}
       FFS_DIR: /app/Fast-FoundationStereo
       STEREO_WEIGHTS: /app/Fast-FoundationStereo/weights/23-36-37/model_best_bp2_serialize.pth
+      # stereo_worker가 읽는 FoundationStereo K.txt(intrinsics+baseline). 1280x720 헤드는
+      # camera_server가 기동 시 디바이스 값을 /app/stereo_worker/d435_ir_1280x720_K.txt 로
+      # 덤프하므로 그 경로로 주입한다(640x480 기본값은 정적 손파일).
+      STEREO_INTRINSICS: ${STEREO_INTRINSICS:-/app/config/d435_ir_640x480_K.txt}
       # 캡처+워커 동시 기동 런처가 사용. 0이면 캡처만(워커 수동).
       STEREO_WORKER_AUTOSTART: ${STEREO_WORKER_AUTOSTART:-1}
     # 한 컨테이너에서 camera_server(C++) + stereo_worker 동시 기동 (docker compose up/start 한 번에 둘 다)

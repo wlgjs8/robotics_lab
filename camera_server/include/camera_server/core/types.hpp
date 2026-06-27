@@ -16,6 +16,21 @@ struct CameraStreamConfig {
   std::string format{"rgb8"};
 };
 
+// 디바이스(센서) 단위 제어. 학습형 스테레오(Fast-FoundationStereo)는 자연 텍스처를
+// 기대하므로 D435 IR projector(emitter) dot 패턴은 매칭을 해치고 광택면에서 정반사
+// disparity 편향을 만든다. emitter off + IR 노출/게인을 config로 제어한다.
+// 모든 수치는 "-1 = 미설정(드라이버/JSON 값 유지)" 의미. (auto_exposure: -1 유지/0 수동/1 자동)
+struct CameraControlsConfig {
+  int emitter_enabled{-1};       // RS2_OPTION_EMITTER_ENABLED (0=off,1=on)
+  float laser_power{-1.0f};      // RS2_OPTION_LASER_POWER (mW; emitter on일 때만 의미)
+  int auto_exposure{-1};         // RS2_OPTION_ENABLE_AUTO_EXPOSURE (0/1)
+  int ir_exposure_us{-1};        // RS2_OPTION_EXPOSURE (us; auto_exposure=0일 때 적용)
+  int ir_gain{-1};               // RS2_OPTION_GAIN
+  // 활성 IR-left 프로파일의 intrinsics + IR L→R baseline을 FoundationStereo K.txt
+  // 포맷으로 1회 기록할 경로(빈 문자열=비활성). 해상도별 손-K.txt 취약성 제거용.
+  std::string dump_intrinsics_path;
+};
+
 struct CameraConfig {
   std::string name;
   // Capture backend: "realsense" (librealsense, depth-capable) or "uvc"
@@ -34,6 +49,8 @@ struct CameraConfig {
   // Fast-FoundationStereo 입력용. 보통 format "y8".
   CameraStreamConfig ir_left;
   CameraStreamConfig ir_right;
+  // 센서 단위 제어(emitter/노출/게인) + intrinsics 덤프. realsense 백엔드만 사용.
+  CameraControlsConfig controls;
 };
 
 struct FrameMeta {

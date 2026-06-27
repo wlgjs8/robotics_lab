@@ -1,0 +1,89 @@
+# D435 head(IR 스테레오 1280x720 + RGB 1280x720) + 손목 D405 2개(color+depth). USB3.
+#
+# head_wrists.yaml(640x480 IR) 대체본. 변경점:
+#  - head IR_left/IR_right 640x480 -> 1280x720 (고해상도 disparity). color는 동일 1280x720.
+#  - head.controls: 학습형 스테레오(FoundationStereo)에 맞춰 IR projector(emitter) OFF +
+#    IR 노출 제어. emitter 도트 패턴은 매칭을 해치고 광택면 정반사 disparity 편향을 유발.
+#  - dump_intrinsics_path: 기동 시 디바이스가 보고하는 1280x720 IR intrinsics+baseline을
+#    FoundationStereo K.txt 포맷으로 자동 기록(손-K.txt 취약성 제거).
+#
+# 주의: 1280x720은 720이 32의 배수가 아니므로 stereo_worker가 736으로 패딩해 추론한다.
+# TRT 엔진을 736x1280로 재빌드해야 한다(make cam-engine-rebuild).
+server:
+  name: camera_server
+  mode: capture_only
+  clock: monotonic_raw
+  simulate_cameras: false
+
+shared_memory:
+  name: "/camera_server_frames"
+  size_mb: 1536
+  ring_slots: 4
+  unlink_on_start: true
+
+metadata:
+  transport: zmq_pub
+  pub_bind: "tcp://127.0.0.1:5600"
+  health_topic: "camera.health"
+  bundle_topic: "camera.bundle"
+
+sync:
+  mode: software
+  master_camera: head
+  bundle_policy: nearest_timestamp
+  max_bundle_time_diff_ms: 33.0
+  publish_incomplete_bundles: false
+
+cameras:
+  head:
+    serial: "313522072863"
+    required: true
+    streams:
+      color: { enabled: true,  width: 1280, height: 720, fps: 30, format: rgb8 }
+      depth: { enabled: false, width: 640,  height: 480, fps: 30, format: z16 }
+      ir_left:  { enabled: true, width: 1280, height: 720, fps: 30, format: y8 }
+      ir_right: { enabled: true, width: 1280, height: 720, fps: 30, format: y8 }
+    controls:
+      # IR projector OFF: 학습형 스테레오는 자연 텍스처를 기대. emitter 도트는
+      # 매칭 모호성 + 광택면 정반사 편향의 원인이라 OFF로 시작해 A/B 한다.
+      emitter_enabled: 0
+      # emitter OFF면 장면이 어두워질 수 있어 auto-exposure로 시작.
+      # 수동 튜닝 시: auto_exposure: 0 후 ir_exposure_us / ir_gain 지정.
+      auto_exposure: 1
+      # ir_exposure_us: 20000   # (auto_exposure: 0 일 때) 시작 예시
+      # ir_gain: 64
+      # laser_power: 150        # (emitter ON 비교 시) mW
+      # /app/config 는 read-only 마운트 -> 쓰기 가능한 stereo_worker(host rw)로 덤프.
+      # 호스트에선 camera_server/stereo_worker/d435_ir_1280x720_K.txt 로 나타남.
+      dump_intrinsics_path: "/app/stereo_worker/d435_ir_1280x720_K.txt"
+  left_realsense:
+    serial: "260322278348"
+    required: true
+    streams:
+      color: { enabled: true, width: 640, height: 480, fps: 30, format: rgb8 }
+      depth: { enabled: true, width: 640, height: 480, fps: 30, format: z16 }
+  right_realsense:
+    serial: "412622272078"
+    required: true
+    streams:
+      color: { enabled: true, width: 640, height: 480, fps: 30, format: rgb8 }
+      depth: { enabled: true, width: 640, height: 480, fps: 30, format: z16 }
+
+recording:
+  enabled: false
+  output_dir: "/data/episodes"
+  queue_capacity_frames: 300
+  writer_threads: 4
+  drop_policy: drop_oldest
+  raw_format: true
+
+health:
+  publish_rate_hz: 1
+  warn_if_frame_age_ms_gt: 100
+  warn_if_drop_count_increases: true
+  warn_if_bundle_skew_ms_gt: 10
+
+reconnect:
+  enabled: false
+  max_attempts: 0
+  retry_interval_ms: 1000

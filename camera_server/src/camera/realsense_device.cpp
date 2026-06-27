@@ -5,6 +5,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -120,7 +121,8 @@ class RealSenseDevice final : public ICameraDevice {
       rs_cfg.enable_stream(RS2_STREAM_INFRARED, 2, cfg_.ir_right.width, cfg_.ir_right.height,
                            cfg_.ir_right.format == "y16" ? RS2_FORMAT_Y16 : RS2_FORMAT_Y8, cfg_.ir_right.fps);
     }
-    pipe_.start(rs_cfg, [this](const rs2::frame& frame) { on_frame(frame); });
+    rs2::pipeline_profile profile = pipe_.start(rs_cfg, [this](const rs2::frame& frame) { on_frame(frame); });
+    apply_controls_and_dump_intrinsics(profile);
   }
 
   void stop() override {
@@ -227,6 +229,68 @@ class RealSenseDevice final : public ICameraDevice {
       }
     } catch (const std::exception& e) {
       std::cerr << "[CAM] depth_units set failed for " << cfg_.name << ": " << e.what() << '\n';
+    }
+  }
+
+  // pipeline start 직후: 센서 단위 제어(emitter/노출/게인) 적용 + IR intrinsics 덤프.
+  // emitter/노출은 스테레오 모듈 센서(=EMITTER_ENABLED 지원 센서)에만 적용해 color
+  // 센서 노출과 분리한다. 미설정(-1/빈문자열) 필드는 건드리지 않는다.
+  void apply_controls_and_dump_intrinsics(const rs2::pipeline_profile& profile) {
+    const auto& ctrl = cfg_.controls;
+    try {
+      auto dev = profile.get_device();
+      for (auto&& s : dev.query_sensors()) {
+        if (!s.supports(RS2_OPTION_EMITTER_ENABLED)) continue;  // stereo module only
+        auto set = [&](rs2_option opt, float v, const char* nm) {
+          if (!s.supports(opt)) {
+            std::cerr << "[CAM] " << cfg_.name << ": option " << nm << " unsupported, skip\n";
+            return;
+          }
+          try {
+            s.set_option(opt, v);
+            std::cerr << "[CAM] " << cfg_.name << ": " << nm << "=" << v << '\n';
+          } catch (const std::exception& e) {
+            std::cerr << "[CAM] " << cfg_.name << ": set " << nm << " failed: " << e.what() << '\n';
+          }
+        };
+        // auto_exposure 먼저(수동 노출/게인 적용 전에 auto off 필요).
+        if (ctrl.auto_exposure >= 0) set(RS2_OPTION_ENABLE_AUTO_EXPOSURE, static_cast<float>(ctrl.auto_exposure), "auto_exposure");
+        if (ctrl.emitter_enabled >= 0) set(RS2_OPTION_EMITTER_ENABLED, static_cast<float>(ctrl.emitter_enabled), "emitter_enabled");
+        if (ctrl.laser_power >= 0.0f) set(RS2_OPTION_LASER_POWER, ctrl.laser_power, "laser_power");
+        if (ctrl.ir_exposure_us >= 0) set(RS2_OPTION_EXPOSURE, static_cast<float>(ctrl.ir_exposure_us), "ir_exposure_us");
+        if (ctrl.ir_gain >= 0) set(RS2_OPTION_GAIN, static_cast<float>(ctrl.ir_gain), "ir_gain");
+        break;
+      }
+    } catch (const std::exception& e) {
+      std::cerr << "[CAM] controls apply failed for " << cfg_.name << ": " << e.what() << '\n';
+    }
+
+    if (ctrl.dump_intrinsics_path.empty()) return;
+    try {
+      auto irl = profile.get_stream(RS2_STREAM_INFRARED, 1).as<rs2::video_stream_profile>();
+      auto irr = profile.get_stream(RS2_STREAM_INFRARED, 2).as<rs2::video_stream_profile>();
+      if (!irl || !irr) {
+        std::cerr << "[CAM] intrinsics dump: IR stereo profiles unavailable for " << cfg_.name << '\n';
+        return;
+      }
+      const rs2_intrinsics in = irl.get_intrinsics();
+      const rs2_extrinsics ex = irl.get_extrinsics_to(irr);
+      const double baseline = std::fabs(static_cast<double>(ex.translation[0]));
+      std::ofstream out(ctrl.dump_intrinsics_path);
+      if (!out) {
+        std::cerr << "[CAM] intrinsics dump: cannot write " << ctrl.dump_intrinsics_path << '\n';
+        return;
+      }
+      out.precision(12);
+      // FoundationStereo K.txt: 3x3 flat 한 줄 + baseline(m) 한 줄.
+      out << in.fx << " 0 " << in.ppx << " 0 " << in.fy << " " << in.ppy << " 0 0 1\n";
+      out << baseline << '\n';
+      out.close();
+      std::cerr << "[CAM] " << cfg_.name << " IR intrinsics -> " << ctrl.dump_intrinsics_path
+                << " (fx=" << in.fx << " fy=" << in.fy << " ppx=" << in.ppx << " ppy=" << in.ppy
+                << " baseline=" << baseline << "m " << in.width << "x" << in.height << ")\n";
+    } catch (const std::exception& e) {
+      std::cerr << "[CAM] intrinsics dump failed for " << cfg_.name << ": " << e.what() << '\n';
     }
   }
 

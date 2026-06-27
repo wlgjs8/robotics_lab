@@ -29,7 +29,11 @@ SCOPE_SCHEMA = "robotics_lab.scope.v1"
 DEFAULT_STATE_LISTEN = "0.0.0.0:50376"
 DEFAULT_HTTP_HOST = "0.0.0.0"
 DEFAULT_HTTP_PORT = 8081
-DEFAULT_HISTORY_SEC = 10.0
+# Retain enough server-side history to back the dashboard's longest finite
+# window (60 s) with margin so a fresh page load / reconnect snapshot fills the
+# selected window immediately instead of growing from empty. The "ALL" window
+# keeps accumulating client-side beyond this via the SSE delta stream.
+DEFAULT_HISTORY_SEC = 120.0
 
 
 @dataclass(frozen=True)
@@ -529,7 +533,7 @@ INDEX_HTML = r"""<!doctype html>
     </label>
     <label>Window
       <select id="window">
-        <option value="2">2 s</option><option value="5" selected>5 s</option><option value="10">10 s</option>
+        <option value="30" selected>30 s</option><option value="60">60 s</option><option value="all">ALL</option>
       </select>
     </label>
     <label class="sent"><input id="trace-sent" type="checkbox" checked> q_sent</label>
@@ -564,6 +568,13 @@ INDEX_HTML = r"""<!doctype html>
     const eventTimes = [];
     let latestStats = null;
     let renderQueued = false;
+    // Manual x-axis (time) zoom shared by ALL plots. `view` is an absolute-time
+    // window {min,max} (same units as buffer t) that freezes/overrides the live
+    // window; null => live mode driven by the Window selector. `drag` holds an
+    // in-progress left-drag box-zoom selection. Both are global so the 8 plots
+    // stay synchronized on a single time domain. "Live" / double-click clears.
+    let view = null;
+    let drag = null;
     const el = {
       plots: document.getElementById("plots"),
       joint: document.getElementById("joint"),
@@ -576,7 +587,36 @@ INDEX_HTML = r"""<!doctype html>
       status: document.getElementById("status"),
     };
 
-    function windowSec() { return Math.max(0.5, Number(el.window.value) || 5); }
+    function windowSec() {
+      // "all" => Infinity: no time-based trim/cull; the live x-axis falls back to
+      // the full retained data span (see xDomain/dataMaxAge). The client buffer
+      // cap in trimArm still bounds memory.
+      if (el.window.value === "all") return Infinity;
+      return Math.max(0.5, Number(el.window.value) || 30);
+    }
+    function dataMaxAge() {
+      // Largest (globalEnd - earliest sample) across both arms.
+      const end = globalEndTime();
+      let age = 0;
+      for (const arm of ARMS) {
+        const b = buffers[arm].t;
+        if (b.length) age = Math.max(age, end - b[0]);
+      }
+      return age;
+    }
+    // The single absolute-time x-domain shared by every plot. While a drag
+    // box-zoom is in progress we freeze on the domain captured at mousedown so
+    // the selection band and mapping stay stable as data streams in. A committed
+    // manual zoom (`view`) overrides the live window; otherwise the domain is
+    // the live Window selection ending at the latest sample.
+    function xDomain() {
+      if (drag) return drag.dom;
+      const end = globalEndTime();
+      if (view) return {min: view.min, max: view.max, end};
+      const w = windowSec();
+      const span = Number.isFinite(w) ? w : (dataMaxAge() || 1);
+      return {min: end - span, max: end, end};
+    }
     function jointIndex() { return Math.max(0, Math.min(5, Number(el.joint.value) || 0)); }
     function clearArm(arm) {
       const b = buffers[arm];
@@ -612,11 +652,15 @@ INDEX_HTML = r"""<!doctype html>
     function trimArm(arm) {
       const b = buffers[arm];
       if (!b.t.length) return;
-      const cutoff = b.t[b.t.length - 1] - windowSec();
-      let drop = 0;
-      while (drop < b.t.length - 1 && b.t[drop] < cutoff) drop++;
-      if (drop > 0) {
-        for (const key of Object.keys(b)) b[key].splice(0, drop);
+      // While a manual zoom is frozen, keep history (bounded only by the sample
+      // cap) so the frozen window doesn't get trimmed out from under the user.
+      if (!view) {
+        const cutoff = b.t[b.t.length - 1] - windowSec();
+        let drop = 0;
+        while (drop < b.t.length - 1 && b.t[drop] < cutoff) drop++;
+        if (drop > 0) {
+          for (const key of Object.keys(b)) b[key].splice(0, drop);
+        }
       }
       const extra = Math.max(0, b.t.length - 20000);
       if (extra > 0) {
@@ -657,27 +701,31 @@ INDEX_HTML = r"""<!doctype html>
       }
       return Number.isFinite(t) ? t : 0;
     }
-    function metricSeries(arm, metric, traceName) {
+    function metricSeries(arm, metric, traceName, dom) {
       const b = buffers[arm];
       if (!b.t.length) return {x: [], y: []};
-      const end = globalEndTime();
-      const cutoff = end - windowSec();
+      dom = dom || xDomain();
+      // Slice to the visible domain (+1 sample of context on each side for line
+      // and finite-difference continuity at the edges).
       let start = 0;
-      while (start < b.t.length - 1 && b.t[start] < cutoff) start++;
-      const times = b.t.slice(start);
+      while (start < b.t.length - 1 && b.t[start] < dom.min) start++;
+      if (start > 0) start--;
+      let stop = b.t.length;
+      while (stop > start + 1 && b.t[stop - 1] > dom.max) stop--;
+      const times = b.t.slice(start, stop);
       let y;
       if (metric === "position") {
-        y = selectedTrace(b[TRACE[traceName].key].slice(start), jointIndex());
+        y = selectedTrace(b[TRACE[traceName].key].slice(start, stop), jointIndex());
       } else if (traceName === "actual") {
-        y = selectedTrace(b[metric].slice(start), jointIndex());
+        y = selectedTrace(b[metric].slice(start, stop), jointIndex());
       } else {
-        let pos = selectedTrace(b[TRACE[traceName].key].slice(start), jointIndex());
+        let pos = selectedTrace(b[TRACE[traceName].key].slice(start, stop), jointIndex());
         let vel = finiteDiff(pos, times);
         let acc = finiteDiff(vel, times);
         y = metric === "velocity" ? vel : metric === "acceleration" ? acc : finiteDiff(acc, times);
       }
       if (el.smooth.checked) y = movingAverage(y, 5);
-      return {x: times.map(t => t - end), y};
+      return {x: times.slice(), y};
     }
     function visibleTraces() {
       const out = [];
@@ -711,7 +759,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       return {w, h, dpr};
     }
-    function drawPlot(item, range) {
+    function drawPlot(item, range, dom) {
       const canvas = item.canvas;
       const {w, h, dpr} = resizeCanvas(canvas);
       const ctx = canvas.getContext("2d");
@@ -720,7 +768,8 @@ INDEX_HTML = r"""<!doctype html>
       const x0 = padL, x1 = w - padR, y0 = padT, y1 = h - padB;
       ctx.fillStyle = "#0d1117";
       ctx.fillRect(0, 0, w, h);
-      const traces = visibleTraces().map(name => ({name, ...metricSeries(item.arm, item.metric, name)}));
+      dom = dom || xDomain();
+      const traces = visibleTraces().map(name => ({name, ...metricSeries(item.arm, item.metric, name, dom)}));
       // Shared per-metric y-range: both arms use the SAME scale (synced to the
       // larger arm) so left/right are directly comparable for tuning. Falls back
       // to this chart's own extent if no shared range was supplied.
@@ -739,8 +788,9 @@ INDEX_HTML = r"""<!doctype html>
         const margin = (ymax - ymin) * 0.08;
         ymin -= margin; ymax += margin;
       }
-      const xmin = -windowSec(), xmax = 0;
-      const sx = x => x0 + (x - xmin) / (xmax - xmin) * (x1 - x0);
+      const xmin = dom.min, xmax = dom.max;
+      const xspan = (xmax - xmin) || 1;
+      const sx = x => x0 + (x - xmin) / xspan * (x1 - x0);
       const sy = y => y1 - (y - ymin) / (ymax - ymin) * (y1 - y0);
       ctx.strokeStyle = "#2a3440";
       ctx.lineWidth = 1 * dpr;
@@ -759,7 +809,9 @@ INDEX_HTML = r"""<!doctype html>
       for (let i = 0; i <= 5; i++) {
         const x = x0 + (x1 - x0) * i / 5;
         ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y1); ctx.stroke();
-        const value = xmin + (xmax - xmin) * i / 5;
+        // Label seconds relative to the right edge (0 = newest sample in view,
+        // negative = older), so the axis reads the same live or zoomed/frozen.
+        const value = (xmin + (xmax - xmin) * i / 5) - xmax;
         ctx.fillText(value.toFixed(1), x, y1 + 5 * dpr);
       }
       ctx.textAlign = "left";
@@ -790,17 +842,32 @@ INDEX_HTML = r"""<!doctype html>
         ctx.fillText(TRACE[name].label, lx + 14 * dpr, y0);
         lx += 56 * dpr;
       }
+      // In-progress left-drag box-zoom selection, mirrored on every plot since
+      // the time domain is shared (synchronized scaling across all 8 graphs).
+      if (drag) {
+        const a = Math.max(xmin, Math.min(drag.startT, drag.curT));
+        const b = Math.min(xmax, Math.max(drag.startT, drag.curT));
+        if (b > a) {
+          const bx0 = sx(a), bx1 = sx(b);
+          ctx.fillStyle = "rgba(120,170,255,0.16)";
+          ctx.fillRect(bx0, y0, bx1 - bx0, y1 - y0);
+          ctx.strokeStyle = "rgba(120,170,255,0.65)";
+          ctx.lineWidth = 1 * dpr;
+          ctx.strokeRect(bx0, y0, bx1 - bx0, y1 - y0);
+        }
+      }
     }
-    function metricExtent(metricKey) {
+    function metricExtent(metricKey, dom) {
       // Union y-extent across BOTH arms for one metric, so both arms share a
       // single auto-scale (the larger arm sets the range) instead of each arm
       // scaling independently. Per-metric (position/velocity/accel/jerk keep
-      // their own units), synced left<->right.
+      // their own units), synced left<->right. Scoped to the visible time
+      // domain so zooming x also rescales y to what's on screen.
       let ymin = Infinity, ymax = -Infinity;
       const names = visibleTraces();
       for (const arm of ARMS) {
         for (const name of names) {
-          const {y} = metricSeries(arm, metricKey, name);
+          const {y} = metricSeries(arm, metricKey, name, dom);
           for (const v of y) {
             if (Number.isFinite(v)) { ymin = Math.min(ymin, v); ymax = Math.max(ymax, v); }
           }
@@ -813,9 +880,10 @@ INDEX_HTML = r"""<!doctype html>
     }
     function renderAll() {
       renderQueued = false;
+      const dom = xDomain();
       const ranges = {};
-      for (const metric of METRICS) ranges[metric.key] = metricExtent(metric.key);
-      for (const item of plots) drawPlot(item, ranges[item.metric]);
+      for (const metric of METRICS) ranges[metric.key] = metricExtent(metric.key, dom);
+      for (const item of plots) drawPlot(item, ranges[item.metric], dom);
       updateStatus();
     }
     function scheduleRender() {
@@ -842,12 +910,14 @@ INDEX_HTML = r"""<!doctype html>
       const packetHz = latestStats && Number.isFinite(latestStats.packet_rate_hz) ? latestStats.packet_rate_hz : NaN;
       const age = latestStats && Number.isFinite(latestStats.latest_receive_age_sec) ? latestStats.latest_receive_age_sec : NaN;
       const invalid = latestStats ? latestStats.invalid_packets : 0;
+      const zoom = view ? " | ZOOM " + (view.max - view.min).toFixed(2) + "s (Live/dbl-click to reset)" : "";
       el.status.textContent = (prefix ? prefix + " | " : "")
         + "SSE " + fmt(sseHz, "Hz")
         + " | UDP " + fmt(packetHz, "Hz")
         + " | density L/R " + fmt(density("left"), "Hz") + " / " + fmt(density("right"), "Hz")
         + " | age " + fmt(age, "s")
-        + " | invalid " + invalid;
+        + " | invalid " + invalid
+        + zoom;
     }
     function handlePayload(payload) {
       if (!payload || payload.schema !== "robotics_lab.servo_scope_dashboard.v1") return;
@@ -869,13 +939,71 @@ INDEX_HTML = r"""<!doctype html>
       es.onerror = () => updateStatus("reconnecting");
     }
     for (const metric of METRICS) for (const arm of ARMS) makePlot(arm, metric);
+
+    // ---- Synchronized time-axis zoom (shared across all 8 plots) ----
+    // Map a canvas-space clientX to absolute time using a domain. Plot paddings
+    // are dpr-scaled in device space, so in CSS px they are the raw constants
+    // (padL=54, padR=10). The fraction is clamped to the plot area [0,1].
+    function clientXToTime(canvas, clientX, dom) {
+      const rect = canvas.getBoundingClientRect();
+      const left = 54, right = rect.width - 10;
+      let frac = (clientX - rect.left - left) / Math.max(1, right - left);
+      frac = Math.max(0, Math.min(1, frac));
+      return dom.min + frac * (dom.max - dom.min);
+    }
+    function setLive() { view = null; drag = null; scheduleRender(); }
+    function attachZoom(canvas) {
+      // Wheel: zoom the time axis about the cursor (up = in, down = out). The
+      // cursor's time stays put; both edges scale, freezing into a manual view.
+      canvas.addEventListener("wheel", (ev) => {
+        ev.preventDefault();
+        const dom = xDomain();
+        const span = dom.max - dom.min;
+        if (!(span > 0)) return;
+        const tc = clientXToTime(canvas, ev.clientX, dom);
+        const f = ev.deltaY < 0 ? 1 / 1.2 : 1.2;
+        let nmin = tc - (tc - dom.min) * f;
+        let nmax = tc + (dom.max - tc) * f;
+        if (nmax - nmin < 1e-3) { const c = (nmin + nmax) / 2; nmin = c - 5e-4; nmax = c + 5e-4; }
+        view = {min: nmin, max: nmax};
+        scheduleRender();
+      }, {passive: false});
+      // Left-drag: rubber-band box-zoom on the time axis; release zooms all
+      // plots to the selected span. Domain is frozen at mousedown so the band
+      // and mapping stay stable while data streams in.
+      canvas.addEventListener("mousedown", (ev) => {
+        if (ev.button !== 0) return;
+        ev.preventDefault();
+        const dom = xDomain();
+        const t = clientXToTime(canvas, ev.clientX, dom);
+        drag = {canvas, dom, startT: t, curT: t};
+        scheduleRender();
+      });
+      canvas.addEventListener("dblclick", (ev) => { ev.preventDefault(); setLive(); });
+    }
+    for (const item of plots) attachZoom(item.canvas);
+    window.addEventListener("mousemove", (ev) => {
+      if (!drag) return;
+      drag.curT = clientXToTime(drag.canvas, ev.clientX, drag.dom);
+      scheduleRender();
+    });
+    window.addEventListener("mouseup", (ev) => {
+      if (!drag) return;
+      const a = Math.min(drag.startT, drag.curT), b = Math.max(drag.startT, drag.curT);
+      const minSpan = (drag.dom.max - drag.dom.min) * 0.01;
+      drag = null;
+      if (b - a > Math.max(1e-3, minSpan)) view = {min: a, max: b};  // else treat as a click
+      scheduleRender();
+    });
+
     for (const control of [el.joint, el.window, el.smooth, el.sent, el.ref, el.actual]) {
       control.addEventListener("change", () => {
+        if (control === el.window) setLive();  // changing the live window exits manual zoom
         for (const arm of ARMS) trimArm(arm);
         scheduleRender();
       });
     }
-    el.reset.addEventListener("click", scheduleRender);
+    el.reset.addEventListener("click", setLive);
     window.addEventListener("resize", scheduleRender);
     setInterval(scheduleRender, 1000);
     scheduleRender();

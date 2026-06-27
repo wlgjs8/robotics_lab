@@ -4,7 +4,7 @@ PROJECT ?= robotics_lab
 POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 
-.PHONY: run flow-infer-real build vm-up vm-down vm-status policy-hdf5-audit-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up cam-up cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
+.PHONY: run flow-infer-real build vm-up vm-down vm-status policy-hdf5-audit-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up cam-up cam-engine-rebuild cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
 
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
@@ -91,13 +91,23 @@ camera-real-up:
 # --- D435 stereo pointcloud (camera_server C++ capture + stereo_worker, one container) ---
 # `make run` 으로 로봇 스택을 띄운 뒤, 별도로 `make cam-up` 한 줄이면 캡처+스테레오 워커가
 # 함께 떠서 viser(고급→Pointcloud)에 RGB 클라우드가 들어온다. 런처(run_all.sh)가 둘 다 기동.
-STEREO_CAM_CONFIG ?= /app/config/head_wrists.yaml
+STEREO_CAM_CONFIG ?= /app/config/d435_head_1280x720.yaml
 STEREO_CAM_JSON ?= /app/config/__no_advanced__.json
+# 헤드 1280x720 IR intrinsics는 camera_server가 기동 시 디바이스에서 덤프(아래 경로).
+# 640x480 head_wrists.yaml 로 되돌릴 땐 STEREO_CAM_K=/app/config/d435_ir_640x480_K.txt 로.
+STEREO_CAM_K ?= /app/stereo_worker/d435_ir_1280x720_K.txt
 
 cam-up:
 	CAMERA_CONFIG=$(STEREO_CAM_CONFIG) CAMERA_REALSENSE_JSON=$(STEREO_CAM_JSON) \
+	STEREO_INTRINSICS=$(STEREO_CAM_K) \
 		$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile real_camera up -d camera_server
 	@echo "camera_server (capture + stereo_worker) up. 상태: make cam-status / 로그: docker logs -f camera_server"
+
+# IR 1280x720(->736 패딩)용 TRT 엔진 재빌드. GPU+torch+tensorrt 필요 -> camera_server
+# 컨테이너 안에서 실행. ONNX 재export 후 tf32 엔진 빌드까지 순차 수행.
+cam-engine-rebuild:
+	docker exec -it camera_server bash /app/stereo_worker/rebuild_engine_1280.sh
+	@echo "엔진 재빌드 완료. worker 재기동(컨테이너 재시작) 후 반영."
 
 cam-status:
 	@docker ps --filter name=camera_server --format "container: {{.Status}}" || true
