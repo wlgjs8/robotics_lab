@@ -206,7 +206,18 @@ class DualSpaceMouseCartesianConfig:
     max_angular_velocity_rad_s: float = 0.2
     deadband: float = 0.08
     response_curve_gamma: float = 3.0
+    linear_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0)
+    angular_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0)
+    angular_axis_order: tuple[str, ...] = ("rx", "ry", "rz")
     sample_hold_timeout_sec: float = 0.05
+    # Buttonless teleop: require_deadman=False replaces the button gate with an
+    # axis-intent gate (cap deflection beyond activation_deadband starts motion;
+    # neutral sends one zero twist). Startup/reconnect requires the cap held
+    # neutral for startup_neutral_hold_sec first.
+    require_deadman: bool = True
+    activation_deadband: float | None = None
+    startup_requires_neutral: bool = True
+    startup_neutral_hold_sec: float = 0.3
 
     def __post_init__(self) -> None:
         if self.max_linear_velocity_m_s < 0.0:
@@ -217,6 +228,18 @@ class DualSpaceMouseCartesianConfig:
             raise ValueError("spacemouse_cartesian_dual.deadband must be non-negative")
         if self.response_curve_gamma < 1.0:
             raise ValueError("spacemouse_cartesian_dual.response_curve_gamma must be >= 1.0")
+        for name in ("linear_axis_signs", "angular_axis_signs"):
+            signs = getattr(self, name)
+            if len(signs) != 3 or any(sign not in (-1.0, 1.0) for sign in signs):
+                raise ValueError(f"spacemouse_cartesian_dual.{name} must be 3 entries of -1 or 1")
+        if sorted(str(axis).lower() for axis in self.angular_axis_order) != ["rx", "ry", "rz"]:
+            raise ValueError(
+                "spacemouse_cartesian_dual.angular_axis_order must be a permutation of rx/ry/rz"
+            )
+        if self.activation_deadband is not None and self.activation_deadband < 0.0:
+            raise ValueError("spacemouse_cartesian_dual.activation_deadband must be non-negative")
+        if self.startup_neutral_hold_sec < 0.0:
+            raise ValueError("spacemouse_cartesian_dual.startup_neutral_hold_sec must be non-negative")
         if self.sample_hold_timeout_sec <= 0.0:
             raise ValueError("spacemouse_cartesian_dual.sample_hold_timeout_sec must be positive")
 
@@ -256,7 +279,17 @@ class UmiDualCartesianConfig:
     )
     max_linear_step_m: float = 0.005
     max_angular_step_rad: float = 0.04
-    gripper_offset: tuple[float, ...] = (0.172, 0.0, -0.076)
+    input_moving_average_window: int = 1
+    target_lpf_tau_sec: float = 0.0
+    deadband_linear_m: float = 0.0
+    deadband_angular_rad: float = 0.0
+    linear_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0)
+    angular_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0)
+    delta_frame: str = "tool"
+    # The pika publisher streams the official gripper-tip pose by default
+    # (--pose-frame tip), so the receiver adds no further offset; see
+    # stack_real.yaml for the paired r_align/axis-sign geometry.
+    gripper_offset: tuple[float, ...] = (0.0, 0.0, 0.0)
     r_align: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
     workspace_bounds: dict[str, tuple[float, float]] | tuple[float, ...] | None = None
     sample_hold_timeout_sec: float = 0.05
@@ -266,6 +299,20 @@ class UmiDualCartesianConfig:
             raise ValueError("umi_dual_cartesian.max_linear_step_m must be non-negative")
         if self.max_angular_step_rad < 0.0:
             raise ValueError("umi_dual_cartesian.max_angular_step_rad must be non-negative")
+        if self.input_moving_average_window < 0:
+            raise ValueError("umi_dual_cartesian.input_moving_average_window must be non-negative")
+        if self.target_lpf_tau_sec < 0.0:
+            raise ValueError("umi_dual_cartesian.target_lpf_tau_sec must be non-negative")
+        if self.deadband_linear_m < 0.0:
+            raise ValueError("umi_dual_cartesian.deadband_linear_m must be non-negative")
+        if self.deadband_angular_rad < 0.0:
+            raise ValueError("umi_dual_cartesian.deadband_angular_rad must be non-negative")
+        for name in ("linear_axis_signs", "angular_axis_signs"):
+            signs = getattr(self, name)
+            if len(signs) != 3 or any(sign not in (-1.0, 1.0) for sign in signs):
+                raise ValueError(f"umi_dual_cartesian.{name} must contain 3 entries of -1 or 1")
+        if self.delta_frame not in ("tool", "world"):
+            raise ValueError("umi_dual_cartesian.delta_frame must be 'tool' or 'world'")
         if len(self.gripper_offset) != 3:
             raise ValueError("umi_dual_cartesian.gripper_offset must contain 3 values")
         if len(self.r_align) not in {3, 9}:
@@ -507,6 +554,21 @@ def _spacemouse_cartesian_dual_config(raw: dict[str, Any]) -> DualSpaceMouseCart
         top_level["response_curve_gamma"] = float(top_level["response_curve_gamma"])
     if "sample_hold_timeout_sec" in top_level:
         top_level["sample_hold_timeout_sec"] = float(top_level["sample_hold_timeout_sec"])
+    for key in ("linear_axis_signs", "angular_axis_signs"):
+        if key in top_level:
+            top_level[key] = tuple(float(v) for v in top_level[key])
+    if "angular_axis_order" in top_level:
+        top_level["angular_axis_order"] = tuple(
+            str(axis).lower() for axis in top_level["angular_axis_order"]
+        )
+    if "require_deadman" in top_level:
+        top_level["require_deadman"] = bool(top_level["require_deadman"])
+    if "activation_deadband" in top_level and top_level["activation_deadband"] is not None:
+        top_level["activation_deadband"] = float(top_level["activation_deadband"])
+    if "startup_requires_neutral" in top_level:
+        top_level["startup_requires_neutral"] = bool(top_level["startup_requires_neutral"])
+    if "startup_neutral_hold_sec" in top_level:
+        top_level["startup_neutral_hold_sec"] = float(top_level["startup_neutral_hold_sec"])
     return DualSpaceMouseCartesianConfig(left=left, right=right, **top_level)
 
 
@@ -540,6 +602,16 @@ def _umi_dual_cartesian_config(raw: dict[str, Any]) -> UmiDualCartesianConfig:
         top_level["max_linear_step_m"] = float(top_level["max_linear_step_m"])
     if "max_angular_step_rad" in top_level:
         top_level["max_angular_step_rad"] = float(top_level["max_angular_step_rad"])
+    if "input_moving_average_window" in top_level:
+        top_level["input_moving_average_window"] = int(top_level["input_moving_average_window"])
+    for key in ("target_lpf_tau_sec", "deadband_linear_m", "deadband_angular_rad"):
+        if key in top_level:
+            top_level[key] = float(top_level[key])
+    for key in ("linear_axis_signs", "angular_axis_signs"):
+        if key in top_level:
+            top_level[key] = _tuple3(top_level[key], f"umi_dual_cartesian.{key}")
+    if "delta_frame" in top_level:
+        top_level["delta_frame"] = str(top_level["delta_frame"])
     if "sample_hold_timeout_sec" in top_level:
         top_level["sample_hold_timeout_sec"] = float(top_level["sample_hold_timeout_sec"])
     if "gripper_offset" in top_level:

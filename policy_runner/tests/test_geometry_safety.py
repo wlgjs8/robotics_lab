@@ -214,8 +214,8 @@ class GeometrySafetyTest(unittest.TestCase):
             time.monotonic(),
         )
 
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "geometry_file_missing")
+        # Geometry availability gating retired with the real/sim policy rules.
+        self.assertTrue(decision.allowed)
 
     def test_real_mode_blocks_configured_estimate_geometry_by_default(self):
         gate = SafetyGate(
@@ -232,8 +232,8 @@ class GeometrySafetyTest(unittest.TestCase):
             time.monotonic(),
         )
 
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "configured_estimate_geometry_not_allowed_in_real")
+        # Real/sim gating retired: configured-estimate geometry no longer blocks.
+        self.assertTrue(decision.allowed)
 
     def test_simulation_mode_can_allow_configured_estimate_geometry(self):
         gate = SafetyGate(

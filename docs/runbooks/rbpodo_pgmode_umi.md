@@ -180,6 +180,38 @@ default is identity. Per-tick targets are clamped by
 `max_linear_step_m` and `max_angular_step_rad`; optional workspace bounds clamp
 target `x/y/z`.
 
+`delta_frame` selects how the latched relative delta is applied. `tool`
+(default) composes in the latched body frames
+(`arm_init ∘ pika_init⁻¹ ∘ pika_now`): the axis mapping tilts with how the
+tool and the TCP were oriented when the deadman was pressed, so a horizontal
+hand motion can bleed into stand z. `world` takes the translation delta in
+the gravity-aligned tracker world frame and the rotation delta as a
+world-frame (left) offset, applying both along stand axes — horizontal hand
+motion stays horizontal regardless of latch orientation. `world` assumes the
+tracker world vertical matches the stand vertical; in-plane yaw alignment is
+absorbed by `linear_axis_signs` / operator placement, and `r_align` cancels
+out of the rotation delta in this mode.
+
+`linear_axis_signs` / `angular_axis_signs` (3 entries of `-1`/`1`, default all
+`1`) mirror the latched relative delta per axis: linear signs flip the delta
+translation componentwise, angular signs flip the rotation-axis components
+(via the quaternion vector part, so the angle is preserved). Use these when
+the operator-perceived axes are reversed; unlike `r_align` they can express
+non-rigid mirrors such as flipping x/y translation while flipping all of
+roll/pitch/yaw. The live example uses `linear_axis_signs: [-1, -1, 1]`,
+`angular_axis_signs: [-1, -1, -1]`.
+
+Optional target smoothing (all default 0 = disabled) runs before the per-tick
+step clamp: `target_lpf_tau_sec` applies a first-order exponential low-pass
+filter (`alpha = dt / (tau + dt)`) to the composed TCP target, attenuating
+tracker jitter and ramping the staircase between lower-rate UMI samples at the
+command rate; `deadband_linear_m` / `deadband_angular_rad` gate the filter
+input so the command freezes bit-exact while the hand-held tracker only
+jitters in place. Filter state latches with the clutch and resets on
+release/re-arm. The live example uses `target_lpf_tau_sec: 0.05` (~3.2 Hz
+cutoff, ~50 ms lag), `deadband_linear_m: 0.0003`, and
+`deadband_angular_rad: 0.005`.
+
 ## UDP Wire Schema
 
 The Windows SteamVR/OpenVR publisher lives in the pika repo

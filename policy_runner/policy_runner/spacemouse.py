@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -83,12 +85,16 @@ class HidSpaceMouseReader:
                 "install policy_runner with the spacemouse extra"
             ) from exc
         self._pyspacemouse = pyspacemouse
-        self._device = _open_pyspacemouse_device(
-            pyspacemouse,
-            device=device,
-            path=path,
-            device_number=device_number,
-        )
+        # pyspacemouse.open() prints one "<device> found" line per enumerated
+        # HID interface (a universal receiver exposes several) — swallow that
+        # noise; open failures still raise below.
+        with contextlib.redirect_stdout(io.StringIO()):
+            self._device = _open_pyspacemouse_device(
+                pyspacemouse,
+                device=device,
+                path=path,
+                device_number=device_number,
+            )
         if self._device is None or self._device is False:
             raise RuntimeError("failed to open SpaceMouse HID device")
 

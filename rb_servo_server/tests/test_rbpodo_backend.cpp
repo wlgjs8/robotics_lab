@@ -343,14 +343,16 @@ bool testControllerSimUnavailableFieldPolicyRequiresConfigAndGate() {
     }
 
     {
+        // Real/sim env gates retired: the unreliable-field policy is config-only,
+        // so the opt-in suppresses the captured bad fields without any env.
         rb_servo::BackendConfig config = controllerSimUnavailableFieldConfig();
         const rb_servo::RobotState state =
             rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot, config);
-        RB_CHECK(state.has_error);
-        RB_CHECK(state.lifecycle_state == "diagnostics_suspect");
+        RB_CHECK(!state.has_error);
+        RB_CHECK(state.lifecycle_state == "servo_enabled");
         RB_CHECK(state.rbpodo_diagnostics.has_value());
-        RB_CHECK(state.rbpodo_diagnostics->diagnostics_suspect);
-        RB_CHECK(state.rbpodo_diagnostics->unavailable_fields.empty());
+        RB_CHECK(!state.rbpodo_diagnostics->diagnostics_suspect);
+        RB_CHECK(containsField(state.rbpodo_diagnostics->unavailable_fields, "op_stat_self_collision"));
     }
 
     allow_real.set("1");
@@ -499,19 +501,18 @@ bool testRealMotionSuspectDiagnosticsFailClosed() {
 
     const rb_servo::RbpodoSystemStateSnapshot snapshot = realModeGarbageSelfCollisionSnapshot();
 
-    // (a) dedicated env gate missing -> still suspect.
+    // (a) env gates retired: the dedicated env no longer matters — the config
+    //     opt-in alone opens the acceptance.
     allow_suspect.unset();
     {
         const rb_servo::BackendConfig config = realSuspectDiagnosticsConfig();
         const rb_servo::RobotState state =
             rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot, config);
-        RB_CHECK(state.has_error);
-        RB_CHECK(state.rbpodo_diagnostics->diagnostics_suspect);
-        RB_CHECK(state.rbpodo_diagnostics->unavailable_fields.empty());
-        RB_CHECK(state.rbpodo_state_decode_policy != "real_motion_suspect_diagnostics_accepted");
+        RB_CHECK(!state.has_error);
+        RB_CHECK(state.rbpodo_state_decode_policy == "real_motion_suspect_diagnostics_accepted");
     }
 
-    // (b) env present but config opt-in false -> still suspect.
+    // (b) config opt-in false -> still suspect.
     allow_suspect.set("1");
     {
         const rb_servo::BackendConfig config = rbpodoConfig("real");

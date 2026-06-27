@@ -24,6 +24,12 @@ is only a short redirect here so review status does not drift across copies.
 - GUI TCP Linear controls
 - GUI Cartesian solve/path telemetry display
 - policy_runner SpaceMouse Cartesian through `TcpTwistLocal`
+- stand-frame floor plane constraint (`safety.floor_constraint`): joint-level FK
+  backstop for all primitives + Cartesian z-clamp/twist v_z sliding assist,
+  runtime-adjustable via leaseless `SetSafetyFloorZ` (config-bounded), GUI
+  slider/plane visual; unit + config + GUI contract tests (note: pre-existing
+  `tests/test_safety_filter.cpp` and `tests/test_state_publisher.cpp` are still
+  not registered in CMakeLists — discovered during this work, left as-is)
 - simulator-only Cartesian acceptance scripts
 - mock camera and camera acceptance runbooks
 - mandatory Eigen3/Pinocchio-backed Cartesian math in `rb_servo_server`

@@ -99,6 +99,15 @@ RB_ALLOW_REAL_CARTESIAN=1
 
 Even with these environment variables, real motion must also be explicitly allowed by config and by the relevant real-hardware acceptance task. Simulator acceptance is not real-hardware acceptance.
 
+The stand-frame floor plane constraint (`safety.floor_constraint`) is
+mode-independent by design: when enabled it applies in mock, simulator,
+controller-simulation, and real, to every motion primitive, at the final
+joint-level safety gate. Enabling it requires `kinematics.enable=true`.
+Runtime adjustment uses the leaseless `SetSafetyFloorZ` command and is
+bounded server-side to the config `[runtime_min_z_m, runtime_max_z_m]`
+envelope; `monitor_only: true` is a tuning aid only and never a real-motion
+safety posture. Do not add env/mode gates that would disable it in real mode.
+
 For new rbpodo configs, use canonical Rainbow Servo J fields only:
 `servo_t1_sec`, `servo_t2_sec`, `servo_gain`, and `servo_alpha`.
 Do not add new uses of deprecated aliases `servo_time_sec`,

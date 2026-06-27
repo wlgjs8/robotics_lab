@@ -468,7 +468,11 @@
   <joint name="tcp_joint" type="fixed">
     <parent link="attachment_site"/>
     <child link="tcp"/>
-    <origin xyz="0.0 0.0 0.21616" rpy="0.0 0.0 0.0"/>
+    <!-- Pika gripper fingertip plane = pika_gripper.STL z-max (247.642 mm), measured
+         from attachment_site (flange +0.1 m). The older 0.21616 matched the legacy
+         tool.STL tip. Disable by removing <origin> (URDF then defaults to identity,
+         tcp == attachment_site). -->
+    <origin xyz="0.0 0.0 0.247642" rpy="0.0 0.0 0.0"/>
   </joint>
   <joint name="link0_fixed" type="fixed">
     <parent link="world"/>

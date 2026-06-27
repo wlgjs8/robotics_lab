@@ -20,6 +20,7 @@ JointArray TrajectoryFilter::computeJointTarget(
         case ControlMode::DisarmMotion:
         case ControlMode::EmergencyStop:
         case ControlMode::ResetFault:
+        case ControlMode::SetSafetyFloorZ:
             return holdTarget(previous_sent_target);
         case ControlMode::JointTarget:
             return filterJointTarget(command.q_target_deg, previous_sent_target, dt_sec);

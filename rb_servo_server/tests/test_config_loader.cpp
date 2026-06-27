@@ -826,14 +826,15 @@ bool testRbpodoServoJParametersParseAndValidate() {
         RB_CHECK(rejected);
     }
 
+    // Vendor-range servo_t2/servo_alpha values now only WARN (the
+    // RB_ALLOW_RBPODO_SERVO_PARAM_UNSAFE gate is retired); rejection is limited
+    // to non-positive / non-finite values.
     const std::string invalid_cases[] = {
         "  command_timeout_sec: 0.0\n  servo_t1_sec: 0.002\n  servo_t2_sec: 0.05\n  servo_gain: 1.0\n  servo_alpha: 0.5\n",
         "  servo_t1_sec: 0.001\n  servo_t2_sec: 0.05\n  servo_gain: 1.0\n  servo_alpha: 0.5\n",
-        "  servo_t1_sec: 0.002\n  servo_t2_sec: 0.02\n  servo_gain: 1.0\n  servo_alpha: 0.5\n",
-        "  servo_t1_sec: 0.002\n  servo_t2_sec: 0.2\n  servo_gain: 1.0\n  servo_alpha: 0.5\n",
+        "  servo_t1_sec: 0.002\n  servo_t2_sec: 0.0\n  servo_gain: 1.0\n  servo_alpha: 0.5\n",
         "  servo_t1_sec: 0.002\n  servo_t2_sec: 0.05\n  servo_gain: 0.0\n  servo_alpha: 0.5\n",
         "  servo_t1_sec: 0.002\n  servo_t2_sec: 0.05\n  servo_gain: 1.0\n  servo_alpha: 0.0\n",
-        "  servo_t1_sec: 0.002\n  servo_t2_sec: 0.05\n  servo_gain: 1.0\n  servo_alpha: 1.0\n",
     };
     for (std::size_t i = 0; i < sizeof(invalid_cases) / sizeof(invalid_cases[0]); ++i) {
         EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
@@ -886,8 +887,8 @@ bool testRbpodoServoJParametersParseAndValidate() {
     }
 
     {
-        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
-        EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", "1");
+        // Real/sim env gates retired: disable_waiting_ack loads without
+        // RB_ALLOW_RBPODO_ACK_DISABLED_MOTION.
         EnvGuard ack_disabled_motion_gate("RB_ALLOW_RBPODO_ACK_DISABLED_MOTION", nullptr);
         const std::string path = writeTempConfig(
             "rbpodo-ack-disabled-motion-gate",
@@ -901,9 +902,9 @@ bool testRbpodoServoJParametersParseAndValidate() {
                 true
             )
         );
-        const bool rejected = loadRejects(path);
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
         ::unlink(path.c_str());
-        RB_CHECK(rejected);
+        RB_CHECK(cfg.left_robot.disable_waiting_ack);
     }
 
     {

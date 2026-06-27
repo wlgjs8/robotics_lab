@@ -14,8 +14,8 @@ if str(REPO_POLICY_ROOT) not in sys.path:
 from policy_runner.spacemouse import HidSpaceMouseReader, SpaceMouseSample
 
 
-DEFAULT_LEFT_PATH = "/dev/hidraw1"
-DEFAULT_RIGHT_PATH = "/dev/hidraw6"
+DEFAULT_LEFT_PATH = "/dev/hidraw5"
+DEFAULT_RIGHT_PATH = "/dev/hidraw10"
 
 
 def main(argv: list[str] | None = None) -> int:

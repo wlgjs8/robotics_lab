@@ -148,6 +148,13 @@ Vec6 twistStandToLocal(const Vec6& twist_stand, const Pose6D& current_tcp_stand)
     return {linear.x(), linear.y(), linear.z(), angular.x(), angular.y(), angular.z()};
 }
 
+Vec6 twistLocalToStand(const Vec6& twist_local, const Pose6D& current_tcp_stand) {
+    const Matrix3 local_to_stand = rotationFromPose(current_tcp_stand);
+    const Vector3 linear = local_to_stand * Vector3(twist_local.x, twist_local.y, twist_local.z);
+    const Vector3 angular = local_to_stand * Vector3(twist_local.rx, twist_local.ry, twist_local.rz);
+    return {linear.x(), linear.y(), linear.z(), angular.x(), angular.y(), angular.z()};
+}
+
 double orientationDistanceRad(const Pose6D& start_tcp_stand, const Pose6D& target_tcp_stand) {
     const Matrix3 relative = rotationFromPose(start_tcp_stand).transpose() * rotationFromPose(target_tcp_stand);
     return vectorNorm(log3(relative));

@@ -1,0 +1,193 @@
+#include "rb_servo/control/smd_pose_tracker.hpp"
+
+#include "rb_servo/math/se3.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+
+namespace {
+
+#define RB_CHECK(cond)                                                       \
+    do {                                                                     \
+        if (!(cond)) {                                                       \
+            std::cerr << "CHECK failed at " << __FILE__ << ":" << __LINE__  \
+                      << ": " #cond << "\n";                                 \
+            return false;                                                    \
+        }                                                                    \
+    } while (false)
+
+constexpr double kDt = 0.002;  // 500 Hz servo tick
+
+rb_servo::PoseTrackSmdConfig defaultConfig() {
+    rb_servo::PoseTrackSmdConfig cfg;
+    cfg.enable = true;
+    cfg.damping_ratio_linear = 1.0;
+    cfg.natural_frequency_linear_hz = 0.5;
+    cfg.damping_ratio_angular = 1.0;
+    cfg.natural_frequency_angular_hz = 0.5;
+    return cfg;
+}
+
+bool testCriticallyDampedStepHasNoOvershootAndConverges() {
+    rb_servo::SmdPoseTracker tracker(defaultConfig());
+    tracker.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    // First command latches the reference; the second carries the step delta.
+    tracker.updateGoalFromCommand({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({0.1, 0.0, 0.0, 0.0, 0.0, 0.0});
+
+    double previous_x = 0.0;
+    double x = 0.0;
+    for (int i = 0; i < 5000; ++i) {  // 10 s >> settling time for fn=0.5 Hz
+        const rb_servo::Pose6D pose = tracker.step(kDt);
+        x = pose.x;
+        RB_CHECK(x <= 0.1 + 1e-9);          // critical damping: no overshoot
+        RB_CHECK(x >= previous_x - 1e-12);  // monotonic approach
+        previous_x = x;
+    }
+    RB_CHECK(std::abs(x - 0.1) < 1e-4);  // converged to the integrated goal
+
+    // Analytic critically damped step response: x(T)/A = 1-(1+wn T)e^(-wn T).
+    rb_servo::SmdPoseTracker timing(defaultConfig());
+    timing.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    timing.updateGoalFromCommand({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    timing.updateGoalFromCommand({0.1, 0.0, 0.0, 0.0, 0.0, 0.0});
+    const double wn = 2.0 * M_PI * 0.5;
+    const double T = 1.0;  // seconds
+    double xt = 0.0;
+    for (int i = 0; i < static_cast<int>(T / kDt); ++i) xt = timing.step(kDt).x;
+    const double expected = 0.1 * (1.0 - (1.0 + wn * T) * std::exp(-wn * T));
+    RB_CHECK(std::abs(xt - expected) < 0.002);
+    return true;
+}
+
+bool testFirstCommandLatchesWithoutJump() {
+    rb_servo::SmdPoseTracker tracker(defaultConfig());
+    tracker.reset({0.5, 0.2, 0.3, 0.0, 0.0, 0.0});
+    // An engagement offset between the commanded pose and the current state
+    // must NOT pull the output: only deltas after the first command count.
+    tracker.updateGoalFromCommand({0.9, 0.9, 0.9, 0.3, 0.3, 0.3});
+    for (int i = 0; i < 1000; ++i) tracker.step(kDt);
+    const rb_servo::Pose6D pose = tracker.step(kDt);
+    RB_CHECK(std::abs(pose.x - 0.5) < 1e-9);
+    RB_CHECK(std::abs(pose.y - 0.2) < 1e-9);
+    RB_CHECK(std::abs(pose.z - 0.3) < 1e-9);
+    // A subsequent delta moves the goal relative to the anchor.
+    tracker.updateGoalFromCommand({0.92, 0.9, 0.9, 0.3, 0.3, 0.3});
+    const rb_servo::Pose6D goal = tracker.goalPose();
+    RB_CHECK(std::abs(goal.x - 0.52) < 1e-9);
+    RB_CHECK(std::abs(goal.y - 0.2) < 1e-9);
+    return true;
+}
+
+bool testRotationConvergesAndAxesAreIndependent() {
+    rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
+    cfg.natural_frequency_linear_hz = 2.0;   // fast translation
+    cfg.natural_frequency_angular_hz = 0.5;  // slow rotation
+    rb_servo::SmdPoseTracker tracker(cfg);
+    tracker.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({0.05, 0.0, 0.0, 0.0, 0.0, 0.8});
+
+    // After 0.6 s the fast translation should be nearly settled while the
+    // slow rotation is still clearly in transit (independent tuning).
+    rb_servo::Pose6D pose{};
+    for (int i = 0; i < 300; ++i) pose = tracker.step(kDt);
+    RB_CHECK(std::abs(pose.x - 0.05) < 0.002);
+    RB_CHECK(pose.rz > 0.05 && pose.rz < 0.75);
+
+    for (int i = 0; i < 5000; ++i) pose = tracker.step(kDt);
+    RB_CHECK(std::abs(pose.rz - 0.8) < 1e-3);
+    RB_CHECK(std::abs(pose.rx) < 1e-6 && std::abs(pose.ry) < 1e-6);
+    return true;
+}
+
+bool testForceAndVelocityClampsSaturateAndConverge() {
+    rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
+    cfg.natural_frequency_linear_hz = 1.0;
+    cfg.max_linear_velocity_m_s = 0.05;   // 50 mm/s
+    cfg.max_linear_accel_m_s2 = 0.1;      // 100 mm/s^2 == max force with M=1
+    cfg.max_angular_velocity_rad_s = 0.872664626;  // 50 deg/s
+    cfg.max_angular_accel_rad_s2 = 1.745329252;    // 100 deg/s^2
+    rb_servo::SmdPoseTracker tracker(cfg);
+    tracker.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({0.5, 0.0, 0.0, 0.0, 0.0, 1.5});
+
+    double prev_x = 0.0;
+    double prev_v = 0.0;
+    double prev_rz = 0.0;
+    double max_x = 0.0;
+    for (int i = 0; i < 15000; ++i) {  // 30 s
+        const rb_servo::Pose6D pose = tracker.step(kDt);
+        const double v = (pose.x - prev_x) / kDt;
+        const double w = (pose.rz - prev_rz) / kDt;
+        RB_CHECK(std::abs(v) <= 0.05 + 1e-9);            // velocity clamp
+        RB_CHECK(std::abs(v - prev_v) / kDt <= 0.1 + 1e-6);  // force clamp
+        RB_CHECK(std::abs(w) <= 0.872664626 + 1e-9);     // angular velocity clamp
+        prev_x = pose.x;
+        prev_v = v;
+        prev_rz = pose.rz;
+        max_x = std::max(max_x, pose.x);
+    }
+    RB_CHECK(std::abs(prev_x - 0.5) < 1e-3);   // converged
+    // Force-limited braking from v_max glides at most v^2/(2a) = 12.5 mm.
+    RB_CHECK(max_x <= 0.5 + 0.0130);
+    RB_CHECK(std::abs(prev_rz - 1.5) < 1e-3);
+    return true;
+}
+
+bool testClampsInactiveForSmallMotionsPreserveDynamics() {
+    rb_servo::PoseTrackSmdConfig limited = defaultConfig();
+    limited.natural_frequency_linear_hz = 1.0;
+    limited.max_linear_velocity_m_s = 0.05;
+    limited.max_linear_accel_m_s2 = 0.1;
+    rb_servo::PoseTrackSmdConfig unlimited = limited;
+    unlimited.max_linear_velocity_m_s = 0.0;
+    unlimited.max_linear_accel_m_s2 = 0.0;
+
+    rb_servo::SmdPoseTracker a(limited);
+    rb_servo::SmdPoseTracker b(unlimited);
+    for (rb_servo::SmdPoseTracker* t : {&a, &b}) {
+        t->reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+        t->updateGoalFromCommand({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+        // 2 mm step at fn=1 Hz: peak accel wn^2*A ~ 0.079 < 0.1 and peak
+        // velocity well under 0.05 -> clamps never engage.
+        t->updateGoalFromCommand({0.002, 0.0, 0.0, 0.0, 0.0, 0.0});
+    }
+    for (int i = 0; i < 3000; ++i) {
+        const rb_servo::Pose6D pa = a.step(kDt);
+        const rb_servo::Pose6D pb = b.step(kDt);
+        RB_CHECK(std::abs(pa.x - pb.x) < 1e-15);  // zeta/fn dynamics untouched
+    }
+    return true;
+}
+
+bool testDeactivateAndReanchor() {
+    rb_servo::SmdPoseTracker tracker(defaultConfig());
+    tracker.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({0.1, 0.0, 0.0, 0.0, 0.0, 0.0});
+    for (int i = 0; i < 100; ++i) tracker.step(kDt);
+    tracker.deactivate();
+    RB_CHECK(!tracker.active());
+    // Re-anchor at a new pose: state and goal restart there with zero velocity.
+    tracker.reset({1.0, 1.0, 1.0, 0.0, 0.0, 0.0});
+    RB_CHECK(tracker.active());
+    const rb_servo::Pose6D pose = tracker.step(kDt);
+    RB_CHECK(std::abs(pose.x - 1.0) < 1e-9);
+    return true;
+}
+
+}  // namespace
+
+int main() {
+    if (!testCriticallyDampedStepHasNoOvershootAndConverges()) return 1;
+    if (!testFirstCommandLatchesWithoutJump()) return 1;
+    if (!testRotationConvergesAndAxesAreIndependent()) return 1;
+    if (!testForceAndVelocityClampsSaturateAndConverge()) return 1;
+    if (!testClampsInactiveForSmallMotionsPreserveDynamics()) return 1;
+    if (!testDeactivateAndReanchor()) return 1;
+    std::cout << "smd_pose_tracker tests passed\n";
+    return 0;
+}

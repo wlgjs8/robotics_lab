@@ -4,6 +4,7 @@ import json
 import math
 import socket
 import time
+from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -17,7 +18,11 @@ from policy_runner.robot_state_client import StateSnapshot, parse_udp_endpoint
 from policy_runner.servo_command_client import CommandIntent
 
 
-GRIPPER_OFFSET = (0.172, 0.0, -0.076)
+# Default: no receiver-side offset — the pika publisher already streams the
+# official gripper-tip pose (pika_sdk T_raw·R_corr·Trans(0.172,0,-0.076)).
+# Legacy raw-tracker wire pairs with gripper_offset (0.172, 0.0, -0.076) in
+# config (see rbpodo_pgmode_umi_live.example.yaml fallback block).
+GRIPPER_OFFSET = (0.0, 0.0, 0.0)
 IDENTITY_R_ALIGN = (
     1.0,
     0.0,
@@ -60,6 +65,44 @@ class _ArmTeleopState:
     previous_target: tuple[float, ...] | None = None
     last_sample: UmiSample | None = None
     was_armed: bool = False
+    filtered_target: tuple[float, ...] | None = None
+    last_filter_monotonic: float | None = None
+
+
+class _PoseMovingAverage:
+    """Moving average over the last N distinct tracker SAMPLES (not 500 Hz
+    ticks): position is the arithmetic mean, rotation is the hemisphere-aligned
+    normalized quaternion mean. The buffer keeps filling while the deadman is
+    released so the window is already warm at clutch engage; pika_init latches
+    from the same filtered stream, so there is no engage offset."""
+
+    def __init__(self, window: int):
+        self.window = int(window)
+        self._positions: deque[tuple[float, float, float]] = deque(maxlen=max(1, self.window))
+        self._quats: deque[tuple[float, float, float, float]] = deque(maxlen=max(1, self.window))
+        self._last_monotonic: float | None = None
+
+    def filter(self, sample: UmiSample) -> UmiSample:
+        if self.window <= 1:
+            return sample
+        if self._last_monotonic is None or sample.monotonic != self._last_monotonic:
+            self._last_monotonic = sample.monotonic
+            x, y, z, qx, qy, qz, qw = sample.pose_xyzw
+            self._positions.append((x, y, z))
+            self._quats.append((qx, qy, qz, qw))
+        n = len(self._positions)
+        mean_position = (
+            sum(p[0] for p in self._positions) / n,
+            sum(p[1] for p in self._positions) / n,
+            sum(p[2] for p in self._positions) / n,
+        )
+        mean_quat = _average_quaternions(self._quats)
+        return UmiSample(
+            (*mean_position, *mean_quat),
+            sample.gripper,
+            sample.deadman,
+            sample.monotonic,
+        )
 
 
 class UmiDualCartesianActionSource:
@@ -72,6 +115,13 @@ class UmiDualCartesianActionSource:
         *,
         max_linear_step_m: float = 0.005,
         max_angular_step_rad: float = 0.04,
+        input_moving_average_window: int = 1,
+        target_lpf_tau_sec: float = 0.0,
+        deadband_linear_m: float = 0.0,
+        deadband_angular_rad: float = 0.0,
+        linear_axis_signs: Sequence[float] = (1.0, 1.0, 1.0),
+        angular_axis_signs: Sequence[float] = (1.0, 1.0, 1.0),
+        delta_frame: str = "tool",
         gripper_offset: Sequence[float] = GRIPPER_OFFSET,
         r_align: Sequence[float] = IDENTITY_R_ALIGN,
         workspace_bounds: Mapping[str, Sequence[float]] | Sequence[float] | None = None,
@@ -82,25 +132,45 @@ class UmiDualCartesianActionSource:
             raise ValueError("max_linear_step_m must be non-negative")
         if max_angular_step_rad < 0.0:
             raise ValueError("max_angular_step_rad must be non-negative")
+        if int(input_moving_average_window) < 0:
+            raise ValueError("input_moving_average_window must be non-negative")
+        if target_lpf_tau_sec < 0.0:
+            raise ValueError("target_lpf_tau_sec must be non-negative")
+        if deadband_linear_m < 0.0:
+            raise ValueError("deadband_linear_m must be non-negative")
+        if deadband_angular_rad < 0.0:
+            raise ValueError("deadband_angular_rad must be non-negative")
         if sample_hold_timeout_sec <= 0.0:
             raise ValueError("sample_hold_timeout_sec must be positive")
         self.left_reader = left_reader
         self.right_reader = right_reader
         self.max_linear_step_m = float(max_linear_step_m)
         self.max_angular_step_rad = float(max_angular_step_rad)
+        self.target_lpf_tau_sec = float(target_lpf_tau_sec)
+        self.deadband_linear_m = float(deadband_linear_m)
+        self.deadband_angular_rad = float(deadband_angular_rad)
+        self.linear_axis_signs = _signs3(linear_axis_signs, "linear_axis_signs")
+        self.angular_axis_signs = _signs3(angular_axis_signs, "angular_axis_signs")
+        if delta_frame not in ("tool", "world"):
+            raise ValueError("delta_frame must be 'tool' or 'world'")
+        self.delta_frame = delta_frame
         self.gripper_offset = _tuple3(gripper_offset, "gripper_offset")
         self.r_align = _matrix3(r_align, "r_align")
         self.workspace_bounds = _workspace_bounds(workspace_bounds)
         self.sample_hold_timeout_sec = float(sample_hold_timeout_sec)
         self.timeout_sec = float(timeout_sec)
+        self.input_moving_average_window = int(input_moving_average_window)
         self._left = _ArmTeleopState()
         self._right = _ArmTeleopState()
+        self._left_ma = _PoseMovingAverage(self.input_moving_average_window)
+        self._right_ma = _PoseMovingAverage(self.input_moving_average_window)
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         left_pose, left_gripper, left_changed = self._target_for_side(
             "left",
             self.left_reader,
             self._left,
+            self._left_ma,
             snapshot,
             now_monotonic,
         )
@@ -108,6 +178,7 @@ class UmiDualCartesianActionSource:
             "right",
             self.right_reader,
             self._right,
+            self._right_ma,
             snapshot,
             now_monotonic,
         )
@@ -130,6 +201,7 @@ class UmiDualCartesianActionSource:
         side: str,
         reader: UmiPoseReader,
         state: _ArmTeleopState,
+        moving_average: _PoseMovingAverage,
         snapshot: StateSnapshot,
         now_monotonic: float,
     ) -> tuple[tuple[float, ...] | None, float | None, bool]:
@@ -152,6 +224,10 @@ class UmiDualCartesianActionSource:
             _clear_latches(state)
             return None, None, False
 
+        # Input conditioning before any latch/compose math: the moving average
+        # buffer also fills while the deadman is released (warm at engage).
+        sample = moving_average.filter(sample)
+
         if not sample.deadman:
             if state.was_armed:
                 _clear_latches(state)
@@ -172,11 +248,124 @@ class UmiDualCartesianActionSource:
 
         assert state.arm_init is not None
         assert state.pika_init is not None
-        target = _compose(state.arm_init, _compose(_inverse(state.pika_init), pika_now))
+        if self.delta_frame == "world":
+            target = self._world_frame_target(state.arm_init, state.pika_init, pika_now)
+        else:
+            delta = self._apply_axis_signs(_compose(_inverse(state.pika_init), pika_now))
+            target = _compose(state.arm_init, delta)
         pose6 = _clamp_workspace(_transform_to_pose6(target), self.workspace_bounds)
+        pose6 = self._filter_target(state, pose6, now_monotonic)
         pose6 = self._clamp_against_previous(state, pose6)
         state.previous_target = pose6
         return pose6, _gripper_percent(sample.gripper), True
+
+    def _world_frame_target(
+        self,
+        arm_init: _Transform,
+        pika_init: _Transform,
+        pika_now: _Transform,
+    ) -> _Transform:
+        """Map the tracker delta in the tracker WORLD frame onto the stand frame.
+
+        Unlike the 'tool' frame composition (arm_init ∘ pika_init⁻¹ ∘ pika_now),
+        the world delta does not pass through the latched tracker/TCP body
+        orientations, so a horizontal hand motion stays horizontal at the robot
+        regardless of how the tool or the TCP was oriented at latch time.
+        Assumes the tracker world vertical matches the stand vertical; in-plane
+        yaw alignment is absorbed by linear_axis_signs (or operator placement).
+        Axis signs are applied along world/stand axes. r_align cancels out of
+        the rotation delta in this mode (it only shifts the tip via
+        gripper_offset).
+        """
+        sx, sy, sz = self.linear_axis_signs
+        translation = (
+            arm_init.translation[0] + sx * (pika_now.translation[0] - pika_init.translation[0]),
+            arm_init.translation[1] + sy * (pika_now.translation[1] - pika_init.translation[1]),
+            arm_init.translation[2] + sz * (pika_now.translation[2] - pika_init.translation[2]),
+        )
+        # World-frame relative rotation, mirrored per axis via the quaternion
+        # vector part, then applied as a world-frame (left) rotation offset.
+        delta_rotation = _mat_mul(pika_now.rotation, _transpose(pika_init.rotation))
+        ax, ay, az = self.angular_axis_signs
+        qx, qy, qz, qw = _matrix_to_quat(delta_rotation)
+        mirrored = _quat_to_matrix((ax * qx, ay * qy, az * qz, qw))
+        return _Transform(translation, _mat_mul(mirrored, arm_init.rotation))
+
+    def _apply_axis_signs(self, delta: _Transform) -> _Transform:
+        """Mirror the latched relative delta per axis.
+
+        Linear signs flip the delta translation componentwise; angular signs
+        flip the rotation-axis components (via the quaternion vector part, so
+        the angle is preserved and there is no RPY singularity). This is more
+        general than an r_align conjugation: e.g. flipping x/y translation
+        while flipping all of roll/pitch/yaw is not expressible as any rigid
+        tool-frame alignment.
+        """
+        if self.linear_axis_signs == (1.0, 1.0, 1.0) and self.angular_axis_signs == (1.0, 1.0, 1.0):
+            return delta
+        sx, sy, sz = self.linear_axis_signs
+        ax, ay, az = self.angular_axis_signs
+        qx, qy, qz, qw = _matrix_to_quat(delta.rotation)
+        return _Transform(
+            (
+                sx * delta.translation[0],
+                sy * delta.translation[1],
+                sz * delta.translation[2],
+            ),
+            _quat_to_matrix((ax * qx, ay * qy, az * qz, qw)),
+        )
+
+    def _filter_target(
+        self,
+        state: _ArmTeleopState,
+        pose6: tuple[float, ...],
+        now_monotonic: float,
+    ) -> tuple[float, ...]:
+        if (
+            self.target_lpf_tau_sec <= 0.0
+            and self.deadband_linear_m <= 0.0
+            and self.deadband_angular_rad <= 0.0
+        ):
+            return pose6
+        filtered = state.filtered_target
+        if filtered is None:
+            state.filtered_target = pose6
+            state.last_filter_monotonic = now_monotonic
+            return pose6
+        # Deadband gates the filter INPUT against the current filtered output so
+        # the command freezes exactly while the hand-held tracker only jitters
+        # in place; a deadband on the output would let the EMA keep creeping.
+        linear_dist = math.sqrt(
+            (pose6[0] - filtered[0]) ** 2
+            + (pose6[1] - filtered[1]) ** 2
+            + (pose6[2] - filtered[2]) ** 2
+        )
+        angular_dist = math.sqrt(
+            _angle_diff(pose6[3], filtered[3]) ** 2
+            + _angle_diff(pose6[4], filtered[4]) ** 2
+            + _angle_diff(pose6[5], filtered[5]) ** 2
+        )
+        target = pose6
+        if linear_dist <= self.deadband_linear_m and angular_dist <= self.deadband_angular_rad:
+            target = filtered
+        if self.target_lpf_tau_sec > 0.0:
+            last = state.last_filter_monotonic
+            dt = now_monotonic - last if last is not None else 0.0
+            if dt > 0.0:
+                alpha = dt / (self.target_lpf_tau_sec + dt)
+                target = (
+                    filtered[0] + alpha * (target[0] - filtered[0]),
+                    filtered[1] + alpha * (target[1] - filtered[1]),
+                    filtered[2] + alpha * (target[2] - filtered[2]),
+                    _wrap_pi(filtered[3] + alpha * _angle_diff(target[3], filtered[3])),
+                    _wrap_pi(filtered[4] + alpha * _angle_diff(target[4], filtered[4])),
+                    _wrap_pi(filtered[5] + alpha * _angle_diff(target[5], filtered[5])),
+                )
+            else:
+                target = filtered
+        state.filtered_target = target
+        state.last_filter_monotonic = now_monotonic
+        return target
 
     def _clamp_against_previous(
         self,
@@ -306,6 +495,8 @@ def _clear_latches(state: _ArmTeleopState) -> None:
     state.previous_target = None
     state.last_sample = None
     state.was_armed = False
+    state.filtered_target = None
+    state.last_filter_monotonic = None
 
 
 def _script_to_samples(script: str | Iterable[Mapping[str, Any] | UmiSample | None]) -> list[UmiSample | None]:
@@ -452,6 +643,74 @@ def _quat_to_matrix(q: Sequence[float]) -> tuple[float, ...]:
     )
 
 
+def _average_quaternions(
+    quats: Iterable[tuple[float, float, float, float]],
+) -> tuple[float, float, float, float]:
+    """Hemisphere-aligned normalized quaternion mean.
+
+    Each quaternion is sign-aligned to the running sum before accumulating
+    (q and -q encode the same rotation), then the sum is normalized. For the
+    nearby orientations of a tracker stream this matches the geodesic mean to
+    first order; for exactly two samples it is the exact slerp midpoint.
+    """
+    sx = sy = sz = sw = 0.0
+    count = 0
+    last = (0.0, 0.0, 0.0, 1.0)
+    for qx, qy, qz, qw in quats:
+        last = (qx, qy, qz, qw)
+        if count > 0 and (sx * qx + sy * qy + sz * qz + sw * qw) < 0.0:
+            qx, qy, qz, qw = -qx, -qy, -qz, -qw
+        sx += qx
+        sy += qy
+        sz += qz
+        sw += qw
+        count += 1
+    if count == 0:
+        return last
+    norm = math.sqrt(sx * sx + sy * sy + sz * sz + sw * sw)
+    if norm < 1e-9:
+        # Degenerate accumulation (antipodal spread) — fall back to the most
+        # recent sample rather than emit a non-unit quaternion.
+        return last
+    return (sx / norm, sy / norm, sz / norm, sw / norm)
+
+
+def _matrix_to_quat(m: Sequence[float]) -> tuple[float, float, float, float]:
+    """Row-major 3x3 rotation matrix -> (qx, qy, qz, qw), Shepperd's method."""
+    trace = float(m[0]) + float(m[4]) + float(m[8])
+    if trace > 0.0:
+        s = math.sqrt(trace + 1.0) * 2.0
+        return (
+            (float(m[7]) - float(m[5])) / s,
+            (float(m[2]) - float(m[6])) / s,
+            (float(m[3]) - float(m[1])) / s,
+            0.25 * s,
+        )
+    if float(m[0]) > float(m[4]) and float(m[0]) > float(m[8]):
+        s = math.sqrt(1.0 + float(m[0]) - float(m[4]) - float(m[8])) * 2.0
+        return (
+            0.25 * s,
+            (float(m[1]) + float(m[3])) / s,
+            (float(m[2]) + float(m[6])) / s,
+            (float(m[7]) - float(m[5])) / s,
+        )
+    if float(m[4]) > float(m[8]):
+        s = math.sqrt(1.0 + float(m[4]) - float(m[0]) - float(m[8])) * 2.0
+        return (
+            (float(m[1]) + float(m[3])) / s,
+            0.25 * s,
+            (float(m[5]) + float(m[7])) / s,
+            (float(m[2]) - float(m[6])) / s,
+        )
+    s = math.sqrt(1.0 + float(m[8]) - float(m[0]) - float(m[4])) * 2.0
+    return (
+        (float(m[2]) + float(m[6])) / s,
+        (float(m[5]) + float(m[7])) / s,
+        0.25 * s,
+        (float(m[3]) - float(m[1])) / s,
+    )
+
+
 def _rpy_to_matrix(roll: float, pitch: float, yaw: float) -> tuple[float, ...]:
     cr, sr = math.cos(roll), math.sin(roll)
     cp, sp = math.cos(pitch), math.sin(pitch)
@@ -517,6 +776,13 @@ def _tuple3(value: Sequence[float], label: str) -> tuple[float, float, float]:
     if len(value) != 3:
         raise ValueError(f"{label} must contain 3 values")
     return (float(value[0]), float(value[1]), float(value[2]))
+
+
+def _signs3(value: Sequence[float], label: str) -> tuple[float, float, float]:
+    signs = _tuple3(value, label)
+    if any(sign not in (-1.0, 1.0) for sign in signs):
+        raise ValueError(f"{label} entries must be -1 or 1")
+    return signs
 
 
 def _matrix3(value: Sequence[float], label: str) -> tuple[float, ...]:

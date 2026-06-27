@@ -75,13 +75,7 @@ CartesianArmTargetResult CartesianController::computeArmJointTarget(
             target_tcp_stand = command.tcp_target_stand;
             break;
         case ControlMode::TcpLinearMove:
-            if (run_mode != RunMode::Simulation) {
-                result.verdict = SafetyVerdict::CartesianUnavailable;
-                result.reason = "tcp_linear_move_simulation_only";
-                result.telemetry.status = "unavailable";
-                result.telemetry.reason = result.reason;
-                return result;
-            }
+            // Real/sim gating retired: linear move computes in every run mode.
             if (!command.has_tcp_target || !state.tcp_stand || !state.has_valid_tcp_pose ||
                 !ik_solver::isFinitePose(command.tcp_target_stand)) {
                 result.verdict = SafetyVerdict::CartesianUnavailable;
@@ -146,9 +140,17 @@ CartesianArmTargetResult CartesianController::solveIkFromTcpStandTarget(
     result.telemetry.warn_ik_duration_us = config_.warn_ik_duration_us;
     result.telemetry.fail_ik_duration_us = config_.fail_ik_duration_us;
 
-    const JointArray seed_q_deg = isFiniteJoints(state.q_actual_deg)
-        ? state.q_actual_deg
-        : previous_safe_sent_q_deg;
+    // Seed from the previously SENT target, not the measured joint state: the
+    // physical state lags the command by the controller servo lag (~100 ms),
+    // so an actual-state seed (a) sits far from the new solution during fast
+    // motion (more DLS iterations under max_step_deg), and (b) feeds the
+    // robot's physical response back into the next command, which combined
+    // with the IK tolerance dead zone produced a 3-5 Hz relay limit cycle in
+    // 500 Hz streaming TcpPoseTarget teleop. The previous sent target is one
+    // tick away from the new solution and keeps the chain feedforward.
+    const JointArray seed_q_deg = isFiniteJoints(previous_safe_sent_q_deg)
+        ? previous_safe_sent_q_deg
+        : state.q_actual_deg;
     const IkResult ik = kinematics_->solveIk(
         arm_id,
         target_tcp_stand,

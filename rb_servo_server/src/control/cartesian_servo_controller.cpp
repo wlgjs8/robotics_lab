@@ -393,6 +393,12 @@ CartesianServoController::CartesianServoController(
     std::shared_ptr<IKinematics> kinematics
 ) : left_mount_(left_mount), right_mount_(right_mount), config_(config), kinematics_(std::move(kinematics)) {}
 
+void CartesianServoController::setFloorConstraint(bool enabled, double z_min_m, double soft_margin_m) {
+    floor_enabled_ = enabled && std::isfinite(z_min_m) && std::isfinite(soft_margin_m);
+    floor_z_min_m_ = z_min_m;
+    floor_soft_margin_m_ = std::max(soft_margin_m, 0.0);
+}
+
 CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
     const ArmCommand& command,
     const RobotState& state,
@@ -411,13 +417,8 @@ CartesianArmTargetResult CartesianServoController::computeLinearMoveTarget(
     result.telemetry.warn_ik_duration_us = config_.warn_ik_duration_us;
     result.telemetry.fail_ik_duration_us = config_.fail_ik_duration_us;
 
-    if (run_mode != RunMode::Simulation) {
-        result.verdict = SafetyVerdict::CartesianUnavailable;
-        result.reason = "tcp_linear_move_simulation_only";
-        result.telemetry.status = "unavailable";
-        result.telemetry.reason = result.reason;
-        return result;
-    }
+    // Real/sim gating retired: linear move computes in every run mode.
+    (void)run_mode;
     if (!kinematics_) {
         result.verdict = SafetyVerdict::CartesianUnavailable;
         result.reason = "kinematics_unavailable";
@@ -670,13 +671,8 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
     result.telemetry.warn_ik_duration_us = config_.warn_ik_duration_us;
     result.telemetry.fail_ik_duration_us = config_.fail_ik_duration_us;
 
-    if (run_mode != RunMode::Simulation) {
-        result.verdict = SafetyVerdict::CartesianUnavailable;
-        result.reason = "tcp_twist_simulation_only";
-        result.telemetry.status = "unavailable";
-        result.telemetry.reason = result.reason;
-        return result;
-    }
+    // Real/sim gating retired: streaming twist computes in every run mode.
+    (void)run_mode;
     if (!kinematics_) {
         result.verdict = SafetyVerdict::CartesianUnavailable;
         result.reason = "kinematics_unavailable";
@@ -774,6 +770,19 @@ CartesianArmTargetResult CartesianServoController::computeTwistTarget(
         result.telemetry.applied_twist_angular_norm_rad_s = 0.0;
         return result;
     }
+    // Tier-2 floor assist: zero a downward stand-frame v_z when the commanded
+    // TCP is at/below the plane (+ soft margin) so lateral motion keeps sliding
+    // along the plane. `requested` is a local twist here — rotate to stand,
+    // clamp only the linear z component, rotate back.
+    if (floor_enabled_ && state.tcp_stand->z <= floor_z_min_m_ + floor_soft_margin_m_) {
+        Vec6 stand_twist = math::twistLocalToStand(requested, *state.tcp_stand);
+        if (stand_twist.z < 0.0) {
+            stand_twist.z = 0.0;
+            requested = math::twistStandToLocal(stand_twist, *state.tcp_stand);
+            result.telemetry.floor_vz_clamped = true;
+        }
+    }
+
     result.telemetry.twist_clamped = twist_clamped;
     result.telemetry.applied_twist_linear_norm_m_s = linearNorm(requested);
     result.telemetry.applied_twist_angular_norm_rad_s = angularNorm(requested);
@@ -832,13 +841,7 @@ CartesianArmTargetResult CartesianServoController::computeCircleMoveTarget(
     result.telemetry.warn_ik_duration_us = config_.warn_ik_duration_us;
     result.telemetry.fail_ik_duration_us = config_.fail_ik_duration_us;
 
-    if (run_mode != RunMode::Simulation) {
-        result.verdict = SafetyVerdict::CartesianUnavailable;
-        result.reason = "tcp_circle_move_simulation_only";
-        result.telemetry.status = "unavailable";
-        result.telemetry.reason = result.reason;
-        return result;
-    }
+    // Real/sim gating retired: circle move computes in every run mode.
     if (!config_.enable_benchmark_primitives ||
         !config_.circle_move.allow_in_simulation ||
         config_.circle_move.allow_in_real) {

@@ -1,0 +1,94 @@
+schema: robotics_lab.policy_runner.v1
+# =====================================================================================
+# STACK CONFIG (SIM) — single source of truth for `make run MODE=sim`.
+# Pairs with rb_servo_server/config/local/stack_sim.yaml (pgmode controller-simulation).
+# Both teleop sources are configured; pick one at launch:
+#   --action-source dual_spacemouse_cartesian   (default below)
+#   --action-source umi_dual_cartesian
+# Real/sim env gates are retired; no RB_ALLOW_* envs are needed.
+# =====================================================================================
+mode: real
+action_source: dual_spacemouse_cartesian
+runtime:
+  startup_timeout_sec: 5.0
+geometry:
+  path: "calibration/active_calibration.yaml"
+recording:
+  output_dir: "policy_runner/episodes"
+  rate_hz: 100.0
+  format: hdf5
+  dataset_metadata:
+    schema: robotics_lab.policy_runner.dataset_metadata.v1
+    backend_type: rbpodo
+    run_mode: real
+    operation_mode: simulation
+    physical_motion_expected: false
+    controller_pgmode: simulation
+    calibration_status: configured_estimate
+    camera_status: disabled
+    command_source_id: policy_runner
+robot_state:
+  bind: "udp://0.0.0.0:50376"
+  stale_timeout_sec: 0.5
+servo_command:
+  endpoint: "udp://127.0.0.1:50256"
+  timeout_sec: 0.05
+  acquire_lease: true
+  lease_readback_timeout_sec: 2.0
+safety:
+  allow_real_motion: true
+  allow_rbpodo_controller_simulation_cartesian: true
+  allow_configured_estimate_geometry_in_controller_simulation: true
+  allow_configured_estimate_geometry_in_real: true
+  require_valid_joint_state: true
+command_rate_hz: 500
+
+spacemouse_cartesian_dual:
+  frame: local
+  max_linear_velocity_m_s: 0.2
+  max_angular_velocity_rad_s: 0.4
+  deadband: 0.08
+  response_curve_gamma: 3.0
+  # Operator axis remap (applied to raw cap axes before deadband/gamma).
+  linear_axis_signs: [1.0, -1.0, -1.0]
+  angular_axis_signs: [-1.0, -1.0, 1.0]
+  angular_axis_order: [ry, rx, rz]
+  sample_hold_timeout_sec: 0.05
+  # Buttonless teleop: cap deflection is the intent gate (buttons reserved for
+  # future gripper open/close). IDLE->ACTIVE needs activation_deadband
+  # (hysteresis vs deadband); startup/stale-reconnect requires the cap held
+  # neutral for startup_neutral_hold_sec before motion is accepted.
+  require_deadman: false
+  activation_deadband: 0.12
+  startup_requires_neutral: true
+  startup_neutral_hold_sec: 0.3
+  left:
+    device: null
+    path: /dev/hidraw5
+    device_number: 0
+    deadman_button: 0
+  right:
+    device: null
+    path: /dev/hidraw10
+    device_number: 0
+    deadman_button: 0
+
+umi_dual_cartesian:
+  max_linear_step_m: 0.005
+  max_angular_step_rad: 0.04
+  # Input LPF off: smoothing is server-side (cartesian_control.pose_track_smd).
+  target_lpf_tau_sec: 0.0
+  deadband_linear_m: 0.0015
+  deadband_angular_rad: 0.012
+  delta_frame: tool
+  # Pose-frame geometry: paired with pika publisher --pose-frame tip (official
+  # tracker→gripper-tip transform on the wire; see stack_real.yaml for details).
+  gripper_offset: [0.0, 0.0, 0.0]
+  r_align: [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
+  linear_axis_signs: [1.0, 1.0, 1.0]
+  angular_axis_signs: [1.0, 1.0, 1.0]
+  sample_hold_timeout_sec: 0.05
+  left:
+    udp_endpoint: "udp://0.0.0.0:50380"
+  right:
+    udp_endpoint: "udp://0.0.0.0:50381"

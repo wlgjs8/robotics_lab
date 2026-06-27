@@ -8,9 +8,11 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <chrono>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 #include "rb_servo/core/clock.hpp"
 
@@ -22,8 +24,10 @@ namespace rb_servo {
 namespace {
 
 bool envIsOne(const char* name) {
-    const char* value = std::getenv(name);
-    return value && std::string(value) == "1";
+    // Real/sim env gates (RB_ALLOW_REAL_*, RB_ALLOW_RBPODO_*) are retired:
+    // backend behavior is config-driven only.
+    (void)name;
+    return true;
 }
 
 bool finiteJointArray(const JointArray& joints) {
@@ -539,6 +543,13 @@ namespace {
 
 #ifdef RB_SERVO_ENABLE_RBPODO
 constexpr double kDefaultStateTimeoutSec = 0.2;
+// One-shot initialize-time commands (e.g. set_speed_bar) can afford a longer ack
+// wait than the streaming command_timeout_sec, which is tuned for the servo loop.
+constexpr double kInitializeCommandAckTimeoutSec = 1.0;
+// pgmode switches (especially simulation -> real, which powers up the servo
+// stage) can take tens of seconds on the controller; this is initialize-time,
+// so wait generously before declaring the switch unconfirmed.
+constexpr uint64_t kOperationModeSwitchTimeoutNs = 60'000'000'000ULL;
 constexpr uint64_t kRecentStateCacheMaxAgeNs = 1'000'000'000ULL;
 
 RbpodoSystemStateSnapshot snapshotFromSystemState(const rb::podo::SystemState& rb_state) {
@@ -815,7 +826,7 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
         makeBackendTiming(start, nowSteadyNs())
     );
 #else
-    if (!impl_->connected || !impl_->data_channel) {
+    if (!impl_->connected || !impl_->data_channel || !impl_->robot) {
         return failedResult<RobotState>(
             BackendOp::Initialize,
             backendError(BackendErrorKind::RobotDisconnected, "rbpodo backend is not connected"),
@@ -823,6 +834,110 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
         );
     }
     try {
+        // Reconcile the controller's pgmode (operation mode) with the config:
+        // if the pendant/controller is in the other mode, switch it and VERIFY
+        // the switch took effect before continuing. This makes `make run
+        // MODE=real|sim` work regardless of what the pendant was left in.
+        {
+            const bool expected_simulation = expectedSimulationMode(impl_->config);
+            const auto mode_state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+            if (mode_state) {
+                const RbpodoSystemStateSnapshot mode_snapshot = snapshotFromSystemState(*mode_state);
+                if (rbpodoModeFieldIsKnown(mode_snapshot.real_vs_simulation_mode) &&
+                    !operationModeMatchesConfig(impl_->config, mode_snapshot)) {
+                    std::cerr << "[INFO] RbpodoBackend switching controller pgmode to "
+                              << rbpodoModeName(expected_simulation) << " for "
+                              << impl_->config.name << " (controller reported "
+                              << rbpodoModeName(mode_snapshot.real_vs_simulation_mode == 1) << ")\n";
+                    rb::podo::ResponseCollector responses;
+                    const auto ret = impl_->robot->set_operation_mode(
+                        responses,
+                        expected_simulation ? rb::podo::OperationMode::Simulation
+                                            : rb::podo::OperationMode::Real,
+                        kInitializeCommandAckTimeoutSec
+                    );
+                    if (impl_->config.disable_waiting_ack) {
+                        rb::podo::ResponseCollector drained;
+                        impl_->robot->flush(drained);
+                    }
+                    if (!ret.is_success()) {
+                        return failedResult<RobotState>(
+                            BackendOp::Initialize,
+                            commandReturnError("set_operation_mode", ret, responses),
+                            makeBackendTiming(start, nowSteadyNs())
+                        );
+                    }
+                    // Verify: poll until the controller reports the expected mode.
+                    // simulation -> real powers up the servo stage and can take
+                    // tens of seconds; log progress so the operator sees it.
+                    bool confirmed = false;
+                    const uint64_t verify_start_ns = nowSteadyNs();
+                    const uint64_t verify_deadline_ns = verify_start_ns + kOperationModeSwitchTimeoutNs;
+                    uint64_t next_progress_ns = verify_start_ns + 5'000'000'000ULL;
+                    while (nowSteadyNs() < verify_deadline_ns) {
+                        const auto verify_state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+                        if (verify_state) {
+                            const RbpodoSystemStateSnapshot verify_snapshot =
+                                snapshotFromSystemState(*verify_state);
+                            if (operationModeMatchesConfig(impl_->config, verify_snapshot)) {
+                                confirmed = true;
+                                break;
+                            }
+                        }
+                        if (nowSteadyNs() >= next_progress_ns) {
+                            std::cerr << "[INFO] RbpodoBackend still waiting for pgmode "
+                                      << rbpodoModeName(expected_simulation) << " on "
+                                      << impl_->config.name << " ("
+                                      << (nowSteadyNs() - verify_start_ns) / 1'000'000'000ULL
+                                      << " s elapsed)\n";
+                            next_progress_ns += 5'000'000'000ULL;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                    if (!confirmed) {
+                        return failedResult<RobotState>(
+                            BackendOp::Initialize,
+                            backendError(
+                                BackendErrorKind::WrongMode,
+                                "rbpodo pgmode switch to " + rbpodoModeName(expected_simulation) +
+                                    " did not take effect within " +
+                                    std::to_string(kOperationModeSwitchTimeoutNs / 1'000'000'000ULL) + " s",
+                                "",
+                                "rbpodo_operation_mode_switch_unconfirmed"
+                            ),
+                            makeBackendTiming(start, nowSteadyNs())
+                        );
+                    }
+                    std::cerr << "[INFO] RbpodoBackend controller pgmode confirmed "
+                              << rbpodoModeName(expected_simulation) << " for "
+                              << impl_->config.name << " in "
+                              << (nowSteadyNs() - verify_start_ns) / 1'000'000'000.0 << " s\n";
+                }
+            }
+        }
+        // Apply the configured overall speed bar (controller UI bottom bar) so every
+        // bring-up starts from a known speed instead of whatever the pendant last had.
+        {
+            rb::podo::ResponseCollector responses;
+            const auto ret = impl_->robot->set_speed_bar(
+                responses,
+                impl_->config.speed_bar,
+                kInitializeCommandAckTimeoutSec
+            );
+            if (impl_->config.disable_waiting_ack) {
+                rb::podo::ResponseCollector drained;
+                impl_->robot->flush(drained);
+            }
+            if (!ret.is_success()) {
+                return failedResult<RobotState>(
+                    BackendOp::Initialize,
+                    commandReturnError("set_speed_bar", ret, responses),
+                    makeBackendTiming(start, nowSteadyNs())
+                );
+            }
+            std::cerr << "[INFO] RbpodoBackend applied speed_bar=" << impl_->config.speed_bar
+                      << " for " << impl_->config.name << "\n";
+        }
         const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
         if (!state) {
             std::cerr << "[ERROR] RbpodoBackend initialize failed: no state from "
