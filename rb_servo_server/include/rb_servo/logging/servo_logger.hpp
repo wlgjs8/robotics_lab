@@ -24,6 +24,15 @@ public:
     uint64_t droppedSamples() const;
 
 private:
+    struct ArmDerivativeState {
+        JointArray prev_q_sent_deg{};
+        JointArray prev_q_actual_deg{};
+        JointArray prev_q_sent_velocity_deg_s{};
+        JointArray prev_q_actual_velocity_deg_s{};
+        JointArray prev_q_sent_accel_deg_s2{};
+        JointArray prev_q_actual_accel_deg_s2{};
+    };
+
     void threadMain();
     void writeHeader();
     void writeSample(const ServoSample& sample);
@@ -40,6 +49,11 @@ private:
     std::atomic<uint64_t> dropped_samples_{0};
 
     std::ofstream file_;
+
+    bool derivative_state_valid_ = false;
+    uint64_t derivative_prev_time_ns_ = 0;
+    ArmDerivativeState left_derivative_;
+    ArmDerivativeState right_derivative_;
 };
 
 }  // namespace rb_servo

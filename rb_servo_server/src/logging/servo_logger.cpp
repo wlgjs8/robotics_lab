@@ -1,8 +1,10 @@
 #include "rb_servo/logging/servo_logger.hpp"
 
+#include <cmath>
 #include <ctime>
 #include <filesystem>
 #include <iostream>
+#include <optional>
 #include <string>
 
 namespace rb_servo {
@@ -42,6 +44,55 @@ void writeCartesianSolveHeader(std::ostream& os, const char* side) {
        << ',' << side << "_cart_path_active"
        << ',' << side << "_cart_path_done"
        << ',' << side << "_cart_reason";
+}
+
+void writePoseHeader(std::ostream& os, const char* side, const char* name) {
+    os << ',' << side << '_' << name << "_x_m"
+       << ',' << side << '_' << name << "_y_m"
+       << ',' << side << '_' << name << "_z_m"
+       << ',' << side << '_' << name << "_rx_rad"
+       << ',' << side << '_' << name << "_ry_rad"
+       << ',' << side << '_' << name << "_rz_rad"
+       << ',' << side << '_' << name << "_qx"
+       << ',' << side << '_' << name << "_qy"
+       << ',' << side << '_' << name << "_qz"
+       << ',' << side << '_' << name << "_qw";
+}
+
+void writeJointArrayHeader(std::ostream& os, const char* side, const char* name) {
+    for (int i = 0; i < kDof; ++i) {
+        os << ',' << side << '_' << name << '_' << i;
+    }
+}
+
+void writeArmProfilingHeader(std::ostream& os, const char* side) {
+    writePoseHeader(os, side, "command_tcp_target_stand");
+    writePoseHeader(os, side, "smd_goal_stand");
+    writePoseHeader(os, side, "smd_ref_stand");
+    writePoseHeader(os, side, "tcp_command_stand");
+    writePoseHeader(os, side, "tcp_actual_stand");
+    writePoseHeader(os, side, "tcp_ref_stand");
+    os << ',' << side << "_smd_active"
+       << ',' << side << "_smd_velocity_feedforward_used"
+       << ',' << side << "_smd_linear_velocity_clipped"
+       << ',' << side << "_smd_linear_accel_clipped"
+       << ',' << side << "_smd_angular_velocity_clipped"
+       << ',' << side << "_smd_angular_accel_clipped"
+       << ',' << side << "_smd_goal_linear_velocity_ff_clipped"
+       << ',' << side << "_smd_goal_angular_velocity_ff_clipped"
+       << ',' << side << "_smd_goal_linear_velocity_norm_m_s"
+       << ',' << side << "_smd_goal_angular_velocity_norm_rad_s"
+       << ',' << side << "_smd_reanchor_count"
+       << ',' << side << "_output_ma_present"
+       << ',' << side << "_output_ma_window";
+    writeJointArrayHeader(os, side, "q_target_before_output_ma");
+    writeJointArrayHeader(os, side, "q_target_after_output_ma");
+    writeJointArrayHeader(os, side, "q_sent_velocity_deg_s");
+    writeJointArrayHeader(os, side, "q_sent_accel_deg_s2");
+    writeJointArrayHeader(os, side, "q_sent_jerk_deg_s3");
+    writeJointArrayHeader(os, side, "q_actual_velocity_deg_s");
+    writeJointArrayHeader(os, side, "q_actual_accel_deg_s2");
+    writeJointArrayHeader(os, side, "q_actual_jerk_deg_s3");
 }
 
 }  // namespace
@@ -151,6 +202,8 @@ void ServoLogger::writeHeader() {
     file_ << ",left_error_code,right_error_code";
     writeCartesianSolveHeader(file_, "left");
     writeCartesianSolveHeader(file_, "right");
+    writeArmProfilingHeader(file_, "left");
+    writeArmProfilingHeader(file_, "right");
     file_ << '\n';
 }
 
@@ -212,9 +265,170 @@ void writeCartesianSolveColumns(std::ostream& os, const CartesianSolveTelemetry&
        << ',' << t.path_done
        << ',' << csvEscape(t.reason);
 }
+
+struct ArmJointDerivatives {
+    JointArray q_sent_velocity_deg_s{};
+    JointArray q_sent_accel_deg_s2{};
+    JointArray q_sent_jerk_deg_s3{};
+    JointArray q_actual_velocity_deg_s{};
+    JointArray q_actual_accel_deg_s2{};
+    JointArray q_actual_jerk_deg_s3{};
+};
+
+void writePoseColumns(std::ostream& os, const std::optional<Pose6D>& pose) {
+    if (!pose.has_value()) {
+        for (int i = 0; i < 10; ++i) os << ',';
+        return;
+    }
+    os << ',' << pose->x
+       << ',' << pose->y
+       << ',' << pose->z
+       << ',' << pose->rx
+       << ',' << pose->ry
+       << ',' << pose->rz;
+    if (pose->quaternion_xyzw.has_value()) {
+        for (double v : *pose->quaternion_xyzw) os << ',' << v;
+    } else {
+        for (int i = 0; i < 4; ++i) os << ',';
+    }
+}
+
+void writeJointArrayColumns(std::ostream& os, const JointArray& values) {
+    for (double v : values) os << ',' << v;
+}
+
+void writeJointArrayBlanks(std::ostream& os) {
+    for (int i = 0; i < kDof; ++i) os << ',';
+}
+
+std::optional<Pose6D> commandTcpTargetStand(const ArmCommand& command) {
+    if (!command.has_tcp_target) return std::nullopt;
+    return command.tcp_target_stand;
+}
+
+std::optional<Pose6D> tcpActualStand(const RobotState& state) {
+    if (state.tcp_actual_stand.has_value()) return state.tcp_actual_stand;
+    return state.tcp_stand;
+}
+
+void writeArmProfilingColumns(
+    std::ostream& os,
+    const ArmCommand& command,
+    const RobotState& state,
+    const CartesianSolveTelemetry& telemetry,
+    const ArmJointDerivatives& derivatives) {
+    writePoseColumns(os, commandTcpTargetStand(command));
+    writePoseColumns(os, telemetry.smd_goal_stand);
+    writePoseColumns(os, telemetry.smd_ref_stand);
+    writePoseColumns(os, state.tcp_command_stand);
+    writePoseColumns(os, tcpActualStand(state));
+    writePoseColumns(os, state.tcp_ref_stand);
+    os << ',' << telemetry.smd_active
+       << ',' << telemetry.smd_velocity_feedforward_used
+       << ',' << telemetry.smd_linear_velocity_clipped
+       << ',' << telemetry.smd_linear_accel_clipped
+       << ',' << telemetry.smd_angular_velocity_clipped
+       << ',' << telemetry.smd_angular_accel_clipped
+       << ',' << telemetry.smd_goal_linear_velocity_ff_clipped
+       << ',' << telemetry.smd_goal_angular_velocity_ff_clipped
+       << ',' << telemetry.smd_goal_linear_velocity_norm_m_s
+       << ',' << telemetry.smd_goal_angular_velocity_norm_rad_s
+       << ',' << telemetry.smd_reanchor_count
+       << ',' << telemetry.output_ma_present
+       << ',' << telemetry.output_ma_window;
+    if (telemetry.output_ma_present) {
+        writeJointArrayColumns(os, telemetry.q_target_before_output_ma_deg);
+        writeJointArrayColumns(os, telemetry.q_target_after_output_ma_deg);
+    } else {
+        writeJointArrayBlanks(os);
+        writeJointArrayBlanks(os);
+    }
+    writeJointArrayColumns(os, derivatives.q_sent_velocity_deg_s);
+    writeJointArrayColumns(os, derivatives.q_sent_accel_deg_s2);
+    writeJointArrayColumns(os, derivatives.q_sent_jerk_deg_s3);
+    writeJointArrayColumns(os, derivatives.q_actual_velocity_deg_s);
+    writeJointArrayColumns(os, derivatives.q_actual_accel_deg_s2);
+    writeJointArrayColumns(os, derivatives.q_actual_jerk_deg_s3);
+}
 }  // namespace
 
 void ServoLogger::writeSample(const ServoSample& sample) {
+    const uint64_t derivative_time_ns =
+        sample.loop_end_time_ns > 0 ? sample.loop_end_time_ns : sample.loop_start_time_ns;
+    const bool can_derive =
+        derivative_state_valid_ &&
+        derivative_prev_time_ns_ > 0 &&
+        derivative_time_ns > derivative_prev_time_ns_;
+    const double derivative_dt_sec = can_derive
+        ? static_cast<double>(derivative_time_ns - derivative_prev_time_ns_) / 1'000'000'000.0
+        : 0.0;
+    ArmJointDerivatives left_derivatives;
+    ArmJointDerivatives right_derivatives;
+    const auto compute_joint_derivatives = [&](
+        const JointArray& q,
+        JointArray& prev_q,
+        JointArray& prev_velocity,
+        JointArray& prev_accel,
+        JointArray& out_velocity,
+        JointArray& out_accel,
+        JointArray& out_jerk) {
+        for (int i = 0; i < kDof; ++i) {
+            double velocity = 0.0;
+            double accel = 0.0;
+            double jerk = 0.0;
+            if (can_derive &&
+                derivative_dt_sec > 0.0 &&
+                std::isfinite(q[i]) &&
+                std::isfinite(prev_q[i]) &&
+                std::isfinite(prev_velocity[i]) &&
+                std::isfinite(prev_accel[i])) {
+                velocity = (q[i] - prev_q[i]) / derivative_dt_sec;
+                accel = (velocity - prev_velocity[i]) / derivative_dt_sec;
+                jerk = (accel - prev_accel[i]) / derivative_dt_sec;
+            }
+            out_velocity[i] = velocity;
+            out_accel[i] = accel;
+            out_jerk[i] = jerk;
+        }
+        prev_q = q;
+        prev_velocity = out_velocity;
+        prev_accel = out_accel;
+    };
+    compute_joint_derivatives(
+        sample.left_sent_q_deg,
+        left_derivative_.prev_q_sent_deg,
+        left_derivative_.prev_q_sent_velocity_deg_s,
+        left_derivative_.prev_q_sent_accel_deg_s2,
+        left_derivatives.q_sent_velocity_deg_s,
+        left_derivatives.q_sent_accel_deg_s2,
+        left_derivatives.q_sent_jerk_deg_s3);
+    compute_joint_derivatives(
+        sample.left_state.q_actual_deg,
+        left_derivative_.prev_q_actual_deg,
+        left_derivative_.prev_q_actual_velocity_deg_s,
+        left_derivative_.prev_q_actual_accel_deg_s2,
+        left_derivatives.q_actual_velocity_deg_s,
+        left_derivatives.q_actual_accel_deg_s2,
+        left_derivatives.q_actual_jerk_deg_s3);
+    compute_joint_derivatives(
+        sample.right_sent_q_deg,
+        right_derivative_.prev_q_sent_deg,
+        right_derivative_.prev_q_sent_velocity_deg_s,
+        right_derivative_.prev_q_sent_accel_deg_s2,
+        right_derivatives.q_sent_velocity_deg_s,
+        right_derivatives.q_sent_accel_deg_s2,
+        right_derivatives.q_sent_jerk_deg_s3);
+    compute_joint_derivatives(
+        sample.right_state.q_actual_deg,
+        right_derivative_.prev_q_actual_deg,
+        right_derivative_.prev_q_actual_velocity_deg_s,
+        right_derivative_.prev_q_actual_accel_deg_s2,
+        right_derivatives.q_actual_velocity_deg_s,
+        right_derivatives.q_actual_accel_deg_s2,
+        right_derivatives.q_actual_jerk_deg_s3);
+    derivative_prev_time_ns_ = derivative_time_ns;
+    derivative_state_valid_ = derivative_time_ns > 0;
+
     file_ << sample.tick << ','
           << sample.loop_start_time_ns << ','
           << sample.loop_end_time_ns << ','
@@ -290,6 +504,18 @@ void ServoLogger::writeSample(const ServoSample& sample) {
     file_ << ',' << sample.left_state.error_code << ',' << sample.right_state.error_code;
     writeCartesianSolveColumns(file_, sample.left_cartesian_solve);
     writeCartesianSolveColumns(file_, sample.right_cartesian_solve);
+    writeArmProfilingColumns(
+        file_,
+        sample.command.left,
+        sample.left_state,
+        sample.left_cartesian_solve,
+        left_derivatives);
+    writeArmProfilingColumns(
+        file_,
+        sample.command.right,
+        sample.right_state,
+        sample.right_cartesian_solve,
+        right_derivatives);
     file_ << '\n';
 }
 

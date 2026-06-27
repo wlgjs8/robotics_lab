@@ -474,7 +474,6 @@ def _make_umi_dual_cartesian_source(config: PolicyRunnerConfig) -> UmiDualCartes
         deadband_angular_rad=umi.deadband_angular_rad,
         linear_axis_signs=umi.linear_axis_signs,
         angular_axis_signs=umi.angular_axis_signs,
-        delta_frame=umi.delta_frame,
         gripper_offset=umi.gripper_offset,
         r_align=umi.r_align,
         workspace_bounds=umi.workspace_bounds,
@@ -1025,14 +1024,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
             "Blend the first N actions after each chunk-resample boundary from the "
             "previously emitted action (alpha 0->1) to remove the boundary jerk "
             "without steady-state lag. 0 (default) disables crossfade. Try 2-3."
-        ),
-    )
-    flow_infer.add_argument(
-        "--allow-tcp-target-pose",
-        action="store_true",
-        help=(
-            "Compatibility no-op: live flow-infer always emits absolute "
-            "TcpPoseTarget setpoints."
         ),
     )
     flow_infer.add_argument("--max-linear-step-m", type=float, default=0.015)

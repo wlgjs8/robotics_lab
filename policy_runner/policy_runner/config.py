@@ -309,7 +309,6 @@ class UmiDualCartesianConfig:
     deadband_angular_rad: float = 0.0
     linear_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0)
     angular_axis_signs: tuple[float, ...] = (1.0, 1.0, 1.0)
-    delta_frame: str = "tool"
     # The pika publisher streams the official gripper-tip pose by default
     # (--pose-frame tip), so the receiver adds no further offset; see
     # stack_real.yaml for the paired r_align/axis-sign geometry.
@@ -338,8 +337,6 @@ class UmiDualCartesianConfig:
             signs = getattr(self, name)
             if len(signs) != 3 or any(sign not in (-1.0, 1.0) for sign in signs):
                 raise ValueError(f"umi_dual_cartesian.{name} must contain 3 entries of -1 or 1")
-        if self.delta_frame not in ("tool", "world"):
-            raise ValueError("umi_dual_cartesian.delta_frame must be 'tool' or 'world'")
         if len(self.gripper_offset) != 3:
             raise ValueError("umi_dual_cartesian.gripper_offset must contain 3 values")
         if len(self.r_align) not in {3, 9}:
@@ -651,8 +648,6 @@ def _umi_dual_cartesian_config(raw: dict[str, Any]) -> UmiDualCartesianConfig:
     for key in ("linear_axis_signs", "angular_axis_signs"):
         if key in top_level:
             top_level[key] = _tuple3(top_level[key], f"umi_dual_cartesian.{key}")
-    if "delta_frame" in top_level:
-        top_level["delta_frame"] = str(top_level["delta_frame"])
     if "sample_stale_timeout_sec" in top_level:
         if "sample_hold_timeout_sec" in top_level:
             raise ValueError(

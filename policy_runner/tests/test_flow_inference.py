@@ -29,7 +29,9 @@ class FlowInferenceCliTest(unittest.TestCase):
         self.assertIn("controller_sim", result.stdout)
         self.assertNotIn("--command-family", result.stdout)
         self.assertIn("--policy-dt-sec", result.stdout)
-        self.assertIn("--allow-tcp-target-pose", result.stdout)
+        # flow-infer always emits absolute TcpPoseTarget setpoints; the old
+        # --allow-tcp-target-pose no-op flag was removed, not retained.
+        self.assertNotIn("--allow-tcp-target-pose", result.stdout)
 
     def test_controller_sim_requirement_helper_allows_rbpodo_carveout(self) -> None:
         requirements = cartesian_action_requirements(allow_rbpodo_controller_simulation=True)

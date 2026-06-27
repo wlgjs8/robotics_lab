@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -359,78 +361,10 @@ class UmiDualCartesianTest(unittest.TestCase):
                     got[axis] - base[axis], expected[axis], places=7, msg=f"pose={pose} axis={axis}"
                 )
 
-    def test_world_delta_frame_keeps_horizontal_motion_horizontal(self):
-        # Latch with the tool pitched 90deg about y; in tool mode this would
-        # rotate the delta into the tracker body frame (x motion becomes z),
-        # in world mode the horizontal world translation must stay horizontal.
-        s45, c45 = math.sin(math.pi / 4.0), math.cos(math.pi / 4.0)
-        pitched = [0.0, s45, 0.0, c45]  # quaternion for Ry(90deg)
-        reader = MockUmiPoseReader(
-            [
-                {"pose": [0, 0, 0, *pitched], "deadman": True, "monotonic": 0.0},
-                {"pose": [0.05, 0, 0, *pitched], "deadman": True, "monotonic": 0.01},
-            ]
-        )
-        source = UmiDualCartesianActionSource(
-            reader,
-            MockUmiPoseReader([]),
-            gripper_offset=(0.0, 0.0, 0.0),
-            max_linear_step_m=1.0,
-            max_angular_step_rad=math.pi,
-            linear_axis_signs=(-1.0, -1.0, 1.0),
-            angular_axis_signs=(-1.0, -1.0, -1.0),
-            delta_frame="world",
-        )
-        _ = source.next_intent(sample_state(), 0.0)
-        intent = source.next_intent(sample_state(), 0.01)
-        self.assertIsNotNone(intent)
-        assert intent is not None
-        got = intent.left["tcp_target_stand"]
-        self.assertAlmostEqual(got[0], 1.0 - 0.05, places=7)  # world +x -> stand -x
-        self.assertAlmostEqual(got[1], 2.0, places=7)
-        self.assertAlmostEqual(got[2], 3.0, places=7)  # NO z bleed despite pitched latch
-        self.assertAlmostEqual(got[3], 0.0, places=7)
-        self.assertAlmostEqual(got[4], 0.0, places=7)
-        self.assertAlmostEqual(got[5], 0.0, places=7)
-
-    def test_world_delta_frame_rotation_uses_world_axis(self):
-        # Rotate the tool about the WORLD z axis while latched pitched 90deg:
-        # world mode must output pure (mirrored) yaw on the robot.
-        s45, c45 = math.sin(math.pi / 4.0), math.cos(math.pi / 4.0)
-        s1, c1 = math.sin(0.1), math.cos(0.1)
-        # quaternion of Rz(0.2) * Ry(90deg)
-        rotated = [-s1 * s45, c1 * s45, c45 * s1, c1 * c45]
-        reader = MockUmiPoseReader(
-            [
-                {"pose": [0, 0, 0, 0.0, s45, 0.0, c45], "deadman": True, "monotonic": 0.0},
-                {"pose": [0, 0, 0, *rotated], "deadman": True, "monotonic": 0.01},
-            ]
-        )
-        source = UmiDualCartesianActionSource(
-            reader,
-            MockUmiPoseReader([]),
-            gripper_offset=(0.0, 0.0, 0.0),
-            max_linear_step_m=1.0,
-            max_angular_step_rad=math.pi,
-            linear_axis_signs=(-1.0, -1.0, 1.0),
-            angular_axis_signs=(-1.0, -1.0, -1.0),
-            delta_frame="world",
-        )
-        _ = source.next_intent(sample_state(), 0.0)
-        intent = source.next_intent(sample_state(), 0.01)
-        self.assertIsNotNone(intent)
-        assert intent is not None
-        got = intent.left["tcp_target_stand"]
-        self.assertAlmostEqual(got[0], 1.0, places=7)
-        self.assertAlmostEqual(got[1], 2.0, places=7)
-        self.assertAlmostEqual(got[2], 3.0, places=7)
-        self.assertAlmostEqual(got[3], 0.0, places=7)
-        self.assertAlmostEqual(got[4], 0.0, places=7)
-        self.assertAlmostEqual(got[5], -0.2, places=7)  # world yaw mirrored
-
-    def test_tool_delta_frame_remains_default_and_tilts_with_latch(self):
-        # Contrast case documenting the 'tool' behavior: the same pitched-latch
-        # horizontal motion DOES bleed into other axes in tool mode.
+    def test_relative_tool_delta_tilts_with_latch(self):
+        # The UMI path composes relative motion through the latched tracker/TCP
+        # body frames, so a pitched latch can rotate horizontal hand motion into
+        # other robot axes.
         s45, c45 = math.sin(math.pi / 4.0), math.cos(math.pi / 4.0)
         pitched = [0.0, s45, 0.0, c45]
         reader = MockUmiPoseReader(
@@ -448,7 +382,6 @@ class UmiDualCartesianTest(unittest.TestCase):
             linear_axis_signs=(-1.0, -1.0, 1.0),
             angular_axis_signs=(-1.0, -1.0, -1.0),
         )
-        self.assertEqual(source.delta_frame, "tool")
         _ = source.next_intent(sample_state(), 0.0)
         intent = source.next_intent(sample_state(), 0.01)
         self.assertIsNotNone(intent)
@@ -696,6 +629,55 @@ class UmiDualCartesianTest(unittest.TestCase):
         self.assertEqual(sample.monotonic, 777.0)
         self.assertEqual(fake_socket.bound, ("127.0.0.1", 49000))
         self.assertTrue(fake_socket.closed)
+
+    def test_udp_cached_sample_logs_reuse_without_seq_reset(self):
+        packet = json.dumps(
+            {
+                "left": {
+                    "pose": [0, 0, 0, 0, 0, 0, 1],
+                    "gripper": 0.2,
+                    "deadman": True,
+                }
+            }
+        ).encode("utf-8")
+        fake_socket = FakeUdpSocket([packet])
+        log_env = "POLICY_RUNNER_UMI_TELEOP_LOG"
+        old_log = os.environ.get(log_env)
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "umi.log"
+            os.environ[log_env] = str(log_path)
+            try:
+                source = UmiDualCartesianActionSource(
+                    UdpUmiPoseReader(
+                        "udp://127.0.0.1:49000",
+                        "left",
+                        socket_factory=lambda *_args: fake_socket,
+                        monotonic_fn=lambda: 0.0,
+                    ),
+                    MockUmiPoseReader([]),
+                    gripper_offset=(0.0, 0.0, 0.0),
+                    max_linear_step_m=1.0,
+                    input_moving_average_window=2,
+                )
+                try:
+                    first = source.next_intent(sample_state(), 0.0)
+                    reused = source.next_intent(sample_state(), 0.001)
+                finally:
+                    source.close()
+            finally:
+                if old_log is None:
+                    os.environ.pop(log_env, None)
+                else:
+                    os.environ[log_env] = old_log
+
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(reused)
+            log_text = log_path.read_text(encoding="utf-8")
+
+        self.assertIn("has=1  fresh=1  seq=1", log_text)
+        self.assertIn("has=1  fresh=0  seq=1", log_text)
+        self.assertIn("[REUSE]", log_text)
+        self.assertNotIn("seq=0", log_text)
 
     def test_config_and_factory_default_to_mock_umi_source(self):
         cfg = config_from_mapping(

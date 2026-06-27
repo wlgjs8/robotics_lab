@@ -2363,6 +2363,8 @@ void DualArmServoLoop::loopMain() {
                 fk_command_tcp(right_state, attempted_target.right_q_target_deg, config_.right_mount);
             }
 
+            sample.left_state = left_state;
+            sample.right_state = right_state;
             latest_snapshot_.tick = sample.tick;
             latest_snapshot_.loop_start_time_ns = loop_start;
             latest_snapshot_.loop_end_time_ns = loop_end;

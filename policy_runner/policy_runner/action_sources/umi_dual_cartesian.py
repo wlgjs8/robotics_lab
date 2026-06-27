@@ -73,6 +73,9 @@ class _ArmTeleopState:
     pika_init: _Transform | None = None
     previous_target: tuple[float, ...] | None = None
     last_sample: UmiSample | None = None
+    # seq of the last sample this arm consumed; used to detect a fresh packet
+    # (read() returned a higher seq) vs a reader-cached replay (same seq).
+    last_seq: int = 0
     was_armed: bool = False
     deadband_target: tuple[float, ...] | None = None
     # Monotonic time the deadman first dropped while still armed (None when the
@@ -113,6 +116,7 @@ class _PoseMovingAverage:
             sample.gripper,
             sample.deadman,
             sample.monotonic,
+            sample.seq,
         )
 
 
@@ -162,9 +166,10 @@ class _TeleopStepLogger:
         self._fh.write(f"# umi_dual_cartesian 수신 per-step 로그  started={_kst_now().isoformat()}\n")
         self._fh.write(
             "# fields: <KST>  side  st=<ARMED|ENGAGE|HOLD|RELEASE|HOLD_TIMEOUT|STALE>  "
-            "age_ms=<수신지연>  dt_ms=<직전처리 샘플간격>  fresh=<신규수신?>  "
+            "age_ms=<수신지연>  dt_ms=<직전 fresh 샘플간격>  "
+            "has=<reader가 샘플 반환?>  fresh=<신규 packet?>  seq=<수신 packet 카운터>  "
             "raw_mm/raw_deg=<클램프전 요구 변위>  app_mm/app_deg=<적용 변위>  "
-            "clamp=<xyz|rpy 포화축>  db=<deadband동결>  tokens(GAP/CLAMP/DB)\n"
+            "clamp=<xyz|rpy 포화축>  db=<deadband동결>  tokens(GAP/REUSE/CLAMP/DB)\n"
         )
 
     def _dt_ms(self, side: str, mono: float) -> float:
@@ -185,7 +190,9 @@ class _TeleopStepLogger:
         *,
         sample_mono: float,
         now_monotonic: float,
-        fresh: bool,
+        has_sample: bool,
+        fresh_packet: bool,
+        sample_seq: int,
         just_engaged: bool,
         prev_target: tuple[float, ...] | None,
         prev_deadband: tuple[float, ...] | None,
@@ -198,7 +205,10 @@ class _TeleopStepLogger:
         max_angular_step_rad: float,
     ) -> None:
         age = (now_monotonic - sample_mono) * 1000.0
-        dt = self._dt_ms(side, sample_mono)
+        # dt only advances on a genuinely fresh packet, so it reports the real
+        # publisher inter-packet interval (a reuse step shares sample_mono and
+        # would otherwise collapse dt to 0 and muddy the gap accounting).
+        dt = self._dt_ms(side, sample_mono) if fresh_packet else -1.0
         base = prev_target if prev_target is not None else applied_pose6
         # raw = 손이 요구한 변위(deadband·클램프 전), app = 실제 적용된 변위(클램프 후)
         raw_lin = math.sqrt(sum((raw_pose6[i] - base[i]) ** 2 for i in range(3)))
@@ -225,6 +235,10 @@ class _TeleopStepLogger:
         tokens = ""
         if dt > _RECV_GAP_MS:
             tokens += " [GAP]"
+        if not fresh_packet:
+            # No new packet this step: the server is being fed a held/reused
+            # setpoint. This is the row the old fresh=1 logging hid.
+            tokens += " [REUSE]"
         if clamp not in ("", "|"):
             tokens += " [CLAMP]"
         if db_hit:
@@ -232,7 +246,8 @@ class _TeleopStepLogger:
         st = "ENGAGE" if just_engaged else "ARMED"
         self._fh.write(
             f"{_kst_now().strftime('%H:%M:%S.%f')[:-3]}  side={side[0].upper()}  st={st}  "
-            f"age_ms={age:6.1f}  dt_ms={dt:6.1f}  fresh={int(fresh)}  "
+            f"age_ms={age:6.1f}  dt_ms={dt:6.1f}  "
+            f"has={int(has_sample)}  fresh={int(fresh_packet)}  seq={sample_seq}  "
             f"raw_mm={raw_lin * 1000:6.2f} raw_deg={math.degrees(raw_ang):5.2f}  "
             f"app_mm={app_lin * 1000:6.2f} app_deg={math.degrees(app_ang):5.2f}  "
             f"clamp={clamp}  db={int(db_hit)}{tokens}\n"
@@ -261,7 +276,6 @@ class UmiDualCartesianActionSource:
         deadband_angular_rad: float = 0.0,
         linear_axis_signs: Sequence[float] = (1.0, 1.0, 1.0),
         angular_axis_signs: Sequence[float] = (1.0, 1.0, 1.0),
-        delta_frame: str = "tool",
         gripper_offset: Sequence[float] = GRIPPER_OFFSET,
         r_align: Sequence[float] = IDENTITY_R_ALIGN,
         workspace_bounds: Mapping[str, Sequence[float]] | Sequence[float] | None = None,
@@ -300,9 +314,6 @@ class UmiDualCartesianActionSource:
         self.deadband_angular_rad = float(deadband_angular_rad)
         self.linear_axis_signs = _signs3(linear_axis_signs, "linear_axis_signs")
         self.angular_axis_signs = _signs3(angular_axis_signs, "angular_axis_signs")
-        if delta_frame not in ("tool", "world"):
-            raise ValueError("delta_frame must be 'tool' or 'world'")
-        self.delta_frame = delta_frame
         self.gripper_offset = _tuple3(gripper_offset, "gripper_offset")
         self.r_align = _matrix3(r_align, "r_align")
         self.workspace_bounds = _workspace_bounds(workspace_bounds)
@@ -376,7 +387,17 @@ class UmiDualCartesianActionSource:
         now_monotonic: float,
     ) -> tuple[tuple[float, ...] | None, float | None, bool]:
         sample = reader.read()
-        fresh = sample is not None
+        # has_sample: the reader returned data at all (fresh packet OR its own
+        # cached latest replayed between packets).
+        # fresh_packet: that data is a genuinely NEW packet this step, detected
+        # by the seq advancing past the last seq this arm consumed. A cached
+        # replay keeps the same seq -> fresh_packet is False even though
+        # has_sample is True (that is the reuse/hold case the old `fresh` flag
+        # could not see, where dt_ms collapses to 0).
+        has_sample = sample is not None
+        fresh_packet = has_sample and sample.seq != state.last_seq
+        if has_sample:
+            state.last_seq = sample.seq
         if sample is None:
             sample = state.last_sample
             if sample is None or now_monotonic - sample.monotonic > self.sample_hold_timeout_sec:
@@ -448,11 +469,8 @@ class UmiDualCartesianActionSource:
 
         assert state.arm_init is not None
         assert state.pika_init is not None
-        if self.delta_frame == "world":
-            target = self._world_frame_target(state.arm_init, state.pika_init, pika_now)
-        else:
-            delta = self._apply_axis_signs(_compose(_inverse(state.pika_init), pika_now))
-            target = _compose(state.arm_init, delta)
+        delta = self._apply_axis_signs(_compose(_inverse(state.pika_init), pika_now))
+        target = _compose(state.arm_init, delta)
         raw_pose6 = _clamp_workspace(_transform_to_pose6(target), self.workspace_bounds)
         # 진단: deadband/클램프 전후를 모두 잡기 위해 prev 상태를 미리 보관
         prev_target = state.previous_target
@@ -464,7 +482,9 @@ class UmiDualCartesianActionSource:
                 side,
                 sample_mono=sample.monotonic,
                 now_monotonic=now_monotonic,
-                fresh=fresh,
+                has_sample=has_sample,
+                fresh_packet=fresh_packet,
+                sample_seq=sample.seq,
                 just_engaged=just_engaged,
                 prev_target=prev_target,
                 prev_deadband=prev_deadband,
@@ -478,38 +498,6 @@ class UmiDualCartesianActionSource:
             )
         state.previous_target = pose6
         return pose6, _gripper_percent(sample.gripper), True
-
-    def _world_frame_target(
-        self,
-        arm_init: _Transform,
-        pika_init: _Transform,
-        pika_now: _Transform,
-    ) -> _Transform:
-        """Map the tracker delta in the tracker WORLD frame onto the stand frame.
-
-        Unlike the 'tool' frame composition (arm_init ∘ pika_init⁻¹ ∘ pika_now),
-        the world delta does not pass through the latched tracker/TCP body
-        orientations, so a horizontal hand motion stays horizontal at the robot
-        regardless of how the tool or the TCP was oriented at latch time.
-        Assumes the tracker world vertical matches the stand vertical; in-plane
-        yaw alignment is absorbed by linear_axis_signs (or operator placement).
-        Axis signs are applied along world/stand axes. r_align cancels out of
-        the rotation delta in this mode (it only shifts the tip via
-        gripper_offset).
-        """
-        sx, sy, sz = self.linear_axis_signs
-        translation = (
-            arm_init.translation[0] + sx * (pika_now.translation[0] - pika_init.translation[0]),
-            arm_init.translation[1] + sy * (pika_now.translation[1] - pika_init.translation[1]),
-            arm_init.translation[2] + sz * (pika_now.translation[2] - pika_init.translation[2]),
-        )
-        # World-frame relative rotation, mirrored per axis via the quaternion
-        # vector part, then applied as a world-frame (left) rotation offset.
-        delta_rotation = _mat_mul(pika_now.rotation, _transpose(pika_init.rotation))
-        ax, ay, az = self.angular_axis_signs
-        qx, qy, qz, qw = _matrix_to_quat(delta_rotation)
-        mirrored = _quat_to_matrix((ax * qx, ay * qy, az * qz, qw))
-        return _Transform(translation, _mat_mul(mirrored, arm_init.rotation))
 
     def _apply_axis_signs(self, delta: _Transform) -> _Transform:
         """Mirror the latched relative delta per axis.
@@ -597,11 +585,16 @@ class MockUmiPoseReader:
     def __init__(self, script: str | Iterable[Mapping[str, Any] | UmiSample | None]):
         self._samples = _script_to_samples(script)
         self.closed = False
+        self._seq = 0
 
     def read(self) -> UmiSample | None:
         if not self._samples:
             return None
-        return self._samples.pop(0)
+        sample = self._samples.pop(0)
+        if sample is None:
+            return None
+        self._seq += 1
+        return replace(sample, seq=self._seq)
 
     def close(self) -> None:
         self.closed = True
@@ -628,6 +621,7 @@ class UdpUmiPoseReader:
         self._monotonic_fn = monotonic_fn
         self._socket: socket.socket | None = None
         self._latest: UmiSample | None = None
+        self._seq = 0
 
     def read(self) -> UmiSample | None:
         self._open()
@@ -637,7 +631,15 @@ class UdpUmiPoseReader:
                 data, _address = self._socket.recvfrom(65536)
             except BlockingIOError:
                 break
-            self._latest = _sample_from_udp_packet(data, self.side, self._monotonic_fn)
+            sample = _sample_from_udp_packet(data, self.side, self._monotonic_fn)
+            if sample is None:
+                # Packet arrived but carried no data for this side; do not count
+                # it as a new sample for this reader (no seq bump, latest held).
+                continue
+            self._seq += 1
+            self._latest = replace(sample, seq=self._seq)
+        # Returns the cached latest between packets (reuse): the seq stays put so
+        # the consumer can tell this apart from a genuinely fresh packet.
         return self._latest
 
     def close(self) -> None:
@@ -691,6 +693,7 @@ def _clear_latches(state: _ArmTeleopState) -> None:
     state.pika_init = None
     state.previous_target = None
     state.last_sample = None
+    state.last_seq = 0
     state.was_armed = False
     state.deadband_target = None
     state.deadman_drop_mono = None

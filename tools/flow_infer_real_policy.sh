@@ -26,7 +26,6 @@ exec "$PYTHON_BIN" -m policy_runner flow-infer \
   --checkpoint "$CHECKPOINT" \
   --config "$CONFIG" \
   --rollout-mode real_policy \
-  --allow-tcp-target-pose \
   --action-horizon "$ACTION_HORIZON" \
   --include-depth \
   --gripper-action-mode absolute \

@@ -10,7 +10,7 @@ schema: robotics_lab.policy_runner.v1
 #   python3 -m policy_runner flow-infer \
 #     --checkpoint openpi://127.0.0.1:8000 \
 #     --config policy_runner/config/flow_real_fisheye.yaml \
-#     --rollout-mode real_policy --allow-tcp-target-pose \
+#     --rollout-mode real_policy \
 #     --action-horizon 24 --include-depth --gripper-action-mode absolute
 #
 # Differs from stack_real.yaml (the `make run` teleop config) in exactly what the
@@ -159,7 +159,6 @@ umi_dual_cartesian:
   deadband_linear_m: 0.0000
   deadband_angular_rad: 0.000
   input_moving_average_window: 16
-  delta_frame: tool
   gripper_offset: [0.0, 0.0, 0.0]
   r_align: [0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0]
   linear_axis_signs: [1.0, 1.0, 1.0]

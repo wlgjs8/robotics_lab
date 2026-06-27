@@ -117,7 +117,6 @@ umi_dual_cartesian:
   deadband_linear_m: 0.0000
   deadband_angular_rad: 0.000
   input_moving_average_window: 8
-  delta_frame: tool
   # ---- Pose-frame geometry (paired with pika publisher --pose-frame tip) ----
   # The publisher applies the official pika_sdk tracker→gripper-tip transform
   # (T_raw · Rx(-20°)·[Ry(-90°)·Rx(-90°)] · Trans(0.172, 0, -0.076)): the wire

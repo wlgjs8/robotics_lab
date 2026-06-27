@@ -112,7 +112,6 @@ umi_dual_cartesian:
   max_angular_step_rad: 0.04
   deadband_linear_m: 0.0015
   deadband_angular_rad: 0.012
-  delta_frame: tool
   # Pose-frame geometry: paired with pika publisher --pose-frame tip (official
   # tracker→gripper-tip transform on the wire; see stack_real.yaml for details).
   gripper_offset: [0.0, 0.0, 0.0]
