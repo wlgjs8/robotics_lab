@@ -2312,70 +2312,6 @@ def build_gui(
                         handles.get("scene", {}), float(floor_slider.value) / 1000.0
                     )
 
-            with server.gui.add_folder("Safety ROI box"):
-                # Show/hide the ROI box in the 3D scene (default ON). Independent of
-                # whether the server is enforcing it — the configured region is
-                # always drawable as a reference.
-                if hasattr(server.gui, "add_checkbox"):
-                    handles["roi_box_visible_toggle"] = server.gui.add_checkbox(
-                        "ROI 영역 표시", initial_value=True
-                    )
-                handles["roi_applied"] = server.gui.add_text(
-                    "Applied box", initial_value="no state", disabled=True
-                )
-                # Six per-axis bound sliders (stand frame, mm): a draggable slider
-                # plus viser's compact integrated number box. _update_roi_panel
-                # syncs their range to the server's runtime envelope and brings them
-                # up at the applied bounds on the first state.
-                _roi_axis_defaults_mm = {
-                    "x": (-500.0, 500.0),
-                    "y": (-1000.0, 0.0),
-                    "z": (0.0, 1000.0),
-                }
-                for _axis in ("x", "y", "z"):
-                    _lo_default, _hi_default = _roi_axis_defaults_mm[_axis]
-                    handles[f"roi_{_axis}_min"] = server.gui.add_slider(
-                        f"{_axis.upper()} min mm", min=-1500.0, max=1500.0, step=5.0,
-                        initial_value=_lo_default,
-                    )
-                    handles[f"roi_{_axis}_max"] = server.gui.add_slider(
-                        f"{_axis.upper()} max mm", min=-1500.0, max=1500.0, step=5.0,
-                        initial_value=_hi_default,
-                    )
-                roi_send = server.gui.add_button("Send ROI box")
-                handles["roi_send_button"] = roi_send
-                handles["roi_set_status"] = server.gui.add_text(
-                    "ROI set status", initial_value="idle", disabled=True
-                )
-
-                def _roi_slider_bounds() -> tuple[
-                    tuple[float, float, float], tuple[float, float, float]
-                ]:
-                    lo = tuple(
-                        float(handles[f"roi_{a}_min"].value) / 1000.0 for a in ("x", "y", "z")
-                    )
-                    hi = tuple(
-                        float(handles[f"roi_{a}_max"].value) / 1000.0 for a in ("x", "y", "z")
-                    )
-                    return lo, hi  # type: ignore[return-value]
-
-                handles["roi_slider_bounds_fn"] = _roi_slider_bounds
-
-                @roi_send.on_click
-                def _(_: Any) -> None:
-                    lo, hi = _roi_slider_bounds()
-                    ok, message = safety.send_set_roi_bounds(lo, hi)
-                    handles["roi_set_status"].value = ("OK: " if ok else "BLOCKED: ") + message
-
-                def _roi_preview(_: Any) -> None:
-                    # Live yellow preview box while dragging any bound slider.
-                    lo, hi = _roi_slider_bounds()
-                    update_roi_box_preview(handles.get("scene", {}), lo, hi)
-
-                for _axis in ("x", "y", "z"):
-                    handles[f"roi_{_axis}_min"].on_update(_roi_preview)
-                    handles[f"roi_{_axis}_max"].on_update(_roi_preview)
-
             with server.gui.add_folder("User Safety Floor"):
                 # A user-defined TILTED floor plane fit from >= 3 captured floor-contact
                 # points (both arms, alternating). Unlike the (horizontal) Stand Safety
@@ -2525,6 +2461,70 @@ def build_gui(
                         _save_user_floor(state)
 
                 _refresh_user_floor_texts()
+
+            with server.gui.add_folder("Safety ROI box"):
+                # Show/hide the ROI box in the 3D scene (default ON). Independent of
+                # whether the server is enforcing it — the configured region is
+                # always drawable as a reference.
+                if hasattr(server.gui, "add_checkbox"):
+                    handles["roi_box_visible_toggle"] = server.gui.add_checkbox(
+                        "ROI 영역 표시", initial_value=True
+                    )
+                handles["roi_applied"] = server.gui.add_text(
+                    "Applied box", initial_value="no state", disabled=True
+                )
+                # Six per-axis bound sliders (stand frame, mm): a draggable slider
+                # plus viser's compact integrated number box. _update_roi_panel
+                # syncs their range to the server's runtime envelope and brings them
+                # up at the applied bounds on the first state.
+                _roi_axis_defaults_mm = {
+                    "x": (-500.0, 500.0),
+                    "y": (-1000.0, 0.0),
+                    "z": (0.0, 1000.0),
+                }
+                for _axis in ("x", "y", "z"):
+                    _lo_default, _hi_default = _roi_axis_defaults_mm[_axis]
+                    handles[f"roi_{_axis}_min"] = server.gui.add_slider(
+                        f"{_axis.upper()} min mm", min=-1500.0, max=1500.0, step=5.0,
+                        initial_value=_lo_default,
+                    )
+                    handles[f"roi_{_axis}_max"] = server.gui.add_slider(
+                        f"{_axis.upper()} max mm", min=-1500.0, max=1500.0, step=5.0,
+                        initial_value=_hi_default,
+                    )
+                roi_send = server.gui.add_button("Send ROI box")
+                handles["roi_send_button"] = roi_send
+                handles["roi_set_status"] = server.gui.add_text(
+                    "ROI set status", initial_value="idle", disabled=True
+                )
+
+                def _roi_slider_bounds() -> tuple[
+                    tuple[float, float, float], tuple[float, float, float]
+                ]:
+                    lo = tuple(
+                        float(handles[f"roi_{a}_min"].value) / 1000.0 for a in ("x", "y", "z")
+                    )
+                    hi = tuple(
+                        float(handles[f"roi_{a}_max"].value) / 1000.0 for a in ("x", "y", "z")
+                    )
+                    return lo, hi  # type: ignore[return-value]
+
+                handles["roi_slider_bounds_fn"] = _roi_slider_bounds
+
+                @roi_send.on_click
+                def _(_: Any) -> None:
+                    lo, hi = _roi_slider_bounds()
+                    ok, message = safety.send_set_roi_bounds(lo, hi)
+                    handles["roi_set_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+                def _roi_preview(_: Any) -> None:
+                    # Live yellow preview box while dragging any bound slider.
+                    lo, hi = _roi_slider_bounds()
+                    update_roi_box_preview(handles.get("scene", {}), lo, hi)
+
+                for _axis in ("x", "y", "z"):
+                    handles[f"roi_{_axis}_min"].on_update(_roi_preview)
+                    handles[f"roi_{_axis}_max"].on_update(_roi_preview)
 
             with server.gui.add_folder("도달영역(reach)"):
                 # Show/hide the per-arm reachable-workspace cloud (FK envelope from

@@ -2472,6 +2472,16 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("Joint Monitor", folder_labels)
         self.assertIn("Stand/World Monitor", folder_labels)
 
+    def test_safety_floor_user_floor_roi_folder_order(self):
+        source = (Path(__file__).resolve().parents[1] / "rb_servo_gui" / "app.py").read_text(
+            encoding="utf-8"
+        )
+        stand = source.index('add_folder("Stand Safety Floor")')
+        user = source.index('add_folder("User Safety Floor")')
+        roi = source.index('add_folder("Safety ROI box")')
+        self.assertLess(stand, user)
+        self.assertLess(user, roi)
+
     def test_update_operator_monitors_updates_html_content_handle(self):
         server = RecordingServer()
         handles = {}
