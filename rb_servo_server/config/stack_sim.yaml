@@ -253,9 +253,9 @@ safety:
 network:
   command_bind: "udp://127.0.0.1:50256"
   state_pub_endpoints:
-    - "udp://127.0.0.1:50356"
-    - "udp://127.0.0.1:50366"
-    - "udp://127.0.0.1:50376"
+    - "udp://127.0.0.1:50356"  # joint scope dashboard
+    - "udp://127.0.0.1:50366"  # viser GUI
+    - "udp://127.0.0.1:50376"  # make run teleop_mux policy_runner
     - "udp://127.0.0.1:50378"  # external flow-infer readback alongside make run
   state_pub_rate_hz: 100
   command_source_allowlist: ["127.0.0.1/32"]

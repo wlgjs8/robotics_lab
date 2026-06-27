@@ -2243,7 +2243,7 @@ bool testRbpodoAsyncHoldStreamsServoJWithoutLatch() {
     return true;
 }
 
-bool testRealHoldStreamsCurrentActualAndArmMotionReanchors() {
+bool testRealHoldFreezesLastReferenceNotDriftedActual() {
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = rbpodoPhysicalRealConfig();
     cfg.servo.rate_hz = 100;
@@ -2289,6 +2289,11 @@ bool testRealHoldStreamsCurrentActualAndArmMotionReanchors() {
     left_backend->setActualJoints(drifted_actual);
     right_backend->setActualJoints(drifted_actual);
 
+    // Hold must FREEZE at the last commanded reference (held_reference), NOT chase
+    // the drifted measured actual: commanding the live actual every tick leaves the
+    // servo with zero error and no restoring torque, so the arm creeps to its
+    // gravity-settled pose (the startup/idle drift this guards against).
+    const rb_servo::JointArray held_reference = joints(6.0);
     rb_servo::DualArmCommand hold = command(rb_servo::ControlMode::Hold);
     hold.seq = 9102;
     hold.left.timeout_sec = 1.0;
@@ -2303,8 +2308,8 @@ bool testRealHoldStreamsCurrentActualAndArmMotionReanchors() {
             snapshot.send_policy == "send_servo_j" &&
             !snapshot.send_suppressed &&
             !snapshot.fault_latched &&
-            sameJointArray(previous.left_q_target_deg, drifted_actual) &&
-            sameJointArray(previous.right_q_target_deg, drifted_actual)) {
+            sameJointArray(previous.left_q_target_deg, held_reference) &&
+            sameJointArray(previous.right_q_target_deg, held_reference)) {
             hold_snapshot = snapshot;
             return true;
         }
@@ -2312,8 +2317,8 @@ bool testRealHoldStreamsCurrentActualAndArmMotionReanchors() {
     }, std::chrono::milliseconds(1000)));
 
     RB_CHECK(hold_snapshot.has_value());
-    RB_CHECK(sameJointArray(hold_snapshot->left_sent_q_deg, drifted_actual));
-    RB_CHECK(sameJointArray(hold_snapshot->right_sent_q_deg, drifted_actual));
+    RB_CHECK(sameJointArray(hold_snapshot->left_sent_q_deg, held_reference));
+    RB_CHECK(sameJointArray(hold_snapshot->right_sent_q_deg, held_reference));
 
     arm_motion.seq = 9103;
     arm_motion.host_time_ns = rb_servo::nowSteadyNs();
@@ -2324,14 +2329,61 @@ bool testRealHoldStreamsCurrentActualAndArmMotionReanchors() {
         return snapshot.motion_state == rb_servo::ServerMotionState::ArmedHold &&
                !snapshot.fault_latched &&
                snapshot.send_policy == "send_servo_j" &&
-               sameJointArray(previous.left_q_target_deg, drifted_actual) &&
-               sameJointArray(previous.right_q_target_deg, drifted_actual);
+               sameJointArray(previous.left_q_target_deg, held_reference) &&
+               sameJointArray(previous.right_q_target_deg, held_reference);
     }, std::chrono::milliseconds(1000)));
 
     loop.stop();
     RB_CHECK(left_backend->resetCount() == 0);
     RB_CHECK(right_backend->resetCount() == 0);
     RB_CHECK(loop.latchedFaultReason() == rb_servo::SafetyVerdict::Ok);
+    return true;
+}
+
+bool testGripperSetpointSurvivesHoldRewrite() {
+    // A SpaceMouse button-only gripper press (cap neutral) arrives as a Hold/Hold
+    // command carrying gripper_target. The explicit-dual-hold rewrite path must
+    // PRESERVE that gripper setpoint (gripper is forwarded from snapshot.command),
+    // not drop it via makeHoldCommand — otherwise the gripper never actuates.
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoPhysicalRealConfig();
+    const rb_servo::JointArray initial = joints(0.0);
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr
+    );
+    RB_CHECK(loop.start());
+
+    rb_servo::DualArmCommand grip = command(rb_servo::ControlMode::Hold);
+    grip.seq = 5501;
+    grip.host_time_ns = rb_servo::nowSteadyNs();
+    grip.left.timeout_sec = 1.0;
+    grip.right.timeout_sec = 1.0;
+    grip.left.has_gripper = true;
+    grip.left.gripper_target = 10.0;    // left button -> close
+    grip.right.has_gripper = true;
+    grip.right.gripper_target = 100.0;  // right button -> open
+    buffer.setCommand(grip);
+
+    std::optional<rb_servo::ServoSnapshot> snap;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot s = loop.latestSnapshot();
+        if (s.command.seq == 5501 &&
+            s.command.left.has_gripper && s.command.right.has_gripper) {
+            snap = s;
+            return true;
+        }
+        return false;
+    }, std::chrono::milliseconds(1000)));
+    loop.stop();
+
+    RB_CHECK(snap.has_value());
+    RB_CHECK(snap->command.left.mode == rb_servo::ControlMode::Hold);
+    RB_CHECK(std::abs(snap->command.left.gripper_target - 10.0) < kEpsilon);
+    RB_CHECK(std::abs(snap->command.right.gripper_target - 100.0) < kEpsilon);
     return true;
 }
 
@@ -5411,7 +5463,8 @@ int main() {
     if (!testRbpodoAsyncSupervisionFaultIsAdvisoryInControllerSimulationWhenFlagEnabled()) return 1;
     if (!testRbpodoAsyncSupervisionFlagDoesNotBypassPhysicalRealLatch()) return 1;
     if (!testRbpodoAsyncHoldStreamsServoJWithoutLatch()) return 1;
-    if (!testRealHoldStreamsCurrentActualAndArmMotionReanchors()) return 1;
+    if (!testRealHoldFreezesLastReferenceNotDriftedActual()) return 1;
+    if (!testGripperSetpointSurvivesHoldRewrite()) return 1;
     if (!testEmergencyStopStillRequiresResetAfterArmMotion()) return 1;
     if (!testPhysicalRealSendFailureStillHardLatches()) return 1;
     if (!testRbpodoTrackingErrorIsAdvisoryInControllerSimulationWhenFlagEnabled()) return 1;

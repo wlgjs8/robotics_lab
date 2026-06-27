@@ -408,6 +408,32 @@ class PolicyRunnerContractTest(unittest.TestCase):
                 self.assertEqual(cfg.camera.expected_cameras, expected)
                 self.assertTrue(cfg.camera.record_zero_on_missing)
 
+    def test_make_run_keeps_external_flow_infer_state_port_available(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        policy_config_dir = Path(__file__).resolve().parents[1] / "config"
+        run_stack_text = (repo_root / "tools/run_stack.sh").read_text()
+
+        stack_cfg = load_config(policy_config_dir / "stack_real.yaml")
+        flow_cfg = load_config(policy_config_dir / "flow_real_realsense.yaml")
+        self.assertEqual(stack_cfg.robot_state.bind, "udp://0.0.0.0:50376")
+        self.assertEqual(flow_cfg.robot_state.bind, "udp://0.0.0.0:50378")
+
+        self.assertIn(
+            'SCOPE_DASHBOARD_STATE_LISTEN="${SCOPE_DASHBOARD_STATE_LISTEN:-0.0.0.0:50356}"',
+            run_stack_text,
+        )
+        self.assertIn("external flow-infer state readback: udp://127.0.0.1:50378", run_stack_text)
+        self.assertNotIn(
+            'SCOPE_DASHBOARD_STATE_LISTEN="${SCOPE_DASHBOARD_STATE_LISTEN:-0.0.0.0:50378}"',
+            run_stack_text,
+        )
+
+        for name in ("stack_real.yaml", "stack_sim.yaml"):
+            with self.subTest(name=name):
+                server_cfg_text = (repo_root / "rb_servo_server" / "config" / name).read_text()
+                self.assertIn('"udp://127.0.0.1:50356"', server_cfg_text)
+                self.assertIn('"udp://127.0.0.1:50378"', server_cfg_text)
+
     def test_record_command_parser_accepts_start_stop_schema(self):
         start = parse_record_command(
             json.dumps(
@@ -601,6 +627,10 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertEqual(sim_cfg.spacemouse_pose_target_dual.sample_stale_timeout_sec, 0.05)
         self.assertTrue(real_cfg.spacemouse_pose_target_dual.gripper_buttons.enable)
         self.assertTrue(sim_cfg.spacemouse_pose_target_dual.gripper_buttons.enable)
+        self.assertEqual(real_cfg.spacemouse_pose_target_dual.gripper_buttons.close_button, 0)
+        self.assertEqual(real_cfg.spacemouse_pose_target_dual.gripper_buttons.open_button, 14)
+        self.assertEqual(sim_cfg.spacemouse_pose_target_dual.gripper_buttons.close_button, 0)
+        self.assertEqual(sim_cfg.spacemouse_pose_target_dual.gripper_buttons.open_button, 14)
         self.assertEqual(real_cfg.spacemouse_pose_target_dual.gripper_buttons.open_percent, 100.0)
         self.assertEqual(real_cfg.spacemouse_pose_target_dual.gripper_buttons.close_percent, 10.0)
 

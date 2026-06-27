@@ -24,6 +24,8 @@
 #     limits.d). If RT setup fails, re-login or re-apply:
 #       sudo setcap cap_sys_nice,cap_ipc_lock+ep rb_servo_server/build/rbpodo_real_gate/rb_servo_server
 #   - Ctrl-C stops all three processes (lease is released by policy_runner).
+#   - State fanout ports: 50356 scope dashboard, 50366 viser GUI,
+#     50376 stack policy_runner/teleop_mux, 50378 external flow-infer.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -88,7 +90,7 @@ case "${SCOPE_DASHBOARD:-1}" in
 esac
 SCOPE_DASHBOARD_PORT="${SCOPE_DASHBOARD_PORT:-8081}"
 SCOPE_DASHBOARD_HOST="${SCOPE_DASHBOARD_HOST:-0.0.0.0}"
-SCOPE_DASHBOARD_STATE_LISTEN="${SCOPE_DASHBOARD_STATE_LISTEN:-0.0.0.0:50378}"
+SCOPE_DASHBOARD_STATE_LISTEN="${SCOPE_DASHBOARD_STATE_LISTEN:-0.0.0.0:50356}"
 SCOPE_DASHBOARD_CSV="${SCOPE_DASHBOARD_CSV:-$LOG_DIR/joint_kinematics.csv}"
 GRIPPER_SERVER_DEBUG_ARGS=""
 case "${GRIPPER_SERVER_DEBUG:-0}" in
@@ -202,6 +204,9 @@ trap cleanup EXIT
 echo "[stack] mode=$MODE source=$ACTION_SOURCE (spacemouse + umi side by side)"
 echo "[stack] server: $SERVER_CFG"
 echo "[stack] external flow-infer state readback: udp://127.0.0.1:50378"
+if [ "$SCOPE_DASHBOARD_ON" = "1" ]; then
+  echo "[stack] joint scope dashboard state listen: ${SCOPE_DASHBOARD_STATE_LISTEN}"
+fi
 ensure_rt_caps
 # 서버측 Cartesian 추종 텔레메트리(per-arm/tick): goal_minus_measured(SMD lag),
 # ik_branch_jump_clamped(seed 유지=0모션), ik_sigma_min(특이값), floor_goal_clamped.

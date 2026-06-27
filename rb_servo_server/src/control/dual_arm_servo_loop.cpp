@@ -1820,6 +1820,15 @@ void DualArmServoLoop::loopMain() {
             DualArmCommand hold = makeHoldCommand(left_state, right_state, loop_start);
             hold.source = source_command.source;
             hold.lease = source_command.lease;
+            // Preserve any gripper setpoint riding the command. A button-only
+            // gripper press (SpaceMouse cap neutral) arrives as a Hold/Hold with
+            // gripper_target, which this hold-rewrite path (e.g. the explicit
+            // dual-hold branch) would otherwise drop because makeHoldCommand only
+            // sets joint hold targets — so the gripper would never actuate.
+            hold.left.has_gripper = source_command.left.has_gripper;
+            hold.left.gripper_target = source_command.left.gripper_target;
+            hold.right.has_gripper = source_command.right.has_gripper;
+            hold.right.gripper_target = source_command.right.gripper_target;
             return hold;
         };
         if (isSyntheticHoldCommand(command)) {
@@ -4473,18 +4482,15 @@ DualArmCommand DualArmServoLoop::makeHoldCommand(
     cmd.right.arm_id = ArmId::Right;
     cmd.left.mode = ControlMode::Hold;
     cmd.right.mode = ControlMode::Hold;
-    cmd.left.q_target_deg = chooseStreamingHoldTarget(
-        ArmId::Left,
-        left_state,
-        left_prev_sent_q_deg_
-    );
-    cmd.right.q_target_deg = chooseStreamingHoldTarget(
-        ArmId::Right,
-        right_state,
-        right_prev_sent_q_deg_
-    );
-    cmd.left.has_joint_target = true;
-    cmd.right.has_joint_target = true;
+    // Hold freezes each arm at its last commanded reference (previous_sent), NOT
+    // the live measured actual. trajectory_filter's Hold branch holds
+    // previous_sent only when has_joint_target is unset; setting has_joint_target
+    // and commanding the measured q_actual every tick (the prior streaming hold)
+    // left the servo with zero commanded error, so it produced no restoring
+    // torque and the arm crept ~5-8 deg to its gravity-settled pose at
+    // startup/idle (and the q_sent->q_actual feedback added a small tremble).
+    cmd.left.q_target_deg = chooseSafeHoldTarget(left_state, left_prev_sent_q_deg_);
+    cmd.right.q_target_deg = chooseSafeHoldTarget(right_state, right_prev_sent_q_deg_);
     return cmd;
 }
 
@@ -5596,20 +5602,6 @@ JointArray DualArmServoLoop::chooseSafeHoldTarget(
         return state.q_actual_deg;
     }
     return previous_sent;
-}
-
-JointArray DualArmServoLoop::chooseStreamingHoldTarget(
-    ArmId arm_id,
-    const RobotState& state,
-    const JointArray& previous_sent
-) const {
-    if (controllerSimulationTrackingReferenceActive(config_, arm_id) &&
-        state.q_ref_valid &&
-        state.has_valid_joint_state &&
-        finiteJointArray(state.q_target_deg)) {
-        return state.q_target_deg;
-    }
-    return chooseSafeHoldTarget(state, previous_sent);
 }
 
 double DualArmServoLoop::computeFilterDtSec(uint64_t actual_period_ns, uint64_t nominal_period_ns) const {

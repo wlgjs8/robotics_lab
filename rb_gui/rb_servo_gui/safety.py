@@ -547,8 +547,11 @@ class OperatorSafety:
         reason = self.init_motion_disabled_reason()
         if reason:
             return False, reason
-        if not self.command_client.hold_lease:
-            return False, "per-arm GUI InitMotion fallback requires Take control (hold lease)"
+        # No explicit "Take control" needed: the per-arm packet's top-level mode is
+        # Hold, which is in command_client._LEASED_MODES, so command_client.send()
+        # auto-brackets it with AcquireLease/ReleaseLease exactly like the dual-arm
+        # build_init_motion path. (Previously this required hold_lease, so per-arm
+        # InitMotion silently no-op'd unless the operator first took the lease.)
         assert self.init_left_joint_deg is not None
         assert self.init_right_joint_deg is not None
         self.command_client.send(
@@ -742,7 +745,13 @@ class OperatorSafety:
                 linear_speed_m_s=linear_speed_m_s,
                 angular_speed_rad_s=angular_speed_rad_s,
                 orientation_mode=orientation_mode,
-                timeout_sec=self.command_timeout_sec,
+                # Do NOT pass the 0.2 s command_timeout_sec here: a one-shot
+                # TcpLinearMove must stay fresh long enough for the server's async
+                # collision-free decision to finish and hand the finite path to the
+                # Cartesian executor. Letting build_tcp_linear_move auto-size the
+                # timeout (max(2.0, duration+0.5)) is what keeps the MoveL from
+                # expiring mid-decision into a synthetic Hold (never starting).
+                # Hold/E-stop still cancel; the server execution_timeout bounds it.
             )
         except ValueError as exc:
             return False, str(exc)

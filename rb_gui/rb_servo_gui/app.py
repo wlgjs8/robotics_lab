@@ -53,6 +53,8 @@ from .pointcloud_receiver import (
     StereoCloudStore,
     load_T_stand_cam,
     save_T_stand_cam,
+    load_T_tcp_cam,
+    save_T_tcp_cam,
     mat_to_wxyz,
     wxyz_to_mat,
 )
@@ -624,6 +626,43 @@ def _policy_runner_control_active(
     return False
 
 
+def _policy_runner_actively_controlling(
+    handles: dict[str, Any],
+    latest: StateSnapshot | None = None,
+) -> bool:
+    # Narrower than _policy_runner_control_active (which only means "policy_runner
+    # is alive / publishing status"): True only when policy_runner is ACTIVELY
+    # driving the robot — a recording/rollout is in progress, an arm_init latch is
+    # already engaged (so a press can clear it), or it currently owns the command
+    # lease. GUI InitMotion routes to policy_runner's arm_init latch only in those
+    # cases; an idle-but-alive policy_runner must let a standalone GUI InitMotion
+    # run as a direct one-shot command, otherwise the latch keeps policy_runner
+    # streaming init_motion, it never releases the command lease (idle handoff
+    # never fires), and later GUI Cartesian commands are rejected with
+    # command_source_lease_conflict.
+    latest = latest or handles.get("_latest_state")
+    store = handles.get("recording_status_store")
+    if isinstance(store, RecordingStatusStore) and not store.is_stale(threshold_sec=2.0):
+        status = store.latest()
+        if isinstance(status, Mapping) and bool(status.get("recording")):
+            return True
+        arm_init = store.latest_arm_init()
+        if isinstance(arm_init, Mapping) and (
+            bool(arm_init.get("init_override_left"))
+            or bool(arm_init.get("init_override_right"))
+        ):
+            return True
+    if isinstance(latest, StateSnapshot):
+        if isinstance(latest.arm_init, Mapping) and (
+            bool(latest.arm_init.get("init_override_left"))
+            or bool(latest.arm_init.get("init_override_right"))
+        ):
+            return True
+        if latest.command_source.display_source_id == "policy_runner":
+            return True
+    return False
+
+
 def _arm_init_status_block(
     handles: dict[str, Any],
     latest: StateSnapshot | None = None,
@@ -695,7 +734,7 @@ def _send_arm_init_override(
     latest = handles.get("_latest_state")
     client = handles.get("recording_cmd_client")
     send_arm_init = getattr(client, "send_arm_init", None)
-    if callable(send_arm_init) and _policy_runner_control_active(handles, latest):
+    if callable(send_arm_init) and _policy_runner_actively_controlling(handles, latest):
         try:
             result = send_arm_init(
                 arms,
@@ -2983,6 +3022,57 @@ def build_gui(
                     h.wxyz = tuple(mat_to_wxyz(T[:3, :3])); h.position = tuple(T[:3, 3])
                 handles["pc_calib_status"].value = "저장값으로 리셋됨"
 
+            # --- 손목(D405) raw 클라우드 오버레이 (모델 추론 X) ---
+            # 워커가 stereo.wrist로 카메라 프레임 클라우드를 저속 발행. rb_gui는 이를
+            # /stand/{arm}_tcp(실시간 TCP) 자식의 핸드아이(T_tcp_cam) 프레임 아래 렌더한다.
+            # 핸드아이는 추정 초기값 + 기즈모 수동 캘리브(저장/로드).
+            handles["pc_wrist_enable"] = server.gui.add_checkbox(
+                "손목 카메라 raw 클라우드 표시", initial_value=bool(_pc.get("pc_wrist_enable", False)))
+            handles["pc_wrist_status"] = server.gui.add_text(
+                "wrist cloud status", initial_value="off", disabled=True)
+            handles["pc_wrist_enable"].on_update(lambda _evt: _persist_pc_settings(handles))
+
+            handles["_wrist_gizmo"] = {}
+            handles["_wrist_frame"] = {}
+            for _arm, _label in (("left", "왼손"), ("right", "오른손")):
+                with server.gui.add_folder(f"손목 핸드아이 ({_label} T_tcp_cam)", expand_by_default=False):
+                    handles[f"pc_wrist_calib_{_arm}"] = server.gui.add_checkbox(
+                        "캘리브레이션 모드(기즈모)", initial_value=False)
+                    handles[f"pc_wrist_save_{_arm}"] = server.gui.add_button("💾 핸드아이 저장")
+                    handles[f"pc_wrist_reset_{_arm}"] = server.gui.add_button("↩ 저장값으로 리셋")
+                    handles[f"pc_wrist_status_{_arm}"] = server.gui.add_text(
+                        "calib pose", initial_value="(기즈모로 클라우드를 로봇팔과 정렬 후 저장)", disabled=True)
+
+                Tw = load_T_tcp_cam(_arm)
+                # 핸드아이 프레임 + 기즈모: /stand/{arm}_tcp 자식이므로 로컬 pose = T_tcp_cam.
+                handles["_wrist_frame"][_arm] = server.scene.add_frame(
+                    f"/stand/{_arm}_tcp/wrist_cam", show_axes=False,
+                    wxyz=tuple(mat_to_wxyz(Tw[:3, :3])), position=tuple(Tw[:3, 3]))
+                handles["_wrist_gizmo"][_arm] = server.scene.add_transform_controls(
+                    f"/stand/{_arm}_tcp/wrist_cam_gizmo", scale=0.2, line_width=2.0,
+                    depth_test=False, visible=False,
+                    wxyz=tuple(mat_to_wxyz(Tw[:3, :3])), position=tuple(Tw[:3, 3]))
+
+                def _make_save(arm):
+                    def _(_evt) -> None:
+                        import numpy as np
+                        g = handles["_wrist_gizmo"][arm]
+                        T = np.eye(4); T[:3, :3] = wxyz_to_mat(g.wxyz); T[:3, 3] = np.array(g.position)
+                        ok, msg = save_T_tcp_cam(arm, T)
+                        handles[f"pc_wrist_status_{arm}"].value = (f"✅ 저장: {msg}" if ok else f"❌ {msg}")
+                    return _
+
+                def _make_reset(arm):
+                    def _(_evt) -> None:
+                        T = load_T_tcp_cam(arm)
+                        for h in (handles["_wrist_gizmo"][arm], handles["_wrist_frame"][arm]):
+                            h.wxyz = tuple(mat_to_wxyz(T[:3, :3])); h.position = tuple(T[:3, 3])
+                        handles[f"pc_wrist_status_{arm}"].value = "저장값으로 리셋됨"
+                    return _
+
+                handles[f"pc_wrist_save_{_arm}"].on_click(_make_save(_arm))
+                handles[f"pc_wrist_reset_{_arm}"].on_click(_make_reset(_arm))
+
     with tabs.add_tab("에피소드"):
         record_host, record_port = _recording_cmd_endpoint()
         handles["recording_cmd_client"] = RecordingCommandClient(record_host, record_port)
@@ -3035,6 +3125,8 @@ def _persist_pc_settings(handles: dict[str, Any]) -> None:
         s["pc_max_k"] = int(handles["pc_max_k"].value)
         s["pc_dmin"] = float(handles["pc_dmin"].value)
         s["pc_dmax"] = float(handles["pc_dmax"].value)
+        if handles.get("pc_wrist_enable") is not None:
+            s["pc_wrist_enable"] = bool(handles["pc_wrist_enable"].value)
         _save_gui_settings(s)
     except Exception:
         pass
@@ -3548,21 +3640,23 @@ def _update_stereo_boxes(handles: dict[str, Any]) -> None:
         return
     mesh = _box_mesh()
     boxes, _seq = store.latest_boxes()
-    colors = [(40, 220, 80), (240, 150, 40), (80, 160, 240), (230, 60, 200)]
+    label_color = {"green": (40, 220, 80), "gray": (170, 170, 180)}
+    fallback = [(240, 150, 40), (80, 160, 240), (230, 60, 200), (240, 220, 60)]
     seen = set()
     for i, b in enumerate(boxes[:4]):
         T = b["T"]; pos = tuple(float(v) for v in T[:3, 3])
         wxyz = tuple(float(v) for v in mat_to_wxyz(T[:3, :3]))
+        col_i = label_color.get(b.get("label"), fallback[i % 4])
         name = f"box{i}"; seen.add(name)
         if name in hs:
             h = hs[name]; h.position = pos; h.wxyz = wxyz; h.visible = True
         elif mesh is not None:
             hs[name] = server.scene.add_mesh_simple(
-                f"/stereo_box_{i}", mesh[0], mesh[1], color=colors[i % 4],
+                f"/stereo_box_{i}", mesh[0], mesh[1], color=col_i,
                 opacity=0.55, side="double", flat_shading=True, position=pos, wxyz=wxyz)
         else:  # STL 로드 실패 시 박스로 폴백
             hs[name] = server.scene.add_box(
-                f"/stereo_box_{i}", color=colors[i % 4], dimensions=tuple(float(v) for v in b["dims"]),
+                f"/stereo_box_{i}", color=col_i, dimensions=tuple(float(v) for v in b["dims"]),
                 wireframe=True, position=pos, wxyz=wxyz)
     for name, h in hs.items():
         if name not in seen:
@@ -3647,6 +3741,81 @@ def _update_stereo_cloud(handles: dict[str, Any]) -> None:
         status.value = f"{xyz.shape[0]}/{n_in} pts, depth {dmin:.2f}~{dmax:.2f}m, age {age_ms:.0f}ms (seq {seq})"
 
 
+def _update_stereo_wrist(handles: dict[str, Any]) -> None:
+    """손목(D405) raw 클라우드를 /stand/{arm}_tcp/wrist_cam(=T_tcp_cam) 자식으로 렌더.
+    점은 카메라 광학 좌표계, 부모(실시간 TCP × 핸드아이)가 stand 배치를 담당. 캘리브
+    모드에선 기즈모로 핸드아이 프레임을 옮겨 클라우드를 로봇팔과 정렬한다."""
+    import numpy as np
+    server = handles.get("_server")
+    store = handles.get("_stereo_store")
+    toggle = handles.get("pc_wrist_enable")
+    if server is None or store is None or toggle is None:
+        return
+
+    gizmos = handles.get("_wrist_gizmo", {})
+    frames = handles.get("_wrist_frame", {})
+    hs = handles.setdefault("_wrist_handles", {})
+    on = bool(toggle.value)
+    dmin = float(handles["pc_dmin"].value) if handles.get("pc_dmin") else 0.0
+    dmax = float(handles["pc_dmax"].value) if handles.get("pc_dmax") else 1e9
+    max_pts = int(handles["pc_max_k"].value) * 1000 if handles.get("pc_max_k") else 80000
+    psize = float(handles["pc_size"].value) if handles.get("pc_size") else 0.004
+
+    parts_status = []
+    for arm in ("left", "right"):
+        # 캘리브 모드: 기즈모 표시 + 로컬 pose를 핸드아이 프레임에 복사
+        giz = gizmos.get(arm)
+        frm = frames.get(arm)
+        calib = handles.get(f"pc_wrist_calib_{arm}")
+        calib_on = bool(getattr(calib, "value", False)) and on
+        if giz is not None:
+            giz.visible = calib_on
+            if calib_on and frm is not None:
+                frm.wxyz = giz.wxyz
+                frm.position = giz.position
+                cs = handles.get(f"pc_wrist_status_{arm}")
+                if cs is not None:
+                    p = np.array(giz.position)
+                    cs.value = f"xyz=({p[0]:.4f}, {p[1]:.4f}, {p[2]:.4f}) m"
+
+        h = hs.get(arm)
+        if not on:
+            if h is not None:
+                h.visible = False
+            continue
+        data = store.latest_wrist(arm)
+        if data is None:
+            parts_status.append(f"{arm}: 대기")
+            continue
+        xyz, rgb, age_ms = data
+        if xyz.shape[0] == 0:
+            if h is not None:
+                h.visible = False
+            parts_status.append(f"{arm}: 0 pts")
+            continue
+        z = xyz[:, 2]
+        m = (z >= dmin) & (z <= dmax)
+        xyz_f, rgb_f = xyz[m], rgb[m]
+        n_in = xyz_f.shape[0]
+        if n_in == 0:
+            if h is not None:
+                h.visible = False
+            parts_status.append(f"{arm}: 범위밖")
+            continue
+        if n_in > max_pts:
+            idx = np.random.default_rng(0).choice(n_in, max_pts, replace=False)
+            xyz_f, rgb_f = xyz_f[idx], rgb_f[idx]
+        hs[arm] = server.scene.add_point_cloud(
+            f"/stand/{arm}_tcp/wrist_cam/cloud",
+            points=xyz_f.astype(np.float32), colors=rgb_f.astype(np.uint8),
+            point_size=psize, point_shape="rounded")
+        parts_status.append(f"{arm}: {xyz_f.shape[0]} pts ({age_ms:.0f}ms)")
+
+    st = handles.get("pc_wrist_status")
+    if st is not None:
+        st.value = ("off" if not on else (", ".join(parts_status) if parts_status else "waiting…"))
+
+
 def update_gui(
     handles: dict[str, Any],
     safety: OperatorSafety,
@@ -3655,6 +3824,7 @@ def update_gui(
 ) -> None:
     _update_stereo_cloud(handles)  # 로봇 상태와 무관 — 항상 갱신
     _update_stereo_boxes(handles)  # 검출된 박스 렌더
+    _update_stereo_wrist(handles)  # 손목 raw 클라우드 오버레이
     disabled_states = safety.control_disabled_states()
     disabled_reasons = safety.control_disabled_reasons()
     for mode, button in handles.get("lifecycle_buttons", {}).items():

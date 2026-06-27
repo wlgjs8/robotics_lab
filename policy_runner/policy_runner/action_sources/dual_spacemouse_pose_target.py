@@ -199,6 +199,14 @@ class DualSpaceMousePoseTargetActionSource:
             return _SideResult(released=was_active)
 
         gripper_target = self._gripper_target_from_buttons(sample, state)
+        if self._debug and any(sample.buttons):
+            # Diagnostic: which raw button index each physical button reports, so
+            # gripper open/close mapping can be set correctly (VERBOSE=1 only).
+            print(
+                f"[SM-btn] {side} buttons={tuple(int(b) for b in sample.buttons)} "
+                f"(close_idx={self.gripper_close_button} open_idx={self.gripper_open_button})",
+                flush=True,
+            )
 
         if self.require_deadman:
             if not _deadman_active(sample, deadman_button):

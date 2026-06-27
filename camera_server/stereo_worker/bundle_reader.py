@@ -124,6 +124,8 @@ class BundleReader:
         arr = np.frombuffer(payload, dtype=np.uint8)
         if fmt in _IR:
             px = arr.reshape(height, stride)[:, :width]
+        elif fmt in ("z16", "mono16"):
+            px = np.frombuffer(payload, dtype=np.uint16).reshape(height, stride // 2)[:, :width]
         elif fmt in {"rgb8", "bgr8"}:
             px = arr.reshape(height, stride)[:, :width * 3].reshape(height, width, 3)
             if fmt == "bgr8":

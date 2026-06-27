@@ -37,15 +37,16 @@ small local-frame pose step onto that cursor and emits an absolute stand-frame
 HID failure emits `Hold` according to the current lease/hold policy.
 
 The `make run` SpaceMouse profile can also send gripper presets. Each
-SpaceMouse controls the gripper on the same arm: button `0` opens and button
-`1` closes by default. Tune the target percent values in YAML:
+SpaceMouse controls the gripper on the same arm: physical left button closes
+and physical right button opens. On the current HID mapping this is button `0`
+for close and button `14` for open. Tune the target percent values in YAML:
 
 ```yaml
 spacemouse_pose_target_dual:
   gripper_buttons:
     enable: true
-    open_button: 0
-    close_button: 1
+    close_button: 0
+    open_button: 14
     open_percent: 100.0
     close_percent: 10.0
 ```
@@ -68,7 +69,9 @@ read-only modes may use the command-rate fallback.
 For live OpenPI `real_policy`, keep `make run` running and start
 `tools/flow_infer_real_policy.sh` or `make flow-infer-real` from another
 terminal. The stack teleop_mux uses state port `50376`; the flow configs use
-`50378`, so `ACTION_SOURCE=none` is not part of the normal flow-infer path.
+`50378`, so `ACTION_SOURCE=none` is not part of the normal flow-infer path. The
+`make run` joint scope dashboard listens on the separate fanout port `50356` by
+default and must not consume the external flow-infer port.
 
 ## HDF5 Schema
 

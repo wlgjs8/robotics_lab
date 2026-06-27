@@ -302,9 +302,9 @@ safety:
 network:
   command_bind: "udp://127.0.0.1:50256"
   state_pub_endpoints:
-    - "udp://127.0.0.1:50356"
-    - "udp://127.0.0.1:50366"
-    - "udp://127.0.0.1:50376"
+    - "udp://127.0.0.1:50356"  # joint scope dashboard
+    - "udp://127.0.0.1:50366"  # viser GUI
+    - "udp://127.0.0.1:50376"  # make run teleop_mux policy_runner
     - "udp://127.0.0.1:50378"  # external flow-infer readback alongside make run
   state_pub_rate_hz: 500   # was 100; raised to see the 500 Hz servo command stream in PlotJuggler. Watch send_period_overrun / send_deadline_hit — revert to 100 if the control loop overruns.
   command_source_allowlist: ["127.0.0.1/32"]

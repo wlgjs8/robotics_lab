@@ -1332,14 +1332,16 @@ class GuiContractsTest(unittest.TestCase):
         self.assertTrue(store.latest_arm_init()["init_override_left"])
         self.assertFalse(store.latest_arm_init()["init_override_right"])
 
-    def test_arm_init_override_uses_policy_control_when_policy_runner_seen(self):
+    def test_arm_init_override_uses_policy_control_when_recording_active(self):
+        # policy_runner ACTIVELY controlling (recording in progress) -> route the
+        # InitMotion press to its arm_init latch so it coordinates with the rollout.
         _, client, safety = self.make_safety(
             sample_state(motion_state="Running"),
             init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
             init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
         )
         status_store = RecordingStatusStore()
-        status_store.update({"recording": False}, received_monotonic=time.monotonic())
+        status_store.update({"recording": True}, received_monotonic=time.monotonic())
         command_client = RecordingCommandFake()
         handles = {
             "recording_status_store": status_store,
@@ -1359,7 +1361,39 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("right_tcp_target_user_moved", scene)
         self.assertTrue(handles["arm_init_local_status"]["init_override_left"])
 
-    def test_arm_init_fallback_keeps_existing_both_button_and_requires_held_lease_for_one_arm(self):
+    def test_arm_init_override_routes_direct_when_policy_runner_idle(self):
+        # An idle-but-alive policy_runner (status fresh, NOT recording, no arm_init
+        # latch, not owning the lease) must NOT capture the InitMotion latch: a
+        # standalone GUI InitMotion goes through the direct one-shot path so the
+        # command lease is released afterward and later GUI Cartesian commands are
+        # not rejected with command_source_lease_conflict.
+        _, client, safety = self.make_safety(
+            sample_state(motion_state="ArmedHold"),
+            init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
+            init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
+        )
+        status_store = RecordingStatusStore()
+        status_store.update({"recording": False}, received_monotonic=time.monotonic())
+        command_client = RecordingCommandFake()
+        handles = {
+            "recording_status_store": status_store,
+            "recording_cmd_client": command_client,
+            "arm_init_status": RecordingText(""),
+            "_state_stale": False,
+        }
+        scene = {"left_tcp_target_user_moved": True, "right_tcp_target_user_moved": True}
+
+        ok, message = _send_arm_init_override(safety, scene, handles, "both")
+
+        self.assertTrue(ok, message)
+        # Direct GUI one-shot InitMotion, NOT the policy_runner arm_init latch.
+        self.assertEqual(command_client.arm_init_calls, [])
+        self.assertEqual(client.sent_packets[-1]["mode"], "JointTarget")
+
+    def test_arm_init_fallback_one_arm_works_without_held_lease(self):
+        # Per-arm InitMotion fallback (policy_runner not actively controlling) sends
+        # WITHOUT an explicitly held lease: command_client.send auto-brackets the
+        # Hold-top packet with AcquireLease/ReleaseLease, same as the dual path.
         _, client, safety = self.make_safety(
             sample_state(motion_state="ArmedHold"),
             init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
@@ -1374,11 +1408,8 @@ class GuiContractsTest(unittest.TestCase):
         self.assertNotIn("left_tcp_target_user_moved", scene)
         self.assertNotIn("right_tcp_target_user_moved", scene)
 
-        ok, message = _send_arm_init_override(safety, {}, handles, "left")
-        self.assertFalse(ok)
-        self.assertIn("Take control", message)
-
-        client.hold_lease = True
+        # One-arm fallback now succeeds without hold_lease ("Take control") — no
+        # longer a silent no-op.
         ok, message = _send_arm_init_override(safety, {}, handles, "left")
         self.assertTrue(ok, message)
         packet = client.sent_packets[-1]
@@ -1386,6 +1417,16 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(packet["left"]["mode"], "JointTarget")
         self.assertEqual(packet["left"]["joint_target_profile"], "init_motion")
         self.assertEqual(packet["right"]["mode"], "Hold")
+
+        # ...and still works when the lease is explicitly held.
+        client.hold_lease = True
+        ok, message = _send_arm_init_override(safety, {}, handles, "right")
+        self.assertTrue(ok, message)
+        packet = client.sent_packets[-1]
+        self.assertEqual(packet["mode"], "Hold")
+        self.assertEqual(packet["right"]["mode"], "JointTarget")
+        self.assertEqual(packet["right"]["joint_target_profile"], "init_motion")
+        self.assertEqual(packet["left"]["mode"], "Hold")
 
     def test_arm_init_status_panel_updates_text_and_button_colors(self):
         handles = {

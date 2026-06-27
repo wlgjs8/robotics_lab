@@ -1,6 +1,5 @@
-# D435f head 단독: RGB + IR-left + IR-right (raw depth 미사용).
-# IR 스테레오 페어 -> Fast-FoundationStereo로 disparity 추론 -> RGB매핑 pointcloud.
-# 848x480@30: USB 대역폭 여유 + 모델 권장(width<1000). USB3에서 1280x720도 가능.
+# D435 head: RGB(1280x720) + IR-left + IR-right(640x480). USB3.
+# IR 640x480 = TRT 엔진(480x640) + d435_ir_640x480_K.txt 와 일치. color는 RGB 매핑용.
 server:
   name: camera_server
   mode: capture_only
@@ -28,32 +27,32 @@ sync:
 
 cameras:
   head:
-    serial: "313522072863"   # D435f
+    serial: "313522072863"
     required: true
     streams:
       color:
         enabled: true
-        width: 848
-        height: 480
-        fps: 15
+        width: 1280
+        height: 720
+        fps: 30
         format: rgb8
       depth:
         enabled: false
-        width: 848
+        width: 640
         height: 480
-        fps: 15
+        fps: 30
         format: z16
-      ir_left:               # infrared index 1
+      ir_left:
         enabled: true
-        width: 848
+        width: 640
         height: 480
-        fps: 15
+        fps: 30
         format: y8
-      ir_right:              # infrared index 2
+      ir_right:
         enabled: true
-        width: 848
+        width: 640
         height: 480
-        fps: 15
+        fps: 30
         format: y8
 
 recording:

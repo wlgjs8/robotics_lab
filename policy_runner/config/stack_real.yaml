@@ -63,8 +63,11 @@ command_rate_hz: 500
 spacemouse_pose_target_dual:
   max_linear_step_m: 0.001
   max_angular_step_rad: 0.01
-  max_target_lead_m: 0.05
-  max_target_lead_rad: 0.35
+  # Target-lead: how far the commanded target may run AHEAD of the current pose.
+  # On release the arm finishes catching up to this lead ("keeps going a bit").
+  # Kept small so stops are crisp (was 0.05 m / 0.35 rad ~= 20deg -> ~5cm/20deg coast).
+  max_target_lead_m: 0.015
+  max_target_lead_rad: 0.08
   deadband: 0.08
   response_curve_gamma: 3.0
   # Operator axis remap (applied to raw cap axes before deadband/gamma).
@@ -76,8 +79,10 @@ spacemouse_pose_target_dual:
   # send gripper presets through the same command stream.
   gripper_buttons:
     enable: true
-    open_button: 0
-    close_button: 1
+    # Current HID mapping: physical left button -> CLOSE (index 0),
+    # physical right button -> OPEN (index 14).
+    close_button: 0
+    open_button: 14
     open_percent: 100.0
     close_percent: 10.0
   # IDLE->ACTIVE needs activation_deadband

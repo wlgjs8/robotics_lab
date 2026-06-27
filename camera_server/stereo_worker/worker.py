@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 import argparse
+import json
 import os
 import time
 import numpy as np
@@ -20,6 +21,59 @@ CLOUD_TOPIC = os.environ.get("CLOUD_TOPIC", "stereo.cloud")
 STEREO_CAMERA = os.environ.get("STEREO_CAMERA", "head")
 STEREO_INTRINSICS = os.environ.get("STEREO_INTRINSICS",
                                    "/app/config/d435_ir_640x480_K.txt")
+COLOR_CALIB_PATH = os.environ.get("STEREO_COLOR_CALIB", "/app/config/d435_color_calib.json")
+
+
+def load_color_calib(path):
+    """color intrinsics + IR-left->color 외부보정 (RGB 매핑용)."""
+    try:
+        with open(path) as f:
+            c = json.load(f)
+        c["R"] = np.array(c["R_ir_to_color"], float)
+        c["t"] = np.array(c["t_ir_to_color"], float)
+        return c
+    except Exception:
+        return None
+
+
+# 손목 D405 (640x480) intrinsics + depth scale (pc_infer DEFAULT_INTRINSICS). raw cloud용.
+WRIST_FX, WRIST_FY, WRIST_CX, WRIST_CY = 393.3166, 392.1858, 319.0753, 229.5226
+WRIST_DSCALE = 1e-4
+
+
+def wrist_cloud(depth, color, zmin=0.05, zmax=1.2, stride=2):
+    """D405 depth(z16) -> raw 3D점(카메라 프레임) + RGB(같은 픽셀 샘플, 근사). 모델 X."""
+    H, W = depth.shape
+    z = depth[::stride, ::stride].astype(np.float32) * WRIST_DSCALE
+    col = color[::stride, ::stride]
+    uu, vv = np.meshgrid(np.arange(0, W, stride), np.arange(0, H, stride))
+    valid = (z > zmin) & (z < zmax)
+    X = (uu.astype(np.float32) - WRIST_CX) / WRIST_FX * z
+    Y = (vv.astype(np.float32) - WRIST_CY) / WRIST_FY * z
+    P = np.stack([X, Y, z], -1)[valid]
+    return P.astype(np.float32), col[valid].astype(np.uint8)
+
+
+def color_cloud(disp, color_img, K, baseline, calib, dmin=0.1, dmax=3.0):
+    """disp(IR-left) -> 3D점(IR 프레임) + 각 점을 color 카메라에 재투영해 RGB 샘플링."""
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    H, W = disp.shape
+    uu, vv = np.meshgrid(np.arange(W), np.arange(H))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z = fx * baseline / disp
+    valid = np.isfinite(z) & (z >= dmin) & (z <= dmax)
+    X = (uu - cx) / fx * z; Y = (vv - cy) / fy * z
+    P = np.stack([X, Y, z], -1)                       # IR-left 프레임
+    Pc = P @ calib["R"].T + calib["t"]                # color 프레임
+    Zc = Pc[..., 2]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        uc = calib["color_fx"] * Pc[..., 0] / Zc + calib["color_cx"]
+        vc = calib["color_fy"] * Pc[..., 1] / Zc + calib["color_cy"]
+    Hc, Wc = color_img.shape[:2]
+    inb = valid & (Zc > 0) & (uc >= 0) & (uc < Wc - 1) & (vc >= 0) & (vc < Hc - 1)
+    ui = np.clip(uc, 0, Wc - 1).astype(np.int32)
+    vi = np.clip(vc, 0, Hc - 1).astype(np.int32)
+    return P[inb].astype(np.float32), color_img[vi[inb], ui[inb]].astype(np.uint8)
 # TRT fp16 엔진이 있으면 우선 사용(~14ms), 없으면 PyTorch(.pth) 폴백.
 STEREO_ENGINE = os.environ.get("STEREO_ENGINE",
                                "/app/stereo_worker/engines/fast_foundationstereo.engine")
@@ -58,8 +112,15 @@ class CloudPublisher:
             {"T": [float(v) for v in b["T"].flatten()],
              "dims": [float(v) for v in b["dims"]],
              "footprint": [float(v) for v in b["footprint"]],
-             "n": int(b["n"])} for b in boxes]}
+             "n": int(b["n"]), "label": b.get("label")} for b in boxes]}
         self._sock.send_multipart([b"stereo.boxes", self._json.dumps(payload).encode()])
+
+    def publish_wrist(self, arm, seq, xyz, rgb):
+        """손목 raw 클라우드(카메라 프레임). rb_gui가 TCP×hand-eye로 배치."""
+        header = self._json.dumps({"arm": arm, "seq": int(seq), "n": int(xyz.shape[0])}).encode()
+        self._sock.send_multipart([b"stereo.wrist", header,
+                                   np.ascontiguousarray(xyz, np.float32).tobytes(),
+                                   np.ascontiguousarray(rgb, np.uint8).tobytes()])
 
 
 def cmd_run(args):
@@ -80,10 +141,20 @@ def cmd_run(args):
         model = FoundationStereoModel(FFS_DIR, WEIGHTS, valid_iters=args.valid_iters)
         print(f"[run] backend=PyTorch  weights={WEIGHTS}", flush=True)
     print("[run] model loaded", flush=True)
+    calib = load_color_calib(COLOR_CALIB_PATH)
+    print(f"[run] color calib: {'loaded ('+COLOR_CALIB_PATH+')' if calib else 'none -> IR 명암'}", flush=True)
 
     cam = STEREO_CAMERA
     k_irl, k_irr, k_col = f"{cam}.ir_left", f"{cam}.ir_right", f"{cam}.color"
     want = {k_irl, k_irr, k_col}
+    # 손목 raw 클라우드 (모델 X). 저rate로 가볍게 publish (head 파이프라인 영향 최소).
+    wrist_on = os.environ.get("STEREO_WRIST", "1") != "0"
+    wrist_every = int(os.environ.get("STEREO_WRIST_EVERY", "3"))
+    wrist_cams = [("left", "left_realsense.color", "left_realsense.depth"),
+                  ("right", "right_realsense.color", "right_realsense.depth")]
+    if wrist_on:
+        for _a, kc, kd in wrist_cams:
+            want.add(kc); want.add(kd)
     reader = BundleReader(endpoint=BUNDLE_ENDPOINT)
     pub = CloudPublisher(CLOUD_PUB_BIND, CLOUD_TOPIC)
 
@@ -108,24 +179,40 @@ def cmd_run(args):
         if irl is None or irr is None:
             continue
         disp = model.infer_disparity(irl.pixels, irr.pixels)
-        # 색: color 스트림이 IR과 정합되지 않으므로(서로 다른 센서/FOV) 현재는 IR-left 명암으로 색칠.
-        # 정확한 RGB 매핑은 color->IR 외부보정 + 재투영 필요(USB3에서 color 활성 후 TODO).
-        if k_col in frames and not warned_rgb:
-            print("[run] color 수신됨 — RGB->IR 정합 미구현, 현재는 IR 명암 사용", flush=True)
-            warned_rgb = True
-        xyz, rgb = model.disparity_to_cloud(disp, irl.pixels, K, baseline, zfar=args.zfar)
+        col = frames.get(k_col)
+        if calib is not None and col is not None:
+            xyz, rgb = color_cloud(disp, col.pixels, K, baseline, calib, dmin=0.1, dmax=args.zfar)
+            if not warned_rgb:
+                print("[run] RGB 매핑 ON (color->IR 재투영)", flush=True); warned_rgb = True
+        else:
+            xyz, rgb = model.disparity_to_cloud(disp, irl.pixels, K, baseline, zfar=args.zfar)
+            if not warned_rgb:
+                print(f"[run] IR 명암 사용 (calib={calib is not None}, color={col is not None})", flush=True)
+                warned_rgb = True
         if xyz.shape[0] == 0:
             continue  # 유효 점 없음(예: fp16 NaN/범위밖) -> publish/통계 건너뜀
         pub.publish(seq, time.time_ns(), xyz, rgb)
         if detector is not None:
             try:
-                raw = detector.detect(disp)
+                raw = detector.detect(disp, color_img=(col.pixels if col is not None else None))
                 boxes = tracker.update(raw) if tracker is not None else raw
                 n_boxes = len(boxes)
                 pub.publish_boxes(seq, boxes)
             except Exception as e:  # noqa: BLE001
                 if seq % 60 == 0:
                     print(f"[run] detect err: {e}", flush=True)
+        # 손목 raw 클라우드 (저rate, 가볍게)
+        if wrist_on and seq % max(1, wrist_every) == 0:
+            for arm, kc, kd in wrist_cams:
+                c = frames.get(kc); d = frames.get(kd)
+                if c is None or d is None:
+                    continue
+                try:
+                    wp, wc = wrist_cloud(d.pixels, c.pixels)
+                    if wp.shape[0] > 0:
+                        pub.publish_wrist(arm, seq, wp, wc)
+                except Exception:
+                    pass
         seq += 1
         fps_n += 1
         if time.time() - fps_t > 1.0:

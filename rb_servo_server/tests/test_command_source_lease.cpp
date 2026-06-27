@@ -272,6 +272,31 @@ bool testLeaseAdminUpdatesBufferReadbackWithoutDisplacingMotion() {
     RB_CHECK(out.lease.active);
     RB_CHECK(out.lease.source_id == "policy_runner");
     RB_CHECK(out.lease.session_id == "policy-session");
+
+    // Regression (teleop flapping): a streaming motion command that CARRIED the
+    // lease and then expired must still publish the active lease. latestOrHold
+    // falls back to a Hold but carries the command's lease onto it; otherwise the
+    // owner (policy_runner) sees "no active command-source lease" in the gaps
+    // between sends and flaps acquire/reacquire, stuttering teleop.
+    rb_servo::CommandBuffer streaming;
+    rb_servo::DualArmCommand motion_with_lease;
+    motion_with_lease.seq = 11;
+    motion_with_lease.host_time_ns = now > 10'000'000'000ull ? now - 10'000'000'000ull : 1;  // ~10s ago (expired)
+    motion_with_lease.left.mode = rb_servo::ControlMode::TcpPoseTarget;
+    motion_with_lease.right.mode = rb_servo::ControlMode::TcpPoseTarget;
+    motion_with_lease.left.has_tcp_target = true;
+    motion_with_lease.right.has_tcp_target = true;
+    motion_with_lease.left.tcp_target_stand = {0.4, 0.0, 0.3, 0.0, 0.0, 0.0};
+    motion_with_lease.right.tcp_target_stand = {0.4, 0.0, 0.3, 0.0, 0.0, 0.0};
+    motion_with_lease.left.timeout_sec = 0.3;
+    motion_with_lease.right.timeout_sec = 0.3;
+    motion_with_lease.lease = lease;  // command rode the lease before going stale
+    streaming.setCommand(motion_with_lease);
+    out = streaming.latestOrHold(now);
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::Hold);  // expired motion not revived
+    RB_CHECK(out.lease.active);                              // ...but the lease stays visible
+    RB_CHECK(out.lease.source_id == "policy_runner");
+    RB_CHECK(out.lease.session_id == "policy-session");
     return true;
 }
 

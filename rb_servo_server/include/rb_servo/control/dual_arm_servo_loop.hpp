@@ -295,11 +295,6 @@ private:
     void setMotionState(ServerMotionState state);
     ServoTarget currentFaultHoldTarget() const;
     JointArray chooseSafeHoldTarget(const RobotState& state, const JointArray& previous_sent) const;
-    JointArray chooseStreamingHoldTarget(
-        ArmId arm_id,
-        const RobotState& state,
-        const JointArray& previous_sent
-    ) const;
     double computeFilterDtSec(uint64_t actual_period_ns, uint64_t nominal_period_ns) const;
 
 private:

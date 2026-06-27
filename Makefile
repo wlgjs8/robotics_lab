@@ -4,7 +4,7 @@ PROJECT ?= robotics_lab
 POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 
-.PHONY: run flow-infer-real build vm-up vm-down vm-status policy-hdf5-audit-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
+.PHONY: run flow-infer-real build vm-up vm-down vm-status policy-hdf5-audit-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up cam-up cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
 
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
@@ -87,6 +87,29 @@ CAMERA_CONFIG ?= /app/config/dual_realsense_d405.yaml
 
 camera-real-up:
 	CAMERA_CONFIG=$(CAMERA_CONFIG) $(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile real_camera up --build camera_server
+
+# --- D435 stereo pointcloud (camera_server C++ capture + stereo_worker, one container) ---
+# `make run` 으로 로봇 스택을 띄운 뒤, 별도로 `make cam-up` 한 줄이면 캡처+스테레오 워커가
+# 함께 떠서 viser(고급→Pointcloud)에 RGB 클라우드가 들어온다. 런처(run_all.sh)가 둘 다 기동.
+STEREO_CAM_CONFIG ?= /app/config/head_wrists.yaml
+STEREO_CAM_JSON ?= /app/config/__no_advanced__.json
+
+cam-up:
+	CAMERA_CONFIG=$(STEREO_CAM_CONFIG) CAMERA_REALSENSE_JSON=$(STEREO_CAM_JSON) \
+		$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile real_camera up -d camera_server
+	@echo "camera_server (capture + stereo_worker) up. 상태: make cam-status / 로그: docker logs -f camera_server"
+
+cam-status:
+	@docker ps --filter name=camera_server --format "container: {{.Status}}" || true
+	@docker logs --tail 1 camera_server 2>&1 | grep -E "status=" || echo "capture: (no status yet)"
+	@docker logs camera_server 2>&1 | grep -E "\[run\] fps=" | tail -1 || echo "worker: (no fps yet)"
+	@(ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q 5601 \
+		&& echo "stereo cloud: tcp 5601 LISTEN (viser 연동 가능)" \
+		|| echo "stereo cloud: 5601 down (worker 미발행)"
+
+cam-down:
+	-docker stop camera_server
+	-docker rm camera_server
 
 # --- rbpodo pgmode-simulation (native; dual Virtual ControlBox VMs) ---
 # One-command bring-up of rb_servo_server + rb_gui (viser) on this WSL box.

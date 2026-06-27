@@ -85,7 +85,16 @@ DualArmCommand CommandBuffer::latestOrHold(uint64_t now_ns) {
 
     DualArmCommand cmd = *latest_command_;
     if (!isUsableCommand(cmd, now_ns)) {
-        return makeHold(now_ns);
+        // The streaming command went stale, but the command-source lease has its
+        // own (longer) timeout. Carry the lease onto the fallback Hold so the
+        // published snapshot keeps reporting the active lease; an empty-lease Hold
+        // makes the owner (e.g. policy_runner) see "no active command-source
+        // lease" in the gaps between teleop sends and flap acquire/reacquire,
+        // which stutters teleop. The state publisher still recomputes lease expiry
+        // against now, so a genuinely expired lease is still reported inactive.
+        DualArmCommand hold = makeHold(now_ns);
+        hold.lease = cmd.lease;
+        return hold;
     }
     return cmd;
 }

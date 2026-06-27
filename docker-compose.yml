@@ -60,7 +60,11 @@ services:
       CAMERA_SERVER_REALSENSE_JSON: ${CAMERA_REALSENSE_JSON:-/app/config/realsense_d405_advanced.json}
       FFS_DIR: /app/Fast-FoundationStereo
       STEREO_WEIGHTS: /app/Fast-FoundationStereo/weights/23-36-37/model_best_bp2_serialize.pth
-    command: ["--config", "${CAMERA_CONFIG:-/app/config/triple_realsense.yaml}"]
+      # 캡처+워커 동시 기동 런처가 사용. 0이면 캡처만(워커 수동).
+      STEREO_WORKER_AUTOSTART: ${STEREO_WORKER_AUTOSTART:-1}
+    # 한 컨테이너에서 camera_server(C++) + stereo_worker 동시 기동 (docker compose up/start 한 번에 둘 다)
+    entrypoint: ["bash", "/app/stereo_worker/run_all.sh"]
+    command: []
     labels:
       rb-servo.role: "real-camera"
       rb-servo.hardware: "realsense+gpu"

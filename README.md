@@ -314,10 +314,12 @@ OPENPI_REMOTE_SKIP_WARMUP=1 RB_ALLOW_REAL_GRIPPER=1 \
 
 기본 wrapper는
 `policy_runner/config/flow_real_realsense.yaml`의 외부 flow-infer state 포트
-`50378`을 사용합니다(`make run` teleop_mux는 `50376`). checkpoint/config/python은
-각각 `FLOW_INFER_CHECKPOINT`, `FLOW_INFER_CONFIG`, `FLOW_INFER_PYTHON`으로
-바꿀 수 있고, `OPENPI_REMOTE_SKIP_WARMUP`, `RB_ALLOW_REAL_GRIPPER`, `DISPLAY` 등
-호출 환경은 그대로 상속됩니다.
+`50378`을 사용합니다(`make run` teleop_mux는 `50376`). `make run`의 joint
+scope dashboard는 별도 fanout 포트 `50356`을 기본으로 수신하므로, dashboard가 켜진
+상태에서도 기존 flow-infer 명령이 `50378`에 bind할 수 있습니다.
+checkpoint/config/python은 각각 `FLOW_INFER_CHECKPOINT`, `FLOW_INFER_CONFIG`,
+`FLOW_INFER_PYTHON`으로 바꿀 수 있고, `OPENPI_REMOTE_SKIP_WARMUP`,
+`RB_ALLOW_REAL_GRIPPER`, `DISPLAY` 등 호출 환경은 그대로 상속됩니다.
 
 HDF5 policy episodes should be audited before `flow-train`:
 
