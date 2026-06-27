@@ -711,7 +711,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       return {w, h, dpr};
     }
-    function drawPlot(item) {
+    function drawPlot(item, range) {
       const canvas = item.canvas;
       const {w, h, dpr} = resizeCanvas(canvas);
       const ctx = canvas.getContext("2d");
@@ -721,16 +721,24 @@ INDEX_HTML = r"""<!doctype html>
       ctx.fillStyle = "#0d1117";
       ctx.fillRect(0, 0, w, h);
       const traces = visibleTraces().map(name => ({name, ...metricSeries(item.arm, item.metric, name)}));
-      let ymin = Infinity, ymax = -Infinity;
-      for (const tr of traces) {
-        for (const v of tr.y) {
-          if (Number.isFinite(v)) { ymin = Math.min(ymin, v); ymax = Math.max(ymax, v); }
+      // Shared per-metric y-range: both arms use the SAME scale (synced to the
+      // larger arm) so left/right are directly comparable for tuning. Falls back
+      // to this chart's own extent if no shared range was supplied.
+      let ymin, ymax;
+      if (range) {
+        ymin = range.ymin; ymax = range.ymax;
+      } else {
+        ymin = Infinity; ymax = -Infinity;
+        for (const tr of traces) {
+          for (const v of tr.y) {
+            if (Number.isFinite(v)) { ymin = Math.min(ymin, v); ymax = Math.max(ymax, v); }
+          }
         }
+        if (!Number.isFinite(ymin) || !Number.isFinite(ymax)) { ymin = -1; ymax = 1; }
+        if (Math.abs(ymax - ymin) < 1e-9) { ymin -= 1; ymax += 1; }
+        const margin = (ymax - ymin) * 0.08;
+        ymin -= margin; ymax += margin;
       }
-      if (!Number.isFinite(ymin) || !Number.isFinite(ymax)) { ymin = -1; ymax = 1; }
-      if (Math.abs(ymax - ymin) < 1e-9) { ymin -= 1; ymax += 1; }
-      const margin = (ymax - ymin) * 0.08;
-      ymin -= margin; ymax += margin;
       const xmin = -windowSec(), xmax = 0;
       const sx = x => x0 + (x - xmin) / (xmax - xmin) * (x1 - x0);
       const sy = y => y1 - (y - ymin) / (ymax - ymin) * (y1 - y0);
@@ -783,9 +791,31 @@ INDEX_HTML = r"""<!doctype html>
         lx += 56 * dpr;
       }
     }
+    function metricExtent(metricKey) {
+      // Union y-extent across BOTH arms for one metric, so both arms share a
+      // single auto-scale (the larger arm sets the range) instead of each arm
+      // scaling independently. Per-metric (position/velocity/accel/jerk keep
+      // their own units), synced left<->right.
+      let ymin = Infinity, ymax = -Infinity;
+      const names = visibleTraces();
+      for (const arm of ARMS) {
+        for (const name of names) {
+          const {y} = metricSeries(arm, metricKey, name);
+          for (const v of y) {
+            if (Number.isFinite(v)) { ymin = Math.min(ymin, v); ymax = Math.max(ymax, v); }
+          }
+        }
+      }
+      if (!Number.isFinite(ymin) || !Number.isFinite(ymax)) { ymin = -1; ymax = 1; }
+      if (Math.abs(ymax - ymin) < 1e-9) { ymin -= 1; ymax += 1; }
+      const margin = (ymax - ymin) * 0.08;
+      return {ymin: ymin - margin, ymax: ymax + margin};
+    }
     function renderAll() {
       renderQueued = false;
-      for (const item of plots) drawPlot(item);
+      const ranges = {};
+      for (const metric of METRICS) ranges[metric.key] = metricExtent(metric.key);
+      for (const item of plots) drawPlot(item, ranges[item.metric]);
       updateStatus();
     }
     function scheduleRender() {
