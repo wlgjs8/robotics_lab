@@ -17,6 +17,75 @@ from policy_runner.servo_command_client import CommandIntent
 from policy_runner.spacemouse import HidSpaceMouseReader, SpaceMouseReader, SpaceMouseSample
 
 
+def _resolve_spacemouse_log_path() -> str | None:
+    """Enabled by POLICY_RUNNER_SPACEMOUSE_TELEOP_LOG or the unified
+    POLICY_RUNNER_TELEOP_CAPTURE (1/on/auto/true/yes -> new KST file in logs/)."""
+    val = (
+        os.environ.get("POLICY_RUNNER_SPACEMOUSE_TELEOP_LOG")
+        or os.environ.get("POLICY_RUNNER_TELEOP_CAPTURE")
+    )
+    if not val:
+        return None
+    if val.lower() in ("1", "on", "auto", "true", "yes"):
+        from datetime import datetime
+        from pathlib import Path
+
+        logs_dir = Path(__file__).resolve().parents[3] / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        return str(logs_dir / f"teleop_spacemouse_{datetime.now().strftime('%Y%m%d_%H%M%S')}_KST.log")
+    return val
+
+
+class _SpaceMouseStepLogger:
+    """Per-step SpaceMouse diagnostic (raw stick vs applied signed delta, in stand
+    frame), keyed by CLOCK_MONOTONIC ns so it aligns with the servo_log. Fail-safe:
+    log() never raises."""
+
+    def __init__(self, path: str):
+        from datetime import datetime
+
+        self._fh = open(path, "w", buffering=1, encoding="utf-8")
+        self.path = path
+        self._fh.write(f"# dual_spacemouse per-step log  started={datetime.now().isoformat()}\n")
+        self._fh.write(
+            "# fields: mono_ns=<CLOCK_MONOTONIC ns == servo loop_start_time_ns>  side  "
+            "deadman=<0/1>  active=<0/1>  raw_stick=(tx,ty,tz,rx,ry,rz)  "
+            "app_delta_mm=(dx,dy,dz) app_delta_deg=(dr,dp,dy)  lead_mm=<|target-live|>\n"
+        )
+
+    def log(self, side, *, mono_ns, deadman, active, sample, delta, target, live) -> None:
+        try:
+            rs = (
+                "-" if sample is None
+                else f"({sample.tx:+.2f},{sample.ty:+.2f},{sample.tz:+.2f},"
+                     f"{sample.rx:+.2f},{sample.ry:+.2f},{sample.rz:+.2f})"
+            )
+            if delta is None:
+                ad_mm = ad_deg = "-"
+            else:
+                ad_mm = f"({delta[0] * 1000:+.1f},{delta[1] * 1000:+.1f},{delta[2] * 1000:+.1f})"
+                ad_deg = (
+                    f"({math.degrees(delta[3]):+.2f},{math.degrees(delta[4]):+.2f},"
+                    f"{math.degrees(delta[5]):+.2f})"
+                )
+            lead = "-"
+            if target is not None and live is not None:
+                lead = f"{1000 * math.sqrt(sum((target[i] - live[i]) ** 2 for i in range(3))):.1f}"
+            self._fh.write(
+                f"mono_ns={mono_ns}  side={side[0].upper()}  deadman={int(bool(deadman))}  "
+                f"active={int(bool(active))}  raw_stick={rs}  "
+                f"app_delta_mm={ad_mm} app_delta_deg={ad_deg}  lead_mm={lead}\n"
+            )
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        try:
+            self._fh.close()
+        except Exception:
+            pass
+
+
 class DualSpaceMousePoseTargetActionSource:
     requirements = CARTESIAN_ACTION_REQUIREMENTS
 
@@ -113,6 +182,11 @@ class DualSpaceMousePoseTargetActionSource:
         self.failure_message: str | None = None
         self._debug = os.environ.get("POLICY_RUNNER_TELEOP_DEBUG", "") == "1"
         self._debug_last_print = 0.0
+        try:
+            _p = _resolve_spacemouse_log_path()
+            self._step_log = _SpaceMouseStepLogger(_p) if _p else None
+        except Exception:
+            self._step_log = None
 
     @property
     def engaged(self) -> bool:
@@ -123,6 +197,8 @@ class DualSpaceMousePoseTargetActionSource:
         self._right_state.reset_engagement()
 
     def close(self) -> None:
+        if getattr(self, "_step_log", None) is not None:
+            self._step_log.close()
         self.left_reader.close()
         self.right_reader.close()
 
@@ -269,6 +345,17 @@ class DualSpaceMousePoseTargetActionSource:
             return _SideResult(released=True, gripper_target=gripper_target)
         else:
             state.neutral_pose_sent = True
+        if self._step_log is not None:
+            self._step_log.log(
+                side,
+                mono_ns=int(now_monotonic * 1e9),
+                deadman=_deadman_active(sample, deadman_button) if self.require_deadman else True,
+                active=state.active,
+                sample=sample,
+                delta=delta,
+                target=state.target_pose,
+                live=live_pose,
+            )
         return _SideResult(pose=state.target_pose, gripper_target=gripper_target)
 
     def _gripper_target_from_buttons(

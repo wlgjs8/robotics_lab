@@ -42,6 +42,11 @@ docker compose --profile real_camera run --rm \
   `point_to_plane`. `yaw_se2`(기본)는 box up=stand z 고정 SE(2) 정합으로 부분관측/
   노이즈에 robust(scipy). `point_to_plane`은 opt-in 실험 경로이며 실패 시
   `point_to_point`로 fallback한다. 미인식 값은 `yaw_se2`로 정규화된다.
+- `STEREO_TEMPORAL_ICP` (기본 `1`) — **tracking-by-registration**. ICP를 매 프레임
+  minAreaRect가 아니라 **직전 포즈**(label별, `TEMPORAL_GATE_M`=0.10m 이내일 때)에서
+  init → 정지 박스의 프레임간 jitter를 ~30mm→~1mm로 줄인다(스테레오 노이즈를 매 프레임
+  처음부터 fit하지 않음). 박스가 게이트보다 멀리 점프하면 minAreaRect로 재획득. 재시작/
+  재획득 직후 ~수초 transient는 정상.
 - `STEREO_GRAY_OPEN_K` (기본 `3`) — 회색(colorless) 박스 de-bridge OPEN 커널(px).
   회색은 색 신호가 없어 테이블/잡음과 붙어 oversize 되기 쉬운데, CLOSE 없이 OPEN으로
   연결부를 끊어 분리한다. 클수록 강하게 끊지만 희박/가림 회색 박스를 침식한다

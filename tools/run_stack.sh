@@ -308,6 +308,7 @@ case "$ACTION_SOURCE" in
     # 기본 auto; 경로를 직접 지정하거나 빈 값으로 비활성 가능 (POLICY_RUNNER_UMI_TELEOP_LOG=...).
     PYTHONPATH=policy_runner \
       POLICY_RUNNER_UMI_TELEOP_LOG="${POLICY_RUNNER_UMI_TELEOP_LOG-auto}" \
+      POLICY_RUNNER_TELEOP_CAPTURE="${POLICY_RUNNER_TELEOP_CAPTURE-auto}" \
       python3 -u -m policy_runner --config "$POLICY_CFG" --action-source "$ACTION_SOURCE" $VERBOSE_FLAG \
       2>&1 | tee "$LOG_DIR/policy.log"
     ;;

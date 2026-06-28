@@ -159,6 +159,7 @@ class BoxDetector:
     # 되지만, OPEN으로 얇은 연결부를 한 번 더 끊는다. 클수록 강하게 끊지만 희박/가림
     # 회색 박스를 침식한다(3≈거의 보존, 5≈치수 깔끔하나 ~20% 침식, 7≈과침식). env로 튜닝.
     GRAY_DEBRIDGE_OPEN_K = 3
+    TEMPORAL_GATE_M = 0.10          # 직전 포즈를 ICP init으로 재사용할 최대 거리(이내=추적, 초과=재획득)
 
     def __init__(self, K, baseline, use_icp=True, icp_method=None):
         self.fx, self.fy = K[0, 0], K[1, 1]
@@ -181,6 +182,9 @@ class BoxDetector:
         self._roi_x, self._roi_y, self._roi_z = _load_roi(
             GUI_SETTINGS_PATH, (self.ROI_X, self.ROI_Y, self.ROI_Z))
         self._z_cap = _load_z_cap(GUI_SETTINGS_PATH)   # stand-Z 점 상한(None=off)
+        self._temporal_icp = os.environ.get("STEREO_TEMPORAL_ICP", "1") != "0"
+        self._prev_pose = {}                           # label -> 직전 ICP 포즈(temporal init)
+        self._last_plane = None                        # 직전 양호 테이블 평면(가림 시 fallback)
         self._calib = _load_color_calib(COLOR_CALIB_PATH)
         self._cfg_t = 0.0
         self._rng = np.random.default_rng(0)
@@ -509,7 +513,16 @@ class BoxDetector:
         if T0 is None:
             return None
         if self.use_icp:
-            T, fit, rmse, method, sample_n = self._icp(scene, T0)
+            # tracking-by-registration: 직전 포즈가 minAreaRect init 근방이면 그걸 ICP init으로
+            # 써서, 매 프레임 노이즈 낀 init을 처음부터 fit하던 jitter를 없앤다(정지 박스 ~안정).
+            # 멀면(박스 점프/신규/가림복귀) minAreaRect로 재획득. label별로 트랙 유지.
+            init = T0
+            prev = self._prev_pose.get(label) if (self._temporal_icp and label is not None) else None
+            if prev is not None and float(np.linalg.norm(prev[:2, 3] - T0[:2, 3])) < self.TEMPORAL_GATE_M:
+                init = prev
+            T, fit, rmse, method, sample_n = self._icp(scene, init)
+            if self._temporal_icp and label is not None:
+                self._prev_pose[label] = T          # 다음 프레임 ICP init
         else:
             T, fit, rmse, method, sample_n = T0, 1.0, None, "disabled", 0
         c = T[:3, 3]
@@ -523,8 +536,10 @@ class BoxDetector:
                     icp_method=method, label=label)
 
     def detect(self, disp, color_img=None, extra_xyz=None, extra_rgb=None):
-        """head disp(+color) 박스 검출. extra_xyz/extra_rgb(stand 프레임 손목 클라우드)를
-        주면 head 점에 병합해 가림 시 커버리지를 늘린다(평면은 head 기준으로 추정)."""
+        """결합 클라우드(head disp + 손목 stand 점) 박스 검출. head·손목을 **먼저 합쳐서**
+        게이트/평면/band/색분할/검출을 결합 기준으로 수행 → 로봇이 head를 가려도 손목 점으로
+        검출이 이어진다. 손목 점(extra_xyz/rgb)은 worker가 T_stand_tcp×hand-eye로 stand에
+        놓아 전달하며, head와 같은 bundle 캡처라 시점이 동기화돼 있다."""
         if cv2 is None:
             return []
         now = time.time(); self._reload_cfg(now)
@@ -538,27 +553,30 @@ class BoxDetector:
         have_color = color_img is not None and self._calib is not None
         if have_color:
             rgb, cok = self._organized_rgb(Pc, color_img, self._calib)
-            m = valid & cok & inroi
+            mh = valid & cok & inroi
         else:
-            m = valid & inroi
-        if int(m.sum()) < 2000:
-            return []
-        P = Ps[m]
-        C = rgb[m] if have_color else None
-        plane = self._fit_floor_plane(P)            # 평면은 head(테이블 시야) 기준 고정
-        if plane is None:
-            return []
-        # 손목 클라우드 병합(이미 stand 프레임). 색 분할 위해 color 있을 때만.
-        if have_color and extra_xyz is not None and len(extra_xyz) > 0:
+            mh = valid & inroi
+        # --- head + 손목 결합 클라우드 (RoI/zcap 필터된 stand 점) ---
+        P = Ps[mh]
+        C = rgb[mh] if have_color else None
+        if extra_xyz is not None and len(extra_xyz) > 0:
             ex = np.asarray(extra_xyz, dtype=np.float64)
-            ec = np.asarray(extra_rgb, dtype=np.uint8)
             inb = ((ex[:, 0] > self._roi_x[0]) & (ex[:, 0] < self._roi_x[1]) &
                    (ex[:, 1] > self._roi_y[0]) & (ex[:, 1] < self._roi_y[1]))
             if self._z_cap is not None:
                 inb = inb & (ex[:, 2] < self._z_cap)
             if inb.any():
                 P = np.concatenate([P, ex[inb]], 0)
-                C = np.concatenate([C, ec[inb]], 0)
+                if have_color:
+                    C = np.concatenate([C, np.asarray(extra_rgb, dtype=np.uint8)[inb]], 0)
+        if int(len(P)) < 2000:                       # 결합 기준 게이트(head 단독 아님)
+            return []
+        plane = self._fit_floor_plane(P)
+        if plane is None:
+            plane = self._last_plane                 # 테이블 미관측(가림) 시 직전 양호 평면 재사용
+        if plane is None:
+            return []
+        self._last_plane = plane
         a, b, c = plane
         h = P[:, 2] - (a * P[:, 0] + b * P[:, 1] + c)
         band = (h > self.Z_LO) & (h < self.Z_HI)

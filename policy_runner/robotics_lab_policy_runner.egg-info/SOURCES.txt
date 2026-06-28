@@ -34,6 +34,7 @@ policy_runner/safety.py
 policy_runner/servo_command_client.py
 policy_runner/spacemouse.py
 policy_runner/tcp_target_pose_conditioner.py
+policy_runner/teleop_capture.py
 policy_runner/training.py
 policy_runner/umi_pipeline.py
 policy_runner/action_sources/__init__.py

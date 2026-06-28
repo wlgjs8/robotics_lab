@@ -15,6 +15,7 @@ from .action_sources import (
     UmiDualCartesianActionSource,
 )
 from .config import PolicyRunnerConfig, load_config
+from .teleop_capture import TeleopCaptureLogger
 from .dataset_manifest import parse_camera_names
 from .geometry import GeometryStatus, load_geometry_status
 from .robot_state_client import (
@@ -288,6 +289,7 @@ def run(
             command_client=command_client,
         )
         sleep_fn(period)
+    _capture = TeleopCaptureLogger()
     try:
         while True:
             snapshot = state_client.latest
@@ -339,6 +341,7 @@ def run(
                 else None
             )
             decision = safety_gate.evaluate(snapshot, intent, requirements, now)
+            _capture.log(now, source, intent, decision.allowed)
             if rollout_recorder is not None:
                 rollout_recorder.record_decision(decision)
                 rollout_recorder.record_source(source)
@@ -524,6 +527,7 @@ def run(
     except KeyboardInterrupt:
         return 0
     finally:
+        _capture.close()
         recording_supervisor.close()
         _close_if_supported(source)
         state_client.close()

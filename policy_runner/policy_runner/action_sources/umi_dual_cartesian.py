@@ -242,6 +242,12 @@ class _TeleopStepLogger:
         raw_ang = math.sqrt(sum(_angle_diff(raw_pose6[3 + i], base[3 + i]) ** 2 for i in range(3)))
         app_lin = math.sqrt(sum((applied_pose6[i] - base[i]) ** 2 for i in range(3)))
         app_ang = math.sqrt(sum(_angle_diff(applied_pose6[3 + i], base[3 + i]) ** 2 for i in range(3)))
+        # signed per-axis deltas (stand frame) for direction diagnosis (symptom: wrong direction)
+        mono_ns = int(now_monotonic * 1e9)
+        raw_sx, raw_sy, raw_sz = ((raw_pose6[i] - base[i]) * 1000.0 for i in range(3))
+        app_sx, app_sy, app_sz = ((applied_pose6[i] - base[i]) * 1000.0 for i in range(3))
+        raw_sr, raw_sp, raw_syaw = (math.degrees(_angle_diff(raw_pose6[3 + i], base[3 + i])) for i in range(3))
+        app_sr, app_sp, app_syaw = (math.degrees(_angle_diff(applied_pose6[3 + i], base[3 + i])) for i in range(3))
         # 클램프는 (deadband-applied - prev_target)를 축별로 자른다 → 그 기준으로 포화축 판정
         lin_axes = "xyz"
         ang_axes = "rpy"
@@ -273,6 +279,7 @@ class _TeleopStepLogger:
         st = "ENGAGE" if just_engaged else "ARMED"
         self._fh.write(
             f"{_kst_now().strftime('%H:%M:%S.%f')[:-3]}  side={side[0].upper()}  st={st}  "
+            f"mono_ns={mono_ns}  "
             f"age_ms={age:6.1f}  dt_ms={dt:6.1f}  "
             f"has={int(has_sample)}  fresh={int(fresh_packet)}  seq={sample_seq}  "
             f"profile={conditioner.get('profile', TCP_TARGET_PROFILE)}  "
@@ -297,6 +304,8 @@ class _TeleopStepLogger:
             f"lead_clamp_axes={conditioner.get('lead_clamp_axes', '')}  "
             f"schedule_reset={int(bool(conditioner.get('schedule_reset', False)))}  "
             f"stale_stop={int(bool(conditioner.get('stale_stop', False)))}  "
+            f"raw_sgn_mm=({raw_sx:+.1f},{raw_sy:+.1f},{raw_sz:+.1f}) raw_sgn_deg=({raw_sr:+.2f},{raw_sp:+.2f},{raw_syaw:+.2f})  "
+            f"app_sgn_mm=({app_sx:+.1f},{app_sy:+.1f},{app_sz:+.1f}) app_sgn_deg=({app_sr:+.2f},{app_sp:+.2f},{app_syaw:+.2f})  "
             f"clamp={clamp}  db={int(db_hit)}{tokens}\n"
         )
 

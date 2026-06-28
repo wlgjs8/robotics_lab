@@ -224,6 +224,71 @@ class TcpPoseMotionGateTest(unittest.TestCase):
         self.assertFalse(sl.is_settled("left"))     # 추정 불가 → 융합 보류
 
 
+class TemporalIcpTest(unittest.TestCase):
+    """tracking-by-registration: _detect_one이 label별 직전 포즈를 저장하고 ICP init으로
+    재사용(정지 박스 jitter 제거). yaw_se2 ICP는 scipy만 쓰므로 o3d 없이도 검증 가능."""
+
+    @unittest.skipIf(box_detect.cv2 is None, "opencv required")
+    def test_prev_pose_stored_and_reused(self):
+        try:
+            import scipy.spatial  # noqa: F401
+        except Exception:
+            self.skipTest("scipy required for yaw_se2 ICP")
+        det = _detector(use_icp=False)
+        det.use_icp = True                 # o3d 게이트 우회(yaw_se2=scipy)
+        det.icp_method = "yaw_se2"
+        det._temporal_icp = True
+        scene = _grid_rect(center=(0.10, -0.60), size=(0.38, 0.24), nx=80, ny=50)
+        cam = np.array([0.0, -1.4])
+        b1 = det._detect_one(scene, cam, (0.0, 0.0, 0.0), label="green", bridge=True)
+        self.assertIsNotNone(b1)
+        self.assertIn("green", det._prev_pose)            # 트랙 저장
+        b2 = det._detect_one(scene, cam, (0.0, 0.0, 0.0), label="green", bridge=True)
+        self.assertIsNotNone(b2)
+        # 같은 관측이면 2번째 출력이 저장된 prev와 일치
+        np.testing.assert_allclose(det._prev_pose["green"][:3, 3], b2["T"][:3, 3], atol=1e-6)
+
+    @unittest.skipIf(box_detect.cv2 is None, "opencv required")
+    def test_temporal_disabled_keeps_no_track(self):
+        det = _detector(use_icp=False)
+        det.use_icp = True
+        det.icp_method = "yaw_se2"
+        det._temporal_icp = False          # off → 트랙 저장 안 함
+        scene = _grid_rect(center=(0.10, -0.60), size=(0.38, 0.24), nx=80, ny=50)
+        try:
+            det._detect_one(scene, np.array([0.0, -1.4]), (0.0, 0.0, 0.0), label="green", bridge=True)
+        except Exception:
+            self.skipTest("scipy required")
+        self.assertEqual(det._prev_pose, {})
+
+
+class CombinedCloudOcclusionTest(unittest.TestCase):
+    """결합 클라우드: head disp가 비어도(완전 가림) 손목 점(extra_xyz)만으로 검출이 이어진다."""
+
+    @unittest.skipIf(box_detect.cv2 is None, "opencv required")
+    def test_detects_from_wrist_when_head_empty(self):
+        det = _detector(use_icp=False)
+        disp = np.zeros((60, 80), dtype=np.float32)        # 전부 무효 → head 점 0 (가림 모사)
+        rng = np.random.default_rng(0)
+        table = np.column_stack([rng.uniform(-0.3, 0.3, 4000),
+                                 rng.uniform(-0.9, -0.5, 4000),
+                                 np.zeros(4000)])          # 테이블(z=0, 평면 fit용)
+        box = _grid_rect(center=(0.10, -0.70), size=(0.38, 0.24), nx=80, ny=50)  # z=0.055 (band)
+        extra = np.concatenate([table, box], 0)
+        extra_rgb = np.zeros((len(extra), 3), np.uint8)
+        out = det.detect(disp, color_img=None, extra_xyz=extra, extra_rgb=extra_rgb)
+        self.assertGreaterEqual(len(out), 1)               # head 비어도 손목으로 검출됨
+        c = out[0]["T"][:3, 3]
+        self.assertLess(abs(float(c[0]) - 0.10), 0.08)
+        self.assertLess(abs(float(c[1]) - (-0.70)), 0.08)
+
+    @unittest.skipIf(box_detect.cv2 is None, "opencv required")
+    def test_empty_combined_returns_empty(self):
+        det = _detector(use_icp=False)
+        disp = np.zeros((60, 80), dtype=np.float32)
+        self.assertEqual(det.detect(disp, color_img=None, extra_xyz=None, extra_rgb=None), [])
+
+
 class OpenTrayModelTest(unittest.TestCase):
     """ICP 모델이 쉘(내벽+외벽+열린 윗면)인지 — 오픈 트레이를 비스듬히 볼 때 가까운-바깥/
     먼-안쪽 관측이 각자 올바른 면에 대응돼 벽두께 편향이 안 생기게."""
