@@ -7,10 +7,11 @@ This milestone adds a browser operator console without changing ownership of the
 The operator stack (`rb_gui` + `rb_servo_server`) runs
 natively, not in Docker:
 
-- `rb_gui`: Python viser web GUI, HTTP `8080`, UDP state listener `50110`.
-- `rb_servo_server`: C++ server, UDP command listener `50010`, using
-  `config/dual_mock.yaml` for hardware-free mock, or the rbpodo controller
-  `pgmode` simulation via `make run MODE=sim`.
+- `rb_gui`: Python viser web GUI, HTTP `8080`, UDP state listener from the
+  active server config.
+- `rb_servo_server`: C++ server, UDP command listener from the active server
+  config, using a site-local mock YAML for hardware-free mock or the rbpodo
+  controller `pgmode` simulation via `make run MODE=sim`.
 
 ## GUI stack
 
@@ -104,8 +105,9 @@ python3 tools/mock_gui_smoke.py
 
 ## Troubleshooting
 
-- **Disconnected/stale GUI:** confirm `rb_servo_server` is running and `state_pub_endpoint` targets the GUI listener (`127.0.0.1:50110` for host smoke).
-- **Hardware-free stack:** `rb_servo_server` in mock mode
-  (`config/dual_mock.yaml`) is hardware-free native wiring only. Controller-level
-  simulation uses the rbpodo `pgmode` simulation (`make run MODE=sim`).
+- **Disconnected/stale GUI:** confirm `rb_servo_server` is running and the
+  configured state publisher targets the GUI listener.
+- **Hardware-free stack:** `rb_servo_server` in mock mode uses an explicit
+  site-local mock config. Controller-level simulation uses the rbpodo `pgmode`
+  simulation (`make run MODE=sim`).
 - **Real guard:** the client-side lock is retired — motion buttons are now emittable in real mode, and the server gates (`RB_ALLOW_REAL_*` + config + SafetyFilter) decide whether anything moves. Operate real motion only under operator supervision with E-stop in hand.

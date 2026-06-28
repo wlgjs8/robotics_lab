@@ -25,7 +25,7 @@ upstream; never skip ahead.
 |---|---|---|---|
 | G1 | Clean configure + build | Source compiles; CMake graph is consistent | Yes |
 | G2 | `ctest` (unit) | `tests/test_safety_policy.cpp` invariants still hold | Yes |
-| G3 | Mock smoke (server only) | Server starts under `config/dual_mock.yaml` and exits cleanly | Yes |
+| G3 | Mock smoke (server only) | Server starts under an explicit site-local mock config and exits cleanly | Yes |
 | G4 | Mock smoke (server + driver) | Sine driver completes a short loop without faulting the server | Yes |
 | G5 | Real-mode config guard | Real motion stays fail-closed under `config/local/dual_real_readonly.yaml`: motion is off unless the site-local config explicitly enables it (`servo.send_servo_commands: true`, `cartesian_control.allow_in_real: true`). Real motion is config-driven, not env-gated (`RB_ALLOW_REAL_*` retired). | Yes |
 | G6 | Touched-area regression | A behavior changed in this iteration is covered by a new or strengthened assertion in `tests/` | Yes for any behavioral change |
@@ -69,7 +69,7 @@ A green `ctest` is necessary but **not** sufficient. See §4.
 ### G3 — mock server smoke
 
 ```bash
-timeout 1s ./build/rb_servo_server --config config/dual_mock.yaml
+timeout 1s ./build/rb_servo_server --config config/local/<mock-config>.yaml
 ```
 
 Pass criteria:
@@ -83,7 +83,7 @@ Pass criteria:
 In one shell:
 
 ```bash
-./build/rb_servo_server --config config/dual_mock.yaml
+./build/rb_servo_server --config config/local/<mock-config>.yaml
 ```
 
 In another:
@@ -148,7 +148,8 @@ Doc drift is treated as a real bug, not a stylistic issue.
 
 In this repo, "smoke" is intentionally narrow:
 
-- It runs the server binary against a **mock** backend (`config/dual_mock.yaml`).
+- It runs the server binary against a **mock** backend via an explicit
+  site-local mock config.
 - It never touches physical hardware. The local read-only real config is only
   exercised via the env-var guard check (G5) to prove the guard latches before
   any socket is opened.

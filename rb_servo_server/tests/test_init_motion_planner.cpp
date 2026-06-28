@@ -413,8 +413,34 @@ static bool run() {
                       << static_cast<int>(r.decision) << " (" << r.message << ")\n";
             RB_CHECK(r.decision != InitMotionLinearResult::Decision::Straight);
         }
+
+        // (4d) Regression: a FAR linear-move goal must IK to its TRUE joint config, not a
+        // per-tick branch-jump-rate-limited step. With max_solution_jump_deg + rate-limit
+        // enabled (as on real), planLinearMove used to call solveIk() for the goal, which
+        // clamped the goal to ~max_solution_jump_deg from the seed -> the arm reached a
+        // pseudo-goal a few degrees away and stopped partway. solveIkToTarget() now returns
+        // the full converged solution, so goal_vs_start_max_deg reflects the real distance.
+        {
+            KinematicsConfig rl_kcfg = testKinematicsConfig(ws);
+            rl_kcfg.ik.max_solution_jump_deg = 4.0;   // mirror stack_real.yaml
+            rl_kcfg.ik.branch_jump_rate_limit = true;
+            auto rl_kin = std::make_shared<PinocchioKinematics>(rl_kcfg);
+            // A goal 25 deg of base rotation away (single left arm; right holds). Its TRUE
+            // IK from `init` is ~25 deg, far above the 4 deg rate-limit clamp.
+            const JointArray far_l = {25.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+            const Pose6D far_pose_l = rl_kin->computeTcpStand(ArmId::Left, far_l, lm);
+            InitMotionPlanner planner_rl(cfg, makePlannerConfig(), qmin, qmax, rl_kin, lm, rm);
+            const InitMotionLinearResult r = planner_rl.planLinearMove(
+                init, init, /*left_active=*/true, far_pose_l,
+                /*right_active=*/false, Pose6D{}, /*slerp=*/false, 24);
+            std::cout << "linear far-goal (rate-limit on): goal_vs_start_max_deg="
+                      << r.goal_vs_start_max_deg << " decision="
+                      << static_cast<int>(r.decision) << " (" << r.message << ")\n";
+            // Before the fix this was clamped to ~4.0; the true goal is ~25 deg.
+            RB_CHECK(r.goal_vs_start_max_deg > 10.0);
+        }
     } else {
-        std::cout << "SKIP (4b/4c): rb3_730e kinematics URDF not found\n";
+        std::cout << "SKIP (4b/4c/4d): rb3_730e kinematics URDF not found\n";
     }
 
     // ---- (5) Gradient escape from a near-collision start. Raise a thin ground slab

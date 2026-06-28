@@ -249,6 +249,29 @@ class TemporalIcpTest(unittest.TestCase):
         np.testing.assert_allclose(det._prev_pose["green"][:3, 3], b2["T"][:3, 3], atol=1e-6)
 
     @unittest.skipIf(box_detect.cv2 is None, "opencv required")
+    def test_partial_observation_inits_from_prev(self):
+        # 가림(부분관측, 작은 footprint)에선 minAreaRect 재획득(yaw ~90° 오류) 대신 prev에서
+        # init → yaw 유지. 먼저 완전관측으로 prev 확립.
+        try:
+            import scipy.spatial  # noqa: F401
+        except Exception:
+            self.skipTest("scipy required")
+        det = _detector(use_icp=False)
+        det.use_icp = True
+        det.icp_method = "yaw_se2"
+        det._temporal_icp = True
+        cam = np.array([0.0, -1.4])
+        full = _grid_rect(center=(0.10, -0.60), size=(0.38, 0.24), nx=90, ny=58)
+        g = det._detect_one(full, cam, (0.0, 0.0, 0.0), "green")
+        self.assertIsNotNone(g)
+        yaw0 = np.degrees(np.arctan2(g["T"][1, 0], g["T"][0, 0]))
+        partial = _grid_rect(center=(0.0, -0.60), size=(0.18, 0.24), nx=44, ny=58)  # 긴변 절반(가림)
+        gp = det._detect_one(partial, cam, (0.0, 0.0, 0.0), "green")
+        self.assertIsNotNone(gp)
+        yawp = np.degrees(np.arctan2(gp["T"][1, 0], gp["T"][0, 0]))
+        self.assertLess(abs(yawp - yaw0), 25.0)            # prev init → yaw 유지(재획득 90° 방지)
+
+    @unittest.skipIf(box_detect.cv2 is None, "opencv required")
     def test_temporal_disabled_keeps_no_track(self):
         det = _detector(use_icp=False)
         det.use_icp = True
@@ -301,6 +324,19 @@ class OpenTrayModelTest(unittest.TestCase):
         n_inner = int((np.abs(np.abs(m[:, 0]) - ix) < 0.004).sum())
         self.assertGreater(n_outer, 50)
         self.assertGreater(n_inner, 50)        # 내벽 존재(예전 모델엔 없었음)
+
+    def test_model_interior_surface_at_sponge_top(self):
+        # 내부 수평면(카메라가 보는 바닥)은 박스 바닥이 아니라 30mm 스펀지 윗면에 있어야 한다.
+        m = box_detect._open_tray_model()
+        hz = box_detect.BOX_DIMS[2] / 2
+        ix = box_detect.BOX_DIMS[0] / 2 - 0.020
+        iy = box_detect.BOX_DIMS[1] / 2 - 0.020
+        interior = m[(np.abs(m[:, 0]) < ix - 0.01) & (np.abs(m[:, 1]) < iy - 0.01)]
+        self.assertGreater(len(interior), 20)
+        expected = -hz + 0.0065 + 0.030               # 바닥두께 6.5 + 스펀지 30mm
+        self.assertLess(abs(float(np.median(interior[:, 2])) - expected), 0.006)
+        # 박스 바닥(-hz)엔 내부 수평면 점이 없어야(스펀지 위로 올림)
+        self.assertEqual(int((np.abs(interior[:, 2] - (-hz)) < 0.005).sum()), 0)
 
     def test_model_top_is_open_rim_not_solid(self):
         m = box_detect._open_tray_model()

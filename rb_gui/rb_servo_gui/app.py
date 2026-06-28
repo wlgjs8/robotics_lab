@@ -1004,6 +1004,8 @@ def _send_tcp_pose_target_from_marker(
 def _tcp_marker_payloads(
     scene_handles: dict[str, Any],
     arm_group: str,
+    *,
+    arms: tuple[str, ...] | None = None,
 ) -> tuple[
     tuple[float, float, float, float, float, float] | None,
     tuple[float, float, float, float, float, float] | None,
@@ -1011,7 +1013,9 @@ def _tcp_marker_payloads(
     tuple[float, float, float, float] | None,
     str | None,
 ]:
-    selected_arms = ("left", "right") if arm_group == "both" else (arm_group,)
+    # `arms`, when given, restricts which arms contribute a payload (the rest stay None).
+    # Used by the TCP-linear send to forward only the arms the operator actually parked.
+    selected_arms = arms if arms is not None else (("left", "right") if arm_group == "both" else (arm_group,))
     left_pose = right_pose = None
     left_quaternion_xyzw = right_quaternion_xyzw = None
     for arm in selected_arms:
@@ -1049,18 +1053,50 @@ def _send_tcp_linear_move_from_marker(
     # the init-motion button.
     # ("TCP targets will follow current TCP").
     selected_arms = ("left", "right") if arm_group == "both" else (arm_group,)
-    following = [arm for arm in selected_arms
-                 if f"{arm}_tcp_target_user_moved" not in scene_handles]
-    if following:
-        arms_txt = " and ".join(following)
+    parked = tuple(arm for arm in selected_arms
+                   if f"{arm}_tcp_target_user_moved" in scene_handles)
+    # Only block when NO selected arm has been parked at a destination. In "both" mode
+    # moving a single gizmo is a valid "move just this arm" request: send only the parked
+    # arm(s) and let the other Hold, instead of blocking the whole command.
+    if not parked:
+        arms_txt = " and ".join(selected_arms)
         return False, (
             f"{arms_txt} TCP target marker is following current TCP "
             "(not parked at a destination) — drag/set the marker to the target first, "
             "otherwise the linear move is ~zero"
         )
-    left_pose, right_pose, left_quaternion_xyzw, right_quaternion_xyzw, error = _tcp_marker_payloads(scene_handles, arm_group)
+    left_pose, right_pose, left_quaternion_xyzw, right_quaternion_xyzw, error = _tcp_marker_payloads(scene_handles, arm_group, arms=parked)
     if error:
         return False, error
+    # DIAGNOSTIC: log the target the GUI is about to send + its drag delta from the
+    # current measured TCP marker. This disambiguates "arm only goes partway and stops":
+    # a large delta here means the GUI captured the full drag (so a short server move is a
+    # planner/collision issue), while a tiny delta means the captured target itself was
+    # near current TCP (a GUI marker bug). scene_handles[f"{arm}_tcp"] is a viser
+    # FrameHandle, so read its .position; wrap everything so logging never blocks the send.
+    try:
+        for arm, pose in (("left", left_pose), ("right", right_pose)):
+            if pose is None:
+                continue
+            handle = scene_handles.get(f"{arm}_tcp")
+            current = getattr(handle, "position", None)
+            if current is not None and len(current) >= 3:
+                cx, cy, cz = float(current[0]), float(current[1]), float(current[2])
+                delta_m = math.sqrt((pose[0] - cx) ** 2 + (pose[1] - cy) ** 2 + (pose[2] - cz) ** 2)
+                current_txt = f"({cx:.4f}, {cy:.4f}, {cz:.4f})"
+            else:
+                delta_m = float("nan")
+                current_txt = "unknown"
+            print(
+                f"rb_servo_gui: TcpLinear send {arm} target_xyz="
+                f"({pose[0]:.4f}, {pose[1]:.4f}, {pose[2]:.4f}) "
+                f"rpy=({pose[3]:.4f}, {pose[4]:.4f}, {pose[5]:.4f}) "
+                f"current_xyz={current_txt} drag_delta={delta_m:.4f} m "
+                f"orientation_mode={orientation_mode}",
+                flush=True,
+            )
+    except Exception as exc:  # noqa: BLE001 - diagnostic logging must never block the send
+        print(f"rb_servo_gui: TcpLinear send diagnostic log failed ({type(exc).__name__}: {exc})", flush=True)
     return safety.send_tcp_linear_move(
         left_pose=left_pose,
         right_pose=right_pose,

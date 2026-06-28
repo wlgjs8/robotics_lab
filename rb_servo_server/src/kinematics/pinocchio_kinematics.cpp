@@ -728,4 +728,18 @@ IkResult PinocchioKinematics::solveIk(
     return result;
 }
 
+IkResult PinocchioKinematics::solveIkToTarget(
+    ArmId arm,
+    const Pose6D& target_tcp_stand,
+    const JointArray& seed_q_deg,
+    const ArmMountConfig& mount
+) const {
+    // Goal/planning IK: the full converged DLS solution (scale 1.0), deliberately WITHOUT
+    // solveIk()'s branch-jump rate-limit/clamp. solveIkDamped() only returns success when
+    // the solution is within position/orientation tolerance of the target, so this is the
+    // true final config — a far linear-move goal yields its real (large) joint delta
+    // instead of a step capped at max_solution_jump_deg.
+    return solveIkDamped(arm, target_tcp_stand, seed_q_deg, mount, 1.0);
+}
+
 }  // namespace rb_servo

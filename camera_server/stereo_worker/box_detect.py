@@ -102,7 +102,7 @@ def _load_color_calib(path):
         return None
 
 
-def _open_tray_model(dims=BOX_DIMS, wall=0.020, floor=0.0065, n=6500, rng=None):
+def _open_tray_model(dims=BOX_DIMS, wall=0.020, floor=0.0065, sponge=0.030, n=6500, rng=None):
     """open-top 트레이 **쉘** 표면 점 (박스 로컬: 중심 원점, z 위, 윗면 열림). ICP target.
 
     카메라가 ~45°로 트레이를 보면 가까운 벽은 **바깥면**, 먼 벽은 (열린 위로 들여다봐)
@@ -113,7 +113,10 @@ def _open_tray_model(dims=BOX_DIMS, wall=0.020, floor=0.0065, n=6500, rng=None):
     rng = rng or np.random.default_rng(0)
     hx, hy, hz = dims[0]/2, dims[1]/2, dims[2]/2
     ix, iy = hx-wall, hy-wall                           # 측벽 두께(NTC-321 20mm)
-    fz = -hz + floor                                    # 내부 바닥 높이(바닥 두께 6.5mm)
+    # 관측되는 내부 수평면 = 박스 바닥(두께 6.5mm) 위에 깔린 30mm 스펀지 윗면.
+    # 카메라는 바닥이 아니라 스펀지 윗면을 보므로(측정 local-z≈-0.019) 내부 바닥/내벽 하단을
+    # 거기로 올린다(미반영 시 모델 바닥이 ~27mm 낮아 정합 오차). 스펀지 아래 내벽은 가려져 제외.
+    fz = -hz + floor + sponge                           # 내부 수평면(스펀지 윗면) 높이
     pts = []
     def wx(k, x, ylo, yhi, zlo, zhi):
         pts.append(np.stack([np.full(k, x), rng.uniform(ylo, yhi, k), rng.uniform(zlo, zhi, k)], 1))
@@ -125,13 +128,13 @@ def _open_tray_model(dims=BOX_DIMS, wall=0.020, floor=0.0065, n=6500, rng=None):
     # 외벽 4 (전체 높이)
     wx(k, -hx, -hy, hy, -hz, hz); wx(k, hx, -hy, hy, -hz, hz)
     wy(k, -hy, -hx, hx, -hz, hz); wy(k, hy, -hx, hx, -hz, hz)
-    # 내벽 4 (내부 바닥~윗면)
+    # 내벽 4 (스펀지 윗면~윗면; 스펀지 아래는 가려져 제외)
     wx(k, -ix, -iy, iy, fz, hz); wx(k, ix, -iy, iy, fz, hz)
     wy(k, -iy, -ix, ix, fz, hz); wy(k, iy, -ix, ix, fz, hz)
     # 윗 림 링 (z=hz, 내외 사이 4 strip — 솔리드 top 아님)
     rz(k, -hx, hx, iy, hy, hz); rz(k, -hx, hx, -hy, -iy, hz)
     rz(k, ix, hx, -iy, iy, hz); rz(k, -hx, -ix, -iy, iy, hz)
-    # 내부 바닥
+    # 내부 수평면(스펀지 윗면) — 카메라가 보는 내부 바닥
     rz(k, -ix, ix, -iy, iy, fz)
     return np.concatenate(pts, 0)
 
@@ -147,13 +150,14 @@ class BoxDetector:
     MIN_PTS = 500                  # 박스 후보 최소 점 수
     SIZE_LONG = (0.16, 0.60)       # 관측 긴변 게이트 (m): 붙은 2박스(~0.8)는 거르되 부분관측 허용
     SIZE_SHORT_MAX = 0.42          # 관측 짧은변 상한 (m)
-    FPS_K = 1024                   # ICP 전 FPS 다운샘플 점 수
-    FPS_CAP = 8000                 # FPS 전 랜덤 상한(속도)
+    FPS_K = 1024                   # ICP 전 다운샘플 점 수
+    FPS_CAP = 8000                 # (구) FPS 전 랜덤 상한
+    FPS_VOXEL = 0.005              # ICP 다운샘플 voxel 크기(m). iterative FPS 대체(속도)
     ICP_MAX_CORR = 0.03            # ICP 대응 최대거리 (m) = 암묵 trimming
-    ICP_ITERS = 40
+    ICP_ITERS = 25                 # SE(2) ICP 최대 iter (early-exit 수렴이라 cap만; 25면 충분)
     ICP_TRIM = 0.7                 # SE(2) ICP 대응 trim 비율(가까운 70%만 사용)
     ICP_CLIP_MARGIN = 0.04         # ICP 입력을 박스 근방 3D RoI로 클립(박스 바깥 점 배제)
-    ICP_PASSES = 2                 # 클립→ICP→재클립→ICP 반복 횟수
+    ICP_PASSES = 2                 # 클립→ICP→재클립→ICP (부분관측 yaw 안정에 2패스 유지)
     MAX_COMPONENTS = 8             # candidate ranking cost bound
     # 회색(colorless 조밀 박스) de-bridge OPEN 커널 (px). CLOSE 제거만으로 분리는
     # 되지만, OPEN으로 얇은 연결부를 한 번 더 끊는다. 클수록 강하게 끊지만 희박/가림
@@ -185,6 +189,7 @@ class BoxDetector:
         self._temporal_icp = os.environ.get("STEREO_TEMPORAL_ICP", "1") != "0"
         self._prev_pose = {}                           # label -> 직전 ICP 포즈(temporal init)
         self._last_plane = None                        # 직전 양호 테이블 평면(가림 시 fallback)
+        self._prof = {}                                # detect 내부 단계 wall-time 누적(STEREO_PROFILE)
         self._calib = _load_color_calib(COLOR_CALIB_PATH)
         self._cfg_t = 0.0
         self._rng = np.random.default_rng(0)
@@ -206,6 +211,12 @@ class BoxDetector:
             "point_to_plane": "point_to_plane", "point2plane": "point_to_plane",
         }
         return aliases.get(m, "yaw_se2")
+
+    def _pt(self, name, t0):
+        """detect 내부 단계 시간 누적(STEREO_PROFILE 리포트용). 다음 시작 시각 반환."""
+        t1 = time.perf_counter()
+        self._prof[name] = self._prof.get(name, 0.0) + (t1 - t0)
+        return t1
 
     def _reload_cfg(self, now):
         if now - self._cfg_t > 1.0:
@@ -311,43 +322,12 @@ class BoxDetector:
         return T, (round(obs_long, 3), round(obs_short, 3))
 
     def _fps(self, pts, k):
-        """farthest point sampling. torch(GPU) 우선, 실패 시 numpy 폴백."""
+        """ICP 다운샘플. 기존 iterative FPS(k=1024 Python 루프)는 GPU에서도 ~1.2s로
+        파이프라인 병목이라 **random 다운샘플**로 교체(O(k), ICP엔 조밀 박스라 충분).
+        균일 커버리지가 더 필요하면 FPS_VOXEL voxel 경로로 바꿀 수 있음."""
         if len(pts) <= k:
             return pts.astype(np.float64)
-        if len(pts) > self.FPS_CAP:
-            pts = pts[self._rng.choice(len(pts), self.FPS_CAP, replace=False)]
-        if self._torch_cuda_ok is None:
-            try:
-                import torch
-                self._torch = torch
-                self._torch_cuda_ok = bool(torch.cuda.is_available())
-            except Exception as e:  # noqa: BLE001
-                self._torch = None
-                self._torch_cuda_ok = False
-                if not self._warned_torch:
-                    print(f"[box_detect] torch FPS 불가 → numpy 폴백: {e}", flush=True)
-                    self._warned_torch = True
-        if not self._torch_cuda_ok:
-            if self._torch is not None and not self._warned_cuda:
-                print("[box_detect] CUDA torch FPS 비활성 → numpy 폴백", flush=True)
-                self._warned_cuda = True
-            return self._fps_numpy(pts, k)
-        try:
-            t = self._torch.as_tensor(pts, device="cuda", dtype=self._torch.float32)
-            n = t.shape[0]
-            idx = self._torch.empty(k, dtype=self._torch.long, device=t.device)
-            d = self._torch.full((n,), 1e10, device=t.device)
-            far = self._torch.zeros((), dtype=self._torch.long, device=t.device)
-            for i in range(k):
-                idx[i] = far
-                d = self._torch.minimum(d, ((t - t[far]) ** 2).sum(1))
-                far = self._torch.argmax(d)
-            return t[idx].double().cpu().numpy()
-        except Exception as e:  # noqa: BLE001
-            if not self._warned_torch:
-                print(f"[box_detect] torch FPS 불가 → numpy 폴백: {e}", flush=True)
-                self._warned_torch = True
-            return self._fps_numpy(pts, k)
+        return pts[self._rng.choice(len(pts), k, replace=False)].astype(np.float64)
 
     @staticmethod
     def _fps_numpy(pts, k):
@@ -401,14 +381,17 @@ class BoxDetector:
         refined = inv(T_icp)@T (패스마다 현 pose 기준 재클립)."""
         T, fit, rmse, meth, sample_n = T0, 1.0, float("nan"), self.icp_method, 0
         for _ in range(max(1, self.ICP_PASSES)):
+            _t = time.perf_counter()
             sc = self._clip_to_box(scene, T, self.ICP_CLIP_MARGIN)
             if len(sc) < self.MIN_PTS:                 # 클립이 과하면 원본 사용
                 sc = scene
             s = self._fps(sc, self.FPS_K)
+            _t = self._pt("  fps", _t)
             if self.icp_method == "yaw_se2":
                 T, fit, rmse, meth, sample_n = self._icp_se2(s, T)
             else:
                 T, fit, rmse, meth, sample_n = self._icp_o3d(s, T, self.icp_method)
+            _t = self._pt("  icpreg", _t)
         return T, fit, rmse, meth, sample_n
 
     def _icp_o3d(self, s, T0, method):
@@ -518,8 +501,14 @@ class BoxDetector:
             # 멀면(박스 점프/신규/가림복귀) minAreaRect로 재획득. label별로 트랙 유지.
             init = T0
             prev = self._prev_pose.get(label) if (self._temporal_icp and label is not None) else None
-            if prev is not None and float(np.linalg.norm(prev[:2, 3] - T0[:2, 3])) < self.TEMPORAL_GATE_M:
-                init = prev
+            if prev is not None:
+                near = float(np.linalg.norm(prev[:2, 3] - T0[:2, 3])) < self.TEMPORAL_GATE_M
+                # 부분 관측(가림): footprint이 known-dims보다 작으면 minAreaRect yaw가 ~90°
+                # 틀어져 ICP가 거기 갇힌다 → 중심이 이동했어도 prev에서 init(재획득 금지).
+                # 완전 관측 + 중심 멀면(실제 이동/신규) minAreaRect로 재획득.
+                partial = (foot[0] < 0.75 * BOX_DIMS[0]) or (foot[1] < 0.75 * BOX_DIMS[1])
+                if near or partial:
+                    init = prev
             T, fit, rmse, method, sample_n = self._icp(scene, init)
             if self._temporal_icp and label is not None:
                 self._prev_pose[label] = T          # 다음 프레임 ICP init
@@ -543,6 +532,7 @@ class BoxDetector:
         if cv2 is None:
             return []
         now = time.time(); self._reload_cfg(now)
+        _t = time.perf_counter()
         Pc, valid = self._cam_points(disp)                       # 카메라 프레임 organized
         Ps = Pc @ self._T_sc[:3, :3].T + self._T_sc[:3, 3]       # stand 프레임
         inroi = ((Ps[..., 0] > self._roi_x[0]) & (Ps[..., 0] < self._roi_x[1]) &
@@ -550,15 +540,17 @@ class BoxDetector:
         if self._z_cap is not None:                  # perception 전용 stand-Z 점 상한
             inroi = inroi & (Ps[..., 2] < self._z_cap)
 
+        # --- head + 손목 결합 클라우드 (RoI/zcap 필터된 stand 점) ---
+        # 색 재투영(_organized_rgb)은 비싸므로 전체 organized(921k)가 아니라 ROI 후보
+        # subset(~수만 점)에만 적용한다(전처리 시간 대폭 단축).
+        pre = valid & inroi
+        P = Ps[pre]                                  # (K,3) stand (ROI 내 유효 head 점)
         have_color = color_img is not None and self._calib is not None
         if have_color:
-            rgb, cok = self._organized_rgb(Pc, color_img, self._calib)
-            mh = valid & cok & inroi
+            C, cok = self._organized_rgb(Pc[pre], color_img, self._calib)  # K점만 재투영
+            P = P[cok]; C = C[cok]
         else:
-            mh = valid & inroi
-        # --- head + 손목 결합 클라우드 (RoI/zcap 필터된 stand 점) ---
-        P = Ps[mh]
-        C = rgb[mh] if have_color else None
+            C = None
         if extra_xyz is not None and len(extra_xyz) > 0:
             ex = np.asarray(extra_xyz, dtype=np.float64)
             inb = ((ex[:, 0] > self._roi_x[0]) & (ex[:, 0] < self._roi_x[1]) &
@@ -601,6 +593,7 @@ class BoxDetector:
         # cv2.inRange는 3채널 이미지를 기대 → 평탄화된 (N,3)엔 못 씀(예외).
         # GREEN_LO/HI (3,) 에 대한 numpy 브로드캐스트 비교로 동일 결과.
         is_green = np.all((hsv >= self.GREEN_LO) & (hsv <= self.GREEN_HI), axis=1)
+        _t = self._pt("pre", _t)
 
         out = []
         green_T = None
@@ -608,6 +601,7 @@ class BoxDetector:
             g = self._detect_one(Pb[is_green], cam_xy, plane, "green")
             if g:
                 out.append(g); green_T = g["T"]
+        _t = self._pt("green", _t)
         keep = ~is_green
         if green_T is not None:
             # 두 박스가 붙어 있어 공간분리 불가 → 초록 박스의 known-dims 사각형(ICP pose)을
@@ -625,6 +619,7 @@ class BoxDetector:
                                   bridge=False, reject_box=green_T)
             if gr:
                 out.append(gr)
+        self._pt("gray", _t)
         return out
 
 

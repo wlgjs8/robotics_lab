@@ -274,7 +274,7 @@ class CommandClient:
         packet: dict[str, Any] = {
             "schema_version": 1,
             "seq": self.next_seq(),
-            "mode": "TcpLinearMove" if left_pose is not None and right_pose is not None else "Hold",
+            "mode": "TcpLinearMove" if (left_pose is not None or right_pose is not None) else "Hold",
             "host_time_ns": time.monotonic_ns(),
             "timeout_sec": timeout_sec,
             "coupled_timeout": True,
@@ -300,10 +300,18 @@ class CommandClient:
                 payload["angular_speed_rad_s"] = parsed_angular_speed
             return payload
 
+        # The non-targeted arm must explicitly Hold. With the top-level mode now
+        # "TcpLinearMove" whenever ANY arm has a target, an empty {} arm object would
+        # inherit that default mode server-side (parseArmObject) and try to MoveL with
+        # no target. Mirror the server-side tool (send_tcp_linear_move.py): {"mode": "Hold"}.
         if left_pose is not None:
             packet["left"] = arm_payload(left_pose, left_quaternion_xyzw, "left TCP linear target")
+        else:
+            packet["left"] = {"mode": "Hold"}
         if right_pose is not None:
             packet["right"] = arm_payload(right_pose, right_quaternion_xyzw, "right TCP linear target")
+        else:
+            packet["right"] = {"mode": "Hold"}
         return self._with_source(packet)
 
     def _with_source(self, packet: dict[str, Any]) -> dict[str, Any]:

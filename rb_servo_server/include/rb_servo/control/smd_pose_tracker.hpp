@@ -28,6 +28,9 @@ struct SmdStepInfo {
     // Estimated goal velocity actually applied as feedforward (stand/body frame).
     Eigen::Vector3d goal_linear_velocity = Eigen::Vector3d::Zero();
     Eigen::Vector3d goal_angular_velocity = Eigen::Vector3d::Zero();
+    // Manipulability velocity scale applied this step (1.0 = none, < 1 = slowed near
+    // a singularity). Telemetry only.
+    double singularity_velocity_scale = 1.0;
 };
 
 // Spring-Mass-Damper pose tracking filter for streaming TcpPoseTarget teleop.
@@ -69,6 +72,13 @@ public:
     // Number of re-anchors (reset() while already active) since construction.
     std::uint64_t reanchorCount() const { return reanchor_count_; }
 
+    // Feed the most recent IK solve's task-Jacobian min singular value so the NEXT
+    // step() can scale the tracking velocity down near a singularity (manipulability
+    // guard, config singularity_scale_*). A value <= 0 means the solve did not compute
+    // the SVD (common in healthy poses) -> treated as unknown -> no scaling. Only a real
+    // positive sigma scales. Pure velocity scaling: never touches IK damping/iterations.
+    void setMinSingular(double sigma) { last_min_singular_ = sigma; }
+
     Pose6D goalPose() const;
 
     // The SMD's currently-tracked (published) pose.
@@ -97,6 +107,7 @@ private:
     // Patch 4: diagnostics.
     SmdStepInfo last_step_info_;
     std::uint64_t reanchor_count_ = 0;
+    double last_min_singular_ = -1.0;  // < 0 = unknown -> no singularity velocity scaling
 };
 
 }  // namespace rb_servo

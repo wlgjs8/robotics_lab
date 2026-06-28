@@ -58,8 +58,9 @@ def wrist_cloud(depth, color, zmin=0.05, zmax=1.2, stride=2):
     return P.astype(np.float32), col[valid].astype(np.uint8)
 
 
-def color_cloud(disp, color_img, K, baseline, calib, dmin=0.1, dmax=3.0):
-    """disp(IR-left) -> 3D점(IR 프레임) + 각 점을 color 카메라에 재투영해 RGB 샘플링."""
+def color_cloud(disp, color_img, K, baseline, calib, dmin=0.1, dmax=3.0, T_sc=None, roi=None):
+    """disp(IR-left) -> 3D점(IR 프레임) + color 재투영 RGB. T_sc+roi를 주면 stand-ROI로 먼저
+    추려 그 subset만 재투영한다(전체 organized 921k 재투영 회피 + ROI-clip 일체화)."""
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
     H, W = disp.shape
     uu, vv = np.meshgrid(np.arange(W), np.arange(H))
@@ -67,17 +68,27 @@ def color_cloud(disp, color_img, K, baseline, calib, dmin=0.1, dmax=3.0):
         z = fx * baseline / disp
     valid = np.isfinite(z) & (z >= dmin) & (z <= dmax)
     X = (uu - cx) / fx * z; Y = (vv - cy) / fy * z
-    P = np.stack([X, Y, z], -1)                       # IR-left 프레임
-    Pc = P @ calib["R"].T + calib["t"]                # color 프레임
-    Zc = Pc[..., 2]
+    P = np.stack([X, Y, z], -1)                       # IR-left 프레임 (organized)
+    sel = valid
+    if T_sc is not None and roi is not None:          # stand-ROI로 먼저 추림 → 재투영 점 수↓
+        Ps = P @ T_sc[:3, :3].T + T_sc[:3, 3]
+        (rx, ry, rz) = roi
+        sel = (valid & (Ps[..., 0] >= rx[0]) & (Ps[..., 0] <= rx[1]) &
+               (Ps[..., 1] >= ry[0]) & (Ps[..., 1] <= ry[1]) &
+               (Ps[..., 2] >= rz[0]) & (Ps[..., 2] <= rz[1]))
+    Pf = P[sel]                                       # (K,3) IR — 이 subset만 color 재투영
+    if len(Pf) == 0:
+        return Pf.astype(np.float32), np.empty((0, 3), np.uint8)
+    Pc = Pf @ calib["R"].T + calib["t"]               # color 프레임
+    Zc = Pc[:, 2]
     with np.errstate(divide="ignore", invalid="ignore"):
-        uc = calib["color_fx"] * Pc[..., 0] / Zc + calib["color_cx"]
-        vc = calib["color_fy"] * Pc[..., 1] / Zc + calib["color_cy"]
+        uc = calib["color_fx"] * Pc[:, 0] / Zc + calib["color_cx"]
+        vc = calib["color_fy"] * Pc[:, 1] / Zc + calib["color_cy"]
     Hc, Wc = color_img.shape[:2]
-    inb = valid & (Zc > 0) & (uc >= 0) & (uc < Wc - 1) & (vc >= 0) & (vc < Hc - 1)
+    ok = (Zc > 0) & (uc >= 0) & (uc < Wc - 1) & (vc >= 0) & (vc < Hc - 1)
     ui = np.clip(uc, 0, Wc - 1).astype(np.int32)
     vi = np.clip(vc, 0, Hc - 1).astype(np.int32)
-    return P[inb].astype(np.float32), color_img[vi[inb], ui[inb]].astype(np.uint8)
+    return Pf[ok].astype(np.float32), color_img[vi[ok], ui[ok]].astype(np.uint8)
 # TRT fp16 엔진이 있으면 우선 사용(~14ms), 없으면 PyTorch(.pth) 폴백.
 STEREO_ENGINE = os.environ.get("STEREO_ENGINE",
                                "/app/stereo_worker/engines/fast_foundationstereo.engine")
@@ -120,6 +131,13 @@ def effective_clip_roi(detector):
     if detector._z_cap is not None:
         rz = (rz[0], min(rz[1], detector._z_cap))
     return (detector._roi_x, detector._roi_y, rz)
+
+
+def _ck(prof, name, t0):
+    """파이프라인 단계 wall-time 누적(STEREO_PROFILE). 다음 단계 시작 시각 반환."""
+    t1 = time.perf_counter()
+    prof[name] = prof.get(name, 0.0) + (t1 - t0)
+    return t1
 
 
 def wait_for_file(path, timeout_s=30.0, poll_s=0.5):
@@ -277,15 +295,26 @@ def cmd_run(args):
     n_boxes = 0
     warned_rgb = False
     last_clip_log = None      # ROI/Z캡 변경 시 1회 로그(operator 피드백)용
+    prof_on = os.environ.get("STEREO_PROFILE", "1") != "0"   # 단계별 ms 브레이크다운
+    prof = {}
     while True:
+        _t = time.perf_counter()
         frames = reader.poll(want, timeout_ms=500)
         irl = frames.get(k_irl); irr = frames.get(k_irr)
         if irl is None or irr is None:
             continue
+        _t = _ck(prof, "poll", _t)
         disp = model.infer_disparity(irl.pixels, irr.pixels)
+        _t = _ck(prof, "infer", _t)
         col = frames.get(k_col)
+        roi_cloud = effective_clip_roi(detector) if roi_clip_on else None
+        cloud_clipped = False
         if calib is not None and col is not None:
-            xyz, rgb = color_cloud(disp, col.pixels, K, baseline, calib, dmin=0.1, dmax=args.zfar)
+            # color_cloud에 T_sc+roi를 주면 ROI subset만 재투영(+ROI clip 일체화)
+            xyz, rgb = color_cloud(disp, col.pixels, K, baseline, calib, dmin=0.1, dmax=args.zfar,
+                                   T_sc=(detector._T_sc if roi_cloud is not None else None),
+                                   roi=roi_cloud)
+            cloud_clipped = roi_cloud is not None
             if not warned_rgb:
                 print("[run] RGB 매핑 ON (color->IR 재투영)", flush=True); warned_rgb = True
         else:
@@ -295,11 +324,12 @@ def cmd_run(args):
                 warned_rgb = True
         if xyz.shape[0] == 0:
             continue  # 유효 점 없음(예: fp16 NaN/범위밖) -> publish/통계 건너뜀
-        if roi_clip_on:                                  # ROI+Z캡 밖 head 점 제거 후 publish
+        if roi_clip_on and not cloud_clipped:            # 아직 안 잘린 경로(IR 등)만 클립
             hm = roi_clip_mask(xyz, detector._T_sc, effective_clip_roi(detector))
             pub.publish(seq, time.time_ns(), xyz[hm], rgb[hm])
         else:
             pub.publish(seq, time.time_ns(), xyz, rgb)
+        _t = _ck(prof, "cloud+pub", _t)
 
         # 손목 raw 클라우드 계산(병합+발행 공용, 카메라 프레임)
         wrist_raw = {}
@@ -314,6 +344,7 @@ def cmd_run(args):
                         wrist_raw[arm] = (wp, wc)
                 except Exception:
                     pass
+        _t = _ck(prof, "wrist", _t)
 
         # 병합용 stand 점: P_stand = T_stand_tcp @ T_tcp_cam @ P_wrist_cam
         extra_xyz = extra_rgb = None
@@ -336,6 +367,7 @@ def cmd_run(args):
                     fused_arms += 1
                 if exs:
                     extra_xyz = np.concatenate(exs, 0); extra_rgb = np.concatenate(ecs, 0)
+        _t = _ck(prof, "fuse", _t)
 
         if detector is not None:
             try:
@@ -353,6 +385,7 @@ def cmd_run(args):
                 print(f"[run] clip RoI update: x={detector._roi_x} y={detector._roi_y} "
                       f"z={detector._roi_z} z_cap={detector._z_cap}", flush=True)
                 last_clip_log = clip_now
+        _t = _ck(prof, "detect", _t)
 
         # 손목 raw 클라우드 발행 (저rate, 카메라 프레임 — rb_gui가 TCP×hand-eye로 배치).
         # ROI 클립: state(T_st)+핸드아이가 있을 때만 stand 변환 가능 → 그때만 자른다.
@@ -369,16 +402,28 @@ def cmd_run(args):
                     pub.publish_wrist(arm, seq, wpub, wcub)
                 except Exception:
                     pass
+        _t = _ck(prof, "pubwrist", _t)
         seq += 1
         fps_n += 1
         if time.time() - fps_t > 1.0:
+            nwin = max(fps_n, 1)
             fps = fps_n / (time.time() - fps_t); fps_t = time.time(); fps_n = 0
             fuse_str = ""
             if fuse_on and pose_listener is not None:
                 fuse_str = (f" fuse[rx={pose_listener.rx_count} fused={fused_arms} "
                             f"gated={gated_arms}]")
+            prof_str = ""
+            if prof_on and prof:
+                prof_str = "  ms/frame[" + " ".join(
+                    f"{k}={1000.0*v/nwin:.0f}" for k, v in prof.items()) + "]"
+            prof = {}
+            dprof_str = ""
+            if prof_on and detector is not None and detector._prof:
+                dprof_str = "  detect[" + " ".join(
+                    f"{k.strip()}={1000.0*v/nwin:.0f}" for k, v in detector._prof.items()) + "]"
+                detector._prof = {}
             print(f"[run] fps={fps:.1f} cloud_pts={xyz.shape[0]} boxes={n_boxes} "
-                  f"z[{xyz[:,2].min():.2f},{xyz[:,2].max():.2f}]m{fuse_str}", flush=True)
+                  f"z[{xyz[:,2].min():.2f},{xyz[:,2].max():.2f}]m{fuse_str}{prof_str}{dprof_str}", flush=True)
         if args.max_frames and seq >= args.max_frames:
             print(f"[run] reached max_frames={args.max_frames}, exit", flush=True)
             break

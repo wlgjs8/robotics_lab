@@ -524,8 +524,10 @@ class OperatorSafety:
         latest = self.latest_valid()
         if latest is None:
             return "state stream missing or stale"
-        if latest.motion_state not in {"ArmedHold", "Running"}:
-            return "ArmMotion first; init motion requires ArmedHold or Running"
+        # ArmMotion is no longer a precondition: the server accepts motion (incl. init
+        # motion) whenever connected and healthy, so InitMotion works straight from
+        # ConnectedHold without a preceding ArmMotion. blocked_reason above still gates
+        # on a stale stream / invalid joints / a latched fault.
         return None
 
     def send_init_motion(self) -> tuple[bool, str]:

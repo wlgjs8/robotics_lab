@@ -1885,22 +1885,23 @@ class GuiContractsTest(unittest.TestCase):
             else:
                 os.environ["RB_GUI_INIT_LEFT_JOINTS"] = old_value
 
-    def test_init_motion_requires_configured_targets_and_armed_state(self):
+    def test_init_motion_requires_configured_targets_but_not_arming(self):
         _, client, unconfigured = self.make_safety(sample_state(motion_state="ArmedHold"))
         ok, reason = unconfigured.send_init_motion()
         self.assertFalse(ok)
         self.assertIn("not configured", reason)
         self.assertEqual(client.sent_packets, [])
 
+        # ArmMotion is no longer a precondition: with targets configured, init motion
+        # sends straight from ConnectedHold (fresh connect) without a preceding ArmMotion.
         _, client, safety = self.make_safety(
             sample_state(motion_state="ConnectedHold"),
             init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
             init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
         )
         ok, reason = safety.send_init_motion()
-        self.assertFalse(ok)
-        self.assertIn("ArmMotion first", reason)
-        self.assertEqual(client.sent_packets, [])
+        self.assertTrue(ok, reason)
+        self.assertEqual(len(client.sent_packets), 1)
 
     def test_init_motion_sends_in_every_mode_when_state_ready(self):
         # Env/mode gating retired: the init profile sends in real AND simulation
@@ -1971,8 +1972,10 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("follow current TCP", reason)
 
     def test_init_motion_blocked_preserves_tcp_target_follow_flags(self):
+        # A latched fault still blocks init motion (ArmMotion is no longer the gate);
+        # a blocked init must not clear the TCP-target follow flags.
         _, client, safety = self.make_safety(
-            sample_state(motion_state="ConnectedHold"),
+            sample_state(motion_state="FaultLatched"),
             init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
             init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
         )
@@ -1982,7 +1985,7 @@ class GuiContractsTest(unittest.TestCase):
         }
         ok, reason = _send_init_motion_and_reset_targets(safety, handles)
         self.assertFalse(ok)
-        self.assertIn("ArmMotion first", reason)
+        self.assertIn("latched", reason)
         self.assertIn("left_tcp_target_user_moved", handles)
         self.assertIn("right_tcp_target_user_moved", handles)
         self.assertEqual(client.sent_packets, [])
@@ -2107,9 +2110,10 @@ class GuiContractsTest(unittest.TestCase):
             orientation_mode="constant",
         )
         self.assertEqual(packet["schema_version"], 1)
-        self.assertEqual(packet["mode"], "Hold")
+        # Any arm target -> top-level TcpLinearMove; the untargeted arm explicitly Holds.
+        self.assertEqual(packet["mode"], "TcpLinearMove")
         self.assertEqual(packet["left"]["mode"], "TcpLinearMove")
-        self.assertEqual(packet["right"], {})
+        self.assertEqual(packet["right"], {"mode": "Hold"})
         # The command must stay fresh through the server's async collision-free decision
         # + path handoff (the old fixed 0.2 s expired mid-decision so the MoveL never ran).
         # Generous timeout = duration + 0.5 (floored at 2.0), covering planning handoff.
@@ -3108,8 +3112,9 @@ class GuiContractsTest(unittest.TestCase):
         )
         self.assertTrue(ok, reason)
         packet = client.sent_packets[-1]
-        self.assertEqual(packet["mode"], "Hold")
+        self.assertEqual(packet["mode"], "TcpLinearMove")
         self.assertEqual(packet["left"]["mode"], "TcpLinearMove")
+        self.assertEqual(packet["right"], {"mode": "Hold"})
         self.assertEqual(packet["left"]["target_tcp_stand"]["quaternion_xyzw"], list(_wxyz_to_xyzw(handles["left_tcp_target_wxyz"])))
 
     def test_tcp_linear_send_blocked_when_marker_follows_current_tcp(self):
@@ -3163,6 +3168,46 @@ class GuiContractsTest(unittest.TestCase):
         )
         self.assertTrue(ok, reason)
         self.assertEqual(client.sent_packets[-1]["left"]["mode"], "TcpLinearMove")
+
+    def test_tcp_linear_both_sends_only_the_single_parked_arm(self):
+        # Regression: in "both" mode, moving only ONE gizmo must move that arm (not block
+        # the whole command). The parked arm gets TcpLinearMove; the other (still following
+        # current TCP) Holds, and the top-level mode stays TcpLinearMove.
+        state = self.tcp_available_state()
+        _, client, safety = self.make_safety(
+            state,
+            desired="simulation",
+            observed="simulation",
+            observed_backend="simulator",
+            sim_ready=True,
+            cartesian_available=True,
+            enable_tcp_pose=True,
+        )
+        pose = (0.31, 0.12, 0.44, 0.0, 0.0, 0.0)
+        handles = {
+            "left_tcp_target_pose": pose,
+            "left_tcp_target_wxyz": _pose_wxyz(pose),
+            "right_tcp_target_pose": pose,
+            "right_tcp_target_wxyz": _pose_wxyz(pose),
+            # Only the left gizmo was dragged.
+            "left_tcp_target_user_moved": True,
+        }
+        before = len(client.sent_packets)
+        ok, reason = _send_tcp_linear_move_from_marker(
+            safety,
+            handles,
+            "both",
+            duration_sec=2.0,
+            linear_speed_m_s=0.03,
+            angular_speed_rad_s=0.2,
+            orientation_mode="constant",
+        )
+        self.assertTrue(ok, reason)
+        self.assertEqual(len(client.sent_packets), before + 1)
+        packet = client.sent_packets[-1]
+        self.assertEqual(packet["mode"], "TcpLinearMove")
+        self.assertEqual(packet["left"]["mode"], "TcpLinearMove")
+        self.assertEqual(packet["right"], {"mode": "Hold"})
 
     def test_tcp_frame_defaults_to_stand_and_updates_button_colors(self):
         handles = {

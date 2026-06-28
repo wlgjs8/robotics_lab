@@ -69,6 +69,22 @@ public:
         const ArmMountConfig& mount
     ) const = 0;
 
+    // Full-solution IK for one-shot GOAL/planning use: returns the converged solution to
+    // the target WITHOUT the per-tick branch-jump rate-limit/clamp that solveIk() applies
+    // when streaming a moving setpoint. A planner needs the TRUE final joint goal (a far
+    // target is a large, legitimate jump); per-tick joint-speed smoothness is the path
+    // executor's job, not the goal's. Misusing solveIk() here clamps the goal to
+    // max_solution_jump_deg from the seed, so a long linear move only steps a few degrees
+    // and "reaches" a pseudo-goal partway. Default: same as solveIk() (safe for mocks).
+    virtual IkResult solveIkToTarget(
+        ArmId arm,
+        const Pose6D& target_tcp_stand,
+        const JointArray& seed_q_deg,
+        const ArmMountConfig& mount
+    ) const {
+        return solveIk(arm, target_tcp_stand, seed_q_deg, mount);
+    }
+
     // Ordered kinematic chain points (xyz, meters) in the STAND frame used to
     // build per-link self-collision capsules: [base, joint1..joint6 origins, tcp].
     // Consecutive points are capsule bone endpoints. Default returns empty,

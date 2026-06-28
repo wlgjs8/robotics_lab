@@ -28,6 +28,12 @@ public:
         const JointArray& seed_q_deg,
         const ArmMountConfig& mount
     ) const override;
+    IkResult solveIkToTarget(
+        ArmId arm,
+        const Pose6D& target_tcp_stand,
+        const JointArray& seed_q_deg,
+        const ArmMountConfig& mount
+    ) const override;
     std::vector<std::array<double, 3>> linkCollisionPointsInStand(
         ArmId arm,
         const JointArray& q_deg,

@@ -80,42 +80,36 @@ bool testRepositoryConfigsParse() {
     const std::filesystem::path config_dir =
         std::filesystem::path(__FILE__).parent_path().parent_path() / "config";
 
-    const rb_servo::DualArmConfig mock =
-        rb_servo::loadConfigFromYaml((config_dir / "dual_mock.yaml").string());
-    RB_CHECK(mock.left_robot.backend_type == rb_servo::BackendType::Mock);
-    RB_CHECK(mock.right_robot.backend_type == rb_servo::BackendType::Mock);
-    RB_CHECK(mock.network.state_pub_endpoint == "udp://127.0.0.1:50110");
-    RB_CHECK(mock.network.state_pub_bind == mock.network.state_pub_endpoint);
-    RB_CHECK(mock.network.state_pub_rate_hz == 20);
-    RB_CHECK(mock.force_control.provider == "null");
-    RB_CHECK(!mock.force_control.enable);
-    RB_CHECK(mock.servo.io_model == rb_servo::ServoIoModel::Direct);
-    RB_CHECK(near(mock.servo.worker_read_period_sec, 0.002));
-    RB_CHECK(!mock.servo.controller_simulation_async_supervision_nonlatching);
-    RB_CHECK(!mock.safety.controller_simulation_tracking_error_nonlatching);
-    RB_CHECK(!mock.servo.allow_real_motion_with_suspect_diagnostics);
-
-    {
-        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
-        EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", nullptr);
-        const rb_servo::DualArmConfig real_default =
-            rb_servo::loadConfigFromYaml((config_dir / "dual_real.example.yaml").string());
-        RB_CHECK(real_default.left_robot.backend_type == rb_servo::BackendType::Rbpodo);
-        RB_CHECK(real_default.servo.rate_hz == 500);
-        RB_CHECK(near(real_default.left_robot.servo_t1_sec, 0.002));
-        RB_CHECK(near(real_default.left_robot.servo_t2_sec, 0.05));
-        RB_CHECK(near(real_default.left_robot.servo_alpha, 0.5));
-        RB_CHECK(near(real_default.left_robot.command_timeout_sec, 0.02));
-        RB_CHECK(!real_default.servo.send_servo_commands);
-        RB_CHECK(near(real_default.safety.q_min_deg[0], -360.0));
-        RB_CHECK(near(real_default.safety.q_min_deg[2], -360.0));
-        RB_CHECK(near(real_default.safety.q_max_deg[0], 360.0));
-        RB_CHECK(near(real_default.safety.q_max_deg[2], 360.0));
-    }
-
     {
         const rb_servo::DualArmConfig stack_real =
             rb_servo::loadConfigFromYaml((config_dir / "stack_real.yaml").string());
+        RB_CHECK(stack_real.left_robot.backend_type == rb_servo::BackendType::Rbpodo);
+        RB_CHECK(stack_real.right_robot.backend_type == rb_servo::BackendType::Rbpodo);
+        RB_CHECK(stack_real.left_robot.run_mode == rb_servo::RunMode::Real);
+        RB_CHECK(stack_real.right_robot.run_mode == rb_servo::RunMode::Real);
+        RB_CHECK(stack_real.left_robot.operation_mode == "real");
+        RB_CHECK(stack_real.right_robot.operation_mode == "real");
+        RB_CHECK(stack_real.servo.rate_hz == 500);
+        RB_CHECK(stack_real.servo.send_servo_commands);
+        RB_CHECK(stack_real.servo.allow_real_motion_with_suspect_diagnostics);
+        RB_CHECK(!stack_real.servo.allow_controller_simulation_motion);
+        RB_CHECK(near(stack_real.left_robot.servo_t1_sec, 0.002));
+        RB_CHECK(near(stack_real.right_robot.servo_t1_sec, 0.002));
+        RB_CHECK(near(stack_real.left_robot.servo_t2_sec, 0.021));
+        RB_CHECK(near(stack_real.right_robot.servo_t2_sec, 0.021));
+        RB_CHECK(stack_real.left_robot.disable_waiting_ack);
+        RB_CHECK(stack_real.right_robot.disable_waiting_ack);
+        RB_CHECK(near(stack_real.safety.q_min_deg[0], -360.0));
+        RB_CHECK(near(stack_real.safety.q_max_deg[2], 360.0));
+        RB_CHECK(stack_real.network.command_bind == "udp://127.0.0.1:50256");
+        RB_CHECK(stack_real.network.state_pub_endpoint == "udp://127.0.0.1:50356");
+        RB_CHECK(stack_real.network.state_pub_endpoints.size() == 5);
+        RB_CHECK(stack_real.command_source.enforce_lease);
+        RB_CHECK(stack_real.network.command_source_enforce_lease);
+        RB_CHECK(near(stack_real.command_source.lease_timeout_sec, 60.0));
+        RB_CHECK(stack_real.cartesian_control.enable);
+        RB_CHECK(stack_real.cartesian_control.allow_in_real);
+        RB_CHECK(!stack_real.cartesian_control.allow_in_controller_simulation);
         RB_CHECK(stack_real.cartesian_control.tcp_pose_target_profile_default == "umi_large_smooth");
         RB_CHECK(stack_real.cartesian_control.tcp_pose_target_profiles.size() == 3);
         bool has_spacemouse = false;
@@ -129,76 +123,67 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(has_spacemouse);
         RB_CHECK(has_umi);
         RB_CHECK(has_flow);
+        RB_CHECK(stack_real.force_control.provider == "null");
+        RB_CHECK(!stack_real.force_control.enable);
+        RB_CHECK(stack_real.kinematics.enable);
+        RB_CHECK(stack_real.kinematics.provider == "pinocchio");
     }
 
     {
-        EnvGuard real_gate("RB_ALLOW_REAL_ROBOT", "1");
-        EnvGuard motion_gate("RB_ALLOW_REAL_MOTION", "1");
-        EnvGuard physical_cartesian_gate("RB_ALLOW_REAL_CARTESIAN", nullptr);
-
-        const rb_servo::DualArmConfig pgmode =
-            rb_servo::loadConfigFromYaml(
-                (config_dir / "dual_real_rbpodo_pgmode_spacemouse_500hz_ack.example.yaml").string()
-            );
-        RB_CHECK(pgmode.left_robot.backend_type == rb_servo::BackendType::Rbpodo);
-        RB_CHECK(pgmode.right_robot.backend_type == rb_servo::BackendType::Rbpodo);
-        RB_CHECK(pgmode.left_robot.run_mode == rb_servo::RunMode::Real);
-        RB_CHECK(pgmode.right_robot.run_mode == rb_servo::RunMode::Real);
-        RB_CHECK(pgmode.left_robot.operation_mode == "simulation");
-        RB_CHECK(pgmode.right_robot.operation_mode == "simulation");
-        RB_CHECK(pgmode.servo.rate_hz == 500);
-        RB_CHECK(pgmode.servo.send_servo_commands);
-        RB_CHECK(pgmode.servo.allow_controller_simulation_motion);
-        RB_CHECK(pgmode.servo.allow_controller_simulation_diagnostics_suspect);
-        RB_CHECK(pgmode.servo.controller_simulation_treat_unreliable_status_fields_as_unavailable);
-        RB_CHECK(pgmode.servo.controller_simulation_async_supervision_nonlatching);
-        RB_CHECK(!pgmode.servo.allow_controller_simulation_init_error);
-        RB_CHECK(!pgmode.servo.allow_controller_simulation_not_activated);
-        RB_CHECK(pgmode.left_robot.allow_controller_simulation_diagnostics_suspect);
-        RB_CHECK(pgmode.right_robot.allow_controller_simulation_diagnostics_suspect);
-        RB_CHECK(pgmode.left_robot.controller_simulation_treat_unreliable_status_fields_as_unavailable);
-        RB_CHECK(pgmode.right_robot.controller_simulation_treat_unreliable_status_fields_as_unavailable);
-        RB_CHECK(!pgmode.left_robot.allow_controller_simulation_init_error);
-        RB_CHECK(!pgmode.right_robot.allow_controller_simulation_init_error);
-        RB_CHECK(near(pgmode.left_robot.servo_t1_sec, 0.002));
-        RB_CHECK(near(pgmode.right_robot.servo_t1_sec, 0.002));
-        RB_CHECK(near(pgmode.left_robot.servo_t2_sec, 0.08));
-        RB_CHECK(near(pgmode.left_robot.servo_alpha, 0.8));
-        RB_CHECK(!pgmode.left_robot.disable_waiting_ack);
-        RB_CHECK(!pgmode.right_robot.disable_waiting_ack);
-        RB_CHECK(pgmode.servo.rbpodo_async_streaming.enable);
-        RB_CHECK(pgmode.servo.rbpodo_async_streaming.mode ==
-                 rb_servo::RbpodoAsyncStreamingMode::SdkAckWorker);
-        RB_CHECK(pgmode.servo.rbpodo_async_streaming.rate_hz == 500);
-        RB_CHECK(pgmode.servo.rbpodo_async_streaming.reference_supervision.policy ==
-                 rb_servo::RbpodoAsyncReferenceSupervisionPolicy::FaultLatch);
-        RB_CHECK(pgmode.servo.rbpodo_async_streaming.diagnostics.publish_per_command_jsonl);
-        RB_CHECK(near(pgmode.safety.q_min_deg[0], -360.0));
-        RB_CHECK(near(pgmode.safety.q_max_deg[2], 360.0));
-        RB_CHECK(pgmode.safety.controller_simulation_tracking_error_source ==
+        const rb_servo::DualArmConfig stack_sim =
+            rb_servo::loadConfigFromYaml((config_dir / "stack_sim.yaml").string());
+        RB_CHECK(stack_sim.left_robot.backend_type == rb_servo::BackendType::Rbpodo);
+        RB_CHECK(stack_sim.right_robot.backend_type == rb_servo::BackendType::Rbpodo);
+        RB_CHECK(stack_sim.left_robot.run_mode == rb_servo::RunMode::Real);
+        RB_CHECK(stack_sim.right_robot.run_mode == rb_servo::RunMode::Real);
+        RB_CHECK(stack_sim.left_robot.operation_mode == "simulation");
+        RB_CHECK(stack_sim.right_robot.operation_mode == "simulation");
+        RB_CHECK(stack_sim.servo.rate_hz == 500);
+        RB_CHECK(stack_sim.servo.send_servo_commands);
+        RB_CHECK(stack_sim.servo.allow_controller_simulation_motion);
+        RB_CHECK(stack_sim.servo.allow_controller_simulation_diagnostics_suspect);
+        RB_CHECK(stack_sim.servo.controller_simulation_treat_unreliable_status_fields_as_unavailable);
+        RB_CHECK(stack_sim.servo.allow_controller_simulation_init_error);
+        RB_CHECK(stack_sim.servo.allow_controller_simulation_not_activated);
+        RB_CHECK(stack_sim.left_robot.allow_controller_simulation_diagnostics_suspect);
+        RB_CHECK(stack_sim.right_robot.allow_controller_simulation_diagnostics_suspect);
+        RB_CHECK(stack_sim.left_robot.controller_simulation_treat_unreliable_status_fields_as_unavailable);
+        RB_CHECK(stack_sim.right_robot.controller_simulation_treat_unreliable_status_fields_as_unavailable);
+        RB_CHECK(stack_sim.left_robot.allow_controller_simulation_init_error);
+        RB_CHECK(stack_sim.right_robot.allow_controller_simulation_init_error);
+        RB_CHECK(near(stack_sim.left_robot.servo_t1_sec, 0.002));
+        RB_CHECK(near(stack_sim.right_robot.servo_t1_sec, 0.002));
+        RB_CHECK(near(stack_sim.left_robot.servo_t2_sec, 0.021));
+        RB_CHECK(near(stack_sim.left_robot.servo_alpha, 10.0));
+        RB_CHECK(stack_sim.left_robot.disable_waiting_ack);
+        RB_CHECK(stack_sim.right_robot.disable_waiting_ack);
+        RB_CHECK(!stack_sim.servo.rbpodo_async_streaming.enable);
+        RB_CHECK(near(stack_sim.safety.q_min_deg[0], -360.0));
+        RB_CHECK(near(stack_sim.safety.q_max_deg[2], 360.0));
+        RB_CHECK(stack_sim.safety.controller_simulation_tracking_error_source ==
                  rb_servo::ControllerSimulationTrackingErrorSource::Reference);
-        RB_CHECK(pgmode.safety.controller_simulation_tracking_error_nonlatching);
-        RB_CHECK(pgmode.safety.controller_simulation_physical_motion_policy ==
-                 rb_servo::ControllerSimulationPhysicalMotionPolicy::FaultLatch);
-        RB_CHECK(pgmode.network.command_bind == "udp://127.0.0.1:50256");
-        RB_CHECK(pgmode.network.state_pub_endpoint == "udp://127.0.0.1:50356");
-        RB_CHECK(pgmode.network.state_pub_endpoints.size() == 3);
-        RB_CHECK(pgmode.network.state_pub_endpoints[1] == "udp://127.0.0.1:50366");
-        RB_CHECK(pgmode.network.state_pub_endpoints[2] == "udp://127.0.0.1:50376");
-        RB_CHECK(pgmode.command_source.enforce_lease);
-        RB_CHECK(pgmode.network.command_source_enforce_lease);
-        RB_CHECK(near(pgmode.command_source.lease_timeout_sec, 60.0));
-        RB_CHECK(pgmode.cartesian_control.enable);
-        RB_CHECK(pgmode.cartesian_control.allow_in_controller_simulation);
-        RB_CHECK(!pgmode.cartesian_control.allow_in_real);
-        RB_CHECK(pgmode.cartesian_control.controller_simulation_servo_state_source ==
+        RB_CHECK(stack_sim.safety.controller_simulation_tracking_error_nonlatching);
+        RB_CHECK(stack_sim.safety.controller_simulation_physical_motion_policy ==
+                 rb_servo::ControllerSimulationPhysicalMotionPolicy::WarnOnly);
+        RB_CHECK(stack_sim.network.command_bind == "udp://127.0.0.1:50256");
+        RB_CHECK(stack_sim.network.state_pub_endpoint == "udp://127.0.0.1:50356");
+        RB_CHECK(stack_sim.network.state_pub_endpoints.size() == 5);
+        RB_CHECK(stack_sim.network.state_pub_endpoints[1] == "udp://127.0.0.1:50366");
+        RB_CHECK(stack_sim.network.state_pub_endpoints[2] == "udp://127.0.0.1:50376");
+        RB_CHECK(stack_sim.command_source.enforce_lease);
+        RB_CHECK(stack_sim.network.command_source_enforce_lease);
+        RB_CHECK(near(stack_sim.command_source.lease_timeout_sec, 60.0));
+        RB_CHECK(stack_sim.cartesian_control.enable);
+        RB_CHECK(stack_sim.cartesian_control.allow_in_controller_simulation);
+        RB_CHECK(stack_sim.cartesian_control.allow_in_real);
+        RB_CHECK(stack_sim.cartesian_control.controller_simulation_servo_state_source ==
                  rb_servo::CartesianControllerSimulationStateSource::Reference);
-        RB_CHECK(pgmode.cartesian_control.controller_simulation_divergence_source ==
+        RB_CHECK(stack_sim.cartesian_control.controller_simulation_divergence_source ==
                  rb_servo::CartesianControllerSimulationStateSource::Reference);
-        RB_CHECK(pgmode.force_control.provider == "null");
-        RB_CHECK(!pgmode.force_control.enable);
-        RB_CHECK(pgmode.kinematics.enable);
-        RB_CHECK(pgmode.kinematics.provider == "pinocchio");
+        RB_CHECK(stack_sim.force_control.provider == "null");
+        RB_CHECK(!stack_sim.force_control.enable);
+        RB_CHECK(stack_sim.kinematics.enable);
+        RB_CHECK(stack_sim.kinematics.provider == "pinocchio");
     }
 
     return true;

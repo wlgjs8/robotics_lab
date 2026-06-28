@@ -28,12 +28,22 @@ void signalHandler(int) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string config_path = "config/dual_mock.yaml";
+    std::string config_path;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--config" && i + 1 < argc) {
             config_path = argv[++i];
+        } else if (arg == "--config") {
+            std::cerr << "--config requires a path\n";
+            return 2;
+        } else if (arg == "--help" || arg == "-h") {
+            std::cout << "usage: rb_servo_server --config <path>\n";
+            return 0;
         }
+    }
+    if (config_path.empty()) {
+        std::cerr << "usage: rb_servo_server --config <path>\n";
+        return 2;
     }
 
     std::signal(SIGINT, signalHandler);

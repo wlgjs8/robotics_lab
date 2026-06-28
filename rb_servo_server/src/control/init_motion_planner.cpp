@@ -877,6 +877,17 @@ InitMotionPlanResult InitMotionPlanner::plan(
             // could not escape (start in/near collision); both trees large but unconnected
             // means a narrow passage / the sample band (sample_margin_deg) is too tight or
             // the time/iteration budget is too small.
+            // Name the nearest colliding pair at BOTH endpoints so an RRT-budget failure
+            // in a tight clearance band is actionable: it tells whether start/goal are
+            // pinched by the two arms (self), an arm vs its stand/floor (external), or a
+            // specific link — i.e. a real proximity vs an over-conservative capsule model.
+            const CollisionDistanceSummary start_s = d.eval(rrt_start);
+            const CollisionDistanceSummary goal_s = d.eval(goal);
+            const auto pairTxt = [](const CollisionDistanceSummary& s) {
+                const std::string a = s.nearest_name_a.empty() ? "unknown" : s.nearest_name_a;
+                const std::string b = s.nearest_name_b.empty() ? "unknown" : s.nearest_name_b;
+                return a + " <-> " + b;
+            };
             std::ostringstream m;
             m << "init motion plan: RRT-Connect did not find a path within budget"
               << " (iters=" << iter << "/" << d.cfg.max_iterations
@@ -889,6 +900,16 @@ InitMotionPlanResult InitMotionPlanner::plan(
               << ", start_clear_m=" << d.minClearance(rrt_start)
               << ", goal_clear_m=" << result.goal_clear_m
               << ", thresh_m=" << d.clear_threshold_m
+              << ", start_nearest_pair=" << pairTxt(start_s)
+              << " (dist=" << start_s.nearest_distance_m << " m, "
+              << (start_s.nearest_external ? "external" : "self")
+              << (start_s.nearest_category.empty() ? std::string()
+                                                   : ", " + start_s.nearest_category) << ")"
+              << ", goal_nearest_pair=" << pairTxt(goal_s)
+              << " (dist=" << goal_s.nearest_distance_m << " m, "
+              << (goal_s.nearest_external ? "external" : "self")
+              << (goal_s.nearest_category.empty() ? std::string()
+                                                  : ", " + goal_s.nearest_category) << ")"
               << ", sample_margin_deg=" << d.cfg.sample_margin_deg
               << ", global_sample_fraction=" << d.cfg.global_sample_fraction << ")";
             result.message = m.str();
@@ -963,8 +984,13 @@ InitMotionLinearResult InitMotionPlanner::planLinearMove(
     }
 
     // IK the target pose(s) to a joint goal (seeded from start -> nearest branch).
+    // Use solveIkToTarget (full converged solution), NOT solveIk: the latter applies the
+    // per-tick branch-jump rate-limit, which caps a far goal to max_solution_jump_deg from
+    // the seed. That made a long linear move "reach" a pseudo-goal only a few degrees away
+    // and stop partway. Per-tick joint-speed smoothness is handled downstream by the detour
+    // pursuit / Cartesian executor, not by clamping the planning goal.
     if (left_active) {
-        const IkResult ik = d.kin->solveIk(ArmId::Left, goal_pose_left, start_left, d.left_mount);
+        const IkResult ik = d.kin->solveIkToTarget(ArmId::Left, goal_pose_left, start_left, d.left_mount);
         if (!ik.success) {
             res.message = "linear move: left goal IK failed";
             return res;
@@ -972,7 +998,7 @@ InitMotionLinearResult InitMotionPlanner::planLinearMove(
         res.goal_left = ik.q_solution_deg;
     }
     if (right_active) {
-        const IkResult ik = d.kin->solveIk(ArmId::Right, goal_pose_right, start_right, d.right_mount);
+        const IkResult ik = d.kin->solveIkToTarget(ArmId::Right, goal_pose_right, start_right, d.right_mount);
         if (!ik.success) {
             res.message = "linear move: right goal IK failed";
             return res;

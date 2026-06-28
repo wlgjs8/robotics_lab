@@ -430,7 +430,9 @@ bool testLinkCollisionPointsInStand() {
 }
 
 bool testConfiguredMountNormals() {
-    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml((servoRoot() / "config" / "dual_mock.yaml").string());
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.left_mount.base_pose_in_stand = {0.15707, -0.17036, 0.58036, 2.186649, 0.523831, 2.526296};
+    cfg.right_mount.base_pose_in_stand = {-0.15707, -0.17036, 0.58036, 2.186649, -0.523831, -2.526296};
     const std::array<double, 3> left_normal = shoulderMountNormal(cfg.left_mount.base_pose_in_stand, rb_servo::ArmId::Left);
     const std::array<double, 3> right_normal = shoulderMountNormal(cfg.right_mount.base_pose_in_stand, rb_servo::ArmId::Right);
 

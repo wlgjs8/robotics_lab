@@ -1,7 +1,10 @@
 #include "rb_servo/control/trajectory_filter.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <iostream>
 
 namespace rb_servo {
 namespace {
@@ -168,8 +171,22 @@ JointArray TrajectoryFilter::smdJointTarget(
     // been called). The internal state must always continue exactly from the
     // caller's previous_sent_target to stay jump-free.
     constexpr double kContinuityTolDeg = 1e-6;
-    if (!joint_smd_.active() ||
-        !nearlyEqualJointArray(joint_smd_.position(), previous_sent_target, kContinuityTolDeg)) {
+    // How far the SMD's last output drifted from what was actually sent (safety/output-MA
+    // can modify it). A non-trivial mismatch here forces a reset below, which defeats the
+    // SMD's smoothing — instrumented to diagnose init-motion jerk.
+    const bool was_active = joint_smd_.active();
+    double continuity_mismatch_deg = 0.0;
+    if (was_active) {
+        const JointArray pos = joint_smd_.position();
+        for (int i = 0; i < kDof; ++i) {
+            continuity_mismatch_deg =
+                std::max(continuity_mismatch_deg, std::abs(pos[i] - previous_sent_target[i]));
+        }
+    }
+    const bool reset =
+        !was_active ||
+        !nearlyEqualJointArray(joint_smd_.position(), previous_sent_target, kContinuityTolDeg);
+    if (reset) {
         JointArray dq0{};
         if (has_last_previous_sent_target_ && dt_sec > 0.0 && std::isfinite(dt_sec)) {
             for (int i = 0; i < kDof; ++i) {
@@ -179,7 +196,35 @@ JointArray TrajectoryFilter::smdJointTarget(
         joint_smd_.reset(previous_sent_target, dq0);
     }
     joint_smd_.setGoal(raw_target);
-    return joint_smd_.step(dt_sec);
+    const JointArray out = joint_smd_.step(dt_sec);
+    // DIAGNOSTIC (throttled ~1 Hz, shared across both arms): is the joint-target SMD
+    // persisting tick-to-tick, or being reset every tick? A reset WHILE it was already
+    // active means safety/output-MA changed the SMD output before it became prev_sent, so
+    // the continuity check (==prev_sent) fails and the SMD re-seeds from scratch each tick
+    // — that defeats its accel/jerk smoothing and lets per-tick goal jitter pass straight
+    // through (the init-motion jerk hypothesis). High active-resets/sec == defeated.
+    {
+        static std::atomic<long long> calls{0}, active_resets{0}, last_ns{0}, max_mismatch_micro{0};
+        calls.fetch_add(1, std::memory_order_relaxed);
+        if (reset && was_active) active_resets.fetch_add(1, std::memory_order_relaxed);
+        const long long mm = static_cast<long long>(continuity_mismatch_deg * 1e6);
+        long long cur = max_mismatch_micro.load(std::memory_order_relaxed);
+        while (mm > cur &&
+               !max_mismatch_micro.compare_exchange_weak(cur, mm, std::memory_order_relaxed)) {}
+        const long long now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        long long prev = last_ns.load(std::memory_order_relaxed);
+        if ((prev == 0 || now - prev > 1000000000LL) &&
+            last_ns.compare_exchange_strong(prev, now, std::memory_order_relaxed)) {
+            const long long c = calls.exchange(0, std::memory_order_relaxed);
+            const long long r = active_resets.exchange(0, std::memory_order_relaxed);
+            const long long mmx = max_mismatch_micro.exchange(0, std::memory_order_relaxed);
+            std::cerr << "[INFO] joint_target SMD: " << r << "/" << c
+                      << " active-continuity-resets/sec (high == smoothing defeated -> jerk), "
+                      << "max_mismatch=" << (static_cast<double>(mmx) * 1e-6) << " deg\n";
+        }
+    }
+    return out;
 }
 
 }  // namespace rb_servo

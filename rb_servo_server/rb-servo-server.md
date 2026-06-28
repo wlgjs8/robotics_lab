@@ -141,7 +141,7 @@ Commands:
 ```bash
 cmake -S . -B build
 cmake --build build -j
-./build/rb_servo_server --config config/dual_mock.yaml
+./build/rb_servo_server --config config/local/<mock-config>.yaml
 ```
 
 In another terminal:

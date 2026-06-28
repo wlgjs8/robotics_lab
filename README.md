@@ -367,16 +367,14 @@ http://127.0.0.1:8080
 
 ## 표준 Config
 
-Mock config:
+Tracked stack configs:
 
-- `rb_servo_server/config/dual_mock.yaml`
+- `rb_servo_server/config/stack_sim.yaml` — rbpodo controller-simulation (`make run MODE=sim`)
+- `rb_servo_server/config/stack_real.yaml` — physical real stack (`make run`, operator-supervised)
 
-Real robot template:
+Site-local mock / real / 컨트롤러 시뮬레이션(VM·onbox) config (gitignore):
 
-- `rb_servo_server/config/dual_real.example.yaml`
-
-Site-local real / 컨트롤러 시뮬레이션(VM·onbox) config (gitignore):
-
+- `rb_servo_server/config/local/*.yaml`
 - `rb_servo_server/config/local/dual_real_readonly.yaml`
 - `rb_servo_server/config/local/dual_real_motion.yaml`
 

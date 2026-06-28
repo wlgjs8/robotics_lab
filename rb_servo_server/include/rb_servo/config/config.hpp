@@ -788,6 +788,18 @@ struct PoseTrackSmdConfig {
     double max_linear_accel_m_s2 = 0.0;
     double max_angular_velocity_rad_s = 0.0;
     double max_angular_accel_rad_s2 = 0.0;
+    // Re-engagement re-latch guard. If > 0, a single updateGoalFromCommand delta
+    // larger than this (position m / rotation rad) is treated as a re-anchor after a
+    // teleop disengage gap — the command buffer holds the last TcpPoseTarget across
+    // the deadman-release gap, keeping the tracker active, then the source re-anchors
+    // to the live pose, so the first post-gap delta is the whole accumulated lead.
+    // Integrating it would lurch the arm on the next pedal/deadman press; instead we
+    // RE-LATCH the reference (goal unchanged). Real per-tick teleop deltas are ~1 mm
+    // at 500 Hz (source-capped well below this), so a healthy stream never trips it.
+    // 0 = disabled (legacy: integrate any delta — required for model-rollout / test
+    // profiles that step the goal by large synthetic deltas).
+    double reengage_relatch_max_step_m = 0.0;
+    double reengage_relatch_max_step_rad = 0.0;
     // Velocity feedforward: damp on the velocity ERROR (goal_dot - x_dot) rather
     // than the absolute x_dot, so the error dynamics become
     //   e_ddot + 2*zeta*wn*e_dot + wn^2*e = goal_ddot.
@@ -799,6 +811,18 @@ struct PoseTrackSmdConfig {
     // (auto stand/body frame; valid because every caller integrates the goal once
     // per step()). Off by default = exact legacy 2nd-order SMD.
     bool velocity_feedforward = false;
+    // Singularity velocity scaling (manipulability guard). As the last IK solve's
+    // task-Jacobian min singular value drops, scale the SMD's max tracking velocity
+    // down so a near-singular pose is approached GENTLY (the arm physically cannot
+    // track Cartesian fast there) instead of lurching, and the operator feels the
+    // slow-down and backs out. scale = 1 at sigma >= full_sigma, ramps linearly to
+    // scale_min at sigma <= floor_sigma (kept > 0 so motion never fully freezes and
+    // the operator can always command back out). Touches ONLY the velocity caps —
+    // NOT IK damping/iterations — so it cannot cause IK max_iterations. full_sigma
+    // <= 0 disables (default off; preserves every non-UMI profile).
+    double singularity_scale_full_sigma = 0.0;
+    double singularity_scale_floor_sigma = 0.0;
+    double singularity_scale_min = 1.0;
 };
 
 struct TcpPoseTargetProfileConfig {

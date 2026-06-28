@@ -61,16 +61,18 @@ Ubuntu robotpkg package under `/opt/openrobots` using
 `../scripts/install_deps_ubuntu.sh --profile hardware-free`, conda/mamba, or a
 source install exposed through `CMAKE_PREFIX_PATH`.
 
-## Run mock mode
+## Run controller-simulation mode
 
 ```bash
-./build/rb_servo_server --config config/dual_mock.yaml
+cd /home/plaif/workspace/robotics_lab
+make run MODE=sim
 ```
 
-In another terminal:
+For a hardware-free mock smoke, provide a site-local mock YAML under
+`config/local/` and pass it explicitly:
 
 ```bash
-python3 tools/send_dual_joint_sine.py --rate 20 --amp-deg 2 --freq 0.2
+./build/rb_servo_server --config config/local/<mock-config>.yaml
 ```
 
 Stop the server with `Ctrl+C`.
@@ -83,8 +85,9 @@ python3 tools/plot_servo_log.py logs/servo_log.csv
 
 ## Hardware-free validation
 
-Hardware-free validation runs in mock mode (`config/dual_mock.yaml`) and checks
-Cartesian behavior against an already-running rbpodo or mock server with
+Hardware-free validation runs C++/Python tests and, when a local mock config is
+available, mock-mode smoke against that explicit `config/local/*.yaml`. Cartesian
+behavior is checked against an already-running rbpodo or mock server with
 `scripts/cartesian_acceptance.py --mode assume-running`. For controller-level
 simulation, use the rbpodo controller `pgmode` simulation (`make run MODE=sim`)
 or the Rainbow virtual control-box VMs.
@@ -174,6 +177,6 @@ snapshots and sends only validated UDP JSON commands; the server is built with
 Pinocchio enabled so FK/IK powers the GUI TCP target tests. See
 `docs/gui_operator_console.md`.
 
-For hardware-free runs, start `rb_servo_server` directly with
-`config/dual_mock.yaml` (MockBackend). Docker remains in use only for
+For hardware-free mock runs, start `rb_servo_server` directly with an explicit
+site-local mock config under `config/local/`. Docker remains in use only for
 `camera_server` / `camera_server_mock`.

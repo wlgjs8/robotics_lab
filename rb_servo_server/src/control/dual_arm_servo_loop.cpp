@@ -3448,6 +3448,11 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             right_pose_track_smd_ = SmdPoseTracker(right_tcp_profile.pose_track_smd);
             right_pose_track_profile_name_ = right_tcp_profile.name;
         }
+        // Manipulability guard: feed the previous tick's IK min singular value into each
+        // SMD so step() scales tracking velocity down near a singularity (config
+        // singularity_scale_*). Velocity-only — cannot stall the IK.
+        left_pose_track_smd_.setMinSingular(left_last_cartesian_solve_.ik_min_singular_value);
+        right_pose_track_smd_.setMinSingular(right_last_cartesian_solve_.ik_min_singular_value);
         const ArmCommand left_pose_track_command = applyPoseTrackSmd(
             effective_command.left,
             left_tcp_profile.pose_track_smd,
@@ -5164,14 +5169,22 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
     }
 
     if (is_init) {
+        // Launching an init for one arm must NOT cancel an in-flight init on the OTHER,
+        // disjoint arm: the left/right execs drive their own arm independently and each
+        // rewrite_selected only writes its active arm's command, so they run concurrently.
+        // Reset the other exec ONLY when it OVERLAPS the arm(s) we are about to drive (a
+        // prior both-arm exec) — otherwise two execs would fight over the same arm.
         if (left_init && right_init) {
+            // Both-arm init drives the LEFT exec for both arms; drop any separate right exec.
             if (non_idle(right_init_motion_exec_)) right_init_motion_exec_ = InitMotionExec{};
         } else if (left_init) {
-            if (left_init_motion_exec_.right_active) left_init_motion_exec_ = InitMotionExec{};
-            if (non_idle(right_init_motion_exec_)) right_init_motion_exec_ = InitMotionExec{};
-        } else if (right_init) {
+            // Left-only: a right-ONLY exec keeps running; clear the right exec only if it
+            // also drives the LEFT arm (a both-arm exec) -> overlap.
             if (right_init_motion_exec_.left_active) right_init_motion_exec_ = InitMotionExec{};
-            if (non_idle(left_init_motion_exec_)) left_init_motion_exec_ = InitMotionExec{};
+        } else if (right_init) {
+            // Right-only: a left-ONLY exec keeps running; clear the left exec only if it
+            // also drives the RIGHT arm (a both-arm exec) -> overlap.
+            if (left_init_motion_exec_.right_active) left_init_motion_exec_ = InitMotionExec{};
         }
     }
 
@@ -5415,22 +5428,25 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         }
     };
 
-    if (is_init) {
-        if (left_init && right_init) {
-            process_exec(left_init_motion_exec_, true, true, true);
-        } else {
-            if (left_init) process_exec(left_init_motion_exec_, true, false, true);
-            if (right_init) process_exec(right_init_motion_exec_, false, true, true);
-        }
-    } else {
-        if (sequence_active(left_init_motion_exec_)) {
-            process_exec(left_init_motion_exec_, left_init_motion_exec_.left_active,
-                         left_init_motion_exec_.right_active, false);
-        }
-        if (sequence_active(right_init_motion_exec_)) {
-            process_exec(right_init_motion_exec_, right_init_motion_exec_.left_active,
-                         right_init_motion_exec_.right_active, false);
-        }
+    // Drive each arm's exec at most once per tick. A FRESH init request for an arm
+    // (re)launches + advances ITS exec; any OTHER in-flight exec is CONTINUED. Crucially
+    // the continuation is NOT gated on is_init: a fresh single-arm init for one arm must
+    // not pause the OTHER arm's in-flight init while its command is fresh — both run
+    // concurrently. (Both-arm init drives the left exec for both arms; the right exec was
+    // reset above, so it is idle and not continued here.)
+    const bool left_exec_fresh = is_init && left_init;
+    const bool right_exec_fresh = is_init && right_init && !left_init;
+    if (left_exec_fresh) {
+        process_exec(left_init_motion_exec_, true, right_init, true);
+    } else if (sequence_active(left_init_motion_exec_)) {
+        process_exec(left_init_motion_exec_, left_init_motion_exec_.left_active,
+                     left_init_motion_exec_.right_active, false);
+    }
+    if (right_exec_fresh) {
+        process_exec(right_init_motion_exec_, false, true, true);
+    } else if (sequence_active(right_init_motion_exec_)) {
+        process_exec(right_init_motion_exec_, right_init_motion_exec_.left_active,
+                     right_init_motion_exec_.right_active, false);
     }
     return command;
 }
@@ -5741,8 +5757,17 @@ bool DualArmServoLoop::workerBackedIoMode() const {
 }
 
 bool DualArmServoLoop::motionAllowed() const {
+    // The explicit ArmMotion arming step is no longer required: motion is accepted
+    // whenever the robot is connected and healthy. ConnectedHold (fresh connect / after
+    // DisarmMotion) now allows motion just like ArmedHold/Running, so a motion command
+    // (incl. InitMotion) executes without a preceding ArmMotion. Disconnected and every
+    // latched/emergency state still block (handled here by omission + the fault/E-stop
+    // short-circuits upstream). ArmMotion/DisarmMotion remain accepted as no-op state
+    // labels for backward compatibility (e.g. policy_runner still emits ArmMotion).
     const ServerMotionState state = motion_state_.load();
-    return state == ServerMotionState::ArmedHold || state == ServerMotionState::Running;
+    return state == ServerMotionState::ConnectedHold ||
+           state == ServerMotionState::ArmedHold ||
+           state == ServerMotionState::Running;
 }
 
 bool DualArmServoLoop::isRealMode() const {

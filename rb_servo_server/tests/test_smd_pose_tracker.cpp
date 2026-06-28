@@ -272,6 +272,83 @@ bool testDeactivateAndReanchor() {
     return true;
 }
 
+bool testReengageRelatchRejectsStaleJump() {
+    rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
+    cfg.reengage_relatch_max_step_m = 0.012;  // 12 mm
+    cfg.reengage_relatch_max_step_rad = 0.12;
+    rb_servo::SmdPoseTracker tracker(cfg);
+    tracker.reset({0.5, 0.2, 0.3, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand({0.5, 0.2, 0.3, 0.0, 0.0, 0.0});    // latch reference
+    tracker.updateGoalFromCommand({0.505, 0.2, 0.3, 0.0, 0.0, 0.0});  // 5 mm -> integrates
+    RB_CHECK(std::abs(tracker.goalPose().x - 0.505) < 1e-9);
+
+    // A 100 mm single delta is the re-engage stale jump: re-latch, goal must NOT move.
+    const auto before = tracker.reanchorCount();
+    tracker.updateGoalFromCommand({0.605, 0.2, 0.3, 0.0, 0.0, 0.0});
+    RB_CHECK(std::abs(tracker.goalPose().x - 0.505) < 1e-9);  // did not jump to 0.605
+    RB_CHECK(tracker.reanchorCount() == before + 1);
+    // A subsequent small delta integrates from the re-latched reference (0.605).
+    tracker.updateGoalFromCommand({0.610, 0.2, 0.3, 0.0, 0.0, 0.0});  // +5 mm
+    RB_CHECK(std::abs(tracker.goalPose().x - 0.510) < 1e-9);
+
+    // A large rotation delta also re-latches (orientation goal held).
+    tracker.updateGoalFromCommand({0.610, 0.2, 0.3, 0.0, 0.0, 0.5});  // +0.5 rad > 0.12
+    RB_CHECK(std::abs(tracker.goalPose().rz) < 1e-9);
+
+    // Disabled by default (thresholds 0): the same big delta integrates (legacy path,
+    // preserved for model-rollout / synthetic-step callers).
+    rb_servo::SmdPoseTracker legacy(defaultConfig());
+    legacy.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    legacy.updateGoalFromCommand({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    legacy.updateGoalFromCommand({0.1, 0.0, 0.0, 0.0, 0.0, 0.0});
+    RB_CHECK(std::abs(legacy.goalPose().x - 0.1) < 1e-9);
+    return true;
+}
+
+bool testSingularityVelocityScaling() {
+    rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
+    cfg.natural_frequency_linear_hz = 1.0;
+    cfg.max_linear_velocity_m_s = 0.10;
+    cfg.singularity_scale_full_sigma = 0.10;
+    cfg.singularity_scale_floor_sigma = 0.04;
+    cfg.singularity_scale_min = 0.20;
+
+    auto peak_velocity = [&](const rb_servo::PoseTrackSmdConfig& c, double sigma) {
+        rb_servo::SmdPoseTracker t(c);
+        t.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+        t.updateGoalFromCommand({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+        t.updateGoalFromCommand({1.0, 0.0, 0.0, 0.0, 0.0, 0.0});  // big step -> saturate vmax
+        t.setMinSingular(sigma);
+        double vmax = 0.0, prev = 0.0;
+        for (int i = 0; i < 800; ++i) {
+            const double x = t.step(kDt).x;
+            vmax = std::max(vmax, (x - prev) / kDt);
+            prev = x;
+        }
+        return vmax;
+    };
+
+    const double v_full = peak_velocity(cfg, 0.20);  // sigma >= full -> scale 1 -> ~0.10
+    const double v_sing = peak_velocity(cfg, 0.04);  // sigma <= floor -> scale 0.20 -> ~0.02
+    const double v_mid = peak_velocity(cfg, 0.07);   // mid ramp -> scale 0.60 -> ~0.06
+    RB_CHECK(v_full > 0.08);
+    RB_CHECK(v_sing < 0.03);
+    RB_CHECK(v_sing < 0.4 * v_full);          // clearly slowed near singular
+    RB_CHECK(v_mid > v_sing && v_mid < v_full);  // monotone in sigma
+    RB_CHECK(v_sing > 1e-4);                  // never frozen (scale_min > 0) -> can back out
+    // sigma <= 0 means the IK did not compute the SVD (healthy pose) -> NO scaling, full
+    // speed. This is the regression guard: feeding 0 must NOT throttle to scale_min.
+    RB_CHECK(peak_velocity(cfg, 0.0) > 0.08);
+    RB_CHECK(peak_velocity(cfg, -1.0) > 0.08);
+
+    // Disabled by default (full_sigma 0): no scaling even at tiny sigma.
+    rb_servo::PoseTrackSmdConfig off = defaultConfig();
+    off.natural_frequency_linear_hz = 1.0;
+    off.max_linear_velocity_m_s = 0.10;
+    RB_CHECK(peak_velocity(off, 0.001) > 0.08);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -284,6 +361,8 @@ int main() {
     if (!testVelocityFeedforwardZeroesRampLag()) return 1;
     if (!testStepInfoClipFlagsAndReanchorCount()) return 1;
     if (!testDeactivateAndReanchor()) return 1;
+    if (!testReengageRelatchRejectsStaleJump()) return 1;
+    if (!testSingularityVelocityScaling()) return 1;
     std::cout << "smd_pose_tracker tests passed\n";
     return 0;
 }

@@ -1035,7 +1035,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--camera-preview",
         action="store_true",
-        default=True,
+        default=False,
         help=(
             "Open a live OpenCV window showing the camera frames the policy consumes "
             "(spawns policy_runner.camera_preview alongside the rollout)."

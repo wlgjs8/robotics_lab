@@ -1413,7 +1413,8 @@ check_worker_docs() {
 check_canonical_config_docs() {
   check_real_config_safety_docs
   grep_existing "Canonical Config Names" README.md docs rb_servo_server/docs || true
-  grep_existing "dual_mock.yaml" README.md docs rb_servo_server/docs rb_servo_server/config
+  grep_existing "stack_sim.yaml|stack_real.yaml" README.md docs rb_servo_server/docs rb_servo_server/config
+  grep_absent "dual_mock\.yaml" README.md docs rb_servo_server/docs rb_servo_server/config
   grep_absent "dual_real\.yaml" README.md docs AGENTS.md rb_servo_server/docs
 }
 

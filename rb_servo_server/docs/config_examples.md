@@ -15,12 +15,12 @@ config-loader tests together.
 ## Mock
 
 ```bash
-./build/rb_servo_server --config config/dual_mock.yaml
+./build/rb_servo_server --config config/local/<mock-config>.yaml
 ```
 
-Mock mode uses `MockBackend` for both arms. Hardware-free runs use `## Mock`
-above; controller-level simulation uses the rbpodo `pgmode` simulation flavor
-(`make run MODE=sim`).
+Mock mode uses `MockBackend` for both arms. No tracked runnable mock config is
+kept; use a site-local YAML under `config/local/`. Controller-level simulation
+uses the rbpodo `pgmode` simulation flavor (`make run MODE=sim`).
 
 ## Real robot
 

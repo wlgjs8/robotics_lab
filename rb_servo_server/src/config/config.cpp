@@ -145,6 +145,11 @@ void parsePoseTrackSmdConfig(const YAML::Node& smd, const std::string& path, Pos
         "max_angular_velocity_rad_s",
         "max_angular_accel_rad_s2",
         "velocity_feedforward",
+        "reengage_relatch_max_step_m",
+        "reengage_relatch_max_step_rad",
+        "singularity_scale_full_sigma",
+        "singularity_scale_floor_sigma",
+        "singularity_scale_min",
     }, path);
     if (has(smd, "enable")) {
         out->enable = asBool(smd["enable"], path + ".enable");
@@ -180,6 +185,26 @@ void parsePoseTrackSmdConfig(const YAML::Node& smd, const std::string& path, Pos
     }
     if (has(smd, "velocity_feedforward")) {
         out->velocity_feedforward = asBool(smd["velocity_feedforward"], path + ".velocity_feedforward");
+    }
+    if (has(smd, "reengage_relatch_max_step_m")) {
+        out->reengage_relatch_max_step_m =
+            asDouble(smd["reengage_relatch_max_step_m"], path + ".reengage_relatch_max_step_m");
+    }
+    if (has(smd, "reengage_relatch_max_step_rad")) {
+        out->reengage_relatch_max_step_rad =
+            asDouble(smd["reengage_relatch_max_step_rad"], path + ".reengage_relatch_max_step_rad");
+    }
+    if (has(smd, "singularity_scale_full_sigma")) {
+        out->singularity_scale_full_sigma =
+            asDouble(smd["singularity_scale_full_sigma"], path + ".singularity_scale_full_sigma");
+    }
+    if (has(smd, "singularity_scale_floor_sigma")) {
+        out->singularity_scale_floor_sigma =
+            asDouble(smd["singularity_scale_floor_sigma"], path + ".singularity_scale_floor_sigma");
+    }
+    if (has(smd, "singularity_scale_min")) {
+        out->singularity_scale_min =
+            asDouble(smd["singularity_scale_min"], path + ".singularity_scale_min");
     }
 }
 

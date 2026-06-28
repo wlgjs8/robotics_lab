@@ -4666,8 +4666,11 @@ bool testEmergencyWinsAndResetDoesNotRun() {
     target.right.has_joint_target = true;
     buffer.setCommand(target);
     sleepTicks();
-    RB_CHECK(loop.motionState() == rb_servo::ServerMotionState::ConnectedHold);
+    // ArmMotion is no longer required: a JointTarget executes straight from ConnectedHold
+    // (after the fault reset) -> Running, without a preceding ArmMotion.
+    RB_CHECK(loop.motionState() == rb_servo::ServerMotionState::Running);
 
+    // ArmMotion remains accepted as a no-op state label; motion keeps running.
     buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
     sleepTicks();
     buffer.setCommand(target);

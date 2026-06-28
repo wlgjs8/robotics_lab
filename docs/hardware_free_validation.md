@@ -81,10 +81,10 @@ not acceptance evidence.
 
 ## Mock Smoke
 
-Run `rb_servo_server` with `config/dual_mock.yaml` (MockBackend) and drive it
-with the bundled sender tools; the state stream and servo log are the smoke
-evidence. Controller behavior beyond mock is validated on rbpodo controller
-`pgmode` simulation (VM or onbox).
+Run `rb_servo_server` with an explicit site-local mock config under
+`rb_servo_server/config/local/` and drive it with the bundled sender tools; the
+state stream and servo log are the smoke evidence. Controller behavior beyond
+mock is validated on rbpodo controller `pgmode` simulation (VM or onbox).
 
 ## Direct And Worker I/O
 

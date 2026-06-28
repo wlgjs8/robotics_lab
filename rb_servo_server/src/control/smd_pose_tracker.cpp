@@ -69,6 +69,23 @@ void SmdPoseTracker::updateGoalFromCommand(const Pose6D& command_pose) {
     const Eigen::Vector3d command_position = positionOf(command_pose);
     const Eigen::Quaterniond command_rotation = rotationOf(command_pose);
 
+    // Re-engagement guard: a single delta far larger than any real per-tick teleop
+    // step means the command stream resumed after a disengage gap (the command buffer
+    // held the last TcpPoseTarget, keeping us active; the source then re-anchored to
+    // the live pose). Integrating that accumulated-lead jump would lurch the arm on
+    // the next pedal/deadman press. Re-latch the reference instead (goal unchanged).
+    // Disabled when thresholds are 0 (legacy: rollout / synthetic-step callers
+    // integrate any delta).
+    const double pos_step = (command_position - previous_position).norm();
+    const double ang_step =
+        math::log3((previous_rotation.conjugate() * command_rotation).toRotationMatrix()).norm();
+    if ((config_.reengage_relatch_max_step_m > 0.0 && pos_step > config_.reengage_relatch_max_step_m) ||
+        (config_.reengage_relatch_max_step_rad > 0.0 && ang_step > config_.reengage_relatch_max_step_rad)) {
+        previous_command_ = command_pose;  // re-latch reference; do not integrate the jump
+        ++reanchor_count_;                 // telemetry: smd_reanchor_count ticks when the guard fires
+        return;
+    }
+
     goal_position_ += command_position - previous_position;
     // World-frame (left) rotation delta, matching the stand-frame translation
     // delta semantics above.
@@ -85,6 +102,31 @@ Pose6D SmdPoseTracker::step(double dt_sec) {
     SmdStepInfo info;
     info.velocity_feedforward_used = config_.velocity_feedforward;
 
+    // Manipulability velocity scaling: as the last IK solve's min singular value drops
+    // below singularity_scale_full_sigma, scale the max tracking velocity down (linearly
+    // to singularity_scale_min at floor) so a near-singular pose is approached gently
+    // instead of lurching, and the operator feels the slow-down and backs out. This is
+    // velocity-only — it never touches IK damping or iteration count — so it cannot cause
+    // an IK max_iterations stall. Disabled when full_sigma <= 0; sigma <= 0 means the IK
+    // did NOT compute the SVD this solve (common in healthy poses) -> treat as unknown ->
+    // NO scaling (full speed). Only a real, positive singular value scales.
+    double vel_scale = 1.0;
+    if (config_.singularity_scale_full_sigma > 0.0 && last_min_singular_ > 0.0) {
+        const double full = config_.singularity_scale_full_sigma;
+        const double flr = config_.singularity_scale_floor_sigma;
+        const double smin = config_.singularity_scale_min;
+        if (last_min_singular_ >= full) {
+            vel_scale = 1.0;
+        } else if (last_min_singular_ <= flr || full <= flr) {
+            vel_scale = smin;
+        } else {
+            vel_scale = smin + (1.0 - smin) * (last_min_singular_ - flr) / (full - flr);
+        }
+    }
+    info.singularity_velocity_scale = vel_scale;
+    const double vmax_lin = config_.max_linear_velocity_m_s * vel_scale;
+    const double vmax_ang = config_.max_angular_velocity_rad_s * vel_scale;
+
     // Optional velocity feedforward. The damping term acts on the velocity ERROR
     // (x_dot - goal_dot) instead of the absolute x_dot, zeroing steady-state lag
     // for ramp goals. The goal velocity is always estimated from the goal delta
@@ -99,9 +141,9 @@ Pose6D SmdPoseTracker::step(double dt_sec) {
         // tracking error is small (the regime feedforward operates in).
         goal_angular_velocity =
             math::log3((previous_goal_rotation_.conjugate() * goal_rotation_).toRotationMatrix()) / dt;
-        goal_linear_velocity = clampNorm(goal_linear_velocity, config_.max_linear_velocity_m_s,
+        goal_linear_velocity = clampNorm(goal_linear_velocity, vmax_lin,
                                          &info.goal_linear_velocity_ff_clipped);
-        goal_angular_velocity = clampNorm(goal_angular_velocity, config_.max_angular_velocity_rad_s,
+        goal_angular_velocity = clampNorm(goal_angular_velocity, vmax_ang,
                                           &info.goal_angular_velocity_ff_clipped);
     }
     info.goal_linear_velocity = goal_linear_velocity;
@@ -121,7 +163,7 @@ Pose6D SmdPoseTracker::step(double dt_sec) {
     );
     // Semi-implicit Euler keeps the discrete system stable well past the
     // frequencies reachable at the 500 Hz servo rate.
-    velocity_ = clampNorm(velocity_ + linear_accel * dt, config_.max_linear_velocity_m_s,
+    velocity_ = clampNorm(velocity_ + linear_accel * dt, vmax_lin,
                           &info.linear_velocity_clipped);
     position_ += velocity_ * dt;
 
@@ -135,7 +177,7 @@ Pose6D SmdPoseTracker::step(double dt_sec) {
         config_.max_angular_accel_rad_s2, &info.angular_accel_clipped
     );
     angular_velocity_ = clampNorm(
-        angular_velocity_ + angular_accel * dt, config_.max_angular_velocity_rad_s,
+        angular_velocity_ + angular_accel * dt, vmax_ang,
         &info.angular_velocity_clipped);
     rotation_ = (rotation_ * Eigen::Quaterniond(math::exp3(angular_velocity_ * dt))).normalized();
 

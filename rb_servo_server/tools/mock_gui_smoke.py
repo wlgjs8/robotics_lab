@@ -30,9 +30,9 @@ def wait_for_snapshot(store: StateStore, timeout_sec: float = 2.0):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Mock-mode GUI contract smoke for rb_servo_server")
+    parser = argparse.ArgumentParser(description="GUI contract smoke for an explicit rb_servo_server config")
     parser.add_argument("--server", default=str(ROOT / "build" / "rb_servo_server"))
-    parser.add_argument("--config", default=str(ROOT / "config" / "dual_mock.yaml"))
+    parser.add_argument("--config", required=True)
     parser.add_argument("--keep-server", action="store_true", help="Do not launch/stop a server process")
     args = parser.parse_args()
 

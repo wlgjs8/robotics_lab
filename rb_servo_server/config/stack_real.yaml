@@ -77,11 +77,26 @@ servo:
 safety:
   q_min_deg: [-360, -360, -360, -360, -360, -360]
   q_max_deg: [360, 360, 360, 360, 360, 360]
-  # Halved vs the sim profile for the first physical run.
-  dq_max_deg_s: [60, 60, 60, 90, 90, 120]      # was halved [30,30,30,45,45,60] for first run
-  ddq_max_deg_s2: [300, 300, 300, 500, 500, 700]  # was halved for first run
-  # dq_max_deg_s: [30, 30, 30, 45, 45, 60]      # was halved for first run
-  # ddq_max_deg_s2: [150, 150, 150, 250, 250, 350]  # was halved for first run
+  # 2026-06-28: raised for UMI teleop responsiveness. The global outer clamp was
+  # the binding limit on UMI Cartesian tracking (left arm velocity-clamped 34%,
+  # accel-clamped 47% -> "robot follows too slowly"). Accel raised more (it was the
+  # dominant limiter). Does NOT speed up init/jog (joint_target_smd profile caps them
+  # at [30..60]) nor spacemouse (rarely hits this clamp). SAFETY: robot is ~1.3x
+  # faster / ~1.6x snappier -> supervised, E-stop ready; dial back if too aggressive.
+  # 2026-06-28 (2nd raise): user wants ~2x faster UMI + much lower follow latency.
+  # Accel pushed >2x (it was the dominant 47% limiter and drives the snappy catch-up
+  # that fixes "robot follows AFTER I move"). dq[0..2]=140 is ~1.75x (slightly under 2x:
+  # the proximal joints are likeliest to hit the controller's own hardware speed cap,
+  # which would reject/clamp). SAFETY: noticeably fast/aggressive — test in clear space,
+  # E-stop ready; if a move faults or the tracking-error latch trips, lower ddq then dq.
+  dq_max_deg_s: [170, 170, 170, 240, 240, 320]      # 2026-06-28 3rd raise (user: much faster); was [140,140,140,200,200,280]
+  ddq_max_deg_s2: [1500, 1500, 1500, 2300, 2300, 3000]  # was [1100,1100,1100,1700,1700,2300]
+  # dq_max_deg_s: [80, 80, 80, 110, 110, 140]        # prior (1st raise)
+  # ddq_max_deg_s2: [500, 500, 500, 800, 800, 1100]   # prior (1st raise)
+  # dq_max_deg_s: [60, 60, 60, 90, 90, 120]          # post-first-run
+  # ddq_max_deg_s2: [300, 300, 300, 500, 500, 700]    # post-first-run
+  # dq_max_deg_s: [30, 30, 30, 45, 45, 60]         # first-run halved
+  # ddq_max_deg_s2: [150, 150, 150, 250, 250, 350]  # first-run halved
   joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]
   # Keep wrist yaw cable-safe on JointTarget/InitMotion return: J6 must move to
   # the configured raw target, not the nearest +/-360 equivalent.
@@ -394,6 +409,16 @@ kinematics:
     # ik_branch_jump=1; set singular_region_eps just above that value (expected
     # well below the ~0.004 healthy-pose floor) and raise damping_max until the
     # branch-jump flag stops firing there. Only then enable.
+    # 2026-06-28: REVERTED to 0.10/0.08. The 0.14/0.15 experiment (to damp the
+    # near-singular jerks) RAN THE IK OUT OF ITERATIONS: when the operator drove the
+    # right arm deep into singularity (cart_min_singular ~0.033 at a far y=-0.82 reach),
+    # damping ramped to ~0.145, IK steps shrank, iters climbed 57->100 (the cap) ->
+    # 'max_iterations' failure -> per-arm hold -> the right arm FROZE for ~12 s. 100% of
+    # the failures were below eps=0.14. Higher damping_max trades IK convergence for
+    # smoothness and that trade broke convergence. The deep-singular jerk/freeze is an
+    # operator-reach problem (full extension), not a damping-tunable one — keep the arm
+    # out of that region; do NOT raise damping_max without also raising the IK iteration
+    # budget (which risks the 500 Hz loop deadline).
     singular_region_eps: 0.10
     damping_max: 0.08
     # Observability ON: flag a solve whose joint solution jumps > N deg from the
@@ -478,13 +503,51 @@ cartesian_control:
         enable: true
         damping_ratio_linear: 1.0
         damping_ratio_angular: 1.0
-        natural_frequency_linear_hz: 1.0
-        natural_frequency_angular_hz: 1.0
+        # 2026-06-28 (2nd raise): nf_linear 1.0->2.5 is the main FOLLOW-LATENCY fix.
+        # velocity_feedforward already zeros the steady-state ramp lag, so nf is a
+        # transient-bandwidth dial: at 1.0 Hz the arm took ~0.3-0.5 s to respond at
+        # starts/reversals ("robot follows AFTER I move"); 2.5 Hz tightens that to ~0.1 s.
+        # Critically damped (no overshoot). If UMI tracking jitter shows through, lower
+        # toward 2.0. (angular left at 1.0; raise if rotation also lags.)
+        # 2026-06-28 (3rd tune): q_sent stayed smooth but the ROBOT (q_actual) jerked up
+        # to 1.56 deg/tick under nf=2.5 + accel 2.8 — NOT singularity (branch jumps were
+        # at healthy minSV~0.17); it's the rbpodo controller jerking on over-aggressive
+        # accel/nf (accel clamp churning). Ease nf 2.5->2.0 and linear accel 2.8->2.0 to
+        # stay in the controller's smooth-tracking envelope; KEEP the high velocity (top
+        # speed is not the jerk source). Rotation raised per request (nf 1.0->2.0, omega
+        # 1.30->2.0). If still jerky, drop nf/accel further; if too soft, nudge back up.
+        natural_frequency_linear_hz: 2.0
+        natural_frequency_angular_hz: 2.0
         velocity_feedforward: true
-        max_linear_velocity_m_s: 0.35
-        max_linear_accel_m_s2: 0.80
-        max_angular_velocity_rad_s: 1.30
+        max_linear_velocity_m_s: 1.20
+        max_linear_accel_m_s2: 2.50
+        max_angular_velocity_rad_s: 2.00
         max_angular_accel_rad_s2: 5.00
+        # 2026-06-28: kill the UMI "robot moves when I just press the pedal" lurch.
+        # On re-engage the command buffer holds the last target across the deadman
+        # gap, keeping the SMD active, so the first re-anchored command delta (the
+        # whole accumulated lead, measured ~17 mm) was integrated into the goal. Any
+        # single delta over these caps is that re-engage jump (real per-tick teleop
+        # deltas are ~1 mm at 500 Hz, source-capped at max_target_lead 0.020) -> re-latch.
+        reengage_relatch_max_step_m: 0.012
+        reengage_relatch_max_step_rad: 0.12
+        # 2026-06-28: singularity velocity guard. Near a singularity the right arm
+        # lurched (q_actual ~408 deg/s on a tiny q_sent) because the IK needs huge joint
+        # velocity for small Cartesian motion there. Scale the SMD velocity down as the
+        # IK min singular value drops: full speed at sigma>=0.15, ramping to 0.12x at
+        # sigma<=0.05, so the arm SLOWS smoothly into the region instead of jerking and
+        # the operator feels it and backs out (scale stays >0 = never freezes). This is
+        # VELOCITY-ONLY -> it cannot stall the IK (unlike the reverted damping_max try).
+        # Tune: more slowdown -> raise full_sigma / lower scale_min; if the edges feel too
+        # slow -> lower full_sigma. (cart_min_singular ~0.17 in healthy poses, ~0.11 at
+        # the lurches, ~0.03 at the deep reach that froze.)
+        # 0.15->0.12: the right arm's NORMAL operating point is cart_min_singular ~0.154,
+        # so full=0.15 was throttling normal motion (guard active 33% of ticks -> "slow").
+        # 0.12 keeps full speed through normal operation and only engages when genuinely
+        # closer in (lurch ~0.11, deep ~0.03). If lurches return, lower scale_min/floor.
+        singularity_scale_full_sigma: 0.12
+        singularity_scale_floor_sigma: 0.05
+        singularity_scale_min: 0.12
       max_smd_goal_lead_m: 0.080
       max_smd_goal_lead_rad: 0.35
     flow_infer_smooth:
