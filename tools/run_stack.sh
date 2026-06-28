@@ -52,6 +52,12 @@ POLICY_CFG="policy_runner/config/stack_${MODE}.yaml"
 LOG_DIR="logs/stack"
 mkdir -p "$LOG_DIR"
 
+# One folder per `make run` for recorded episodes: data_<KST timestamp>, fixed
+# here at launch time so every episode from this session lands under the same
+# folder. policy_runner writes episode_000.hdf5, episode_001.hdf5, ... inside it
+# (under recording.output_dir). Override by exporting RB_RECORD_SESSION_DIR.
+export RB_RECORD_SESSION_DIR="${RB_RECORD_SESSION_DIR:-data_$(TZ='Asia/Seoul' date +%Y%m%d_%H%M%S)}"
+
 # Gripper server (docs/plans/gripper_server_design.md): single owner of the Pika
 # grippers. rb_servo_server forwards the arbitrated per-arm gripper setpoint
 # (left/right.gripper in the command packet) to it as gripper_cmd.v1 (:50410) and

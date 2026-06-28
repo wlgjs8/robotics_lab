@@ -1264,8 +1264,12 @@ def _save_gui_settings(settings: Mapping[str, Any]) -> tuple[bool, str]:
         directory = os.path.dirname(path)
         if directory:
             os.makedirs(directory, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
+        # 원자적 쓰기(temp+replace): camera_server stereo_worker가 1Hz로 이 파일을 읽으므로
+        # 부분 기록 상태를 읽지 않게 한다(truncated json → 워커가 기본 ROI로 폴백하는 깜빡임 방지).
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
             json.dump(dict(settings), handle, indent=2, sort_keys=True)
+        os.replace(tmp, path)
     except OSError as exc:
         return False, str(exc)
     return True, path
@@ -2708,6 +2712,20 @@ def build_gui(
                     "y": (-1000.0, 0.0),
                     "z": (0.0, 1000.0),
                 }
+                # 저장된 ROI(settings.json roi_min_m/roi_max_m)가 있으면 그 값으로 시작 →
+                # 재시작 후에도 perception/viz 클립 영역 유지(검출 워커와 같은 박스).
+                _roi_saved = _load_gui_settings()
+                _roi_lo_s = _roi_saved.get("roi_min_m")
+                _roi_hi_s = _roi_saved.get("roi_max_m")
+                if (isinstance(_roi_lo_s, (list, tuple)) and isinstance(_roi_hi_s, (list, tuple))
+                        and len(_roi_lo_s) == 3 and len(_roi_hi_s) == 3):
+                    try:
+                        _roi_axis_defaults_mm = {
+                            _a: (float(_roi_lo_s[_i]) * 1000.0, float(_roi_hi_s[_i]) * 1000.0)
+                            for _i, _a in enumerate(("x", "y", "z"))
+                        }
+                    except (TypeError, ValueError):
+                        pass
                 for _axis in ("x", "y", "z"):
                     _lo_default, _hi_default = _roi_axis_defaults_mm[_axis]
                     handles[f"roi_{_axis}_min"] = server.gui.add_slider(
@@ -2742,11 +2760,13 @@ def build_gui(
                     lo, hi = _roi_slider_bounds()
                     ok, message = safety.send_set_roi_bounds(lo, hi)
                     handles["roi_set_status"].value = ("OK: " if ok else "BLOCKED: ") + message
+                    _persist_roi_settings(handles)   # perception/viz 클립 영역도 함께 적용
 
                 def _roi_preview(_: Any) -> None:
                     # Live yellow preview box while dragging any bound slider.
                     lo, hi = _roi_slider_bounds()
                     update_roi_box_preview(handles.get("scene", {}), lo, hi)
+                    _persist_roi_settings(handles)   # 드래그 즉시 검출/클라우드 클립에 반영(≤1s)
 
                 for _axis in ("x", "y", "z"):
                     handles[f"roi_{_axis}_min"].on_update(_roi_preview)
@@ -3155,10 +3175,18 @@ def build_gui(
             handles["pc_dmax"] = server.gui.add_slider(
                 "depth max (m)", min=0.1, max=4.0, step=0.05,
                 initial_value=float(_pc.get("pc_dmax", 3.0)))
+            # stand-Z 점 상한 (mm, 0=off). Safety ROI(로봇 safety용 Z)와 독립한
+            # perception 전용 높이 컷 → ROI Z는 로봇 모션용으로 높게 두고 클라우드/검출만
+            # 낮게 자른다(로봇팔·배경 noise 제거). settings.json pc_clip_z_max_m(=값/1000)로
+            # 영속화, camera_server stereo_worker가 1Hz로 읽어 viz·검출 양쪽에 적용.
+            handles["pc_clip_z_max_mm"] = server.gui.add_slider(
+                "stand Z 상한 (mm, 0=off)", min=0, max=500, step=10,
+                initial_value=float(_pc.get("pc_clip_z_max_m", 0.150)) * 1000.0)
             handles["pc_status"] = server.gui.add_text(
                 "pointcloud status", initial_value="off", disabled=True)
             # 설정 영속화: 변경 시 settings.json에 저장 (재시작 후에도 유지)
-            for _k in ("pc_enable", "pc_box_enable", "pc_size", "pc_max_k", "pc_dmin", "pc_dmax"):
+            for _k in ("pc_enable", "pc_box_enable", "pc_size", "pc_max_k", "pc_dmin",
+                       "pc_dmax", "pc_clip_z_max_mm"):
                 handles[_k].on_update(lambda _evt: _persist_pc_settings(handles))
 
             with server.gui.add_folder("수동 캘리브레이션 (T_stand_cam)", expand_by_default=False):
@@ -3321,8 +3349,31 @@ def _persist_pc_settings(handles: dict[str, Any]) -> None:
         s["pc_max_k"] = int(handles["pc_max_k"].value)
         s["pc_dmin"] = float(handles["pc_dmin"].value)
         s["pc_dmax"] = float(handles["pc_dmax"].value)
+        if handles.get("pc_clip_z_max_mm") is not None:
+            _zc_mm = float(handles["pc_clip_z_max_mm"].value)
+            if _zc_mm > 0:                       # 0 = off → 키 제거(상한 없음)
+                s["pc_clip_z_max_m"] = _zc_mm / 1000.0
+            else:
+                s.pop("pc_clip_z_max_m", None)
         if handles.get("pc_wrist_enable") is not None:
             s["pc_wrist_enable"] = bool(handles["pc_wrist_enable"].value)
+        _save_gui_settings(s)
+    except Exception:
+        pass
+
+
+def _persist_roi_settings(handles: dict[str, Any]) -> None:
+    """현재 ROI 슬라이더 바운드를 settings.json(roi_min_m/roi_max_m, stand 프레임 m)에
+    저장. camera_server stereo_worker(box_detect)가 이 값을 읽어 박스 검출 영역 + publish
+    클라우드(head/손목) 클립 영역으로 쓴다 → viser 시각화와 검출이 같은 Safety ROI로 정렬."""
+    try:
+        fn = handles.get("roi_slider_bounds_fn")
+        if not callable(fn):
+            return
+        lo, hi = fn()
+        s = _load_gui_settings()
+        s["roi_min_m"] = [float(v) for v in lo]
+        s["roi_max_m"] = [float(v) for v in hi]
         _save_gui_settings(s)
     except Exception:
         pass

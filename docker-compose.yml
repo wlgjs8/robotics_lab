@@ -51,6 +51,8 @@ services:
       # 박스 검출용: T_stand_cam(캘리브) + rb_gui settings(depth 범위) 읽기 전용
       - ${RB_T_STAND_CAM:-/home/plaif/workspace/T_stand_cam.npy}:/app/state/T_stand_cam.npy:ro
       - ${RB_GUI_STATE_DIR:-/home/plaif/.rb_servo_gui}:/app/rb_gui_state:ro
+      # 손목 핸드아이 T_tcp_cam (rb_gui 기즈모가 갱신) — 아이디어2 손목 클라우드 병합용
+      - ./calibration:/calibration:ro
     environment:
       # Container path; override with CAMERA_CONFIG (see Makefile camera-real-up).
       CAMERA_SERVER_CONFIG: ${CAMERA_CONFIG:-/app/config/triple_realsense.yaml}

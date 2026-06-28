@@ -728,6 +728,45 @@ class PolicyRunnerContractTest(unittest.TestCase):
         supervisor.stamp_snapshot(state)
         self.assertEqual(state.payload["recording"]["state"], "idle")
 
+    def test_episodes_grouped_under_session_folder(self):
+        from datetime import datetime, timedelta, timezone
+
+        from policy_runner.record_control import _session_dir_name
+
+        # KST session-folder name format (e.g. make run at 13:46:08 KST).
+        fixed = datetime(2026, 6, 6, 13, 46, 8, tzinfo=timezone(timedelta(hours=9)))
+        self.assertEqual(_session_dir_name(fixed), "data_20260606_134608")
+
+        FakeRecordingCameraClient.instances.clear()
+        FakeHdf5Recorder.instances.clear()
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "geometry": {"path": ""},
+                "recording": {"output_dir": "episodes", "rate_hz": 30.0},
+            }
+        )
+        supervisor = RecordingSupervisor(
+            cfg,
+            camera_client_factory=FakeRecordingCameraClient,
+            recorder_factory=FakeHdf5Recorder,
+            session_dir_name="data_20260606_134608",
+        )
+        # Session folder sits under recording.output_dir, stamped at session start.
+        self.assertEqual(
+            Path(supervisor.session_output_dir), Path("episodes/data_20260606_134608")
+        )
+        # The recorder writes episodes into that session folder (episode_NNN.hdf5).
+        supervisor.handle_command(
+            RecordCommand("start", task="collect", operator="op"),
+            sample_state(),
+            action_source="teleop_mux",
+        )
+        recorder = FakeHdf5Recorder.instances[0]
+        self.assertEqual(
+            Path(recorder.output_dir), Path("episodes/data_20260606_134608")
+        )
+
     def test_runtime_config_defaults_and_parses_startup_timeout(self):
         default_cfg = config_from_mapping({"schema": "robotics_lab.policy_runner.v1"})
         self.assertEqual(default_cfg.runtime.startup_timeout_sec, 5.0)

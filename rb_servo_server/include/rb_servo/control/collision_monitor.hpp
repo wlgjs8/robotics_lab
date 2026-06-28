@@ -316,6 +316,22 @@ public:
     bool clearsThresholds(const JointArray& left_deg, const JointArray& right_deg,
                           double self_thresh_m, double external_thresh_m);
 
+    // Active-arm-masked variants (planner use): only pairs that involve an INCLUDED
+    // arm are considered. With include_left=false, every pair whose two bodies are
+    // both non-left (left-only intra/arm-stand/external pairs) is skipped, and
+    // symmetrically for include_right. A left<->right pair counts if EITHER arm is
+    // included. This lets single-arm InitMotion gate solely on the collisions its
+    // moving arm can cause (active<->other-arm, active<->stand, active<->external,
+    // active intra-arm) and never fail-closed on the stationary other arm's own
+    // clearance, which the runtime monitor already owns. (true,true) is identical to
+    // the unmasked overloads above.
+    CollisionDistanceSummary evalDistancesOnly(const JointArray& left_deg,
+                                               const JointArray& right_deg,
+                                               bool include_left, bool include_right);
+    bool clearsThresholds(const JointArray& left_deg, const JointArray& right_deg,
+                          double self_thresh_m, double external_thresh_m,
+                          bool include_left, bool include_right);
+
     void start();   // spawn the monitor thread
     void stop();    // join the monitor thread
 

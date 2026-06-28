@@ -22,6 +22,10 @@ STEREO_CAMERA = os.environ.get("STEREO_CAMERA", "head")
 STEREO_INTRINSICS = os.environ.get("STEREO_INTRINSICS",
                                    "/app/config/d435_ir_640x480_K.txt")
 COLOR_CALIB_PATH = os.environ.get("STEREO_COLOR_CALIB", "/app/config/d435_color_calib.json")
+# 아이디어2: 가림 시 head 박스 검출에 손목(D405) 클라우드를 stand 프레임으로 병합.
+STEREO_FUSE_WRIST = os.environ.get("STEREO_FUSE_WRIST", "1") != "0"
+STATE_ENDPOINT = os.environ.get("STEREO_STATE_ENDPOINT", "udp://127.0.0.1:50386")
+T_TCP_CAM_PATH = os.environ.get("STEREO_T_TCP_CAM", "/calibration/T_tcp_cam.npy")
 
 
 def load_color_calib(path):
@@ -86,6 +90,36 @@ def load_ktxt(path):
     K = np.array(list(map(float, lines[0].split()))).reshape(3, 3)
     baseline = float(lines[1])
     return K, baseline
+
+
+def load_T_tcp_cam(path):
+    """손목 핸드아이 T_tcp_cam(4x4). 없거나 형식 불일치 시 None(→ 병합 비활성)."""
+    try:
+        T = np.load(path)
+        if T.shape == (4, 4):
+            return T.astype(np.float64)
+    except Exception:
+        pass
+    return None
+
+
+def roi_clip_mask(xyz_cam, T_sx, roi):
+    """카메라 프레임 점을 stand로 옮겨 ROI((x0,x1),(y0,y1),(z0,z1)) 안인 점만 True.
+    publish 전 head/손목 클라우드를 Safety ROI로 잘라 viz·검출 영역을 일치시킨다."""
+    ps = xyz_cam.astype(np.float64) @ T_sx[:3, :3].T + T_sx[:3, 3]
+    (x0, x1), (y0, y1), (z0, z1) = roi
+    return ((ps[:, 0] >= x0) & (ps[:, 0] <= x1) &
+            (ps[:, 1] >= y0) & (ps[:, 1] <= y1) &
+            (ps[:, 2] >= z0) & (ps[:, 2] <= z1))
+
+
+def effective_clip_roi(detector):
+    """detector의 Safety ROI에 perception Z 캡(pc_clip_z_max_m)을 합친 publish-클립 RoI.
+    ROI Z(로봇 safety용)는 그대로 두고, 그보다 낮은 Z 캡이 있으면 상한만 더 낮춘다."""
+    rz = detector._roi_z
+    if detector._z_cap is not None:
+        rz = (rz[0], min(rz[1], detector._z_cap))
+    return (detector._roi_x, detector._roi_y, rz)
 
 
 def wait_for_file(path, timeout_s=30.0, poll_s=0.5):
@@ -211,10 +245,38 @@ def cmd_run(args):
         except Exception as e:  # noqa: BLE001
             print(f"[run] box detect OFF: {e}", flush=True)
 
+    # 아이디어2: 손목 클라우드 병합 (state로 TCP pose 구독 + 핸드아이). state 미수신 시 자동 head-only.
+    pose_listener = None
+    T_tcp_cam = None
+    fuse_on = STEREO_FUSE_WRIST and detector is not None and wrist_on
+    # 동기화: 팔 이동 중 융합하면 pose↔프레임 비동기로 손목 점이 어긋난다 → 정지 시에만 융합.
+    fuse_motion_gate = os.environ.get("STEREO_FUSE_MOTION_GATE", "1") != "0"
+    fuse_lin_thr = float(os.environ.get("STEREO_FUSE_MAX_LIN_MPS", "0.03"))
+    fuse_ang_thr = float(os.environ.get("STEREO_FUSE_MAX_ANG_RPS", "0.15"))
+    # publish하는 head/손목 클라우드를 Safety ROI(box_detect가 settings.json에서 읽는 값)로
+    # 잘라 viser 시각화와 검출 영역을 일치시킨다(ROI 밖 noise 제거). detector가 ROI 소유.
+    roi_clip_on = os.environ.get("STEREO_ROI_CLIP", "1") != "0" and detector is not None
+    if roi_clip_on:
+        print(f"[run] cloud ROI clip: ON (x={detector._roi_x} y={detector._roi_y} "
+              f"z={detector._roi_z} z_cap={detector._z_cap}; rb_gui Safety ROI + "
+              f"pc_clip_z_max_m via settings.json, 1Hz)", flush=True)
+    if fuse_on:
+        try:
+            from state_listener import TcpPoseListener
+            pose_listener = TcpPoseListener(STATE_ENDPOINT)
+            gate_str = (f"motion-gate ON (<= {fuse_lin_thr} m/s, {fuse_ang_thr} rad/s)"
+                        if fuse_motion_gate else "motion-gate OFF")
+            print(f"[run] wrist fusion: ON (state={STATE_ENDPOINT}, T_tcp_cam={T_TCP_CAM_PATH}); "
+                  f"{gate_str}. state 미수신 시 자동 head-only.", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[run] wrist fusion OFF (state listener): {e}", flush=True)
+            fuse_on = False
+
     seq = 0
     fps_t, fps_n, fps = time.time(), 0, 0.0
     n_boxes = 0
     warned_rgb = False
+    last_clip_log = None      # ROI/Z캡 변경 시 1회 로그(operator 피드백)용
     while True:
         frames = reader.poll(want, timeout_ms=500)
         irl = frames.get(k_irl); irr = frames.get(k_irr)
@@ -233,18 +295,15 @@ def cmd_run(args):
                 warned_rgb = True
         if xyz.shape[0] == 0:
             continue  # 유효 점 없음(예: fp16 NaN/범위밖) -> publish/통계 건너뜀
-        pub.publish(seq, time.time_ns(), xyz, rgb)
-        if detector is not None:
-            try:
-                raw = detector.detect(disp, color_img=(col.pixels if col is not None else None))
-                boxes = tracker.update(raw) if tracker is not None else raw
-                n_boxes = len(boxes)
-                pub.publish_boxes(seq, boxes)
-            except Exception as e:  # noqa: BLE001
-                if seq % 60 == 0:
-                    print(f"[run] detect err: {e}", flush=True)
-        # 손목 raw 클라우드 (저rate, 가볍게)
-        if wrist_on and seq % max(1, wrist_every) == 0:
+        if roi_clip_on:                                  # ROI+Z캡 밖 head 점 제거 후 publish
+            hm = roi_clip_mask(xyz, detector._T_sc, effective_clip_roi(detector))
+            pub.publish(seq, time.time_ns(), xyz[hm], rgb[hm])
+        else:
+            pub.publish(seq, time.time_ns(), xyz, rgb)
+
+        # 손목 raw 클라우드 계산(병합+발행 공용, 카메라 프레임)
+        wrist_raw = {}
+        if wrist_on or fuse_on:
             for arm, kc, kd in wrist_cams:
                 c = frames.get(kc); d = frames.get(kd)
                 if c is None or d is None:
@@ -252,15 +311,74 @@ def cmd_run(args):
                 try:
                     wp, wc = wrist_cloud(d.pixels, c.pixels)
                     if wp.shape[0] > 0:
-                        pub.publish_wrist(arm, seq, wp, wc)
+                        wrist_raw[arm] = (wp, wc)
+                except Exception:
+                    pass
+
+        # 병합용 stand 점: P_stand = T_stand_tcp @ T_tcp_cam @ P_wrist_cam
+        extra_xyz = extra_rgb = None
+        fused_arms = gated_arms = 0
+        if fuse_on and pose_listener is not None and wrist_raw:
+            if T_tcp_cam is None or seq % 30 == 0:
+                T_tcp_cam = load_T_tcp_cam(T_TCP_CAM_PATH)
+            if T_tcp_cam is not None:
+                exs, ecs = [], []
+                for arm, (wp, wc) in wrist_raw.items():
+                    T_st = pose_listener.get(arm)
+                    if T_st is None:
+                        continue
+                    # 팔 이동 중이면 융합 보류(head-only) — 비동기 misregistration 방지.
+                    if fuse_motion_gate and not pose_listener.is_settled(arm, fuse_lin_thr, fuse_ang_thr):
+                        gated_arms += 1
+                        continue
+                    T_sw = T_st @ T_tcp_cam
+                    exs.append(wp.astype(np.float64) @ T_sw[:3, :3].T + T_sw[:3, 3]); ecs.append(wc)
+                    fused_arms += 1
+                if exs:
+                    extra_xyz = np.concatenate(exs, 0); extra_rgb = np.concatenate(ecs, 0)
+
+        if detector is not None:
+            try:
+                raw = detector.detect(disp, color_img=(col.pixels if col is not None else None),
+                                      extra_xyz=extra_xyz, extra_rgb=extra_rgb)
+                boxes = tracker.update(raw) if tracker is not None else raw
+                n_boxes = len(boxes)
+                pub.publish_boxes(seq, boxes)
+            except Exception as e:  # noqa: BLE001
+                if seq % 60 == 0:
+                    print(f"[run] detect err: {e}", flush=True)
+            # settings.json에서 갱신된 ROI/Z캡이 바뀌면 1회 로그(GUI 수정이 반영됐는지 확인)
+            clip_now = (detector._roi_x, detector._roi_y, detector._roi_z, detector._z_cap)
+            if clip_now != last_clip_log:
+                print(f"[run] clip RoI update: x={detector._roi_x} y={detector._roi_y} "
+                      f"z={detector._roi_z} z_cap={detector._z_cap}", flush=True)
+                last_clip_log = clip_now
+
+        # 손목 raw 클라우드 발행 (저rate, 카메라 프레임 — rb_gui가 TCP×hand-eye로 배치).
+        # ROI 클립: state(T_st)+핸드아이가 있을 때만 stand 변환 가능 → 그때만 자른다.
+        if wrist_on and seq % max(1, wrist_every) == 0:
+            roi = effective_clip_roi(detector) if roi_clip_on else None
+            for arm, (wp, wc) in wrist_raw.items():
+                wpub, wcub = wp, wc
+                if roi is not None and pose_listener is not None and T_tcp_cam is not None:
+                    T_st = pose_listener.get(arm)
+                    if T_st is not None:
+                        wm = roi_clip_mask(wp, T_st @ T_tcp_cam, roi)
+                        wpub, wcub = wp[wm], wc[wm]
+                try:
+                    pub.publish_wrist(arm, seq, wpub, wcub)
                 except Exception:
                     pass
         seq += 1
         fps_n += 1
         if time.time() - fps_t > 1.0:
             fps = fps_n / (time.time() - fps_t); fps_t = time.time(); fps_n = 0
+            fuse_str = ""
+            if fuse_on and pose_listener is not None:
+                fuse_str = (f" fuse[rx={pose_listener.rx_count} fused={fused_arms} "
+                            f"gated={gated_arms}]")
             print(f"[run] fps={fps:.1f} cloud_pts={xyz.shape[0]} boxes={n_boxes} "
-                  f"z[{xyz[:,2].min():.2f},{xyz[:,2].max():.2f}]m", flush=True)
+                  f"z[{xyz[:,2].min():.2f},{xyz[:,2].max():.2f}]m{fuse_str}", flush=True)
         if args.max_frames and seq >= args.max_frames:
             print(f"[run] reached max_frames={args.max_frames}, exit", flush=True)
             break

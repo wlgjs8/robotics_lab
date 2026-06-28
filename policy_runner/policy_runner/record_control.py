@@ -1,13 +1,30 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, TextIO
 
 from .config import PolicyRunnerConfig
 from .robot_state_client import StateSnapshot, parse_udp_endpoint
+
+# Korea Standard Time (UTC+9, no DST): recorded-episode session folders are
+# stamped in KST so the folder name matches the operator's `make run` wall clock.
+_KST = timezone(timedelta(hours=9))
+
+
+def _session_dir_name(now: datetime | None = None) -> str:
+    """Per-run episode folder name: ``data_<KST YYYYMMDD_HHMMSS>``.
+
+    Computed once at session start (~ ``make run`` time) so every episode
+    recorded in one run is grouped under the same folder.
+    """
+    stamp = (now or datetime.now(_KST)).strftime("%Y%m%d_%H%M%S")
+    return f"data_{stamp}"
 
 
 RECORD_COMMAND_SCHEMA = "robotics_lab.record_cmd.v1"
@@ -156,6 +173,7 @@ class RecordingSupervisor:
         status_publisher: RecordStatusPublisher | None = None,
         camera_client_factory: Callable[..., Any] | None = None,
         recorder_factory: Callable[..., Any] | None = None,
+        session_dir_name: str | None = None,
         stderr: TextIO | None = None,
     ) -> None:
         self.config = config
@@ -172,6 +190,18 @@ class RecordingSupervisor:
         self.last_command = ""
         self._last_status_publish = float("-inf")
         self._last_status: dict[str, Any] = {"recording": self.status_block(), "arm_init": None}
+        # One folder per run, fixed at session start (~ `make run` time, KST):
+        # data_<YYYYMMDD_HHMMSS>. Every episode recorded this session is written
+        # here as episode_000.hdf5, episode_001.hdf5, ... run_stack.sh exports the
+        # exact make-run timestamp via RB_RECORD_SESSION_DIR; a direct invocation
+        # falls back to KST now. The folder itself is created lazily by the
+        # recorder on the first episode, so an idle run leaves no empty folder.
+        session_name = (
+            session_dir_name
+            or os.environ.get("RB_RECORD_SESSION_DIR")
+            or _session_dir_name()
+        )
+        self.session_output_dir = Path(self.config.recording.output_dir) / session_name
 
     @classmethod
     def from_config(cls, config: PolicyRunnerConfig, *, stderr: TextIO | None = None) -> "RecordingSupervisor":
@@ -385,7 +415,7 @@ class RecordingSupervisor:
             include_depth=True,
         )
         self.recorder = self.recorder_factory(
-            self.config.recording.output_dir,
+            self.session_output_dir,
             recording_rate_hz=self.config.recording.rate_hz,
             camera_client=self.camera_client,
             expected_cameras=self.config.camera.expected_cameras,

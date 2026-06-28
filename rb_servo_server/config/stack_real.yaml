@@ -149,8 +149,8 @@ safety:
   # bounds는 sim에서 검증한 값 재사용, 강제(monitor_only=false)는 real floor와 동일.
   roi_box:
     enable: true
-    min_m: [-0.400, -0.900, 0.000]
-    max_m: [0.400, 0.120, 0.800]
+    min_m: [-0.450, -0.900, 0.000]
+    max_m: [0.450, 0.120, 0.800]
     runtime_min_m: [-1.2, -1.6, -0.2]
     runtime_max_m: [1.2, 0.6, 1.6]
     fail_policy: clamp_hold
@@ -315,6 +315,7 @@ network:
     - "udp://127.0.0.1:50366"  # viser GUI
     - "udp://127.0.0.1:50376"  # make run teleop_mux policy_runner
     - "udp://127.0.0.1:50378"  # external flow-infer readback alongside make run
+    - "udp://127.0.0.1:50386"  # camera_server stereo_worker wrist-fusion (box detect)
   state_pub_rate_hz: 500   # was 100; raised to see the 500 Hz servo command stream in PlotJuggler. Watch send_period_overrun / send_deadline_hit — revert to 100 if the control loop overruns.
   command_source_allowlist: ["127.0.0.1/32"]
 

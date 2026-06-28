@@ -1006,6 +1006,18 @@ def _main_with_subcommands(argv: list[str]) -> int:
         help="metres per stored-depth count (Pika D405: 1e-4 = 100um; check collect.log + match training)",
     )
     flow_infer.add_argument(
+        "--blank-depth",
+        action="store_true",
+        help=(
+            "DEPTH ABLATION for an RGB-D openpi checkpoint: still send the "
+            "*_wrist_0_depth keys (server input transform satisfied, 5-camera token "
+            "structure unchanged) but fill them with a constant all-far frame "
+            "instead of live depth. If the policy behaves the same as with live "
+            "depth, it did not learn to use depth content. Use INSTEAD of "
+            "--include-depth; live depth is not read."
+        ),
+    )
+    flow_infer.add_argument(
         "--pc-intrinsics", default=None,
         help=(
             "point-cloud (pc_v1) checkpoints only: per-arm RealSense color intrinsics + depth scale "
@@ -1710,7 +1722,12 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 zmq_endpoint=config.camera.zmq_endpoint,
                 topic=config.camera.bundle_topic,
                 max_age_ms=config.camera.max_age_ms,
-                include_depth=bool(getattr(args, "include_depth", False)),  # z16 decode for RGB-D checkpoints
+                # z16 decode for RGB-D checkpoints; --blank-depth synthesizes the
+                # depth channel, so it neither needs nor reads the live z16 stream.
+                include_depth=bool(
+                    getattr(args, "include_depth", False)
+                    and not getattr(args, "blank_depth", False)
+                ),
             )
         preview_process = None
         if args.camera_preview and config.camera.enable:
@@ -1718,20 +1735,32 @@ def _main_with_subcommands(argv: list[str]) -> int:
 
             # Same ZMQ bundle/shm + resolve_frame mapping as the runtime; PUB
             # fans out so the preview never interferes with inference.
-            preview_process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "policy_runner.camera_preview",
-                    "--zmq-endpoint",
-                    config.camera.zmq_endpoint,
-                    "--topic",
-                    config.camera.bundle_topic,
-                    "--cameras",
-                    ",".join(config.camera.expected_cameras)
-                    or "left_realsense_color,right_realsense_color",
-                ],
-            )
+            preview_cmd = [
+                sys.executable,
+                "-m",
+                "policy_runner.camera_preview",
+                "--zmq-endpoint",
+                config.camera.zmq_endpoint,
+                "--topic",
+                config.camera.bundle_topic,
+                "--cameras",
+                ",".join(config.camera.expected_cameras)
+                or "left_realsense_color,right_realsense_color",
+            ]
+            # For an RGB-D rollout, decode + show the depth panels too, with the
+            # SAME z_near/z_far/units the policy is fed — otherwise the preview's
+            # bundle client drops depth and its panels read [MISSING].
+            if getattr(args, "include_depth", False):
+                preview_cmd += [
+                    "--include-depth",
+                    "--depth-z-near-mm",
+                    str(args.depth_z_near_mm),
+                    "--depth-z-far-mm",
+                    str(args.depth_z_far_mm),
+                    "--depth-units-m",
+                    str(args.depth_units_m),
+                ]
+            preview_process = subprocess.Popen(preview_cmd)
         # Physical gripper hardware connects (and energizes motors) only when
         # the rollout mode could actually dispatch to it; sim_dryrun and
         # real_readonly always stay on the fail-closed Noop backend.
@@ -1929,7 +1958,8 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     wrist_crop_frac=float(config.camera.wrist_crop_frac),
                     action_horizon=args.action_horizon,
                     proprio_mode=args.proprio_mode,
-                    include_depth=bool(args.include_depth),
+                    include_depth=bool(args.include_depth or args.blank_depth),
+                    blank_depth=bool(args.blank_depth),
                     depth_z_near_mm=float(args.depth_z_near_mm),
                     depth_z_far_mm=float(args.depth_z_far_mm),
                     depth_units_m=float(args.depth_units_m),

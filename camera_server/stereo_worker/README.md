@@ -38,9 +38,41 @@ docker compose --profile real_camera run --rm \
 - `STEREO_WEIGHTS` — 기본 `weights/23-36-37/...`(정확). 빠른 모델은 `weights/20-30-48/...`.
 - `STEREO_DETECT` (기본 `1`) — head stereo 박스 검출 publish(`stereo.boxes`) 활성화.
 - `STEREO_DETECT_ICP` (기본 `1`) — 검출 후보에 known-model ICP refinement 적용.
-- `STEREO_DETECT_ICP_METHOD` (기본 `point_to_point`) — `point_to_point` 또는
-  `point_to_plane`. `point_to_plane`은 opt-in 실험 경로이며 실패 시
-  `point_to_point`로 fallback한다.
+- `STEREO_DETECT_ICP_METHOD` (기본 `yaw_se2`) — `yaw_se2` | `point_to_point` |
+  `point_to_plane`. `yaw_se2`(기본)는 box up=stand z 고정 SE(2) 정합으로 부분관측/
+  노이즈에 robust(scipy). `point_to_plane`은 opt-in 실험 경로이며 실패 시
+  `point_to_point`로 fallback한다. 미인식 값은 `yaw_se2`로 정규화된다.
+- `STEREO_GRAY_OPEN_K` (기본 `3`) — 회색(colorless) 박스 de-bridge OPEN 커널(px).
+  회색은 색 신호가 없어 테이블/잡음과 붙어 oversize 되기 쉬운데, CLOSE 없이 OPEN으로
+  연결부를 끊어 분리한다. 클수록 강하게 끊지만 희박/가림 회색 박스를 침식한다
+  (가림이 잦으면 작게, 잡음이 많아 oversize가 잦으면 크게: 3≈보존, 5≈치수 깔끔, 7≈과침식).
+
+### Safety ROI 클립 (viz·검출 영역 정렬)
+박스 검출과 publish 클라우드(head + 손목) 모두 rb_gui **Safety ROI 박스**(stand 프레임)
+밖의 점을 버린다 → viser 시각화와 검출이 같은 영역만 보고, ROI 밖 noise가 추정에 안 들어간다.
+ROI는 rb_gui가 `settings.json`의 `roi_min_m`/`roi_max_m`(stand m, `[x,y,z]`)로 영속화하고
+(슬라이더 변경/`Send ROI box` 시 기록, 원자적 쓰기), worker가 1Hz로 읽는다. 키가 없으면
+클래스 기본값(`x±0.55, y[-1.05,0.05], z[-0.05,1.0]`).
+- `STEREO_ROI_CLIP` (기본 `1`) — publish 클라우드 ROI 클립 on/off. 검출 RoI 게이트는
+  항상 적용. 손목 클라우드는 state(T_stand_tcp)+핸드아이가 있을 때만 stand 변환이 되어 클립된다.
+- **stand-Z 점 상한** (`settings.json` `pc_clip_z_max_m`, rb_gui "stand Z 상한(mm)" 슬라이더,
+  또는 env `STEREO_CLIP_Z_MAX`) — Safety ROI의 Z는 **로봇이 움직일 높이**라 perception용으로
+  낮추기 어렵다. 이와 **독립한 perception 전용 stand-Z 상한**으로 그보다 높은 점(로봇팔·배경
+  noise)을 viz·검출 양쪽에서 버린다. 없으면 상한 없음. worker 로그 `clip RoI update: ... z_cap=`
+  로 현재 ROI/Z캡(=GUI 수정 반영 여부)을 확인한다.
+
+### 손목(D405) 융합 — 아이디어2 (head 가림 시 커버리지 보강)
+head 박스 검출에 손목 클라우드를 stand 프레임(`P_stand = T_stand_tcp @ T_tcp_cam @
+P_wrist_cam`)으로 병합한다. **활성 조건**: rb_servo_server가 state fanout을
+`udp://127.0.0.1:50386`로 publish해야 한다(`stack_sim.yaml`/`stack_real.yaml`의
+`network.state_pub_endpoints`에 이미 포함). state 미수신/stale 시 자동 head-only.
+- `STEREO_FUSE_WRIST` (기본 `1`) — 융합 on/off.
+- `STEREO_FUSE_MOTION_GATE` (기본 `1`) — **동기화 게이트**. 손목 프레임과 TCP pose는
+  하드웨어 타임스탬프 동기가 안 되므로(번들 `Frame`에 ts 없음) 팔이 움직이면 손목 점이
+  어긋난다. 팔이 (거의) 정지일 때만 융합하고, 이동 중에는 그 팔을 head-only로 둔다.
+- `STEREO_FUSE_MAX_LIN_MPS` (기본 `0.03`) / `STEREO_FUSE_MAX_ANG_RPS` (기본 `0.15`) —
+  정지 판정 임계(최근 ~0.2s TCP 선/각속도). worker 로그의 `fuse[rx=.. fused=.. gated=..]`로
+  수신/융합/게이트 상태를 확인한다(`rx=0`이면 state 미수신 = rb_servo_server 미기동).
 
 `stereo.boxes` payload는 기존 `T`/`dims`/`footprint`/`n`/`label`에 더해, 가능하면
 `fitness`, `rmse`, `track_id`, `icp_method`, `source_n`, `icp_sample_n`, `coasting`

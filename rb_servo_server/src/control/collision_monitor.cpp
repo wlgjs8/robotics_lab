@@ -260,6 +260,22 @@ struct CollisionMonitor::Impl {
     // per-collision-pair external flag (1 = arm<->external obstacle, e.g. ground_plane).
     std::vector<char> pair_external_;
     std::vector<std::string> pair_category_;
+    // per-collision-pair arm membership: does the pair touch the left / right arm
+    // (parallel to pair_external_/pair_category_). A pair touches an arm if either of
+    // its two bodies belongs to that arm. Used by the active-arm-masked queries so the
+    // planner can ignore pairs that involve only the stationary non-active arm.
+    std::vector<char> pair_left_;
+    std::vector<char> pair_right_;
+
+    // True if the pair at index k should be considered for the given active-arm set.
+    // Both-included is the unmasked fast path; otherwise keep only pairs that touch an
+    // included arm.
+    bool pairActive(std::size_t k, bool include_left, bool include_right) const {
+        if (include_left && include_right) return true;
+        const bool touches_left = k < pair_left_.size() && pair_left_[k];
+        const bool touches_right = k < pair_right_.size() && pair_right_[k];
+        return (include_left && touches_left) || (include_right && touches_right);
+    }
     // ARTICULATED gripper: per-arm movable finger hull geometry + the (open) base
     // placement, repositioned along local +X by the live jaw percent. gripper_[0]=Left,
     // [1]=Right. gripper_pct_ is guarded by in_mtx; defaults OPEN (largest envelope) so
@@ -629,6 +645,8 @@ struct CollisionMonitor::Impl {
         geom.removeAllCollisionPairs();
         pair_external_.clear();
         pair_category_.clear();
+        pair_left_.clear();
+        pair_right_.clear();
         std::size_t n_lr = 0, n_arm_stand = 0, n_intra = 0, n_external = 0, n_disabled = 0;
         const auto tryAddPair = [&](std::size_t a, std::size_t b, PairCategory category) {
             if (const CollisionPairPattern* rule = disabledRule(a, b)) {
@@ -646,6 +664,10 @@ struct CollisionMonitor::Impl {
             geom.addCollisionPair(pinocchio::CollisionPair(a, b));
             pair_external_.push_back(category == PairCategory::External ? 1 : 0);
             pair_category_.push_back(categoryString(category));
+            const Side sa = classify(a);
+            const Side sb = classify(b);
+            pair_left_.push_back((sa == Side::Left || sb == Side::Left) ? 1 : 0);
+            pair_right_.push_back((sa == Side::Right || sb == Side::Right) ? 1 : 0);
             switch (category) {
                 case PairCategory::LeftRight: ++n_lr; break;
                 case PairCategory::ArmStand: ++n_arm_stand; break;
@@ -846,11 +868,13 @@ struct CollisionMonitor::Impl {
         return reduce(nowMonotonicS(), q_eval);
     }
 
-    CollisionDistanceSummary summarizeCurrentDistances() const {
+    CollisionDistanceSummary summarizeCurrentDistances(
+        bool include_left = true, bool include_right = true) const {
         CollisionDistanceSummary s;
         s.valid = true;
         const std::size_t np = geom.collisionPairs.size();
         for (std::size_t k = 0; k < np; ++k) {
+            if (!pairActive(k, include_left, include_right)) continue;
             const double d = gdata.distanceResults[k].min_distance;
             if (d < s.min_clearance_m) {
                 s.min_clearance_m = d;
@@ -878,16 +902,19 @@ struct CollisionMonitor::Impl {
         return s;
     }
 
-    CollisionDistanceSummary evalDistancesOnly(const JointArray& l, const JointArray& r) {
+    CollisionDistanceSummary evalDistancesOnly(const JointArray& l, const JointArray& r,
+                                               bool include_left = true,
+                                               bool include_right = true) {
         setQ(l, r);
         applyGroundPlanePose();
         applyGripperFingers();
         pinocchio::computeDistances(model, data, geom, gdata, q);
-        return summarizeCurrentDistances();
+        return summarizeCurrentDistances(include_left, include_right);
     }
 
     bool clearsThresholds(const JointArray& l, const JointArray& r,
-                          double self_thresh_m, double external_thresh_m) {
+                          double self_thresh_m, double external_thresh_m,
+                          bool include_left = true, bool include_right = true) {
         if (!(std::isfinite(self_thresh_m) && std::isfinite(external_thresh_m))) {
             return false;
         }
@@ -903,6 +930,7 @@ struct CollisionMonitor::Impl {
                 geom.geometryObjects[cp.second].disableCollision) {
                 continue;
             }
+            if (!pairActive(k, include_left, include_right)) continue;
             const auto& res = pinocchio::computeDistance(
                 geom, gdata, static_cast<pinocchio::PairIndex>(k));
             const double d = res.min_distance;
@@ -1001,9 +1029,22 @@ CollisionDistanceSummary CollisionMonitor::evalDistancesOnly(const JointArray& l
     return impl_->evalDistancesOnly(left_deg, right_deg);
 }
 
+CollisionDistanceSummary CollisionMonitor::evalDistancesOnly(const JointArray& left_deg,
+                                                             const JointArray& right_deg,
+                                                             bool include_left, bool include_right) {
+    return impl_->evalDistancesOnly(left_deg, right_deg, include_left, include_right);
+}
+
 bool CollisionMonitor::clearsThresholds(const JointArray& left_deg, const JointArray& right_deg,
                                         double self_thresh_m, double external_thresh_m) {
     return impl_->clearsThresholds(left_deg, right_deg, self_thresh_m, external_thresh_m);
+}
+
+bool CollisionMonitor::clearsThresholds(const JointArray& left_deg, const JointArray& right_deg,
+                                        double self_thresh_m, double external_thresh_m,
+                                        bool include_left, bool include_right) {
+    return impl_->clearsThresholds(left_deg, right_deg, self_thresh_m, external_thresh_m,
+                                   include_left, include_right);
 }
 
 void CollisionMonitor::start() {

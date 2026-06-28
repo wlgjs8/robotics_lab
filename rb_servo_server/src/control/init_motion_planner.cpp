@@ -74,6 +74,46 @@ ActiveMask makeActiveMask(bool left_active, bool right_active) {
     return active;
 }
 
+// Scopes the planner's active-arm collision mask to one planning call: sets the two
+// include flags on entry and restores the unmasked (true,true) default on every exit
+// path, so a later standalone query is never silently masked by a prior plan.
+struct ScopedArmMask {
+    bool& left_flag;
+    bool& right_flag;
+    ScopedArmMask(bool& lf, bool& rf, bool include_left, bool include_right)
+        : left_flag(lf), right_flag(rf) {
+        left_flag = include_left;
+        right_flag = include_right;
+    }
+    ~ScopedArmMask() {
+        left_flag = true;
+        right_flag = true;
+    }
+    ScopedArmMask(const ScopedArmMask&) = delete;
+    ScopedArmMask& operator=(const ScopedArmMask&) = delete;
+};
+
+// Scopes the planner's per-category clearance thresholds to one planning call, restoring
+// the configured (path/swept-margin) values on exit. Used to relax the gate just enough
+// to admit a fixed endpoint resting inside the planning margin band (never below d_hard).
+struct ScopedThreshold {
+    double& self_thr;
+    double& ext_thr;
+    double saved_self;
+    double saved_ext;
+    ScopedThreshold(double& s, double& e, double new_self, double new_ext)
+        : self_thr(s), ext_thr(e), saved_self(s), saved_ext(e) {
+        self_thr = new_self;
+        ext_thr = new_ext;
+    }
+    ~ScopedThreshold() {
+        self_thr = saved_self;
+        ext_thr = saved_ext;
+    }
+    ScopedThreshold(const ScopedThreshold&) = delete;
+    ScopedThreshold& operator=(const ScopedThreshold&) = delete;
+};
+
 // Nearest-branch goal selection per joint (mirrors trajectory_filter's file-local
 // shortestPathJointGoal): pick the in-range equivalent (target + 360*k) closest to
 // the reference so InitMotion does not spin a full revolution to an equivalent pose.
@@ -101,8 +141,22 @@ struct InitMotionPlanner::Impl {
     InitMotionPlannerConfig cfg;
     JointArray q_min_deg{};
     JointArray q_max_deg{};
-    double clear_threshold_m = 0.0;           // self d_hard + collision_margin
+    double clear_threshold_m = 0.0;           // self d_hard + collision_margin (path/swept margin)
     double external_clear_threshold_m = 0.0;  // external d_hard + collision_margin
+    // Runtime hard-barrier distances (no planning margin). A FIXED endpoint resting at
+    // [d_hard, d_hard+margin] is physically safe — the runtime CollisionMonitor's hard
+    // barrier is d_hard and independently guards execution — so plan() relaxes its gate
+    // down to (but never below) d_hard to admit such a goal/start. See plan().
+    double d_hard_m = 0.0;
+    double external_d_hard_m = 0.0;
+    // Active-arm mask for the CURRENT plan() / planLinearMove() call. When only one
+    // arm is active, every oracle query below ignores pairs that involve solely the
+    // stationary other arm (its own intra/arm-stand/external clearance is the runtime
+    // monitor's concern, not this move's). Set at each planning entry point and reset
+    // to (true,true) on exit via ScopedArmMask. Single-threaded per plan, matching the
+    // oracle's existing non-reentrant use.
+    bool include_left_ = true;
+    bool include_right_ = true;
     std::unique_ptr<CollisionMonitor> oracle;
     std::mt19937 rng;
     // Private IK/FK for collision-free TcpLinearMove (own pinocchio Data; never the
@@ -208,6 +262,8 @@ struct InitMotionPlanner::Impl {
          std::shared_ptr<IKinematics> kinematics, ArmMountConfig lmount, ArmMountConfig rmount)
         : cfg(planner_cfg), q_min_deg(qmin), q_max_deg(qmax), rng(planner_cfg.seed),
           kin(std::move(kinematics)), left_mount(lmount), right_mount(rmount) {
+        d_hard_m = monitor_cfg.d_hard_m;
+        external_d_hard_m = monitor_cfg.external_d_hard_m;
         clear_threshold_m = monitor_cfg.d_hard_m + cfg.collision_margin_m;
         // External obstacles (the floor / ground_plane) plan to their own tighter
         // d_hard so InitMotion can approach the floor closer than it keeps the robot
@@ -224,14 +280,16 @@ struct InitMotionPlanner::Impl {
     double minClearance(const Config& c) {
         JointArray l{}, r{};
         split(c, &l, &r);
-        const CollisionDistanceSummary s = oracle->evalDistancesOnly(l, r);
+        const CollisionDistanceSummary s =
+            oracle->evalDistancesOnly(l, r, include_left_, include_right_);
         return s.min_clearance_m;
     }
 
     bool clear(const Config& c) {
         JointArray l{}, r{};
         split(c, &l, &r);
-        return oracle->clearsThresholds(l, r, clear_threshold_m, external_clear_threshold_m);
+        return oracle->clearsThresholds(l, r, clear_threshold_m, external_clear_threshold_m,
+                                        include_left_, include_right_);
     }
 
     // One collision evaluation of a combined config, plus the per-category clearance
@@ -240,7 +298,7 @@ struct InitMotionPlanner::Impl {
     CollisionDistanceSummary eval(const Config& c) {
         JointArray l{}, r{};
         split(c, &l, &r);
-        return oracle->evalDistancesOnly(l, r);
+        return oracle->evalDistancesOnly(l, r, include_left_, include_right_);
     }
     bool isClear(const CollisionDistanceSummary& v) const {
         return !v.hard_violation &&
@@ -566,6 +624,10 @@ InitMotionPlanResult InitMotionPlanner::plan(
     InitMotionPlanResult result;
 
     Impl& d = *impl_;
+    // Single-arm init gates only on collisions its moving arm can cause; a stationary
+    // non-active arm (e.g. a flow pose resting near the floor) must not fail-close this
+    // move. Scoped so the mask is reset on every return path.
+    ScopedArmMask arm_mask(d.include_left_, d.include_right_, left_active, right_active);
     result.clear_threshold_m = d.clear_threshold_m;
     result.external_clear_threshold_m = d.external_clear_threshold_m;
     result.goal_clear_threshold_self_m = d.clear_threshold_m;
@@ -627,6 +689,28 @@ InitMotionPlanResult InitMotionPlanner::plan(
     const CollisionDistanceSummary goal_summary = d.eval(goal);
     result.start_clear_m = start_summary.min_clearance_m;
     result.goal_clear_m = goal_summary.min_clearance_m;
+
+    // Fix B: the goal/start are FIXED endpoints, not swept path. A pose resting in the
+    // [d_hard, d_hard+collision_margin] band is physically safe (the runtime monitor's
+    // hard barrier is d_hard and independently guards execution); the +collision_margin
+    // is swept-path robustness, not a hard limit on a resting pose. Relax this plan's
+    // per-category gate down to the goal's own clearance — never below d_hard — so the
+    // goal is reachable AND the approach edges can connect into its clearance pocket.
+    // No-op when the goal already clears the full margin (eff == configured threshold),
+    // so well-clear init poses keep the full swept buffer. hard_violation (< d_hard) is
+    // evaluated independently in the oracle, so a true collision is still refused.
+    constexpr double kEndpointEps = 1e-4;  // 0.1 mm: strict '>' / '<=' admit the goal exactly
+    const double eff_self = std::max(
+        d.d_hard_m,
+        std::min(d.clear_threshold_m, goal_summary.self_min_clearance_m - kEndpointEps));
+    const double eff_ext = std::max(
+        d.external_d_hard_m,
+        std::min(d.external_clear_threshold_m, goal_summary.external_min_clearance_m - kEndpointEps));
+    ScopedThreshold endpoint_thr(d.clear_threshold_m, d.external_clear_threshold_m,
+                                 eff_self, eff_ext);
+    result.goal_clear_threshold_self_m = eff_self;
+    result.goal_clear_threshold_external_m = eff_ext;
+
     fill_nearest(goal_summary);
     if (!d.isClear(goal_summary)) {
         // The init pose itself collides / dips below the floor — refuse (fail-closed).
@@ -863,6 +947,10 @@ InitMotionLinearResult InitMotionPlanner::planLinearMove(
     const auto t0 = Clock::now();
     InitMotionLinearResult res;
     Impl& d = *impl_;
+    // Same active-arm masking as plan(): a single-arm collision-free MoveL gates only on
+    // pairs its moving arm can drive into, never on the stationary other arm's own
+    // clearance.
+    ScopedArmMask arm_mask(d.include_left_, d.include_right_, left_active, right_active);
     res.goal_left = start_left;
     res.goal_right = start_right;
     if (!d.kin) {

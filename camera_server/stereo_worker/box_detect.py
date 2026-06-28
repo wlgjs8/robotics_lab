@@ -28,7 +28,7 @@ try:
 except Exception:  # noqa: BLE001
     o3d = None
 
-BOX_DIMS = (0.380, 0.240, 0.110)
+BOX_DIMS = (0.380, 0.240, 0.105)   # NPC NTC-321 외부 실측(380×240×105mm). 측벽 20mm, 바닥 6.5mm.
 T_STAND_CAM_PATH = os.environ.get("STEREO_T_STAND_CAM", "/app/state/T_stand_cam.npy")
 GUI_SETTINGS_PATH = os.environ.get("STEREO_GUI_SETTINGS", "/app/rb_gui_state/settings.json")
 COLOR_CALIB_PATH = os.environ.get("STEREO_COLOR_CALIB", "/app/config/d435_color_calib.json")
@@ -53,6 +53,44 @@ def _load_depth_range(path, default=(0.2, 3.0)):
         return default
 
 
+def _load_roi(path, default):
+    """settings.json의 roi_min_m/roi_max_m(stand 프레임 m, [x,y,z]) → ((x0,x1),(y0,y1),(z0,z1)).
+    rb_gui Safety ROI 박스를 검출 영역으로 공유한다. 없거나 형식 불일치 시 default."""
+    try:
+        with open(path) as f:
+            s = json.load(f)
+        lo, hi = s.get("roi_min_m"), s.get("roi_max_m")
+        if (isinstance(lo, (list, tuple)) and isinstance(hi, (list, tuple))
+                and len(lo) == 3 and len(hi) == 3):
+            lo = [float(v) for v in lo]
+            hi = [float(v) for v in hi]
+            if all(lo[i] <= hi[i] for i in range(3)):
+                return ((lo[0], hi[0]), (lo[1], hi[1]), (lo[2], hi[2]))
+    except Exception:
+        pass
+    return default
+
+
+def _load_z_cap(path, default=None):
+    """settings.json의 pc_clip_z_max_m(stand 프레임 m) — 점 단위 stand-Z 상한.
+    Safety ROI(로봇 safety envelope)와 독립한 perception 전용 높이 컷(로봇팔/배경 noise
+    제거). env STEREO_CLIP_Z_MAX로도 지정 가능. 없으면 default(None=상한 없음)."""
+    env = os.environ.get("STEREO_CLIP_Z_MAX")
+    try:
+        with open(path) as f:
+            v = json.load(f).get("pc_clip_z_max_m")
+        if v is not None:
+            return float(v)
+    except Exception:
+        pass
+    if env not in (None, ""):
+        try:
+            return float(env)
+        except (TypeError, ValueError):
+            pass
+    return default
+
+
 def _load_color_calib(path):
     try:
         with open(path) as f:
@@ -64,23 +102,37 @@ def _load_color_calib(path):
         return None
 
 
-def _open_tray_model(dims=BOX_DIMS, wall=0.020, n=4000, rng=None):
-    """open-top 트레이 표면 점 (박스 로컬: 중심 원점, z 위, 윗면 열림). ICP target."""
+def _open_tray_model(dims=BOX_DIMS, wall=0.020, floor=0.0065, n=6500, rng=None):
+    """open-top 트레이 **쉘** 표면 점 (박스 로컬: 중심 원점, z 위, 윗면 열림). ICP target.
+
+    카메라가 ~45°로 트레이를 보면 가까운 벽은 **바깥면**, 먼 벽은 (열린 위로 들여다봐)
+    **안쪽면**이 관측된다. 모델이 벽을 바깥면만 두면 먼-안쪽 관측이 바깥 모델로 끌려가
+    포즈가 카메라쪽으로 ~벽두께만큼 편향되고 yaw가 틀어진다. 그래서 내벽·외벽·림 링·
+    내부 바닥을 모두 둔 쉘로 만들어 가까운-바깥/먼-안쪽 관측이 각자 올바른 면에 대응되게
+    한다(검증: 벽두께 편향 교정 + ICP 잔차 절반). 바닥(외부)은 테이블에 가려 제외."""
     rng = rng or np.random.default_rng(0)
     hx, hy, hz = dims[0]/2, dims[1]/2, dims[2]/2
-    ix, iy = hx-wall, hy-wall
-    floor_z = -hz + wall
+    ix, iy = hx-wall, hy-wall                           # 측벽 두께(NTC-321 20mm)
+    fz = -hz + floor                                    # 내부 바닥 높이(바닥 두께 6.5mm)
     pts = []
-    def rect(k, xlo, xhi, ylo, yhi, z):
+    def wx(k, x, ylo, yhi, zlo, zhi):
+        pts.append(np.stack([np.full(k, x), rng.uniform(ylo, yhi, k), rng.uniform(zlo, zhi, k)], 1))
+    def wy(k, y, xlo, xhi, zlo, zhi):
+        pts.append(np.stack([rng.uniform(xlo, xhi, k), np.full(k, y), rng.uniform(zlo, zhi, k)], 1))
+    def rz(k, xlo, xhi, ylo, yhi, z):
         pts.append(np.stack([rng.uniform(xlo, xhi, k), rng.uniform(ylo, yhi, k), np.full(k, z)], 1))
-    def wx(k, x, zlo, zhi):
-        pts.append(np.stack([np.full(k, x), rng.uniform(-hy, hy, k), rng.uniform(zlo, zhi, k)], 1))
-    def wy(k, y, zlo, zhi):
-        pts.append(np.stack([rng.uniform(-hx, hx, k), np.full(k, y), rng.uniform(zlo, zhi, k)], 1))
-    k = n // 8
-    wx(k, -hx, -hz, hz); wx(k, hx, -hz, hz); wy(k, -hy, -hz, hz); wy(k, hy, -hz, hz)  # 바깥 4벽
-    rect(k, -hx, hx, -hy, hy, hz)                       # 윗 림
-    rect(k, -ix, ix, -iy, iy, floor_z)                  # 내부 바닥
+    k = n // 13
+    # 외벽 4 (전체 높이)
+    wx(k, -hx, -hy, hy, -hz, hz); wx(k, hx, -hy, hy, -hz, hz)
+    wy(k, -hy, -hx, hx, -hz, hz); wy(k, hy, -hx, hx, -hz, hz)
+    # 내벽 4 (내부 바닥~윗면)
+    wx(k, -ix, -iy, iy, fz, hz); wx(k, ix, -iy, iy, fz, hz)
+    wy(k, -iy, -ix, ix, fz, hz); wy(k, iy, -ix, ix, fz, hz)
+    # 윗 림 링 (z=hz, 내외 사이 4 strip — 솔리드 top 아님)
+    rz(k, -hx, hx, iy, hy, hz); rz(k, -hx, hx, -hy, -iy, hz)
+    rz(k, ix, hx, -iy, iy, hz); rz(k, -hx, -ix, -iy, iy, hz)
+    # 내부 바닥
+    rz(k, -ix, ix, -iy, iy, fz)
     return np.concatenate(pts, 0)
 
 
@@ -103,6 +155,10 @@ class BoxDetector:
     ICP_CLIP_MARGIN = 0.04         # ICP 입력을 박스 근방 3D RoI로 클립(박스 바깥 점 배제)
     ICP_PASSES = 2                 # 클립→ICP→재클립→ICP 반복 횟수
     MAX_COMPONENTS = 8             # candidate ranking cost bound
+    # 회색(colorless 조밀 박스) de-bridge OPEN 커널 (px). CLOSE 제거만으로 분리는
+    # 되지만, OPEN으로 얇은 연결부를 한 번 더 끊는다. 클수록 강하게 끊지만 희박/가림
+    # 회색 박스를 침식한다(3≈거의 보존, 5≈치수 깔끔하나 ~20% 침식, 7≈과침식). env로 튜닝.
+    GRAY_DEBRIDGE_OPEN_K = 3
 
     def __init__(self, K, baseline, use_icp=True, icp_method=None):
         self.fx, self.fy = K[0, 0], K[1, 1]
@@ -113,9 +169,18 @@ class BoxDetector:
             icp_method or os.environ.get("STEREO_DETECT_ICP_METHOD", "yaw_se2")
         )
         self.model = _open_tray_model()
+        try:
+            self._gray_open_k = max(0, int(os.environ.get("STEREO_GRAY_OPEN_K",
+                                                          self.GRAY_DEBRIDGE_OPEN_K)))
+        except (TypeError, ValueError):
+            self._gray_open_k = self.GRAY_DEBRIDGE_OPEN_K
         self._uu = self._vv = None
         self._T_sc = _load_T(T_STAND_CAM_PATH)
         self._dmin, self._dmax = _load_depth_range(GUI_SETTINGS_PATH)
+        # 검출 RoI: rb_gui Safety ROI 박스(settings.json)를 공유. 없으면 클래스 기본값.
+        self._roi_x, self._roi_y, self._roi_z = _load_roi(
+            GUI_SETTINGS_PATH, (self.ROI_X, self.ROI_Y, self.ROI_Z))
+        self._z_cap = _load_z_cap(GUI_SETTINGS_PATH)   # stand-Z 점 상한(None=off)
         self._calib = _load_color_calib(COLOR_CALIB_PATH)
         self._cfg_t = 0.0
         self._rng = np.random.default_rng(0)
@@ -142,6 +207,9 @@ class BoxDetector:
         if now - self._cfg_t > 1.0:
             self._T_sc = _load_T(T_STAND_CAM_PATH)
             self._dmin, self._dmax = _load_depth_range(GUI_SETTINGS_PATH)
+            self._roi_x, self._roi_y, self._roi_z = _load_roi(
+                GUI_SETTINGS_PATH, (self.ROI_X, self.ROI_Y, self.ROI_Z))
+            self._z_cap = _load_z_cap(GUI_SETTINGS_PATH)
             self._cfg_t = now
 
     # ---- 카메라 프레임 점/색 (기존 로직 유지) ----
@@ -182,17 +250,28 @@ class BoxDetector:
         coef, *_ = np.linalg.lstsq(A, tab[:, 2], rcond=None)
         return coef
 
-    def _cluster_xy(self, P_xy):
-        """XY occupancy grid → 연결성분. (점별 라벨, 면적내림차순 성분 id 목록)."""
-        gx = ((P_xy[:, 0] - self.ROI_X[0]) / self.GRID).astype(np.int32)
-        gy = ((P_xy[:, 1] - self.ROI_Y[0]) / self.GRID).astype(np.int32)
-        W = int((self.ROI_X[1] - self.ROI_X[0]) / self.GRID) + 2
-        H = int((self.ROI_Y[1] - self.ROI_Y[0]) / self.GRID) + 2
+    def _cluster_xy(self, P_xy, bridge=True):
+        """XY occupancy grid → 연결성분. (점별 라벨, 면적내림차순 성분 id 목록).
+
+        bridge=True (초록 등 색-세그 희박 점): MORPH_CLOSE로 마스크의 구멍/틈을 메워
+          한 박스의 흩어진 점을 한 성분으로 잇는다.
+        bridge=False (회색=colorless 조밀 박스): CLOSE는 박스를 테이블/잡음과 이어
+          oversize 덩어리로 만들어 size gate에 걸리게 한다. CLOSE를 빼고 OPEN을 키워
+          얇은 연결부를 끊고 박스를 독립 성분으로 분리한다.
+        """
+        gx = ((P_xy[:, 0] - self._roi_x[0]) / self.GRID).astype(np.int32)
+        gy = ((P_xy[:, 1] - self._roi_y[0]) / self.GRID).astype(np.int32)
+        W = int((self._roi_x[1] - self._roi_x[0]) / self.GRID) + 2
+        H = int((self._roi_y[1] - self._roi_y[0]) / self.GRID) + 2
         inb = (gx >= 0) & (gx < W) & (gy >= 0) & (gy < H)
         occ = np.zeros((H, W), np.uint8)
         occ[gy[inb], gx[inb]] = 255
-        occ = cv2.morphologyEx(occ, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-        occ = cv2.morphologyEx(occ, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        if bridge:
+            occ = cv2.morphologyEx(occ, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+            occ = cv2.morphologyEx(occ, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        elif self._gray_open_k >= 1:
+            k = self._gray_open_k
+            occ = cv2.morphologyEx(occ, cv2.MORPH_OPEN, np.ones((k, k), np.uint8))
         ncc, lab, stats, _ = cv2.connectedComponentsWithStats(occ, 8)
         order = sorted(range(1, ncc), key=lambda c: -stats[c, cv2.CC_STAT_AREA])
         keep = [c for c in order if stats[c, cv2.CC_STAT_AREA] >= self.MIN_CLUSTER_CELL]
@@ -368,11 +447,11 @@ class BoxDetector:
                 method,
                 int(len(s)))
 
-    def _component_candidates(self, pts, cam_xy, plane, label):
+    def _component_candidates(self, pts, cam_xy, plane, label, bridge=True):
         """후보 점을 cluster별 init-fit 후보로 변환한다. ICP는 최종 선택 후 한 번만 수행."""
         if len(pts) < self.MIN_PTS:
             return []
-        pl, comps = self._cluster_xy(pts[:, :2])
+        pl, comps = self._cluster_xy(pts[:, :2], bridge=bridge)
         out = []
         for cid in comps[:self.MAX_COMPONENTS]:
             m = pl == cid
@@ -398,17 +477,30 @@ class BoxDetector:
         oversize_penalty = 8.0 * long_over * long_over + 12.0 * short_over * short_over
         return 0.55 * long_cov + 0.35 * short_cov + 0.10 * n_bonus - oversize_penalty
 
-    def _select_candidate(self, pts, cam_xy, plane, label, prefer_fit=False):
-        cands = self._component_candidates(pts, cam_xy, plane, label)
+    @staticmethod
+    def _center_in_box(T, box_T, margin=0.04):
+        """T의 중심이 box_T(known-dims) footprint(+margin) 안에 있는가 (회색이 초록
+        잔여물을 무는 것을 막는 reject 게이트용)."""
+        dl = T[:2, 3] - box_T[:2, 3]
+        return (abs(dl @ box_T[:2, 0]) < BOX_DIMS[0] / 2 + margin and
+                abs(dl @ box_T[:2, 1]) < BOX_DIMS[1] / 2 + margin)
+
+    def _select_candidate(self, pts, cam_xy, plane, label, prefer_fit=False,
+                          bridge=True, reject_box=None):
+        cands = self._component_candidates(pts, cam_xy, plane, label, bridge=bridge)
+        if reject_box is not None:
+            cands = [c for c in cands if not self._center_in_box(c["T0"], reject_box)]
         if not cands:
             return None
         if prefer_fit:
             return max(cands, key=self._candidate_fit_score)
         return max(cands, key=lambda c: (c["n"], self._candidate_fit_score(c)))
 
-    def _detect_one(self, pts, cam_xy, plane, label, prefer_fit=False):
+    def _detect_one(self, pts, cam_xy, plane, label, prefer_fit=False,
+                    bridge=True, reject_box=None):
         """후보 점 → cluster ranking → init fit → ICP → box dict (RoI 게이트)."""
-        cand = self._select_candidate(pts, cam_xy, plane, label, prefer_fit=prefer_fit)
+        cand = self._select_candidate(pts, cam_xy, plane, label, prefer_fit=prefer_fit,
+                                      bridge=bridge, reject_box=reject_box)
         if cand is None:
             return None
         scene = cand["scene"]
@@ -421,8 +513,8 @@ class BoxDetector:
         else:
             T, fit, rmse, method, sample_n = T0, 1.0, None, "disabled", 0
         c = T[:3, 3]
-        if not (self.ROI_X[0] < c[0] < self.ROI_X[1] and self.ROI_Y[0] < c[1] < self.ROI_Y[1]
-                and self.ROI_Z[0] < c[2] < self.ROI_Z[1]):
+        if not (self._roi_x[0] < c[0] < self._roi_x[1] and self._roi_y[0] < c[1] < self._roi_y[1]
+                and self._roi_z[0] < c[2] < self._roi_z[1]):
             return None
         return dict(T=T, dims=BOX_DIMS, footprint=foot, n=int(len(scene)),
                     source_n=int(len(scene)), icp_sample_n=int(sample_n),
@@ -430,14 +522,18 @@ class BoxDetector:
                     rmse=(None if rmse is None or not np.isfinite(rmse) else round(float(rmse), 5)),
                     icp_method=method, label=label)
 
-    def detect(self, disp, color_img=None):
+    def detect(self, disp, color_img=None, extra_xyz=None, extra_rgb=None):
+        """head disp(+color) 박스 검출. extra_xyz/extra_rgb(stand 프레임 손목 클라우드)를
+        주면 head 점에 병합해 가림 시 커버리지를 늘린다(평면은 head 기준으로 추정)."""
         if cv2 is None:
             return []
         now = time.time(); self._reload_cfg(now)
         Pc, valid = self._cam_points(disp)                       # 카메라 프레임 organized
         Ps = Pc @ self._T_sc[:3, :3].T + self._T_sc[:3, 3]       # stand 프레임
-        inroi = ((Ps[..., 0] > self.ROI_X[0]) & (Ps[..., 0] < self.ROI_X[1]) &
-                 (Ps[..., 1] > self.ROI_Y[0]) & (Ps[..., 1] < self.ROI_Y[1]))
+        inroi = ((Ps[..., 0] > self._roi_x[0]) & (Ps[..., 0] < self._roi_x[1]) &
+                 (Ps[..., 1] > self._roi_y[0]) & (Ps[..., 1] < self._roi_y[1]))
+        if self._z_cap is not None:                  # perception 전용 stand-Z 점 상한
+            inroi = inroi & (Ps[..., 2] < self._z_cap)
 
         have_color = color_img is not None and self._calib is not None
         if have_color:
@@ -448,9 +544,21 @@ class BoxDetector:
         if int(m.sum()) < 2000:
             return []
         P = Ps[m]
-        plane = self._fit_floor_plane(P)
+        C = rgb[m] if have_color else None
+        plane = self._fit_floor_plane(P)            # 평면은 head(테이블 시야) 기준 고정
         if plane is None:
             return []
+        # 손목 클라우드 병합(이미 stand 프레임). 색 분할 위해 color 있을 때만.
+        if have_color and extra_xyz is not None and len(extra_xyz) > 0:
+            ex = np.asarray(extra_xyz, dtype=np.float64)
+            ec = np.asarray(extra_rgb, dtype=np.uint8)
+            inb = ((ex[:, 0] > self._roi_x[0]) & (ex[:, 0] < self._roi_x[1]) &
+                   (ex[:, 1] > self._roi_y[0]) & (ex[:, 1] < self._roi_y[1]))
+            if self._z_cap is not None:
+                inb = inb & (ex[:, 2] < self._z_cap)
+            if inb.any():
+                P = np.concatenate([P, ex[inb]], 0)
+                C = np.concatenate([C, ec[inb]], 0)
         a, b, c = plane
         h = P[:, 2] - (a * P[:, 0] + b * P[:, 1] + c)
         band = (h > self.Z_LO) & (h < self.Z_HI)
@@ -470,8 +578,8 @@ class BoxDetector:
                     out.append(b_)
             return out
 
-        C = rgb[m][band]
-        hsv = cv2.cvtColor(np.ascontiguousarray(C).reshape(-1, 1, 3), cv2.COLOR_RGB2HSV).reshape(-1, 3)
+        Cb = C[band]
+        hsv = cv2.cvtColor(np.ascontiguousarray(Cb).reshape(-1, 1, 3), cv2.COLOR_RGB2HSV).reshape(-1, 3)
         # cv2.inRange는 3채널 이미지를 기대 → 평탄화된 (N,3)엔 못 씀(예외).
         # GREEN_LO/HI (3,) 에 대한 numpy 브로드캐스트 비교로 동일 결과.
         is_green = np.all((hsv >= self.GREEN_LO) & (hsv <= self.GREEN_HI), axis=1)
@@ -491,7 +599,12 @@ class BoxDetector:
             mgn = 0.04
             keep &= ~((np.abs(xl) < BOX_DIMS[0] / 2 + mgn) & (np.abs(yl) < BOX_DIMS[1] / 2 + mgn))
         if int(keep.sum()) >= self.MIN_PTS:
-            gr = self._detect_one(Pb[keep], cam_xy, plane, "gray", prefer_fit=True)
+            # 회색=colorless 조밀 박스. bridge=False(de-bridge)로 박스를 테이블/잡음과
+            # 떼어 독립 성분으로 잡고, 초록 footprint 안에 중심이 놓인 후보(초록 뒷벽/
+            # 모서리 잔여물)는 reject_box로 거부한 뒤 점 수 최대(n-first) 후보를 고른다.
+            # prefer_fit은 초록 잔여물의 known-dims 점수가 높아 오선택되므로 쓰지 않는다.
+            gr = self._detect_one(Pb[keep], cam_xy, plane, "gray",
+                                  bridge=False, reject_box=green_T)
             if gr:
                 out.append(gr)
         return out

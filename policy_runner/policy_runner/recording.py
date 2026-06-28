@@ -700,15 +700,16 @@ class Hdf5EpisodeRecorder:
             self.end_episode(success=False, end_reason="operator_abort")
 
     def _next_episode_id(self) -> str:
-        base = utc_episode_name("ep")
-        if not (self.output_dir / f"{base}.hdf5").exists():
-            return base
-        suffix = 1
-        while True:
-            candidate = f"{base}_{suffix:03d}"
-            if not (self.output_dir / f"{candidate}.hdf5").exists():
-                return candidate
-            suffix += 1
+        # Sequential per-folder index: episode_000, episode_001, ... The session
+        # folder (data_<KST timestamp>) groups one run's episodes, so the index
+        # restarts at 000 each run. Matches the episode_NNN.hdf5 convention the
+        # downstream tools (hdf5-audit, flow_dataset, umi import) already expect.
+        next_index = 0
+        for path in self.output_dir.glob("episode_*.hdf5"):
+            suffix = path.stem[len("episode_"):]
+            if suffix.isdigit():
+                next_index = max(next_index, int(suffix) + 1)
+        return f"episode_{next_index:03d}"
 
     def _record_camera_frame(self, ep: _EpisodeBuffer) -> None:
         if self.camera_client is None:

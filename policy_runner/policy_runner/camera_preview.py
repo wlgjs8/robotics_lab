@@ -23,6 +23,25 @@ WINDOW_TITLE = "policy camera preview (q/ESC closes)"
 DEFAULT_PANEL_SIZE = (640, 480)
 
 
+def _depth_to_image(
+    depth_raw, z_near_mm: float = 120.0, z_far_mm: float = 700.0, depth_units_m: float = 1e-4
+):
+    """z16 depth (uint16 H,W) -> 3ch uint8, the SAME channel the policy receives.
+
+    Kept bit-identical to ``openpi_remote._depth_to_image`` (and the openpi
+    training converter) so the preview shows EXACTLY the depth the model is fed,
+    not a generic colormap. Holes (raw == 0) map to far (1.0), same as inference.
+    """
+    import numpy as np
+
+    valid = depth_raw > 0
+    d_mm = depth_raw.astype(np.float32) * (depth_units_m * 1000.0)
+    d = np.clip((d_mm - z_near_mm) / (z_far_mm - z_near_mm), 0.0, 1.0)
+    d[~valid] = 1.0
+    g = (d * 255.0).astype(np.uint8)
+    return np.repeat(g[..., None], 3, axis=2)
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--zmq-endpoint", default="tcp://127.0.0.1:5600")
@@ -35,6 +54,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-age-ms", type=float, default=500.0)
     parser.add_argument("--refresh-hz", type=float, default=15.0)
     parser.add_argument("--scale", type=float, default=1.0, help="Display scale factor")
+    parser.add_argument(
+        "--include-depth",
+        action="store_true",
+        help=(
+            "Decode the z16 depth streams and render them as the model's depth "
+            "channel (_depth_to_image). Without this the bundle client drops "
+            "depth and its panels show [MISSING]."
+        ),
+    )
+    parser.add_argument("--depth-z-near-mm", type=float, default=120.0, help="match the rollout --depth-z-near-mm")
+    parser.add_argument("--depth-z-far-mm", type=float, default=700.0, help="match the rollout --depth-z-far-mm")
+    parser.add_argument("--depth-units-m", type=float, default=1e-4, help="match the rollout --depth-units-m")
     return parser.parse_args(argv)
 
 
@@ -67,7 +98,10 @@ def main(argv: list[str] | None = None) -> int:
 
     cameras = [name.strip() for name in str(args.cameras).split(",") if name.strip()]
     client = CameraBundleClient(
-        args.zmq_endpoint, topic=args.topic, max_age_ms=args.max_age_ms
+        args.zmq_endpoint,
+        topic=args.topic,
+        max_age_ms=args.max_age_ms,
+        include_depth=bool(args.include_depth),
     )
     period = 1.0 / max(float(args.refresh_hz), 1.0)
     placeholder_shape = (DEFAULT_PANEL_SIZE[1], DEFAULT_PANEL_SIZE[0], 3)
@@ -87,7 +121,20 @@ def main(argv: list[str] | None = None) -> int:
                     status = "MISSING"
                     resolution = f"{DEFAULT_PANEL_SIZE[0]}x{DEFAULT_PANEL_SIZE[1]}"
                 else:
-                    panel = cv2.cvtColor(np.asarray(pixels), cv2.COLOR_RGB2BGR)
+                    arr = np.asarray(pixels)
+                    if arr.ndim == 2:
+                        # Depth (z16 -> uint16 H,W): render EXACTLY the model's
+                        # depth channel (same _depth_to_image + z_near/z_far/units
+                        # as the rollout), so a live panel here proves depth is fed
+                        # to the policy. Already 3ch grayscale -> no cvtColor.
+                        panel = _depth_to_image(
+                            arr,
+                            args.depth_z_near_mm,
+                            args.depth_z_far_mm,
+                            args.depth_units_m,
+                        )
+                    else:
+                        panel = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
                     status = "fresh" if fresh else "STALE"
                     resolution = f"{panel.shape[1]}x{panel.shape[0]}"
                 color = (0, 255, 0) if status == "fresh" else (0, 0, 255)

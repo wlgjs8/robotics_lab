@@ -194,6 +194,94 @@ static bool run() {
         }
     }
 
+    // ---- Active-arm masked goal-clear: a single-arm init must gate ONLY on the
+    // collisions its moving arm can cause. A floor/obstacle that blocks ONLY the
+    // stationary other arm must not fail-close the move (that arm's clearance is the
+    // runtime monitor's concern). Regression for: right-only InitMotion during flow
+    // held forever because the live LEFT arm's gripper sat just inside the floor
+    // margin. ----
+    {
+        // ground_plane occupying the +x half-space (left-arm side: left mount x=+0.157,
+        // right mount x=-0.157), so at `init` the LEFT arm penetrates it and the RIGHT
+        // arm stays clear.
+        CollisionMonitorConfig left_floor = cfg;
+        ExtraCollisionShape box;
+        box.name = "ground_plane";
+        box.shape = "box";
+        box.parent_frame = "stand";
+        box.size_m = {6.0, 6.0, 6.0};
+        box.xyz_m = {3.06, 0.0, 0.0};         // covers x in [0.06, 6.06] -> left arm only
+        left_floor.extra_collision.push_back(box);
+        InitMotionPlanner lp(left_floor, makePlannerConfig(), qmin, qmax);
+
+        // Precondition: the box blocks the LEFT arm but not the RIGHT arm.
+        RB_CHECK(!lp.configClear(init, init));                  // left penetrates -> not clear (unmasked)
+
+        // RIGHT-only init: the left<->floor pair is masked out; the right arm and its
+        // goal are clear, so the plan must SUCCEED (pre-fix: GoalNotClear, held forever).
+        InitMotionPlanResult right_only =
+            lp.plan(init, init, /*left_active=*/false, goal_l, /*right_active=*/true, goal_r);
+        std::cout << "masked right-only over left-floor: success=" << right_only.success
+                  << " fail_mode=" << static_cast<int>(right_only.fail_mode) << " ("
+                  << right_only.message << ")\n";
+        RB_CHECK(right_only.success);
+        RB_CHECK(right_only.fail_mode == InitMotionPlanResult::FailMode::None);
+        for (int i = 0; i < kDof; ++i) {                        // left held at its start q
+            RB_CHECK(std::abs(right_only.waypoints.back().first[i] - init[i]) < 1e-6);
+            RB_CHECK(std::abs(right_only.waypoints.back().second[i] - goal_r[i]) < 1e-6);
+        }
+
+        // LEFT-only init over the same floor must STILL fail closed: the moving (left)
+        // arm's own external clearance IS in scope, so the mask must not relax it.
+        InitMotionPlanResult left_only =
+            lp.plan(init, init, /*left_active=*/true, goal_l, /*right_active=*/false, goal_r);
+        std::cout << "masked left-only over left-floor: success=" << left_only.success
+                  << " fail_mode=" << static_cast<int>(left_only.fail_mode) << "\n";
+        RB_CHECK(!left_only.success);
+    }
+
+    // ---- Fix B: a FIXED goal endpoint resting in the [d_hard, d_hard+margin] band is
+    // physically safe (above the runtime hard barrier, which independently guards
+    // execution) and must be REACHABLE, not fail-closed as "goal not clear". The
+    // +collision_margin is swept-path robustness, not a hard limit on a resting pose.
+    // Reuses the escape slab: `init` sits ~4.5 mm above it (external band [3,8] mm) while
+    // the base-rotated pose {30,...} is clear. ----
+    {
+        const JointArray band_goal = init;                          // ~4.5 mm above slab (band)
+        const JointArray clear_start = {30.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+        CollisionMonitorConfig s = cfg;
+        ExtraCollisionShape box;
+        box.name = "ground_plane";
+        box.shape = "box";
+        box.parent_frame = "stand";
+        box.size_m = {6.0, 6.0, 0.10};
+        box.xyz_m = {0.0, 0.0, 0.09 - 0.05};                        // slab top at z = 0.09
+        s.extra_collision.push_back(box);
+        InitMotionPlanner p(s, makePlannerConfig(), qmin, qmax);
+
+        // Precondition: the goal is inside the planning margin band (NOT full-margin
+        // clear) yet safely above the hard barrier; the start is fully clear.
+        const bool goal_in_band = !p.configClear(band_goal, band_goal) &&
+                                  p.minClearance(band_goal, band_goal) > 0.0035;  // > external_d_hard
+        if (goal_in_band && p.configClear(clear_start, clear_start)) {
+            InitMotionPlanResult r = p.plan(clear_start, clear_start, band_goal, band_goal);
+            std::cout << "band goal: success=" << r.success
+                      << " goal_clear_mm=" << r.goal_clear_m * 1000.0
+                      << " eff_thr_ext_mm=" << r.goal_clear_threshold_external_m * 1000.0
+                      << " (" << r.message << ")\n";
+            RB_CHECK(r.success);                                     // pre-B this was GoalNotClear
+            RB_CHECK(r.fail_mode == InitMotionPlanResult::FailMode::None);
+            // The external gate was relaxed below the configured full margin
+            // (external_d_hard 3mm + margin 5mm = 8mm) but never below the hard barrier.
+            RB_CHECK(r.goal_clear_threshold_external_m < 0.008 - 1e-9);
+            RB_CHECK(r.goal_clear_threshold_external_m >= 0.003 - 1e-9);
+            for (int i = 0; i < kDof; ++i) {                        // reached the band goal exactly
+                RB_CHECK(std::abs(r.waypoints.back().first[i] - band_goal[i]) < 1e-6);
+                RB_CHECK(std::abs(r.waypoints.back().second[i] - band_goal[i]) < 1e-6);
+            }
+        }
+    }
+
     // Lazy can be disabled to recover the eager edge-checking path. It should still
     // return a fully clear, densified path in the same simple scene.
     {

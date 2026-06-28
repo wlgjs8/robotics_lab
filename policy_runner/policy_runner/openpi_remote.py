@@ -271,6 +271,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         depth_z_near_mm: float = 120.0,
         depth_z_far_mm: float = 700.0,
         depth_units_m: float = 1e-4,
+        blank_depth: bool = False,
         sample_steps: int = 1,  # accepted for CLI symmetry; unused remotely
         device: str = "remote",  # accepted for CLI symmetry; inference is server-side
         rtc_enabled: bool = False,
@@ -358,6 +359,12 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # SigLIP. The live D405 depth stream names are the color names with color->depth; the camera
         # bundle client MUST be built with include_depth=True (main.py) so z16 is decoded.
         self.include_depth = bool(include_depth)
+        # Depth ABLATION (option C): still send the *_wrist_0_depth keys (so the
+        # RGB-D server's input transform is satisfied and the 5-camera token
+        # structure stays training-matched) but fill them with a constant all-far
+        # frame instead of live depth. Isolates whether the policy uses depth
+        # CONTENT — live depth is not read in this mode.
+        self.blank_depth = bool(blank_depth)
         self.depth_camera_names = [n.replace("color", "depth") for n in self.camera_names]
         self.depth_z_near_mm = float(depth_z_near_mm)
         self.depth_z_far_mm = float(depth_z_far_mm)
@@ -703,7 +710,15 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             # Resolve the live D405 depth (z16 -> uint16 HxW from the bundle client when its
             # include_depth=True) and encode it with the SAME _depth_to_image as the training
             # converter. Fail-closed if depth is missing (an include_depth checkpoint needs it).
+            blank = getattr(self, "blank_depth", False)
             for key, depth_name in (("left_depth", self.depth_camera_names[0]), ("right_depth", self.depth_camera_names[1])):
+                if blank:
+                    # Ablation: keep the depth token, strip the information. All-far
+                    # (255) == the model's invalid-depth/hole appearance. Shape only
+                    # needs to be a valid HWC uint8 image; the server resizes it.
+                    rgb = images["left" if key == "left_depth" else "right"]
+                    images[key] = np.full((rgb.shape[0], rgb.shape[1], 3), 255, dtype=np.uint8)
+                    continue
                 frame = resolve_frame(bundle_frames, depth_name)
                 px = getattr(frame, "pixels", None)
                 if px is None:
@@ -711,6 +726,14 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 images[key] = _depth_to_image(
                     np.asarray(px), self.depth_z_near_mm, self.depth_z_far_mm, self.depth_units_m
                 )
+            if blank and not getattr(self, "_logged_blank_depth", False):
+                print(
+                    "[flow-infer] BLANK-DEPTH ablation active: sending constant all-far depth, "
+                    "live depth IGNORED (tests whether the policy uses depth content)",
+                    file=self.stderr,
+                    flush=True,
+                )
+                self._logged_blank_depth = True
         # One-time proof of the actual image fed to the server (HWC). With crop_frac=0.65
         # on a 480x640 fisheye this prints (312, 416, 3); uncropped it prints (480, 640, 3).
         if not getattr(self, "_logged_wrist_shape", False):
