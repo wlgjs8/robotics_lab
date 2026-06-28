@@ -263,6 +263,14 @@ safety:
       #       size_m: [0.07, 0.10, 0.04], xyz_m: [0.0, 0.05, 0.05], rpy: [0,0,0] }
       #   - { name: work_table, shape: box, parent_frame: stand,
       #       size_m: [1.2, 0.8, 0.04], xyz_m: [0.0, -0.2, 0.0], rpy: [0,0,0] }
+      external_boxes:
+        enable: true
+        max_count: 2
+        size_m: [0.380, 0.240, 0.105]
+        margin_m: 0.025
+        monitor_only: true        # bring-up: report clearance, do not constrain motion yet
+        stale_timeout_s: 0.5
+        stale_policy: hold
       # WHOLE-ARM floor: a large thin static box (world frame) so the SAME mesh
       # barrier that guards arm<->arm / arm<->stand also keeps EVERY arm link above
       # the floor (floor_constraint only checks the TCP + offset points, so an

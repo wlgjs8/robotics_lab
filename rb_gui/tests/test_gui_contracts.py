@@ -114,7 +114,15 @@ from rb_servo_gui.app import (
 )
 from rb_servo_gui.command_client import CommandClient
 from rb_servo_gui import geometry as gui_geometry
-from rb_servo_gui.models import CIRCLE_OVERLAY_SCHEMA_VERSION, CircleOverlaySnapshot, Pose6D, StateSnapshot
+from rb_servo_gui.models import (
+    CIRCLE_OVERLAY_SCHEMA_VERSION,
+    EXTERNAL_BOX_COLLISION_M,
+    EXTERNAL_BOX_NEAR_M,
+    CircleOverlaySnapshot,
+    Pose6D,
+    StateSnapshot,
+    external_box_display,
+)
 from rb_servo_gui.overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
 from rb_servo_gui.recording_control import (
     ARM_INIT_COMMAND_SCHEMA,
@@ -4028,6 +4036,46 @@ class FloorConstraintGuiTest(unittest.TestCase):
         self.assertTrue(handles.get("floor_enforce_synced"))
 
 
+class ExternalBoxTelemetryGuiTest(unittest.TestCase):
+    def test_external_box_display_helper(self):
+        near = external_box_display(EXTERNAL_BOX_NEAR_M / 2.0)
+        self.assertFalse(near["in_collision"])
+        self.assertTrue(near["show_label"])
+        self.assertEqual(near["label"], "50 mm")
+
+        collision = external_box_display(EXTERNAL_BOX_COLLISION_M)
+        self.assertTrue(collision["in_collision"])
+        self.assertFalse(collision["show_label"])
+        self.assertEqual(collision["label"], "")
+
+        far = external_box_display(EXTERNAL_BOX_NEAR_M)
+        self.assertFalse(far["in_collision"])
+        self.assertFalse(far["show_label"])
+        self.assertEqual(far["label"], "")
+
+        none = external_box_display(None)
+        self.assertFalse(none["in_collision"])
+        self.assertFalse(none["show_label"])
+        self.assertEqual(none["label"], "")
+
+    def test_state_snapshot_parses_external_box_clearance(self):
+        snap = StateSnapshot.parse(sample_state(self_collision={
+            "enabled": True,
+            "checked": True,
+            "violated": False,
+            "external_box_min_clearance_m": 0.012,
+            "external_box_clearance_m": [0.012, None, float("inf"), "bad"],
+            "near_pairs": [{"name_a": "arm", "name_b": "external_box_0", "external_box": True}],
+        }))
+        self.assertIsNotNone(snap)
+        self.assertEqual(
+            snap.self_collision["external_box_clearance_m"],
+            [0.012, None, None, None],
+        )
+        self.assertEqual(snap.self_collision["external_box_min_clearance_m"], 0.012)
+        self.assertTrue(snap.self_collision["near_pairs"][0]["external_box"])
+
+
 class PointcloudGuiTest(unittest.TestCase):
     class _Value:
         def __init__(self, value):
@@ -4067,6 +4115,7 @@ class PointcloudGuiTest(unittest.TestCase):
         class _Scene:
             def __init__(self):
                 self.meshes = {}
+                self.labels = {}
 
             def add_mesh_simple(self, name, vertices, faces, **kwargs):
                 handle = RecordingSceneHandle()
@@ -4075,6 +4124,14 @@ class PointcloudGuiTest(unittest.TestCase):
                 handle.visible = kwargs.get("visible", True)
                 handle.color = kwargs.get("color")
                 self.meshes[name] = handle
+                return handle
+
+            def add_label(self, name, text, **kwargs):
+                handle = RecordingSceneHandle()
+                handle.text = text
+                handle.position = kwargs.get("position")
+                handle.visible = kwargs.get("visible", True)
+                self.labels[name] = handle
                 return handle
 
         class _Server:
@@ -4109,17 +4166,27 @@ class PointcloudGuiTest(unittest.TestCase):
             "pc_enable": self._Value(False),
             "pc_box_enable": self._Value(True),
         }
-        gui_app._update_stereo_boxes(handles)
+        latest = StateSnapshot.parse(sample_state(self_collision={
+            "external_box_clearance_m": [0.050, 0.0],
+            "external_box_min_clearance_m": 0.0,
+        }))
+        gui_app._update_stereo_boxes(handles, latest)
 
         self.assertEqual(set(scene.meshes), {"/stereo_box_0", "/stereo_box_1"})
         self.assertEqual(set(handles["_box_handles"]), {"box0", "box1"})
         self.assertTrue(handles["_box_handles"]["box0"].visible)
         self.assertTrue(handles["_box_handles"]["box1"].visible)
+        self.assertEqual(handles["_box_handles"]["box0"].color, (40, 220, 80))
+        self.assertEqual(handles["_box_handles"]["box1"].color, gui_app._EXTERNAL_BOX_COLLISION_RED)
+        self.assertEqual(handles["_box_dist_labels"]["box0"].text, "50 mm")
+        self.assertTrue(handles["_box_dist_labels"]["box0"].visible)
+        self.assertNotIn("box1", handles["_box_dist_labels"])
 
         handles["pc_box_enable"].value = False
         gui_app._update_stereo_boxes(handles)
         self.assertFalse(handles["_box_handles"]["box0"].visible)
         self.assertFalse(handles["_box_handles"]["box1"].visible)
+        self.assertFalse(handles["_box_dist_labels"]["box0"].visible)
 
 
 class RoiBoxGuiTest(unittest.TestCase):
@@ -4465,7 +4532,15 @@ class SelfCollisionOverlayTest(unittest.TestCase):
         }
 
     @staticmethod
-    def _latest(*, violated, physical_real, q_actual, q_sent, pair="left_stand"):
+    def _latest(
+        *,
+        violated,
+        physical_real,
+        q_actual,
+        q_sent,
+        pair="left_stand",
+        external_box_clearance_m=None,
+    ):
         store = StateStore(stale_after_sec=5.0)
         arm = {
             "has_valid_joint_state": True,
@@ -4473,12 +4548,17 @@ class SelfCollisionOverlayTest(unittest.TestCase):
             "q_sent_deg": q_sent,
             "physical_motion_expected": physical_real,
         }
+        sc = {"enabled": True, "checked": True, "violated": violated,
+              "pair": pair,
+              "stand_capsule": "lower_column" if pair and "stand" in pair else None}
+        if external_box_clearance_m is not None:
+            sc["external_box_clearance_m"] = external_box_clearance_m
+            finite = [c for c in external_box_clearance_m if isinstance(c, (int, float)) and math.isfinite(float(c))]
+            sc["external_box_min_clearance_m"] = min(finite) if finite else None
         payload = sample_state(
             left=dict(arm),
             right=dict(arm),
-            self_collision={"enabled": True, "checked": True, "violated": violated,
-                            "pair": pair,
-                            "stand_capsule": "lower_column" if pair and "stand" in pair else None},
+            self_collision=sc,
         )
         assert store.update_from_json_bytes(json.dumps(payload).encode(), received_monotonic=time.monotonic())
         return store.latest()
@@ -4553,6 +4633,26 @@ class SelfCollisionOverlayTest(unittest.TestCase):
         self.assertTrue(handles["left_base"].visible)
         self.assertTrue(handles["right_base"].visible)
         self.assertEqual(handles["left_urdf_collision"].configs, [])
+
+    def test_external_box_collision_paints_both_arms_red(self):
+        handles = self._handles()
+        latest = self._latest(
+            violated=False,
+            physical_real=False,
+            pair=None,
+            external_box_clearance_m=[None, 0.0],
+            q_actual=[1, 2, 3, 4, 5, 6],
+            q_sent=[9, 8, 7, 6, 5, 4],
+        )
+        update_self_collision_overlay(handles, latest)
+        self.assertTrue(handles["left_base_collision"].visible)
+        self.assertTrue(handles["right_base_collision"].visible)
+        self.assertFalse(handles["stand_mesh_collision"].visible)
+        self.assertTrue(handles["stand_mesh"].visible)
+        self.assertFalse(handles["left_base_ref"].visible)
+        self.assertFalse(handles["right_base_ref"].visible)
+        self.assertAlmostEqual(handles["left_urdf_collision"].configs[-1][0], math.radians(9.0))
+        self.assertAlmostEqual(handles["right_urdf_collision"].configs[-1][0], math.radians(9.0))
 
 
 class _CheckGeomUrdf:

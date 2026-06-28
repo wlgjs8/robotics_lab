@@ -863,6 +863,26 @@ void validateConfig(const DualArmConfig& cfg) {
         validatePositiveFinite(m.d_slow_m, "safety.self_collision.mesh.d_slow_m");
         validatePositiveFinite(m.a_brake_m_s2, "safety.self_collision.mesh.a_brake_m_s2");
         validatePositiveFinite(m.max_staleness_s, "safety.self_collision.mesh.max_staleness_s");
+        if (m.external_boxes.max_count < 0) {
+            throw std::runtime_error(
+                "safety.self_collision.mesh.external_boxes.max_count must be >= 0");
+        }
+        for (std::size_t i = 0; i < m.external_boxes.size_m.size(); ++i) {
+            validatePositiveFinite(
+                m.external_boxes.size_m[i],
+                "safety.self_collision.mesh.external_boxes.size_m[" + std::to_string(i) + "]");
+        }
+        validateNonNegativeFinite(
+            m.external_boxes.margin_m,
+            "safety.self_collision.mesh.external_boxes.margin_m");
+        validatePositiveFinite(
+            m.external_boxes.stale_timeout_s,
+            "safety.self_collision.mesh.external_boxes.stale_timeout_s");
+        if (m.external_boxes.stale_policy != "hold" &&
+            m.external_boxes.stale_policy != "disable") {
+            throw std::runtime_error(
+                "safety.self_collision.mesh.external_boxes.stale_policy must be 'hold' or 'disable'");
+        }
         if (m.d_slow_m < m.d_hard_m) {
             throw std::runtime_error(
                 "safety.self_collision.mesh.d_slow_m must be >= d_hard_m");
@@ -1906,6 +1926,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "extra_collision",
                     "ground_plane",
                     "external",
+                    "external_boxes",
                 }, "safety.self_collision.mesh");
                 auto& mc = cfg.safety.self_collision.mesh;
                 if (has(m, "unified_urdf")) {
@@ -2058,6 +2079,29 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     if (has(ex, "hyst_m")) x.hyst_m = asDouble(ex["hyst_m"], "safety.self_collision.mesh.external.hyst_m");
                     if (has(ex, "recover_speed_m_s")) x.recover_speed_m_s = asDouble(ex["recover_speed_m_s"], "safety.self_collision.mesh.external.recover_speed_m_s");
                     if (has(ex, "latency_s")) x.latency_s = asDouble(ex["latency_s"], "safety.self_collision.mesh.external.latency_s");
+                }
+                if (has(m, "external_boxes")) {
+                    const YAML::Node eb = m["external_boxes"];
+                    validateAllowedKeys(eb, {
+                        "enable", "max_count", "size_m", "margin_m", "monitor_only",
+                        "stale_timeout_s", "stale_policy",
+                    }, "safety.self_collision.mesh.external_boxes");
+                    auto& x = mc.external_boxes;
+                    if (has(eb, "enable")) x.enable = asBool(eb["enable"], "safety.self_collision.mesh.external_boxes.enable");
+                    if (has(eb, "max_count")) x.max_count = asInt(eb["max_count"], "safety.self_collision.mesh.external_boxes.max_count");
+                    if (has(eb, "size_m")) {
+                        const YAML::Node sz = eb["size_m"];
+                        if (!sz.IsSequence() || sz.size() != 3) {
+                            fail("safety.self_collision.mesh.external_boxes.size_m must be 3 values [x, y, z]", sz);
+                        }
+                        for (std::size_t i = 0; i < 3; ++i) {
+                            x.size_m[i] = asDouble(sz[i], "safety.self_collision.mesh.external_boxes.size_m");
+                        }
+                    }
+                    if (has(eb, "margin_m")) x.margin_m = asDouble(eb["margin_m"], "safety.self_collision.mesh.external_boxes.margin_m");
+                    if (has(eb, "monitor_only")) x.monitor_only = asBool(eb["monitor_only"], "safety.self_collision.mesh.external_boxes.monitor_only");
+                    if (has(eb, "stale_timeout_s")) x.stale_timeout_s = asDouble(eb["stale_timeout_s"], "safety.self_collision.mesh.external_boxes.stale_timeout_s");
+                    if (has(eb, "stale_policy")) x.stale_policy = asString(eb["stale_policy"], "safety.self_collision.mesh.external_boxes.stale_policy");
                 }
             }
         }

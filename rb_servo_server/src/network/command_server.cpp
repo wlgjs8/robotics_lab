@@ -16,6 +16,7 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
@@ -359,10 +360,10 @@ bool isReleaseLeaseModeString(const std::string& mode) {
     return mode == "ReleaseLease" || mode == "release_lease" || mode == "releaselease";
 }
 
-// EmergencyStop, SetSafetyFloorZ, SetSafetyFloorEnabled, SetSafetyRoiBounds and
-// SetUserSafetyFloorPlane are intentionally leaseless: an operator must be able to
-// stop motion or adjust
-// the safety floor / ROI box / user floor plane while another client (e.g.
+// EmergencyStop, SetSafetyFloorZ, SetSafetyFloorEnabled, SetSafetyRoiBounds,
+// SetExternalBoxes and SetUserSafetyFloorPlane are intentionally leaseless: an
+// operator/perception worker must be able to stop motion or adjust the safety
+// floor / ROI box / external boxes / user floor plane while another client (e.g.
 // policy_runner) holds the command lease. SetSafetyFloorZ is bounded server-side
 // to safety.floor_constraint.[runtime_min_z_m, runtime_max_z_m]; SetSafetyRoiBounds
 // to safety.roi_box.[runtime_min_m, runtime_max_m] per axis; SetUserSafetyFloorPlane
@@ -731,6 +732,51 @@ bool CommandServer::parseMessage(
         if (!read_vec3(root, "roi_min_m", &cmd.roi_min_m)) return false;
         if (!read_vec3(root, "roi_max_m", &cmd.roi_max_m)) return false;
         cmd.has_roi_bounds = true;
+    }
+
+    // SetExternalBoxes payload (top-level: global external keep-out boxes). Each
+    // entry carries a required label and a required row-major 4x4 T_stand_box.
+    // Malformed entries are skipped so one bad detection does not block other
+    // valid obstacle updates in the same packet.
+    if (root.contains("boxes")) {
+        const json& boxes = root["boxes"];
+        if (!boxes.is_array()) return false;
+        const auto read_transform = [](const json& object, const char* key,
+                                       std::array<double, 16>* out) -> bool {
+            const auto it = object.find(key);
+            if (it == object.end() || !it->is_array() || it->size() != 16) return false;
+            for (std::size_t i = 0; i < 16; ++i) {
+                double v = 0.0;
+                if (!isFiniteNumber((*it)[i], &v)) return false;
+                (*out)[i] = v;
+            }
+            return true;
+        };
+        cmd.external_boxes.clear();
+        for (std::size_t i = 0; i < boxes.size(); ++i) {
+            const json& box = boxes[i];
+            if (!box.is_object()) {
+                std::cerr << "[WARN] SetExternalBoxes skipped malformed box[" << i << "]: not an object\n";
+                continue;
+            }
+            ExternalBoxCommand parsed;
+            const auto label_it = box.find("label");
+            if (label_it == box.end() || !label_it->is_string()) {
+                std::cerr << "[WARN] SetExternalBoxes skipped malformed box[" << i << "]: missing label\n";
+                continue;
+            }
+            parsed.label = label_it->get<std::string>();
+            if (!read_transform(box, "T", &parsed.T_stand_box)) {
+                std::cerr << "[WARN] SetExternalBoxes skipped malformed box[" << i << "]: invalid T\n";
+                continue;
+            }
+            if (!readOptionalBool(box, "enable", &parsed.enable)) {
+                std::cerr << "[WARN] SetExternalBoxes skipped malformed box[" << i << "]: invalid enable\n";
+                continue;
+            }
+            cmd.external_boxes.push_back(std::move(parsed));
+        }
+        cmd.has_external_boxes = true;
     }
 
     // SetUserSafetyFloorPlane payload (top-level: the plane is global). point + normal

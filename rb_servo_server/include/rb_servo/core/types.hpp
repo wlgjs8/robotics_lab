@@ -102,6 +102,9 @@ enum class ControlMode {
     // Leaseless runtime adjustment of the stand-frame ROI box bounds
     // (safety.roi_box), bounded server-side to the configured runtime envelope.
     SetSafetyRoiBounds,
+    // Leaseless runtime update of detected external keep-out box poses for the
+    // async mesh CollisionMonitor. Adds obstacles only; it grants no motion authority.
+    SetExternalBoxes,
     // Leaseless runtime set/enable of the user-defined tilted floor plane
     // (safety.user_floor_constraint): carries a stand-frame point + unit normal +
     // margin + enable flag, validated server-side by validateUserFloorPlaneRequest.
@@ -484,6 +487,12 @@ struct CommandSourceLeaseState {
     std::string reason;
 };
 
+struct ExternalBoxCommand {
+    std::string label;                    // "green" | "gray" slot key
+    std::array<double, 16> T_stand_box{};  // 4x4 row-major, box pose in stand frame
+    bool enable = true;
+};
+
 struct DualArmCommand {
     uint64_t seq = 0;
     uint64_t host_time_ns = 0;
@@ -516,6 +525,11 @@ struct DualArmCommand {
     std::array<double, 3> roi_min_m{};
     std::array<double, 3> roi_max_m{};
     bool has_roi_bounds = false;
+
+    // SetExternalBoxes payload (top-level: external keep-out boxes are global):
+    // labeled stand-frame box poses supplied by the camera/perception worker.
+    std::vector<ExternalBoxCommand> external_boxes;
+    bool has_external_boxes = false;
 
     // SetUserSafetyFloorPlane payload (top-level: the plane is global, not per-arm):
     // a stand-frame point + unit normal defining the half-space n.(p-point) >= margin,
@@ -837,6 +851,7 @@ struct SelfCollisionNearPairViz {
     std::array<double, 3> p_b_m{};
     double clearance_m = 0.0;
     bool external = false;  // arm<->external obstacle (floor) vs robot self-collision
+    bool external_box = false;  // arm<->runtime external keep-out box
 };
 
 struct ServoSnapshot {
@@ -881,6 +896,8 @@ struct ServoSnapshot {
     bool self_collision_checked = false;
     bool self_collision_violated = false;
     double self_collision_min_clearance_m = 0.0;
+    double self_collision_external_box_min_clearance_m = std::numeric_limits<double>::infinity();
+    std::vector<double> self_collision_external_box_clearance_m;
     double self_collision_margin_m = 0.0;
     int self_collision_left_bone = -1;
     std::string self_collision_pair;

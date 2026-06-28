@@ -8,6 +8,11 @@ import time
 DOF = 6
 TCP_DISPLAY_MODES = ("auto", "actual", "reference", "both")
 CIRCLE_OVERLAY_SCHEMA_VERSION = "robotics_lab.circle_overlay.v1"
+# TODO: tune with operator.
+EXTERNAL_BOX_NEAR_M = 0.10
+EXTERNAL_BOX_COLLISION_M = 0.0
+EXTERNAL_BOX_SLOT_LABELS = {0: "green", 1: "gray"}
+EXTERNAL_BOX_LABEL_SLOTS = {label: slot for slot, label in EXTERNAL_BOX_SLOT_LABELS.items()}
 
 
 def finite_joint_array(value: Any) -> tuple[float, ...] | None:
@@ -479,6 +484,42 @@ def _optional_finite(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+def _optional_finite_list(value: Any) -> list[float | None]:
+    if not isinstance(value, list | tuple):
+        return []
+    return [_optional_finite(item) for item in value]
+
+
+def _parse_self_collision(value: Any) -> Mapping[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    parsed = dict(value)
+    parsed["external_box_min_clearance_m"] = _optional_finite(
+        value.get("external_box_min_clearance_m")
+    )
+    parsed["external_box_clearance_m"] = _optional_finite_list(
+        value.get("external_box_clearance_m")
+    )
+    return parsed
+
+
+def external_box_display(
+    clearance_m: Any,
+    near_m: float = EXTERNAL_BOX_NEAR_M,
+    collision_m: float = EXTERNAL_BOX_COLLISION_M,
+) -> dict[str, Any]:
+    clearance = _optional_finite(clearance_m)
+    if clearance is None:
+        return {"in_collision": False, "show_label": False, "label": ""}
+    in_collision = clearance <= float(collision_m)
+    show_label = (not in_collision) and float(collision_m) < clearance < float(near_m)
+    return {
+        "in_collision": in_collision,
+        "show_label": show_label,
+        "label": f"{clearance * 1000:.0f} mm" if show_label else "",
+    }
+
+
 def _field_value(
     data: Mapping[str, Any],
     key: str,
@@ -575,7 +616,7 @@ class StateSnapshot:
             observed_backend=_optional_str(data.get("observed_backend")),
             command_source=CommandSourceSnapshot.parse(data.get("command_source")),
             cartesian_gate=top_cartesian_gate if isinstance(top_cartesian_gate, Mapping) else None,
-            self_collision=data.get("self_collision") if isinstance(data.get("self_collision"), Mapping) else None,
+            self_collision=_parse_self_collision(data.get("self_collision")),
             floor_constraint=data.get("floor_constraint") if isinstance(data.get("floor_constraint"), Mapping) else None,
             roi_box=data.get("roi_box") if isinstance(data.get("roi_box"), Mapping) else None,
             user_floor_constraint=data.get("user_floor_constraint") if isinstance(data.get("user_floor_constraint"), Mapping) else None,

@@ -13,6 +13,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <Eigen/Geometry>
+
 #include "rb_servo/control/cartesian_controller.hpp"
 #include "rb_servo/control/fault_classifier.hpp"
 #include "rb_servo/control/servo_dispatcher.hpp"
@@ -1436,6 +1438,13 @@ DualArmServoLoop::DualArmServoLoop(
         collision_monitor_cfg_.external_hyst_m = m.external.hyst_m;
         collision_monitor_cfg_.external_recover_speed_m_s = m.external.recover_speed_m_s;
         collision_monitor_cfg_.external_latency_s = m.external.latency_s;
+        collision_monitor_cfg_.external_boxes.enable = m.external_boxes.enable;
+        collision_monitor_cfg_.external_boxes.max_count = m.external_boxes.max_count;
+        collision_monitor_cfg_.external_boxes.size_m = m.external_boxes.size_m;
+        collision_monitor_cfg_.external_boxes.margin_m = m.external_boxes.margin_m;
+        collision_monitor_cfg_.external_boxes.monitor_only = m.external_boxes.monitor_only;
+        collision_monitor_cfg_.external_boxes.stale_timeout_s = m.external_boxes.stale_timeout_s;
+        collision_monitor_cfg_.external_boxes.stale_policy = m.external_boxes.stale_policy;
         collision_monitor_cfg_.extra_collision.clear();
         for (const auto& e : m.extra_collision) {
             ExtraCollisionShape s;
@@ -1987,6 +1996,66 @@ void DualArmServoLoop::loopMain() {
                 }
             }
             command = metadata_hold(command);
+        } else if (commandRequestsSetExternalBoxes(command)) {
+            // Leaseless runtime update of preallocated external keep-out boxes.
+            // No-op unless the mesh CollisionMonitor was built with external boxes.
+            if (!command.has_external_boxes) {
+                std::cerr << "[WARN] SetExternalBoxes rejected: missing boxes payload\n";
+            } else if (!collision_monitor_ || !collision_monitor_cfg_.external_boxes.enable) {
+                std::cerr << "[DEBUG] SetExternalBoxes ignored: external boxes disabled or monitor absent\n";
+            } else {
+                const int max_count = collision_monitor_cfg_.external_boxes.max_count;
+                std::vector<ExternalBoxPose> poses(static_cast<std::size_t>(std::max(0, max_count)));
+                int accepted = 0;
+                int ignored_unknown = 0;
+                int ignored_out_of_range = 0;
+                int ignored_invalid_rotation = 0;
+                for (const auto& box : command.external_boxes) {
+                    int slot = -1;
+                    if (box.label == "green") {
+                        slot = 0;
+                    } else if (box.label == "gray") {
+                        slot = 1;
+                    } else {
+                        ++ignored_unknown;
+                        continue;
+                    }
+                    if (slot < 0 || slot >= max_count) {
+                        ++ignored_out_of_range;
+                        continue;
+                    }
+
+                    Eigen::Matrix3d R;
+                    Eigen::Vector3d t;
+                    for (int row = 0; row < 3; ++row) {
+                        for (int col = 0; col < 3; ++col) {
+                            R(row, col) = box.T_stand_box[static_cast<std::size_t>(row * 4 + col)];
+                        }
+                        t(row) = box.T_stand_box[static_cast<std::size_t>(row * 4 + 3)];
+                    }
+                    Eigen::Quaterniond q(R);
+                    const double q_norm = q.norm();
+                    if (!std::isfinite(q_norm) || q_norm <= 0.0) {
+                        ++ignored_invalid_rotation;
+                        continue;
+                    }
+                    q.normalize();
+                    ExternalBoxPose pose;
+                    pose.enable = box.enable;
+                    pose.R = q.toRotationMatrix();
+                    pose.t = t;
+                    poses[static_cast<std::size_t>(slot)] = pose;
+                    ++accepted;
+                }
+                const double stamp_s = nsToSec(nowSteadyNs());
+                collision_monitor_->setExternalBoxes(poses, stamp_s);
+                std::cerr << "[DEBUG] SetExternalBoxes applied " << accepted
+                          << " box(es), ignored_unknown=" << ignored_unknown
+                          << " ignored_out_of_range=" << ignored_out_of_range
+                          << " ignored_invalid_rotation=" << ignored_invalid_rotation
+                          << " by source_id=" << command.source.source_id << "\n";
+            }
+            command = metadata_hold(command);
         } else if (commandRequestsSetUserSafetyFloorPlane(command)) {
             // Leaseless runtime set/enable of the user-defined tilted floor plane.
             // A disable request (enable=false) is accepted unconditionally; an enable
@@ -2469,6 +2538,10 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.self_collision_checked = last_self_collision_.checked;
             latest_snapshot_.self_collision_violated = last_self_collision_.violated;
             latest_snapshot_.self_collision_min_clearance_m = last_self_collision_.min_clearance_m;
+            latest_snapshot_.self_collision_external_box_min_clearance_m =
+                last_collision_verdict_.external_box_min_clearance_m;
+            latest_snapshot_.self_collision_external_box_clearance_m =
+                last_collision_verdict_.external_box_clearance_m;
             // Telemetry "margin" is the hard floor the mesh barrier defends.
             latest_snapshot_.self_collision_margin_m = config_.safety.self_collision.mesh.d_hard_m;
             latest_snapshot_.self_collision_left_bone = last_self_collision_.left_bone;
@@ -2500,7 +2573,7 @@ void DualArmServoLoop::loopMain() {
                         p.name_a, p.name_b,
                         {p.p_a.x(), p.p_a.y(), p.p_a.z()},
                         {p.p_b.x(), p.p_b.y(), p.p_b.z()},
-                        p.d_m, p.external});
+                        p.d_m, p.external, p.external_box});
                 }
             }
             {
@@ -4741,6 +4814,11 @@ bool DualArmServoLoop::commandRequestsSetSafetyFloorEnabled(const DualArmCommand
 bool DualArmServoLoop::commandRequestsSetSafetyRoiBounds(const DualArmCommand& command) const {
     return command.left.mode == ControlMode::SetSafetyRoiBounds ||
            command.right.mode == ControlMode::SetSafetyRoiBounds;
+}
+
+bool DualArmServoLoop::commandRequestsSetExternalBoxes(const DualArmCommand& command) const {
+    return command.left.mode == ControlMode::SetExternalBoxes ||
+           command.right.mode == ControlMode::SetExternalBoxes;
 }
 
 bool DualArmServoLoop::commandRequestsSetUserSafetyFloorPlane(const DualArmCommand& command) const {

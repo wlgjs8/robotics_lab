@@ -851,6 +851,38 @@ bool testCommandValidation() {
     return true;
 }
 
+bool testSetExternalBoxesCommandParser() {
+    rb_servo::NetworkConfig network;
+    network.command_source_enforce_lease = true;
+    rb_servo::CommandBuffer buffer;
+    rb_servo::CommandServer server(network, &buffer);
+    rb_servo::DualArmCommand out;
+    const uint64_t now = rb_servo::nowSteadyNs();
+
+    RB_CHECK(server.parseMessage(
+        R"({"seq":1,"mode":"AcquireLease","source_id":"policy_runner","session_id":"policy-session","lease_token":"policy-token"})",
+        now,
+        &out
+    ));
+    RB_CHECK(server.parseMessage(
+        R"({"seq":1,"mode":"set_external_boxes","source_id":"camera_worker","session_id":"camera-session","boxes":[{"label":"green","T":[1,0,0,0.11,0,1,0,0.22,0,0,1,0.33,0,0,0,1]},{"label":"gray","T":[0,-1,0,0.44,1,0,0,0.55,0,0,1,0.66,0,0,0,1],"enable":false}]})",
+        now + 1,
+        &out
+    ));
+    RB_CHECK(out.left.mode == rb_servo::ControlMode::SetExternalBoxes);
+    RB_CHECK(out.right.mode == rb_servo::ControlMode::SetExternalBoxes);
+    RB_CHECK(out.has_external_boxes);
+    RB_CHECK(out.external_boxes.size() == 2);
+    RB_CHECK(out.external_boxes[0].label == "green");
+    RB_CHECK(out.external_boxes[0].enable);
+    RB_CHECK(std::abs(out.external_boxes[0].T_stand_box[3] - 0.11) < kEpsilon);
+    RB_CHECK(out.external_boxes[1].label == "gray");
+    RB_CHECK(!out.external_boxes[1].enable);
+    RB_CHECK(std::abs(out.external_boxes[1].T_stand_box[7] - 0.55) < kEpsilon);
+    RB_CHECK(!out.lease.command_requires_lease);
+    return true;
+}
+
 bool testCartesianCommandParser() {
     rb_servo::NetworkConfig network;
     network.command_timeout_sec = 0.35;
@@ -5786,6 +5818,7 @@ bool testFreedriveTeachOnFailureAbortsAndReleases() {
 
 int main() {
     if (!testCommandValidation()) return 1;
+    if (!testSetExternalBoxesCommandParser()) return 1;
     if (!testFreedriveArmingQuiescesUntilIdleThenEngages()) return 1;
     if (!testFreedriveTeachOnFailureAbortsAndReleases()) return 1;
     if (!testCommandSequenceRequiredAndMonotonic()) return 1;

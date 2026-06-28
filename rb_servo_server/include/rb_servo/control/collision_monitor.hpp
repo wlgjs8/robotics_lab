@@ -17,6 +17,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -132,6 +133,25 @@ struct CollisionMonitorConfig {
     double external_hyst_m = 0.005;
     double external_recover_speed_m_s = 0.0;
     double external_latency_s = 0.010;
+
+    struct ExternalBoxesConfig {
+        bool enable = false;
+        int max_count = 2;
+        std::array<double, 3> size_m{0.380, 0.240, 0.105};  // NTC-321 outer extents
+        double margin_m = 0.025;  // inflate half-extents for perception uncertainty
+        bool monitor_only = true;
+        double stale_timeout_s = 0.5;
+        std::string stale_policy = "hold";  // "hold" | "disable"
+    };
+    ExternalBoxesConfig external_boxes;
+};
+
+struct ExternalBoxPose {
+    bool enable = false;
+    // Caller guarantees R is orthonormal; CollisionMonitor stores and applies it as-is.
+    Eigen::Matrix3d R = Eigen::Matrix3d::Identity();
+    // Box center in the same stand frame used by setGroundPlanePose's `point`.
+    Eigen::Vector3d t = Eigen::Vector3d::Zero();
 };
 
 // One reported near pair (witness points + approach direction in stand frame).
@@ -147,6 +167,9 @@ struct CollisionNearPair {
     // True if this is an arm<->EXTERNAL-obstacle pair (the floor / ground_plane), which
     // uses the external_* barrier params (smaller d_hard) instead of the self set.
     bool external = false;
+    // True for arm<->runtime external box pairs. Kept distinct from `external`
+    // so ground-plane semantics and telemetry remain unchanged.
+    bool external_box = false;
     // Per-pair clearance Jacobian rows (Stage 1): d(clearance)/dt = J_n * qdot,
     // split into this command's actuated left/right joint columns (command order,
     // idx_v mapping). For an arm<->stand pair only the arm's row is non-zero, so the
@@ -169,6 +192,10 @@ struct CollisionVerdict {
     // clearance gate.
     double self_min_clearance_m = std::numeric_limits<double>::infinity();
     double external_min_clearance_m = std::numeric_limits<double>::infinity();
+    double external_box_min_clearance_m = std::numeric_limits<double>::infinity();
+    // Per preallocated external box slot (slot 0=green, slot 1=gray).
+    // +inf means no finite/active pair for that slot.
+    std::vector<double> external_box_clearance_m;
     // Signed rate of the CURRENTLY-critical (global-min) pair's clearance, tracked
     // per-pair so a switch of which pair is closest does not corrupt it.
     // + = separating, - = approaching.
@@ -290,6 +317,12 @@ public:
     // Safe to call from servo_j. `normal` must be (near) unit and is used as-is.
     void setGroundPlanePose(bool enabled, const Eigen::Vector3d& point,
                             const Eigen::Vector3d& normal);
+
+    // Runtime update for preallocated external keep-out boxes. Cheap
+    // mutex-guarded store; the monitor thread applies placements before its next
+    // distance eval. No-op if external_boxes.enable=false at construction.
+    void setExternalBoxes(const std::vector<ExternalBoxPose>& boxes,
+                          double stamp_monotonic_s);
 
     // True if the model contains a "ground_plane" geometry (i.e. it can be tracked).
     bool hasGroundPlane() const;

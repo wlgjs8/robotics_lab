@@ -46,7 +46,14 @@ from .geometry import (
     _wxyz_to_xyzw,
     _xyzw_to_wxyz,
 )
-from .models import ArmSnapshot, CircleOverlaySnapshot, Pose6D, StateSnapshot
+from .models import (
+    EXTERNAL_BOX_LABEL_SLOTS,
+    ArmSnapshot,
+    CircleOverlaySnapshot,
+    Pose6D,
+    StateSnapshot,
+    external_box_display,
+)
 from .overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
 from .pointcloud_receiver import (
     StereoCloudReceiver,
@@ -3887,6 +3894,9 @@ def _update_lease_owner(
 
 
 _BOX_MESH: Any = "uninit"
+_EXTERNAL_BOX_COLLISION_RED = (220, 60, 60)
+# TODO: tune with operator.
+_EXTERNAL_BOX_LABEL_Z_OFFSET_M = 0.06
 
 
 def _box_mesh():
@@ -3907,7 +3917,7 @@ def _box_mesh():
     return _BOX_MESH
 
 
-def _update_stereo_boxes(handles: dict[str, Any]) -> None:
+def _update_stereo_boxes(handles: dict[str, Any], latest: StateSnapshot | None = None) -> None:
     """검출된 박스(stereo.boxes, T_stand)를 box.stl 메쉬로 각각 렌더."""
     server = handles.get("_server")
     store = handles.get("_stereo_store")
@@ -3917,8 +3927,14 @@ def _update_stereo_boxes(handles: dict[str, Any]) -> None:
     if server is None or store is None or toggle is None:
         return
     hs = handles.setdefault("_box_handles", {})
+    label_hs = handles.setdefault("_box_dist_labels", {})
     if not bool(getattr(toggle, "value", False)):
         for h in hs.values():
+            try:
+                h.visible = False
+            except Exception:
+                pass
+        for h in label_hs.values():
             try:
                 h.visible = False
             except Exception:
@@ -3928,14 +3944,27 @@ def _update_stereo_boxes(handles: dict[str, Any]) -> None:
     boxes, _seq = store.latest_boxes()
     label_color = {"green": (40, 220, 80), "gray": (170, 170, 180)}
     fallback = [(240, 150, 40), (80, 160, 240), (230, 60, 200), (240, 220, 60)]
+    sc = latest.self_collision if latest is not None else None
+    clearances = sc.get("external_box_clearance_m") if isinstance(sc, Mapping) else None
+    if not isinstance(clearances, (list, tuple)):
+        clearances = []
     seen = set()
     for i, b in enumerate(boxes[:4]):
         T = b["T"]; pos = tuple(float(v) for v in T[:3, 3])
         wxyz = tuple(float(v) for v in mat_to_wxyz(T[:3, :3]))
-        col_i = label_color.get(b.get("label"), fallback[i % 4])
+        box_label = b.get("label")
+        slot = EXTERNAL_BOX_LABEL_SLOTS.get(str(box_label)) if box_label is not None else None
+        clearance = clearances[slot] if slot is not None and slot < len(clearances) else None
+        display = external_box_display(clearance)
+        normal_color = label_color.get(box_label, fallback[i % 4])
+        col_i = _EXTERNAL_BOX_COLLISION_RED if display["in_collision"] else normal_color
         name = f"box{i}"; seen.add(name)
         if name in hs:
             h = hs[name]; h.position = pos; h.wxyz = wxyz; h.visible = True
+            try:
+                h.color = col_i
+            except Exception:
+                pass
         elif mesh is not None:
             hs[name] = server.scene.add_mesh_simple(
                 f"/stereo_box_{i}", mesh[0], mesh[1], color=col_i,
@@ -3944,7 +3973,40 @@ def _update_stereo_boxes(handles: dict[str, Any]) -> None:
             hs[name] = server.scene.add_box(
                 f"/stereo_box_{i}", color=col_i, dimensions=tuple(float(v) for v in b["dims"]),
                 wireframe=True, position=pos, wxyz=wxyz)
+        dims = b.get("dims", (0.0, 0.0, 0.0))
+        try:
+            label_z = pos[2] + max(0.0, float(dims[2]) / 2.0) + _EXTERNAL_BOX_LABEL_Z_OFFSET_M
+        except Exception:
+            label_z = pos[2] + _EXTERNAL_BOX_LABEL_Z_OFFSET_M
+        label_pos = (pos[0], pos[1], label_z)
+        label_handle = label_hs.get(name)
+        if display["show_label"] and hasattr(server.scene, "add_label"):
+            if label_handle is None:
+                label_hs[name] = server.scene.add_label(
+                    f"/stereo_box_{i}_clearance",
+                    text=display["label"],
+                    position=label_pos,
+                    visible=True,
+                )
+            else:
+                try:
+                    label_handle.text = display["label"]
+                    label_handle.position = label_pos
+                    label_handle.visible = True
+                except Exception:
+                    pass
+        elif label_handle is not None:
+            try:
+                label_handle.visible = False
+            except Exception:
+                pass
     for name, h in hs.items():
+        if name not in seen:
+            try:
+                h.visible = False
+            except Exception:
+                pass
+    for name, h in label_hs.items():
         if name not in seen:
             try:
                 h.visible = False
@@ -4126,7 +4188,8 @@ def update_gui(
     overlay_store: CircleOverlayStore | None = None,
 ) -> None:
     _update_stereo_cloud(handles)  # 로봇 상태와 무관 — 항상 갱신
-    _update_stereo_boxes(handles)  # 검출된 박스 렌더
+    latest = store.latest()
+    _update_stereo_boxes(handles, latest)  # 검출된 박스 렌더
     _update_stereo_wrist(handles)  # 손목 raw 클라우드 오버레이
     disabled_states = safety.control_disabled_states()
     disabled_reasons = safety.control_disabled_reasons()
@@ -4157,7 +4220,6 @@ def update_gui(
         _update_tcp_display_buttons(handles)
     if "tcp_linear_arm_buttons" in handles or "tcp_linear_orientation_buttons" in handles:
         _update_tcp_linear_selection_buttons(handles)
-    latest = store.latest()
     stale = store.is_stale()
     # Stash the live snapshot so the TCP PTP fields can mirror the current pose
     # every tick (the patched viser NumberInput ignores server updates while it is

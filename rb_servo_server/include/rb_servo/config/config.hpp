@@ -369,6 +369,20 @@ struct SelfCollisionConfig {
             double latency_s = 0.010;
         };
         ExternalConfig external;
+
+        // Preallocated external keep-out boxes updated at runtime by the leaseless
+        // SetExternalBoxes command. Disabled by default; when enabled the monitor
+        // builds exactly max_count box geometries at startup.
+        struct ExternalBoxesConfig {
+            bool enable = false;
+            int max_count = 2;
+            std::array<double, 3> size_m{0.380, 0.240, 0.105};
+            double margin_m = 0.025;
+            bool monitor_only = true;
+            double stale_timeout_s = 0.5;
+            std::string stale_policy = "hold";
+        };
+        ExternalBoxesConfig external_boxes;
     };
     MeshConfig mesh;
 };

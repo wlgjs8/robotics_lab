@@ -230,6 +230,7 @@ private:
     bool commandRequestsSetSafetyFloorZ(const DualArmCommand& command) const;
     bool commandRequestsSetSafetyFloorEnabled(const DualArmCommand& command) const;
     bool commandRequestsSetSafetyRoiBounds(const DualArmCommand& command) const;
+    bool commandRequestsSetExternalBoxes(const DualArmCommand& command) const;
     bool commandRequestsSetUserSafetyFloorPlane(const DualArmCommand& command) const;
     bool commandRequestsEmergencyStop(const DualArmCommand& command) const;
     bool commandRequestsArmMotion(const DualArmCommand& command) const;

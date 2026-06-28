@@ -26,6 +26,9 @@ COLOR_CALIB_PATH = os.environ.get("STEREO_COLOR_CALIB", "/app/config/d435_color_
 STEREO_FUSE_WRIST = os.environ.get("STEREO_FUSE_WRIST", "1") != "0"
 STATE_ENDPOINT = os.environ.get("STEREO_STATE_ENDPOINT", "udp://127.0.0.1:50386")
 T_TCP_CAM_PATH = os.environ.get("STEREO_T_TCP_CAM", "/calibration/T_tcp_cam.npy")
+STEREO_SEND_EXTERNAL_BOXES = os.environ.get("STEREO_SEND_EXTERNAL_BOXES", "0") == "1"
+STEREO_COMMAND_ENDPOINT = os.environ.get("STEREO_COMMAND_ENDPOINT", "127.0.0.1:50010")
+STEREO_BOX_SOURCE_ID = os.environ.get("STEREO_BOX_SOURCE_ID", "stereo_worker")
 
 
 def load_color_calib(path):
@@ -209,6 +212,7 @@ def cmd_run(args):
     import sys
     sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
     from bundle_reader import BundleReader
+    from external_boxes_sender import ExternalBoxesSender
 
     wait_for_file(STEREO_INTRINSICS)
     if not os.path.exists(STEREO_INTRINSICS):
@@ -247,6 +251,14 @@ def cmd_run(args):
             want.add(kc); want.add(kd)
     reader = BundleReader(endpoint=BUNDLE_ENDPOINT)
     pub = CloudPublisher(CLOUD_PUB_BIND, CLOUD_TOPIC)
+    external_boxes_sender = ExternalBoxesSender(
+        endpoint=STEREO_COMMAND_ENDPOINT,
+        source_id=STEREO_BOX_SOURCE_ID,
+        enabled=STEREO_SEND_EXTERNAL_BOXES,
+    )
+    if STEREO_SEND_EXTERNAL_BOXES:
+        print(f"[run] external boxes sender: ON endpoint={STEREO_COMMAND_ENDPOINT} "
+              f"source_id={STEREO_BOX_SOURCE_ID}", flush=True)
 
     detector = None; tracker = None
     if os.environ.get("STEREO_DETECT", "1") != "0":
@@ -376,6 +388,7 @@ def cmd_run(args):
                 boxes = tracker.update(raw) if tracker is not None else raw
                 n_boxes = len(boxes)
                 pub.publish_boxes(seq, boxes)
+                external_boxes_sender.send(boxes)
             except Exception as e:  # noqa: BLE001
                 if seq % 60 == 0:
                     print(f"[run] detect err: {e}", flush=True)
