@@ -2045,9 +2045,10 @@ def _lifecycle_init_motion_layout_html() -> str:
   function parentBox(button){ return button && (button.parentElement || button); }
   function apply(){
     var buttons = Array.prototype.slice.call(document.querySelectorAll('button'));
-    var both = buttons.find(function(b){ return labelOf(b) === 'InitMotion (양팔)'; });
-    var left = buttons.find(function(b){ return labelOf(b) === 'InitMotion (왼팔)'; });
-    var right = buttons.find(function(b){ return labelOf(b) === 'InitMotion (오른팔)'; });
+    function isInit(b, tok){ var l = labelOf(b); return l.indexOf('InitMotion') >= 0 && l.indexOf(tok) >= 0; }
+    var both = buttons.find(function(b){ return isInit(b, '(양팔)'); });
+    var left = buttons.find(function(b){ return isInit(b, '(왼팔)'); });
+    var right = buttons.find(function(b){ return isInit(b, '(오른팔)'); });
     if(!both || !left || !right) return;
     var bothBox = parentBox(both), leftBox = parentBox(left), rightBox = parentBox(right);
     [both, left, right].forEach(function(b){ b.style.width = '100%'; });
@@ -2333,8 +2334,8 @@ def build_gui(
                 disabled=True,
             )
             init_both_button = server.gui.add_button("InitMotion (양팔)")
-            init_left_button = server.gui.add_button("InitMotion (왼팔)")
-            init_right_button = server.gui.add_button("InitMotion (오른팔)")
+            init_left_button = server.gui.add_button("InitMotion (왼팔) [a]")
+            init_right_button = server.gui.add_button("InitMotion (오른팔) [c]")
             init_cancel_button = server.gui.add_button("Cancel Init Override / Resume Flow")
             handles["init_motion_button"] = init_both_button
             handles["init_motion_buttons"] = {
@@ -4369,7 +4370,7 @@ def update_gui(
 
 _VISER_WASD_PATCH_MARKER = "rb-disable-wasd-keys"
 _VISER_WASD_BUNDLE_MARKER = "rb-wasd-bundle-patched"
-_VISER_KEYBOARD_PATCH_VERSION = "rb-disable-wasd-keys-recording-v2"
+_VISER_KEYBOARD_PATCH_VERSION = "rb-disable-wasd-keys-recording-initmotion-v3"
 
 
 def _patch_viser_bundle_wasd(html: str) -> str:
@@ -4435,14 +4436,26 @@ def _viser_keyboard_patch_script() -> str:
         "return g==='INPUT'||g==='TEXTAREA'||g==='SELECT'||e.isContentEditable||"
         "(e.closest&&e.closest('input,textarea,select,[contenteditable=true]'));}"
         "function s(e){e.stopImmediatePropagation();e.preventDefault();}"
-        "function r(){var a=Array.prototype.slice.call(document.querySelectorAll('button'));"
+        "function mod(e){return e.ctrlKey||e.metaKey||e.altKey;}"
         "function txt(b){return (b.textContent||b.innerText||'').trim();}"
+        "function r(){var a=Array.prototype.slice.call(document.querySelectorAll('button'));"
         "var h=a.find(function(b){return !b.disabled&&txt(b).indexOf('record-toggle-hotkey-b')>=0;});"
         "if(h){h.click();return;}"
         "var stop=a.find(function(b){return !b.disabled&&txt(b).indexOf('수집 종료')>=0;});"
         "var start=a.find(function(b){return !b.disabled&&txt(b).indexOf('수집 시작')>=0;});"
         "(stop||start||{}).click&& (stop||start).click();}"
-        "function d(e){if(t(e.target))return;if(B[e.code]){s(e);return;}"
+        # InitMotion hotkeys: 'a' = left arm, 'c' = right arm. Click the matching GUI
+        # button (by 'InitMotion' + side token) so the press routes through the same
+        # arm-init path as the click and works during any motion. Skipped while a button
+        # is disabled (init not allowed in the current state) or a modifier is held (so
+        # Ctrl/Cmd+A/C are never hijacked).
+        "function initArm(tok){var a=Array.prototype.slice.call(document.querySelectorAll('button'));"
+        "var b=a.find(function(x){return !x.disabled&&txt(x).indexOf('InitMotion')>=0&&txt(x).indexOf(tok)>=0;});"
+        "if(b)b.click();}"
+        "function d(e){if(t(e.target))return;"
+        "if(e.code==='KeyA'&&!mod(e)){s(e);initArm('(왼팔)');return;}"
+        "if(e.code==='KeyC'&&!mod(e)){s(e);initArm('(오른팔)');return;}"
+        "if(B[e.code]){s(e);return;}"
         "if(e.code==='KeyB'){s(e);r();}}"
         "function u(e){if(!t(e.target)&&B[e.code])s(e);}"
         "window.addEventListener('keydown',d,true);"
@@ -4454,9 +4467,11 @@ def _viser_keyboard_patch_script() -> str:
 def _disable_viser_wasd_keys() -> None:
     """Disable viser's WASD camera fly-movement (W/A/S/D) in the served client.
 
-    Q/E (up/down), the arrow keys, and mouse drag/zoom are kept; 'a' is freed (it
-    does nothing). viser bakes these key handlers into its frontend bundle with NO
-    Python API to disable them, so we patch the served client index.html two ways:
+    Q/E (up/down), the arrow keys, and mouse drag/zoom are kept; W/A/S/D camera
+    fly-movement is suppressed and the injected handler repurposes 'a'/'c' as the
+    InitMotion left/right hotkeys ('b' stays the record toggle). viser bakes these key
+    handlers into its frontend bundle with NO Python API to disable them, so we patch
+    the served client index.html two ways:
       1. Source-level: rename the W/A/S/D hold-event key codes in the JS bundle so
          the bindings never fire (the robust fix — see _patch_viser_bundle_wasd).
       2. Fallback: inject a capture-phase key blocker (covers builds where the
@@ -4495,6 +4510,173 @@ def _disable_viser_wasd_keys() -> None:
     except Exception as exc:  # noqa: BLE001 - cosmetic patch must never block GUI startup
         print(
             f"rb_servo_gui: could not patch viser WASD keys ({type(exc).__name__}: {exc})",
+            flush=True,
+        )
+
+
+_FOOT_PEDAL_DEVICE_ENV = "RB_GUI_FOOT_PEDAL_DEVICE"
+_FOOT_PEDAL_DEFAULT_PATH = "/dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd"
+
+
+def _open_foot_pedal_device():
+    """Open + exclusively grab the foot-pedal keyboard device via evdev.
+
+    The PCsensor FootSwitch presents as a keyboard emitting a/b/c. Reading it
+    directly works regardless of viser/browser focus or which terminal is active,
+    and grab() (EVIOCGRAB) keeps the pedal from ALSO typing a/b/c into whatever
+    window is focused. Returns a grabbed evdev.InputDevice or None (evdev missing,
+    no matching device, or access denied). Best-effort: never raises.
+
+    Device selection: $RB_GUI_FOOT_PEDAL_DEVICE override, then the stable by-id
+    path, then a scan for a foot-switch node that exposes KEY_A (the keyboard
+    interface, not the device's mouse/extra nodes)."""
+    try:
+        import evdev
+        from evdev import ecodes
+    except Exception:
+        print(
+            "rb_servo_gui: foot pedal disabled (python-evdev not installed; `pip install evdev`)",
+            flush=True,
+        )
+        return None
+    dev = None
+    override = os.environ.get(_FOOT_PEDAL_DEVICE_ENV, "").strip()
+    for path in [p for p in (override, _FOOT_PEDAL_DEFAULT_PATH) if p]:
+        try:
+            if os.path.exists(path):
+                dev = evdev.InputDevice(path)
+                break
+        except Exception:
+            dev = None
+    if dev is None:
+        try:
+            for path in evdev.list_devices():
+                try:
+                    cand = evdev.InputDevice(path)
+                except Exception:
+                    continue
+                name = (cand.name or "").lower()
+                keys = cand.capabilities().get(ecodes.EV_KEY, [])
+                if ("foot" in name or "pcsensor" in name) and ecodes.KEY_A in keys:
+                    dev = cand
+                    break
+                try:
+                    cand.close()
+                except Exception:
+                    pass
+        except Exception:
+            dev = None
+    if dev is None:
+        print(
+            f"rb_servo_gui: foot pedal not found (set {_FOOT_PEDAL_DEVICE_ENV} to its /dev/input path)",
+            flush=True,
+        )
+        return None
+    try:
+        dev.grab()
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"rb_servo_gui: foot pedal grab failed ({type(exc).__name__}: {exc}); "
+            "add your user to the 'input' group (sudo usermod -aG input $USER) and re-login",
+            flush=True,
+        )
+        try:
+            dev.close()
+        except Exception:
+            pass
+        return None
+    print(
+        f"rb_servo_gui: foot pedal active on {dev.path} ({dev.name}); "
+        "a=InitMotion left, c=InitMotion right, b=record toggle",
+        flush=True,
+    )
+    return dev
+
+
+def _foot_pedal_action_map(safety: "OperatorSafety", handles: dict[str, Any]) -> dict:
+    """evdev key code -> (label, action) for the foot pedal.
+
+    a -> InitMotion left, c -> InitMotion right, b -> record toggle. Each action
+    reuses the exact GUI handler (same routing as a viser button click). Returns
+    {} if evdev is unavailable."""
+    try:
+        from evdev import ecodes as e
+    except Exception:
+        return {}
+    return {
+        e.KEY_A: ("InitMotion left", lambda: _send_arm_init_override(
+            safety, handles.get("scene", {}), handles, "left")),
+        e.KEY_C: ("InitMotion right", lambda: _send_arm_init_override(
+            safety, handles.get("scene", {}), handles, "right")),
+        e.KEY_B: ("record toggle", lambda: _toggle_episode_recording(handles)),
+    }
+
+
+def _foot_pedal_loop(safety: "OperatorSafety", handles: dict[str, Any]) -> None:
+    """Map foot-pedal key-down events to robot actions, independent of the browser.
+
+    Works during any motion and whether or not a viser tab is open/focused (reads
+    the device directly). Reconnects on unplug; a handler error never kills the loop."""
+    try:
+        from evdev import ecodes as e
+    except Exception:
+        return
+    actions = _foot_pedal_action_map(safety, handles)
+    while True:
+        dev = _open_foot_pedal_device()
+        if dev is None:
+            return  # evdev missing, no device, or no permission -> stay disabled this run.
+        try:
+            for event in dev.read_loop():
+                if event.type != e.EV_KEY or event.value != 1:  # key-DOWN only (ignore up/repeat)
+                    continue
+                entry = actions.get(event.code)
+                if entry is None:
+                    continue
+                label, fn = entry
+                try:
+                    fn()
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"rb_servo_gui: foot pedal {label} failed ({type(exc).__name__}: {exc})",
+                        flush=True,
+                    )
+        except OSError as exc:
+            print(
+                f"rb_servo_gui: foot pedal disconnected ({type(exc).__name__}: {exc}); reconnecting",
+                flush=True,
+            )
+            try:
+                dev.close()
+            except Exception:
+                pass
+            time.sleep(2.0)  # then re-open via the loop (handles replug)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"rb_servo_gui: foot pedal loop stopped ({type(exc).__name__}: {exc})",
+                flush=True,
+            )
+            try:
+                dev.close()
+            except Exception:
+                pass
+            return
+
+
+def _start_foot_pedal_listener(safety: "OperatorSafety", handles: dict[str, Any]) -> None:
+    """Start the global foot-pedal listener as a daemon thread (best-effort)."""
+    try:
+        thread = threading.Thread(
+            target=_foot_pedal_loop,
+            args=(safety, handles),
+            name="rb-foot-pedal",
+            daemon=True,
+        )
+        thread.start()
+        handles["_foot_pedal_thread"] = thread
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"rb_servo_gui: foot pedal listener not started ({type(exc).__name__}: {exc})",
             flush=True,
         )
 
@@ -4585,6 +4767,10 @@ def main(argv: list[str] | None = None) -> None:
         recording_status_store=recording_status_store,
     )
     handles["_stereo_store"] = stereo_store
+    # Global foot-pedal hotkeys (PCsensor FootSwitch -> a/b/c), read straight from the
+    # input device so they fire regardless of the viser tab being open/focused or which
+    # terminal is active. a=InitMotion left, c=InitMotion right, b=record toggle.
+    _start_foot_pedal_listener(safety, handles)
     overlay_status = (
         f", circle overlay UDP {circle_overlay_bind[0]}:{circle_overlay_bind[1]}"
         if circle_overlay_bind is not None

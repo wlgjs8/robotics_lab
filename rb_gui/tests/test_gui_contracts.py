@@ -33,6 +33,7 @@ from rb_servo_gui.app import (
     _update_recording_panel,
     _send_arm_init_override,
     _send_arm_init_cancel_resume,
+    _foot_pedal_action_map,
     _update_arm_init_panel,
     _lifecycle_init_motion_layout_html,
     _update_gripper_feedback,
@@ -1562,9 +1563,12 @@ class GuiContractsTest(unittest.TestCase):
 
     def test_lifecycle_init_motion_layout_targets_three_buttons(self):
         html = _lifecycle_init_motion_layout_html()
-        self.assertIn("InitMotion (양팔)", html)
-        self.assertIn("InitMotion (왼팔)", html)
-        self.assertIn("InitMotion (오른팔)", html)
+        # Matched by 'InitMotion' + side token (substring), so the layout survives the
+        # button label carrying a key hint (e.g. "InitMotion (왼팔) [a]").
+        self.assertIn("InitMotion", html)
+        self.assertIn("(양팔)", html)
+        self.assertIn("(왼팔)", html)
+        self.assertIn("(오른팔)", html)
         self.assertIn("calc(50% - 0.25rem)", html)
 
     def test_viser_keyboard_patch_includes_b_hotkey_and_input_guard(self):
@@ -1575,6 +1579,43 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("수집 종료", script)
         self.assertIn("INPUT", script)
         self.assertIn("TEXTAREA", script)
+
+    def test_foot_pedal_action_map_routes_a_to_left_c_to_right_b_to_record(self):
+        try:
+            from evdev import ecodes as e
+        except Exception:
+            self.skipTest("python-evdev not installed")
+        handles = {"scene": {"_sentinel": 1}}
+        safety = object()
+        amap = _foot_pedal_action_map(safety, handles)
+        self.assertEqual(amap[e.KEY_A][0], "InitMotion left")
+        self.assertEqual(amap[e.KEY_C][0], "InitMotion right")
+        self.assertEqual(amap[e.KEY_B][0], "record toggle")
+        with mock.patch("rb_servo_gui.app._send_arm_init_override", return_value=(True, "ok")) as init, \
+                mock.patch("rb_servo_gui.app._toggle_episode_recording", return_value=None) as rec:
+            amap[e.KEY_A][1]()
+            amap[e.KEY_C][1]()
+            amap[e.KEY_B][1]()
+        self.assertEqual(init.call_count, 2)
+        # _send_arm_init_override(safety, scene_handles, handles, arms): arms is arg[3].
+        self.assertEqual(init.call_args_list[0].args[0], safety)
+        self.assertEqual(init.call_args_list[0].args[2], handles)
+        self.assertEqual(init.call_args_list[0].args[3], "left")
+        self.assertEqual(init.call_args_list[1].args[3], "right")
+        rec.assert_called_once_with(handles)
+
+    def test_viser_keyboard_patch_maps_a_c_to_initmotion_arms_with_modifier_guard(self):
+        script = _viser_keyboard_patch_script()
+        # 'a' -> left arm InitMotion, 'c' -> right arm InitMotion, via the matching button.
+        self.assertIn("KeyA", script)
+        self.assertIn("KeyC", script)
+        self.assertIn("initArm('(왼팔)')", script)
+        self.assertIn("initArm('(오른팔)')", script)
+        self.assertIn("InitMotion", script)
+        # Ctrl/Cmd/Alt+A/C must NOT be hijacked (copy / select-all stay intact).
+        self.assertIn("mod(e)", script)
+        self.assertIn("ctrlKey", script)
+        self.assertIn("metaKey", script)
 
     def test_send_gripper_command_builds_and_sends_packet(self):
         class _Slider:
