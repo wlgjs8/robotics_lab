@@ -43,7 +43,9 @@ void writeCartesianSolveHeader(std::ostream& os, const char* side) {
        << ',' << side << "_cart_ori_err_rad"
        << ',' << side << "_cart_path_active"
        << ',' << side << "_cart_path_done"
-       << ',' << side << "_cart_reason";
+       << ',' << side << "_cart_reason"
+       << ',' << side << "_cart_ik_joint_limit_index"
+       << ',' << side << "_cart_ik_joint_limit_margin_deg";
 }
 
 void writePoseHeader(std::ostream& os, const char* side, const char* name) {
@@ -193,7 +195,9 @@ void writeInitMotionHeader(std::ostream& os) {
        << ",init_motion_aggregate_goal_pair_category"
        << ",init_motion_aggregate_goal_clearance_m"
        << ",init_motion_aggregate_goal_threshold_m"
-       << ",init_motion_aggregate_goal_margin_deficit_m";
+       << ",init_motion_aggregate_goal_margin_deficit_m"
+       << ",self_collision_min_clearance_m"
+       << ",self_collision_pair";
 }
 
 }  // namespace
@@ -367,7 +371,9 @@ void writeCartesianSolveColumns(std::ostream& os, const CartesianSolveTelemetry&
        << ',' << t.orientation_error_rad
        << ',' << t.path_active
        << ',' << t.path_done
-       << ',' << csvEscape(t.reason);
+       << ',' << csvEscape(t.reason)
+       << ',' << t.ik_joint_limit_worst_index
+       << ',' << t.ik_joint_limit_worst_margin_deg;
 }
 
 struct ArmJointDerivatives {
@@ -553,6 +559,8 @@ void writeInitMotionColumns(std::ostream& os, const ServoSample& sample) {
     write_goal_columns(sample.init_motion_left);
     write_goal_columns(sample.init_motion_right);
     write_goal_columns(sample.init_motion);
+    os << ',' << sample.self_collision_min_clearance_m
+       << ',' << csvEscape(sample.self_collision_pair);
 }
 }  // namespace
 

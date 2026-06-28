@@ -5217,6 +5217,71 @@ bool testCartesianIkFailureHoldsPreviousSafeTarget() {
     return true;
 }
 
+// Regression: a single arm's Cartesian/IK failure must NOT freeze the healthy arm.
+// Left streams a TcpPoseTarget whose IK fails every tick (mirrors a flow pose driving
+// the elbow into the URDF joint limit); right runs an ordinary JointTarget. The right
+// arm must keep advancing toward its goal while the aggregate verdict reports IkFailed.
+// (Previously the loop blanket-held BOTH arms on any non-Ok command verdict, so a
+// single-arm InitMotion or any dual-arm move stalled when the opposite arm's IK failed.)
+bool testSingleArmIkFailureDoesNotFreezeHealthyArm() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.left_robot.run_mode = rb_servo::RunMode::Simulation;
+    cfg.right_robot.run_mode = rb_servo::RunMode::Simulation;
+    cfg.kinematics.enable = true;
+    cfg.kinematics.ik.enable = true;
+    cfg.kinematics.publish_tcp = true;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    // Left Cartesian IK fails on every tick; right does not use IK (JointTarget).
+    kinematics->setFail(true);
+
+    rb_servo::DualArmCommand mixed = command(rb_servo::ControlMode::JointTarget);
+    mixed.seq = 42;
+    mixed.host_time_ns = rb_servo::nowSteadyNs();
+    mixed.left.mode = rb_servo::ControlMode::TcpPoseTarget;
+    mixed.left.has_tcp_target = true;
+    mixed.left.tcp_target_stand = {0.5, 0.0, 0.0, 0.0, 0.0, 0.0};
+    mixed.right.mode = rb_servo::ControlMode::JointTarget;
+    mixed.right.has_joint_target = true;
+    mixed.right.q_target_deg = joints(20.0);
+    buffer.setCommand(mixed);
+
+    // The right arm must ramp toward its JointTarget goal even though left IK fails.
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        return snapshot.command.seq == mixed.seq &&
+               snapshot.safety_verdict == rb_servo::SafetyVerdict::IkFailed &&
+               snapshot.right_sent_q_deg[0] > 1.0;
+    }, std::chrono::milliseconds(1500)));
+
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    loop.stop();
+
+    // Aggregate verdict still surfaces the left-arm IK failure for the operator...
+    RB_CHECK(snapshot.safety_verdict == rb_servo::SafetyVerdict::IkFailed);
+    RB_CHECK(snapshot.left_cartesian_solve.attempted);
+    RB_CHECK(snapshot.left_cartesian_solve.status == "failed");
+    // ...the failed left arm holds at its previous safe target...
+    RB_CHECK(sameJointArray(snapshot.left_sent_q_deg, initial));
+    // ...and the healthy right arm advanced toward its goal (not frozen at prev_sent).
+    RB_CHECK(snapshot.right_sent_q_deg[0] > 1.0);
+    RB_CHECK(snapshot.right_sent_q_deg[0] <= 20.0 + 1e-6);
+    return true;
+}
+
 bool testCartesianIkDurationBudgetFailureIsSimulatorOnly() {
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = testConfig();
@@ -5792,6 +5857,7 @@ int main() {
     if (!testRbpodoControllerSimulationStartupReferenceSource()) return 1;
     if (!testRbpodoControllerSimulationNonStreamingCartesianGate()) return 1;
     if (!testCartesianIkFailureHoldsPreviousSafeTarget()) return 1;
+    if (!testSingleArmIkFailureDoesNotFreezeHealthyArm()) return 1;
     if (!testCartesianIkDurationBudgetFailureIsSimulatorOnly()) return 1;
     if (!testCartesianRealModeBlockedByDefault()) return 1;
     if (!testInvalidMotionCommandDoesNotReportRunning()) return 1;

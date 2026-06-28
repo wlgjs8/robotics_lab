@@ -293,7 +293,11 @@ bool testBooleanStatusFieldsStillRejectNonBooleanValues() {
         rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot);
     RB_CHECK(state.has_valid_joint_state);
     RB_CHECK(state.has_error);
-    RB_CHECK(state.diagnostic_error_source == "rbpodo_collision_suspect");
+    // op_stat_collision_occur low 2 bits = 2 is malformed (spec: 0/1 only). It is rejected
+    // and flagged suspect, but NOT as a collision: the masked collision check ((& 0b11)==1)
+    // is false, and the raw-value collision fallback was removed (it only false-positived on
+    // reserved bits), so this surfaces via the generic diagnostics_suspect source.
+    RB_CHECK(state.diagnostic_error_source == "rbpodo_diagnostics_suspect");
     RB_CHECK(state.rbpodo_diagnostics.has_value());
     RB_CHECK(!state.rbpodo_diagnostics->diagnostics_valid);
     RB_CHECK(state.rbpodo_diagnostics->diagnostics_suspect);

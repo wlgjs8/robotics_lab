@@ -2158,31 +2158,39 @@ void DualArmServoLoop::loopMain() {
             const ServoTarget desired =
                 computeServoTarget(left_state, right_state, command, filter_dt_sec, &command_verdict);
 
-            if (command_verdict != SafetyVerdict::Ok) {
-                // Missing payload, unsupported Cartesian/IK, or other command generation failure.
-                // Do not synthesize a new target or report Running for a held/rejected command.
-                safe_target.left_q_target_deg = left_prev_sent_q_deg_;
-                safe_target.right_q_target_deg = right_prev_sent_q_deg_;
+            // computeServoTarget already encodes the correct PER-ARM result in `desired`:
+            // an arm whose Cartesian/IK solve failed is held at its prev_sent target, while
+            // a healthy arm keeps its freshly computed target (and a whole-command failure
+            // — missing payload / Cartesian unavailable — holds BOTH at prev_sent). So we
+            // run the safety stage on `desired` UNCONDITIONALLY. A single arm's IK/Cartesian
+            // failure must NOT blanket-hold the other arm: previously this branch overwrote
+            // BOTH targets with prev_sent on any non-Ok command_verdict, so e.g. a left-arm
+            // flow IK failure (elbow hitting the URDF joint limit) froze a right-arm
+            // InitMotion mid-stream, and vice-versa. Holding only the failed arm is already
+            // done inside computeServoTarget; here we just stop discarding the healthy arm.
+            safe_target = applySafety(
+                desired,
+                left_state,
+                right_state,
+                command.left.mode,
+                command.right.mode,
+                filter_dt_sec,
+                &safety_verdict);
+            // A command-generation fault (IkFailed / TrackingError / InvalidCommand /
+            // CartesianUnavailable, on one or both arms) outranks a clean safety verdict so
+            // the operator still sees the failure (the per-arm *_cart_status columns name the
+            // arm); it no longer implies the whole robot is held.
+            if (command_verdict != SafetyVerdict::Ok &&
+                (safety_verdict == SafetyVerdict::Ok ||
+                 safety_verdict == SafetyVerdict::JointLimitClamped)) {
                 safety_verdict = command_verdict;
-                if (motion_requested) {
+            }
+            if (motion_requested) {
+                if (safety_verdict == SafetyVerdict::Ok ||
+                    safety_verdict == SafetyVerdict::JointLimitClamped) {
+                    setMotionState(ServerMotionState::Running);
+                } else if (!fault_latched_.load()) {
                     setMotionState(ServerMotionState::ArmedHold);
-                }
-            } else {
-                safe_target = applySafety(
-                    desired,
-                    left_state,
-                    right_state,
-                    command.left.mode,
-                    command.right.mode,
-                    filter_dt_sec,
-                    &safety_verdict);
-                if (motion_requested) {
-                    if (safety_verdict == SafetyVerdict::Ok ||
-                        safety_verdict == SafetyVerdict::JointLimitClamped) {
-                        setMotionState(ServerMotionState::Running);
-                    } else if (!fault_latched_.load()) {
-                        setMotionState(ServerMotionState::ArmedHold);
-                    }
                 }
             }
         }
@@ -2466,6 +2474,10 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.self_collision_left_bone = last_self_collision_.left_bone;
             latest_snapshot_.self_collision_right_bone = last_self_collision_.right_bone;
             latest_snapshot_.self_collision_pair = last_self_collision_.pair;
+            // Mirror the mesh-monitor proximity into the CSV sample (see ServoSample) so a
+            // controller op_stat_self_collision (1005) latch is cross-checkable post-hoc.
+            sample.self_collision_min_clearance_m = last_self_collision_.min_clearance_m;
+            sample.self_collision_pair = last_self_collision_.pair;
             latest_snapshot_.self_collision_stand_capsule = last_self_collision_.stand_capsule;
             latest_snapshot_.self_collision_has_closest_points = last_self_collision_.has_closest_points;
             latest_snapshot_.self_collision_closest_point_a_m = last_self_collision_.closest_point_a_m;

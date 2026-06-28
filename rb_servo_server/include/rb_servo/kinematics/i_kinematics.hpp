@@ -18,6 +18,13 @@ struct IkResult {
     int iterations = 0;
     bool timed_out = false;
     std::string reason;
+    // Joint-limit diagnostics (meaningful when reason == "joint_limit"): which joint's
+    // final solution sits closest to / pinned at its position limit, and that signed
+    // margin in degrees (<= ~0 == saturated at the limit). joint_limit_worst_index is
+    // -1 when the solve was not joint-limited. Lets a "joint_limit" IK failure name the
+    // offending axis (e.g. an elbow driven to its model limit) instead of just a reason.
+    int joint_limit_worst_index = -1;
+    double joint_limit_worst_margin_deg = 0.0;
     // Conditioning / singularity-robust-damping diagnostics (last DLS step).
     double min_singular_value = 0.0;     // smallest task-Jacobian singular value
     double applied_damping = 0.0;        // effective lambda used on the singular dir

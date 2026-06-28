@@ -235,8 +235,14 @@ bool testRbpodoFaultedJointFeedbackIsReadableButNotMotionReady() {
         rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot);
     RB_CHECK(state.has_valid_joint_state);
     RB_CHECK(state.has_error);
-    RB_CHECK(state.error_code == 1234);
-    RB_CHECK(state.lifecycle_state == "faulted");
+    // op_stat_collision_occur = 1234 has low 2 bits = 2 (spec: only lower 2 bits valid,
+    // value 0/1). That is malformed, NOT an external collision (which is low-bits == 1,
+    // caught by the masked check). The raw-value collision fallback was removed (it only
+    // false-positived on reserved bits), so a malformed value now surfaces via the generic
+    // diagnostics_suspect path: error_code = kRbpodoDiagnosticsSuspectCode (-2001), lifecycle
+    // "diagnostics_suspect". Still readable, still fault-closed (not motion-ready).
+    RB_CHECK(state.error_code == -2001);
+    RB_CHECK(state.lifecycle_state == "diagnostics_suspect");
     RB_CHECK(!rb_servo::rbpodoStateAcquisitionError(state).has_value());
 
     const std::optional<rb_servo::BackendError> readiness =

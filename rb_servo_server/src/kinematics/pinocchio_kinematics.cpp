@@ -5,8 +5,11 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -171,6 +174,55 @@ bool clampJointLimits(
         }
     }
     return clamped;
+}
+
+// Identify which joint's solution sits closest to (or pinned at) a position limit,
+// for diagnosing a joint_limit IK failure. Fills the 0-based joint index and its signed
+// margin to the nearer limit in degrees (<= ~0 == saturated). index = -1 if no joints.
+void worstJointLimit(
+    const Eigen::VectorXd& q,
+    const pinocchio::Model& model,
+    const std::array<pinocchio::JointIndex, kDof>& joints,
+    int* worst_index,
+    double* worst_margin_deg
+) {
+    int best = -1;
+    double best_margin_rad = std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+        const Eigen::DenseIndex q_index = model.idx_qs[joints[i]];
+        const double value = q[q_index];
+        const double lower = model.lowerPositionLimit[q_index];
+        const double upper = model.upperPositionLimit[q_index];
+        double margin = std::numeric_limits<double>::infinity();
+        if (std::isfinite(lower)) margin = std::min(margin, value - lower);
+        if (std::isfinite(upper)) margin = std::min(margin, upper - value);
+        if (margin < best_margin_rad) {
+            best_margin_rad = margin;
+            best = static_cast<int>(i);
+        }
+    }
+    *worst_index = best;
+    *worst_margin_deg = std::isfinite(best_margin_rad) ? radToDeg(best_margin_rad) : 0.0;
+}
+
+// Throttled (~1 Hz, shared across arms) WARN naming the joint a joint_limit IK failure
+// pinned. A pinned joint persists for as long as the target demands it (we saw an elbow
+// stay at its model limit for seconds), so an un-throttled log would flood at 500 Hz.
+void logJointLimitThrottled(ArmId arm, const IkResult& result) {
+    static std::atomic<long long> last_log_ns{0};
+    const long long now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    long long prev = last_log_ns.load(std::memory_order_relaxed);
+    if (prev != 0 && now_ns - prev < 1000000000LL) return;  // <= ~1 Hz
+    if (!last_log_ns.compare_exchange_strong(prev, now_ns, std::memory_order_relaxed)) {
+        return;  // another thread just logged
+    }
+    std::cerr << "[WARN] IK joint_limit: " << (arm == ArmId::Left ? "left" : "right")
+              << " arm pinned at joint J" << (result.joint_limit_worst_index + 1)
+              << " (margin " << result.joint_limit_worst_margin_deg << " deg, pos_err "
+              << result.position_error_m << " m, ori_err " << result.orientation_error_rad
+              << " rad); arm holds. If the controller allows more range, widen that joint's"
+              << " URDF limit (see docs/joint_range_policy.md Kinematics Alignment).\n";
 }
 
 Eigen::Matrix<double, 6, 1> clampJointStep(
@@ -378,7 +430,6 @@ IkResult PinocchioKinematics::solveIkDamped(
     const ArmMountConfig& mount,
     double damping_scale
 ) const {
-    (void)arm;
     const double eff_damping = config_.ik.damping * damping_scale;
     const double eff_damping_max = config_.ik.damping_max * damping_scale;
     const auto started = std::chrono::steady_clock::now();
@@ -566,7 +617,7 @@ IkResult PinocchioKinematics::solveIkDamped(
         hit_joint_limit = clampJointLimits(&q, impl_->model, impl_->joints) || hit_joint_limit;
     }
 
-    return ik_solver::failureResult(
+    IkResult result = ik_solver::failureResult(
         hit_joint_limit ? ik_solver::kReasonJointLimit : ik_solver::kReasonMaxIterations,
         fromPinocchioQ(q, impl_->model, impl_->joints),
         position_error_m,
@@ -574,6 +625,19 @@ IkResult PinocchioKinematics::solveIkDamped(
         iterations,
         elapsedUs()
     );
+    if (hit_joint_limit) {
+        // Name the offending joint so a joint_limit failure is actionable (which axis
+        // pinned, and how far inside its limit) instead of just "joint_limit".
+        worstJointLimit(
+            q,
+            impl_->model,
+            impl_->joints,
+            &result.joint_limit_worst_index,
+            &result.joint_limit_worst_margin_deg
+        );
+        logJointLimitThrottled(arm, result);
+    }
+    return result;
 }
 
 IkResult PinocchioKinematics::solveIk(

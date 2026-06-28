@@ -410,14 +410,17 @@ std::optional<RbpodoInterpretedFault> firstClearRbpodoFault(
             !rbpodoSuspiciousRawCode(snapshot.op_stat_soft_estop_occur)) {
             return RbpodoInterpretedFault{snapshot.op_stat_soft_estop_occur, "rbpodo_soft_estop_suspect"};
         }
-        if (snapshot.op_stat_collision_occur != 0 &&
-            !rbpodoSuspiciousRawCode(snapshot.op_stat_collision_occur)) {
-            return RbpodoInterpretedFault{snapshot.op_stat_collision_occur, "rbpodo_collision_suspect"};
-        }
-        if (snapshot.op_stat_self_collision != 0 &&
-            !rbpodoSuspiciousRawCode(snapshot.op_stat_self_collision)) {
-            return RbpodoInterpretedFault{snapshot.op_stat_self_collision, "rbpodo_self_collision_suspect"};
-        }
+        // NO raw-value fallback for op_stat_collision_occur (item 33) or
+        // op_stat_self_collision (item 35). Per the Rainbow data-structure spec, ONLY the
+        // low bits are valid: item 33 = lower 2 bits (0/1); item 35 = bits0-1 self-collision
+        // (0/1), bits2-3 last out-collision SOURCE, bits4-31 control-box TIME ZONE. The
+        // masked checks above ((field & kRbpodo*Mask) == 1, lines for collision/self-
+        // collision) are the complete truth and run regardless of diagnostics_suspect, so a
+        // real collision is already caught. Reading the RAW value here only false-positives
+        // on the reserved/source/time-zone bits — e.g. the observed op_stat_self_collision =
+        // 0x76904aa0 has its self-collision bit = 0 yet a nonzero raw. A non-1 low-bit value
+        // (e.g. 2) is malformed garbage, surfaced by the generic diagnostics_suspect path,
+        // not a collision. soft_estop is kept: it is a plain 0/1 with no reserved upper bits.
     }
 
     return std::nullopt;

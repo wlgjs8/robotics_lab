@@ -346,6 +346,11 @@ struct CartesianSolveTelemetry {
     double ik_branch_jump_limit_deg = 0.0;
     double ik_branch_jump_scale = 1.0;
     int ik_branch_jump_retry_count = 0;
+    // Joint-limit diagnostics: when reason == "joint_limit", which joint (0-based) pinned
+    // its position limit and that joint's signed margin to the limit in degrees (<= ~0 ==
+    // saturated). worst_index is -1 when the solve was not joint-limited.
+    int ik_joint_limit_worst_index = -1;
+    double ik_joint_limit_worst_margin_deg = 0.0;
     JointArray q_ik_seed_deg{};
     JointArray q_ik_raw_solution_deg{};
     JointArray q_ik_solution_deg{};
@@ -812,6 +817,13 @@ struct ServoSample {
     std::string right_joint_target_profile_after_init_sequencer;
     std::string non_init_arm_preserved_mode;
     bool single_arm_freeze_other_arm = false;
+    // URDF-mesh self-collision monitor (safety.self_collision): smallest clearance over
+    // the active pairs this tick and the closest pair's name. Logged so a controller
+    // op_stat_self_collision (code 1005) latch can be cross-checked against the server's
+    // own mesh proximity in the CSV (real collision -> clearance trending to ~0 on a real
+    // arm pair; firmware false-positive -> clearance stays comfortably positive).
+    double self_collision_min_clearance_m = 0.0;
+    std::string self_collision_pair;
 };
 
 // One near pair from the URDF mesh self-collision monitor: the two closest
