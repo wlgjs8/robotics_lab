@@ -370,6 +370,20 @@ struct SelfCollisionConfig {
         };
         ExternalConfig external;
 
+        // Intra-arm-only self-collision barrier params. These apply only to
+        // same-arm non-adjacent link pairs, separately from arm<->arm and
+        // arm<->stand self pairs. Negative values inherit the corresponding
+        // self-collision value during runtime config conversion.
+        struct IntraArmConfig {
+            double d_hard_m = -1.0;
+            double d_slow_m = -1.0;
+            double a_brake_m_s2 = -1.0;
+            double hyst_m = -1.0;
+            double recover_speed_m_s = -1.0;
+            double latency_s = -1.0;
+        };
+        IntraArmConfig intra_arm;
+
         // Preallocated external keep-out boxes updated at runtime by the leaseless
         // SetExternalBoxes command. Disabled by default; when enabled the monitor
         // builds exactly max_count box geometries at startup.

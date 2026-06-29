@@ -134,6 +134,16 @@ struct CollisionMonitorConfig {
     double external_recover_speed_m_s = 0.0;
     double external_latency_s = 0.010;
 
+    // ---- INTRA-ARM self-collision velocity-barrier params ----
+    // Applied only to same-arm non-adjacent link pairs. Arm<->arm and arm<->stand
+    // keep the self set above.
+    double intra_arm_d_hard_m = 0.005;
+    double intra_arm_d_slow_m = 0.025;
+    double intra_arm_a_brake_m_s2 = 4.0;
+    double intra_arm_hyst_m = 0.005;
+    double intra_arm_recover_speed_m_s = 0.0;
+    double intra_arm_latency_s = 0.010;
+
     struct ExternalBoxesConfig {
         bool enable = false;
         int max_count = 2;
@@ -170,6 +180,9 @@ struct CollisionNearPair {
     // True for arm<->runtime external box pairs. Kept distinct from `external`
     // so ground-plane semantics and telemetry remain unchanged.
     bool external_box = false;
+    // True for same-arm non-adjacent link pairs. These use intra_arm_* barrier
+    // params instead of the arm<->arm / arm<->stand self set.
+    bool intra_arm = false;
     // Per-pair clearance Jacobian rows (Stage 1): d(clearance)/dt = J_n * qdot,
     // split into this command's actuated left/right joint columns (command order,
     // idx_v mapping). For an arm<->stand pair only the arm's row is non-zero, so the
@@ -186,11 +199,12 @@ struct CollisionVerdict {
     double stamp_s = 0.0;                   // monotonic time the snapshot was taken
     bool valid = false;                     // false until first eval
     double min_clearance_m = std::numeric_limits<double>::infinity();
-    // Per-category minima (the smaller of the two drives min_clearance_m). Self =
-    // robot<->robot/stand; external = arm<->floor/obstacle. Each is compared against its
-    // own d_hard for hard_violation and used by the InitMotion planner's per-category
-    // clearance gate.
+    // Per-category minima. Self = arm<->arm / arm<->stand, intra_arm = same-arm
+    // non-adjacent links, external = arm<->floor/obstacle. Each is compared
+    // against its own d_hard for hard_violation and used by the InitMotion
+    // planner's per-category clearance gate.
     double self_min_clearance_m = std::numeric_limits<double>::infinity();
+    double intra_arm_min_clearance_m = std::numeric_limits<double>::infinity();
     double external_min_clearance_m = std::numeric_limits<double>::infinity();
     double external_box_min_clearance_m = std::numeric_limits<double>::infinity();
     // Per preallocated external box slot (slot 0=green, slot 1=gray).
@@ -201,7 +215,7 @@ struct CollisionVerdict {
     // + = separating, - = approaching.
     double clearance_rate_m_s = 0.0;
     double closing_speed_m_s = 0.0;         // max(0, -clearance_rate_m_s)
-    bool hard_violation = false;            // min_clearance_m < d_hard_m
+    bool hard_violation = false;            // any pair below its category d_hard
     std::vector<CollisionNearPair> near;    // up to max_near_pairs, sorted ascending
 };
 
@@ -280,11 +294,13 @@ struct CollisionDistanceSummary {
     bool hard_violation = false;
     double min_clearance_m = std::numeric_limits<double>::infinity();
     double self_min_clearance_m = std::numeric_limits<double>::infinity();
+    double intra_arm_min_clearance_m = std::numeric_limits<double>::infinity();
     double external_min_clearance_m = std::numeric_limits<double>::infinity();
     std::string nearest_name_a;
     std::string nearest_name_b;
     double nearest_distance_m = std::numeric_limits<double>::infinity();
     bool nearest_external = false;
+    bool nearest_intra_arm = false;
     std::string nearest_category;
     bool valid = false;
 };
@@ -348,6 +364,9 @@ public:
                                                const JointArray& right_deg);
     bool clearsThresholds(const JointArray& left_deg, const JointArray& right_deg,
                           double self_thresh_m, double external_thresh_m);
+    bool clearsThresholds(const JointArray& left_deg, const JointArray& right_deg,
+                          double self_thresh_m, double external_thresh_m,
+                          double intra_arm_thresh_m);
 
     // Active-arm-masked variants (planner use): only pairs that involve an INCLUDED
     // arm are considered. With include_left=false, every pair whose two bodies are
@@ -363,6 +382,10 @@ public:
                                                bool include_left, bool include_right);
     bool clearsThresholds(const JointArray& left_deg, const JointArray& right_deg,
                           double self_thresh_m, double external_thresh_m,
+                          bool include_left, bool include_right);
+    bool clearsThresholds(const JointArray& left_deg, const JointArray& right_deg,
+                          double self_thresh_m, double external_thresh_m,
+                          double intra_arm_thresh_m,
                           bool include_left, bool include_right);
 
     void start();   // spawn the monitor thread

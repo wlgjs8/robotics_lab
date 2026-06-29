@@ -1310,10 +1310,11 @@ SelfCollisionResult selfCollisionResultFromVerdict(
     const CollisionVerdict& v,
     const CollisionMonitorConfig& cfg
 ) {
+    (void)cfg;
     SelfCollisionResult sc;
     sc.checked = v.valid;
     sc.min_clearance_m = v.min_clearance_m;
-    sc.violated = v.valid && v.min_clearance_m < cfg.d_hard_m;
+    sc.violated = v.valid && v.hard_violation;
     if (!v.near.empty()) {
         const CollisionNearPair& p = v.near.front();
         sc.has_closest_points = true;
@@ -1438,6 +1439,21 @@ DualArmServoLoop::DualArmServoLoop(
         collision_monitor_cfg_.external_hyst_m = m.external.hyst_m;
         collision_monitor_cfg_.external_recover_speed_m_s = m.external.recover_speed_m_s;
         collision_monitor_cfg_.external_latency_s = m.external.latency_s;
+        const auto inherit = [](double value, double self_value) {
+            return value > 0.0 ? value : self_value;
+        };
+        collision_monitor_cfg_.intra_arm_d_hard_m =
+            inherit(m.intra_arm.d_hard_m, m.d_hard_m);
+        collision_monitor_cfg_.intra_arm_d_slow_m =
+            inherit(m.intra_arm.d_slow_m, m.d_slow_m);
+        collision_monitor_cfg_.intra_arm_a_brake_m_s2 =
+            inherit(m.intra_arm.a_brake_m_s2, m.a_brake_m_s2);
+        collision_monitor_cfg_.intra_arm_hyst_m =
+            inherit(m.intra_arm.hyst_m, m.hyst_m);
+        collision_monitor_cfg_.intra_arm_recover_speed_m_s =
+            inherit(m.intra_arm.recover_speed_m_s, m.recover_speed_m_s);
+        collision_monitor_cfg_.intra_arm_latency_s =
+            inherit(m.intra_arm.latency_s, m.latency_s);
         collision_monitor_cfg_.external_boxes.enable = m.external_boxes.enable;
         collision_monitor_cfg_.external_boxes.max_count = m.external_boxes.max_count;
         collision_monitor_cfg_.external_boxes.size_m = m.external_boxes.size_m;

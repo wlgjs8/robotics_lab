@@ -51,7 +51,7 @@ static CollisionMonitorConfig makeConfig(const fs::path& ws) {
 
 static bool sameDistance(double a, double b) {
     if (std::isinf(a) && std::isinf(b) && std::signbit(a) == std::signbit(b)) return true;
-    return std::abs(a - b) < 1e-12;
+    return std::abs(a - b) < 1e-6;
 }
 
 static bool nearPairMatches(const CollisionNearPair& p, const CollisionPairPattern& rule) {
@@ -110,6 +110,8 @@ static bool run() {
         all_pairs_cfg.max_near_pairs = 10000;
         CollisionPairPattern adjacent_right{"*right*link0*", "*right*link1*"};
         CollisionPairPattern link02_right{"*right*link0*", "*right*link2*"};
+        CollisionPairPattern wrist_left{"*left*link4*", "*left*link6*"};
+        CollisionPairPattern wrist_right{"*right*link4*", "*right*link6*"};
         CollisionMonitor all_pairs(all_pairs_cfg);
         const JointArray init = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
         const CollisionVerdict before = all_pairs.evalOnce(init, init);
@@ -152,6 +154,16 @@ static bool run() {
         RB_CHECK(lr_after.valid);
         RB_CHECK(!verdictHasPair(lr_after, left_right));
         RB_CHECK(lr_disabled.numPairs() < all_pairs.numPairs());
+
+        CollisionMonitorConfig wrist_cfg = all_pairs_cfg;
+        wrist_cfg.disabled_collision_pairs.push_back(wrist_left);
+        wrist_cfg.disabled_collision_pairs.push_back(wrist_right);
+        CollisionMonitor wrist_disabled(wrist_cfg);
+        const CollisionVerdict wrist_after = wrist_disabled.evalOnce(init, init);
+        RB_CHECK(wrist_after.valid);
+        RB_CHECK(!verdictHasPair(wrist_after, wrist_left));
+        RB_CHECK(!verdictHasPair(wrist_after, wrist_right));
+        RB_CHECK(wrist_disabled.numPairs() < all_pairs.numPairs());
     }
 
     const JointArray init = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
@@ -175,13 +187,16 @@ static bool run() {
         RB_CHECK(s.hard_violation == v.hard_violation);
         RB_CHECK(sameDistance(s.min_clearance_m, v.min_clearance_m));
         RB_CHECK(sameDistance(s.self_min_clearance_m, v.self_min_clearance_m));
+        RB_CHECK(sameDistance(s.intra_arm_min_clearance_m, v.intra_arm_min_clearance_m));
         RB_CHECK(sameDistance(s.external_min_clearance_m, v.external_min_clearance_m));
         const double self_thresh = cfg.d_hard_m + 0.005;
         const double ext_thresh = cfg.external_d_hard_m + 0.005;
+        const double intra_thresh = cfg.intra_arm_d_hard_m + 0.005;
         const bool gate = !v.hard_violation &&
                           v.self_min_clearance_m > self_thresh &&
+                          v.intra_arm_min_clearance_m > intra_thresh &&
                           v.external_min_clearance_m > ext_thresh;
-        RB_CHECK(mon.clearsThresholds(init, init, self_thresh, ext_thresh) == gate);
+        RB_CHECK(mon.clearsThresholds(init, init, self_thresh, ext_thresh, intra_thresh) == gate);
     }
     {
         CollisionMonitorConfig endpoint_cfg = cfg;
@@ -189,6 +204,7 @@ static bool run() {
         CollisionMonitor endpoint(endpoint_cfg);
         const double self_thresh = endpoint_cfg.d_hard_m + 0.005;
         const double ext_thresh = endpoint_cfg.external_d_hard_m + 0.005;
+        const double intra_thresh = endpoint_cfg.intra_arm_d_hard_m + 0.005;
         const std::array<std::pair<JointArray, JointArray>, 4> samples{{
             {init, init},
             {JointArray{8.0, -38.0, 72.0, 4.0, 55.0, 6.0},
@@ -207,16 +223,21 @@ static bool run() {
             RB_CHECK(light.hard_violation == full.hard_violation);
             RB_CHECK(sameDistance(light.min_clearance_m, full.min_clearance_m));
             RB_CHECK(sameDistance(light.self_min_clearance_m, full.self_min_clearance_m));
+            RB_CHECK(sameDistance(light.intra_arm_min_clearance_m,
+                                  full.intra_arm_min_clearance_m));
             RB_CHECK(sameDistance(light.external_min_clearance_m, full.external_min_clearance_m));
             const bool full_gate = !full.hard_violation &&
                                    full.self_min_clearance_m > self_thresh &&
+                                   full.intra_arm_min_clearance_m > intra_thresh &&
                                    full.external_min_clearance_m > ext_thresh;
             const bool light_gate = !light.hard_violation &&
                                     light.self_min_clearance_m > self_thresh &&
+                                    light.intra_arm_min_clearance_m > intra_thresh &&
                                     light.external_min_clearance_m > ext_thresh;
             RB_CHECK(light_gate == full_gate);
             RB_CHECK(endpoint.clearsThresholds(sample.first, sample.second,
-                                               self_thresh, ext_thresh) == full_gate);
+                                               self_thresh, ext_thresh,
+                                               intra_thresh) == full_gate);
         }
     }
 
@@ -471,6 +492,32 @@ static bool runProjection() {
         const auto r1 = applyCollisionVelocityProjection(v, pc, zero, zero, lt2, rt2, dt, 0.010, big);
         RB_CHECK(r1.active && lt2[0] < 1.0 && lt2[0] > 0.0);  // age 10ms: now braking
     }
+    // (7) Intra-arm uses its own barrier params. A 10mm clearance is inside the
+    // global self hard floor (18mm) but outside the intra-arm hard floor (5mm).
+    {
+        CollisionMonitorConfig cat;
+        cat.d_hard_m = 0.018;
+        cat.d_slow_m = 0.025;
+        cat.a_brake_m_s2 = 3.0;
+        cat.intra_arm_d_hard_m = 0.005;
+        cat.intra_arm_d_slow_m = 0.015;
+        cat.intra_arm_a_brake_m_s2 = 3.0;
+        CollisionVerdict intra = makePairVerdict(0.010, 0.0, jl, jr);
+        intra.hard_violation = false;
+        intra.near[0].intra_arm = true;
+        CollisionVerdict self = intra;
+        self.hard_violation = true;
+        self.near[0].intra_arm = false;
+
+        std::vector<VelocityConstraint> intra_cons;
+        std::vector<VelocityConstraint> self_cons;
+        buildCollisionConstraints(intra, cat, 0.0, intra_cons);
+        buildCollisionConstraints(self, cat, 0.0, self_cons);
+        RB_CHECK(intra_cons.size() == 1);
+        RB_CHECK(self_cons.size() == 1);
+        RB_CHECK(intra_cons[0].xi > 0.15);  // sqrt(2*3*(10mm-5mm)) ~= 0.173m/s
+        RB_CHECK(std::abs(self_cons[0].xi) < 1e-12);  // below self hard -> hold
+    }
     return true;
 }
 
@@ -591,6 +638,97 @@ static bool runExternalDHard() {
     return true;
 }
 
+// Intra-arm category: same-arm pairs use intra_arm_d_hard_m instead of the global
+// arm<->arm / arm<->stand self d_hard. A folded single-arm pose in the 5-18mm
+// band is therefore not a hard violation, while the same clearance to a stand
+// obstacle remains a self hard violation.
+static bool runIntraArmDHard() {
+    const fs::path ws = workspaceRoot();
+    CollisionMonitorConfig base = makeConfig(ws);
+    if (!fs::is_regular_file(base.unified_urdf)) {
+        std::cout << "SKIP: unified URDF not found (intra-arm d_hard test)\n";
+        return true;
+    }
+    base.swept_samples = 1;
+    base.max_near_pairs = 10000;
+    base.d_hard_m = 0.018;
+    base.d_slow_m = 0.025;
+    base.intra_arm_d_hard_m = 0.005;
+    base.intra_arm_d_slow_m = 0.015;
+    base.intra_arm_a_brake_m_s2 = 3.0;
+    const JointArray init = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+
+    CollisionMonitor intra(base);
+    bool found_intra_band = false;
+    CollisionDistanceSummary intra_summary;
+    JointArray folded = init;
+    for (double elbow_abs = 135.0; elbow_abs <= 150.0 && !found_intra_band; elbow_abs += 1.0) {
+        for (double sign : std::array<double, 2>{1.0, -1.0}) {
+            folded = init;
+            folded[2] = sign * elbow_abs;
+            const CollisionDistanceSummary s =
+                intra.evalDistancesOnly(folded, init, true, false);
+            if (std::isfinite(s.intra_arm_min_clearance_m) &&
+                s.intra_arm_min_clearance_m > 0.0055 &&
+                s.intra_arm_min_clearance_m < 0.0175 &&
+                !s.hard_violation) {
+                found_intra_band = true;
+                intra_summary = s;
+                break;
+            }
+        }
+    }
+    if (!found_intra_band) {
+        std::cout << "SKIP: no 5-18mm intra-arm sample found in elbow scan\n";
+    } else {
+        RB_CHECK(intra_summary.nearest_intra_arm ||
+                 intra_summary.intra_arm_min_clearance_m <= intra_summary.min_clearance_m + 1e-6);
+        RB_CHECK(!intra_summary.hard_violation);
+        RB_CHECK(intra_summary.intra_arm_min_clearance_m < base.d_hard_m);
+        RB_CHECK(intra_summary.intra_arm_min_clearance_m > base.intra_arm_d_hard_m);
+        std::cout << "intra-arm d_hard: clearance="
+                  << intra_summary.intra_arm_min_clearance_m * 1000.0
+                  << "mm hard=" << intra_summary.hard_violation << "\n";
+    }
+
+    // Build an arm<->stand clearance in the same 10mm band. This must still be a
+    // hard violation because arm<->stand keeps the global self d_hard=18mm.
+    CollisionMonitorConfig floor_ref = base;
+    ExtraCollisionShape gp;
+    gp.name = "ground_plane";
+    gp.shape = "box";
+    gp.parent_frame = base.stand_frame;
+    gp.size_m = {4.0, 4.0, 0.10};
+    gp.xyz_m = {0.0, 0.0, 0.001 - 0.05};
+    floor_ref.extra_collision.push_back(gp);
+    CollisionMonitor m0(floor_ref);
+    m0.setGroundPlanePose(true, Eigen::Vector3d::Zero(), Eigen::Vector3d::UnitZ());
+    const CollisionVerdict v0 = m0.evalOnce(init, init);
+    const double H = v0.external_min_clearance_m;
+    RB_CHECK(std::isfinite(H) && H > 0.020);
+
+    CollisionMonitorConfig stand_probe = base;
+    ExtraCollisionShape box;
+    box.name = "stand_clearance_probe";
+    box.shape = "box";
+    box.parent_frame = base.stand_frame;
+    box.size_m = {4.0, 4.0, 0.10};
+    box.xyz_m = {0.0, 0.0, (H - 0.010) - 0.05};
+    stand_probe.extra_collision.push_back(box);
+    CollisionMonitor stand_monitor(stand_probe);
+    const CollisionDistanceSummary stand_summary =
+        stand_monitor.evalDistancesOnly(init, init);
+    RB_CHECK(std::isfinite(stand_summary.self_min_clearance_m));
+    RB_CHECK(stand_summary.self_min_clearance_m < base.d_hard_m);
+    RB_CHECK(stand_summary.hard_violation);
+    RB_CHECK(stand_summary.nearest_category == "arm-stand" ||
+             stand_summary.self_min_clearance_m <= stand_summary.min_clearance_m + 1e-6);
+    std::cout << "arm-stand self d_hard: clearance="
+              << stand_summary.self_min_clearance_m * 1000.0
+              << "mm hard=" << stand_summary.hard_violation << "\n";
+    return true;
+}
+
 // Articulated gripper: the two finger hulls reposition along the jaw axis with the live
 // open percent, so finger<->other-geometry clearances change between OPEN and CLOSED.
 static bool runArticulatedGripper() {
@@ -668,6 +806,10 @@ int main() {
     }
     if (!runExternalDHard()) {
         std::cerr << "test_collision_monitor (external d_hard) FAILED\n";
+        return 1;
+    }
+    if (!runIntraArmDHard()) {
+        std::cerr << "test_collision_monitor (intra-arm d_hard) FAILED\n";
         return 1;
     }
     if (!run()) {

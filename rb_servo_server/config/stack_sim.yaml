@@ -183,6 +183,11 @@ safety:
       disabled_collision_pairs:
         - ["*left*link0*", "*left*link1*"]
         - ["*right*link0*", "*right*link1*"]
+        # compact wrist structural false-positive: measured overlap 0%, always
+        # near 19-25mm and inside d_slow. Distal gripper hull pairs still cover
+        # downstream collisions from link6/attachment_site.
+        - ["*left*link4*", "*left*link6*"]
+        - ["*right*link4*", "*right*link6*"]
       viz_near_pairs_m: 0.06   # GUI-only: show witness tubes within 60mm (decoupled from d_slow)
       d_hard_m: 0.010   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
       # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
@@ -196,6 +201,14 @@ safety:
       a_brake_m_s2: 4.0
       hyst_m: 0.005
       latency_s: 0.010
+      # Intra-arm-only margin. Arm<->arm and arm<->stand keep the self values above.
+      # Normal operating intra-arm clearances measured >=27mm; true near-contact is
+      # retained at full link2<->link4 elbow fold, so 5/15mm catches real fold risk
+      # without triggering on compact wrist constant-near geometry.
+      intra_arm:
+        d_hard_m: 0.005
+        d_slow_m: 0.015
+        a_brake_m_s2: 3.0
       swept_samples: 2          # 1=endpoint only; >=2 swept-volume (catches tunneling)
       check_intra_arm: true     # arm folding onto itself (non-adjacent links)
       max_staleness_s: 0.050

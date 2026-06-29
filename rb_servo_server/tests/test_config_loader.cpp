@@ -5,6 +5,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <vector>
 #include <unistd.h>
 
 #include "rb_servo/config/config.hpp"
@@ -37,6 +38,18 @@ bool loadRejects(const std::string& path) {
 
 bool near(double a, double b) {
     return std::abs(a - b) < 1e-12;
+}
+
+bool hasPairRule(const std::vector<rb_servo::CollisionPairPattern>& rules,
+                 const std::string& a,
+                 const std::string& b) {
+    for (const auto& rule : rules) {
+        if ((rule.pattern_a == a && rule.pattern_b == b) ||
+            (rule.pattern_a == b && rule.pattern_b == a)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::filesystem::path servoRoot() {
@@ -127,6 +140,19 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(!stack_real.force_control.enable);
         RB_CHECK(stack_real.kinematics.enable);
         RB_CHECK(stack_real.kinematics.provider == "pinocchio");
+        const auto& real_mesh = stack_real.safety.self_collision.mesh;
+        RB_CHECK(near(real_mesh.intra_arm.d_hard_m, 0.005));
+        RB_CHECK(near(real_mesh.intra_arm.d_slow_m, 0.015));
+        RB_CHECK(near(real_mesh.intra_arm.a_brake_m_s2, 3.0));
+        RB_CHECK(real_mesh.intra_arm_min_chain_separation == 2);
+        RB_CHECK(hasPairRule(real_mesh.disabled_collision_pairs,
+                             "*left*link4*", "*left*link6*"));
+        RB_CHECK(hasPairRule(real_mesh.disabled_collision_pairs,
+                             "*right*link4*", "*right*link6*"));
+        RB_CHECK(!hasPairRule(real_mesh.disabled_collision_pairs,
+                              "*left*link2*", "*left*link4*"));
+        RB_CHECK(!hasPairRule(real_mesh.disabled_collision_pairs,
+                              "*right*link2*", "*right*link4*"));
     }
 
     {
@@ -184,6 +210,19 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(!stack_sim.force_control.enable);
         RB_CHECK(stack_sim.kinematics.enable);
         RB_CHECK(stack_sim.kinematics.provider == "pinocchio");
+        const auto& sim_mesh = stack_sim.safety.self_collision.mesh;
+        RB_CHECK(near(sim_mesh.intra_arm.d_hard_m, 0.005));
+        RB_CHECK(near(sim_mesh.intra_arm.d_slow_m, 0.015));
+        RB_CHECK(near(sim_mesh.intra_arm.a_brake_m_s2, 3.0));
+        RB_CHECK(sim_mesh.intra_arm_min_chain_separation == 2);
+        RB_CHECK(hasPairRule(sim_mesh.disabled_collision_pairs,
+                             "*left*link4*", "*left*link6*"));
+        RB_CHECK(hasPairRule(sim_mesh.disabled_collision_pairs,
+                             "*right*link4*", "*right*link6*"));
+        RB_CHECK(!hasPairRule(sim_mesh.disabled_collision_pairs,
+                              "*left*link2*", "*left*link4*"));
+        RB_CHECK(!hasPairRule(sim_mesh.disabled_collision_pairs,
+                              "*right*link2*", "*right*link4*"));
     }
 
     return true;
@@ -966,6 +1005,10 @@ bool testSelfCollisionConfig() {
         "      unified_urdf: \"" + rb3UrdfPath() + "\"\n"
         "      d_hard_m: 0.006\n"
         "      d_slow_m: 0.03\n"
+        "      intra_arm:\n"
+        "        d_hard_m: 0.005\n"
+        "        d_slow_m: 0.015\n"
+        "        a_brake_m_s2: 3.0\n"
         "      disabled_collision_pairs:\n"
         "        - [\"*left*link0*\", \"*left*link1*\"]\n"
         "        - [\"*right*link0*\", \"*right*link1*\"]\n"
@@ -990,6 +1033,9 @@ bool testSelfCollisionConfig() {
         RB_CHECK(!cfg.safety.self_collision.mesh.unified_urdf.empty());
         RB_CHECK(near(cfg.safety.self_collision.mesh.d_hard_m, 0.006));
         RB_CHECK(near(cfg.safety.self_collision.mesh.d_slow_m, 0.03));
+        RB_CHECK(near(cfg.safety.self_collision.mesh.intra_arm.d_hard_m, 0.005));
+        RB_CHECK(near(cfg.safety.self_collision.mesh.intra_arm.d_slow_m, 0.015));
+        RB_CHECK(near(cfg.safety.self_collision.mesh.intra_arm.a_brake_m_s2, 3.0));
         RB_CHECK(cfg.safety.self_collision.mesh.disabled_collision_pairs.size() == 2);
         RB_CHECK(cfg.safety.self_collision.mesh.disabled_collision_pairs[1].pattern_a == "*right*link0*");
         RB_CHECK(cfg.safety.self_collision.mesh.disabled_collision_pairs[1].pattern_b == "*right*link1*");

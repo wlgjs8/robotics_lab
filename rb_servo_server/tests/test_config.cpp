@@ -955,6 +955,63 @@ bool testDisabledCollisionPairsConfig() {
     return true;
 }
 
+bool testIntraArmSelfCollisionConfig() {
+    const std::string valid_path = writeTempConfig(
+        "intra-arm-self-collision-valid",
+        selfCollisionMeshConfigBody(
+            "      intra_arm:\n"
+            "        d_hard_m: 0.005\n"
+            "        d_slow_m: 0.015\n"
+            "        a_brake_m_s2: 3.0\n"
+            "        hyst_m: 0.004\n"
+            "        recover_speed_m_s: 0.002\n"
+            "        latency_s: 0.006\n"
+        )
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(valid_path);
+    ::unlink(valid_path.c_str());
+    const auto& intra = cfg.safety.self_collision.mesh.intra_arm;
+    RB_CHECK(near(intra.d_hard_m, 0.005));
+    RB_CHECK(near(intra.d_slow_m, 0.015));
+    RB_CHECK(near(intra.a_brake_m_s2, 3.0));
+    RB_CHECK(near(intra.hyst_m, 0.004));
+    RB_CHECK(near(intra.recover_speed_m_s, 0.002));
+    RB_CHECK(near(intra.latency_s, 0.006));
+
+    const std::string default_path = writeTempConfig(
+        "intra-arm-self-collision-default",
+        selfCollisionMeshConfigBody("")
+    );
+    const rb_servo::DualArmConfig default_cfg = rb_servo::loadConfigFromYaml(default_path);
+    ::unlink(default_path.c_str());
+    RB_CHECK(default_cfg.safety.self_collision.mesh.intra_arm.d_hard_m < 0.0);
+    RB_CHECK(default_cfg.safety.self_collision.mesh.intra_arm.d_slow_m < 0.0);
+    RB_CHECK(default_cfg.safety.self_collision.mesh.intra_arm.a_brake_m_s2 < 0.0);
+
+    const std::string bad_band_path = writeTempConfig(
+        "intra-arm-self-collision-bad-band",
+        selfCollisionMeshConfigBody(
+            "      intra_arm:\n"
+            "        d_hard_m: 0.020\n"
+            "        d_slow_m: 0.010\n"
+        )
+    );
+    RB_CHECK(loadRejects(bad_band_path));
+    ::unlink(bad_band_path.c_str());
+
+    const std::string unknown_key_path = writeTempConfig(
+        "intra-arm-self-collision-unknown-key",
+        selfCollisionMeshConfigBody(
+            "      intra_arm:\n"
+            "        d_hard_m: 0.005\n"
+            "        typo: 0.010\n"
+        )
+    );
+    RB_CHECK(loadRejects(unknown_key_path));
+    ::unlink(unknown_key_path.c_str());
+    return true;
+}
+
 bool testInitMotionPlannerConfigExt() {
     const std::string valid_path = writeTempConfig(
         "init-motion-valid",
@@ -1019,6 +1076,7 @@ int main() {
     if (!testRoiBoxConfigParsesAndDefaults()) return 1;
     if (!testRoiBoxInvalidConfigRejects()) return 1;
     if (!testDisabledCollisionPairsConfig()) return 1;
+    if (!testIntraArmSelfCollisionConfig()) return 1;
     if (!testInitMotionPlannerConfigExt()) return 1;
     return 0;
 }

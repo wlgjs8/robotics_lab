@@ -863,6 +863,35 @@ void validateConfig(const DualArmConfig& cfg) {
         validatePositiveFinite(m.d_slow_m, "safety.self_collision.mesh.d_slow_m");
         validatePositiveFinite(m.a_brake_m_s2, "safety.self_collision.mesh.a_brake_m_s2");
         validatePositiveFinite(m.max_staleness_s, "safety.self_collision.mesh.max_staleness_s");
+        const auto validateOptionalPositive = [](double value, const std::string& name) {
+            if (!std::isfinite(value)) {
+                throw std::runtime_error(name + " must be finite");
+            }
+            if (value > 0.0) {
+                validatePositiveFinite(value, name);
+            }
+        };
+        validateOptionalPositive(
+            m.intra_arm.d_hard_m, "safety.self_collision.mesh.intra_arm.d_hard_m");
+        validateOptionalPositive(
+            m.intra_arm.d_slow_m, "safety.self_collision.mesh.intra_arm.d_slow_m");
+        validateOptionalPositive(
+            m.intra_arm.a_brake_m_s2, "safety.self_collision.mesh.intra_arm.a_brake_m_s2");
+        validateOptionalPositive(
+            m.intra_arm.hyst_m, "safety.self_collision.mesh.intra_arm.hyst_m");
+        validateOptionalPositive(
+            m.intra_arm.recover_speed_m_s,
+            "safety.self_collision.mesh.intra_arm.recover_speed_m_s");
+        validateOptionalPositive(
+            m.intra_arm.latency_s, "safety.self_collision.mesh.intra_arm.latency_s");
+        const double intra_hard =
+            m.intra_arm.d_hard_m > 0.0 ? m.intra_arm.d_hard_m : m.d_hard_m;
+        const double intra_slow =
+            m.intra_arm.d_slow_m > 0.0 ? m.intra_arm.d_slow_m : m.d_slow_m;
+        if (intra_slow < intra_hard) {
+            throw std::runtime_error(
+                "safety.self_collision.mesh.intra_arm.d_slow_m must be >= d_hard_m");
+        }
         if (m.external_boxes.max_count < 0) {
             throw std::runtime_error(
                 "safety.self_collision.mesh.external_boxes.max_count must be >= 0");
@@ -1926,6 +1955,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "extra_collision",
                     "ground_plane",
                     "external",
+                    "intra_arm",
                     "external_boxes",
                 }, "safety.self_collision.mesh");
                 auto& mc = cfg.safety.self_collision.mesh;
@@ -2079,6 +2109,20 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     if (has(ex, "hyst_m")) x.hyst_m = asDouble(ex["hyst_m"], "safety.self_collision.mesh.external.hyst_m");
                     if (has(ex, "recover_speed_m_s")) x.recover_speed_m_s = asDouble(ex["recover_speed_m_s"], "safety.self_collision.mesh.external.recover_speed_m_s");
                     if (has(ex, "latency_s")) x.latency_s = asDouble(ex["latency_s"], "safety.self_collision.mesh.external.latency_s");
+                }
+                if (has(m, "intra_arm")) {
+                    const YAML::Node ia = m["intra_arm"];
+                    validateAllowedKeys(ia, {
+                        "d_hard_m", "d_slow_m", "a_brake_m_s2", "hyst_m",
+                        "recover_speed_m_s", "latency_s",
+                    }, "safety.self_collision.mesh.intra_arm");
+                    auto& x = mc.intra_arm;
+                    if (has(ia, "d_hard_m")) x.d_hard_m = asDouble(ia["d_hard_m"], "safety.self_collision.mesh.intra_arm.d_hard_m");
+                    if (has(ia, "d_slow_m")) x.d_slow_m = asDouble(ia["d_slow_m"], "safety.self_collision.mesh.intra_arm.d_slow_m");
+                    if (has(ia, "a_brake_m_s2")) x.a_brake_m_s2 = asDouble(ia["a_brake_m_s2"], "safety.self_collision.mesh.intra_arm.a_brake_m_s2");
+                    if (has(ia, "hyst_m")) x.hyst_m = asDouble(ia["hyst_m"], "safety.self_collision.mesh.intra_arm.hyst_m");
+                    if (has(ia, "recover_speed_m_s")) x.recover_speed_m_s = asDouble(ia["recover_speed_m_s"], "safety.self_collision.mesh.intra_arm.recover_speed_m_s");
+                    if (has(ia, "latency_s")) x.latency_s = asDouble(ia["latency_s"], "safety.self_collision.mesh.intra_arm.latency_s");
                 }
                 if (has(m, "external_boxes")) {
                     const YAML::Node eb = m["external_boxes"];

@@ -99,16 +99,22 @@ struct ScopedArmMask {
 struct ScopedThreshold {
     double& self_thr;
     double& ext_thr;
+    double& intra_thr;
     double saved_self;
     double saved_ext;
-    ScopedThreshold(double& s, double& e, double new_self, double new_ext)
-        : self_thr(s), ext_thr(e), saved_self(s), saved_ext(e) {
+    double saved_intra;
+    ScopedThreshold(double& s, double& e, double& i,
+                    double new_self, double new_ext, double new_intra)
+        : self_thr(s), ext_thr(e), intra_thr(i),
+          saved_self(s), saved_ext(e), saved_intra(i) {
         self_thr = new_self;
         ext_thr = new_ext;
+        intra_thr = new_intra;
     }
     ~ScopedThreshold() {
         self_thr = saved_self;
         ext_thr = saved_ext;
+        intra_thr = saved_intra;
     }
     ScopedThreshold(const ScopedThreshold&) = delete;
     ScopedThreshold& operator=(const ScopedThreshold&) = delete;
@@ -143,12 +149,14 @@ struct InitMotionPlanner::Impl {
     JointArray q_max_deg{};
     double clear_threshold_m = 0.0;           // self d_hard + collision_margin (path/swept margin)
     double external_clear_threshold_m = 0.0;  // external d_hard + collision_margin
+    double intra_arm_clear_threshold_m = 0.0; // intra-arm d_hard + collision_margin
     // Runtime hard-barrier distances (no planning margin). A FIXED endpoint resting at
     // [d_hard, d_hard+margin] is physically safe — the runtime CollisionMonitor's hard
     // barrier is d_hard and independently guards execution — so plan() relaxes its gate
     // down to (but never below) d_hard to admit such a goal/start. See plan().
     double d_hard_m = 0.0;
     double external_d_hard_m = 0.0;
+    double intra_arm_d_hard_m = 0.0;
     // Active-arm mask for the CURRENT plan() / planLinearMove() call. When only one
     // arm is active, every oracle query below ignores pairs that involve solely the
     // stationary other arm (its own intra/arm-stand/external clearance is the runtime
@@ -264,11 +272,13 @@ struct InitMotionPlanner::Impl {
           kin(std::move(kinematics)), left_mount(lmount), right_mount(rmount) {
         d_hard_m = monitor_cfg.d_hard_m;
         external_d_hard_m = monitor_cfg.external_d_hard_m;
+        intra_arm_d_hard_m = monitor_cfg.intra_arm_d_hard_m;
         clear_threshold_m = monitor_cfg.d_hard_m + cfg.collision_margin_m;
         // External obstacles (the floor / ground_plane) plan to their own tighter
         // d_hard so InitMotion can approach the floor closer than it keeps the robot
         // from itself, matching the runtime external barrier.
         external_clear_threshold_m = monitor_cfg.external_d_hard_m + cfg.collision_margin_m;
+        intra_arm_clear_threshold_m = monitor_cfg.intra_arm_d_hard_m + cfg.collision_margin_m;
         // Endpoint-only eval: the planner does its own dense edge sampling, so the
         // private oracle must not sweep between arbitrary RRT node checks.
         monitor_cfg.swept_samples = 1;
@@ -289,6 +299,7 @@ struct InitMotionPlanner::Impl {
         JointArray l{}, r{};
         split(c, &l, &r);
         return oracle->clearsThresholds(l, r, clear_threshold_m, external_clear_threshold_m,
+                                        intra_arm_clear_threshold_m,
                                         include_left_, include_right_);
     }
 
@@ -303,6 +314,7 @@ struct InitMotionPlanner::Impl {
     bool isClear(const CollisionDistanceSummary& v) const {
         return !v.hard_violation &&
                v.self_min_clearance_m > clear_threshold_m &&
+               v.intra_arm_min_clearance_m > intra_arm_clear_threshold_m &&
                v.external_min_clearance_m > external_clear_threshold_m;
     }
 
@@ -650,7 +662,9 @@ InitMotionPlanResult InitMotionPlanner::plan(
         result.goal_nearest_pair_distance_m = s.nearest_distance_m;
         const double goal_threshold = s.nearest_external
             ? result.goal_clear_threshold_external_m
-            : result.goal_clear_threshold_self_m;
+            : (s.nearest_intra_arm
+                ? d.intra_arm_clear_threshold_m
+                : result.goal_clear_threshold_self_m);
         result.goal_clear_margin_deficit_m =
             std::isfinite(goal_threshold) && std::isfinite(s.nearest_distance_m)
                 ? goal_threshold - s.nearest_distance_m
@@ -706,8 +720,13 @@ InitMotionPlanResult InitMotionPlanner::plan(
     const double eff_ext = std::max(
         d.external_d_hard_m,
         std::min(d.external_clear_threshold_m, goal_summary.external_min_clearance_m - kEndpointEps));
+    const double eff_intra = std::max(
+        d.intra_arm_d_hard_m,
+        std::min(d.intra_arm_clear_threshold_m,
+                 goal_summary.intra_arm_min_clearance_m - kEndpointEps));
     ScopedThreshold endpoint_thr(d.clear_threshold_m, d.external_clear_threshold_m,
-                                 eff_self, eff_ext);
+                                 d.intra_arm_clear_threshold_m,
+                                 eff_self, eff_ext, eff_intra);
     result.goal_clear_threshold_self_m = eff_self;
     result.goal_clear_threshold_external_m = eff_ext;
 

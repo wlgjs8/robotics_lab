@@ -236,6 +236,11 @@ safety:
         - ["*right*link0*", "*right*link1*"]
         - ["*left*link0*", "*left*link2*"]
         - ["*right*link0*", "*right*link2*"]
+        # compact wrist structural false-positive: measured overlap 0%, always
+        # near 19-25mm and inside d_slow. Distal gripper hull pairs still cover
+        # downstream collisions from link6/attachment_site.
+        - ["*left*link4*", "*left*link6*"]
+        - ["*right*link4*", "*right*link6*"]
       d_hard_m: 0.018   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
       # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
       # can brake a head-on approach at the command ceiling before the hard floor.
@@ -245,6 +250,14 @@ safety:
       a_brake_m_s2: 3.0  # 2026-06-19 anti-chatter: 4.0→3.0 (softer braking ramp = quieter onset at boundary)
       hyst_m: 0.010      # 2026-06-19 anti-chatter: 0.005→0.010 (break on/off limit-cycle toggle)
       latency_s: 0.003   # 2026-06-19 LPF off + new fw(no actuation latency): 0.010→0.003 (cut vc·comp_s feedback that drives the brake↔release limit cycle; comp_s=max(latency_s,verdict_age) so stale verdicts still floor it)
+      # Intra-arm-only margin. Arm<->arm and arm<->stand keep the self values above.
+      # Normal operating intra-arm clearances measured >=27mm; true near-contact is
+      # retained at full link2<->link4 elbow fold, so 5/15mm catches real fold risk
+      # without triggering on compact wrist constant-near geometry.
+      intra_arm:
+        d_hard_m: 0.005
+        d_slow_m: 0.015
+        a_brake_m_s2: 3.0
       swept_samples: 2          # 1=endpoint only; >=2 swept-volume (catches tunneling)
       check_intra_arm: true     # arm folding onto itself (non-adjacent links)
       max_staleness_s: 0.050
