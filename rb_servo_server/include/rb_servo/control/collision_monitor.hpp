@@ -144,6 +144,21 @@ struct CollisionMonitorConfig {
     double intra_arm_recover_speed_m_s = 0.0;
     double intra_arm_latency_s = 0.010;
 
+    // ---- EXTERNAL-BOX keep-out velocity-barrier params ----
+    // Applied ONLY to arm<->runtime-external-box pairs (the detected NTC-321 keep-out
+    // boxes). Kept SEPARATE from the floor's external_* set above: a box is a keep-out the
+    // operator drives TOWARD at teleop speed, so the slow zone must be WIDE enough to brake
+    // the fastest approach before the hard floor. The stoppable approach speed is
+    // sqrt(2*a_brake*(d_slow - d_hard)); the floor's 5 mm slow zone stops only ~0.12 m/s,
+    // but SpaceMouse teleop reaches ~0.8 m/s and overshot ~40 mm INTO the box. These
+    // defaults stop ~0.9 m/s (sqrt(2*6*(0.080-0.010))) and actively eject on penetration.
+    double external_box_d_hard_m = 0.010;
+    double external_box_d_slow_m = 0.080;
+    double external_box_a_brake_m_s2 = 6.0;
+    double external_box_hyst_m = 0.010;
+    double external_box_recover_speed_m_s = 0.030;  // >0: push back out if it does penetrate
+    double external_box_latency_s = 0.010;
+
     struct ExternalBoxesConfig {
         bool enable = false;
         int max_count = 2;

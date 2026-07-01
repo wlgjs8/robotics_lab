@@ -1461,6 +1461,13 @@ DualArmServoLoop::DualArmServoLoop(
         collision_monitor_cfg_.external_boxes.monitor_only = m.external_boxes.monitor_only;
         collision_monitor_cfg_.external_boxes.stale_timeout_s = m.external_boxes.stale_timeout_s;
         collision_monitor_cfg_.external_boxes.stale_policy = m.external_boxes.stale_policy;
+        // Box-only keep-out barrier set (separate from the floor's external_* above).
+        collision_monitor_cfg_.external_box_d_hard_m = m.external_boxes.barrier.d_hard_m;
+        collision_monitor_cfg_.external_box_d_slow_m = m.external_boxes.barrier.d_slow_m;
+        collision_monitor_cfg_.external_box_a_brake_m_s2 = m.external_boxes.barrier.a_brake_m_s2;
+        collision_monitor_cfg_.external_box_hyst_m = m.external_boxes.barrier.hyst_m;
+        collision_monitor_cfg_.external_box_recover_speed_m_s = m.external_boxes.barrier.recover_speed_m_s;
+        collision_monitor_cfg_.external_box_latency_s = m.external_boxes.barrier.latency_s;
         collision_monitor_cfg_.extra_collision.clear();
         for (const auto& e : m.extra_collision) {
             ExtraCollisionShape s;

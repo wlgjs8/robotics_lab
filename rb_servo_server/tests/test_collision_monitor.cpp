@@ -818,9 +818,47 @@ static bool runExternalBoxFeedLiveness() {
     return true;
 }
 
+// External keep-out BOX pairs must route to the box-only barrier set (wide slow zone),
+// NOT the floor's `external` set — the fix for teleop overshooting ~40mm into a box
+// because boxes reused the floor's 5 mm slow zone.
+static bool runExternalBoxBarrierRouting() {
+    const std::array<double, kDof> jl = {-1.0, 0, 0, 0, 0, 0};  // +cmd closes the pair
+    const std::array<double, kDof> jr = {0, 0, 0, 0, 0, 0};
+    CollisionMonitorConfig cfg;
+    cfg.external_boxes.monitor_only = false;         // enforce boxes
+    cfg.external_d_slow_m = 0.005;                   // floor: narrow (5 mm)
+    cfg.external_box_d_hard_m = 0.010;               // box: wide keep-out set
+    cfg.external_box_d_slow_m = 0.080;
+    cfg.external_box_a_brake_m_s2 = 6.0;
+    cfg.external_box_recover_speed_m_s = 0.030;
+
+    // A pair at 40 mm: inside the BOX slow zone (80 mm) but outside the FLOOR slow zone (5 mm).
+    CollisionVerdict vbox = makePairVerdict(0.040, 0.0, jl, jr);
+    vbox.near[0].external_box = true;
+    std::vector<VelocityConstraint> cbox;
+    buildCollisionConstraints(vbox, cfg, 0.0, cbox);
+    RB_CHECK(cbox.size() == 1);  // box's wide slow zone engaged at 40 mm
+    // xi uses the BOX a_brake/d_hard: sqrt(2*6*(0.040-0.010)) = 0.6.
+    RB_CHECK(std::abs(cbox[0].xi - std::sqrt(2.0 * 6.0 * 0.030)) < 1e-6);
+
+    // The SAME 40 mm pair as a FLOOR (external) pair must NOT engage (5 mm slow zone) —
+    // proves routing selects the box set for boxes, not the shared floor set.
+    CollisionVerdict vflo = makePairVerdict(0.040, 0.0, jl, jr);
+    vflo.near[0].external = true;
+    std::vector<VelocityConstraint> cflo;
+    buildCollisionConstraints(vflo, cfg, 0.0, cflo);
+    RB_CHECK(cflo.empty());
+    std::cout << "external box barrier routing: OK\n";
+    return true;
+}
+
 int main() {
     if (!runExternalBoxFeedLiveness()) {
         std::cerr << "test_collision_monitor (external box feed liveness) FAILED\n";
+        return 1;
+    }
+    if (!runExternalBoxBarrierRouting()) {
+        std::cerr << "test_collision_monitor (external box barrier routing) FAILED\n";
         return 1;
     }
     if (!runPairPatternMatching()) {

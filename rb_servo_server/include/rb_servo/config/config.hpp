@@ -395,6 +395,20 @@ struct SelfCollisionConfig {
             bool monitor_only = true;
             double stale_timeout_s = 0.5;
             std::string stale_policy = "hold";
+            // Box-only keep-out velocity-barrier params, SEPARATE from the floor's
+            // `external` set: a box is a keep-out the operator drives toward at teleop
+            // speed, so the slow zone must be wide enough to brake the fastest approach
+            // (the floor's 5 mm zone stops only ~0.12 m/s and let teleop overshoot ~40 mm
+            // in). Defaults stop ~0.9 m/s and eject on penetration.
+            struct BarrierConfig {
+                double d_hard_m = 0.010;
+                double d_slow_m = 0.080;
+                double a_brake_m_s2 = 6.0;
+                double hyst_m = 0.010;
+                double recover_speed_m_s = 0.030;
+                double latency_s = 0.010;
+            };
+            BarrierConfig barrier;
         };
         ExternalBoxesConfig external_boxes;
     };

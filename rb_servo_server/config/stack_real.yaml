@@ -248,12 +248,12 @@ safety:
         # downstream collisions from link6/attachment_site.
         - ["*left*link4*", "*left*link6*"]
         - ["*right*link4*", "*right*link6*"]
-      d_hard_m: 0.018   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
+      d_hard_m: 0.025   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
       # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
       # can brake a head-on approach at the command ceiling before the hard floor.
       # v_max(max_linear_velocity)=0.32, a_brake=4.0 -> d_hard+0.0128=0.0278; 0.035
       # leaves a ~20mm slow zone (stoppable up to ~0.4 m/s). (Stage 0c)
-      d_slow_m: 0.025    # 2026-06-19 anti-chatter: 0.035→0.05 (gentler velocity gradient; ≥d_hard+vmax²/2a_brake=0.032)
+      d_slow_m: 0.030    # 2026-06-19 anti-chatter: 0.035→0.05 (gentler velocity gradient; ≥d_hard+vmax²/2a_brake=0.032)
       a_brake_m_s2: 3.0  # 2026-06-19 anti-chatter: 4.0→3.0 (softer braking ramp = quieter onset at boundary)
       hyst_m: 0.010      # 2026-06-19 anti-chatter: 0.005→0.010 (break on/off limit-cycle toggle)
       latency_s: 0.003   # 2026-06-19 LPF off + new fw(no actuation latency): 0.010→0.003 (cut vc·comp_s feedback that drives the brake↔release limit cycle; comp_s=max(latency_s,verdict_age) so stale verdicts still floor it)
@@ -287,10 +287,23 @@ safety:
         enable: true
         max_count: 2
         size_m: [0.380, 0.240, 0.105]
-        margin_m: 0.025
-        monitor_only: false        # bring-up: report clearance, do not constrain motion yet
+        margin_m: 0.040        # 2026-07-01: 25→40mm keep-out standoff (+ absorbs residual overshoot)
+        monitor_only: true    # ENFORCE (real): velocity-damper decel/hold at the box surface
         stale_timeout_s: 0.5
         stale_policy: hold
+        # 2026-07-01 BOX-ONLY keep-out barrier (SEPARATE from the floor's `external:` set
+        # below). A box is a keep-out the operator drives TOWARD at teleop speed, so the
+        # slow zone must brake the fastest approach. Root cause of the -37.6mm penetration:
+        # boxes reused the floor's 5mm slow zone → stops only √(2·a·(d_slow−d_hard))=0.12 m/s,
+        # but teleop hit 0.78 m/s → ~40mm overshoot. Here d_slow=80mm stops
+        # √(2·6·(0.080−0.010))=0.92 m/s > observed; recover>0 ejects if it does penetrate.
+        barrier:
+          d_hard_m: 0.010          # hard floor (never cross); + margin 40mm = ~50mm from real box
+          d_slow_m: 0.080          # WIDE slow zone: decelerate far so it never arrives fast
+          a_brake_m_s2: 6.0        # braking decel the barrier assumes
+          hyst_m: 0.010
+          recover_speed_m_s: 0.030 # >0: actively push back out on penetration
+          latency_s: 0.010
       # WHOLE-ARM floor: a large thin static box (world frame) so the SAME mesh
       # barrier that guards arm<->arm / arm<->stand also keeps EVERY arm link above
       # the floor (floor_constraint only checks the TCP + offset points, so an
@@ -299,7 +312,8 @@ safety:
       # avoids this box too.
       ground_plane:
         enable: true
-        z_m: 0.001             # startup/fallback top face (used until a floor drives it)
+        # z_m: 0.001             # startup/fallback top face (used until a floor drives it)
+        z_m: 0.0005             # startup/fallback top face (used until a floor drives it)
         size_m: [4.0, 4.0]      # lateral extents [Lx, Ly]
         thickness_m: 0.10
         parent_frame: world

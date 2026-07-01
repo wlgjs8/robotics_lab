@@ -179,24 +179,28 @@ void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitor
     if (!v.valid) return;
     const double age = std::max(0.0, verdict_age_s);
     for (const auto& p : v.near) {
-        // External-like pairs (arm<->floor and enforced arm<->runtime external boxes)
-        // use the external barrier set so known obstacles can use a tighter hard
-        // distance than robot self-collision while keeping ground_plane telemetry
-        // distinct. Monitor-only boxes are reported in the verdict but skipped here.
+        // Per-category barrier set. A keep-out BOX gets its own set (WIDE slow zone so a
+        // fast teleop approach is braked before the hard floor — the floor's 5 mm slow
+        // zone stops only ~0.12 m/s and let teleop overshoot ~40 mm into the box). The
+        // floor (ground_plane, `external`) keeps the tight external_* set; intra-arm and
+        // arm<->arm/stand keep their own. Monitor-only boxes are reported but not enforced.
         if (p.external_box && cfg.external_boxes.monitor_only) continue;
-        const bool external_like = p.external || p.external_box;
-        const double d_hard = external_like
-            ? cfg.external_d_hard_m
-            : (p.intra_arm ? cfg.intra_arm_d_hard_m : cfg.d_hard_m);
-        const double d_slow = external_like
-            ? cfg.external_d_slow_m
-            : (p.intra_arm ? cfg.intra_arm_d_slow_m : cfg.d_slow_m);
-        const double a_brake = external_like
-            ? cfg.external_a_brake_m_s2
-            : (p.intra_arm ? cfg.intra_arm_a_brake_m_s2 : cfg.a_brake_m_s2);
-        const double recover = external_like
-            ? cfg.external_recover_speed_m_s
-            : (p.intra_arm ? cfg.intra_arm_recover_speed_m_s : cfg.recover_speed_m_s);
+        const double d_hard = p.external_box ? cfg.external_box_d_hard_m
+                            : p.external     ? cfg.external_d_hard_m
+                            : p.intra_arm    ? cfg.intra_arm_d_hard_m
+                                             : cfg.d_hard_m;
+        const double d_slow = p.external_box ? cfg.external_box_d_slow_m
+                            : p.external     ? cfg.external_d_slow_m
+                            : p.intra_arm    ? cfg.intra_arm_d_slow_m
+                                             : cfg.d_slow_m;
+        const double a_brake = p.external_box ? cfg.external_box_a_brake_m_s2
+                             : p.external     ? cfg.external_a_brake_m_s2
+                             : p.intra_arm    ? cfg.intra_arm_a_brake_m_s2
+                                              : cfg.a_brake_m_s2;
+        const double recover = p.external_box ? cfg.external_box_recover_speed_m_s
+                             : p.external     ? cfg.external_recover_speed_m_s
+                             : p.intra_arm    ? cfg.intra_arm_recover_speed_m_s
+                                              : cfg.recover_speed_m_s;
         const double closing = p.rate_m_s < 0.0 ? -p.rate_m_s : 0.0;
         const double d_now = p.d_m - closing * age;  // age-extrapolated clearance
         if (d_now >= d_slow) continue;
@@ -997,7 +1001,7 @@ struct CollisionMonitor::Impl {
                 if (d < ext_min) ext_min = d;
                 if (d < cfg.external_d_hard_m) hard = true;
             } else if (ext_box) {
-                if (d < cfg.external_d_hard_m) hard = true;
+                if (d < cfg.external_box_d_hard_m) hard = true;
             } else if (intra) {
                 if (d < intra_min) intra_min = d;
                 if (d < cfg.intra_arm_d_hard_m) hard = true;
@@ -1149,7 +1153,7 @@ struct CollisionMonitor::Impl {
                 if (d < s.external_min_clearance_m) s.external_min_clearance_m = d;
                 if (d < cfg.external_d_hard_m) s.hard_violation = true;
             } else if (ext_box) {
-                if (d < cfg.external_d_hard_m) s.hard_violation = true;
+                if (d < cfg.external_box_d_hard_m) s.hard_violation = true;
             } else if (intra) {
                 if (d < s.intra_arm_min_clearance_m) s.intra_arm_min_clearance_m = d;
                 if (d < cfg.intra_arm_d_hard_m) s.hard_violation = true;
@@ -1203,11 +1207,11 @@ struct CollisionMonitor::Impl {
             const bool ext_box = k < pair_external_box_.size() && pair_external_box_[k];
             const bool intra = k < pair_intra_.size() && pair_intra_[k];
             if (ext_box && cfg.external_boxes.monitor_only) continue;
-            const double threshold = (ext || ext_box)
-                ? std::max(external_thresh_m, cfg.external_d_hard_m)
-                : (intra
-                    ? std::max(intra_arm_thresh_m, cfg.intra_arm_d_hard_m)
-                    : std::max(self_thresh_m, cfg.d_hard_m));
+            const double threshold =
+                  ext_box ? std::max(external_thresh_m, cfg.external_box_d_hard_m)
+                : ext     ? std::max(external_thresh_m, cfg.external_d_hard_m)
+                : intra   ? std::max(intra_arm_thresh_m, cfg.intra_arm_d_hard_m)
+                          : std::max(self_thresh_m, cfg.d_hard_m);
             if (d <= threshold) return false;
         }
         return true;
