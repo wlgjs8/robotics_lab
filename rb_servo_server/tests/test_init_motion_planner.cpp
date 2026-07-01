@@ -279,6 +279,23 @@ static bool run() {
                 RB_CHECK(std::abs(r.waypoints.back().first[i] - band_goal[i]) < 1e-6);
                 RB_CHECK(std::abs(r.waypoints.back().second[i] - band_goal[i]) < 1e-6);
             }
+
+            // Already at that same near-margin endpoint: must be a one-waypoint no-op,
+            // not an escape-out-and-return wiggle. This is the operator-facing regression
+            // where pressing InitMotion at the init pose moved to a slightly different pose.
+            InitMotionPlanResult noop = p.plan(band_goal, band_goal, band_goal, band_goal);
+            std::cout << "band no-op: success=" << noop.success
+                      << " waypoints=" << noop.waypoints.size() << " ("
+                      << noop.message << ")\n";
+            RB_CHECK(noop.success);
+            RB_CHECK(noop.fail_mode == InitMotionPlanResult::FailMode::None);
+            RB_CHECK(noop.message == "already_at_goal");
+            RB_CHECK(noop.escape_waypoints == 0);
+            RB_CHECK(noop.waypoints.size() == 1);
+            for (int i = 0; i < kDof; ++i) {
+                RB_CHECK(std::abs(noop.waypoints.back().first[i] - band_goal[i]) < 1e-6);
+                RB_CHECK(std::abs(noop.waypoints.back().second[i] - band_goal[i]) < 1e-6);
+            }
         }
     }
 

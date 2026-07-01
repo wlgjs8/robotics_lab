@@ -619,6 +619,11 @@ struct InitMotionPlannerConfig {
     double collision_margin_m = 0.005;    // oracle clearance threshold (extra over d_hard)
     unsigned int seed = 12345;            // RNG seed (reproducible plans/tests)
     double waypoint_tol_deg = 1.5;        // arrival tolerance at the FINAL waypoint
+    // If the selected active arm(s) are already at the target within this tolerance,
+    // InitMotion completes as a no-op. This prevents a start==goal pose that is merely
+    // inside the planner's clearance-margin band from first executing an unnecessary
+    // gradient-escape wiggle and then returning to the same pose.
+    double noop_tol_deg = 0.75;
     double max_segment_deg = 5.0;         // densify so no segment exceeds this per joint
     double escape_max_time_sec = 0.75;     // escape-only budget before RRT budget starts
     int escape_max_steps = 40;             // gradient escape iteration cap

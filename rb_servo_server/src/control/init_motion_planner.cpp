@@ -59,6 +59,15 @@ double dist2(const Config& a, const Config& b) {
     return s;
 }
 
+double maxActiveAbsDiff(const Config& a, const Config& b, const ActiveMask& active) {
+    double m = 0.0;
+    for (int i = 0; i < kCombined; ++i) {
+        if (!active[i]) continue;
+        m = std::max(m, std::abs(a[i] - b[i]));
+    }
+    return m;
+}
+
 Config lerp(const Config& a, const Config& b, double t) {
     Config c{};
     for (int i = 0; i < kCombined; ++i) c[i] = a[i] + t * (b[i] - a[i]);
@@ -147,6 +156,7 @@ struct InitMotionPlanner::Impl {
     InitMotionPlannerConfig cfg;
     JointArray q_min_deg{};
     JointArray q_max_deg{};
+    JointBoolArray joint_target_literal_axes{};
     double clear_threshold_m = 0.0;           // self d_hard + collision_margin (path/swept margin)
     double external_clear_threshold_m = 0.0;  // external d_hard + collision_margin
     double intra_arm_clear_threshold_m = 0.0; // intra-arm d_hard + collision_margin
@@ -266,9 +276,10 @@ struct InitMotionPlanner::Impl {
     };
 
     Impl(CollisionMonitorConfig monitor_cfg, InitMotionPlannerConfig planner_cfg,
-         JointArray qmin, JointArray qmax,
+         JointArray qmin, JointArray qmax, JointBoolArray literal_axes,
          std::shared_ptr<IKinematics> kinematics, ArmMountConfig lmount, ArmMountConfig rmount)
-        : cfg(planner_cfg), q_min_deg(qmin), q_max_deg(qmax), rng(planner_cfg.seed),
+        : cfg(planner_cfg), q_min_deg(qmin), q_max_deg(qmax),
+          joint_target_literal_axes(literal_axes), rng(planner_cfg.seed),
           kin(std::move(kinematics)), left_mount(lmount), right_mount(rmount) {
         d_hard_m = monitor_cfg.d_hard_m;
         external_d_hard_m = monitor_cfg.external_d_hard_m;
@@ -607,9 +618,11 @@ InitMotionPlanner::InitMotionPlanner(CollisionMonitorConfig monitor_cfg,
                                      InitMotionPlannerConfig planner_cfg,
                                      JointArray q_min_deg, JointArray q_max_deg,
                                      std::shared_ptr<IKinematics> kinematics,
-                                     ArmMountConfig left_mount, ArmMountConfig right_mount)
+                                     ArmMountConfig left_mount, ArmMountConfig right_mount,
+                                     JointBoolArray joint_target_literal_axes)
     : impl_(std::make_unique<Impl>(std::move(monitor_cfg), planner_cfg, q_min_deg, q_max_deg,
-                                   std::move(kinematics), left_mount, right_mount)) {}
+                                   joint_target_literal_axes, std::move(kinematics),
+                                   left_mount, right_mount)) {}
 
 InitMotionPlanner::~InitMotionPlanner() = default;
 
@@ -680,10 +693,11 @@ InitMotionPlanResult InitMotionPlanner::plan(
     JointArray gl = left_active ? goal_left : start_left;
     JointArray gr = right_active ? goal_right : start_right;
     for (int i = 0; i < kDof; ++i) {
-        if (left_active) {
+        const bool literal = d.joint_target_literal_axes[static_cast<std::size_t>(i)];
+        if (left_active && !literal) {
             gl[i] = nearestBranch(goal_left[i], start_left[i], d.q_min_deg[i], d.q_max_deg[i]);
         }
-        if (right_active) {
+        if (right_active && !literal) {
             gr[i] = nearestBranch(goal_right[i], start_right[i], d.q_min_deg[i], d.q_max_deg[i]);
         }
     }
@@ -762,6 +776,24 @@ InitMotionPlanResult InitMotionPlanner::plan(
         result.message = m.str();
         result.fail_mode = InitMotionPlanResult::FailMode::GoalNotClear;
         result.planning_time_s = std::chrono::duration<double>(Clock::now() - t0).count();
+        return result;
+    }
+
+    // Already at the requested init pose: complete as a one-waypoint no-op. This must
+    // run AFTER endpoint hard-clearance validation, but BEFORE the gradient escape.
+    // Without this guard, a start==goal pose that is inside only the planner's soft
+    // clearance margin executes an avoidable escape wiggle even though the operator
+    // asked for the pose the robot already has.
+    if (maxActiveAbsDiff(start, goal, active) <= std::max(0.0, d.cfg.noop_tol_deg)) {
+        JointArray l{}, r{};
+        split(start, &l, &r);
+        result.waypoints.emplace_back(l, r);
+        result.success = true;
+        result.fail_mode = InitMotionPlanResult::FailMode::None;
+        result.iterations = 0;
+        result.escape_waypoints = 0;
+        result.planning_time_s = std::chrono::duration<double>(Clock::now() - t0).count();
+        result.message = "already_at_goal";
         return result;
     }
 

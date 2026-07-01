@@ -856,18 +856,17 @@ def _arm_init_status_block(
     return normalize_arm_init_status(None)
 
 
-def _optimistic_arm_init_toggle(handles: dict[str, Any], arms: str) -> dict[str, Any]:
+def _optimistic_arm_init_start(handles: dict[str, Any], arms: str) -> dict[str, Any]:
     status = _arm_init_status_block(handles, handles.get("_latest_state"))
     left_on = bool(status.get("init_override_left", False))
     right_on = bool(status.get("init_override_right", False))
     if arms == "both":
-        target = not (left_on or right_on)
-        left_on = target
-        right_on = target
+        left_on = True
+        right_on = True
     elif arms == "left":
-        left_on = not left_on
+        left_on = True
     elif arms == "right":
-        right_on = not right_on
+        right_on = True
     local = normalize_arm_init_status(
         {
             "init_override_left": left_on,
@@ -890,7 +889,7 @@ def _apply_arm_init_result(
         message = result.message
     else:
         ok = bool(result)
-        message = f"arm init {arms} toggle sent" if ok else f"arm init {arms} toggle failed"
+        message = f"arm init {arms} request sent" if ok else f"arm init {arms} request failed"
     if "arm_init_status" in handles:
         handles["arm_init_status"].value = ("OK: " if ok else "BLOCKED: ") + message
     return ok, message
@@ -918,6 +917,7 @@ def _send_arm_init_override(
         try:
             result = send_arm_init(
                 arms,
+                action="start",
                 left_q_deg=safety.init_left_joint_deg,
                 right_q_deg=safety.init_right_joint_deg,
             )
@@ -929,7 +929,7 @@ def _send_arm_init_override(
                 "route": route_label,
                 "detail": route_detail,
             }
-            _optimistic_arm_init_toggle(handles, arms)
+            _optimistic_arm_init_start(handles, arms)
             _clear_tcp_target_user_moved(
                 scene_handles,
                 ("left", "right") if arms == "both" else (arms,),
@@ -4857,7 +4857,7 @@ def update_gui(
 
 _VISER_WASD_PATCH_MARKER = "rb-disable-wasd-keys"
 _VISER_WASD_BUNDLE_MARKER = "rb-wasd-bundle-patched"
-_VISER_KEYBOARD_PATCH_VERSION = "rb-disable-wasd-keys-recording-initmotion-v3"
+_VISER_KEYBOARD_PATCH_VERSION = "rb-disable-wasd-keys-recording-initmotion-v4"
 
 
 def _patch_viser_bundle_wasd(html: str) -> str:
@@ -4940,6 +4940,7 @@ def _viser_keyboard_patch_script() -> str:
         "var b=a.find(function(x){return !x.disabled&&txt(x).indexOf('InitMotion')>=0&&txt(x).indexOf(tok)>=0;});"
         "if(b)b.click();}"
         "function d(e){if(t(e.target))return;"
+        "if(e.repeat){if(!mod(e)&&(e.code==='KeyA'||e.code==='KeyC'||e.code==='KeyB'||B[e.code]))s(e);return;}"
         "if(e.code==='KeyA'&&!mod(e)){s(e);initArm('(왼팔)');return;}"
         "if(e.code==='KeyC'&&!mod(e)){s(e);initArm('(오른팔)');return;}"
         "if(B[e.code]){s(e);return;}"

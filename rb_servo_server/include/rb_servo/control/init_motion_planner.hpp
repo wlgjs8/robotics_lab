@@ -114,13 +114,15 @@ public:
                       JointArray q_max_deg,
                       std::shared_ptr<IKinematics> kinematics = nullptr,
                       ArmMountConfig left_mount = {},
-                      ArmMountConfig right_mount = {});
+                      ArmMountConfig right_mount = {},
+                      JointBoolArray joint_target_literal_axes = {});
     ~InitMotionPlanner();  // defined in the .cpp (pimpl: Impl is incomplete here)
     InitMotionPlanner(const InitMotionPlanner&) = delete;
     InitMotionPlanner& operator=(const InitMotionPlanner&) = delete;
 
     // Plan a collision-free path from (start_left,start_right) to the wrapped nearest
-    // branch of (goal_left,goal_right). Single-threaded; intended to run on a worker
+    // branch of (goal_left,goal_right), except axes configured literal by the servo
+    // safety config (e.g. cable-sensitive J6) keep their raw target. Single-threaded; intended to run on a worker
     // thread off the 500 Hz servo loop. Not re-entrant (mutates the private oracle).
     InitMotionPlanResult plan(const JointArray& start_left, const JointArray& start_right,
                               const JointArray& goal_left, const JointArray& goal_right);

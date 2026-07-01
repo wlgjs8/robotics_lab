@@ -1648,6 +1648,7 @@ class GuiContractsTest(unittest.TestCase):
 
         self.assertTrue(ok, message)
         self.assertEqual(command_client.arm_init_calls[0]["arms"], "left")
+        self.assertEqual(command_client.arm_init_calls[0]["action"], "start")
         self.assertEqual(command_client.arm_init_calls[0]["left_q_deg"], _DEFAULT_INIT_LEFT_JOINTS_DEG)
         self.assertEqual(client.sent_packets, [])
         self.assertNotIn("left_tcp_target_user_moved", scene)
@@ -1854,6 +1855,8 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("initArm('(왼팔)')", script)
         self.assertIn("initArm('(오른팔)')", script)
         self.assertIn("InitMotion", script)
+        # Auto-repeat must not toggle/cancel an in-flight InitMotion.
+        self.assertIn("e.repeat", script)
         # Ctrl/Cmd/Alt+A/C must NOT be hijacked (copy / select-all stay intact).
         self.assertIn("mod(e)", script)
         self.assertIn("ctrlKey", script)

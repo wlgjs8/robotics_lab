@@ -1030,6 +1030,7 @@ void validateConfig(const DualArmConfig& cfg) {
         validatePositiveFinite(ip.step_size_rad, "safety.init_motion_planner.step_size_rad");
         validatePositiveFinite(ip.edge_resolution_rad, "safety.init_motion_planner.edge_resolution_rad");
         validatePositiveFinite(ip.waypoint_tol_deg, "safety.init_motion_planner.waypoint_tol_deg");
+        validateNonNegativeFinite(ip.noop_tol_deg, "safety.init_motion_planner.noop_tol_deg");
         validatePositiveFinite(ip.max_segment_deg, "safety.init_motion_planner.max_segment_deg");
         if (ip.max_iterations <= 0) {
             throw std::runtime_error("safety.init_motion_planner.max_iterations must be > 0");
@@ -2539,6 +2540,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "collision_margin_m",
                 "seed",
                 "waypoint_tol_deg",
+                "noop_tol_deg",
                 "max_segment_deg",
                 "escape_max_time_sec",
                 "escape_max_steps",
@@ -2567,6 +2569,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ip, "collision_margin_m")) ipc.collision_margin_m = asDouble(ip["collision_margin_m"], "safety.init_motion_planner.collision_margin_m");
             if (has(ip, "seed")) ipc.seed = static_cast<unsigned int>(asInt(ip["seed"], "safety.init_motion_planner.seed"));
             if (has(ip, "waypoint_tol_deg")) ipc.waypoint_tol_deg = asDouble(ip["waypoint_tol_deg"], "safety.init_motion_planner.waypoint_tol_deg");
+            if (has(ip, "noop_tol_deg")) ipc.noop_tol_deg = asDouble(ip["noop_tol_deg"], "safety.init_motion_planner.noop_tol_deg");
             if (has(ip, "max_segment_deg")) ipc.max_segment_deg = asDouble(ip["max_segment_deg"], "safety.init_motion_planner.max_segment_deg");
             if (has(ip, "escape_max_time_sec")) ipc.escape_max_time_sec = asDouble(ip["escape_max_time_sec"], "safety.init_motion_planner.escape_max_time_sec");
             if (has(ip, "escape_max_steps")) ipc.escape_max_steps = asInt(ip["escape_max_steps"], "safety.init_motion_planner.escape_max_steps");

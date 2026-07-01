@@ -1528,7 +1528,8 @@ DualArmServoLoop::DualArmServoLoop(
             config_.safety.q_max_deg,
             planner_kin,
             config_.left_mount,
-            config_.right_mount);
+            config_.right_mount,
+            config_.safety.joint_target_literal_axes);
     }
     resetReferenceSupervisionState(this);
 }
@@ -2759,6 +2760,14 @@ void DualArmServoLoop::loopMain() {
                     if (ex.exec_stalled) return std::string("exec_stalled");
                     return initMotionFailModeString(ex.fail_mode);
                 };
+                const JointArray left_init_diag_q =
+                    (left_state.q_actual_valid && finiteJointArray(left_state.q_actual_deg))
+                        ? left_state.q_actual_deg
+                        : left_prev_sent_q_deg_;
+                const JointArray right_init_diag_q =
+                    (right_state.q_actual_valid && finiteJointArray(right_state.q_actual_deg))
+                        ? right_state.q_actual_deg
+                        : right_prev_sent_q_deg_;
                 auto fill_arm = [&](InitMotionArmDiag& arm, const InitMotionExec& ex, bool left_arm) {
                     arm.status = status_string(ex.status);
                     arm.fail_mode = fail_mode_string(ex);
@@ -2792,7 +2801,7 @@ void DualArmServoLoop::loopMain() {
                     double dist = 0.0;
                     for (int i = 0; i < kDof; ++i) {
                         dist = std::max(dist, std::abs(
-                            (left_arm ? left_prev_sent_q_deg_[i] : right_prev_sent_q_deg_[i]) -
+                            (left_arm ? left_init_diag_q[i] : right_init_diag_q[i]) -
                             (left_arm ? goal_wp.first[i] : goal_wp.second[i])));
                     }
                     arm.dist_to_goal_deg = dist;
@@ -5437,17 +5446,53 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         return command;
     }
 
+    const auto measured_or_sent = [](const RobotState& state, const JointArray& fallback) -> JointArray {
+        return (state.q_actual_valid && finiteJointArray(state.q_actual_deg))
+            ? state.q_actual_deg
+            : fallback;
+    };
+    const JointArray current_left_q = measured_or_sent(left_state, left_prev_sent_q_deg_);
+    const JointArray current_right_q = measured_or_sent(right_state, right_prev_sent_q_deg_);
+    const auto active_goal_dist = [&](const InitMotionExec& ex,
+                                      const std::pair<JointArray, JointArray>& goal_wp) {
+        double dist = 0.0;
+        for (int i = 0; i < kDof; ++i) {
+            if (ex.left_active || freeze_other_arm) {
+                dist = std::max(dist, std::abs(current_left_q[i] - goal_wp.first[i]));
+            }
+            if (ex.right_active || freeze_other_arm) {
+                dist = std::max(dist, std::abs(current_right_q[i] - goal_wp.second[i]));
+            }
+        }
+        return dist;
+    };
+    const auto active_goal_reached = [&](const InitMotionExec& ex,
+                                         const std::pair<JointArray, JointArray>& goal_wp,
+                                         double tol_deg) {
+        for (int i = 0; i < kDof; ++i) {
+            if ((ex.left_active || freeze_other_arm) &&
+                std::abs(current_left_q[i] - goal_wp.first[i]) > tol_deg) {
+                return false;
+            }
+            if ((ex.right_active || freeze_other_arm) &&
+                std::abs(current_right_q[i] - goal_wp.second[i]) > tol_deg) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     const auto process_exec = [&](InitMotionExec& ex, PlannerRequester requester,
                                   bool request_left, bool request_right, bool fresh_profile) {
-        // Launch (or relaunch on a changed target) a plan from the CURRENT sent pose.
-        // For single-arm init the non-selected arm is frozen only inside the planner's
-        // combined collision oracle; it is not a target identity and must not trigger
-        // replans as flow moves it on later ticks.
+        // Launch (or relaunch on a changed target) a plan from the MEASURED joint pose
+        // when it is available. For single-arm init, freeze the non-selected arm in the
+        // planner at its measured pose; do not use last-sent references because SMD/flow
+        // can intentionally lead the physical robot by a small amount.
         if (fresh_profile && (request_left || request_right)) {
             const JointArray target_left =
-                request_left ? command.left.q_target_deg : left_prev_sent_q_deg_;
+                request_left ? command.left.q_target_deg : current_left_q;
             const JointArray target_right =
-                request_right ? command.right.q_target_deg : right_prev_sent_q_deg_;
+                request_right ? command.right.q_target_deg : current_right_q;
             const bool new_target = !ex.has_target ||
                 (request_left && !reached(target_left, ex.target_left, 1e-6)) ||
                 (request_right && !reached(target_right, ex.target_right, 1e-6)) ||
@@ -5489,31 +5534,17 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                 ex.exec_timeout = false;
                 ex.exec_stalled = false;
                 ex.start_ns = nowSteadyNs();
-                // Start the offline init-motion plan from the measured joint pose when
-                // available. During flow-infer the Cartesian SMD can lead the physical
-                // arm by a small amount; planning from the last sent target can make the
-                // first JointTarget waypoint pull toward a stale reference and show up
-                // as a jerk when pressing a/c. Falling back to prev_sent keeps sim/mock
-                // and invalid-state behavior unchanged.
-                const JointArray start_left =
-                    (left_state.q_actual_valid && finiteJointArray(left_state.q_actual_deg))
-                        ? left_state.q_actual_deg
-                        : left_prev_sent_q_deg_;
-                const JointArray start_right =
-                    (right_state.q_actual_valid && finiteJointArray(right_state.q_actual_deg))
-                        ? right_state.q_actual_deg
-                        : right_prev_sent_q_deg_;
                 PlannerJob job;
                 job.requester = requester;
                 job.is_linear = false;
-                job.start_left = start_left;
-                job.start_right = start_right;
+                job.start_left = current_left_q;
+                job.start_right = current_right_q;
                 job.target_left = target_left;
                 job.target_right = target_right;
                 job.request_left = request_left;
                 job.request_right = request_right;
                 ex.plan_generation = postPlannerJob(std::move(job));
-                std::cerr << "[INFO] JointTarget init_motion: planning collision-free path from current pose\n";
+                std::cerr << "[INFO] JointTarget init_motion: planning collision-free path from measured pose\n";
             };
             if (ex.status == InitMotionStatus::Idle ||
                 ((ex.status == InitMotionStatus::Executing ||
@@ -5607,16 +5638,16 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
 
         switch (ex.status) {
             case InitMotionStatus::Executing: {
-                bool done = false;
-                // Follow the gradient-escape head precisely (escape_waypoints), then pure-pursuit.
-                JointArray pursue_left = left_prev_sent_q_deg_;
-                JointArray pursue_right = right_prev_sent_q_deg_;
-                if (!ex.left_active && !freeze_other_arm) {
-                    pursue_left = ex.target_left;
-                }
-                if (!ex.right_active && !freeze_other_arm) {
-                    pursue_right = ex.target_right;
-                }
+                // Follow the gradient-escape head precisely (escape_waypoints), then
+                // pure-pursuit. Active arms are tracked against MEASURED joints so init
+                // cannot complete just because the sent target reached the goal while
+                // the physical robot is still lagging behind the SMD/servo filters.
+                JointArray pursue_left = (ex.left_active || freeze_other_arm)
+                    ? current_left_q
+                    : (!ex.waypoints.empty() ? ex.waypoints.back().first : ex.target_left);
+                JointArray pursue_right = (ex.right_active || freeze_other_arm)
+                    ? current_right_q
+                    : (!ex.waypoints.empty() ? ex.waypoints.back().second : ex.target_right);
                 PursuitStep pursuit =
                     pursueWaypointsStep(
                         ex.waypoints,
@@ -5628,20 +5659,17 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                         ex.escape_waypoints
                     );
                 std::pair<JointArray, JointArray> wp = {pursuit.left, pursuit.right};
-                done = pursuit.done;
+                bool done = false;
                 if (!ex.waypoints.empty()) {
-                    // Progress = max-joint distance from the current sent pose to the final
-                    // waypoint. Closing on it (by > a noise floor) refreshes the stall timer.
                     const auto& goal_wp = ex.waypoints.back();
-                    double dist = 0.0;
-                    for (int i = 0; i < kDof; ++i) {
-                        if (ex.left_active || freeze_other_arm) {
-                            dist = std::max(dist, std::abs(left_prev_sent_q_deg_[i] - goal_wp.first[i]));
-                        }
-                        if (ex.right_active || freeze_other_arm) {
-                            dist = std::max(dist, std::abs(right_prev_sent_q_deg_[i] - goal_wp.second[i]));
-                        }
-                    }
+                    done = active_goal_reached(
+                        ex,
+                        goal_wp,
+                        config_.safety.init_motion_planner.waypoint_tol_deg
+                    );
+                    // Progress = max-joint distance from the current MEASURED pose to the final
+                    // waypoint. Closing on it (by > a noise floor) refreshes the stall timer.
+                    const double dist = active_goal_dist(ex, goal_wp);
                     const uint64_t now_ns = nowSteadyNs();
                     if (dist < ex.best_dist_deg - 0.05) {
                         ex.best_dist_deg = dist;
@@ -5654,7 +5682,7 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                         ex.last_exec_log_ns = now_ns;
                         std::cerr << "[INFO] JointTarget init_motion: streaming wp " << ex.index << "/"
                                   << ex.waypoints.size() << " (escape=" << ex.escape_waypoints
-                                  << ", dist_to_goal=" << dist << " deg, best=" << ex.best_dist_deg
+                                  << ", actual_dist_to_goal=" << dist << " deg, best=" << ex.best_dist_deg
                                   << " deg)\n";
                     }
                 }
@@ -5666,11 +5694,15 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                 rewrite_selected(command, ex, wp.first, wp.second);
                 break;
             }
-            case InitMotionStatus::Done:
-                // Hold at the (planned) goal so the arm resists drift until the command
-                // expires or the operator issues something else.
-                rewrite_selected(command, ex, ex.target_left, ex.target_right);
+            case InitMotionStatus::Done: {
+                // Hold at the PLANNED final waypoint (not the raw requested target) so a
+                // no-op plan or wrapped-branch plan cannot reintroduce a small post-done jump.
+                const std::pair<JointArray, JointArray> goal_wp = ex.waypoints.empty()
+                    ? std::pair<JointArray, JointArray>{ex.target_left, ex.target_right}
+                    : ex.waypoints.back();
+                rewrite_selected(command, ex, goal_wp.first, goal_wp.second);
                 break;
+            }
             case InitMotionStatus::Planning:
             case InitMotionStatus::Failed:
             default:
