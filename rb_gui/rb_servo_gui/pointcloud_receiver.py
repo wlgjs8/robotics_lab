@@ -128,6 +128,8 @@ class StereoCloudStore:
         self._recv_monotonic: float = 0.0
         self._boxes: list = []          # [{"T": 4x4 np, "dims": (x,y,z)}]
         self._boxes_seq: int = -1
+        self._phase: str | None = None
+        self._locks: dict = {}
         self._wrist: dict = {}          # arm -> (xyz_cam, rgb, monotonic)
 
     def update(self, xyz: np.ndarray, rgb: np.ndarray, seq: int) -> None:
@@ -135,9 +137,14 @@ class StereoCloudStore:
             self._xyz, self._rgb, self._seq = xyz, rgb, seq
             self._recv_monotonic = time.monotonic()
 
-    def update_boxes(self, boxes: list, seq: int) -> None:
+    def update_boxes(self, boxes: list, seq: int, *, phase: str | None = None,
+                     locks: dict | None = None) -> None:
         with self._lock:
             self._boxes, self._boxes_seq = boxes, seq
+            if phase is not None:
+                self._phase = phase
+            if locks is not None:
+                self._locks = locks
 
     def latest(self):
         """returns (xyz_cam, rgb, seq, age_ms) or None."""
@@ -151,6 +158,15 @@ class StereoCloudStore:
         """returns (boxes, seq). boxes: [{'T':4x4, 'dims':(x,y,z)}]."""
         with self._lock:
             return list(self._boxes), self._boxes_seq
+
+    def latest_locks(self):
+        """returns {'phase': 'idle'|'burst'|None, 'locks': {label: {...}}}, or None if
+        stereo_worker hasn't sent click-to-detect-and-lock telemetry yet (e.g. an older
+        worker build without Chunk 2, or no message received since startup)."""
+        with self._lock:
+            if self._phase is None and not self._locks:
+                return None
+            return {"phase": self._phase, "locks": dict(self._locks)}
 
     def update_wrist(self, arm, xyz, rgb):
         with self._lock:
@@ -216,11 +232,13 @@ class StereoCloudReceiver:
                                "fitness": b.get("fitness"),
                                "label": b.get("label")}
                         for key in ("rmse", "track_id", "icp_method", "source_n", "n",
-                                    "footprint", "icp_sample_n", "coasting"):
+                                    "footprint", "icp_sample_n", "coasting",
+                                    "locked", "lock_seq", "lock_age_s"):
                             if key in b:
                                 box[key] = b.get(key)
                         boxes.append(box)
-                    self.store.update_boxes(boxes, int(meta.get("seq", -1)))
+                    self.store.update_boxes(boxes, int(meta.get("seq", -1)),
+                                            phase=meta.get("phase"), locks=meta.get("locks"))
                     continue
                 if len(parts) != 4:
                     continue

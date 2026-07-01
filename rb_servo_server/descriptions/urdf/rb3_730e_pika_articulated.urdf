@@ -523,10 +523,11 @@
     <child link="link3"/>
     <origin xyz="0.0 -0.00645 0.286" rpy="0.0 0.0 0.0"/>
     <axis xyz="0.0 1.0 0.0"/>
-    <!-- elbow widened from +/-2.618 rad (+/-150 deg) to +/-6.2832 rad (+/-360 deg) to
-         match the rbpodo raw controller range and the kinematics URDF (rb3_730e.urdf).
+    <!-- elbow (J3) physical range on RB3-730E is +/-150 deg (+/-2.618 rad); the joint
+         cannot reach +/-360 deg (catalog). Kept at the true physical range to mirror the
+         kinematics URDF (rb3_730e.urdf) so IK never selects an unreachable elbow branch.
          See docs/joint_range_policy.md "Kinematics Alignment". -->
-    <limit lower="-6.2832" upper="6.2832" effort="150.0" velocity="3.141592653589793"/>
+    <limit lower="-2.618" upper="2.618" effort="150.0" velocity="3.141592653589793"/>
   </joint>
   <joint name="wrist1_joint" type="revolute">
     <parent link="link3"/>

@@ -52,6 +52,34 @@ docker compose --profile real_camera run --rm \
   연결부를 끊어 분리한다. 클수록 강하게 끊지만 희박/가림 회색 박스를 침식한다
   (가림이 잦으면 작게, 잡음이 많아 oversize가 잦으면 크게: 3≈보존, 5≈치수 깔끔, 7≈과침식).
 
+### 박스 잠금 검출 트리거
+박스 pose 검출은 더 이상 매 프레임 연속으로 실행하거나 collision feed에 곧바로 흘리지
+않는다. 운영자가 트리거를 보내면 제한된 시간 동안만 detection burst를 실행하고, burst
+종료 시 ICP 품질 게이트를 통과한 후보만 현재 잠금 pose로 승격한다. 실패한 burst는 이전
+잠금을 그대로 유지하므로 일시적인 팔 가림/노이즈가 좋은 잠금을 조용히 덮어쓸 수 없다.
+프로세스는 재시작할 때마다 항상 idle/unlocked에서 시작하며, 잠금 상태는 디스크에 저장하지
+않는다.
+
+- `STEREO_TRIGGER_ENDPOINT` (기본 `udp://127.0.0.1:50387`) — rb_gui가 보내는
+  `detect_now` (`robotics_lab.box_detect_cmd.v1`) UDP JSON 트리거를 수신하는 엔드포인트.
+- `STEREO_BOX_BURST_S` (기본 `4.0`) — 트리거 1회당 검출을 시도하는 시간(초). 이 워커의
+  메인 루프는 카메라 번들 조립/스테레오 추론 비용 때문에 초당 1~5프레임 수준으로 느리고
+  기복이 크므로(`[CAM] status=degraded` 상태 포함), `BoxTracker`의 `min_hits=3` 확인에
+  필요한 프레임이 burst 안에 실제로 들어오려면 여유 있는 값이 필요하다(0.8s 기본값은
+  실기기에서 항상 `reject_no_track`으로 실패했다).
+- `STEREO_BOX_HEARTBEAT_S` (기본 `1.0`) — 잠긴 pose를 rb_servo_server의
+  `SetExternalBoxes`로 재전송하는 주기(초). 잠금이 갱신되면 즉시 1회 재전송한다.
+- `STEREO_LOCK_RMSE_MAX_M` / `STEREO_LOCK_FITNESS_MIN` (기본 `0.012` / `0.5`) —
+  burst 종료 시 후보를 잠금으로 승격하기 전 적용하는 ICP 품질 게이트. rmse가 1차
+  판별자이고, fitness는 rmse 통과 뒤 확인하는 2차 안전망이다.
+- `STEREO_TRACK` (기본 `1`) — burst 내부에서 EMA/min_hits 확인용 `BoxTracker`를 쓸지
+  여부. `0`이면 burst 중 각 프레임의 raw `detect()` 후보를 직접 평가한다.
+
+`stereo.boxes` payload는 기존 필드에 더해 top-level `phase`(`"idle"` 또는 `"burst"`)와
+`locks`(label별 `locked`/`lock_seq`/`lock_age_s`/`last_result`) 상태를 additive field로
+싣는다. 각 box entry에도 잠금 heartbeat에서 `locked`, `lock_seq`, `lock_age_s`가 추가될 수
+있다. 기존 consumer가 이 필드를 무시해도 기존 payload 구조는 유지된다.
+
 ### Safety ROI 클립 (viz·검출 영역 정렬)
 박스 검출과 publish 클라우드(head + 손목) 모두 rb_gui **Safety ROI 박스**(stand 프레임)
 밖의 점을 버린다 → viser 시각화와 검출이 같은 영역만 보고, ROI 밖 noise가 추정에 안 들어간다.

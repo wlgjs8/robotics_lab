@@ -1162,7 +1162,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--rtc-inference-delay",
         type=int,
-        default=8,
+        default=4,
         help="RTC delay d (policy steps guaranteed to execute during inference latency); the first d "
              "actions are hard-frozen to the previous chunk. ~ceil(inference_latency / policy_dt); "
              "clamped to [0, chunk_execute_steps]. Only used with --rtc.",
@@ -1190,8 +1190,8 @@ def _main_with_subcommands(argv: list[str]) -> int:
             "without steady-state lag. 0 (default) disables crossfade. Try 2-3."
         ),
     )
-    flow_infer.add_argument("--max-linear-step-m", type=float, default=0.015)
-    flow_infer.add_argument("--max-angular-step-rad", type=float, default=0.01)
+    flow_infer.add_argument("--max-linear-step-m", type=float, default=0.020)
+    flow_infer.add_argument("--max-angular-step-rad", type=float, default=0.03)
     flow_infer.add_argument(
         "--rotation-axes",
         default="xyz",

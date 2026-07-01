@@ -75,8 +75,15 @@ servo:
     enable: false
 
 safety:
-  q_min_deg: [-360, -360, -360, -360, -360, -360]
-  q_max_deg: [360, 360, 360, 360, 360, 360]
+  # J3 (elbow) physical range on RB3-730E is +/-150 deg (catalog); the joint cannot
+  # reach +/-360. It is clamped here so JointTarget/InitMotion PTP (which bypass IK and
+  # only pass this final safety clamp) and shortest-path goal selection never command an
+  # unreachable J3 the controller would reject/clamp. J3 also mirrors the IK URDF limit
+  # (rb3_730e.urdf: elbow +/-2.618 rad); see docs/joint_range_policy.md.
+  # q_min_deg: [-360, -360, -150, -360, -360, -360]
+  # q_max_deg: [360, 360, 150, 360, 360, 360]
+  q_min_deg: [-360, -360, -160, -360, -360, -360]
+  q_max_deg: [360, 360, 160, 360, 360, 360]
   # 2026-06-28: raised for UMI teleop responsiveness. The global outer clamp was
   # the binding limit on UMI Cartesian tracking (left arm velocity-clamped 34%,
   # accel-clamped 47% -> "robot follows too slowly"). Accel raised more (it was the
@@ -288,7 +295,7 @@ safety:
         max_count: 2
         size_m: [0.380, 0.240, 0.105]
         margin_m: 0.040        # 2026-07-01: 25→40mm keep-out standoff (+ absorbs residual overshoot)
-        monitor_only: true    # ENFORCE (real): velocity-damper decel/hold at the box surface
+        monitor_only: false    # ENFORCE (real): velocity-damper decel/hold at the box surface
         stale_timeout_s: 0.5
         stale_policy: hold
         # 2026-07-01 BOX-ONLY keep-out barrier (SEPARATE from the floor's `external:` set

@@ -29,6 +29,13 @@ T_TCP_CAM_PATH = os.environ.get("STEREO_T_TCP_CAM", "/calibration/T_tcp_cam.npy"
 STEREO_SEND_EXTERNAL_BOXES = os.environ.get("STEREO_SEND_EXTERNAL_BOXES", "0") == "1"
 STEREO_COMMAND_ENDPOINT = os.environ.get("STEREO_COMMAND_ENDPOINT", "127.0.0.1:50010")
 STEREO_BOX_SOURCE_ID = os.environ.get("STEREO_BOX_SOURCE_ID", "stereo_worker")
+STEREO_TRIGGER_ENDPOINT = os.environ.get("STEREO_TRIGGER_ENDPOINT", "udp://127.0.0.1:50387")
+STEREO_BOX_BURST_S = float(os.environ.get("STEREO_BOX_BURST_S", "4.0"))
+STEREO_BOX_HEARTBEAT_S = float(os.environ.get("STEREO_BOX_HEARTBEAT_S", "1.0"))
+STEREO_LOCK_RMSE_MAX_M = float(os.environ.get("STEREO_LOCK_RMSE_MAX_M", "0.012"))
+STEREO_LOCK_FITNESS_MIN = float(os.environ.get("STEREO_LOCK_FITNESS_MIN", "0.5"))
+STEREO_TRACK_ON = os.environ.get("STEREO_TRACK", "1") != "0"
+BOX_LABELS = ("green", "gray")
 
 
 def load_color_calib(path):
@@ -153,6 +160,62 @@ def wait_for_file(path, timeout_s=30.0, poll_s=0.5):
         time.sleep(poll_s)
 
 
+def _new_lock_state():
+    """label 하나의 초기 잠금 상태: 아직 한 번도 잠긴 적 없음."""
+    return {"locked": False, "box": None, "lock_seq": 0, "lock_monotonic": None,
+            "last_result": None}
+
+
+def evaluate_lock_gate(candidate, rmse_max_m, fitness_min):
+    """burst 종료 시 후보(BoxTracker.update()의 confirmed-track dict, 미확정이면 None)를
+    ICP 품질로 게이트. rmse가 1차 판별자다: 배포 기본값 icp_method="yaw_se2"의 fitness는
+    mean(d <= quantile(d, ICP_TRIM=0.7)) 산식이라 실제 fit 품질과 무관하게 ~0.70에 구조적으로
+    수렴하는 약한 신호이고, rmse(trim된 대응점 집합의 RMS 거리)가 진짜 판별자이기 때문이다.
+    fitness는 2차 안전망으로만 쓴다(rmse가 통과한 뒤에만 검사).
+    Returns (ok: bool, reason: str); reason in
+    {"ok", "reject_no_track", "reject_rmse", "reject_fitness"}.
+    """
+    if candidate is None:
+        return False, "reject_no_track"
+    rmse = candidate.get("rmse")
+    if rmse is None or rmse > rmse_max_m:
+        return False, "reject_rmse"
+    fitness = candidate.get("fitness")
+    if fitness is None or fitness < fitness_min:
+        return False, "reject_fitness"
+    return True, "ok"
+
+
+def build_heartbeat_boxes(locks, now_monotonic):
+    """현재 locked=True인 label만 담은 box list. external_boxes_sender.send()와
+    CloudPublisher.publish_boxes()에 그대로 넘겨 반복 재전송(heartbeat)한다."""
+    out = []
+    for label, st in locks.items():
+        if not st.get("locked") or st.get("box") is None:
+            continue
+        b = dict(st["box"])
+        b["locked"] = True
+        b["lock_seq"] = st.get("lock_seq", 0)
+        lm = st.get("lock_monotonic")
+        b["lock_age_s"] = (now_monotonic - lm) if lm is not None else None
+        out.append(b)
+    return out
+
+
+def build_lock_status(locks, now_monotonic):
+    """rb_gui 상태 표시용: locked 여부와 무관하게 모든 label의 상태를 담는다."""
+    out = {}
+    for label, st in locks.items():
+        lm = st.get("lock_monotonic")
+        out[label] = {
+            "locked": bool(st.get("locked")),
+            "lock_seq": int(st.get("lock_seq", 0)),
+            "lock_age_s": (now_monotonic - lm) if lm is not None else None,
+            "last_result": st.get("last_result"),
+        }
+    return out
+
+
 class CloudPublisher:
     """ZMQ PUB: [topic, header_json, xyz_f32, rgb_u8]."""
     def __init__(self, bind, topic, viz_max_pts=0):
@@ -184,8 +247,9 @@ class CloudPublisher:
                                    np.ascontiguousarray(xyz, np.float32).tobytes(),
                                    np.ascontiguousarray(rgb, np.uint8).tobytes()])
 
-    def publish_boxes(self, seq, boxes, frame="stand"):
-        """박스 pose(T_stand_box)를 stereo.boxes 토픽으로 publish (같은 PUB 소켓)."""
+    def publish_boxes(self, seq, boxes, frame="stand", phase=None, locks=None):
+        """박스 pose(T_stand_box)를 stereo.boxes 토픽으로 publish (같은 PUB 소켓).
+        phase/locks는 click-to-detect-and-lock 상태 telemetry(둘 다 optional, additive)."""
         def encode_box(b):
             out = {
                 "T": [float(v) for v in b["T"].flatten()],
@@ -195,7 +259,7 @@ class CloudPublisher:
                 "label": b.get("label"),
             }
             for key in ("fitness", "rmse", "track_id", "icp_method", "source_n",
-                        "icp_sample_n", "coasting"):
+                        "icp_sample_n", "coasting", "locked", "lock_seq", "lock_age_s"):
                 if key not in b:
                     continue
                 v = b[key]
@@ -211,6 +275,10 @@ class CloudPublisher:
                     out[key] = v
             return out
         payload = {"seq": int(seq), "frame": frame, "boxes": [encode_box(b) for b in boxes]}
+        if phase is not None:
+            payload["phase"] = phase
+        if locks is not None:
+            payload["locks"] = locks
         self._sock.send_multipart([b"stereo.boxes", self._json.dumps(payload).encode()])
 
     def publish_wrist(self, arm, seq, xyz, rgb):
@@ -278,7 +346,7 @@ def cmd_run(args):
         print(f"[run] external boxes sender: ON endpoint={STEREO_COMMAND_ENDPOINT} "
               f"source_id={STEREO_BOX_SOURCE_ID}", flush=True)
 
-    detector = None; tracker = None
+    detector = None
     if os.environ.get("STEREO_DETECT", "1") != "0":
         try:
             from box_detect import BoxDetector, BoxTracker
@@ -287,11 +355,31 @@ def cmd_run(args):
                 use_icp=os.environ.get("STEREO_DETECT_ICP", "1") != "0",
                 icp_method=os.environ.get("STEREO_DETECT_ICP_METHOD", "yaw_se2"),
             )
-            if os.environ.get("STEREO_TRACK", "1") != "0":
-                tracker = BoxTracker()
-            print(f"[run] box detect: ON (icp={detector.use_icp}, track={tracker is not None})", flush=True)
+            print(f"[run] box detect: ON (icp={detector.use_icp}, track={STEREO_TRACK_ON})", flush=True)
+            if not detector.use_icp:
+                print("[run] WARN: ICP disabled -> rmse is always None -> every box-lock "
+                      "trigger will reject_rmse (set STEREO_DETECT_ICP=1 to fix)", flush=True)
         except Exception as e:  # noqa: BLE001
             print(f"[run] box detect OFF: {e}", flush=True)
+
+    trigger_listener = None
+    locks = None
+    phase = "idle"
+    burst_labels = []
+    burst_tracker = None
+    burst_candidates = {}
+    burst_deadline = None
+    last_heartbeat_t = 0.0
+    if detector is not None:
+        locks = {lbl: _new_lock_state() for lbl in BOX_LABELS}
+        try:
+            from box_trigger_listener import BoxTriggerListener
+            trigger_listener = BoxTriggerListener(STEREO_TRIGGER_ENDPOINT)
+            print(f"[run] box trigger listener: ON endpoint={STEREO_TRIGGER_ENDPOINT} "
+                  f"burst={STEREO_BOX_BURST_S}s heartbeat={STEREO_BOX_HEARTBEAT_S}s "
+                  f"gate[rmse<={STEREO_LOCK_RMSE_MAX_M} fitness>={STEREO_LOCK_FITNESS_MIN}]", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[run] box trigger listener OFF: {e}", flush=True)
 
     # 아이디어2: 손목 클라우드 병합 (state로 TCP pose 구독 + 핸드아이). state 미수신 시 자동 head-only.
     pose_listener = None
@@ -330,6 +418,11 @@ def cmd_run(args):
     while True:
         _t = time.perf_counter()
         frames = reader.poll(want, timeout_ms=500)
+        if detector is not None:
+            now_m = time.monotonic()
+            if (now_m - last_heartbeat_t) >= STEREO_BOX_HEARTBEAT_S:
+                external_boxes_sender.send(build_heartbeat_boxes(locks, now_m))
+                last_heartbeat_t = now_m
         irl = frames.get(k_irl); irr = frames.get(k_irr)
         if irl is None or irr is None:
             continue
@@ -400,16 +493,70 @@ def cmd_run(args):
         _t = _ck(prof, "fuse", _t)
 
         if detector is not None:
+            if trigger_listener is not None:
+                for trig in trigger_listener.drain():
+                    if phase == "burst":
+                        print(f"[run] WARN: box trigger ignored (already mid-burst) "
+                              f"seq={trig.get('seq')}", flush=True)
+                        continue
+                    want_labels = [l for l in trig.get("labels", []) if l in BOX_LABELS]
+                    if not want_labels:
+                        continue
+                    for lbl in want_labels:
+                        detector._prev_pose.pop(lbl, None)   # force reacquisition, don't anchor
+                                                              # to a possibly-stale/occluded pose
+                        locks[lbl]["last_result"] = "pending"
+                    burst_labels = want_labels
+                    burst_tracker = BoxTracker() if STEREO_TRACK_ON else None
+                    burst_candidates = {}
+                    burst_deadline = time.monotonic() + STEREO_BOX_BURST_S
+                    phase = "burst"
+                    print(f"[run] box burst START labels={burst_labels} "
+                          f"dur={STEREO_BOX_BURST_S:.2f}s", flush=True)
+                    # NOTE: intentionally no `break` here — additional triggers already queued in
+                    # this same drain batch must still be seen by this loop so they hit the
+                    # `if phase == "burst":` ignore-and-log branch above, not be silently dropped.
+
             try:
-                raw = detector.detect(disp, color_img=(col.pixels if col is not None else None),
-                                      extra_xyz=extra_xyz, extra_rgb=extra_rgb)
-                boxes = tracker.update(raw) if tracker is not None else raw
-                n_boxes = len(boxes)
-                pub.publish_boxes(seq, boxes)
-                external_boxes_sender.send(boxes)
+                if phase == "burst":
+                    raw = detector.detect(disp, color_img=(col.pixels if col is not None else None),
+                                          extra_xyz=extra_xyz, extra_rgb=extra_rgb)
+                    targeted = [d for d in raw if d.get("label") in burst_labels]
+                    candidates = burst_tracker.update(targeted) if burst_tracker is not None else targeted
+                    for cand in candidates:
+                        burst_candidates[cand.get("label")] = cand
+
+                    if time.monotonic() >= burst_deadline:
+                        summary = []
+                        for lbl in burst_labels:
+                            cand = burst_candidates.get(lbl)
+                            ok, reason = evaluate_lock_gate(cand, STEREO_LOCK_RMSE_MAX_M,
+                                                            STEREO_LOCK_FITNESS_MIN)
+                            if ok:
+                                locks[lbl] = {
+                                    "locked": True, "box": cand,
+                                    "lock_seq": locks[lbl]["lock_seq"] + 1,
+                                    "lock_monotonic": time.monotonic(), "last_result": "ok",
+                                }
+                                last_heartbeat_t = 0.0   # force immediate heartbeat resend
+                            else:
+                                locks[lbl]["last_result"] = reason
+                            summary.append(f"{lbl}={reason if not ok else 'ok'}")
+                        print(f"[run] box burst END " + " ".join(summary), flush=True)
+                        phase = "idle"
+                        burst_labels = []
+                        burst_tracker = None
+                        burst_candidates = {}
+                        burst_deadline = None
+
+                now_m = time.monotonic()
+                pub.publish_boxes(seq, build_heartbeat_boxes(locks, now_m),
+                                  phase=phase, locks=build_lock_status(locks, now_m))
             except Exception as e:  # noqa: BLE001
                 if seq % 60 == 0:
                     print(f"[run] detect err: {e}", flush=True)
+
+            n_boxes = sum(1 for st in locks.values() if st.get("locked"))
             # settings.json에서 갱신된 ROI/Z캡이 바뀌면 1회 로그(GUI 수정이 반영됐는지 확인)
             clip_now = (detector._roi_x, detector._roi_y, detector._roi_z, detector._z_cap)
             if clip_now != last_clip_log:

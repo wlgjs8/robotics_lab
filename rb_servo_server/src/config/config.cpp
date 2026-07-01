@@ -8,7 +8,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -724,6 +726,54 @@ bool bothBackendsAreRbpodoControllerSimulation(const DualArmConfig& cfg) {
         isRbpodoControllerSimulationBackend(cfg.right_robot);
 }
 
+// Read a single-DOF joint's <limit lower/upper> (radians) directly from a URDF file.
+// Deliberately a small, dependency-free text scan (not a full XML/pinocchio parse): it
+// is diagnostic-only and must never throw or block startup. Returns {lower_rad, upper_rad}
+// in degrees, or nullopt if the joint or its limit cannot be located.
+std::optional<std::pair<double, double>> readUrdfJointLimitDeg(
+    const std::string& urdf_path,
+    const std::string& joint_name
+) {
+    std::ifstream file(urdf_path);
+    if (!file) return std::nullopt;
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    const std::string xml = buffer.str();
+
+    const std::string needle = "name=\"" + joint_name + "\"";
+    const std::size_t joint_pos = xml.find(needle);
+    if (joint_pos == std::string::npos) return std::nullopt;
+    // The <limit .../> must belong to this joint: stop at the joint's closing tag.
+    const std::size_t joint_end = xml.find("</joint>", joint_pos);
+    const std::size_t limit_pos = xml.find("<limit", joint_pos);
+    if (limit_pos == std::string::npos ||
+        (joint_end != std::string::npos && limit_pos > joint_end)) {
+        return std::nullopt;
+    }
+    const std::size_t limit_end = xml.find('>', limit_pos);
+    if (limit_end == std::string::npos) return std::nullopt;
+    const std::string tag = xml.substr(limit_pos, limit_end - limit_pos);
+
+    const auto readAttr = [&tag](const std::string& attr) -> std::optional<double> {
+        const std::string key = attr + "=\"";
+        const std::size_t p = tag.find(key);
+        if (p == std::string::npos) return std::nullopt;
+        const std::size_t v = p + key.size();
+        const std::size_t e = tag.find('"', v);
+        if (e == std::string::npos) return std::nullopt;
+        try {
+            return std::stod(tag.substr(v, e - v));
+        } catch (...) {
+            return std::nullopt;
+        }
+    };
+    const std::optional<double> lower = readAttr("lower");
+    const std::optional<double> upper = readAttr("upper");
+    if (!lower || !upper) return std::nullopt;
+    constexpr double kRadToDeg = 180.0 / 3.141592653589793238462643383279502884;
+    return std::make_pair(*lower * kRadToDeg, *upper * kRadToDeg);
+}
+
 void warnIfRbpodoSafetyRangeDiffersFromKnownUrdf(const DualArmConfig& cfg) {
     if (!cfg.kinematics.enable || !anyRbpodo(cfg)) return;
     if (std::filesystem::path(cfg.kinematics.urdf).filename().string() != "rb3_730e.urdf") return;
@@ -731,6 +781,27 @@ void warnIfRbpodoSafetyRangeDiffersFromKnownUrdf(const DualArmConfig& cfg) {
     const JointArray urdf_min_deg{-360.0, -360.0, -150.0, -360.0, -360.0, -360.0};
     const JointArray urdf_max_deg{360.0, 360.0, 150.0, 360.0, 360.0, 360.0};
     constexpr double kToleranceDeg = 0.5;
+
+    // Guard against the actual URDF file silently drifting from the expected physical
+    // limits above (the J3/elbow +/-150 -> +/-360 drift that made IK pick an unreachable
+    // elbow branch). This reads the real file, so a regenerated/overwritten URDF is
+    // caught here instead of only at runtime as a branch-flip. J3 is the load-bearing one.
+    const std::optional<std::pair<double, double>> elbow_deg =
+        readUrdfJointLimitDeg(cfg.kinematics.urdf, "elbow_joint");
+    if (elbow_deg) {
+        if (std::abs(elbow_deg->first - urdf_min_deg[2]) > kToleranceDeg ||
+            std::abs(elbow_deg->second - urdf_max_deg[2]) > kToleranceDeg) {
+            warn(
+                "rb3_730e URDF elbow_joint (J3) limit=[" +
+                std::to_string(elbow_deg->first) + ", " + std::to_string(elbow_deg->second) +
+                "] deg does NOT match the RB3-730E physical range [" +
+                std::to_string(urdf_min_deg[2]) + ", " + std::to_string(urdf_max_deg[2]) +
+                "] deg. The elbow cannot reach +/-360; a widened URDF makes IK select an "
+                "unreachable elbow branch the controller rejects (TCP branch-flip / lurch). "
+                "Restore elbow to +/-2.618 rad. See docs/joint_range_policy.md."
+            );
+        }
+    }
     for (int i = 0; i < kDof; ++i) {
         if (std::abs(cfg.safety.q_min_deg[i] - urdf_min_deg[i]) <= kToleranceDeg &&
             std::abs(cfg.safety.q_max_deg[i] - urdf_max_deg[i]) <= kToleranceDeg) {

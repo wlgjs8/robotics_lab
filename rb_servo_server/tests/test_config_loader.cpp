@@ -113,7 +113,9 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(stack_real.left_robot.disable_waiting_ack);
         RB_CHECK(stack_real.right_robot.disable_waiting_ack);
         RB_CHECK(near(stack_real.safety.q_min_deg[0], -360.0));
-        RB_CHECK(near(stack_real.safety.q_max_deg[2], 360.0));
+        // J3 (elbow) is clamped to the RB3-730E physical +/-150 deg, not +/-360.
+        RB_CHECK(near(stack_real.safety.q_min_deg[2], -150.0));
+        RB_CHECK(near(stack_real.safety.q_max_deg[2], 150.0));
         RB_CHECK(stack_real.network.command_bind == "udp://127.0.0.1:50256");
         RB_CHECK(stack_real.network.state_pub_endpoint == "udp://127.0.0.1:50356");
         RB_CHECK(stack_real.network.state_pub_endpoints.size() == 5);
@@ -185,7 +187,9 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(stack_sim.right_robot.disable_waiting_ack);
         RB_CHECK(!stack_sim.servo.rbpodo_async_streaming.enable);
         RB_CHECK(near(stack_sim.safety.q_min_deg[0], -360.0));
-        RB_CHECK(near(stack_sim.safety.q_max_deg[2], 360.0));
+        // J3 (elbow) is clamped to the RB3-730E physical +/-150 deg, not +/-360.
+        RB_CHECK(near(stack_sim.safety.q_min_deg[2], -150.0));
+        RB_CHECK(near(stack_sim.safety.q_max_deg[2], 150.0));
         RB_CHECK(stack_sim.safety.controller_simulation_tracking_error_source ==
                  rb_servo::ControllerSimulationTrackingErrorSource::Reference);
         RB_CHECK(stack_sim.safety.controller_simulation_tracking_error_nonlatching);

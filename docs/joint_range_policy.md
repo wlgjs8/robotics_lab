@@ -25,9 +25,14 @@ scope is represented as explicit per-joint raw limits:
 
 ```yaml
 safety:
-  q_min_deg: [-360, -360, -360, -360, -360, -360]
-  q_max_deg: [360, 360, 360, 360, 360, 360]
+  q_min_deg: [-360, -360, -150, -360, -360, -360]
+  q_max_deg: [360, 360, 150, 360, 360, 360]
 ```
+
+J3 (elbow) is **not** `+/-360`: the RB3-730E elbow physical range is `+/-150 deg`
+(catalog), so its raw safety limit is clamped to `+/-150` to match the true
+hardware range and the IK URDF model limit (see "Kinematics Alignment" below).
+The other joints stay at the broad `+/-360` raw controller range.
 
 Tracked `dual_real*.yaml` rbpodo templates must carry these arrays explicitly.
 Site-owned configs under `rb_servo_server/config/local/` may override them only
@@ -79,12 +84,26 @@ leave the Pika gripper cable wound.
 
 ## Kinematics Alignment
 
-The current `rb3_730e.urdf` model has limits close to `+/-360 deg` for most
-joints and approximately `+/-150 deg` for `elbow_joint`. When rbpodo configs
-enable kinematics and use broader controller raw safety limits, the config
-loader emits a warning that IK may still be model-limited.
+The `rb3_730e.urdf` model has limits of `+/-360 deg` (`+/-6.2832 rad`) for J1, J2,
+J4, J5, J6 and `+/-150 deg` (`+/-2.618 rad`) for `elbow_joint` (J3). The J3 value
+is the true RB3-730E elbow physical range (catalog: the elbow cannot reach
+`+/-360`), so the IK model limit, the raw safety limit (`q_min_deg`/`q_max_deg[2]`
+above), and the hardware agree on `+/-150` for J3.
 
-This warning is intentional. It prevents silent confusion between:
+**History (do not repeat):** J3 was once widened to `+/-360` in the URDF to stop
+IK from returning `reason=joint_limit` (which held the arm) on poses that "looked"
+reachable. Because the elbow physically cannot exceed `+/-150`, widening did not
+make those poses reachable — it only let IK pick an elbow branch the controller
+then rejected/clamped, surfacing as a TCP branch-flip / lurch. A pose needing
+`|J3| > 150 deg` is genuinely unreachable; an honest IK `joint_limit` hold (arm
+stops, WARN names J3) is the correct outcome. Keep J3 at the physical range in
+every layer (URDF, safety `q_min/q_max`, collision model, `config.cpp` expected
+limits); do not widen it to mask an unreachable target.
+
+For joints whose raw safety range is intentionally broader than the URDF IK limit
+(none by default now — J3 is aligned), the config loader emits a warning that IK
+may still be model-limited. This warning is intentional. It prevents silent
+confusion between:
 
 - raw controller safety limits used for state, command, tracking, and logging
 - URDF/Pinocchio model limits used by IK

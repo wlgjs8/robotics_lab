@@ -2,6 +2,7 @@ README.md
 pyproject.toml
 rb_servo_gui/__init__.py
 rb_servo_gui/app.py
+rb_servo_gui/box_detect_control.py
 rb_servo_gui/command_client.py
 rb_servo_gui/geometry.py
 rb_servo_gui/models.py

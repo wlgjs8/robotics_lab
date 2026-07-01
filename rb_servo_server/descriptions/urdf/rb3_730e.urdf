@@ -498,11 +498,16 @@
     <child link="link3"/>
     <origin xyz="0.0 -0.00645 0.286" rpy="0.0 0.0 0.0"/>
     <axis xyz="0.0 1.0 0.0"/>
-    <!-- elbow widened from +/-2.618 rad (+/-150 deg) to +/-6.2832 rad (+/-360 deg) to
-         match the rbpodo raw controller range. The +/-150 deg IK model cap previously
-         pinned the elbow and failed IK (reason=joint_limit) for reachable flow/picking
-         poses, freezing the arm. See docs/joint_range_policy.md "Kinematics Alignment". -->
-    <limit lower="-6.2832" upper="6.2832" effort="150.0" velocity="3.141592653589793"/>
+    <!-- elbow (J3) physical range on RB3-730E is +/-150 deg (+/-2.618 rad); the joint
+         cannot reach +/-360 deg (catalog). Keep the IK model limit at the true physical
+         range so the solver never selects an elbow branch the controller would
+         reject/clamp -> that mismatch is what shows up as a TCP branch-flip / lurch.
+         A pose that needs |J3|>150 deg is genuinely UNREACHABLE on this hardware, so an
+         honest IK joint_limit hold (arm stops, WARN names J3) is the correct behavior;
+         do NOT widen this to +/-360 to mask it (that only defers the failure to the
+         controller as a silent branch jump). See docs/joint_range_policy.md
+         "Kinematics Alignment". -->
+    <limit lower="-2.618" upper="2.618" effort="150.0" velocity="3.141592653589793"/>
   </joint>
   <joint name="wrist1_joint" type="revolute">
     <parent link="link3"/>

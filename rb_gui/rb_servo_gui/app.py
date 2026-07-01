@@ -11,6 +11,7 @@ from html import escape
 from pathlib import Path
 from typing import Any, Mapping
 
+from .box_detect_control import BoxDetectCommandClient, BoxDetectCommandResult
 from .command_client import CommandClient
 from .geometry import (
     _add_matrix3,
@@ -52,6 +53,7 @@ from .models import (
     CircleOverlaySnapshot,
     Pose6D,
     StateSnapshot,
+    box_lock_status_text,
     external_box_display,
 )
 from .overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
@@ -3233,6 +3235,22 @@ def build_gui(
                        "pc_dmax", "pc_clip_z_max_mm"):
                 handles[_k].on_update(lambda _evt: _persist_pc_settings(handles))
 
+            box_detect_host, box_detect_port = _box_detect_cmd_endpoint()
+            handles["box_detect_cmd_client"] = BoxDetectCommandClient(box_detect_host, box_detect_port)
+            handles["box_detect_busy"] = False
+            handles["box_detect_busy_since"] = float("-inf")
+            handles["box_detect_seen_burst"] = False
+            handles["box_detect_last_trigger_monotonic"] = float("-inf")
+            handles["box_detect_button"] = server.gui.add_button("🎯 박스 재탐지")
+            handles["box_detect_status_green"] = server.gui.add_text(
+                "green box", initial_value="탐지 전", disabled=True)
+            handles["box_detect_status_gray"] = server.gui.add_text(
+                "gray box", initial_value="탐지 전", disabled=True)
+
+            @handles["box_detect_button"].on_click
+            def _(_evt) -> None:
+                _trigger_box_detect(handles)
+
             with server.gui.add_folder("수동 캘리브레이션 (T_stand_cam)", expand_by_default=False):
                 handles["pc_calib_mode"] = server.gui.add_checkbox("캘리브레이션 모드(기즈모)", initial_value=False)
                 handles["pc_calib_save"] = server.gui.add_button("💾 캘리브레이션 저장")
@@ -3406,6 +3424,88 @@ def _persist_pc_settings(handles: dict[str, Any]) -> None:
         pass
 
 
+_BOX_DETECT_BUSY_TIMEOUT_S = 8.0  # client-side fallback only, independent of the worker's actual
+                                   # (server-side, env-configurable STEREO_BOX_BURST_S, default 4.0s)
+                                   # burst duration — just generous enough that a real burst always
+                                   # finishes first; only fires on a truly unresponsive worker.
+
+
+def _trigger_box_detect(handles: dict[str, Any], *, monotonic_fn=time.monotonic) -> bool:
+    if handles.get("box_detect_busy"):
+        return False
+    now = monotonic_fn()
+    last = handles.get("box_detect_last_trigger_monotonic", float("-inf"))
+    try:
+        last_value = float(last)
+    except (TypeError, ValueError):
+        last_value = float("-inf")
+    if now - last_value < 1.0:
+        return False
+    client = handles.get("box_detect_cmd_client")
+    send = getattr(client, "send_detect_now", None)
+    if not callable(send):
+        return False
+    try:
+        result = send()
+    except OSError as exc:
+        result = BoxDetectCommandResult(False, f"box detect_now send failed: {exc}")
+    if not result.ok:
+        for key in ("box_detect_status_green", "box_detect_status_gray"):
+            if key in handles:
+                handles[key].value = f"BLOCKED: {result.message}"
+        return False
+    handles["box_detect_last_trigger_monotonic"] = now
+    handles["box_detect_busy"] = True
+    handles["box_detect_busy_since"] = now
+    handles["box_detect_seen_burst"] = False
+    if "box_detect_button" in handles:
+        _set_disabled(handles["box_detect_button"], True)
+    return True
+
+
+def _update_box_detect_status(handles: dict[str, Any], *, monotonic_fn=time.monotonic) -> None:
+    """Called every update_gui() tick. While the OLD locked box is still what's rendered (the
+    worker always heartbeats the previous lock during a burst, never the in-progress candidate —
+    see worker.py's build_heartbeat_boxes), this refreshes only the green/gray status text.
+
+    `phase`/`locks` come from the worker in real time even mid-burst (it republishes every frame
+    while phase=="burst" too, not just once at the end), so once the worker's own burst-start
+    sets last_result="pending" that reaches the GUI almost immediately — we don't need to fake a
+    local "탐지 중…" text. The local busy/seen_burst/timeout bookkeeping below exists ONLY to
+    (a) keep the button disabled for the duration of a burst, and (b) detect a truly unresponsive
+    worker (UDP send always reports ok=True even if nothing is listening) so the button doesn't
+    stay stuck disabled forever.
+    """
+    store = handles.get("_stereo_store")
+    latest_locks = store.latest_locks() if store is not None else None
+    locks = (latest_locks or {}).get("locks") or {}
+    phase = (latest_locks or {}).get("phase")
+
+    timed_out = False
+    if handles.get("box_detect_busy"):
+        if phase == "burst":
+            handles["box_detect_seen_burst"] = True
+        now = monotonic_fn()
+        since = float(handles.get("box_detect_busy_since", now))
+        finished = phase == "idle" and handles.get("box_detect_seen_burst")
+        timed_out = (not finished) and (now - since > _BOX_DETECT_BUSY_TIMEOUT_S)
+        if finished or timed_out:
+            handles["box_detect_busy"] = False
+            if "box_detect_button" in handles:
+                _set_disabled(handles["box_detect_button"], False)
+
+    if timed_out:
+        for key in ("box_detect_status_green", "box_detect_status_gray"):
+            if key in handles:
+                handles[key].value = "응답 없음"
+        return
+
+    if "box_detect_status_green" in handles:
+        handles["box_detect_status_green"].value = box_lock_status_text(locks.get("green"))
+    if "box_detect_status_gray" in handles:
+        handles["box_detect_status_gray"].value = box_lock_status_text(locks.get("gray"))
+
+
 def _persist_roi_settings(handles: dict[str, Any]) -> None:
     """현재 ROI 슬라이더 바운드를 settings.json(roi_min_m/roi_max_m, stand 프레임 m)에
     저장. camera_server stereo_worker(box_detect)가 이 값을 읽어 박스 검출 영역 + publish
@@ -3437,6 +3537,15 @@ def _recording_cmd_endpoint() -> tuple[str, int]:
         os.environ.get("RB_GUI_RECORD_CMD_ENDPOINT", "udp://127.0.0.1:50441"),
         default_host="127.0.0.1",
         default_port=50441,
+    )
+
+
+def _box_detect_cmd_endpoint() -> tuple[str, int]:
+    """stereo_worker box_detect_cmd.v1 destination (must match its STEREO_TRIGGER_ENDPOINT)."""
+    return parse_udp_endpoint(
+        os.environ.get("RB_GUI_BOX_DETECT_CMD_ENDPOINT", "udp://127.0.0.1:50387"),
+        default_host="127.0.0.1",
+        default_port=50387,
     )
 
 
@@ -3979,18 +4088,25 @@ def _update_stereo_boxes(handles: dict[str, Any], latest: StateSnapshot | None =
         except Exception:
             label_z = pos[2] + _EXTERNAL_BOX_LABEL_Z_OFFSET_M
         label_pos = (pos[0], pos[1], label_z)
+        if display["show_label"]:
+            label_text = display["label"]
+        elif b.get("locked"):
+            label_text = "🔒"
+        else:
+            label_text = None
+
         label_handle = label_hs.get(name)
-        if display["show_label"] and hasattr(server.scene, "add_label"):
+        if label_text and hasattr(server.scene, "add_label"):
             if label_handle is None:
                 label_hs[name] = server.scene.add_label(
                     f"/stereo_box_{i}_clearance",
-                    text=display["label"],
+                    text=label_text,
                     position=label_pos,
                     visible=True,
                 )
             else:
                 try:
-                    label_handle.text = display["label"]
+                    label_handle.text = label_text
                     label_handle.position = label_pos
                     label_handle.visible = True
                 except Exception:
@@ -4229,6 +4345,7 @@ def update_gui(
     _update_stereo_cloud(handles)  # 로봇 상태와 무관 — 항상 갱신
     latest = store.latest()
     _update_stereo_boxes(handles, latest)  # 검출된 박스 렌더
+    _update_box_detect_status(handles)  # 박스 재탐지 버튼 상태(green/gray 잠금 텍스트)
     _update_stereo_wrist(handles)  # 손목 raw 클라우드 오버레이
     disabled_states = safety.control_disabled_states()
     disabled_reasons = safety.control_disabled_reasons()
