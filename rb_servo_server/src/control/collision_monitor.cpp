@@ -739,7 +739,7 @@ struct CollisionMonitor::Impl {
             const auto& fr = model.frames[fid];
             std::array<double, 3> dims{};
             for (int i = 0; i < 3; ++i) {
-                dims[i] = cfg.external_boxes.size_m[i] + 2.0 * cfg.external_boxes.margin_m;
+                dims[i] = cfg.external_boxes.size_m[i] + 2.0 * cfg.external_boxes.margin_m[i];
                 if (!std::isfinite(dims[i]) || dims[i] <= 0.0) {
                     throw std::runtime_error(
                         "collision_monitor: external_boxes inflated size must be finite and > 0");

@@ -163,7 +163,7 @@ struct CollisionMonitorConfig {
         bool enable = false;
         int max_count = 2;
         std::array<double, 3> size_m{0.380, 0.240, 0.105};  // NTC-321 outer extents
-        double margin_m = 0.025;  // inflate half-extents for perception uncertainty
+        std::array<double, 3> margin_m{0.025, 0.025, 0.025};  // per-axis [x,y,z] box-local inflation; index 2 = height
         bool monitor_only = true;
         double stale_timeout_s = 0.5;
         std::string stale_policy = "hold";  // "hold" | "disable"

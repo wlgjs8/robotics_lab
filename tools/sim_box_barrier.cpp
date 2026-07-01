@@ -36,7 +36,7 @@ static CollisionMonitorConfig baseCfg() {
     c.external_boxes.enable = true;
     c.external_boxes.max_count = 2;
     c.external_boxes.size_m = {0.380,0.240,0.105};
-    c.external_boxes.margin_m = 0.040;
+    c.external_boxes.margin_m = {0.000, 0.000, 0.040};
     c.external_boxes.monitor_only = false;
     c.external_boxes.stale_timeout_s = 1e12;  // harness: never treat the box feed as stale
     return c;
@@ -115,7 +115,7 @@ int main() {
                        t, v.external_box_min_clearance_m*1000, v.near.size(), nb, fc*1000, proj.max_correction_deg_s); }
             for(int i=0;i<6;i++){ lprev[i]=lt[i]; rprev[i]=rt[i]; }
         }
-        const double real = minclear + c.external_boxes.margin_m;  // clearance to the PHYSICAL box
+        const double real = minclear + c.external_boxes.margin_m[2];  // clearance to the PHYSICAL box
         printf("  [%s] approach=%.2f m/s lag=%dms -> inflated %+7.1f mm | REAL box %+7.1f mm  (%s)\n",
                use_box_params?"BOX  d_slow=80":"FLOOR d_slow=5", approach_mps, lag*2, minclear*1000,
                real*1000, real < -0.001 ? "PENETRATED REAL BOX" : "outside real box");

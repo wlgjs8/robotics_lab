@@ -972,9 +972,11 @@ void validateConfig(const DualArmConfig& cfg) {
                 m.external_boxes.size_m[i],
                 "safety.self_collision.mesh.external_boxes.size_m[" + std::to_string(i) + "]");
         }
-        validateNonNegativeFinite(
-            m.external_boxes.margin_m,
-            "safety.self_collision.mesh.external_boxes.margin_m");
+        for (std::size_t i = 0; i < m.external_boxes.margin_m.size(); ++i) {
+            validateNonNegativeFinite(
+                m.external_boxes.margin_m[i],
+                "safety.self_collision.mesh.external_boxes.margin_m[" + std::to_string(i) + "]");
+        }
         validatePositiveFinite(
             m.external_boxes.stale_timeout_s,
             "safety.self_collision.mesh.external_boxes.stale_timeout_s");
@@ -2226,7 +2228,20 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                             x.size_m[i] = asDouble(sz[i], "safety.self_collision.mesh.external_boxes.size_m");
                         }
                     }
-                    if (has(eb, "margin_m")) x.margin_m = asDouble(eb["margin_m"], "safety.self_collision.mesh.external_boxes.margin_m");
+                    if (has(eb, "margin_m")) {
+                        const YAML::Node mg = eb["margin_m"];
+                        if (mg.IsSequence()) {
+                            if (mg.size() != 3) {
+                                fail("safety.self_collision.mesh.external_boxes.margin_m must be a scalar or 3 values [x, y, z]", mg);
+                            }
+                            for (std::size_t i = 0; i < 3; ++i) {
+                                x.margin_m[i] = asDouble(mg[i], "safety.self_collision.mesh.external_boxes.margin_m");
+                            }
+                        } else {
+                            const double v = asDouble(mg, "safety.self_collision.mesh.external_boxes.margin_m");
+                            x.margin_m = {v, v, v};
+                        }
+                    }
                     if (has(eb, "monitor_only")) x.monitor_only = asBool(eb["monitor_only"], "safety.self_collision.mesh.external_boxes.monitor_only");
                     if (has(eb, "stale_timeout_s")) x.stale_timeout_s = asDouble(eb["stale_timeout_s"], "safety.self_collision.mesh.external_boxes.stale_timeout_s");
                     if (has(eb, "stale_policy")) x.stale_policy = asString(eb["stale_policy"], "safety.self_collision.mesh.external_boxes.stale_policy");

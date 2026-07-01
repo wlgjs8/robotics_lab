@@ -146,6 +146,9 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(real_mesh.intra_arm.d_hard_m, 0.005));
         RB_CHECK(near(real_mesh.intra_arm.d_slow_m, 0.015));
         RB_CHECK(near(real_mesh.intra_arm.a_brake_m_s2, 3.0));
+        RB_CHECK(near(real_mesh.external_boxes.margin_m[0], 0.0));
+        RB_CHECK(near(real_mesh.external_boxes.margin_m[1], 0.0));
+        RB_CHECK(near(real_mesh.external_boxes.margin_m[2], 0.040));
         RB_CHECK(real_mesh.intra_arm_min_chain_separation == 2);
         RB_CHECK(hasPairRule(real_mesh.disabled_collision_pairs,
                              "*left*link4*", "*left*link6*"));
@@ -1044,6 +1047,83 @@ bool testSelfCollisionConfig() {
         RB_CHECK(cfg.safety.self_collision.mesh.disabled_collision_pairs[1].pattern_a == "*right*link0*");
         RB_CHECK(cfg.safety.self_collision.mesh.disabled_collision_pairs[1].pattern_b == "*right*link1*");
         RB_CHECK(cfg.safety.self_collision.mesh.debug_pair_curation);
+    }
+
+    // external_boxes.margin_m accepts legacy scalar form and broadcasts to all axes.
+    {
+        const std::string path = writeTempConfig(
+            "external-box-margin-scalar",
+            selfCollisionConfigBody(
+                true,
+                "  self_collision:\n"
+                "    enable: true\n"
+                "    monitor_only: true\n"
+                "    fail_policy: clamp_hold\n"
+                "    mesh:\n"
+                "      unified_urdf: \"" + rb3UrdfPath() + "\"\n"
+                "      external_boxes:\n"
+                "        margin_m: 0.04\n"));
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+        ::unlink(path.c_str());
+        const auto& margin = cfg.safety.self_collision.mesh.external_boxes.margin_m;
+        RB_CHECK(near(margin[0], 0.04));
+        RB_CHECK(near(margin[1], 0.04));
+        RB_CHECK(near(margin[2], 0.04));
+    }
+
+    // external_boxes.margin_m also accepts per-axis [x, y, z] box-local inflation.
+    {
+        const std::string path = writeTempConfig(
+            "external-box-margin-list",
+            selfCollisionConfigBody(
+                true,
+                "  self_collision:\n"
+                "    enable: true\n"
+                "    monitor_only: true\n"
+                "    fail_policy: clamp_hold\n"
+                "    mesh:\n"
+                "      unified_urdf: \"" + rb3UrdfPath() + "\"\n"
+                "      external_boxes:\n"
+                "        margin_m: [0.0, 0.0, 0.04]\n"));
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+        ::unlink(path.c_str());
+        const auto& margin = cfg.safety.self_collision.mesh.external_boxes.margin_m;
+        RB_CHECK(near(margin[0], 0.0));
+        RB_CHECK(near(margin[1], 0.0));
+        RB_CHECK(near(margin[2], 0.04));
+    }
+
+    // Bad per-axis margin shapes and values fail closed.
+    {
+        const std::string path = writeTempConfig(
+            "external-box-margin-bad-length",
+            selfCollisionConfigBody(
+                true,
+                "  self_collision:\n"
+                "    enable: true\n"
+                "    mesh:\n"
+                "      unified_urdf: \"" + rb3UrdfPath() + "\"\n"
+                "      external_boxes:\n"
+                "        margin_m: [0.0, 0.04]\n"));
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+
+    {
+        const std::string path = writeTempConfig(
+            "external-box-margin-negative",
+            selfCollisionConfigBody(
+                true,
+                "  self_collision:\n"
+                "    enable: true\n"
+                "    mesh:\n"
+                "      unified_urdf: \"" + rb3UrdfPath() + "\"\n"
+                "      external_boxes:\n"
+                "        margin_m: [0.0, -0.01, 0.04]\n"));
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
     }
 
     // Disabled by default when the block is absent.

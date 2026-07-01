@@ -294,7 +294,9 @@ safety:
         enable: true
         max_count: 2
         size_m: [0.380, 0.240, 0.105]
-        margin_m: 0.040        # 2026-07-01: 25→40mm keep-out standoff (+ absorbs residual overshoot)
+        margin_m: [0.000, 0.000, 0.040]   # per-axis [x,y,z] box-local; x,y=SIDE, z=HEIGHT.
+                                          # side 0mm + d_hard 10mm = ~10mm side keep-out;
+                                          # height 40mm + d_hard 10mm = ~50mm top/bottom keep-out.
         monitor_only: false    # ENFORCE (real): velocity-damper decel/hold at the box surface
         stale_timeout_s: 0.5
         stale_policy: hold
