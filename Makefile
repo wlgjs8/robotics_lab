@@ -4,7 +4,7 @@ PROJECT ?= robotics_lab
 POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 
-.PHONY: run flow-infer-real build vm-up vm-down vm-status policy-hdf5-audit-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free camera-mock-up camera-real-up cam-up cam-engine-rebuild cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
+.PHONY: run flow-infer-real build vm-up vm-down vm-status policy-hdf5-audit-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free cam-up cam-engine-rebuild cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
 
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
@@ -76,32 +76,24 @@ mig-rebaseline:
 deps-hardware-free:
 	./scripts/install_deps_ubuntu.sh --profile hardware-free
 
-camera-mock-up:
-	$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile mock_camera up --build camera_server_mock
-
-# Container path of the camera config (mounted from ./camera_server/config).
-# This site runs two D405 wrist cameras for flow-infer; other profiles:
-#   make camera-real-up CAMERA_CONFIG=/app/config/triple_realsense.yaml      # 3-camera
-#   make camera-real-up CAMERA_CONFIG=/app/config/quad_realsense_fisheye.yaml # + wrist fisheye (fe65 deploy)
-CAMERA_CONFIG ?= /app/config/dual_realsense_d405.yaml
-
-camera-real-up:
-	CAMERA_CONFIG=$(CAMERA_CONFIG) $(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile real_camera up --build camera_server
-
-# --- D435 stereo pointcloud (camera_server C++ capture + stereo_worker, one container) ---
-# `make run` 으로 로봇 스택을 띄운 뒤, 별도로 `make cam-up` 한 줄이면 캡처+스테레오 워커가
-# 함께 떠서 viser(고급→Pointcloud)에 RGB 클라우드가 들어온다. 런처(run_all.sh)가 둘 다 기동.
-STEREO_CAM_CONFIG ?= /app/config/d435_head_1280x720.yaml
+# --- Camera (D435 head stereo + dual D405 wrists + stereo_worker, one container) ---
+# 카메라 관련 make 타겟은 4개로 통합: cam-up / cam-down / cam-status / cam-engine-rebuild.
+# `make run` 으로 로봇 스택을 띄운 뒤 `make cam-up` 한 줄이면 D435 헤드(IR 스테레오) + 손목
+# D405 2개 캡처와 스테레오 워커(viser 포인트클라우드 / 박스검출 / external-box 송신)가 한
+# 컨테이너에서 함께 뜬다(run_all.sh 가 캡처+워커 둘 다 기동).
+# 다른 리그로 띄우려면 CAMERA_CONFIG 를 덮어쓴다(컨테이너 경로, ./camera_server/config 마운트):
+#   make cam-up CAMERA_CONFIG=/app/config/quad_realsense_fisheye.yaml   # + 손목 피쉬아이
+#   make cam-up CAMERA_CONFIG=/app/config/head_wrists.yaml STEREO_CAM_K=/app/config/d435_ir_640x480_K.txt  # 헤드 IR 640x480
+CAMERA_CONFIG ?= /app/config/d435_head_1280x720.yaml
 STEREO_CAM_JSON ?= /app/config/__no_advanced__.json
 # 헤드 1280x720 IR intrinsics는 camera_server가 기동 시 디바이스에서 덤프(아래 경로).
-# 640x480 head_wrists.yaml 로 되돌릴 땐 STEREO_CAM_K=/app/config/d435_ir_640x480_K.txt 로.
 STEREO_CAM_K ?= /app/stereo_worker/d435_ir_1280x720_K.txt
 
 cam-up:
-	CAMERA_CONFIG=$(STEREO_CAM_CONFIG) CAMERA_REALSENSE_JSON=$(STEREO_CAM_JSON) \
+	CAMERA_CONFIG=$(CAMERA_CONFIG) CAMERA_REALSENSE_JSON=$(STEREO_CAM_JSON) \
 	STEREO_INTRINSICS=$(STEREO_CAM_K) \
 		$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile real_camera up -d --build camera_server
-	@echo "camera_server (capture + stereo_worker) up. 상태: make cam-status / 로그: docker logs -f camera_server"
+	@echo "camera_server (D435 head + dual D405 + stereo_worker) up. 상태: make cam-status / 로그: docker logs -f camera_server"
 
 # IR 1280x720(->736 패딩)용 TRT 엔진 재빌드. GPU+torch+tensorrt 필요 -> camera_server
 # 컨테이너 안에서 실행. ONNX 재export 후 tf32 엔진 빌드까지 순차 수행.

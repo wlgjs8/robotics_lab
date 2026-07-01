@@ -91,6 +91,33 @@ def _load_z_cap(path, default=None):
     return default
 
 
+def _load_yaw_prior(path, ref_default, tol_default):
+    """settings.json의 box_yaw_ref_deg/box_yaw_tol_deg(stand 프레임, degree) →
+    (ref_rad, tol_rad). 긴변 yaw 제한 window. env STEREO_YAW_PRIOR_REF_DEG/
+    STEREO_YAW_PRIOR_TOL_DEG로도 지정 가능(settings.json 우선). 없으면 default."""
+    ref_deg, tol_deg = None, None
+    try:
+        with open(path) as f:
+            s = json.load(f)
+        ref_deg = s.get("box_yaw_ref_deg")
+        tol_deg = s.get("box_yaw_tol_deg")
+    except Exception:
+        pass
+    if ref_deg is None:
+        ref_deg = os.environ.get("STEREO_YAW_PRIOR_REF_DEG")
+    if tol_deg is None:
+        tol_deg = os.environ.get("STEREO_YAW_PRIOR_TOL_DEG")
+    try:
+        ref = np.radians(float(ref_deg)) if ref_deg is not None else ref_default
+    except (TypeError, ValueError):
+        ref = ref_default
+    try:
+        tol = np.radians(max(0.0, float(tol_deg))) if tol_deg is not None else tol_default
+    except (TypeError, ValueError):
+        tol = tol_default
+    return ref, tol
+
+
 def _load_color_calib(path):
     try:
         with open(path) as f:
@@ -164,6 +191,12 @@ class BoxDetector:
     # 회색 박스를 침식한다(3≈거의 보존, 5≈치수 깔끔하나 ~20% 침식, 7≈과침식). env로 튜닝.
     GRAY_DEBRIDGE_OPEN_K = 3
     TEMPORAL_GATE_M = 0.10          # 직전 포즈를 ICP init으로 재사용할 최대 거리(이내=추적, 초과=재획득)
+    # yaw prior: 박스 긴변(0.38m축)은 head 카메라 2D 이미지에 늘 보인다는 가정 →
+    # floor(stand) 프레임에서 긴변 yaw가 nominal(ref)±tol 안에 있다고 제한한다.
+    # 부분관측 무특징 박스(회색)에서 SE(2) ICP yaw가 underconstrained로 ~90° 뒤집히거나
+    # 크게 떠는 실패를 init 배정 단계 + ICP 출력 clamp 두 곳에서 차단. env/settings.json로 튜닝.
+    YAW_PRIOR_REF_DEG = 0.0         # 긴변 nominal yaw (stand x축 정렬=0; 데이터상 두 박스 모두 ~0)
+    YAW_PRIOR_TOL_DEG = 30.0        # 허용 편차(±). 이 밖이면 window 경계로 clamp
 
     def __init__(self, K, baseline, use_icp=True, icp_method=None):
         self.fx, self.fy = K[0, 0], K[1, 1]
@@ -187,6 +220,9 @@ class BoxDetector:
             GUI_SETTINGS_PATH, (self.ROI_X, self.ROI_Y, self.ROI_Z))
         self._z_cap = _load_z_cap(GUI_SETTINGS_PATH)   # stand-Z 점 상한(None=off)
         self._temporal_icp = os.environ.get("STEREO_TEMPORAL_ICP", "1") != "0"
+        self._yaw_prior = os.environ.get("STEREO_YAW_PRIOR", "1") != "0"
+        self._yaw_ref, self._yaw_tol = _load_yaw_prior(
+            GUI_SETTINGS_PATH, np.radians(self.YAW_PRIOR_REF_DEG), np.radians(self.YAW_PRIOR_TOL_DEG))
         self._prev_pose = {}                           # label -> 직전 ICP 포즈(temporal init)
         self._last_plane = None                        # 직전 양호 테이블 평면(가림 시 fallback)
         self._prof = {}                                # detect 내부 단계 wall-time 누적(STEREO_PROFILE)
@@ -225,6 +261,9 @@ class BoxDetector:
             self._roi_x, self._roi_y, self._roi_z = _load_roi(
                 GUI_SETTINGS_PATH, (self.ROI_X, self.ROI_Y, self.ROI_Z))
             self._z_cap = _load_z_cap(GUI_SETTINGS_PATH)
+            self._yaw_ref, self._yaw_tol = _load_yaw_prior(
+                GUI_SETTINGS_PATH, np.radians(self.YAW_PRIOR_REF_DEG),
+                np.radians(self.YAW_PRIOR_TOL_DEG))
             self._cfg_t = now
 
     # ---- 카메라 프레임 점/색 (기존 로직 유지) ----
@@ -293,6 +332,25 @@ class BoxDetector:
         pl = np.where(inb, lab[np.clip(gy, 0, H - 1), np.clip(gx, 0, W - 1)], 0)
         return pl, keep
 
+    def _fold_to_prior(self, yaw):
+        """긴변 yaw(주기 π=박스 180° 대칭)를 prior window [ref-tol, ref+tol]로 접는다.
+        반환 (folded, within): π-fold 후에도 window 밖이면 within=False + 경계로 clamp."""
+        d = yaw - self._yaw_ref
+        d = (d + np.pi / 2.0) % np.pi - np.pi / 2.0     # 박스 대칭 주기 π → (-π/2, π/2]
+        within = abs(d) <= self._yaw_tol
+        if not within:
+            d = float(np.clip(d, -self._yaw_tol, self._yaw_tol))
+        return self._yaw_ref + d, within
+
+    def _clamp_pose_yaw(self, T):
+        """pose의 긴변(box x) yaw를 prior window로 fold+clamp. up=stand z 고정 재구성."""
+        x = T[:3, 0]
+        yaw, _ = self._fold_to_prior(float(np.arctan2(x[1], x[0])))
+        c, s = np.cos(yaw), np.sin(yaw)
+        Tn = T.copy()
+        Tn[:3, :3] = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+        return Tn
+
     def _init_fit(self, P_xy, cam_xy, plane):
         """평면상 minAreaRect → known-dims + 가림 보정 → init pose(4x4 box→stand) + obs footprint."""
         rect = cv2.minAreaRect((P_xy * 1000).astype(np.float32))
@@ -302,6 +360,16 @@ class BoxDetector:
             obs_long, obs_short, yaw = w, hgt, np.radians(ang)
         else:
             obs_long, obs_short, yaw = hgt, w, np.radians(ang + 90.0)
+        if self._yaw_prior:
+            # 부분관측 시 minAreaRect의 긴/짧은변 배정이 90° 틀어질 수 있다. 긴변은 prior
+            # window(ref±tol) 안에 있어야 하므로, 직교 두 가설 중 window에 드는 쪽을 긴변으로
+            # 택한다(perp만 들면 swap=긴/짧은변 교체). 이후 yaw를 window로 fold/clamp.
+            _, in_long = self._fold_to_prior(yaw)
+            _, in_perp = self._fold_to_prior(yaw + np.pi / 2.0)
+            if in_perp and not in_long:
+                obs_long, obs_short = obs_short, obs_long
+                yaw = yaw + np.pi / 2.0
+            yaw, _ = self._fold_to_prior(yaw)
         if not (self.SIZE_LONG[0] <= obs_long <= self.SIZE_LONG[1]) or obs_short > self.SIZE_SHORT_MAX:
             return None, None
         a, b, c = plane
@@ -391,6 +459,10 @@ class BoxDetector:
                 T, fit, rmse, meth, sample_n = self._icp_se2(s, T)
             else:
                 T, fit, rmse, meth, sample_n = self._icp_o3d(s, T, self.icp_method)
+            if self._yaw_prior:
+                # underconstrained yaw가 window 밖으로 드리프트하지 않게 패스마다 clamp
+                # (다음 패스의 _clip_to_box도 clamp된 pose 기준으로 일관되게 재클립).
+                T = self._clamp_pose_yaw(T)
             _t = self._pt("  icpreg", _t)
         return T, fit, rmse, meth, sample_n
 

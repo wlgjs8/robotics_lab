@@ -155,7 +155,7 @@ def wait_for_file(path, timeout_s=30.0, poll_s=0.5):
 
 class CloudPublisher:
     """ZMQ PUB: [topic, header_json, xyz_f32, rgb_u8]."""
-    def __init__(self, bind, topic):
+    def __init__(self, bind, topic, viz_max_pts=0):
         import zmq, json
         self._json = json
         self._ctx = zmq.Context.instance()
@@ -163,8 +163,21 @@ class CloudPublisher:
         self._sock.setsockopt(zmq.SNDHWM, 4)
         self._sock.bind(bind)
         self._topic = topic.encode()
+        # publish(=시각화) 전용 점수 상한. detect는 disp에서 자기 클라우드를 따로 만들므로
+        # (box_detect.BoxDetector._cam_points) 여기서 줄여도 박스 위치 추정은 무손실.
+        self._viz_max_pts = int(viz_max_pts)
+
+    def _cap(self, seq, xyz, rgb):
+        """발행 직전 viz 전용 random subsample (seq 시드 → 프레임마다 균일 분포)."""
+        n = int(xyz.shape[0])
+        if self._viz_max_pts <= 0 or n <= self._viz_max_pts:
+            return xyz, rgb
+        idx = np.random.default_rng(seq if seq >= 0 else 0).choice(
+            n, self._viz_max_pts, replace=False)
+        return xyz[idx], rgb[idx]
 
     def publish(self, seq, ts_ns, xyz, rgb, frame="camera"):
+        xyz, rgb = self._cap(seq, xyz, rgb)
         header = self._json.dumps({"seq": int(seq), "ts_ns": int(ts_ns),
                                    "n": int(xyz.shape[0]), "frame": frame}).encode()
         self._sock.send_multipart([self._topic, header,
@@ -202,6 +215,7 @@ class CloudPublisher:
 
     def publish_wrist(self, arm, seq, xyz, rgb):
         """손목 raw 클라우드(카메라 프레임). rb_gui가 TCP×hand-eye로 배치."""
+        xyz, rgb = self._cap(seq, xyz, rgb)
         header = self._json.dumps({"arm": arm, "seq": int(seq), "n": int(xyz.shape[0])}).encode()
         self._sock.send_multipart([b"stereo.wrist", header,
                                    np.ascontiguousarray(xyz, np.float32).tobytes(),
@@ -250,7 +264,11 @@ def cmd_run(args):
         for _a, kc, kd in wrist_cams:
             want.add(kc); want.add(kd)
     reader = BundleReader(endpoint=BUNDLE_ENDPOINT)
-    pub = CloudPublisher(CLOUD_PUB_BIND, CLOUD_TOPIC)
+    # viz 전용 점수 상한(0=무제한). 16만 head 클라우드를 그대로 흘리면 rb_gui 수신 스레드
+    # + viser 웹소켓을 포화시킨다 → 발행 직전 캡. detect는 disp 경로라 위치 추정 무손실.
+    viz_max_pts = int(os.environ.get("STEREO_VIZ_MAX_PTS", "30000"))
+    pub = CloudPublisher(CLOUD_PUB_BIND, CLOUD_TOPIC, viz_max_pts=viz_max_pts)
+    print(f"[run] viz cloud cap: {viz_max_pts if viz_max_pts > 0 else 'off'} pts/frame", flush=True)
     external_boxes_sender = ExternalBoxesSender(
         endpoint=STEREO_COMMAND_ENDPOINT,
         source_id=STEREO_BOX_SOURCE_ID,

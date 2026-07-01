@@ -309,6 +309,19 @@ bool collisionPairPatternMatches(const CollisionPairPattern& rule,
                                  const std::string& name_a,
                                  const std::string& name_b);
 
+// Fail-closed liveness decision for an ENFORCED external-box keep-out feed. Pure (all
+// times in seconds) so it is unit-testable. Returns a human-readable abort reason, or
+// nullptr if the feed is acceptable. Semantics:
+//   - feed never seen: acceptable only within the startup grace (producer may be coming
+//     up); past the grace -> abort (producer not running).
+//   - feed seen before: acceptable only if the last feed is within feed_timeout_s;
+//     a larger gap -> abort (producer stopped). Generous vs a normal multi-Hz feed so a
+//     transient blip never false-aborts.
+// Caller applies this ONLY when the boxes are enforced (enable && !monitor_only).
+const char* externalBoxFeedAbortReason(bool feed_seen, double since_enforce_start_s,
+                                       double since_last_feed_s, double startup_grace_s,
+                                       double feed_timeout_s);
+
 // Owns the geometry model + the monitor thread + the published verdict.
 class CollisionMonitor {
 public:
@@ -393,6 +406,11 @@ public:
 
     std::size_t numGeometries() const;
     std::size_t numPairs() const;
+    // Number of collision meshes that were NOT convex and were kept as a (correct but
+    // slow) BVH rather than convexified. 0 = the fast convex path everywhere (the
+    // per-eval performance contract holds); >0 means correct-but-slow geometry is in
+    // play (a loud startup warning named them) and a precomputed convex hull is needed.
+    std::size_t numNonConvexMeshes() const;
 
 private:
     struct Impl;

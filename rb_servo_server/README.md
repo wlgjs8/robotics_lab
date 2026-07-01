@@ -179,4 +179,4 @@ Pinocchio enabled so FK/IK powers the GUI TCP target tests. See
 
 For hardware-free mock runs, start `rb_servo_server` directly with an explicit
 site-local mock config under `config/local/`. Docker remains in use only for
-`camera_server` / `camera_server_mock`.
+`camera_server` (managed by `make cam-up` / `cam-down` / `cam-status`).

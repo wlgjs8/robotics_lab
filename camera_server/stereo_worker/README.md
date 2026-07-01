@@ -31,7 +31,7 @@ docker compose --profile real_camera run --rm \
     --entrypoint python3 camera_server /app/stereo_worker/worker.py --smoke
 # 결과: camera_server/stereo_worker/out/disp_vis.png, out/cloud.npz
 ```
-기본 기동(캡처 서버)은 기존대로 `make camera-real-up` / `docker compose --profile real_camera up camera_server`.
+기본 기동(캡처 서버 + 스테레오 워커)은 `make cam-up` / `docker compose --profile real_camera up camera_server`.
 
 ## 환경변수
 - `FFS_DIR` (기본 `/app/Fast-FoundationStereo`) — 마운트된 submodule 경로.

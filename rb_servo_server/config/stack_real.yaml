@@ -165,7 +165,7 @@ safety:
   roi_box:
     enable: true
     min_m: [-0.450, -0.900, 0.000]
-    max_m: [0.450, 0.120, 0.800]
+    max_m: [0.450, -0.150, 0.800]
     runtime_min_m: [-1.2, -1.6, -0.2]
     runtime_max_m: [1.2, 0.6, 1.6]
     fail_policy: clamp_hold
@@ -222,9 +222,16 @@ safety:
       # +90° Z), the fingers tracking the live jaw open percent via setGripperOpenPercent
       # (mirrors rb3_730e_pika_articulated.urdf). Takes precedence over pika_gripper_mesh.
       # Remove these three to fall back to the single static hull above.
-      pika_gripper_base_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_base.STL"
-      pika_finger_left_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_finger_left.STL"
-      pika_finger_right_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_finger_right.STL"
+      # 2026-06-30 SAFETY FIX: these MUST be precomputed CONVEX HULL meshes (*_hull.STL),
+      # not the raw visual STLs. coal's buildConvexRepresentation does NOT compute a hull
+      # (it just reuses the mesh points) and this coal build lacks qhull, so a non-convex
+      # mesh becomes an INVALID Convex whose GJK distance is garbage (gripper base<->base
+      # read 125 mm at a pose where the true clearance was ~21 mm), silently disabling the
+      # gripper<->gripper self-collision guard. The arm/stand link*_hull/stand_hull meshes
+      # are already convex; only the gripper meshes were raw. (See selfcollision memory.)
+      pika_gripper_base_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_base_hull.STL"
+      pika_finger_left_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_finger_left_hull.STL"
+      pika_finger_right_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_finger_right_hull.STL"
       gripper_finger_travel_m: 0.047
       stand_ignore_arm_substrings: ["link0"]
       debug_pair_curation: true
@@ -281,7 +288,7 @@ safety:
         max_count: 2
         size_m: [0.380, 0.240, 0.105]
         margin_m: 0.025
-        monitor_only: true        # bring-up: report clearance, do not constrain motion yet
+        monitor_only: false        # bring-up: report clearance, do not constrain motion yet
         stale_timeout_s: 0.5
         stale_policy: hold
       # WHOLE-ARM floor: a large thin static box (world frame) so the SAME mesh

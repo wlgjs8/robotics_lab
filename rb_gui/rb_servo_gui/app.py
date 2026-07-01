@@ -4058,9 +4058,18 @@ def _update_stereo_cloud(handles: dict[str, Any]) -> None:
     dmax = float(handles["pc_dmax"].value) if handles.get("pc_dmax") else 1e9
     max_pts = int(handles["pc_max_k"].value) * 1000 if handles.get("pc_max_k") else 80000
     psize = float(handles["pc_size"].value) if handles.get("pc_size") else 0.004
-    # seq/필터/표시값이 모두 그대로면 재전송 생략 (10Hz 중복 방지). 슬라이더 변경 시엔 즉시 갱신.
-    key = (seq, round(dmin, 3), round(dmax, 3), max_pts, round(psize, 4))
+    # seq/필터/표시값이 모두 그대로면 재전송 생략 (중복 방지). 슬라이더 변경 시엔 즉시 갱신.
+    param_key = (round(dmin, 3), round(dmax, 3), max_pts, round(psize, 4))
+    key = (seq,) + param_key
     if key == handles.get("_pc_last_key") and handles.get("pc_handle") is not None:
+        handles["pc_handle"].visible = True
+        return
+    # 슬라이더 변경(param_key)은 즉시 반영하되, 클라우드 seq 갱신(~14fps)만으로 오는 재렌더는
+    # throttle해 웹소켓/브라우저 부하를 제한한다(노드 재전송이 비싸므로 ~5Hz로 캡).
+    now = time.monotonic()
+    params_changed = param_key != handles.get("_pc_last_param_key")
+    if (not params_changed and handles.get("pc_handle") is not None
+            and (now - handles.get("_pc_last_render_t", 0.0)) < 0.2):
         handles["pc_handle"].visible = True
         return
     # depth(=카메라 z) 범위 밖 점 제거
@@ -4081,10 +4090,26 @@ def _update_stereo_cloud(handles: dict[str, Any]) -> None:
         idx = np.random.default_rng(seq if seq >= 0 else 0).choice(n_in, max_pts, replace=False)
         xyz, rgb = xyz[idx], rgb[idx]
     # /stereo_cam 의 자식 -> 부모 프레임(T_stand_cam)이 stand 배치 적용. 점은 카메라 좌표계.
-    handles["pc_handle"] = server.scene.add_point_cloud(
-        "/stereo_cam/cloud", points=xyz.astype(np.float32), colors=rgb.astype(np.uint8),
-        point_size=psize, point_shape="rounded")
+    pts = xyz.astype(np.float32)
+    cols = rgb.astype(np.uint8)
+    h = handles.get("pc_handle")
+    if h is not None and not params_changed:
+        # seq만 바뀐 갱신은 노드 재생성 없이 buffer만 교체(점수 가변도 OK — user_floor와 동일 패턴).
+        try:
+            h.points = pts
+            h.colors = cols
+            h.visible = True
+        except Exception:
+            h = None
+    else:
+        h = None
+    if h is None:  # 최초 생성 또는 슬라이더(point_size/shape) 변경 시에만 재생성
+        handles["pc_handle"] = server.scene.add_point_cloud(
+            "/stereo_cam/cloud", points=pts, colors=cols,
+            point_size=psize, point_shape="rounded")
     handles["_pc_last_key"] = key
+    handles["_pc_last_param_key"] = param_key
+    handles["_pc_last_render_t"] = now
     if status is not None:
         status.value = f"{xyz.shape[0]}/{n_in} pts, depth {dmin:.2f}~{dmax:.2f}m, age {age_ms:.0f}ms (seq {seq})"
 
@@ -4108,6 +4133,9 @@ def _update_stereo_wrist(handles: dict[str, Any]) -> None:
     dmax = float(handles["pc_dmax"].value) if handles.get("pc_dmax") else 1e9
     max_pts = int(handles["pc_max_k"].value) * 1000 if handles.get("pc_max_k") else 80000
     psize = float(handles["pc_size"].value) if handles.get("pc_size") else 0.004
+    # point_size(슬라이더) 변경 시에만 노드 재생성, 그 외엔 buffer만 in-place 교체.
+    wrist_psize_changed = round(psize, 4) != handles.get("_wrist_last_psize")
+    handles["_wrist_last_psize"] = round(psize, 4)
 
     # 캘리브 모드: 양손 기즈모 표시 + 동기화. 한쪽 기즈모가 움직이면 같은 로컬
     # pose(=공유 T_tcp_cam)를 양쪽 기즈모와 핸드아이 프레임에 전파한다.
@@ -4170,10 +4198,21 @@ def _update_stereo_wrist(handles: dict[str, Any]) -> None:
         if n_in > max_pts:
             idx = np.random.default_rng(0).choice(n_in, max_pts, replace=False)
             xyz_f, rgb_f = xyz_f[idx], rgb_f[idx]
-        hs[arm] = server.scene.add_point_cloud(
-            f"/stand/{arm}_tcp/wrist_cam/cloud",
-            points=xyz_f.astype(np.float32), colors=rgb_f.astype(np.uint8),
-            point_size=psize, point_shape="rounded")
+        pts = xyz_f.astype(np.float32)
+        cols = rgb_f.astype(np.uint8)
+        if h is not None and not wrist_psize_changed:
+            try:
+                h.points = pts
+                h.colors = cols
+                h.visible = True
+            except Exception:
+                h = None
+        else:
+            h = None
+        if h is None:
+            hs[arm] = server.scene.add_point_cloud(
+                f"/stand/{arm}_tcp/wrist_cam/cloud",
+                points=pts, colors=cols, point_size=psize, point_shape="rounded")
         parts_status.append(f"{arm}: {xyz_f.shape[0]} pts ({age_ms:.0f}ms)")
 
     st = handles.get("pc_wrist_status")

@@ -64,13 +64,13 @@ sudo apt install libzmq3-dev
 Use `rs-enumerate-devices` for P0 serial discovery. A dedicated
 `camera_server/tools/list_realsense_devices` helper is still a future task.
 Real-camera Docker startup must use the explicit `real_camera` profile or the
-`make camera-real-up` wrapper; this grants camera USB/shared-memory access only
+`make cam-up` wrapper; this grants camera USB/shared-memory access only
 and does not enable robot connection or robot motion gates.
 
 ```bash
 docker compose --profile real_camera up --build camera_server
 # or, from the repository root:
-make camera-real-up
+make cam-up
 ```
 
 ## 2. Hardware inventory

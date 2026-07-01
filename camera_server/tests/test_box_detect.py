@@ -427,5 +427,62 @@ class BoxDetectRoiSettingsTest(unittest.TestCase):
         self.assertEqual(worker.effective_clip_roi(det)[2], (0.0, 0.8))
 
 
+class YawPriorTest(unittest.TestCase):
+    """긴변 yaw를 floor 프레임 nominal±tol로 제한하는 prior (긴변이 head cam에 늘 보인다는 가정)."""
+
+    def _det(self, ref_deg=0.0, tol_deg=30.0):
+        det = _detector(use_icp=False)
+        det._yaw_prior = True
+        det._yaw_ref = np.radians(ref_deg)
+        det._yaw_tol = np.radians(tol_deg)
+        return det
+
+    def test_fold_within_window_unchanged(self):
+        det = self._det()
+        folded, within = det._fold_to_prior(np.radians(20.0))
+        self.assertTrue(within)
+        self.assertAlmostEqual(np.degrees(folded), 20.0, places=4)
+
+    def test_fold_clamps_out_of_window(self):
+        det = self._det()
+        folded, within = det._fold_to_prior(np.radians(50.0))
+        self.assertFalse(within)
+        self.assertAlmostEqual(np.degrees(folded), 30.0, places=4)   # 경계로 clamp
+
+    def test_fold_respects_180_symmetry(self):
+        det = self._det()
+        folded, within = det._fold_to_prior(np.radians(170.0))       # =-10° (박스 대칭)
+        self.assertTrue(within)
+        self.assertAlmostEqual(np.degrees(folded), -10.0, places=4)
+
+    def test_clamp_pose_yaw_caps_at_boundary(self):
+        det = self._det()
+        yaw = np.radians(50.0)
+        T = np.eye(4)
+        T[:3, :3] = np.array([[np.cos(yaw), -np.sin(yaw), 0.0],
+                              [np.sin(yaw), np.cos(yaw), 0.0], [0.0, 0.0, 1.0]])
+        x = det._clamp_pose_yaw(T)[:3, 0]
+        self.assertAlmostEqual(np.degrees(np.arctan2(x[1], x[0])), 30.0, places=3)
+        self.assertAlmostEqual(float(x[2]), 0.0, places=9)           # up=stand z 유지
+
+    @unittest.skipIf(box_detect.cv2 is None, "opencv is required for init_fit")
+    def test_init_fit_resolves_90deg_flip_into_window(self):
+        # 긴변(0.38)이 stand-y를 향한 ~90° 자세로 관측됨(window 밖). prior가 직교 가설로
+        # swap → 긴변을 stand-x(yaw≈0, window 안)로 재해석. prior off면 ~90°로 남는다.
+        scene = _grid_rect(center=(0.2, -0.7), size=(0.24, 0.38), nx=48, ny=72)
+        for det, expect_in_window in ((self._det(), True), (self._det_off(), False)):
+            T0, foot = det._init_fit(scene[:, :2], cam_xy=np.array([0.0, -1.4]),
+                                     plane=(0.0, 0.0, 0.055))
+            self.assertIsNotNone(T0)
+            yaw = np.degrees(np.arctan2(T0[1, 0], T0[0, 0]))
+            yaw = (yaw + 90.0) % 180.0 - 90.0                        # 박스 대칭 fold
+            self.assertEqual(abs(yaw) <= 30.0 + 1e-6, expect_in_window)
+
+    def _det_off(self):
+        det = self._det()
+        det._yaw_prior = False
+        return det
+
+
 if __name__ == "__main__":
     raise SystemExit(unittest.main())

@@ -79,6 +79,44 @@ bool globMatch(const std::string& pattern, const std::string& text) {
 std::string ruleString(const CollisionPairPattern& rule) {
     return "[\"" + rule.pattern_a + "\",\"" + rule.pattern_b + "\"]";
 }
+
+// True iff the BVH triangle mesh is (numerically) convex: every vertex lies on the
+// inner side of every face plane within `tol` meters. WHY THIS EXISTS: coal's
+// BVHModelBase::buildConvexRepresentation() does NOT compute a convex hull — its own
+// header says it "only takes the points of this model, does not check that the object
+// is convex, does not compute a convex hull." This coal build also lacks qhull (so
+// buildConvexHull() throws). Feeding a NON-convex mesh through buildConvexRepresentation
+// yields an invalid Convex whose GJK distance is garbage (measured: two gripper-base
+// hulls read 125 mm apart at a pose where the true clearance was 21 mm), which silently
+// disabled the gripper<->gripper self-collision guard. Callers use this to refuse the
+// broken convex and keep the (correct, if slower) BVH mesh instead. Convex meshes have
+// their vertex-average strictly interior, so face normals orient outward reliably and
+// the test returns true with ~0 defect; non-convex meshes have a poking vertex.
+bool bvhMeshIsConvex(const coal::BVHModelBase& m, double tol) {
+    if (!m.vertices || !m.tri_indices || m.num_vertices == 0 || m.num_tris == 0) {
+        return false;  // cannot validate -> treat as non-convex (fail-closed to BVH)
+    }
+    const std::vector<coal::Vec3s>& V = *m.vertices;
+    const std::vector<coal::Triangle>& T = *m.tri_indices;
+    coal::Vec3s centroid = coal::Vec3s::Zero();
+    for (unsigned i = 0; i < m.num_vertices; ++i) centroid += V[i];
+    centroid /= static_cast<double>(m.num_vertices);
+    for (unsigned t = 0; t < m.num_tris; ++t) {
+        const coal::Vec3s& a = V[T[t][0]];
+        const coal::Vec3s& b = V[T[t][1]];
+        const coal::Vec3s& c = V[T[t][2]];
+        coal::Vec3s n = (b - a).cross(c - a);
+        const double nn = n.norm();
+        if (nn < 1e-12) continue;            // degenerate triangle: skip
+        n /= nn;
+        if (n.dot(centroid - a) > 0.0) n = -n;  // orient outward (away from interior)
+        for (unsigned i = 0; i < m.num_vertices; ++i) {
+            if (n.dot(V[i] - a) > tol) return false;  // a vertex pokes past this face
+        }
+    }
+    return true;
+}
+constexpr double kConvexTolM = 1e-3;  // 1 mm: real hull meshes defect ~0, gripper ~cm
 }  // namespace
 
 bool collisionPairPatternMatches(const CollisionPairPattern& rule,
@@ -91,6 +129,21 @@ bool collisionPairPatternMatches(const CollisionPairPattern& rule,
 bool collisionVerdictStale(const CollisionVerdict& v, double now_s, double max_staleness_s) {
     if (!v.valid) return true;
     return (now_s - v.stamp_s) > max_staleness_s;
+}
+
+const char* externalBoxFeedAbortReason(bool feed_seen, double since_enforce_start_s,
+                                       double since_last_feed_s, double startup_grace_s,
+                                       double feed_timeout_s) {
+    if (!feed_seen) {
+        if (since_enforce_start_s > startup_grace_s) {
+            return "no SetExternalBoxes feed received since startup (producer not running?)";
+        }
+        return nullptr;  // still inside startup grace
+    }
+    if (since_last_feed_s > feed_timeout_s) {
+        return "SetExternalBoxes feed went stale (producer stopped sending)";
+    }
+    return nullptr;
 }
 
 double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
@@ -314,6 +367,12 @@ struct CollisionMonitor::Impl {
     GripperFingers gripper_[2];
     double gripper_pct_[2] = {100.0, 100.0};  // guarded by in_mtx
     bool articulated_ = false;
+    // Collision meshes that were NOT convex and were kept as (correct but slow) BVH
+    // instead of a convex hull. >0 means the geometry is not the fast convex path:
+    // distances are still correct, but eval is much slower (BVH-vs-BVH), so the per-eval
+    // performance contract (servo reaction budget) only holds when this is 0. Set in
+    // buildGeometry; surfaced via CollisionMonitor::numNonConvexMeshes() for tests/ops.
+    std::size_t non_convex_mesh_count_ = 0;
     // stand frame pose in the model's universe frame (constant; the stand is fixed to
     // the root). setGroundPlanePose() takes the floor plane in STAND frame (matching
     // the servo loop's floor_constraint / user_floor), so we map it through this.
@@ -554,14 +613,32 @@ struct CollisionMonitor::Impl {
     void buildGeometry() {
         pinocchio::urdf::buildGeom(model, cfg.unified_urdf, pinocchio::COLLISION, geom,
                                    cfg.package_dirs);
-        // convexify mesh (BVH) geometry for fast GJK; primitives untouched
+        // Convexify mesh (BVH) geometry for fast GJK; primitives untouched. ONLY when the
+        // mesh is actually convex — buildConvexRepresentation does not hull a non-convex
+        // mesh, it silently produces an invalid Convex with wrong GJK distances (see
+        // bvhMeshIsConvex). A non-convex mesh keeps its BVH (correct distance, slower) and
+        // is reported below so the broken-convex failure mode can never recur silently.
+        std::vector<std::string> non_convex_kept_bvh;
         for (auto& go : geom.geometryObjects) {
             auto bvh = std::dynamic_pointer_cast<coal::BVHModelBase>(go.geometry);
             if (bvh) {
-                bvh->buildConvexRepresentation(false);
-                if (bvh->convex) go.geometry = bvh->convex;
+                if (bvhMeshIsConvex(*bvh, kConvexTolM)) {
+                    bvh->buildConvexRepresentation(false);
+                    if (bvh->convex) go.geometry = bvh->convex;
+                } else {
+                    non_convex_kept_bvh.push_back(go.name);
+                }
             }
         }
+        if (!non_convex_kept_bvh.empty()) {
+            std::cerr << "[collision_monitor] WARNING: " << non_convex_kept_bvh.size()
+                      << " URDF collision mesh(es) are NOT convex; kept as BVH (correct but"
+                         " slower). Provide precomputed convex-hull meshes for: ";
+            for (std::size_t i = 0; i < non_convex_kept_bvh.size(); ++i)
+                std::cerr << (i ? ", " : "") << non_convex_kept_bvh[i];
+            std::cerr << std::endl;
+        }
+        non_convex_mesh_count_ = non_convex_kept_bvh.size();
         // Attach the Pika gripper to each arm's attachment_site frame. Two modes:
         //  (1) ARTICULATED (base + both finger meshes set): a static base hull plus two
         //      movable finger hulls placed at identity in the attachment_site frame
@@ -570,10 +647,24 @@ struct CollisionMonitor::Impl {
         //      jaw tracks the live gripper. Default placement = OPEN (finger_pos 0).
         //  (2) SINGLE HULL (pika_gripper_mesh only): the legacy static convex hull at
         //      attachment_site with a +90° Z rotation (the combined-hull STL frame).
-        auto loadConvex = [](coal::MeshLoader& ld, const std::string& path) {
+        // Load a gripper mesh as a convex shape for fast GJK — but ONLY if it is actually
+        // convex. A non-convex STL would become an invalid Convex (wrong distances, which
+        // silently disabled the gripper guard); fail-closed to the raw BVH (correct,
+        // slower) and warn loudly so the operator supplies a *_hull.STL. Return the common
+        // CollisionGeometry base so either shape works downstream (placement-only updates).
+        auto loadConvex = [this](coal::MeshLoader& ld,
+                                 const std::string& path) -> std::shared_ptr<coal::CollisionGeometry> {
             auto bvh = ld.load(path, coal::Vec3s(0.001, 0.001, 0.001));
-            bvh->buildConvexRepresentation(false);
-            return bvh->convex;
+            if (bvhMeshIsConvex(*bvh, kConvexTolM)) {
+                bvh->buildConvexRepresentation(false);
+                if (bvh->convex) return bvh->convex;
+            }
+            ++non_convex_mesh_count_;
+            std::cerr << "[collision_monitor] WARNING: gripper mesh '" << path
+                      << "' is NOT convex; coal cannot hull it here (no qhull) -> keeping the"
+                         " raw BVH mesh (correct but slower). Provide a precomputed convex-hull"
+                         " STL (*_hull.STL) for fast, reliable gripper self-collision.\n";
+            return bvh;
         };
         const bool articulated = !cfg.pika_gripper_base_mesh.empty() &&
                                  !cfg.pika_finger_left_mesh.empty() &&
@@ -1261,5 +1352,6 @@ void CollisionMonitor::stop() {
 
 std::size_t CollisionMonitor::numGeometries() const { return impl_->geom.geometryObjects.size(); }
 std::size_t CollisionMonitor::numPairs() const { return impl_->geom.collisionPairs.size(); }
+std::size_t CollisionMonitor::numNonConvexMeshes() const { return impl_->non_convex_mesh_count_; }
 
 }  // namespace rb_servo

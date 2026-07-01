@@ -1712,6 +1712,36 @@ bool DualArmServoLoop::initializeWorkers() {
     return false;
 }
 
+void DualArmServoLoop::checkExternalBoxFeedOrAbort(uint64_t now_ns) {
+    // Only when external-box keep-out is ENFORCED. When monitor_only (the default) or
+    // disabled, a missing feed is expected/harmless, so this is a no-op.
+    if (!collision_monitor_ || !collision_monitor_cfg_.external_boxes.enable ||
+        collision_monitor_cfg_.external_boxes.monitor_only) {
+        return;
+    }
+    if (external_box_enforce_start_ns_ == 0) external_box_enforce_start_ns_ = now_ns;
+    // Startup grace lets the producer (camera/stereo, or any SetExternalBoxes sender)
+    // come up before we judge the feed missing. After the first feed, a gap beyond the
+    // timeout means the producer stopped. Both are generous vs a normal multi-Hz feed so
+    // a transient blip never false-aborts. Decision is in the pure (tested) helper.
+    constexpr double kStartupGraceS = 10.0;
+    constexpr double kFeedTimeoutS = 3.0;
+    const char* reason = externalBoxFeedAbortReason(
+        external_box_feed_seen_, nsToSec(now_ns - external_box_enforce_start_ns_),
+        nsToSec(now_ns - last_external_box_apply_ns_), kStartupGraceS, kFeedTimeoutS);
+    if (!reason) return;
+    std::cerr << "\n[FATAL][collision_monitor] external-box keep-out is ENFORCED"
+                 " (external_boxes.enable=true, monitor_only=false) but " << reason << ".\n"
+                 "Refusing to run on without keep-out (fail-closed). Resolve one of:\n"
+                 "  - start the box producer so SetExternalBoxes is sent to the command port"
+                 " (camera/stereo with STEREO_SEND_EXTERNAL_BOXES=1), or\n"
+                 "  - set safety.self_collision.mesh.external_boxes.monitor_only: true"
+                 " (report-only), or\n"
+                 "  - set external_boxes.enable: false to disable the feature.\n"
+                 "Aborting." << std::endl;
+    std::abort();
+}
+
 void DualArmServoLoop::loopMain() {
     if (!configureRealtimeForLoop()) {
         startup_ok_ = false;
@@ -1738,6 +1768,10 @@ void DualArmServoLoop::loopMain() {
     while (running_) {
         next_tick += period;
         const uint64_t loop_start = nowSteadyNs();
+        // Fail-closed: if external-box keep-out is enforced but the producer feed is
+        // missing/stale, abort instead of silently running without keep-out (no-op when
+        // monitor_only/disabled — the default config).
+        checkExternalBoxFeedOrAbort(loop_start);
         bool async_supervision_degraded_this_tick = false;
         bool async_supervision_degraded_warned_this_tick = false;
         tracking_error_degraded_this_tick_ = false;
@@ -2065,6 +2099,11 @@ void DualArmServoLoop::loopMain() {
                 }
                 const double stamp_s = nsToSec(nowSteadyNs());
                 collision_monitor_->setExternalBoxes(poses, stamp_s);
+                // Mark the producer feed live (any applied command counts, including an
+                // all-parked "nothing detected" update — that still proves the producer
+                // is running). Consumed by checkExternalBoxFeedOrAbort.
+                external_box_feed_seen_ = true;
+                last_external_box_apply_ns_ = nowSteadyNs();
                 std::cerr << "[DEBUG] SetExternalBoxes applied " << accepted
                           << " box(es), ignored_unknown=" << ignored_unknown
                           << " ignored_out_of_range=" << ignored_out_of_range

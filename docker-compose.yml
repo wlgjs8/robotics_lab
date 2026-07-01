@@ -1,23 +1,4 @@
 services:
-  camera_server_mock:
-    profiles: ["mock_camera"]
-    build:
-      context: .
-      dockerfile: scripts/docker/camera_server_mock.Dockerfile
-    image: robotics_lab/camera_server_mock:dev
-    command: ["--config", "/app/config/mock_triple_realsense.yaml", "--simulate"]
-    init: true
-    ipc: private
-    shm_size: "256mb"
-    networks: [rb_servo_net]
-    volumes:
-      - ./camera_server/episodes:/data/episodes
-    environment:
-      CAMERA_SERVER_CONFIG: /app/config/mock_triple_realsense.yaml
-    labels:
-      rb-servo.role: "hardware-free-mock-camera"
-      rb-servo.hardware: "none"
-
   # camera_server 단일 컨테이너: C++ 캡처(librealsense) + GPU 스테레오 추론(Fast-FoundationStereo).
   camera_server:
     profiles: ["real_camera"]
@@ -54,7 +35,7 @@ services:
       # 손목 핸드아이 T_tcp_cam (rb_gui 기즈모가 갱신) — 아이디어2 손목 클라우드 병합용
       - ./calibration:/calibration:ro
     environment:
-      # Container path; override with CAMERA_CONFIG (see Makefile camera-real-up).
+      # Container path; override with CAMERA_CONFIG (see Makefile cam-up).
       CAMERA_SERVER_CONFIG: ${CAMERA_CONFIG:-/app/config/triple_realsense.yaml}
       # rs400 advanced-mode JSON applied per device before streaming, so the
       # capture PC (.40) and this inference PC share identical camera settings.
@@ -68,13 +49,15 @@ services:
       STEREO_INTRINSICS: ${STEREO_INTRINSICS:-/app/config/d435_ir_640x480_K.txt}
       # 캡처+워커 동시 기동 런처가 사용. 0이면 캡처만(워커 수동).
       STEREO_WORKER_AUTOSTART: ${STEREO_WORKER_AUTOSTART:-1}
+      # 검출된 박스 2개를 rb_servo_server CollisionMonitor에 keep-out 으로 전송
+      # (UDP SetExternalBoxes, net=host). 0이면 송신 안 함.
+      STEREO_SEND_EXTERNAL_BOXES: ${STEREO_SEND_EXTERNAL_BOXES:-1}
+      # 반드시 servo의 network.command_bind 포트와 일치해야 함. 이 사이트 stack_real.yaml은
+      # 50256을 쓴다(문서 기본값 50010 아님 → 안 맞추면 박스 패킷이 버려짐).
+      STEREO_COMMAND_ENDPOINT: ${STEREO_COMMAND_ENDPOINT:-127.0.0.1:50256}
     # 한 컨테이너에서 camera_server(C++) + stereo_worker 동시 기동 (docker compose up/start 한 번에 둘 다)
     entrypoint: ["bash", "/app/stereo_worker/run_all.sh"]
     command: []
     labels:
       rb-servo.role: "real-camera"
       rb-servo.hardware: "realsense+gpu"
-
-networks:
-  rb_servo_net:
-    driver: bridge

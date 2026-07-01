@@ -1066,7 +1066,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--chunk-execute-steps",
         type=int,
-        default=12,
+        default=16,
         help="Number of sampled action steps to execute before resampling; default is action_horizon//2.",
     )
     flow_infer.add_argument(
@@ -1130,6 +1130,15 @@ def _main_with_subcommands(argv: list[str]) -> int:
              "firmly (lower opening = more closed). E.g. 1.0 turns an 18%% command into 17%%; use it "
              "when the policy stops a hair short of clamping the object. Clamped to [0,100]; 0 = off "
              "(DEFAULT). No effect in --gripper-action-mode delta.",
+    )
+    flow_infer.add_argument(
+        "--prompt",
+        type=str,
+        default=None,
+        help="Override the language prompt sent to the openpi server (default OPENPI_DEFAULT_PROMPT). "
+        "For the colorprompt model pass the phase_color prompt, e.g. 'pick up the black bolt with the "
+        "right arm and put it in the green box' (right phase) or 'pick up the gray bolt with the left "
+        "arm and put it in the gray box' (left phase).",
     )
     flow_infer.add_argument(
         "--gripper-close-snap-percent",
@@ -1214,7 +1223,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--tcp-target-pose-reanchor-mode",
         choices=["measured_legacy", "last_emitted_continuous", "measured_blend"],
-        default="measured_blend",
+        default="measured_legacy",
         help=(
             "Chunk-boundary handling for foh_se3. measured_legacy (default): reanchor straight to measured. "
             "measured_blend: anchor the new chunk to the measured pose for drift correction but blend in from the last emitted "
@@ -1962,6 +1971,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     wrist_crop_frac=float(config.camera.wrist_crop_frac),
                     action_horizon=args.action_horizon,
                     proprio_mode=args.proprio_mode,
+                    **({"prompt": args.prompt} if getattr(args, "prompt", None) else {}),
                     include_depth=bool(args.include_depth or args.blank_depth),
                     blank_depth=bool(args.blank_depth),
                     depth_z_near_mm=float(args.depth_z_near_mm),
