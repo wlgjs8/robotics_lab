@@ -26,7 +26,10 @@ from urllib.parse import urlparse
 ARMS = ("left", "right")
 JOINT_COUNT = 6
 SCOPE_SCHEMA = "robotics_lab.scope.v1"
+TRAJ_SCOPE_SCHEMA = "robotics_lab.scope_traj.v1"
+CHUNK_OVERLAY_SCHEMA = "robotics_lab.chunk_overlay.v1"
 DEFAULT_STATE_LISTEN = "0.0.0.0:50376"
+DEFAULT_CHUNK_LISTEN = "0.0.0.0:50263"
 DEFAULT_HTTP_HOST = "0.0.0.0"
 DEFAULT_HTTP_PORT = 8081
 # Retain enough server-side history to back the dashboard's longest finite
@@ -171,6 +174,118 @@ def extract_packet_samples(payload: Mapping[str, Any], *, fallback_time_s: float
     return [(t, arms)] if arms else []
 
 
+def _vec3_from_tcp_pose(value: Any) -> tuple[float, float, float] | None:
+    try:
+        if isinstance(value, Mapping):
+            raw = (value["x"], value["y"], value["z"])
+        elif isinstance(value, list | tuple) and len(value) >= 3:
+            raw = value[:3]
+        else:
+            return None
+        parsed = tuple(float(item) for item in raw)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if len(parsed) != 3 or not all(math.isfinite(item) for item in parsed):
+        return None
+    return parsed  # type: ignore[return-value]
+
+
+def _chunk_xyz_path(value: Any) -> list[list[float]] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list | tuple):
+        return None
+    out: list[list[float]] = []
+    try:
+        for waypoint in value:
+            if not isinstance(waypoint, list | tuple) or len(waypoint) < 3:
+                return None
+            xyz = [float(waypoint[0]), float(waypoint[1]), float(waypoint[2])]
+            if not all(math.isfinite(item) for item in xyz):
+                return None
+            out.append(xyz)
+    except (TypeError, ValueError):
+        return None
+    return out
+
+
+def build_traj_data_payload(
+    *,
+    predicted: Mapping[str, list[list[float]] | None],
+    actual: Mapping[str, list[list[float]]],
+    host_time_ns: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema": TRAJ_SCOPE_SCHEMA,
+        "host_time_ns": time.time_ns() if host_time_ns is None else int(host_time_ns),
+        "predicted": {arm: predicted.get(arm) for arm in ARMS},
+        "actual": {arm: actual.get(arm, []) for arm in ARMS},
+    }
+
+
+class TrajectoryStore:
+    def __init__(self, *, max_actual_points_per_arm: int = 600) -> None:
+        self._lock = threading.Lock()
+        self._predicted: dict[str, list[list[float]] | None] = {arm: None for arm in ARMS}
+        self._actual: dict[str, deque[list[float]]] = {
+            arm: deque(maxlen=max(1, int(max_actual_points_per_arm))) for arm in ARMS
+        }
+        self._bind_error: str | None = None
+
+    def set_bind_error(self, message: str) -> None:
+        with self._lock:
+            self._bind_error = str(message)
+
+    def update_actual_from_state_payload(self, payload: Mapping[str, Any]) -> None:
+        updates: dict[str, list[float]] = {}
+        for arm in ARMS:
+            arm_payload = payload.get(arm)
+            if not isinstance(arm_payload, Mapping):
+                continue
+            xyz = _vec3_from_tcp_pose(arm_payload.get("tcp_actual_stand"))
+            if xyz is not None:
+                updates[arm] = [xyz[0], xyz[1], xyz[2]]
+        if not updates:
+            return
+        with self._lock:
+            for arm, xyz in updates.items():
+                self._actual[arm].append(xyz)
+
+    def update_predicted_from_json_bytes(self, data: bytes) -> bool:
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        if not isinstance(payload, Mapping):
+            return False
+        schema = payload.get("schema", payload.get("schema_version"))
+        if schema != CHUNK_OVERLAY_SCHEMA:
+            return False
+        updates: dict[str, list[list[float]] | None] = {}
+        for arm in ARMS:
+            if arm not in payload:
+                continue
+            path = _chunk_xyz_path(payload.get(arm))
+            if path is None and payload.get(arm) is not None:
+                return False
+            updates[arm] = path
+        if not updates:
+            return False
+        with self._lock:
+            for arm, path in updates.items():
+                self._predicted[arm] = path
+        return True
+
+    def snapshot_payload(self) -> dict[str, Any]:
+        with self._lock:
+            predicted = {
+                arm: None if self._predicted[arm] is None else [point[:] for point in self._predicted[arm] or []]
+                for arm in ARMS
+            }
+            actual = {arm: [point[:] for point in self._actual[arm]] for arm in ARMS}
+        return build_traj_data_payload(predicted=predicted, actual=actual)
+
+
 class DashboardStore:
     def __init__(
         self,
@@ -180,9 +295,11 @@ class DashboardStore:
         # step), enough to back the 60 s window and a long ALL view.
         max_samples_per_arm: int = 40000,
         csv_path: str | None = None,
+        trajectory_store: TrajectoryStore | None = None,
     ) -> None:
         self.history_sec = max(1.0, float(history_sec))
         self.max_samples_per_arm = max(16, int(max_samples_per_arm))
+        self.trajectory_store = trajectory_store
         self._samples: dict[str, deque[ArmSample]] = {arm: deque() for arm in ARMS}
         self._derivative: dict[str, _DerivativeState] = {arm: _DerivativeState() for arm in ARMS}
         self._lock = threading.Lock()
@@ -225,6 +342,8 @@ class DashboardStore:
             with self._lock:
                 self._invalid_packets += 1
             return False
+        if self.trajectory_store is not None:
+            self.trajectory_store.update_actual_from_state_payload(payload)
         samples = extract_packet_samples(payload, fallback_time_s=time.time())
         if not samples:
             with self._lock:
@@ -433,6 +552,56 @@ class StateFanoutReceiver:
             self.store.update_from_json_bytes(data, received_monotonic=time.monotonic())
 
 
+class ChunkOverlayReceiver:
+    def __init__(self, store: TrajectoryStore, host: str, port: int) -> None:
+        self.store = store
+        self.host = host
+        self.port = int(port)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._sock: socket.socket | None = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="servo-scope-chunk-overlay-udp", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+
+    def _run(self) -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.settimeout(0.2)
+        self._sock = sock
+        try:
+            sock.bind((self.host, self.port))
+        except OSError as exc:
+            self.store.set_bind_error(f"{self.host}:{self.port}: {exc}")
+            try:
+                sock.close()
+            except OSError:
+                pass
+            return
+        while not self._stop.is_set():
+            try:
+                data, _ = sock.recvfrom(262144)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            self.store.update_predicted_from_json_bytes(data)
+
+
 INDEX_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
@@ -464,6 +633,7 @@ INDEX_HTML = r"""<!doctype html>
       font-size: 13px;
     }
     body { display: grid; grid-template-rows: 42px minmax(0, 1fr); }
+    body { grid-template-rows: 42px minmax(220px, 34vh) minmax(0, 1fr); }
     #toolbar {
       min-width: 0;
       display: flex;
@@ -506,6 +676,27 @@ INDEX_HTML = r"""<!doctype html>
       gap: 1px;
       background: var(--grid);
     }
+    #traj-section {
+      min-height: 0;
+      display: grid;
+      grid-template-rows: 24px minmax(0, 1fr);
+      background: var(--plot);
+      border-bottom: 1px solid var(--grid);
+    }
+    #traj-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 10px;
+      color: var(--muted);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      font-size: 12px;
+    }
+    #traj-status { margin-left: auto; }
+    #traj-plots {
+      min-width: 0;
+      min-height: 0;
+    }
     .plot {
       min-width: 0;
       min-height: 0;
@@ -546,7 +737,179 @@ INDEX_HTML = r"""<!doctype html>
     <button id="reset" type="button">Live</button>
     <div id="status">connecting...</div>
   </div>
+  <section id="traj-section">
+    <div id="traj-head">
+      <strong>Chunk vs Actual (XY / XZ / YZ)</strong>
+      <span id="traj-status">connecting...</span>
+    </div>
+    <div id="traj-plots"></div>
+  </section>
   <div id="plots"></div>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <script>
+  (() => {
+    "use strict";
+    const ARMS = ["left", "right"];
+    const ARM_LABEL = {left: "Left", right: "Right"};
+    const PLANES = [
+      {key: "xy", label: "XY", xi: 0, yi: 1, xLabel: "x (m)", yLabel: "y (m)"},
+      {key: "xz", label: "XZ", xi: 0, yi: 2, xLabel: "x (m)", yLabel: "z (m)"},
+      {key: "yz", label: "YZ", xi: 1, yi: 2, xLabel: "y (m)", yLabel: "z (m)"},
+    ];
+    const el = {
+      plot: document.getElementById("traj-plots"),
+      status: document.getElementById("traj-status"),
+    };
+    const xDomains = [[0.00, 0.31], [0.345, 0.655], [0.69, 1.00]];
+    const yDomains = [[0.56, 1.00], [0.00, 0.44]];
+    const config = {displayModeBar: false, displaylogo: false, responsive: true};
+    function axisRef(prefix, index) {
+      return prefix + (index === 1 ? "" : String(index));
+    }
+    function layoutAxisKey(prefix, index) {
+      return prefix + "axis" + (index === 1 ? "" : String(index));
+    }
+    function coord(points, index) {
+      return (Array.isArray(points) ? points : [])
+        .map(point => Array.isArray(point) && point.length > index ? Number(point[index]) : NaN);
+    }
+    function traceFor(points, arm, plane, index, kind) {
+      const x = coord(points, plane.xi);
+      const y = coord(points, plane.yi);
+      const hasFinite = x.some((value, i) => Number.isFinite(value) && Number.isFinite(y[i]));
+      if (!hasFinite) return null;
+      if (kind === "predicted") {
+        return {
+          type: "scattergl",
+          mode: "lines+markers",
+          name: "predicted",
+          legendgroup: "predicted",
+          showlegend: index === 1,
+          x, y,
+          xaxis: axisRef("x", index),
+          yaxis: axisRef("y", index),
+          line: {color: "#2ec4a0", width: 2},
+          marker: {color: "#2ec4a0", size: 4},
+          hovertemplate: `${ARM_LABEL[arm]} ${plane.label} predicted<br>%{x:.4f}, %{y:.4f}<extra></extra>`,
+        };
+      }
+      return {
+        type: "scattergl",
+        mode: "lines",
+        name: "actual",
+        legendgroup: "actual",
+        showlegend: index === 1,
+        x, y,
+        xaxis: axisRef("x", index),
+        yaxis: axisRef("y", index),
+        line: {color: "#ff7a1a", width: 2},
+        hovertemplate: `${ARM_LABEL[arm]} ${plane.label} actual<br>%{x:.4f}, %{y:.4f}<extra></extra>`,
+      };
+    }
+    function lastActualTrace(points, arm, plane, index) {
+      if (!Array.isArray(points) || !points.length) return null;
+      const point = points[points.length - 1];
+      if (!Array.isArray(point) || point.length < 3) return null;
+      const x = Number(point[plane.xi]);
+      const y = Number(point[plane.yi]);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+      return {
+        type: "scattergl",
+        mode: "markers",
+        name: "latest actual",
+        legendgroup: "latest actual",
+        showlegend: index === 1,
+        x: [x],
+        y: [y],
+        xaxis: axisRef("x", index),
+        yaxis: axisRef("y", index),
+        marker: {color: "#ffd23a", size: 9, line: {color: "#101419", width: 1}},
+        hovertemplate: `${ARM_LABEL[arm]} ${plane.label} latest<br>%{x:.4f}, %{y:.4f}<extra></extra>`,
+      };
+    }
+    function buildFigure(payload) {
+      const traces = [];
+      const layout = {
+        paper_bgcolor: "#101419",
+        plot_bgcolor: "#0d1117",
+        font: {color: "#e7edf5", size: 10},
+        margin: {l: 42, r: 16, t: 22, b: 28},
+        showlegend: true,
+        legend: {orientation: "h", x: 0, y: 1.08, bgcolor: "rgba(0,0,0,0)"},
+        annotations: [],
+      };
+      let index = 0;
+      for (let row = 0; row < ARMS.length; row++) {
+        const arm = ARMS[row];
+        for (let col = 0; col < PLANES.length; col++) {
+          const plane = PLANES[col];
+          index += 1;
+          const predicted = payload && payload.predicted ? payload.predicted[arm] : null;
+          const actual = payload && payload.actual ? payload.actual[arm] : null;
+          const predTrace = traceFor(predicted, arm, plane, index, "predicted");
+          const actualTrace = traceFor(actual, arm, plane, index, "actual");
+          const latestTrace = lastActualTrace(actual, arm, plane, index);
+          if (predTrace) traces.push(predTrace);
+          if (actualTrace) traces.push(actualTrace);
+          if (latestTrace) traces.push(latestTrace);
+          const xRef = axisRef("x", index);
+          layout[layoutAxisKey("x", index)] = {
+            domain: xDomains[col],
+            title: {text: plane.xLabel, standoff: 2},
+            gridcolor: "#2a3440",
+            zerolinecolor: "#384554",
+            linecolor: "#384554",
+            tickfont: {size: 9},
+          };
+          layout[layoutAxisKey("y", index)] = {
+            domain: yDomains[row],
+            title: {text: plane.yLabel, standoff: 2},
+            gridcolor: "#2a3440",
+            zerolinecolor: "#384554",
+            linecolor: "#384554",
+            tickfont: {size: 9},
+            scaleanchor: xRef,
+            scaleratio: 1,
+          };
+          layout.annotations.push({
+            text: `${ARM_LABEL[arm]} ${plane.label}`,
+            x: (xDomains[col][0] + xDomains[col][1]) / 2,
+            y: yDomains[row][1] + 0.035,
+            xref: "paper",
+            yref: "paper",
+            showarrow: false,
+            font: {color: "#97a3b3", size: 11},
+          });
+        }
+      }
+      return {traces, layout};
+    }
+    async function refresh() {
+      if (!window.Plotly) {
+        el.status.textContent = "Plotly unavailable";
+        return;
+      }
+      try {
+        const response = await fetch("./traj_data", {cache: "no-store"});
+        if (!response.ok) throw new Error(String(response.status));
+        const payload = await response.json();
+        if (!payload || payload.schema !== "robotics_lab.scope_traj.v1") throw new Error("bad schema");
+        const {traces, layout} = buildFigure(payload);
+        await window.Plotly.react(el.plot, traces, layout, config);
+        const nActual = (payload.actual.left || []).length + (payload.actual.right || []).length;
+        const nPred = (payload.predicted.left || []).length + (payload.predicted.right || []).length;
+        el.status.textContent = `actual ${nActual} pts | predicted ${nPred} pts`;
+      } catch (_err) {
+        el.status.textContent = "trajectory disconnected";
+      }
+    }
+    refresh();
+    setInterval(refresh, 400);
+    window.addEventListener("resize", () => {
+      if (window.Plotly) window.Plotly.Plots.resize(el.plot);
+    });
+  })();
+  </script>
   <script>
   (() => {
     "use strict";
@@ -1120,9 +1483,16 @@ INDEX_HTML = r"""<!doctype html>
 
 
 class _DashboardHttpServer(ThreadingHTTPServer):
-    def __init__(self, *args: Any, store: DashboardStore, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        store: DashboardStore,
+        trajectory_store: TrajectoryStore,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.store = store
+        self.trajectory_store = trajectory_store
         self.stop_event = threading.Event()
 
 
@@ -1140,6 +1510,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._serve_events()
         elif parsed.path == "/data":
             self._send_json(self.server.store.snapshot())
+        elif parsed.path == "/traj_data":
+            self._send_json(self.server.trajectory_store.snapshot_payload())
         elif parsed.path == "/healthz":
             self._send_json({"ok": True, "stats": self.server.store.snapshot()["stats"]})
         else:
@@ -1187,6 +1559,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_STATE_LISTEN,
         help=f"UDP state/scope endpoint to bind (default {DEFAULT_STATE_LISTEN})",
     )
+    # Chunk overlay publisher fanout example:
+    # RB_GUI_CHUNK_OVERLAY_ENDPOINT=udp://127.0.0.1:50262,udp://127.0.0.1:50263
+    # feeds rb_gui and this scope dashboard; default dashboard bind is :50263.
+    parser.add_argument(
+        "--chunk-listen",
+        default=DEFAULT_CHUNK_LISTEN,
+        help=f"UDP predicted-chunk overlay endpoint to bind (default {DEFAULT_CHUNK_LISTEN})",
+    )
     parser.add_argument("--host", default=DEFAULT_HTTP_HOST, help="HTTP bind host")
     parser.add_argument("--port", type=int, default=DEFAULT_HTTP_PORT, help="HTTP port")
     parser.add_argument("--history-sec", type=float, default=DEFAULT_HISTORY_SEC)
@@ -1197,16 +1577,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     udp_host, udp_port = _parse_host_port(args.listen)
+    chunk_host, chunk_port = _parse_host_port(args.chunk_listen)
+    trajectory_store = TrajectoryStore()
     store = DashboardStore(
         history_sec=args.history_sec,
         csv_path=args.csv or None,
+        trajectory_store=trajectory_store,
     )
     receiver = StateFanoutReceiver(store, udp_host, udp_port)
     receiver.start()
-    httpd = _DashboardHttpServer((args.host, int(args.port)), _Handler, store=store)
+    chunk_receiver = ChunkOverlayReceiver(trajectory_store, chunk_host, chunk_port)
+    chunk_receiver.start()
+    httpd = _DashboardHttpServer(
+        (args.host, int(args.port)),
+        _Handler,
+        store=store,
+        trajectory_store=trajectory_store,
+    )
     public_url = f"http://{_public_host(args.host)}:{httpd.server_address[1]}"
     print(
         f"[scope-dashboard] listening {public_url}; UDP {udp_host}:{udp_port}; "
+        f"chunk UDP {chunk_host}:{chunk_port}; "
         f"csv={args.csv or 'disabled'}",
         flush=True,
     )
@@ -1217,6 +1608,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         httpd.stop_event.set()
         httpd.server_close()
+        chunk_receiver.stop()
         receiver.stop()
         store.close()
     return 0

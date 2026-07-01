@@ -5339,25 +5339,6 @@ def main(argv: list[str] | None = None) -> None:
         init_motion_timeout_sec=init_motion_timeout_sec,
     )
     server = viser.ViserServer(host=host, port=port)
-    plot2d = None
-    _p2d_port_raw = os.environ.get("RB_GUI_2D_PORT", "8090").strip()
-    if _p2d_port_raw.lower() not in ("", "none", "0"):
-        try:
-            from .plot2d import TrajectoryPlot2D
-
-            plot2d = TrajectoryPlot2D(host=host, port=int(_p2d_port_raw))
-            if getattr(plot2d, "enabled", True):
-                # Print the ACTUAL bound port (viser bumps to the next free port if the
-                # requested one is taken), so the URL is always correct.
-                _p2d_port = getattr(plot2d, "port", _p2d_port_raw)
-                print(f"[rb_gui] 2D trajectory viewer: http://{host}:{_p2d_port}", flush=True)
-            else:
-                reason = getattr(plot2d, "disabled_reason", "unavailable")
-                print(f"[rb_gui] 2D trajectory viewer disabled: {reason}", flush=True)
-                plot2d = None
-        except Exception as exc:
-            print(f"[rb_gui] 2D trajectory viewer disabled: {type(exc).__name__}: {exc}", flush=True)
-            plot2d = None
     # viser's WASD camera fly-movement is baked into its client bundle with no
     # Python toggle; patch the served client to disable W/A/S/D (Q/E, arrows, mouse
     # kept). Done after ViserServer init (post client-autobuild) and before clients
@@ -5406,12 +5387,8 @@ def main(argv: list[str] | None = None) -> None:
                 overlay_store=overlay_store,
                 chunk_overlay_store=chunk_overlay_store,
             )
-            if plot2d is not None:
-                plot2d.update(chunk_overlay_store, store)
             time.sleep(0.1)
     finally:
-        if plot2d is not None:
-            plot2d.stop()
         receiver.stop()
         stereo_receiver.stop()
         if overlay_receiver is not None:

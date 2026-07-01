@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import socket
 from typing import Callable
 
@@ -21,8 +22,16 @@ class ChunkOverlayPublisher:
         self.endpoint = endpoint
         self._socket = socket_factory(socket.AF_INET, socket.SOCK_DGRAM)
         self._socket.setblocking(False)
-        parsed = parse_udp_endpoint(endpoint)
-        self._address = (parsed.host, parsed.port)
+        self._addresses: list[tuple[str, int]] = []
+        for item in re.split(r"[\s,]+", endpoint.strip()):
+            if not item:
+                continue
+            try:
+                parsed = parse_udp_endpoint(item)
+            except (TypeError, ValueError):
+                continue
+            self._addresses.append((parsed.host, parsed.port))
+        self._address = self._addresses[0] if self._addresses else None
 
     def publish(
         self,
@@ -36,6 +45,7 @@ class ChunkOverlayPublisher:
         try:
             horizon = len(left) if left is not None else len(right or [])
             packet = {
+                "schema": CHUNK_OVERLAY_SCHEMA_VERSION,
                 "schema_version": CHUNK_OVERLAY_SCHEMA_VERSION,
                 "host_time_ns": int(host_time_ns),
                 "seq": int(seq),
@@ -45,9 +55,13 @@ class ChunkOverlayPublisher:
                 "right": right,
             }
             data = json.dumps(packet, separators=(",", ":")).encode("utf-8")
-            self._socket.sendto(data, self._address)
         except (BlockingIOError, OSError, TypeError, ValueError):
             return
+        for address in self._addresses:
+            try:
+                self._socket.sendto(data, address)
+            except (BlockingIOError, OSError, TypeError, ValueError):
+                continue
 
     def close(self) -> None:
         self._socket.close()
