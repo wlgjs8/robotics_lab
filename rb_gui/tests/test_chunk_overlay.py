@@ -50,6 +50,7 @@ def recording_chunk_overlay_handles(*, mode: str = "line_segments") -> dict[str,
     handles: dict[str, object] = {"chunk_overlay_line_mode": mode}
     for arm in ("left", "right"):
         handles[f"{arm}_chunk_overlay"] = RecordingSceneHandle()
+        handles[f"{arm}_chunk_overlay_history"] = RecordingSceneHandle()
         handles[f"{arm}_chunk_overlay_points"] = RecordingSceneHandle()
         handles[f"{arm}_chunk_overlay_cursor"] = RecordingSceneHandle()
         handles[f"{arm}_chunk_overlay_error"] = RecordingSceneHandle()
@@ -160,6 +161,30 @@ class ChunkOverlayTest(unittest.TestCase):
         self.assertFalse(store.is_stale(now=14.0))
         self.assertTrue(store.is_stale(now=16.0))
 
+    def test_store_history_returns_past_chunks_oldest_to_newest_without_duplicates(self) -> None:
+        store = ChunkOverlayStore(stale_after_sec=5.0)
+        for seq in range(1, 5):
+            self.assertTrue(
+                store.update_from_json_bytes(
+                    json.dumps(sample_chunk_overlay(seq=seq)).encode(),
+                    received_monotonic=float(seq),
+                )
+            )
+        latest = store.latest()
+        self.assertIsNotNone(latest)
+        assert latest is not None
+        self.assertEqual(latest.seq, 4)
+        self.assertEqual([snapshot.seq for snapshot in store.history(2)], [2, 3])
+        self.assertEqual(store.history(0), [])
+
+        self.assertTrue(
+            store.update_from_json_bytes(
+                json.dumps(sample_chunk_overlay(seq=4)).encode(),
+                received_monotonic=4.5,
+            )
+        )
+        self.assertEqual([snapshot.seq for snapshot in store.history(10)], [1, 2, 3])
+
     def test_gui_chunk_overlay_retention_uses_operator_persist_seconds(self) -> None:
         from rb_servo_gui import app as gui_app
 
@@ -208,6 +233,22 @@ class ChunkOverlayTest(unittest.TestCase):
                 self.assertEqual(
                     gui_app._gui_setting_float(settings, "chunk_overlay_persist_sec", 30.0),
                     74.0,
+                )
+            finally:
+                os.environ.pop("RB_GUI_SETTINGS_PATH", None)
+
+    def test_chunk_overlay_history_count_setting_round_trips(self) -> None:
+        from rb_servo_gui import app as gui_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["RB_GUI_SETTINGS_PATH"] = os.path.join(tmp, "settings.json")
+            try:
+                gui_app._update_gui_setting("chunk_overlay_history_count", 0)
+                settings = gui_app._load_gui_settings()
+                self.assertEqual(settings.get("chunk_overlay_history_count"), 0)
+                self.assertEqual(
+                    gui_app._gui_setting_int(settings, "chunk_overlay_history_count", 12),
+                    0,
                 )
             finally:
                 os.environ.pop("RB_GUI_SETTINGS_PATH", None)
@@ -285,6 +326,51 @@ class ChunkOverlayTest(unittest.TestCase):
 
         self.assertEqual(handles["left_chunk_overlay_points"].point_size, 0.003)
         self.assertEqual(handles["right_chunk_overlay_points"].point_size, 0.003)
+
+    def test_scene_update_renders_and_hides_past_chunk_history_lines(self) -> None:
+        past = [
+            ChunkOverlaySnapshot.parse(sample_chunk_overlay(seq=1, left=[
+                [0.00, 0.00, 0.10, 0.0, 0.0, 0.0, 100.0],
+                [0.01, 0.00, 0.10, 0.0, 0.0, 0.0, 90.0],
+            ], right=None)),
+            ChunkOverlaySnapshot.parse(sample_chunk_overlay(seq=2, left=[
+                [0.02, 0.00, 0.10, 0.0, 0.0, 0.0, 100.0],
+                [0.03, 0.00, 0.10, 0.0, 0.0, 0.0, 90.0],
+            ], right=None)),
+        ]
+        self.assertTrue(all(snapshot is not None for snapshot in past))
+        history = [snapshot for snapshot in past if snapshot is not None]
+        overlay = ChunkOverlaySnapshot.parse(sample_chunk_overlay(seq=3), received_monotonic=10.0)
+        self.assertIsNotNone(overlay)
+        assert overlay is not None
+        handles = recording_chunk_overlay_handles()
+
+        update_chunk_overlay(
+            handles,
+            overlay,
+            stale=False,
+            visible=True,
+            history_overlays=history,
+        )
+
+        history_handle = handles["left_chunk_overlay_history"]
+        self.assertTrue(history_handle.visible)
+        self.assertEqual(history_handle.points.shape, (2, 2, 3))
+        self.assertEqual(history_handle.colors.shape, (2, 2, 3))
+        self.assertLess(int(history_handle.colors[0][0][0]), int(history_handle.colors[1][0][0]))
+        self.assertTrue(handles["left_chunk_overlay"].visible)
+        self.assertTrue(handles["left_chunk_overlay_points"].visible)
+
+        update_chunk_overlay(
+            handles,
+            overlay,
+            stale=False,
+            visible=True,
+            history_overlays=[],
+        )
+        self.assertFalse(history_handle.visible)
+        self.assertTrue(handles["left_chunk_overlay"].visible)
+        self.assertTrue(handles["left_chunk_overlay_points"].visible)
 
     def test_scene_update_scales_cursor_from_dot_size(self) -> None:
         overlay = ChunkOverlaySnapshot.parse(sample_chunk_overlay(), received_monotonic=10.0)

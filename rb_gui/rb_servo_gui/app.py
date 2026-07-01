@@ -206,32 +206,6 @@ _OPERATOR_MONITOR_GAP_EM = 1.0
 _OPERATOR_MONITOR_SPLIT_EM = 35.5
 
 
-def _tcp_command_trail_visible(handles: dict[str, Any]) -> bool:
-    toggle = handles.get("tcp_command_trail_toggle")
-    if toggle is not None:
-        try:
-            visible = bool(toggle.value)
-            handles["tcp_command_trail_visible"] = visible
-            return visible
-        except Exception:
-            pass
-    return bool(handles.get("tcp_command_trail_visible", False))
-
-
-def _hide_tcp_command_trails(handles: dict[str, Any]) -> None:
-    scene_handles = handles.get("scene", {})
-    if not isinstance(scene_handles, dict):
-        return
-    for arm in ("left", "right"):
-        handle = scene_handles.get(f"{arm}_tcp_cmd_trail")
-        if handle is None:
-            continue
-        try:
-            handle.visible = False
-        except Exception:
-            pass
-
-
 def _tcp_gizmo_visible(handles: dict[str, Any]) -> bool:
     toggle = handles.get("tcp_gizmo_toggle")
     if toggle is not None:
@@ -1451,7 +1425,7 @@ def _gui_setting_float(settings: Mapping[str, Any], key: str, default: float) ->
 def _gui_setting_int(settings: Mapping[str, Any], key: str, default: int) -> int:
     try:
         value = int(settings.get(key, default))
-        if value <= 0:
+        if value < 0:
             raise ValueError
         return value
     except Exception:
@@ -2379,14 +2353,19 @@ def build_gui(
         chunk_overlay_dot_size = _gui_setting_float(_ov, "chunk_overlay_dot_size", 0.022)
         chunk_overlay_persist_sec = _gui_setting_float(_ov, "chunk_overlay_persist_sec", 30.0)
         chunk_overlay_axes_stride = _gui_setting_int(_ov, "chunk_overlay_axes_stride", 2)
-        tcp_command_trail_visible = _gui_setting_bool(_ov, "tcp_command_trail_visible", True)
+        chunk_overlay_history_count = _gui_setting_int(_ov, "chunk_overlay_history_count", 12)
         tcp_gizmo_visible = _gui_setting_bool(_ov, "tcp_gizmo_visible", True)
         tcp_trail_limit = _gui_setting_int(_ov, "tcp_trail_limit", 600)
+        if chunk_overlay_axes_stride <= 0:
+            chunk_overlay_axes_stride = 2
+        if tcp_trail_limit <= 0:
+            tcp_trail_limit = 600
         handles["chunk_overlay_visible"] = chunk_overlay_visible
         handles["chunk_overlay_dot_size"] = chunk_overlay_dot_size
         handles["chunk_overlay_persist_sec"] = chunk_overlay_persist_sec
         handles["chunk_overlay_axes_visible"] = chunk_overlay_axes_visible
         handles["chunk_overlay_axes_stride"] = chunk_overlay_axes_stride
+        handles["chunk_overlay_history_count"] = chunk_overlay_history_count
         handles["scene"]["tcp_trail_limit"] = tcp_trail_limit
         if hasattr(server.gui, "add_checkbox"):
             handles["chunk_overlay_toggle"] = server.gui.add_checkbox(
@@ -2460,6 +2439,20 @@ def build_gui(
                     "chunk_overlay_axes_stride", handles["chunk_overlay_axes_stride"]
                 )
 
+            handles["chunk_overlay_history_count_slider"] = server.gui.add_slider(
+                "예측 chunk 이력 개수",
+                min=0,
+                max=40,
+                step=1,
+                initial_value=chunk_overlay_history_count,
+            )
+
+            @handles["chunk_overlay_history_count_slider"].on_update
+            def _(_: Any) -> None:
+                value = int(handles["chunk_overlay_history_count_slider"].value)
+                handles["chunk_overlay_history_count"] = value
+                _update_gui_setting("chunk_overlay_history_count", value)
+
             handles["tcp_trail_limit_slider"] = server.gui.add_slider(
                 "궤적 잔류 길이(점)",
                 min=100,
@@ -2494,23 +2487,6 @@ def build_gui(
                 handles["tcp_display_mode"] = display_mode
                 _update_tcp_display_buttons(handles)
                 handles["tcp_tracking"].value = f"TCP display: {display_mode}"
-
-        handles["tcp_command_trail_visible"] = tcp_command_trail_visible
-        if hasattr(server.gui, "add_checkbox"):
-            handles["tcp_command_trail_toggle"] = server.gui.add_checkbox(
-                "TCP 명령 궤적 표시", initial_value=tcp_command_trail_visible
-            )
-
-            @handles["tcp_command_trail_toggle"].on_update
-            def _(_: Any) -> None:
-                handles["tcp_command_trail_visible"] = bool(
-                    handles["tcp_command_trail_toggle"].value
-                )
-                _update_gui_setting(
-                    "tcp_command_trail_visible", handles["tcp_command_trail_visible"]
-                )
-                if not handles["tcp_command_trail_visible"]:
-                    _hide_tcp_command_trails(handles)
 
         handles["tcp_gizmo_visible"] = tcp_gizmo_visible
         if hasattr(server.gui, "add_checkbox"):
@@ -4258,6 +4234,12 @@ def _update_chunk_overlay_gui(
 ) -> None:
     overlay = chunk_overlay_store.latest() if chunk_overlay_store is not None else None
     try:
+        history_count = int(handles.get("chunk_overlay_history_count", 12) or 0)
+    except Exception:
+        history_count = 12
+    history_count = max(0, history_count)
+    history = chunk_overlay_store.history(history_count) if chunk_overlay_store is not None else []
+    try:
         persist_sec = float(handles.get("chunk_overlay_persist_sec", 30.0) or 30.0)
         if not math.isfinite(persist_sec) or persist_sec <= 0.0:
             raise ValueError
@@ -4290,6 +4272,7 @@ def _update_chunk_overlay_gui(
         dot_size=handles.get("chunk_overlay_dot_size"),
         show_axes=bool(handles.get("chunk_overlay_axes_visible")),
         axes_stride=axes_stride,
+        history_overlays=history,
     )
     handle = handles.get("chunk_overlay_error_text")
     if handle is not None:
@@ -4912,7 +4895,6 @@ def update_gui(
         handles.get("scene", {}),
         latest,
         tcp_display_mode=_tcp_display_mode(handles),
-        show_tcp_command_trail=_tcp_command_trail_visible(handles),
         show_tcp_gizmo=_tcp_gizmo_visible(handles),
     )
     # After markers (TCP frames now posed): toggle the orange floor-check points,
@@ -5357,6 +5339,25 @@ def main(argv: list[str] | None = None) -> None:
         init_motion_timeout_sec=init_motion_timeout_sec,
     )
     server = viser.ViserServer(host=host, port=port)
+    plot2d = None
+    _p2d_port_raw = os.environ.get("RB_GUI_2D_PORT", "8090").strip()
+    if _p2d_port_raw.lower() not in ("", "none", "0"):
+        try:
+            from .plot2d import TrajectoryPlot2D
+
+            plot2d = TrajectoryPlot2D(host=host, port=int(_p2d_port_raw))
+            if getattr(plot2d, "enabled", True):
+                # Print the ACTUAL bound port (viser bumps to the next free port if the
+                # requested one is taken), so the URL is always correct.
+                _p2d_port = getattr(plot2d, "port", _p2d_port_raw)
+                print(f"[rb_gui] 2D trajectory viewer: http://{host}:{_p2d_port}", flush=True)
+            else:
+                reason = getattr(plot2d, "disabled_reason", "unavailable")
+                print(f"[rb_gui] 2D trajectory viewer disabled: {reason}", flush=True)
+                plot2d = None
+        except Exception as exc:
+            print(f"[rb_gui] 2D trajectory viewer disabled: {type(exc).__name__}: {exc}", flush=True)
+            plot2d = None
     # viser's WASD camera fly-movement is baked into its client bundle with no
     # Python toggle; patch the served client to disable W/A/S/D (Q/E, arrows, mouse
     # kept). Done after ViserServer init (post client-autobuild) and before clients
@@ -5405,8 +5406,12 @@ def main(argv: list[str] | None = None) -> None:
                 overlay_store=overlay_store,
                 chunk_overlay_store=chunk_overlay_store,
             )
+            if plot2d is not None:
+                plot2d.update(chunk_overlay_store, store)
             time.sleep(0.1)
     finally:
+        if plot2d is not None:
+            plot2d.stop()
         receiver.stop()
         stereo_receiver.stop()
         if overlay_receiver is not None:

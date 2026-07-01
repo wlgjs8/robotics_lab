@@ -3194,7 +3194,9 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(left_tcp_label.position, (0.32, 0.13, 0.495))
         self.assertEqual(left_ref_label.position, (0.41, 0.21, 0.555))
         self.assertFalse(handles["left_tcp_trail"].visible)
-        self.assertTrue(handles["left_tcp_ref_trail"].visible)
+        self.assertFalse(handles["left_tcp_ref_trail"].visible)
+        self.assertEqual(handles["left_tcp_trail_points"], [])
+        self.assertEqual(handles["left_tcp_ref_trail_points"], [])
         self.assertAlmostEqual(left_ref.wxyz[3], 1.0, places=7)
 
         update_scene_markers(handles, store.latest(), tcp_display_mode="both")
@@ -3209,8 +3211,32 @@ class GuiContractsTest(unittest.TestCase):
         self.assertTrue(left_tcp_label.visible)
         self.assertFalse(left_ref_label.visible)
 
-    def test_scene_update_appends_tcp_command_trail_when_enabled(self):
+    def test_scene_update_hides_all_tcp_trails_without_accumulating_points(self):
         state = sample_state()
+        state["left"]["tcp_stand"] = {
+            "x": 0.11,
+            "y": 0.12,
+            "z": 0.13,
+            "rx": 0.0,
+            "ry": 0.0,
+            "rz": 0.0,
+        }
+        state["left"]["tcp_actual_stand"] = {
+            "x": 0.11,
+            "y": 0.12,
+            "z": 0.13,
+            "rx": 0.0,
+            "ry": 0.0,
+            "rz": 0.0,
+        }
+        state["left"]["tcp_ref_stand"] = {
+            "x": 0.31,
+            "y": 0.32,
+            "z": 0.33,
+            "rx": 0.0,
+            "ry": 0.0,
+            "rz": 0.0,
+        }
         state["left"]["tcp_command_stand"] = {
             "x": 0.21,
             "y": 0.12,
@@ -3219,22 +3245,34 @@ class GuiContractsTest(unittest.TestCase):
             "ry": 0.0,
             "rz": 0.0,
         }
+        state["left"]["has_valid_tcp_pose"] = True
+        state["left"]["tcp_actual_valid"] = True
+        state["left"]["tcp_ref_valid"] = True
+        state["left"]["tcp_deferred"] = False
         store, _, _ = self.make_safety(state)
+        left_actual_trail = RecordingSceneHandle()
+        left_ref_trail = RecordingSceneHandle()
         left_cmd_trail = RecordingSceneHandle()
         handles = {
             "tcp_trail_mode": "point",
+            "left_tcp_trail": left_actual_trail,
+            "left_tcp_ref_trail": left_ref_trail,
             "left_tcp_cmd_trail": left_cmd_trail,
+            "left_tcp_trail_points": [],
+            "left_tcp_ref_trail_points": [],
             "left_tcp_cmd_trail_points": [],
+            "left_tcp_trail_color": (80, 160, 255),
+            "left_tcp_ref_trail_color": (60, 210, 110),
             "left_tcp_cmd_trail_color": (250, 215, 60),
         }
 
-        update_scene_markers(handles, store.latest(), show_tcp_command_trail=False)
-        self.assertEqual(handles["left_tcp_cmd_trail_points"], [])
-        self.assertFalse(left_cmd_trail.visible)
-
         update_scene_markers(handles, store.latest(), show_tcp_command_trail=True)
-        self.assertEqual(handles["left_tcp_cmd_trail_points"], [(0.21, 0.12, 0.43)])
-        self.assertTrue(left_cmd_trail.visible)
+        self.assertEqual(handles["left_tcp_trail_points"], [])
+        self.assertEqual(handles["left_tcp_ref_trail_points"], [])
+        self.assertEqual(handles["left_tcp_cmd_trail_points"], [])
+        self.assertFalse(left_actual_trail.visible)
+        self.assertFalse(left_ref_trail.visible)
+        self.assertFalse(left_cmd_trail.visible)
 
     def test_tcp_trail_limit_is_scene_handle_driven(self):
         handles = {
@@ -3371,9 +3409,9 @@ class GuiContractsTest(unittest.TestCase):
             self.assertIn(f"{arm}_tcp_cmd_trail_points", handles)
             self.assertEqual(handles[f"{arm}_tcp_cmd_trail_points"], [])
             self.assertEqual(handles[f"{arm}_tcp_cmd_trail_color"], (250, 215, 60))
-        # The six TCP trails (left/right × actual/reference/command) render as
-        # gradient comet-trail line segments, plus the circle overlay line.
-        self.assertGreaterEqual(len(scene.line_segments), 7)
+            self.assertIn(f"{arm}_chunk_overlay_history", handles)
+            self.assertFalse(handles[f"{arm}_chunk_overlay_history"].visible)
+        self.assertGreaterEqual(len(scene.line_segments), 9)
 
     def test_scene_fallback_chunk_overlay_points_default_dot_size(self):
         scene = ShapeCheckingScene()
@@ -4414,6 +4452,8 @@ class FloorConstraintGuiTest(unittest.TestCase):
                 self.assertEqual(
                     gui_app._load_gui_settings().get("chunk_overlay_persist_sec"), 74.0
                 )
+                gui_app._update_gui_setting("chunk_overlay_history_count", 0)
+                self.assertEqual(gui_app._load_gui_settings().get("chunk_overlay_history_count"), 0)
                 gui_app._update_gui_setting("tcp_trail_limit", 1250)
                 self.assertEqual(gui_app._load_gui_settings().get("tcp_trail_limit"), 1250)
                 # Read-modify-write preserves other keys.
@@ -4422,6 +4462,7 @@ class FloorConstraintGuiTest(unittest.TestCase):
                 self.assertEqual(loaded.get("stand_floor_enforce"), False)
                 self.assertEqual(loaded.get("chunk_overlay_visible"), False)
                 self.assertEqual(loaded.get("chunk_overlay_persist_sec"), 74.0)
+                self.assertEqual(loaded.get("chunk_overlay_history_count"), 0)
                 self.assertEqual(loaded.get("tcp_trail_limit"), 1250)
                 self.assertEqual(loaded.get("other"), 1)
             finally:
@@ -4440,7 +4481,7 @@ class FloorConstraintGuiTest(unittest.TestCase):
                     ("chunk_overlay_dot_size", 0.003),
                     ("chunk_overlay_persist_sec", 74.0),
                     ("chunk_overlay_axes_stride", 4),
-                    ("tcp_command_trail_visible", False),
+                    ("chunk_overlay_history_count", 9),
                     ("tcp_gizmo_visible", False),
                     ("tcp_trail_limit", 1250),
                 ):
@@ -4464,14 +4505,14 @@ class FloorConstraintGuiTest(unittest.TestCase):
                 self.assertEqual(handles["chunk_overlay_dot_size"], 0.003)
                 self.assertEqual(handles["chunk_overlay_persist_sec"], 74.0)
                 self.assertEqual(handles["chunk_overlay_axes_stride"], 4)
-                self.assertFalse(handles["tcp_command_trail_visible"])
+                self.assertEqual(handles["chunk_overlay_history_count"], 9)
                 self.assertFalse(handles["tcp_gizmo_visible"])
                 self.assertEqual(handles["scene"]["tcp_trail_limit"], 1250)
 
                 checkboxes = {label: handle.value for label, _kwargs, handle in server.gui.checkboxes}
                 self.assertFalse(checkboxes["예측 chunk 궤적 표시"])
                 self.assertFalse(checkboxes["웨이포인트 자세(6DOF) 표시"])
-                self.assertFalse(checkboxes["TCP 명령 궤적 표시"])
+                self.assertNotIn("TCP 명령 궤적 표시", checkboxes)
                 self.assertFalse(checkboxes["TCP 기즈모 표시"])
 
                 sliders = {label: (kwargs, handle) for label, kwargs, handle in server.gui.sliders}
@@ -4485,6 +4526,11 @@ class FloorConstraintGuiTest(unittest.TestCase):
                 self.assertEqual(persist_kwargs["max"], 120)
                 self.assertEqual(persist_kwargs["step"], 2)
                 self.assertEqual(persist_handle.value, 74.0)
+                history_kwargs, history_handle = sliders["예측 chunk 이력 개수"]
+                self.assertEqual(history_kwargs["min"], 0)
+                self.assertEqual(history_kwargs["max"], 40)
+                self.assertEqual(history_kwargs["step"], 1)
+                self.assertEqual(history_handle.value, 9)
                 trail_kwargs, trail_handle = sliders["궤적 잔류 길이(점)"]
                 self.assertEqual(trail_kwargs["min"], 100)
                 self.assertEqual(trail_kwargs["max"], 3000)

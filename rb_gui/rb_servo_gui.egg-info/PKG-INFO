@@ -7,3 +7,4 @@ Requires-Dist: viser>=0.2.0
 Requires-Dist: numpy>=1.26
 Requires-Dist: trimesh>=4.0
 Requires-Dist: yourdfpy>=0.0.56
+Requires-Dist: plotly>=5.0

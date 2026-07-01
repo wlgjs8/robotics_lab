@@ -2,3 +2,4 @@ viser>=0.2.0
 numpy>=1.26
 trimesh>=4.0
 yourdfpy>=0.0.56
+plotly>=5.0

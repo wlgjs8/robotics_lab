@@ -5354,10 +5354,16 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         if (ex.left_active || freeze_other_arm) {
             c.left.mode = ControlMode::Hold;
             c.left.joint_target_profile = JointTargetProfile::Direct;
+            // IMPORTANT: a stale InitMotion/JointTarget q_target_deg must not leak through
+            // Hold. TrajectoryFilter::computeJointTarget(Hold) uses q_target_deg when
+            // has_joint_target=true, so failing to clear this field turns "hold while
+            // planning/already-at-goal" into an immediate move toward the raw init target.
+            c.left.has_joint_target = false;
         }
         if (ex.right_active || freeze_other_arm) {
             c.right.mode = ControlMode::Hold;
             c.right.joint_target_profile = JointTargetProfile::Direct;
+            c.right.has_joint_target = false;
         }
     };
     const auto reached = [](const JointArray& a, const JointArray& b, double tol) {
@@ -5481,6 +5487,63 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         }
         return true;
     };
+    const auto request_goal_reached = [&](bool request_left, bool request_right,
+                                          const JointArray& target_left,
+                                          const JointArray& target_right,
+                                          double tol_deg) {
+        for (int i = 0; i < kDof; ++i) {
+            if (request_left && std::abs(current_left_q[i] - target_left[i]) > tol_deg) {
+                return false;
+            }
+            if (request_right && std::abs(current_right_q[i] - target_right[i]) > tol_deg) {
+                return false;
+            }
+        }
+        return true;
+    };
+    const auto reanchor_selected_to_measured = [&](bool request_left, bool request_right) {
+        // InitMotion plans from measured q_actual. The command stream must be re-anchored to
+        // the same measured pose before the first waypoint is streamed; otherwise a flow/servo
+        // target that was leading q_actual can become the first InitMotion command and create
+        // the observed initial jerk. Re-anchoring only on an explicit InitMotion start/no-op
+        // avoids using measured pose as a continuous hold source during normal operation.
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if ((request_left || freeze_other_arm) && finiteJointArray(current_left_q)) {
+            left_prevprev_sent_q_deg_ = current_left_q;
+            left_prev_sent_q_deg_ = current_left_q;
+            left_output_ma_.reset();
+        }
+        if ((request_right || freeze_other_arm) && finiteJointArray(current_right_q)) {
+            right_prevprev_sent_q_deg_ = current_right_q;
+            right_prev_sent_q_deg_ = current_right_q;
+            right_output_ma_.reset();
+        }
+    };
+    const auto mark_done_at_measured = [&](InitMotionExec& ex,
+                                           bool request_left,
+                                           bool request_right,
+                                           const JointArray& target_left,
+                                           const JointArray& target_right,
+                                           const std::string& message) {
+        ex.target_left = target_left;
+        ex.target_right = target_right;
+        ex.left_active = request_left;
+        ex.right_active = request_right;
+        ex.has_target = true;
+        ex.waypoints.clear();
+        ex.waypoints.emplace_back(current_left_q, current_right_q);
+        ex.index = 0;
+        ex.escape_waypoints = 0;
+        ex.status = InitMotionStatus::Done;
+        ex.message = message;
+        ex.fail_mode = InitMotionPlanResult::FailMode::None;
+        ex.exec_timeout = false;
+        ex.exec_stalled = false;
+        ex.best_dist_deg = 0.0;
+        ex.last_progress_ns = nowSteadyNs();
+        ex.last_exec_log_ns = 0;
+        ex.start_ns = nowSteadyNs();
+    };
 
     const auto process_exec = [&](InitMotionExec& ex, PlannerRequester requester,
                                   bool request_left, bool request_right, bool fresh_profile) {
@@ -5493,12 +5556,30 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                 request_left ? command.left.q_target_deg : current_left_q;
             const JointArray target_right =
                 request_right ? command.right.q_target_deg : current_right_q;
+            const double noop_tol_deg = std::max(
+                0.0,
+                std::max(config_.safety.init_motion_planner.noop_tol_deg,
+                         config_.safety.init_motion_planner.waypoint_tol_deg));
+            if (noop_tol_deg > 0.0 && request_goal_reached(
+                    request_left, request_right, target_left, target_right, noop_tol_deg)) {
+                // A fresh GUI/key request while the measured joints are already at the
+                // requested init pose is a no-op. Do not replay an old Done waypoint and do
+                // not stream the raw target for one tick while planning; both show up as
+                // "pressing InitMotion changes the pose".
+                reanchor_selected_to_measured(request_left, request_right);
+                mark_done_at_measured(
+                    ex, request_left, request_right, target_left, target_right,
+                    "already_at_goal_measured_noop");
+                hold_selected(command, ex);
+                return;
+            }
             const bool new_target = !ex.has_target ||
                 (request_left && !reached(target_left, ex.target_left, 1e-6)) ||
                 (request_right && !reached(target_right, ex.target_right, 1e-6)) ||
                 ex.left_active != request_left ||
                 ex.right_active != request_right;
             const auto launch_plan = [&]() {
+                reanchor_selected_to_measured(request_left, request_right);
                 ex.target_left = target_left;
                 ex.target_right = target_right;
                 ex.left_active = request_left;

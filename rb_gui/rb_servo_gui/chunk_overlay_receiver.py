@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import json
 import socket
 import threading
@@ -18,6 +19,7 @@ class ChunkOverlayStore:
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
         self._latest: ChunkOverlaySnapshot | None = None
+        self._history = collections.deque(maxlen=128)
         self.invalid_packets = 0
         self.received_packets = 0
 
@@ -38,6 +40,8 @@ class ChunkOverlayStore:
                 self.invalid_packets += 1
             return False
         with self._lock:
+            if not self._history or self._latest is None or snapshot.seq != self._latest.seq:
+                self._history.append(snapshot)
             self._latest = snapshot
             self.received_packets += 1
         return True
@@ -45,6 +49,18 @@ class ChunkOverlayStore:
     def latest(self) -> ChunkOverlaySnapshot | None:
         with self._lock:
             return self._latest
+
+    def history(self, count: int) -> list[ChunkOverlaySnapshot]:
+        try:
+            limit = max(0, int(count))
+        except (TypeError, ValueError, OverflowError):
+            limit = 0
+        if limit <= 0:
+            return []
+        with self._lock:
+            items = list(self._history)
+        past = items[:-1]
+        return past[-limit:]
 
     def is_stale(self, *, now: float | None = None) -> bool:
         latest = self.latest()
