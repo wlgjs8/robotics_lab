@@ -1421,6 +1421,43 @@ def _update_gui_setting(key: str, value: Any) -> None:
     _save_gui_settings(settings)
 
 
+def _gui_setting_bool(settings: Mapping[str, Any], key: str, default: bool) -> bool:
+    try:
+        value = settings.get(key, default)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "on"}:
+                return True
+            if lowered in {"0", "false", "no", "off", ""}:
+                return False
+            raise ValueError
+        if isinstance(value, (list, dict)):
+            raise ValueError
+        return bool(value)
+    except Exception:
+        return bool(default)
+
+
+def _gui_setting_float(settings: Mapping[str, Any], key: str, default: float) -> float:
+    try:
+        value = float(settings.get(key, default))
+        if not math.isfinite(value):
+            raise ValueError
+        return value
+    except Exception:
+        return float(default)
+
+
+def _gui_setting_int(settings: Mapping[str, Any], key: str, default: int) -> int:
+    try:
+        value = int(settings.get(key, default))
+        if value <= 0:
+            raise ValueError
+        return value
+    except Exception:
+        return int(default)
+
+
 def _user_floor_contact_point(latest: StateSnapshot | None, arm: str) -> tuple[float, float, float] | None:
     """The arm's lowest floor-contact point (xyz, stand frame) from floor telemetry.
 

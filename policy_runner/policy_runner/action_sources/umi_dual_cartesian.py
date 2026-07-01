@@ -84,10 +84,6 @@ class _Transform:
 class _ArmTeleopState:
     arm_init: _Transform | None = None
     pika_init: _Transform | None = None
-    # Pika device transform emitted the previous armed tick; used to detect
-    # whether the operator is actively moving the device this tick (external-move
-    # re-anchor gate). None until the first armed tick after (re)engagement.
-    pika_prev: _Transform | None = None
     previous_target: tuple[float, ...] | None = None
     last_sample: UmiSample | None = None
     # seq of the last sample this arm consumed; used to detect a fresh packet
@@ -321,13 +317,15 @@ class _TeleopStepLogger:
             pass
 
 
-# External-move re-anchor: how still (in pika device space, between consecutive
-# armed ticks) the operator must be for a tick to count as "not driving". Above
-# these the operator is actively teleoping and the anchor is never touched, so the
-# guard cannot regress normal motion; only a still-device + externally-displaced
-# arm re-latches. Device-space jitter tolerances; tune on hardware if needed.
-_REANCHOR_DEVICE_STILL_LINEAR_M = 0.0015
-_REANCHOR_DEVICE_STILL_ANGULAR_RAD = 0.012
+# External-move re-anchor: how close (in pika device space) the device must be to
+# the engage anchor for the operator to count as "commanding ~no offset". Beyond
+# these the operator is actively teleoping (target legitimately leads live) and the
+# anchor is never touched, so the guard cannot regress normal motion; only a
+# near-engage device + externally-displaced arm re-latches. The displacement gate
+# (reanchor_linear_m/_angular_rad) is the real discriminator, so this stays loose
+# enough to tolerate hand jitter. Device-space tolerances; tune on hardware if needed.
+_REANCHOR_DEVICE_STILL_LINEAR_M = 0.01
+_REANCHOR_DEVICE_STILL_ANGULAR_RAD = 0.10
 
 
 class UmiDualCartesianActionSource:
@@ -577,24 +575,24 @@ class UmiDualCartesianActionSource:
             if self.tcp_pose_target_conditioning.reset_on_engage:
                 _reset_conditioner(state, state.previous_target, now_monotonic)
                 diag["schedule_reset"] = True
-        elif self.reanchor_on_external_move and state.pika_prev is not None:
+        elif self.reanchor_on_external_move:
             # Absorb external motion under an idle-but-engaged clutch. The relative-init
             # anchor is latched once at engage (arm_init = TCP-at-engage); if the arm is
             # then moved out from under the operator by another authority (they press
-            # InitMotion, or a flow move runs) while they are NOT driving the device, the
+            # InitMotion, or a flow move runs) while they are NOT commanding motion, the
             # held target stays at the engage-point pose and drags the arm back there the
             # instant it reaches the command slot (root cause of the InitMotion-then-revert
-            # loop). Gate strictly: (a) device essentially still this tick (operator not
-            # teleoping -> normal motion is never touched) AND (b) live TCP displaced from
-            # our last emitted target beyond the thresholds (an external move happened).
-            # Then re-latch the anchor from the live snapshot so the hold tracks the new
-            # pose instead of reverting.
+            # loop). Gate on BOTH: (a) device still ~at the engage anchor, i.e. the operator
+            # has commanded ~no offset (so a legitimately-led target is never disturbed) AND
+            # (b) live TCP displaced from our last emitted target beyond the thresholds (an
+            # external move happened). Then re-latch the anchor from the live snapshot so the
+            # hold tracks the new pose instead of reverting.
             dev_lin, dev_ang = _pose6_distance(
-                _transform_to_pose6(pika_now), _transform_to_pose6(state.pika_prev))
-            operator_still = (dev_lin <= _REANCHOR_DEVICE_STILL_LINEAR_M
-                              and dev_ang <= _REANCHOR_DEVICE_STILL_ANGULAR_RAD)
+                _transform_to_pose6(pika_now), _transform_to_pose6(state.pika_init))
+            operator_neutral = (dev_lin <= _REANCHOR_DEVICE_STILL_LINEAR_M
+                                and dev_ang <= _REANCHOR_DEVICE_STILL_ANGULAR_RAD)
             anchor = state.last_emitted_target_stand or state.previous_target
-            live_tf = _tcp_stand_transform(snapshot, side) if operator_still else None
+            live_tf = _tcp_stand_transform(snapshot, side) if operator_neutral else None
             if live_tf is not None and anchor is not None:
                 disp_lin, disp_ang = _pose6_distance(_transform_to_pose6(live_tf), anchor)
                 if disp_lin > self.reanchor_linear_m or disp_ang > self.reanchor_angular_rad:
@@ -604,7 +602,6 @@ class UmiDualCartesianActionSource:
                     if self.tcp_pose_target_conditioning.reset_on_engage:
                         _reset_conditioner(state, state.previous_target, now_monotonic)
                     diag["reanchor_external"] = True
-        state.pika_prev = pika_now
 
         assert state.arm_init is not None
         assert state.pika_init is not None
@@ -961,7 +958,6 @@ _NAMED_SCRIPTS: dict[str, tuple[Mapping[str, Any] | None, ...]] = {
 def _clear_latches(state: _ArmTeleopState) -> None:
     state.arm_init = None
     state.pika_init = None
-    state.pika_prev = None
     state.previous_target = None
     state.last_sample = None
     state.last_seq = 0
