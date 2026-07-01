@@ -3142,6 +3142,31 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(handles["left_tcp_cmd_trail_points"], [(0.21, 0.12, 0.43)])
         self.assertTrue(left_cmd_trail.visible)
 
+    def test_scene_update_can_hide_tcp_target_gizmos_without_hiding_tcp_frames(self):
+        store, _, _ = self.make_safety(self.tcp_available_state())
+        left_tcp = RecordingSceneHandle()
+        right_tcp = RecordingSceneHandle()
+        left_target = RecordingSceneHandle()
+        right_target = RecordingSceneHandle()
+        handles = {
+            "left_tcp": left_tcp,
+            "right_tcp": right_tcp,
+            "left_tcp_target": left_target,
+            "right_tcp_target": right_target,
+        }
+
+        update_scene_markers(handles, store.latest(), show_tcp_gizmo=False)
+
+        self.assertTrue(left_tcp.visible)
+        self.assertTrue(right_tcp.visible)
+        self.assertFalse(left_target.visible)
+        self.assertFalse(right_target.visible)
+
+        update_scene_markers(handles, store.latest())
+
+        self.assertTrue(left_target.visible)
+        self.assertTrue(right_target.visible)
+
     def test_floor_check_points_toggle_gated_on_actual_tcp(self):
         state = sample_state()
         # Left has a valid actual TCP pose; right does not (deferred FK).
@@ -3230,6 +3255,16 @@ class GuiContractsTest(unittest.TestCase):
         # The six TCP trails (left/right × actual/reference/command) render as
         # gradient comet-trail line segments, plus the circle overlay line.
         self.assertGreaterEqual(len(scene.line_segments), 7)
+
+    def test_scene_fallback_chunk_overlay_points_default_dot_size(self):
+        scene = ShapeCheckingScene()
+        server = RecordingServer(scene=scene)
+        _add_scene_fallback(server)
+
+        point_clouds = {name: kwargs for name, _points, _colors, kwargs, _handle in scene.point_clouds}
+
+        self.assertEqual(point_clouds["/stand/left_chunk_overlay_points"]["point_size"], 0.022)
+        self.assertEqual(point_clouds["/stand/right_chunk_overlay_points"]["point_size"], 0.022)
 
     def test_circle_overlay_points_support_standard_planes(self):
         xy = CircleOverlaySnapshot.parse(sample_circle_overlay(plane="xy", axis1_stand=None, axis2_stand=None))

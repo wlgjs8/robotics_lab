@@ -13,6 +13,7 @@ from .geometry import (
     _pose_orientation_wxyz,
     _pose_position,
     _pose_wxyz,
+    _rpy_to_wxyz,
 )
 from .models import EXTERNAL_BOX_COLLISION_M, ChunkOverlaySnapshot, CircleOverlaySnapshot
 
@@ -83,6 +84,60 @@ def _trail_line_arrays(points: Any, base_color: tuple[int, int, int]) -> tuple[A
     vert_colors = np.clip(base[None, :] * fade[:, None], 0.0, 255.0)  # (n, 3)
     seg_colors = np.stack([vert_colors[:-1], vert_colors[1:]], axis=1)  # (n-1, 2, 3)
     return segments, seg_colors.astype(np.uint8)
+
+
+def _chunk_overlay_point_colors(count: int, base_color: tuple[int, int, int]) -> Any:
+    import numpy as np
+
+    if count <= 0:
+        return _colors_array()
+    base = np.asarray(base_color, dtype=np.float32)
+    lo, hi = 0.10, 1.0
+    t = np.linspace(0.0, 1.0, count, dtype=np.float32) ** 1.6
+    fade = lo + (hi - lo) * t
+    return np.clip(base[None, :] * fade[:, None], 0.0, 255.0).astype(np.uint8)
+
+
+def _rotate_vector_by_wxyz(
+    wxyz: tuple[float, float, float, float],
+    vector: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    w, x, y, z = _normalize_wxyz(wxyz)
+    vx, vy, vz = vector
+    tx = 2.0 * (y * vz - z * vy)
+    ty = 2.0 * (z * vx - x * vz)
+    tz = 2.0 * (x * vy - y * vx)
+    return (
+        vx + w * tx + (y * tz - z * ty),
+        vy + w * ty + (z * tx - x * tz),
+        vz + w * tz + (x * ty - y * tx),
+    )
+
+
+def _pose_triad_segments(
+    pose6: tuple[float, float, float, float, float, float],
+    length: float,
+) -> tuple[Any, Any]:
+    origin = (float(pose6[0]), float(pose6[1]), float(pose6[2]))
+    axis_length = float(length)
+    wxyz = _rpy_to_wxyz(float(pose6[3]), float(pose6[4]), float(pose6[5]))
+    axes = (
+        ((1.0, 0.0, 0.0), (224, 36, 36)),
+        ((0.0, 1.0, 0.0), (31, 157, 58)),
+        ((0.0, 0.0, 1.0), (34, 102, 238)),
+    )
+    segments = []
+    colors = []
+    for axis, color in axes:
+        direction = _rotate_vector_by_wxyz(wxyz, axis)
+        end = (
+            origin[0] + direction[0] * axis_length,
+            origin[1] + direction[1] * axis_length,
+            origin[2] + direction[2] * axis_length,
+        )
+        segments.append((origin, end))
+        colors.append((color, color))
+    return _line_segments_array(tuple(segments)), _line_segment_colors_array(tuple(colors))
 
 
 def _repo_descriptions_dir() -> Path:
@@ -2076,7 +2131,7 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
                     f"/stand/{arm}_chunk_overlay",
                     points=_line_segments_array(),
                     colors=_line_segment_colors_array(),
-                    line_width=2.5,
+                    line_width=4.5,
                 )
         elif hasattr(server.scene, "add_point_cloud"):
             handles["chunk_overlay_line_mode"] = "point_cloud"
@@ -2085,8 +2140,55 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
                     f"/stand/{arm}_chunk_overlay",
                     points=_points_array(),
                     colors=_colors_array(),
-                    point_size=0.01,
+                    point_size=0.012,
                     point_shape="rounded",
+                )
+        if hasattr(server.scene, "add_point_cloud"):
+            for arm in ("left", "right"):
+                handles[f"{arm}_chunk_overlay_points"] = server.scene.add_point_cloud(
+                    f"/stand/{arm}_chunk_overlay_points",
+                    points=_points_array(),
+                    colors=_colors_array(),
+                    point_size=0.022,
+                    point_shape="rounded",
+                )
+        for arm in ("left", "right"):
+            if hasattr(server.scene, "add_icosphere"):
+                handles[f"{arm}_chunk_overlay_cursor"] = server.scene.add_icosphere(
+                    f"/stand/{arm}_chunk_overlay_cursor",
+                    radius=0.02,
+                    color=(255, 255, 90),
+                    position=(0.0, 0.0, 0.0),
+                )
+            elif hasattr(server.scene, "add_point_cloud"):
+                handles[f"{arm}_chunk_overlay_cursor"] = server.scene.add_point_cloud(
+                    f"/stand/{arm}_chunk_overlay_cursor",
+                    points=_points_array(),
+                    colors=_colors_array(((255, 255, 90),)),
+                    point_size=0.04,
+                    point_shape="rounded",
+                )
+        if hasattr(server.scene, "add_line_segments"):
+            for arm in ("left", "right"):
+                handles[f"{arm}_chunk_overlay_error"] = server.scene.add_line_segments(
+                    f"/stand/{arm}_chunk_overlay_error",
+                    points=_line_segments_array(),
+                    colors=_line_segment_colors_array(),
+                    line_width=3.5,
+                )
+                handles[f"{arm}_chunk_overlay_axes"] = server.scene.add_line_segments(
+                    f"/stand/{arm}_chunk_overlay_axes",
+                    points=_line_segments_array(),
+                    colors=_line_segment_colors_array(),
+                    line_width=2.0,
+                    visible=False,
+                )
+                handles[f"{arm}_chunk_overlay_cursor_axes"] = server.scene.add_line_segments(
+                    f"/stand/{arm}_chunk_overlay_cursor_axes",
+                    points=_line_segments_array(),
+                    colors=_line_segment_colors_array(),
+                    line_width=3.0,
+                    visible=False,
                 )
         if hasattr(server.scene, "add_icosphere"):
             handles["circle_overlay_desired"] = server.scene.add_icosphere(
@@ -2104,8 +2206,9 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
             )
         _set_visible(handles.get("circle_overlay_line"), False)
         _set_visible(handles.get("circle_overlay_desired"), False)
-        _set_visible(handles.get("left_chunk_overlay"), False)
-        _set_visible(handles.get("right_chunk_overlay"), False)
+        for arm in ("left", "right"):
+            for suffix in ("", "_points", "_cursor", "_error", "_axes", "_cursor_axes"):
+                _set_visible(handles.get(f"{arm}_chunk_overlay{suffix}"), False)
         _add_floor_plane(server, handles)
         _add_floor_check_points(server, handles)
         _add_roi_box(server, handles)
@@ -2290,36 +2393,126 @@ def update_circle_overlay(scene_handles: dict[str, Any], overlay: CircleOverlayS
     _set_visible(desired, True)
 
 
+def _hide_chunk_overlay_handles(scene_handles: dict[str, Any], arm: str) -> None:
+    for suffix in ("", "_points", "_cursor", "_error", "_axes", "_cursor_axes"):
+        _set_visible(scene_handles.get(f"{arm}_chunk_overlay{suffix}"), False)
+
+
 def update_chunk_overlay(
     scene_handles: dict[str, Any],
     overlay: ChunkOverlaySnapshot | None,
     *,
     stale: bool = False,
     visible: bool = True,
-) -> None:
+    now_monotonic: float | None = None,
+    actual_positions: Mapping[str, tuple[float, float, float] | None] | None = None,
+    dot_size: float | None = None,
+    show_axes: bool = False,
+    axes_stride: int = 1,
+) -> dict[str, float | None]:
     line_color = (60, 230, 180)
+    errors: dict[str, float | None] = {"left": None, "right": None}
+    try:
+        stride = max(1, int(axes_stride))
+    except Exception:
+        stride = 1
     for arm in ("left", "right"):
-        handle = scene_handles.get(f"{arm}_chunk_overlay")
-        positions = None if overlay is None else getattr(overlay, f"{arm}_positions", None)
-        if handle is None or overlay is None or stale or not visible or not positions:
-            _set_visible(handle, False)
-            continue
         try:
+            handle = scene_handles.get(f"{arm}_chunk_overlay")
+            points_handle = scene_handles.get(f"{arm}_chunk_overlay_points")
+            cursor_handle = scene_handles.get(f"{arm}_chunk_overlay_cursor")
+            error_handle = scene_handles.get(f"{arm}_chunk_overlay_error")
+            axes_handle = scene_handles.get(f"{arm}_chunk_overlay_axes")
+            cursor_axes_handle = scene_handles.get(f"{arm}_chunk_overlay_cursor_axes")
+            positions = None if overlay is None else getattr(overlay, f"{arm}_positions", None)
+            poses = None if overlay is None else getattr(overlay, f"{arm}_poses", None)
+            if handle is None or overlay is None or stale or not visible or not positions:
+                _hide_chunk_overlay_handles(scene_handles, arm)
+                errors[arm] = None
+                continue
+
+            point_colors = _chunk_overlay_point_colors(len(positions), line_color)
             if scene_handles.get("chunk_overlay_line_mode") == "line_segments":
-                if len(positions) < 2:
-                    _set_visible(handle, False)
-                    continue
-                segments = _circle_overlay_line_segments(positions)
-                handle.points = _line_segments_array(segments)
-                handle.colors = _line_segment_colors_array(
-                    tuple((line_color, line_color) for _ in segments)
-                )
+                segments, seg_colors = _trail_line_arrays(positions, line_color)
+                handle.points = segments
+                handle.colors = seg_colors
+                _set_visible(handle, len(positions) >= 2)
             else:
                 handle.points = _points_array(positions)
-                handle.colors = _colors_array(tuple(line_color for _ in positions))
-            _set_visible(handle, True)
+                handle.colors = point_colors
+                _set_visible(handle, True)
+
+            if points_handle is not None:
+                points_handle.points = _points_array(positions)
+                points_handle.colors = point_colors
+                if dot_size is not None:
+                    try:
+                        if hasattr(points_handle, "point_size"):
+                            points_handle.point_size = float(dot_size)
+                    except Exception:
+                        pass
+                _set_visible(points_handle, True)
+
+            cursor = overlay.cursor_position(arm, now=now_monotonic)
+            if cursor is not None and cursor_handle is not None:
+                try:
+                    cursor_handle.position = cursor
+                except Exception:
+                    try:
+                        cursor_handle.points = _points_array((cursor,))
+                        cursor_handle.colors = _colors_array(((255, 255, 90),))
+                    except Exception:
+                        pass
+                _set_visible(cursor_handle, True)
+            else:
+                _set_visible(cursor_handle, False)
+
+            if show_axes and poses and axes_handle is not None:
+                segments = []
+                colors = []
+                for pose in poses[::stride]:
+                    pose_segments, pose_colors = _pose_triad_segments(pose, 0.03)
+                    segments.extend(pose_segments.tolist())
+                    colors.extend(pose_colors.tolist())
+                axes_handle.points = _line_segments_array(segments)
+                axes_handle.colors = _line_segment_colors_array(colors)
+                _set_visible(axes_handle, len(segments) > 0)
+            else:
+                _set_visible(axes_handle, False)
+
+            cursor_pose = overlay.cursor_pose(arm, now=now_monotonic) if show_axes else None
+            if cursor_pose is not None and cursor_axes_handle is not None:
+                cursor_segments, cursor_colors = _pose_triad_segments(cursor_pose, 0.045)
+                cursor_axes_handle.points = cursor_segments
+                cursor_axes_handle.colors = cursor_colors
+                _set_visible(cursor_axes_handle, True)
+            else:
+                _set_visible(cursor_axes_handle, False)
+
+            actual = actual_positions.get(arm) if actual_positions else None
+            if cursor is not None and actual is not None:
+                actual_pos = tuple(float(value) for value in actual)
+                if len(actual_pos) != 3:
+                    raise ValueError("actual position must be xyz")
+                error_m = math.sqrt(
+                    (cursor[0] - actual_pos[0]) ** 2
+                    + (cursor[1] - actual_pos[1]) ** 2
+                    + (cursor[2] - actual_pos[2]) ** 2
+                )
+                color = (60, 220, 90) if error_m <= 0.015 else (230, 50, 50)
+                if error_handle is not None:
+                    segment = ((cursor, actual_pos),)
+                    error_handle.points = _line_segments_array(segment)
+                    error_handle.colors = _line_segment_colors_array(((color, color),))
+                    _set_visible(error_handle, True)
+                errors[arm] = error_m
+            else:
+                _set_visible(error_handle, False)
+                errors[arm] = None
         except Exception:
-            pass
+            _hide_chunk_overlay_handles(scene_handles, arm)
+            errors[arm] = None
+    return errors
 
 
 def _arm_is_controller_sim(arm_state: Any) -> bool:
@@ -2339,6 +2532,7 @@ def update_scene_markers(
     *,
     tcp_display_mode: str | None = None,
     show_tcp_command_trail: bool = False,
+    show_tcp_gizmo: bool = True,
 ) -> None:
     mounts = latest.mounts if isinstance(latest.mounts, dict) else {}
     left_pose = _mount_pose_from_mounts(mounts, "left", _DEFAULT_LEFT_POSE)
@@ -2431,7 +2625,7 @@ def update_scene_markers(
             handle = scene_handles.get(key)
             if handle is not None:
                 try:
-                    handle.visible = True
+                    handle.visible = show_tcp_gizmo if key == f"{arm}_tcp_target" else True
                 except Exception:
                     pass
         _update_tcp_trail(
@@ -2525,6 +2719,9 @@ def update_scene_markers(
             handle.wxyz = wxyz
         except Exception:
             pass
+    if not show_tcp_gizmo:
+        for arm in ("left", "right"):
+            _set_visible(scene_handles.get(f"{arm}_tcp_target"), False)
 
 
 def _install_tcp_target_callbacks(scene_handles: dict[str, Any], status_handle: Any | None = None) -> None:

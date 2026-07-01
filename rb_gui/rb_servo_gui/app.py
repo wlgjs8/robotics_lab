@@ -30,7 +30,6 @@ from .geometry import (
     _pose6_from_state_arm,
     _pose6_from_transform,
     _pose_orientation_wxyz,
-    _pose_position,
     _pose_transform,
     _pose_wxyz,
     _quat_to_matrix,
@@ -95,6 +94,7 @@ from .scene import (
     _install_tcp_target_callbacks,
     _joint_cfg_radians,
     _joint_marker_position,
+    _pose_position,
     _repo_descriptions_dir,
     _robot_urdf_path,
     _stand_mesh_path,
@@ -232,6 +232,32 @@ def _hide_tcp_command_trails(handles: dict[str, Any]) -> None:
             pass
 
 
+def _tcp_gizmo_visible(handles: dict[str, Any]) -> bool:
+    toggle = handles.get("tcp_gizmo_toggle")
+    if toggle is not None:
+        try:
+            visible = bool(toggle.value)
+            handles["tcp_gizmo_visible"] = visible
+            return visible
+        except Exception:
+            pass
+    return bool(handles.get("tcp_gizmo_visible", True))
+
+
+def _hide_tcp_gizmos(handles: dict[str, Any]) -> None:
+    scene_handles = handles.get("scene", {})
+    if not isinstance(scene_handles, dict):
+        return
+    for arm in ("left", "right"):
+        handle = scene_handles.get(f"{arm}_tcp_target")
+        if handle is None:
+            continue
+        try:
+            handle.visible = False
+        except Exception:
+            pass
+
+
 def _chunk_overlay_visible(handles: dict[str, Any]) -> bool:
     toggle = handles.get("chunk_overlay_toggle")
     if toggle is not None:
@@ -246,6 +272,12 @@ def _chunk_overlay_visible(handles: dict[str, Any]) -> bool:
 
 def _hide_chunk_overlays(handles: dict[str, Any]) -> None:
     update_chunk_overlay(handles.get("scene", {}), None, visible=False)
+    handle = handles.get("chunk_overlay_error_text")
+    if handle is not None:
+        try:
+            handle.value = "L — / R —"
+        except Exception:
+            pass
 
 
 def _env_int(name: str, fallback: int) -> int:
@@ -2305,6 +2337,9 @@ def build_gui(
             disabled=True,
         )
         handles["chunk_overlay_visible"] = False
+        handles["chunk_overlay_dot_size"] = 0.022
+        handles["chunk_overlay_axes_visible"] = True
+        handles["chunk_overlay_axes_stride"] = 2
         if hasattr(server.gui, "add_checkbox"):
             handles["chunk_overlay_toggle"] = server.gui.add_checkbox(
                 "예측 chunk 궤적 표시", initial_value=False
@@ -2315,6 +2350,42 @@ def build_gui(
                 handles["chunk_overlay_visible"] = bool(handles["chunk_overlay_toggle"].value)
                 if not handles["chunk_overlay_visible"]:
                     _hide_chunk_overlays(handles)
+
+            handles["chunk_overlay_axes_toggle"] = server.gui.add_checkbox(
+                "웨이포인트 자세(6DOF) 표시", initial_value=True
+            )
+
+            @handles["chunk_overlay_axes_toggle"].on_update
+            def _(_: Any) -> None:
+                handles["chunk_overlay_axes_visible"] = bool(
+                    handles["chunk_overlay_axes_toggle"].value
+                )
+
+        if hasattr(server.gui, "add_slider"):
+            handles["chunk_overlay_dot_size_slider"] = server.gui.add_slider(
+                "웨이포인트 dot 크기", min=0.008, max=0.035, step=0.002, initial_value=0.022
+            )
+
+            @handles["chunk_overlay_dot_size_slider"].on_update
+            def _(_: Any) -> None:
+                handles["chunk_overlay_dot_size"] = float(
+                    handles["chunk_overlay_dot_size_slider"].value
+                )
+
+            handles["chunk_overlay_axes_stride_slider"] = server.gui.add_slider(
+                "자세 triad 간격(step)", min=1, max=6, step=1, initial_value=2
+            )
+
+            @handles["chunk_overlay_axes_stride_slider"].on_update
+            def _(_: Any) -> None:
+                handles["chunk_overlay_axes_stride"] = int(
+                    handles["chunk_overlay_axes_stride_slider"].value
+                )
+
+        if hasattr(server.gui, "add_text"):
+            handles["chunk_overlay_error_text"] = server.gui.add_text(
+                "예측-실제 오차 (mm)", initial_value="L — / R —", disabled=True
+            )
 
         handles["cartesian_solve"] = server.gui.add_text("IK solve", initial_value="IK: no state", disabled=True)
         handles["tcp_display_mode"] = "auto"
@@ -2345,6 +2416,20 @@ def build_gui(
                 )
                 if not handles["tcp_command_trail_visible"]:
                     _hide_tcp_command_trails(handles)
+
+        handles["tcp_gizmo_visible"] = True
+        if hasattr(server.gui, "add_checkbox"):
+            handles["tcp_gizmo_toggle"] = server.gui.add_checkbox(
+                "TCP 기즈모 표시", initial_value=True
+            )
+
+            @handles["tcp_gizmo_toggle"].on_update
+            def _(_: Any) -> None:
+                handles["tcp_gizmo_visible"] = bool(
+                    handles["tcp_gizmo_toggle"].value
+                )
+                if not handles["tcp_gizmo_visible"]:
+                    _hide_tcp_gizmos(handles)
 
         handles["ops"] = server.gui.add_text(
             "Container ops",
@@ -4070,14 +4155,47 @@ def _update_circle_overlay_gui(handles: dict[str, Any], overlay_store: CircleOve
     update_circle_overlay(handles.get("scene", {}), overlay, stale=stale)
 
 
-def _update_chunk_overlay_gui(handles: dict[str, Any], chunk_overlay_store: ChunkOverlayStore | None) -> None:
+def _update_chunk_overlay_gui(
+    handles: dict[str, Any],
+    chunk_overlay_store: ChunkOverlayStore | None,
+    latest: StateSnapshot | None,
+) -> None:
     overlay, stale = _latest_chunk_overlay(chunk_overlay_store)
-    update_chunk_overlay(
+    now = time.monotonic()
+    actual_positions: dict[str, tuple[float, float, float] | None] = {}
+    for arm in ("left", "right"):
+        arm_state = getattr(latest, arm, None) if latest is not None else None
+        if (
+            arm_state is not None
+            and getattr(arm_state, "tcp_actual_valid", False)
+            and arm_state.tcp_actual_stand is not None
+        ):
+            actual_positions[arm] = _pose_position(arm_state.tcp_actual_stand)
+        else:
+            actual_positions[arm] = None
+    try:
+        axes_stride = int(handles.get("chunk_overlay_axes_stride", 2) or 2)
+    except Exception:
+        axes_stride = 2
+    errors = update_chunk_overlay(
         handles.get("scene", {}),
         overlay,
         stale=stale,
         visible=_chunk_overlay_visible(handles),
+        now_monotonic=now,
+        actual_positions=actual_positions,
+        dot_size=handles.get("chunk_overlay_dot_size"),
+        show_axes=bool(handles.get("chunk_overlay_axes_visible")),
+        axes_stride=axes_stride,
     )
+    handle = handles.get("chunk_overlay_error_text")
+    if handle is not None:
+        left = f"{errors['left'] * 1000.0:.0f}" if errors.get("left") is not None else "—"
+        right = f"{errors['right'] * 1000.0:.0f}" if errors.get("right") is not None else "—"
+        try:
+            handle.value = f"L {left} / R {right}"
+        except Exception:
+            pass
 
 
 def _update_lease_owner(
@@ -4495,7 +4613,7 @@ def update_gui(
     readiness = safety.readiness()
     _update_lease_owner(handles, latest, safety.command_client.source_id, held=safety.command_client.hold_lease)
     _update_circle_overlay_gui(handles, overlay_store)
-    _update_chunk_overlay_gui(handles, chunk_overlay_store)
+    _update_chunk_overlay_gui(handles, chunk_overlay_store, latest)
     _update_recording_panel(handles, latest, stale=stale)
     _update_arm_init_panel(handles, latest, stale=stale)
     if latest is None:
@@ -4692,6 +4810,7 @@ def update_gui(
         latest,
         tcp_display_mode=_tcp_display_mode(handles),
         show_tcp_command_trail=_tcp_command_trail_visible(handles),
+        show_tcp_gizmo=_tcp_gizmo_visible(handles),
     )
     # After markers (TCP frames now posed): toggle the orange floor-check points,
     # which are parented under /stand/<arm>_tcp and ride those poses.

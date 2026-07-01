@@ -542,6 +542,7 @@ INDEX_HTML = r"""<!doctype html>
     <label class="ref"><input id="trace-ref" type="checkbox" checked> q_ref</label>
     <label class="actual"><input id="trace-actual" type="checkbox" checked> q_actual</label>
     <label><input id="smooth" type="checkbox" checked> Smooth</label>
+    <label title="Position plots show tracking error (q_sent/q_ref minus q_actual, actual=0 baseline)"><input id="pos-error" type="checkbox"> Pos err</label>
     <button id="reset" type="button">Live</button>
     <div id="status">connecting...</div>
   </div>
@@ -585,6 +586,7 @@ INDEX_HTML = r"""<!doctype html>
       joint: document.getElementById("joint"),
       window: document.getElementById("window"),
       smooth: document.getElementById("smooth"),
+      posError: document.getElementById("pos-error"),
       sent: document.getElementById("trace-sent"),
       ref: document.getElementById("trace-ref"),
       actual: document.getElementById("trace-actual"),
@@ -723,10 +725,18 @@ INDEX_HTML = r"""<!doctype html>
       if (start > 0) start--;
       let stop = b.t.length;
       while (stop > start + 1 && b.t[stop - 1] > dom.max) stop--;
+      if (stop < b.t.length) stop++;  // keep one context sample past the right edge (mirror of start--)
       const times = b.t.slice(start, stop);
       let y;
       if (metric === "position") {
-        y = selectedTrace(b[TRACE[traceName].key].slice(start, stop), jointIndex());
+        const j = jointIndex();
+        y = selectedTrace(b[TRACE[traceName].key].slice(start, stop), j);
+        // Error view: subtract q_actual so tracking deviations (sub-degree) fill the
+        // panel instead of being dwarfed by the absolute joint sweep. actual => 0 baseline.
+        if (el.posError.checked) {
+          const act = selectedTrace(b.q_actual.slice(start, stop), j);
+          y = y.map((v, i) => v - act[i]);
+        }
       } else if (traceName === "actual") {
         y = selectedTrace(b[metric].slice(start, stop), jointIndex());
       } else {
@@ -755,7 +765,7 @@ INDEX_HTML = r"""<!doctype html>
       panel.appendChild(title);
       panel.appendChild(canvas);
       el.plots.appendChild(panel);
-      const item = {arm, metric: metric.key, unit: metric.unit, canvas};
+      const item = {arm, metric: metric.key, unit: metric.unit, canvas, titleEl: title, baseTitle: `${ARM_LABEL[arm]} - ${metric.label}`};
       plots.push(item);
       return item;
     }
@@ -835,21 +845,31 @@ INDEX_HTML = r"""<!doctype html>
       }
       ctx.textAlign = "left";
       ctx.fillText(item.unit, x0, y0 + 2 * dpr);
+      // Clip to the plot area so a trace that runs through the off-domain context
+      // samples (one on each side, kept by metricSeries) reaches the panel edges
+      // without painting over the axes/labels.
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x0, y0, x1 - x0, y1 - y0);
+      ctx.clip();
       for (const tr of traces) {
         const color = TRACE[tr.name].color;
         ctx.strokeStyle = color;
         ctx.lineWidth = 1.6 * dpr;
         ctx.beginPath();
         let started = false;
-        const pts = [];
+        const pts = [];  // in-view sample dots only (context points extend the line, not the dots)
         for (let i = 0; i < tr.x.length; i++) {
           const x = tr.x[i], y = tr.y[i];
           if (!Number.isFinite(x) || !Number.isFinite(y)) { started = false; continue; }
-          if (x < xmin || x > xmax) continue;
           const px = sx(x), py = sy(y);
-          pts.push(px, py);
+          // Draw the line THROUGH out-of-domain context points so segments span the
+          // full width (clip trims the overshoot); previously they were dropped,
+          // leaving up to one sample-gap (~2 ms) blank at each edge — very visible
+          // when zoomed to a few ms span.
           if (!started) { ctx.moveTo(px, py); started = true; }
           else ctx.lineTo(px, py);
+          if (x >= xmin && x <= xmax) pts.push(px, py);
         }
         ctx.stroke();
         // Once zoomed in enough that few samples are visible, mark each sample so
@@ -863,6 +883,7 @@ INDEX_HTML = r"""<!doctype html>
           }
         }
       }
+      ctx.restore();
       let lx = x1 - 170 * dpr;
       for (const name of visibleTraces()) {
         ctx.fillStyle = TRACE[name].color;
@@ -914,7 +935,13 @@ INDEX_HTML = r"""<!doctype html>
       const dom = xDomain();
       const ranges = {};
       for (const metric of METRICS) ranges[metric.key] = metricExtent(metric.key, dom);
-      for (const item of plots) drawPlot(item, ranges[item.metric], dom);
+      for (const item of plots) {
+        if (item.metric === "position") {
+          const t = el.posError.checked ? item.baseTitle + "  (err: q − q_actual)" : item.baseTitle;
+          if (item.titleEl.textContent !== t) item.titleEl.textContent = t;
+        }
+        drawPlot(item, ranges[item.metric], dom);
+      }
       updateStatus();
     }
     function scheduleRender() {
@@ -1065,7 +1092,7 @@ INDEX_HTML = r"""<!doctype html>
       scheduleRender();
     });
 
-    for (const control of [el.joint, el.window, el.smooth, el.sent, el.ref, el.actual]) {
+    for (const control of [el.joint, el.window, el.smooth, el.posError, el.sent, el.ref, el.actual]) {
       control.addEventListener("change", () => {
         if (control === el.window) setLive();  // changing the live window exits manual zoom
         for (const arm of ARMS) trimArm(arm);

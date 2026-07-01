@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -9,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from rb_servo_gui.chunk_overlay_receiver import ChunkOverlayStore
 from rb_servo_gui.models import CHUNK_OVERLAY_SCHEMA_VERSION, ChunkOverlaySnapshot
-from rb_servo_gui.scene import update_chunk_overlay
+from rb_servo_gui.scene import _pose_triad_segments, update_chunk_overlay
 
 
 def sample_chunk_overlay(**overrides):
@@ -36,7 +37,21 @@ class RecordingSceneHandle:
     def __init__(self) -> None:
         self.points = None
         self.colors = None
+        self.position = None
+        self.point_size = None
         self.visible = False
+
+
+def recording_chunk_overlay_handles(*, mode: str = "line_segments") -> dict[str, object]:
+    handles: dict[str, object] = {"chunk_overlay_line_mode": mode}
+    for arm in ("left", "right"):
+        handles[f"{arm}_chunk_overlay"] = RecordingSceneHandle()
+        handles[f"{arm}_chunk_overlay_points"] = RecordingSceneHandle()
+        handles[f"{arm}_chunk_overlay_cursor"] = RecordingSceneHandle()
+        handles[f"{arm}_chunk_overlay_error"] = RecordingSceneHandle()
+        handles[f"{arm}_chunk_overlay_axes"] = RecordingSceneHandle()
+        handles[f"{arm}_chunk_overlay_cursor_axes"] = RecordingSceneHandle()
+    return handles
 
 
 class ChunkOverlayTest(unittest.TestCase):
@@ -48,10 +63,81 @@ class ChunkOverlayTest(unittest.TestCase):
         self.assertEqual(overlay.seq, 7)
         self.assertEqual(overlay.policy_dt_sec, 0.05)
         self.assertEqual(overlay.horizon, 2)
+        self.assertEqual(
+            overlay.left_poses,
+            (
+                (0.10, 0.20, 0.30, 0.0, 0.0, 0.0),
+                (0.11, 0.21, 0.31, 0.0, 0.0, 0.0),
+            ),
+        )
         self.assertEqual(overlay.left_positions, ((0.10, 0.20, 0.30), (0.11, 0.21, 0.31)))
+        self.assertEqual(overlay.left_positions[0], overlay.left_poses[0][:3])
         self.assertEqual(overlay.right_positions, ((-0.10, 0.20, 0.30), (-0.11, 0.21, 0.31)))
         self.assertFalse(overlay.stale(now=104.9, threshold_sec=5.0))
         self.assertTrue(overlay.stale(now=105.1, threshold_sec=5.0))
+
+    def test_snapshot_parse_retains_nonzero_waypoint_orientation(self) -> None:
+        left = [
+            [0.10, 0.20, 0.30, 0.01, -0.02, 0.03, 100.0],
+            [0.11, 0.21, 0.31, 0.04, -0.05, 0.06, 90.0],
+        ]
+        overlay = ChunkOverlaySnapshot.parse(sample_chunk_overlay(left=left, right=None), received_monotonic=100.0)
+        self.assertIsNotNone(overlay)
+        assert overlay is not None
+        self.assertEqual(overlay.left_poses[0], tuple(left[0][:6]))
+        self.assertEqual(overlay.left_poses[1], tuple(left[1][:6]))
+        self.assertEqual(overlay.left_positions[0], overlay.left_poses[0][:3])
+        self.assertEqual(overlay.left_positions[1], overlay.left_poses[1][:3])
+
+    def test_cursor_position_interpolates_by_gui_local_elapsed_time(self) -> None:
+        overlay = ChunkOverlaySnapshot.parse(
+            sample_chunk_overlay(
+                horizon=3,
+                left=[
+                    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0],
+                    [0.10, 0.20, 0.30, 0.0, 0.0, 0.0, 90.0],
+                    [0.20, 0.40, 0.60, 0.0, 0.0, 0.0, 80.0],
+                ],
+                right=None,
+                policy_dt_sec=0.10,
+            ),
+            received_monotonic=100.0,
+        )
+        self.assertIsNotNone(overlay)
+        assert overlay is not None
+        self.assertEqual(overlay.cursor_position("left", now=100.0), (0.0, 0.0, 0.0))
+        self.assertEqual(overlay.cursor_position("left", now=100.0 + overlay.policy_dt_sec * overlay.horizon), (0.20, 0.40, 0.60))
+        midpoint = overlay.cursor_position("left", now=100.05)
+        self.assertIsNotNone(midpoint)
+        assert midpoint is not None
+        self.assertAlmostEqual(midpoint[0], 0.05)
+        self.assertAlmostEqual(midpoint[1], 0.10)
+        self.assertAlmostEqual(midpoint[2], 0.15)
+
+    def test_cursor_pose_uses_interpolated_position_and_floor_step_orientation(self) -> None:
+        overlay = ChunkOverlaySnapshot.parse(
+            sample_chunk_overlay(
+                horizon=3,
+                left=[
+                    [0.0, 0.0, 0.0, 0.10, 0.20, 0.30, 100.0],
+                    [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 90.0],
+                    [0.20, 0.40, 0.60, 0.70, 0.80, 0.90, 80.0],
+                ],
+                right=None,
+                policy_dt_sec=0.10,
+            ),
+            received_monotonic=100.0,
+        )
+        self.assertIsNotNone(overlay)
+        assert overlay is not None
+        cursor_position = overlay.cursor_position("left", now=100.15)
+        cursor_pose = overlay.cursor_pose("left", now=100.15)
+        self.assertIsNotNone(cursor_position)
+        self.assertIsNotNone(cursor_pose)
+        assert cursor_position is not None
+        assert cursor_pose is not None
+        self.assertEqual(cursor_pose[:3], cursor_position)
+        self.assertEqual(cursor_pose[3:], (0.40, 0.50, 0.60))
 
     def test_snapshot_parse_rejects_wrong_schema_empty_and_nonfinite(self) -> None:
         self.assertIsNone(ChunkOverlaySnapshot.parse(sample_chunk_overlay(schema_version="wrong.schema")))
@@ -93,6 +179,117 @@ class ChunkOverlayTest(unittest.TestCase):
         update_chunk_overlay(handles, overlay, stale=False, visible=False)
         self.assertFalse(left.visible)
         self.assertFalse(right.visible)
+
+    def test_scene_update_returns_tracking_error_and_hides_chunk_handles(self) -> None:
+        overlay = ChunkOverlaySnapshot.parse(sample_chunk_overlay(), received_monotonic=10.0)
+        self.assertIsNotNone(overlay)
+        assert overlay is not None
+        handles = recording_chunk_overlay_handles()
+        cursor = overlay.cursor_position("left", now=10.025)
+        self.assertIsNotNone(cursor)
+        assert cursor is not None
+        actual_left = (cursor[0], cursor[1], cursor[2] + 0.020)
+
+        errors = update_chunk_overlay(
+            handles,
+            overlay,
+            stale=False,
+            visible=True,
+            now_monotonic=10.025,
+            actual_positions={"left": actual_left, "right": None},
+        )
+
+        expected_error = math.sqrt(sum((cursor[index] - actual_left[index]) ** 2 for index in range(3)))
+        self.assertAlmostEqual(errors["left"], expected_error)
+        self.assertIsNone(errors["right"])
+        self.assertTrue(handles["left_chunk_overlay_error"].visible)
+        self.assertTrue(handles["left_chunk_overlay_points"].visible)
+
+        hidden_errors = update_chunk_overlay(
+            handles,
+            overlay,
+            stale=True,
+            visible=True,
+            now_monotonic=10.025,
+            actual_positions={"left": actual_left, "right": None},
+        )
+        self.assertEqual(hidden_errors, {"left": None, "right": None})
+        for key, handle in handles.items():
+            if key == "chunk_overlay_line_mode":
+                continue
+            self.assertFalse(handle.visible, key)
+
+    def test_scene_update_applies_live_dot_size_to_point_handles(self) -> None:
+        overlay = ChunkOverlaySnapshot.parse(sample_chunk_overlay(), received_monotonic=10.0)
+        self.assertIsNotNone(overlay)
+        assert overlay is not None
+        handles = recording_chunk_overlay_handles()
+
+        update_chunk_overlay(handles, overlay, stale=False, visible=True, dot_size=0.03)
+
+        self.assertEqual(handles["left_chunk_overlay_points"].point_size, 0.03)
+        self.assertEqual(handles["right_chunk_overlay_points"].point_size, 0.03)
+
+    def test_pose_triad_segments_zero_rotation_aligns_with_world_axes(self) -> None:
+        segments, colors = _pose_triad_segments((1.0, 2.0, 3.0, 0.0, 0.0, 0.0), 0.05)
+        self.assertEqual(segments.shape, (3, 2, 3))
+        self.assertEqual(colors.shape, (3, 2, 3))
+        expected_directions = ((0.05, 0.0, 0.0), (0.0, 0.05, 0.0), (0.0, 0.0, 0.05))
+        for index, expected in enumerate(expected_directions):
+            direction = segments[index][1] - segments[index][0]
+            for actual_value, expected_value in zip(direction, expected, strict=True):
+                self.assertAlmostEqual(float(actual_value), expected_value)
+
+    def test_scene_update_renders_strided_pose_triads_and_hides_when_disabled(self) -> None:
+        overlay = ChunkOverlaySnapshot.parse(
+            sample_chunk_overlay(
+                horizon=5,
+                left=[
+                    [0.00, 0.00, 0.00, 0.0, 0.0, 0.0, 100.0],
+                    [0.01, 0.00, 0.00, 0.1, 0.0, 0.0, 90.0],
+                    [0.02, 0.00, 0.00, 0.2, 0.0, 0.0, 80.0],
+                    [0.03, 0.00, 0.00, 0.3, 0.0, 0.0, 70.0],
+                    [0.04, 0.00, 0.00, 0.4, 0.0, 0.0, 60.0],
+                ],
+                right=None,
+                policy_dt_sec=0.10,
+            ),
+            received_monotonic=10.0,
+        )
+        self.assertIsNotNone(overlay)
+        assert overlay is not None
+        handles = recording_chunk_overlay_handles()
+
+        update_chunk_overlay(
+            handles,
+            overlay,
+            stale=False,
+            visible=True,
+            now_monotonic=10.05,
+            show_axes=True,
+            axes_stride=2,
+        )
+
+        axes = handles["left_chunk_overlay_axes"]
+        cursor_axes = handles["left_chunk_overlay_cursor_axes"]
+        self.assertTrue(axes.visible)
+        self.assertEqual(axes.points.shape, (9, 2, 3))
+        self.assertEqual(axes.colors.shape, (9, 2, 3))
+        self.assertTrue(cursor_axes.visible)
+        self.assertEqual(cursor_axes.points.shape, (3, 2, 3))
+
+        update_chunk_overlay(
+            handles,
+            overlay,
+            stale=False,
+            visible=True,
+            now_monotonic=10.05,
+            show_axes=False,
+            axes_stride=2,
+        )
+
+        self.assertFalse(handles["left_chunk_overlay_axes"].visible)
+        self.assertFalse(handles["left_chunk_overlay_cursor_axes"].visible)
 
 
 if __name__ == "__main__":

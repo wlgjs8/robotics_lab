@@ -92,6 +92,13 @@ def _parse_quaternion_xyzw(value: Mapping[str, Any]) -> tuple[float, float, floa
 
 
 def _parse_chunk_waypoints(value: Any, *, horizon: int) -> tuple[tuple[float, float, float], ...] | None:
+    poses = _parse_chunk_waypoint_poses(value, horizon=horizon)
+    if poses is None:
+        return None
+    return tuple((pose[0], pose[1], pose[2]) for pose in poses)
+
+
+def _parse_chunk_waypoint_poses(value: Any, *, horizon: int) -> tuple[tuple[float, float, float, float, float, float], ...] | None:
     if value is None:
         return None
     if not isinstance(value, list | tuple):
@@ -100,7 +107,7 @@ def _parse_chunk_waypoints(value: Any, *, horizon: int) -> tuple[tuple[float, fl
         return None
     if len(value) != horizon:
         return None
-    positions: list[tuple[float, float, float]] = []
+    poses: list[tuple[float, float, float, float, float, float]] = []
     for waypoint in value:
         if not isinstance(waypoint, list | tuple) or len(waypoint) != 7:
             return None
@@ -110,8 +117,8 @@ def _parse_chunk_waypoints(value: Any, *, horizon: int) -> tuple[tuple[float, fl
             return None
         if not all(math.isfinite(item) for item in parsed):
             return None
-        positions.append((parsed[0], parsed[1], parsed[2]))
-    return tuple(positions)
+        poses.append((parsed[0], parsed[1], parsed[2], parsed[3], parsed[4], parsed[5]))
+    return tuple(poses)
 
 
 @dataclass(frozen=True)
@@ -218,6 +225,8 @@ class ChunkOverlaySnapshot:
     left_positions: tuple[tuple[float, float, float], ...] | None
     right_positions: tuple[tuple[float, float, float], ...] | None
     raw: Mapping[str, Any]
+    left_poses: tuple[tuple[float, float, float, float, float, float], ...] | None = None
+    right_poses: tuple[tuple[float, float, float, float, float, float], ...] | None = None
 
     @classmethod
     def parse(
@@ -239,15 +248,17 @@ class ChunkOverlaySnapshot:
             return None
         left_raw = data.get("left")
         right_raw = data.get("right")
-        left_positions = _parse_chunk_waypoints(left_raw, horizon=horizon)
-        right_positions = _parse_chunk_waypoints(right_raw, horizon=horizon)
+        left_poses = _parse_chunk_waypoint_poses(left_raw, horizon=horizon)
+        right_poses = _parse_chunk_waypoint_poses(right_raw, horizon=horizon)
+        left_positions = None if left_poses is None else tuple((pose[0], pose[1], pose[2]) for pose in left_poses)
+        right_positions = None if right_poses is None else tuple((pose[0], pose[1], pose[2]) for pose in right_poses)
         left_empty = isinstance(left_raw, list | tuple) and len(left_raw) == 0
         right_empty = isinstance(right_raw, list | tuple) and len(right_raw) == 0
-        if left_raw is not None and not left_empty and left_positions is None:
+        if left_raw is not None and not left_empty and left_poses is None:
             return None
-        if right_raw is not None and not right_empty and right_positions is None:
+        if right_raw is not None and not right_empty and right_poses is None:
             return None
-        if not left_positions and not right_positions:
+        if not left_poses and not right_poses:
             return None
         return cls(
             schema_version=CHUNK_OVERLAY_SCHEMA_VERSION,
@@ -258,11 +269,50 @@ class ChunkOverlaySnapshot:
             left_positions=left_positions,
             right_positions=right_positions,
             raw=data,
+            left_poses=left_poses,
+            right_poses=right_poses,
         )
 
     def stale(self, *, now: float | None = None, threshold_sec: float = 5.0) -> bool:
         now_value = time.monotonic() if now is None else now
         return now_value - self.received_monotonic > threshold_sec
+
+    def _cursor_index_float(self, count: int, *, now: float | None = None) -> float:
+        if count <= 0:
+            return 0.0
+        now_value = time.monotonic() if now is None else now
+        if self.policy_dt_sec <= 0.0:
+            return float(count - 1)
+        elapsed = max(0.0, now_value - self.received_monotonic)
+        return max(0.0, min(elapsed / self.policy_dt_sec, float(count - 1)))
+
+    def cursor_position(self, arm: str, *, now: float | None = None) -> tuple[float, float, float] | None:
+        positions = self.left_positions if arm == "left" else self.right_positions
+        if not positions:
+            return None
+        fidx = self._cursor_index_float(len(positions), now=now)
+        index = int(fidx)
+        if index >= len(positions) - 1:
+            return positions[-1]
+        frac = fidx - index
+        start = positions[index]
+        end = positions[index + 1]
+        return (
+            start[0] + (end[0] - start[0]) * frac,
+            start[1] + (end[1] - start[1]) * frac,
+            start[2] + (end[2] - start[2]) * frac,
+        )
+
+    def cursor_pose(self, arm: str, *, now: float | None = None) -> tuple[float, float, float, float, float, float] | None:
+        poses = self.left_poses if arm == "left" else self.right_poses
+        if not poses:
+            return None
+        position = self.cursor_position(arm, now=now)
+        if position is None:
+            return None
+        index = int(self._cursor_index_float(len(poses), now=now))
+        pose = poses[index]
+        return (position[0], position[1], position[2], pose[3], pose[4], pose[5])
 
 
 @dataclass(frozen=True)

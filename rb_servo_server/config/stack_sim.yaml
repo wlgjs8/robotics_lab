@@ -96,8 +96,8 @@ safety:
   q_max_deg: [360, 360, 160, 360, 360, 360]
   # Halved vs the sim profile for the first physical run.
   # dq_max_deg_s: [60, 60, 60, 90, 90, 120]      # was halved [30,30,30,45,45,60] for first run
-  dq_max_deg_s: [120, 120, 120, 120, 120, 120]      # was halved [30,30,30,45,45,60] for first run1
-  ddq_max_deg_s2: [300, 300, 300, 500, 500, 700]  # was halved for first run
+  dq_max_deg_s: [170, 170, 170, 240, 240, 320]      # 2026-06-28 3rd raise (user: much faster); was [140,140,140,200,200,280]
+  ddq_max_deg_s2: [1500, 1500, 1500, 2300, 2300, 3000]  # was [1100,1100,1100,1700,1700,2300]
   joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]
   # Match real stack cable-safety behavior for JointTarget/InitMotion return.
   joint_target_literal_axes: [false, false, false, false, false, true]
@@ -139,7 +139,7 @@ safety:
     max_accel_deg_s2:    [150, 150, 150, 250, 250, 350]
   floor_constraint:
     enable: true
-    z_min_m: -0.200
+    z_min_m: 0.0000
     runtime_min_z_m: -0.2
     runtime_max_z_m: 0.5
     fail_policy: clamp_hold
@@ -150,25 +150,39 @@ safety:
     # 팁이 TCP 점보다 아래로 내려가는 케이스를 잡는다. 체크는 팔당 3점(TCP+팁 2)이며,
     # projection도 같은 점들을 사용한다.
     tcp_offset_points:
-      - { name: gripper_tip_a, offset_m: [ 0.059, 0.0, 0.0 ] }
-      - { name: gripper_tip_b, offset_m: [-0.059, 0.0, 0.0 ] }
+      - { name: gripper_tip_a_yp, offset_m: [ 0.058,  0.013, 0.0 ], offset_closed_m: [ 0.010,  0.013, 0.0 ] }
+      - { name: gripper_tip_a_yn, offset_m: [ 0.058, -0.013, 0.0 ], offset_closed_m: [ 0.010, -0.013, 0.0 ] }
+      - { name: gripper_tip_b_yp, offset_m: [-0.058,  0.013, 0.0 ], offset_closed_m: [-0.010,  0.013, 0.0 ] }
+      - { name: gripper_tip_b_yn, offset_m: [-0.058, -0.013, 0.0 ], offset_closed_m: [-0.010, -0.013, 0.0 ] }
   # Stand-frame ROI box (workspace limit), viser "Safety ROI box"에서 조정.
   # enable=true라야 viser Send가 허용된다(서버가 enabled 보고). monitor_only=true로
   # 시작: 박스/여유(margin)/closest_face 관찰 + bounds 튜닝만 하고 강제는 안 함.
   # 실제 차단(면 슬라이드/홀드)을 보려면 monitor_only=false로 전환.
   roi_box:
     enable: true
-    min_m: [-0.500, -1.000, -0.200]
-    max_m: [0.500, 0.050, 0.800]
+    min_m: [-0.450, -0.900, 0.000]
+    max_m: [0.450, -0.150, 0.800]
     runtime_min_m: [-1.2, -1.6, -0.2]
     runtime_max_m: [1.2, 0.6, 1.6]
     fail_policy: clamp_hold
     monitor_only: true   # 관찰 시작; 강제하려면 false
-    a_brake_m_s2: 4.0
-    d_slow_m: 0.05
+    a_brake_m_s2: 3.0
+    d_slow_m: 0.06
     tcp_offset_points:
-      - { name: gripper_tip_a, offset_m: [ 0.059, 0.0, 0.0 ] }
-      - { name: gripper_tip_b, offset_m: [-0.059, 0.0, 0.0 ] }
+      - { name: gripper_tip_a_yp, offset_m: [ 0.058,  0.013, 0.0 ], offset_closed_m: [ 0.010,  0.013, 0.0 ] }
+      - { name: gripper_tip_a_yn, offset_m: [ 0.058, -0.013, 0.0 ], offset_closed_m: [ 0.010, -0.013, 0.0 ] }
+      - { name: gripper_tip_b_yp, offset_m: [-0.058,  0.013, 0.0 ], offset_closed_m: [-0.010,  0.013, 0.0 ] }
+      - { name: gripper_tip_b_yn, offset_m: [-0.058, -0.013, 0.0 ], offset_closed_m: [-0.010, -0.013, 0.0 ] }
+  user_floor_constraint:
+    enable: true
+    max_tilt_deg: 35.0
+    runtime_min_point_z_m: -0.2
+    runtime_max_point_z_m: 0.5
+    max_margin_m: 0.2
+    fail_policy: clamp_hold
+    monitor_only: true
+    a_brake_m_s2: 3.0
+    d_slow_m: 0.06
   self_collision:
     enable: true
     # clamp_hold: 충돌 방향 명령만 직전 안전 자세로 홀드(비래치, 탈출 허용) —
@@ -183,28 +197,35 @@ safety:
       package_dirs:
         - "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e"
       pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_hull.STL"
+      pika_gripper_base_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_base_hull.STL"
+      pika_finger_left_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_finger_left_hull.STL"
+      pika_finger_right_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_finger_right_hull.STL"
+      gripper_finger_travel_m: 0.047
       stand_ignore_arm_substrings: ["link0"]
+      debug_pair_curation: true
       disabled_collision_pairs:
+        # Structural adjacent/base false-positive pairs. Verify these in the
+        # Viser collision overlay before real operation; do not replace this with
+        # a global d_hard_m or InitMotion planner margin reduction.
         - ["*left*link0*", "*left*link1*"]
         - ["*right*link0*", "*right*link1*"]
+        - ["*left*link0*", "*left*link2*"]
+        - ["*right*link0*", "*right*link2*"]
         # compact wrist structural false-positive: measured overlap 0%, always
         # near 19-25mm and inside d_slow. Distal gripper hull pairs still cover
         # downstream collisions from link6/attachment_site.
         - ["*left*link4*", "*left*link6*"]
         - ["*right*link4*", "*right*link6*"]
       viz_near_pairs_m: 0.06   # GUI-only: show witness tubes within 60mm (decoupled from d_slow)
-      d_hard_m: 0.010   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
+      d_hard_m: 0.025   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
       # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
       # can brake a head-on approach at the command ceiling before the hard floor.
-      # v_max(max_linear_velocity)=0.25, a_brake=4.0 -> d_hard+0.0078=0.0228; 0.035
+      # v_max(max_linear_velocity)=0.32, a_brake=4.0 -> d_hard+0.0128=0.0278; 0.035
       # leaves a ~20mm slow zone (stoppable up to ~0.4 m/s). (Stage 0c)
-      d_slow_m: 0.035   # 2026-06-19: slow zone so the velocity barrier brakes
-                        # BEFORE d_hard (was =d_hard: no ramp -> overshoot past 10mm).
-      # NOTE: with no braking ramp a fast approach can overshoot 5mm in one tick;
-      # swept_samples catches the in-between and holds at the last >5mm config.
-      a_brake_m_s2: 4.0
-      hyst_m: 0.005
-      latency_s: 0.010
+      d_slow_m: 0.030    # 2026-06-19 anti-chatter: 0.035→0.05 (gentler velocity gradient; ≥d_hard+vmax²/2a_brake=0.032)
+      a_brake_m_s2: 3.0  # 2026-06-19 anti-chatter: 4.0→3.0 (softer braking ramp = quieter onset at boundary)
+      hyst_m: 0.010      # 2026-06-19 anti-chatter: 0.005→0.010 (break on/off limit-cycle toggle)
+      latency_s: 0.003   # 2026-06-19 LPF off + new fw(no actuation latency): 0.010→0.003 (cut vc·comp_s feedback that drives the brake↔release limit cycle; comp_s=max(latency_s,verdict_age) so stale verdicts still floor it)
       # Intra-arm-only margin. Arm<->arm and arm<->stand keep the self values above.
       # Normal operating intra-arm clearances measured >=27mm; true near-contact is
       # retained at full link2<->link4 elbow fold, so 5/15mm catches real fold risk
@@ -238,13 +259,37 @@ safety:
       # elbow/wrist can dip below it). Top face at z_m; kept == floor_constraint.z_min_m
       # so the two floors agree. The InitMotion planner avoids this box too. Raise z_m
       # to exercise whole-arm floor braking more aggressively in sim.
+      external_boxes:
+        enable: true
+        max_count: 2
+        size_m: [0.380, 0.240, 0.105]
+        margin_m: [0.000, 0.000, 0.040]   # per-axis [x,y,z] box-local; x,y=SIDE, z=HEIGHT.
+                                          # side 0mm + d_hard 10mm = ~10mm side keep-out;
+                                          # height 40mm + d_hard 10mm = ~50mm top/bottom keep-out.
+        monitor_only: true    # ENFORCE (real): velocity-damper decel/hold at the box surface
+        stale_timeout_s: 0.5
+        stale_policy: hold
+        # 2026-07-01 BOX-ONLY keep-out barrier (SEPARATE from the floor's `external:` set
+        # below). A box is a keep-out the operator drives TOWARD at teleop speed, so the
+        # slow zone must brake the fastest approach. Root cause of the -37.6mm penetration:
+        # boxes reused the floor's 5mm slow zone → stops only √(2·a·(d_slow−d_hard))=0.12 m/s,
+        # but teleop hit 0.78 m/s → ~40mm overshoot. Here d_slow=80mm stops
+        # √(2·6·(0.080−0.010))=0.92 m/s > observed; recover>0 ejects if it does penetrate.
+        barrier:
+          d_hard_m: 0.010          # hard floor (never cross); + margin 40mm = ~50mm from real box
+          d_slow_m: 0.080          # WIDE slow zone: decelerate far so it never arrives fast
+          a_brake_m_s2: 6.0        # braking decel the barrier assumes
+          hyst_m: 0.010
+          recover_speed_m_s: 0.030 # >0: actively push back out on penetration
+          latency_s: 0.010
       ground_plane:
         enable: true
-        z_m: -0.200             # == floor_constraint.z_min_m
+        # z_m: 0.001             # startup/fallback top face (used until a floor drives it)
+        z_m: 0.0005             # startup/fallback top face (used until a floor drives it)
         size_m: [4.0, 4.0]      # lateral extents [Lx, Ly]
         thickness_m: 0.10
         parent_frame: world
-
+        follow_safety_floors: true
   # Collision-free InitMotion planner (requires self_collision.enable — the mesh
   # model is the planner's collision+floor oracle). A JointTarget init_motion profile command
   # plans a collision-free + floor-safe 12-DOF (both arms) RRT-Connect path to the
@@ -278,7 +323,7 @@ network:
     - "udp://127.0.0.1:50376"  # make run teleop_mux policy_runner
     - "udp://127.0.0.1:50378"  # external flow-infer readback alongside make run
     - "udp://127.0.0.1:50386"  # camera_server stereo_worker wrist-fusion (box detect)
-  state_pub_rate_hz: 100
+  state_pub_rate_hz: 500
   command_source_allowlist: ["127.0.0.1/32"]
 
 # Forward arbitrated per-arm gripper setpoints (left/right.gripper in the command
@@ -379,13 +424,14 @@ cartesian_control:
   # state feedback), same as streaming TcpPoseTarget.
   path_kp_pos: 3.0                # anti-tremble (was 6.0): less reactive to tiny errors
   path_kp_ori: 3.0                # anti-tremble (was 6.0)
-  velocity_damping: 0.04          # anti-tremble (was 0.01): damp IK velocity solution
+  velocity_damping: 0.08          # anti-tremble (was 0.01): damp IK velocity solution
   # Low-speed first-run Cartesian limits (sim profile used 0.2 / 0.4 / 0.002 / 0.02).
   # joint headroom checked (~15deg/s vs dq_max 120deg/s, 0.2mm/tick @500Hz).
   max_linear_move_speed_m_s: 0.05
   max_angular_move_speed_rad_s: 0.1
-  max_cartesian_step_m: 0.001
-  max_cartesian_step_rad: 0.01
+  max_cartesian_step_m: 0.01
+  max_cartesian_step_rad: 0.1
+  
   exceed_limit_policy: clamp
   # SMD pose tracking for streaming TcpPoseTarget (UMI teleop): received target
   # deltas integrate into a goal pose; the published target follows it as a
