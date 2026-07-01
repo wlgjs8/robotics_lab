@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -39,6 +42,7 @@ class RecordingSceneHandle:
         self.colors = None
         self.position = None
         self.point_size = None
+        self.scale = None
         self.visible = False
 
 
@@ -156,6 +160,58 @@ class ChunkOverlayTest(unittest.TestCase):
         self.assertFalse(store.is_stale(now=14.0))
         self.assertTrue(store.is_stale(now=16.0))
 
+    def test_gui_chunk_overlay_retention_uses_operator_persist_seconds(self) -> None:
+        from rb_servo_gui import app as gui_app
+
+        overlay = ChunkOverlaySnapshot.parse(sample_chunk_overlay(), received_monotonic=90.0)
+        self.assertIsNotNone(overlay)
+        assert overlay is not None
+        self.assertFalse(overlay.stale(now=100.0, threshold_sec=30.0))
+        self.assertTrue(overlay.stale(now=100.0, threshold_sec=5.0))
+
+        store = ChunkOverlayStore(stale_after_sec=5.0)
+        self.assertTrue(
+            store.update_from_json_bytes(
+                json.dumps(sample_chunk_overlay()).encode(),
+                received_monotonic=90.0,
+            )
+        )
+        scene_handles = recording_chunk_overlay_handles()
+        handles = {
+            "scene": scene_handles,
+            "chunk_overlay_visible": True,
+            "chunk_overlay_dot_size": 0.022,
+            "chunk_overlay_axes_visible": False,
+            "chunk_overlay_axes_stride": 1,
+            "chunk_overlay_persist_sec": 30.0,
+        }
+        with mock.patch("rb_servo_gui.app.time.monotonic", return_value=100.0):
+            gui_app._update_chunk_overlay_gui(handles, store, latest=None)
+        self.assertTrue(scene_handles["left_chunk_overlay"].visible)
+        self.assertTrue(scene_handles["right_chunk_overlay"].visible)
+
+        handles["chunk_overlay_persist_sec"] = 5.0
+        with mock.patch("rb_servo_gui.app.time.monotonic", return_value=100.0):
+            gui_app._update_chunk_overlay_gui(handles, store, latest=None)
+        self.assertFalse(scene_handles["left_chunk_overlay"].visible)
+        self.assertFalse(scene_handles["right_chunk_overlay"].visible)
+
+    def test_chunk_overlay_persist_seconds_setting_round_trips(self) -> None:
+        from rb_servo_gui import app as gui_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["RB_GUI_SETTINGS_PATH"] = os.path.join(tmp, "settings.json")
+            try:
+                gui_app._update_gui_setting("chunk_overlay_persist_sec", 74.0)
+                settings = gui_app._load_gui_settings()
+                self.assertEqual(settings.get("chunk_overlay_persist_sec"), 74.0)
+                self.assertEqual(
+                    gui_app._gui_setting_float(settings, "chunk_overlay_persist_sec", 30.0),
+                    74.0,
+                )
+            finally:
+                os.environ.pop("RB_GUI_SETTINGS_PATH", None)
+
     def test_scene_update_sets_visible_for_valid_snapshot_and_hides_stale(self) -> None:
         overlay = ChunkOverlaySnapshot.parse(sample_chunk_overlay())
         self.assertIsNotNone(overlay)
@@ -225,10 +281,51 @@ class ChunkOverlayTest(unittest.TestCase):
         assert overlay is not None
         handles = recording_chunk_overlay_handles()
 
-        update_chunk_overlay(handles, overlay, stale=False, visible=True, dot_size=0.03)
+        update_chunk_overlay(handles, overlay, stale=False, visible=True, dot_size=0.003)
 
-        self.assertEqual(handles["left_chunk_overlay_points"].point_size, 0.03)
-        self.assertEqual(handles["right_chunk_overlay_points"].point_size, 0.03)
+        self.assertEqual(handles["left_chunk_overlay_points"].point_size, 0.003)
+        self.assertEqual(handles["right_chunk_overlay_points"].point_size, 0.003)
+
+    def test_scene_update_scales_cursor_from_dot_size(self) -> None:
+        overlay = ChunkOverlaySnapshot.parse(sample_chunk_overlay(), received_monotonic=10.0)
+        self.assertIsNotNone(overlay)
+        assert overlay is not None
+        handles = recording_chunk_overlay_handles()
+
+        update_chunk_overlay(
+            handles,
+            overlay,
+            stale=False,
+            visible=True,
+            now_monotonic=10.0,
+            dot_size=0.002,
+        )
+        self.assertEqual(handles["left_chunk_overlay_cursor"].scale, 0.3)
+        self.assertEqual(handles["right_chunk_overlay_cursor"].scale, 0.3)
+        self.assertEqual(handles["left_chunk_overlay_cursor"].point_size, 0.006)
+
+        update_chunk_overlay(
+            handles,
+            overlay,
+            stale=False,
+            visible=True,
+            now_monotonic=10.0,
+            dot_size=0.022,
+        )
+        self.assertAlmostEqual(handles["left_chunk_overlay_cursor"].scale, 1.0)
+        self.assertAlmostEqual(handles["right_chunk_overlay_cursor"].scale, 1.0)
+        self.assertAlmostEqual(handles["left_chunk_overlay_cursor"].point_size, 0.0396)
+
+        update_chunk_overlay(
+            handles,
+            overlay,
+            stale=False,
+            visible=True,
+            now_monotonic=10.0,
+            dot_size=0.08,
+        )
+        self.assertEqual(handles["left_chunk_overlay_cursor"].scale, 2.0)
+        self.assertEqual(handles["left_chunk_overlay_cursor"].point_size, 0.05)
 
     def test_pose_triad_segments_zero_rotation_aligns_with_world_axes(self) -> None:
         segments, colors = _pose_triad_segments((1.0, 2.0, 3.0, 0.0, 0.0, 0.0), 0.05)

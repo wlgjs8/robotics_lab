@@ -707,11 +707,13 @@ INDEX_HTML = r"""<!doctype html>
       return Math.max(0, Math.min(6, Math.ceil(-Math.log10(step)) + 1));
     }
     function fmtSci(v) {
-      // Y-axis labels in scientific notation (e.g. 1.2e-3) so magnitude is read
-      // off the exponent regardless of zoom.
+      // Y-axis labels as a pure power of ten with the mantissa pinned to 1
+      // (e.g. 1e+2, -1e-3) so only the exponent varies — read magnitude off the
+      // exponent regardless of zoom.
       if (!Number.isFinite(v)) return "";
       if (v === 0) return "0";
-      return v.toExponential(1);
+      const exp = Math.floor(Math.log10(Math.abs(v)));
+      return (v < 0 ? "-" : "") + Math.pow(10, exp).toExponential(0);
     }
     function globalEndTime() {
       let t = -Infinity;
@@ -1023,9 +1025,9 @@ INDEX_HTML = r"""<!doctype html>
     function plotWidthPx(canvas) {
       return Math.max(1, canvas.getBoundingClientRect().width - 64);  // padL 54 + padR 10
     }
-    // Deepest zoom: a 5 ms span renders as exactly 1 ms per division (5
-    // divisions), so fully zoomed in the time axis reads in 1 ms units.
-    const MIN_SPAN_SEC = 0.005;
+    // Deepest zoom: a 10 ms span renders as exactly 2 ms per division (5
+    // divisions), so fully zoomed in the time axis reads in 2 ms units.
+    const MIN_SPAN_SEC = 0.010;
     function setView(min, max) {
       if (max - min < MIN_SPAN_SEC) {
         const c = (min + max) / 2;
@@ -1047,7 +1049,7 @@ INDEX_HTML = r"""<!doctype html>
         const f = ev.deltaY < 0 ? 1 / 1.2 : 1.2;
         const nmin = tc - (tc - dom.min) * f;
         const nmax = tc + (dom.max - tc) * f;
-        setView(nmin, nmax);  // clamps to MIN_SPAN_SEC (1 ms-per-division floor)
+        setView(nmin, nmax);  // clamps to MIN_SPAN_SEC (2 ms-per-division floor)
         scheduleRender();
       }, {passive: false});
       // Left-drag: rubber-band box-zoom on the time axis; release zooms all

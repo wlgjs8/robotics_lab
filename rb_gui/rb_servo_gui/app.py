@@ -2373,23 +2373,35 @@ def build_gui(
             initial_value=_format_circle_overlay_status(None, stale=True, enabled=overlay_store is not None),
             disabled=True,
         )
-        handles["chunk_overlay_visible"] = False
-        handles["chunk_overlay_dot_size"] = 0.022
-        handles["chunk_overlay_axes_visible"] = True
-        handles["chunk_overlay_axes_stride"] = 2
+        _ov = _load_gui_settings()
+        chunk_overlay_visible = _gui_setting_bool(_ov, "chunk_overlay_visible", True)
+        chunk_overlay_axes_visible = _gui_setting_bool(_ov, "chunk_overlay_axes_visible", True)
+        chunk_overlay_dot_size = _gui_setting_float(_ov, "chunk_overlay_dot_size", 0.022)
+        chunk_overlay_persist_sec = _gui_setting_float(_ov, "chunk_overlay_persist_sec", 30.0)
+        chunk_overlay_axes_stride = _gui_setting_int(_ov, "chunk_overlay_axes_stride", 2)
+        tcp_command_trail_visible = _gui_setting_bool(_ov, "tcp_command_trail_visible", True)
+        tcp_gizmo_visible = _gui_setting_bool(_ov, "tcp_gizmo_visible", True)
+        tcp_trail_limit = _gui_setting_int(_ov, "tcp_trail_limit", 600)
+        handles["chunk_overlay_visible"] = chunk_overlay_visible
+        handles["chunk_overlay_dot_size"] = chunk_overlay_dot_size
+        handles["chunk_overlay_persist_sec"] = chunk_overlay_persist_sec
+        handles["chunk_overlay_axes_visible"] = chunk_overlay_axes_visible
+        handles["chunk_overlay_axes_stride"] = chunk_overlay_axes_stride
+        handles["scene"]["tcp_trail_limit"] = tcp_trail_limit
         if hasattr(server.gui, "add_checkbox"):
             handles["chunk_overlay_toggle"] = server.gui.add_checkbox(
-                "예측 chunk 궤적 표시", initial_value=False
+                "예측 chunk 궤적 표시", initial_value=chunk_overlay_visible
             )
 
             @handles["chunk_overlay_toggle"].on_update
             def _(_: Any) -> None:
                 handles["chunk_overlay_visible"] = bool(handles["chunk_overlay_toggle"].value)
+                _update_gui_setting("chunk_overlay_visible", handles["chunk_overlay_visible"])
                 if not handles["chunk_overlay_visible"]:
                     _hide_chunk_overlays(handles)
 
             handles["chunk_overlay_axes_toggle"] = server.gui.add_checkbox(
-                "웨이포인트 자세(6DOF) 표시", initial_value=True
+                "웨이포인트 자세(6DOF) 표시", initial_value=chunk_overlay_axes_visible
             )
 
             @handles["chunk_overlay_axes_toggle"].on_update
@@ -2397,10 +2409,17 @@ def build_gui(
                 handles["chunk_overlay_axes_visible"] = bool(
                     handles["chunk_overlay_axes_toggle"].value
                 )
+                _update_gui_setting(
+                    "chunk_overlay_axes_visible", handles["chunk_overlay_axes_visible"]
+                )
 
         if hasattr(server.gui, "add_slider"):
             handles["chunk_overlay_dot_size_slider"] = server.gui.add_slider(
-                "웨이포인트 dot 크기", min=0.008, max=0.035, step=0.002, initial_value=0.022
+                "웨이포인트 dot 크기",
+                min=0.002,
+                max=0.035,
+                step=0.001,
+                initial_value=chunk_overlay_dot_size,
             )
 
             @handles["chunk_overlay_dot_size_slider"].on_update
@@ -2408,9 +2427,28 @@ def build_gui(
                 handles["chunk_overlay_dot_size"] = float(
                     handles["chunk_overlay_dot_size_slider"].value
                 )
+                _update_gui_setting("chunk_overlay_dot_size", handles["chunk_overlay_dot_size"])
+
+            handles["chunk_overlay_persist_sec_slider"] = server.gui.add_slider(
+                "예측 궤적 잔류(초)",
+                min=2,
+                max=120,
+                step=2,
+                initial_value=chunk_overlay_persist_sec,
+            )
+
+            @handles["chunk_overlay_persist_sec_slider"].on_update
+            def _(_: Any) -> None:
+                value = float(handles["chunk_overlay_persist_sec_slider"].value)
+                handles["chunk_overlay_persist_sec"] = value
+                _update_gui_setting("chunk_overlay_persist_sec", value)
 
             handles["chunk_overlay_axes_stride_slider"] = server.gui.add_slider(
-                "자세 triad 간격(step)", min=1, max=6, step=1, initial_value=2
+                "자세 triad 간격(step)",
+                min=1,
+                max=6,
+                step=1,
+                initial_value=chunk_overlay_axes_stride,
             )
 
             @handles["chunk_overlay_axes_stride_slider"].on_update
@@ -2418,6 +2456,23 @@ def build_gui(
                 handles["chunk_overlay_axes_stride"] = int(
                     handles["chunk_overlay_axes_stride_slider"].value
                 )
+                _update_gui_setting(
+                    "chunk_overlay_axes_stride", handles["chunk_overlay_axes_stride"]
+                )
+
+            handles["tcp_trail_limit_slider"] = server.gui.add_slider(
+                "궤적 잔류 길이(점)",
+                min=100,
+                max=3000,
+                step=50,
+                initial_value=tcp_trail_limit,
+            )
+
+            @handles["tcp_trail_limit_slider"].on_update
+            def _(_: Any) -> None:
+                value = int(handles["tcp_trail_limit_slider"].value)
+                handles["scene"]["tcp_trail_limit"] = value
+                _update_gui_setting("tcp_trail_limit", value)
 
         if hasattr(server.gui, "add_text"):
             handles["chunk_overlay_error_text"] = server.gui.add_text(
@@ -2440,10 +2495,10 @@ def build_gui(
                 _update_tcp_display_buttons(handles)
                 handles["tcp_tracking"].value = f"TCP display: {display_mode}"
 
-        handles["tcp_command_trail_visible"] = False
+        handles["tcp_command_trail_visible"] = tcp_command_trail_visible
         if hasattr(server.gui, "add_checkbox"):
             handles["tcp_command_trail_toggle"] = server.gui.add_checkbox(
-                "TCP 명령 궤적 표시", initial_value=False
+                "TCP 명령 궤적 표시", initial_value=tcp_command_trail_visible
             )
 
             @handles["tcp_command_trail_toggle"].on_update
@@ -2451,13 +2506,16 @@ def build_gui(
                 handles["tcp_command_trail_visible"] = bool(
                     handles["tcp_command_trail_toggle"].value
                 )
+                _update_gui_setting(
+                    "tcp_command_trail_visible", handles["tcp_command_trail_visible"]
+                )
                 if not handles["tcp_command_trail_visible"]:
                     _hide_tcp_command_trails(handles)
 
-        handles["tcp_gizmo_visible"] = True
+        handles["tcp_gizmo_visible"] = tcp_gizmo_visible
         if hasattr(server.gui, "add_checkbox"):
             handles["tcp_gizmo_toggle"] = server.gui.add_checkbox(
-                "TCP 기즈모 표시", initial_value=True
+                "TCP 기즈모 표시", initial_value=tcp_gizmo_visible
             )
 
             @handles["tcp_gizmo_toggle"].on_update
@@ -2465,6 +2523,7 @@ def build_gui(
                 handles["tcp_gizmo_visible"] = bool(
                     handles["tcp_gizmo_toggle"].value
                 )
+                _update_gui_setting("tcp_gizmo_visible", handles["tcp_gizmo_visible"])
                 if not handles["tcp_gizmo_visible"]:
                     _hide_tcp_gizmos(handles)
 
@@ -4197,7 +4256,14 @@ def _update_chunk_overlay_gui(
     chunk_overlay_store: ChunkOverlayStore | None,
     latest: StateSnapshot | None,
 ) -> None:
-    overlay, stale = _latest_chunk_overlay(chunk_overlay_store)
+    overlay = chunk_overlay_store.latest() if chunk_overlay_store is not None else None
+    try:
+        persist_sec = float(handles.get("chunk_overlay_persist_sec", 30.0) or 30.0)
+        if not math.isfinite(persist_sec) or persist_sec <= 0.0:
+            raise ValueError
+    except Exception:
+        persist_sec = 30.0
+    stale = overlay is None or overlay.stale(threshold_sec=persist_sec)
     now = time.monotonic()
     actual_positions: dict[str, tuple[float, float, float] | None] = {}
     for arm in ("left", "right"):

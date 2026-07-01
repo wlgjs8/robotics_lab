@@ -43,6 +43,7 @@ from rb_servo_gui.app import (
     _send_gripper_command,
     _user_floor_display_points,
     _apply_init_joints_live,
+    build_gui,
     _nudge_label,
     _status_summary_html,
     _tab_theme_html,
@@ -144,6 +145,7 @@ from rb_servo_gui.safety import OperatorSafety, normalize_observed_mode_backend
 from rb_servo_gui.scene import (
     _FLOOR_CHECK_POINTS_TCP_FRAME,
     _FLOOR_CHECK_POINTS_TCP_FRAME_CLOSED,
+    _TCP_TRAIL_LIMIT,
     _add_ik_infeasible_region,
     _add_robot_urdfs,
     _add_scene_fallback,
@@ -155,6 +157,7 @@ from rb_servo_gui.scene import (
     _ik_infeasible_path,
     _reference_ghost_active,
     _robot_urdf_path,
+    _update_tcp_trail,
     _update_urdf_config,
     set_ik_infeasible_region_visible,
     update_circle_overlay,
@@ -321,8 +324,39 @@ class RecordingSceneHandle:
 
 
 class RecordingButton:
-    def __init__(self, color="gray"):
+    def __init__(self, color="gray", *, disabled=False):
         self.color = color
+        self.disabled = disabled
+        self.visible = True
+        self.callback = None
+        self.hold_callback = None
+
+    def on_click(self, callback):
+        self.callback = callback
+        return callback
+
+    def on_hold(self, callback=None, **_kwargs):
+        def _register(fn):
+            self.hold_callback = fn
+            return fn
+
+        return _register(callback) if callback is not None else _register
+
+
+class RecordingInput:
+    def __init__(self, value=None, **kwargs):
+        self.value = value
+        self.disabled = kwargs.get("disabled", False)
+        self.visible = kwargs.get("visible", True)
+        self.options = kwargs.get("options")
+        self.min = kwargs.get("min")
+        self.max = kwargs.get("max")
+        self.step = kwargs.get("step")
+        self.callback = None
+
+    def on_update(self, callback):
+        self.callback = callback
+        return callback
 
     def on_click(self, callback):
         self.callback = callback
@@ -330,8 +364,9 @@ class RecordingButton:
 
 
 class RecordingText:
-    def __init__(self, value=""):
+    def __init__(self, value="", *, disabled=False):
         self.value = value
+        self.disabled = disabled
 
 
 class RecordingHtml:
@@ -350,28 +385,84 @@ class RecordingContext:
         return None
 
 
+class RecordingTabGroup:
+    def __init__(self):
+        self.tabs = []
+
+    def add_tab(self, label, **kwargs):
+        self.tabs.append((label, kwargs))
+        return RecordingContext(label)
+
+
 class RecordingGui:
     def __init__(self, *, has_html=True):
         self.folders = []
         self.buttons = []
+        self.button_groups = []
+        self.checkboxes = []
+        self.dropdowns = []
         self.html = []
+        self.numbers = []
+        self.sliders = []
         self.texts = []
+        self.tab_groups = []
+        self.vector2s = []
+        self.themes = []
         if has_html:
             self.add_html = self._add_html
+
+    def configure_theme(self, **kwargs):
+        self.themes.append(kwargs)
+
+    def add_tab_group(self, **kwargs):
+        group = RecordingTabGroup()
+        self.tab_groups.append((kwargs, group))
+        return group
 
     def add_folder(self, label, **kwargs):
         self.folders.append((label, kwargs))
         return RecordingContext(label)
 
     def add_button(self, label, **kwargs):
-        button = RecordingButton(color=kwargs.get("color", "gray"))
+        button = RecordingButton(color=kwargs.get("color", "gray"), disabled=kwargs.get("disabled", False))
         self.buttons.append((label, kwargs, button))
         return button
 
+    def add_button_group(self, label, options, **kwargs):
+        initial = kwargs.get("initial_value", tuple(options)[0] if options else None)
+        group = RecordingInput(initial, options=tuple(options), **kwargs)
+        self.button_groups.append((label, tuple(options), kwargs, group))
+        return group
+
+    def add_checkbox(self, label, **kwargs):
+        checkbox = RecordingInput(bool(kwargs.get("initial_value", False)), **kwargs)
+        self.checkboxes.append((label, kwargs, checkbox))
+        return checkbox
+
+    def add_dropdown(self, label, options, **kwargs):
+        dropdown = RecordingInput(kwargs.get("initial_value"), options=tuple(options), **kwargs)
+        self.dropdowns.append((label, tuple(options), kwargs, dropdown))
+        return dropdown
+
+    def add_number(self, label, **kwargs):
+        number = RecordingInput(kwargs.get("initial_value", 0), **kwargs)
+        self.numbers.append((label, kwargs, number))
+        return number
+
+    def add_slider(self, label, **kwargs):
+        slider = RecordingInput(kwargs.get("initial_value"), **kwargs)
+        self.sliders.append((label, kwargs, slider))
+        return slider
+
     def add_text(self, label, **kwargs):
-        text = RecordingText(kwargs.get("initial_value", ""))
+        text = RecordingText(kwargs.get("initial_value", ""), disabled=kwargs.get("disabled", False))
         self.texts.append((label, kwargs, text))
         return text
+
+    def add_vector2(self, label, **kwargs):
+        vector = RecordingInput(kwargs.get("initial_value", (0.0, 0.0)), **kwargs)
+        self.vector2s.append((label, kwargs, vector))
+        return vector
 
     def _add_html(self, content, **kwargs):
         html = RecordingHtml(content)
@@ -3145,6 +3236,31 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(handles["left_tcp_cmd_trail_points"], [(0.21, 0.12, 0.43)])
         self.assertTrue(left_cmd_trail.visible)
 
+    def test_tcp_trail_limit_is_scene_handle_driven(self):
+        handles = {
+            "tcp_trail_mode": "point",
+            "left_tcp_trail": RecordingSceneHandle(),
+            "left_tcp_trail_points": [],
+            "left_tcp_trail_color": (80, 160, 255),
+            "tcp_trail_limit": 5,
+        }
+        for index in range(8):
+            _update_tcp_trail(handles, "left_tcp", (float(index), 0.0, 0.0), visible=True)
+        self.assertEqual(len(handles["left_tcp_trail_points"]), 5)
+        self.assertEqual(handles["left_tcp_trail_points"][0], (3.0, 0.0, 0.0))
+
+        default_handles = {
+            "tcp_trail_mode": "point",
+            "left_tcp_trail": RecordingSceneHandle(),
+            "left_tcp_trail_points": [],
+            "left_tcp_trail_color": (80, 160, 255),
+        }
+        for index in range(_TCP_TRAIL_LIMIT + 3):
+            _update_tcp_trail(default_handles, "left_tcp", (float(index), 0.0, 0.0), visible=True)
+        self.assertEqual(_TCP_TRAIL_LIMIT, 600)
+        self.assertEqual(len(default_handles["left_tcp_trail_points"]), 600)
+        self.assertEqual(default_handles["left_tcp_trail_points"][0], (3.0, 0.0, 0.0))
+
     def test_scene_update_can_hide_tcp_target_gizmos_without_hiding_tcp_frames(self):
         store, _, _ = self.make_safety(self.tcp_available_state())
         left_tcp = RecordingSceneHandle()
@@ -4290,11 +4406,90 @@ class FloorConstraintGuiTest(unittest.TestCase):
                 self.assertEqual(
                     gui_app._load_gui_settings().get("stand_floor_enforce"), False
                 )
+                gui_app._update_gui_setting("chunk_overlay_visible", False)
+                self.assertEqual(
+                    gui_app._load_gui_settings().get("chunk_overlay_visible"), False
+                )
+                gui_app._update_gui_setting("chunk_overlay_persist_sec", 74.0)
+                self.assertEqual(
+                    gui_app._load_gui_settings().get("chunk_overlay_persist_sec"), 74.0
+                )
+                gui_app._update_gui_setting("tcp_trail_limit", 1250)
+                self.assertEqual(gui_app._load_gui_settings().get("tcp_trail_limit"), 1250)
                 # Read-modify-write preserves other keys.
                 gui_app._update_gui_setting("other", 1)
                 loaded = gui_app._load_gui_settings()
                 self.assertEqual(loaded.get("stand_floor_enforce"), False)
+                self.assertEqual(loaded.get("chunk_overlay_visible"), False)
+                self.assertEqual(loaded.get("chunk_overlay_persist_sec"), 74.0)
+                self.assertEqual(loaded.get("tcp_trail_limit"), 1250)
                 self.assertEqual(loaded.get("other"), 1)
+            finally:
+                os.environ.pop("RB_GUI_SETTINGS_PATH", None)
+
+    def test_build_gui_restores_overlay_settings_and_slider_bounds(self):
+        from rb_servo_gui import app as gui_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "settings.json")
+            os.environ["RB_GUI_SETTINGS_PATH"] = path
+            try:
+                for key, value in (
+                    ("chunk_overlay_visible", False),
+                    ("chunk_overlay_axes_visible", False),
+                    ("chunk_overlay_dot_size", 0.003),
+                    ("chunk_overlay_persist_sec", 74.0),
+                    ("chunk_overlay_axes_stride", 4),
+                    ("tcp_command_trail_visible", False),
+                    ("tcp_gizmo_visible", False),
+                    ("tcp_trail_limit", 1250),
+                ):
+                    gui_app._update_gui_setting(key, value)
+
+                store = StateStore(stale_after_sec=0.5)
+                safety = OperatorSafety(
+                    store,
+                    RecordingClient(),
+                    desired_mode="mock",
+                    observed_server_mode="mock",
+                    observed_backend="mock",
+                )
+                server = RecordingServer(scene=ShapeCheckingScene())
+                with mock.patch("rb_servo_gui.app.load_T_stand_cam", return_value=np.eye(4)), \
+                        mock.patch("rb_servo_gui.app.load_T_tcp_cam", return_value=np.eye(4)):
+                    handles = build_gui(server, safety, store)
+
+                self.assertFalse(handles["chunk_overlay_visible"])
+                self.assertFalse(handles["chunk_overlay_axes_visible"])
+                self.assertEqual(handles["chunk_overlay_dot_size"], 0.003)
+                self.assertEqual(handles["chunk_overlay_persist_sec"], 74.0)
+                self.assertEqual(handles["chunk_overlay_axes_stride"], 4)
+                self.assertFalse(handles["tcp_command_trail_visible"])
+                self.assertFalse(handles["tcp_gizmo_visible"])
+                self.assertEqual(handles["scene"]["tcp_trail_limit"], 1250)
+
+                checkboxes = {label: handle.value for label, _kwargs, handle in server.gui.checkboxes}
+                self.assertFalse(checkboxes["예측 chunk 궤적 표시"])
+                self.assertFalse(checkboxes["웨이포인트 자세(6DOF) 표시"])
+                self.assertFalse(checkboxes["TCP 명령 궤적 표시"])
+                self.assertFalse(checkboxes["TCP 기즈모 표시"])
+
+                sliders = {label: (kwargs, handle) for label, kwargs, handle in server.gui.sliders}
+                dot_kwargs, dot_handle = sliders["웨이포인트 dot 크기"]
+                self.assertEqual(dot_kwargs["min"], 0.002)
+                self.assertEqual(dot_kwargs["max"], 0.035)
+                self.assertEqual(dot_kwargs["step"], 0.001)
+                self.assertEqual(dot_handle.value, 0.003)
+                persist_kwargs, persist_handle = sliders["예측 궤적 잔류(초)"]
+                self.assertEqual(persist_kwargs["min"], 2)
+                self.assertEqual(persist_kwargs["max"], 120)
+                self.assertEqual(persist_kwargs["step"], 2)
+                self.assertEqual(persist_handle.value, 74.0)
+                trail_kwargs, trail_handle = sliders["궤적 잔류 길이(점)"]
+                self.assertEqual(trail_kwargs["min"], 100)
+                self.assertEqual(trail_kwargs["max"], 3000)
+                self.assertEqual(trail_kwargs["step"], 50)
+                self.assertEqual(trail_handle.value, 1250)
             finally:
                 os.environ.pop("RB_GUI_SETTINGS_PATH", None)
 

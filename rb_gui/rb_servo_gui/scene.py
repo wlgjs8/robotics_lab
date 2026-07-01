@@ -30,7 +30,7 @@ _DEFAULT_LEFT_POSE = (0.15707, -0.17036, 0.58036, 2.186649, 0.523831, 2.526296)
 _DEFAULT_RIGHT_POSE = (-0.15707, -0.17036, 0.58036, 2.186649, -0.523831, -2.526296)
 _DEFAULT_STAND_MESH_POSE = (0.0, 0.0, 0.001, 0.0, 0.0, -1.57078)
 _TCP_DISPLAY_MODES = ("auto", "actual", "reference", "both")
-_TCP_TRAIL_LIMIT = 200
+_TCP_TRAIL_LIMIT = 600
 _CIRCLE_OVERLAY_POINT_COUNT = 96
 _ASSET_INSTALL_HINT = "Install with python3 -m pip install -e rb_gui"
 
@@ -2156,7 +2156,7 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
             if hasattr(server.scene, "add_icosphere"):
                 handles[f"{arm}_chunk_overlay_cursor"] = server.scene.add_icosphere(
                     f"/stand/{arm}_chunk_overlay_cursor",
-                    radius=0.02,
+                    radius=0.012,
                     color=(255, 255, 90),
                     position=(0.0, 0.0, 0.0),
                 )
@@ -2165,7 +2165,7 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
                     f"/stand/{arm}_chunk_overlay_cursor",
                     points=_points_array(),
                     colors=_colors_array(((255, 255, 90),)),
-                    point_size=0.04,
+                    point_size=0.03,
                     point_shape="rounded",
                 )
         if hasattr(server.scene, "add_line_segments"):
@@ -2296,9 +2296,16 @@ def _update_tcp_trail(
     points = scene_handles.get(f"{key_prefix}_trail_points")
     if handle is None or not isinstance(points, list):
         return
+    limit = _TCP_TRAIL_LIMIT
+    try:
+        candidate = int(scene_handles.get("tcp_trail_limit") or _TCP_TRAIL_LIMIT)
+        if candidate > 0:
+            limit = candidate
+    except (TypeError, ValueError, OverflowError):
+        limit = _TCP_TRAIL_LIMIT
     if not points or points[-1] != position:
         points.append(position)
-        del points[:-_TCP_TRAIL_LIMIT]
+        del points[:-limit]
     color = scene_handles.get(f"{key_prefix}_trail_color", (160, 160, 160))
     try:
         if scene_handles.get("tcp_trail_mode") == "line":
@@ -2398,6 +2405,26 @@ def _hide_chunk_overlay_handles(scene_handles: dict[str, Any], arm: str) -> None
         _set_visible(scene_handles.get(f"{arm}_chunk_overlay{suffix}"), False)
 
 
+def _set_chunk_cursor_size(cursor_handle: Any, dot_size: float | None) -> None:
+    dot_default = 0.022
+    try:
+        dot_value = float(dot_size) if dot_size else dot_default
+        if not math.isfinite(dot_value):
+            raise ValueError
+    except Exception:
+        dot_value = dot_default
+    ratio = (dot_value / dot_default) if dot_size else 1.0
+    ratio = max(0.3, min(2.0, ratio))
+    try:
+        cursor_handle.scale = float(ratio)
+    except Exception:
+        pass
+    try:
+        cursor_handle.point_size = float(max(0.006, min(0.05, dot_value * 1.8)))
+    except Exception:
+        pass
+
+
 def update_chunk_overlay(
     scene_handles: dict[str, Any],
     overlay: ChunkOverlaySnapshot | None,
@@ -2455,12 +2482,14 @@ def update_chunk_overlay(
 
             cursor = overlay.cursor_position(arm, now=now_monotonic)
             if cursor is not None and cursor_handle is not None:
+                _set_chunk_cursor_size(cursor_handle, dot_size)
                 try:
                     cursor_handle.position = cursor
                 except Exception:
                     try:
                         cursor_handle.points = _points_array((cursor,))
                         cursor_handle.colors = _colors_array(((255, 255, 90),))
+                        _set_chunk_cursor_size(cursor_handle, dot_size)
                     except Exception:
                         pass
                 _set_visible(cursor_handle, True)
