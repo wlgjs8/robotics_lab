@@ -22,7 +22,14 @@ ROLLOUT_SUMMARY="${FLOW_INFER_ROLLOUT_SUMMARY:-outputs/rollout_summary.json}"
 mkdir -p "$(dirname "$ROLLOUT_SUMMARY")"
 export PYTHONPATH="$PWD/policy_runner${PYTHONPATH:+:$PYTHONPATH}"
 
+# rb_gui predicted action-chunk overlay: publish each inferred chunk's absolute TCP path
+# (dots/6DOF triads/'now' cursor/tracking-error) to the GUI's chunk-overlay UDP receiver
+# (rb_gui binds udp://0.0.0.0:50262 by default). Telemetry-only; never carries commands.
+# Set to "none" or "" to disable, or point at the GUI host if it runs elsewhere.
+export RB_GUI_CHUNK_OVERLAY_ENDPOINT="${RB_GUI_CHUNK_OVERLAY_ENDPOINT:-udp://127.0.0.1:50262}"
+
 echo "[flow-infer] checkpoint=$CHECKPOINT"
+echo "[flow-infer] chunk_overlay_endpoint=$RB_GUI_CHUNK_OVERLAY_ENDPOINT (rb_gui '예측 chunk 궤적 표시')"
 echo "[flow-infer] config=$CONFIG"
 echo "[flow-infer] rollout_summary=$ROLLOUT_SUMMARY"
 echo "[flow-infer] speed_scale=$SPEED_SCALE chunk_execute_steps=$CHUNK_EXECUTE_STEPS crossfade=$CHUNK_CROSSFADE_STEPS reanchor=$TCP_REANCHOR_MODE"

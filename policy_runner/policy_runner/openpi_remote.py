@@ -39,6 +39,7 @@ import numpy as np
 from .action_sources.tcp_pose_target import cartesian_action_requirements
 from .camera_bundle_client import resolve_frame
 from .flow_dataset import pose_from_state_payload
+from .chunk_overlay_publisher import ChunkOverlayPublisher
 from .flow_inference import (
     DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S,
     DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S,
@@ -460,6 +461,24 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         }
         self._target_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
+        # rb_gui predicted action-chunk overlay publisher. This class skips
+        # super().__init__, so mirror FlowMatchingActionSource's setup here or NOTHING
+        # publishes for openpi-remote rollouts (the inherited next_intent/_activate_chunk
+        # call _publish_chunk_overlay, which no-ops when the publisher is None). Env-gated
+        # via RB_GUI_CHUNK_OVERLAY_ENDPOINT; telemetry-only, best-effort UDP.
+        self._last_overlay_payload = None
+        self._chunk_overlay_seq = 0
+        self._chunk_overlay_publisher = None
+        _overlay_endpoint = os.environ.get("RB_GUI_CHUNK_OVERLAY_ENDPOINT")
+        if _overlay_endpoint and _overlay_endpoint.strip():
+            try:
+                self._chunk_overlay_publisher = ChunkOverlayPublisher(_overlay_endpoint.strip())
+            except Exception as exc:
+                print(
+                    f"WARNING: {self.policy_label}: chunk overlay publisher disabled "
+                    f"for {_overlay_endpoint!r}: {type(exc).__name__}: {exc}",
+                    file=self.stderr,
+                )
         # Patch 3: online tcp_target_pose A-stage conditioning (this class skips
         # super().__init__, so the state the inherited foh helpers touch is set here).
         if str(tcp_target_pose_conditioning) not in CONDITIONING_MODES:

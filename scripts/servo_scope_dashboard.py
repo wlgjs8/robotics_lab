@@ -706,6 +706,13 @@ INDEX_HTML = r"""<!doctype html>
       if (!Number.isFinite(step) || step <= 0) return 1;
       return Math.max(0, Math.min(6, Math.ceil(-Math.log10(step)) + 1));
     }
+    function fmtSci(v) {
+      // Y-axis labels in scientific notation (e.g. 1.2e-3) so magnitude is read
+      // off the exponent regardless of zoom.
+      if (!Number.isFinite(v)) return "";
+      if (v === 0) return "0";
+      return v.toExponential(1);
+    }
     function globalEndTime() {
       let t = -Infinity;
       for (const arm of ARMS) {
@@ -819,12 +826,11 @@ INDEX_HTML = r"""<!doctype html>
       ctx.fillStyle = "#97a3b3";
       ctx.textAlign = "right";
       ctx.textBaseline = "middle";
-      const ydec = axisDecimals((ymax - ymin) / 4);
       for (let i = 0; i <= 4; i++) {
         const y = y0 + (y1 - y0) * i / 4;
         ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
         const value = ymax - (ymax - ymin) * i / 4;
-        ctx.fillText(value.toFixed(ydec), x0 - 6 * dpr, y);
+        ctx.fillText(fmtSci(value), x0 - 6 * dpr, y);
       }
       ctx.textAlign = "center";
       ctx.textBaseline = "top";

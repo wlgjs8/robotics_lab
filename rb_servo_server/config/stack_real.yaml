@@ -294,23 +294,25 @@ safety:
         enable: true
         max_count: 2
         size_m: [0.380, 0.240, 0.105]
-        margin_m: [0.000, 0.000, 0.040]   # per-axis [x,y,z] box-local; x,y=SIDE, z=HEIGHT.
-                                          # side 0mm + d_hard 10mm = ~10mm side keep-out;
-                                          # height 40mm + d_hard 10mm = ~50mm top/bottom keep-out.
+        margin_m: [0.000, 0.000, 0.020]   # per-axis [x,y,z] box-local; x,y=SIDE, z=HEIGHT.
+                                          # side 0mm + d_hard 5mm = ~5mm side keep-out;
+                                          # height 20mm + d_hard 5mm = ~25mm top/bottom keep-out.
         monitor_only: false    # ENFORCE (real): velocity-damper decel/hold at the box surface
         stale_timeout_s: 0.5
         stale_policy: hold
-        # 2026-07-01 BOX-ONLY keep-out barrier (SEPARATE from the floor's `external:` set
-        # below). A box is a keep-out the operator drives TOWARD at teleop speed, so the
-        # slow zone must brake the fastest approach. Root cause of the -37.6mm penetration:
-        # boxes reused the floor's 5mm slow zone → stops only √(2·a·(d_slow−d_hard))=0.12 m/s,
-        # but teleop hit 0.78 m/s → ~40mm overshoot. Here d_slow=80mm stops
-        # √(2·6·(0.080−0.010))=0.92 m/s > observed; recover>0 ejects if it does penetrate.
+        # BOX-ONLY keep-out barrier (SEPARATE from the floor's `external:` set below).
+        # 2026-07-02 TIGHTER keep-out: shrunk from the wide 2026-07-01 zone now that
+        # box-position estimates are trusted closer — height margin 40→20mm, d_hard 10→5mm,
+        # d_slow 80→20mm. Slow-zone width d_slow−d_hard = 15mm still satisfies the invariant
+        # d_slow ≥ d_hard + v_max²/(2·a_brake): with a_brake=6, v_max(0.32–0.40) needs
+        # ≤18.3mm, so it still brakes the command ceiling (√(2·6·0.015)=0.42 m/s).
+        # TRADEOFF: this drops the extra teleop-overshoot margin the 80mm zone gave
+        # (that braked ~0.92 m/s); recover>0 still ejects if a fast approach penetrates.
         barrier:
-          d_hard_m: 0.010          # hard floor (never cross); + margin 40mm = ~50mm from real box
-          d_slow_m: 0.080          # WIDE slow zone: decelerate far so it never arrives fast
-          a_brake_m_s2: 6.0        # braking decel the barrier assumes
-          hyst_m: 0.010
+          d_hard_m: 0.005          # hard floor (never cross); + margin 20mm = ~25mm from real box
+          d_slow_m: 0.020          # slow zone: 15mm brake band (stoppable ~0.42 m/s ≥ command ceiling)
+          a_brake_m_s2: 6.0        # braking decel the barrier assumes (kept: needed to meet d_slow invariant)
+          hyst_m: 0.003            # shrunk with the zone (was 10mm on a 70mm zone) to avoid on/off toggling
           recover_speed_m_s: 0.030 # >0: actively push back out on penetration
           latency_s: 0.010
       # WHOLE-ARM floor: a large thin static box (world frame) so the SAME mesh
