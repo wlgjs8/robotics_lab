@@ -130,14 +130,32 @@ bool testRepositoryConfigsParse() {
         bool has_spacemouse = false;
         bool has_umi = false;
         bool has_flow = false;
+        const rb_servo::TcpPoseTargetProfileConfig* flow_profile = nullptr;
         for (const auto& profile : stack_real.cartesian_control.tcp_pose_target_profiles) {
             has_spacemouse = has_spacemouse || profile.name == "spacemouse_precise";
             has_umi = has_umi || profile.name == "umi_large_smooth";
             has_flow = has_flow || profile.name == "flow_infer_smooth";
+            if (profile.name == "flow_infer_smooth") {
+                flow_profile = &profile;
+            }
         }
         RB_CHECK(has_spacemouse);
         RB_CHECK(has_umi);
         RB_CHECK(has_flow);
+        RB_CHECK(flow_profile != nullptr);
+        RB_CHECK(near(flow_profile->pose_track_smd.natural_frequency_linear_hz, 1.6));
+        RB_CHECK(near(flow_profile->pose_track_smd.natural_frequency_angular_hz, 1.6));
+        RB_CHECK(near(flow_profile->pose_track_smd.max_linear_velocity_m_s, 0.50));
+        RB_CHECK(near(flow_profile->pose_track_smd.max_linear_accel_m_s2, 1.20));
+        RB_CHECK(near(flow_profile->pose_track_smd.max_angular_velocity_rad_s, 1.80));
+        RB_CHECK(near(flow_profile->pose_track_smd.max_angular_accel_rad_s2, 5.00));
+        RB_CHECK(near(flow_profile->pose_track_smd.reengage_relatch_max_step_m, 0.010));
+        RB_CHECK(near(flow_profile->pose_track_smd.reengage_relatch_max_step_rad, 0.10));
+        RB_CHECK(near(flow_profile->pose_track_smd.singularity_scale_full_sigma, 0.12));
+        RB_CHECK(near(flow_profile->pose_track_smd.singularity_scale_floor_sigma, 0.05));
+        RB_CHECK(near(flow_profile->pose_track_smd.singularity_scale_min, 0.12));
+        RB_CHECK(near(flow_profile->max_smd_goal_lead_m, 0.080));
+        RB_CHECK(near(flow_profile->max_smd_goal_lead_rad, 0.35));
         RB_CHECK(stack_real.force_control.provider == "null");
         RB_CHECK(!stack_real.force_control.enable);
         RB_CHECK(stack_real.kinematics.enable);

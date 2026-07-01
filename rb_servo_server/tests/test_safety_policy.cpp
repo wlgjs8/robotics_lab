@@ -883,6 +883,36 @@ bool testSetExternalBoxesCommandParser() {
     return true;
 }
 
+// The external-box feed-liveness watchdog measures RECEIVE time on the shared
+// CommandBuffer, not apply time, so a high-rate motion stream that monopolizes the
+// single latest-command slot cannot starve the signal and false-abort. Encode that
+// property directly: the receive stamp survives a flood of setCommand() and is only
+// advanced by noteExternalBoxReceived().
+bool testExternalBoxReceiveStampSurvivesMotionFlood() {
+    rb_servo::CommandBuffer buffer;
+    RB_CHECK(buffer.lastExternalBoxReceiveNs() == 0);  // no feed yet
+
+    const uint64_t t1 = 1'000'000'000ULL;
+    buffer.noteExternalBoxReceived(t1);
+    RB_CHECK(buffer.lastExternalBoxReceiveNs() == t1);
+
+    // Saturate the latest-command slot the way flow-infer would at command_rate_hz.
+    rb_servo::DualArmCommand motion;
+    motion.left.timeout_sec = 1.0;
+    motion.right.timeout_sec = 1.0;
+    for (int i = 0; i < 1000; ++i) {
+        motion.host_time_ns = t1 + static_cast<uint64_t>(i);
+        buffer.setCommand(motion);
+    }
+    // The motion flood must NOT touch the external-box receive stamp.
+    RB_CHECK(buffer.lastExternalBoxReceiveNs() == t1);
+
+    const uint64_t t2 = t1 + 2'000'000'000ULL;
+    buffer.noteExternalBoxReceived(t2);
+    RB_CHECK(buffer.lastExternalBoxReceiveNs() == t2);
+    return true;
+}
+
 bool testCartesianCommandParser() {
     rb_servo::NetworkConfig network;
     network.command_timeout_sec = 0.35;
@@ -5819,6 +5849,7 @@ bool testFreedriveTeachOnFailureAbortsAndReleases() {
 int main() {
     if (!testCommandValidation()) return 1;
     if (!testSetExternalBoxesCommandParser()) return 1;
+    if (!testExternalBoxReceiveStampSurvivesMotionFlood()) return 1;
     if (!testFreedriveArmingQuiescesUntilIdleThenEngages()) return 1;
     if (!testFreedriveTeachOnFailureAbortsAndReleases()) return 1;
     if (!testCommandSequenceRequiredAndMonotonic()) return 1;

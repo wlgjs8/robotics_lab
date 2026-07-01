@@ -5,6 +5,7 @@ policy_runner/__main__.py
 policy_runner/arm_init_control.py
 policy_runner/camera_bundle_client.py
 policy_runner/camera_preview.py
+policy_runner/chunk_overlay_publisher.py
 policy_runner/config.py
 policy_runner/dataset_manifest.py
 policy_runner/flow_dataset.py
@@ -54,6 +55,8 @@ tests/test_camera_bundle_client.py
 tests/test_camera_preview.py
 tests/test_camera_wrist_source_config.py
 tests/test_chunk_crossfade.py
+tests/test_chunk_overlay_projection.py
+tests/test_chunk_overlay_publisher.py
 tests/test_dual_arm_policy_gate.py
 tests/test_dual_spacemouse_policy_integration.py
 tests/test_flow_dataset.py

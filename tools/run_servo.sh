@@ -15,8 +15,8 @@
 #       sigma_min small + qdot ~0 despite a commanded twist)
 #   server stdout/stderr -> logs/server_<ts>.log
 # Both are timestamped, so successive runs ACCUMULATE (nothing is overwritten).
-# The companion action log (logs/actions_<ts>.jsonl) is emitted by flow-infer
-# itself (default_action_log_path), so no env is needed there either.
+# The companion action log is now opt-in for low-jitter live motion: set
+# POLICY_RUNNER_ACTION_LOG=auto (or a path) on the flow-infer process when needed.
 #
 # Usage:
 #   tools/run_servo.sh [real|sim]      # default: real

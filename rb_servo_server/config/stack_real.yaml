@@ -606,15 +606,22 @@ cartesian_control:
         enable: true
         damping_ratio_linear: 1.0
         damping_ratio_angular: 1.0
-        natural_frequency_linear_hz: 0.8
-        natural_frequency_angular_hz: 0.8
+        # 2x flow-infer rollout profile: keep critically damped SMD, but remove
+        # the old 0.25 m/s, 0.45 m/s^2 bottleneck so --speed-scale 2.0 can track.
+        natural_frequency_linear_hz: 1.6
+        natural_frequency_angular_hz: 1.6
         velocity_feedforward: true
-        max_linear_velocity_m_s: 0.25
-        max_linear_accel_m_s2: 0.45
-        max_angular_velocity_rad_s: 0.90
-        max_angular_accel_rad_s2: 2.50
-      max_smd_goal_lead_m: 0.060
-      max_smd_goal_lead_rad: 0.25
+        max_linear_velocity_m_s: 0.50
+        max_linear_accel_m_s2: 1.20
+        max_angular_velocity_rad_s: 1.80
+        max_angular_accel_rad_s2: 5.00
+        reengage_relatch_max_step_m: 0.010
+        reengage_relatch_max_step_rad: 0.10
+        singularity_scale_full_sigma: 0.12
+        singularity_scale_floor_sigma: 0.05
+        singularity_scale_min: 0.12
+      max_smd_goal_lead_m: 0.080
+      max_smd_goal_lead_rad: 0.35
   linear_move:
     min_duration_sec: 0.05
     max_duration_sec: 10.0

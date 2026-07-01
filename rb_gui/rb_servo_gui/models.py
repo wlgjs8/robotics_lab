@@ -8,6 +8,7 @@ import time
 DOF = 6
 TCP_DISPLAY_MODES = ("auto", "actual", "reference", "both")
 CIRCLE_OVERLAY_SCHEMA_VERSION = "robotics_lab.circle_overlay.v1"
+CHUNK_OVERLAY_SCHEMA_VERSION = "robotics_lab.chunk_overlay.v1"
 # TODO: tune with operator.
 EXTERNAL_BOX_NEAR_M = 0.10
 EXTERNAL_BOX_COLLISION_M = 0.0
@@ -88,6 +89,29 @@ def _parse_quaternion_xyzw(value: Mapping[str, Any]) -> tuple[float, float, floa
     if not math.isfinite(norm) or norm <= 0.0:
         return None
     return (parsed[0] / norm, parsed[1] / norm, parsed[2] / norm, parsed[3] / norm)
+
+
+def _parse_chunk_waypoints(value: Any, *, horizon: int) -> tuple[tuple[float, float, float], ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list | tuple):
+        return None
+    if len(value) == 0:
+        return None
+    if len(value) != horizon:
+        return None
+    positions: list[tuple[float, float, float]] = []
+    for waypoint in value:
+        if not isinstance(waypoint, list | tuple) or len(waypoint) != 7:
+            return None
+        try:
+            parsed = tuple(float(item) for item in waypoint)
+        except Exception:
+            return None
+        if not all(math.isfinite(item) for item in parsed):
+            return None
+        positions.append((parsed[0], parsed[1], parsed[2]))
+    return tuple(positions)
 
 
 @dataclass(frozen=True)
@@ -180,6 +204,63 @@ class CircleOverlaySnapshot:
         )
 
     def stale(self, *, now: float | None = None, threshold_sec: float = 1.0) -> bool:
+        now_value = time.monotonic() if now is None else now
+        return now_value - self.received_monotonic > threshold_sec
+
+
+@dataclass(frozen=True)
+class ChunkOverlaySnapshot:
+    schema_version: str
+    received_monotonic: float
+    seq: int
+    policy_dt_sec: float
+    horizon: int
+    left_positions: tuple[tuple[float, float, float], ...] | None
+    right_positions: tuple[tuple[float, float, float], ...] | None
+    raw: Mapping[str, Any]
+
+    @classmethod
+    def parse(
+        cls,
+        data: Mapping[str, Any],
+        *,
+        received_monotonic: float | None = None,
+    ) -> "ChunkOverlaySnapshot | None":
+        if data.get("schema_version") != CHUNK_OVERLAY_SCHEMA_VERSION:
+            return None
+        seq = data.get("seq")
+        horizon = data.get("horizon")
+        if not isinstance(seq, int) or seq < 0:
+            return None
+        if not isinstance(horizon, int) or horizon <= 0:
+            return None
+        policy_dt_sec = _optional_finite(data.get("policy_dt_sec"))
+        if policy_dt_sec is None or policy_dt_sec < 0.0:
+            return None
+        left_raw = data.get("left")
+        right_raw = data.get("right")
+        left_positions = _parse_chunk_waypoints(left_raw, horizon=horizon)
+        right_positions = _parse_chunk_waypoints(right_raw, horizon=horizon)
+        left_empty = isinstance(left_raw, list | tuple) and len(left_raw) == 0
+        right_empty = isinstance(right_raw, list | tuple) and len(right_raw) == 0
+        if left_raw is not None and not left_empty and left_positions is None:
+            return None
+        if right_raw is not None and not right_empty and right_positions is None:
+            return None
+        if not left_positions and not right_positions:
+            return None
+        return cls(
+            schema_version=CHUNK_OVERLAY_SCHEMA_VERSION,
+            received_monotonic=time.monotonic() if received_monotonic is None else received_monotonic,
+            seq=seq,
+            policy_dt_sec=policy_dt_sec,
+            horizon=horizon,
+            left_positions=left_positions,
+            right_positions=right_positions,
+            raw=data,
+        )
+
+    def stale(self, *, now: float | None = None, threshold_sec: float = 5.0) -> bool:
         now_value = time.monotonic() if now is None else now
         return now_value - self.received_monotonic > threshold_sec
 

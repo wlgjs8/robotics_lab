@@ -1046,9 +1046,20 @@ def _main_with_subcommands(argv: list[str]) -> int:
         type=float,
         default=0.0334,
         help=(
-            "Seconds represented by one flow action step. Controller/real flow rollout "
-            "requires this value or checkpoint dataset_stats.dt_mean_sec; sim_dryrun "
+            "Seconds represented by one flow action step before --speed-scale. Controller/real "
+            "flow rollout requires this value or checkpoint dataset_stats.dt_mean_sec; sim_dryrun "
             "can fall back to 1/command_rate_hz."
+        ),
+    )
+    flow_infer.add_argument(
+        "--speed-scale",
+        type=float,
+        default=1.5,
+        help=(
+            "Replay policy action steps faster/slower without changing the model: effective "
+            "policy_dt = policy_dt_sec / speed_scale, while source-side velocity clamps are "
+            "multiplied by speed_scale so the same per-step deltas are not clipped. Use 2.0 "
+            "for 2x flow-infer motion after the server flow_infer_smooth profile is tuned."
         ),
     )
     flow_infer.add_argument(
@@ -1183,11 +1194,11 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--chunk-crossfade-steps",
         type=int,
-        default=0,
+        default=2,
         help=(
             "Blend the first N actions after each chunk-resample boundary from the "
             "previously emitted action (alpha 0->1) to remove the boundary jerk "
-            "without steady-state lag. 0 (default) disables crossfade. Try 2-3."
+            "without steady-state lag. Default 2; set 0 to disable."
         ),
     )
     flow_infer.add_argument("--max-linear-step-m", type=float, default=0.020)
@@ -1223,11 +1234,12 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--tcp-target-pose-reanchor-mode",
         choices=["measured_legacy", "last_emitted_continuous", "measured_blend"],
-        default="measured_legacy",
+        default="measured_blend",
         help=(
-            "Chunk-boundary handling for foh_se3. measured_legacy (default): reanchor straight to measured. "
-            "measured_blend: anchor the new chunk to the measured pose for drift correction but blend in from the last emitted "
-            "target (no one-tick jump). last_emitted_continuous: perfect continuity, no drift correction (tests/sim)."
+            "Chunk-boundary handling for foh_se3. measured_blend (default): anchor the new chunk to the measured "
+            "pose for drift correction but blend in from the last emitted target (no one-tick jump). "
+            "measured_legacy reanchors straight to measured. last_emitted_continuous gives perfect continuity "
+            "without drift correction (tests/sim)."
         ),
     )
     flow_infer.add_argument("--tcp-target-pose-blend-steps", type=int, default=8)
@@ -1924,18 +1936,35 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 _occ.close()
                 _osc.close()
         try:
-            policy_dt_sec = resolve_flow_policy_dt_sec(
+            base_policy_dt_sec = resolve_flow_policy_dt_sec(
                 rollout_policy.mode,
                 policy_dt_sec=args.policy_dt_sec,
                 command_rate_hz=config.command_rate_hz,
                 dataset_stats=dataset_stats,
             )
+            speed_scale = float(getattr(args, "speed_scale", 1.0) or 1.0)
+            if not (speed_scale > 0.0):
+                raise ValueError("--speed-scale must be positive")
+            policy_dt_sec = float(base_policy_dt_sec) / speed_scale
+            max_linear_velocity_m_s = (
+                None if args.max_linear_velocity_m_s is None else float(args.max_linear_velocity_m_s) * speed_scale
+            )
+            max_angular_velocity_rad_s = (
+                None if args.max_angular_velocity_rad_s is None else float(args.max_angular_velocity_rad_s) * speed_scale
+            )
+            if abs(speed_scale - 1.0) > 1e-6:
+                print(
+                    f"[flow-infer] speed_scale={speed_scale:g}: policy_dt "
+                    f"{float(base_policy_dt_sec):.4f}s -> {policy_dt_sec:.4f}s, "
+                    f"linear clamp={max_linear_velocity_m_s}, angular clamp={max_angular_velocity_rad_s}",
+                    flush=True,
+                )
             source_kwargs = {
                 "timeout_sec": config.servo_command.timeout_sec,
                 "camera_client": camera_client,
                 "policy_dt_sec": policy_dt_sec,
-                "max_linear_velocity_m_s": args.max_linear_velocity_m_s,
-                "max_angular_velocity_rad_s": args.max_angular_velocity_rad_s,
+                "max_linear_velocity_m_s": max_linear_velocity_m_s,
+                "max_angular_velocity_rad_s": max_angular_velocity_rad_s,
                 "max_linear_step_m": args.max_linear_step_m,
                 "max_angular_step_rad": args.max_angular_step_rad,
                 "chunk_execute_steps": args.chunk_execute_steps,
@@ -2058,6 +2087,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             # never blocks on inference (removes the pulsed start/stop vibration).
             if rollout_policy.mode.value in {"controller_sim", "real_policy", "real_readonly"}:
                 source.enable_async_chunking = True
+                source.nonblocking_stream_inference = True
             # Hold the gripper open for the first N policy steps (reach-before-grasp).
             source.gripper_open_hold_steps = int(getattr(args, "gripper_open_hold_steps", 0) or 0)
             # Interpret the action gripper dim as an absolute opening (default,

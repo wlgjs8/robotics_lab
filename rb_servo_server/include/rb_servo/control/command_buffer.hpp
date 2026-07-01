@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <deque>
 #include <mutex>
 #include <optional>
@@ -21,10 +23,20 @@ public:
     void updateLease(const CommandSourceLeaseState& lease, uint64_t now_ns);
     DualArmCommand latestOrHold(uint64_t now_ns);
 
+    // External-box keep-out feed liveness. Stamped on the network RECEIVE thread
+    // for every accepted SetExternalBoxes packet (independent of whether the
+    // control loop later samples/applies it), so the servo-side liveness watchdog
+    // (checkExternalBoxFeedOrAbort) measures true producer aliveness and is not
+    // starved by a high-rate motion stream monopolizing the single latest-command
+    // slot. Read on the control thread. 0 means no feed received yet.
+    void noteExternalBoxReceived(uint64_t receive_time_ns);
+    uint64_t lastExternalBoxReceiveNs() const;
+
 private:
     mutable std::mutex mutex_;
     std::optional<DualArmCommand> latest_command_;
     std::deque<DualArmCommand> pending_lifecycle_commands_;
+    std::atomic<uint64_t> last_external_box_receive_ns_{0};
 };
 
 }  // namespace rb_servo

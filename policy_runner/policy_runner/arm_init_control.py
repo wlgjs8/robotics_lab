@@ -3,6 +3,9 @@ from __future__ import annotations
 import copy
 import json
 import math
+import os
+import sys
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -10,6 +13,30 @@ from .servo_command_client import CommandIntent
 
 
 ARM_INIT_COMMAND_SCHEMA = "robotics_lab.arm_init_cmd.v1"
+
+# Debug instrumentation for the flow-infer vs InitMotion cancel race. When enabled
+# (RB_ARM_INIT_DEBUG=1) every latch transition is logged WITH ITS CAUSE so a
+# committed init move that gets cancelled by a leaked flow TcpPoseTarget can be
+# traced to either (a) a cancel/toggle edge or (b) a server-status-driven clear.
+# Default off -> zero behavior/output change for normal runs and tests.
+_ARM_INIT_DEBUG = os.environ.get("RB_ARM_INIT_DEBUG", "").strip().lower() not in {
+    "",
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+
+def _dbg(msg: str) -> None:
+    if not _ARM_INIT_DEBUG:
+        return
+    try:
+        now = time.time()
+        wall = time.strftime("%H:%M:%S", time.localtime(now)) + f".{int((now % 1) * 1000):03d}"
+        print(f"[arm_init {wall} mono_ns={time.monotonic_ns()}] {msg}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
 ARM_INIT_STATE_SCHEMA = "robotics_lab.arm_init_state.v1"
 
 
@@ -110,6 +137,8 @@ class ArmInitOverrideController:
             "cancelled": set(),
             "failed": set(),
         }
+        # Edge state for the compose_intent leak detector (debug-only).
+        self._dbg_prev_any_on = False
 
     @property
     def left_on(self) -> bool:
@@ -143,6 +172,12 @@ class ArmInitOverrideController:
             action = "start" if failed and not self.allow_manual_cancel_after_failed else (
                 "cancel" if any(self._runtime(arm).on for arm in arms) else "start"
             )
+        _dbg(
+            f"cmd recv arms={command.arms} action_req={command.action} -> resolved={action} "
+            f"(pre left_on={self._left.on} right_on={self._right.on} "
+            f"left_fail={self._left.fail} right_fail={self._right.fail} "
+            f"left_status={self._left.server_status} right_status={self._right.server_status})"
+        )
         if action == "cancel":
             return self._cancel_arms(arms)
         return self._start_arms(arms)
@@ -204,6 +239,11 @@ class ArmInitOverrideController:
             message = _format_failed_message(arm_block)
             if not message:
                 message = str(arm_block.get("message", "") or "")
+            if status and status != runtime.server_status:
+                _dbg(
+                    f"{arm} server_status {runtime.server_status or 'none'} -> {status} "
+                    f"(latch on={runtime.on} msg={message!r})"
+                )
             if status:
                 runtime.server_status = status
             if message:
@@ -227,6 +267,28 @@ class ArmInitOverrideController:
         return changed
 
     def compose_intent(self, intent: CommandIntent | None) -> CommandIntent | None:
+        if _ARM_INIT_DEBUG:
+            any_on = self.left_on or self.right_on
+            if any_on != self._dbg_prev_any_on:
+                if any_on:
+                    _dbg(f"OVERRIDE ENGAGED left_on={self.left_on} right_on={self.right_on}")
+                else:
+                    left_mode = (
+                        intent.left.get("mode")
+                        if intent is not None and isinstance(intent.left, dict)
+                        else None
+                    )
+                    right_mode = (
+                        intent.right.get("mode")
+                        if intent is not None and isinstance(intent.right, dict)
+                        else None
+                    )
+                    _dbg(
+                        "OVERRIDE DROPPED both off -> flow passes through to server "
+                        f"(flow left_mode={left_mode} right_mode={right_mode}) "
+                        "<- this tick's flow command can CANCEL a committed init move"
+                    )
+                self._dbg_prev_any_on = any_on
         if not self.left_on and not self.right_on:
             return intent
         left = _arm_payload(intent.left if intent is not None else None)
@@ -328,9 +390,12 @@ class ArmInitOverrideController:
         changed = False
         for arm in arms:
             runtime = self._runtime(arm)
+            was_on = runtime.on
             if not runtime.on or runtime.fail:
                 self._pending["started"].add(arm)
                 changed = True
+            if not was_on:
+                _dbg(f"{arm} latch SET cause=start")
             runtime.on = True
             runtime.fail = False
             runtime.fail_mode = ""
@@ -353,6 +418,10 @@ class ArmInitOverrideController:
             if runtime.on or runtime.state.startswith("init"):
                 self._pending["cancelled"].add(arm)
                 changed = True
+                _dbg(
+                    f"{arm} latch CLEAR cause=cancel "
+                    f"(prev on={runtime.on} server_status={runtime.server_status} state={runtime.state})"
+                )
             runtime.on = False
             runtime.fail = False
             runtime.fail_mode = ""
@@ -370,6 +439,12 @@ class ArmInitOverrideController:
 
     def _mark_done(self, arm: str) -> None:
         runtime = self._runtime(arm)
+        _cleared = self.auto_clear_on_done and self.resume_flow_on_done
+        _dbg(
+            f"{arm} server reported DONE while latch on={runtime.on} "
+            f"(server_status={runtime.server_status}); "
+            f"latch {'CLEAR->flow' if _cleared else 'HOLD'} cause=done"
+        )
         if runtime.state != "init done":
             self._pending["done"].add(arm)
         runtime.fail = False
@@ -390,6 +465,12 @@ class ArmInitOverrideController:
 
     def _mark_failed(self, arm: str, message: str) -> None:
         runtime = self._runtime(arm)
+        _cleared = self.auto_clear_on_failed or self.resume_flow_on_failed
+        _dbg(
+            f"{arm} server reported FAILED while latch on={runtime.on} "
+            f"(server_status={runtime.server_status} msg={message!r}); "
+            f"latch {'CLEAR->flow' if _cleared else 'HOLD(fail-closed)'} cause=failed"
+        )
         if not runtime.fail:
             self._pending["failed"].add(arm)
         runtime.fail = True

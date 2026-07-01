@@ -171,7 +171,10 @@ JointArray TrajectoryFilter::smdJointTarget(
     // — those modes bypass this filter entirely, so deactivate() may not have
     // been called). The internal state must always continue exactly from the
     // caller's previous_sent_target to stay jump-free.
-    constexpr double kContinuityTolDeg = 1e-6;
+    // Ignore tiny prev_sent mismatches from numerical noise, safety limiting, or
+    // output smoothing. A 1e-6 deg exact-continuity requirement can reseed the SMD
+    // every tick and defeat acceleration smoothing during init-motion handoff.
+    constexpr double kContinuityTolDeg = 0.02;
     // How far the SMD's last output drifted from what was actually sent (safety/output-MA
     // can modify it). A non-trivial mismatch here forces a reset below, which defeats the
     // SMD's smoothing — instrumented to diagnose init-motion jerk.

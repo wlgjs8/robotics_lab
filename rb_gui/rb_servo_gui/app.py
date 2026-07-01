@@ -50,12 +50,14 @@ from .geometry import (
 from .models import (
     EXTERNAL_BOX_LABEL_SLOTS,
     ArmSnapshot,
+    ChunkOverlaySnapshot,
     CircleOverlaySnapshot,
     Pose6D,
     StateSnapshot,
     box_lock_status_text,
     external_box_display,
 )
+from .chunk_overlay_receiver import ChunkOverlayReceiver, ChunkOverlayStore
 from .overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
 from .pointcloud_receiver import (
     StereoCloudReceiver,
@@ -99,6 +101,7 @@ from .scene import (
     _update_urdf_config,
     set_ik_infeasible_region_visible,
     set_reach_envelope_visible,
+    update_chunk_overlay,
     update_circle_overlay,
     update_floor_check_points,
     update_floor_plane,
@@ -203,6 +206,48 @@ _OPERATOR_MONITOR_GAP_EM = 1.0
 _OPERATOR_MONITOR_SPLIT_EM = 35.5
 
 
+def _tcp_command_trail_visible(handles: dict[str, Any]) -> bool:
+    toggle = handles.get("tcp_command_trail_toggle")
+    if toggle is not None:
+        try:
+            visible = bool(toggle.value)
+            handles["tcp_command_trail_visible"] = visible
+            return visible
+        except Exception:
+            pass
+    return bool(handles.get("tcp_command_trail_visible", False))
+
+
+def _hide_tcp_command_trails(handles: dict[str, Any]) -> None:
+    scene_handles = handles.get("scene", {})
+    if not isinstance(scene_handles, dict):
+        return
+    for arm in ("left", "right"):
+        handle = scene_handles.get(f"{arm}_tcp_cmd_trail")
+        if handle is None:
+            continue
+        try:
+            handle.visible = False
+        except Exception:
+            pass
+
+
+def _chunk_overlay_visible(handles: dict[str, Any]) -> bool:
+    toggle = handles.get("chunk_overlay_toggle")
+    if toggle is not None:
+        try:
+            visible = bool(toggle.value)
+            handles["chunk_overlay_visible"] = visible
+            return visible
+        except Exception:
+            pass
+    return bool(handles.get("chunk_overlay_visible", False))
+
+
+def _hide_chunk_overlays(handles: dict[str, Any]) -> None:
+    update_chunk_overlay(handles.get("scene", {}), None, visible=False)
+
+
 def _env_int(name: str, fallback: int) -> int:
     try:
         return int(os.environ.get(name, str(fallback)))
@@ -290,6 +335,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--chunk-overlay-bind",
+        default=None,
+        help=(
+            "UDP endpoint for predicted action-chunk overlay packets, for example "
+            "udp://0.0.0.0:50262. Use 'none' or an empty value to disable. "
+            "Defaults to RB_GUI_CHUNK_OVERLAY_BIND or udp://0.0.0.0:50262."
+        ),
+    )
+    parser.add_argument(
         "--check-assets",
         action="store_true",
         help="Print rb_gui URDF, mesh, and visualization dependency diagnostics, then exit.",
@@ -301,6 +355,13 @@ def _circle_overlay_bind_from_args_env(args: argparse.Namespace) -> tuple[str, i
     endpoint = args.circle_overlay_bind
     if endpoint is None:
         endpoint = os.environ.get("RB_GUI_CIRCLE_OVERLAY_BIND", "none")
+    return parse_udp_bind(endpoint)
+
+
+def _chunk_overlay_bind_from_args_env(args: argparse.Namespace) -> tuple[str, int] | None:
+    endpoint = args.chunk_overlay_bind
+    if endpoint is None:
+        endpoint = os.environ.get("RB_GUI_CHUNK_OVERLAY_BIND", "udp://0.0.0.0:50262")
     return parse_udp_bind(endpoint)
 
 
@@ -2152,10 +2213,12 @@ def build_gui(
     safety: OperatorSafety,
     store: StateStore,
     overlay_store: CircleOverlayStore | None = None,
+    chunk_overlay_store: ChunkOverlayStore | None = None,
     recording_status_store: RecordingStatusStore | None = None,
 ) -> dict[str, Any]:
     handles: dict[str, Any] = {}
     handles["circle_overlay_enabled"] = overlay_store is not None
+    handles["chunk_overlay_enabled"] = chunk_overlay_store is not None
     handles["recording_status_store"] = recording_status_store
     # Dark mode is the default; set RB_GUI_DARK_MODE=0 to launch in light mode.
     dark_default = os.environ.get("RB_GUI_DARK_MODE", "1") != "0"
@@ -2241,6 +2304,18 @@ def build_gui(
             initial_value=_format_circle_overlay_status(None, stale=True, enabled=overlay_store is not None),
             disabled=True,
         )
+        handles["chunk_overlay_visible"] = False
+        if hasattr(server.gui, "add_checkbox"):
+            handles["chunk_overlay_toggle"] = server.gui.add_checkbox(
+                "예측 chunk 궤적 표시", initial_value=False
+            )
+
+            @handles["chunk_overlay_toggle"].on_update
+            def _(_: Any) -> None:
+                handles["chunk_overlay_visible"] = bool(handles["chunk_overlay_toggle"].value)
+                if not handles["chunk_overlay_visible"]:
+                    _hide_chunk_overlays(handles)
+
         handles["cartesian_solve"] = server.gui.add_text("IK solve", initial_value="IK: no state", disabled=True)
         handles["tcp_display_mode"] = "auto"
         handles["tcp_display_buttons"] = {}
@@ -2256,6 +2331,20 @@ def build_gui(
                 handles["tcp_display_mode"] = display_mode
                 _update_tcp_display_buttons(handles)
                 handles["tcp_tracking"].value = f"TCP display: {display_mode}"
+
+        handles["tcp_command_trail_visible"] = False
+        if hasattr(server.gui, "add_checkbox"):
+            handles["tcp_command_trail_toggle"] = server.gui.add_checkbox(
+                "TCP 명령 궤적 표시", initial_value=False
+            )
+
+            @handles["tcp_command_trail_toggle"].on_update
+            def _(_: Any) -> None:
+                handles["tcp_command_trail_visible"] = bool(
+                    handles["tcp_command_trail_toggle"].value
+                )
+                if not handles["tcp_command_trail_visible"]:
+                    _hide_tcp_command_trails(handles)
 
         handles["ops"] = server.gui.add_text(
             "Container ops",
@@ -3531,6 +3620,14 @@ def _latest_circle_overlay(
     return overlay_store.latest(), overlay_store.is_stale()
 
 
+def _latest_chunk_overlay(
+    chunk_overlay_store: ChunkOverlayStore | None,
+) -> tuple[ChunkOverlaySnapshot | None, bool]:
+    if chunk_overlay_store is None:
+        return None, True
+    return chunk_overlay_store.latest(), chunk_overlay_store.is_stale()
+
+
 def _recording_cmd_endpoint() -> tuple[str, int]:
     """policy_runner record_cmd.v1 destination."""
     return parse_udp_endpoint(
@@ -3973,6 +4070,16 @@ def _update_circle_overlay_gui(handles: dict[str, Any], overlay_store: CircleOve
     update_circle_overlay(handles.get("scene", {}), overlay, stale=stale)
 
 
+def _update_chunk_overlay_gui(handles: dict[str, Any], chunk_overlay_store: ChunkOverlayStore | None) -> None:
+    overlay, stale = _latest_chunk_overlay(chunk_overlay_store)
+    update_chunk_overlay(
+        handles.get("scene", {}),
+        overlay,
+        stale=stale,
+        visible=_chunk_overlay_visible(handles),
+    )
+
+
 def _update_lease_owner(
     handles: dict[str, Any],
     latest: StateSnapshot | None,
@@ -4341,6 +4448,7 @@ def update_gui(
     safety: OperatorSafety,
     store: StateStore,
     overlay_store: CircleOverlayStore | None = None,
+    chunk_overlay_store: ChunkOverlayStore | None = None,
 ) -> None:
     _update_stereo_cloud(handles)  # 로봇 상태와 무관 — 항상 갱신
     latest = store.latest()
@@ -4387,6 +4495,7 @@ def update_gui(
     readiness = safety.readiness()
     _update_lease_owner(handles, latest, safety.command_client.source_id, held=safety.command_client.hold_lease)
     _update_circle_overlay_gui(handles, overlay_store)
+    _update_chunk_overlay_gui(handles, chunk_overlay_store)
     _update_recording_panel(handles, latest, stale=stale)
     _update_arm_init_panel(handles, latest, stale=stale)
     if latest is None:
@@ -4578,7 +4687,12 @@ def update_gui(
     _update_operator_monitors(handles, latest, stale=stale)
     _push_gripper_percent(handles, latest)
     _update_gripper_feedback(handles, latest, stale=stale)
-    update_scene_markers(handles.get("scene", {}), latest, tcp_display_mode=_tcp_display_mode(handles))
+    update_scene_markers(
+        handles.get("scene", {}),
+        latest,
+        tcp_display_mode=_tcp_display_mode(handles),
+        show_tcp_command_trail=_tcp_command_trail_visible(handles),
+    )
     # After markers (TCP frames now posed): toggle the orange floor-check points,
     # which are parented under /stand/<arm>_tcp and ride those poses.
     _floor_points_toggle = handles.get("floor_check_points_toggle")
@@ -4981,6 +5095,18 @@ def main(argv: list[str] | None = None) -> None:
         overlay_store = CircleOverlayStore()
         overlay_receiver = CircleOverlayReceiver(overlay_store, host=overlay_host, port=overlay_port)
         overlay_receiver.start()
+    chunk_overlay_bind = _chunk_overlay_bind_from_args_env(args)
+    chunk_overlay_store: ChunkOverlayStore | None = None
+    chunk_overlay_receiver: ChunkOverlayReceiver | None = None
+    if chunk_overlay_bind is not None:
+        chunk_overlay_host, chunk_overlay_port = chunk_overlay_bind
+        chunk_overlay_store = ChunkOverlayStore()
+        chunk_overlay_receiver = ChunkOverlayReceiver(
+            chunk_overlay_store,
+            host=chunk_overlay_host,
+            port=chunk_overlay_port,
+        )
+        chunk_overlay_receiver.start()
     recording_status_store = RecordingStatusStore()
     recording_status_receiver: RecordingStatusReceiver | None = None
     recording_status_host, recording_status_port = _recording_status_bind_endpoint()
@@ -5018,6 +5144,7 @@ def main(argv: list[str] | None = None) -> None:
         safety,
         store,
         overlay_store=overlay_store,
+        chunk_overlay_store=chunk_overlay_store,
         recording_status_store=recording_status_store,
     )
     handles["_stereo_store"] = stereo_store
@@ -5035,21 +5162,34 @@ def main(argv: list[str] | None = None) -> None:
         if recording_status_receiver is not None
         else ", recording status disabled"
     )
+    chunk_overlay_status = (
+        f", chunk overlay UDP {chunk_overlay_bind[0]}:{chunk_overlay_bind[1]}"
+        if chunk_overlay_bind is not None
+        else ", chunk overlay disabled"
+    )
     print(
         f"rb_servo_gui listening on http://{host}:{port}, UDP state {state_host}:{state_port}"
-        f"{overlay_status}{recording_status}",
+        f"{overlay_status}{chunk_overlay_status}{recording_status}",
         flush=True,
     )
 
     try:
         while True:
-            update_gui(handles, safety, store, overlay_store=overlay_store)
+            update_gui(
+                handles,
+                safety,
+                store,
+                overlay_store=overlay_store,
+                chunk_overlay_store=chunk_overlay_store,
+            )
             time.sleep(0.1)
     finally:
         receiver.stop()
         stereo_receiver.stop()
         if overlay_receiver is not None:
             overlay_receiver.stop()
+        if chunk_overlay_receiver is not None:
+            chunk_overlay_receiver.stop()
         if recording_status_receiver is not None:
             recording_status_receiver.stop()
         close_recording_cmd = getattr(handles.get("recording_cmd_client"), "close", None)

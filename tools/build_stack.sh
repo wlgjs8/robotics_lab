@@ -60,6 +60,33 @@ cmake -S rb_servo_server -B "$BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Release -DRB_SERVO_ENABLE_RBPODO=ON
 cmake --build "$BUILD_DIR" -j "$JOBS"
 
+# 2b) ODR / stale-object SAFETY guard. cmake's incremental header-dependency tracking
+#     can MISS transitively-config-dependent TUs when a struct-layout header
+#     (config.hpp) changes, leaving a MIXED-LAYOUT binary (ODR). That silently corrupts
+#     runtime config and can DISABLE a safety guard — a real 2026-07 incident where a
+#     mixed build let an arm penetrate the floor while FloorViolation was still detected.
+#     Fail closed: if any object linked into the SERVER (core lib + exe, not tests) is
+#     older than config.hpp, refuse to ship the binary and demand a clean rebuild.
+#     (Add more struct headers to STRUCT_HDRS if their layout changes bite similarly.)
+STRUCT_HDRS=("rb_servo_server/include/rb_servo/config/config.hpp")
+STALE_OBJS=""
+for hdr in "${STRUCT_HDRS[@]}"; do
+  found=$(find "$BUILD_DIR/CMakeFiles/rb_servo_core.dir" \
+               "$BUILD_DIR/CMakeFiles/rb_servo_server.dir" \
+               -name '*.o' ! -newer "$hdr" 2>/dev/null || true)
+  [ -n "$found" ] && STALE_OBJS+="$found"$'\n'
+done
+if [ -n "${STALE_OBJS//[$'\n\t ']/}" ]; then
+  echo "[build] FATAL: server object(s) are OLDER than a struct-layout header after build." >&2
+  echo "[build]        The incremental build is LAYOUT-INCONSISTENT (ODR) — it can silently" >&2
+  echo "[build]        corrupt runtime safety config (floor/collision). Clean rebuild required:" >&2
+  echo "[build]            rm -rf $BUILD_DIR && make build" >&2
+  echo "[build]        stale objects:" >&2
+  printf '%s' "$STALE_OBJS" | sed '/^$/d;s/^/[build]          /' >&2
+  exit 1
+fi
+echo "[build] ODR guard: OK (all server objects newer than ${STRUCT_HDRS[*]})"
+
 # 3) RT capabilities — stripped by every rebuild, so (re)apply via run_sudo.
 if ! getcap "$SERVER_BIN" 2>/dev/null | grep -q cap_sys_nice; then
   if run_sudo setcap "$RT_CAPS" "$SERVER_BIN"; then

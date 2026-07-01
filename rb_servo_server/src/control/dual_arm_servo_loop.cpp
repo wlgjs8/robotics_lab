@@ -1538,10 +1538,91 @@ DualArmServoLoop::~DualArmServoLoop() {
     eraseReferenceSupervisionState(this);
 }
 
+void DualArmServoLoop::plannerWorkerMain() {
+    for (;;) {
+        PlannerJob job;
+        {
+            std::unique_lock<std::mutex> lk(planner_mtx_);
+            planner_cv_.wait(lk, [&]() {
+                return planner_stop_ ||
+                       planner_pending_[0].has_value() ||
+                       planner_pending_[1].has_value() ||
+                       planner_pending_[2].has_value();
+            });
+            if (planner_stop_) {
+                return;
+            }
+            for (int i = 0; i < 3; ++i) {
+                if (planner_pending_[i].has_value()) {
+                    job = std::move(*planner_pending_[i]);
+                    planner_pending_[i].reset();
+                    break;
+                }
+            }
+        }
+
+        PlannerResultSlot res;
+        res.generation = job.generation;
+        res.valid = true;
+        res.is_linear = job.is_linear;
+        if (job.is_linear) {
+            res.linear_result = init_motion_planner_->planLinearMove(
+                job.start_left, job.start_right, job.lin_left_active, job.lin_goal_left,
+                job.lin_right_active, job.lin_goal_right, job.slerp, job.lin_samples);
+        } else {
+            res.init_result = init_motion_planner_->plan(
+                job.start_left, job.start_right, job.request_left, job.target_left,
+                job.request_right, job.target_right);
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(planner_mtx_);
+            planner_result_[static_cast<int>(job.requester)] = std::move(res);
+        }
+    }
+}
+
+uint64_t DualArmServoLoop::postPlannerJob(PlannerJob job) {
+    std::lock_guard<std::mutex> lk(planner_mtx_);
+    job.generation = ++planner_job_seq_;
+    const uint64_t generation = job.generation;
+    planner_pending_[static_cast<int>(job.requester)] = std::move(job);
+    planner_cv_.notify_one();
+    return generation;
+}
+
+bool DualArmServoLoop::takePlannerResult(
+    PlannerRequester requester,
+    uint64_t generation,
+    PlannerResultSlot& out
+) {
+    std::lock_guard<std::mutex> lk(planner_mtx_);
+    PlannerResultSlot& slot = planner_result_[static_cast<int>(requester)];
+    if (slot.valid && slot.generation == generation) {
+        out = slot;
+        slot.valid = false;
+        return true;
+    }
+    return false;
+}
+
 bool DualArmServoLoop::start() {
     if (running_) return true;
     if (!initializeRobots()) {
         return false;
+    }
+    if (init_motion_planner_ && !planner_worker_.joinable()) {
+        {
+            std::lock_guard<std::mutex> lk(planner_mtx_);
+            planner_stop_ = false;
+            for (auto& pending : planner_pending_) {
+                pending.reset();
+            }
+            for (PlannerResultSlot& result : planner_result_) {
+                result = PlannerResultSlot{};
+            }
+        }
+        planner_worker_ = std::thread(&DualArmServoLoop::plannerWorkerMain, this);
     }
     running_ = true;
     startup_complete_ = false;
@@ -1562,6 +1643,14 @@ void DualArmServoLoop::stop() {
     running_ = false;
     if (thread_.joinable()) {
         thread_.join();
+    }
+    {
+        std::lock_guard<std::mutex> lk(planner_mtx_);
+        planner_stop_ = true;
+    }
+    planner_cv_.notify_all();
+    if (planner_worker_.joinable()) {
+        planner_worker_.join();
     }
     // The loop thread is joined (no race on the freedrive stage atomics) but the
     // workers/backends are still connected — issue freedrive_teach_off now for any
@@ -1727,15 +1816,25 @@ void DualArmServoLoop::checkExternalBoxFeedOrAbort(uint64_t now_ns) {
         return;
     }
     if (external_box_enforce_start_ns_ == 0) external_box_enforce_start_ns_ = now_ns;
-    // Startup grace lets the producer (camera/stereo, or any SetExternalBoxes sender)
-    // come up before we judge the feed missing. After the first feed, a gap beyond the
-    // timeout means the producer stopped. Both are generous vs a normal multi-Hz feed so
-    // a transient blip never false-aborts. Decision is in the pure (tested) helper.
+    // Liveness is measured at RECEIVE time (network thread stamps every accepted
+    // SetExternalBoxes packet on the shared CommandBuffer), NOT at apply time. The
+    // producer is a leaseless ~1 Hz heartbeat that shares the single latest-command
+    // slot with the flow-infer motion stream (up to command_rate_hz, e.g. 500 Hz);
+    // an apply-time signal is starved whenever the loop keeps sampling motion
+    // packets, which would false-abort even though the producer is alive. Receipt
+    // reflects the true feed and still catches a genuinely dead/stopped producer.
+    // Startup grace lets the producer come up; after the first feed, a gap beyond
+    // the timeout means it stopped. Decision is in the pure (tested) helper.
     constexpr double kStartupGraceS = 10.0;
     constexpr double kFeedTimeoutS = 3.0;
+    const uint64_t last_receive_ns =
+        command_buffer_ ? command_buffer_->lastExternalBoxReceiveNs() : 0;
+    const bool feed_seen = last_receive_ns != 0;
+    const double since_last_feed_s =
+        feed_seen ? nsToSec(now_ns - last_receive_ns) : 0.0;
     const char* reason = externalBoxFeedAbortReason(
-        external_box_feed_seen_, nsToSec(now_ns - external_box_enforce_start_ns_),
-        nsToSec(now_ns - last_external_box_apply_ns_), kStartupGraceS, kFeedTimeoutS);
+        feed_seen, nsToSec(now_ns - external_box_enforce_start_ns_),
+        since_last_feed_s, kStartupGraceS, kFeedTimeoutS);
     if (!reason) return;
     std::cerr << "\n[FATAL][collision_monitor] external-box keep-out is ENFORCED"
                  " (external_boxes.enable=true, monitor_only=false) but " << reason << ".\n"
@@ -2106,11 +2205,10 @@ void DualArmServoLoop::loopMain() {
                 }
                 const double stamp_s = nsToSec(nowSteadyNs());
                 collision_monitor_->setExternalBoxes(poses, stamp_s);
-                // Mark the producer feed live (any applied command counts, including an
-                // all-parked "nothing detected" update — that still proves the producer
-                // is running). Consumed by checkExternalBoxFeedOrAbort.
-                external_box_feed_seen_ = true;
-                last_external_box_apply_ns_ = nowSteadyNs();
+                // Feed liveness is tracked at receive time on the CommandBuffer
+                // (see checkExternalBoxFeedOrAbort), not here at apply time — the
+                // apply path shares the single latest-command slot with the motion
+                // stream and can be starved even while the producer is alive.
                 std::cerr << "[DEBUG] SetExternalBoxes applied " << accepted
                           << " box(es), ignored_unknown=" << ignored_unknown
                           << " ignored_out_of_range=" << ignored_out_of_range
@@ -5215,8 +5313,6 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
     const RobotState& left_state,
     const RobotState& right_state
 ) {
-    (void)left_state;
-    (void)right_state;
     const bool left_init =
         command.left.mode == ControlMode::JointTarget &&
         command.left.joint_target_profile == JointTargetProfile::InitMotion;
@@ -5283,7 +5379,8 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             // WITHOUT relaunching. exec.target/waypoints already hold the committed move.
         } else {
             // Explicit non-profile command, or no active sequence -> cancel/reset so
-            // the next init_motion profile plans fresh. A discarded in-flight future detaches.
+            // the next init_motion profile plans fresh. Reset is non-blocking: in-flight
+            // planner jobs run on the worker and stale results are ignored by generation.
             for (InitMotionExec* ex : {&left_init_motion_exec_, &right_init_motion_exec_}) {
                 if (ex->status == InitMotionStatus::Idle) continue;
                 // Diagnostic: a committed go-to-init move was interrupted before it
@@ -5340,8 +5437,8 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         return command;
     }
 
-    const auto process_exec = [&](InitMotionExec& ex, bool request_left, bool request_right,
-                                  bool fresh_profile) {
+    const auto process_exec = [&](InitMotionExec& ex, PlannerRequester requester,
+                                  bool request_left, bool request_right, bool fresh_profile) {
         // Launch (or relaunch on a changed target) a plan from the CURRENT sent pose.
         // For single-arm init the non-selected arm is frozen only inside the planner's
         // combined collision oracle; it is not a target identity and must not trigger
@@ -5392,16 +5489,30 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                 ex.exec_timeout = false;
                 ex.exec_stalled = false;
                 ex.start_ns = nowSteadyNs();
-                const JointArray start_left = left_prev_sent_q_deg_;
-                const JointArray start_right = right_prev_sent_q_deg_;
-                InitMotionPlanner* planner = init_motion_planner_.get();
-                ex.future = std::async(std::launch::async,
-                    [planner, start_left, start_right, request_left, target_left,
-                     request_right, target_right]() {
-                        return planner->plan(
-                            start_left, start_right, request_left, target_left,
-                            request_right, target_right);
-                    });
+                // Start the offline init-motion plan from the measured joint pose when
+                // available. During flow-infer the Cartesian SMD can lead the physical
+                // arm by a small amount; planning from the last sent target can make the
+                // first JointTarget waypoint pull toward a stale reference and show up
+                // as a jerk when pressing a/c. Falling back to prev_sent keeps sim/mock
+                // and invalid-state behavior unchanged.
+                const JointArray start_left =
+                    (left_state.q_actual_valid && finiteJointArray(left_state.q_actual_deg))
+                        ? left_state.q_actual_deg
+                        : left_prev_sent_q_deg_;
+                const JointArray start_right =
+                    (right_state.q_actual_valid && finiteJointArray(right_state.q_actual_deg))
+                        ? right_state.q_actual_deg
+                        : right_prev_sent_q_deg_;
+                PlannerJob job;
+                job.requester = requester;
+                job.is_linear = false;
+                job.start_left = start_left;
+                job.start_right = start_right;
+                job.target_left = target_left;
+                job.target_right = target_right;
+                job.request_left = request_left;
+                job.request_right = request_right;
+                ex.plan_generation = postPlannerJob(std::move(job));
                 std::cerr << "[INFO] JointTarget init_motion: planning collision-free path from current pose\n";
             };
             if (ex.status == InitMotionStatus::Idle ||
@@ -5441,10 +5552,11 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             }
         }
 
-        // Poll the async plan (non-blocking) and transition Planning -> Executing/Failed.
-        if (ex.status == InitMotionStatus::Planning && ex.future.valid() &&
-            ex.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-            InitMotionPlanResult result = ex.future.get();
+        // Poll the worker plan (non-blocking) and transition Planning -> Executing/Failed.
+        PlannerResultSlot pr;
+        if (ex.status == InitMotionStatus::Planning && ex.plan_generation != 0 &&
+            takePlannerResult(requester, ex.plan_generation, pr)) {
+            InitMotionPlanResult result = pr.init_result;
             ex.fail_mode = result.fail_mode;
             ex.start_clear_m = result.start_clear_m;
             ex.goal_clear_m = result.goal_clear_m;
@@ -5577,15 +5689,17 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
     const bool left_exec_fresh = is_init && left_init;
     const bool right_exec_fresh = is_init && right_init && !left_init;
     if (left_exec_fresh) {
-        process_exec(left_init_motion_exec_, true, right_init, true);
+        process_exec(left_init_motion_exec_, PlannerRequester::LeftInit, true, right_init, true);
     } else if (sequence_active(left_init_motion_exec_)) {
-        process_exec(left_init_motion_exec_, left_init_motion_exec_.left_active,
+        process_exec(left_init_motion_exec_, PlannerRequester::LeftInit,
+                     left_init_motion_exec_.left_active,
                      left_init_motion_exec_.right_active, false);
     }
     if (right_exec_fresh) {
-        process_exec(right_init_motion_exec_, false, true, true);
+        process_exec(right_init_motion_exec_, PlannerRequester::RightInit, false, true, true);
     } else if (sequence_active(right_init_motion_exec_)) {
-        process_exec(right_init_motion_exec_, right_init_motion_exec_.left_active,
+        process_exec(right_init_motion_exec_, PlannerRequester::RightInit,
+                     right_init_motion_exec_.left_active,
                      right_init_motion_exec_.right_active, false);
     }
     return command;
@@ -5776,14 +5890,18 @@ DualArmCommand DualArmServoLoop::applyCollisionFreeLinearMove(
             const Pose6D goal_left = command.left.tcp_target_stand;
             const Pose6D goal_right = command.right.tcp_target_stand;
             const int samples = config_.cartesian_control.linear_move.collision_check_samples;
-            InitMotionPlanner* planner = init_motion_planner_.get();
-            lx.future = std::async(std::launch::async,
-                [planner, start_left, start_right, left_active, goal_left,
-                 right_active, goal_right, slerp, samples]() {
-                    return planner->planLinearMove(start_left, start_right,
-                                                   left_active, goal_left,
-                                                   right_active, goal_right, slerp, samples);
-                });
+            PlannerJob job;
+            job.requester = PlannerRequester::Linear;
+            job.is_linear = true;
+            job.start_left = start_left;
+            job.start_right = start_right;
+            job.lin_left_active = left_active;
+            job.lin_right_active = right_active;
+            job.lin_goal_left = goal_left;
+            job.lin_goal_right = goal_right;
+            job.slerp = slerp;
+            job.lin_samples = samples;
+            lx.plan_generation = postPlannerJob(std::move(job));
             std::cerr << "[INFO] TcpLinearMove(collision-free): checking straight path\n";
         };
         if (lx.status == LinearMoveStatus::Idle ||
@@ -5805,10 +5923,11 @@ DualArmCommand DualArmServoLoop::applyCollisionFreeLinearMove(
         }
     }
 
-    // Poll the async decision.
-    if (lx.status == LinearMoveStatus::Deciding && lx.future.valid() &&
-        lx.future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-        InitMotionLinearResult r = lx.future.get();
+    // Poll the worker decision.
+    PlannerResultSlot pr;
+    if (lx.status == LinearMoveStatus::Deciding && lx.plan_generation != 0 &&
+        takePlannerResult(PlannerRequester::Linear, lx.plan_generation, pr)) {
+        InitMotionLinearResult r = pr.linear_result;
         // Diagnostic: goal-vs-current joint delta. ~0 deg means the requested TCP target
         // is essentially the current pose (e.g., the GUI target marker is following
         // current TCP, not parked at a destination) -> the move is a near no-op.

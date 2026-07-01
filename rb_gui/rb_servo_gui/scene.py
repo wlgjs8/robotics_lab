@@ -14,7 +14,7 @@ from .geometry import (
     _pose_position,
     _pose_wxyz,
 )
-from .models import EXTERNAL_BOX_COLLISION_M, CircleOverlaySnapshot
+from .models import EXTERNAL_BOX_COLLISION_M, ChunkOverlaySnapshot, CircleOverlaySnapshot
 
 _ROBOT_JOINT_NAMES = (
     "base_joint",
@@ -2027,7 +2027,12 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
             ):
                 handles[f"{arm}_tcp_trail_points"] = []
                 handles[f"{arm}_tcp_ref_trail_points"] = []
-                for key in (f"{arm}_tcp_trail", f"{arm}_tcp_ref_trail"):
+                handles[f"{arm}_tcp_cmd_trail_points"] = []
+                for key in (
+                    f"{arm}_tcp_trail",
+                    f"{arm}_tcp_ref_trail",
+                    f"{arm}_tcp_cmd_trail",
+                ):
                     if _trail_as_line:
                         handles[key] = server.scene.add_line_segments(
                             f"/stand/{key}",
@@ -2045,6 +2050,9 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
                         )
                 handles[f"{arm}_tcp_trail_color"] = actual_color
                 handles[f"{arm}_tcp_ref_trail_color"] = ref_color
+                # Amber is shared by both arms so "commanded target" has one identity.
+                handles[f"{arm}_tcp_cmd_trail_color"] = (250, 215, 60)
+                _set_visible(handles.get(f"{arm}_tcp_cmd_trail"), False)
         if hasattr(server.scene, "add_line_segments"):
             handles["circle_overlay_line_mode"] = "line_segments"
             handles["circle_overlay_line"] = server.scene.add_line_segments(
@@ -2061,6 +2069,25 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
                 colors=_colors_array(),
                 point_size=0.008,
             )
+        if hasattr(server.scene, "add_line_segments"):
+            handles["chunk_overlay_line_mode"] = "line_segments"
+            for arm in ("left", "right"):
+                handles[f"{arm}_chunk_overlay"] = server.scene.add_line_segments(
+                    f"/stand/{arm}_chunk_overlay",
+                    points=_line_segments_array(),
+                    colors=_line_segment_colors_array(),
+                    line_width=2.5,
+                )
+        elif hasattr(server.scene, "add_point_cloud"):
+            handles["chunk_overlay_line_mode"] = "point_cloud"
+            for arm in ("left", "right"):
+                handles[f"{arm}_chunk_overlay"] = server.scene.add_point_cloud(
+                    f"/stand/{arm}_chunk_overlay",
+                    points=_points_array(),
+                    colors=_colors_array(),
+                    point_size=0.01,
+                    point_shape="rounded",
+                )
         if hasattr(server.scene, "add_icosphere"):
             handles["circle_overlay_desired"] = server.scene.add_icosphere(
                 "/stand/circle_overlay_desired",
@@ -2077,6 +2104,8 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
             )
         _set_visible(handles.get("circle_overlay_line"), False)
         _set_visible(handles.get("circle_overlay_desired"), False)
+        _set_visible(handles.get("left_chunk_overlay"), False)
+        _set_visible(handles.get("right_chunk_overlay"), False)
         _add_floor_plane(server, handles)
         _add_floor_check_points(server, handles)
         _add_roi_box(server, handles)
@@ -2143,6 +2172,7 @@ def _hide_tcp_handles(scene_handles: dict[str, Any], arm: str, *, include_target
         f"{arm}_tcp_ref",
         f"{arm}_tcp_trail",
         f"{arm}_tcp_ref_trail",
+        f"{arm}_tcp_cmd_trail",
         f"{arm}_tcp_label",
         f"{arm}_tcp_ref_label",
     ]
@@ -2260,6 +2290,38 @@ def update_circle_overlay(scene_handles: dict[str, Any], overlay: CircleOverlayS
     _set_visible(desired, True)
 
 
+def update_chunk_overlay(
+    scene_handles: dict[str, Any],
+    overlay: ChunkOverlaySnapshot | None,
+    *,
+    stale: bool = False,
+    visible: bool = True,
+) -> None:
+    line_color = (60, 230, 180)
+    for arm in ("left", "right"):
+        handle = scene_handles.get(f"{arm}_chunk_overlay")
+        positions = None if overlay is None else getattr(overlay, f"{arm}_positions", None)
+        if handle is None or overlay is None or stale or not visible or not positions:
+            _set_visible(handle, False)
+            continue
+        try:
+            if scene_handles.get("chunk_overlay_line_mode") == "line_segments":
+                if len(positions) < 2:
+                    _set_visible(handle, False)
+                    continue
+                segments = _circle_overlay_line_segments(positions)
+                handle.points = _line_segments_array(segments)
+                handle.colors = _line_segment_colors_array(
+                    tuple((line_color, line_color) for _ in segments)
+                )
+            else:
+                handle.points = _points_array(positions)
+                handle.colors = _colors_array(tuple(line_color for _ in positions))
+            _set_visible(handle, True)
+        except Exception:
+            pass
+
+
 def _arm_is_controller_sim(arm_state: Any) -> bool:
     """True for rbpodo controller (pgmode) simulation (operation_mode: simulation)."""
     csm = getattr(arm_state, "controller_simulation_mode", None)
@@ -2271,7 +2333,13 @@ def _arm_is_controller_sim(arm_state: Any) -> bool:
         return False
 
 
-def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_display_mode: str | None = None) -> None:
+def update_scene_markers(
+    scene_handles: dict[str, Any],
+    latest: Any,
+    *,
+    tcp_display_mode: str | None = None,
+    show_tcp_command_trail: bool = False,
+) -> None:
     mounts = latest.mounts if isinstance(latest.mounts, dict) else {}
     left_pose = _mount_pose_from_mounts(mounts, "left", _DEFAULT_LEFT_POSE)
     right_pose = _mount_pose_from_mounts(mounts, "right", _DEFAULT_RIGHT_POSE)
@@ -2331,10 +2399,13 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_disp
     }
     actual_updates: dict[str, tuple[tuple[float, float, float], tuple[float, float, float, float]]] = {}
     ref_updates: dict[str, tuple[tuple[float, float, float], tuple[float, float, float, float]]] = {}
+    command_updates: dict[str, tuple[float, float, float]] = {}
     for arm, arm_state in (("left", latest.left), ("right", latest.right)):
         actual_pose = arm_state.tcp_actual_stand or arm_state.tcp_stand
         if arm_state.tcp_actual_valid and actual_pose is not None and not arm_state.tcp_deferred:
             actual_updates[arm] = (_pose_position(actual_pose), _pose_orientation_wxyz(actual_pose))
+        if arm_state.tcp_command_stand is not None:
+            command_updates[arm] = _pose_position(arm_state.tcp_command_stand)
         # Controller-sim reference gizmo: prefer the commanded TCP (FK of q_sent),
         # which is stable at rest, over the noisy jnt_ref-derived tcp_ref_stand.
         if _arm_is_controller_sim(arm_state) and arm_state.tcp_command_stand is not None:
@@ -2390,6 +2461,15 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_disp
             ),
         )
 
+    for arm, position in command_updates.items():
+        if show_tcp_command_trail:
+            _update_tcp_trail(
+                scene_handles,
+                f"{arm}_tcp_cmd",
+                position,
+                visible=True,
+            )
+
     for arm, arm_state in (("left", latest.left), ("right", latest.right)):
         selected = arm_state.selected_tcp_source("auto")
         actual_visible = arm in actual_updates and (
@@ -2402,6 +2482,8 @@ def update_scene_markers(scene_handles: dict[str, Any], latest: Any, *, tcp_disp
         _set_visible(scene_handles.get(f"{arm}_tcp_ref"), ref_visible)
         _set_visible(scene_handles.get(f"{arm}_tcp_label"), actual_visible)
         _set_visible(scene_handles.get(f"{arm}_tcp_ref_label"), ref_visible)
+        if arm not in command_updates or not show_tcp_command_trail:
+            _set_visible(scene_handles.get(f"{arm}_tcp_cmd_trail"), False)
         if arm not in ref_updates:
             _set_visible(scene_handles.get(f"{arm}_tcp_ref"), False)
             _set_visible(scene_handles.get(f"{arm}_tcp_ref_trail"), False)

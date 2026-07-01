@@ -3115,6 +3115,33 @@ class GuiContractsTest(unittest.TestCase):
         self.assertTrue(left_tcp_label.visible)
         self.assertFalse(left_ref_label.visible)
 
+    def test_scene_update_appends_tcp_command_trail_when_enabled(self):
+        state = sample_state()
+        state["left"]["tcp_command_stand"] = {
+            "x": 0.21,
+            "y": 0.12,
+            "z": 0.43,
+            "rx": 0.0,
+            "ry": 0.0,
+            "rz": 0.0,
+        }
+        store, _, _ = self.make_safety(state)
+        left_cmd_trail = RecordingSceneHandle()
+        handles = {
+            "tcp_trail_mode": "point",
+            "left_tcp_cmd_trail": left_cmd_trail,
+            "left_tcp_cmd_trail_points": [],
+            "left_tcp_cmd_trail_color": (250, 215, 60),
+        }
+
+        update_scene_markers(handles, store.latest(), show_tcp_command_trail=False)
+        self.assertEqual(handles["left_tcp_cmd_trail_points"], [])
+        self.assertFalse(left_cmd_trail.visible)
+
+        update_scene_markers(handles, store.latest(), show_tcp_command_trail=True)
+        self.assertEqual(handles["left_tcp_cmd_trail_points"], [(0.21, 0.12, 0.43)])
+        self.assertTrue(left_cmd_trail.visible)
+
     def test_floor_check_points_toggle_gated_on_actual_tcp(self):
         state = sample_state()
         # Left has a valid actual TCP pose; right does not (deferred FK).
@@ -3195,9 +3222,14 @@ class GuiContractsTest(unittest.TestCase):
         handles = _add_scene_fallback(server)
         self.assertNotIn("scene_error", handles)
         self.assertIn("stand_mesh", handles)
-        # The four TCP trails (left/right × actual/reference) render as gradient
-        # comet-trail line segments, plus the circle overlay line.
-        self.assertGreaterEqual(len(scene.line_segments), 5)
+        for arm in ("left", "right"):
+            self.assertIn(f"{arm}_tcp_cmd_trail", handles)
+            self.assertIn(f"{arm}_tcp_cmd_trail_points", handles)
+            self.assertEqual(handles[f"{arm}_tcp_cmd_trail_points"], [])
+            self.assertEqual(handles[f"{arm}_tcp_cmd_trail_color"], (250, 215, 60))
+        # The six TCP trails (left/right × actual/reference/command) render as
+        # gradient comet-trail line segments, plus the circle overlay line.
+        self.assertGreaterEqual(len(scene.line_segments), 7)
 
     def test_circle_overlay_points_support_standard_planes(self):
         xy = CircleOverlaySnapshot.parse(sample_circle_overlay(plane="xy", axis1_stand=None, axis2_stand=None))

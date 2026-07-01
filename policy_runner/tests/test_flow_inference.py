@@ -29,6 +29,7 @@ class FlowInferenceCliTest(unittest.TestCase):
         self.assertIn("controller_sim", result.stdout)
         self.assertNotIn("--command-family", result.stdout)
         self.assertIn("--policy-dt-sec", result.stdout)
+        self.assertIn("--speed-scale", result.stdout)
         # flow-infer always emits absolute TcpPoseTarget setpoints; the old
         # --allow-tcp-target-pose no-op flag was removed, not retained.
         self.assertNotIn("--allow-tcp-target-pose", result.stdout)

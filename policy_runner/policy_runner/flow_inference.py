@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -33,6 +34,7 @@ from .flow_dataset import (
     runtime_proprio_from_state,
 )
 from .camera_bundle_client import resolve_frame
+from .chunk_overlay_publisher import ChunkOverlayPublisher
 from .flow_model import FlowMatchingPolicy, sample_action_chunks
 from .pc_dataset import PC_CHECKPOINT_SCHEMA
 from .tcp_target_pose_conditioner import (
@@ -46,22 +48,42 @@ from .rollout_modes import RolloutMode, RolloutModeValidationError, parse_rollou
 from .servo_command_client import CommandIntent
 
 
-def default_action_log_path() -> str:
+def default_action_log_path() -> str | None:
     """Resolve the per-step action-log path.
 
-    Honors ``POLICY_RUNNER_ACTION_LOG`` when set; otherwise auto-accumulates one
-    timestamped file per run under the repo ``logs/`` dir, so a plain
-    ``flow-infer`` (no env var on the command line) still captures actions.
+    Action logging is intentionally opt-in for live flow-infer runs: disk I/O and
+    terminal spam at every policy step add latency jitter. Set
+    ``POLICY_RUNNER_ACTION_LOG=/path/to/actions.jsonl`` to capture a specific
+    file, or ``POLICY_RUNNER_ACTION_LOG=auto``/``1`` for a timestamped file under
+    ``logs/``. Empty/false/off disables logging.
     """
     configured = os.environ.get("POLICY_RUNNER_ACTION_LOG")
-    if configured:
-        return configured
-    logs_dir = Path(__file__).resolve().parents[2] / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    return str(logs_dir / f"actions_{time.strftime('%Y%m%d_%H%M%S')}.jsonl")
+    if configured is None:
+        return None
+    configured = configured.strip()
+    if not configured or configured.lower() in {"0", "false", "off", "no", "none"}:
+        return None
+    if configured.lower() in {"1", "true", "yes", "auto"}:
+        logs_dir = Path(__file__).resolve().parents[2] / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        return str(logs_dir / f"actions_{time.strftime('%Y%m%d_%H%M%S')}.jsonl")
+    return configured
+
+
+def _open_action_log(stderr: TextIO = sys.stderr) -> TextIO | None:
+    path = default_action_log_path()
+    if path is None:
+        return None
+    log_path = Path(path)
+    if log_path.parent != Path(""):
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(log_path, "w", buffering=1)
+    print(f"[flow-infer] logging per-step actions to {log_path}", file=stderr, flush=True)
+    return handle
 
 
 FLOW_COMMAND_LABEL = "TcpPoseTarget"
+_ZERO_TWIST: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S = 0.30
 DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S = 2.0
 _FLOW_STATS_VELOCITY_LIMIT_SCALE = 1.25
@@ -284,6 +306,7 @@ class FlowMatchingActionSource:
         ee_local_r_align: Any = None,
         device: str = "auto",
         stochastic_sampling: bool = True,
+        chunk_overlay_endpoint: str | None = None,
         stderr: TextIO = sys.stderr,
     ):
         if sample_steps <= 0:
@@ -450,6 +473,23 @@ class FlowMatchingActionSource:
         }
         self._target_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
+        self._last_overlay_payload: dict[str, Any] | None = None
+        self._chunk_overlay_seq = 0
+        self._chunk_overlay_publisher: ChunkOverlayPublisher | None = None
+        resolved_chunk_overlay_endpoint = (
+            os.environ.get("RB_GUI_CHUNK_OVERLAY_ENDPOINT")
+            if chunk_overlay_endpoint is None
+            else chunk_overlay_endpoint
+        )
+        if resolved_chunk_overlay_endpoint and resolved_chunk_overlay_endpoint.strip():
+            try:
+                self._chunk_overlay_publisher = ChunkOverlayPublisher(resolved_chunk_overlay_endpoint.strip())
+            except Exception as exc:
+                print(
+                    f"WARNING: {self.policy_label}: chunk overlay publisher disabled "
+                    f"for {resolved_chunk_overlay_endpoint!r}: {type(exc).__name__}: {exc}",
+                    file=self.stderr,
+                )
         # Per-policy-step action logger (env-gated, debug only). Set
         # POLICY_RUNNER_ACTION_LOG=/path/to/actions.jsonl to capture one JSON
         # line per executed policy step: raw flow delta, converted/clamped twist
@@ -457,12 +497,7 @@ class FlowMatchingActionSource:
         # trembling (pulsed chunk boundaries vs. delta->twist noise amplification).
         self._action_log: TextIO | None = None
         self._action_log_seq = 0
-        _action_log_path = default_action_log_path()
-        self._action_log = open(_action_log_path, "w", buffering=1)
-        print(
-            f"[flow-infer] logging per-step actions to {_action_log_path}",
-            file=sys.stderr,
-        )
+        self._action_log = _open_action_log(self.stderr)
 
     # --------------------------------------------------------- override hooks --
     def on_arm_init_override_start(self, arms: tuple[str, ...], snapshot: StateSnapshot) -> None:
@@ -541,9 +576,9 @@ class FlowMatchingActionSource:
         return model
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
+        self._last_overlay_payload = snapshot.payload
         if getattr(self, "enable_async_chunking", False):
             return self._next_intent_streamed(snapshot, now_monotonic)
-        _ = now_monotonic
         payload = snapshot.payload
         if self._reset_left_pose is None or self._reset_right_pose is None:
             self._reset_left_pose = pose_from_state_payload(payload, "left")
@@ -572,6 +607,7 @@ class FlowMatchingActionSource:
             self._chunk = chunk
             self._chunk_index = 0
             self._steps_since_boundary = 0  # restart the crossfade ramp at the boundary
+            self._publish_chunk_overlay(now_monotonic)
         step = self._chunk[self._chunk_index]
         self._chunk_index += 1
         gripper_targets = self._integrate_gripper_targets(step, payload)
@@ -590,6 +626,7 @@ class FlowMatchingActionSource:
         chunk is inferred in a worker thread. The control loop never blocks on
         inference, removing the pulsed start/stop motion (vibration) of the
         synchronous path."""
+        self._last_overlay_payload = snapshot.payload
         payload = snapshot.payload
         if self._reset_left_pose is None or self._reset_right_pose is None:
             self._reset_left_pose = pose_from_state_payload(payload, "left")
@@ -598,11 +635,16 @@ class FlowMatchingActionSource:
 
         advanced = False
         if self._chunk is None:
-            # Need a chunk: take a ready prefetch, else sample once inline (only
-            # safe while the worker is idle, guaranteed by the _stream_pending
-            # guard, so the camera client is never touched by two threads).
+            # Need a chunk: live real/controller rollouts should never block the
+            # command loop on inference. Unit tests and offline/synchronous callers
+            # keep the legacy one-shot inline sample unless the runner sets
+            # nonblocking_stream_inference=True.
             chunk = self._take_prefetched()
-            if chunk is None and not self._stream_pending:
+            if (
+                chunk is None
+                and not self._stream_pending
+                and not bool(getattr(self, "nonblocking_stream_inference", False))
+            ):
                 chunk = self._sample_and_align_chunk(payload)
             if chunk is None:
                 self._request_prefetch(payload)
@@ -654,6 +696,7 @@ class FlowMatchingActionSource:
                 # the per-tick interpolated target. Gripper stays step-based.
                 if self._chunk_index == 0:
                     self._foh_begin_chunk(payload, now_monotonic)
+                self._remember_emitted_deltas_for_step(step, step_index=self._chunk_index)
                 self._steps_since_boundary += 1
                 self._current_step_intent = self._foh_tick_intent(now_monotonic, stall=False)
                 self._log_foh_action(step, self._current_step_intent, now_monotonic)
@@ -739,6 +782,47 @@ class FlowMatchingActionSource:
         self._chunk_index = 0
         self._steps_since_boundary = 0  # restart the crossfade ramp at the boundary
         self._step_deadline = now_monotonic + float(self.policy_dt_sec)
+        self._publish_chunk_overlay(now_monotonic)
+
+    def _publish_chunk_overlay(self, now_monotonic: float) -> None:
+        _ = now_monotonic
+        publisher = getattr(self, "_chunk_overlay_publisher", None)
+        chunk = getattr(self, "_chunk", None)
+        payload = getattr(self, "_last_overlay_payload", None)
+        if publisher is None or chunk is None or payload is None:
+            return
+        try:
+            limit = self._current_chunk_execute_limit()
+            if limit <= 0:
+                return
+            projected: dict[str, list[list[float]] | None] = {"left": None, "right": None}
+            for arm, idx, sl in self._foh_arm_indices():
+                if len(self.arm_mask) <= idx or self.arm_mask[idx] <= 0.0:
+                    continue
+                grip_index = 6 if arm == "left" else 13
+                measured_anchor = np.asarray(pose_from_state_payload(payload, arm), dtype=np.float64)
+                cur = measured_anchor
+                arm_points: list[list[float]] = []
+                for i in range(limit):
+                    delta = np.asarray(
+                        self._condition_arm_delta(arm, chunk[i][sl], step_index=i, update_prev=False),
+                        dtype=np.float64,
+                    )
+                    cur = np.asarray(pose_compose_local(cur, delta), dtype=np.float64)
+                    arm_points.append([float(value) for value in cur[:6].tolist()] + [float(chunk[i][grip_index])])
+                projected[arm] = arm_points
+            if projected["left"] is None and projected["right"] is None:
+                return
+            self._chunk_overlay_seq = int(getattr(self, "_chunk_overlay_seq", 0)) + 1
+            publisher.publish(
+                seq=self._chunk_overlay_seq,
+                policy_dt_sec=float(self.policy_dt_sec or 0.0),
+                left=projected["left"],
+                right=projected["right"],
+                host_time_ns=time.time_ns(),
+            )
+        except Exception:
+            return
 
     def _stream_prefetch_at(self) -> int:
         # Kick the next inference EARLY (after ~1/4 of the chunk) so it has the most wall-clock
@@ -832,7 +916,9 @@ class FlowMatchingActionSource:
             if self._stream_pending or self._stream_next_chunk is not None:
                 return
             self._stream_pending = True
-            self._stream_request = (int(getattr(self, "_stream_generation", 0)), payload)
+            # Snapshot the state payload for the worker so a mutable camera/state
+            # object cannot be changed by the command loop while inference is reading it.
+            self._stream_request = (int(getattr(self, "_stream_generation", 0)), copy.deepcopy(payload))
             self._stream_cv.notify()
 
     def _take_prefetched(self) -> np.ndarray | None:
@@ -897,12 +983,10 @@ class FlowMatchingActionSource:
         return 100.0
 
     def _dispatch_gripper_step(self, step: np.ndarray) -> None:
-        # RAW RIGHT-ARM action as predicted by the model, BEFORE the gripper binary
-        # threshold / open-close snap (_map_gripper_opening) is applied: pose delta
-        # (dxyz, rxyz) + the model's raw gripper opening prediction in percent
-        # (step[13]). Printed unconditionally so it shows on a plain flow-infer run.
+        # RAW action debug is terminal-heavy; keep it opt-in so live flow-infer
+        # motion is not paced by stdout. Enable with POLICY_RUNNER_PRINT_RAW_ACTIONS=1.
         _raw = np.asarray(step, dtype=np.float64).reshape(-1)
-        if _raw.shape[0] > 13:
+        if os.environ.get("POLICY_RUNNER_PRINT_RAW_ACTIONS", "") == "1" and _raw.shape[0] > 13:
             # Post-threshold commanded gripper value: replicate exactly what the
             # dispatch below sends for each gripper -- the reach-before-grasp
             # hold-open value if active, else the binary threshold / absolute
@@ -987,6 +1071,51 @@ class FlowMatchingActionSource:
             },
         )
 
+    def _apply_chunk_crossfade(
+        self,
+        arm: str,
+        twist: tuple[float, ...] | list[float] | np.ndarray,
+        *,
+        step_index: int | None = None,
+    ) -> tuple[float, ...]:
+        """Blend the first N action deltas of a new chunk from the prior chunk's
+        last emitted delta. This removes velocity discontinuities at chunk
+        boundaries without adding steady-state lag after the short ramp window.
+        """
+        current = tuple(float(v) for v in np.asarray(twist, dtype=np.float64).reshape(-1)[:6].tolist())
+        k = int(getattr(self, "_chunk_crossfade_steps", 0) or 0)
+        prev_by_arm = getattr(self, "_prev_emitted_twist_by_arm", {}) or {}
+        prev = prev_by_arm.get(arm) if isinstance(prev_by_arm, dict) else None
+        idx = int(getattr(self, "_steps_since_boundary", 0) if step_index is None else step_index)
+        if k <= 0 or prev is None or idx >= k:
+            return current
+        prev_tuple = tuple(float(v) for v in np.asarray(prev, dtype=np.float64).reshape(-1)[:6].tolist())
+        alpha = float(idx + 1) / float(k + 1)
+        return tuple((1.0 - alpha) * prev_tuple[i] + alpha * current[i] for i in range(6))
+
+    def _condition_arm_delta(
+        self,
+        arm: str,
+        delta: np.ndarray,
+        *,
+        step_index: int | None = None,
+        update_prev: bool = False,
+    ) -> tuple[float, ...]:
+        clamped = self._clamp_delta_step(delta)
+        emitted = self._apply_chunk_crossfade(arm, clamped, step_index=step_index)
+        if update_prev:
+            prev_by_arm = getattr(self, "_prev_emitted_twist_by_arm", None)
+            if isinstance(prev_by_arm, dict):
+                k = int(getattr(self, "_chunk_crossfade_steps", 0) or 0)
+                prev = prev_by_arm.get(arm)
+                idx = int(getattr(self, "_steps_since_boundary", 0) if step_index is None else step_index)
+                # Keep the old chunk's final delta as the fixed crossfade anchor
+                # during the ramp; once past the ramp, track the current emitted delta
+                # so the next chunk boundary starts from the true last velocity.
+                if prev is None or k <= 0 or idx >= k:
+                    prev_by_arm[arm] = emitted
+        return emitted
+
     def _target_payload_for_arm(
         self,
         arm: str,
@@ -999,8 +1128,8 @@ class FlowMatchingActionSource:
             targets = self._target_pose_by_arm
         if self._steps_since_boundary == 0 or targets.get(arm) is None:
             targets[arm] = pose_from_state_payload(payload, arm)
-        clamped_delta = self._clamp_delta_step(delta)
-        targets[arm] = pose_compose_local(targets[arm], np.asarray(clamped_delta, dtype=np.float32))
+        conditioned_delta = self._condition_arm_delta(arm, delta, update_prev=True)
+        targets[arm] = pose_compose_local(targets[arm], np.asarray(conditioned_delta, dtype=np.float32))
         return tuple(float(value) for value in targets[arm].tolist())
 
     def _clear_target_pose_state(self, arms: tuple[str, ...] | list[str] | None = None) -> None:
@@ -1227,7 +1356,10 @@ class FlowMatchingActionSource:
             cur_m = measured_anchor
             cur_c = None if last_emitted is None else np.asarray(last_emitted, dtype=np.float64)
             for i in range(limit):
-                delta = np.asarray(self._clamp_delta_step(chunk[i][sl]), dtype=np.float64)
+                delta = np.asarray(
+                    self._condition_arm_delta(arm, chunk[i][sl], step_index=i, update_prev=False),
+                    dtype=np.float64,
+                )
                 cur_m = np.asarray(pose_compose_local(cur_m, delta), dtype=np.float64)
                 measured.append(cur_m.copy())
                 if continuous is not None:
@@ -1240,6 +1372,11 @@ class FlowMatchingActionSource:
                 t_wall_start=float(now_monotonic),
                 chunk_id=self._tcp_tp_chunk_seq,
             )
+
+    def _remember_emitted_deltas_for_step(self, step: np.ndarray, *, step_index: int | None = None) -> None:
+        for arm, idx, sl in self._foh_arm_indices():
+            if self.arm_mask[idx] > 0.0:
+                self._condition_arm_delta(arm, step[sl], step_index=step_index, update_prev=True)
 
     def _foh_tick_intent(self, now_monotonic: float, *, stall: bool) -> CommandIntent | None:
         """Emit a fresh SE(3)-interpolated TcpPoseTarget for the current servo tick."""
@@ -1401,6 +1538,9 @@ class FlowMatchingActionSource:
         thread = getattr(self, "_stream_thread", None)
         if thread is not None:
             thread.join(timeout=2.0)
+        close_overlay = getattr(getattr(self, "_chunk_overlay_publisher", None), "close", None)
+        if callable(close_overlay):
+            close_overlay()
         close = getattr(self.camera_client, "close", None)
         if callable(close):
             close()
@@ -1733,12 +1873,7 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
         # trembling (pulsed chunk boundaries vs. delta->twist noise amplification).
         self._action_log: TextIO | None = None
         self._action_log_seq = 0
-        _action_log_path = default_action_log_path()
-        self._action_log = open(_action_log_path, "w", buffering=1)
-        print(
-            f"[flow-infer] logging per-step actions to {_action_log_path}",
-            file=sys.stderr,
-        )
+        self._action_log = _open_action_log(self.stderr)
 
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
         assert self._reset_left_pose is not None
@@ -1894,12 +2029,7 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
         # trembling (pulsed chunk boundaries vs. delta->twist noise amplification).
         self._action_log: TextIO | None = None
         self._action_log_seq = 0
-        _action_log_path = default_action_log_path()
-        self._action_log = open(_action_log_path, "w", buffering=1)
-        print(
-            f"[flow-infer] logging per-step actions to {_action_log_path}",
-            file=sys.stderr,
-        )
+        self._action_log = _open_action_log(self.stderr)
 
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
         assert self._reset_left_pose is not None

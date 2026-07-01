@@ -69,6 +69,16 @@ void CommandBuffer::updateLease(const CommandSourceLeaseState& lease, uint64_t n
     latest_command_->lease = lease;
 }
 
+void CommandBuffer::noteExternalBoxReceived(uint64_t receive_time_ns) {
+    // Lock-free single-scalar publish from the receive thread; independent of the
+    // latest_command_ slot so a saturating motion stream cannot hide it.
+    last_external_box_receive_ns_.store(receive_time_ns, std::memory_order_relaxed);
+}
+
+uint64_t CommandBuffer::lastExternalBoxReceiveNs() const {
+    return last_external_box_receive_ns_.load(std::memory_order_relaxed);
+}
+
 DualArmCommand CommandBuffer::latestOrHold(uint64_t now_ns) {
     std::lock_guard<std::mutex> lock(mutex_);
     while (!pending_lifecycle_commands_.empty()) {

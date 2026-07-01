@@ -1,7 +1,7 @@
 #pragma once
 
 #include <atomic>
-#include <future>
+#include <condition_variable>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -376,9 +376,10 @@ private:
     // keep it diagnosable we FAIL CLOSED: if no fresh SetExternalBoxes feed arrives
     // (producer never started, or it stopped), checkExternalBoxFeedOrAbort() aborts the
     // process with a loud reason instead of running on without keep-out. Inert when the
-    // boxes are monitor_only or disabled (the current default config).
-    bool external_box_feed_seen_ = false;          // a SetExternalBoxes feed was ever applied
-    uint64_t last_external_box_apply_ns_ = 0;       // steady-clock stamp of the last applied feed
+    // boxes are monitor_only or disabled (the current default config). Liveness itself
+    // is stamped at RECEIVE time on the shared CommandBuffer
+    // (CommandBuffer::lastExternalBoxReceiveNs) so a high-rate motion stream sharing the
+    // single latest-command slot cannot starve the signal and false-abort.
     uint64_t external_box_enforce_start_ns_ = 0;    // first enforced tick (startup-grace anchor)
     void checkExternalBoxFeedOrAbort(uint64_t now_ns);
 
@@ -386,6 +387,42 @@ private:
     // The planner owns a PRIVATE CollisionMonitor (incl. the ground plane) and is null
     // when the feature is disabled (then InitMotion falls back to a direct JointTarget).
     std::unique_ptr<InitMotionPlanner> init_motion_planner_;
+    enum class PlannerRequester { LeftInit = 0, RightInit = 1, Linear = 2 };
+    struct PlannerJob {
+        PlannerRequester requester = PlannerRequester::LeftInit;
+        uint64_t generation = 0;
+        bool is_linear = false;
+        JointArray start_left{};
+        JointArray start_right{};
+        JointArray target_left{};
+        JointArray target_right{};
+        bool request_left = false;
+        bool request_right = false;
+        Pose6D lin_goal_left{};
+        Pose6D lin_goal_right{};
+        bool lin_left_active = false;
+        bool lin_right_active = false;
+        bool slerp = false;
+        int lin_samples = 0;
+    };
+    struct PlannerResultSlot {
+        uint64_t generation = 0;
+        bool valid = false;
+        bool is_linear = false;
+        InitMotionPlanResult init_result{};
+        InitMotionLinearResult linear_result{};
+    };
+    std::thread planner_worker_;
+    std::mutex planner_mtx_;
+    std::condition_variable planner_cv_;
+    bool planner_stop_ = false;
+    std::optional<PlannerJob> planner_pending_[3];
+    PlannerResultSlot planner_result_[3];
+    uint64_t planner_job_seq_ = 0;
+    void plannerWorkerMain();
+    uint64_t postPlannerJob(PlannerJob job);
+    bool takePlannerResult(PlannerRequester requester, uint64_t generation, PlannerResultSlot& out);
+
     enum class InitMotionStatus { Idle, Planning, Executing, Done, Failed };
     struct InitMotionExec {
         InitMotionStatus status = InitMotionStatus::Idle;
@@ -394,7 +431,7 @@ private:
         bool right_active = false;
         JointArray target_left{};
         JointArray target_right{};
-        std::future<InitMotionPlanResult> future;
+        uint64_t plan_generation = 0;
         std::vector<std::pair<JointArray, JointArray>> waypoints;
         std::size_t index = 0;
         int escape_waypoints = 0;  // leading sub-threshold escape waypoints (follow precisely)
@@ -449,7 +486,7 @@ private:
         bool slerp = false;
         Pose6D target_left{};
         Pose6D target_right{};
-        std::future<InitMotionLinearResult> future;
+        uint64_t plan_generation = 0;
         std::vector<std::pair<JointArray, JointArray>> waypoints;
         std::size_t index = 0;
         int escape_waypoints = 0;  // leading sub-threshold escape waypoints (follow precisely)

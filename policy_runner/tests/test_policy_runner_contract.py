@@ -435,6 +435,18 @@ class PolicyRunnerContractTest(unittest.TestCase):
                 self.assertIn('"udp://127.0.0.1:50356"', server_cfg_text)
                 self.assertIn('"udp://127.0.0.1:50378"', server_cfg_text)
 
+    def test_flow_infer_real_wrapper_defaults_to_fast_smooth_profile(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        wrapper = (repo_root / "tools/flow_infer_real_policy.sh").read_text()
+
+        self.assertIn('SPEED_SCALE="${FLOW_INFER_SPEED_SCALE:-2.0}"', wrapper)
+        self.assertIn('CHUNK_EXECUTE_STEPS="${FLOW_INFER_CHUNK_EXECUTE_STEPS:-24}"', wrapper)
+        self.assertIn('CHUNK_CROSSFADE_STEPS="${FLOW_INFER_CHUNK_CROSSFADE_STEPS:-2}"', wrapper)
+        self.assertIn('TCP_REANCHOR_MODE="${FLOW_INFER_TCP_REANCHOR_MODE:-measured_blend}"', wrapper)
+        self.assertIn('--speed-scale "$SPEED_SCALE"', wrapper)
+        self.assertIn('--tcp-target-pose-conditioning foh_se3', wrapper)
+        self.assertIn('--tcp-target-pose-reanchor-mode "$TCP_REANCHOR_MODE"', wrapper)
+
     def test_record_command_parser_accepts_start_stop_schema(self):
         start = parse_record_command(
             json.dumps(

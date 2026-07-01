@@ -45,7 +45,7 @@ from .flow_inference import (
     FLOW_COMMAND_LABEL,
     FlowMatchingActionSource,
     _gripper_value_from_payload,
-    default_action_log_path,
+    _open_action_log,
     resolve_ee_local_r_align,
     rotate_flow_arm_vectors,
 )
@@ -454,6 +454,10 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # (it makes boundaries continuous at the flow level), so disable it when on.
         self._chunk_crossfade_steps = 0 if self.rtc_enabled else int(chunk_crossfade_steps)
         self._steps_since_boundary = 0
+        self._prev_emitted_twist_by_arm: dict[str, tuple[float, ...] | None] = {
+            "left": None,
+            "right": None,
+        }
         self._target_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
         # Patch 3: online tcp_target_pose A-stage conditioning (this class skips
@@ -475,9 +479,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # line per executed policy step (raw flow delta, sent target, chunk index).
         self._action_log: TextIO | None = None
         self._action_log_seq = 0
-        _action_log_path = default_action_log_path()
-        self._action_log = open(_action_log_path, "w", buffering=1)
-        print(f"[flow-infer] logging per-step actions to {_action_log_path}", file=self.stderr)
+        self._action_log = _open_action_log(self.stderr)
         # Wrist-camera routing + crop, so the deploy provenance is visible at startup.
         print(
             f"[flow-infer] wrist cameras={self.camera_names} crop_frac={self.wrist_crop_frac}"
