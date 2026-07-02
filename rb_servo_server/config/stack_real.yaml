@@ -168,10 +168,10 @@ safety:
     # 0.047m(rb3_730e_pika_articulated.urdf). ★URDF 유도 기본값이므로 줄자 실측으로
     # 검증할 것. offset_closed_m 생략 시 정적(개방 고정)=기존 거동.
     tcp_offset_points:
-      - { name: gripper_tip_a_yp, offset_m: [ 0.058,  0.013, 0.0 ], offset_closed_m: [ 0.010,  0.013, 0.0 ] }
-      - { name: gripper_tip_a_yn, offset_m: [ 0.058, -0.013, 0.0 ], offset_closed_m: [ 0.010, -0.013, 0.0 ] }
-      - { name: gripper_tip_b_yp, offset_m: [-0.058,  0.013, 0.0 ], offset_closed_m: [-0.010,  0.013, 0.0 ] }
-      - { name: gripper_tip_b_yn, offset_m: [-0.058, -0.013, 0.0 ], offset_closed_m: [-0.010, -0.013, 0.0 ] }
+      - { name: gripper_tip_a_yp, offset_m: [ 0.058,  0.010, 0.0 ], offset_closed_m: [ 0.010,  0.010, 0.0 ] }
+      - { name: gripper_tip_a_yn, offset_m: [ 0.058, -0.010, 0.0 ], offset_closed_m: [ 0.010, -0.010, 0.0 ] }
+      - { name: gripper_tip_b_yp, offset_m: [-0.058,  0.010, 0.0 ], offset_closed_m: [-0.010,  0.010, 0.0 ] }
+      - { name: gripper_tip_b_yn, offset_m: [-0.058, -0.010, 0.0 ], offset_closed_m: [-0.010, -0.010, 0.0 ] }
   # Stand-frame ROI box (workspace limit), viser "Safety ROI box"에서 조정.
   # enable=true라야 viser Send가 허용된다(서버가 enabled 보고). bounds/면(face)
   # velocity-damper/fail-closed/escape 로직은 전부 C++ 서버(config-driven)이고
@@ -194,10 +194,10 @@ safety:
     # 개폐를 실측 개방률 선형 보간(floor_constraint 주석 참조). 박스 6면 체크는
     # 팔당 5점(TCP+팁 4)을 사용하며, 각 면은 보간된 점들 중 가장 노출된 점에 binds.
     tcp_offset_points:
-      - { name: gripper_tip_a_yp, offset_m: [ 0.058,  0.013, 0.0 ], offset_closed_m: [ 0.010,  0.013, 0.0 ] }
-      - { name: gripper_tip_a_yn, offset_m: [ 0.058, -0.013, 0.0 ], offset_closed_m: [ 0.010, -0.013, 0.0 ] }
-      - { name: gripper_tip_b_yp, offset_m: [-0.058,  0.013, 0.0 ], offset_closed_m: [-0.010,  0.013, 0.0 ] }
-      - { name: gripper_tip_b_yn, offset_m: [-0.058, -0.013, 0.0 ], offset_closed_m: [-0.010, -0.013, 0.0 ] }
+      - { name: gripper_tip_a_yp, offset_m: [ 0.058,  0.010, 0.0 ], offset_closed_m: [ 0.010,  0.010, 0.0 ] }
+      - { name: gripper_tip_a_yn, offset_m: [ 0.058, -0.010, 0.0 ], offset_closed_m: [ 0.010, -0.010, 0.0 ] }
+      - { name: gripper_tip_b_yp, offset_m: [-0.058,  0.010, 0.0 ], offset_closed_m: [-0.010,  0.010, 0.0 ] }
+      - { name: gripper_tip_b_yn, offset_m: [-0.058, -0.010, 0.0 ], offset_closed_m: [-0.010, -0.010, 0.0 ] }
   # User-defined TILTED floor plane (viser "User Safety Floor"). enable=true라야
   # viser Send가 허용된다(서버가 enabled 보고). 초기 평면은 비워둠(has_initial_plane
   # false) → viser에서 양팔 접촉점 ≥3 캡처 후 Fit & Apply 하기 전까지는 inert.

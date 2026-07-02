@@ -13,7 +13,6 @@ from .geometry import (
     _pose_orientation_wxyz,
     _pose_position,
     _pose_wxyz,
-    _rpy_to_wxyz,
 )
 from .models import EXTERNAL_BOX_COLLISION_M, ChunkOverlaySnapshot, CircleOverlaySnapshot
 
@@ -141,12 +140,12 @@ def _rotate_vector_by_wxyz(
 
 
 def _pose_triad_segments(
-    pose6: tuple[float, float, float, float, float, float],
+    pose7: tuple[float, float, float, float, float, float, float],
     length: float,
 ) -> tuple[Any, Any]:
-    origin = (float(pose6[0]), float(pose6[1]), float(pose6[2]))
+    origin = (float(pose7[0]), float(pose7[1]), float(pose7[2]))
     axis_length = float(length)
-    wxyz = _rpy_to_wxyz(float(pose6[3]), float(pose6[4]), float(pose6[5]))
+    wxyz = (float(pose7[6]), float(pose7[3]), float(pose7[4]), float(pose7[5]))
     axes = (
         ((1.0, 0.0, 0.0), (224, 36, 36)),
         ((0.0, 1.0, 0.0), (31, 157, 58)),

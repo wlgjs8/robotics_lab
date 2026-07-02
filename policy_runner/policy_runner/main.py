@@ -942,7 +942,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--execute-arms",
         choices=("both", "left", "right"),
-        default="both",
+        default="right",
         help=(
             "Runtime execution mask: suppress the non-selected arm's commands "
             "(twist + gripper) so it physically holds. The checkpoint stays "
@@ -1003,7 +1003,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
             "(--include-depth converter) AND the same --depth-z-near/far-mm + --depth-units-m."
         ),
     )
-    flow_infer.add_argument("--depth-z-near-mm", type=float, default=120.0, help="depth clip near (mm); match training")
+    flow_infer.add_argument("--depth-z-near-mm", type=float, default=50.0, help="depth clip near (mm); match training")
     flow_infer.add_argument("--depth-z-far-mm", type=float, default=700.0, help="depth clip far (mm); match training")
     flow_infer.add_argument(
         "--depth-units-m", type=float, default=1e-4,
@@ -1054,7 +1054,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--speed-scale",
         type=float,
-        default=1.5,
+        default=1.0,
         help=(
             "Replay policy action steps faster/slower without changing the model: effective "
             "policy_dt = policy_dt_sec / speed_scale, while source-side velocity clamps are "
@@ -1071,7 +1071,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--max-angular-velocity-rad-s",
         type=float,
-        default=0.8,
+        default=2.0,
         help="Override flow action angular clamp; omitted uses checkpoint action statistics.",
     )
     flow_infer.add_argument(
@@ -1121,7 +1121,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--gripper-close-percent",
         type=float,
-        default=7.0,
+        default=3.0,
         help="Opening percent commanded for the CLOSE level in --gripper-action-mode binary "
              "(DEFAULT 7). Clamped to [0,100].",
     )
@@ -1154,7 +1154,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--gripper-close-snap-percent",
         type=float,
-        default=0.0,
+        default=15.0,
         help="ABSOLUTE close-snap deadzone (opening percent): after mapping, any gripper opening "
              "STRICTLY BELOW this snaps to 0 (fully closed), so small policy jitter near the closed "
              "end does not leave the jaw cracked open. E.g. 10 -> any commanded opening <10%% closes "

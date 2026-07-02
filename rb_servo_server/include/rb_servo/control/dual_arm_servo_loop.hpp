@@ -507,9 +507,10 @@ private:
 
     // Pure-pursuit over a planned waypoint list using the current sent pose. Thin wrapper
     // around pursueWaypointsStep() that supplies the current sent pose and config tolerances:
-    // advances `index` by projection (never stalls on corner-cutting), returns the farthest
-    // waypoint within the execution lookahead (so the servo runs near max velocity), and
-    // sets `done` at the final waypoint. Shared by InitMotion and the collision-free linear
+    // advances `index` by projection or far-endpoint proximity (never stalls on
+    // corner-cutting or asymptotic endpoint convergence), returns the farthest waypoint
+    // within the execution lookahead (so the servo runs near max velocity), and sets
+    // `done` at the final waypoint. Shared by InitMotion and the collision-free linear
     // detour.
     std::pair<JointArray, JointArray> pursueWaypoints(
         const std::vector<std::pair<JointArray, JointArray>>& waypoints,
@@ -602,11 +603,13 @@ private:
 
 // Projection-based pure-pursuit step over a planned collision-free waypoint polyline.
 // Given the current sent pose, it advances `index` by PROJECTING the pose onto the path
-// (monotonic, never stalls — even when the lookahead chord cuts a corner and never comes
-// within `waypoint_tol_deg` of an apex node), then returns the farthest forward waypoint
-// within `lookahead_deg` of the current pose. `done` is set once the pose has settled
-// within `waypoint_tol_deg` of the final waypoint. Stateless apart from the in/out
-// `index`, so it is unit-testable in isolation (see test_init_motion_pursuit).
+// or by reaching the segment's far endpoint within `waypoint_tol_deg` on both arms
+// (monotonic, never stalls when the lookahead chord cuts a corner or when an
+// asymptotic tracker settles just short of an escape-head waypoint), then returns the
+// farthest forward waypoint within `lookahead_deg` of the current pose. `done` is set
+// once the pose has settled within `waypoint_tol_deg` of the final waypoint. Stateless
+// apart from the in/out `index`, so it is unit-testable in isolation (see
+// test_init_motion_pursuit).
 struct PursuitStep {
     JointArray left{};
     JointArray right{};

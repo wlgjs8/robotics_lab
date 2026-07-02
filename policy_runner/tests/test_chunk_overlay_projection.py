@@ -71,10 +71,12 @@ class ChunkOverlayProjectionTest(unittest.TestCase):
         anchor = np.asarray([0.40, -0.20, 0.30, 0.0, 0.0, 0.0, 1.0], dtype=np.float64)
         expected0 = pose_compose_local(anchor, np.asarray([0.01, 0.0, 0.0, 0.0, 0.0, 0.0]))
         expected1 = pose_compose_local(expected0, np.asarray([0.0, 0.02, 0.0, 0.0, 0.0, 0.0]))
-        np.testing.assert_allclose(packet["left"][0][:6], expected0[:6], atol=1e-7)
-        np.testing.assert_allclose(packet["left"][1][:6], expected1[:6], atol=1e-7)
-        self.assertEqual(packet["left"][0][6], 70.0)
-        self.assertEqual(packet["left"][1][6], 60.0)
+        self.assertEqual(len(packet["left"][0]), 8)
+        self.assertEqual(len(packet["left"][1]), 8)
+        np.testing.assert_allclose(packet["left"][0][:7], expected0[:7], atol=1e-7)
+        np.testing.assert_allclose(packet["left"][1][:7], expected1[:7], atol=1e-7)
+        self.assertEqual(packet["left"][0][7], 70.0)
+        self.assertEqual(packet["left"][1][7], 60.0)
 
 
 if __name__ == "__main__":

@@ -26,8 +26,8 @@ from urllib.parse import urlparse
 ARMS = ("left", "right")
 JOINT_COUNT = 6
 SCOPE_SCHEMA = "robotics_lab.scope.v1"
-TRAJ_SCOPE_SCHEMA = "robotics_lab.scope_traj.v1"
-CHUNK_OVERLAY_SCHEMA = "robotics_lab.chunk_overlay.v1"
+TRAJ_SCOPE_SCHEMA = "robotics_lab.scope_traj.v2"
+CHUNK_OVERLAY_SCHEMA = "robotics_lab.chunk_overlay.v2"
 DEFAULT_STATE_LISTEN = "0.0.0.0:50376"
 DEFAULT_CHUNK_LISTEN = "0.0.0.0:50263"
 DEFAULT_HTTP_HOST = "0.0.0.0"
@@ -174,23 +174,69 @@ def extract_packet_samples(payload: Mapping[str, Any], *, fallback_time_s: float
     return [(t, arms)] if arms else []
 
 
-def _vec3_from_tcp_pose(value: Any) -> tuple[float, float, float] | None:
-    try:
-        if isinstance(value, Mapping):
-            raw = (value["x"], value["y"], value["z"])
-        elif isinstance(value, list | tuple) and len(value) >= 3:
-            raw = value[:3]
-        else:
-            return None
-        parsed = tuple(float(item) for item in raw)
-    except (KeyError, TypeError, ValueError):
+def _quaternion_xyzw_from_tcp_pose(value: Any) -> tuple[float, float, float, float] | None:
+    if not isinstance(value, Mapping):
         return None
-    if len(parsed) != 3 or not all(math.isfinite(item) for item in parsed):
+    raw = value.get("quaternion_xyzw")
+    if isinstance(raw, list | tuple) and len(raw) == 4:
+        values = raw
+    elif all(key in value for key in ("qx", "qy", "qz", "qw")):
+        values = (value["qx"], value["qy"], value["qz"], value["qw"])
+    else:
+        return None
+    try:
+        parsed = tuple(float(item) for item in values)
+    except (TypeError, ValueError):
+        return None
+    if len(parsed) != 4 or not all(math.isfinite(item) for item in parsed):
+        return None
+    norm = math.sqrt(sum(item * item for item in parsed))
+    if not math.isfinite(norm) or norm <= 0.0:
         return None
     return parsed  # type: ignore[return-value]
 
 
-def _chunk_xyz_path(value: Any) -> list[list[float]] | None:
+def _xyz_quat_from_tcp_pose(value: Any) -> list[float] | None:
+    if not isinstance(value, Mapping):
+        return None
+    quat = _quaternion_xyzw_from_tcp_pose(value)
+    if quat is None:
+        return None
+    try:
+        xyz = (float(value["x"]), float(value["y"]), float(value["z"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(item) for item in xyz):
+        return None
+    return [xyz[0], xyz[1], xyz[2], quat[0], quat[1], quat[2], quat[3]]
+
+
+def _normalize_quaternion_xyzw(value: Any) -> tuple[float, float, float, float] | None:
+    if not isinstance(value, list | tuple) or len(value) != 4:
+        return None
+    try:
+        parsed = tuple(float(item) for item in value)
+    except (TypeError, ValueError):
+        return None
+    if len(parsed) != 4 or not all(math.isfinite(item) for item in parsed):
+        return None
+    norm = math.sqrt(sum(item * item for item in parsed))
+    if not math.isfinite(norm) or norm <= 0.0:
+        return None
+    return (parsed[0] / norm, parsed[1] / norm, parsed[2] / norm, parsed[3] / norm)
+
+
+def _quat_geodesic_deg(q1: Any, q2: Any) -> float | None:
+    q1n = _normalize_quaternion_xyzw(q1)
+    q2n = _normalize_quaternion_xyzw(q2)
+    if q1n is None or q2n is None:
+        return None
+    dot = abs(sum(a * b for a, b in zip(q1n, q2n, strict=True)))
+    dot = min(1.0, max(0.0, dot))
+    return math.degrees(2.0 * math.acos(dot))
+
+
+def _chunk_pose_path(value: Any) -> list[list[float]] | None:
     if value is None:
         return None
     if not isinstance(value, list | tuple):
@@ -198,12 +244,12 @@ def _chunk_xyz_path(value: Any) -> list[list[float]] | None:
     out: list[list[float]] = []
     try:
         for waypoint in value:
-            if not isinstance(waypoint, list | tuple) or len(waypoint) < 3:
+            if not isinstance(waypoint, list | tuple) or len(waypoint) != 8:
                 return None
-            xyz = [float(waypoint[0]), float(waypoint[1]), float(waypoint[2])]
-            if not all(math.isfinite(item) for item in xyz):
+            parsed = [float(item) for item in waypoint]
+            if not all(math.isfinite(item) for item in parsed):
                 return None
-            out.append(xyz)
+            out.append(parsed[:7])
     except (TypeError, ValueError):
         return None
     return out
@@ -211,25 +257,30 @@ def _chunk_xyz_path(value: Any) -> list[list[float]] | None:
 
 def build_traj_data_payload(
     *,
-    predicted: Mapping[str, list[list[float]] | None],
-    actual: Mapping[str, list[list[float]]],
+    chunks: list[Mapping[str, Any]],
     host_time_ns: int | None = None,
 ) -> dict[str, Any]:
     return {
         "schema": TRAJ_SCOPE_SCHEMA,
         "host_time_ns": time.time_ns() if host_time_ns is None else int(host_time_ns),
-        "predicted": {arm: predicted.get(arm) for arm in ARMS},
-        "actual": {arm: actual.get(arm, []) for arm in ARMS},
+        "chunks": chunks,
     }
 
 
+@dataclass
+class _TrajectoryChunk:
+    seq: Any
+    dt: float
+    horizon: int
+    t0: float
+    predicted: dict[str, list[list[float]] | None]
+    actual_by_step: dict[str, list[list[float] | None]]
+
+
 class TrajectoryStore:
-    def __init__(self, *, max_actual_points_per_arm: int = 600) -> None:
+    def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._predicted: dict[str, list[list[float]] | None] = {arm: None for arm in ARMS}
-        self._actual: dict[str, deque[list[float]]] = {
-            arm: deque(maxlen=max(1, int(max_actual_points_per_arm))) for arm in ARMS
-        }
+        self._chunks: deque[_TrajectoryChunk] = deque(maxlen=64)
         self._bind_error: str | None = None
 
     def set_bind_error(self, message: str) -> None:
@@ -242,14 +293,25 @@ class TrajectoryStore:
             arm_payload = payload.get(arm)
             if not isinstance(arm_payload, Mapping):
                 continue
-            xyz = _vec3_from_tcp_pose(arm_payload.get("tcp_actual_stand"))
-            if xyz is not None:
-                updates[arm] = [xyz[0], xyz[1], xyz[2]]
+            pose = _xyz_quat_from_tcp_pose(arm_payload.get("tcp_actual_stand"))
+            if pose is not None:
+                updates[arm] = pose
         if not updates:
             return
+        now = time.monotonic()
         with self._lock:
-            for arm, xyz in updates.items():
-                self._actual[arm].append(xyz)
+            if not self._chunks:
+                return
+            chunk = self._chunks[-1]
+            if chunk.horizon <= 0:
+                return
+            step = int((now - chunk.t0) / chunk.dt)
+            if step < 0 or step >= chunk.horizon:
+                return
+            for arm, pose in updates.items():
+                if chunk.predicted[arm] is None:
+                    continue
+                chunk.actual_by_step[arm][step] = pose
 
     def update_predicted_from_json_bytes(self, data: bytes) -> bool:
         try:
@@ -261,29 +323,73 @@ class TrajectoryStore:
         schema = payload.get("schema", payload.get("schema_version"))
         if schema != CHUNK_OVERLAY_SCHEMA:
             return False
-        updates: dict[str, list[list[float]] | None] = {}
+        try:
+            policy_dt_sec = float(payload.get("policy_dt_sec", 1e-3))
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(policy_dt_sec):
+            return False
+        horizon_raw = payload.get("horizon", 0)
+        try:
+            packet_horizon = int(horizon_raw)
+        except (TypeError, ValueError):
+            return False
+        if packet_horizon < 0:
+            return False
+        seq = payload.get("seq")
+        predicted: dict[str, list[list[float]] | None] = {}
         for arm in ARMS:
-            if arm not in payload:
-                continue
-            path = _chunk_xyz_path(payload.get(arm))
+            path = _chunk_pose_path(payload.get(arm))
             if path is None and payload.get(arm) is not None:
                 return False
-            updates[arm] = path
-        if not updates:
+            predicted[arm] = path
+        path_horizon = max((len(path) for path in predicted.values() if path is not None), default=0)
+        horizon = max(packet_horizon, path_horizon)
+        if horizon <= 0:
             return False
         with self._lock:
-            for arm, path in updates.items():
-                self._predicted[arm] = path
+            if self._chunks and seq == self._chunks[-1].seq:
+                return True
+            self._chunks.append(
+                _TrajectoryChunk(
+                    seq=seq,
+                    t0=time.monotonic(),
+                    dt=max(1e-3, policy_dt_sec),
+                    horizon=horizon,
+                    predicted={
+                        arm: None if predicted[arm] is None else [point[:] for point in predicted[arm] or []]
+                        for arm in ARMS
+                    },
+                    actual_by_step={arm: [None] * horizon for arm in ARMS},
+                )
+            )
         return True
 
     def snapshot_payload(self) -> dict[str, Any]:
         with self._lock:
-            predicted = {
-                arm: None if self._predicted[arm] is None else [point[:] for point in self._predicted[arm] or []]
-                for arm in ARMS
-            }
-            actual = {arm: [point[:] for point in self._actual[arm]] for arm in ARMS}
-        return build_traj_data_payload(predicted=predicted, actual=actual)
+            chunks = [
+                {
+                    "seq": chunk.seq,
+                    "policy_dt_sec": chunk.dt,
+                    "horizon": int(chunk.horizon),
+                    "arms": {
+                        arm: {
+                            "predicted": (
+                                None
+                                if chunk.predicted[arm] is None
+                                else [point[:] for point in chunk.predicted[arm] or []]
+                            ),
+                            "actual": [
+                                None if point is None else point[:]
+                                for point in chunk.actual_by_step[arm]
+                            ],
+                        }
+                        for arm in ARMS
+                    },
+                }
+                for chunk in self._chunks
+            ]
+        return build_traj_data_payload(chunks=chunks)
 
 
 class DashboardStore:
@@ -633,7 +739,38 @@ INDEX_HTML = r"""<!doctype html>
       font-size: 13px;
     }
     body { display: grid; grid-template-rows: 42px minmax(0, 1fr); }
-    body { grid-template-rows: 42px minmax(220px, 34vh) minmax(0, 1fr); }
+    #tabbar {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--grid);
+    }
+    .tab-button {
+      min-width: 126px;
+      color: var(--muted);
+    }
+    .tab-button.active {
+      color: var(--text);
+      border-color: #465568;
+      background: #1d2630;
+    }
+    .tab-panel {
+      min-width: 0;
+      min-height: 0;
+      display: none;
+    }
+    .tab-panel.active {
+      display: grid;
+    }
+    #tab-chunk {
+      grid-template-rows: 34px minmax(0, 1fr);
+    }
+    #tab-joint {
+      grid-template-rows: 42px minmax(0, 1fr);
+    }
     #toolbar {
       min-width: 0;
       display: flex;
@@ -676,24 +813,25 @@ INDEX_HTML = r"""<!doctype html>
       gap: 1px;
       background: var(--grid);
     }
-    #traj-section {
-      min-height: 0;
-      display: grid;
-      grid-template-rows: 24px minmax(0, 1fr);
-      background: var(--plot);
-      border-bottom: 1px solid var(--grid);
-    }
-    #traj-head {
+    #chunk-controls {
+      min-width: 0;
       display: flex;
       align-items: center;
       gap: 10px;
-      padding: 0 10px;
+      padding: 4px 10px;
+      background: var(--panel);
       color: var(--muted);
       border-bottom: 1px solid rgba(255,255,255,0.06);
       font-size: 12px;
     }
-    #traj-status { margin-left: auto; }
-    #traj-plots {
+    #chunk-controls input[type="range"] { width: 160px; }
+    #recent-steps-value {
+      min-width: 2.5em;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+    #chunk-status { margin-left: auto; }
+    #chunk-plots {
       min-width: 0;
       min-height: 0;
     }
@@ -716,52 +854,100 @@ INDEX_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-  <div id="toolbar">
-    <div class="brand">RB Joint Scope</div>
-    <label>Joint
-      <select id="joint">
-        <option value="0">J1</option><option value="1">J2</option><option value="2">J3</option>
-        <option value="3">J4</option><option value="4">J5</option><option value="5">J6</option>
-      </select>
-    </label>
-    <label>Window
-      <select id="window">
-        <option value="30" selected>30 s</option><option value="60">60 s</option><option value="all">ALL</option>
-      </select>
-    </label>
-    <label class="sent"><input id="trace-sent" type="checkbox" checked> q_sent</label>
-    <label class="ref"><input id="trace-ref" type="checkbox" checked> q_ref</label>
-    <label class="actual"><input id="trace-actual" type="checkbox" checked> q_actual</label>
-    <label><input id="smooth" type="checkbox" checked> Smooth</label>
-    <label title="Position plots show tracking error (q_sent/q_ref minus q_actual, actual=0 baseline)"><input id="pos-error" type="checkbox"> Pos err</label>
-    <button id="reset" type="button">Live</button>
-    <div id="status">connecting...</div>
+  <div id="tabbar" role="tablist" aria-label="Dashboard views">
+    <button id="tab-button-chunk" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="tab-chunk" data-tab="chunk">Chunk Following</button>
+    <button id="tab-button-joint" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="tab-joint" data-tab="joint">Joint Scope</button>
   </div>
-  <section id="traj-section">
-    <div id="traj-head">
-      <strong>Chunk vs Actual (XY / XZ / YZ)</strong>
-      <span id="traj-status">connecting...</span>
+  <div id="tab-chunk" class="tab-panel active" role="tabpanel" aria-labelledby="tab-button-chunk">
+    <div id="chunk-controls">
+      <div class="brand">Chunk Following</div>
+      <label>window (steps)
+        <input id="recent-steps" type="range" min="16" max="512" step="8" value="96">
+      </label>
+      <span id="recent-steps-value">96</span>
+      <span id="chunk-status">connecting...</span>
     </div>
-    <div id="traj-plots"></div>
-  </section>
-  <div id="plots"></div>
+    <div id="chunk-plots"></div>
+  </div>
+  <div id="tab-joint" class="tab-panel" role="tabpanel" aria-labelledby="tab-button-joint" hidden>
+    <div id="toolbar">
+      <div class="brand">RB Joint Scope</div>
+      <label>Joint
+        <select id="joint">
+          <option value="0">J1</option><option value="1">J2</option><option value="2">J3</option>
+          <option value="3">J4</option><option value="4">J5</option><option value="5">J6</option>
+        </select>
+      </label>
+      <label>Window
+        <select id="window">
+          <option value="30" selected>30 s</option><option value="60">60 s</option><option value="all">ALL</option>
+        </select>
+      </label>
+      <label class="sent"><input id="trace-sent" type="checkbox" checked> q_sent</label>
+      <label class="ref"><input id="trace-ref" type="checkbox" checked> q_ref</label>
+      <label class="actual"><input id="trace-actual" type="checkbox" checked> q_actual</label>
+      <label><input id="smooth" type="checkbox" checked> Smooth</label>
+      <label title="Position plots show tracking error (q_sent/q_ref minus q_actual, actual=0 baseline)"><input id="pos-error" type="checkbox"> Pos err</label>
+      <button id="reset" type="button">Live</button>
+      <div id="status">connecting...</div>
+    </div>
+    <div id="plots"></div>
+  </div>
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <script>
   (() => {
     "use strict";
+    const buttons = Array.from(document.querySelectorAll(".tab-button"));
+    const panels = {
+      chunk: document.getElementById("tab-chunk"),
+      joint: document.getElementById("tab-joint"),
+    };
+    function resizeShownTab(name) {
+      requestAnimationFrame(() => {
+        if (name === "chunk" && window.Plotly) {
+          window.Plotly.Plots.resize(document.getElementById("chunk-plots"));
+        }
+        window.dispatchEvent(new Event("resize"));
+      });
+    }
+    function showTab(name) {
+      for (const [key, panel] of Object.entries(panels)) {
+        const active = key === name;
+        panel.hidden = !active;
+        panel.classList.toggle("active", active);
+      }
+      for (const button of buttons) {
+        const active = button.dataset.tab === name;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", active ? "true" : "false");
+      }
+      resizeShownTab(name);
+    }
+    for (const button of buttons) {
+      button.addEventListener("click", () => showTab(button.dataset.tab || "chunk"));
+    }
+    showTab("chunk");
+  })();
+  </script>
+  <script>
+  (() => {
+    "use strict";
     const ARMS = ["left", "right"];
-    const ARM_LABEL = {left: "Left", right: "Right"};
-    const PLANES = [
-      {key: "xy", label: "XY", xi: 0, yi: 1, xLabel: "x (m)", yLabel: "y (m)"},
-      {key: "xz", label: "XZ", xi: 0, yi: 2, xLabel: "x (m)", yLabel: "z (m)"},
-      {key: "yz", label: "YZ", xi: 1, yi: 2, xLabel: "y (m)", yLabel: "z (m)"},
+    const ARM_LABEL = {left: "L", right: "R"};
+    const POS_DOFS = [
+      {key: "x", unit: "m"},
+      {key: "y", unit: "m"},
+      {key: "z", unit: "m"},
     ];
     const el = {
-      plot: document.getElementById("traj-plots"),
-      status: document.getElementById("traj-status"),
+      plot: document.getElementById("chunk-plots"),
+      status: document.getElementById("chunk-status"),
+      recent: document.getElementById("recent-steps"),
+      recentValue: document.getElementById("recent-steps-value"),
     };
+    const storageKey = "scope_window_steps";
     const xDomains = [[0.00, 0.31], [0.345, 0.655], [0.69, 1.00]];
-    const yDomains = [[0.56, 1.00], [0.00, 0.44]];
+    const yDomains = [[0.78, 1.00], [0.52, 0.74], [0.26, 0.48], [0.00, 0.22]];
     const config = {displayModeBar: false, displaylogo: false, responsive: true};
     function axisRef(prefix, index) {
       return prefix + (index === 1 ? "" : String(index));
@@ -769,111 +955,350 @@ INDEX_HTML = r"""<!doctype html>
     function layoutAxisKey(prefix, index) {
       return prefix + "axis" + (index === 1 ? "" : String(index));
     }
-    function coord(points, index) {
-      return (Array.isArray(points) ? points : [])
-        .map(point => Array.isArray(point) && point.length > index ? Number(point[index]) : NaN);
+    function clampWindowSteps(value) {
+      const parsed = Number(value);
+      const rounded = Number.isFinite(parsed) ? Math.round(parsed / 8) * 8 : 96;
+      return Math.max(16, Math.min(512, rounded));
     }
-    function traceFor(points, arm, plane, index, kind) {
-      const x = coord(points, plane.xi);
-      const y = coord(points, plane.yi);
-      const hasFinite = x.some((value, i) => Number.isFinite(value) && Number.isFinite(y[i]));
-      if (!hasFinite) return null;
-      if (kind === "predicted") {
-        return {
-          type: "scattergl",
-          mode: "lines+markers",
-          name: "predicted",
-          legendgroup: "predicted",
-          showlegend: index === 1,
-          x, y,
-          xaxis: axisRef("x", index),
-          yaxis: axisRef("y", index),
-          line: {color: "#2ec4a0", width: 2},
-          marker: {color: "#2ec4a0", size: 4},
-          hovertemplate: `${ARM_LABEL[arm]} ${plane.label} predicted<br>%{x:.4f}, %{y:.4f}<extra></extra>`,
-        };
+    function setWindowSteps(value, persist) {
+      const n = clampWindowSteps(value);
+      el.recent.value = String(n);
+      el.recentValue.textContent = String(n);
+      if (persist) localStorage.setItem(storageKey, String(n));
+    }
+    setWindowSteps(localStorage.getItem(storageKey) || el.recent.value, false);
+    el.recent.addEventListener("input", () => {
+      setWindowSteps(el.recent.value, true);
+      refresh();
+    });
+    function validPoint(point, dof) {
+      if (!Array.isArray(point) || point.length <= dof) return null;
+      const value = Number(point[dof]);
+      return Number.isFinite(value) ? value : null;
+    }
+    function normalizeQuat(q) {
+      if (!Array.isArray(q) || q.length !== 4) return null;
+      const values = q.map(Number);
+      if (!values.every(Number.isFinite)) return null;
+      const norm = Math.hypot(values[0], values[1], values[2], values[3]);
+      if (!(norm > 0)) return null;
+      return values.map(v => v / norm);
+    }
+    function quatAt(rows, index) {
+      const source = Array.isArray(rows) ? rows : [];
+      const row = source[index];
+      if (!Array.isArray(row) || row.length < 7) return null;
+      return normalizeQuat(row.slice(3, 7));
+    }
+    function geodesicDeg(q1, q2) {
+      const a = normalizeQuat(q1), b = normalizeQuat(q2);
+      if (!a || !b) return null;
+      const dot = Math.min(1, Math.abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]));
+      return 2 * Math.acos(dot) * 180 / Math.PI;
+    }
+    function firstAvailableQuat(rows) {
+      const source = Array.isArray(rows) ? rows : [];
+      for (let i = 0; i < source.length; i++) {
+        const q = quatAt(source, i);
+        if (q) return q;
       }
-      return {
-        type: "scattergl",
-        mode: "lines",
-        name: "actual",
-        legendgroup: "actual",
-        showlegend: index === 1,
-        x, y,
-        xaxis: axisRef("x", index),
-        yaxis: axisRef("y", index),
-        line: {color: "#ff7a1a", width: 2},
-        hovertemplate: `${ARM_LABEL[arm]} ${plane.label} actual<br>%{x:.4f}, %{y:.4f}<extra></extra>`,
-      };
+      return null;
     }
-    function lastActualTrace(points, arm, plane, index) {
-      if (!Array.isArray(points) || !points.length) return null;
-      const point = points[points.length - 1];
-      if (!Array.isArray(point) || point.length < 3) return null;
-      const x = Number(point[plane.xi]);
-      const y = Number(point[plane.yi]);
-      if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-      return {
-        type: "scattergl",
-        mode: "markers",
-        name: "latest actual",
-        legendgroup: "latest actual",
-        showlegend: index === 1,
-        x: [x],
-        y: [y],
-        xaxis: axisRef("x", index),
-        yaxis: axisRef("y", index),
-        marker: {color: "#ffd23a", size: 9, line: {color: "#101419", width: 1}},
-        hovertemplate: `${ARM_LABEL[arm]} ${plane.label} latest<br>%{x:.4f}, %{y:.4f}<extra></extra>`,
-      };
+    function countRecorded(rows) {
+      return Array.isArray(rows) ? rows.filter(row => Array.isArray(row)).length : 0;
+    }
+    function chunkArms(chunk) {
+      return chunk && chunk.arms && typeof chunk.arms === "object" ? chunk.arms : {};
+    }
+    function armRows(chunk, arm, key) {
+      const arms = chunkArms(chunk);
+      const armPayload = arms[arm] || {};
+      const rows = armPayload[key];
+      return Array.isArray(rows) ? rows : [];
+    }
+    function chunkSeq(chunk) {
+      return chunk && chunk.seq !== null && chunk.seq !== undefined ? String(chunk.seq) : "n/a";
+    }
+    function chunkHorizon(chunk) {
+      let horizon = Number(chunk && chunk.horizon);
+      horizon = Number.isFinite(horizon) && horizon > 0 ? Math.floor(horizon) : 0;
+      for (const arm of ARMS) {
+        horizon = Math.max(
+          horizon,
+          armRows(chunk, arm, "predicted").length,
+          armRows(chunk, arm, "actual").length,
+        );
+      }
+      return horizon;
+    }
+    function visibleModel(payload) {
+      const rawChunks = payload && Array.isArray(payload.chunks) ? payload.chunks : [];
+      const chunks = [];
+      let totalSteps = 0;
+      for (const chunk of rawChunks) {
+        const horizon = chunkHorizon(chunk);
+        if (horizon <= 0) continue;
+        chunks.push({chunk, start: totalSteps, horizon});
+        totalSteps += horizon;
+      }
+      const windowSteps = clampWindowSteps(el.recent.value);
+      const visibleStart = Math.max(0, totalSteps - windowSteps);
+      const visibleEnd = totalSteps > 0 ? totalSteps - 1 : 0;
+      const slices = [];
+      for (const item of chunks) {
+        const from = Math.max(0, visibleStart - item.start);
+        const to = Math.min(item.horizon, visibleEnd + 1 - item.start);
+        if (to > from) {
+          slices.push({...item, from, to});
+        }
+      }
+      const boundaries = chunks
+        .slice(1)
+        .map(item => item.start)
+        .filter(step => totalSteps > 0 && step >= visibleStart && step <= visibleEnd);
+      return {chunks, slices, boundaries, totalSteps, visibleStart, visibleEnd, windowSteps};
+    }
+    function pushSeparator(series, x) {
+      if (!series.x.length) return;
+      series.x.push(x);
+      series.y.push(null);
+      series.customdata.push(["", ""]);
+    }
+    function positionSeries(model, arm, key, dof) {
+      const series = {x: [], y: [], customdata: []};
+      let first = true;
+      for (const slice of model.slices) {
+        if (!first) pushSeparator(series, slice.start - 0.5);
+        first = false;
+        const rows = armRows(slice.chunk, arm, key);
+        const seq = chunkSeq(slice.chunk);
+        for (let local = slice.from; local < slice.to; local++) {
+          series.x.push(slice.start + local);
+          series.y.push(validPoint(rows[local], dof));
+          series.customdata.push([seq, local]);
+        }
+      }
+      return series;
+    }
+    function rotationSeries(model, arm, kind) {
+      const series = {x: [], y: [], customdata: []};
+      let first = true;
+      for (const slice of model.slices) {
+        if (!first) pushSeparator(series, slice.start - 0.5);
+        first = false;
+        const predictedRows = armRows(slice.chunk, arm, "predicted");
+        const actualRows = armRows(slice.chunk, arm, "actual");
+        const predictedBase = quatAt(predictedRows, 0);
+        const actualBase = firstAvailableQuat(actualRows);
+        const seq = chunkSeq(slice.chunk);
+        for (let local = slice.from; local < slice.to; local++) {
+          const pred = quatAt(predictedRows, local);
+          const act = quatAt(actualRows, local);
+          let value = null;
+          if (kind === "predictedTravel") {
+            value = predictedBase && pred ? geodesicDeg(predictedBase, pred) : null;
+          } else if (kind === "actualTravel") {
+            value = actualBase && act ? geodesicDeg(actualBase, act) : null;
+          } else {
+            value = pred && act ? geodesicDeg(pred, act) : null;
+          }
+          series.x.push(slice.start + local);
+          series.y.push(value);
+          series.customdata.push([seq, local]);
+        }
+      }
+      return series;
+    }
+    function xAxisRange(model) {
+      if (model.totalSteps <= 0) return [-0.5, 0.5];
+      if (model.visibleStart === model.visibleEnd) return [model.visibleStart - 0.5, model.visibleEnd + 0.5];
+      return [model.visibleStart, model.visibleEnd];
+    }
+    function visibleStepCount(model) {
+      return Math.max(1, Math.min(model.windowSteps, model.totalSteps || 1));
+    }
+    function addChunkBoundaryShapes(layout, model, xIndex, row) {
+      for (const boundary of model.boundaries) {
+        layout.shapes.push({
+          type: "line",
+          xref: axisRef("x", xIndex),
+          yref: "paper",
+          x0: boundary,
+          x1: boundary,
+          y0: yDomains[row][0],
+          y1: yDomains[row][1],
+          line: {color: "rgba(56,69,84,0.55)", width: 1},
+          layer: "below",
+        });
+      }
     }
     function buildFigure(payload) {
       const traces = [];
+      const model = visibleModel(payload);
       const layout = {
         paper_bgcolor: "#101419",
         plot_bgcolor: "#0d1117",
         font: {color: "#e7edf5", size: 10},
-        margin: {l: 42, r: 16, t: 22, b: 28},
+        margin: {l: 42, r: 16, t: 28, b: 28},
         showlegend: true,
-        legend: {orientation: "h", x: 0, y: 1.08, bgcolor: "rgba(0,0,0,0)"},
+        legend: {orientation: "h", x: 0, y: 1.06, bgcolor: "rgba(0,0,0,0)"},
         annotations: [],
+        shapes: [],
       };
+      const count = visibleStepCount(model);
+      const range = xAxisRange(model);
       let index = 0;
-      for (let row = 0; row < ARMS.length; row++) {
-        const arm = ARMS[row];
-        for (let col = 0; col < PLANES.length; col++) {
-          const plane = PLANES[col];
+      const rowSpecs = [
+        {arm: "left", kind: "position"},
+        {arm: "left", kind: "rotation"},
+        {arm: "right", kind: "position"},
+        {arm: "right", kind: "rotation"},
+      ];
+      for (let row = 0; row < rowSpecs.length; row++) {
+        const spec = rowSpecs[row];
+        const isBottomRow = row === rowSpecs.length - 1;
+        if (spec.kind === "position") {
+          for (let col = 0; col < POS_DOFS.length; col++) {
+            const dofIndex = col;
+            const dof = POS_DOFS[dofIndex];
+            index += 1;
+            const predicted = positionSeries(model, spec.arm, "predicted", dofIndex);
+            const actual = positionSeries(model, spec.arm, "actual", dofIndex);
+            traces.push({
+              type: "scatter",
+              mode: "lines+markers",
+              name: "predicted",
+              legendgroup: "predicted",
+              showlegend: index === 1,
+              x: predicted.x,
+              y: predicted.y,
+              customdata: predicted.customdata,
+              xaxis: axisRef("x", index),
+              yaxis: axisRef("y", index),
+              line: {color: "#2ec4a0", width: 2},
+              marker: {color: "#2ec4a0", size: 4},
+              connectgaps: false,
+              hovertemplate: `${ARM_LABEL[spec.arm]}·${dof.key} predicted<br>chunk %{customdata[0]} · step %{customdata[1]}<br>global step %{x}<br>%{y:.5f} ${dof.unit}<extra></extra>`,
+            });
+            traces.push({
+              type: "scatter",
+              mode: "lines",
+              name: "actual",
+              legendgroup: "actual",
+              showlegend: index === 1,
+              x: actual.x,
+              y: actual.y,
+              customdata: actual.customdata,
+              xaxis: axisRef("x", index),
+              yaxis: axisRef("y", index),
+              line: {color: "#ff7a1a", width: 2},
+              connectgaps: false,
+              hovertemplate: `${ARM_LABEL[spec.arm]}·${dof.key} actual<br>chunk %{customdata[0]} · step %{customdata[1]}<br>global step %{x}<br>%{y:.5f} ${dof.unit}<extra></extra>`,
+            });
+            layout[layoutAxisKey("x", index)] = {
+              domain: xDomains[col],
+              title: {text: isBottomRow ? "step" : "", standoff: 2},
+              gridcolor: "#2a3440",
+              zerolinecolor: "#384554",
+              linecolor: "#384554",
+              tickfont: {size: 9},
+              range,
+              dtick: Math.max(1, Math.ceil(Math.max(1, count - 1) / 4)),
+            };
+            layout[layoutAxisKey("y", index)] = {
+              domain: yDomains[row],
+              title: {text: dof.unit, standoff: 2},
+              gridcolor: "#2a3440",
+              zerolinecolor: "#384554",
+              linecolor: "#384554",
+              tickfont: {size: 9},
+            };
+            addChunkBoundaryShapes(layout, model, index, row);
+            layout.annotations.push({
+              text: `${ARM_LABEL[spec.arm]}·${dof.key}`,
+              x: (xDomains[col][0] + xDomains[col][1]) / 2,
+              y: yDomains[row][1] + 0.035,
+              xref: "paper",
+              yref: "paper",
+              showarrow: false,
+              font: {color: "#97a3b3", size: 11},
+            });
+          }
+        } else {
           index += 1;
-          const predicted = payload && payload.predicted ? payload.predicted[arm] : null;
-          const actual = payload && payload.actual ? payload.actual[arm] : null;
-          const predTrace = traceFor(predicted, arm, plane, index, "predicted");
-          const actualTrace = traceFor(actual, arm, plane, index, "actual");
-          const latestTrace = lastActualTrace(actual, arm, plane, index);
-          if (predTrace) traces.push(predTrace);
-          if (actualTrace) traces.push(actualTrace);
-          if (latestTrace) traces.push(latestTrace);
-          const xRef = axisRef("x", index);
+          const predictedTravel = rotationSeries(model, spec.arm, "predictedTravel");
+          const actualTravel = rotationSeries(model, spec.arm, "actualTravel");
+          const error = rotationSeries(model, spec.arm, "error");
+          traces.push({
+            type: "scatter",
+            mode: "lines+markers",
+            name: "predicted rot travel",
+            legendgroup: "predicted-rot-travel",
+            showlegend: spec.arm === "left",
+            x: predictedTravel.x,
+            y: predictedTravel.y,
+            customdata: predictedTravel.customdata,
+            xaxis: axisRef("x", index),
+            yaxis: axisRef("y", index),
+            line: {color: "#2ec4a0", width: 2},
+            marker: {color: "#2ec4a0", size: 4},
+            connectgaps: false,
+            hovertemplate: `${ARM_LABEL[spec.arm]} rot predicted travel<br>chunk %{customdata[0]} · step %{customdata[1]}<br>global step %{x}<br>%{y:.3f} deg<extra></extra>`,
+          });
+          traces.push({
+            type: "scatter",
+            mode: "lines+markers",
+            name: "actual rot travel",
+            legendgroup: "actual-rot-travel",
+            showlegend: spec.arm === "left",
+            x: actualTravel.x,
+            y: actualTravel.y,
+            customdata: actualTravel.customdata,
+            xaxis: axisRef("x", index),
+            yaxis: axisRef("y", index),
+            line: {color: "#ff7a1a", width: 2},
+            marker: {color: "#ff7a1a", size: 4},
+            connectgaps: false,
+            hovertemplate: `${ARM_LABEL[spec.arm]} rot actual travel<br>chunk %{customdata[0]} · step %{customdata[1]}<br>global step %{x}<br>%{y:.3f} deg<extra></extra>`,
+          });
+          traces.push({
+            type: "scatter",
+            mode: "lines+markers",
+            name: "rotation error",
+            legendgroup: "rotation-error",
+            showlegend: spec.arm === "left",
+            x: error.x,
+            y: error.y,
+            customdata: error.customdata,
+            xaxis: axisRef("x", index),
+            yaxis: axisRef("y", index),
+            line: {color: "#ff4f64", width: 2},
+            marker: {color: "#ff4f64", size: 4},
+            connectgaps: false,
+            hovertemplate: `${ARM_LABEL[spec.arm]} rot error<br>chunk %{customdata[0]} · step %{customdata[1]}<br>global step %{x}<br>%{y:.3f} deg<extra></extra>`,
+          });
           layout[layoutAxisKey("x", index)] = {
-            domain: xDomains[col],
-            title: {text: plane.xLabel, standoff: 2},
+            domain: [0.00, 1.00],
+            title: {text: isBottomRow ? "step" : "", standoff: 2},
             gridcolor: "#2a3440",
             zerolinecolor: "#384554",
             linecolor: "#384554",
             tickfont: {size: 9},
+            range,
+            dtick: Math.max(1, Math.ceil(Math.max(1, count - 1) / 4)),
           };
           layout[layoutAxisKey("y", index)] = {
             domain: yDomains[row],
-            title: {text: plane.yLabel, standoff: 2},
+            title: {text: "deg", standoff: 2},
             gridcolor: "#2a3440",
             zerolinecolor: "#384554",
             linecolor: "#384554",
             tickfont: {size: 9},
-            scaleanchor: xRef,
-            scaleratio: 1,
           };
+          addChunkBoundaryShapes(layout, model, index, row);
           layout.annotations.push({
-            text: `${ARM_LABEL[arm]} ${plane.label}`,
-            x: (xDomains[col][0] + xDomains[col][1]) / 2,
+            text: `${ARM_LABEL[spec.arm]} rot travel/err (deg)`,
+            x: 0.5,
             y: yDomains[row][1] + 0.035,
             xref: "paper",
             yref: "paper",
@@ -882,7 +1307,11 @@ INDEX_HTML = r"""<!doctype html>
           });
         }
       }
-      return {traces, layout};
+      return {traces, layout, model};
+    }
+    function updateStatus(model) {
+      const shown = Math.min(model.windowSteps, model.totalSteps);
+      el.status.textContent = `${model.chunks.length} chunks / ${model.totalSteps} steps buffered, showing last ${shown}`;
     }
     async function refresh() {
       if (!window.Plotly) {
@@ -893,18 +1322,16 @@ INDEX_HTML = r"""<!doctype html>
         const response = await fetch("./traj_data", {cache: "no-store"});
         if (!response.ok) throw new Error(String(response.status));
         const payload = await response.json();
-        if (!payload || payload.schema !== "robotics_lab.scope_traj.v1") throw new Error("bad schema");
-        const {traces, layout} = buildFigure(payload);
+        if (!payload || payload.schema !== "robotics_lab.scope_traj.v2") throw new Error("bad schema");
+        const {traces, layout, model} = buildFigure(payload);
         await window.Plotly.react(el.plot, traces, layout, config);
-        const nActual = (payload.actual.left || []).length + (payload.actual.right || []).length;
-        const nPred = (payload.predicted.left || []).length + (payload.predicted.right || []).length;
-        el.status.textContent = `actual ${nActual} pts | predicted ${nPred} pts`;
+        updateStatus(model);
       } catch (_err) {
-        el.status.textContent = "trajectory disconnected";
+        el.status.textContent = "chunk data disconnected";
       }
     }
     refresh();
-    setInterval(refresh, 400);
+    setInterval(refresh, 300);
     window.addEventListener("resize", () => {
       if (window.Plotly) window.Plotly.Plots.resize(el.plot);
     });
@@ -1568,7 +1995,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=f"UDP predicted-chunk overlay endpoint to bind (default {DEFAULT_CHUNK_LISTEN})",
     )
     parser.add_argument("--host", default=DEFAULT_HTTP_HOST, help="HTTP bind host")
-    parser.add_argument("--port", type=int, default=DEFAULT_HTTP_PORT, help="HTTP port")
+    parser.add_argument("--port", "--http-port", type=int, default=DEFAULT_HTTP_PORT, help="HTTP port")
     parser.add_argument("--history-sec", type=float, default=DEFAULT_HISTORY_SEC)
     parser.add_argument("--csv", default="", help="CSV log path; empty disables CSV")
     return parser

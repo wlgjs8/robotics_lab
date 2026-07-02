@@ -809,7 +809,7 @@ class FlowMatchingActionSource:
                         dtype=np.float64,
                     )
                     cur = np.asarray(pose_compose_local(cur, delta), dtype=np.float64)
-                    arm_points.append([float(value) for value in cur[:6].tolist()] + [float(chunk[i][grip_index])])
+                    arm_points.append([float(value) for value in cur[:7].tolist()] + [float(chunk[i][grip_index])])
                 projected[arm] = arm_points
             if projected["left"] is None and projected["right"] is None:
                 return

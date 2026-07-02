@@ -24,12 +24,12 @@ def sample_chunk_overlay(**overrides):
         "policy_dt_sec": 0.05,
         "horizon": 2,
         "left": [
-            [0.10, 0.20, 0.30, 0.0, 0.0, 0.0, 100.0],
-            [0.11, 0.21, 0.31, 0.0, 0.0, 0.0, 90.0],
+            [0.10, 0.20, 0.30, 0.0, 0.0, 0.0, 1.0, 100.0],
+            [0.11, 0.21, 0.31, 0.0, 0.0, 0.0, 1.0, 90.0],
         ],
         "right": [
-            [-0.10, 0.20, 0.30, 0.0, 0.0, 0.0, 100.0],
-            [-0.11, 0.21, 0.31, 0.0, 0.0, 0.0, 80.0],
+            [-0.10, 0.20, 0.30, 0.0, 0.0, 0.0, 1.0, 100.0],
+            [-0.11, 0.21, 0.31, 0.0, 0.0, 0.0, 1.0, 80.0],
         ],
     }
     data.update(overrides)
@@ -71,8 +71,8 @@ class ChunkOverlayTest(unittest.TestCase):
         self.assertEqual(
             overlay.left_poses,
             (
-                (0.10, 0.20, 0.30, 0.0, 0.0, 0.0),
-                (0.11, 0.21, 0.31, 0.0, 0.0, 0.0),
+                (0.10, 0.20, 0.30, 0.0, 0.0, 0.0, 1.0),
+                (0.11, 0.21, 0.31, 0.0, 0.0, 0.0, 1.0),
             ),
         )
         self.assertEqual(overlay.left_positions, ((0.10, 0.20, 0.30), (0.11, 0.21, 0.31)))
@@ -83,14 +83,14 @@ class ChunkOverlayTest(unittest.TestCase):
 
     def test_snapshot_parse_retains_nonzero_waypoint_orientation(self) -> None:
         left = [
-            [0.10, 0.20, 0.30, 0.01, -0.02, 0.03, 100.0],
-            [0.11, 0.21, 0.31, 0.04, -0.05, 0.06, 90.0],
+            [0.10, 0.20, 0.30, 0.01, -0.02, 0.03, 0.99, 100.0],
+            [0.11, 0.21, 0.31, 0.04, -0.05, 0.06, 0.98, 90.0],
         ]
         overlay = ChunkOverlaySnapshot.parse(sample_chunk_overlay(left=left, right=None), received_monotonic=100.0)
         self.assertIsNotNone(overlay)
         assert overlay is not None
-        self.assertEqual(overlay.left_poses[0], tuple(left[0][:6]))
-        self.assertEqual(overlay.left_poses[1], tuple(left[1][:6]))
+        self.assertEqual(overlay.left_poses[0], tuple(left[0][:7]))
+        self.assertEqual(overlay.left_poses[1], tuple(left[1][:7]))
         self.assertEqual(overlay.left_positions[0], overlay.left_poses[0][:3])
         self.assertEqual(overlay.left_positions[1], overlay.left_poses[1][:3])
 
@@ -99,9 +99,9 @@ class ChunkOverlayTest(unittest.TestCase):
             sample_chunk_overlay(
                 horizon=3,
                 left=[
-                    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0],
-                    [0.10, 0.20, 0.30, 0.0, 0.0, 0.0, 90.0],
-                    [0.20, 0.40, 0.60, 0.0, 0.0, 0.0, 80.0],
+                    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 100.0],
+                    [0.10, 0.20, 0.30, 0.0, 0.0, 0.0, 1.0, 90.0],
+                    [0.20, 0.40, 0.60, 0.0, 0.0, 0.0, 1.0, 80.0],
                 ],
                 right=None,
                 policy_dt_sec=0.10,
@@ -124,9 +124,9 @@ class ChunkOverlayTest(unittest.TestCase):
             sample_chunk_overlay(
                 horizon=3,
                 left=[
-                    [0.0, 0.0, 0.0, 0.10, 0.20, 0.30, 100.0],
-                    [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 90.0],
-                    [0.20, 0.40, 0.60, 0.70, 0.80, 0.90, 80.0],
+                    [0.0, 0.0, 0.0, 0.10, 0.20, 0.30, 0.90, 100.0],
+                    [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 90.0],
+                    [0.20, 0.40, 0.60, 0.70, 0.80, 0.90, 0.10, 80.0],
                 ],
                 right=None,
                 policy_dt_sec=0.10,
@@ -142,7 +142,7 @@ class ChunkOverlayTest(unittest.TestCase):
         assert cursor_position is not None
         assert cursor_pose is not None
         self.assertEqual(cursor_pose[:3], cursor_position)
-        self.assertEqual(cursor_pose[3:], (0.40, 0.50, 0.60))
+        self.assertEqual(cursor_pose[3:], (0.40, 0.50, 0.60, 0.70))
 
     def test_snapshot_parse_rejects_wrong_schema_empty_and_nonfinite(self) -> None:
         self.assertIsNone(ChunkOverlaySnapshot.parse(sample_chunk_overlay(schema_version="wrong.schema")))
@@ -330,12 +330,12 @@ class ChunkOverlayTest(unittest.TestCase):
     def test_scene_update_renders_and_hides_past_chunk_history_lines(self) -> None:
         past = [
             ChunkOverlaySnapshot.parse(sample_chunk_overlay(seq=1, left=[
-                [0.00, 0.00, 0.10, 0.0, 0.0, 0.0, 100.0],
-                [0.01, 0.00, 0.10, 0.0, 0.0, 0.0, 90.0],
+                [0.00, 0.00, 0.10, 0.0, 0.0, 0.0, 1.0, 100.0],
+                [0.01, 0.00, 0.10, 0.0, 0.0, 0.0, 1.0, 90.0],
             ], right=None)),
             ChunkOverlaySnapshot.parse(sample_chunk_overlay(seq=2, left=[
-                [0.02, 0.00, 0.10, 0.0, 0.0, 0.0, 100.0],
-                [0.03, 0.00, 0.10, 0.0, 0.0, 0.0, 90.0],
+                [0.02, 0.00, 0.10, 0.0, 0.0, 0.0, 1.0, 100.0],
+                [0.03, 0.00, 0.10, 0.0, 0.0, 0.0, 1.0, 90.0],
             ], right=None)),
         ]
         self.assertTrue(all(snapshot is not None for snapshot in past))
@@ -414,7 +414,7 @@ class ChunkOverlayTest(unittest.TestCase):
         self.assertEqual(handles["left_chunk_overlay_cursor"].point_size, 0.05)
 
     def test_pose_triad_segments_zero_rotation_aligns_with_world_axes(self) -> None:
-        segments, colors = _pose_triad_segments((1.0, 2.0, 3.0, 0.0, 0.0, 0.0), 0.05)
+        segments, colors = _pose_triad_segments((1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0), 0.05)
         self.assertEqual(segments.shape, (3, 2, 3))
         self.assertEqual(colors.shape, (3, 2, 3))
         expected_directions = ((0.05, 0.0, 0.0), (0.0, 0.05, 0.0), (0.0, 0.0, 0.05))
@@ -423,16 +423,29 @@ class ChunkOverlayTest(unittest.TestCase):
             for actual_value, expected_value in zip(direction, expected, strict=True):
                 self.assertAlmostEqual(float(actual_value), expected_value)
 
+    def test_pose_triad_segments_quaternion_z90_and_sign_flip_match(self) -> None:
+        s = math.sqrt(0.5)
+        segments, _colors = _pose_triad_segments((0.0, 0.0, 0.0, 0.0, 0.0, s, s), 0.05)
+        flipped, _flipped_colors = _pose_triad_segments((0.0, 0.0, 0.0, -0.0, -0.0, -s, -s), 0.05)
+        expected_directions = ((0.0, 0.05, 0.0), (-0.05, 0.0, 0.0), (0.0, 0.0, 0.05))
+        for index, expected in enumerate(expected_directions):
+            direction = segments[index][1] - segments[index][0]
+            flipped_direction = flipped[index][1] - flipped[index][0]
+            for actual_value, expected_value in zip(direction, expected, strict=True):
+                self.assertAlmostEqual(float(actual_value), expected_value, places=6)
+            for actual_value, expected_value in zip(flipped_direction, expected, strict=True):
+                self.assertAlmostEqual(float(actual_value), expected_value, places=6)
+
     def test_scene_update_renders_strided_pose_triads_and_hides_when_disabled(self) -> None:
         overlay = ChunkOverlaySnapshot.parse(
             sample_chunk_overlay(
                 horizon=5,
                 left=[
-                    [0.00, 0.00, 0.00, 0.0, 0.0, 0.0, 100.0],
-                    [0.01, 0.00, 0.00, 0.1, 0.0, 0.0, 90.0],
-                    [0.02, 0.00, 0.00, 0.2, 0.0, 0.0, 80.0],
-                    [0.03, 0.00, 0.00, 0.3, 0.0, 0.0, 70.0],
-                    [0.04, 0.00, 0.00, 0.4, 0.0, 0.0, 60.0],
+                    [0.00, 0.00, 0.00, 0.0, 0.0, 0.0, 1.0, 100.0],
+                    [0.01, 0.00, 0.00, 0.1, 0.0, 0.0, 0.99, 90.0],
+                    [0.02, 0.00, 0.00, 0.2, 0.0, 0.0, 0.98, 80.0],
+                    [0.03, 0.00, 0.00, 0.3, 0.0, 0.0, 0.95, 70.0],
+                    [0.04, 0.00, 0.00, 0.4, 0.0, 0.0, 0.90, 60.0],
                 ],
                 right=None,
                 policy_dt_sec=0.10,

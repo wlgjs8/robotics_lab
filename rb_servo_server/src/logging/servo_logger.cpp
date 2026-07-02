@@ -312,6 +312,9 @@ void ServoLogger::writeHeader() {
     writeTcpPoseTargetDebugHeader(file_, "left");
     writeTcpPoseTargetDebugHeader(file_, "right");
     writeInitMotionHeader(file_);
+    file_ << ",sched_wake_time_ns,prev_sleep_enter_time_ns"
+             ",wake_latency_us,sleep_entry_margin_us"
+             ",left_pre_send_us,right_pre_send_us";
     file_ << '\n';
 }
 
@@ -319,6 +322,10 @@ namespace {
 double ageUs(uint64_t newer_ns, uint64_t older_ns) {
     if (newer_ns == 0 || older_ns == 0 || newer_ns < older_ns) return 0.0;
     return static_cast<double>(newer_ns - older_ns) / 1000.0;
+}
+
+double signedDiffUs(uint64_t a_ns, uint64_t b_ns) {
+    return static_cast<double>(static_cast<int64_t>(a_ns - b_ns)) / 1000.0;
 }
 
 bool sendWithinPeriod(const ServoSample& sample, uint64_t send_end_ns) {
@@ -731,6 +738,31 @@ void ServoLogger::writeSample(const ServoSample& sample) {
     writeTcpPoseTargetDebugColumns(file_, sample.left_cartesian_solve);
     writeTcpPoseTargetDebugColumns(file_, sample.right_cartesian_solve);
     writeInitMotionColumns(file_, sample);
+    // Wake/send jitter decomposition (all stamps share the steady clock epoch):
+    //   wake_latency_us       = loop_start - sched_wake  (how late this tick woke)
+    //   sleep_entry_margin_us = sched_wake - prev_sleep_enter (signed; negative means
+    //                           the PREVIOUS tick overran into this tick's slot, so a
+    //                           large wake_latency is overrun, not scheduler latency)
+    //   pre_send_us           = send_start - loop_start (compute time before the send)
+    const double wake_latency_us = sample.sched_wake_time_ns > 0
+        ? signedDiffUs(sample.loop_start_time_ns, sample.sched_wake_time_ns)
+        : 0.0;
+    const double sleep_entry_margin_us =
+        (sample.sched_wake_time_ns > 0 && sample.prev_sleep_enter_time_ns > 0)
+            ? signedDiffUs(sample.sched_wake_time_ns, sample.prev_sleep_enter_time_ns)
+            : 0.0;
+    const double left_pre_send_us = sample.left_send_start_ns > 0
+        ? signedDiffUs(sample.left_send_start_ns, sample.loop_start_time_ns)
+        : 0.0;
+    const double right_pre_send_us = sample.right_send_start_ns > 0
+        ? signedDiffUs(sample.right_send_start_ns, sample.loop_start_time_ns)
+        : 0.0;
+    file_ << ',' << sample.sched_wake_time_ns
+          << ',' << sample.prev_sleep_enter_time_ns
+          << ',' << wake_latency_us
+          << ',' << sleep_entry_margin_us
+          << ',' << left_pre_send_us
+          << ',' << right_pre_send_us;
     file_ << '\n';
 }
 

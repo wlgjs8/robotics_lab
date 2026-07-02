@@ -1,12 +1,14 @@
 // Unit test for the projection-based pure-pursuit follower (pursueWaypointsStep) used by
 // the collision-free InitMotion sequencer and the linear-detour executor.
 //
-// Regression target: the previous "advance index only when the pose is within
-// waypoint_tol_deg of waypoints[index]" logic stalled on any curved (corner) path,
-// because the pure-pursuit lookahead cuts the corner and never passes within tol of the
-// apex node. A stalled progress pointer froze the commanded target and the arm stopped
-// part-way to the init pose (then failed-closed on execution_timeout). The projection
-// progress pointer must never stall, so a single click drives smoothly to the goal.
+// Regression targets:
+// 1. The previous "advance index only when the pose is within waypoint_tol_deg of
+//    waypoints[index]" logic stalled on curved (corner) paths because pure-pursuit
+//    lookahead cuts the corner and never passes within tol of the apex node.
+// 2. Projection-only progress stalled in the gradient-escape head when lookahead is 0:
+//    the commanded carrot is exactly the next waypoint, and an asymptotic tracker can
+//    settle just short of projecting past it. Endpoint proximity must advance that case
+//    without weakening the projection rule that fixed corner cutting.
 
 #include <array>
 #include <cmath>
@@ -36,6 +38,16 @@ static WP lwp(double j0, double j1) {
     JointArray r{};
     l[0] = j0;
     l[1] = j1;
+    return {l, r};
+}
+
+static WP dualwp(double l0, double l1, double r0, double r1) {
+    JointArray l{};
+    JointArray r{};
+    l[0] = l0;
+    l[1] = l1;
+    r[0] = r0;
+    r[1] = r1;
     return {l, r};
 }
 
@@ -120,6 +132,63 @@ static bool test_corner_path_reaches_goal_without_stall() {
     return true;
 }
 
+// Field regression: inside the gradient-escape head, lookahead is suppressed and the
+// target is exactly waypoints[index + 1]. A real servo/SMD tracker can converge
+// asymptotically and then deadband just short of the waypoint, so projection reaches
+// ~0.999x but never >= 1.0. Progress must still advance once both arms are within the
+// waypoint tolerance of the segment's far endpoint.
+static bool test_escape_head_asymptotic_tracker_does_not_deadlock() {
+    const std::vector<WP> w = {
+        dualwp(0.0, 0.0, 0.0, 0.0),
+        dualwp(2.5, -2.5, -2.5, 2.5),
+        dualwp(5.0, -5.0, -5.0, 5.0),
+        dualwp(7.5, -5.0, -7.5, 5.0),
+        dualwp(10.0, -2.5, -10.0, 2.5),
+        dualwp(12.5, 0.0, -12.5, 0.0),
+    };
+    const double tol = 0.002;
+    const double lookahead = 25.0;
+    const double deadband = 0.002;
+    const int escape_count = 3;
+
+    JointArray cur_l = w.front().first;
+    JointArray cur_r = w.front().second;
+    std::size_t index = 0;
+    std::size_t prev_index = 0;
+    bool done = false;
+    const int kMaxTicks = 3000;
+    int ticks = 0;
+
+    const auto apply_asymptotic_deadband = [&](JointArray& cur, const JointArray& target) {
+        for (int i = 0; i < kDof; ++i) {
+            const double d = target[i] - cur[i];
+            if (std::abs(d) < deadband) continue;
+            cur[i] += 0.5 * d;
+        }
+    };
+
+    for (; ticks < kMaxTicks; ++ticks) {
+        const PursuitStep s =
+            pursueWaypointsStep(w, cur_l, cur_r, index, tol, lookahead, escape_count);
+        RB_CHECK(index >= prev_index);
+        prev_index = index;
+        if (s.done) {
+            done = true;
+            break;
+        }
+        apply_asymptotic_deadband(cur_l, s.left);
+        apply_asymptotic_deadband(cur_r, s.right);
+    }
+
+    RB_CHECK(done);
+    RB_CHECK(ticks < kMaxTicks);
+    RB_CHECK(index + 1 == w.size());
+    RB_CHECK(maxJointErr(cur_l, w.back().first) <= tol);
+    RB_CHECK(maxJointErr(cur_r, w.back().second) <= tol);
+    std::cout << "escape-head asymptotic path reached goal in " << ticks << " ticks\n";
+    return true;
+}
+
 // A degenerate path with a zero-length (duplicate) segment must not divide-by-zero or
 // stall: the projection treats it as already passed.
 static bool test_degenerate_segment_is_passed() {
@@ -173,6 +242,7 @@ int main() {
     bool ok = true;
     ok = test_projection_advances_past_cut_corner() && ok;
     ok = test_corner_path_reaches_goal_without_stall() && ok;
+    ok = test_escape_head_asymptotic_tracker_does_not_deadlock() && ok;
     ok = test_degenerate_segment_is_passed() && ok;
     ok = test_escape_head_followed_precisely() && ok;
     if (!ok) {

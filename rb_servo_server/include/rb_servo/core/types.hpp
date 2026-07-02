@@ -762,6 +762,11 @@ struct ServoSample {
     uint64_t tick = 0;
     uint64_t loop_start_time_ns = 0;
     uint64_t loop_end_time_ns = 0;
+    // Wake/send jitter decomposition (steady clock, same epoch as loop_start_time_ns).
+    // sched_wake_time_ns: the sleep_until target this tick was supposed to wake at.
+    // prev_sleep_enter_time_ns: when the previous tick entered sleep_until (0 on first tick).
+    uint64_t sched_wake_time_ns = 0;
+    uint64_t prev_sleep_enter_time_ns = 0;
 
     RobotState left_state;
     RobotState right_state;

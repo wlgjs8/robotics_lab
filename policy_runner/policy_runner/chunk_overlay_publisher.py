@@ -8,7 +8,7 @@ from typing import Callable
 from .robot_state_client import parse_udp_endpoint
 
 
-CHUNK_OVERLAY_SCHEMA_VERSION = "robotics_lab.chunk_overlay.v1"
+CHUNK_OVERLAY_SCHEMA_VERSION = "robotics_lab.chunk_overlay.v2"
 
 
 class ChunkOverlayPublisher:

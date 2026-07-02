@@ -9,7 +9,6 @@ rb_servo_gui/geometry.py
 rb_servo_gui/models.py
 rb_servo_gui/overlay_receiver.py
 rb_servo_gui/plane_fit.py
-rb_servo_gui/plot2d.py
 rb_servo_gui/pointcloud_receiver.py
 rb_servo_gui/recording_control.py
 rb_servo_gui/safety.py
@@ -24,4 +23,3 @@ rb_servo_gui.egg-info/requires.txt
 rb_servo_gui.egg-info/top_level.txt
 tests/test_chunk_overlay.py
 tests/test_gui_contracts.py
-tests/test_plot2d.py

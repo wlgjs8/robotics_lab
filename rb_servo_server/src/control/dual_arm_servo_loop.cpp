@@ -1872,7 +1872,15 @@ void DualArmServoLoop::loopMain() {
     std::string last_async_supervision_degraded_reason;
     constexpr uint64_t kAsyncSupervisionDegradedWarnPeriodNs = 5'000'000'000ULL;
 
+    // Jitter instrumentation: when the previous tick entered sleep_until (0 on first tick).
+    uint64_t prev_sleep_enter_ns = 0;
     while (running_) {
+        // Scheduled wake time of THIS tick = the sleep_until target of the previous
+        // iteration (next_tick before the increment below). Same steady epoch as
+        // nowSteadyNs().
+        const uint64_t sched_wake_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                next_tick.time_since_epoch()).count());
         next_tick += period;
         const uint64_t loop_start = nowSteadyNs();
         // Fail-closed: if external-box keep-out is enforced but the producer feed is
@@ -2563,6 +2571,10 @@ void DualArmServoLoop::loopMain() {
         sample.tick = tick_++;
         sample.loop_start_time_ns = loop_start;
         sample.loop_end_time_ns = loop_end;
+        sample.sched_wake_time_ns = sched_wake_ns;
+        // Still holds the PREVIOUS iteration's value here; this tick's sleep-enter
+        // stamp happens right before sleep_until below (after this sample is pushed).
+        sample.prev_sleep_enter_time_ns = prev_sleep_enter_ns;
         sample.left_state = left_state;
         sample.right_state = right_state;
         sample.command = command;
@@ -3001,6 +3013,7 @@ void DualArmServoLoop::loopMain() {
 
         async_supervision_degraded_last_tick = async_supervision_degraded_this_tick;
         tracking_error_degraded_prev_tick_ = tracking_error_degraded_this_tick_;
+        prev_sleep_enter_ns = nowSteadyNs();
         std::this_thread::sleep_until(next_tick);
     }
 }
@@ -5729,6 +5742,7 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                 JointArray pursue_right = (ex.right_active || freeze_other_arm)
                     ? current_right_q
                     : (!ex.waypoints.empty() ? ex.waypoints.back().second : ex.target_right);
+                const std::size_t index_before_pursuit = ex.index;
                 PursuitStep pursuit =
                     pursueWaypointsStep(
                         ex.waypoints,
@@ -5752,6 +5766,9 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                     // waypoint. Closing on it (by > a noise floor) refreshes the stall timer.
                     const double dist = active_goal_dist(ex, goal_wp);
                     const uint64_t now_ns = nowSteadyNs();
+                    if (ex.index > index_before_pursuit) {
+                        ex.last_progress_ns = now_ns;
+                    }
                     if (dist < ex.best_dist_deg - 0.05) {
                         ex.best_dist_deg = dist;
                         ex.last_progress_ns = now_ns;
@@ -5868,11 +5885,15 @@ PursuitStep pursueWaypointsStep(
         return den > 1e-9 ? num / den : 1.0;  // degenerate segment -> already passed
     };
 
-    // Progress pointer: monotonic projection advance. Advances past every segment whose
-    // far endpoint the pose has projected beyond. Corner-cutting can never freeze it,
-    // because progress is measured along the path direction, not by proximity to a node.
+    // Progress pointer: monotonic projection advance, with endpoint proximity as a
+    // fallback. Projection keeps corner-cutting from freezing at apex nodes; proximity
+    // keeps an asymptotic tracker from freezing when the carrot is exactly the segment
+    // endpoint (gradient-escape head, lookahead 0) and the pose settles just short of
+    // projecting past it.
     while (index + 1 < n &&
-           segFraction(waypoints[index], waypoints[index + 1]) >= 1.0) {
+           (segFraction(waypoints[index], waypoints[index + 1]) >= 1.0 ||
+            (reached(cur_left, waypoints[index + 1].first) &&
+             reached(cur_right, waypoints[index + 1].second)))) {
         ++index;
     }
     // Inside the gradient-escape head (the leading sub-threshold waypoints), follow the

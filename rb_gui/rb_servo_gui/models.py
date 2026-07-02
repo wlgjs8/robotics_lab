@@ -8,7 +8,7 @@ import time
 DOF = 6
 TCP_DISPLAY_MODES = ("auto", "actual", "reference", "both")
 CIRCLE_OVERLAY_SCHEMA_VERSION = "robotics_lab.circle_overlay.v1"
-CHUNK_OVERLAY_SCHEMA_VERSION = "robotics_lab.chunk_overlay.v1"
+CHUNK_OVERLAY_SCHEMA_VERSION = "robotics_lab.chunk_overlay.v2"
 # TODO: tune with operator.
 EXTERNAL_BOX_NEAR_M = 0.10
 EXTERNAL_BOX_COLLISION_M = 0.0
@@ -98,7 +98,7 @@ def _parse_chunk_waypoints(value: Any, *, horizon: int) -> tuple[tuple[float, fl
     return tuple((pose[0], pose[1], pose[2]) for pose in poses)
 
 
-def _parse_chunk_waypoint_poses(value: Any, *, horizon: int) -> tuple[tuple[float, float, float, float, float, float], ...] | None:
+def _parse_chunk_waypoint_poses(value: Any, *, horizon: int) -> tuple[tuple[float, float, float, float, float, float, float], ...] | None:
     if value is None:
         return None
     if not isinstance(value, list | tuple):
@@ -107,9 +107,9 @@ def _parse_chunk_waypoint_poses(value: Any, *, horizon: int) -> tuple[tuple[floa
         return None
     if len(value) != horizon:
         return None
-    poses: list[tuple[float, float, float, float, float, float]] = []
+    poses: list[tuple[float, float, float, float, float, float, float]] = []
     for waypoint in value:
-        if not isinstance(waypoint, list | tuple) or len(waypoint) != 7:
+        if not isinstance(waypoint, list | tuple) or len(waypoint) != 8:
             return None
         try:
             parsed = tuple(float(item) for item in waypoint)
@@ -117,7 +117,7 @@ def _parse_chunk_waypoint_poses(value: Any, *, horizon: int) -> tuple[tuple[floa
             return None
         if not all(math.isfinite(item) for item in parsed):
             return None
-        poses.append((parsed[0], parsed[1], parsed[2], parsed[3], parsed[4], parsed[5]))
+        poses.append((parsed[0], parsed[1], parsed[2], parsed[3], parsed[4], parsed[5], parsed[6]))
     return tuple(poses)
 
 
@@ -225,8 +225,8 @@ class ChunkOverlaySnapshot:
     left_positions: tuple[tuple[float, float, float], ...] | None
     right_positions: tuple[tuple[float, float, float], ...] | None
     raw: Mapping[str, Any]
-    left_poses: tuple[tuple[float, float, float, float, float, float], ...] | None = None
-    right_poses: tuple[tuple[float, float, float, float, float, float], ...] | None = None
+    left_poses: tuple[tuple[float, float, float, float, float, float, float], ...] | None = None
+    right_poses: tuple[tuple[float, float, float, float, float, float, float], ...] | None = None
 
     @classmethod
     def parse(
@@ -303,7 +303,7 @@ class ChunkOverlaySnapshot:
             start[2] + (end[2] - start[2]) * frac,
         )
 
-    def cursor_pose(self, arm: str, *, now: float | None = None) -> tuple[float, float, float, float, float, float] | None:
+    def cursor_pose(self, arm: str, *, now: float | None = None) -> tuple[float, float, float, float, float, float, float] | None:
         poses = self.left_poses if arm == "left" else self.right_poses
         if not poses:
             return None
@@ -312,7 +312,7 @@ class ChunkOverlaySnapshot:
             return None
         index = int(self._cursor_index_float(len(poses), now=now))
         pose = poses[index]
-        return (position[0], position[1], position[2], pose[3], pose[4], pose[5])
+        return (position[0], position[1], position[2], pose[3], pose[4], pose[5], pose[6])
 
 
 @dataclass(frozen=True)

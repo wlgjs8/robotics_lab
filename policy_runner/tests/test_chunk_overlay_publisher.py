@@ -38,8 +38,8 @@ class ChunkOverlayPublisherTest(unittest.TestCase):
             publisher.publish(
                 seq=3,
                 policy_dt_sec=0.5,
-                left=[[1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 99.0]],
-                right=[[4.0, 5.0, 6.0, 0.4, 0.5, 0.6, 88.0]],
+                left=[[1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 0.9, 99.0]],
+                right=[[4.0, 5.0, 6.0, 0.4, 0.5, 0.6, 0.7, 88.0]],
                 host_time_ns=123456789,
             )
         finally:
@@ -52,12 +52,13 @@ class ChunkOverlayPublisherTest(unittest.TestCase):
         self.assertEqual(address, ("127.0.0.1", 50262))
         packet = json.loads(data.decode("utf-8"))
         self.assertEqual(packet["schema_version"], CHUNK_OVERLAY_SCHEMA_VERSION)
+        self.assertEqual(packet["schema_version"], "robotics_lab.chunk_overlay.v2")
         self.assertEqual(packet["host_time_ns"], 123456789)
         self.assertEqual(packet["seq"], 3)
         self.assertEqual(packet["policy_dt_sec"], 0.5)
         self.assertEqual(packet["horizon"], 1)
-        self.assertEqual(packet["left"], [[1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 99.0]])
-        self.assertEqual(packet["right"], [[4.0, 5.0, 6.0, 0.4, 0.5, 0.6, 88.0]])
+        self.assertEqual(packet["left"], [[1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 0.9, 99.0]])
+        self.assertEqual(packet["right"], [[4.0, 5.0, 6.0, 0.4, 0.5, 0.6, 0.7, 88.0]])
 
 
 if __name__ == "__main__":
