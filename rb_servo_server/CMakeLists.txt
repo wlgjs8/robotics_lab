@@ -35,11 +35,14 @@ add_library(rb_servo_core
     src/control/cartesian_servo_controller.cpp
     src/control/cartesian_trajectory_planner.cpp
     src/control/smd_pose_tracker.cpp
+    src/control/chunk_window.cpp
+    src/control/cartesian_chunk_follower.cpp
     src/math/se3.cpp
     src/control/force_controller.cpp
     src/control/collision_monitor.cpp
     src/control/init_motion_planner.cpp
     src/control/dual_arm_servo_loop.cpp
+    src/network/chunk_frame_receiver.cpp
     src/network/command_server.cpp
     src/network/state_publisher.cpp
     src/network/scope_publisher.cpp
@@ -73,6 +76,15 @@ find_package(Threads REQUIRED)
 if(IS_DIRECTORY "/opt/openrobots")
     list(APPEND CMAKE_PREFIX_PATH "/opt/openrobots")
 endif()
+# ruckig (online jerk-limited OTG) for the receding-horizon chunk-follower.
+# Community edition, exports the ruckig::ruckig target. The system install ships
+# with ROS (/opt/ros/*); add those prefixes so find_package resolves it there.
+foreach(_ros_prefix /opt/ros/$ENV{ROS_DISTRO} /opt/ros/humble)
+    if(IS_DIRECTORY "${_ros_prefix}")
+        list(APPEND CMAKE_PREFIX_PATH "${_ros_prefix}")
+    endif()
+endforeach()
+find_package(ruckig REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(pinocchio REQUIRED)
 # coal (hpp-fcl successor) + pinocchio collision component: URDF mesh/box
@@ -89,6 +101,7 @@ target_link_libraries(
         pinocchio::pinocchio
         pinocchio::pinocchio_collision
         coal::coal
+        ruckig::ruckig
 )
 target_compile_definitions(rb_servo_core PUBLIC RB_SERVO_ENABLE_PINOCCHIO=1)
 
@@ -211,6 +224,22 @@ if(BUILD_TESTING)
     add_executable(test_joint_smd_tracker tests/test_joint_smd_tracker.cpp)
     target_link_libraries(test_joint_smd_tracker PRIVATE rb_servo_core)
     add_test(NAME joint_smd_tracker COMMAND test_joint_smd_tracker)
+
+    add_executable(test_chunk_follower_core tests/test_chunk_follower_core.cpp)
+    target_link_libraries(test_chunk_follower_core PRIVATE rb_servo_core)
+    add_test(NAME chunk_follower_core COMMAND test_chunk_follower_core)
+
+    add_executable(test_chunk_window tests/test_chunk_window.cpp)
+    target_link_libraries(test_chunk_window PRIVATE rb_servo_core)
+    add_test(NAME chunk_window COMMAND test_chunk_window)
+
+    add_executable(test_cartesian_chunk_follower tests/test_cartesian_chunk_follower.cpp)
+    target_link_libraries(test_cartesian_chunk_follower PRIVATE rb_servo_core)
+    add_test(NAME cartesian_chunk_follower COMMAND test_cartesian_chunk_follower)
+
+    add_executable(test_chunk_frame_receiver tests/test_chunk_frame_receiver.cpp)
+    target_link_libraries(test_chunk_frame_receiver PRIVATE rb_servo_core)
+    add_test(NAME chunk_frame_receiver COMMAND test_chunk_frame_receiver)
 
     add_executable(test_joint_moving_average tests/test_joint_moving_average.cpp)
     target_link_libraries(test_joint_moving_average PRIVATE rb_servo_core)

@@ -409,6 +409,21 @@ struct CartesianSolveTelemetry {
     double smd_goal_linear_velocity_norm_m_s = 0.0;
     double smd_goal_angular_velocity_norm_rad_s = 0.0;
     uint64_t smd_reanchor_count = 0;
+    // Ruckig chunk-follower stage (replaces the SMD step while active). One row
+    // per tick: the ACTIVE segment's target (pf, the chunk step being tracked),
+    // window/solve state, and flags — offline analysis joins these against
+    // command_tcp_target_stand (raw producer command), tcp_command_stand
+    // (emitted setpoint) and tcp_actual_stand (measured) on the same row.
+    bool follower_active = false;
+    uint64_t follower_seq = 0;          // receiver seq of the active chunk window
+    int follower_step = -1;             // absolute chunk index of the segment target
+    double follower_t_in_seg_sec = 0.0; // time into the current 33ms segment
+    double follower_duration_sec = 0.0; // ruckig T_opt of the segment (>= policy_dt)
+    double follower_alpha = 1.0;        // sacrifice-ladder time dilation applied
+    bool follower_converged = false;    // duration ≈ policy_dt (in-regime)
+    bool follower_stall = false;        // ring-down (window exhausted, no fresh chunk)
+    bool follower_corner = false;       // corner ring-down fired on some axis
+    std::optional<Pose6D> follower_pf_stand;  // active segment target pose
     // Final-stage output moving average (C). q_target before/after the boxcar.
     bool output_ma_present = false;
     int output_ma_window = 0;
@@ -436,6 +451,13 @@ struct ArmCommand {
 
     JointArray q_target_deg{};
     JointTargetProfile joint_target_profile = JointTargetProfile::Direct;
+
+    // Final-stop joint pose for the JointTarget arrival-decel taper. InitMotion pursuit
+    // sets this to the terminal waypoint while q_target_deg leads by the pursuit
+    // lookahead, so JointSmdTracker can ease into the true endpoint independently of the
+    // cruise natural frequency. Absent (has_arrival_stop=false) => no taper (unchanged).
+    JointArray arrival_stop_q_deg{};
+    bool has_arrival_stop = false;
 
     Pose6D tcp_target_stand;
     double linear_move_duration_sec = 0.0;

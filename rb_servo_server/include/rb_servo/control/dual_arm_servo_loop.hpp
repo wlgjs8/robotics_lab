@@ -13,10 +13,12 @@
 
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/control/arm_worker.hpp"
+#include "rb_servo/control/cartesian_chunk_follower.hpp"
 #include "rb_servo/control/cartesian_servo_controller.hpp"
 #include "rb_servo/control/command_buffer.hpp"
 #include "rb_servo/control/joint_moving_average.hpp"
 #include "rb_servo/control/smd_pose_tracker.hpp"
+#include "rb_servo/network/chunk_frame_receiver.hpp"
 #include "rb_servo/control/self_collision.hpp"
 #include "rb_servo/control/collision_monitor.hpp"
 #include "rb_servo/control/init_motion_planner.hpp"
@@ -83,6 +85,12 @@ public:
     // atomic store). valid=false (stale/absent feedback, gripper disabled) makes the
     // gate fall back to the gripper-OPEN offsets — the conservative, larger envelope.
     void setGripperFeedback(ArmId arm, double percent, bool valid);
+
+    // Wire the dedicated chunk-frame ingest (Ruckig chunk-follower reference
+    // input). Must be called BEFORE start(); the receiver must outlive the loop.
+    // nullptr (or a receiver with an empty bind) leaves every profile on the
+    // pose_track_smd path even when ruckig_follower.enable is set.
+    void setChunkFrameReceiver(ChunkFrameReceiver* receiver) { chunk_frame_receiver_ = receiver; }
 
 private:
     // Live gripper open percent per arm and its validity, set by setGripperFeedback
@@ -572,6 +580,40 @@ private:
     SmdPoseTracker right_pose_track_smd_{PoseTrackSmdConfig{}};
     std::string left_pose_track_profile_name_;
     std::string right_pose_track_profile_name_;
+    // Ruckig chunk-follower stage (per-profile opt-in replacement for the SMD
+    // step). Constructed with defaults here (off the RT path, absorbing the
+    // one-time ruckig prewarm); rebuilt in applyChunkFollowerStage when the
+    // active profile's ruckig_follower params change.
+    control::CartesianChunkFollower left_chunk_follower_{control::CartesianChunkFollowerConfig{}};
+    control::CartesianChunkFollower right_chunk_follower_{control::CartesianChunkFollowerConfig{}};
+    RuckigFollowerConfig left_chunk_follower_built_{};
+    RuckigFollowerConfig right_chunk_follower_built_{};
+    std::uint64_t left_chunk_submitted_seq_ = 0;
+    std::uint64_t right_chunk_submitted_seq_ = 0;
+    ChunkFrameReceiver* chunk_frame_receiver_ = nullptr;
+    ChunkFrameReceiver::Frame chunk_frame_cache_{};
+    std::uint64_t chunk_frame_cache_seq_ = 0;
+    uint64_t last_chunk_follower_log_ns_ = 0;
+    // Copy the newest chunk frame out of the receiver (at most one copy per
+    // frame; try_lock, allocation-free). Called once per tick before the
+    // Cartesian smoothing stage.
+    void pollChunkFrames();
+    // The SMD-stage drop-in: runs the Ruckig chunk-follower when the profile
+    // enables it and a chunk feed is live; otherwise (cold start, watchdog
+    // timeout, divergence re-anchor, other modes) falls back to
+    // applyPoseTrackSmd with identical semantics to the legacy path.
+    ArmCommand applyChunkFollowerStage(
+        ArmId arm_id,
+        const ArmCommand& command,
+        const TcpPoseTargetProfileConfig& profile,
+        control::CartesianChunkFollower* follower,
+        RuckigFollowerConfig* built_cfg,
+        std::uint64_t* submitted_seq,
+        SmdPoseTracker* smd_tracker,
+        const ArmMountConfig& mount,
+        const JointArray& previous_sent_q_deg,
+        double dt_sec
+    );
     JointMovingAverage left_output_ma_{0};
     JointMovingAverage right_output_ma_{0};
     // A/B/C separation telemetry (Patch 4), captured each tick from the SMD step
@@ -592,6 +634,18 @@ private:
         JointArray q_target_after_output_ma_deg{};
         bool safety_clamp_present = false;
         SafetyClampTelemetry safety_clamp;
+        // Ruckig chunk-follower stage telemetry (captured in
+        // applyChunkFollowerStage each tick; merged into cartesian_solve).
+        bool follower_active = false;
+        std::uint64_t follower_seq = 0;
+        int follower_step = -1;
+        double follower_t_in_seg_sec = 0.0;
+        double follower_duration_sec = 0.0;
+        double follower_alpha = 1.0;
+        bool follower_converged = false;
+        bool follower_stall = false;
+        bool follower_corner = false;
+        std::optional<Pose6D> follower_pf_stand;
     };
     AbcTelemetry left_abc_telemetry_;
     AbcTelemetry right_abc_telemetry_;

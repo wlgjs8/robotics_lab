@@ -210,6 +210,62 @@ void parsePoseTrackSmdConfig(const YAML::Node& smd, const std::string& path, Pos
     }
 }
 
+void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, RuckigFollowerConfig* out) {
+    if (!out) return;
+    validateAllowedKeys(node, {
+        "enable",
+        "max_linear_velocity_m_s",
+        "max_linear_accel_m_s2",
+        "max_linear_jerk_m_s3",
+        "max_angular_velocity_rad_s",
+        "max_angular_accel_rad_s2",
+        "max_angular_jerk_rad_s3",
+        "discard_head_steps",
+        "consume_steps",
+        "reserve_steps",
+        "smoothing_window",
+        "af_damping_beta",
+        "chunk_feed_timeout_sec",
+    }, path);
+    if (has(node, "enable")) out->enable = asBool(node["enable"], path + ".enable");
+    if (has(node, "max_linear_velocity_m_s")) {
+        out->max_linear_velocity_m_s = asDouble(node["max_linear_velocity_m_s"], path + ".max_linear_velocity_m_s");
+    }
+    if (has(node, "max_linear_accel_m_s2")) {
+        out->max_linear_accel_m_s2 = asDouble(node["max_linear_accel_m_s2"], path + ".max_linear_accel_m_s2");
+    }
+    if (has(node, "max_linear_jerk_m_s3")) {
+        out->max_linear_jerk_m_s3 = asDouble(node["max_linear_jerk_m_s3"], path + ".max_linear_jerk_m_s3");
+    }
+    if (has(node, "max_angular_velocity_rad_s")) {
+        out->max_angular_velocity_rad_s = asDouble(node["max_angular_velocity_rad_s"], path + ".max_angular_velocity_rad_s");
+    }
+    if (has(node, "max_angular_accel_rad_s2")) {
+        out->max_angular_accel_rad_s2 = asDouble(node["max_angular_accel_rad_s2"], path + ".max_angular_accel_rad_s2");
+    }
+    if (has(node, "max_angular_jerk_rad_s3")) {
+        out->max_angular_jerk_rad_s3 = asDouble(node["max_angular_jerk_rad_s3"], path + ".max_angular_jerk_rad_s3");
+    }
+    if (has(node, "discard_head_steps")) {
+        out->discard_head_steps = asInt(node["discard_head_steps"], path + ".discard_head_steps");
+    }
+    if (has(node, "consume_steps")) {
+        out->consume_steps = asInt(node["consume_steps"], path + ".consume_steps");
+    }
+    if (has(node, "reserve_steps")) {
+        out->reserve_steps = asInt(node["reserve_steps"], path + ".reserve_steps");
+    }
+    if (has(node, "smoothing_window")) {
+        out->smoothing_window = asInt(node["smoothing_window"], path + ".smoothing_window");
+    }
+    if (has(node, "af_damping_beta")) {
+        out->af_damping_beta = asDouble(node["af_damping_beta"], path + ".af_damping_beta");
+    }
+    if (has(node, "chunk_feed_timeout_sec")) {
+        out->chunk_feed_timeout_sec = asDouble(node["chunk_feed_timeout_sec"], path + ".chunk_feed_timeout_sec");
+    }
+}
+
 void ensureTcpPoseTargetProfiles(DualArmConfig* cfg) {
     if (!cfg) return;
     if (cfg->cartesian_control.tcp_pose_target_profile_default.empty()) {
@@ -219,6 +275,7 @@ void ensureTcpPoseTargetProfiles(DualArmConfig* cfg) {
         TcpPoseTargetProfileConfig profile;
         profile.name = cfg->cartesian_control.tcp_pose_target_profile_default;
         profile.pose_track_smd = cfg->cartesian_control.pose_track_smd;
+        profile.ruckig_follower = cfg->cartesian_control.ruckig_follower;
         cfg->cartesian_control.tcp_pose_target_profiles.push_back(profile);
     }
 }
@@ -675,6 +732,7 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
         "servo_soft_entry_gain_start_scale",
         "servo_soft_entry_rearm_gap_sec",
         "disable_waiting_ack",
+        "state_read_pipelined",
         "max_consecutive_read_misses",
     }, path);
 
@@ -702,6 +760,7 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
     if (has(sec, "servo_soft_entry_gain_start_scale")) cfg->servo_soft_entry_gain_start_scale = asDouble(sec["servo_soft_entry_gain_start_scale"], path + ".servo_soft_entry_gain_start_scale");
     if (has(sec, "servo_soft_entry_rearm_gap_sec")) cfg->servo_soft_entry_rearm_gap_sec = asDouble(sec["servo_soft_entry_rearm_gap_sec"], path + ".servo_soft_entry_rearm_gap_sec");
     if (has(sec, "disable_waiting_ack")) cfg->disable_waiting_ack = asBool(sec["disable_waiting_ack"], path + ".disable_waiting_ack");
+    if (has(sec, "state_read_pipelined")) cfg->state_read_pipelined = asBool(sec["state_read_pipelined"], path + ".state_read_pipelined");
     if (has(sec, "max_consecutive_read_misses")) cfg->max_consecutive_read_misses = asInt(sec["max_consecutive_read_misses"], path + ".max_consecutive_read_misses");
 }
 
@@ -1015,6 +1074,10 @@ void validateConfig(const DualArmConfig& cfg) {
         validatePositiveFinite(js.natural_frequency_hz, "safety.joint_target_smd.natural_frequency_hz");
         validatePositiveFiniteArray(js.max_velocity_deg_s, "safety.joint_target_smd.max_velocity_deg_s");
         validatePositiveFiniteArray(js.max_accel_deg_s2, "safety.joint_target_smd.max_accel_deg_s2");
+        if (js.arrival_taper_enable) {
+            validatePositiveFinite(js.arrival_decel_deg_s2, "safety.joint_target_smd.arrival_decel_deg_s2");
+            validateNonNegativeFinite(js.arrival_min_speed_deg_s, "safety.joint_target_smd.arrival_min_speed_deg_s");
+        }
     }
     if (cfg.safety.init_motion_planner.enable) {
         const auto& ip = cfg.safety.init_motion_planner;
@@ -1484,6 +1547,36 @@ void validateConfig(const DualArmConfig& cfg) {
         }
     };
     validate_pose_track_smd(cfg.cartesian_control.pose_track_smd, "cartesian_control.pose_track_smd");
+    const auto validate_ruckig_follower = [&cfg](const RuckigFollowerConfig& rf, const std::string& path) {
+        validatePositiveFinite(rf.max_linear_velocity_m_s, path + ".max_linear_velocity_m_s");
+        validatePositiveFinite(rf.max_linear_accel_m_s2, path + ".max_linear_accel_m_s2");
+        validatePositiveFinite(rf.max_linear_jerk_m_s3, path + ".max_linear_jerk_m_s3");
+        validatePositiveFinite(rf.max_angular_velocity_rad_s, path + ".max_angular_velocity_rad_s");
+        validatePositiveFinite(rf.max_angular_accel_rad_s2, path + ".max_angular_accel_rad_s2");
+        validatePositiveFinite(rf.max_angular_jerk_rad_s3, path + ".max_angular_jerk_rad_s3");
+        validatePositiveFinite(rf.chunk_feed_timeout_sec, path + ".chunk_feed_timeout_sec");
+        if (rf.discard_head_steps < 0) {
+            throw std::runtime_error(path + ".discard_head_steps must be >= 0");
+        }
+        if (rf.consume_steps < 1) {
+            throw std::runtime_error(path + ".consume_steps must be >= 1");
+        }
+        if (rf.reserve_steps < 1) {
+            throw std::runtime_error(path + ".reserve_steps must be >= 1 (central difference needs a forward neighbor)");
+        }
+        if (rf.smoothing_window < 1 || rf.smoothing_window % 2 == 0) {
+            throw std::runtime_error(path + ".smoothing_window must be an odd integer >= 1");
+        }
+        if (!std::isfinite(rf.af_damping_beta) || rf.af_damping_beta <= 0.0 || rf.af_damping_beta > 1.0) {
+            throw std::runtime_error(path + ".af_damping_beta must be in (0, 1]");
+        }
+        if (rf.enable && cfg.network.chunk_frame_bind.empty()) {
+            throw std::runtime_error(
+                path + ".enable=true requires network.chunk_frame_bind (dedicated chunk-frame UDP ingest)"
+            );
+        }
+    };
+    validate_ruckig_follower(cfg.cartesian_control.ruckig_follower, "cartesian_control.ruckig_follower");
     if (cfg.cartesian_control.tcp_pose_target_profile_default.empty()) {
         throw std::runtime_error("cartesian_control.tcp_pose_target_profile_default must not be empty");
     }
@@ -1502,6 +1595,10 @@ void validateConfig(const DualArmConfig& cfg) {
         validate_pose_track_smd(
             profile.pose_track_smd,
             "cartesian_control.tcp_pose_target_profiles." + profile.name + ".pose_track_smd"
+        );
+        validate_ruckig_follower(
+            profile.ruckig_follower,
+            "cartesian_control.tcp_pose_target_profiles." + profile.name + ".ruckig_follower"
         );
         validateNonNegativeFinite(
             profile.max_smd_goal_lead_m,
@@ -1765,6 +1862,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "io_model",
             "startup_mode",
             "send_servo_commands",
+            "send_at_tick_start",
             "allow_readonly_faulted_startup",
             "allow_readonly_q_range_violation_startup",
             "allow_readonly_wrong_mode_startup",
@@ -1794,6 +1892,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "io_model")) cfg.servo.io_model = parseServoIoModel(sec["io_model"], "servo.io_model");
         if (has(sec, "startup_mode")) cfg.servo.startup_mode = controlModeFromString(asString(sec["startup_mode"], "servo.startup_mode"));
         if (has(sec, "send_servo_commands")) cfg.servo.send_servo_commands = asBool(sec["send_servo_commands"], "servo.send_servo_commands");
+        if (has(sec, "send_at_tick_start")) cfg.servo.send_at_tick_start = asBool(sec["send_at_tick_start"], "servo.send_at_tick_start");
         if (has(sec, "allow_readonly_faulted_startup")) {
             cfg.servo.allow_readonly_faulted_startup =
                 asBool(sec["allow_readonly_faulted_startup"], "servo.allow_readonly_faulted_startup");
@@ -2501,6 +2600,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "natural_frequency_hz",
                 "max_velocity_deg_s",
                 "max_accel_deg_s2",
+                "arrival_taper_enable",
+                "arrival_decel_deg_s2",
+                "arrival_min_speed_deg_s",
             }, "safety.joint_target_smd");
             if (has(js, "enable")) {
                 cfg.safety.joint_target_smd.enable =
@@ -2521,6 +2623,18 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(js, "max_accel_deg_s2")) {
                 cfg.safety.joint_target_smd.max_accel_deg_s2 =
                     parseJointArray(js["max_accel_deg_s2"], "safety.joint_target_smd.max_accel_deg_s2");
+            }
+            if (has(js, "arrival_taper_enable")) {
+                cfg.safety.joint_target_smd.arrival_taper_enable =
+                    asBool(js["arrival_taper_enable"], "safety.joint_target_smd.arrival_taper_enable");
+            }
+            if (has(js, "arrival_decel_deg_s2")) {
+                cfg.safety.joint_target_smd.arrival_decel_deg_s2 =
+                    asDouble(js["arrival_decel_deg_s2"], "safety.joint_target_smd.arrival_decel_deg_s2");
+            }
+            if (has(js, "arrival_min_speed_deg_s")) {
+                cfg.safety.joint_target_smd.arrival_min_speed_deg_s =
+                    asDouble(js["arrival_min_speed_deg_s"], "safety.joint_target_smd.arrival_min_speed_deg_s");
             }
         }
         if (has(sec, "init_motion_planner")) {
@@ -2592,8 +2706,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "scope_pub_endpoints",
             "state_pub_rate_hz",
             "command_source_allowlist",
+            "chunk_frame_bind",
         }, "network");
         cfg.network.command_bind = getString(sec, "command_bind", cfg.network.command_bind, "network");
+        cfg.network.chunk_frame_bind = getString(sec, "chunk_frame_bind", cfg.network.chunk_frame_bind, "network");
         if (has(sec, "state_pub_endpoints") && (has(sec, "state_pub_endpoint") || has(sec, "state_pub_bind"))) {
             fail("network.state_pub_endpoints cannot be combined with state_pub_endpoint or deprecated state_pub_bind", sec["state_pub_endpoints"]);
         }
@@ -2747,6 +2863,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "controller_simulation_divergence_source",
             "linear_move",
             "pose_track_smd",
+            "ruckig_follower",
             "tcp_pose_target_profile_default",
             "tcp_pose_target_profiles",
         }, "cartesian_control");
@@ -2886,6 +3003,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 &cfg.cartesian_control.pose_track_smd
             );
         }
+        if (has(sec, "ruckig_follower")) {
+            parseRuckigFollowerConfig(
+                sec["ruckig_follower"],
+                "cartesian_control.ruckig_follower",
+                &cfg.cartesian_control.ruckig_follower
+            );
+        }
         if (has(sec, "tcp_pose_target_profile_default")) {
             cfg.cartesian_control.tcp_pose_target_profile_default =
                 asString(sec["tcp_pose_target_profile_default"], "cartesian_control.tcp_pose_target_profile_default");
@@ -2902,17 +3026,26 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 const YAML::Node profile_node = item.second;
                 validateAllowedKeys(profile_node, {
                     "pose_track_smd",
+                    "ruckig_follower",
                     "max_smd_goal_lead_m",
                     "max_smd_goal_lead_rad",
                 }, "cartesian_control.tcp_pose_target_profiles." + name);
                 TcpPoseTargetProfileConfig profile;
                 profile.name = name;
                 profile.pose_track_smd = cfg.cartesian_control.pose_track_smd;
+                profile.ruckig_follower = cfg.cartesian_control.ruckig_follower;
                 if (has(profile_node, "pose_track_smd")) {
                     parsePoseTrackSmdConfig(
                         profile_node["pose_track_smd"],
                         "cartesian_control.tcp_pose_target_profiles." + name + ".pose_track_smd",
                         &profile.pose_track_smd
+                    );
+                }
+                if (has(profile_node, "ruckig_follower")) {
+                    parseRuckigFollowerConfig(
+                        profile_node["ruckig_follower"],
+                        "cartesian_control.tcp_pose_target_profiles." + name + ".ruckig_follower",
+                        &profile.ruckig_follower
                     );
                 }
                 if (has(profile_node, "max_smd_goal_lead_m")) {

@@ -4,6 +4,7 @@
 #include <array>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <cmath>
 #include <iostream>
 #include <memory>
@@ -767,10 +768,19 @@ struct RbpodoBackend::Impl {
 #ifdef RB_SERVO_ENABLE_RBPODO
     std::unique_ptr<rb::podo::Cobot<>> robot;
     std::unique_ptr<rb::podo::CobotData> data_channel;
+    // Pipelined state-read channel (config.state_read_pipelined): a second,
+    // readState()-exclusive connection to the CobotData port. The SDK Socket is
+    // O_NONBLOCK, so drain/request never block the servo thread; the response
+    // to this tick's request is consumed on the NEXT tick. data_channel stays
+    // untouched for connect/transition-time blocking reads.
+    std::unique_ptr<rb::podo::Socket> pipelined_state_sock;
+    std::string pipelined_rx_buf;
     std::optional<RobotState> last_state_cache;
     std::optional<BackendError> last_state_error;
     // Consecutive transient readState misses currently being tolerated (held)
     // under the controller-simulation read-miss carve-out. Reset on any valid read.
+    // In pipelined mode this counts ticks without a fresh frame (diagnostic only;
+    // the staleness bound governs failure).
     int consecutive_read_misses = 0;
 #endif
 };
@@ -853,6 +863,35 @@ BackendResult<RobotState> RbpodoBackend::connect() {
                 makeBackendTiming(start, nowSteadyNs())
             );
         }
+        if (impl_->config.state_read_pipelined) {
+            // Dedicated non-blocking data connection for pipelined readState().
+            // Prime one request now so the first servo tick already has a
+            // response waiting instead of starting on a stale-cache miss.
+            // (Socket ctor throws on connect failure -> handled by catch below.)
+            impl_->pipelined_state_sock = std::make_unique<rb::podo::Socket>(
+                impl_->config.ip,
+                static_cast<int>(rb::podo::kDataPort)
+            );
+            impl_->pipelined_rx_buf.clear();
+            if (!impl_->pipelined_state_sock->send(rb::podo::kRequestDataCommand)) {
+                impl_->robot.reset();
+                impl_->data_channel.reset();
+                impl_->pipelined_state_sock.reset();
+                impl_->connected = false;
+                return failedResult<RobotState>(
+                    BackendOp::Connect,
+                    backendError(
+                        BackendErrorKind::TransportConnectFailed,
+                        "rbpodo pipelined state channel connected but the priming reqdata send failed",
+                        "",
+                        "rbpodo_pipelined_prime_send_failed"
+                    ),
+                    makeBackendTiming(start, nowSteadyNs())
+                );
+            }
+            std::cerr << "[INFO] RbpodoBackend pipelined state read enabled for "
+                      << impl_->config.name << "\n";
+        }
         std::cerr << "[INFO] RbpodoBackend connected to " << impl_->config.ip
                   << " for " << impl_->config.name
                   << " initial_state_valid=" << (mapped.has_valid_joint_state ? "true" : "false")
@@ -870,6 +909,7 @@ BackendResult<RobotState> RbpodoBackend::connect() {
                   << ": " << exc.what() << "\n";
         impl_->robot.reset();
         impl_->data_channel.reset();
+        impl_->pipelined_state_sock.reset();
         impl_->connected = false;
         return failedResult<RobotState>(
             BackendOp::Connect,
@@ -1192,6 +1232,44 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
 #endif
 }
 
+namespace {
+// Pipelined readState framing bounds. A real SystemState frame is well under
+// 4 KiB, so a frame whose 16-bit size field claims more than this is garbage:
+// resync byte-by-byte instead of stalling the stream waiting for it. The rx
+// buffer holds at most a few frames between ticks; 64 KiB of unparseable bytes
+// means the stream is corrupt, so drop the buffer and resync from live data.
+constexpr size_t kRbpodoStateFrameMaxBytes = 8192;
+constexpr size_t kRbpodoPipelinedRxBufMaxBytes = 65536;
+}  // namespace
+
+std::optional<std::string> extractNewestRbpodoStateFrame(std::string& buf) {
+    // Mirror of the CobotData wire framing parsed by the SDK's request_data()
+    // (rbpodo src/cobot_data.cpp): '$', size lo, size hi, type; a type-0x03
+    // payload is a SystemState image; total frame = size + 4 bytes.
+    std::optional<std::string> newest;
+    size_t pos = 0;
+    while (buf.size() >= pos + 4) {
+        if (buf[pos] != '$') {  // resync past garbage
+            ++pos;
+            continue;
+        }
+        const size_t frame_size = 4 +
+            ((static_cast<size_t>(static_cast<unsigned char>(buf[pos + 2])) << 8) |
+             static_cast<size_t>(static_cast<unsigned char>(buf[pos + 1])));
+        if (frame_size > kRbpodoStateFrameMaxBytes) {  // corrupt length: resync
+            ++pos;
+            continue;
+        }
+        if (buf.size() < pos + frame_size) break;  // partial frame: keep for next drain
+        if (buf[pos + 3] == 0x03) {
+            newest = buf.substr(pos, frame_size);
+        }
+        pos += frame_size;
+    }
+    buf.erase(0, pos);
+    return newest;
+}
+
 BackendResult<RobotState> RbpodoBackend::readState() {
     const uint64_t start = nowSteadyNs();
 #ifndef RB_SERVO_ENABLE_RBPODO
@@ -1214,6 +1292,9 @@ BackendResult<RobotState> RbpodoBackend::readState() {
             backendError(BackendErrorKind::RobotDisconnected, "rbpodo backend is not connected"),
             makeBackendTiming(start, nowSteadyNs())
         );
+    }
+    if (impl_->config.state_read_pipelined) {
+        return readStatePipelined(start);
     }
 
     try {
@@ -1287,6 +1368,124 @@ BackendResult<RobotState> RbpodoBackend::readState() {
     }
 #endif
 }
+
+#ifdef RB_SERVO_ENABLE_RBPODO
+BackendResult<RobotState> RbpodoBackend::readStatePipelined(uint64_t start_ns) {
+    // Non-blocking pipelined exchange: consume the response(s) that arrived
+    // since the previous tick (normally exactly one, ~1 tick old), then fire
+    // the request whose response the NEXT tick will consume. The RT servo loop
+    // therefore never waits on the controller round trip. Freshness stays
+    // fail-closed: no frame newer than kDefaultStateTimeoutSec (the same bound
+    // the blocking path used as its response timeout) fails the read. Note the
+    // controller-simulation max_consecutive_read_misses carve-out (which could
+    // tolerate up to N blocking timeouts) is intentionally NOT applied here —
+    // the single staleness bound is stricter and mode-independent.
+    if (!impl_->pipelined_state_sock) {
+        return failedResult<RobotState>(
+            BackendOp::ReadState,
+            backendError(
+                BackendErrorKind::RobotDisconnected,
+                "rbpodo pipelined state socket unavailable"
+            ),
+            makeBackendTiming(start_ns, nowSteadyNs())
+        );
+    }
+
+    // 1) Drain everything the controller sent since the last tick. recv() is
+    //    non-blocking: nullopt = nothing buffered, empty string = orderly close.
+    bool peer_closed = false;
+    while (true) {
+        const auto chunk = impl_->pipelined_state_sock->recv();
+        if (!chunk.has_value()) break;
+        if (chunk->empty()) {
+            peer_closed = true;
+            break;
+        }
+        impl_->pipelined_rx_buf.append(*chunk);
+        if (impl_->pipelined_rx_buf.size() > kRbpodoPipelinedRxBufMaxBytes) {
+            std::cerr << "[WARN] RbpodoBackend pipelined rx buffer overflow for "
+                      << impl_->config.name << "; dropping buffer to resync\n";
+            impl_->pipelined_rx_buf.clear();
+        }
+    }
+    if (peer_closed) {
+        impl_->connected = false;
+        return failedResult<RobotState>(
+            BackendOp::ReadState,
+            backendError(
+                BackendErrorKind::RobotDisconnected,
+                "rbpodo pipelined data socket closed by controller",
+                "",
+                "rbpodo_pipelined_socket_closed"
+            ),
+            makeBackendTiming(start_ns, nowSteadyNs())
+        );
+    }
+    const std::optional<std::string> frame =
+        extractNewestRbpodoStateFrame(impl_->pipelined_rx_buf);
+
+    // 2) Fire this tick's request; its response is next tick's frame. A
+    //    transient send failure is tolerated — the staleness bound below fails
+    //    closed if the stream actually stopped.
+    if (!impl_->pipelined_state_sock->send(rb::podo::kRequestDataCommand)) {
+        std::cerr << "[WARN] RbpodoBackend pipelined reqdata send failed for "
+                  << impl_->config.name << "\n";
+    }
+
+    // 3) Fresh frame this tick: map it exactly like the blocking path.
+    if (frame.has_value()) {
+        rb::podo::SystemState state{};
+        std::memcpy(
+            &state,
+            frame->data(),
+            std::min(sizeof(rb::podo::SystemState), frame->size())
+        );
+        impl_->consecutive_read_misses = 0;
+        const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(state);
+        RobotState out_state = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
+        out_state.rbpodo_sdk_state_source = "CobotData.pipelined";
+        impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, out_state);
+        attachMotionReadinessDiagnostic(&out_state, impl_->last_state_error);
+        impl_->last_state_cache =
+            out_state.has_valid_joint_state ? std::make_optional(out_state) : std::nullopt;
+        if (const auto acquisition_error = rbpodoStateAcquisitionError(out_state)) {
+            return failedResultWithValue(
+                BackendOp::ReadState,
+                *acquisition_error,
+                out_state,
+                makeBackendTiming(start_ns, nowSteadyNs())
+            );
+        }
+        return okResult(BackendOp::ReadState, out_state, makeBackendTiming(start_ns, nowSteadyNs()));
+    }
+
+    // 4) No response yet this tick: hold the cached state inside the freshness
+    //    bound (host_time_ns is stamped at frame-consume time and intentionally
+    //    NOT re-stamped here, so state age stays observable downstream).
+    ++impl_->consecutive_read_misses;
+    const uint64_t now_ns = nowSteadyNs();
+    const auto max_age_ns = static_cast<uint64_t>(kDefaultStateTimeoutSec * 1'000'000'000.0);
+    if (impl_->last_state_cache.has_value() &&
+        impl_->last_state_cache->host_time_ns > 0 &&
+        now_ns >= impl_->last_state_cache->host_time_ns &&
+        now_ns - impl_->last_state_cache->host_time_ns <= max_age_ns) {
+        RobotState held = *impl_->last_state_cache;
+        held.rbpodo_sdk_state_source = "CobotData.pipelined(held)";
+        return okResult(BackendOp::ReadState, held, makeBackendTiming(start_ns, now_ns));
+    }
+    impl_->connected = false;
+    return failedResult<RobotState>(
+        BackendOp::ReadState,
+        backendError(
+            BackendErrorKind::TransportReadFailed,
+            "rbpodo pipelined state stale beyond freshness bound",
+            "",
+            "rbpodo_pipelined_state_stale"
+        ),
+        makeBackendTiming(start_ns, nowSteadyNs())
+    );
+}
+#endif
 
 SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
     const uint64_t start = nowSteadyNs();

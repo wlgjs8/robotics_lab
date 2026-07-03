@@ -785,6 +785,78 @@ bool testStatePublisherSerializesControllerSimUnavailableFields() {
     return true;
 }
 
+// --- pipelined readState frame extraction (wire framing mirror of the SDK's
+// CobotData::request_data: '$', size lo, size hi, type; total = size + 4) ---
+
+std::string makeRbpodoFrame(char type, const std::string& payload) {
+    std::string frame;
+    frame.push_back('$');
+    frame.push_back(static_cast<char>(payload.size() & 0xFF));
+    frame.push_back(static_cast<char>((payload.size() >> 8) & 0xFF));
+    frame.push_back(type);
+    frame += payload;
+    return frame;
+}
+
+bool testExtractNewestRbpodoStateFrame() {
+    // Empty buffer: nothing extracted, nothing consumed.
+    std::string buf;
+    RB_CHECK(!rb_servo::extractNewestRbpodoStateFrame(buf).has_value());
+    RB_CHECK(buf.empty());
+
+    // Single complete type-3 frame is returned whole and consumed.
+    buf = makeRbpodoFrame(0x03, "AAAA");
+    auto frame = rb_servo::extractNewestRbpodoStateFrame(buf);
+    RB_CHECK(frame.has_value());
+    RB_CHECK(frame->size() == 8);
+    RB_CHECK((*frame)[0] == '$' && (*frame)[3] == 0x03);
+    RB_CHECK(buf.empty());
+
+    // Two buffered frames (burst after a controller stall): newest wins, both consumed.
+    buf = makeRbpodoFrame(0x03, "OLD1") + makeRbpodoFrame(0x03, "NEW2");
+    frame = rb_servo::extractNewestRbpodoStateFrame(buf);
+    RB_CHECK(frame.has_value());
+    RB_CHECK(frame->substr(4) == "NEW2");
+    RB_CHECK(buf.empty());
+
+    // Trailing partial frame stays buffered for the next drain.
+    const std::string full = makeRbpodoFrame(0x03, "FULL");
+    const std::string partial = makeRbpodoFrame(0x03, "PARTIAL").substr(0, 6);
+    buf = full + partial;
+    frame = rb_servo::extractNewestRbpodoStateFrame(buf);
+    RB_CHECK(frame.has_value());
+    RB_CHECK(frame->substr(4) == "FULL");
+    RB_CHECK(buf == partial);
+    // Completing the partial on the next drain yields it.
+    buf += makeRbpodoFrame(0x03, "PARTIAL").substr(6);
+    frame = rb_servo::extractNewestRbpodoStateFrame(buf);
+    RB_CHECK(frame.has_value());
+    RB_CHECK(frame->substr(4) == "PARTIAL");
+    RB_CHECK(buf.empty());
+
+    // Garbage prefix is resynced past; non-type-3 frames are consumed but not returned.
+    buf = "xx" + makeRbpodoFrame(0x01, "SKIP") + makeRbpodoFrame(0x03, "GOOD");
+    frame = rb_servo::extractNewestRbpodoStateFrame(buf);
+    RB_CHECK(frame.has_value());
+    RB_CHECK(frame->substr(4) == "GOOD");
+    RB_CHECK(buf.empty());
+
+    // A '$' with a corrupt (oversized) length claim must not stall the stream:
+    // resync finds the real frame that follows.
+    std::string corrupt;
+    corrupt.push_back('$');
+    corrupt.push_back(static_cast<char>(0xFF));
+    corrupt.push_back(static_cast<char>(0xFF));
+    corrupt.push_back(0x03);
+    buf = corrupt + makeRbpodoFrame(0x03, "REAL");
+    frame = rb_servo::extractNewestRbpodoStateFrame(buf);
+    RB_CHECK(frame.has_value());
+    RB_CHECK(frame->substr(4) == "REAL");
+    RB_CHECK(buf.empty());
+
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -809,5 +881,6 @@ int main() {
     if (!testNonFiniteJointStateStillFailsAcquisition()) return 1;
     if (!testStatePublisherSerializesRawRbpodoDiagnostics()) return 1;
     if (!testStatePublisherSerializesControllerSimUnavailableFields()) return 1;
+    if (!testExtractNewestRbpodoStateFrame()) return 1;
     return 0;
 }

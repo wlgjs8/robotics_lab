@@ -55,6 +55,14 @@ LEASE_READBACK_TIMEOUT_EXIT_CODE = 3
 IDLE_LEASE_RELEASE_SEC = 1.0
 LEASE_RETRY_BACKOFF_SEC = 2.0
 
+# Per-arm ABSOLUTE gripper close-bias fallbacks (opening percent subtracted from
+# the model's opening target so a marginal grasp clamps). The two pika grippers
+# clamp differently, so left/right default to independent values; these apply when
+# neither the per-arm flag (--gripper-close-bias-left/right) nor the shared
+# --gripper-close-bias is given. Mirrored in the flow-infer arg help text below.
+DEFAULT_GRIPPER_CLOSE_BIAS_LEFT = 2.0
+DEFAULT_GRIPPER_CLOSE_BIAS_RIGHT = 6.0
+
 
 def _intent_record_packet(
     command_client: ServoCommandClient | object | None,
@@ -942,7 +950,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--execute-arms",
         choices=("both", "left", "right"),
-        default="right",
+        default="both",
         help=(
             "Runtime execution mask: suppress the non-selected arm's commands "
             "(twist + gripper) so it physically holds. The checkpoint stays "
@@ -991,6 +999,21 @@ def _main_with_subcommands(argv: list[str]) -> int:
             "finite-differenced from the robot TCP pose (use a small --chunk-execute-steps for the "
             "cleanest per-step velocity). nostate (zero_state) checkpoints ignore state, so any value "
             "works there. Only the openpi-remote source uses this."
+        ),
+    )
+    flow_infer.add_argument(
+        "--velproprio-sample-mode",
+        default="replan",
+        choices=("replan", "fixed_step"),
+        help=(
+            "How velocity* proprio picks its finite-difference window (openpi-remote only). 'replan' "
+            "(default, legacy): difference the TCP pose between successive proprio samples (chunk-replan "
+            "boundaries) and rescale by policy_dt/wall_dt — the window length AND wall-clock both depend "
+            "on controller/inference timing, so a slower/burstier controller (or SEQUENTIAL holds) reports "
+            "a SMALLER velocity than training saw. 'fixed_step': difference the MEASURED pose over a fixed "
+            "~policy_dt window from a per-tick pose history, decoupled from replan cadence and inference "
+            "latency — reproduces the training converter's single 30 Hz frame delta regardless of the "
+            "controller. Use fixed_step when a controller change makes the policy under-shoot (e.g. depth)."
         ),
     )
     flow_infer.add_argument(
@@ -1077,8 +1100,70 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--chunk-execute-steps",
         type=int,
-        default=16,
+        default=24,
         help="Number of sampled action steps to execute before resampling; default is action_horizon//2.",
+    )
+    flow_infer.add_argument(
+        "--chunk-anchor-source",
+        choices=["actual", "command", "chain"],
+        default="actual",
+        help=(
+            "Pose the chunk deltas integrate from at each (re)anchor: 'actual' = measured FK(q_actual) "
+            "(legacy), 'command' = FK(q_sent), the pose the server actually commanded — removes servo "
+            "tracking-lag re-compensation from the integrated targets. 'chain' = pure plan-chain: each "
+            "chunk integrates from the previous chunk's integrated tail (no robot-state re-anchor; "
+            "boundary shortfall carries over instead of being discarded — pair with "
+            "--tcp-target-pose-reanchor-mode last_emitted_continuous). Proprio/reset/tracking logs stay measured."
+        ),
+    )
+    flow_infer.add_argument(
+        "--chunk-stitch-mode",
+        choices=["boundary", "ensemble"],
+        default="boundary",
+        help=(
+            "How consecutive chunks are stitched. 'boundary' (default): swap whole chunks at the "
+            "execute boundary (optionally RTC-inpainted). 'ensemble': observation-aligned recursive "
+            "2-chunk blend — kick every --ensemble-period R steps; each executed R-window linearly "
+            "blends the old chunk's [2R..3R) with the new chunk's [R..2R) (time-aligned); requires "
+            "action_horizon >= 3R. Forces reanchor last_emitted_continuous + chain anchoring."
+        ),
+    )
+    flow_infer.add_argument(
+        "--ensemble-period",
+        type=int,
+        default=6,
+        help="R: replan/blend window length in policy steps for --chunk-stitch-mode ensemble.",
+    )
+    flow_infer.add_argument(
+        "--ensemble-blend",
+        choices=["linear", "none"],
+        default="linear",
+        help=(
+            "Window mixing for ensemble mode: 'linear' = lerp(old[2R..3R), new[R..2R)); "
+            "'none' = execute the newest chunk's [R..2R) PURE (old plan is only the late runway; "
+            "window seams may step by the plans' divergence, absorbed by FOH + follower jerk limits)."
+        ),
+    )
+    flow_infer.add_argument(
+        "--stream-prefetch-at",
+        type=int,
+        default=None,
+        help=(
+            "Kick the next chunk inference after this many consumed steps of the current window "
+            "(default: legacy early kick at ~2). For RTC pair with --rtc-inference-delay == "
+            "chunk_execute_steps - stream_prefetch_at (the frozen prefix that runs on the old plan "
+            "while the new chunk is inpainted). Ignored in --sequential-chunk-inference."
+        ),
+    )
+    flow_infer.add_argument(
+        "--sequential-chunk-inference",
+        action="store_true",
+        help=(
+            "Blocking sequential chunk mode (verification): consume the chunk to the END, only then "
+            "run inference with the freshest observation (the robot holds still for the inference "
+            "latency), and re-anchor the new chunk's deltas to the measured pose at activation. "
+            "Disables the mid-chunk prefetch kick; pair with --chunk-execute-steps == action horizon."
+        ),
     )
     flow_infer.add_argument(
         "--action-horizon",
@@ -1123,24 +1208,42 @@ def _main_with_subcommands(argv: list[str]) -> int:
         type=float,
         default=3.0,
         help="Opening percent commanded for the CLOSE level in --gripper-action-mode binary "
-             "(DEFAULT 7). Clamped to [0,100].",
+             "(DEFAULT 3). Clamped to [0,100].",
     )
     flow_infer.add_argument(
         "--gripper-binary-threshold",
         type=float,
         default=40.0,
         help="Decision threshold (opening percent) for --gripper-action-mode binary: the model's "
-             "gripper output >= threshold -> OPEN, else CLOSE (DEFAULT 35, the midpoint of the "
+             "gripper output >= threshold -> OPEN, else CLOSE (DEFAULT 40, the midpoint of the "
              "model's bimodal 0/100 output). Only used in binary mode.",
     )
     flow_infer.add_argument(
         "--gripper-close-bias",
         type=float,
-        default=7.0,
-        help="Percent subtracted from the ABSOLUTE gripper opening target so grasps close more "
-             "firmly (lower opening = more closed). E.g. 1.0 turns an 18%% command into 17%%; use it "
-             "when the policy stops a hair short of clamping the object. Clamped to [0,100]; 0 = off "
-             "(DEFAULT). No effect in --gripper-action-mode delta.",
+        default=None,
+        help="SHARED ABSOLUTE close-bias (opening percent subtracted from the target so grasps "
+             "close more firmly; lower opening = more closed) applied to BOTH arms, unless a "
+             "per-arm flag (--gripper-close-bias-left / --gripper-close-bias-right) overrides it. "
+             "E.g. 1.0 turns an 18%% command into 17%%. Clamped to [0,100]; no effect in "
+             "--gripper-action-mode delta/binary. UNSET by default -> the per-arm defaults apply "
+             "(left 2.0, right 6.0).",
+    )
+    flow_infer.add_argument(
+        "--gripper-close-bias-left",
+        type=float,
+        default=2.0,
+        help="LEFT-arm ABSOLUTE close-bias override (opening percent). Wins over --gripper-close-bias. "
+             "When unset, falls back to --gripper-close-bias, then to the left default (2.0). "
+             "Clamped to [0,100]; no effect in delta/binary mode.",
+    )
+    flow_infer.add_argument(
+        "--gripper-close-bias-right",
+        type=float,
+        default=6.0,
+        help="RIGHT-arm ABSOLUTE close-bias override (opening percent). Wins over --gripper-close-bias. "
+             "When unset, falls back to --gripper-close-bias, then to the right default (6.0). "
+             "Clamped to [0,100]; no effect in delta/binary mode.",
     )
     flow_infer.add_argument(
         "--prompt",
@@ -1173,7 +1276,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--rtc-inference-delay",
         type=int,
-        default=4,
+        default=8,
         help="RTC delay d (policy steps guaranteed to execute during inference latency); the first d "
              "actions are hard-frozen to the previous chunk. ~ceil(inference_latency / policy_dt); "
              "clamped to [0, chunk_execute_steps]. Only used with --rtc.",
@@ -2000,6 +2103,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     wrist_crop_frac=float(config.camera.wrist_crop_frac),
                     action_horizon=args.action_horizon,
                     proprio_mode=args.proprio_mode,
+                    velproprio_sample_mode=getattr(args, "velproprio_sample_mode", "replan"),
                     **({"prompt": args.prompt} if getattr(args, "prompt", None) else {}),
                     include_depth=bool(args.include_depth or args.blank_depth),
                     blank_depth=bool(args.blank_depth),
@@ -2088,6 +2192,65 @@ def _main_with_subcommands(argv: list[str]) -> int:
             if rollout_policy.mode.value in {"controller_sim", "real_policy", "real_readonly"}:
                 source.enable_async_chunking = True
                 source.nonblocking_stream_inference = True
+            # Sequential verification mode: no mid-chunk prefetch — infer only at
+            # the boundary stall (fresh observation), robot pauses during latency.
+            source.sequential_stream_inference = bool(
+                getattr(args, "sequential_chunk_inference", False)
+            )
+            source.chunk_anchor_source = str(getattr(args, "chunk_anchor_source", "actual"))
+            stitch_mode = str(getattr(args, "chunk_stitch_mode", "boundary"))
+            if stitch_mode == "ensemble":
+                if bool(getattr(args, "sequential_chunk_inference", False)):
+                    raise RolloutModeValidationError(
+                        "--chunk-stitch-mode ensemble and --sequential-chunk-inference are mutually exclusive"
+                    )
+                period = int(getattr(args, "ensemble_period", 6))
+                # fail fast on H < 3R (the scheduler enforces the same rule)
+                from .chunk_ensemble import ChunkEnsembleScheduler
+
+                blend_mode = str(getattr(args, "ensemble_blend", "linear"))
+                ChunkEnsembleScheduler(period, int(source.action_horizon), blend_mode=blend_mode)
+                source.chunk_stitch_mode = "ensemble"
+                source.ensemble_period = period
+                source.ensemble_blend_mode = blend_mode
+                # the mode presumes pure plan-chain integration on both paths
+                source.chunk_anchor_source = "chain"
+                if getattr(source, "_tcp_tp_reanchor_mode", None) != "last_emitted_continuous":
+                    source._tcp_tp_reanchor_mode = "last_emitted_continuous"
+                # RTC (if enabled) replans every R now, not every execute window
+                source.rtc_replan_period = period
+                _window_desc = (
+                    "lerp(old[2R..3R), new[R..2R))" if blend_mode == "linear" else "new[R..2R) PURE (no blend)"
+                )
+                print(
+                    f"[flow-infer] chunk-stitch-mode=ensemble R={period}: kick every {period} steps, "
+                    f"window = {_window_desc}; H={int(source.action_horizon)} "
+                    f"(runway {int(source.action_horizon) - 3 * period} steps)",
+                    flush=True,
+                )
+            if getattr(args, "stream_prefetch_at", None) is not None:
+                source.stream_prefetch_at = int(args.stream_prefetch_at)
+                print(
+                    f"[flow-infer] stream_prefetch_at={source.stream_prefetch_at}: next-chunk inference "
+                    "kicks at this consumed-step index (RTC frozen prefix = execute_steps - this)",
+                    flush=True,
+                )
+            if source.chunk_anchor_source != "actual":
+                _anchor_desc = {
+                    "command": "FK(q_sent) (command pose)",
+                    "chain": "the previous chunk's integrated tail (pure plan-chain)",
+                }.get(source.chunk_anchor_source, source.chunk_anchor_source)
+                print(
+                    f"[flow-infer] chunk-anchor-source={source.chunk_anchor_source}: chunk deltas "
+                    f"integrate from {_anchor_desc}; proprio/reset stay measured",
+                    flush=True,
+                )
+            if source.sequential_stream_inference:
+                print(
+                    "[flow-infer] sequential-chunk-inference ON: consume full chunk -> hold during "
+                    "inference -> re-anchor next chunk to measured pose",
+                    flush=True,
+                )
             # Hold the gripper open for the first N policy steps (reach-before-grasp).
             source.gripper_open_hold_steps = int(getattr(args, "gripper_open_hold_steps", 0) or 0)
             # Interpret the action gripper dim as an absolute opening (default,
@@ -2103,8 +2266,31 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 getattr(args, "gripper_binary_threshold", 50.0)
             )
             # Close-bias: subtract a few percent from the absolute opening target so
-            # a marginal grasp clamps (no effect in delta or binary mode).
-            source.gripper_close_bias = float(getattr(args, "gripper_close_bias", 0.0) or 0.0)
+            # a marginal grasp clamps (no effect in delta or binary mode). Resolved
+            # PER ARM (the two pika grippers clamp differently): an explicit
+            # --gripper-close-bias-<arm> wins; else the shared --gripper-close-bias;
+            # else the per-arm default (left 2.0 / right 6.0). The shared base is
+            # kept for the startup log + tests that set `gripper_close_bias` directly.
+            _shared_bias = getattr(args, "gripper_close_bias", None)
+            _left_bias = getattr(args, "gripper_close_bias_left", None)
+            _right_bias = getattr(args, "gripper_close_bias_right", None)
+            if _left_bias is None:
+                _left_bias = (
+                    _shared_bias
+                    if _shared_bias is not None
+                    else DEFAULT_GRIPPER_CLOSE_BIAS_LEFT
+                )
+            if _right_bias is None:
+                _right_bias = (
+                    _shared_bias
+                    if _shared_bias is not None
+                    else DEFAULT_GRIPPER_CLOSE_BIAS_RIGHT
+                )
+            source.gripper_close_bias = (
+                float(_shared_bias) if _shared_bias is not None else 0.0
+            )
+            source.gripper_close_bias_left = float(min(100.0, max(0.0, _left_bias)))
+            source.gripper_close_bias_right = float(min(100.0, max(0.0, _right_bias)))
             # Close-snap deadzone: collapse a near-closed absolute opening to fully
             # closed (0%) so small jitter doesn't leave the jaw cracked open.
             source.gripper_close_snap_percent = float(
@@ -2131,11 +2317,9 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     f" threshold={source.gripper_binary_threshold:g}%"
                 )
             elif source.gripper_action_absolute:
-                detail = (
-                    f", close-bias={source.gripper_close_bias:g}%"
-                    if source.gripper_close_bias
-                    else ""
-                )
+                _lb = float(getattr(source, "gripper_close_bias_left", 0.0) or 0.0)
+                _rb = float(getattr(source, "gripper_close_bias_right", 0.0) or 0.0)
+                detail = f", close-bias L={_lb:g}%/R={_rb:g}%" if (_lb or _rb) else ""
                 if source.gripper_close_snap_percent:
                     detail += f", close-snap<{source.gripper_close_snap_percent:g}%"
             else:

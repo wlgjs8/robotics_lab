@@ -208,6 +208,62 @@ ArmCommand applyPoseTrackSmd(
     return smoothed;
 }
 
+// ---- Ruckig chunk-follower stage helpers -----------------------------------
+
+bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFollowerConfig& b) {
+    return a.enable != b.enable ||
+        a.max_linear_velocity_m_s != b.max_linear_velocity_m_s ||
+        a.max_linear_accel_m_s2 != b.max_linear_accel_m_s2 ||
+        a.max_linear_jerk_m_s3 != b.max_linear_jerk_m_s3 ||
+        a.max_angular_velocity_rad_s != b.max_angular_velocity_rad_s ||
+        a.max_angular_accel_rad_s2 != b.max_angular_accel_rad_s2 ||
+        a.max_angular_jerk_rad_s3 != b.max_angular_jerk_rad_s3 ||
+        a.discard_head_steps != b.discard_head_steps ||
+        a.consume_steps != b.consume_steps ||
+        a.reserve_steps != b.reserve_steps ||
+        a.smoothing_window != b.smoothing_window ||
+        a.af_damping_beta != b.af_damping_beta ||
+        a.chunk_feed_timeout_sec != b.chunk_feed_timeout_sec;
+}
+
+control::CartesianChunkFollowerConfig makeChunkFollowerConfig(const RuckigFollowerConfig& rf) {
+    control::CartesianChunkFollowerConfig cfg;
+    cfg.lin = control::AxisLimit{rf.max_linear_velocity_m_s, rf.max_linear_accel_m_s2, rf.max_linear_jerk_m_s3};
+    cfg.ang = control::AxisLimit{rf.max_angular_velocity_rad_s, rf.max_angular_accel_rad_s2, rf.max_angular_jerk_rad_s3};
+    cfg.window.discard_head_L = rf.discard_head_steps;
+    cfg.window.consume_C = rf.consume_steps;
+    cfg.window.reserve_R = rf.reserve_steps;
+    cfg.window.smoothing_window = rf.smoothing_window;
+    cfg.guard.af_damping_beta = rf.af_damping_beta;
+    return cfg;
+}
+
+control::ChunkFrame toControlChunkFrame(
+    const ChunkFrameReceiver::Frame& frame,
+    ArmId arm_id,
+    std::uint64_t receiver_seq
+) {
+    const ChunkFrameReceiver::ArmSteps& steps =
+        arm_id == ArmId::Left ? frame.left : frame.right;
+    control::ChunkFrame out;
+    out.policy_dt = frame.policy_dt_sec;
+    out.seq = receiver_seq;
+    out.recv_time = frame.recv_steady_sec;
+    out.pose.reserve(static_cast<std::size_t>(steps.count));
+    out.grip.reserve(static_cast<std::size_t>(steps.count));
+    for (int i = 0; i < steps.count; ++i) {
+        const auto& s = steps.step[static_cast<std::size_t>(i)];
+        Pose6D p;
+        p.x = s[0];
+        p.y = s[1];
+        p.z = s[2];
+        p.quaternion_xyzw = std::array<double, 4>{s[3], s[4], s[5], s[6]};
+        out.pose.push_back(p);
+        out.grip.push_back(s[7]);
+    }
+    return out;
+}
+
 TcpPoseTargetProfileConfig selectTcpPoseTargetProfile(
     const CartesianControlConfig& config,
     const std::string& requested_profile,
@@ -1874,6 +1930,18 @@ void DualArmServoLoop::loopMain() {
 
     // Jitter instrumentation: when the previous tick entered sleep_until (0 on first tick).
     uint64_t prev_sleep_enter_ns = 0;
+    // servo.send_at_tick_start staging: tick N computes and safety-filters a
+    // target, tick N+1 dispatches it immediately after wake-up (wire timing
+    // then depends only on wake-up latency). Invalid until the first compute.
+    struct PendingTopSend {
+        ServoTarget target{};
+        uint64_t command_seq = 0;
+        uint64_t command_host_time_ns = 0;
+        uint64_t deadline_ns = 0;
+        bool valid = false;
+    };
+    PendingTopSend pending_top_send;
+    const bool send_at_top = config_.servo.send_at_tick_start;
     while (running_) {
         // Scheduled wake time of THIS tick = the sleep_until target of the previous
         // iteration (next_tick before the increment below). Same steady epoch as
@@ -1883,6 +1951,41 @@ void DualArmServoLoop::loopMain() {
                 next_tick.time_since_epoch()).count());
         next_tick += period;
         const uint64_t loop_start = nowSteadyNs();
+        // Dispatch/result variables shared by both send modes. In
+        // send_at_tick_start mode they are filled HERE (dispatching the target
+        // staged by the previous tick); in legacy mode they are filled at the
+        // post-compute send site below. `sent_target` is the target actually
+        // dispatched THIS tick (staged one in top mode, attempted one in
+        // legacy) and is what send bookkeeping must record.
+        DualSendResult dual_send_result;
+        ServoTarget sent_target{};
+        bool fault_latched_before_send = false;
+        std::string send_policy = "send_servo_j";
+        bool send_suppressed = true;
+        if (send_at_top) {
+            // Re-evaluate the policy at dispatch time: a fault latched (or a
+            // freedrive/lease change) since the target was computed must still
+            // suppress it. sendTargets() itself suppresses on any policy other
+            // than "send_servo_j" without touching the sockets.
+            fault_latched_before_send = fault_latched_.load();
+            send_policy = currentSendPolicy();
+            if (!pending_top_send.valid && send_policy == "send_servo_j") {
+                // First tick(s) after start: nothing staged yet. Telemetry
+                // shows this as its own suppressed policy.
+                send_policy = "no_pending_target";
+            }
+            send_suppressed = send_policy != "send_servo_j";
+            sent_target = pending_top_send.target;
+            dual_send_result = sendTargets(
+                pending_top_send.target,
+                pending_top_send.command_seq,
+                pending_top_send.command_host_time_ns,
+                send_policy,
+                loop_start,
+                pending_top_send.deadline_ns
+            );
+            pending_top_send.valid = false;
+        }
         // Fail-closed: if external-box keep-out is enforced but the producer feed is
         // missing/stale, abort instead of silently running without keep-out (no-op when
         // monitor_only/disabled — the default config).
@@ -2448,9 +2551,6 @@ void DualArmServoLoop::loopMain() {
         right_abc_telemetry_.q_target_before_output_ma_deg = safe_target.right_q_target_deg;
         right_abc_telemetry_.q_target_after_output_ma_deg = output_filtered_target.right_q_target_deg;
         const ServoTarget attempted_target = output_filtered_target;
-        const bool fault_latched_before_send = fault_latched_.load();
-        const std::string send_policy = currentSendPolicy();
-        const bool send_suppressed = send_policy != "send_servo_j";
         const uint64_t command_host_time_ns = command.host_time_ns > 0
             ? command.host_time_ns
             : loop_start;
@@ -2463,14 +2563,28 @@ void DualArmServoLoop::loopMain() {
             command_host_time_ns,
             fallback_timeout_ns
         );
-        DualSendResult dual_send_result = sendTargets(
-            attempted_target,
-            command.seq,
-            command_host_time_ns,
-            send_policy,
-            loop_start,
-            send_deadline_ns
-        );
+        if (send_at_top) {
+            // Stage this tick's safety-filtered target for dispatch at the top
+            // of the NEXT tick (send policy is re-evaluated there).
+            pending_top_send.target = attempted_target;
+            pending_top_send.command_seq = command.seq;
+            pending_top_send.command_host_time_ns = command_host_time_ns;
+            pending_top_send.deadline_ns = send_deadline_ns;
+            pending_top_send.valid = true;
+        } else {
+            fault_latched_before_send = fault_latched_.load();
+            send_policy = currentSendPolicy();
+            send_suppressed = send_policy != "send_servo_j";
+            sent_target = attempted_target;
+            dual_send_result = sendTargets(
+                attempted_target,
+                command.seq,
+                command_host_time_ns,
+                send_policy,
+                loop_start,
+                send_deadline_ns
+            );
+        }
         const SendServoJResult& left_send_result = dual_send_result.left.result;
         const SendServoJResult& right_send_result = dual_send_result.right.result;
         const uint64_t left_send_start_ns = dual_send_result.left.dispatch_timing.start_ns;
@@ -2479,13 +2593,19 @@ void DualArmServoLoop::loopMain() {
         const uint64_t right_send_end_ns = dual_send_result.right.dispatch_timing.end_ns;
         const bool left_ok = left_send_result.accepted;
         const bool right_ok = right_send_result.accepted;
-        if (left_send_result.state_after.has_value()) {
-            left_state = *left_send_result.state_after;
-            populateTcpPose(left_state, config_.left_mount);
-        }
-        if (right_send_result.state_after.has_value()) {
-            right_state = *right_send_result.state_after;
-            populateTcpPose(right_state, config_.right_mount);
+        if (!send_at_top) {
+            // Legacy in-tick send: the dispatch's cached state_after is the
+            // freshest state available. In send_at_tick_start mode the regular
+            // state read above already ran AFTER the dispatch, so it is fresher
+            // than the dispatch cache and must not be overwritten.
+            if (left_send_result.state_after.has_value()) {
+                left_state = *left_send_result.state_after;
+                populateTcpPose(left_state, config_.left_mount);
+            }
+            if (right_send_result.state_after.has_value()) {
+                right_state = *right_send_result.state_after;
+                populateTcpPose(right_state, config_.right_mount);
+            }
         }
         if (left_ok && !fault_latched_before_send && !send_suppressed) {
             noteReferenceSupervisionSentTarget(
@@ -2494,7 +2614,7 @@ void DualArmServoLoop::loopMain() {
                 kinematics_,
                 kinematics_injected_,
                 ArmId::Left,
-                attempted_target.left_q_target_deg
+                sent_target.left_q_target_deg
             );
         }
         if (right_ok && !fault_latched_before_send && !send_suppressed) {
@@ -2504,7 +2624,7 @@ void DualArmServoLoop::loopMain() {
                 kinematics_,
                 kinematics_injected_,
                 ArmId::Right,
-                attempted_target.right_q_target_deg
+                sent_target.right_q_target_deg
             );
         }
         if (workerBackedIoMode()) {
@@ -2559,11 +2679,11 @@ void DualArmServoLoop::loopMain() {
             std::lock_guard<std::mutex> lock(state_mutex_);
             if (left_ok && !fault_latched_before_send && !send_suppressed) {
                 left_prevprev_sent_q_deg_ = left_prev_sent_q_deg_;
-                left_prev_sent_q_deg_ = attempted_target.left_q_target_deg;
+                left_prev_sent_q_deg_ = sent_target.left_q_target_deg;
             }
             if (right_ok && !fault_latched_before_send && !send_suppressed) {
                 right_prevprev_sent_q_deg_ = right_prev_sent_q_deg_;
-                right_prev_sent_q_deg_ = attempted_target.right_q_target_deg;
+                right_prev_sent_q_deg_ = sent_target.right_q_target_deg;
             }
         }
 
@@ -2589,8 +2709,8 @@ void DualArmServoLoop::loopMain() {
         sample.non_init_arm_preserved_mode = init_non_init_arm_preserved_mode;
         sample.single_arm_freeze_other_arm =
             config_.safety.init_motion_planner.single_arm_freeze_other_arm;
-        sample.left_sent_q_deg = attempted_target.left_q_target_deg;
-        sample.right_sent_q_deg = attempted_target.right_q_target_deg;
+        sample.left_sent_q_deg = sent_target.left_q_target_deg;
+        sample.right_sent_q_deg = sent_target.right_q_target_deg;
         sample.left_send_ok = left_ok;
         sample.right_send_ok = right_ok;
         sample.left_last_read = readCallSnapshot(left_state_result, left_read_fault);
@@ -2699,8 +2819,8 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.left_state = left_state;
             latest_snapshot_.right_state = right_state;
             latest_snapshot_.command = command;
-            latest_snapshot_.left_sent_q_deg = attempted_target.left_q_target_deg;
-            latest_snapshot_.right_sent_q_deg = attempted_target.right_q_target_deg;
+            latest_snapshot_.left_sent_q_deg = sent_target.left_q_target_deg;
+            latest_snapshot_.right_sent_q_deg = sent_target.right_q_target_deg;
             latest_snapshot_.left_prev_sent_q_deg = left_prev_sent_q_deg_;
             latest_snapshot_.right_prev_sent_q_deg = right_prev_sent_q_deg_;
             latest_snapshot_.period_ms = sample.period_ms;
@@ -3522,6 +3642,16 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.smd_goal_linear_velocity_norm_m_s = info.goal_linear_velocity.norm();
     solve.smd_goal_angular_velocity_norm_rad_s = info.goal_angular_velocity.norm();
     solve.smd_reanchor_count = abc.smd_reanchor_count;
+    solve.follower_active = abc.follower_active;
+    solve.follower_seq = abc.follower_seq;
+    solve.follower_step = abc.follower_step;
+    solve.follower_t_in_seg_sec = abc.follower_t_in_seg_sec;
+    solve.follower_duration_sec = abc.follower_duration_sec;
+    solve.follower_alpha = abc.follower_alpha;
+    solve.follower_converged = abc.follower_converged;
+    solve.follower_stall = abc.follower_stall;
+    solve.follower_corner = abc.follower_corner;
+    solve.follower_pf_stand = abc.follower_pf_stand;
     solve.output_ma_present = abc.output_ma_present;
     solve.output_ma_window = output_ma_window;
     if (abc.output_ma_present) {
@@ -3531,6 +3661,128 @@ void DualArmServoLoop::mergeAbcTelemetry(
     if (abc.safety_clamp_present) {
         solve.safety_clamp = abc.safety_clamp;
     }
+}
+
+void DualArmServoLoop::pollChunkFrames() {
+    if (!chunk_frame_receiver_) return;
+    const std::uint64_t seq = chunk_frame_receiver_->latestSeq();
+    if (seq == 0 || seq == chunk_frame_cache_seq_) return;
+    ChunkFrameReceiver::Frame frame;
+    if (!chunk_frame_receiver_->copyLatest(&frame)) return;  // writer busy; retry next tick
+    chunk_frame_cache_ = frame;
+    chunk_frame_cache_seq_ = frame.receiver_seq;  // seq copied UNDER the same lock as the frame
+}
+
+ArmCommand DualArmServoLoop::applyChunkFollowerStage(
+    ArmId arm_id,
+    const ArmCommand& command,
+    const TcpPoseTargetProfileConfig& profile,
+    control::CartesianChunkFollower* follower,
+    RuckigFollowerConfig* built_cfg,
+    std::uint64_t* submitted_seq,
+    SmdPoseTracker* smd_tracker,
+    const ArmMountConfig& mount,
+    const JointArray& previous_sent_q_deg,
+    double dt_sec
+) {
+    const RuckigFollowerConfig& rf = profile.ruckig_follower;
+    AbcTelemetry& abc = arm_id == ArmId::Left ? left_abc_telemetry_ : right_abc_telemetry_;
+    // Reset follower telemetry each tick; re-filled below when the follower drives.
+    abc.follower_active = false;
+    abc.follower_seq = 0;
+    abc.follower_step = -1;
+    abc.follower_t_in_seg_sec = 0.0;
+    abc.follower_duration_sec = 0.0;
+    abc.follower_alpha = 1.0;
+    abc.follower_converged = false;
+    abc.follower_stall = false;
+    abc.follower_corner = false;
+    abc.follower_pf_stand.reset();
+    const bool was_active = follower->active();
+    const char* transition_reason = "";
+    const auto log_transition = [&]() {
+        if (follower->active() == was_active) return;
+        // Rare (engage / watchdog / divergence / mode change) — safe to print
+        // from the loop, mirrors the existing throttled-WARN practice.
+        std::cout << "[chunk_follower] " << (arm_id == ArmId::Left ? "left" : "right")
+                  << (follower->active() ? " ENGAGED" : " disengaged")
+                  << (transition_reason[0] ? " (" : "") << transition_reason
+                  << (transition_reason[0] ? ")" : "") << "\n";
+    };
+    const auto smd_fallback = [&]() {
+        log_transition();
+        return applyPoseTrackSmd(
+            command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
+            previous_sent_q_deg, dt_sec);
+    };
+    if (!rf.enable || !chunk_frame_receiver_ || command.mode != ControlMode::TcpPoseTarget ||
+        !command.has_tcp_target || !kinematics_) {
+        // Not in the follower regime: deactivate (drops the stale window) and run
+        // the legacy SMD path with identical semantics. Mode changes (Hold /
+        // JointTarget / InitMotion / TcpLinearMove / deadman-stale->Hold) all
+        // land here, so the follower can never outlive the streaming command.
+        transition_reason = "mode/enable";
+        follower->deactivate();
+        return smd_fallback();
+    }
+    // Re-point the follower at the active profile's params when they change.
+    // In-place (keeps the prewarmed ruckig OTG): cheap enough for the RT tick.
+    if (ruckigFollowerConfigChanged(*built_cfg, rf)) {
+        follower->reconfigure(makeChunkFollowerConfig(rf));
+        *built_cfg = rf;
+        *submitted_seq = 0;
+    }
+    // Live reference = FK of the previously SENT joints (same anchor discipline
+    // as the SMD path).
+    const Pose6D reference = kinematics_->computeTcpStand(arm_id, previous_sent_q_deg, mount);
+    if (follower->active()) {
+        const double age = follower->ageSince(ChunkFrameReceiver::steadyNowSec());
+        if (age > rf.chunk_feed_timeout_sec) {
+            // Feed-liveness watchdog: producer stalled/died. Fall back to the SMD
+            // path (which re-anchors at the live reference) until frames resume.
+            transition_reason = "feed timeout";
+            follower->deactivate();
+        } else {
+            const double pos_err = math::positionDistance(follower->lastPose(), reference);
+            const double ang_err = math::orientationDistanceRad(follower->lastPose(), reference);
+            if (pos_err > kPoseTrackReanchorPosTolM || ang_err > kPoseTrackReanchorAngTolRad) {
+                // Divergence re-anchor: the sent target drifted from the follower's
+                // plan (barrier hold / safety clamp / init-return). Drop the plan;
+                // the next frame cold-starts from the live reference.
+                transition_reason = "divergence re-anchor";
+                follower->deactivate();
+            }
+        }
+    }
+    const bool arm_present =
+        arm_id == ArmId::Left ? chunk_frame_cache_.has_left : chunk_frame_cache_.has_right;
+    if (chunk_frame_cache_seq_ != 0 && chunk_frame_cache_seq_ != *submitted_seq && arm_present) {
+        transition_reason = "chunk frame";
+        follower->submitFrame(
+            toControlChunkFrame(chunk_frame_cache_, arm_id, chunk_frame_cache_seq_), reference);
+        *submitted_seq = chunk_frame_cache_seq_;
+    }
+    if (!follower->active()) {
+        return smd_fallback();  // cold start: no frame yet -> today's behavior
+    }
+    // The follower drives; keep the SMD inactive so telemetry reads honestly and
+    // fallback re-entry re-anchors at the live pose.
+    log_transition();
+    smd_tracker->deactivate();
+    ArmCommand smoothed = command;
+    smoothed.tcp_target_stand = follower->tick(dt_sec);
+    const control::FollowerDiag& diag = follower->diag();
+    abc.follower_active = true;
+    abc.follower_seq = diag.seg_seq;
+    abc.follower_step = diag.seg_step_index;
+    abc.follower_t_in_seg_sec = follower->tInSegment();
+    abc.follower_duration_sec = diag.last_solve.duration;
+    abc.follower_alpha = diag.last_solve.alpha;
+    abc.follower_converged = diag.last_solve.converged;
+    abc.follower_stall = diag.stall;
+    abc.follower_corner = diag.last_solve.corner;
+    abc.follower_pf_stand = diag.seg_target_stand;
+    return smoothed;
 }
 
 ServoTarget DualArmServoLoop::computeServoTarget(
@@ -3708,20 +3960,32 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         // singularity_scale_*). Velocity-only — cannot stall the IK.
         left_pose_track_smd_.setMinSingular(left_last_cartesian_solve_.ik_min_singular_value);
         right_pose_track_smd_.setMinSingular(right_last_cartesian_solve_.ik_min_singular_value);
-        const ArmCommand left_pose_track_command = applyPoseTrackSmd(
+        // Ruckig chunk-follower stage: pull the newest chunk frame once per tick,
+        // then run the follower (per-profile opt-in) or the legacy SMD path.
+        // applyChunkFollowerStage falls back to applyPoseTrackSmd verbatim when
+        // the profile leaves ruckig_follower disabled, so existing profiles are
+        // byte-identical in behavior.
+        pollChunkFrames();
+        const ArmCommand left_pose_track_command = applyChunkFollowerStage(
+            ArmId::Left,
             effective_command.left,
-            left_tcp_profile.pose_track_smd,
+            left_tcp_profile,
+            &left_chunk_follower_,
+            &left_chunk_follower_built_,
+            &left_chunk_submitted_seq_,
             &left_pose_track_smd_,
-            kinematics_,
             config_.left_mount,
             left_prev_sent_q_deg_,
             dt_sec
         );
-        const ArmCommand right_pose_track_command = applyPoseTrackSmd(
+        const ArmCommand right_pose_track_command = applyChunkFollowerStage(
+            ArmId::Right,
             effective_command.right,
-            right_tcp_profile.pose_track_smd,
+            right_tcp_profile,
+            &right_chunk_follower_,
+            &right_chunk_follower_built_,
+            &right_chunk_submitted_seq_,
             &right_pose_track_smd_,
-            kinematics_,
             config_.right_mount,
             right_prev_sent_q_deg_,
             dt_sec
@@ -5363,6 +5627,21 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             set_joint_target(c.right, r);
         }
     };
+    // Arrival-decel taper endpoint: hand the SMD the TRUE final stop (terminal waypoint)
+    // for the active arm(s) while rewrite_selected feeds it the pursuit carrot as q_target.
+    // The SMD eases into this stop independently of the cruise natural frequency; a command
+    // without it (plain PTP / jog) is untouched.
+    const auto set_arrival_stop = [&](DualArmCommand& c, const InitMotionExec& ex,
+                                      const JointArray& l, const JointArray& r) {
+        if (ex.left_active || freeze_other_arm) {
+            c.left.arrival_stop_q_deg = l;
+            c.left.has_arrival_stop = true;
+        }
+        if (ex.right_active || freeze_other_arm) {
+            c.right.arrival_stop_q_deg = r;
+            c.right.has_arrival_stop = true;
+        }
+    };
     const auto hold_selected = [&](DualArmCommand& c, const InitMotionExec& ex) {
         if (ex.left_active || freeze_other_arm) {
             c.left.mode = ControlMode::Hold;
@@ -5459,9 +5738,14 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         InitMotionExec direct;
         direct.left_active = left_init;
         direct.right_active = right_init;
-        rewrite_selected(command, direct,
-                         left_init ? command.left.q_target_deg : left_prev_sent_q_deg_,
-                         right_init ? command.right.q_target_deg : right_prev_sent_q_deg_);
+        const JointArray direct_left =
+            left_init ? command.left.q_target_deg : left_prev_sent_q_deg_;
+        const JointArray direct_right =
+            right_init ? command.right.q_target_deg : right_prev_sent_q_deg_;
+        rewrite_selected(command, direct, direct_left, direct_right);
+        // No waypoints in the planner-disabled fallback: the requested pose IS the final
+        // stop, so ease into it directly (same arrival taper as the planned path).
+        set_arrival_stop(command, direct, direct_left, direct_right);
         return command;
     }
 
@@ -5790,6 +6074,10 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                     std::cerr << "[INFO] JointTarget init_motion: reached init pose\n";
                 }
                 rewrite_selected(command, ex, wp.first, wp.second);
+                if (!ex.waypoints.empty()) {
+                    const auto& stop_wp = ex.waypoints.back();
+                    set_arrival_stop(command, ex, stop_wp.first, stop_wp.second);
+                }
                 break;
             }
             case InitMotionStatus::Done: {
@@ -5799,6 +6087,7 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                     ? std::pair<JointArray, JointArray>{ex.target_left, ex.target_right}
                     : ex.waypoints.back();
                 rewrite_selected(command, ex, goal_wp.first, goal_wp.second);
+                set_arrival_stop(command, ex, goal_wp.first, goal_wp.second);
                 break;
             }
             case InitMotionStatus::Planning:

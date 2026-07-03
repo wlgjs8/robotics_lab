@@ -10,6 +10,7 @@
 #include "rb_servo/control/command_buffer.hpp"
 #include "rb_servo/control/dual_arm_servo_loop.hpp"
 #include "rb_servo/logging/servo_logger.hpp"
+#include "rb_servo/network/chunk_frame_receiver.hpp"
 #include "rb_servo/network/command_server.hpp"
 #include "rb_servo/network/scope_publisher.hpp"
 #include "rb_servo/network/state_publisher.hpp"
@@ -71,6 +72,9 @@ int main(int argc, char** argv) {
             );
         }
         rb_servo::CommandServer command_server(config.network, &command_buffer, config.cartesian_control);
+        // Dedicated chunk-frame ingest for the Ruckig chunk-follower (empty bind
+        // = disabled). Declared before the servo loop so it outlives it.
+        rb_servo::ChunkFrameReceiver chunk_frame_receiver(config.network.chunk_frame_bind);
 
         rb_servo::DualArmServoLoop servo_loop(
             std::move(left_robot),
@@ -81,6 +85,7 @@ int main(int argc, char** argv) {
             nullptr,
             scope_publisher.get()
         );
+        servo_loop.setChunkFrameReceiver(&chunk_frame_receiver);
         rb_servo::StatePublisher state_publisher(
             config,
             [&servo_loop]() {
@@ -111,8 +116,17 @@ int main(int argc, char** argv) {
             logger.stop();
             return 1;
         }
+        if (!chunk_frame_receiver.start()) {
+            std::cerr << "[ERROR] failed to start chunk frame receiver\n";
+            command_server.stop();
+            servo_loop.stop();
+            if (scope_publisher) scope_publisher->stop();
+            logger.stop();
+            return 1;
+        }
         if (!state_publisher.start()) {
             std::cerr << "[ERROR] failed to start state publisher\n";
+            chunk_frame_receiver.stop();
             command_server.stop();
             servo_loop.stop();
             if (scope_publisher) scope_publisher->stop();
@@ -126,6 +140,7 @@ int main(int argc, char** argv) {
         }
 
         state_publisher.stop();
+        chunk_frame_receiver.stop();
         command_server.stop();
         servo_loop.stop();
         if (scope_publisher) scope_publisher->stop();

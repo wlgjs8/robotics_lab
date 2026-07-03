@@ -62,6 +62,15 @@ RobotState mapRbpodoSystemStateSnapshot(
 
 std::optional<BackendError> rbpodoStateAcquisitionError(const RobotState& mapped);
 
+// Scans a CobotData receive buffer for complete frames using the SDK wire
+// framing ('$', size lo, size hi, type; total frame = size + 4 bytes — see
+// rbpodo src/cobot_data.cpp request_data()). Consumes every complete frame
+// (erasing them from buf), resyncs past garbage bytes, and returns the raw
+// bytes of the NEWEST complete type-0x03 (SystemState) frame, or nullopt if
+// none completed. A trailing partial frame is left in buf for the next drain.
+// Used by the pipelined readState() path; exposed for hardware-free tests.
+std::optional<std::string> extractNewestRbpodoStateFrame(std::string& buf);
+
 std::optional<BackendError> rbpodoMotionReadinessError(
     const BackendConfig& config,
     const RbpodoSystemStateSnapshot& snapshot,
@@ -90,6 +99,11 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+
+    // Non-blocking pipelined readState() (config.state_read_pipelined): consume
+    // the response that arrived since the previous tick, then fire this tick's
+    // request. Defined only when RB_SERVO_ENABLE_RBPODO is on.
+    BackendResult<RobotState> readStatePipelined(uint64_t start_ns);
 };
 
 }  // namespace rb_servo

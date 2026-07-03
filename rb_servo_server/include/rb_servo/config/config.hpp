@@ -59,6 +59,13 @@ struct BackendConfig {
     // rbpodo-only. When true, Cobot::disable_waiting_ack() makes command calls
     // return after socket send instead of waiting for controller ACK.
     bool disable_waiting_ack = false;
+    // rbpodo-only. When true, readState() runs a pipelined non-blocking state
+    // exchange on a dedicated CobotData connection: each servo tick consumes
+    // the response that arrived since the previous tick and fires the next
+    // request, so the RT loop never blocks on the controller round trip. State
+    // is therefore one tick (~2 ms at 500 Hz) old. Fail-closed: no frame newer
+    // than the blocking path's response timeout (0.2 s) fails the read.
+    bool state_read_pipelined = false;
     bool allow_controller_simulation_diagnostics_suspect = false;
     bool controller_simulation_treat_unreliable_status_fields_as_unavailable = false;
     // Controller-simulation (pgmode) ONLY: demote the rbpodo controller's CLEAN
@@ -590,6 +597,16 @@ struct JointTargetSmdConfig {
     double natural_frequency_hz = 0.4;
     JointArray max_velocity_deg_s{30.0, 30.0, 30.0, 45.0, 45.0, 60.0};
     JointArray max_accel_deg_s2{150.0, 150.0, 150.0, 250.0, 250.0, 350.0};
+    // Arrival-decel taper (decoupled from natural_frequency). When a command carries an
+    // explicit final stop (InitMotion pursuit), the per-step joint velocity is uniformly
+    // capped at sqrt(2*arrival_decel_deg_s2*d) — d = max per-joint distance to the stop —
+    // so the last stretch eases in gently while the snappy start/cruise (governed by
+    // natural_frequency) is unchanged. Uniform scaling preserves the straight-line joint
+    // path. Smaller arrival_decel = gentler/longer glide-in. The min-speed floor keeps the
+    // tail from crawling so it settles into waypoint_tol quickly. Disabled => no taper.
+    bool arrival_taper_enable = false;
+    double arrival_decel_deg_s2 = 200.0;
+    double arrival_min_speed_deg_s = 3.0;
 };
 
 // Collision-free JointTarget init_motion profile planner (server-side). A direct
@@ -708,6 +725,14 @@ struct ServoConfig {
     ServoIoModel io_model = ServoIoModel::Direct;
     ControlMode startup_mode = ControlMode::Hold;
     bool send_servo_commands = true;
+    // When true, the tick's servo_j dispatch happens FIRST, immediately after
+    // wake-up, sending the target computed (and safety-filtered) by the
+    // PREVIOUS tick. Wire timing then depends only on wake-up latency, not on
+    // the tick's compute time. Adds one tick (~2 ms at 500 Hz) of
+    // command-to-wire latency. The send policy (fault latch / lease /
+    // freedrive / read-only) is re-evaluated at dispatch time, so a fault
+    // latched after compute still suppresses the staged target.
+    bool send_at_tick_start = false;
     bool allow_readonly_faulted_startup = false;
     bool allow_readonly_q_range_violation_startup = false;
     bool allow_readonly_wrong_mode_startup = false;
@@ -763,6 +788,13 @@ struct NetworkConfig {
     double command_timeout_sec = 0.2;
     bool command_source_enforce_lease = false;
     double command_source_lease_timeout_sec = 1.0;
+    // Ruckig chunk-follower ingest: dedicated UDP bind for whole action-chunk
+    // frames (the producer's chunk-overlay wire format, fanned out here in
+    // addition to the GUI). DELIBERATELY separate from the lease-gated
+    // command_bind so a high-rate per-tick command stream can never starve the
+    // ~1-2 Hz chunk feed, and lease admission never drops telemetry-shaped
+    // frames. Empty = receiver disabled.
+    std::string chunk_frame_bind;
 };
 
 struct CommandSourceConfig {
@@ -872,9 +904,46 @@ struct PoseTrackSmdConfig {
     double singularity_scale_min = 1.0;
 };
 
+// Ruckig receding-horizon chunk-follower: a per-profile Cartesian smoothing
+// stage that REPLACES the pose_track_smd step while active. It consumes whole
+// measured-anchored absolute action-chunk frames (the chunk-overlay wire
+// format) from network.chunk_frame_bind, re-solves a jerk-limited BVP every
+// policy step (~33 ms) with central-difference boundary velocity/acceleration
+// (self-consistent Taylor samples of the chunk), and evaluates the trajectory
+// at each 2 ms servo tick. Falls back to pose_track_smd whenever inactive
+// (cold start, feed timeout, divergence re-anchor, non-streaming modes).
+struct RuckigFollowerConfig {
+    bool enable = false;
+    // Fixed conservative Cartesian limits (per-axis). The joint-space safety
+    // clamp downstream remains the sole hard guarantor; these caps only shape
+    // the generated reference. At 33 ms segments the JERK cap is the binding
+    // convergence budget (|dv| <= j*dt^2/4), not accel.
+    double max_linear_velocity_m_s = 0.6;
+    double max_linear_accel_m_s2 = 3.0;
+    double max_linear_jerk_m_s3 = 20.0;
+    double max_angular_velocity_rad_s = 1.5;
+    double max_angular_accel_rad_s2 = 8.0;
+    double max_angular_jerk_rad_s3 = 40.0;
+    // Chunk windowing. The producer re-anchors each chunk to the measured TCP
+    // at activation, so inference latency is already absorbed -> discard_head
+    // defaults 0 (a nonzero value would double-compensate). consume_steps is a
+    // preempt preference; the window clamps it to horizon - discard - reserve,
+    // and the follower keeps consuming into the reserve tail (decelerating into
+    // the final waypoint) when the next chunk is late, instead of stalling.
+    int discard_head_steps = 0;
+    int consume_steps = 16;
+    int reserve_steps = 1;             // central-difference lookahead (>= 1)
+    int smoothing_window = 3;          // odd; pre-difference chunk smoothing
+    double af_damping_beta = 0.85;     // feedforward accel damping (0, 1]
+    // Feed-liveness watchdog: with no fresh chunk frame for this long the
+    // follower deactivates (falls back to pose_track_smd / hold).
+    double chunk_feed_timeout_sec = 1.5;
+};
+
 struct TcpPoseTargetProfileConfig {
     std::string name = "default";
     PoseTrackSmdConfig pose_track_smd;
+    RuckigFollowerConfig ruckig_follower;
     // Server-side backlog cap for future enforcement/telemetry. A value <= 0
     // leaves clamping disabled; source-side lead clamps remain the primary
     // UMI control-quality limiter.
@@ -915,6 +984,10 @@ struct CartesianControlConfig {
         CartesianControllerSimulationStateSource::Actual;
     LinearMoveConfig linear_move;
     PoseTrackSmdConfig pose_track_smd;
+    // Base ruckig_follower defaults copied into each profile (same pattern as
+    // pose_track_smd): a profile without its own ruckig_follower block inherits
+    // this one.
+    RuckigFollowerConfig ruckig_follower;
     std::string tcp_pose_target_profile_default = "default";
     std::vector<TcpPoseTargetProfileConfig> tcp_pose_target_profiles;
 };

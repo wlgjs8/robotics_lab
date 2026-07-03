@@ -18,6 +18,7 @@ left_robot:
   servo_gain: 1.0           # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
   servo_alpha: 10.0
   disable_waiting_ack: true    # ACK-off 500Hz streaming (requires RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1)
+  state_read_pipelined: true   # non-blocking read: tick N requests, tick N+1 consumes (state ~2ms old)
 
 right_robot:
   backend_type: rbpodo
@@ -32,6 +33,7 @@ right_robot:
   servo_gain: 1.0                 # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
   servo_alpha: 10.0
   disable_waiting_ack: true    # ACK-off 500Hz streaming (requires RB_ALLOW_RBPODO_ACK_DISABLED_MOTION=1)
+  state_read_pipelined: true   # non-blocking read: tick N requests, tick N+1 consumes (state ~2ms old)
 
 left_mount:
   base_pose_in_stand: [0.15707, -0.17036, 0.58036, 2.186649, 0.523831, 2.526296]
@@ -45,9 +47,10 @@ servo:
   io_model: direct
   startup_mode: Hold
   send_servo_commands: true
+  send_at_tick_start: true   # dispatch previous tick's filtered target right after wake-up (wire jitter = wake-up latency only; +2ms command latency)
   enable_realtime_priority: true
   realtime_priority: 80
-  cpu_core: 2
+  cpu_core: 3
   filter_dt_min_ratio: 0.5
   # Final-stage joint MA: 40 ticks @500Hz = 80ms boxcar (~40ms delay).
   output_moving_average_window: 1
@@ -137,6 +140,12 @@ safety:
     natural_frequency_hz: 0.50  # InitMotion/Jog를 더 부드럽게 추종해 시작/정지 jerk 감소
     max_velocity_deg_s:  [36, 36, 36, 52, 52, 68]
     max_accel_deg_s2:    [120, 120, 120, 180, 180, 240]
+    # natural_frequency와 분리된 InitMotion 도착부 감속 테이퍼(발판 a/c). 최종 waypoint까지
+    # 남은 거리 d로 속도상한 v≤√(2·arrival_decel·d) → 마지막 구간만 완만히 안착. 상세: stack_real.yaml.
+    # sim은 fn=0.5로 자연 도착감속(≈0.368·wn·v0)이 이미 낮아 25로 더 낮춰야 체감됨.
+    arrival_taper_enable: true
+    arrival_decel_deg_s2: 25.0     # sim: 더 완만하게(느린 wn과 조합) 관찰용
+    arrival_min_speed_deg_s: 3.0
   floor_constraint:
     enable: true
     z_min_m: 0.0000
@@ -238,10 +247,11 @@ safety:
       check_intra_arm: true     # arm folding onto itself (non-adjacent links)
       max_staleness_s: 0.050
       max_near_pairs: 8
-      # 2026-06-19: 검사 스레드를 servo RT 코어(cpu_core=2)와 분리된 전용 코어에 핀.
-      # 미설정(-1) 시 OS가 코어를 떠돌아 500Hz servo 코어를 침범할 수 있음. 측정상
-      # eval ~2.4ms 평균(~417Hz)/worst 4.6ms이라 servo와 코어 공유 시 둘 다 손해.
-      monitor_core: 4
+      # 2026-07-02: OS 배정(-1)으로 전환. 이전(2026-06-19)에는 전용 코어(4)에 핀했으나
+      # (미설정 시 OS가 떠돌며 servo 코어 침범 가능이 사유), 이제 커널 isolcpus=3로
+      # servo 코어가 스케줄러 도메인에서 제외되어 OS가 collision 스레드를 cpu3에
+      # 올릴 수 없음 — tools/rt_core_isolation.sh 적용(재부팅) 후에만 -1이 안전.
+      monitor_core: -1
       # 항목 6: URDF에 없는 collision geometry(손목 카메라/케이블/작업 테이블)를
       # 추가 검사. 팔 프레임에 붙이면 그 팔로 자동 분류(좌/우), stand/world면 정적
       # 장애물로 양팔과 페어링. shape: box|sphere|capsule|cylinder.
@@ -320,6 +330,10 @@ safety:
 
 network:
   command_bind: "udp://127.0.0.1:50256"
+  # Ruckig chunk-follower ingest (parity with stack_real; follower profiles are
+  # enabled per-profile, so this alone changes nothing). 50263 belongs to the
+  # scope dashboard (servo_scope_dashboard.py DEFAULT_CHUNK_LISTEN).
+  chunk_frame_bind: "udp://127.0.0.1:50264"
   state_pub_endpoints:
     - "udp://127.0.0.1:50356"  # joint scope dashboard
     - "udp://127.0.0.1:50366"  # viser GUI

@@ -543,10 +543,21 @@ def runtime_proprio_from_state(
     return np.concatenate([left_features, right_features, arm_mask.astype(np.float32)]).astype(np.float32)
 
 
-def pose_from_state_payload(payload: dict[str, Any], side: str) -> np.ndarray:
+def pose_from_state_payload(
+    payload: dict[str, Any], side: str, source: str = "actual"
+) -> np.ndarray:
+    """Absolute stand pose7 for one arm from a servo state payload.
+
+    source="actual"  (default): measured pose, FK(q_actual) — tcp_stand.
+    source="command": commanded pose, FK(q_sent) — tcp_command_stand (falls
+    back to measured when absent). Used to anchor chunk-delta integration on
+    the command state instead of the measured state.
+    """
     if side not in {"left", "right"}:
         raise ValueError("side must be left or right")
-    return _pose_from_state_arm(payload.get(side, {}))
+    if source not in {"actual", "command"}:
+        raise ValueError("source must be actual or command")
+    return _pose_from_state_arm(payload.get(side, {}), source)
 
 
 def normalize_runtime_proprio(proprio: np.ndarray, stats: dict[str, Any]) -> np.ndarray:
@@ -1162,9 +1173,15 @@ def _has_nonzero_pose(values: np.ndarray) -> bool:
     return bool(np.isfinite(values).all() and np.any(np.abs(values[:, :3]) > 1e-9))
 
 
-def _pose_from_state_arm(value: Any) -> np.ndarray:
+def _pose_from_state_arm(value: Any, source: str = "actual") -> np.ndarray:
     arm = value if isinstance(value, dict) else {}
-    pose = arm.get("tcp_stand") or arm.get("tcp_actual_stand") or {}
+    if source == "command":
+        # FK of the joints the server actually SENT (q_sent). Falls back to the
+        # measured pose when the command pose is absent (e.g. before the first
+        # send), so callers degrade to the legacy behavior instead of zeros.
+        pose = arm.get("tcp_command_stand") or arm.get("tcp_stand") or arm.get("tcp_actual_stand") or {}
+    else:
+        pose = arm.get("tcp_stand") or arm.get("tcp_actual_stand") or {}
     if not isinstance(pose, dict):
         out = np.zeros(7, dtype=np.float32)
         out[6] = 1.0

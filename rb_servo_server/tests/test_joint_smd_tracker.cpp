@@ -118,6 +118,113 @@ bool testStraightLinePathWhenUnclamped() {
     return true;
 }
 
+JointTargetSmdConfig taperConfig(double arrival_decel) {
+    JointTargetSmdConfig cfg = defaultSmdConfig();
+    cfg.arrival_taper_enable = true;
+    cfg.arrival_decel_deg_s2 = arrival_decel;
+    cfg.arrival_min_speed_deg_s = 3.0;
+    return cfg;
+}
+
+// The arrival taper must decouple the final deceleration from the cruise: the peak
+// braking near the stop is far gentler (~arrival_decel) than the SMD's natural
+// velocity-clamped braking, while the peak (cruise) velocity is untouched and the
+// tracker still settles exactly on the stop.
+bool testArrivalTaperGentlerButPreservesCruiseAndSettles() {
+    JointArray stop{};
+    stop[0] = 120.0;  // large single-joint move -> cruises at the velocity clamp
+    const auto run = [&](const JointTargetSmdConfig& cfg, bool with_stop,
+                         double& max_vel, double& max_decel, JointArray& last) {
+        JointSmdTracker smd(cfg);
+        smd.reset(JointArray{}, JointArray{});
+        smd.setGoal(stop);
+        if (with_stop) smd.setArrivalStop(stop);
+        double prev_dq = 0.0;
+        JointArray prev{};
+        max_vel = 0.0;
+        max_decel = 0.0;
+        for (int t = 0; t < 10000; ++t) {
+            const JointArray q = smd.step(kDt);
+            const double dq = (q[0] - prev[0]) / kDt;
+            const double ddq = (dq - prev_dq) / kDt;
+            max_vel = std::max(max_vel, std::abs(dq));
+            max_decel = std::max(max_decel, -ddq);  // most-negative accel = hardest braking
+            prev_dq = dq;
+            prev = q;
+        }
+        last = prev;
+    };
+    double vel_base = 0.0, decel_base = 0.0;
+    JointArray last_base{};
+    run(defaultSmdConfig(), false, vel_base, decel_base, last_base);
+    // The SMD's natural braking peak is ~0.368*wn*v0 (here ~27.7 deg/s^2 at fn=0.4,
+    // v0=30), NOT the accel clamp. Pick an arrival_decel well below it so the taper is
+    // demonstrably gentler; the taper region then brakes at a constant ~arrival_decel.
+    const double arrival_decel = 12.0;
+    double vel_taper = 0.0, decel_taper = 0.0;
+    JointArray last_taper{};
+    run(taperConfig(arrival_decel), true, vel_taper, decel_taper, last_taper);
+
+    RB_CHECK(std::abs(vel_taper - vel_base) < 1e-6);       // start/cruise unchanged
+    RB_CHECK(decel_taper < 0.6 * decel_base);              // arrival meaningfully gentler
+    RB_CHECK(decel_taper < arrival_decel + 8.0);           // braking bounded near arrival_decel
+    RB_CHECK(std::abs(last_taper[0] - stop[0]) < 0.05);    // still settles on the stop
+    return true;
+}
+
+// Uniform velocity scaling means a multi-joint tapered move keeps its straight
+// joint-space line all the way into the stop (same invariant as the unclamped SMD).
+bool testArrivalTaperPreservesStraightLine() {
+    JointTargetSmdConfig cfg = taperConfig(80.0);
+    cfg.max_velocity_deg_s = {1e6, 1e6, 1e6, 1e6, 1e6, 1e6};
+    cfg.max_accel_deg_s2 = {1e9, 1e9, 1e9, 1e9, 1e9, 1e9};
+    JointSmdTracker smd(cfg);
+    smd.reset(JointArray{}, JointArray{});
+    JointArray goal{10.0, -20.0, 40.0, -80.0, 5.0, -2.5};
+    smd.setGoal(goal);
+    smd.setArrivalStop(goal);
+    for (int tick = 0; tick < 2000; ++tick) {
+        const JointArray q = smd.step(kDt);
+        const double f0 = q[0] / goal[0];
+        for (int i = 1; i < kDof; ++i) {
+            RB_CHECK(std::abs(q[i] / goal[i] - f0) < 1e-9);
+        }
+    }
+    return true;
+}
+
+// The taper is inert unless BOTH the config enables it AND a stop is latched: taper
+// enabled with no stop, and a stop with taper disabled, must both match the plain SMD.
+bool testArrivalTaperInertWhenNoStopOrDisabled() {
+    JointArray goal{};
+    goal[0] = 120.0;
+    JointArray ref{};
+    {
+        JointSmdTracker smd(defaultSmdConfig());
+        smd.reset(JointArray{}, JointArray{});
+        smd.setGoal(goal);
+        for (int t = 0; t < 3000; ++t) ref = smd.step(kDt);
+    }
+    {  // taper enabled, but no arrival stop latched
+        JointSmdTracker smd(taperConfig(50.0));
+        smd.reset(JointArray{}, JointArray{});
+        smd.setGoal(goal);
+        JointArray q{};
+        for (int t = 0; t < 3000; ++t) q = smd.step(kDt);
+        for (int i = 0; i < kDof; ++i) RB_CHECK(std::abs(q[i] - ref[i]) < 1e-9);
+    }
+    {  // stop latched, but taper disabled in config
+        JointSmdTracker smd(defaultSmdConfig());
+        smd.reset(JointArray{}, JointArray{});
+        smd.setGoal(goal);
+        smd.setArrivalStop(goal);
+        JointArray q{};
+        for (int t = 0; t < 3000; ++t) q = smd.step(kDt);
+        for (int i = 0; i < kDof; ++i) RB_CHECK(std::abs(q[i] - ref[i]) < 1e-9);
+    }
+    return true;
+}
+
 ArmCommand jointTargetCommand(const JointArray& q) {
     ArmCommand cmd;
     cmd.mode = ControlMode::JointTarget;
@@ -279,6 +386,9 @@ int main() {
     if (!testVelocityAndAccelClamps()) return 1;
     if (!testResetClampsInitialVelocity()) return 1;
     if (!testStraightLinePathWhenUnclamped()) return 1;
+    if (!testArrivalTaperGentlerButPreservesCruiseAndSettles()) return 1;
+    if (!testArrivalTaperPreservesStraightLine()) return 1;
+    if (!testArrivalTaperInertWhenNoStopOrDisabled()) return 1;
     if (!testTrajectoryFilterDisabledKeepsLegacyRamp()) return 1;
     if (!testTrajectoryFilterSmdProfile()) return 1;
     if (!testTrajectoryFilterRebaselinesAfterExternalMove()) return 1;

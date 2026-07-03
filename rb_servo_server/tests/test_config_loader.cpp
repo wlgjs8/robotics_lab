@@ -113,9 +113,11 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(stack_real.left_robot.disable_waiting_ack);
         RB_CHECK(stack_real.right_robot.disable_waiting_ack);
         RB_CHECK(near(stack_real.safety.q_min_deg[0], -360.0));
-        // J3 (elbow) is clamped to the RB3-730E physical +/-150 deg, not +/-360.
-        RB_CHECK(near(stack_real.safety.q_min_deg[2], -150.0));
-        RB_CHECK(near(stack_real.safety.q_max_deg[2], 150.0));
+        // J3 (elbow) is clamped near the RB3-730E physical range, not +/-360.
+        // Site-raised from the +/-150 catalog value to +/-160 (2026-07 stack
+        // config safety-margin adjustment).
+        RB_CHECK(near(stack_real.safety.q_min_deg[2], -160.0));
+        RB_CHECK(near(stack_real.safety.q_max_deg[2], 160.0));
         RB_CHECK(stack_real.network.command_bind == "udp://127.0.0.1:50256");
         RB_CHECK(stack_real.network.state_pub_endpoint == "udp://127.0.0.1:50356");
         RB_CHECK(stack_real.network.state_pub_endpoints.size() == 5);
@@ -166,7 +168,9 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(real_mesh.intra_arm.a_brake_m_s2, 3.0));
         RB_CHECK(near(real_mesh.external_boxes.margin_m[0], 0.0));
         RB_CHECK(near(real_mesh.external_boxes.margin_m[1], 0.0));
-        RB_CHECK(near(real_mesh.external_boxes.margin_m[2], 0.040));
+        // Height margin site-lowered 0.040 -> 0.020 (2026-07 barrier tuning:
+        // 20mm height + 5mm d_hard = ~25mm top/bottom keep-out).
+        RB_CHECK(near(real_mesh.external_boxes.margin_m[2], 0.020));
         RB_CHECK(real_mesh.intra_arm_min_chain_separation == 2);
         RB_CHECK(hasPairRule(real_mesh.disabled_collision_pairs,
                              "*left*link4*", "*left*link6*"));
@@ -206,11 +210,16 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(stack_sim.left_robot.servo_alpha, 10.0));
         RB_CHECK(stack_sim.left_robot.disable_waiting_ack);
         RB_CHECK(stack_sim.right_robot.disable_waiting_ack);
+        RB_CHECK(stack_sim.left_robot.state_read_pipelined);
+        RB_CHECK(stack_sim.right_robot.state_read_pipelined);
+        RB_CHECK(stack_sim.servo.send_at_tick_start);
         RB_CHECK(!stack_sim.servo.rbpodo_async_streaming.enable);
         RB_CHECK(near(stack_sim.safety.q_min_deg[0], -360.0));
-        // J3 (elbow) is clamped to the RB3-730E physical +/-150 deg, not +/-360.
-        RB_CHECK(near(stack_sim.safety.q_min_deg[2], -150.0));
-        RB_CHECK(near(stack_sim.safety.q_max_deg[2], 150.0));
+        // J3 (elbow) is clamped near the RB3-730E physical range, not +/-360.
+        // Site-raised from the +/-150 catalog value to +/-160 (2026-07 stack
+        // config safety-margin adjustment).
+        RB_CHECK(near(stack_sim.safety.q_min_deg[2], -160.0));
+        RB_CHECK(near(stack_sim.safety.q_max_deg[2], 160.0));
         RB_CHECK(stack_sim.safety.controller_simulation_tracking_error_source ==
                  rb_servo::ControllerSimulationTrackingErrorSource::Reference);
         RB_CHECK(stack_sim.safety.controller_simulation_tracking_error_nonlatching);

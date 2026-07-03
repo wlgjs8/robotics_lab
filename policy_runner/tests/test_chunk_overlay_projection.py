@@ -78,6 +78,82 @@ class ChunkOverlayProjectionTest(unittest.TestCase):
         self.assertEqual(packet["left"][0][7], 70.0)
         self.assertEqual(packet["left"][1][7], 60.0)
 
+    def test_publish_chunk_overlay_chain_anchor_continues_from_prev_tail(self) -> None:
+        assert np is not None
+        source = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
+        publisher = RecordingPublisher()
+        source._chunk_overlay_publisher = publisher
+        source._chunk_overlay_seq = 0
+        source.policy_dt_sec = 0.05
+        source.chunk_execute_steps = 2
+        source.max_linear_velocity_m_s = 1.0
+        source.max_angular_velocity_rad_s = 1.0
+        source.arm_mask = np.asarray([1.0, 0.0], dtype=np.float32)
+        source._chunk_crossfade_steps = 0
+        source._steps_since_boundary = 0
+        source._prev_emitted_twist_by_arm = {"left": None, "right": None}
+        source.chunk_anchor_source = "chain"
+        payload = {
+            "left": {"tcp_stand": {"x": 0.40, "y": -0.20, "z": 0.30, "quaternion_xyzw": [0, 0, 0, 1]}},
+            "right": {"tcp_stand": {"x": 0.0, "y": 0.0, "z": 0.0, "quaternion_xyzw": [0, 0, 0, 1]}},
+        }
+        source._last_overlay_payload = payload
+
+        chunk1 = np.zeros((2, 14), dtype=np.float64)
+        chunk1[0, 0] = 0.01
+        chunk1[1, 1] = 0.02
+        source._chunk = chunk1
+        source._publish_chunk_overlay(1.0)
+        first_tail = np.asarray(publisher.calls[0]["left"][-1][:7], dtype=np.float64)
+
+        # re-publishing the SAME chunk must not advance the chain (idempotent)
+        source._publish_chunk_overlay(1.5)
+        np.testing.assert_allclose(
+            np.asarray(publisher.calls[1]["left"][0][:7]),
+            np.asarray(publisher.calls[0]["left"][0][:7]),
+            atol=1e-9,
+        )
+
+        # activating the NEXT chunk promotes the tail: chunk2 anchors on it, NOT
+        # on the (unchanged) measured payload pose
+        chunk2 = np.zeros((2, 14), dtype=np.float64)
+        chunk2[0, 2] = 0.03
+        source._overlay_chain_advance()
+        source._chunk = chunk2
+        source._publish_chunk_overlay(2.0)
+        expected0 = pose_compose_local(first_tail, np.asarray([0.0, 0.0, 0.03, 0.0, 0.0, 0.0]))
+        np.testing.assert_allclose(
+            np.asarray(publisher.calls[2]["left"][0][:7]), expected0[:7], atol=1e-7
+        )
+
+    def test_arm_init_reanchor_resets_chain_for_that_arm_only(self) -> None:
+        assert np is not None
+        from types import SimpleNamespace
+
+        source = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
+        source._target_pose_by_arm = {"left": None, "right": None}
+        source._gripper_targets_by_arm = {"left": 40.0, "right": 50.0}
+        source._tcp_tp_conditioners = None
+        left_tail = np.asarray([0.1, 0.2, 0.3, 0, 0, 0, 1.0])
+        right_tail = np.asarray([0.4, 0.5, 0.6, 0, 0, 0, 1.0])
+        source._overlay_chain_prev = {"left": left_tail, "right": right_tail}
+        source._overlay_chain_pending = {"left": left_tail.copy(), "right": right_tail.copy()}
+        rtc_reset = {"called": False}
+        source.reset_rtc = lambda: rtc_reset.__setitem__("called", True)
+        snapshot = SimpleNamespace(payload={
+            "left": {"tcp_stand": {"x": 0.7, "y": 0.0, "z": 0.2, "quaternion_xyzw": [0, 0, 0, 1]}},
+            "right": {"tcp_stand": {"x": -0.7, "y": 0.0, "z": 0.2, "quaternion_xyzw": [0, 0, 0, 1]}},
+        })
+
+        after = source._reanchor_arms_to_snapshot(("left",), snapshot)
+
+        self.assertIsNotNone(after["left"])
+        self.assertIsNone(source._overlay_chain_prev["left"])       # init arm: chain dropped
+        self.assertIsNone(source._overlay_chain_pending["left"])
+        self.assertIsNotNone(source._overlay_chain_prev["right"])   # other arm: chain kept
+        np.testing.assert_allclose(source._overlay_chain_prev["right"], right_tail)
+        self.assertTrue(rtc_reset["called"])                          # RTC prev cold-started
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -128,5 +128,83 @@ class VelocityProprioTest(unittest.TestCase):
         np.testing.assert_allclose(out[6:9], [0.0, 0.0, -1.0], atol=1e-6)
 
 
+@unittest.skipIf(OpenpiRemoteActionSource is None, "torch is not installed")
+class VelocityProprioFixedStepTest(unittest.TestCase):
+    """velproprio_sample_mode='fixed_step': velocity from a fixed ~policy_dt window taken from
+    the per-tick pose history, decoupled from replan cadence / inference latency."""
+
+    def _make_source(self, *, proprio_mode: str = "velocity", policy_dt: float = 1.0 / 30.0):
+        from collections import deque
+
+        src = OpenpiRemoteActionSource.__new__(OpenpiRemoteActionSource)
+        src.proprio_mode = proprio_mode
+        src._state_dim = {"velocity": 12, "velocity_grav": 20}.get(proprio_mode, 14)
+        src.ee_local_r_align = resolve_ee_local_r_align(None)
+        src.policy_dt_sec = policy_dt
+        src.velproprio_sample_mode = "fixed_step"
+        src._pose_history = {"left": deque(maxlen=512), "right": deque(maxlen=512)}
+        src._last_now_monotonic = None
+        src._vel_prev_pose_by_arm = {"left": None, "right": None}
+        src._vel_prev_sample_t = None
+        src._live_gripper_percent = lambda side: None
+        return src
+
+    def _push(self, src, side, t, pose):
+        src._pose_history[side].append((float(t), np.asarray(pose, dtype=np.float64)))
+
+    def test_translation_from_fixed_window(self) -> None:
+        src = self._make_source()
+        dt = src.policy_dt_sec
+        cur = [0.01, 0.02, 0.03, 0, 0, 0, 1]
+        # prev sample exactly one policy step old; current tick recorded at t=dt.
+        self._push(src, "left", 0.0, _IDENT)
+        self._push(src, "right", 0.0, _IDENT)
+        self._push(src, "left", dt, cur)
+        self._push(src, "right", dt, _IDENT)
+        src._last_now_monotonic = dt
+        out = src._proprio_state(_payload(cur, _IDENT))
+        # window == policy_dt -> scale 1 -> raw ee_local delta; right arm static.
+        np.testing.assert_allclose(out[:6], [0.01, 0.02, 0.03, 0, 0, 0], atol=1e-6)
+        np.testing.assert_allclose(out[6:], np.zeros(6), atol=1e-6)
+
+    def test_cold_start_is_zero(self) -> None:
+        # Only the current tick in history -> buffer does not span a full policy step -> vel 0.
+        src = self._make_source()
+        cur = [0.05, 0.0, 0.0, 0, 0, 0, 1]
+        self._push(src, "left", 0.0, cur)
+        self._push(src, "right", 0.0, _IDENT)
+        src._last_now_monotonic = 0.0
+        out = src._proprio_state(_payload(cur, _IDENT))
+        np.testing.assert_allclose(out, np.zeros(12), atol=1e-7)
+
+    def test_window_normalized_to_one_policy_step(self) -> None:
+        # prev sample 2*policy_dt old -> actual window 2*dt -> scale 0.5 halves the raw delta,
+        # so the reported magnitude is per-policy-step regardless of the actual sample spacing.
+        src = self._make_source()
+        dt = src.policy_dt_sec
+        self._push(src, "left", 0.0, _IDENT)
+        self._push(src, "right", 0.0, _IDENT)
+        src._last_now_monotonic = 2.0 * dt
+        cur = [0.02, 0.0, 0.0, 0, 0, 0, 1]
+        out = src._proprio_state(_payload(cur, _IDENT))
+        np.testing.assert_allclose(out[:3], [0.01, 0.0, 0.0], atol=1e-6)
+
+    def test_independent_of_inference_latency(self) -> None:
+        # The SAME measured window must yield the SAME velocity no matter how much wall-clock
+        # elapsed at the replan (the replan path would shrink it via policy_dt/wall_dt). Here the
+        # current tick lands far in wall-time but the fixed window is anchored to `now`.
+        src = self._make_source()
+        dt = src.policy_dt_sec
+        cur = [0.0, 0.008, 0.0, 0, 0, 0, 1]
+        # A long idle gap then two samples one step apart around `now` = 5.0.
+        self._push(src, "left", 5.0 - dt, _IDENT)
+        self._push(src, "right", 5.0 - dt, _IDENT)
+        self._push(src, "left", 5.0, cur)
+        self._push(src, "right", 5.0, _IDENT)
+        src._last_now_monotonic = 5.0
+        out = src._proprio_state(_payload(cur, _IDENT))
+        np.testing.assert_allclose(out[:6], [0.0, 0.008, 0.0, 0, 0, 0], atol=1e-6)
+
+
 if __name__ == "__main__":
     unittest.main()

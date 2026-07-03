@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from collections import deque
 from dataclasses import replace
 from typing import Any, TextIO
 
@@ -45,6 +46,7 @@ from .flow_inference import (
     DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S,
     FLOW_COMMAND_LABEL,
     FlowMatchingActionSource,
+    _env_truthy,
     _gripper_value_from_payload,
     _open_action_log,
     resolve_ee_local_r_align,
@@ -241,6 +243,32 @@ def _gripper_from_arm_payload(value: Any) -> float:
     return 0.0
 
 
+def rtc_shift_prev_chunk(raw_chunk, execute_steps):
+    """Advance the cached raw chunk by the steps that will have EXECUTED when the
+    next chunk takes over (paper/Kinetix caller-side roll, missing from the port).
+
+    The freeze/guidance must reference the previous plan's UNEXECUTED tail:
+    new[0:d] is pinned to prev_shifted[0:d] = raw[execute : execute+d]. Without
+    this shift the freeze pins to raw[0:d] — actions already executed one window
+    ago — replaying ~d steps at every boundary. The zero-pad tail is never
+    referenced: get_prefix_weights() is exactly 0 for index >= H - execute.
+    """
+    import numpy as _np
+
+    raw = _np.asarray(raw_chunk, dtype=_np.float32)
+    steps = int(max(0, min(int(execute_steps), raw.shape[0])))
+    if steps == 0:
+        return raw
+    pad = _np.zeros((steps, raw.shape[1]), dtype=raw.dtype)
+    return _np.concatenate([raw[steps:], pad], axis=0)
+
+
+# Fixed-rate velocity-proprio pose history: one (t, pose7) per control tick per arm.
+# ~512 samples covers >1 s at any realistic control rate — only the last ~policy_dt
+# window is read, so this is a cheap bounded ring.
+_VELPROPRIO_HISTORY_MAXLEN = 512
+
+
 class OpenpiRemoteActionSource(FlowMatchingActionSource):
     """flow-infer action source backed by a remote openpi policy server."""
 
@@ -264,6 +292,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         gripper_runtime: GripperRuntime | None = None,
         ee_local_r_align: Any = None,
         proprio_mode: str = "pose",
+        velproprio_sample_mode: str = "replan",
         prompt: str = OPENPI_DEFAULT_PROMPT,
         action_horizon: int | None = None,
         camera_names: tuple[str, str] = ("left_realsense_color", "right_realsense_color"),
@@ -312,7 +341,11 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self.gripper_action_absolute = True
         # Close-bias (percent subtracted from the absolute opening target so a
         # marginal grasp clamps); main.py overrides from --gripper-close-bias.
+        # Shared base + per-arm overrides (None -> use base). main.py resolves the
+        # per-arm values from --gripper-close-bias-left/right (defaults 2.0/6.0).
         self.gripper_close_bias = 0.0
+        self.gripper_close_bias_left = None
+        self.gripper_close_bias_right = None
         # BINARY gripper (binarized open/close checkpoints, e.g. openpi `binary 25`):
         # threshold the model's bimodal gripper output and snap to the open/close
         # presets. A flavour of the absolute path. main.py overrides these from
@@ -349,10 +382,32 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             )
         self.proprio_mode = str(proprio_mode)
         self._state_dim = {"velocity": 12, "velocity_grav": 20}.get(self.proprio_mode, 14)
+        # How the velocity-proprio finite-difference window is chosen:
+        #   replan     (default): difference the TCP pose between successive proprio SAMPLES
+        #              (chunk-replan boundaries) and rescale the multi-step displacement to one
+        #              policy step via policy_dt/wall_dt (clamped <=1). Simple, but the window
+        #              length AND the wall-clock (which includes inference latency / SEQUENTIAL
+        #              holds) both depend on the controller/pipeline timing, so a slower or
+        #              burstier controller reports a SMALLER velocity than training saw.
+        #   fixed_step: difference the MEASURED pose between two samples exactly ~policy_dt apart
+        #              taken from a per-tick pose history (see _record_pose_history), independent
+        #              of replan cadence and inference latency. Reproduces the training converter's
+        #              single 30 Hz frame delta (openpi _arm_velocity) regardless of the controller.
+        if str(velproprio_sample_mode) not in ("replan", "fixed_step"):
+            raise ValueError(
+                f"velproprio_sample_mode must be 'replan' or 'fixed_step', got {velproprio_sample_mode!r}"
+            )
+        self.velproprio_sample_mode = str(velproprio_sample_mode)
         # Velocity-proprio finite-difference memory (per arm): the previous proprio-sample TCP pose
         # and the wall-clock of that sample (to rescale a multi-step displacement to one policy step).
         self._vel_prev_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._vel_prev_sample_t: float | None = None
+        # Per-tick measured-pose history for velproprio_sample_mode='fixed_step': (t_monotonic, pose7).
+        self._pose_history: dict[str, deque] = {
+            "left": deque(maxlen=_VELPROPRIO_HISTORY_MAXLEN),
+            "right": deque(maxlen=_VELPROPRIO_HISTORY_MAXLEN),
+        }
+        self._last_now_monotonic: float | None = None
         self.command_family = FLOW_COMMAND_LABEL
         # Fake-image smoke mode runs camera-less so the runtime does not gate on frames.
         self.camera_names = [] if self._fake_images else [str(name) for name in camera_names]
@@ -468,6 +523,20 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # via RB_GUI_CHUNK_OVERLAY_ENDPOINT; telemetry-only, best-effort UDP.
         self._last_overlay_payload = None
         self._chunk_overlay_seq = 0
+        # Terminal chunk dump (debug). This class skips super().__init__, so the
+        # attributes the inherited _print_chunk_steps reads must be set here or the
+        # dump silently no-ops for openpi-remote rollouts. Gated on
+        # FLOW_INFER_PRINT_CHUNK; prints each fresh chunk step-by-step for both arms
+        # (position deltas in meters, rotation deltas in degrees).
+        self._print_chunk_enabled = _env_truthy(os.environ.get("FLOW_INFER_PRINT_CHUNK"))
+        self._print_chunk_seq = 0
+        # Per-step chunk-vs-actual tracking dump (FLOW_INFER_PRINT_TRACKING). This
+        # class skips super().__init__, so the state the inherited _begin/_log_chunk
+        # _tracking helpers touch must be seeded here too.
+        self._print_tracking_enabled = _env_truthy(os.environ.get("FLOW_INFER_PRINT_TRACKING"))
+        self._trk_predicted = {"left": None, "right": None}
+        self._trk_prev_measured = {"left": None, "right": None}
+        self._trk_start_monotonic = 0.0
         self._chunk_overlay_publisher = None
         _overlay_endpoint = os.environ.get("RB_GUI_CHUNK_OVERLAY_ENDPOINT")
         if _overlay_endpoint and _overlay_endpoint.strip():
@@ -523,6 +592,18 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             file=self.stderr,
             flush=True,
         )
+        if self.proprio_mode != "pose":
+            print(
+                f"[flow-infer] velproprio_sample_mode={self.velproprio_sample_mode}"
+                + (
+                    " -- velocity from a fixed ~policy_dt window (per-tick pose history); "
+                    "decoupled from replan cadence + inference latency"
+                    if self.velproprio_sample_mode == "fixed_step"
+                    else " -- velocity from successive replan-boundary samples, rescaled by policy_dt/wall_dt"
+                ),
+                file=self.stderr,
+                flush=True,
+            )
         self._logged_wrist_shape = False
 
         # The server's first inference triggers torch compile/kernel autotune and can
@@ -618,38 +699,46 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         out[3:6] = out[3:6] @ angular.T
         return out
 
-    def _proprio_state_velocity(self, payload: dict[str, Any]) -> np.ndarray:
-        """ee_local VELOCITY proprio (--state-mode velocity / velocity_grip / velocity_grav).
+    def next_intent(self, snapshot, now_monotonic):  # type: ignore[override]
+        # Record the measured pose every control tick so velproprio_sample_mode='fixed_step'
+        # can finite-difference over a fixed ~policy_dt window, independent of replan cadence
+        # and inference latency. Cheap bounded ring; only the last policy_dt is ever read.
+        self._last_now_monotonic = now_monotonic
+        if getattr(self, "velproprio_sample_mode", "replan") == "fixed_step" and self.proprio_mode != "pose":
+            self._record_pose_history(getattr(snapshot, "payload", None), now_monotonic)
+        return super().next_intent(snapshot, now_monotonic)
 
-        Per arm the proprio is the INCOMING per-step motion in the previous body
-        frame -- pos_vel(3), rot_vel(3) [, grip] -- the exact quantity the training
-        converter bakes (openpi `_arm_velocity`: cur^-1 . (p_next - p_cur),
-        cur^-1 . R_next). Because it is a body-frame delta it is W-invariant AND
-        init-pose-INDEPENDENT (no per-episode reset anchor), the whole point of the
-        velproprio variant over reset-relative pose.
+    def _record_pose_history(self, payload, now_monotonic) -> None:
+        if payload is None or now_monotonic is None:
+            return
+        for side in ("left", "right"):
+            try:
+                pose = np.asarray(pose_from_state_payload(payload, side), dtype=np.float64)
+            except Exception:  # noqa: BLE001 - a malformed/partial payload just skips this tick
+                continue
+            self._pose_history[side].append((float(now_monotonic), pose))
 
-        Cadence note: proprio is sampled at chunk-replan boundaries, not every
-        policy step, so the raw pose difference spans `chunk_execute_steps` steps.
-        We rescale it to ONE policy step (policy_dt / wall_dt, clamped <=1) so the
-        magnitude matches the training per-frame delta the server's norm-stats
-        expect. Exact when --chunk-execute-steps is 1; a close approximation for a
-        few steps (the body frame barely rotates over ~0.1 s). The first sample of
-        a rollout (and after reset_rtc) has no previous pose -> velocity 0 (matches
-        the converter's vel[0]=0 / segment-start zeroing)."""
+    def _arm_body_velocities(self, payload: dict[str, Any]) -> dict[str, np.ndarray]:
+        """Per-arm ee_local body velocity (pos_vel3, rot_vel3) in the TCP frame, normalized to
+        one policy step. Dispatches on velproprio_sample_mode; defaults to 'replan' for sources
+        constructed without the flag (e.g. legacy __new__-based tests)."""
+        if getattr(self, "velproprio_sample_mode", "replan") == "fixed_step":
+            return self._arm_body_velocities_fixed_step(payload)
+        return self._arm_body_velocities_replan(payload)
+
+    def _arm_body_velocities_replan(self, payload: dict[str, Any]) -> dict[str, np.ndarray]:
+        """Legacy: difference the TCP pose between successive proprio SAMPLES (replan
+        boundaries) and rescale the multi-step displacement to one policy step via
+        policy_dt/wall_dt (clamped <=1, never amplify)."""
+        from scipy.spatial.transform import Rotation
+
         now = time.perf_counter()
         wall_dt = (now - self._vel_prev_sample_t) if self._vel_prev_sample_t is not None else None
         self._vel_prev_sample_t = now
-        # Rescale the multi-step displacement down to one policy step. Never amplify
-        # (clamp <=1); a long stall (wall_dt large) -> ~0 velocity (stale, report rest).
         scale = 1.0
         if wall_dt is not None and wall_dt > 1e-6:
             scale = float(np.clip(float(self.policy_dt_sec) / wall_dt, 0.0, 1.0))
-
-        from scipy.spatial.transform import Rotation
-
-        include_grip = self.proprio_mode in ("velocity_grip", "velocity_grav")
-        include_grav = self.proprio_mode == "velocity_grav"
-        features: list[np.ndarray] = []
+        out: dict[str, np.ndarray] = {}
         for side in ("left", "right"):
             pose = np.asarray(pose_from_state_payload(payload, side), dtype=np.float64)
             prev = self._vel_prev_pose_by_arm[side]
@@ -661,6 +750,75 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 rot_vel = (r_prev.inv() * Rotation.from_quat(pose[3:7])).as_rotvec() * scale
                 vel = np.concatenate([pos_vel, rot_vel])
             self._vel_prev_pose_by_arm[side] = pose.copy()
+            out[side] = vel
+        return out
+
+    def _arm_body_velocities_fixed_step(self, payload: dict[str, Any]) -> dict[str, np.ndarray]:
+        """Controller-independent velocity: difference the CURRENT measured pose against the
+        measured pose ~policy_dt earlier, pulled from the per-tick history. The window is real
+        MOTION time (two measured samples one step apart), so it is unaffected by inference
+        latency / SEQUENTIAL holds; the tiny window/policy_dt mismatch is normalized out. Until
+        the history spans a full policy step (rollout start / after reset) -> velocity 0."""
+        from scipy.spatial.transform import Rotation
+
+        now = self._last_now_monotonic
+        out: dict[str, np.ndarray] = {}
+        for side in ("left", "right"):
+            cur = np.asarray(pose_from_state_payload(payload, side), dtype=np.float64)
+            prev, dt = self._velproprio_lookback(side, now)
+            if prev is None or dt is None:
+                out[side] = np.zeros(6, dtype=np.float64)
+                continue
+            # Normalize the ~one-step window to exactly one policy step. dt ~= policy_dt so the
+            # ratio ~1; the clamp only guards a sparse buffer (never the latency blow-up the
+            # replan path suffers, because dt here is measured motion time, not wall-clock).
+            scale = float(np.clip(float(self.policy_dt_sec) / dt, 0.25, 4.0))
+            r_prev = Rotation.from_quat(prev[3:7])
+            pos_vel = r_prev.inv().apply(cur[:3] - prev[:3]) * scale
+            rot_vel = (r_prev.inv() * Rotation.from_quat(cur[3:7])).as_rotvec() * scale
+            out[side] = np.concatenate([pos_vel, rot_vel])
+        return out
+
+    def _velproprio_lookback(self, side: str, now: float | None):
+        """Newest history sample at least policy_dt older than `now` -> (pose7, dt). Returns
+        (None, None) until the buffer spans a full policy step (-> cold-start velocity 0)."""
+        hist = self._pose_history.get(side)
+        if not hist or now is None:
+            return None, None
+        target = float(now) - float(self.policy_dt_sec)
+        for t, pose in reversed(hist):
+            if t <= target:
+                dt = float(now) - float(t)
+                return (pose, dt) if dt > 1e-6 else (None, None)
+        return None, None
+
+    def _proprio_state_velocity(self, payload: dict[str, Any]) -> np.ndarray:
+        """ee_local VELOCITY proprio (--state-mode velocity / velocity_grip / velocity_grav).
+
+        Per arm the proprio is the INCOMING per-step motion in the previous body
+        frame -- pos_vel(3), rot_vel(3) [, grip] -- the exact quantity the training
+        converter bakes (openpi `_arm_velocity`: cur^-1 . (p_next - p_cur),
+        cur^-1 . R_next). Because it is a body-frame delta it is W-invariant AND
+        init-pose-INDEPENDENT (no per-episode reset anchor), the whole point of the
+        velproprio variant over reset-relative pose.
+
+        Cadence note: velproprio_sample_mode selects HOW the finite-difference
+        window is chosen (see _arm_body_velocities): 'replan' differences successive
+        replan-boundary samples and rescales by policy_dt/wall_dt (controller/latency
+        dependent); 'fixed_step' differences the measured pose over a fixed ~policy_dt
+        window from the per-tick history (controller-independent, matches the training
+        per-frame delta). The first sample of a rollout (and after reset_rtc) has no
+        previous pose -> velocity 0 (matches the converter's vel[0]=0 / segment-start
+        zeroing)."""
+        from scipy.spatial.transform import Rotation
+
+        include_grip = self.proprio_mode in ("velocity_grip", "velocity_grav")
+        include_grav = self.proprio_mode == "velocity_grav"
+        vel_by_side = self._arm_body_velocities(payload)
+        features: list[np.ndarray] = []
+        for side in ("left", "right"):
+            pose = np.asarray(pose_from_state_payload(payload, side), dtype=np.float64)
+            vel = vel_by_side[side]
             if self.ee_local_r_align is not None:
                 # Body deltas are in the RB TCP frame; the checkpoint trained in the
                 # EE (pika tip) frame -> v_tip = R_align . v_tcp (same as the pose path).
@@ -780,6 +938,13 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # across the reset teleport.
         self._vel_prev_pose_by_arm = {"left": None, "right": None}
         self._vel_prev_sample_t = None
+        # Drop the fixed_step pose history too, so a new rollout's first samples report rest
+        # (no finite difference across the reset teleport) until a fresh policy_dt accumulates.
+        self._pose_history = {
+            "left": deque(maxlen=_VELPROPRIO_HISTORY_MAXLEN),
+            "right": deque(maxlen=_VELPROPRIO_HISTORY_MAXLEN),
+        }
+        self._last_now_monotonic = None
 
     # ---------------------------------------------------------------- infer --
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
@@ -803,9 +968,13 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             # Round-trip the previous MODEL-SPACE chunk so the server freezes the
             # first `inference_delay` actions and inpaints the rest toward it.
             # execute_horizon = the committed steps per replan (chunk_execute_steps).
-            obs["prev_action_chunk"] = self._rtc_prev_raw_chunk
-            obs["inference_delay"] = int(np.clip(self.rtc_inference_delay, 0, self.chunk_execute_steps))
-            obs["execute_horizon"] = int(self.chunk_execute_steps)
+            # SHIFT by the executed window first (caller-side roll, as in the
+            # Kinetix reference): the freeze must pin to the previous plan's
+            # UNEXECUTED tail, not its already-executed head.
+            replan = int(getattr(self, "rtc_replan_period", 0) or self.chunk_execute_steps)
+            obs["prev_action_chunk"] = rtc_shift_prev_chunk(self._rtc_prev_raw_chunk, replan)
+            obs["inference_delay"] = int(np.clip(self.rtc_inference_delay, 0, replan))
+            obs["execute_horizon"] = int(replan)
             obs["prefix_attention_schedule"] = self.rtc_prefix_attention_schedule
             obs["max_guidance_weight"] = float(self.rtc_max_guidance_weight)
         try:

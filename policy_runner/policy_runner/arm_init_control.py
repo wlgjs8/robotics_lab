@@ -239,6 +239,7 @@ class ArmInitOverrideController:
             message = _format_failed_message(arm_block)
             if not message:
                 message = str(arm_block.get("message", "") or "")
+            prev_status = runtime.server_status
             if status and status != runtime.server_status:
                 _dbg(
                     f"{arm} server_status {runtime.server_status or 'none'} -> {status} "
@@ -249,6 +250,15 @@ class ArmInitOverrideController:
             if message:
                 runtime.message = message
             if not runtime.on:
+                # EXTERNAL InitMotion (e.g. the rb_gui button that commands the
+                # server directly, bypassing the arm_init_cmd channel): the arm
+                # was moved outside the policy stream. Surface the completion as
+                # a DONE transition so the source re-anchors at the new pose
+                # (plan chain / conditioners / RTC prev) exactly like a
+                # channel-initiated init.
+                if status == "done" and prev_status in {"planning", "executing"}:
+                    self._pending["done"].add(arm)
+                    changed = True
                 continue
             if status in {"planning", "executing"}:
                 next_state = f"init {status}"

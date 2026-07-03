@@ -43,6 +43,8 @@ def _make_source(
     binary_threshold: float = 50.0,
     open_hold_steps: int = 0,
     close_snap_percent: float = 0.0,
+    close_bias_left: float | None = None,
+    close_bias_right: float | None = None,
 ) -> "FlowMatchingActionSource":
     assert FlowMatchingActionSource is not None
     source = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
@@ -57,6 +59,10 @@ def _make_source(
     source._gripper_targets_by_arm = {"left": None, "right": None}
     source.gripper_action_absolute = bool(absolute)
     source.gripper_close_bias = 0.0
+    # Per-arm close-bias overrides: None -> _gripper_close_bias falls back to the
+    # shared gripper_close_bias above (so existing single-bias tests are unchanged).
+    source.gripper_close_bias_left = close_bias_left
+    source.gripper_close_bias_right = close_bias_right
     source.gripper_binary = bool(binary)
     source.gripper_open_percent = float(open_percent)
     source.gripper_close_percent = float(close_percent)
@@ -156,6 +162,38 @@ class GripperActionModeTest(unittest.TestCase):
         targets = source._integrate_gripper_targets(_step(42.0, 88.0), payload={})
         self.assertAlmostEqual(targets["left"], 42.0)
         self.assertAlmostEqual(targets["right"], 88.0)
+
+    def test_per_arm_close_bias_overrides_shared_motion_packet(self) -> None:
+        # Independent per-arm close-bias: left subtracts 2, right subtracts 6.
+        source = _make_source(absolute=True, close_bias_left=2.0, close_bias_right=6.0)
+        targets = source._integrate_gripper_targets(_step(50.0, 50.0), payload={})
+        self.assertAlmostEqual(targets["left"], 48.0)   # 50 - 2
+        self.assertAlmostEqual(targets["right"], 44.0)  # 50 - 6
+
+    def test_per_arm_close_bias_overrides_shared_dispatch(self) -> None:
+        # The PHYSICAL serial-backend dispatch must apply the same per-arm bias.
+        source = _make_source(absolute=True, close_bias_left=2.0, close_bias_right=6.0)
+        source._dispatch_gripper_step(_step(50.0, 50.0))
+        values = [r.command.value for r in source.gripper_runtime.results]
+        self.assertEqual(values, [48.0, 44.0])  # [left 50-2, right 50-6]
+
+    def test_per_arm_close_bias_falls_back_to_shared_when_unset(self) -> None:
+        # Left has an override (1.0); right override is unset (None) -> right uses
+        # the shared gripper_close_bias base (3.0).
+        source = _make_source(absolute=True, close_bias_left=1.0)
+        source.gripper_close_bias = 3.0
+        targets = source._integrate_gripper_targets(_step(20.0, 20.0), payload={})
+        self.assertAlmostEqual(targets["left"], 19.0)   # 20 - 1 (per-arm override)
+        self.assertAlmostEqual(targets["right"], 17.0)  # 20 - 3 (shared fallback)
+
+    def test_per_arm_close_bias_ignored_in_binary_mode(self) -> None:
+        # binary snaps to the open/close presets; per-arm bias must not apply.
+        source = _make_source(
+            absolute=True, binary=True, close_bias_left=2.0, close_bias_right=6.0
+        )
+        targets = source._integrate_gripper_targets(_step(88.0, 12.0), payload={})
+        self.assertAlmostEqual(targets["left"], 50.0)   # open preset, no bias
+        self.assertAlmostEqual(targets["right"], 7.0)   # close preset, no bias
 
 
 @unittest.skipIf(FlowMatchingActionSource is None, "torch is not installed")

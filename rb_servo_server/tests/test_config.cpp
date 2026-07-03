@@ -1059,6 +1059,38 @@ bool testInitMotionPlannerConfigExt() {
     return true;
 }
 
+bool testSendAtTickStartAndPipelinedReadConfig() {
+    // Defaults: both jitter-decoupling flags stay off (legacy in-tick send +
+    // blocking state read) unless a config opts in.
+    const std::string default_path = writeTempConfig(
+        "jitter-decoupling-default",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+    );
+    const rb_servo::DualArmConfig default_cfg = rb_servo::loadConfigFromYaml(default_path);
+    ::unlink(default_path.c_str());
+    RB_CHECK(!default_cfg.servo.send_at_tick_start);
+    RB_CHECK(!default_cfg.left_robot.state_read_pipelined);
+    RB_CHECK(!default_cfg.right_robot.state_read_pipelined);
+
+    const std::string enabled_path = writeTempConfig(
+        "jitter-decoupling-enabled",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  state_read_pipelined: true\n"
+        "right_robot:\n"
+        "  state_read_pipelined: true\n"
+        "servo:\n"
+        "  send_at_tick_start: true\n"
+    );
+    const rb_servo::DualArmConfig enabled_cfg = rb_servo::loadConfigFromYaml(enabled_path);
+    ::unlink(enabled_path.c_str());
+    RB_CHECK(enabled_cfg.servo.send_at_tick_start);
+    RB_CHECK(enabled_cfg.left_robot.state_read_pipelined);
+    RB_CHECK(enabled_cfg.right_robot.state_read_pipelined);
+
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -1078,5 +1110,6 @@ int main() {
     if (!testDisabledCollisionPairsConfig()) return 1;
     if (!testIntraArmSelfCollisionConfig()) return 1;
     if (!testInitMotionPlannerConfigExt()) return 1;
+    if (!testSendAtTickStartAndPipelinedReadConfig()) return 1;
     return 0;
 }

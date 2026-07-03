@@ -70,6 +70,25 @@ def default_action_log_path() -> str | None:
     return configured
 
 
+def _env_truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _quat_angle_deg(q1: np.ndarray, q2: np.ndarray) -> float:
+    """Geodesic angle (deg) between two xyzw quaternions; 0 if either is null."""
+    a = np.asarray(q1, dtype=np.float64)
+    b = np.asarray(q2, dtype=np.float64)
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    dot = abs(float(np.dot(a / na, b / nb)))
+    dot = min(1.0, max(-1.0, dot))
+    return float(np.degrees(2.0 * np.arccos(dot)))
+
+
 def _open_action_log(stderr: TextIO = sys.stderr) -> TextIO | None:
     path = default_action_log_path()
     if path is None:
@@ -350,8 +369,16 @@ class FlowMatchingActionSource:
         # Percent subtracted from the ABSOLUTE gripper opening target so grasps
         # close more firmly (lower opening = more closed): e.g. 1.0 turns an 18%
         # command into 17%. 0 = off. No effect in delta mode. Set from the
-        # `--gripper-close-bias` CLI flag in main.py.
+        # `--gripper-close-bias` CLI flag in main.py. This is the SHARED base; the
+        # per-arm overrides below win over it when set.
         self.gripper_close_bias = 0.0
+        # Per-arm ABSOLUTE close-bias overrides (opening percent). None -> fall back
+        # to the shared `gripper_close_bias` above. The two pika grippers clamp
+        # differently, so main.py resolves independent left/right values from the
+        # `--gripper-close-bias-left` / `--gripper-close-bias-right` CLI flags
+        # (defaults left 2.0 / right 6.0).
+        self.gripper_close_bias_left = None
+        self.gripper_close_bias_right = None
         # BINARY gripper (for checkpoints trained with a binarized open/close
         # gripper, e.g. openpi `binary 25`): the model's gripper-action output is
         # bimodal, so threshold it and snap to the physical open/close presets
@@ -475,6 +502,20 @@ class FlowMatchingActionSource:
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
         self._last_overlay_payload: dict[str, Any] | None = None
         self._chunk_overlay_seq = 0
+        # Terminal chunk dump (debug): when FLOW_INFER_PRINT_CHUNK is truthy, print
+        # every freshly-inferred action chunk step-by-step for both arms — position
+        # deltas in meters, rotation deltas converted rad->deg, plus gripper target.
+        self._print_chunk_enabled = _env_truthy(os.environ.get("FLOW_INFER_PRINT_CHUNK"))
+        self._print_chunk_seq = 0
+        # Per-step chunk-vs-actual tracking dump (FLOW_INFER_PRINT_TRACKING): as each
+        # step executes, compare the model's predicted absolute pose (chunk deltas
+        # composed onto the boundary anchor) against the live measured pose — position
+        # error in mm, rotation error in deg — plus per-step predicted vs actual
+        # displacement, all time-stamped from chunk activation for controller tuning.
+        self._print_tracking_enabled = _env_truthy(os.environ.get("FLOW_INFER_PRINT_TRACKING"))
+        self._trk_predicted: dict[str, list[np.ndarray] | None] = {"left": None, "right": None}
+        self._trk_prev_measured: dict[str, np.ndarray | None] = {"left": None, "right": None}
+        self._trk_start_monotonic = 0.0
         self._chunk_overlay_publisher: ChunkOverlayPublisher | None = None
         resolved_chunk_overlay_endpoint = (
             os.environ.get("RB_GUI_CHUNK_OVERLAY_ENDPOINT")
@@ -607,7 +648,10 @@ class FlowMatchingActionSource:
             self._chunk = chunk
             self._chunk_index = 0
             self._steps_since_boundary = 0  # restart the crossfade ramp at the boundary
+            self._print_chunk_steps(chunk)
+            self._begin_chunk_tracking(chunk, payload, now_monotonic)
             self._publish_chunk_overlay(now_monotonic)
+        self._log_chunk_tracking(payload, now_monotonic, int(self._chunk_index))
         step = self._chunk[self._chunk_index]
         self._chunk_index += 1
         gripper_targets = self._integrate_gripper_targets(step, payload)
@@ -648,7 +692,20 @@ class FlowMatchingActionSource:
                 chunk = self._sample_and_align_chunk(payload)
             if chunk is None:
                 self._request_prefetch(payload)
+                sched = self._ensure_chunk_ensemble()
+                if sched is not None:
+                    sched.note_kick(int(sched.window_start))
                 return self._stream_hold_intent()
+            sched = self._ensure_chunk_ensemble()
+            if sched is not None:
+                anchor_fn = self._ensemble_anchor_fn(payload)
+                if not sched.first_window_built:
+                    chunk = sched.begin(chunk, anchor_fn)
+                else:
+                    # late resume after a stall: the raw chunk joins the schedule
+                    chunk = sched.advance(chunk, anchor_fn)
+                    if chunk is None:
+                        return self._stream_hold_intent()
             self._activate_chunk(chunk, now_monotonic)
             advanced = True
         elif now_monotonic >= self._step_deadline:
@@ -659,15 +716,26 @@ class FlowMatchingActionSource:
                 advanced = True
             else:
                 swapped = self._take_prefetched()
-                if swapped is not None:
+                sched = self._ensure_chunk_ensemble()
+                if sched is not None:
+                    window = sched.advance(swapped, self._ensemble_anchor_fn(payload))
+                    if window is not None:
+                        self._activate_chunk(window, now_monotonic)
+                        advanced = True
+                        swapped = window
+                    else:
+                        swapped = None  # starved -> fall into the stall path below
+                if sched is None and swapped is not None:
                     self._activate_chunk(swapped, now_monotonic)
                     advanced = True
-                else:
+                elif swapped is None:
                     # Next chunk not ready at the boundary: hold (zero twist) and
                     # drop the stale chunk so the next tick re-acquires cleanly.
                     self._stream_stall_count += 1
                     self._chunk = None
                     self._request_prefetch(payload)
+                    if sched is not None:
+                        sched.note_kick(int(sched.window_start))
                     if self._tcp_tp_foh_active():
                         # Re-emit the last absolute target (no abrupt jump); flag stall.
                         self._current_step_intent = self._foh_tick_intent(now_monotonic, stall=True)
@@ -684,9 +752,13 @@ class FlowMatchingActionSource:
             and self._chunk_index >= self._stream_prefetch_at()
         ):
             self._request_prefetch(payload)
+            sched = getattr(self, "_chunk_ensemble", None)
+            if sched is not None:
+                sched.note_kick(self._ensemble_wall_now())
 
         foh = self._tcp_tp_foh_active()
         if advanced and self._chunk is not None:
+            self._log_chunk_tracking(payload, now_monotonic, int(self._chunk_index))
             step = self._chunk[self._chunk_index]
             gripper_targets = self._integrate_gripper_targets(step, payload)
             self._dispatch_gripper_step(step)
@@ -777,12 +849,150 @@ class FlowMatchingActionSource:
         self._action_log_seq += 1
         log.write(json.dumps(record) + "\n")
 
+    def _overlay_chain_advance(self) -> None:
+        # Promote the outgoing chunk's chain tail to the anchor for the chunk
+        # being activated (chain anchor mode). No-op when nothing is pending.
+        pending = getattr(self, "_overlay_chain_pending", None)
+        if pending is None:
+            return
+        prev = getattr(self, "_overlay_chain_prev", None)
+        if prev is None:
+            prev = {"left": None, "right": None}
+            self._overlay_chain_prev = prev
+        for arm, tail in pending.items():
+            if tail is not None:
+                prev[arm] = tail
+        self._overlay_chain_pending = {"left": None, "right": None}
+
     def _activate_chunk(self, chunk: np.ndarray, now_monotonic: float) -> None:
+        self._overlay_chain_advance()
         self._chunk = chunk
         self._chunk_index = 0
         self._steps_since_boundary = 0  # restart the crossfade ramp at the boundary
         self._step_deadline = now_monotonic + float(self.policy_dt_sec)
+        self._print_chunk_steps(chunk)
+        self._begin_chunk_tracking(chunk, getattr(self, "_last_overlay_payload", None), now_monotonic)
         self._publish_chunk_overlay(now_monotonic)
+
+    def _begin_chunk_tracking(
+        self,
+        chunk: np.ndarray | None,
+        payload: dict[str, Any] | None,
+        now_monotonic: float,
+    ) -> None:
+        """Snapshot the predicted absolute pose trajectory for a freshly activated
+        chunk so subsequent steps can be compared against the measured pose. Mirrors
+        the overlay projection: anchor at the current measured pose, then compose the
+        per-step conditioned deltas. Stored poses[0]=anchor, poses[i+1]=after step i."""
+        self._trk_predicted = {"left": None, "right": None}
+        self._trk_prev_measured = {"left": None, "right": None}
+        self._trk_start_monotonic = now_monotonic
+        if not getattr(self, "_print_tracking_enabled", False) or chunk is None or payload is None:
+            return
+        try:
+            limit = self._current_chunk_execute_limit()
+            if limit <= 0:
+                return
+            for arm, idx, sl in self._foh_arm_indices():
+                if len(self.arm_mask) <= idx or self.arm_mask[idx] <= 0.0:
+                    continue
+                cur = np.asarray(pose_from_state_payload(payload, arm), dtype=np.float64)
+                poses = [cur.copy()]
+                for i in range(limit):
+                    delta = np.asarray(
+                        self._condition_arm_delta(arm, chunk[i][sl], step_index=i, update_prev=False),
+                        dtype=np.float64,
+                    )
+                    cur = np.asarray(pose_compose_local(cur, delta), dtype=np.float64)
+                    poses.append(cur.copy())
+                self._trk_predicted[arm] = poses
+        except Exception:
+            self._trk_predicted = {"left": None, "right": None}
+
+    def _log_chunk_tracking(
+        self, payload: dict[str, Any], now_monotonic: float, index: int
+    ) -> None:
+        """Per-step chunk-vs-actual line: for each arm, tracking error (predicted
+        absolute pose for this step vs measured), plus predicted and actual per-step
+        displacement. Time-stamped from chunk activation. Gated on
+        FLOW_INFER_PRINT_TRACKING (see __init__)."""
+        if not getattr(self, "_print_tracking_enabled", False):
+            return
+        predicted = getattr(self, "_trk_predicted", None)
+        if not predicted:
+            return
+        try:
+            t = float(now_monotonic) - float(getattr(self, "_trk_start_monotonic", now_monotonic))
+            prev = getattr(self, "_trk_prev_measured", None) or {"left": None, "right": None}
+            parts: list[str] = []
+            for arm, tag in (("left", "L"), ("right", "R")):
+                poses = predicted.get(arm)
+                if poses is None or index >= len(poses):
+                    continue
+                meas = np.asarray(pose_from_state_payload(payload, arm), dtype=np.float64)
+                tgt = np.asarray(poses[index], dtype=np.float64)
+                trk_pos = float(np.linalg.norm(meas[:3] - tgt[:3]) * 1000.0)
+                trk_rot = _quat_angle_deg(meas[3:7], tgt[3:7])
+                nxt = poses[index + 1] if index + 1 < len(poses) else None
+                pred_step = (
+                    float(np.linalg.norm(np.asarray(nxt, dtype=np.float64)[:3] - tgt[:3]) * 1000.0)
+                    if nxt is not None
+                    else 0.0
+                )
+                pm = prev.get(arm)
+                act_step = (
+                    float(np.linalg.norm(meas[:3] - np.asarray(pm, dtype=np.float64)[:3]) * 1000.0)
+                    if pm is not None
+                    else 0.0
+                )
+                prev[arm] = meas
+                parts.append(
+                    f"{tag} trk(p={trk_pos:6.1f}mm r={trk_rot:5.1f}°) "
+                    f"pred_step={pred_step:6.1f}mm act_step={act_step:6.1f}mm"
+                )
+            self._trk_prev_measured = prev
+            if parts:
+                print(
+                    f"[trk #{getattr(self, '_print_chunk_seq', 0)} i={index:02d} t={t:+.3f}s] "
+                    + "  |  ".join(parts),
+                    file=self.stderr,
+                    flush=True,
+                )
+        except Exception:
+            return
+
+    def _print_chunk_steps(self, chunk: np.ndarray | None) -> None:
+        """Debug: dump a freshly-inferred chunk to the terminal, one line per
+        step, for both arms. Position deltas stay in meters; rotation deltas are
+        converted rad->deg. Gated on FLOW_INFER_PRINT_CHUNK (see __init__)."""
+        if not getattr(self, "_print_chunk_enabled", False) or chunk is None:
+            return
+        try:
+            arr = np.asarray(chunk, dtype=np.float64)
+            limit = self._current_chunk_execute_limit()
+            n = min(int(limit), arr.shape[0]) if limit > 0 else arr.shape[0]
+            self._print_chunk_seq += 1
+            print(
+                f"[flow-infer] chunk #{self._print_chunk_seq} steps={n} "
+                f"(dpos=m, drot=deg, per-step deltas)",
+                file=self.stderr,
+                flush=True,
+            )
+            for i in range(n):
+                row = arr[i]
+                lp, lr, lg = row[0:3], np.degrees(row[3:6]), row[6]
+                rp, rr, rg = row[7:10], np.degrees(row[10:13]), row[13]
+                print(
+                    f"  [{i:02d}] "
+                    f"L dpos=[{lp[0]:+.4f} {lp[1]:+.4f} {lp[2]:+.4f}] "
+                    f"drot=[{lr[0]:+6.2f} {lr[1]:+6.2f} {lr[2]:+6.2f}] grip={lg:+.3f}  |  "
+                    f"R dpos=[{rp[0]:+.4f} {rp[1]:+.4f} {rp[2]:+.4f}] "
+                    f"drot=[{rr[0]:+6.2f} {rr[1]:+6.2f} {rr[2]:+6.2f}] grip={rg:+.3f}",
+                    file=self.stderr,
+                    flush=True,
+                )
+        except Exception:
+            return
 
     def _publish_chunk_overlay(self, now_monotonic: float) -> None:
         _ = now_monotonic
@@ -800,7 +1010,28 @@ class FlowMatchingActionSource:
                 if len(self.arm_mask) <= idx or self.arm_mask[idx] <= 0.0:
                     continue
                 grip_index = 6 if arm == "left" else 13
-                measured_anchor = np.asarray(pose_from_state_payload(payload, arm), dtype=np.float64)
+                anchor_mode = self._chunk_anchor_source()
+                if anchor_mode == "chain":
+                    # Pure plan-chain integration: anchor on the PREVIOUS chunk's
+                    # last executed-window target (its own integrated value), not
+                    # on any robot state. Boundary shortfall (unconverged robot)
+                    # carries over instead of being discarded each chunk — fixes
+                    # the asymptotic-undershoot (Zeno) pattern of state anchoring.
+                    # First chunk (no chain yet) seeds from the command pose.
+                    chain_prev = getattr(self, "_overlay_chain_prev", None) or {}
+                    prev_tail = chain_prev.get(arm)
+                    if prev_tail is not None:
+                        measured_anchor = np.asarray(prev_tail, dtype=np.float64)
+                    else:
+                        measured_anchor = np.asarray(
+                            pose_from_state_payload(payload, arm, source="command"),
+                            dtype=np.float64,
+                        )
+                else:
+                    measured_anchor = np.asarray(
+                        pose_from_state_payload(payload, arm, source=anchor_mode),
+                        dtype=np.float64,
+                    )
                 cur = measured_anchor
                 arm_points: list[list[float]] = []
                 for i in range(limit):
@@ -811,6 +1042,28 @@ class FlowMatchingActionSource:
                     cur = np.asarray(pose_compose_local(cur, delta), dtype=np.float64)
                     arm_points.append([float(value) for value in cur[:7].tolist()] + [float(chunk[i][grip_index])])
                 projected[arm] = arm_points
+                if anchor_mode == "chain":
+                    # Record this chunk's chain tail; promoted to the anchor when
+                    # the NEXT chunk activates (re-publishing the same chunk is
+                    # idempotent). Warn once if the plan chain drifts far from
+                    # the measured pose (safety layers may be blocking it).
+                    pending = getattr(self, "_overlay_chain_pending", None)
+                    if pending is None:
+                        pending = {"left": None, "right": None}
+                        self._overlay_chain_pending = pending
+                    pending[arm] = np.asarray(arm_points[-1][:7], dtype=np.float64)
+                    try:
+                        meas = np.asarray(pose_from_state_payload(payload, arm), dtype=np.float64)
+                        drift = float(np.linalg.norm(measured_anchor[:3] - meas[:3]))
+                        if drift > 0.15 and not getattr(self, "_overlay_chain_drift_warned", False):
+                            self._overlay_chain_drift_warned = True
+                            print(
+                                f"[flow-infer] WARNING chain anchor drifted {drift * 1000:.0f}mm from the "
+                                "measured pose — a safety layer may be blocking the plan",
+                                flush=True,
+                            )
+                    except Exception:
+                        pass
             if projected["left"] is None and projected["right"] is None:
                 return
             self._chunk_overlay_seq = int(getattr(self, "_chunk_overlay_seq", 0)) + 1
@@ -824,14 +1077,88 @@ class FlowMatchingActionSource:
         except Exception:
             return
 
+    def _ensure_chunk_ensemble(self):
+        """Lazy ChunkEnsembleScheduler when --chunk-stitch-mode ensemble.
+        None in the default boundary mode."""
+        if str(getattr(self, "chunk_stitch_mode", "boundary")) != "ensemble":
+            return None
+        sched = getattr(self, "_chunk_ensemble", None)
+        if sched is None:
+            from .chunk_ensemble import ChunkEnsembleScheduler
+
+            sched = ChunkEnsembleScheduler(
+                int(getattr(self, "ensemble_period", 6)),
+                int(self.action_horizon),
+                blend_mode=str(getattr(self, "ensemble_blend_mode", "linear")),
+            )
+            self._chunk_ensemble = sched
+        return sched
+
+    def _ensemble_anchor_fn(self, payload: dict[str, Any]):
+        # First-chunk / post-reset plan seed: the overlay chain tail (kept per
+        # arm across InitMotion of the OTHER arm) -> command pose fallback.
+        def anchor(arm: str) -> np.ndarray:
+            chain_prev = getattr(self, "_overlay_chain_prev", None) or {}
+            tail = chain_prev.get(arm)
+            if tail is not None:
+                return np.asarray(tail, dtype=np.float64)
+            return np.asarray(
+                pose_from_state_payload(payload, arm, source="command"), dtype=np.float64
+            )
+
+        return anchor
+
+    def _ensemble_wall_now(self) -> int:
+        sched = getattr(self, "_chunk_ensemble", None)
+        if sched is None:
+            return 0
+        active_len = int(self._chunk.shape[0]) if self._chunk is not None else 0
+        return int(sched.window_start) - active_len + int(self._chunk_index)
+
+    def _state_anchor_source(self) -> str:
+        # pose_from_state_payload-safe variant: in chain mode the per-tick
+        # command path is expected to run reanchor_mode=last_emitted_continuous
+        # (its own plan chain); its residual measured_anchor uses (first chunk /
+        # legacy fallbacks) map to the command pose.
+        src = self._chunk_anchor_source()
+        return "command" if src == "chain" else src
+
+    def _chunk_anchor_source(self) -> str:
+        # Where chunk-delta integration anchors: "actual" (measured pose,
+        # FK(q_actual) — legacy default) or "command" (FK(q_sent), the pose the
+        # server actually commanded). Set by the runner (--chunk-anchor-source).
+        # Scope: chunk integration + overlay/follower frames ONLY — proprio,
+        # reset poses, tracking logs, and external-move re-anchor stay measured.
+        return str(getattr(self, "chunk_anchor_source", "actual"))
+
     def _stream_prefetch_at(self) -> int:
+        limit = self._current_chunk_execute_limit()
+        # Sequential (blocking) chunk mode, set by the runner for step-by-step
+        # verification: NEVER kick inference mid-chunk. The chunk is consumed to
+        # the end, the boundary stall path then requests inference with the
+        # freshest observation (the robot deliberately holds still for the
+        # inference latency), and the new chunk re-anchors to the measured pose
+        # at activation. chunk_index < limit always, so returning limit disables
+        # the early kick entirely.
+        if bool(getattr(self, "sequential_stream_inference", False)):
+            return limit
+        sched = getattr(self, "_chunk_ensemble", None)
+        if sched is not None:
+            # Ensemble: first (2R) window kicks at R; steady windows at start.
+            return int(sched.kick_index_for_active_window())
+        # Explicit kick point (RTC pairing): kick the next inference when this
+        # many steps of the window are consumed. With RTC, inference_delay should
+        # equal (execute_steps - stream_prefetch_at) — the steps that will run on
+        # the OLD plan while the new chunk is inpainted (its frozen prefix).
+        explicit = getattr(self, "stream_prefetch_at", None)
+        if explicit is not None:
+            return int(max(0, min(int(explicit), limit - 1)))
         # Kick the next inference EARLY (after ~1/4 of the chunk) so it has the most wall-clock
         # to finish before the executable window drains -> fewer boundary stalls (= fewer
         # pauses in the motion). Was limit//2 (half-chunk lead); a slow medoid/remote inference
         # could not finish in that window and stalled every chunk. Trade-off: the next chunk is
         # inferred from a slightly older frame (~quarter-chunk), but it re-anchors to the current
         # pose at its boundary, so only the IMAGE is marginally staler.
-        limit = self._current_chunk_execute_limit()
         return max(0, min(2, limit - 1))
 
     def _stream_hold_intent(self) -> CommandIntent | None:
@@ -935,18 +1262,26 @@ class FlowMatchingActionSource:
     def gripper_dropped_count(self) -> int:
         return int(self.gripper_runtime.dropped_count)
 
-    def _gripper_close_bias(self) -> float:
+    def _gripper_close_bias(self, arm: str | None = None) -> float:
         """Percent subtracted from the ABSOLUTE gripper opening target so grasps
         close more firmly (e.g. 1.0 turns an 18% command into 17%). 0 in delta
         mode (the action is a relative change, biasing it would compound), and 0
-        in binary mode (the value snaps to the open/close presets)."""
+        in binary mode (the value snaps to the open/close presets).
+
+        Resolved PER ARM: an `arm` of "left"/"right" uses that arm's override
+        (`gripper_close_bias_left` / `_right`) when set, else the shared
+        `gripper_close_bias`. arm=None (or an unset override) uses the shared base."""
         if not getattr(self, "gripper_action_absolute", True):
             return 0.0
         if getattr(self, "gripper_binary", False):
             return 0.0
+        if arm is not None:
+            override = getattr(self, f"gripper_close_bias_{arm}", None)
+            if override is not None:
+                return float(override or 0.0)
         return float(getattr(self, "gripper_close_bias", 0.0) or 0.0)
 
-    def _map_gripper_opening(self, raw_percent: float) -> float:
+    def _map_gripper_opening(self, raw_percent: float, arm: str | None = None) -> float:
         """Map the model's raw gripper-action opening percent (already in percent
         units) to the opening percent to command. Used by both gripper sinks
         (motion-packet target and serial-backend dispatch) in the target-command
@@ -956,7 +1291,7 @@ class FlowMatchingActionSource:
         (e.g. openpi `binary 25`), so the model output is bimodal -- threshold it
         and snap to the physical open/close presets (`--gripper-open-percent` /
         `--gripper-close-percent`). absolute: pass the opening through, minus the
-        close-bias. Both clamp to the [0, 100] opening range."""
+        per-arm close-bias (`arm`-resolved). Both clamp to the [0, 100] opening range."""
         if getattr(self, "gripper_binary", False):
             threshold = float(getattr(self, "gripper_binary_threshold", 50.0))
             target = (
@@ -965,7 +1300,7 @@ class FlowMatchingActionSource:
                 else float(getattr(self, "gripper_close_percent", 7.0))
             )
             return float(np.clip(target, 0.0, 100.0))
-        mapped = float(np.clip(float(raw_percent) - self._gripper_close_bias(), 0.0, 100.0))
+        mapped = float(np.clip(float(raw_percent) - self._gripper_close_bias(arm), 0.0, 100.0))
         # Close-snap deadzone: collapse a near-closed opening to fully closed so
         # small policy jitter near the closed end doesn't leave the jaw cracked
         # open. 0 = off; absolute (non-binary) mode only.
@@ -991,13 +1326,13 @@ class FlowMatchingActionSource:
             # dispatch below sends for each gripper -- the reach-before-grasp
             # hold-open value if active, else the binary threshold / absolute
             # clip mapping (_map_gripper_opening).
-            def _grip_cmd_str(raw_grip: float) -> str:
+            def _grip_cmd_str(raw_grip: float, arm: str) -> str:
                 if not getattr(self, "gripper_action_absolute", True):
                     return " -> delta (no threshold)"
                 if bool(getattr(self, "_gripper_hold_open_now", False)):
                     grip_cmd = self._gripper_hold_open_value()
                 else:
-                    grip_cmd = self._map_gripper_opening(float(raw_grip))
+                    grip_cmd = self._map_gripper_opening(float(raw_grip), arm)
                 if getattr(self, "gripper_binary", False):
                     thr = float(getattr(self, "gripper_binary_threshold", 50.0))
                     decision = "OPEN" if float(raw_grip) >= thr else "CLOSE"
@@ -1005,11 +1340,12 @@ class FlowMatchingActionSource:
                 return f" -> cmd={grip_cmd:.1f}%"
 
             for _arm, _v in (("R", _raw[7:14]), ("L", _raw[0:7])):
+                _arm_name = "right" if _arm == "R" else "left"
                 print(
                     f"[flow-infer] RAW {_arm} action (pre-threshold) "
                     f"dxyz=[{_v[0]:+.4f} {_v[1]:+.4f} {_v[2]:+.4f}] "
                     f"rxyz=[{_v[3]:+.4f} {_v[4]:+.4f} {_v[5]:+.4f}] "
-                    f"grip={_v[6]:+.2f}{_grip_cmd_str(float(_v[6]))}",
+                    f"grip={_v[6]:+.2f}{_grip_cmd_str(float(_v[6]), _arm_name)}",
                     flush=True,
                 )
         # ABSOLUTE/BINARY checkpoints emit an opening target -> drive the gripper
@@ -1028,8 +1364,11 @@ class FlowMatchingActionSource:
             step = step.copy()
             for idx in (6, 13):  # left, right gripper dims in the 14-D action step
                 if step.shape[0] > idx:
+                    arm = "left" if idx == 6 else "right"
                     step[idx] = (
-                        hold_value if hold_open else self._map_gripper_opening(float(step[idx]))
+                        hold_value
+                        if hold_open
+                        else self._map_gripper_opening(float(step[idx]), arm)
                     )
         commands = gripper_commands_from_flow_step(
             step.tolist(),
@@ -1127,7 +1466,7 @@ class FlowMatchingActionSource:
             self._target_pose_by_arm = {"left": None, "right": None}
             targets = self._target_pose_by_arm
         if self._steps_since_boundary == 0 or targets.get(arm) is None:
-            targets[arm] = pose_from_state_payload(payload, arm)
+            targets[arm] = pose_from_state_payload(payload, arm, source=self._state_anchor_source())
         conditioned_delta = self._condition_arm_delta(arm, delta, update_prev=True)
         targets[arm] = pose_compose_local(targets[arm], np.asarray(conditioned_delta, dtype=np.float32))
         return tuple(float(value) for value in targets[arm].tolist())
@@ -1172,6 +1511,8 @@ class FlowMatchingActionSource:
         gripper_targets = getattr(self, "_gripper_targets_by_arm", None)
         conds = getattr(self, "_tcp_tp_conditioners", None)
         after: dict[str, list[float] | None] = {}
+        chain_prev = getattr(self, "_overlay_chain_prev", None)
+        chain_pending = getattr(self, "_overlay_chain_pending", None)
         for arm in arms:
             try:
                 pose = np.asarray(pose_from_state_payload(payload, arm), dtype=np.float64)
@@ -1188,11 +1529,33 @@ class FlowMatchingActionSource:
                     cond._prev_emitted = pose.copy()
                 except Exception:
                     pass
+            # Chain anchor (--chunk-anchor-source chain): the arm was moved
+            # EXTERNALLY (InitMotion etc.), so the accumulated plan chain is
+            # meaningless for it — drop it so the next chunk re-seeds from the
+            # arm's new pose. Per-arm: the other arm's chain keeps accumulating.
+            if isinstance(chain_prev, dict):
+                chain_prev[arm] = None
+            if isinstance(chain_pending, dict):
+                chain_pending[arm] = None
             after[arm] = [float(v) for v in pose.reshape(-1).tolist()]
+        # RTC guidance references the previous BOTH-ARM raw chunk; after an
+        # external move it must not pull the new plan toward the pre-init plan.
+        # Cold-start the next infer (vanilla). Also drops the velocity-proprio
+        # previous-pose memory so the first post-init sample reads rest, not a
+        # jump across the init teleport.
+        reset_rtc = getattr(self, "reset_rtc", None)
+        if callable(reset_rtc):
+            try:
+                reset_rtc()
+            except Exception:
+                pass
         return after
 
     def _invalidate_policy_chunks(self, *, reason: str) -> None:
         _ = reason
+        sched = getattr(self, "_chunk_ensemble", None)
+        if sched is not None:
+            sched.reset()
         self._chunk = None
         self._chunk_index = 0
         self._steps_since_boundary = 0
@@ -1349,7 +1712,10 @@ class FlowMatchingActionSource:
             if self.arm_mask[idx] <= 0.0:
                 continue
             cond = conds[arm]
-            measured_anchor = np.asarray(pose_from_state_payload(payload, arm), dtype=np.float64)
+            measured_anchor = np.asarray(
+                pose_from_state_payload(payload, arm, source=self._state_anchor_source()),
+                dtype=np.float64,
+            )
             last_emitted = cond.last_emitted
             measured: list[np.ndarray] = []
             continuous: list[np.ndarray] | None = [] if last_emitted is not None else None
@@ -1504,7 +1870,7 @@ class FlowMatchingActionSource:
                     # command it directly (never integrate). absolute applies the
                     # close-bias; binary snaps to the open/close presets. Clamped.
                     self._gripper_targets_by_arm[arm] = self._map_gripper_opening(
-                        float(step[step_index])
+                        float(step[step_index]), arm
                     )
                 else:
                     # DELTA (legacy): accumulate the per-step opening change.
@@ -1622,6 +1988,9 @@ class FlowMatchingActionSource:
     def _current_chunk_execute_limit(self) -> int:
         if self._chunk is None:
             return 0
+        if getattr(self, "_chunk_ensemble", None) is not None:
+            # Ensemble windows are exactly the execute window (R or 2R rows).
+            return int(self._chunk.shape[0])
         return min(int(self.chunk_execute_steps), int(self._chunk.shape[0]))
 
     def _camera_inputs_ready(self) -> bool:
