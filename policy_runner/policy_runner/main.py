@@ -942,7 +942,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--execute-arms",
         choices=("both", "left", "right"),
-        default="right",
+        default="both",
         help=(
             "Runtime execution mask: suppress the non-selected arm's commands "
             "(twist + gripper) so it physically holds. The checkpoint stays "
@@ -1054,7 +1054,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--speed-scale",
         type=float,
-        default=1.0,
+        default=1.3,
         help=(
             "Replay policy action steps faster/slower without changing the model: effective "
             "policy_dt = policy_dt_sec / speed_scale, while source-side velocity clamps are "
@@ -1136,7 +1136,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--gripper-close-bias",
         type=float,
-        default=7.0,
+        default=5.0,
         help="Percent subtracted from the ABSOLUTE gripper opening target so grasps close more "
              "firmly (lower opening = more closed). E.g. 1.0 turns an 18%% command into 17%%; use it "
              "when the policy stops a hair short of clamping the object. Clamped to [0,100]; 0 = off "
@@ -1173,7 +1173,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--rtc-inference-delay",
         type=int,
-        default=4,
+        default=8,
         help="RTC delay d (policy steps guaranteed to execute during inference latency); the first d "
              "actions are hard-frozen to the previous chunk. ~ceil(inference_latency / policy_dt); "
              "clamped to [0, chunk_execute_steps]. Only used with --rtc.",

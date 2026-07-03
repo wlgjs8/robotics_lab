@@ -590,6 +590,16 @@ struct JointTargetSmdConfig {
     double natural_frequency_hz = 0.4;
     JointArray max_velocity_deg_s{30.0, 30.0, 30.0, 45.0, 45.0, 60.0};
     JointArray max_accel_deg_s2{150.0, 150.0, 150.0, 250.0, 250.0, 350.0};
+    // Arrival-decel taper (decoupled from natural_frequency). When a command carries an
+    // explicit final stop (InitMotion pursuit), the per-step joint velocity is uniformly
+    // capped at sqrt(2*arrival_decel_deg_s2*d) — d = max per-joint distance to the stop —
+    // so the last stretch eases in gently while the snappy start/cruise (governed by
+    // natural_frequency) is unchanged. Uniform scaling preserves the straight-line joint
+    // path. Smaller arrival_decel = gentler/longer glide-in. The min-speed floor keeps the
+    // tail from crawling so it settles into waypoint_tol quickly. Disabled => no taper.
+    bool arrival_taper_enable = false;
+    double arrival_decel_deg_s2 = 200.0;
+    double arrival_min_speed_deg_s = 3.0;
 };
 
 // Collision-free JointTarget init_motion profile planner (server-side). A direct

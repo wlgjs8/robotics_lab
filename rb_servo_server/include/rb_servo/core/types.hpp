@@ -437,6 +437,13 @@ struct ArmCommand {
     JointArray q_target_deg{};
     JointTargetProfile joint_target_profile = JointTargetProfile::Direct;
 
+    // Final-stop joint pose for the JointTarget arrival-decel taper. InitMotion pursuit
+    // sets this to the terminal waypoint while q_target_deg leads by the pursuit
+    // lookahead, so JointSmdTracker can ease into the true endpoint independently of the
+    // cruise natural frequency. Absent (has_arrival_stop=false) => no taper (unchanged).
+    JointArray arrival_stop_q_deg{};
+    bool has_arrival_stop = false;
+
     Pose6D tcp_target_stand;
     double linear_move_duration_sec = 0.0;
     double linear_move_linear_speed_m_s = 0.0;

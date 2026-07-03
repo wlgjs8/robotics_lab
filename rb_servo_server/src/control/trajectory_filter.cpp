@@ -122,6 +122,17 @@ JointArray TrajectoryFilter::computeJointTarget(
                 command.q_target_deg, previous_sent_target,
                 safety_config_.q_min_deg, safety_config_.q_max_deg,
                 safety_config_.joint_target_literal_axes);
+            // Arrival-decel taper toward the true final stop (InitMotion pursuit sets it;
+            // wrap it the same way as the carrot so it shares the SMD's branch). Absent =>
+            // pure SMD profile (plain PTP / streaming jog stay exactly as before).
+            if (safety_config_.joint_target_smd.arrival_taper_enable && command.has_arrival_stop) {
+                joint_smd_.setArrivalStop(shortestPathJointGoal(
+                    command.arrival_stop_q_deg, previous_sent_target,
+                    safety_config_.q_min_deg, safety_config_.q_max_deg,
+                    safety_config_.joint_target_literal_axes));
+            } else {
+                joint_smd_.clearArrivalStop();
+            }
             out = safety_config_.joint_target_smd.enable
                 ? smdJointTarget(goal, previous_sent_target, dt_sec)
                 : filterJointTarget(goal, previous_sent_target, dt_sec);

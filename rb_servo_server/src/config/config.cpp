@@ -1015,6 +1015,10 @@ void validateConfig(const DualArmConfig& cfg) {
         validatePositiveFinite(js.natural_frequency_hz, "safety.joint_target_smd.natural_frequency_hz");
         validatePositiveFiniteArray(js.max_velocity_deg_s, "safety.joint_target_smd.max_velocity_deg_s");
         validatePositiveFiniteArray(js.max_accel_deg_s2, "safety.joint_target_smd.max_accel_deg_s2");
+        if (js.arrival_taper_enable) {
+            validatePositiveFinite(js.arrival_decel_deg_s2, "safety.joint_target_smd.arrival_decel_deg_s2");
+            validateNonNegativeFinite(js.arrival_min_speed_deg_s, "safety.joint_target_smd.arrival_min_speed_deg_s");
+        }
     }
     if (cfg.safety.init_motion_planner.enable) {
         const auto& ip = cfg.safety.init_motion_planner;
@@ -2501,6 +2505,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "natural_frequency_hz",
                 "max_velocity_deg_s",
                 "max_accel_deg_s2",
+                "arrival_taper_enable",
+                "arrival_decel_deg_s2",
+                "arrival_min_speed_deg_s",
             }, "safety.joint_target_smd");
             if (has(js, "enable")) {
                 cfg.safety.joint_target_smd.enable =
@@ -2521,6 +2528,18 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(js, "max_accel_deg_s2")) {
                 cfg.safety.joint_target_smd.max_accel_deg_s2 =
                     parseJointArray(js["max_accel_deg_s2"], "safety.joint_target_smd.max_accel_deg_s2");
+            }
+            if (has(js, "arrival_taper_enable")) {
+                cfg.safety.joint_target_smd.arrival_taper_enable =
+                    asBool(js["arrival_taper_enable"], "safety.joint_target_smd.arrival_taper_enable");
+            }
+            if (has(js, "arrival_decel_deg_s2")) {
+                cfg.safety.joint_target_smd.arrival_decel_deg_s2 =
+                    asDouble(js["arrival_decel_deg_s2"], "safety.joint_target_smd.arrival_decel_deg_s2");
+            }
+            if (has(js, "arrival_min_speed_deg_s")) {
+                cfg.safety.joint_target_smd.arrival_min_speed_deg_s =
+                    asDouble(js["arrival_min_speed_deg_s"], "safety.joint_target_smd.arrival_min_speed_deg_s");
             }
         }
         if (has(sec, "init_motion_planner")) {

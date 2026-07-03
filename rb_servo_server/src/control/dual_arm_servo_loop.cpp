@@ -5363,6 +5363,21 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             set_joint_target(c.right, r);
         }
     };
+    // Arrival-decel taper endpoint: hand the SMD the TRUE final stop (terminal waypoint)
+    // for the active arm(s) while rewrite_selected feeds it the pursuit carrot as q_target.
+    // The SMD eases into this stop independently of the cruise natural frequency; a command
+    // without it (plain PTP / jog) is untouched.
+    const auto set_arrival_stop = [&](DualArmCommand& c, const InitMotionExec& ex,
+                                      const JointArray& l, const JointArray& r) {
+        if (ex.left_active || freeze_other_arm) {
+            c.left.arrival_stop_q_deg = l;
+            c.left.has_arrival_stop = true;
+        }
+        if (ex.right_active || freeze_other_arm) {
+            c.right.arrival_stop_q_deg = r;
+            c.right.has_arrival_stop = true;
+        }
+    };
     const auto hold_selected = [&](DualArmCommand& c, const InitMotionExec& ex) {
         if (ex.left_active || freeze_other_arm) {
             c.left.mode = ControlMode::Hold;
@@ -5459,9 +5474,14 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         InitMotionExec direct;
         direct.left_active = left_init;
         direct.right_active = right_init;
-        rewrite_selected(command, direct,
-                         left_init ? command.left.q_target_deg : left_prev_sent_q_deg_,
-                         right_init ? command.right.q_target_deg : right_prev_sent_q_deg_);
+        const JointArray direct_left =
+            left_init ? command.left.q_target_deg : left_prev_sent_q_deg_;
+        const JointArray direct_right =
+            right_init ? command.right.q_target_deg : right_prev_sent_q_deg_;
+        rewrite_selected(command, direct, direct_left, direct_right);
+        // No waypoints in the planner-disabled fallback: the requested pose IS the final
+        // stop, so ease into it directly (same arrival taper as the planned path).
+        set_arrival_stop(command, direct, direct_left, direct_right);
         return command;
     }
 
@@ -5790,6 +5810,10 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                     std::cerr << "[INFO] JointTarget init_motion: reached init pose\n";
                 }
                 rewrite_selected(command, ex, wp.first, wp.second);
+                if (!ex.waypoints.empty()) {
+                    const auto& stop_wp = ex.waypoints.back();
+                    set_arrival_stop(command, ex, stop_wp.first, stop_wp.second);
+                }
                 break;
             }
             case InitMotionStatus::Done: {
@@ -5799,6 +5823,7 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                     ? std::pair<JointArray, JointArray>{ex.target_left, ex.target_right}
                     : ex.waypoints.back();
                 rewrite_selected(command, ex, goal_wp.first, goal_wp.second);
+                set_arrival_stop(command, ex, goal_wp.first, goal_wp.second);
                 break;
             }
             case InitMotionStatus::Planning:
