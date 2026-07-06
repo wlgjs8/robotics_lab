@@ -3846,9 +3846,9 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     if (!rf.enable || !chunk_frame_receiver_ || command.mode != ControlMode::TcpPoseTarget ||
         !command.has_tcp_target || !kinematics_) {
         // Not in the follower regime: deactivate (drops the stale window) and run
-        // the legacy SMD path with identical semantics. Mode changes (Hold /
-        // JointTarget / InitMotion / TcpLinearMove / deadman-stale->Hold) all
-        // land here, so the follower can never outlive the streaming command.
+        // the legacy SMD path with identical semantics. Per-arm mode changes
+        // that reach this stage cannot leave the follower attached to an old
+        // streaming command.
         transition_reason = "mode/enable";
         follower->deactivate();
         resetChunkFollowerEngageWait(arm_id);
@@ -4379,6 +4379,14 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         }
         return target;
     }
+
+    // No arm is in Cartesian mode, so applyChunkFollowerStage() did not run.
+    // Drop both chunk followers here to preserve the invariant that a follower
+    // cannot outlive the streaming TcpPoseTarget command that fed it.
+    left_chunk_follower_.deactivate();
+    right_chunk_follower_.deactivate();
+    resetChunkFollowerEngageWait(ArmId::Left);
+    resetChunkFollowerEngageWait(ArmId::Right);
 
     target.left_q_target_deg = left_traj_filter_.computeJointTarget(
         command.left,

@@ -745,6 +745,33 @@ bool sendUdpJson(const std::string& host, int port, const std::string& payload) 
     return sent == static_cast<ssize_t>(payload.size());
 }
 
+std::string makeDualArmChunkFramePacket(uint64_t seq, int horizon) {
+    nlohmann::json left = nlohmann::json::array();
+    for (int i = 0; i < horizon; ++i) {
+        left.push_back({
+            0.0005 * static_cast<double>(i),
+            0.0002 * static_cast<double>(i),
+            0.0001 * static_cast<double>(i),
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            20.0,
+        });
+    }
+    nlohmann::json packet = {
+        {"schema", "robotics_lab.chunk_overlay.v2"},
+        {"schema_version", "robotics_lab.chunk_overlay.v2"},
+        {"host_time_ns", 123456789},
+        {"seq", seq},
+        {"policy_dt_sec", 0.0334},
+        {"horizon", horizon},
+        {"left", left},
+        {"right", left},
+    };
+    return packet.dump();
+}
+
 class EnvVarGuard {
 public:
     explicit EnvVarGuard(const char* name)
@@ -4909,6 +4936,118 @@ bool testCartesianPoseTargetUsesIkInSimulation() {
     return true;
 }
 
+bool testChunkFollowerDeactivatesAcrossBothArmJointTargetGap() {
+    const int port = reserveLoopbackUdpPort();
+    if (port <= 0) {
+        std::cerr << "SKIP testChunkFollowerDeactivatesAcrossBothArmJointTargetGap: "
+                  << "loopback UDP unavailable\n";
+        return true;
+    }
+
+    rb_servo::ChunkFrameReceiver receiver("udp://127.0.0.1:" + std::to_string(port));
+    RB_CHECK(receiver.start());
+    RB_CHECK(sendUdpJson("127.0.0.1", port, makeDualArmChunkFramePacket(77, 24)));
+    RB_CHECK(waitUntil([&] { return receiver.latestSeq() > 0; }, std::chrono::milliseconds(500)));
+
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoPhysicalRealConfig();
+    configureCartesianLoopTest(&cfg);
+    cfg.cartesian_control.allow_in_real = true;
+    cfg.cartesian_control.tcp_pose_target_profile_default = "default";
+    rb_servo::TcpPoseTargetProfileConfig profile;
+    profile.name = "default";
+    profile.pose_track_smd = cfg.cartesian_control.pose_track_smd;
+    profile.ruckig_follower.enable = true;
+    profile.ruckig_follower.fallback_policy = rb_servo::RuckigFollowerFallbackPolicy::Fault;
+    cfg.cartesian_control.tcp_pose_target_profiles = {profile};
+
+    const rb_servo::JointArray initial = joints(0.0);
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+    loop.setChunkFrameReceiver(&receiver);
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+
+    rb_servo::DualArmCommand cartesian = command(rb_servo::ControlMode::TcpPoseTarget);
+    cartesian.seq = 77;
+    cartesian.host_time_ns = rb_servo::nowSteadyNs();
+    cartesian.left.timeout_sec = 5.0;
+    cartesian.right.timeout_sec = 5.0;
+    cartesian.left.has_tcp_target = true;
+    cartesian.right.has_tcp_target = true;
+    cartesian.left.tcp_target_stand = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    cartesian.right.tcp_target_stand = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    cartesian.left.tcp_target_stand.quaternion_xyzw =
+        std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+    cartesian.right.tcp_target_stand.quaternion_xyzw =
+        std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+    buffer.setCommand(cartesian);
+
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        return snapshot.command.seq == cartesian.seq &&
+               snapshot.left_cartesian_solve.follower_active &&
+               snapshot.right_cartesian_solve.follower_active &&
+               snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok &&
+               !snapshot.fault_latched;
+    }, std::chrono::milliseconds(1000)));
+
+    rb_servo::DualArmCommand joint = command(rb_servo::ControlMode::JointTarget);
+    joint.seq = 78;
+    joint.host_time_ns = rb_servo::nowSteadyNs();
+    joint.left.timeout_sec = 5.0;
+    joint.right.timeout_sec = 5.0;
+    joint.left.has_joint_target = true;
+    joint.right.has_joint_target = true;
+    joint.left.q_target_deg = joints(0.0);
+    joint.right.q_target_deg = joints(0.0);
+    buffer.setCommand(joint);
+
+    const uint64_t joint_start_tick = loop.latestSnapshot().tick;
+    const uint64_t min_gap_ticks = static_cast<uint64_t>(
+        cfg.servo.rate_hz * (profile.ruckig_follower.chunk_feed_timeout_sec + 0.1)
+    );
+    rb_servo::ServoSnapshot gap_snapshot;
+    RB_CHECK(waitUntil([&] {
+        gap_snapshot = loop.latestSnapshot();
+        return gap_snapshot.command.seq == joint.seq &&
+               gap_snapshot.tick >= joint_start_tick + min_gap_ticks &&
+               !gap_snapshot.fault_latched;
+    }, std::chrono::milliseconds(4000)));
+
+    rb_servo::DualArmCommand resumed = cartesian;
+    resumed.seq = 79;
+    resumed.host_time_ns = rb_servo::nowSteadyNs();
+    buffer.setCommand(resumed);
+
+    const uint64_t resume_start_tick = loop.latestSnapshot().tick;
+    rb_servo::ServoSnapshot resumed_snapshot;
+    RB_CHECK(waitUntil([&] {
+        resumed_snapshot = loop.latestSnapshot();
+        return resumed_snapshot.command.seq == resumed.seq &&
+               resumed_snapshot.tick >= resume_start_tick + 5;
+    }, std::chrono::milliseconds(500)));
+    const bool fault_latched = loop.faultLatched();
+    const rb_servo::SafetyVerdict latched_reason = loop.latchedFaultReason();
+    loop.stop();
+    receiver.stop();
+
+    RB_CHECK(resumed_snapshot.safety_verdict != rb_servo::SafetyVerdict::ChunkFollowerFault);
+    RB_CHECK(!resumed_snapshot.fault_latched);
+    RB_CHECK(!fault_latched);
+    RB_CHECK(latched_reason != rb_servo::SafetyVerdict::ChunkFollowerFault);
+    return true;
+}
+
 bool testTcpLinearMoveUsesIkInSimulationOnly() {
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = testConfig();
@@ -5920,6 +6059,7 @@ int main() {
     if (!testResetFaultRequiresFreshValidState()) return 1;
     if (!testDisarmAndCartesianHoldPreviousTarget()) return 1;
     if (!testCartesianPoseTargetUsesIkInSimulation()) return 1;
+    if (!testChunkFollowerDeactivatesAcrossBothArmJointTargetGap()) return 1;
     if (!testTcpLinearMoveUsesIkInSimulationOnly()) return 1;
     if (!testRbpodoControllerSimulationStartupReferenceSource()) return 1;
     if (!testRbpodoControllerSimulationNonStreamingCartesianGate()) return 1;
