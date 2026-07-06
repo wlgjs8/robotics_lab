@@ -39,18 +39,18 @@ struct BackendConfig {
 
     // Soft-entry gain ramp for move_servo_j RT-servo (re)engagement.
     // On every server (re)start the controller transitions from soft
-    // position-hold into stiff real-time servo_j streaming. With the transparent
-    // executor profile (servo_gain=1.0, LPF off) the joints stiffen in a single
-    // 2 ms tick and take up gearbox backlash/compliance on the gravity-loaded
-    // joints (J0/J2) -> an audible "clunk" + a few-mm settle on every bring-up
-    // (independent of pgmode/activation). Ramping ONLY the proportional gain from
+    // position-hold into stiff real-time servo_j streaming. With servo_gain=1.0
+    // the joints can stiffen in a single 2 ms tick and take up gearbox
+    // backlash/compliance on the gravity-loaded joints (J0/J2) -> an audible
+    // "clunk" + a few-mm settle on every bring-up (independent of
+    // pgmode/activation). Ramping ONLY the proportional gain from
     // servo_gain*servo_soft_entry_gain_start_scale up to servo_gain over
     // servo_soft_entry_sec spreads that take-up out so the joints stiffen
     // gradually. This is a TRANSIENT shaping of how the gain is reached at
-    // engagement; it never changes the steady-state servo_gain (the
-    // transparent-executor contract value) nor t1/t2/alpha. The ramp re-arms
-    // whenever servo_j streaming resumes after a gap > servo_soft_entry_rearm_gap_sec
-    // (the same RT-servo re-engagement clunk happens after any stream interruption).
+    // engagement; it never changes the steady-state servo_gain nor t1/t2/alpha.
+    // The ramp re-arms whenever servo_j streaming resumes after a gap >
+    // servo_soft_entry_rearm_gap_sec (the same RT-servo re-engagement clunk
+    // happens after any stream interruption).
     bool servo_soft_entry_enable = true;
     double servo_soft_entry_sec = 0.08;
     double servo_soft_entry_gain_start_scale = 0.1;  // start gain = servo_gain * this

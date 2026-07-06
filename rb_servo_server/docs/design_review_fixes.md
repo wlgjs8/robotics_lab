@@ -75,11 +75,14 @@ A packet like this is now converted to Hold:
 
 The parser sets payload flags for the retained motion primitives, and the loop refuses to execute a mode whose required payload is absent.
 
-### 5. Cartesian/IK unavailable means Hold, not zero
+### 5. Cartesian failure means Hold, not zero
 
-`TcpPoseTarget` and `TcpLinearMove` return `CartesianUnavailable` and hold the previous safe target when Cartesian solving is unavailable. This prevents the Cartesian layer from accidentally defaulting to zero joint arrays.
+`TcpPoseTarget` and `TcpLinearMove` now have active configured Cartesian paths.
+They return `CartesianUnavailable` and hold the previous safe target when
+kinematics, config, input state, or IK solving is unavailable. This prevents the
+Cartesian layer from accidentally defaulting to zero joint arrays.
 
-When IK is implemented, the same rule should remain:
+The rule remains:
 
 ```text
 IK success → q_target
@@ -101,12 +104,8 @@ At 500 Hz this means filter dt is constrained to 1.0-3.0 ms by default. One late
 
 The acceleration limiter now prevents overshoot past the already velocity-limited target. This avoids direction-change artifacts where `q_sent` could exceed the intended command range.
 
-## Still pending
+## Still pending from this v3 review
 
-- `RbpodoBackend` real controller communication
-- fully implemented `StatePublisher`
 - lock-free or priority-inheritance command buffer
-- parallel left/right `sendServoJ`
-- time-based interpolation or Ruckig
-- Cartesian FK/IK implementation
+- optional Ruckig or jerk-limited interpolation beyond the current filters
 - production JSON parser such as `nlohmann/json`

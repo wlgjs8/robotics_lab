@@ -342,13 +342,17 @@ are not supported profiles. ACK-off rbpodo settings are not a real baseline
 until the supervised acceptance sequence passes with state-age, ACK, error-code,
 and q_ref/q_actual evidence.
 
-These four Servo J fields are pinned to a *transparent-executor* profile
-(`t1=0.002, t2=0.021, gain=1.0, alpha=10.0`; `alpha=10` script-level = effective
-`1.0` after the controller's `0.1` scaling = inner LPF off), so the controller
-adds no smoothing of its own and all responsiveness/smoothness/accuracy is owned
-by the server-side control loop (`TcpPoseTarget` → `cartesian_control.pose_track_smd`).
-They are a contract, not a tuning surface — see `docs/servo_backend_contract.md`
-→ "Servo J Is A Fixed Transparent Executor".
+Supported 500 Hz Servo J configs pin `servo_t1_sec: 0.002`,
+`servo_t2_sec: 0.021`, and `servo_gain: 1.0`. `servo_alpha` remains
+script-level and is scaled by `0.1` inside the Rainbow controller:
+`servo_alpha: 10.0` disables the controller LPF, while `servo_alpha: 1.0`
+leaves an effective alpha of roughly `0.1`. The tracked physical-real stack uses
+`servo_alpha: 1.0` because the LPF-off setting produced jerk/jitter on hardware;
+controller-simulation diagnostics may still use `10.0` for a transparent
+controller profile. The primary responsiveness/smoothness/accuracy tuning
+surface is the server-side control loop (`TcpPoseTarget` →
+`cartesian_control.pose_track_smd`) — see `docs/servo_backend_contract.md` →
+"Servo J Streaming Profiles".
 
 Deprecated simulator config names are archived under `docs/archive/configs/`
 for historical reference only. They are not runnable source-of-truth profiles

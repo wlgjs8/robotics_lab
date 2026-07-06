@@ -16,7 +16,8 @@ left_robot:
   servo_t1_sec: 0.002
   servo_t2_sec: 0.021
   servo_gain: 1.0           # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
-  servo_alpha: 1.0 #10.0
+  # script-level 10.0 disables controller LPF but produced jerk/jitter on hardware.
+  servo_alpha: 1.0
   disable_waiting_ack: true    # ACK-off 500Hz streaming; config-driven, no RB_ALLOW_* env gate
 
 right_robot:
@@ -30,7 +31,8 @@ right_robot:
   servo_t1_sec: 0.002
   servo_t2_sec: 0.021
   servo_gain: 1.0                 # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
-  servo_alpha: 1.0 #10.0
+  # script-level 10.0 disables controller LPF but produced jerk/jitter on hardware.
+  servo_alpha: 1.0
   disable_waiting_ack: true    # ACK-off 500Hz streaming; config-driven, no RB_ALLOW_* env gate
 
 left_mount:
@@ -663,8 +665,8 @@ cartesian_control:
         max_linear_accel_m_s2: 3.0
         max_linear_jerk_m_s3: 100.0 #5.0
         max_angular_velocity_rad_s: 1.50
-        max_angular_accel_rad_s2: 8.0 #2.0
-        max_angular_jerk_rad_s3: 120.0 #3.0
+        max_angular_accel_rad_s2: 10.0 #8.0 #2.0
+        max_angular_jerk_rad_s3: 300.0 #120.0 #3.0
         discard_head_steps: 0     # producer re-anchors each chunk to measured TCP: latency already absorbed
         consume_steps: 12         # preempt preference (clamped to horizon-L-R; tail-consume covers late chunks)
         reserve_steps: 1

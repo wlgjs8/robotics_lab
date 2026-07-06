@@ -182,15 +182,16 @@ deprecated입니다. 지원되는 robot-control profile은 500 Hz이며
 `docs/runbooks/rbpodo_servo_acceptance.md`와
 `docs/runbooks/real_robot_readonly.md`를 봅니다.
 
-이 4개 Servo J 값은 *투명 실행기(transparent-executor)* 프로파일
-(`t1=0.002, t2=0.021, gain=1.0, alpha=10.0`)로 **고정**합니다. 컨트롤러가
-`gain`/`alpha`를 내부에서 `0.1` 스케일하므로 script값 `alpha=10`은 실효 `1.0`,
-즉 컨트롤러 내부 LPF off입니다. 그러면 Rainbow 컨트롤러 inner loop는 어떤
-스무딩도 추가하지 않는 투명 pass-through가 되고, 반응성·부드러움·정확성은
-모두 서버 측 제어루프(`TcpPoseTarget` → `cartesian_control.pose_track_smd`)가
-책임집니다. 이 4값은 튜닝 대상이 아니라 **계약**입니다 —
-`docs/servo_backend_contract.md`의 "Servo J Is A Fixed Transparent Executor"
-참고.
+지원되는 500 Hz Servo J profile은 `t1=0.002`, `t2=0.021`, `gain=1.0`을
+고정합니다. 컨트롤러가 `gain`/`alpha`를 내부에서 `0.1` 스케일하므로
+script값 `alpha=10.0`은 실효 `1.0`, 즉 컨트롤러 내부 LPF off입니다. 하지만
+physical real robot에서는 LPF-off profile이 jerk/jitter를 키우므로 tracked
+real stack은 script-level `servo_alpha: 1.0`(실효 약 `0.1`)을 사용해
+컨트롤러 LPF를 남겨 둡니다. Controller-simulation diagnostic transparency가
+필요할 때만 `servo_alpha: 10.0` profile을 씁니다. 반응성·부드러움·정확성의
+1차 튜닝 표면은 여전히 서버 측 제어루프(`TcpPoseTarget` →
+`cartesian_control.pose_track_smd`)입니다. 자세한 내용은
+`docs/servo_backend_contract.md`의 "Servo J Streaming Profiles"를 봅니다.
 
 `rbpodo` joint state와 command는 raw controller degree 값을 보존합니다.
 tracked real rbpodo template의 supported safety range는 명시적 per-joint

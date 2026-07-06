@@ -68,9 +68,11 @@ Servo J range checks in config validation (see
 - `0.02 < servo_t2_sec < 0.2` (vendor-recommended; outside → WARN only)
 - `servo_gain > 0`
 - `0 < servo_alpha <= 10` — **script-level** units. The controller scales
-  `gain`/`alpha` by `0.1` internally, so effective `0 < alpha < 1` maps to
-  script-level `0 < servo_alpha <= 10`; `servo_alpha: 10.0` = effective `1.0` =
-  inner LPF OFF (the server-side SMD owns smoothing).
+  `gain`/`alpha` by `0.1` internally, so effective `0 < alpha <= 1` maps to
+  script-level `0 < servo_alpha <= 10`. Use `servo_alpha: 1.0` for the tracked
+  physical-real profile (effective roughly `0.1`, LPF retained to reduce
+  jerk/jitter). `servo_alpha: 10.0` is the LPF-off diagnostic profile, not the
+  default physical-real setting.
 
 For later motion configs, `servo_t1_sec` must match the supported command
 period:

@@ -20,9 +20,11 @@ Supported servo target:
 7. ResetFault command → clear latched fault if present, return to ConnectedHold, and Hold
 8. EmergencyStop command → latch fault hold pose
 9. validate payloads; missing payload → Hold/InvalidCommand
-10. Cartesian modes currently → Hold/CartesianUnavailable
+10. Cartesian commands resolve through the configured Pinocchio/Eigen path:
+    `TcpPoseTarget` targets a final TCP pose, and `TcpLinearMove` runs a finite
+    MoveL-like path. Missing kinematics/config/state → Hold/CartesianUnavailable
 11. TrajectoryFilter computes left/right joint target
-12. SafetyFilter clamps target and checks robot/tracking state
+12. SafetyFilter clamps target and checks robot/tracking/floor/collision state
 13. safety failure policy:
     - snap_to_actual for mock/simulator tracking error
     - fault_latch for real tracking error
@@ -74,7 +76,7 @@ Lifecycle commands (`ArmMotion`, `DisarmMotion`, `EmergencyStop`, `ResetFault`) 
 
 ## Safety behavior
 
-The first scaffold safety checks are:
+The active safety checks include:
 
 - robot connected
 - no robot error state
@@ -83,7 +85,9 @@ The first scaffold safety checks are:
 - joint acceleration clamp
 - tracking error threshold
 - missing payload guard
-- Cartesian unavailable guard
+- Cartesian solve/config/state unavailable guard
+- stand-frame floor plane guard when configured
+- self-collision verdict guard when configured
 - emergency-stop fault latch
 
 The tracking guard checks:
@@ -108,7 +112,7 @@ The server should never generate a zero joint target merely because something fa
 
 ```text
 invalid command → previous safe target
-unsupported Cartesian/IK → previous safe target
+Cartesian unavailable / IK failure → previous safe target or fault latch
 tracking error with fault_latch → latched current/last-safe target
 robot state error → latched current/last-safe target
 EmergencyStop → latched current/last-safe target
@@ -116,7 +120,5 @@ EmergencyStop → latched current/last-safe target
 
 ## Still pending
 
-- parallel left/right send
-- time-based action chunk interpolation
-- Ruckig or jerk-limited interpolation
-- lock-free/latest command buffer for 500 Hz experiments
+- optional Ruckig or jerk-limited interpolation beyond the current filters
+- lock-free/latest command buffer experiments, if future 500 Hz profiling needs them

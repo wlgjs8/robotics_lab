@@ -491,11 +491,14 @@ vendor-recommended range are accepted with a WARN, not refused
 - `0 < servo_alpha <= 10` — **script-level units**. The Rainbow controller
   scales `gain`/`alpha` by `0.1` internally (vendor-confirmed), so the script
   value we send is 10x the effective value. The effective vendor range
-  `0 < alpha < 1` therefore maps to script-level `0 < servo_alpha <= 10`, and
-  `servo_alpha: 10.0` is the intended "effective 1.0 = inner LPF OFF" setting.
-  The range check is in script-level units so this vendor-correct value does not
-  spuriously warn. (Earlier docs stating `0 < servo_alpha < 1` were in effective
-  units and are superseded by this script-level range.)
+  `0 < alpha <= 1` therefore maps to script-level `0 < servo_alpha <= 10`, and
+  `servo_alpha: 10.0` means "effective 1.0 = inner LPF OFF". The tracked real
+  robot profile intentionally uses `servo_alpha: 1.0` (effective roughly `0.1`)
+  to retain controller-side filtering after LPF-off motion showed jerk/jitter on
+  hardware. The range check is in script-level units so both the real profile
+  (`1.0`) and the diagnostic LPF-off profile (`10.0`) are valid. (Earlier docs
+  using a sub-unit script-level alpha range were mixing effective and
+  script-level units and are superseded by this range.)
 
 Deprecated aliases remain accepted with warnings while configs migrate:
 
@@ -515,29 +518,33 @@ New configs must not use `servo_acc`; use `servo_alpha`. New configs must not
 use `servo_lookahead_sec`; use `servo_t2_sec`. The old names are compatibility
 aliases only.
 
-### Servo J Is A Fixed Transparent Executor
+### Servo J Streaming Profiles
 
-The four `move_servo_j` parameters are pinned to a *transparent-executor*
-profile. They are a CONTRACT, not a tuning surface. The supported streaming
-profile is:
+The supported 500 Hz `move_servo_j` profiles keep `t1`, `t2`, and `gain` fixed
+and vary only the script-level `alpha` according to target environment:
 
 ```yaml
 servo_t1_sec: 0.002   # == 1 / servo.rate_hz at 500 Hz (command arrival/period)
 servo_t2_sec: 0.021   # controller hold time, just above the 0.02 vendor floor
 servo_gain:   1.0      # unity, no command scaling
-servo_alpha: 10.0      # script-level; effective 1.0 after the controller's 0.1 scaling => inner LPF OFF
 ```
 
-With `servo_alpha: 10.0` (effective `1.0`) the controller's inner low-pass
-filter is off, so `move_servo_j` is a transparent pass-through of the per-tick
-joint targets the server streams: the Rainbow controller's inner loop adds no
-smoothing, lag, or shaping of its own. Pin these values; do not treat them as
-knobs.
+Profile-specific alpha:
 
-Because the controller is transparent, ALL responsiveness, smoothness, and
-accuracy are owned by the `rb_servo_server` control loop, not by the controller.
-For Cartesian setpoint streaming (`TcpPoseTarget` / `tcp_target_pose`) the
-server-side tuning surface is:
+- Physical real robot: `servo_alpha: 1.0` (effective roughly `0.1`). This keeps
+  Rainbow's inner LPF active enough to reduce jerk/jitter observed with LPF off.
+- Controller-simulation / diagnostic transparency: `servo_alpha: 10.0`
+  (effective `1.0`). This disables Rainbow's inner LPF and is useful when
+  controller-side smoothing must be removed from acceptance evidence.
+
+Do not treat `servo_t1_sec`, `servo_t2_sec`, or `servo_gain` as casual tuning
+knobs in supported 500 Hz profiles. `servo_alpha` is deliberately profile-owned:
+use `1.0` for the tracked real stack unless a supervised acceptance task
+explicitly asks for the LPF-off diagnostic profile.
+
+Responsiveness, smoothness, and accuracy are still primarily owned by the
+`rb_servo_server` control loop. For Cartesian setpoint streaming
+(`TcpPoseTarget` / `tcp_target_pose`) the server-side tuning surface is:
 
 - `cartesian_control.pose_track_smd.*` — second-order (spring-mass-damper)
   target tracker. `natural_frequency_linear_hz` / `natural_frequency_angular_hz`
@@ -557,11 +564,11 @@ server-side tuning surface is:
 Trade-off across the two regimes: for large/fast UMI teleop moves raise
 `pose_track_smd.natural_frequency_*` (and the velocity/accel caps); for
 wrist-camera-stable imitation rollout keep damping critical (`1.0`) and the
-velocity/accel caps bounded so the camera view does not shake. The servo J
-profile above stays fixed in BOTH regimes. Tracked example configs that predate
-this profile may still carry legacy `servo_t2_sec` / `servo_alpha` values
-(e.g. `0.05` / `0.5`); new and migrated configs use the transparent-executor
-profile above.
+velocity/accel caps bounded so the camera view does not shake. Keep the real
+Servo J profile at `servo_alpha: 1.0` unless the task is specifically collecting
+LPF-off diagnostic evidence. Tracked example configs that predate this profile
+may still carry legacy `servo_t2_sec` / `servo_alpha` values (e.g. `0.05` /
+`0.5`); new and migrated physical-real configs use the `1.0` real profile above.
 
 ### Rbpodo Real Acceptance Sequence
 

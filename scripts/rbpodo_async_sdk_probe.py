@@ -128,7 +128,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--command-timeout-sec", type=float, default=0.02)
     parser.add_argument("--servo-t2-sec", type=float, default=0.03)
     parser.add_argument("--servo-gain", type=float, default=1.0)
-    parser.add_argument("--servo-alpha", type=float, default=0.5)
+    parser.add_argument(
+        "--servo-alpha",
+        type=float,
+        default=0.5,
+        help="Script-level Servo J alpha; valid range is 0 < alpha <= 10.",
+    )
     parser.add_argument("--max-noop-target-delta-deg", type=float, default=0.05)
     parser.add_argument("--max-q-actual-drift-deg", type=float, default=0.05)
     parser.add_argument("--late-ack-poll-sec", type=float, default=0.02)
@@ -272,8 +277,8 @@ def preflight(args: argparse.Namespace, *, run_pgmode: bool = True) -> dict[str,
     finite_positive(args.servo_gain, "--servo-gain")
     finite_positive(args.pgmode_timeout_sec, "--pgmode-timeout-sec")
     finite_port(args.pgmode_command_port, "--pgmode-command-port")
-    if not math.isfinite(args.servo_alpha) or not (0.0 < args.servo_alpha < 1.0):
-        raise AsyncSdkProbeError("--servo-alpha must be finite and in (0, 1)")
+    if not math.isfinite(args.servo_alpha) or not (0.0 < args.servo_alpha <= 10.0):
+        raise AsyncSdkProbeError("--servo-alpha must be finite and in (0, 10]")
     if (
         not math.isfinite(args.max_noop_target_delta_deg)
         or args.max_noop_target_delta_deg <= 0.0

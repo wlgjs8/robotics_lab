@@ -86,6 +86,16 @@ right_robot:
             with self.assertRaisesRegex(probe.AsyncSdkProbeError, "operation_mode is real"):
                 probe.preflight(args(config=config), run_pgmode=False)
 
+    def test_servo_alpha_accepts_script_level_real_and_lpf_off_values(self) -> None:
+        probe.preflight(args(servo_alpha=1.0), run_pgmode=False)
+        probe.preflight(args(servo_alpha=10.0), run_pgmode=False)
+
+    def test_servo_alpha_rejects_out_of_script_level_range(self) -> None:
+        with self.assertRaisesRegex(probe.AsyncSdkProbeError, r"\(0, 10\]"):
+            probe.preflight(args(servo_alpha=0.0), run_pgmode=False)
+        with self.assertRaisesRegex(probe.AsyncSdkProbeError, r"\(0, 10\]"):
+            probe.preflight(args(servo_alpha=10.1), run_pgmode=False)
+
     def test_classifies_ack_on_fast_enough(self) -> None:
         classification, reasons = probe.classify_summary(summary_for("ack_on", {
             "send_count": 100,
