@@ -84,19 +84,14 @@ This includes the mandatory `rb_servo_server` C++ Pinocchio tests for near-pi
 SO(3), quaternion convention, body-error convention, and stand/local
 frame-conversion behavior. Missing Pinocchio is a dependency failure.
 
-## Cartesian Acceptance
+## Cartesian Validation
 
-Cartesian PTP, Linear, and Twist behavior is validated against an
-already-running rbpodo/mock server:
-
-```bash
-python3 scripts/cartesian_acceptance.py --mode assume-running
-```
-
-Run it against a mock server for hardware-free checks, or against rbpodo
-controller `pgmode` simulation / VM for controller-sim evidence. It does not
-enable real robot motion. (The prior simulator-first hardware-free Cartesian
-acceptance lane was retired with `rb_simulator`.)
+Cartesian PTP, Linear, and Twist behavior is covered by the Pinocchio-backed C++
+test suite, then exercised on the active stack: mock smoke when a local mock
+config is available, rbpodo controller `pgmode` simulation / VM for
+controller-sim evidence, and physical real only through the separate supervised
+runbooks. The prior software-simulator-oriented Cartesian acceptance runner was
+removed with the retired simulator-first lane.
 
 ## Native Stack
 
@@ -133,6 +128,6 @@ Real robot work requires rbpodo and site-specific network access. Do not add or 
 1. Run Python/unit checks.
 2. Run hardware-free C++ checks.
 3. Run the mock / controller-sim stack manually in the GUI.
-4. Run Cartesian acceptance (`scripts/cartesian_acceptance.py --mode assume-running`).
+4. Exercise Cartesian behavior on the active mock or controller-sim stack.
 5. Repeat until behavior is stable.
 6. Only then start a separate real robot read-only acceptance workflow.

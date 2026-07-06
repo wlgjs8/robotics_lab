@@ -98,7 +98,7 @@ backend_type: mock | rbpodo
 ```
 
 `run_mode: simulation` now refers only to the rbpodo controller `pgmode`
-simulation flavor; the `rb_simulator` software-simulator backend was removed.
+simulation flavor; the old software-simulator backend was removed.
 
 ## Real And Controller-Simulation Topology
 
@@ -182,15 +182,12 @@ Cartesian math rebaseline is part of the Pinocchio-backed C++ test suite:
 ctest --test-dir rb_servo_server/build --output-on-failure
 ```
 
-Cartesian acceptance now runs against an already-running rbpodo/mock server:
-
-```bash
-python3 scripts/cartesian_acceptance.py --mode assume-running
-```
-
-Behavior is additionally validated on rbpodo pgmode-simulation / VM / real. The
-prior simulator-first hardware-free Cartesian acceptance lane was retired with
-`rb_simulator`.
+Cartesian behavior is covered by the Pinocchio-backed C++ tests above, then
+exercised on the active stack: mock smoke when a local mock config is available,
+rbpodo controller `pgmode` simulation / VM, and real hardware only through the
+separate supervised runbooks. The old software-simulator-oriented Cartesian
+acceptance runner was removed with the retired simulator-first Cartesian
+acceptance lane.
 
 Start the integrated operator stack (native, not Docker). `make run` brings up
 `rb_servo_server` + the viser GUI + `policy_runner` (SpaceMouse + UMI teleop):

@@ -90,19 +90,19 @@ run_mode: mock | simulation | real
 backend_type: mock | rbpodo
 ```
 
-`run_mode` describes the environment. `backend_type` describes the backend implementation. Deprecated terms such as `rbsim_local`, public `rbsim`, the removed `simulator` backend, or mixed simulator aliases must not be introduced in new public docs/configs.
+`run_mode` describes the environment. `backend_type` describes the backend implementation. Removed simulator backend aliases or mixed simulator terms must not be introduced in new public docs/configs.
 
 Supported real-controller scope is rbpodo only. The `MockBackend` is the
-hardware-free validation surface; the `rb_simulator` software-simulator backend
-and unsupported raw script TCP comparison paths are removed and must not be
+hardware-free validation surface; the old software-simulator backend and
+unsupported raw script TCP comparison paths are removed and must not be
 presented as runnable backends.
 
 ### Simulation flavors (name them precisely)
 
 "Simulation" now means exactly one thing — rbpodo controller `pgmode`
-simulation. The former `rb_simulator` software-simulator flavor (`run_mode:
-simulation`, `backend_type: simulator`) was removed. Name the remaining flavor by
-its canonical config keys, never by the bare word "simulation":
+simulation. The former software-simulator flavor (`run_mode: simulation`,
+`backend_type: simulator`) was removed. Name the remaining flavor by its
+canonical config keys, never by the bare word "simulation":
 
 | Flavor | Canonical name | `run_mode` | `backend_type` | `operation_mode` | Connects to |
 |---|---|---|---|---|---|
@@ -499,9 +499,11 @@ Current geometry is `configured_estimate`, not measured calibration. It may be u
 
 Hardware-free validation is described in `docs/hardware_free_validation.md`.
 
-Cartesian behavior is validated against an already-running rbpodo/mock server
-(`scripts/cartesian_acceptance.py --mode assume-running`) and on rbpodo
-pgmode-simulation / VM / real.
+Cartesian behavior is validated with the Pinocchio-backed C++ tests plus
+active-stack smoke/acceptance on mock when a local mock config is available,
+rbpodo controller `pgmode` simulation / VM, and physical real only through the
+separate supervised runbooks. The old software-simulator-oriented Cartesian
+acceptance runner is no longer part of the active validation surface.
 
 Real three-camera acceptance is described in `docs/runbooks/camera_acceptance.md`.
 

@@ -18,7 +18,7 @@ Primary near-term goal:
 
 Later goals:
 
-- Rainbow rbsim backend
+- rbpodo controller-simulation support
 - real rbpodo backend
 - Cartesian TCP control
 - optional force/admittance control
@@ -122,7 +122,7 @@ Required behavior:
 - motion commands are ignored until `ArmMotion` transitions to `ArmedHold`.
 - latched fault ignores motion commands until `ResetFault`.
 - failed `sendServoJ` targets are not recorded as previous sent targets.
-- mock/rbsim default tracking error policy: `snap_to_actual`.
+- mock/controller-simulation default tracking error policy: `snap_to_actual`.
 - real default tracking error policy: `fault_latch`.
 - trajectory/safety math uses capped `filter_dt`, while logs keep actual `period_ms`.
 
@@ -173,7 +173,7 @@ Expected:
 - `tools/send_dual_joint_sine.py`
 - `tools/plot_servo_log.py`
 
-## Milestone 2: cleanup before rbsim
+## Milestone 2: cleanup before controller simulation
 
 Implement or refine:
 
@@ -297,7 +297,7 @@ A good next Codex task is:
 2. `send_dual_joint_sine.py` changes command seq/mode in log
 3. jitter columns exist and have meaningful values
 4. YAML changes are reflected at runtime
-5. no regression to real/rbsim placeholder build
+5. no regression to real/controller-simulation placeholder build
 6. force-control scaffold compiles but remains disabled by default
 7. invalid `JointTarget` without `q_target_deg` holds previous target and never moves to zeros
 8. `EmergencyStop` latches fault and ignores later motion commands until `ResetFault`

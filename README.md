@@ -104,8 +104,8 @@ backend_type: mock | rbpodo
 
 지원되는 real-controller backend는 `rbpodo` 하나뿐입니다. `mock`은
 hardware-free 검증용으로 유지하며, `run_mode: simulation`은 이제 rbpodo
-컨트롤러 `pgmode` 시뮬레이션 flavor만 지칭합니다. 제거된 `rb_simulator`
-소프트웨어 시뮬레이터와 unsupported raw script TCP 비교 경로는 active
+컨트롤러 `pgmode` 시뮬레이션 flavor만 지칭합니다. 제거된 소프트웨어
+시뮬레이터 backend와 unsupported raw script TCP 비교 경로는 active
 code/config/gate/runbook surface에 없습니다.
 
 ## 실제 및 컨트롤러 시뮬레이션 토폴로지
@@ -257,15 +257,12 @@ Cartesian math rebaseline is part of the Pinocchio-backed C++ test suite:
 ctest --test-dir rb_servo_server/build --output-on-failure
 ```
 
-Cartesian acceptance now runs against an already-running rbpodo/mock server:
-
-```bash
-python3 scripts/cartesian_acceptance.py --mode assume-running
-```
-
-추가로 rbpodo pgmode-simulation / VM / real에서 거동을 검증합니다. (이전의
-simulator-우선 hardware-free Cartesian acceptance lane은 `rb_simulator`와 함께
-제거됐습니다.)
+Cartesian behavior is covered by the Pinocchio-backed C++ tests above, then
+exercised on the active stack: mock smoke when a local mock config is available,
+rbpodo controller `pgmode` simulation / VM, and real hardware only through the
+separate supervised runbooks. The old software-simulator-oriented Cartesian
+acceptance runner was removed with the retired simulator-first Cartesian
+acceptance lane.
 
 Supported scope hygiene is documented in `AGENTS.md`,
 `docs/architecture.md`, and `docs/servo_backend_contract.md`; keep removed

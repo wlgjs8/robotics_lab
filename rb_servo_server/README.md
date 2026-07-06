@@ -87,10 +87,11 @@ python3 tools/plot_servo_log.py logs/servo_log.csv
 
 Hardware-free validation runs C++/Python tests and, when a local mock config is
 available, mock-mode smoke against that explicit `config/local/*.yaml`. Cartesian
-behavior is checked against an already-running rbpodo or mock server with
-`scripts/cartesian_acceptance.py --mode assume-running`. For controller-level
-simulation, use the rbpodo controller `pgmode` simulation (`make run MODE=sim`)
-or the Rainbow virtual control-box VMs.
+behavior is covered by Pinocchio-backed C++ tests and active-stack smoke. For
+controller-level simulation, use the rbpodo controller `pgmode` simulation
+(`make run MODE=sim`) or the Rainbow virtual control-box VMs. The old
+software-simulator-oriented Cartesian acceptance runner is no longer part of
+this validation surface.
 
 This lane is not Rainbow Robotics external simulator/OVA, real robot, privileged
 Docker, or production network validation.

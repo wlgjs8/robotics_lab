@@ -86,7 +86,8 @@ Do not run real mode unless all are true:
 - `safety.latch_fault_on_robot_state_error=true`.
 - `network.command_bind` and `network.state_pub_endpoint` remain loopback unless a
   separate deployment review explicitly sets `RB_ALLOW_NETWORK_EXPOSURE=1`.
-- Hardware-free gate and rb_simulator gate pass immediately before real work.
+- Hardware-free gate and the retired software-simulator gate pass immediately
+  before real work.
 
 ## Implementation Plan
 
@@ -356,13 +357,8 @@ This checklist must be completed in order. Stop immediately on any failed item.
 
 ### 2. Build and Software Evidence
 
-Run these without real hardware contact:
-
-```bash
-RBSIM_SMOKE_MODE=skip bash scripts/hardware_free_validation.sh
-python3 -m unittest discover rb_simulator/tests
-python3 rb_simulator/tools/rbsim_servo_smoke.py --self-test
-```
+Run the corresponding hardware-free and retired software-simulator checks
+without real hardware contact.
 
 If SDK is installed, build the rbpodo-enabled binary without launching it:
 

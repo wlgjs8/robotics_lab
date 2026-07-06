@@ -108,13 +108,14 @@ The SpaceMouse controller-simulation path uses `policy_runner` as the command
 source, the rbpodo backend in controller `pgmode` simulation, and the
 state-only `rb_gui`/viser view for operator feedback.
 
-Prepared wrapper checks:
+Use the unified stack entrypoint for this path:
 
 ```bash
-tools/rbpodo_pgmode_spacemouse.sh check
-tools/rbpodo_pgmode_spacemouse.sh policy-dry-run
-tools/rbpodo_pgmode_spacemouse.sh gui --dry-run
+make run MODE=sim
 ```
+
+The old dedicated SpaceMouse wrapper is no longer part of the active tooling
+surface.
 
 The SpaceMouse path sends `TcpPoseTarget` only after command-source lease,
 deadman, stale state, fault, controller-simulation Cartesian, and
@@ -179,6 +180,5 @@ Run the focused checks:
 python3 scripts/collect_gene_umi_artifact_manifest.py --help
 PYTHONPATH=scripts python3 -m unittest discover -s scripts -p 'test_collect_gene_umi_artifact_manifest.py' -v
 make -n policy-hdf5-audit-smoke
-make -n pgmode-transition-dry-run
 python3 -m compileall -q policy_runner/policy_runner scripts
 ```

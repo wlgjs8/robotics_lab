@@ -4,7 +4,7 @@ PROJECT ?= robotics_lab
 POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 
-.PHONY: run flow-infer-real build vm-up vm-down vm-status policy-hdf5-audit-smoke pgmode-transition-dry-run mig-rebaseline deps-hardware-free cam-up cam-engine-rebuild cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
+.PHONY: run flow-infer-real build vm-up vm-down vm-status policy-hdf5-audit-smoke deps-hardware-free cam-up cam-engine-rebuild cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
 
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
@@ -66,9 +66,6 @@ policy-hdf5-audit-smoke:
 	else \
 		echo "policy-hdf5-audit-smoke: no CODEX_UPLOADED_HDF5_SMOKE or episode_002.hdf5; skipped"; \
 	fi
-
-pgmode-transition-dry-run:
-	tools/rbpodo_pgmode_spacemouse.sh check
 
 deps-hardware-free:
 	./scripts/install_deps_ubuntu.sh --profile hardware-free

@@ -13,10 +13,10 @@ Hardware-free validation may exercise:
 - C++ unit tests that do not require hardware
 - mock-mode smoke tests
 
-> The `rb_simulator` per-arm software-simulator backend and its hardware-free
-> simulator lane were retired. Hardware-free validation now uses the mock
-> backend; controller behavior beyond mock is validated on rbpodo controller
-> `pgmode` simulation (VM or onbox) and real.
+> The old per-arm software-simulator backend and its hardware-free simulator
+> lane were retired. Hardware-free validation now uses the mock backend;
+> controller behavior beyond mock is validated on rbpodo controller `pgmode`
+> simulation (VM or onbox) and real.
 
 It does not prove:
 
@@ -52,11 +52,10 @@ cmake --build rb_servo_server/build -j
 ctest --test-dir rb_servo_server/build --output-on-failure
 ```
 
-Cartesian acceptance (against an already-running rbpodo/mock server):
-
-```bash
-python3 scripts/cartesian_acceptance.py --mode assume-running
-```
+Cartesian behavior is covered by the Pinocchio-backed C++ tests above plus
+active-stack smoke when a local mock config is available. The old
+software-simulator-oriented Cartesian acceptance runner is no longer part of
+the hardware-free validation surface.
 
 ## Dependency Preflight
 

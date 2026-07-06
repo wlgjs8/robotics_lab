@@ -1,8 +1,8 @@
 # Supported Scope
 
 The active real-controller backend is `rbpodo` only. `mock` is the
-hardware-free validation surface; the `rb_simulator` software-simulator
-backend was removed.
+hardware-free validation surface; the old software-simulator backend was
+removed.
 
 The repository is in **rbpodo pgmode-real physical bring-up**. Real motion is an
 operator-supervised lane that has carried a dual-arm physical Cartesian circle

@@ -40,14 +40,14 @@ run_mode: mock | simulation | real
 backend_type: mock | rbpodo
 ```
 
-Do not introduce new public terms such as `rbsim_local`, public `rbsim`, the
-removed `simulator` backend, or mixed simulator aliases. `run_mode: simulation`
-now refers only to the rbpodo controller `pgmode` simulation flavor.
+Do not introduce removed simulator backend aliases or mixed simulator terms.
+`run_mode: simulation` now refers only to the rbpodo controller `pgmode`
+simulation flavor.
 
 Supported real-controller scope is rbpodo only. The `MockBackend` remains for
-hardware-free validation; the `rb_simulator` software-simulator backend and raw
-script TCP comparison backends are no longer part of the active code, config,
-gate, or runbook surface.
+hardware-free validation; the retired software-simulator backend and raw script
+TCP comparison backends are no longer part of the active code, config, gate, or
+runbook surface.
 
 ## Target Topology
 
@@ -211,9 +211,11 @@ cmake --build rb_servo_server/build -j
 ctest --test-dir rb_servo_server/build --output-on-failure
 ```
 
-For Cartesian behavior, run `scripts/cartesian_acceptance.py --mode assume-running`
-against an already-running rbpodo/mock server, and validate on rbpodo
-pgmode-simulation / VM / real.
+For Cartesian behavior, use the Pinocchio-backed C++ tests plus active-stack
+smoke/acceptance on mock when a local mock config is available, rbpodo
+controller `pgmode` simulation / VM, and physical real only through the separate
+supervised runbooks. The old software-simulator-oriented Cartesian acceptance
+runner has been removed.
 
 ## Required Final Report
 
