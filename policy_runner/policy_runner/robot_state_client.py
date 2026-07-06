@@ -44,6 +44,14 @@ class CommandSourceLeaseReadback:
         return lease_token is None or self.active_lease_token == lease_token
 
 
+@dataclass(frozen=True)
+class FaultLatchReadback:
+    latched: bool
+    motion_state: str | None
+    latched_fault_reason: str | None
+    reason: str | None
+
+
 def parse_udp_endpoint(endpoint: str) -> UdpEndpoint:
     prefix = "udp://"
     if not endpoint.startswith(prefix):
@@ -73,6 +81,36 @@ def command_source_lease_from_snapshot(snapshot: StateSnapshot) -> CommandSource
         reason=_optional_str(raw.get("reason")),
         command_requires_lease=_optional_bool(raw.get("command_requires_lease")),
         command_has_lease=_optional_bool(raw.get("command_has_lease")),
+    )
+
+
+def fault_latch_from_snapshot(snapshot: StateSnapshot) -> FaultLatchReadback:
+    payload = snapshot.payload
+    raw_context = payload.get("fault_context")
+    top_level_motion_state = _optional_str(payload.get("motion_state"))
+    top_level_latched = _optional_bool(payload.get("fault_latched")) is True
+    context_latched = False
+    motion_state = top_level_motion_state
+    latched_fault_reason = None
+    reason = None
+
+    if isinstance(raw_context, dict):
+        context_latched = _optional_bool(raw_context.get("latched")) is True
+        motion_state = _optional_str(raw_context.get("motion_state")) or top_level_motion_state
+        latched_fault_reason = _optional_str(raw_context.get("latched_fault_reason"))
+        reason = _optional_str(raw_context.get("reason"))
+
+    latched = (
+        context_latched
+        or top_level_latched
+        or motion_state in {"FaultLatched", "EmergencyLatched"}
+        or top_level_motion_state in {"FaultLatched", "EmergencyLatched"}
+    )
+    return FaultLatchReadback(
+        latched=latched,
+        motion_state=motion_state,
+        latched_fault_reason=latched_fault_reason,
+        reason=reason,
     )
 
 

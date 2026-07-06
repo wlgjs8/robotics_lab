@@ -169,6 +169,7 @@ enum class SafetyVerdict {
     SelfCollision,
     FloorViolation,
     RoiViolation,
+    ChunkFollowerFault,
     UnknownError
 };
 

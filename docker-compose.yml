@@ -55,6 +55,13 @@ services:
       # 반드시 servo의 network.command_bind 포트와 일치해야 함. 이 사이트 stack_real.yaml은
       # 50256을 쓴다(문서 기본값 50010 아님 → 안 맞추면 박스 패킷이 버려짐).
       STEREO_COMMAND_ENDPOINT: ${STEREO_COMMAND_ENDPOINT:-127.0.0.1:50256}
+      # CPU 경량화 튜닝(호스트 env로 오버라이드). HEAD_HZ=0은 매 프레임(캡처율).
+      STEREO_HEAD_HZ: ${STEREO_HEAD_HZ:-0}
+      STEREO_TORCH_THREADS: ${STEREO_TORCH_THREADS:-2}
+      # numpy/OpenBLAS/OMP 스레드 상한(cloud 재투영의 코어 확산 억제). 최대 레버:
+      # 기본 2면 CPU ~305%->~119% (fps 손실 0, 전체율 6.5fps 유지). 0/빈값=제한 없음.
+      OMP_NUM_THREADS: ${OMP_NUM_THREADS:-2}
+      OPENBLAS_NUM_THREADS: ${OPENBLAS_NUM_THREADS:-2}
     # 한 컨테이너에서 camera_server(C++) + stereo_worker 동시 기동 (docker compose up/start 한 번에 둘 다)
     entrypoint: ["bash", "/app/stereo_worker/run_all.sh"]
     command: []

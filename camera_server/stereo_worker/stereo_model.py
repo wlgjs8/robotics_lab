@@ -95,6 +95,16 @@ class TrtStereoModel:
         if self.engine is None:
             raise RuntimeError(f"TRT 엔진 deserialize 실패 (TRT {trt.__version__}, 버전 불일치 가능): {engine_path}")
         self.context = self.engine.create_execution_context()
+        # CPU 경량화: TRT 엔진은 GPU 단일 스트림만 쓰므로 torch CPU 스레드풀을 최소화
+        # (기본은 코어수만큼 스폰 → 45개 스레드/배경 wakeup의 주범). STEREO_TORCH_THREADS로 조정.
+        torch.set_num_threads(int(os.environ.get("STEREO_TORCH_THREADS", "2")))
+        try:
+            torch.set_num_interop_threads(1)
+        except RuntimeError:
+            pass  # interop 풀이 이미 초기화됨(재호출 불가) — 무시
+        # blocking sync 이벤트: cudaEventBlockingSync 플래그로 GPU 완료 대기 시 CPU가
+        # busy-spin(cuda-EvtHandlr가 코어를 태움) 대신 sleep/yield 하게 한다.
+        self._done_event = torch.cuda.Event(blocking=True)
 
     def _dt(self, dt):
         trt, torch = self.trt, self.torch
@@ -135,7 +145,9 @@ class TrtStereoModel:
         for nm, t in {**inp, **outs}.items():
             self.context.set_tensor_address(nm, int(t.data_ptr()))
         assert self.context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
-        torch.cuda.synchronize()
+        # 전체 device synchronize(스핀) 대신 blocking 이벤트 대기 → CPU가 잠들어 코어 절약
+        self._done_event.record()
+        self._done_event.synchronize()
         disp = next(iter(outs.values())).float().reshape(self.h, self.w).cpu().numpy()
         H, W = getattr(self, "_src_hw", (self.h, self.w))
         if (H, W) != (self.h, self.w) and H <= self.h and W <= self.w:

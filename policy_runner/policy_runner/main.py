@@ -23,6 +23,7 @@ from .robot_state_client import (
     StateSnapshot,
     StateStreamLeaseReadback,
     command_source_lease_from_snapshot,
+    fault_latch_from_snapshot,
 )
 from .rollout_modes import (
     ReadOnlyActionSource,
@@ -48,6 +49,7 @@ from .action_sources.umi_dual_cartesian import MockUmiPoseReader, UdpUmiPoseRead
 
 STARTUP_TIMEOUT_EXIT_CODE = 2
 LEASE_READBACK_TIMEOUT_EXIT_CODE = 3
+FAULT_LATCH_EXIT_CODE = 4
 
 # Quiet period (no motion intents) after which the teleop loop voluntarily
 # releases the command-source lease so one-shot GUI commands can run between
@@ -223,6 +225,10 @@ def run(
             config.servo_command.timeout_sec,
         )
     source = source or make_action_source(config)
+    abort_on_fault_latch = (
+        _runner_role(config, source, str(getattr(source, "name", config.action_source)))
+        == "flow_infer"
+    )
     safety_gate = SafetyGate(
         config.mode,
         config.safety,
@@ -313,6 +319,19 @@ def run(
                     return STARTUP_TIMEOUT_EXIT_CODE
                 sleep_fn(period)
                 continue
+            if abort_on_fault_latch:
+                fault_latch = fault_latch_from_snapshot(snapshot)
+                if fault_latch.latched:
+                    fields = []
+                    if fault_latch.motion_state is not None:
+                        fields.append(f"motion_state={fault_latch.motion_state}")
+                    if fault_latch.latched_fault_reason is not None:
+                        fields.append(f"verdict={fault_latch.latched_fault_reason}")
+                    if fault_latch.reason is not None:
+                        fields.append(f"reason={fault_latch.reason}")
+                    suffix = f" {' '.join(fields)}" if fields else ""
+                    print(f"policy_runner fault_latch_abort:{suffix}", file=stderr)
+                    return FAULT_LATCH_EXIT_CODE
             action_source_name = str(getattr(source, "name", config.action_source))
             drain_payloads = getattr(recording_supervisor, "drain_control_payloads", None)
             dispatch_payloads = getattr(recording_supervisor, "dispatch_control_payloads", None)
@@ -1545,6 +1564,9 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 elif rc == STARTUP_TIMEOUT_EXIT_CODE:
                     end_reason = "timeout"
                     success = False
+                elif rc == FAULT_LATCH_EXIT_CODE:
+                    end_reason = "fault_latch"
+                    success = False
                 else:
                     end_reason = "other"
                     success = False
@@ -2353,6 +2375,8 @@ def _main_with_subcommands(argv: list[str]) -> int:
             run_source = source
             if not rollout_policy.may_send_commands:
                 run_source = ReadOnlyActionSource(source, recorder)
+                run_source.runner_role = getattr(source, "runner_role", "flow_infer")
+                run_source.name = getattr(source, "name", "flow_infer")
             rc = run(
                 config,
                 source=run_source,

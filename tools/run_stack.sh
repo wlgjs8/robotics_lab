@@ -214,11 +214,7 @@ if [ "$SCOPE_DASHBOARD_ON" = "1" ]; then
   echo "[stack] joint scope dashboard state listen: ${SCOPE_DASHBOARD_STATE_LISTEN}"
 fi
 ensure_rt_caps
-# 서버측 Cartesian 추종 텔레메트리(per-arm/tick): goal_minus_measured(SMD lag),
-# ik_branch_jump_clamped(seed 유지=0모션), ik_sigma_min(특이값), floor_goal_clamped.
-# 텔레옵 "멈춤"이 서버 IK/추종에서 나는지 진단용. 실행마다 새 파일(미설정 시).
-RB_TWIST_PIPELINE_CSV="${RB_TWIST_PIPELINE_CSV:-$PWD/logs/twist_pipe_$(date +%Y%m%d_%H%M%S).csv}" \
-  "$SERVER_BIN" --config "$SERVER_CFG" >"$LOG_DIR/server.log" 2>&1 &
+"$SERVER_BIN" --config "$SERVER_CFG" >"$LOG_DIR/server.log" 2>&1 &
 PIDS+=($!)
 
 # Wait until the command server is up (or fail fast on config/RT errors).

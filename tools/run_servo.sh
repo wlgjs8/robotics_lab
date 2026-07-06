@@ -8,11 +8,7 @@
 # 50378. For ground-truth replay or deliberately isolated debugging, this
 # launcher still keeps the policy_runner command source out of the stack.
 #
-# On every launch this auto-sets (so you never type them on the command line):
-#   RB_TWIST_PIPELINE_CSV = logs/twist_pipe_<ts>.csv   (per-tick model->applied
-#       twist + qdot + IK conditioning: ik_sigma_min / ik_lambda / ik_jump_deg /
-#       ik_branch_jump — the file to read when an arm freezes: singularity =
-#       sigma_min small + qdot ~0 despite a commanded twist)
+# On every launch this auto-sets (so you never type it on the command line):
 #   server stdout/stderr -> logs/server_<ts>.log
 # Both are timestamped, so successive runs ACCUMULATE (nothing is overwritten).
 # The companion action log is now opt-in for low-jitter live motion: set
@@ -35,7 +31,6 @@ SERVER_CFG="rb_servo_server/config/local/stack_${MODE}.yaml"
 LOG_DIR="logs"
 TS="$(date +%Y%m%d_%H%M%S)"
 SERVER_LOG="$LOG_DIR/server_${TS}.log"
-TWIST_CSV="$LOG_DIR/twist_pipe_${TS}.csv"
 
 [ -x "$SERVER_BIN" ] || { echo "[servo] server binary missing: $SERVER_BIN (build rbpodo_real_gate first)" >&2; exit 1; }
 [ -f "$SERVER_CFG" ] || { echo "[servo] missing $SERVER_CFG" >&2; exit 1; }
@@ -59,8 +54,6 @@ if command -v getcap >/dev/null 2>&1 && ! getcap "$SERVER_BIN" 2>/dev/null | gre
 fi
 
 echo "[servo] mode=$MODE config=$SERVER_CFG"
-echo "[servo] twist CSV  -> $TWIST_CSV"
 echo "[servo] server log -> $SERVER_LOG"
 echo "[servo] (Ctrl-C to stop)"
-env RB_TWIST_PIPELINE_CSV="$TWIST_CSV" \
-  "$SERVER_BIN" --config "$SERVER_CFG" 2>&1 | tee "$SERVER_LOG"
+"$SERVER_BIN" --config "$SERVER_CFG" 2>&1 | tee "$SERVER_LOG"

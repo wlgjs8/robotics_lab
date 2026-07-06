@@ -904,16 +904,32 @@ struct PoseTrackSmdConfig {
     double singularity_scale_min = 1.0;
 };
 
+enum class RuckigFollowerFallbackPolicy {
+    Smd,
+    Fault
+};
+
 // Ruckig receding-horizon chunk-follower: a per-profile Cartesian smoothing
 // stage that REPLACES the pose_track_smd step while active. It consumes whole
 // measured-anchored absolute action-chunk frames (the chunk-overlay wire
 // format) from network.chunk_frame_bind, re-solves a jerk-limited BVP every
 // policy step (~33 ms) with central-difference boundary velocity/acceleration
 // (self-consistent Taylor samples of the chunk), and evaluates the trajectory
-// at each 2 ms servo tick. Falls back to pose_track_smd whenever inactive
-// (cold start, feed timeout, divergence re-anchor, non-streaming modes).
+// at each 2 ms servo tick.
 struct RuckigFollowerConfig {
     bool enable = false;
+    // Fallback policy for follower-regime interruptions:
+    // - Smd: legacy behavior; cold start / feed timeout / divergence quietly
+    //   fall back to pose_track_smd.
+    // - Fault: strict behavior once the follower regime applies (enable &&
+    //   TcpPoseTarget && has_tcp_target && kinematics && chunk receiver). Cold
+    //   start holds at the live FK reference and latches if no first chunk
+    //   engages within engage_timeout_sec; post-engage feed timeout or
+    //   divergence latches ChunkFollowerFault instead of falling back to SMD.
+    //   Mode changes (Hold / JointTarget / InitMotion / TcpLinearMove /
+    //   deadman-stale) remain normal deactivations under both policies.
+    RuckigFollowerFallbackPolicy fallback_policy = RuckigFollowerFallbackPolicy::Smd;
+    double engage_timeout_sec = 3.0;
     // Fixed conservative Cartesian limits (per-axis). The joint-space safety
     // clamp downstream remains the sole hard guarantor; these caps only shape
     // the generated reference. At 33 ms segments the JERK cap is the binding

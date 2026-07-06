@@ -415,6 +415,14 @@ def cmd_run(args):
     last_clip_log = None      # ROI/Z캡 변경 시 1회 로그(operator 피드백)용
     prof_on = os.environ.get("STEREO_PROFILE", "1") != "0"   # 단계별 ms 브레이크다운
     prof = {}
+    # 전체 프레임 처리율 상한: head infer+cloud+detect+publish 파이프라인 전부를 이 Hz로
+    # 데시메이트해 CPU를 직접 절감한다(병목은 추론이 아니라 프레임당 numpy cloud 재투영이라,
+    # 프레임 자체를 덜 처리해야 CPU가 내려간다). 0=매 프레임(캡처율). 정지 트레이 검출/시각화엔
+    # 5~10Hz면 충분. heartbeat는 상한과 무관하게 계속 송신됨(위 블록).
+    head_hz = float(os.environ.get("STEREO_HEAD_HZ", "0"))
+    last_proc_t = 0.0
+    if head_hz > 0.0:
+        print(f"[run] full-frame rate cap: {head_hz:.1f} Hz (STEREO_HEAD_HZ)", flush=True)
     while True:
         _t = time.perf_counter()
         frames = reader.poll(want, timeout_ms=500)
@@ -427,6 +435,11 @@ def cmd_run(args):
         if irl is None or irr is None:
             continue
         _t = _ck(prof, "poll", _t)
+        if head_hz > 0.0:
+            _now = time.monotonic()
+            if (_now - last_proc_t) < (1.0 / head_hz):
+                continue   # rate cap: 이번 프레임은 통째로 건너뛰어 CPU를 쉰다(heartbeat는 유지)
+            last_proc_t = _now
         disp = model.infer_disparity(irl.pixels, irr.pixels)
         _t = _ck(prof, "infer", _t)
         col = frames.get(k_col)

@@ -34,6 +34,15 @@ bool loadRejects(const std::string& path) {
     return false;
 }
 
+bool loadRejectsWithMessage(const std::string& path, const std::string& needle) {
+    try {
+        (void)rb_servo::loadConfigFromYaml(path);
+    } catch (const std::exception& exc) {
+        return std::string(exc.what()).find(needle) != std::string::npos;
+    }
+    return false;
+}
+
 bool near(double a, double b) {
     return std::abs(a - b) < 1e-12;
 }
@@ -1059,6 +1068,93 @@ bool testInitMotionPlannerConfigExt() {
     return true;
 }
 
+bool testRuckigFollowerFallbackPolicyConfig() {
+    const std::string default_path = writeTempConfig(
+        "ruckig-follower-fallback-default",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+    );
+    const rb_servo::DualArmConfig defaults = rb_servo::loadConfigFromYaml(default_path);
+    ::unlink(default_path.c_str());
+    RB_CHECK(defaults.cartesian_control.ruckig_follower.fallback_policy ==
+             rb_servo::RuckigFollowerFallbackPolicy::Smd);
+    RB_CHECK(near(defaults.cartesian_control.ruckig_follower.engage_timeout_sec, 3.0));
+    RB_CHECK(!defaults.cartesian_control.tcp_pose_target_profiles.empty());
+    RB_CHECK(defaults.cartesian_control.tcp_pose_target_profiles.front().ruckig_follower.fallback_policy ==
+             rb_servo::RuckigFollowerFallbackPolicy::Smd);
+    RB_CHECK(near(
+        defaults.cartesian_control.tcp_pose_target_profiles.front().ruckig_follower.engage_timeout_sec,
+        3.0
+    ));
+
+    const std::string fault_path = writeTempConfig(
+        "ruckig-follower-fallback-fault",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    fallback_policy: \"fault\"\n"
+        "    engage_timeout_sec: 2.5\n"
+        "  tcp_pose_target_profile_default: strict\n"
+        "  tcp_pose_target_profiles:\n"
+        "    strict:\n"
+        "      ruckig_follower:\n"
+        "        fallback_policy: \"fault\"\n"
+        "        engage_timeout_sec: 1.25\n"
+    );
+    const rb_servo::DualArmConfig fault_cfg = rb_servo::loadConfigFromYaml(fault_path);
+    ::unlink(fault_path.c_str());
+    RB_CHECK(fault_cfg.cartesian_control.ruckig_follower.fallback_policy ==
+             rb_servo::RuckigFollowerFallbackPolicy::Fault);
+    RB_CHECK(near(fault_cfg.cartesian_control.ruckig_follower.engage_timeout_sec, 2.5));
+    RB_CHECK(fault_cfg.cartesian_control.tcp_pose_target_profiles.size() == 1);
+    RB_CHECK(fault_cfg.cartesian_control.tcp_pose_target_profiles.front().ruckig_follower.fallback_policy ==
+             rb_servo::RuckigFollowerFallbackPolicy::Fault);
+    RB_CHECK(near(
+        fault_cfg.cartesian_control.tcp_pose_target_profiles.front().ruckig_follower.engage_timeout_sec,
+        1.25
+    ));
+
+    const std::string bad_policy_path = writeTempConfig(
+        "ruckig-follower-bad-policy",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    fallback_policy: \"hold\"\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(
+        bad_policy_path,
+        "cartesian_control.ruckig_follower.fallback_policy"
+    ));
+    ::unlink(bad_policy_path.c_str());
+
+    const std::string zero_timeout_path = writeTempConfig(
+        "ruckig-follower-zero-engage-timeout",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    engage_timeout_sec: 0.0\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(
+        zero_timeout_path,
+        "cartesian_control.ruckig_follower.engage_timeout_sec"
+    ));
+    ::unlink(zero_timeout_path.c_str());
+
+    const std::string infinite_timeout_path = writeTempConfig(
+        "ruckig-follower-inf-engage-timeout",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    engage_timeout_sec: .inf\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(
+        infinite_timeout_path,
+        "cartesian_control.ruckig_follower.engage_timeout_sec"
+    ));
+    ::unlink(infinite_timeout_path.c_str());
+
+    return true;
+}
+
 bool testSendAtTickStartAndPipelinedReadConfig() {
     // Defaults: both jitter-decoupling flags stay off (legacy in-tick send +
     // blocking state read) unless a config opts in.
@@ -1110,6 +1206,7 @@ int main() {
     if (!testDisabledCollisionPairsConfig()) return 1;
     if (!testIntraArmSelfCollisionConfig()) return 1;
     if (!testInitMotionPlannerConfigExt()) return 1;
+    if (!testRuckigFollowerFallbackPolicyConfig()) return 1;
     if (!testSendAtTickStartAndPipelinedReadConfig()) return 1;
     return 0;
 }

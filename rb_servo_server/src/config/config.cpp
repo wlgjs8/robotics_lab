@@ -214,6 +214,8 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
     if (!out) return;
     validateAllowedKeys(node, {
         "enable",
+        "fallback_policy",
+        "engage_timeout_sec",
         "max_linear_velocity_m_s",
         "max_linear_accel_m_s2",
         "max_linear_jerk_m_s3",
@@ -228,6 +230,19 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         "chunk_feed_timeout_sec",
     }, path);
     if (has(node, "enable")) out->enable = asBool(node["enable"], path + ".enable");
+    if (has(node, "fallback_policy")) {
+        const std::string value = lower(asString(node["fallback_policy"], path + ".fallback_policy"));
+        if (value == "smd") {
+            out->fallback_policy = RuckigFollowerFallbackPolicy::Smd;
+        } else if (value == "fault") {
+            out->fallback_policy = RuckigFollowerFallbackPolicy::Fault;
+        } else {
+            fail("Unknown " + path + ".fallback_policy: " + value, node["fallback_policy"]);
+        }
+    }
+    if (has(node, "engage_timeout_sec")) {
+        out->engage_timeout_sec = asDouble(node["engage_timeout_sec"], path + ".engage_timeout_sec");
+    }
     if (has(node, "max_linear_velocity_m_s")) {
         out->max_linear_velocity_m_s = asDouble(node["max_linear_velocity_m_s"], path + ".max_linear_velocity_m_s");
     }
@@ -1555,6 +1570,7 @@ void validateConfig(const DualArmConfig& cfg) {
         validatePositiveFinite(rf.max_angular_accel_rad_s2, path + ".max_angular_accel_rad_s2");
         validatePositiveFinite(rf.max_angular_jerk_rad_s3, path + ".max_angular_jerk_rad_s3");
         validatePositiveFinite(rf.chunk_feed_timeout_sec, path + ".chunk_feed_timeout_sec");
+        validatePositiveFinite(rf.engage_timeout_sec, path + ".engage_timeout_sec");
         if (rf.discard_head_steps < 0) {
             throw std::runtime_error(path + ".discard_head_steps must be >= 0");
         }

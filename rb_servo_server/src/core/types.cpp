@@ -93,6 +93,7 @@ std::string toString(SafetyVerdict verdict) {
         case SafetyVerdict::SelfCollision: return "SelfCollision";
         case SafetyVerdict::FloorViolation: return "FloorViolation";
         case SafetyVerdict::RoiViolation: return "RoiViolation";
+        case SafetyVerdict::ChunkFollowerFault: return "ChunkFollowerFault";
         case SafetyVerdict::UnknownError: return "UnknownError";
     }
     return "Unknown";

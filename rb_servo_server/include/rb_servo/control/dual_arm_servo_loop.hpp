@@ -305,6 +305,10 @@ private:
     ServoTarget currentFaultHoldTarget() const;
     JointArray chooseSafeHoldTarget(const RobotState& state, const JointArray& previous_sent) const;
     double computeFilterDtSec(uint64_t actual_period_ns, uint64_t nominal_period_ns) const;
+    void resetChunkFollowerEngageWait(ArmId arm_id);
+    void clearChunkFollowerFaultRequests();
+    void recordChunkFollowerFaultRequest(ArmId arm_id, const std::string& reason);
+    bool latchChunkFollowerFaultRequests(const RobotState& left_state, const RobotState& right_state);
 
 private:
     std::unique_ptr<IRobotBackend> left_robot_;
@@ -590,6 +594,17 @@ private:
     RuckigFollowerConfig right_chunk_follower_built_{};
     std::uint64_t left_chunk_submitted_seq_ = 0;
     std::uint64_t right_chunk_submitted_seq_ = 0;
+    bool left_chunk_engage_waiting_ = false;
+    bool right_chunk_engage_waiting_ = false;
+    double left_chunk_engage_wait_start_sec_ = 0.0;
+    double right_chunk_engage_wait_start_sec_ = 0.0;
+    struct ChunkFollowerFaultRequest {
+        bool active = false;
+        ArmId arm = ArmId::Left;
+        std::string reason;
+    };
+    ChunkFollowerFaultRequest left_chunk_follower_fault_request_;
+    ChunkFollowerFaultRequest right_chunk_follower_fault_request_;
     ChunkFrameReceiver* chunk_frame_receiver_ = nullptr;
     ChunkFrameReceiver::Frame chunk_frame_cache_{};
     std::uint64_t chunk_frame_cache_seq_ = 0;
@@ -599,9 +614,9 @@ private:
     // Cartesian smoothing stage.
     void pollChunkFrames();
     // The SMD-stage drop-in: runs the Ruckig chunk-follower when the profile
-    // enables it and a chunk feed is live; otherwise (cold start, watchdog
-    // timeout, divergence re-anchor, other modes) falls back to
-    // applyPoseTrackSmd with identical semantics to the legacy path.
+    // enables it and a chunk feed is live. Legacy profiles fall back to
+    // applyPoseTrackSmd with identical semantics; strict profiles hold and
+    // request a ChunkFollowerFault on follower-regime interruptions.
     ArmCommand applyChunkFollowerStage(
         ArmId arm_id,
         const ArmCommand& command,

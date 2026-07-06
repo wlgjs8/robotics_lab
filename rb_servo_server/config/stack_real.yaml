@@ -412,7 +412,7 @@ network:
     - "udp://127.0.0.1:50376"  # make run teleop_mux policy_runner
     - "udp://127.0.0.1:50378"  # external flow-infer readback alongside make run
     - "udp://127.0.0.1:50386"  # camera_server stereo_worker wrist-fusion (box detect)
-  state_pub_rate_hz: 500   # was 100; raised to see the 500 Hz servo command stream in PlotJuggler. Watch send_period_overrun / send_deadline_hit — revert to 100 if the control loop overruns.
+  state_pub_rate_hz: 100   # default publish rate for gui/scope/policy/flow/camera consumers. Temporarily raise to 500 only for PlotJuggler 500 Hz command-stream debugging (watch send_period_overrun / send_deadline_hit).
   command_source_allowlist: ["127.0.0.1/32"]
 
 # Forward arbitrated per-arm gripper setpoints to the out-of-process gripper_server
@@ -651,8 +651,9 @@ cartesian_control:
         singularity_scale_floor_sigma: 0.05
         singularity_scale_min: 0.12
       # Ruckig receding-horizon chunk-follower (replaces the SMD step above while
-      # a chunk feed is live; falls back to it on cold start / feed timeout /
-      # divergence). Consumes whole chunk frames from network.chunk_frame_bind.
+      # a chunk feed is live). fallback_policy=smd preserves legacy SMD fallback;
+      # fallback_policy=fault holds on cold start and latches on feed loss/divergence.
+      # Consumes whole chunk frames from network.chunk_frame_bind.
       # 2026-07-03 first-hardware values: CONSERVATIVE on purpose — at 33 ms
       # segments the JERK cap is the convergence budget (|dv| <= j*dt^2/4
       # ~ 0.0056 m/s per step at j=20); raise only on real-run evidence.
@@ -670,6 +671,8 @@ cartesian_control:
         smoothing_window: 1
         af_damping_beta: 0.5
         chunk_feed_timeout_sec: 1.5
+        fallback_policy: "fault"     # strict: no silent SMD fallback; cold start holds, loss latches ChunkFollowerFault (ResetFault to recover)
+        engage_timeout_sec: 3.0      # max wait for the first chunk frame before faulting (fault policy only)
       max_smd_goal_lead_m: 0.080
       max_smd_goal_lead_rad: 0.35
   linear_move:
