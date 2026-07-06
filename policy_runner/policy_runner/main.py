@@ -1036,6 +1036,18 @@ def _main_with_subcommands(argv: list[str]) -> int:
         ),
     )
     flow_infer.add_argument(
+        "--velproprio-source",
+        default="measured",
+        choices=("measured", "command"),
+        help=(
+            "Source stream for velocity* proprio finite differences (openpi-remote only). "
+            "'measured' (default) uses live robot TCP pose. 'command' uses the runner's emitted "
+            "absolute TcpPoseTarget stream, matching UMI training semantics where velocity is "
+            "finite-differenced from the same trajectory the actions describe. Requires "
+            "--velproprio-sample-mode fixed_step and --proprio-mode velocity*."
+        ),
+    )
+    flow_infer.add_argument(
         "--include-depth",
         action="store_true",
         help=(
@@ -2126,6 +2138,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     action_horizon=args.action_horizon,
                     proprio_mode=args.proprio_mode,
                     velproprio_sample_mode=getattr(args, "velproprio_sample_mode", "replan"),
+                    velproprio_source=getattr(args, "velproprio_source", "measured"),
                     **({"prompt": args.prompt} if getattr(args, "prompt", None) else {}),
                     include_depth=bool(args.include_depth or args.blank_depth),
                     blank_depth=bool(args.blank_depth),

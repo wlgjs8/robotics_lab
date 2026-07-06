@@ -18,6 +18,7 @@ CHUNK_CROSSFADE_STEPS="${FLOW_INFER_CHUNK_CROSSFADE_STEPS:-2}"
 TCP_REANCHOR_MODE="${FLOW_INFER_TCP_REANCHOR_MODE:-measured_blend}"
 TCP_BLEND_STEPS="${FLOW_INFER_TCP_BLEND_STEPS:-8}"
 ROLLOUT_SUMMARY="${FLOW_INFER_ROLLOUT_SUMMARY:-outputs/rollout_summary.json}"
+VELPROPRIO_SOURCE="${FLOW_INFER_VELPROPRIO_SOURCE:-measured}"
 
 mkdir -p "$(dirname "$ROLLOUT_SUMMARY")"
 export PYTHONPATH="$PWD/policy_runner${PYTHONPATH:+:$PYTHONPATH}"
@@ -49,7 +50,7 @@ echo "[flow-infer] checkpoint=$CHECKPOINT"
 echo "[flow-infer] chunk_overlay_endpoint=$RB_GUI_CHUNK_OVERLAY_ENDPOINT (rb_gui '예측 chunk 궤적 표시')"
 echo "[flow-infer] config=$CONFIG"
 echo "[flow-infer] rollout_summary=$ROLLOUT_SUMMARY"
-echo "[flow-infer] speed_scale=$SPEED_SCALE chunk_execute_steps=$CHUNK_EXECUTE_STEPS crossfade=$CHUNK_CROSSFADE_STEPS reanchor=$TCP_REANCHOR_MODE"
+echo "[flow-infer] speed_scale=$SPEED_SCALE chunk_execute_steps=$CHUNK_EXECUTE_STEPS crossfade=$CHUNK_CROSSFADE_STEPS reanchor=$TCP_REANCHOR_MODE velproprio_source=$VELPROPRIO_SOURCE"
 echo "[flow-infer] inherited env: OPENPI_REMOTE_SKIP_WARMUP=${OPENPI_REMOTE_SKIP_WARMUP-<unset>} RB_ALLOW_REAL_GRIPPER=${RB_ALLOW_REAL_GRIPPER-<unset>} DISPLAY=${DISPLAY-<unset>}"
 
 RTC_ARGS=()
@@ -135,6 +136,10 @@ VELPROPRIO_ARGS=()
 if [ "$VELPROPRIO_SAMPLE" != "replan" ]; then
   VELPROPRIO_ARGS+=(--velproprio-sample-mode "$VELPROPRIO_SAMPLE")
   echo "[flow-infer] velproprio_sample_mode=$VELPROPRIO_SAMPLE (velocity from fixed ~policy_dt window; controller-independent)"
+fi
+if [ "$VELPROPRIO_SOURCE" != "measured" ]; then
+  VELPROPRIO_ARGS+=(--velproprio-source "$VELPROPRIO_SOURCE")
+  echo "[flow-infer] velproprio_source=$VELPROPRIO_SOURCE"
 fi
 
 exec "$PYTHON_BIN" -m policy_runner flow-infer \
