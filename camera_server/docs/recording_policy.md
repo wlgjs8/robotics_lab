@@ -104,8 +104,10 @@ Rough bandwidth:
 ```text
 640x480 RGB x 3 x 30fps ≈ 83 MB/s
 640x480 RGB+Depth x 3 x 30fps ≈ 138 MB/s
-default mixed RGB (head 1280x720 + two wrist 640x360) x 30fps ≈ 124 MB/s
+legacy mixed RGB (head 1280x720 + two wrist 640x360) x 30fps ≈ 124 MB/s
 1280x720 RGB x 3 x 30fps ≈ 249 MB/s
+current d435_head_1280x720 profile includes head RGB, head IR stereo, and two
+wrist RGB-D streams; measure sustained bandwidth from the exact approved config.
 ```
 
 Use NVMe SSD for lossless raw recording.

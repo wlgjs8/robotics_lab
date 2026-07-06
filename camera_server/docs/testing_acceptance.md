@@ -20,13 +20,15 @@ Acceptance:
 - shared memory slot updates
 - no frame drops for 2 minutes
 
-## 3. Three camera capture test
+## 3. Camera-rig capture test
 
-Run head color 1280x720 30 FPS and left_wrist/right_wrist color 640x360 30 FPS.
+Run the approved rig profile. For the current default, that is head color
+1280x720 30 FPS plus head IR stereo and left/right wrist D405 color+depth
+640x480 30 FPS.
 
 Acceptance:
 
-- all 3 cameras maintain 30 FPS
+- all required cameras maintain 30 FPS
 - zero frame number gaps for 10 minutes, or drop count explicitly reported
 - bundle metadata publishes at approximately 30 FPS
 - policy_runner sample can read latest bundle from shared memory
@@ -97,12 +99,12 @@ Acceptance:
 - policy_runner reads valid images
 - no permission errors on USB devices
 
-## 10. Definition of Done for initial milestone
+## 10. Definition of Done for camera-server plumbing
 
-Initial milestone is done when:
+Camera-server plumbing is done when:
 
 ```text
-- head RealSense runs at 1280x720 color 30 FPS and both wrist RealSense cameras run at 640x360 color 30 FPS
+- head RealSense and both wrist RealSense cameras match the approved profile at 30 FPS
 - shared memory image ring works
 - ZMQ camera.bundle metadata works
 - policy_runner sample reads latest bundle
@@ -136,6 +138,11 @@ Mock acceptance expects all three mock streams at 64x48 RGB and 30 FPS. Treat
 mock drop/skew metrics as schema and plumbing evidence only; they are not real
 camera hardware evidence.
 
-Hardware acceptance(실제 RealSense 3대 10분, Docker USB permission, disconnect test)는 실제 장비가 연결된 host에서 `config/triple_realsense_640x360.yaml` 또는 명시 승인된 `config/triple_realsense_640x480.yaml` variant를 복사하고 serial placeholder를 채운 뒤 수행해야 한다.
+Hardware acceptance(실제 camera rig 10분, Docker USB permission, disconnect
+test)는 실제 장비가 연결된 host에서 승인된 rig profile을 복사하고 serial/UVC
+placeholder를 채운 뒤 수행해야 한다. 현재 기본은
+`config/d435_head_1280x720.yaml`이며, `config/head_wrists.yaml`,
+`config/quad_realsense_fisheye.yaml`, 또는 legacy `config/triple_realsense*`
+variant는 해당 세션에서 명시 승인된 경우에만 사용한다.
 The gated operator procedure and evidence template live in
 `docs/hardware_acceptance_runbook.md`.

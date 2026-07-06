@@ -1,10 +1,12 @@
 # camera_server docs
 
-`camera_server`는 `rb_servo_server`와 분리된 RealSense 3대 전용 카메라 서버이다.
+`camera_server`는 `rb_servo_server`와 분리된 카메라 서버이다. 현재 기본 rig는
+D435 head + dual D405 wrist RealSense이며, fisheye deploy profile에서는 UVC
+fisheye 카메라도 함께 publish한다.
 
 목표는 다음과 같다.
 
-1. RealSense 3대를 각각 30 FPS로 안정적으로 capture한다.
+1. 설정된 카메라 rig를 각각 30 FPS로 안정적으로 capture한다.
 2. capture callback에서 host timestamp와 RealSense metadata를 즉시 기록한다.
 3. image payload는 POSIX shared memory ring buffer에 저장한다.
 4. frame metadata만 ZeroMQ PUB/SUB로 publish한다.
@@ -22,7 +24,7 @@ rb_servo_server
   - image 처리 없음
 
 camera_server
-  - RealSense 3대 capture
+  - configured camera rig capture
   - hardware/software sync
   - shared memory latest image publish
   - metadata publish
@@ -42,7 +44,7 @@ policy_runner
 ## 구현된 산출물
 
 - C++17 server: `src/main.cpp`, `include/camera_server/**`, `src/**`
-- 기본 설정: `config/triple_realsense.yaml`, mock/CI 설정: `config/mock_triple_realsense.yaml`
+- 기본 설정: `config/d435_head_1280x720.yaml`, mock/CI 설정: `config/mock_triple_realsense.yaml`
 - POSIX shared memory ring: `include/camera_server/shm/*`, `src/shm/shared_memory_ring.cpp`
 - ZeroMQ metadata publisher with no-ZMQ build fallback: `include/camera_server/publish/metadata_publisher.hpp`, `src/publish/metadata_publisher.cpp`
 - RealSense-by-serial backend and mock 30 FPS backend: `src/camera/realsense_device.cpp`

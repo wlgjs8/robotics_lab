@@ -17,7 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `docs/code_architecture_map.md` — code-verified component map, ports/wire-formats, and a doc-vs-code drift list
 - the component README/docs for whatever module you change
 
-Historical files (`TODO.md`, `CODEX_*PROMPTS*`, `MIG-*`, `HARDEN-*`, `CART-HARDEN-*`, `docs/archive/**`) are audit context only. `REVIEW.md` is a point-in-time snapshot, not direction — see the drift notes below. (The ACKON500 circle-tracking benchmark and its `GOAL.md` snapshot were removed 2026-06-20.)
+Historical files (`TODO.md`, `CODEX_*PROMPTS*`, `MIG-*`, `HARDEN-*`, `CART-HARDEN-*`, `docs/archive/**`) are audit context only. `REVIEW.md` is a point-in-time snapshot, not direction — see the drift notes below. (The ACKON500 circle-tracking benchmark and its old root `GOAL.md` snapshot were removed 2026-06-20; `policy_runner/GOAL.md` is a separate active policy-training note.)
 
 ## Current Phase
 
@@ -43,7 +43,7 @@ camera_server (C++) ──────┘ (RealSense/mock, shared-memory image t
 
 State fanout: `rb_servo_server` is the sole owner of UDP state publication via `network.state_pub_endpoints` (list). Commands go directly to `network.command_bind`. Benchmark overlay streams (desired geometry/metrics) are separate from robot state and must never carry commands.
 
-Ports/protocols (verified against compose + config; full table in `docs/code_architecture_map.md`): command in `UDP 50010`; state out fanout to `UDP 50110` (gui) + `UDP 50120` (policy); camera metadata `ZMQ 5600` (`camera.bundle`/`camera.health`) with images in a POSIX shared-memory ring (`/camera_server_frames`); GUI web `HTTP 8080`; optional circle overlay `UDP 50261`. Command JSON `{seq, mode, left{…}, right{…}}` (`mode` parsed by `controlModeFromString` in `src/core/types.cpp`); state JSON schema `robotics_lab.servo_state.v1`.
+Ports/protocols (verified against compose + config; full table in `docs/code_architecture_map.md`): commands in `UDP 50256`; chunk frames on `UDP 50264`; state fanout to `UDP 50356` (joint scope dashboard), `50366` (viser GUI), `50376` (stack policy_runner/teleop_mux), `50378` (external flow-infer readback), and `50386` (camera_server stereo_worker wrist-fusion); gripper command/feedback `UDP 50410`/`50420`; camera metadata `ZMQ 5600` (`camera.bundle`/`camera.health`) with images in a POSIX shared-memory ring (`/camera_server_frames`); GUI web `HTTP 8080`; optional circle overlay `UDP 50261`. Command JSON `{seq, mode, left{…}, right{…}}` (`mode` parsed by `controlModeFromString` in `src/core/types.cpp`); state JSON schema `robotics_lab.servo_state.v1`.
 
 ## Canonical Terminology (use everywhere — config, docs, GUI, logs, tests)
 
@@ -56,7 +56,7 @@ backend_type: mock | rbpodo
 
 ## Safety Boundary
 
-Real behavior is fail-closed and never implicit, but it is **no longer gated on env vars**. The legacy execution gates — `RB_ALLOW_REAL_ROBOT`, `RB_ALLOW_REAL_MOTION`, `RB_ALLOW_REAL_CARTESIAN`, `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION`, `RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION`, `RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION`, `RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN`, `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED` — are removed from the server runtime (some acceptance scripts under `scripts/` still set the old names, but they no longer affect server gating). `run_mode`/`operation_mode` are telemetry labels only and do not decide whether motion is allowed.
+Real behavior is fail-closed and never implicit, but it is **no longer gated on env vars**. The legacy execution gates — `RB_ALLOW_REAL_ROBOT`, `RB_ALLOW_REAL_MOTION`, `RB_ALLOW_REAL_CARTESIAN`, `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION`, `RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION`, `RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION`, `RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN`, `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED` — are removed from the server runtime. `run_mode`/`operation_mode` are telemetry labels only and do not decide whether motion is allowed.
 
 Real-motion execution authority is owned by **site-local config + the mode-independent safety layers**:
 
@@ -71,7 +71,7 @@ Real motion requires the gitignored site config (`rb_servo_server/config/local/`
 
 The policy-side `SafetyGate` real-Cartesian block was retired (PR #13); stale state, fault, camera, and kinematics readiness checks remain. For real Cartesian motion, `rb_servo_server` makes the final allow/deny decision. Controller-simulation safety is unchanged.
 
-Other invariants: never reintroduce bool-only backend results (preserve `BackendResult<RobotState>`, `SendServoJResult`, `BackendErrorKind`, `BackendTiming`, `FaultContext`); don't parse error strings when structured fields exist; force control stays `provider: null, enable: false`; `servo.io_model: worker` is hardware-free/mock-only until a real-hardware acceptance task opens it. The stand-frame floor plane (`safety.floor_constraint`) applies in EVERY run mode when enabled (no env/mode gate), covers all motion primitives at the final joint-level safety gate, requires `kinematics.enable`, and its runtime lowering via the leaseless `SetSafetyFloorZ` command is bounded to the config `[runtime_min_z_m, runtime_max_z_m]`; `monitor_only` is never a real-motion posture. Tracked real config is a template only (`rb_servo_server/config/dual_real.example.yaml`); site configs go in gitignored `rb_servo_server/config/local/`. New rbpodo configs use canonical Servo J fields `servo_t1_sec` / `servo_t2_sec` / `servo_gain` / `servo_alpha` (not `servo_time_sec` / `servo_lookahead_sec` / `servo_acc`); `servo_t1_sec: 0.002` at the supported 500 Hz.
+Other invariants: never reintroduce bool-only backend results (preserve `BackendResult<RobotState>`, `SendServoJResult`, `BackendErrorKind`, `BackendTiming`, `FaultContext`); don't parse error strings when structured fields exist; force control stays `provider: null, enable: false`; `servo.io_model: worker` is hardware-free/mock-only until a real-hardware acceptance task opens it. The stand-frame floor plane (`safety.floor_constraint`) applies in EVERY run mode when enabled (no env/mode gate), covers all motion primitives at the final joint-level safety gate, requires `kinematics.enable`, and its runtime lowering via the leaseless `SetSafetyFloorZ` command is bounded to the config `[runtime_min_z_m, runtime_max_z_m]`; `monitor_only` is never a real-motion posture. Tracked stack config templates are `rb_servo_server/config/stack_real.yaml` and `rb_servo_server/config/stack_sim.yaml`; site-specific variants go in gitignored `rb_servo_server/config/local/`. New rbpodo configs use canonical Servo J fields `servo_t1_sec` / `servo_t2_sec` / `servo_gain` / `servo_alpha` (not `servo_time_sec` / `servo_lookahead_sec` / `servo_acc`); `servo_t1_sec: 0.002` at the supported 500 Hz.
 
 ## Motion Primitives (don't blur)
 
@@ -124,7 +124,7 @@ ML data flow: audit HDF5 episodes (`python3 -m policy_runner hdf5-audit ...`, sc
 
 Scattered docs don't all track the latest direction. Key gotchas (full list in `docs/code_architecture_map.md`):
 
-- **The ACKON500 circle-tracking benchmark was removed** — the 500 Hz rbpodo controller-sim circle-tracking benchmark subsystem (its scripts, `configs/rbpodo_circle_ablation/*`, ablation/report tooling, runbooks, and the `GOAL.md` task snapshot) was deleted 2026-06-20. Older notes that called `GOAL.md` "a snapshot of the ACKON500 task" are obsolete.
+- **The ACKON500 circle-tracking benchmark was removed** — the 500 Hz rbpodo controller-sim circle-tracking benchmark subsystem (its scripts, `configs/rbpodo_circle_ablation/*`, ablation/report tooling, runbooks, and the old root `GOAL.md` task snapshot) was deleted 2026-06-20. Older notes that called root `GOAL.md` "a snapshot of the ACKON500 task" are obsolete; `policy_runner/GOAL.md` is unrelated.
 - **Milestone**: the milestone is rbpodo pgmode-real physical bring-up (real motion exercised under supervision — see `docs/runbooks/rbpodo_real_physical_circle.md`). The Cartesian-circle evidence that matters is physical-real (`tcp_actual_stand`); the prior controller-reference (`tcp_ref_stand`) benchmark lane is gone.
 - **Precedence on conflict** (`AGENTS.md`): `AGENTS.md` → root `README.md` → `docs/architecture.md` → contract docs → component READMEs. `docs/current_review.md` redirects to `REVIEW.md`; `docs/archive/**` is audit-only.
 

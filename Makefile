@@ -9,12 +9,12 @@ POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
 # owns the robot until idle; a missing SpaceMouse degrades to UMI-only).
-# In real mode it also starts umi_gripper_follow (UDP 50382 -> local Pika
-# Grippers), so this PC needs only `make run` — disable with GRIPPER_FOLLOW=0.
-#   make run                  -> pgmode real (+ gripper follower)
+# It also starts gripper_server (UDP 50410/50420 -> local/sim Pika grippers),
+# so this PC needs only `make run` — disable with GRIPPER_SERVER=0.
+#   make run                  -> pgmode real (+ gripper_server)
 #   make run MODE=sim         -> pgmode controller-simulation
 #   make run VERBOSE=1        -> live teleop input + send/drop stats
-#   make run GRIPPER_FOLLOW=0 -> skip the gripper follower
+#   make run GRIPPER_SERVER=0 -> skip the gripper server
 MODE ?= sim
 run:
 	./tools/run_stack.sh $(MODE)
@@ -109,7 +109,7 @@ cam-down:
 
 # --- rbpodo pgmode-simulation (native; dual Virtual ControlBox VMs) ---
 # One-command bring-up of rb_servo_server + rb_gui (viser) on this WSL box.
-# Controller-simulation only; never sets RB_ALLOW_REAL_CARTESIAN.
+# Controller-simulation only; uses stack_sim.yaml and does not enable real motion.
 pgmode-sim-build:
 	bash tools/vm/pgmode_sim_build.sh
 

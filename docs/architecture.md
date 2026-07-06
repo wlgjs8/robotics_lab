@@ -166,10 +166,9 @@ env vars**. The legacy execution gates — `RB_ALLOW_REAL_ROBOT`,
 `RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION`,
 `RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION`,
 `RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN`,
-`RB_RBPODO_PGMODE_SIMULATION_CONFIRMED` — were removed from the server runtime
-(some acceptance scripts under `scripts/` still set the old names, but they no
-longer affect server gating). `run_mode`/`operation_mode` are telemetry labels
-only and do not decide whether motion is allowed.
+`RB_RBPODO_PGMODE_SIMULATION_CONFIRMED` — were removed from the server runtime.
+`run_mode`/`operation_mode` are telemetry labels only and do not decide whether
+motion is allowed.
 
 Real-motion execution authority is owned by **site-local config
 (`rb_servo_server/config/local/`) + the mode-independent safety layers**. Real

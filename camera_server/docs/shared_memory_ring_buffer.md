@@ -141,7 +141,7 @@ Do not make policy wait for recorder.
 
 ## 6. Recommended initial shared memory sizing
 
-For the default RGB profile, head 1280x720 plus two wrist 640x360, ring size 4:
+For the legacy RGB-only profile, head 1280x720 plus two wrist 640x360, ring size 4:
 
 ```text
 2.76 MB/head frame × 4 + 0.69 MB/wrist frame × 4 × 2 ≈ 16.6 MB
@@ -154,6 +154,10 @@ RGB   0.92 MB/frame
 Depth 0.61 MB/frame
 Total 1.53 MB/frame × 4 × 3 ≈ 18.4 MB
 ```
+
+For the current default `d435_head_1280x720.yaml` profile, budget for head RGB,
+head IR stereo, and two wrist RGB-D streams; the tracked config uses 1536 MB
+shared memory to leave room for alignment, headers, and stereo-worker consumers.
 
 Use generous allocation to handle alignment, headers, and future modes.
 

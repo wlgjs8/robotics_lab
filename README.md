@@ -2,10 +2,11 @@
 
 한국어 기본 README입니다. 영어 원문은 [README.en.md](README.en.md)에 보존되어 있습니다.
 
-> **참고:** ACKON500 circle-tracking benchmark와 그 시점 스냅샷 프롬프트(`GOAL.md`)는
-> 2026-06-20에 제거됐습니다. 현재 방향은 이 README / `AGENTS.md` /
+> **참고:** ACKON500 circle-tracking benchmark와 그 시점의 root `GOAL.md`
+> 스냅샷 프롬프트는 2026-06-20에 제거됐습니다. 현재 방향은 이 README / `AGENTS.md` /
 > `docs/architecture.md`를 따르세요. 자세한 드리프트 목록은
-> `docs/code_architecture_map.md`에 있습니다.
+> `docs/code_architecture_map.md`에 있습니다. `policy_runner/GOAL.md`는 별도
+> policy-training 메모입니다.
 
 `robotics_lab`는 dual-arm RB3-730 시스템을 통합하기 위한 작업 공간입니다. 서보 제어, rbpodo 백엔드(실로봇 + 컨트롤러 `pgmode` 시뮬레이션), 카메라 캡처, `policy_runner`, 운영자 GUI를 함께 다룹니다.
 
@@ -131,9 +132,8 @@ site/VM config는 gitignore된 `rb_servo_server/config/local/`에 둡니다.
 `RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION` /
 `RB_ALLOW_RBPODO_CONTROLLER_SIM_CARTESIAN` /
 `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED` 게이트는 서버 런타임에서 모두
-제거됐습니다(일부 인수-테스트 스크립트에 과거 이름이 남아 있을 수 있으나 서버
-동작에는 영향이 없습니다). `run_mode`/`operation_mode`는 이제 telemetry
-라벨이며 실행 허용 여부를 결정하지 않습니다.
+제거됐습니다. `run_mode`/`operation_mode`는 이제 telemetry 라벨이며 실행 허용
+여부를 결정하지 않습니다.
 
 실제 모션의 실행 권한은 **site-local config + `rb_servo_server`의 mode-독립
 안전 계층**이 결정합니다.
@@ -277,16 +277,17 @@ rbpodo Servo J supervised acceptance:
 python3 scripts/rbpodo_servo_acceptance.py --help
 ```
 
-Start with read-only. Do not copy `dual_real.example.yaml` directly as a
-ready-to-run real motion config; site-specific real configs live under
-`rb_servo_server/config/local/` and are gitignored.
+Start with read-only. Use the tracked `rb_servo_server/config/stack_real.yaml`
+as the reference template, then make a site-specific copy under
+`rb_servo_server/config/local/` for read-only or motion procedures. Local real
+configs are gitignored and must carry the site/operator-specific safety choices.
 
 통합 운영자 stack 시작(native — Docker 아님). `make run`이
 `rb_servo_server` + viser GUI + `policy_runner`(SpaceMouse + UMI teleop)를 한
 번에 띄웁니다:
 
 ```bash
-make run            # pgmode real (+ gripper follower)
+make run            # pgmode real (+ gripper_server)
 make run MODE=sim   # pgmode controller-simulation
 ```
 
@@ -373,7 +374,7 @@ Tracked stack configs:
 Site-local mock / real / 컨트롤러 시뮬레이션(VM·onbox) config (gitignore):
 
 - `rb_servo_server/config/local/*.yaml`
-- `rb_servo_server/config/local/dual_real_readonly.yaml`
-- `rb_servo_server/config/local/dual_real_motion.yaml`
+- e.g. `rb_servo_server/config/local/stack_real_readonly.yaml`
+- e.g. `rb_servo_server/config/local/stack_real_motion.yaml`
 
 실행 가능한 tracked real robot config는 추가하면 안 됩니다.

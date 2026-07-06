@@ -193,7 +193,7 @@ Start the integrated operator stack (native, not Docker). `make run` brings up
 `rb_servo_server` + the viser GUI + `policy_runner` (SpaceMouse + UMI teleop):
 
 ```bash
-make run            # pgmode real (+ gripper follower)
+make run            # pgmode real (+ gripper_server)
 make run MODE=sim   # pgmode controller-simulation
 ```
 
@@ -217,8 +217,8 @@ Tracked stack configs:
 Site-local mock / real / controller-simulation (VM·onbox) configs (gitignored):
 
 - `rb_servo_server/config/local/*.yaml`
-- `rb_servo_server/config/local/dual_real_readonly.yaml`
-- `rb_servo_server/config/local/dual_real_motion.yaml`
+- e.g. `rb_servo_server/config/local/stack_real_readonly.yaml`
+- e.g. `rb_servo_server/config/local/stack_real_motion.yaml`
 
 No tracked runnable real robot config should be added. `README.md` is the
 canonical root README; this English README is a best-effort translation.

@@ -114,9 +114,9 @@ operator:
 repo_commit:
 config_file:
 profile:
-  head: D435f 1280x720@30
-  left_wrist: D405 640x360@30
-  right_wrist: D405 640x360@30
+  head: D435 RGB 1280x720@30 + IR stereo 1280x720@30
+  left_wrist: D405 RGB-D 640x480@30
+  right_wrist: D405 RGB-D 640x480@30
 serials:
   head:
   left_wrist:

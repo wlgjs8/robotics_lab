@@ -100,19 +100,21 @@ command period for supported real/controller-simulation configs: `0.002` at
 but they are not supported profiles. ACK-off rbpodo settings are diagnostic
 evidence only until a future real-motion task promotes them.
 
-Tracked real robot config must remain a template only:
+Tracked stack configs are the current templates:
 
 ```text
-rb_servo_server/config/dual_real.example.yaml
+rb_servo_server/config/stack_real.yaml
+rb_servo_server/config/stack_sim.yaml
 ```
 
-Site-specific real configs belong under:
+Site-specific real, mock, or controller-simulation variants belong under:
 
 ```text
 rb_servo_server/config/local/
 ```
 
-Do not add a tracked runnable real robot config.
+Do not add tracked site-specific real robot configs with private IP/serial/safety
+overrides; copy from the tracked stack config into `config/local/` for site work.
 
 ## Force Control
 

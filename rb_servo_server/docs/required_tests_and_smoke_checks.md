@@ -27,7 +27,7 @@ upstream; never skip ahead.
 | G2 | `ctest` (unit) | `tests/test_safety_policy.cpp` invariants still hold | Yes |
 | G3 | Mock smoke (server only) | Server starts under an explicit site-local mock config and exits cleanly | Yes |
 | G4 | Mock smoke (server + driver) | Sine driver completes a short loop without faulting the server | Yes |
-| G5 | Real-mode config guard | Real motion stays fail-closed under `config/local/dual_real_readonly.yaml`: motion is off unless the site-local config explicitly enables it (`servo.send_servo_commands: true`, `cartesian_control.allow_in_real: true`). Real motion is config-driven, not env-gated (`RB_ALLOW_REAL_*` retired). | Yes |
+| G5 | Real-mode config guard | Real motion stays fail-closed under a site-local read-only copy such as `config/local/stack_real_readonly.yaml`: motion is off unless the site-local config explicitly enables it (`servo.send_servo_commands: true`, `cartesian_control.allow_in_real: true`). Real motion is config-driven, not env-gated (`RB_ALLOW_REAL_*` retired). | Yes |
 | G6 | Touched-area regression | A behavior changed in this iteration is covered by a new or strengthened assertion in `tests/` | Yes for any behavioral change |
 | G7 | Doc parity | Any policy or behavior change is reflected in `docs/fail_safe_policy.md`, `docs/network_protocol.md`, or `docs/testing.md` | Yes for any policy change |
 
@@ -105,7 +105,7 @@ Pass criteria:
 ### G5 — real-mode config guard
 
 ```bash
-./build/rb_servo_server --config config/local/dual_real_readonly.yaml
+./build/rb_servo_server --config config/local/stack_real_readonly.yaml
 ```
 
 Real motion is config-driven, not env-gated (`RB_ALLOW_REAL_*` retired). A

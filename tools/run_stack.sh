@@ -2,9 +2,9 @@
 # Launch the full teleop stack with one command:
 #   rb_servo_server (pgmode real|sim) + viser GUI + policy_runner (teleop mux)
 #   + joint scope dashboard on :8081 (per-arm q/velocity/acceleration/jerk)
-#   + (real mode) umi_gripper_follow: replays the UMI Sense angle (UDP 50382)
-#     onto the Pika Grippers wired to this control PC. Toggle with
-#     GRIPPER_FOLLOW=0|1; extra flags via GRIPPER_FOLLOW_ARGS.
+#   + gripper_server: receives the arbitrated command stream on UDP 50410 and
+#     publishes feedback on UDP 50420. Toggle with GRIPPER_SERVER=0|1; legacy
+#     GRIPPER_FOLLOW is accepted only as a deprecated alias.
 #
 # Both teleop sources (SpaceMouse + UMI) run side by side: the first to engage
 # owns the robot until it returns to idle (policy_runner action_source
@@ -62,7 +62,7 @@ export RB_RECORD_SESSION_DIR="${RB_RECORD_SESSION_DIR:-data_$(TZ='Asia/Seoul' da
 # grippers. rb_servo_server forwards the arbitrated per-arm gripper setpoint
 # (left/right.gripper in the command packet) to it as gripper_cmd.v1 (:50410) and
 # stamps its gripper_state.v1 feedback (:50420) into the published state JSON,
-# which drives the viser gripper viz. This REPLACES the old umi_gripper_follow
+# which drives the viser gripper viz. This replaces the old direct serial bridge
 # serial bridge: gripper now rides the same command stream + lease as arm motion.
 # Backend: 'sim' (hardware-free; feedback eases toward the command, so the viz
 # moves even without hardware) for mock/sim; 'pika' (local serial) for real.
@@ -71,10 +71,10 @@ export RB_RECORD_SESSION_DIR="${RB_RECORD_SESSION_DIR:-data_$(TZ='Asia/Seoul' da
 if [ "$MODE" = "real" ]; then
   GRIPPER_BACKEND="pika"
   # The AgileX Pika SDK ('pika' package) is NOT on this PC's default sys.path;
-  # the copy from the SteamVR PC's conda env lives at PIKA_SDK_PATH (same
-  # convention/default as scripts/umi_gripper_follow.py). Without it the pika
-  # backend dies at startup with "No module named 'pika'" and the gripper viz
-  # never updates. Pass it through so `make run` alone works.
+  # the copy from the SteamVR PC's conda env lives at PIKA_SDK_PATH (the same
+  # convention/default used on this workstation). Without it the pika backend
+  # dies at startup with "No module named 'pika'" and the gripper viz never
+  # updates. Pass it through so `make run` alone works.
   PIKA_SDK_PATH="${PIKA_SDK_PATH:-/home/plaif/workspace/pika_sdk}"
   # --no-home-on-connect: do NOT actuate the grippers at startup. Homing drives
   # each jaw to its closed stop to re-zero, but the two Pika motors have opposite

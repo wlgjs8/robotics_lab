@@ -23,8 +23,9 @@ make run MODE=sim
 ```
 
 Build/install the stack first with `make build` after editing source. The
-server binds commands on `udp://0.0.0.0:50010` and publishes state to the GUI's
-`50110` listener.
+server binds commands on the active config's `network.command_bind`
+(`udp://127.0.0.1:50256` in the tracked stack configs) and publishes state to
+the GUI fanout endpoint (`50366`).
 
 The server is built with Pinocchio enabled. The mock / controller-simulation
 config publishes FK TCP poses and enables Cartesian IK, so the GUI TCP target

@@ -53,7 +53,7 @@ services:
       # (UDP SetExternalBoxes, net=host). 0이면 송신 안 함.
       STEREO_SEND_EXTERNAL_BOXES: ${STEREO_SEND_EXTERNAL_BOXES:-1}
       # 반드시 servo의 network.command_bind 포트와 일치해야 함. 이 사이트 stack_real.yaml은
-      # 50256을 쓴다(문서 기본값 50010 아님 → 안 맞추면 박스 패킷이 버려짐).
+      # 50256을 쓴다(안 맞추면 박스 패킷이 버려짐).
       STEREO_COMMAND_ENDPOINT: ${STEREO_COMMAND_ENDPOINT:-127.0.0.1:50256}
       # CPU 경량화 튜닝(호스트 env로 오버라이드). HEAD_HZ=0은 매 프레임(캡처율).
       STEREO_HEAD_HZ: ${STEREO_HEAD_HZ:-0}

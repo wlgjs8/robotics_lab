@@ -108,15 +108,12 @@ safety:
   # (presence/non-negative checked here); the actual runtime enforcement is the
   # rb_servo_server async URDF-mesh self-collision guard (capsule margin), not this value.
   minimum_inter_arm_distance_m: 0.05
-  # Physical Pika grippers over local serial (flow-infer real_policy). WITHOUT this
-# block GripperConfig.backend defaults to "none" -> NoopGripperBackend -> every
-# gripper command is dropped (gripper_dropped_count == gripper_command_count, the
-# gripper never actuates). safety.allow_real_gripper_motion + RB_ALLOW_REAL_GRIPPER=1
-# only OPEN the dispatch gate; this block is what puts a real backend behind it.
-# Ports/SDK match the working teleop gripper path (scripts/umi_gripper_follow.py).
-# NOTE: PikaSerialGripperBackend.connect() runs at flow-infer startup -> if a port is
-# held by another process (e.g. teleop) or the SDK path is wrong it RAISES and
-# flow-infer exits (fail-loud, not silent drop).
+# Gripper commands ride the same policy_runner -> rb_servo_server command stream
+# as arm motion. Keep backend "none" here so flow-infer does not open the Pika
+# serial ports directly; rb_servo_server forwards gated per-arm gripper targets
+# to the out-of-process gripper_server on UDP 50410 and stamps feedback from UDP
+# 50420 into state. safety.allow_real_gripper_motion + RB_ALLOW_REAL_GRIPPER=1
+# open the policy dispatch gate; gripper_server owns the hardware/sim backend.
 gripper:
   backend: none
   left_port: /dev/pika-left

@@ -30,8 +30,10 @@ joint-only acceptance run after read-only state publishing has been verified.
 
 ## Config
 
-Start from `rb_servo_server/config/dual_real.example.yaml` and copy it into
-`rb_servo_server/config/local/`. Files in `config/local/` are gitignored.
+Start from `rb_servo_server/config/stack_real.yaml` and copy it into
+`rb_servo_server/config/local/` with a site-specific name such as
+`stack_real_readonly.yaml` or `stack_real_motion.yaml`. Files in `config/local/`
+are gitignored.
 
 For read-only acceptance:
 

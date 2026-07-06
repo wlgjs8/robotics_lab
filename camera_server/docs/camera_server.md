@@ -74,17 +74,19 @@ privileged: true
 
 and USB access to RealSense devices.
 
-## Initial milestone
+## Current default profile
 
-Milestone 1 is RGB-only:
+The current default `make cam-up` profile is not RGB-only:
 
 ```text
-head.color        1280x720 30 FPS
-left_wrist.color  640x360 30 FPS
-right_wrist.color 640x360 30 FPS
+head.color          1280x720 30 FPS
+head.ir_left/right  1280x720 30 FPS
+left_realsense      640x480 color + depth 30 FPS
+right_realsense     640x480 color + depth 30 FPS
 ```
 
-Depth can be supported by config but should be disabled by default for wrist cameras.
+Older RGB-only milestone docs map to the retained `triple_realsense*` profiles
+and are not the default stack.
 
 ## Tests
 
@@ -103,4 +105,4 @@ Keep `docs/*.md` updated. The design source of truth is this docs directory.
 
 ## 현재 구현 상태
 
-Initial milestone 산출물은 repository root에 구현되어 있다. RealSense가 설치된 환경에서는 serial로 required camera를 확인하고 없으면 startup 실패한다. Hardware가 없는 개발/CI 환경은 `--simulate` 또는 `server.simulate_cameras: true`로 3대 30 FPS mock capture를 실행해 shared memory, bundle metadata, health, drop counter 경로를 검증한다.
+Camera-server plumbing 산출물은 repository root에 구현되어 있다. RealSense가 설치된 환경에서는 serial로 required camera를 확인하고 없으면 startup 실패한다. Hardware가 없는 개발/CI 환경은 `--simulate` 또는 `server.simulate_cameras: true`로 mock capture를 실행해 shared memory, bundle metadata, health, drop counter 경로를 검증한다.

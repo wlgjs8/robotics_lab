@@ -2,12 +2,15 @@
 
 Example files:
 
-- `config/triple_realsense.yaml`: canonical real-camera template, same profile
-  as `config/triple_realsense_640x360.yaml`
-- `config/triple_realsense_640x360.yaml`: canonical D435f head
-  1280x720@30 RGB plus D405 wrists 640x360@30 RGB
-- `config/triple_realsense_640x480.yaml`: optional D405 wrist
-  640x480@30 RGB variant for explicitly approved hardware sessions
+- `config/d435_head_1280x720.yaml`: current `make cam-up` default — D435 head
+  RGB + 1280x720 IR stereo, plus two D405 wrist RealSense cameras with
+  color+depth at 640x480
+- `config/head_wrists.yaml`: alternate D435-head + dual-D405 profile using
+  640x480 head IR stereo when the static 640x480 intrinsics/engine are required
+- `config/triple_realsense.yaml` and `config/triple_realsense_640x360.yaml`:
+  legacy three-RealSense RGB-only profile retained for older capture sessions
+- `config/triple_realsense_640x480.yaml`: legacy D405 wrist 640x480 RGB variant
+  for explicitly approved hardware sessions
 - `config/dual_realsense_d405.yaml`: two D405 wrist cameras 640x480@30 RGB for
   flow-infer rollout on the local PC (camera names `left_realsense` /
   `right_realsense` pair with checkpoint camera names
@@ -33,7 +36,7 @@ server:
 
 shared_memory:
   name: "/camera_server_frames"
-  size_mb: 1024
+  size_mb: 1536
   ring_slots: 4
   unlink_on_start: true
 
@@ -47,7 +50,7 @@ sync:
   mode: software           # software | hardware
   master_camera: head
   bundle_policy: nearest_timestamp
-  max_bundle_time_diff_ms: 10.0
+  max_bundle_time_diff_ms: 33.0
   publish_incomplete_bundles: false
 
 cameras:
@@ -69,30 +72,50 @@ cameras:
         height: 720
         fps: 30
         format: z16
-  left_wrist:
+      ir_left:
+        enabled: true
+        width: 1280
+        height: 720
+        fps: 30
+        format: y8
+      ir_right:
+        enabled: true
+        width: 1280
+        height: 720
+        fps: 30
+        format: y8
+  left_realsense:
     serial: "REPLACE_LEFT_SERIAL"
     required: true
     streams:
       color:
         enabled: true
         width: 640
-        height: 360
+        height: 480
         fps: 30
         format: rgb8
       depth:
-        enabled: false
-  right_wrist:
+        enabled: true
+        width: 640
+        height: 480
+        fps: 30
+        format: z16
+  right_realsense:
     serial: "REPLACE_RIGHT_SERIAL"
     required: true
     streams:
       color:
         enabled: true
         width: 640
-        height: 360
+        height: 480
         fps: 30
         format: rgb8
       depth:
-        enabled: false
+        enabled: true
+        width: 640
+        height: 480
+        fps: 30
+        format: z16
 
 recording:
   enabled: false
@@ -156,10 +179,10 @@ reconnect:
 
 Geometry and calibration naming are shared with `rb_servo_server`, `rb_gui`,
 and the future `policy_runner` through `../../docs/frame_contract.md`.
-`camera_server` camera names remain `head`, `left_wrist`, and `right_wrist`;
-geometry frame names are `head_camera`, `left_wrist_camera`, and
-`right_wrist_camera`. `camera_server` must not invent extrinsics when
-calibration files are absent.
+The current stack profile uses `head`, `left_realsense`, and `right_realsense`
+camera names. Older triple-RealSense profiles use `head`, `left_wrist`, and
+`right_wrist`. Geometry frame names remain owned by `../../docs/frame_contract.md`.
+`camera_server` must not invent extrinsics when calibration files are absent.
 
 ## Derived values
 
@@ -213,4 +236,9 @@ config copy.
 
 ## 구현 파일
 
-Schema loader/validator는 `src/config/config.cpp`에 있다. 기본 production config는 `config/triple_realsense.yaml`, hardware 없는 검증 config는 `config/mock_triple_realsense.yaml`이다. Validator는 serial placeholder, mock serial gate, sync mode/policy 조합, reconnect disabled state, required serial, positive dimensions/FPS, supported formats, POSIX shm name, loopback metadata bind, shared-memory capacity를 검사한다.
+Schema loader/validator는 `src/config/config.cpp`에 있다. 현재 repository-root
+`make cam-up` 기본 production config는 `config/d435_head_1280x720.yaml`,
+hardware 없는 검증 config는 `config/mock_triple_realsense.yaml`이다. Validator는
+serial placeholder, mock serial gate, sync mode/policy 조합, reconnect disabled
+state, required serial, positive dimensions/FPS, supported formats, POSIX shm
+name, loopback metadata bind, shared-memory capacity를 검사한다.

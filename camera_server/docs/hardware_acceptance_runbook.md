@@ -2,7 +2,7 @@
 
 This runbook is for the RealSense hardware session gated by kanban task
 `t_8f430205`. It must not be used during code-only or mock-only validation.
-The repository-level source for current three-camera acceptance criteria is
+The repository-level source for current camera acceptance criteria is
 `../../docs/runbooks/camera_acceptance.md`; keep this component runbook aligned
 with that checklist.
 
@@ -12,16 +12,19 @@ Do not start `camera_server`, Docker with USB access, RealSense capture, shared
 memory production endpoints, or recording until all items below are true.
 
 - Human approval for this exact hardware session is recorded.
-- Three physical RealSense cameras are connected and reserved for this test:
-  one D435f head camera and two D405 wrist cameras.
+- The approved physical camera rig is connected and reserved for this test. The
+  current default is one D435 head camera and two D405 wrist cameras; fisheye
+  sessions add the approved UVC fisheye pair.
 - USB and udev access are approved for the test host.
 - Storage target, retention period, and cleanup owner are recorded.
 - Test endpoints are isolated from production policy and metadata consumers.
-- A copied config based on `config/triple_realsense_640x360.yaml` or the
-  explicitly approved `config/triple_realsense_640x480.yaml` variant contains
-  the approved serial mapping. Do not run the checked-in template directly;
-  `REPLACE_*`, `TODO`, `CHANGEME`, `UNKNOWN`, empty required serials, and
-  `MOCK_*` serials in real mode fail validation.
+- A copied config based on the approved rig profile contains the approved serial
+  and/or UVC device mapping. For the current default, start from
+  `config/d435_head_1280x720.yaml`; use `config/head_wrists.yaml`,
+  `config/quad_realsense_fisheye.yaml`, or legacy `config/triple_realsense*`
+  only when that session explicitly approves the variant. Do not run a template
+  with placeholders; `REPLACE_*`, `TODO`, `CHANGEME`, `UNKNOWN`, empty required
+  serials, and `MOCK_*` serials in real mode fail validation.
 - First-wave code-only and mock-only gates have passed.
 
 Record:
@@ -102,7 +105,7 @@ Acceptance:
 - Hardware sync claims are documented as observed wiring/configuration, or the
   run is explicitly marked software-sync-only.
 
-## 3. Baseline triple-camera run
+## 3. Baseline camera-rig run
 
 Run from the `camera_server` repository root. Use an approved per-session config
 copy with a non-production shared memory name and metadata port unless the
@@ -111,7 +114,7 @@ approved session explicitly authorizes the defaults.
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j2
-./build/camera_server --config config/triple_realsense_640x360.approved.yaml --run-seconds 600
+./build/camera_server --config config/d435_head_1280x720.approved.yaml --run-seconds 600
 python3 tools/print_camera_health.py --once
 python3 tools/read_latest_bundle.py --once --shm /camera_server_frames
 ```
@@ -143,8 +146,10 @@ server_log_path:
 
 Acceptance:
 
-- Head color is 1280x720 at approximately 30 FPS.
-- Left and right wrist color are 640x360 at approximately 30 FPS.
+- Head color is 1280x720 at approximately 30 FPS; head IR stereo matches the
+  approved profile resolution.
+- Left and right wrist color/depth streams match the approved profile, normally
+  640x480 at approximately 30 FPS for the current stack.
 - Drop counts are zero for 10 minutes, or every drop is reported with timing and
   suspected cause.
 - Bundle publish rate is approximately 30 FPS.
@@ -159,7 +164,7 @@ shared memory and record through the async writer path.
 Record the exact config diff or copied config path used for recording.
 
 ```bash
-./build/camera_server --config config/triple_realsense_recording.approved.yaml --run-seconds 180
+./build/camera_server --config config/d435_head_1280x720_recording.approved.yaml --run-seconds 180
 ```
 
 Record:

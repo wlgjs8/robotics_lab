@@ -24,13 +24,14 @@ uses the rbpodo `pgmode` simulation flavor (`make run MODE=sim`).
 
 ## Real robot
 
-`config/dual_real.example.yaml` is a template only. Actual site-specific real
-robot YAML files belong under `config/local/`, and local `*.yaml` files there
-are gitignored. Use `config/local/dual_real_readonly.yaml` for read-only
-bring-up and `config/local/dual_real_motion.yaml` only for separately approved
-motion procedures.
+`config/stack_real.yaml` is the tracked real-stack reference template. Actual
+site-specific real robot YAML files belong under `config/local/`, and local
+`*.yaml` files there are gitignored. Use a local copy such as
+`config/local/stack_real_readonly.yaml` for read-only bring-up and a separate
+local copy such as `config/local/stack_real_motion.yaml` only for approved motion
+procedures.
 
-The real example uses the assigned controller IPs:
+The real stack uses the assigned controller IPs:
 
 ```yaml
 left_robot:
@@ -55,7 +56,7 @@ from the server runtime). Read-only real connection keeps
 motion additionally requires `cartesian_control.allow_in_real: true`. Together
 with the mode-independent safety layers, operator supervision, and the hardware
 E-stop, the site-local config is the sole decider. The rbpodo `disable_waiting_ack` arm option is
-wired to the SDK ACK-wait toggle and defaults to `false` in the tracked real
+wired to the SDK ACK-wait toggle and defaults to `false` in the tracked stack
 template; only change it in site-local motion configs after command-path
 acceptance.
 

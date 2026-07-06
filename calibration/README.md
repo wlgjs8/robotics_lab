@@ -10,8 +10,9 @@ configured estimate, not a measured calibration artifact:
 - `geometry_valid_for_real_policy: false`
 
 Configured estimates may be used for visualization, simulation, and frame
-contract development. They are not valid for real geometry-dependent policy,
-real Cartesian/TCP policy, or camera-to-robot policy decisions.
+contract development. They are not valid for general real geometry-dependent
+policy, real camera-to-robot Cartesian policy, or camera-to-robot policy
+decisions.
 
 Joint-only action sources do not require this file to be measured. Missing or
 unmeasured camera intrinsics, camera extrinsics, or wrist hand-eye calibration
@@ -24,12 +25,14 @@ camera intrinsics, head-camera extrinsics, and wrist-camera hand-eye transforms.
 Policy and teleop dataset metadata should record the active calibration status.
 For the current file, use `calibration_status: configured_estimate` and keep
 `geometry_valid_for_real_policy: false` visible in dataset review. Do not label
-controller-simulation or future physical real policy data as measured until a
-measured calibration artifact is accepted.
+controller-simulation or physical real policy data as measured until a measured
+calibration artifact is accepted.
 
 `umi_retarget.example.yaml` is the template for offline UMI-to-stand retarget
 metadata. Its default `status: configured_estimate` is suitable for synthetic
-fixtures and training pipeline smoke tests only. Real policy rollout must remain
-blocked until a site-specific retarget config has `status: measured` or
-`status: accepted`. `accepted` means a measured transform was accepted by a
-documented acceptance artifact.
+fixtures and training pipeline smoke tests only. General geometry-dependent real
+policy rollout must remain blocked until a site-specific retarget config has
+`status: measured` or `status: accepted`. `accepted` means a measured transform
+or a documented policy-specific carve-out was accepted by an acceptance artifact;
+the deployed pika ee_local image-conditioned policy uses that carve-out because
+it does not consume the unmeasured tool/camera extrinsics.

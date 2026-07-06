@@ -31,7 +31,7 @@ services:
       - ./config:/app/config:ro
       - ./episodes:/data/episodes
     environment:
-      - CAMERA_SERVER_CONFIG=/app/config/triple_realsense.yaml
+      - CAMERA_SERVER_CONFIG=/app/config/d435_head_1280x720.yaml
 ```
 
 `policy_runner` runs natively (not in Docker) and opens the same POSIX shared

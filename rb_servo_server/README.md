@@ -5,9 +5,9 @@ C++ control server for synchronizing two Rainbow RB3-730 arms through a shared `
 The server is designed for:
 
 1. fast mock-mode development without robots,
-2. later Rainbow real robot backends through `IRobotBackend`,
+2. Rainbow rbpodo real/controller-simulation backends through `IRobotBackend`,
 3. Python VLA / imitation policy integration through UDP commands,
-4. future Cartesian TCP and force/admittance control layers.
+4. Cartesian TCP control and inactive force/admittance scaffolding.
 
 ## Current status
 
@@ -15,7 +15,7 @@ Implemented in this server:
 
 - dual-arm same-tick servo loop
 - mock backend
-- guarded `RbpodoBackend` integration path, disabled unless built and gated
+- guarded `RbpodoBackend` integration path, enabled only by explicit stack config
 - actual UDP JSON command receiver
 - minimal YAML config parser for the provided config files
 - velocity/acceleration safety clamps
@@ -31,14 +31,11 @@ Implemented in this server:
 - Cartesian command routing when kinematics and Cartesian config gates are
   enabled
 - force-control design types, config, and optional controller scaffold
+- gripper command forwarding to the out-of-process `gripper_server`
 
 Still pending:
 
-- real-hardware acceptance for `RbpodoBackend`
-- real `servo_j` motion acceptance
-- real Cartesian/TCP motion acceptance
 - production force-control integration
-- gripper integration
 - measured camera/robot calibration
 - production promotion of worker I/O for real hardware
 
@@ -118,29 +115,33 @@ Reset a latched fault:
 python3 tools/send_reset_fault.py
 ```
 
-## Real robot guard
+## Real robot config boundary
 
-Real mode refuses to start unless explicitly enabled. Do not run real robot
+Real motion is config-driven and operator-supervised. Do not run real robot
 configs during hardware-free validation; real validation is a separate
-human-gated task. Start from the tracked
-`config/dual_real.example.yaml` template, then create a site-owned
-`config/local/dual_real_readonly.yaml` for read-only bring-up or
-`config/local/dual_real_motion.yaml` for a separately approved motion
-procedure. The real template defaults to `tracking_error_policy: fault_latch`
-and `servo.send_servo_commands: false`.
+human-gated task. Use the tracked `config/stack_real.yaml` as the reference
+template, then create a site-owned copy under `config/local/` for read-only
+bring-up or a separately approved motion procedure. Site-local real configs must
+keep motion off until the relevant acceptance task explicitly enables
+`servo.send_servo_commands: true` and, for Cartesian motion,
+`cartesian_control.allow_in_real: true`.
 
 Rbpodo joint states and commands preserve raw controller degrees. The tracked
-real templates use explicit `q_min_deg: [-360, -360, -360, -360, -360, -360]`
-and `q_max_deg: [360, 360, 360, 360, 360, 360]`; see
+stack configs use explicit raw-degree ranges; see
 `../docs/joint_range_policy.md`.
 
 ## Command channel
 
-Default command endpoint:
+Current stack command endpoint:
 
 ```text
-udp://127.0.0.1:50010
+udp://127.0.0.1:50256
 ```
+
+The stack state fanout uses `50356` (joint scope dashboard), `50366` (viser
+GUI), `50376` (stack policy_runner/teleop_mux), `50378` (external flow-infer
+readback), and `50386` (camera_server stereo_worker wrist-fusion). Gripper
+command/feedback uses `50410`/`50420`.
 
 Minimal command:
 
