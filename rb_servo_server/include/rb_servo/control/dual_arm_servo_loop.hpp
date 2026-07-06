@@ -309,6 +309,8 @@ private:
     void clearChunkFollowerFaultRequests();
     void recordChunkFollowerFaultRequest(ArmId arm_id, const std::string& reason);
     bool latchChunkFollowerFaultRequests(const RobotState& left_state, const RobotState& right_state);
+    void markSafetyIntervention(ArmId arm_id, uint64_t now_ns);
+    bool safetyInterventionRecent(ArmId arm_id, uint64_t now_ns) const;
 
 private:
     std::unique_ptr<IRobotBackend> left_robot_;
@@ -568,6 +570,11 @@ private:
     UserFloorArmEvaluation last_user_floor_right_{};
     uint64_t user_floor_clamp_count_ = 0;
     std::string user_floor_last_set_reject_reason_;
+    // Last tick when the final safety gate actively modified/held each arm.
+    // applyChunkFollowerStage runs before this tick's applySafety, so strict
+    // follower divergence reads the previous safety tick through a short debounce.
+    uint64_t left_safety_intervention_last_ns_ = 0;
+    uint64_t right_safety_intervention_last_ns_ = 0;
     // Controller-sim tracking-error advisory (safety.controller_simulation_tracking_error_nonlatching).
     // Reset each tick in loopMain; set in applySafety when a reference/actual tracking
     // divergence is suppressed (not latched). Surfaced as published telemetry
@@ -600,6 +607,10 @@ private:
     bool right_chunk_engage_waiting_ = false;
     double left_chunk_engage_wait_start_sec_ = 0.0;
     double right_chunk_engage_wait_start_sec_ = 0.0;
+    std::uint64_t left_chunk_follower_reanchor_count_ = 0;
+    std::uint64_t right_chunk_follower_reanchor_count_ = 0;
+    uint64_t left_chunk_follower_reanchor_log_ns_ = 0;
+    uint64_t right_chunk_follower_reanchor_log_ns_ = 0;
     struct ChunkFollowerFaultRequest {
         bool active = false;
         ArmId arm = ArmId::Left;
@@ -668,6 +679,8 @@ private:
         std::optional<Pose6D> stage_tcp_target_stand;
         double follower_divergence_pos_m = 0.0;
         double follower_divergence_ang_rad = 0.0;
+        std::uint64_t follower_reanchor_count = 0;
+        bool safety_intervention_recent = false;
     };
     AbcTelemetry left_abc_telemetry_;
     AbcTelemetry right_abc_telemetry_;

@@ -5,9 +5,11 @@
 #include "rb_servo/control/cartesian_chunk_follower.hpp"
 #include "rb_servo/math/se3.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 
 using rb_servo::control::CartesianChunkFollower;
 using rb_servo::control::CartesianChunkFollowerConfig;
@@ -48,6 +50,11 @@ static ChunkFrame makeRef(int n, double vx = 0.03, double wz = 0.2) {
 static double quatNorm(const Pose6D& p) {
   const auto& q = *p.quaternion_xyzw;
   return std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+}
+
+static bool poseNear(const Pose6D& a, const Pose6D& b, double pos_tol, double ang_tol) {
+  return rb_servo::math::positionDistance(a, b) < pos_tol &&
+         rb_servo::math::orientationDistanceRad(a, b) < ang_tol;
 }
 
 int main() {
@@ -139,6 +146,45 @@ int main() {
     f.tick(TICK);
     check(f.diag().seg_wire_seq == 1234, "diag carries producer wire seq");
     check(f.diag().seg_recv_seq == 7, "diag carries receiver-local seq");
+  }
+
+  // -- Test 5: strict-divergence reanchor keeps the active chunk window. -------
+  std::printf("Test 5: reanchor keeps window and restarts from reference\n");
+  {
+    CartesianChunkFollower f(cfg);
+    ChunkFrame frame = makeRef(18);
+    frame.wire_seq = 2222;
+    frame.recv_seq = 33;
+    f.submitFrame(frame, frame.pose[cfg.window.discard_head_L]);
+    for (int i = 0; i < 80; ++i) f.tick(TICK);  // a few 33 ms segments
+
+    const std::uint64_t wire_before = f.windowWireSeq();
+    const std::uint64_t recv_before = f.windowRecvSeq();
+    const std::size_t index_before = f.windowIndex();
+    const int consumed_before = f.windowConsumed();
+    const int segments_before = f.diag().segments;
+
+    Pose6D ref;
+    ref.x = -0.04;
+    ref.y = 0.015;
+    ref.z = 0.18;
+    const double ang = 0.35;
+    ref.quaternion_xyzw =
+        std::array<double, 4>{0.0, 0.0, std::sin(ang / 2), std::cos(ang / 2)};
+
+    f.reanchor(ref);
+    check(f.active(), "active stays true immediately after reanchor");
+    check(f.windowWireSeq() == wire_before && f.windowRecvSeq() == recv_before,
+          "reanchor keeps active window seq ids");
+    check(f.windowIndex() == index_before && f.windowConsumed() == consumed_before,
+          "reanchor keeps window consume pointer");
+    check(poseNear(f.lastPose(), ref, 1e-12, 1e-12), "lastPose equals reference immediately");
+
+    const Pose6D first = f.tick(TICK);
+    check(poseNear(first, ref, 1e-9, 1e-9), "next tick starts at reanchor reference");
+    check(f.diag().segments == segments_before + 1, "reanchor forces a fresh segment solve");
+    check(f.diag().seg_step_index == static_cast<int>(index_before),
+          "fresh segment uses unchanged window index");
   }
 
   std::printf("\n=== %s (%d failure%s) ===\n",

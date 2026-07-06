@@ -112,6 +112,8 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_follower_corner"
        << ',' << side << "_follower_divergence_pos_m"
        << ',' << side << "_follower_divergence_ang_rad"
+       << ',' << side << "_follower_reanchor_count"
+       << ',' << side << "_safety_intervention_recent"
        << ',' << side << "_output_ma_present"
        << ',' << side << "_output_ma_window";
     writeJointArrayHeader(os, side, "q_target_before_output_ma");
@@ -492,6 +494,8 @@ void writeArmProfilingColumns(
        << ',' << telemetry.follower_corner
        << ',' << telemetry.follower_divergence_pos_m
        << ',' << telemetry.follower_divergence_ang_rad
+       << ',' << telemetry.follower_reanchor_count
+       << ',' << telemetry.safety_intervention_recent
        << ',' << telemetry.output_ma_present
        << ',' << telemetry.output_ma_window;
     if (telemetry.output_ma_present) {

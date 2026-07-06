@@ -160,6 +160,15 @@ void appendReason(ArmStartupValidationSnapshot* validation, const std::string& r
 // below an inter-episode swing (tens of cm), so it isolates external moves without false trips.
 constexpr double kPoseTrackReanchorPosTolM = 0.05;
 constexpr double kPoseTrackReanchorAngTolRad = 0.10;
+// Strict chunk-follower divergence is explained only by a safety intervention
+// stamped by applySafety on a recent prior tick. The follower stage runs before
+// this tick's safety evaluation, so the window must cover one or more servo ticks
+// without letting stale, unrelated interventions mask real divergence.
+constexpr double kFollowerDivergenceExplainWindowSec = 0.1;
+constexpr uint64_t kFollowerDivergenceExplainWindowNs =
+    static_cast<uint64_t>(kFollowerDivergenceExplainWindowSec * 1'000'000'000.0);
+constexpr uint64_t kFollowerDivergenceReanchorLogPeriodNs = 1'000'000'000ULL;
+constexpr double kSafetyInterventionCorrectionEpsDegPerSec = 1e-3;
 
 // Streaming TcpPoseTarget smoothing: integrate received target deltas into the
 // SMD tracker's goal and replace the commanded pose with this tick's SMD
@@ -3658,6 +3667,8 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.stage_tcp_target_stand = abc.stage_tcp_target_stand;
     solve.follower_divergence_pos_m = abc.follower_divergence_pos_m;
     solve.follower_divergence_ang_rad = abc.follower_divergence_ang_rad;
+    solve.follower_reanchor_count = abc.follower_reanchor_count;
+    solve.safety_intervention_recent = abc.safety_intervention_recent;
     solve.output_ma_present = abc.output_ma_present;
     solve.output_ma_window = output_ma_window;
     if (abc.output_ma_present) {
@@ -3689,6 +3700,20 @@ void DualArmServoLoop::resetChunkFollowerEngageWait(ArmId arm_id) {
         right_chunk_engage_waiting_ = false;
         right_chunk_engage_wait_start_sec_ = 0.0;
     }
+}
+
+void DualArmServoLoop::markSafetyIntervention(ArmId arm_id, uint64_t now_ns) {
+    uint64_t& stamp = arm_id == ArmId::Left ? left_safety_intervention_last_ns_
+                                            : right_safety_intervention_last_ns_;
+    stamp = now_ns;
+}
+
+bool DualArmServoLoop::safetyInterventionRecent(ArmId arm_id, uint64_t now_ns) const {
+    const uint64_t stamp = arm_id == ArmId::Left ? left_safety_intervention_last_ns_
+                                                 : right_safety_intervention_last_ns_;
+    if (stamp == 0) return false;
+    if (now_ns < stamp) return true;
+    return now_ns - stamp <= kFollowerDivergenceExplainWindowNs;
 }
 
 void DualArmServoLoop::clearChunkFollowerFaultRequests() {
@@ -3779,6 +3804,13 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.stage_tcp_target_stand.reset();
     abc.follower_divergence_pos_m = 0.0;
     abc.follower_divergence_ang_rad = 0.0;
+    const uint64_t now_ns = last_loop_start_ns_ != 0 ? last_loop_start_ns_ : nowSteadyNs();
+    const bool intervention_recent = safetyInterventionRecent(arm_id, now_ns);
+    std::uint64_t& reanchor_count = arm_id == ArmId::Left
+        ? left_chunk_follower_reanchor_count_
+        : right_chunk_follower_reanchor_count_;
+    abc.follower_reanchor_count = reanchor_count;
+    abc.safety_intervention_recent = intervention_recent;
     const bool fault_policy = rf.fallback_policy == RuckigFollowerFallbackPolicy::Fault;
     const bool was_active = follower->active();
     std::string transition_reason;
@@ -3868,26 +3900,46 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             }
         } else {
             if (pos_err > kPoseTrackReanchorPosTolM || ang_err > kPoseTrackReanchorAngTolRad) {
-                // Divergence re-anchor: the sent target drifted from the follower's
-                // plan (barrier hold / safety clamp / init-return). Drop the plan;
-                // the next frame cold-starts from the live reference.
-                transition_reason = fault_policy
-                    ? "divergence -> fault " + diag_seq_labels(active_diag)
-                    : "divergence re-anchor " + diag_seq_labels(active_diag);
-                follower->deactivate();
-                if (fault_policy) {
-                    smd_tracker->deactivate();
-                    std::ostringstream reason;
-                    reason << toString(arm_id)
-                           << " chunk_follower_divergence"
-                           << " pos_err_m=" << pos_err
-                           << " pos_tol_m=" << kPoseTrackReanchorPosTolM
-                           << " ang_err_rad=" << ang_err
-                           << " ang_tol_rad=" << kPoseTrackReanchorAngTolRad
-                           << " " << diag_seq_labels(active_diag);
-                    recordChunkFollowerFaultRequest(arm_id, reason.str());
-                    log_transition();
-                    return with_stage_telemetry(hold_at_reference());
+                // Divergence: the sent target drifted from the follower's plan. In
+                // strict fault mode, only an active recent safety intervention can
+                // explain it; then reseed the chained state but keep the active window.
+                // Otherwise keep the legacy drop/fault or SMD re-anchor behavior.
+                if (fault_policy && intervention_recent) {
+                    follower->reanchor(reference);
+                    ++reanchor_count;
+                    abc.follower_reanchor_count = reanchor_count;
+                    uint64_t& last_log_ns = arm_id == ArmId::Left
+                        ? left_chunk_follower_reanchor_log_ns_
+                        : right_chunk_follower_reanchor_log_ns_;
+                    if (last_log_ns == 0 || now_ns < last_log_ns ||
+                        now_ns - last_log_ns >= kFollowerDivergenceReanchorLogPeriodNs) {
+                        std::cout << "[chunk_follower] " << toString(arm_id)
+                                  << " divergence re-anchor (safety intervention)"
+                                  << " pos_err=" << pos_err
+                                  << " ang_err=" << ang_err
+                                  << " wire_seq=" << active_diag.seg_wire_seq
+                                  << " recv_seq=" << active_diag.seg_recv_seq << "\n";
+                        last_log_ns = now_ns;
+                    }
+                } else {
+                    transition_reason = fault_policy
+                        ? "divergence -> fault " + diag_seq_labels(active_diag)
+                        : "divergence re-anchor " + diag_seq_labels(active_diag);
+                    follower->deactivate();
+                    if (fault_policy) {
+                        smd_tracker->deactivate();
+                        std::ostringstream reason;
+                        reason << toString(arm_id)
+                               << " chunk_follower_divergence"
+                               << " pos_err_m=" << pos_err
+                               << " pos_tol_m=" << kPoseTrackReanchorPosTolM
+                               << " ang_err_rad=" << ang_err
+                               << " ang_tol_rad=" << kPoseTrackReanchorAngTolRad
+                               << " " << diag_seq_labels(active_diag);
+                        recordChunkFollowerFaultRequest(arm_id, reason.str());
+                        log_transition();
+                        return with_stage_telemetry(hold_at_reference());
+                    }
                 }
             }
         }
@@ -4133,7 +4185,9 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         // then run the follower (per-profile opt-in) or the legacy SMD path.
         // applyChunkFollowerStage falls back to applyPoseTrackSmd verbatim when
         // the profile leaves ruckig_follower disabled, so existing profiles are
-        // byte-identical in behavior.
+        // byte-identical in behavior. This stage runs before this tick's
+        // applySafety(), so strict divergence explanation intentionally reads the
+        // previous safety tick's intervention stamp through a short debounce.
         pollChunkFrames();
         const ArmCommand left_pose_track_command = applyChunkFollowerStage(
             ArmId::Left,
@@ -4509,6 +4563,19 @@ ServoTarget DualArmServoLoop::applySafety(
     bool reach_engaged = false;        // a reach-shell row is within its engage band
     bool user_floor_engaged = false;   // a user-floor-plane row is within its engage band
     bool self_collision_hold = false;  // stale verdict -> whole-arm hold, skip solve
+    bool collision_constraints_engaged = false;
+    bool left_floor_engaged = false;
+    bool right_floor_engaged = false;
+    bool left_roi_engaged = false;
+    bool right_roi_engaged = false;
+    bool left_reach_engaged = false;
+    bool right_reach_engaged = false;
+    bool left_user_floor_engaged = false;
+    bool right_user_floor_engaged = false;
+    const uint64_t safety_now_ns = last_loop_start_ns_ != 0 ? last_loop_start_ns_ : nowSteadyNs();
+    const auto mark_intervention = [&](ArmId arm) {
+        markSafetyIntervention(arm, safety_now_ns);
+    };
 
     // ---- Floor plane: synchronous FK + per-point z-velocity Jacobian ----
     if (floorConstraintActive()) {
@@ -4534,12 +4601,14 @@ ServoTarget DualArmServoLoop::applySafety(
                     // TCP FK unavailable -> fail closed (cannot build a Jacobian).
                     const std::string reason = "floor constraint: " + arm_name + " TCP FK unavailable";
                     if (fc.fail_policy == FloorConstraintFailPolicy::FaultLatch) {
+                        mark_intervention(arm);
                         latchFault(SafetyVerdict::FloorViolation, reason, left_state, right_state);
                         out = currentFaultHoldTarget();
                         combined = SafetyVerdict::FaultLatched;
                         return true;
                     }
                     target_q = prev_sent_q;  // hold this arm
+                    mark_intervention(arm);
                     if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
                         combined = SafetyVerdict::FloorViolation;
                     }
@@ -4556,6 +4625,7 @@ ServoTarget DualArmServoLoop::applySafety(
                         const std::string reason = "floor constraint: " + arm_name + " tcp z " +
                             std::to_string(eval.tcp_z_m) + " m below plane z_min " +
                             std::to_string(floor_z) + " m";
+                        mark_intervention(arm);
                         latchFault(SafetyVerdict::FloorViolation, reason, left_state, right_state);
                         out = currentFaultHoldTarget();
                         combined = SafetyVerdict::FaultLatched;
@@ -4581,10 +4651,16 @@ ServoTarget DualArmServoLoop::applySafety(
                             c.d_now = margin;
                             safety_cons.push_back(std::move(c));
                             floor_engaged = true;
+                            if (arm == ArmId::Left) {
+                                left_floor_engaged = true;
+                            } else {
+                                right_floor_engaged = true;
+                            }
                         }
                     } else {
                         // Jacobian unavailable -> fail closed (revert this arm).
                         target_q = prev_sent_q;
+                        mark_intervention(arm);
                         if (combined == SafetyVerdict::Ok ||
                             combined == SafetyVerdict::JointLimitClamped) {
                             combined = SafetyVerdict::FloorViolation;
@@ -4629,6 +4705,7 @@ ServoTarget DualArmServoLoop::applySafety(
                 const auto fail_closed_hold = [&](const char* why) {
                     (void)why;
                     target_q = prev_sent_q;  // hold this arm
+                    mark_intervention(arm);
                     if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
                         combined = SafetyVerdict::RoiViolation;
                     }
@@ -4637,6 +4714,7 @@ ServoTarget DualArmServoLoop::applySafety(
                     // TCP FK unavailable -> fail closed (cannot build a Jacobian).
                     const std::string reason = "roi box: " + arm_name + " TCP FK unavailable";
                     if (rb.fail_policy == FloorConstraintFailPolicy::FaultLatch) {
+                        mark_intervention(arm);
                         latchFault(SafetyVerdict::RoiViolation, reason, left_state, right_state);
                         out = currentFaultHoldTarget();
                         combined = SafetyVerdict::FaultLatched;
@@ -4657,6 +4735,7 @@ ServoTarget DualArmServoLoop::applySafety(
                     if (!escaping) {
                         const std::string reason = "roi box: " + arm_name + " outside box (closest face " +
                             eval.closest_face + ", margin " + std::to_string(eval.min_margin_m) + " m)";
+                        mark_intervention(arm);
                         latchFault(SafetyVerdict::RoiViolation, reason, left_state, right_state);
                         out = currentFaultHoldTarget();
                         combined = SafetyVerdict::FaultLatched;
@@ -4688,6 +4767,11 @@ ServoTarget DualArmServoLoop::applySafety(
                                 c.d_now = margin;
                                 safety_cons.push_back(std::move(c));
                                 roi_engaged = true;
+                                if (arm == ArmId::Left) {
+                                    left_roi_engaged = true;
+                                } else {
+                                    right_roi_engaged = true;
+                                }
                             }
                         } else {
                             // Jacobian unavailable -> fail closed (revert this arm).
@@ -4736,6 +4820,7 @@ ServoTarget DualArmServoLoop::applySafety(
                 const auto fail_closed_hold = [&](const char* why) {
                     (void)why;
                     target_q = prev_sent_q;  // hold this arm
+                    mark_intervention(arm);
                     if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
                         combined = SafetyVerdict::RoiViolation;
                     }
@@ -4744,6 +4829,7 @@ ServoTarget DualArmServoLoop::applySafety(
                     // TCP FK unavailable -> fail closed (cannot build a Jacobian).
                     const std::string reason = "reach shell: " + arm_name + " TCP FK unavailable";
                     if (rc.fail_policy == FloorConstraintFailPolicy::FaultLatch) {
+                        mark_intervention(arm);
                         latchFault(SafetyVerdict::RoiViolation, reason, left_state, right_state);
                         out = currentFaultHoldTarget();
                         combined = SafetyVerdict::FaultLatched;
@@ -4764,6 +4850,7 @@ ServoTarget DualArmServoLoop::applySafety(
                     if (!escaping) {
                         const std::string reason = "reach shell: " + arm_name + " outside shell (closest " +
                             eval.closest_shell + ", margin " + std::to_string(eval.min_margin_m) + " m)";
+                        mark_intervention(arm);
                         latchFault(SafetyVerdict::RoiViolation, reason, left_state, right_state);
                         out = currentFaultHoldTarget();
                         combined = SafetyVerdict::FaultLatched;
@@ -4794,6 +4881,11 @@ ServoTarget DualArmServoLoop::applySafety(
                             c.d_now = margin;
                             safety_cons.push_back(std::move(c));
                             reach_engaged = true;
+                            if (arm == ArmId::Left) {
+                                left_reach_engaged = true;
+                            } else {
+                                right_reach_engaged = true;
+                            }
                         }
                     } else {
                         // Jacobian unavailable -> fail closed (revert this arm).
@@ -4838,6 +4930,7 @@ ServoTarget DualArmServoLoop::applySafety(
                 const auto fail_closed_hold = [&](const char* why) {
                     (void)why;
                     target_q = prev_sent_q;  // hold this arm
+                    mark_intervention(arm);
                     if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
                         combined = SafetyVerdict::FloorViolation;
                     }
@@ -4846,6 +4939,7 @@ ServoTarget DualArmServoLoop::applySafety(
                     // TCP FK unavailable -> fail closed (cannot build a Jacobian).
                     const std::string reason = "user floor: " + arm_name + " TCP FK unavailable";
                     if (uf.fail_policy == FloorConstraintFailPolicy::FaultLatch) {
+                        mark_intervention(arm);
                         latchFault(SafetyVerdict::FloorViolation, reason, left_state, right_state);
                         out = currentFaultHoldTarget();
                         combined = SafetyVerdict::FaultLatched;
@@ -4865,6 +4959,7 @@ ServoTarget DualArmServoLoop::applySafety(
                     if (!escaping) {
                         const std::string reason = "user floor: " + arm_name + " signed dist " +
                             std::to_string(eval.signed_dist_m) + " m below plane";
+                        mark_intervention(arm);
                         latchFault(SafetyVerdict::FloorViolation, reason, left_state, right_state);
                         out = currentFaultHoldTarget();
                         combined = SafetyVerdict::FaultLatched;
@@ -4891,6 +4986,11 @@ ServoTarget DualArmServoLoop::applySafety(
                             c.d_now = margin;
                             safety_cons.push_back(std::move(c));
                             user_floor_engaged = true;
+                            if (arm == ArmId::Left) {
+                                left_user_floor_engaged = true;
+                            } else {
+                                right_user_floor_engaged = true;
+                            }
                         }
                     } else {
                         // Jacobian unavailable -> fail closed (revert this arm).
@@ -4920,6 +5020,10 @@ ServoTarget DualArmServoLoop::applySafety(
             // code — but never advance a real arm with the guard silently gone.
             last_self_collision_ = SelfCollisionResult{};  // checked=false
             if (combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
+                // Guard availability is a dual-arm aggregate decision with no
+                // per-arm attribution; stamp both arms as conservatively intervened.
+                mark_intervention(ArmId::Left);
+                mark_intervention(ArmId::Right);
                 latchFault(SafetyVerdict::SelfCollision,
                     "self-collision guard enabled but CollisionMonitor unavailable",
                     left_state, right_state);
@@ -5011,6 +5115,10 @@ ServoTarget DualArmServoLoop::applySafety(
                                                            : last_self_collision_.pair) +
                         "): clearance " + std::to_string(v.min_clearance_m) + " m below floor " +
                         std::to_string(collision_monitor_cfg_.d_hard_m) + " m";
+                    // A hard mesh breach is a dual-arm/stand verdict at this level;
+                    // stamp both arms because per-arm blame is not reliable here.
+                    mark_intervention(ArmId::Left);
+                    mark_intervention(ArmId::Right);
                     latchFault(SafetyVerdict::SelfCollision, reason, left_state, right_state);
                     out = currentFaultHoldTarget();
                     combined = SafetyVerdict::FaultLatched;
@@ -5020,6 +5128,10 @@ ServoTarget DualArmServoLoop::applySafety(
                     // recovers once fresh verdicts resume (never latches on staleness).
                     out.left_q_target_deg = left_prev_sent_q_deg_;
                     out.right_q_target_deg = right_prev_sent_q_deg_;
+                    // Staleness is a dual-arm aggregate verdict with no reliable
+                    // per-arm attribution; stamp both arms as conservatively intervened.
+                    mark_intervention(ArmId::Left);
+                    mark_intervention(ArmId::Right);
                     self_collision_hold = true;  // skip the combined solve (qdot already 0)
                     if (combined == SafetyVerdict::Ok ||
                         combined == SafetyVerdict::JointLimitClamped) {
@@ -5029,8 +5141,12 @@ ServoTarget DualArmServoLoop::applySafety(
                     // Collect self-collision velocity constraints (per near pair within
                     // d_slow, age-extrapolated) into the shared list; the combined solve
                     // below removes only the closing component of the command.
+                    const std::size_t before_collision_cons = safety_cons.size();
                     buildCollisionConstraints(v, collision_monitor_cfg_, now_s - v.stamp_s,
                                               safety_cons);
+                    if (safety_cons.size() > before_collision_cons) {
+                        collision_constraints_engaged = true;
+                    }
                 }
             }
         }
@@ -5053,6 +5169,20 @@ ServoTarget DualArmServoLoop::applySafety(
         constexpr double kReanchorDegPerSec = 2.0;
         const bool left_blocked = proj.left_correction_deg_s > kReanchorDegPerSec;
         const bool right_blocked = proj.right_correction_deg_s > kReanchorDegPerSec;
+        const bool left_corrected =
+            proj.left_correction_deg_s > kSafetyInterventionCorrectionEpsDegPerSec;
+        const bool right_corrected =
+            proj.right_correction_deg_s > kSafetyInterventionCorrectionEpsDegPerSec;
+        if (left_corrected &&
+            (left_floor_engaged || left_roi_engaged || left_reach_engaged ||
+             left_user_floor_engaged || collision_constraints_engaged)) {
+            mark_intervention(ArmId::Left);
+        }
+        if (right_corrected &&
+            (right_floor_engaged || right_roi_engaged || right_reach_engaged ||
+             right_user_floor_engaged || collision_constraints_engaged)) {
+            mark_intervention(ArmId::Right);
+        }
         if (left_blocked || right_blocked) {
             if (floor_engaged) ++floor_clamp_count_;
             if (roi_engaged) ++roi_clamp_count_;

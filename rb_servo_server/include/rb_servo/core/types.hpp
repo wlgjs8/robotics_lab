@@ -429,6 +429,8 @@ struct CartesianSolveTelemetry {
     std::optional<Pose6D> stage_tcp_target_stand;  // pose-track stage output handed to IK
     double follower_divergence_pos_m = 0.0;
     double follower_divergence_ang_rad = 0.0;
+    uint64_t follower_reanchor_count = 0;          // explained strict-divergence reanchors
+    bool safety_intervention_recent = false;       // debounced signal seen by follower stage
     // Final-stage output moving average (C). q_target before/after the boxcar.
     bool output_ma_present = false;
     int output_ma_window = 0;

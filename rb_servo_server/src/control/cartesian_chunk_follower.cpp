@@ -44,6 +44,16 @@ void CartesianChunkFollower::deactivate() {
   window_.deactivate();
 }
 
+void CartesianChunkFollower::reanchor(const Pose6D& reference) {
+  R0_ref_ = Eigen::Quaterniond(math::rotationFromPose(reference)).normalized();
+  std::array<double, 6> p0{reference.x, reference.y, reference.z, 0.0, 0.0, 0.0};
+  core_.seed(p0);        // zero velocity/acceleration; keep the active window untouched
+  have_segment_ = false; // force a fresh BVP solve from the new anchor on the next tick
+  t_in_seg_ = 0.0;
+  last_pose_ = reference;
+  active_ = true;
+}
+
 void CartesianChunkFollower::submitFrame(const ChunkFrame& frame,
                                          const Pose6D& current_pose) {
   if (!window_.activate(frame)) return;  // frame too short; keep prior state

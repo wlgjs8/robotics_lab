@@ -59,6 +59,11 @@ class CartesianChunkFollower {
   bool active() const { return active_; }
   void deactivate();
 
+  // Strict-divergence recovery when an external safety constraint already
+  // explained the plan-vs-sent split. Keeps the active chunk window and consume
+  // pointer intact, but reseeds the chained state at the live sent-pose reference.
+  void reanchor(const Pose6D& reference);
+
   // Advance by one servo tick and return the smoothed stand-frame pose setpoint.
   // Crosses 33 ms segment boundaries internally (solve next BVP / ring down).
   Pose6D tick(double dt_tick);
@@ -67,6 +72,10 @@ class CartesianChunkFollower {
   const Pose6D& lastPose() const { return last_pose_; }
   const FollowerDiag& diag() const { return diag_; }
   double tInSegment() const { return t_in_seg_; }
+  std::uint64_t windowWireSeq() const { return window_.wireSeq(); }
+  std::uint64_t windowRecvSeq() const { return window_.recvSeq(); }
+  std::size_t windowIndex() const { return window_.index(); }
+  int windowConsumed() const { return window_.consumed(); }
   // Seconds since the active frame was received (feed-liveness watchdog input).
   double ageSince(double now) const { return active_ ? now - window_.recvTime() : 0.0; }
 

@@ -8,8 +8,9 @@ alongside the servo CSV:
 
   RB_GUI_CHUNK_OVERLAY_ENDPOINT=udp://127.0.0.1:50262,udp://127.0.0.1:50263,udp://127.0.0.1:50264,udp://127.0.0.1:50265
 
-Join against the servo CSV on the producer `seq` (the CSV's follower_seq is the
-server-receiver seq, monotonic per server run; use recv time for alignment).
+Join against the servo CSV on the producer `seq` (= the CSV's follower_wire_seq;
+follower_recv_seq is the server-receiver accepted-frame count, monotonic per
+server run — pre-rename CSVs have a single ambiguous follower_seq instead).
 
 Usage: python3 tools/chunk_frame_dump.py [--bind 0.0.0.0:50265] [--out logs/chunk_frames.jsonl]
 """

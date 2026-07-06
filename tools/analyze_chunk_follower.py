@@ -128,7 +128,11 @@ def load(csv_path: str, arms: list[str], t0: float | None, t1: float | None):
                 s.raw_q.append(quat(row, f"{arm}_command_tcp_target_stand"))
                 s.act.append(pose(row, f"{arm}_tcp_actual_stand"))
                 s.act_q.append(quat(row, f"{arm}_tcp_actual_stand"))
-                s.seq.append(int(fnum(row, f"{arm}_follower_seq", 0)))
+                # recv_seq (receiver-local accepted-frame count) marks window
+                # boundaries; fall back to the pre-rename follower_seq column
+                # for CSVs recorded before the wire/recv seq split.
+                s.seq.append(int(fnum(row, f"{arm}_follower_recv_seq",
+                                      fnum(row, f"{arm}_follower_seq", 0))))
                 s.step.append(int(fnum(row, f"{arm}_follower_step", -1)))
                 s.stall.append(row.get(f"{arm}_follower_stall", "0") in ("1", "true", "True"))
                 s.corner.append(row.get(f"{arm}_follower_corner", "0") in ("1", "true", "True"))
