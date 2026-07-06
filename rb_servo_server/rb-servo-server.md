@@ -85,7 +85,7 @@ Already implemented:
 - invalid command payload guard; malformed packets are dropped before the command buffer changes
 - explicit `ArmMotion` gate before motion commands can run
 - send failure policy that records only successfully sent targets
-- real-mode startup guards for `RB_ALLOW_REAL_ROBOT`, realtime setup, local command bind, and conservative safety policy
+- real-mode startup/config checks for realtime setup, local command bind, and conservative safety policy
 - capped filter dt and acceleration-overshoot guard
 - force-control types/config/interface scaffold
 - thread-safe `ServoSnapshot` read surface for tests/debug/publisher integration
@@ -220,7 +220,7 @@ Required behavior:
 
 Safety:
 
-- keep `RB_ALLOW_REAL_ROBOT=1` guard
+- keep real robot motion explicit through site-local config
 - never default to real mode silently
 - start real robot tests with `Hold` only
 

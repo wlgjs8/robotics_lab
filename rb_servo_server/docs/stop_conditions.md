@@ -1,5 +1,10 @@
 # Stop Conditions for the Unattended Safety Loop
 
+> Historical OMX autoloop planning document. It references `.omx` artifacts and
+> older team-loop mechanics that are not required for normal repository
+> operation. For current runtime and validation guidance, use root `README.md`,
+> `AGENTS.md`, `docs/architecture.md`, and `docs/hardware_free_validation.md`.
+
 Architect-level definition of when the
 `4:architect -> ralph -> 4:critic -> ralph -> 4:critic ...` loop described in
 [`.omx/context/autonomous-real-readiness-loop-20260514T110745Z.md`](../.omx/context/autonomous-real-readiness-loop-20260514T110745Z.md)

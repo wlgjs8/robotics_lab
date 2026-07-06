@@ -27,8 +27,9 @@ mock / rbpodo 컨트롤러 시뮬레이션(pgmode) 측에서 반복 검증되어
 - 카메라 readiness contract
 
 실제 물리 로봇에서 추가로 검증된 항목은 아래 "현재 성숙도"를 참고합니다. 실제
-모션은 여전히 운영자 감독 + E-stop 휴대 + 명시적 게이트가 필요한 fail-closed
-동작이며, simulator acceptance 통과가 곧 하드웨어 구동 허가는 아닙니다.
+모션 권한은 site-local config와 서버 안전 계층이 결정하며, 운영자 감독과
+E-stop은 물리 운용 절차입니다. simulator acceptance 통과가 곧 하드웨어 구동
+허가는 아닙니다.
 
 ## 현재 성숙도
 
@@ -134,20 +135,20 @@ site/VM config는 gitignore된 `rb_servo_server/config/local/`에 둡니다.
 동작에는 영향이 없습니다). `run_mode`/`operation_mode`는 이제 telemetry
 라벨이며 실행 허용 여부를 결정하지 않습니다.
 
-실제 모션의 안전은 **site-local config + `rb_servo_server`의 mode-독립 안전
-계층**이 단독으로 책임집니다.
+실제 모션의 실행 권한은 **site-local config + `rb_servo_server`의 mode-독립
+안전 계층**이 결정합니다.
 
 - safety filter (joint clamp, stand-frame floor plane)
 - tracking-error latch
 - URDF-캡슐 async self-collision 가드 (`CollisionMonitor`)
 - command-source lease / arbitration
 - client deadman
-- 그리고 운영자 감독 + 하드웨어 E-stop
+- 운영자 감독 + 하드웨어 E-stop은 물리 운용 절차로 유지
 
 실제 동작은 `rb_servo_server/config/local/`의 site config가 명시적으로 허용해야
-하며, **config가 단일 결정자**입니다. (policy측 `SafetyGate`의 real-Cartesian
-차단은 PR #13으로 완화되어, 실제 모션에서는 `rb_servo_server`가 단일 안전
-계층입니다.)
+합니다. policy측 `SafetyGate`의 real-Cartesian 차단은 PR #13으로 은퇴했고,
+stale state/fault/camera/kinematics 같은 client-side readiness만 남습니다. 실제
+Cartesian 모션의 최종 허용/거부는 `rb_servo_server`가 맡습니다.
 
 컨트롤러 `-2001`(suspect diagnostics, `op_stat_self_collision`/`robot_time`
 필드 디코딩 garbage)은 per-arm config
@@ -193,8 +194,8 @@ deprecated입니다. 지원되는 robot-control profile은 500 Hz이며
 
 `rbpodo` joint state와 command는 raw controller degree 값을 보존합니다.
 tracked real rbpodo template의 supported safety range는 명시적 per-joint
-`q_min_deg: [-360, -360, -360, -360, -360, -360]` /
-`q_max_deg: [360, 360, 360, 360, 360, 360]`입니다. `[-180, 180]`
+`q_min_deg: [-360, -360, -160, -360, -360, -360]` /
+`q_max_deg: [360, 360, 160, 360, 360, 360]`입니다. `[-180, 180]`
 정규화는 control/safety/tracking/log source-of-truth에 쓰지 않습니다.
 자세한 내용은 `docs/joint_range_policy.md`를 봅니다.
 

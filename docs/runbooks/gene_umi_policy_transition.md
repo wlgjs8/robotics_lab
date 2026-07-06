@@ -164,7 +164,7 @@ of these gates before `policy_runner` may send motion:
 - measured gripper integration with `measured_gripper_available: true`
 - physical gripper block remains active unless
   `allow_real_gripper_motion: true` and `RB_ALLOW_REAL_GRIPPER=1`
-- normal real robot and real motion gates required by the servo server
+- the site-local real stack config enables the required server motion paths
 
 Flow checkpoints are 14D: each arm has six Cartesian channels plus one gripper
 channel. In `controller_sim`, proposed gripper commands are logged and dropped

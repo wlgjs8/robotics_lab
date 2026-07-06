@@ -25,13 +25,17 @@ scope is represented as explicit per-joint raw limits:
 
 ```yaml
 safety:
-  q_min_deg: [-360, -360, -150, -360, -360, -360]
-  q_max_deg: [360, 360, 150, 360, 360, 360]
+  q_min_deg: [-360, -360, -160, -360, -360, -360]
+  q_max_deg: [360, 360, 160, 360, 360, 360]
 ```
 
 J3 (elbow) is **not** `+/-360`: the RB3-730E elbow physical range is `+/-150 deg`
-(catalog), so its raw safety limit is clamped to `+/-150` to match the true
-hardware range and the IK URDF model limit (see "Kinematics Alignment" below).
+(catalog). The tracked stack configs currently use a narrow site margin of
+`+/-160 deg` so JointTarget/InitMotion PTP and shortest-path goal selection stay
+near the true hardware range while leaving a small operational margin around the
+catalog value. The IK URDF model still uses the physical `+/-150 deg` limit, so
+Cartesian IK may hold before the final raw safety clamp (see "Kinematics
+Alignment" below).
 The other joints stay at the broad `+/-360` raw controller range.
 
 Tracked `dual_real*.yaml` rbpodo templates must carry these arrays explicitly.

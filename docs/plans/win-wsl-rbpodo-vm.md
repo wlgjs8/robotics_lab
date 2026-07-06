@@ -17,7 +17,7 @@ Existing runbooks remain authoritative for everything they cover:
 
 - `docs/runbooks/vm_network_bringup.md` — OVA verify, import checklist, reachability probe, ports 5000/5001, one-VM-per-arm.
 - `docs/runbooks/vm_real_parity.md` — home VM vs office real mode matrix, `${ROBOT_LEFT_IP}`/`${ROBOT_RIGHT_IP}` config pattern, `tools/vm/home_vm_env.sh`, WU-01..WU-05 sequence.
-- `docs/developer_environment.md` — `scripts/install_deps_ubuntu.sh`, `scripts/check_deps.sh`, HARDEN-10, CART-MATH-03 gates.
+- `docs/developer_environment.md` — `scripts/install_deps_ubuntu.sh`, `scripts/check_deps.sh`, Python checks, and direct C++ build/tests.
 - `docs/runbooks/rbpodo_pgmode_spacemouse.md`, `docs/runbooks/pgmode_real_transition.md`, `docs/runbooks/real_robot_readonly.md`.
 - `AGENTS.md`, `REVIEW.md`, `docs/architecture.md`, `docs/code_architecture_map.md`.
 

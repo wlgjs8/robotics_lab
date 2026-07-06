@@ -70,15 +70,14 @@ Install missing base packages on Ubuntu:
 ./scripts/install_deps_ubuntu.sh --profile hardware-free
 ```
 
-`rb_servo_server` hardware-free C++ gates require valid Eigen3 and Pinocchio
+`rb_servo_server` hardware-free C++ checks require valid Eigen3 and Pinocchio
 CMake packages. The Ubuntu helper installs Pinocchio under `/opt/openrobots`:
 robotpkg remains the jammy default, while non-jammy hosts such as Ubuntu 24.04
 noble use a pinned Pinocchio `v3.9.0` source build when `ROBOTPKG_DIST` is
 unset. Source builds use an automatic memory-capped job limit, overridable with
 `PINOCCHIO_BUILD_JOBS`, to avoid OOM on low-RAM hosts. Missing Pinocchio is
-reported as `Missing CMake package: pinocchio`; it may be skipped only when
-`CODEX_SKIP_MISSING_CPP_DEPS=1` is explicitly set, and skipped C++ gates are
-not acceptance evidence.
+reported as `Missing CMake package: pinocchio`. A skipped C++ build is not
+acceptance evidence.
 
 ## Mock Smoke
 

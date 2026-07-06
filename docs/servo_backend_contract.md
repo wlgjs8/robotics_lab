@@ -248,10 +248,12 @@ source of truth. Preserve controller degrees in `q_actual_deg`, `q_target_deg`,
 tracking, and q-ref comparisons must not normalize raw values to `[-180, 180]`.
 The tracked rbpodo real templates use explicit per-joint raw safety arrays
 matching the current controller soft-limit configuration:
-`q_min_deg: [-360, -360, -360, -360, -360, -360]` and
-`q_max_deg: [360, 360, 360, 360, 360, 360]`. Narrow ranges such as
-`[-180, 180]` are allowed only for intentional tests or site-owned conservative
-overrides, not as production defaults.
+`q_min_deg: [-360, -360, -160, -360, -360, -360]` and
+`q_max_deg: [360, 360, 160, 360, 360, 360]`. The J3 value stays near the
+RB3-730E elbow's catalog `+/-150 deg` range while leaving the current
+site-configured margin. Narrow ranges such as `[-180, 180]` are allowed only for
+intentional tests or site-owned conservative overrides, not as production
+defaults.
 
 The startup-validation wrapping policy remains diagnostic only. State JSON must
 keep raw `q_actual_deg`, publish any `q_range_wrapped` entries, and may publish

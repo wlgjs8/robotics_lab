@@ -14,7 +14,8 @@ A D405 640x480@30 variant may be used only when explicitly documented in the con
 
 ## Safety Boundary
 
-Camera acceptance does not enable robot motion. Do not set robot motion env gates during this runbook.
+Camera acceptance does not enable robot motion. Do not modify robot motion
+configs or start robot command sources during this runbook.
 
 ## Config Requirements
 

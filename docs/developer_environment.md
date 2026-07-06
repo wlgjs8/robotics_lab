@@ -131,7 +131,7 @@ Real robot work requires rbpodo and site-specific network access. Do not add or 
 ## Recommended Development Flow
 
 1. Run Python/unit checks.
-2. Run hardware-free C++ gate.
+2. Run hardware-free C++ checks.
 3. Run the mock / controller-sim stack manually in the GUI.
 4. Run Cartesian acceptance (`scripts/cartesian_acceptance.py --mode assume-running`).
 5. Repeat until behavior is stable.

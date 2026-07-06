@@ -13,7 +13,7 @@ The mock / rbpodo controller-simulation (pgmode) stack remains the regression ba
 - GUI and policy-runner safety gates
 - command-source lease/arbitration
 
-Real motion is now an active, gated bring-up lane: read-only diagnostics parity, a slow dual-arm physical Cartesian circle, UMI teleop/replay, and a full `flow-infer` `real_policy` closed-loop rollout (pi0.5/openpi, `TcpPoseTarget` + real gripper) have all run on hardware under operator supervision (`docs/runbooks/rbpodo_real_physical_circle.md`, ladder `docs/runbooks/pgmode_real_transition.md`). `flow-infer` composes ee_local deltas into absolute `TcpPoseTarget` setpoints. The `real_policy` gate stays fully enforced and was satisfied via accepted/validated config — the lane is open, not blocked; runtime is validated and task success is the remaining model-side gap. Real motion stays fail-closed — gates, site-local config, operator supervision, and an E-stop are all required — and passing simulator tests is never permission to move hardware. For real motion the policy-side gate was relaxed (PR #13), so `rb_servo_server` is the sole real-motion safety layer (plus the async URDF-mesh `CollisionMonitor`). Still off: force control; measured hand-eye calibration is unneeded for the deployed pika ee_local image-conditioned policy but still required for general geometry-dependent policy.
+Real motion is now an active bring-up lane: read-only diagnostics parity, a slow dual-arm physical Cartesian circle, UMI teleop/replay, and a full `flow-infer` `real_policy` closed-loop rollout (pi0.5/openpi, `TcpPoseTarget` + real gripper) have all run on hardware under operator supervision (`docs/runbooks/rbpodo_real_physical_circle.md`, ladder `docs/runbooks/pgmode_real_transition.md`). `flow-infer` composes ee_local deltas into absolute `TcpPoseTarget` setpoints. The `real_policy` rollout-mode validation was satisfied via accepted/validated config — the lane is open, not blocked; runtime is validated and task success is the remaining model-side gap. Real-motion execution authority is config-driven and server-owned: site-local config plus the mode-independent safety layers decide whether motion is sent. Operator supervision and an E-stop remain physical operation procedure, and passing simulator tests is never permission to move hardware. For real Cartesian motion the policy-side block was retired (PR #13), so `rb_servo_server` makes the final allow/deny decision (plus the async URDF-mesh `CollisionMonitor`). Still off: force control; measured hand-eye calibration is unneeded for the deployed pika ee_local image-conditioned policy but still required for general geometry-dependent policy.
 
 ## Required Reading
 
@@ -64,7 +64,7 @@ The rbpodo controller `pgmode` simulation topology mirrors this controller shape
 physical box held in `pgmode`. Site/VM configs live under gitignored
 `rb_servo_server/config/local/`.
 
-## Hard Safety Rules
+## Safety Boundary
 
 Never enable real robot behavior implicitly. Real behavior is fail-closed, but
 it is **no longer gated on env vars**: the legacy execution gates
@@ -73,14 +73,14 @@ it is **no longer gated on env vars**: the legacy execution gates
 from the server runtime. `run_mode`/`operation_mode` are telemetry labels only
 and do not decide whether motion is allowed.
 
-Real motion is owned solely by **site-local config
-(`rb_servo_server/config/local/`) + the mode-independent safety layers**, and
-config is the single decider. Real motion requires the site config to enable it
-explicitly (e.g. `cartesian_control.allow_in_real: true`) plus the relevant
-real-hardware acceptance task and operator supervision. The controller `-2001`
-suspect-diagnostics acceptance and the rbpodo `pgmode` controller-simulation
-carve-out are likewise config opt-ins (no env). Simulator acceptance is not
-real-hardware acceptance.
+Real-motion execution authority is owned by **site-local config
+(`rb_servo_server/config/local/`) + the mode-independent safety layers**. Real
+motion requires the site config to enable it explicitly (e.g.
+`cartesian_control.allow_in_real: true`). Real-hardware acceptance and operator
+supervision are physical operation process, not extra software gates. The
+controller `-2001` suspect-diagnostics acceptance and the rbpodo `pgmode`
+controller-simulation carve-out are likewise config opt-ins (no env). Simulator
+acceptance is not real-hardware acceptance.
 
 The stand-frame floor plane constraint (`safety.floor_constraint`) is
 mode-independent by design: when enabled it applies in mock,
@@ -183,15 +183,15 @@ Use `docs/frame_contract.md` and `calibration/active_calibration.yaml` as the fr
 
 - Work only on the assigned task.
 - Prefer small, reviewable changes.
-- Keep configs strict and fail-closed.
+- Keep configs explicit about what they enable and what safety layer owns it.
 - Update tests, docs, and acceptance scripts together with behavior changes.
 - Do not fake external APIs for rbpodo, Pinocchio, RealSense, SpaceMouse, or camera devices.
 - If a dependency is missing, report it clearly and do not claim the gate passed.
 - Do not claim C++ or Pinocchio runtime acceptance passed unless the command was actually run.
 - Do not introduce custom SO(3), SE(3), quaternion interpolation, or frame-conversion math in production Cartesian control when Eigen/Pinocchio can provide it.
 - Do not create production fallback math paths that bypass mandatory Eigen/Pinocchio Cartesian math.
-- Do not weaken command-source lease, deadman, stale-state, fault, or real-mode checks. Real motion now relies on `rb_servo_server` as its sole safety layer (safety filter, tracking-error latch, self-collision guard, lease, deadman) — treat these as load-bearing, not optional.
-- Real motion is an explicit, operator-supervised, gated lane — never enable it incidentally as part of simulator/benchmark work, and keep grippers and force control off until separately validated.
+- Do not weaken command-source lease, deadman, stale-state, fault, or real-mode checks. Real Cartesian motion now relies on `rb_servo_server` for the final allow/deny decision (safety filter, tracking-error latch, self-collision guard, lease, deadman) — treat these as load-bearing, not optional.
+- Real motion is explicit and operator-supervised — never enable it incidentally as part of simulator/benchmark work, and keep force control off until separately validated. Gripper motion remains separately gated by `allow_real_gripper_motion`, measured gripper availability, and `RB_ALLOW_REAL_GRIPPER=1`.
 
 ## Expected Validation
 

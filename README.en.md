@@ -20,9 +20,10 @@ Mock / rbpodo controller-simulation (pgmode) behavior that is repeatedly validat
 - camera readiness contracts
 
 What has additionally been validated on the physical robot is listed under
-"Current Maturity" below. Real motion is still a fail-closed operation requiring
-operator supervision, an E-stop in hand, and explicit gates; passing simulator
-acceptance is not permission to move hardware.
+"Current Maturity" below. Real-motion authority is decided by site-local config
+and the server safety layers; operator supervision and an E-stop remain physical
+operation procedure. Passing simulator acceptance is not permission to move
+hardware.
 
 ## Current Maturity
 
@@ -122,16 +123,18 @@ Real robot connection and motion are **no longer gated on env vars.** The legacy
 execution gates were removed from the server runtime. `run_mode`/`operation_mode`
 are telemetry labels only and do not decide whether motion is allowed.
 
-Real motion is owned solely by **site-local config
-(`rb_servo_server/config/local/`) + the mode-independent safety layer**, and
-config is the single decider: real motion requires the site config to enable it
-explicitly (`cartesian_control.allow_in_real: true`) plus operator supervision.
+Real-motion execution authority is owned by **site-local config
+(`rb_servo_server/config/local/`) + the mode-independent safety layer**: real
+motion requires the site config to enable it explicitly
+(`cartesian_control.allow_in_real: true`). Operator supervision remains physical
+operation procedure.
 Through this config-driven path a dual-arm physical Cartesian circle has already
 run under supervision (`docs/runbooks/rbpodo_real_physical_circle.md`).
-The policy-side `SafetyGate` real-Cartesian block was relaxed in PR #13, so for
-real motion `rb_servo_server` is the sole safety layer (safety filter,
-tracking-error latch, async URDF-mesh self-collision guard (`CollisionMonitor`), lease, deadman);
-controller-simulation safety is unchanged. Accepting the controller `-2001`
+The policy-side `SafetyGate` real-Cartesian block was retired in PR #13; stale
+state, fault, camera, and kinematics readiness checks remain. For real Cartesian
+motion, `rb_servo_server` makes the final allow/deny decision (safety filter,
+tracking-error latch, async URDF-mesh self-collision guard (`CollisionMonitor`), lease, deadman).
+Controller-simulation safety is unchanged. Accepting the controller `-2001`
 suspect diagnostics in real mode is a per-arm config opt-in
 (`allow_real_motion_with_suspect_diagnostics: true`, no env).
 EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error still latch

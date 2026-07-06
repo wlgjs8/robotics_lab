@@ -21,9 +21,10 @@ synthetic UMI sender ─UDP→ policy_runner (umi_dual_cartesian, relative-init)
 - **Server (PR #12)** — `servo.allow_real_motion_with_suspect_diagnostics: true` accepts the
   vendor `-2001` (`op_stat_self_collision` / `robot_time` field-layout garbage) in real mode.
   EMS / SOS / soft-estop / `collision_occur` / unknown-mode / init-error still latch.
-- **Policy (PR #13)** — the `SafetyGate` no longer blocks real Cartesian motion (scoped to
-  `cartesian_gate.operation_mode == "real"`). Controller-simulation safety is unchanged.
-- **Remaining safety = rb_servo_server**: `cartesian_control.allow_in_real: true` (site-local config),
+- **Policy (PR #13)** — the `SafetyGate` no longer blocks real Cartesian motion.
+  Readiness checks still reject stale state, faults, missing camera/kinematics,
+  and invalid TCP state where required. Controller-simulation safety is unchanged.
+- **Server decision layer**: `cartesian_control.allow_in_real: true` (site-local config),
   `speed`/`step` clamps, `max_tracking_error_deg=10` **fault-latch**, `dq`/`ddq` limits, and the
   **URDF-capsule self-collision guard** (`clamp_to_hold`). The controller's own self-collision
   status is NOT trusted (see Known issues).

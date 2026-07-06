@@ -4,18 +4,19 @@ The active real-controller backend is `rbpodo` only. `mock` is the
 hardware-free validation surface; the `rb_simulator` software-simulator
 backend was removed.
 
-The repository is in **rbpodo pgmode-real physical bring-up**. Real motion is a
-gated, operator-supervised lane that has carried a dual-arm physical Cartesian
-circle (`docs/runbooks/rbpodo_real_physical_circle.md`); the conservative
-promotion ladder is `docs/runbooks/pgmode_real_transition.md`. Real motion stays
-fail-closed, but is **no longer gated on env vars**: the legacy
+The repository is in **rbpodo pgmode-real physical bring-up**. Real motion is an
+operator-supervised lane that has carried a dual-arm physical Cartesian circle
+(`docs/runbooks/rbpodo_real_physical_circle.md`); the promotion ladder is
+`docs/runbooks/pgmode_real_transition.md`. Real-motion execution authority is
+config-driven and server-owned, and is **no longer gated on env vars**: the legacy
 `RB_ALLOW_REAL_*` execution gates were removed from the server runtime, and real
 motion is now decided solely by site-local config + the mode-independent safety
 layers (`rb_servo_server/config/local/`). The `-2001` suspect-diagnostics
 acceptance is a per-arm config opt-in
 (`allow_real_motion_with_suspect_diagnostics: true`, no env).
-The policy-side `SafetyGate` real-Cartesian block was relaxed (PR #13), so for
-real motion `rb_servo_server` is the sole safety layer. A full `flow-infer`
+The policy-side `SafetyGate` real-Cartesian block was retired (PR #13); stale
+state, fault, camera, and kinematics readiness checks remain. For real Cartesian
+motion, `rb_servo_server` makes the final allow/deny decision. A full `flow-infer`
 `real_policy` closed-loop rollout (pi0.5/openpi, `TcpPoseTarget` + real gripper via
 the Pika Gripper Backend) and the async URDF-mesh `CollisionMonitor` have run on the
 physical robot; the `real_policy` rollout-mode gate stays fully enforced and was
@@ -35,8 +36,8 @@ Supported tracked rbpodo real templates preserve raw controller joint degrees
 and use explicit per-joint safety limits for the current controller soft-limit
 configuration:
 
-- `q_min_deg: [-360, -360, -360, -360, -360, -360]`
-- `q_max_deg: [360, 360, 360, 360, 360, 360]`
+- `q_min_deg: [-360, -360, -160, -360, -360, -360]`
+- `q_max_deg: [360, 360, 160, 360, 360, 360]`
 
 Do not normalize raw control, safety, tracking, q-ref, state JSON, or log values
 to `[-180, 180]`. See `docs/joint_range_policy.md`.

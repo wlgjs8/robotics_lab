@@ -95,7 +95,7 @@ python3 tools/mock_gui_smoke.py
 
 ## Safety boundaries
 
-- The GUI's client-side real-motion lock is **retired** (see "Execution gating" above): controls emit in every run mode, and the server (`RB_ALLOW_REAL_*` env + config + SafetyFilter + collision guard + lease/deadman) is the sole authority for whether real motion actually executes. The GUI never sets `RB_ALLOW_*`.
+- The GUI's client-side real-motion lock is **retired** (see "Execution gating" above): controls emit in every run mode, and the server config plus SafetyFilter, collision guard, lease, and deadman decide whether real motion actually executes. The GUI never sets `RB_ALLOW_*`.
 - Simulation motion is limited to mock mode and the rbpodo controller `pgmode` simulation until connect, valid state read, truthful `servo_j` send, stop/reset, hold, and low-amplitude jog tests pass with software-only artifacts. Rainbow Robotics external simulator/OVA and real robot validation remain out of scope.
 - The stand frame axes are hidden; the visible 6D controls are left/right TCP target gizmos. They initialize from `tcp_stand` when the state stream provides it, otherwise from URDF FK, and fall back to the old joint marker estimate only when TCP/FK data is unavailable.
 - TCP target buttons emit validated `TcpPoseTarget` UDP commands from the gizmo pose in mock/simulation-safe modes. The C++ Cartesian controller requires configured kinematics and Cartesian gates; when they are unavailable or disabled, it reports a safe failure and holds position.
@@ -110,4 +110,4 @@ python3 tools/mock_gui_smoke.py
 - **Hardware-free stack:** `rb_servo_server` in mock mode uses an explicit
   site-local mock config. Controller-level simulation uses the rbpodo `pgmode`
   simulation (`make run MODE=sim`).
-- **Real guard:** the client-side lock is retired — motion buttons are now emittable in real mode, and the server gates (`RB_ALLOW_REAL_*` + config + SafetyFilter) decide whether anything moves. Operate real motion only under operator supervision with E-stop in hand.
+- **Real guard:** the client-side lock is retired — motion buttons are now emittable in real mode, and site-local config plus server safety layers decide whether anything moves. Operate real motion only under operator supervision with E-stop in hand.

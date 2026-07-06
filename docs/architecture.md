@@ -20,10 +20,11 @@ The mock / rbpodo controller-simulation (pgmode) stack remains the regression ba
 - command-source lease/arbitration
 - camera readiness contracts for future policy work
 
-Real motion is now an active, gated bring-up lane (see Maturity Boundary), not a
-deferred milestone. It stays fail-closed: gates, site-local config, operator
-supervision, and an E-stop are all required, and passing simulator acceptance is
-never permission to move hardware.
+Real motion is now an active bring-up lane (see Maturity Boundary), not a
+deferred milestone. Execution authority is config-driven and server-owned:
+site-local config plus the mode-independent safety layers decide whether motion
+is sent. Operator supervision and an E-stop remain physical operation procedure,
+and passing simulator acceptance is never permission to move hardware.
 
 ## Maturity Boundary
 
@@ -170,18 +171,20 @@ env vars**. The legacy execution gates — `RB_ALLOW_REAL_ROBOT`,
 longer affect server gating). `run_mode`/`operation_mode` are telemetry labels
 only and do not decide whether motion is allowed.
 
-Real motion is owned solely by **site-local config
-(`rb_servo_server/config/local/`) + the mode-independent safety layers**, and
-config is the single decider. Real motion requires the site config to enable it
-explicitly (`cartesian_control.allow_in_real: true`) and operator-supervised
-acceptance. This config-driven path has already carried a supervised dual-arm
-physical Cartesian circle (`docs/runbooks/rbpodo_real_physical_circle.md`).
+Real-motion execution authority is owned by **site-local config
+(`rb_servo_server/config/local/`) + the mode-independent safety layers**. Real
+motion requires the site config to enable it explicitly
+(`cartesian_control.allow_in_real: true`). Operator-supervised acceptance remains
+the physical operating process. This config-driven path has already carried a
+supervised dual-arm physical Cartesian circle
+(`docs/runbooks/rbpodo_real_physical_circle.md`).
 
-The policy-side `SafetyGate` no longer blocks real Cartesian motion (PR #13,
-scoped to `cartesian_gate.operation_mode == "real"`); for real motion
-`rb_servo_server` is therefore the sole safety layer — safety filter (dq/ddq/
-joint limits), tracking-error fault latch, the async URDF-mesh self-collision
-guard (`CollisionMonitor`), lease arbitration, and deadman. Mesh
+The policy-side `SafetyGate` no longer blocks real Cartesian motion (PR #13);
+stale state, fault, camera, and kinematics readiness checks remain client-side.
+For real Cartesian motion, `rb_servo_server` makes the final allow/deny decision:
+safety filter (dq/ddq/joint limits), tracking-error fault latch, the async
+URDF-mesh self-collision guard (`CollisionMonitor`), lease arbitration, and
+deadman. Mesh
 self-collision pair curation is SRDF-style: disabled pairs remove only named
 geometry pairs from the monitor/planner oracle, while non-disabled intra-arm,
 arm-arm, arm-stand, floor, and external pairs keep the configured margins.

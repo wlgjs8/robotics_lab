@@ -1,8 +1,11 @@
 # Plan: final-form run-mode model (remove RB_ALLOW_* env toggles)
 
-Status: agreed design (decisions below). Implementation is PHASED and the real
-part is gated on the safety subsystems existing first. Do NOT delete real env
-gates before those exist.
+> Historical plan. The server-side `RB_ALLOW_REAL_*` execution gates have since
+> been removed, policy-side real-Cartesian blocking was retired, and current
+> behavior is documented in `README.md`, `AGENTS.md`, and
+> `docs/architecture.md`.
+
+Status: superseded by the current config-driven runtime.
 
 ## Goal
 
