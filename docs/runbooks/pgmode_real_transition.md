@@ -57,15 +57,16 @@ the servo server or send motion commands.
 
 ## Config Policy
 
-Tracked physical transition templates are non-runnable for motion:
+Physical transition configs are site-local stage configs, not tracked
+`dual_real*.example.yaml` templates. Start from the current stack config that
+matches the target and copy it under `rb_servo_server/config/local/`:
 
 ```text
-rb_servo_server/config/dual_real_rbpodo_physical_readonly.example.yaml
-rb_servo_server/config/dual_real_rbpodo_physical_tiny_joint.example.yaml
-rb_servo_server/config/dual_real_rbpodo_physical_tiny_cartesian.example.yaml
+rb_servo_server/config/stack_real.yaml
+rb_servo_server/config/local/<stage-specific-real-config>.yaml
 ```
 
-Every tracked example must keep:
+Every site-local stage config must keep:
 
 ```yaml
 servo:

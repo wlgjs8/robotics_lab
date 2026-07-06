@@ -1,6 +1,8 @@
-# RTC (Real-Time Chunking) — design plan
+# RTC (Real-Time Chunking) — design and validation plan
 
-Status: **proposal / pre-implementation** (2026-06-22). Owner decision pending.
+Status: partially implemented behind opt-in flags; live GPU/model validation is
+still pending. The code path is default-off (`--rtc` required) and must not be
+treated as accepted real-policy behavior until M4 validation is complete.
 Scope: add Real-Time Chunking to the openpi pi0.5 deploy lane so a long action
 horizon (now **H=24**, retrained) keeps its *commitment* while recovering the
 *reactivity* of a short horizon — without retraining.

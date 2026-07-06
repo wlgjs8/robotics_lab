@@ -43,8 +43,9 @@ Dry run:
   CMake flags, install prefix, and sudo steps without running apt, git, cmake,
   or sudo.
 
-This script installs dependencies only. It does not enable RB_ALLOW_REAL_ROBOT,
-RB_ALLOW_REAL_MOTION, RB_ALLOW_REAL_CARTESIAN, RealSense capture, or robot motion.
+This script installs dependencies only. It does not enable RealSense capture,
+site-local real robot configs, or robot motion. Legacy RB_ALLOW_REAL_* execution
+gates are retired; real motion is config-driven.
 USAGE
 }
 

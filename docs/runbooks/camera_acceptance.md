@@ -1,16 +1,29 @@
 # Camera Acceptance Runbook
 
-This runbook defines real three-camera acceptance for `camera_server`. It is separate from robot motion acceptance.
+This runbook defines real camera acceptance for `camera_server`. It is separate
+from robot motion acceptance.
 
 ## Camera Profile
 
-Canonical profile:
+Canonical stack profile (`make cam-up`, default
+`CAMERA_CONFIG=/app/config/d435_head_1280x720.yaml`):
 
-- head: Intel RealSense D435f, color 1280x720@30
-- left wrist: Intel RealSense D405, color 640x360@30
-- right wrist: Intel RealSense D405, color 640x360@30
+- head: Intel RealSense D435, color 1280x720@30 plus IR left/right
+  1280x720@30 for the stereo worker
+- left wrist: Intel RealSense D405, color 640x480@30 plus depth 640x480@30
+- right wrist: Intel RealSense D405, color 640x480@30 plus depth 640x480@30
+- stereo worker: launched in the same `camera_server` container by
+  `camera_server/stereo_worker/run_all.sh`
 
-A D405 640x480@30 variant may be used only when explicitly documented in the config and acceptance record.
+Supported explicit variants:
+
+- `CAMERA_CONFIG=/app/config/head_wrists.yaml` for the older head/wrist profile
+  with 640x480 head IR intrinsics.
+- `CAMERA_CONFIG=/app/config/quad_realsense_fisheye.yaml` for the real-policy
+  fisheye deploy profile: two D405 RealSense cameras plus two UVC fisheye
+  cameras in the same bundle.
+
+Any other profile must be documented in the config and acceptance record.
 
 ## Safety Boundary
 
@@ -74,7 +87,7 @@ Record for bundles:
 
 ## Policy Runner Readiness
 
-Camera-dependent policy sources must declare:
+Camera-dependent policy sources must declare or enforce:
 
 ```yaml
 requires_camera: true
@@ -87,7 +100,10 @@ Camera-geometry-dependent sources must also declare:
 requires_camera_geometry: true
 ```
 
-If camera metadata is stale, incomplete, or missing, policy_runner must fail closed and stop sending motion commands.
+`flow-infer` real-policy configs consume the ZMQ camera bundle on port 5600 and
+perform source-level camera freshness checks for the expected bundle keys. If
+camera metadata is stale, incomplete, or missing, policy_runner must fail closed
+and stop sending motion commands.
 
 ## Acceptance Record Template
 

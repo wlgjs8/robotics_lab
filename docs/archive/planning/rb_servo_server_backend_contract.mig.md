@@ -5,6 +5,10 @@ non-blocking servo-loop migration. The root source of truth remains
 `../../servo_backend_contract.md`; this component note documents the
 MIG-01 result vocabulary added inside `rb_servo_server`.
 
+Archived note: this is MIG history, not current runtime guidance. When this
+file conflicts with `docs/servo_backend_contract.md` or `docs/architecture.md`,
+the current docs win.
+
 MIG-01 adds the vocabulary only. It does not change `IRobotBackend` method
 signatures, backend behavior, `DualArmServoLoop`, the state publisher schema,
 or simulator protocol.

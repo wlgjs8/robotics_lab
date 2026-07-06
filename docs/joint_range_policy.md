@@ -38,9 +38,10 @@ Cartesian IK may hold before the final raw safety clamp (see "Kinematics
 Alignment" below).
 The other joints stay at the broad `+/-360` raw controller range.
 
-Tracked `dual_real*.yaml` rbpodo templates must carry these arrays explicitly.
-Site-owned configs under `rb_servo_server/config/local/` may override them only
-after confirming the active controller soft limits and the physical setup.
+Tracked rbpodo stack configs (`rb_servo_server/config/stack_real.yaml` and
+`rb_servo_server/config/stack_sim.yaml`) must carry these arrays explicitly.
+Site-owned configs under `rb_servo_server/config/local/` may override them
+only after confirming the active controller soft limits and the physical setup.
 
 `[-180, 180]` is not a supported production rbpodo default. It may appear only
 in tests or diagnostic fixtures that intentionally prove range-violation

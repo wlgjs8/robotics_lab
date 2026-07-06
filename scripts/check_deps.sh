@@ -170,7 +170,7 @@ check_real_camera() {
 check_real_robot() {
   check_hardware_free
   check_cmake_package rbpodo "Install the Rainbow rbpodo SDK and expose it through CMAKE_PREFIX_PATH or RBPODO_ROOT."
-  add_warning "real robot startup remains gated by RB_ALLOW_REAL_ROBOT=1; real motion also needs RB_ALLOW_REAL_MOTION=1."
+  add_warning "real robot startup/motion is config-driven; legacy RB_ALLOW_REAL_ROBOT/RB_ALLOW_REAL_MOTION env gates are retired."
 }
 
 check_kinematics() {

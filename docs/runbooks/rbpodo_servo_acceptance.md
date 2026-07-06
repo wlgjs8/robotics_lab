@@ -15,7 +15,7 @@ The supported rbpodo profile is:
 
 | Profile | Template | Rate | `servo_t1_sec` | ACK policy | Command/state endpoints | Default motion |
 | --- | --- | ---: | ---: | --- | --- | --- |
-| `500hz_ack` | `rb_servo_server/config/dual_real.example.yaml` | 500 Hz | 0.002 s | ACK-on | site-local | disabled |
+| `500hz_ack` | site-local copy derived from `rb_servo_server/config/stack_real.yaml` or `stack_sim.yaml` | 500 Hz | 0.002 s | ACK-on | site-local | disabled for read-only stages |
 
 `servo_t1_sec` must match the supported command period: 0.002 s at 500 Hz.
 
@@ -100,9 +100,10 @@ operator supervision, and the hardware E-stop:
   `disable_waiting_ack` arm option.
 
 The temporary diagnostics-suspect bridge for controller simulation requires the
-YAML opt-in `servo.allow_controller_simulation_diagnostics_suspect: true` and
-the env var `RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1` (still read by
-the prepared tooling for controller-sim diagnostics).
+YAML opt-ins `servo.allow_controller_simulation_motion: true` and
+`servo.allow_controller_simulation_diagnostics_suspect: true`. The legacy
+`RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM` env gate is no longer read
+by the server or acceptance tooling.
 
 This is not real motion approval. It is limited to `operation_mode:
 simulation`, known rbpodo suspicious status layouts, finite joint state, no
@@ -131,18 +132,19 @@ Real Cartesian/TCP motion is out of scope for this runbook; keep
 
 ## Config Handling
 
-`rb_servo_server/config/dual_real.example.yaml` is a template, not a
-ready-to-run real motion config. Copy it to `rb_servo_server/config/local/`,
-review the local values, and keep `send_servo_commands: false` for read-only
-acceptance.
+Create a site-local acceptance config under `rb_servo_server/config/local/`.
+Start from the tracked stack config that matches the target (`stack_real.yaml`
+for physical controllers, `stack_sim.yaml` for controller `pgmode`
+simulation), review the local values, and keep `servo.send_servo_commands:
+false` for read-only acceptance.
 The `config/local` directory is user-owned; tracked local YAML samples are not
 production configuration.
 
 Example copy commands:
 
 ```bash
-cp rb_servo_server/config/dual_real.example.yaml \
-  rb_servo_server/config/local/dual_real_500hz_ack.yaml
+cp rb_servo_server/config/stack_real.yaml \
+  rb_servo_server/config/local/stack_real_readonly_500hz_ack.yaml
 ```
 
 For controller bring-up diagnostics, the ACK-on read-only examples enable:
@@ -236,7 +238,7 @@ Use a local copy under `rb_servo_server/config/local/`, not a tracked template.
 
 ```bash
 python3 scripts/rbpodo_servo_acceptance.py \
-  --config rb_servo_server/config/local/dual_real_500hz_ack.yaml \
+  --config rb_servo_server/config/local/stack_real_readonly_500hz_ack.yaml \
   --arm left \
   --mode read_only \
   --profile 500hz_ack \

@@ -18,19 +18,23 @@ Verified by reading source under `rb_servo_server/`, `rb_gui/`, `policy_runner/`
 
 ```
                  rb_gui (viser web :8080)
-       state ◄── UDP :50110 ──┐        ┌── UDP :50010 ──► command
+       state ◄── UDP :50366 ──┐        ┌── UDP :50256 ──► command
        overlay ◄─ UDP :50261 (optional, off by default)
                               │        │
-   policy_runner ◄── UDP :50120 ──┐    ├── UDP :50010 ──► command
+   policy_runner ◄── UDP :50376 ──┐    ├── UDP :50256 ──► command
    (robot_state_client)           │    │
                                    ▼    ▼
                        ┌──────────────────────────────────┐
                        │        rb_servo_server (C++)       │
                        │  DualArmServoLoop @ servo.rate_hz   │
-                       │  command_server  : UDP in  :50010   │
+                       │  command_server  : UDP in  :50256   │
+                       │  chunk_frame in  : UDP in  :50264   │
                        │  state_publisher : UDP fanout       │
                        │   state_pub_endpoints =             │
-                       │     [:50110 gui, :50120 policy]     │
+                       │     [:50356 scope, :50366 gui,      │
+                       │      :50376 policy, :50378 flow,    │
+                       │      :50386 camera worker]          │
+                       │  gripper bridge : UDP 50410/50420   │
                        │   per-arm backend: MockBackend /    │
                        │     RbpodoBackend (real + pgmode)   │
                        └────────────────────────────────────┘
@@ -48,12 +52,14 @@ The `rbpodo` backend also serves **controller (`pgmode`) simulation** (`run_mode
 
 | Path | Protocol | Port(s) | Notes |
 |---|---|---|---|
-| command in → `rb_servo_server` | UDP JSON | 50010 | `network.command_bind` |
-| state out ← `rb_servo_server` | UDP JSON fanout | 50110 (gui), 50120 (policy) | `network.state_pub_endpoints` list; legacy single `state_pub_endpoint` is mirrored from the first entry |
+| command in → `rb_servo_server` | UDP JSON | 50256 | `network.command_bind` in `rb_servo_server/config/stack_{real,sim}.yaml` |
+| chunk frame in → `rb_servo_server` | UDP JSON | 50264 | `network.chunk_frame_bind`; separate from the lease-gated command socket |
+| state out ← `rb_servo_server` | UDP JSON fanout | 50356 (scope), 50366 (viser GUI), 50376 (`make run` policy_runner), 50378 (external flow-infer), 50386 (camera/stereo worker) | `network.state_pub_endpoints` list |
+| gripper command / feedback | UDP JSON | 50410 / 50420 | `gripper.command_endpoint` and `gripper.feedback_bind`; launched by `tools/run_stack.sh` |
 | camera metadata | ZMQ PUB | 5600 | topics `camera.bundle`, `camera.health` |
 | camera images | POSIX shared memory ring | `/camera_server_frames` (real) / `/camera_server_frames_test` (mock) | atomic seq begin/end for reader/writer coordination |
 | GUI web | HTTP (viser) | 8080 | |
-| circle overlay → gui | UDP JSON | 50261 | optional benchmark overlay, off by default |
+| GUI overlay → gui | UDP JSON | 50261 | optional overlay, off by default |
 
 ### Wire formats
 
@@ -93,8 +99,8 @@ The legacy `RB_ALLOW_REAL_*` server execution env gates were **removed** from th
 1. **The ACKON500 circle-tracking benchmark and `GOAL.md` were removed (2026-06-20).** The rbpodo controller-sim 500 Hz ACK-ON circle-tracking benchmark subsystem — its scripts, ablation/report tooling, `configs/rbpodo_circle_ablation/*` configs, runbooks, and the `GOAL.md` task-prompt snapshot — has been deleted. For overall direction trust `README.md` / `AGENTS.md` / `docs/architecture.md`.
 2. **Milestone is physical bring-up; the controller-reference circle-benchmark lane is gone.** The current milestone is rbpodo pgmode-real physical bring-up — real motion has been exercised under supervision (`docs/runbooks/rbpodo_real_physical_circle.md`). The Cartesian-circle evidence that matters is physical-real (`tcp_actual_stand`); the prior controller-reference (`tcp_ref_stand`) ACKON500 / 500 Hz benchmark lane was removed and is no longer tracked.
 3. **Server language.** `rb_servo_server` is **C++17 + Eigen3 + mandatory Pinocchio** (CMake hard-errors if Pinocchio is disabled; no fallback math). If a wiring summary calls it "unknown/Rust," that is wrong.
-4. **State publication is a fanout, not a single port.** Some defaults/prose mention only `state_pub_endpoint :50110`; the real compose config publishes to both `:50110` (gui) and `:50120` (policy) via `state_pub_endpoints`.
-5. **Port/protocol consistency is otherwise good.** 50010 (cmd), 50110/50120 (state), 5600 (camera ZMQ), 8080 (gui), 50261 (overlay) all agree across code, config, and compose. (The former server↔software-simulator TCP 50200/50201 ports were removed with that lane.)
+4. **State publication is a fanout, not a single port.** Current stack configs publish to `:50356` (scope), `:50366` (viser GUI), `:50376` (`make run` policy_runner), `:50378` (external flow-infer), and `:50386` (camera/stereo worker) via `state_pub_endpoints`.
+5. **Port/protocol consistency is otherwise good.** 50256 (command), 50264 (chunk frame), 50356/50366/50376/50378/50386 (state), 50410/50420 (gripper), 5600 (camera ZMQ), 8080 (gui), and 50261 (overlay) agree across the stack configs and launch scripts. (The former server↔software-simulator TCP 50200/50201 ports were removed with that lane.)
 6. **GUI client-side execution lock is retired; server real-motion authority is config-driven.** `rb_gui` `safety.py` (`blocked_reason`, `tcp_command_disabled_reason`) no longer blocks real-mode commands or gates on a mode/backend match, and the old `RB_GUI_ENABLE_*` opt-in env flags are gone — controls emit in every run mode. The legacy **server** `RB_ALLOW_REAL_ROBOT/MOTION/CARTESIAN` env gates were also removed from the runtime (`config.cpp` "Real/sim env gates retired"); real motion is now decided by site-local config (`cartesian_control.allow_in_real: true`) + the mode-independent server safety layers. Operator supervision remains physical procedure. Don't read "GUI lock removed" as "real-motion authority removed" — `rb_servo_server` still makes the final allow/deny decision. Older `rb_servo_server/docs/gui_operator_console.md` prose that says "real motion ... disabled in the GUI / connect-status only" predates this and has been corrected.
 7. **Unified collision URDF is an untracked external asset.** The self-collision `CollisionMonitor` loads `safety.self_collision.mesh.unified_urdf` — a stand+both-arms URDF (`mo_robot_descriptions/.../dual_rb3_730e_ver3.urdf`) that lives in the **separate, non-submodule** `mo_robot_descriptions` repo and is **not** git-tracked here; only the single-arm `rb_servo_server/descriptions/urdf/rb3_730e.urdf` (used by `kinematics.urdf`) is tracked. Provenance/version-pin/regeneration of the dual URDF is documented in `docs/frame_contract.md` → "Collision Geometry Asset (unified URDF)".
 8. **Doc precedence.** Per `AGENTS.md`, when docs conflict the order is `AGENTS.md` → root `README.md` (KO; `README.en.md` is the English original) → `docs/architecture.md` → contract docs → component READMEs. `REVIEW.md` is a snapshot; `docs/current_review.md` is a redirect to `REVIEW.md`; `docs/archive/**` is audit-only.

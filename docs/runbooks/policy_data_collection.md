@@ -1,8 +1,8 @@
 # Policy Data Collection Runbook
 
 This runbook defines the policy and teleop dataset schema for simulator data,
-rbpodo controller pgmode simulation data, and future physical real
-demonstrations. It is a recording contract only. It does not approve physical
+rbpodo controller pgmode simulation data, and physical real demonstrations. It
+is a recording contract only. It does not approve physical
 motion, change deadman behavior, or weaken command-source lease checks.
 
 ## Evidence Categories
@@ -12,17 +12,17 @@ Keep these categories separate in every episode and report:
 | Category | `backend_type` | `run_mode` | `operation_mode` | Physical motion |
 | --- | --- | --- | --- | --- |
 | `rbpodo_controller_simulation` | `rbpodo` | `real` | `simulation` | `physical_motion_expected=false` |
-| future physical real robot | `rbpodo` | `real` | `real` | future acceptance only |
+| physical real robot | `rbpodo` | `real` | `real` | only under explicit physical acceptance / `real_policy` gate |
 
 The controller-simulation path uses real Rainbow controller boxes in `pgmode`
-simulation. Do not mix controller-simulation episodes with future physical real
+simulation. Do not mix controller-simulation episodes with physical real
 episodes unless the training loader explicitly filters by these labels.
 
 Controller-simulation (`pgmode` simulation) tuning is a high-performance
 controller-reference signal only. It is not the physical-real default until the
 physical promotion ladder produces actual TCP tracking evidence. Keep
 controller-simulation episodes under the category `rbpodo_controller_simulation`
-unless a future physical promotion artifact explicitly changes this contract.
+unless a physical promotion artifact explicitly changes this contract.
 
 For rbpodo controller pgmode collection,
 `policy_runner.safety.allow_real_motion=false` is the expected policy setting.
@@ -44,8 +44,9 @@ checkpoint plus HDF5 sample review without state or UDP clients, `sim_dryrun`
 for mock/simulator state with dropped intents by default, `controller_sim` for
 the rbpodo `controller_simulation` carve-out, `real_readonly` for
 `real_supervised` observation/inference with no command sends, and
-`real_policy` only for future physical rollout after measured or accepted retarget,
-collision, gripper, camera, and geometry gates are present. Every `flow-infer`
+`real_policy` only for explicitly gated physical rollout after measured or
+accepted retarget, collision, gripper, camera, and geometry gates are present.
+Every `flow-infer`
 run writes `rollout_summary`, including decode/missing-camera counts, safety
 decision counts, command send/drop counts, and backend/run_mode/operation_mode
 observed in state.
@@ -55,7 +56,9 @@ list is:
 
 - `mode: real`
 - `safety.allow_real_motion: true`
-- measured geometry with `geometry_valid_for_real_policy: true`
+- measured/accepted geometry with `geometry_valid_for_real_policy: true`, or
+  `safety.allow_configured_estimate_geometry_in_real: true` for accepted
+  ee_local policies that do not consume unmeasured camera/tool extrinsics
 - `retarget_status: measured|accepted` and `measured_retarget_available: true`
 - `collision_model_status: measured|validated` and
   `measured_collision_model_available: true`
@@ -115,8 +118,10 @@ calibration/active_calibration.yaml
 ```
 
 The current repository default is `status: configured_estimate` and
-`geometry_valid_for_real_policy: false`. That is acceptable for simulator and
-visualization work, but not for future real geometry-dependent policy.
+`geometry_valid_for_real_policy: false`. That is acceptable for simulator,
+visualization, and the explicit configured-estimate carve-out used by accepted
+ee_local real-policy configs that do not consume unmeasured camera/tool
+extrinsics. It is not acceptable for general real geometry-dependent policy.
 
 ## State Fields
 

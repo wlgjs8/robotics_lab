@@ -121,7 +121,7 @@ Real camera work is separate from hardware-free robot work. Install RealSense an
 
 ## Real Robot Dependencies
 
-Real robot work requires rbpodo and site-specific network access. Do not add or run tracked runnable real configs. Use `rb_servo_server/config/dual_real.example.yaml` only as a template and create site-local configs under `rb_servo_server/config/local/`.
+Real robot work requires rbpodo and site-specific network access. The tracked launch configs are `rb_servo_server/config/stack_real.yaml` and `rb_servo_server/config/stack_sim.yaml`; create site-local acceptance or site-variant copies under `rb_servo_server/config/local/` rather than adding new tracked real configs.
 
 ## Recommended Development Flow
 

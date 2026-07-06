@@ -201,14 +201,19 @@ enough fixture evidence to justify the layout.
 ## Diagnostics Root-Cause Report
 
 Use the diagnostics report when `diagnostics_suspect` is present in rbpodo
-controller-simulation artifacts or when a controller-simulation result used:
+controller-simulation artifacts or when a controller-simulation result used
+the diagnostics-suspect config opt-in:
 
-```bash
-RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM=1
+```yaml
+servo:
+  allow_controller_simulation_motion: true
+  allow_controller_simulation_diagnostics_suspect: true
 ```
 
-The override is controller-simulation-only. It does not make the diagnostics
-healthy and it does not authorize physical real motion.
+The opt-in is controller-simulation-only. It does not make the diagnostics
+healthy and it does not authorize physical real motion. The legacy
+`RB_ALLOW_RBPODO_DIAGNOSTICS_SUSPECT_CONTROLLER_SIM` env gate is no longer read
+by the server.
 
 Generate the report from the read-only state dump, Python/C++ parity summary,
 and raw 5001 capture summary:
@@ -253,9 +258,10 @@ The root-cause classifier is intentionally conservative:
 - `insufficient_evidence`: state dump, parity, or raw capture evidence is
   missing or inconclusive.
 
-Physical real remains blocked until the diagnostics root cause is resolved or
-explicitly accepted by a separate safety review. The diagnostics report keeps
-these blockers visible:
+A diagnostics-suspect controller-simulation artifact must not be promoted to
+physical evidence unless the diagnostics root cause is resolved or explicitly
+accepted by a separate safety review. The diagnostics report keeps these
+blockers visible:
 
 - `diagnostics_suspect_unresolved`
 - `stop_resetFault_unverified`
@@ -263,8 +269,9 @@ these blockers visible:
 
 ## Timestamp Alignment Audit
 
-Use the timestamp audit after a controller-simulation circle benchmark finishes
-and before interpreting RMS, p95, or max tracking error as controller behavior:
+Use the timestamp audit only for historical or explicitly collected
+controller-simulation circle artifacts, before interpreting RMS, p95, or max
+tracking error as controller behavior:
 
 ```bash
 python3 scripts/timestamp_alignment_audit.py \
@@ -310,8 +317,8 @@ tuning decisions.
 
 ## Circle Error Decomposition
 
-Completed controller-simulation circle benchmarks write offline error
-decomposition artifacts:
+Historical controller-simulation circle artifacts may include offline error
+decomposition files:
 
 - `error_decomposition.json`
 - `cycle_error_decomposition.csv`
@@ -355,8 +362,8 @@ the three listed offsets.
 
 ## Measurement Reliability Report
 
-Use the measurement reliability report before using rbpodo pgmode circle
-metrics for tuning decisions:
+Use the measurement reliability report only before using archived or explicitly
+collected rbpodo pgmode circle metrics for tuning decisions:
 
 ```bash
 python3 scripts/generate_rbpodo_measurement_reliability_report.py \
@@ -388,9 +395,9 @@ Reliability levels:
 - `controller_reference_valid`: the run completed with valid `tcp_ref_stand`
   and visible `q_ref`/`q_target`, no fault, and no physical motion detected.
   This is still controller-reference lower-bound evidence only.
-- `physical_ready_candidate`: reserved for future physical real acceptance and
-  not assigned while `diagnostics_suspect` remains unresolved. Current rbpodo
-  pgmode simulation reports should not produce this level.
+- `physical_ready_candidate`: not assigned by rbpodo pgmode simulation reports.
+  Physical readiness comes from the physical acceptance runbooks, not from a
+  controller-simulation reliability report.
 
 Important caveats:
 
@@ -462,7 +469,7 @@ Read-only server-start mode:
 ```bash
 python3 scripts/rbpodo_state_parity_check.py \
   --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
-  --server-config rb_servo_server/config/local/dual_real_rbpodo_readonly_measurement.yaml \
+  --server-config rb_servo_server/config/local/stack_sim_readonly_measurement.yaml \
   --ips 172.28.60.200 172.28.60.201 \
   --duration-sec 5 \
   --state-endpoint udp://127.0.0.1:50171 \
@@ -470,12 +477,12 @@ python3 scripts/rbpodo_state_parity_check.py \
   --i-understand-this-connects-to-real-controller
 ```
 
-Create the local config from
-`rb_servo_server/config/dual_real_rbpodo_readonly_measurement.example.yaml`.
-The template uses `operation_mode: simulation`,
-`servo.send_servo_commands: false`, read-only unsafe-startup allowances, and
-measurement-only state fanout on `udp://127.0.0.1:50171`. The parity checker
-refuses any supplied server config that does not explicitly set
+Create the local config from `rb_servo_server/config/stack_sim.yaml` and keep
+the copy under `rb_servo_server/config/local/`. The local copy uses
+`operation_mode: simulation`, `servo.send_servo_commands: false`, read-only
+unsafe-startup allowances, and measurement-only state fanout on
+`udp://127.0.0.1:50171`. The parity checker refuses any supplied server config
+that does not explicitly set
 `servo.send_servo_commands: false`.
 
 Already-running server mode:

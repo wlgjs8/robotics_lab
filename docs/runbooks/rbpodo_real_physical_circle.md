@@ -36,7 +36,7 @@ synthetic UMI sender ─UDP→ policy_runner (umi_dual_cartesian, relative-init)
 2. Workspace clear; **E-stop in hand**.
 3. Build present: `rb_servo_server/build/rbpodo_real_gate/rb_servo_server` (configured with
    `RB_SERVO_ENABLE_RBPODO:BOOL=ON`).
-4. Local config: `rb_servo_server/config/local/dual_real_rbpodo_PHYSICAL_circle_lowspeed.yaml`
+4. Local config: `rb_servo_server/config/local/stack_real_PHYSICAL_circle_lowspeed.yaml`
    (gitignored, site-local; key values in **Config** below).
 
 ## Required config (server is run as root for RT priority)
@@ -96,8 +96,8 @@ PYTHONPATH=rb_gui RB_GUI_DESCRIPTIONS_DIR="$PWD/rb_servo_server/descriptions" \
 ```bash
 cd robotics_lab
 SUDO_ASKPASS=/path/to/askpass sudo -A env \
-  rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
-  --config rb_servo_server/config/local/dual_real_rbpodo_PHYSICAL_circle_lowspeed.yaml
+	  rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+	  --config rb_servo_server/config/local/stack_real_PHYSICAL_circle_lowspeed.yaml
 ```
 
 Wait for `CommandServer listening on udp://127.0.0.1:50256`, then **verify (still no motion):**

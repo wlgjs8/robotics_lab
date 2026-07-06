@@ -343,11 +343,12 @@ prevents a startup `Hold` state from deadlocking the first policy-runner
 
 Real stop/reset APIs remain conservative until verified. If no verified API is wired, return `DependencyUnavailable` and require operator intervention.
 
-Rbpodo is the primary vendor-library real backend. `dual_real.example.yaml` and
-the `dual_real_*_ack.example.yaml` files are tracked templates, not
-ready-to-run real motion configs. Site-specific real configs belong under
-`rb_servo_server/config/local/`, which is intentionally user-owned and
-gitignored.
+Rbpodo is the primary vendor-library real backend. The current tracked launch
+configs are `rb_servo_server/config/stack_real.yaml` and
+`rb_servo_server/config/stack_sim.yaml`; the legacy `dual_real*.example.yaml`
+template surface is no longer tracked. Site-specific variants and acceptance
+stage copies belong under `rb_servo_server/config/local/`, which is
+intentionally user-owned and gitignored.
 
 ### Rbpodo ACK Semantics
 

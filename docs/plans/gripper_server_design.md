@@ -1,20 +1,23 @@
-# Gripper Server — Design Proposal (DRAFT)
+# Gripper Server — Design And Implementation Notes
 
-Status: **proposal**. Date: 2026-06-20.
+Status: implemented in the current stack; this file also preserves the original
+design rationale from 2026-06-20.
 
-Implemented so far (on `dev`):
+Current implementation:
 
 - **Phase 1 — gripper_server** (`policy_runner/policy_runner/gripper_server.py`).
   Standalone native process wrapping `PikaSerialGripperBackend`: UDP command-in
   (`gripper_cmd.v1`) → drive grippers → UDP state-out (`gripper_state.v1`), with
   stale/deadman handling (`on_stale` hold/open/close). Runs hardware-free via
   `--backend sim` (a `SimPikaGripper` whose feedback eases toward the commanded
-  position). CLI: run / `--monitor` / `--send left=50,right=80`. Verified:
-  11 tests (parse, stale policy, sim easing, build_state, UDP round-trip) + live
-  smoke (command in → feedback tracks target → state published); full
-  policy_runner suite (330) green. Not yet wired: policy/UMI as senders (they
-  still drive serial directly) and GUI/server consumption of the feed — that is
-  Phase 2 (server routing) + Phase 3 (state JSON + GUI).
+  position). CLI: run / `--monitor` / `--send left=50,right=80`.
+- **Phase 2 — server bridge.** `rb_servo_server` parses `left/right.gripper` or
+  `gripper_target`, arbitrates the setpoint with the arm command packet,
+  forwards it to UDP `50410`, receives feedback on UDP `50420`, and stamps
+  `left/right.gripper` into `servo_state.v1`.
+- **Phase 3 — GUI/state consumers.** `rb_gui` parses gripper feedback and exposes
+  gripper controls/visualization. `tools/run_stack.sh` launches the gripper
+  server by default: sim backend in `MODE=sim`, Pika backend in `MODE=real`.
 
 Earlier (GUI-only viz):
 - **B2a articulated-gripper visualization.** `pika_gripper.STL` split into
@@ -22,47 +25,45 @@ Earlier (GUI-only viz):
   two STL components reaching the fingertip plane; +90° Z baked in). GUI-only
   `rb3_730e_pika_articulated.urdf` (base + two prismatic finger joints). `scene.py`
   drives the fingers from a gripper open-% (continuous → partial close); `app.py`
-  adds an interim "그리퍼 표시 (preview)" L/R slider as the source. The C++
-  Pinocchio URDF (`rb3_730e.urdf`) is untouched. Verified: URDF loads (yourdfpy,
-  8 actuated joints), fingers track 100%/50%/0% (94/47/0 mm gap), 162 GUI tests
-  pass. Still pending: the real `gripper.percent` feed (Phases 1–3 below) replacing
-  the slider, and live viser confirmation.
+  adds gripper display/control surfaces. The C++ Pinocchio URDF
+  (`rb3_730e.urdf`) is untouched.
 
 Goal: make the gripper a first-class, single-owner subsystem like `camera_server`,
 unify its command path through `rb_servo_server` (so it inherits lease /
 arbitration / deadman), publish gripper feedback in the server state stream, and
 visualize open/close in the viser GUI.
 
-This document is the agreed design to build against. Implementation is phased
-(see §10) — nothing here is built yet.
+The sections below describe the design that led to the current implementation.
+Any "current gaps" language in historical subsections refers to the
+pre-implementation state unless explicitly marked current.
 
 ---
 
-## 1. Why change (current gaps)
+## 1. Why change (historical gaps)
 
-The gripper today is fully out-of-band and fragmented:
+Historical pre-implementation gaps:
 
-- **No server awareness.** `rb_servo_server` has a vestigial `ArmCommand.gripper_target`
-  (`include/rb_servo/core/types.hpp:449`) but never parses, arbitrates, applies,
-  or publishes it. `RobotState` and the published `servo_state` JSON have no
-  gripper field; the GUI `ArmSnapshot` (`rb_gui/rb_servo_gui/models.py`) has none.
-- **Two independent driver paths over the same serial ports** → contention risk:
+The gripper used to be fully out-of-band and fragmented:
+
+- **No server awareness.** `rb_servo_server` had a vestigial `ArmCommand.gripper_target`
+  but did not parse, arbitrate, apply, or publish it. `RobotState` and the
+  published `servo_state` JSON had no gripper field; the GUI `ArmSnapshot` had
+  none.
+- **Two independent driver paths over the same serial ports** created contention risk:
   - policy rollout: `policy_runner` → `GripperRuntime` → `PikaSerialGripperBackend`
     (`policy_runner/policy_runner/gripper.py`) → Pika SDK serial.
   - UMI teleop: `scripts/umi_gripper_follow.py` (UDP 50382) → Pika SDK serial.
-- **No arbitration for an actuator.** The gripper can be driven by either path
-  with no lease/deadman, unlike arm motion (which the server arbitrates). An
-  operator's arm and that arm's gripper can end up owned by different sources.
-- **Static visual only.** The viser URDF (`rb_servo_server/descriptions/urdf/rb3_730e.urdf`)
-  carries the gripper as a single FIXED `pika_gripper.STL` (no jaw joint);
-  `_ROBOT_JOINT_NAMES` (`scene.py`) is the 6 arm joints only → the gripper never
-  moves on screen.
+- **No arbitration for an actuator.** The gripper could be driven by either path
+  with no lease/deadman, unlike arm motion. An operator's arm and that arm's
+  gripper could end up owned by different sources.
+- **Static visual only.** The viser URDF carried the gripper as a single FIXED
+  `pika_gripper.STL` (no jaw joint), so the gripper did not move on screen.
 
 ## 2. Target architecture
 
 ```
  command sources (UMI bridge · policy_runner · GUI)
-        │  existing command JSON {seq, mode, left{…, gripper}, right{…, gripper}}  UDP 50010
+       │  existing command JSON {seq, mode, left{…, gripper}, right{…, gripper}}  UDP 50256
         ▼
  rb_servo_server  ──(arm: FK/IK/safety/servo)──► arm backends
    └ lease / arbitration / deadman / freshness applied to the WHOLE packet
@@ -72,7 +73,7 @@ The gripper today is fully out-of-band and fragmented:
         │ serial (Pika SDK)  → left / right Pika grippers
         └ server caches latest feedback and stamps it into the state JSON
                  │
-                 ▼  state fanout (existing 50110 gui / 50120 policy)
+                ▼  state fanout (50356 scope / 50366 gui / 50376 policy / 50378 flow / 50386 camera)
         GUI (viser open/close viz) + policy_runner (proprio)
 ```
 

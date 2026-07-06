@@ -41,8 +41,8 @@ motion belong to later supervised acceptance stages, not read-only.
 
 ## Config Rules
 
-`rb_servo_server/config/dual_real.example.yaml` is a template, not a
-ready-to-run real motion config. Local real configs live under:
+Create a site-local read-only config from the current stack real config and
+keep local real variants under:
 
 ```text
 rb_servo_server/config/local/
@@ -83,7 +83,7 @@ Example for the left arm 500 Hz ACK-on profile:
 
 ```bash
 python3 scripts/rbpodo_servo_acceptance.py \
-  --config rb_servo_server/config/local/dual_real_500hz_ack.yaml \
+  --config rb_servo_server/config/local/stack_real_readonly_500hz_ack.yaml \
   --arm left \
   --mode read_only \
   --profile 500hz_ack \

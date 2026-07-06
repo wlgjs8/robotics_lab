@@ -1,8 +1,10 @@
 # RbpodoBackend Implementation Plan and Hardware Acceptance Runbook
 
-This document defines the implementation plan and acceptance gates for the real
-Rainbow RB3-730 backend. It is a planning artifact only. Do not use it as
-evidence that real-robot operation is ready.
+This document defines the historical implementation plan and acceptance gates
+for the real Rainbow RB3-730 backend. It is a superseded planning artifact only:
+do not use it as current runtime guidance or evidence that real-robot operation
+is ready. References below to `RB_ALLOW_*` gates and `dual_real*.example.yaml`
+templates describe the old plan, not the current config-driven stack.
 
 Current state after MIG-04:
 

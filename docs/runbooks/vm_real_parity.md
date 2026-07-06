@@ -13,7 +13,7 @@ evidence only, not physical acceptance.
 | `operation_mode` | `simulation` | `real` |
 | IPs | two VM IPs | site controller IPs |
 | command/data ports | rbpodo fixed `5000/5001` | rbpodo fixed `5000/5001` |
-| Cartesian real gate | never `cartesian_control.allow_in_real` | future physical acceptance only |
+| Cartesian real gate | never `cartesian_control.allow_in_real` | config-gated physical acceptance only; current physical stack may set `cartesian_control.allow_in_real: true` |
 | evidence tag | `source=controller_simulation_vm` | physical run-specific source |
 | `physical_motion_expected` | `false` | true only in approved physical acceptance |
 

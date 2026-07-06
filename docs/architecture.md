@@ -311,19 +311,21 @@ follow-up) — regenerate with `make ik-infeasible` (tunable `IK_CYL_SPEED` /
 `IK_CYL_DQMAX` / `IK_CYL_RADIUS`) if the URDF, mount geometry, or speed cap changes.
 Toggle: "A 영역(특이점 원통) 표시" in the 조작 → 안전 tab.
 
-Tracked real config is a template only:
+Tracked stack configs are the current launch source of truth:
 
 ```text
-rb_servo_server/config/dual_real.example.yaml
+rb_servo_server/config/stack_real.yaml
+rb_servo_server/config/stack_sim.yaml
 ```
 
-Site-owned real configs belong under:
+Do not add additional tracked runnable real robot configs. Site-owned real
+variants and acceptance-stage copies belong under:
 
 ```text
 rb_servo_server/config/local/
 ```
 
-No tracked runnable real robot config should exist.
+The legacy `dual_real*.example.yaml` template surface is no longer tracked.
 
 Rbpodo is the primary vendor-library real backend. Its Rainbow Servo J fields
 must use canonical names in new configs:
@@ -473,12 +475,12 @@ closed when camera state is stale.
 
 Policy and teleop datasets must preserve the collection environment as
 metadata. The required categories are hardware-free mock, rbpodo
-controller `pgmode` simulation, and future physical real demonstrations.
+controller `pgmode` simulation, and physical real demonstrations.
 Controller-simulation data uses `backend_type: rbpodo`, `run_mode: real`,
 `operation_mode: simulation`, and `physical_motion_expected=false`; it should
 record both `tcp_actual_stand` and `tcp_ref_stand` when available. It is not
-the same evidence class as mock data and must not be mixed with future
-physical real data without explicit metadata filtering. The dataset schema is
+the same evidence class as mock data and must not be mixed with physical real
+data without explicit metadata filtering. The dataset schema is
 documented in `docs/runbooks/policy_data_collection.md`.
 
 ## Camera Role

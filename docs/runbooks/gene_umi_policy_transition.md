@@ -1,8 +1,10 @@
 # GENE UMI Policy Transition Runbook
 
 This runbook tracks the transition from offline UMI/GENE-style flow-policy
-training to supervised simulator and rbpodo controller `pgmode` simulation
-rollout. It is not physical real robot approval.
+training to supervised simulator, rbpodo controller `pgmode` simulation, and
+explicitly gated physical `real_policy` rollout. It is not blanket physical
+robot approval: every physical send still requires the `real_policy` gate,
+site-local server motion config, operator supervision, and the hardware E-stop.
 
 ## Scope And Non-Goals
 
@@ -11,14 +13,16 @@ Scope:
 - collect UMI/Pika and robotics_lab HDF5 evidence before policy training
 - train and evaluate flow-policy checkpoints from audited episodes
 - run simulator and rbpodo controller `pgmode` simulation dry runs
+- run physical `real_policy` only through the accepted/validated gate set
 - preserve rollout summaries and artifact manifest evidence for review
 
 Non-goals:
 
 - no implicit real RB3-730 motion
-- no physical real Cartesian policy approval
-- no force-control, gripper, or camera-driven physical policy promotion
-- no replacement of the simulator-first Cartesian acceptance milestone
+- no force-control promotion
+- no gripper or camera-driven physical promotion outside the explicit
+  `real_policy` gate and site-local config
+- no replacement of controller-simulation or hardware-free regression evidence
 
 ## Why Controller-Sim Is Not Physical Real Robot Performance
 
@@ -83,7 +87,7 @@ Keep these lanes separate:
 | `sim_dryrun` | dropped by default | mock state and SafetyGate decisions |
 | `controller_sim` | rbpodo controller `pgmode` simulation only | controller reference with `physical_motion_expected=false` |
 | `real_readonly` / `real_supervised` | none | real state/camera observation and rollout summary |
-| `real_policy` | future only | blocked until measured or accepted retarget, collision, gripper, camera, and geometry gates pass |
+| `real_policy` | physical sends only when `_validate_real_policy`, server config, gripper gate, operator supervision, and E-stop are all satisfied | physical `TcpPoseTarget` + gripper rollout summary; lane open only for accepted/validated configs |
 
 Example offline evaluation:
 
@@ -99,8 +103,9 @@ PYTHONPATH=policy_runner python3 -m policy_runner flow-infer \
 For `controller_sim`, policy dt must come from `--policy-dt-sec` or checkpoint
 `dataset_stats.dt_mean_sec`. For non-offline simulator or read-only modes,
 omitting both means `1 / command_rate_hz`; this fallback is for dry-run and
-summary convenience only. Physical `real_policy` remains blocked by
-rollout-mode validation and measured-geometry safety gates.
+summary convenience only. Physical `real_policy` is blocked by default but can
+send when rollout-mode validation, accepted/validated safety attestations,
+gripper gates, and the site-local real server config are all satisfied.
 
 ## SpaceMouse -> policy_runner -> rbpodo pgmode simulation -> viser path
 
@@ -150,11 +155,14 @@ silently omit them when reviewing promotion readiness.
 
 ## Physical Promotion Criteria
 
-`real_policy` is blocked by default. A future physical rollout must satisfy all
-of these gates before `policy_runner` may send motion:
+`real_policy` is blocked by default. A physical rollout may send motion only
+after all of these gates are satisfied:
 
 - `mode: real` and `safety.allow_real_motion: true`
-- measured geometry with `geometry_valid_for_real_policy: true`
+- measured/accepted geometry with `geometry_valid_for_real_policy: true`, or
+  the explicit `safety.allow_configured_estimate_geometry_in_real: true`
+  carve-out for accepted ee_local policies that do not consume unmeasured
+  camera/tool extrinsics
 - `retarget_status: measured|accepted` and `measured_retarget_available: true`
 - `collision_model_status: measured|validated` and
   `measured_collision_model_available: true`
@@ -168,9 +176,10 @@ of these gates before `policy_runner` may send motion:
 - the site-local real stack config enables the required server motion paths
 
 Flow checkpoints are 14D: each arm has six Cartesian channels plus one gripper
-channel. In `controller_sim`, proposed gripper commands are logged and dropped
-by the noop gripper backend unless a simulator gripper backend is explicitly
-provided. Controller simulation does not approve physical gripper motion.
+channel. In `controller_sim`, gripper commands may be forwarded to the sim
+gripper backend when the stack gripper server is enabled, but that remains
+hardware-free feedback only. Controller simulation does not approve physical
+gripper motion.
 
 ## Validation
 
