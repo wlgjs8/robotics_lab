@@ -40,15 +40,16 @@ python3 -m compileall -q rb_gui/rb_servo_gui policy_runner/policy_runner scripts
 Shell syntax checks:
 
 ```bash
-bash -n scripts/codex_gate.sh
-bash -n scripts/codex_run_sequence.sh
 bash -n scripts/check_deps.sh
+if [ -f scripts/install_deps_ubuntu.sh ]; then bash -n scripts/install_deps_ubuntu.sh; fi
 ```
 
-C++ gate:
+C++ hardware-free checks:
 
 ```bash
-./scripts/codex_gate.sh HARDEN-10
+cmake -S rb_servo_server -B rb_servo_server/build
+cmake --build rb_servo_server/build -j
+ctest --test-dir rb_servo_server/build --output-on-failure
 ```
 
 Cartesian acceptance (against an already-running rbpodo/mock server):

@@ -76,15 +76,15 @@ Stages 0-1 are environment; Stages 2-3 are the new Windows/WSL2/VM layer; Stage 
 - Install WSL2 Ubuntu + Docker Desktop (WSL2 backend).
 - **Clone the repo inside the WSL filesystem** (e.g. `~/robotics_lab`), not under `/mnt/c`, to avoid slow I/O and CRLF/permission issues. Keep the Windows copy only for Claude Desktop file viewing.
 - Ensure shell scripts keep **LF** line endings (they are bash). Verify `tools/*.sh` and `scripts/*.sh` are executable.
-- Pass check: `git status` clean in WSL clone; `bash -n scripts/codex_gate.sh` ok.
+- Pass check: `git status` clean in WSL clone; `bash -n scripts/check_deps.sh` ok.
 
 ### Stage 1 — Build & hardware-free sanity (no VM yet)
 - `./scripts/install_deps_ubuntu.sh --profile hardware-free` (Eigen3 + Pinocchio via robotpkg at `/opt/openrobots`).
 - `./scripts/check_deps.sh --profile hardware-free`.
 - Python: `python3 -m unittest discover rb_gui/tests`, `python3 -m unittest discover policy_runner/tests`.
-- C++ gates: `./scripts/codex_gate.sh HARDEN-10`, then `./scripts/codex_gate.sh CART-MATH-03`.
+- C++ checks: configure, build, and run `ctest --test-dir rb_servo_server/build --output-on-failure`.
 - (Optional confidence) build the native stack with `make build`, then verify the viser GUI loads at http://127.0.0.1:8080.
-- Pass check: deps check ok, Python suites pass, HARDEN-10 + CART-MATH-03 pass. This proves the toolchain before adding VM complexity.
+- Pass check: deps check ok, Python suites pass, and C++ tests pass. This proves the toolchain before adding VM complexity.
 - Investigate: does rbpodo backend need an SDK install separate from the hardware-free profile? Document the rbpodo SDK acquisition/build step here (gap in current docs for the home setup).
 
 ### Stage 2 — VirtualBox + Virtual ControlBox import (single VM first)

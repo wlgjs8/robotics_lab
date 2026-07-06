@@ -180,5 +180,5 @@ python3 scripts/collect_gene_umi_artifact_manifest.py --help
 PYTHONPATH=scripts python3 -m unittest discover -s scripts -p 'test_collect_gene_umi_artifact_manifest.py' -v
 make -n policy-hdf5-audit-smoke
 make -n pgmode-transition-dry-run
-CODEX_SKIP_MISSING_CPP_DEPS=1 ./scripts/codex_gate.sh 09_docs_ci_artifact_manifest
+python3 -m compileall -q policy_runner/policy_runner scripts
 ```

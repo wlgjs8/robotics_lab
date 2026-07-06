@@ -60,26 +60,29 @@ python3 -m unittest discover policy_runner/tests
 python3 -m compileall -q rb_gui/rb_servo_gui policy_runner/policy_runner scripts
 ```
 
-## C++ Hardware-Free Gate
+## C++ Hardware-Free Checks
 
 ```bash
-./scripts/codex_gate.sh HARDEN-10
+cmake -S rb_servo_server -B rb_servo_server/build
+cmake --build rb_servo_server/build -j
+ctest --test-dir rb_servo_server/build --output-on-failure
 ```
 
-When dependencies are missing, the gate may skip C++ checks only if explicitly configured to do so. Do not report skipped C++ checks as passed C++ acceptance.
+When dependencies are missing, report the missing package clearly. Do not report skipped C++ checks as passed C++ acceptance.
 
 ## Cartesian Math Acceptance
 
-Run the Pinocchio-backed Cartesian math rebaseline gate:
+Run the Pinocchio-backed C++ test suite:
 
 ```bash
-./scripts/codex_gate.sh CART-MATH-03
+cmake -S rb_servo_server -B rb_servo_server/build
+cmake --build rb_servo_server/build -j
+ctest --test-dir rb_servo_server/build --output-on-failure
 ```
 
-This runs the Python suites and the mandatory `rb_servo_server` C++ Pinocchio
-gate, including near-pi SO(3), quaternion convention, body-error convention, and
-stand/local frame-conversion tests. Missing Pinocchio is a dependency failure
-unless an explicit temporary skip variable is set.
+This includes the mandatory `rb_servo_server` C++ Pinocchio tests for near-pi
+SO(3), quaternion convention, body-error convention, and stand/local
+frame-conversion behavior. Missing Pinocchio is a dependency failure.
 
 ## Cartesian Acceptance
 

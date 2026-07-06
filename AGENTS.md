@@ -203,10 +203,12 @@ python3 -m unittest discover policy_runner/tests
 python3 -m compileall -q rb_gui/rb_servo_gui policy_runner/policy_runner scripts
 ```
 
-For C++ servo changes, run the hardware-free C++ gate when dependencies are installed:
+For C++ servo changes, build and run the hardware-free C++ tests when dependencies are installed:
 
 ```bash
-./scripts/codex_gate.sh HARDEN-10
+cmake -S rb_servo_server -B rb_servo_server/build
+cmake --build rb_servo_server/build -j
+ctest --test-dir rb_servo_server/build --output-on-failure
 ```
 
 For Cartesian behavior, run `scripts/cartesian_acceptance.py --mode assume-running`

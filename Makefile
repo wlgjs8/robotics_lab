@@ -70,9 +70,6 @@ policy-hdf5-audit-smoke:
 pgmode-transition-dry-run:
 	tools/rbpodo_pgmode_spacemouse.sh check
 
-mig-rebaseline:
-	./scripts/codex_gate.sh MIG-26
-
 deps-hardware-free:
 	./scripts/install_deps_ubuntu.sh --profile hardware-free
 

@@ -160,10 +160,12 @@ python3 -m unittest discover rb_gui/tests
 python3 -m unittest discover policy_runner/tests
 ```
 
-Hardware-free gate:
+Hardware-free C++ checks:
 
 ```bash
-./scripts/codex_gate.sh HARDEN-10
+cmake -S rb_servo_server -B rb_servo_server/build
+cmake --build rb_servo_server/build -j
+ctest --test-dir rb_servo_server/build --output-on-failure
 ```
 
 `rb_servo_server` C++ builds require Eigen3 and Pinocchio. Cartesian FK/IK,
@@ -171,10 +173,10 @@ orientation interpolation, frame conversion, and SE(3) delta math delegate to
 Eigen/Pinocchio. Missing Pinocchio is a missing C++ dependency, not a fallback
 runtime mode.
 
-Cartesian math rebaseline:
+Cartesian math rebaseline is part of the Pinocchio-backed C++ test suite:
 
 ```bash
-./scripts/codex_gate.sh CART-MATH-03
+ctest --test-dir rb_servo_server/build --output-on-failure
 ```
 
 Cartesian acceptance now runs against an already-running rbpodo/mock server:

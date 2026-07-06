@@ -94,10 +94,11 @@ cmake --build rb_servo_server/build -j
 ctest --test-dir rb_servo_server/build --output-on-failure
 ```
 
-Gates (`scripts/codex_gate.sh <TASK>`) wrap build/test/acceptance:
+C++ servo server build and tests:
 ```bash
-./scripts/codex_gate.sh HARDEN-10                                  # hardware-free C++ gate
-./scripts/codex_gate.sh CART-MATH-03                               # Cartesian math rebaseline
+cmake -S rb_servo_server -B rb_servo_server/build
+cmake --build rb_servo_server/build -j
+ctest --test-dir rb_servo_server/build --output-on-failure
 ```
 
 Cartesian behavior is now validated against an already-running rbpodo/mock server
