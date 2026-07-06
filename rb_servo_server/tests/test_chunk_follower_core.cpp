@@ -105,8 +105,8 @@ int main() {
     check(track_ok, "accumulated setpoint tracks the reference (<5mm)");
   }
 
-  // -- Test 3: over-fast target → ladder dilates α<1 and still solves. ---------
-  std::printf("Test 3: sacrifice ladder (over-fast target)\n");
+  // -- Test 3: over-fast target keeps alpha=1 and degrades by T-slip. ----------
+  std::printf("Test 3: predictive alpha disabled (over-fast target)\n");
   {
     ChunkFollowerSegment<3> seg(lim, DT);
     seg.seed({0, 0, 0}, {0, 0, 0}, {0, 0, 0});
@@ -114,14 +114,36 @@ int main() {
     s.pf = {0.02, 0, 0}; s.vf = {0.5, 0, 0}; s.af = {0, 0, 0};
     s.sign_dk = {1, 0, 0}; s.sign_dkp1 = {1, 0, 0};
     const double a = seg.predictAlpha(s);
-    check(a < 1.0, "ladder picks α<1 for an over-fast target");
+    check(std::fabs(a - 1.0) < 1e-12, "predictAlpha returns alpha=1.0");
     auto r = seg.solve(s);
     check(r.result == ruckig::Result::Working, "over-fast segment still produces a valid trajectory");
+    check(std::fabs(r.alpha - 1.0) < 1e-12, "solve telemetry reports alpha=1.0");
     check(!r.converged, "over-fast segment is correctly flagged non-converged (T slips)");
+    std::array<double, 3> p{}, v{}, acc{};
+    check(seg.sample(r.duration, p, v, acc) && std::fabs(v[0] - s.vf[0]) < 1e-6,
+          "solve targets the undilated requested velocity");
   }
 
-  // -- Test 4: forward-safe predictor rejects an over-fast START velocity. -----
-  std::printf("Test 4: forward-safe invariant\n");
+  // -- Test 4: braking regression for the removed predictive ladder. -----------
+  std::printf("Test 4: braking target is not over-dilated\n");
+  {
+    ChunkFollowerSegment<3> seg(lim, DT);
+    seg.seed({0, 0, 0}, {0.6, 0, 0}, {0, 0, 0});
+    BoundarySample<3> s;                 // braking: requested |vf| is below |v0|
+    s.pf = {0.06, 0, 0}; s.vf = {0.2, 0, 0}; s.af = {0, 0, 0};
+    s.sign_dk = {1, 0, 0}; s.sign_dkp1 = {1, 0, 0};
+    check(std::fabs(seg.predictAlpha(s) - 1.0) < 1e-12,
+          "braking predictAlpha returns alpha=1.0");
+    auto r = seg.solve(s);
+    check(r.result == ruckig::Result::Working, "braking segment solves");
+    check(std::fabs(r.alpha - 1.0) < 1e-12, "braking solve telemetry reports alpha=1.0");
+    std::array<double, 3> p{}, v{}, acc{};
+    check(seg.sample(r.duration, p, v, acc) && std::fabs(v[0] - s.vf[0]) < 1e-6,
+          "braking solve targets vf, not an alpha-diluted vf");
+  }
+
+  // -- Test 5: forward-safe predictor rejects an over-fast START velocity. -----
+  std::printf("Test 5: forward-safe invariant\n");
   {
     ChunkFollowerSegment<3> seg(lim, DT);
     seg.seed({0, 0, 0}, {0.9, 0, 0}, {0, 0, 0});  // v0 large, near a close target
@@ -133,8 +155,8 @@ int main() {
     check(seg.forwardSafe(s), "forward-safe accepts a modest v0");
   }
 
-  // -- Test 5: corner (direction reversal) rings af→0 and flags corner. -------
-  std::printf("Test 5: corner ring-down\n");
+  // -- Test 6: corner (direction reversal) rings af→0 and flags corner. -------
+  std::printf("Test 6: corner ring-down\n");
   {
     ChunkFollowerSegment<3> seg(lim, DT);
     seg.seed({0, 0, 0}, {0.05, 0, 0}, {0, 0, 0});

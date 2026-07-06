@@ -9,7 +9,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 try:
     import numpy as np
 
-    from policy_runner.chunk_ensemble import ChunkEnsembleScheduler, blend_weight
+    from policy_runner.chunk_ensemble import (
+        ChunkEnsembleScheduler,
+        blend_weight,
+        overlay_rows_with_runway,
+    )
     from policy_runner.flow_dataset import pose_compose_local
 except Exception:  # pragma: no cover - numpy/torch extras optional in some envs
     np = None
@@ -135,6 +139,75 @@ class ChunkEnsembleTest(unittest.TestCase):
         c2 = _raw_chunk(H, np.asarray([0.0, 0.01, 0, 0, 0, 0]), np.zeros(6))
         window4 = sched.advance(c2, self._anchor)
         self.assertIsNotNone(window4)
+
+    def test_runway_replays_next_no_new_window_with_grips(self) -> None:
+        R, H = self.R, 30
+        sched = ChunkEnsembleScheduler(R, H)
+        step1 = np.asarray([0.01, 0.0, 0.0, 0.0, 0.0, 0.0])
+        step2 = np.asarray([0.0, 0.01, 0.0, 0.0, 0.0, 0.0])
+        c1 = _raw_chunk(H, step1, np.zeros(6), grip_left=20.0, grip_right=30.0)
+        c2 = _raw_chunk(H, step2, np.zeros(6), grip_left=80.0, grip_right=90.0)
+        c2[:, 6] = np.arange(H, dtype=np.float64) + 100.0
+        c2[:, 13] = np.arange(H, dtype=np.float64) + 200.0
+
+        sched.begin(c1, self._anchor)
+        sched.note_kick(R)
+        window = sched.advance(c2, self._anchor)
+        self.assertIsNotNone(window)
+        self.assertEqual(sched.last_window_provenance, "blend")
+
+        runway = sched.runway_segment()
+        self.assertEqual(runway.shape, (R, 14))
+        frame = overlay_rows_with_runway(window, scheduler=sched, stitch_mode="ensemble")
+        self.assertEqual(frame.shape, (2 * R, 14))
+        np.testing.assert_allclose(frame[R:], runway, atol=1e-7)
+
+        next_window = sched.advance(None, self._anchor)
+        self.assertIsNotNone(next_window)
+        self.assertEqual(sched.last_window_provenance, "pure-new")
+        np.testing.assert_allclose(runway, next_window[:R], atol=1e-7)
+        np.testing.assert_allclose(runway[:, 6], c2[2 * R : 3 * R, 6], atol=1e-7)
+        np.testing.assert_allclose(runway[:, 13], c2[2 * R : 3 * R, 13], atol=1e-7)
+
+    def test_bootstrap_2r_overlay_frame_is_not_expanded(self) -> None:
+        R, H = self.R, self.H
+        sched = ChunkEnsembleScheduler(R, H)
+        first = sched.begin(
+            _raw_chunk(H, np.asarray([0.01, 0, 0, 0, 0, 0]), np.zeros(6)),
+            self._anchor,
+        )
+
+        frame = overlay_rows_with_runway(first, scheduler=sched, stitch_mode="ensemble")
+
+        self.assertEqual(frame.shape, (2 * R, 14))
+        np.testing.assert_array_equal(frame, first)
+
+    def test_runway_truncates_when_latest_plan_tail_is_short(self) -> None:
+        R, H = self.R, 20
+        sched = ChunkEnsembleScheduler(R, H)
+        c1 = _raw_chunk(H, np.asarray([0.01, 0, 0, 0, 0, 0]), np.zeros(6))
+        c1[:, 6] = np.arange(H, dtype=np.float64) + 10.0
+        c1[:, 13] = np.arange(H, dtype=np.float64) + 20.0
+
+        sched.begin(c1, self._anchor)
+        window = sched.advance(None, self._anchor)
+        self.assertIsNotNone(window)
+
+        runway = sched.runway_segment()
+        self.assertEqual(runway.shape, (H - 3 * R, 14))
+        np.testing.assert_allclose(runway[:, 6], c1[3 * R :, 6], atol=1e-7)
+        np.testing.assert_allclose(runway[:, 13], c1[3 * R :, 13], atol=1e-7)
+
+    def test_boundary_overlay_rows_are_unchanged(self) -> None:
+        R, H = self.R, self.H
+        sched = ChunkEnsembleScheduler(R, H)
+        sched.begin(_raw_chunk(H, np.asarray([0.01, 0, 0, 0, 0, 0]), np.zeros(6)), self._anchor)
+        rows = np.arange(R * 14, dtype=np.float32).reshape(R, 14)
+
+        frame = overlay_rows_with_runway(rows, scheduler=sched, stitch_mode="boundary")
+
+        self.assertEqual(frame.shape, rows.shape)
+        np.testing.assert_array_equal(frame, rows)
 
     def test_reset_reseeds_from_anchor_fn(self) -> None:
         R, H = self.R, self.H

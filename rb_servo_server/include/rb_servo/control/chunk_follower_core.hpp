@@ -1,9 +1,10 @@
 // chunk_follower_core.hpp — pure kinematic core for the Ruckig receding-horizon
 // chunk-follower. No servo-loop / Pinocchio / Eigen dependencies: it is a thin,
 // unit-testable layer over ruckig that implements the settled control math —
-//   * the a_max/jerk predictive convergence gate (validated in ruckig_spike),
 //   * the per-segment BVP guards (clamp, forward-safe, corner, co-clamp),
-//   * the bounded sacrifice ladder with true time-dilation (vf*α, af*α²),
+//   * Ruckig-owned v/a/j limiting with minimum_duration=dt; infeasible segments
+//     degrade by duration growth (T-slip),
+//   * alpha telemetry compatibility with the removed sacrifice ladder,
 //   * per-segment state chaining from the ruckig OUTPUT (not measured).
 //
 // It operates on an abstract N-dim axis vector; the caller maps Cartesian
@@ -57,14 +58,16 @@ struct BoundarySample {
 struct GuardConfig {
   double af_damping_beta{0.85};   // (0.7, 1]; damps the feedforward af
   double eps_clamp{1e-9};         // limit clamp tolerance
-  int    ladder_rungs{3};         // bounded sacrifice-ladder attempts (no unbounded bisection)
+  double corner_deadband_lin_m{3e-4};
+  double corner_deadband_ang_rad{5e-4};
+  int    ladder_rungs{3};         // retained for compatibility; predictive ladder is unused
 };
 
 // Result of building + solving one segment.
 struct SegmentSolve {
   ruckig::Result result{ruckig::Result::Error};
   double duration{0.0};
-  double alpha{1.0};              // time-dilation factor actually applied (1.0 = none)
+  double alpha{1.0};              // telemetry-compatible; predictive alpha is disabled
   bool   converged{false};       // duration ≈ dt (within tol) → in converging regime
   bool   corner{false};          // any axis rang down af→0 this segment
 };
@@ -107,17 +110,16 @@ class ChunkFollowerSegment {
   const std::array<double, N>& v0() const { return v0_; }
   const std::array<double, N>& a0() const { return a0_; }
 
-  // Predictive convergence gate (Δv capacity): the sacrifice ladder dilates the
-  // TARGET (vf·α, af·α²) to bring |vf − v0| inside the jerk/accel Δv capacity.
-  // Returns the largest α∈(0,1] predicted feasible on all axes, or the smallest
-  // rung if none fit (caller then lets T slip). NOTE: α cannot fix an over-fast
-  // START velocity — that is the forward-safe case below, which needs T-slip.
+  // Predictive alpha gate is intentionally disabled. The old finite rung ladder
+  // diluted target vf/af for acceleration cases, but inverted the braking case:
+  // when |vf| < |v0|, shrinking vf can increase |α·vf - v0| and force α down to
+  // the floor, commanding an even harder brake. Keep the signature and
+  // SegmentSolve.alpha for telemetry compatibility; Ruckig's v/a/j limits plus
+  // minimum_duration=dt are the envelope, and infeasible targets degrade by
+  // duration growth (T-slip).
   double predictAlpha(const BoundarySample<N>& s) const {
-    for (int r = 0; r < guard_.ladder_rungs; ++r) {
-      const double alpha = 1.0 - static_cast<double>(r) / guard_.ladder_rungs;  // 1.0, .66, .33
-      if (dvFeasibleAtAlpha(s, alpha)) return alpha;
-    }
-    return 1.0 / guard_.ladder_rungs;  // most-dilated rung; still may slip
+    (void)s;
+    return 1.0;
   }
 
   // Forward-safe invariant (independent predictor, evaluated at the undilated
@@ -133,8 +135,8 @@ class ChunkFollowerSegment {
     return true;
   }
 
-  // Build the guarded BVP, run the (bounded) sacrifice ladder, solve, and — on
-  // success — CHAIN the start state from the ruckig output at t=dt.
+  // Build the guarded BVP, solve, and — on success — CHAIN the start state from
+  // the ruckig output at t=dt.
   SegmentSolve solve(const BoundarySample<N>& sample) {
     SegmentSolve out;
     if (!have_state_) return out;
@@ -189,8 +191,9 @@ class ChunkFollowerSegment {
     return x > c ? c : (x < -c ? -c : x);
   }
 
-  // Δv-capacity feasibility of a dilated sample on ALL axes (cheap; no ruckig
-  // call). This is what the ladder's α actually addresses.
+  // Legacy Δv-capacity feasibility of a dilated sample on ALL axes (cheap; no
+  // ruckig call). Retained alongside dvCapacity for documentation/debugging; the
+  // production predictive alpha gate no longer calls it.
   bool dvFeasibleAtAlpha(const BoundarySample<N>& s, double alpha) const {
     for (std::size_t d = 0; d < N; ++d) {
       const double vf = alpha * s.vf[d];

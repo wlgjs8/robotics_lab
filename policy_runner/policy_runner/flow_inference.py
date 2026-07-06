@@ -1005,6 +1005,25 @@ class FlowMatchingActionSource:
             limit = self._current_chunk_execute_limit()
             if limit <= 0:
                 return
+            overlay_rows = np.asarray(chunk[:limit], dtype=np.float64)
+            if str(getattr(self, "chunk_stitch_mode", "boundary")) == "ensemble":
+                from .chunk_ensemble import overlay_rows_with_runway
+
+                overlay_rows = overlay_rows_with_runway(
+                    overlay_rows,
+                    scheduler=getattr(self, "_chunk_ensemble", None),
+                    stitch_mode="ensemble",
+                )
+            else:
+                # Boundary runway: publish a few rows past the execute limit so the
+                # servo follower's central-diff never edge-clamps at the tail and a
+                # slightly-late next frame (~1 step of inference/publish skew, ~35ms
+                # measured) coasts on the chunk's own continuation instead of
+                # ring-down. Execution still replans at `limit`; the extra rows are
+                # follower-feed only.
+                extra = min(limit + 4, len(chunk))
+                if extra > limit:
+                    overlay_rows = np.asarray(chunk[:extra], dtype=np.float64)
             projected: dict[str, list[list[float]] | None] = {"left": None, "right": None}
             for arm, idx, sl in self._foh_arm_indices():
                 if len(self.arm_mask) <= idx or self.arm_mask[idx] <= 0.0:
@@ -1034,13 +1053,21 @@ class FlowMatchingActionSource:
                     )
                 cur = measured_anchor
                 arm_points: list[list[float]] = []
-                for i in range(limit):
+                for i in range(int(overlay_rows.shape[0])):
                     delta = np.asarray(
-                        self._condition_arm_delta(arm, chunk[i][sl], step_index=i, update_prev=False),
+                        self._condition_arm_delta(
+                            arm,
+                            overlay_rows[i][sl],
+                            step_index=i,
+                            update_prev=False,
+                        ),
                         dtype=np.float64,
                     )
                     cur = np.asarray(pose_compose_local(cur, delta), dtype=np.float64)
-                    arm_points.append([float(value) for value in cur[:7].tolist()] + [float(chunk[i][grip_index])])
+                    arm_points.append(
+                        [float(value) for value in cur[:7].tolist()]
+                        + [float(overlay_rows[i][grip_index])]
+                    )
                 projected[arm] = arm_points
                 if anchor_mode == "chain":
                     # Record this chunk's chain tail; promoted to the anchor when
@@ -1092,6 +1119,12 @@ class FlowMatchingActionSource:
                 blend_mode=str(getattr(self, "ensemble_blend_mode", "linear")),
             )
             self._chunk_ensemble = sched
+            if not bool(getattr(self, "_chunk_ensemble_runway_echoed", False)):
+                self._chunk_ensemble_runway_echoed = True
+                print(
+                    f"[flow-infer] chunk-stitch-mode=ensemble runway=+{sched.period} rows",
+                    flush=True,
+                )
         return sched
 
     def _ensemble_anchor_fn(self, payload: dict[str, Any]):

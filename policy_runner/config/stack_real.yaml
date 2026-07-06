@@ -123,7 +123,7 @@ umi_dual_cartesian:
   deadband_angular_rad: 0.000
   input_moving_average_window: 8
   tcp_pose_target_conditioning:
-    enable: true
+    enable: false
     mode: foh_se3
     emit_rate_hz: 500
     min_interpolation_horizon_sec: 0.004
@@ -133,7 +133,7 @@ umi_dual_cartesian:
     stop_on_release: true
     stop_on_stale: true
   target_lead_clamp:
-    enable: true
+    enable: false
     # 2026-06-28: 0.060->0.020. The 60mm lead = the UMI arm trailing the operator's
     # hands by ~6cm during teleop (measured lead p50=55 p95=60mm) = the original
     # "goes a direction I didn't command" (executing where hands were 6cm ago).
@@ -143,9 +143,10 @@ umi_dual_cartesian:
     # 2026-06-28: 0.020->0.012 for tighter / more-immediate following (less "ahead" buffer
     # between the commanded target and the robot). vff still supplies the tracking velocity,
     # so this mainly removes the position lead the operator perceives as follow latency.
-    max_target_lead_m: 0.012
+    # max_target_lead_m: 0.012
+    max_target_lead_m: 0.05
     max_target_lead_rad: 0.25
-    rebase_conditioner_on_clamp: true
+    rebase_conditioner_on_clamp: false
   # ---- Pose-frame geometry (paired with pika publisher --pose-frame tip) ----
   # The publisher applies the official pika_sdk tracker→gripper-tip transform
   # (T_raw · Rx(-20°)·[Ry(-90°)·Rx(-90°)] · Trans(0.172, 0, -0.076)): the wire

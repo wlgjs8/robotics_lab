@@ -77,6 +77,12 @@ class _Plan:
             return None
         return self.grips[arm][i0 : i0 + length]
 
+    def available_from(self, wall_start: int, max_length: int) -> int:
+        i0 = wall_start - self.kick_wall
+        if i0 < 0 or i0 >= self.horizon:
+            return 0
+        return max(0, min(int(max_length), self.horizon - i0))
+
 
 class ChunkEnsembleScheduler:
     """Owns the plan chains + window schedule. All indices are POLICY STEPS
@@ -106,6 +112,8 @@ class ChunkEnsembleScheduler:
         self._plans: list[_Plan] = []          # newest LAST; at most 2 kept
         self._pending_kick_wall: int | None = None
         self._window_start = 0                  # wall step of the NEXT window to build
+        self._last_window_start = 0
+        self._last_window_length = 0
         self._plan_tail: dict[str, np.ndarray | None] = {a: None for a in ARMS}
         self._history: dict[str, dict[int, np.ndarray]] = {a: {} for a in ARMS}
         self.first_window_built = False
@@ -195,7 +203,12 @@ class ChunkEnsembleScheduler:
                     if self.blend_mode == "none":
                         break                    # pure newest; no old side
                 else:
-                    old_plan = plan
+                    # A previous plan is a blend partner only over its old-side
+                    # interval [2R..3R). Past that it is runway, used pure only
+                    # when no newer plan covers the window.
+                    i0 = start - plan.kick_wall
+                    if 2 * self.period <= i0 and i0 + length <= 3 * self.period:
+                        old_plan = plan
                     break
         if new_plan is None:
             self.last_window_provenance = "starved"
@@ -238,7 +251,45 @@ class ChunkEnsembleScheduler:
             hist = self._history[arm]
             for key in [k for k in hist if k < floor]:
                 del hist[key]
+        self._last_window_start = start
+        self._last_window_length = length
         self._window_start = start + length
+        return np.asarray(rows, dtype=np.float32)
+
+    def runway_segment(self, length: int | None = None) -> np.ndarray:
+        """Synthetic continuation rows immediately after the last built window.
+
+        The slice is taken from the latest registered plan only. For a steady
+        R-step window starting at wall W this is wall [W+R, W+2R), i.e.
+        latest-plan rows [W+R-kick_wall, W+2R-kick_wall). The scheduler state is
+        not advanced; these rows are for producer-side follower frames.
+        """
+        if not self._plans or self._last_window_length <= 0:
+            return np.zeros((0, 14), dtype=np.float32)
+        requested = self.period if length is None else int(length)
+        if requested <= 0:
+            return np.zeros((0, 14), dtype=np.float32)
+        start = self._last_window_start + self._last_window_length
+        latest = self._plans[-1]
+        available = latest.available_from(start, requested)
+        if available <= 0:
+            return np.zeros((0, 14), dtype=np.float32)
+
+        rows = [np.zeros(14, dtype=np.float64) for _ in range(available)]
+        for arm in ARMS:
+            i0 = start - latest.kick_wall
+            seg = latest.abs_targets[arm][i0 : i0 + available]
+            grip = latest.grips[arm][i0 : i0 + available]
+            prev = self._plan_tail[arm]
+            if prev is None:
+                prev = latest.anchors[arm]
+            sl = _ARM_SLICES[arm]
+            gi = _ARM_GRIP[arm]
+            for j in range(available):
+                target = np.asarray(seg[j], dtype=np.float64)
+                rows[j][sl] = np.asarray(pose_delta_local(prev, target), dtype=np.float64)
+                rows[j][gi] = float(grip[j])
+                prev = target
         return np.asarray(rows, dtype=np.float32)
 
     # ------------------------------------------------------------- telemetry
@@ -248,3 +299,20 @@ class ChunkEnsembleScheduler:
 
     def plan_tail_pose(self, arm: str) -> np.ndarray | None:
         return self._plan_tail[arm]
+
+
+def overlay_rows_with_runway(
+    window_rows: np.ndarray,
+    *,
+    scheduler: ChunkEnsembleScheduler | None,
+    stitch_mode: str,
+) -> np.ndarray:
+    rows = np.asarray(window_rows)
+    if str(stitch_mode) != "ensemble" or scheduler is None:
+        return rows
+    if rows.shape[0] > scheduler.period:
+        return rows
+    runway = np.asarray(scheduler.runway_segment(), dtype=rows.dtype)
+    if runway.size <= 0:
+        return rows
+    return np.concatenate([rows, runway], axis=0)

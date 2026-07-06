@@ -602,7 +602,8 @@ cartesian_control:
         natural_frequency_linear_hz: 2.0
         natural_frequency_angular_hz: 2.0
         velocity_feedforward: true
-        max_linear_velocity_m_s: 1.20
+        # max_linear_velocity_m_s: 1.20
+        max_linear_velocity_m_s: 0.30
         max_linear_accel_m_s2: 2.50
         max_angular_velocity_rad_s: 2.00
         max_angular_accel_rad_s2: 5.00
@@ -661,17 +662,20 @@ cartesian_control:
       # ~ 0.0056 m/s per step at j=20); raise only on real-run evidence.
       ruckig_follower:
         enable: true
-        max_linear_velocity_m_s: 0.6 #0.3
-        max_linear_accel_m_s2: 3.0
-        max_linear_jerk_m_s3: 100.0 #5.0
-        max_angular_velocity_rad_s: 1.50
-        max_angular_accel_rad_s2: 10.0 #8.0 #2.0
-        max_angular_jerk_rad_s3: 300.0 #120.0 #3.0
+        # 2026-07-06 밤: SPEED_SCALE 1.5 대응 — dt 33.4→22.3ms에서 per-세그먼트 Δv/Δω
+        # 예산(∝ j·dt²)이 보존되도록 jerk ×(33.4/22.3)²≈2.25, accel ×1.5, vel ×1.5.
+        # scale 1.0에서도 그냥 여유가 늘어날 뿐(무해). 하드 안전망은 관절 클램프.
+        max_linear_velocity_m_s: 0.9 #0.6 #0.3
+        max_linear_accel_m_s2: 12.0 #8.0 #3.0
+        max_linear_jerk_m_s3: 225.0 #100.0 #5.0
+        max_angular_velocity_rad_s: 2.0 #1.50
+        max_angular_accel_rad_s2: 15.0 #10.0 #8.0 #2.0
+        max_angular_jerk_rad_s3: 675.0 #300.0 #120.0 #3.0
         discard_head_steps: 0     # producer re-anchors each chunk to measured TCP: latency already absorbed
-        consume_steps: 12         # preempt preference (clamped to horizon-L-R; tail-consume covers late chunks)
+        consume_steps: 6          # consume only window rows; rows 6-11 are runway neighbors + late-frame coast
         reserve_steps: 1
         smoothing_window: 3
-        af_damping_beta: 0.2
+        af_damping_beta: 1.0 #0.2  # P3: honest central-diff curvature; clampAbs(af, a_max) bounds it (beta<1 = per-waypoint micro-brake)
         chunk_feed_timeout_sec: 1.5
         fallback_policy: "fault"     # strict: no silent SMD fallback; cold start holds, loss latches ChunkFollowerFault (ResetFault to recover)
         engage_timeout_sec: 3.0      # max wait for the first chunk frame before faulting (fault policy only)

@@ -57,6 +57,46 @@ static bool poseNear(const Pose6D& a, const Pose6D& b, double pos_tol, double an
          rb_servo::math::orientationDistanceRad(a, b) < ang_tol;
 }
 
+static Pose6D poseWithXAndYaw(double x, double yaw_rad) {
+  Pose6D p;
+  p.x = x;
+  p.y = 0.0;
+  p.z = 0.2;
+  p.quaternion_xyzw =
+      std::array<double, 4>{0.0, 0.0, std::sin(yaw_rad / 2), std::cos(yaw_rad / 2)};
+  return p;
+}
+
+static ChunkFrame makeLinearReverseFrame(double x_mid) {
+  ChunkFrame f;
+  f.policy_dt = SEG;
+  f.pose.assign(6, poseWithXAndYaw(0.0, 0.0));
+  f.pose[1] = poseWithXAndYaw(x_mid, 0.0);
+  f.grip.assign(f.pose.size(), 20.0);
+  return f;
+}
+
+static ChunkFrame makeAngularReverseFrame(double yaw_mid) {
+  ChunkFrame f;
+  f.policy_dt = SEG;
+  f.pose.assign(6, poseWithXAndYaw(0.0, 0.0));
+  f.pose[1] = poseWithXAndYaw(0.0, yaw_mid);
+  f.grip.assign(f.pose.size(), 20.0);
+  return f;
+}
+
+static bool firstSegmentCorner(const CartesianChunkFollowerConfig& cfg,
+                               const ChunkFrame& frame,
+                               bool* solved) {
+  CartesianChunkFollower f(cfg);
+  f.submitFrame(frame, frame.pose[static_cast<std::size_t>(cfg.window.discard_head_L)]);
+  f.tick(TICK);
+  if (solved) {
+    *solved = f.diag().last_solve.result == ruckig::Result::Working;
+  }
+  return f.diag().last_solve.corner;
+}
+
 int main() {
   CartesianChunkFollowerConfig cfg;
   cfg.window = {/*L*/ 2, /*C*/ 10, /*R*/ 2, /*smooth*/ 3};
@@ -185,6 +225,34 @@ int main() {
     check(f.diag().segments == segments_before + 1, "reanchor forces a fresh segment solve");
     check(f.diag().seg_step_index == static_cast<int>(index_before),
           "fresh segment uses unchanged window index");
+  }
+
+  // -- Test 6: corner sign deadbands ignore encoder-noise reversals. ----------
+  std::printf("Test 6: corner deadband\n");
+  {
+    CartesianChunkFollowerConfig deadband_cfg;
+    deadband_cfg.window = {/*L*/ 1, /*C*/ 3, /*R*/ 1, /*smooth*/ 1};
+
+    bool solved = false;
+    const bool linear_sub =
+        firstSegmentCorner(deadband_cfg, makeLinearReverseFrame(2.0e-4), &solved);
+    check(solved, "linear sub-threshold reversal segment solves");
+    check(!linear_sub, "linear reversal below 3e-4 m is not a corner");
+
+    const bool linear_supra =
+        firstSegmentCorner(deadband_cfg, makeLinearReverseFrame(4.0e-4), &solved);
+    check(solved, "linear supra-threshold reversal segment solves");
+    check(linear_supra, "linear reversal above 3e-4 m is a corner");
+
+    const bool angular_sub =
+        firstSegmentCorner(deadband_cfg, makeAngularReverseFrame(4.0e-4), &solved);
+    check(solved, "angular sub-threshold reversal segment solves");
+    check(!angular_sub, "angular reversal below 5e-4 rad is not a corner");
+
+    const bool angular_supra =
+        firstSegmentCorner(deadband_cfg, makeAngularReverseFrame(6.0e-4), &solved);
+    check(solved, "angular supra-threshold reversal segment solves");
+    check(angular_supra, "angular reversal above 5e-4 rad is a corner");
   }
 
   std::printf("\n=== %s (%d failure%s) ===\n",

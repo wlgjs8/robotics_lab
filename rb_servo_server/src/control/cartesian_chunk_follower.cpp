@@ -16,7 +16,7 @@ std::array<AxisLimit, 6> makeLimits(const CartesianChunkFollowerConfig& cfg) {
 
 Eigen::Vector3d positionOf(const Pose6D& p) { return {p.x, p.y, p.z}; }
 
-int sgn(double x) { return (x > 1e-12) - (x < -1e-12); }
+int sgn(double x, double deadband) { return (x > deadband) - (x < -deadband); }
 
 int flankIndex(std::size_t k, int off, std::size_t n) {
   return std::clamp(static_cast<int>(k) + off, 0, static_cast<int>(n) - 1);
@@ -154,8 +154,11 @@ BoundarySample<6> CartesianChunkFollower::buildSample(std::size_t k) const {
     s.pf[a] = vk[a];
     s.vf[a] = (d_k + d_kp1) / (2 * dt);
     s.af[a] = (d_kp1 - d_k) / (dt * dt);
-    s.sign_dk[a] = sgn(d_k);
-    s.sign_dkp1[a] = sgn(d_kp1);
+    const double deadband =
+        std::max(0.0, a < 3 ? cfg_.guard.corner_deadband_lin_m
+                            : cfg_.guard.corner_deadband_ang_rad);
+    s.sign_dk[a] = sgn(d_k, deadband);
+    s.sign_dkp1[a] = sgn(d_kp1, deadband);
   }
   return s;
 }
