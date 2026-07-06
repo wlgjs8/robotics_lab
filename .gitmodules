@@ -1,0 +1,3 @@
+[submodule "submodules/Fast-FoundationStereo"]
+	path = submodules/Fast-FoundationStereo
+	url = https://github.com/wlgjs8/Fast-FoundationStereo.git
