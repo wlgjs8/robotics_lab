@@ -68,25 +68,38 @@ def wrist_cloud(depth, color, zmin=0.05, zmax=1.2, stride=2):
     return P.astype(np.float32), col[valid].astype(np.uint8)
 
 
-def color_cloud(disp, color_img, K, baseline, calib, dmin=0.1, dmax=3.0, T_sc=None, roi=None):
+_MESHGRID_CACHE = {}   # (H,W,stride) -> (uu,vv) 픽셀좌표 (매 프레임 meshgrid 재생성 회피)
+
+
+def color_cloud(disp, color_img, K, baseline, calib, dmin=0.1, dmax=3.0, T_sc=None, roi=None, stride=1):
     """disp(IR-left) -> 3D점(IR 프레임) + color 재투영 RGB. T_sc+roi를 주면 stand-ROI로 먼저
-    추려 그 subset만 재투영한다(전체 organized 921k 재투영 회피 + ROI-clip 일체화)."""
+    추려 그 subset만 재투영한다(전체 organized 921k 재투영 회피 + ROI-clip 일체화).
+    stride>1: 픽셀을 stride 간격으로 솎아 계산량↓(발행은 30k cap이라 viz 품질 동일).
+    B: meshgrid를 (shape,stride)별로 캐시하고, valid 점만 stand로 변환(ROI-후-변환)."""
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
     H, W = disp.shape
-    uu, vv = np.meshgrid(np.arange(W), np.arange(H))
+    if stride > 1:
+        disp = disp[::stride, ::stride]
+    key = (H, W, int(stride))
+    uv = _MESHGRID_CACHE.get(key)
+    if uv is None:
+        uu, vv = np.meshgrid(np.arange(0, W, stride, dtype=np.float32),
+                             np.arange(0, H, stride, dtype=np.float32))
+        _MESHGRID_CACHE[key] = (uu, vv)
+    else:
+        uu, vv = uv
     with np.errstate(divide="ignore", invalid="ignore"):
         z = fx * baseline / disp
     valid = np.isfinite(z) & (z >= dmin) & (z <= dmax)
-    X = (uu - cx) / fx * z; Y = (vv - cy) / fy * z
-    P = np.stack([X, Y, z], -1)                       # IR-left 프레임 (organized)
-    sel = valid
-    if T_sc is not None and roi is not None:          # stand-ROI로 먼저 추림 → 재투영 점 수↓
-        Ps = P @ T_sc[:3, :3].T + T_sc[:3, 3]
+    zf = z[valid]; uf = uu[valid]; vf = vv[valid]     # valid subset (flat)
+    Pf = np.stack([(uf - cx) / fx * zf, (vf - cy) / fy * zf, zf], -1)  # (K,3) IR
+    if T_sc is not None and roi is not None:          # ROI-후-변환: valid 점만 stand 변환
+        Ps = Pf @ T_sc[:3, :3].T + T_sc[:3, 3]
         (rx, ry, rz) = roi
-        sel = (valid & (Ps[..., 0] >= rx[0]) & (Ps[..., 0] <= rx[1]) &
-               (Ps[..., 1] >= ry[0]) & (Ps[..., 1] <= ry[1]) &
-               (Ps[..., 2] >= rz[0]) & (Ps[..., 2] <= rz[1]))
-    Pf = P[sel]                                       # (K,3) IR — 이 subset만 color 재투영
+        sel = ((Ps[:, 0] >= rx[0]) & (Ps[:, 0] <= rx[1]) &
+               (Ps[:, 1] >= ry[0]) & (Ps[:, 1] <= ry[1]) &
+               (Ps[:, 2] >= rz[0]) & (Ps[:, 2] <= rz[1]))
+        Pf = Pf[sel]                                  # 이 subset만 color 재투영
     if len(Pf) == 0:
         return Pf.astype(np.float32), np.empty((0, 3), np.uint8)
     Pc = Pf @ calib["R"].T + calib["t"]               # color 프레임
@@ -423,6 +436,11 @@ def cmd_run(args):
     last_proc_t = 0.0
     if head_hz > 0.0:
         print(f"[run] full-frame rate cap: {head_hz:.1f} Hz (STEREO_HEAD_HZ)", flush=True)
+    # A: burst가 아닐 때 head 클라우드를 stride로 솎아 계산량↓ (full 416k는 burst의 detect 공유용
+    # 으로만 필요하고, 평상시 발행은 30k cap이라 viz 품질 동일). burst 중엔 stride=1(full).
+    idle_stride = max(1, int(os.environ.get("STEREO_IDLE_STRIDE", "2")))
+    if idle_stride > 1:
+        print(f"[run] idle cloud stride: {idle_stride} (STEREO_IDLE_STRIDE; burst 중엔 1=full)", flush=True)
     while True:
         _t = time.perf_counter()
         frames = reader.poll(want, timeout_ms=500)
@@ -446,10 +464,12 @@ def cmd_run(args):
         roi_cloud = effective_clip_roi(detector) if roi_clip_on else None
         cloud_clipped = False
         if calib is not None and col is not None:
-            # color_cloud에 T_sc+roi를 주면 ROI subset만 재투영(+ROI clip 일체화)
+            # color_cloud에 T_sc+roi를 주면 ROI subset만 재투영(+ROI clip 일체화). burst 중에만
+            # full(stride=1) — detect가 이 클라우드를 공유하므로. 평상시엔 idle_stride로 솎음.
+            cloud_stride = 1 if phase == "burst" else idle_stride
             xyz, rgb = color_cloud(disp, col.pixels, K, baseline, calib, dmin=0.1, dmax=args.zfar,
                                    T_sc=(detector._T_sc if roi_cloud is not None else None),
-                                   roi=roi_cloud)
+                                   roi=roi_cloud, stride=cloud_stride)
             cloud_clipped = roi_cloud is not None
             if not warned_rgb:
                 print("[run] RGB 매핑 ON (color->IR 재투영)", flush=True); warned_rgb = True
@@ -458,6 +478,9 @@ def cmd_run(args):
             if not warned_rgb:
                 print(f"[run] IR 명암 사용 (calib={calib is not None}, color={col is not None})", flush=True)
                 warned_rgb = True
+        # detect와 공유할 head 클라우드(IR 프레임, color 경로일 때만). detect가 이걸 stand로만
+        # 변환해 재계산을 피한다(중복 제거). IR-명암 경로는 색이 없어 공유 안 함(None).
+        head_share_xyz = xyz if (calib is not None and col is not None) else None
         if xyz.shape[0] == 0:
             continue  # 유효 점 없음(예: fp16 NaN/범위밖) -> publish/통계 건너뜀
         if roi_clip_on and not cloud_clipped:            # 아직 안 잘린 경로(IR 등)만 클립
@@ -533,7 +556,8 @@ def cmd_run(args):
             try:
                 if phase == "burst":
                     raw = detector.detect(disp, color_img=(col.pixels if col is not None else None),
-                                          extra_xyz=extra_xyz, extra_rgb=extra_rgb)
+                                          extra_xyz=extra_xyz, extra_rgb=extra_rgb,
+                                          head_xyz_ir=head_share_xyz, head_rgb=rgb)
                     targeted = [d for d in raw if d.get("label") in burst_labels]
                     candidates = burst_tracker.update(targeted) if burst_tracker is not None else targeted
                     for cand in candidates:

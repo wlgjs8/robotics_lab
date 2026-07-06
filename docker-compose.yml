@@ -57,6 +57,8 @@ services:
       STEREO_COMMAND_ENDPOINT: ${STEREO_COMMAND_ENDPOINT:-127.0.0.1:50256}
       # CPU 경량화 튜닝(호스트 env로 오버라이드). HEAD_HZ=0은 매 프레임(캡처율).
       STEREO_HEAD_HZ: ${STEREO_HEAD_HZ:-0}
+      STEREO_IDLE_STRIDE: ${STEREO_IDLE_STRIDE:-2}         # burst 아닐 때 head 클라우드 픽셀 stride(계산량↓)
+      STEREO_DETECT_PROFILE: ${STEREO_DETECT_PROFILE:-0}   # 1=박스 detect 단계별 ms 로그
       STEREO_TORCH_THREADS: ${STEREO_TORCH_THREADS:-2}
       # numpy/OpenBLAS/OMP 스레드 상한(cloud 재투영의 코어 확산 억제). 최대 레버:
       # 기본 2면 CPU ~305%->~119% (fps 손실 0, 전체율 6.5fps 유지). 0/빈값=제한 없음.

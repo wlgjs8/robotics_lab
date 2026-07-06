@@ -226,6 +226,7 @@ class BoxDetector:
         self._prev_pose = {}                           # label -> 직전 ICP 포즈(temporal init)
         self._last_plane = None                        # 직전 양호 테이블 평면(가림 시 fallback)
         self._prof = {}                                # detect 내부 단계 wall-time 누적(STEREO_PROFILE)
+        self._profile_on = os.environ.get("STEREO_DETECT_PROFILE", "0") != "0"
         self._calib = _load_color_calib(COLOR_CALIB_PATH)
         self._cfg_t = 0.0
         self._rng = np.random.default_rng(0)
@@ -421,7 +422,7 @@ class BoxDetector:
         tree = cKDTree(Mw)
         S = s.copy(); Tacc = np.eye(4); rmse = float("nan"); inl = 1.0
         for _ in range(self.ICP_ITERS):
-            d, j = tree.query(S)
+            d, j = tree.query(S, workers=-1)   # NN query 병렬화(멀티코어). pose 정확도 무손실
             thr = np.quantile(d, self.ICP_TRIM); m = d <= thr
             inl = float(m.mean()); rmse = float(np.sqrt(float((d[m] ** 2).mean())))
             sp, dp = S[m, :2], Mw[j[m], :2]
@@ -596,7 +597,8 @@ class BoxDetector:
                     rmse=(None if rmse is None or not np.isfinite(rmse) else round(float(rmse), 5)),
                     icp_method=method, label=label)
 
-    def detect(self, disp, color_img=None, extra_xyz=None, extra_rgb=None):
+    def detect(self, disp, color_img=None, extra_xyz=None, extra_rgb=None,
+               head_xyz_ir=None, head_rgb=None):
         """결합 클라우드(head disp + 손목 stand 점) 박스 검출. head·손목을 **먼저 합쳐서**
         게이트/평면/band/색분할/검출을 결합 기준으로 수행 → 로봇이 head를 가려도 손목 점으로
         검출이 이어진다. 손목 점(extra_xyz/rgb)은 worker가 T_stand_tcp×hand-eye로 stand에
@@ -604,25 +606,38 @@ class BoxDetector:
         if cv2 is None:
             return []
         now = time.time(); self._reload_cfg(now)
-        _t = time.perf_counter()
-        Pc, valid = self._cam_points(disp)                       # 카메라 프레임 organized
-        Ps = Pc @ self._T_sc[:3, :3].T + self._T_sc[:3, 3]       # stand 프레임
-        inroi = ((Ps[..., 0] > self._roi_x[0]) & (Ps[..., 0] < self._roi_x[1]) &
-                 (Ps[..., 1] > self._roi_y[0]) & (Ps[..., 1] < self._roi_y[1]))
-        if self._z_cap is not None:                  # perception 전용 stand-Z 점 상한
-            inroi = inroi & (Ps[..., 2] < self._z_cap)
-
-        # --- head + 손목 결합 클라우드 (RoI/zcap 필터된 stand 점) ---
-        # 색 재투영(_organized_rgb)은 비싸므로 전체 organized(921k)가 아니라 ROI 후보
-        # subset(~수만 점)에만 적용한다(전처리 시간 대폭 단축).
-        pre = valid & inroi
-        P = Ps[pre]                                  # (K,3) stand (ROI 내 유효 head 점)
+        self._prof = {}
+        _t_all = time.perf_counter()
+        _t = _t_all
         have_color = color_img is not None and self._calib is not None
-        if have_color:
-            C, cok = self._organized_rgb(Pc[pre], color_img, self._calib)  # K점만 재투영
-            P = P[cok]; C = C[cok]
+        if head_xyz_ir is not None and have_color:
+            # ── ①클라우드 공유: worker가 매 프레임 만드는 head 클라우드(IR 프레임, ROI∩color-valid)를
+            # 재사용해 _cam_points(921k division)+전체 stand 변환+_organized_rgb를 통째로 스킵.
+            # 넘어온 ROI subset(~수만 점)만 stand로 변환한다(점이 동일하므로 품질 무손실). ──
+            P = np.asarray(head_xyz_ir, np.float64) @ self._T_sc[:3, :3].T + self._T_sc[:3, 3]
+            C = np.asarray(head_rgb)
+            m = ((P[:, 0] > self._roi_x[0]) & (P[:, 0] < self._roi_x[1]) &
+                 (P[:, 1] > self._roi_y[0]) & (P[:, 1] < self._roi_y[1]))
+            if self._z_cap is not None:              # detect 고유 ROI/zcap을 subset에 재적용
+                m = m & (P[:, 2] < self._z_cap)
+            P = P[m]; C = C[m]
         else:
-            C = None
+            # ── 폴백(공유 없음): 직접 계산. ②ROI-후-변환 — valid 점만 stand로 옮겨(전체 921k GEMM 회피)
+            # ROI로 추린 뒤 그 subset만 색 재투영. 결과 점 집합은 기존과 동일. ──
+            Pc, valid = self._cam_points(disp)                       # 카메라 프레임 organized
+            Pcv = Pc[valid]                                          # valid subset (flat, 카메라 프레임)
+            Psv = Pcv @ self._T_sc[:3, :3].T + self._T_sc[:3, 3]     # valid 점만 stand 변환
+            inroi = ((Psv[:, 0] > self._roi_x[0]) & (Psv[:, 0] < self._roi_x[1]) &
+                     (Psv[:, 1] > self._roi_y[0]) & (Psv[:, 1] < self._roi_y[1]))
+            if self._z_cap is not None:              # perception 전용 stand-Z 점 상한
+                inroi = inroi & (Psv[:, 2] < self._z_cap)
+            P = Psv[inroi]
+            if have_color:
+                C, cok = self._organized_rgb(Pcv[inroi], color_img, self._calib)  # ROI subset만 재투영
+                P = P[cok]; C = C[cok]
+            else:
+                C = None
+        _t = self._pt("cloud", _t)
         if extra_xyz is not None and len(extra_xyz) > 0:
             ex = np.asarray(extra_xyz, dtype=np.float64)
             inb = ((ex[:, 0] > self._roi_x[0]) & (ex[:, 0] < self._roi_x[1]) &
@@ -692,6 +707,11 @@ class BoxDetector:
             if gr:
                 out.append(gr)
         self._pt("gray", _t)
+        if self._profile_on:
+            tot = (time.perf_counter() - _t_all) * 1000.0
+            parts = " ".join(f"{k.strip()}={v*1000:.1f}" for k, v in self._prof.items())
+            print(f"[detect] total={tot:.1f}ms  [{parts}]  "
+                  f"green_pts={int(is_green.sum())} keep_pts={int(keep.sum())} out={len(out)}", flush=True)
         return out
 
 
