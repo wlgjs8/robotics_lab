@@ -25,7 +25,8 @@ struct ChunkFrame {
   std::vector<Pose6D> pose;      // absolute stand-frame waypoints
   std::vector<double> grip;      // per-waypoint gripper target (producer units)
   double policy_dt{1.0 / 30.0};  // per-step wall clock
-  std::uint64_t seq{0};
+  std::uint64_t wire_seq{0};     // producer packet seq / flow chunk id
+  std::uint64_t recv_seq{0};     // receiver-local accepted-frame count
   double recv_time{0.0};         // servo receive-time stamp (feed-liveness)
 };
 
@@ -67,7 +68,8 @@ class ChunkWindow {
   double gripAt(std::size_t k) const;
 
   double policyDt() const { return dt_; }
-  std::uint64_t seq() const { return seq_; }
+  std::uint64_t wireSeq() const { return wire_seq_; }
+  std::uint64_t recvSeq() const { return recv_seq_; }
   double recvTime() const { return recv_; }
   int consumed() const { return consumed_; }
   int consumeBudget() const { return consume_eff_; }
@@ -78,7 +80,8 @@ class ChunkWindow {
   std::vector<Pose6D> pose_;   // smoothed absolute waypoints
   std::vector<double> grip_;
   double dt_{1.0 / 30.0};
-  std::uint64_t seq_{0};
+  std::uint64_t wire_seq_{0};
+  std::uint64_t recv_seq_{0};
   double recv_{0.0};
   std::size_t k_{0};           // current consumed absolute index
   int consumed_{0};

@@ -12,8 +12,8 @@ PYTHON_BIN="${FLOW_INFER_PYTHON:-${PYTHON:-python3}}"
 CHECKPOINT="${FLOW_INFER_CHECKPOINT:-openpi://127.0.0.1:8000}"
 CONFIG="${FLOW_INFER_CONFIG:-policy_runner/config/flow_real_realsense.yaml}"
 ACTION_HORIZON="${FLOW_INFER_ACTION_HORIZON:-24}"
-CHUNK_EXECUTE_STEPS="${FLOW_INFER_CHUNK_EXECUTE_STEPS:-24}"
-SPEED_SCALE="${FLOW_INFER_SPEED_SCALE:-2.0}"
+CHUNK_EXECUTE_STEPS="${FLOW_INFER_CHUNK_EXECUTE_STEPS:-12}"
+SPEED_SCALE="${FLOW_INFER_SPEED_SCALE:-1.0}"
 CHUNK_CROSSFADE_STEPS="${FLOW_INFER_CHUNK_CROSSFADE_STEPS:-2}"
 TCP_REANCHOR_MODE="${FLOW_INFER_TCP_REANCHOR_MODE:-measured_blend}"
 TCP_BLEND_STEPS="${FLOW_INFER_TCP_BLEND_STEPS:-8}"
@@ -109,7 +109,8 @@ fi
 #             H >= 3R. Inference cadence doubles vs boundary mode (budget = R
 #             steps ~ R*33ms) — check PRINT_CHUNK latency first. RTC optional
 #             on top (FLOW_INFER_RTC=1 adds flow-level consistency inpainting).
-STITCH_MODE="${FLOW_INFER_STITCH:-boundary}"
+# STITCH_MODE="${FLOW_INFER_STITCH:-boundary}"
+STITCH_MODE="${FLOW_INFER_STITCH:-ensemble}"
 if [ "$STITCH_MODE" != "boundary" ]; then
   ENSEMBLE_PERIOD="${FLOW_INFER_ENSEMBLE_PERIOD:-6}"
   # FLOW_INFER_ENSEMBLE_BLEND: linear (lerp old/new over the window) | none
@@ -128,7 +129,8 @@ fi
 #              pose history, decoupled from replan cadence + inference latency (matches the
 #              training 30 Hz per-frame delta regardless of the controller).
 # Set FLOW_INFER_VELPROPRIO_SAMPLE=fixed_step to isolate the controller from the proprio.
-VELPROPRIO_SAMPLE="${FLOW_INFER_VELPROPRIO_SAMPLE:-replan}"
+# VELPROPRIO_SAMPLE="${FLOW_INFER_VELPROPRIO_SAMPLE:-replan}"
+VELPROPRIO_SAMPLE="${FLOW_INFER_VELPROPRIO_SAMPLE:-fixed_step}"
 VELPROPRIO_ARGS=()
 if [ "$VELPROPRIO_SAMPLE" != "replan" ]; then
   VELPROPRIO_ARGS+=(--velproprio-sample-mode "$VELPROPRIO_SAMPLE")

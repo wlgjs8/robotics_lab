@@ -592,8 +592,10 @@ private:
     control::CartesianChunkFollower right_chunk_follower_{control::CartesianChunkFollowerConfig{}};
     RuckigFollowerConfig left_chunk_follower_built_{};
     RuckigFollowerConfig right_chunk_follower_built_{};
-    std::uint64_t left_chunk_submitted_seq_ = 0;
-    std::uint64_t right_chunk_submitted_seq_ = 0;
+    std::uint64_t left_chunk_submitted_wire_seq_ = 0;
+    std::uint64_t left_chunk_submitted_recv_seq_ = 0;
+    std::uint64_t right_chunk_submitted_wire_seq_ = 0;
+    std::uint64_t right_chunk_submitted_recv_seq_ = 0;
     bool left_chunk_engage_waiting_ = false;
     bool right_chunk_engage_waiting_ = false;
     double left_chunk_engage_wait_start_sec_ = 0.0;
@@ -607,7 +609,7 @@ private:
     ChunkFollowerFaultRequest right_chunk_follower_fault_request_;
     ChunkFrameReceiver* chunk_frame_receiver_ = nullptr;
     ChunkFrameReceiver::Frame chunk_frame_cache_{};
-    std::uint64_t chunk_frame_cache_seq_ = 0;
+    std::uint64_t chunk_frame_cache_recv_seq_ = 0;
     uint64_t last_chunk_follower_log_ns_ = 0;
     // Copy the newest chunk frame out of the receiver (at most one copy per
     // frame; try_lock, allocation-free). Called once per tick before the
@@ -623,7 +625,8 @@ private:
         const TcpPoseTargetProfileConfig& profile,
         control::CartesianChunkFollower* follower,
         RuckigFollowerConfig* built_cfg,
-        std::uint64_t* submitted_seq,
+        std::uint64_t* submitted_wire_seq,
+        std::uint64_t* submitted_recv_seq,
         SmdPoseTracker* smd_tracker,
         const ArmMountConfig& mount,
         const JointArray& previous_sent_q_deg,
@@ -652,7 +655,8 @@ private:
         // Ruckig chunk-follower stage telemetry (captured in
         // applyChunkFollowerStage each tick; merged into cartesian_solve).
         bool follower_active = false;
-        std::uint64_t follower_seq = 0;
+        std::uint64_t follower_wire_seq = 0;
+        std::uint64_t follower_recv_seq = 0;
         int follower_step = -1;
         double follower_t_in_seg_sec = 0.0;
         double follower_duration_sec = 0.0;
@@ -661,6 +665,9 @@ private:
         bool follower_stall = false;
         bool follower_corner = false;
         std::optional<Pose6D> follower_pf_stand;
+        std::optional<Pose6D> stage_tcp_target_stand;
+        double follower_divergence_pos_m = 0.0;
+        double follower_divergence_ang_rad = 0.0;
     };
     AbcTelemetry left_abc_telemetry_;
     AbcTelemetry right_abc_telemetry_;

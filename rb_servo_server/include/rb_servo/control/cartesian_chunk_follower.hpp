@@ -38,7 +38,8 @@ struct FollowerDiag {
   // this segment is driving toward, as an absolute stand pose, plus indices.
   Pose6D seg_target_stand{};
   int seg_step_index{-1};        // absolute chunk index (-1 = ring-down/no data)
-  std::uint64_t seg_seq{0};      // receiver seq of the window that produced it
+  std::uint64_t seg_wire_seq{0}; // producer packet seq / flow chunk id
+  std::uint64_t seg_recv_seq{0}; // receiver-local accepted-frame count
 };
 
 class CartesianChunkFollower {

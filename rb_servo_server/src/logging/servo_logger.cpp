@@ -96,11 +96,13 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_smd_goal_angular_velocity_norm_rad_s"
        << ',' << side << "_smd_reanchor_count";
     // Ruckig chunk-follower stage: the active segment's chunk-step target pose
-    // (pf) plus window/solve state — join against command_tcp_target_stand /
-    // tcp_command_stand / tcp_actual_stand on the same row for offline analysis.
+    // (pf), final stage output pose handed to IK, explicit producer/receiver
+    // sequence ids, and divergence-guard inputs.
     writePoseHeader(os, side, "follower_pf_stand");
+    writePoseHeader(os, side, "stage_tcp_target_stand");
     os << ',' << side << "_follower_active"
-       << ',' << side << "_follower_seq"
+       << ',' << side << "_follower_wire_seq"
+       << ',' << side << "_follower_recv_seq"
        << ',' << side << "_follower_step"
        << ',' << side << "_follower_t_in_seg_sec"
        << ',' << side << "_follower_duration_sec"
@@ -108,6 +110,8 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_follower_converged"
        << ',' << side << "_follower_stall"
        << ',' << side << "_follower_corner"
+       << ',' << side << "_follower_divergence_pos_m"
+       << ',' << side << "_follower_divergence_ang_rad"
        << ',' << side << "_output_ma_present"
        << ',' << side << "_output_ma_window";
     writeJointArrayHeader(os, side, "q_target_before_output_ma");
@@ -475,8 +479,10 @@ void writeArmProfilingColumns(
        << ',' << telemetry.smd_goal_angular_velocity_norm_rad_s
        << ',' << telemetry.smd_reanchor_count;
     writePoseColumns(os, telemetry.follower_pf_stand);
+    writePoseColumns(os, telemetry.stage_tcp_target_stand);
     os << ',' << telemetry.follower_active
-       << ',' << telemetry.follower_seq
+       << ',' << telemetry.follower_wire_seq
+       << ',' << telemetry.follower_recv_seq
        << ',' << telemetry.follower_step
        << ',' << telemetry.follower_t_in_seg_sec
        << ',' << telemetry.follower_duration_sec
@@ -484,6 +490,8 @@ void writeArmProfilingColumns(
        << ',' << telemetry.follower_converged
        << ',' << telemetry.follower_stall
        << ',' << telemetry.follower_corner
+       << ',' << telemetry.follower_divergence_pos_m
+       << ',' << telemetry.follower_divergence_ang_rad
        << ',' << telemetry.output_ma_present
        << ',' << telemetry.output_ma_window;
     if (telemetry.output_ma_present) {

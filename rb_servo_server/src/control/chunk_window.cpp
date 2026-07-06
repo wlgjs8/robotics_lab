@@ -81,7 +81,8 @@ bool ChunkWindow::activate(const ChunkFrame& frame) {
   grip_ = frame.grip;
   grip_.resize(n, grip_.empty() ? 0.0 : grip_.back());
   dt_ = frame.policy_dt > 1e-6 ? frame.policy_dt : (1.0 / 30.0);
-  seq_ = frame.seq;
+  wire_seq_ = frame.wire_seq;
+  recv_seq_ = frame.recv_seq;
   recv_ = frame.recv_time;
   k_ = static_cast<std::size_t>(L);
   consumed_ = 0;

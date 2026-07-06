@@ -668,8 +668,8 @@ cartesian_control:
         discard_head_steps: 0     # producer re-anchors each chunk to measured TCP: latency already absorbed
         consume_steps: 12         # preempt preference (clamped to horizon-L-R; tail-consume covers late chunks)
         reserve_steps: 1
-        smoothing_window: 1
-        af_damping_beta: 0.5
+        smoothing_window: 3
+        af_damping_beta: 0.2
         chunk_feed_timeout_sec: 1.5
         fallback_policy: "fault"     # strict: no silent SMD fallback; cold start holds, loss latches ChunkFollowerFault (ResetFault to recover)
         engage_timeout_sec: 3.0      # max wait for the first chunk frame before faulting (fault policy only)

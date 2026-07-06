@@ -416,7 +416,8 @@ struct CartesianSolveTelemetry {
     // command_tcp_target_stand (raw producer command), tcp_command_stand
     // (emitted setpoint) and tcp_actual_stand (measured) on the same row.
     bool follower_active = false;
-    uint64_t follower_seq = 0;          // receiver seq of the active chunk window
+    uint64_t follower_wire_seq = 0;     // producer packet seq / flow chunk id
+    uint64_t follower_recv_seq = 0;     // receiver-local accepted-frame count
     int follower_step = -1;             // absolute chunk index of the segment target
     double follower_t_in_seg_sec = 0.0; // time into the current 33ms segment
     double follower_duration_sec = 0.0; // ruckig T_opt of the segment (>= policy_dt)
@@ -425,6 +426,9 @@ struct CartesianSolveTelemetry {
     bool follower_stall = false;        // ring-down (window exhausted, no fresh chunk)
     bool follower_corner = false;       // corner ring-down fired on some axis
     std::optional<Pose6D> follower_pf_stand;  // active segment target pose
+    std::optional<Pose6D> stage_tcp_target_stand;  // pose-track stage output handed to IK
+    double follower_divergence_pos_m = 0.0;
+    double follower_divergence_ang_rad = 0.0;
     // Final-stage output moving average (C). q_target before/after the boxcar.
     bool output_ma_present = false;
     int output_ma_window = 0;

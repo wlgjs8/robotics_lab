@@ -89,7 +89,7 @@ int main() {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     ::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-    const std::string pkt1 = makePacket(1, 16, true);
+    const std::string pkt1 = makePacket(55, 16, true);
     ::sendto(sender, pkt1.data(), pkt1.size(), 0, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
 
     ChunkFrameReceiver::Frame frame;
@@ -99,11 +99,12 @@ int main() {
       got = receiver.latestSeq() > 0 && receiver.copyLatest(&frame);
     }
     check(got, "frame received over loopback");
+    check(frame.seq == 55, "producer seq remains wire seq");
     check(frame.receiver_seq == 1, "receiver_seq assigned");
     check(frame.has_left && frame.has_right, "both arms parsed");
     check(frame.recv_steady_sec > 0.0, "receive time stamped");
 
-    const std::string pkt2 = makePacket(2, 16, true);
+    const std::string pkt2 = makePacket(56, 16, true);
     ::sendto(sender, pkt2.data(), pkt2.size(), 0, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
     got = false;
     for (int i = 0; i < 200 && !got; ++i) {
@@ -111,7 +112,7 @@ int main() {
       got = receiver.copyLatest(&frame) && frame.receiver_seq == 2;
     }
     check(got, "second frame supersedes (receiver_seq=2)");
-    check(frame.seq == 2, "producer seq follows");
+    check(frame.seq == 56, "producer seq follows independently");
 
     ::close(sender);
     receiver.stop();

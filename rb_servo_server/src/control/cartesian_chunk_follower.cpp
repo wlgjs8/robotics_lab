@@ -99,7 +99,8 @@ void CartesianChunkFollower::stepToNextSegment() {
     diag_.stall = false;
     diag_.seg_target_stand = tangentPose(sample.pf);
     diag_.seg_step_index = static_cast<int>(k);
-    diag_.seg_seq = window_.seq();
+    diag_.seg_wire_seq = window_.wireSeq();
+    diag_.seg_recv_seq = window_.recvSeq();
     window_.advance();
     ++diag_.segments;
   } else {
@@ -110,7 +111,8 @@ void CartesianChunkFollower::stepToNextSegment() {
     ++diag_.stall_count;
     diag_.seg_target_stand = tangentPose(core_.p0());
     diag_.seg_step_index = -1;
-    diag_.seg_seq = window_.seq();
+    diag_.seg_wire_seq = window_.wireSeq();
+    diag_.seg_recv_seq = window_.recvSeq();
   }
   have_segment_ = true;
 }

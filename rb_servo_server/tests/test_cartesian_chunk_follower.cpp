@@ -27,7 +27,8 @@ static constexpr double SEG = 1.0 / 30.0;
 static ChunkFrame makeRef(int n, double vx = 0.03, double wz = 0.2) {
   ChunkFrame f;
   f.policy_dt = SEG;
-  f.seq = 1;
+  f.wire_seq = 55;
+  f.recv_seq = 20;
   f.recv_time = 0.0;
   for (int i = 0; i < n; ++i) {
     const double t = i * SEG;
@@ -115,7 +116,8 @@ int main() {
     // A fresh chunk arrives (continuing the path from where we are).
     ChunkFrame frame2 = makeRef(16, 0.03, 0.2);
     for (auto& p : frame2.pose) { p.x += before.x; }  // re-anchored ahead
-    frame2.seq = 2;
+    frame2.wire_seq = 56;
+    frame2.recv_seq = 21;
     f.submitFrame(frame2, before);  // active → preempt, keep chained state
     const Pose6D after = f.tick(TICK);
     const double seam = std::sqrt(std::pow(after.x - before.x, 2) +
@@ -124,6 +126,19 @@ int main() {
     check(f.active(), "still active after preemption");
     check(seam < 5e-3, "no position jump across the preemption seam");
     std::printf("    seam jump = %.6f m\n", seam);
+  }
+
+  // -- Test 4: producer wire seq and receiver seq both reach FollowerDiag. ----
+  std::printf("Test 4: seq propagation\n");
+  {
+    CartesianChunkFollower f(cfg);
+    ChunkFrame frame = makeRef(16);
+    frame.wire_seq = 1234;
+    frame.recv_seq = 7;
+    f.submitFrame(frame, frame.pose[cfg.window.discard_head_L]);
+    f.tick(TICK);
+    check(f.diag().seg_wire_seq == 1234, "diag carries producer wire seq");
+    check(f.diag().seg_recv_seq == 7, "diag carries receiver-local seq");
   }
 
   std::printf("\n=== %s (%d failure%s) ===\n",

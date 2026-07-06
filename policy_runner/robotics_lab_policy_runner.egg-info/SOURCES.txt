@@ -61,6 +61,7 @@ tests/test_chunk_overlay_projection.py
 tests/test_chunk_overlay_publisher.py
 tests/test_dual_arm_policy_gate.py
 tests/test_dual_spacemouse_policy_integration.py
+tests/test_fault_latch_abort.py
 tests/test_flow_dataset.py
 tests/test_flow_inference.py
 tests/test_flow_inference_gripper_mode.py

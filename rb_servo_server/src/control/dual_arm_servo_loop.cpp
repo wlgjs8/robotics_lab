@@ -242,14 +242,14 @@ control::CartesianChunkFollowerConfig makeChunkFollowerConfig(const RuckigFollow
 
 control::ChunkFrame toControlChunkFrame(
     const ChunkFrameReceiver::Frame& frame,
-    ArmId arm_id,
-    std::uint64_t receiver_seq
+    ArmId arm_id
 ) {
     const ChunkFrameReceiver::ArmSteps& steps =
         arm_id == ArmId::Left ? frame.left : frame.right;
     control::ChunkFrame out;
     out.policy_dt = frame.policy_dt_sec;
-    out.seq = receiver_seq;
+    out.wire_seq = frame.seq;
+    out.recv_seq = frame.receiver_seq;
     out.recv_time = frame.recv_steady_sec;
     out.pose.reserve(static_cast<std::size_t>(steps.count));
     out.grip.reserve(static_cast<std::size_t>(steps.count));
@@ -3645,7 +3645,8 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.smd_goal_angular_velocity_norm_rad_s = info.goal_angular_velocity.norm();
     solve.smd_reanchor_count = abc.smd_reanchor_count;
     solve.follower_active = abc.follower_active;
-    solve.follower_seq = abc.follower_seq;
+    solve.follower_wire_seq = abc.follower_wire_seq;
+    solve.follower_recv_seq = abc.follower_recv_seq;
     solve.follower_step = abc.follower_step;
     solve.follower_t_in_seg_sec = abc.follower_t_in_seg_sec;
     solve.follower_duration_sec = abc.follower_duration_sec;
@@ -3654,6 +3655,9 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.follower_stall = abc.follower_stall;
     solve.follower_corner = abc.follower_corner;
     solve.follower_pf_stand = abc.follower_pf_stand;
+    solve.stage_tcp_target_stand = abc.stage_tcp_target_stand;
+    solve.follower_divergence_pos_m = abc.follower_divergence_pos_m;
+    solve.follower_divergence_ang_rad = abc.follower_divergence_ang_rad;
     solve.output_ma_present = abc.output_ma_present;
     solve.output_ma_window = output_ma_window;
     if (abc.output_ma_present) {
@@ -3667,12 +3671,14 @@ void DualArmServoLoop::mergeAbcTelemetry(
 
 void DualArmServoLoop::pollChunkFrames() {
     if (!chunk_frame_receiver_) return;
-    const std::uint64_t seq = chunk_frame_receiver_->latestSeq();
-    if (seq == 0 || seq == chunk_frame_cache_seq_) return;
+    const std::uint64_t recv_seq = chunk_frame_receiver_->latestSeq();
+    if (recv_seq == 0 || recv_seq == chunk_frame_cache_recv_seq_) return;
     ChunkFrameReceiver::Frame frame;
     if (!chunk_frame_receiver_->copyLatest(&frame)) return;  // writer busy; retry next tick
     chunk_frame_cache_ = frame;
-    chunk_frame_cache_seq_ = frame.receiver_seq;  // seq copied UNDER the same lock as the frame
+    // receiver_seq is copied UNDER the same lock as the frame; the atomic above
+    // is only the cheap "anything new?" gate.
+    chunk_frame_cache_recv_seq_ = frame.receiver_seq;
 }
 
 void DualArmServoLoop::resetChunkFollowerEngageWait(ArmId arm_id) {
@@ -3749,7 +3755,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     const TcpPoseTargetProfileConfig& profile,
     control::CartesianChunkFollower* follower,
     RuckigFollowerConfig* built_cfg,
-    std::uint64_t* submitted_seq,
+    std::uint64_t* submitted_wire_seq,
+    std::uint64_t* submitted_recv_seq,
     SmdPoseTracker* smd_tracker,
     const ArmMountConfig& mount,
     const JointArray& previous_sent_q_deg,
@@ -3759,7 +3766,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     AbcTelemetry& abc = arm_id == ArmId::Left ? left_abc_telemetry_ : right_abc_telemetry_;
     // Reset follower telemetry each tick; re-filled below when the follower drives.
     abc.follower_active = false;
-    abc.follower_seq = 0;
+    abc.follower_wire_seq = 0;
+    abc.follower_recv_seq = 0;
     abc.follower_step = -1;
     abc.follower_t_in_seg_sec = 0.0;
     abc.follower_duration_sec = 0.0;
@@ -3768,23 +3776,40 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.follower_stall = false;
     abc.follower_corner = false;
     abc.follower_pf_stand.reset();
+    abc.stage_tcp_target_stand.reset();
+    abc.follower_divergence_pos_m = 0.0;
+    abc.follower_divergence_ang_rad = 0.0;
     const bool fault_policy = rf.fallback_policy == RuckigFollowerFallbackPolicy::Fault;
     const bool was_active = follower->active();
-    const char* transition_reason = "";
+    std::string transition_reason;
+    const auto seq_labels = [](std::uint64_t wire_seq, std::uint64_t recv_seq) {
+        std::ostringstream os;
+        os << "wire_seq=" << wire_seq << " recv_seq=" << recv_seq;
+        return os.str();
+    };
+    const auto diag_seq_labels = [&seq_labels](const control::FollowerDiag& diag) {
+        return seq_labels(diag.seg_wire_seq, diag.seg_recv_seq);
+    };
+    const auto with_stage_telemetry = [&](ArmCommand out) {
+        if (out.mode == ControlMode::TcpPoseTarget && out.has_tcp_target) {
+            abc.stage_tcp_target_stand = out.tcp_target_stand;
+        }
+        return out;
+    };
     const auto log_transition = [&]() {
         if (follower->active() == was_active) return;
         // Rare (engage / watchdog / divergence / mode change) — safe to print
         // from the loop, mirrors the existing throttled-WARN practice.
         std::cout << "[chunk_follower] " << (arm_id == ArmId::Left ? "left" : "right")
                   << (follower->active() ? " ENGAGED" : " disengaged")
-                  << (transition_reason[0] ? " (" : "") << transition_reason
-                  << (transition_reason[0] ? ")" : "") << "\n";
+                  << (!transition_reason.empty() ? " (" : "") << transition_reason
+                  << (!transition_reason.empty() ? ")" : "") << "\n";
     };
     const auto smd_fallback = [&]() {
         log_transition();
-        return applyPoseTrackSmd(
+        return with_stage_telemetry(applyPoseTrackSmd(
             command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
-            previous_sent_q_deg, dt_sec);
+            previous_sent_q_deg, dt_sec));
     };
     if (!rf.enable || !chunk_frame_receiver_ || command.mode != ControlMode::TcpPoseTarget ||
         !command.has_tcp_target || !kinematics_) {
@@ -3802,7 +3827,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     if (ruckigFollowerConfigChanged(*built_cfg, rf)) {
         follower->reconfigure(makeChunkFollowerConfig(rf));
         *built_cfg = rf;
-        *submitted_seq = 0;
+        *submitted_wire_seq = 0;
+        *submitted_recv_seq = 0;
     }
     // Live reference = FK of the previously SENT joints (same anchor discipline
     // as the SMD path).
@@ -3813,34 +3839,41 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         return smoothed;
     };
     if (follower->active()) {
+        const control::FollowerDiag& active_diag = follower->diag();
+        abc.follower_wire_seq = active_diag.seg_wire_seq;
+        abc.follower_recv_seq = active_diag.seg_recv_seq;
+        const double pos_err = math::positionDistance(follower->lastPose(), reference);
+        const double ang_err = math::orientationDistanceRad(follower->lastPose(), reference);
+        abc.follower_divergence_pos_m = pos_err;
+        abc.follower_divergence_ang_rad = ang_err;
         const double age = follower->ageSince(ChunkFrameReceiver::steadyNowSec());
         if (age > rf.chunk_feed_timeout_sec) {
             // Feed-liveness watchdog: producer stalled/died. Fall back to the SMD
             // path (which re-anchors at the live reference) until frames resume.
-            transition_reason = fault_policy ? "feed timeout -> fault" : "feed timeout";
+            transition_reason = fault_policy
+                ? "feed timeout -> fault " + diag_seq_labels(active_diag)
+                : "feed timeout " + diag_seq_labels(active_diag);
             follower->deactivate();
             if (fault_policy) {
                 smd_tracker->deactivate();
-                const control::FollowerDiag& diag = follower->diag();
                 std::ostringstream reason;
                 reason << toString(arm_id)
                        << " chunk_feed_timeout"
                        << " age_sec=" << age
                        << " timeout_sec=" << rf.chunk_feed_timeout_sec
-                       << " window_seq=" << diag.seg_seq;
+                       << " " << diag_seq_labels(active_diag);
                 recordChunkFollowerFaultRequest(arm_id, reason.str());
                 log_transition();
-                return hold_at_reference();
+                return with_stage_telemetry(hold_at_reference());
             }
         } else {
-            const double pos_err = math::positionDistance(follower->lastPose(), reference);
-            const double ang_err = math::orientationDistanceRad(follower->lastPose(), reference);
             if (pos_err > kPoseTrackReanchorPosTolM || ang_err > kPoseTrackReanchorAngTolRad) {
                 // Divergence re-anchor: the sent target drifted from the follower's
                 // plan (barrier hold / safety clamp / init-return). Drop the plan;
                 // the next frame cold-starts from the live reference.
-                transition_reason = fault_policy ? "divergence -> fault" : "divergence re-anchor";
-                const control::FollowerDiag& diag = follower->diag();
+                transition_reason = fault_policy
+                    ? "divergence -> fault " + diag_seq_labels(active_diag)
+                    : "divergence re-anchor " + diag_seq_labels(active_diag);
                 follower->deactivate();
                 if (fault_policy) {
                     smd_tracker->deactivate();
@@ -3851,21 +3884,24 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                            << " pos_tol_m=" << kPoseTrackReanchorPosTolM
                            << " ang_err_rad=" << ang_err
                            << " ang_tol_rad=" << kPoseTrackReanchorAngTolRad
-                           << " window_seq=" << diag.seg_seq;
+                           << " " << diag_seq_labels(active_diag);
                     recordChunkFollowerFaultRequest(arm_id, reason.str());
                     log_transition();
-                    return hold_at_reference();
+                    return with_stage_telemetry(hold_at_reference());
                 }
             }
         }
     }
     const bool arm_present =
         arm_id == ArmId::Left ? chunk_frame_cache_.has_left : chunk_frame_cache_.has_right;
-    if (chunk_frame_cache_seq_ != 0 && chunk_frame_cache_seq_ != *submitted_seq && arm_present) {
-        transition_reason = "chunk frame";
-        follower->submitFrame(
-            toControlChunkFrame(chunk_frame_cache_, arm_id, chunk_frame_cache_seq_), reference);
-        *submitted_seq = chunk_frame_cache_seq_;
+    if (chunk_frame_cache_recv_seq_ != 0 &&
+        chunk_frame_cache_recv_seq_ != *submitted_recv_seq &&
+        arm_present) {
+        transition_reason = "chunk frame " +
+            seq_labels(chunk_frame_cache_.seq, chunk_frame_cache_.receiver_seq);
+        follower->submitFrame(toControlChunkFrame(chunk_frame_cache_, arm_id), reference);
+        *submitted_wire_seq = chunk_frame_cache_.seq;
+        *submitted_recv_seq = chunk_frame_cache_.receiver_seq;
     }
     if (!follower->active()) {
         if (fault_policy) {
@@ -3878,7 +3914,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                 waiting = true;
                 wait_start_sec = now_sec;
                 std::cout << "[chunk_follower] " << toString(arm_id)
-                          << " waiting for first chunk frame (fallback_policy=fault)\n";
+                          << " waiting for first chunk frame (fallback_policy=fault "
+                          << seq_labels(*submitted_wire_seq, *submitted_recv_seq) << ")\n";
             }
             const double elapsed_sec = now_sec - wait_start_sec;
             if (elapsed_sec > rf.engage_timeout_sec) {
@@ -3887,10 +3924,10 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                        << " chunk_follower_engage_timeout"
                        << " elapsed_sec=" << elapsed_sec
                        << " timeout_sec=" << rf.engage_timeout_sec
-                       << " window_seq=" << *submitted_seq;
+                       << " " << seq_labels(*submitted_wire_seq, *submitted_recv_seq);
                 recordChunkFollowerFaultRequest(arm_id, reason.str());
             }
-            return hold_at_reference();
+            return with_stage_telemetry(hold_at_reference());
         }
         return smd_fallback();  // cold start: no frame yet -> today's behavior
     }
@@ -3903,7 +3940,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     smoothed.tcp_target_stand = follower->tick(dt_sec);
     const control::FollowerDiag& diag = follower->diag();
     abc.follower_active = true;
-    abc.follower_seq = diag.seg_seq;
+    abc.follower_wire_seq = diag.seg_wire_seq;
+    abc.follower_recv_seq = diag.seg_recv_seq;
     abc.follower_step = diag.seg_step_index;
     abc.follower_t_in_seg_sec = follower->tInSegment();
     abc.follower_duration_sec = diag.last_solve.duration;
@@ -3912,7 +3950,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.follower_stall = diag.stall;
     abc.follower_corner = diag.last_solve.corner;
     abc.follower_pf_stand = diag.seg_target_stand;
-    return smoothed;
+    return with_stage_telemetry(smoothed);
 }
 
 ServoTarget DualArmServoLoop::computeServoTarget(
@@ -4103,7 +4141,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             left_tcp_profile,
             &left_chunk_follower_,
             &left_chunk_follower_built_,
-            &left_chunk_submitted_seq_,
+            &left_chunk_submitted_wire_seq_,
+            &left_chunk_submitted_recv_seq_,
             &left_pose_track_smd_,
             config_.left_mount,
             left_prev_sent_q_deg_,
@@ -4115,7 +4154,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             right_tcp_profile,
             &right_chunk_follower_,
             &right_chunk_follower_built_,
-            &right_chunk_submitted_seq_,
+            &right_chunk_submitted_wire_seq_,
+            &right_chunk_submitted_recv_seq_,
             &right_pose_track_smd_,
             config_.right_mount,
             right_prev_sent_q_deg_,

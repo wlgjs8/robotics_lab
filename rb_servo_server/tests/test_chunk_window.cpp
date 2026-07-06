@@ -20,7 +20,8 @@ static void check(bool ok, const char* name) {
 static ChunkFrame makeFrame(int n, double step = 0.01) {
   ChunkFrame f;
   f.policy_dt = 1.0 / 30.0;
-  f.seq = 1;
+  f.wire_seq = 55;
+  f.recv_seq = 20;
   f.recv_time = 0.0;
   for (int i = 0; i < n; ++i) {
     Pose6D p;
@@ -40,6 +41,7 @@ int main() {
   {
     ChunkWindow w(ChunkWindowConfig{/*L*/ 6, /*C*/ 8, /*R*/ 2, /*smooth*/ 1});
     check(w.activate(makeFrame(16)), "activate a 16-step frame");
+    check(w.wireSeq() == 55 && w.recvSeq() == 20, "wire/recv seqs preserved distinctly");
     check(w.consumeBudget() == 8, "C not clamped (6+8+2=16)");
     check(w.index() == 6, "consume pointer starts at L=6 (head discarded)");
     int steps = 0;
