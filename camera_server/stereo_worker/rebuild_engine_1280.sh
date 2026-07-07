@@ -28,11 +28,12 @@ python3 "$FFS/scripts/make_single_onnx.py" \
   --height "$H" --width "$W" --max_disp "$MAXD" --valid_iters "$ITERS" \
   --onnx_name fast_foundationstereo
 
-echo "[rebuild] build TRT engine (tf32: fp16은 cost-volume NaN)"
+echo "[rebuild] build TRT engine (fp16: make_single_onnx의 normalize eps 1e-4가 cost-volume"
+echo "          NaN을 해결 -> 전역 fp16 안전, tf32 대비 ~43% 빠름. 과거 tf32 폴백은 --precision tf32)"
 python3 /app/stereo_worker/build_engine.py \
   --onnx "$OUT/fast_foundationstereo.onnx" \
   --engine "$ENG_DIR/fast_foundationstereo.engine" \
-  --precision tf32
+  --fp16
 
 cp -f "$OUT/fast_foundationstereo.yaml" "$ENG_DIR/fast_foundationstereo.yaml"
 echo "[rebuild] done. engine=$ENG_DIR/fast_foundationstereo.engine  image_size=[$H,$W]"
