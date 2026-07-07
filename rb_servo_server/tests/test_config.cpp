@@ -1179,6 +1179,7 @@ bool testRuckigFollowerControllerConfig() {
         "    delta_twist_max_residual_rad: 0.42\n"
         "    delta_twist_max_lead_m: 0.091\n"
         "    delta_twist_max_lead_rad: 0.51\n"
+        "    delta_twist_stale_residual_timeout_sec: 0.19\n"
         "  tcp_pose_target_profile_default: strict\n"
         "  tcp_pose_target_profiles:\n"
         "    strict:\n"
@@ -1195,6 +1196,7 @@ bool testRuckigFollowerControllerConfig() {
     RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_max_residual_rad, 0.42));
     RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_max_lead_m, 0.091));
     RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_max_lead_rad, 0.51));
+    RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_stale_residual_timeout_sec, 0.19));
     RB_CHECK(delta_cfg.cartesian_control.tcp_pose_target_profiles.front().ruckig_follower.controller ==
              rb_servo::RuckigFollowerController::RuckigWaypoint);
 

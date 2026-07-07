@@ -140,11 +140,20 @@ class AnalyzeServoLogTest(unittest.TestCase):
             "left_follower_active",
             "left_follower_stall",
             "left_follower_step",
+            "left_delta_twist_step_kind",
             "left_delta_twist_pending_linear_norm_m",
             "left_delta_twist_pending_angular_norm_rad",
+            "left_delta_twist_xi_ref_linear_norm_m_s",
+            "left_delta_twist_xi_ref_angular_norm_rad_s",
             "left_delta_twist_xi_cmd_linear_norm_m_s",
             "left_delta_twist_xi_cmd_angular_norm_rad_s",
+            "left_delta_twist_step_yaw_rad",
+            "left_delta_twist_realized_yaw_rad",
+            "left_delta_twist_realized_linear_ratio",
+            "left_delta_twist_realized_angular_ratio",
+            "left_delta_twist_realized_yaw_ratio",
             "left_delta_twist_saturated",
+            "left_safety_accel_clamped",
         ]
         rows = [
             {
@@ -153,11 +162,20 @@ class AnalyzeServoLogTest(unittest.TestCase):
                 "left_follower_active": "1",
                 "left_follower_stall": "0",
                 "left_follower_step": "0",
+                "left_delta_twist_step_kind": "1",
                 "left_delta_twist_pending_linear_norm_m": "0.1",
                 "left_delta_twist_pending_angular_norm_rad": "0.01",
+                "left_delta_twist_xi_ref_linear_norm_m_s": "1.5",
+                "left_delta_twist_xi_ref_angular_norm_rad_s": "1.1",
                 "left_delta_twist_xi_cmd_linear_norm_m_s": "0.5",
                 "left_delta_twist_xi_cmd_angular_norm_rad_s": "1.0",
+                "left_delta_twist_step_yaw_rad": "0.10",
+                "left_delta_twist_realized_yaw_rad": "0.05",
+                "left_delta_twist_realized_linear_ratio": "0.4",
+                "left_delta_twist_realized_angular_ratio": "0.45",
+                "left_delta_twist_realized_yaw_ratio": "0.5",
                 "left_delta_twist_saturated": "0",
+                "left_safety_accel_clamped": "0",
             },
             {
                 "safety_verdict": "Ok",
@@ -165,11 +183,20 @@ class AnalyzeServoLogTest(unittest.TestCase):
                 "left_follower_active": "1",
                 "left_follower_stall": "0",
                 "left_follower_step": "1",
+                "left_delta_twist_step_kind": "1",
                 "left_delta_twist_pending_linear_norm_m": "0.2",
                 "left_delta_twist_pending_angular_norm_rad": "0.02",
+                "left_delta_twist_xi_ref_linear_norm_m_s": "1.6",
+                "left_delta_twist_xi_ref_angular_norm_rad_s": "2.1",
                 "left_delta_twist_xi_cmd_linear_norm_m_s": "0.6",
                 "left_delta_twist_xi_cmd_angular_norm_rad_s": "2.0",
+                "left_delta_twist_step_yaw_rad": "0.20",
+                "left_delta_twist_realized_yaw_rad": "0.12",
+                "left_delta_twist_realized_linear_ratio": "0.5",
+                "left_delta_twist_realized_angular_ratio": "0.55",
+                "left_delta_twist_realized_yaw_ratio": "0.6",
                 "left_delta_twist_saturated": "0",
+                "left_safety_accel_clamped": "0",
             },
             {
                 "safety_verdict": "JointLimitClamped",
@@ -177,11 +204,20 @@ class AnalyzeServoLogTest(unittest.TestCase):
                 "left_follower_active": "1",
                 "left_follower_stall": "1",
                 "left_follower_step": "1",
+                "left_delta_twist_step_kind": "2",
                 "left_delta_twist_pending_linear_norm_m": "0.3",
                 "left_delta_twist_pending_angular_norm_rad": "0.03",
+                "left_delta_twist_xi_ref_linear_norm_m_s": "1.7",
+                "left_delta_twist_xi_ref_angular_norm_rad_s": "3.1",
                 "left_delta_twist_xi_cmd_linear_norm_m_s": "0.7",
                 "left_delta_twist_xi_cmd_angular_norm_rad_s": "3.0",
+                "left_delta_twist_step_yaw_rad": "0.30",
+                "left_delta_twist_realized_yaw_rad": "0.21",
+                "left_delta_twist_realized_linear_ratio": "0.6",
+                "left_delta_twist_realized_angular_ratio": "0.65",
+                "left_delta_twist_realized_yaw_ratio": "0.7",
                 "left_delta_twist_saturated": "1",
+                "left_safety_accel_clamped": "1",
             },
             {
                 "safety_verdict": "Ok",
@@ -189,11 +225,20 @@ class AnalyzeServoLogTest(unittest.TestCase):
                 "left_follower_active": "0",
                 "left_follower_stall": "0",
                 "left_follower_step": "2",
+                "left_delta_twist_step_kind": "4",
                 "left_delta_twist_pending_linear_norm_m": "0.4",
                 "left_delta_twist_pending_angular_norm_rad": "0.04",
+                "left_delta_twist_xi_ref_linear_norm_m_s": "1.8",
+                "left_delta_twist_xi_ref_angular_norm_rad_s": "4.1",
                 "left_delta_twist_xi_cmd_linear_norm_m_s": "0.8",
                 "left_delta_twist_xi_cmd_angular_norm_rad_s": "4.0",
+                "left_delta_twist_step_yaw_rad": "0.40",
+                "left_delta_twist_realized_yaw_rad": "0.40",
+                "left_delta_twist_realized_linear_ratio": "1.0",
+                "left_delta_twist_realized_angular_ratio": "1.0",
+                "left_delta_twist_realized_yaw_ratio": "1.0",
                 "left_delta_twist_saturated": "0",
+                "left_safety_accel_clamped": "0",
             },
         ]
         with tempfile.TemporaryDirectory() as tmp:
@@ -214,10 +259,18 @@ class AnalyzeServoLogTest(unittest.TestCase):
             self.assertEqual(left["stall_ticks"], 1)
             self.assertEqual(left["saturated_ticks"], 1)
             self.assertEqual(left["follower_step_distribution"], {"0": 1, "1": 2, "2": 1})
+            self.assertEqual(left["step_kind_counts"], {"normal": 2, "reserve": 1, "ringdown": 1})
+            self.assertEqual(left["accel_clamp_counts"], {"safety_accel_clamped": 1})
             self.assertEqual(left["pending_residual_linear_norm_m"]["p50"], 0.2)
             self.assertEqual(left["pending_residual_linear_norm_m"]["p90"], 0.4)
+            self.assertEqual(left["xi_ref_angular_norm_rad_s"]["p99"], 4.1)
             self.assertEqual(left["commanded_angular_velocity_rad_s"]["p99"], 4.0)
+            self.assertEqual(left["requested_yaw_delta_rad"]["p90"], 0.4)
+            self.assertEqual(left["realized_yaw_delta_rad"]["p50"], 0.12)
+            self.assertEqual(left["yaw_realized_ratio"]["p90"], 1.0)
+            self.assertEqual(left["linear_realized_ratio"]["p50"], 0.5)
             self.assertIn("safety_verdict_counts: JointLimitClamped=1, Ok=3", report)
+            self.assertIn("step_kind_counts={'normal': 2, 'reserve': 1, 'ringdown': 1}", report)
             self.assertIn("left xi_cmd_angular_norm_rad_s: count=4", report)
 
 

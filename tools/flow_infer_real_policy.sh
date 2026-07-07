@@ -12,7 +12,8 @@ PYTHON_BIN="${FLOW_INFER_PYTHON:-${PYTHON:-python3}}"
 CHECKPOINT="${FLOW_INFER_CHECKPOINT:-openpi://127.0.0.1:8000}"
 CONFIG="${FLOW_INFER_CONFIG:-policy_runner/config/flow_real_realsense.yaml}"
 ACTION_HORIZON="${FLOW_INFER_ACTION_HORIZON:-24}"
-CHUNK_EXECUTE_STEPS="${FLOW_INFER_CHUNK_EXECUTE_STEPS:-12}"
+CHUNK_EXECUTE_STEPS="${FLOW_INFER_CHUNK_EXECUTE_STEPS:-6}"
+CHUNK_OVERLAY_RUNWAY_STEPS="${FLOW_INFER_CHUNK_OVERLAY_RUNWAY_STEPS:-4}"
 SPEED_SCALE="${FLOW_INFER_SPEED_SCALE:-1.0}"
 CHUNK_CROSSFADE_STEPS="${FLOW_INFER_CHUNK_CROSSFADE_STEPS:-2}"
 TCP_REANCHOR_MODE="${FLOW_INFER_TCP_REANCHOR_MODE:-measured_blend}"
@@ -38,19 +39,19 @@ export RB_GUI_CHUNK_OVERLAY_ENDPOINT="${RB_GUI_CHUNK_OVERLAY_ENDPOINT:-udp://127
 
 # Print each freshly-inferred action chunk to the terminal, step-by-step, for both
 # arms (position deltas in meters, rotation deltas in degrees). Debug-only; set
-# FLOW_INFER_PRINT_CHUNK=0 to silence.
-export FLOW_INFER_PRINT_CHUNK="${FLOW_INFER_PRINT_CHUNK:-1}"
+# FLOW_INFER_PRINT_CHUNK=1 to enable.
+export FLOW_INFER_PRINT_CHUNK="${FLOW_INFER_PRINT_CHUNK:-0}"
 # Per-step chunk-vs-actual tracking: as each step executes, compare the model's
 # predicted absolute pose against the live measured pose (tracking error in mm/deg)
 # plus predicted vs actual per-step displacement, time-stamped from chunk activation.
-# Use this to see how well the controller follows the chunk. Set to 0 to silence.
-export FLOW_INFER_PRINT_TRACKING="${FLOW_INFER_PRINT_TRACKING:-1}"
+# Use this to see how well the controller follows the chunk. Set to 1 to enable.
+export FLOW_INFER_PRINT_TRACKING="${FLOW_INFER_PRINT_TRACKING:-0}"
 
 echo "[flow-infer] checkpoint=$CHECKPOINT"
 echo "[flow-infer] chunk_overlay_endpoint=$RB_GUI_CHUNK_OVERLAY_ENDPOINT (rb_gui '예측 chunk 궤적 표시')"
 echo "[flow-infer] config=$CONFIG"
 echo "[flow-infer] rollout_summary=$ROLLOUT_SUMMARY"
-echo "[flow-infer] speed_scale=$SPEED_SCALE chunk_execute_steps=$CHUNK_EXECUTE_STEPS crossfade=$CHUNK_CROSSFADE_STEPS reanchor=$TCP_REANCHOR_MODE velproprio_source=$VELPROPRIO_SOURCE"
+echo "[flow-infer] speed_scale=$SPEED_SCALE chunk_execute_steps=$CHUNK_EXECUTE_STEPS overlay_runway_steps=$CHUNK_OVERLAY_RUNWAY_STEPS crossfade=$CHUNK_CROSSFADE_STEPS reanchor=$TCP_REANCHOR_MODE"
 echo "[flow-infer] inherited env: OPENPI_REMOTE_SKIP_WARMUP=${OPENPI_REMOTE_SKIP_WARMUP-<unset>} RB_ALLOW_REAL_GRIPPER=${RB_ALLOW_REAL_GRIPPER-<unset>} DISPLAY=${DISPLAY-<unset>}"
 
 RTC_ARGS=()
@@ -110,8 +111,7 @@ fi
 #             H >= 3R. Inference cadence doubles vs boundary mode (budget = R
 #             steps ~ R*33ms) — check PRINT_CHUNK latency first. RTC optional
 #             on top (FLOW_INFER_RTC=1 adds flow-level consistency inpainting).
-# STITCH_MODE="${FLOW_INFER_STITCH:-boundary}"
-STITCH_MODE="${FLOW_INFER_STITCH:-ensemble}"
+STITCH_MODE="${FLOW_INFER_STITCH:-boundary}"
 if [ "$STITCH_MODE" != "boundary" ]; then
   ENSEMBLE_PERIOD="${FLOW_INFER_ENSEMBLE_PERIOD:-6}"
   # FLOW_INFER_ENSEMBLE_BLEND: linear (lerp old/new over the window) | none
@@ -134,15 +134,32 @@ fi
 # Override with FLOW_INFER_VELPROPRIO_SAMPLE=replan|fixed_step|camera_frame.
 VELPROPRIO_SAMPLE="${FLOW_INFER_VELPROPRIO_SAMPLE:-camera_frame}"
 VELPROPRIO_ARGS=()
-if [ "$VELPROPRIO_SAMPLE" != "replan" ]; then
-  VELPROPRIO_ARGS+=(--velproprio-sample-mode "$VELPROPRIO_SAMPLE")
-  if [ "$VELPROPRIO_SAMPLE" = "camera_frame" ]; then
-    echo "[flow-infer] velproprio_sample_mode=$VELPROPRIO_SAMPLE (camera-time measured TCP local delta; no dt normalization)"
-  else
-    echo "[flow-infer] velproprio_sample_mode=$VELPROPRIO_SAMPLE (velocity from fixed ~policy_dt window; controller-independent)"
+PROPRIO_MODE_FROM_ARGS=""
+PREV_WAS_PROPRIO_MODE=0
+for ARG in "$@"; do
+  if [ "$PREV_WAS_PROPRIO_MODE" = "1" ]; then
+    PROPRIO_MODE_FROM_ARGS="$ARG"
+    PREV_WAS_PROPRIO_MODE=0
+    continue
   fi
-fi
-if [ "$VELPROPRIO_SOURCE" != "measured" ]; then
+  case "$ARG" in
+    --proprio-mode)
+      PREV_WAS_PROPRIO_MODE=1
+      ;;
+    --proprio-mode=*)
+      PROPRIO_MODE_FROM_ARGS="${ARG#--proprio-mode=}"
+      ;;
+  esac
+done
+if [[ "$PROPRIO_MODE_FROM_ARGS" == velocity* ]]; then
+  if [ "$VELPROPRIO_SAMPLE" != "replan" ]; then
+    VELPROPRIO_ARGS+=(--velproprio-sample-mode "$VELPROPRIO_SAMPLE")
+    if [ "$VELPROPRIO_SAMPLE" = "camera_frame" ]; then
+      echo "[flow-infer] velproprio_sample_mode=$VELPROPRIO_SAMPLE (camera-time measured TCP local delta; no dt normalization)"
+    else
+      echo "[flow-infer] velproprio_sample_mode=$VELPROPRIO_SAMPLE (velocity from fixed ~policy_dt window; controller-independent)"
+    fi
+  fi
   VELPROPRIO_ARGS+=(--velproprio-source "$VELPROPRIO_SOURCE")
   echo "[flow-infer] velproprio_source=$VELPROPRIO_SOURCE"
 fi
@@ -153,6 +170,7 @@ exec "$PYTHON_BIN" -m policy_runner flow-infer \
   --rollout-mode real_policy \
   --action-horizon "$ACTION_HORIZON" \
   --chunk-execute-steps "$CHUNK_EXECUTE_STEPS" \
+  --chunk-overlay-runway-steps "$CHUNK_OVERLAY_RUNWAY_STEPS" \
   --speed-scale "$SPEED_SCALE" \
   --chunk-crossfade-steps "$CHUNK_CROSSFADE_STEPS" \
   --tcp-target-pose-conditioning foh_se3 \

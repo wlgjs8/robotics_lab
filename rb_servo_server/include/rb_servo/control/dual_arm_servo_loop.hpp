@@ -657,6 +657,7 @@ private:
         SmdPoseTracker* smd_tracker,
         const ArmMountConfig& mount,
         const JointArray& previous_sent_q_deg,
+        const Pose6D& feedback_pose,
         double dt_sec
     );
     JointMovingAverage left_output_ma_{0};
@@ -700,9 +701,28 @@ private:
         bool safety_intervention_recent = false;
         double delta_twist_pending_linear_norm_m = 0.0;
         double delta_twist_pending_angular_norm_rad = 0.0;
+        Vec6 delta_twist_step_delta{};
+        double delta_twist_step_linear_norm_m = 0.0;
+        double delta_twist_step_angular_norm_rad = 0.0;
+        double delta_twist_step_yaw_rad = 0.0;
+        Vec6 delta_twist_realized_delta{};
+        double delta_twist_realized_linear_norm_m = 0.0;
+        double delta_twist_realized_angular_norm_rad = 0.0;
+        double delta_twist_realized_yaw_rad = 0.0;
+        double delta_twist_realized_linear_ratio = 1.0;
+        double delta_twist_realized_angular_ratio = 1.0;
+        double delta_twist_realized_yaw_ratio = 1.0;
+        double delta_twist_phase_sec = 0.0;
+        int delta_twist_step_kind = 0;
+        int delta_twist_normal_consumed = 0;
+        int delta_twist_reserve_consumed = 0;
+        double delta_twist_xi_ref_linear_norm_m_s = 0.0;
+        double delta_twist_xi_ref_angular_norm_rad_s = 0.0;
         double delta_twist_xi_cmd_linear_norm_m_s = 0.0;
         double delta_twist_xi_cmd_angular_norm_rad_s = 0.0;
         bool delta_twist_saturated = false;
+        double delta_twist_lead_linear_norm_m = 0.0;
+        double delta_twist_lead_angular_norm_rad = 0.0;
     };
     AbcTelemetry left_abc_telemetry_;
     AbcTelemetry right_abc_telemetry_;

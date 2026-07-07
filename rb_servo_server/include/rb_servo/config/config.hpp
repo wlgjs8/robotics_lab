@@ -959,12 +959,13 @@ struct RuckigFollowerConfig {
     // DeltaTwistFollower params. The model delta is a per-policy-frame local
     // displacement, not m/s; these tune how that backlog is drained into an
     // internally jerk-limited body twist.
-    double delta_twist_tau_sec = 0.020;
+    double delta_twist_tau_sec = 0.015;
     int delta_twist_residual_drain_steps = 1;
     double delta_twist_max_residual_m = 0.030;
     double delta_twist_max_residual_rad = 0.35;
-    double delta_twist_max_lead_m = 0.080;
-    double delta_twist_max_lead_rad = 0.35;
+    double delta_twist_max_lead_m = 0.060;
+    double delta_twist_max_lead_rad = 0.30;
+    double delta_twist_stale_residual_timeout_sec = 0.15;
     // Feed-liveness watchdog: with no fresh chunk frame for this long the
     // follower deactivates (falls back to pose_track_smd / hold).
     double chunk_feed_timeout_sec = 1.5;

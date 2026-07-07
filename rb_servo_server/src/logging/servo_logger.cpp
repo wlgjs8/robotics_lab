@@ -67,6 +67,15 @@ void writeJointArrayHeader(std::ostream& os, const char* side, const char* name)
     }
 }
 
+void writeDeltaTwistVecHeader(std::ostream& os, const char* side, const char* name) {
+    os << ',' << side << '_' << name << "_dx_m"
+       << ',' << side << '_' << name << "_dy_m"
+       << ',' << side << '_' << name << "_dz_m"
+       << ',' << side << '_' << name << "_drx_rad"
+       << ',' << side << '_' << name << "_dry_rad"
+       << ',' << side << '_' << name << "_drz_rad";
+}
+
 void writeArmProfilingHeader(std::ostream& os, const char* side) {
     writePoseHeader(os, side, "command_tcp_target_stand");
     writePoseHeader(os, side, "smd_goal_stand");
@@ -117,9 +126,28 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_safety_intervention_recent"
        << ',' << side << "_delta_twist_pending_linear_norm_m"
        << ',' << side << "_delta_twist_pending_angular_norm_rad"
+       << ',' << side << "_delta_twist_step_linear_norm_m"
+       << ',' << side << "_delta_twist_step_angular_norm_rad"
+       << ',' << side << "_delta_twist_step_yaw_rad";
+    writeDeltaTwistVecHeader(os, side, "delta_twist_step");
+    os << ',' << side << "_delta_twist_realized_linear_norm_m"
+       << ',' << side << "_delta_twist_realized_angular_norm_rad"
+       << ',' << side << "_delta_twist_realized_yaw_rad";
+    writeDeltaTwistVecHeader(os, side, "delta_twist_realized");
+    os << ',' << side << "_delta_twist_realized_linear_ratio"
+       << ',' << side << "_delta_twist_realized_angular_ratio"
+       << ',' << side << "_delta_twist_realized_yaw_ratio"
+       << ',' << side << "_delta_twist_phase_sec"
+       << ',' << side << "_delta_twist_step_kind"
+       << ',' << side << "_delta_twist_normal_consumed"
+       << ',' << side << "_delta_twist_reserve_consumed"
+       << ',' << side << "_delta_twist_xi_ref_linear_norm_m_s"
+       << ',' << side << "_delta_twist_xi_ref_angular_norm_rad_s"
        << ',' << side << "_delta_twist_xi_cmd_linear_norm_m_s"
        << ',' << side << "_delta_twist_xi_cmd_angular_norm_rad_s"
        << ',' << side << "_delta_twist_saturated"
+       << ',' << side << "_delta_twist_lead_linear_norm_m"
+       << ',' << side << "_delta_twist_lead_angular_norm_rad"
        << ',' << side << "_output_ma_present"
        << ',' << side << "_output_ma_window";
     writeJointArrayHeader(os, side, "q_target_before_output_ma");
@@ -445,6 +473,15 @@ void writeJointArrayColumns(std::ostream& os, const JointArray& values) {
     for (double v : values) os << ',' << v;
 }
 
+void writeDeltaTwistVecColumns(std::ostream& os, const Vec6& value) {
+    os << ',' << value.x
+       << ',' << value.y
+       << ',' << value.z
+       << ',' << value.rx
+       << ',' << value.ry
+       << ',' << value.rz;
+}
+
 void writeJointArrayBlanks(std::ostream& os) {
     for (int i = 0; i < kDof; ++i) os << ',';
 }
@@ -511,9 +548,28 @@ void writeArmProfilingColumns(
        << ',' << telemetry.safety_intervention_recent
        << ',' << telemetry.delta_twist_pending_linear_norm_m
        << ',' << telemetry.delta_twist_pending_angular_norm_rad
+       << ',' << telemetry.delta_twist_step_linear_norm_m
+       << ',' << telemetry.delta_twist_step_angular_norm_rad
+       << ',' << telemetry.delta_twist_step_yaw_rad;
+    writeDeltaTwistVecColumns(os, telemetry.delta_twist_step_delta);
+    os << ',' << telemetry.delta_twist_realized_linear_norm_m
+       << ',' << telemetry.delta_twist_realized_angular_norm_rad
+       << ',' << telemetry.delta_twist_realized_yaw_rad;
+    writeDeltaTwistVecColumns(os, telemetry.delta_twist_realized_delta);
+    os << ',' << telemetry.delta_twist_realized_linear_ratio
+       << ',' << telemetry.delta_twist_realized_angular_ratio
+       << ',' << telemetry.delta_twist_realized_yaw_ratio
+       << ',' << telemetry.delta_twist_phase_sec
+       << ',' << telemetry.delta_twist_step_kind
+       << ',' << telemetry.delta_twist_normal_consumed
+       << ',' << telemetry.delta_twist_reserve_consumed
+       << ',' << telemetry.delta_twist_xi_ref_linear_norm_m_s
+       << ',' << telemetry.delta_twist_xi_ref_angular_norm_rad_s
        << ',' << telemetry.delta_twist_xi_cmd_linear_norm_m_s
        << ',' << telemetry.delta_twist_xi_cmd_angular_norm_rad_s
        << ',' << telemetry.delta_twist_saturated
+       << ',' << telemetry.delta_twist_lead_linear_norm_m
+       << ',' << telemetry.delta_twist_lead_angular_norm_rad
        << ',' << telemetry.output_ma_present
        << ',' << telemetry.output_ma_window;
     if (telemetry.output_ma_present) {

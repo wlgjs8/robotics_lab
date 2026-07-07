@@ -144,8 +144,12 @@ umi_dual_cartesian:
     # between the commanded target and the robot). vff still supplies the tracking velocity,
     # so this mainly removes the position lead the operator perceives as follow latency.
     # max_target_lead_m: 0.012
-    max_target_lead_m: 0.030
-    max_target_lead_rad: 0.12
+    # 2026-07-07: 0.20->0.30->0.40 rad for UMI right-arm rotation following. The
+    # post-SetExternalBoxes-slot run was smooth, but rpy lead was still clamped
+    # at 0.30 rad while the operator input reached ~0.38 rad; keep linear lead
+    # unchanged because linear tracking felt good.
+    max_target_lead_m: 0.050
+    max_target_lead_rad: 0.40
     rebase_conditioner_on_clamp: true
   # ---- Pose-frame geometry (paired with pika publisher --pose-frame tip) ----
   # The publisher applies the official pika_sdk tracker→gripper-tip transform

@@ -23,8 +23,124 @@ class RecordingPublisher:
         self.calls.append(kwargs)
 
 
+def _seed_overlay_source(
+    *,
+    execute_steps: int,
+    runway_steps: int = 4,
+    max_linear_velocity_m_s: float = 1.0,
+    max_angular_velocity_rad_s: float = 1.0,
+):
+    assert np is not None
+    source = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
+    publisher = RecordingPublisher()
+    source._chunk_overlay_publisher = publisher
+    source._chunk_overlay_seq = 0
+    source.policy_dt_sec = 0.05
+    source.chunk_execute_steps = execute_steps
+    source.chunk_overlay_runway_steps = runway_steps
+    source.max_linear_velocity_m_s = max_linear_velocity_m_s
+    source.max_angular_velocity_rad_s = max_angular_velocity_rad_s
+    source.arm_mask = np.asarray([1.0, 0.0], dtype=np.float32)
+    source._chunk_crossfade_steps = 0
+    source._steps_since_boundary = 0
+    source._prev_emitted_twist_by_arm = {"left": None, "right": None}
+    source._last_overlay_payload = {
+        "left": {
+            "tcp_stand": {
+                "x": 0.40,
+                "y": -0.20,
+                "z": 0.30,
+                "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+            }
+        },
+        "right": {
+            "tcp_stand": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+                "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+            }
+        },
+    }
+    return source, publisher
+
+
 @unittest.skipIf(np is None, "numpy/torch flow inference extras are not installed")
 class ChunkOverlayProjectionTest(unittest.TestCase):
+    def test_overlay_limit_includes_runway(self) -> None:
+        assert np is not None
+        source, publisher = _seed_overlay_source(execute_steps=6, runway_steps=4)
+        source._chunk = np.zeros((24, 14), dtype=np.float64)
+        for i in range(24):
+            source._chunk[i, 0] = 0.001 * (i + 1)
+
+        source._publish_chunk_overlay(123.0)
+
+        packet = publisher.calls[0]
+        self.assertEqual(source._current_chunk_execute_limit(), 6)
+        self.assertEqual(len(packet["left"]), 10)
+        self.assertEqual(len(packet["left_delta"]), 10)
+
+    def test_overlay_limit_clamped_by_horizon(self) -> None:
+        assert np is not None
+        source, publisher = _seed_overlay_source(execute_steps=6, runway_steps=4)
+        source._chunk = np.zeros((8, 14), dtype=np.float64)
+
+        source._publish_chunk_overlay(123.0)
+
+        packet = publisher.calls[0]
+        self.assertEqual(source._current_chunk_execute_limit(), 6)
+        self.assertEqual(len(packet["left"]), 8)
+        self.assertEqual(len(packet["left_delta"]), 8)
+
+    def test_execution_limit_unchanged_by_overlay_runway(self) -> None:
+        assert np is not None
+        source, publisher = _seed_overlay_source(execute_steps=6, runway_steps=4)
+        source._chunk = np.zeros((24, 14), dtype=np.float64)
+        source._chunk_index = 0
+
+        self.assertEqual(source._current_chunk_execute_limit(), 6)
+        source._publish_chunk_overlay(123.0)
+
+        self.assertEqual(source._current_chunk_execute_limit(), 6)
+        self.assertEqual(source._chunk_index, 0)
+        self.assertEqual(len(publisher.calls[0]["left"]), 10)
+
+    def test_delta_rows_match_pose_integration(self) -> None:
+        assert np is not None
+        source, publisher = _seed_overlay_source(
+            execute_steps=2,
+            runway_steps=1,
+            max_linear_velocity_m_s=0.2,  # max per-frame translation = 0.01 m
+        )
+        source._chunk = np.zeros((3, 14), dtype=np.float64)
+        source._chunk[0, 0:6] = [0.02, 0.0, 0.0, 0.0, 0.0, 0.0]
+        source._chunk[1, 0:6] = [0.0, 0.02, 0.0, 0.0, 0.0, 0.0]
+        source._chunk[2, 0:6] = [0.0, 0.0, 0.02, 0.0, 0.0, 0.0]
+
+        source._publish_chunk_overlay(123.0)
+
+        packet = publisher.calls[0]
+        anchor = np.asarray([0.40, -0.20, 0.30, 0.0, 0.0, 0.0, 1.0], dtype=np.float64)
+        cur = anchor
+        self.assertEqual(len(packet["left"]), 3)
+        self.assertEqual(len(packet["left_delta"]), 3)
+        for i, row in enumerate(packet["left_delta"]):
+            conditioned = np.asarray(row[:6], dtype=np.float64)
+            cur = pose_compose_local(cur, conditioned)
+            np.testing.assert_allclose(packet["left"][i][:7], cur[:7], atol=1e-7)
+            self.assertLessEqual(float(np.linalg.norm(conditioned[:3])), 0.0100001)
+
+    def test_old_behavior_with_zero_runway(self) -> None:
+        assert np is not None
+        source, publisher = _seed_overlay_source(execute_steps=6, runway_steps=0)
+        source._chunk = np.zeros((24, 14), dtype=np.float64)
+
+        source._publish_chunk_overlay(123.0)
+
+        self.assertEqual(len(publisher.calls[0]["left"]), 6)
+        self.assertEqual(len(publisher.calls[0]["left_delta"]), 6)
+
     def test_publish_chunk_overlay_integrates_from_measured_anchor(self) -> None:
         assert np is not None
         source = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
@@ -150,12 +266,19 @@ class ChunkOverlayProjectionTest(unittest.TestCase):
         }
         source._last_overlay_payload = payload
 
-        chunk1 = np.zeros((2, 14), dtype=np.float64)
+        source.chunk_overlay_runway_steps = 2
+
+        chunk1 = np.zeros((4, 14), dtype=np.float64)
         chunk1[0, 0] = 0.01
         chunk1[1, 1] = 0.02
+        chunk1[2, 2] = 0.03
+        chunk1[3, 0] = 0.04
         source._chunk = chunk1
         source._publish_chunk_overlay(1.0)
-        first_tail = np.asarray(publisher.calls[0]["left"][-1][:7], dtype=np.float64)
+        first_execute_tail = np.asarray(publisher.calls[0]["left"][1][:7], dtype=np.float64)
+        first_runway_tail = np.asarray(publisher.calls[0]["left"][-1][:7], dtype=np.float64)
+        self.assertEqual(len(publisher.calls[0]["left"]), 4)
+        self.assertFalse(np.allclose(first_execute_tail, first_runway_tail, atol=1e-9))
         np.testing.assert_allclose(publisher.calls[0]["left_delta"][0][:6], [0.01, 0, 0, 0, 0, 0], atol=1e-9)
         np.testing.assert_allclose(publisher.calls[0]["left_delta"][1][:6], [0, 0.02, 0, 0, 0, 0], atol=1e-9)
 
@@ -174,7 +297,7 @@ class ChunkOverlayProjectionTest(unittest.TestCase):
         source._overlay_chain_advance()
         source._chunk = chunk2
         source._publish_chunk_overlay(2.0)
-        expected0 = pose_compose_local(first_tail, np.asarray([0.0, 0.0, 0.03, 0.0, 0.0, 0.0]))
+        expected0 = pose_compose_local(first_execute_tail, np.asarray([0.0, 0.0, 0.03, 0.0, 0.0, 0.0]))
         np.testing.assert_allclose(
             np.asarray(publisher.calls[2]["left"][0][:7]), expected0[:7], atol=1e-7
         )

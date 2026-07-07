@@ -50,6 +50,20 @@ bool scaleAngularTo(Vec6* v, double max_norm) {
   return true;
 }
 
+bool hasLinearOrAngularNorm(const Vec6& v, double eps = 1e-9) {
+  return linearNorm(v) > eps || angularNorm(v) > eps;
+}
+
+double robustRatio(double numerator, double denominator) {
+  constexpr double kEps = 1e-9;
+  if (!std::isfinite(numerator) || !std::isfinite(denominator)) return 0.0;
+  if (std::abs(denominator) < kEps) {
+    return std::abs(numerator) < kEps ? 1.0 : 0.0;
+  }
+  const double ratio = numerator / denominator;
+  return std::isfinite(ratio) ? ratio : 0.0;
+}
+
 bool clampAxes(Vec6* v, const AxisLimit& lin, const AxisLimit& ang, double AxisLimit::* member) {
   if (!v) return false;
   const double lin_lim = lin.*member;
@@ -93,6 +107,35 @@ bool finiteDelta(const Vec6& v) {
          std::isfinite(v.rx) && std::isfinite(v.ry) && std::isfinite(v.rz);
 }
 
+bool finitePose(const Pose6D& pose) {
+  if (!std::isfinite(pose.x) || !std::isfinite(pose.y) || !std::isfinite(pose.z)) {
+    return false;
+  }
+  try {
+    const auto R = math::rotationFromPose(pose);
+    return R.allFinite();
+  } catch (...) {
+    return false;
+  }
+}
+
+Vec6 localDelta(const Pose6D& prev, const Pose6D& cur) {
+  const auto R_prev = math::rotationFromPose(prev);
+  const auto R_cur = math::rotationFromPose(cur);
+  const math::Vector3 dp(cur.x - prev.x, cur.y - prev.y, cur.z - prev.z);
+  const math::Vector3 pos_local = R_prev.transpose() * dp;
+  const math::Vector3 rot_local = math::log3(R_prev.transpose() * R_cur);
+  return {pos_local.x(), pos_local.y(), pos_local.z(),
+          rot_local.x(), rot_local.y(), rot_local.z()};
+}
+
+bool feedbackDeltaPlausible(const Vec6& delta, const DeltaTwistFollowerConfig& cfg) {
+  if (!finiteDelta(delta)) return false;
+  const double lin_limit = std::max({3.0 * cfg.max_residual_m, 3.0 * cfg.max_lead_m, 0.25});
+  const double ang_limit = std::max({3.0 * cfg.max_residual_rad, 3.0 * cfg.max_lead_rad, 1.0});
+  return linearNorm(delta) <= lin_limit && angularNorm(delta) <= ang_limit;
+}
+
 }  // namespace
 
 DeltaTwistFollower::DeltaTwistFollower(const DeltaTwistFollowerConfig& cfg)
@@ -109,16 +152,23 @@ void DeltaTwistFollower::deactivate() {
   grip_.clear();
   index_ = 0;
   consumed_ = 0;
-  consume_eff_ = 0;
+  normal_eff_ = 0;
+  total_eff_ = 0;
+  stale_residual_age_ = 0.0;
   t_in_seg_ = 0.0;
   pending_delta_ = Vec6{};
+  step_delta_ = Vec6{};
+  realized_delta_ = Vec6{};
+  xi_ref_ = Vec6{};
   xi_cmd_ = Vec6{};
   accel_cmd_ = Vec6{};
+  lead_delta_ = Vec6{};
+  has_feedback_pose_ = false;
   diag_ = DeltaTwistFollowerDiag{};
 }
 
 bool DeltaTwistFollower::hasConsumableStep() const {
-  return active_ && consumed_ < consume_eff_ && index_ < delta_.size();
+  return active_ && consumed_ < total_eff_ && index_ < delta_.size();
 }
 
 double DeltaTwistFollower::gripAt(std::size_t k) const {
@@ -147,15 +197,30 @@ void DeltaTwistFollower::submitFrame(const ChunkFrame& frame, const Pose6D& curr
   }
   index_ = static_cast<std::size_t>(L);
   consumed_ = 0;
-  consume_eff_ = std::min(cfg_.consume_steps, n - L);
+  normal_eff_ = std::min(std::max(0, cfg_.consume_steps), n - L);
+  total_eff_ = std::min(
+      std::max(0, cfg_.consume_steps) + std::max(0, cfg_.reserve_steps),
+      n - L);
+  if (normal_eff_ < 1 || total_eff_ < 1) {
+    deactivate();
+    return;
+  }
+  t_in_seg_ = 0.0;
+  stale_residual_age_ = 0.0;
+  clampPendingResidual();
 
   if (!active_) {
     command_pose_ = current_pose;
     last_pose_ = current_pose;
+    last_feedback_pose_ = current_pose;
+    has_feedback_pose_ = false;
     xi_cmd_ = Vec6{};
     accel_cmd_ = Vec6{};
     pending_delta_ = Vec6{};
-    t_in_seg_ = 0.0;
+    step_delta_ = Vec6{};
+    realized_delta_ = Vec6{};
+    xi_ref_ = Vec6{};
+    lead_delta_ = Vec6{};
     current_grip_ = gripAt(index_);
     diag_ = DeltaTwistFollowerDiag{};
     active_ = true;
@@ -171,34 +236,76 @@ void DeltaTwistFollower::submitFrame(const ChunkFrame& frame, const Pose6D& curr
 void DeltaTwistFollower::reanchor(const Pose6D& reference) {
   command_pose_ = reference;
   last_pose_ = reference;
+  last_feedback_pose_ = reference;
+  has_feedback_pose_ = false;
   xi_cmd_ = Vec6{};
   accel_cmd_ = Vec6{};
   pending_delta_ = Vec6{};
+  step_delta_ = Vec6{};
+  realized_delta_ = Vec6{};
+  xi_ref_ = Vec6{};
+  lead_delta_ = Vec6{};
   t_in_seg_ = 0.0;
+  stale_residual_age_ = 0.0;
   diag_.seg_target_stand = reference;
   updateDiagState();
-  if (consume_eff_ > 0) active_ = true;
+  if (total_eff_ > 0) active_ = true;
 }
 
-void DeltaTwistFollower::consumeNextStep() {
+void DeltaTwistFollower::setFeedbackPose(const Pose6D& feedback_pose) {
+  if (!finitePose(feedback_pose)) {
+    return;
+  }
+  if (!has_feedback_pose_) {
+    last_feedback_pose_ = feedback_pose;
+    has_feedback_pose_ = true;
+    return;
+  }
+
+  Vec6 realized{};
+  try {
+    realized = localDelta(last_feedback_pose_, feedback_pose);
+  } catch (...) {
+    last_feedback_pose_ = feedback_pose;
+    return;
+  }
+  last_feedback_pose_ = feedback_pose;
+  if (!feedbackDeltaPlausible(realized, cfg_)) {
+    return;
+  }
+  realized_delta_ = add(realized_delta_, realized);
+  pending_delta_ = sub(pending_delta_, realized);
+  clampPendingResidual();
+  updateDiagState();
+}
+
+bool DeltaTwistFollower::consumeNextStep() {
   if (!hasConsumableStep()) {
     diag_.stall = true;
     ++diag_.stall_count;
     diag_.seg_step_index = -1;
-    return;
+    diag_.step_phase = hasLinearOrAngularNorm(pending_delta_) ? DeltaTwistStepPhase::ResidualDrain
+                                                             : DeltaTwistStepPhase::Ringdown;
+    return false;
   }
 
   const Vec6 step = finiteDelta(delta_[index_]) ? delta_[index_] : Vec6{};
+  step_delta_ = step;
+  realized_delta_ = Vec6{};
   pending_delta_ = add(pending_delta_, step);
-  clampPendingLead();
+  clampPendingResidual();
   current_grip_ = gripAt(index_);
   diag_.stall = false;
   diag_.seg_step_index = static_cast<int>(index_);
   diag_.seg_wire_seq = wire_seq_;
   diag_.seg_recv_seq = recv_seq_;
+  diag_.step_phase = consumed_ < normal_eff_ ? DeltaTwistStepPhase::Normal
+                                             : DeltaTwistStepPhase::Reserve;
   ++index_;
   ++consumed_;
   ++diag_.segments;
+  stale_residual_age_ = 0.0;
+  return true;
 }
 
 void DeltaTwistFollower::clampPendingResidual() {
@@ -206,16 +313,41 @@ void DeltaTwistFollower::clampPendingResidual() {
   (void)scaleAngularTo(&pending_delta_, cfg_.max_residual_rad);
 }
 
-void DeltaTwistFollower::clampPendingLead() {
-  (void)scaleLinearTo(&pending_delta_, cfg_.max_lead_m);
-  (void)scaleAngularTo(&pending_delta_, cfg_.max_lead_rad);
-}
-
 void DeltaTwistFollower::updateDiagState() {
   diag_.pending_delta = pending_delta_;
+  diag_.step_delta = step_delta_;
+  diag_.realized_delta = realized_delta_;
+  diag_.xi_ref = xi_ref_;
   diag_.xi_cmd = xi_cmd_;
   diag_.accel_cmd = accel_cmd_;
+  diag_.lead_delta = lead_delta_;
+  diag_.realized_linear_ratio = robustRatio(linearNorm(realized_delta_), linearNorm(step_delta_));
+  diag_.realized_angular_ratio = robustRatio(angularNorm(realized_delta_), angularNorm(step_delta_));
+  diag_.realized_yaw_ratio = robustRatio(realized_delta_.rz, step_delta_.rz);
+  diag_.normal_consumed = std::min(consumed_, normal_eff_);
+  diag_.reserve_consumed = std::max(0, consumed_ - normal_eff_);
   diag_.seg_target_stand = command_pose_;
+}
+
+void DeltaTwistFollower::clampCommandLead() {
+  if (!has_feedback_pose_) {
+    lead_delta_ = Vec6{};
+    return;
+  }
+  Vec6 lead{};
+  try {
+    lead = localDelta(last_feedback_pose_, command_pose_);
+  } catch (...) {
+    lead_delta_ = Vec6{};
+    return;
+  }
+  bool clamped = false;
+  clamped = scaleLinearTo(&lead, cfg_.max_lead_m) || clamped;
+  clamped = scaleAngularTo(&lead, cfg_.max_lead_rad) || clamped;
+  lead_delta_ = lead;
+  if (clamped) {
+    command_pose_ = math::composeDeltaLocal(last_feedback_pose_, deltaPose(lead));
+  }
 }
 
 Pose6D DeltaTwistFollower::tick(double dt_tick) {
@@ -223,17 +355,26 @@ Pose6D DeltaTwistFollower::tick(double dt_tick) {
   if (!std::isfinite(dt_tick) || dt_tick <= 0.0) return last_pose_;
 
   t_in_seg_ += dt_tick;
+  bool consumed_step = false;
   while (t_in_seg_ >= policy_dt_) {
     t_in_seg_ -= policy_dt_;
-    consumeNextStep();
+    consumed_step = consumeNextStep() || consumed_step;
+  }
+  if (!consumed_step && diag_.stall) {
+    stale_residual_age_ += dt_tick;
+    if (cfg_.stale_residual_timeout_sec > 0.0 &&
+        stale_residual_age_ > cfg_.stale_residual_timeout_sec) {
+      pending_delta_ = Vec6{};
+    }
   }
 
-  clampPendingLead();
-  const double drain_time = std::max(
-      policy_dt_ * static_cast<double>(std::max(1, cfg_.residual_drain_steps)),
-      dt_tick);
-  Vec6 xi_ref = mul(pending_delta_, 1.0 / drain_time);
+  clampPendingResidual();
+  const double remaining = std::max(policy_dt_ - t_in_seg_, dt_tick);
+  const int extra_steps = std::max(0, cfg_.residual_drain_steps - 1);
+  const double horizon = std::max(remaining + static_cast<double>(extra_steps) * policy_dt_, dt_tick);
+  Vec6 xi_ref = mul(pending_delta_, 1.0 / horizon);
   bool saturated = clampAxes(&xi_ref, cfg_.lin, cfg_.ang, &AxisLimit::v_max);
+  xi_ref_ = xi_ref;
 
   Vec6 a_des = mul(sub(xi_ref, xi_cmd_), 1.0 / std::max(cfg_.tau_sec, dt_tick));
   saturated = clampAxes(&a_des, cfg_.lin, cfg_.ang, &AxisLimit::a_max) || saturated;
@@ -248,10 +389,14 @@ Pose6D DeltaTwistFollower::tick(double dt_tick) {
 
   const Vec6 delta_exec = mul(xi_cmd_, dt_tick);
   command_pose_ = math::composeDeltaLocal(command_pose_, deltaPose(delta_exec));
+  clampCommandLead();
   last_pose_ = command_pose_;
 
-  pending_delta_ = sub(pending_delta_, delta_exec);
   clampPendingResidual();
+  if (diag_.stall) {
+    diag_.step_phase = hasLinearOrAngularNorm(pending_delta_) ? DeltaTwistStepPhase::ResidualDrain
+                                                             : DeltaTwistStepPhase::Ringdown;
+  }
 
   diag_.saturated = saturated;
   diag_.last_solve.result = ruckig::Result::Working;

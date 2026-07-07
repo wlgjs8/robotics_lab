@@ -24,12 +24,21 @@ struct DeltaTwistFollowerConfig {
   int discard_head_steps{0};
   int consume_steps{8};
   int reserve_steps{1};
-  double tau_sec{0.020};
+  double tau_sec{0.015};
   int residual_drain_steps{1};
   double max_residual_m{0.030};
   double max_residual_rad{0.35};
-  double max_lead_m{0.080};
-  double max_lead_rad{0.35};
+  double max_lead_m{0.060};
+  double max_lead_rad{0.30};
+  double stale_residual_timeout_sec{0.15};
+};
+
+enum class DeltaTwistStepPhase {
+  Inactive,
+  Normal,
+  Reserve,
+  ResidualDrain,
+  Ringdown,
 };
 
 struct DeltaTwistFollowerDiag {
@@ -42,9 +51,19 @@ struct DeltaTwistFollowerDiag {
   std::uint64_t seg_wire_seq{0};
   std::uint64_t seg_recv_seq{0};
   Vec6 pending_delta{};
+  Vec6 step_delta{};
+  Vec6 realized_delta{};
+  Vec6 xi_ref{};
   Vec6 xi_cmd{};
   Vec6 accel_cmd{};
+  Vec6 lead_delta{};
+  double realized_linear_ratio{1.0};
+  double realized_angular_ratio{1.0};
+  double realized_yaw_ratio{1.0};
   bool saturated{false};
+  DeltaTwistStepPhase step_phase{DeltaTwistStepPhase::Inactive};
+  int normal_consumed{0};
+  int reserve_consumed{0};
 };
 
 class DeltaTwistFollower {
@@ -56,6 +75,7 @@ class DeltaTwistFollower {
   bool active() const { return active_; }
   void deactivate();
   void reanchor(const Pose6D& reference);
+  void setFeedbackPose(const Pose6D& feedback_pose);
   Pose6D tick(double dt_tick);
 
   double currentGrip() const { return current_grip_; }
@@ -67,13 +87,15 @@ class DeltaTwistFollower {
   std::uint64_t windowRecvSeq() const { return recv_seq_; }
   std::size_t windowIndex() const { return index_; }
   int windowConsumed() const { return consumed_; }
+  const Vec6& pendingDelta() const { return pending_delta_; }
+  const Vec6& xiCommand() const { return xi_cmd_; }
 
  private:
-  void consumeNextStep();
+  bool consumeNextStep();
   bool hasConsumableStep() const;
   double gripAt(std::size_t k) const;
   void clampPendingResidual();
-  void clampPendingLead();
+  void clampCommandLead();
   void updateDiagState();
 
   DeltaTwistFollowerConfig cfg_;
@@ -85,13 +107,21 @@ class DeltaTwistFollower {
   std::vector<double> grip_;
   std::size_t index_{0};
   int consumed_{0};
-  int consume_eff_{0};
+  int normal_eff_{0};
+  int total_eff_{0};
+  double stale_residual_age_{0.0};
 
   Pose6D command_pose_{};
   Pose6D last_pose_{};
+  Pose6D last_feedback_pose_{};
+  bool has_feedback_pose_{false};
   Vec6 xi_cmd_{};
   Vec6 accel_cmd_{};
   Vec6 pending_delta_{};
+  Vec6 step_delta_{};
+  Vec6 realized_delta_{};
+  Vec6 xi_ref_{};
+  Vec6 lead_delta_{};
   double current_grip_{0.0};
   double t_in_seg_{0.0};
   bool active_{false};

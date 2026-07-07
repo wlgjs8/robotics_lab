@@ -597,16 +597,21 @@ cartesian_control:
         # at healthy minSV~0.17); it's the rbpodo controller jerking on over-aggressive
         # accel/nf (accel clamp churning). Ease nf 2.5->2.0 and linear accel 2.8->2.0 to
         # stay in the controller's smooth-tracking envelope; KEEP the high velocity (top
-        # speed is not the jerk source). Rotation raised per request (nf 1.0->2.0, omega
-        # 1.30->2.0). If still jerky, drop nf/accel further; if too soft, nudge back up.
+        # speed is not the jerk source). Rotation raised conservatively again on
+        # 2026-07-07 after SetExternalBoxes no longer displaced teleop motion:
+        # logs showed smooth motion, no IK failures, but angular source/server
+        # lead clamped at 0.20 rad and angular ff hit the 1.0 rad/s ceiling.
+        # A later 0.30 rad / 1.2 rad/s run still hit rotation lead + velocity
+        # caps; keep nf/accel fixed because that run also showed a short
+        # sol-jump/safety-clamp cluster. If jerk returns, first roll back omega.
         natural_frequency_linear_hz: 2.0
-        natural_frequency_angular_hz: 1.2 #2.0
+        natural_frequency_angular_hz: 1.5 #2.0
         velocity_feedforward: true
         # max_linear_velocity_m_s: 1.20
         max_linear_velocity_m_s: 0.30
         max_linear_accel_m_s2: 2.50
-        max_angular_velocity_rad_s: 1.0 #2.00
-        max_angular_accel_rad_s2: 2.0 #5.00
+        max_angular_velocity_rad_s: 1.4 #2.00
+        max_angular_accel_rad_s2: 3.0 #5.00
         # 2026-06-28: kill the UMI "robot moves when I just press the pedal" lurch.
         # On re-engage the command buffer holds the last target across the deadman
         # gap, keeping the SMD active, so the first re-anchored command delta (the
@@ -633,7 +638,7 @@ cartesian_control:
         singularity_scale_floor_sigma: 0.05
         singularity_scale_min: 0.12
       max_smd_goal_lead_m: 0.080
-      max_smd_goal_lead_rad: 0.20 #0.35
+      max_smd_goal_lead_rad: 0.40 #0.35
     flow_infer_smooth:
       pose_track_smd:
         enable: true
@@ -663,26 +668,31 @@ cartesian_control:
       ruckig_follower:
         enable: true
         controller: "delta_twist"  # consume conditioned local per-frame action deltas directly
-        # 2026-07-06 밤: SPEED_SCALE 1.5 대응 — dt 33.4→22.3ms에서 per-세그먼트 Δv/Δω
-        # 예산(∝ j·dt²)이 보존되도록 jerk ×(33.4/22.3)²≈2.25, accel ×1.5, vel ×1.5.
-        # scale 1.0에서도 그냥 여유가 늘어날 뿐(무해). 하드 안전망은 관절 클램프.
-        max_linear_velocity_m_s: 0.9 #0.6 #0.3
-        max_linear_accel_m_s2: 12.0 #8.0 #3.0
-        max_linear_jerk_m_s3: 225.0 #100.0 #5.0
-        max_angular_velocity_rad_s: 2.0 #1.50
-        max_angular_accel_rad_s2: 15.0 #10.0 #8.0 #2.0
-        max_angular_jerk_rad_s3: 675.0 #300.0 #120.0 #3.0
+        # 2026-07-07 real OpenPI velocity-proprio baseline: the model deltas in
+        # the faulting run were only ~1-2 mm / ~0.004-0.007 rad per 33 ms frame,
+        # but residual catch-up drove xi_cmd to ~1 m/s and command lead to the
+        # 50 mm divergence latch. Keep the first real DeltaTwist profile bounded
+        # near the requested action scale; raise only from CSV evidence.
+        max_linear_velocity_m_s: 0.25
+        max_linear_accel_m_s2: 2.0
+        max_linear_jerk_m_s3: 60.0
+        max_angular_velocity_rad_s: 0.80
+        max_angular_accel_rad_s2: 4.0
+        max_angular_jerk_rad_s3: 160.0
         discard_head_steps: 0     # producer re-anchors each chunk to measured TCP: latency already absorbed
         consume_steps: 6          # consume only window rows; rows 6-11 are runway neighbors + late-frame coast
-        reserve_steps: 1
+        reserve_steps: 2
         smoothing_window: 3
         af_damping_beta: 1.0 #0.2  # P3: honest central-diff curvature; clampAbs(af, a_max) bounds it (beta<1 = per-waypoint micro-brake)
-        delta_twist_tau_sec: 0.020
+        delta_twist_tau_sec: 0.015
         delta_twist_residual_drain_steps: 1
-        delta_twist_max_residual_m: 0.030
-        delta_twist_max_residual_rad: 0.35
-        delta_twist_max_lead_m: 0.080
-        delta_twist_max_lead_rad: 0.35
+        delta_twist_max_residual_m: 0.012
+        delta_twist_max_residual_rad: 0.10
+        # Must stay below the strict chunk-follower divergence latch
+        # (50 mm / 0.1 rad) so lead clamp engages before safety fault.
+        delta_twist_max_lead_m: 0.025
+        delta_twist_max_lead_rad: 0.08
+        delta_twist_stale_residual_timeout_sec: 0.15
         chunk_feed_timeout_sec: 1.5
         fallback_policy: "fault"     # strict: no silent SMD fallback; cold start holds, loss latches ChunkFollowerFault (ResetFault to recover)
         engage_timeout_sec: 3.0      # max wait for the first chunk frame before faulting (fault policy only)

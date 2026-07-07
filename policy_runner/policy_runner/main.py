@@ -1166,6 +1166,16 @@ def _main_with_subcommands(argv: list[str]) -> int:
         help="Number of sampled action steps to execute before resampling; default is action_horizon//2.",
     )
     flow_infer.add_argument(
+        "--chunk-overlay-runway-steps",
+        type=int,
+        default=4,
+        help=(
+            "Extra future action rows to publish in the chunk overlay beyond --chunk-execute-steps. "
+            "This feeds servo-side follower reserve_steps only; Python execution, gripper dispatch, "
+            "and chunk anchoring still use --chunk-execute-steps."
+        ),
+    )
+    flow_infer.add_argument(
         "--chunk-anchor-source",
         choices=["actual", "command", "chain"],
         default="actual",
@@ -2136,6 +2146,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 "max_linear_step_m": args.max_linear_step_m,
                 "max_angular_step_rad": args.max_angular_step_rad,
                 "chunk_execute_steps": args.chunk_execute_steps,
+                "chunk_overlay_runway_steps": args.chunk_overlay_runway_steps,
                 "chunk_crossfade_steps": args.chunk_crossfade_steps,
                 "allow_rbpodo_controller_simulation_cartesian": (
                     rollout_policy.allows_controller_simulation_cartesian

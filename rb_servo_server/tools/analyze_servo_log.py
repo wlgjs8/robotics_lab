@@ -103,6 +103,13 @@ Q_REQUIRED_COLUMNS = [
 ]
 
 TIMESTAMP_COLUMNS = ["loop_start_time_ns", "loop_end_time_ns"]
+DELTA_TWIST_STEP_KIND_LABELS = {
+    0: "inactive",
+    1: "normal",
+    2: "reserve",
+    3: "residual_drain",
+    4: "ringdown",
+}
 
 
 class AnalysisError(Exception):
@@ -188,10 +195,19 @@ def make_delta_twist_bucket() -> dict[str, object]:
         "saturated_ticks": 0,
         "controller_counts": {},
         "step_counts": {},
+        "step_kind_counts": {},
+        "accel_clamp_counts": {},
         "pending_linear": [],
         "pending_angular": [],
+        "xi_ref_linear": [],
+        "xi_ref_angular": [],
         "xi_linear": [],
         "xi_angular": [],
+        "requested_yaw": [],
+        "realized_yaw": [],
+        "yaw_ratio": [],
+        "linear_ratio": [],
+        "angular_ratio": [],
     }
 
 
@@ -201,22 +217,41 @@ def bump_count(counts: dict[str, int], key: str) -> None:
 
 def finalize_delta_twist_bucket(bucket: dict[str, object]) -> dict[str, object]:
     step_counts = bucket["step_counts"]
+    step_kind_counts = bucket["step_kind_counts"]
     controller_counts = bucket["controller_counts"]
+    accel_clamp_counts = bucket["accel_clamp_counts"]
     assert isinstance(step_counts, dict)
+    assert isinstance(step_kind_counts, dict)
     assert isinstance(controller_counts, dict)
+    assert isinstance(accel_clamp_counts, dict)
+    kind_total = sum(int(value) for value in step_kind_counts.values())
+    kind_percent = {
+        key: (100.0 * float(value) / float(kind_total)) if kind_total > 0 else 0.0
+        for key, value in sorted(step_kind_counts.items())
+    }
     return {
         "rows": bucket["rows"],
         "active_ticks": bucket["active_ticks"],
         "stall_ticks": bucket["stall_ticks"],
         "saturated_ticks": bucket["saturated_ticks"],
         "controller_counts": dict(sorted(controller_counts.items())),
+        "step_kind_counts": dict(sorted(step_kind_counts.items())),
+        "step_kind_percent": kind_percent,
+        "accel_clamp_counts": dict(sorted(accel_clamp_counts.items())),
         "follower_step_distribution": dict(
             sorted(step_counts.items(), key=lambda item: int(item[0]))
         ),
         "pending_residual_linear_norm_m": percentile_summary(bucket["pending_linear"]),  # type: ignore[arg-type]
         "pending_residual_angular_norm_rad": percentile_summary(bucket["pending_angular"]),  # type: ignore[arg-type]
+        "xi_ref_linear_norm_m_s": percentile_summary(bucket["xi_ref_linear"]),  # type: ignore[arg-type]
+        "xi_ref_angular_norm_rad_s": percentile_summary(bucket["xi_ref_angular"]),  # type: ignore[arg-type]
         "commanded_linear_velocity_m_s": percentile_summary(bucket["xi_linear"]),  # type: ignore[arg-type]
         "commanded_angular_velocity_rad_s": percentile_summary(bucket["xi_angular"]),  # type: ignore[arg-type]
+        "requested_yaw_delta_rad": percentile_summary(bucket["requested_yaw"]),  # type: ignore[arg-type]
+        "realized_yaw_delta_rad": percentile_summary(bucket["realized_yaw"]),  # type: ignore[arg-type]
+        "yaw_realized_ratio": percentile_summary(bucket["yaw_ratio"]),  # type: ignore[arg-type]
+        "linear_realized_ratio": percentile_summary(bucket["linear_ratio"]),  # type: ignore[arg-type]
+        "angular_realized_ratio": percentile_summary(bucket["angular_ratio"]),  # type: ignore[arg-type]
     }
 
 
@@ -289,6 +324,10 @@ def analyze_csv(path: Path) -> dict[str, object]:
                 delta_columns = (
                     f"{arm}_delta_twist_pending_linear_norm_m",
                     f"{arm}_delta_twist_pending_angular_norm_rad",
+                    f"{arm}_delta_twist_step_yaw_rad",
+                    f"{arm}_delta_twist_realized_yaw_rad",
+                    f"{arm}_delta_twist_realized_yaw_ratio",
+                    f"{arm}_delta_twist_xi_ref_angular_norm_rad_s",
                     f"{arm}_delta_twist_xi_cmd_linear_norm_m_s",
                     f"{arm}_delta_twist_xi_cmd_angular_norm_rad_s",
                     f"{arm}_delta_twist_saturated",
@@ -316,11 +355,33 @@ def analyze_csv(path: Path) -> dict[str, object]:
                     if step != step_int:
                         raise AnalysisError(f"row {row_number}: column {arm}_follower_step must be an integer")
                     bump_count(bucket["step_counts"], str(step_int))  # type: ignore[arg-type]
+                step_kind = optional_float(row, f"{arm}_delta_twist_step_kind", row_number)
+                if step_kind is not None:
+                    step_kind_int = int(step_kind)
+                    if step_kind != step_kind_int:
+                        raise AnalysisError(f"row {row_number}: column {arm}_delta_twist_step_kind must be an integer")
+                    step_kind_name = DELTA_TWIST_STEP_KIND_LABELS.get(step_kind_int, str(step_kind_int))
+                    bump_count(bucket["step_kind_counts"], step_kind_name)  # type: ignore[arg-type]
+                for column, key in (
+                    (f"{arm}_safety_accel_clamped", "safety_accel_clamped"),
+                    (f"{arm}_smd_linear_accel_clipped", "smd_linear_accel_clipped"),
+                    (f"{arm}_smd_angular_accel_clipped", "smd_angular_accel_clipped"),
+                ):
+                    value = optional_bool(row, column, row_number)
+                    if value:
+                        bump_count(bucket["accel_clamp_counts"], key)  # type: ignore[arg-type]
                 for column, key in (
                     (f"{arm}_delta_twist_pending_linear_norm_m", "pending_linear"),
                     (f"{arm}_delta_twist_pending_angular_norm_rad", "pending_angular"),
+                    (f"{arm}_delta_twist_xi_ref_linear_norm_m_s", "xi_ref_linear"),
+                    (f"{arm}_delta_twist_xi_ref_angular_norm_rad_s", "xi_ref_angular"),
                     (f"{arm}_delta_twist_xi_cmd_linear_norm_m_s", "xi_linear"),
                     (f"{arm}_delta_twist_xi_cmd_angular_norm_rad_s", "xi_angular"),
+                    (f"{arm}_delta_twist_step_yaw_rad", "requested_yaw"),
+                    (f"{arm}_delta_twist_realized_yaw_rad", "realized_yaw"),
+                    (f"{arm}_delta_twist_realized_yaw_ratio", "yaw_ratio"),
+                    (f"{arm}_delta_twist_realized_linear_ratio", "linear_ratio"),
+                    (f"{arm}_delta_twist_realized_angular_ratio", "angular_ratio"),
                 ):
                     value = optional_float(row, column, row_number)
                     if value is not None:
@@ -483,8 +544,13 @@ def format_report(metrics: dict[str, object], budget: ProfileBudget, failures: S
                 f"active_ticks={arm_metrics['active_ticks']} "
                 f"stall_ticks={arm_metrics['stall_ticks']} "
                 f"saturated_ticks={arm_metrics['saturated_ticks']} "
-                f"follower_steps={arm_metrics['follower_step_distribution']}"
+                f"follower_steps={arm_metrics['follower_step_distribution']} "
+                f"step_kind_counts={arm_metrics.get('step_kind_counts', {})} "
+                f"step_kind_percent={arm_metrics.get('step_kind_percent', {})}"
             )
+            accel_counts = arm_metrics.get("accel_clamp_counts")
+            if isinstance(accel_counts, dict) and accel_counts:
+                lines.append(f"  {arm} accel_clamp_counts: {accel_counts}")
             lines.append(
                 f"  {arm} pending_linear_norm_m: "
                 f"{fmt_percentiles(arm_metrics.get('pending_residual_linear_norm_m'))}"
@@ -494,8 +560,32 @@ def format_report(metrics: dict[str, object], budget: ProfileBudget, failures: S
                 f"{fmt_percentiles(arm_metrics.get('pending_residual_angular_norm_rad'))}"
             )
             lines.append(
+                f"  {arm} xi_ref_angular_norm_rad_s: "
+                f"{fmt_percentiles(arm_metrics.get('xi_ref_angular_norm_rad_s'))}"
+            )
+            lines.append(
                 f"  {arm} xi_cmd_angular_norm_rad_s: "
                 f"{fmt_percentiles(arm_metrics.get('commanded_angular_velocity_rad_s'))}"
+            )
+            lines.append(
+                f"  {arm} requested_yaw_delta_rad: "
+                f"{fmt_percentiles(arm_metrics.get('requested_yaw_delta_rad'))}"
+            )
+            lines.append(
+                f"  {arm} realized_yaw_delta_rad: "
+                f"{fmt_percentiles(arm_metrics.get('realized_yaw_delta_rad'))}"
+            )
+            lines.append(
+                f"  {arm} yaw_realized_ratio: "
+                f"{fmt_percentiles(arm_metrics.get('yaw_realized_ratio'))}"
+            )
+            lines.append(
+                f"  {arm} linear_realized_ratio: "
+                f"{fmt_percentiles(arm_metrics.get('linear_realized_ratio'))}"
+            )
+            lines.append(
+                f"  {arm} angular_realized_ratio: "
+                f"{fmt_percentiles(arm_metrics.get('angular_realized_ratio'))}"
             )
     if failures:
         lines.append("budget_failures:")

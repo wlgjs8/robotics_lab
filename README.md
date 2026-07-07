@@ -321,6 +321,26 @@ checkpoint/config/python은 각각 `FLOW_INFER_CHECKPOINT`, `FLOW_INFER_CONFIG`,
 `FLOW_INFER_PYTHON`으로 바꿀 수 있고, `OPENPI_REMOTE_SKIP_WARMUP`,
 `RB_ALLOW_REAL_GRIPPER`, `DISPLAY` 등 호출 환경은 그대로 상속됩니다.
 
+DeltaTwistFollower + velocity-proprio 안정성 확인을 위한 첫 실행 baseline은
+아래처럼 둡니다. RTC/ensemble은 기본 안정성 확인 뒤 별도로 opt-in합니다.
+
+```bash
+FLOW_INFER_STITCH=boundary \
+FLOW_INFER_ACTION_HORIZON=24 \
+FLOW_INFER_CHUNK_EXECUTE_STEPS=6 \
+FLOW_INFER_CHUNK_OVERLAY_RUNWAY_STEPS=4 \
+FLOW_INFER_VELPROPRIO_SOURCE=measured \
+FLOW_INFER_VELPROPRIO_SAMPLE=camera_frame \
+FLOW_INFER_PRINT_CHUNK=0 \
+FLOW_INFER_PRINT_TRACKING=0 \
+RB_ALLOW_REAL_GRIPPER=1 \
+./tools/flow_infer_real_policy.sh \
+  --proprio-mode velocity \
+  --depth-z-near-mm 50 \
+  --depth-z-far-mm 700 \
+  --depth-units-m 1e-4
+```
+
 HDF5 policy episodes should be audited before `flow-train`:
 
 ```bash

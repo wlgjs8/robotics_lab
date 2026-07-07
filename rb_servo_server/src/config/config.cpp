@@ -234,6 +234,7 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         "delta_twist_max_residual_rad",
         "delta_twist_max_lead_m",
         "delta_twist_max_lead_rad",
+        "delta_twist_stale_residual_timeout_sec",
         "chunk_feed_timeout_sec",
     }, path);
     if (has(node, "enable")) out->enable = asBool(node["enable"], path + ".enable");
@@ -315,6 +316,13 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
     if (has(node, "delta_twist_max_lead_rad")) {
         out->delta_twist_max_lead_rad =
             asDouble(node["delta_twist_max_lead_rad"], path + ".delta_twist_max_lead_rad");
+    }
+    if (has(node, "delta_twist_stale_residual_timeout_sec")) {
+        out->delta_twist_stale_residual_timeout_sec =
+            asDouble(
+                node["delta_twist_stale_residual_timeout_sec"],
+                path + ".delta_twist_stale_residual_timeout_sec"
+            );
     }
     if (has(node, "chunk_feed_timeout_sec")) {
         out->chunk_feed_timeout_sec = asDouble(node["chunk_feed_timeout_sec"], path + ".chunk_feed_timeout_sec");
@@ -1634,6 +1642,10 @@ void validateConfig(const DualArmConfig& cfg) {
         validatePositiveFinite(rf.delta_twist_max_residual_rad, path + ".delta_twist_max_residual_rad");
         validatePositiveFinite(rf.delta_twist_max_lead_m, path + ".delta_twist_max_lead_m");
         validatePositiveFinite(rf.delta_twist_max_lead_rad, path + ".delta_twist_max_lead_rad");
+        validatePositiveFinite(
+            rf.delta_twist_stale_residual_timeout_sec,
+            path + ".delta_twist_stale_residual_timeout_sec"
+        );
         if (rf.enable && cfg.network.chunk_frame_bind.empty()) {
             throw std::runtime_error(
                 path + ".enable=true requires network.chunk_frame_bind (dedicated chunk-frame UDP ingest)"
