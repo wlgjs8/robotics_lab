@@ -621,12 +621,9 @@ void CommandServer::threadMain(std::promise<bool> startup_result) {
                     } else {
                         command_buffer_->setCommand(cmd);
                     }
-                    // Stamp external-box feed liveness at RECEIVE time (not apply
-                    // time). SetExternalBoxes is a leaseless heartbeat that shares
-                    // the single latest-command slot with the high-rate motion
-                    // stream; measuring receipt here keeps the servo watchdog from
-                    // false-aborting when the control loop is momentarily starved
-                    // of the slot, while still catching a genuinely dead producer.
+                    // Stamp external-box feed liveness at RECEIVE time. The payload
+                    // itself is stored in a CommandBuffer side slot, not the motion
+                    // latest slot, so heartbeat packets cannot interrupt teleop.
                     if (cmd.has_external_boxes) {
                         command_buffer_->noteExternalBoxReceived(receive_time_ns);
                     }

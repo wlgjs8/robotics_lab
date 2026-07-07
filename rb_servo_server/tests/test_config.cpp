@@ -1155,6 +1155,78 @@ bool testRuckigFollowerFallbackPolicyConfig() {
     return true;
 }
 
+bool testRuckigFollowerControllerConfig() {
+    const std::string default_path = writeTempConfig(
+        "ruckig-follower-controller-default",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+    );
+    const rb_servo::DualArmConfig defaults = rb_servo::loadConfigFromYaml(default_path);
+    ::unlink(default_path.c_str());
+    RB_CHECK(defaults.cartesian_control.ruckig_follower.controller ==
+             rb_servo::RuckigFollowerController::RuckigWaypoint);
+    RB_CHECK(defaults.cartesian_control.tcp_pose_target_profiles.front().ruckig_follower.controller ==
+             rb_servo::RuckigFollowerController::RuckigWaypoint);
+
+    const std::string delta_path = writeTempConfig(
+        "ruckig-follower-controller-delta",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    controller: \"delta_twist\"\n"
+        "    delta_twist_tau_sec: 0.031\n"
+        "    delta_twist_residual_drain_steps: 2\n"
+        "    delta_twist_max_residual_m: 0.041\n"
+        "    delta_twist_max_residual_rad: 0.42\n"
+        "    delta_twist_max_lead_m: 0.091\n"
+        "    delta_twist_max_lead_rad: 0.51\n"
+        "  tcp_pose_target_profile_default: strict\n"
+        "  tcp_pose_target_profiles:\n"
+        "    strict:\n"
+        "      ruckig_follower:\n"
+        "        controller: \"ruckig_waypoint\"\n"
+    );
+    const rb_servo::DualArmConfig delta_cfg = rb_servo::loadConfigFromYaml(delta_path);
+    ::unlink(delta_path.c_str());
+    RB_CHECK(delta_cfg.cartesian_control.ruckig_follower.controller ==
+             rb_servo::RuckigFollowerController::DeltaTwist);
+    RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_tau_sec, 0.031));
+    RB_CHECK(delta_cfg.cartesian_control.ruckig_follower.delta_twist_residual_drain_steps == 2);
+    RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_max_residual_m, 0.041));
+    RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_max_residual_rad, 0.42));
+    RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_max_lead_m, 0.091));
+    RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_max_lead_rad, 0.51));
+    RB_CHECK(delta_cfg.cartesian_control.tcp_pose_target_profiles.front().ruckig_follower.controller ==
+             rb_servo::RuckigFollowerController::RuckigWaypoint);
+
+    const std::string bad_controller_path = writeTempConfig(
+        "ruckig-follower-bad-controller",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    controller: \"central_difference\"\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(
+        bad_controller_path,
+        "cartesian_control.ruckig_follower.controller"
+    ));
+    ::unlink(bad_controller_path.c_str());
+
+    const std::string bad_tau_path = writeTempConfig(
+        "ruckig-follower-bad-delta-tau",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    delta_twist_tau_sec: 0.0\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(
+        bad_tau_path,
+        "cartesian_control.ruckig_follower.delta_twist_tau_sec"
+    ));
+    ::unlink(bad_tau_path.c_str());
+
+    return true;
+}
+
 bool testSendAtTickStartAndPipelinedReadConfig() {
     // Defaults: both jitter-decoupling flags stay off (legacy in-tick send +
     // blocking state read) unless a config opts in.
@@ -1207,6 +1279,7 @@ int main() {
     if (!testIntraArmSelfCollisionConfig()) return 1;
     if (!testInitMotionPlannerConfigExt()) return 1;
     if (!testRuckigFollowerFallbackPolicyConfig()) return 1;
+    if (!testRuckigFollowerControllerConfig()) return 1;
     if (!testSendAtTickStartAndPipelinedReadConfig()) return 1;
     return 0;
 }

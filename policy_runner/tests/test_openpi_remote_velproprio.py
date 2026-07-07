@@ -306,5 +306,140 @@ class VelocityProprioFixedStepTest(unittest.TestCase):
         np.testing.assert_allclose(out, pose, atol=1e-9)
 
 
+@unittest.skipIf(OpenpiRemoteActionSource is None, "torch is not installed")
+class VelocityProprioCameraFrameTest(unittest.TestCase):
+    """velproprio_sample_mode='camera_frame': measured per-frame body delta at image time."""
+
+    def _make_source(self, *, policy_dt: float = 0.2, velproprio_source: str = "measured"):
+        from collections import deque
+
+        src = OpenpiRemoteActionSource.__new__(OpenpiRemoteActionSource)
+        src.proprio_mode = "velocity"
+        src._state_dim = 12
+        src.ee_local_r_align = resolve_ee_local_r_align(None)
+        src.policy_dt_sec = policy_dt
+        src.velproprio_sample_mode = "camera_frame"
+        src.velproprio_source = velproprio_source
+        src._pose_history = {"left": deque(maxlen=512), "right": deque(maxlen=512)}
+        src._command_pose_history = {"left": deque(maxlen=512), "right": deque(maxlen=512)}
+        src._last_obs_camera_bundle = None
+        src._last_obs_camera_time_sec = None
+        src._last_obs_camera_seq = None
+        src._last_command_pose_by_arm = {"left": None, "right": None}
+        src._last_now_monotonic = None
+        src._vel_prev_pose_by_arm = {"left": None, "right": None}
+        src._vel_prev_sample_t = None
+        src._live_gripper_percent = lambda side: None
+        return src
+
+    def _push(self, src, side, t, pose):
+        src._pose_history[side].append((float(t), np.asarray(pose, dtype=np.float64)))
+
+    def test_cold_start_without_camera_time_is_zero(self) -> None:
+        src = self._make_source()
+        self._push(src, "left", 0.0, _IDENT)
+        self._push(src, "left", src.policy_dt_sec, [0.02, 0.0, 0.0, 0, 0, 0, 1])
+
+        out = src._proprio_state(_payload(_IDENT, _IDENT))
+
+        np.testing.assert_allclose(out, np.zeros(12), atol=1e-7)
+
+    def test_translation_uses_interpolated_local_delta_without_dt_scaling(self) -> None:
+        dt = 0.2
+        src = self._make_source(policy_dt=dt)
+        src._last_obs_camera_time_sec = 1.0
+        q_z90 = Rotation.from_euler("z", np.pi / 2.0).as_quat().tolist()
+        # Interpolation targets:
+        #   t_prev=0.8 -> pos [1, 2.00, 3], q_z90
+        #   t_cur =1.0 -> pos [1, 2.04, 3], q_z90
+        # World +Y is local +X under q_z90, and the raw 4 cm frame delta must not
+        # become 20 cm/s by dividing by dt.
+        self._push(src, "left", 0.75, [1.0, 1.99, 3.0] + q_z90)
+        self._push(src, "left", 0.85, [1.0, 2.01, 3.0] + q_z90)
+        self._push(src, "left", 0.95, [1.0, 2.03, 3.0] + q_z90)
+        self._push(src, "left", 1.05, [1.0, 2.05, 3.0] + q_z90)
+
+        out = src._proprio_state(_payload(_IDENT, _IDENT))
+
+        np.testing.assert_allclose(out[:6], [0.04, 0.0, 0.0, 0.0, 0.0, 0.0], atol=1e-6)
+        np.testing.assert_allclose(out[6:], np.zeros(6), atol=1e-6)
+
+    def test_rotation_delta_is_raw_local_rotvec(self) -> None:
+        src = self._make_source(policy_dt=0.1)
+        src._last_obs_camera_time_sec = 1.0
+        theta = 0.2
+        cur = [0.0, 0.0, 0.0] + Rotation.from_rotvec([0.0, 0.0, theta]).as_quat().tolist()
+        self._push(src, "left", 0.9, _IDENT)
+        self._push(src, "left", 1.0, cur)
+
+        out = src._proprio_state(_payload(_IDENT, _IDENT))
+
+        np.testing.assert_allclose(out[:3], [0.0, 0.0, 0.0], atol=1e-6)
+        np.testing.assert_allclose(out[3:6], [0.0, 0.0, theta], atol=1e-6)
+
+    def test_uses_camera_time_window_not_previous_inference_time_or_payload(self) -> None:
+        dt = 0.25
+        src = self._make_source(policy_dt=dt)
+        src._last_obs_camera_time_sec = 10.0
+        src._last_now_monotonic = 5.0
+        # Distractor window around the previous inference time; camera_frame must ignore it.
+        self._push(src, "left", 5.0 - dt, _IDENT)
+        self._push(src, "left", 5.0, [0.5, 0.0, 0.0, 0, 0, 0, 1])
+        # Actual camera observation window.
+        self._push(src, "left", 10.0 - dt, _IDENT)
+        self._push(src, "left", 10.0, [0.0, 0.02, 0.0, 0, 0, 0, 1])
+        payload_pose = [9.0, 9.0, 9.0, 0, 0, 0, 1]
+
+        out = src._proprio_state(_payload(payload_pose, _IDENT))
+
+        np.testing.assert_allclose(out[:6], [0.0, 0.02, 0.0, 0.0, 0.0, 0.0], atol=1e-6)
+
+    def test_sparse_interpolation_window_returns_zero(self) -> None:
+        src = self._make_source(policy_dt=0.1)
+        src._last_obs_camera_time_sec = 1.0
+        self._push(src, "left", 0.50, _IDENT)
+        self._push(src, "left", 0.95, [0.09, 0.0, 0.0, 0, 0, 0, 1])
+        self._push(src, "left", 1.00, [0.10, 0.0, 0.0, 0, 0, 0, 1])
+
+        out = src._proprio_state(_payload(_IDENT, _IDENT))
+
+        np.testing.assert_allclose(out, np.zeros(12), atol=1e-7)
+
+    def test_pose_history_snapshot_tolerates_mutation_during_interpolation(self) -> None:
+        src = self._make_source(policy_dt=0.1)
+        src._last_obs_camera_time_sec = 1.0
+        self._push(src, "left", 0.80, _IDENT)
+        self._push(src, "left", 0.90, _IDENT)
+        self._push(src, "left", 1.00, [0.01, 0.0, 0.0, 0, 0, 0, 1])
+
+        original_normalize = src._normalize_pose7_or_none
+        mutated = False
+
+        def mutate_once(pose):
+            nonlocal mutated
+            if not mutated:
+                mutated = True
+                src._pose_history["left"].append(
+                    (1.10, np.asarray([0.02, 0.0, 0.0, 0, 0, 0, 1], dtype=np.float64))
+                )
+            return original_normalize(pose)
+
+        src._normalize_pose7_or_none = mutate_once
+
+        out = src._proprio_state(_payload(_IDENT, _IDENT))
+
+        self.assertTrue(mutated)
+        np.testing.assert_allclose(out[:6], [0.01, 0.0, 0.0, 0.0, 0.0, 0.0], atol=1e-6)
+        np.testing.assert_allclose(out[6:], np.zeros(6), atol=1e-6)
+
+    def test_command_source_validation_rejects_camera_frame(self) -> None:
+        with self.assertRaisesRegex(ValueError, "camera_frame"):
+            OpenpiRemoteActionSource._validate_velproprio_source(
+                "command",
+                proprio_mode="velocity",
+                velproprio_sample_mode="camera_frame",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

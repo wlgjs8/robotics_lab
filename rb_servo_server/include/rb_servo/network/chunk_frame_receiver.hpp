@@ -3,11 +3,13 @@
 //
 // Wire format: the producer's chunk-overlay packet (chunk_overlay_publisher.py,
 // schema "robotics_lab.chunk_overlay.v2") — measured-anchored absolute stand
-// pose7+grip per step:
+// pose7+grip per step, plus optional conditioned local/body-frame delta rows:
 //   { "schema_version": "robotics_lab.chunk_overlay.v2", "seq": N,
 //     "policy_dt_sec": 0.033, "horizon": H, "host_time_ns": ...,
 //     "left":  [[x,y,z,qx,qy,qz,qw,grip] * H] | null,
-//     "right": [[...] * H] | null }
+//     "right": [[...] * H] | null,
+//     "left_delta":  [[dx,dy,dz,drx,dry,drz,grip] * H],   // optional
+//     "right_delta": [[dx,dy,dz,drx,dry,drz,grip] * H] }  // optional
 // The producer fans the same packet out to the GUI overlay port and to this
 // bind; DELIBERATELY separate from the lease-gated command socket so the 500 Hz
 // command stream can never starve the ~1-2 Hz chunk feed (see
@@ -33,11 +35,17 @@ namespace rb_servo {
 class ChunkFrameReceiver {
 public:
     static constexpr int kMaxSteps = 64;
-    static constexpr int kStepDims = 8;  // x y z qx qy qz qw grip
+    static constexpr int kPoseStepDims = 8;   // x y z qx qy qz qw grip
+    static constexpr int kDeltaStepDims = 7;  // dx dy dz drx dry drz grip
+    static constexpr int kStepDims = kPoseStepDims;  // compatibility alias
 
     struct ArmSteps {
         int count = 0;
-        std::array<std::array<double, kStepDims>, kMaxSteps> step{};
+        std::array<std::array<double, kPoseStepDims>, kMaxSteps> step{};
+    };
+    struct ArmDeltaSteps {
+        int count = 0;
+        std::array<std::array<double, kDeltaStepDims>, kMaxSteps> step{};
     };
     struct Frame {
         std::uint64_t seq = 0;           // producer seq (may reset on restart)
@@ -48,6 +56,10 @@ public:
         bool has_right = false;
         ArmSteps left;
         ArmSteps right;
+        bool has_left_delta = false;
+        bool has_right_delta = false;
+        ArmDeltaSteps left_delta;
+        ArmDeltaSteps right_delta;
     };
 
     explicit ChunkFrameReceiver(const std::string& bind_uri);

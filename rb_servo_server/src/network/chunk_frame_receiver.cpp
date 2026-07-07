@@ -48,8 +48,8 @@ bool parseArm(const json& arm_node, ChunkFrameReceiver::ArmSteps* out) {
     const int count = std::min(n, ChunkFrameReceiver::kMaxSteps);
     for (int i = 0; i < count; ++i) {
         const json& row = arm_node[i];
-        if (!row.is_array() || row.size() < ChunkFrameReceiver::kStepDims) return false;
-        for (int d = 0; d < ChunkFrameReceiver::kStepDims; ++d) {
+        if (!row.is_array() || row.size() < ChunkFrameReceiver::kPoseStepDims) return false;
+        for (int d = 0; d < ChunkFrameReceiver::kPoseStepDims; ++d) {
             if (!row[d].is_number()) return false;
             const double v = row[d].get<double>();
             if (!std::isfinite(v)) return false;
@@ -60,6 +60,26 @@ bool parseArm(const json& arm_node, ChunkFrameReceiver::ArmSteps* out) {
             out->step[i][3] * out->step[i][3] + out->step[i][4] * out->step[i][4] +
             out->step[i][5] * out->step[i][5] + out->step[i][6] * out->step[i][6]);
         if (qn < 1e-6) return false;
+    }
+    out->count = count;
+    return true;
+}
+
+bool parseArmDelta(const json& arm_node, ChunkFrameReceiver::ArmDeltaSteps* out) {
+    if (arm_node.is_null()) return false;
+    if (!arm_node.is_array()) return false;
+    const int n = static_cast<int>(arm_node.size());
+    if (n < 1) return false;
+    const int count = std::min(n, ChunkFrameReceiver::kMaxSteps);
+    for (int i = 0; i < count; ++i) {
+        const json& row = arm_node[i];
+        if (!row.is_array() || row.size() < ChunkFrameReceiver::kDeltaStepDims) return false;
+        for (int d = 0; d < ChunkFrameReceiver::kDeltaStepDims; ++d) {
+            if (!row[d].is_number()) return false;
+            const double v = row[d].get<double>();
+            if (!std::isfinite(v)) return false;
+            out->step[i][d] = v;
+        }
     }
     out->count = count;
     return true;
@@ -106,6 +126,17 @@ bool ChunkFrameReceiver::parsePacket(const char* data, std::size_t size, Frame* 
     const auto right_it = packet.find("right");
     if (right_it != packet.end()) frame.has_right = parseArm(*right_it, &frame.right);
     if (!frame.has_left && !frame.has_right) return false;
+
+    const auto left_delta_it = packet.find("left_delta");
+    if (left_delta_it != packet.end()) {
+        frame.has_left_delta = parseArmDelta(*left_delta_it, &frame.left_delta);
+        if (!frame.has_left_delta || !frame.has_left) return false;
+    }
+    const auto right_delta_it = packet.find("right_delta");
+    if (right_delta_it != packet.end()) {
+        frame.has_right_delta = parseArmDelta(*right_delta_it, &frame.right_delta);
+        if (!frame.has_right_delta || !frame.has_right) return false;
+    }
 
     frame.recv_steady_sec = steadyNowSec();
     *out = frame;

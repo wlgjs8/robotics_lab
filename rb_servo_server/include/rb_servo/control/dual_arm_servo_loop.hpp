@@ -16,6 +16,7 @@
 #include "rb_servo/control/cartesian_chunk_follower.hpp"
 #include "rb_servo/control/cartesian_servo_controller.hpp"
 #include "rb_servo/control/command_buffer.hpp"
+#include "rb_servo/control/delta_twist_follower.hpp"
 #include "rb_servo/control/joint_moving_average.hpp"
 #include "rb_servo/control/smd_pose_tracker.hpp"
 #include "rb_servo/network/chunk_frame_receiver.hpp"
@@ -240,6 +241,7 @@ private:
     bool commandRequestsSetSafetyRoiBounds(const DualArmCommand& command) const;
     bool commandRequestsSetExternalBoxes(const DualArmCommand& command) const;
     bool commandRequestsSetUserSafetyFloorPlane(const DualArmCommand& command) const;
+    bool applySetExternalBoxesCommand(const DualArmCommand& command);
     bool commandRequestsEmergencyStop(const DualArmCommand& command) const;
     bool commandRequestsArmMotion(const DualArmCommand& command) const;
     bool commandRequestsDisarmMotion(const DualArmCommand& command) const;
@@ -391,9 +393,9 @@ private:
     // (producer never started, or it stopped), checkExternalBoxFeedOrAbort() aborts the
     // process with a loud reason instead of running on without keep-out. Inert when the
     // boxes are monitor_only or disabled (the current default config). Liveness itself
-    // is stamped at RECEIVE time on the shared CommandBuffer
-    // (CommandBuffer::lastExternalBoxReceiveNs) so a high-rate motion stream sharing the
-    // single latest-command slot cannot starve the signal and false-abort.
+    // is stamped at RECEIVE time on the CommandBuffer
+    // (CommandBuffer::lastExternalBoxReceiveNs), independent of the external-box side
+    // slot, so control-loop scheduling cannot hide a live producer or false-abort.
     uint64_t external_box_enforce_start_ns_ = 0;    // first enforced tick (startup-grace anchor)
     void checkExternalBoxFeedOrAbort(uint64_t now_ns);
 
@@ -591,12 +593,13 @@ private:
     SmdPoseTracker right_pose_track_smd_{PoseTrackSmdConfig{}};
     std::string left_pose_track_profile_name_;
     std::string right_pose_track_profile_name_;
-    // Ruckig chunk-follower stage (per-profile opt-in replacement for the SMD
-    // step). Constructed with defaults here (off the RT path, absorbing the
-    // one-time ruckig prewarm); rebuilt in applyChunkFollowerStage when the
-    // active profile's ruckig_follower params change.
+    // Chunk-follower stage (per-profile opt-in replacement for the SMD step).
+    // The default absolute-waypoint follower still prewarms Ruckig off the RT
+    // path; delta_twist consumes local action deltas through a separate state.
     control::CartesianChunkFollower left_chunk_follower_{control::CartesianChunkFollowerConfig{}};
     control::CartesianChunkFollower right_chunk_follower_{control::CartesianChunkFollowerConfig{}};
+    control::DeltaTwistFollower left_delta_twist_follower_{control::DeltaTwistFollowerConfig{}};
+    control::DeltaTwistFollower right_delta_twist_follower_{control::DeltaTwistFollowerConfig{}};
     RuckigFollowerConfig left_chunk_follower_built_{};
     RuckigFollowerConfig right_chunk_follower_built_{};
     std::uint64_t left_chunk_submitted_wire_seq_ = 0;
@@ -643,6 +646,19 @@ private:
         const JointArray& previous_sent_q_deg,
         double dt_sec
     );
+    ArmCommand applyDeltaTwistFollowerStage(
+        ArmId arm_id,
+        const ArmCommand& command,
+        const TcpPoseTargetProfileConfig& profile,
+        control::DeltaTwistFollower* follower,
+        RuckigFollowerConfig* built_cfg,
+        std::uint64_t* submitted_wire_seq,
+        std::uint64_t* submitted_recv_seq,
+        SmdPoseTracker* smd_tracker,
+        const ArmMountConfig& mount,
+        const JointArray& previous_sent_q_deg,
+        double dt_sec
+    );
     JointMovingAverage left_output_ma_{0};
     JointMovingAverage right_output_ma_{0};
     // A/B/C separation telemetry (Patch 4), captured each tick from the SMD step
@@ -663,8 +679,9 @@ private:
         JointArray q_target_after_output_ma_deg{};
         bool safety_clamp_present = false;
         SafetyClampTelemetry safety_clamp;
-        // Ruckig chunk-follower stage telemetry (captured in
-        // applyChunkFollowerStage each tick; merged into cartesian_solve).
+        // Chunk-follower stage telemetry (captured in apply*FollowerStage each
+        // tick; merged into cartesian_solve).
+        std::string follower_controller = "none";
         bool follower_active = false;
         std::uint64_t follower_wire_seq = 0;
         std::uint64_t follower_recv_seq = 0;
@@ -681,6 +698,11 @@ private:
         double follower_divergence_ang_rad = 0.0;
         std::uint64_t follower_reanchor_count = 0;
         bool safety_intervention_recent = false;
+        double delta_twist_pending_linear_norm_m = 0.0;
+        double delta_twist_pending_angular_norm_rad = 0.0;
+        double delta_twist_xi_cmd_linear_norm_m_s = 0.0;
+        double delta_twist_xi_cmd_angular_norm_rad_s = 0.0;
+        bool delta_twist_saturated = false;
     };
     AbcTelemetry left_abc_telemetry_;
     AbcTelemetry right_abc_telemetry_;

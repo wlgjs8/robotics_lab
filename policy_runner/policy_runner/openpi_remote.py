@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 from collections import deque
 from dataclasses import replace
@@ -268,6 +269,9 @@ def rtc_shift_prev_chunk(raw_chunk, execute_steps):
 # window is read, so this is a cheap bounded ring.
 _VELPROPRIO_HISTORY_MAXLEN = 512
 _VELPROPRIO_SOURCES = ("measured", "command")
+_VELPROPRIO_SAMPLE_MODES = ("replan", "fixed_step", "camera_frame")
+_CAMERA_TIME_MAX_PLAUSIBLE_AGE_SEC = 5.0
+_CAMERA_TIME_FUTURE_TOLERANCE_SEC = 0.010
 
 
 class OpenpiRemoteActionSource(FlowMatchingActionSource):
@@ -379,10 +383,10 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # nostate (zero_state=True) checkpoints ignore this server-side, so any mode works there.
         # velocity/velocity_grip/velocity_grav are init-pose-INDEPENDENT (egocentric) -> avoid the
         # per-episode rotated reset frame that makes reset-relative pose non-ego-centric (see the
-        # velproprio configs in openpi training/config.py). The velocity is finite-differenced from the
-        # robot TCP pose between proprio samples and normalized to one policy step (the training per-frame
-        # delta); velocity_grav ADDS an absolute gravity-tilt anchor (world-down in the tool frame, still
-        # yaw-invariant/ego-centric). See _proprio_state_velocity.
+        # velproprio configs in openpi training/config.py). The "velocity" value is a body-frame
+        # per-frame delta, not SI velocity; only legacy modes rescale it to approximate one policy
+        # step. velocity_grav ADDS an absolute gravity-tilt anchor (world-down in the tool frame,
+        # still yaw-invariant/ego-centric). See _proprio_state_velocity.
         if str(proprio_mode) not in ("pose", "velocity", "velocity_grip", "velocity_grav"):
             raise ValueError(
                 f"proprio_mode must be 'pose', 'velocity', 'velocity_grip', or 'velocity_grav', got {proprio_mode!r}"
@@ -400,9 +404,12 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         #              taken from a per-tick pose history (see _record_pose_history), independent
         #              of replan cadence and inference latency. Reproduces the training converter's
         #              single 30 Hz frame delta (openpi _arm_velocity) regardless of the controller.
-        if str(velproprio_sample_mode) not in ("replan", "fixed_step"):
+        #   camera_frame: interpolate the MEASURED pose history at the camera observation time and
+        #              one policy_dt earlier, then emit the raw local/body delta with NO dt scaling.
+        #              This is the closest live equivalent of OpenPI/UMI converter _arm_velocity.
+        if str(velproprio_sample_mode) not in _VELPROPRIO_SAMPLE_MODES:
             raise ValueError(
-                f"velproprio_sample_mode must be 'replan' or 'fixed_step', got {velproprio_sample_mode!r}"
+                f"velproprio_sample_mode must be one of {_VELPROPRIO_SAMPLE_MODES}, got {velproprio_sample_mode!r}"
             )
         self.velproprio_sample_mode = str(velproprio_sample_mode)
         self.velproprio_source = validated_velproprio_source
@@ -410,7 +417,11 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # and the wall-clock of that sample (to rescale a multi-step displacement to one policy step).
         self._vel_prev_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._vel_prev_sample_t: float | None = None
-        # Per-tick measured-pose history for velproprio_sample_mode='fixed_step': (t_monotonic, pose7).
+        # The streamed OpenPI path samples proprio in a prefetch thread while the
+        # main 500 Hz loop records measured poses. Guard history deque iteration
+        # with a short snapshot lock; Python deque raises if mutated mid-iteration.
+        self._velproprio_history_lock = threading.Lock()
+        # Per-tick measured-pose history for history-based velproprio modes: (t_monotonic, pose7).
         self._pose_history: dict[str, deque] = {
             "left": deque(maxlen=_VELPROPRIO_HISTORY_MAXLEN),
             "right": deque(maxlen=_VELPROPRIO_HISTORY_MAXLEN),
@@ -424,6 +435,9 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         }
         self._last_command_pose_by_arm: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._last_now_monotonic: float | None = None
+        self._last_obs_camera_bundle: Any | None = None
+        self._last_obs_camera_time_sec: float | None = None
+        self._last_obs_camera_seq: int | None = None
         self.command_family = FLOW_COMMAND_LABEL
         # Fake-image smoke mode runs camera-less so the runtime does not gate on frames.
         self.camera_names = [] if self._fake_images else [str(name) for name in camera_names]
@@ -546,6 +560,8 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # (position deltas in meters, rotation deltas in degrees).
         self._print_chunk_enabled = _env_truthy(os.environ.get("FLOW_INFER_PRINT_CHUNK"))
         self._print_chunk_seq = 0
+        self._print_delta_overlay_enabled = _env_truthy(os.environ.get("FLOW_INFER_PRINT_DELTA_OVERLAY"))
+        self._print_velproprio_enabled = _env_truthy(os.environ.get("FLOW_INFER_PRINT_VELPROPRIO"))
         # Per-step chunk-vs-actual tracking dump (FLOW_INFER_PRINT_TRACKING). This
         # class skips super().__init__, so the state the inherited _begin/_log_chunk
         # _tracking helpers touch must be seeded here too.
@@ -615,7 +631,12 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                     " -- velocity from a fixed ~policy_dt window (per-tick pose history); "
                     "decoupled from replan cadence + inference latency"
                     if self.velproprio_sample_mode == "fixed_step"
-                    else " -- velocity from successive replan-boundary samples, rescaled by policy_dt/wall_dt"
+                    else (
+                        " -- measured TCP local delta over [camera_time - policy_dt, camera_time]; "
+                        "no dt normalization, closest to OpenPI/UMI converter semantics"
+                        if self.velproprio_sample_mode == "camera_frame"
+                        else " -- velocity from successive replan-boundary samples, rescaled by policy_dt/wall_dt"
+                    )
                 ),
                 file=self.stderr,
                 flush=True,
@@ -736,6 +757,12 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 f"velproprio_source must be one of {_VELPROPRIO_SOURCES}, got {velproprio_source!r}"
             )
         if source == "command":
+            if str(velproprio_sample_mode) == "camera_frame":
+                raise ValueError(
+                    "velproprio_source='command' is not supported with "
+                    "velproprio_sample_mode='camera_frame'; camera_frame is camera/image aligned "
+                    "and requires velproprio_source='measured'"
+                )
             if str(velproprio_sample_mode) != "fixed_step":
                 raise ValueError(
                     "velproprio_source='command' requires velproprio_sample_mode='fixed_step'; "
@@ -748,12 +775,89 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 )
         return source
 
+    @staticmethod
+    def _state_history_time_sec(payload: Any, now_monotonic: float) -> float:
+        """Best monotonic timestamp for a state payload, falling back to receipt time.
+
+        Server state ``host_time_ns`` is expected to be in the monotonic/steady-clock
+        domain. Use it only when it is close to Python's monotonic receipt time; this
+        avoids accidentally mixing epoch or camera raw-clock stamps into pose history.
+        """
+        try:
+            raw = payload.get("host_time_ns") if isinstance(payload, dict) else None
+            state_time = float(raw) * 1e-9
+        except Exception:  # noqa: BLE001 - malformed timestamps are not fatal to proprio
+            return float(now_monotonic)
+        if np.isfinite(state_time) and abs(state_time - float(now_monotonic)) < 5.0:
+            return state_time
+        return float(now_monotonic)
+
+    @staticmethod
+    def _normalize_pose7_or_none(pose: Any) -> np.ndarray | None:
+        arr = np.asarray(pose, dtype=np.float64)
+        if arr.shape != (7,) or not np.all(np.isfinite(arr)):
+            return None
+        q_norm = float(np.linalg.norm(arr[3:7]))
+        if q_norm <= 1e-9 or not np.isfinite(q_norm):
+            return None
+        out = arr.copy()
+        out[3:7] /= q_norm
+        return out
+
+    def _clear_last_obs_camera_bundle(self) -> None:
+        self._last_obs_camera_bundle = None
+        self._last_obs_camera_time_sec = None
+        self._last_obs_camera_seq = None
+
+    def _camera_bundle_time_monotonic(self, bundle: Any) -> float | None:
+        """Map a camera bundle timestamp into Python's monotonic domain.
+
+        ``bundle_time_ns`` is stamped by camera_server's CLOCK_MONOTONIC_RAW clock,
+        while state history and Python control timing use the monotonic domain. Map
+        raw->monotonic using the current offset at polling time. If the raw stamp is
+        absent or maps to a future/implausibly old time, fall back to the bundle's
+        Python-side receipt timestamp instead of comparing raw camera time directly
+        to robot ``host_time_ns``.
+        """
+        mono_now_sec = time.monotonic()
+
+        def fallback_received() -> float | None:
+            try:
+                received = float(getattr(bundle, "received_monotonic"))
+            except Exception:  # noqa: BLE001
+                return None
+            return received if np.isfinite(received) else None
+
+        try:
+            bundle_time_ns = int(getattr(bundle, "bundle_time_ns", 0) or 0)
+        except Exception:  # noqa: BLE001
+            bundle_time_ns = 0
+        if bundle_time_ns <= 0:
+            return fallback_received()
+
+        raw_clock = getattr(time, "CLOCK_MONOTONIC_RAW", None)
+        if raw_clock is None:
+            return fallback_received()
+        raw_now_sec = time.clock_gettime_ns(raw_clock) * 1e-9
+        t_img_mono = mono_now_sec - (raw_now_sec - bundle_time_ns * 1e-9)
+        age_sec = mono_now_sec - t_img_mono
+        if (
+            not np.isfinite(t_img_mono)
+            or age_sec < -_CAMERA_TIME_FUTURE_TOLERANCE_SEC
+            or age_sec > _CAMERA_TIME_MAX_PLAUSIBLE_AGE_SEC
+        ):
+            return fallback_received()
+        return float(t_img_mono)
+
     def next_intent(self, snapshot, now_monotonic):  # type: ignore[override]
-        # Record the measured pose every control tick so velproprio_sample_mode='fixed_step'
-        # can finite-difference over a fixed ~policy_dt window, independent of replan cadence
-        # and inference latency. Cheap bounded ring; only the last policy_dt is ever read.
+        # Record measured pose every control tick for history-based velocity-proprio modes.
+        # fixed_step reads a fixed ~policy_dt window; camera_frame interpolates at the camera
+        # observation time and one policy_dt earlier. Cheap bounded ring.
         self._last_now_monotonic = now_monotonic
-        if getattr(self, "velproprio_sample_mode", "replan") == "fixed_step" and self.proprio_mode != "pose":
+        if (
+            getattr(self, "velproprio_sample_mode", "replan") in ("fixed_step", "camera_frame")
+            and self.proprio_mode != "pose"
+        ):
             self._record_pose_history(getattr(snapshot, "payload", None), now_monotonic)
         intent = super().next_intent(snapshot, now_monotonic)
         if (
@@ -767,26 +871,55 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
     def _record_pose_history(self, payload, now_monotonic) -> None:
         if payload is None or now_monotonic is None:
             return
+        history_t = self._state_history_time_sec(payload, float(now_monotonic))
+        updates: list[tuple[str, float, np.ndarray]] = []
         for side in ("left", "right"):
             try:
                 pose = np.asarray(pose_from_state_payload(payload, side), dtype=np.float64)
             except Exception:  # noqa: BLE001 - a malformed/partial payload just skips this tick
                 continue
-            self._pose_history[side].append((float(now_monotonic), pose))
+            updates.append((side, float(history_t), pose))
+        if not updates:
+            return
+        with self._get_velproprio_history_lock():
+            for side, t_sec, pose in updates:
+                self._pose_history[side].append((t_sec, pose))
 
     def _record_command_pose_history(self, intent, now_monotonic) -> None:
         if now_monotonic is None:
             return
-        for side in ("left", "right"):
-            pose = self._command_pose_from_intent(intent, side)
-            if pose is not None:
-                pose = pose.copy()
-                self._last_command_pose_by_arm[side] = pose
-            else:
-                last = self._last_command_pose_by_arm.get(side)
-                pose = None if last is None else last.copy()
-            if pose is not None:
-                self._command_pose_history[side].append((float(now_monotonic), pose))
+        with self._get_velproprio_history_lock():
+            for side in ("left", "right"):
+                pose = self._command_pose_from_intent(intent, side)
+                if pose is not None:
+                    pose = pose.copy()
+                    self._last_command_pose_by_arm[side] = pose
+                else:
+                    last = self._last_command_pose_by_arm.get(side)
+                    pose = None if last is None else last.copy()
+                if pose is not None:
+                    self._command_pose_history[side].append((float(now_monotonic), pose))
+
+    def _get_velproprio_history_lock(self):
+        lock = getattr(self, "_velproprio_history_lock", None)
+        if lock is None:
+            # Tests and old deserialized/manual instances can bypass __init__.
+            lock = threading.Lock()
+            self._velproprio_history_lock = lock
+        return lock
+
+    def _velproprio_history_snapshot(
+        self,
+        side: str,
+        *,
+        history: dict[str, deque] | None = None,
+    ) -> list[tuple[float, np.ndarray]]:
+        with self._get_velproprio_history_lock():
+            histories = self._pose_history if history is None else history
+            hist = histories.get(side)
+            if not hist:
+                return []
+            return list(hist)
 
     @staticmethod
     def _command_pose_from_intent(intent, side: str) -> np.ndarray | None:
@@ -848,10 +981,17 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         return pose
 
     def _arm_body_velocities(self, payload: dict[str, Any]) -> dict[str, np.ndarray]:
-        """Per-arm ee_local body velocity (pos_vel3, rot_vel3) in the TCP frame, normalized to
-        one policy step. Dispatches on velproprio_sample_mode; defaults to 'replan' for sources
-        constructed without the flag (e.g. legacy __new__-based tests)."""
-        if getattr(self, "velproprio_sample_mode", "replan") == "fixed_step":
+        """Per-arm body-frame motion delta (pos3, rotvec3) in the TCP frame.
+
+        The OpenPI/UMI converter calls this "velocity", but the training value is a
+        per-frame local/body delta, not m/s or rad/s. Legacy modes keep their
+        historical normalization behavior; camera_frame deliberately does no dt math.
+        Defaults to 'replan' for sources constructed without the flag (legacy tests).
+        """
+        mode = getattr(self, "velproprio_sample_mode", "replan")
+        if mode == "camera_frame":
+            return self._arm_body_velocities_camera_frame(payload)
+        if mode == "fixed_step":
             return self._arm_body_velocities_fixed_step(payload)
         return self._arm_body_velocities_replan(payload)
 
@@ -899,13 +1039,18 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         out: dict[str, np.ndarray] = {}
         for side in ("left", "right"):
             if use_command:
-                hist = self._command_pose_history.get(side)
-                if not hist:
+                hist_samples = self._velproprio_history_snapshot(side, history=self._command_pose_history)
+                if not hist_samples:
                     out[side] = np.zeros(6, dtype=np.float64)
                     continue
-                cur_t, cur = hist[-1]
+                cur_t, cur = hist_samples[-1]
                 cur = np.asarray(cur, dtype=np.float64)
-                prev, dt = self._velproprio_lookback(side, float(cur_t), history=self._command_pose_history)
+                prev, dt = self._velproprio_lookback(
+                    side,
+                    float(cur_t),
+                    history=self._command_pose_history,
+                    samples=hist_samples,
+                )
             else:
                 cur = np.asarray(pose_from_state_payload(payload, side), dtype=np.float64)
                 prev, dt = self._velproprio_lookback(side, now)
@@ -922,11 +1067,17 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             out[side] = np.concatenate([pos_vel, rot_vel])
         return out
 
-    def _velproprio_lookback(self, side: str, now: float | None, *, history: dict[str, deque] | None = None):
+    def _velproprio_lookback(
+        self,
+        side: str,
+        now: float | None,
+        *,
+        history: dict[str, deque] | None = None,
+        samples: list[tuple[float, np.ndarray]] | None = None,
+    ):
         """Newest history sample at least policy_dt older than `now` -> (pose7, dt). Returns
         (None, None) until the buffer spans a full policy step (-> cold-start velocity 0)."""
-        histories = self._pose_history if history is None else history
-        hist = histories.get(side)
+        hist = self._velproprio_history_snapshot(side, history=history) if samples is None else samples
         if not hist or now is None:
             return None, None
         target = float(now) - float(self.policy_dt_sec)
@@ -935,6 +1086,93 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 dt = float(now) - float(t)
                 return (pose, dt) if dt > 1e-6 else (None, None)
         return None, None
+
+    def _pose_history_at(self, side: str, t_sec: float) -> np.ndarray | None:
+        """Interpolated measured TCP pose7 at ``t_sec`` from bounded pose history.
+
+        Position is linear; orientation uses quaternion slerp. Returning ``None`` for
+        out-of-bounds or sparse windows makes cold starts, resets, camera gaps, and
+        hold-like missing windows emit zero velocity instead of inventing motion.
+        """
+        hist = self._velproprio_history_snapshot(side)
+        if not hist or t_sec is None:
+            return None
+        try:
+            target = float(t_sec)
+        except Exception:  # noqa: BLE001
+            return None
+        if not np.isfinite(target):
+            return None
+
+        samples: list[tuple[float, np.ndarray]] = []
+        for t, pose in hist:
+            try:
+                sample_t = float(t)
+            except Exception:  # noqa: BLE001
+                continue
+            norm_pose = self._normalize_pose7_or_none(pose)
+            if np.isfinite(sample_t) and norm_pose is not None:
+                samples.append((sample_t, norm_pose))
+        if not samples:
+            return None
+        samples.sort(key=lambda item: item[0])
+        eps = 1e-9
+        if target < samples[0][0] - eps or target > samples[-1][0] + eps:
+            return None
+        for sample_t, pose in samples:
+            if abs(target - sample_t) <= eps:
+                return pose.copy()
+
+        max_gap_sec = max(2.5 * float(self.policy_dt_sec), 0.10)
+        for (t0, pose0), (t1, pose1) in zip(samples[:-1], samples[1:]):
+            if t0 <= target <= t1:
+                gap = float(t1 - t0)
+                if gap <= eps or gap > max_gap_sec:
+                    return None
+                alpha = (target - t0) / gap
+                pos = (1.0 - alpha) * pose0[:3] + alpha * pose1[:3]
+                from scipy.spatial.transform import Rotation, Slerp
+
+                rots = Rotation.from_quat(np.stack([pose0[3:7], pose1[3:7]], axis=0))
+                quat = Slerp([t0, t1], rots)([target]).as_quat()[0]
+                out = np.concatenate([pos, quat])
+                return self._normalize_pose7_or_none(out)
+        return None
+
+    def _arm_body_velocities_camera_frame(self, payload: dict[str, Any]) -> dict[str, np.ndarray]:
+        """Measured TCP local delta over [camera_time - policy_dt, camera_time].
+
+        This path intentionally does NOT divide by dt and does NOT rescale by
+        policy_dt/actual_dt. The depth_z50_real OpenPI training converter stores a
+        per-frame body delta, so the closest live equivalent is the raw measured pose
+        delta at the image observation time.
+        """
+        del payload  # camera_frame uses timestamped measured pose history, not command/current payload pose.
+        if getattr(self, "velproprio_source", "measured") != "measured":
+            raise ValueError("velproprio_sample_mode='camera_frame' requires velproprio_source='measured'")
+        from scipy.spatial.transform import Rotation
+
+        t_cur = getattr(self, "_last_obs_camera_time_sec", None)
+        out: dict[str, np.ndarray] = {}
+        try:
+            t_cur_float = float(t_cur)
+        except Exception:  # noqa: BLE001
+            t_cur_float = float("nan")
+        if t_cur is None or not np.isfinite(t_cur_float):
+            return {"left": np.zeros(6, dtype=np.float64), "right": np.zeros(6, dtype=np.float64)}
+        t_cur = t_cur_float
+        t_prev = t_cur - float(self.policy_dt_sec)
+        for side in ("left", "right"):
+            cur_pose = self._pose_history_at(side, t_cur)
+            prev_pose = self._pose_history_at(side, t_prev)
+            if cur_pose is None or prev_pose is None:
+                out[side] = np.zeros(6, dtype=np.float64)
+                continue
+            r_prev = Rotation.from_quat(prev_pose[3:7])
+            pos_delta_local = r_prev.inv().apply(cur_pose[:3] - prev_pose[:3])
+            rot_delta = (r_prev.inv() * Rotation.from_quat(cur_pose[3:7])).as_rotvec()
+            out[side] = np.concatenate([pos_delta_local, rot_delta])
+        return out
 
     def _proprio_state_velocity(self, payload: dict[str, Any]) -> np.ndarray:
         """ee_local VELOCITY proprio (--state-mode velocity / velocity_grip / velocity_grav).
@@ -951,7 +1189,9 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         replan-boundary samples and rescales by policy_dt/wall_dt (controller/latency
         dependent); 'fixed_step' differences the measured pose over a fixed ~policy_dt
         window from the per-tick history (controller-independent, matches the training
-        per-frame delta), or the emitted command stream when velproprio_source='command'.
+        per-frame delta), or the emitted command stream when velproprio_source='command';
+        'camera_frame' differences measured pose history at [camera_time - policy_dt,
+        camera_time] with no dt normalization, matching the converter's per-frame delta.
         The first sample of a rollout (and after reset_rtc) has no
         previous pose -> velocity 0 (matches the converter's vel[0]=0 / segment-start
         zeroing)."""
@@ -961,6 +1201,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         include_grav = self.proprio_mode == "velocity_grav"
         vel_by_side = self._arm_body_velocities(payload)
         features: list[np.ndarray] = []
+        vel_for_print: dict[str, np.ndarray] = {}
         for side in ("left", "right"):
             pose = np.asarray(pose_from_state_payload(payload, side), dtype=np.float64)
             vel = vel_by_side[side]
@@ -968,6 +1209,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 # Body deltas are in the RB TCP frame; the checkpoint trained in the
                 # EE (pika tip) frame -> v_tip = R_align . v_tcp (same as the pose path).
                 vel = self._rotate_vel6(vel, self.ee_local_r_align)
+            vel_for_print[side] = np.asarray(vel, dtype=np.float64).copy()
             parts: list[np.ndarray] = [vel]
             if include_grav:
                 # GRAVITY-TILT ANCHOR (velocity_grav): world "down" expressed in the current TCP body
@@ -989,11 +1231,26 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                     grip = live if live is not None else _gripper_from_arm_payload(payload.get(side, {}))
                 parts.append(np.array([float(grip) / 100.0]))
             features.append(np.concatenate(parts))
+        if getattr(self, "_print_velproprio_enabled", False):
+            try:
+                parts: list[str] = []
+                for side, tag in (("left", "L"), ("right", "R")):
+                    vel = vel_for_print[side]
+                    pos_mm = vel[:3] * 1000.0
+                    rot_deg = np.degrees(vel[3:6])
+                    parts.append(
+                        f"{tag} vel_pos_mm=[{pos_mm[0]:+.2f} {pos_mm[1]:+.2f} {pos_mm[2]:+.2f}] "
+                        f"vel_rot_deg=[{rot_deg[0]:+.2f} {rot_deg[1]:+.2f} {rot_deg[2]:+.2f}]"
+                    )
+                print("[flow-infer] velproprio " + "  |  ".join(parts), file=self.stderr, flush=True)
+            except Exception:
+                pass
         return np.concatenate(features).astype(np.float32)
 
     def _raw_camera_images(self) -> tuple[dict[str, np.ndarray] | None, int, int]:
         """Full-resolution HWC uint8 RGB frames keyed left/right; None if missing."""
         if self._fake_images:
+            self._clear_last_obs_camera_bundle()
             zero = np.zeros((480, 640, 3), dtype=np.uint8)
             return {"left": zero, "right": zero.copy()}, 2, 0
         bundle = self._poll_camera_bundle()
@@ -1029,6 +1286,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             images[key] = rgb
             decode_count += 1
         if missing_count > 0 or len(images) < 2:
+            self._clear_last_obs_camera_bundle()
             return None, decode_count, max(missing_count, 2 - len(images))
         if getattr(self, "include_depth", False):
             # Resolve the live D405 depth (z16 -> uint16 HxW from the bundle client when its
@@ -1046,6 +1304,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 frame = resolve_frame(bundle_frames, depth_name)
                 px = getattr(frame, "pixels", None)
                 if px is None:
+                    self._clear_last_obs_camera_bundle()
                     return None, decode_count, 2
                 images[key] = _depth_to_image(
                     np.asarray(px), self.depth_z_near_mm, self.depth_z_far_mm, self.depth_units_m
@@ -1068,6 +1327,15 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 flush=True,
             )
             self._logged_wrist_shape = True
+        if bundle is not None:
+            self._last_obs_camera_bundle = bundle
+            self._last_obs_camera_time_sec = self._camera_bundle_time_monotonic(bundle)
+            try:
+                self._last_obs_camera_seq = int(getattr(bundle, "bundle_seq", 0) or 0)
+            except Exception:  # noqa: BLE001
+                self._last_obs_camera_seq = None
+        else:
+            self._clear_last_obs_camera_bundle()
         return images, decode_count, 0
 
     def reset_rtc(self) -> None:
@@ -1083,18 +1351,20 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # across the reset teleport.
         self._vel_prev_pose_by_arm = {"left": None, "right": None}
         self._vel_prev_sample_t = None
-        # Drop the fixed_step pose history too, so a new rollout's first samples report rest
+        # Drop history-based pose buffers too, so a new rollout's first samples report rest
         # (no finite difference across the reset teleport) until a fresh policy_dt accumulates.
-        self._pose_history = {
-            "left": deque(maxlen=_VELPROPRIO_HISTORY_MAXLEN),
-            "right": deque(maxlen=_VELPROPRIO_HISTORY_MAXLEN),
-        }
-        self._command_pose_history = {
-            "left": deque(maxlen=_VELPROPRIO_HISTORY_MAXLEN),
-            "right": deque(maxlen=_VELPROPRIO_HISTORY_MAXLEN),
-        }
-        self._last_command_pose_by_arm = {"left": None, "right": None}
+        with self._get_velproprio_history_lock():
+            self._pose_history = {
+                "left": deque(maxlen=_VELPROPRIO_HISTORY_MAXLEN),
+                "right": deque(maxlen=_VELPROPRIO_HISTORY_MAXLEN),
+            }
+            self._command_pose_history = {
+                "left": deque(maxlen=_VELPROPRIO_HISTORY_MAXLEN),
+                "right": deque(maxlen=_VELPROPRIO_HISTORY_MAXLEN),
+            }
+            self._last_command_pose_by_arm = {"left": None, "right": None}
         self._last_now_monotonic = None
+        self._clear_last_obs_camera_bundle()
 
     # ---------------------------------------------------------------- infer --
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:

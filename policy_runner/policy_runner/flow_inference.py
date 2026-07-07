@@ -507,6 +507,7 @@ class FlowMatchingActionSource:
         # deltas in meters, rotation deltas converted rad->deg, plus gripper target.
         self._print_chunk_enabled = _env_truthy(os.environ.get("FLOW_INFER_PRINT_CHUNK"))
         self._print_chunk_seq = 0
+        self._print_delta_overlay_enabled = _env_truthy(os.environ.get("FLOW_INFER_PRINT_DELTA_OVERLAY"))
         # Per-step chunk-vs-actual tracking dump (FLOW_INFER_PRINT_TRACKING): as each
         # step executes, compare the model's predicted absolute pose (chunk deltas
         # composed onto the boundary anchor) against the live measured pose — position
@@ -994,6 +995,55 @@ class FlowMatchingActionSource:
         except Exception:
             return
 
+    def _print_delta_overlay_summary(
+        self,
+        seq: int,
+        execute_limit: int,
+        projected_delta: dict[str, list[list[float]] | None],
+    ) -> None:
+        """Debug: summarize conditioned local action deltas sent in the chunk overlay.
+
+        The rows here are the same conditioned/clamped deltas used to integrate
+        the absolute overlay path, not raw model outputs. Deltas are per policy
+        frame, so the print intentionally reports displacement units, not rates.
+        """
+        if not getattr(self, "_print_delta_overlay_enabled", False):
+            return
+        try:
+            parts: list[str] = []
+            for arm, tag in (("left", "L"), ("right", "R")):
+                rows = projected_delta.get(arm)
+                if not rows:
+                    parts.append(f"{tag} delta_overlay=none")
+                    continue
+                arr = np.asarray(rows, dtype=np.float64)
+                n = min(max(int(execute_limit), 0), arr.shape[0], 3)
+                if n <= 0:
+                    parts.append(f"{tag} delta_overlay=none")
+                    continue
+                window = arr[:n]
+                lin_norm_mm = np.linalg.norm(window[:, :3], axis=1) * 1000.0
+                ang_norm_deg = np.degrees(np.linalg.norm(window[:, 3:6], axis=1))
+                yaw_deg = np.degrees(window[:, 5])
+
+                def fmt(values: np.ndarray) -> str:
+                    return " ".join(f"{float(value):+.2f}" for value in values)
+
+                parts.append(
+                    f"{tag} rows={n}/{arr.shape[0]} "
+                    f"lin_norm_mm=[{fmt(lin_norm_mm)}] "
+                    f"ang_norm_deg=[{fmt(ang_norm_deg)}] "
+                    f"yaw_deg=[{fmt(yaw_deg)}]"
+                )
+            print(
+                f"[flow-infer] delta_overlay seq={seq} execute_limit={execute_limit} "
+                + "  |  ".join(parts),
+                file=self.stderr,
+                flush=True,
+            )
+        except Exception:
+            return
+
     def _publish_chunk_overlay(self, now_monotonic: float) -> None:
         _ = now_monotonic
         publisher = getattr(self, "_chunk_overlay_publisher", None)
@@ -1025,6 +1075,7 @@ class FlowMatchingActionSource:
                 if extra > limit:
                     overlay_rows = np.asarray(chunk[:extra], dtype=np.float64)
             projected: dict[str, list[list[float]] | None] = {"left": None, "right": None}
+            projected_delta: dict[str, list[list[float]] | None] = {"left": None, "right": None}
             for arm, idx, sl in self._foh_arm_indices():
                 if len(self.arm_mask) <= idx or self.arm_mask[idx] <= 0.0:
                     continue
@@ -1053,6 +1104,7 @@ class FlowMatchingActionSource:
                     )
                 cur = measured_anchor
                 arm_points: list[list[float]] = []
+                arm_delta_points: list[list[float]] = []
                 for i in range(int(overlay_rows.shape[0])):
                     delta = np.asarray(
                         self._condition_arm_delta(
@@ -1063,12 +1115,17 @@ class FlowMatchingActionSource:
                         ),
                         dtype=np.float64,
                     )
+                    arm_delta_points.append(
+                        [float(value) for value in delta[:6].tolist()]
+                        + [float(overlay_rows[i][grip_index])]
+                    )
                     cur = np.asarray(pose_compose_local(cur, delta), dtype=np.float64)
                     arm_points.append(
                         [float(value) for value in cur[:7].tolist()]
                         + [float(overlay_rows[i][grip_index])]
                     )
                 projected[arm] = arm_points
+                projected_delta[arm] = arm_delta_points
                 if anchor_mode == "chain":
                     # Record this chunk's chain tail; promoted to the anchor when
                     # the NEXT chunk activates (re-publishing the same chunk is
@@ -1094,11 +1151,14 @@ class FlowMatchingActionSource:
             if projected["left"] is None and projected["right"] is None:
                 return
             self._chunk_overlay_seq = int(getattr(self, "_chunk_overlay_seq", 0)) + 1
+            self._print_delta_overlay_summary(self._chunk_overlay_seq, limit, projected_delta)
             publisher.publish(
                 seq=self._chunk_overlay_seq,
                 policy_dt_sec=float(self.policy_dt_sec or 0.0),
                 left=projected["left"],
                 right=projected["right"],
+                left_delta=projected_delta["left"],
+                right_delta=projected_delta["right"],
                 host_time_ns=time.time_ns(),
             )
         except Exception:

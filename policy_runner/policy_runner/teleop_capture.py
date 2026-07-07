@@ -44,13 +44,26 @@ class TeleopCaptureLogger:
                 "# fields: mono_ns=<CLOCK_MONOTONIC ns == servo loop_start_time_ns>  wall=<iso>  "
                 "owner=<idle|spacemouse|umi|?>  sm_eng=<0/1>  umi_eng=<0/1>  "
                 "imode=<intent.mode>  intentL=<arm mode>  intentR=<arm mode>  "
-                "motion=<0/1>  allowed=<0/1>\n"
+                "motion=<0/1>  allowed=<0/1>  phase=<pre|final>  sent=<-|0|1>  "
+                "command_seq=<seq>  arm_seq=<seq>  drop_reason=<reason>\n"
             )
             print(f"[teleop-capture] mux state -> {self.path}", flush=True)
         except Exception:
             self._fh = None
 
-    def log(self, now_monotonic: float, source: Any, intent: Any, allowed: Any) -> None:
+    def log(
+        self,
+        now_monotonic: float,
+        source: Any,
+        intent: Any,
+        allowed: Any,
+        *,
+        phase: str = "pre",
+        sent: bool | None = None,
+        command_seq: int = 0,
+        arm_seq: int = 0,
+        drop_reason: str | None = None,
+    ) -> None:
         if self._fh is None:
             return
         try:
@@ -71,7 +84,10 @@ class TeleopCaptureLogger:
                 f"mono_ns={mono_ns}  wall={datetime.now().isoformat()}  "
                 f"owner={owner}  sm_eng={sm_eng}  umi_eng={umi_eng}  "
                 f"imode={imode}  intentL={il}  intentR={ir}  "
-                f"motion={motion}  allowed={int(bool(allowed))}\n"
+                f"motion={motion}  allowed={int(bool(allowed))}  "
+                f"phase={phase}  sent={'-' if sent is None else int(bool(sent))}  "
+                f"command_seq={int(command_seq)}  arm_seq={int(arm_seq)}  "
+                f"drop_reason={drop_reason or '-'}\n"
             )
         except Exception:
             pass

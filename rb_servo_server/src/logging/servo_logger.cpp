@@ -101,6 +101,7 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
     writePoseHeader(os, side, "follower_pf_stand");
     writePoseHeader(os, side, "stage_tcp_target_stand");
     os << ',' << side << "_follower_active"
+       << ',' << side << "_follower_controller"
        << ',' << side << "_follower_wire_seq"
        << ',' << side << "_follower_recv_seq"
        << ',' << side << "_follower_step"
@@ -114,6 +115,11 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_follower_divergence_ang_rad"
        << ',' << side << "_follower_reanchor_count"
        << ',' << side << "_safety_intervention_recent"
+       << ',' << side << "_delta_twist_pending_linear_norm_m"
+       << ',' << side << "_delta_twist_pending_angular_norm_rad"
+       << ',' << side << "_delta_twist_xi_cmd_linear_norm_m_s"
+       << ',' << side << "_delta_twist_xi_cmd_angular_norm_rad_s"
+       << ',' << side << "_delta_twist_saturated"
        << ',' << side << "_output_ma_present"
        << ',' << side << "_output_ma_window";
     writeJointArrayHeader(os, side, "q_target_before_output_ma");
@@ -312,7 +318,13 @@ void ServoLogger::threadMain() {
 }
 
 void ServoLogger::writeHeader() {
-    file_ << "tick,loop_start_time_ns,loop_end_time_ns,period_ms,jitter_ms,filter_dt_ms,safety_verdict,motion_state,fault_latched,fault_reason,logger_dropped_samples,command_seq,left_mode,right_mode,left_send_ok,right_send_ok";
+    file_ << "tick,loop_start_time_ns,loop_end_time_ns,period_ms,jitter_ms,filter_dt_ms,safety_verdict,motion_state,fault_latched,fault_reason,logger_dropped_samples,command_seq,left_mode,right_mode";
+    file_ << ",command_buffer_result,command_buffer_pending_lifecycle_count,command_buffer_skipped_lifecycle_count";
+    file_ << ",command_buffer_returned_seq,command_buffer_returned_left_mode,command_buffer_returned_right_mode,command_buffer_returned_host_time_ns,command_buffer_returned_age_ms,command_buffer_returned_client_send_age_ms";
+    file_ << ",command_buffer_latest_seq,command_buffer_latest_left_mode,command_buffer_latest_right_mode,command_buffer_latest_host_time_ns,command_buffer_latest_age_ms,command_buffer_latest_timeout_ms,command_buffer_latest_timeout_valid,command_buffer_latest_usable,command_buffer_latest_client_send_age_ms";
+    file_ << ",command_buffer_lifecycle_seq,command_buffer_lifecycle_left_mode,command_buffer_lifecycle_right_mode,command_buffer_lifecycle_host_time_ns,command_buffer_lifecycle_age_ms,command_buffer_lifecycle_timeout_ms,command_buffer_lifecycle_timeout_valid,command_buffer_lifecycle_usable";
+    file_ << ",command_buffer_external_boxes_pending,command_buffer_external_boxes_consumed,command_buffer_external_boxes_applied,command_buffer_external_boxes_seq,command_buffer_external_boxes_left_mode,command_buffer_external_boxes_right_mode,command_buffer_external_boxes_host_time_ns,command_buffer_external_boxes_age_ms,command_buffer_external_boxes_client_send_age_ms";
+    file_ << ",left_send_ok,right_send_ok";
     file_ << ",fault_context_verdict,fault_context_domain,fault_context_arm,fault_context_backend_op,fault_context_backend_error_kind,fault_context_backend_error_name,fault_context_backend_error_code,fault_context_retryable,fault_context_recoverable,fault_context_robot_fault,fault_context_transport_fault,fault_context_state_after_source,fault_context_reason";
     file_ << ",left_send_start_ns,left_send_end_ns,right_send_start_ns,right_send_end_ns,send_skew_us,left_send_duration_us,right_send_duration_us";
     file_ << ",left_ack_policy,right_ack_policy,left_ack_observed,right_ack_observed,left_controller_acceptance_observed,right_controller_acceptance_observed,left_ack_wait_duration_us,right_ack_wait_duration_us,left_rbpodo_waiting_ack,right_rbpodo_waiting_ack,left_send_acceptance_semantics,right_send_acceptance_semantics";
@@ -483,6 +495,7 @@ void writeArmProfilingColumns(
     writePoseColumns(os, telemetry.follower_pf_stand);
     writePoseColumns(os, telemetry.stage_tcp_target_stand);
     os << ',' << telemetry.follower_active
+       << ',' << csvEscape(telemetry.follower_controller)
        << ',' << telemetry.follower_wire_seq
        << ',' << telemetry.follower_recv_seq
        << ',' << telemetry.follower_step
@@ -496,6 +509,11 @@ void writeArmProfilingColumns(
        << ',' << telemetry.follower_divergence_ang_rad
        << ',' << telemetry.follower_reanchor_count
        << ',' << telemetry.safety_intervention_recent
+       << ',' << telemetry.delta_twist_pending_linear_norm_m
+       << ',' << telemetry.delta_twist_pending_angular_norm_rad
+       << ',' << telemetry.delta_twist_xi_cmd_linear_norm_m_s
+       << ',' << telemetry.delta_twist_xi_cmd_angular_norm_rad_s
+       << ',' << telemetry.delta_twist_saturated
        << ',' << telemetry.output_ma_present
        << ',' << telemetry.output_ma_window;
     if (telemetry.output_ma_present) {
@@ -697,6 +715,41 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << sample.command.seq << ','
           << toString(sample.command.left.mode) << ','
           << toString(sample.command.right.mode) << ','
+          << csvEscape(sample.command_buffer_read.result) << ','
+          << sample.command_buffer_read.pending_lifecycle_count << ','
+          << sample.command_buffer_read.skipped_lifecycle_count << ','
+          << sample.command_buffer_read.returned_seq << ','
+          << toString(sample.command_buffer_read.returned_left_mode) << ','
+          << toString(sample.command_buffer_read.returned_right_mode) << ','
+          << sample.command_buffer_read.returned_host_time_ns << ','
+          << sample.command_buffer_read.returned_age_ms << ','
+          << sample.command_buffer_read.returned_client_send_age_ms << ','
+          << sample.command_buffer_read.latest_seq << ','
+          << toString(sample.command_buffer_read.latest_left_mode) << ','
+          << toString(sample.command_buffer_read.latest_right_mode) << ','
+          << sample.command_buffer_read.latest_host_time_ns << ','
+          << sample.command_buffer_read.latest_age_ms << ','
+          << sample.command_buffer_read.latest_timeout_ms << ','
+          << sample.command_buffer_read.latest_timeout_valid << ','
+          << sample.command_buffer_read.latest_usable << ','
+          << sample.command_buffer_read.latest_client_send_age_ms << ','
+          << sample.command_buffer_read.lifecycle_seq << ','
+          << toString(sample.command_buffer_read.lifecycle_left_mode) << ','
+          << toString(sample.command_buffer_read.lifecycle_right_mode) << ','
+          << sample.command_buffer_read.lifecycle_host_time_ns << ','
+          << sample.command_buffer_read.lifecycle_age_ms << ','
+          << sample.command_buffer_read.lifecycle_timeout_ms << ','
+          << sample.command_buffer_read.lifecycle_timeout_valid << ','
+          << sample.command_buffer_read.lifecycle_usable << ','
+          << sample.command_buffer_read.external_boxes_pending << ','
+          << sample.command_buffer_read.external_boxes_consumed << ','
+          << sample.command_buffer_read.external_boxes_applied << ','
+          << sample.command_buffer_read.external_boxes_seq << ','
+          << toString(sample.command_buffer_read.external_boxes_left_mode) << ','
+          << toString(sample.command_buffer_read.external_boxes_right_mode) << ','
+          << sample.command_buffer_read.external_boxes_host_time_ns << ','
+          << sample.command_buffer_read.external_boxes_age_ms << ','
+          << sample.command_buffer_read.external_boxes_client_send_age_ms << ','
           << sample.left_send_ok << ','
           << sample.right_send_ok << ',';
     if (sample.latched_fault_context.has_value()) {

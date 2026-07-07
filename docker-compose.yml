@@ -34,6 +34,10 @@ services:
       - ${RB_GUI_STATE_DIR:-/home/plaif/.rb_servo_gui}:/app/rb_gui_state:ro
       # 손목 핸드아이 T_tcp_cam (rb_gui 기즈모가 갱신) — 아이디어2 손목 클라우드 병합용
       - ./calibration:/calibration:ro
+    # 호스트 데스크톱/입력 응답성 보호: stereo 추론+캡처를 코어 4/5/6에 격리(0/1/2/7은
+    # GNOME/Xorg/USB-IRQ용, 3은 서보 RT isolcpus 격리). 미설정 시 추론 2스레드가 데스크톱
+    # 코어로 올라타 마우스/키보드 랙. live 조정은 `docker update --cpuset-cpus=... camera_server`.
+    cpuset: "4,5,6"
     environment:
       # Container path; override with CAMERA_CONFIG (see Makefile cam-up).
       CAMERA_SERVER_CONFIG: ${CAMERA_CONFIG:-/app/config/triple_realsense.yaml}
@@ -55,8 +59,11 @@ services:
       # 반드시 servo의 network.command_bind 포트와 일치해야 함. 이 사이트 stack_real.yaml은
       # 50256을 쓴다(안 맞추면 박스 패킷이 버려짐).
       STEREO_COMMAND_ENDPOINT: ${STEREO_COMMAND_ENDPOINT:-127.0.0.1:50256}
-      # CPU 경량화 튜닝(호스트 env로 오버라이드). HEAD_HZ=0은 매 프레임(캡처율).
-      STEREO_HEAD_HZ: ${STEREO_HEAD_HZ:-0}
+      # CPU 경량화 튜닝(호스트 env로 오버라이드). HEAD_HZ=0은 매 프레임(캡처율), >0은 그 Hz로
+      # 데시메이트(추론 2스레드가 최대 레버 → 기본 3Hz; 정지 트레이 검출/viz엔 충분).
+      # 컨테이너 재생성(RealSense 재오픈) 없이 live로 바꾸려면 stereo_worker/head_hz.txt에
+      # 값 쓰고 worker만 재시작(파일이 env보다 우선).
+      STEREO_HEAD_HZ: ${STEREO_HEAD_HZ:-3}
       STEREO_IDLE_STRIDE: ${STEREO_IDLE_STRIDE:-2}         # burst 아닐 때 head 클라우드 픽셀 stride(계산량↓)
       STEREO_DETECT_PROFILE: ${STEREO_DETECT_PROFILE:-0}   # 1=박스 detect 단계별 ms 로그
       STEREO_TORCH_THREADS: ${STEREO_TORCH_THREADS:-2}

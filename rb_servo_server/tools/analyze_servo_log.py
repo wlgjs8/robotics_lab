@@ -128,6 +128,20 @@ def parse_bool(value: str, column: str, row_number: int) -> bool:
     raise AnalysisError(f"row {row_number}: column {column!r} is not boolean-like: {value!r}")
 
 
+def optional_float(row: dict[str, str], column: str, row_number: int) -> float | None:
+    value = row.get(column)
+    if value is None or value == "":
+        return None
+    return parse_float(value, column, row_number)
+
+
+def optional_bool(row: dict[str, str], column: str, row_number: int) -> bool | None:
+    value = row.get(column)
+    if value is None or value == "":
+        return None
+    return parse_bool(value, column, row_number)
+
+
 def percentile_nearest_rank(values: Sequence[float], percentile: float) -> float:
     if not values:
         raise AnalysisError("cannot compute percentile of an empty series")
@@ -150,9 +164,60 @@ def series_summary(values: Sequence[float]) -> dict[str, float]:
     }
 
 
+def percentile_summary(values: Sequence[float]) -> dict[str, float | int | None]:
+    if not values:
+        return {"count": 0, "p50": None, "p90": None, "p99": None}
+    return {
+        "count": len(values),
+        "p50": percentile_nearest_rank(values, 50.0),
+        "p90": percentile_nearest_rank(values, 90.0),
+        "p99": percentile_nearest_rank(values, 99.0),
+    }
+
+
 def require_columns(fieldnames: Iterable[str] | None, required: Sequence[str]) -> list[str]:
     available = set(fieldnames or [])
     return [column for column in required if column not in available]
+
+
+def make_delta_twist_bucket() -> dict[str, object]:
+    return {
+        "rows": 0,
+        "active_ticks": 0,
+        "stall_ticks": 0,
+        "saturated_ticks": 0,
+        "controller_counts": {},
+        "step_counts": {},
+        "pending_linear": [],
+        "pending_angular": [],
+        "xi_linear": [],
+        "xi_angular": [],
+    }
+
+
+def bump_count(counts: dict[str, int], key: str) -> None:
+    counts[key] = counts.get(key, 0) + 1
+
+
+def finalize_delta_twist_bucket(bucket: dict[str, object]) -> dict[str, object]:
+    step_counts = bucket["step_counts"]
+    controller_counts = bucket["controller_counts"]
+    assert isinstance(step_counts, dict)
+    assert isinstance(controller_counts, dict)
+    return {
+        "rows": bucket["rows"],
+        "active_ticks": bucket["active_ticks"],
+        "stall_ticks": bucket["stall_ticks"],
+        "saturated_ticks": bucket["saturated_ticks"],
+        "controller_counts": dict(sorted(controller_counts.items())),
+        "follower_step_distribution": dict(
+            sorted(step_counts.items(), key=lambda item: int(item[0]))
+        ),
+        "pending_residual_linear_norm_m": percentile_summary(bucket["pending_linear"]),  # type: ignore[arg-type]
+        "pending_residual_angular_norm_rad": percentile_summary(bucket["pending_angular"]),  # type: ignore[arg-type]
+        "commanded_linear_velocity_m_s": percentile_summary(bucket["xi_linear"]),  # type: ignore[arg-type]
+        "commanded_angular_velocity_rad_s": percentile_summary(bucket["xi_angular"]),  # type: ignore[arg-type]
+    }
 
 
 def analyze_csv(path: Path) -> dict[str, object]:
@@ -171,6 +236,11 @@ def analyze_csv(path: Path) -> dict[str, object]:
         tracking_errors: dict[str, list[float]] = {"left": [], "right": []}
         send_failures_by_arm = {"left": 0, "right": 0}
         rows_with_send_failure = 0
+        safety_verdict_counts: dict[str, int] = {}
+        delta_twist_series = {
+            "left": make_delta_twist_bucket(),
+            "right": make_delta_twist_bucket(),
+        }
         first_loop_start_ns: float | None = None
         last_loop_end_ns: float | None = None
         rows = 0
@@ -205,11 +275,56 @@ def analyze_csv(path: Path) -> dict[str, object]:
             if not left_ok or not right_ok:
                 rows_with_send_failure += 1
 
+            safety_verdict = row.get("safety_verdict")
+            if safety_verdict:
+                bump_count(safety_verdict_counts, safety_verdict)
+
             for arm in ("left", "right"):
                 for joint in range(6):
                     actual = parse_float(row[f"{arm}_q_actual_{joint}"], f"{arm}_q_actual_{joint}", row_number)
                     sent = parse_float(row[f"{arm}_q_sent_{joint}"], f"{arm}_q_sent_{joint}", row_number)
                     tracking_errors[arm].append(abs(actual - sent))
+
+                controller = (row.get(f"{arm}_follower_controller") or "").strip()
+                delta_columns = (
+                    f"{arm}_delta_twist_pending_linear_norm_m",
+                    f"{arm}_delta_twist_pending_angular_norm_rad",
+                    f"{arm}_delta_twist_xi_cmd_linear_norm_m_s",
+                    f"{arm}_delta_twist_xi_cmd_angular_norm_rad_s",
+                    f"{arm}_delta_twist_saturated",
+                )
+                has_delta_columns = any(column in row for column in delta_columns)
+                if controller != "delta_twist" and not (has_delta_columns and not controller):
+                    continue
+
+                bucket = delta_twist_series[arm]
+                bucket["rows"] = int(bucket["rows"]) + 1
+                if controller:
+                    bump_count(bucket["controller_counts"], controller)  # type: ignore[arg-type]
+                active = optional_bool(row, f"{arm}_follower_active", row_number)
+                if active:
+                    bucket["active_ticks"] = int(bucket["active_ticks"]) + 1
+                stall = optional_bool(row, f"{arm}_follower_stall", row_number)
+                if stall:
+                    bucket["stall_ticks"] = int(bucket["stall_ticks"]) + 1
+                saturated = optional_bool(row, f"{arm}_delta_twist_saturated", row_number)
+                if saturated:
+                    bucket["saturated_ticks"] = int(bucket["saturated_ticks"]) + 1
+                step = optional_float(row, f"{arm}_follower_step", row_number)
+                if step is not None:
+                    step_int = int(step)
+                    if step != step_int:
+                        raise AnalysisError(f"row {row_number}: column {arm}_follower_step must be an integer")
+                    bump_count(bucket["step_counts"], str(step_int))  # type: ignore[arg-type]
+                for column, key in (
+                    (f"{arm}_delta_twist_pending_linear_norm_m", "pending_linear"),
+                    (f"{arm}_delta_twist_pending_angular_norm_rad", "pending_angular"),
+                    (f"{arm}_delta_twist_xi_cmd_linear_norm_m_s", "xi_linear"),
+                    (f"{arm}_delta_twist_xi_cmd_angular_norm_rad_s", "xi_angular"),
+                ):
+                    value = optional_float(row, column, row_number)
+                    if value is not None:
+                        bucket[key].append(value)  # type: ignore[union-attr]
 
             if all(column in row and row[column] != "" for column in TIMESTAMP_COLUMNS):
                 loop_start = parse_float(row["loop_start_time_ns"], "loop_start_time_ns", row_number)
@@ -253,6 +368,11 @@ def analyze_csv(path: Path) -> dict[str, object]:
             "right": send_failures_by_arm["right"],
             "total_arm_failures": send_failures_by_arm["left"] + send_failures_by_arm["right"],
             "rows_with_failure": rows_with_send_failure,
+        },
+        "safety_verdict_counts": dict(sorted(safety_verdict_counts.items())),
+        "delta_twist": {
+            "left": finalize_delta_twist_bucket(delta_twist_series["left"]),
+            "right": finalize_delta_twist_bucket(delta_twist_series["right"]),
         },
     }
 
@@ -320,6 +440,16 @@ def format_report(metrics: dict[str, object], budget: ProfileBudget, failures: S
             current = current[part]
         return current
 
+    def fmt_percentiles(summary: object) -> str:
+        if not isinstance(summary, dict) or int(summary.get("count", 0)) == 0:
+            return "count=0 p50=n/a p90=n/a p99=n/a"
+        return (
+            f"count={summary['count']} "
+            f"p50={float(summary['p50']):.6f} "
+            f"p90={float(summary['p90']):.6f} "
+            f"p99={float(summary['p99']):.6f}"
+        )
+
     lines = [
         f"profile: {budget.name}",
         f"verdict: {'FAIL' if failures else 'PASS'}",
@@ -334,6 +464,39 @@ def format_report(metrics: dict[str, object], budget: ProfileBudget, failures: S
         f"tracking_error_deg: left_max={float(get('tracking_error_deg.left.max')):.6f} right_max={float(get('tracking_error_deg.right.max')):.6f} max={float(get('tracking_error_deg.max')):.6f}",
         f"send_failures: left={get('send_failures.left')} right={get('send_failures.right')} total_arm_failures={get('send_failures.total_arm_failures')} rows_with_failure={get('send_failures.rows_with_failure')}",
     ]
+    safety_counts = metrics.get("safety_verdict_counts")
+    if isinstance(safety_counts, dict) and safety_counts:
+        counts = ", ".join(f"{key}={value}" for key, value in safety_counts.items())
+        lines.append(f"safety_verdict_counts: {counts}")
+    delta_twist = metrics.get("delta_twist")
+    if isinstance(delta_twist, dict) and any(
+        isinstance(delta_twist.get(arm), dict) and int(delta_twist[arm].get("rows", 0)) > 0
+        for arm in ("left", "right")
+    ):
+        lines.append("delta_twist:")
+        for arm in ("left", "right"):
+            arm_metrics = delta_twist.get(arm)
+            if not isinstance(arm_metrics, dict) or int(arm_metrics.get("rows", 0)) <= 0:
+                continue
+            lines.append(
+                f"  {arm}: rows={arm_metrics['rows']} "
+                f"active_ticks={arm_metrics['active_ticks']} "
+                f"stall_ticks={arm_metrics['stall_ticks']} "
+                f"saturated_ticks={arm_metrics['saturated_ticks']} "
+                f"follower_steps={arm_metrics['follower_step_distribution']}"
+            )
+            lines.append(
+                f"  {arm} pending_linear_norm_m: "
+                f"{fmt_percentiles(arm_metrics.get('pending_residual_linear_norm_m'))}"
+            )
+            lines.append(
+                f"  {arm} pending_angular_norm_rad: "
+                f"{fmt_percentiles(arm_metrics.get('pending_residual_angular_norm_rad'))}"
+            )
+            lines.append(
+                f"  {arm} xi_cmd_angular_norm_rad_s: "
+                f"{fmt_percentiles(arm_metrics.get('commanded_angular_velocity_rad_s'))}"
+            )
     if failures:
         lines.append("budget_failures:")
         lines.extend(f"- {failure}" for failure in failures)

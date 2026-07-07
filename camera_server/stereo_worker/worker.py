@@ -433,6 +433,16 @@ def cmd_run(args):
     # 프레임 자체를 덜 처리해야 CPU가 내려간다). 0=매 프레임(캡처율). 정지 트레이 검출/시각화엔
     # 5~10Hz면 충분. heartbeat는 상한과 무관하게 계속 송신됨(위 블록).
     head_hz = float(os.environ.get("STEREO_HEAD_HZ", "0"))
+    # live override: bind-mount된 head_hz.txt가 있으면 env보다 우선한다. 컨테이너를
+    # 재생성(=RealSense 재오픈, D405 USB2-fallback replug 위험)하지 않고, worker만
+    # 재시작해 처리율을 바꾸기 위한 파일 훅. 없음/파싱실패 시 env 값을 그대로 쓴다.
+    _hz_override = os.path.join(os.path.dirname(os.path.realpath(__file__)), "head_hz.txt")
+    try:
+        with open(_hz_override) as _f:
+            head_hz = float(_f.read().strip())
+        print(f"[run] STEREO_HEAD_HZ override <- {_hz_override} ({head_hz:.1f} Hz)", flush=True)
+    except Exception:
+        pass
     last_proc_t = 0.0
     if head_hz > 0.0:
         print(f"[run] full-frame rate cap: {head_hz:.1f} Hz (STEREO_HEAD_HZ)", flush=True)
@@ -490,10 +500,18 @@ def cmd_run(args):
             pub.publish(seq, time.time_ns(), xyz, rgb)
         _t = _ck(prof, "cloud+pub", _t)
 
-        # 손목 raw 클라우드 계산(병합+발행 공용, 카메라 프레임)
+        # 손목 raw 클라우드 계산(병합+발행 공용, 카메라 프레임). 소비되는 프레임에서만
+        # 계산한다: publish는 wrist_every마다, fusion은 해당 arm의 live pose가 있을 때만.
+        # (평상시 state 미수신/stale이면 fusion은 어차피 no-op이므로, 매 프레임 두 손목
+        # 클라우드를 만들던 낭비를 제거 — 동작 불변, wrist ms/frame ↓.)
+        wrist_publish_frame = wrist_on and (seq % max(1, wrist_every) == 0)
         wrist_raw = {}
         if wrist_on or fuse_on:
             for arm, kc, kd in wrist_cams:
+                fuse_live = (fuse_on and pose_listener is not None
+                             and pose_listener.get(arm) is not None)
+                if not (wrist_publish_frame or fuse_live):
+                    continue
                 c = frames.get(kc); d = frames.get(kd)
                 if c is None or d is None:
                     continue

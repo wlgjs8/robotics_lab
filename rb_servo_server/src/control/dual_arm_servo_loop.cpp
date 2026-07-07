@@ -40,6 +40,14 @@ bool isMotionMode(ControlMode mode) {
            mode == ControlMode::TcpLinearMove;
 }
 
+double vec6LinearNorm(const Vec6& value) {
+    return std::sqrt(value.x * value.x + value.y * value.y + value.z * value.z);
+}
+
+double vec6AngularNorm(const Vec6& value) {
+    return std::sqrt(value.rx * value.rx + value.ry * value.ry + value.rz * value.rz);
+}
+
 bool finiteJointArray(const JointArray& joints) {
     return std::all_of(joints.begin(), joints.end(), [](double value) {
         return std::isfinite(value);
@@ -221,6 +229,7 @@ ArmCommand applyPoseTrackSmd(
 
 bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFollowerConfig& b) {
     return a.enable != b.enable ||
+        a.controller != b.controller ||
         a.fallback_policy != b.fallback_policy ||
         a.engage_timeout_sec != b.engage_timeout_sec ||
         a.max_linear_velocity_m_s != b.max_linear_velocity_m_s ||
@@ -234,6 +243,12 @@ bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFoll
         a.reserve_steps != b.reserve_steps ||
         a.smoothing_window != b.smoothing_window ||
         a.af_damping_beta != b.af_damping_beta ||
+        a.delta_twist_tau_sec != b.delta_twist_tau_sec ||
+        a.delta_twist_residual_drain_steps != b.delta_twist_residual_drain_steps ||
+        a.delta_twist_max_residual_m != b.delta_twist_max_residual_m ||
+        a.delta_twist_max_residual_rad != b.delta_twist_max_residual_rad ||
+        a.delta_twist_max_lead_m != b.delta_twist_max_lead_m ||
+        a.delta_twist_max_lead_rad != b.delta_twist_max_lead_rad ||
         a.chunk_feed_timeout_sec != b.chunk_feed_timeout_sec;
 }
 
@@ -249,12 +264,32 @@ control::CartesianChunkFollowerConfig makeChunkFollowerConfig(const RuckigFollow
     return cfg;
 }
 
+control::DeltaTwistFollowerConfig makeDeltaTwistFollowerConfig(const RuckigFollowerConfig& rf) {
+    control::DeltaTwistFollowerConfig cfg;
+    cfg.lin = control::AxisLimit{rf.max_linear_velocity_m_s, rf.max_linear_accel_m_s2, rf.max_linear_jerk_m_s3};
+    cfg.ang = control::AxisLimit{rf.max_angular_velocity_rad_s, rf.max_angular_accel_rad_s2, rf.max_angular_jerk_rad_s3};
+    cfg.discard_head_steps = rf.discard_head_steps;
+    cfg.consume_steps = rf.consume_steps;
+    cfg.reserve_steps = rf.reserve_steps;
+    cfg.tau_sec = rf.delta_twist_tau_sec;
+    cfg.residual_drain_steps = rf.delta_twist_residual_drain_steps;
+    cfg.max_residual_m = rf.delta_twist_max_residual_m;
+    cfg.max_residual_rad = rf.delta_twist_max_residual_rad;
+    cfg.max_lead_m = rf.delta_twist_max_lead_m;
+    cfg.max_lead_rad = rf.delta_twist_max_lead_rad;
+    return cfg;
+}
+
 control::ChunkFrame toControlChunkFrame(
     const ChunkFrameReceiver::Frame& frame,
     ArmId arm_id
 ) {
     const ChunkFrameReceiver::ArmSteps& steps =
         arm_id == ArmId::Left ? frame.left : frame.right;
+    const bool has_delta =
+        arm_id == ArmId::Left ? frame.has_left_delta : frame.has_right_delta;
+    const ChunkFrameReceiver::ArmDeltaSteps& delta_steps =
+        arm_id == ArmId::Left ? frame.left_delta : frame.right_delta;
     control::ChunkFrame out;
     out.policy_dt = frame.policy_dt_sec;
     out.wire_seq = frame.seq;
@@ -262,6 +297,9 @@ control::ChunkFrame toControlChunkFrame(
     out.recv_time = frame.recv_steady_sec;
     out.pose.reserve(static_cast<std::size_t>(steps.count));
     out.grip.reserve(static_cast<std::size_t>(steps.count));
+    if (has_delta) {
+        out.delta.reserve(static_cast<std::size_t>(delta_steps.count));
+    }
     for (int i = 0; i < steps.count; ++i) {
         const auto& s = steps.step[static_cast<std::size_t>(i)];
         Pose6D p;
@@ -271,6 +309,12 @@ control::ChunkFrame toControlChunkFrame(
         p.quaternion_xyzw = std::array<double, 4>{s[3], s[4], s[5], s[6]};
         out.pose.push_back(p);
         out.grip.push_back(s[7]);
+    }
+    if (has_delta) {
+        for (int i = 0; i < delta_steps.count; ++i) {
+            const auto& s = delta_steps.step[static_cast<std::size_t>(i)];
+            out.delta.push_back(Vec6{s[0], s[1], s[2], s[3], s[4], s[5]});
+        }
     }
     return out;
 }
@@ -1885,12 +1929,9 @@ void DualArmServoLoop::checkExternalBoxFeedOrAbort(uint64_t now_ns) {
     }
     if (external_box_enforce_start_ns_ == 0) external_box_enforce_start_ns_ = now_ns;
     // Liveness is measured at RECEIVE time (network thread stamps every accepted
-    // SetExternalBoxes packet on the shared CommandBuffer), NOT at apply time. The
-    // producer is a leaseless ~1 Hz heartbeat that shares the single latest-command
-    // slot with the flow-infer motion stream (up to command_rate_hz, e.g. 500 Hz);
-    // an apply-time signal is starved whenever the loop keeps sampling motion
-    // packets, which would false-abort even though the producer is alive. Receipt
-    // reflects the true feed and still catches a genuinely dead/stopped producer.
+    // SetExternalBoxes packet on the CommandBuffer), NOT at apply time. The payload
+    // is consumed from an external-box side slot so it cannot displace the high-rate
+    // motion stream; the receive stamp still catches a genuinely dead/stopped producer.
     // Startup grace lets the producer come up; after the first feed, a gap beyond
     // the timeout means it stopped. Decision is in the pure (tested) helper.
     constexpr double kStartupGraceS = 10.0;
@@ -2133,9 +2174,18 @@ void DualArmServoLoop::loopMain() {
             (void)handleAsyncSupervisionFault(async_fault_contexts, left_state, right_state);
         }
 
+        CommandBufferReadTelemetry command_buffer_read;
         DualArmCommand command = command_buffer_
-            ? command_buffer_->latestOrHold(loop_start)
+            ? command_buffer_->latestOrHold(loop_start, &command_buffer_read)
             : makeHoldCommand(left_state, right_state, loop_start);
+        if (!command_buffer_) {
+            command_buffer_read.result = "no_command_buffer_hold";
+            command_buffer_read.returned_seq = command.seq;
+            command_buffer_read.returned_left_mode = command.left.mode;
+            command_buffer_read.returned_right_mode = command.right.mode;
+            command_buffer_read.returned_host_time_ns = command.host_time_ns;
+            command_buffer_read.returned_age_ms = 0.0;
+        }
         const auto metadata_hold = [&](const DualArmCommand& source_command) {
             DualArmCommand hold = makeHoldCommand(left_state, right_state, loop_start);
             hold.source = source_command.source;
@@ -2153,6 +2203,14 @@ void DualArmServoLoop::loopMain() {
         };
         if (isSyntheticHoldCommand(command)) {
             command = metadata_hold(command);
+        }
+        if (command_buffer_) {
+            std::optional<DualArmCommand> external_boxes_command =
+                command_buffer_->consumeLatestExternalBoxes(loop_start, &command_buffer_read);
+            if (external_boxes_command.has_value()) {
+                command_buffer_read.external_boxes_applied =
+                    applySetExternalBoxesCommand(*external_boxes_command);
+            }
         }
         const bool read_only_command_blocked = readOnlyMode() && commandBlockedByReadOnly(command);
 
@@ -2276,68 +2334,7 @@ void DualArmServoLoop::loopMain() {
             }
             command = metadata_hold(command);
         } else if (commandRequestsSetExternalBoxes(command)) {
-            // Leaseless runtime update of preallocated external keep-out boxes.
-            // No-op unless the mesh CollisionMonitor was built with external boxes.
-            if (!command.has_external_boxes) {
-                std::cerr << "[WARN] SetExternalBoxes rejected: missing boxes payload\n";
-            } else if (!collision_monitor_ || !collision_monitor_cfg_.external_boxes.enable) {
-                std::cerr << "[DEBUG] SetExternalBoxes ignored: external boxes disabled or monitor absent\n";
-            } else {
-                const int max_count = collision_monitor_cfg_.external_boxes.max_count;
-                std::vector<ExternalBoxPose> poses(static_cast<std::size_t>(std::max(0, max_count)));
-                int accepted = 0;
-                int ignored_unknown = 0;
-                int ignored_out_of_range = 0;
-                int ignored_invalid_rotation = 0;
-                for (const auto& box : command.external_boxes) {
-                    int slot = -1;
-                    if (box.label == "green") {
-                        slot = 0;
-                    } else if (box.label == "gray") {
-                        slot = 1;
-                    } else {
-                        ++ignored_unknown;
-                        continue;
-                    }
-                    if (slot < 0 || slot >= max_count) {
-                        ++ignored_out_of_range;
-                        continue;
-                    }
-
-                    Eigen::Matrix3d R;
-                    Eigen::Vector3d t;
-                    for (int row = 0; row < 3; ++row) {
-                        for (int col = 0; col < 3; ++col) {
-                            R(row, col) = box.T_stand_box[static_cast<std::size_t>(row * 4 + col)];
-                        }
-                        t(row) = box.T_stand_box[static_cast<std::size_t>(row * 4 + 3)];
-                    }
-                    Eigen::Quaterniond q(R);
-                    const double q_norm = q.norm();
-                    if (!std::isfinite(q_norm) || q_norm <= 0.0) {
-                        ++ignored_invalid_rotation;
-                        continue;
-                    }
-                    q.normalize();
-                    ExternalBoxPose pose;
-                    pose.enable = box.enable;
-                    pose.R = q.toRotationMatrix();
-                    pose.t = t;
-                    poses[static_cast<std::size_t>(slot)] = pose;
-                    ++accepted;
-                }
-                const double stamp_s = nsToSec(nowSteadyNs());
-                collision_monitor_->setExternalBoxes(poses, stamp_s);
-                // Feed liveness is tracked at receive time on the CommandBuffer
-                // (see checkExternalBoxFeedOrAbort), not here at apply time — the
-                // apply path shares the single latest-command slot with the motion
-                // stream and can be starved even while the producer is alive.
-                std::cerr << "[DEBUG] SetExternalBoxes applied " << accepted
-                          << " box(es), ignored_unknown=" << ignored_unknown
-                          << " ignored_out_of_range=" << ignored_out_of_range
-                          << " ignored_invalid_rotation=" << ignored_invalid_rotation
-                          << " by source_id=" << command.source.source_id << "\n";
-            }
+            (void)applySetExternalBoxesCommand(command);
             command = metadata_hold(command);
         } else if (commandRequestsSetUserSafetyFloorPlane(command)) {
             // Leaseless runtime set/enable of the user-defined tilted floor plane.
@@ -2709,6 +2706,7 @@ void DualArmServoLoop::loopMain() {
         sample.left_state = left_state;
         sample.right_state = right_state;
         sample.command = command;
+        sample.command_buffer_read = command_buffer_read;
         sample.left_mode_before_init_sequencer = init_mode_before_left;
         sample.right_mode_before_init_sequencer = init_mode_before_right;
         sample.left_mode_after_init_sequencer = init_mode_after_left;
@@ -3653,6 +3651,7 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.smd_goal_linear_velocity_norm_m_s = info.goal_linear_velocity.norm();
     solve.smd_goal_angular_velocity_norm_rad_s = info.goal_angular_velocity.norm();
     solve.smd_reanchor_count = abc.smd_reanchor_count;
+    solve.follower_controller = abc.follower_controller;
     solve.follower_active = abc.follower_active;
     solve.follower_wire_seq = abc.follower_wire_seq;
     solve.follower_recv_seq = abc.follower_recv_seq;
@@ -3669,6 +3668,11 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.follower_divergence_ang_rad = abc.follower_divergence_ang_rad;
     solve.follower_reanchor_count = abc.follower_reanchor_count;
     solve.safety_intervention_recent = abc.safety_intervention_recent;
+    solve.delta_twist_pending_linear_norm_m = abc.delta_twist_pending_linear_norm_m;
+    solve.delta_twist_pending_angular_norm_rad = abc.delta_twist_pending_angular_norm_rad;
+    solve.delta_twist_xi_cmd_linear_norm_m_s = abc.delta_twist_xi_cmd_linear_norm_m_s;
+    solve.delta_twist_xi_cmd_angular_norm_rad_s = abc.delta_twist_xi_cmd_angular_norm_rad_s;
+    solve.delta_twist_saturated = abc.delta_twist_saturated;
     solve.output_ma_present = abc.output_ma_present;
     solve.output_ma_window = output_ma_window;
     if (abc.output_ma_present) {
@@ -3790,6 +3794,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     const RuckigFollowerConfig& rf = profile.ruckig_follower;
     AbcTelemetry& abc = arm_id == ArmId::Left ? left_abc_telemetry_ : right_abc_telemetry_;
     // Reset follower telemetry each tick; re-filled below when the follower drives.
+    abc.follower_controller = "ruckig_waypoint";
     abc.follower_active = false;
     abc.follower_wire_seq = 0;
     abc.follower_recv_seq = 0;
@@ -3804,6 +3809,11 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.stage_tcp_target_stand.reset();
     abc.follower_divergence_pos_m = 0.0;
     abc.follower_divergence_ang_rad = 0.0;
+    abc.delta_twist_pending_linear_norm_m = 0.0;
+    abc.delta_twist_pending_angular_norm_rad = 0.0;
+    abc.delta_twist_xi_cmd_linear_norm_m_s = 0.0;
+    abc.delta_twist_xi_cmd_angular_norm_rad_s = 0.0;
+    abc.delta_twist_saturated = false;
     const uint64_t now_ns = last_loop_start_ns_ != 0 ? last_loop_start_ns_ : nowSteadyNs();
     const bool intervention_recent = safetyInterventionRecent(arm_id, now_ns);
     std::uint64_t& reanchor_count = arm_id == ArmId::Left
@@ -4005,6 +4015,239 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     return with_stage_telemetry(smoothed);
 }
 
+ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
+    ArmId arm_id,
+    const ArmCommand& command,
+    const TcpPoseTargetProfileConfig& profile,
+    control::DeltaTwistFollower* follower,
+    RuckigFollowerConfig* built_cfg,
+    std::uint64_t* submitted_wire_seq,
+    std::uint64_t* submitted_recv_seq,
+    SmdPoseTracker* smd_tracker,
+    const ArmMountConfig& mount,
+    const JointArray& previous_sent_q_deg,
+    double dt_sec
+) {
+    const RuckigFollowerConfig& rf = profile.ruckig_follower;
+    AbcTelemetry& abc = arm_id == ArmId::Left ? left_abc_telemetry_ : right_abc_telemetry_;
+    abc.follower_controller = "delta_twist";
+    abc.follower_active = false;
+    abc.follower_wire_seq = 0;
+    abc.follower_recv_seq = 0;
+    abc.follower_step = -1;
+    abc.follower_t_in_seg_sec = 0.0;
+    abc.follower_duration_sec = 0.0;
+    abc.follower_alpha = 1.0;
+    abc.follower_converged = false;
+    abc.follower_stall = false;
+    abc.follower_corner = false;
+    abc.follower_pf_stand.reset();
+    abc.stage_tcp_target_stand.reset();
+    abc.follower_divergence_pos_m = 0.0;
+    abc.follower_divergence_ang_rad = 0.0;
+    abc.delta_twist_pending_linear_norm_m = 0.0;
+    abc.delta_twist_pending_angular_norm_rad = 0.0;
+    abc.delta_twist_xi_cmd_linear_norm_m_s = 0.0;
+    abc.delta_twist_xi_cmd_angular_norm_rad_s = 0.0;
+    abc.delta_twist_saturated = false;
+    const uint64_t now_ns = last_loop_start_ns_ != 0 ? last_loop_start_ns_ : nowSteadyNs();
+    const bool intervention_recent = safetyInterventionRecent(arm_id, now_ns);
+    std::uint64_t& reanchor_count = arm_id == ArmId::Left
+        ? left_chunk_follower_reanchor_count_
+        : right_chunk_follower_reanchor_count_;
+    abc.follower_reanchor_count = reanchor_count;
+    abc.safety_intervention_recent = intervention_recent;
+    const bool fault_policy = rf.fallback_policy == RuckigFollowerFallbackPolicy::Fault;
+    const bool was_active = follower->active();
+    std::string transition_reason;
+    const auto seq_labels = [](std::uint64_t wire_seq, std::uint64_t recv_seq) {
+        std::ostringstream os;
+        os << "wire_seq=" << wire_seq << " recv_seq=" << recv_seq;
+        return os.str();
+    };
+    const auto diag_seq_labels = [&seq_labels](const control::DeltaTwistFollowerDiag& diag) {
+        return seq_labels(diag.seg_wire_seq, diag.seg_recv_seq);
+    };
+    const auto with_stage_telemetry = [&](ArmCommand out) {
+        if (out.mode == ControlMode::TcpPoseTarget && out.has_tcp_target) {
+            abc.stage_tcp_target_stand = out.tcp_target_stand;
+        }
+        return out;
+    };
+    const auto log_transition = [&]() {
+        if (follower->active() == was_active) return;
+        std::cout << "[chunk_follower] " << (arm_id == ArmId::Left ? "left" : "right")
+                  << (follower->active() ? " delta_twist ENGAGED" : " delta_twist disengaged")
+                  << (!transition_reason.empty() ? " (" : "") << transition_reason
+                  << (!transition_reason.empty() ? ")" : "") << "\n";
+    };
+    const auto smd_fallback = [&]() {
+        log_transition();
+        return with_stage_telemetry(applyPoseTrackSmd(
+            command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
+            previous_sent_q_deg, dt_sec));
+    };
+    if (!rf.enable || !chunk_frame_receiver_ || command.mode != ControlMode::TcpPoseTarget ||
+        !command.has_tcp_target || !kinematics_) {
+        transition_reason = "mode/enable";
+        follower->deactivate();
+        resetChunkFollowerEngageWait(arm_id);
+        return smd_fallback();
+    }
+    if (ruckigFollowerConfigChanged(*built_cfg, rf)) {
+        follower->reconfigure(makeDeltaTwistFollowerConfig(rf));
+        *built_cfg = rf;
+        *submitted_wire_seq = 0;
+        *submitted_recv_seq = 0;
+    }
+
+    const Pose6D reference = kinematics_->computeTcpStand(arm_id, previous_sent_q_deg, mount);
+    const auto hold_at_reference = [&]() {
+        ArmCommand smoothed = command;
+        smoothed.tcp_target_stand = reference;
+        return smoothed;
+    };
+    if (follower->active()) {
+        const control::DeltaTwistFollowerDiag& active_diag = follower->diag();
+        abc.follower_wire_seq = active_diag.seg_wire_seq;
+        abc.follower_recv_seq = active_diag.seg_recv_seq;
+        const double pos_err = math::positionDistance(follower->lastPose(), reference);
+        const double ang_err = math::orientationDistanceRad(follower->lastPose(), reference);
+        abc.follower_divergence_pos_m = pos_err;
+        abc.follower_divergence_ang_rad = ang_err;
+        const double age = follower->ageSince(ChunkFrameReceiver::steadyNowSec());
+        if (age > rf.chunk_feed_timeout_sec) {
+            transition_reason = fault_policy
+                ? "feed timeout -> fault " + diag_seq_labels(active_diag)
+                : "feed timeout " + diag_seq_labels(active_diag);
+            follower->deactivate();
+            if (fault_policy) {
+                smd_tracker->deactivate();
+                std::ostringstream reason;
+                reason << toString(arm_id)
+                       << " delta_twist_feed_timeout"
+                       << " age_sec=" << age
+                       << " timeout_sec=" << rf.chunk_feed_timeout_sec
+                       << " " << diag_seq_labels(active_diag);
+                recordChunkFollowerFaultRequest(arm_id, reason.str());
+                log_transition();
+                return with_stage_telemetry(hold_at_reference());
+            }
+        } else {
+            if (pos_err > kPoseTrackReanchorPosTolM || ang_err > kPoseTrackReanchorAngTolRad) {
+                if (fault_policy && intervention_recent) {
+                    follower->reanchor(reference);
+                    ++reanchor_count;
+                    abc.follower_reanchor_count = reanchor_count;
+                    uint64_t& last_log_ns = arm_id == ArmId::Left
+                        ? left_chunk_follower_reanchor_log_ns_
+                        : right_chunk_follower_reanchor_log_ns_;
+                    if (last_log_ns == 0 || now_ns < last_log_ns ||
+                        now_ns - last_log_ns >= kFollowerDivergenceReanchorLogPeriodNs) {
+                        std::cout << "[chunk_follower] " << toString(arm_id)
+                                  << " delta_twist divergence re-anchor (safety intervention)"
+                                  << " pos_err=" << pos_err
+                                  << " ang_err=" << ang_err
+                                  << " wire_seq=" << active_diag.seg_wire_seq
+                                  << " recv_seq=" << active_diag.seg_recv_seq << "\n";
+                        last_log_ns = now_ns;
+                    }
+                } else {
+                    transition_reason = fault_policy
+                        ? "divergence -> fault " + diag_seq_labels(active_diag)
+                        : "divergence re-anchor " + diag_seq_labels(active_diag);
+                    follower->deactivate();
+                    if (fault_policy) {
+                        smd_tracker->deactivate();
+                        std::ostringstream reason;
+                        reason << toString(arm_id)
+                               << " delta_twist_divergence"
+                               << " pos_err_m=" << pos_err
+                               << " pos_tol_m=" << kPoseTrackReanchorPosTolM
+                               << " ang_err_rad=" << ang_err
+                               << " ang_tol_rad=" << kPoseTrackReanchorAngTolRad
+                               << " " << diag_seq_labels(active_diag);
+                        recordChunkFollowerFaultRequest(arm_id, reason.str());
+                        log_transition();
+                        return with_stage_telemetry(hold_at_reference());
+                    }
+                }
+            }
+        }
+    }
+    const bool arm_present =
+        arm_id == ArmId::Left ? chunk_frame_cache_.has_left : chunk_frame_cache_.has_right;
+    const bool arm_has_delta =
+        arm_id == ArmId::Left ? chunk_frame_cache_.has_left_delta : chunk_frame_cache_.has_right_delta;
+    if (chunk_frame_cache_recv_seq_ != 0 &&
+        chunk_frame_cache_recv_seq_ != *submitted_recv_seq &&
+        arm_present) {
+        if (arm_has_delta) {
+            transition_reason = "delta chunk frame " +
+                seq_labels(chunk_frame_cache_.seq, chunk_frame_cache_.receiver_seq);
+            follower->submitFrame(toControlChunkFrame(chunk_frame_cache_, arm_id), reference);
+        } else {
+            transition_reason = "chunk frame missing delta " +
+                seq_labels(chunk_frame_cache_.seq, chunk_frame_cache_.receiver_seq);
+            follower->deactivate();
+        }
+        *submitted_wire_seq = chunk_frame_cache_.seq;
+        *submitted_recv_seq = chunk_frame_cache_.receiver_seq;
+    }
+    if (!follower->active()) {
+        if (fault_policy) {
+            smd_tracker->deactivate();
+            const double now_sec = ChunkFrameReceiver::steadyNowSec();
+            bool& waiting = arm_id == ArmId::Left ? left_chunk_engage_waiting_ : right_chunk_engage_waiting_;
+            double& wait_start_sec =
+                arm_id == ArmId::Left ? left_chunk_engage_wait_start_sec_ : right_chunk_engage_wait_start_sec_;
+            if (!waiting) {
+                waiting = true;
+                wait_start_sec = now_sec;
+                std::cout << "[chunk_follower] " << toString(arm_id)
+                          << " waiting for first delta chunk frame (fallback_policy=fault "
+                          << seq_labels(*submitted_wire_seq, *submitted_recv_seq) << ")\n";
+            }
+            const double elapsed_sec = now_sec - wait_start_sec;
+            if (elapsed_sec > rf.engage_timeout_sec) {
+                std::ostringstream reason;
+                reason << toString(arm_id)
+                       << " delta_twist_engage_timeout"
+                       << " elapsed_sec=" << elapsed_sec
+                       << " timeout_sec=" << rf.engage_timeout_sec
+                       << " " << seq_labels(*submitted_wire_seq, *submitted_recv_seq);
+                recordChunkFollowerFaultRequest(arm_id, reason.str());
+            }
+            return with_stage_telemetry(hold_at_reference());
+        }
+        return smd_fallback();
+    }
+
+    resetChunkFollowerEngageWait(arm_id);
+    log_transition();
+    smd_tracker->deactivate();
+    ArmCommand smoothed = command;
+    smoothed.tcp_target_stand = follower->tick(dt_sec);
+    const control::DeltaTwistFollowerDiag& diag = follower->diag();
+    abc.follower_active = true;
+    abc.follower_wire_seq = diag.seg_wire_seq;
+    abc.follower_recv_seq = diag.seg_recv_seq;
+    abc.follower_step = diag.seg_step_index;
+    abc.follower_t_in_seg_sec = follower->tInSegment();
+    abc.follower_duration_sec = diag.last_solve.duration;
+    abc.follower_alpha = diag.last_solve.alpha;
+    abc.follower_converged = diag.last_solve.converged;
+    abc.follower_stall = diag.stall;
+    abc.follower_corner = diag.last_solve.corner;
+    abc.follower_pf_stand = diag.seg_target_stand;
+    abc.delta_twist_pending_linear_norm_m = vec6LinearNorm(diag.pending_delta);
+    abc.delta_twist_pending_angular_norm_rad = vec6AngularNorm(diag.pending_delta);
+    abc.delta_twist_xi_cmd_linear_norm_m_s = vec6LinearNorm(diag.xi_cmd);
+    abc.delta_twist_xi_cmd_angular_norm_rad_s = vec6AngularNorm(diag.xi_cmd);
+    abc.delta_twist_saturated = diag.saturated;
+    return with_stage_telemetry(smoothed);
+}
+
 ServoTarget DualArmServoLoop::computeServoTarget(
     const RobotState& left_state,
     const RobotState& right_state,
@@ -4181,40 +4424,79 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         // singularity_scale_*). Velocity-only — cannot stall the IK.
         left_pose_track_smd_.setMinSingular(left_last_cartesian_solve_.ik_min_singular_value);
         right_pose_track_smd_.setMinSingular(right_last_cartesian_solve_.ik_min_singular_value);
-        // Ruckig chunk-follower stage: pull the newest chunk frame once per tick,
-        // then run the follower (per-profile opt-in) or the legacy SMD path.
+        // Chunk-follower stage: pull the newest chunk frame once per tick, then
+        // run the selected follower (absolute-waypoint Ruckig or local-delta
+        // delta_twist) or the legacy SMD path.
         // applyChunkFollowerStage falls back to applyPoseTrackSmd verbatim when
         // the profile leaves ruckig_follower disabled, so existing profiles are
         // byte-identical in behavior. This stage runs before this tick's
         // applySafety(), so strict divergence explanation intentionally reads the
         // previous safety tick's intervention stamp through a short debounce.
         pollChunkFrames();
-        const ArmCommand left_pose_track_command = applyChunkFollowerStage(
-            ArmId::Left,
-            effective_command.left,
-            left_tcp_profile,
-            &left_chunk_follower_,
-            &left_chunk_follower_built_,
-            &left_chunk_submitted_wire_seq_,
-            &left_chunk_submitted_recv_seq_,
-            &left_pose_track_smd_,
-            config_.left_mount,
-            left_prev_sent_q_deg_,
-            dt_sec
-        );
-        const ArmCommand right_pose_track_command = applyChunkFollowerStage(
-            ArmId::Right,
-            effective_command.right,
-            right_tcp_profile,
-            &right_chunk_follower_,
-            &right_chunk_follower_built_,
-            &right_chunk_submitted_wire_seq_,
-            &right_chunk_submitted_recv_seq_,
-            &right_pose_track_smd_,
-            config_.right_mount,
-            right_prev_sent_q_deg_,
-            dt_sec
-        );
+        ArmCommand left_pose_track_command;
+        if (left_tcp_profile.ruckig_follower.controller == RuckigFollowerController::DeltaTwist) {
+            left_chunk_follower_.deactivate();
+            left_pose_track_command = applyDeltaTwistFollowerStage(
+                ArmId::Left,
+                effective_command.left,
+                left_tcp_profile,
+                &left_delta_twist_follower_,
+                &left_chunk_follower_built_,
+                &left_chunk_submitted_wire_seq_,
+                &left_chunk_submitted_recv_seq_,
+                &left_pose_track_smd_,
+                config_.left_mount,
+                left_prev_sent_q_deg_,
+                dt_sec
+            );
+        } else {
+            left_delta_twist_follower_.deactivate();
+            left_pose_track_command = applyChunkFollowerStage(
+                ArmId::Left,
+                effective_command.left,
+                left_tcp_profile,
+                &left_chunk_follower_,
+                &left_chunk_follower_built_,
+                &left_chunk_submitted_wire_seq_,
+                &left_chunk_submitted_recv_seq_,
+                &left_pose_track_smd_,
+                config_.left_mount,
+                left_prev_sent_q_deg_,
+                dt_sec
+            );
+        }
+        ArmCommand right_pose_track_command;
+        if (right_tcp_profile.ruckig_follower.controller == RuckigFollowerController::DeltaTwist) {
+            right_chunk_follower_.deactivate();
+            right_pose_track_command = applyDeltaTwistFollowerStage(
+                ArmId::Right,
+                effective_command.right,
+                right_tcp_profile,
+                &right_delta_twist_follower_,
+                &right_chunk_follower_built_,
+                &right_chunk_submitted_wire_seq_,
+                &right_chunk_submitted_recv_seq_,
+                &right_pose_track_smd_,
+                config_.right_mount,
+                right_prev_sent_q_deg_,
+                dt_sec
+            );
+        } else {
+            right_delta_twist_follower_.deactivate();
+            right_pose_track_command = applyChunkFollowerStage(
+                ArmId::Right,
+                effective_command.right,
+                right_tcp_profile,
+                &right_chunk_follower_,
+                &right_chunk_follower_built_,
+                &right_chunk_submitted_wire_seq_,
+                &right_chunk_submitted_recv_seq_,
+                &right_pose_track_smd_,
+                config_.right_mount,
+                right_prev_sent_q_deg_,
+                dt_sec
+            );
+        }
         if (latchChunkFollowerFaultRequests(left_state, right_state) && command_verdict) {
             *command_verdict = SafetyVerdict::ChunkFollowerFault;
         }
@@ -4381,10 +4663,12 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     }
 
     // No arm is in Cartesian mode, so applyChunkFollowerStage() did not run.
-    // Drop both chunk followers here to preserve the invariant that a follower
-    // cannot outlive the streaming TcpPoseTarget command that fed it.
+    // Drop both chunk follower variants here to preserve the invariant that a
+    // follower cannot outlive the streaming TcpPoseTarget command that fed it.
     left_chunk_follower_.deactivate();
     right_chunk_follower_.deactivate();
+    left_delta_twist_follower_.deactivate();
+    right_delta_twist_follower_.deactivate();
     resetChunkFollowerEngageWait(ArmId::Left);
     resetChunkFollowerEngageWait(ArmId::Right);
 
@@ -5579,6 +5863,71 @@ bool DualArmServoLoop::commandRequestsSetSafetyRoiBounds(const DualArmCommand& c
 bool DualArmServoLoop::commandRequestsSetExternalBoxes(const DualArmCommand& command) const {
     return command.left.mode == ControlMode::SetExternalBoxes ||
            command.right.mode == ControlMode::SetExternalBoxes;
+}
+
+bool DualArmServoLoop::applySetExternalBoxesCommand(const DualArmCommand& command) {
+    // Leaseless runtime update of preallocated external keep-out boxes.
+    // No-op unless the mesh CollisionMonitor was built with external boxes.
+    if (!command.has_external_boxes) {
+        std::cerr << "[WARN] SetExternalBoxes rejected: missing boxes payload\n";
+        return false;
+    }
+    if (!collision_monitor_ || !collision_monitor_cfg_.external_boxes.enable) {
+        std::cerr << "[DEBUG] SetExternalBoxes ignored: external boxes disabled or monitor absent\n";
+        return false;
+    }
+
+    const int max_count = collision_monitor_cfg_.external_boxes.max_count;
+    std::vector<ExternalBoxPose> poses(static_cast<std::size_t>(std::max(0, max_count)));
+    int accepted = 0;
+    int ignored_unknown = 0;
+    int ignored_out_of_range = 0;
+    int ignored_invalid_rotation = 0;
+    for (const auto& box : command.external_boxes) {
+        int slot = -1;
+        if (box.label == "green") {
+            slot = 0;
+        } else if (box.label == "gray") {
+            slot = 1;
+        } else {
+            ++ignored_unknown;
+            continue;
+        }
+        if (slot < 0 || slot >= max_count) {
+            ++ignored_out_of_range;
+            continue;
+        }
+
+        Eigen::Matrix3d R;
+        Eigen::Vector3d t;
+        for (int row = 0; row < 3; ++row) {
+            for (int col = 0; col < 3; ++col) {
+                R(row, col) = box.T_stand_box[static_cast<std::size_t>(row * 4 + col)];
+            }
+            t(row) = box.T_stand_box[static_cast<std::size_t>(row * 4 + 3)];
+        }
+        Eigen::Quaterniond q(R);
+        const double q_norm = q.norm();
+        if (!std::isfinite(q_norm) || q_norm <= 0.0) {
+            ++ignored_invalid_rotation;
+            continue;
+        }
+        q.normalize();
+        ExternalBoxPose pose;
+        pose.enable = box.enable;
+        pose.R = q.toRotationMatrix();
+        pose.t = t;
+        poses[static_cast<std::size_t>(slot)] = pose;
+        ++accepted;
+    }
+    const double stamp_s = nsToSec(nowSteadyNs());
+    collision_monitor_->setExternalBoxes(poses, stamp_s);
+    std::cerr << "[DEBUG] SetExternalBoxes applied " << accepted
+              << " box(es), ignored_unknown=" << ignored_unknown
+              << " ignored_out_of_range=" << ignored_out_of_range
+              << " ignored_invalid_rotation=" << ignored_invalid_rotation
+              << " by source_id=" << command.source.source_id << "\n";
+    return true;
 }
 
 bool DualArmServoLoop::commandRequestsSetUserSafetyFloorPlane(const DualArmCommand& command) const {

@@ -20,10 +20,13 @@
 namespace rb_servo::control {
 
 // One chunk as received on the servo side (absolute stand-frame waypoints,
-// measured-anchored at idx0 by the producer).
+// measured-anchored at idx0 by the producer). Optional delta rows preserve the
+// conditioned local/body-frame model action used to generate those waypoints;
+// current followers still consume pose/grip.
 struct ChunkFrame {
   std::vector<Pose6D> pose;      // absolute stand-frame waypoints
   std::vector<double> grip;      // per-waypoint gripper target (producer units)
+  std::vector<Vec6> delta;       // optional conditioned per-frame local/body deltas
   double policy_dt{1.0 / 30.0};  // per-step wall clock
   std::uint64_t wire_seq{0};     // producer packet seq / flow chunk id
   std::uint64_t recv_seq{0};     // receiver-local accepted-frame count

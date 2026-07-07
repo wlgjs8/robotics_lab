@@ -304,6 +304,40 @@ def run(
         )
         sleep_fn(period)
     _capture = TeleopCaptureLogger()
+
+    def _log_final_and_capture(
+        intent: CommandIntent | None,
+        snapshot: StateSnapshot,
+        decision: object,
+        now_value: float,
+        *,
+        sent: bool,
+        command_seq: int = 0,
+        arm_seq: int = 0,
+        drop_reason: str | None = None,
+    ) -> None:
+        _log_final_intent(
+            source,
+            intent,
+            snapshot,
+            arm_init_override,
+            decision,
+            sent=sent,
+            command_seq=command_seq,
+            drop_reason=drop_reason,
+        )
+        _capture.log(
+            now_value,
+            source,
+            intent,
+            getattr(decision, "allowed", False),
+            phase="final",
+            sent=sent,
+            command_seq=command_seq,
+            arm_seq=arm_seq,
+            drop_reason=drop_reason,
+        )
+
     try:
         while True:
             snapshot = state_client.latest
@@ -368,7 +402,7 @@ def run(
                 else None
             )
             decision = safety_gate.evaluate(snapshot, intent, requirements, now)
-            _capture.log(now, source, intent, decision.allowed)
+            _capture.log(now, source, intent, decision.allowed, phase="pre")
             if rollout_recorder is not None:
                 rollout_recorder.record_decision(decision)
                 rollout_recorder.record_source(source)
@@ -435,12 +469,11 @@ def run(
                     if rollout_recorder is not None:
                         rollout_recorder.record_dropped("rollout_mode_command_send_disabled", intent)
                     _remember_unsent_intent(intent)
-                    _log_final_intent(
-                        source,
+                    _log_final_and_capture(
                         intent,
                         snapshot,
-                        arm_init_override,
                         decision,
+                        now,
                         sent=False,
                         command_seq=0,
                         drop_reason="rollout_mode_command_send_disabled",
@@ -454,12 +487,11 @@ def run(
                 # temporary GUI lease holder does not kill the teleop process.
                 if config.servo_command.acquire_lease and not lease_acquired and intent.is_motion:
                     if now < lease_retry_after:
-                        _log_final_intent(
-                            source,
+                        _log_final_and_capture(
                             intent,
                             snapshot,
-                            arm_init_override,
                             decision,
+                            now,
                             sent=False,
                             command_seq=0,
                             drop_reason="lease_retry_backoff",
@@ -480,18 +512,18 @@ def run(
                             file=stderr,
                         )
                         lease_retry_after = now + LEASE_RETRY_BACKOFF_SEC
-                        _log_final_intent(
-                            source,
+                        _log_final_and_capture(
                             intent,
                             snapshot,
-                            arm_init_override,
                             decision,
+                            now,
                             sent=False,
                             command_seq=0,
                             drop_reason="lease_busy",
                         )
                         _finish_tick(snapshot, now)
                         continue
+                arm_seq = 0
                 if intent.is_motion and not armed_for_motion:
                     arm = CommandIntent.arm_motion(timeout_sec=config.servo_command.timeout_sec)
                     arm_decision = safety_gate.evaluate(snapshot, arm, getattr(source, "requirements", None), now)
@@ -509,12 +541,11 @@ def run(
                         if teleop_debug:
                             debug_dropped += 1
                             debug_last_drop_reason = f"arm:{arm_decision.reason or ''}"
-                        _log_final_intent(
-                            source,
+                        _log_final_and_capture(
                             intent,
                             snapshot,
-                            arm_init_override,
                             decision,
+                            now,
                             sent=False,
                             command_seq=0,
                             drop_reason=f"arm:{arm_decision.reason or ''}",
@@ -523,14 +554,14 @@ def run(
                         continue
                 seq = command_client.send(intent)
                 _remember_sent_intent(intent, seq)
-                _log_final_intent(
-                    source,
+                _log_final_and_capture(
                     intent,
                     snapshot,
-                    arm_init_override,
                     decision,
+                    now,
                     sent=True,
                     command_seq=seq,
+                    arm_seq=arm_seq,
                     drop_reason=None,
                 )
                 if teleop_debug:
@@ -540,12 +571,11 @@ def run(
             elif intent is not None:
                 if rollout_recorder is not None:
                     rollout_recorder.record_dropped(decision.reason, intent)
-                _log_final_intent(
-                    source,
+                _log_final_and_capture(
                     intent,
                     snapshot,
-                    arm_init_override,
                     decision,
+                    now,
                     sent=False,
                     command_seq=0,
                     drop_reason=decision.reason,
@@ -1023,7 +1053,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--velproprio-sample-mode",
         default="replan",
-        choices=("replan", "fixed_step"),
+        choices=("replan", "fixed_step", "camera_frame"),
         help=(
             "How velocity* proprio picks its finite-difference window (openpi-remote only). 'replan' "
             "(default, legacy): difference the TCP pose between successive proprio samples (chunk-replan "
@@ -1032,7 +1062,8 @@ def _main_with_subcommands(argv: list[str]) -> int:
             "a SMALLER velocity than training saw. 'fixed_step': difference the MEASURED pose over a fixed "
             "~policy_dt window from a per-tick pose history, decoupled from replan cadence and inference "
             "latency — reproduces the training converter's single 30 Hz frame delta regardless of the "
-            "controller. Use fixed_step when a controller change makes the policy under-shoot (e.g. depth)."
+            "controller. 'camera_frame': measured TCP local delta over [camera_time - policy_dt, "
+            "camera_time], no dt normalization, closest to OpenPI/UMI converter semantics."
         ),
     )
     flow_infer.add_argument(

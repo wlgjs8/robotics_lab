@@ -21,20 +21,27 @@ public:
     // buffered command has already EXPIRED at now_ns (re-acquire after idle
     // teleop) — an expired carrier would hide the grant from the readback.
     void updateLease(const CommandSourceLeaseState& lease, uint64_t now_ns);
-    DualArmCommand latestOrHold(uint64_t now_ns);
+    DualArmCommand latestOrHold(
+        uint64_t now_ns,
+        CommandBufferReadTelemetry* telemetry = nullptr
+    );
+    std::optional<DualArmCommand> consumeLatestExternalBoxes(
+        uint64_t now_ns,
+        CommandBufferReadTelemetry* telemetry = nullptr
+    );
 
     // External-box keep-out feed liveness. Stamped on the network RECEIVE thread
-    // for every accepted SetExternalBoxes packet (independent of whether the
-    // control loop later samples/applies it), so the servo-side liveness watchdog
-    // (checkExternalBoxFeedOrAbort) measures true producer aliveness and is not
-    // starved by a high-rate motion stream monopolizing the single latest-command
-    // slot. Read on the control thread. 0 means no feed received yet.
+    // for every accepted SetExternalBoxes packet. The box payload itself uses a
+    // side slot so it cannot displace motion; this receive stamp is still kept
+    // separately so the servo-side liveness watchdog measures true producer
+    // aliveness. Read on the control thread. 0 means no feed received yet.
     void noteExternalBoxReceived(uint64_t receive_time_ns);
     uint64_t lastExternalBoxReceiveNs() const;
 
 private:
     mutable std::mutex mutex_;
     std::optional<DualArmCommand> latest_command_;
+    std::optional<DualArmCommand> pending_external_boxes_command_;
     std::deque<DualArmCommand> pending_lifecycle_commands_;
     std::atomic<uint64_t> last_external_box_receive_ns_{0};
 };

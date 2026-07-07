@@ -37,6 +37,7 @@ add_library(rb_servo_core
     src/control/smd_pose_tracker.cpp
     src/control/chunk_window.cpp
     src/control/cartesian_chunk_follower.cpp
+    src/control/delta_twist_follower.cpp
     src/math/se3.cpp
     src/control/force_controller.cpp
     src/control/collision_monitor.cpp
@@ -236,6 +237,10 @@ if(BUILD_TESTING)
     add_executable(test_cartesian_chunk_follower tests/test_cartesian_chunk_follower.cpp)
     target_link_libraries(test_cartesian_chunk_follower PRIVATE rb_servo_core)
     add_test(NAME cartesian_chunk_follower COMMAND test_cartesian_chunk_follower)
+
+    add_executable(test_delta_twist_follower tests/test_delta_twist_follower.cpp)
+    target_link_libraries(test_delta_twist_follower PRIVATE rb_servo_core)
+    add_test(NAME delta_twist_follower COMMAND test_delta_twist_follower)
 
     add_executable(test_chunk_frame_receiver tests/test_chunk_frame_receiver.cpp)
     target_link_libraries(test_chunk_frame_receiver PRIVATE rb_servo_core)

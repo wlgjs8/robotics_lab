@@ -127,15 +127,20 @@ fi
 #              timing, so a slower/burstier controller (or SEQUENTIAL holds) under-reports
 #              velocity -> the policy reads "slowing down" and under-shoots (e.g. depth).
 #   fixed_step: difference the measured pose over a fixed ~policy_dt window from a per-tick
-#              pose history, decoupled from replan cadence + inference latency (matches the
-#              training 30 Hz per-frame delta regardless of the controller).
-# Set FLOW_INFER_VELPROPRIO_SAMPLE=fixed_step to isolate the controller from the proprio.
-# VELPROPRIO_SAMPLE="${FLOW_INFER_VELPROPRIO_SAMPLE:-replan}"
-VELPROPRIO_SAMPLE="${FLOW_INFER_VELPROPRIO_SAMPLE:-fixed_step}"
+#              pose history, decoupled from replan cadence + inference latency (legacy
+#              normalization preserved).
+#   camera_frame: measured TCP local delta over [camera_time - policy_dt, camera_time],
+#              no dt normalization, closest to OpenPI/UMI converter semantics.
+# Override with FLOW_INFER_VELPROPRIO_SAMPLE=replan|fixed_step|camera_frame.
+VELPROPRIO_SAMPLE="${FLOW_INFER_VELPROPRIO_SAMPLE:-camera_frame}"
 VELPROPRIO_ARGS=()
 if [ "$VELPROPRIO_SAMPLE" != "replan" ]; then
   VELPROPRIO_ARGS+=(--velproprio-sample-mode "$VELPROPRIO_SAMPLE")
-  echo "[flow-infer] velproprio_sample_mode=$VELPROPRIO_SAMPLE (velocity from fixed ~policy_dt window; controller-independent)"
+  if [ "$VELPROPRIO_SAMPLE" = "camera_frame" ]; then
+    echo "[flow-infer] velproprio_sample_mode=$VELPROPRIO_SAMPLE (camera-time measured TCP local delta; no dt normalization)"
+  else
+    echo "[flow-infer] velproprio_sample_mode=$VELPROPRIO_SAMPLE (velocity from fixed ~policy_dt window; controller-independent)"
+  fi
 fi
 if [ "$VELPROPRIO_SOURCE" != "measured" ]; then
   VELPROPRIO_ARGS+=(--velproprio-source "$VELPROPRIO_SOURCE")

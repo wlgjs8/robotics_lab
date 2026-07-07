@@ -214,6 +214,7 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
     if (!out) return;
     validateAllowedKeys(node, {
         "enable",
+        "controller",
         "fallback_policy",
         "engage_timeout_sec",
         "max_linear_velocity_m_s",
@@ -227,9 +228,25 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         "reserve_steps",
         "smoothing_window",
         "af_damping_beta",
+        "delta_twist_tau_sec",
+        "delta_twist_residual_drain_steps",
+        "delta_twist_max_residual_m",
+        "delta_twist_max_residual_rad",
+        "delta_twist_max_lead_m",
+        "delta_twist_max_lead_rad",
         "chunk_feed_timeout_sec",
     }, path);
     if (has(node, "enable")) out->enable = asBool(node["enable"], path + ".enable");
+    if (has(node, "controller")) {
+        const std::string value = lower(asString(node["controller"], path + ".controller"));
+        if (value == "ruckig_waypoint") {
+            out->controller = RuckigFollowerController::RuckigWaypoint;
+        } else if (value == "delta_twist") {
+            out->controller = RuckigFollowerController::DeltaTwist;
+        } else {
+            fail("Unknown " + path + ".controller: " + value, node["controller"]);
+        }
+    }
     if (has(node, "fallback_policy")) {
         const std::string value = lower(asString(node["fallback_policy"], path + ".fallback_policy"));
         if (value == "smd") {
@@ -275,6 +292,29 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
     }
     if (has(node, "af_damping_beta")) {
         out->af_damping_beta = asDouble(node["af_damping_beta"], path + ".af_damping_beta");
+    }
+    if (has(node, "delta_twist_tau_sec")) {
+        out->delta_twist_tau_sec = asDouble(node["delta_twist_tau_sec"], path + ".delta_twist_tau_sec");
+    }
+    if (has(node, "delta_twist_residual_drain_steps")) {
+        out->delta_twist_residual_drain_steps =
+            asInt(node["delta_twist_residual_drain_steps"], path + ".delta_twist_residual_drain_steps");
+    }
+    if (has(node, "delta_twist_max_residual_m")) {
+        out->delta_twist_max_residual_m =
+            asDouble(node["delta_twist_max_residual_m"], path + ".delta_twist_max_residual_m");
+    }
+    if (has(node, "delta_twist_max_residual_rad")) {
+        out->delta_twist_max_residual_rad =
+            asDouble(node["delta_twist_max_residual_rad"], path + ".delta_twist_max_residual_rad");
+    }
+    if (has(node, "delta_twist_max_lead_m")) {
+        out->delta_twist_max_lead_m =
+            asDouble(node["delta_twist_max_lead_m"], path + ".delta_twist_max_lead_m");
+    }
+    if (has(node, "delta_twist_max_lead_rad")) {
+        out->delta_twist_max_lead_rad =
+            asDouble(node["delta_twist_max_lead_rad"], path + ".delta_twist_max_lead_rad");
     }
     if (has(node, "chunk_feed_timeout_sec")) {
         out->chunk_feed_timeout_sec = asDouble(node["chunk_feed_timeout_sec"], path + ".chunk_feed_timeout_sec");
@@ -1586,6 +1626,14 @@ void validateConfig(const DualArmConfig& cfg) {
         if (!std::isfinite(rf.af_damping_beta) || rf.af_damping_beta <= 0.0 || rf.af_damping_beta > 1.0) {
             throw std::runtime_error(path + ".af_damping_beta must be in (0, 1]");
         }
+        validatePositiveFinite(rf.delta_twist_tau_sec, path + ".delta_twist_tau_sec");
+        if (rf.delta_twist_residual_drain_steps < 1) {
+            throw std::runtime_error(path + ".delta_twist_residual_drain_steps must be >= 1");
+        }
+        validatePositiveFinite(rf.delta_twist_max_residual_m, path + ".delta_twist_max_residual_m");
+        validatePositiveFinite(rf.delta_twist_max_residual_rad, path + ".delta_twist_max_residual_rad");
+        validatePositiveFinite(rf.delta_twist_max_lead_m, path + ".delta_twist_max_lead_m");
+        validatePositiveFinite(rf.delta_twist_max_lead_rad, path + ".delta_twist_max_lead_rad");
         if (rf.enable && cfg.network.chunk_frame_bind.empty()) {
             throw std::runtime_error(
                 path + ".enable=true requires network.chunk_frame_bind (dedicated chunk-frame UDP ingest)"

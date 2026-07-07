@@ -21,22 +21,33 @@ static void check(bool ok, const char* name) {
   if (!ok) ++g_failures;
 }
 
-static std::string makePacket(int seq, int horizon, bool with_right) {
+static std::string makePacket(int seq, int horizon, bool with_right, bool with_delta = false) {
   std::string left = "[";
+  std::string left_delta = "[";
   for (int i = 0; i < horizon; ++i) {
     left += "[" + std::to_string(0.01 * i) + ",0.0,0.2,0.0,0.0,0.0,1.0," +
             std::to_string(20.0 + i) + "]";
+    left_delta += "[" + std::to_string(0.001 * i) + ",0.002,0.003,0.004,0.005,0.006," +
+                  std::to_string(20.0 + i) + "]";
     if (i + 1 < horizon) left += ",";
+    if (i + 1 < horizon) left_delta += ",";
   }
   left += "]";
+  left_delta += "]";
   std::string right = with_right ? left : "null";
-  return std::string("{\"schema\":\"robotics_lab.chunk_overlay.v2\",") +
+  std::string out = std::string("{\"schema\":\"robotics_lab.chunk_overlay.v2\",") +
          "\"schema_version\":\"robotics_lab.chunk_overlay.v2\"," +
          "\"host_time_ns\":123456789," +
          "\"seq\":" + std::to_string(seq) + "," +
          "\"policy_dt_sec\":0.0334," +
          "\"horizon\":" + std::to_string(horizon) + "," +
-         "\"left\":" + left + ",\"right\":" + right + "}";
+         "\"left\":" + left + ",\"right\":" + right;
+  if (with_delta) {
+    out += ",\"left_delta\":" + left_delta;
+    if (with_right) out += ",\"right_delta\":" + left_delta;
+  }
+  out += "}";
+  return out;
 }
 
 int main() {
@@ -48,6 +59,7 @@ int main() {
     check(ChunkFrameReceiver::parsePacket(pkt.data(), pkt.size(), &frame), "valid packet parses");
     check(frame.seq == 7, "producer seq parsed");
     check(frame.has_left && !frame.has_right, "left present, right null");
+    check(!frame.has_left_delta && !frame.has_right_delta, "old packet has no deltas");
     check(frame.left.count == 16, "16 steps");
     check(frame.left.step[3][0] == 0.03, "step x values land");
     check(frame.left.step[3][7] == 23.0, "grip values land");
@@ -66,19 +78,35 @@ int main() {
     check(!ChunkFrameReceiver::parsePacket(bad3.data(), bad3.size(), &frame), "both arms null rejected");
     const std::string bad4 = "{\"schema_version\":\"robotics_lab.chunk_overlay.v2\",\"seq\":1,\"policy_dt_sec\":0.033,\"left\":[[0,0,0,0,0,0,0,0]]}";
     check(!ChunkFrameReceiver::parsePacket(bad4.data(), bad4.size(), &frame), "degenerate quaternion rejected");
+    const std::string bad5 = "{\"schema_version\":\"robotics_lab.chunk_overlay.v2\",\"seq\":1,\"policy_dt_sec\":0.033,\"left\":[[0,0,0,0,0,0,1,0]],\"left_delta\":[[0,0,0,0,0,\"bad\",0]]}";
+    check(!ChunkFrameReceiver::parsePacket(bad5.data(), bad5.size(), &frame), "malformed delta row rejected");
   }
 
-  // -- Test 3: oversize horizon clamps to kMaxSteps. ---------------------------
-  std::printf("Test 3: horizon clamp\n");
+  // -- Test 3: optional delta rows parse. -------------------------------------
+  std::printf("Test 3: delta rows\n");
   {
-    const std::string pkt = makePacket(1, ChunkFrameReceiver::kMaxSteps + 8, false);
+    const std::string pkt = makePacket(8, 4, true, true);
+    ChunkFrameReceiver::Frame frame;
+    check(ChunkFrameReceiver::parsePacket(pkt.data(), pkt.size(), &frame), "packet with deltas parses");
+    check(frame.has_left_delta && frame.has_right_delta, "delta presence flags set");
+    check(frame.left_delta.count == 4, "left delta count parsed");
+    check(frame.right_delta.count == 4, "right delta count parsed");
+    check(frame.left_delta.step[3][0] == 0.003, "left delta dx values land");
+    check(frame.left_delta.step[3][6] == 23.0, "left delta grip values land");
+  }
+
+  // -- Test 4: oversize horizon clamps to kMaxSteps. ---------------------------
+  std::printf("Test 4: horizon clamp\n");
+  {
+    const std::string pkt = makePacket(1, ChunkFrameReceiver::kMaxSteps + 8, false, true);
     ChunkFrameReceiver::Frame frame;
     check(ChunkFrameReceiver::parsePacket(pkt.data(), pkt.size(), &frame), "oversize packet parses");
     check(frame.left.count == ChunkFrameReceiver::kMaxSteps, "steps clamped to kMaxSteps");
+    check(frame.left_delta.count == ChunkFrameReceiver::kMaxSteps, "delta steps clamped to kMaxSteps");
   }
 
-  // -- Test 4: live loopback receive + receiver_seq dedup. ---------------------
-  std::printf("Test 4: loopback receive\n");
+  // -- Test 5: live loopback receive + receiver_seq dedup. ---------------------
+  std::printf("Test 5: loopback receive\n");
   {
     const int port = 57263;
     ChunkFrameReceiver receiver("udp://127.0.0.1:" + std::to_string(port));
@@ -119,8 +147,8 @@ int main() {
     check(true, "receiver stops cleanly");
   }
 
-  // -- Test 5: empty bind = disabled but start() succeeds. ---------------------
-  std::printf("Test 5: disabled receiver\n");
+  // -- Test 6: empty bind = disabled but start() succeeds. ---------------------
+  std::printf("Test 6: disabled receiver\n");
   {
     ChunkFrameReceiver receiver("");
     check(receiver.start(), "empty bind starts as no-op");

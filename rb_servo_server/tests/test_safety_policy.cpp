@@ -910,11 +910,9 @@ bool testSetExternalBoxesCommandParser() {
     return true;
 }
 
-// The external-box feed-liveness watchdog measures RECEIVE time on the shared
-// CommandBuffer, not apply time, so a high-rate motion stream that monopolizes the
-// single latest-command slot cannot starve the signal and false-abort. Encode that
-// property directly: the receive stamp survives a flood of setCommand() and is only
-// advanced by noteExternalBoxReceived().
+// The external-box feed-liveness watchdog measures RECEIVE time on the
+// CommandBuffer, not apply time. Encode that property directly: the receive stamp
+// is independent from motion commands and is only advanced by noteExternalBoxReceived().
 bool testExternalBoxReceiveStampSurvivesMotionFlood() {
     rb_servo::CommandBuffer buffer;
     RB_CHECK(buffer.lastExternalBoxReceiveNs() == 0);  // no feed yet
@@ -937,6 +935,126 @@ bool testExternalBoxReceiveStampSurvivesMotionFlood() {
     const uint64_t t2 = t1 + 2'000'000'000ULL;
     buffer.noteExternalBoxReceived(t2);
     RB_CHECK(buffer.lastExternalBoxReceiveNs() == t2);
+    return true;
+}
+
+rb_servo::DualArmCommand externalBoxesCommand(uint64_t seq, uint64_t host_time_ns, double x_m) {
+    rb_servo::DualArmCommand cmd = command(rb_servo::ControlMode::SetExternalBoxes);
+    cmd.seq = seq;
+    cmd.host_time_ns = host_time_ns;
+    cmd.source.source_id = "stereo_worker";
+    cmd.source.session_id = "camera-session";
+    cmd.has_external_boxes = true;
+    rb_servo::ExternalBoxCommand box;
+    box.label = "green";
+    box.T_stand_box = {
+        1.0, 0.0, 0.0, x_m,
+        0.0, 1.0, 0.0, 0.22,
+        0.0, 0.0, 1.0, 0.33,
+        0.0, 0.0, 0.0, 1.0
+    };
+    box.enable = true;
+    cmd.external_boxes.push_back(box);
+    return cmd;
+}
+
+bool testExternalBoxesDoNotDisplaceMotionLatest() {
+    rb_servo::CommandBuffer buffer;
+    const uint64_t now = rb_servo::nowSteadyNs();
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.seq = 10;
+    target.host_time_ns = now;
+    target.left.q_target_deg = joints(3.0);
+    target.right.q_target_deg = joints(3.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    rb_servo::DualArmCommand boxes = externalBoxesCommand(11, now + 1, 0.11);
+
+    buffer.setCommand(target);
+    buffer.setCommand(boxes);
+
+    rb_servo::CommandBufferReadTelemetry telemetry;
+    rb_servo::DualArmCommand latest = buffer.latestOrHold(now + 2, &telemetry);
+    RB_CHECK(latest.seq == target.seq);
+    RB_CHECK(latest.left.mode == rb_servo::ControlMode::JointTarget);
+    RB_CHECK(latest.right.mode == rb_servo::ControlMode::JointTarget);
+    RB_CHECK(telemetry.external_boxes_pending);
+    RB_CHECK(!telemetry.external_boxes_consumed);
+    RB_CHECK(telemetry.latest_seq == target.seq);
+    RB_CHECK(telemetry.latest_right_mode == rb_servo::ControlMode::JointTarget);
+
+    std::optional<rb_servo::DualArmCommand> consumed =
+        buffer.consumeLatestExternalBoxes(now + 3, &telemetry);
+    RB_CHECK(consumed.has_value());
+    RB_CHECK(consumed->seq == boxes.seq);
+    RB_CHECK(consumed->right.mode == rb_servo::ControlMode::SetExternalBoxes);
+    RB_CHECK(telemetry.external_boxes_consumed);
+    RB_CHECK(telemetry.external_boxes_seq == boxes.seq);
+
+    latest = buffer.latestOrHold(now + 4);
+    RB_CHECK(latest.seq == target.seq);
+    RB_CHECK(latest.right.mode == rb_servo::ControlMode::JointTarget);
+    RB_CHECK(!buffer.consumeLatestExternalBoxes(now + 5).has_value());
+    return true;
+}
+
+bool testExternalBoxesLatestOnlySideSlot() {
+    rb_servo::CommandBuffer buffer;
+    const uint64_t now = rb_servo::nowSteadyNs();
+    rb_servo::DualArmCommand first = externalBoxesCommand(20, now, 0.20);
+    rb_servo::DualArmCommand second = externalBoxesCommand(21, now + 1, 0.21);
+
+    buffer.setCommand(first);
+    buffer.setCommand(second);
+
+    rb_servo::CommandBufferReadTelemetry telemetry;
+    rb_servo::DualArmCommand latest = buffer.latestOrHold(now + 2, &telemetry);
+    RB_CHECK(latest.left.mode == rb_servo::ControlMode::Hold);
+    RB_CHECK(latest.right.mode == rb_servo::ControlMode::Hold);
+    RB_CHECK(telemetry.external_boxes_pending);
+
+    std::optional<rb_servo::DualArmCommand> consumed =
+        buffer.consumeLatestExternalBoxes(now + 3, &telemetry);
+    RB_CHECK(consumed.has_value());
+    RB_CHECK(consumed->seq == second.seq);
+    RB_CHECK(std::abs(consumed->external_boxes[0].T_stand_box[3] - 0.21) < kEpsilon);
+    RB_CHECK(!buffer.consumeLatestExternalBoxes(now + 4).has_value());
+    return true;
+}
+
+bool testParsedExternalBoxesDoNotDisplaceMotionLatest() {
+    rb_servo::NetworkConfig network;
+    network.command_source_enforce_lease = false;
+    rb_servo::CommandBuffer buffer;
+    rb_servo::CommandServer server(network, &buffer);
+    rb_servo::DualArmCommand parsed_boxes;
+    const uint64_t now = rb_servo::nowSteadyNs();
+
+    rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+    target.seq = 30;
+    target.host_time_ns = now;
+    target.left.q_target_deg = joints(4.0);
+    target.right.q_target_deg = joints(4.0);
+    target.left.has_joint_target = true;
+    target.right.has_joint_target = true;
+    buffer.setCommand(target);
+
+    RB_CHECK(server.parseMessage(
+        R"({"seq":31,"mode":"set_external_boxes","source_id":"stereo_worker","session_id":"camera-session","boxes":[{"label":"green","T":[1,0,0,0.31,0,1,0,0.22,0,0,1,0.33,0,0,0,1]}]})",
+        now + 1,
+        &parsed_boxes
+    ));
+    buffer.setCommand(parsed_boxes);
+
+    rb_servo::CommandBufferReadTelemetry telemetry;
+    rb_servo::DualArmCommand latest = buffer.latestOrHold(now + 2, &telemetry);
+    RB_CHECK(latest.seq == target.seq);
+    RB_CHECK(latest.right.mode == rb_servo::ControlMode::JointTarget);
+    RB_CHECK(telemetry.external_boxes_pending);
+    std::optional<rb_servo::DualArmCommand> consumed =
+        buffer.consumeLatestExternalBoxes(now + 3, &telemetry);
+    RB_CHECK(consumed.has_value());
+    RB_CHECK(consumed->seq == parsed_boxes.seq);
     return true;
 }
 
@@ -5989,6 +6107,9 @@ int main() {
     if (!testCommandValidation()) return 1;
     if (!testSetExternalBoxesCommandParser()) return 1;
     if (!testExternalBoxReceiveStampSurvivesMotionFlood()) return 1;
+    if (!testExternalBoxesDoNotDisplaceMotionLatest()) return 1;
+    if (!testExternalBoxesLatestOnlySideSlot()) return 1;
+    if (!testParsedExternalBoxesDoNotDisplaceMotionLatest()) return 1;
     if (!testFreedriveArmingQuiescesUntilIdleThenEngages()) return 1;
     if (!testFreedriveTeachOnFailureAbortsAndReleases()) return 1;
     if (!testCommandSequenceRequiredAndMonotonic()) return 1;

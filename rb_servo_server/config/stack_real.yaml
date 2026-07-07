@@ -507,7 +507,7 @@ kinematics:
     # Observability ON: flag a solve whose joint solution jumps > N deg from the
     # seed in one tick (branch-jump detector). Does not change motion; surfaces
     # the events to tune the damping above.
-    max_solution_jump_deg: 4.0
+    max_solution_jump_deg: 2.0
     # Branch-jump CLAMP (acts, not just observes). When a converged solve still
     # jumps > max_solution_jump_deg from the seed: re-solve the SAME tick at
     # branch_jump_damping_scale x damping (escalating per retry) to pull it back
@@ -600,13 +600,13 @@ cartesian_control:
         # speed is not the jerk source). Rotation raised per request (nf 1.0->2.0, omega
         # 1.30->2.0). If still jerky, drop nf/accel further; if too soft, nudge back up.
         natural_frequency_linear_hz: 2.0
-        natural_frequency_angular_hz: 2.0
+        natural_frequency_angular_hz: 1.2 #2.0
         velocity_feedforward: true
         # max_linear_velocity_m_s: 1.20
         max_linear_velocity_m_s: 0.30
         max_linear_accel_m_s2: 2.50
-        max_angular_velocity_rad_s: 2.00
-        max_angular_accel_rad_s2: 5.00
+        max_angular_velocity_rad_s: 1.0 #2.00
+        max_angular_accel_rad_s2: 2.0 #5.00
         # 2026-06-28: kill the UMI "robot moves when I just press the pedal" lurch.
         # On re-engage the command buffer holds the last target across the deadman
         # gap, keeping the SMD active, so the first re-anchored command delta (the
@@ -633,7 +633,7 @@ cartesian_control:
         singularity_scale_floor_sigma: 0.05
         singularity_scale_min: 0.12
       max_smd_goal_lead_m: 0.080
-      max_smd_goal_lead_rad: 0.35
+      max_smd_goal_lead_rad: 0.20 #0.35
     flow_infer_smooth:
       pose_track_smd:
         enable: true
@@ -662,6 +662,7 @@ cartesian_control:
       # ~ 0.0056 m/s per step at j=20); raise only on real-run evidence.
       ruckig_follower:
         enable: true
+        controller: "delta_twist"  # consume conditioned local per-frame action deltas directly
         # 2026-07-06 밤: SPEED_SCALE 1.5 대응 — dt 33.4→22.3ms에서 per-세그먼트 Δv/Δω
         # 예산(∝ j·dt²)이 보존되도록 jerk ×(33.4/22.3)²≈2.25, accel ×1.5, vel ×1.5.
         # scale 1.0에서도 그냥 여유가 늘어날 뿐(무해). 하드 안전망은 관절 클램프.
@@ -676,6 +677,12 @@ cartesian_control:
         reserve_steps: 1
         smoothing_window: 3
         af_damping_beta: 1.0 #0.2  # P3: honest central-diff curvature; clampAbs(af, a_max) bounds it (beta<1 = per-waypoint micro-brake)
+        delta_twist_tau_sec: 0.020
+        delta_twist_residual_drain_steps: 1
+        delta_twist_max_residual_m: 0.030
+        delta_twist_max_residual_rad: 0.35
+        delta_twist_max_lead_m: 0.080
+        delta_twist_max_lead_rad: 0.35
         chunk_feed_timeout_sec: 1.5
         fallback_policy: "fault"     # strict: no silent SMD fallback; cold start holds, loss latches ChunkFollowerFault (ResetFault to recover)
         engage_timeout_sec: 3.0      # max wait for the first chunk frame before faulting (fault policy only)

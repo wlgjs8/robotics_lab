@@ -59,6 +59,33 @@ class ChunkOverlayPublisherTest(unittest.TestCase):
         self.assertEqual(packet["horizon"], 1)
         self.assertEqual(packet["left"], [[1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 0.9, 99.0]])
         self.assertEqual(packet["right"], [[4.0, 5.0, 6.0, 0.4, 0.5, 0.6, 0.7, 88.0]])
+        self.assertNotIn("left_delta", packet)
+        self.assertNotIn("right_delta", packet)
+
+    def test_publish_serializes_optional_delta_rows(self) -> None:
+        sock = FakeSendSocket()
+        publisher = ChunkOverlayPublisher(
+            "udp://127.0.0.1:50262",
+            socket_factory=lambda *_args: sock,
+        )
+        try:
+            publisher.publish(
+                seq=4,
+                policy_dt_sec=0.1,
+                left=[[1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0, 50.0]],
+                right=None,
+                left_delta=[[0.01, 0.02, 0.03, 0.1, 0.2, 0.3, 50.0]],
+                right_delta=None,
+                host_time_ns=123,
+            )
+        finally:
+            publisher.close()
+
+        self.assertEqual(len(sock.sent), 1)
+        packet = json.loads(sock.sent[0][0].decode("utf-8"))
+        self.assertEqual(packet["schema_version"], "robotics_lab.chunk_overlay.v2")
+        self.assertEqual(packet["left_delta"], [[0.01, 0.02, 0.03, 0.1, 0.2, 0.3, 50.0]])
+        self.assertNotIn("right_delta", packet)
 
 
 if __name__ == "__main__":

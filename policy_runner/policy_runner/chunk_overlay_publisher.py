@@ -41,6 +41,8 @@ class ChunkOverlayPublisher:
         left: list[list[float]] | None,
         right: list[list[float]] | None,
         host_time_ns: int,
+        left_delta: list[list[float]] | None = None,
+        right_delta: list[list[float]] | None = None,
     ) -> None:
         try:
             horizon = len(left) if left is not None else len(right or [])
@@ -54,6 +56,10 @@ class ChunkOverlayPublisher:
                 "left": left,
                 "right": right,
             }
+            if left_delta is not None:
+                packet["left_delta"] = left_delta
+            if right_delta is not None:
+                packet["right_delta"] = right_delta
             data = json.dumps(packet, separators=(",", ":")).encode("utf-8")
         except (BlockingIOError, OSError, TypeError, ValueError):
             return

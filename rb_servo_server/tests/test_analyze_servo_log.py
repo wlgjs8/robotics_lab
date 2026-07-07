@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import sys
+from typing import Sequence
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
@@ -11,11 +12,21 @@ import analyze_servo_log
 
 
 class AnalyzeServoLogTest(unittest.TestCase):
-    def make_log(self, path: Path, *, rows: int = 200, period_ms: float = 10.0, **overrides: object) -> None:
+    def make_log(
+        self,
+        path: Path,
+        *,
+        rows: int = 200,
+        period_ms: float = 10.0,
+        extra_fieldnames: Sequence[str] | None = None,
+        row_overrides: Sequence[dict[str, object]] | None = None,
+        **overrides: object,
+    ) -> None:
         fieldnames = (
             analyze_servo_log.BASE_REQUIRED_COLUMNS
             + analyze_servo_log.Q_REQUIRED_COLUMNS
             + analyze_servo_log.TIMESTAMP_COLUMNS
+            + list(extra_fieldnames or [])
         )
         start_ns = 1_000_000_000
         with path.open("w", newline="", encoding="utf-8") as handle:
@@ -44,6 +55,8 @@ class AnalyzeServoLogTest(unittest.TestCase):
                         row[f"{arm}_q_actual_{joint}"] = float(joint)
                         row[f"{arm}_q_sent_{joint}"] = float(joint)
                 row.update(overrides)
+                if row_overrides is not None:
+                    row.update(row_overrides[index])
                 writer.writerow(row)
 
     def profile_failures(self, path: Path, profile: str = "rbsim-local100") -> list[str]:
@@ -108,6 +121,104 @@ class AnalyzeServoLogTest(unittest.TestCase):
                     any(expected_fragment in failure for failure in failures),
                     f"{expected_fragment!r} not found in {failures!r}",
                 )
+
+    def test_delta_twist_summary_tolerates_missing_optional_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old-log.csv"
+            self.make_log(path, rows=4)
+
+            metrics = analyze_servo_log.analyze_csv(path)
+
+            self.assertEqual(metrics["safety_verdict_counts"], {})
+            self.assertEqual(metrics["delta_twist"]["left"]["rows"], 0)
+            self.assertEqual(metrics["delta_twist"]["right"]["rows"], 0)
+
+    def test_delta_twist_summary_uses_optional_columns(self) -> None:
+        extra = [
+            "safety_verdict",
+            "left_follower_controller",
+            "left_follower_active",
+            "left_follower_stall",
+            "left_follower_step",
+            "left_delta_twist_pending_linear_norm_m",
+            "left_delta_twist_pending_angular_norm_rad",
+            "left_delta_twist_xi_cmd_linear_norm_m_s",
+            "left_delta_twist_xi_cmd_angular_norm_rad_s",
+            "left_delta_twist_saturated",
+        ]
+        rows = [
+            {
+                "safety_verdict": "Ok",
+                "left_follower_controller": "delta_twist",
+                "left_follower_active": "1",
+                "left_follower_stall": "0",
+                "left_follower_step": "0",
+                "left_delta_twist_pending_linear_norm_m": "0.1",
+                "left_delta_twist_pending_angular_norm_rad": "0.01",
+                "left_delta_twist_xi_cmd_linear_norm_m_s": "0.5",
+                "left_delta_twist_xi_cmd_angular_norm_rad_s": "1.0",
+                "left_delta_twist_saturated": "0",
+            },
+            {
+                "safety_verdict": "Ok",
+                "left_follower_controller": "delta_twist",
+                "left_follower_active": "1",
+                "left_follower_stall": "0",
+                "left_follower_step": "1",
+                "left_delta_twist_pending_linear_norm_m": "0.2",
+                "left_delta_twist_pending_angular_norm_rad": "0.02",
+                "left_delta_twist_xi_cmd_linear_norm_m_s": "0.6",
+                "left_delta_twist_xi_cmd_angular_norm_rad_s": "2.0",
+                "left_delta_twist_saturated": "0",
+            },
+            {
+                "safety_verdict": "JointLimitClamped",
+                "left_follower_controller": "delta_twist",
+                "left_follower_active": "1",
+                "left_follower_stall": "1",
+                "left_follower_step": "1",
+                "left_delta_twist_pending_linear_norm_m": "0.3",
+                "left_delta_twist_pending_angular_norm_rad": "0.03",
+                "left_delta_twist_xi_cmd_linear_norm_m_s": "0.7",
+                "left_delta_twist_xi_cmd_angular_norm_rad_s": "3.0",
+                "left_delta_twist_saturated": "1",
+            },
+            {
+                "safety_verdict": "Ok",
+                "left_follower_controller": "delta_twist",
+                "left_follower_active": "0",
+                "left_follower_stall": "0",
+                "left_follower_step": "2",
+                "left_delta_twist_pending_linear_norm_m": "0.4",
+                "left_delta_twist_pending_angular_norm_rad": "0.04",
+                "left_delta_twist_xi_cmd_linear_norm_m_s": "0.8",
+                "left_delta_twist_xi_cmd_angular_norm_rad_s": "4.0",
+                "left_delta_twist_saturated": "0",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "delta-twist-log.csv"
+            self.make_log(path, rows=len(rows), extra_fieldnames=extra, row_overrides=rows)
+
+            metrics = analyze_servo_log.analyze_csv(path)
+            report = analyze_servo_log.format_report(
+                metrics,
+                analyze_servo_log.BUDGETS["rbsim-local100"],
+                failures=[],
+            )
+
+            left = metrics["delta_twist"]["left"]
+            self.assertEqual(metrics["safety_verdict_counts"], {"JointLimitClamped": 1, "Ok": 3})
+            self.assertEqual(left["rows"], 4)
+            self.assertEqual(left["active_ticks"], 3)
+            self.assertEqual(left["stall_ticks"], 1)
+            self.assertEqual(left["saturated_ticks"], 1)
+            self.assertEqual(left["follower_step_distribution"], {"0": 1, "1": 2, "2": 1})
+            self.assertEqual(left["pending_residual_linear_norm_m"]["p50"], 0.2)
+            self.assertEqual(left["pending_residual_linear_norm_m"]["p90"], 0.4)
+            self.assertEqual(left["commanded_angular_velocity_rad_s"]["p99"], 4.0)
+            self.assertIn("safety_verdict_counts: JointLimitClamped=1, Ok=3", report)
+            self.assertIn("left xi_cmd_angular_norm_rad_s: count=4", report)
 
 
 if __name__ == "__main__":

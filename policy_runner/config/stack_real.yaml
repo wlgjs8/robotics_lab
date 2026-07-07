@@ -115,7 +115,7 @@ umi_dual_cartesian:
   # max_linear_step_m: 0.012
   # max_angular_step_rad: 0.10
   max_linear_step_m: 0.010   # 2026-06-21: 0.024->0.010 standard clamp for model rollout (matches deploy per-step)
-  max_angular_step_rad: 0.20
+  max_angular_step_rad: 0.05 #0.20
   # 2026-06-16: 1.5mm/0.69° deadband가 빠른 텔레옵을 1.5mm 격자로 양자화 → 계단식
   # 뚝뚝(수신로그 db=1 88%, app=0). 0.3mm/0.17°로 낮춰 계단 제거(미세 떨림만 억제).
   # 떨림 재발 시 hard deadband 대신 input_moving_average_window 상향 권장.
@@ -133,7 +133,7 @@ umi_dual_cartesian:
     stop_on_release: true
     stop_on_stale: true
   target_lead_clamp:
-    enable: false
+    enable: true
     # 2026-06-28: 0.060->0.020. The 60mm lead = the UMI arm trailing the operator's
     # hands by ~6cm during teleop (measured lead p50=55 p95=60mm) = the original
     # "goes a direction I didn't command" (executing where hands were 6cm ago).
@@ -144,9 +144,9 @@ umi_dual_cartesian:
     # between the commanded target and the robot). vff still supplies the tracking velocity,
     # so this mainly removes the position lead the operator perceives as follow latency.
     # max_target_lead_m: 0.012
-    max_target_lead_m: 0.05
-    max_target_lead_rad: 0.25
-    rebase_conditioner_on_clamp: false
+    max_target_lead_m: 0.030
+    max_target_lead_rad: 0.12
+    rebase_conditioner_on_clamp: true
   # ---- Pose-frame geometry (paired with pika publisher --pose-frame tip) ----
   # The publisher applies the official pika_sdk tracker→gripper-tip transform
   # (T_raw · Rx(-20°)·[Ry(-90°)·Rx(-90°)] · Trans(0.172, 0, -0.076)): the wire

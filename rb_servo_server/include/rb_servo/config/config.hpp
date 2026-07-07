@@ -909,15 +909,20 @@ enum class RuckigFollowerFallbackPolicy {
     Fault
 };
 
-// Ruckig receding-horizon chunk-follower: a per-profile Cartesian smoothing
-// stage that REPLACES the pose_track_smd step while active. It consumes whole
-// measured-anchored absolute action-chunk frames (the chunk-overlay wire
-// format) from network.chunk_frame_bind, re-solves a jerk-limited BVP every
-// policy step (~33 ms) with central-difference boundary velocity/acceleration
-// (self-consistent Taylor samples of the chunk), and evaluates the trajectory
-// at each 2 ms servo tick.
+enum class RuckigFollowerController {
+    RuckigWaypoint,
+    DeltaTwist
+};
+
+// Per-profile chunk-follower stage that REPLACES the pose_track_smd step while
+// active. The default controller consumes measured-anchored absolute waypoint
+// rows through the Ruckig receding-horizon follower; delta_twist consumes
+// conditioned local per-frame model action deltas directly.
 struct RuckigFollowerConfig {
     bool enable = false;
+    // Default preserves the absolute-waypoint follower. delta_twist consumes
+    // conditioned local per-frame action deltas from ChunkFrame::delta.
+    RuckigFollowerController controller = RuckigFollowerController::RuckigWaypoint;
     // Fallback policy for follower-regime interruptions:
     // - Smd: legacy behavior; cold start / feed timeout / divergence quietly
     //   fall back to pose_track_smd.
@@ -951,6 +956,15 @@ struct RuckigFollowerConfig {
     int reserve_steps = 1;             // central-difference lookahead (>= 1)
     int smoothing_window = 3;          // odd; pre-difference chunk smoothing
     double af_damping_beta = 0.85;     // feedforward accel damping (0, 1]
+    // DeltaTwistFollower params. The model delta is a per-policy-frame local
+    // displacement, not m/s; these tune how that backlog is drained into an
+    // internally jerk-limited body twist.
+    double delta_twist_tau_sec = 0.020;
+    int delta_twist_residual_drain_steps = 1;
+    double delta_twist_max_residual_m = 0.030;
+    double delta_twist_max_residual_rad = 0.35;
+    double delta_twist_max_lead_m = 0.080;
+    double delta_twist_max_lead_rad = 0.35;
     // Feed-liveness watchdog: with no fresh chunk frame for this long the
     // follower deactivates (falls back to pose_track_smd / hold).
     double chunk_feed_timeout_sec = 1.5;

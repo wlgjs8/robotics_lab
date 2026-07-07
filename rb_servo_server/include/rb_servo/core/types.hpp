@@ -410,11 +410,12 @@ struct CartesianSolveTelemetry {
     double smd_goal_linear_velocity_norm_m_s = 0.0;
     double smd_goal_angular_velocity_norm_rad_s = 0.0;
     uint64_t smd_reanchor_count = 0;
-    // Ruckig chunk-follower stage (replaces the SMD step while active). One row
-    // per tick: the ACTIVE segment's target (pf, the chunk step being tracked),
-    // window/solve state, and flags — offline analysis joins these against
-    // command_tcp_target_stand (raw producer command), tcp_command_stand
-    // (emitted setpoint) and tcp_actual_stand (measured) on the same row.
+    // Chunk-follower stage (replaces the SMD step while active). One row per
+    // tick: the active segment target / delta-follower state, window ids, and
+    // flags — offline analysis joins these against command_tcp_target_stand
+    // (raw producer command), tcp_command_stand (emitted setpoint), and
+    // tcp_actual_stand (measured) on the same row.
+    std::string follower_controller = "none";
     bool follower_active = false;
     uint64_t follower_wire_seq = 0;     // producer packet seq / flow chunk id
     uint64_t follower_recv_seq = 0;     // receiver-local accepted-frame count
@@ -431,6 +432,11 @@ struct CartesianSolveTelemetry {
     double follower_divergence_ang_rad = 0.0;
     uint64_t follower_reanchor_count = 0;          // explained strict-divergence reanchors
     bool safety_intervention_recent = false;       // debounced signal seen by follower stage
+    double delta_twist_pending_linear_norm_m = 0.0;
+    double delta_twist_pending_angular_norm_rad = 0.0;
+    double delta_twist_xi_cmd_linear_norm_m_s = 0.0;
+    double delta_twist_xi_cmd_angular_norm_rad_s = 0.0;
+    bool delta_twist_saturated = false;
     // Final-stage output moving average (C). q_target before/after the boxcar.
     bool output_ma_present = false;
     int output_ma_window = 0;
@@ -578,6 +584,47 @@ struct DualArmCommand {
     // becomes stale, both arms hold. Per-arm command streams should use separate
     // timestamps in a future binary protocol.
     bool coupled_timeout = true;
+};
+
+struct CommandBufferReadTelemetry {
+    std::string result = "unset";
+    uint64_t pending_lifecycle_count = 0;
+    uint64_t skipped_lifecycle_count = 0;
+    bool external_boxes_pending = false;
+    bool external_boxes_consumed = false;
+    bool external_boxes_applied = false;
+    uint64_t external_boxes_seq = 0;
+    ControlMode external_boxes_left_mode = ControlMode::Hold;
+    ControlMode external_boxes_right_mode = ControlMode::Hold;
+    uint64_t external_boxes_host_time_ns = 0;
+    double external_boxes_age_ms = std::numeric_limits<double>::quiet_NaN();
+    double external_boxes_client_send_age_ms = std::numeric_limits<double>::quiet_NaN();
+
+    uint64_t returned_seq = 0;
+    ControlMode returned_left_mode = ControlMode::Hold;
+    ControlMode returned_right_mode = ControlMode::Hold;
+    uint64_t returned_host_time_ns = 0;
+    double returned_age_ms = std::numeric_limits<double>::quiet_NaN();
+    double returned_client_send_age_ms = std::numeric_limits<double>::quiet_NaN();
+
+    uint64_t latest_seq = 0;
+    ControlMode latest_left_mode = ControlMode::Hold;
+    ControlMode latest_right_mode = ControlMode::Hold;
+    uint64_t latest_host_time_ns = 0;
+    double latest_age_ms = std::numeric_limits<double>::quiet_NaN();
+    double latest_timeout_ms = std::numeric_limits<double>::quiet_NaN();
+    bool latest_timeout_valid = false;
+    bool latest_usable = false;
+    double latest_client_send_age_ms = std::numeric_limits<double>::quiet_NaN();
+
+    uint64_t lifecycle_seq = 0;
+    ControlMode lifecycle_left_mode = ControlMode::Hold;
+    ControlMode lifecycle_right_mode = ControlMode::Hold;
+    uint64_t lifecycle_host_time_ns = 0;
+    double lifecycle_age_ms = std::numeric_limits<double>::quiet_NaN();
+    double lifecycle_timeout_ms = std::numeric_limits<double>::quiet_NaN();
+    bool lifecycle_timeout_valid = false;
+    bool lifecycle_usable = false;
 };
 
 struct ServoTarget {
@@ -801,6 +848,7 @@ struct ServoSample {
     RobotState right_state;
 
     DualArmCommand command;
+    CommandBufferReadTelemetry command_buffer_read;
 
     JointArray left_sent_q_deg{};
     JointArray right_sent_q_deg{};
