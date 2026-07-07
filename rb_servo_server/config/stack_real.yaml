@@ -692,8 +692,8 @@ cartesian_control:
         delta_twist_max_residual_rad: 0.050
         # Must stay below the strict chunk-follower divergence latch
         # (50 mm / 0.1 rad) so lead clamp engages before safety fault.
-        delta_twist_max_lead_m: 0.020
-        delta_twist_max_lead_rad: 0.060
+        delta_twist_max_lead_m: 0.004 #0.020
+        delta_twist_max_lead_rad: 0.020 #0.060
         delta_twist_stale_residual_timeout_sec: 0.15
         chunk_feed_timeout_sec: 1.5
         fallback_policy: "fault"     # strict: no silent SMD fallback; cold start holds, loss latches ChunkFollowerFault (ResetFault to recover)
