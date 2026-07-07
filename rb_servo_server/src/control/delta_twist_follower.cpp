@@ -11,12 +11,7 @@ namespace rb_servo::control {
 namespace {
 
 constexpr double kDefaultPolicyDt = 1.0 / 30.0;
-
-double clampAbs(double value, double limit) {
-  if (!std::isfinite(value)) return 0.0;
-  const double lim = std::max(0.0, limit);
-  return std::clamp(value, -lim, lim);
-}
+constexpr double kFeedbackCosDefault = 1.0;
 
 double linearNorm(const Vec6& v) {
   const double n = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
@@ -64,19 +59,48 @@ double robustRatio(double numerator, double denominator) {
   return std::isfinite(ratio) ? ratio : 0.0;
 }
 
-bool clampAxes(Vec6* v, const AxisLimit& lin, const AxisLimit& ang, double AxisLimit::* member) {
+bool clampLinearNorm(Vec6* v, double max_norm) {
   if (!v) return false;
-  const double lin_lim = lin.*member;
-  const double ang_lim = ang.*member;
-  const Vec6 before = *v;
-  v->x = clampAbs(v->x, lin_lim);
-  v->y = clampAbs(v->y, lin_lim);
-  v->z = clampAbs(v->z, lin_lim);
-  v->rx = clampAbs(v->rx, ang_lim);
-  v->ry = clampAbs(v->ry, ang_lim);
-  v->rz = clampAbs(v->rz, ang_lim);
-  return before.x != v->x || before.y != v->y || before.z != v->z ||
-         before.rx != v->rx || before.ry != v->ry || before.rz != v->rz;
+  const double n = linearNorm(*v);
+  if (!std::isfinite(n) || max_norm <= 0.0) {
+    const bool changed = v->x != 0.0 || v->y != 0.0 || v->z != 0.0;
+    v->x = 0.0;
+    v->y = 0.0;
+    v->z = 0.0;
+    return changed;
+  }
+  if (n <= max_norm) return false;
+  const double s = max_norm / n;
+  v->x *= s;
+  v->y *= s;
+  v->z *= s;
+  return true;
+}
+
+bool clampAngularNorm(Vec6* v, double max_norm) {
+  if (!v) return false;
+  const double n = angularNorm(*v);
+  if (!std::isfinite(n) || max_norm <= 0.0) {
+    const bool changed = v->rx != 0.0 || v->ry != 0.0 || v->rz != 0.0;
+    v->rx = 0.0;
+    v->ry = 0.0;
+    v->rz = 0.0;
+    return changed;
+  }
+  if (n <= max_norm) return false;
+  const double s = max_norm / n;
+  v->rx *= s;
+  v->ry *= s;
+  v->rz *= s;
+  return true;
+}
+
+bool clampVec6Norm(Vec6* v, const AxisLimit& lin, const AxisLimit& ang, double AxisLimit::* member) {
+  if (!v) return false;
+  bool clamped = false;
+  clamped = clampLinearNorm(v, lin.*member) || clamped;
+  clamped = clampAngularNorm(v, ang.*member) || clamped;
+  return clamped;
 }
 
 Vec6 add(const Vec6& a, const Vec6& b) {
@@ -136,6 +160,48 @@ bool feedbackDeltaPlausible(const Vec6& delta, const DeltaTwistFollowerConfig& c
   return linearNorm(delta) <= lin_limit && angularNorm(delta) <= ang_limit;
 }
 
+double linearDot(const Vec6& a, const Vec6& b) {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+double angularDot(const Vec6& a, const Vec6& b) {
+  return a.rx * b.rx + a.ry * b.ry + a.rz * b.rz;
+}
+
+void subtractProjectedLinear(Vec6* pending, const Vec6& realized, double* cos_out) {
+  constexpr double kEps = 1e-9;
+  if (!pending) return;
+  if (cos_out) *cos_out = kFeedbackCosDefault;
+  const double p_norm = linearNorm(*pending);
+  const double r_norm = linearNorm(realized);
+  if (p_norm <= kEps || r_norm <= kEps || !std::isfinite(p_norm) || !std::isfinite(r_norm)) {
+    return;
+  }
+  const double dot = linearDot(*pending, realized);
+  if (cos_out) *cos_out = std::clamp(dot / (p_norm * r_norm), -1.0, 1.0);
+  const double projected_amount = std::clamp(dot / p_norm, 0.0, p_norm);
+  pending->x -= pending->x / p_norm * projected_amount;
+  pending->y -= pending->y / p_norm * projected_amount;
+  pending->z -= pending->z / p_norm * projected_amount;
+}
+
+void subtractProjectedAngular(Vec6* pending, const Vec6& realized, double* cos_out) {
+  constexpr double kEps = 1e-9;
+  if (!pending) return;
+  if (cos_out) *cos_out = kFeedbackCosDefault;
+  const double p_norm = angularNorm(*pending);
+  const double r_norm = angularNorm(realized);
+  if (p_norm <= kEps || r_norm <= kEps || !std::isfinite(p_norm) || !std::isfinite(r_norm)) {
+    return;
+  }
+  const double dot = angularDot(*pending, realized);
+  if (cos_out) *cos_out = std::clamp(dot / (p_norm * r_norm), -1.0, 1.0);
+  const double projected_amount = std::clamp(dot / p_norm, 0.0, p_norm);
+  pending->rx -= pending->rx / p_norm * projected_amount;
+  pending->ry -= pending->ry / p_norm * projected_amount;
+  pending->rz -= pending->rz / p_norm * projected_amount;
+}
+
 }  // namespace
 
 DeltaTwistFollower::DeltaTwistFollower(const DeltaTwistFollowerConfig& cfg)
@@ -163,6 +229,14 @@ void DeltaTwistFollower::deactivate() {
   xi_cmd_ = Vec6{};
   accel_cmd_ = Vec6{};
   lead_delta_ = Vec6{};
+  feedback_source_ = static_cast<int>(DeltaTwistFeedbackSource::None);
+  pending_clamped_ = false;
+  residual_cleared_on_frame_ = false;
+  min_time_to_go_used_ = false;
+  lin_feedback_cos_ = kFeedbackCosDefault;
+  ang_feedback_cos_ = kFeedbackCosDefault;
+  xi_ref_clamped_norm_ = false;
+  xi_cmd_clamped_norm_ = false;
   has_feedback_pose_ = false;
   diag_ = DeltaTwistFollowerDiag{};
 }
@@ -207,7 +281,20 @@ void DeltaTwistFollower::submitFrame(const ChunkFrame& frame, const Pose6D& curr
   }
   t_in_seg_ = 0.0;
   stale_residual_age_ = 0.0;
-  clampPendingResidual();
+  residual_cleared_on_frame_ = false;
+  pending_clamped_ = false;
+  if (cfg_.clear_residual_on_new_frame) {
+    // OpenPI chunks are closed-loop replans from the current observation. Carrying
+    // residual from an older chunk double-counts stale action and causes catch-up
+    // arcs; keep xi_cmd_/accel_cmd_ for velocity continuity, but clear backlog.
+    pending_delta_ = Vec6{};
+    realized_delta_ = Vec6{};
+    step_delta_ = Vec6{};
+    stale_residual_age_ = 0.0;
+    residual_cleared_on_frame_ = true;
+  } else {
+    pending_clamped_ = clampPendingResidual() || pending_clamped_;
+  }
 
   if (!active_) {
     command_pose_ = current_pose;
@@ -221,6 +308,12 @@ void DeltaTwistFollower::submitFrame(const ChunkFrame& frame, const Pose6D& curr
     realized_delta_ = Vec6{};
     xi_ref_ = Vec6{};
     lead_delta_ = Vec6{};
+    feedback_source_ = static_cast<int>(DeltaTwistFeedbackSource::None);
+    min_time_to_go_used_ = false;
+    lin_feedback_cos_ = kFeedbackCosDefault;
+    ang_feedback_cos_ = kFeedbackCosDefault;
+    xi_ref_clamped_norm_ = false;
+    xi_cmd_clamped_norm_ = false;
     current_grip_ = gripAt(index_);
     diag_ = DeltaTwistFollowerDiag{};
     active_ = true;
@@ -247,15 +340,29 @@ void DeltaTwistFollower::reanchor(const Pose6D& reference) {
   lead_delta_ = Vec6{};
   t_in_seg_ = 0.0;
   stale_residual_age_ = 0.0;
+  feedback_source_ = static_cast<int>(DeltaTwistFeedbackSource::None);
+  pending_clamped_ = false;
+  residual_cleared_on_frame_ = true;
+  min_time_to_go_used_ = false;
+  lin_feedback_cos_ = kFeedbackCosDefault;
+  ang_feedback_cos_ = kFeedbackCosDefault;
+  xi_ref_clamped_norm_ = false;
+  xi_cmd_clamped_norm_ = false;
   diag_.seg_target_stand = reference;
   updateDiagState();
   if (total_eff_ > 0) active_ = true;
 }
 
-void DeltaTwistFollower::setFeedbackPose(const Pose6D& feedback_pose) {
+void DeltaTwistFollower::setFeedbackPose(
+    const Pose6D& feedback_pose,
+    DeltaTwistFeedbackSource source
+) {
   if (!finitePose(feedback_pose)) {
     return;
   }
+  feedback_source_ = static_cast<int>(source);
+  lin_feedback_cos_ = kFeedbackCosDefault;
+  ang_feedback_cos_ = kFeedbackCosDefault;
   if (!has_feedback_pose_) {
     last_feedback_pose_ = feedback_pose;
     has_feedback_pose_ = true;
@@ -274,8 +381,13 @@ void DeltaTwistFollower::setFeedbackPose(const Pose6D& feedback_pose) {
     return;
   }
   realized_delta_ = add(realized_delta_, realized);
-  pending_delta_ = sub(pending_delta_, realized);
-  clampPendingResidual();
+  // Residual anti-windup is based on execution feedback. If feedback moves
+  // opposite to the pending local action, blind subtraction grows residual and
+  // drives catch-up orbits, so only subtract the realized projection along the
+  // current pending direction while keeping raw realized_delta_ for telemetry.
+  subtractProjectedLinear(&pending_delta_, realized, &lin_feedback_cos_);
+  subtractProjectedAngular(&pending_delta_, realized, &ang_feedback_cos_);
+  pending_clamped_ = clampPendingResidual() || pending_clamped_;
   updateDiagState();
 }
 
@@ -293,7 +405,7 @@ bool DeltaTwistFollower::consumeNextStep() {
   step_delta_ = step;
   realized_delta_ = Vec6{};
   pending_delta_ = add(pending_delta_, step);
-  clampPendingResidual();
+  pending_clamped_ = clampPendingResidual() || pending_clamped_;
   current_grip_ = gripAt(index_);
   diag_.stall = false;
   diag_.seg_step_index = static_cast<int>(index_);
@@ -308,9 +420,17 @@ bool DeltaTwistFollower::consumeNextStep() {
   return true;
 }
 
-void DeltaTwistFollower::clampPendingResidual() {
-  (void)scaleLinearTo(&pending_delta_, cfg_.max_residual_m);
-  (void)scaleAngularTo(&pending_delta_, cfg_.max_residual_rad);
+bool DeltaTwistFollower::clampPendingResidual() {
+  bool clamped = false;
+  clamped = scaleLinearTo(&pending_delta_, cfg_.max_residual_m) || clamped;
+  clamped = scaleAngularTo(&pending_delta_, cfg_.max_residual_rad) || clamped;
+  if (cfg_.max_residual_m > 0.0 && linearNorm(pending_delta_) >= 0.999 * cfg_.max_residual_m) {
+    clamped = true;
+  }
+  if (cfg_.max_residual_rad > 0.0 && angularNorm(pending_delta_) >= 0.999 * cfg_.max_residual_rad) {
+    clamped = true;
+  }
+  return clamped;
 }
 
 void DeltaTwistFollower::updateDiagState() {
@@ -321,6 +441,14 @@ void DeltaTwistFollower::updateDiagState() {
   diag_.xi_cmd = xi_cmd_;
   diag_.accel_cmd = accel_cmd_;
   diag_.lead_delta = lead_delta_;
+  diag_.feedback_source = feedback_source_;
+  diag_.pending_clamped = pending_clamped_;
+  diag_.residual_cleared_on_frame = residual_cleared_on_frame_;
+  diag_.min_time_to_go_used = min_time_to_go_used_;
+  diag_.lin_feedback_cos = lin_feedback_cos_;
+  diag_.ang_feedback_cos = ang_feedback_cos_;
+  diag_.xi_ref_clamped_norm = xi_ref_clamped_norm_;
+  diag_.xi_cmd_clamped_norm = xi_cmd_clamped_norm_;
   diag_.realized_linear_ratio = robustRatio(linearNorm(realized_delta_), linearNorm(step_delta_));
   diag_.realized_angular_ratio = robustRatio(angularNorm(realized_delta_), angularNorm(step_delta_));
   diag_.realized_yaw_ratio = robustRatio(realized_delta_.rz, step_delta_.rz);
@@ -354,6 +482,11 @@ Pose6D DeltaTwistFollower::tick(double dt_tick) {
   if (!active_) return last_pose_;
   if (!std::isfinite(dt_tick) || dt_tick <= 0.0) return last_pose_;
 
+  pending_clamped_ = false;
+  min_time_to_go_used_ = false;
+  xi_ref_clamped_norm_ = false;
+  xi_cmd_clamped_norm_ = false;
+
   t_in_seg_ += dt_tick;
   bool consumed_step = false;
   while (t_in_seg_ >= policy_dt_) {
@@ -368,31 +501,38 @@ Pose6D DeltaTwistFollower::tick(double dt_tick) {
     }
   }
 
-  clampPendingResidual();
+  pending_clamped_ = clampPendingResidual() || pending_clamped_;
   const double remaining = std::max(policy_dt_ - t_in_seg_, dt_tick);
   const int extra_steps = std::max(0, cfg_.residual_drain_steps - 1);
-  const double horizon = std::max(remaining + static_cast<double>(extra_steps) * policy_dt_, dt_tick);
+  const double raw_horizon = std::max(
+      remaining + static_cast<double>(extra_steps) * policy_dt_,
+      dt_tick);
+  const double min_tgo = std::max(cfg_.min_time_to_go_sec, 0.5 * policy_dt_);
+  min_time_to_go_used_ = raw_horizon < min_tgo;
+  const double horizon = std::max(raw_horizon, min_tgo);
   Vec6 xi_ref = mul(pending_delta_, 1.0 / horizon);
-  bool saturated = clampAxes(&xi_ref, cfg_.lin, cfg_.ang, &AxisLimit::v_max);
+  bool saturated = clampVec6Norm(&xi_ref, cfg_.lin, cfg_.ang, &AxisLimit::v_max);
+  xi_ref_clamped_norm_ = saturated;
   xi_ref_ = xi_ref;
 
   Vec6 a_des = mul(sub(xi_ref, xi_cmd_), 1.0 / std::max(cfg_.tau_sec, dt_tick));
-  saturated = clampAxes(&a_des, cfg_.lin, cfg_.ang, &AxisLimit::a_max) || saturated;
+  saturated = clampVec6Norm(&a_des, cfg_.lin, cfg_.ang, &AxisLimit::a_max) || saturated;
 
   Vec6 j_des = mul(sub(a_des, accel_cmd_), 1.0 / dt_tick);
-  saturated = clampAxes(&j_des, cfg_.lin, cfg_.ang, &AxisLimit::j_max) || saturated;
+  saturated = clampVec6Norm(&j_des, cfg_.lin, cfg_.ang, &AxisLimit::j_max) || saturated;
 
   accel_cmd_ = add(accel_cmd_, mul(j_des, dt_tick));
-  saturated = clampAxes(&accel_cmd_, cfg_.lin, cfg_.ang, &AxisLimit::a_max) || saturated;
+  saturated = clampVec6Norm(&accel_cmd_, cfg_.lin, cfg_.ang, &AxisLimit::a_max) || saturated;
   xi_cmd_ = add(xi_cmd_, mul(accel_cmd_, dt_tick));
-  saturated = clampAxes(&xi_cmd_, cfg_.lin, cfg_.ang, &AxisLimit::v_max) || saturated;
+  xi_cmd_clamped_norm_ = clampVec6Norm(&xi_cmd_, cfg_.lin, cfg_.ang, &AxisLimit::v_max);
+  saturated = xi_cmd_clamped_norm_ || saturated;
 
   const Vec6 delta_exec = mul(xi_cmd_, dt_tick);
   command_pose_ = math::composeDeltaLocal(command_pose_, deltaPose(delta_exec));
   clampCommandLead();
   last_pose_ = command_pose_;
 
-  clampPendingResidual();
+  pending_clamped_ = clampPendingResidual() || pending_clamped_;
   if (diag_.stall) {
     diag_.step_phase = hasLinearOrAngularNorm(pending_delta_) ? DeltaTwistStepPhase::ResidualDrain
                                                              : DeltaTwistStepPhase::Ringdown;
@@ -405,6 +545,7 @@ Pose6D DeltaTwistFollower::tick(double dt_tick) {
   diag_.last_solve.converged = !saturated;
   diag_.last_solve.corner = false;
   updateDiagState();
+  residual_cleared_on_frame_ = false;
   return last_pose_;
 }
 

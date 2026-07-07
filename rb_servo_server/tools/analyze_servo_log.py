@@ -193,10 +193,15 @@ def make_delta_twist_bucket() -> dict[str, object]:
         "active_ticks": 0,
         "stall_ticks": 0,
         "saturated_ticks": 0,
+        "pending_clamped_ticks": 0,
+        "xi_ref_clamped_ticks": 0,
+        "xi_cmd_clamped_ticks": 0,
+        "min_time_to_go_ticks": 0,
         "controller_counts": {},
         "step_counts": {},
         "step_kind_counts": {},
         "accel_clamp_counts": {},
+        "feedback_source_counts": {},
         "pending_linear": [],
         "pending_angular": [],
         "xi_ref_linear": [],
@@ -208,6 +213,7 @@ def make_delta_twist_bucket() -> dict[str, object]:
         "yaw_ratio": [],
         "linear_ratio": [],
         "angular_ratio": [],
+        "stage_positions": [],
     }
 
 
@@ -220,24 +226,79 @@ def finalize_delta_twist_bucket(bucket: dict[str, object]) -> dict[str, object]:
     step_kind_counts = bucket["step_kind_counts"]
     controller_counts = bucket["controller_counts"]
     accel_clamp_counts = bucket["accel_clamp_counts"]
+    feedback_source_counts = bucket["feedback_source_counts"]
     assert isinstance(step_counts, dict)
     assert isinstance(step_kind_counts, dict)
     assert isinstance(controller_counts, dict)
     assert isinstance(accel_clamp_counts, dict)
+    assert isinstance(feedback_source_counts, dict)
     kind_total = sum(int(value) for value in step_kind_counts.values())
     kind_percent = {
         key: (100.0 * float(value) / float(kind_total)) if kind_total > 0 else 0.0
         for key, value in sorted(step_kind_counts.items())
     }
+    requested_yaw = bucket["requested_yaw"]
+    realized_yaw = bucket["realized_yaw"]
+    assert isinstance(requested_yaw, list)
+    assert isinstance(realized_yaw, list)
+    yaw_pairs = [
+        (float(req), float(realized))
+        for req, realized in zip(requested_yaw, realized_yaw)
+        if abs(float(req)) > 1e-6 and abs(float(realized)) > 1e-6
+    ]
+    yaw_sign_match_percent = None
+    if yaw_pairs:
+        yaw_sign_match_percent = 100.0 * sum(
+            (req > 0.0) == (realized > 0.0) for req, realized in yaw_pairs
+        ) / float(len(yaw_pairs))
+
+    stage_positions = bucket["stage_positions"]
+    assert isinstance(stage_positions, list)
+    stage_path_length_m = None
+    stage_net_displacement_m = None
+    stage_path_to_net_ratio = None
+    if len(stage_positions) >= 2:
+        def distance(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+            return math.sqrt(
+                (b[0] - a[0]) * (b[0] - a[0]) +
+                (b[1] - a[1]) * (b[1] - a[1]) +
+                (b[2] - a[2]) * (b[2] - a[2])
+            )
+
+        stage_path_length_m = sum(
+            distance(stage_positions[i - 1], stage_positions[i])
+            for i in range(1, len(stage_positions))
+        )
+        stage_net_displacement_m = distance(stage_positions[0], stage_positions[-1])
+        if stage_net_displacement_m > 1e-6:
+            stage_path_to_net_ratio = stage_path_length_m / stage_net_displacement_m
+
+    warnings: list[str] = []
+    if int(bucket["pending_clamped_ticks"]) > 0:
+        warnings.append("pending residual hit configured clamp")
+    if int(bucket["xi_ref_clamped_ticks"]) > 0:
+        warnings.append("xi_ref hit configured vector norm limit")
+    if int(bucket["xi_cmd_clamped_ticks"]) > 0:
+        warnings.append("xi_cmd hit configured vector norm limit")
+    if stage_path_to_net_ratio is not None and stage_path_to_net_ratio > 5.0:
+        warnings.append(f"stage path/net displacement ratio is high ({stage_path_to_net_ratio:.3g})")
+    if yaw_sign_match_percent is not None and yaw_sign_match_percent < 70.0:
+        warnings.append(f"requested/realized yaw sign match is low ({yaw_sign_match_percent:.1f}%)")
+
     return {
         "rows": bucket["rows"],
         "active_ticks": bucket["active_ticks"],
         "stall_ticks": bucket["stall_ticks"],
         "saturated_ticks": bucket["saturated_ticks"],
+        "pending_clamped_ticks": bucket["pending_clamped_ticks"],
+        "xi_ref_clamped_ticks": bucket["xi_ref_clamped_ticks"],
+        "xi_cmd_clamped_ticks": bucket["xi_cmd_clamped_ticks"],
+        "min_time_to_go_ticks": bucket["min_time_to_go_ticks"],
         "controller_counts": dict(sorted(controller_counts.items())),
         "step_kind_counts": dict(sorted(step_kind_counts.items())),
         "step_kind_percent": kind_percent,
         "accel_clamp_counts": dict(sorted(accel_clamp_counts.items())),
+        "feedback_source_counts": dict(sorted(feedback_source_counts.items())),
         "follower_step_distribution": dict(
             sorted(step_counts.items(), key=lambda item: int(item[0]))
         ),
@@ -252,6 +313,11 @@ def finalize_delta_twist_bucket(bucket: dict[str, object]) -> dict[str, object]:
         "yaw_realized_ratio": percentile_summary(bucket["yaw_ratio"]),  # type: ignore[arg-type]
         "linear_realized_ratio": percentile_summary(bucket["linear_ratio"]),  # type: ignore[arg-type]
         "angular_realized_ratio": percentile_summary(bucket["angular_ratio"]),  # type: ignore[arg-type]
+        "yaw_sign_match_percent": yaw_sign_match_percent,
+        "stage_path_length_m": stage_path_length_m,
+        "stage_net_displacement_m": stage_net_displacement_m,
+        "stage_path_to_net_ratio": stage_path_to_net_ratio,
+        "warnings": warnings,
     }
 
 
@@ -349,6 +415,21 @@ def analyze_csv(path: Path) -> dict[str, object]:
                 saturated = optional_bool(row, f"{arm}_delta_twist_saturated", row_number)
                 if saturated:
                     bucket["saturated_ticks"] = int(bucket["saturated_ticks"]) + 1
+                for column, key in (
+                    (f"{arm}_delta_twist_pending_clamped", "pending_clamped_ticks"),
+                    (f"{arm}_delta_twist_xi_ref_clamped_norm", "xi_ref_clamped_ticks"),
+                    (f"{arm}_delta_twist_xi_cmd_clamped_norm", "xi_cmd_clamped_ticks"),
+                    (f"{arm}_delta_twist_min_time_to_go_used", "min_time_to_go_ticks"),
+                ):
+                    value = optional_bool(row, column, row_number)
+                    if value:
+                        bucket[key] = int(bucket[key]) + 1
+                feedback_source = optional_float(row, f"{arm}_delta_twist_feedback_source", row_number)
+                if feedback_source is not None:
+                    feedback_source_int = int(feedback_source)
+                    if feedback_source != feedback_source_int:
+                        raise AnalysisError(f"row {row_number}: column {arm}_delta_twist_feedback_source must be an integer")
+                    bump_count(bucket["feedback_source_counts"], str(feedback_source_int))  # type: ignore[arg-type]
                 step = optional_float(row, f"{arm}_follower_step", row_number)
                 if step is not None:
                     step_int = int(step)
@@ -386,6 +467,12 @@ def analyze_csv(path: Path) -> dict[str, object]:
                     value = optional_float(row, column, row_number)
                     if value is not None:
                         bucket[key].append(value)  # type: ignore[union-attr]
+                stage_xyz = [
+                    optional_float(row, f"{arm}_stage_tcp_target_stand_{axis}_m", row_number)
+                    for axis in ("x", "y", "z")
+                ]
+                if all(value is not None for value in stage_xyz):
+                    bucket["stage_positions"].append(tuple(float(value) for value in stage_xyz))  # type: ignore[union-attr]
 
             if all(column in row and row[column] != "" for column in TIMESTAMP_COLUMNS):
                 loop_start = parse_float(row["loop_start_time_ns"], "loop_start_time_ns", row_number)
@@ -544,13 +631,36 @@ def format_report(metrics: dict[str, object], budget: ProfileBudget, failures: S
                 f"active_ticks={arm_metrics['active_ticks']} "
                 f"stall_ticks={arm_metrics['stall_ticks']} "
                 f"saturated_ticks={arm_metrics['saturated_ticks']} "
+                f"pending_clamped_ticks={arm_metrics.get('pending_clamped_ticks', 0)} "
+                f"xi_ref_clamped_ticks={arm_metrics.get('xi_ref_clamped_ticks', 0)} "
+                f"xi_cmd_clamped_ticks={arm_metrics.get('xi_cmd_clamped_ticks', 0)} "
+                f"min_time_to_go_ticks={arm_metrics.get('min_time_to_go_ticks', 0)} "
                 f"follower_steps={arm_metrics['follower_step_distribution']} "
                 f"step_kind_counts={arm_metrics.get('step_kind_counts', {})} "
                 f"step_kind_percent={arm_metrics.get('step_kind_percent', {})}"
             )
+            feedback_sources = arm_metrics.get("feedback_source_counts")
+            if isinstance(feedback_sources, dict) and feedback_sources:
+                lines.append(f"  {arm} feedback_source_counts: {feedback_sources}")
             accel_counts = arm_metrics.get("accel_clamp_counts")
             if isinstance(accel_counts, dict) and accel_counts:
                 lines.append(f"  {arm} accel_clamp_counts: {accel_counts}")
+            if arm_metrics.get("stage_path_length_m") is not None:
+                ratio = arm_metrics.get("stage_path_to_net_ratio")
+                ratio_text = "n/a" if ratio is None else f"{float(ratio):.6f}"
+                lines.append(
+                    f"  {arm} stage_path: length_m={float(arm_metrics['stage_path_length_m']):.6f} "
+                    f"net_m={float(arm_metrics['stage_net_displacement_m']):.6f} "
+                    f"path_to_net={ratio_text}"
+                )
+            if arm_metrics.get("yaw_sign_match_percent") is not None:
+                lines.append(
+                    f"  {arm} yaw_sign_match_percent: "
+                    f"{float(arm_metrics['yaw_sign_match_percent']):.3f}"
+                )
+            warnings = arm_metrics.get("warnings")
+            if isinstance(warnings, list) and warnings:
+                lines.append(f"  {arm} warnings: " + "; ".join(str(warning) for warning in warnings))
             lines.append(
                 f"  {arm} pending_linear_norm_m: "
                 f"{fmt_percentiles(arm_metrics.get('pending_residual_linear_norm_m'))}"

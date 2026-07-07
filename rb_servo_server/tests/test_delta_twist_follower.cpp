@@ -33,6 +33,13 @@ static Pose6D identityPose() {
   return p;
 }
 
+static Pose6D yawPose(double yaw_rad) {
+  Pose6D p = identityPose();
+  p.quaternion_xyzw.reset();
+  p.rz = yaw_rad;
+  return p;
+}
+
 static bool finitePose(const Pose6D& p) {
   if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return false;
   if (!p.quaternion_xyzw.has_value()) return false;
@@ -161,6 +168,8 @@ int main() {
     fresh.wire_seq = 45;
     follower.submitFrame(fresh, identityPose());
     check(follower.tInSegment() == 0.0, "fresh frame resets local policy-frame phase");
+    check(follower.diag().residual_cleared_on_frame, "fresh frame reports residual clear");
+    check(linearNorm(follower.pendingDelta()) < 0.015, "old residual is cleared before adding new first step");
     check(linearNorm(follower.xiCommand()) >= 0.5 * xi_before, "submitFrame does not force xi_cmd to zero");
     tickOpenLoop(follower, POLICY_DT * 0.50);
     check(follower.diag().seg_step_index == 0, "new step 0 remains active halfway through policy_dt");
@@ -168,7 +177,53 @@ int main() {
     check(follower.diag().seg_step_index == 1, "new step 1 is consumed after roughly one policy_dt");
   }
 
-  std::printf("Test C: area matching translation with perfect feedback\n");
+  std::printf("Test C: norm clamp preserves linear/angular direction\n");
+  {
+    DeltaTwistFollowerConfig cfg = fastConfig();
+    cfg.lin = AxisLimit{0.18, 1000.0, 1000000.0};
+    cfg.ang = AxisLimit{0.60, 1000.0, 1000000.0};
+    cfg.max_residual_m = 100.0;
+    cfg.max_residual_rad = 100.0;
+    cfg.max_lead_m = 100.0;
+    cfg.max_lead_rad = 100.0;
+
+    DeltaTwistFollower linear_x(cfg);
+    linear_x.submitFrame(makeFrame({Vec6{10.0, 0.0, 0.0, 0.0, 0.0, 0.0}}), identityPose());
+    (void)linear_x.tick(TICK);
+    check(linearNorm(linear_x.diag().xi_ref) <= cfg.lin.v_max + 1e-12, "linear xi_ref norm respects configured limit");
+    check(linear_x.diag().xi_ref.x > 0.17, "x direction preserved by norm clamp");
+    check(std::fabs(linear_x.diag().xi_ref.y) < 1e-12, "no off-axis y from x-only clamp");
+
+    DeltaTwistFollower linear_xy(cfg);
+    linear_xy.submitFrame(makeFrame({Vec6{10.0, 10.0, 0.0, 0.0, 0.0, 0.0}}), identityPose());
+    (void)linear_xy.tick(TICK);
+    check(linearNorm(linear_xy.diag().xi_ref) <= cfg.lin.v_max + 1e-12, "diagonal linear norm has no sqrt(3) overshoot");
+    check(std::fabs(linear_xy.diag().xi_ref.x - linear_xy.diag().xi_ref.y) < 1e-12, "diagonal linear direction ratio preserved");
+
+    DeltaTwistFollower angular_xy(cfg);
+    angular_xy.submitFrame(makeFrame({Vec6{0.0, 0.0, 0.0, 10.0, 10.0, 0.0}}), identityPose());
+    (void)angular_xy.tick(TICK);
+    check(angularNorm(angular_xy.diag().xi_ref) <= cfg.ang.v_max + 1e-12, "diagonal angular norm respects configured limit");
+    check(std::fabs(angular_xy.diag().xi_ref.rx - angular_xy.diag().xi_ref.ry) < 1e-12, "diagonal angular direction ratio preserved");
+  }
+
+  std::printf("Test D: min time-to-go prevents end-frame spike\n");
+  {
+    DeltaTwistFollowerConfig cfg = fastConfig();
+    cfg.lin = AxisLimit{10.0, 1000.0, 1000000.0};
+    cfg.min_time_to_go_sec = 0.020;
+    cfg.max_lead_m = 100.0;
+    DeltaTwistFollower follower(cfg);
+    follower.submitFrame(makeFrame({Vec6{0.01, 0.0, 0.0, 0.0, 0.0, 0.0}}), identityPose());
+    for (int i = 0; i < 16; ++i) {
+      (void)follower.tick(TICK);
+    }
+    check(follower.diag().min_time_to_go_used, "min time-to-go floor is reported near frame end");
+    check(std::fabs(follower.diag().xi_ref.x - 0.5) < 0.05, "xi_ref uses pending_delta/min_time_to_go instead of end-frame spike");
+    check(linearNorm(follower.diag().xi_ref) < 1.0, "xi_ref stays below catch-up spike scale");
+  }
+
+  std::printf("Test E: area matching translation with perfect feedback\n");
   {
     DeltaTwistFollower follower(fastConfig());
     follower.submitFrame(makeFrame({Vec6{0.01, 0.0, 0.0, 0.0, 0.0, 0.0}}), identityPose());
@@ -179,7 +234,7 @@ int main() {
     check(std::fabs(out.y) < 1e-6 && std::fabs(out.z) < 1e-6, "off-axis translation stays near zero");
   }
 
-  std::printf("Test D: area matching rotation with perfect feedback\n");
+  std::printf("Test F: area matching rotation with perfect feedback\n");
   {
     DeltaTwistFollower follower(fastConfig());
     follower.submitFrame(makeFrame({Vec6{0.0, 0.0, 0.0, 0.0, 0.0, 0.1}}), identityPose());
@@ -189,7 +244,7 @@ int main() {
     check(std::fabs(logged.x()) < 1e-6 && std::fabs(logged.y()) < 1e-6, "rotation stays on requested axis");
   }
 
-  std::printf("Test E: pending residual is reduced by feedback, not command alone\n");
+  std::printf("Test G: pending residual is reduced by feedback, not command alone\n");
   {
     DeltaTwistFollower follower(fastConfig());
     const Pose6D start = identityPose();
@@ -208,7 +263,29 @@ int main() {
     check(std::isfinite(follower.diag().realized_linear_ratio), "linear realized ratio is finite");
   }
 
-  std::printf("Test E2: telemetry ratios are robust near zero request\n");
+  std::printf("Test G2: feedback projection does not increase residual when feedback opposes pending\n");
+  {
+    DeltaTwistFollower linear_follower(fastConfig());
+    const Pose6D start = identityPose();
+    linear_follower.submitFrame(makeFrame({Vec6{0.02, 0.0, 0.0, 0.0, 0.0, 0.0}}), start);
+    linear_follower.setFeedbackPose(start);
+    Pose6D moved_back = start;
+    moved_back.x = -0.005;
+    const double linear_before = linearNorm(linear_follower.pendingDelta());
+    linear_follower.setFeedbackPose(moved_back);
+    check(linearNorm(linear_follower.pendingDelta()) <= linear_before + 1e-12, "opposing linear feedback does not grow pending residual");
+    check(linear_follower.diag().lin_feedback_cos < -0.9, "linear feedback cosine records opposing direction");
+
+    DeltaTwistFollower angular_follower(fastConfig());
+    angular_follower.submitFrame(makeFrame({Vec6{0.0, 0.0, 0.0, 0.0, 0.0, 0.10}}), start);
+    angular_follower.setFeedbackPose(start);
+    const double angular_before = angularNorm(angular_follower.pendingDelta());
+    angular_follower.setFeedbackPose(yawPose(-0.02));
+    check(angularNorm(angular_follower.pendingDelta()) <= angular_before + 1e-12, "opposing angular feedback does not grow pending residual");
+    check(angular_follower.diag().ang_feedback_cos < -0.9, "angular feedback cosine records opposing direction");
+  }
+
+  std::printf("Test G3: telemetry ratios are robust near zero request\n");
   {
     DeltaTwistFollower follower(fastConfig());
     const Pose6D start = identityPose();
@@ -222,7 +299,7 @@ int main() {
     check(follower.diag().realized_linear_ratio == 0.0, "zero request with nonzero realized reports ratio 0");
   }
 
-  std::printf("Test F: command lead clamp limits pose ahead of feedback\n");
+  std::printf("Test H: command lead clamp limits pose ahead of feedback\n");
   {
     DeltaTwistFollowerConfig cfg = fastConfig();
     cfg.max_lead_m = 0.012;
@@ -247,7 +324,7 @@ int main() {
     check(max_lead_rad <= cfg.max_lead_rad + 1e-9, "angular command lead stays clamped");
   }
 
-  std::printf("Test G: missing delta rows do not activate\n");
+  std::printf("Test I: missing delta rows do not activate\n");
   {
     DeltaTwistFollower follower(fastConfig());
     ChunkFrame f;
@@ -257,7 +334,7 @@ int main() {
     check(!follower.active(), "frame without deltas rejected");
   }
 
-  std::printf("Test H: reanchor clears dangerous residual\n");
+  std::printf("Test J: reanchor clears dangerous residual\n");
   {
     DeltaTwistFollower follower(fastConfig());
     follower.submitFrame(makeFrame({Vec6{0.20, 0.0, 0.0, 0.0, 0.0, 0.0}}), identityPose());
@@ -273,7 +350,7 @@ int main() {
     check(angularNorm(follower.diag().pending_delta) < 1e-9, "old pending rotation cleared on reanchor");
   }
 
-  std::printf("Test I: telemetry step phase reaches ringdown\n");
+  std::printf("Test K: telemetry step phase reaches ringdown\n");
   {
     DeltaTwistFollowerConfig cfg = fastConfig();
     cfg.consume_steps = 1;

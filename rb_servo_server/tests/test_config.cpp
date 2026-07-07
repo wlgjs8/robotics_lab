@@ -1175,6 +1175,8 @@ bool testRuckigFollowerControllerConfig() {
         "    controller: \"delta_twist\"\n"
         "    delta_twist_tau_sec: 0.031\n"
         "    delta_twist_residual_drain_steps: 2\n"
+        "    delta_twist_clear_residual_on_new_frame: false\n"
+        "    delta_twist_min_time_to_go_sec: 0.021\n"
         "    delta_twist_max_residual_m: 0.041\n"
         "    delta_twist_max_residual_rad: 0.42\n"
         "    delta_twist_max_lead_m: 0.091\n"
@@ -1192,6 +1194,8 @@ bool testRuckigFollowerControllerConfig() {
              rb_servo::RuckigFollowerController::DeltaTwist);
     RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_tau_sec, 0.031));
     RB_CHECK(delta_cfg.cartesian_control.ruckig_follower.delta_twist_residual_drain_steps == 2);
+    RB_CHECK(!delta_cfg.cartesian_control.ruckig_follower.delta_twist_clear_residual_on_new_frame);
+    RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_min_time_to_go_sec, 0.021));
     RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_max_residual_m, 0.041));
     RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_max_residual_rad, 0.42));
     RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_max_lead_m, 0.091));
@@ -1225,6 +1229,19 @@ bool testRuckigFollowerControllerConfig() {
         "cartesian_control.ruckig_follower.delta_twist_tau_sec"
     ));
     ::unlink(bad_tau_path.c_str());
+
+    const std::string bad_min_tgo_path = writeTempConfig(
+        "ruckig-follower-bad-delta-min-tgo",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    delta_twist_min_time_to_go_sec: 0.0\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(
+        bad_min_tgo_path,
+        "cartesian_control.ruckig_follower.delta_twist_min_time_to_go_sec"
+    ));
+    ::unlink(bad_min_tgo_path.c_str());
 
     return true;
 }

@@ -148,6 +148,14 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_delta_twist_saturated"
        << ',' << side << "_delta_twist_lead_linear_norm_m"
        << ',' << side << "_delta_twist_lead_angular_norm_rad"
+       << ',' << side << "_delta_twist_feedback_source"
+       << ',' << side << "_delta_twist_pending_clamped"
+       << ',' << side << "_delta_twist_residual_cleared_on_frame"
+       << ',' << side << "_delta_twist_min_time_to_go_used"
+       << ',' << side << "_delta_twist_lin_feedback_cos"
+       << ',' << side << "_delta_twist_ang_feedback_cos"
+       << ',' << side << "_delta_twist_xi_ref_clamped_norm"
+       << ',' << side << "_delta_twist_xi_cmd_clamped_norm"
        << ',' << side << "_output_ma_present"
        << ',' << side << "_output_ma_window";
     writeJointArrayHeader(os, side, "q_target_before_output_ma");
@@ -570,6 +578,14 @@ void writeArmProfilingColumns(
        << ',' << telemetry.delta_twist_saturated
        << ',' << telemetry.delta_twist_lead_linear_norm_m
        << ',' << telemetry.delta_twist_lead_angular_norm_rad
+       << ',' << telemetry.delta_twist_feedback_source
+       << ',' << telemetry.delta_twist_pending_clamped
+       << ',' << telemetry.delta_twist_residual_cleared_on_frame
+       << ',' << telemetry.delta_twist_min_time_to_go_used
+       << ',' << telemetry.delta_twist_lin_feedback_cos
+       << ',' << telemetry.delta_twist_ang_feedback_cos
+       << ',' << telemetry.delta_twist_xi_ref_clamped_norm
+       << ',' << telemetry.delta_twist_xi_cmd_clamped_norm
        << ',' << telemetry.output_ma_present
        << ',' << telemetry.output_ma_window;
     if (telemetry.output_ma_present) {

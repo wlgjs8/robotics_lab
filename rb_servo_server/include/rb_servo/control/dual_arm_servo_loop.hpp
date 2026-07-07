@@ -657,7 +657,8 @@ private:
         SmdPoseTracker* smd_tracker,
         const ArmMountConfig& mount,
         const JointArray& previous_sent_q_deg,
-        const Pose6D& feedback_pose,
+        const Pose6D& actual_feedback_pose,
+        const Pose6D& execution_feedback_pose,
         double dt_sec
     );
     JointMovingAverage left_output_ma_{0};
@@ -723,6 +724,14 @@ private:
         bool delta_twist_saturated = false;
         double delta_twist_lead_linear_norm_m = 0.0;
         double delta_twist_lead_angular_norm_rad = 0.0;
+        int delta_twist_feedback_source = 0;
+        bool delta_twist_pending_clamped = false;
+        bool delta_twist_residual_cleared_on_frame = false;
+        bool delta_twist_min_time_to_go_used = false;
+        double delta_twist_lin_feedback_cos = 1.0;
+        double delta_twist_ang_feedback_cos = 1.0;
+        bool delta_twist_xi_ref_clamped_norm = false;
+        bool delta_twist_xi_cmd_clamped_norm = false;
     };
     AbcTelemetry left_abc_telemetry_;
     AbcTelemetry right_abc_telemetry_;

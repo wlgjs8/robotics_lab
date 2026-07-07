@@ -153,6 +153,14 @@ class AnalyzeServoLogTest(unittest.TestCase):
             "left_delta_twist_realized_angular_ratio",
             "left_delta_twist_realized_yaw_ratio",
             "left_delta_twist_saturated",
+            "left_delta_twist_feedback_source",
+            "left_delta_twist_pending_clamped",
+            "left_delta_twist_min_time_to_go_used",
+            "left_delta_twist_xi_ref_clamped_norm",
+            "left_delta_twist_xi_cmd_clamped_norm",
+            "left_stage_tcp_target_stand_x_m",
+            "left_stage_tcp_target_stand_y_m",
+            "left_stage_tcp_target_stand_z_m",
             "left_safety_accel_clamped",
         ]
         rows = [
@@ -175,6 +183,14 @@ class AnalyzeServoLogTest(unittest.TestCase):
                 "left_delta_twist_realized_angular_ratio": "0.45",
                 "left_delta_twist_realized_yaw_ratio": "0.5",
                 "left_delta_twist_saturated": "0",
+                "left_delta_twist_feedback_source": "2",
+                "left_delta_twist_pending_clamped": "0",
+                "left_delta_twist_min_time_to_go_used": "0",
+                "left_delta_twist_xi_ref_clamped_norm": "0",
+                "left_delta_twist_xi_cmd_clamped_norm": "0",
+                "left_stage_tcp_target_stand_x_m": "0.0",
+                "left_stage_tcp_target_stand_y_m": "0.0",
+                "left_stage_tcp_target_stand_z_m": "0.0",
                 "left_safety_accel_clamped": "0",
             },
             {
@@ -191,11 +207,19 @@ class AnalyzeServoLogTest(unittest.TestCase):
                 "left_delta_twist_xi_cmd_linear_norm_m_s": "0.6",
                 "left_delta_twist_xi_cmd_angular_norm_rad_s": "2.0",
                 "left_delta_twist_step_yaw_rad": "0.20",
-                "left_delta_twist_realized_yaw_rad": "0.12",
+                "left_delta_twist_realized_yaw_rad": "-0.12",
                 "left_delta_twist_realized_linear_ratio": "0.5",
                 "left_delta_twist_realized_angular_ratio": "0.55",
                 "left_delta_twist_realized_yaw_ratio": "0.6",
                 "left_delta_twist_saturated": "0",
+                "left_delta_twist_feedback_source": "2",
+                "left_delta_twist_pending_clamped": "1",
+                "left_delta_twist_min_time_to_go_used": "1",
+                "left_delta_twist_xi_ref_clamped_norm": "1",
+                "left_delta_twist_xi_cmd_clamped_norm": "0",
+                "left_stage_tcp_target_stand_x_m": "1.0",
+                "left_stage_tcp_target_stand_y_m": "0.0",
+                "left_stage_tcp_target_stand_z_m": "0.0",
                 "left_safety_accel_clamped": "0",
             },
             {
@@ -212,11 +236,19 @@ class AnalyzeServoLogTest(unittest.TestCase):
                 "left_delta_twist_xi_cmd_linear_norm_m_s": "0.7",
                 "left_delta_twist_xi_cmd_angular_norm_rad_s": "3.0",
                 "left_delta_twist_step_yaw_rad": "0.30",
-                "left_delta_twist_realized_yaw_rad": "0.21",
+                "left_delta_twist_realized_yaw_rad": "-0.21",
                 "left_delta_twist_realized_linear_ratio": "0.6",
                 "left_delta_twist_realized_angular_ratio": "0.65",
                 "left_delta_twist_realized_yaw_ratio": "0.7",
                 "left_delta_twist_saturated": "1",
+                "left_delta_twist_feedback_source": "2",
+                "left_delta_twist_pending_clamped": "1",
+                "left_delta_twist_min_time_to_go_used": "1",
+                "left_delta_twist_xi_ref_clamped_norm": "1",
+                "left_delta_twist_xi_cmd_clamped_norm": "1",
+                "left_stage_tcp_target_stand_x_m": "0.0",
+                "left_stage_tcp_target_stand_y_m": "0.0",
+                "left_stage_tcp_target_stand_z_m": "0.0",
                 "left_safety_accel_clamped": "1",
             },
             {
@@ -238,6 +270,14 @@ class AnalyzeServoLogTest(unittest.TestCase):
                 "left_delta_twist_realized_angular_ratio": "1.0",
                 "left_delta_twist_realized_yaw_ratio": "1.0",
                 "left_delta_twist_saturated": "0",
+                "left_delta_twist_feedback_source": "2",
+                "left_delta_twist_pending_clamped": "0",
+                "left_delta_twist_min_time_to_go_used": "0",
+                "left_delta_twist_xi_ref_clamped_norm": "0",
+                "left_delta_twist_xi_cmd_clamped_norm": "0",
+                "left_stage_tcp_target_stand_x_m": "0.01",
+                "left_stage_tcp_target_stand_y_m": "0.0",
+                "left_stage_tcp_target_stand_z_m": "0.0",
                 "left_safety_accel_clamped": "0",
             },
         ]
@@ -258,6 +298,11 @@ class AnalyzeServoLogTest(unittest.TestCase):
             self.assertEqual(left["active_ticks"], 3)
             self.assertEqual(left["stall_ticks"], 1)
             self.assertEqual(left["saturated_ticks"], 1)
+            self.assertEqual(left["pending_clamped_ticks"], 2)
+            self.assertEqual(left["xi_ref_clamped_ticks"], 2)
+            self.assertEqual(left["xi_cmd_clamped_ticks"], 1)
+            self.assertEqual(left["min_time_to_go_ticks"], 2)
+            self.assertEqual(left["feedback_source_counts"], {"2": 4})
             self.assertEqual(left["follower_step_distribution"], {"0": 1, "1": 2, "2": 1})
             self.assertEqual(left["step_kind_counts"], {"normal": 2, "reserve": 1, "ringdown": 1})
             self.assertEqual(left["accel_clamp_counts"], {"safety_accel_clamped": 1})
@@ -266,11 +311,17 @@ class AnalyzeServoLogTest(unittest.TestCase):
             self.assertEqual(left["xi_ref_angular_norm_rad_s"]["p99"], 4.1)
             self.assertEqual(left["commanded_angular_velocity_rad_s"]["p99"], 4.0)
             self.assertEqual(left["requested_yaw_delta_rad"]["p90"], 0.4)
-            self.assertEqual(left["realized_yaw_delta_rad"]["p50"], 0.12)
+            self.assertEqual(left["realized_yaw_delta_rad"]["p50"], -0.12)
             self.assertEqual(left["yaw_realized_ratio"]["p90"], 1.0)
             self.assertEqual(left["linear_realized_ratio"]["p50"], 0.5)
+            self.assertEqual(left["yaw_sign_match_percent"], 50.0)
+            self.assertGreater(left["stage_path_to_net_ratio"], 100.0)
+            self.assertTrue(any("path/net" in warning for warning in left["warnings"]))
+            self.assertTrue(any("yaw sign" in warning for warning in left["warnings"]))
             self.assertIn("safety_verdict_counts: JointLimitClamped=1, Ok=3", report)
             self.assertIn("step_kind_counts={'normal': 2, 'reserve': 1, 'ringdown': 1}", report)
+            self.assertIn("feedback_source_counts: {'2': 4}", report)
+            self.assertIn("yaw_sign_match_percent: 50.000", report)
             self.assertIn("left xi_cmd_angular_norm_rad_s: count=4", report)
 
 

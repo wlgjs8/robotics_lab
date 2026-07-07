@@ -961,6 +961,8 @@ struct RuckigFollowerConfig {
     // internally jerk-limited body twist.
     double delta_twist_tau_sec = 0.015;
     int delta_twist_residual_drain_steps = 1;
+    bool delta_twist_clear_residual_on_new_frame = true;
+    double delta_twist_min_time_to_go_sec = 0.015;
     double delta_twist_max_residual_m = 0.030;
     double delta_twist_max_residual_rad = 0.35;
     double delta_twist_max_lead_m = 0.060;

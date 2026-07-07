@@ -673,25 +673,27 @@ cartesian_control:
         # but residual catch-up drove xi_cmd to ~1 m/s and command lead to the
         # 50 mm divergence latch. Keep the first real DeltaTwist profile bounded
         # near the requested action scale; raise only from CSV evidence.
-        max_linear_velocity_m_s: 0.25
-        max_linear_accel_m_s2: 2.0
-        max_linear_jerk_m_s3: 60.0
-        max_angular_velocity_rad_s: 0.80
-        max_angular_accel_rad_s2: 4.0
-        max_angular_jerk_rad_s3: 160.0
+        max_linear_velocity_m_s: 0.18
+        max_linear_accel_m_s2: 1.5
+        max_linear_jerk_m_s3: 45.0
+        max_angular_velocity_rad_s: 0.60
+        max_angular_accel_rad_s2: 3.0
+        max_angular_jerk_rad_s3: 120.0
         discard_head_steps: 0     # producer re-anchors each chunk to measured TCP: latency already absorbed
         consume_steps: 6          # consume only window rows; rows 6-11 are runway neighbors + late-frame coast
         reserve_steps: 2
         smoothing_window: 3
         af_damping_beta: 1.0 #0.2  # P3: honest central-diff curvature; clampAbs(af, a_max) bounds it (beta<1 = per-waypoint micro-brake)
-        delta_twist_tau_sec: 0.015
+        delta_twist_clear_residual_on_new_frame: true
+        delta_twist_min_time_to_go_sec: 0.015
+        delta_twist_tau_sec: 0.020
         delta_twist_residual_drain_steps: 1
-        delta_twist_max_residual_m: 0.012
-        delta_twist_max_residual_rad: 0.10
+        delta_twist_max_residual_m: 0.006
+        delta_twist_max_residual_rad: 0.050
         # Must stay below the strict chunk-follower divergence latch
         # (50 mm / 0.1 rad) so lead clamp engages before safety fault.
-        delta_twist_max_lead_m: 0.025
-        delta_twist_max_lead_rad: 0.08
+        delta_twist_max_lead_m: 0.020
+        delta_twist_max_lead_rad: 0.060
         delta_twist_stale_residual_timeout_sec: 0.15
         chunk_feed_timeout_sec: 1.5
         fallback_policy: "fault"     # strict: no silent SMD fallback; cold start holds, loss latches ChunkFollowerFault (ResetFault to recover)

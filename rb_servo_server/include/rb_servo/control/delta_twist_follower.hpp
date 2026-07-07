@@ -26,11 +26,19 @@ struct DeltaTwistFollowerConfig {
   int reserve_steps{1};
   double tau_sec{0.015};
   int residual_drain_steps{1};
+  bool clear_residual_on_new_frame{true};
+  double min_time_to_go_sec{0.015};
   double max_residual_m{0.030};
   double max_residual_rad{0.35};
   double max_lead_m{0.060};
   double max_lead_rad{0.30};
   double stale_residual_timeout_sec{0.15};
+};
+
+enum class DeltaTwistFeedbackSource {
+  None = 0,
+  Actual = 1,
+  PreviousSentFk = 2,
 };
 
 enum class DeltaTwistStepPhase {
@@ -57,6 +65,14 @@ struct DeltaTwistFollowerDiag {
   Vec6 xi_cmd{};
   Vec6 accel_cmd{};
   Vec6 lead_delta{};
+  int feedback_source{0};
+  bool pending_clamped{false};
+  bool residual_cleared_on_frame{false};
+  bool min_time_to_go_used{false};
+  double lin_feedback_cos{1.0};
+  double ang_feedback_cos{1.0};
+  bool xi_ref_clamped_norm{false};
+  bool xi_cmd_clamped_norm{false};
   double realized_linear_ratio{1.0};
   double realized_angular_ratio{1.0};
   double realized_yaw_ratio{1.0};
@@ -75,7 +91,10 @@ class DeltaTwistFollower {
   bool active() const { return active_; }
   void deactivate();
   void reanchor(const Pose6D& reference);
-  void setFeedbackPose(const Pose6D& feedback_pose);
+  void setFeedbackPose(
+      const Pose6D& feedback_pose,
+      DeltaTwistFeedbackSource source = DeltaTwistFeedbackSource::PreviousSentFk
+  );
   Pose6D tick(double dt_tick);
 
   double currentGrip() const { return current_grip_; }
@@ -94,7 +113,7 @@ class DeltaTwistFollower {
   bool consumeNextStep();
   bool hasConsumableStep() const;
   double gripAt(std::size_t k) const;
-  void clampPendingResidual();
+  bool clampPendingResidual();
   void clampCommandLead();
   void updateDiagState();
 
@@ -122,6 +141,14 @@ class DeltaTwistFollower {
   Vec6 realized_delta_{};
   Vec6 xi_ref_{};
   Vec6 lead_delta_{};
+  int feedback_source_{0};
+  bool pending_clamped_{false};
+  bool residual_cleared_on_frame_{false};
+  bool min_time_to_go_used_{false};
+  double lin_feedback_cos_{1.0};
+  double ang_feedback_cos_{1.0};
+  bool xi_ref_clamped_norm_{false};
+  bool xi_cmd_clamped_norm_{false};
   double current_grip_{0.0};
   double t_in_seg_{0.0};
   bool active_{false};

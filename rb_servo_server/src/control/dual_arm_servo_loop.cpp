@@ -261,6 +261,8 @@ bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFoll
         a.af_damping_beta != b.af_damping_beta ||
         a.delta_twist_tau_sec != b.delta_twist_tau_sec ||
         a.delta_twist_residual_drain_steps != b.delta_twist_residual_drain_steps ||
+        a.delta_twist_clear_residual_on_new_frame != b.delta_twist_clear_residual_on_new_frame ||
+        a.delta_twist_min_time_to_go_sec != b.delta_twist_min_time_to_go_sec ||
         a.delta_twist_max_residual_m != b.delta_twist_max_residual_m ||
         a.delta_twist_max_residual_rad != b.delta_twist_max_residual_rad ||
         a.delta_twist_max_lead_m != b.delta_twist_max_lead_m ||
@@ -290,6 +292,8 @@ control::DeltaTwistFollowerConfig makeDeltaTwistFollowerConfig(const RuckigFollo
     cfg.reserve_steps = rf.reserve_steps;
     cfg.tau_sec = rf.delta_twist_tau_sec;
     cfg.residual_drain_steps = rf.delta_twist_residual_drain_steps;
+    cfg.clear_residual_on_new_frame = rf.delta_twist_clear_residual_on_new_frame;
+    cfg.min_time_to_go_sec = rf.delta_twist_min_time_to_go_sec;
     cfg.max_residual_m = rf.delta_twist_max_residual_m;
     cfg.max_residual_rad = rf.delta_twist_max_residual_rad;
     cfg.max_lead_m = rf.delta_twist_max_lead_m;
@@ -3710,6 +3714,14 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.delta_twist_saturated = abc.delta_twist_saturated;
     solve.delta_twist_lead_linear_norm_m = abc.delta_twist_lead_linear_norm_m;
     solve.delta_twist_lead_angular_norm_rad = abc.delta_twist_lead_angular_norm_rad;
+    solve.delta_twist_feedback_source = abc.delta_twist_feedback_source;
+    solve.delta_twist_pending_clamped = abc.delta_twist_pending_clamped;
+    solve.delta_twist_residual_cleared_on_frame = abc.delta_twist_residual_cleared_on_frame;
+    solve.delta_twist_min_time_to_go_used = abc.delta_twist_min_time_to_go_used;
+    solve.delta_twist_lin_feedback_cos = abc.delta_twist_lin_feedback_cos;
+    solve.delta_twist_ang_feedback_cos = abc.delta_twist_ang_feedback_cos;
+    solve.delta_twist_xi_ref_clamped_norm = abc.delta_twist_xi_ref_clamped_norm;
+    solve.delta_twist_xi_cmd_clamped_norm = abc.delta_twist_xi_cmd_clamped_norm;
     solve.output_ma_present = abc.output_ma_present;
     solve.output_ma_window = output_ma_window;
     if (abc.output_ma_present) {
@@ -3870,6 +3882,14 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.delta_twist_saturated = false;
     abc.delta_twist_lead_linear_norm_m = 0.0;
     abc.delta_twist_lead_angular_norm_rad = 0.0;
+    abc.delta_twist_feedback_source = 0;
+    abc.delta_twist_pending_clamped = false;
+    abc.delta_twist_residual_cleared_on_frame = false;
+    abc.delta_twist_min_time_to_go_used = false;
+    abc.delta_twist_lin_feedback_cos = 1.0;
+    abc.delta_twist_ang_feedback_cos = 1.0;
+    abc.delta_twist_xi_ref_clamped_norm = false;
+    abc.delta_twist_xi_cmd_clamped_norm = false;
     const uint64_t now_ns = last_loop_start_ns_ != 0 ? last_loop_start_ns_ : nowSteadyNs();
     const bool intervention_recent = safetyInterventionRecent(arm_id, now_ns);
     std::uint64_t& reanchor_count = arm_id == ArmId::Left
@@ -4082,7 +4102,8 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     SmdPoseTracker* smd_tracker,
     const ArmMountConfig& mount,
     const JointArray& previous_sent_q_deg,
-    const Pose6D& feedback_pose,
+    const Pose6D& actual_feedback_pose,
+    const Pose6D& execution_feedback_pose,
     double dt_sec
 ) {
     const RuckigFollowerConfig& rf = profile.ruckig_follower;
@@ -4126,6 +4147,14 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     abc.delta_twist_saturated = false;
     abc.delta_twist_lead_linear_norm_m = 0.0;
     abc.delta_twist_lead_angular_norm_rad = 0.0;
+    abc.delta_twist_feedback_source = 0;
+    abc.delta_twist_pending_clamped = false;
+    abc.delta_twist_residual_cleared_on_frame = false;
+    abc.delta_twist_min_time_to_go_used = false;
+    abc.delta_twist_lin_feedback_cos = 1.0;
+    abc.delta_twist_ang_feedback_cos = 1.0;
+    abc.delta_twist_xi_ref_clamped_norm = false;
+    abc.delta_twist_xi_cmd_clamped_norm = false;
     const uint64_t now_ns = last_loop_start_ns_ != 0 ? last_loop_start_ns_ : nowSteadyNs();
     const bool intervention_recent = safetyInterventionRecent(arm_id, now_ns);
     std::uint64_t& reanchor_count = arm_id == ArmId::Left
@@ -4177,7 +4206,7 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
         *submitted_recv_seq = 0;
     }
 
-    const Pose6D reference = feedback_pose;
+    const Pose6D reference = actual_feedback_pose;
     const auto hold_at_reference = [&]() {
         ArmCommand smoothed = command;
         smoothed.tcp_target_stand = reference;
@@ -4261,7 +4290,7 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
         if (arm_has_delta) {
             transition_reason = "delta chunk frame " +
                 seq_labels(chunk_frame_cache_.seq, chunk_frame_cache_.receiver_seq);
-            follower->submitFrame(toControlChunkFrame(chunk_frame_cache_, arm_id), reference);
+            follower->submitFrame(toControlChunkFrame(chunk_frame_cache_, arm_id), execution_feedback_pose);
         } else {
             transition_reason = "chunk frame missing delta " +
                 seq_labels(chunk_frame_cache_.seq, chunk_frame_cache_.receiver_seq);
@@ -4303,7 +4332,10 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     log_transition();
     smd_tracker->deactivate();
     ArmCommand smoothed = command;
-    follower->setFeedbackPose(reference);
+    follower->setFeedbackPose(
+        execution_feedback_pose,
+        control::DeltaTwistFeedbackSource::PreviousSentFk
+    );
     smoothed.tcp_target_stand = follower->tick(dt_sec);
     const control::DeltaTwistFollowerDiag& diag = follower->diag();
     abc.follower_active = true;
@@ -4341,6 +4373,14 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     abc.delta_twist_saturated = diag.saturated;
     abc.delta_twist_lead_linear_norm_m = vec6LinearNorm(diag.lead_delta);
     abc.delta_twist_lead_angular_norm_rad = vec6AngularNorm(diag.lead_delta);
+    abc.delta_twist_feedback_source = diag.feedback_source;
+    abc.delta_twist_pending_clamped = diag.pending_clamped;
+    abc.delta_twist_residual_cleared_on_frame = diag.residual_cleared_on_frame;
+    abc.delta_twist_min_time_to_go_used = diag.min_time_to_go_used;
+    abc.delta_twist_lin_feedback_cos = diag.lin_feedback_cos;
+    abc.delta_twist_ang_feedback_cos = diag.ang_feedback_cos;
+    abc.delta_twist_xi_ref_clamped_norm = diag.xi_ref_clamped_norm;
+    abc.delta_twist_xi_cmd_clamped_norm = diag.xi_cmd_clamped_norm;
     return with_stage_telemetry(smoothed);
 }
 
@@ -4529,7 +4569,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         // applySafety(), so strict divergence explanation intentionally reads the
         // previous safety tick's intervention stamp through a short debounce.
         pollChunkFrames();
-        const auto feedback_pose_for_arm = [this](
+        const auto actual_feedback_pose_for_arm = [this](
             const RobotState& state,
             ArmId arm_id,
             const ArmMountConfig& mount,
@@ -4543,10 +4583,24 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             }
             return Pose6D{};
         };
-        const Pose6D left_delta_twist_feedback = feedback_pose_for_arm(
+        const auto execution_feedback_pose_for_arm = [this](
+            ArmId arm_id,
+            const ArmMountConfig& mount,
+            const JointArray& previous_sent_q_deg
+        ) {
+            if (kinematics_) {
+                return kinematics_->computeTcpStand(arm_id, previous_sent_q_deg, mount);
+            }
+            return Pose6D{};
+        };
+        const Pose6D left_delta_twist_actual_feedback = actual_feedback_pose_for_arm(
             left_state, ArmId::Left, config_.left_mount, left_prev_sent_q_deg_);
-        const Pose6D right_delta_twist_feedback = feedback_pose_for_arm(
+        const Pose6D right_delta_twist_actual_feedback = actual_feedback_pose_for_arm(
             right_state, ArmId::Right, config_.right_mount, right_prev_sent_q_deg_);
+        const Pose6D left_delta_twist_execution_feedback = execution_feedback_pose_for_arm(
+            ArmId::Left, config_.left_mount, left_prev_sent_q_deg_);
+        const Pose6D right_delta_twist_execution_feedback = execution_feedback_pose_for_arm(
+            ArmId::Right, config_.right_mount, right_prev_sent_q_deg_);
         ArmCommand left_pose_track_command;
         if (left_tcp_profile.ruckig_follower.controller == RuckigFollowerController::DeltaTwist) {
             left_chunk_follower_.deactivate();
@@ -4561,7 +4615,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 &left_pose_track_smd_,
                 config_.left_mount,
                 left_prev_sent_q_deg_,
-                left_delta_twist_feedback,
+                left_delta_twist_actual_feedback,
+                left_delta_twist_execution_feedback,
                 dt_sec
             );
         } else {
@@ -4594,7 +4649,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 &right_pose_track_smd_,
                 config_.right_mount,
                 right_prev_sent_q_deg_,
-                right_delta_twist_feedback,
+                right_delta_twist_actual_feedback,
+                right_delta_twist_execution_feedback,
                 dt_sec
             );
         } else {
