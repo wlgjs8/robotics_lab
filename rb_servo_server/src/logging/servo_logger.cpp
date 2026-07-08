@@ -76,6 +76,13 @@ void writeDeltaTwistVecHeader(std::ostream& os, const char* side, const char* na
        << ',' << side << '_' << name << "_drz_rad";
 }
 
+void writeOptionalDoubleColumn(std::ostream& os, const std::optional<double>& value) {
+    os << ',';
+    if (value.has_value() && std::isfinite(*value)) {
+        os << *value;
+    }
+}
+
 void writeArmProfilingHeader(std::ostream& os, const char* side) {
     writePoseHeader(os, side, "command_tcp_target_stand");
     writePoseHeader(os, side, "smd_goal_stand");
@@ -156,6 +163,46 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_delta_twist_ang_feedback_cos"
        << ',' << side << "_delta_twist_xi_ref_clamped_norm"
        << ',' << side << "_delta_twist_xi_cmd_clamped_norm"
+       << ',' << side << "_delta_twist_blocked"
+       << ',' << side << "_delta_twist_block_reason"
+       << ',' << side << "_delta_twist_block_elapsed_sec"
+       << ',' << side << "_delta_twist_block_requires_fresh_chunk"
+       << ',' << side << "_delta_twist_residual_cleared_by_block"
+       << ',' << side << "_delta_twist_step_consumed_this_tick"
+       << ',' << side << "_surface_mode"
+       << ',' << side << "_surface_active"
+       << ',' << side << "_surface_close_soon"
+       << ',' << side << "_surface_hull_scaled"
+       << ',' << side << "_surface_min_tip_dist_m"
+       << ',' << side << "_surface_down_scale"
+       << ',' << side << "_surface_tangent_scale"
+       << ',' << side << "_surface_hull_alpha";
+    writeDeltaTwistVecHeader(os, side, "surface_raw");
+    writeDeltaTwistVecHeader(os, side, "surface_projected");
+    writeDeltaTwistVecHeader(os, side, "surface_discarded");
+    os << ',' << side << "_surface_raw_linear_norm_m"
+       << ',' << side << "_surface_projected_linear_norm_m"
+       << ',' << side << "_surface_discarded_linear_norm_m"
+       << ',' << side << "_surface_raw_angular_norm_rad"
+       << ',' << side << "_surface_projected_angular_norm_rad"
+       << ',' << side << "_surface_discarded_angular_norm_rad"
+       << ',' << side << "_grasp_phase"
+       << ',' << side << "_grasp_commit_active"
+       << ',' << side << "_grasp_close_soon"
+       << ',' << side << "_grasp_ready"
+       << ',' << side << "_grasp_sync_wait_sec"
+       << ',' << side << "_grasp_closing_hold_elapsed_sec"
+       << ',' << side << "_grasp_lift_elapsed_sec"
+       << ',' << side << "_grasp_lift_progress"
+       << ',' << side << "_grasp_gripper_override_active"
+       << ',' << side << "_grasp_policy_delta_dropped"
+       << ',' << side << "_grasp_resume_wait_fresh_chunk"
+       << ',' << side << "_grasp_blocked"
+       << ',' << side << "_grasp_phase_before_block"
+       << ',' << side << "_gripper_policy_cmd"
+       << ',' << side << "_gripper_effective_cmd"
+       << ',' << side << "_gripper_close_soon"
+       << ',' << side << "_gripper_closing_hold_active"
        << ',' << side << "_output_ma_present"
        << ',' << side << "_output_ma_window";
     writeJointArrayHeader(os, side, "q_target_before_output_ma");
@@ -586,6 +633,46 @@ void writeArmProfilingColumns(
        << ',' << telemetry.delta_twist_ang_feedback_cos
        << ',' << telemetry.delta_twist_xi_ref_clamped_norm
        << ',' << telemetry.delta_twist_xi_cmd_clamped_norm
+       << ',' << telemetry.delta_twist_blocked
+       << ',' << telemetry.delta_twist_block_reason
+       << ',' << telemetry.delta_twist_block_elapsed_sec
+       << ',' << telemetry.delta_twist_block_requires_fresh_chunk
+       << ',' << telemetry.delta_twist_residual_cleared_by_block
+       << ',' << telemetry.delta_twist_step_consumed_this_tick
+       << ',' << telemetry.surface_mode
+       << ',' << telemetry.surface_active
+       << ',' << telemetry.surface_close_soon
+       << ',' << telemetry.surface_hull_scaled
+       << ',' << telemetry.surface_min_tip_dist_m
+       << ',' << telemetry.surface_down_scale
+       << ',' << telemetry.surface_tangent_scale
+       << ',' << telemetry.surface_hull_alpha;
+    writeDeltaTwistVecColumns(os, telemetry.surface_raw_delta);
+    writeDeltaTwistVecColumns(os, telemetry.surface_projected_delta);
+    writeDeltaTwistVecColumns(os, telemetry.surface_discarded_delta);
+    os << ',' << telemetry.surface_raw_linear_norm_m
+       << ',' << telemetry.surface_projected_linear_norm_m
+       << ',' << telemetry.surface_discarded_linear_norm_m
+       << ',' << telemetry.surface_raw_angular_norm_rad
+       << ',' << telemetry.surface_projected_angular_norm_rad
+       << ',' << telemetry.surface_discarded_angular_norm_rad
+       << ',' << telemetry.grasp_phase
+       << ',' << telemetry.grasp_commit_active
+       << ',' << telemetry.grasp_close_soon
+       << ',' << telemetry.grasp_ready
+       << ',' << telemetry.grasp_sync_wait_sec
+       << ',' << telemetry.grasp_closing_hold_elapsed_sec
+       << ',' << telemetry.grasp_lift_elapsed_sec
+       << ',' << telemetry.grasp_lift_progress
+       << ',' << telemetry.grasp_gripper_override_active
+       << ',' << telemetry.grasp_policy_delta_dropped
+       << ',' << telemetry.grasp_resume_wait_fresh_chunk
+       << ',' << telemetry.grasp_blocked
+       << ',' << telemetry.grasp_phase_before_block;
+    writeOptionalDoubleColumn(os, telemetry.gripper_policy_cmd);
+    writeOptionalDoubleColumn(os, telemetry.gripper_effective_cmd);
+    os << ',' << telemetry.gripper_close_soon
+       << ',' << telemetry.gripper_closing_hold_active
        << ',' << telemetry.output_ma_present
        << ',' << telemetry.output_ma_window;
     if (telemetry.output_ma_present) {

@@ -134,6 +134,18 @@ bool asBool(const YAML::Node& node, const std::string& path) {
     return asValue<bool>(node, path);
 }
 
+std::vector<FloorCheckPointConfig> parseTcpOffsetPoints(const YAML::Node& points,
+                                                        const std::string& path);
+
+std::array<double, 3> parseVec3Array(const YAML::Node& node, const std::string& path) {
+    if (!node.IsSequence() || node.size() != 3) {
+        fail(path + " must be [x, y, z]", node);
+    }
+    return {asDouble(node[0], path + "[0]"),
+            asDouble(node[1], path + "[1]"),
+            asDouble(node[2], path + "[2]")};
+}
+
 void parsePoseTrackSmdConfig(const YAML::Node& smd, const std::string& path, PoseTrackSmdConfig* out) {
     if (!out) return;
     validateAllowedKeys(smd, {
@@ -210,6 +222,166 @@ void parsePoseTrackSmdConfig(const YAML::Node& smd, const std::string& path, Pos
     }
 }
 
+void parseSurfaceActionProjectorConfig(
+    const YAML::Node& node,
+    const std::string& path,
+    SurfaceActionProjectorConfig* out
+) {
+    if (!out) return;
+    validateAllowedKeys(node, {
+        "enable",
+        "floor_z_m",
+        "floor_normal_stand",
+        "soft_floor_margin_m",
+        "stop_floor_margin_m",
+        "close_floor_band_m",
+        "min_tip_margin_m",
+        "tangent_coupling",
+        "close_tangent_scale",
+        "preclose_tangent_scale",
+        "max_tangent_delta_near_floor_m",
+        "max_down_delta_near_floor_m",
+        "max_yaw_delta_near_floor_rad",
+        "max_pitch_roll_delta_near_floor_rad",
+        "close_lookahead_steps",
+        "close_threshold",
+        "close_is_greater",
+        "gripper_floor_check_points_tcp",
+        "hull_line_search_iters",
+    }, path);
+    if (has(node, "enable")) out->enable = asBool(node["enable"], path + ".enable");
+    if (has(node, "floor_z_m")) {
+        out->floor_z_m = asDouble(node["floor_z_m"], path + ".floor_z_m");
+        out->floor_z_m_configured = true;
+    }
+    if (has(node, "floor_normal_stand")) {
+        out->floor_normal_stand = parseVec3Array(node["floor_normal_stand"], path + ".floor_normal_stand");
+    }
+    if (has(node, "soft_floor_margin_m")) {
+        out->soft_floor_margin_m = asDouble(node["soft_floor_margin_m"], path + ".soft_floor_margin_m");
+    }
+    if (has(node, "stop_floor_margin_m")) {
+        out->stop_floor_margin_m = asDouble(node["stop_floor_margin_m"], path + ".stop_floor_margin_m");
+    }
+    if (has(node, "close_floor_band_m")) {
+        out->close_floor_band_m = asDouble(node["close_floor_band_m"], path + ".close_floor_band_m");
+    }
+    if (has(node, "min_tip_margin_m")) {
+        out->min_tip_margin_m = asDouble(node["min_tip_margin_m"], path + ".min_tip_margin_m");
+    }
+    if (has(node, "tangent_coupling")) {
+        out->tangent_coupling = asDouble(node["tangent_coupling"], path + ".tangent_coupling");
+    }
+    if (has(node, "close_tangent_scale")) {
+        out->close_tangent_scale = asDouble(node["close_tangent_scale"], path + ".close_tangent_scale");
+    }
+    if (has(node, "preclose_tangent_scale")) {
+        out->preclose_tangent_scale = asDouble(node["preclose_tangent_scale"], path + ".preclose_tangent_scale");
+    }
+    if (has(node, "max_tangent_delta_near_floor_m")) {
+        out->max_tangent_delta_near_floor_m =
+            asDouble(node["max_tangent_delta_near_floor_m"], path + ".max_tangent_delta_near_floor_m");
+    }
+    if (has(node, "max_down_delta_near_floor_m")) {
+        out->max_down_delta_near_floor_m =
+            asDouble(node["max_down_delta_near_floor_m"], path + ".max_down_delta_near_floor_m");
+    }
+    if (has(node, "max_yaw_delta_near_floor_rad")) {
+        out->max_yaw_delta_near_floor_rad =
+            asDouble(node["max_yaw_delta_near_floor_rad"], path + ".max_yaw_delta_near_floor_rad");
+    }
+    if (has(node, "max_pitch_roll_delta_near_floor_rad")) {
+        out->max_pitch_roll_delta_near_floor_rad =
+            asDouble(node["max_pitch_roll_delta_near_floor_rad"], path + ".max_pitch_roll_delta_near_floor_rad");
+    }
+    if (has(node, "close_lookahead_steps")) {
+        out->close_lookahead_steps = asInt(node["close_lookahead_steps"], path + ".close_lookahead_steps");
+    }
+    if (has(node, "close_threshold")) {
+        out->close_threshold = asDouble(node["close_threshold"], path + ".close_threshold");
+    }
+    if (has(node, "close_is_greater")) {
+        out->close_is_greater = asBool(node["close_is_greater"], path + ".close_is_greater");
+    }
+    if (has(node, "gripper_floor_check_points_tcp")) {
+        out->gripper_floor_check_points_tcp = parseTcpOffsetPoints(
+            node["gripper_floor_check_points_tcp"],
+            path + ".gripper_floor_check_points_tcp"
+        );
+    }
+    if (has(node, "hull_line_search_iters")) {
+        out->hull_line_search_iters = asInt(node["hull_line_search_iters"], path + ".hull_line_search_iters");
+    }
+}
+
+void parseGraspCommitConfig(
+    const YAML::Node& node,
+    const std::string& path,
+    GraspCommitConfig* out
+) {
+    if (!out) return;
+    validateAllowedKeys(node, {
+        "enable",
+        "close_threshold",
+        "close_is_greater",
+        "close_lookahead_steps",
+        "commit_floor_band_m",
+        "both_arm_sync_timeout_sec",
+        "preclose_translation_scale",
+        "preclose_angular_scale",
+        "closing_hold_sec",
+        "lift_height_m",
+        "lift_duration_sec",
+        "bimanual_sync",
+        "freeze_gripper_until_commit",
+        "close_target",
+    }, path);
+    if (has(node, "enable")) out->enable = asBool(node["enable"], path + ".enable");
+    if (has(node, "close_threshold")) {
+        out->close_threshold = asDouble(node["close_threshold"], path + ".close_threshold");
+    }
+    if (has(node, "close_is_greater")) {
+        out->close_is_greater = asBool(node["close_is_greater"], path + ".close_is_greater");
+    }
+    if (has(node, "close_lookahead_steps")) {
+        out->close_lookahead_steps = asInt(node["close_lookahead_steps"], path + ".close_lookahead_steps");
+    }
+    if (has(node, "commit_floor_band_m")) {
+        out->commit_floor_band_m = asDouble(node["commit_floor_band_m"], path + ".commit_floor_band_m");
+    }
+    if (has(node, "both_arm_sync_timeout_sec")) {
+        out->both_arm_sync_timeout_sec =
+            asDouble(node["both_arm_sync_timeout_sec"], path + ".both_arm_sync_timeout_sec");
+    }
+    if (has(node, "preclose_translation_scale")) {
+        out->preclose_translation_scale =
+            asDouble(node["preclose_translation_scale"], path + ".preclose_translation_scale");
+    }
+    if (has(node, "preclose_angular_scale")) {
+        out->preclose_angular_scale =
+            asDouble(node["preclose_angular_scale"], path + ".preclose_angular_scale");
+    }
+    if (has(node, "closing_hold_sec")) {
+        out->closing_hold_sec = asDouble(node["closing_hold_sec"], path + ".closing_hold_sec");
+    }
+    if (has(node, "lift_height_m")) {
+        out->lift_height_m = asDouble(node["lift_height_m"], path + ".lift_height_m");
+    }
+    if (has(node, "lift_duration_sec")) {
+        out->lift_duration_sec = asDouble(node["lift_duration_sec"], path + ".lift_duration_sec");
+    }
+    if (has(node, "bimanual_sync")) {
+        out->bimanual_sync = asBool(node["bimanual_sync"], path + ".bimanual_sync");
+    }
+    if (has(node, "freeze_gripper_until_commit")) {
+        out->freeze_gripper_until_commit =
+            asBool(node["freeze_gripper_until_commit"], path + ".freeze_gripper_until_commit");
+    }
+    if (has(node, "close_target")) {
+        out->close_target = asDouble(node["close_target"], path + ".close_target");
+    }
+}
+
 void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, RuckigFollowerConfig* out) {
     if (!out) return;
     validateAllowedKeys(node, {
@@ -237,6 +409,11 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         "delta_twist_max_lead_m",
         "delta_twist_max_lead_rad",
         "delta_twist_stale_residual_timeout_sec",
+        "delta_twist_pause_on_safety_block",
+        "delta_twist_block_requires_fresh_chunk_sec",
+        "delta_twist_block_clear_residual",
+        "surface_action_projector",
+        "grasp_commit",
         "chunk_feed_timeout_sec",
     }, path);
     if (has(node, "enable")) out->enable = asBool(node["enable"], path + ".enable");
@@ -336,6 +513,34 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
                 node["delta_twist_stale_residual_timeout_sec"],
                 path + ".delta_twist_stale_residual_timeout_sec"
             );
+    }
+    if (has(node, "delta_twist_pause_on_safety_block")) {
+        out->delta_twist_pause_on_safety_block =
+            asBool(node["delta_twist_pause_on_safety_block"], path + ".delta_twist_pause_on_safety_block");
+    }
+    if (has(node, "delta_twist_block_requires_fresh_chunk_sec")) {
+        out->delta_twist_block_requires_fresh_chunk_sec = asDouble(
+            node["delta_twist_block_requires_fresh_chunk_sec"],
+            path + ".delta_twist_block_requires_fresh_chunk_sec"
+        );
+    }
+    if (has(node, "delta_twist_block_clear_residual")) {
+        out->delta_twist_block_clear_residual =
+            asBool(node["delta_twist_block_clear_residual"], path + ".delta_twist_block_clear_residual");
+    }
+    if (has(node, "surface_action_projector")) {
+        parseSurfaceActionProjectorConfig(
+            node["surface_action_projector"],
+            path + ".surface_action_projector",
+            &out->surface_action_projector
+        );
+    }
+    if (has(node, "grasp_commit")) {
+        parseGraspCommitConfig(
+            node["grasp_commit"],
+            path + ".grasp_commit",
+            &out->grasp_commit
+        );
     }
     if (has(node, "chunk_feed_timeout_sec")) {
         out->chunk_feed_timeout_sec = asDouble(node["chunk_feed_timeout_sec"], path + ".chunk_feed_timeout_sec");
@@ -1624,6 +1829,92 @@ void validateConfig(const DualArmConfig& cfg) {
     };
     validate_pose_track_smd(cfg.cartesian_control.pose_track_smd, "cartesian_control.pose_track_smd");
     const auto validate_ruckig_follower = [&cfg](const RuckigFollowerConfig& rf, const std::string& path) {
+        const auto validate_surface_projector =
+            [](const SurfaceActionProjectorConfig& sp, const std::string& sp_path) {
+                if (!std::isfinite(sp.floor_z_m)) {
+                    throw std::runtime_error(sp_path + ".floor_z_m must be finite");
+                }
+                const double n2 =
+                    sp.floor_normal_stand[0] * sp.floor_normal_stand[0] +
+                    sp.floor_normal_stand[1] * sp.floor_normal_stand[1] +
+                    sp.floor_normal_stand[2] * sp.floor_normal_stand[2];
+                if (!std::isfinite(n2) || n2 <= 1e-12) {
+                    throw std::runtime_error(sp_path + ".floor_normal_stand must be finite and non-zero");
+                }
+                validatePositiveFinite(sp.soft_floor_margin_m, sp_path + ".soft_floor_margin_m");
+                if (!std::isfinite(sp.stop_floor_margin_m) || sp.stop_floor_margin_m < 0.0) {
+                    throw std::runtime_error(sp_path + ".stop_floor_margin_m must be finite and >= 0");
+                }
+                if (sp.stop_floor_margin_m > sp.soft_floor_margin_m) {
+                    throw std::runtime_error(sp_path + ".stop_floor_margin_m must be <= soft_floor_margin_m");
+                }
+                if (!std::isfinite(sp.close_floor_band_m) || sp.close_floor_band_m < 0.0) {
+                    throw std::runtime_error(sp_path + ".close_floor_band_m must be finite and >= 0");
+                }
+                if (!std::isfinite(sp.min_tip_margin_m) || sp.min_tip_margin_m < 0.0) {
+                    throw std::runtime_error(sp_path + ".min_tip_margin_m must be finite and >= 0");
+                }
+                for (const auto& [value, name] : {
+                         std::pair<double, const char*>{sp.tangent_coupling, ".tangent_coupling"},
+                         {sp.close_tangent_scale, ".close_tangent_scale"},
+                         {sp.preclose_tangent_scale, ".preclose_tangent_scale"},
+                     }) {
+                    if (!std::isfinite(value) || value < 0.0 || value > 1.0) {
+                        throw std::runtime_error(sp_path + name + " must be in [0, 1]");
+                    }
+                }
+                for (const auto& [value, name] : {
+                         std::pair<double, const char*>{sp.max_tangent_delta_near_floor_m, ".max_tangent_delta_near_floor_m"},
+                         {sp.max_down_delta_near_floor_m, ".max_down_delta_near_floor_m"},
+                         {sp.max_yaw_delta_near_floor_rad, ".max_yaw_delta_near_floor_rad"},
+                         {sp.max_pitch_roll_delta_near_floor_rad, ".max_pitch_roll_delta_near_floor_rad"},
+                     }) {
+                    if (!std::isfinite(value) || value < 0.0) {
+                        throw std::runtime_error(sp_path + name + " must be finite and >= 0");
+                    }
+                }
+                if (sp.close_lookahead_steps < 0) {
+                    throw std::runtime_error(sp_path + ".close_lookahead_steps must be >= 0");
+                }
+                if (!std::isfinite(sp.close_threshold)) {
+                    throw std::runtime_error(sp_path + ".close_threshold must be finite");
+                }
+                if (sp.hull_line_search_iters < 0) {
+                    throw std::runtime_error(sp_path + ".hull_line_search_iters must be >= 0");
+                }
+                validateTcpOffsetPoints(
+                    sp.gripper_floor_check_points_tcp,
+                    sp_path + ".gripper_floor_check_points_tcp"
+                );
+            };
+        const auto validate_grasp_commit =
+            [](const GraspCommitConfig& gc, const std::string& gc_path) {
+                if (!std::isfinite(gc.close_threshold)) {
+                    throw std::runtime_error(gc_path + ".close_threshold must be finite");
+                }
+                if (gc.close_lookahead_steps < 0) {
+                    throw std::runtime_error(gc_path + ".close_lookahead_steps must be >= 0");
+                }
+                validatePositiveFinite(gc.commit_floor_band_m, gc_path + ".commit_floor_band_m");
+                validateNonNegativeFinite(
+                    gc.both_arm_sync_timeout_sec,
+                    gc_path + ".both_arm_sync_timeout_sec"
+                );
+                for (const auto& [value, name] : {
+                         std::pair<double, const char*>{gc.preclose_translation_scale, ".preclose_translation_scale"},
+                         {gc.preclose_angular_scale, ".preclose_angular_scale"},
+                     }) {
+                    if (!std::isfinite(value) || value < 0.0 || value > 1.0) {
+                        throw std::runtime_error(gc_path + name + " must be in [0, 1]");
+                    }
+                }
+                validateNonNegativeFinite(gc.closing_hold_sec, gc_path + ".closing_hold_sec");
+                validateNonNegativeFinite(gc.lift_height_m, gc_path + ".lift_height_m");
+                validatePositiveFinite(gc.lift_duration_sec, gc_path + ".lift_duration_sec");
+                if (!std::isfinite(gc.close_target)) {
+                    throw std::runtime_error(gc_path + ".close_target must be finite");
+                }
+            };
         validatePositiveFinite(rf.max_linear_velocity_m_s, path + ".max_linear_velocity_m_s");
         validatePositiveFinite(rf.max_linear_accel_m_s2, path + ".max_linear_accel_m_s2");
         validatePositiveFinite(rf.max_linear_jerk_m_s3, path + ".max_linear_jerk_m_s3");
@@ -1659,6 +1950,18 @@ void validateConfig(const DualArmConfig& cfg) {
         validatePositiveFinite(
             rf.delta_twist_stale_residual_timeout_sec,
             path + ".delta_twist_stale_residual_timeout_sec"
+        );
+        validatePositiveFinite(
+            rf.delta_twist_block_requires_fresh_chunk_sec,
+            path + ".delta_twist_block_requires_fresh_chunk_sec"
+        );
+        validate_surface_projector(
+            rf.surface_action_projector,
+            path + ".surface_action_projector"
+        );
+        validate_grasp_commit(
+            rf.grasp_commit,
+            path + ".grasp_commit"
         );
         if (rf.enable && cfg.network.chunk_frame_bind.empty()) {
             throw std::runtime_error(

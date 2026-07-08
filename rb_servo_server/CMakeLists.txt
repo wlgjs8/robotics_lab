@@ -37,6 +37,8 @@ add_library(rb_servo_core
     src/control/smd_pose_tracker.cpp
     src/control/chunk_window.cpp
     src/control/cartesian_chunk_follower.cpp
+    src/control/surface_action_projector.cpp
+    src/control/grasp_commit_coordinator.cpp
     src/control/delta_twist_follower.cpp
     src/math/se3.cpp
     src/control/force_controller.cpp
@@ -241,6 +243,14 @@ if(BUILD_TESTING)
     add_executable(test_delta_twist_follower tests/test_delta_twist_follower.cpp)
     target_link_libraries(test_delta_twist_follower PRIVATE rb_servo_core)
     add_test(NAME delta_twist_follower COMMAND test_delta_twist_follower)
+
+    add_executable(test_surface_action_projector tests/test_surface_action_projector.cpp)
+    target_link_libraries(test_surface_action_projector PRIVATE rb_servo_core)
+    add_test(NAME surface_action_projector COMMAND test_surface_action_projector)
+
+    add_executable(test_grasp_commit_coordinator tests/test_grasp_commit_coordinator.cpp)
+    target_link_libraries(test_grasp_commit_coordinator PRIVATE rb_servo_core)
+    add_test(NAME grasp_commit_coordinator COMMAND test_grasp_commit_coordinator)
 
     add_executable(test_chunk_frame_receiver tests/test_chunk_frame_receiver.cpp)
     target_link_libraries(test_chunk_frame_receiver PRIVATE rb_servo_core)

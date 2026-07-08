@@ -17,6 +17,7 @@
 #include "rb_servo/control/cartesian_servo_controller.hpp"
 #include "rb_servo/control/command_buffer.hpp"
 #include "rb_servo/control/delta_twist_follower.hpp"
+#include "rb_servo/control/grasp_commit_coordinator.hpp"
 #include "rb_servo/control/joint_moving_average.hpp"
 #include "rb_servo/control/smd_pose_tracker.hpp"
 #include "rb_servo/network/chunk_frame_receiver.hpp"
@@ -600,6 +601,8 @@ private:
     control::CartesianChunkFollower right_chunk_follower_{control::CartesianChunkFollowerConfig{}};
     control::DeltaTwistFollower left_delta_twist_follower_{control::DeltaTwistFollowerConfig{}};
     control::DeltaTwistFollower right_delta_twist_follower_{control::DeltaTwistFollowerConfig{}};
+    control::GraspCommitCoordinator grasp_commit_coordinator_{GraspCommitConfig{}};
+    GraspCommitConfig grasp_commit_built_{};
     RuckigFollowerConfig left_chunk_follower_built_{};
     RuckigFollowerConfig right_chunk_follower_built_{};
     std::uint64_t left_chunk_submitted_wire_seq_ = 0;
@@ -659,6 +662,7 @@ private:
         const JointArray& previous_sent_q_deg,
         const Pose6D& actual_feedback_pose,
         const Pose6D& execution_feedback_pose,
+        int safety_block_reason_mask,
         double dt_sec
     );
     JointMovingAverage left_output_ma_{0};
@@ -732,6 +736,46 @@ private:
         double delta_twist_ang_feedback_cos = 1.0;
         bool delta_twist_xi_ref_clamped_norm = false;
         bool delta_twist_xi_cmd_clamped_norm = false;
+        bool delta_twist_blocked = false;
+        int delta_twist_block_reason = 0;
+        double delta_twist_block_elapsed_sec = 0.0;
+        bool delta_twist_block_requires_fresh_chunk = false;
+        bool delta_twist_residual_cleared_by_block = false;
+        bool delta_twist_step_consumed_this_tick = false;
+        int surface_mode = 0;
+        bool surface_active = false;
+        bool surface_close_soon = false;
+        bool surface_hull_scaled = false;
+        double surface_min_tip_dist_m = std::numeric_limits<double>::quiet_NaN();
+        double surface_down_scale = 1.0;
+        double surface_tangent_scale = 1.0;
+        double surface_hull_alpha = 1.0;
+        Vec6 surface_raw_delta{};
+        Vec6 surface_projected_delta{};
+        Vec6 surface_discarded_delta{};
+        double surface_raw_linear_norm_m = 0.0;
+        double surface_projected_linear_norm_m = 0.0;
+        double surface_discarded_linear_norm_m = 0.0;
+        double surface_raw_angular_norm_rad = 0.0;
+        double surface_projected_angular_norm_rad = 0.0;
+        double surface_discarded_angular_norm_rad = 0.0;
+        int grasp_phase = 0;
+        bool grasp_commit_active = false;
+        bool grasp_close_soon = false;
+        bool grasp_ready = false;
+        double grasp_sync_wait_sec = 0.0;
+        double grasp_closing_hold_elapsed_sec = 0.0;
+        double grasp_lift_elapsed_sec = 0.0;
+        double grasp_lift_progress = 0.0;
+        bool grasp_gripper_override_active = false;
+        bool grasp_policy_delta_dropped = false;
+        bool grasp_resume_wait_fresh_chunk = false;
+        bool grasp_blocked = false;
+        int grasp_phase_before_block = 0;
+        std::optional<double> gripper_policy_cmd;
+        std::optional<double> gripper_effective_cmd;
+        bool gripper_close_soon = false;
+        bool gripper_closing_hold_active = false;
     };
     AbcTelemetry left_abc_telemetry_;
     AbcTelemetry right_abc_telemetry_;

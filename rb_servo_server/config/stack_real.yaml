@@ -668,17 +668,16 @@ cartesian_control:
       ruckig_follower:
         enable: true
         controller: "delta_twist"  # consume conditioned local per-frame action deltas directly
-        # 2026-07-07 real OpenPI velocity-proprio baseline: the model deltas in
-        # the faulting run were only ~1-2 mm / ~0.004-0.007 rad per 33 ms frame,
-        # but residual catch-up drove xi_cmd to ~1 m/s and command lead to the
-        # 50 mm divergence latch. Keep the first real DeltaTwist profile bounded
-        # near the requested action scale; raise only from CSV evidence.
-        max_linear_velocity_m_s: 0.18
-        max_linear_accel_m_s2: 1.5
-        max_linear_jerk_m_s3: 45.0
-        max_angular_velocity_rad_s: 0.60
-        max_angular_accel_rad_s2: 3.0
-        max_angular_jerk_rad_s3: 120.0
+        # Near-floor bolt-pick preset (2026-07): conservative DeltaTwist limits
+        # for low-clearance pickup. Do not lower the hard safety floor for this
+        # task; the SurfaceActionProjector below only works above the existing
+        # hard floor plane and the final safety stack remains the guard.
+        max_linear_velocity_m_s: 0.12
+        max_linear_accel_m_s2: 1.0
+        max_linear_jerk_m_s3: 35.0
+        max_angular_velocity_rad_s: 0.45
+        max_angular_accel_rad_s2: 2.5
+        max_angular_jerk_rad_s3: 90.0
         discard_head_steps: 0     # producer re-anchors each chunk to measured TCP: latency already absorbed
         consume_steps: 6          # consume only window rows; rows 6-11 are runway neighbors + late-frame coast
         reserve_steps: 2
@@ -688,13 +687,65 @@ cartesian_control:
         delta_twist_min_time_to_go_sec: 0.015
         delta_twist_tau_sec: 0.020
         delta_twist_residual_drain_steps: 1
-        delta_twist_max_residual_m: 0.006
-        delta_twist_max_residual_rad: 0.050
+        delta_twist_max_residual_m: 0.004
+        delta_twist_max_residual_rad: 0.035
         # Must stay below the strict chunk-follower divergence latch
         # (50 mm / 0.1 rad) so lead clamp engages before safety fault.
-        delta_twist_max_lead_m: 0.004 #0.020
-        delta_twist_max_lead_rad: 0.020 #0.060
+        delta_twist_max_lead_m: 0.006
+        delta_twist_max_lead_rad: 0.025
         delta_twist_stale_residual_timeout_sec: 0.15
+        delta_twist_pause_on_safety_block: true
+        delta_twist_block_requires_fresh_chunk_sec: 0.050
+        delta_twist_block_clear_residual: true
+        # Soft pre-controller projection for the near-floor pick phase. This does
+        # not lower or replace the hard floor; it prevents infeasible down/forward
+        # OpenPI deltas from becoming DeltaTwist residual before the final safety
+        # stack sees the command. Omit floor_z_m here so the projector references
+        # the existing safety.floor_constraint plane rather than defining a new
+        # floor value. Discarded near-floor action is intentionally dropped, not
+        # saved for later catch-up.
+        surface_action_projector:
+          enable: true
+          soft_floor_margin_m: 0.012
+          stop_floor_margin_m: 0.002
+          close_floor_band_m: 0.015
+          min_tip_margin_m: 0.002
+          tangent_coupling: 0.80
+          close_tangent_scale: 0.15
+          preclose_tangent_scale: 0.0
+          max_tangent_delta_near_floor_m: 0.0005
+          max_down_delta_near_floor_m: 0.0002
+          max_yaw_delta_near_floor_rad: 0.010
+          max_pitch_roll_delta_near_floor_rad: 0.003
+          close_lookahead_steps: 4
+          # Pika gripper command convention in this stack is opening percent
+          # (0=closed, 100=open), so close intent is "less than threshold".
+          # If a future normalized close command is used, set 0.60 + true in
+          # a site-local config instead.
+          close_threshold: 25.0  # gripper opening percent: 0=closed, 100=open
+          close_is_greater: false
+          hull_line_search_iters: 8
+        # Optional near-floor pick assist for low-clearance bolt pickup only:
+        # once close intent is detected at the surface, stop sliding forward,
+        # close, lift, then wait for a fresh policy chunk. This is not a general
+        # manipulation mode and does not change the hard safety floor or place
+        # behavior. Toggle enable=false in site-local config to return to pure
+        # projected DeltaTwist without the stop-close-lift phase.
+        grasp_commit:
+          enable: true
+          close_threshold: 25.0  # gripper opening percent: 0=closed, 100=open
+          close_is_greater: false
+          close_lookahead_steps: 4
+          commit_floor_band_m: 0.015
+          both_arm_sync_timeout_sec: 0.150
+          preclose_translation_scale: 0.0
+          preclose_angular_scale: 0.25
+          closing_hold_sec: 0.200
+          lift_height_m: 0.030
+          lift_duration_sec: 0.350
+          bimanual_sync: true
+          freeze_gripper_until_commit: false
+          close_target: 0.0
         chunk_feed_timeout_sec: 1.5
         fallback_policy: "fault"     # strict: no silent SMD fallback; cold start holds, loss latches ChunkFollowerFault (ResetFault to recover)
         engage_timeout_sec: 3.0      # max wait for the first chunk frame before faulting (fault policy only)

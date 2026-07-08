@@ -333,6 +333,7 @@ FLOW_INFER_VELPROPRIO_SOURCE=measured \
 FLOW_INFER_VELPROPRIO_SAMPLE=camera_frame \
 FLOW_INFER_PRINT_CHUNK=0 \
 FLOW_INFER_PRINT_TRACKING=0 \
+FLOW_INFER_SPEED_SCALE=1.0 \
 RB_ALLOW_REAL_GRIPPER=1 \
 ./tools/flow_infer_real_policy.sh \
   --proprio-mode velocity \
@@ -340,6 +341,30 @@ RB_ALLOW_REAL_GRIPPER=1 \
   --depth-z-far-mm 700 \
   --depth-units-m 1e-4
 ```
+
+Near-floor bolt-pick preset은 `rb_servo_server/config/stack_real.yaml`의
+`cartesian_control.tcp_target_profiles.flow_infer_smooth.ruckig_follower`에
+있습니다. 이 preset은 hard floor safety 값을 낮추지 않습니다.
+`SurfaceActionProjector`가 hard floor 위의 soft band에서 infeasible down/forward
+action을 버리고, `GraspCommit`은 low-clearance pick에서만 stop-close-lift를
+보조합니다. 일반 조작이나 place 동작용 의미로 해석하지 마세요.
+
+첫 검증은 보수적으로 진행합니다.
+
+1. 볼트 없이 실행해 floor projector와 lift path가 hard safety를 건드리지 않는지 확인합니다.
+2. 가능하면 real gripper를 끄거나 fake close 상태로 한 번 더 확인합니다.
+3. 마지막에 `RB_ALLOW_REAL_GRIPPER=1`로 real gripper를 켭니다.
+4. 각 run 뒤 servo CSV를 분석합니다.
+
+```bash
+python3 rb_servo_server/tools/analyze_servo_log.py logs/servo_log.csv --profile rbsim-local100
+```
+
+특히 `Near-floor pick analysis`에서 `surface_min_tip_dist_m`,
+`surface_projected_*`/`surface_discarded_*`, `grasp_phase`,
+`delta_twist_blocked`, near-floor lead, 그리고 `blocked_step_consumed_ticks`를
+확인합니다. sliding warning이 뜨면 close 직전 arm translation이 아직 남아 있는
+것이고, projector inactive warning이 뜨면 config/profile 선택부터 확인합니다.
 
 HDF5 policy episodes should be audited before `flow-train`:
 

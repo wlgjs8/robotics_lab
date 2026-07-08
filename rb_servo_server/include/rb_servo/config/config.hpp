@@ -914,6 +914,73 @@ enum class RuckigFollowerController {
     DeltaTwist
 };
 
+// Optional pre-controller projector for OpenPI DeltaTwist action rows near the
+// floor. This is not a safety layer: it discards local action components that
+// are physically infeasible near the configured floor before they become
+// DeltaTwist residual. The hard floor/ROI/self-collision filters remain final.
+struct SurfaceActionProjectorConfig {
+    bool enable = false;
+
+    double floor_z_m = 0.0;
+    bool floor_z_m_configured = false;  // internal: lets profile inherit safety.floor_constraint.z_min_m
+    std::array<double, 3> floor_normal_stand{0.0, 0.0, 1.0};
+
+    double soft_floor_margin_m = 0.012;
+    double stop_floor_margin_m = 0.002;
+    double close_floor_band_m = 0.015;
+    double min_tip_margin_m = 0.002;
+
+    double tangent_coupling = 0.80;
+    double close_tangent_scale = 0.15;
+    double preclose_tangent_scale = 0.0;
+
+    double max_tangent_delta_near_floor_m = 0.0005;
+    double max_down_delta_near_floor_m = 0.0002;
+    double max_yaw_delta_near_floor_rad = 0.010;
+    double max_pitch_roll_delta_near_floor_rad = 0.003;
+
+    // Gripper values in chunk frames are opening percent in the current flow
+    // stack: 0 = closed, 100 = open. Defaults therefore detect close by values
+    // falling below the threshold.
+    int close_lookahead_steps = 4;
+    double close_threshold = 25.0;
+    bool close_is_greater = false;
+
+    // TCP-frame floor check points. Empty means the DeltaTwist builder may
+    // inherit safety.floor_constraint.tcp_offset_points; if still empty, the
+    // projector falls back to the TCP origin.
+    std::vector<FloorCheckPointConfig> gripper_floor_check_points_tcp;
+    int hull_line_search_iters = 8;
+};
+
+// Optional near-floor pick assist for DeltaTwist/OpenPI. This is intentionally
+// separate from the hard floor/safety stack: it freezes/drops policy deltas
+// during the final close/lift contact phase so unexecutable forward/down action
+// does not become stale residual. Disabled by default.
+struct GraspCommitConfig {
+    bool enable = false;
+
+    // Gripper values in the flow stack are opening percent (0 = closed,
+    // 100 = open), so defaults detect close intent by falling below threshold.
+    double close_threshold = 25.0;
+    bool close_is_greater = false;
+    int close_lookahead_steps = 4;
+
+    double commit_floor_band_m = 0.015;
+    double both_arm_sync_timeout_sec = 0.150;
+
+    double preclose_translation_scale = 0.0;
+    double preclose_angular_scale = 0.25;
+
+    double closing_hold_sec = 0.200;
+    double lift_height_m = 0.030;
+    double lift_duration_sec = 0.350;
+
+    bool bimanual_sync = true;
+    bool freeze_gripper_until_commit = false;
+    double close_target = 0.0;
+};
+
 // Per-profile chunk-follower stage that REPLACES the pose_track_smd step while
 // active. The default controller consumes measured-anchored absolute waypoint
 // rows through the Ruckig receding-horizon follower; delta_twist consumes
@@ -968,6 +1035,11 @@ struct RuckigFollowerConfig {
     double delta_twist_max_lead_m = 0.060;
     double delta_twist_max_lead_rad = 0.30;
     double delta_twist_stale_residual_timeout_sec = 0.15;
+    bool delta_twist_pause_on_safety_block = true;
+    double delta_twist_block_requires_fresh_chunk_sec = 0.050;
+    bool delta_twist_block_clear_residual = true;
+    SurfaceActionProjectorConfig surface_action_projector;
+    GraspCommitConfig grasp_commit;
     // Feed-liveness watchdog: with no fresh chunk frame for this long the
     // follower deactivates (falls back to pose_track_smd / hold).
     double chunk_feed_timeout_sec = 1.5;

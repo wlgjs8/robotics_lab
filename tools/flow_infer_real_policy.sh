@@ -21,6 +21,11 @@ TCP_BLEND_STEPS="${FLOW_INFER_TCP_BLEND_STEPS:-8}"
 ROLLOUT_SUMMARY="${FLOW_INFER_ROLLOUT_SUMMARY:-outputs/rollout_summary.json}"
 VELPROPRIO_SOURCE="${FLOW_INFER_VELPROPRIO_SOURCE:-measured}"
 
+# Baseline for real OpenPI + DeltaTwistFollower stability checks:
+# boundary stitch, H=24, execute=6, overlay runway=4, speed_scale=1.0,
+# measured camera_frame velocity proprio, and quiet chunk/tracking prints.
+# Keep debug prints opt-in via FLOW_INFER_PRINT_CHUNK/TRACKING=1.
+
 mkdir -p "$(dirname "$ROLLOUT_SUMMARY")"
 export PYTHONPATH="$PWD/policy_runner${PYTHONPATH:+:$PYTHONPATH}"
 

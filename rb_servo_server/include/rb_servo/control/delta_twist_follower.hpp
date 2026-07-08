@@ -10,6 +10,8 @@
 
 #include "rb_servo/control/chunk_follower_core.hpp"
 #include "rb_servo/control/chunk_window.hpp"
+#include "rb_servo/control/grasp_commit_coordinator.hpp"
+#include "rb_servo/control/surface_action_projector.hpp"
 #include "rb_servo/core/types.hpp"
 
 #include <cstddef>
@@ -33,6 +35,11 @@ struct DeltaTwistFollowerConfig {
   double max_lead_m{0.060};
   double max_lead_rad{0.30};
   double stale_residual_timeout_sec{0.15};
+  bool pause_on_safety_block{true};
+  double block_requires_fresh_chunk_sec{0.050};
+  bool block_clear_residual{true};
+  SurfaceActionProjectorConfig surface_action_projector{};
+  GraspCommitConfig grasp_commit{};
 };
 
 enum class DeltaTwistFeedbackSource {
@@ -60,6 +67,7 @@ struct DeltaTwistFollowerDiag {
   std::uint64_t seg_recv_seq{0};
   Vec6 pending_delta{};
   Vec6 step_delta{};
+  Vec6 projected_step_delta{};
   Vec6 realized_delta{};
   Vec6 xi_ref{};
   Vec6 xi_cmd{};
@@ -73,6 +81,12 @@ struct DeltaTwistFollowerDiag {
   double ang_feedback_cos{1.0};
   bool xi_ref_clamped_norm{false};
   bool xi_cmd_clamped_norm{false};
+  bool blocked{false};
+  int block_reason{0};
+  double block_elapsed_sec{0.0};
+  bool block_requires_fresh_chunk{false};
+  bool residual_cleared_by_block{false};
+  bool step_consumed_this_tick{false};
   double realized_linear_ratio{1.0};
   double realized_angular_ratio{1.0};
   double realized_yaw_ratio{1.0};
@@ -80,6 +94,8 @@ struct DeltaTwistFollowerDiag {
   DeltaTwistStepPhase step_phase{DeltaTwistStepPhase::Inactive};
   int normal_consumed{0};
   int reserve_consumed{0};
+  SurfaceProjectionResult surface_projection{};
+  GraspCommitArmCommand grasp_commit{};
 };
 
 class DeltaTwistFollower {
@@ -87,14 +103,20 @@ class DeltaTwistFollower {
   explicit DeltaTwistFollower(const DeltaTwistFollowerConfig& cfg);
 
   void reconfigure(const DeltaTwistFollowerConfig& cfg);
+  void setArmId(ArmId arm_id) { arm_id_ = arm_id; }
   void submitFrame(const ChunkFrame& frame, const Pose6D& current_pose);
   bool active() const { return active_; }
   void deactivate();
   void reanchor(const Pose6D& reference);
+  void pauseBlocked(const Pose6D& feedback_or_reference_pose, double dt);
+  void clearPendingResidual();
+  void ringDown(double dt);
+  void setBlocked(bool blocked, int reason_mask = 0);
   void setFeedbackPose(
       const Pose6D& feedback_pose,
       DeltaTwistFeedbackSource source = DeltaTwistFeedbackSource::PreviousSentFk
   );
+  void setGraspCommitCommand(const GraspCommitArmCommand& command);
   Pose6D tick(double dt_tick);
 
   double currentGrip() const { return current_grip_; }
@@ -113,11 +135,16 @@ class DeltaTwistFollower {
   bool consumeNextStep();
   bool hasConsumableStep() const;
   double gripAt(std::size_t k) const;
+  std::vector<double> futureGripWindow(std::size_t k) const;
   bool clampPendingResidual();
   void clampCommandLead();
+  void clearResidualForCommit();
+  Pose6D liftPoseFromProgress(double progress) const;
   void updateDiagState();
 
   DeltaTwistFollowerConfig cfg_;
+  ArmId arm_id_{ArmId::Left};
+  SurfaceActionProjector surface_projector_;
   double policy_dt_{1.0 / 30.0};
   double recv_time_{0.0};
   std::uint64_t wire_seq_{0};
@@ -133,11 +160,14 @@ class DeltaTwistFollower {
   Pose6D command_pose_{};
   Pose6D last_pose_{};
   Pose6D last_feedback_pose_{};
+  Pose6D projection_reference_pose_{};
   bool has_feedback_pose_{false};
+  bool has_projection_reference_{false};
   Vec6 xi_cmd_{};
   Vec6 accel_cmd_{};
   Vec6 pending_delta_{};
   Vec6 step_delta_{};
+  Vec6 projected_step_delta_{};
   Vec6 realized_delta_{};
   Vec6 xi_ref_{};
   Vec6 lead_delta_{};
@@ -149,9 +179,20 @@ class DeltaTwistFollower {
   double ang_feedback_cos_{1.0};
   bool xi_ref_clamped_norm_{false};
   bool xi_cmd_clamped_norm_{false};
+  bool blocked_{false};
+  int block_reason_mask_{0};
+  double block_elapsed_sec_{0.0};
+  bool block_requires_fresh_chunk_{false};
+  bool residual_cleared_by_block_{false};
+  bool step_consumed_this_tick_{false};
   double current_grip_{0.0};
   double t_in_seg_{0.0};
   bool active_{false};
+  SurfaceProjectionResult surface_projection_{};
+  GraspCommitArmCommand grasp_commit_{};
+  GraspPhase previous_grasp_phase_{GraspPhase::Normal};
+  Pose6D grasp_lift_start_pose_{};
+  bool has_grasp_lift_start_{false};
   DeltaTwistFollowerDiag diag_{};
 };
 

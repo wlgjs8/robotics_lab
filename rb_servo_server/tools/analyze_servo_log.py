@@ -110,6 +110,18 @@ DELTA_TWIST_STEP_KIND_LABELS = {
     3: "residual_drain",
     4: "ringdown",
 }
+GRASP_PHASE_LABELS = {
+    0: "normal",
+    1: "surface_approach",
+    2: "pregrasp_commit",
+    3: "closing_hold",
+    4: "lift_out",
+    5: "resume_wait_fresh_chunk",
+}
+DEFAULT_NEAR_FLOOR_MARGIN_M = 0.012
+DEFAULT_SLIDING_THRESHOLD_M = 0.0005
+DEFAULT_LEAD_LINEAR_WARN_M = 0.006
+DEFAULT_LEAD_ANGULAR_WARN_RAD = 0.025
 
 
 class AnalysisError(Exception):
@@ -139,7 +151,13 @@ def optional_float(row: dict[str, str], column: str, row_number: int) -> float |
     value = row.get(column)
     if value is None or value == "":
         return None
-    return parse_float(value, column, row_number)
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise AnalysisError(f"row {row_number}: column {column!r} is not numeric: {value!r}") from exc
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 def optional_bool(row: dict[str, str], column: str, row_number: int) -> bool | None:
@@ -202,6 +220,17 @@ def make_delta_twist_bucket() -> dict[str, object]:
         "step_kind_counts": {},
         "accel_clamp_counts": {},
         "feedback_source_counts": {},
+        "surface_active_ticks": 0,
+        "surface_close_soon_ticks": 0,
+        "surface_hull_scaled_ticks": 0,
+        "surface_mode_counts": {},
+        "grasp_commit_active_ticks": 0,
+        "grasp_close_soon_ticks": 0,
+        "grasp_ready_ticks": 0,
+        "grasp_gripper_override_ticks": 0,
+        "grasp_policy_delta_dropped_ticks": 0,
+        "grasp_resume_wait_ticks": 0,
+        "grasp_phase_counts": {},
         "pending_linear": [],
         "pending_angular": [],
         "xi_ref_linear": [],
@@ -213,7 +242,149 @@ def make_delta_twist_bucket() -> dict[str, object]:
         "yaw_ratio": [],
         "linear_ratio": [],
         "angular_ratio": [],
+        "surface_min_tip_dist": [],
+        "surface_down_scale": [],
+        "surface_tangent_scale": [],
+        "surface_hull_alpha": [],
+        "surface_raw_linear": [],
+        "surface_projected_linear": [],
+        "surface_discarded_linear": [],
+        "surface_raw_angular": [],
+        "surface_projected_angular": [],
+        "surface_discarded_angular": [],
+        "grasp_sync_wait": [],
+        "grasp_closing_hold_elapsed": [],
+        "grasp_lift_elapsed": [],
+        "grasp_lift_progress": [],
         "stage_positions": [],
+    }
+
+
+def make_near_floor_bucket() -> dict[str, object]:
+    return {
+        "near_floor_ticks": 0,
+        "near_floor_duration_s": 0.0,
+        "close_soon_ticks": 0,
+        "gripper_closing_ticks": 0,
+        "sliding_risk_ticks": 0,
+        "closing_translation_ticks": 0,
+        "projector_inactive_ticks": 0,
+        "blocked_ticks": 0,
+        "blocked_step_consumed_ticks": 0,
+        "commits": 0,
+        "grasp_ready_ticks": 0,
+        "both_arm_ready_ticks": 0,
+        "phase_counts": {},
+        "safety_verdict_counts": {},
+        "min_tip_dist": [],
+        "down_scale": [],
+        "tangent_scale": [],
+        "raw_linear": [],
+        "projected_linear": [],
+        "discarded_linear": [],
+        "raw_tangent": [],
+        "projected_tangent": [],
+        "discarded_tangent": [],
+        "raw_dz": [],
+        "projected_dz": [],
+        "discarded_dz": [],
+        "lead_linear": [],
+        "lead_angular": [],
+        "sync_wait": [],
+        "closing_hold_elapsed": [],
+        "lift_elapsed": [],
+        "lift_progress": [],
+        "_last_grasp_phase": None,
+        "_last_follower_step": None,
+    }
+
+
+def optional_delta_xyz(
+    row: dict[str, str],
+    arm: str,
+    prefix: str,
+    row_number: int,
+) -> tuple[float, float, float] | None:
+    columns = [f"{arm}_{prefix}_{axis}_m" for axis in ("dx", "dy", "dz")]
+    values = [optional_float(row, column, row_number) for column in columns]
+    if any(value is None for value in values):
+        return None
+    return (float(values[0]), float(values[1]), float(values[2]))
+
+
+def tangent_proxy_norm(
+    row: dict[str, str],
+    arm: str,
+    prefix: str,
+    fallback_column: str,
+    row_number: int,
+) -> float | None:
+    xyz = optional_delta_xyz(row, arm, prefix, row_number)
+    if xyz is not None:
+        return math.hypot(xyz[0], xyz[1])
+    return optional_float(row, fallback_column, row_number)
+
+
+def finalize_near_floor_bucket(bucket: dict[str, object]) -> dict[str, object]:
+    phase_counts = bucket["phase_counts"]
+    safety_counts = bucket["safety_verdict_counts"]
+    assert isinstance(phase_counts, dict)
+    assert isinstance(safety_counts, dict)
+    warnings: list[str] = []
+    near_floor_ticks = int(bucket["near_floor_ticks"])
+    if near_floor_ticks > 0:
+        if int(bucket["projector_inactive_ticks"]) > 0:
+            warnings.append("Projector inactive near floor")
+        if int(bucket["close_soon_ticks"]) == 0:
+            warnings.append("No close_soon detected before floor contact")
+        if int(bucket["sliding_risk_ticks"]) > 0 or int(bucket["closing_translation_ticks"]) > 0:
+            warnings.append("Sliding risk: arm translation during close")
+        if int(bucket["blocked_step_consumed_ticks"]) > 0:
+            warnings.append("Safety phase mismatch: step consumed while blocked")
+        if not any(key in phase_counts for key in ("pregrasp_commit", "closing_hold", "lift_out")):
+            warnings.append("GraspCommit never entered")
+        lead_linear = bucket["lead_linear"]
+        lead_angular = bucket["lead_angular"]
+        assert isinstance(lead_linear, list)
+        assert isinstance(lead_angular, list)
+        if lead_linear and percentile_nearest_rank(lead_linear, 90.0) > DEFAULT_LEAD_LINEAR_WARN_M:
+            warnings.append("High linear lead near floor")
+        if lead_angular and percentile_nearest_rank(lead_angular, 90.0) > DEFAULT_LEAD_ANGULAR_WARN_RAD:
+            warnings.append("High angular lead near floor")
+
+    return {
+        "near_floor_ticks": near_floor_ticks,
+        "near_floor_duration_s": bucket["near_floor_duration_s"],
+        "close_soon_ticks": bucket["close_soon_ticks"],
+        "gripper_closing_ticks": bucket["gripper_closing_ticks"],
+        "sliding_risk_ticks": bucket["sliding_risk_ticks"],
+        "closing_translation_ticks": bucket["closing_translation_ticks"],
+        "projector_inactive_ticks": bucket["projector_inactive_ticks"],
+        "blocked_ticks": bucket["blocked_ticks"],
+        "blocked_step_consumed_ticks": bucket["blocked_step_consumed_ticks"],
+        "commits": bucket["commits"],
+        "grasp_ready_ticks": bucket["grasp_ready_ticks"],
+        "phase_counts": dict(sorted(phase_counts.items())),
+        "safety_verdict_counts": dict(sorted(safety_counts.items())),
+        "surface_min_tip_dist_m": percentile_summary(bucket["min_tip_dist"]),  # type: ignore[arg-type]
+        "surface_down_scale": percentile_summary(bucket["down_scale"]),  # type: ignore[arg-type]
+        "surface_tangent_scale": percentile_summary(bucket["tangent_scale"]),  # type: ignore[arg-type]
+        "surface_raw_linear_norm_m": percentile_summary(bucket["raw_linear"]),  # type: ignore[arg-type]
+        "surface_projected_linear_norm_m": percentile_summary(bucket["projected_linear"]),  # type: ignore[arg-type]
+        "surface_discarded_linear_norm_m": percentile_summary(bucket["discarded_linear"]),  # type: ignore[arg-type]
+        "raw_tangent_norm_m": percentile_summary(bucket["raw_tangent"]),  # type: ignore[arg-type]
+        "projected_tangent_norm_m": percentile_summary(bucket["projected_tangent"]),  # type: ignore[arg-type]
+        "discarded_tangent_norm_m": percentile_summary(bucket["discarded_tangent"]),  # type: ignore[arg-type]
+        "raw_dz_m": percentile_summary(bucket["raw_dz"]),  # type: ignore[arg-type]
+        "projected_dz_m": percentile_summary(bucket["projected_dz"]),  # type: ignore[arg-type]
+        "discarded_dz_m": percentile_summary(bucket["discarded_dz"]),  # type: ignore[arg-type]
+        "delta_twist_lead_linear_norm_m": percentile_summary(bucket["lead_linear"]),  # type: ignore[arg-type]
+        "delta_twist_lead_angular_norm_rad": percentile_summary(bucket["lead_angular"]),  # type: ignore[arg-type]
+        "grasp_sync_wait_sec": percentile_summary(bucket["sync_wait"]),  # type: ignore[arg-type]
+        "grasp_closing_hold_elapsed_sec": percentile_summary(bucket["closing_hold_elapsed"]),  # type: ignore[arg-type]
+        "grasp_lift_elapsed_sec": percentile_summary(bucket["lift_elapsed"]),  # type: ignore[arg-type]
+        "grasp_lift_progress": percentile_summary(bucket["lift_progress"]),  # type: ignore[arg-type]
+        "warnings": warnings,
     }
 
 
@@ -227,11 +398,15 @@ def finalize_delta_twist_bucket(bucket: dict[str, object]) -> dict[str, object]:
     controller_counts = bucket["controller_counts"]
     accel_clamp_counts = bucket["accel_clamp_counts"]
     feedback_source_counts = bucket["feedback_source_counts"]
+    surface_mode_counts = bucket["surface_mode_counts"]
+    grasp_phase_counts = bucket["grasp_phase_counts"]
     assert isinstance(step_counts, dict)
     assert isinstance(step_kind_counts, dict)
     assert isinstance(controller_counts, dict)
     assert isinstance(accel_clamp_counts, dict)
     assert isinstance(feedback_source_counts, dict)
+    assert isinstance(surface_mode_counts, dict)
+    assert isinstance(grasp_phase_counts, dict)
     kind_total = sum(int(value) for value in step_kind_counts.values())
     kind_percent = {
         key: (100.0 * float(value) / float(kind_total)) if kind_total > 0 else 0.0
@@ -299,6 +474,17 @@ def finalize_delta_twist_bucket(bucket: dict[str, object]) -> dict[str, object]:
         "step_kind_percent": kind_percent,
         "accel_clamp_counts": dict(sorted(accel_clamp_counts.items())),
         "feedback_source_counts": dict(sorted(feedback_source_counts.items())),
+        "surface_active_ticks": bucket["surface_active_ticks"],
+        "surface_close_soon_ticks": bucket["surface_close_soon_ticks"],
+        "surface_hull_scaled_ticks": bucket["surface_hull_scaled_ticks"],
+        "surface_mode_counts": dict(sorted(surface_mode_counts.items())),
+        "grasp_commit_active_ticks": bucket["grasp_commit_active_ticks"],
+        "grasp_close_soon_ticks": bucket["grasp_close_soon_ticks"],
+        "grasp_ready_ticks": bucket["grasp_ready_ticks"],
+        "grasp_gripper_override_ticks": bucket["grasp_gripper_override_ticks"],
+        "grasp_policy_delta_dropped_ticks": bucket["grasp_policy_delta_dropped_ticks"],
+        "grasp_resume_wait_ticks": bucket["grasp_resume_wait_ticks"],
+        "grasp_phase_counts": dict(sorted(grasp_phase_counts.items())),
         "follower_step_distribution": dict(
             sorted(step_counts.items(), key=lambda item: int(item[0]))
         ),
@@ -313,6 +499,20 @@ def finalize_delta_twist_bucket(bucket: dict[str, object]) -> dict[str, object]:
         "yaw_realized_ratio": percentile_summary(bucket["yaw_ratio"]),  # type: ignore[arg-type]
         "linear_realized_ratio": percentile_summary(bucket["linear_ratio"]),  # type: ignore[arg-type]
         "angular_realized_ratio": percentile_summary(bucket["angular_ratio"]),  # type: ignore[arg-type]
+        "surface_min_tip_dist_m": percentile_summary(bucket["surface_min_tip_dist"]),  # type: ignore[arg-type]
+        "surface_down_scale": percentile_summary(bucket["surface_down_scale"]),  # type: ignore[arg-type]
+        "surface_tangent_scale": percentile_summary(bucket["surface_tangent_scale"]),  # type: ignore[arg-type]
+        "surface_hull_alpha": percentile_summary(bucket["surface_hull_alpha"]),  # type: ignore[arg-type]
+        "surface_raw_linear_norm_m": percentile_summary(bucket["surface_raw_linear"]),  # type: ignore[arg-type]
+        "surface_projected_linear_norm_m": percentile_summary(bucket["surface_projected_linear"]),  # type: ignore[arg-type]
+        "surface_discarded_linear_norm_m": percentile_summary(bucket["surface_discarded_linear"]),  # type: ignore[arg-type]
+        "surface_raw_angular_norm_rad": percentile_summary(bucket["surface_raw_angular"]),  # type: ignore[arg-type]
+        "surface_projected_angular_norm_rad": percentile_summary(bucket["surface_projected_angular"]),  # type: ignore[arg-type]
+        "surface_discarded_angular_norm_rad": percentile_summary(bucket["surface_discarded_angular"]),  # type: ignore[arg-type]
+        "grasp_sync_wait_sec": percentile_summary(bucket["grasp_sync_wait"]),  # type: ignore[arg-type]
+        "grasp_closing_hold_elapsed_sec": percentile_summary(bucket["grasp_closing_hold_elapsed"]),  # type: ignore[arg-type]
+        "grasp_lift_elapsed_sec": percentile_summary(bucket["grasp_lift_elapsed"]),  # type: ignore[arg-type]
+        "grasp_lift_progress": percentile_summary(bucket["grasp_lift_progress"]),  # type: ignore[arg-type]
         "yaw_sign_match_percent": yaw_sign_match_percent,
         "stage_path_length_m": stage_path_length_m,
         "stage_net_displacement_m": stage_net_displacement_m,
@@ -341,6 +541,16 @@ def analyze_csv(path: Path) -> dict[str, object]:
         delta_twist_series = {
             "left": make_delta_twist_bucket(),
             "right": make_delta_twist_bucket(),
+        }
+        near_floor_series = {
+            "left": make_near_floor_bucket(),
+            "right": make_near_floor_bucket(),
+        }
+        near_floor_bimanual: dict[str, object] = {
+            "near_floor_ticks": 0,
+            "both_ready_ticks": 0,
+            "one_ready_wait_ticks": 0,
+            "sync_wait": [],
         }
         first_loop_start_ns: float | None = None
         last_loop_end_ns: float | None = None
@@ -380,6 +590,23 @@ def analyze_csv(path: Path) -> dict[str, object]:
             if safety_verdict:
                 bump_count(safety_verdict_counts, safety_verdict)
 
+            left_min_tip = optional_float(row, "left_surface_min_tip_dist_m", row_number)
+            right_min_tip = optional_float(row, "right_surface_min_tip_dist_m", row_number)
+            left_near_floor = left_min_tip is not None and left_min_tip < DEFAULT_NEAR_FLOOR_MARGIN_M
+            right_near_floor = right_min_tip is not None and right_min_tip < DEFAULT_NEAR_FLOOR_MARGIN_M
+            if left_near_floor or right_near_floor:
+                near_floor_bimanual["near_floor_ticks"] = int(near_floor_bimanual["near_floor_ticks"]) + 1
+                left_ready = optional_bool(row, "left_grasp_ready", row_number)
+                right_ready = optional_bool(row, "right_grasp_ready", row_number)
+                if left_ready and right_ready:
+                    near_floor_bimanual["both_ready_ticks"] = int(near_floor_bimanual["both_ready_ticks"]) + 1
+                elif left_ready or right_ready:
+                    near_floor_bimanual["one_ready_wait_ticks"] = int(near_floor_bimanual["one_ready_wait_ticks"]) + 1
+                for column in ("left_grasp_sync_wait_sec", "right_grasp_sync_wait_sec"):
+                    sync_wait = optional_float(row, column, row_number)
+                    if sync_wait is not None:
+                        near_floor_bimanual["sync_wait"].append(sync_wait)  # type: ignore[union-attr]
+
             for arm in ("left", "right"):
                 for joint in range(6):
                     actual = parse_float(row[f"{arm}_q_actual_{joint}"], f"{arm}_q_actual_{joint}", row_number)
@@ -397,6 +624,8 @@ def analyze_csv(path: Path) -> dict[str, object]:
                     f"{arm}_delta_twist_xi_cmd_linear_norm_m_s",
                     f"{arm}_delta_twist_xi_cmd_angular_norm_rad_s",
                     f"{arm}_delta_twist_saturated",
+                    f"{arm}_surface_min_tip_dist_m",
+                    f"{arm}_surface_projected_linear_norm_m",
                 )
                 has_delta_columns = any(column in row for column in delta_columns)
                 if controller != "delta_twist" and not (has_delta_columns and not controller):
@@ -443,6 +672,33 @@ def analyze_csv(path: Path) -> dict[str, object]:
                         raise AnalysisError(f"row {row_number}: column {arm}_delta_twist_step_kind must be an integer")
                     step_kind_name = DELTA_TWIST_STEP_KIND_LABELS.get(step_kind_int, str(step_kind_int))
                     bump_count(bucket["step_kind_counts"], step_kind_name)  # type: ignore[arg-type]
+                surface_mode = optional_float(row, f"{arm}_surface_mode", row_number)
+                if surface_mode is not None:
+                    surface_mode_int = int(surface_mode)
+                    if surface_mode != surface_mode_int:
+                        raise AnalysisError(f"row {row_number}: column {arm}_surface_mode must be an integer")
+                    bump_count(bucket["surface_mode_counts"], str(surface_mode_int))  # type: ignore[arg-type]
+                grasp_phase = optional_float(row, f"{arm}_grasp_phase", row_number)
+                if grasp_phase is not None:
+                    grasp_phase_int = int(grasp_phase)
+                    if grasp_phase != grasp_phase_int:
+                        raise AnalysisError(f"row {row_number}: column {arm}_grasp_phase must be an integer")
+                    grasp_phase_name = GRASP_PHASE_LABELS.get(grasp_phase_int, str(grasp_phase_int))
+                    bump_count(bucket["grasp_phase_counts"], grasp_phase_name)  # type: ignore[arg-type]
+                for column, key in (
+                    (f"{arm}_surface_active", "surface_active_ticks"),
+                    (f"{arm}_surface_close_soon", "surface_close_soon_ticks"),
+                    (f"{arm}_surface_hull_scaled", "surface_hull_scaled_ticks"),
+                    (f"{arm}_grasp_commit_active", "grasp_commit_active_ticks"),
+                    (f"{arm}_grasp_close_soon", "grasp_close_soon_ticks"),
+                    (f"{arm}_grasp_ready", "grasp_ready_ticks"),
+                    (f"{arm}_grasp_gripper_override_active", "grasp_gripper_override_ticks"),
+                    (f"{arm}_grasp_policy_delta_dropped", "grasp_policy_delta_dropped_ticks"),
+                    (f"{arm}_grasp_resume_wait_fresh_chunk", "grasp_resume_wait_ticks"),
+                ):
+                    value = optional_bool(row, column, row_number)
+                    if value:
+                        bucket[key] = int(bucket[key]) + 1
                 for column, key in (
                     (f"{arm}_safety_accel_clamped", "safety_accel_clamped"),
                     (f"{arm}_smd_linear_accel_clipped", "smd_linear_accel_clipped"),
@@ -463,6 +719,20 @@ def analyze_csv(path: Path) -> dict[str, object]:
                     (f"{arm}_delta_twist_realized_yaw_ratio", "yaw_ratio"),
                     (f"{arm}_delta_twist_realized_linear_ratio", "linear_ratio"),
                     (f"{arm}_delta_twist_realized_angular_ratio", "angular_ratio"),
+                    (f"{arm}_surface_min_tip_dist_m", "surface_min_tip_dist"),
+                    (f"{arm}_surface_down_scale", "surface_down_scale"),
+                    (f"{arm}_surface_tangent_scale", "surface_tangent_scale"),
+                    (f"{arm}_surface_hull_alpha", "surface_hull_alpha"),
+                    (f"{arm}_surface_raw_linear_norm_m", "surface_raw_linear"),
+                    (f"{arm}_surface_projected_linear_norm_m", "surface_projected_linear"),
+                    (f"{arm}_surface_discarded_linear_norm_m", "surface_discarded_linear"),
+                    (f"{arm}_surface_raw_angular_norm_rad", "surface_raw_angular"),
+                    (f"{arm}_surface_projected_angular_norm_rad", "surface_projected_angular"),
+                    (f"{arm}_surface_discarded_angular_norm_rad", "surface_discarded_angular"),
+                    (f"{arm}_grasp_sync_wait_sec", "grasp_sync_wait"),
+                    (f"{arm}_grasp_closing_hold_elapsed_sec", "grasp_closing_hold_elapsed"),
+                    (f"{arm}_grasp_lift_elapsed_sec", "grasp_lift_elapsed"),
+                    (f"{arm}_grasp_lift_progress", "grasp_lift_progress"),
                 ):
                     value = optional_float(row, column, row_number)
                     if value is not None:
@@ -473,6 +743,118 @@ def analyze_csv(path: Path) -> dict[str, object]:
                 ]
                 if all(value is not None for value in stage_xyz):
                     bucket["stage_positions"].append(tuple(float(value) for value in stage_xyz))  # type: ignore[union-attr]
+
+                near_bucket = near_floor_series[arm]
+                min_tip = optional_float(row, f"{arm}_surface_min_tip_dist_m", row_number)
+                near_floor = min_tip is not None and min_tip < DEFAULT_NEAR_FLOOR_MARGIN_M
+                if near_floor:
+                    near_bucket["near_floor_ticks"] = int(near_bucket["near_floor_ticks"]) + 1
+                    near_bucket["near_floor_duration_s"] = float(near_bucket["near_floor_duration_s"]) + period_ms[-1] / 1000.0
+                    near_bucket["min_tip_dist"].append(min_tip)  # type: ignore[union-attr]
+                    if safety_verdict:
+                        bump_count(near_bucket["safety_verdict_counts"], safety_verdict)  # type: ignore[arg-type]
+
+                    surface_active = optional_bool(row, f"{arm}_surface_active", row_number)
+                    if surface_active is False:
+                        near_bucket["projector_inactive_ticks"] = int(near_bucket["projector_inactive_ticks"]) + 1
+
+                    close_soon = (
+                        optional_bool(row, f"{arm}_gripper_close_soon", row_number) or
+                        optional_bool(row, f"{arm}_grasp_close_soon", row_number) or
+                        optional_bool(row, f"{arm}_surface_close_soon", row_number)
+                    )
+                    if close_soon:
+                        near_bucket["close_soon_ticks"] = int(near_bucket["close_soon_ticks"]) + 1
+
+                    raw_xyz = optional_delta_xyz(row, arm, "surface_raw", row_number)
+                    projected_xyz = optional_delta_xyz(row, arm, "surface_projected", row_number)
+                    discarded_xyz = optional_delta_xyz(row, arm, "surface_discarded", row_number)
+                    if raw_xyz is not None:
+                        near_bucket["raw_tangent"].append(math.hypot(raw_xyz[0], raw_xyz[1]))  # type: ignore[union-attr]
+                        near_bucket["raw_dz"].append(raw_xyz[2])  # type: ignore[union-attr]
+                    if projected_xyz is not None:
+                        near_bucket["projected_dz"].append(projected_xyz[2])  # type: ignore[union-attr]
+                    if discarded_xyz is not None:
+                        near_bucket["discarded_tangent"].append(math.hypot(discarded_xyz[0], discarded_xyz[1]))  # type: ignore[union-attr]
+                        near_bucket["discarded_dz"].append(discarded_xyz[2])  # type: ignore[union-attr]
+                    projected_tangent = tangent_proxy_norm(
+                        row,
+                        arm,
+                        "surface_projected",
+                        f"{arm}_surface_projected_linear_norm_m",
+                        row_number,
+                    )
+                    if projected_tangent is not None:
+                        near_bucket["projected_tangent"].append(projected_tangent)  # type: ignore[union-attr]
+
+                    for column, key in (
+                        (f"{arm}_surface_down_scale", "down_scale"),
+                        (f"{arm}_surface_tangent_scale", "tangent_scale"),
+                        (f"{arm}_surface_raw_linear_norm_m", "raw_linear"),
+                        (f"{arm}_surface_projected_linear_norm_m", "projected_linear"),
+                        (f"{arm}_surface_discarded_linear_norm_m", "discarded_linear"),
+                        (f"{arm}_delta_twist_lead_linear_norm_m", "lead_linear"),
+                        (f"{arm}_delta_twist_lead_angular_norm_rad", "lead_angular"),
+                        (f"{arm}_grasp_sync_wait_sec", "sync_wait"),
+                        (f"{arm}_grasp_closing_hold_elapsed_sec", "closing_hold_elapsed"),
+                        (f"{arm}_grasp_lift_elapsed_sec", "lift_elapsed"),
+                        (f"{arm}_grasp_lift_progress", "lift_progress"),
+                    ):
+                        value = optional_float(row, column, row_number)
+                        if value is not None:
+                            near_bucket[key].append(value)  # type: ignore[union-attr]
+
+                    grasp_phase_value = optional_float(row, f"{arm}_grasp_phase", row_number)
+                    grasp_phase_int: int | None = None
+                    if grasp_phase_value is not None:
+                        grasp_phase_int = int(grasp_phase_value)
+                        if grasp_phase_value != grasp_phase_int:
+                            raise AnalysisError(f"row {row_number}: column {arm}_grasp_phase must be an integer")
+                        grasp_phase_name = GRASP_PHASE_LABELS.get(grasp_phase_int, str(grasp_phase_int))
+                        bump_count(near_bucket["phase_counts"], grasp_phase_name)  # type: ignore[arg-type]
+                        last_phase = near_bucket["_last_grasp_phase"]
+                        if grasp_phase_int in {2, 3, 4} and last_phase not in {2, 3, 4}:
+                            near_bucket["commits"] = int(near_bucket["commits"]) + 1
+                        near_bucket["_last_grasp_phase"] = grasp_phase_int
+
+                    ready = optional_bool(row, f"{arm}_grasp_ready", row_number)
+                    if ready:
+                        near_bucket["grasp_ready_ticks"] = int(near_bucket["grasp_ready_ticks"]) + 1
+
+                    gripper_closing = (
+                        optional_bool(row, f"{arm}_gripper_closing_hold_active", row_number) or
+                        optional_bool(row, f"{arm}_grasp_gripper_override_active", row_number) or
+                        (grasp_phase_int in {3, 4} if grasp_phase_int is not None else False)
+                    )
+                    if gripper_closing:
+                        near_bucket["gripper_closing_ticks"] = int(near_bucket["gripper_closing_ticks"]) + 1
+
+                    if close_soon and projected_tangent is not None and projected_tangent > DEFAULT_SLIDING_THRESHOLD_M:
+                        near_bucket["sliding_risk_ticks"] = int(near_bucket["sliding_risk_ticks"]) + 1
+                    if gripper_closing and projected_tangent is not None and projected_tangent > DEFAULT_SLIDING_THRESHOLD_M:
+                        near_bucket["closing_translation_ticks"] = int(near_bucket["closing_translation_ticks"]) + 1
+
+                    blocked = optional_bool(row, f"{arm}_delta_twist_blocked", row_number)
+                    step_consumed = optional_bool(row, f"{arm}_delta_twist_step_consumed_this_tick", row_number)
+                    follower_step = optional_float(row, f"{arm}_follower_step", row_number)
+                    follower_step_int: int | None = None
+                    if follower_step is not None:
+                        follower_step_int = int(follower_step)
+                        if follower_step != follower_step_int:
+                            raise AnalysisError(f"row {row_number}: column {arm}_follower_step must be an integer")
+                    if blocked:
+                        near_bucket["blocked_ticks"] = int(near_bucket["blocked_ticks"]) + 1
+                        last_step = near_bucket["_last_follower_step"]
+                        step_changed_while_blocked = (
+                            step_consumed is None and
+                            follower_step_int is not None and
+                            last_step is not None and
+                            follower_step_int != last_step
+                        )
+                        if step_consumed or step_changed_while_blocked:
+                            near_bucket["blocked_step_consumed_ticks"] = int(near_bucket["blocked_step_consumed_ticks"]) + 1
+                    if follower_step_int is not None:
+                        near_bucket["_last_follower_step"] = follower_step_int
 
             if all(column in row and row[column] != "" for column in TIMESTAMP_COLUMNS):
                 loop_start = parse_float(row["loop_start_time_ns"], "loop_start_time_ns", row_number)
@@ -521,6 +903,16 @@ def analyze_csv(path: Path) -> dict[str, object]:
         "delta_twist": {
             "left": finalize_delta_twist_bucket(delta_twist_series["left"]),
             "right": finalize_delta_twist_bucket(delta_twist_series["right"]),
+        },
+        "near_floor_pick_analysis": {
+            "left": finalize_near_floor_bucket(near_floor_series["left"]),
+            "right": finalize_near_floor_bucket(near_floor_series["right"]),
+            "bimanual": {
+                "near_floor_ticks": near_floor_bimanual["near_floor_ticks"],
+                "both_ready_ticks": near_floor_bimanual["both_ready_ticks"],
+                "one_ready_wait_ticks": near_floor_bimanual["one_ready_wait_ticks"],
+                "sync_wait_sec": percentile_summary(near_floor_bimanual["sync_wait"]),  # type: ignore[arg-type]
+            },
         },
     }
 
@@ -645,6 +1037,25 @@ def format_report(metrics: dict[str, object], budget: ProfileBudget, failures: S
             accel_counts = arm_metrics.get("accel_clamp_counts")
             if isinstance(accel_counts, dict) and accel_counts:
                 lines.append(f"  {arm} accel_clamp_counts: {accel_counts}")
+            surface_counts = arm_metrics.get("surface_mode_counts")
+            if isinstance(surface_counts, dict) and surface_counts:
+                lines.append(
+                    f"  {arm} surface: active_ticks={arm_metrics.get('surface_active_ticks', 0)} "
+                    f"close_soon_ticks={arm_metrics.get('surface_close_soon_ticks', 0)} "
+                    f"hull_scaled_ticks={arm_metrics.get('surface_hull_scaled_ticks', 0)} "
+                    f"mode_counts={surface_counts}"
+                )
+            grasp_counts = arm_metrics.get("grasp_phase_counts")
+            if isinstance(grasp_counts, dict) and grasp_counts:
+                lines.append(
+                    f"  {arm} grasp: commit_active_ticks={arm_metrics.get('grasp_commit_active_ticks', 0)} "
+                    f"close_soon_ticks={arm_metrics.get('grasp_close_soon_ticks', 0)} "
+                    f"ready_ticks={arm_metrics.get('grasp_ready_ticks', 0)} "
+                    f"gripper_override_ticks={arm_metrics.get('grasp_gripper_override_ticks', 0)} "
+                    f"policy_delta_dropped_ticks={arm_metrics.get('grasp_policy_delta_dropped_ticks', 0)} "
+                    f"resume_wait_ticks={arm_metrics.get('grasp_resume_wait_ticks', 0)} "
+                    f"phase_counts={grasp_counts}"
+                )
             if arm_metrics.get("stage_path_length_m") is not None:
                 ratio = arm_metrics.get("stage_path_to_net_ratio")
                 ratio_text = "n/a" if ratio is None else f"{float(ratio):.6f}"
@@ -697,6 +1108,129 @@ def format_report(metrics: dict[str, object], budget: ProfileBudget, failures: S
                 f"  {arm} angular_realized_ratio: "
                 f"{fmt_percentiles(arm_metrics.get('angular_realized_ratio'))}"
             )
+            if isinstance(surface_counts, dict) and surface_counts:
+                lines.append(
+                    f"  {arm} surface_min_tip_dist_m: "
+                    f"{fmt_percentiles(arm_metrics.get('surface_min_tip_dist_m'))}"
+                )
+                lines.append(
+                    f"  {arm} surface_down_scale: "
+                    f"{fmt_percentiles(arm_metrics.get('surface_down_scale'))}"
+                )
+                lines.append(
+                    f"  {arm} surface_tangent_scale: "
+                    f"{fmt_percentiles(arm_metrics.get('surface_tangent_scale'))}"
+                )
+                lines.append(
+                    f"  {arm} surface_discarded_linear_norm_m: "
+                    f"{fmt_percentiles(arm_metrics.get('surface_discarded_linear_norm_m'))}"
+                )
+                lines.append(
+                    f"  {arm} surface_discarded_angular_norm_rad: "
+                    f"{fmt_percentiles(arm_metrics.get('surface_discarded_angular_norm_rad'))}"
+                )
+            if isinstance(grasp_counts, dict) and grasp_counts:
+                lines.append(
+                    f"  {arm} grasp_sync_wait_sec: "
+                    f"{fmt_percentiles(arm_metrics.get('grasp_sync_wait_sec'))}"
+                )
+                lines.append(
+                    f"  {arm} grasp_closing_hold_elapsed_sec: "
+                    f"{fmt_percentiles(arm_metrics.get('grasp_closing_hold_elapsed_sec'))}"
+                )
+                lines.append(
+                    f"  {arm} grasp_lift_elapsed_sec: "
+                    f"{fmt_percentiles(arm_metrics.get('grasp_lift_elapsed_sec'))}"
+                )
+                lines.append(
+                    f"  {arm} grasp_lift_progress: "
+                    f"{fmt_percentiles(arm_metrics.get('grasp_lift_progress'))}"
+                )
+    near_floor = metrics.get("near_floor_pick_analysis")
+    if isinstance(near_floor, dict) and any(
+        isinstance(near_floor.get(arm), dict) and int(near_floor[arm].get("near_floor_ticks", 0)) > 0
+        for arm in ("left", "right")
+    ):
+        lines.append("Near-floor pick analysis:")
+        bimanual = near_floor.get("bimanual")
+        if isinstance(bimanual, dict) and int(bimanual.get("near_floor_ticks", 0)) > 0:
+            lines.append(
+                "  bimanual: "
+                f"near_floor_ticks={bimanual.get('near_floor_ticks', 0)} "
+                f"both_ready_ticks={bimanual.get('both_ready_ticks', 0)} "
+                f"one_ready_wait_ticks={bimanual.get('one_ready_wait_ticks', 0)} "
+                f"sync_wait={fmt_percentiles(bimanual.get('sync_wait_sec'))}"
+            )
+        for arm in ("left", "right"):
+            arm_metrics = near_floor.get(arm)
+            if not isinstance(arm_metrics, dict) or int(arm_metrics.get("near_floor_ticks", 0)) <= 0:
+                continue
+            lines.append(
+                f"  {arm}: near_floor_ticks={arm_metrics.get('near_floor_ticks', 0)} "
+                f"near_floor_duration_s={float(arm_metrics.get('near_floor_duration_s', 0.0)):.6f} "
+                f"close_soon_ticks={arm_metrics.get('close_soon_ticks', 0)} "
+                f"gripper_closing_ticks={arm_metrics.get('gripper_closing_ticks', 0)} "
+                f"sliding_risk_ticks={arm_metrics.get('sliding_risk_ticks', 0)} "
+                f"closing_translation_ticks={arm_metrics.get('closing_translation_ticks', 0)} "
+                f"blocked_ticks={arm_metrics.get('blocked_ticks', 0)} "
+                f"blocked_step_consumed_ticks={arm_metrics.get('blocked_step_consumed_ticks', 0)} "
+                f"commits={arm_metrics.get('commits', 0)}"
+            )
+            safety_counts = arm_metrics.get("safety_verdict_counts")
+            if isinstance(safety_counts, dict) and safety_counts:
+                lines.append(f"  {arm} near_floor_safety_verdict_counts: {safety_counts}")
+            phase_counts = arm_metrics.get("phase_counts")
+            if isinstance(phase_counts, dict) and phase_counts:
+                lines.append(f"  {arm} near_floor_grasp_phase_counts: {phase_counts}")
+            lines.append(
+                f"  {arm} near_floor_min_tip_dist_m: "
+                f"{fmt_percentiles(arm_metrics.get('surface_min_tip_dist_m'))}"
+            )
+            lines.append(
+                f"  {arm} near_floor_down_scale: "
+                f"{fmt_percentiles(arm_metrics.get('surface_down_scale'))}"
+            )
+            lines.append(
+                f"  {arm} near_floor_tangent_scale: "
+                f"{fmt_percentiles(arm_metrics.get('surface_tangent_scale'))}"
+            )
+            lines.append(
+                f"  {arm} raw_vs_projected_linear_norm_m: "
+                f"raw={fmt_percentiles(arm_metrics.get('surface_raw_linear_norm_m'))} "
+                f"projected={fmt_percentiles(arm_metrics.get('surface_projected_linear_norm_m'))} "
+                f"discarded={fmt_percentiles(arm_metrics.get('surface_discarded_linear_norm_m'))}"
+            )
+            lines.append(
+                f"  {arm} projected_tangent_norm_m: "
+                f"{fmt_percentiles(arm_metrics.get('projected_tangent_norm_m'))}"
+            )
+            lines.append(
+                f"  {arm} action_tangent_norm_m: "
+                f"raw={fmt_percentiles(arm_metrics.get('raw_tangent_norm_m'))} "
+                f"projected={fmt_percentiles(arm_metrics.get('projected_tangent_norm_m'))} "
+                f"discarded={fmt_percentiles(arm_metrics.get('discarded_tangent_norm_m'))}"
+            )
+            lines.append(
+                f"  {arm} action_dz_m: "
+                f"raw={fmt_percentiles(arm_metrics.get('raw_dz_m'))} "
+                f"projected={fmt_percentiles(arm_metrics.get('projected_dz_m'))} "
+                f"discarded={fmt_percentiles(arm_metrics.get('discarded_dz_m'))}"
+            )
+            lines.append(
+                f"  {arm} near_floor_lead: "
+                f"linear={fmt_percentiles(arm_metrics.get('delta_twist_lead_linear_norm_m'))} "
+                f"angular={fmt_percentiles(arm_metrics.get('delta_twist_lead_angular_norm_rad'))}"
+            )
+            lines.append(
+                f"  {arm} grasp_hold_lift: "
+                f"sync_wait={fmt_percentiles(arm_metrics.get('grasp_sync_wait_sec'))} "
+                f"closing_hold={fmt_percentiles(arm_metrics.get('grasp_closing_hold_elapsed_sec'))} "
+                f"lift_elapsed={fmt_percentiles(arm_metrics.get('grasp_lift_elapsed_sec'))} "
+                f"lift_progress={fmt_percentiles(arm_metrics.get('grasp_lift_progress'))}"
+            )
+            warnings = arm_metrics.get("warnings")
+            if isinstance(warnings, list) and warnings:
+                lines.append(f"  {arm} near_floor_warnings: " + "; ".join(str(warning) for warning in warnings))
     if failures:
         lines.append("budget_failures:")
         lines.extend(f"- {failure}" for failure in failures)
