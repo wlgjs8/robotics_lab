@@ -43,6 +43,7 @@ from .camera_bundle_client import resolve_frame
 from .flow_dataset import pose_from_state_payload
 from .chunk_overlay_publisher import ChunkOverlayPublisher
 from .flow_inference import (
+    DEFAULT_CHUNK_GRIP_HORIZON_STEPS,
     DEFAULT_CHUNK_OVERLAY_RUNWAY_STEPS,
     DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S,
     DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S,
@@ -51,6 +52,7 @@ from .flow_inference import (
     _env_truthy,
     _gripper_value_from_payload,
     _open_action_log,
+    _resolve_chunk_grip_horizon_steps,
     _resolve_chunk_overlay_runway_steps,
     resolve_ee_local_r_align,
     rotate_flow_arm_vectors,
@@ -292,6 +294,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         max_angular_step_rad: float = 0.01,
         chunk_execute_steps: int | None = None,
         chunk_overlay_runway_steps: int = DEFAULT_CHUNK_OVERLAY_RUNWAY_STEPS,
+        chunk_grip_horizon_steps: int = DEFAULT_CHUNK_GRIP_HORIZON_STEPS,
         chunk_crossfade_steps: int = 0,
         tcp_target_pose_conditioning: str = "legacy_step_hold",
         tcp_target_pose_reanchor_mode: str = "measured_blend",
@@ -496,6 +499,10 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             self.action_horizon,
         )
         self.chunk_overlay_runway_steps = _resolve_chunk_overlay_runway_steps(chunk_overlay_runway_steps)
+        self.chunk_grip_horizon_steps = _resolve_chunk_grip_horizon_steps(
+            chunk_grip_horizon_steps,
+            self.action_horizon,
+        )
         self.policy_dt_sec = float(policy_dt_sec) if policy_dt_sec else (1.0 / 30.0)
         self.max_linear_velocity_m_s = (
             float(max_linear_velocity_m_s) if max_linear_velocity_m_s is not None else DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S

@@ -335,6 +335,15 @@ void parseGraspCommitConfig(
         "bimanual_sync",
         "freeze_gripper_until_commit",
         "close_target",
+        "enable_near_floor_dwell_fallback",
+        "dwell_floor_band_m",
+        "dwell_min_duration_sec",
+        "dwell_max_linear_speed_m_s",
+        "dwell_max_angular_speed_rad_s",
+        "dwell_require_both_arms_near_floor",
+        "dwell_require_projected_motion_small",
+        "dwell_projected_linear_norm_threshold_m",
+        "dwell_trigger_close_even_without_model_close",
     }, path);
     if (has(node, "enable")) out->enable = asBool(node["enable"], path + ".enable");
     if (has(node, "close_threshold")) {
@@ -380,6 +389,43 @@ void parseGraspCommitConfig(
     if (has(node, "close_target")) {
         out->close_target = asDouble(node["close_target"], path + ".close_target");
     }
+    if (has(node, "enable_near_floor_dwell_fallback")) {
+        out->enable_near_floor_dwell_fallback =
+            asBool(node["enable_near_floor_dwell_fallback"], path + ".enable_near_floor_dwell_fallback");
+    }
+    if (has(node, "dwell_floor_band_m")) {
+        out->dwell_floor_band_m = asDouble(node["dwell_floor_band_m"], path + ".dwell_floor_band_m");
+    }
+    if (has(node, "dwell_min_duration_sec")) {
+        out->dwell_min_duration_sec =
+            asDouble(node["dwell_min_duration_sec"], path + ".dwell_min_duration_sec");
+    }
+    if (has(node, "dwell_max_linear_speed_m_s")) {
+        out->dwell_max_linear_speed_m_s =
+            asDouble(node["dwell_max_linear_speed_m_s"], path + ".dwell_max_linear_speed_m_s");
+    }
+    if (has(node, "dwell_max_angular_speed_rad_s")) {
+        out->dwell_max_angular_speed_rad_s =
+            asDouble(node["dwell_max_angular_speed_rad_s"], path + ".dwell_max_angular_speed_rad_s");
+    }
+    if (has(node, "dwell_require_both_arms_near_floor")) {
+        out->dwell_require_both_arms_near_floor =
+            asBool(node["dwell_require_both_arms_near_floor"], path + ".dwell_require_both_arms_near_floor");
+    }
+    if (has(node, "dwell_require_projected_motion_small")) {
+        out->dwell_require_projected_motion_small =
+            asBool(node["dwell_require_projected_motion_small"], path + ".dwell_require_projected_motion_small");
+    }
+    if (has(node, "dwell_projected_linear_norm_threshold_m")) {
+        out->dwell_projected_linear_norm_threshold_m =
+            asDouble(node["dwell_projected_linear_norm_threshold_m"],
+                     path + ".dwell_projected_linear_norm_threshold_m");
+    }
+    if (has(node, "dwell_trigger_close_even_without_model_close")) {
+        out->dwell_trigger_close_even_without_model_close =
+            asBool(node["dwell_trigger_close_even_without_model_close"],
+                   path + ".dwell_trigger_close_even_without_model_close");
+    }
 }
 
 void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, RuckigFollowerConfig* out) {
@@ -410,6 +456,7 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         "delta_twist_max_lead_rad",
         "delta_twist_stale_residual_timeout_sec",
         "delta_twist_pause_on_safety_block",
+        "delta_twist_block_on_safety_intervention_recent",
         "delta_twist_block_requires_fresh_chunk_sec",
         "delta_twist_block_clear_residual",
         "surface_action_projector",
@@ -517,6 +564,12 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
     if (has(node, "delta_twist_pause_on_safety_block")) {
         out->delta_twist_pause_on_safety_block =
             asBool(node["delta_twist_pause_on_safety_block"], path + ".delta_twist_pause_on_safety_block");
+    }
+    if (has(node, "delta_twist_block_on_safety_intervention_recent")) {
+        out->delta_twist_block_on_safety_intervention_recent = asBool(
+            node["delta_twist_block_on_safety_intervention_recent"],
+            path + ".delta_twist_block_on_safety_intervention_recent"
+        );
     }
     if (has(node, "delta_twist_block_requires_fresh_chunk_sec")) {
         out->delta_twist_block_requires_fresh_chunk_sec = asDouble(
@@ -1914,6 +1967,23 @@ void validateConfig(const DualArmConfig& cfg) {
                 if (!std::isfinite(gc.close_target)) {
                     throw std::runtime_error(gc_path + ".close_target must be finite");
                 }
+                validatePositiveFinite(gc.dwell_floor_band_m, gc_path + ".dwell_floor_band_m");
+                validateNonNegativeFinite(
+                    gc.dwell_min_duration_sec,
+                    gc_path + ".dwell_min_duration_sec"
+                );
+                validateNonNegativeFinite(
+                    gc.dwell_max_linear_speed_m_s,
+                    gc_path + ".dwell_max_linear_speed_m_s"
+                );
+                validateNonNegativeFinite(
+                    gc.dwell_max_angular_speed_rad_s,
+                    gc_path + ".dwell_max_angular_speed_rad_s"
+                );
+                validateNonNegativeFinite(
+                    gc.dwell_projected_linear_norm_threshold_m,
+                    gc_path + ".dwell_projected_linear_norm_threshold_m"
+                );
             };
         validatePositiveFinite(rf.max_linear_velocity_m_s, path + ".max_linear_velocity_m_s");
         validatePositiveFinite(rf.max_linear_accel_m_s2, path + ".max_linear_accel_m_s2");

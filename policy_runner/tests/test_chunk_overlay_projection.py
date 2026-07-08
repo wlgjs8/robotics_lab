@@ -27,6 +27,7 @@ def _seed_overlay_source(
     *,
     execute_steps: int,
     runway_steps: int = 4,
+    grip_horizon_steps: int = 24,
     max_linear_velocity_m_s: float = 1.0,
     max_angular_velocity_rad_s: float = 1.0,
 ):
@@ -36,8 +37,10 @@ def _seed_overlay_source(
     source._chunk_overlay_publisher = publisher
     source._chunk_overlay_seq = 0
     source.policy_dt_sec = 0.05
+    source.action_horizon = 24
     source.chunk_execute_steps = execute_steps
     source.chunk_overlay_runway_steps = runway_steps
+    source.chunk_grip_horizon_steps = grip_horizon_steps
     source.max_linear_velocity_m_s = max_linear_velocity_m_s
     source.max_angular_velocity_rad_s = max_angular_velocity_rad_s
     source.arm_mask = np.asarray([1.0, 0.0], dtype=np.float32)
@@ -105,6 +108,44 @@ class ChunkOverlayProjectionTest(unittest.TestCase):
         self.assertEqual(source._current_chunk_execute_limit(), 6)
         self.assertEqual(source._chunk_index, 0)
         self.assertEqual(len(publisher.calls[0]["left"]), 10)
+
+    def test_motion_rows_short_but_grip_horizon_full(self) -> None:
+        assert np is not None
+        source, publisher = _seed_overlay_source(
+            execute_steps=6,
+            runway_steps=4,
+            grip_horizon_steps=24,
+        )
+        source._chunk = np.zeros((24, 14), dtype=np.float64)
+        for i in range(24):
+            source._chunk[i, 6] = 100.0 - i
+
+        source._publish_chunk_overlay(123.0)
+
+        packet = publisher.calls[0]
+        self.assertEqual(len(packet["left"]), 10)
+        self.assertEqual(len(packet["left_delta"]), 10)
+        self.assertEqual(len(packet["left_grip_horizon"]), 24)
+        self.assertEqual(packet["left_grip_horizon"][0], 100.0)
+        self.assertEqual(packet["left_grip_horizon"][16], 84.0)
+
+    def test_grip_horizon_does_not_change_execution_limit(self) -> None:
+        assert np is not None
+        source, publisher = _seed_overlay_source(
+            execute_steps=6,
+            runway_steps=4,
+            grip_horizon_steps=24,
+        )
+        source._chunk = np.zeros((24, 14), dtype=np.float64)
+        source._chunk_index = 0
+
+        self.assertEqual(source._current_chunk_execute_limit(), 6)
+        source._publish_chunk_overlay(123.0)
+
+        self.assertEqual(source._current_chunk_execute_limit(), 6)
+        self.assertEqual(source._chunk_index, 0)
+        self.assertEqual(len(publisher.calls[0]["left"]), 10)
+        self.assertEqual(len(publisher.calls[0]["left_grip_horizon"]), 24)
 
     def test_delta_rows_match_pose_integration(self) -> None:
         assert np is not None

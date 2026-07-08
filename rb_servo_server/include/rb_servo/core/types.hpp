@@ -432,6 +432,9 @@ struct CartesianSolveTelemetry {
     double follower_divergence_ang_rad = 0.0;
     uint64_t follower_reanchor_count = 0;          // explained strict-divergence reanchors
     bool safety_intervention_recent = false;       // debounced signal seen by follower stage
+    bool delta_twist_safety_intervention_recent = false;
+    bool delta_twist_block_on_safety_intervention_recent = false;
+    bool delta_twist_soft_intervention_ignored_for_block = false;
     double delta_twist_pending_linear_norm_m = 0.0;
     double delta_twist_pending_angular_norm_rad = 0.0;
     Vec6 delta_twist_step_delta{};
@@ -490,6 +493,8 @@ struct CartesianSolveTelemetry {
     int grasp_phase = 0;
     bool grasp_commit_active = false;
     bool grasp_close_soon = false;
+    int grasp_close_soon_source = 0;
+    int grasp_close_soon_steps_ahead = -1;
     bool grasp_ready = false;
     double grasp_sync_wait_sec = 0.0;
     double grasp_closing_hold_elapsed_sec = 0.0;
@@ -500,9 +505,24 @@ struct CartesianSolveTelemetry {
     bool grasp_resume_wait_fresh_chunk = false;
     bool grasp_blocked = false;
     int grasp_phase_before_block = 0;
+    bool grasp_dwell_active = false;
+    double grasp_dwell_elapsed_sec = 0.0;
+    bool grasp_dwell_fallback_triggered = false;
+    int grasp_dwell_reason = 0;
     std::optional<double> gripper_policy_cmd;
     std::optional<double> gripper_effective_cmd;
     bool gripper_close_soon = false;
+    bool grip_horizon_available = false;
+    int grip_horizon_len = 0;
+    int grip_horizon_current_index = -1;
+    double grip_horizon_min = std::numeric_limits<double>::quiet_NaN();
+    double grip_horizon_max = std::numeric_limits<double>::quiet_NaN();
+    int grip_horizon_argmin = -1;
+    int grip_horizon_argmax = -1;
+    int grip_horizon_first_close_index = -1;
+    int grip_horizon_first_close_steps_ahead = -1;
+    double grip_horizon_close_threshold = std::numeric_limits<double>::quiet_NaN();
+    bool grip_horizon_close_is_greater = false;
     bool gripper_closing_hold_active = false;
     // Final-stage output moving average (C). q_target before/after the boxcar.
     bool output_ma_present = false;

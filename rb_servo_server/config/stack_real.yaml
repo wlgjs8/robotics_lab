@@ -695,6 +695,7 @@ cartesian_control:
         delta_twist_max_lead_rad: 0.025
         delta_twist_stale_residual_timeout_sec: 0.15
         delta_twist_pause_on_safety_block: true
+        delta_twist_block_on_safety_intervention_recent: false
         delta_twist_block_requires_fresh_chunk_sec: 0.050
         delta_twist_block_clear_residual: true
         # Soft pre-controller projection for the near-floor pick phase. This does
@@ -706,9 +707,9 @@ cartesian_control:
         # saved for later catch-up.
         surface_action_projector:
           enable: true
-          soft_floor_margin_m: 0.012
+          soft_floor_margin_m: 0.018
           stop_floor_margin_m: 0.002
-          close_floor_band_m: 0.015
+          close_floor_band_m: 0.018
           min_tip_margin_m: 0.002
           tangent_coupling: 0.80
           close_tangent_scale: 0.15
@@ -717,7 +718,7 @@ cartesian_control:
           max_down_delta_near_floor_m: 0.0002
           max_yaw_delta_near_floor_rad: 0.010
           max_pitch_roll_delta_near_floor_rad: 0.003
-          close_lookahead_steps: 4
+          close_lookahead_steps: 24
           # Pika gripper command convention in this stack is opening percent
           # (0=closed, 100=open), so close intent is "less than threshold".
           # If a future normalized close command is used, set 0.60 + true in
@@ -735,8 +736,8 @@ cartesian_control:
           enable: true
           close_threshold: 25.0  # gripper opening percent: 0=closed, 100=open
           close_is_greater: false
-          close_lookahead_steps: 4
-          commit_floor_band_m: 0.015
+          close_lookahead_steps: 24
+          commit_floor_band_m: 0.018
           both_arm_sync_timeout_sec: 0.150
           preclose_translation_scale: 0.0
           preclose_angular_scale: 0.25
@@ -746,6 +747,11 @@ cartesian_control:
           bimanual_sync: true
           freeze_gripper_until_commit: false
           close_target: 0.0
+          # Disabled until full grip-horizon telemetry proves the model close is missing.
+          enable_near_floor_dwell_fallback: false
+          # enable_near_floor_dwell_fallback: true
+          # dwell_floor_band_m: 0.018
+          # dwell_min_duration_sec: 0.180
         chunk_feed_timeout_sec: 1.5
         fallback_policy: "fault"     # strict: no silent SMD fallback; cold start holds, loss latches ChunkFollowerFault (ResetFault to recover)
         engage_timeout_sec: 3.0      # max wait for the first chunk frame before faulting (fault policy only)

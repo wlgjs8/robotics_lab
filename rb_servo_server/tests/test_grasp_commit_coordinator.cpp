@@ -8,6 +8,8 @@ using rb_servo::GraspCommitConfig;
 using rb_servo::control::GraspCommitArmInput;
 using rb_servo::control::GraspCommitCoordinator;
 using rb_servo::control::GraspPhase;
+using rb_servo::control::kGraspCloseSoonSourceNearFloorDwellFallback;
+using rb_servo::control::kGraspDwellReasonProjectedMotionHigh;
 
 static int g_failures = 0;
 
@@ -43,6 +45,10 @@ static GraspCommitArmInput nearClose() {
   in.surface_active = true;
   in.surface_close_soon = true;
   in.surface_min_tip_dist_m = 0.006;
+  in.commanded_linear_speed_m_s = 0.0;
+  in.commanded_angular_speed_rad_s = 0.0;
+  in.projected_linear_norm_m = 0.0;
+  in.gripper_cmd = 80.0;
   return in;
 }
 
@@ -58,6 +64,16 @@ static GraspCommitArmInput farClose() {
   in.surface_active = false;
   in.surface_close_soon = true;
   in.surface_min_tip_dist_m = 0.050;
+  in.commanded_linear_speed_m_s = 0.0;
+  in.commanded_angular_speed_rad_s = 0.0;
+  in.projected_linear_norm_m = 0.0;
+  in.gripper_cmd = 80.0;
+  return in;
+}
+
+static GraspCommitArmInput farNoClose() {
+  GraspCommitArmInput in = farClose();
+  in.surface_close_soon = false;
   return in;
 }
 
@@ -182,6 +198,96 @@ int main() {
           "blocked update does not advance grasp phase timers");
     check(coord.command(ArmId::Left).phase_before_block == GraspPhase::PreGraspCommit,
           "repeated blocked updates keep original phase-before-block telemetry");
+  }
+
+  std::printf("Test G: dwell triggers commit when enabled\n");
+  {
+    GraspCommitConfig cfg = baseConfig();
+    cfg.bimanual_sync = false;
+    cfg.enable_near_floor_dwell_fallback = true;
+    cfg.dwell_min_duration_sec = 0.010;
+    GraspCommitCoordinator coord(cfg);
+    coord.update(nearNoClose(), farNoClose(), 0.011);
+    check(coord.phase(ArmId::Left) == GraspPhase::PreGraspCommit,
+          "near-floor dwell enters PreGraspCommit");
+    const auto cmd = coord.command(ArmId::Left);
+    check(cmd.close_soon, "dwell fallback reports close soon");
+    check(cmd.close_soon_source == kGraspCloseSoonSourceNearFloorDwellFallback,
+          "dwell fallback uses close source 3");
+    check(cmd.dwell_fallback_triggered, "dwell fallback trigger telemetry is set");
+    check(cmd.dwell_active, "dwell active telemetry is set");
+  }
+
+  std::printf("Test H: dwell does not trigger when disabled\n");
+  {
+    GraspCommitConfig cfg = baseConfig();
+    cfg.bimanual_sync = false;
+    cfg.enable_near_floor_dwell_fallback = false;
+    cfg.dwell_min_duration_sec = 0.010;
+    GraspCommitCoordinator coord(cfg);
+    coord.update(nearNoClose(), farNoClose(), 0.011);
+    check(coord.phase(ArmId::Left) == GraspPhase::SurfaceApproach,
+          "disabled dwell fallback stays in surface approach");
+    check(coord.command(ArmId::Left).close_soon_source !=
+              kGraspCloseSoonSourceNearFloorDwellFallback,
+          "disabled dwell fallback does not emit source 3");
+  }
+
+  std::printf("Test I: dwell does not trigger far from floor\n");
+  {
+    GraspCommitConfig cfg = baseConfig();
+    cfg.bimanual_sync = false;
+    cfg.enable_near_floor_dwell_fallback = true;
+    cfg.dwell_min_duration_sec = 0.010;
+    GraspCommitCoordinator coord(cfg);
+    coord.update(farNoClose(), farNoClose(), 0.011);
+    check(coord.phase(ArmId::Left) == GraspPhase::Normal,
+          "far dwell candidate stays normal");
+    check(!coord.command(ArmId::Left).dwell_active,
+          "far dwell candidate does not report dwell active");
+  }
+
+  std::printf("Test J: dwell requires small projected motion\n");
+  {
+    GraspCommitConfig cfg = baseConfig();
+    cfg.bimanual_sync = false;
+    cfg.enable_near_floor_dwell_fallback = true;
+    cfg.dwell_min_duration_sec = 0.010;
+    cfg.dwell_require_projected_motion_small = true;
+    GraspCommitCoordinator coord(cfg);
+    GraspCommitArmInput moving = nearNoClose();
+    moving.projected_linear_norm_m = 0.010;
+    coord.update(moving, farNoClose(), 0.011);
+    check(coord.phase(ArmId::Left) == GraspPhase::SurfaceApproach,
+          "high projected motion does not enter PreGraspCommit");
+    check((coord.command(ArmId::Left).dwell_reason &
+           kGraspDwellReasonProjectedMotionHigh) != 0,
+          "dwell reason marks high projected motion");
+  }
+
+  std::printf("Test K: dwell bimanual sync waits and then times out\n");
+  {
+    GraspCommitConfig cfg = baseConfig();
+    cfg.bimanual_sync = true;
+    cfg.enable_near_floor_dwell_fallback = true;
+    cfg.dwell_min_duration_sec = 0.010;
+    cfg.both_arm_sync_timeout_sec = 0.020;
+    GraspCommitCoordinator coord(cfg);
+    coord.update(nearNoClose(), farNoClose(), 0.011);
+    check(coord.phase(ArmId::Left) == GraspPhase::PreGraspCommit,
+          "dwelling arm waits in pregrasp");
+    check(coord.phase(ArmId::Right) != GraspPhase::ClosingHold,
+          "other arm is not forced closed before sync timeout");
+    check(coord.command(ArmId::Left).close_soon_source ==
+              kGraspCloseSoonSourceNearFloorDwellFallback,
+          "bimanual dwell fallback records source 3");
+    for (int i = 0; i < 10; ++i) {
+      coord.update(nearNoClose(), farNoClose(), 0.002);
+    }
+    check(coord.phase(ArmId::Left) == GraspPhase::ClosingHold,
+          "dwell sync timeout starts closing hold for dwelling arm");
+    check(coord.phase(ArmId::Right) == GraspPhase::ClosingHold,
+          "dwell sync timeout starts closing hold for both arms together");
   }
 
   std::printf("\n=== %s (%d failure%s) ===\n",

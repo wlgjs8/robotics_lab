@@ -426,7 +426,61 @@ public:
     std::optional<rb_servo::Pose6D> lastLeftTarget() const { return last_left_target_; }
     std::optional<rb_servo::Pose6D> lastRightTarget() const { return last_right_target_; }
 
+    bool computeFloorPointZJacobian(
+        rb_servo::ArmId arm,
+        const rb_servo::JointArray& q_deg,
+        const rb_servo::ArmMountConfig& mount,
+        const std::array<double, 3>& tcp_offset_m,
+        rb_servo::JointArray& Jz_out
+    ) const override {
+        return computeStandAxisJacobian(arm, q_deg, mount, tcp_offset_m, 2, Jz_out);
+    }
+
+    bool computeStandAxisJacobian(
+        rb_servo::ArmId arm,
+        const rb_servo::JointArray& q_deg,
+        const rb_servo::ArmMountConfig& mount,
+        const std::array<double, 3>& tcp_offset_m,
+        int axis,
+        rb_servo::JointArray& J_out
+    ) const override {
+        (void)arm;
+        (void)q_deg;
+        (void)mount;
+        (void)tcp_offset_m;
+        J_out = rb_servo::JointArray{};
+        if (axis < 0 || axis > 2) return false;
+        J_out[axis] = fakeTcpMetresPerRad();
+        return true;
+    }
+
+    bool computeStandDirectionJacobian(
+        rb_servo::ArmId arm,
+        const rb_servo::JointArray& q_deg,
+        const rb_servo::ArmMountConfig& mount,
+        const std::array<double, 3>& tcp_offset_m,
+        const std::array<double, 3>& dir_stand,
+        rb_servo::JointArray& J_out
+    ) const override {
+        (void)arm;
+        (void)q_deg;
+        (void)mount;
+        (void)tcp_offset_m;
+        J_out = rb_servo::JointArray{};
+        const double scale = fakeTcpMetresPerRad();
+        double norm_sq = 0.0;
+        for (int i = 0; i < 3; ++i) {
+            J_out[i] = dir_stand[i] * scale;
+            norm_sq += dir_stand[i] * dir_stand[i];
+        }
+        return norm_sq > 1e-18;
+    }
+
 private:
+    static double fakeTcpMetresPerRad() {
+        return 180.0 / (std::acos(-1.0) * 100.0);
+    }
+
     bool fail_ = false;
     bool orientation_from_joint_ = false;
     double orientation_solve_bias_rad_ = 0.0;
@@ -770,6 +824,114 @@ std::string makeDualArmChunkFramePacket(uint64_t seq, int horizon) {
         {"right", left},
     };
     return packet.dump();
+}
+
+std::string makeDualArmDeltaChunkFramePacket(uint64_t seq, int horizon, const rb_servo::Vec6& delta) {
+    nlohmann::json pose_rows = nlohmann::json::array();
+    nlohmann::json delta_rows = nlohmann::json::array();
+    for (int i = 0; i < horizon; ++i) {
+        (void)i;
+        pose_rows.push_back({
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            20.0,
+        });
+        delta_rows.push_back({
+            delta.x,
+            delta.y,
+            delta.z,
+            delta.rx,
+            delta.ry,
+            delta.rz,
+            20.0,
+        });
+    }
+    nlohmann::json packet = {
+        {"schema", "robotics_lab.chunk_overlay.v2"},
+        {"schema_version", "robotics_lab.chunk_overlay.v2"},
+        {"host_time_ns", 123456789},
+        {"seq", seq},
+        {"policy_dt_sec", 0.0334},
+        {"horizon", horizon},
+        {"left", pose_rows},
+        {"right", pose_rows},
+        {"left_delta", delta_rows},
+        {"right_delta", delta_rows},
+    };
+    return packet.dump();
+}
+
+constexpr int kDeltaTwistBlockPreviousSafetyBit = 1 << 0;
+constexpr int kDeltaTwistBlockCurrentHoldBit = 1 << 1;
+constexpr int kDeltaTwistBlockPreviousHoldBit = 1 << 2;
+constexpr int kDeltaTwistBlockSafetyInterventionBit = 1 << 4;
+
+void configureDeltaTwistSafetyBlockTest(
+    rb_servo::DualArmConfig* cfg,
+    bool block_on_safety_intervention_recent
+) {
+    configureCartesianLoopTest(cfg);
+    cfg->servo.rate_hz = 50;
+    cfg->cartesian_control.allow_in_real = true;
+    cfg->safety.dq_max_deg_s = joints(10000.0);
+    cfg->safety.ddq_max_deg_s2 = joints(100000.0);
+    cfg->safety.joint_target_smd.max_velocity_deg_s = joints(10000.0);
+    cfg->safety.floor_constraint.enable = true;
+    cfg->safety.floor_constraint.z_min_m = 0.0;
+    cfg->safety.floor_constraint.runtime_min_z_m = -0.01;
+    cfg->safety.floor_constraint.runtime_max_z_m = 0.02;
+    cfg->safety.floor_constraint.fail_policy = rb_servo::FloorConstraintFailPolicy::ClampToHold;
+    cfg->safety.floor_constraint.monitor_only = false;
+    cfg->safety.floor_constraint.a_brake_m_s2 = 4.0;
+    cfg->safety.floor_constraint.d_slow_m = 0.010;
+    cfg->safety.floor_constraint.tcp_offset_points.clear();
+
+    cfg->cartesian_control.tcp_pose_target_profile_default = "delta_test";
+    rb_servo::TcpPoseTargetProfileConfig profile;
+    profile.name = "delta_test";
+    profile.pose_track_smd = cfg->cartesian_control.pose_track_smd;
+    profile.ruckig_follower.enable = true;
+    profile.ruckig_follower.controller = rb_servo::RuckigFollowerController::DeltaTwist;
+    profile.ruckig_follower.fallback_policy = rb_servo::RuckigFollowerFallbackPolicy::Fault;
+    profile.ruckig_follower.engage_timeout_sec = 1.0;
+    profile.ruckig_follower.max_linear_velocity_m_s = 1.0;
+    profile.ruckig_follower.max_linear_accel_m_s2 = 100.0;
+    profile.ruckig_follower.max_linear_jerk_m_s3 = 10000.0;
+    profile.ruckig_follower.max_angular_velocity_rad_s = 1.0;
+    profile.ruckig_follower.max_angular_accel_rad_s2 = 100.0;
+    profile.ruckig_follower.max_angular_jerk_rad_s3 = 10000.0;
+    profile.ruckig_follower.consume_steps = 6;
+    profile.ruckig_follower.reserve_steps = 2;
+    profile.ruckig_follower.delta_twist_tau_sec = 0.005;
+    profile.ruckig_follower.delta_twist_pause_on_safety_block = true;
+    profile.ruckig_follower.delta_twist_block_on_safety_intervention_recent =
+        block_on_safety_intervention_recent;
+    profile.ruckig_follower.delta_twist_block_requires_fresh_chunk_sec = 0.050;
+    profile.ruckig_follower.delta_twist_block_clear_residual = true;
+    cfg->cartesian_control.tcp_pose_target_profiles = {profile};
+}
+
+rb_servo::DualArmCommand deltaTwistCartesianCommand(uint64_t seq) {
+    rb_servo::DualArmCommand cartesian = command(rb_servo::ControlMode::TcpPoseTarget);
+    cartesian.seq = seq;
+    cartesian.host_time_ns = rb_servo::nowSteadyNs();
+    cartesian.tcp_target_profile = "delta_test";
+    cartesian.left.timeout_sec = 5.0;
+    cartesian.right.timeout_sec = 5.0;
+    cartesian.left.has_tcp_target = true;
+    cartesian.right.has_tcp_target = true;
+    cartesian.left.tcp_target_stand = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    cartesian.right.tcp_target_stand = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    cartesian.left.tcp_target_stand.quaternion_xyzw =
+        std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+    cartesian.right.tcp_target_stand.quaternion_xyzw =
+        std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+    return cartesian;
 }
 
 class EnvVarGuard {
@@ -3936,6 +4098,9 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     sample.left_cartesian_solve.smd_profile_max_linear_accel_m_s2 = 0.8;
     sample.left_cartesian_solve.smd_profile_max_angular_velocity_rad_s = 1.3;
     sample.left_cartesian_solve.smd_profile_max_angular_accel_rad_s2 = 5.0;
+    sample.left_cartesian_solve.delta_twist_safety_intervention_recent = true;
+    sample.left_cartesian_solve.delta_twist_block_on_safety_intervention_recent = true;
+    sample.left_cartesian_solve.delta_twist_soft_intervention_ignored_for_block = true;
     sample.left_cartesian_solve.ik_branch_jump_rate_limited = true;
     sample.left_cartesian_solve.ik_branch_jump_raw_deg = 12.0;
     sample.left_cartesian_solve.ik_branch_jump_limit_deg = 4.0;
@@ -4027,6 +4192,11 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     const std::size_t profile_nf_linear = index_of("left_smd_profile_nf_linear_hz");
     const std::size_t profile_velocity_ff = index_of("left_smd_profile_velocity_feedforward");
     const std::size_t profile_max_angular_accel = index_of("left_smd_profile_max_angular_accel_rad_s2");
+    const std::size_t delta_recent = index_of("left_delta_twist_safety_intervention_recent");
+    const std::size_t delta_block_on_recent =
+        index_of("left_delta_twist_block_on_safety_intervention_recent");
+    const std::size_t delta_soft_ignored =
+        index_of("left_delta_twist_soft_intervention_ignored_for_block");
     const std::size_t init_left_status = index_of("init_motion_left_status");
     const std::size_t init_right_status = index_of("init_motion_right_status");
     const std::size_t before_left = index_of("left_mode_before_init_sequencer");
@@ -4046,6 +4216,9 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(profile_nf_linear < old_last);
     RB_CHECK(profile_velocity_ff < old_last);
     RB_CHECK(profile_max_angular_accel < old_last);
+    RB_CHECK(delta_recent < old_last);
+    RB_CHECK(delta_block_on_recent < old_last);
+    RB_CHECK(delta_soft_ignored < old_last);
     RB_CHECK(branch_rate > old_last);
     RB_CHECK(raw_jump > old_last);
     RB_CHECK(q_seed > old_last);
@@ -4076,6 +4249,9 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(row.at(profile_nf_linear) == "1");
     RB_CHECK(row.at(profile_velocity_ff) == "1");
     RB_CHECK(row.at(profile_max_angular_accel) == "5");
+    RB_CHECK(row.at(delta_recent) == "1");
+    RB_CHECK(row.at(delta_block_on_recent) == "1");
+    RB_CHECK(row.at(delta_soft_ignored) == "1");
     RB_CHECK(row.at(init_left_status) == "executing");
     RB_CHECK(row.at(init_right_status) == "idle");
     RB_CHECK(row.at(before_left) == "JointTarget");
@@ -5166,6 +5342,206 @@ bool testChunkFollowerDeactivatesAcrossBothArmJointTargetGap() {
     return true;
 }
 
+bool testDeltaTwistSafetyInterventionRecentDoesNotBlockByDefault() {
+    const int port = reserveLoopbackUdpPort();
+    if (port <= 0) {
+        std::cerr << "SKIP testDeltaTwistSafetyInterventionRecentDoesNotBlockByDefault: "
+                  << "loopback UDP unavailable\n";
+        return true;
+    }
+
+    rb_servo::ChunkFrameReceiver receiver("udp://127.0.0.1:" + std::to_string(port));
+    RB_CHECK(receiver.start());
+    RB_CHECK(sendUdpJson(
+        "127.0.0.1",
+        port,
+        makeDualArmDeltaChunkFramePacket(770, 24, rb_servo::Vec6{0.0, 0.0, -0.000010, 0.0, 0.0, 0.0})
+    ));
+    RB_CHECK(waitUntil([&] { return receiver.latestSeq() > 0; }, std::chrono::milliseconds(500)));
+
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoPhysicalRealConfig();
+    configureDeltaTwistSafetyBlockTest(&cfg, false);
+    const rb_servo::JointArray initial = joints(0.0);
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+    loop.setChunkFrameReceiver(&receiver);
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    buffer.setCommand(deltaTwistCartesianCommand(770));
+
+    rb_servo::ServoSnapshot recent;
+    RB_CHECK(waitUntil([&] {
+        recent = loop.latestSnapshot();
+        return recent.left_cartesian_solve.delta_twist_safety_intervention_recent &&
+               recent.right_cartesian_solve.delta_twist_safety_intervention_recent &&
+               recent.safety_verdict == rb_servo::SafetyVerdict::Ok &&
+               recent.motion_state == rb_servo::ServerMotionState::Running;
+    }, std::chrono::milliseconds(1000)));
+
+    RB_CHECK(!recent.left_cartesian_solve.delta_twist_blocked);
+    RB_CHECK(!recent.right_cartesian_solve.delta_twist_blocked);
+    RB_CHECK(recent.left_cartesian_solve.delta_twist_block_reason == 0);
+    RB_CHECK(!recent.left_cartesian_solve.delta_twist_block_requires_fresh_chunk);
+    RB_CHECK(!recent.left_cartesian_solve.delta_twist_block_on_safety_intervention_recent);
+    RB_CHECK(recent.left_cartesian_solve.delta_twist_soft_intervention_ignored_for_block);
+
+    const uint64_t first_recv_seq = receiver.latestSeq();
+    RB_CHECK(sendUdpJson(
+        "127.0.0.1",
+        port,
+        makeDualArmDeltaChunkFramePacket(771, 24, rb_servo::Vec6{0.000020, 0.0, 0.0, 0.0, 0.0, 0.0})
+    ));
+    RB_CHECK(waitUntil([&] { return receiver.latestSeq() > first_recv_seq; }, std::chrono::milliseconds(500)));
+
+    rb_servo::ServoSnapshot consumed;
+    RB_CHECK(waitUntil([&] {
+        consumed = loop.latestSnapshot();
+        return consumed.left_cartesian_solve.follower_wire_seq == 771 &&
+               consumed.right_cartesian_solve.follower_wire_seq == 771 &&
+               consumed.left_cartesian_solve.delta_twist_step_consumed_this_tick &&
+               consumed.right_cartesian_solve.delta_twist_step_consumed_this_tick;
+    }, std::chrono::milliseconds(1000)));
+    loop.stop();
+    receiver.stop();
+
+    RB_CHECK(consumed.safety_verdict == rb_servo::SafetyVerdict::Ok);
+    RB_CHECK(!consumed.left_cartesian_solve.delta_twist_blocked);
+    RB_CHECK(!consumed.left_cartesian_solve.delta_twist_block_requires_fresh_chunk);
+    RB_CHECK(consumed.left_cartesian_solve.delta_twist_safety_intervention_recent);
+    RB_CHECK(consumed.left_cartesian_solve.delta_twist_soft_intervention_ignored_for_block);
+    return true;
+}
+
+bool testDeltaTwistSafetyInterventionRecentCanBlockWhenEnabled() {
+    const int port = reserveLoopbackUdpPort();
+    if (port <= 0) {
+        std::cerr << "SKIP testDeltaTwistSafetyInterventionRecentCanBlockWhenEnabled: "
+                  << "loopback UDP unavailable\n";
+        return true;
+    }
+
+    rb_servo::ChunkFrameReceiver receiver("udp://127.0.0.1:" + std::to_string(port));
+    RB_CHECK(receiver.start());
+    RB_CHECK(sendUdpJson(
+        "127.0.0.1",
+        port,
+        makeDualArmDeltaChunkFramePacket(780, 24, rb_servo::Vec6{0.0, 0.0, -0.000010, 0.0, 0.0, 0.0})
+    ));
+    RB_CHECK(waitUntil([&] { return receiver.latestSeq() > 0; }, std::chrono::milliseconds(500)));
+
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoPhysicalRealConfig();
+    configureDeltaTwistSafetyBlockTest(&cfg, true);
+    const rb_servo::JointArray initial = joints(0.0);
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+    loop.setChunkFrameReceiver(&receiver);
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    buffer.setCommand(deltaTwistCartesianCommand(780));
+
+    rb_servo::ServoSnapshot blocked;
+    RB_CHECK(waitUntil([&] {
+        blocked = loop.latestSnapshot();
+        return blocked.left_cartesian_solve.delta_twist_safety_intervention_recent &&
+               blocked.left_cartesian_solve.delta_twist_blocked &&
+               blocked.safety_verdict == rb_servo::SafetyVerdict::Ok;
+    }, std::chrono::milliseconds(1000)));
+    loop.stop();
+    receiver.stop();
+
+    RB_CHECK(blocked.motion_state == rb_servo::ServerMotionState::Running);
+    RB_CHECK(blocked.left_cartesian_solve.delta_twist_block_on_safety_intervention_recent);
+    RB_CHECK(!blocked.left_cartesian_solve.delta_twist_soft_intervention_ignored_for_block);
+    RB_CHECK((blocked.left_cartesian_solve.delta_twist_block_reason &
+              kDeltaTwistBlockSafetyInterventionBit) != 0);
+    RB_CHECK((blocked.left_cartesian_solve.delta_twist_block_reason &
+              kDeltaTwistBlockPreviousSafetyBit) == 0);
+    return true;
+}
+
+bool testDeltaTwistHardSafetyAndMotionHoldStillBlock() {
+    const int port = reserveLoopbackUdpPort();
+    if (port <= 0) {
+        std::cerr << "SKIP testDeltaTwistHardSafetyAndMotionHoldStillBlock: "
+                  << "loopback UDP unavailable\n";
+        return true;
+    }
+
+    rb_servo::ChunkFrameReceiver receiver("udp://127.0.0.1:" + std::to_string(port));
+    RB_CHECK(receiver.start());
+    RB_CHECK(sendUdpJson(
+        "127.0.0.1",
+        port,
+        makeDualArmDeltaChunkFramePacket(790, 24, rb_servo::Vec6{0.0, 0.0, -0.0010, 0.0, 0.0, 0.0})
+    ));
+    RB_CHECK(waitUntil([&] { return receiver.latestSeq() > 0; }, std::chrono::milliseconds(500)));
+
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = rbpodoPhysicalRealConfig();
+    configureDeltaTwistSafetyBlockTest(&cfg, false);
+    const rb_servo::JointArray initial = joints(0.0);
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+    loop.setChunkFrameReceiver(&receiver);
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    buffer.setCommand(deltaTwistCartesianCommand(790));
+
+    rb_servo::ServoSnapshot hard_verdict;
+    RB_CHECK(waitUntil([&] {
+        hard_verdict = loop.latestSnapshot();
+        return hard_verdict.safety_verdict == rb_servo::SafetyVerdict::FloorViolation &&
+               hard_verdict.motion_state == rb_servo::ServerMotionState::ArmedHold;
+    }, std::chrono::milliseconds(1000)));
+
+    rb_servo::ServoSnapshot blocked;
+    RB_CHECK(waitUntil([&] {
+        blocked = loop.latestSnapshot();
+        return blocked.tick > hard_verdict.tick &&
+               blocked.left_cartesian_solve.delta_twist_blocked;
+    }, std::chrono::milliseconds(1000)));
+    loop.stop();
+    receiver.stop();
+
+    RB_CHECK((blocked.left_cartesian_solve.delta_twist_block_reason &
+              kDeltaTwistBlockPreviousSafetyBit) != 0);
+    RB_CHECK((blocked.left_cartesian_solve.delta_twist_block_reason &
+              (kDeltaTwistBlockCurrentHoldBit | kDeltaTwistBlockPreviousHoldBit)) != 0);
+    RB_CHECK((blocked.left_cartesian_solve.delta_twist_block_reason &
+              kDeltaTwistBlockSafetyInterventionBit) == 0);
+    RB_CHECK(!blocked.left_cartesian_solve.delta_twist_block_on_safety_intervention_recent);
+    return true;
+}
+
 bool testTcpLinearMoveUsesIkInSimulationOnly() {
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = testConfig();
@@ -6181,6 +6557,9 @@ int main() {
     if (!testDisarmAndCartesianHoldPreviousTarget()) return 1;
     if (!testCartesianPoseTargetUsesIkInSimulation()) return 1;
     if (!testChunkFollowerDeactivatesAcrossBothArmJointTargetGap()) return 1;
+    if (!testDeltaTwistSafetyInterventionRecentDoesNotBlockByDefault()) return 1;
+    if (!testDeltaTwistSafetyInterventionRecentCanBlockWhenEnabled()) return 1;
+    if (!testDeltaTwistHardSafetyAndMotionHoldStillBlock()) return 1;
     if (!testTcpLinearMoveUsesIkInSimulationOnly()) return 1;
     if (!testRbpodoControllerSimulationStartupReferenceSource()) return 1;
     if (!testRbpodoControllerSimulationNonStreamingCartesianGate()) return 1;

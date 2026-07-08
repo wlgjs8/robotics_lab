@@ -1164,8 +1164,13 @@ bool testRuckigFollowerControllerConfig() {
     ::unlink(default_path.c_str());
     RB_CHECK(defaults.cartesian_control.ruckig_follower.controller ==
              rb_servo::RuckigFollowerController::RuckigWaypoint);
+    RB_CHECK(!defaults.cartesian_control.ruckig_follower.delta_twist_block_on_safety_intervention_recent);
     RB_CHECK(defaults.cartesian_control.tcp_pose_target_profiles.front().ruckig_follower.controller ==
              rb_servo::RuckigFollowerController::RuckigWaypoint);
+    RB_CHECK(
+        !defaults.cartesian_control.tcp_pose_target_profiles.front()
+             .ruckig_follower.delta_twist_block_on_safety_intervention_recent
+    );
 
     const std::string delta_path = writeTempConfig(
         "ruckig-follower-controller-delta",
@@ -1183,6 +1188,7 @@ bool testRuckigFollowerControllerConfig() {
         "    delta_twist_max_lead_rad: 0.51\n"
         "    delta_twist_stale_residual_timeout_sec: 0.19\n"
         "    delta_twist_pause_on_safety_block: false\n"
+        "    delta_twist_block_on_safety_intervention_recent: true\n"
         "    delta_twist_block_requires_fresh_chunk_sec: 0.071\n"
         "    delta_twist_block_clear_residual: false\n"
         "    surface_action_projector:\n"
@@ -1221,6 +1227,15 @@ bool testRuckigFollowerControllerConfig() {
         "      bimanual_sync: true\n"
         "      freeze_gripper_until_commit: true\n"
         "      close_target: 0.0\n"
+        "      enable_near_floor_dwell_fallback: true\n"
+        "      dwell_floor_band_m: 0.018\n"
+        "      dwell_min_duration_sec: 0.180\n"
+        "      dwell_max_linear_speed_m_s: 0.015\n"
+        "      dwell_max_angular_speed_rad_s: 0.20\n"
+        "      dwell_require_both_arms_near_floor: false\n"
+        "      dwell_require_projected_motion_small: true\n"
+        "      dwell_projected_linear_norm_threshold_m: 0.0006\n"
+        "      dwell_trigger_close_even_without_model_close: true\n"
         "  tcp_pose_target_profile_default: strict\n"
         "  tcp_pose_target_profiles:\n"
         "    strict:\n"
@@ -1241,6 +1256,7 @@ bool testRuckigFollowerControllerConfig() {
     RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_max_lead_rad, 0.51));
     RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_stale_residual_timeout_sec, 0.19));
     RB_CHECK(!delta_cfg.cartesian_control.ruckig_follower.delta_twist_pause_on_safety_block);
+    RB_CHECK(delta_cfg.cartesian_control.ruckig_follower.delta_twist_block_on_safety_intervention_recent);
     RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_block_requires_fresh_chunk_sec, 0.071));
     RB_CHECK(!delta_cfg.cartesian_control.ruckig_follower.delta_twist_block_clear_residual);
     const auto& sp = delta_cfg.cartesian_control.ruckig_follower.surface_action_projector;
@@ -1267,6 +1283,15 @@ bool testRuckigFollowerControllerConfig() {
     RB_CHECK(near(gc.lift_duration_sec, 0.36));
     RB_CHECK(gc.freeze_gripper_until_commit);
     RB_CHECK(near(gc.close_target, 0.0));
+    RB_CHECK(gc.enable_near_floor_dwell_fallback);
+    RB_CHECK(near(gc.dwell_floor_band_m, 0.018));
+    RB_CHECK(near(gc.dwell_min_duration_sec, 0.180));
+    RB_CHECK(near(gc.dwell_max_linear_speed_m_s, 0.015));
+    RB_CHECK(near(gc.dwell_max_angular_speed_rad_s, 0.20));
+    RB_CHECK(!gc.dwell_require_both_arms_near_floor);
+    RB_CHECK(gc.dwell_require_projected_motion_small);
+    RB_CHECK(near(gc.dwell_projected_linear_norm_threshold_m, 0.0006));
+    RB_CHECK(gc.dwell_trigger_close_even_without_model_close);
     RB_CHECK(delta_cfg.cartesian_control.tcp_pose_target_profiles.front().ruckig_follower.controller ==
              rb_servo::RuckigFollowerController::RuckigWaypoint);
 

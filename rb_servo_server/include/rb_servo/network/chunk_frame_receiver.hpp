@@ -9,7 +9,9 @@
 //     "left":  [[x,y,z,qx,qy,qz,qw,grip] * H] | null,
 //     "right": [[...] * H] | null,
 //     "left_delta":  [[dx,dy,dz,drx,dry,drz,grip] * H],   // optional
-//     "right_delta": [[dx,dy,dz,drx,dry,drz,grip] * H] }  // optional
+//     "right_delta": [[dx,dy,dz,drx,dry,drz,grip] * H],   // optional
+//     "left_grip_horizon":  [g0,g1,...,gN-1],              // optional
+//     "right_grip_horizon": [g0,g1,...,gN-1] }             // optional
 // The producer fans the same packet out to the GUI overlay port and to this
 // bind; DELIBERATELY separate from the lease-gated command socket so the 500 Hz
 // command stream can never starve the ~1-2 Hz chunk feed (see
@@ -35,6 +37,7 @@ namespace rb_servo {
 class ChunkFrameReceiver {
 public:
     static constexpr int kMaxSteps = 64;
+    static constexpr int kMaxGripHorizon = kMaxSteps;
     static constexpr int kPoseStepDims = 8;   // x y z qx qy qz qw grip
     static constexpr int kDeltaStepDims = 7;  // dx dy dz drx dry drz grip
     static constexpr int kStepDims = kPoseStepDims;  // compatibility alias
@@ -46,6 +49,10 @@ public:
     struct ArmDeltaSteps {
         int count = 0;
         std::array<std::array<double, kDeltaStepDims>, kMaxSteps> step{};
+    };
+    struct ArmGripHorizon {
+        int count = 0;
+        std::array<double, kMaxGripHorizon> value{};
     };
     struct Frame {
         std::uint64_t seq = 0;           // producer seq (may reset on restart)
@@ -60,6 +67,10 @@ public:
         bool has_right_delta = false;
         ArmDeltaSteps left_delta;
         ArmDeltaSteps right_delta;
+        bool has_left_grip_horizon = false;
+        bool has_right_grip_horizon = false;
+        ArmGripHorizon left_grip_horizon;
+        ArmGripHorizon right_grip_horizon;
     };
 
     explicit ChunkFrameReceiver(const std::string& bind_uri);

@@ -172,7 +172,18 @@ bool graspCommitConfigChanged(const GraspCommitConfig& a, const GraspCommitConfi
         a.lift_duration_sec != b.lift_duration_sec ||
         a.bimanual_sync != b.bimanual_sync ||
         a.freeze_gripper_until_commit != b.freeze_gripper_until_commit ||
-        a.close_target != b.close_target;
+        a.close_target != b.close_target ||
+        a.enable_near_floor_dwell_fallback != b.enable_near_floor_dwell_fallback ||
+        a.dwell_floor_band_m != b.dwell_floor_band_m ||
+        a.dwell_min_duration_sec != b.dwell_min_duration_sec ||
+        a.dwell_max_linear_speed_m_s != b.dwell_max_linear_speed_m_s ||
+        a.dwell_max_angular_speed_rad_s != b.dwell_max_angular_speed_rad_s ||
+        a.dwell_require_both_arms_near_floor != b.dwell_require_both_arms_near_floor ||
+        a.dwell_require_projected_motion_small != b.dwell_require_projected_motion_small ||
+        a.dwell_projected_linear_norm_threshold_m !=
+            b.dwell_projected_linear_norm_threshold_m ||
+        a.dwell_trigger_close_even_without_model_close !=
+            b.dwell_trigger_close_even_without_model_close;
 }
 
 std::string initMotionFailModeString(InitMotionPlanResult::FailMode mode) {
@@ -368,6 +379,8 @@ bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFoll
         a.delta_twist_max_lead_rad != b.delta_twist_max_lead_rad ||
         a.delta_twist_stale_residual_timeout_sec != b.delta_twist_stale_residual_timeout_sec ||
         a.delta_twist_pause_on_safety_block != b.delta_twist_pause_on_safety_block ||
+        a.delta_twist_block_on_safety_intervention_recent !=
+            b.delta_twist_block_on_safety_intervention_recent ||
         a.delta_twist_block_requires_fresh_chunk_sec != b.delta_twist_block_requires_fresh_chunk_sec ||
         a.delta_twist_block_clear_residual != b.delta_twist_block_clear_residual ||
         surfaceActionProjectorConfigChanged(a.surface_action_projector, b.surface_action_projector) ||
@@ -430,15 +443,23 @@ control::ChunkFrame toControlChunkFrame(
         arm_id == ArmId::Left ? frame.has_left_delta : frame.has_right_delta;
     const ChunkFrameReceiver::ArmDeltaSteps& delta_steps =
         arm_id == ArmId::Left ? frame.left_delta : frame.right_delta;
+    const bool has_grip_horizon =
+        arm_id == ArmId::Left ? frame.has_left_grip_horizon : frame.has_right_grip_horizon;
+    const ChunkFrameReceiver::ArmGripHorizon& grip_horizon =
+        arm_id == ArmId::Left ? frame.left_grip_horizon : frame.right_grip_horizon;
     control::ChunkFrame out;
     out.policy_dt = frame.policy_dt_sec;
     out.wire_seq = frame.seq;
     out.recv_seq = frame.receiver_seq;
     out.recv_time = frame.recv_steady_sec;
+    out.has_grip_horizon = has_grip_horizon;
     out.pose.reserve(static_cast<std::size_t>(steps.count));
     out.grip.reserve(static_cast<std::size_t>(steps.count));
     if (has_delta) {
         out.delta.reserve(static_cast<std::size_t>(delta_steps.count));
+    }
+    if (has_grip_horizon) {
+        out.grip_horizon.reserve(static_cast<std::size_t>(grip_horizon.count));
     }
     for (int i = 0; i < steps.count; ++i) {
         const auto& s = steps.step[static_cast<std::size_t>(i)];
@@ -455,6 +476,13 @@ control::ChunkFrame toControlChunkFrame(
             const auto& s = delta_steps.step[static_cast<std::size_t>(i)];
             out.delta.push_back(Vec6{s[0], s[1], s[2], s[3], s[4], s[5]});
         }
+    }
+    if (has_grip_horizon) {
+        for (int i = 0; i < grip_horizon.count; ++i) {
+            out.grip_horizon.push_back(grip_horizon.value[static_cast<std::size_t>(i)]);
+        }
+    } else {
+        out.grip_horizon = out.grip;
     }
     return out;
 }
@@ -3808,6 +3836,11 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.follower_divergence_ang_rad = abc.follower_divergence_ang_rad;
     solve.follower_reanchor_count = abc.follower_reanchor_count;
     solve.safety_intervention_recent = abc.safety_intervention_recent;
+    solve.delta_twist_safety_intervention_recent = abc.delta_twist_safety_intervention_recent;
+    solve.delta_twist_block_on_safety_intervention_recent =
+        abc.delta_twist_block_on_safety_intervention_recent;
+    solve.delta_twist_soft_intervention_ignored_for_block =
+        abc.delta_twist_soft_intervention_ignored_for_block;
     solve.delta_twist_pending_linear_norm_m = abc.delta_twist_pending_linear_norm_m;
     solve.delta_twist_pending_angular_norm_rad = abc.delta_twist_pending_angular_norm_rad;
     solve.delta_twist_step_delta = abc.delta_twist_step_delta;
@@ -3866,6 +3899,8 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.grasp_phase = abc.grasp_phase;
     solve.grasp_commit_active = abc.grasp_commit_active;
     solve.grasp_close_soon = abc.grasp_close_soon;
+    solve.grasp_close_soon_source = abc.grasp_close_soon_source;
+    solve.grasp_close_soon_steps_ahead = abc.grasp_close_soon_steps_ahead;
     solve.grasp_ready = abc.grasp_ready;
     solve.grasp_sync_wait_sec = abc.grasp_sync_wait_sec;
     solve.grasp_closing_hold_elapsed_sec = abc.grasp_closing_hold_elapsed_sec;
@@ -3876,9 +3911,24 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.grasp_resume_wait_fresh_chunk = abc.grasp_resume_wait_fresh_chunk;
     solve.grasp_blocked = abc.grasp_blocked;
     solve.grasp_phase_before_block = abc.grasp_phase_before_block;
+    solve.grasp_dwell_active = abc.grasp_dwell_active;
+    solve.grasp_dwell_elapsed_sec = abc.grasp_dwell_elapsed_sec;
+    solve.grasp_dwell_fallback_triggered = abc.grasp_dwell_fallback_triggered;
+    solve.grasp_dwell_reason = abc.grasp_dwell_reason;
     solve.gripper_policy_cmd = abc.gripper_policy_cmd;
     solve.gripper_effective_cmd = abc.gripper_effective_cmd;
     solve.gripper_close_soon = abc.gripper_close_soon;
+    solve.grip_horizon_available = abc.grip_horizon_available;
+    solve.grip_horizon_len = abc.grip_horizon_len;
+    solve.grip_horizon_current_index = abc.grip_horizon_current_index;
+    solve.grip_horizon_min = abc.grip_horizon_min;
+    solve.grip_horizon_max = abc.grip_horizon_max;
+    solve.grip_horizon_argmin = abc.grip_horizon_argmin;
+    solve.grip_horizon_argmax = abc.grip_horizon_argmax;
+    solve.grip_horizon_first_close_index = abc.grip_horizon_first_close_index;
+    solve.grip_horizon_first_close_steps_ahead = abc.grip_horizon_first_close_steps_ahead;
+    solve.grip_horizon_close_threshold = abc.grip_horizon_close_threshold;
+    solve.grip_horizon_close_is_greater = abc.grip_horizon_close_is_greater;
     solve.gripper_closing_hold_active = abc.gripper_closing_hold_active;
     solve.output_ma_present = abc.output_ma_present;
     solve.output_ma_window = output_ma_window;
@@ -4074,6 +4124,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.grasp_phase = 0;
     abc.grasp_commit_active = false;
     abc.grasp_close_soon = false;
+    abc.grasp_close_soon_source = 0;
+    abc.grasp_close_soon_steps_ahead = -1;
     abc.grasp_ready = false;
     abc.grasp_sync_wait_sec = 0.0;
     abc.grasp_closing_hold_elapsed_sec = 0.0;
@@ -4084,9 +4136,24 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.grasp_resume_wait_fresh_chunk = false;
     abc.grasp_blocked = false;
     abc.grasp_phase_before_block = 0;
+    abc.grasp_dwell_active = false;
+    abc.grasp_dwell_elapsed_sec = 0.0;
+    abc.grasp_dwell_fallback_triggered = false;
+    abc.grasp_dwell_reason = 0;
     abc.gripper_policy_cmd.reset();
     abc.gripper_effective_cmd.reset();
     abc.gripper_close_soon = false;
+    abc.grip_horizon_available = false;
+    abc.grip_horizon_len = 0;
+    abc.grip_horizon_current_index = -1;
+    abc.grip_horizon_min = std::numeric_limits<double>::quiet_NaN();
+    abc.grip_horizon_max = std::numeric_limits<double>::quiet_NaN();
+    abc.grip_horizon_argmin = -1;
+    abc.grip_horizon_argmax = -1;
+    abc.grip_horizon_first_close_index = -1;
+    abc.grip_horizon_first_close_steps_ahead = -1;
+    abc.grip_horizon_close_threshold = std::numeric_limits<double>::quiet_NaN();
+    abc.grip_horizon_close_is_greater = false;
     abc.gripper_closing_hold_active = false;
     if (command.has_gripper) {
         abc.gripper_policy_cmd = command.gripper_target;
@@ -4098,6 +4165,9 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         : right_chunk_follower_reanchor_count_;
     abc.follower_reanchor_count = reanchor_count;
     abc.safety_intervention_recent = intervention_recent;
+    abc.delta_twist_safety_intervention_recent = false;
+    abc.delta_twist_block_on_safety_intervention_recent = false;
+    abc.delta_twist_soft_intervention_ignored_for_block = false;
     const bool fault_policy = rf.fallback_policy == RuckigFollowerFallbackPolicy::Fault;
     const bool was_active = follower->active();
     std::string transition_reason;
@@ -4389,6 +4459,8 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     abc.grasp_phase = 0;
     abc.grasp_commit_active = false;
     abc.grasp_close_soon = false;
+    abc.grasp_close_soon_source = 0;
+    abc.grasp_close_soon_steps_ahead = -1;
     abc.grasp_ready = false;
     abc.grasp_sync_wait_sec = 0.0;
     abc.grasp_closing_hold_elapsed_sec = 0.0;
@@ -4399,9 +4471,24 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     abc.grasp_resume_wait_fresh_chunk = false;
     abc.grasp_blocked = false;
     abc.grasp_phase_before_block = 0;
+    abc.grasp_dwell_active = false;
+    abc.grasp_dwell_elapsed_sec = 0.0;
+    abc.grasp_dwell_fallback_triggered = false;
+    abc.grasp_dwell_reason = 0;
     abc.gripper_policy_cmd.reset();
     abc.gripper_effective_cmd.reset();
     abc.gripper_close_soon = false;
+    abc.grip_horizon_available = false;
+    abc.grip_horizon_len = 0;
+    abc.grip_horizon_current_index = -1;
+    abc.grip_horizon_min = std::numeric_limits<double>::quiet_NaN();
+    abc.grip_horizon_max = std::numeric_limits<double>::quiet_NaN();
+    abc.grip_horizon_argmin = -1;
+    abc.grip_horizon_argmax = -1;
+    abc.grip_horizon_first_close_index = -1;
+    abc.grip_horizon_first_close_steps_ahead = -1;
+    abc.grip_horizon_close_threshold = std::numeric_limits<double>::quiet_NaN();
+    abc.grip_horizon_close_is_greater = false;
     abc.gripper_closing_hold_active = false;
     if (command.has_gripper) {
         abc.gripper_policy_cmd = command.gripper_target;
@@ -4413,6 +4500,10 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
         : right_chunk_follower_reanchor_count_;
     abc.follower_reanchor_count = reanchor_count;
     abc.safety_intervention_recent = intervention_recent;
+    abc.delta_twist_safety_intervention_recent = intervention_recent;
+    abc.delta_twist_block_on_safety_intervention_recent =
+        rf.delta_twist_block_on_safety_intervention_recent;
+    abc.delta_twist_soft_intervention_ignored_for_block = false;
     const bool fault_policy = rf.fallback_policy == RuckigFollowerFallbackPolicy::Fault;
     const bool was_active = follower->active();
     std::string transition_reason;
@@ -4482,10 +4573,30 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
         abc.surface_raw_angular_norm_rad = vec6AngularNorm(surface.raw_delta_local);
         abc.surface_projected_angular_norm_rad = vec6AngularNorm(surface.projected_delta_local);
         abc.surface_discarded_angular_norm_rad = vec6AngularNorm(surface.discarded_delta_local);
+        const control::GripHorizonSummary& grip_horizon = diag.grip_horizon;
+        abc.grip_horizon_available = grip_horizon.available;
+        abc.grip_horizon_len = grip_horizon.len;
+        abc.grip_horizon_current_index = grip_horizon.current_index;
+        abc.grip_horizon_min = grip_horizon.min;
+        abc.grip_horizon_max = grip_horizon.max;
+        abc.grip_horizon_argmin = grip_horizon.argmin;
+        abc.grip_horizon_argmax = grip_horizon.argmax;
+        abc.grip_horizon_first_close_index = grip_horizon.first_close_index;
+        abc.grip_horizon_first_close_steps_ahead = grip_horizon.first_close_steps_ahead;
+        abc.grip_horizon_close_threshold = grip_horizon.close_threshold;
+        abc.grip_horizon_close_is_greater = grip_horizon.close_is_greater;
         const control::GraspCommitArmCommand& grasp = diag.grasp_commit;
         abc.grasp_phase = control::graspPhaseKind(grasp.phase);
         abc.grasp_commit_active = grasp.commit_active;
         abc.grasp_close_soon = grasp.close_soon;
+        abc.grasp_close_soon_source =
+            grasp.close_soon_source != control::kGraspCloseSoonSourceNone
+                ? grasp.close_soon_source
+                : grip_horizon.close_soon_source;
+        abc.grasp_close_soon_steps_ahead =
+            grasp.close_soon_source != control::kGraspCloseSoonSourceNone
+                ? grasp.close_soon_steps_ahead
+                : grip_horizon.close_soon_steps_ahead;
         abc.grasp_ready = grasp.ready;
         abc.grasp_sync_wait_sec = grasp.sync_wait_sec;
         abc.grasp_closing_hold_elapsed_sec = grasp.closing_hold_elapsed_sec;
@@ -4496,6 +4607,10 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
         abc.grasp_resume_wait_fresh_chunk = grasp.resume_wait_fresh_chunk;
         abc.grasp_blocked = grasp.blocked;
         abc.grasp_phase_before_block = control::graspPhaseKind(grasp.phase_before_block);
+        abc.grasp_dwell_active = grasp.dwell_active;
+        abc.grasp_dwell_elapsed_sec = grasp.dwell_elapsed_sec;
+        abc.grasp_dwell_fallback_triggered = grasp.dwell_fallback_triggered;
+        abc.grasp_dwell_reason = grasp.dwell_reason;
         abc.gripper_close_soon = grasp.close_soon || surface.close_soon;
         abc.gripper_closing_hold_active = grasp.phase == control::GraspPhase::ClosingHold;
     };
@@ -4541,6 +4656,11 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     };
     const bool blocked =
         rf.delta_twist_pause_on_safety_block && safety_block_reason_mask != 0;
+    abc.delta_twist_soft_intervention_ignored_for_block =
+        intervention_recent &&
+        !rf.delta_twist_block_on_safety_intervention_recent &&
+        !blocked &&
+        safety_block_reason_mask == 0;
     if (blocked) {
         follower->setBlocked(true, safety_block_reason_mask);
         follower->pauseBlocked(execution_feedback_pose, dt_sec);
@@ -4748,10 +4868,30 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     abc.surface_raw_angular_norm_rad = vec6AngularNorm(surface.raw_delta_local);
     abc.surface_projected_angular_norm_rad = vec6AngularNorm(surface.projected_delta_local);
     abc.surface_discarded_angular_norm_rad = vec6AngularNorm(surface.discarded_delta_local);
+    const control::GripHorizonSummary& grip_horizon = diag.grip_horizon;
+    abc.grip_horizon_available = grip_horizon.available;
+    abc.grip_horizon_len = grip_horizon.len;
+    abc.grip_horizon_current_index = grip_horizon.current_index;
+    abc.grip_horizon_min = grip_horizon.min;
+    abc.grip_horizon_max = grip_horizon.max;
+    abc.grip_horizon_argmin = grip_horizon.argmin;
+    abc.grip_horizon_argmax = grip_horizon.argmax;
+    abc.grip_horizon_first_close_index = grip_horizon.first_close_index;
+    abc.grip_horizon_first_close_steps_ahead = grip_horizon.first_close_steps_ahead;
+    abc.grip_horizon_close_threshold = grip_horizon.close_threshold;
+    abc.grip_horizon_close_is_greater = grip_horizon.close_is_greater;
     const control::GraspCommitArmCommand& grasp = diag.grasp_commit;
     abc.grasp_phase = control::graspPhaseKind(grasp.phase);
     abc.grasp_commit_active = grasp.commit_active;
     abc.grasp_close_soon = grasp.close_soon;
+    abc.grasp_close_soon_source =
+        grasp.close_soon_source != control::kGraspCloseSoonSourceNone
+            ? grasp.close_soon_source
+            : grip_horizon.close_soon_source;
+    abc.grasp_close_soon_steps_ahead =
+        grasp.close_soon_source != control::kGraspCloseSoonSourceNone
+            ? grasp.close_soon_steps_ahead
+            : grip_horizon.close_soon_steps_ahead;
     abc.grasp_ready = grasp.ready;
     abc.grasp_sync_wait_sec = grasp.sync_wait_sec;
     abc.grasp_closing_hold_elapsed_sec = grasp.closing_hold_elapsed_sec;
@@ -4762,6 +4902,10 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     abc.grasp_resume_wait_fresh_chunk = grasp.resume_wait_fresh_chunk;
     abc.grasp_blocked = grasp.blocked;
     abc.grasp_phase_before_block = control::graspPhaseKind(grasp.phase_before_block);
+    abc.grasp_dwell_active = grasp.dwell_active;
+    abc.grasp_dwell_elapsed_sec = grasp.dwell_elapsed_sec;
+    abc.grasp_dwell_fallback_triggered = grasp.dwell_fallback_triggered;
+    abc.grasp_dwell_reason = grasp.dwell_reason;
     abc.gripper_close_soon = grasp.close_soon || surface.close_soon;
     abc.gripper_closing_hold_active = grasp.phase == control::GraspPhase::ClosingHold;
     if (grasp.gripper_override_active) {
@@ -5034,7 +5178,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                     (follower.active() && isHoldMotionState(previous_motion_state))) {
                     reason |= kDeltaTwistBlockPreviousHold;
                 }
-                if (safetyInterventionRecent(arm_id, now_ns)) {
+                if (rf.delta_twist_block_on_safety_intervention_recent &&
+                    safetyInterventionRecent(arm_id, now_ns)) {
                     reason |= kDeltaTwistBlockSafetyIntervention;
                 }
                 return reason;
@@ -5060,6 +5205,13 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 input.surface_active = diag.surface_projection.active;
                 input.surface_close_soon = diag.surface_projection.close_soon;
                 input.surface_min_tip_dist_m = diag.surface_projection.min_tip_dist_m;
+                input.close_soon_source = diag.grip_horizon.close_soon_source;
+                input.close_soon_steps_ahead = diag.grip_horizon.close_soon_steps_ahead;
+                input.commanded_linear_speed_m_s = vec6LinearNorm(diag.xi_cmd);
+                input.commanded_angular_speed_rad_s = vec6AngularNorm(diag.xi_cmd);
+                input.projected_linear_norm_m =
+                    vec6LinearNorm(diag.surface_projection.projected_delta_local);
+                input.gripper_cmd = follower.currentGrip();
                 input.safety_blocked =
                     (arm_id == ArmId::Left ? left_delta_block_reason : right_delta_block_reason) != 0;
                 input.fresh_chunk =

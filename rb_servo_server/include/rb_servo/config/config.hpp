@@ -979,6 +979,16 @@ struct GraspCommitConfig {
     bool bimanual_sync = true;
     bool freeze_gripper_until_commit = false;
     double close_target = 0.0;
+
+    bool enable_near_floor_dwell_fallback = false;
+    double dwell_floor_band_m = 0.018;
+    double dwell_min_duration_sec = 0.180;
+    double dwell_max_linear_speed_m_s = 0.015;
+    double dwell_max_angular_speed_rad_s = 0.20;
+    bool dwell_require_both_arms_near_floor = false;
+    bool dwell_require_projected_motion_small = true;
+    double dwell_projected_linear_norm_threshold_m = 0.0006;
+    bool dwell_trigger_close_even_without_model_close = true;
 };
 
 // Per-profile chunk-follower stage that REPLACES the pose_track_smd step while
@@ -1036,6 +1046,7 @@ struct RuckigFollowerConfig {
     double delta_twist_max_lead_rad = 0.30;
     double delta_twist_stale_residual_timeout_sec = 0.15;
     bool delta_twist_pause_on_safety_block = true;
+    bool delta_twist_block_on_safety_intervention_recent = false;
     double delta_twist_block_requires_fresh_chunk_sec = 0.050;
     bool delta_twist_block_clear_residual = true;
     SurfaceActionProjectorConfig surface_action_projector;

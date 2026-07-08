@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace rb_servo::control {
@@ -54,6 +55,29 @@ enum class DeltaTwistStepPhase {
   Reserve,
   ResidualDrain,
   Ringdown,
+};
+
+enum class GraspCloseSoonSource {
+  None = 0,
+  MotionOverlayGrip = 1,
+  FullGripHorizon = 2,
+  NearFloorDwellFallback = 3,
+};
+
+struct GripHorizonSummary {
+  bool available{false};
+  int len{0};
+  int current_index{-1};
+  double min{std::numeric_limits<double>::quiet_NaN()};
+  double max{std::numeric_limits<double>::quiet_NaN()};
+  int argmin{-1};
+  int argmax{-1};
+  int first_close_index{-1};
+  int first_close_steps_ahead{-1};
+  double close_threshold{std::numeric_limits<double>::quiet_NaN()};
+  bool close_is_greater{false};
+  int close_soon_source{static_cast<int>(GraspCloseSoonSource::None)};
+  int close_soon_steps_ahead{-1};
 };
 
 struct DeltaTwistFollowerDiag {
@@ -95,6 +119,7 @@ struct DeltaTwistFollowerDiag {
   int normal_consumed{0};
   int reserve_consumed{0};
   SurfaceProjectionResult surface_projection{};
+  GripHorizonSummary grip_horizon{};
   GraspCommitArmCommand grasp_commit{};
 };
 
@@ -136,6 +161,7 @@ class DeltaTwistFollower {
   bool hasConsumableStep() const;
   double gripAt(std::size_t k) const;
   std::vector<double> futureGripWindow(std::size_t k) const;
+  GripHorizonSummary summarizeGripHorizon(std::size_t k) const;
   bool clampPendingResidual();
   void clampCommandLead();
   void clearResidualForCommit();
@@ -151,6 +177,8 @@ class DeltaTwistFollower {
   std::uint64_t recv_seq_{0};
   std::vector<Vec6> delta_;
   std::vector<double> grip_;
+  std::vector<double> grip_horizon_;
+  bool full_grip_horizon_available_{false};
   std::size_t index_{0};
   int consumed_{0};
   int normal_eff_{0};
@@ -193,6 +221,7 @@ class DeltaTwistFollower {
   GraspPhase previous_grasp_phase_{GraspPhase::Normal};
   Pose6D grasp_lift_start_pose_{};
   bool has_grasp_lift_start_{false};
+  GripHorizonSummary grip_horizon_summary_{};
   DeltaTwistFollowerDiag diag_{};
 };
 

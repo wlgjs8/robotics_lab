@@ -43,6 +43,8 @@ class ChunkOverlayPublisher:
         host_time_ns: int,
         left_delta: list[list[float]] | None = None,
         right_delta: list[list[float]] | None = None,
+        left_grip_horizon: list[float] | None = None,
+        right_grip_horizon: list[float] | None = None,
     ) -> None:
         try:
             horizon = len(left) if left is not None else len(right or [])
@@ -60,6 +62,10 @@ class ChunkOverlayPublisher:
                 packet["left_delta"] = left_delta
             if right_delta is not None:
                 packet["right_delta"] = right_delta
+            if left_grip_horizon is not None:
+                packet["left_grip_horizon"] = left_grip_horizon
+            if right_grip_horizon is not None:
+                packet["right_grip_horizon"] = right_grip_horizon
             data = json.dumps(packet, separators=(",", ":")).encode("utf-8")
         except (BlockingIOError, OSError, TypeError, ValueError):
             return

@@ -106,6 +106,7 @@ _ZERO_TWIST: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 DEFAULT_FLOW_MAX_LINEAR_VELOCITY_M_S = 0.30
 DEFAULT_FLOW_MAX_ANGULAR_VELOCITY_RAD_S = 2.0
 DEFAULT_CHUNK_OVERLAY_RUNWAY_STEPS = 4
+DEFAULT_CHUNK_GRIP_HORIZON_STEPS = 24
 _FLOW_STATS_VELOCITY_LIMIT_SCALE = 1.25
 IMITATION_CHECKPOINT_SCHEMA = "robotics_lab.policy_runner.imitation_checkpoint.v1"
 IMITATION_ENSEMBLE_REPORT_SCHEMA = "robotics_lab.policy_runner.imitation_ensemble_report.v1"
@@ -318,6 +319,7 @@ class FlowMatchingActionSource:
         max_angular_step_rad: float = 0.01,
         chunk_execute_steps: int | None = None,
         chunk_overlay_runway_steps: int = DEFAULT_CHUNK_OVERLAY_RUNWAY_STEPS,
+        chunk_grip_horizon_steps: int = DEFAULT_CHUNK_GRIP_HORIZON_STEPS,
         chunk_crossfade_steps: int = 0,
         tcp_target_pose_conditioning: str = "legacy_step_hold",
         tcp_target_pose_reanchor_mode: str = "measured_blend",
@@ -445,6 +447,10 @@ class FlowMatchingActionSource:
         self.action_horizon = int(model_config.get("action_horizon", checkpoint.get("action_horizon", 0)) or 0)
         self.chunk_execute_steps = _resolve_chunk_execute_steps(chunk_execute_steps, self.action_horizon)
         self.chunk_overlay_runway_steps = _resolve_chunk_overlay_runway_steps(chunk_overlay_runway_steps)
+        self.chunk_grip_horizon_steps = _resolve_chunk_grip_horizon_steps(
+            chunk_grip_horizon_steps,
+            self.action_horizon,
+        )
         self.policy_dt_sec = _resolve_runtime_policy_dt_sec(
             policy_dt_sec,
             self.stats,
@@ -1080,10 +1086,23 @@ class FlowMatchingActionSource:
             execute_tail_index = max(0, min(int(execute_limit), int(overlay_rows.shape[0])) - 1)
             projected: dict[str, list[list[float]] | None] = {"left": None, "right": None}
             projected_delta: dict[str, list[list[float]] | None] = {"left": None, "right": None}
+            grip_horizon: dict[str, list[float] | None] = {"left": None, "right": None}
+            grip_horizon_limit = min(
+                int(len(chunk)),
+                _resolve_chunk_grip_horizon_steps(
+                    getattr(self, "chunk_grip_horizon_steps", DEFAULT_CHUNK_GRIP_HORIZON_STEPS),
+                    int(getattr(self, "action_horizon", len(chunk)) or len(chunk)),
+                ),
+            )
             for arm, idx, sl in self._foh_arm_indices():
                 if len(self.arm_mask) <= idx or self.arm_mask[idx] <= 0.0:
                     continue
                 grip_index = 6 if arm == "left" else 13
+                if grip_horizon_limit > 0:
+                    grip_horizon[arm] = [
+                        float(chunk[i][grip_index])
+                        for i in range(grip_horizon_limit)
+                    ]
                 anchor_mode = self._chunk_anchor_source()
                 if anchor_mode == "chain":
                     # Pure plan-chain integration: anchor on the PREVIOUS chunk's
@@ -1166,6 +1185,8 @@ class FlowMatchingActionSource:
                 right=projected["right"],
                 left_delta=projected_delta["left"],
                 right_delta=projected_delta["right"],
+                left_grip_horizon=grip_horizon["left"],
+                right_grip_horizon=grip_horizon["right"],
                 host_time_ns=time.time_ns(),
             )
         except Exception:
@@ -2193,6 +2214,7 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
         max_angular_step_rad: float = 0.01,
         chunk_execute_steps: int | None = None,
         chunk_overlay_runway_steps: int = DEFAULT_CHUNK_OVERLAY_RUNWAY_STEPS,
+        chunk_grip_horizon_steps: int = DEFAULT_CHUNK_GRIP_HORIZON_STEPS,
         chunk_crossfade_steps: int = 0,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
@@ -2262,6 +2284,10 @@ class DirectBcImageActionSource(FlowMatchingActionSource):
             raise ValueError("imitation checkpoint action_horizon must be positive")
         self.chunk_execute_steps = _resolve_chunk_execute_steps(chunk_execute_steps, self.action_horizon)
         self.chunk_overlay_runway_steps = _resolve_chunk_overlay_runway_steps(chunk_overlay_runway_steps)
+        self.chunk_grip_horizon_steps = _resolve_chunk_grip_horizon_steps(
+            chunk_grip_horizon_steps,
+            self.action_horizon,
+        )
         self.policy_dt_sec = _resolve_runtime_policy_dt_sec(
             policy_dt_sec,
             self.stats,
@@ -2391,6 +2417,7 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
         max_angular_step_rad: float = 0.01,
         chunk_execute_steps: int | None = None,
         chunk_overlay_runway_steps: int = DEFAULT_CHUNK_OVERLAY_RUNWAY_STEPS,
+        chunk_grip_horizon_steps: int = DEFAULT_CHUNK_GRIP_HORIZON_STEPS,
         chunk_crossfade_steps: int = 0,
         allow_rbpodo_controller_simulation_cartesian: bool = False,
         gripper_runtime: GripperRuntime | None = None,
@@ -2445,6 +2472,10 @@ class DirectBcCheckpointEnsembleActionSource(FlowMatchingActionSource):
         self.action_horizon = int(bundle.action_horizon)
         self.chunk_execute_steps = _resolve_chunk_execute_steps(chunk_execute_steps, self.action_horizon)
         self.chunk_overlay_runway_steps = _resolve_chunk_overlay_runway_steps(chunk_overlay_runway_steps)
+        self.chunk_grip_horizon_steps = _resolve_chunk_grip_horizon_steps(
+            chunk_grip_horizon_steps,
+            self.action_horizon,
+        )
         self.policy_dt_sec = _resolve_runtime_policy_dt_sec(
             policy_dt_sec,
             self.stats,
@@ -3146,6 +3177,15 @@ def _resolve_chunk_overlay_runway_steps(value: int | None) -> int:
     if resolved < 0:
         raise ValueError("chunk_overlay_runway_steps must be non-negative")
     return resolved
+
+
+def _resolve_chunk_grip_horizon_steps(value: int | None, action_horizon: int) -> int:
+    if action_horizon <= 0:
+        raise ValueError("flow checkpoint action_horizon must be positive")
+    resolved = int(DEFAULT_CHUNK_GRIP_HORIZON_STEPS if value is None else value)
+    if resolved <= 0:
+        raise ValueError("chunk_grip_horizon_steps must be positive")
+    return min(resolved, int(action_horizon))
 
 
 def _resolve_velocity_limit_from_stats(

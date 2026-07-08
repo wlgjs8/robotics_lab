@@ -14,6 +14,7 @@ CONFIG="${FLOW_INFER_CONFIG:-policy_runner/config/flow_real_realsense.yaml}"
 ACTION_HORIZON="${FLOW_INFER_ACTION_HORIZON:-24}"
 CHUNK_EXECUTE_STEPS="${FLOW_INFER_CHUNK_EXECUTE_STEPS:-6}"
 CHUNK_OVERLAY_RUNWAY_STEPS="${FLOW_INFER_CHUNK_OVERLAY_RUNWAY_STEPS:-4}"
+CHUNK_GRIP_HORIZON_STEPS="${FLOW_INFER_CHUNK_GRIP_HORIZON_STEPS:-24}"
 SPEED_SCALE="${FLOW_INFER_SPEED_SCALE:-1.0}"
 CHUNK_CROSSFADE_STEPS="${FLOW_INFER_CHUNK_CROSSFADE_STEPS:-2}"
 TCP_REANCHOR_MODE="${FLOW_INFER_TCP_REANCHOR_MODE:-measured_blend}"
@@ -56,7 +57,7 @@ echo "[flow-infer] checkpoint=$CHECKPOINT"
 echo "[flow-infer] chunk_overlay_endpoint=$RB_GUI_CHUNK_OVERLAY_ENDPOINT (rb_gui '예측 chunk 궤적 표시')"
 echo "[flow-infer] config=$CONFIG"
 echo "[flow-infer] rollout_summary=$ROLLOUT_SUMMARY"
-echo "[flow-infer] speed_scale=$SPEED_SCALE chunk_execute_steps=$CHUNK_EXECUTE_STEPS overlay_runway_steps=$CHUNK_OVERLAY_RUNWAY_STEPS crossfade=$CHUNK_CROSSFADE_STEPS reanchor=$TCP_REANCHOR_MODE"
+echo "[flow-infer] speed_scale=$SPEED_SCALE chunk_execute_steps=$CHUNK_EXECUTE_STEPS overlay_runway_steps=$CHUNK_OVERLAY_RUNWAY_STEPS grip_horizon_steps=$CHUNK_GRIP_HORIZON_STEPS crossfade=$CHUNK_CROSSFADE_STEPS reanchor=$TCP_REANCHOR_MODE"
 echo "[flow-infer] inherited env: OPENPI_REMOTE_SKIP_WARMUP=${OPENPI_REMOTE_SKIP_WARMUP-<unset>} RB_ALLOW_REAL_GRIPPER=${RB_ALLOW_REAL_GRIPPER-<unset>} DISPLAY=${DISPLAY-<unset>}"
 
 RTC_ARGS=()
@@ -176,6 +177,7 @@ exec "$PYTHON_BIN" -m policy_runner flow-infer \
   --action-horizon "$ACTION_HORIZON" \
   --chunk-execute-steps "$CHUNK_EXECUTE_STEPS" \
   --chunk-overlay-runway-steps "$CHUNK_OVERLAY_RUNWAY_STEPS" \
+  --chunk-grip-horizon-steps "$CHUNK_GRIP_HORIZON_STEPS" \
   --speed-scale "$SPEED_SCALE" \
   --chunk-crossfade-steps "$CHUNK_CROSSFADE_STEPS" \
   --tcp-target-pose-conditioning foh_se3 \

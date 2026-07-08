@@ -442,6 +442,7 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertIn('ACTION_HORIZON="${FLOW_INFER_ACTION_HORIZON:-24}"', wrapper)
         self.assertIn('CHUNK_EXECUTE_STEPS="${FLOW_INFER_CHUNK_EXECUTE_STEPS:-6}"', wrapper)
         self.assertIn('CHUNK_OVERLAY_RUNWAY_STEPS="${FLOW_INFER_CHUNK_OVERLAY_RUNWAY_STEPS:-4}"', wrapper)
+        self.assertIn('CHUNK_GRIP_HORIZON_STEPS="${FLOW_INFER_CHUNK_GRIP_HORIZON_STEPS:-24}"', wrapper)
         self.assertIn('SPEED_SCALE="${FLOW_INFER_SPEED_SCALE:-1.0}"', wrapper)
         self.assertIn('CHUNK_CROSSFADE_STEPS="${FLOW_INFER_CHUNK_CROSSFADE_STEPS:-2}"', wrapper)
         self.assertIn('TCP_REANCHOR_MODE="${FLOW_INFER_TCP_REANCHOR_MODE:-measured_blend}"', wrapper)
@@ -452,6 +453,7 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertIn('VELPROPRIO_SAMPLE="${FLOW_INFER_VELPROPRIO_SAMPLE:-camera_frame}"', wrapper)
         self.assertIn('--speed-scale "$SPEED_SCALE"', wrapper)
         self.assertIn('--chunk-overlay-runway-steps "$CHUNK_OVERLAY_RUNWAY_STEPS"', wrapper)
+        self.assertIn('--chunk-grip-horizon-steps "$CHUNK_GRIP_HORIZON_STEPS"', wrapper)
         self.assertIn('--tcp-target-pose-conditioning foh_se3', wrapper)
         self.assertIn('--tcp-target-pose-reanchor-mode "$TCP_REANCHOR_MODE"', wrapper)
 

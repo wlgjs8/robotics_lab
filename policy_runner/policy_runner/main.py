@@ -1376,6 +1376,16 @@ def _main_with_subcommands(argv: list[str]) -> int:
             "without steady-state lag. Default 2; set 0 to disable."
         ),
     )
+    flow_infer.add_argument(
+        "--chunk-grip-horizon-steps",
+        type=int,
+        default=24,
+        help=(
+            "Number of gripper action rows to include in the chunk overlay lookahead. "
+            "Motion overlay rows still use chunk_execute_steps + chunk_overlay_runway_steps; "
+            "this is only for servo-side close_soon detection."
+        ),
+    )
     flow_infer.add_argument("--max-linear-step-m", type=float, default=0.020)
     flow_infer.add_argument("--max-angular-step-rad", type=float, default=0.03)
     flow_infer.add_argument(
@@ -2147,6 +2157,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 "max_angular_step_rad": args.max_angular_step_rad,
                 "chunk_execute_steps": args.chunk_execute_steps,
                 "chunk_overlay_runway_steps": args.chunk_overlay_runway_steps,
+                "chunk_grip_horizon_steps": args.chunk_grip_horizon_steps,
                 "chunk_crossfade_steps": args.chunk_crossfade_steps,
                 "allow_rbpodo_controller_simulation_cartesian": (
                     rollout_policy.allows_controller_simulation_cartesian

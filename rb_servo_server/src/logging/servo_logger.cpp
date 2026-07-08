@@ -131,6 +131,9 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_follower_divergence_ang_rad"
        << ',' << side << "_follower_reanchor_count"
        << ',' << side << "_safety_intervention_recent"
+       << ',' << side << "_delta_twist_safety_intervention_recent"
+       << ',' << side << "_delta_twist_block_on_safety_intervention_recent"
+       << ',' << side << "_delta_twist_soft_intervention_ignored_for_block"
        << ',' << side << "_delta_twist_pending_linear_norm_m"
        << ',' << side << "_delta_twist_pending_angular_norm_rad"
        << ',' << side << "_delta_twist_step_linear_norm_m"
@@ -189,6 +192,8 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_grasp_phase"
        << ',' << side << "_grasp_commit_active"
        << ',' << side << "_grasp_close_soon"
+       << ',' << side << "_grasp_close_soon_source"
+       << ',' << side << "_grasp_close_soon_steps_ahead"
        << ',' << side << "_grasp_ready"
        << ',' << side << "_grasp_sync_wait_sec"
        << ',' << side << "_grasp_closing_hold_elapsed_sec"
@@ -199,9 +204,24 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_grasp_resume_wait_fresh_chunk"
        << ',' << side << "_grasp_blocked"
        << ',' << side << "_grasp_phase_before_block"
+       << ',' << side << "_grasp_dwell_active"
+       << ',' << side << "_grasp_dwell_elapsed_sec"
+       << ',' << side << "_grasp_dwell_fallback_triggered"
+       << ',' << side << "_grasp_dwell_reason"
        << ',' << side << "_gripper_policy_cmd"
        << ',' << side << "_gripper_effective_cmd"
        << ',' << side << "_gripper_close_soon"
+       << ',' << side << "_grip_horizon_available"
+       << ',' << side << "_grip_horizon_len"
+       << ',' << side << "_grip_horizon_current_index"
+       << ',' << side << "_grip_horizon_min"
+       << ',' << side << "_grip_horizon_max"
+       << ',' << side << "_grip_horizon_argmin"
+       << ',' << side << "_grip_horizon_argmax"
+       << ',' << side << "_grip_horizon_first_close_index"
+       << ',' << side << "_grip_horizon_first_close_steps_ahead"
+       << ',' << side << "_grip_horizon_close_threshold"
+       << ',' << side << "_grip_horizon_close_is_greater"
        << ',' << side << "_gripper_closing_hold_active"
        << ',' << side << "_output_ma_present"
        << ',' << side << "_output_ma_window";
@@ -601,6 +621,9 @@ void writeArmProfilingColumns(
        << ',' << telemetry.follower_divergence_ang_rad
        << ',' << telemetry.follower_reanchor_count
        << ',' << telemetry.safety_intervention_recent
+       << ',' << telemetry.delta_twist_safety_intervention_recent
+       << ',' << telemetry.delta_twist_block_on_safety_intervention_recent
+       << ',' << telemetry.delta_twist_soft_intervention_ignored_for_block
        << ',' << telemetry.delta_twist_pending_linear_norm_m
        << ',' << telemetry.delta_twist_pending_angular_norm_rad
        << ',' << telemetry.delta_twist_step_linear_norm_m
@@ -659,6 +682,8 @@ void writeArmProfilingColumns(
        << ',' << telemetry.grasp_phase
        << ',' << telemetry.grasp_commit_active
        << ',' << telemetry.grasp_close_soon
+       << ',' << telemetry.grasp_close_soon_source
+       << ',' << telemetry.grasp_close_soon_steps_ahead
        << ',' << telemetry.grasp_ready
        << ',' << telemetry.grasp_sync_wait_sec
        << ',' << telemetry.grasp_closing_hold_elapsed_sec
@@ -668,10 +693,25 @@ void writeArmProfilingColumns(
        << ',' << telemetry.grasp_policy_delta_dropped
        << ',' << telemetry.grasp_resume_wait_fresh_chunk
        << ',' << telemetry.grasp_blocked
-       << ',' << telemetry.grasp_phase_before_block;
+       << ',' << telemetry.grasp_phase_before_block
+       << ',' << telemetry.grasp_dwell_active
+       << ',' << telemetry.grasp_dwell_elapsed_sec
+       << ',' << telemetry.grasp_dwell_fallback_triggered
+       << ',' << telemetry.grasp_dwell_reason;
     writeOptionalDoubleColumn(os, telemetry.gripper_policy_cmd);
     writeOptionalDoubleColumn(os, telemetry.gripper_effective_cmd);
     os << ',' << telemetry.gripper_close_soon
+       << ',' << telemetry.grip_horizon_available
+       << ',' << telemetry.grip_horizon_len
+       << ',' << telemetry.grip_horizon_current_index
+       << ',' << telemetry.grip_horizon_min
+       << ',' << telemetry.grip_horizon_max
+       << ',' << telemetry.grip_horizon_argmin
+       << ',' << telemetry.grip_horizon_argmax
+       << ',' << telemetry.grip_horizon_first_close_index
+       << ',' << telemetry.grip_horizon_first_close_steps_ahead
+       << ',' << telemetry.grip_horizon_close_threshold
+       << ',' << telemetry.grip_horizon_close_is_greater
        << ',' << telemetry.gripper_closing_hold_active
        << ',' << telemetry.output_ma_present
        << ',' << telemetry.output_ma_window;

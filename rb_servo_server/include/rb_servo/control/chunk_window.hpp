@@ -26,6 +26,8 @@ namespace rb_servo::control {
 struct ChunkFrame {
   std::vector<Pose6D> pose;      // absolute stand-frame waypoints
   std::vector<double> grip;      // per-waypoint gripper target (producer units)
+  std::vector<double> grip_horizon;  // optional full action-horizon grip lookahead
+  bool has_grip_horizon{false};      // true only when the optional horizon was present
   std::vector<Vec6> delta;       // optional conditioned per-frame local/body deltas
   double policy_dt{1.0 / 30.0};  // per-step wall clock
   std::uint64_t wire_seq{0};     // producer packet seq / flow chunk id

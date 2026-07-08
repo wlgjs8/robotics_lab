@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <initializer_list>
+#include <vector>
 
 using rb_servo::Pose6D;
 using rb_servo::Vec6;
@@ -17,6 +18,7 @@ using rb_servo::control::DeltaTwistFollower;
 using rb_servo::control::DeltaTwistFollowerConfig;
 using rb_servo::control::DeltaTwistStepPhase;
 using rb_servo::control::GraspCommitArmCommand;
+using rb_servo::control::GraspCloseSoonSource;
 using rb_servo::control::GraspPhase;
 
 static int g_failures = 0;
@@ -94,6 +96,47 @@ static ChunkFrame makeFrame(std::initializer_list<Vec6> deltas) {
     f.delta.push_back(delta);
     f.grip.push_back(20.0 + static_cast<double>(i));
     ++i;
+  }
+  return f;
+}
+
+static ChunkFrame makeOpenMotionFrameWithGripHorizon(
+    int motion_rows,
+    int horizon_rows,
+    int close_step
+) {
+  ChunkFrame f;
+  f.policy_dt = POLICY_DT;
+  f.wire_seq = 64;
+  f.recv_seq = 19;
+  f.recv_time = 20.0;
+  for (int i = 0; i < motion_rows; ++i) {
+    f.delta.push_back(Vec6{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    f.grip.push_back(80.0);
+  }
+  f.has_grip_horizon = true;
+  for (int i = 0; i < horizon_rows; ++i) {
+    f.grip_horizon.push_back(i == close_step ? 0.0 : 80.0);
+  }
+  return f;
+}
+
+static ChunkFrame makeOpenMotionFrameWithGripHorizonValues(
+    int motion_rows,
+    std::initializer_list<double> horizon
+) {
+  ChunkFrame f;
+  f.policy_dt = POLICY_DT;
+  f.wire_seq = 65;
+  f.recv_seq = 20;
+  f.recv_time = 21.0;
+  for (int i = 0; i < motion_rows; ++i) {
+    f.delta.push_back(Vec6{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    f.grip.push_back(80.0);
+  }
+  f.has_grip_horizon = true;
+  for (double value : horizon) {
+    f.grip_horizon.push_back(value);
   }
   return f;
 }
@@ -360,6 +403,131 @@ int main() {
           "pending residual receives projected delta only");
     check(follower.diag().surface_projection.discarded_delta_local.z < 0.0,
           "discarded downward delta is reported");
+  }
+
+  std::printf("Test I3: late grip horizon close is visible to close_soon\n");
+  {
+    DeltaTwistFollowerConfig cfg = fastConfig();
+    cfg.surface_action_projector.close_lookahead_steps = 24;
+    cfg.surface_action_projector.close_threshold = 25.0;
+    cfg.surface_action_projector.close_is_greater = false;
+    cfg.grasp_commit.enable = true;
+    cfg.grasp_commit.close_lookahead_steps = 24;
+    cfg.grasp_commit.close_threshold = 25.0;
+    cfg.grasp_commit.close_is_greater = false;
+    DeltaTwistFollower follower(cfg);
+    follower.submitFrame(
+        makeOpenMotionFrameWithGripHorizon(10, 24, 16),
+        identityPose());
+    check(follower.diag().surface_projection.close_soon,
+          "late close in full grip horizon is detected");
+    check(follower.currentGrip() == 80.0,
+          "current gripper target still comes from executable motion row");
+    check(follower.windowConsumed() == 1,
+          "full grip horizon does not execute extra motion rows");
+  }
+
+  std::printf("Test I4: short grip lookahead does not see late close\n");
+  {
+    DeltaTwistFollowerConfig cfg = fastConfig();
+    cfg.surface_action_projector.close_lookahead_steps = 4;
+    cfg.surface_action_projector.close_threshold = 25.0;
+    cfg.surface_action_projector.close_is_greater = false;
+    cfg.grasp_commit.enable = true;
+    cfg.grasp_commit.close_lookahead_steps = 4;
+    cfg.grasp_commit.close_threshold = 25.0;
+    cfg.grasp_commit.close_is_greater = false;
+    DeltaTwistFollower follower(cfg);
+    follower.submitFrame(
+        makeOpenMotionFrameWithGripHorizon(10, 24, 16),
+        identityPose());
+    check(!follower.diag().surface_projection.close_soon,
+          "late close outside short lookahead is ignored");
+  }
+
+  std::printf("Test I5: grip horizon summary finds first less-than-threshold close\n");
+  {
+    DeltaTwistFollowerConfig cfg = fastConfig();
+    cfg.grasp_commit.enable = true;
+    cfg.grasp_commit.close_lookahead_steps = 4;
+    cfg.grasp_commit.close_threshold = 25.0;
+    cfg.grasp_commit.close_is_greater = false;
+    DeltaTwistFollower follower(cfg);
+    follower.submitFrame(
+        makeOpenMotionFrameWithGripHorizonValues(4, {80.0, 70.0, 30.0, 20.0}),
+        identityPose());
+    const auto& summary = follower.diag().grip_horizon;
+    check(summary.available, "full grip horizon availability is reported");
+    check(summary.len == 4, "full grip horizon length is reported");
+    check(summary.current_index == 0, "current horizon index matches consumed delta row");
+    check(summary.argmin == 3 && summary.min == 20.0, "horizon min and argmin are reported");
+    check(summary.argmax == 0 && summary.max == 80.0, "horizon max and argmax are reported");
+    check(summary.first_close_index == 3, "less-than threshold first close index is reported");
+    check(summary.first_close_steps_ahead == 3, "less-than threshold steps-ahead is reported");
+    check(summary.close_soon_source == static_cast<int>(GraspCloseSoonSource::FullGripHorizon),
+          "less-than close source is full grip horizon");
+    check(summary.close_soon_steps_ahead == 3, "less-than close_soon steps-ahead is reported");
+  }
+
+  std::printf("Test I6: grip horizon summary finds first greater-than-threshold close\n");
+  {
+    DeltaTwistFollowerConfig cfg = fastConfig();
+    cfg.grasp_commit.enable = true;
+    cfg.grasp_commit.close_lookahead_steps = 3;
+    cfg.grasp_commit.close_threshold = 60.0;
+    cfg.grasp_commit.close_is_greater = true;
+    DeltaTwistFollower follower(cfg);
+    follower.submitFrame(
+        makeOpenMotionFrameWithGripHorizonValues(3, {10.0, 20.0, 70.0}),
+        identityPose());
+    const auto& summary = follower.diag().grip_horizon;
+    check(summary.first_close_index == 2, "greater-than threshold first close index is reported");
+    check(summary.first_close_steps_ahead == 2, "greater-than threshold steps-ahead is reported");
+    check(summary.close_soon_source == static_cast<int>(GraspCloseSoonSource::FullGripHorizon),
+          "greater-than close source is full grip horizon");
+    check(summary.close_soon_steps_ahead == 2, "greater-than close_soon steps-ahead is reported");
+  }
+
+  std::printf("Test I7: grip horizon summary reports no-close sentinel\n");
+  {
+    DeltaTwistFollowerConfig cfg = fastConfig();
+    cfg.grasp_commit.enable = true;
+    cfg.grasp_commit.close_lookahead_steps = 4;
+    cfg.grasp_commit.close_threshold = 25.0;
+    cfg.grasp_commit.close_is_greater = false;
+    DeltaTwistFollower follower(cfg);
+    follower.submitFrame(
+        makeOpenMotionFrameWithGripHorizonValues(3, {80.0, 70.0, 30.0}),
+        identityPose());
+    const auto& summary = follower.diag().grip_horizon;
+    check(summary.first_close_index == -1, "no-close first index sentinel is -1");
+    check(summary.first_close_steps_ahead == -1, "no-close steps-ahead sentinel is -1");
+    check(summary.close_soon_source == static_cast<int>(GraspCloseSoonSource::None),
+          "no-close source is none");
+    check(summary.close_soon_steps_ahead == -1, "no-close close_soon steps-ahead sentinel is -1");
+  }
+
+  std::printf("Test I8: grip horizon telemetry is safe when no full horizon is present\n");
+  {
+    DeltaTwistFollowerConfig cfg = fastConfig();
+    cfg.grasp_commit.enable = true;
+    cfg.grasp_commit.close_lookahead_steps = 4;
+    cfg.grasp_commit.close_threshold = 5.0;
+    cfg.grasp_commit.close_is_greater = false;
+    DeltaTwistFollower follower(cfg);
+    follower.submitFrame(makeFrame({
+        Vec6{0.0, 0.0, 0.0, 0.0, 0.0, 0.0},
+        Vec6{0.0, 0.0, 0.0, 0.0, 0.0, 0.0},
+    }), identityPose());
+    const auto& summary = follower.diag().grip_horizon;
+    check(!summary.available, "missing full grip horizon is reported");
+    check(summary.len == 0, "missing full grip horizon length is zero");
+    check(summary.current_index == 0, "missing horizon still reports current policy index");
+    check(std::isnan(summary.min) && std::isnan(summary.max), "missing horizon extrema are NaN");
+    check(summary.argmin == -1 && summary.argmax == -1, "missing horizon extrema indices are sentinels");
+    check(summary.first_close_index == -1, "missing horizon first close index is sentinel");
+    check(summary.close_soon_source == static_cast<int>(GraspCloseSoonSource::None),
+          "missing horizon without motion-overlay close reports no source");
   }
 
   std::printf("Test J: reanchor clears dangerous residual\n");

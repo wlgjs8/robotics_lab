@@ -473,6 +473,57 @@ class AnalyzeServoLogTest(unittest.TestCase):
             self.assertIn("yaw_sign_match_percent: 50.000", report)
             self.assertIn("left xi_cmd_angular_norm_rad_s: count=4", report)
 
+    def test_gripper_horizon_warns_when_threshold_never_crossed(self) -> None:
+        extra = [
+            "left_follower_controller",
+            "left_gripper_close_soon",
+            "left_grasp_close_soon",
+            "left_grasp_close_soon_source",
+            "left_grasp_close_soon_steps_ahead",
+            "left_grip_horizon_available",
+            "left_grip_horizon_len",
+            "left_grip_horizon_min",
+            "left_grip_horizon_max",
+            "left_grip_horizon_first_close_steps_ahead",
+            "left_grip_horizon_close_threshold",
+            "left_grip_horizon_close_is_greater",
+        ]
+        rows = [
+            {
+                "left_follower_controller": "delta_twist",
+                "left_gripper_close_soon": "0",
+                "left_grasp_close_soon": "0",
+                "left_grasp_close_soon_source": "0",
+                "left_grasp_close_soon_steps_ahead": "-1",
+                "left_grip_horizon_available": "1",
+                "left_grip_horizon_len": "24",
+                "left_grip_horizon_min": "50",
+                "left_grip_horizon_max": "50",
+                "left_grip_horizon_first_close_steps_ahead": "-1",
+                "left_grip_horizon_close_threshold": "25",
+                "left_grip_horizon_close_is_greater": "0",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "grip-horizon-threshold.csv"
+            self.make_log(path, rows=len(rows), extra_fieldnames=extra, row_overrides=rows)
+
+            metrics = analyze_servo_log.analyze_csv(path)
+            report = analyze_servo_log.format_report(
+                metrics,
+                analyze_servo_log.BUDGETS["rbsim-local100"],
+                failures=[],
+            )
+
+            left = metrics["delta_twist"]["left"]
+            self.assertEqual(left["grip_horizon_available_ticks"], 1)
+            self.assertEqual(left["grip_horizon_crossed_ticks"], 0)
+            self.assertEqual(left["grip_horizon_min"]["p50"], 50.0)
+            self.assertIn("No close will be detected with this threshold.", left["warnings"])
+            self.assertIn("close_threshold is outside the observed gripper range", left["warnings"])
+            self.assertIn("gripper horizon", report)
+            self.assertIn("No close will be detected with this threshold.", report)
+
     def test_near_floor_analysis_warns_on_sliding_during_close(self) -> None:
         extra = [
             "safety_verdict",

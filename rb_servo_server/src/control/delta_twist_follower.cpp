@@ -49,34 +49,26 @@ bool hasLinearOrAngularNorm(const Vec6& v, double eps = 1e-9) {
   return linearNorm(v) > eps || angularNorm(v) > eps;
 }
 
-bool closeSoonForGrasp(
-    const GraspCommitConfig& cfg,
-    const std::vector<double>& future_grip_window
+bool crossesCloseThreshold(double value, double threshold, bool close_is_greater) {
+  if (!std::isfinite(value) || !std::isfinite(threshold)) return false;
+  return close_is_greater ? value >= threshold : value <= threshold;
+}
+
+int firstCloseIndex(
+    const std::vector<double>& values,
+    std::size_t begin,
+    std::size_t end,
+    double threshold,
+    bool close_is_greater
 ) {
-  if (!cfg.enable || cfg.close_lookahead_steps <= 0 || future_grip_window.empty()) {
-    return false;
-  }
-  const std::size_t n = std::min(
-      static_cast<std::size_t>(cfg.close_lookahead_steps),
-      future_grip_window.size()
-  );
-  bool found = false;
-  double extreme = cfg.close_is_greater
-      ? -std::numeric_limits<double>::infinity()
-      : std::numeric_limits<double>::infinity();
-  for (std::size_t i = 0; i < n; ++i) {
-    const double value = future_grip_window[i];
-    if (!std::isfinite(value)) continue;
-    found = true;
-    if (cfg.close_is_greater) {
-      extreme = std::max(extreme, value);
-    } else {
-      extreme = std::min(extreme, value);
+  if (begin >= values.size()) return -1;
+  end = std::min(end, values.size());
+  for (std::size_t i = begin; i < end; ++i) {
+    if (crossesCloseThreshold(values[i], threshold, close_is_greater)) {
+      return static_cast<int>(i);
     }
   }
-  if (!found) return false;
-  return cfg.close_is_greater ? extreme >= cfg.close_threshold
-                              : extreme <= cfg.close_threshold;
+  return -1;
 }
 
 double robustRatio(double numerator, double denominator) {
@@ -253,6 +245,8 @@ void DeltaTwistFollower::deactivate() {
   active_ = false;
   delta_.clear();
   grip_.clear();
+  grip_horizon_.clear();
+  full_grip_horizon_available_ = false;
   index_ = 0;
   consumed_ = 0;
   normal_eff_ = 0;
@@ -286,6 +280,7 @@ void DeltaTwistFollower::deactivate() {
   grasp_commit_ = GraspCommitArmCommand{};
   previous_grasp_phase_ = GraspPhase::Normal;
   has_grasp_lift_start_ = false;
+  grip_horizon_summary_ = GripHorizonSummary{};
   surface_projection_ = SurfaceProjectionResult{};
   diag_ = DeltaTwistFollowerDiag{};
 }
@@ -305,13 +300,83 @@ std::vector<double> DeltaTwistFollower::futureGripWindow(std::size_t k) const {
       cfg_.surface_action_projector.close_lookahead_steps,
       cfg_.grasp_commit.close_lookahead_steps
   );
-  if (lookahead <= 0 || grip_.empty()) return window;
-  const std::size_t end = std::min(grip_.size(), k + static_cast<std::size_t>(lookahead));
+  const std::vector<double>& source = grip_horizon_.empty() ? grip_ : grip_horizon_;
+  if (lookahead <= 0 || source.empty()) return window;
+  const std::size_t end = std::min(source.size(), k + static_cast<std::size_t>(lookahead));
   window.reserve(end > k ? end - k : 0);
   for (std::size_t i = k; i < end; ++i) {
-    window.push_back(gripAt(i));
+    window.push_back(source[i]);
   }
   return window;
+}
+
+GripHorizonSummary DeltaTwistFollower::summarizeGripHorizon(std::size_t k) const {
+  GripHorizonSummary summary;
+  summary.available = full_grip_horizon_available_;
+  summary.current_index = static_cast<int>(k);
+  summary.close_threshold = cfg_.grasp_commit.close_threshold;
+  summary.close_is_greater = cfg_.grasp_commit.close_is_greater;
+
+  if (full_grip_horizon_available_) {
+    summary.len = static_cast<int>(grip_horizon_.size());
+    bool found_finite = false;
+    for (std::size_t i = 0; i < grip_horizon_.size(); ++i) {
+      const double value = grip_horizon_[i];
+      if (!std::isfinite(value)) continue;
+      if (!found_finite) {
+        summary.min = value;
+        summary.max = value;
+        summary.argmin = static_cast<int>(i);
+        summary.argmax = static_cast<int>(i);
+        found_finite = true;
+      } else {
+        if (value < summary.min) {
+          summary.min = value;
+          summary.argmin = static_cast<int>(i);
+        }
+        if (value > summary.max) {
+          summary.max = value;
+          summary.argmax = static_cast<int>(i);
+        }
+      }
+    }
+    summary.first_close_index = firstCloseIndex(
+        grip_horizon_,
+        k,
+        grip_horizon_.size(),
+        summary.close_threshold,
+        summary.close_is_greater
+    );
+    if (summary.first_close_index >= 0) {
+      summary.first_close_steps_ahead = summary.first_close_index - static_cast<int>(k);
+    }
+  }
+
+  const bool use_full_horizon = full_grip_horizon_available_ && !grip_horizon_.empty();
+  const std::vector<double>& close_source = use_full_horizon ? grip_horizon_ : grip_;
+  if (cfg_.grasp_commit.enable &&
+      cfg_.grasp_commit.close_lookahead_steps > 0 &&
+      k < close_source.size()) {
+    const std::size_t end = std::min(
+        close_source.size(),
+        k + static_cast<std::size_t>(cfg_.grasp_commit.close_lookahead_steps)
+    );
+    const int close_index = firstCloseIndex(
+        close_source,
+        k,
+        end,
+        summary.close_threshold,
+        summary.close_is_greater
+    );
+    if (close_index >= 0) {
+      summary.close_soon_source = static_cast<int>(
+          use_full_horizon ? GraspCloseSoonSource::FullGripHorizon
+                           : GraspCloseSoonSource::MotionOverlayGrip
+      );
+      summary.close_soon_steps_ahead = close_index - static_cast<int>(k);
+    }
+  }
+  return summary;
 }
 
 void DeltaTwistFollower::submitFrame(const ChunkFrame& frame, const Pose6D& current_pose) {
@@ -326,6 +391,8 @@ void DeltaTwistFollower::submitFrame(const ChunkFrame& frame, const Pose6D& curr
   recv_seq_ = frame.recv_seq;
   delta_ = frame.delta;
   grip_ = frame.grip;
+  full_grip_horizon_available_ = frame.has_grip_horizon;
+  grip_horizon_ = frame.grip_horizon;
 
   const int L = std::max(0, cfg_.discard_head_steps);
   const int n = static_cast<int>(delta_.size());
@@ -349,6 +416,7 @@ void DeltaTwistFollower::submitFrame(const ChunkFrame& frame, const Pose6D& curr
   residual_cleared_by_block_ = false;
   block_requires_fresh_chunk_ = false;
   step_consumed_this_tick_ = false;
+  grip_horizon_summary_ = summarizeGripHorizon(index_);
   if (!blocked_) {
     block_elapsed_sec_ = 0.0;
     block_reason_mask_ = 0;
@@ -396,6 +464,7 @@ void DeltaTwistFollower::submitFrame(const ChunkFrame& frame, const Pose6D& curr
     xi_cmd_clamped_norm_ = false;
     current_grip_ = gripAt(index_);
     surface_projection_ = SurfaceProjectionResult{};
+    grip_horizon_summary_ = summarizeGripHorizon(index_);
     diag_ = DeltaTwistFollowerDiag{};
     active_ = true;
   }
@@ -404,6 +473,7 @@ void DeltaTwistFollower::submitFrame(const ChunkFrame& frame, const Pose6D& curr
   // row immediately so the first servo tick starts moving toward the model's
   // current action instead of waiting one policy period.
   if (blocked_) {
+    grip_horizon_summary_ = summarizeGripHorizon(index_);
     updateDiagState();
     return;
   }
@@ -446,6 +516,7 @@ void DeltaTwistFollower::reanchor(const Pose6D& reference) {
   grasp_commit_ = GraspCommitArmCommand{};
   previous_grasp_phase_ = GraspPhase::Normal;
   has_grasp_lift_start_ = false;
+  grip_horizon_summary_ = summarizeGripHorizon(index_);
   diag_.seg_target_stand = reference;
   updateDiagState();
   if (total_eff_ > 0) active_ = true;
@@ -616,11 +687,13 @@ void DeltaTwistFollower::setFeedbackPose(
 
 bool DeltaTwistFollower::consumeNextStep() {
   if (blocked_ || block_requires_fresh_chunk_) {
+    grip_horizon_summary_ = summarizeGripHorizon(index_);
     diag_.stall = true;
     diag_.step_phase = DeltaTwistStepPhase::Ringdown;
     return false;
   }
   if (!hasConsumableStep()) {
+    grip_horizon_summary_ = summarizeGripHorizon(index_);
     diag_.stall = true;
     ++diag_.stall_count;
     diag_.seg_step_index = -1;
@@ -632,6 +705,7 @@ bool DeltaTwistFollower::consumeNextStep() {
   const Vec6 raw_step = finiteDelta(delta_[index_]) ? delta_[index_] : Vec6{};
   const Pose6D projection_reference =
       has_projection_reference_ ? projection_reference_pose_ : command_pose_;
+  grip_horizon_summary_ = summarizeGripHorizon(index_);
   std::vector<double> grip_window = futureGripWindow(index_);
   SurfaceProjectionResult surface = surface_projector_.project(
       arm_id_,
@@ -641,7 +715,10 @@ bool DeltaTwistFollower::consumeNextStep() {
       current_grip_,
       consumed_ < normal_eff_ ? SurfacePhase::Normal : SurfacePhase::Reserve
   );
-  surface.close_soon = surface.close_soon || closeSoonForGrasp(cfg_.grasp_commit, grip_window);
+  surface.close_soon =
+      surface.close_soon ||
+      grip_horizon_summary_.close_soon_source !=
+          static_cast<int>(GraspCloseSoonSource::None);
   Vec6 projected_step = surface.projected_delta_local;
   if (!finiteDelta(projected_step)) {
     projected_step = Vec6{};
@@ -734,6 +811,7 @@ void DeltaTwistFollower::updateDiagState() {
   diag_.reserve_consumed = std::max(0, consumed_ - normal_eff_);
   diag_.seg_target_stand = command_pose_;
   diag_.surface_projection = surface_projection_;
+  diag_.grip_horizon = grip_horizon_summary_;
   diag_.grasp_commit = grasp_commit_;
 }
 

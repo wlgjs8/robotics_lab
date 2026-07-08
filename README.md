@@ -325,10 +325,12 @@ DeltaTwistFollower + velocity-proprio 안정성 확인을 위한 첫 실행 base
 아래처럼 둡니다. RTC/ensemble은 기본 안정성 확인 뒤 별도로 opt-in합니다.
 
 ```bash
+FLOW_INFER_PYTHON=~/openpi/.venv/bin/python \
 FLOW_INFER_STITCH=boundary \
 FLOW_INFER_ACTION_HORIZON=24 \
 FLOW_INFER_CHUNK_EXECUTE_STEPS=6 \
 FLOW_INFER_CHUNK_OVERLAY_RUNWAY_STEPS=4 \
+FLOW_INFER_CHUNK_GRIP_HORIZON_STEPS=24 \
 FLOW_INFER_VELPROPRIO_SOURCE=measured \
 FLOW_INFER_VELPROPRIO_SAMPLE=camera_frame \
 FLOW_INFER_PRINT_CHUNK=0 \
@@ -365,6 +367,16 @@ python3 rb_servo_server/tools/analyze_servo_log.py logs/servo_log.csv --profile 
 `delta_twist_blocked`, near-floor lead, 그리고 `blocked_step_consumed_ticks`를
 확인합니다. sliding warning이 뜨면 close 직전 arm translation이 아직 남아 있는
 것이고, projector inactive warning이 뜨면 config/profile 선택부터 확인합니다.
+
+다음 OpenPI DeltaTwist bolt-pick run 뒤에는 아래 telemetry를 먼저 확인합니다.
+
+- `right_delta_twist_block_reason`이 긴 구간 동안 `16`만 반복되지 않아야 합니다.
+- `right_delta_twist_step_kind`가 대부분 ringdown이어서는 안 됩니다.
+- `grip_horizon_available`은 true, `grip_horizon_len`은 24여야 합니다.
+- `grip_horizon_first_close_index`로 model close가 늦게 나오는지, 아예 없는지 확인합니다.
+- close가 horizon 안에 있으면 `right_gripper_close_soon`이 true가 되어야 합니다.
+- `grasp_phase`는 `SurfaceApproach -> PreGraspCommit -> ClosingHold -> LiftOut`로 진행해야 합니다.
+- `ClosingHold` 동안 `gripper_effective_cmd`가 실제 close target으로 내려가야 합니다.
 
 HDF5 policy episodes should be audited before `flow-train`:
 

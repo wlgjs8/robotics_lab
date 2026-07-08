@@ -85,6 +85,24 @@ bool parseArmDelta(const json& arm_node, ChunkFrameReceiver::ArmDeltaSteps* out)
     return true;
 }
 
+bool parseGripHorizon(const json& node, ChunkFrameReceiver::ArmGripHorizon* out) {
+    if (node.is_null()) return false;
+    if (!node.is_array()) return false;
+    const int n = static_cast<int>(node.size());
+    if (n < 1) return false;
+    const int count = std::min(n, ChunkFrameReceiver::kMaxGripHorizon);
+    for (int i = 0; i < n; ++i) {
+        if (!node[i].is_number()) return false;
+        const double v = node[i].get<double>();
+        if (!std::isfinite(v)) return false;
+        if (i < count) {
+            out->value[static_cast<std::size_t>(i)] = v;
+        }
+    }
+    out->count = count;
+    return true;
+}
+
 }  // namespace
 
 ChunkFrameReceiver::ChunkFrameReceiver(const std::string& bind_uri) : bind_uri_(bind_uri) {}
@@ -136,6 +154,19 @@ bool ChunkFrameReceiver::parsePacket(const char* data, std::size_t size, Frame* 
     if (right_delta_it != packet.end()) {
         frame.has_right_delta = parseArmDelta(*right_delta_it, &frame.right_delta);
         if (!frame.has_right_delta || !frame.has_right) return false;
+    }
+
+    const auto left_grip_horizon_it = packet.find("left_grip_horizon");
+    if (left_grip_horizon_it != packet.end()) {
+        frame.has_left_grip_horizon =
+            parseGripHorizon(*left_grip_horizon_it, &frame.left_grip_horizon);
+        if (!frame.has_left_grip_horizon || !frame.has_left) return false;
+    }
+    const auto right_grip_horizon_it = packet.find("right_grip_horizon");
+    if (right_grip_horizon_it != packet.end()) {
+        frame.has_right_grip_horizon =
+            parseGripHorizon(*right_grip_horizon_it, &frame.right_grip_horizon);
+        if (!frame.has_right_grip_horizon || !frame.has_right) return false;
     }
 
     frame.recv_steady_sec = steadyNowSec();

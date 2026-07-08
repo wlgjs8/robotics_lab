@@ -118,6 +118,12 @@ GRASP_PHASE_LABELS = {
     4: "lift_out",
     5: "resume_wait_fresh_chunk",
 }
+GRASP_CLOSE_SOURCE_LABELS = {
+    0: "none",
+    1: "motion_overlay_grip",
+    2: "full_grip_horizon",
+    3: "near_floor_dwell_fallback",
+}
 DEFAULT_NEAR_FLOOR_MARGIN_M = 0.012
 DEFAULT_SLIDING_THRESHOLD_M = 0.0005
 DEFAULT_LEAD_LINEAR_WARN_M = 0.006
@@ -165,6 +171,16 @@ def optional_bool(row: dict[str, str], column: str, row_number: int) -> bool | N
     if value is None or value == "":
         return None
     return parse_bool(value, column, row_number)
+
+
+def optional_int(row: dict[str, str], column: str, row_number: int) -> int | None:
+    value = optional_float(row, column, row_number)
+    if value is None:
+        return None
+    integer = int(value)
+    if value != integer:
+        raise AnalysisError(f"row {row_number}: column {column} must be an integer")
+    return integer
 
 
 def percentile_nearest_rank(values: Sequence[float], percentile: float) -> float:
@@ -231,6 +247,21 @@ def make_delta_twist_bucket() -> dict[str, object]:
         "grasp_policy_delta_dropped_ticks": 0,
         "grasp_resume_wait_ticks": 0,
         "grasp_phase_counts": {},
+        "grasp_close_soon_source_counts": {},
+        "gripper_close_soon_ticks": 0,
+        "grip_horizon_rows": 0,
+        "grip_horizon_available_ticks": 0,
+        "grip_horizon_missing_ticks": 0,
+        "grip_horizon_short_ticks": 0,
+        "grip_horizon_crossed_ticks": 0,
+        "grip_horizon_late_close_ticks": 0,
+        "grip_horizon_len": [],
+        "grip_horizon_min": [],
+        "grip_horizon_max": [],
+        "grip_horizon_first_close_steps_ahead": [],
+        "grip_horizon_close_threshold": [],
+        "grip_horizon_close_is_greater": [],
+        "grasp_close_soon_steps_ahead": [],
         "pending_linear": [],
         "pending_angular": [],
         "xi_ref_linear": [],
@@ -400,6 +431,7 @@ def finalize_delta_twist_bucket(bucket: dict[str, object]) -> dict[str, object]:
     feedback_source_counts = bucket["feedback_source_counts"]
     surface_mode_counts = bucket["surface_mode_counts"]
     grasp_phase_counts = bucket["grasp_phase_counts"]
+    grasp_close_source_counts = bucket["grasp_close_soon_source_counts"]
     assert isinstance(step_counts, dict)
     assert isinstance(step_kind_counts, dict)
     assert isinstance(controller_counts, dict)
@@ -407,6 +439,7 @@ def finalize_delta_twist_bucket(bucket: dict[str, object]) -> dict[str, object]:
     assert isinstance(feedback_source_counts, dict)
     assert isinstance(surface_mode_counts, dict)
     assert isinstance(grasp_phase_counts, dict)
+    assert isinstance(grasp_close_source_counts, dict)
     kind_total = sum(int(value) for value in step_kind_counts.values())
     kind_percent = {
         key: (100.0 * float(value) / float(kind_total)) if kind_total > 0 else 0.0
@@ -460,6 +493,53 @@ def finalize_delta_twist_bucket(bucket: dict[str, object]) -> dict[str, object]:
     if yaw_sign_match_percent is not None and yaw_sign_match_percent < 70.0:
         warnings.append(f"requested/realized yaw sign match is low ({yaw_sign_match_percent:.1f}%)")
 
+    grip_horizon_rows = int(bucket["grip_horizon_rows"])
+    grip_horizon_len = bucket["grip_horizon_len"]
+    grip_horizon_min = bucket["grip_horizon_min"]
+    grip_horizon_max = bucket["grip_horizon_max"]
+    grip_horizon_first_close_steps = bucket["grip_horizon_first_close_steps_ahead"]
+    grip_thresholds = bucket["grip_horizon_close_threshold"]
+    grip_close_is_greater = bucket["grip_horizon_close_is_greater"]
+    assert isinstance(grip_horizon_len, list)
+    assert isinstance(grip_horizon_min, list)
+    assert isinstance(grip_horizon_max, list)
+    assert isinstance(grip_horizon_first_close_steps, list)
+    assert isinstance(grip_thresholds, list)
+    assert isinstance(grip_close_is_greater, list)
+    observed_horizon_min = min(grip_horizon_min) if grip_horizon_min else None
+    observed_horizon_max = max(grip_horizon_max) if grip_horizon_max else None
+    expected_action_horizon = max(grip_horizon_len) if grip_horizon_len else None
+    if grip_horizon_rows > 0:
+        if int(bucket["grip_horizon_missing_ticks"]) > 0:
+            warnings.append("grip_horizon_available is false")
+        if expected_action_horizon is not None and any(
+            int(value) < int(expected_action_horizon) for value in grip_horizon_len
+        ):
+            bucket["grip_horizon_short_ticks"] = sum(
+                1 for value in grip_horizon_len if int(value) < int(expected_action_horizon)
+            )
+            warnings.append("grip_horizon_len < action_horizon")
+        if int(bucket["gripper_close_soon_ticks"]) == 0:
+            warnings.append("close_soon is never true")
+        if int(bucket["grip_horizon_crossed_ticks"]) > 0 and int(bucket["grasp_close_soon_ticks"]) == 0:
+            warnings.append("grip_horizon crosses threshold but grasp_close_soon never true")
+        if int(bucket["grip_horizon_late_close_ticks"]) > 0:
+            warnings.append("close appears only after current lookahead window")
+        if (
+            observed_horizon_min is not None and
+            observed_horizon_max is not None and
+            grip_thresholds and
+            grip_close_is_greater
+        ):
+            threshold = float(grip_thresholds[-1])
+            close_is_greater = bool(grip_close_is_greater[-1])
+            if threshold < observed_horizon_min or threshold > observed_horizon_max:
+                warnings.append("close_threshold is outside the observed gripper range")
+            if (not close_is_greater) and threshold < observed_horizon_min:
+                warnings.append("No close will be detected with this threshold.")
+            if close_is_greater and threshold > observed_horizon_max:
+                warnings.append("No close will be detected with this threshold.")
+
     return {
         "rows": bucket["rows"],
         "active_ticks": bucket["active_ticks"],
@@ -485,6 +565,24 @@ def finalize_delta_twist_bucket(bucket: dict[str, object]) -> dict[str, object]:
         "grasp_policy_delta_dropped_ticks": bucket["grasp_policy_delta_dropped_ticks"],
         "grasp_resume_wait_ticks": bucket["grasp_resume_wait_ticks"],
         "grasp_phase_counts": dict(sorted(grasp_phase_counts.items())),
+        "grasp_close_soon_source_counts": dict(sorted(grasp_close_source_counts.items())),
+        "gripper_close_soon_ticks": bucket["gripper_close_soon_ticks"],
+        "grip_horizon_rows": grip_horizon_rows,
+        "grip_horizon_available_ticks": bucket["grip_horizon_available_ticks"],
+        "grip_horizon_missing_ticks": bucket["grip_horizon_missing_ticks"],
+        "grip_horizon_short_ticks": bucket["grip_horizon_short_ticks"],
+        "grip_horizon_crossed_ticks": bucket["grip_horizon_crossed_ticks"],
+        "grip_horizon_late_close_ticks": bucket["grip_horizon_late_close_ticks"],
+        "grip_horizon_expected_action_horizon": expected_action_horizon,
+        "grip_horizon_len": percentile_summary(grip_horizon_len),  # type: ignore[arg-type]
+        "grip_horizon_min": percentile_summary(grip_horizon_min),  # type: ignore[arg-type]
+        "grip_horizon_max": percentile_summary(grip_horizon_max),  # type: ignore[arg-type]
+        "grip_horizon_first_close_steps_ahead": percentile_summary(grip_horizon_first_close_steps),  # type: ignore[arg-type]
+        "grip_horizon_observed_min": observed_horizon_min,
+        "grip_horizon_observed_max": observed_horizon_max,
+        "grip_horizon_close_threshold": grip_thresholds[-1] if grip_thresholds else None,
+        "grip_horizon_close_is_greater": grip_close_is_greater[-1] if grip_close_is_greater else None,
+        "grasp_close_soon_steps_ahead": percentile_summary(bucket["grasp_close_soon_steps_ahead"]),  # type: ignore[arg-type]
         "follower_step_distribution": dict(
             sorted(step_counts.items(), key=lambda item: int(item[0]))
         ),
@@ -685,6 +783,16 @@ def analyze_csv(path: Path) -> dict[str, object]:
                         raise AnalysisError(f"row {row_number}: column {arm}_grasp_phase must be an integer")
                     grasp_phase_name = GRASP_PHASE_LABELS.get(grasp_phase_int, str(grasp_phase_int))
                     bump_count(bucket["grasp_phase_counts"], grasp_phase_name)  # type: ignore[arg-type]
+                grasp_close_source = optional_int(row, f"{arm}_grasp_close_soon_source", row_number)
+                if grasp_close_source is not None:
+                    grasp_close_source_name = GRASP_CLOSE_SOURCE_LABELS.get(
+                        grasp_close_source,
+                        str(grasp_close_source),
+                    )
+                    bump_count(bucket["grasp_close_soon_source_counts"], grasp_close_source_name)  # type: ignore[arg-type]
+                grasp_close_steps = optional_int(row, f"{arm}_grasp_close_soon_steps_ahead", row_number)
+                if grasp_close_steps is not None and grasp_close_steps >= 0:
+                    bucket["grasp_close_soon_steps_ahead"].append(grasp_close_steps)  # type: ignore[union-attr]
                 for column, key in (
                     (f"{arm}_surface_active", "surface_active_ticks"),
                     (f"{arm}_surface_close_soon", "surface_close_soon_ticks"),
@@ -699,6 +807,51 @@ def analyze_csv(path: Path) -> dict[str, object]:
                     value = optional_bool(row, column, row_number)
                     if value:
                         bucket[key] = int(bucket[key]) + 1
+                gripper_close_soon = optional_bool(row, f"{arm}_gripper_close_soon", row_number)
+                if gripper_close_soon:
+                    bucket["gripper_close_soon_ticks"] = int(bucket["gripper_close_soon_ticks"]) + 1
+                horizon_columns_seen = any(
+                    f"{arm}_{column}" in row
+                    for column in (
+                        "grip_horizon_available",
+                        "grip_horizon_len",
+                        "grip_horizon_min",
+                        "grip_horizon_max",
+                        "grip_horizon_first_close_steps_ahead",
+                        "grip_horizon_close_threshold",
+                        "grip_horizon_close_is_greater",
+                    )
+                )
+                if horizon_columns_seen:
+                    bucket["grip_horizon_rows"] = int(bucket["grip_horizon_rows"]) + 1
+                    horizon_available = optional_bool(row, f"{arm}_grip_horizon_available", row_number)
+                    if horizon_available:
+                        bucket["grip_horizon_available_ticks"] = int(bucket["grip_horizon_available_ticks"]) + 1
+                    elif horizon_available is False:
+                        bucket["grip_horizon_missing_ticks"] = int(bucket["grip_horizon_missing_ticks"]) + 1
+                    horizon_len = optional_int(row, f"{arm}_grip_horizon_len", row_number)
+                    if horizon_len is not None:
+                        bucket["grip_horizon_len"].append(horizon_len)  # type: ignore[union-attr]
+                    horizon_first_close_steps = optional_int(
+                        row,
+                        f"{arm}_grip_horizon_first_close_steps_ahead",
+                        row_number,
+                    )
+                    if horizon_first_close_steps is not None and horizon_first_close_steps >= 0:
+                        bucket["grip_horizon_first_close_steps_ahead"].append(horizon_first_close_steps)  # type: ignore[union-attr]
+                        bucket["grip_horizon_crossed_ticks"] = int(bucket["grip_horizon_crossed_ticks"]) + 1
+                        if grasp_close_source is None or grasp_close_source == 0:
+                            bucket["grip_horizon_late_close_ticks"] = int(bucket["grip_horizon_late_close_ticks"]) + 1
+                    horizon_threshold = optional_float(row, f"{arm}_grip_horizon_close_threshold", row_number)
+                    if horizon_threshold is not None:
+                        bucket["grip_horizon_close_threshold"].append(horizon_threshold)  # type: ignore[union-attr]
+                    horizon_close_is_greater = optional_bool(
+                        row,
+                        f"{arm}_grip_horizon_close_is_greater",
+                        row_number,
+                    )
+                    if horizon_close_is_greater is not None:
+                        bucket["grip_horizon_close_is_greater"].append(horizon_close_is_greater)  # type: ignore[union-attr]
                 for column, key in (
                     (f"{arm}_safety_accel_clamped", "safety_accel_clamped"),
                     (f"{arm}_smd_linear_accel_clipped", "smd_linear_accel_clipped"),
@@ -733,6 +886,8 @@ def analyze_csv(path: Path) -> dict[str, object]:
                     (f"{arm}_grasp_closing_hold_elapsed_sec", "grasp_closing_hold_elapsed"),
                     (f"{arm}_grasp_lift_elapsed_sec", "grasp_lift_elapsed"),
                     (f"{arm}_grasp_lift_progress", "grasp_lift_progress"),
+                    (f"{arm}_grip_horizon_min", "grip_horizon_min"),
+                    (f"{arm}_grip_horizon_max", "grip_horizon_max"),
                 ):
                     value = optional_float(row, column, row_number)
                     if value is not None:
@@ -1050,11 +1205,46 @@ def format_report(metrics: dict[str, object], budget: ProfileBudget, failures: S
                 lines.append(
                     f"  {arm} grasp: commit_active_ticks={arm_metrics.get('grasp_commit_active_ticks', 0)} "
                     f"close_soon_ticks={arm_metrics.get('grasp_close_soon_ticks', 0)} "
+                    f"source_counts={arm_metrics.get('grasp_close_soon_source_counts', {})} "
                     f"ready_ticks={arm_metrics.get('grasp_ready_ticks', 0)} "
                     f"gripper_override_ticks={arm_metrics.get('grasp_gripper_override_ticks', 0)} "
                     f"policy_delta_dropped_ticks={arm_metrics.get('grasp_policy_delta_dropped_ticks', 0)} "
                     f"resume_wait_ticks={arm_metrics.get('grasp_resume_wait_ticks', 0)} "
                     f"phase_counts={grasp_counts}"
+                )
+            if int(arm_metrics.get("grip_horizon_rows", 0)) > 0:
+                lines.append(
+                    f"  {arm} gripper horizon: rows={arm_metrics.get('grip_horizon_rows', 0)} "
+                    f"available_ticks={arm_metrics.get('grip_horizon_available_ticks', 0)} "
+                    f"missing_ticks={arm_metrics.get('grip_horizon_missing_ticks', 0)} "
+                    f"short_ticks={arm_metrics.get('grip_horizon_short_ticks', 0)} "
+                    f"crossed_ticks={arm_metrics.get('grip_horizon_crossed_ticks', 0)} "
+                    f"late_close_ticks={arm_metrics.get('grip_horizon_late_close_ticks', 0)} "
+                    f"gripper_close_soon_ticks={arm_metrics.get('gripper_close_soon_ticks', 0)} "
+                    f"threshold={arm_metrics.get('grip_horizon_close_threshold')} "
+                    f"close_is_greater={arm_metrics.get('grip_horizon_close_is_greater')} "
+                    f"observed_range=[{arm_metrics.get('grip_horizon_observed_min')}, "
+                    f"{arm_metrics.get('grip_horizon_observed_max')}]"
+                )
+                lines.append(
+                    f"  {arm} grip_horizon_len: "
+                    f"{fmt_percentiles(arm_metrics.get('grip_horizon_len'))}"
+                )
+                lines.append(
+                    f"  {arm} grip_horizon_min: "
+                    f"{fmt_percentiles(arm_metrics.get('grip_horizon_min'))}"
+                )
+                lines.append(
+                    f"  {arm} grip_horizon_max: "
+                    f"{fmt_percentiles(arm_metrics.get('grip_horizon_max'))}"
+                )
+                lines.append(
+                    f"  {arm} first_close_steps_ahead: "
+                    f"{fmt_percentiles(arm_metrics.get('grip_horizon_first_close_steps_ahead'))}"
+                )
+                lines.append(
+                    f"  {arm} grasp_close_soon_steps_ahead: "
+                    f"{fmt_percentiles(arm_metrics.get('grasp_close_soon_steps_ahead'))}"
                 )
             if arm_metrics.get("stage_path_length_m") is not None:
                 ratio = arm_metrics.get("stage_path_to_net_ratio")

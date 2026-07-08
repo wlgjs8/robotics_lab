@@ -21,19 +21,29 @@ static void check(bool ok, const char* name) {
   if (!ok) ++g_failures;
 }
 
-static std::string makePacket(int seq, int horizon, bool with_right, bool with_delta = false) {
+static std::string makePacket(
+    int seq,
+    int horizon,
+    bool with_right,
+    bool with_delta = false,
+    bool with_grip_horizon = false
+) {
   std::string left = "[";
   std::string left_delta = "[";
+  std::string grip_horizon = "[";
   for (int i = 0; i < horizon; ++i) {
     left += "[" + std::to_string(0.01 * i) + ",0.0,0.2,0.0,0.0,0.0,1.0," +
             std::to_string(20.0 + i) + "]";
     left_delta += "[" + std::to_string(0.001 * i) + ",0.002,0.003,0.004,0.005,0.006," +
                   std::to_string(20.0 + i) + "]";
+    grip_horizon += std::to_string(40.0 - i);
     if (i + 1 < horizon) left += ",";
     if (i + 1 < horizon) left_delta += ",";
+    if (i + 1 < horizon) grip_horizon += ",";
   }
   left += "]";
   left_delta += "]";
+  grip_horizon += "]";
   std::string right = with_right ? left : "null";
   std::string out = std::string("{\"schema\":\"robotics_lab.chunk_overlay.v2\",") +
          "\"schema_version\":\"robotics_lab.chunk_overlay.v2\"," +
@@ -45,6 +55,10 @@ static std::string makePacket(int seq, int horizon, bool with_right, bool with_d
   if (with_delta) {
     out += ",\"left_delta\":" + left_delta;
     if (with_right) out += ",\"right_delta\":" + left_delta;
+  }
+  if (with_grip_horizon) {
+    out += ",\"left_grip_horizon\":" + grip_horizon;
+    if (with_right) out += ",\"right_grip_horizon\":" + grip_horizon;
   }
   out += "}";
   return out;
@@ -60,6 +74,8 @@ int main() {
     check(frame.seq == 7, "producer seq parsed");
     check(frame.has_left && !frame.has_right, "left present, right null");
     check(!frame.has_left_delta && !frame.has_right_delta, "old packet has no deltas");
+    check(!frame.has_left_grip_horizon && !frame.has_right_grip_horizon,
+          "old packet has no grip horizon");
     check(frame.left.count == 16, "16 steps");
     check(frame.left.step[3][0] == 0.03, "step x values land");
     check(frame.left.step[3][7] == 23.0, "grip values land");
@@ -80,6 +96,8 @@ int main() {
     check(!ChunkFrameReceiver::parsePacket(bad4.data(), bad4.size(), &frame), "degenerate quaternion rejected");
     const std::string bad5 = "{\"schema_version\":\"robotics_lab.chunk_overlay.v2\",\"seq\":1,\"policy_dt_sec\":0.033,\"left\":[[0,0,0,0,0,0,1,0]],\"left_delta\":[[0,0,0,0,0,\"bad\",0]]}";
     check(!ChunkFrameReceiver::parsePacket(bad5.data(), bad5.size(), &frame), "malformed delta row rejected");
+    const std::string bad6 = "{\"schema_version\":\"robotics_lab.chunk_overlay.v2\",\"seq\":1,\"policy_dt_sec\":0.033,\"left\":[[0,0,0,0,0,0,1,0]],\"left_grip_horizon\":[40,\"bad\",20]}";
+    check(!ChunkFrameReceiver::parsePacket(bad6.data(), bad6.size(), &frame), "malformed grip horizon rejected");
   }
 
   // -- Test 3: optional delta rows parse. -------------------------------------
@@ -95,18 +113,36 @@ int main() {
     check(frame.left_delta.step[3][6] == 23.0, "left delta grip values land");
   }
 
-  // -- Test 4: oversize horizon clamps to kMaxSteps. ---------------------------
-  std::printf("Test 4: horizon clamp\n");
+  // -- Test 4: optional full grip horizon parses. ----------------------------
+  std::printf("Test 4: grip horizon rows\n");
   {
-    const std::string pkt = makePacket(1, ChunkFrameReceiver::kMaxSteps + 8, false, true);
+    const std::string pkt = makePacket(9, 24, true, true, true);
+    ChunkFrameReceiver::Frame frame;
+    check(ChunkFrameReceiver::parsePacket(pkt.data(), pkt.size(), &frame),
+          "packet with grip horizon parses");
+    check(frame.has_left_grip_horizon && frame.has_right_grip_horizon,
+          "grip horizon presence flags set");
+    check(frame.left_grip_horizon.count == 24, "left grip horizon count parsed");
+    check(frame.right_grip_horizon.count == 24, "right grip horizon count parsed");
+    check(frame.left_grip_horizon.value[0] == 40.0, "left grip horizon first value lands");
+    check(frame.left_grip_horizon.value[16] == 24.0, "late grip horizon value lands");
+  }
+
+  // -- Test 5: oversize horizon clamps to kMaxSteps. ---------------------------
+  std::printf("Test 5: horizon clamp\n");
+  {
+    const std::string pkt =
+        makePacket(1, ChunkFrameReceiver::kMaxSteps + 8, false, true, true);
     ChunkFrameReceiver::Frame frame;
     check(ChunkFrameReceiver::parsePacket(pkt.data(), pkt.size(), &frame), "oversize packet parses");
     check(frame.left.count == ChunkFrameReceiver::kMaxSteps, "steps clamped to kMaxSteps");
     check(frame.left_delta.count == ChunkFrameReceiver::kMaxSteps, "delta steps clamped to kMaxSteps");
+    check(frame.left_grip_horizon.count == ChunkFrameReceiver::kMaxGripHorizon,
+          "grip horizon clamped to kMaxGripHorizon");
   }
 
-  // -- Test 5: live loopback receive + receiver_seq dedup. ---------------------
-  std::printf("Test 5: loopback receive\n");
+  // -- Test 6: live loopback receive + receiver_seq dedup. ---------------------
+  std::printf("Test 6: loopback receive\n");
   {
     const int port = 57263;
     ChunkFrameReceiver receiver("udp://127.0.0.1:" + std::to_string(port));
@@ -147,8 +183,8 @@ int main() {
     check(true, "receiver stops cleanly");
   }
 
-  // -- Test 6: empty bind = disabled but start() succeeds. ---------------------
-  std::printf("Test 6: disabled receiver\n");
+  // -- Test 7: empty bind = disabled but start() succeeds. ---------------------
+  std::printf("Test 7: disabled receiver\n");
   {
     ChunkFrameReceiver receiver("");
     check(receiver.start(), "empty bind starts as no-op");
