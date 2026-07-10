@@ -163,7 +163,21 @@ The backend preserves the raw values in per-arm state JSON under
 `rbpodo_diagnostics.raw`, including `time`, `real_vs_simulation_mode`,
 `init_state_info`, `init_error`, `op_stat_sos_flag`, `op_stat_ems_flag`,
 `op_stat_soft_estop_occur`, `op_stat_collision_occur`, and
-`op_stat_self_collision`. Boolean status flags with values other than `0` or
+`op_stat_self_collision`.
+
+The backend also decodes the controller's external F/T sensor wrench
+(`sdata.eft_fx..eft_mz`) into `RobotState.eft_wrench` / `eft_valid`, published
+in per-arm state JSON as `eft_wrench` (`[fx, fy, fz, tx, ty, tz]`, N / Nm),
+`eft_valid`, and `eft_source: "rbpodo.sdata.eft"`. The values are in the
+controller-reported external-sensor frame (tool-flange mounted), NOT verified
+as a TCP-frame wrench — `RobotState.wrench_tcp` remains reserved for the
+(TCP-frame) force-control path and is not populated from `eft_*`. The
+controller reports zeros when no external FT sensor is selected; `eft_valid`
+is `false` when the values are non-finite or the state frame ended before the
+eft fields (short/old-firmware frame; boundary constant
+`kRbpodoStateFrameEftEndOffsetBytes`, pinned to the SDK struct by a
+static_assert in the rbpodo-enabled build). Telemetry only: nothing in the
+motion/safety path consumes `eft_*` yet. Boolean status flags with values other than `0` or
 `1`, non-finite or implausibly tiny nonzero controller time, and unknown
 `real_vs_simulation_mode` values mark `diagnostics_suspect=true`.
 Suspicious diagnostics do not make `readState()` fail when joint acquisition is

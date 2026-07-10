@@ -291,6 +291,14 @@ struct RobotState {
     bool tcp_deferred = true;
     double fk_duration_us = 0.0;
     Wrench6D wrench_tcp;
+    // External F/T sensor wrench decoded from the rbpodo state frame
+    // (sdata.eft_fx..eft_mz; N / Nm). Frame is the controller-reported external
+    // sensor frame (tool-flange mounted), NOT verified as TCP frame — kept
+    // separate from wrench_tcp, which is reserved for the (TCP-frame)
+    // force-control path. Zeros when no external FT sensor is selected on the
+    // controller. eft_valid = fields present in the state frame and finite.
+    Wrench6D eft_wrench;
+    bool eft_valid = false;
 
     RobotConnectionState connection_state = RobotConnectionState::Disconnected;
 

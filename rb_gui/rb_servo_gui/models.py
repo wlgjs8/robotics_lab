@@ -396,6 +396,11 @@ class ArmSnapshot:
     # (gripper_state.v1 feedback stamped by the bridge). None when no valid feed.
     gripper_percent: float | None = None
     gripper_moving: bool = False
+    # External F/T sensor wrench from the server's rbpodo decode
+    # (state JSON `eft_wrench`: [fx, fy, fz, tx, ty, tz], N / Nm, sensor frame).
+    # None when absent/non-finite; eft_valid mirrors the server's validity flag.
+    eft_wrench: tuple[float, ...] | None = None
+    eft_valid: bool = False
 
     @classmethod
     def parse(
@@ -501,6 +506,8 @@ class ArmSnapshot:
             cartesian_solve=CartesianSolveSnapshot.parse(data.get("cartesian_solve")),
             gripper_percent=gripper_percent,
             gripper_moving=gripper_moving,
+            eft_wrench=finite_joint_array(data.get("eft_wrench")),
+            eft_valid=bool(data.get("eft_valid", False)),
         )
 
     def selected_tcp_pose(self, mode: str = "auto") -> Pose6D | None:

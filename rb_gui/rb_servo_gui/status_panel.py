@@ -796,6 +796,31 @@ def _update_joint_monitor(handles: dict[str, Any], latest: StateSnapshot | None,
             )
 
 
+def _eft_monitor_values(arm_state: Any, *, stale: bool) -> tuple[str, str, str]:
+    """(force, torque, |F|) display strings for one arm's external F/T sensor
+    (rbpodo sdata.eft_*, sensor frame, N / Nm). 'invalid' when the feed is
+    stale, the server flags it invalid, or the fields are absent (mock)."""
+    eft = getattr(arm_state, "eft_wrench", None) if arm_state is not None else None
+    valid = bool(getattr(arm_state, "eft_valid", False)) and eft is not None and not stale
+    if not valid:
+        return ("invalid", "invalid", "invalid")
+    force = " ".join(f"{v:+.1f}" for v in eft[:3])
+    torque = " ".join(f"{v:+.2f}" for v in eft[3:])
+    magnitude = f"{math.sqrt(eft[0] ** 2 + eft[1] ** 2 + eft[2] ** 2):.1f}"
+    return (force, torque, magnitude)
+
+
+def _update_eft_monitor_handles(handles: dict[str, Any], arm: str, arm_state: Any, *, stale: bool) -> None:
+    eft_handles = handles.get("eft_monitor_values", {}).get(arm, {})
+    if not eft_handles:
+        return
+    force, torque, magnitude = _eft_monitor_values(arm_state, stale=stale)
+    for field, value in (("force", force), ("torque", torque), ("magnitude", magnitude)):
+        handle = eft_handles.get(field)
+        if handle is not None:
+            handle.value = value
+
+
 def _update_stand_world_monitor(handles: dict[str, Any], latest: StateSnapshot | None, *, stale: bool) -> None:
     if "stand_world_monitor_status" not in handles:
         return
@@ -807,6 +832,7 @@ def _update_stand_world_monitor(handles: dict[str, Any], latest: StateSnapshot |
         for arm in ("left", "right"):
             for handle in value_handles.get(arm, {}).values():
                 handle.value = "invalid"
+            _update_eft_monitor_handles(handles, arm, None, stale=True)
         return
     state = "stale" if stale else "live"
     handles["stand_world_monitor_status"].value = f"{state}, xyz=mm, rpy={unit}, tick={latest.tick}"
@@ -814,6 +840,7 @@ def _update_stand_world_monitor(handles: dict[str, Any], latest: StateSnapshot |
         for arm in ("left", "right"):
             for handle in value_handles.get(arm, {}).values():
                 handle.value = "invalid"
+            _update_eft_monitor_handles(handles, arm, None, stale=True)
         return
     for arm, arm_state in (("left", latest.left), ("right", latest.right)):
         valid = bool(arm_state.has_valid_tcp_pose and arm_state.tcp_stand is not None and not arm_state.tcp_deferred)
@@ -824,3 +851,4 @@ def _update_stand_world_monitor(handles: dict[str, Any], latest: StateSnapshot |
                 valid=valid,
                 unit=unit,
             )
+        _update_eft_monitor_handles(handles, arm, arm_state, stale=stale)

@@ -2984,6 +2984,31 @@ class GuiContractsTest(unittest.TestCase):
         self.assertNotIn("xyz=mm", stale_html)
         self.assertIn("invalid", stale_html)
 
+    def test_operator_monitor_dynamic_html_renders_eft_wrench(self):
+        # External F/T sensor rows (rbpodo eft_*) render per arm in the Pose/FT
+        # card: force (1 decimal), torque (2 decimals), |F| magnitude.
+        state = self.tcp_available_state()
+        state["left"]["eft_wrench"] = [7.4, 6.7, -38.5, -0.12, -0.48, 0.23]
+        state["left"]["eft_valid"] = True
+        state["right"]["eft_wrench"] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        state["right"]["eft_valid"] = False
+        store, _, _ = self.make_safety(state)
+        latest = store.latest()
+        # Parser surfaces the wrench + validity flag per arm.
+        self.assertEqual(latest.left.eft_wrench, (7.4, 6.7, -38.5, -0.12, -0.48, 0.23))
+        self.assertTrue(latest.left.eft_valid)
+        self.assertFalse(latest.right.eft_valid)
+        html = _operator_monitor_dynamic_html(latest, stale=False)
+        self.assertIn("FT F [N]", html)
+        self.assertIn("FT T [Nm]", html)
+        self.assertIn("FT |F| [N]", html)
+        self.assertIn("+7.4 +6.7 -38.5", html)
+        self.assertIn("-0.12 -0.48 +0.23", html)
+        self.assertIn("39.8", html)  # |F| = sqrt(7.4^2 + 6.7^2 + 38.5^2)
+        # Server-invalid (right arm) and stale streams must not show readings.
+        stale_html = _operator_monitor_dynamic_html(latest, stale=True)
+        self.assertNotIn("+7.4 +6.7 -38.5", stale_html)
+
     def test_operator_monitors_use_fixed_html_overlay_when_available(self):
         server = RecordingServer(scene=RecordingScene())
         handles = {}

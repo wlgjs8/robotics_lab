@@ -158,7 +158,10 @@ safety:
     arrival_decel_deg_s2: 40.0     # 작을수록 더 완만/긴 감속; cap=√(2·a·d) deg/s
     arrival_min_speed_deg_s: 3.0   # tail이 waypoint_tol로 빨리 안착하도록 최저속도 floor
   floor_constraint:
-    enable: true
+    # 2026-07-09 (ft branch): DISABLED — floor velocity-damper 감속이 배포 중 실측
+    # velocity를 깎아 모델 관측(velproprio)을 훼손함. 지오메트리 사전감속 대신
+    # FT 센서(rbpodo sdata.eft_*) 기반 접촉 감지로 전환. 되돌리려면 enable: true.
+    enable: false
     z_min_m: 0.0000
     runtime_min_z_m: -0.2
     runtime_max_z_m: 0.5
@@ -192,7 +195,10 @@ safety:
   # bounds는 sim에서 검증한 값 재사용, 강제(monitor_only=false)는 real floor와 동일.
   roi_box:
     enable: true
-    min_m: [-0.450, -0.900, 0.000]
+    # 2026-07-09 (ft branch): z 하한만 0.000 → -0.200 (runtime_min과 동일). 바닥면이
+    # 스탠드 플로어와 같은 높이(z=0)라 플로어를 꺼도 테이블 접근 감속이 남던 것을
+    # 제거 — 바닥 backstop은 FT 센서로 대체, x/y/상단 작업공간 제한은 유지.
+    min_m: [-0.450, -0.900, -0.200]
     max_m: [0.450, -0.150, 0.800]
     runtime_min_m: [-1.2, -1.6, -0.2]
     runtime_max_m: [1.2, 0.6, 1.6]
@@ -221,7 +227,9 @@ safety:
   # 있다. 팁이 바닥 닿을 때의 TCP 원점 자취 = 평면 → "TCP 원점이 평면 위" = "팁이
   # 실제 바닥 위". 팁 자체의 수평 backstop은 stand floor가 계속 담당.
   user_floor_constraint:
-    enable: true
+    # 2026-07-09 (ft branch): DISABLED — floor_constraint와 같은 이유(모델 관측
+    # velocity 훼손 방지, FT 센서로 대체). viser Fit & Apply Send는 거부된다.
+    enable: false
     max_tilt_deg: 35.0
     runtime_min_point_z_m: -0.2
     runtime_max_point_z_m: 0.5
@@ -313,7 +321,10 @@ safety:
       #   - { name: work_table, shape: box, parent_frame: stand,
       #       size_m: [1.2, 0.8, 0.04], xyz_m: [0.0, -0.2, 0.0], rpy: [0,0,0] }
       external_boxes:
-        enable: true
+        # 2026-07-09 (ft branch): DISABLED — 박스 keep-out barrier 감속이 모델 관측
+        # velocity를 훼손함(FT 센서 접촉 감지로 대체). enable: false면 box-feed
+        # (SetExternalBoxes) startup 요구 + stale-feed watchdog도 함께 사라진다.
+        enable: false
         max_count: 2
         size_m: [0.380, 0.240, 0.105]
         margin_m: [0.000, 0.000, 0.020]   # per-axis [x,y,z] box-local; x,y=SIDE, z=HEIGHT.
@@ -344,7 +355,11 @@ safety:
       # (the measured table surface), so the two floors agree. The InitMotion planner
       # avoids this box too.
       ground_plane:
-        enable: true
+        # 2026-07-09 (ft branch): DISABLED — whole-arm 바닥 박스도 external barrier
+        # 감속원이므로 플로어들과 함께 끔(모델 관측 velocity 보존, FT 센서로 대체).
+        # InitMotion planner 오라클에서도 빠짐 — 팔꿈치/손목의 테이블 하강은 이제
+        # arm<->arm / arm<->stand self-collision만 막는다.
+        enable: false
         # z_m: 0.001             # startup/fallback top face (used until a floor drives it)
         z_m: 0.0005             # startup/fallback top face (used until a floor drives it)
         size_m: [4.0, 4.0]      # lateral extents [Lx, Ly]

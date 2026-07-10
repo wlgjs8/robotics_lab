@@ -49,6 +49,12 @@ nlohmann::json jointArrayJson(const JointArray& joints) {
     return out;
 }
 
+nlohmann::json wrenchJson(const Wrench6D& wrench) {
+    return nlohmann::json::array({
+        wrench.fx, wrench.fy, wrench.fz, wrench.tx, wrench.ty, wrench.tz
+    });
+}
+
 bool finiteJointArray(const JointArray& joints) {
     return std::all_of(joints.begin(), joints.end(), [](double value) {
         return std::isfinite(value);
@@ -1173,6 +1179,13 @@ nlohmann::json armStateJson(
         {"robot_time_ns", state.robot_time_ns},
         {"host_time_ns", state.host_time_ns},
         {"error_code", state.error_code},
+        // External F/T sensor wrench from the rbpodo state frame (sdata.eft_*):
+        // [fx, fy, fz, tx, ty, tz] in N / Nm, controller-reported external-sensor
+        // frame (tool-flange mounted). Zeros when no sensor is selected on the
+        // controller; eft_valid=false when the frame lacked the fields.
+        {"eft_wrench", wrenchJson(state.eft_wrench)},
+        {"eft_valid", state.eft_valid},
+        {"eft_source", "rbpodo.sdata.eft"},
         {"tcp_stand", optionalPoseJson(tcp.actual_stand)},
         {"tcp_base", optionalPoseJson(tcp.actual_base)},
         {"tcp_actual_stand", optionalPoseJson(tcp.actual_stand)},

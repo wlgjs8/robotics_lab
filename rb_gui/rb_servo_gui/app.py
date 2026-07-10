@@ -125,6 +125,7 @@ from .status_panel import (
     _format_arm_cartesian_solve,
     _format_cartesian_solve_status,
     _format_circle_overlay_status,
+    _eft_monitor_values,
     _format_scene_asset_status,
     _format_fk_status,
     _format_init_motion_status,
@@ -1744,11 +1745,16 @@ def _build_stand_world_monitor(server: Any, handles: dict[str, Any], *, order: f
             disabled=True,
         )
         handles["stand_world_monitor_values"] = {"left": {}, "right": {}}
+        handles["eft_monitor_values"] = {"left": {}, "right": {}}
         for arm in ("left", "right"):
             with server.gui.add_folder(arm, expand_by_default=True):
                 for field in _STAND_WORLD_POSE_FIELDS:
                     handle = server.gui.add_text(f"{arm} {field}", initial_value="invalid", disabled=True)
                     handles["stand_world_monitor_values"][arm][field] = handle
+                # External F/T sensor (rbpodo eft_*, sensor frame).
+                for field, label in (("force", "FT F [N]"), ("torque", "FT T [Nm]"), ("magnitude", "FT |F| [N]")):
+                    handle = server.gui.add_text(f"{arm} {label}", initial_value="invalid", disabled=True)
+                    handles["eft_monitor_values"][arm][field] = handle
 
 
 def _operator_monitor_layout() -> tuple[float, float, float]:
@@ -1893,7 +1899,7 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
   </div>
 </div>
 <div class="rb-monitor-card rb-monitor-header-card rb-monitor-stand-card">
-  <div class="rb-monitor-title">Pose Monitor</div>
+  <div class="rb-monitor-title">Pose Monitor · FT</div>
   <div class="rb-monitor-units">
     <label><input id="rb-stand-unit-deg" name="rb-stand-unit" type="radio" checked> deg</label>
     <label><input id="rb-stand-unit-rad" name="rb-stand-unit" type="radio"> rad</label>
@@ -2017,6 +2023,11 @@ def _render_stand_world_monitor_rows(
                     _format_stand_world_pose_value(pose, field, valid=valid, unit="rad"),
                 )
             parts.append(_operator_monitor_row(field, value_html))
+        # External F/T sensor (rbpodo eft_*, sensor frame): live contact wrench.
+        ft_force, ft_torque, ft_mag = _eft_monitor_values(arm_state, stale=stale)
+        parts.append(_operator_monitor_row("FT F [N]", escape(ft_force)))
+        parts.append(_operator_monitor_row("FT T [Nm]", escape(ft_torque)))
+        parts.append(_operator_monitor_row("FT |F| [N]", escape(ft_mag)))
         parts.append("</div>")
     return "".join(parts)
 
