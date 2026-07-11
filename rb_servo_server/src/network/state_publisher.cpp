@@ -55,6 +55,12 @@ nlohmann::json wrenchJson(const Wrench6D& wrench) {
     });
 }
 
+nlohmann::json vec6Json(const Vec6& value) {
+    return nlohmann::json::array({
+        value.x, value.y, value.z, value.rx, value.ry, value.rz
+    });
+}
+
 nlohmann::json realtimeTimingRangeJson(const RealtimeTimingRange& value) {
     return {
         {"last", value.last},
@@ -144,6 +150,32 @@ nlohmann::json forceControlJson(const ForceControlTelemetry& value) {
         {"surface_source", value.surface_source},
         {"normal_stand", value.normal_stand},
         {"contact_active", value.contact_active},
+        {"normal_contact_active", value.normal_contact_active},
+        {"transverse_contact_active", value.transverse_contact_active},
+        {"rotational_contact_active", value.rotational_contact_active},
+        {"compliance_active", value.compliance_active},
+        {"normal_regulating", value.normal_regulating},
+        {"transverse_regulating", value.transverse_regulating},
+        {"rotational_regulating", value.rotational_regulating},
+        {"loading_projection_active", value.loading_projection_active},
+        {"control_wrench_surface", wrenchJson(value.control_wrench_surface)},
+        {"wrench_error_surface", wrenchJson(value.wrench_error_surface)},
+        {"compliance_offset_surface", nlohmann::json::array({
+            value.compliance_offset_surface.x,
+            value.compliance_offset_surface.y,
+            value.compliance_offset_surface.z,
+            value.compliance_offset_surface.rx,
+            value.compliance_offset_surface.ry,
+            value.compliance_offset_surface.rz,
+        })},
+        {"compliance_velocity_surface", vec6Json(value.compliance_velocity_surface)},
+        {"compliance_acceleration_surface", vec6Json(value.compliance_acceleration_surface)},
+        {"raw_policy_delta_surface", vec6Json(value.raw_policy_delta_surface)},
+        {"accepted_policy_delta_surface", vec6Json(value.accepted_policy_delta_surface)},
+        {"compliance_limit_axes", value.compliance_limit_axes},
+        {"compliance_limit_reason", value.compliance_limit_reason.empty()
+            ? nlohmann::json(nullptr)
+            : nlohmann::json(value.compliance_limit_reason)},
         {"measured_force_n", value.measured_force_n},
         {"fast_normal_force_n", value.fast_normal_force_n},
         {"fast_force_norm_n", value.fast_force_norm_n},

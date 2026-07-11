@@ -31,6 +31,15 @@ struct SyncConfig {
   bool publish_incomplete_bundles{false};
 };
 
+struct BundleGroupConfig {
+  std::string name{"default"};
+  std::string topic{"camera.bundle"};
+  std::string master_stream;
+  std::vector<std::string> required_streams;
+  double max_bundle_time_diff_ms{10.0};
+  bool publish_incomplete_bundles{false};
+};
+
 struct RecordingConfig {
   bool enabled{false};
   std::string output_dir{"/data/episodes"};
@@ -42,6 +51,8 @@ struct RecordingConfig {
 
 struct HealthConfig {
   double publish_rate_hz{1.0};
+  double fps_window_sec{5.0};
+  double warn_if_fps_below{29.0};
   double warn_if_frame_age_ms_gt{100.0};
   bool warn_if_drop_count_increases{true};
   double warn_if_bundle_skew_ms_gt{10.0};
@@ -65,6 +76,7 @@ struct AppConfig {
   SharedMemoryConfig shared_memory;
   MetadataConfig metadata;
   SyncConfig sync;
+  std::vector<BundleGroupConfig> bundle_groups;
   std::vector<CameraConfig> cameras;
   RecordingConfig recording;
   HealthConfig health;
@@ -78,5 +90,6 @@ uint32_t bytes_per_pixel_for_format(const std::string& format);
 uint32_t channels_for_format(const std::string& format);
 uint64_t required_shared_memory_bytes(const AppConfig& cfg);
 std::vector<std::string> required_stream_keys(const AppConfig& cfg);
+std::vector<BundleGroupConfig> effective_bundle_groups(const AppConfig& cfg);
 
 }  // namespace camera_server

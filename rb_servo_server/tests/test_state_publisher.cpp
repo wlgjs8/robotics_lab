@@ -270,9 +270,12 @@ bool testStatePublisherSerializesForceTelemetry() {
     snapshot.left_force_torque.tare_reason = "accepted";
     snapshot.left_force_torque.residual_tare_tcp.fz = 23.5;
     snapshot.left_force_control.enabled = true;
-    snapshot.left_force_control.operating_mode = "guarded_admittance";
+    snapshot.left_force_control.operating_mode = "cartesian_admittance";
     snapshot.left_force_control.state = "release_braking";
     snapshot.left_force_control.contact_active = true;
+    snapshot.left_force_control.normal_contact_active = false;
+    snapshot.left_force_control.transverse_contact_active = true;
+    snapshot.left_force_control.rotational_contact_active = true;
     snapshot.left_force_control.measured_force_n = 5.0;
     snapshot.left_force_control.fast_normal_force_n = 5.5;
     snapshot.left_force_control.fast_force_norm_n = 7.0;
@@ -283,6 +286,23 @@ bool testStatePublisherSerializesForceTelemetry() {
     snapshot.left_force_control.hard_limit_exceeded = false;
     snapshot.left_force_control.target_force_n = 3.0;
     snapshot.left_force_control.correction_m = 0.001;
+    snapshot.left_force_control.compliance_active = true;
+    snapshot.left_force_control.normal_regulating = true;
+    snapshot.left_force_control.transverse_regulating = true;
+    snapshot.left_force_control.rotational_regulating = true;
+    snapshot.left_force_control.loading_projection_active = true;
+    snapshot.left_force_control.control_wrench_surface = {1.0, 2.0, 5.0, 0.1, 0.2, 0.3};
+    snapshot.left_force_control.wrench_error_surface = {0.5, 1.5, 2.5, 0.05, 0.15, 0.25};
+    snapshot.left_force_control.compliance_offset_surface = {0.001, 0.002, 0.003, 0.01, 0.02, 0.03};
+    snapshot.left_force_control.compliance_velocity_surface = {0.01, 0.02, 0.03, 0.1, 0.2, 0.3};
+    snapshot.left_force_control.compliance_acceleration_surface = {0.1, 0.2, 0.3, 1.0, 2.0, 3.0};
+    snapshot.left_force_control.raw_policy_delta_surface = {0.004, 0.005, -0.006, 0.04, 0.05, -0.06};
+    snapshot.left_force_control.accepted_policy_delta_surface = {0.004, 0.0, 0.0, 0.04, 0.0, 0.0};
+    snapshot.left_force_control.compliance_limit_axes = {
+        true, false, false, false, true, false,
+    };
+    snapshot.left_force_control.compliance_limit_reason =
+        "jerk_limited_motion_envelope";
     snapshot.left_force_control.motion_epoch = 7;
 
     rb_servo::StatePublisher publisher(rb_servo::DualArmConfig{});
@@ -303,6 +323,9 @@ bool testStatePublisherSerializesForceTelemetry() {
     RB_CHECK(ft.at("residual_tare_tcp").at(2).get<double>() == 23.5);
     RB_CHECK(force.at("state").get<std::string>() == "release_braking");
     RB_CHECK(force.at("contact_active").get<bool>());
+    RB_CHECK(!force.at("normal_contact_active").get<bool>());
+    RB_CHECK(force.at("transverse_contact_active").get<bool>());
+    RB_CHECK(force.at("rotational_contact_active").get<bool>());
     RB_CHECK(force.at("fast_normal_force_n").get<double>() == 5.5);
     RB_CHECK(force.at("fast_force_norm_n").get<double>() == 7.0);
     RB_CHECK(force.at("fast_torque_norm_nm").get<double>() == 0.8);
@@ -311,6 +334,22 @@ bool testStatePublisherSerializesForceTelemetry() {
     RB_CHECK(force.at("hard_limit_sample_count").get<int>() == 2);
     RB_CHECK(!force.at("hard_limit_exceeded").get<bool>());
     RB_CHECK(force.at("correction_m").get<double>() == 0.001);
+    RB_CHECK(force.at("compliance_active").get<bool>());
+    RB_CHECK(force.at("normal_regulating").get<bool>());
+    RB_CHECK(force.at("transverse_regulating").get<bool>());
+    RB_CHECK(force.at("rotational_regulating").get<bool>());
+    RB_CHECK(force.at("loading_projection_active").get<bool>());
+    RB_CHECK(force.at("control_wrench_surface").at(2).get<double>() == 5.0);
+    RB_CHECK(force.at("wrench_error_surface").at(1).get<double>() == 1.5);
+    RB_CHECK(force.at("compliance_offset_surface").at(5).get<double>() == 0.03);
+    RB_CHECK(force.at("compliance_velocity_surface").at(0).get<double>() == 0.01);
+    RB_CHECK(force.at("compliance_acceleration_surface").at(3).get<double>() == 1.0);
+    RB_CHECK(force.at("raw_policy_delta_surface").at(2).get<double>() == -0.006);
+    RB_CHECK(force.at("accepted_policy_delta_surface").at(4).get<double>() == 0.0);
+    RB_CHECK(force.at("compliance_limit_axes").at(0).get<bool>());
+    RB_CHECK(force.at("compliance_limit_axes").at(4).get<bool>());
+    RB_CHECK(force.at("compliance_limit_reason").get<std::string>() ==
+             "jerk_limited_motion_envelope");
     RB_CHECK(force.at("motion_epoch").get<uint64_t>() == 7);
     return true;
 }

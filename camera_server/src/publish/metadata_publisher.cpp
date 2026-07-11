@@ -61,6 +61,7 @@ std::string frame_to_json(const FrameMeta& meta) {
 std::string bundle_to_json(const FrameBundleMeta& b) {
   std::ostringstream os;
   os << "{\"schema\":\"camera_server.bundle.v1\",";
+  os << "\"group_name\":\"" << esc(b.group_name) << "\",";
   os << "\"bundle_seq\":" << b.bundle_seq << ',';
   os << "\"bundle_time_ns\":" << b.bundle_time_ns << ',';
   os << "\"hardware_synced\":" << (b.hardware_synced ? "true" : "false") << ',';
@@ -104,6 +105,23 @@ std::string health_to_json(const HealthSnapshot& h) {
   os << "],";
   os << "\"bundle\":{\"bundle_seq\":" << h.bundle_seq << ",\"complete_bundle_count\":" << h.complete_bundle_count
      << ",\"incomplete_bundle_count\":" << h.incomplete_bundle_count << ",\"max_time_diff_ms\":" << h.max_time_diff_ms << "},";
+  os << "\"bundle_groups\":{";
+  bool first_group = true;
+  for (const auto& [name, b] : h.bundle_groups) {
+    if (!first_group) os << ',';
+    first_group = false;
+    os << '\"' << esc(name) << "\":{\"topic\":\"" << esc(b.topic)
+       << "\",\"bundle_seq\":" << b.bundle_seq
+       << ",\"complete_bundle_count\":" << b.complete_bundle_count
+       << ",\"incomplete_retry_count\":" << b.incomplete_retry_count
+       << ",\"dropped_master_count\":" << b.dropped_master_count
+       << ",\"publish_rate_hz\":" << b.publish_rate_hz
+       << ",\"last_skew_ms\":" << b.last_skew_ms
+       << ",\"skew_p50_ms\":" << b.skew_p50_ms
+       << ",\"skew_p95_ms\":" << b.skew_p95_ms
+       << ",\"skew_max_ms\":" << b.skew_max_ms << '}';
+  }
+  os << "},";
   os << "\"cameras\":{";
   bool first_cam = true;
   for (const auto& [cam, connected] : h.camera_connected) {
@@ -111,6 +129,19 @@ std::string health_to_json(const HealthSnapshot& h) {
     first_cam = false;
     os << '\"' << esc(cam) << "\":{\"serial\":\"" << esc(h.camera_serial.count(cam) ? h.camera_serial.at(cam) : "")
        << "\",\"connected\":" << (connected ? "true" : "false");
+    auto capture_it = h.camera_capture_stats.find(cam);
+    if (capture_it != h.camera_capture_stats.end()) {
+      const auto& c = capture_it->second;
+      os << ",\"capture\":{\"queue_depth\":" << c.queue_depth
+         << ",\"queue_drop_count\":" << c.queue_drop_count
+         << ",\"queue_drop_delta\":" << c.queue_drop_delta
+         << ",\"callback_enqueue_us_p95\":" << c.callback_enqueue_us_p95
+         << ",\"callback_enqueue_us_max\":" << c.callback_enqueue_us_max
+         << ",\"queue_wait_us_p95\":" << c.queue_wait_us_p95
+         << ",\"queue_wait_us_max\":" << c.queue_wait_us_max
+         << ",\"frame_process_us_p95\":" << c.frame_process_us_p95
+         << ",\"frame_process_us_max\":" << c.frame_process_us_max << '}';
+    }
     for (const auto& suffix : {std::string("color"), std::string("depth"),
                                std::string("ir_left"), std::string("ir_right")}) {
       const auto key = stream_key(cam, suffix);
@@ -122,10 +153,15 @@ std::string health_to_json(const HealthSnapshot& h) {
       os << ",\"status_" << suffix << "\":\""
          << esc(h.stream_status.count(key) ? h.stream_status.at(key) : std::string("unknown")) << "\"";
       os << ",\"fps_" << suffix << "\":" << std::setprecision(3) << s.fps_estimate;
+      os << ",\"fps_window_" << suffix << "\":" << std::setprecision(3) << s.fps_window_hz;
       os << ",\"drop_count_" << suffix << "\":" << s.frame_number_gap_drop_count;
       os << ",\"drops_" << suffix << "\":{\"frame_number_gap\":" << s.frame_number_gap_drop_count
          << ",\"internal_queue\":" << s.internal_queue_drop_count << ",\"recorder\":" << s.recorder_drop_count
-         << ",\"total\":" << total_drop_count << '}';
+         << ",\"total\":" << total_drop_count
+         << ",\"frame_number_gap_delta\":" << s.frame_number_gap_drop_delta
+         << ",\"internal_queue_delta\":" << s.internal_queue_drop_delta
+         << ",\"recorder_delta\":" << s.recorder_drop_delta
+         << ",\"shared_memory_write_error_delta\":" << s.shared_memory_write_error_delta << '}';
       os << ",\"frame_count_" << suffix << "\":" << s.frame_count;
       os << ",\"last_frame_age_ms_" << suffix << "\":"
          << (h.host_time_ns > s.last_frame_time_ns ? static_cast<double>(h.host_time_ns - s.last_frame_time_ns) / 1e6 : 0.0);
@@ -198,6 +234,9 @@ bool MetadataPublisher::publish(const std::string& topic, const std::string& pay
 }
 
 bool MetadataPublisher::publish_bundle(const FrameBundleMeta& bundle) { return publish(cfg_.bundle_topic, bundle_to_json(bundle)); }
+bool MetadataPublisher::publish_bundle(const std::string& topic, const FrameBundleMeta& bundle) {
+  return publish(topic, bundle_to_json(bundle));
+}
 bool MetadataPublisher::publish_health(const HealthSnapshot& health) { return publish(cfg_.health_topic, health_to_json(health)); }
 
 }  // namespace camera_server

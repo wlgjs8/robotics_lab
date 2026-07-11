@@ -11,6 +11,7 @@
 namespace camera_server {
 
 void apply_health_thresholds(const HealthConfig& cfg, HealthSnapshot& snapshot);
+void populate_health_deltas(HealthSnapshot& snapshot, const HealthSnapshot* previous);
 
 class HealthMonitor {
  public:
@@ -27,6 +28,8 @@ class HealthMonitor {
   SnapshotFn snapshot_fn_;
   std::atomic<bool> running_{false};
   std::thread thread_;
+  HealthSnapshot previous_snapshot_;
+  bool have_previous_snapshot_{false};
 };
 
 }  // namespace camera_server

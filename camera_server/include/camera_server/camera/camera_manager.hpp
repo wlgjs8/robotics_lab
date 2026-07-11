@@ -10,6 +10,7 @@
 #include "camera_server/sync/frame_synchronizer.hpp"
 
 #include <atomic>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -21,7 +22,7 @@ namespace camera_server {
 class CameraManager {
  public:
   CameraManager(const AppConfig& cfg, SharedMemoryRingBuffer& shm, MetadataPublisher& publisher,
-                FrameSynchronizer& synchronizer, Recorder& recorder);
+                FrameSynchronizerSet& synchronizer, Recorder& recorder);
   ~CameraManager();
   void start();
   void stop();
@@ -40,12 +41,13 @@ class CameraManager {
   AppConfig cfg_;
   SharedMemoryRingBuffer& shm_;
   MetadataPublisher& publisher_;
-  FrameSynchronizer& synchronizer_;
+  FrameSynchronizerSet& synchronizer_;
   Recorder& recorder_;
   std::vector<std::unique_ptr<ICameraDevice>> devices_;
   mutable std::mutex mu_;
   std::map<std::string, StreamStats> stats_;
   std::map<std::string, bool> connected_;
+  std::map<std::string, std::deque<uint64_t>> frame_time_windows_;
   BoundedQueue<ProcessedFrame> metadata_queue_;
   std::thread metadata_thread_;
   uint64_t start_time_ns_{0};

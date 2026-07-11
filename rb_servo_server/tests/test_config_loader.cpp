@@ -190,7 +190,7 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(stack_real.force_torque.right.frame_configured);
         RB_CHECK(stack_real.force_control.provider == "project_native");
         RB_CHECK(stack_real.force_control.enable);
-        RB_CHECK(stack_real.force_control.operating_mode == "guarded_admittance");
+        RB_CHECK(stack_real.force_control.operating_mode == "cartesian_admittance");
         RB_CHECK(stack_real.force_control.allow_in_real);
         RB_CHECK(stack_real.force_control.supervised_experimental_real);
         RB_CHECK(stack_real.force_control.left.enable);
@@ -211,6 +211,35 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(left_force.force_deadband_n, right_force.force_deadband_n));
         RB_CHECK(near(left_force.hard_normal_force_n, 40.0));
         RB_CHECK(near(left_force.hard_normal_force_n, right_force.hard_normal_force_n));
+        RB_CHECK(left_force.compliance_axes.x);
+        RB_CHECK(left_force.compliance_axes.y);
+        RB_CHECK(left_force.compliance_axes.z);
+        RB_CHECK(left_force.compliance_axes.roll);
+        RB_CHECK(left_force.compliance_axes.pitch);
+        RB_CHECK(left_force.compliance_axes.yaw);
+        RB_CHECK(near(left_force.transverse_contact_enter_force_n, 5.0));
+        RB_CHECK(near(left_force.transverse_contact_release_force_n, 4.0));
+        RB_CHECK(near(left_force.torque_contact_enter_nm, 0.9));
+        RB_CHECK(near(left_force.torque_contact_release_nm, 0.7));
+        RB_CHECK(near(
+            left_force.transverse_contact_enter_force_n,
+            right_force.transverse_contact_enter_force_n
+        ));
+        RB_CHECK(near(
+            left_force.transverse_contact_release_force_n,
+            right_force.transverse_contact_release_force_n
+        ));
+        RB_CHECK(near(
+            left_force.torque_contact_enter_nm,
+            right_force.torque_contact_enter_nm
+        ));
+        RB_CHECK(near(
+            left_force.torque_contact_release_nm,
+            right_force.torque_contact_release_nm
+        ));
+        RB_CHECK(right_force.compliance_axes.x && right_force.compliance_axes.y);
+        RB_CHECK(right_force.compliance_axes.z && right_force.compliance_axes.roll);
+        RB_CHECK(right_force.compliance_axes.pitch && right_force.compliance_axes.yaw);
         RB_CHECK(near(left_force.hard_force_norm_n, 45.0));
         RB_CHECK(near(left_force.hard_force_norm_n, right_force.hard_force_norm_n));
         RB_CHECK(near(left_force.hard_torque_norm_nm, 7.0));
@@ -229,6 +258,10 @@ bool testRepositoryConfigsParse() {
         ));
         const auto& normal_force = stack_real.force_control.normal_admittance;
         RB_CHECK(near(normal_force.virtual_mass_kg, 8.0));
+        RB_CHECK(near(stack_real.force_control.virtual_mass[0], 8.0));
+        RB_CHECK(near(stack_real.force_control.virtual_mass[3], 0.8));
+        RB_CHECK(near(stack_real.force_control.wrench_deadband[0], 5.0));
+        RB_CHECK(near(stack_real.force_control.wrench_deadband[3], 0.9));
         RB_CHECK(near(normal_force.damping_n_s_m, 160.0));
         RB_CHECK(near(normal_force.stiffness_n_m, 0.0));
         RB_CHECK(near(normal_force.max_unload_offset_m, 0.01));

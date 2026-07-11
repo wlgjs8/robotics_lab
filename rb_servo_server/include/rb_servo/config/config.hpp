@@ -874,6 +874,13 @@ struct ForceControlArmConfig {
     int hard_limit_debounce_samples = 1;
     double release_dwell_sec = 0.0;
     double release_velocity_threshold_m_s = 0.002;
+    // Soft-contact hysteresis for the five non-normal Cartesian compliance
+    // axes.  The known surface normal keeps using the scalar thresholds above.
+    double transverse_contact_enter_force_n = 5.0;
+    double transverse_contact_release_force_n = 4.0;
+    double torque_contact_enter_nm = 0.9;
+    double torque_contact_release_nm = 0.7;
+    ForceControlAxis compliance_axes;
 };
 
 struct NormalAdmittanceConfig {
@@ -908,6 +915,7 @@ struct ForceControlConfig {
     std::array<double, 6> virtual_mass{5.0, 5.0, 5.0, 0.5, 0.5, 0.5};
     std::array<double, 6> damping{80.0, 80.0, 80.0, 8.0, 8.0, 8.0};
     std::array<double, 6> stiffness{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    std::array<double, 6> wrench_deadband{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 
     double max_dt_sec = 0.02;
 

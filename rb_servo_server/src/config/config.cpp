@@ -1590,9 +1590,11 @@ void validateConfig(const DualArmConfig& cfg) {
     }
     const std::string force_mode = lower(cfg.force_control.operating_mode);
     if (!(force_mode == "monitor" || force_mode == "guard" ||
-          force_mode == "guarded_admittance")) {
+          force_mode == "guarded_admittance" ||
+          force_mode == "cartesian_admittance")) {
         throw std::runtime_error(
-            "force_control.operating_mode must be monitor, guard, or guarded_admittance"
+            "force_control.operating_mode must be monitor, guard, "
+            "guarded_admittance, or cartesian_admittance"
         );
     }
     if (!cfg.force_control.enable &&
@@ -1619,6 +1621,10 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFiniteArray(cfg.force_control.virtual_mass, "force_control.virtual_mass");
     validateNonNegativeFiniteArray(cfg.force_control.damping, "force_control.damping");
     validateNonNegativeFiniteArray(cfg.force_control.stiffness, "force_control.stiffness");
+    validateNonNegativeFiniteArray(
+        cfg.force_control.wrench_deadband,
+        "force_control.wrench_deadband"
+    );
     validatePositiveFinite(cfg.force_control.max_dt_sec, "force_control.max_dt_sec");
     validatePositiveFinite(cfg.force_control.max_pos_offset_m, "force_control.max_pos_offset_m");
     validatePositiveFinite(cfg.force_control.max_rot_offset_rad, "force_control.max_rot_offset_rad");
@@ -1694,6 +1700,22 @@ void validateConfig(const DualArmConfig& cfg) {
             arm.release_velocity_threshold_m_s,
             path + ".release_velocity_threshold_m_s"
         );
+        validateNonNegativeFinite(
+            arm.transverse_contact_enter_force_n,
+            path + ".transverse_contact_enter_force_n"
+        );
+        validateNonNegativeFinite(
+            arm.transverse_contact_release_force_n,
+            path + ".transverse_contact_release_force_n"
+        );
+        validateNonNegativeFinite(
+            arm.torque_contact_enter_nm,
+            path + ".torque_contact_enter_nm"
+        );
+        validateNonNegativeFinite(
+            arm.torque_contact_release_nm,
+            path + ".torque_contact_release_nm"
+        );
         if (arm.release_velocity_threshold_m_s >
             cfg.force_control.normal_admittance.max_normal_velocity_m_s) {
             throw std::runtime_error(
@@ -1708,7 +1730,8 @@ void validateConfig(const DualArmConfig& cfg) {
         if (!(arm.contact_release_force_n < arm.contact_enter_force_n)) {
             throw std::runtime_error(path + " requires contact_release_force_n < contact_enter_force_n");
         }
-        if (force_mode == "guarded_admittance") {
+        if (force_mode == "guarded_admittance" ||
+            force_mode == "cartesian_admittance") {
             if (!(arm.target_force_n < arm.contact_release_force_n)) {
                 throw std::runtime_error(
                     path + " requires target_force_n < contact_release_force_n "
@@ -1720,6 +1743,27 @@ void validateConfig(const DualArmConfig& cfg) {
                 throw std::runtime_error(
                     path + " requires target_force_n + force_deadband_n <= "
                     "contact_release_force_n for guarded_admittance"
+                );
+            }
+        }
+        if (force_mode == "cartesian_admittance") {
+            if (!(arm.transverse_contact_release_force_n <
+                  arm.transverse_contact_enter_force_n)) {
+                throw std::runtime_error(
+                    path + " requires transverse_contact_release_force_n < "
+                    "transverse_contact_enter_force_n"
+                );
+            }
+            if (!(arm.torque_contact_release_nm < arm.torque_contact_enter_nm)) {
+                throw std::runtime_error(
+                    path + " requires torque_contact_release_nm < torque_contact_enter_nm"
+                );
+            }
+            const ForceControlAxis& axes = arm.compliance_axes;
+            if (!(axes.x || axes.y || axes.z || axes.roll || axes.pitch || axes.yaw)) {
+                throw std::runtime_error(
+                    path + ".compliance_axes must enable at least one axis for "
+                    "cartesian_admittance"
                 );
             }
         }
@@ -3257,6 +3301,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "virtual_mass",
             "damping",
             "stiffness",
+            "wrench_deadband",
             "max_dt_sec",
             "max_pos_offset_m",
             "max_rot_offset_rad",
@@ -3295,6 +3340,11 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "hard_limit_debounce_samples",
                 "release_dwell_sec",
                 "release_velocity_threshold_m_s",
+                "transverse_contact_enter_force_n",
+                "transverse_contact_release_force_n",
+                "torque_contact_enter_nm",
+                "torque_contact_release_nm",
+                "compliance_axes",
             }, path);
             if (has(arm, "enable")) out.enable = asBool(arm["enable"], path + ".enable");
             if (has(arm, "surface_source")) out.surface_source = lower(asString(arm["surface_source"], path + ".surface_source"));
@@ -3309,6 +3359,20 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(arm, "hard_limit_debounce_samples")) out.hard_limit_debounce_samples = asInt(arm["hard_limit_debounce_samples"], path + ".hard_limit_debounce_samples");
             if (has(arm, "release_dwell_sec")) out.release_dwell_sec = asDouble(arm["release_dwell_sec"], path + ".release_dwell_sec");
             if (has(arm, "release_velocity_threshold_m_s")) out.release_velocity_threshold_m_s = asDouble(arm["release_velocity_threshold_m_s"], path + ".release_velocity_threshold_m_s");
+            if (has(arm, "transverse_contact_enter_force_n")) out.transverse_contact_enter_force_n = asDouble(arm["transverse_contact_enter_force_n"], path + ".transverse_contact_enter_force_n");
+            if (has(arm, "transverse_contact_release_force_n")) out.transverse_contact_release_force_n = asDouble(arm["transverse_contact_release_force_n"], path + ".transverse_contact_release_force_n");
+            if (has(arm, "torque_contact_enter_nm")) out.torque_contact_enter_nm = asDouble(arm["torque_contact_enter_nm"], path + ".torque_contact_enter_nm");
+            if (has(arm, "torque_contact_release_nm")) out.torque_contact_release_nm = asDouble(arm["torque_contact_release_nm"], path + ".torque_contact_release_nm");
+            if (has(arm, "compliance_axes")) {
+                const YAML::Node axes = arm["compliance_axes"];
+                if (!axes.IsSequence() || axes.size() != 6) {
+                    throw std::runtime_error(path + ".compliance_axes must contain 6 booleans");
+                }
+                out.compliance_axes = {
+                    axes[0].as<bool>(), axes[1].as<bool>(), axes[2].as<bool>(),
+                    axes[3].as<bool>(), axes[4].as<bool>(), axes[5].as<bool>(),
+                };
+            }
         };
         if (has(sec, "left")) parse_force_arm(sec["left"], cfg.force_control.left, "force_control.left");
         if (has(sec, "right")) parse_force_arm(sec["right"], cfg.force_control.right, "force_control.right");
@@ -3339,6 +3403,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "virtual_mass")) cfg.force_control.virtual_mass = parseJointArray(sec["virtual_mass"], "force_control.virtual_mass");
         if (has(sec, "damping")) cfg.force_control.damping = parseJointArray(sec["damping"], "force_control.damping");
         if (has(sec, "stiffness")) cfg.force_control.stiffness = parseJointArray(sec["stiffness"], "force_control.stiffness");
+        if (has(sec, "wrench_deadband")) cfg.force_control.wrench_deadband = parseJointArray(sec["wrench_deadband"], "force_control.wrench_deadband");
         if (has(sec, "max_dt_sec")) cfg.force_control.max_dt_sec = asDouble(sec["max_dt_sec"], "force_control.max_dt_sec");
         if (has(sec, "max_pos_offset_m")) cfg.force_control.max_pos_offset_m = asDouble(sec["max_pos_offset_m"], "force_control.max_pos_offset_m");
         if (has(sec, "max_rot_offset_rad")) cfg.force_control.max_rot_offset_rad = asDouble(sec["max_rot_offset_rad"], "force_control.max_rot_offset_rad");

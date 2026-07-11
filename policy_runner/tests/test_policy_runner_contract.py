@@ -392,9 +392,9 @@ class PolicyRunnerContractTest(unittest.TestCase):
             if callable(close):
                 close()
 
-    def test_stack_configs_record_six_rgbd_streams_at_30hz(self):
+    def test_stack_configs_record_expected_rgbd_streams_at_30hz(self):
         config_dir = Path(__file__).resolve().parents[1] / "config"
-        expected = [
+        full_rig = [
             "left_realsense_color",
             "left_realsense_depth",
             "right_realsense_color",
@@ -402,12 +402,16 @@ class PolicyRunnerContractTest(unittest.TestCase):
             "head_color",
             "head_depth",
         ]
+        wrist_priority = full_rig[:4]
         for name in ("stack_sim.yaml", "stack_real.yaml", "flow_real_realsense.yaml"):
             with self.subTest(name=name):
                 cfg = load_config(config_dir / name)
                 self.assertEqual(cfg.recording.rate_hz, 30.0)
+                expected = wrist_priority if name == "flow_real_realsense.yaml" else full_rig
                 self.assertEqual(cfg.camera.expected_cameras, expected)
                 self.assertTrue(cfg.camera.record_zero_on_missing)
+                if name == "flow_real_realsense.yaml":
+                    self.assertEqual(cfg.camera.bundle_topic, "camera.bundle.policy")
 
     def test_make_run_keeps_external_flow_infer_state_port_available(self):
         repo_root = Path(__file__).resolve().parents[2]

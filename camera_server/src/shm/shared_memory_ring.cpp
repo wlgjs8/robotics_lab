@@ -185,7 +185,7 @@ void SharedMemoryRingBuffer::load_descriptors() {
     }
     const std::string camera = read_cstr(desc[i].camera_name, sizeof(desc[i].camera_name));
     const std::string stream = read_cstr(desc[i].stream_name, sizeof(desc[i].stream_name));
-    rings_[stream_key(camera, stream)] = RingInfo{&desc[i], 0};
+    rings_[stream_key(camera, stream)] = RingInfo{&desc[i], 0, std::make_shared<std::mutex>()};
   }
 }
 
@@ -216,10 +216,10 @@ FrameMeta SharedMemoryRingBuffer::write_frame(const std::string& camera_name, co
                                               uint64_t host_arrival_time_ns, uint64_t sensor_timestamp_ns,
                                               double realsense_timestamp_ms, uint32_t stride_bytes, const uint8_t* bytes,
                                               uint32_t size_bytes) {
-  std::lock_guard<std::mutex> lk(write_mutex_);
   auto it = rings_.find(stream_key(camera_name, stream_name));
   if (it == rings_.end()) throw std::runtime_error("unknown shm ring: " + stream_key(camera_name, stream_name));
   RingInfo& ring = it->second;
+  std::lock_guard<std::mutex> lk(*ring.write_mutex);
   const uint32_t slot_idx = ring.next_slot++ % ring.desc->slot_count;
   auto* slot = slot_header(ring, slot_idx);
   const uint64_t expected = slot_payload_capacity(ring);

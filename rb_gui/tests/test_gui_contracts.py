@@ -3251,6 +3251,23 @@ class GuiContractsTest(unittest.TestCase):
             "surface_source": "floor_constraint",
             "normal_stand": [0.0, 0.0, 1.0],
             "contact_active": True,
+            "normal_contact_active": False,
+            "transverse_contact_active": True,
+            "rotational_contact_active": True,
+            "compliance_active": True,
+            "normal_regulating": True,
+            "transverse_regulating": False,
+            "rotational_regulating": False,
+            "loading_projection_active": True,
+            "control_wrench_surface": [1.0, 2.0, 3.0, 0.1, 0.2, 0.3],
+            "wrench_error_surface": [0.5, -0.5, 1.5, -0.1, 0.0, 0.1],
+            "compliance_offset_surface": [0.001, 0.002, 0.003, 0.01, 0.02, 0.03],
+            "compliance_velocity_surface": [0.004, 0.005, 0.006, 0.04, 0.05, 0.06],
+            "compliance_acceleration_surface": [0.007, 0.008, 0.009, 0.07, 0.08, 0.09],
+            "raw_policy_delta_surface": [0.01, 0.02, -0.03, 0.1, 0.2, -0.3],
+            "accepted_policy_delta_surface": [0.01, 0.0, 0.0, 0.1, 0.0, 0.0],
+            "compliance_limit_axes": [True, False, False, False, True, False],
+            "compliance_limit_reason": "jerk_limited_motion_envelope",
             "measured_force_n": 8.2,
             "fast_normal_force_n": 9.2,
             "fast_force_norm_n": 10.2,
@@ -3264,7 +3281,7 @@ class GuiContractsTest(unittest.TestCase):
             "velocity_m_s": 0.002,
             "acceleration_m_s2": 0.01,
             "energy_j": 0.04,
-            "saturated": False,
+            "saturated": True,
             "proposal_valid": True,
             "proposal_committed": True,
             "fault_reason": None,
@@ -3299,6 +3316,30 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(latest.left.force_control.state, "regulating")
         self.assertEqual(latest.left.force_control.normal_stand, (0.0, 0.0, 1.0))
         self.assertTrue(latest.left.force_control.contact_active)
+        self.assertFalse(latest.left.force_control.normal_contact_active)
+        self.assertTrue(latest.left.force_control.transverse_contact_active)
+        self.assertTrue(latest.left.force_control.rotational_contact_active)
+        self.assertTrue(latest.left.force_control.compliance_active)
+        self.assertTrue(latest.left.force_control.normal_regulating)
+        self.assertFalse(latest.left.force_control.transverse_regulating)
+        self.assertFalse(latest.left.force_control.rotational_regulating)
+        self.assertTrue(latest.left.force_control.loading_projection_active)
+        self.assertEqual(
+            latest.left.force_control.control_wrench_surface,
+            (1.0, 2.0, 3.0, 0.1, 0.2, 0.3),
+        )
+        self.assertEqual(
+            latest.left.force_control.accepted_policy_delta_surface,
+            (0.01, 0.0, 0.0, 0.1, 0.0, 0.0),
+        )
+        self.assertEqual(
+            latest.left.force_control.compliance_limit_axes,
+            (True, False, False, False, True, False),
+        )
+        self.assertEqual(
+            latest.left.force_control.compliance_limit_reason,
+            "jerk_limited_motion_envelope",
+        )
         self.assertAlmostEqual(latest.left.force_control.measured_force_n, 8.2)
         self.assertAlmostEqual(latest.left.force_control.fast_normal_force_n, 9.2)
         self.assertAlmostEqual(latest.left.force_control.fast_force_norm_n, 10.2)
@@ -3319,6 +3360,26 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("health_verified=False", status)
         self.assertIn("safety_rated=False", status)
         self.assertIn("contact=True", status)
+        self.assertIn("normal_contact=False", status)
+        self.assertIn("transverse_contact=True", status)
+        self.assertIn("rotational_contact=True", status)
+        self.assertIn("compliance=True", status)
+        self.assertIn("normal_regulating=True", status)
+        self.assertIn("transverse_regulating=False", status)
+        self.assertIn("rotational_regulating=False", status)
+        self.assertIn("loading_projection=True", status)
+        self.assertIn(
+            "control_wrench_surface=[+1.0000,+2.0000,+3.0000,+0.1000,+0.2000,+0.3000]",
+            status,
+        )
+        self.assertIn(
+            "wrench_error_surface=[+0.5000,-0.5000,+1.5000,-0.1000,+0.0000,+0.1000]",
+            status,
+        )
+        self.assertIn(
+            "accepted_policy_delta_surface=[+0.0100,+0.0000,+0.0000,+0.1000,+0.0000,+0.0000]",
+            status,
+        )
         self.assertIn("fast_normal=9.200N", status)
         self.assertIn("force_norm=10.200N", status)
         self.assertIn("torque_norm=1.200Nm", status)
@@ -3326,6 +3387,8 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("hard_count=2", status)
         self.assertIn("contact_threshold=True", status)
         self.assertIn("hard_limit=False", status)
+        self.assertIn("limit_axes=x+ry", status)
+        self.assertIn("limit_reason=jerk_limited_motion_envelope", status)
         self.assertIn("controller=regulating", status)
         self.assertIn("normal_force=8.200N", status)
         self.assertIn("target=8.000N", status)

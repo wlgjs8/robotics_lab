@@ -5,7 +5,7 @@
 `PRODUCTION REAL ENFORCEMENT: BLOCKED`
 
 This runbook records the evidence required to promote the integrated F/T
-monitor, guard, and unilateral normal-admittance path. It grants no motion
+monitor, guard, unilateral normal admittance, and Cartesian compliance path. It grants no motion
 authority. The current rbpodo EFT state does not prove sensor presence, sensor
 fault, or overrange status. The backend exposes a CobotData frame-acquisition
 sequence, but this is not an independent sensor sequence, so the
@@ -15,7 +15,8 @@ a supervised acceptance stage; it does not close this gate.
 
 `stack_sim.yaml` remains force-off. The tracked `stack_real.yaml` is the single
 physical bring-up profile and currently exposes a dual-arm supervised
-experimental guarded-admittance stage with an identical per-arm contact profile.
+experimental Cartesian-admittance stage with an identical per-arm contact
+profile.
 The production gate above remains
 blocked because the EFT source does not provide independent sensor health:
 
@@ -23,7 +24,7 @@ blocked because the EFT source does not provide independent sensor health:
 force_control:
   provider: project_native
   enable: true
-  operating_mode: guarded_admittance
+  operating_mode: cartesian_admittance
   allow_in_real: true
   supervised_experimental_real: true
   left:
@@ -179,17 +180,28 @@ applicable config/ownership parts of these requirements:
 - output moving-average transition reset/bypass evidence
 - same-tick fault/send-suppression tests
 - an enforcing floor/ROI/contact-zone envelope outside the planned contact zone
-- server and Python motion-epoch/observation provenance invalidation
+- hard-fault server and Python motion-epoch/observation provenance invalidation
 - DeltaTwist normal-axis projection with tangential-state preservation
-- reset interlock requiring a fresh post-event observation and chunk
+- Cartesian loading projection and bounded SE(3) compliance on every enabled axis
+- legacy guarded-mode reset interlock requiring a fresh post-event observation and chunk
 
-The implementation increments `motion_epoch` on contact entry, release, and
-external-force fault. `flow-infer` invalidates cached/in-flight chunks and
-reanchors its absolute TCP targets when the epoch changes. Admittance state is
-committed only after IK, final safety filtering, and accepted backend send.
-While that reanchor is pending and the upstream command is `Hold`, the active
-contact arm continues a server-synthesized Cartesian unload target from its
-measured pose; stale chunk/SMD followers are bypassed for that arm.
+In `cartesian_admittance`, soft-contact entry and release do not increment
+`motion_epoch`: flow-infer inference, the active chunk, and gripper execution
+continue while the server projects loading policy deltas and composes bounded
+compliance. External-force hard faults still increment the epoch and invalidate
+cached/in-flight chunks. All admittance state is committed only after IK, final
+safety filtering, and accepted backend send. The older
+`guarded_admittance` mode retains its contact/release epoch and synthesized-Hold
+recovery behavior for regression compatibility.
+
+During this stage, a Cartesian compliance limit is not itself a failed test:
+`compliance_limit_reason=jerk_limited_motion_envelope` means the requested
+deflection was reduced to preserve the configured offset, velocity,
+acceleration, jerk, and step bounds. A run fails if that bounded condition
+latches a controller fault, if any hard force/torque threshold is crossed, or
+if the corrected target fails IK or a downstream safety gate. Review the
+per-axis `compliance_limit_axes` together with the separate normal, transverse,
+and rotational contact flags in the GUI and CSV.
 
 The F/T path is not safety-rated. It supplements but never replaces E-stop,
 lease/deadman, stale-state, tracking-error, self-collision, floor, ROI, and

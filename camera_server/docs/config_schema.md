@@ -53,6 +53,18 @@ sync:
   max_bundle_time_diff_ms: 33.0
   publish_incomplete_bundles: false
 
+bundle_groups:              # optional; omitted profiles retain one legacy group
+  policy:
+    topic: "camera.bundle.policy"
+    master_stream: "left_realsense.color"
+    required_streams:
+      - "left_realsense.color"
+      - "left_realsense.depth"
+      - "right_realsense.color"
+      - "right_realsense.depth"
+    max_bundle_time_diff_ms: 33.0
+    publish_incomplete_bundles: false
+
 cameras:
   head:
     backend: realsense      # realsense (default, depth-capable) | uvc (V4L2 fisheye)
@@ -127,6 +139,8 @@ recording:
 
 health:
   publish_rate_hz: 1
+  fps_window_sec: 5
+  warn_if_fps_below: 29
   warn_if_frame_age_ms_gt: 100
   warn_if_drop_count_increases: true
   warn_if_bundle_skew_ms_gt: 10
@@ -170,6 +184,8 @@ reconnect:
   - `sync.mode: software` requires `sync.bundle_policy: nearest_timestamp`
   - `sync.mode: hardware` requires `sync.bundle_policy: frame_number`
 - `reconnect.enabled: true` fails validation until reconnect is implemented
+- bundle group names and topics must be unique; every required/master stream
+  must refer to an enabled stream
 - stream FPS must be 30 initially unless explicitly changed
 - width/height must be positive
 - shared memory size must fit configured streams and ring slots

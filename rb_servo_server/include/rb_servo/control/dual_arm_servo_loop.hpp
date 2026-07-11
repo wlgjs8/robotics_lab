@@ -17,6 +17,7 @@
 #include "rb_servo/control/cartesian_servo_controller.hpp"
 #include "rb_servo/control/command_buffer.hpp"
 #include "rb_servo/control/delta_twist_follower.hpp"
+#include "rb_servo/control/force_controller.hpp"
 #include "rb_servo/control/joint_moving_average.hpp"
 #include "rb_servo/control/normal_force_controller.hpp"
 #include "rb_servo/control/realtime_timing.hpp"
@@ -345,7 +346,12 @@ private:
         ForceControlTelemetry control;
         Pose6D contact_anchor;
         bool contact_anchor_valid = false;
+        bool normal_contact_active = false;
+        bool transverse_contact_active = false;
+        bool rotational_contact_active = false;
         int enter_count = 0;
+        int transverse_enter_count = 0;
+        int rotational_enter_count = 0;
         int hard_limit_count = 0;
         uint64_t release_start_ns = 0;
         Pose6D release_hold_pose;
@@ -356,6 +362,19 @@ private:
         uint64_t previous_actual_pose_ns = 0;
         std::optional<NormalForceControllerProposal> pending_proposal;
         bool pending_proposal_applied = false;
+        std::optional<ForceControllerProposal> pending_cartesian_proposal;
+        bool pending_cartesian_proposal_applied = false;
+        Wrench6D control_wrench_surface;
+        Vec6 actual_twist_surface;
+        Pose6D previous_raw_compliance_target;
+        Pose6D rolling_compliance_target;
+        bool rolling_compliance_target_valid = false;
+        Pose6D pending_previous_raw_compliance_target;
+        Pose6D pending_rolling_compliance_target;
+        bool pending_rolling_compliance_target_valid = false;
+        bool pending_absorb_normal_correction_applied = false;
+        bool absorb_normal_correction = false;
+        double absorbed_normal_correction_m = 0.0;
         bool tare_valid = false;
         bool tare_waiting_for_init_completion = false;
         bool tare_collecting = false;
@@ -367,6 +386,8 @@ private:
     FtWrenchPipeline right_ft_pipeline_;
     NormalForceController left_normal_force_controller_;
     NormalForceController right_normal_force_controller_;
+    ForceController left_cartesian_force_controller_;
+    ForceController right_cartesian_force_controller_;
     ForceArmRuntime left_force_runtime_;
     ForceArmRuntime right_force_runtime_;
     uint64_t motion_epoch_ = 0;

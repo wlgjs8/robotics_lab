@@ -18,6 +18,8 @@ struct ForceControllerState {
 struct ForceControllerProposal {
     ForceControllerState state;
     Wrench6D wrench_error_tcp;
+    std::array<bool, 6> limit_axes{};
+    std::string limit_reason;
     bool valid = false;
     bool saturated = false;
     std::string reason;
@@ -26,9 +28,9 @@ struct ForceControllerProposal {
     uint64_t base_state_revision = 0;
 };
 
-// Standalone, project-native bounded Cartesian admittance. It intentionally
-// has no DualArmServoLoop integration yet. Callers must commit only after the
-// corrected Cartesian target has passed IK and every final safety gate.
+// Project-native bounded Cartesian admittance. DualArmServoLoop composes its
+// proposal in a deterministic surface frame and commits it only after the
+// corrected Cartesian target passes IK, every final safety gate, and send.
 class ForceController {
 public:
     explicit ForceController(ForceControlConfig config);

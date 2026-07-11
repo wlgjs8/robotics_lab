@@ -757,6 +757,7 @@ class FlowMatchingActionSource:
         )
         return {
             "enabled": bool(getattr(config, "enable", False)),
+            "contact_behavior": str(getattr(config, "contact_behavior", "recover")),
             "state": str(getattr(self, "_force_recovery_state", "running")),
             "blocked_on": str(getattr(self, "_force_recovery_blocked_on", "none")),
             "terminal_abort_reason": self.force_recovery_terminal_abort_reason,
@@ -819,6 +820,10 @@ class FlowMatchingActionSource:
         self._force_recovery_last_now = now
         self._update_force_recovery_arm_status(payload)
         contact = self._force_contact_active(payload)
+        if str(getattr(config, "contact_behavior", "recover")) == "continue":
+            self._force_recovery_state = "running"
+            self._force_recovery_blocked_on = "none"
+            return False, None
         state = str(getattr(self, "_force_recovery_state", "running"))
 
         if contact and state != "contact":

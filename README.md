@@ -200,11 +200,13 @@ tracked real rbpodo template의 supported safety range는 명시적 per-joint
 정규화는 control/safety/tracking/log source-of-truth에 쓰지 않습니다.
 자세한 내용은 `docs/joint_range_policy.md`를 봅니다.
 
-Project-native F/T monitor, contact guard, 법선방향 unilateral admittance가
-servo motion path에 통합되어 있습니다. `stack_real.yaml`은 현재 오른팔만
-supervised experimental guarded-admittance로 연결하며, 왼팔 force motion은
-별도 sign/axis evidence 전까지 비활성입니다. 이 설정은 production acceptance가
-아니며 같은 파일에서 단계별 CSV evidence를 남깁니다.
+Project-native F/T monitor, contact guard, 법선방향 unilateral admittance,
+6D Cartesian compliance가 servo motion path에 통합되어 있습니다.
+`stack_real.yaml`은 양팔에 동일한 supervised experimental
+Cartesian-admittance profile을 적용합니다. Soft contact에서는 flow-infer
+chunk와 gripper 실행을 계속하고, hard limit만 기존 fault/중단 경로를
+유지합니다. 이 설정은 production acceptance가 아니며 단계별 CSV
+evidence가 필요합니다.
 상세 계약은 `rb_servo_server/docs/force_control.md`, 실센서 특성화와
 승격 evidence는 `docs/runbooks/ft_force_control_acceptance.md`에 기록합니다.
 
@@ -212,7 +214,7 @@ supervised experimental guarded-admittance로 연결하며, 왼팔 force motion�
 force_control:
   provider: project_native
   enable: true
-  operating_mode: guarded_admittance
+  operating_mode: cartesian_admittance
   allow_in_real: true
   supervised_experimental_real: true
 ```

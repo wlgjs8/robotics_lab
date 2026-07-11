@@ -14,7 +14,6 @@ server:
   mode: capture_only
   clock: monotonic_raw
   simulate_cameras: false
-
 shared_memory:
   name: "/camera_server_frames"
   size_mb: 1024

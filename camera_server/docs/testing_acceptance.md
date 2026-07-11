@@ -30,8 +30,8 @@ Acceptance:
 
 - all required cameras maintain 30 FPS
 - zero frame number gaps for 10 minutes, or drop count explicitly reported
-- bundle metadata publishes at approximately 30 FPS
-- policy_runner sample can read latest bundle from shared memory
+- `camera.bundle.policy` and `camera.bundle.stereo` each publish at approximately 30 FPS
+- policy_runner reads the wrist-only priority bundle from shared memory
 
 ## 4. RGB-D bandwidth test
 
@@ -60,7 +60,9 @@ Subscriber validates JSON schema.
 
 Acceptance:
 
-- `camera.bundle` contains configured streams
+- `camera.bundle` contains the legacy full rig
+- `camera.bundle.policy` contains only wrist RGB-D
+- `camera.bundle.stereo` contains only head color/IR
 - `complete` is true when all required streams are available
 - `max_time_diff_ms` is finite
 - frame numbers increase
@@ -106,7 +108,7 @@ Camera-server plumbing is done when:
 ```text
 - head RealSense and both wrist RealSense cameras match the approved profile at 30 FPS
 - shared memory image ring works
-- ZMQ camera.bundle metadata works
+- ZMQ legacy, policy, and stereo bundle metadata works
 - policy_runner sample reads latest bundle
 - frame drop counters are implemented
 - health topic is published

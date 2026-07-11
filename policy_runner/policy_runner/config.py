@@ -191,6 +191,7 @@ class ForceRecoveryConfig:
     """Policy-side recovery gate driven by server-owned force-contact telemetry."""
 
     enable: bool = False
+    contact_behavior: str = "recover"
     settle_time_sec: float = 0.12
     max_linear_velocity_m_s: float = 0.002
     max_angular_velocity_rad_s: float = 0.05
@@ -198,6 +199,8 @@ class ForceRecoveryConfig:
     settling_timeout_sec: float = 2.0
 
     def __post_init__(self) -> None:
+        if self.contact_behavior not in {"recover", "continue"}:
+            raise ValueError("force_recovery.contact_behavior must be recover or continue")
         if self.settle_time_sec < 0.0:
             raise ValueError("force_recovery.settle_time_sec must be non-negative")
         if self.max_linear_velocity_m_s < 0.0:
@@ -676,6 +679,8 @@ def _force_recovery_config(raw: dict[str, Any]) -> ForceRecoveryConfig:
         raw["settling_timeout_sec"] = timeout
     if "enable" in raw:
         raw["enable"] = bool(raw["enable"])
+    if "contact_behavior" in raw:
+        raw["contact_behavior"] = str(raw["contact_behavior"])
     for key in (
         "settle_time_sec",
         "max_linear_velocity_m_s",

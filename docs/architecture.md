@@ -357,15 +357,16 @@ Deprecated simulator config names are archived under `docs/archive/configs/`
 for historical reference only. They are not runnable source-of-truth profiles
 and must not be used for new smoke or acceptance evidence.
 
-Force control is integrated as a server-owned path: rbpodo EFT
-samples feed the compensated wrench pipeline, contact guard, and unilateral
-surface-normal admittance before IK. The active contact normal suppresses
-further policy penetration while preserving tangential/orientation commands and
-policy-requested retreat. Config/local activation, motion epochs, telemetry,
-and promotion constraints are defined in
+Force control is integrated as a server-owned path: rbpodo EFT samples feed the
+compensated wrench pipeline, contact guard, unilateral surface-normal
+admittance, and bounded 6D Cartesian compliance before IK. In Cartesian
+compliance mode, soft contact preserves the active flow-infer chunk and gripper
+execution while loading translation/rotation increments are projected and a
+bounded SE(3) correction is composed. Hard-limit faults retain the normal
+motion-epoch interruption path. Activation, telemetry, and promotion constraints are defined in
 `rb_servo_server/docs/force_control.md`. The path is not safety-rated;
 `stack_real.yaml` currently exposes a supervised experimental dual-arm
-guarded-admittance stage with identical per-arm contact parameters. This is a
+Cartesian-admittance stage with identical per-arm contact parameters. This is a
 physical bring-up configuration, not production
 acceptance.
 
@@ -373,7 +374,7 @@ acceptance.
 force_control:
   provider: project_native
   enable: true
-  operating_mode: guarded_admittance
+  operating_mode: cartesian_admittance
   allow_in_real: true
   supervised_experimental_real: true
 ```

@@ -95,10 +95,13 @@ class ForceRecoveryConfigTest(unittest.TestCase):
         self.assertTrue(config.force_recovery.enable)
         self.assertEqual(config.force_recovery.contact_timeout_sec, 5.0)
         self.assertEqual(config.force_recovery.settling_timeout_sec, 3.0)
+        self.assertEqual(config.force_recovery.contact_behavior, "recover")
         with self.assertRaisesRegex(ValueError, "contact_timeout_sec"):
             ForceRecoveryConfig(enable=True, contact_timeout_sec=0.0)
         with self.assertRaisesRegex(ValueError, "settling_timeout_sec"):
             ForceRecoveryConfig(enable=True, settling_timeout_sec=0.0)
+        with self.assertRaisesRegex(ValueError, "contact_behavior"):
+            ForceRecoveryConfig(enable=True, contact_behavior="invalid")
 
     def test_deprecated_timeout_is_per_phase_fallback_and_cannot_be_mixed(self) -> None:
         config = config_from_mapping({"force_recovery": {"timeout_sec": 4.0}})
@@ -123,6 +126,7 @@ class ForceRecoveryConfigTest(unittest.TestCase):
         flow = load_config(root / "policy_runner/config/flow_real_realsense.yaml")
         stack = load_config(root / "policy_runner/config/stack_real.yaml")
         self.assertTrue(flow.force_recovery.enable)
+        self.assertEqual(flow.force_recovery.contact_behavior, "continue")
         self.assertEqual(flow.force_recovery.contact_timeout_sec, 5.0)
         self.assertEqual(flow.force_recovery.settling_timeout_sec, 2.0)
         self.assertFalse(stack.force_recovery.enable)
@@ -130,6 +134,51 @@ class ForceRecoveryConfigTest(unittest.TestCase):
 
 @unittest.skipUnless(_TORCH_AVAILABLE, "flow-infer runtime dependency torch is not installed")
 class ForceRecoveryGateTest(unittest.TestCase):
+    def test_continue_behavior_keeps_chunk_gripper_and_policy_live_during_contact(self) -> None:
+        source = _source()
+        source.configure_force_recovery(
+            ForceRecoveryConfig(enable=True, contact_behavior="continue")
+        )
+        chunk = source._chunk
+        current_intent = source._current_step_intent
+        gripper_targets = dict(source._gripper_targets_by_arm)
+
+        blocked, intent = source._force_recovery_gate(
+            StateSnapshot(
+                payload=_payload(contact=True, measured_force_n=6.75),
+                received_monotonic=0.0,
+            ),
+            1.0,
+        )
+
+        self.assertFalse(blocked)
+        self.assertIsNone(intent)
+        self.assertIs(source._chunk, chunk)
+        self.assertIs(source._current_step_intent, current_intent)
+        self.assertEqual(source._gripper_targets_by_arm, gripper_targets)
+        self.assertEqual(source._force_recovery_state, "running")
+        self.assertEqual(source._force_recovery_counters["contact_events"], 0)
+        self.assertEqual(source._force_recovery_counters["chunk_invalidations"], 0)
+        status = source.force_recovery_status()
+        self.assertEqual(status["contact_behavior"], "continue")
+        self.assertTrue(status["arms"]["right"]["contact_active"])
+
+    def test_continue_behavior_preserves_hard_motion_epoch_invalidation(self) -> None:
+        source = _source()
+        source.configure_force_recovery(
+            ForceRecoveryConfig(enable=True, contact_behavior="continue")
+        )
+        source._last_server_motion_epoch = 1
+        invalidations: list[str] = []
+        source._invalidate_policy_chunks = lambda *, reason: invalidations.append(reason)
+
+        fault_or_other_epoch = _snapshot(contact=True, epoch=2)
+        source._force_recovery_gate(fault_or_other_epoch, 1.0)
+        source._handle_server_motion_epoch(fault_or_other_epoch)
+
+        self.assertEqual(source._last_server_motion_epoch, 2)
+        self.assertEqual(invalidations, ["server_motion_epoch"])
+
     def test_contact_invalidates_once_and_holds_both_grippers(self) -> None:
         source = _source()
         blocked, intent = source._force_recovery_gate(_snapshot(contact=True), 0.0)

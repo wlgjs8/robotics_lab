@@ -174,6 +174,21 @@ class CameraBundleClientTest(unittest.TestCase):
         self.assertEqual(diagnostics["latest_bundle"]["bundle_seq"], 42)
         np.testing.assert_array_equal(bundle.frames["head"].pixels.reshape(-1), np.frombuffer(pixels, dtype=np.uint8))
 
+    def test_legacy_topic_ignores_prefixed_group_messages_when_draining(self) -> None:
+        frame = _write_shm_image(
+            name=self._shm_name(), width=1, height=1, channels=3, payload=b"\x01\x02\x03"
+        )
+        payload = json.dumps(self._bundle({"head": frame})).encode("utf-8")
+        for _ in range(5):
+            self.pub.send_multipart([b"camera.bundle", payload])
+            self.pub.send_multipart([b"camera.bundle.policy", b"{}"])
+            bundle = self.client.poll(timeout_ms=50)
+            if bundle is not None:
+                break
+        self.assertIsNotNone(bundle)
+        assert bundle is not None
+        self.assertEqual(bundle.bundle_seq, 42)
+
     def test_poll_skips_incomplete_bundles(self) -> None:
         frame = _write_shm_image(name=self._shm_name(), width=1, height=1, channels=3, payload=b"\x01\x02\x03")
         self.assertIsNone(self._publish(self._bundle({"head": frame}, complete=False)))

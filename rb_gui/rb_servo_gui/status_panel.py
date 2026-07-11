@@ -32,6 +32,10 @@ def _format_joints(q_values: tuple[float, ...] | None) -> str:
     return ", ".join(f"{value:.2f}" for value in q_values)
 
 
+def _format_force_vec6(values: tuple[float, ...]) -> str:
+    return "[" + ",".join(f"{value:+.4f}" for value in values) + "]"
+
+
 def _joint_monitor_unit(handles: dict[str, Any]) -> str:
     selector = handles.get("joint_monitor_unit", "deg")
     unit = selector if isinstance(selector, str) else getattr(selector, "value", "deg")
@@ -151,6 +155,48 @@ def _format_arm_force_status(arm: ArmSnapshot) -> str:
             parts.append(f"controller={force_control.state}")
         if force_control.contact_active is not None:
             parts.append(f"contact={force_control.contact_active}")
+        if force_control.normal_contact_active is not None:
+            parts.append(f"normal_contact={force_control.normal_contact_active}")
+        if force_control.transverse_contact_active is not None:
+            parts.append(
+                f"transverse_contact={force_control.transverse_contact_active}"
+            )
+        if force_control.rotational_contact_active is not None:
+            parts.append(
+                f"rotational_contact={force_control.rotational_contact_active}"
+            )
+        if force_control.compliance_active is not None:
+            parts.append(f"compliance={force_control.compliance_active}")
+        if force_control.normal_regulating is not None:
+            parts.append(f"normal_regulating={force_control.normal_regulating}")
+        if force_control.transverse_regulating is not None:
+            parts.append(
+                f"transverse_regulating={force_control.transverse_regulating}"
+            )
+        if force_control.rotational_regulating is not None:
+            parts.append(f"rotational_regulating={force_control.rotational_regulating}")
+        if force_control.loading_projection_active is not None:
+            parts.append(
+                f"loading_projection={force_control.loading_projection_active}"
+            )
+        vector_fields = (
+            ("control_wrench_surface", force_control.control_wrench_surface),
+            ("wrench_error_surface", force_control.wrench_error_surface),
+            ("compliance_offset_surface", force_control.compliance_offset_surface),
+            ("compliance_velocity_surface", force_control.compliance_velocity_surface),
+            (
+                "compliance_acceleration_surface",
+                force_control.compliance_acceleration_surface,
+            ),
+            ("raw_policy_delta_surface", force_control.raw_policy_delta_surface),
+            (
+                "accepted_policy_delta_surface",
+                force_control.accepted_policy_delta_surface,
+            ),
+        )
+        for label, values in vector_fields:
+            if values is not None:
+                parts.append(f"{label}={_format_force_vec6(values)}")
         if force_control.measured_force_n is not None:
             parts.append(f"normal_force={force_control.measured_force_n:.3f}N")
         if force_control.fast_normal_force_n is not None:
@@ -175,6 +221,16 @@ def _format_arm_force_status(arm: ArmSnapshot) -> str:
             parts.append(f"unload={force_control.correction_m * 1000.0:.3f}mm")
         if force_control.saturated is not None:
             parts.append(f"saturated={force_control.saturated}")
+        if force_control.compliance_limit_axes is not None:
+            labels = ("x", "y", "z", "rx", "ry", "rz")
+            active = [
+                label for label, limited in zip(
+                    labels, force_control.compliance_limit_axes, strict=True
+                ) if limited
+            ]
+            parts.append(f"limit_axes={'+'.join(active) if active else 'none'}")
+        if force_control.compliance_limit_reason is not None:
+            parts.append(f"limit_reason={force_control.compliance_limit_reason}")
         if force_control.motion_epoch is not None:
             parts.append(f"controller_epoch={force_control.motion_epoch}")
         if force_control.fault_reason is not None:

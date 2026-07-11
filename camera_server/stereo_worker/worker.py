@@ -16,6 +16,8 @@ FFS_DIR = os.environ.get("FFS_DIR", "/app/Fast-FoundationStereo")
 WEIGHTS = os.environ.get("STEREO_WEIGHTS",
                          f"{FFS_DIR}/weights/23-36-37/model_best_bp2_serialize.pth")
 BUNDLE_ENDPOINT = os.environ.get("CAMERA_BUNDLE_ENDPOINT", "tcp://127.0.0.1:5600")
+STEREO_BUNDLE_TOPIC = os.environ.get("STEREO_BUNDLE_TOPIC", "camera.bundle.stereo")
+STEREO_WRIST_BUNDLE_TOPIC = os.environ.get("STEREO_WRIST_BUNDLE_TOPIC", "camera.bundle.policy")
 CLOUD_PUB_BIND = os.environ.get("CLOUD_PUB_BIND", "tcp://127.0.0.1:5601")
 CLOUD_TOPIC = os.environ.get("CLOUD_TOPIC", "stereo.cloud")
 STEREO_CAMERA = os.environ.get("STEREO_CAMERA", "head")
@@ -319,7 +321,8 @@ def cmd_run(args):
     K, baseline = load_ktxt(STEREO_INTRINSICS)
     print(f"[run] intrinsics fx={K[0,0]:.1f} cx={K[0,2]:.1f} cy={K[1,2]:.1f} "
           f"baseline={baseline*1000:.1f}mm  src={STEREO_INTRINSICS}  "
-          f"bundle={BUNDLE_ENDPOINT}  pub={CLOUD_PUB_BIND}", flush=True)
+          f"bundle={BUNDLE_ENDPOINT} topics[head={STEREO_BUNDLE_TOPIC} "
+          f"wrist={STEREO_WRIST_BUNDLE_TOPIC}] pub={CLOUD_PUB_BIND}", flush=True)
     use_trt = os.path.exists(STEREO_ENGINE) and not args.force_torch
     if use_trt:
         from stereo_model import TrtStereoModel
@@ -335,16 +338,16 @@ def cmd_run(args):
 
     cam = STEREO_CAMERA
     k_irl, k_irr, k_col = f"{cam}.ir_left", f"{cam}.ir_right", f"{cam}.color"
-    want = {k_irl, k_irr, k_col}
+    head_want = {k_irl, k_irr, k_col}
     # 손목 raw 클라우드 (모델 X). 저rate로 가볍게 publish (head 파이프라인 영향 최소).
     wrist_on = os.environ.get("STEREO_WRIST", "1") != "0"
     wrist_every = int(os.environ.get("STEREO_WRIST_EVERY", "3"))
     wrist_cams = [("left", "left_realsense.color", "left_realsense.depth"),
                   ("right", "right_realsense.color", "right_realsense.depth")]
-    if wrist_on:
-        for _a, kc, kd in wrist_cams:
-            want.add(kc); want.add(kd)
-    reader = BundleReader(endpoint=BUNDLE_ENDPOINT)
+    wrist_want = {key for _arm, kc, kd in wrist_cams for key in (kc, kd)}
+    head_reader = BundleReader(endpoint=BUNDLE_ENDPOINT, topic=STEREO_BUNDLE_TOPIC)
+    wrist_reader = (BundleReader(endpoint=BUNDLE_ENDPOINT, topic=STEREO_WRIST_BUNDLE_TOPIC)
+                    if wrist_on else None)
     # viz 전용 점수 상한(0=무제한). 16만 head 클라우드를 그대로 흘리면 rb_gui 수신 스레드
     # + viser 웹소켓을 포화시킨다 → 발행 직전 캡. detect는 disp 경로라 위치 추정 무손실.
     viz_max_pts = int(os.environ.get("STEREO_VIZ_MAX_PTS", "30000"))
@@ -453,7 +456,9 @@ def cmd_run(args):
         print(f"[run] idle cloud stride: {idle_stride} (STEREO_IDLE_STRIDE; burst 중엔 1=full)", flush=True)
     while True:
         _t = time.perf_counter()
-        frames = reader.poll(want, timeout_ms=500)
+        frames = head_reader.poll(head_want, timeout_ms=500)
+        if wrist_reader is not None:
+            frames.update(wrist_reader.poll(wrist_want, timeout_ms=0))
         if detector is not None:
             now_m = time.monotonic()
             if (now_m - last_heartbeat_t) >= STEREO_BOX_HEARTBEAT_S:
@@ -660,7 +665,9 @@ def cmd_run(args):
         if args.max_frames and seq >= args.max_frames:
             print(f"[run] reached max_frames={args.max_frames}, exit", flush=True)
             break
-    reader.close()
+    head_reader.close()
+    if wrist_reader is not None:
+        wrist_reader.close()
 
 
 def cmd_smoke(args):

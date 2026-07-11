@@ -34,6 +34,10 @@ docker compose --profile real_camera run --rm \
 기본 기동(캡처 서버 + 스테레오 워커)은 `make cam-up` / `docker compose --profile real_camera up camera_server`.
 
 ## 환경변수
+- `STEREO_BUNDLE_TOPIC` (기본 `camera.bundle.stereo`) — head color/IR 전용
+  bundle topic. 느린 stereo inference가 policy wrist topic을 소비하지 않는다.
+- `STEREO_WRIST_BUNDLE_TOPIC` (기본 `camera.bundle.policy`) — 손목 RGB-D
+  융합용 topic. Worker는 head와 wrist를 별도 SUB socket으로 읽고 각각 최신 bundle만 유지한다.
 - `FFS_DIR` (기본 `/app/Fast-FoundationStereo`) — 마운트된 submodule 경로.
 - `STEREO_WEIGHTS` — 기본 `weights/23-36-37/...`(정확). 빠른 모델은 `weights/20-30-48/...`.
 - `STEREO_DETECT` (기본 `1`) — head stereo 박스 검출 publish(`stereo.boxes`) 활성화.

@@ -37,6 +37,7 @@ class ICameraDevice {
   virtual ~ICameraDevice() = default;
   virtual void start(FrameCallback cb) = 0;
   virtual void stop() = 0;
+  virtual CameraCaptureStats capture_stats() const { return {}; }
 };
 
 std::unique_ptr<ICameraDevice> make_realsense_device(const CameraConfig& cfg, ClockKind clock);

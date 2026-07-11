@@ -4,7 +4,7 @@
 
 Per stream:
 
-- fps estimate
+- lifetime FPS and rolling-window FPS
 - frame_count
 - frame_number_gap_drop_count
 - recorder_drop_count
@@ -20,13 +20,17 @@ Per camera:
 - reconnect_count
 - last_error
 - color/depth status
+- callback enqueue, queue wait, and frame-processing p95/max latency
+- callback queue depth and drop count/delta
 
-Bundle-level:
+Per bundle group:
 
 - bundle_seq
 - complete_bundle_count
-- incomplete_bundle_count
-- max_time_diff_ms current/mean/max
+- incomplete retry count
+- actually discarded master-frame count
+- publish rate
+- skew current/p50/p95/max
 - stale_bundle_count
 
 Server-level:
@@ -89,3 +93,7 @@ rb_servo_server enforces robot command safety
 ## 구현 파일
 
 Health JSON 생성은 `src/publish/metadata_publisher.cpp`의 `health_to_json`, 주기 publish/logging은 `src/health/health_monitor.cpp`, counter collection은 `src/camera/camera_manager.cpp`에 구현되어 있다. Health topic은 config의 `metadata.health_topic` 기본값 `camera.health`를 사용한다.
+
+Drop alarms use the delta since the previous health sample, not the lifetime
+counter. A past drop therefore remains visible in the cumulative counter but
+does not leave health permanently degraded after the stream recovers.

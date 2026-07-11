@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -47,6 +48,7 @@ class SharedMemoryRingBuffer {
   struct RingInfo {
     shm_layout::StreamRingHeader* desc{nullptr};
     uint32_t next_slot{0};
+    std::shared_ptr<std::mutex> write_mutex{std::make_shared<std::mutex>()};
   };
 
   void* ptr_at(uint64_t offset) const;
@@ -62,7 +64,6 @@ class SharedMemoryRingBuffer {
   uint64_t size_bytes_{0};
   bool owner_{false};
   std::map<std::string, RingInfo> rings_;
-  mutable std::mutex write_mutex_;
 };
 
 }  // namespace camera_server

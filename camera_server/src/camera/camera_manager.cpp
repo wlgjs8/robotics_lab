@@ -10,7 +10,7 @@
 namespace camera_server {
 
 CameraManager::CameraManager(const AppConfig& cfg, SharedMemoryRingBuffer& shm, MetadataPublisher& publisher,
-                             FrameSynchronizer& synchronizer, Recorder& recorder)
+                             FrameSynchronizerSet& synchronizer, Recorder& recorder)
     : cfg_(cfg), shm_(shm), publisher_(publisher), synchronizer_(synchronizer), recorder_(recorder),
       metadata_queue_(std::max<uint32_t>(32, cfg.recording.queue_capacity_frames)) {
   for (const auto& cam : cfg_.cameras) {
@@ -148,16 +148,31 @@ void CameraManager::process_frame_metadata(ProcessedFrame&& frame) {
     }
     st.last_frame_number = frame.meta.frame_number;
     st.last_frame_time_ns = frame.meta.host_arrival_time_ns;
+    if (st.first_frame_time_ns == 0) st.first_frame_time_ns = frame.meta.host_arrival_time_ns;
     ++st.frame_count;
     ++st.shared_memory_write_count;
-    const double elapsed = static_cast<double>(frame.meta.host_arrival_time_ns - start_time_ns_) / 1e9;
-    if (elapsed > 0.0) st.fps_estimate = static_cast<double>(st.frame_count) / elapsed;
+    const double elapsed = static_cast<double>(frame.meta.host_arrival_time_ns - st.first_frame_time_ns) / 1e9;
+    if (elapsed > 0.0 && st.frame_count > 1) {
+      st.fps_estimate = static_cast<double>(st.frame_count - 1) / elapsed;
+    }
+    auto& times = frame_time_windows_[key];
+    times.push_back(frame.meta.host_arrival_time_ns);
+    const uint64_t window_ns = static_cast<uint64_t>(cfg_.health.fps_window_sec * 1e9);
+    while (!times.empty() && frame.meta.host_arrival_time_ns > times.front() &&
+           frame.meta.host_arrival_time_ns - times.front() > window_ns) {
+      times.pop_front();
+    }
+    if (times.size() >= 2) {
+      const double window_elapsed = static_cast<double>(times.back() - times.front()) / 1e9;
+      if (window_elapsed > 0.0) st.fps_window_hz = static_cast<double>(times.size() - 1) / window_elapsed;
+    }
     for (const auto& [k, s] : stats_) {
       drops[k] = s.frame_number_gap_drop_count + s.internal_queue_drop_count + s.recorder_drop_count;
     }
   }
-  auto bundle = synchronizer_.push_frame(frame.meta, drops);
-  if (bundle) publisher_.publish_bundle(*bundle);
+  for (auto& published : synchronizer_.push_frame(frame.meta, drops)) {
+    publisher_.publish_bundle(published.topic, published.bundle);
+  }
 }
 
 HealthSnapshot CameraManager::snapshot() const {
@@ -169,10 +184,15 @@ HealthSnapshot CameraManager::snapshot() const {
   h.camera_connected = connected_;
   for (const auto& cam : cfg_.cameras) h.camera_serial[cam.name] = cam.serial;
   h.stream_stats = stats_;
-  h.bundle_seq = synchronizer_.bundle_seq();
-  h.complete_bundle_count = synchronizer_.complete_bundle_count();
-  h.incomplete_bundle_count = synchronizer_.incomplete_bundle_count();
-  h.max_time_diff_ms = synchronizer_.last_max_time_diff_ms();
+  h.bundle_groups = synchronizer_.stats();
+  const auto compat = synchronizer_.compatibility_stats();
+  h.bundle_seq = compat.bundle_seq;
+  h.complete_bundle_count = compat.complete_bundle_count;
+  h.incomplete_bundle_count = compat.dropped_master_count;
+  h.max_time_diff_ms = compat.last_skew_ms;
+  for (size_t i = 0; i < devices_.size() && i < cfg_.cameras.size(); ++i) {
+    h.camera_capture_stats[cfg_.cameras[i].name] = devices_[i]->capture_stats();
+  }
   h.shm_name = shm_.name();
   h.shm_size_bytes = shm_.size_bytes();
   h.metadata_publish_count = publisher_.publish_count();

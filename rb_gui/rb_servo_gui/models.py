@@ -27,6 +27,14 @@ def finite_joint_array(value: Any) -> tuple[float, ...] | None:
     return tuple(out)
 
 
+def finite_bool_array(value: Any) -> tuple[bool, ...] | None:
+    if not isinstance(value, list | tuple) or len(value) != DOF:
+        return None
+    if not all(isinstance(item, bool) for item in value):
+        return None
+    return tuple(value)
+
+
 @dataclass(frozen=True)
 class Pose6D:
     x: float
@@ -419,6 +427,23 @@ class ForceControlSnapshot:
     surface_source: str | None = None
     normal_stand: tuple[float, float, float] | None = None
     contact_active: bool | None = None
+    normal_contact_active: bool | None = None
+    transverse_contact_active: bool | None = None
+    rotational_contact_active: bool | None = None
+    compliance_active: bool | None = None
+    normal_regulating: bool | None = None
+    transverse_regulating: bool | None = None
+    rotational_regulating: bool | None = None
+    loading_projection_active: bool | None = None
+    control_wrench_surface: tuple[float, ...] | None = None
+    wrench_error_surface: tuple[float, ...] | None = None
+    compliance_offset_surface: tuple[float, ...] | None = None
+    compliance_velocity_surface: tuple[float, ...] | None = None
+    compliance_acceleration_surface: tuple[float, ...] | None = None
+    raw_policy_delta_surface: tuple[float, ...] | None = None
+    accepted_policy_delta_surface: tuple[float, ...] | None = None
+    compliance_limit_axes: tuple[bool, ...] | None = None
+    compliance_limit_reason: str | None = None
     measured_force_n: float | None = None
     fast_normal_force_n: float | None = None
     fast_force_norm_n: float | None = None
@@ -450,6 +475,45 @@ class ForceControlSnapshot:
             surface_source=_optional_str(value.get("surface_source")),
             normal_stand=_finite_vec3(value.get("normal_stand")),
             contact_active=_optional_bool(value.get("contact_active")),
+            normal_contact_active=_optional_bool(value.get("normal_contact_active")),
+            transverse_contact_active=_optional_bool(
+                value.get("transverse_contact_active")
+            ),
+            rotational_contact_active=_optional_bool(
+                value.get("rotational_contact_active")
+            ),
+            compliance_active=_optional_bool(value.get("compliance_active")),
+            normal_regulating=_optional_bool(value.get("normal_regulating")),
+            transverse_regulating=_optional_bool(value.get("transverse_regulating")),
+            rotational_regulating=_optional_bool(value.get("rotational_regulating")),
+            loading_projection_active=_optional_bool(
+                value.get("loading_projection_active")
+            ),
+            control_wrench_surface=finite_joint_array(
+                value.get("control_wrench_surface")
+            ),
+            wrench_error_surface=finite_joint_array(value.get("wrench_error_surface")),
+            compliance_offset_surface=finite_joint_array(
+                value.get("compliance_offset_surface")
+            ),
+            compliance_velocity_surface=finite_joint_array(
+                value.get("compliance_velocity_surface")
+            ),
+            compliance_acceleration_surface=finite_joint_array(
+                value.get("compliance_acceleration_surface")
+            ),
+            raw_policy_delta_surface=finite_joint_array(
+                value.get("raw_policy_delta_surface")
+            ),
+            accepted_policy_delta_surface=finite_joint_array(
+                value.get("accepted_policy_delta_surface")
+            ),
+            compliance_limit_axes=finite_bool_array(
+                value.get("compliance_limit_axes")
+            ),
+            compliance_limit_reason=_optional_str(
+                value.get("compliance_limit_reason")
+            ),
             measured_force_n=_optional_finite(value.get("measured_force_n")),
             fast_normal_force_n=_optional_finite(value.get("fast_normal_force_n")),
             fast_force_norm_n=_optional_finite(value.get("fast_force_norm_n")),

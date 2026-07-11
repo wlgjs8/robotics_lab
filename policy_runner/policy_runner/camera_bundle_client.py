@@ -204,14 +204,20 @@ class CameraBundleClient:
         except self._zmq.Again:
             self._set_poll_outcome("recv_race")
             return None
+        # ZMQ subscriptions are prefix matches. A legacy `camera.bundle`
+        # subscriber therefore also receives `camera.bundle.policy` and
+        # `camera.bundle.stereo`; retain the newest exact-topic message only.
+        meta = self._decode_message(parts)
         while True:
             try:
                 parts = self._sock.recv_multipart(flags=self._zmq.NOBLOCK)
             except self._zmq.Again:
                 break
-        meta = self._decode_message(parts)
+            candidate = self._decode_message(parts)
+            if candidate is not None:
+                meta = candidate
         if meta is None:
-            self._set_poll_outcome("malformed_message")
+            self._set_poll_outcome("no_exact_topic_message")
             return None
         if not bool(meta.get("complete", False)):
             self._set_poll_outcome("incomplete_bundle", bundle_seq=int(meta.get("bundle_seq", 0) or 0))

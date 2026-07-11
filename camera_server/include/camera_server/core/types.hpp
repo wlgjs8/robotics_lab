@@ -75,6 +75,7 @@ struct FrameMeta {
 };
 
 struct FrameBundleMeta {
+  std::string group_name{"default"};
   uint64_t bundle_seq{0};
   uint64_t bundle_time_ns{0};
   bool hardware_synced{false};
@@ -92,9 +93,40 @@ struct StreamStats {
   uint64_t shared_memory_write_errors{0};
   uint64_t internal_queue_drop_count{0};
   uint64_t recorder_drop_count{0};
+  uint64_t frame_number_gap_drop_delta{0};
+  uint64_t internal_queue_drop_delta{0};
+  uint64_t recorder_drop_delta{0};
+  uint64_t shared_memory_write_error_delta{0};
   uint64_t last_frame_number{0};
+  uint64_t first_frame_time_ns{0};
   uint64_t last_frame_time_ns{0};
   double fps_estimate{0.0};
+  double fps_window_hz{0.0};
+};
+
+struct CameraCaptureStats {
+  uint64_t queue_drop_count{0};
+  uint64_t queue_drop_delta{0};
+  uint64_t queue_depth{0};
+  double callback_enqueue_us_p95{0.0};
+  double callback_enqueue_us_max{0.0};
+  double queue_wait_us_p95{0.0};
+  double queue_wait_us_max{0.0};
+  double frame_process_us_p95{0.0};
+  double frame_process_us_max{0.0};
+};
+
+struct BundleStats {
+  std::string topic;
+  uint64_t bundle_seq{0};
+  uint64_t complete_bundle_count{0};
+  uint64_t incomplete_retry_count{0};
+  uint64_t dropped_master_count{0};
+  double publish_rate_hz{0.0};
+  double last_skew_ms{0.0};
+  double skew_p50_ms{0.0};
+  double skew_p95_ms{0.0};
+  double skew_max_ms{0.0};
 };
 
 struct HealthSnapshot {
@@ -107,6 +139,8 @@ struct HealthSnapshot {
   std::map<std::string, bool> camera_connected;
   std::map<std::string, std::string> camera_serial;
   std::map<std::string, StreamStats> stream_stats;
+  std::map<std::string, CameraCaptureStats> camera_capture_stats;
+  std::map<std::string, BundleStats> bundle_groups;
   uint64_t bundle_seq{0};
   uint64_t complete_bundle_count{0};
   uint64_t incomplete_bundle_count{0};

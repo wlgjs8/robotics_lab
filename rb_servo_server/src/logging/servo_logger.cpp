@@ -312,6 +312,29 @@ void writeForceTelemetryHeader(std::ostream& os, const char* side) {
        << ',' << side << "_force_control_normal_stand_y"
        << ',' << side << "_force_control_normal_stand_z"
        << ',' << side << "_force_control_contact_active"
+       << ',' << side << "_force_control_normal_contact_active"
+       << ',' << side << "_force_control_transverse_contact_active"
+       << ',' << side << "_force_control_rotational_contact_active"
+       << ',' << side << "_force_control_compliance_active"
+       << ',' << side << "_force_control_normal_regulating"
+       << ',' << side << "_force_control_transverse_regulating"
+       << ',' << side << "_force_control_rotational_regulating"
+       << ',' << side << "_force_control_loading_projection_active";
+    writeWrenchHeader(os, side, "force_control_control_wrench_surface");
+    writeWrenchHeader(os, side, "force_control_wrench_error_surface");
+    writeDeltaTwistVecHeader(os, side, "force_control_compliance_offset_surface");
+    writeDeltaTwistVecHeader(os, side, "force_control_compliance_velocity_surface");
+    writeDeltaTwistVecHeader(os, side, "force_control_compliance_acceleration_surface");
+    writeDeltaTwistVecHeader(os, side, "force_control_raw_policy_delta_surface");
+    writeDeltaTwistVecHeader(os, side, "force_control_accepted_policy_delta_surface");
+    os
+       << ',' << side << "_force_control_limit_axis_x"
+       << ',' << side << "_force_control_limit_axis_y"
+       << ',' << side << "_force_control_limit_axis_z"
+       << ',' << side << "_force_control_limit_axis_roll"
+       << ',' << side << "_force_control_limit_axis_pitch"
+       << ',' << side << "_force_control_limit_axis_yaw"
+       << ',' << side << "_force_control_limit_reason"
        << ',' << side << "_force_control_measured_normal_force_n"
        << ',' << side << "_force_control_fast_normal_force_n"
        << ',' << side << "_force_control_fast_force_norm_n"
@@ -544,6 +567,8 @@ void writeWrenchColumns(std::ostream& os, const Wrench6D& wrench) {
        << ',' << wrench.tz;
 }
 
+void writeDeltaTwistVecColumns(std::ostream& os, const Vec6& value);
+
 void writeForceTelemetryColumns(
     std::ostream& os,
     const ForceTorqueTelemetry& ft,
@@ -579,6 +604,36 @@ void writeForceTelemetryColumns(
        << ',' << control.normal_stand[1]
        << ',' << control.normal_stand[2]
        << ',' << control.contact_active
+       << ',' << control.normal_contact_active
+       << ',' << control.transverse_contact_active
+       << ',' << control.rotational_contact_active
+       << ',' << control.compliance_active
+       << ',' << control.normal_regulating
+       << ',' << control.transverse_regulating
+       << ',' << control.rotational_regulating
+       << ',' << control.loading_projection_active;
+    writeWrenchColumns(os, control.control_wrench_surface);
+    writeWrenchColumns(os, control.wrench_error_surface);
+    writeDeltaTwistVecColumns(os, {
+        control.compliance_offset_surface.x,
+        control.compliance_offset_surface.y,
+        control.compliance_offset_surface.z,
+        control.compliance_offset_surface.rx,
+        control.compliance_offset_surface.ry,
+        control.compliance_offset_surface.rz,
+    });
+    writeDeltaTwistVecColumns(os, control.compliance_velocity_surface);
+    writeDeltaTwistVecColumns(os, control.compliance_acceleration_surface);
+    writeDeltaTwistVecColumns(os, control.raw_policy_delta_surface);
+    writeDeltaTwistVecColumns(os, control.accepted_policy_delta_surface);
+    os
+       << ',' << control.compliance_limit_axes[0]
+       << ',' << control.compliance_limit_axes[1]
+       << ',' << control.compliance_limit_axes[2]
+       << ',' << control.compliance_limit_axes[3]
+       << ',' << control.compliance_limit_axes[4]
+       << ',' << control.compliance_limit_axes[5]
+       << ',' << csvEscape(control.compliance_limit_reason)
        << ',' << control.measured_force_n
        << ',' << control.fast_normal_force_n
        << ',' << control.fast_force_norm_n

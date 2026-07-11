@@ -72,8 +72,8 @@ sync:
 Algorithm:
 
 1. Maintain a small queue of recent frames per camera stream.
-2. Choose a reference stream, typically `head.color`.
-3. For each head frame, find left/right frames with closest `host_arrival_time_ns` or sensor timestamp.
+2. Choose a reference stream per bundle group.
+3. For each group master frame, find required frames with closest `host_arrival_time_ns`.
 4. If max time diff is below threshold, publish complete bundle.
 5. Otherwise publish incomplete bundle or drop, according to config.
 
@@ -151,6 +151,18 @@ Track:
 
 Print concise health summary every second.
 
+## 9. Consumer-specific groups
+
+The active real-camera profile publishes three independent topics:
+
+- `camera.bundle.policy`: wrist left/right color+depth; master `left_realsense.color`
+- `camera.bundle.stereo`: head color+IR pair; master `head.color`
+- `camera.bundle`: full-rig compatibility topic
+
+A missing or delayed head frame therefore cannot suppress policy wrist bundles.
+Each group reports its own publish rate, retry count, actually discarded master
+count, and skew percentiles in `camera.health.bundle_groups`.
+
 ## 구현 파일
 
-Software sync는 `src/sync/frame_synchronizer.cpp`에 구현되어 있다. Stream별 recent-frame deque를 유지하고 `sync.master_camera`의 color frame이 도착할 때만 bundle 생성을 시도한다. Software mode는 master timestamp에 가장 가까운 required stream frame을 선택하고, hardware mode는 동일 `frame_number` frame을 선택한다. Host arrival timestamp의 max-min skew가 `sync.max_bundle_time_diff_ms` 이하일 때만 `complete=true`가 된다. Policy path는 incomplete/high-skew bundle을 기본 drop하며, `publish_incomplete_bundles=true`일 때만 incomplete bundle도 publish한다.
+Software sync는 `src/sync/frame_synchronizer.cpp`에 구현되어 있다. Group별 recent-frame deque를 유지하고 각 `master_stream`을 기준으로 bundle 생성을 시도한다. Software mode는 master timestamp에 가장 가까운 required stream frame을 선택하고, hardware mode는 동일 `frame_number` frame을 선택한다. Host arrival timestamp의 max-min skew가 group threshold 이하일 때만 `complete=true`가 된다. Policy path는 incomplete/high-skew bundle을 기본 drop한다.
