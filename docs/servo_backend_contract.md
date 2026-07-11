@@ -183,6 +183,12 @@ motion/safety path consumes `eft_*` yet. Boolean status flags with values other 
 Suspicious diagnostics do not make `readState()` fail when joint acquisition is
 otherwise valid, but they do make the state motion-unsafe and block
 `sendServoJ()` with a `RobotFault` named `rbpodo_diagnostics_suspect`.
+
+The standalone `FtWrenchPipeline` is deliberately not fed from `eft_*` yet.
+Enforcing use requires independent sensor-presence, acquisition-freshness,
+sensor-fault, and overrange evidence that this rbpodo state surface does not
+currently provide. A finite decoded wrench or a changing value is not a
+substitute for those signals.
 Garbage-looking raw flag values must be kept in `rbpodo_diagnostics.raw` rather
 than used as the sole controller `error_code`.
 

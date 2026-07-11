@@ -3,7 +3,7 @@ Name: rb-servo-gui
 Version: 0.1.0
 Summary: Viser operator console for rb_servo_server
 Requires-Python: >=3.10
-Requires-Dist: viser>=0.2.0
+Requires-Dist: viser>=0.2.12
 Requires-Dist: numpy>=1.26
 Requires-Dist: trimesh>=4.0
 Requires-Dist: yourdfpy>=0.0.56

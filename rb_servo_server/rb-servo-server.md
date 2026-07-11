@@ -242,12 +242,15 @@ Do not call Rainbow FK/IK inside the high-rate loop except for debugging. Use lo
 
 ## Milestone 5: force control integration
 
-Force control is currently included as a design scaffold.
+Force control currently has a hardware-free Phase-1 foundation. It is not
+connected to `DualArmServoLoop`, and config activation is rejected.
 
 Use files:
 
 - `include/rb_servo/control/force_controller.hpp`
 - `src/control/force_controller.cpp`
+- `include/rb_servo/sensor/ft_wrench_pipeline.hpp`
+- `src/sensor/ft_wrench_pipeline.cpp`
 - `include/rb_servo/sensor/i_force_torque_sensor.hpp`
 - `include/rb_servo/sensor/mock_force_torque_sensor.hpp`
 - `src/sensor/mock_force_torque_sensor.cpp`
@@ -265,19 +268,18 @@ nominal TCP target
 
 Do not apply force compensation directly to joint targets.
 
-Before using real contact:
+Before any motion-path integration:
 
-- verify force sensor sign convention
-- implement tare/bias
-- clamp position offset and per-tick step
-- log measured wrench, target wrench, TCP compensation
-- start with tiny gains
+- supply independent sensor presence/fault/overrange/freshness signals
+- verify `T_tcp_sensor`, sign, bias, tare, payload, and gravity compensation
+- add monitor-only contact supervision and telemetry
+- add same-tick send suppression and flow-chunk epoch invalidation
+- preserve DeltaTwist tangential ownership while projecting the contact normal
+- pass deterministic loop replay before supervised hardware acceptance
 
-If integrating `mo_forcecontroller`:
-
-- wrap it behind `ForceController`
-- make sampling time configurable
-- use the configured loop `dt_sec`; the supported robot-control target is `Ts=0.002`
+The project-native `ForceController` uses the actual loop `dt_sec`, server hard
+caps, a passivity observer, and propose/commit state updates. See
+`docs/force_control.md` for the inactive schema and promotion gates.
 
 ## Coding rules
 
@@ -298,6 +300,6 @@ A good next Codex task is:
 3. jitter columns exist and have meaningful values
 4. YAML changes are reflected at runtime
 5. no regression to real/controller-simulation placeholder build
-6. force-control scaffold compiles but remains disabled by default
+6. force-control foundation compiles and config activation remains rejected
 7. invalid `JointTarget` without `q_target_deg` holds previous target and never moves to zeros
 8. `EmergencyStop` latches fault and ignores later motion commands until `ResetFault`

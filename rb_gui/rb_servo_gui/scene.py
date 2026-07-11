@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .geometry import (
+    _matrix_to_wxyz,
     _mount_pose_from_mounts,
     _normalize_wxyz,
     _pose6_from_transform,
@@ -32,6 +33,12 @@ _TCP_DISPLAY_MODES = ("auto", "actual", "reference", "both")
 _TCP_TRAIL_LIMIT = 600
 _CIRCLE_OVERLAY_POINT_COUNT = 96
 _ASSET_INSTALL_HINT = "Install with python3 -m pip install -e rb_gui"
+_FT_SENSOR_LINK = "ft_sensor_measurement"
+_FT_SENSOR_MODEL = "Robotous RFT64-6A01"
+_FT_FORCE_SCALE_M_PER_N = 0.002
+_FT_FORCE_MAX_LENGTH_M = 0.12
+_FT_FORCE_DISPLAY_DEADBAND_N = 0.25
+_FT_OVERLAY_QUALIFIER = "URDF/CAD estimate · axes unverified"
 
 
 def _points_array(points: Any = ()) -> Any:
@@ -201,6 +208,35 @@ def _robot_urdf_path() -> Path:
     if articulated.exists():
         return articulated
     return _descriptions_dir() / "urdf/rb3_730e.urdf"
+
+
+def _ft_sensor_pose_tcp_from_urdf(
+    urdf_path: Path | str | None = None,
+) -> tuple[tuple[float, float, float], tuple[float, float, float, float]] | None:
+    """Return the URDF-authored ``T_tcp_sensor`` as (position, wxyz).
+
+    The F/T location is never inferred from the combined Pika mesh or from a
+    zero/default config. A missing/non-finite measurement link fails closed and
+    prevents the GUI overlay from being created.
+    """
+    try:
+        import numpy as np
+        from yourdfpy import URDF
+
+        path = Path(urdf_path) if urdf_path is not None else _robot_urdf_path()
+        model = URDF.load(str(path), build_scene_graph=True, load_meshes=False)
+        transform = np.asarray(model.get_transform(_FT_SENSOR_LINK, "tcp"), dtype=float)
+        if transform.shape != (4, 4) or not np.all(np.isfinite(transform)):
+            return None
+        rotation = transform[:3, :3]
+        if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-6):
+            return None
+        if not math.isclose(float(np.linalg.det(rotation)), 1.0, abs_tol=1e-6):
+            return None
+        position = tuple(float(value) for value in transform[:3, 3])
+        return position, _matrix_to_wxyz(rotation)
+    except Exception:
+        return None
 
 
 def _stand_mesh_path() -> Path:
@@ -855,6 +891,170 @@ def update_floor_plane(scene_handles: dict[str, Any], floor: Mapping[str, Any] |
         )
     else:
         _hide_floor_plane_outline(scene_handles)
+
+
+def _add_ft_sensor_overlay(server: Any, handles: dict[str, Any]) -> None:
+    """Add read-only, unaccepted RFT64 frame estimates and raw-force vectors.
+
+    The local pose comes only from the explicit URDF measurement link. The
+    scene paths are children of each live actual-TCP frame, so Viser composes
+    ``T_stand_tcp * T_tcp_sensor`` without duplicating transform math here.
+    The label deliberately marks the CAD-authored axes as unverified until the
+    per-arm positive-axis/load acceptance is complete.
+    """
+    pose = _ft_sensor_pose_tcp_from_urdf()
+    if pose is None:
+        handles["ft_sensor_frame_error"] = (
+            f"URDF link {_FT_SENSOR_LINK!r} is absent or invalid; F/T overlay disabled"
+        )
+        return
+    position, wxyz = pose
+    handles["ft_sensor_pose_tcp"] = (*position, *wxyz)
+    for arm in ("left", "right"):
+        prefix = f"/stand/{arm}_tcp/ft_sensor"
+        try:
+            handles[f"{arm}_ft_sensor_frame"] = server.scene.add_frame(
+                prefix,
+                position=position,
+                wxyz=wxyz,
+                show_axes=True,
+                axes_length=0.045,
+                axes_radius=0.002,
+                visible=False,
+            )
+            if hasattr(server.scene, "add_label"):
+                handles[f"{arm}_ft_sensor_label"] = server.scene.add_label(
+                    f"{prefix}/label",
+                    f"{arm} {_FT_SENSOR_MODEL} {_FT_OVERLAY_QUALIFIER} · raw wrench invalid",
+                    position=(0.0, 0.0, 0.055),
+                    visible=False,
+                )
+            if hasattr(server.scene, "add_arrows"):
+                handles[f"{arm}_ft_force"] = server.scene.add_arrows(
+                    f"{prefix}/raw_force",
+                    points=_line_segments_array(),
+                    colors=(255, 70, 70),
+                    shaft_radius=0.002,
+                    head_radius=0.005,
+                    head_length=0.012,
+                    visible=False,
+                )
+                handles[f"{arm}_ft_force_mode"] = "arrows"
+            elif hasattr(server.scene, "add_line_segments"):
+                handles[f"{arm}_ft_force"] = server.scene.add_line_segments(
+                    f"{prefix}/raw_force",
+                    points=_line_segments_array(),
+                    colors=_line_segment_colors_array(),
+                    line_width=5.0,
+                    visible=False,
+                )
+                handles[f"{arm}_ft_force_mode"] = "line"
+        except Exception as exc:
+            handles[f"{arm}_ft_sensor_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def _ft_force_segment(
+    wrench: Any,
+) -> tuple[Any, float] | None:
+    if isinstance(wrench, (str, bytes)):
+        return None
+    try:
+        values = tuple(float(value) for value in tuple(wrench))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if len(values) != 6:
+        return None
+    if not all(math.isfinite(value) for value in values):
+        return None
+    magnitude = math.sqrt(sum(value * value for value in values[:3]))
+    if magnitude < _FT_FORCE_DISPLAY_DEADBAND_N:
+        return _line_segments_array(), 0.0
+    length = min(magnitude * _FT_FORCE_SCALE_M_PER_N, _FT_FORCE_MAX_LENGTH_M)
+    endpoint = tuple(value * length / magnitude for value in values[:3])
+    return _line_segments_array((((0.0, 0.0, 0.0), endpoint),)), magnitude
+
+
+def update_ft_sensor_overlay(
+    scene_handles: dict[str, Any], latest: Any, *, stale: bool, show: bool = True
+) -> None:
+    """Update F/T frame visibility and the raw sensor-frame force vector.
+
+    The frame remains useful when the wrench is unavailable, but only while the
+    actual TCP pose is current. The raw-force vector requires a fresh state
+    stream, ``eft_valid``, and a finite six-axis sample. This visualization does
+    not imply that the force-control pipeline or motion path is active.
+    """
+    if not isinstance(scene_handles, dict):
+        return
+    for arm in ("left", "right"):
+        frame = scene_handles.get(f"{arm}_ft_sensor_frame")
+        force_handle = scene_handles.get(f"{arm}_ft_force")
+        label = scene_handles.get(f"{arm}_ft_sensor_label")
+        arm_state = getattr(latest, arm, None) if latest is not None else None
+        actual_pose = None
+        if arm_state is not None:
+            actual_pose = getattr(arm_state, "tcp_actual_stand", None) or getattr(
+                arm_state, "tcp_stand", None
+            )
+        frame_visible = bool(
+            show
+            and not stale
+            and arm_state is not None
+            and getattr(arm_state, "tcp_actual_valid", False)
+            and actual_pose is not None
+            and not getattr(arm_state, "tcp_deferred", True)
+        )
+        _set_visible(frame, frame_visible)
+        _set_visible(label, frame_visible)
+
+        wrench = getattr(arm_state, "eft_wrench", None) if arm_state is not None else None
+        force_sample = (
+            _ft_force_segment(wrench)
+            if frame_visible and getattr(arm_state, "eft_valid", False) and wrench is not None
+            else None
+        )
+        force_visible = bool(force_sample is not None and force_sample[1] > 1e-9)
+        if force_handle is not None and force_sample is not None:
+            try:
+                force_handle.points = force_sample[0]
+                force_mode = scene_handles.get(f"{arm}_ft_force_mode")
+                if force_mode == "line":
+                    force_handle.colors = _line_segment_colors_array(
+                        (((255, 70, 70), (255, 70, 70)),)
+                    )
+                elif force_mode == "arrows":
+                    display_length = min(
+                        force_sample[1] * _FT_FORCE_SCALE_M_PER_N,
+                        _FT_FORCE_MAX_LENGTH_M,
+                    )
+                    # Keep the arrow head inside the displayed vector for low
+                    # forces instead of rendering a fixed 12 mm head on a
+                    # shorter shaft.
+                    force_handle.head_length = min(0.012, display_length * 0.35)
+                    force_handle.head_radius = min(0.005, display_length * 0.15)
+                    force_handle.shaft_radius = min(0.002, display_length * 0.06)
+            except Exception as exc:
+                scene_handles[f"{arm}_ft_force_update_error"] = f"{type(exc).__name__}: {exc}"
+                force_visible = False
+        _set_visible(force_handle, force_visible)
+
+        if label is not None and frame_visible:
+            try:
+                if force_sample is None:
+                    label.text = (
+                        f"{arm} {_FT_SENSOR_MODEL} {_FT_OVERLAY_QUALIFIER} · raw wrench invalid"
+                    )
+                else:
+                    values = tuple(float(value) for value in wrench)
+                    label.text = (
+                        f"{arm} {_FT_SENSOR_MODEL} {_FT_OVERLAY_QUALIFIER} · "
+                        f"decoded only / presence unverified · "
+                        f"F=({values[0]:+.1f}, {values[1]:+.1f}, {values[2]:+.1f}) N · "
+                        f"|F|={force_sample[1]:.1f} N · "
+                        f"T=({values[3]:+.2f}, {values[4]:+.2f}, {values[5]:+.2f}) Nm"
+                    )
+            except Exception:
+                pass
 
 
 def _add_floor_check_points(server: Any, handles: dict[str, Any]) -> None:
@@ -2241,6 +2441,7 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         for arm in ("left", "right"):
             for suffix in ("", "_history", "_points", "_cursor", "_error", "_axes", "_cursor_axes"):
                 _set_visible(handles.get(f"{arm}_chunk_overlay{suffix}"), False)
+        _add_ft_sensor_overlay(server, handles)
         _add_floor_plane(server, handles)
         _add_floor_check_points(server, handles)
         _add_roi_box(server, handles)

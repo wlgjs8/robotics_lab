@@ -17,9 +17,11 @@ stand
   left_base
     left_tcp
       left_wrist_camera
+      left_ft_sensor
   right_base
     right_tcp
       right_wrist_camera
+      right_ft_sensor
   head_camera
 ```
 
@@ -47,7 +49,34 @@ T_stand_right_base
 T_left_tcp_left_wrist_camera
 T_right_tcp_right_wrist_camera
 T_stand_head_camera
+T_left_tcp_left_ft_sensor
+T_right_tcp_right_ft_sensor
 ```
+
+Force-control configuration uses the arm-local generic name `T_tcp_sensor` for
+the same direction: the pose of the F/T sensor frame expressed in that arm's
+TCP frame. Sensor-fixed bias is removed before applying this wrench transform;
+payload/gravity and residual tare are then removed in the TCP frame.
+
+The active RB3-730/Pika URDFs explicitly define the Robotous RFT64-6A01
+measurement frame as `ft_sensor_measurement`. The combined Pika CAD already
+contains the sensor geometry: the RFT64 body matches the CAD from
+`attachment_site` z=15 mm through z=45 mm. The sensor's model-defined
+measurement site is the tool-side face at z=45 mm, with the Pika CAD's +90
+degree yaw convention. Both active URDFs therefore encode:
+
+```text
+T_attachment_ft_sensor_base        = xyz [0, 0, 0.015], rpy [0, 0, pi/2]
+T_ft_sensor_base_measurement       = xyz [0, 0, 0.030], rpy [0, 0, 0]
+T_tcp_sensor                       = xyz [0, 0, -0.202642], rpy [0, 0, pi/2]
+```
+
+This is a CAD-derived configured transform, not positive-axis acceptance. The
+controller-reported raw wrench axes must still be checked with a known positive
+load on all six axes before this frame is eligible for enforcement. `rb_gui`
+reads the measurement-frame estimate from the viewer URDF and renders the raw
+wrench in those URDF/CAD-authored local axes; the GUI labels the axes and sensor
+presence as unverified and does not infer a frame from a mesh or zero config.
 
 ## Mount Orientation Convention
 

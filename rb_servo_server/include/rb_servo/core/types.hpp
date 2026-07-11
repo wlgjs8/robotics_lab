@@ -250,11 +250,12 @@ struct ForceControlCommand {
     Wrench6D target_wrench;
     ForceControlAxis enabled_axis;
 
-    // Force controller output clamps. They are applied before Cartesian IK.
-    double max_pos_offset_m = 0.01;
-    double max_rot_offset_rad = 0.1;
-    double max_pos_step_m = 0.001;
-    double max_rot_step_rad = 0.01;
+    // Optional per-command clamps. Zero means "use the server hard limit";
+    // positive values may only tighten, never enlarge, the configured limits.
+    double max_pos_offset_m = 0.0;
+    double max_rot_offset_rad = 0.0;
+    double max_pos_step_m = 0.0;
+    double max_rot_step_rad = 0.0;
 };
 
 struct RobotState {

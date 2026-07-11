@@ -358,7 +358,10 @@ Deprecated simulator config names are archived under `docs/archive/configs/`
 for historical reference only. They are not runnable source-of-truth profiles
 and must not be used for new smoke or acceptance evidence.
 
-Force control is intentionally unavailable:
+Force control is intentionally unavailable. The standalone F/T compensation
+pipeline and bounded admittance controller are hardware-free foundations only;
+config activation is rejected and `DualArmServoLoop` does not call them. See
+`rb_servo_server/docs/force_control.md` for the input and promotion contracts.
 
 ```yaml
 force_control:

@@ -446,6 +446,14 @@
       </geometry>
     </visual>
   </link>
+  <!-- Robotous RFT64-6A01 frames embedded in the combined Pika tool CAD.
+       The sensor mesh occupies attachment_site z=0.015..0.045 m: a 15 mm
+       robot-side adapter followed by the 30 mm sensor body. The measurement
+       origin is the RFT64 sensor_site at the tool-side face. The +90 deg yaw
+       matches the baked Pika/RFT CAD orientation; controller wrench-axis
+       acceptance is still pending. -->
+  <link name="ft_sensor_base"/>
+  <link name="ft_sensor_measurement"/>
   <link name="tool">
     <visual>
       <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 1.5707963267948966"/>
@@ -459,6 +467,16 @@
     <parent link="link6"/>
     <child link="attachment_site"/>
     <origin xyz="0.0 0.0 0.1" rpy="0.0 0.0 0.0"/>
+  </joint>
+  <joint name="ft_sensor_base_joint" type="fixed">
+    <parent link="attachment_site"/>
+    <child link="ft_sensor_base"/>
+    <origin xyz="0.0 0.0 0.015" rpy="0.0 0.0 1.5707963267948966"/>
+  </joint>
+  <joint name="ft_sensor_measurement_joint" type="fixed">
+    <parent link="ft_sensor_base"/>
+    <child link="ft_sensor_measurement"/>
+    <origin xyz="0.0 0.0 0.030" rpy="0.0 0.0 0.0"/>
   </joint>
   <joint name="tool_joint" type="fixed">
     <parent link="attachment_site"/>

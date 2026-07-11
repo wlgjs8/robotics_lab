@@ -153,6 +153,7 @@ from rb_servo_gui.scene import (
     _circle_overlay_points,
     _ensure_sc_world_frame,
     _finger_position_m,
+    _ft_sensor_pose_tcp_from_urdf,
     _interpolated_floor_check_points,
     _ik_infeasible_path,
     _reference_ghost_active,
@@ -162,6 +163,7 @@ from rb_servo_gui.scene import (
     set_ik_infeasible_region_visible,
     update_circle_overlay,
     update_floor_check_points,
+    update_ft_sensor_overlay,
     update_floor_plane,
     update_floor_plane_preview,
     update_roi_box,
@@ -502,6 +504,7 @@ class ShapeCheckingScene(RecordingScene):
         super().__init__()
         self.point_clouds = []
         self.line_segments = []
+        self.arrows = []
         self.meshes = []
         self.icospheres = []
         self.transform_controls = []
@@ -526,6 +529,16 @@ class ShapeCheckingScene(RecordingScene):
         handle.colors = colors_array
         handle.visible = kwargs.get("visible", True)
         self.line_segments.append((name, points_array, colors_array, kwargs, handle))
+        return handle
+
+    def add_arrows(self, name, points, colors, **kwargs):
+        points_array = np.asarray(points)
+        self.assert_line_segment_arrays(points_array, np.asarray(colors))
+        handle = RecordingSceneHandle()
+        handle.points = points_array
+        handle.colors = np.asarray(colors)
+        handle.visible = kwargs.get("visible", True)
+        self.arrows.append((name, points_array, colors, kwargs, handle))
         return handle
 
     def add_transform_controls(self, name, **kwargs):
@@ -560,6 +573,15 @@ class ShapeCheckingScene(RecordingScene):
     def assert_line_segment_arrays(points, colors):
         assert points.ndim == 3 and points.shape[1:] == (2, 3)
         assert colors.shape in {points.shape, (3,)}
+
+
+class LineOnlyShapeCheckingScene(ShapeCheckingScene):
+    """Viser 0.2.12-compatible scene surface without ``add_arrows``."""
+
+    def __getattribute__(self, name):
+        if name == "add_arrows":
+            raise AttributeError(name)
+        return super().__getattribute__(name)
 
 
 class RecordingServer:
@@ -3422,6 +3444,160 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("left tcp_ref_stand controller-sim reference", label_texts)
         self.assertIn("right tcp_actual_stand physical-state inspection", label_texts)
         self.assertIn("right tcp_ref_stand controller-sim reference", label_texts)
+
+    def test_ft_sensor_measurement_pose_is_authored_by_both_robot_urdfs(self):
+        descriptions = Path(__file__).resolve().parents[2] / "rb_servo_server" / "descriptions"
+        expected_position = (0.0, 0.0, -0.202642)
+        expected_wxyz = (math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5))
+        for filename in ("rb3_730e.urdf", "rb3_730e_pika_articulated.urdf"):
+            pose = _ft_sensor_pose_tcp_from_urdf(descriptions / "urdf" / filename)
+            self.assertIsNotNone(pose)
+            position, wxyz = pose
+            np.testing.assert_allclose(position, expected_position, atol=1e-9)
+            np.testing.assert_allclose(wxyz, expected_wxyz, atol=1e-9)
+
+    def test_ft_sensor_pose_fails_closed_when_urdf_link_is_absent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "no_ft.urdf"
+            path.write_text(
+                """<robot name="no_ft">
+  <link name="tcp"/>
+</robot>
+""",
+                encoding="utf-8",
+            )
+            self.assertIsNone(_ft_sensor_pose_tcp_from_urdf(path))
+
+    def test_scene_fallback_adds_read_only_ft_sensor_frames_from_urdf(self):
+        scene = ShapeCheckingScene()
+        handles = _add_scene_fallback(RecordingServer(scene=scene))
+
+        frame_by_name = {name: (kwargs, handle) for name, kwargs, handle in scene.frames}
+        for arm in ("left", "right"):
+            kwargs, handle = frame_by_name[f"/stand/{arm}_tcp/ft_sensor"]
+            np.testing.assert_allclose(kwargs["position"], (0.0, 0.0, -0.202642), atol=1e-9)
+            np.testing.assert_allclose(
+                kwargs["wxyz"], (math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5)), atol=1e-9
+            )
+            self.assertTrue(kwargs["show_axes"])
+            self.assertFalse(handle.visible)
+            self.assertIn(f"{arm}_ft_force", handles)
+            self.assertIn("URDF/CAD estimate", handles[f"{arm}_ft_sensor_label"].text)
+            self.assertIn("axes unverified", handles[f"{arm}_ft_sensor_label"].text)
+        self.assertFalse(
+            any("ft_sensor" in name for name, _kwargs, _handle in scene.transform_controls)
+        )
+
+    def test_ft_sensor_overlay_tracks_actual_tcp_and_raw_sensor_force(self):
+        state = sample_state()
+        state["left"].update(
+            {
+                "tcp_actual_stand": {
+                    "x": 0.3,
+                    "y": 0.1,
+                    "z": 0.4,
+                    "rx": 0.0,
+                    "ry": 0.0,
+                    "rz": 0.0,
+                },
+                "tcp_actual_valid": True,
+                "tcp_deferred": False,
+                "eft_wrench": [3.0, 4.0, 0.0, 0.1, -0.2, 0.3],
+                "eft_valid": True,
+            }
+        )
+        store, _, _ = self.make_safety(state)
+        handles = _add_scene_fallback(RecordingServer(scene=ShapeCheckingScene()))
+
+        update_ft_sensor_overlay(handles, store.latest(), stale=False, show=True)
+
+        self.assertTrue(handles["left_ft_sensor_frame"].visible)
+        self.assertTrue(handles["left_ft_sensor_label"].visible)
+        self.assertTrue(handles["left_ft_force"].visible)
+        np.testing.assert_allclose(
+            handles["left_ft_force"].points,
+            np.asarray([[[0.0, 0.0, 0.0], [0.006, 0.008, 0.0]]], dtype=np.float32),
+            atol=1e-7,
+        )
+        self.assertIn("|F|=5.0 N", handles["left_ft_sensor_label"].text)
+        self.assertIn("decoded only / presence unverified", handles["left_ft_sensor_label"].text)
+        self.assertAlmostEqual(handles["left_ft_force"].head_length, 0.0035)
+        self.assertFalse(handles["right_ft_sensor_frame"].visible)
+
+        update_ft_sensor_overlay(handles, store.latest(), stale=True, show=True)
+        self.assertFalse(handles["left_ft_sensor_frame"].visible)
+        self.assertFalse(handles["left_ft_sensor_label"].visible)
+        self.assertFalse(handles["left_ft_force"].visible)
+
+    def test_ft_sensor_frame_remains_visible_when_raw_wrench_is_invalid(self):
+        state = sample_state()
+        state["left"].update(
+            {
+                "tcp_actual_stand": {
+                    "x": 0.3,
+                    "y": 0.1,
+                    "z": 0.4,
+                    "rx": 0.0,
+                    "ry": 0.0,
+                    "rz": 0.0,
+                },
+                "tcp_actual_valid": True,
+                "tcp_deferred": False,
+                "eft_wrench": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "eft_valid": False,
+            }
+        )
+        store, _, _ = self.make_safety(state)
+        handles = _add_scene_fallback(RecordingServer(scene=ShapeCheckingScene()))
+
+        update_ft_sensor_overlay(handles, store.latest(), stale=False, show=True)
+
+        self.assertTrue(handles["left_ft_sensor_frame"].visible)
+        self.assertTrue(handles["left_ft_sensor_label"].visible)
+        self.assertFalse(handles["left_ft_force"].visible)
+        self.assertIn("raw wrench invalid", handles["left_ft_sensor_label"].text)
+
+    def test_ft_sensor_overlay_uses_supported_line_fallback_without_arrows(self):
+        state = self.tcp_available_state()
+        state["left"].update(
+            {
+                "eft_wrench": [0.0, 10.0, 0.0, 0.0, 0.0, 0.0],
+                "eft_valid": True,
+            }
+        )
+        store, _, _ = self.make_safety(state)
+        handles = _add_scene_fallback(RecordingServer(scene=LineOnlyShapeCheckingScene()))
+
+        update_ft_sensor_overlay(handles, store.latest(), stale=False, show=True)
+
+        self.assertEqual(handles["left_ft_force_mode"], "line")
+        self.assertTrue(handles["left_ft_force"].visible)
+        np.testing.assert_allclose(
+            handles["left_ft_force"].points,
+            np.asarray([[[0.0, 0.0, 0.0], [0.0, 0.02, 0.0]]], dtype=np.float32),
+            atol=1e-7,
+        )
+
+    def test_ft_sensor_overlay_fails_closed_for_hidden_or_bad_samples(self):
+        state = self.tcp_available_state()
+        state["left"].update(
+            {
+                "eft_wrench": [float("nan"), 0.0, 0.0, 0.0, 0.0, 0.0],
+                "eft_valid": True,
+            }
+        )
+        store, _, _ = self.make_safety(state)
+        handles = _add_scene_fallback(RecordingServer(scene=ShapeCheckingScene()))
+
+        update_ft_sensor_overlay(handles, store.latest(), stale=False, show=True)
+        self.assertTrue(handles["left_ft_sensor_frame"].visible)
+        self.assertFalse(handles["left_ft_force"].visible)
+        self.assertIn("raw wrench invalid", handles["left_ft_sensor_label"].text)
+
+        update_ft_sensor_overlay(handles, store.latest(), stale=False, show=False)
+        self.assertFalse(handles["left_ft_sensor_frame"].visible)
+        self.assertFalse(handles["left_ft_sensor_label"].visible)
+        self.assertFalse(handles["left_ft_force"].visible)
 
     def test_scene_fallback_uses_viser_compatible_empty_geometry_arrays(self):
         scene = ShapeCheckingScene()

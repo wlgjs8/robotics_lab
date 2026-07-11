@@ -398,6 +398,74 @@ bool testStatePublisherEndpointsParseAndValidate() {
 }
 
 bool testForceControlStaysDisabled() {
+    const std::string inactive_path = writeTempConfig(
+        "force-inactive-schema",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  source: rbpodo_eft\n"
+        "  left:\n"
+        "    enable: false\n"
+        "    frame_configured: true\n"
+        "    sensor_identity: left-ft-profile\n"
+        "    calibration_id: left-ft-cal-v1\n"
+        "    freshness_source: sequence\n"
+        "    max_sample_age_sec: 0.01\n"
+        "    max_source_stall_sec: 0.02\n"
+        "    control_lpf_alpha: 0.3\n"
+        "    max_tcp_speed_m_s: 0.05\n"
+        "    max_tcp_accel_m_s2: 0.5\n"
+        "    residual_tare_min_samples: 20\n"
+        "    residual_tare_max_force_stddev_n: 0.2\n"
+        "    residual_tare_max_torque_stddev_nm: 0.02\n"
+        "    T_tcp_sensor: [0.0, 0.0, 0.03, 0.0, 0.0, 0.0]\n"
+        "    sensor_bias: [1.0, 2.0, 3.0, 0.1, 0.2, 0.3]\n"
+        "    payload_mass_kg: 0.5\n"
+        "    payload_com_tcp_m: [0.0, 0.0, 0.05]\n"
+        "    residual_tare_tcp: [0.1, 0.0, 0.0, 0.0, 0.0, 0.0]\n"
+        "  right:\n"
+        "    enable: false\n"
+        "    frame_configured: true\n"
+        "    sensor_identity: right-ft-profile\n"
+        "    calibration_id: right-ft-cal-v2\n"
+        "    freshness_source: source_time\n"
+        "    T_tcp_sensor: [0.0, 0.0, 0.04, 0.0, 0.0, 0.0]\n"
+        "    payload_mass_kg: 0.7\n"
+        "force_control:\n"
+        "  provider: null\n"
+        "  enable: false\n"
+        "  allow_in_real: false\n"
+        "  update_rate_hz: 500\n"
+        "  virtual_mass: [4.0, 4.0, 5.0, 0.4, 0.4, 0.5]\n"
+        "  damping: [60.0, 60.0, 80.0, 6.0, 6.0, 8.0]\n"
+        "  stiffness: [0.0, 0.0, 20.0, 0.0, 0.0, 2.0]\n"
+        "  max_dt_sec: 0.01\n"
+        "  max_pos_offset_m: 0.005\n"
+        "  max_rot_offset_rad: 0.05\n"
+        "  max_linear_velocity_m_s: 0.01\n"
+        "  max_angular_velocity_rad_s: 0.1\n"
+        "  max_linear_acceleration_m_s2: 0.1\n"
+        "  max_angular_acceleration_rad_s2: 1.0\n"
+        "  max_linear_jerk_m_s3: 1.0\n"
+        "  max_angular_jerk_rad_s3: 10.0\n"
+        "  max_pos_step_m: 0.0005\n"
+        "  max_rot_step_rad: 0.005\n"
+        "  max_energy_j: 1.0\n"
+    );
+    const rb_servo::DualArmConfig inactive = rb_servo::loadConfigFromYaml(inactive_path);
+    ::unlink(inactive_path.c_str());
+    RB_CHECK(!inactive.force_control.enable);
+    RB_CHECK(inactive.force_control.update_rate_hz == 500);
+    RB_CHECK(near(inactive.force_control.virtual_mass[2], 5.0));
+    RB_CHECK(near(inactive.force_control.max_linear_velocity_m_s, 0.01));
+    RB_CHECK(inactive.force_torque.source == "rbpodo_eft");
+    RB_CHECK(!inactive.force_torque.left.enable);
+    RB_CHECK(inactive.force_torque.left.frame_configured);
+    RB_CHECK(near(inactive.force_torque.left.t_tcp_sensor.z, 0.03));
+    RB_CHECK(near(inactive.force_torque.left.payload_mass_kg, 0.5));
+    RB_CHECK(inactive.force_torque.right.freshness_source == "source_time");
+    RB_CHECK(near(inactive.force_torque.right.t_tcp_sensor.z, 0.04));
+    RB_CHECK(near(inactive.force_torque.right.payload_mass_kg, 0.7));
+
     const std::string enabled_path = writeTempConfig(
         "force-enabled",
         "schema: robotics_lab.rb_servo_server.v1\n"
@@ -419,6 +487,63 @@ bool testForceControlStaysDisabled() {
     const bool provider_rejected = loadRejects(provider_path);
     ::unlink(provider_path.c_str());
     RB_CHECK(provider_rejected);
+
+    const std::string pipeline_enabled_path = writeTempConfig(
+        "force-pipeline-enabled",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  left:\n"
+        "    enable: true\n"
+    );
+    const bool pipeline_enabled_rejected = loadRejects(pipeline_enabled_path);
+    ::unlink(pipeline_enabled_path.c_str());
+    RB_CHECK(pipeline_enabled_rejected);
+
+    const std::string invalid_mass_path = writeTempConfig(
+        "force-invalid-mass",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_control:\n"
+        "  provider: null\n"
+        "  enable: false\n"
+        "  virtual_mass: [1.0, 1.0, 0.0, 1.0, 1.0, 1.0]\n"
+    );
+    const bool invalid_mass_rejected = loadRejects(invalid_mass_path);
+    ::unlink(invalid_mass_path.c_str());
+    RB_CHECK(invalid_mass_rejected);
+
+    const std::string invalid_alpha_path = writeTempConfig(
+        "force-invalid-alpha",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  left:\n"
+        "    control_lpf_alpha: 1.1\n"
+    );
+    const bool invalid_alpha_rejected = loadRejects(invalid_alpha_path);
+    ::unlink(invalid_alpha_path.c_str());
+    RB_CHECK(invalid_alpha_rejected);
+
+    const std::string invalid_freshness_path = writeTempConfig(
+        "force-invalid-freshness",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  left:\n"
+        "    freshness_source: host_time\n"
+    );
+    const bool invalid_freshness_rejected = loadRejects(invalid_freshness_path);
+    ::unlink(invalid_freshness_path.c_str());
+    RB_CHECK(invalid_freshness_rejected);
+
+    const std::string missing_identity_path = writeTempConfig(
+        "force-missing-identity",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  left:\n"
+        "    frame_configured: true\n"
+        "    T_tcp_sensor: [0, 0, 0, 0, 0, 0]\n"
+    );
+    const bool missing_identity_rejected = loadRejects(missing_identity_path);
+    ::unlink(missing_identity_path.c_str());
+    RB_CHECK(missing_identity_rejected);
     return true;
 }
 

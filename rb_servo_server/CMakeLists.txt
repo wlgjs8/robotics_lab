@@ -40,6 +40,7 @@ add_library(rb_servo_core
     src/control/delta_twist_follower.cpp
     src/math/se3.cpp
     src/control/force_controller.cpp
+    src/sensor/ft_wrench_pipeline.cpp
     src/control/collision_monitor.cpp
     src/control/init_motion_planner.cpp
     src/control/dual_arm_servo_loop.cpp
@@ -173,6 +174,14 @@ if(BUILD_TESTING)
     add_executable(test_se3_math tests/test_se3_math.cpp)
     target_link_libraries(test_se3_math PRIVATE rb_servo_core)
     add_test(NAME se3_math COMMAND test_se3_math)
+
+    add_executable(test_ft_wrench_pipeline tests/test_ft_wrench_pipeline.cpp)
+    target_link_libraries(test_ft_wrench_pipeline PRIVATE rb_servo_core)
+    add_test(NAME ft_wrench_pipeline COMMAND test_ft_wrench_pipeline)
+
+    add_executable(test_force_controller tests/test_force_controller.cpp)
+    target_link_libraries(test_force_controller PRIVATE rb_servo_core)
+    add_test(NAME force_controller COMMAND test_force_controller)
 
     add_executable(test_capsule_distance tests/test_capsule_distance.cpp)
     target_link_libraries(test_capsule_distance PRIVATE rb_servo_core)

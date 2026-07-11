@@ -200,7 +200,12 @@ tracked real rbpodo template의 supported safety range는 명시적 per-joint
 정규화는 control/safety/tracking/log source-of-truth에 쓰지 않습니다.
 자세한 내용은 `docs/joint_range_policy.md`를 봅니다.
 
-Force control은 비활성 상태를 유지합니다.
+Force control은 비활성 상태를 유지합니다. Hardware-free Phase 1에는
+`FtWrenchPipeline`과 bounded project-native `ForceController` 단위 테스트만
+포함되며 servo motion path에는 연결되지 않습니다. 상세 계약과 승격 gate는
+`rb_servo_server/docs/force_control.md`를 봅니다.
+실센서 특성화와 승격 evidence는
+`docs/runbooks/ft_force_control_acceptance.md`에 기록합니다.
 
 ```yaml
 force_control:

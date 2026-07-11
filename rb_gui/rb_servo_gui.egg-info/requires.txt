@@ -1,4 +1,4 @@
-viser>=0.2.0
+viser>=0.2.12
 numpy>=1.26
 trimesh>=4.0
 yourdfpy>=0.0.56

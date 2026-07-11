@@ -30,6 +30,19 @@ Lifecycle/safety controls include arm/disarm, emergency stop, reset fault,
 freedrive, safety floor/ROI/user plane controls, and command-source lease
 take/release.
 
+## F/T Sensor Visualization
+
+The scene renders each Robotous RFT64-6A01 URDF/CAD measurement-frame estimate
+as a read-only child of the live actual TCP frame. Its local pose is loaded from
+the explicit `ft_sensor_measurement` link in the active viewer URDF; missing or
+invalid URDF frame data disables the overlay instead of falling back to a
+guessed origin. When the state stream is current and `eft_valid` is true, the
+raw controller-reported force vector is drawn in the authored local axes and
+the label shows all six raw wrench components. The label explicitly states
+that the axes and sensor presence are unverified: `eft_valid` currently proves
+finite decoding only. This display is diagnostic only and does not indicate
+that force control is active.
+
 ## Running Tests
 
 ```bash

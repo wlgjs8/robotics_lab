@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <optional>
 #include <string>
 #include <vector>
@@ -815,20 +816,62 @@ struct ScopeConfig {
     size_t max_samples_per_batch = 64;
 };
 
+struct FtWrenchPipelineConfig {
+    // Phase-1 pipeline is hardware-free and is not connected to a backend or
+    // motion path. Activation remains rejected by config validation.
+    bool enable = false;
+    bool frame_configured = false;
+    std::string sensor_identity;
+    std::string calibration_id;
+    std::string freshness_source = "sequence";
+    double max_sample_age_sec = 0.02;
+    double max_source_stall_sec = 0.02;
+    double control_lpf_alpha = 0.2;
+    double max_tcp_speed_m_s = 0.0;
+    double max_tcp_accel_m_s2 = 0.0;
+    int residual_tare_min_samples = 50;
+    double residual_tare_max_force_stddev_n = 0.1;
+    double residual_tare_max_torque_stddev_nm = 0.01;
+
+    // T_tcp_sensor: pose of the sensor frame expressed in the TCP frame.
+    Pose6D t_tcp_sensor;
+    Wrench6D sensor_bias;
+    double payload_mass_kg = 0.0;
+    std::array<double, 3> payload_com_tcp_m{};
+    Wrench6D residual_tare_tcp;
+};
+
+struct ForceTorqueConfig {
+    std::string source = "null";
+    FtWrenchPipelineConfig left;
+    FtWrenchPipelineConfig right;
+};
+
 struct ForceControlConfig {
     std::string provider = "null";
     bool enable = false;
+    bool allow_in_real = false;
     int update_rate_hz = 200;
 
-    // Simple admittance fallback used before integrating mo_forcecontroller.
-    double admittance_gain_pos = 0.0002;  // m / (N*s) applied as gain * error * dt
-    double admittance_gain_rot = 0.0001;  // rad / (Nm*s)
-    double force_lpf_alpha = 0.2;
+    // Diagonal Cartesian admittance parameters ordered [x,y,z,rx,ry,rz].
+    std::array<double, 6> virtual_mass{5.0, 5.0, 5.0, 0.5, 0.5, 0.5};
+    std::array<double, 6> damping{80.0, 80.0, 80.0, 8.0, 8.0, 8.0};
+    std::array<double, 6> stiffness{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+    double max_dt_sec = 0.02;
 
     double max_pos_offset_m = 0.01;
     double max_rot_offset_rad = 0.1;
+    double max_linear_velocity_m_s = 0.02;
+    double max_angular_velocity_rad_s = 0.2;
+    double max_linear_acceleration_m_s2 = 0.2;
+    double max_angular_acceleration_rad_s2 = 2.0;
+    double max_linear_jerk_m_s3 = 2.0;
+    double max_angular_jerk_rad_s3 = 20.0;
     double max_pos_step_m = 0.001;
     double max_rot_step_rad = 0.01;
+    double max_energy_j = 2.0;
+
 };
 
 struct LinearMoveConfig {
@@ -1051,6 +1094,7 @@ struct DualArmConfig {
     CommandSourceConfig command_source;
     LoggingConfig logging;
     ScopeConfig scope;
+    ForceTorqueConfig force_torque;
     ForceControlConfig force_control;
     CartesianControlConfig cartesian_control;
     KinematicsConfig kinematics;

@@ -3,33 +3,58 @@
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/core/types.hpp"
 
+#include <cstdint>
+#include <string>
+
 namespace rb_servo {
 
-// Lightweight force/admittance design placeholder.
-// This is intentionally independent from DualArmServoLoop until CartesianController/IK is enabled.
+struct ForceControllerState {
+    Pose6D offset_tcp;
+    Vec6 velocity_tcp;
+    Vec6 acceleration_tcp;
+    double observed_energy_j = 0.0;
+};
+
+struct ForceControllerProposal {
+    ForceControllerState state;
+    Wrench6D wrench_error_tcp;
+    bool valid = false;
+    bool saturated = false;
+    std::string reason;
+    uint64_t controller_id = 0;
+    uint64_t lifecycle_generation = 0;
+    uint64_t base_state_revision = 0;
+};
+
+// Standalone, project-native bounded Cartesian admittance. It intentionally
+// has no DualArmServoLoop integration yet. Callers must commit only after the
+// corrected Cartesian target has passed IK and every final safety gate.
 class ForceController {
 public:
-    explicit ForceController(const ForceControlConfig& config);
+    explicit ForceController(ForceControlConfig config);
 
+    void engage();
+    void release();
+    ForceControllerProposal propose(
+        const Wrench6D& measured_external_wrench_tcp,
+        const ForceControlCommand& command,
+        const Vec6& measured_actual_twist_tcp,
+        double dt_sec
+    ) const;
+    bool commit(const ForceControllerProposal& proposal);
+    void reject();
     void reset();
 
-    Pose6D computeTcpCompensation(
-        const Pose6D& current_tcp_stand,
-        const Pose6D& reference_tcp_stand,
-        const Wrench6D& measured_wrench_tcp,
-        const ForceControlCommand& command,
-        double dt_sec
-    );
-
-private:
-    Wrench6D lowPass(const Wrench6D& measured);
-    Pose6D clampStepAndOffset(const Pose6D& desired, const ForceControlCommand& command) const;
+    const ForceControllerState& state() const { return state_; }
+    bool engaged() const { return engaged_; }
 
 private:
     ForceControlConfig config_;
-    Wrench6D filtered_wrench_{};
-    Pose6D offset_{};
-    bool initialized_ = false;
+    ForceControllerState state_{};
+    bool engaged_ = false;
+    uint64_t controller_id_ = 0;
+    uint64_t lifecycle_generation_ = 0;
+    uint64_t state_revision_ = 0;
 };
 
 }  // namespace rb_servo

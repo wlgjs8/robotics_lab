@@ -126,7 +126,7 @@ force_control:
   enable: false
 ```
 
-Do not integrate `mo_forcecontroller` or any other force-control library into an active motion path unless a future task explicitly approves it and defines a safety acceptance plan.
+Do not integrate an external force-control library into an active motion path unless a future task explicitly approves it and defines a safety acceptance plan. Project-native force-control work must follow the same acceptance boundary.
 
 ## Motion Primitive Contract
 

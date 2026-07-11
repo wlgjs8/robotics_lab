@@ -424,6 +424,22 @@ Pose6D parsePose6D(const YAML::Node& node, const std::string& path) {
     return Pose6D{v[0], v[1], v[2], v[3], v[4], v[5]};
 }
 
+Wrench6D parseWrench6D(const YAML::Node& node, const std::string& path) {
+    const JointArray v = parseJointArray(node, path);
+    return Wrench6D{v[0], v[1], v[2], v[3], v[4], v[5]};
+}
+
+std::array<double, 3> parseVec3(const YAML::Node& node, const std::string& path) {
+    if (!node.IsSequence() || node.size() != 3) {
+        fail(path + " must contain exactly 3 values", node);
+    }
+    return {
+        asDouble(node[0], path + "[0]"),
+        asDouble(node[1], path + "[1]"),
+        asDouble(node[2], path + "[2]"),
+    };
+}
+
 // Parse a safety constraint's tcp_offset_points sequence (floor/roi/reach/user_floor
 // all share the FloorCheckPointConfig schema). Each entry has a name, the OPEN
 // offset_m: [x, y, z], and an OPTIONAL offset_closed_m: [x, y, z] (the gripper-closed
@@ -1558,6 +1574,112 @@ void validateConfig(const DualArmConfig& cfg) {
     if (cfg.force_control.enable) {
         throw std::runtime_error("force_control.enable must remain false");
     }
+    if (cfg.force_control.allow_in_real) {
+        throw std::runtime_error("force_control.allow_in_real must remain false");
+    }
+    validatePositiveFinite(
+        static_cast<double>(cfg.force_control.update_rate_hz),
+        "force_control.update_rate_hz"
+    );
+    validatePositiveFiniteArray(cfg.force_control.virtual_mass, "force_control.virtual_mass");
+    validateNonNegativeFiniteArray(cfg.force_control.damping, "force_control.damping");
+    validateNonNegativeFiniteArray(cfg.force_control.stiffness, "force_control.stiffness");
+    validatePositiveFinite(cfg.force_control.max_dt_sec, "force_control.max_dt_sec");
+    validatePositiveFinite(cfg.force_control.max_pos_offset_m, "force_control.max_pos_offset_m");
+    validatePositiveFinite(cfg.force_control.max_rot_offset_rad, "force_control.max_rot_offset_rad");
+    validatePositiveFinite(
+        cfg.force_control.max_linear_velocity_m_s,
+        "force_control.max_linear_velocity_m_s"
+    );
+    validatePositiveFinite(
+        cfg.force_control.max_angular_velocity_rad_s,
+        "force_control.max_angular_velocity_rad_s"
+    );
+    validatePositiveFinite(
+        cfg.force_control.max_linear_acceleration_m_s2,
+        "force_control.max_linear_acceleration_m_s2"
+    );
+    validatePositiveFinite(
+        cfg.force_control.max_angular_acceleration_rad_s2,
+        "force_control.max_angular_acceleration_rad_s2"
+    );
+    validatePositiveFinite(
+        cfg.force_control.max_linear_jerk_m_s3,
+        "force_control.max_linear_jerk_m_s3"
+    );
+    validatePositiveFinite(
+        cfg.force_control.max_angular_jerk_rad_s3,
+        "force_control.max_angular_jerk_rad_s3"
+    );
+    validatePositiveFinite(cfg.force_control.max_pos_step_m, "force_control.max_pos_step_m");
+    validatePositiveFinite(cfg.force_control.max_rot_step_rad, "force_control.max_rot_step_rad");
+    validatePositiveFinite(cfg.force_control.max_energy_j, "force_control.max_energy_j");
+
+    const auto validate_wrench = [](const Wrench6D& value, const std::string& name) {
+        const std::array<double, 6> values{
+            value.fx, value.fy, value.fz, value.tx, value.ty, value.tz,
+        };
+        for (double item : values) {
+            if (!std::isfinite(item)) throw std::runtime_error(name + " values must be finite");
+        }
+    };
+    const std::string ft_source = lower(cfg.force_torque.source);
+    if (!(ft_source == "null" || ft_source == "none" || ft_source.empty() ||
+          ft_source == "rbpodo_eft")) {
+        throw std::runtime_error("force_torque.source must be null or rbpodo_eft");
+    }
+    const auto validate_ft_arm = [&](const FtWrenchPipelineConfig& ft, const std::string& path) {
+        if (ft.enable) throw std::runtime_error(path + ".enable must remain false");
+        if (ft.frame_configured &&
+            (ft.sensor_identity.empty() || ft.calibration_id.empty())) {
+            throw std::runtime_error(
+                path + ".frame_configured=true requires sensor_identity and calibration_id"
+            );
+        }
+        const std::string freshness_source = lower(ft.freshness_source);
+        if (!(freshness_source == "sequence" || freshness_source == "source_time")) {
+            throw std::runtime_error(path + ".freshness_source must be sequence or source_time");
+        }
+        validatePositiveFinite(ft.max_sample_age_sec, path + ".max_sample_age_sec");
+        validatePositiveFinite(ft.max_source_stall_sec, path + ".max_source_stall_sec");
+        if (!std::isfinite(ft.control_lpf_alpha) ||
+            ft.control_lpf_alpha < 0.0 || ft.control_lpf_alpha > 1.0) {
+            throw std::runtime_error(path + ".control_lpf_alpha must be in [0, 1]");
+        }
+        validateNonNegativeFinite(ft.max_tcp_speed_m_s, path + ".max_tcp_speed_m_s");
+        validateNonNegativeFinite(ft.max_tcp_accel_m_s2, path + ".max_tcp_accel_m_s2");
+        if (ft.residual_tare_min_samples < 2) {
+            throw std::runtime_error(path + ".residual_tare_min_samples must be >= 2");
+        }
+        validateNonNegativeFinite(
+            ft.residual_tare_max_force_stddev_n,
+            path + ".residual_tare_max_force_stddev_n"
+        );
+        validateNonNegativeFinite(
+            ft.residual_tare_max_torque_stddev_nm,
+            path + ".residual_tare_max_torque_stddev_nm"
+        );
+        validateNonNegativeFinite(ft.payload_mass_kg, path + ".payload_mass_kg");
+        for (double item : ft.payload_com_tcp_m) {
+            if (!std::isfinite(item)) {
+                throw std::runtime_error(path + ".payload_com_tcp_m values must be finite");
+            }
+        }
+        validate_wrench(ft.sensor_bias, path + ".sensor_bias");
+        validate_wrench(ft.residual_tare_tcp, path + ".residual_tare_tcp");
+        const Pose6D& sensor_pose = ft.t_tcp_sensor;
+        const std::array<double, 6> sensor_pose_values{
+            sensor_pose.x, sensor_pose.y, sensor_pose.z,
+            sensor_pose.rx, sensor_pose.ry, sensor_pose.rz,
+        };
+        for (double item : sensor_pose_values) {
+            if (!std::isfinite(item)) {
+                throw std::runtime_error(path + ".T_tcp_sensor values must be finite");
+            }
+        }
+    };
+    validate_ft_arm(cfg.force_torque.left, "force_torque.left");
+    validate_ft_arm(cfg.force_torque.right, "force_torque.right");
 
     // Real/sim env gates retired: real Cartesian control no longer requires
     // RB_ALLOW_REAL_CARTESIAN.
@@ -1883,6 +2005,7 @@ void validateRootKeys(const YAML::Node& root) {
         "command_source",
         "logging",
         "scope",
+        "force_torque",
         "force_control",
         "cartesian_control",
         "kinematics",
@@ -2925,9 +3048,100 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
 
     if (has(root, "force_control")) {
         const YAML::Node sec = root["force_control"];
-        validateAllowedKeys(sec, {"provider", "enable"}, "force_control");
+        validateAllowedKeys(sec, {
+            "provider",
+            "enable",
+            "allow_in_real",
+            "update_rate_hz",
+            "virtual_mass",
+            "damping",
+            "stiffness",
+            "max_dt_sec",
+            "max_pos_offset_m",
+            "max_rot_offset_rad",
+            "max_linear_velocity_m_s",
+            "max_angular_velocity_rad_s",
+            "max_linear_acceleration_m_s2",
+            "max_angular_acceleration_rad_s2",
+            "max_linear_jerk_m_s3",
+            "max_angular_jerk_rad_s3",
+            "max_pos_step_m",
+            "max_rot_step_rad",
+            "max_energy_j",
+        }, "force_control");
         if (has(sec, "provider")) cfg.force_control.provider = lower(asString(sec["provider"], "force_control.provider"));
         if (has(sec, "enable")) cfg.force_control.enable = asBool(sec["enable"], "force_control.enable");
+        if (has(sec, "allow_in_real")) cfg.force_control.allow_in_real = asBool(sec["allow_in_real"], "force_control.allow_in_real");
+        if (has(sec, "update_rate_hz")) cfg.force_control.update_rate_hz = asInt(sec["update_rate_hz"], "force_control.update_rate_hz");
+        if (has(sec, "virtual_mass")) cfg.force_control.virtual_mass = parseJointArray(sec["virtual_mass"], "force_control.virtual_mass");
+        if (has(sec, "damping")) cfg.force_control.damping = parseJointArray(sec["damping"], "force_control.damping");
+        if (has(sec, "stiffness")) cfg.force_control.stiffness = parseJointArray(sec["stiffness"], "force_control.stiffness");
+        if (has(sec, "max_dt_sec")) cfg.force_control.max_dt_sec = asDouble(sec["max_dt_sec"], "force_control.max_dt_sec");
+        if (has(sec, "max_pos_offset_m")) cfg.force_control.max_pos_offset_m = asDouble(sec["max_pos_offset_m"], "force_control.max_pos_offset_m");
+        if (has(sec, "max_rot_offset_rad")) cfg.force_control.max_rot_offset_rad = asDouble(sec["max_rot_offset_rad"], "force_control.max_rot_offset_rad");
+        if (has(sec, "max_linear_velocity_m_s")) cfg.force_control.max_linear_velocity_m_s = asDouble(sec["max_linear_velocity_m_s"], "force_control.max_linear_velocity_m_s");
+        if (has(sec, "max_angular_velocity_rad_s")) cfg.force_control.max_angular_velocity_rad_s = asDouble(sec["max_angular_velocity_rad_s"], "force_control.max_angular_velocity_rad_s");
+        if (has(sec, "max_linear_acceleration_m_s2")) cfg.force_control.max_linear_acceleration_m_s2 = asDouble(sec["max_linear_acceleration_m_s2"], "force_control.max_linear_acceleration_m_s2");
+        if (has(sec, "max_angular_acceleration_rad_s2")) cfg.force_control.max_angular_acceleration_rad_s2 = asDouble(sec["max_angular_acceleration_rad_s2"], "force_control.max_angular_acceleration_rad_s2");
+        if (has(sec, "max_linear_jerk_m_s3")) cfg.force_control.max_linear_jerk_m_s3 = asDouble(sec["max_linear_jerk_m_s3"], "force_control.max_linear_jerk_m_s3");
+        if (has(sec, "max_angular_jerk_rad_s3")) cfg.force_control.max_angular_jerk_rad_s3 = asDouble(sec["max_angular_jerk_rad_s3"], "force_control.max_angular_jerk_rad_s3");
+        if (has(sec, "max_pos_step_m")) cfg.force_control.max_pos_step_m = asDouble(sec["max_pos_step_m"], "force_control.max_pos_step_m");
+        if (has(sec, "max_rot_step_rad")) cfg.force_control.max_rot_step_rad = asDouble(sec["max_rot_step_rad"], "force_control.max_rot_step_rad");
+        if (has(sec, "max_energy_j")) cfg.force_control.max_energy_j = asDouble(sec["max_energy_j"], "force_control.max_energy_j");
+    }
+
+    if (has(root, "force_torque")) {
+        const YAML::Node sec = root["force_torque"];
+        validateAllowedKeys(sec, {"source", "left", "right"}, "force_torque");
+        if (has(sec, "source")) {
+            cfg.force_torque.source = lower(asString(sec["source"], "force_torque.source"));
+        }
+        const auto parse_ft_arm = [&](
+            const YAML::Node& ft,
+            FtWrenchPipelineConfig& out,
+            const std::string& path
+        ) {
+            validateAllowedKeys(ft, {
+                "enable",
+                "frame_configured",
+                "sensor_identity",
+                "calibration_id",
+                "freshness_source",
+                "max_sample_age_sec",
+                "max_source_stall_sec",
+                "control_lpf_alpha",
+                "max_tcp_speed_m_s",
+                "max_tcp_accel_m_s2",
+                "residual_tare_min_samples",
+                "residual_tare_max_force_stddev_n",
+                "residual_tare_max_torque_stddev_nm",
+                "T_tcp_sensor",
+                "sensor_bias",
+                "payload_mass_kg",
+                "payload_com_tcp_m",
+                "residual_tare_tcp",
+            }, path);
+            if (has(ft, "enable")) out.enable = asBool(ft["enable"], path + ".enable");
+            if (has(ft, "frame_configured")) out.frame_configured = asBool(ft["frame_configured"], path + ".frame_configured");
+            if (has(ft, "sensor_identity")) out.sensor_identity = asString(ft["sensor_identity"], path + ".sensor_identity");
+            if (has(ft, "calibration_id")) out.calibration_id = asString(ft["calibration_id"], path + ".calibration_id");
+            if (has(ft, "freshness_source")) out.freshness_source = lower(asString(ft["freshness_source"], path + ".freshness_source"));
+            if (has(ft, "max_sample_age_sec")) out.max_sample_age_sec = asDouble(ft["max_sample_age_sec"], path + ".max_sample_age_sec");
+            if (has(ft, "max_source_stall_sec")) out.max_source_stall_sec = asDouble(ft["max_source_stall_sec"], path + ".max_source_stall_sec");
+            if (has(ft, "control_lpf_alpha")) out.control_lpf_alpha = asDouble(ft["control_lpf_alpha"], path + ".control_lpf_alpha");
+            if (has(ft, "max_tcp_speed_m_s")) out.max_tcp_speed_m_s = asDouble(ft["max_tcp_speed_m_s"], path + ".max_tcp_speed_m_s");
+            if (has(ft, "max_tcp_accel_m_s2")) out.max_tcp_accel_m_s2 = asDouble(ft["max_tcp_accel_m_s2"], path + ".max_tcp_accel_m_s2");
+            if (has(ft, "residual_tare_min_samples")) out.residual_tare_min_samples = asInt(ft["residual_tare_min_samples"], path + ".residual_tare_min_samples");
+            if (has(ft, "residual_tare_max_force_stddev_n")) out.residual_tare_max_force_stddev_n = asDouble(ft["residual_tare_max_force_stddev_n"], path + ".residual_tare_max_force_stddev_n");
+            if (has(ft, "residual_tare_max_torque_stddev_nm")) out.residual_tare_max_torque_stddev_nm = asDouble(ft["residual_tare_max_torque_stddev_nm"], path + ".residual_tare_max_torque_stddev_nm");
+            if (has(ft, "T_tcp_sensor")) out.t_tcp_sensor = parsePose6D(ft["T_tcp_sensor"], path + ".T_tcp_sensor");
+            if (has(ft, "sensor_bias")) out.sensor_bias = parseWrench6D(ft["sensor_bias"], path + ".sensor_bias");
+            if (has(ft, "payload_mass_kg")) out.payload_mass_kg = asDouble(ft["payload_mass_kg"], path + ".payload_mass_kg");
+            if (has(ft, "payload_com_tcp_m")) out.payload_com_tcp_m = parseVec3(ft["payload_com_tcp_m"], path + ".payload_com_tcp_m");
+            if (has(ft, "residual_tare_tcp")) out.residual_tare_tcp = parseWrench6D(ft["residual_tare_tcp"], path + ".residual_tare_tcp");
+        };
+        if (has(sec, "left")) parse_ft_arm(sec["left"], cfg.force_torque.left, "force_torque.left");
+        if (has(sec, "right")) parse_ft_arm(sec["right"], cfg.force_torque.right, "force_torque.right");
     }
 
     if (has(root, "cartesian_control")) {
