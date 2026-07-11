@@ -94,6 +94,7 @@ std::string toString(SafetyVerdict verdict) {
         case SafetyVerdict::FloorViolation: return "FloorViolation";
         case SafetyVerdict::RoiViolation: return "RoiViolation";
         case SafetyVerdict::ChunkFollowerFault: return "ChunkFollowerFault";
+        case SafetyVerdict::ExternalForceLimit: return "ExternalForceLimit";
         case SafetyVerdict::UnknownError: return "UnknownError";
     }
     return "Unknown";

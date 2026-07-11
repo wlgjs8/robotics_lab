@@ -61,8 +61,8 @@ rb_servo_server
 
 The rbpodo controller `pgmode` simulation topology mirrors this controller shape
 (one rbpodo endpoint per arm), targeting either a Virtual ControlBox VM or a
-physical box held in `pgmode`. Site/VM configs live under gitignored
-`rb_servo_server/config/local/`.
+physical box held in `pgmode`. The tracked `stack_real.yaml` and
+`stack_sim.yaml` files are the only launch configs.
 
 ## Safety Boundary
 
@@ -73,9 +73,9 @@ it is **no longer gated on env vars**: the legacy execution gates
 from the server runtime. `run_mode`/`operation_mode` are telemetry labels only
 and do not decide whether motion is allowed.
 
-Real-motion execution authority is owned by **site-local config
-(`rb_servo_server/config/local/`) + the mode-independent safety layers**. Real
-motion requires the site config to enable it explicitly (e.g.
+Real-motion execution authority is owned by **the tracked stack config + the
+mode-independent safety layers**. Real motion requires `stack_real.yaml` to
+enable it explicitly (e.g.
 `cartesian_control.allow_in_real: true`). Real-hardware acceptance and operator
 supervision are physical operation process, not extra software gates. The
 controller `-2001` suspect-diagnostics acceptance and the rbpodo `pgmode`
@@ -100,30 +100,30 @@ command period for supported real/controller-simulation configs: `0.002` at
 but they are not supported profiles. ACK-off rbpodo settings are diagnostic
 evidence only until a future real-motion task promotes them.
 
-Tracked stack configs are the current templates:
+Tracked stack configs are the launch source of truth:
 
 ```text
 rb_servo_server/config/stack_real.yaml
 rb_servo_server/config/stack_sim.yaml
 ```
 
-Site-specific real, mock, or controller-simulation variants belong under:
-
-```text
-rb_servo_server/config/local/
-```
-
-Do not add tracked site-specific real robot configs with private IP/serial/safety
-overrides; copy from the tracked stack config into `config/local/` for site work.
+Do not create `config/local` launch variants. Change one reviewed setting at a
+time in the appropriate tracked stack config so the effective runtime profile
+remains visible and auditable.
 
 ## Force Control
 
-Force/admittance/impedance control must remain inactive.
+Real force/admittance motion must remain inactive until its acceptance stage.
+The tracked real stack may run the project-native path in `monitor` mode because
+that mode records telemetry and returns before contact, guard, or motion.
 
 ```yaml
 force_control:
-  provider: null
-  enable: false
+  provider: project_native
+  enable: true
+  operating_mode: monitor
+  allow_in_real: false
+  supervised_experimental_real: false
 ```
 
 Do not integrate an external force-control library into an active motion path unless a future task explicitly approves it and defines a safety acceptance plan. Project-native force-control work must follow the same acceptance boundary.

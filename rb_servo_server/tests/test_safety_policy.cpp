@@ -143,6 +143,7 @@ public:
                 rb_servo::backendError(rb_servo::BackendErrorKind::TransportReadFailed, "test read failed")
             );
         }
+        acquisition_sequence_.fetch_add(1);
         return result(rb_servo::BackendOp::ReadState, currentState(), true);
     }
 
@@ -264,6 +265,10 @@ public:
     void setActualJoints(const rb_servo::JointArray& q_actual) { q_actual_ = q_actual; }
     void setRobotTimeNs(uint64_t robot_time_ns) { robot_time_ns_.store(robot_time_ns); }
     void setAdvanceRobotTimeOnRead(bool advance) { advance_robot_time_on_read_ = advance; }
+    void setEftWrench(const rb_servo::Wrench6D& wrench) {
+        eft_wrench_ = wrench;
+        eft_valid_ = true;
+    }
     int readCount() const { return read_count_; }
     int resetCount() const { return reset_count_; }
     int sendCount() const { return send_count_; }
@@ -280,11 +285,14 @@ private:
         state.arm_id = arm_id_;
         state.host_time_ns = rb_servo::nowSteadyNs();
         state.robot_time_ns = robot_time_ns_.load();
+        state.acquisition_sequence = acquisition_sequence_.load();
         state.q_actual_deg = q_actual_;
         state.q_target_deg = q_target_;
         state.q_actual_valid = valid_joint_state_;
         state.q_ref_valid = q_ref_valid_ && valid_joint_state_;
         state.q_ref_source = "test.q_ref";
+        state.eft_wrench = eft_wrench_;
+        state.eft_valid = eft_valid_;
         state.has_valid_joint_state = valid_joint_state_;
         state.connection_state = connected_
             ? rb_servo::RobotConnectionState::Connected
@@ -345,6 +353,9 @@ private:
     std::atomic<int> freedrive_on_count_{0};
     std::atomic<int> freedrive_off_count_{0};
     mutable std::atomic<uint64_t> robot_time_ns_{0};
+    mutable std::atomic<uint64_t> acquisition_sequence_{0};
+    rb_servo::Wrench6D eft_wrench_{};
+    bool eft_valid_ = false;
     int read_count_ = 0;
     int reset_count_ = 0;
     int send_count_ = 0;
@@ -3261,6 +3272,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     snapshot.right_state.host_time_ns = 12'000;
     snapshot.left_state.robot_time_ns = 21'000;
     snapshot.right_state.robot_time_ns = 22'000;
+    snapshot.left_state.acquisition_sequence = 31;
+    snapshot.right_state.acquisition_sequence = 32;
     snapshot.left_state.q_actual_deg = joints(1.0);
     snapshot.right_state.q_actual_deg = joints(2.0);
     snapshot.left_state.has_valid_joint_state = true;
@@ -3422,7 +3435,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
         "diagnostic_error_source", "connection_state", "has_error", "servo_enabled",
         "fault_recoverable", "lifecycle_state", "motion_readiness_error_kind",
         "motion_readiness_error_name",
-        "last_read", "last_send", "robot_time_ns", "host_time_ns", "error_code", "state_age_us",
+        "last_read", "last_send", "robot_time_ns", "host_time_ns", "acquisition_sequence",
+        "error_code", "state_age_us",
         "send_within_period", "send_period_overrun", "send_command_deadline_missed",
         "send_deadline_hit", "send_deadline_hit_deprecated_alias_for",
         "tcp_stand", "tcp_base", "tcp_deferred", "fk_duration_us", "cartesian_solve", "worker",
@@ -3550,6 +3564,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("right").at("send_end_ns").get<uint64_t>() == 40);
     RB_CHECK(json.at("left").at("host_time_ns").get<uint64_t>() == 11'000);
     RB_CHECK(json.at("right").at("robot_time_ns").get<uint64_t>() == 22'000);
+    RB_CHECK(json.at("left").at("acquisition_sequence").get<uint64_t>() == 31);
+    RB_CHECK(json.at("right").at("acquisition_sequence").get<uint64_t>() == 32);
     RB_CHECK(json.at("send_skew_us").get<double>() == 20.0);
     RB_CHECK(json.at("send_within_period").get<bool>());
     RB_CHECK(!json.at("send_period_overrun").get<bool>());
@@ -3993,6 +4009,26 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     sample.init_motion.goal_clear_margin_deficit_m = 0.0042;
     sample.non_init_arm_preserved_mode = "TcpPoseTarget";
     sample.single_arm_freeze_other_arm = false;
+    sample.left_force_torque.enabled = true;
+    sample.left_force_torque.source = "rbpodo_eft";
+    sample.left_force_torque.source_assurance = "controller_frame_only";
+    sample.left_force_torque.raw_sensor_wrench.fz = -22.5;
+    sample.left_force_torque.control_external_wrench.fz = 7.25;
+    sample.left_force_torque.healthy = true;
+    sample.left_force_torque.freshness_value = 1234;
+    sample.left_force_torque.freshness_advanced = true;
+    sample.left_force_torque.reason = "ok";
+    sample.left_force_control.enabled = true;
+    sample.left_force_control.operating_mode = "monitor";
+    sample.left_force_control.state = "monitoring";
+    sample.left_force_control.measured_force_n = 6.75;
+    sample.left_force_control.fast_normal_force_n = 7.25;
+    sample.left_force_control.fast_force_norm_n = 8.5;
+    sample.left_force_control.fast_torque_norm_nm = 0.75;
+    sample.left_force_control.contact_threshold_exceeded = true;
+    sample.left_force_control.hard_limit_exceeded = false;
+    sample.left_force_control.target_force_n = 2.0;
+    sample.left_force_control.motion_epoch = 9;
     logger.push(sample);
 
     const std::filesystem::path latest = std::filesystem::path(cfg.directory) / "servo_log.csv";
@@ -4041,6 +4077,19 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     const std::size_t init_left_goal_pair_a = index_of("init_motion_left_goal_nearest_pair_a");
     const std::size_t init_left_goal_category = index_of("init_motion_left_goal_pair_category");
     const std::size_t init_left_goal_deficit = index_of("init_motion_left_goal_margin_deficit_m");
+    const std::size_t ft_raw_fz = index_of("left_ft_raw_sensor_fz_n");
+    const std::size_t ft_control_fz = index_of("left_ft_control_external_fz_n");
+    const std::size_t ft_healthy = index_of("left_ft_healthy");
+    const std::size_t ft_freshness = index_of("left_ft_freshness_value");
+    const std::size_t force_mode = index_of("left_force_control_operating_mode");
+    const std::size_t force_state = index_of("left_force_control_state");
+    const std::size_t measured_force = index_of("left_force_control_measured_normal_force_n");
+    const std::size_t fast_normal_force = index_of("left_force_control_fast_normal_force_n");
+    const std::size_t fast_force_norm = index_of("left_force_control_fast_force_norm_n");
+    const std::size_t fast_torque_norm = index_of("left_force_control_fast_torque_norm_nm");
+    const std::size_t contact_threshold = index_of("left_force_control_contact_threshold_exceeded");
+    const std::size_t hard_limit = index_of("left_force_control_hard_limit_exceeded");
+    const std::size_t motion_epoch = index_of("left_force_control_motion_epoch");
     RB_CHECK(old_last < header.size());
     RB_CHECK(profile_name < old_last);
     RB_CHECK(profile_nf_linear < old_last);
@@ -4066,6 +4115,19 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(init_left_goal_pair_a > old_last);
     RB_CHECK(init_left_goal_category > old_last);
     RB_CHECK(init_left_goal_deficit > old_last);
+    RB_CHECK(ft_raw_fz > init_left_goal_deficit);
+    RB_CHECK(ft_control_fz > init_left_goal_deficit);
+    RB_CHECK(ft_healthy > init_left_goal_deficit);
+    RB_CHECK(ft_freshness > init_left_goal_deficit);
+    RB_CHECK(force_mode > init_left_goal_deficit);
+    RB_CHECK(force_state > init_left_goal_deficit);
+    RB_CHECK(measured_force > init_left_goal_deficit);
+    RB_CHECK(fast_normal_force > measured_force);
+    RB_CHECK(fast_force_norm > fast_normal_force);
+    RB_CHECK(fast_torque_norm > fast_force_norm);
+    RB_CHECK(contact_threshold > fast_torque_norm);
+    RB_CHECK(hard_limit > contact_threshold);
+    RB_CHECK(motion_epoch > init_left_goal_deficit);
     RB_CHECK(row.at(branch_rate) == "1");
     RB_CHECK(row.at(raw_jump) == "12");
     RB_CHECK(row.at(q_seed) == "1");
@@ -4090,7 +4152,84 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(row.at(init_left_goal_pair_a) == "left_link0");
     RB_CHECK(row.at(init_left_goal_category) == "intra-arm");
     RB_CHECK(row.at(init_left_goal_deficit) == "0.0042");
+    RB_CHECK(row.at(ft_raw_fz) == "-22.5");
+    RB_CHECK(row.at(ft_control_fz) == "7.25");
+    RB_CHECK(row.at(ft_healthy) == "1");
+    RB_CHECK(row.at(ft_freshness) == "1234");
+    RB_CHECK(row.at(force_mode) == "monitor");
+    RB_CHECK(row.at(force_state) == "monitoring");
+    RB_CHECK(row.at(measured_force) == "6.75");
+    RB_CHECK(row.at(fast_normal_force) == "7.25");
+    RB_CHECK(row.at(fast_force_norm) == "8.5");
+    RB_CHECK(row.at(fast_torque_norm) == "0.75");
+    RB_CHECK(row.at(contact_threshold) == "1");
+    RB_CHECK(row.at(hard_limit) == "0");
+    RB_CHECK(row.at(motion_epoch) == "9");
     std::filesystem::remove_all(cfg.directory);
+    return true;
+}
+
+bool testForceRuntimeUsesTimestampAfterBackendStateRead() {
+    rb_servo::DualArmConfig cfg = testConfig();
+    configureCartesianLoopTest(&cfg);
+    cfg.force_torque.source = "rbpodo_eft";
+    cfg.force_torque.left.enable = true;
+    cfg.force_torque.left.frame_configured = true;
+    cfg.force_torque.right.enable = true;
+    cfg.force_torque.right.frame_configured = true;
+    cfg.force_control.provider = "project_native";
+    cfg.force_control.enable = true;
+    cfg.force_control.operating_mode = "monitor";
+    cfg.force_control.left.enable = true;
+    cfg.force_control.right.enable = true;
+
+    rb_servo::Wrench6D eft;
+    eft.fx = 1.0;
+    eft.fy = -2.0;
+    eft.fz = 3.0;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+    auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    left->setEftWrench(eft);
+    right->setEftWrench(eft);
+    // Real rbpodo firmware may report robot_time_ns=0. A fresh backend frame
+    // must still qualify EFT freshness through acquisition_sequence.
+    left->setAdvanceRobotTimeOnRead(false);
+    right->setAdvanceRobotTimeOnRead(false);
+
+    rb_servo::CommandBuffer buffer;
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::move(left),
+        std::move(right),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+
+    RB_CHECK(loop.start());
+    rb_servo::ServoSnapshot snapshot;
+    RB_CHECK(waitUntil([&] {
+        snapshot = loop.latestSnapshot();
+        return snapshot.left_force_torque.healthy && snapshot.right_force_torque.healthy &&
+            snapshot.left_force_control.state == "monitoring" &&
+            snapshot.right_force_control.state == "monitoring";
+    }));
+    RB_CHECK(!snapshot.left_force_torque.stale);
+    RB_CHECK(!snapshot.right_force_torque.stale);
+    RB_CHECK(snapshot.left_force_torque.reason == "ok");
+    RB_CHECK(snapshot.right_force_torque.reason == "ok");
+    RB_CHECK(snapshot.left_force_torque.freshness_value > 0);
+    RB_CHECK(snapshot.right_force_torque.freshness_value > 0);
+    RB_CHECK(std::abs(snapshot.right_force_torque.wrench_tcp.fz - 3.0) < 1e-12);
+    RB_CHECK(std::abs(snapshot.right_force_control.measured_force_n - 3.0) < 1e-12);
+    RB_CHECK(std::abs(snapshot.right_force_control.fast_normal_force_n - 3.0) < 1e-12);
+    RB_CHECK(std::abs(snapshot.right_force_control.fast_force_norm_n - std::sqrt(14.0)) < 1e-12);
+    RB_CHECK(snapshot.left_force_control.state == "monitoring");
+    RB_CHECK(snapshot.right_force_control.state == "monitoring");
+    RB_CHECK(!snapshot.fault_latched);
+    loop.stop();
     return true;
 }
 
@@ -6160,6 +6299,7 @@ int main() {
     if (!testStatePublisherUsesConfiguredPublishRate()) return 1;
     if (!testLoggerZeroCapacityDropsWithoutBlocking()) return 1;
     if (!testServoLoggerAppendsTcpPoseTargetDebugColumns()) return 1;
+    if (!testForceRuntimeUsesTimestampAfterBackendStateRead()) return 1;
     if (!testReadOnlyDiagnosticStartupAllowsFaultedStateAndPublishesUnsafeSnapshot()) return 1;
     if (!testMotionStartupRejectsFaultedState()) return 1;
     if (!testRbpodoControllerSimulationMotionRequiresConfigAndRealEnvGates()) return 1;

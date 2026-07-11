@@ -170,6 +170,7 @@ enum class SafetyVerdict {
     FloorViolation,
     RoiViolation,
     ChunkFollowerFault,
+    ExternalForceLimit,
     UnknownError
 };
 
@@ -263,6 +264,9 @@ struct RobotState {
 
     uint64_t host_time_ns = 0;
     uint64_t robot_time_ns = 0;
+    // Backend-owned sequence that advances only when a fresh state frame is
+    // acquired. Cached/held states retain the sequence of their source frame.
+    uint64_t acquisition_sequence = 0;
 
     JointArray q_actual_deg{};
     JointArray q_target_deg{};
@@ -488,6 +492,48 @@ struct SafetyTrackingTelemetry {
     double command_reference_tracking_error_deg = 0.0;
     double physical_command_actual_error_deg = 0.0;
     bool controller_simulation_physical_motion_detected = false;
+};
+
+struct ForceTorqueTelemetry {
+    bool enabled = false;
+    std::string source = "null";
+    std::string source_assurance = "unavailable";
+    bool sensor_health_verified = false;
+    bool safety_rated = false;
+    Wrench6D raw_sensor_wrench;
+    Wrench6D wrench_tcp;
+    Wrench6D fast_external_wrench;
+    Wrench6D control_external_wrench;
+    bool healthy = false;
+    bool stale = false;
+    uint64_t freshness_value = 0;
+    bool freshness_advanced = false;
+    std::string reason = "disabled";
+};
+
+struct ForceControlTelemetry {
+    bool enabled = false;
+    std::string operating_mode = "monitor";
+    std::string state = "inactive";
+    std::string surface_source = "floor_constraint";
+    std::array<double, 3> normal_stand{0.0, 0.0, 1.0};
+    bool contact_active = false;
+    double measured_force_n = 0.0;
+    double fast_normal_force_n = 0.0;
+    double fast_force_norm_n = 0.0;
+    double fast_torque_norm_nm = 0.0;
+    bool contact_threshold_exceeded = false;
+    bool hard_limit_exceeded = false;
+    double target_force_n = 0.0;
+    double correction_m = 0.0;
+    double velocity_m_s = 0.0;
+    double acceleration_m_s2 = 0.0;
+    double energy_j = 0.0;
+    bool saturated = false;
+    bool proposal_valid = false;
+    bool proposal_committed = false;
+    std::string fault_reason;
+    uint64_t motion_epoch = 0;
 };
 
 struct ArmCommand {
@@ -882,6 +928,13 @@ struct ServoSample {
 
     RobotState left_state;
     RobotState right_state;
+    // Persist the same per-tick F/T and force-control truth surface that is
+    // published over UDP so supervised hardware tests remain auditable after
+    // the live GUI/state consumers have exited.
+    ForceTorqueTelemetry left_force_torque;
+    ForceTorqueTelemetry right_force_torque;
+    ForceControlTelemetry left_force_control;
+    ForceControlTelemetry right_force_control;
 
     DualArmCommand command;
     CommandBufferReadTelemetry command_buffer_read;
@@ -958,6 +1011,45 @@ struct ServoSample {
     std::string self_collision_pair;
 };
 
+struct RealtimeTimingRange {
+    double last = 0.0;
+    double p95 = 0.0;
+    double max = 0.0;
+};
+
+struct ServoRealtimeTimingTelemetry {
+    double target_rate_hz = 0.0;
+    double observed_rate_hz = 0.0;
+    double send_rate_hz = 0.0;
+    RealtimeTimingRange period_ms;
+    RealtimeTimingRange jitter_ms;
+    RealtimeTimingRange wake_latency_us;
+    RealtimeTimingRange pre_send_us;
+    RealtimeTimingRange send_duration_us;
+    uint64_t deadline_miss_count = 0;
+    uint64_t catch_up_count = 0;
+};
+
+struct FeedbackRealtimeTimingTelemetry {
+    double frame_rate_hz = 0.0;
+    double fresh_rate_hz = 0.0;
+    uint64_t held_count = 0;
+    RealtimeTimingRange period_ms;
+    RealtimeTimingRange jitter_ms;
+    RealtimeTimingRange age_us;
+    RealtimeTimingRange phase_us;
+    bool freshness_reliable = false;
+    bool robot_time_available = false;
+    bool robot_time_monotonic = false;
+};
+
+struct RealtimeTimingTelemetry {
+    double window_sec = 0.0;
+    ServoRealtimeTimingTelemetry servo;
+    FeedbackRealtimeTimingTelemetry left_feedback;
+    FeedbackRealtimeTimingTelemetry right_feedback;
+};
+
 // One near pair from the URDF mesh self-collision monitor: the two closest
 // witness points (stand frame) on the two geometries + their signed clearance.
 // Lets a viewer draw the close-call segments over the URDF meshes (the mesh-mode
@@ -979,6 +1071,11 @@ struct ServoSnapshot {
 
     RobotState left_state;
     RobotState right_state;
+    ForceTorqueTelemetry left_force_torque;
+    ForceTorqueTelemetry right_force_torque;
+    ForceControlTelemetry left_force_control;
+    ForceControlTelemetry right_force_control;
+    uint64_t motion_epoch = 0;
 
     DualArmCommand command;
 
@@ -990,6 +1087,11 @@ struct ServoSnapshot {
     double period_ms = 0.0;
     double jitter_ms = 0.0;
     double filter_dt_ms = 0.0;
+
+    // Producer-side rolling cadence statistics. Absent for snapshots that did
+    // not originate from the live servo loop (for example static unit-test or
+    // compatibility snapshots).
+    std::optional<RealtimeTimingTelemetry> realtime_timing;
 
     SafetyVerdict safety_verdict = SafetyVerdict::Ok;
     ServerMotionState motion_state = ServerMotionState::Disconnected;

@@ -1413,6 +1413,16 @@ void validateConfig(const DualArmConfig& cfg) {
     if (cfg.servo.realtime_priority < 1 || cfg.servo.realtime_priority > 99) {
         throw std::runtime_error("servo.realtime_priority must be in [1, 99]");
     }
+    if (cfg.servo.spin_slack_us < 0) {
+        throw std::runtime_error("servo.spin_slack_us must be >= 0");
+    }
+    {
+        const int spin_rate_hz = cfg.servo.rate_hz > 0 ? cfg.servo.rate_hz : 500;
+        const long long period_us = 1'000'000LL / spin_rate_hz;
+        if (cfg.servo.spin_slack_us >= period_us) {
+            throw std::runtime_error("servo.spin_slack_us must be smaller than the tick period");
+        }
+    }
     if (cfg.network.command_source_allowlist.empty()) {
         throw std::runtime_error("network.command_source_allowlist must not be empty");
     }
@@ -1568,19 +1578,44 @@ void validateConfig(const DualArmConfig& cfg) {
     }
 
     const std::string force_provider = lower(cfg.force_control.provider);
-    if (!(force_provider == "null" || force_provider == "none" || force_provider.empty())) {
-        throw std::runtime_error("force_control.provider must be null");
+    const bool force_provider_null =
+        force_provider == "null" || force_provider == "none" || force_provider.empty();
+    if (!(force_provider_null || force_provider == "project_native")) {
+        throw std::runtime_error("force_control.provider must be null or project_native");
     }
-    if (cfg.force_control.enable) {
-        throw std::runtime_error("force_control.enable must remain false");
+    if (cfg.force_control.enable && force_provider != "project_native") {
+        throw std::runtime_error(
+            "force_control.enable=true requires force_control.provider=project_native"
+        );
     }
-    if (cfg.force_control.allow_in_real) {
-        throw std::runtime_error("force_control.allow_in_real must remain false");
+    const std::string force_mode = lower(cfg.force_control.operating_mode);
+    if (!(force_mode == "monitor" || force_mode == "guard" ||
+          force_mode == "guarded_admittance")) {
+        throw std::runtime_error(
+            "force_control.operating_mode must be monitor, guard, or guarded_admittance"
+        );
+    }
+    if (!cfg.force_control.enable &&
+        (cfg.force_control.left.enable || cfg.force_control.right.enable)) {
+        throw std::runtime_error(
+            "per-arm force_control enable requires force_control.enable=true"
+        );
+    }
+    if (cfg.force_control.supervised_experimental_real && !cfg.force_control.allow_in_real) {
+        throw std::runtime_error(
+            "force_control.supervised_experimental_real=true requires allow_in_real=true"
+        );
     }
     validatePositiveFinite(
         static_cast<double>(cfg.force_control.update_rate_hz),
         "force_control.update_rate_hz"
     );
+    if (cfg.force_control.enable &&
+        cfg.force_control.update_rate_hz != cfg.servo.rate_hz) {
+        throw std::runtime_error(
+            "enabled force_control.update_rate_hz must match servo.rate_hz"
+        );
+    }
     validatePositiveFiniteArray(cfg.force_control.virtual_mass, "force_control.virtual_mass");
     validateNonNegativeFiniteArray(cfg.force_control.damping, "force_control.damping");
     validateNonNegativeFiniteArray(cfg.force_control.stiffness, "force_control.stiffness");
@@ -1615,6 +1650,77 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.force_control.max_rot_step_rad, "force_control.max_rot_step_rad");
     validatePositiveFinite(cfg.force_control.max_energy_j, "force_control.max_energy_j");
 
+    const auto& normal = cfg.force_control.normal_admittance;
+    validatePositiveFinite(normal.virtual_mass_kg, "force_control.normal_admittance.virtual_mass_kg");
+    validateNonNegativeFinite(normal.damping_n_s_m, "force_control.normal_admittance.damping_n_s_m");
+    validateNonNegativeFinite(normal.stiffness_n_m, "force_control.normal_admittance.stiffness_n_m");
+    validatePositiveFinite(normal.max_unload_offset_m, "force_control.normal_admittance.max_unload_offset_m");
+    validatePositiveFinite(normal.max_normal_velocity_m_s, "force_control.normal_admittance.max_normal_velocity_m_s");
+    validatePositiveFinite(normal.max_normal_acceleration_m_s2, "force_control.normal_admittance.max_normal_acceleration_m_s2");
+    validatePositiveFinite(normal.max_normal_jerk_m_s3, "force_control.normal_admittance.max_normal_jerk_m_s3");
+    validatePositiveFinite(normal.max_normal_step_m, "force_control.normal_admittance.max_normal_step_m");
+    validatePositiveFinite(normal.max_energy_j, "force_control.normal_admittance.max_energy_j");
+
+    const bool force_motion_affecting =
+        cfg.force_control.enable && force_mode != "monitor";
+    const auto validate_force_arm = [&](
+        const ForceControlArmConfig& arm,
+        const FtWrenchPipelineConfig& ft,
+        const std::string& path
+    ) {
+        const std::string surface = lower(arm.surface_source);
+        if (!(surface == "floor_constraint" || surface == "user_floor_plane")) {
+            throw std::runtime_error(
+                path + ".surface_source must be floor_constraint or user_floor_plane"
+            );
+        }
+        validateNonNegativeFinite(arm.target_force_n, path + ".target_force_n");
+        validateNonNegativeFinite(arm.contact_enter_force_n, path + ".contact_enter_force_n");
+        validateNonNegativeFinite(arm.contact_release_force_n, path + ".contact_release_force_n");
+        validateNonNegativeFinite(arm.force_deadband_n, path + ".force_deadband_n");
+        validateNonNegativeFinite(arm.hard_normal_force_n, path + ".hard_normal_force_n");
+        validateNonNegativeFinite(arm.hard_force_norm_n, path + ".hard_force_norm_n");
+        validateNonNegativeFinite(arm.hard_torque_norm_nm, path + ".hard_torque_norm_nm");
+        if (arm.debounce_samples < 1) {
+            throw std::runtime_error(path + ".debounce_samples must be >= 1");
+        }
+        validateNonNegativeFinite(arm.release_dwell_sec, path + ".release_dwell_sec");
+        if (!arm.enable) return;
+        if (!ft.enable) {
+            throw std::runtime_error(path + ".enable=true requires matching force_torque arm enable=true");
+        }
+        if (!(arm.contact_release_force_n < arm.contact_enter_force_n)) {
+            throw std::runtime_error(path + " requires contact_release_force_n < contact_enter_force_n");
+        }
+        if (arm.target_force_n > arm.contact_enter_force_n) {
+            throw std::runtime_error(path + ".target_force_n must be <= contact_enter_force_n");
+        }
+        if (!(arm.contact_enter_force_n < arm.hard_normal_force_n)) {
+            throw std::runtime_error(path + " requires contact_enter_force_n < hard_normal_force_n");
+        }
+        if (arm.hard_force_norm_n < arm.hard_normal_force_n) {
+            throw std::runtime_error(path + ".hard_force_norm_n must be >= hard_normal_force_n");
+        }
+        if (!(arm.hard_torque_norm_nm > 0.0)) {
+            throw std::runtime_error(path + ".hard_torque_norm_nm must be positive");
+        }
+        if (force_motion_affecting) {
+            if (surface == "floor_constraint" &&
+                (!cfg.safety.floor_constraint.enable || cfg.safety.floor_constraint.monitor_only)) {
+                throw std::runtime_error(
+                    path + " requires an enforcing safety.floor_constraint"
+                );
+            }
+            if (surface == "user_floor_plane" &&
+                (!cfg.safety.user_floor_constraint.enable ||
+                 cfg.safety.user_floor_constraint.monitor_only)) {
+                throw std::runtime_error(
+                    path + " requires an enforcing safety.user_floor_constraint"
+                );
+            }
+        }
+    };
+
     const auto validate_wrench = [](const Wrench6D& value, const std::string& name) {
         const std::array<double, 6> values{
             value.fx, value.fy, value.fz, value.tx, value.ty, value.tz,
@@ -1629,7 +1735,6 @@ void validateConfig(const DualArmConfig& cfg) {
         throw std::runtime_error("force_torque.source must be null or rbpodo_eft");
     }
     const auto validate_ft_arm = [&](const FtWrenchPipelineConfig& ft, const std::string& path) {
-        if (ft.enable) throw std::runtime_error(path + ".enable must remain false");
         if (ft.frame_configured &&
             (ft.sensor_identity.empty() || ft.calibration_id.empty())) {
             throw std::runtime_error(
@@ -1680,6 +1785,52 @@ void validateConfig(const DualArmConfig& cfg) {
     };
     validate_ft_arm(cfg.force_torque.left, "force_torque.left");
     validate_ft_arm(cfg.force_torque.right, "force_torque.right");
+    validate_force_arm(
+        cfg.force_control.left,
+        cfg.force_torque.left,
+        "force_control.left"
+    );
+    validate_force_arm(
+        cfg.force_control.right,
+        cfg.force_torque.right,
+        "force_control.right"
+    );
+
+    const bool any_ft_enabled = cfg.force_torque.left.enable || cfg.force_torque.right.enable;
+    if (any_ft_enabled && ft_source != "rbpodo_eft") {
+        throw std::runtime_error(
+            "enabled force_torque arms require force_torque.source=rbpodo_eft"
+        );
+    }
+    if (force_motion_affecting) {
+        if (!cfg.kinematics.enable) {
+            throw std::runtime_error("motion-affecting force control requires kinematics.enable=true");
+        }
+        if (cfg.servo.send_at_tick_start) {
+            throw std::runtime_error(
+                "motion-affecting force control requires servo.send_at_tick_start=false"
+            );
+        }
+        if (!cfg.force_control.left.enable && !cfg.force_control.right.enable) {
+            throw std::runtime_error(
+                "motion-affecting force control requires at least one enabled arm"
+            );
+        }
+    }
+
+    const auto physical_real = [](const BackendConfig& backend) {
+        return backend.run_mode == RunMode::Real &&
+            lower(backend.operation_mode) == "real";
+    };
+    if (force_motion_affecting &&
+        (physical_real(cfg.left_robot) || physical_real(cfg.right_robot)) &&
+        (!cfg.force_control.allow_in_real ||
+         !cfg.force_control.supervised_experimental_real)) {
+        throw std::runtime_error(
+            "real force control requires allow_in_real=true and "
+            "supervised_experimental_real=true"
+        );
+    }
 
     // Real/sim env gates retired: real Cartesian control no longer requires
     // RB_ALLOW_REAL_CARTESIAN.
@@ -2090,6 +2241,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "enable_realtime_priority",
             "realtime_priority",
             "cpu_core",
+            "spin_slack_us",
             "worker_read_period_sec",
             "worker_read_rate_hz",
             "filter_dt_min_ratio",
@@ -2180,6 +2332,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "enable_realtime_priority")) cfg.servo.enable_realtime_priority = asBool(sec["enable_realtime_priority"], "servo.enable_realtime_priority");
         if (has(sec, "realtime_priority")) cfg.servo.realtime_priority = asInt(sec["realtime_priority"], "servo.realtime_priority");
         if (has(sec, "cpu_core")) cfg.servo.cpu_core = asInt(sec["cpu_core"], "servo.cpu_core");
+        if (has(sec, "spin_slack_us")) cfg.servo.spin_slack_us = asInt(sec["spin_slack_us"], "servo.spin_slack_us");
         if (has(sec, "worker_read_period_sec") && has(sec, "worker_read_rate_hz")) {
             fail("servo cannot set both worker_read_period_sec and worker_read_rate_hz", sec["worker_read_rate_hz"]);
         }
@@ -3051,8 +3204,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         validateAllowedKeys(sec, {
             "provider",
             "enable",
+            "operating_mode",
             "allow_in_real",
+            "supervised_experimental_real",
             "update_rate_hz",
+            "left",
+            "right",
+            "normal_admittance",
             "virtual_mass",
             "damping",
             "stiffness",
@@ -3071,8 +3229,66 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         }, "force_control");
         if (has(sec, "provider")) cfg.force_control.provider = lower(asString(sec["provider"], "force_control.provider"));
         if (has(sec, "enable")) cfg.force_control.enable = asBool(sec["enable"], "force_control.enable");
+        if (has(sec, "operating_mode")) cfg.force_control.operating_mode = lower(asString(sec["operating_mode"], "force_control.operating_mode"));
         if (has(sec, "allow_in_real")) cfg.force_control.allow_in_real = asBool(sec["allow_in_real"], "force_control.allow_in_real");
+        if (has(sec, "supervised_experimental_real")) cfg.force_control.supervised_experimental_real = asBool(sec["supervised_experimental_real"], "force_control.supervised_experimental_real");
         if (has(sec, "update_rate_hz")) cfg.force_control.update_rate_hz = asInt(sec["update_rate_hz"], "force_control.update_rate_hz");
+        const auto parse_force_arm = [&](
+            const YAML::Node& arm,
+            ForceControlArmConfig& out,
+            const std::string& path
+        ) {
+            validateAllowedKeys(arm, {
+                "enable",
+                "surface_source",
+                "target_force_n",
+                "contact_enter_force_n",
+                "contact_release_force_n",
+                "force_deadband_n",
+                "hard_normal_force_n",
+                "hard_force_norm_n",
+                "hard_torque_norm_nm",
+                "debounce_samples",
+                "release_dwell_sec",
+            }, path);
+            if (has(arm, "enable")) out.enable = asBool(arm["enable"], path + ".enable");
+            if (has(arm, "surface_source")) out.surface_source = lower(asString(arm["surface_source"], path + ".surface_source"));
+            if (has(arm, "target_force_n")) out.target_force_n = asDouble(arm["target_force_n"], path + ".target_force_n");
+            if (has(arm, "contact_enter_force_n")) out.contact_enter_force_n = asDouble(arm["contact_enter_force_n"], path + ".contact_enter_force_n");
+            if (has(arm, "contact_release_force_n")) out.contact_release_force_n = asDouble(arm["contact_release_force_n"], path + ".contact_release_force_n");
+            if (has(arm, "force_deadband_n")) out.force_deadband_n = asDouble(arm["force_deadband_n"], path + ".force_deadband_n");
+            if (has(arm, "hard_normal_force_n")) out.hard_normal_force_n = asDouble(arm["hard_normal_force_n"], path + ".hard_normal_force_n");
+            if (has(arm, "hard_force_norm_n")) out.hard_force_norm_n = asDouble(arm["hard_force_norm_n"], path + ".hard_force_norm_n");
+            if (has(arm, "hard_torque_norm_nm")) out.hard_torque_norm_nm = asDouble(arm["hard_torque_norm_nm"], path + ".hard_torque_norm_nm");
+            if (has(arm, "debounce_samples")) out.debounce_samples = asInt(arm["debounce_samples"], path + ".debounce_samples");
+            if (has(arm, "release_dwell_sec")) out.release_dwell_sec = asDouble(arm["release_dwell_sec"], path + ".release_dwell_sec");
+        };
+        if (has(sec, "left")) parse_force_arm(sec["left"], cfg.force_control.left, "force_control.left");
+        if (has(sec, "right")) parse_force_arm(sec["right"], cfg.force_control.right, "force_control.right");
+        if (has(sec, "normal_admittance")) {
+            const YAML::Node normal = sec["normal_admittance"];
+            validateAllowedKeys(normal, {
+                "virtual_mass_kg",
+                "damping_n_s_m",
+                "stiffness_n_m",
+                "max_unload_offset_m",
+                "max_normal_velocity_m_s",
+                "max_normal_acceleration_m_s2",
+                "max_normal_jerk_m_s3",
+                "max_normal_step_m",
+                "max_energy_j",
+            }, "force_control.normal_admittance");
+            auto& out = cfg.force_control.normal_admittance;
+            if (has(normal, "virtual_mass_kg")) out.virtual_mass_kg = asDouble(normal["virtual_mass_kg"], "force_control.normal_admittance.virtual_mass_kg");
+            if (has(normal, "damping_n_s_m")) out.damping_n_s_m = asDouble(normal["damping_n_s_m"], "force_control.normal_admittance.damping_n_s_m");
+            if (has(normal, "stiffness_n_m")) out.stiffness_n_m = asDouble(normal["stiffness_n_m"], "force_control.normal_admittance.stiffness_n_m");
+            if (has(normal, "max_unload_offset_m")) out.max_unload_offset_m = asDouble(normal["max_unload_offset_m"], "force_control.normal_admittance.max_unload_offset_m");
+            if (has(normal, "max_normal_velocity_m_s")) out.max_normal_velocity_m_s = asDouble(normal["max_normal_velocity_m_s"], "force_control.normal_admittance.max_normal_velocity_m_s");
+            if (has(normal, "max_normal_acceleration_m_s2")) out.max_normal_acceleration_m_s2 = asDouble(normal["max_normal_acceleration_m_s2"], "force_control.normal_admittance.max_normal_acceleration_m_s2");
+            if (has(normal, "max_normal_jerk_m_s3")) out.max_normal_jerk_m_s3 = asDouble(normal["max_normal_jerk_m_s3"], "force_control.normal_admittance.max_normal_jerk_m_s3");
+            if (has(normal, "max_normal_step_m")) out.max_normal_step_m = asDouble(normal["max_normal_step_m"], "force_control.normal_admittance.max_normal_step_m");
+            if (has(normal, "max_energy_j")) out.max_energy_j = asDouble(normal["max_energy_j"], "force_control.normal_admittance.max_energy_j");
+        }
         if (has(sec, "virtual_mass")) cfg.force_control.virtual_mass = parseJointArray(sec["virtual_mass"], "force_control.virtual_mass");
         if (has(sec, "damping")) cfg.force_control.damping = parseJointArray(sec["damping"], "force_control.damping");
         if (has(sec, "stiffness")) cfg.force_control.stiffness = parseJointArray(sec["stiffness"], "force_control.stiffness");

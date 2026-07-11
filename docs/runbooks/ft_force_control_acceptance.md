@@ -4,26 +4,39 @@
 
 `REAL ENFORCEMENT: BLOCKED`
 
-This runbook records the evidence required to promote the hardware-free F/T
-pipeline and admittance controller. It grants no motion authority. The current
-rbpodo EFT state does not prove sensor presence and does not expose an
-independent acquisition sequence, sensor fault, or overrange status, so the
-real-enforcement gate cannot currently pass.
+This runbook records the evidence required to promote the integrated F/T
+monitor, guard, and unilateral normal-admittance path. It grants no motion
+authority. The current rbpodo EFT state does not prove sensor presence, sensor
+fault, or overrange status. The backend exposes a CobotData frame-acquisition
+sequence, but this is not an independent sensor sequence, so the
+real-enforcement gate cannot currently pass. The explicit
+`supervised_experimental_real` config flag only exposes the implementation for
+a supervised acceptance stage; it does not close this gate.
 
-Tracked `stack_real.yaml` and `stack_sim.yaml` must remain:
+`stack_sim.yaml` remains force-off. The tracked `stack_real.yaml` is the single
+physical bring-up profile and is currently limited to:
 
 ```yaml
 force_control:
-  provider: null
-  enable: false
+  provider: project_native
+  enable: true
+  operating_mode: monitor
+  allow_in_real: false
+  supervised_experimental_real: false
 ```
 
 Do not use controller `pgmode` as evidence of physical F/T dynamics.
 
+Monitor-only acquisition is enabled directly in `stack_real.yaml` because it
+does not alter or stop motion. Start it with `make run MODE=real`.
+Do not advance to `guard` or `guarded_admittance` until the preceding promotion
+stage has recorded and reviewed its evidence.
+
 ## Per-arm accepted profile
 
-Create a site-local artifact for each arm. Do not commit device serials or
-site-specific transforms to tracked stack configs.
+Record the accepted per-arm values in `stack_real.yaml` and preserve the
+matching CSV artifact for each stage. Pending serials or transforms must remain
+explicitly labelled as unaccepted estimates.
 
 | Field | Left | Right |
 | --- | --- | --- |
@@ -34,7 +47,8 @@ site-specific transforms to tracked stack configs.
 | Presence signal and evidence | pending | pending |
 | Fault signal and evidence | pending | pending |
 | Overrange signal and evidence | pending | pending |
-| Source sequence/time evidence | pending | pending |
+| Backend frame sequence evidence | implemented; physical log acceptance pending | implemented; physical log acceptance pending |
+| Independent sensor sequence/time evidence | unavailable | unavailable |
 | `T_tcp_sensor` | `[0, 0, -0.202642, 0, 0, pi/2]`; URDF/CAD-derived, axis acceptance pending | `[0, 0, -0.202642, 0, 0, pi/2]`; URDF/CAD-derived, axis acceptance pending |
 | Positive force/torque axis check | pending | pending |
 | Tool/payload mass | pending | pending |
@@ -67,7 +81,7 @@ threshold.
 Every record must include:
 
 - arm, sensor/profile revision, and fixture identifier
-- host receive time and independent source sequence/time
+- host receive time, backend frame-acquisition sequence, and any independent sensor sequence/time
 - raw sensor-frame wrench
 - bias-corrected TCP-frame wrench
 - modeled payload/gravity wrench
@@ -87,6 +101,26 @@ Collect these datasets before choosing thresholds:
 Report per-axis mean, standard deviation, robust high percentile, worst-case
 residual, temperature/time drift, and missing/stalled sample bursts. Repeating
 the same wrench value is not a fault when the acquisition sequence advances.
+
+For every static capture, run:
+
+```bash
+python3 rb_servo_server/tools/analyze_ft_acceptance.py \
+  logs/servo_log.csv --static-start-sec 2 --static-end-sec 10
+```
+
+Preserve its output with the CSV. Promotion requires `promotion_ready: true`
+for both arms. The checker fails closed on FT freshness discontinuity, a
+static force/torque norm already beyond the configured hard limits, or a
+disagreement between the logged normal force and the normal projection
+recomputed from the logged TCP quaternion and wrench. Its tare value is an
+incremental static-window candidate only and must not be applied without the
+payload/orientation and sign checks in this runbook.
+
+The analyzer requires the force-control fast projection and norm columns added
+with the value-return projection fix. Older captures are intentionally rejected:
+their normal-force telemetry may have been produced from a dangling Eigen
+expression and cannot be used as promotion evidence. Re-capture after rebuilding.
 
 ## Threshold and latency record
 
@@ -124,7 +158,8 @@ failure returns the system to the previous stage.
 8. small nonzero target force after zero-force acceptance
 9. flow-infer planned contact with force ownership limited to the accepted normal
 
-Promotion beyond monitor-only also requires:
+Promotion beyond monitor-only also requires, and the runtime now enforces the
+applicable config/ownership parts of these requirements:
 
 - `send_at_tick_start=false`
 - output moving-average transition reset/bypass evidence
@@ -133,6 +168,11 @@ Promotion beyond monitor-only also requires:
 - server and Python motion-epoch/observation provenance invalidation
 - DeltaTwist normal-axis projection with tangential-state preservation
 - reset interlock requiring a fresh post-event observation and chunk
+
+The implementation increments `motion_epoch` on contact entry, release, and
+external-force fault. `flow-infer` invalidates cached/in-flight chunks and
+reanchors its absolute TCP targets when the epoch changes. Admittance state is
+committed only after IK, final safety filtering, and accepted backend send.
 
 The F/T path is not safety-rated. It supplements but never replaces E-stop,
 lease/deadman, stale-state, tracking-error, self-collision, floor, ROI, and

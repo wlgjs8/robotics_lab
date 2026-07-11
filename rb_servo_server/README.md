@@ -30,12 +30,12 @@ Implemented in this server:
 - mandatory Pinocchio/Eigen FK, IK, and Cartesian math support
 - Cartesian command routing when kinematics and Cartesian config gates are
   enabled
-- force-control design types, config, and optional controller scaffold
+- default-off F/T monitor, contact guard, and unilateral normal admittance
 - gripper command forwarding to the out-of-process `gripper_server`
 
 Still pending:
 
-- production force-control integration
+- physical F/T characterization and force-control acceptance
 - measured camera/robot calibration
 - production promotion of worker I/O for real hardware
 
@@ -51,6 +51,11 @@ cmake -S . -B build
 cmake --build build -j
 ```
 
+The repository-level `make build` keeps this stack incremental. Layout-sensitive
+`config.hpp` changes explicitly rebuild every shipped server object while
+preserving the CMake build tree. Use `make rebuild` only for an intentional hard
+reset of `build/rbpodo_real_gate`, such as cache or toolchain recovery.
+
 The build requires Eigen3 and Pinocchio. Cartesian FK, IK, orientation
 interpolation, frame conversion, and SE(3) delta math delegate to
 Eigen/Pinocchio rather than local fallback math. Install Pinocchio through an
@@ -65,11 +70,11 @@ cd /home/plaif/workspace/robotics_lab
 make run MODE=sim
 ```
 
-For a hardware-free mock smoke, provide a site-local mock YAML under
-`config/local/` and pass it explicitly:
+For a hardware-free mock smoke, use a temporary YAML outside the repository and
+pass it explicitly:
 
 ```bash
-./build/rb_servo_server --config config/local/<mock-config>.yaml
+./build/rb_servo_server --config /tmp/<mock-config>.yaml
 ```
 
 Stop the server with `Ctrl+C`.
@@ -82,8 +87,8 @@ python3 tools/plot_servo_log.py logs/servo_log.csv
 
 ## Hardware-free validation
 
-Hardware-free validation runs C++/Python tests and, when a local mock config is
-available, mock-mode smoke against that explicit `config/local/*.yaml`. Cartesian
+Hardware-free validation runs C++/Python tests and, when a temporary mock config is
+available, mock-mode smoke against that explicit YAML. Cartesian
 behavior is covered by Pinocchio-backed C++ tests and active-stack smoke. For
 controller-level simulation, use the rbpodo controller `pgmode` simulation
 (`make run MODE=sim`) or the Rainbow virtual control-box VMs. The old
@@ -119,10 +124,9 @@ python3 tools/send_reset_fault.py
 
 Real motion is config-driven and operator-supervised. Do not run real robot
 configs during hardware-free validation; real validation is a separate
-human-gated task. Use the tracked `config/stack_real.yaml` as the reference
-template, then create a site-owned copy under `config/local/` for read-only
-bring-up or a separately approved motion procedure. Site-local real configs must
-keep motion off until the relevant acceptance task explicitly enables
+human-gated task. Use the tracked `config/stack_real.yaml` directly and change
+one reviewed acceptance-stage setting at a time. It must keep unaccepted motion
+paths off until the relevant acceptance task explicitly enables
 `servo.send_servo_commands: true` and, for Cartesian motion,
 `cartesian_control.allow_in_real: true`.
 
@@ -159,7 +163,10 @@ The C++ receive timestamp is used for timeout checks.
 
 ## Force-control status
 
-Force control is present as a design scaffold only. It is disabled by default and not connected to the joint-only control path. See `docs/force_control.md`.
+Force control is connected to the Cartesian servo path but remains disabled in
+tracked configs. Site-local profiles can select monitor, guard, or guarded
+normal admittance; physical acceptance is still required. See
+`docs/force_control.md`.
 
 ## Viser operator GUI
 
@@ -180,5 +187,5 @@ Pinocchio enabled so FK/IK powers the GUI TCP target tests. See
 `docs/gui_operator_console.md`.
 
 For hardware-free mock runs, start `rb_servo_server` directly with an explicit
-site-local mock config under `config/local/`. Docker remains in use only for
+temporary mock config outside the repository. Docker remains in use only for
 `camera_server` (managed by `make cam-up` / `cam-down` / `cam-status`).

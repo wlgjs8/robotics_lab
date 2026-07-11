@@ -196,41 +196,15 @@ bool readOptionalPose6D(const json& object, const char* key, Pose6D* out, bool* 
     return true;
 }
 
-bool readOptionalWrench6D(const json& object, const char* key, Wrench6D* out, bool* present) {
-    return readOptionalArray6(object, key, out, present, [](const std::array<double, 6>& values, Wrench6D* target) {
-        *target = Wrench6D{values[0], values[1], values[2], values[3], values[4], values[5]};
-    });
-}
-
 bool parseForceControlObject(const json& object, ForceControlCommand* cmd) {
     const auto force_it = object.find("force_control");
     if (force_it == object.end()) return true;
-    if (!force_it->is_object()) return false;
-
-    const json& force = *force_it;
-    std::string mode;
-    if (!readOptionalString(force, "mode", &mode)) return false;
-    if (!mode.empty()) cmd->mode = forceControlModeFromString(mode);
-
-    bool present = false;
-    if (!readOptionalWrench6D(force, "target_wrench", &cmd->target_wrench, &present)) return false;
-    if (!readOptionalNumber(force, "max_pos_offset_m", &cmd->max_pos_offset_m)) return false;
-    if (!readOptionalNumber(force, "max_rot_offset_rad", &cmd->max_rot_offset_rad)) return false;
-    if (!readOptionalNumber(force, "max_pos_step_m", &cmd->max_pos_step_m)) return false;
-    if (!readOptionalNumber(force, "max_rot_step_rad", &cmd->max_rot_step_rad)) return false;
-
-    const auto axis_it = force.find("enabled_axis");
-    if (axis_it != force.end()) {
-        if (!axis_it->is_object()) return false;
-        const json& axis = *axis_it;
-        if (!readOptionalBool(axis, "x", &cmd->enabled_axis.x)) return false;
-        if (!readOptionalBool(axis, "y", &cmd->enabled_axis.y)) return false;
-        if (!readOptionalBool(axis, "z", &cmd->enabled_axis.z)) return false;
-        if (!readOptionalBool(axis, "roll", &cmd->enabled_axis.roll)) return false;
-        if (!readOptionalBool(axis, "pitch", &cmd->enabled_axis.pitch)) return false;
-        if (!readOptionalBool(axis, "yaw", &cmd->enabled_axis.yaw)) return false;
-    }
-    return true;
+    // V1 force authority is server-owned YAML configuration. Per-command
+    // force_control used to parse successfully and then be ignored by the
+    // servo loop, which was an unsafe silent no-op. Reject it explicitly until
+    // a separately accepted task-level command contract exists.
+    (void)cmd;
+    return false;
 }
 
 bool parseLinearMoveOrientationMode(const std::string& value, LinearMoveOrientationMode* out) {

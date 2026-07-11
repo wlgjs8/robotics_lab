@@ -10,6 +10,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "rb_servo/control/realtime_timing.hpp"
 #include "rb_servo/network/state_publisher.hpp"
 
 namespace {
@@ -251,6 +252,126 @@ bool testStatePublisherSerializesAsyncStreamingFields() {
     return true;
 }
 
+bool testStatePublisherSerializesForceTelemetry() {
+    rb_servo::ServoSnapshot snapshot = snapshotWithTick(124);
+    snapshot.motion_epoch = 7;
+    snapshot.left_force_torque.enabled = true;
+    snapshot.left_force_torque.source = "rbpodo_eft";
+    snapshot.left_force_torque.source_assurance = "controller_frame_only";
+    snapshot.left_force_torque.raw_sensor_wrench.fx = 8.0;
+    snapshot.left_force_torque.control_external_wrench.fz = 5.0;
+    snapshot.left_force_torque.healthy = true;
+    snapshot.left_force_torque.freshness_value = 42;
+    snapshot.left_force_control.enabled = true;
+    snapshot.left_force_control.operating_mode = "guarded_admittance";
+    snapshot.left_force_control.state = "regulating";
+    snapshot.left_force_control.contact_active = true;
+    snapshot.left_force_control.measured_force_n = 5.0;
+    snapshot.left_force_control.fast_normal_force_n = 5.5;
+    snapshot.left_force_control.fast_force_norm_n = 7.0;
+    snapshot.left_force_control.fast_torque_norm_nm = 0.8;
+    snapshot.left_force_control.contact_threshold_exceeded = true;
+    snapshot.left_force_control.hard_limit_exceeded = false;
+    snapshot.left_force_control.target_force_n = 3.0;
+    snapshot.left_force_control.correction_m = 0.001;
+    snapshot.left_force_control.motion_epoch = 7;
+
+    rb_servo::StatePublisher publisher(rb_servo::DualArmConfig{});
+    const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+    const nlohmann::json& ft = json.at("left").at("force_torque");
+    const nlohmann::json& force = json.at("left").at("force_control");
+    RB_CHECK(json.at("motion_epoch").get<uint64_t>() == 7);
+    RB_CHECK(ft.at("source").get<std::string>() == "rbpodo_eft");
+    RB_CHECK(ft.at("source_assurance").get<std::string>() == "controller_frame_only");
+    RB_CHECK(!ft.at("sensor_health_verified").get<bool>());
+    RB_CHECK(!ft.at("safety_rated").get<bool>());
+    RB_CHECK(ft.at("raw_sensor_wrench").at(0).get<double>() == 8.0);
+    RB_CHECK(force.at("state").get<std::string>() == "regulating");
+    RB_CHECK(force.at("contact_active").get<bool>());
+    RB_CHECK(force.at("fast_normal_force_n").get<double>() == 5.5);
+    RB_CHECK(force.at("fast_force_norm_n").get<double>() == 7.0);
+    RB_CHECK(force.at("fast_torque_norm_nm").get<double>() == 0.8);
+    RB_CHECK(force.at("contact_threshold_exceeded").get<bool>());
+    RB_CHECK(!force.at("hard_limit_exceeded").get<bool>());
+    RB_CHECK(force.at("correction_m").get<double>() == 0.001);
+    RB_CHECK(force.at("motion_epoch").get<uint64_t>() == 7);
+    return true;
+}
+
+bool testRealtimeTimingAccumulatorAndSerialization() {
+    rb_servo::RealtimeTimingAccumulator accumulator;
+    constexpr uint64_t kBaseNs = 1'000'000'000ULL;
+    constexpr uint64_t kPeriodNs = 2'000'000ULL;
+    uint64_t left_host_ns = kBaseNs;
+    uint64_t right_host_ns = kBaseNs;
+    for (uint64_t i = 0; i < 500; ++i) {
+        rb_servo::RealtimeTimingTick tick;
+        tick.scheduled_wake_ns = kBaseNs + i * kPeriodNs;
+        tick.loop_start_ns = tick.scheduled_wake_ns + 100'000ULL;
+        tick.loop_end_ns = tick.loop_start_ns + 1'000'000ULL;
+        if (i == 100) tick.loop_end_ns = tick.scheduled_wake_ns + 2'100'000ULL;
+        tick.previous_sleep_enter_ns = i == 200
+            ? tick.scheduled_wake_ns : tick.scheduled_wake_ns - 500'000ULL;
+        tick.nominal_period_ns = kPeriodNs;
+        tick.send_cycle = true;
+        tick.pre_send_ns = 300'000ULL;
+        tick.send_duration_ns = 150'000ULL;
+        if (i != 250) left_host_ns = tick.loop_start_ns + 200'000ULL;
+        tick.left_feedback.host_time_ns = left_host_ns;
+        tick.left_feedback.robot_time_ns = i * kPeriodNs + 1;
+        if ((i % 2) == 0) right_host_ns = tick.loop_start_ns + 400'000ULL;
+        tick.right_feedback.host_time_ns = right_host_ns;
+        tick.right_feedback.robot_time_ns = (i / 2) * 2 * kPeriodNs + 1;
+        accumulator.add(tick);
+    }
+
+    const rb_servo::RealtimeTimingTelemetry timing = accumulator.snapshot();
+    RB_CHECK(timing.window_sec > 0.99 && timing.window_sec <= 1.001);
+    RB_CHECK(timing.servo.target_rate_hz == 500.0);
+    RB_CHECK(timing.servo.observed_rate_hz > 499.0 && timing.servo.observed_rate_hz < 501.0);
+    RB_CHECK(timing.servo.send_rate_hz > 499.0 && timing.servo.send_rate_hz < 501.0);
+    RB_CHECK(timing.servo.period_ms.last == 2.0);
+    RB_CHECK(timing.servo.wake_latency_us.last == 100.0);
+    RB_CHECK(timing.servo.pre_send_us.last == 300.0);
+    RB_CHECK(timing.servo.send_duration_us.last == 150.0);
+    RB_CHECK(timing.servo.deadline_miss_count == 1);
+    RB_CHECK(timing.servo.catch_up_count == 1);
+    RB_CHECK(timing.left_feedback.frame_rate_hz > 498.0);
+    RB_CHECK(timing.left_feedback.frame_rate_hz < 500.0);
+    RB_CHECK(timing.left_feedback.held_count == 1);
+    RB_CHECK(timing.right_feedback.fresh_rate_hz > 249.0);
+    RB_CHECK(timing.right_feedback.fresh_rate_hz < 251.0);
+    RB_CHECK(timing.right_feedback.held_count == 250);
+    RB_CHECK(timing.right_feedback.period_ms.last == 4.0);
+    RB_CHECK(!timing.left_feedback.freshness_reliable);
+    RB_CHECK(timing.left_feedback.robot_time_available);
+    RB_CHECK(timing.left_feedback.robot_time_monotonic);
+
+    rb_servo::ServoSnapshot snapshot = snapshotWithTick(125);
+    rb_servo::StatePublisher publisher(rb_servo::DualArmConfig{});
+    const nlohmann::json absent =
+        nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+    RB_CHECK(!absent.contains("realtime_timing"));
+
+    snapshot.realtime_timing = timing;
+    const nlohmann::json json =
+        nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+    const nlohmann::json& realtime = json.at("realtime_timing");
+    RB_CHECK(realtime.at("servo").at("target_rate_hz").get<double>() == 500.0);
+    RB_CHECK(realtime.at("servo").at("period_ms").contains("p95"));
+    RB_CHECK(realtime.at("servo").at("wake_latency_us").contains("max"));
+    RB_CHECK(realtime.at("servo").at("pre_send_us").at("last").get<double>() == 300.0);
+    RB_CHECK(realtime.at("servo").at("send_duration_us").at("last").get<double>() == 150.0);
+    const nlohmann::json& feedback = realtime.at("feedback").at("right");
+    RB_CHECK(feedback.at("held_count").get<uint64_t>() == 250);
+    RB_CHECK(feedback.at("frame_rate_basis").get<std::string>() ==
+             "host_frame_timestamp_change");
+    RB_CHECK(feedback.at("freshness_basis").get<std::string>() ==
+             "controller_robot_time_diagnostic_only");
+    RB_CHECK(feedback.at("robot_time_trust").get<std::string>() == "diagnostic_only");
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -258,5 +379,7 @@ int main() {
     if (!testStatePublisherLegacySingleEndpointStillWorks()) return 1;
     if (!testStatePublisherSerializesJointReferenceFields()) return 1;
     if (!testStatePublisherSerializesAsyncStreamingFields()) return 1;
+    if (!testStatePublisherSerializesForceTelemetry()) return 1;
+    if (!testRealtimeTimingAccumulatorAndSerialization()) return 1;
     return 0;
 }

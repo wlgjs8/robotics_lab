@@ -125,6 +125,186 @@ class FlowInferenceCliTest(unittest.TestCase):
         self.assertTrue(requirements.allow_rbpodo_controller_simulation_cartesian)
         self.assertTrue(requirements.cartesian_motion)
 
+    def test_server_motion_epoch_invalidates_cached_chunk_and_reanchors(self) -> None:
+        import numpy as np
+
+        try:
+            from policy_runner.flow_inference import FlowMatchingActionSource
+        except ModuleNotFoundError as exc:
+            if exc.name == "torch":
+                self.skipTest("flow-infer runtime dependency torch is not installed")
+            raise
+        from policy_runner.robot_state_client import StateSnapshot
+
+        source = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
+        source._last_server_motion_epoch = 4
+        source._target_pose_by_arm = {
+            "left": np.ones(7, dtype=np.float64),
+            "right": np.ones(7, dtype=np.float64),
+        }
+        source._gripper_targets_by_arm = {"left": 0.2, "right": 0.8}
+        source._chunk = np.ones((2, 14), dtype=np.float32)
+        source._chunk_index = 1
+        source._steps_since_boundary = 1
+        source._current_step_intent = object()
+        source._current_gripper_targets = {"left": 0.2, "right": 0.8}
+
+        snapshot = StateSnapshot(
+            payload={
+                "motion_epoch": 5,
+                "left": {
+                    "tcp_stand": {
+                        "x": 0.1,
+                        "y": 0.2,
+                        "z": 0.3,
+                        "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+                    },
+                },
+                "right": {
+                    "tcp_stand": {
+                        "x": 0.4,
+                        "y": 0.5,
+                        "z": 0.6,
+                        "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+                    },
+                },
+            },
+            received_monotonic=0.0,
+        )
+
+        source._handle_server_motion_epoch(snapshot)
+
+        self.assertEqual(source._last_server_motion_epoch, 5)
+        self.assertIsNone(source._chunk)
+        self.assertEqual(source._chunk_index, 0)
+        self.assertEqual(source._steps_since_boundary, 0)
+        self.assertIsNone(source._target_pose_by_arm["left"])
+        self.assertIsNone(source._target_pose_by_arm["right"])
+        self.assertEqual(source._reset_left_pose[0], 0.1)
+        self.assertEqual(source._reset_right_pose[0], 0.4)
+
+    def test_async_inference_timing_tracks_request_completion_activation_and_rolling_stats(self) -> None:
+        import threading
+
+        import numpy as np
+
+        from policy_runner.flow_inference import FlowMatchingActionSource
+
+        source = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
+        source._init_inference_timing_state()
+        source._stream_pending = False
+        source._stream_next_chunk = None
+        source._stream_request = None
+        source._stream_generation = 7
+        source._stream_stall_count = 3
+        source._stream_lock = threading.Lock()
+        source._stream_cv = threading.Condition(source._stream_lock)
+        source._inference_clock_ns = iter([1_000_000_000]).__next__
+
+        source._request_prefetch({"observation": [1, 2, 3]})
+
+        generation, inference_seq, request_ns, payload = source._stream_request
+        self.assertEqual(generation, 7)
+        self.assertEqual(inference_seq, 1)
+        self.assertEqual(request_ns, 1_000_000_000)
+        self.assertEqual(payload, {"observation": [1, 2, 3]})
+
+        timing = source._record_inference_completion(
+            inference_seq=inference_seq,
+            request_ns=request_ns,
+            worker_start_ns=1_003_000_000,
+            worker_end_ns=1_013_000_000,
+            ready_ns=1_014_000_000,
+        )
+        source._stream_next_chunk = np.zeros((2, 14), dtype=np.float32)
+        source._stream_ready_timing = timing
+
+        chunk = source._take_prefetched()
+        source._record_inference_activation(1.020)
+        snapshot = source._inference_timing_snapshot()
+
+        self.assertIsNotNone(chunk)
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["seq"], 1)
+        self.assertEqual(snapshot["request_monotonic_ns"], 1_000_000_000)
+        self.assertEqual(snapshot["worker_start_monotonic_ns"], 1_003_000_000)
+        self.assertEqual(snapshot["worker_end_monotonic_ns"], 1_013_000_000)
+        self.assertEqual(snapshot["chunk_ready_monotonic_ns"], 1_014_000_000)
+        self.assertEqual(snapshot["activation_monotonic_ns"], 1_020_000_000)
+        self.assertEqual(snapshot["queue_wait_ms"], 3.0)
+        self.assertEqual(snapshot["inference_latency_ms"], 10.0)
+        self.assertEqual(snapshot["ready_wait_ms"], 6.0)
+        self.assertIsNone(snapshot["inference_period_ms"])
+        self.assertEqual(snapshot["stall_count"], 3)
+        self.assertEqual(snapshot["rolling"]["inference_latency_ms"]["p95_ms"], 10.0)
+        self.assertEqual(snapshot["rolling"]["ready_wait_ms"]["max_ms"], 6.0)
+
+        source._record_inference_completion(
+            inference_seq=2,
+            request_ns=1_025_000_000,
+            worker_start_ns=1_033_000_000,
+            worker_end_ns=1_045_000_000,
+            ready_ns=1_046_000_000,
+        )
+        snapshot = source._inference_timing_snapshot()
+        assert snapshot is not None
+        self.assertEqual(snapshot["inference_period_ms"], 30.0)
+        self.assertEqual(snapshot["inference_period_nominal_ms"], 30.0)
+        self.assertEqual(snapshot["inference_period_jitter_ms"], 0.0)
+        self.assertEqual(snapshot["rolling"]["inference_latency_ms"]["max_ms"], 12.0)
+
+        source._record_inference_completion(
+            inference_seq=3,
+            request_ns=1_060_000_000,
+            worker_start_ns=1_073_000_000,
+            worker_end_ns=1_084_000_000,
+            ready_ns=1_085_000_000,
+        )
+        snapshot = source._inference_timing_snapshot()
+        assert snapshot is not None
+        self.assertEqual(snapshot["inference_period_ms"], 40.0)
+        self.assertEqual(snapshot["inference_period_nominal_ms"], 35.0)
+        self.assertEqual(snapshot["inference_period_jitter_ms"], 5.0)
+        self.assertEqual(snapshot["inference_period_jitter"]["last_ms"], 5.0)
+        self.assertEqual(snapshot["inference_period_jitter"]["p95_ms"], 5.0)
+        self.assertEqual(snapshot["inference_period_jitter"]["max_ms"], 5.0)
+
+    def test_inline_inference_uses_the_same_timing_boundary(self) -> None:
+        import numpy as np
+
+        from policy_runner.flow_inference import FlowMatchingActionSource
+
+        source = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
+        source._init_inference_timing_state()
+        source._stream_stall_count = 0
+        source._inference_clock_ns = iter(
+            [
+                2_000_000_000,
+                2_001_000_000,
+                2_011_000_000,
+                2_012_000_000,
+                2_013_000_000,
+            ]
+        ).__next__
+        expected = np.zeros((2, 14), dtype=np.float32)
+        source._sample_and_align_chunk = lambda payload: expected
+
+        chunk = source._sample_and_align_chunk_timed({"observation": [4, 5, 6]})
+        # The loop timestamp predates blocking inline inference; activation must
+        # fall back to a fresh monotonic reading instead of reporting time travel.
+        source._record_inference_activation(1.999)
+        snapshot = source._inference_timing_snapshot()
+
+        self.assertIs(chunk, expected)
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["seq"], 1)
+        self.assertEqual(snapshot["queue_wait_ms"], 1.0)
+        self.assertEqual(snapshot["inference_latency_ms"], 10.0)
+        self.assertEqual(snapshot["ready_wait_ms"], 1.0)
+        self.assertEqual(snapshot["activation_monotonic_ns"], 2_013_000_000)
+
 
 if __name__ == "__main__":
     unittest.main()

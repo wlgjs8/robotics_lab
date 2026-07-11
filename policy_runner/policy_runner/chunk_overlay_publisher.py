@@ -43,6 +43,7 @@ class ChunkOverlayPublisher:
         host_time_ns: int,
         left_delta: list[list[float]] | None = None,
         right_delta: list[list[float]] | None = None,
+        inference_timing: dict[str, object] | None = None,
     ) -> None:
         try:
             horizon = len(left) if left is not None else len(right or [])
@@ -60,6 +61,8 @@ class ChunkOverlayPublisher:
                 packet["left_delta"] = left_delta
             if right_delta is not None:
                 packet["right_delta"] = right_delta
+            if inference_timing is not None:
+                packet["inference_timing"] = inference_timing
             data = json.dumps(packet, separators=(",", ":")).encode("utf-8")
         except (BlockingIOError, OSError, TypeError, ValueError):
             return

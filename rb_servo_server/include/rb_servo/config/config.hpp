@@ -758,6 +758,14 @@ struct ServoConfig {
     bool enable_realtime_priority = true;
     int realtime_priority = 80;
     int cpu_core = -1;
+    // Hybrid sleep-then-spin tail (microseconds). 0 = plain sleep_until (default,
+    // unchanged). When > 0 the loop sleeps until `slack` before the tick, then
+    // busy-spins the last `slack` so wake-up carries no C-state/scheduler jitter.
+    // GUARDED at loop start: spin is silently disabled (falls back to sleep_until)
+    // unless enable_realtime_priority is true AND kernel.sched_rt_runtime_us == -1
+    // (RT throttling off) — otherwise a ~100% RT spin would be throttled ~50 ms/s.
+    // Must be < the tick period. Only worthwhile on a dedicated isolated cpu_core.
+    int spin_slack_us = 0;
     double worker_read_period_sec = 0.002;
 
     // Use actual period for logging, but cap filter dt so one late tick does not
@@ -817,8 +825,9 @@ struct ScopeConfig {
 };
 
 struct FtWrenchPipelineConfig {
-    // Phase-1 pipeline is hardware-free and is not connected to a backend or
-    // motion path. Activation remains rejected by config validation.
+    // Runtime activation remains explicit and fail-closed. The rbpodo EFT
+    // adapter does not provide an independent sensor-health channel, so real
+    // use is experimental and must be accepted through site-local config.
     bool enable = false;
     bool frame_configured = false;
     std::string sensor_identity;
@@ -847,11 +856,49 @@ struct ForceTorqueConfig {
     FtWrenchPipelineConfig right;
 };
 
+struct ForceControlArmConfig {
+    bool enable = false;
+    // V1 supports a single verified stand-frame contact normal. The normal is
+    // supplied by one of the existing server-owned plane constraints.
+    std::string surface_source = "floor_constraint";
+    double target_force_n = 0.0;
+    double contact_enter_force_n = 0.0;
+    double contact_release_force_n = 0.0;
+    double force_deadband_n = 0.0;
+    double hard_normal_force_n = 0.0;
+    double hard_force_norm_n = 0.0;
+    double hard_torque_norm_nm = 0.0;
+    int debounce_samples = 1;
+    double release_dwell_sec = 0.0;
+};
+
+struct NormalAdmittanceConfig {
+    double virtual_mass_kg = 5.0;
+    double damping_n_s_m = 80.0;
+    double stiffness_n_m = 0.0;
+    double max_unload_offset_m = 0.01;
+    double max_normal_velocity_m_s = 0.02;
+    double max_normal_acceleration_m_s2 = 0.2;
+    double max_normal_jerk_m_s3 = 2.0;
+    double max_normal_step_m = 0.001;
+    double max_energy_j = 2.0;
+};
+
 struct ForceControlConfig {
     std::string provider = "null";
     bool enable = false;
+    std::string operating_mode = "monitor";
     bool allow_in_real = false;
-    int update_rate_hz = 200;
+    // rbpodo EFT does not expose an independent sensor presence/fault/
+    // overrange channel. This explicit opt-in prevents a generic real-motion
+    // allow flag from silently treating controller-frame freshness as a
+    // safety-rated sensor contract.
+    bool supervised_experimental_real = false;
+    int update_rate_hz = 500;
+
+    ForceControlArmConfig left;
+    ForceControlArmConfig right;
+    NormalAdmittanceConfig normal_admittance;
 
     // Diagonal Cartesian admittance parameters ordered [x,y,z,rx,ry,rz].
     std::array<double, 6> virtual_mass{5.0, 5.0, 5.0, 0.5, 0.5, 0.5};

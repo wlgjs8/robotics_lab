@@ -801,6 +801,9 @@ struct RbpodoBackend::Impl {
     std::string pipelined_rx_buf;
     std::optional<RobotState> last_state_cache;
     std::optional<BackendError> last_state_error;
+    // Advances only after a newly received CobotData state frame is decoded.
+    // Held/cache returns deliberately preserve their source frame's sequence.
+    uint64_t state_acquisition_sequence = 0;
     // Consecutive transient readState misses currently being tolerated (held)
     // under the controller-simulation read-miss carve-out. Reset on any valid read.
     // In pipelined mode this counts ticks without a fresh frame (diagnostic only;
@@ -876,6 +879,7 @@ BackendResult<RobotState> RbpodoBackend::connect() {
         impl_->connected = true;
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
         RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
+        mapped.acquisition_sequence = ++impl_->state_acquisition_sequence;
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, mapped);
         attachMotionReadinessDiagnostic(&mapped, impl_->last_state_error);
         impl_->last_state_cache = mapped.has_valid_joint_state ? std::make_optional(mapped) : std::nullopt;
@@ -1227,6 +1231,7 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
 
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
         RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
+        mapped.acquisition_sequence = ++impl_->state_acquisition_sequence;
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, mapped);
         attachMotionReadinessDiagnostic(&mapped, impl_->last_state_error);
         impl_->last_state_cache = mapped.has_valid_joint_state ? std::make_optional(mapped) : std::nullopt;
@@ -1368,6 +1373,7 @@ BackendResult<RobotState> RbpodoBackend::readState() {
         impl_->consecutive_read_misses = 0;
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
         out_state = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
+        out_state.acquisition_sequence = ++impl_->state_acquisition_sequence;
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, out_state);
         attachMotionReadinessDiagnostic(&out_state, impl_->last_state_error);
         impl_->last_state_cache = out_state.has_valid_joint_state ? std::make_optional(out_state) : std::nullopt;
@@ -1477,6 +1483,7 @@ BackendResult<RobotState> RbpodoBackend::readStatePipelined(uint64_t start_ns) {
         // publish eft as sensor readings when the frame actually covered them.
         snapshot.eft_in_frame = rbpodoStateFrameIncludesEft(frame->size());
         RobotState out_state = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
+        out_state.acquisition_sequence = ++impl_->state_acquisition_sequence;
         out_state.rbpodo_sdk_state_source = "CobotData.pipelined";
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, out_state);
         attachMotionReadinessDiagnostic(&out_state, impl_->last_state_error);
@@ -1797,6 +1804,7 @@ BackendResult<RobotState> RbpodoBackend::resetFault() {
             if (state) {
                 const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
                 RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
+                mapped.acquisition_sequence = ++impl_->state_acquisition_sequence;
                 return okResult(BackendOp::ResetFault, mapped, makeBackendTiming(start, nowSteadyNs()));
             }
         } catch (const std::exception&) {
@@ -1864,6 +1872,7 @@ BackendResult<RobotState> RbpodoBackend::setFreedrive(bool on) {
             if (state) {
                 const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
                 state_after = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
+                state_after.acquisition_sequence = ++impl_->state_acquisition_sequence;
                 if (state_after.has_valid_joint_state) {
                     impl_->last_state_cache = state_after;
                 }

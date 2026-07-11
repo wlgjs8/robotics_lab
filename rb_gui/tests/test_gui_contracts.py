@@ -29,6 +29,7 @@ from rb_servo_gui.app import (
     _gripper_cmd_endpoint,
     _recording_cmd_endpoint,
     _recording_status_bind_endpoint,
+    _roi_initial_slider_specs,
     _push_gripper_percent,
     _toggle_episode_recording,
     _update_recording_panel,
@@ -63,6 +64,7 @@ from rb_servo_gui.app import (
     _format_cartesian_solve_status,
     _format_circle_overlay_status,
     _format_fk_status,
+    _format_force_status,
     _format_init_motion_status,
     _format_scene_asset_status,
     _format_joint_monitor_value,
@@ -452,6 +454,7 @@ class RecordingGui:
         return number
 
     def add_slider(self, label, **kwargs):
+        assert kwargs["min"] <= kwargs.get("initial_value") <= kwargs["max"]
         slider = RecordingInput(kwargs.get("initial_value"), **kwargs)
         self.sliders.append((label, kwargs, slider))
         return slider
@@ -1366,6 +1369,45 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(client.calls[-1]["command"], "stop")
         self.assertFalse(handles["recording_start_button"].disabled)
         self.assertTrue(handles["recording_stop_button"].disabled)
+
+    def test_recording_master_gate_blocks_start_but_never_stop(self):
+        # The 녹화 활성화 toggle is OFF (its default at every make-run GUI launch):
+        # a start (수집 시작 / 'b' / foot-pedal from idle) must not fire and no
+        # command may reach policy_runner, while a stop of an in-progress episode
+        # is never gated.
+        client = RecordingCommandFake()
+        handles = {
+            "recording_cmd_client": client,
+            "recording_enabled": RecordingInput(value=False),
+            "recording_last_toggle_monotonic": float("-inf"),
+            "recording_task": RecordingText("fold towel"),
+            "recording_operator": RecordingText("operator-a"),
+            "recording_state": RecordingText("idle"),
+            "recording_episode": RecordingText(""),
+            "recording_frames": RecordingText(""),
+            "recording_command_status": RecordingText(""),
+            "recording_start_button": RecordingButton(),
+            "recording_stop_button": RecordingButton(),
+        }
+
+        # OFF + idle: start blocked, nothing sent to policy_runner.
+        self.assertFalse(_toggle_episode_recording(handles, target="start", monotonic_fn=lambda: 10.0))
+        self.assertEqual(client.calls, [])
+        self.assertIn("BLOCKED", handles["recording_command_status"].value)
+
+        # Panel reflects the gate: start button disabled while the toggle is OFF.
+        _update_recording_panel(handles, None, stale=False)
+        self.assertTrue(handles["recording_start_button"].disabled)
+
+        # Flip the toggle ON: start now fires and reaches policy_runner.
+        handles["recording_enabled"].value = True
+        self.assertTrue(_toggle_episode_recording(handles, target="start", monotonic_fn=lambda: 20.0))
+        self.assertEqual(client.calls, [{"command": "start", "task": "fold towel", "operator": "operator-a"}])
+
+        # Toggle back OFF while recording: a stop is still allowed (never gated).
+        handles["recording_enabled"].value = False
+        self.assertTrue(_toggle_episode_recording(handles, target="stop", monotonic_fn=lambda: 30.0))
+        self.assertEqual(client.calls[-1]["command"], "stop")
 
     def test_trigger_box_detect_debounce_and_busy_state(self):
         class BoxDetectCommandFake:
@@ -2964,6 +3006,14 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn(".rb-monitor-stand-card.rb-monitor-header-card { top: var(--rb-monitor-split); }", html)
         self.assertIn(".rb-monitor-joint-card.rb-monitor-body-card { max-height: calc(var(--rb-monitor-split) - 5.95em); }", html)
         self.assertIn("Pose Monitor", html)
+        # FT split out of the Pose Monitor into its own right-column card.
+        self.assertNotIn("Pose Monitor · FT", html)
+        self.assertIn("FT Monitor", html)
+        self.assertIn(
+            ".rb-monitor-ft-card { left: calc(var(--rb-monitor-gap) * 2 + var(--rb-monitor-width)); }",
+            html,
+        )
+        self.assertIn("rb-monitor-header-card rb-monitor-ft-card", html)
         self.assertIn('id="rb-joint-unit-rad"', html)
         self.assertIn('id="rb-stand-unit-rad"', html)
         self.assertIn("body:has(#rb-joint-unit-rad:checked)", html)
@@ -3007,8 +3057,10 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("invalid", stale_html)
 
     def test_operator_monitor_dynamic_html_renders_eft_wrench(self):
-        # External F/T sensor rows (rbpodo eft_*) render per arm in the Pose/FT
-        # card: force (1 decimal), torque (2 decimals), |F| magnitude.
+        # External F/T sensor rows (rbpodo eft_*) render per arm in the dedicated
+        # FT Monitor card. One axis per row (single short number) so the narrow
+        # card fits without a horizontal scrollbar: force (1 decimal), torque
+        # (2 decimals), |F| magnitude.
         state = self.tcp_available_state()
         state["left"]["eft_wrench"] = [7.4, 6.7, -38.5, -0.12, -0.48, 0.23]
         state["left"]["eft_valid"] = True
@@ -3021,15 +3073,126 @@ class GuiContractsTest(unittest.TestCase):
         self.assertTrue(latest.left.eft_valid)
         self.assertFalse(latest.right.eft_valid)
         html = _operator_monitor_dynamic_html(latest, stale=False)
-        self.assertIn("FT F [N]", html)
-        self.assertIn("FT T [Nm]", html)
-        self.assertIn("FT |F| [N]", html)
-        self.assertIn("+7.4 +6.7 -38.5", html)
-        self.assertIn("-0.12 -0.48 +0.23", html)
+        # FT readings live in their own FT Monitor body card, not the Pose card.
+        self.assertIn("rb-monitor-body-card rb-monitor-ft-card", html)
+        for label in ("Fx [N]", "Fy [N]", "Fz [N]", "|F| [N]", "Tx [Nm]", "Ty [Nm]", "Tz [Nm]"):
+            self.assertIn(label, html)
+        # No 3-vector packed onto one line (that was the horizontal-scroll driver).
+        self.assertNotIn("+7.4 +6.7 -38.5", html)
+        for axis_value in ("+7.4", "+6.7", "-38.5", "-0.12", "-0.48", "+0.23"):
+            self.assertIn(axis_value, html)
         self.assertIn("39.8", html)  # |F| = sqrt(7.4^2 + 6.7^2 + 38.5^2)
         # Server-invalid (right arm) and stale streams must not show readings.
         stale_html = _operator_monitor_dynamic_html(latest, stale=True)
-        self.assertNotIn("+7.4 +6.7 -38.5", stale_html)
+        self.assertNotIn("+7.4", stale_html)
+        self.assertNotIn("-38.5", stale_html)
+
+    def test_force_telemetry_parser_and_read_only_status(self):
+        state = self.tcp_available_state()
+        state["motion_epoch"] = 42
+        state["left"]["force_torque"] = {
+            "enabled": True,
+            "source": "rbpodo_eft",
+            "source_assurance": "controller_frame_only",
+            "sensor_health_verified": False,
+            "safety_rated": False,
+            "raw_sensor_wrench": [1.0, 2.0, 3.0, 0.1, 0.2, 0.3],
+            "wrench_tcp": [3.0, 2.0, 1.0, 0.3, 0.2, 0.1],
+            "fast_external_wrench": [0.9, 1.9, 2.9, 0.09, 0.19, 0.29],
+            "control_external_wrench": [0.8, 1.8, 2.8, 0.08, 0.18, 0.28],
+            "healthy": True,
+            "stale": False,
+            "freshness_value": 1234,
+            "freshness_advanced": True,
+            "reason": "ok",
+        }
+        state["left"]["force_control"] = {
+            "enabled": True,
+            "operating_mode": "guarded_admittance",
+            "state": "regulating",
+            "surface_source": "floor_constraint",
+            "normal_stand": [0.0, 0.0, 1.0],
+            "contact_active": True,
+            "measured_force_n": 8.2,
+            "fast_normal_force_n": 9.2,
+            "fast_force_norm_n": 10.2,
+            "fast_torque_norm_nm": 1.2,
+            "contact_threshold_exceeded": True,
+            "hard_limit_exceeded": False,
+            "target_force_n": 8.0,
+            "correction_m": 0.0003,
+            "velocity_m_s": 0.002,
+            "acceleration_m_s2": 0.01,
+            "energy_j": 0.04,
+            "saturated": False,
+            "proposal_valid": True,
+            "proposal_committed": True,
+            "fault_reason": None,
+            "motion_epoch": 42,
+        }
+        store, _, _ = self.make_safety(state)
+        latest = store.latest()
+
+        self.assertEqual(latest.motion_epoch, 42)
+        self.assertEqual(latest.left.force_torque.source, "rbpodo_eft")
+        self.assertEqual(latest.left.force_torque.source_assurance, "controller_frame_only")
+        self.assertEqual(
+            latest.left.force_torque.raw_sensor_wrench,
+            (1.0, 2.0, 3.0, 0.1, 0.2, 0.3),
+        )
+        self.assertEqual(
+            latest.left.force_torque.control_external_wrench,
+            (0.8, 1.8, 2.8, 0.08, 0.18, 0.28),
+        )
+        self.assertEqual(latest.left.force_torque.freshness_value, 1234)
+        self.assertTrue(latest.left.force_torque.freshness_advanced)
+        self.assertEqual(latest.left.force_control.operating_mode, "guarded_admittance")
+        self.assertEqual(latest.left.force_control.state, "regulating")
+        self.assertEqual(latest.left.force_control.normal_stand, (0.0, 0.0, 1.0))
+        self.assertTrue(latest.left.force_control.contact_active)
+        self.assertAlmostEqual(latest.left.force_control.measured_force_n, 8.2)
+        self.assertAlmostEqual(latest.left.force_control.fast_normal_force_n, 9.2)
+        self.assertAlmostEqual(latest.left.force_control.fast_force_norm_n, 10.2)
+        self.assertAlmostEqual(latest.left.force_control.fast_torque_norm_nm, 1.2)
+        self.assertTrue(latest.left.force_control.contact_threshold_exceeded)
+        self.assertFalse(latest.left.force_control.hard_limit_exceeded)
+        self.assertTrue(latest.left.force_control.proposal_committed)
+        self.assertEqual(latest.left.force_control.motion_epoch, 42)
+        self.assertIsNone(latest.right.force_torque)
+        self.assertIsNone(latest.right.force_control)
+
+        status = _format_force_status(latest, stale=False)
+        self.assertIn("motion_epoch=42", status)
+        self.assertIn("source=rbpodo_eft", status)
+        self.assertIn("assurance=controller_frame_only", status)
+        self.assertIn("health_verified=False", status)
+        self.assertIn("safety_rated=False", status)
+        self.assertIn("contact=True", status)
+        self.assertIn("fast_normal=9.200N", status)
+        self.assertIn("force_norm=10.200N", status)
+        self.assertIn("torque_norm=1.200Nm", status)
+        self.assertIn("contact_threshold=True", status)
+        self.assertIn("hard_limit=False", status)
+        self.assertIn("controller=regulating", status)
+        self.assertIn("normal_force=8.200N", status)
+        self.assertIn("target=8.000N", status)
+        self.assertIn("unload=0.300mm", status)
+        self.assertIn("right telemetry unavailable", status)
+        # The FT Monitor card shows only the raw wrench axes now — the verbose
+        # force-controller status string is no longer surfaced there.
+        self.assertNotIn("FT status", _operator_monitor_dynamic_html(latest, stale=False))
+        self.assertNotIn("assurance=controller_frame_only", _operator_monitor_dynamic_html(latest, stale=False))
+        self.assertEqual(_format_force_status(latest, stale=True), "State stream stale")
+
+    def test_force_telemetry_is_backward_compatible_when_absent(self):
+        store, _, _ = self.make_safety(sample_state())
+        latest = store.latest()
+        self.assertIsNone(latest.motion_epoch)
+        self.assertIsNone(latest.left.force_torque)
+        self.assertIsNone(latest.left.force_control)
+        self.assertIn("motion_epoch=unavailable", _format_force_status(latest, stale=False))
+        self.assertNotIn("FT status", _operator_monitor_dynamic_html(latest, stale=False))
+        self.assertEqual(_format_force_status(None, stale=True), "Force: no state")
 
     def test_operator_monitors_use_fixed_html_overlay_when_available(self):
         server = RecordingServer(scene=RecordingScene())
@@ -4685,6 +4848,8 @@ class FloorConstraintGuiTest(unittest.TestCase):
                     ("chunk_overlay_history_count", 9),
                     ("tcp_gizmo_visible", False),
                     ("tcp_trail_limit", 1250),
+                    ("roi_min_m", [-1.2, -1.6, -0.2]),
+                    ("roi_max_m", [1.2, 0.6, 1.6]),
                 ):
                     gui_app._update_gui_setting(key, value)
 
@@ -4709,12 +4874,20 @@ class FloorConstraintGuiTest(unittest.TestCase):
                 self.assertEqual(handles["chunk_overlay_history_count"], 9)
                 self.assertFalse(handles["tcp_gizmo_visible"])
                 self.assertEqual(handles["scene"]["tcp_trail_limit"], 1250)
+                self.assertEqual(handles["force_status"].value, "Force: no state")
+                self.assertTrue(handles["force_status"].disabled)
 
                 checkboxes = {label: handle.value for label, _kwargs, handle in server.gui.checkboxes}
                 self.assertFalse(checkboxes["예측 chunk 궤적 표시"])
                 self.assertFalse(checkboxes["웨이포인트 자세(6DOF) 표시"])
                 self.assertNotIn("TCP 명령 궤적 표시", checkboxes)
                 self.assertFalse(checkboxes["TCP 기즈모 표시"])
+                self.assertFalse(
+                    any(
+                        "force control" in label.lower() or "force controller" in label.lower()
+                        for label in checkboxes
+                    )
+                )
 
                 sliders = {label: (kwargs, handle) for label, kwargs, handle in server.gui.sliders}
                 dot_kwargs, dot_handle = sliders["웨이포인트 dot 크기"]
@@ -4737,6 +4910,12 @@ class FloorConstraintGuiTest(unittest.TestCase):
                 self.assertEqual(trail_kwargs["max"], 3000)
                 self.assertEqual(trail_kwargs["step"], 50)
                 self.assertEqual(trail_handle.value, 1250)
+                y_min_kwargs, y_min_handle = sliders["Y min mm"]
+                z_max_kwargs, z_max_handle = sliders["Z max mm"]
+                self.assertEqual(y_min_kwargs["min"], -1600.0)
+                self.assertEqual(y_min_handle.value, -1600.0)
+                self.assertEqual(z_max_kwargs["max"], 1600.0)
+                self.assertEqual(z_max_handle.value, 1600.0)
             finally:
                 os.environ.pop("RB_GUI_SETTINGS_PATH", None)
 
@@ -5101,6 +5280,13 @@ class RoiBoxGuiTest(unittest.TestCase):
         self.assertIsNotNone(without)
         self.assertIsNone(without.roi_box)
 
+    def test_initial_slider_specs_reject_invalid_saved_bounds(self):
+        specs = _roi_initial_slider_specs({
+            "roi_min_m": [-1.2, 0.5, -0.2],
+            "roi_max_m": [1.2, -0.5, 1.6],
+        })
+        self.assertEqual(specs["y"], (-1500.0, 1500.0, -1000.0, 0.0))
+
     def test_format_roi_box_status(self):
         from rb_servo_gui.models import StateSnapshot
 
@@ -5209,6 +5395,55 @@ class RoiBoxGuiTest(unittest.TestCase):
         handles["roi_x_min"].value = -250.0
         _update_roi_panel(handles, state)
         self.assertAlmostEqual(handles["roi_x_min"].value, -250.0)
+
+    def test_update_roi_panel_safely_shrinks_stale_bootstrap_range(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        class StrictSlider:
+            def __init__(self, value):
+                self._min = -2500.0
+                self._max = 2500.0
+                self._value = value
+
+            @property
+            def min(self):
+                return self._min
+
+            @min.setter
+            def min(self, value):
+                assert value <= self._value <= self._max
+                self._min = value
+
+            @property
+            def max(self):
+                return self._max
+
+            @max.setter
+            def max(self, value):
+                assert self._min <= self._value <= value
+                self._max = value
+
+            @property
+            def value(self):
+                return self._value
+
+            @value.setter
+            def value(self, value):
+                assert self._min <= value <= self._max
+                self._value = value
+
+        handles = {
+            f"roi_{axis}_{suffix}": StrictSlider(-2000.0 if suffix == "min" else 2000.0)
+            for axis in ("x", "y", "z")
+            for suffix in ("min", "max")
+        }
+        state = StateSnapshot.parse(sample_state(roi_box=self._roi_block()))
+        _update_roi_panel(handles, state)
+
+        self.assertEqual(handles["roi_y_min"].min, -1500.0)
+        self.assertEqual(handles["roi_y_min"].max, 500.0)
+        self.assertEqual(handles["roi_y_min"].value, -1000.0)
+        self.assertEqual(handles["roi_z_max"].value, 1000.0)
 
     def test_persist_roi_bounds_rewrites_min_max_and_keeps_comments(self):
         import tempfile

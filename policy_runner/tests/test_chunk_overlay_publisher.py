@@ -77,6 +77,11 @@ class ChunkOverlayPublisherTest(unittest.TestCase):
                 left_delta=[[0.01, 0.02, 0.03, 0.1, 0.2, 0.3, 50.0]],
                 right_delta=None,
                 host_time_ns=123,
+                inference_timing={
+                    "seq": 9,
+                    "inference_latency_ms": 12.5,
+                    "stall_count": 2,
+                },
             )
         finally:
             publisher.close()
@@ -86,6 +91,10 @@ class ChunkOverlayPublisherTest(unittest.TestCase):
         self.assertEqual(packet["schema_version"], "robotics_lab.chunk_overlay.v2")
         self.assertEqual(packet["left_delta"], [[0.01, 0.02, 0.03, 0.1, 0.2, 0.3, 50.0]])
         self.assertNotIn("right_delta", packet)
+        self.assertEqual(
+            packet["inference_timing"],
+            {"seq": 9, "inference_latency_ms": 12.5, "stall_count": 2},
+        )
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ The mock / rbpodo controller-simulation (pgmode) stack remains the regression ba
 
 Real motion is now an active bring-up lane (see Maturity Boundary), not a
 deferred milestone. Execution authority is config-driven and server-owned:
-site-local config plus the mode-independent safety layers decide whether motion
+the tracked stack config plus the mode-independent safety layers decide whether motion
 is sent. Operator supervision and an E-stop remain physical operation procedure,
 and passing simulator acceptance is never permission to move hardware.
 
@@ -121,7 +121,7 @@ them only by deployment target, via config filename suffix and docs:
 - `…controller_sim_vm.yaml` — target is a Virtual ControlBox VM (no physical hardware on the wire)
 - `…controller_sim_onbox.yaml` — target is a physical controller box held in `pgmode`
 
-Site/VM configs live in gitignored `rb_servo_server/config/local/`.
+Launch settings live only in the tracked `stack_real.yaml` and `stack_sim.yaml`.
 
 ## Controller Topology
 
@@ -135,7 +135,7 @@ rb_servo_server
 
 The rbpodo controller `pgmode` simulation reuses this same per-arm rbpodo
 endpoint shape, but targets a Virtual ControlBox VM or a physical box held in
-`pgmode` (site/VM configs under gitignored `rb_servo_server/config/local/`),
+`pgmode` (configured by the tracked simulation stack),
 distinguished only by deployment target.
 
 ## State Publication Fanout
@@ -170,9 +170,8 @@ env vars**. The legacy execution gates — `RB_ALLOW_REAL_ROBOT`,
 `run_mode`/`operation_mode` are telemetry labels only and do not decide whether
 motion is allowed.
 
-Real-motion execution authority is owned by **site-local config
-(`rb_servo_server/config/local/`) + the mode-independent safety layers**. Real
-motion requires the site config to enable it explicitly
+Real-motion execution authority is owned by **the tracked stack config + the
+mode-independent safety layers**. Real motion requires `stack_real.yaml` to enable it explicitly
 (`cartesian_control.allow_in_real: true`). Operator-supervised acceptance remains
 the physical operating process. This config-driven path has already carried a
 supervised dual-arm physical Cartesian circle
@@ -317,12 +316,8 @@ rb_servo_server/config/stack_real.yaml
 rb_servo_server/config/stack_sim.yaml
 ```
 
-Do not add additional tracked runnable real robot configs. Site-owned real
-variants and acceptance-stage copies belong under:
-
-```text
-rb_servo_server/config/local/
-```
+Do not add parallel runnable real robot configs. Advance acceptance stages by
+changing one reviewed setting at a time in `stack_real.yaml`.
 
 The legacy `dual_real*.example.yaml` template surface is no longer tracked.
 
@@ -358,15 +353,23 @@ Deprecated simulator config names are archived under `docs/archive/configs/`
 for historical reference only. They are not runnable source-of-truth profiles
 and must not be used for new smoke or acceptance evidence.
 
-Force control is intentionally unavailable. The standalone F/T compensation
-pipeline and bounded admittance controller are hardware-free foundations only;
-config activation is rejected and `DualArmServoLoop` does not call them. See
-`rb_servo_server/docs/force_control.md` for the input and promotion contracts.
+Force control is integrated as a server-owned path: rbpodo EFT
+samples feed the compensated wrench pipeline, contact guard, and unilateral
+surface-normal admittance before IK. The active contact normal suppresses
+further policy penetration while preserving tangential/orientation commands and
+policy-requested retreat. Config/local activation, motion epochs, telemetry,
+and promotion constraints are defined in
+`rb_servo_server/docs/force_control.md`. The path is not safety-rated;
+`stack_real.yaml` currently enables telemetry-only monitor mode while all
+motion-affecting real-force opt-ins remain false.
 
 ```yaml
 force_control:
-  provider: null
-  enable: false
+  provider: project_native
+  enable: true
+  operating_mode: monitor
+  allow_in_real: false
+  supervised_experimental_real: false
 ```
 
 ## Motion Primitive Contract

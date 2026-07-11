@@ -121,6 +121,43 @@ bool testResidualTareAndLowPass() {
     return true;
 }
 
+bool testLowPassAdvancesOnlyOnNewAcquisition() {
+    rb_servo::FtWrenchPipeline pipeline(baseConfig());
+
+    rb_servo::FtRawSample first = sample(1, 1'000'000'000ULL);
+    const auto first_out = pipeline.process(first, rb_servo::Pose6D{}, first.host_time_ns);
+    RB_CHECK(first_out.healthy);
+    RB_CHECK(first_out.freshness_advanced);
+    RB_CHECK(near(first_out.control_external_wrench_tcp.fx, 0.0));
+
+    rb_servo::FtRawSample second = sample(2, 1'001'000'000ULL);
+    second.wrench_sensor.fx = 8.0;
+    const auto second_out = pipeline.process(second, rb_servo::Pose6D{}, second.host_time_ns);
+    RB_CHECK(second_out.healthy);
+    RB_CHECK(second_out.freshness_advanced);
+    RB_CHECK(near(second_out.control_external_wrench_tcp.fx, 2.0));
+
+    rb_servo::FtRawSample duplicate = second;
+    duplicate.host_time_ns = 1'002'000'000ULL;
+    const auto duplicate_out = pipeline.process(
+        duplicate,
+        rb_servo::Pose6D{},
+        duplicate.host_time_ns
+    );
+    RB_CHECK(duplicate_out.healthy);
+    RB_CHECK(!duplicate_out.freshness_advanced);
+    RB_CHECK(near(duplicate_out.fast_external_wrench_tcp.fx, 8.0));
+    RB_CHECK(near(duplicate_out.control_external_wrench_tcp.fx, 2.0));
+
+    rb_servo::FtRawSample third = sample(3, 1'003'000'000ULL);
+    third.wrench_sensor.fx = 8.0;
+    const auto third_out = pipeline.process(third, rb_servo::Pose6D{}, third.host_time_ns);
+    RB_CHECK(third_out.healthy);
+    RB_CHECK(third_out.freshness_advanced);
+    RB_CHECK(near(third_out.control_external_wrench_tcp.fx, 3.5));
+    return true;
+}
+
 bool testFreshnessUsesSourceSequenceNotValueChanges() {
     rb_servo::FtWrenchPipeline pipeline(baseConfig());
     rb_servo::FtRawSample first = sample(10, 1'000'000'000ULL);
@@ -286,6 +323,7 @@ int main() {
     if (!testBiasThenTransformWithMomentArm()) return 1;
     if (!testRotationAndPayloadCompensation()) return 1;
     if (!testResidualTareAndLowPass()) return 1;
+    if (!testLowPassAdvancesOnlyOnNewAcquisition()) return 1;
     if (!testFreshnessUsesSourceSequenceNotValueChanges()) return 1;
     if (!testSourceTimestampFreshnessAlternative()) return 1;
     if (!testHealthFailuresAreFailClosed()) return 1;

@@ -79,6 +79,7 @@ from .recording_control import (
     normalize_recording_status,
     parse_udp_endpoint,
 )
+from .realtime_health import RealtimeTimingHistory, realtime_health_html
 from .safety import OperatorSafety, normalize_observed_mode_backend
 from .scene import (
     _DEFAULT_LEFT_POSE,
@@ -126,9 +127,10 @@ from .status_panel import (
     _format_arm_cartesian_solve,
     _format_cartesian_solve_status,
     _format_circle_overlay_status,
-    _eft_monitor_values,
+    _eft_monitor_axis_values,
     _format_scene_asset_status,
     _format_fk_status,
+    _format_force_status,
     _format_init_motion_status,
     _format_joint_monitor_value,
     _format_joints,
@@ -1424,6 +1426,46 @@ def _gui_setting_float(settings: Mapping[str, Any], key: str, default: float) ->
         return float(default)
 
 
+def _roi_initial_slider_specs(
+    settings: Mapping[str, Any],
+) -> dict[str, tuple[float, float, float, float]]:
+    """Return bootstrap slider ranges and values in millimetres.
+
+    The authoritative range arrives shortly afterwards in the server state
+    ``roi_box.runtime_min_m/runtime_max_m`` block.  Until that first state is
+    received, the slider still has to be constructible: viser rejects an
+    initial value outside its declared range.  Include valid persisted values
+    in the temporary range so a wider server envelope from a previous session
+    cannot terminate the GUI during startup.
+    """
+    defaults = {
+        "x": (-500.0, 500.0),
+        "y": (-1000.0, 0.0),
+        "z": (0.0, 1000.0),
+    }
+    saved_lo = _roi_bounds_floats(settings.get("roi_min_m"))
+    saved_hi = _roi_bounds_floats(settings.get("roi_max_m"))
+    if saved_lo is not None and saved_hi is not None and all(
+        saved_lo[k] <= saved_hi[k] for k in range(3)
+    ):
+        values = {
+            axis: (saved_lo[k] * 1000.0, saved_hi[k] * 1000.0)
+            for k, axis in enumerate(("x", "y", "z"))
+        }
+    else:
+        values = defaults
+
+    return {
+        axis: (
+            min(-1500.0, lo_mm),
+            max(1500.0, hi_mm),
+            lo_mm,
+            hi_mm,
+        )
+        for axis, (lo_mm, hi_mm) in values.items()
+    }
+
+
 def _gui_setting_int(settings: Mapping[str, Any], key: str, default: int) -> int:
     try:
         value = int(settings.get(key, default))
@@ -1815,6 +1857,10 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
      static header cards) stable across dynamic body refreshes. */
   .rb-monitor-joint-card {{ left: var(--rb-monitor-gap); }}
   .rb-monitor-stand-card {{ left: var(--rb-monitor-gap); }}
+  /* FT Monitor lives in its own right column beside the Joint/Pose left column,
+     so it spans the full viewport height (base body-card rules) instead of
+     sharing the left-column split. */
+  .rb-monitor-ft-card {{ left: calc(var(--rb-monitor-gap) * 2 + var(--rb-monitor-width)); }}
   .rb-monitor-joint-card.rb-monitor-body-card {{ max-height: calc(var(--rb-monitor-split) - 5.95em); }}
   .rb-monitor-stand-card.rb-monitor-header-card {{ top: var(--rb-monitor-split); }}
   .rb-monitor-stand-card.rb-monitor-body-card {{ top: calc(var(--rb-monitor-split) + 4.95em); max-height: calc(100vh - var(--rb-monitor-split) - 5.95em); }}
@@ -1900,11 +1946,14 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
   </div>
 </div>
 <div class="rb-monitor-card rb-monitor-header-card rb-monitor-stand-card">
-  <div class="rb-monitor-title">Pose Monitor · FT</div>
+  <div class="rb-monitor-title">Pose Monitor</div>
   <div class="rb-monitor-units">
     <label><input id="rb-stand-unit-deg" name="rb-stand-unit" type="radio" checked> deg</label>
     <label><input id="rb-stand-unit-rad" name="rb-stand-unit" type="radio"> rad</label>
   </div>
+</div>
+<div class="rb-monitor-card rb-monitor-header-card rb-monitor-ft-card">
+  <div class="rb-monitor-title">FT Monitor</div>
 </div>
 """
 
@@ -2024,11 +2073,39 @@ def _render_stand_world_monitor_rows(
                     _format_stand_world_pose_value(pose, field, valid=valid, unit="rad"),
                 )
             parts.append(_operator_monitor_row(field, value_html))
-        # External F/T sensor (rbpodo eft_*, sensor frame): live contact wrench.
-        ft_force, ft_torque, ft_mag = _eft_monitor_values(arm_state, stale=stale)
-        parts.append(_operator_monitor_row("FT F [N]", escape(ft_force)))
-        parts.append(_operator_monitor_row("FT T [Nm]", escape(ft_torque)))
-        parts.append(_operator_monitor_row("FT |F| [N]", escape(ft_mag)))
+        parts.append("</div>")
+    return "".join(parts)
+
+
+def _render_ft_monitor_rows(
+    latest: StateSnapshot | None, *, stale: bool, uptime: str | None = None
+) -> str:
+    """External F/T sensor (rbpodo eft_*, sensor frame): live contact wrench, per
+    arm. Split out of the Pose Monitor into its own right-column FT Monitor card."""
+    if latest is None:
+        status = "No state stream"
+        arms = (("left", None), ("right", None))
+    else:
+        status = f"{'stale' if stale else 'live'}, tick={latest.tick}"
+        if uptime:
+            status += f", up={uptime}"
+        arms = (("left", latest.left), ("right", latest.right))
+    parts = [f'<div class="rb-monitor-status">{escape(status)}</div>']
+    for arm, arm_state in arms:
+        parts.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">{escape(arm)}</div>')
+        # One axis per row (single short number) so the card fits its column
+        # width without a horizontal scrollbar.
+        fx, fy, fz, mag, tx, ty, tz = _eft_monitor_axis_values(arm_state, stale=stale)
+        for label, value in (
+            ("Fx [N]", fx),
+            ("Fy [N]", fy),
+            ("Fz [N]", fz),
+            ("|F| [N]", mag),
+            ("Tx [Nm]", tx),
+            ("Ty [Nm]", ty),
+            ("Tz [Nm]", tz),
+        ):
+            parts.append(_operator_monitor_row(label, escape(value)))
         parts.append("</div>")
     return "".join(parts)
 
@@ -2042,6 +2119,9 @@ def _operator_monitor_dynamic_html(
         + "</div>"
         + '<div class="rb-monitor-card rb-monitor-body-card rb-monitor-stand-card">'
         + _render_stand_world_monitor_rows(latest, stale=stale, uptime=uptime)
+        + "</div>"
+        + '<div class="rb-monitor-card rb-monitor-body-card rb-monitor-ft-card">'
+        + _render_ft_monitor_rows(latest, stale=stale, uptime=uptime)
         + "</div>"
     )
 
@@ -2163,6 +2243,46 @@ def _status_summary_html(
         _status_chip("결함", "없음" if not fault_active else "FAULT", "ok" if not fault_active else "bad"),
     ]
     return '<div style="display:flex;flex-wrap:wrap;padding:0.25em 0 0.1em;">' + "".join(chips) + "</div>"
+
+
+def _update_realtime_health(
+    handles: dict[str, Any],
+    latest: StateSnapshot | None,
+    chunk_overlay_store: ChunkOverlayStore | None,
+    *,
+    stale: bool,
+) -> None:
+    handle = handles.get("realtime_health")
+    chunk = chunk_overlay_store.latest() if chunk_overlay_store is not None else None
+    chunk_current = (
+        chunk is not None
+        and chunk_overlay_store is not None
+        and not chunk_overlay_store.is_stale()
+    )
+    html = realtime_health_html(
+        latest.raw if latest is not None else None,
+        chunk.raw if chunk_current else None,
+        stale=stale,
+    )
+    if handle is not None:
+        try:
+            handle.content = html
+        except Exception:
+            try:
+                handle.value = "Realtime timing telemetry unavailable"
+            except Exception:
+                pass
+    history = handles.get("realtime_history")
+    if isinstance(history, RealtimeTimingHistory) and history.add(
+        latest.raw if latest is not None and not stale else None,
+        chunk.raw if chunk_current else None,
+    ):
+        plot = handles.get("realtime_plot")
+        if plot is not None:
+            try:
+                plot.figure = history.figure()
+            except Exception:
+                pass
 
 
 def _tab_theme_html(dark: bool = True) -> str:
@@ -2316,6 +2436,20 @@ def build_gui(
                     fault_active=False,
                 )
             )
+            handles["realtime_health"] = _add_status_html(
+                realtime_health_html(None, None, stale=True)
+            )
+        handles["realtime_history"] = RealtimeTimingHistory()
+        _add_plotly = getattr(server.gui, "add_plotly", None)
+        if callable(_add_plotly):
+            try:
+                with server.gui.add_folder("Realtime timing · 최근 30초", expand_by_default=True):
+                    handles["realtime_plot"] = _add_plotly(
+                        handles["realtime_history"].figure(),
+                        aspect=1.35,
+                    )
+            except Exception:
+                pass
         handles["connection"] = server.gui.add_text("Connection", initial_value="disconnected", disabled=True)
         handles["mode"] = server.gui.add_text("Observed mode/backend", initial_value=f"{safety.observed_server_mode}/{safety.observed_backend}", disabled=True)
         handles["readiness"] = server.gui.add_text("Readiness", initial_value="No-Go: no state", disabled=True)
@@ -2352,6 +2486,11 @@ def build_gui(
             "User Safety floor", initial_value="user floor: no state", disabled=True
         )
         handles["fk_status"] = server.gui.add_text("FK/TCP", initial_value="FK: no state", disabled=True)
+        handles["force_status"] = server.gui.add_text(
+            "F/T + force controller",
+            initial_value="Force: no state",
+            disabled=True,
+        )
         handles["tcp_tracking"] = server.gui.add_text("TCP tracking", initial_value="TCP tracking: no state", disabled=True)
         handles["pgmode_status"] = server.gui.add_text("pgmode simulation", initial_value="pgmode_sim: no state", disabled=True)
         handles["circle_overlay"] = server.gui.add_text(
@@ -2560,30 +2699,6 @@ def build_gui(
                 def _(_: Any, mode: str = mode) -> None:
                     ok, message = safety.send_lifecycle(mode)
                     handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
-
-            # Explicit lease ownership. One-shot GUI commands bracket the lease per
-            # click; holding the lease gives the operator continuous command
-            # authority until release. The server
-            # rejects an Acquire while another source (e.g. policy_runner teleop)
-            # owns it — the lease-owner line below makes that visible.
-            # Collapsed by default, like 직접교시 below: holding the lease takes
-            # control authority away from other command sources, so it stays
-            # folded to avoid accidental toggles.
-            with server.gui.add_folder("제어권 (Lease)", expand_by_default=False):
-                handles["lease_owner_status"] = server.gui.add_text(
-                    "Lease owner", initial_value="unknown", disabled=True
-                )
-                take_control = server.gui.add_checkbox("Take control (hold lease)", initial_value=False)
-                handles["take_control_toggle"] = take_control
-
-                @take_control.on_update
-                def _(_: Any) -> None:
-                    if take_control.value:
-                        safety.command_client.acquire_lease()
-                        handles["last_action"].value = "OK: lease held (Take control ON)"
-                    else:
-                        safety.command_client.release_lease()
-                        handles["last_action"].value = "OK: lease released (Take control OFF)"
 
             # Per-arm direct teaching (free-drive). Releases servo_j authority on
             # the chosen arm's controller so it can be hand-guided, then re-acquires
@@ -3028,33 +3143,20 @@ def build_gui(
                 # plus viser's compact integrated number box. _update_roi_panel
                 # syncs their range to the server's runtime envelope and brings them
                 # up at the applied bounds on the first state.
-                _roi_axis_defaults_mm = {
-                    "x": (-500.0, 500.0),
-                    "y": (-1000.0, 0.0),
-                    "z": (0.0, 1000.0),
-                }
                 # 저장된 ROI(settings.json roi_min_m/roi_max_m)가 있으면 그 값으로 시작 →
                 # 재시작 후에도 perception/viz 클립 영역 유지(검출 워커와 같은 박스).
-                _roi_saved = _load_gui_settings()
-                _roi_lo_s = _roi_saved.get("roi_min_m")
-                _roi_hi_s = _roi_saved.get("roi_max_m")
-                if (isinstance(_roi_lo_s, (list, tuple)) and isinstance(_roi_hi_s, (list, tuple))
-                        and len(_roi_lo_s) == 3 and len(_roi_hi_s) == 3):
-                    try:
-                        _roi_axis_defaults_mm = {
-                            _a: (float(_roi_lo_s[_i]) * 1000.0, float(_roi_hi_s[_i]) * 1000.0)
-                            for _i, _a in enumerate(("x", "y", "z"))
-                        }
-                    except (TypeError, ValueError):
-                        pass
+                # 이 범위는 첫 서버 상태 전까지만 쓰는 bootstrap 값이다. 이후
+                # _update_roi_panel이 서버가 publish한 runtime envelope/applied bounds로
+                # 범위와 값을 동기화한다.
+                _roi_slider_specs = _roi_initial_slider_specs(_load_gui_settings())
                 for _axis in ("x", "y", "z"):
-                    _lo_default, _hi_default = _roi_axis_defaults_mm[_axis]
+                    _slider_min, _slider_max, _lo_default, _hi_default = _roi_slider_specs[_axis]
                     handles[f"roi_{_axis}_min"] = server.gui.add_slider(
-                        f"{_axis.upper()} min mm", min=-1500.0, max=1500.0, step=5.0,
+                        f"{_axis.upper()} min mm", min=_slider_min, max=_slider_max, step=5.0,
                         initial_value=_lo_default,
                     )
                     handles[f"roi_{_axis}_max"] = server.gui.add_slider(
-                        f"{_axis.upper()} max mm", min=-1500.0, max=1500.0, step=5.0,
+                        f"{_axis.upper()} max mm", min=_slider_min, max=_slider_max, step=5.0,
                         initial_value=_hi_default,
                     )
                 roi_send = server.gui.add_button("Send ROI box")
@@ -3648,6 +3750,24 @@ def build_gui(
             initial_value=f"policy_runner {record_host}:{record_port}",
             disabled=True,
         )
+        # Master On/Off gate for the whole episode-recording feature. Always OFF
+        # when `make run` brings the GUI up (initial_value=False, not persisted):
+        # only when this is ON does a 수집 시작 / 'b' hotkey / foot-pedal press
+        # actually start (and save) an episode. Stopping an in-progress episode is
+        # never gated. See _toggle_episode_recording / _update_recording_panel.
+        if hasattr(server.gui, "add_checkbox"):
+            handles["recording_enabled"] = server.gui.add_checkbox(
+                "녹화 활성화 (Enable)", initial_value=False
+            )
+
+            @handles["recording_enabled"].on_update
+            def _(_: Any) -> None:
+                _update_recording_panel(
+                    handles,
+                    handles.get("_latest_state"),
+                    stale=bool(handles.get("_state_stale", True)),
+                )
+
         start_button = server.gui.add_button("수집 시작", color="green")
         stop_button = server.gui.add_button("수집 종료", color="red")
         toggle_button = server.gui.add_button("record-toggle-hotkey-b")
@@ -3886,6 +4006,23 @@ def _apply_recording_result(
     return ok
 
 
+def _recording_enabled(handles: dict[str, Any]) -> bool:
+    """Master On/Off gate for episode recording.
+
+    Backed by the "녹화 활성화" checkbox in the 에피소드 tab, which is always OFF
+    when the GUI starts (default at every `make run`). When the checkbox handle is
+    absent (headless/older test fixtures that don't wire it) recording is treated
+    as enabled so legacy behavior and existing tests are preserved.
+    """
+    toggle = handles.get("recording_enabled")
+    if toggle is None:
+        return True
+    try:
+        return bool(toggle.value)
+    except Exception:
+        return True
+
+
 def _toggle_episode_recording(
     handles: dict[str, Any],
     *,
@@ -3911,6 +4048,13 @@ def _toggle_episode_recording(
     if command == "stop" and not active:
         if "recording_command_status" in handles:
             handles["recording_command_status"].value = "already idle"
+        return False
+    # Master gate: a start (수집 시작 / 'b' / foot-pedal from idle) only fires when
+    # the 녹화 활성화 toggle is ON. Stopping an in-progress episode is never gated,
+    # so 'b' can always end a recording even after the toggle is switched off.
+    if command == "start" and not _recording_enabled(handles):
+        if "recording_command_status" in handles:
+            handles["recording_command_status"].value = "BLOCKED: 녹화 비활성화 (녹화 활성화 토글 OFF)"
         return False
     client = handles.get("recording_cmd_client")
     send = getattr(client, "send", None)
@@ -3959,8 +4103,12 @@ def _update_recording_panel(handles: dict[str, Any], latest: StateSnapshot | Non
         handles["recording_episode"].value = episode
     if "recording_frames" in handles:
         handles["recording_frames"].value = f"{frames} @ {rate:.1f} Hz"
+    enabled = _recording_enabled(handles)
     if "recording_start_button" in handles:
-        _set_disabled(handles["recording_start_button"], recording)
+        # Start is available only while the master toggle is ON and nothing is
+        # already recording. Stop stays live whenever an episode is in progress
+        # (even after the toggle is switched off) so it can always be ended.
+        _set_disabled(handles["recording_start_button"], recording or not enabled)
     if "recording_stop_button" in handles:
         _set_disabled(handles["recording_stop_button"], not recording)
 
@@ -4171,6 +4319,25 @@ def _roi_bounds_floats(value: Any) -> list[float] | None:
     return out
 
 
+def _set_slider_server_range(handle: Any, minimum: float, maximum: float) -> None:
+    """Apply a server-owned slider range without transiently invalid state.
+
+    Viser validates the current value whenever min/max changes.  Expand first,
+    clamp the value into the new server range, and only then shrink to the exact
+    envelope.  This also handles stale settings from a wider previous profile.
+    """
+    if not (math.isfinite(minimum) and math.isfinite(maximum) and maximum > minimum):
+        return
+    current = float(handle.value)
+    old_min = float(handle.min)
+    old_max = float(handle.max)
+    handle.min = min(old_min, minimum, current)
+    handle.max = max(old_max, maximum, current)
+    handle.value = max(minimum, min(maximum, current))
+    handle.min = minimum
+    handle.max = maximum
+
+
 def _update_roi_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> None:
     roi = latest.roi_box if latest is not None else None
     # The "ROI 영역 표시" checkbox (default ON) controls scene visibility,
@@ -4192,8 +4359,11 @@ def _update_roi_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> 
             if runtime_max[k] > runtime_min[k]:
                 for suffix in ("min", "max"):
                     try:
-                        handles[f"roi_{a}_{suffix}"].min = runtime_min[k] * 1000.0
-                        handles[f"roi_{a}_{suffix}"].max = runtime_max[k] * 1000.0
+                        _set_slider_server_range(
+                            handles[f"roi_{a}_{suffix}"],
+                            runtime_min[k] * 1000.0,
+                            runtime_max[k] * 1000.0,
+                        )
                     except Exception:
                         pass
     # First-state init: bring the inputs up at the server-applied bounds (once).
@@ -4732,6 +4902,12 @@ def update_gui(
     _update_recording_panel(handles, latest, stale=stale)
     _update_arm_init_panel(handles, latest, stale=stale)
     if latest is None:
+        _update_realtime_health(
+            handles,
+            None,
+            chunk_overlay_store,
+            stale=True,
+        )
         _update_operator_monitors(handles, None, stale=True)
         if "status_summary" in handles:
             handles["status_summary"].content = _status_summary_html(
@@ -4756,6 +4932,8 @@ def update_gui(
         update_user_floor_plane(handles.get("scene", {}), None)
         if "fk_status" in handles:
             handles["fk_status"].value = _format_fk_status(None, stale=True)
+        if "force_status" in handles:
+            handles["force_status"].value = _format_force_status(None, stale=True)
         if "tcp_tracking" in handles:
             handles["tcp_tracking"].value = _format_tcp_tracking_status(
                 None,
@@ -4780,6 +4958,12 @@ def update_gui(
         return
 
     handles["connection"].value = "stale" if stale else "live"
+    _update_realtime_health(
+        handles,
+        latest,
+        chunk_overlay_store,
+        stale=stale,
+    )
     mode_parts = [
         f"desired={safety.desired_mode}",
         f"observed={safety.observed_server_mode}",
@@ -4897,6 +5081,8 @@ def update_gui(
                 ) + msg
     if "fk_status" in handles:
         handles["fk_status"].value = _format_fk_status(latest, stale=stale)
+    if "force_status" in handles:
+        handles["force_status"].value = _format_force_status(latest, stale=stale)
     if "tcp_tracking" in handles:
         handles["tcp_tracking"].value = _format_tcp_tracking_status(
             latest,

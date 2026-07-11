@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -21,10 +22,33 @@
 #include "rb_servo/core/clock.hpp"
 #include "rb_servo/core/realtime.hpp"
 #include "rb_servo/kinematics/pinocchio_kinematics.hpp"
+#include "rb_servo/math/se3.hpp"
 #include "rb_servo/network/scope_publisher.hpp"
 
 namespace rb_servo {
 namespace {
+
+// Spin-hint for the hybrid sleep-then-spin tail: keeps the core in C0 and yields
+// the pipeline without descheduling. No-op on unknown ISAs (spin still works,
+// just without the relax hint).
+inline void cpuRelax() {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    asm volatile("yield" ::: "memory");
+#endif
+}
+
+// kernel.sched_rt_runtime_us: -1 means RT throttling is OFF (safe for a busy
+// spin). Any other value (or an unreadable file) is treated as "throttling on"
+// so the spin guard fails closed and falls back to plain sleep_until.
+long long readSchedRtRuntimeUs() {
+    std::ifstream f("/proc/sys/kernel/sched_rt_runtime_us");
+    long long value = 0;
+    if (f >> value) return value;
+    return 0;  // unreadable -> conservative: not -1, so spin stays disabled
+}
+
 bool isCartesianMode(ControlMode mode) {
     return mode == ControlMode::TcpPoseTarget ||
            mode == ControlMode::TcpLinearMove;
@@ -68,6 +92,33 @@ bool finiteJointArray(const JointArray& joints) {
     return std::all_of(joints.begin(), joints.end(), [](double value) {
         return std::isfinite(value);
     });
+}
+
+NormalForceControllerConfig makeNormalForceControllerConfig(
+    const DualArmConfig& config,
+    ArmId arm
+) {
+    const ForceControlArmConfig& arm_config =
+        arm == ArmId::Left ? config.force_control.left : config.force_control.right;
+    const NormalAdmittanceConfig& normal = config.force_control.normal_admittance;
+    NormalForceControllerConfig out;
+    out.enable = config.force_control.enable && arm_config.enable &&
+        config.force_control.operating_mode == "guarded_admittance";
+    out.virtual_mass_kg = normal.virtual_mass_kg;
+    out.damping_n_s_per_m = normal.damping_n_s_m;
+    out.stiffness_n_per_m = normal.stiffness_n_m;
+    out.force_deadband_n = arm_config.force_deadband_n;
+    out.max_dt_sec = std::max(
+        1.0 / static_cast<double>(std::max(1, config.servo.rate_hz)) * 4.0,
+        0.02
+    );
+    out.max_unload_offset_m = normal.max_unload_offset_m;
+    out.max_unload_velocity_m_s = normal.max_normal_velocity_m_s;
+    out.max_unload_acceleration_m_s2 = normal.max_normal_acceleration_m_s2;
+    out.max_unload_jerk_m_s3 = normal.max_normal_jerk_m_s3;
+    out.max_unload_step_m = normal.max_normal_step_m;
+    out.max_observed_energy_j = normal.max_energy_j;
+    return out;
 }
 
 bool isSyntheticHoldCommand(const DualArmCommand& command) {
@@ -1484,6 +1535,617 @@ ScopeSample scopeSampleFromServoSample(const ServoSample& sample) {
 }
 }  // namespace
 
+uint8_t RealtimeTimingAccumulator::Histogram::binFor(uint64_t value_ns) {
+    if (value_ns <= 1) return 0;
+    const unsigned exponent = 63U - static_cast<unsigned>(__builtin_clzll(value_ns));
+    if (exponent >= 31U) return static_cast<uint8_t>(kHistogramBins - 1);
+    const uint64_t base = uint64_t{1} << exponent;
+    const uint64_t quarter = std::max<uint64_t>(1, base >> 2U);
+    const unsigned sub = static_cast<unsigned>(
+        std::min<uint64_t>(3, (value_ns - base) / quarter));
+    return static_cast<uint8_t>(exponent * 4U + sub);
+}
+
+uint64_t RealtimeTimingAccumulator::Histogram::upperBoundNs(uint8_t bin) {
+    const unsigned exponent = static_cast<unsigned>(bin) / 4U;
+    const unsigned sub = static_cast<unsigned>(bin) % 4U;
+    const uint64_t base = uint64_t{1} << exponent;
+    const uint64_t quarter = std::max<uint64_t>(1, base >> 2U);
+    return base + static_cast<uint64_t>(sub + 1U) * quarter - 1U;
+}
+
+void RealtimeTimingAccumulator::Histogram::add(uint8_t bin) {
+    ++count[bin];
+    ++total;
+}
+
+void RealtimeTimingAccumulator::Histogram::remove(uint8_t bin) {
+    if (count[bin] > 0) --count[bin];
+    if (total > 0) --total;
+}
+
+uint64_t RealtimeTimingAccumulator::Histogram::percentileUpperNs(double quantile) const {
+    if (total == 0) return 0;
+    const uint32_t rank = static_cast<uint32_t>(
+        std::ceil(std::clamp(quantile, 0.0, 1.0) * static_cast<double>(total)));
+    uint32_t cumulative = 0;
+    for (std::size_t i = 0; i < count.size(); ++i) {
+        cumulative += count[i];
+        if (cumulative >= std::max<uint32_t>(1, rank)) {
+            return upperBoundNs(static_cast<uint8_t>(i));
+        }
+    }
+    return maxUpperNs();
+}
+
+uint64_t RealtimeTimingAccumulator::Histogram::maxUpperNs() const {
+    for (std::size_t i = count.size(); i > 0; --i) {
+        if (count[i - 1] > 0) return upperBoundNs(static_cast<uint8_t>(i - 1));
+    }
+    return 0;
+}
+
+uint64_t RealtimeTimingAccumulator::absoluteDifference(uint64_t lhs, uint64_t rhs) {
+    return lhs >= rhs ? lhs - rhs : rhs - lhs;
+}
+
+uint64_t RealtimeTimingAccumulator::receiptPhaseNs(
+    uint64_t host_time_ns,
+    uint64_t scheduled_wake_ns,
+    uint64_t nominal_period_ns
+) {
+    if (host_time_ns == 0 || scheduled_wake_ns == 0 || nominal_period_ns == 0) return 0;
+    if (host_time_ns >= scheduled_wake_ns) {
+        return (host_time_ns - scheduled_wake_ns) % nominal_period_ns;
+    }
+    const uint64_t before_ns = (scheduled_wake_ns - host_time_ns) % nominal_period_ns;
+    return before_ns == 0 ? 0 : nominal_period_ns - before_ns;
+}
+
+RealtimeTimingAccumulator::ArmEntry RealtimeTimingAccumulator::makeArmEntry(
+    const RealtimeFeedbackTimingTick& feedback,
+    uint64_t loop_end_ns,
+    uint64_t scheduled_wake_ns,
+    uint64_t nominal_period_ns,
+    ArmAggregate* aggregate
+) {
+    ArmEntry entry;
+    entry.observed = feedback.host_time_ns > 0;
+    if (!entry.observed) return entry;
+
+    const bool regressed = aggregate->previous_host_time_ns > 0 &&
+        feedback.host_time_ns < aggregate->previous_host_time_ns;
+    entry.frame = !feedback.explicit_cached_hold && !regressed &&
+        (aggregate->previous_host_time_ns == 0 ||
+         feedback.host_time_ns > aggregate->previous_host_time_ns);
+    entry.held = feedback.explicit_cached_hold ||
+        (aggregate->previous_host_time_ns > 0 &&
+         feedback.host_time_ns == aggregate->previous_host_time_ns);
+
+    if (entry.frame) {
+        if (aggregate->previous_host_time_ns > 0) {
+            aggregate->last_period_ns = feedback.host_time_ns - aggregate->previous_host_time_ns;
+            aggregate->last_jitter_ns = absoluteDifference(
+                aggregate->last_period_ns, nominal_period_ns);
+            entry.period_valid = true;
+            entry.period_bin = Histogram::binFor(aggregate->last_period_ns);
+            entry.jitter_bin = Histogram::binFor(aggregate->last_jitter_ns);
+        }
+        aggregate->previous_host_time_ns = feedback.host_time_ns;
+    }
+
+    aggregate->last_age_ns = loop_end_ns >= feedback.host_time_ns
+        ? loop_end_ns - feedback.host_time_ns : 0;
+    aggregate->last_phase_ns = receiptPhaseNs(
+        feedback.host_time_ns, scheduled_wake_ns, nominal_period_ns);
+    entry.age_bin = Histogram::binFor(aggregate->last_age_ns);
+    entry.phase_bin = Histogram::binFor(aggregate->last_phase_ns);
+
+    if (entry.frame && feedback.robot_time_ns > 0) {
+        aggregate->robot_time_available = true;
+        if (aggregate->previous_robot_time_ns > 0 &&
+            feedback.robot_time_ns < aggregate->previous_robot_time_ns) {
+            aggregate->robot_time_monotonic = false;
+        }
+        entry.fresh = aggregate->previous_robot_time_ns == 0 ||
+            feedback.robot_time_ns > aggregate->previous_robot_time_ns;
+        aggregate->previous_robot_time_ns = feedback.robot_time_ns;
+    }
+    return entry;
+}
+
+void RealtimeTimingAccumulator::addArmEntry(
+    const ArmEntry& entry,
+    ArmAggregate* aggregate
+) {
+    if (!entry.observed) return;
+    aggregate->age.add(entry.age_bin);
+    aggregate->phase.add(entry.phase_bin);
+    if (entry.frame) ++aggregate->frame_count;
+    if (entry.fresh) ++aggregate->fresh_count;
+    if (entry.held) ++aggregate->held_count;
+    if (entry.period_valid) {
+        aggregate->period.add(entry.period_bin);
+        aggregate->jitter.add(entry.jitter_bin);
+    }
+}
+
+void RealtimeTimingAccumulator::removeArmEntry(
+    const ArmEntry& entry,
+    ArmAggregate* aggregate
+) {
+    if (!entry.observed) return;
+    aggregate->age.remove(entry.age_bin);
+    aggregate->phase.remove(entry.phase_bin);
+    if (entry.frame && aggregate->frame_count > 0) --aggregate->frame_count;
+    if (entry.fresh && aggregate->fresh_count > 0) --aggregate->fresh_count;
+    if (entry.held && aggregate->held_count > 0) --aggregate->held_count;
+    if (entry.period_valid) {
+        aggregate->period.remove(entry.period_bin);
+        aggregate->jitter.remove(entry.jitter_bin);
+    }
+}
+
+void RealtimeTimingAccumulator::removeOldest() {
+    if (size_ == 0) return;
+    const Entry& entry = entries_[head_];
+    period_.remove(entry.period_bin);
+    jitter_.remove(entry.jitter_bin);
+    wake_.remove(entry.wake_bin);
+    if (entry.send_cycle) {
+        pre_send_.remove(entry.pre_send_bin);
+        send_duration_.remove(entry.send_duration_bin);
+        if (send_cycle_count_ > 0) --send_cycle_count_;
+    }
+    if (entry.deadline_miss && deadline_miss_count_ > 0) --deadline_miss_count_;
+    if (entry.catch_up && catch_up_count_ > 0) --catch_up_count_;
+    removeArmEntry(entry.left, &left_);
+    removeArmEntry(entry.right, &right_);
+    head_ = (head_ + 1) % entries_.size();
+    --size_;
+}
+
+void RealtimeTimingAccumulator::reset() {
+    *this = RealtimeTimingAccumulator{};
+}
+
+void RealtimeTimingAccumulator::add(const RealtimeTimingTick& tick) {
+    if (tick.loop_start_ns == 0 || tick.nominal_period_ns == 0) return;
+    nominal_period_ns_ = tick.nominal_period_ns;
+    while (size_ > 0) {
+        const uint64_t oldest_ns = entries_[head_].loop_start_ns;
+        if (tick.loop_start_ns >= oldest_ns &&
+            tick.loop_start_ns - oldest_ns >= kWindowNs) {
+            removeOldest();
+        } else {
+            break;
+        }
+    }
+    if (size_ == entries_.size()) removeOldest();
+
+    Entry entry;
+    entry.loop_start_ns = tick.loop_start_ns;
+    last_period_ns_ = previous_loop_start_ns_ > 0 &&
+        tick.loop_start_ns >= previous_loop_start_ns_
+        ? tick.loop_start_ns - previous_loop_start_ns_
+        : tick.nominal_period_ns;
+    previous_loop_start_ns_ = tick.loop_start_ns;
+    last_jitter_ns_ = absoluteDifference(last_period_ns_, tick.nominal_period_ns);
+    last_wake_ns_ = tick.scheduled_wake_ns > 0 &&
+        tick.loop_start_ns >= tick.scheduled_wake_ns
+        ? tick.loop_start_ns - tick.scheduled_wake_ns : 0;
+    last_pre_send_ns_ = tick.pre_send_ns;
+    last_send_duration_ns_ = tick.send_duration_ns;
+    entry.period_bin = Histogram::binFor(last_period_ns_);
+    entry.jitter_bin = Histogram::binFor(last_jitter_ns_);
+    entry.wake_bin = Histogram::binFor(last_wake_ns_);
+    entry.pre_send_bin = Histogram::binFor(last_pre_send_ns_);
+    entry.send_duration_bin = Histogram::binFor(last_send_duration_ns_);
+    entry.deadline_miss = tick.scheduled_wake_ns > 0 &&
+        tick.loop_end_ns > tick.scheduled_wake_ns + tick.nominal_period_ns;
+    entry.catch_up = tick.scheduled_wake_ns > 0 &&
+        tick.previous_sleep_enter_ns >= tick.scheduled_wake_ns;
+    entry.send_cycle = tick.send_cycle;
+    entry.left = makeArmEntry(
+        tick.left_feedback, tick.loop_end_ns, tick.scheduled_wake_ns,
+        tick.nominal_period_ns, &left_);
+    entry.right = makeArmEntry(
+        tick.right_feedback, tick.loop_end_ns, tick.scheduled_wake_ns,
+        tick.nominal_period_ns, &right_);
+
+    const std::size_t write_index = (head_ + size_) % entries_.size();
+    entries_[write_index] = entry;
+    ++size_;
+    period_.add(entry.period_bin);
+    jitter_.add(entry.jitter_bin);
+    wake_.add(entry.wake_bin);
+    if (entry.send_cycle) {
+        ++send_cycle_count_;
+        pre_send_.add(entry.pre_send_bin);
+        send_duration_.add(entry.send_duration_bin);
+    }
+    if (entry.deadline_miss) ++deadline_miss_count_;
+    if (entry.catch_up) ++catch_up_count_;
+    addArmEntry(entry.left, &left_);
+    addArmEntry(entry.right, &right_);
+}
+
+FeedbackRealtimeTimingTelemetry RealtimeTimingAccumulator::armSnapshot(
+    const ArmAggregate& aggregate,
+    double window_sec
+) {
+    FeedbackRealtimeTimingTelemetry out;
+    if (window_sec > 0.0) {
+        out.frame_rate_hz = static_cast<double>(aggregate.frame_count) / window_sec;
+        out.fresh_rate_hz = static_cast<double>(aggregate.fresh_count) / window_sec;
+    }
+    out.held_count = aggregate.held_count;
+    const auto range_ms = [](uint64_t last_ns, const Histogram& histogram) {
+        RealtimeTimingRange range;
+        range.last = static_cast<double>(last_ns) / 1'000'000.0;
+        range.p95 = static_cast<double>(histogram.percentileUpperNs(0.95)) / 1'000'000.0;
+        range.max = static_cast<double>(histogram.maxUpperNs()) / 1'000'000.0;
+        return range;
+    };
+    const auto range_us = [](uint64_t last_ns, const Histogram& histogram) {
+        RealtimeTimingRange range;
+        range.last = static_cast<double>(last_ns) / 1'000.0;
+        range.p95 = static_cast<double>(histogram.percentileUpperNs(0.95)) / 1'000.0;
+        range.max = static_cast<double>(histogram.maxUpperNs()) / 1'000.0;
+        return range;
+    };
+    out.period_ms = range_ms(aggregate.last_period_ns, aggregate.period);
+    out.jitter_ms = range_ms(aggregate.last_jitter_ns, aggregate.jitter);
+    out.age_us = range_us(aggregate.last_age_ns, aggregate.age);
+    out.phase_us = range_us(aggregate.last_phase_ns, aggregate.phase);
+    // robot_time_ns is retained as a diagnostic only: some controller/firmware
+    // modes expose an unavailable or suspect field, so monotonicity alone is not
+    // enough to promote it to an acquisition-freshness clock.
+    out.freshness_reliable = false;
+    out.robot_time_available = aggregate.robot_time_available;
+    out.robot_time_monotonic = aggregate.robot_time_monotonic;
+    return out;
+}
+
+RealtimeTimingTelemetry RealtimeTimingAccumulator::snapshot() const {
+    RealtimeTimingTelemetry out;
+    if (size_ == 0 || nominal_period_ns_ == 0) return out;
+    const Entry& oldest = entries_[head_];
+    const Entry& newest = entries_[(head_ + size_ - 1) % entries_.size()];
+    const uint64_t covered_ns = newest.loop_start_ns >= oldest.loop_start_ns
+        ? newest.loop_start_ns - oldest.loop_start_ns + nominal_period_ns_
+        : nominal_period_ns_;
+    out.window_sec = static_cast<double>(covered_ns) * 1e-9;
+    out.servo.target_rate_hz = 1e9 / static_cast<double>(nominal_period_ns_);
+    out.servo.observed_rate_hz = static_cast<double>(size_) / out.window_sec;
+    out.servo.send_rate_hz = static_cast<double>(send_cycle_count_) / out.window_sec;
+    const auto range_ms = [](uint64_t last_ns, const Histogram& histogram) {
+        return RealtimeTimingRange{
+            static_cast<double>(last_ns) / 1'000'000.0,
+            static_cast<double>(histogram.percentileUpperNs(0.95)) / 1'000'000.0,
+            static_cast<double>(histogram.maxUpperNs()) / 1'000'000.0,
+        };
+    };
+    const auto range_us = [](uint64_t last_ns, const Histogram& histogram) {
+        return RealtimeTimingRange{
+            static_cast<double>(last_ns) / 1'000.0,
+            static_cast<double>(histogram.percentileUpperNs(0.95)) / 1'000.0,
+            static_cast<double>(histogram.maxUpperNs()) / 1'000.0,
+        };
+    };
+    out.servo.period_ms = range_ms(last_period_ns_, period_);
+    out.servo.jitter_ms = range_ms(last_jitter_ns_, jitter_);
+    out.servo.wake_latency_us = range_us(last_wake_ns_, wake_);
+    out.servo.pre_send_us = range_us(last_pre_send_ns_, pre_send_);
+    out.servo.send_duration_us = range_us(last_send_duration_ns_, send_duration_);
+    out.servo.deadline_miss_count = deadline_miss_count_;
+    out.servo.catch_up_count = catch_up_count_;
+    out.left_feedback = armSnapshot(left_, out.window_sec);
+    out.right_feedback = armSnapshot(right_, out.window_sec);
+    return out;
+}
+
+bool DualArmServoLoop::updateForceRuntime(
+    ArmId arm_id,
+    const RobotState& state,
+    double dt_sec,
+    uint64_t now_ns,
+    std::string* fault_reason
+) {
+    ForceArmRuntime& runtime =
+        arm_id == ArmId::Left ? left_force_runtime_ : right_force_runtime_;
+    FtWrenchPipeline& pipeline =
+        arm_id == ArmId::Left ? left_ft_pipeline_ : right_ft_pipeline_;
+    NormalForceController& controller = arm_id == ArmId::Left
+        ? left_normal_force_controller_ : right_normal_force_controller_;
+    const FtWrenchPipelineConfig& ft_config = arm_id == ArmId::Left
+        ? config_.force_torque.left : config_.force_torque.right;
+    const ForceControlArmConfig& arm_config = arm_id == ArmId::Left
+        ? config_.force_control.left : config_.force_control.right;
+
+    runtime.pending_proposal.reset();
+    runtime.control.proposal_valid = false;
+    runtime.control.proposal_committed = false;
+    runtime.control.fault_reason.clear();
+    runtime.ft.enabled = ft_config.enable;
+    runtime.ft.source = config_.force_torque.source;
+    runtime.ft.source_assurance = ft_config.enable
+        ? "controller_frame_only" : "unavailable";
+    runtime.ft.sensor_health_verified = false;
+    runtime.ft.safety_rated = false;
+    runtime.ft.raw_sensor_wrench = state.eft_wrench;
+    runtime.control.enabled = config_.force_control.enable && arm_config.enable;
+    runtime.control.operating_mode = config_.force_control.operating_mode;
+    runtime.control.surface_source = arm_config.surface_source;
+    runtime.control.target_force_n = arm_config.target_force_n;
+    runtime.control.motion_epoch = motion_epoch_;
+
+    const math::Vector3 normal = arm_config.surface_source == "user_floor_plane"
+        ? effectiveUserFloorNormal() : math::Vector3(0.0, 0.0, 1.0);
+    runtime.control.normal_stand = {normal.x(), normal.y(), normal.z()};
+
+    if (!ft_config.enable) {
+        runtime.ft.healthy = false;
+        runtime.ft.reason = "disabled";
+        runtime.control.state = runtime.control.enabled ? "unavailable" : "inactive";
+        return false;
+    }
+    if (!state.tcp_actual_valid || !state.tcp_actual_stand.has_value()) {
+        runtime.ft.healthy = false;
+        runtime.ft.reason = "actual TCP pose unavailable";
+        runtime.control.state = "unavailable";
+        if (runtime.control.enabled && config_.force_control.operating_mode != "monitor") {
+            if (fault_reason) *fault_reason = "force control actual TCP pose unavailable";
+            return true;
+        }
+        return false;
+    }
+
+    FtRawSample raw;
+    raw.wrench_sensor = state.eft_wrench;
+    raw.host_time_ns = state.host_time_ns;
+    raw.source_sequence = state.acquisition_sequence;
+    raw.source_time_ns = state.robot_time_ns;
+    raw.source_sequence_valid = state.acquisition_sequence > 0;
+    raw.source_time_valid = state.robot_time_ns > 0;
+    raw.fields_present = state.eft_valid;
+    // rbpodo has no independent presence bit. This is deliberately weaker
+    // than verified sensor health and is exposed as controller_frame_only.
+    raw.sensor_present = state.eft_valid && ft_config.frame_configured;
+    const FtWrenchPipelineOutput output =
+        pipeline.process(raw, *state.tcp_actual_stand, now_ns);
+    runtime.ft.wrench_tcp = output.wrench_tcp;
+    runtime.ft.fast_external_wrench = output.fast_external_wrench_tcp;
+    runtime.ft.control_external_wrench = output.control_external_wrench_tcp;
+    runtime.ft.healthy = output.healthy;
+    runtime.ft.stale = output.stale;
+    runtime.ft.freshness_value = output.freshness_value;
+    runtime.ft.freshness_advanced = output.freshness_advanced;
+    runtime.ft.reason = output.reason;
+
+    if (!output.healthy) {
+        runtime.control.state = "unavailable";
+        if (runtime.control.enabled && config_.force_control.operating_mode != "monitor") {
+            runtime.control.fault_reason = "FT pipeline unhealthy: " + output.reason;
+            if (fault_reason) *fault_reason = runtime.control.fault_reason;
+            return true;
+        }
+        return false;
+    }
+
+    const Pose6D& tcp = *state.tcp_actual_stand;
+    const math::Matrix3 r_stand_tcp = math::rotationFromPose(tcp);
+    const auto forceStand = [&r_stand_tcp](const Wrench6D& wrench) -> math::Vector3 {
+        return r_stand_tcp * math::Vector3(wrench.fx, wrench.fy, wrench.fz);
+    };
+    const auto torqueStand = [&r_stand_tcp](const Wrench6D& wrench) -> math::Vector3 {
+        return r_stand_tcp * math::Vector3(wrench.tx, wrench.ty, wrench.tz);
+    };
+    const math::Vector3 force_control_stand = forceStand(output.control_external_wrench_tcp);
+    const math::Vector3 force_fast_stand = forceStand(output.fast_external_wrench_tcp);
+    const math::Vector3 torque_fast_stand = torqueStand(output.fast_external_wrench_tcp);
+    const double measured_normal = normal.dot(force_control_stand);
+    const double fast_normal = normal.dot(force_fast_stand);
+    runtime.control.measured_force_n = measured_normal;
+    runtime.control.fast_normal_force_n = fast_normal;
+    runtime.control.fast_force_norm_n = force_fast_stand.norm();
+    runtime.control.fast_torque_norm_nm = torque_fast_stand.norm();
+    runtime.control.contact_threshold_exceeded =
+        measured_normal >= arm_config.contact_enter_force_n;
+    runtime.control.hard_limit_exceeded =
+        fast_normal >= arm_config.hard_normal_force_n ||
+        runtime.control.fast_force_norm_n >= arm_config.hard_force_norm_n ||
+        runtime.control.fast_torque_norm_nm >= arm_config.hard_torque_norm_nm;
+
+    double actual_normal_velocity = 0.0;
+    if (runtime.previous_actual_pose_ns != 0 && now_ns > runtime.previous_actual_pose_ns) {
+        const double pose_dt = static_cast<double>(now_ns - runtime.previous_actual_pose_ns) * 1e-9;
+        const math::Vector3 delta(
+            tcp.x - runtime.previous_actual_pose.x,
+            tcp.y - runtime.previous_actual_pose.y,
+            tcp.z - runtime.previous_actual_pose.z
+        );
+        actual_normal_velocity = normal.dot(delta) / pose_dt;
+    }
+    runtime.previous_actual_pose = tcp;
+    runtime.previous_actual_pose_ns = now_ns;
+
+    if (!runtime.control.enabled) {
+        runtime.control.state = "monitoring";
+        return false;
+    }
+    const std::string& mode = config_.force_control.operating_mode;
+    if (mode == "monitor") {
+        runtime.control.state = "monitoring";
+        return false;
+    }
+
+    const bool hard_limit = runtime.control.hard_limit_exceeded;
+    if (hard_limit) {
+        runtime.control.state = "fault";
+        runtime.control.fault_reason = "external force/torque hard limit exceeded";
+        if (fault_reason) *fault_reason = runtime.control.fault_reason;
+        return true;
+    }
+
+    if (!runtime.control.contact_active) {
+        runtime.control.state = "armed";
+        if (output.freshness_advanced && measured_normal >= arm_config.contact_enter_force_n) {
+            ++runtime.enter_count;
+        } else if (output.freshness_advanced) {
+            runtime.enter_count = 0;
+        }
+        if (runtime.enter_count >= arm_config.debounce_samples) {
+            runtime.control.contact_active = true;
+            runtime.contact_anchor = tcp;
+            runtime.contact_anchor_valid = true;
+            runtime.release_start_ns = 0;
+            runtime.enter_count = 0;
+            ++motion_epoch_;
+            runtime.control.motion_epoch = motion_epoch_;
+            if (arm_id == ArmId::Left) left_output_ma_.reset();
+            else right_output_ma_.reset();
+            if (mode == "guard") {
+                runtime.control.state = "fault";
+                runtime.control.fault_reason = "force guard contact threshold exceeded";
+                if (fault_reason) *fault_reason = runtime.control.fault_reason;
+                return true;
+            }
+            controller.engage();
+            runtime.control.state = "regulating";
+        }
+    }
+
+    if (!runtime.control.contact_active) return false;
+
+    if (measured_normal <= arm_config.contact_release_force_n) {
+        if (runtime.release_start_ns == 0) runtime.release_start_ns = now_ns;
+        const double release_sec = static_cast<double>(now_ns - runtime.release_start_ns) * 1e-9;
+        runtime.control.state = "release_wait";
+        if (release_sec >= arm_config.release_dwell_sec) {
+            runtime.control.contact_active = false;
+            runtime.contact_anchor_valid = false;
+            runtime.release_start_ns = 0;
+            controller.release();
+            runtime.control.correction_m = 0.0;
+            runtime.control.velocity_m_s = 0.0;
+            runtime.control.acceleration_m_s2 = 0.0;
+            runtime.control.energy_j = 0.0;
+            runtime.control.saturated = false;
+            ++motion_epoch_;
+            runtime.control.motion_epoch = motion_epoch_;
+            runtime.control.state = "armed";
+            if (arm_id == ArmId::Left) {
+                left_delta_twist_follower_.deactivate();
+                left_chunk_follower_.deactivate();
+                left_pose_track_smd_.deactivate();
+                left_chunk_submitted_recv_seq_ = chunk_frame_cache_recv_seq_;
+                left_output_ma_.reset();
+            } else {
+                right_delta_twist_follower_.deactivate();
+                right_chunk_follower_.deactivate();
+                right_pose_track_smd_.deactivate();
+                right_chunk_submitted_recv_seq_ = chunk_frame_cache_recv_seq_;
+                right_output_ma_.reset();
+            }
+            return false;
+        }
+    } else {
+        runtime.release_start_ns = 0;
+        runtime.control.state = "regulating";
+    }
+
+    NormalForceControllerCommand command;
+    command.target_contact_force_n = arm_config.target_force_n;
+    const NormalForceControllerProposal proposal = controller.propose(
+        measured_normal,
+        command,
+        actual_normal_velocity,
+        dt_sec
+    );
+    runtime.pending_proposal = proposal;
+    runtime.control.proposal_valid = proposal.valid;
+    runtime.control.saturated = proposal.saturated;
+    runtime.control.correction_m = proposal.state.unload_offset_m;
+    runtime.control.velocity_m_s = proposal.state.unload_velocity_m_s;
+    runtime.control.acceleration_m_s2 = proposal.state.unload_acceleration_m_s2;
+    runtime.control.energy_j = proposal.state.observed_energy_j;
+    if (!proposal.valid) {
+        runtime.control.state = "fault";
+        runtime.control.fault_reason = proposal.reason;
+        if (fault_reason) *fault_reason = "normal force controller: " + proposal.reason;
+        return true;
+    }
+    return false;
+}
+
+void DualArmServoLoop::applyForceCorrection(ArmId arm_id, ArmCommand* command) const {
+    if (!command || command->mode != ControlMode::TcpPoseTarget || !command->has_tcp_target) {
+        return;
+    }
+    const ForceArmRuntime& runtime =
+        arm_id == ArmId::Left ? left_force_runtime_ : right_force_runtime_;
+    if (!runtime.control.contact_active || !runtime.contact_anchor_valid ||
+        !runtime.pending_proposal.has_value() || !runtime.pending_proposal->valid) {
+        return;
+    }
+    const math::Vector3 normal(
+        runtime.control.normal_stand[0],
+        runtime.control.normal_stand[1],
+        runtime.control.normal_stand[2]
+    );
+    const math::Vector3 anchor(
+        runtime.contact_anchor.x,
+        runtime.contact_anchor.y,
+        runtime.contact_anchor.z
+    );
+    math::Vector3 target(
+        command->tcp_target_stand.x,
+        command->tcp_target_stand.y,
+        command->tcp_target_stand.z
+    );
+    // Reject only policy penetration along the accepted contact normal. A
+    // policy-requested retreat remains available so contact cannot deadlock at
+    // a positive target force. The force controller supplies the minimum
+    // outward unload offset; tangential motion and orientation remain intact.
+    const double policy_normal_offset = normal.dot(target - anchor);
+    const double accepted_normal_offset = std::max(
+        policy_normal_offset,
+        runtime.pending_proposal->state.unload_offset_m
+    );
+    target += normal * (accepted_normal_offset - policy_normal_offset);
+    command->tcp_target_stand.x = target.x();
+    command->tcp_target_stand.y = target.y();
+    command->tcp_target_stand.z = target.z();
+}
+
+void DualArmServoLoop::finishForceProposals(
+    bool left_accepted,
+    bool right_accepted,
+    SafetyVerdict verdict
+) {
+    const bool downstream_clean = verdict == SafetyVerdict::Ok;
+    const auto finish = [&](ForceArmRuntime& runtime,
+                            NormalForceController& controller,
+                            bool accepted) {
+        runtime.control.proposal_committed = false;
+        if (!runtime.pending_proposal.has_value()) return;
+        if (accepted && downstream_clean) {
+            runtime.control.proposal_committed = controller.commit(*runtime.pending_proposal);
+        } else {
+            controller.reject();
+        }
+        runtime.pending_proposal.reset();
+        const NormalForceControllerState& state = controller.state();
+        runtime.control.correction_m = state.unload_offset_m;
+        runtime.control.velocity_m_s = state.unload_velocity_m_s;
+        runtime.control.acceleration_m_s2 = state.unload_acceleration_m_s2;
+        runtime.control.energy_j = state.observed_energy_j;
+    };
+    finish(left_force_runtime_, left_normal_force_controller_, left_accepted);
+    finish(right_force_runtime_, right_normal_force_controller_, right_accepted);
+}
+
 DualArmServoLoop::DualArmServoLoop(
     std::unique_ptr<IRobotBackend> left_robot,
     std::unique_ptr<IRobotBackend> right_robot,
@@ -1495,6 +2157,10 @@ DualArmServoLoop::DualArmServoLoop(
 ) : left_robot_(std::move(left_robot)),
     right_robot_(std::move(right_robot)),
     config_(config),
+    left_ft_pipeline_(config.force_torque.left),
+    right_ft_pipeline_(config.force_torque.right),
+    left_normal_force_controller_(makeNormalForceControllerConfig(config, ArmId::Left)),
+    right_normal_force_controller_(makeNormalForceControllerConfig(config, ArmId::Right)),
     command_buffer_(command_buffer),
     logger_(logger),
     scope_publisher_(scope_publisher),
@@ -2016,6 +2682,35 @@ void DualArmServoLoop::loopMain() {
     };
     PendingTopSend pending_top_send;
     const bool send_at_top = config_.servo.send_at_tick_start;
+
+    // Hybrid sleep-then-spin: sleep_until(next_tick - slack), then busy-spin the
+    // final `slack` so the tick lands on phase without the C-state exit +
+    // hrtimer/scheduler wake-path jitter. Guarded (fail-closed to plain
+    // sleep_until): a ~100% RT spin under RT throttling would be descheduled
+    // ~50 ms/s, so spin is only enabled with RT priority AND throttling off.
+    long long spin_slack_ns = 0;
+    if (config_.servo.spin_slack_us > 0) {
+        const long long requested_ns = static_cast<long long>(config_.servo.spin_slack_us) * 1000LL;
+        if (!config_.servo.enable_realtime_priority) {
+            std::cerr << "[WARN] servo.spin_slack_us=" << config_.servo.spin_slack_us
+                      << " ignored: needs enable_realtime_priority=true (a non-RT spin just "
+                         "burns a core and is preempted anyway). Using plain sleep_until.\n";
+        } else {
+            const long long rt_runtime_us = readSchedRtRuntimeUs();
+            if (rt_runtime_us != -1) {
+                std::cerr << "[WARN] servo.spin_slack_us=" << config_.servo.spin_slack_us
+                          << " ignored: kernel.sched_rt_runtime_us=" << rt_runtime_us
+                          << " (RT throttling ON) would throttle a busy spin ~50 ms/s. "
+                             "Run `sudo sysctl kernel.sched_rt_runtime_us=-1` to enable. "
+                             "Using plain sleep_until.\n";
+            } else {
+                spin_slack_ns = requested_ns;
+                std::cerr << "[INFO] servo hybrid sleep-then-spin enabled: slack="
+                          << config_.servo.spin_slack_us << " us (RT throttling off).\n";
+            }
+        }
+    }
+
     while (running_) {
         // Scheduled wake time of THIS tick = the sleep_until target of the previous
         // iteration (next_tick before the increment below). Same steady epoch as
@@ -2194,6 +2889,49 @@ void DualArmServoLoop::loopMain() {
             const LatchedDualFaultContext async_fault_contexts =
                 asyncSupervisionFaultContexts(left_async_telemetry, right_async_telemetry);
             (void)handleAsyncSupervisionFault(async_fault_contexts, left_state, right_state);
+        }
+
+        std::string left_force_fault_reason;
+        std::string right_force_fault_reason;
+        // Backend state acquisition stamps RobotState::host_time_ns while the
+        // read is in progress, so it is necessarily newer than loop_start.
+        // Use a post-read monotonic timestamp for FT age/freshness checks;
+        // passing loop_start makes every freshly acquired sample look like it
+        // came from the future and rejects it as an invalid timestamp.
+        const uint64_t force_update_now_ns = nowSteadyNs();
+        const bool left_force_fault = updateForceRuntime(
+            ArmId::Left,
+            left_state,
+            filter_dt_sec,
+            force_update_now_ns,
+            &left_force_fault_reason
+        );
+        const bool right_force_fault = updateForceRuntime(
+            ArmId::Right,
+            right_state,
+            filter_dt_sec,
+            force_update_now_ns,
+            &right_force_fault_reason
+        );
+        if ((left_force_fault || right_force_fault) && !fault_latched_.load()) {
+            const ArmId fault_arm = left_force_fault ? ArmId::Left : ArmId::Right;
+            const std::string reason = left_force_fault
+                ? left_force_fault_reason : right_force_fault_reason;
+            const FaultContext context = classifyCommandValidation(
+                SafetyVerdict::ExternalForceLimit,
+                fault_arm,
+                reason
+            );
+            ++motion_epoch_;
+            left_force_runtime_.control.motion_epoch = motion_epoch_;
+            right_force_runtime_.control.motion_epoch = motion_epoch_;
+            latchFault(
+                SafetyVerdict::ExternalForceLimit,
+                reason,
+                left_state,
+                right_state,
+                context
+            );
         }
 
         CommandBufferReadTelemetry command_buffer_read;
@@ -2702,8 +3440,53 @@ void DualArmServoLoop::loopMain() {
                 safety_verdict = SafetyVerdict::FaultLatched;
             }
         }
+        finishForceProposals(
+            left_ok && !send_suppressed && command.left.mode == ControlMode::TcpPoseTarget,
+            right_ok && !send_suppressed && command.right.mode == ControlMode::TcpPoseTarget,
+            safety_verdict
+        );
 
         const uint64_t loop_end = nowSteadyNs();
+
+        const bool send_cycle = !send_suppressed &&
+            (left_send_start_ns > 0 || right_send_start_ns > 0);
+        uint64_t first_send_start_ns = 0;
+        if (left_send_start_ns > 0 && right_send_start_ns > 0) {
+            first_send_start_ns = std::min(left_send_start_ns, right_send_start_ns);
+        } else {
+            first_send_start_ns = std::max(left_send_start_ns, right_send_start_ns);
+        }
+        const uint64_t pre_send_ns = first_send_start_ns >= loop_start
+            ? first_send_start_ns - loop_start : 0;
+        const uint64_t left_send_duration_ns =
+            left_send_end_ns >= left_send_start_ns && left_send_start_ns > 0
+                ? left_send_end_ns - left_send_start_ns : 0;
+        const uint64_t right_send_duration_ns =
+            right_send_end_ns >= right_send_start_ns && right_send_start_ns > 0
+                ? right_send_end_ns - right_send_start_ns : 0;
+        RealtimeTimingTick timing_tick;
+        timing_tick.loop_start_ns = loop_start;
+        timing_tick.loop_end_ns = loop_end;
+        timing_tick.scheduled_wake_ns = sched_wake_ns;
+        timing_tick.previous_sleep_enter_ns = prev_sleep_enter_ns;
+        timing_tick.nominal_period_ns = nominal_period_ns;
+        timing_tick.send_cycle = send_cycle;
+        timing_tick.pre_send_ns = pre_send_ns;
+        timing_tick.send_duration_ns = std::max(
+            left_send_duration_ns, right_send_duration_ns);
+        timing_tick.left_feedback.host_time_ns = left_state.host_time_ns;
+        timing_tick.left_feedback.robot_time_ns = left_state.robot_time_ns;
+        timing_tick.left_feedback.explicit_cached_hold =
+            left_state.rbpodo_sdk_state_source.find("last_state_cache") != std::string::npos ||
+            left_state.rbpodo_sdk_state_source.find("(held)") != std::string::npos;
+        timing_tick.right_feedback.host_time_ns = right_state.host_time_ns;
+        timing_tick.right_feedback.robot_time_ns = right_state.robot_time_ns;
+        timing_tick.right_feedback.explicit_cached_hold =
+            right_state.rbpodo_sdk_state_source.find("last_state_cache") != std::string::npos ||
+            right_state.rbpodo_sdk_state_source.find("(held)") != std::string::npos;
+        realtime_timing_accumulator_.add(timing_tick);
+        const RealtimeTimingTelemetry realtime_timing =
+            realtime_timing_accumulator_.snapshot();
 
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
@@ -2844,11 +3627,20 @@ void DualArmServoLoop::loopMain() {
 
             sample.left_state = left_state;
             sample.right_state = right_state;
+            sample.left_force_torque = left_force_runtime_.ft;
+            sample.right_force_torque = right_force_runtime_.ft;
+            sample.left_force_control = left_force_runtime_.control;
+            sample.right_force_control = right_force_runtime_.control;
             latest_snapshot_.tick = sample.tick;
             latest_snapshot_.loop_start_time_ns = loop_start;
             latest_snapshot_.loop_end_time_ns = loop_end;
             latest_snapshot_.left_state = left_state;
             latest_snapshot_.right_state = right_state;
+            latest_snapshot_.left_force_torque = left_force_runtime_.ft;
+            latest_snapshot_.right_force_torque = right_force_runtime_.ft;
+            latest_snapshot_.left_force_control = left_force_runtime_.control;
+            latest_snapshot_.right_force_control = right_force_runtime_.control;
+            latest_snapshot_.motion_epoch = motion_epoch_;
             latest_snapshot_.command = command;
             latest_snapshot_.left_sent_q_deg = sent_target.left_q_target_deg;
             latest_snapshot_.right_sent_q_deg = sent_target.right_q_target_deg;
@@ -2857,6 +3649,7 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.period_ms = sample.period_ms;
             latest_snapshot_.jitter_ms = sample.jitter_ms;
             latest_snapshot_.filter_dt_ms = sample.filter_dt_ms;
+            latest_snapshot_.realtime_timing = realtime_timing;
             latest_snapshot_.safety_verdict = safety_verdict;
             latest_snapshot_.self_collision_enabled = config_.safety.self_collision.enable;
             latest_snapshot_.self_collision_checked = last_self_collision_.checked;
@@ -3165,7 +3958,16 @@ void DualArmServoLoop::loopMain() {
         async_supervision_degraded_last_tick = async_supervision_degraded_this_tick;
         tracking_error_degraded_prev_tick_ = tracking_error_degraded_this_tick_;
         prev_sleep_enter_ns = nowSteadyNs();
-        std::this_thread::sleep_until(next_tick);
+        if (spin_slack_ns > 0) {
+            // Sleep until `slack` before the deadline, then busy-spin the rest so
+            // the tick wakes exactly on phase (no C-state/scheduler wake jitter).
+            std::this_thread::sleep_until(next_tick - std::chrono::nanoseconds(spin_slack_ns));
+            while (std::chrono::steady_clock::now() < next_tick) {
+                cpuRelax();
+            }
+        } else {
+            std::this_thread::sleep_until(next_tick);
+        }
     }
 }
 
@@ -4669,6 +5471,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 dt_sec
             );
         }
+        applyForceCorrection(ArmId::Left, &left_pose_track_command);
+        applyForceCorrection(ArmId::Right, &right_pose_track_command);
         if (latchChunkFollowerFaultRequests(left_state, right_state) && command_verdict) {
             *command_verdict = SafetyVerdict::ChunkFollowerFault;
         }

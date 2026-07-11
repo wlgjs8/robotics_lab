@@ -4,7 +4,7 @@ PROJECT ?= robotics_lab
 POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 
-.PHONY: run flow-infer-real build vm-up vm-down vm-status policy-hdf5-audit-smoke deps-hardware-free cam-up cam-engine-rebuild cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
+.PHONY: run flow-infer-real build rebuild vm-up vm-down vm-status policy-hdf5-audit-smoke deps-hardware-free cam-up cam-engine-rebuild cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
 
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
@@ -32,6 +32,11 @@ flow-infer-real:
 # install is one-time). Override jobs with BUILD_JOBS=N.
 build:
 	./tools/build_stack.sh
+
+# Explicit hard reset for cache/toolchain/build-tree recovery. Normal source
+# edits, including config.hpp layout changes, stay on the incremental build path.
+rebuild:
+	./tools/build_stack.sh --clean
 
 # Rainbow VIRTUAL control-box VMs (vendor OVA): boot 2 VMs and map them to the
 # real controller IPs so `make run MODE=sim` works without hardware.

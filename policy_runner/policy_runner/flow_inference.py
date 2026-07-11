@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TextIO
@@ -485,6 +486,8 @@ class FlowMatchingActionSource:
         self._reset_right_pose: np.ndarray | None = None
         self._chunk: np.ndarray | None = None
         self._chunk_index = 0
+        self._last_server_motion_epoch: int | None = None
+        self._init_inference_timing_state()
         self._warned_missing_camera_client = False
         self.last_image_decode_count = 0
         self.last_missing_camera_count = 0
@@ -622,6 +625,7 @@ class FlowMatchingActionSource:
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         self._last_overlay_payload = snapshot.payload
+        self._handle_server_motion_epoch(snapshot)
         if getattr(self, "enable_async_chunking", False):
             return self._next_intent_streamed(snapshot, now_monotonic)
         payload = snapshot.payload
@@ -640,18 +644,14 @@ class FlowMatchingActionSource:
             return self._no_policy_input_intent()
 
         if self._chunk is None or self._chunk_index >= self._current_chunk_execute_limit():
-            chunk = self._sample_chunk(payload)
+            chunk = self._sample_and_align_chunk_timed(payload)
             if chunk is None:
                 self._chunk = None
                 return self._no_policy_input_intent()
-            if self.ee_local_r_align is not None:
-                # Policy steps are in the training EE frame (e.g. pika tip);
-                # convert to the RB TCP body frame: v_tcp = R_alignT . v_tip.
-                chunk = rotate_flow_arm_vectors(chunk, self.ee_local_r_align.T)
-            chunk = self._apply_rotation_axis_mask(chunk)
             self._chunk = chunk
             self._chunk_index = 0
             self._steps_since_boundary = 0  # restart the crossfade ramp at the boundary
+            self._record_inference_activation()
             self._print_chunk_steps(chunk)
             self._begin_chunk_tracking(chunk, payload, now_monotonic)
             self._publish_chunk_overlay(now_monotonic)
@@ -661,6 +661,35 @@ class FlowMatchingActionSource:
         gripper_targets = self._integrate_gripper_targets(step, payload)
         self._dispatch_gripper_step(step)
         return self._emit_step_intent(step, payload, gripper_targets)
+
+    def _handle_server_motion_epoch(self, snapshot: StateSnapshot) -> None:
+        """Invalidate every cached/in-flight action after a server contact event.
+
+        The server increments motion_epoch when force ownership enters/exits or
+        an external-force fault is raised. An older policy chunk must never
+        resume its accumulated normal delta after that discontinuity.
+        """
+        raw_epoch = snapshot.payload.get("motion_epoch")
+        if isinstance(raw_epoch, bool) or not isinstance(raw_epoch, (int, float)):
+            return
+        try:
+            epoch = int(raw_epoch)
+        except (OverflowError, ValueError):
+            return
+        if self._last_server_motion_epoch is None:
+            self._last_server_motion_epoch = epoch
+            return
+        if epoch == self._last_server_motion_epoch:
+            return
+        self._last_server_motion_epoch = epoch
+        self._clear_target_pose_state()
+        self._invalidate_policy_chunks(reason="server_motion_epoch")
+        try:
+            self._reset_left_pose = pose_from_state_payload(snapshot.payload, "left")
+            self._reset_right_pose = pose_from_state_payload(snapshot.payload, "right")
+        except Exception:
+            self._reset_left_pose = None
+            self._reset_right_pose = None
 
     # ----------------------------------------------------------- streamed --
     def _next_intent_streamed(
@@ -693,7 +722,7 @@ class FlowMatchingActionSource:
                 and not self._stream_pending
                 and not bool(getattr(self, "nonblocking_stream_inference", False))
             ):
-                chunk = self._sample_and_align_chunk(payload)
+                chunk = self._sample_and_align_chunk_timed(payload)
             if chunk is None:
                 self._request_prefetch(payload)
                 sched = self._ensure_chunk_ensemble()
@@ -869,6 +898,7 @@ class FlowMatchingActionSource:
         self._overlay_chain_pending = {"left": None, "right": None}
 
     def _activate_chunk(self, chunk: np.ndarray, now_monotonic: float) -> None:
+        self._record_inference_activation(now_monotonic)
         self._overlay_chain_advance()
         self._chunk = chunk
         self._chunk_index = 0
@@ -1167,6 +1197,7 @@ class FlowMatchingActionSource:
                 left_delta=projected_delta["left"],
                 right_delta=projected_delta["right"],
                 host_time_ns=time.time_ns(),
+                inference_timing=self._inference_timing_snapshot(),
             )
         except Exception:
             return
@@ -1292,6 +1323,26 @@ class FlowMatchingActionSource:
             chunk = rotate_flow_arm_vectors(chunk, self.ee_local_r_align.T)
         return self._apply_rotation_axis_mask(chunk)
 
+    def _sample_and_align_chunk_timed(self, payload: dict[str, Any]) -> np.ndarray | None:
+        """Measure one inline local/remote inference without changing its behavior."""
+        inference_seq, request_ns = self._begin_inference_request()
+        worker_start_ns = self._inference_now_ns()
+        chunk: np.ndarray | None = None
+        try:
+            chunk = self._sample_and_align_chunk(payload)
+            return chunk
+        finally:
+            worker_end_ns = self._inference_now_ns()
+            ready_ns = self._inference_now_ns()
+            timing = self._record_inference_completion(
+                inference_seq=inference_seq,
+                request_ns=request_ns,
+                worker_start_ns=worker_start_ns,
+                worker_end_ns=worker_end_ns,
+                ready_ns=ready_ns,
+            )
+            self._stream_activation_candidate_timing = timing if chunk is not None else None
+
     def _ensure_stream_state(self) -> None:
         if getattr(self, "_stream_inited", False):
             return
@@ -1304,6 +1355,8 @@ class FlowMatchingActionSource:
         self._stream_request = None
         self._stream_stall_count = 0
         self._stream_generation = 0
+        if not hasattr(self, "_inference_timing_lock"):
+            self._init_inference_timing_state()
         self._stream_lock = threading.Lock()
         self._stream_cv = threading.Condition(self._stream_lock)
         self._stream_thread = threading.Thread(
@@ -1320,10 +1373,17 @@ class FlowMatchingActionSource:
                     return
                 request = self._stream_request
                 self._stream_request = None
-            if isinstance(request, tuple) and len(request) == 2:
+            if isinstance(request, tuple) and len(request) == 4:
+                generation, inference_seq, request_ns, payload = request
+            elif isinstance(request, tuple) and len(request) == 2:
                 generation, payload = request
+                inference_seq = 0
+                request_ns = self._inference_now_ns()
             else:
                 generation, payload = int(getattr(self, "_stream_generation", 0)), request
+                inference_seq = 0
+                request_ns = self._inference_now_ns()
+            worker_start_ns = self._inference_now_ns()
             try:
                 chunk = self._sample_and_align_chunk(payload)
             except Exception as exc:  # noqa: BLE001 - inference must not kill the worker
@@ -1333,9 +1393,19 @@ class FlowMatchingActionSource:
                     flush=True,
                 )
                 chunk = None
+            worker_end_ns = self._inference_now_ns()
+            ready_ns = self._inference_now_ns()
+            timing = self._record_inference_completion(
+                inference_seq=int(inference_seq),
+                request_ns=int(request_ns),
+                worker_start_ns=worker_start_ns,
+                worker_end_ns=worker_end_ns,
+                ready_ns=ready_ns,
+            )
             with self._stream_lock:
                 if int(generation) == int(getattr(self, "_stream_generation", 0)):
                     self._stream_next_chunk = chunk
+                    self._stream_ready_timing = timing if chunk is not None else None
                 self._stream_pending = False
 
     def _request_prefetch(self, payload: dict[str, Any]) -> None:
@@ -1345,14 +1415,175 @@ class FlowMatchingActionSource:
             self._stream_pending = True
             # Snapshot the state payload for the worker so a mutable camera/state
             # object cannot be changed by the command loop while inference is reading it.
-            self._stream_request = (int(getattr(self, "_stream_generation", 0)), copy.deepcopy(payload))
+            payload_snapshot = copy.deepcopy(payload)
+            inference_seq, request_ns = self._begin_inference_request()
+            self._stream_request = (
+                int(getattr(self, "_stream_generation", 0)),
+                inference_seq,
+                request_ns,
+                payload_snapshot,
+            )
             self._stream_cv.notify()
 
     def _take_prefetched(self) -> np.ndarray | None:
         with self._stream_lock:
             chunk = self._stream_next_chunk
             self._stream_next_chunk = None
+            if chunk is not None:
+                self._stream_activation_candidate_timing = self._stream_ready_timing
+            self._stream_ready_timing = None
         return chunk
+
+    def _init_inference_timing_state(self) -> None:
+        self._inference_seq = 0
+        self._inference_last_worker_start_ns = 0
+        self._inference_timing_lock = threading.Lock()
+        self._inference_timing_latest: dict[str, object] | None = None
+        self._inference_timing_history = {
+            name: deque(maxlen=64)
+            for name in (
+                "queue_wait_ms",
+                "inference_latency_ms",
+                "ready_wait_ms",
+                "inference_period_ms",
+                "inference_period_jitter_ms",
+            )
+        }
+        self._stream_ready_timing: dict[str, object] | None = None
+        self._stream_activation_candidate_timing: dict[str, object] | None = None
+
+    def _inference_now_ns(self) -> int:
+        clock = getattr(self, "_inference_clock_ns", None)
+        return int(clock()) if callable(clock) else time.monotonic_ns()
+
+    def _begin_inference_request(self) -> tuple[int, int]:
+        if not hasattr(self, "_inference_timing_lock"):
+            self._init_inference_timing_state()
+        with self._inference_timing_lock:
+            self._inference_seq = int(getattr(self, "_inference_seq", 0)) + 1
+            return self._inference_seq, self._inference_now_ns()
+
+    def _record_inference_completion(
+        self,
+        *,
+        inference_seq: int,
+        request_ns: int,
+        worker_start_ns: int,
+        worker_end_ns: int,
+        ready_ns: int,
+    ) -> dict[str, object]:
+        queue_wait_ms = max(0.0, (worker_start_ns - request_ns) / 1_000_000.0)
+        inference_latency_ms = max(0.0, (worker_end_ns - worker_start_ns) / 1_000_000.0)
+        previous_start_ns = int(getattr(self, "_inference_last_worker_start_ns", 0))
+        inference_period_ms = (
+            max(0.0, (worker_start_ns - previous_start_ns) / 1_000_000.0)
+            if previous_start_ns > 0
+            else None
+        )
+        timing: dict[str, object] = {
+            "seq": int(inference_seq),
+            "request_monotonic_ns": int(request_ns),
+            "worker_start_monotonic_ns": int(worker_start_ns),
+            "worker_end_monotonic_ns": int(worker_end_ns),
+            "chunk_ready_monotonic_ns": int(ready_ns),
+            "activation_monotonic_ns": None,
+            "queue_wait_ms": queue_wait_ms,
+            "inference_latency_ms": inference_latency_ms,
+            "ready_wait_ms": None,
+            "inference_period_ms": inference_period_ms,
+            "inference_period_nominal_ms": None,
+            "inference_period_jitter_ms": None,
+        }
+        lock = getattr(self, "_inference_timing_lock", None)
+        if lock is None:
+            return timing
+        with lock:
+            self._inference_last_worker_start_ns = int(worker_start_ns)
+            self._inference_timing_history["queue_wait_ms"].append(queue_wait_ms)
+            self._inference_timing_history["inference_latency_ms"].append(inference_latency_ms)
+            if inference_period_ms is not None:
+                self._inference_timing_history["inference_period_ms"].append(inference_period_ms)
+                periods = sorted(self._inference_timing_history["inference_period_ms"])
+                middle = len(periods) // 2
+                nominal_ms = (
+                    periods[middle]
+                    if len(periods) % 2 == 1
+                    else 0.5 * (periods[middle - 1] + periods[middle])
+                )
+                jitter_ms = abs(inference_period_ms - nominal_ms)
+                jitter_history = self._inference_timing_history["inference_period_jitter_ms"]
+                jitter_history.clear()
+                jitter_history.extend(abs(period_ms - nominal_ms) for period_ms in periods)
+                timing["inference_period_nominal_ms"] = nominal_ms
+                timing["inference_period_jitter_ms"] = jitter_ms
+            self._inference_timing_latest = dict(timing)
+        return timing
+
+    def _record_inference_activation(self, now_monotonic: float | None = None) -> None:
+        timing = getattr(self, "_stream_activation_candidate_timing", None)
+        if not isinstance(timing, dict):
+            return
+        activation_ns = (
+            self._inference_now_ns()
+            if now_monotonic is None
+            else int(max(0.0, float(now_monotonic)) * 1_000_000_000.0)
+        )
+        ready_ns = int(timing.get("chunk_ready_monotonic_ns", activation_ns) or activation_ns)
+        # Inline fallback inference starts after the command loop captured
+        # now_monotonic, so that supplied value can predate chunk readiness.
+        if activation_ns < ready_ns:
+            activation_ns = self._inference_now_ns()
+        ready_wait_ms = max(0.0, (activation_ns - ready_ns) / 1_000_000.0)
+        activated = dict(timing)
+        activated["activation_monotonic_ns"] = activation_ns
+        activated["ready_wait_ms"] = ready_wait_ms
+        lock = getattr(self, "_inference_timing_lock", None)
+        if lock is not None:
+            with lock:
+                self._inference_timing_history["ready_wait_ms"].append(ready_wait_ms)
+                self._inference_timing_latest = activated
+        self._stream_activation_candidate_timing = None
+
+    @staticmethod
+    def _inference_metric_summary(values: object) -> dict[str, float | int] | None:
+        samples = [float(value) for value in values] if values is not None else []
+        if not samples:
+            return None
+        ordered = sorted(samples)
+        p95_index = max(0, min(len(ordered) - 1, int(np.ceil(0.95 * len(ordered))) - 1))
+        return {
+            "samples": len(ordered),
+            "p95_ms": ordered[p95_index],
+            "max_ms": ordered[-1],
+        }
+
+    def _inference_timing_snapshot(self) -> dict[str, object] | None:
+        lock = getattr(self, "_inference_timing_lock", None)
+        if lock is None:
+            return None
+        with lock:
+            latest = getattr(self, "_inference_timing_latest", None)
+            if not isinstance(latest, dict):
+                return None
+            history = {
+                name: self._inference_metric_summary(values)
+                for name, values in self._inference_timing_history.items()
+            }
+            jitter_summary = history.get("inference_period_jitter_ms")
+            return {
+                **latest,
+                "stall_count": int(getattr(self, "_stream_stall_count", 0)),
+                "rolling_window": 64,
+                "rolling": {name: summary for name, summary in history.items() if summary is not None},
+                "inference_period_jitter": {
+                    "definition": "abs(start_to_start_period_ms - rolling_median_period_ms)",
+                    "nominal_ms": latest.get("inference_period_nominal_ms"),
+                    "last_ms": latest.get("inference_period_jitter_ms"),
+                    "p95_ms": None if jitter_summary is None else jitter_summary["p95_ms"],
+                    "max_ms": None if jitter_summary is None else jitter_summary["max_ms"],
+                    "samples": 0 if jitter_summary is None else jitter_summary["samples"],
+                },
+            }
 
     @property
     def gripper_command_count(self) -> int:
@@ -1668,6 +1899,8 @@ class FlowMatchingActionSource:
                     self._stream_next_chunk = None
                     self._stream_pending = False
                     self._stream_request = None
+                    self._stream_ready_timing = None
+                    self._stream_activation_candidate_timing = None
             except Exception:
                 pass
         if hasattr(self, "_stream_cv"):

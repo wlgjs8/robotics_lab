@@ -357,6 +357,104 @@ class CommandSourceSnapshot:
 
 
 @dataclass(frozen=True)
+class ForceTorqueSnapshot:
+    enabled: bool | None = None
+    source: str | None = None
+    source_assurance: str | None = None
+    sensor_health_verified: bool | None = None
+    safety_rated: bool | None = None
+    raw_sensor_wrench: tuple[float, ...] | None = None
+    wrench_tcp: tuple[float, ...] | None = None
+    fast_external_wrench: tuple[float, ...] | None = None
+    control_external_wrench: tuple[float, ...] | None = None
+    healthy: bool | None = None
+    stale: bool | None = None
+    freshness_value: int | None = None
+    freshness_advanced: bool | None = None
+    reason: str | None = None
+    raw: Mapping[str, Any] | None = None
+
+    @classmethod
+    def parse(cls, value: Any) -> "ForceTorqueSnapshot | None":
+        if not isinstance(value, Mapping):
+            return None
+        return cls(
+            enabled=_optional_bool(value.get("enabled")),
+            source=_optional_str(value.get("source")),
+            source_assurance=_optional_str(value.get("source_assurance")),
+            sensor_health_verified=_optional_bool(value.get("sensor_health_verified")),
+            safety_rated=_optional_bool(value.get("safety_rated")),
+            raw_sensor_wrench=finite_joint_array(value.get("raw_sensor_wrench")),
+            wrench_tcp=finite_joint_array(value.get("wrench_tcp")),
+            fast_external_wrench=finite_joint_array(value.get("fast_external_wrench")),
+            control_external_wrench=finite_joint_array(value.get("control_external_wrench")),
+            healthy=_optional_bool(value.get("healthy")),
+            stale=_optional_bool(value.get("stale")),
+            freshness_value=_optional_nonnegative_int(value.get("freshness_value")),
+            freshness_advanced=_optional_bool(value.get("freshness_advanced")),
+            reason=_optional_str(value.get("reason")),
+            raw=value,
+        )
+
+
+@dataclass(frozen=True)
+class ForceControlSnapshot:
+    enabled: bool | None = None
+    operating_mode: str | None = None
+    state: str | None = None
+    surface_source: str | None = None
+    normal_stand: tuple[float, float, float] | None = None
+    contact_active: bool | None = None
+    measured_force_n: float | None = None
+    fast_normal_force_n: float | None = None
+    fast_force_norm_n: float | None = None
+    fast_torque_norm_nm: float | None = None
+    contact_threshold_exceeded: bool | None = None
+    hard_limit_exceeded: bool | None = None
+    target_force_n: float | None = None
+    correction_m: float | None = None
+    velocity_m_s: float | None = None
+    acceleration_m_s2: float | None = None
+    energy_j: float | None = None
+    saturated: bool | None = None
+    proposal_valid: bool | None = None
+    proposal_committed: bool | None = None
+    fault_reason: str | None = None
+    motion_epoch: int | None = None
+    raw: Mapping[str, Any] | None = None
+
+    @classmethod
+    def parse(cls, value: Any) -> "ForceControlSnapshot | None":
+        if not isinstance(value, Mapping):
+            return None
+        return cls(
+            enabled=_optional_bool(value.get("enabled")),
+            operating_mode=_optional_str(value.get("operating_mode")),
+            state=_optional_str(value.get("state")),
+            surface_source=_optional_str(value.get("surface_source")),
+            normal_stand=_finite_vec3(value.get("normal_stand")),
+            contact_active=_optional_bool(value.get("contact_active")),
+            measured_force_n=_optional_finite(value.get("measured_force_n")),
+            fast_normal_force_n=_optional_finite(value.get("fast_normal_force_n")),
+            fast_force_norm_n=_optional_finite(value.get("fast_force_norm_n")),
+            fast_torque_norm_nm=_optional_finite(value.get("fast_torque_norm_nm")),
+            contact_threshold_exceeded=_optional_bool(value.get("contact_threshold_exceeded")),
+            hard_limit_exceeded=_optional_bool(value.get("hard_limit_exceeded")),
+            target_force_n=_optional_finite(value.get("target_force_n")),
+            correction_m=_optional_finite(value.get("correction_m")),
+            velocity_m_s=_optional_finite(value.get("velocity_m_s")),
+            acceleration_m_s2=_optional_finite(value.get("acceleration_m_s2")),
+            energy_j=_optional_finite(value.get("energy_j")),
+            saturated=_optional_bool(value.get("saturated")),
+            proposal_valid=_optional_bool(value.get("proposal_valid")),
+            proposal_committed=_optional_bool(value.get("proposal_committed")),
+            fault_reason=_optional_str(value.get("fault_reason")),
+            motion_epoch=_optional_nonnegative_int(value.get("motion_epoch")),
+            raw=value,
+        )
+
+
+@dataclass(frozen=True)
 class ArmSnapshot:
     mode: str
     q_actual_deg: tuple[float, ...] | None
@@ -401,6 +499,10 @@ class ArmSnapshot:
     # None when absent/non-finite; eft_valid mirrors the server's validity flag.
     eft_wrench: tuple[float, ...] | None = None
     eft_valid: bool = False
+    # Optional server-owned force pipeline telemetry. The GUI only observes these
+    # blocks; it never enables or configures force control.
+    force_torque: ForceTorqueSnapshot | None = None
+    force_control: ForceControlSnapshot | None = None
 
     @classmethod
     def parse(
@@ -508,6 +610,8 @@ class ArmSnapshot:
             gripper_moving=gripper_moving,
             eft_wrench=finite_joint_array(data.get("eft_wrench")),
             eft_valid=bool(data.get("eft_valid", False)),
+            force_torque=ForceTorqueSnapshot.parse(data.get("force_torque")),
+            force_control=ForceControlSnapshot.parse(data.get("force_control")),
         )
 
     def selected_tcp_pose(self, mode: str = "auto") -> Pose6D | None:
@@ -613,6 +717,10 @@ def _optional_str(value: Any) -> str | None:
 
 def _optional_int(value: Any) -> int | None:
     return int(value) if isinstance(value, int) else None
+
+
+def _optional_nonnegative_int(value: Any) -> int | None:
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def _optional_finite(value: Any) -> float | None:
@@ -729,6 +837,7 @@ class StateSnapshot:
     recording: Mapping[str, Any] | None
     arm_init: Mapping[str, Any] | None
     init_motion: Mapping[str, Any] | None
+    motion_epoch: int | None
     raw: Mapping[str, Any]
 
     @classmethod
@@ -779,6 +888,7 @@ class StateSnapshot:
             recording=data.get("recording") if isinstance(data.get("recording"), Mapping) else None,
             arm_init=data.get("arm_init") if isinstance(data.get("arm_init"), Mapping) else None,
             init_motion=data.get("init_motion") if isinstance(data.get("init_motion"), Mapping) else None,
+            motion_epoch=_optional_nonnegative_int(data.get("motion_epoch")),
             raw=data,
         )
 

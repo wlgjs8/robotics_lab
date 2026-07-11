@@ -40,6 +40,7 @@ add_library(rb_servo_core
     src/control/delta_twist_follower.cpp
     src/math/se3.cpp
     src/control/force_controller.cpp
+    src/control/normal_force_controller.cpp
     src/sensor/ft_wrench_pipeline.cpp
     src/control/collision_monitor.cpp
     src/control/init_motion_planner.cpp
@@ -115,6 +116,20 @@ endif()
 add_executable(rb_servo_server src/main.cpp)
 target_link_libraries(rb_servo_server PRIVATE rb_servo_core)
 
+# config.hpp contains layout-sensitive runtime/safety structs shared across the
+# server. Make every shipped server object depend on it explicitly so an
+# incremental build recompiles the complete ABI surface without deleting the
+# build tree. tools/build_stack.sh keeps a post-link timestamp guard as a
+# fail-closed backstop.
+set(RB_SERVO_LAYOUT_HEADERS
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/rb_servo/config/config.hpp"
+)
+get_target_property(RB_SERVO_CORE_SOURCES rb_servo_core SOURCES)
+set_property(
+    SOURCE ${RB_SERVO_CORE_SOURCES} src/main.cpp
+    APPEND PROPERTY OBJECT_DEPENDS "${RB_SERVO_LAYOUT_HEADERS}"
+)
+
 # Offline IK-feasibility grid sampler (feeds tools/ik_infeasible_region.py, which
 # turns the reachability grid into the viser "IK 불가 영역" overlay mesh). Reuses
 # the real Pinocchio IK solver in rb_servo_core for fidelity.
@@ -159,6 +174,10 @@ if(BUILD_TESTING)
     target_link_libraries(test_scope_publisher PRIVATE rb_servo_core)
     add_test(NAME scope_publisher COMMAND test_scope_publisher)
 
+    add_executable(test_state_publisher tests/test_state_publisher.cpp)
+    target_link_libraries(test_state_publisher PRIVATE rb_servo_core)
+    add_test(NAME state_publisher COMMAND test_state_publisher)
+
     add_executable(test_rbpodo_backend tests/test_rbpodo_backend.cpp)
     target_link_libraries(test_rbpodo_backend PRIVATE rb_servo_core)
     add_test(NAME rbpodo_backend COMMAND test_rbpodo_backend)
@@ -182,6 +201,10 @@ if(BUILD_TESTING)
     add_executable(test_force_controller tests/test_force_controller.cpp)
     target_link_libraries(test_force_controller PRIVATE rb_servo_core)
     add_test(NAME force_controller COMMAND test_force_controller)
+
+    add_executable(test_normal_force_controller tests/test_normal_force_controller.cpp)
+    target_link_libraries(test_normal_force_controller PRIVATE rb_servo_core)
+    add_test(NAME normal_force_controller COMMAND test_normal_force_controller)
 
     add_executable(test_capsule_distance tests/test_capsule_distance.cpp)
     target_link_libraries(test_capsule_distance PRIVATE rb_servo_core)

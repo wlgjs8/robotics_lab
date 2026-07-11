@@ -158,8 +158,18 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(flow_profile->pose_track_smd.singularity_scale_min, 0.12));
         RB_CHECK(near(flow_profile->max_smd_goal_lead_m, 0.080));
         RB_CHECK(near(flow_profile->max_smd_goal_lead_rad, 0.35));
-        RB_CHECK(stack_real.force_control.provider == "null");
-        RB_CHECK(!stack_real.force_control.enable);
+        RB_CHECK(stack_real.force_torque.source == "rbpodo_eft");
+        RB_CHECK(stack_real.force_torque.left.enable);
+        RB_CHECK(stack_real.force_torque.right.enable);
+        RB_CHECK(stack_real.force_torque.left.frame_configured);
+        RB_CHECK(stack_real.force_torque.right.frame_configured);
+        RB_CHECK(stack_real.force_control.provider == "project_native");
+        RB_CHECK(stack_real.force_control.enable);
+        RB_CHECK(stack_real.force_control.operating_mode == "monitor");
+        RB_CHECK(!stack_real.force_control.allow_in_real);
+        RB_CHECK(!stack_real.force_control.supervised_experimental_real);
+        RB_CHECK(stack_real.force_control.left.enable);
+        RB_CHECK(stack_real.force_control.right.enable);
         RB_CHECK(stack_real.kinematics.enable);
         RB_CHECK(stack_real.kinematics.provider == "pinocchio");
         const auto& real_mesh = stack_real.safety.self_collision.mesh;
@@ -397,7 +407,7 @@ bool testStatePublisherEndpointsParseAndValidate() {
     return true;
 }
 
-bool testForceControlStaysDisabled() {
+bool testForceControlSchemaAndActivation() {
     const std::string inactive_path = writeTempConfig(
         "force-inactive-schema",
         "schema: robotics_lab.rb_servo_server.v1\n"
@@ -498,6 +508,71 @@ bool testForceControlStaysDisabled() {
     const bool pipeline_enabled_rejected = loadRejects(pipeline_enabled_path);
     ::unlink(pipeline_enabled_path.c_str());
     RB_CHECK(pipeline_enabled_rejected);
+
+    const std::string monitor_enabled_path = writeTempConfig(
+        "force-monitor-enabled",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  source: rbpodo_eft\n"
+        "  left:\n"
+        "    enable: true\n"
+        "    frame_configured: true\n"
+        "    sensor_identity: rft64-left\n"
+        "    calibration_id: characterization-v1\n"
+        "    freshness_source: source_time\n"
+        "force_control:\n"
+        "  provider: project_native\n"
+        "  enable: true\n"
+        "  operating_mode: monitor\n"
+        "  left:\n"
+        "    enable: true\n"
+        "    surface_source: floor_constraint\n"
+        "    target_force_n: 3.0\n"
+        "    contact_enter_force_n: 5.0\n"
+        "    contact_release_force_n: 1.0\n"
+        "    force_deadband_n: 0.5\n"
+        "    hard_normal_force_n: 20.0\n"
+        "    hard_force_norm_n: 30.0\n"
+        "    hard_torque_norm_nm: 5.0\n"
+        "    debounce_samples: 3\n"
+        "    release_dwell_sec: 0.1\n"
+        "  normal_admittance:\n"
+        "    virtual_mass_kg: 4.0\n"
+        "    damping_n_s_m: 60.0\n"
+        "    stiffness_n_m: 0.0\n"
+        "    max_unload_offset_m: 0.005\n"
+        "    max_normal_velocity_m_s: 0.01\n"
+        "    max_normal_acceleration_m_s2: 0.1\n"
+        "    max_normal_jerk_m_s3: 1.0\n"
+        "    max_normal_step_m: 0.0005\n"
+        "    max_energy_j: 1.0\n"
+    );
+    const rb_servo::DualArmConfig monitor_enabled =
+        rb_servo::loadConfigFromYaml(monitor_enabled_path);
+    ::unlink(monitor_enabled_path.c_str());
+    RB_CHECK(monitor_enabled.force_control.enable);
+    RB_CHECK(monitor_enabled.force_control.provider == "project_native");
+    RB_CHECK(monitor_enabled.force_control.operating_mode == "monitor");
+    RB_CHECK(monitor_enabled.force_control.update_rate_hz == 500);
+    RB_CHECK(monitor_enabled.force_control.left.enable);
+    RB_CHECK(near(monitor_enabled.force_control.left.target_force_n, 3.0));
+    RB_CHECK(near(
+        monitor_enabled.force_control.normal_admittance.max_unload_offset_m,
+        0.005
+    ));
+
+    const std::string rate_mismatch_path = writeTempConfig(
+        "force-rate-mismatch",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_control:\n"
+        "  provider: project_native\n"
+        "  enable: true\n"
+        "  operating_mode: monitor\n"
+        "  update_rate_hz: 200\n"
+    );
+    const bool rate_mismatch_rejected = loadRejects(rate_mismatch_path);
+    ::unlink(rate_mismatch_path.c_str());
+    RB_CHECK(rate_mismatch_rejected);
 
     const std::string invalid_mass_path = writeTempConfig(
         "force-invalid-mass",
@@ -1354,7 +1429,7 @@ int main() {
     if (!testServoIoModelParsesAndValidates()) return 1;
     if (!testUnknownKeysAndSchemaFail()) return 1;
     if (!testStatePublisherEndpointsParseAndValidate()) return 1;
-    if (!testForceControlStaysDisabled()) return 1;
+    if (!testForceControlSchemaAndActivation()) return 1;
     if (!testCommandSourceConfigParsesAndValidates()) return 1;
     if (!testCartesianControlTuningParsesAndValidates()) return 1;
     if (!testRemovedRawScriptBackendRejected()) return 1;

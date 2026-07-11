@@ -269,7 +269,7 @@ FtWrenchPipelineOutput FtWrenchPipeline::process(
     if (!filter_initialized_) {
         filtered_external_ = out.fast_external_wrench_tcp;
         filter_initialized_ = true;
-    } else {
+    } else if (freshness_advanced) {
         filtered_external_ = lowPass(filtered_external_, out.fast_external_wrench_tcp, alpha);
     }
     out.control_external_wrench_tcp = filtered_external_;

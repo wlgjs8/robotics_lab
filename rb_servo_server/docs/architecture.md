@@ -61,12 +61,12 @@ SafetyFilter
 sendServoJ
 ```
 
-## Future force-control path
+## Default-off force-control path
 
 ```text
 nominal TCP target
         ↓
-ForceController + F/T sensor
+F/T pipeline + contact supervisor + NormalForceController
         ↓
 TCP compensation
         ↓
@@ -75,7 +75,9 @@ IK
 sendServoJ
 ```
 
-Force control is disabled by default and should only be activated after Cartesian FK/IK is stable.
+Force control is disabled in tracked configs. Site-local activation follows the
+staged sensor/frame/sign/threshold acceptance runbook and remains subordinate to
+the final joint safety gate.
 
 ## Camera architecture
 

@@ -71,7 +71,7 @@ pgmode-real(실제 RB3-730E 하드웨어)에서 구동/검증된 항목:
 - **정책 task 성공률** — rollout 모션은 부드럽지만 부정확(예: 좌완이 grasp 대신
   충돌). 런타임이 아니라 **모델 품질 / 데이터 커버리지 / appearance-domain gap**
   문제이며 init-pose 분포 매칭이 진행 중(`umi_init_from_grasp.py`)
-- force control (`provider: null`, `enable: false` 유지)
+- default-off project-native F/T monitor/contact guard/normal admittance
 - 고속 물리 circle 단계 (15 cm / 16 s 이상, transition ladder P7–P9)
 - 실측 hand-eye / 카메라 calibration은 일반 geometry-의존 정책엔 여전히 미완이지만,
   **현재 배포된 pika Sense≡Gripper + ee_local + 이미지조건 정책에는 불필요**
@@ -121,7 +121,7 @@ rb_servo_server
 
 rbpodo 컨트롤러 `pgmode` 시뮬레이션은 위와 같은 팔별 rbpodo endpoint 구조를
 그대로 쓰되, 대상이 Virtual ControlBox VM 또는 `pgmode`로 둔 실제 box입니다.
-site/VM config는 gitignore된 `rb_servo_server/config/local/`에 둡니다.
+실행 설정은 추적되는 `stack_real.yaml`과 `stack_sim.yaml`에서만 관리합니다.
 
 ## Safety
 
@@ -135,7 +135,7 @@ site/VM config는 gitignore된 `rb_servo_server/config/local/`에 둡니다.
 제거됐습니다. `run_mode`/`operation_mode`는 이제 telemetry 라벨이며 실행 허용
 여부를 결정하지 않습니다.
 
-실제 모션의 실행 권한은 **site-local config + `rb_servo_server`의 mode-독립
+실제 모션의 실행 권한은 **추적되는 stack config + `rb_servo_server`의 mode-독립
 안전 계층**이 결정합니다.
 
 - safety filter (joint clamp, stand-frame floor plane)
@@ -145,7 +145,7 @@ site/VM config는 gitignore된 `rb_servo_server/config/local/`에 둡니다.
 - client deadman
 - 운영자 감독 + 하드웨어 E-stop은 물리 운용 절차로 유지
 
-실제 동작은 `rb_servo_server/config/local/`의 site config가 명시적으로 허용해야
+실제 동작은 `rb_servo_server/config/stack_real.yaml`이 명시적으로 허용해야
 합니다. policy측 `SafetyGate`의 real-Cartesian 차단은 PR #13으로 은퇴했고,
 stale state/fault/camera/kinematics 같은 client-side readiness만 남습니다. 실제
 Cartesian 모션의 최종 허용/거부는 `rb_servo_server`가 맡습니다.
@@ -200,17 +200,19 @@ tracked real rbpodo template의 supported safety range는 명시적 per-joint
 정규화는 control/safety/tracking/log source-of-truth에 쓰지 않습니다.
 자세한 내용은 `docs/joint_range_policy.md`를 봅니다.
 
-Force control은 비활성 상태를 유지합니다. Hardware-free Phase 1에는
-`FtWrenchPipeline`과 bounded project-native `ForceController` 단위 테스트만
-포함되며 servo motion path에는 연결되지 않습니다. 상세 계약과 승격 gate는
-`rb_servo_server/docs/force_control.md`를 봅니다.
-실센서 특성화와 승격 evidence는
-`docs/runbooks/ft_force_control_acceptance.md`에 기록합니다.
+Project-native F/T monitor, contact guard, 법선방향 unilateral admittance가
+servo motion path에 통합되어 있습니다. `stack_real.yaml`은 현재 monitor 단계만
+활성화하며 실제 guard/admittance 승격은 같은 파일에서 한 단계씩 수행합니다.
+상세 계약은 `rb_servo_server/docs/force_control.md`, 실센서 특성화와
+승격 evidence는 `docs/runbooks/ft_force_control_acceptance.md`에 기록합니다.
 
 ```yaml
 force_control:
-  provider: null
-  enable: false
+  provider: project_native
+  enable: true
+  operating_mode: monitor
+  allow_in_real: false
+  supervised_experimental_real: false
 ```
 
 ## Motion Primitive 요약
@@ -284,9 +286,8 @@ python3 scripts/rbpodo_servo_acceptance.py --help
 ```
 
 Start with read-only. Use the tracked `rb_servo_server/config/stack_real.yaml`
-as the reference template, then make a site-specific copy under
-`rb_servo_server/config/local/` for read-only or motion procedures. Local real
-configs are gitignored and must carry the site/operator-specific safety choices.
+directly and change one reviewed acceptance-stage setting at a time. Do not
+create parallel local real profiles.
 
 통합 운영자 stack 시작(native — Docker 아님). `make run`이
 `rb_servo_server` + viser GUI + `policy_runner`(SpaceMouse + UMI teleop)를 한
@@ -301,6 +302,10 @@ make run MODE=sim   # pgmode controller-simulation
 backend 포함). 하드웨어 없이 controller-simulation을 돌리려면 Rainbow 가상
 control-box VM 2대를 `make vm-up`으로 띄운 뒤 `make run MODE=sim`을 씁니다
 (`make vm-down` / `make vm-status`).
+
+`make build`는 증분 빌드이며, layout-sensitive `config.hpp`가 바뀌면 서버
+object 전체만 자동으로 다시 컴파일합니다. CMake cache/toolchain/build-tree를
+완전히 초기화해야 할 때만 `make rebuild`를 사용합니다.
 
 SpaceMouse / UMI teleop는 `make run`이 띄우는 `policy_runner`에서 상시 동시
 운용됩니다(별도 teleop 모드 불필요). policy 학습은 GPU 서버에서 native
@@ -397,10 +402,5 @@ Tracked stack configs:
 - `rb_servo_server/config/stack_sim.yaml` — rbpodo controller-simulation (`make run MODE=sim`)
 - `rb_servo_server/config/stack_real.yaml` — physical real stack (`make run`, operator-supervised)
 
-Site-local mock / real / 컨트롤러 시뮬레이션(VM·onbox) config (gitignore):
-
-- `rb_servo_server/config/local/*.yaml`
-- e.g. `rb_servo_server/config/local/stack_real_readonly.yaml`
-- e.g. `rb_servo_server/config/local/stack_real_motion.yaml`
-
-실행 가능한 tracked real robot config는 추가하면 안 됩니다.
+추가 real/local launch config는 만들지 않습니다. 실제 단계별 변경은
+`stack_real.yaml` 한 파일에서 review와 CSV evidence를 남기며 진행합니다.

@@ -55,6 +55,109 @@ nlohmann::json wrenchJson(const Wrench6D& wrench) {
     });
 }
 
+nlohmann::json realtimeTimingRangeJson(const RealtimeTimingRange& value) {
+    return {
+        {"last", value.last},
+        {"p95", value.p95},
+        {"max", value.max},
+    };
+}
+
+nlohmann::json feedbackRealtimeTimingJson(
+    const FeedbackRealtimeTimingTelemetry& value
+) {
+    return {
+        {"frame_rate_hz", value.frame_rate_hz},
+        {"fresh_rate_hz", value.fresh_rate_hz},
+        {"held_count", value.held_count},
+        {"period_ms", realtimeTimingRangeJson(value.period_ms)},
+        {"jitter_ms", realtimeTimingRangeJson(value.jitter_ms)},
+        {"age_us", realtimeTimingRangeJson(value.age_us)},
+        {"phase_us", realtimeTimingRangeJson(value.phase_us)},
+        {"phase_basis", "host_frame_timestamp_modulo_scheduled_servo_period"},
+        {"freshness_reliable", value.freshness_reliable},
+        {"frame_rate_basis", "host_frame_timestamp_change"},
+        {"freshness_basis", "controller_robot_time_diagnostic_only"},
+        {"robot_time_available", value.robot_time_available},
+        {"robot_time_monotonic", value.robot_time_monotonic},
+        {"robot_time_trust", "diagnostic_only"},
+    };
+}
+
+nlohmann::json realtimeTimingJson(const RealtimeTimingTelemetry& value) {
+    return {
+        {"window_sec", value.window_sec},
+        {"quantile_method", "fixed_log_histogram_upper_bound"},
+        {"servo", {
+            {"target_rate_hz", value.servo.target_rate_hz},
+            {"observed_rate_hz", value.servo.observed_rate_hz},
+            {"send_rate_hz", value.servo.send_rate_hz},
+            {"period_ms", realtimeTimingRangeJson(value.servo.period_ms)},
+            {"jitter_ms", realtimeTimingRangeJson(value.servo.jitter_ms)},
+            {"wake_latency_us", realtimeTimingRangeJson(value.servo.wake_latency_us)},
+            {"pre_send_us", realtimeTimingRangeJson(value.servo.pre_send_us)},
+            {"send_duration_us", realtimeTimingRangeJson(value.servo.send_duration_us)},
+            {"pre_send_basis", "first_backend_dispatch_start_minus_loop_start"},
+            {"send_duration_basis", "max_per_arm_backend_dispatch_call"},
+            {"deadline_basis", "loop_end_after_scheduled_wake_plus_nominal_period"},
+            {"deadline_miss_count", value.servo.deadline_miss_count},
+            {"catch_up_count", value.servo.catch_up_count},
+        }},
+        {"feedback", {
+            {"left", feedbackRealtimeTimingJson(value.left_feedback)},
+            {"right", feedbackRealtimeTimingJson(value.right_feedback)},
+        }},
+    };
+}
+
+nlohmann::json forceTorqueJson(const ForceTorqueTelemetry& value) {
+    return {
+        {"enabled", value.enabled},
+        {"source", value.source},
+        {"source_assurance", value.source_assurance},
+        {"sensor_health_verified", value.sensor_health_verified},
+        {"safety_rated", value.safety_rated},
+        {"raw_sensor_wrench", wrenchJson(value.raw_sensor_wrench)},
+        {"wrench_tcp", wrenchJson(value.wrench_tcp)},
+        {"fast_external_wrench", wrenchJson(value.fast_external_wrench)},
+        {"control_external_wrench", wrenchJson(value.control_external_wrench)},
+        {"healthy", value.healthy},
+        {"stale", value.stale},
+        {"freshness_value", value.freshness_value},
+        {"freshness_advanced", value.freshness_advanced},
+        {"reason", value.reason},
+    };
+}
+
+nlohmann::json forceControlJson(const ForceControlTelemetry& value) {
+    return {
+        {"enabled", value.enabled},
+        {"operating_mode", value.operating_mode},
+        {"state", value.state},
+        {"surface_source", value.surface_source},
+        {"normal_stand", value.normal_stand},
+        {"contact_active", value.contact_active},
+        {"measured_force_n", value.measured_force_n},
+        {"fast_normal_force_n", value.fast_normal_force_n},
+        {"fast_force_norm_n", value.fast_force_norm_n},
+        {"fast_torque_norm_nm", value.fast_torque_norm_nm},
+        {"contact_threshold_exceeded", value.contact_threshold_exceeded},
+        {"hard_limit_exceeded", value.hard_limit_exceeded},
+        {"target_force_n", value.target_force_n},
+        {"correction_m", value.correction_m},
+        {"velocity_m_s", value.velocity_m_s},
+        {"acceleration_m_s2", value.acceleration_m_s2},
+        {"energy_j", value.energy_j},
+        {"saturated", value.saturated},
+        {"proposal_valid", value.proposal_valid},
+        {"proposal_committed", value.proposal_committed},
+        {"fault_reason", value.fault_reason.empty()
+            ? nlohmann::json(nullptr)
+            : nlohmann::json(value.fault_reason)},
+        {"motion_epoch", value.motion_epoch},
+    };
+}
+
 bool finiteJointArray(const JointArray& joints) {
     return std::all_of(joints.begin(), joints.end(), [](double value) {
         return std::isfinite(value);
@@ -1178,6 +1281,7 @@ nlohmann::json armStateJson(
         {"last_send", backendCallJson(last_send, true)},
         {"robot_time_ns", state.robot_time_ns},
         {"host_time_ns", state.host_time_ns},
+        {"acquisition_sequence", state.acquisition_sequence},
         {"error_code", state.error_code},
         // External F/T sensor wrench from the rbpodo state frame (sdata.eft_*):
         // [fx, fy, fz, tx, ty, tz] in N / Nm, controller-reported external-sensor
@@ -1388,7 +1492,11 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
     message["period_ms"] = snapshot.period_ms;
     message["jitter_ms"] = snapshot.jitter_ms;
     message["filter_dt_ms"] = snapshot.filter_dt_ms;
+    if (snapshot.realtime_timing.has_value()) {
+        message["realtime_timing"] = realtimeTimingJson(*snapshot.realtime_timing);
+    }
     message["command_seq"] = snapshot.command.seq;
+    message["motion_epoch"] = snapshot.motion_epoch;
     message["command_source"] = commandSourceJson(snapshot, config_);
     message["observed_mode"] = observedModeString(config_);
     message["observed_backend"] = observedBackendString(config_);
@@ -1470,6 +1578,10 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         snapshot.startup_validation.right,
         gripper_bridge_ ? gripper_bridge_->latest(ArmId::Right) : GripperArmFeedback{}
     );
+    message["left"]["force_torque"] = forceTorqueJson(snapshot.left_force_torque);
+    message["right"]["force_torque"] = forceTorqueJson(snapshot.right_force_torque);
+    message["left"]["force_control"] = forceControlJson(snapshot.left_force_control);
+    message["right"]["force_control"] = forceControlJson(snapshot.right_force_control);
     message["last_cartesian_solve"] = {
         {"left", cartesianSolveJson(snapshot.left_cartesian_solve)},
         {"right", cartesianSolveJson(snapshot.right_cartesian_solve)},

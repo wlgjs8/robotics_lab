@@ -261,6 +261,56 @@ void writeInitMotionHeader(std::ostream& os) {
        << ",self_collision_pair";
 }
 
+void writeWrenchHeader(std::ostream& os, const char* side, const char* name) {
+    os << ',' << side << '_' << name << "_fx_n"
+       << ',' << side << '_' << name << "_fy_n"
+       << ',' << side << '_' << name << "_fz_n"
+       << ',' << side << '_' << name << "_tx_nm"
+       << ',' << side << '_' << name << "_ty_nm"
+       << ',' << side << '_' << name << "_tz_nm";
+}
+
+void writeForceTelemetryHeader(std::ostream& os, const char* side) {
+    os << ',' << side << "_ft_enabled"
+       << ',' << side << "_ft_source"
+       << ',' << side << "_ft_source_assurance"
+       << ',' << side << "_ft_sensor_health_verified"
+       << ',' << side << "_ft_safety_rated";
+    writeWrenchHeader(os, side, "ft_raw_sensor");
+    writeWrenchHeader(os, side, "ft_wrench_tcp");
+    writeWrenchHeader(os, side, "ft_fast_external");
+    writeWrenchHeader(os, side, "ft_control_external");
+    os << ',' << side << "_ft_healthy"
+       << ',' << side << "_ft_stale"
+       << ',' << side << "_ft_freshness_value"
+       << ',' << side << "_ft_freshness_advanced"
+       << ',' << side << "_ft_reason"
+       << ',' << side << "_force_control_enabled"
+       << ',' << side << "_force_control_operating_mode"
+       << ',' << side << "_force_control_state"
+       << ',' << side << "_force_control_surface_source"
+       << ',' << side << "_force_control_normal_stand_x"
+       << ',' << side << "_force_control_normal_stand_y"
+       << ',' << side << "_force_control_normal_stand_z"
+       << ',' << side << "_force_control_contact_active"
+       << ',' << side << "_force_control_measured_normal_force_n"
+       << ',' << side << "_force_control_fast_normal_force_n"
+       << ',' << side << "_force_control_fast_force_norm_n"
+       << ',' << side << "_force_control_fast_torque_norm_nm"
+       << ',' << side << "_force_control_contact_threshold_exceeded"
+       << ',' << side << "_force_control_hard_limit_exceeded"
+       << ',' << side << "_force_control_target_force_n"
+       << ',' << side << "_force_control_correction_m"
+       << ',' << side << "_force_control_velocity_m_s"
+       << ',' << side << "_force_control_acceleration_m_s2"
+       << ',' << side << "_force_control_energy_j"
+       << ',' << side << "_force_control_saturated"
+       << ',' << side << "_force_control_proposal_valid"
+       << ',' << side << "_force_control_proposal_committed"
+       << ',' << side << "_force_control_fault_reason"
+       << ',' << side << "_force_control_motion_epoch";
+}
+
 }  // namespace
 
 ServoLogger::ServoLogger(const LoggingConfig& config) : config_(config) {}
@@ -272,6 +322,16 @@ ServoLogger::~ServoLogger() {
 bool ServoLogger::start() {
     if (!config_.enable) return true;
     if (running_) return true;
+
+    // Preallocate the ring once, off the RT path, so push() never allocates.
+    // queue_capacity == 0 leaves the ring empty and push drops every sample
+    // (preserves the prior capacity==0 behavior). Sized to queue_capacity, it
+    // holds ~queue_capacity/rate seconds of backlog before evicting oldest.
+    ring_.assign(config_.queue_capacity, ServoSample{});
+    head_ = 0;
+    size_ = 0;
+    drain_buffer_.clear();
+    drain_buffer_.reserve(config_.queue_capacity);
 
     std::filesystem::create_directories(config_.directory);
     // One file per run: servo_log_<YYYYMMDD_HHMMSS>.csv (no longer truncated/
@@ -318,16 +378,28 @@ void ServoLogger::stop() {
 void ServoLogger::push(const ServoSample& sample) {
     if (!config_.enable || !running_) return;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (config_.queue_capacity == 0) {
+        // try_to_lock, never block: if the consumer holds the mutex (it can be
+        // preempted while draining on a loaded non-RT core), a plain lock would
+        // priority-invert the FIFO-80 servo loop for milliseconds. Dropping a
+        // log row (counted below, surfaced as logger_dropped_samples) is the
+        // correct RT trade — the servo tick must not stall to log itself.
+        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+        if (!lock.owns_lock()) {
             dropped_samples_.fetch_add(1, std::memory_order_relaxed);
             return;
         }
-        if (queue_.size() >= config_.queue_capacity) {
-            queue_.pop_front();
+        if (ring_.empty()) {  // queue_capacity == 0: logging disabled at the queue
+            dropped_samples_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (size_ >= ring_.size()) {  // full: evict oldest, no allocation
+            head_ = (head_ + 1) % ring_.size();
+            --size_;
             dropped_samples_.fetch_add(1, std::memory_order_relaxed);
         }
-        queue_.push_back(sample);
+        const size_t write_index = (head_ + size_) % ring_.size();
+        ring_[write_index] = sample;  // fixed-slot copy; deque node growth is gone
+        ++size_;
     }
     cv_.notify_one();
 }
@@ -336,18 +408,30 @@ uint64_t ServoLogger::droppedSamples() const {
     return dropped_samples_.load(std::memory_order_relaxed);
 }
 
+void ServoLogger::drainInto(std::vector<ServoSample>& out) {
+    out.clear();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (ring_.empty() || size_ == 0) return;
+    for (size_t i = 0; i < size_; ++i) {
+        out.push_back(ring_[(head_ + i) % ring_.size()]);
+    }
+    head_ = 0;
+    size_ = 0;
+}
+
 void ServoLogger::threadMain() {
     while (running_) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait_for(lock, std::chrono::milliseconds(config_.flush_period_ms), [&] {
-            return !queue_.empty() || !running_;
-        });
-        while (!queue_.empty()) {
-            ServoSample sample = queue_.front();
-            queue_.pop_front();
-            lock.unlock();
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait_for(lock, std::chrono::milliseconds(config_.flush_period_ms), [&] {
+                return size_ > 0 || !running_;
+            });
+        }
+        // Copy the pending batch out under the lock, then write it with the lock
+        // released so the RT producer's try_lock in push() rarely contends.
+        drainInto(drain_buffer_);
+        for (const ServoSample& sample : drain_buffer_) {
             writeSample(sample);
-            lock.lock();
         }
         if (file_) file_.flush();
     }
@@ -382,6 +466,8 @@ void ServoLogger::writeHeader() {
     file_ << ",sched_wake_time_ns,prev_sleep_enter_time_ns"
              ",wake_latency_us,sleep_entry_margin_us"
              ",left_pre_send_us,right_pre_send_us";
+    writeForceTelemetryHeader(file_, "left");
+    writeForceTelemetryHeader(file_, "right");
     file_ << '\n';
 }
 
@@ -423,6 +509,60 @@ std::string csvEscape(const std::string& value) {
     }
     out += '"';
     return out;
+}
+
+void writeWrenchColumns(std::ostream& os, const Wrench6D& wrench) {
+    os << ',' << wrench.fx
+       << ',' << wrench.fy
+       << ',' << wrench.fz
+       << ',' << wrench.tx
+       << ',' << wrench.ty
+       << ',' << wrench.tz;
+}
+
+void writeForceTelemetryColumns(
+    std::ostream& os,
+    const ForceTorqueTelemetry& ft,
+    const ForceControlTelemetry& control
+) {
+    os << ',' << ft.enabled
+       << ',' << csvEscape(ft.source)
+       << ',' << csvEscape(ft.source_assurance)
+       << ',' << ft.sensor_health_verified
+       << ',' << ft.safety_rated;
+    writeWrenchColumns(os, ft.raw_sensor_wrench);
+    writeWrenchColumns(os, ft.wrench_tcp);
+    writeWrenchColumns(os, ft.fast_external_wrench);
+    writeWrenchColumns(os, ft.control_external_wrench);
+    os << ',' << ft.healthy
+       << ',' << ft.stale
+       << ',' << ft.freshness_value
+       << ',' << ft.freshness_advanced
+       << ',' << csvEscape(ft.reason)
+       << ',' << control.enabled
+       << ',' << csvEscape(control.operating_mode)
+       << ',' << csvEscape(control.state)
+       << ',' << csvEscape(control.surface_source)
+       << ',' << control.normal_stand[0]
+       << ',' << control.normal_stand[1]
+       << ',' << control.normal_stand[2]
+       << ',' << control.contact_active
+       << ',' << control.measured_force_n
+       << ',' << control.fast_normal_force_n
+       << ',' << control.fast_force_norm_n
+       << ',' << control.fast_torque_norm_nm
+       << ',' << control.contact_threshold_exceeded
+       << ',' << control.hard_limit_exceeded
+       << ',' << control.target_force_n
+       << ',' << control.correction_m
+       << ',' << control.velocity_m_s
+       << ',' << control.acceleration_m_s2
+       << ',' << control.energy_j
+       << ',' << control.saturated
+       << ',' << control.proposal_valid
+       << ',' << control.proposal_committed
+       << ',' << csvEscape(control.fault_reason)
+       << ',' << control.motion_epoch;
 }
 
 // Per-arm Cartesian IK/solve diagnostics row values. Field order MUST match
@@ -923,6 +1063,8 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << ',' << sleep_entry_margin_us
           << ',' << left_pre_send_us
           << ',' << right_pre_send_us;
+    writeForceTelemetryColumns(file_, sample.left_force_torque, sample.left_force_control);
+    writeForceTelemetryColumns(file_, sample.right_force_torque, sample.right_force_control);
     file_ << '\n';
 }
 

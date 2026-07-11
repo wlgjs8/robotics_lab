@@ -8,8 +8,21 @@
 # components are editable installs (subsequent source edits are live, no
 # reinstall). The C++ server is rebuilt every run.
 #
+# Usage: tools/build_stack.sh [--clean]
+#   --clean removes only the rb_servo_server build tree used by make run.
 # Overrides: BUILD_JOBS, RBPODO_TAG, RBPODO_SRC, BUILD_STACK_PYTHON.
 set -euo pipefail
+
+CLEAN_BUILD=0
+case "${1:-}" in
+  "") ;;
+  --clean) CLEAN_BUILD=1 ;;
+  *)
+    echo "usage: $0 [--clean]" >&2
+    exit 2
+    ;;
+esac
+[ "$#" -le 1 ] || { echo "usage: $0 [--clean]" >&2; exit 2; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -43,7 +56,10 @@ run_sudo() {
 #    build. Installed once into /usr/local; re-runs detect it and skip.
 RBPODO_TAG="${RBPODO_TAG:-v0.16.10}"
 RBPODO_SRC="${RBPODO_SRC:-$HOME/rbpodo_src}"
-if ! find /usr/local /opt -name 'rbpodoConfig.cmake' 2>/dev/null | grep -q .; then
+RBPODO_CONFIG=$(find /usr/local /opt -type f \
+  \( -name 'rbpodoConfig.cmake' -o -name 'rbpodo-config.cmake' \) \
+  -print -quit 2>/dev/null || true)
+if [ -z "$RBPODO_CONFIG" ]; then
   echo "[build] rbpodo C++ SDK not found; installing $RBPODO_TAG into /usr/local"
   [ -d "$RBPODO_SRC/.git" ] || git clone --depth 1 --branch "$RBPODO_TAG" \
     https://github.com/RainbowRobotics/rbpodo "$RBPODO_SRC"
@@ -54,6 +70,10 @@ if ! find /usr/local /opt -name 'rbpodoConfig.cmake' 2>/dev/null | grep -q .; th
 fi
 
 # 2) rb_servo_server -> the exact path `make run` expects (build/rbpodo_real_gate).
+if [ "$CLEAN_BUILD" -eq 1 ]; then
+  echo "[build] clean rebuild: removing $BUILD_DIR"
+  rm -rf -- "$BUILD_DIR"
+fi
 echo "[build] rb_servo_server (RB_SERVO_ENABLE_RBPODO=ON) -> $BUILD_DIR"
 export CMAKE_PREFIX_PATH="/opt/openrobots:/usr/local${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 cmake -S rb_servo_server -B "$BUILD_DIR" \
@@ -67,7 +87,7 @@ cmake --build "$BUILD_DIR" -j "$JOBS"
 #     mixed build let an arm penetrate the floor while FloorViolation was still detected.
 #     Fail closed: if any object linked into the SERVER (core lib + exe, not tests) is
 #     older than config.hpp, refuse to ship the binary and demand a clean rebuild.
-#     (Add more struct headers to STRUCT_HDRS if their layout changes bite similarly.)
+#     Keep STRUCT_HDRS in sync with CMakeLists.txt RB_SERVO_LAYOUT_HEADERS.
 STRUCT_HDRS=("rb_servo_server/include/rb_servo/config/config.hpp")
 STALE_OBJS=""
 for hdr in "${STRUCT_HDRS[@]}"; do
@@ -80,7 +100,7 @@ if [ -n "${STALE_OBJS//[$'\n\t ']/}" ]; then
   echo "[build] FATAL: server object(s) are OLDER than a struct-layout header after build." >&2
   echo "[build]        The incremental build is LAYOUT-INCONSISTENT (ODR) — it can silently" >&2
   echo "[build]        corrupt runtime safety config (floor/collision). Clean rebuild required:" >&2
-  echo "[build]            rm -rf $BUILD_DIR && make build" >&2
+  echo "[build]            make rebuild" >&2
   echo "[build]        stale objects:" >&2
   printf '%s' "$STALE_OBJS" | sed '/^$/d;s/^/[build]          /' >&2
   exit 1

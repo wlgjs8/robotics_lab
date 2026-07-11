@@ -331,11 +331,11 @@ Real `sendServoJ()` requires:
 - valid state acquisition
 - controller motion readiness
 - config `send_servo_commands: true`
-- site-local config that enables real motion (the legacy `RB_ALLOW_REAL_*` env
+- the tracked stack config enabling real motion (the legacy `RB_ALLOW_REAL_*` env
   gates were removed from the server runtime)
 
 Cartesian primitives are config-gated. `TcpPoseTarget` and `TcpLinearMove`
-require `cartesian_control.enable: true` and the relevant site-local
+require `cartesian_control.enable: true` and the relevant tracked-stack
 Cartesian gate for the active topology.
 
 The only real-controller carve-out is rbpodo controller `pgmode` simulation.
@@ -366,9 +366,9 @@ Real stop/reset APIs remain conservative until verified. If no verified API is w
 Rbpodo is the primary vendor-library real backend. The current tracked launch
 configs are `rb_servo_server/config/stack_real.yaml` and
 `rb_servo_server/config/stack_sim.yaml`; the legacy `dual_real*.example.yaml`
-template surface is no longer tracked. Site-specific variants and acceptance
-stage copies belong under `rb_servo_server/config/local/`, which is
-intentionally user-owned and gitignored.
+template surface is no longer tracked. Do not create site-specific launch
+copies; acceptance-stage settings are changed one at a time in the tracked
+stack config with matching evidence.
 
 ### Rbpodo ACK Semantics
 
@@ -397,7 +397,7 @@ telemetry must show:
 
 ACK-off is an experimental supervised acceptance mode, not a safe mode. Real
 motion with ACK waiting disabled is config-driven and must be enabled explicitly
-in the site-local config (the legacy `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION` env
+in the tracked real config (the legacy `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION` env
 gate was removed from the server runtime).
 
 ACK-off runs need stronger monitoring because immediate controller rejection is

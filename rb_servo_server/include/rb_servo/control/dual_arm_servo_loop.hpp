@@ -18,6 +18,8 @@
 #include "rb_servo/control/command_buffer.hpp"
 #include "rb_servo/control/delta_twist_follower.hpp"
 #include "rb_servo/control/joint_moving_average.hpp"
+#include "rb_servo/control/normal_force_controller.hpp"
+#include "rb_servo/control/realtime_timing.hpp"
 #include "rb_servo/control/smd_pose_tracker.hpp"
 #include "rb_servo/network/chunk_frame_receiver.hpp"
 #include "rb_servo/control/self_collision.hpp"
@@ -33,6 +35,7 @@
 #include "rb_servo/kinematics/i_kinematics.hpp"
 #include "rb_servo/logging/servo_logger.hpp"
 #include "rb_servo/robot/i_robot_backend.hpp"
+#include "rb_servo/sensor/ft_wrench_pipeline.hpp"
 
 namespace rb_servo {
 
@@ -313,6 +316,19 @@ private:
     bool latchChunkFollowerFaultRequests(const RobotState& left_state, const RobotState& right_state);
     void markSafetyIntervention(ArmId arm_id, uint64_t now_ns);
     bool safetyInterventionRecent(ArmId arm_id, uint64_t now_ns) const;
+    bool updateForceRuntime(
+        ArmId arm_id,
+        const RobotState& state,
+        double dt_sec,
+        uint64_t now_ns,
+        std::string* fault_reason
+    );
+    void applyForceCorrection(ArmId arm_id, ArmCommand* command) const;
+    void finishForceProposals(
+        bool left_accepted,
+        bool right_accepted,
+        SafetyVerdict verdict
+    );
 
 private:
     std::unique_ptr<IRobotBackend> left_robot_;
@@ -321,6 +337,25 @@ private:
     std::unique_ptr<ArmWorker> right_worker_;
 
     DualArmConfig config_;
+
+    struct ForceArmRuntime {
+        ForceTorqueTelemetry ft;
+        ForceControlTelemetry control;
+        Pose6D contact_anchor;
+        bool contact_anchor_valid = false;
+        int enter_count = 0;
+        uint64_t release_start_ns = 0;
+        Pose6D previous_actual_pose;
+        uint64_t previous_actual_pose_ns = 0;
+        std::optional<NormalForceControllerProposal> pending_proposal;
+    };
+    FtWrenchPipeline left_ft_pipeline_;
+    FtWrenchPipeline right_ft_pipeline_;
+    NormalForceController left_normal_force_controller_;
+    NormalForceController right_normal_force_controller_;
+    ForceArmRuntime left_force_runtime_;
+    ForceArmRuntime right_force_runtime_;
+    uint64_t motion_epoch_ = 0;
 
     CommandBuffer* command_buffer_ = nullptr;
     ServoLogger* logger_ = nullptr;
@@ -339,6 +374,7 @@ private:
 
     uint64_t tick_ = 0;
     uint64_t last_loop_start_ns_ = 0;
+    RealtimeTimingAccumulator realtime_timing_accumulator_;
 
     JointArray left_prev_sent_q_deg_{};
     JointArray right_prev_sent_q_deg_{};
