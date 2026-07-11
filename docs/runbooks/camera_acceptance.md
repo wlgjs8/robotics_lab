@@ -43,7 +43,9 @@ UNKNOWN
 
 Mock serials such as `MOCK_*` are only valid when mock/simulated cameras are enabled.
 
-`reconnect.enabled: true` must remain rejected until reconnect is implemented and accepted.
+Tracked real-camera profiles enable per-camera reconnect with a 2 s frame
+timeout. Verify that unplugging one approved test camera leaves every other
+camera streaming and that health reports a disconnect, attempt, and success.
 
 ## Dependency Preflight
 
@@ -55,6 +57,16 @@ Run:
 
 Real camera work may require RealSense packages, udev rules, USB permission, and host access to `/dev/bus/usb`.
 
+The tracked camera image pins librealsense SDK `2.58.1`, matching the deployed
+D435 firmware `5.17.3.10`. Before acceptance, both D405 devices must report
+firmware `5.17.0.10`. Startup fails closed for an older SDK, USB2 connection,
+older D405 firmware, or mismatched D405 firmware pair.
+
+Run native V4L2 first. If it reproduces USB `-71`/disconnect after the version
+alignment, apply the D405-only autosuspend rule documented in
+`camera_server/docs/docker_deployment.md` and repeat. Use
+`LIBREALSENSE_BACKEND=rsusb` only as the final software-only diagnostic.
+
 ## Acceptance Duration
 
 Minimum recommended test durations:
@@ -62,6 +74,23 @@ Minimum recommended test durations:
 - short smoke: 2 minutes
 - development acceptance: 10 minutes
 - pre-policy acceptance: 30 to 60 minutes
+
+For the shared `4-2.x` D405 path, use this fixed ladder:
+
+Use `make cam-down` followed by `make cam-up ...` between stages. Do not use
+`docker restart camera_server`: it can relaunch before the previous RealSense
+pipelines have released their UVC interfaces, leaving a camera at 0 FPS.
+
+1. dual D405-only native, 10 minutes;
+2. full D435 + dual D405 native, 30 minutes;
+3. if needed, repeat after the D405-only autosuspend rule;
+4. if still failing, repeat with the pinned RSUSB image.
+
+Each stage requires 29--31 FPS per enabled stream, frame age below 100 ms,
+policy bundle rate at least 29 Hz, no increasing drops after warm-up, and no
+kernel USB `-71`, disconnect, or re-enumeration. Failure of the RSUSB stage is
+the stop condition for software-only remediation and requires physical USB
+root-path separation.
 
 ## Metrics To Record
 

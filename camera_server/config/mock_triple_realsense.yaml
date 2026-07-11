@@ -54,3 +54,4 @@ reconnect:
   enabled: false
   max_attempts: 0
   retry_interval_ms: 1000
+  frame_timeout_ms: 2000

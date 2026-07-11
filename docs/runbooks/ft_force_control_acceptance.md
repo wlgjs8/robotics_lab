@@ -183,6 +183,9 @@ applicable config/ownership parts of these requirements:
 - hard-fault server and Python motion-epoch/observation provenance invalidation
 - DeltaTwist normal-axis projection with tangential-state preservation
 - Cartesian loading projection and bounded SE(3) compliance on every enabled axis
+- fixed Hold equilibrium with no measured-pose ratchet under sustained wrench
+- zero-wrench release recentering to that equilibrium on x/y/z/rx/ry/rz
+- Hold-to-policy first-delta projection without an equilibrium jump
 - legacy guarded-mode reset interlock requiring a fresh post-event observation and chunk
 
 In `cartesian_admittance`, soft-contact entry and release do not increment
@@ -202,6 +205,14 @@ latches a controller fault, if any hard force/torque threshold is crossed, or
 if the corrected target fails IK or a downstream safety gate. Review the
 per-axis `compliance_limit_axes` together with the separate normal, transverse,
 and rotational contact flags in the GUI and CSV.
+
+Before flow-infer, validate `cartesian_admittance` in a fixed `Hold` one axis at
+a time. Apply and release a small supervised load in x, y, z, roll, pitch, and
+yaw. The equilibrium pose/source must remain unchanged while held, the bounded
+offset must oppose the wrench without a fault, and `compliance_recenter_active`
+must drive every offset back near zero after release. Stop immediately on an
+equilibrium drift, repeated offset growth, unexpected-axis motion, or a hard
+force/torque threshold event.
 
 The F/T path is not safety-rated. It supplements but never replaces E-stop,
 lease/deadman, stale-state, tracking-error, self-collision, floor, ROI, and

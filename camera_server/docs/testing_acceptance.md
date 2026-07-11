@@ -87,8 +87,9 @@ Acceptance:
 - server does not crash unexpectedly
 - health event reports disconnect
 - bundles become incomplete or are dropped according to config
-- reconnect remains disabled in P0; `reconnect.enabled: true` must fail config
-  validation until reconnect is implemented
+- the disconnected camera reconnects independently
+- unaffected cameras continue increasing their frame counters during recovery
+- health exposes disconnect, attempt, success, exhaustion, and last-error state
 
 ## 9. Docker test
 

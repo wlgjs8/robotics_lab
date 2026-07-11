@@ -327,7 +327,10 @@ void writeForceTelemetryHeader(std::ostream& os, const char* side) {
     writeDeltaTwistVecHeader(os, side, "force_control_compliance_acceleration_surface");
     writeDeltaTwistVecHeader(os, side, "force_control_raw_policy_delta_surface");
     writeDeltaTwistVecHeader(os, side, "force_control_accepted_policy_delta_surface");
+    writePoseHeader(os, side, "force_control_compliance_equilibrium_stand");
     os
+       << ',' << side << "_force_control_compliance_equilibrium_source"
+       << ',' << side << "_force_control_compliance_recenter_active"
        << ',' << side << "_force_control_limit_axis_x"
        << ',' << side << "_force_control_limit_axis_y"
        << ',' << side << "_force_control_limit_axis_z"
@@ -568,6 +571,7 @@ void writeWrenchColumns(std::ostream& os, const Wrench6D& wrench) {
 }
 
 void writeDeltaTwistVecColumns(std::ostream& os, const Vec6& value);
+void writePoseColumns(std::ostream& os, const std::optional<Pose6D>& pose);
 
 void writeForceTelemetryColumns(
     std::ostream& os,
@@ -626,7 +630,10 @@ void writeForceTelemetryColumns(
     writeDeltaTwistVecColumns(os, control.compliance_acceleration_surface);
     writeDeltaTwistVecColumns(os, control.raw_policy_delta_surface);
     writeDeltaTwistVecColumns(os, control.accepted_policy_delta_surface);
+    writePoseColumns(os, std::optional<Pose6D>{control.compliance_equilibrium_stand});
     os
+       << ',' << csvEscape(control.compliance_equilibrium_source)
+       << ',' << control.compliance_recenter_active
        << ',' << control.compliance_limit_axes[0]
        << ',' << control.compliance_limit_axes[1]
        << ',' << control.compliance_limit_axes[2]

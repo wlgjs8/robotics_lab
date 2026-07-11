@@ -81,13 +81,40 @@ Use POSIX names:
 
 Do not use random names unless published through config or discovery endpoint.
 
-## 6. Host prerequisites
+## 6. Librealsense version and backend
+
+The image builds librealsense from the pinned official release rather than the
+legacy Jammy package repository. The deployed D435 firmware `5.17.3.10`
+requires SDK `2.58.1`; the D405 pair remains on firmware `5.17.0.10`.
+
+```bash
+# Production/default: native V4L2 backend
+make cam-up
+
+# Diagnostic fallback only, after the native acceptance run fails
+make cam-up LIBREALSENSE_BACKEND=rsusb
+```
+
+Build arguments are `LIBREALSENSE_VERSION`, `LIBREALSENSE_REF`, and
+`LIBREALSENSE_BACKEND=native|rsusb`. The tracked defaults pin both the tag and
+commit. Do not move the ref independently of the version.
+
+The server fails before opening streams when a required RealSense is USB2, the
+SDK is older than `2.58.1`, a D405 is older than `5.17.0.10`, or the configured
+D405 cameras have different firmware versions.
+
+## 7. Optional D405 autosuspend diagnostic
+
+Do not install the rule initially. If the version-aligned native test still
+disconnects, install `deploy/99-realsense-d405-power.rules` on the host, reload
+udev, replug/reset the cameras, and repeat the same acceptance profile. The rule
+targets D405 product ID `8086:0b5b` only.
+
+## 8. Host prerequisites
 
 Recommended packages:
 
 ```text
-librealsense2
-librealsense2-dev
 libzmq3-dev
 nlohmann-json3-dev
 ```
@@ -96,4 +123,8 @@ If offline deployment is needed, vendor small header-only dependencies such as n
 
 ## 구현 파일
 
-Docker 설정은 repository root의 `Dockerfile`과 `docker-compose.yml`에 구현되어 있다. Compose service는 `container_name: camera_server`, `ipc: host`, `shm_size: "2gb"`, `network_mode: host`, `privileged: true`, USB/udev mounts, config/episode volumes를 포함한다.
+Docker 설정은 `camera_server/Dockerfile`과 repository root의
+`docker-compose.yml`에 구현되어 있다. Compose service는
+`container_name: camera_server`, `ipc: host`, `shm_size: "2gb"`,
+`network_mode: host`, `privileged: true`, USB/udev mounts, config/episode
+volumes를 포함한다.

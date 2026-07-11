@@ -142,7 +142,14 @@ Publish periodically, for example 1 Hz.
       "drop_count_color": 0,
       "drop_count_depth": 0,
       "last_frame_age_ms": 3.1,
-      "usb_reconnect_count": 0
+      "reconnect": {
+        "attempt_count": 1,
+        "success_count": 1,
+        "disconnect_count": 1,
+        "consecutive_failures": 0,
+        "exhausted": false,
+        "last_error": "frame timeout after 2000 ms"
+      }
     }
   },
   "shared_memory": {

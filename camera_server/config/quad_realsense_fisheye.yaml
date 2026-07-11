@@ -122,6 +122,7 @@ health:
   warn_if_bundle_skew_ms_gt: 25
 
 reconnect:
-  enabled: false  # not implemented; enabled=true is rejected at config load
+  enabled: true
   max_attempts: 0
   retry_interval_ms: 1000
+  frame_timeout_ms: 2000

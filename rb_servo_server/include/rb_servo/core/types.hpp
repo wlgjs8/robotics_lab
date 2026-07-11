@@ -558,6 +558,7 @@ struct ForceControlTelemetry {
     std::string operating_mode = "monitor";
     std::string state = "inactive";
     std::string surface_source = "floor_constraint";
+    std::string compliance_frame = "surface";
     std::array<double, 3> normal_stand{0.0, 0.0, 1.0};
     bool contact_active = false;
     bool normal_contact_active = false;
@@ -569,10 +570,15 @@ struct ForceControlTelemetry {
     bool rotational_regulating = false;
     bool loading_projection_active = false;
     Wrench6D control_wrench_surface;
+    Wrench6D control_wrench_compliance;
     Wrench6D wrench_error_surface;
+    Wrench6D wrench_error_compliance;
     Pose6D compliance_offset_surface;
     Vec6 compliance_velocity_surface;
     Vec6 compliance_acceleration_surface;
+    Pose6D compliance_equilibrium_stand;
+    std::string compliance_equilibrium_source = "unavailable";
+    bool compliance_recenter_active = false;
     Vec6 raw_policy_delta_surface;
     Vec6 accepted_policy_delta_surface;
     std::array<bool, 6> compliance_limit_axes{};

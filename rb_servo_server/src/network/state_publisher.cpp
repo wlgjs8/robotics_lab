@@ -172,6 +172,16 @@ nlohmann::json forceControlJson(const ForceControlTelemetry& value) {
         {"compliance_acceleration_surface", vec6Json(value.compliance_acceleration_surface)},
         {"raw_policy_delta_surface", vec6Json(value.raw_policy_delta_surface)},
         {"accepted_policy_delta_surface", vec6Json(value.accepted_policy_delta_surface)},
+        {"compliance_equilibrium_stand", nlohmann::json::array({
+            value.compliance_equilibrium_stand.x,
+            value.compliance_equilibrium_stand.y,
+            value.compliance_equilibrium_stand.z,
+            value.compliance_equilibrium_stand.rx,
+            value.compliance_equilibrium_stand.ry,
+            value.compliance_equilibrium_stand.rz,
+        })},
+        {"compliance_equilibrium_source", value.compliance_equilibrium_source},
+        {"compliance_recenter_active", value.compliance_recenter_active},
         {"compliance_limit_axes", value.compliance_limit_axes},
         {"compliance_limit_reason", value.compliance_limit_reason.empty()
             ? nlohmann::json(nullptr)

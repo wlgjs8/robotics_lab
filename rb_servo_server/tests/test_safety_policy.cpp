@@ -4074,6 +4074,11 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     sample.left_force_control.accepted_policy_delta_surface = {
         0.001, 0.002, 0.003, 0.01, 0.02, 0.03,
     };
+    sample.left_force_control.compliance_equilibrium_stand = {
+        0.41, -0.22, 0.33, 0.1, -0.2, 0.3,
+    };
+    sample.left_force_control.compliance_equilibrium_source = "policy_target";
+    sample.left_force_control.compliance_recenter_active = true;
     sample.left_force_control.compliance_limit_axes = {
         true, false, false, false, true, false,
     };
@@ -4158,6 +4163,14 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
         index_of("left_force_control_compliance_offset_surface_dry_rad");
     const std::size_t accepted_policy_rz =
         index_of("left_force_control_accepted_policy_delta_surface_drz_rad");
+    const std::size_t equilibrium_x =
+        index_of("left_force_control_compliance_equilibrium_stand_x_m");
+    const std::size_t equilibrium_rz =
+        index_of("left_force_control_compliance_equilibrium_stand_rz_rad");
+    const std::size_t equilibrium_source =
+        index_of("left_force_control_compliance_equilibrium_source");
+    const std::size_t recenter_active =
+        index_of("left_force_control_compliance_recenter_active");
     const std::size_t limit_axis_x = index_of("left_force_control_limit_axis_x");
     const std::size_t limit_axis_pitch =
         index_of("left_force_control_limit_axis_pitch");
@@ -4220,7 +4233,11 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(compliance_wrench_fx > loading_projection);
     RB_CHECK(compliance_offset_ry > compliance_wrench_fx);
     RB_CHECK(accepted_policy_rz > compliance_offset_ry);
-    RB_CHECK(limit_axis_x > accepted_policy_rz);
+    RB_CHECK(equilibrium_x > accepted_policy_rz);
+    RB_CHECK(equilibrium_rz > equilibrium_x);
+    RB_CHECK(equilibrium_source > equilibrium_rz);
+    RB_CHECK(recenter_active > equilibrium_source);
+    RB_CHECK(limit_axis_x > recenter_active);
     RB_CHECK(limit_axis_pitch > limit_axis_x);
     RB_CHECK(limit_reason > limit_axis_pitch);
     RB_CHECK(measured_force > init_left_goal_deficit);
@@ -4280,6 +4297,10 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(row.at(compliance_wrench_fx) == "1.25");
     RB_CHECK(row.at(compliance_offset_ry) == "0.02");
     RB_CHECK(row.at(accepted_policy_rz) == "0.03");
+    RB_CHECK(row.at(equilibrium_x) == "0.41");
+    RB_CHECK(row.at(equilibrium_rz) == "0.3");
+    RB_CHECK(row.at(equilibrium_source) == "policy_target");
+    RB_CHECK(row.at(recenter_active) == "1");
     RB_CHECK(row.at(limit_axis_x) == "1");
     RB_CHECK(row.at(limit_axis_pitch) == "1");
     RB_CHECK(row.at(limit_reason) == "jerk_limited_motion_envelope");
@@ -4604,6 +4625,8 @@ bool testCartesianTransverseComplianceKeepsSoftContactInCurrentMotionEpoch() {
     RB_CHECK(snapshot.right_force_control.correction_m == 0.0);
     RB_CHECK(snapshot.right_force_control.velocity_m_s == 0.0);
     RB_CHECK(snapshot.right_force_control.acceleration_m_s2 == 0.0);
+    const double equilibrium_x_before_loading =
+        snapshot.right_force_control.compliance_equilibrium_stand.x;
 
     target.seq = 3;
     target.host_time_ns = rb_servo::nowSteadyNs();
@@ -4611,8 +4634,13 @@ bool testCartesianTransverseComplianceKeepsSoftContactInCurrentMotionEpoch() {
     buffer.setCommand(target);
     RB_CHECK(waitUntil([&] {
         snapshot = loop.latestSnapshot();
-        return snapshot.right_force_control.loading_projection_active;
+        return snapshot.command.seq == target.seq &&
+            snapshot.right_force_control.proposal_committed;
     }, std::chrono::milliseconds(1000)));
+    RB_CHECK(snapshot.right_force_control.compliance_equilibrium_source ==
+             "policy_target");
+    RB_CHECK(snapshot.right_force_control.compliance_equilibrium_stand.x <=
+             equilibrium_x_before_loading + 1e-6);
     RB_CHECK(snapshot.motion_epoch == soft_contact_epoch);
 
     right_backend_ptr->setEftWrench(rb_servo::Wrench6D{});
@@ -4621,6 +4649,117 @@ bool testCartesianTransverseComplianceKeepsSoftContactInCurrentMotionEpoch() {
         return !snapshot.right_force_control.contact_active;
     }, std::chrono::milliseconds(1500)));
     RB_CHECK(snapshot.motion_epoch == soft_contact_epoch);
+    RB_CHECK(!snapshot.fault_latched);
+    loop.stop();
+    return true;
+}
+
+bool testCartesianHoldComplianceUsesFixedSixAxisEquilibriumAndRecenters() {
+    rb_servo::DualArmConfig cfg = testConfig();
+    configureCartesianLoopTest(&cfg);
+    cfg.servo.send_at_tick_start = false;
+    cfg.servo.command_timeout_sec = 10.0;
+    cfg.safety.floor_constraint.enable = true;
+    cfg.safety.floor_constraint.z_min_m = -1.0;
+    cfg.force_torque.source = "rbpodo_eft";
+    cfg.force_torque.right.enable = true;
+    cfg.force_torque.right.frame_configured = true;
+    cfg.force_torque.right.freshness_source = "sequence";
+    cfg.force_torque.right.control_lpf_alpha = 1.0;
+    cfg.force_control.provider = "project_native";
+    cfg.force_control.enable = true;
+    cfg.force_control.operating_mode = "cartesian_admittance";
+    cfg.force_control.update_rate_hz = cfg.servo.rate_hz;
+    cfg.force_control.right.enable = true;
+    cfg.force_control.right.contact_enter_force_n = 4.0;
+    cfg.force_control.right.contact_release_force_n = 2.0;
+    cfg.force_control.right.hard_normal_force_n = 100.0;
+    cfg.force_control.right.hard_force_norm_n = 200.0;
+    cfg.force_control.right.hard_torque_norm_nm = 100.0;
+    cfg.force_control.right.debounce_samples = 1;
+    cfg.force_control.right.transverse_contact_enter_force_n = 4.0;
+    cfg.force_control.right.transverse_contact_release_force_n = 2.0;
+    cfg.force_control.right.torque_contact_enter_nm = 0.5;
+    cfg.force_control.right.torque_contact_release_nm = 0.2;
+    cfg.force_control.right.compliance_axes = {true, true, true, true, true, true};
+    cfg.force_control.virtual_mass = {1.0, 1.0, 1.0, 0.5, 0.5, 0.5};
+    cfg.force_control.damping = {20.0, 20.0, 20.0, 5.0, 5.0, 5.0};
+    cfg.force_control.stiffness = {100.0, 100.0, 100.0, 20.0, 20.0, 20.0};
+    cfg.force_control.wrench_deadband = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    cfg.force_control.max_linear_velocity_m_s = 0.03;
+    cfg.force_control.max_angular_velocity_rad_s = 0.1;
+    cfg.force_control.max_linear_acceleration_m_s2 = 0.5;
+    cfg.force_control.max_angular_acceleration_rad_s2 = 1.0;
+    cfg.force_control.max_linear_jerk_m_s3 = 5.0;
+    cfg.force_control.max_angular_jerk_rad_s3 = 10.0;
+    cfg.force_control.max_energy_j = 100.0;
+
+    rb_servo::Wrench6D wrench{8.0, -7.0, 6.0, 1.0, -1.0, 1.0};
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left_backend = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Left, initial, false);
+    auto right_backend = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Right, initial, false);
+    TestBackend* right_backend_ptr = right_backend.get();
+    right_backend_ptr->setEftWrench(wrench);
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    kinematics->setOrientationFromJoint(true);
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmServoLoop loop(
+        std::move(left_backend), std::move(right_backend), cfg, &buffer,
+        nullptr, kinematics
+    );
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    RB_CHECK(waitUntil([&] {
+        return loop.motionState() == rb_servo::ServerMotionState::ArmedHold;
+    }));
+
+    rb_servo::ServoSnapshot snapshot;
+    RB_CHECK(waitUntil([&] {
+        snapshot = loop.latestSnapshot();
+        const rb_servo::Pose6D& offset =
+            snapshot.right_force_control.compliance_offset_surface;
+        return snapshot.right_force_control.proposal_committed &&
+            snapshot.right_force_control.compliance_equilibrium_source ==
+                "hold_anchor" &&
+            offset.x < 0.0 && offset.y > 0.0 && offset.z < 0.0 &&
+            offset.rx < 0.0 && offset.ry > 0.0 && offset.rz < 0.0;
+    }, std::chrono::milliseconds(2000)));
+    RB_CHECK(!snapshot.fault_latched);
+    const rb_servo::Pose6D equilibrium =
+        snapshot.right_force_control.compliance_equilibrium_stand;
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    snapshot = loop.latestSnapshot();
+    const rb_servo::Pose6D& held_equilibrium =
+        snapshot.right_force_control.compliance_equilibrium_stand;
+    RB_CHECK(std::abs(held_equilibrium.x - equilibrium.x) <= 1e-9);
+    RB_CHECK(std::abs(held_equilibrium.y - equilibrium.y) <= 1e-9);
+    RB_CHECK(std::abs(held_equilibrium.z - equilibrium.z) <= 1e-9);
+    RB_CHECK(std::abs(snapshot.right_force_control.compliance_offset_surface.x) <=
+             cfg.force_control.max_pos_offset_m + 1e-9);
+    RB_CHECK(std::abs(snapshot.right_force_control.compliance_offset_surface.y) <=
+             cfg.force_control.max_pos_offset_m + 1e-9);
+    RB_CHECK(std::abs(snapshot.right_force_control.compliance_offset_surface.z) <=
+             cfg.force_control.max_pos_offset_m + 1e-9);
+
+    right_backend_ptr->setEftWrench(rb_servo::Wrench6D{});
+    RB_CHECK(waitUntil([&] {
+        snapshot = loop.latestSnapshot();
+        const rb_servo::Pose6D& offset =
+            snapshot.right_force_control.compliance_offset_surface;
+        const rb_servo::Vec6& velocity =
+            snapshot.right_force_control.compliance_velocity_surface;
+        return std::abs(offset.x) < 1e-4 && std::abs(offset.y) < 1e-4 &&
+            std::abs(offset.z) < 1e-4 && std::abs(offset.rx) < 1e-4 &&
+            std::abs(offset.ry) < 1e-4 && std::abs(offset.rz) < 1e-4 &&
+            std::abs(velocity.x) < 1e-4 && std::abs(velocity.y) < 1e-4 &&
+            std::abs(velocity.z) < 1e-4;
+    }, std::chrono::milliseconds(4000)));
+    RB_CHECK(snapshot.right_force_control.compliance_equilibrium_source ==
+             "hold_anchor");
     RB_CHECK(!snapshot.fault_latched);
     loop.stop();
     return true;
@@ -6873,6 +7012,7 @@ int main() {
     if (!testForceHardLimitRequiresConsecutiveFreshSamples()) return 1;
     if (!testGuardedAdmittanceContinuesAcrossUpstreamHold()) return 1;
     if (!testCartesianTransverseComplianceKeepsSoftContactInCurrentMotionEpoch()) return 1;
+    if (!testCartesianHoldComplianceUsesFixedSixAxisEquilibriumAndRecenters()) return 1;
     if (!testGuardedAdmittanceBrakesAndHoldsMeasuredPoseOnRelease()) return 1;
     if (!testReadOnlyDiagnosticStartupAllowsFaultedStateAndPublishesUnsafeSnapshot()) return 1;
     if (!testMotionStartupRejectsFaultedState()) return 1;

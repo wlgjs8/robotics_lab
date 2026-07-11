@@ -1680,6 +1680,14 @@ void validateConfig(const DualArmConfig& cfg) {
                 path + ".surface_source must be floor_constraint or user_floor_plane"
             );
         }
+        const std::string compliance_frame = lower(arm.compliance_frame);
+        if (!(compliance_frame == "surface" ||
+              compliance_frame == "sensor_origin" ||
+              compliance_frame == "tcp_origin")) {
+            throw std::runtime_error(
+                path + ".compliance_frame must be surface, sensor_origin, or tcp_origin"
+            );
+        }
         validateNonNegativeFinite(arm.target_force_n, path + ".target_force_n");
         validateNonNegativeFinite(arm.contact_enter_force_n, path + ".contact_enter_force_n");
         validateNonNegativeFinite(arm.contact_release_force_n, path + ".contact_release_force_n");
@@ -3329,6 +3337,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             validateAllowedKeys(arm, {
                 "enable",
                 "surface_source",
+                "compliance_frame",
                 "target_force_n",
                 "contact_enter_force_n",
                 "contact_release_force_n",
@@ -3348,6 +3357,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             }, path);
             if (has(arm, "enable")) out.enable = asBool(arm["enable"], path + ".enable");
             if (has(arm, "surface_source")) out.surface_source = lower(asString(arm["surface_source"], path + ".surface_source"));
+            if (has(arm, "compliance_frame")) out.compliance_frame = lower(asString(arm["compliance_frame"], path + ".compliance_frame"));
             if (has(arm, "target_force_n")) out.target_force_n = asDouble(arm["target_force_n"], path + ".target_force_n");
             if (has(arm, "contact_enter_force_n")) out.contact_enter_force_n = asDouble(arm["contact_enter_force_n"], path + ".contact_enter_force_n");
             if (has(arm, "contact_release_force_n")) out.contact_release_force_n = asDouble(arm["contact_release_force_n"], path + ".contact_release_force_n");

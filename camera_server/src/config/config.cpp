@@ -184,6 +184,7 @@ AppConfig load_config(const std::string& path) {
     cfg.reconnect.enabled = node_as(n["enabled"], cfg.reconnect.enabled);
     cfg.reconnect.max_attempts = node_as(n["max_attempts"], cfg.reconnect.max_attempts);
     cfg.reconnect.retry_interval_ms = node_as(n["retry_interval_ms"], cfg.reconnect.retry_interval_ms);
+    cfg.reconnect.frame_timeout_ms = node_as(n["frame_timeout_ms"], cfg.reconnect.frame_timeout_ms);
   }
 
   validate_config(cfg);
@@ -251,8 +252,11 @@ void validate_config(const AppConfig& cfg) {
       cfg.health.warn_if_fps_below < 0.0) {
     throw std::runtime_error("health publish/window/fps thresholds must be positive");
   }
-  if (cfg.reconnect.enabled) {
-    throw std::runtime_error("reconnect.enabled=true is not implemented yet");
+  if (cfg.reconnect.enabled && cfg.reconnect.retry_interval_ms == 0) {
+    throw std::runtime_error("reconnect.retry_interval_ms must be > 0 when reconnect is enabled");
+  }
+  if (cfg.reconnect.enabled && cfg.reconnect.frame_timeout_ms < 100) {
+    throw std::runtime_error("reconnect.frame_timeout_ms must be >= 100 when reconnect is enabled");
   }
   for (const auto& cam : cfg.cameras) {
     if (cam.name.empty()) throw std::runtime_error("camera name cannot be empty");

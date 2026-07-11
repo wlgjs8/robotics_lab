@@ -48,9 +48,9 @@ rb_servo::ForceControlCommand xCommand() {
 rb_servo::ForceControlConfig realProfileConfig() {
     rb_servo::ForceControlConfig config = controllerConfig();
     config.virtual_mass = {8.0, 8.0, 8.0, 0.8, 0.8, 0.8};
-    config.damping = {160.0, 160.0, 160.0, 16.0, 16.0, 16.0};
-    config.stiffness = {300.0, 300.0, 0.0, 30.0, 30.0, 30.0};
-    config.wrench_deadband = {5.0, 5.0, 0.0, 0.9, 0.9, 0.9};
+    config.damping = {100.0, 100.0, 100.0, 10.0, 10.0, 10.0};
+    config.stiffness = {300.0, 300.0, 300.0, 30.0, 30.0, 30.0};
+    config.wrench_deadband = {3.0, 3.0, 3.0, 0.6, 0.6, 0.6};
     config.max_pos_offset_m = 0.01;
     config.max_rot_offset_rad = 0.035;
     config.max_linear_velocity_m_s = 0.015;
@@ -98,13 +98,15 @@ bool testCommandLimitsOnlyTightenServerLimits() {
     larger.max_pos_step_m = 0.1;
     const auto server_bounded = controller.propose(wrench, larger, rb_servo::Vec6{}, 0.01);
     RB_CHECK(server_bounded.valid);
-    RB_CHECK(near(server_bounded.state.offset_tcp.x, -0.001));
+    RB_CHECK(server_bounded.state.offset_tcp.x < -0.0009);
+    RB_CHECK(std::abs(server_bounded.state.offset_tcp.x) <= 0.001 + 1e-12);
 
     rb_servo::ForceControlCommand tighter = xCommand();
     tighter.max_pos_step_m = 0.0002;
     const auto command_bounded = controller.propose(wrench, tighter, rb_servo::Vec6{}, 0.01);
     RB_CHECK(command_bounded.valid);
-    RB_CHECK(near(command_bounded.state.offset_tcp.x, -0.0002));
+    RB_CHECK(command_bounded.state.offset_tcp.x < -0.00018);
+    RB_CHECK(std::abs(command_bounded.state.offset_tcp.x) <= 0.0002 + 1e-12);
     return true;
 }
 
@@ -208,13 +210,21 @@ bool testZeroErrorJitterAndSaturationDoNotWindUp() {
             rb_servo::Vec6{},
             0.01
         );
+        if (!proposal.valid) {
+            const auto& state = bounded_controller.state();
+            std::cerr << "bounded steady i=" << i
+                      << " x=" << state.offset_tcp.x
+                      << " v=" << state.velocity_tcp.x
+                      << " a=" << state.acceleration_tcp.x
+                      << ": " << proposal.reason << "\n";
+        }
         RB_CHECK(proposal.valid);
         RB_CHECK(bounded_controller.commit(proposal));
     }
-    RB_CHECK(near(
-        bounded_controller.state().offset_tcp.x,
-        -bounded_config.max_pos_offset_m
-    ));
+    RB_CHECK(bounded_controller.state().offset_tcp.x <
+             -0.94 * bounded_config.max_pos_offset_m);
+    RB_CHECK(std::abs(bounded_controller.state().offset_tcp.x) <=
+             bounded_config.max_pos_offset_m + 1e-12);
     RB_CHECK(near(bounded_controller.state().velocity_tcp.x, 0.0));
     return true;
 }
@@ -339,6 +349,48 @@ bool testRealProfileAllCartesianAxesStayBoundedWithoutFault() {
     return true;
 }
 
+bool testRealProfileReleaseSweepRemainsRecursivelyFeasible() {
+    const rb_servo::ForceControlConfig config = realProfileConfig();
+    constexpr double dt = 0.002;
+    for (double force_n : {-30.0, -18.0, -10.0, 10.0, 18.0, 30.0}) {
+        for (int load_ticks : {25, 75, 150, 300, 600, 1200, 2400}) {
+            rb_servo::ForceController controller(config);
+            controller.engage();
+            rb_servo::Wrench6D wrench;
+            wrench.fx = force_n;
+            for (int i = 0; i < load_ticks; ++i) {
+                const auto proposal = controller.propose(
+                    wrench, xCommand(), rb_servo::Vec6{}, dt
+                );
+                if (!proposal.valid) {
+                    std::cerr << "release sweep load force=" << force_n
+                              << " ticks=" << load_ticks << " i=" << i
+                              << ": " << proposal.reason << "\n";
+                }
+                RB_CHECK(proposal.valid);
+                RB_CHECK(controller.commit(proposal));
+            }
+            for (int i = 0; i < 5000; ++i) {
+                const auto proposal = controller.propose(
+                    rb_servo::Wrench6D{}, xCommand(), rb_servo::Vec6{}, dt
+                );
+                if (!proposal.valid) {
+                    const auto& state = controller.state();
+                    std::cerr << "release sweep recenter force=" << force_n
+                              << " ticks=" << load_ticks << " i=" << i
+                              << " x=" << state.offset_tcp.x
+                              << " v=" << state.velocity_tcp.x
+                              << " a=" << state.acceleration_tcp.x
+                              << ": " << proposal.reason << "\n";
+                }
+                RB_CHECK(proposal.valid);
+                RB_CHECK(controller.commit(proposal));
+            }
+        }
+    }
+    return true;
+}
+
 bool testProposalProvenancePreventsStaleOrCrossControllerCommit() {
     rb_servo::ForceController first(controllerConfig());
     rb_servo::ForceController second(controllerConfig());
@@ -396,6 +448,7 @@ int main() {
     if (!testEveryValidProposalHonorsFiniteDifferenceDynamics()) return 1;
     if (!testRealProfileVelocityBoundaryBrakesWithoutFault()) return 1;
     if (!testRealProfileAllCartesianAxesStayBoundedWithoutFault()) return 1;
+    if (!testRealProfileReleaseSweepRemainsRecursivelyFeasible()) return 1;
     if (!testProposalProvenancePreventsStaleOrCrossControllerCommit()) return 1;
     if (!testWrenchDeadbandSuppressesNoiseAndPreservesExcessSign()) return 1;
     std::cout << "force_controller tests passed\n";

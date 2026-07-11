@@ -95,6 +95,8 @@ std::string health_to_json(const HealthSnapshot& h) {
   os << "\"uptime_sec\":" << std::fixed << std::setprecision(3) << h.uptime_sec << ',';
   os << "\"mode\":\"" << esc(h.mode) << "\",";
   os << "\"status\":\"" << esc(h.status) << "\",";
+  os << "\"realsense\":{\"sdk_version\":\"" << esc(h.realsense_sdk_version)
+     << "\",\"backend\":\"" << esc(h.realsense_backend) << "\"},";
   os << "\"status_reasons\":[";
   bool first_reason = true;
   for (const auto& reason : h.status_reasons) {
@@ -128,7 +130,19 @@ std::string health_to_json(const HealthSnapshot& h) {
     if (!first_cam) os << ',';
     first_cam = false;
     os << '\"' << esc(cam) << "\":{\"serial\":\"" << esc(h.camera_serial.count(cam) ? h.camera_serial.at(cam) : "")
-       << "\",\"connected\":" << (connected ? "true" : "false");
+       << "\",\"connected\":" << (connected ? "true" : "false")
+       << ",\"firmware_version\":\""
+       << esc(h.camera_firmware_version.count(cam) ? h.camera_firmware_version.at(cam) : "")
+       << "\",\"recommended_firmware_version\":\""
+       << esc(h.camera_recommended_firmware_version.count(cam)
+                  ? h.camera_recommended_firmware_version.at(cam)
+                  : "")
+       << "\",\"physical_port\":\""
+       << esc(h.camera_physical_port.count(cam) ? h.camera_physical_port.at(cam) : "")
+       << "\",\"product_id\":\""
+       << esc(h.camera_product_id.count(cam) ? h.camera_product_id.at(cam) : "")
+       << "\",\"usb_type\":\""
+       << esc(h.camera_usb_type.count(cam) ? h.camera_usb_type.at(cam) : "") << '\"';
     auto capture_it = h.camera_capture_stats.find(cam);
     if (capture_it != h.camera_capture_stats.end()) {
       const auto& c = capture_it->second;
@@ -141,6 +155,18 @@ std::string health_to_json(const HealthSnapshot& h) {
          << ",\"queue_wait_us_max\":" << c.queue_wait_us_max
          << ",\"frame_process_us_p95\":" << c.frame_process_us_p95
          << ",\"frame_process_us_max\":" << c.frame_process_us_max << '}';
+    }
+    auto reconnect_it = h.camera_reconnect_stats.find(cam);
+    if (reconnect_it != h.camera_reconnect_stats.end()) {
+      const auto& r = reconnect_it->second;
+      os << ",\"reconnect\":{\"attempt_count\":" << r.attempt_count
+         << ",\"success_count\":" << r.success_count
+         << ",\"disconnect_count\":" << r.disconnect_count
+         << ",\"consecutive_failures\":" << r.consecutive_failures
+         << ",\"exhausted\":" << (r.exhausted ? "true" : "false")
+         << ",\"last_disconnect_time_ns\":" << r.last_disconnect_time_ns
+         << ",\"last_reconnect_time_ns\":" << r.last_reconnect_time_ns
+         << ",\"last_error\":\"" << esc(r.last_error) << "\"}";
     }
     for (const auto& suffix : {std::string("color"), std::string("depth"),
                                std::string("ir_left"), std::string("ir_right")}) {

@@ -3266,6 +3266,9 @@ class GuiContractsTest(unittest.TestCase):
             "compliance_acceleration_surface": [0.007, 0.008, 0.009, 0.07, 0.08, 0.09],
             "raw_policy_delta_surface": [0.01, 0.02, -0.03, 0.1, 0.2, -0.3],
             "accepted_policy_delta_surface": [0.01, 0.0, 0.0, 0.1, 0.0, 0.0],
+            "compliance_equilibrium_stand": [0.41, -0.22, 0.33, 0.1, -0.2, 0.3],
+            "compliance_equilibrium_source": "policy_target",
+            "compliance_recenter_active": True,
             "compliance_limit_axes": [True, False, False, False, True, False],
             "compliance_limit_reason": "jerk_limited_motion_envelope",
             "measured_force_n": 8.2,
@@ -3340,6 +3343,15 @@ class GuiContractsTest(unittest.TestCase):
             latest.left.force_control.compliance_limit_reason,
             "jerk_limited_motion_envelope",
         )
+        self.assertEqual(
+            latest.left.force_control.compliance_equilibrium_source,
+            "policy_target",
+        )
+        self.assertAlmostEqual(
+            latest.left.force_control.compliance_equilibrium_stand.x,
+            0.41,
+        )
+        self.assertTrue(latest.left.force_control.compliance_recenter_active)
         self.assertAlmostEqual(latest.left.force_control.measured_force_n, 8.2)
         self.assertAlmostEqual(latest.left.force_control.fast_normal_force_n, 9.2)
         self.assertAlmostEqual(latest.left.force_control.fast_force_norm_n, 10.2)
@@ -3363,6 +3375,8 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("normal_contact=False", status)
         self.assertIn("transverse_contact=True", status)
         self.assertIn("rotational_contact=True", status)
+        self.assertIn("equilibrium_source=policy_target", status)
+        self.assertIn("recenter=True", status)
         self.assertIn("compliance=True", status)
         self.assertIn("normal_regulating=True", status)
         self.assertIn("transverse_regulating=False", status)

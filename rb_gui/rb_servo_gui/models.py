@@ -442,6 +442,9 @@ class ForceControlSnapshot:
     compliance_acceleration_surface: tuple[float, ...] | None = None
     raw_policy_delta_surface: tuple[float, ...] | None = None
     accepted_policy_delta_surface: tuple[float, ...] | None = None
+    compliance_equilibrium_stand: Pose6D | None = None
+    compliance_equilibrium_source: str | None = None
+    compliance_recenter_active: bool | None = None
     compliance_limit_axes: tuple[bool, ...] | None = None
     compliance_limit_reason: str | None = None
     measured_force_n: float | None = None
@@ -507,6 +510,15 @@ class ForceControlSnapshot:
             ),
             accepted_policy_delta_surface=finite_joint_array(
                 value.get("accepted_policy_delta_surface")
+            ),
+            compliance_equilibrium_stand=Pose6D.parse(
+                value.get("compliance_equilibrium_stand")
+            ),
+            compliance_equilibrium_source=_optional_str(
+                value.get("compliance_equilibrium_source")
+            ),
+            compliance_recenter_active=_optional_bool(
+                value.get("compliance_recenter_active")
             ),
             compliance_limit_axes=finite_bool_array(
                 value.get("compliance_limit_axes")

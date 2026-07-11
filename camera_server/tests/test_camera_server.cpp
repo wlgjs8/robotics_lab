@@ -1,4 +1,5 @@
 #include "camera_server/camera/realsense_device.hpp"
+#include "camera_server/camera/camera_manager.hpp"
 #include "camera_server/config/config.hpp"
 #include "camera_server/core/bounded_queue.hpp"
 #include "camera_server/core/clock.hpp"
@@ -14,6 +15,8 @@
 #include <unistd.h>
 
 #include <cassert>
+#include <atomic>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -22,6 +25,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <thread>
 
 using namespace camera_server;
 
@@ -151,10 +155,163 @@ void test_config_validation_rejects_invalid_sync_combinations() {
   expect_config_failure([&] { validate_config(hardware_nearest_timestamp); }, "sync.mode=hardware");
 }
 
-void test_config_validation_rejects_reconnect_until_implemented() {
+void test_config_validation_accepts_bounded_reconnect() {
   auto cfg = make_test_config();
   cfg.reconnect.enabled = true;
-  expect_config_failure([&] { validate_config(cfg); }, "reconnect.enabled=true is not implemented yet");
+  cfg.reconnect.max_attempts = 5;
+  cfg.reconnect.retry_interval_ms = 20;
+  cfg.reconnect.frame_timeout_ms = 100;
+  validate_config(cfg);
+
+  auto zero_interval = cfg;
+  zero_interval.reconnect.retry_interval_ms = 0;
+  expect_config_failure([&] { validate_config(zero_interval); }, "retry_interval_ms must be > 0");
+  auto short_timeout = cfg;
+  short_timeout.reconnect.frame_timeout_ms = 99;
+  expect_config_failure([&] { validate_config(short_timeout); }, "frame_timeout_ms must be >= 100");
+}
+
+class ReconnectTestDevice final : public ICameraDevice {
+ public:
+  ReconnectTestDevice(CameraConfig cfg, int frames_before_stall)
+      : cfg_(std::move(cfg)), frames_before_stall_(frames_before_stall) {}
+  ~ReconnectTestDevice() override { stop(); }
+
+  void start(FrameCallback cb) override {
+    cb_ = std::move(cb);
+    running_ = true;
+    thread_ = std::thread([this] {
+      uint64_t frame_number = 0;
+      while (running_) {
+        if (frames_before_stall_ >= 0 &&
+            frame_number >= static_cast<uint64_t>(frames_before_stall_)) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(5));
+          continue;
+        }
+        CapturedFrame frame;
+        frame.camera_name = cfg_.name;
+        frame.serial = cfg_.serial;
+        frame.stream = "color";
+        frame.frame_number = ++frame_number;
+        frame.host_arrival_time_ns = now_ns();
+        frame.sensor_timestamp_ns = frame.host_arrival_time_ns;
+        frame.width = static_cast<uint32_t>(cfg_.color.width);
+        frame.height = static_cast<uint32_t>(cfg_.color.height);
+        frame.stride_bytes = frame.width * 3;
+        frame.format = "rgb8";
+        frame.bytes.assign(static_cast<size_t>(frame.stride_bytes) * frame.height, 7);
+        frame.data = frame.bytes.data();
+        frame.size_bytes = static_cast<uint32_t>(frame.bytes.size());
+        cb_(std::move(frame));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    });
+  }
+
+  void stop() override {
+    running_ = false;
+    if (thread_.joinable()) thread_.join();
+  }
+
+ private:
+  CameraConfig cfg_;
+  int frames_before_stall_;
+  FrameCallback cb_;
+  std::atomic<bool> running_{false};
+  std::thread thread_;
+};
+
+void test_per_camera_reconnect_keeps_other_camera_streaming() {
+  auto cfg = make_test_config();
+  cfg.cameras.resize(2);
+  cfg.shared_memory.name = "/camera_server_reconnect_test";
+  cfg.metadata.pub_bind = "tcp://127.0.0.1:5998";
+  cfg.sync.master_camera = cfg.cameras[0].name;
+  cfg.reconnect.enabled = true;
+  cfg.reconnect.max_attempts = 3;
+  cfg.reconnect.retry_interval_ms = 20;
+  cfg.reconnect.frame_timeout_ms = 120;
+  validate_config(cfg);
+
+  std::atomic<int> left_instances{0};
+  CameraManager::DeviceFactory factory = [&](const CameraConfig& cam) {
+    const bool is_left = cam.name == cfg.cameras[0].name;
+    const int instance = is_left ? left_instances.fetch_add(1) : 0;
+    return std::make_unique<ReconnectTestDevice>(cam, is_left && instance == 0 ? 3 : -1);
+  };
+
+  SharedMemoryRingBuffer shm;
+  shm.create(cfg);
+  MetadataPublisher publisher(cfg.metadata);
+  FrameSynchronizerSet synchronizer(cfg);
+  Recorder recorder(cfg.recording);
+  CameraManager manager(cfg, shm, publisher, synchronizer, recorder, std::move(factory));
+  manager.start();
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  bool recovered = false;
+  uint64_t right_frames_before_recovery = 0;
+  while (std::chrono::steady_clock::now() < deadline) {
+    const auto snapshot = manager.snapshot();
+    const auto& left_reconnect = snapshot.camera_reconnect_stats.at(cfg.cameras[0].name);
+    if (left_reconnect.disconnect_count > 0 && right_frames_before_recovery == 0) {
+      right_frames_before_recovery = snapshot.stream_stats.at(cfg.cameras[1].name + ".color").frame_count;
+    }
+    if (left_reconnect.success_count > 0 &&
+        snapshot.camera_connected.at(cfg.cameras[0].name) &&
+        snapshot.camera_connected.at(cfg.cameras[1].name)) {
+      recovered = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  const auto final_snapshot = manager.snapshot();
+  manager.stop();
+
+  assert(recovered);
+  assert(left_instances.load() >= 2);
+  assert(final_snapshot.camera_reconnect_stats.at(cfg.cameras[0].name).attempt_count >= 1);
+  assert(final_snapshot.camera_reconnect_stats.at(cfg.cameras[0].name).success_count >= 1);
+  assert(final_snapshot.stream_stats.at(cfg.cameras[1].name + ".color").frame_count >
+         right_frames_before_recovery);
+}
+
+void test_realsense_preflight_contract() {
+  auto cfg = make_test_config();
+  cfg.server.simulate_cameras = false;
+  cfg.cameras.clear();
+  for (const auto& [name, serial] :
+       std::vector<std::pair<std::string, std::string>>{{"left", "LEFT"}, {"right", "RIGHT"}}) {
+    CameraConfig cam;
+    cam.name = name;
+    cam.backend = "realsense";
+    cam.serial = serial;
+    cam.required = true;
+    cam.color.enabled = true;
+    cam.depth.enabled = true;
+    cfg.cameras.push_back(cam);
+  }
+
+  const RealSenseDeviceInfo left{"Intel RealSense D405", "LEFT", "5.17.0.10", "5.17.0.10",
+                                 "/usb4/4-2.3.2", "0B5B", "3.2"};
+  const RealSenseDeviceInfo right{"Intel RealSense D405", "RIGHT", "5.17.0.10", "5.17.0.10",
+                                  "/usb4/4-2.4.2", "0B5B", "3.2"};
+  validate_realsense_preflight(cfg, {left, right}, "2.58.1");
+
+  expect_config_failure(
+      [&] { validate_realsense_preflight(cfg, {left, right}, "2.55.1"); }, "older than required 2.58.1");
+  auto usb2 = right;
+  usb2.usb_type = "2.1";
+  expect_config_failure(
+      [&] { validate_realsense_preflight(cfg, {left, usb2}, "2.58.1"); }, "not on USB3");
+  auto old_firmware = left;
+  old_firmware.firmware_version = "5.12.14.100";
+  expect_config_failure(
+      [&] { validate_realsense_preflight(cfg, {old_firmware, right}, "2.58.1"); }, "older than required 5.17.0.10");
+  auto mismatched = right;
+  mismatched.firmware_version = "5.17.0.11";
+  expect_config_failure(
+      [&] { validate_realsense_preflight(cfg, {left, mismatched}, "2.58.1"); }, "must use identical firmware");
 }
 
 void test_real_placeholder_config_fails() {
@@ -451,6 +608,14 @@ void test_health_json() {
   h.stream_status["head.color"] = "degraded";
   h.camera_connected["head"] = true;
   h.camera_serial["head"] = "MOCK_HEAD";
+  h.realsense_sdk_version = "2.58.1";
+  h.realsense_backend = "native";
+  h.camera_firmware_version["head"] = "5.17.3.10";
+  h.camera_physical_port["head"] = "/usb4/4-1.3.3";
+  h.camera_product_id["head"] = "0B07";
+  h.camera_usb_type["head"] = "3.2";
+  h.camera_reconnect_stats["head"].attempt_count = 2;
+  h.camera_reconnect_stats["head"].success_count = 1;
   h.stream_stats["head.color"].frame_count = 3;
   h.stream_stats["head.color"].internal_queue_drop_count = 1;
   h.stream_stats["head.color"].recorder_drop_count = 2;
@@ -459,6 +624,11 @@ void test_health_json() {
   assert(json.find("camera_server.health.v1") != std::string::npos);
   assert(json.find("\"status\":\"degraded\"") != std::string::npos);
   assert(json.find("\"status_reasons\"") != std::string::npos);
+  assert(json.find("\"sdk_version\":\"2.58.1\"") != std::string::npos);
+  assert(json.find("\"backend\":\"native\"") != std::string::npos);
+  assert(json.find("\"firmware_version\":\"5.17.3.10\"") != std::string::npos);
+  assert(json.find("\"usb_type\":\"3.2\"") != std::string::npos);
+  assert(json.find("\"reconnect\":{\"attempt_count\":2,\"success_count\":1") != std::string::npos);
   assert(json.find("\"status_color\":\"degraded\"") != std::string::npos);
   assert(json.find("\"drops_color\":{\"frame_number_gap\":0,\"internal_queue\":1,\"recorder\":2,\"total\":3") != std::string::npos);
   assert(json.find("\"internal_queue_delta\":0") != std::string::npos);
@@ -591,7 +761,9 @@ int main() {
   test_priority_bundle_config();
   test_config_validation_rejects_real_serial_placeholders();
   test_config_validation_rejects_invalid_sync_combinations();
-  test_config_validation_rejects_reconnect_until_implemented();
+  test_config_validation_accepts_bounded_reconnect();
+  test_per_camera_reconnect_keeps_other_camera_streaming();
+  test_realsense_preflight_contract();
   test_real_placeholder_config_fails();
   test_config_uvc_fisheye_backend();
   test_uvc_device_resolution();

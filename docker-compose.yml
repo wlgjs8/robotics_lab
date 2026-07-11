@@ -5,6 +5,10 @@ services:
     build:
       context: ./camera_server
       dockerfile: Dockerfile
+      args:
+        LIBREALSENSE_VERSION: ${LIBREALSENSE_VERSION:-2.58.1}
+        LIBREALSENSE_REF: ${LIBREALSENSE_REF:-bf2778061d5dd29776e9aca8765f75852671760b}
+        LIBREALSENSE_BACKEND: ${LIBREALSENSE_BACKEND:-native}
     image: robotics_lab/camera_server:dev
     container_name: camera_server
     ipc: host

@@ -362,7 +362,9 @@ compensated wrench pipeline, contact guard, unilateral surface-normal
 admittance, and bounded 6D Cartesian compliance before IK. In Cartesian
 compliance mode, soft contact preserves the active flow-infer chunk and gripper
 execution while loading translation/rotation increments are projected and a
-bounded SE(3) correction is composed. Hard-limit faults retain the normal
+bounded SE(3) correction is composed around a fixed Hold or latest accepted
+policy-command equilibrium. Zero-wrench stiffness recenters all six offsets
+without absorbing measured motion into that equilibrium. Hard-limit faults retain the normal
 motion-epoch interruption path. Activation, telemetry, and promotion constraints are defined in
 `rb_servo_server/docs/force_control.md`. The path is not safety-rated;
 `stack_real.yaml` currently exposes a supervised experimental dual-arm

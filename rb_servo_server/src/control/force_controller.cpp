@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <limits>
 #include <utility>
 
 namespace rb_servo {
@@ -65,44 +66,67 @@ struct AxisMotionLimits {
     double jerk = 0.0;
 };
 
-struct AccelerationInterval {
+struct AxisState {
+    double offset = 0.0;
+    double velocity = 0.0;
+    double acceleration = 0.0;
+};
+
+struct JerkInterval {
     double lower = 0.0;
     double upper = 0.0;
 };
 
-bool within(double value, double lower, double upper) {
-    constexpr double kTolerance = 1e-12;
-    return value >= lower - kTolerance && value <= upper + kTolerance;
+double scaledTolerance(double scale) {
+    return 128.0 * std::numeric_limits<double>::epsilon() *
+        std::max(1.0, std::abs(scale));
+}
+
+bool within(double value, double lower, double upper, double scale) {
+    const double tolerance = scaledTolerance(scale);
+    return value >= lower - tolerance && value <= upper + tolerance;
+}
+
+AxisState advanceWithJerk(
+    const AxisState& state,
+    double jerk,
+    double dt_sec
+) {
+    AxisState next;
+    next.acceleration = state.acceleration + jerk * dt_sec;
+    // Preserve the controller's established semi-implicit discrete dynamics:
+    // the new acceleration drives this tick's velocity and the new velocity
+    // drives this tick's position.  Jerk is now the selected control input, so
+    // all three states are produced by one consistent update instead of being
+    // integrated and then reconciled with clamps.
+    next.velocity = state.velocity + next.acceleration * dt_sec;
+    next.offset = state.offset + next.velocity * dt_sec;
+    return next;
 }
 
 // Mirror of the proven scalar normal-admittance braking envelope, generalized
 // to a symmetric Cartesian axis. It answers whether a state can still brake
 // before the positive offset/velocity boundary without violating jerk.
 bool upperBrakingFeasible(
-    double offset,
-    double velocity,
-    double acceleration,
+    AxisState state,
     const AxisMotionLimits& limits,
     double dt_sec
 ) {
-    if (!within(offset, -limits.offset, limits.offset) ||
-        !within(velocity, -limits.velocity, limits.velocity)) {
+    if (!within(state.offset, -limits.offset, limits.offset, limits.offset) ||
+        !within(state.velocity, -limits.velocity, limits.velocity, limits.velocity) ||
+        !within(
+            state.acceleration,
+            -limits.acceleration,
+            limits.acceleration,
+            limits.acceleration
+        )) {
         return false;
     }
-    if (velocity <= 0.0) return true;
+    if (state.velocity <= 0.0) return true;
 
     const double jerk_step = limits.jerk * dt_sec;
-    const auto ramp_to_zero_velocity_delta = [&](double candidate_acceleration) {
-        if (candidate_acceleration >= 0.0) return 0.0;
-        const double ramp_steps = std::ceil(-candidate_acceleration / jerk_step) - 1.0;
-        const double negative_steps = std::max(0.0, ramp_steps);
-        return dt_sec * (
-            negative_steps * candidate_acceleration +
-            jerk_step * negative_steps * (negative_steps + 1.0) * 0.5
-        );
-    };
     const double required_steps = std::ceil(
-        2.0 * limits.acceleration / jerk_step +
+        limits.acceleration / jerk_step +
         2.0 * limits.velocity / (limits.acceleration * dt_sec)
     ) + 4.0;
     constexpr double kMaxBrakingLookaheadSteps = 4096.0;
@@ -111,71 +135,63 @@ bool upperBrakingFeasible(
     }
 
     for (int i = 0; i < static_cast<int>(required_steps); ++i) {
-        const double more_negative = std::max(
-            -limits.acceleration, acceleration - jerk_step
+        // Maximum inward jerk minimizes both the future outward velocity and
+        // the distance travelled toward this boundary.  Reversing velocity is
+        // sufficient for boundary viability; requiring acceleration to ramp
+        // back to zero at the same instant unnecessarily collapses the viable
+        // set at a velocity limit and caused the observed recenter fault.
+        state.acceleration = std::max(
+            -limits.acceleration, state.acceleration - jerk_step
         );
-        const auto terminal_velocity = [&](double candidate_acceleration) {
-            return velocity + candidate_acceleration * dt_sec +
-                ramp_to_zero_velocity_delta(candidate_acceleration);
-        };
-        if (terminal_velocity(more_negative) >= 0.0) {
-            acceleration = more_negative;
-        } else {
-            double infeasible = more_negative;
-            double feasible = std::min(limits.acceleration, acceleration + jerk_step);
-            if (terminal_velocity(feasible) < -1e-12) {
-                acceleration = feasible;
-            } else {
-                for (int search = 0; search < 40; ++search) {
-                    const double midpoint = 0.5 * (infeasible + feasible);
-                    if (terminal_velocity(midpoint) >= 0.0) feasible = midpoint;
-                    else infeasible = midpoint;
-                }
-                acceleration = feasible;
-            }
-        }
-        velocity += acceleration * dt_sec;
-        offset += velocity * dt_sec;
-        if (velocity > 0.0 &&
-            (velocity > limits.velocity + 1e-12 || offset > limits.offset + 1e-12)) {
+        state.velocity += state.acceleration * dt_sec;
+        state.offset += state.velocity * dt_sec;
+        if (state.velocity > 0.0 &&
+            (!within(
+                 state.velocity, -limits.velocity, limits.velocity, limits.velocity
+             ) ||
+             !within(state.offset, -limits.offset, limits.offset, limits.offset))) {
             return false;
         }
-        if (velocity <= 1e-12) return true;
+        if (state.velocity <= scaledTolerance(limits.velocity)) return true;
     }
     return false;
 }
 
 bool lowerBrakingFeasible(
-    double offset,
-    double velocity,
-    double acceleration,
+    const AxisState& state,
     const AxisMotionLimits& limits,
     double dt_sec
 ) {
-    return upperBrakingFeasible(-offset, -velocity, -acceleration, limits, dt_sec);
+    return upperBrakingFeasible(
+        {-state.offset, -state.velocity, -state.acceleration}, limits, dt_sec
+    );
+}
+
+bool collapseTinyInterval(JerkInterval* interval, double jerk_limit) {
+    const double tolerance = 64.0 * scaledTolerance(jerk_limit);
+    if (interval->lower > interval->upper + tolerance) return false;
+    if (interval->lower > interval->upper) {
+        const double boundary = 0.5 * (interval->lower + interval->upper);
+        interval->lower = boundary;
+        interval->upper = boundary;
+    }
+    return true;
 }
 
 bool tightenToJerkLimitedEnvelope(
-    double offset,
-    double velocity,
-    double acceleration,
+    const AxisState& state,
     const AxisMotionLimits& limits,
     double dt_sec,
-    AccelerationInterval* interval
+    JerkInterval* interval
 ) {
-    const double search_margin = std::min(1e-6, limits.jerk * dt_sec * 1e-3);
-    const auto upper_ok = [&](double candidate_acceleration) {
-        const double next_velocity = velocity + candidate_acceleration * dt_sec;
-        const double next_offset = offset + next_velocity * dt_sec;
+    const auto upper_ok = [&](double candidate_jerk) {
         return upperBrakingFeasible(
-            next_offset, next_velocity, candidate_acceleration, limits, dt_sec
+            advanceWithJerk(state, candidate_jerk, dt_sec), limits, dt_sec
         );
     };
-    const auto lower_ok = [&](double candidate_acceleration) {
-        const double next_velocity = velocity + candidate_acceleration * dt_sec;
-        const double next_offset = offset + next_velocity * dt_sec;
+    const auto lower_ok = [&](double candidate_jerk) {
         return lowerBrakingFeasible(
-            next_offset, next_velocity, candidate_acceleration, limits, dt_sec
+            advanceWithJerk(state, candidate_jerk, dt_sec), limits, dt_sec
         );
     };
 
@@ -188,7 +204,7 @@ bool tightenToJerkLimitedEnvelope(
             if (upper_ok(midpoint)) feasible = midpoint;
             else infeasible = midpoint;
         }
-        interval->upper = std::max(interval->lower, feasible - search_margin);
+        interval->upper = feasible;
     }
     if (!lower_ok(interval->lower)) {
         if (!lower_ok(interval->upper)) return false;
@@ -199,9 +215,104 @@ bool tightenToJerkLimitedEnvelope(
             if (lower_ok(midpoint)) feasible = midpoint;
             else infeasible = midpoint;
         }
-        interval->lower = std::min(interval->upper, feasible + search_margin);
+        interval->lower = feasible;
     }
-    return interval->lower <= interval->upper + 1e-12;
+    return collapseTinyInterval(interval, limits.jerk);
+}
+
+bool constrainNextState(
+    const AxisState& state,
+    const AxisMotionLimits& limits,
+    double dt_sec,
+    JerkInterval* interval
+) {
+    const double dt2 = dt_sec * dt_sec;
+    const double dt3 = dt2 * dt_sec;
+    interval->lower = std::max(
+        interval->lower,
+        (-limits.acceleration - state.acceleration) / dt_sec
+    );
+    interval->upper = std::min(
+        interval->upper,
+        (limits.acceleration - state.acceleration) / dt_sec
+    );
+    interval->lower = std::max(
+        interval->lower,
+        (-limits.velocity - state.velocity - state.acceleration * dt_sec) / dt2
+    );
+    interval->upper = std::min(
+        interval->upper,
+        (limits.velocity - state.velocity - state.acceleration * dt_sec) / dt2
+    );
+    interval->lower = std::max(
+        interval->lower,
+        (-limits.offset - state.offset - state.velocity * dt_sec -
+         state.acceleration * dt2) / dt3
+    );
+    interval->upper = std::min(
+        interval->upper,
+        (limits.offset - state.offset - state.velocity * dt_sec -
+         state.acceleration * dt2) / dt3
+    );
+    return collapseTinyInterval(interval, limits.jerk);
+}
+
+bool feasibleJerkInterval(
+    const AxisState& state,
+    const AxisMotionLimits& limits,
+    double dt_sec,
+    JerkInterval* interval
+) {
+    *interval = {-limits.jerk, limits.jerk};
+    return constrainNextState(state, limits, dt_sec, interval) &&
+        tightenToJerkLimitedEnvelope(state, limits, dt_sec, interval);
+}
+
+AxisMotionLimits softGovernorLimits(
+    const AxisMotionLimits& hard,
+    double dt_sec
+) {
+    // The soft envelope is the recursively invariant operating set.  The hard
+    // configured limits remain untouched and provide deterministic recovery
+    // authority if floating-point or a prior implementation leaves a state on
+    // the exact viability boundary.  Margins are derived from one control step,
+    // not hand-tuned filtering or an output moving average.
+    const double velocity_margin = std::min(
+        0.05 * hard.velocity,
+        std::max(
+            scaledTolerance(hard.velocity), 2.0 * hard.jerk * dt_sec * dt_sec
+        )
+    );
+    const double offset_margin = std::min(
+        0.05 * hard.offset,
+        std::max(
+            scaledTolerance(hard.offset),
+            2.0 * hard.velocity * dt_sec + hard.acceleration * dt_sec * dt_sec
+        )
+    );
+    AxisMotionLimits soft = hard;
+    soft.velocity = std::max(0.5 * hard.velocity, hard.velocity - velocity_margin);
+    soft.offset = std::max(0.5 * hard.offset, hard.offset - offset_margin);
+    return soft;
+}
+
+double recoveryJerk(
+    const AxisState& state,
+    const AxisMotionLimits& soft
+) {
+    if (state.velocity > soft.velocity ||
+        (state.velocity > 0.0 && state.acceleration > 0.0)) {
+        return -soft.jerk;
+    }
+    if (state.velocity < -soft.velocity ||
+        (state.velocity < 0.0 && state.acceleration < 0.0)) {
+        return soft.jerk;
+    }
+    if (state.offset > soft.offset) return -soft.jerk;
+    if (state.offset < -soft.offset) return soft.jerk;
+    if (state.acceleration > 0.0) return -soft.jerk;
+    if (state.acceleration < 0.0) return soft.jerk;
+    return 0.0;
 }
 
 }  // namespace
@@ -330,63 +441,65 @@ ForceControllerProposal ForceController::propose(
             acceleration_limit,
             jerk_limit,
         };
-        const double jerk_step = limits.jerk * dt_sec;
-        AccelerationInterval interval{
-            std::max(-limits.acceleration, old_acceleration[i] - jerk_step),
-            std::min(limits.acceleration, old_acceleration[i] + jerk_step),
+        const AxisState old_state{
+            old_offset[i], old_velocity[i], old_acceleration[i]
         };
-        interval.lower = std::max(
-            interval.lower, (-limits.velocity - old_velocity[i]) / dt_sec
-        );
-        interval.upper = std::min(
-            interval.upper, (limits.velocity - old_velocity[i]) / dt_sec
-        );
-        interval.lower = std::max(
-            interval.lower,
-            ((-limits.offset - old_offset[i]) / dt_sec - old_velocity[i]) / dt_sec
-        );
-        interval.upper = std::min(
-            interval.upper,
-            ((limits.offset - old_offset[i]) / dt_sec - old_velocity[i]) / dt_sec
-        );
-        if (interval.lower > interval.upper + 1e-6 ||
-            !tightenToJerkLimitedEnvelope(
-                old_offset[i], old_velocity[i], old_acceleration[i],
-                limits, dt_sec, &interval
-            )) {
-            proposal.reason = "Cartesian axis state is outside the jerk-limited motion envelope";
-            return proposal;
-        }
-        if (interval.lower > interval.upper) {
-            const double boundary = 0.5 * (interval.lower + interval.upper);
-            interval.lower = boundary;
-            interval.upper = boundary;
+        const AxisMotionLimits soft_limits = softGovernorLimits(limits, dt_sec);
+        JerkInterval interval;
+        bool recovering = false;
+        if (!feasibleJerkInterval(old_state, soft_limits, dt_sec, &interval)) {
+            recovering = true;
+            if (!feasibleJerkInterval(old_state, limits, dt_sec, &interval)) {
+                proposal.reason =
+                    "Cartesian axis state is outside the hard jerk-governed motion envelope";
+                return proposal;
+            }
         }
 
-        double acceleration = std::clamp(raw_acceleration, interval.lower, interval.upper);
-        const bool axis_limited = std::abs(acceleration - raw_acceleration) > 1e-12;
-        proposal.limit_axes[i] = axis_limited;
-        proposal.saturated = proposal.saturated || axis_limited;
-        double velocity = std::clamp(
-            old_velocity[i] + acceleration * dt_sec,
-            -limits.velocity,
-            limits.velocity
+        const double unbounded_desired_jerk =
+            (raw_acceleration - old_acceleration[i]) / dt_sec;
+        const double desired_jerk = std::clamp(
+            unbounded_desired_jerk,
+            -limits.jerk,
+            limits.jerk
         );
-        double offset = std::clamp(
-            old_offset[i] + velocity * dt_sec,
-            -limits.offset,
-            limits.offset
+        const double governed_jerk = std::clamp(
+            recovering ? recoveryJerk(old_state, soft_limits) : desired_jerk,
+            interval.lower,
+            interval.upper
         );
-        velocity = (offset - old_offset[i]) / dt_sec;
-        acceleration = (velocity - old_velocity[i]) / dt_sec;
-        if (std::abs(acceleration) > limits.acceleration + 1e-6 ||
-            std::abs(acceleration - old_acceleration[i]) > jerk_step + 1e-6) {
-            proposal.reason = "Cartesian axis numerical boundary reconciliation exceeded limits";
+        const AxisState next_state = advanceWithJerk(
+            old_state, governed_jerk, dt_sec
+        );
+        if (!within(
+                next_state.acceleration,
+                -limits.acceleration,
+                limits.acceleration,
+                limits.acceleration
+            ) ||
+            !within(
+                next_state.velocity,
+                -limits.velocity,
+                limits.velocity,
+                limits.velocity
+            ) ||
+            !within(
+                next_state.offset,
+                -limits.offset,
+                limits.offset,
+                limits.offset
+            )) {
+            proposal.reason = "Cartesian jerk governor produced a state outside hard limits";
             return proposal;
         }
-        next_offset[i] = offset;
-        next_velocity[i] = velocity;
-        next_acceleration[i] = acceleration;
+        const bool axis_limited = recovering ||
+            std::abs(governed_jerk - unbounded_desired_jerk) >
+                scaledTolerance(limits.jerk);
+        proposal.limit_axes[i] = axis_limited;
+        proposal.saturated = proposal.saturated || axis_limited;
+        next_offset[i] = next_state.offset;
+        next_velocity[i] = next_state.velocity;
+        next_acceleration[i] = next_state.acceleration;
     }
 
     double power_w = 0.0;

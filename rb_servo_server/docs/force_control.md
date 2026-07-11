@@ -81,8 +81,8 @@ runbook.
   or immediately at a hard force/torque threshold.
 - `guarded_admittance`: enters contact regulation after debounce. Hard limits
   still latch immediately.
-- `cartesian_admittance`: retains the scalar unilateral normal controller and
-  adds configurable tangential and rotational compliance. Soft contact does not
+- `cartesian_admittance`: runs one symmetric zero-wrench Cartesian admittance
+  controller on all six configured axes. Soft contact does not
   increment `motion_epoch`, synthesize an upstream Hold, freeze the gripper, or
   discard the active flow-infer chunk. Hard limits still latch immediately.
 
@@ -102,17 +102,15 @@ valid zero. Until acceptance, enforcing force modes remain unavailable.
 Left-only and right-only Init Motion tare only that arm; a dual-arm request tares
 both independently.
 
-During normal `regulating`, the accepted normal target is:
+In legacy `guarded_admittance`, the accepted normal target is:
 
 ```text
 max(policy outward offset from contact anchor, controller unload offset)
 ```
 
 Thus an inward policy delta cannot build a hidden catch-up target, while a
-policy-requested retreat remains possible. In `cartesian_admittance`, the same
-loading rule is applied to enabled tangential and rotational axes in a
-deterministic surface frame, and the correction is composed with Pinocchio SE(3)
-operations. At or below `contact_release_force_n`, the scalar controller
+policy-requested retreat remains possible. At or below
+`contact_release_force_n`, the scalar controller
 enters `release_braking`: force-error drive is removed, but damping, stiffness,
 jerk limits, downstream acceptance, and two-phase commit remain active. Force
 rising above the release threshold resumes `regulating`. A release is accepted
@@ -134,11 +132,21 @@ chunk and wait for a fresh inference. During that gap the server synthesizes a
 applies only the bounded outward correction. Controller state is committed only
 after the resulting IK, safety checks, and backend send are accepted.
 
-Cartesian compliance keeps a rolling raw-policy reference and a rolling
-compliant target. On soft-contact release, the accepted normal correction is
-absorbed into that reference instead of creating `release_hold`; this prevents
-a discontinuous catch-up to a pre-contact chunk target. Scalar and 6D controller
-proposals use the same two-phase commit boundary.
+Cartesian compliance keeps a command equilibrium separately from its bounded
+6D offset. In upstream `Hold`, the equilibrium is captured once and remains
+fixed; it is never replaced by the measured TCP on later ticks. Under
+flow-infer, each accepted/projected policy delta advances the equilibrium, and
+the first `Hold -> policy` delta is projected by the same rule. Policy deltas
+that load the measured reaction wrench are removed in the deterministic surface
+frame. The compliant offset is composed with Pinocchio SE(3) operations.
+
+When external wrench returns inside the six-axis deadband, Cartesian stiffness
+and damping drive the offset and velocity back to zero around that equilibrium.
+The correction is not absorbed into the equilibrium, so release returns to the
+current command pose without a motion-epoch reset or a pre-contact chunk
+catch-up. Telemetry publishes the equilibrium pose, its `hold_anchor` or
+`policy_target` source, and whether recentering is active. Scalar and 6D
+controller proposals use the same two-phase commit boundary.
 
 ## Normal admittance
 
@@ -175,8 +183,8 @@ The discrete admittance integrator uses the configured force-control period
 jitter remains telemetry but does not change the jerk envelope from one tick to
 the next.
 
-The Cartesian controller applies the same rule independently to both surface
-tangents and all three rotational axes. Reaching an offset, velocity,
+The Cartesian controller applies the same symmetric zero-wrench spring rule to
+all three translations and all three rotations. Reaching an offset, velocity,
 acceleration, jerk, or per-tick step envelope is a valid bounded compliance
 result, not a force fault. Telemetry exposes `compliance_limit_axes` and
 `compliance_limit_reason=jerk_limited_motion_envelope` so an operator can
@@ -184,8 +192,9 @@ distinguish normal compliance saturation from a hard force/torque trip.
 
 Normal, transverse, and rotational contact hysteresis are tracked separately.
 A pure tangential pull or torque can therefore enable Cartesian compliance
-without engaging the scalar normal-force controller or creating a fictitious
-floor-contact correction. Their aggregate remains available as
+without creating a fictitious floor-contact correction. The scalar normal
+controller is used only by `guarded_admittance`. The aggregate contact signal
+remains available as
 `contact_active`; the individual fields are `normal_contact_active`,
 `transverse_contact_active`, and `rotational_contact_active`.
 
@@ -261,11 +270,11 @@ force_control:
     max_normal_step_m: 0.001
     max_energy_j: 2.0
   # Cartesian surface-frame order: tangent-x, tangent-y, normal, roll, pitch, yaw.
-  # The scalar normal controller owns index 2 in cartesian_admittance mode.
+  # cartesian_admittance owns all six axes and regulates zero wrench.
   virtual_mass: [8.0, 8.0, 8.0, 0.8, 0.8, 0.8]
-  damping: [160.0, 160.0, 160.0, 16.0, 16.0, 16.0]
-  stiffness: [300.0, 300.0, 0.0, 30.0, 30.0, 30.0]
-  wrench_deadband: [5.0, 5.0, 0.0, 0.9, 0.9, 0.9]
+  damping: [100.0, 100.0, 100.0, 10.0, 10.0, 10.0]
+  stiffness: [300.0, 300.0, 300.0, 30.0, 30.0, 30.0]
+  wrench_deadband: [3.0, 3.0, 3.0, 0.6, 0.6, 0.6]
   max_pos_offset_m: 0.01
   max_rot_offset_rad: 0.035
   max_linear_velocity_m_s: 0.015

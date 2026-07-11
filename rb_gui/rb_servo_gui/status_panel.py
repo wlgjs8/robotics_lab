@@ -179,6 +179,19 @@ def _format_arm_force_status(arm: ArmSnapshot) -> str:
             parts.append(
                 f"loading_projection={force_control.loading_projection_active}"
             )
+        if force_control.compliance_equilibrium_source is not None:
+            parts.append(
+                f"equilibrium_source={force_control.compliance_equilibrium_source}"
+            )
+        if force_control.compliance_equilibrium_stand is not None:
+            equilibrium = force_control.compliance_equilibrium_stand
+            parts.append(
+                "equilibrium_stand="
+                f"[{equilibrium.x:.4f},{equilibrium.y:.4f},{equilibrium.z:.4f},"
+                f"{equilibrium.rx:.3f},{equilibrium.ry:.3f},{equilibrium.rz:.3f}]"
+            )
+        if force_control.compliance_recenter_active is not None:
+            parts.append(f"recenter={force_control.compliance_recenter_active}")
         vector_fields = (
             ("control_wrench_surface", force_control.control_wrench_surface),
             ("wrench_error_surface", force_control.wrench_error_surface),

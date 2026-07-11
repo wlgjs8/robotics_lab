@@ -203,7 +203,9 @@ tracked real rbpodo template의 supported safety range는 명시적 per-joint
 Project-native F/T monitor, contact guard, 법선방향 unilateral admittance,
 6D Cartesian compliance가 servo motion path에 통합되어 있습니다.
 `stack_real.yaml`은 양팔에 동일한 supervised experimental
-Cartesian-admittance profile을 적용합니다. Soft contact에서는 flow-infer
+Cartesian-admittance profile을 적용합니다. 6축 zero-wrench spring은 고정
+Hold 또는 최신 policy command 평형점을 기준으로 순응하고, 외력이
+사라지면 그 평형점으로 복귀합니다. Soft contact에서는 flow-infer
 chunk와 gripper 실행을 계속하고, hard limit만 기존 fault/중단 경로를
 유지합니다. 이 설정은 production acceptance가 아니며 단계별 CSV
 evidence가 필요합니다.

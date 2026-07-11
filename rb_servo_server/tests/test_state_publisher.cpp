@@ -298,6 +298,11 @@ bool testStatePublisherSerializesForceTelemetry() {
     snapshot.left_force_control.compliance_acceleration_surface = {0.1, 0.2, 0.3, 1.0, 2.0, 3.0};
     snapshot.left_force_control.raw_policy_delta_surface = {0.004, 0.005, -0.006, 0.04, 0.05, -0.06};
     snapshot.left_force_control.accepted_policy_delta_surface = {0.004, 0.0, 0.0, 0.04, 0.0, 0.0};
+    snapshot.left_force_control.compliance_equilibrium_stand = {
+        0.41, -0.22, 0.33, 0.1, -0.2, 0.3,
+    };
+    snapshot.left_force_control.compliance_equilibrium_source = "policy_target";
+    snapshot.left_force_control.compliance_recenter_active = true;
     snapshot.left_force_control.compliance_limit_axes = {
         true, false, false, false, true, false,
     };
@@ -346,6 +351,11 @@ bool testStatePublisherSerializesForceTelemetry() {
     RB_CHECK(force.at("compliance_acceleration_surface").at(3).get<double>() == 1.0);
     RB_CHECK(force.at("raw_policy_delta_surface").at(2).get<double>() == -0.006);
     RB_CHECK(force.at("accepted_policy_delta_surface").at(4).get<double>() == 0.0);
+    RB_CHECK(force.at("compliance_equilibrium_stand").at(0).get<double>() == 0.41);
+    RB_CHECK(force.at("compliance_equilibrium_stand").at(5).get<double>() == 0.3);
+    RB_CHECK(force.at("compliance_equilibrium_source").get<std::string>() ==
+             "policy_target");
+    RB_CHECK(force.at("compliance_recenter_active").get<bool>());
     RB_CHECK(force.at("compliance_limit_axes").at(0).get<bool>());
     RB_CHECK(force.at("compliance_limit_axes").at(4).get<bool>());
     RB_CHECK(force.at("compliance_limit_reason").get<std::string>() ==

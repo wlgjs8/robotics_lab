@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 
 #if CAMERA_SERVER_HAVE_REALSENSE
 #include <librealsense2/rs.hpp>
@@ -24,13 +25,118 @@
 
 namespace camera_server {
 
-std::vector<std::string> discover_realsense_serials() {
-  std::vector<std::string> serials;
+namespace {
+
+std::tuple<int, int, int, int> parse_version(const std::string& text) {
+  std::tuple<int, int, int, int> out{0, 0, 0, 0};
+  std::stringstream input(text);
+  std::string part;
+  int values[4]{0, 0, 0, 0};
+  size_t index = 0;
+  while (index < 4 && std::getline(input, part, '.')) {
+    try {
+      values[index] = std::stoi(part);
+    } catch (...) {
+      return {0, 0, 0, 0};
+    }
+    ++index;
+  }
+  return {values[0], values[1], values[2], values[3]};
+}
+
+}  // namespace
+
+std::vector<RealSenseDeviceInfo> discover_realsense_devices() {
+  std::vector<RealSenseDeviceInfo> devices;
 #if CAMERA_SERVER_HAVE_REALSENSE
   rs2::context ctx;
-  for (auto&& dev : ctx.query_devices()) serials.emplace_back(dev.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER));
+  for (auto&& dev : ctx.query_devices()) {
+    auto get = [&](rs2_camera_info field) -> std::string {
+      return dev.supports(field) ? dev.get_info(field) : std::string();
+    };
+    RealSenseDeviceInfo info;
+    info.name = get(RS2_CAMERA_INFO_NAME);
+    info.serial = get(RS2_CAMERA_INFO_SERIAL_NUMBER);
+    info.firmware_version = get(RS2_CAMERA_INFO_FIRMWARE_VERSION);
+    info.recommended_firmware_version = get(RS2_CAMERA_INFO_RECOMMENDED_FIRMWARE_VERSION);
+    info.physical_port = get(RS2_CAMERA_INFO_PHYSICAL_PORT);
+    info.product_id = get(RS2_CAMERA_INFO_PRODUCT_ID);
+    info.usb_type = get(RS2_CAMERA_INFO_USB_TYPE_DESCRIPTOR);
+    devices.push_back(std::move(info));
+  }
 #endif
+  return devices;
+}
+
+std::vector<std::string> discover_realsense_serials() {
+  std::vector<std::string> serials;
+  for (const auto& device : discover_realsense_devices()) serials.push_back(device.serial);
   return serials;
+}
+
+std::string librealsense_sdk_version() {
+#if CAMERA_SERVER_HAVE_REALSENSE
+  rs2_error* error = nullptr;
+  const int version = rs2_get_api_version(&error);
+  if (error != nullptr) {
+    const std::string message = rs2_get_error_message(error);
+    rs2_free_error(error);
+    throw std::runtime_error("failed to query librealsense SDK version: " + message);
+  }
+  return std::to_string(version / 10000) + "." + std::to_string((version / 100) % 100) + "." +
+         std::to_string(version % 100);
+#else
+  return "unavailable";
+#endif
+}
+
+std::string librealsense_backend() {
+#if CAMERA_SERVER_HAVE_REALSENSE
+  return CAMERA_SERVER_REALSENSE_BACKEND;
+#else
+  return "unavailable";
+#endif
+}
+
+void validate_realsense_preflight(const AppConfig& cfg,
+                                  const std::vector<RealSenseDeviceInfo>& devices,
+                                  const std::string& sdk_version) {
+  if (cfg.server.simulate_cameras) return;
+  bool requires_realsense = false;
+  for (const auto& camera : cfg.cameras) {
+    if (camera.backend == "realsense" && camera.required) requires_realsense = true;
+  }
+  if (!requires_realsense) return;
+  if (parse_version(sdk_version) < parse_version("2.58.1")) {
+    throw std::runtime_error("librealsense SDK " + sdk_version +
+                             " is older than required 2.58.1 for the deployed D400 firmware set");
+  }
+
+  std::map<std::string, RealSenseDeviceInfo> by_serial;
+  for (const auto& device : devices) by_serial[device.serial] = device;
+  std::string d405_firmware;
+  for (const auto& camera : cfg.cameras) {
+    if (camera.backend != "realsense" || !camera.required) continue;
+    const auto found = by_serial.find(camera.serial);
+    if (found == by_serial.end()) continue;  // Missing-device error retains the connected-serial detail.
+    const auto& device = found->second;
+    if (device.usb_type.empty() || device.usb_type.front() != '3') {
+      throw std::runtime_error("required RealSense camera is not on USB3: " + camera.name +
+                               " serial=" + camera.serial + " usb_type=" + device.usb_type);
+    }
+    if (device.product_id != "0B5B") continue;
+    if (parse_version(device.firmware_version) < parse_version("5.17.0.10")) {
+      throw std::runtime_error("D405 firmware is older than required 5.17.0.10: " + camera.name +
+                               " serial=" + camera.serial + " firmware=" + device.firmware_version);
+    }
+    if (d405_firmware.empty()) {
+      d405_firmware = device.firmware_version;
+    } else if (device.firmware_version != d405_firmware) {
+      throw std::runtime_error("configured D405 cameras must use identical firmware: expected=" +
+                               d405_firmware + " got=" + device.firmware_version +
+                               " serial=" + camera.serial);
+    }
+  }
 }
 
 class MockCameraDevice final : public ICameraDevice {

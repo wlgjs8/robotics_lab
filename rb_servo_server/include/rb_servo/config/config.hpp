@@ -863,6 +863,11 @@ struct ForceControlArmConfig {
     // V1 supports a single verified stand-frame contact normal. The normal is
     // supplied by one of the existing server-owned plane constraints.
     std::string surface_source = "floor_constraint";
+    // Frame used by the symmetric 6D Cartesian admittance controller.
+    // surface: selected stand-fixed surface axes at the TCP origin.
+    // sensor_origin: URDF/configured sensor axes and measurement origin.
+    // tcp_origin: sensor axes translated to the TCP origin.
+    std::string compliance_frame = "surface";
     double target_force_n = 0.0;
     double contact_enter_force_n = 0.0;
     double contact_release_force_n = 0.0;

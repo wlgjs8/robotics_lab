@@ -17,8 +17,11 @@ Per camera:
 
 - connected
 - serial
-- reconnect_count
-- last_error
+- firmware and recommended firmware version
+- product ID, USB type descriptor, and physical port
+- reconnect attempt/success/disconnect counts
+- consecutive failures and exhausted state
+- last disconnect/reconnect timestamps and last_error
 - color/depth status
 - callback enqueue, queue wait, and frame-processing p95/max latency
 - callback queue depth and drop count/delta
@@ -36,6 +39,7 @@ Per bundle group:
 Server-level:
 
 - uptime_sec
+- librealsense SDK version and native/RSUSB backend label
 - shm_size_bytes
 - metadata_publish_count
 - metadata_publish_errors

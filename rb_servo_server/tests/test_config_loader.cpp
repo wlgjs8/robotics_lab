@@ -260,8 +260,12 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(normal_force.virtual_mass_kg, 8.0));
         RB_CHECK(near(stack_real.force_control.virtual_mass[0], 8.0));
         RB_CHECK(near(stack_real.force_control.virtual_mass[3], 0.8));
-        RB_CHECK(near(stack_real.force_control.wrench_deadband[0], 5.0));
-        RB_CHECK(near(stack_real.force_control.wrench_deadband[3], 0.9));
+        RB_CHECK(near(stack_real.force_control.damping[0], 100.0));
+        RB_CHECK(near(stack_real.force_control.damping[3], 10.0));
+        RB_CHECK(near(stack_real.force_control.stiffness[2], 300.0));
+        RB_CHECK(near(stack_real.force_control.wrench_deadband[0], 3.0));
+        RB_CHECK(near(stack_real.force_control.wrench_deadband[2], 3.0));
+        RB_CHECK(near(stack_real.force_control.wrench_deadband[3], 0.6));
         RB_CHECK(near(normal_force.damping_n_s_m, 160.0));
         RB_CHECK(near(normal_force.stiffness_n_m, 0.0));
         RB_CHECK(near(normal_force.max_unload_offset_m, 0.01));

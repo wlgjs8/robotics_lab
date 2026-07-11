@@ -60,8 +60,11 @@ struct HealthConfig {
 
 struct ReconnectConfig {
   bool enabled{false};
+  // Number of retries after a failed/stalled connection. Zero means retry
+  // indefinitely; the delay remains bounded by retry_interval_ms.
   uint32_t max_attempts{0};
   uint32_t retry_interval_ms{1000};
+  uint32_t frame_timeout_ms{2000};
 };
 
 struct ServerConfig {

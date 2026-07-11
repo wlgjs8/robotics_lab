@@ -85,10 +85,15 @@ deps-hardware-free:
 #   make cam-up CAMERA_CONFIG=/app/config/head_wrists.yaml STEREO_CAM_K=/app/config/d435_ir_640x480_K.txt  # 헤드 IR 640x480
 CAMERA_CONFIG ?= /app/config/d435_head_1280x720.yaml
 STEREO_CAM_JSON ?= /app/config/__no_advanced__.json
+LIBREALSENSE_VERSION ?= 2.58.1
+LIBREALSENSE_REF ?= bf2778061d5dd29776e9aca8765f75852671760b
+LIBREALSENSE_BACKEND ?= native
 # 헤드 1280x720 IR intrinsics는 camera_server가 기동 시 디바이스에서 덤프(아래 경로).
 STEREO_CAM_K ?= /app/stereo_worker/d435_ir_1280x720_K.txt
 
 cam-up:
+	LIBREALSENSE_VERSION=$(LIBREALSENSE_VERSION) LIBREALSENSE_REF=$(LIBREALSENSE_REF) \
+	LIBREALSENSE_BACKEND=$(LIBREALSENSE_BACKEND) \
 	CAMERA_CONFIG=$(CAMERA_CONFIG) CAMERA_REALSENSE_JSON=$(STEREO_CAM_JSON) \
 	STEREO_INTRINSICS=$(STEREO_CAM_K) \
 		$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile real_camera up -d --build camera_server
