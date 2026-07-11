@@ -83,7 +83,15 @@ Inspect timing:
 
 ```bash
 python3 tools/plot_servo_log.py logs/servo_log.csv
+python3 tools/analyze_servo_log.py logs/servo_log.csv
 ```
+
+The servo CSV also carries the latest chunk-frame receive age/interarrival,
+policy inference timing, camera bundle/frame age and focus indicators, plus
+DeltaTwist per-arm execution budgets, acceleration commands, and a stable
+14-bit clamp mask. `analyze_servo_log.py` summarizes these optional columns and
+continues to accept older logs that do not contain them. These fields are CSV
+telemetry only; they are not added to state JSON and do not affect control.
 
 ## Hardware-free validation
 
@@ -163,10 +171,10 @@ The C++ receive timestamp is used for timeout checks.
 
 ## Force-control status
 
-Force control is connected to the Cartesian servo path but remains disabled in
-tracked configs. Site-local profiles can select monitor, guard, or guarded
-normal admittance; physical acceptance is still required. See
-`docs/force_control.md`.
+Force control is connected to the Cartesian servo path. The tracked real stack
+currently exposes a supervised experimental dual-arm guarded-admittance stage
+with identical per-arm contact parameters; the simulation stack remains off. Physical production
+acceptance is still required. See `docs/force_control.md`.
 
 ## Viser operator GUI
 

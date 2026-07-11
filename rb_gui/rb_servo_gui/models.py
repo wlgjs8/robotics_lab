@@ -372,6 +372,13 @@ class ForceTorqueSnapshot:
     freshness_value: int | None = None
     freshness_advanced: bool | None = None
     reason: str | None = None
+    auto_tare_enabled: bool | None = None
+    tare_valid: bool | None = None
+    tare_state: str | None = None
+    tare_sample_count: int | None = None
+    tare_generation: int | None = None
+    tare_reason: str | None = None
+    residual_tare_tcp: tuple[float, ...] | None = None
     raw: Mapping[str, Any] | None = None
 
     @classmethod
@@ -393,6 +400,13 @@ class ForceTorqueSnapshot:
             freshness_value=_optional_nonnegative_int(value.get("freshness_value")),
             freshness_advanced=_optional_bool(value.get("freshness_advanced")),
             reason=_optional_str(value.get("reason")),
+            auto_tare_enabled=_optional_bool(value.get("auto_tare_enabled")),
+            tare_valid=_optional_bool(value.get("tare_valid")),
+            tare_state=_optional_str(value.get("tare_state")),
+            tare_sample_count=_optional_nonnegative_int(value.get("tare_sample_count")),
+            tare_generation=_optional_nonnegative_int(value.get("tare_generation")),
+            tare_reason=_optional_str(value.get("tare_reason")),
+            residual_tare_tcp=finite_joint_array(value.get("residual_tare_tcp")),
             raw=value,
         )
 
@@ -410,6 +424,8 @@ class ForceControlSnapshot:
     fast_force_norm_n: float | None = None
     fast_torque_norm_nm: float | None = None
     contact_threshold_exceeded: bool | None = None
+    hard_limit_threshold_exceeded: bool | None = None
+    hard_limit_sample_count: int | None = None
     hard_limit_exceeded: bool | None = None
     target_force_n: float | None = None
     correction_m: float | None = None
@@ -439,6 +455,12 @@ class ForceControlSnapshot:
             fast_force_norm_n=_optional_finite(value.get("fast_force_norm_n")),
             fast_torque_norm_nm=_optional_finite(value.get("fast_torque_norm_nm")),
             contact_threshold_exceeded=_optional_bool(value.get("contact_threshold_exceeded")),
+            hard_limit_threshold_exceeded=_optional_bool(
+                value.get("hard_limit_threshold_exceeded")
+            ),
+            hard_limit_sample_count=_optional_nonnegative_int(
+                value.get("hard_limit_sample_count")
+            ),
             hard_limit_exceeded=_optional_bool(value.get("hard_limit_exceeded")),
             target_force_n=_optional_finite(value.get("target_force_n")),
             correction_m=_optional_finite(value.get("correction_m")),

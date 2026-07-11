@@ -150,6 +150,10 @@ int main() {
     check(follower.windowIndex() == 8, "rows beyond reserve were not consumed");
     check(follower.diag().normal_consumed == 6, "normal consumed count recorded");
     check(follower.diag().reserve_consumed == 2, "reserve consumed count recorded");
+    check(follower.diag().frame_rows == 9, "frame row count recorded");
+    check(follower.diag().normal_budget == 6, "effective normal budget recorded");
+    check(follower.diag().total_budget == 8, "effective total budget recorded");
+    check(follower.diag().steps_remaining == 0, "remaining budget reaches zero");
   }
 
   std::printf("Test B: fresh frame resets phase without zeroing velocity\n");
@@ -191,6 +195,8 @@ int main() {
     linear_x.submitFrame(makeFrame({Vec6{10.0, 0.0, 0.0, 0.0, 0.0, 0.0}}), identityPose());
     (void)linear_x.tick(TICK);
     check(linearNorm(linear_x.diag().xi_ref) <= cfg.lin.v_max + 1e-12, "linear xi_ref norm respects configured limit");
+    check((linear_x.diag().clamp_mask & rb_servo::control::DeltaTwistClampXiRefLinear) != 0,
+          "xi_ref linear clamp bit recorded");
     check(linear_x.diag().xi_ref.x > 0.17, "x direction preserved by norm clamp");
     check(std::fabs(linear_x.diag().xi_ref.y) < 1e-12, "no off-axis y from x-only clamp");
 
@@ -205,6 +211,28 @@ int main() {
     (void)angular_xy.tick(TICK);
     check(angularNorm(angular_xy.diag().xi_ref) <= cfg.ang.v_max + 1e-12, "diagonal angular norm respects configured limit");
     check(std::fabs(angular_xy.diag().xi_ref.rx - angular_xy.diag().xi_ref.ry) < 1e-12, "diagonal angular direction ratio preserved");
+    check((angular_xy.diag().clamp_mask & rb_servo::control::DeltaTwistClampXiRefAngular) != 0,
+          "xi_ref angular clamp bit recorded");
+  }
+
+  // Clamp attribution is a telemetry contract; it must not alter the shaper.
+  std::printf("Test C2: acceleration/jerk shaping diagnostics identify clamp stages\n");
+  {
+    DeltaTwistFollowerConfig cfg = fastConfig();
+    cfg.lin = AxisLimit{10.0, 0.10, 0.20};
+    cfg.max_residual_m = 10.0;
+    cfg.max_lead_m = 10.0;
+    DeltaTwistFollower follower(cfg);
+    follower.submitFrame(makeFrame({Vec6{0.10, 0.0, 0.0, 0.0, 0.0, 0.0}}), identityPose());
+    (void)follower.tick(TICK);
+    check((follower.diag().clamp_mask &
+           rb_servo::control::DeltaTwistClampDesiredAccelLinear) != 0,
+          "desired linear acceleration clamp bit recorded");
+    check((follower.diag().clamp_mask &
+           rb_servo::control::DeltaTwistClampDesiredJerkLinear) != 0,
+          "desired linear jerk clamp bit recorded");
+    check(finiteVec6(follower.diag().accel_cmd), "accel_cmd telemetry is finite");
+    check(follower.diag().accel_cmd.x > 0.0, "accel_cmd telemetry preserves direction");
   }
 
   std::printf("Test D: min time-to-go prevents end-frame spike\n");
@@ -322,6 +350,9 @@ int main() {
     }
     check(max_lead_m <= cfg.max_lead_m + 1e-9, "linear command lead stays clamped");
     check(max_lead_rad <= cfg.max_lead_rad + 1e-9, "angular command lead stays clamped");
+    check((follower.diag().clamp_mask & rb_servo::control::DeltaTwistClampLeadLinear) != 0 ||
+          (follower.diag().clamp_mask & rb_servo::control::DeltaTwistClampLeadAngular) != 0,
+          "command lead clamp bit recorded");
   }
 
   std::printf("Test I: missing delta rows do not activate\n");

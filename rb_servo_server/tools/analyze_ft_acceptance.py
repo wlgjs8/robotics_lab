@@ -54,6 +54,9 @@ def _required_columns(arm: str) -> list[str]:
         f"{arm}_ft_freshness_value",
         f"{arm}_ft_freshness_advanced",
         f"{arm}_ft_reason",
+        f"{arm}_ft_auto_tare_enabled",
+        f"{arm}_ft_tare_valid",
+        f"{arm}_ft_tare_state",
         f"{arm}_force_control_measured_normal_force_n",
         f"{arm}_force_control_fast_normal_force_n",
         f"{arm}_force_control_fast_force_norm_n",
@@ -89,7 +92,7 @@ def analyze_arm(
         indices = {name: header.index(name) for name in required}
         first_time_ns: int | None = None
         previous_sequence: int | None = None
-        regressions = duplicates = unhealthy = stale = not_advanced = 0
+        regressions = duplicates = unhealthy = stale = not_advanced = invalid_tare = 0
         reasons: dict[str, int] = {}
         for row in reader:
             time_ns = int(row[indices["loop_start_time_ns"]])
@@ -108,13 +111,23 @@ def analyze_arm(
             reasons[reason] = reasons.get(reason, 0) + 1
             if not static_start_sec <= elapsed <= static_end_sec:
                 continue
+            auto_tare_enabled = row[indices[f"{arm}_ft_auto_tare_enabled"]] in {
+                "1", "true", "True"
+            }
+            if auto_tare_enabled:
+                tare_valid = row[indices[f"{arm}_ft_tare_valid"]] in {"1", "true", "True"}
+                tare_state = row[indices[f"{arm}_ft_tare_state"]]
+                invalid_tare += not tare_valid or tare_state != "accepted"
             fast_force = [float(row[indices[f"{arm}_ft_fast_external_f{axis}_n"]]) for axis in "xyz"]
             fast_torque = [float(row[indices[f"{arm}_ft_fast_external_t{axis}_nm"]]) for axis in "xyz"]
             control_force = [float(row[indices[f"{arm}_ft_control_external_f{axis}_n"]]) for axis in "xyz"]
             normal = [float(row[indices[f"{arm}_force_control_normal_stand_{axis}"]]) for axis in "xyz"]
             quaternion = [float(row[indices[f"{arm}_tcp_actual_stand_q{axis}"]]) for axis in "xyzw"]
-            expected_normal = sum(a * b for a, b in zip(normal, _rotate_xyzw(quaternion, control_force)))
-            expected_fast_normal = sum(a * b for a, b in zip(normal, _rotate_xyzw(quaternion, fast_force)))
+            # The surface normal is geometric/outward.  Sensor reaction force
+            # points against it during compression, while force-control
+            # telemetry intentionally reports compression as positive.
+            expected_normal = -sum(a * b for a, b in zip(normal, _rotate_xyzw(quaternion, control_force)))
+            expected_fast_normal = -sum(a * b for a, b in zip(normal, _rotate_xyzw(quaternion, fast_force)))
             measured_normal = float(row[indices[f"{arm}_force_control_measured_normal_force_n"]])
             logged_fast_normal = float(row[indices[f"{arm}_force_control_fast_normal_force_n"]])
             logged_force_norm = float(row[indices[f"{arm}_force_control_fast_force_norm_n"]])
@@ -152,6 +165,10 @@ def analyze_arm(
     blockers: list[str] = []
     if unhealthy or stale or not_advanced or regressions or duplicates:
         blockers.append("FT freshness/health was not continuously valid")
+    if invalid_tare:
+        blockers.append(
+            f"software zero was not accepted for {invalid_tare} static-window rows"
+        )
     if force_p99 >= hard_force_norm_n:
         blockers.append(
             f"static force norm p99 {force_p99:.3f}N is not below hard limit {hard_force_norm_n:.3f}N"
@@ -170,7 +187,9 @@ def analyze_arm(
             f"logged fast normal-force projection disagrees with CSV pose/wrench by up to "
             f"{fast_projection_error_max:.3f}N (limit {projection_tolerance_n:.3f}N)"
         )
-    if force_norm_error_max > 1e-6 or torque_norm_error_max > 1e-6:
+    # CSV wrench components and derived norms are decimal text; allow their
+    # bounded serialization round-off while still catching computation errors.
+    if force_norm_error_max > 1e-3 or torque_norm_error_max > 1e-3:
         blockers.append(
             "logged fast wrench norms disagree with the CSV wrench "
             f"(force {force_norm_error_max:.6g}N, torque {torque_norm_error_max:.6g}Nm)"
@@ -182,6 +201,7 @@ def analyze_arm(
             "unhealthy_rows": unhealthy,
             "stale_rows": stale,
             "not_advanced_rows": not_advanced,
+            "invalid_tare_rows_in_static_window": invalid_tare,
             "sequence_regressions": regressions,
             "sequence_duplicates": duplicates,
             "reasons": reasons,

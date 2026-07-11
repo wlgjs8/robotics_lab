@@ -130,8 +130,106 @@ class AnalyzeServoLogTest(unittest.TestCase):
             metrics = analyze_servo_log.analyze_csv(path)
 
             self.assertEqual(metrics["safety_verdict_counts"], {})
+            self.assertEqual(metrics["chunk_diagnostics"]["rows"], 0)
+            self.assertEqual(metrics["chunk_diagnostics"]["unique_wire_sequences"], 0)
             self.assertEqual(metrics["delta_twist"]["left"]["rows"], 0)
             self.assertEqual(metrics["delta_twist"]["right"]["rows"], 0)
+
+    def test_optional_chunk_and_delta_twist_diagnostics_are_summarized(self) -> None:
+        shared_fields = list(analyze_servo_log.CHUNK_DIAGNOSTIC_INTEGER_COLUMNS) + list(
+            analyze_servo_log.CHUNK_DIAGNOSTIC_FLOAT_COLUMNS
+        )
+        arm_fields = [
+            "left_follower_controller",
+            "left_delta_twist_frame_rows",
+            "left_delta_twist_normal_budget",
+            "left_delta_twist_total_budget",
+            "left_delta_twist_steps_remaining",
+            "left_delta_twist_clamp_mask",
+            *[
+                f"left_delta_twist_accel_cmd_{suffix}"
+                for suffix in analyze_servo_log.DELTA_TWIST_ACCEL_COMMAND_SUFFIXES
+            ],
+        ]
+        rows: list[dict[str, object]] = []
+        for index in range(3):
+            row: dict[str, object] = {
+                "chunk_frame_wire_seq": 10 + min(index, 1),
+                "chunk_frame_recv_seq": 20 + min(index, 1),
+                "chunk_frame_horizon": 16,
+                "chunk_frame_execute_steps": 12,
+                "chunk_frame_runway_steps": 4,
+                "chunk_inference_seq": 30 + min(index, 1),
+                "chunk_inference_stall_count": index,
+                "chunk_camera_bundle_seq": 40 + index,
+                "chunk_camera_left_frame_number": 50 + index,
+                "chunk_camera_right_frame_number": 60 + index,
+                "chunk_frame_policy_dt_sec": 0.0668,
+                "chunk_frame_age_ms": 100.0 + 100.0 * index,
+                "chunk_frame_interarrival_ms": 800.0 + 10.0 * index,
+                "chunk_inference_queue_wait_ms": 1.0 + index,
+                "chunk_inference_latency_ms": 700.0 + 10.0 * index,
+                "chunk_inference_ready_wait_ms": 2.0 + index,
+                "chunk_inference_period_ms": 810.0 + 10.0 * index,
+                "chunk_inference_period_jitter_ms": 5.0 + index,
+                "chunk_camera_bundle_age_ms": 10.0 + index,
+                "chunk_camera_max_skew_ms": 3.0 + index,
+                "chunk_camera_left_frame_age_ms": 11.0 + index,
+                "chunk_camera_right_frame_age_ms": 12.0 + index,
+                "chunk_camera_left_focus_score": 100.0 + index,
+                "chunk_camera_right_focus_score": 200.0 + index,
+                "left_follower_controller": "delta_twist",
+                "left_delta_twist_frame_rows": 16,
+                "left_delta_twist_normal_budget": 6,
+                "left_delta_twist_total_budget": 8,
+                "left_delta_twist_steps_remaining": 8 - index,
+                "left_delta_twist_clamp_mask": (1 << 0) | (1 << 2) if index == 0 else (
+                    (1 << 2) | (1 << 13) if index == 1 else 0
+                ),
+            }
+            for axis, suffix in enumerate(analyze_servo_log.DELTA_TWIST_ACCEL_COMMAND_SUFFIXES):
+                row[f"left_delta_twist_accel_cmd_{suffix}"] = float(index - axis)
+            rows.append(row)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "chunk-diagnostics.csv"
+            self.make_log(
+                path,
+                rows=len(rows),
+                extra_fieldnames=shared_fields + arm_fields,
+                row_overrides=rows,
+            )
+
+            metrics = analyze_servo_log.analyze_csv(path)
+            report = analyze_servo_log.format_report(
+                metrics,
+                analyze_servo_log.BUDGETS["rbsim-local100"],
+                failures=[],
+            )
+
+            chunk = metrics["chunk_diagnostics"]
+            self.assertEqual(chunk["rows"], 3)
+            self.assertEqual(chunk["unique_wire_sequences"], 2)
+            self.assertEqual(chunk["series"]["chunk_frame_age_ms"]["p50"], 200.0)
+            self.assertEqual(chunk["series"]["chunk_inference_latency_ms"]["p99"], 720.0)
+            self.assertEqual(chunk["series"]["chunk_camera_max_skew_ms"]["p90"], 5.0)
+
+            left = metrics["delta_twist"]["left"]
+            self.assertEqual(left["frame_rows"]["p50"], 16)
+            self.assertEqual(left["normal_budget"]["p50"], 6)
+            self.assertEqual(left["total_budget"]["p50"], 8)
+            self.assertEqual(left["steps_remaining"]["p50"], 7)
+            self.assertEqual(
+                left["clamp_mask_counts"],
+                {"lead_angular": 1, "pending_linear": 1, "xi_ref_velocity_linear": 2},
+            )
+            self.assertEqual(left["accel_command"]["x_m_s2"]["p50"], 1.0)
+            self.assertEqual(left["accel_command"]["rz_rad_s2"]["p50"], -4.0)
+            self.assertIn("chunk_diagnostics: rows=3 unique_wire_sequences=2", report)
+            self.assertIn("chunk_inference_latency_ms: count=3", report)
+            self.assertIn("left clamp_mask_counts:", report)
+            self.assertIn("left steps_remaining: count=3", report)
+            self.assertIn("left accel_cmd_rz_rad_s2: count=3", report)
 
     def test_delta_twist_summary_uses_optional_columns(self) -> None:
         extra = [

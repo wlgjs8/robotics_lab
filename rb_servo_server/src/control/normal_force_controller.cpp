@@ -41,12 +41,6 @@ void validateConfig(const NormalForceControllerConfig& config) {
     }
 }
 
-double clampAbs(double value, double limit, bool* saturated) {
-    const double clamped = std::clamp(value, -limit, limit);
-    *saturated = *saturated || clamped != value;
-    return clamped;
-}
-
 double applyContinuousDeadband(double error, double deadband, bool* in_deadband) {
     const double magnitude = std::abs(error);
     if (magnitude <= deadband) {
@@ -54,6 +48,195 @@ double applyContinuousDeadband(double error, double deadband, bool* in_deadband)
         return 0.0;
     }
     return std::copysign(magnitude - deadband, error);
+}
+
+struct AccelerationInterval {
+    double lower = 0.0;
+    double upper = 0.0;
+};
+
+bool within(double value, double lower, double upper) {
+    constexpr double kTolerance = 1e-12;
+    return value >= lower - kTolerance && value <= upper + kTolerance;
+}
+
+// Test whether a jerk-limited braking trajectory can avoid the positive
+// position/velocity boundaries. This look-ahead is what a plain velocity clamp
+// lacks: arriving at vmax with positive acceleration is already too late to
+// respect the jerk limit on the following tick.
+bool upperBrakingFeasible(
+    double offset,
+    double velocity,
+    double acceleration,
+    const NormalForceControllerConfig& config,
+    double dt_sec,
+    double velocity_limit
+) {
+    if (!within(offset, 0.0, config.max_unload_offset_m) ||
+        !within(velocity, -velocity_limit, velocity_limit)) {
+        return false;
+    }
+    if (velocity <= 0.0) {
+        return true;
+    }
+    if (velocity > 0.0 &&
+        (velocity > velocity_limit + 1e-12 ||
+         offset > config.max_unload_offset_m + 1e-12)) {
+        return false;
+    }
+
+    const double jerk_step = config.max_unload_jerk_m_s3 * dt_sec;
+    const auto ramp_to_zero_velocity_delta = [&](double candidate_acceleration) {
+        if (candidate_acceleration >= 0.0) {
+            return 0.0;
+        }
+        const double ramp_steps = std::ceil(
+            -candidate_acceleration / jerk_step
+        ) - 1.0;
+        const double negative_steps = std::max(0.0, ramp_steps);
+        return dt_sec * (
+            negative_steps * candidate_acceleration +
+            jerk_step * negative_steps * (negative_steps + 1.0) * 0.5
+        );
+    };
+    // The bound follows from the maximum time needed to ramp acceleration from
+    // +amax to -amax plus the maximum time needed to remove vmax at -amax.
+    const double required_steps = std::ceil(
+        2.0 * config.max_unload_acceleration_m_s2 / jerk_step +
+        2.0 * velocity_limit /
+            (config.max_unload_acceleration_m_s2 * dt_sec)
+    ) + 4.0;
+    constexpr double kMaxBrakingLookaheadSteps = 4096.0;
+    if (!std::isfinite(required_steps) ||
+        required_steps > kMaxBrakingLookaheadSteps) {
+        return false;
+    }
+    const int max_steps = static_cast<int>(required_steps);
+    for (int i = 0; i < max_steps; ++i) {
+        const double more_negative = std::max(
+            -config.max_unload_acceleration_m_s2,
+            acceleration - jerk_step
+        );
+        const auto terminal_velocity = [&](double candidate_acceleration) {
+            return velocity + candidate_acceleration * dt_sec +
+                ramp_to_zero_velocity_delta(candidate_acceleration);
+        };
+        if (terminal_velocity(more_negative) >= 0.0) {
+            acceleration = more_negative;
+        } else {
+            double infeasible = more_negative;
+            double feasible = std::min(
+                config.max_unload_acceleration_m_s2,
+                acceleration + jerk_step
+            );
+            if (terminal_velocity(feasible) < -1e-12) {
+                // Even maximum positive jerk cannot finish at v=0,a=0 without
+                // first reversing. Reversal is nevertheless safe for this
+                // one-sided boundary, so follow that jerk and stop checking as
+                // soon as velocity points away from the boundary.
+                acceleration = feasible;
+            } else {
+                for (int search = 0; search < 40; ++search) {
+                    const double midpoint = 0.5 * (infeasible + feasible);
+                    if (terminal_velocity(midpoint) >= 0.0) {
+                        feasible = midpoint;
+                    } else {
+                        infeasible = midpoint;
+                    }
+                }
+                acceleration = feasible;
+            }
+        }
+        velocity += acceleration * dt_sec;
+        offset += velocity * dt_sec;
+        if (velocity > 0.0 &&
+            (velocity > velocity_limit + 1e-12 ||
+             offset > config.max_unload_offset_m + 1e-12)) {
+            return false;
+        }
+        if (velocity <= 1e-12) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool lowerBrakingFeasible(
+    double offset,
+    double velocity,
+    double acceleration,
+    const NormalForceControllerConfig& config,
+    double dt_sec,
+    double velocity_limit
+) {
+    // Mirror the scalar state about the midpoint so the positive-boundary test
+    // also covers return motion toward the unilateral x=0 boundary.
+    return upperBrakingFeasible(
+        config.max_unload_offset_m - offset,
+        -velocity,
+        -acceleration,
+        config,
+        dt_sec,
+        velocity_limit
+    );
+}
+
+bool tightenToJerkLimitedEnvelope(
+    const NormalForceControllerState& state,
+    const NormalForceControllerConfig& config,
+    double dt_sec,
+    double velocity_limit,
+    AccelerationInterval* interval
+) {
+    const auto upper_ok = [&](double acceleration) {
+        const double velocity = state.unload_velocity_m_s + acceleration * dt_sec;
+        const double offset = state.unload_offset_m + velocity * dt_sec;
+        return upperBrakingFeasible(
+            offset, velocity, acceleration, config, dt_sec, velocity_limit
+        );
+    };
+    const auto lower_ok = [&](double acceleration) {
+        const double velocity = state.unload_velocity_m_s + acceleration * dt_sec;
+        const double offset = state.unload_offset_m + velocity * dt_sec;
+        return lowerBrakingFeasible(
+            offset, velocity, acceleration, config, dt_sec, velocity_limit
+        );
+    };
+
+    if (!upper_ok(interval->upper)) {
+        if (!upper_ok(interval->lower)) {
+            return false;
+        }
+        double feasible = interval->lower;
+        double infeasible = interval->upper;
+        for (int i = 0; i < 40; ++i) {
+            const double midpoint = 0.5 * (feasible + infeasible);
+            if (upper_ok(midpoint)) {
+                feasible = midpoint;
+            } else {
+                infeasible = midpoint;
+            }
+        }
+        interval->upper = std::max(interval->lower, feasible - 1e-5);
+    }
+
+    if (!lower_ok(interval->lower)) {
+        if (!lower_ok(interval->upper)) {
+            return false;
+        }
+        double infeasible = interval->lower;
+        double feasible = interval->upper;
+        for (int i = 0; i < 40; ++i) {
+            const double midpoint = 0.5 * (infeasible + feasible);
+            if (lower_ok(midpoint)) {
+                feasible = midpoint;
+            } else {
+                infeasible = midpoint;
+            }
+        }
+        interval->lower = std::min(interval->upper, feasible + 1e-5);
+    }
+    return interval->lower <= interval->upper + 1e-12;
 }
 
 }  // namespace
@@ -132,11 +315,16 @@ NormalForceControllerProposal NormalForceController::propose(
 
     proposal.force_error_n =
         measured_contact_force_n - command.target_contact_force_n;
-    proposal.controlled_force_error_n = applyContinuousDeadband(
-        proposal.force_error_n,
-        config_.force_deadband_n,
-        &proposal.in_deadband
-    );
+    if (command.brake_to_hold) {
+        proposal.controlled_force_error_n = 0.0;
+        proposal.in_deadband = true;
+    } else {
+        proposal.controlled_force_error_n = applyContinuousDeadband(
+            proposal.force_error_n,
+            config_.force_deadband_n,
+            &proposal.in_deadband
+        );
+    }
 
     const double raw_acceleration =
         (proposal.controlled_force_error_n -
@@ -144,50 +332,82 @@ NormalForceControllerProposal NormalForceController::propose(
          config_.stiffness_n_per_m * state_.unload_offset_m) /
         config_.virtual_mass_kg;
 
-    double acceleration = clampAbs(
-        raw_acceleration,
-        config_.max_unload_acceleration_m_s2,
-        &proposal.saturated
-    );
-    acceleration = state_.unload_acceleration_m_s2 + clampAbs(
-        acceleration - state_.unload_acceleration_m_s2,
-        config_.max_unload_jerk_m_s3 * dt_sec,
-        &proposal.saturated
-    );
-    double velocity = clampAbs(
-        state_.unload_velocity_m_s + acceleration * dt_sec,
+    const double velocity_limit = std::min(
         config_.max_unload_velocity_m_s,
-        &proposal.saturated
+        config_.max_unload_step_m / dt_sec
     );
-    const double step = clampAbs(
-        velocity * dt_sec,
-        config_.max_unload_step_m,
-        &proposal.saturated
+    const double jerk_step = config_.max_unload_jerk_m_s3 * dt_sec;
+    AccelerationInterval interval{
+        std::max(
+            -config_.max_unload_acceleration_m_s2,
+            state_.unload_acceleration_m_s2 - jerk_step
+        ),
+        std::min(
+            config_.max_unload_acceleration_m_s2,
+            state_.unload_acceleration_m_s2 + jerk_step
+        )
+    };
+    interval.lower = std::max(interval.lower, (
+        -velocity_limit - state_.unload_velocity_m_s
+    ) / dt_sec);
+    interval.upper = std::min(interval.upper, (
+        velocity_limit - state_.unload_velocity_m_s
+    ) / dt_sec);
+    interval.lower = std::max(interval.lower, (
+        -state_.unload_offset_m / dt_sec - state_.unload_velocity_m_s
+    ) / dt_sec);
+    interval.upper = std::min(interval.upper, (
+        (config_.max_unload_offset_m - state_.unload_offset_m) / dt_sec -
+        state_.unload_velocity_m_s
+    ) / dt_sec);
+
+    if (interval.lower > interval.upper + 1e-6) {
+        proposal.reason =
+            "normal force controller immediate motion bounds are infeasible";
+        return proposal;
+    }
+    if (interval.lower > interval.upper) {
+        const double boundary = 0.5 * (interval.lower + interval.upper);
+        interval.lower = boundary;
+        interval.upper = boundary;
+    }
+    if (!tightenToJerkLimitedEnvelope(
+            state_, config_, dt_sec, velocity_limit, &interval
+        )) {
+        proposal.reason =
+            "normal force controller state is outside the jerk-limited motion envelope";
+        return proposal;
+    }
+    if (interval.lower > interval.upper) {
+        const double boundary = 0.5 * (interval.lower + interval.upper);
+        interval.lower = boundary;
+        interval.upper = boundary;
+    }
+
+    double acceleration = std::clamp(
+        raw_acceleration, interval.lower, interval.upper
     );
-    const double unclamped_offset = state_.unload_offset_m + step;
-    const double offset = std::clamp(
-        unclamped_offset,
+    proposal.saturated = acceleration != raw_acceleration;
+    double velocity = std::clamp(
+        state_.unload_velocity_m_s + acceleration * dt_sec,
+        -velocity_limit,
+        velocity_limit
+    );
+    double offset = std::clamp(
+        state_.unload_offset_m + velocity * dt_sec,
         0.0,
         config_.max_unload_offset_m
     );
-    proposal.saturated = proposal.saturated || offset != unclamped_offset;
-
-    // Back-calculate dynamics from the correction that can actually be emitted.
-    // This prevents hidden wind-up at either unilateral position boundary.
+    // Reconcile only floating-point boundary residue. The look-ahead envelope
+    // has already made the clamp dynamically feasible; unlike the old path,
+    // this must never absorb a material acceleration/jerk discontinuity.
     velocity = (offset - state_.unload_offset_m) / dt_sec;
-    const double realized_acceleration =
-        (velocity - state_.unload_velocity_m_s) / dt_sec;
-    const double realized_jerk =
-        (realized_acceleration - state_.unload_acceleration_m_s2) / dt_sec;
-    constexpr double kRelativeLimitTolerance = 1e-9;
-    const double acceleration_tolerance = kRelativeLimitTolerance *
-        std::max(1.0, config_.max_unload_acceleration_m_s2);
-    const double jerk_tolerance = kRelativeLimitTolerance *
-        std::max(1.0, config_.max_unload_jerk_m_s3);
-    if (std::abs(realized_acceleration) >
-            config_.max_unload_acceleration_m_s2 + acceleration_tolerance ||
-        std::abs(realized_jerk) > config_.max_unload_jerk_m_s3 + jerk_tolerance) {
-        proposal.reason = "normal force output bounds are infeasible at unilateral limit";
+    acceleration = (velocity - state_.unload_velocity_m_s) / dt_sec;
+    if (std::abs(acceleration) > config_.max_unload_acceleration_m_s2 + 1e-6 ||
+        std::abs(acceleration - state_.unload_acceleration_m_s2) >
+            config_.max_unload_jerk_m_s3 * dt_sec + 1e-6) {
+        proposal.reason =
+            "normal force controller numerical boundary reconciliation exceeded limits";
         return proposal;
     }
 
@@ -207,12 +427,13 @@ NormalForceControllerProposal NormalForceController::propose(
 
     proposal.state.unload_offset_m = offset;
     proposal.state.unload_velocity_m_s = velocity;
-    proposal.state.unload_acceleration_m_s2 = realized_acceleration;
+    proposal.state.unload_acceleration_m_s2 = acceleration;
     proposal.state.observed_energy_j = observed_energy_j;
     proposal.valid = true;
     proposal.reason = proposal.saturated
         ? "bounded"
-        : (proposal.in_deadband ? "deadband" : "ok");
+        : (command.brake_to_hold ? "braking" :
+            (proposal.in_deadband ? "deadband" : "ok"));
     return proposal;
 }
 

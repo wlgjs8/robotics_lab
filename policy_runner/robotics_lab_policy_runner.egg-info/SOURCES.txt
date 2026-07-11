@@ -4,6 +4,7 @@ policy_runner/__init__.py
 policy_runner/__main__.py
 policy_runner/arm_init_control.py
 policy_runner/camera_bundle_client.py
+policy_runner/camera_diagnostics.py
 policy_runner/camera_preview.py
 policy_runner/chunk_ensemble.py
 policy_runner/chunk_overlay_publisher.py
@@ -35,6 +36,7 @@ policy_runner/rollout_modes.py
 policy_runner/safety.py
 policy_runner/servo_command_client.py
 policy_runner/spacemouse.py
+policy_runner/spacemouse_registry.py
 policy_runner/tcp_target_pose_conditioner.py
 policy_runner/teleop_capture.py
 policy_runner/training.py
@@ -53,7 +55,9 @@ robotics_lab_policy_runner.egg-info/entry_points.txt
 robotics_lab_policy_runner.egg-info/requires.txt
 robotics_lab_policy_runner.egg-info/top_level.txt
 tests/test_camera_bundle_client.py
+tests/test_camera_diagnostics.py
 tests/test_camera_preview.py
+tests/test_camera_runtime_gate.py
 tests/test_camera_wrist_source_config.py
 tests/test_chunk_crossfade.py
 tests/test_chunk_ensemble.py
@@ -68,6 +72,8 @@ tests/test_flow_inference_gripper_mode.py
 tests/test_flow_inference_tcp_targetpose.py
 tests/test_flow_matching.py
 tests/test_flow_training.py
+tests/test_force_recovery.py
+tests/test_force_recovery_main.py
 tests/test_geometry_safety.py
 tests/test_gripper_runtime.py
 tests/test_gripper_server.py
@@ -83,6 +89,7 @@ tests/test_phase_metrics.py
 tests/test_policy_runner_contract.py
 tests/test_rbpodo_controller_sim_safety.py
 tests/test_recording_and_training.py
+tests/test_spacemouse_device_registry.py
 tests/test_spacemouse_hid_reader.py
 tests/test_teleop_mux.py
 tests/test_umi_dual_cartesian.py

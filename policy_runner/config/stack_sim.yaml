@@ -61,6 +61,13 @@ safety:
 command_rate_hz: 500
 
 spacemouse_pose_target_dual:
+  discovery:
+    enable: true
+    vendor_id: 0x256f
+    product_id: 0xc652
+    interface_number: 0
+    scan_period_sec: 0.5
+    poll_period_sec: 0.002
   max_linear_step_m: 0.001
   max_angular_step_rad: 0.01
   # Target-lead: how far the commanded target may run AHEAD of the current pose.
@@ -94,16 +101,13 @@ spacemouse_pose_target_dual:
   startup_neutral_hold_sec: 0.3
   left:
     device: null
-    # 3Dconnexion receiver A (USB 3-1.1) interface 1.0 = the 6-DOF motion
-    # node. hidraw2..5 are the same receiver's non-motion interfaces and emit
-    # NO samples (left arm stayed dead when pinned to hidraw5 = intf 1.4).
-    path: /dev/hidraw1
+    # Runtime assignment is operator-owned in rb_gui; hidraw numbering is not stable.
+    path: null
     device_number: 0
     deadman_button: 0
   right:
     device: null
-    # receiver B (USB 3-1.2) interface 1.0.
-    path: /dev/hidraw10
+    path: null
     device_number: 0
     deadman_button: 0
 

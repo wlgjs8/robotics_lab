@@ -19,6 +19,41 @@ available side by side under one lease. To isolate SpaceMouse while debugging,
 pass `POLICY_ACTION_SOURCE=dual_spacemouse_pose_target` through the stack
 launcher environment.
 
+The stack no longer relies on fixed `/dev/hidrawN` numbers. `policy_runner`
+discovers `256f:c652` interface `0` receivers wherever they are plugged in and
+publishes their activity to `rb_gui`. Because the Universal Receivers report no
+unique serial, open `조작 > SpaceMouse`, move each physical cap to identify it,
+then assign left/right and press `좌/우 배정 적용`. A replugged receiver appears
+as a new unassigned connection; motion stays blocked for it until reassigned and
+held neutral. `좌우 교환` is available only while teleop ownership is idle.
+
+The same panel reports `deadman`, startup-neutral progress, raw axes, activity,
+sample age, and the active per-arm input gate. The tracked profile already uses
+`deadman=off`. If an assigned device remains at `gate=startup-neutral` while a
+centered raw axis exceeds `deadband`, the input is being stopped before a
+Cartesian intent is generated; this is not a servo-server rejection. Keep the
+server lease, stale-state, and motion safety gates enabled during this check.
+
+Read-only discovery diagnostics:
+
+```bash
+PYTHONPATH=policy_runner python3 policy_runner/scripts/probe_spacemouse.py --list
+```
+
+Standalone dual-input test (stop `make run` first so no process owns either HID
+handle):
+
+```bash
+PYTHONPATH=policy_runner python3 policy_runner/scripts/probe_spacemouse.py \
+  --duration-sec 60 --rate-hz 100 --log --changes-only \
+  | tee logs/spacemouse_dual_probe.log
+```
+
+Move receiver A only, then receiver B only, then both together. The final
+summary reports each path's independent value-change count, peak axis, and last
+released axes. This script opens HID readers only; it does not create a robot
+command client or send servo commands.
+
 Controller-simulation safety remains config-driven. The server-side local config
 must keep the controller in `operation_mode: simulation`, expose
 `physical_motion_expected=false`, and keep physical real Cartesian disabled with

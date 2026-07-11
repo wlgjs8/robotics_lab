@@ -838,6 +838,8 @@ struct FtWrenchPipelineConfig {
     double control_lpf_alpha = 0.2;
     double max_tcp_speed_m_s = 0.0;
     double max_tcp_accel_m_s2 = 0.0;
+    bool auto_tare_after_init_motion = false;
+    double auto_tare_settle_sec = 0.5;
     int residual_tare_min_samples = 50;
     double residual_tare_max_force_stddev_n = 0.1;
     double residual_tare_max_torque_stddev_nm = 0.01;
@@ -869,7 +871,9 @@ struct ForceControlArmConfig {
     double hard_force_norm_n = 0.0;
     double hard_torque_norm_nm = 0.0;
     int debounce_samples = 1;
+    int hard_limit_debounce_samples = 1;
     double release_dwell_sec = 0.0;
+    double release_velocity_threshold_m_s = 0.002;
 };
 
 struct NormalAdmittanceConfig {

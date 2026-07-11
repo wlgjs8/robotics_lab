@@ -29,6 +29,10 @@ struct NormalForceControllerCommand {
     // not seek contact beyond the nominal pose because unload offset is
     // constrained to be non-negative.
     double target_contact_force_n = 0.0;
+    // Suppress the force-error drive while retaining the configured damping,
+    // stiffness, jerk envelope, and two-phase state update. Release uses this
+    // to brake the committed unload trajectory instead of resetting it.
+    bool brake_to_hold = false;
 };
 
 struct NormalForceControllerState {

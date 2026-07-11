@@ -95,12 +95,22 @@ bool clampAngularNorm(Vec6* v, double max_norm) {
   return true;
 }
 
-bool clampVec6Norm(Vec6* v, const AxisLimit& lin, const AxisLimit& ang, double AxisLimit::* member) {
+bool clampVec6Norm(
+    Vec6* v,
+    const AxisLimit& lin,
+    const AxisLimit& ang,
+    double AxisLimit::* member,
+    std::uint32_t linear_bit,
+    std::uint32_t angular_bit,
+    std::uint32_t* mask) {
   if (!v) return false;
-  bool clamped = false;
-  clamped = clampLinearNorm(v, lin.*member) || clamped;
-  clamped = clampAngularNorm(v, ang.*member) || clamped;
-  return clamped;
+  const bool linear_clamped = clampLinearNorm(v, lin.*member);
+  const bool angular_clamped = clampAngularNorm(v, ang.*member);
+  if (mask) {
+    if (linear_clamped) *mask |= linear_bit;
+    if (angular_clamped) *mask |= angular_bit;
+  }
+  return linear_clamped || angular_clamped;
 }
 
 Vec6 add(const Vec6& a, const Vec6& b) {
@@ -237,6 +247,7 @@ void DeltaTwistFollower::deactivate() {
   ang_feedback_cos_ = kFeedbackCosDefault;
   xi_ref_clamped_norm_ = false;
   xi_cmd_clamped_norm_ = false;
+  clamp_mask_ = 0;
   has_feedback_pose_ = false;
   diag_ = DeltaTwistFollowerDiag{};
 }
@@ -421,16 +432,19 @@ bool DeltaTwistFollower::consumeNextStep() {
 }
 
 bool DeltaTwistFollower::clampPendingResidual() {
-  bool clamped = false;
-  clamped = scaleLinearTo(&pending_delta_, cfg_.max_residual_m) || clamped;
-  clamped = scaleAngularTo(&pending_delta_, cfg_.max_residual_rad) || clamped;
+  const bool linear_scaled = scaleLinearTo(&pending_delta_, cfg_.max_residual_m);
+  const bool angular_scaled = scaleAngularTo(&pending_delta_, cfg_.max_residual_rad);
+  bool linear_clamped = linear_scaled;
+  bool angular_clamped = angular_scaled;
   if (cfg_.max_residual_m > 0.0 && linearNorm(pending_delta_) >= 0.999 * cfg_.max_residual_m) {
-    clamped = true;
+    linear_clamped = true;
   }
   if (cfg_.max_residual_rad > 0.0 && angularNorm(pending_delta_) >= 0.999 * cfg_.max_residual_rad) {
-    clamped = true;
+    angular_clamped = true;
   }
-  return clamped;
+  if (linear_clamped) clamp_mask_ |= DeltaTwistClampPendingLinear;
+  if (angular_clamped) clamp_mask_ |= DeltaTwistClampPendingAngular;
+  return linear_clamped || angular_clamped;
 }
 
 void DeltaTwistFollower::updateDiagState() {
@@ -454,6 +468,11 @@ void DeltaTwistFollower::updateDiagState() {
   diag_.realized_yaw_ratio = robustRatio(realized_delta_.rz, step_delta_.rz);
   diag_.normal_consumed = std::min(consumed_, normal_eff_);
   diag_.reserve_consumed = std::max(0, consumed_ - normal_eff_);
+  diag_.frame_rows = static_cast<int>(delta_.size());
+  diag_.normal_budget = normal_eff_;
+  diag_.total_budget = total_eff_;
+  diag_.steps_remaining = std::max(0, total_eff_ - consumed_);
+  diag_.clamp_mask = clamp_mask_;
   diag_.seg_target_stand = command_pose_;
 }
 
@@ -469,9 +488,11 @@ void DeltaTwistFollower::clampCommandLead() {
     lead_delta_ = Vec6{};
     return;
   }
-  bool clamped = false;
-  clamped = scaleLinearTo(&lead, cfg_.max_lead_m) || clamped;
-  clamped = scaleAngularTo(&lead, cfg_.max_lead_rad) || clamped;
+  const bool linear_clamped = scaleLinearTo(&lead, cfg_.max_lead_m);
+  const bool angular_clamped = scaleAngularTo(&lead, cfg_.max_lead_rad);
+  if (linear_clamped) clamp_mask_ |= DeltaTwistClampLeadLinear;
+  if (angular_clamped) clamp_mask_ |= DeltaTwistClampLeadAngular;
+  const bool clamped = linear_clamped || angular_clamped;
   lead_delta_ = lead;
   if (clamped) {
     command_pose_ = math::composeDeltaLocal(last_feedback_pose_, deltaPose(lead));
@@ -486,6 +507,7 @@ Pose6D DeltaTwistFollower::tick(double dt_tick) {
   min_time_to_go_used_ = false;
   xi_ref_clamped_norm_ = false;
   xi_cmd_clamped_norm_ = false;
+  clamp_mask_ = 0;
 
   t_in_seg_ += dt_tick;
   bool consumed_step = false;
@@ -511,20 +533,33 @@ Pose6D DeltaTwistFollower::tick(double dt_tick) {
   min_time_to_go_used_ = raw_horizon < min_tgo;
   const double horizon = std::max(raw_horizon, min_tgo);
   Vec6 xi_ref = mul(pending_delta_, 1.0 / horizon);
-  bool saturated = clampVec6Norm(&xi_ref, cfg_.lin, cfg_.ang, &AxisLimit::v_max);
+  bool saturated = clampVec6Norm(
+      &xi_ref, cfg_.lin, cfg_.ang, &AxisLimit::v_max,
+      DeltaTwistClampXiRefLinear, DeltaTwistClampXiRefAngular, &clamp_mask_);
   xi_ref_clamped_norm_ = saturated;
   xi_ref_ = xi_ref;
 
   Vec6 a_des = mul(sub(xi_ref, xi_cmd_), 1.0 / std::max(cfg_.tau_sec, dt_tick));
-  saturated = clampVec6Norm(&a_des, cfg_.lin, cfg_.ang, &AxisLimit::a_max) || saturated;
+  saturated = clampVec6Norm(
+      &a_des, cfg_.lin, cfg_.ang, &AxisLimit::a_max,
+      DeltaTwistClampDesiredAccelLinear, DeltaTwistClampDesiredAccelAngular,
+      &clamp_mask_) || saturated;
 
   Vec6 j_des = mul(sub(a_des, accel_cmd_), 1.0 / dt_tick);
-  saturated = clampVec6Norm(&j_des, cfg_.lin, cfg_.ang, &AxisLimit::j_max) || saturated;
+  saturated = clampVec6Norm(
+      &j_des, cfg_.lin, cfg_.ang, &AxisLimit::j_max,
+      DeltaTwistClampDesiredJerkLinear, DeltaTwistClampDesiredJerkAngular,
+      &clamp_mask_) || saturated;
 
   accel_cmd_ = add(accel_cmd_, mul(j_des, dt_tick));
-  saturated = clampVec6Norm(&accel_cmd_, cfg_.lin, cfg_.ang, &AxisLimit::a_max) || saturated;
+  saturated = clampVec6Norm(
+      &accel_cmd_, cfg_.lin, cfg_.ang, &AxisLimit::a_max,
+      DeltaTwistClampAccelCmdLinear, DeltaTwistClampAccelCmdAngular,
+      &clamp_mask_) || saturated;
   xi_cmd_ = add(xi_cmd_, mul(accel_cmd_, dt_tick));
-  xi_cmd_clamped_norm_ = clampVec6Norm(&xi_cmd_, cfg_.lin, cfg_.ang, &AxisLimit::v_max);
+  xi_cmd_clamped_norm_ = clampVec6Norm(
+      &xi_cmd_, cfg_.lin, cfg_.ang, &AxisLimit::v_max,
+      DeltaTwistClampXiCmdLinear, DeltaTwistClampXiCmdAngular, &clamp_mask_);
   saturated = xi_cmd_clamped_norm_ || saturated;
 
   const Vec6 delta_exec = mul(xi_cmd_, dt_tick);

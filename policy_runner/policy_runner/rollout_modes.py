@@ -280,6 +280,9 @@ class RolloutSummaryRecorder:
     gripper_dropped_count: int = 0
     allow_real_gripper_motion: bool = False
     collision_model_status: str = "missing"
+    force_recovery: dict[str, Any] = field(default_factory=dict)
+    camera_runtime: dict[str, Any] = field(default_factory=dict)
+    inference_diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def record_state(self, snapshot: Any) -> None:
         payload = getattr(snapshot, "payload", snapshot)
@@ -334,6 +337,18 @@ class RolloutSummaryRecorder:
         self.gripper_dropped_count = int(
             getattr(source, "gripper_dropped_count", self.gripper_dropped_count) or 0
         )
+        force_status = getattr(source, "force_recovery_status", None)
+        if callable(force_status):
+            self.force_recovery = dict(force_status())
+        camera_status = getattr(source, "camera_runtime_status", None)
+        if callable(camera_status):
+            self.camera_runtime = dict(camera_status())
+        diagnostics = getattr(source, "inference_diagnostics_snapshot", None)
+        if callable(diagnostics):
+            try:
+                self.inference_diagnostics = dict(diagnostics())
+            except Exception:  # noqa: BLE001 - summary diagnostics are best effort.
+                pass
 
     def record_decision(self, decision: Any) -> None:
         reason = str(getattr(decision, "reason", "") or "ok")
@@ -394,6 +409,9 @@ class RolloutSummaryRecorder:
             "gripper_dropped_count": int(self.gripper_dropped_count),
             "allow_real_gripper_motion": bool(self.allow_real_gripper_motion),
             "collision_model_status": self.collision_model_status,
+            "force_recovery": dict(self.force_recovery),
+            "camera_runtime": dict(self.camera_runtime),
+            "inference_diagnostics": dict(self.inference_diagnostics),
         }
         return data
 
@@ -446,6 +464,29 @@ class ReadOnlyActionSource:
     @property
     def gripper_dropped_count(self) -> int:
         return int(getattr(self._source, "gripper_dropped_count", 0) or 0)
+
+    @property
+    def force_recovery_terminal_abort_reason(self) -> str | None:
+        return getattr(self._source, "force_recovery_terminal_abort_reason", None)
+
+    @property
+    def terminal_abort_reason(self) -> str | None:
+        value = getattr(self._source, "terminal_abort_reason", None)
+        if value is not None:
+            return str(value)
+        return self.force_recovery_terminal_abort_reason
+
+    def force_recovery_status(self) -> dict[str, Any]:
+        status = getattr(self._source, "force_recovery_status", None)
+        return dict(status()) if callable(status) else {}
+
+    def camera_runtime_status(self) -> dict[str, Any]:
+        status = getattr(self._source, "camera_runtime_status", None)
+        return dict(status()) if callable(status) else {}
+
+    def inference_diagnostics_snapshot(self) -> dict[str, Any]:
+        snapshot = getattr(self._source, "inference_diagnostics_snapshot", None)
+        return dict(snapshot()) if callable(snapshot) else {}
 
     def next_intent(self, snapshot: Any, now_monotonic: float) -> Any | None:
         intent = self._source.next_intent(snapshot, now_monotonic)

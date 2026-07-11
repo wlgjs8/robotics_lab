@@ -36,6 +36,29 @@ bool loadRejects(const std::string& path) {
     return false;
 }
 
+bool loadRejectsContaining(const std::string& path, const std::string& expected) {
+    try {
+        (void)rb_servo::loadConfigFromYaml(path);
+    } catch (const std::exception& e) {
+        return std::string(e.what()).find(expected) != std::string::npos;
+    }
+    return false;
+}
+
+std::string readFile(const std::filesystem::path& path) {
+    std::ifstream file(path);
+    std::ostringstream text;
+    text << file.rdbuf();
+    return text.str();
+}
+
+bool replaceOnce(std::string* text, const std::string& from, const std::string& to) {
+    const std::size_t offset = text->find(from);
+    if (offset == std::string::npos) return false;
+    text->replace(offset, from.size(), to);
+    return true;
+}
+
 bool near(double a, double b) {
     return std::abs(a - b) < 1e-12;
 }
@@ -158,6 +181,8 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(flow_profile->pose_track_smd.singularity_scale_min, 0.12));
         RB_CHECK(near(flow_profile->max_smd_goal_lead_m, 0.080));
         RB_CHECK(near(flow_profile->max_smd_goal_lead_rad, 0.35));
+        RB_CHECK(flow_profile->ruckig_follower.consume_steps == 12);
+        RB_CHECK(flow_profile->ruckig_follower.reserve_steps == 2);
         RB_CHECK(stack_real.force_torque.source == "rbpodo_eft");
         RB_CHECK(stack_real.force_torque.left.enable);
         RB_CHECK(stack_real.force_torque.right.enable);
@@ -165,11 +190,51 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(stack_real.force_torque.right.frame_configured);
         RB_CHECK(stack_real.force_control.provider == "project_native");
         RB_CHECK(stack_real.force_control.enable);
-        RB_CHECK(stack_real.force_control.operating_mode == "monitor");
-        RB_CHECK(!stack_real.force_control.allow_in_real);
-        RB_CHECK(!stack_real.force_control.supervised_experimental_real);
+        RB_CHECK(stack_real.force_control.operating_mode == "guarded_admittance");
+        RB_CHECK(stack_real.force_control.allow_in_real);
+        RB_CHECK(stack_real.force_control.supervised_experimental_real);
         RB_CHECK(stack_real.force_control.left.enable);
         RB_CHECK(stack_real.force_control.right.enable);
+        const auto& left_force = stack_real.force_control.left;
+        const auto& right_force = stack_real.force_control.right;
+        RB_CHECK(left_force.surface_source == right_force.surface_source);
+        RB_CHECK(near(left_force.target_force_n, right_force.target_force_n));
+        RB_CHECK(near(left_force.contact_enter_force_n, right_force.contact_enter_force_n));
+        RB_CHECK(near(left_force.contact_release_force_n, right_force.contact_release_force_n));
+        RB_CHECK(near(left_force.target_force_n, 2.0));
+        RB_CHECK(near(left_force.contact_release_force_n, 3.0));
+        RB_CHECK(near(left_force.contact_enter_force_n, 6.0));
+        RB_CHECK(
+            left_force.target_force_n + left_force.force_deadband_n <=
+            left_force.contact_release_force_n
+        );
+        RB_CHECK(near(left_force.force_deadband_n, right_force.force_deadband_n));
+        RB_CHECK(near(left_force.hard_normal_force_n, 40.0));
+        RB_CHECK(near(left_force.hard_normal_force_n, right_force.hard_normal_force_n));
+        RB_CHECK(near(left_force.hard_force_norm_n, 45.0));
+        RB_CHECK(near(left_force.hard_force_norm_n, right_force.hard_force_norm_n));
+        RB_CHECK(near(left_force.hard_torque_norm_nm, 7.0));
+        RB_CHECK(near(left_force.hard_torque_norm_nm, right_force.hard_torque_norm_nm));
+        RB_CHECK(left_force.debounce_samples == right_force.debounce_samples);
+        RB_CHECK(left_force.hard_limit_debounce_samples == 5);
+        RB_CHECK(
+            left_force.hard_limit_debounce_samples ==
+            right_force.hard_limit_debounce_samples
+        );
+        RB_CHECK(near(left_force.release_dwell_sec, right_force.release_dwell_sec));
+        RB_CHECK(near(left_force.release_velocity_threshold_m_s, 0.002));
+        RB_CHECK(near(
+            left_force.release_velocity_threshold_m_s,
+            right_force.release_velocity_threshold_m_s
+        ));
+        const auto& normal_force = stack_real.force_control.normal_admittance;
+        RB_CHECK(near(normal_force.virtual_mass_kg, 8.0));
+        RB_CHECK(near(normal_force.damping_n_s_m, 160.0));
+        RB_CHECK(near(normal_force.stiffness_n_m, 0.0));
+        RB_CHECK(near(normal_force.max_unload_offset_m, 0.01));
+        RB_CHECK(near(normal_force.max_normal_velocity_m_s, 0.015));
+        RB_CHECK(near(normal_force.max_normal_acceleration_m_s2, 0.12));
+        RB_CHECK(near(normal_force.max_normal_jerk_m_s3, 0.8));
         RB_CHECK(stack_real.kinematics.enable);
         RB_CHECK(stack_real.kinematics.provider == "pinocchio");
         const auto& real_mesh = stack_real.safety.self_collision.mesh;
@@ -267,6 +332,61 @@ bool testRepositoryConfigsParse() {
                               "*left*link2*", "*left*link4*"));
         RB_CHECK(!hasPairRule(sim_mesh.disabled_collision_pairs,
                               "*right*link2*", "*right*link4*"));
+    }
+
+    return true;
+}
+
+bool testGuardedAdmittanceReleaseProfileValidation() {
+    const std::filesystem::path stack_real_path =
+        servoRoot() / "config" / "stack_real.yaml";
+
+    {
+        std::string body = readFile(stack_real_path);
+        RB_CHECK(replaceOnce(
+            &body,
+            "    contact_release_force_n: 3.0\n",
+            "    contact_release_force_n: 2.0\n"
+        ));
+        const std::string path = writeTempConfig("force-release-at-target", body);
+        const bool rejected = loadRejectsContaining(
+            path,
+            "target_force_n < contact_release_force_n"
+        );
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+
+    {
+        std::string body = readFile(stack_real_path);
+        RB_CHECK(replaceOnce(
+            &body,
+            "    force_deadband_n: 0.5\n",
+            "    force_deadband_n: 1.1\n"
+        ));
+        const std::string path = writeTempConfig("force-release-inside-deadband", body);
+        const bool rejected = loadRejectsContaining(
+            path,
+            "target_force_n + force_deadband_n <= contact_release_force_n"
+        );
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+
+    {
+        std::string body = readFile(stack_real_path);
+        RB_CHECK(replaceOnce(
+            &body,
+            "    contact_release_force_n: 3.0\n",
+            "    contact_release_force_n: 6.0\n"
+        ));
+        const std::string path = writeTempConfig("force-release-at-entry", body);
+        const bool rejected = loadRejectsContaining(
+            path,
+            "contact_release_force_n < contact_enter_force_n"
+        );
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
     }
 
     return true;
@@ -424,6 +544,8 @@ bool testForceControlSchemaAndActivation() {
         "    control_lpf_alpha: 0.3\n"
         "    max_tcp_speed_m_s: 0.05\n"
         "    max_tcp_accel_m_s2: 0.5\n"
+        "    auto_tare_after_init_motion: true\n"
+        "    auto_tare_settle_sec: 0.6\n"
         "    residual_tare_min_samples: 20\n"
         "    residual_tare_max_force_stddev_n: 0.2\n"
         "    residual_tare_max_torque_stddev_nm: 0.02\n"
@@ -470,6 +592,8 @@ bool testForceControlSchemaAndActivation() {
     RB_CHECK(inactive.force_torque.source == "rbpodo_eft");
     RB_CHECK(!inactive.force_torque.left.enable);
     RB_CHECK(inactive.force_torque.left.frame_configured);
+    RB_CHECK(inactive.force_torque.left.auto_tare_after_init_motion);
+    RB_CHECK(near(inactive.force_torque.left.auto_tare_settle_sec, 0.6));
     RB_CHECK(near(inactive.force_torque.left.t_tcp_sensor.z, 0.03));
     RB_CHECK(near(inactive.force_torque.left.payload_mass_kg, 0.5));
     RB_CHECK(inactive.force_torque.right.freshness_source == "source_time");
@@ -509,6 +633,23 @@ bool testForceControlSchemaAndActivation() {
     ::unlink(pipeline_enabled_path.c_str());
     RB_CHECK(pipeline_enabled_rejected);
 
+    const std::string auto_tare_without_planner_path = writeTempConfig(
+        "force-auto-tare-without-planner",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  source: rbpodo_eft\n"
+        "  left:\n"
+        "    enable: true\n"
+        "    frame_configured: true\n"
+        "    sensor_identity: rft64-left\n"
+        "    calibration_id: characterization-v1\n"
+        "    auto_tare_after_init_motion: true\n"
+    );
+    const bool auto_tare_without_planner_rejected =
+        loadRejects(auto_tare_without_planner_path);
+    ::unlink(auto_tare_without_planner_path.c_str());
+    RB_CHECK(auto_tare_without_planner_rejected);
+
     const std::string monitor_enabled_path = writeTempConfig(
         "force-monitor-enabled",
         "schema: robotics_lab.rb_servo_server.v1\n"
@@ -535,7 +676,9 @@ bool testForceControlSchemaAndActivation() {
         "    hard_force_norm_n: 30.0\n"
         "    hard_torque_norm_nm: 5.0\n"
         "    debounce_samples: 3\n"
+        "    hard_limit_debounce_samples: 4\n"
         "    release_dwell_sec: 0.1\n"
+        "    release_velocity_threshold_m_s: 0.003\n"
         "  normal_admittance:\n"
         "    virtual_mass_kg: 4.0\n"
         "    damping_n_s_m: 60.0\n"
@@ -556,6 +699,11 @@ bool testForceControlSchemaAndActivation() {
     RB_CHECK(monitor_enabled.force_control.update_rate_hz == 500);
     RB_CHECK(monitor_enabled.force_control.left.enable);
     RB_CHECK(near(monitor_enabled.force_control.left.target_force_n, 3.0));
+    RB_CHECK(monitor_enabled.force_control.left.hard_limit_debounce_samples == 4);
+    RB_CHECK(near(
+        monitor_enabled.force_control.left.release_velocity_threshold_m_s,
+        0.003
+    ));
     RB_CHECK(near(
         monitor_enabled.force_control.normal_admittance.max_unload_offset_m,
         0.005
@@ -573,6 +721,20 @@ bool testForceControlSchemaAndActivation() {
     const bool rate_mismatch_rejected = loadRejects(rate_mismatch_path);
     ::unlink(rate_mismatch_path.c_str());
     RB_CHECK(rate_mismatch_rejected);
+
+    const std::string invalid_release_velocity_path = writeTempConfig(
+        "force-invalid-release-velocity",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_control:\n"
+        "  provider: null\n"
+        "  enable: false\n"
+        "  left:\n"
+        "    release_velocity_threshold_m_s: 0.0\n"
+    );
+    const bool invalid_release_velocity_rejected =
+        loadRejects(invalid_release_velocity_path);
+    ::unlink(invalid_release_velocity_path.c_str());
+    RB_CHECK(invalid_release_velocity_rejected);
 
     const std::string invalid_mass_path = writeTempConfig(
         "force-invalid-mass",
@@ -1426,6 +1588,7 @@ bool testSelfCollisionConfig() {
 
 int main() {
     if (!testRepositoryConfigsParse()) return 1;
+    if (!testGuardedAdmittanceReleaseProfileValidation()) return 1;
     if (!testServoIoModelParsesAndValidates()) return 1;
     if (!testUnknownKeysAndSchemaFail()) return 1;
     if (!testStatePublisherEndpointsParseAndValidate()) return 1;

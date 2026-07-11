@@ -156,6 +156,17 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_delta_twist_ang_feedback_cos"
        << ',' << side << "_delta_twist_xi_ref_clamped_norm"
        << ',' << side << "_delta_twist_xi_cmd_clamped_norm"
+       << ',' << side << "_delta_twist_frame_rows"
+       << ',' << side << "_delta_twist_normal_budget"
+       << ',' << side << "_delta_twist_total_budget"
+       << ',' << side << "_delta_twist_steps_remaining"
+       << ',' << side << "_delta_twist_clamp_mask"
+       << ',' << side << "_delta_twist_accel_cmd_x_m_s2"
+       << ',' << side << "_delta_twist_accel_cmd_y_m_s2"
+       << ',' << side << "_delta_twist_accel_cmd_z_m_s2"
+       << ',' << side << "_delta_twist_accel_cmd_rx_rad_s2"
+       << ',' << side << "_delta_twist_accel_cmd_ry_rad_s2"
+       << ',' << side << "_delta_twist_accel_cmd_rz_rad_s2"
        << ',' << side << "_output_ma_present"
        << ',' << side << "_output_ma_window";
     writeJointArrayHeader(os, side, "q_target_before_output_ma");
@@ -285,6 +296,14 @@ void writeForceTelemetryHeader(std::ostream& os, const char* side) {
        << ',' << side << "_ft_freshness_value"
        << ',' << side << "_ft_freshness_advanced"
        << ',' << side << "_ft_reason"
+       << ',' << side << "_ft_auto_tare_enabled"
+       << ',' << side << "_ft_tare_valid"
+       << ',' << side << "_ft_tare_state"
+       << ',' << side << "_ft_tare_sample_count"
+       << ',' << side << "_ft_tare_generation"
+       << ',' << side << "_ft_tare_reason";
+    writeWrenchHeader(os, side, "ft_residual_tare_tcp");
+    os
        << ',' << side << "_force_control_enabled"
        << ',' << side << "_force_control_operating_mode"
        << ',' << side << "_force_control_state"
@@ -298,6 +317,8 @@ void writeForceTelemetryHeader(std::ostream& os, const char* side) {
        << ',' << side << "_force_control_fast_force_norm_n"
        << ',' << side << "_force_control_fast_torque_norm_nm"
        << ',' << side << "_force_control_contact_threshold_exceeded"
+       << ',' << side << "_force_control_hard_limit_threshold_exceeded"
+       << ',' << side << "_force_control_hard_limit_sample_count"
        << ',' << side << "_force_control_hard_limit_exceeded"
        << ',' << side << "_force_control_target_force_n"
        << ',' << side << "_force_control_correction_m"
@@ -444,6 +465,9 @@ void ServoLogger::writeHeader() {
     file_ << ",command_buffer_latest_seq,command_buffer_latest_left_mode,command_buffer_latest_right_mode,command_buffer_latest_host_time_ns,command_buffer_latest_age_ms,command_buffer_latest_timeout_ms,command_buffer_latest_timeout_valid,command_buffer_latest_usable,command_buffer_latest_client_send_age_ms";
     file_ << ",command_buffer_lifecycle_seq,command_buffer_lifecycle_left_mode,command_buffer_lifecycle_right_mode,command_buffer_lifecycle_host_time_ns,command_buffer_lifecycle_age_ms,command_buffer_lifecycle_timeout_ms,command_buffer_lifecycle_timeout_valid,command_buffer_lifecycle_usable";
     file_ << ",command_buffer_external_boxes_pending,command_buffer_external_boxes_consumed,command_buffer_external_boxes_applied,command_buffer_external_boxes_seq,command_buffer_external_boxes_left_mode,command_buffer_external_boxes_right_mode,command_buffer_external_boxes_host_time_ns,command_buffer_external_boxes_age_ms,command_buffer_external_boxes_client_send_age_ms";
+    file_ << ",chunk_frame_wire_seq,chunk_frame_recv_seq,chunk_frame_policy_dt_sec,chunk_frame_horizon,chunk_frame_execute_steps,chunk_frame_runway_steps,chunk_frame_age_ms,chunk_frame_interarrival_ms";
+    file_ << ",chunk_inference_seq,chunk_inference_queue_wait_ms,chunk_inference_latency_ms,chunk_inference_ready_wait_ms,chunk_inference_period_ms,chunk_inference_period_jitter_ms,chunk_inference_stall_count";
+    file_ << ",chunk_camera_bundle_seq,chunk_camera_bundle_age_ms,chunk_camera_max_skew_ms,chunk_camera_left_frame_number,chunk_camera_right_frame_number,chunk_camera_left_frame_age_ms,chunk_camera_right_frame_age_ms,chunk_camera_left_focus_score,chunk_camera_right_focus_score";
     file_ << ",left_send_ok,right_send_ok";
     file_ << ",fault_context_verdict,fault_context_domain,fault_context_arm,fault_context_backend_op,fault_context_backend_error_kind,fault_context_backend_error_name,fault_context_backend_error_code,fault_context_retryable,fault_context_recoverable,fault_context_robot_fault,fault_context_transport_fault,fault_context_state_after_source,fault_context_reason";
     file_ << ",left_send_start_ns,left_send_end_ns,right_send_start_ns,right_send_end_ns,send_skew_us,left_send_duration_us,right_send_duration_us";
@@ -539,6 +563,14 @@ void writeForceTelemetryColumns(
        << ',' << ft.freshness_value
        << ',' << ft.freshness_advanced
        << ',' << csvEscape(ft.reason)
+       << ',' << ft.auto_tare_enabled
+       << ',' << ft.tare_valid
+       << ',' << csvEscape(ft.tare_state)
+       << ',' << ft.tare_sample_count
+       << ',' << ft.tare_generation
+       << ',' << csvEscape(ft.tare_reason);
+    writeWrenchColumns(os, ft.residual_tare_tcp);
+    os
        << ',' << control.enabled
        << ',' << csvEscape(control.operating_mode)
        << ',' << csvEscape(control.state)
@@ -552,6 +584,8 @@ void writeForceTelemetryColumns(
        << ',' << control.fast_force_norm_n
        << ',' << control.fast_torque_norm_nm
        << ',' << control.contact_threshold_exceeded
+       << ',' << control.hard_limit_threshold_exceeded
+       << ',' << control.hard_limit_sample_count
        << ',' << control.hard_limit_exceeded
        << ',' << control.target_force_n
        << ',' << control.correction_m
@@ -726,6 +760,17 @@ void writeArmProfilingColumns(
        << ',' << telemetry.delta_twist_ang_feedback_cos
        << ',' << telemetry.delta_twist_xi_ref_clamped_norm
        << ',' << telemetry.delta_twist_xi_cmd_clamped_norm
+       << ',' << telemetry.delta_twist_frame_rows
+       << ',' << telemetry.delta_twist_normal_budget
+       << ',' << telemetry.delta_twist_total_budget
+       << ',' << telemetry.delta_twist_steps_remaining
+       << ',' << telemetry.delta_twist_clamp_mask
+       << ',' << telemetry.delta_twist_accel_cmd.x
+       << ',' << telemetry.delta_twist_accel_cmd.y
+       << ',' << telemetry.delta_twist_accel_cmd.z
+       << ',' << telemetry.delta_twist_accel_cmd.rx
+       << ',' << telemetry.delta_twist_accel_cmd.ry
+       << ',' << telemetry.delta_twist_accel_cmd.rz
        << ',' << telemetry.output_ma_present
        << ',' << telemetry.output_ma_window;
     if (telemetry.output_ma_present) {
@@ -962,6 +1007,30 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << sample.command_buffer_read.external_boxes_host_time_ns << ','
           << sample.command_buffer_read.external_boxes_age_ms << ','
           << sample.command_buffer_read.external_boxes_client_send_age_ms << ','
+          << sample.chunk_frame.wire_seq << ','
+          << sample.chunk_frame.recv_seq << ','
+          << sample.chunk_frame.policy_dt_sec << ','
+          << sample.chunk_frame.horizon << ','
+          << sample.chunk_frame.execute_steps << ','
+          << sample.chunk_frame.runway_steps << ','
+          << sample.chunk_frame.age_ms << ','
+          << sample.chunk_frame.interarrival_ms << ','
+          << sample.chunk_frame.inference_seq << ','
+          << sample.chunk_frame.inference_queue_wait_ms << ','
+          << sample.chunk_frame.inference_latency_ms << ','
+          << sample.chunk_frame.inference_ready_wait_ms << ','
+          << sample.chunk_frame.inference_period_ms << ','
+          << sample.chunk_frame.inference_period_jitter_ms << ','
+          << sample.chunk_frame.inference_stall_count << ','
+          << sample.chunk_frame.camera_bundle_seq << ','
+          << sample.chunk_frame.camera_bundle_age_ms << ','
+          << sample.chunk_frame.camera_max_skew_ms << ','
+          << sample.chunk_frame.camera_left_frame_number << ','
+          << sample.chunk_frame.camera_right_frame_number << ','
+          << sample.chunk_frame.camera_left_frame_age_ms << ','
+          << sample.chunk_frame.camera_right_frame_age_ms << ','
+          << sample.chunk_frame.camera_left_focus_score << ','
+          << sample.chunk_frame.camera_right_focus_score << ','
           << sample.left_send_ok << ','
           << sample.right_send_ok << ',';
     if (sample.latched_fault_context.has_value()) {

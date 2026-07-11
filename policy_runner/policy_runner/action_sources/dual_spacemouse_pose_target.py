@@ -15,6 +15,7 @@ from policy_runner.action_sources.tcp_pose_target import (
 from policy_runner.robot_state_client import StateSnapshot
 from policy_runner.servo_command_client import CommandIntent
 from policy_runner.spacemouse import HidSpaceMouseReader, SpaceMouseReader, SpaceMouseSample
+from policy_runner.spacemouse_registry import SpaceMouseDeviceRegistry
 
 
 def _resolve_spacemouse_log_path() -> str | None:
@@ -116,6 +117,7 @@ class DualSpaceMousePoseTargetActionSource:
         gripper_close_percent: float = 10.0,
         timeout_sec: float = 0.2,
         allow_rbpodo_controller_simulation: bool = False,
+        device_registry: SpaceMouseDeviceRegistry | None = None,
     ):
         if max_linear_step_m < 0.0:
             raise ValueError("max_linear_step_m must be non-negative")
@@ -173,6 +175,8 @@ class DualSpaceMousePoseTargetActionSource:
         self.gripper_open_percent = float(gripper_open_percent)
         self.gripper_close_percent = float(gripper_close_percent)
         self.timeout_sec = float(timeout_sec)
+        self.device_registry = device_registry
+        self._assignment_hold_pending = False
         self.requirements = cartesian_action_requirements(
             allow_rbpodo_controller_simulation=allow_rbpodo_controller_simulation
         )
@@ -201,8 +205,82 @@ class DualSpaceMousePoseTargetActionSource:
             self._step_log.close()
         self.left_reader.close()
         self.right_reader.close()
+        if self.device_registry is not None:
+            self.device_registry.close()
+
+    def spacemouse_status(
+        self,
+        *,
+        assignment_change_allowed: bool | None = None,
+        block_reason: str = "",
+    ):
+        if self.device_registry is None:
+            return None
+        allowed = not self.engaged if assignment_change_allowed is None else assignment_change_allowed
+        status = self.device_registry.status_block(
+            assignment_change_allowed=bool(allowed),
+            block_reason=block_reason,
+        )
+        now = time.monotonic()
+        status["input_policy"] = {
+            "require_deadman": self.require_deadman,
+            "deadband": self.deadband,
+            "activation_deadband": self.activation_deadband,
+            "sample_stale_timeout_sec": self.sample_stale_timeout_sec,
+            "startup_requires_neutral": self.startup_requires_neutral,
+            "startup_neutral_hold_sec": self.startup_neutral_hold_sec,
+        }
+        status["side_gates"] = {
+            "left": self._side_gate_status(self._left_state, now),
+            "right": self._side_gate_status(self._right_state, now),
+        }
+        return status
+
+    def _side_gate_status(self, state: "_SideState", now_monotonic: float) -> dict[str, object]:
+        neutral_hold_elapsed_sec = (
+            max(0.0, now_monotonic - state.neutral_since)
+            if state.neutral_since is not None
+            else 0.0
+        )
+        startup_blocked = self.startup_requires_neutral and not state.neutral_confirmed
+        return {
+            "active": state.active,
+            "neutral_confirmed": state.neutral_confirmed,
+            "neutral_hold_elapsed_sec": min(
+                neutral_hold_elapsed_sec,
+                self.startup_neutral_hold_sec,
+            ),
+            "startup_blocked": startup_blocked,
+            "gate": "startup_neutral" if startup_blocked else "ready",
+        }
+
+    def handle_spacemouse_control(
+        self,
+        payload: Mapping[str, object],
+        *,
+        assignment_change_allowed: bool | None = None,
+    ) -> bool:
+        if self.device_registry is None:
+            return False
+        allowed = not self.engaged if assignment_change_allowed is None else assignment_change_allowed
+        handled = self.device_registry.handle_control(
+            payload,
+            assignment_change_allowed=bool(allowed),
+        )
+        if handled:
+            status = self.device_registry.status_block(assignment_change_allowed=bool(allowed))
+            if status.get("last_result") == "accepted":
+                self._left_state.reset_all()
+                self._right_state.reset_all()
+                self._assignment_hold_pending = True
+        return handled
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
+        if self._assignment_hold_pending:
+            self._assignment_hold_pending = False
+            self._left_state.reset_all()
+            self._right_state.reset_all()
+            return CommandIntent.hold(timeout_sec=self.timeout_sec)
         self.failed = False
         self.failure_message = None
         left = self._target_from_reader(

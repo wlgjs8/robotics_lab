@@ -75,6 +75,7 @@ from .recording_control import (
     RecordingCommandResult,
     RecordingStatusReceiver,
     RecordingStatusStore,
+    SpaceMouseCommandResult,
     normalize_arm_init_status,
     normalize_recording_status,
     parse_udp_endpoint,
@@ -2919,20 +2920,13 @@ def build_gui(
 
         with _op_tabs.add_tab("안전"):
             with server.gui.add_folder("Stand Safety Floor"):
-                # Runtime enforce on/off. The operator's last choice is persisted to
-                # the GUI settings file and restored here as the checkbox default; once
-                # the state stream is live it is re-applied to the server (see the
-                # one-shot block in update_gui) so the saved choice wins over
-                # the config default. With no saved preference we fall back to syncing
-                # from telemetry on the first state (see _update_floor_panel). Only
-                # effective when floor_constraint.enable=true in the server config.
-                _floor_pref = _load_gui_settings().get("stand_floor_enforce")
-                _floor_pref = _floor_pref if isinstance(_floor_pref, bool) else None
-                handles["stand_floor_enforce_pref"] = _floor_pref
+                # Runtime enforce on/off. Startup authority belongs to the server
+                # config, so the first state always initializes this checkbox. A stale
+                # GUI preference must never disable a configured safety envelope.
                 if hasattr(server.gui, "add_checkbox"):
                     floor_enforce = server.gui.add_checkbox(
                         "Enforce stand floor",
-                        initial_value=_floor_pref if _floor_pref is not None else True,
+                        initial_value=True,
                     )
                     handles["floor_enforce_toggle"] = floor_enforce
 
@@ -2940,10 +2934,6 @@ def build_gui(
                     def _(_: Any) -> None:
                         enabled = bool(floor_enforce.value)
                         ok, message = safety.send_set_floor_enabled(enabled)
-                        # Remember the operator's choice for the next launch (and so the
-                        # restore block stops fighting telemetry from here on).
-                        handles["stand_floor_enforce_pref"] = enabled
-                        _update_gui_setting("stand_floor_enforce", enabled)
                         handles["floor_set_status"].value = ("OK: " if ok else "BLOCKED: ") + message
                 handles["floor_applied"] = server.gui.add_text(
                     "Applied z", initial_value="no state", disabled=True
@@ -3301,6 +3291,42 @@ def build_gui(
                         initial_value=f"-> gripper_server {handles['gripper_cmd_endpoint'][0]}:{handles['gripper_cmd_endpoint'][1]}",
                         disabled=True,
                     )
+
+        with _op_tabs.add_tab("SpaceMouse"):
+            handles["spacemouse_summary"] = server.gui.add_text(
+                "감지 장치", initial_value="policy_runner 상태 대기 중", disabled=True
+            )
+            handles["spacemouse_left_select"] = server.gui.add_dropdown(
+                "왼팔 SpaceMouse", ("미배정",), initial_value="미배정"
+            )
+            handles["spacemouse_right_select"] = server.gui.add_dropdown(
+                "오른팔 SpaceMouse", ("미배정",), initial_value="미배정"
+            )
+            handles["spacemouse_assignment_dirty"] = False
+            handles["spacemouse_syncing"] = False
+            handles["spacemouse_pending_seq"] = 0
+
+            def _mark_spacemouse_dirty(_: Any = None) -> None:
+                if not handles.get("spacemouse_syncing", False):
+                    handles["spacemouse_assignment_dirty"] = True
+
+            handles["spacemouse_left_select"].on_update(_mark_spacemouse_dirty)
+            handles["spacemouse_right_select"].on_update(_mark_spacemouse_dirty)
+            apply_button = server.gui.add_button("좌/우 배정 적용", color="green")
+            swap_button = server.gui.add_button("좌우 교환")
+            handles["spacemouse_apply_button"] = apply_button
+            handles["spacemouse_swap_button"] = swap_button
+            handles["spacemouse_command_status"] = server.gui.add_text(
+                "배정 상태", initial_value="미배정 장치는 로봇을 움직이지 않습니다", disabled=True
+            )
+
+            @apply_button.on_click
+            def _(_: Any) -> None:
+                _send_spacemouse_assignment(handles)
+
+            @swap_button.on_click
+            def _(_: Any) -> None:
+                _send_spacemouse_swap(handles)
 
     with tabs.add_tab("이동"):
         _move_tabs = server.gui.add_tab_group()
@@ -3985,6 +4011,140 @@ def _recording_status_block(
     return normalize_recording_status(None)
 
 
+def _spacemouse_status_block(handles: dict[str, Any]) -> dict[str, Any] | None:
+    store = handles.get("recording_status_store")
+    if isinstance(store, RecordingStatusStore):
+        return store.latest_spacemouse()
+    return None
+
+
+def _spacemouse_selected_connection(handle: Any) -> str | None:
+    value = str(getattr(handle, "value", "") or "").strip()
+    return None if value in {"", "미배정"} else value
+
+
+def _send_spacemouse_assignment(handles: dict[str, Any]) -> bool:
+    status = _spacemouse_status_block(handles)
+    client = handles.get("recording_cmd_client")
+    send = getattr(client, "send_spacemouse_assignments", None)
+    if status is None or not callable(send):
+        handles["spacemouse_command_status"].value = "BLOCKED: policy_runner 상태/제어 없음"
+        return False
+    result = send(
+        status_generation=int(status.get("generation", -1)),
+        left_connection_id=_spacemouse_selected_connection(handles.get("spacemouse_left_select")),
+        right_connection_id=_spacemouse_selected_connection(handles.get("spacemouse_right_select")),
+    )
+    return _apply_spacemouse_command_result(handles, result)
+
+
+def _send_spacemouse_swap(handles: dict[str, Any]) -> bool:
+    status = _spacemouse_status_block(handles)
+    client = handles.get("recording_cmd_client")
+    send = getattr(client, "send_spacemouse_swap", None)
+    if status is None or not callable(send):
+        handles["spacemouse_command_status"].value = "BLOCKED: policy_runner 상태/제어 없음"
+        return False
+    return _apply_spacemouse_command_result(
+        handles,
+        send(status_generation=int(status.get("generation", -1))),
+    )
+
+
+def _apply_spacemouse_command_result(handles: dict[str, Any], result: SpaceMouseCommandResult) -> bool:
+    prefix = "PENDING: " if result.ok else "BLOCKED: "
+    handles["spacemouse_command_status"].value = prefix + result.message
+    if result.ok and isinstance(result.payload, Mapping):
+        handles["spacemouse_pending_seq"] = int(result.payload.get("seq", 0) or 0)
+    return result.ok
+
+
+def _update_spacemouse_panel(handles: dict[str, Any]) -> None:
+    if "spacemouse_summary" not in handles:
+        return
+    status = _spacemouse_status_block(handles)
+    store = handles.get("recording_status_store")
+    stale = not isinstance(store, RecordingStatusStore) or store.is_stale(threshold_sec=2.0)
+    if status is None:
+        handles["spacemouse_summary"].value = "policy_runner 상태 없음"
+        _set_disabled(handles.get("spacemouse_apply_button"), True)
+        _set_disabled(handles.get("spacemouse_swap_button"), True)
+        return
+    devices = status.get("devices") if isinstance(status.get("devices"), list) else []
+    input_policy = status.get("input_policy") if isinstance(status.get("input_policy"), Mapping) else {}
+    side_gates = status.get("side_gates") if isinstance(status.get("side_gates"), Mapping) else {}
+    connection_ids = [
+        str(device.get("connection_id"))
+        for device in devices
+        if isinstance(device, Mapping) and device.get("connection_id")
+    ]
+    options = ("미배정", *connection_ids)
+    for key in ("spacemouse_left_select", "spacemouse_right_select"):
+        handle = handles.get(key)
+        if handle is not None:
+            try:
+                handle.options = options
+            except Exception:
+                pass
+    if not handles.get("spacemouse_assignment_dirty", False):
+        left = str(status.get("left_connection_id") or "미배정")
+        right = str(status.get("right_connection_id") or "미배정")
+        handles["spacemouse_syncing"] = True
+        try:
+            if handles.get("spacemouse_left_select") is not None:
+                handles["spacemouse_left_select"].value = left if left in options else "미배정"
+            if handles.get("spacemouse_right_select") is not None:
+                handles["spacemouse_right_select"].value = right if right in options else "미배정"
+        finally:
+            handles["spacemouse_syncing"] = False
+    rows = [
+        "policy "
+        f"deadman={'on' if bool(input_policy.get('require_deadman', False)) else 'off'} "
+        f"startup-neutral={'on' if bool(input_policy.get('startup_requires_neutral', False)) else 'off'} "
+        f"deadband={float(input_policy.get('deadband', 0.0) or 0.0):.3f} "
+        f"activation={float(input_policy.get('activation_deadband', 0.0) or 0.0):.3f}"
+    ]
+    for index, device in enumerate(devices):
+        if not isinstance(device, Mapping):
+            continue
+        arm = str(device.get("arm", "unassigned") or "unassigned")
+        gate = side_gates.get(arm) if arm in {"left", "right"} else None
+        gate = gate if isinstance(gate, Mapping) else {}
+        raw_axes = device.get("raw_axes")
+        raw_text = "no-sample"
+        if isinstance(raw_axes, (list, tuple)) and len(raw_axes) == 6:
+            raw_text = "(" + ",".join(f"{float(value):+.2f}" for value in raw_axes) + ")"
+        sample_age = device.get("sample_age_sec")
+        age_text = "n/a" if sample_age is None else f"{float(sample_age):.3f}s"
+        gate_text = str(gate.get("gate", "unassigned"))
+        if gate_text == "startup_neutral":
+            elapsed = float(gate.get("neutral_hold_elapsed_sec", 0.0) or 0.0)
+            required = float(input_policy.get("startup_neutral_hold_sec", 0.0) or 0.0)
+            gate_text = f"startup-neutral {elapsed:.2f}/{required:.2f}s"
+        rows.append(
+            f"{chr(ord('A') + index)}={device.get('connection_id')} "
+            f"arm={arm} activity={float(device.get('activity', 0.0) or 0.0):.2f} "
+            f"neutral={bool(device.get('neutral', True))} age={age_text} gate={gate_text}\n"
+            f"  raw={raw_text}"
+        )
+    handles["spacemouse_summary"].value = "\n".join(rows) if rows else "감지된 SpaceMouse 없음"
+    allowed = bool(status.get("assignment_change_allowed", False)) and not stale
+    _set_disabled(handles.get("spacemouse_apply_button"), not allowed)
+    both_assigned = bool(status.get("left_connection_id")) and bool(status.get("right_connection_id"))
+    _set_disabled(handles.get("spacemouse_swap_button"), not allowed or not both_assigned)
+    pending = int(handles.get("spacemouse_pending_seq", 0) or 0)
+    acknowledged = int(status.get("last_command_seq", 0) or 0)
+    if pending and acknowledged >= pending:
+        result = str(status.get("last_result", "") or "")
+        error = str(status.get("last_error", "") or "")
+        handles["spacemouse_command_status"].value = (
+            "OK: 배정 적용됨" if result == "accepted" else f"BLOCKED: {error or result or 'unknown'}"
+        )
+        handles["spacemouse_pending_seq"] = 0
+        if result == "accepted":
+            handles["spacemouse_assignment_dirty"] = False
+
+
 def _recording_is_active(handles: dict[str, Any], latest: StateSnapshot | None = None) -> bool:
     return bool(_recording_status_block(handles, latest).get("recording", False))
 
@@ -4243,19 +4403,15 @@ def _update_floor_panel(handles: dict[str, Any], latest: StateSnapshot | None) -
     update_floor_plane(handles.get("scene", {}), floor)
     # One-shot: bring the enforce checkbox up at the server-reported state, then leave
     # it operator-controlled (guarded by a flag so we don't fight the user's clicks).
-    # Skip this when the operator has a persisted preference: that choice is restored
-    # as the checkbox default and pushed to the server in _build_status_updater, so we
-    # must not overwrite it from telemetry here (see update_gui).
     if (
         "floor_enforce_toggle" in handles
         and isinstance(floor, Mapping)
         and not handles.get("floor_enforce_synced", False)
     ):
-        if handles.get("stand_floor_enforce_pref") is None:
-            try:
-                handles["floor_enforce_toggle"].value = bool(floor.get("enabled", False))
-            except Exception:
-                pass
+        try:
+            handles["floor_enforce_toggle"].value = bool(floor.get("enabled", False))
+        except Exception:
+            pass
         handles["floor_enforce_synced"] = True
     slider = handles.get("floor_slider")
     if not isinstance(floor, Mapping) or not bool(floor.get("enabled", False)):
@@ -4900,6 +5056,7 @@ def update_gui(
     _update_circle_overlay_gui(handles, overlay_store)
     _update_chunk_overlay_gui(handles, chunk_overlay_store, latest)
     _update_recording_panel(handles, latest, stale=stale)
+    _update_spacemouse_panel(handles)
     _update_arm_init_panel(handles, latest, stale=stale)
     if latest is None:
         _update_realtime_health(
@@ -5059,26 +5216,6 @@ def update_gui(
             handles["user_floor_resend_attempts"] = attempts + 1
             if "user_floor_set_status" in handles:
                 handles["user_floor_set_status"].value = ("restoring... " if ok else "restore failed: ") + msg
-    # Re-apply the operator's persisted "Enforce stand floor" choice once the state
-    # stream is live, so the GUI's last setting wins over the server's config default on
-    # every launch. Same retry-until-confirmed pattern (the startup command can be
-    # dropped). No-op when there is no saved preference (checkbox just mirrors telemetry).
-    if not stale and not handles.get("floor_enforce_resent", False):
-        pref = handles.get("stand_floor_enforce_pref")
-        floor = latest.floor_constraint if latest is not None else None
-        server_enabled = (
-            bool(floor.get("enabled", False)) if isinstance(floor, Mapping) else None
-        )
-        attempts = handles.get("floor_enforce_resend_attempts", 0)
-        if not isinstance(pref, bool) or server_enabled == pref or attempts >= 50:
-            handles["floor_enforce_resent"] = True
-        else:
-            ok, msg = safety.send_set_floor_enabled(pref)
-            handles["floor_enforce_resend_attempts"] = attempts + 1
-            if "floor_set_status" in handles:
-                handles["floor_set_status"].value = (
-                    "restoring... " if ok else "restore failed: "
-                ) + msg
     if "fk_status" in handles:
         handles["fk_status"].value = _format_fk_status(latest, stale=stale)
     if "force_status" in handles:

@@ -47,11 +47,35 @@ public:
         int count = 0;
         std::array<std::array<double, kDeltaStepDims>, kMaxSteps> step{};
     };
+    // Optional producer-side diagnostics carried by chunk_overlay.v2. These are
+    // telemetry only: malformed or absent values remain zero and must never
+    // invalidate an otherwise valid motion frame.
+    struct Diagnostics {
+        int execute_steps = 0;
+        int runway_steps = 0;
+        std::uint64_t inference_seq = 0;
+        double inference_queue_wait_ms = 0.0;
+        double inference_latency_ms = 0.0;
+        double inference_ready_wait_ms = 0.0;
+        double inference_period_ms = 0.0;
+        double inference_period_jitter_ms = 0.0;
+        std::uint64_t inference_stall_count = 0;
+        std::uint64_t camera_bundle_seq = 0;
+        double camera_bundle_age_ms = 0.0;
+        double camera_max_skew_ms = 0.0;
+        std::uint64_t camera_left_frame_number = 0;
+        std::uint64_t camera_right_frame_number = 0;
+        double camera_left_frame_age_ms = 0.0;
+        double camera_right_frame_age_ms = 0.0;
+        double camera_left_focus_score = 0.0;
+        double camera_right_focus_score = 0.0;
+    };
     struct Frame {
         std::uint64_t seq = 0;           // producer seq (may reset on restart)
         std::uint64_t receiver_seq = 0;  // receiver-monotonic; use for dedup
         double policy_dt_sec = 0.0;
         double recv_steady_sec = 0.0;  // steadyNowSec() at parse time
+        double interarrival_sec = 0.0; // receiver-local accepted-frame interval
         bool has_left = false;
         bool has_right = false;
         ArmSteps left;
@@ -60,6 +84,7 @@ public:
         bool has_right_delta = false;
         ArmDeltaSteps left_delta;
         ArmDeltaSteps right_delta;
+        Diagnostics diagnostics;
     };
 
     explicit ChunkFrameReceiver(const std::string& bind_uri);

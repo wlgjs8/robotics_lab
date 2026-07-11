@@ -125,6 +125,11 @@ class CameraConfig:
     # Center-crop fraction applied to each wrist frame before inference (openpi remote
     # only). 0.0 = off; 0.65 reproduces the fisheye fe65 training crop (640x480 -> 416x312).
     wrist_crop_frac: float = 0.0
+    # OpenPI physical-motion camera guard. A zero bundle count keeps the guard
+    # disabled for non-real/offline profiles; real flow-infer opts in explicitly.
+    readiness_bundle_count: int = 0
+    readiness_timeout_sec: float = 1.0
+    stale_timeout_sec: float = 1.0
 
     def __post_init__(self) -> None:
         if self.max_age_ms <= 0.0:
@@ -133,6 +138,12 @@ class CameraConfig:
             raise ValueError("camera.wrist_source must be 'realsense' or 'fisheye'")
         if not 0.0 <= self.wrist_crop_frac <= 1.0:
             raise ValueError("camera.wrist_crop_frac must be in [0.0, 1.0]")
+        if self.readiness_bundle_count < 0:
+            raise ValueError("camera.readiness_bundle_count must be non-negative")
+        if self.readiness_timeout_sec <= 0.0:
+            raise ValueError("camera.readiness_timeout_sec must be positive")
+        if self.stale_timeout_sec <= 0.0:
+            raise ValueError("camera.stale_timeout_sec must be positive")
 
 
 @dataclass(frozen=True)
@@ -176,6 +187,30 @@ class GripperConfig:
 
 
 @dataclass(frozen=True)
+class ForceRecoveryConfig:
+    """Policy-side recovery gate driven by server-owned force-contact telemetry."""
+
+    enable: bool = False
+    settle_time_sec: float = 0.12
+    max_linear_velocity_m_s: float = 0.002
+    max_angular_velocity_rad_s: float = 0.05
+    contact_timeout_sec: float = 5.0
+    settling_timeout_sec: float = 2.0
+
+    def __post_init__(self) -> None:
+        if self.settle_time_sec < 0.0:
+            raise ValueError("force_recovery.settle_time_sec must be non-negative")
+        if self.max_linear_velocity_m_s < 0.0:
+            raise ValueError("force_recovery.max_linear_velocity_m_s must be non-negative")
+        if self.max_angular_velocity_rad_s < 0.0:
+            raise ValueError("force_recovery.max_angular_velocity_rad_s must be non-negative")
+        if self.contact_timeout_sec <= 0.0:
+            raise ValueError("force_recovery.contact_timeout_sec must be positive")
+        if self.settling_timeout_sec <= 0.0:
+            raise ValueError("force_recovery.settling_timeout_sec must be positive")
+
+
+@dataclass(frozen=True)
 class JointSineConfig:
     selected_arm: str = "both"
     amplitude_deg: tuple[float, ...] = (1.0, 1.0, 1.0, 0.5, 0.5, 0.5)
@@ -201,6 +236,24 @@ class SpaceMouseDeviceConfig:
 
 
 @dataclass(frozen=True)
+class SpaceMouseDiscoveryConfig:
+    enable: bool = False
+    vendor_id: int = 0x256F
+    product_id: int = 0xC652
+    interface_number: int = 0
+    scan_period_sec: float = 0.5
+    poll_period_sec: float = 0.002
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.vendor_id <= 0xFFFF or not 0 <= self.product_id <= 0xFFFF:
+            raise ValueError("spacemouse discovery vendor_id/product_id must be USB 16-bit integers")
+        if self.interface_number < 0:
+            raise ValueError("spacemouse discovery interface_number must be non-negative")
+        if self.scan_period_sec <= 0.0 or self.poll_period_sec <= 0.0:
+            raise ValueError("spacemouse discovery periods must be positive")
+
+
+@dataclass(frozen=True)
 class SpaceMouseGripperButtonsConfig:
     enable: bool = False
     open_button: int = 0
@@ -221,6 +274,7 @@ class SpaceMouseGripperButtonsConfig:
 
 @dataclass(frozen=True)
 class DualSpaceMousePoseTargetConfig:
+    discovery: SpaceMouseDiscoveryConfig = field(default_factory=SpaceMouseDiscoveryConfig)
     left: SpaceMouseDeviceConfig = field(default_factory=SpaceMouseDeviceConfig)
     right: SpaceMouseDeviceConfig = field(
         default_factory=lambda: SpaceMouseDeviceConfig(device_number=1)
@@ -438,6 +492,7 @@ class PolicyRunnerConfig:
     arm_init_override: ArmInitOverrideConfig = field(default_factory=ArmInitOverrideConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     gripper: GripperConfig = field(default_factory=GripperConfig)
+    force_recovery: ForceRecoveryConfig = field(default_factory=ForceRecoveryConfig)
     robot_state: RobotStateConfig = field(default_factory=RobotStateConfig)
     servo_command: ServoCommandConfig = field(default_factory=ServoCommandConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
@@ -476,6 +531,7 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
         arm_init_override=_arm_init_override_config(_section(raw, "arm_init_override")),
         camera=_camera_config(_section(raw, "camera")),
         gripper=_gripper_config(_section(raw, "gripper")),
+        force_recovery=_force_recovery_config(_section(raw, "force_recovery")),
         robot_state=RobotStateConfig(**_section(raw, "robot_state")),
         servo_command=_servo_command_config(_section(raw, "servo_command")),
         safety=_safety_config(_section(raw, "safety")),
@@ -500,6 +556,7 @@ def _validate_top_level_keys(raw: dict[str, Any]) -> None:
         "arm_init_override",
         "camera",
         "gripper",
+        "force_recovery",
         "robot_state",
         "servo_command",
         "safety",
@@ -579,6 +636,11 @@ def _camera_config(raw: dict[str, Any]) -> CameraConfig:
         raw["wrist_source"] = str(raw["wrist_source"])
     if "wrist_crop_frac" in raw:
         raw["wrist_crop_frac"] = float(raw["wrist_crop_frac"])
+    if "readiness_bundle_count" in raw:
+        raw["readiness_bundle_count"] = int(raw["readiness_bundle_count"])
+    for key in ("readiness_timeout_sec", "stale_timeout_sec"):
+        if key in raw:
+            raw[key] = float(raw[key])
     return CameraConfig(**raw)
 
 
@@ -596,6 +658,34 @@ def _gripper_config(raw: dict[str, Any]) -> GripperConfig:
     if "startup_open" in raw:
         raw["startup_open"] = bool(raw["startup_open"])
     return GripperConfig(**raw)
+
+
+def _force_recovery_config(raw: dict[str, Any]) -> ForceRecoveryConfig:
+    legacy_timeout = raw.get("timeout_sec")
+    phase_fields = {"contact_timeout_sec", "settling_timeout_sec"}.intersection(raw)
+    if legacy_timeout is not None and phase_fields:
+        raise ValueError(
+            "force_recovery must not set deprecated timeout_sec together with "
+            "contact_timeout_sec or settling_timeout_sec"
+        )
+    if legacy_timeout is not None:
+        # Compatibility for older non-real profiles: the former single deadline
+        # is applied independently to each phase instead of spanning both phases.
+        timeout = float(raw.pop("timeout_sec"))
+        raw["contact_timeout_sec"] = timeout
+        raw["settling_timeout_sec"] = timeout
+    if "enable" in raw:
+        raw["enable"] = bool(raw["enable"])
+    for key in (
+        "settle_time_sec",
+        "max_linear_velocity_m_s",
+        "max_angular_velocity_rad_s",
+        "contact_timeout_sec",
+        "settling_timeout_sec",
+    ):
+        if key in raw:
+            raw[key] = float(raw[key])
+    return ForceRecoveryConfig(**raw)
 
 
 def _servo_command_config(raw: dict[str, Any]) -> ServoCommandConfig:
@@ -639,6 +729,7 @@ def _joint_sine_config(raw: dict[str, Any]) -> JointSineConfig:
 
 
 def _spacemouse_pose_target_dual_config(raw: dict[str, Any]) -> DualSpaceMousePoseTargetConfig:
+    discovery = _spacemouse_discovery_config(_section(raw, "discovery"))
     left = _spacemouse_device_config(_section(raw, "left"))
     right_raw = _section(raw, "right")
     if "device_number" not in right_raw:
@@ -648,7 +739,7 @@ def _spacemouse_pose_target_dual_config(raw: dict[str, Any]) -> DualSpaceMousePo
     top_level = {
         key: value
         for key, value in raw.items()
-        if key not in {"left", "right", "gripper_buttons"}
+        if key not in {"discovery", "left", "right", "gripper_buttons"}
     }
     for key in ("max_linear_step_m", "max_angular_step_rad", "max_target_lead_m", "max_target_lead_rad"):
         if key in top_level:
@@ -675,11 +766,24 @@ def _spacemouse_pose_target_dual_config(raw: dict[str, Any]) -> DualSpaceMousePo
     if "startup_neutral_hold_sec" in top_level:
         top_level["startup_neutral_hold_sec"] = float(top_level["startup_neutral_hold_sec"])
     return DualSpaceMousePoseTargetConfig(
+        discovery=discovery,
         left=left,
         right=right,
         gripper_buttons=gripper_buttons,
         **top_level,
     )
+
+
+def _spacemouse_discovery_config(raw: dict[str, Any]) -> SpaceMouseDiscoveryConfig:
+    for key in ("vendor_id", "product_id", "interface_number"):
+        if key in raw:
+            raw[key] = int(raw[key])
+    for key in ("scan_period_sec", "poll_period_sec"):
+        if key in raw:
+            raw[key] = float(raw[key])
+    if "enable" in raw:
+        raw["enable"] = bool(raw["enable"])
+    return SpaceMouseDiscoveryConfig(**raw)
 
 
 def _spacemouse_gripper_buttons_config(raw: dict[str, Any]) -> SpaceMouseGripperButtonsConfig:

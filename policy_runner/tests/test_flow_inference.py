@@ -5,6 +5,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from policy_runner.action_sources.tcp_pose_target import cartesian_action_requirements
 
@@ -180,8 +181,29 @@ class FlowInferenceCliTest(unittest.TestCase):
         self.assertEqual(source._steps_since_boundary, 0)
         self.assertIsNone(source._target_pose_by_arm["left"])
         self.assertIsNone(source._target_pose_by_arm["right"])
-        self.assertEqual(source._reset_left_pose[0], 0.1)
-        self.assertEqual(source._reset_right_pose[0], 0.4)
+        self.assertAlmostEqual(float(source._reset_left_pose[0]), 0.1)
+        self.assertAlmostEqual(float(source._reset_right_pose[0]), 0.4)
+
+    def test_openpi_remote_initializes_server_motion_epoch_state(self) -> None:
+        try:
+            from policy_runner.openpi_remote import OpenpiRemoteActionSource
+        except ModuleNotFoundError as exc:
+            if exc.name == "torch":
+                self.skipTest("flow-infer runtime dependency torch is not installed")
+            raise
+
+        with (
+            mock.patch("policy_runner.openpi_remote._OpenpiWebsocketClient") as client_type,
+            mock.patch.dict(os.environ, {"OPENPI_REMOTE_SKIP_WARMUP": "1"}),
+        ):
+            client_type.return_value.fetch_metadata.return_value = {"action_horizon": 24}
+            source = OpenpiRemoteActionSource(
+                "127.0.0.1:8000",
+                action_horizon=24,
+                camera_names=(),
+            )
+
+        self.assertIsNone(source._last_server_motion_epoch)
 
     def test_async_inference_timing_tracks_request_completion_activation_and_rolling_stats(self) -> None:
         import threading
@@ -269,6 +291,10 @@ class FlowInferenceCliTest(unittest.TestCase):
         self.assertEqual(snapshot["inference_period_jitter"]["last_ms"], 5.0)
         self.assertEqual(snapshot["inference_period_jitter"]["p95_ms"], 5.0)
         self.assertEqual(snapshot["inference_period_jitter"]["max_ms"], 5.0)
+        diagnostics = source.inference_diagnostics_snapshot()
+        self.assertEqual(diagnostics["total_inferences"], 3)
+        self.assertEqual(diagnostics["retained_inferences"], 3)
+        self.assertEqual(diagnostics["events"][0]["timing"]["ready_wait_ms"], 6.0)
 
     def test_inline_inference_uses_the_same_timing_boundary(self) -> None:
         import numpy as np

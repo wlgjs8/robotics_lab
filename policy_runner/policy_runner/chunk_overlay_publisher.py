@@ -44,6 +44,9 @@ class ChunkOverlayPublisher:
         left_delta: list[list[float]] | None = None,
         right_delta: list[list[float]] | None = None,
         inference_timing: dict[str, object] | None = None,
+        camera_diagnostics: dict[str, object] | None = None,
+        execute_steps: int | None = None,
+        runway_steps: int | None = None,
     ) -> None:
         try:
             horizon = len(left) if left is not None else len(right or [])
@@ -63,6 +66,12 @@ class ChunkOverlayPublisher:
                 packet["right_delta"] = right_delta
             if inference_timing is not None:
                 packet["inference_timing"] = inference_timing
+            if camera_diagnostics is not None:
+                packet["camera_diagnostics"] = camera_diagnostics
+            if execute_steps is not None:
+                packet["execute_steps"] = int(execute_steps)
+            if runway_steps is not None:
+                packet["runway_steps"] = int(runway_steps)
             data = json.dumps(packet, separators=(",", ":")).encode("utf-8")
         except (BlockingIOError, OSError, TypeError, ValueError):
             return

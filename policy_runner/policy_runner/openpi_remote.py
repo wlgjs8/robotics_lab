@@ -39,7 +39,8 @@ from typing import Any, TextIO
 import numpy as np
 
 from .action_sources.tcp_pose_target import cartesian_action_requirements
-from .camera_bundle_client import resolve_frame
+from .camera_bundle_client import bundle_clock_ns, resolve_frame
+from .camera_diagnostics import BackgroundRgbSnapshotWriter, rgb_image_metrics
 from .flow_dataset import pose_from_state_payload
 from .chunk_overlay_publisher import ChunkOverlayPublisher
 from .flow_inference import (
@@ -56,6 +57,7 @@ from .flow_inference import (
     rotate_flow_arm_vectors,
 )
 from .gripper import GripperRuntime
+from .servo_command_client import CommandIntent
 from .tcp_target_pose_conditioner import CONDITIONING_MODES, REANCHOR_MODES
 
 OPENPI_CHECKPOINT_PREFIX = "openpi://"
@@ -340,6 +342,16 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
 
         self.timeout_sec = float(timeout_sec)
         self.camera_client = camera_client
+        self._camera_runtime_config: Any | None = None
+        self._camera_runtime_state = "disabled"
+        self._camera_runtime_started: float | None = None
+        self._camera_runtime_unavailable_since: float | None = None
+        self._camera_runtime_last_seq: int | None = None
+        self._camera_runtime_rejected_seq: int | None = None
+        self._camera_runtime_consecutive = 0
+        self._camera_runtime_terminal_abort_reason: str | None = None
+        self._camera_runtime_missing_streams: list[str] = []
+        self._camera_runtime_latest_age_ms: float | None = None
         self.sample_steps = int(sample_steps)
         self.max_linear_step_m = float(max_linear_step_m)
         self.max_angular_step_rad = float(max_angular_step_rad)
@@ -521,11 +533,20 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self._reset_right_pose: np.ndarray | None = None
         self._chunk: np.ndarray | None = None
         self._chunk_index = 0
+        # This subclass deliberately skips FlowMatchingActionSource.__init__, so
+        # mirror the server force/contact epoch state used by inherited
+        # next_intent(). Without it the first real-policy state raises before an
+        # action can be emitted.
+        self._last_server_motion_epoch: int | None = None
         self._warned_missing_camera_client = False
         self.last_image_decode_count = 0
         self.last_missing_camera_count = 0
         self.image_decode_count = 0
         self.missing_camera_count = 0
+        self._last_inference_camera_diagnostics: dict[str, object] = {
+            "outcome": "not_sampled"
+        }
+        self._diagnostic_image_writer = BackgroundRgbSnapshotWriter()
         # Real-Time Chunking (RTC). When enabled, each infer sends the previous
         # chunk back to the server (`prev_action_chunk`) so it freezes the first
         # `inference_delay` actions and inpaints the rest -- smooth async replan
@@ -854,15 +875,17 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         return float(t_img_mono)
 
     def next_intent(self, snapshot, now_monotonic):  # type: ignore[override]
-        # Record measured pose every control tick for history-based velocity-proprio modes.
-        # fixed_step reads a fixed ~policy_dt window; camera_frame interpolates at the camera
-        # observation time and one policy_dt earlier. Cheap bounded ring.
         self._last_now_monotonic = now_monotonic
-        if (
-            getattr(self, "velproprio_sample_mode", "replan") in ("fixed_step", "camera_frame")
-            and self.proprio_mode != "pose"
-        ):
-            self._record_pose_history(getattr(snapshot, "payload", None), now_monotonic)
+        # Force ownership is server-driven and takes precedence over camera
+        # readiness. Process it before the camera guard so a simultaneous camera
+        # outage cannot delay contact invalidation or its frozen-gripper Hold.
+        force_blocked, force_intent = self._force_recovery_gate(snapshot, now_monotonic)
+        if force_blocked:
+            return force_intent
+        self._handle_server_motion_epoch(snapshot)
+        blocked, guard_intent = self._camera_runtime_gate(float(now_monotonic))
+        if blocked:
+            return guard_intent
         intent = super().next_intent(snapshot, now_monotonic)
         if (
             getattr(self, "velproprio_sample_mode", "replan") == "fixed_step"
@@ -871,6 +894,180 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         ):
             self._record_command_pose_history(intent, now_monotonic)
         return intent
+
+    def configure_camera_runtime(self, config: Any) -> None:
+        """Enable the OpenPI camera guard from the runtime camera config.
+
+        The guard is intentionally source-owned: the camera bundle is consumed
+        before policy inference, so no physical motion intent can precede the
+        required sequence of accepted wrist observations.
+        """
+        self._camera_runtime_config = config
+        required = int(getattr(config, "readiness_bundle_count", 0) or 0)
+        enabled = bool(self.camera_names) and not self._fake_images and required > 0
+        self._camera_runtime_state = "startup" if enabled else "disabled"
+        self._camera_runtime_started = None
+        self._camera_runtime_unavailable_since = None
+        self._camera_runtime_last_seq = None
+        self._camera_runtime_rejected_seq = None
+        self._camera_runtime_consecutive = 0
+        self._camera_runtime_terminal_abort_reason = None
+        self._camera_runtime_missing_streams = []
+        self._camera_runtime_latest_age_ms = None
+
+    @property
+    def camera_terminal_abort_reason(self) -> str | None:
+        return self._camera_runtime_terminal_abort_reason
+
+    @property
+    def terminal_abort_reason(self) -> str | None:
+        """Expose camera failure first, then the base force-recovery reason."""
+        return self._camera_runtime_terminal_abort_reason or super().terminal_abort_reason
+
+    def camera_runtime_status(self) -> dict[str, object]:
+        config = self._camera_runtime_config
+        return {
+            "state": self._camera_runtime_state,
+            "required_consecutive_bundles": int(
+                getattr(config, "readiness_bundle_count", 0) or 0
+            ),
+            "consecutive_fresh_complete_bundles": int(self._camera_runtime_consecutive),
+            "latest_bundle_seq": self._camera_runtime_last_seq,
+            "latest_bundle_age_ms": self._camera_runtime_latest_age_ms,
+            "missing_streams": list(self._camera_runtime_missing_streams),
+            "terminal_abort_reason": self._camera_runtime_terminal_abort_reason,
+        }
+
+    def _camera_runtime_gate(
+        self, now_monotonic: float
+    ) -> tuple[bool, CommandIntent | None]:
+        if self._camera_runtime_state == "disabled":
+            return False, None
+        if self._camera_runtime_terminal_abort_reason is not None:
+            return True, self._camera_runtime_hold_intent()
+
+        if self._camera_runtime_started is None:
+            self._camera_runtime_started = now_monotonic
+
+        bundle, received_new, rejected_seq = self._camera_runtime_poll()
+        accepted, seq, missing, age_ms = self._camera_runtime_bundle_status(bundle)
+        self._camera_runtime_missing_streams = missing
+        self._camera_runtime_latest_age_ms = age_ms
+
+        if rejected_seq is not None:
+            self._camera_runtime_rejected_seq = rejected_seq
+        if accepted and seq is not None and self._camera_runtime_rejected_seq is not None:
+            if seq <= self._camera_runtime_rejected_seq:
+                accepted = False
+        if accepted and received_new and seq is not None:
+            if self._camera_runtime_last_seq is None or seq > self._camera_runtime_last_seq:
+                self._camera_runtime_last_seq = seq
+                self._camera_runtime_rejected_seq = None
+                self._camera_runtime_consecutive += 1
+
+        config = self._camera_runtime_config
+        if self._camera_runtime_state == "startup":
+            if not accepted and (received_new or rejected_seq is not None):
+                self._camera_runtime_consecutive = 0
+            required = int(getattr(config, "readiness_bundle_count", 0) or 0)
+            if accepted and self._camera_runtime_consecutive >= required:
+                self._camera_runtime_state = "running"
+                self._camera_runtime_unavailable_since = None
+                print(
+                    "[flow-infer] camera preflight ready: "
+                    f"{self._camera_runtime_consecutive}/{required} consecutive fresh complete bundles",
+                    file=self.stderr,
+                    flush=True,
+                )
+                return False, None
+            timeout = float(getattr(config, "readiness_timeout_sec", 1.0))
+            if now_monotonic - float(self._camera_runtime_started) >= timeout:
+                self._camera_runtime_state = "timed_out"
+                self._camera_runtime_terminal_abort_reason = "camera_stale_timeout"
+            return True, self._camera_runtime_hold_intent()
+
+        if accepted:
+            self._camera_runtime_unavailable_since = None
+            return False, None
+        if self._camera_runtime_unavailable_since is None:
+            self._camera_runtime_unavailable_since = now_monotonic
+        timeout = float(getattr(config, "stale_timeout_sec", 1.0))
+        if now_monotonic - float(self._camera_runtime_unavailable_since) >= timeout:
+            self._camera_runtime_state = "timed_out"
+            self._camera_runtime_terminal_abort_reason = "camera_stale_timeout"
+        return True, self._camera_runtime_hold_intent()
+
+    def _camera_runtime_poll(self) -> tuple[Any | None, bool, int | None]:
+        client = self.camera_client
+        if client is None:
+            return None, False, None
+        bundle = None
+        poll = getattr(client, "poll", None)
+        if callable(poll):
+            try:
+                bundle = poll(timeout_ms=0)
+            except TypeError:
+                bundle = poll(0)
+        received_new = bundle is not None
+        rejected_seq: int | None = None
+        if bundle is None:
+            diagnostics = getattr(client, "diagnostics_snapshot", None)
+            if callable(diagnostics):
+                try:
+                    outcome = dict(diagnostics()).get("last_poll", {})
+                    outcome_name = str(outcome.get("outcome", ""))
+                    if outcome_name not in {"", "no_message", "recv_race"}:
+                        raw_seq = outcome.get("bundle_seq")
+                        rejected_seq = int(raw_seq) if raw_seq is not None else None
+                except Exception:  # noqa: BLE001 - health telemetry is best effort
+                    pass
+            latest = getattr(client, "latest", None)
+            if callable(latest):
+                bundle = latest()
+        return bundle, received_new, rejected_seq
+
+    def _camera_runtime_bundle_status(
+        self, bundle: Any | None
+    ) -> tuple[bool, int | None, list[str], float | None]:
+        missing: list[str] = []
+        if bundle is None or not bool(getattr(bundle, "complete", False)):
+            return False, None, list(self.camera_names), None
+        frames = getattr(bundle, "frames", {})
+        for camera_name in self.camera_names:
+            frame = resolve_frame(frames, camera_name)
+            if getattr(frame, "pixels", None) is None:
+                missing.append(str(camera_name))
+        client_fresh = getattr(self.camera_client, "is_fresh", None)
+        fresh = bool(client_fresh(bundle)) if callable(client_fresh) else False
+        try:
+            seq = int(getattr(bundle, "bundle_seq", 0) or 0)
+        except Exception:  # noqa: BLE001
+            seq = 0
+        try:
+            bundle_time_ns = int(getattr(bundle, "bundle_time_ns", 0) or 0)
+            age_ms = max(0.0, (bundle_clock_ns() - bundle_time_ns) / 1_000_000.0)
+        except Exception:  # noqa: BLE001
+            age_ms = None
+        return bool(fresh and not missing and seq > 0), (seq or None), missing, age_ms
+
+    def _camera_runtime_hold_intent(self) -> CommandIntent:
+        targets = getattr(self, "_current_gripper_targets", {})
+        fallback = getattr(self, "_gripper_targets_by_arm", {})
+        return CommandIntent.gripper_target(
+            left=targets.get("left") if targets.get("left") is not None else fallback.get("left"),
+            right=targets.get("right") if targets.get("right") is not None else fallback.get("right"),
+            timeout_sec=self.timeout_sec,
+        )
+
+    def _before_policy_intent(self, snapshot, now_monotonic) -> None:  # type: ignore[override]
+        # The base class calls this only when inference may run, or after the
+        # force-recovery clear has reset all pre-contact history. Thus camera-frame
+        # velocity proprio can never bridge across a contact discontinuity.
+        if (
+            getattr(self, "velproprio_sample_mode", "replan") in ("fixed_step", "camera_frame")
+            and self.proprio_mode != "pose"
+        ):
+            self._record_pose_history(getattr(snapshot, "payload", None), now_monotonic)
 
     def _record_pose_history(self, payload, now_monotonic) -> None:
         if payload is None or now_monotonic is None:
@@ -1253,9 +1450,16 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
 
     def _raw_camera_images(self) -> tuple[dict[str, np.ndarray] | None, int, int]:
         """Full-resolution HWC uint8 RGB frames keyed left/right; None if missing."""
+        if not hasattr(self, "_last_inference_camera_diagnostics"):
+            self._last_inference_camera_diagnostics = {"outcome": "not_sampled"}
         if self._fake_images:
             self._clear_last_obs_camera_bundle()
             zero = np.zeros((480, 640, 3), dtype=np.uint8)
+            self._last_inference_camera_diagnostics = {
+                "outcome": "fake_images",
+                "bundle_seq": None,
+                "rgb": {"left": rgb_image_metrics(zero), "right": rgb_image_metrics(zero)},
+            }
             return {"left": zero, "right": zero.copy()}, 2, 0
         bundle = self._poll_camera_bundle()
         bundle_frames = getattr(bundle, "frames", {}) if bundle is not None else {}
@@ -1266,6 +1470,8 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         images: dict[str, np.ndarray] = {}
         decode_count = 0
         missing_count = 0
+        missing_streams: list[str] = []
+        decode_failures: list[str] = []
         for key, camera_name in (("left", self.camera_names[0]), ("right", self.camera_names[1])):
             # Bundle frames are keyed '<camera>.<stream>' (e.g. 'left_realsense.color')
             # while checkpoint camera names use '<camera>_<stream>'
@@ -1275,6 +1481,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             pixels = getattr(frame, "pixels", None)
             if pixels is None:
                 missing_count += 1
+                missing_streams.append(str(camera_name))
                 continue
             array = np.asarray(pixels)
             if array.ndim == 3 and array.shape[-1] == 3:
@@ -1283,6 +1490,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 bgr = cv2.imdecode(array.astype(np.uint8), cv2.IMREAD_COLOR)
                 if bgr is None:
                     missing_count += 1
+                    decode_failures.append(str(camera_name))
                     continue
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             if self.wrist_crop_frac > 0.0:
@@ -1290,8 +1498,53 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             images[key] = rgb
             decode_count += 1
         if missing_count > 0 or len(images) < 2:
+            self._last_inference_camera_diagnostics = {
+                "outcome": "missing_rgb",
+                "bundle_seq": None if bundle is None else int(getattr(bundle, "bundle_seq", 0) or 0),
+                "missing_streams": missing_streams,
+                "decode_failures": decode_failures,
+                "decoded_rgb_count": decode_count,
+            }
             self._clear_last_obs_camera_bundle()
             return None, decode_count, max(missing_count, 2 - len(images))
+        bundle_seq = 0 if bundle is None else int(getattr(bundle, "bundle_seq", 0) or 0)
+        bundle_now_ns = bundle_clock_ns()
+        bundle_time_ns = 0 if bundle is None else int(getattr(bundle, "bundle_time_ns", 0) or 0)
+        bundle_age_ms = (
+            max(0.0, (bundle_now_ns - bundle_time_ns) / 1_000_000.0)
+            if bundle_time_ns > 0
+            else 0.0
+        )
+        frame_diagnostics: dict[str, int | float] = {}
+        for side, camera_name in (("left", self.camera_names[0]), ("right", self.camera_names[1])):
+            frame = resolve_frame(bundle_frames, camera_name)
+            frame_number = int(getattr(frame, "frame_number", 0) or 0)
+            frame_time_ns = int(getattr(frame, "host_arrival_time_ns", 0) or 0)
+            frame_diagnostics[f"{side}_frame_number"] = frame_number
+            frame_diagnostics[f"{side}_frame_age_ms"] = (
+                max(0.0, (bundle_now_ns - frame_time_ns) / 1_000_000.0)
+                if frame_time_ns > 0
+                else 0.0
+            )
+        rgb_metrics = {side: rgb_image_metrics(images[side]) for side in ("left", "right")}
+        self._last_inference_camera_diagnostics = {
+            "outcome": "camera_ready",
+            "bundle_seq": bundle_seq,
+            "bundle_time_ns": bundle_time_ns,
+            "bundle_age_ms": bundle_age_ms,
+            "hardware_synced": False if bundle is None else bool(getattr(bundle, "hardware_synced", False)),
+            "sync_policy": "" if bundle is None else str(getattr(bundle, "sync_policy", "") or ""),
+            "max_time_diff_ms": 0.0 if bundle is None else float(getattr(bundle, "max_time_diff_ms", 0.0) or 0.0),
+            "max_skew_ms": 0.0 if bundle is None else float(getattr(bundle, "max_time_diff_ms", 0.0) or 0.0),
+            "drop_counters": {} if bundle is None else dict(getattr(bundle, "drop_counters", {}) or {}),
+            "rgb": rgb_metrics,
+            "left_focus_score": float(rgb_metrics["left"]["focus_gradient_energy"]),
+            "right_focus_score": float(rgb_metrics["right"]["focus_gradient_energy"]),
+            **frame_diagnostics,
+        }
+        snapshot_writer = getattr(self, "_diagnostic_image_writer", None)
+        if snapshot_writer is not None:
+            snapshot_writer.submit(bundle_seq, images)
         if getattr(self, "include_depth", False):
             # Resolve the live D405 depth (z16 -> uint16 HxW from the bundle client when its
             # include_depth=True) and encode it with the SAME _depth_to_image as the training
@@ -1308,6 +1561,8 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 frame = resolve_frame(bundle_frames, depth_name)
                 px = getattr(frame, "pixels", None)
                 if px is None:
+                    self._last_inference_camera_diagnostics["outcome"] = "missing_depth"
+                    self._last_inference_camera_diagnostics["missing_streams"] = [str(depth_name)]
                     self._clear_last_obs_camera_bundle()
                     return None, decode_count, 2
                 images[key] = _depth_to_image(
@@ -1372,6 +1627,8 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
 
     # ---------------------------------------------------------------- infer --
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
+        if not hasattr(self, "_last_inference_camera_diagnostics"):
+            self._last_inference_camera_diagnostics = {"outcome": "camera_state_unavailable"}
         images, decode_count, missing_count = self._raw_camera_images()
         self.last_image_decode_count = decode_count
         self.last_missing_camera_count = missing_count
@@ -1404,13 +1661,17 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         try:
             result = self._client.infer(obs)
         except Exception as exc:  # noqa: BLE001 - remote failure must not crash the loop
+            self._last_inference_camera_diagnostics["outcome"] = "remote_inference_error"
+            self._last_inference_camera_diagnostics["error_type"] = type(exc).__name__
             print(f"openpi remote inference failed: {type(exc).__name__}: {exc}", file=self.stderr, flush=True)
             return None
         chunk = np.asarray(result.get("actions"), dtype=np.float32)
         if chunk.ndim != 2 or chunk.shape[1] < 14:
+            self._last_inference_camera_diagnostics["outcome"] = "invalid_action_shape"
             print(f"openpi remote returned unexpected action shape {chunk.shape}", file=self.stderr, flush=True)
             return None
         if int(chunk.shape[0]) != int(self.action_horizon):
+            self._last_inference_camera_diagnostics["outcome"] = "invalid_action_horizon"
             print(
                 "openpi remote returned action_horizon "
                 f"{int(chunk.shape[0])}, expected {int(self.action_horizon)}; "
@@ -1419,6 +1680,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 flush=True,
             )
             return None
+        self._last_inference_camera_diagnostics["outcome"] = "ok"
         chunk = chunk[:, :14].copy()
         if self.rtc_enabled:
             # Cache the server's MODEL-SPACE chunk (pre output-transform) to seed

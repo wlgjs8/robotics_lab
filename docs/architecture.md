@@ -257,6 +257,10 @@ flags, and the last reject reason are published every state tick under
 `floor_constraint`. `monitor_only: true` publishes telemetry without clamping
 and is never a real-motion safety posture. Enabling the constraint requires
 `kinematics.enable: true` (TCP FK source) — enforced at config load.
+The GUI initializes its floor-enforcement checkbox from this published server
+state and does not restore a prior GUI-side disable across launches; the tracked
+stack config remains the startup authority. An operator may still change the
+runtime state explicitly during the current supervised session.
 
 ### Reachable-workspace shell constraint (`safety.reach_constraint`)
 
@@ -360,16 +364,18 @@ further policy penetration while preserving tangential/orientation commands and
 policy-requested retreat. Config/local activation, motion epochs, telemetry,
 and promotion constraints are defined in
 `rb_servo_server/docs/force_control.md`. The path is not safety-rated;
-`stack_real.yaml` currently enables telemetry-only monitor mode while all
-motion-affecting real-force opt-ins remain false.
+`stack_real.yaml` currently exposes a supervised experimental dual-arm
+guarded-admittance stage with identical per-arm contact parameters. This is a
+physical bring-up configuration, not production
+acceptance.
 
 ```yaml
 force_control:
   provider: project_native
   enable: true
-  operating_mode: monitor
-  allow_in_real: false
-  supervised_experimental_real: false
+  operating_mode: guarded_admittance
+  allow_in_real: true
+  supervised_experimental_real: true
 ```
 
 ## Motion Primitive Contract

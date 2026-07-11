@@ -82,6 +82,9 @@ class ChunkOverlayPublisherTest(unittest.TestCase):
                     "inference_latency_ms": 12.5,
                     "stall_count": 2,
                 },
+                camera_diagnostics={"outcome": "ok", "bundle_seq": 1234},
+                execute_steps=12,
+                runway_steps=4,
             )
         finally:
             publisher.close()
@@ -95,6 +98,9 @@ class ChunkOverlayPublisherTest(unittest.TestCase):
             packet["inference_timing"],
             {"seq": 9, "inference_latency_ms": 12.5, "stall_count": 2},
         )
+        self.assertEqual(packet["camera_diagnostics"], {"outcome": "ok", "bundle_seq": 1234})
+        self.assertEqual(packet["execute_steps"], 12)
+        self.assertEqual(packet["runway_steps"], 4)
 
 
 if __name__ == "__main__":

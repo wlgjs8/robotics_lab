@@ -49,6 +49,25 @@ enum class DeltaTwistStepPhase {
   Ringdown,
 };
 
+// Stable CSV bit assignments for identifying the exact shaping stage and
+// translation/rotation half that clamped during one servo tick.
+enum DeltaTwistClampBit : std::uint32_t {
+  DeltaTwistClampPendingLinear = 1u << 0,
+  DeltaTwistClampPendingAngular = 1u << 1,
+  DeltaTwistClampXiRefLinear = 1u << 2,
+  DeltaTwistClampXiRefAngular = 1u << 3,
+  DeltaTwistClampDesiredAccelLinear = 1u << 4,
+  DeltaTwistClampDesiredAccelAngular = 1u << 5,
+  DeltaTwistClampDesiredJerkLinear = 1u << 6,
+  DeltaTwistClampDesiredJerkAngular = 1u << 7,
+  DeltaTwistClampAccelCmdLinear = 1u << 8,
+  DeltaTwistClampAccelCmdAngular = 1u << 9,
+  DeltaTwistClampXiCmdLinear = 1u << 10,
+  DeltaTwistClampXiCmdAngular = 1u << 11,
+  DeltaTwistClampLeadLinear = 1u << 12,
+  DeltaTwistClampLeadAngular = 1u << 13,
+};
+
 struct DeltaTwistFollowerDiag {
   SegmentSolve last_solve{};
   bool stall{false};
@@ -80,6 +99,11 @@ struct DeltaTwistFollowerDiag {
   DeltaTwistStepPhase step_phase{DeltaTwistStepPhase::Inactive};
   int normal_consumed{0};
   int reserve_consumed{0};
+  int frame_rows{0};
+  int normal_budget{0};
+  int total_budget{0};
+  int steps_remaining{0};
+  std::uint32_t clamp_mask{0};
 };
 
 class DeltaTwistFollower {
@@ -149,6 +173,7 @@ class DeltaTwistFollower {
   double ang_feedback_cos_{1.0};
   bool xi_ref_clamped_norm_{false};
   bool xi_cmd_clamped_norm_{false};
+  std::uint32_t clamp_mask_{0};
   double current_grip_{0.0};
   double t_in_seg_{0.0};
   bool active_{false};

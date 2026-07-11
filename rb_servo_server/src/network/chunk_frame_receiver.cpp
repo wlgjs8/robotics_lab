@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
@@ -85,6 +86,92 @@ bool parseArmDelta(const json& arm_node, ChunkFrameReceiver::ArmDeltaSteps* out)
     return true;
 }
 
+void parseOptionalNonnegativeInt(const json& object, const char* key, int* out) {
+    if (!out || !object.is_object()) return;
+    const auto it = object.find(key);
+    if (it == object.end() || !it->is_number_integer()) return;
+    try {
+        const long long value = it->get<long long>();
+        if (value >= 0 && value <= std::numeric_limits<int>::max()) {
+            *out = static_cast<int>(value);
+        }
+    } catch (const json::exception&) {
+    }
+}
+
+void parseOptionalUint64(const json& object, const char* key, std::uint64_t* out) {
+    if (!out || !object.is_object()) return;
+    const auto it = object.find(key);
+    if (it == object.end() || !it->is_number_unsigned()) return;
+    try {
+        *out = it->get<std::uint64_t>();
+    } catch (const json::exception&) {
+    }
+}
+
+void parseOptionalFiniteDouble(const json& object, const char* key, double* out) {
+    if (!out || !object.is_object()) return;
+    const auto it = object.find(key);
+    if (it == object.end() || !it->is_number()) return;
+    try {
+        const double value = it->get<double>();
+        if (std::isfinite(value) && value >= 0.0) *out = value;
+    } catch (const json::exception&) {
+    }
+}
+
+void parseOptionalDiagnostics(const json& packet, ChunkFrameReceiver::Diagnostics* out) {
+    if (!out) return;
+    parseOptionalNonnegativeInt(packet, "execute_steps", &out->execute_steps);
+    parseOptionalNonnegativeInt(packet, "chunk_execute_steps", &out->execute_steps);
+    parseOptionalNonnegativeInt(packet, "runway_steps", &out->runway_steps);
+    parseOptionalNonnegativeInt(packet, "chunk_overlay_runway_steps", &out->runway_steps);
+
+    const auto timing_it = packet.find("inference_timing");
+    if (timing_it != packet.end() && timing_it->is_object()) {
+        const json& timing = *timing_it;
+        parseOptionalUint64(timing, "seq", &out->inference_seq);
+        parseOptionalFiniteDouble(timing, "queue_wait_ms", &out->inference_queue_wait_ms);
+        parseOptionalFiniteDouble(timing, "inference_latency_ms", &out->inference_latency_ms);
+        parseOptionalFiniteDouble(timing, "ready_wait_ms", &out->inference_ready_wait_ms);
+        parseOptionalFiniteDouble(timing, "inference_period_ms", &out->inference_period_ms);
+        parseOptionalFiniteDouble(
+            timing, "inference_period_jitter_ms", &out->inference_period_jitter_ms);
+        parseOptionalUint64(timing, "stall_count", &out->inference_stall_count);
+    }
+
+    // Camera diagnostics may be emitted as a top-level object or nested beside
+    // inference timing. Accept both without making either shape contractual for
+    // motion-frame validity.
+    const json* camera = nullptr;
+    for (const char* key : {"camera_diagnostics", "camera_timing", "camera"}) {
+        const auto it = packet.find(key);
+        if (it != packet.end() && it->is_object()) {
+            camera = &*it;
+            break;
+        }
+    }
+    if (!camera && timing_it != packet.end() && timing_it->is_object()) {
+        for (const char* key : {"camera_diagnostics", "camera_timing", "camera"}) {
+            const auto it = timing_it->find(key);
+            if (it != timing_it->end() && it->is_object()) {
+                camera = &*it;
+                break;
+            }
+        }
+    }
+    if (!camera) return;
+    parseOptionalUint64(*camera, "bundle_seq", &out->camera_bundle_seq);
+    parseOptionalFiniteDouble(*camera, "bundle_age_ms", &out->camera_bundle_age_ms);
+    parseOptionalFiniteDouble(*camera, "max_skew_ms", &out->camera_max_skew_ms);
+    parseOptionalUint64(*camera, "left_frame_number", &out->camera_left_frame_number);
+    parseOptionalUint64(*camera, "right_frame_number", &out->camera_right_frame_number);
+    parseOptionalFiniteDouble(*camera, "left_frame_age_ms", &out->camera_left_frame_age_ms);
+    parseOptionalFiniteDouble(*camera, "right_frame_age_ms", &out->camera_right_frame_age_ms);
+    parseOptionalFiniteDouble(*camera, "left_focus_score", &out->camera_left_focus_score);
+    parseOptionalFiniteDouble(*camera, "right_focus_score", &out->camera_right_focus_score);
+}
+
 }  // namespace
 
 ChunkFrameReceiver::ChunkFrameReceiver(const std::string& bind_uri) : bind_uri_(bind_uri) {}
@@ -137,6 +224,8 @@ bool ChunkFrameReceiver::parsePacket(const char* data, std::size_t size, Frame* 
         frame.has_right_delta = parseArmDelta(*right_delta_it, &frame.right_delta);
         if (!frame.has_right_delta || !frame.has_right) return false;
     }
+
+    parseOptionalDiagnostics(packet, &frame.diagnostics);
 
     frame.recv_steady_sec = steadyNowSec();
     *out = frame;
@@ -222,6 +311,10 @@ void ChunkFrameReceiver::threadMain() {
             // under, so a copied frame always carries its own consistent seq
             // (the atomic latest_seq_ is only a cheap "anything new?" gate).
             frame.receiver_seq = latest_seq_.load(std::memory_order_relaxed) + 1;
+            if (latest_.recv_steady_sec > 0.0 &&
+                frame.recv_steady_sec >= latest_.recv_steady_sec) {
+                frame.interarrival_sec = frame.recv_steady_sec - latest_.recv_steady_sec;
+            }
             latest_ = frame;
         }
         latest_seq_.fetch_add(1, std::memory_order_acq_rel);

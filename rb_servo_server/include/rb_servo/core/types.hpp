@@ -477,12 +477,47 @@ struct CartesianSolveTelemetry {
     double delta_twist_ang_feedback_cos = 1.0;
     bool delta_twist_xi_ref_clamped_norm = false;
     bool delta_twist_xi_cmd_clamped_norm = false;
+    int delta_twist_frame_rows = 0;
+    int delta_twist_normal_budget = 0;
+    int delta_twist_total_budget = 0;
+    int delta_twist_steps_remaining = 0;
+    std::uint32_t delta_twist_clamp_mask = 0;
+    Vec6 delta_twist_accel_cmd{};
     // Final-stage output moving average (C). q_target before/after the boxcar.
     bool output_ma_present = false;
     int output_ma_window = 0;
     JointArray q_target_before_output_ma_deg{};
     JointArray q_target_after_output_ma_deg{};
     SafetyClampTelemetry safety_clamp;
+};
+
+// Shared producer/receiver diagnostics for the active whole-chunk frame. This
+// lives only in ServoSample/CSV; state JSON remains intentionally unchanged.
+struct ChunkFrameTelemetry {
+    std::uint64_t wire_seq = 0;
+    std::uint64_t recv_seq = 0;
+    double policy_dt_sec = 0.0;
+    int horizon = 0;
+    int execute_steps = 0;
+    int runway_steps = 0;
+    double age_ms = 0.0;
+    double interarrival_ms = 0.0;
+    std::uint64_t inference_seq = 0;
+    double inference_queue_wait_ms = 0.0;
+    double inference_latency_ms = 0.0;
+    double inference_ready_wait_ms = 0.0;
+    double inference_period_ms = 0.0;
+    double inference_period_jitter_ms = 0.0;
+    std::uint64_t inference_stall_count = 0;
+    std::uint64_t camera_bundle_seq = 0;
+    double camera_bundle_age_ms = 0.0;
+    double camera_max_skew_ms = 0.0;
+    std::uint64_t camera_left_frame_number = 0;
+    std::uint64_t camera_right_frame_number = 0;
+    double camera_left_frame_age_ms = 0.0;
+    double camera_right_frame_age_ms = 0.0;
+    double camera_left_focus_score = 0.0;
+    double camera_right_focus_score = 0.0;
 };
 
 struct SafetyTrackingTelemetry {
@@ -509,6 +544,13 @@ struct ForceTorqueTelemetry {
     uint64_t freshness_value = 0;
     bool freshness_advanced = false;
     std::string reason = "disabled";
+    bool auto_tare_enabled = false;
+    bool tare_valid = false;
+    std::string tare_state = "disabled";
+    int tare_sample_count = 0;
+    uint64_t tare_generation = 0;
+    std::string tare_reason;
+    Wrench6D residual_tare_tcp;
 };
 
 struct ForceControlTelemetry {
@@ -523,6 +565,8 @@ struct ForceControlTelemetry {
     double fast_force_norm_n = 0.0;
     double fast_torque_norm_nm = 0.0;
     bool contact_threshold_exceeded = false;
+    bool hard_limit_threshold_exceeded = false;
+    int hard_limit_sample_count = 0;
     bool hard_limit_exceeded = false;
     double target_force_n = 0.0;
     double correction_m = 0.0;
@@ -938,6 +982,7 @@ struct ServoSample {
 
     DualArmCommand command;
     CommandBufferReadTelemetry command_buffer_read;
+    ChunkFrameTelemetry chunk_frame;
 
     JointArray left_sent_q_deg{};
     JointArray right_sent_q_deg{};

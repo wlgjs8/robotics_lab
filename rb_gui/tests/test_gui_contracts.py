@@ -33,6 +33,9 @@ from rb_servo_gui.app import (
     _push_gripper_percent,
     _toggle_episode_recording,
     _update_recording_panel,
+    _update_spacemouse_panel,
+    _send_spacemouse_assignment,
+    _send_spacemouse_swap,
     _trigger_box_detect,
     _send_arm_init_override,
     _send_arm_init_cancel_resume,
@@ -142,6 +145,8 @@ from rb_servo_gui.recording_control import (
     ArmInitCommandResult,
     RecordingCommandClient,
     RecordingStatusStore,
+    SPACEMOUSE_ASSIGNMENT_COMMAND_SCHEMA,
+    SpaceMouseCommandResult,
 )
 from rb_servo_gui.safety import OperatorSafety, normalize_observed_mode_backend
 from rb_servo_gui.scene import (
@@ -1617,6 +1622,132 @@ class GuiContractsTest(unittest.TestCase):
         self.assertTrue(store.is_stale(now=7.0))
         self.assertFalse(store.update_from_packet(b"not json"))
         self.assertEqual(store.invalid_packets, 1)
+
+    def test_spacemouse_control_client_emits_atomic_assignment_and_swap(self):
+        class _Sock:
+            def __init__(self, *_args):
+                self.sent = []
+
+            def sendto(self, data, endpoint):
+                self.sent.append((json.loads(data.decode()), endpoint))
+                return len(data)
+
+            def close(self):
+                pass
+
+        sock = _Sock()
+        client = RecordingCommandClient(
+            "127.0.0.1", 50441, socket_factory=lambda *_args: sock
+        )
+        result = client.send_spacemouse_assignments(
+            status_generation=4,
+            left_connection_id="sm-a",
+            right_connection_id="sm-b",
+        )
+        self.assertTrue(result.ok)
+        payload, endpoint = sock.sent[0]
+        self.assertEqual(endpoint, ("127.0.0.1", 50441))
+        self.assertEqual(payload["schema"], SPACEMOUSE_ASSIGNMENT_COMMAND_SCHEMA)
+        self.assertEqual(payload["command"], "set")
+        self.assertEqual(payload["status_generation"], 4)
+        swap = client.send_spacemouse_swap(status_generation=5)
+        self.assertTrue(swap.ok)
+        self.assertEqual(sock.sent[1][0]["command"], "swap")
+
+    def test_spacemouse_status_panel_and_ack(self):
+        store = RecordingStatusStore()
+        store.update(
+            {"recording": False},
+            spacemouse={
+                "generation": 9,
+                "assignment_change_allowed": True,
+                "left_connection_id": "sm-a",
+                "right_connection_id": "sm-b",
+                "devices": [
+                    {
+                        "connection_id": "sm-a",
+                        "arm": "left",
+                        "activity": 0.4,
+                        "neutral": False,
+                        "sample_age_sec": 0.01,
+                        "raw_axes": [0.4, 0.0, 0.0, 0.0, 0.08, 0.0],
+                    },
+                    {"connection_id": "sm-b", "arm": "right", "activity": 0.0, "neutral": True},
+                ],
+                "input_policy": {
+                    "require_deadman": False,
+                    "deadband": 0.06,
+                    "activation_deadband": 0.1,
+                    "startup_requires_neutral": True,
+                    "startup_neutral_hold_sec": 0.3,
+                },
+                "side_gates": {
+                    "left": {
+                        "gate": "startup_neutral",
+                        "neutral_hold_elapsed_sec": 0.0,
+                    },
+                    "right": {"gate": "ready"},
+                },
+                "last_command_seq": 3,
+                "last_result": "accepted",
+                "last_error": "",
+            },
+            received_monotonic=time.monotonic(),
+        )
+        handles = {
+            "recording_status_store": store,
+            "spacemouse_summary": RecordingText(),
+            "spacemouse_left_select": RecordingInput("미배정"),
+            "spacemouse_right_select": RecordingInput("미배정"),
+            "spacemouse_apply_button": RecordingButton(),
+            "spacemouse_swap_button": RecordingButton(),
+            "spacemouse_command_status": RecordingText(),
+            "spacemouse_assignment_dirty": False,
+            "spacemouse_pending_seq": 3,
+        }
+        _update_spacemouse_panel(handles)
+        self.assertIn("sm-a", handles["spacemouse_summary"].value)
+        self.assertIn("deadman=off", handles["spacemouse_summary"].value)
+        self.assertIn("startup-neutral 0.00/0.30s", handles["spacemouse_summary"].value)
+        self.assertIn("+0.08", handles["spacemouse_summary"].value)
+        self.assertEqual(handles["spacemouse_left_select"].value, "sm-a")
+        self.assertEqual(handles["spacemouse_right_select"].value, "sm-b")
+        self.assertFalse(handles["spacemouse_apply_button"].disabled)
+        self.assertFalse(handles["spacemouse_swap_button"].disabled)
+        self.assertEqual(handles["spacemouse_command_status"].value, "OK: 배정 적용됨")
+
+    def test_spacemouse_gui_sends_current_generation(self):
+        store = RecordingStatusStore()
+        store.update(
+            {"recording": False},
+            spacemouse={"generation": 12, "devices": []},
+            received_monotonic=time.monotonic(),
+        )
+
+        class _Client:
+            def __init__(self):
+                self.calls = []
+
+            def send_spacemouse_assignments(self, **kwargs):
+                self.calls.append(("set", kwargs))
+                return SpaceMouseCommandResult(True, "sent", {"seq": 8})
+
+            def send_spacemouse_swap(self, **kwargs):
+                self.calls.append(("swap", kwargs))
+                return SpaceMouseCommandResult(True, "sent", {"seq": 9})
+
+        client = _Client()
+        handles = {
+            "recording_status_store": store,
+            "recording_cmd_client": client,
+            "spacemouse_left_select": RecordingInput("sm-a"),
+            "spacemouse_right_select": RecordingInput("sm-b"),
+            "spacemouse_command_status": RecordingText(),
+        }
+        self.assertTrue(_send_spacemouse_assignment(handles))
+        self.assertTrue(_send_spacemouse_swap(handles))
+        self.assertEqual(client.calls[0][1]["status_generation"], 12)
+        self.assertEqual(client.calls[1][1]["status_generation"], 12)
 
     def test_arm_init_command_client_emits_control_schema(self):
         class _Sock:
@@ -3105,6 +3236,13 @@ class GuiContractsTest(unittest.TestCase):
             "freshness_value": 1234,
             "freshness_advanced": True,
             "reason": "ok",
+            "auto_tare_enabled": True,
+            "tare_valid": True,
+            "tare_state": "accepted",
+            "tare_sample_count": 500,
+            "tare_generation": 2,
+            "tare_reason": "accepted",
+            "residual_tare_tcp": [0.0, 0.0, 23.5, 0.1, 0.2, 0.3],
         }
         state["left"]["force_control"] = {
             "enabled": True,
@@ -3118,6 +3256,8 @@ class GuiContractsTest(unittest.TestCase):
             "fast_force_norm_n": 10.2,
             "fast_torque_norm_nm": 1.2,
             "contact_threshold_exceeded": True,
+            "hard_limit_threshold_exceeded": True,
+            "hard_limit_sample_count": 2,
             "hard_limit_exceeded": False,
             "target_force_n": 8.0,
             "correction_m": 0.0003,
@@ -3146,6 +3286,15 @@ class GuiContractsTest(unittest.TestCase):
         )
         self.assertEqual(latest.left.force_torque.freshness_value, 1234)
         self.assertTrue(latest.left.force_torque.freshness_advanced)
+        self.assertTrue(latest.left.force_torque.auto_tare_enabled)
+        self.assertTrue(latest.left.force_torque.tare_valid)
+        self.assertEqual(latest.left.force_torque.tare_state, "accepted")
+        self.assertEqual(latest.left.force_torque.tare_sample_count, 500)
+        self.assertEqual(latest.left.force_torque.tare_generation, 2)
+        self.assertEqual(
+            latest.left.force_torque.residual_tare_tcp,
+            (0.0, 0.0, 23.5, 0.1, 0.2, 0.3),
+        )
         self.assertEqual(latest.left.force_control.operating_mode, "guarded_admittance")
         self.assertEqual(latest.left.force_control.state, "regulating")
         self.assertEqual(latest.left.force_control.normal_stand, (0.0, 0.0, 1.0))
@@ -3155,6 +3304,8 @@ class GuiContractsTest(unittest.TestCase):
         self.assertAlmostEqual(latest.left.force_control.fast_force_norm_n, 10.2)
         self.assertAlmostEqual(latest.left.force_control.fast_torque_norm_nm, 1.2)
         self.assertTrue(latest.left.force_control.contact_threshold_exceeded)
+        self.assertTrue(latest.left.force_control.hard_limit_threshold_exceeded)
+        self.assertEqual(latest.left.force_control.hard_limit_sample_count, 2)
         self.assertFalse(latest.left.force_control.hard_limit_exceeded)
         self.assertTrue(latest.left.force_control.proposal_committed)
         self.assertEqual(latest.left.force_control.motion_epoch, 42)
@@ -3171,6 +3322,8 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("fast_normal=9.200N", status)
         self.assertIn("force_norm=10.200N", status)
         self.assertIn("torque_norm=1.200Nm", status)
+        self.assertIn("hard_threshold=True", status)
+        self.assertIn("hard_count=2", status)
         self.assertIn("contact_threshold=True", status)
         self.assertIn("hard_limit=False", status)
         self.assertIn("controller=regulating", status)
@@ -4919,14 +5072,14 @@ class FloorConstraintGuiTest(unittest.TestCase):
             finally:
                 os.environ.pop("RB_GUI_SETTINGS_PATH", None)
 
-    def test_update_floor_panel_keeps_saved_enforce_preference(self):
+    def test_update_floor_panel_server_state_overrides_stale_saved_preference(self):
         from rb_servo_gui.models import StateSnapshot
 
         class FakeCheckbox:
             def __init__(self, value):
                 self.value = value
 
-        # Operator previously turned enforce OFF; server config still reports it ON.
+        # A stale historical GUI preference must not override the server config.
         toggle = FakeCheckbox(False)
         handles = {
             "floor_enforce_toggle": toggle,
@@ -4936,8 +5089,7 @@ class FloorConstraintGuiTest(unittest.TestCase):
             sample_state(floor_constraint=self._floor_block(enabled=True))
         )
         _update_floor_panel(handles, state)
-        # Saved preference wins: the checkbox is NOT overwritten from telemetry.
-        self.assertFalse(toggle.value)
+        self.assertTrue(toggle.value)
         self.assertTrue(handles.get("floor_enforce_synced"))
 
     def test_update_floor_panel_syncs_enforce_when_no_preference(self):

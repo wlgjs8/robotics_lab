@@ -110,6 +110,58 @@ DELTA_TWIST_STEP_KIND_LABELS = {
     3: "residual_drain",
     4: "ringdown",
 }
+CHUNK_DIAGNOSTIC_INTEGER_COLUMNS = (
+    "chunk_frame_wire_seq",
+    "chunk_frame_recv_seq",
+    "chunk_frame_horizon",
+    "chunk_frame_execute_steps",
+    "chunk_frame_runway_steps",
+    "chunk_inference_seq",
+    "chunk_inference_stall_count",
+    "chunk_camera_bundle_seq",
+    "chunk_camera_left_frame_number",
+    "chunk_camera_right_frame_number",
+)
+CHUNK_DIAGNOSTIC_FLOAT_COLUMNS = (
+    "chunk_frame_policy_dt_sec",
+    "chunk_frame_age_ms",
+    "chunk_frame_interarrival_ms",
+    "chunk_inference_queue_wait_ms",
+    "chunk_inference_latency_ms",
+    "chunk_inference_ready_wait_ms",
+    "chunk_inference_period_ms",
+    "chunk_inference_period_jitter_ms",
+    "chunk_camera_bundle_age_ms",
+    "chunk_camera_max_skew_ms",
+    "chunk_camera_left_frame_age_ms",
+    "chunk_camera_right_frame_age_ms",
+    "chunk_camera_left_focus_score",
+    "chunk_camera_right_focus_score",
+)
+DELTA_TWIST_CLAMP_MASK_LABELS = (
+    "pending_linear",
+    "pending_angular",
+    "xi_ref_velocity_linear",
+    "xi_ref_velocity_angular",
+    "desired_accel_linear",
+    "desired_accel_angular",
+    "desired_jerk_linear",
+    "desired_jerk_angular",
+    "accel_cmd_linear",
+    "accel_cmd_angular",
+    "xi_cmd_velocity_linear",
+    "xi_cmd_velocity_angular",
+    "lead_linear",
+    "lead_angular",
+)
+DELTA_TWIST_ACCEL_COMMAND_SUFFIXES = (
+    "x_m_s2",
+    "y_m_s2",
+    "z_m_s2",
+    "rx_rad_s2",
+    "ry_rad_s2",
+    "rz_rad_s2",
+)
 
 
 class AnalysisError(Exception):
@@ -147,6 +199,16 @@ def optional_bool(row: dict[str, str], column: str, row_number: int) -> bool | N
     if value is None or value == "":
         return None
     return parse_bool(value, column, row_number)
+
+
+def optional_int(row: dict[str, str], column: str, row_number: int) -> int | None:
+    value = optional_float(row, column, row_number)
+    if value is None:
+        return None
+    integer = int(value)
+    if value != integer:
+        raise AnalysisError(f"row {row_number}: column {column} must be an integer")
+    return integer
 
 
 def percentile_nearest_rank(values: Sequence[float], percentile: float) -> float:
@@ -202,6 +264,14 @@ def make_delta_twist_bucket() -> dict[str, object]:
         "step_kind_counts": {},
         "accel_clamp_counts": {},
         "feedback_source_counts": {},
+        "clamp_mask_counts": {},
+        "frame_rows": [],
+        "normal_budget": [],
+        "total_budget": [],
+        "steps_remaining": [],
+        "accel_command": {
+            suffix: [] for suffix in DELTA_TWIST_ACCEL_COMMAND_SUFFIXES
+        },
         "pending_linear": [],
         "pending_angular": [],
         "xi_ref_linear": [],
@@ -217,6 +287,17 @@ def make_delta_twist_bucket() -> dict[str, object]:
     }
 
 
+def make_chunk_diagnostics_bucket() -> dict[str, object]:
+    return {
+        "rows": 0,
+        "values": {
+            column: []
+            for column in (*CHUNK_DIAGNOSTIC_INTEGER_COLUMNS, *CHUNK_DIAGNOSTIC_FLOAT_COLUMNS)
+        },
+        "wire_sequences": set(),
+    }
+
+
 def bump_count(counts: dict[str, int], key: str) -> None:
     counts[key] = counts.get(key, 0) + 1
 
@@ -227,11 +308,15 @@ def finalize_delta_twist_bucket(bucket: dict[str, object]) -> dict[str, object]:
     controller_counts = bucket["controller_counts"]
     accel_clamp_counts = bucket["accel_clamp_counts"]
     feedback_source_counts = bucket["feedback_source_counts"]
+    clamp_mask_counts = bucket["clamp_mask_counts"]
+    accel_command = bucket["accel_command"]
     assert isinstance(step_counts, dict)
     assert isinstance(step_kind_counts, dict)
     assert isinstance(controller_counts, dict)
     assert isinstance(accel_clamp_counts, dict)
     assert isinstance(feedback_source_counts, dict)
+    assert isinstance(clamp_mask_counts, dict)
+    assert isinstance(accel_command, dict)
     kind_total = sum(int(value) for value in step_kind_counts.values())
     kind_percent = {
         key: (100.0 * float(value) / float(kind_total)) if kind_total > 0 else 0.0
@@ -299,6 +384,15 @@ def finalize_delta_twist_bucket(bucket: dict[str, object]) -> dict[str, object]:
         "step_kind_percent": kind_percent,
         "accel_clamp_counts": dict(sorted(accel_clamp_counts.items())),
         "feedback_source_counts": dict(sorted(feedback_source_counts.items())),
+        "clamp_mask_counts": dict(sorted(clamp_mask_counts.items())),
+        "frame_rows": percentile_summary(bucket["frame_rows"]),  # type: ignore[arg-type]
+        "normal_budget": percentile_summary(bucket["normal_budget"]),  # type: ignore[arg-type]
+        "total_budget": percentile_summary(bucket["total_budget"]),  # type: ignore[arg-type]
+        "steps_remaining": percentile_summary(bucket["steps_remaining"]),  # type: ignore[arg-type]
+        "accel_command": {
+            suffix: percentile_summary(values)
+            for suffix, values in accel_command.items()
+        },
         "follower_step_distribution": dict(
             sorted(step_counts.items(), key=lambda item: int(item[0]))
         ),
@@ -318,6 +412,21 @@ def finalize_delta_twist_bucket(bucket: dict[str, object]) -> dict[str, object]:
         "stage_net_displacement_m": stage_net_displacement_m,
         "stage_path_to_net_ratio": stage_path_to_net_ratio,
         "warnings": warnings,
+    }
+
+
+def finalize_chunk_diagnostics_bucket(bucket: dict[str, object]) -> dict[str, object]:
+    values = bucket["values"]
+    wire_sequences = bucket["wire_sequences"]
+    assert isinstance(values, dict)
+    assert isinstance(wire_sequences, set)
+    return {
+        "rows": bucket["rows"],
+        "unique_wire_sequences": len(wire_sequences),
+        "series": {
+            column: percentile_summary(samples)
+            for column, samples in values.items()
+        },
     }
 
 
@@ -342,6 +451,7 @@ def analyze_csv(path: Path) -> dict[str, object]:
             "left": make_delta_twist_bucket(),
             "right": make_delta_twist_bucket(),
         }
+        chunk_diagnostics = make_chunk_diagnostics_bucket()
         first_loop_start_ns: float | None = None
         last_loop_end_ns: float | None = None
         rows = 0
@@ -380,6 +490,24 @@ def analyze_csv(path: Path) -> dict[str, object]:
             if safety_verdict:
                 bump_count(safety_verdict_counts, safety_verdict)
 
+            chunk_row_present = False
+            chunk_values = chunk_diagnostics["values"]
+            assert isinstance(chunk_values, dict)
+            for column in CHUNK_DIAGNOSTIC_INTEGER_COLUMNS:
+                value = optional_int(row, column, row_number)
+                if value is not None:
+                    chunk_row_present = True
+                    chunk_values[column].append(value)
+                    if column == "chunk_frame_wire_seq" and value > 0:
+                        chunk_diagnostics["wire_sequences"].add(value)  # type: ignore[union-attr]
+            for column in CHUNK_DIAGNOSTIC_FLOAT_COLUMNS:
+                value = optional_float(row, column, row_number)
+                if value is not None:
+                    chunk_row_present = True
+                    chunk_values[column].append(value)
+            if chunk_row_present:
+                chunk_diagnostics["rows"] = int(chunk_diagnostics["rows"]) + 1
+
             for arm in ("left", "right"):
                 for joint in range(6):
                     actual = parse_float(row[f"{arm}_q_actual_{joint}"], f"{arm}_q_actual_{joint}", row_number)
@@ -397,6 +525,9 @@ def analyze_csv(path: Path) -> dict[str, object]:
                     f"{arm}_delta_twist_xi_cmd_linear_norm_m_s",
                     f"{arm}_delta_twist_xi_cmd_angular_norm_rad_s",
                     f"{arm}_delta_twist_saturated",
+                    f"{arm}_delta_twist_frame_rows",
+                    f"{arm}_delta_twist_clamp_mask",
+                    f"{arm}_delta_twist_accel_cmd_x_m_s2",
                 )
                 has_delta_columns = any(column in row for column in delta_columns)
                 if controller != "delta_twist" and not (has_delta_columns and not controller):
@@ -443,6 +574,32 @@ def analyze_csv(path: Path) -> dict[str, object]:
                         raise AnalysisError(f"row {row_number}: column {arm}_delta_twist_step_kind must be an integer")
                     step_kind_name = DELTA_TWIST_STEP_KIND_LABELS.get(step_kind_int, str(step_kind_int))
                     bump_count(bucket["step_kind_counts"], step_kind_name)  # type: ignore[arg-type]
+                for suffix, key in (
+                    ("frame_rows", "frame_rows"),
+                    ("normal_budget", "normal_budget"),
+                    ("total_budget", "total_budget"),
+                    ("steps_remaining", "steps_remaining"),
+                ):
+                    value = optional_int(row, f"{arm}_delta_twist_{suffix}", row_number)
+                    if value is not None:
+                        bucket[key].append(value)  # type: ignore[union-attr]
+                clamp_mask = optional_int(row, f"{arm}_delta_twist_clamp_mask", row_number)
+                if clamp_mask is not None:
+                    if clamp_mask < 0:
+                        raise AnalysisError(
+                            f"row {row_number}: column {arm}_delta_twist_clamp_mask must be non-negative"
+                        )
+                    for bit, label in enumerate(DELTA_TWIST_CLAMP_MASK_LABELS):
+                        if clamp_mask & (1 << bit):
+                            bump_count(bucket["clamp_mask_counts"], label)  # type: ignore[arg-type]
+                accel_command = bucket["accel_command"]
+                assert isinstance(accel_command, dict)
+                for suffix in DELTA_TWIST_ACCEL_COMMAND_SUFFIXES:
+                    value = optional_float(
+                        row, f"{arm}_delta_twist_accel_cmd_{suffix}", row_number
+                    )
+                    if value is not None:
+                        accel_command[suffix].append(value)
                 for column, key in (
                     (f"{arm}_safety_accel_clamped", "safety_accel_clamped"),
                     (f"{arm}_smd_linear_accel_clipped", "smd_linear_accel_clipped"),
@@ -518,6 +675,7 @@ def analyze_csv(path: Path) -> dict[str, object]:
             "rows_with_failure": rows_with_send_failure,
         },
         "safety_verdict_counts": dict(sorted(safety_verdict_counts.items())),
+        "chunk_diagnostics": finalize_chunk_diagnostics_bucket(chunk_diagnostics),
         "delta_twist": {
             "left": finalize_delta_twist_bucket(delta_twist_series["left"]),
             "right": finalize_delta_twist_bucket(delta_twist_series["right"]),
@@ -616,6 +774,19 @@ def format_report(metrics: dict[str, object], budget: ProfileBudget, failures: S
     if isinstance(safety_counts, dict) and safety_counts:
         counts = ", ".join(f"{key}={value}" for key, value in safety_counts.items())
         lines.append(f"safety_verdict_counts: {counts}")
+    chunk_diagnostics = metrics.get("chunk_diagnostics")
+    if isinstance(chunk_diagnostics, dict) and int(chunk_diagnostics.get("rows", 0)) > 0:
+        lines.append(
+            "chunk_diagnostics: "
+            f"rows={chunk_diagnostics['rows']} "
+            f"unique_wire_sequences={chunk_diagnostics['unique_wire_sequences']}"
+        )
+        chunk_series = chunk_diagnostics.get("series")
+        if isinstance(chunk_series, dict):
+            for column in (*CHUNK_DIAGNOSTIC_INTEGER_COLUMNS, *CHUNK_DIAGNOSTIC_FLOAT_COLUMNS):
+                summary = chunk_series.get(column)
+                if isinstance(summary, dict) and int(summary.get("count", 0)) > 0:
+                    lines.append(f"  {column}: {fmt_percentiles(summary)}")
     delta_twist = metrics.get("delta_twist")
     if isinstance(delta_twist, dict) and any(
         isinstance(delta_twist.get(arm), dict) and int(delta_twist[arm].get("rows", 0)) > 0
@@ -645,6 +816,21 @@ def format_report(metrics: dict[str, object], budget: ProfileBudget, failures: S
             accel_counts = arm_metrics.get("accel_clamp_counts")
             if isinstance(accel_counts, dict) and accel_counts:
                 lines.append(f"  {arm} accel_clamp_counts: {accel_counts}")
+            clamp_mask_counts = arm_metrics.get("clamp_mask_counts")
+            if isinstance(clamp_mask_counts, dict) and clamp_mask_counts:
+                lines.append(f"  {arm} clamp_mask_counts: {clamp_mask_counts}")
+            for name in ("frame_rows", "normal_budget", "total_budget", "steps_remaining"):
+                summary = arm_metrics.get(name)
+                if isinstance(summary, dict) and int(summary.get("count", 0)) > 0:
+                    lines.append(f"  {arm} {name}: {fmt_percentiles(summary)}")
+            accel_command = arm_metrics.get("accel_command")
+            if isinstance(accel_command, dict):
+                for suffix in DELTA_TWIST_ACCEL_COMMAND_SUFFIXES:
+                    summary = accel_command.get(suffix)
+                    if isinstance(summary, dict) and int(summary.get("count", 0)) > 0:
+                        lines.append(
+                            f"  {arm} accel_cmd_{suffix}: {fmt_percentiles(summary)}"
+                        )
             if arm_metrics.get("stage_path_length_m") is not None:
                 ratio = arm_metrics.get("stage_path_to_net_ratio")
                 ratio_text = "n/a" if ratio is None else f"{float(ratio):.6f}"

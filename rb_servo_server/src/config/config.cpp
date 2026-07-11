@@ -1684,13 +1684,44 @@ void validateConfig(const DualArmConfig& cfg) {
         if (arm.debounce_samples < 1) {
             throw std::runtime_error(path + ".debounce_samples must be >= 1");
         }
+        if (arm.hard_limit_debounce_samples < 1) {
+            throw std::runtime_error(
+                path + ".hard_limit_debounce_samples must be >= 1"
+            );
+        }
         validateNonNegativeFinite(arm.release_dwell_sec, path + ".release_dwell_sec");
+        validatePositiveFinite(
+            arm.release_velocity_threshold_m_s,
+            path + ".release_velocity_threshold_m_s"
+        );
+        if (arm.release_velocity_threshold_m_s >
+            cfg.force_control.normal_admittance.max_normal_velocity_m_s) {
+            throw std::runtime_error(
+                path + ".release_velocity_threshold_m_s must be <= "
+                "force_control.normal_admittance.max_normal_velocity_m_s"
+            );
+        }
         if (!arm.enable) return;
         if (!ft.enable) {
             throw std::runtime_error(path + ".enable=true requires matching force_torque arm enable=true");
         }
         if (!(arm.contact_release_force_n < arm.contact_enter_force_n)) {
             throw std::runtime_error(path + " requires contact_release_force_n < contact_enter_force_n");
+        }
+        if (force_mode == "guarded_admittance") {
+            if (!(arm.target_force_n < arm.contact_release_force_n)) {
+                throw std::runtime_error(
+                    path + " requires target_force_n < contact_release_force_n "
+                    "for guarded_admittance"
+                );
+            }
+            if (arm.target_force_n + arm.force_deadband_n >
+                arm.contact_release_force_n) {
+                throw std::runtime_error(
+                    path + " requires target_force_n + force_deadband_n <= "
+                    "contact_release_force_n for guarded_admittance"
+                );
+            }
         }
         if (arm.target_force_n > arm.contact_enter_force_n) {
             throw std::runtime_error(path + ".target_force_n must be <= contact_enter_force_n");
@@ -1753,6 +1784,7 @@ void validateConfig(const DualArmConfig& cfg) {
         }
         validateNonNegativeFinite(ft.max_tcp_speed_m_s, path + ".max_tcp_speed_m_s");
         validateNonNegativeFinite(ft.max_tcp_accel_m_s2, path + ".max_tcp_accel_m_s2");
+        validateNonNegativeFinite(ft.auto_tare_settle_sec, path + ".auto_tare_settle_sec");
         if (ft.residual_tare_min_samples < 2) {
             throw std::runtime_error(path + ".residual_tare_min_samples must be >= 2");
         }
@@ -1797,9 +1829,20 @@ void validateConfig(const DualArmConfig& cfg) {
     );
 
     const bool any_ft_enabled = cfg.force_torque.left.enable || cfg.force_torque.right.enable;
+    const bool any_auto_tare =
+        (cfg.force_torque.left.enable &&
+         cfg.force_torque.left.auto_tare_after_init_motion) ||
+        (cfg.force_torque.right.enable &&
+         cfg.force_torque.right.auto_tare_after_init_motion);
     if (any_ft_enabled && ft_source != "rbpodo_eft") {
         throw std::runtime_error(
             "enabled force_torque arms require force_torque.source=rbpodo_eft"
+        );
+    }
+    if (any_auto_tare && !cfg.safety.init_motion_planner.enable) {
+        throw std::runtime_error(
+            "force_torque auto_tare_after_init_motion requires "
+            "safety.init_motion_planner.enable=true so completion is measured"
         );
     }
     if (force_motion_affecting) {
@@ -3249,7 +3292,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "hard_force_norm_n",
                 "hard_torque_norm_nm",
                 "debounce_samples",
+                "hard_limit_debounce_samples",
                 "release_dwell_sec",
+                "release_velocity_threshold_m_s",
             }, path);
             if (has(arm, "enable")) out.enable = asBool(arm["enable"], path + ".enable");
             if (has(arm, "surface_source")) out.surface_source = lower(asString(arm["surface_source"], path + ".surface_source"));
@@ -3261,7 +3306,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(arm, "hard_force_norm_n")) out.hard_force_norm_n = asDouble(arm["hard_force_norm_n"], path + ".hard_force_norm_n");
             if (has(arm, "hard_torque_norm_nm")) out.hard_torque_norm_nm = asDouble(arm["hard_torque_norm_nm"], path + ".hard_torque_norm_nm");
             if (has(arm, "debounce_samples")) out.debounce_samples = asInt(arm["debounce_samples"], path + ".debounce_samples");
+            if (has(arm, "hard_limit_debounce_samples")) out.hard_limit_debounce_samples = asInt(arm["hard_limit_debounce_samples"], path + ".hard_limit_debounce_samples");
             if (has(arm, "release_dwell_sec")) out.release_dwell_sec = asDouble(arm["release_dwell_sec"], path + ".release_dwell_sec");
+            if (has(arm, "release_velocity_threshold_m_s")) out.release_velocity_threshold_m_s = asDouble(arm["release_velocity_threshold_m_s"], path + ".release_velocity_threshold_m_s");
         };
         if (has(sec, "left")) parse_force_arm(sec["left"], cfg.force_control.left, "force_control.left");
         if (has(sec, "right")) parse_force_arm(sec["right"], cfg.force_control.right, "force_control.right");
@@ -3328,6 +3375,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "control_lpf_alpha",
                 "max_tcp_speed_m_s",
                 "max_tcp_accel_m_s2",
+                "auto_tare_after_init_motion",
+                "auto_tare_settle_sec",
                 "residual_tare_min_samples",
                 "residual_tare_max_force_stddev_n",
                 "residual_tare_max_torque_stddev_nm",
@@ -3347,6 +3396,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ft, "control_lpf_alpha")) out.control_lpf_alpha = asDouble(ft["control_lpf_alpha"], path + ".control_lpf_alpha");
             if (has(ft, "max_tcp_speed_m_s")) out.max_tcp_speed_m_s = asDouble(ft["max_tcp_speed_m_s"], path + ".max_tcp_speed_m_s");
             if (has(ft, "max_tcp_accel_m_s2")) out.max_tcp_accel_m_s2 = asDouble(ft["max_tcp_accel_m_s2"], path + ".max_tcp_accel_m_s2");
+            if (has(ft, "auto_tare_after_init_motion")) out.auto_tare_after_init_motion = asBool(ft["auto_tare_after_init_motion"], path + ".auto_tare_after_init_motion");
+            if (has(ft, "auto_tare_settle_sec")) out.auto_tare_settle_sec = asDouble(ft["auto_tare_settle_sec"], path + ".auto_tare_settle_sec");
             if (has(ft, "residual_tare_min_samples")) out.residual_tare_min_samples = asInt(ft["residual_tare_min_samples"], path + ".residual_tare_min_samples");
             if (has(ft, "residual_tare_max_force_stddev_n")) out.residual_tare_max_force_stddev_n = asDouble(ft["residual_tare_max_force_stddev_n"], path + ".residual_tare_max_force_stddev_n");
             if (has(ft, "residual_tare_max_torque_stddev_nm")) out.residual_tare_max_torque_stddev_nm = asDouble(ft["residual_tare_max_torque_stddev_nm"], path + ".residual_tare_max_torque_stddev_nm");

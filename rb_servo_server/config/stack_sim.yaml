@@ -376,6 +376,8 @@ force_torque:
     control_lpf_alpha: 0.2
     max_tcp_speed_m_s: 0.0
     max_tcp_accel_m_s2: 0.0
+    auto_tare_after_init_motion: false
+    auto_tare_settle_sec: 0.5
     residual_tare_min_samples: 50
     residual_tare_max_force_stddev_n: 0.1
     residual_tare_max_torque_stddev_nm: 0.01

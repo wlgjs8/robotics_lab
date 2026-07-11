@@ -62,6 +62,7 @@ public:
         bool contact_clear
     );
     void cancelResidualTare();
+    Wrench6D residualTareTcp() const;
     void reset();
 
 private:

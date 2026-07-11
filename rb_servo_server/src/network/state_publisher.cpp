@@ -126,6 +126,13 @@ nlohmann::json forceTorqueJson(const ForceTorqueTelemetry& value) {
         {"freshness_value", value.freshness_value},
         {"freshness_advanced", value.freshness_advanced},
         {"reason", value.reason},
+        {"auto_tare_enabled", value.auto_tare_enabled},
+        {"tare_valid", value.tare_valid},
+        {"tare_state", value.tare_state},
+        {"tare_sample_count", value.tare_sample_count},
+        {"tare_generation", value.tare_generation},
+        {"tare_reason", value.tare_reason},
+        {"residual_tare_tcp", wrenchJson(value.residual_tare_tcp)},
     };
 }
 
@@ -142,6 +149,8 @@ nlohmann::json forceControlJson(const ForceControlTelemetry& value) {
         {"fast_force_norm_n", value.fast_force_norm_n},
         {"fast_torque_norm_nm", value.fast_torque_norm_nm},
         {"contact_threshold_exceeded", value.contact_threshold_exceeded},
+        {"hard_limit_threshold_exceeded", value.hard_limit_threshold_exceeded},
+        {"hard_limit_sample_count", value.hard_limit_sample_count},
         {"hard_limit_exceeded", value.hard_limit_exceeded},
         {"target_force_n", value.target_force_n},
         {"correction_m", value.correction_m},

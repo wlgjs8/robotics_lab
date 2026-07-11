@@ -132,6 +132,15 @@ def _format_arm_force_status(arm: ArmSnapshot) -> str:
             parts.append(f"freshness={force_torque.freshness_value}")
         if force_torque.reason is not None:
             parts.append(f"sensor_reason={force_torque.reason}")
+        if force_torque.auto_tare_enabled:
+            tare = force_torque.tare_state or "unknown"
+            if force_torque.tare_sample_count is not None and tare == "collecting":
+                tare += f"({force_torque.tare_sample_count})"
+            parts.append(f"zero={tare}")
+            if force_torque.tare_valid is not None:
+                parts.append(f"zero_valid={force_torque.tare_valid}")
+            if force_torque.tare_reason:
+                parts.append(f"zero_reason={force_torque.tare_reason}")
     force_control = arm.force_control
     if force_control is not None:
         if force_control.enabled is not None:
@@ -152,6 +161,12 @@ def _format_arm_force_status(arm: ArmSnapshot) -> str:
             parts.append(f"torque_norm={force_control.fast_torque_norm_nm:.3f}Nm")
         if force_control.contact_threshold_exceeded is not None:
             parts.append(f"contact_threshold={force_control.contact_threshold_exceeded}")
+        if force_control.hard_limit_threshold_exceeded is not None:
+            parts.append(
+                f"hard_threshold={force_control.hard_limit_threshold_exceeded}"
+            )
+        if force_control.hard_limit_sample_count is not None:
+            parts.append(f"hard_count={force_control.hard_limit_sample_count}")
         if force_control.hard_limit_exceeded is not None:
             parts.append(f"hard_limit={force_control.hard_limit_exceeded}")
         if force_control.target_force_n is not None:

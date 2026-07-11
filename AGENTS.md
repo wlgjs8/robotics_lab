@@ -13,7 +13,7 @@ The mock / rbpodo controller-simulation (pgmode) stack remains the regression ba
 - GUI and policy-runner safety gates
 - command-source lease/arbitration
 
-Real motion is now an active bring-up lane: read-only diagnostics parity, a slow dual-arm physical Cartesian circle, UMI teleop/replay, and a full `flow-infer` `real_policy` closed-loop rollout (pi0.5/openpi, `TcpPoseTarget` + real gripper) have all run on hardware under operator supervision (`docs/runbooks/rbpodo_real_physical_circle.md`, ladder `docs/runbooks/pgmode_real_transition.md`). `flow-infer` composes ee_local deltas into absolute `TcpPoseTarget` setpoints. The `real_policy` rollout-mode validation was satisfied via accepted/validated config — the lane is open, not blocked; runtime is validated and task success is the remaining model-side gap. Real-motion execution authority is config-driven and server-owned: site-local config plus the mode-independent safety layers decide whether motion is sent. Operator supervision and an E-stop remain physical operation procedure, and passing simulator tests is never permission to move hardware. For real Cartesian motion the policy-side block was retired (PR #13), so `rb_servo_server` makes the final allow/deny decision (plus the async URDF-mesh `CollisionMonitor`). Still off: force control; measured hand-eye calibration is unneeded for the deployed pika ee_local image-conditioned policy but still required for general geometry-dependent policy.
+Real motion is now an active bring-up lane: read-only diagnostics parity, a slow dual-arm physical Cartesian circle, UMI teleop/replay, and a full `flow-infer` `real_policy` closed-loop rollout (pi0.5/openpi, `TcpPoseTarget` + real gripper) have all run on hardware under operator supervision (`docs/runbooks/rbpodo_real_physical_circle.md`, ladder `docs/runbooks/pgmode_real_transition.md`). `flow-infer` composes ee_local deltas into absolute `TcpPoseTarget` setpoints. The `real_policy` rollout-mode validation was satisfied via accepted/validated config — the lane is open, not blocked; runtime is validated and task success is the remaining model-side gap. Real-motion execution authority is config-driven and server-owned: tracked stack config plus the mode-independent safety layers decide whether motion is sent. Operator supervision and an E-stop remain physical operation procedure, and passing simulator tests is never permission to move hardware. For real Cartesian motion the policy-side block was retired (PR #13), so `rb_servo_server` makes the final allow/deny decision (plus the async URDF-mesh `CollisionMonitor`). Right-arm project-native force control is now exposed only as a supervised experimental guarded-admittance bring-up stage; left force motion and production force acceptance remain blocked. Measured hand-eye calibration is unneeded for the deployed pika ee_local image-conditioned policy but still required for general geometry-dependent policy.
 
 ## Required Reading
 
@@ -113,17 +113,22 @@ remains visible and auditable.
 
 ## Force Control
 
-Real force/admittance motion must remain inactive until its acceptance stage.
-The tracked real stack may run the project-native path in `monitor` mode because
-that mode records telemetry and returns before contact, guard, or motion.
+Production force/admittance remains unaccepted. The tracked real stack currently
+exposes a right-arm-only supervised experimental guarded-admittance bring-up
+stage after physical software-zero, sign, and contact-selectivity monitor
+evidence. Left-arm force motion stays off until its own evidence exists.
 
 ```yaml
 force_control:
   provider: project_native
   enable: true
-  operating_mode: monitor
-  allow_in_real: false
-  supervised_experimental_real: false
+  operating_mode: guarded_admittance
+  allow_in_real: true
+  supervised_experimental_real: true
+  left:
+    enable: false
+  right:
+    enable: true
 ```
 
 Do not integrate an external force-control library into an active motion path unless a future task explicitly approves it and defines a safety acceptance plan. Project-native force-control work must follow the same acceptance boundary.

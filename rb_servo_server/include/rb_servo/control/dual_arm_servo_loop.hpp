@@ -323,7 +323,9 @@ private:
         uint64_t now_ns,
         std::string* fault_reason
     );
-    void applyForceCorrection(ArmId arm_id, ArmCommand* command) const;
+    void invalidatePostInitTare(ArmId arm_id, uint64_t command_seq);
+    void beginPostInitTare(ArmId arm_id, uint64_t now_ns);
+    void applyForceCorrection(ArmId arm_id, ArmCommand* command);
     void finishForceProposals(
         bool left_accepted,
         bool right_accepted,
@@ -344,10 +346,22 @@ private:
         Pose6D contact_anchor;
         bool contact_anchor_valid = false;
         int enter_count = 0;
+        int hard_limit_count = 0;
         uint64_t release_start_ns = 0;
+        Pose6D release_hold_pose;
+        bool release_hold_pending = false;
+        bool release_hold_applied = false;
+        bool release_hold_clear_requested = false;
         Pose6D previous_actual_pose;
         uint64_t previous_actual_pose_ns = 0;
         std::optional<NormalForceControllerProposal> pending_proposal;
+        bool pending_proposal_applied = false;
+        bool tare_valid = false;
+        bool tare_waiting_for_init_completion = false;
+        bool tare_collecting = false;
+        uint64_t tare_not_before_ns = 0;
+        uint64_t last_init_tare_command_seq = 0;
+        uint64_t tare_generation = 0;
     };
     FtWrenchPipeline left_ft_pipeline_;
     FtWrenchPipeline right_ft_pipeline_;
@@ -768,6 +782,12 @@ private:
         double delta_twist_ang_feedback_cos = 1.0;
         bool delta_twist_xi_ref_clamped_norm = false;
         bool delta_twist_xi_cmd_clamped_norm = false;
+        int delta_twist_frame_rows = 0;
+        int delta_twist_normal_budget = 0;
+        int delta_twist_total_budget = 0;
+        int delta_twist_steps_remaining = 0;
+        std::uint32_t delta_twist_clamp_mask = 0;
+        Vec6 delta_twist_accel_cmd{};
     };
     AbcTelemetry left_abc_telemetry_;
     AbcTelemetry right_abc_telemetry_;

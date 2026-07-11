@@ -51,6 +51,7 @@ status() {
     echo "[isolation] nohz_full   : '$(cat /sys/devices/system/cpu/nohz_full 2>/dev/null | tr -d ' ' || echo n/a)'"
     echo "[isolation] cpuidle drv : $(cat /sys/devices/system/cpu/cpuidle/current_driver 2>/dev/null || echo none)"
     echo "[isolation] cpu${ISOL_CPU} governor: $(cat /sys/devices/system/cpu/cpu${ISOL_CPU}/cpufreq/scaling_governor)"
+    echo "[isolation] rt throttle   : sched_rt_runtime_us=$(cat /proc/sys/kernel/sched_rt_runtime_us) (-1 = off; required for servo.spin_slack_us)"
     echo "[isolation] default irq affinity: $(cat /proc/irq/default_smp_affinity)"
     echo "[isolation] pid1 affinity: $(taskset -pc 1 2>/dev/null | sed 's/.*: //' || echo n/a)"
     echo "[isolation] cmdline     : $(cat /proc/cmdline)"
@@ -119,9 +120,17 @@ else
 fi
 
 # ---- 3) Immediate steps (effective now, superseded by the reboot) -----------
-if [ -w /sys/devices/system/cpu/smt/control ]; then
-    echo off > /sys/devices/system/cpu/smt/control || true
-    echo "[isolation] SMT: $(cat /sys/devices/system/cpu/smt/control) (immediate)"
+# Only toggle SMT at runtime if it is actually "on". When it is already off /
+# forceoff (nosmt boot param) or notsupported (SMT disabled in BIOS / no siblings),
+# writing "off" fails with ENODEV — the desired state (SMT off) is already met, so
+# skip the write instead of emitting a scary error.
+smt_ctl=/sys/devices/system/cpu/smt/control
+if [ -w "$smt_ctl" ]; then
+    smt_now="$(cat "$smt_ctl" 2>/dev/null || echo n/a)"
+    if [ "$smt_now" = "on" ]; then
+        echo off > "$smt_ctl" || true
+    fi
+    echo "[isolation] SMT: $(cat "$smt_ctl" 2>/dev/null || echo n/a) (immediate)"
 fi
 
 # Default affinity for NEW irqs + migrate existing ones off cpu3 (best effort;
@@ -134,6 +143,27 @@ for f in /proc/irq/[0-9]*/smp_affinity_list; do
     fi
 done
 echo "[isolation] IRQs migrated off cpu${ISOL_CPU}: ${moved} (rest immovable/already off)"
+
+# ---- 4) Disable RT throttling (persist + immediate) -------------------------
+# The scheduler throttles SCHED_FIFO/RR to sched_rt_runtime_us per period
+# (default 950000/1000000 = 95%): an RT task running >950 ms in any 1 s window is
+# descheduled ~50 ms. The servo loop sleeps most of each tick so it normally
+# never hits this — EXCEPT (a) a busy catch-up burst after a stall and (b)
+# servo.spin_slack_us busy-spin, either of which can approach 100% duty and get
+# throttled into a 50 ms stall. Disable it (-1). Safe here: cpu3 is isolated with
+# the bounded servo loop as its only RT task, and there is no other high-duty RT
+# task system-wide to run away without the throttle safety valve.
+SYSCTL_DROPIN=/etc/sysctl.d/99-rb-servo-rt.conf
+want_sysctl="kernel.sched_rt_runtime_us = -1"
+if [ ! -f "$SYSCTL_DROPIN" ] || ! grep -qxF "$want_sysctl" "$SYSCTL_DROPIN"; then
+    printf '# rb_servo: disable RT throttling for the dedicated-core 500 Hz servo loop\n%s\n' \
+        "$want_sysctl" > "$SYSCTL_DROPIN"
+    echo "[isolation] wrote $SYSCTL_DROPIN ($want_sysctl) — applied automatically every boot"
+else
+    echo "[isolation] $SYSCTL_DROPIN already sets $want_sysctl"
+fi
+sysctl -w kernel.sched_rt_runtime_us=-1 >/dev/null
+echo "[isolation] rt throttle now: sched_rt_runtime_us=$(cat /proc/sys/kernel/sched_rt_runtime_us) (immediate)"
 
 echo
 echo "[isolation] DONE — reboot required for isolcpus/nohz_full/rcu_nocbs/CPUAffinity."

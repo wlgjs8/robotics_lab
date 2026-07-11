@@ -44,12 +44,14 @@ from .arm_init_control import (
 )
 from .record_control import RecordingSupervisor
 from .spacemouse import HidSpaceMouseReader, ScriptedSpaceMouseReader, SpaceMouseReader, SpaceMouseSample
+from .spacemouse_registry import RegistrySpaceMouseReader, SpaceMouseDeviceRegistry
 from .action_sources.umi_dual_cartesian import MockUmiPoseReader, UdpUmiPoseReader, UmiPoseReader
 
 
 STARTUP_TIMEOUT_EXIT_CODE = 2
 LEASE_READBACK_TIMEOUT_EXIT_CODE = 3
 FAULT_LATCH_EXIT_CODE = 4
+FORCE_RECOVERY_TIMEOUT_EXIT_CODE = 5
 
 # Quiet period (no motion intents) after which the teleop loop voluntarily
 # releases the command-source lease so one-shot GUI commands can run between
@@ -285,7 +287,7 @@ def run(
         last_record_packet_time_ns = 0
         last_record_packet_seq = 0
 
-    def _finish_tick(snapshot: StateSnapshot, now_value: float) -> None:
+    def _finish_tick(snapshot: StateSnapshot, now_value: float) -> int | None:
         action_source_name = str(getattr(source, "name", config.action_source))
         recording_supervisor.record_frame(
             snapshot,
@@ -301,8 +303,17 @@ def run(
             runner_role=_runner_role(config, source, action_source_name),
             action_source=action_source_name,
             command_client=command_client,
+            spacemouse=_spacemouse_status(source),
+            force_recovery=_force_recovery_status(source),
+            camera_runtime=_camera_runtime_status(source),
         )
+        abort_reason = _terminal_abort_reason(source)
+        if abort_reason is not None:
+            label = "camera_abort" if abort_reason == "camera_stale_timeout" else "force_recovery_abort"
+            print(f"policy_runner {label}: {abort_reason}", file=stderr)
+            return FORCE_RECOVERY_TIMEOUT_EXIT_CODE
         sleep_fn(period)
+        return None
     _capture = TeleopCaptureLogger()
 
     def _log_final_and_capture(
@@ -373,6 +384,7 @@ def run(
                 control_payloads = drain_payloads()
                 dispatch_payloads(control_payloads, snapshot, action_source=action_source_name)
                 arm_init_override.handle_payloads(control_payloads)
+                _handle_spacemouse_control_payloads(source, control_payloads)
             else:
                 recording_supervisor.drain_commands(snapshot, action_source=action_source_name)
             arm_init_override.update_from_snapshot(snapshot)
@@ -478,7 +490,9 @@ def run(
                         command_seq=0,
                         drop_reason="rollout_mode_command_send_disabled",
                     )
-                    _finish_tick(snapshot, now)
+                    abort_code = _finish_tick(snapshot, now)
+                    if abort_code is not None:
+                        return abort_code
                     continue
                 assert command_client is not None
                 # Lazy lease: acquire on the FIRST motion intent, not at startup.
@@ -496,7 +510,9 @@ def run(
                             command_seq=0,
                             drop_reason="lease_retry_backoff",
                         )
-                        _finish_tick(snapshot, now)
+                        abort_code = _finish_tick(snapshot, now)
+                        if abort_code is not None:
+                            return abort_code
                         continue
                     try:
                         command_client.acquire_lease(
@@ -521,7 +537,9 @@ def run(
                             command_seq=0,
                             drop_reason="lease_busy",
                         )
-                        _finish_tick(snapshot, now)
+                        abort_code = _finish_tick(snapshot, now)
+                        if abort_code is not None:
+                            return abort_code
                         continue
                 arm_seq = 0
                 if intent.is_motion and not armed_for_motion:
@@ -550,7 +568,9 @@ def run(
                             command_seq=0,
                             drop_reason=f"arm:{arm_decision.reason or ''}",
                         )
-                        _finish_tick(snapshot, now)
+                        abort_code = _finish_tick(snapshot, now)
+                        if abort_code is not None:
+                            return abort_code
                         continue
                 seq = command_client.send(intent)
                 _remember_sent_intent(intent, seq)
@@ -580,7 +600,9 @@ def run(
                     command_seq=0,
                     drop_reason=decision.reason,
                 )
-            _finish_tick(snapshot, now)
+            abort_code = _finish_tick(snapshot, now)
+            if abort_code is not None:
+                return abort_code
     except KeyboardInterrupt:
         return 0
     finally:
@@ -629,9 +651,24 @@ def _make_dual_spacemouse_pose_target_source(
     sm = config.spacemouse_pose_target_dual
     left = sm.left
     right = sm.right
+    registry = None
+    if sm.discovery.enable and left.mock_script is None and right.mock_script is None:
+        registry = SpaceMouseDeviceRegistry(
+            vendor_id=sm.discovery.vendor_id,
+            product_id=sm.discovery.product_id,
+            interface_number=sm.discovery.interface_number,
+            scan_period_sec=sm.discovery.scan_period_sec,
+            poll_period_sec=sm.discovery.poll_period_sec,
+            neutral_threshold=sm.deadband,
+        )
+        left_reader: SpaceMouseReader = RegistrySpaceMouseReader(registry, "left")
+        right_reader: SpaceMouseReader = RegistrySpaceMouseReader(registry, "right")
+    else:
+        left_reader = _spacemouse_reader_from_device_config(left)
+        right_reader = _spacemouse_reader_from_device_config(right)
     return DualSpaceMousePoseTargetActionSource(
-        left_reader=_spacemouse_reader_from_device_config(left),
-        right_reader=_spacemouse_reader_from_device_config(right),
+        left_reader=left_reader,
+        right_reader=right_reader,
         max_linear_step_m=sm.max_linear_step_m,
         max_angular_step_rad=sm.max_angular_step_rad,
         max_target_lead_m=sm.max_target_lead_m,
@@ -657,7 +694,51 @@ def _make_dual_spacemouse_pose_target_source(
         allow_rbpodo_controller_simulation=(
             config.safety.allow_rbpodo_controller_simulation_cartesian
         ),
+        device_registry=registry,
     )
+
+
+def _spacemouse_status(source: object):
+    status = getattr(source, "spacemouse_status", None)
+    return status() if callable(status) else None
+
+
+def _force_recovery_status(source: object) -> dict[str, object] | None:
+    status = getattr(source, "force_recovery_status", None)
+    if not callable(status):
+        return None
+    try:
+        return dict(status())
+    except Exception:
+        return None
+
+
+def _camera_runtime_status(source: object) -> dict[str, object] | None:
+    status = getattr(source, "camera_runtime_status", None)
+    if not callable(status):
+        return None
+    try:
+        return dict(status())
+    except Exception:
+        return None
+
+
+def _terminal_abort_reason(source: object) -> str | None:
+    value = getattr(source, "terminal_abort_reason", None)
+    if value is None:
+        value = getattr(source, "force_recovery_terminal_abort_reason", None)
+    if value is None:
+        return None
+    resolved = str(value).strip()
+    return resolved or None
+
+
+def _handle_spacemouse_control_payloads(source: object, payloads) -> None:
+    handler = getattr(source, "handle_spacemouse_control", None)
+    if not callable(handler):
+        return
+    for payload in payloads:
+        handler(payload)
 
 
 def _make_umi_dual_cartesian_source(config: PolicyRunnerConfig) -> UmiDualCartesianActionSource:
@@ -2244,6 +2325,10 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 )
             source.runner_role = "flow_infer"
             source.name = "flow_infer"
+            source.configure_force_recovery(config.force_recovery)
+            configure_camera_runtime = getattr(source, "configure_camera_runtime", None)
+            if callable(configure_camera_runtime):
+                configure_camera_runtime(config.camera)
             # Runtime execution mask: suppress the non-selected arm's per-step
             # commands so it holds in place. Only source.arm_mask (the emission
             # gate) is changed; source.checkpoint_arm_mask / selected_arms (the

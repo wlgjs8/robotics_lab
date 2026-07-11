@@ -122,6 +122,10 @@ void FtWrenchPipeline::cancelResidualTare() {
     last_tare_freshness_value_ = 0;
 }
 
+Wrench6D FtWrenchPipeline::residualTareTcp() const {
+    return config_.residual_tare_tcp;
+}
+
 FtTareUpdate FtWrenchPipeline::updateResidualTare(
     const FtWrenchPipelineOutput& output,
     bool robot_stationary,

@@ -165,10 +165,11 @@ safety:
     arrival_decel_deg_s2: 40.0     # 작을수록 더 완만/긴 감속; cap=√(2·a·d) deg/s
     arrival_min_speed_deg_s: 3.0   # tail이 waypoint_tol로 빨리 안착하도록 최저속도 floor
   floor_constraint:
-    # 2026-07-09 (ft branch): DISABLED — floor velocity-damper 감속이 배포 중 실측
-    # velocity를 깎아 모델 관측(velproprio)을 훼손함. 지오메트리 사전감속 대신
-    # FT 센서(rbpodo sdata.eft_*) 기반 접촉 감지로 전환. 되돌리려면 enable: true.
-    enable: false
+    # Required server-owned surface/normal envelope for the supervised
+    # guarded-admittance stage. This intentionally restores the geometric floor
+    # backstop; its velocity-damper effect must be separated from the F/T
+    # response in the first flow-infer rollout evidence.
+    enable: true
     z_min_m: 0.0000
     runtime_min_z_m: -0.2
     runtime_max_z_m: 0.5
@@ -461,7 +462,7 @@ logging:
 force_torque:
   source: rbpodo_eft
   # Stage 1 monitor profile. The URDF/CAD transform is configured, but axis
-  # signs, payload, serials, bias, and tare still require measured acceptance.
+  # signs, payload, serials, bias, and automatic tare still require measured acceptance.
   left: &ft_arm_monitor
     enable: true
     frame_configured: true
@@ -475,9 +476,17 @@ force_torque:
     control_lpf_alpha: 0.2
     max_tcp_speed_m_s: 0.0
     max_tcp_accel_m_s2: 0.0
-    residual_tare_min_samples: 50
-    residual_tare_max_force_stddev_n: 0.1
-    residual_tare_max_torque_stddev_nm: 0.01
+    # Every successful Init Motion for this arm explicitly authorizes a
+    # pose-local software zero. Collection starts only after the arm reaches
+    # the measured goal and remains settled for 0.5 s.
+    auto_tare_after_init_motion: true
+    auto_tare_settle_sec: 0.5
+    residual_tare_min_samples: 500
+    # Latest physical no-contact data: ~0.29..0.46 N and ~0.06..0.09 Nm
+    # per-axis stddev. These bounds reject motion/contact transients while
+    # admitting the measured stationary sensor noise.
+    residual_tare_max_force_stddev_n: 0.75
+    residual_tare_max_torque_stddev_nm: 0.15
     T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
     sensor_bias: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     payload_mass_kg: 0.0
@@ -494,48 +503,71 @@ force_torque:
     control_lpf_alpha: 0.2
     max_tcp_speed_m_s: 0.0
     max_tcp_accel_m_s2: 0.0
-    residual_tare_min_samples: 50
-    residual_tare_max_force_stddev_n: 0.1
-    residual_tare_max_torque_stddev_nm: 0.01
+    auto_tare_after_init_motion: true
+    auto_tare_settle_sec: 0.5
+    residual_tare_min_samples: 500
+    residual_tare_max_force_stddev_n: 0.75
+    residual_tare_max_torque_stddev_nm: 0.15
     T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
     sensor_bias: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     payload_mass_kg: 0.0
     payload_com_tcp_m: [0.0, 0.0, 0.0]
     residual_tare_tcp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-# Stage 1 is deliberately monitor-only: force telemetry is live, while force
-# thresholds cannot stop or move the robot. Promote one setting at a time only
-# with the acceptance runbook and fresh CSV evidence.
+# Supervised experimental dual-arm force-motion stage. Both arms use the same
+# floor-normal contact profile; software zero remains independent per arm.
+# The 2026-07-11 captures established positive floor-compression polarity on
+# both arms, and the nominal bolt pickup established the task-contact ceiling.
+# This is not production acceptance and does not replace the E-stop/operator.
 force_control:
   provider: project_native
   enable: true
-  operating_mode: monitor
-  allow_in_real: false
-  supervised_experimental_real: false
+  operating_mode: guarded_admittance
+  allow_in_real: true
+  supervised_experimental_real: true
   update_rate_hz: 500
-  left: &force_arm_monitor
+  left:
     enable: true
     surface_source: floor_constraint
-    # Diagnostic ordering values only. Monitor mode publishes threshold/hard-
-    # limit exceedance telemetry but does not stop or alter robot motion.
+    # Shared dual-arm profile. The latest accepted floor contact peaked at
+    # 23.88 N normal / 24.36 N resultant without crossing the old hard guard.
+    # Keep margin for task contact while remaining well below the earlier
+    # 100+ N floor-press event. Hard limits require 5 fresh samples (10 ms).
     target_force_n: 2.0
     contact_enter_force_n: 6.0
-    contact_release_force_n: 1.0
+    contact_release_force_n: 3.0
     force_deadband_n: 0.5
-    hard_normal_force_n: 15.0
-    hard_force_norm_n: 20.0
-    hard_torque_norm_nm: 3.0
+    hard_normal_force_n: 40.0
+    hard_force_norm_n: 45.0
+    hard_torque_norm_nm: 7.0
     debounce_samples: 3
+    hard_limit_debounce_samples: 5
     release_dwell_sec: 0.1
-  right: *force_arm_monitor
+    release_velocity_threshold_m_s: 0.002
+  right:
+    enable: true
+    surface_source: floor_constraint
+    # Identical to the left arm so task behavior and acceptance evidence use a
+    # single dual-arm profile.
+    target_force_n: 2.0
+    contact_enter_force_n: 6.0
+    contact_release_force_n: 3.0
+    force_deadband_n: 0.5
+    hard_normal_force_n: 40.0
+    hard_force_norm_n: 45.0
+    hard_torque_norm_nm: 7.0
+    debounce_samples: 3
+    hard_limit_debounce_samples: 5
+    release_dwell_sec: 0.1
+    release_velocity_threshold_m_s: 0.002
   normal_admittance:
-    virtual_mass_kg: 5.0
-    damping_n_s_m: 80.0
+    virtual_mass_kg: 8.0
+    damping_n_s_m: 160.0
     stiffness_n_m: 0.0
     max_unload_offset_m: 0.01
-    max_normal_velocity_m_s: 0.02
-    max_normal_acceleration_m_s2: 0.2
-    max_normal_jerk_m_s3: 2.0
+    max_normal_velocity_m_s: 0.015
+    max_normal_acceleration_m_s2: 0.12
+    max_normal_jerk_m_s3: 0.8
     max_normal_step_m: 0.001
     max_energy_j: 2.0
 
@@ -779,7 +811,9 @@ cartesian_control:
         max_angular_accel_rad_s2: 3.0
         max_angular_jerk_rad_s3: 120.0
         discard_head_steps: 0     # producer re-anchors each chunk to measured TCP: latency already absorbed
-        consume_steps: 6          # consume only window rows; rows 6-11 are runway neighbors + late-frame coast
+        # Match FLOW_INFER_CHUNK_EXECUTE_STEPS=12: consume the complete policy
+        # execution window before using reserve rows from the published runway.
+        consume_steps: 12
         reserve_steps: 2
         smoothing_window: 3
         af_damping_beta: 1.0 #0.2  # P3: honest central-diff curvature; clampAbs(af, a_max) bounds it (beta<1 = per-waypoint micro-brake)

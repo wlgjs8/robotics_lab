@@ -149,6 +149,15 @@ class CameraBundleClientTest(unittest.TestCase):
     def test_poll_returns_none_when_no_bundle_published(self) -> None:
         self.assertIsNone(self.client.poll(timeout_ms=10))
 
+    def test_poll_preserves_latest_camera_health_document(self) -> None:
+        health = {"schema": "camera_server.health.v1", "status": "ok", "fps": 30.0}
+        payload = json.dumps(health).encode("utf-8")
+        for _ in range(5):
+            self.pub.send_multipart([b"camera.health", payload])
+            time.sleep(0.01)
+            self.client.poll(timeout_ms=1)
+        self.assertEqual(self.client.diagnostics_snapshot()["camera_health"], health)
+
     def test_poll_decodes_complete_bundle_with_one_camera(self) -> None:
         pixels = bytes(range(12))
         frame = _write_shm_image(name=self._shm_name(), width=2, height=2, channels=3, payload=pixels)
@@ -157,11 +166,21 @@ class CameraBundleClientTest(unittest.TestCase):
         assert bundle is not None
         self.assertEqual(sorted(bundle.frames), ["head"])
         self.assertEqual(bundle.frames["head"].pixels.shape, (2, 2, 3))
+        self.assertEqual(bundle.sync_policy, "nearest_timestamp")
+        self.assertEqual(bundle.max_time_diff_ms, 1.0)
+        self.assertEqual(bundle.drop_counters, {})
+        diagnostics = self.client.diagnostics_snapshot()
+        self.assertEqual(diagnostics["last_poll"]["outcome"], "ok")
+        self.assertEqual(diagnostics["latest_bundle"]["bundle_seq"], 42)
         np.testing.assert_array_equal(bundle.frames["head"].pixels.reshape(-1), np.frombuffer(pixels, dtype=np.uint8))
 
     def test_poll_skips_incomplete_bundles(self) -> None:
         frame = _write_shm_image(name=self._shm_name(), width=1, height=1, channels=3, payload=b"\x01\x02\x03")
         self.assertIsNone(self._publish(self._bundle({"head": frame}, complete=False)))
+        self.assertGreater(
+            self.client.diagnostics_snapshot()["poll_outcome_counts"].get("incomplete_bundle", 0),
+            0,
+        )
 
     def test_poll_skips_invalid_frames(self) -> None:
         frame = _write_shm_image(name=self._shm_name(), width=1, height=1, channels=3, payload=b"\x01\x02\x03")

@@ -2,7 +2,7 @@
 
 ## Current gate
 
-`REAL ENFORCEMENT: BLOCKED`
+`PRODUCTION REAL ENFORCEMENT: BLOCKED`
 
 This runbook records the evidence required to promote the integrated F/T
 monitor, guard, and unilateral normal-admittance path. It grants no motion
@@ -14,23 +14,30 @@ real-enforcement gate cannot currently pass. The explicit
 a supervised acceptance stage; it does not close this gate.
 
 `stack_sim.yaml` remains force-off. The tracked `stack_real.yaml` is the single
-physical bring-up profile and is currently limited to:
+physical bring-up profile and currently exposes a dual-arm supervised
+experimental guarded-admittance stage with an identical per-arm contact profile.
+The production gate above remains
+blocked because the EFT source does not provide independent sensor health:
 
 ```yaml
 force_control:
   provider: project_native
   enable: true
-  operating_mode: monitor
-  allow_in_real: false
-  supervised_experimental_real: false
+  operating_mode: guarded_admittance
+  allow_in_real: true
+  supervised_experimental_real: true
+  left:
+    enable: true
+  right:
+    enable: true
 ```
 
 Do not use controller `pgmode` as evidence of physical F/T dynamics.
 
-Monitor-only acquisition is enabled directly in `stack_real.yaml` because it
-does not alter or stop motion. Start it with `make run MODE=real`.
-Do not advance to `guard` or `guarded_admittance` until the preceding promotion
-stage has recorded and reviewed its evidence.
+Start the supervised experimental profile with `make run MODE=real`. It is a
+bring-up exposure requested after the per-arm monitor captures, not evidence
+that the full promotion ladder or production gate has passed. Any failure
+returns this block to monitor mode.
 
 ## Per-arm accepted profile
 
@@ -54,7 +61,7 @@ explicitly labelled as unaccepted estimates.
 | Tool/payload mass | pending | pending |
 | Payload center of mass in TCP | pending | pending |
 | Sensor bias artifact | pending | pending |
-| Residual tare procedure | pending | pending |
+| Residual tare procedure | automatic after successful left/both Init Motion; physical acceptance pending | automatic after successful right/both Init Motion; physical acceptance pending |
 | Profile revision/hash | pending | pending |
 | Reviewer and date | pending | pending |
 
@@ -75,6 +82,13 @@ point_tcp = T_tcp_sensor * point_sensor
 Record a manual positive load on every force and torque axis. A sign or frame
 mismatch is a hard failure; do not compensate for it by changing a contact
 threshold.
+
+For the floor contact channel, keep the stand-frame geometric normal pointing
+outward (`+Z`). The installed sensor's reaction force points opposite that
+normal when the floor pushes the TCP upward, so force-control telemetry uses
+`compressive_force = -normal dot force_stand`. A valid upward floor-reaction
+test must therefore produce positive measured/fast normal force without
+changing the geometric normal or the outward unload direction.
 
 ## Characterization datasets
 
@@ -173,10 +187,22 @@ The implementation increments `motion_epoch` on contact entry, release, and
 external-force fault. `flow-infer` invalidates cached/in-flight chunks and
 reanchors its absolute TCP targets when the epoch changes. Admittance state is
 committed only after IK, final safety filtering, and accepted backend send.
+While that reanchor is pending and the upstream command is `Hold`, the active
+contact arm continues a server-synthesized Cartesian unload target from its
+measured pose; stale chunk/SMD followers are bypassed for that arm.
 
 The F/T path is not safety-rated. It supplements but never replaces E-stop,
 lease/deadman, stale-state, tracking-error, self-collision, floor, ROI, and
 other final server-owned safety gates.
+
+For automatic tare, leave the selected tool completely unloaded and clear of
+contact before Init Motion. After measured arrival the server waits 0.5 s, then
+accepts 500 fresh samples only when every force-axis standard deviation is at
+most 0.75 N and every torque-axis standard deviation is at most 0.15 Nm.
+Confirm `ft_tare_state=accepted` and `ft_tare_valid=1` in the GUI/CSV before
+interpreting contact thresholds. This removes the installed tool's static
+wrench only at the Init Motion orientation; it does not replace payload mass/COM
+characterization.
 
 ## Gate close conditions
 

@@ -12,10 +12,7 @@ if str(REPO_POLICY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_POLICY_ROOT))
 
 from policy_runner.spacemouse import HidSpaceMouseReader, SpaceMouseSample
-
-
-DEFAULT_LEFT_PATH = "/dev/hidraw5"
-DEFAULT_RIGHT_PATH = "/dev/hidraw10"
+from policy_runner.spacemouse_registry import enumerate_spacemouse_hid
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -26,19 +23,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--duration-sec", type=float, default=30.0, help="Probe duration. Use 0 for unlimited.")
     parser.add_argument("--rate-hz", type=float, default=30.0, help="Polling/display rate.")
     parser.add_argument("--log", action="store_true", help="Print every sample as log lines instead of refreshing.")
+    parser.add_argument(
+        "--changes-only",
+        action="store_true",
+        help="With --log, print only axis/button changes and finish with per-device statistics.",
+    )
     parser.add_argument("--single", action="store_true", help="Open only the left/default reader.")
     parser.add_argument("--device", default=None, help="pyspacemouse device name to open for both readers.")
     parser.add_argument("--left-device", default=None, help="pyspacemouse device name for the left reader.")
     parser.add_argument("--right-device", default=None, help="pyspacemouse device name for the right reader.")
     parser.add_argument(
         "--left-path",
-        default=DEFAULT_LEFT_PATH,
-        help=f"HID path for the left reader. Default: {DEFAULT_LEFT_PATH}.",
+        default=None,
+        help="Explicit HID path for reader A. Default: auto-discovered 256f:c652 interface 0.",
     )
     parser.add_argument(
         "--right-path",
-        default=DEFAULT_RIGHT_PATH,
-        help=f"HID path for the right reader. Default: {DEFAULT_RIGHT_PATH}.",
+        default=None,
+        help="Explicit HID path for reader B. Default: second auto-discovered motion interface.",
     )
     parser.add_argument("--left-device-number", type=int, default=0, help="pyspacemouse DeviceNumber for left.")
     parser.add_argument("--right-device-number", type=int, default=1, help="pyspacemouse DeviceNumber for right.")
@@ -52,6 +54,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.duration_sec < 0.0:
         raise SystemExit("--duration-sec must be non-negative")
 
+    candidates = sorted(
+        (
+            device.path
+            for device in enumerate_spacemouse_hid()
+            if device.vendor_id == 0x256F
+            and device.product_id == 0xC652
+            and device.interface_number == 0
+        )
+    )
+    left_path = args.left_path or (candidates[0] if candidates else None)
+    right_path = args.right_path or (candidates[1] if len(candidates) > 1 else None)
+    if left_path is None or (not args.single and right_path is None):
+        print("failed to find enough 256f:c652 interface-0 SpaceMouse receivers", file=sys.stderr)
+        return 2
+    assert left_path is not None
+
     readers = []
     try:
         readers.append(
@@ -59,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
                 "LEFT",
                 HidSpaceMouseReader(
                     device=args.left_device or args.device,
-                    path=args.left_path,
+                    path=left_path,
                     device_number=args.left_device_number,
                 ),
             )
@@ -70,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
                     "RIGHT",
                     HidSpaceMouseReader(
                         device=args.right_device or args.device,
-                        path=args.right_path,
+                        path=right_path,
                         device_number=args.right_device_number,
                     ),
                 )
@@ -84,7 +102,19 @@ def main(argv: list[str] | None = None) -> int:
     period = 1.0 / args.rate_hz
     deadline = None if args.duration_sec == 0.0 else time.monotonic() + args.duration_sec
     latest: dict[str, SpaceMouseSample | None] = {side: None for side, _reader in readers}
+    paths: dict[str, str] = {"LEFT": left_path}
+    if right_path is not None:
+        paths["RIGHT"] = right_path
+    last_signatures: dict[str, tuple[object, ...] | None] = {
+        side: None for side, _reader in readers
+    }
+    change_counts = {side: 0 for side, _reader in readers}
+    peak_axes = {side: 0.0 for side, _reader in readers}
     if args.log:
+        print("Opened independent SpaceMouse readers:")
+        for side, _reader in readers:
+            print(f"  {side}: {paths[side]}")
+        print("LEFT/RIGHT are probe slots only; they are not rb_gui arm assignments.")
         print("Move each SpaceMouse and press buttons. Ctrl+C exits.")
         print("time_sec side   tx      ty      tz      rx      ry      rz      buttons")
     try:
@@ -94,7 +124,16 @@ def main(argv: list[str] | None = None) -> int:
                 sample = reader.read(timeout_sec=0.0)
                 if sample is not None:
                     latest[side] = sample
-                    if args.log:
+                    signature = sample_signature(sample)
+                    peak_axes[side] = max(peak_axes[side], max(abs(value) for value in signature[:6]))
+                    first_sample = last_signatures[side] is None
+                    changed = not first_sample and signature != last_signatures[side]
+                    if first_sample:
+                        last_signatures[side] = signature
+                    if changed:
+                        change_counts[side] += 1
+                        last_signatures[side] = signature
+                    if args.log and (not args.changes_only or first_sample or changed):
                         print(format_sample(side, sample), flush=True)
             if not args.log:
                 render_screen(latest, args.duration_sec, deadline)
@@ -107,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
         close_readers(readers)
         if not args.log:
             print()
+        print_summary(readers, paths, latest, change_counts, peak_axes)
     return 0
 
 
@@ -114,33 +154,28 @@ def list_devices() -> int:
     try:
         import pyspacemouse  # type: ignore
 
-        print("pyspacemouse supported connected devices:")
-        for index, name in enumerate(pyspacemouse.list_devices()):
-            print(f"  {index}: {name}")
+        print("pyspacemouse supported connected device types:")
+        for name in sorted(set(pyspacemouse.list_devices())):
+            print(f"  {name}")
     except Exception as exc:
         print(f"pyspacemouse list failed: {type(exc).__name__}: {exc}", file=sys.stderr)
 
     try:
-        from easyhid import Enumeration  # type: ignore
-
         print("\n3Dconnexion HID interfaces:")
         count = 0
-        for dev in Enumeration().find() or []:
-            vendor_id = getattr(dev, "vendor_id", None)
-            product_id = getattr(dev, "product_id", None)
-            manufacturer = str(getattr(dev, "manufacturer_string", ""))
-            product = str(getattr(dev, "product_string", ""))
-            if vendor_id == 0x256F or "3Dconnexion" in manufacturer or "Space" in product:
+        for dev in enumerate_spacemouse_hid():
+            vendor_id = dev.vendor_id
+            product_id = dev.product_id
+            product = dev.product
+            if vendor_id == 0x256F or "Space" in product:
                 count += 1
-                path = getattr(dev, "path", "")
+                path = dev.path
                 phys = hid_phys_for_path(path)
-                interface_number = getattr(dev, "interface_number", None)
-                usage_page = getattr(dev, "usage_page", None)
-                usage = getattr(dev, "usage", None)
+                candidate = product_id == 0xC652 and dev.interface_number == 0
                 print(
                     f"  vendor={hex(vendor_id or 0)} product={hex(product_id or 0)} "
-                    f"manufacturer={manufacturer!r} product_name={product!r} path={path} "
-                    f"interface={interface_number} usage_page={usage_page} usage={usage} phys={phys}"
+                    f"product_name={product!r} path={path} interface={dev.interface_number} "
+                    f"serial={dev.serial!r} motion_candidate={candidate} phys={phys}"
                 )
         if count == 0:
             print("  none")
@@ -170,6 +205,40 @@ def format_sample(side: str, sample: SpaceMouseSample) -> str:
         f"{sample.tx:+.3f} {sample.ty:+.3f} {sample.tz:+.3f} "
         f"{sample.rx:+.3f} {sample.ry:+.3f} {sample.rz:+.3f}  {buttons}"
     )
+
+
+def sample_signature(sample: SpaceMouseSample) -> tuple[object, ...]:
+    return (
+        sample.tx,
+        sample.ty,
+        sample.tz,
+        sample.rx,
+        sample.ry,
+        sample.rz,
+        sample.buttons,
+    )
+
+
+def print_summary(
+    readers: list[tuple[str, HidSpaceMouseReader]],
+    paths: dict[str, str],
+    latest: dict[str, SpaceMouseSample | None],
+    change_counts: dict[str, int],
+    peak_axes: dict[str, float],
+) -> None:
+    print("\nSpaceMouse probe summary:")
+    for side, _reader in readers:
+        sample = latest[side]
+        last_axes = "no-sample"
+        if sample is not None:
+            last_axes = (
+                f"({sample.tx:+.3f},{sample.ty:+.3f},{sample.tz:+.3f},"
+                f"{sample.rx:+.3f},{sample.ry:+.3f},{sample.rz:+.3f})"
+            )
+        print(
+            f"  {side}: path={paths[side]} changes={change_counts[side]} "
+            f"peak_axis={peak_axes[side]:.3f} last_axes={last_axes}"
+        )
 
 
 def render_screen(
