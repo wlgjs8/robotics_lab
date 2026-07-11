@@ -43,8 +43,9 @@ UNKNOWN
 
 Mock serials such as `MOCK_*` are only valid when mock/simulated cameras are enabled.
 
-Tracked real-camera profiles enable per-camera reconnect with a 2 s frame
-timeout. Verify that unplugging one approved test camera leaves every other
+Tracked real-camera profiles enable per-camera reconnect. The current
+high-bandwidth head+wrist profile uses a 5 s frame timeout. Verify that
+unplugging one approved test camera leaves every other
 camera streaming and that health reports a disconnect, attempt, and success.
 
 ## Dependency Preflight

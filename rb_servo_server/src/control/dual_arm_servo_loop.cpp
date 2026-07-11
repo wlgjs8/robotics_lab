@@ -2383,8 +2383,15 @@ bool DualArmServoLoop::updateForceRuntime(
         runtime.pending_cartesian_proposal = cartesian_proposal;
         runtime.control.proposal_valid = cartesian_proposal.valid;
         runtime.control.saturated = cartesian_proposal.saturated;
-        runtime.control.wrench_error_surface = cartesian_proposal.wrench_error_tcp;
         runtime.control.wrench_error_compliance = cartesian_proposal.wrench_error_tcp;
+        const pinocchio::SE3 t_tcp_surface(
+            r_stand_tcp.transpose() * r_stand_surface,
+            math::Vector3::Zero()
+        );
+        runtime.control.wrench_error_surface = transformWrenchFrame(
+            t_tcp_surface.inverse() * t_tcp_compliance,
+            cartesian_proposal.wrench_error_tcp
+        );
         runtime.control.compliance_limit_axes = cartesian_proposal.limit_axes;
         runtime.control.compliance_limit_reason = cartesian_proposal.limit_reason;
         runtime.control.compliance_offset_surface = cartesian_proposal.state.offset_tcp;

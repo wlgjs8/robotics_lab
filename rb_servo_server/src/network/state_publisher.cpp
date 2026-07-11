@@ -148,6 +148,7 @@ nlohmann::json forceControlJson(const ForceControlTelemetry& value) {
         {"operating_mode", value.operating_mode},
         {"state", value.state},
         {"surface_source", value.surface_source},
+        {"compliance_frame", value.compliance_frame},
         {"normal_stand", value.normal_stand},
         {"contact_active", value.contact_active},
         {"normal_contact_active", value.normal_contact_active},
@@ -159,7 +160,9 @@ nlohmann::json forceControlJson(const ForceControlTelemetry& value) {
         {"rotational_regulating", value.rotational_regulating},
         {"loading_projection_active", value.loading_projection_active},
         {"control_wrench_surface", wrenchJson(value.control_wrench_surface)},
+        {"control_wrench_compliance", wrenchJson(value.control_wrench_compliance)},
         {"wrench_error_surface", wrenchJson(value.wrench_error_surface)},
+        {"wrench_error_compliance", wrenchJson(value.wrench_error_compliance)},
         {"compliance_offset_surface", nlohmann::json::array({
             value.compliance_offset_surface.x,
             value.compliance_offset_surface.y,

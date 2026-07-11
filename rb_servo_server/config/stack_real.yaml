@@ -529,17 +529,17 @@ force_control:
   left:
     enable: true
     surface_source: floor_constraint
-    # First acceptance stage: regulate in the RFT64 measurement axes and about
-    # the physical sensor origin. Switch to tcp_origin after the six-axis
-    # sensor-frame direction/sign stage passes; surface remains floor-specific.
-    compliance_frame: sensor_origin
+    # TCP-origin acceptance stage: retain the RFT64 measurement-axis
+    # orientation while translating the compliance pivot to the TCP endpoint.
+    # Surface remains floor-specific and hard guards stay in the TCP/stand path.
+    compliance_frame: tcp_origin
     # Shared dual-arm profile. The latest accepted floor contact peaked at
     # 23.88 N normal / 24.36 N resultant without crossing the old hard guard.
     # Keep margin for task contact while remaining well below the earlier
     # 100+ N floor-press event. Hard limits require 5 fresh samples (10 ms).
     target_force_n: 2.0
-    contact_enter_force_n: 6.0
-    contact_release_force_n: 3.0
+    contact_enter_force_n: 3.5
+    contact_release_force_n: 2.75
     force_deadband_n: 0.5
     hard_normal_force_n: 40.0
     hard_force_norm_n: 45.0
@@ -548,20 +548,20 @@ force_control:
     hard_limit_debounce_samples: 5
     release_dwell_sec: 0.1
     release_velocity_threshold_m_s: 0.002
-    transverse_contact_enter_force_n: 5.0
-    transverse_contact_release_force_n: 4.0
-    torque_contact_enter_nm: 0.9
-    torque_contact_release_nm: 0.7
+    transverse_contact_enter_force_n: 2.5
+    transverse_contact_release_force_n: 1.5
+    torque_contact_enter_nm: 0.45
+    torque_contact_release_nm: 0.30
     compliance_axes: [true, true, true, true, true, true]
   right:
     enable: true
     surface_source: floor_constraint
-    compliance_frame: sensor_origin
+    compliance_frame: tcp_origin
     # Identical to the left arm so task behavior and acceptance evidence use a
     # single dual-arm profile.
     target_force_n: 2.0
-    contact_enter_force_n: 6.0
-    contact_release_force_n: 3.0
+    contact_enter_force_n: 3.5
+    contact_release_force_n: 2.75
     force_deadband_n: 0.5
     hard_normal_force_n: 40.0
     hard_force_norm_n: 45.0
@@ -570,10 +570,10 @@ force_control:
     hard_limit_debounce_samples: 5
     release_dwell_sec: 0.1
     release_velocity_threshold_m_s: 0.002
-    transverse_contact_enter_force_n: 5.0
-    transverse_contact_release_force_n: 4.0
-    torque_contact_enter_nm: 0.9
-    torque_contact_release_nm: 0.7
+    transverse_contact_enter_force_n: 2.5
+    transverse_contact_release_force_n: 1.5
+    torque_contact_enter_nm: 0.45
+    torque_contact_release_nm: 0.30
     compliance_axes: [true, true, true, true, true, true]
   normal_admittance:
     virtual_mass_kg: 8.0
@@ -585,24 +585,25 @@ force_control:
     max_normal_jerk_m_s3: 0.8
     max_normal_step_m: 0.001
     max_energy_j: 2.0
-  # Surface-frame diagonal zero-wrench compliance [tangent-x, tangent-y,
-  # normal, roll, pitch, yaw]. All six axes recenter on the current command
-  # equilibrium; the scalar unilateral normal controller is guarded-mode only.
-  virtual_mass: [8.0, 8.0, 8.0, 0.8, 0.8, 0.8]
-  damping: [100.0, 100.0, 100.0, 10.0, 10.0, 10.0]
-  stiffness: [300.0, 300.0, 300.0, 30.0, 30.0, 30.0]
-  wrench_deadband: [3.0, 3.0, 3.0, 0.6, 0.6, 0.6]
+  # Selected-frame diagonal zero-wrench compliance [x, y, z, roll, pitch,
+  # yaw]. This responsive hand-guiding profile starts outside a 1.5 N / 0.25
+  # Nm quiet zone, is approximately critically damped, and recenters on the
+  # fixed command equilibrium. Hard force/torque limits above are unchanged.
+  virtual_mass: [2.0, 2.0, 2.0, 0.2, 0.2, 0.2]
+  damping: [26.0, 26.0, 26.0, 2.8, 2.8, 2.8]
+  stiffness: [80.0, 80.0, 80.0, 8.0, 8.0, 8.0]
+  wrench_deadband: [1.5, 1.5, 1.5, 0.25, 0.25, 0.25]
   max_dt_sec: 0.02
-  max_pos_offset_m: 0.01
-  max_rot_offset_rad: 0.035
-  max_linear_velocity_m_s: 0.015
-  max_angular_velocity_rad_s: 0.05
-  max_linear_acceleration_m_s2: 0.12
-  max_angular_acceleration_rad_s2: 0.5
-  max_linear_jerk_m_s3: 0.8
-  max_angular_jerk_rad_s3: 3.0
+  max_pos_offset_m: 0.02
+  max_rot_offset_rad: 0.08
+  max_linear_velocity_m_s: 0.03
+  max_angular_velocity_rad_s: 0.15
+  max_linear_acceleration_m_s2: 0.25
+  max_angular_acceleration_rad_s2: 1.5
+  max_linear_jerk_m_s3: 2.0
+  max_angular_jerk_rad_s3: 10.0
   max_pos_step_m: 0.001
-  max_rot_step_rad: 0.001
+  max_rot_step_rad: 0.002
   max_energy_j: 2.0
 
 kinematics:

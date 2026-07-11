@@ -425,6 +425,7 @@ class ForceControlSnapshot:
     operating_mode: str | None = None
     state: str | None = None
     surface_source: str | None = None
+    compliance_frame: str | None = None
     normal_stand: tuple[float, float, float] | None = None
     contact_active: bool | None = None
     normal_contact_active: bool | None = None
@@ -436,7 +437,9 @@ class ForceControlSnapshot:
     rotational_regulating: bool | None = None
     loading_projection_active: bool | None = None
     control_wrench_surface: tuple[float, ...] | None = None
+    control_wrench_compliance: tuple[float, ...] | None = None
     wrench_error_surface: tuple[float, ...] | None = None
+    wrench_error_compliance: tuple[float, ...] | None = None
     compliance_offset_surface: tuple[float, ...] | None = None
     compliance_velocity_surface: tuple[float, ...] | None = None
     compliance_acceleration_surface: tuple[float, ...] | None = None
@@ -476,6 +479,7 @@ class ForceControlSnapshot:
             operating_mode=_optional_str(value.get("operating_mode")),
             state=_optional_str(value.get("state")),
             surface_source=_optional_str(value.get("surface_source")),
+            compliance_frame=_optional_str(value.get("compliance_frame")),
             normal_stand=_finite_vec3(value.get("normal_stand")),
             contact_active=_optional_bool(value.get("contact_active")),
             normal_contact_active=_optional_bool(value.get("normal_contact_active")),
@@ -495,7 +499,13 @@ class ForceControlSnapshot:
             control_wrench_surface=finite_joint_array(
                 value.get("control_wrench_surface")
             ),
+            control_wrench_compliance=finite_joint_array(
+                value.get("control_wrench_compliance")
+            ),
             wrench_error_surface=finite_joint_array(value.get("wrench_error_surface")),
+            wrench_error_compliance=finite_joint_array(
+                value.get("wrench_error_compliance")
+            ),
             compliance_offset_surface=finite_joint_array(
                 value.get("compliance_offset_surface")
             ),

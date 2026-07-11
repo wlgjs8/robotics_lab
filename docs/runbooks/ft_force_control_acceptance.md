@@ -29,8 +29,10 @@ force_control:
   supervised_experimental_real: true
   left:
     enable: true
+    compliance_frame: tcp_origin
   right:
     enable: true
+    compliance_frame: tcp_origin
 ```
 
 Do not use controller `pgmode` as evidence of physical F/T dynamics.
@@ -83,6 +85,16 @@ point_tcp = T_tcp_sensor * point_sensor
 Record a manual positive load on every force and torque axis. A sign or frame
 mismatch is a hard failure; do not compensate for it by changing a contact
 threshold.
+
+The current acceptance stage uses `compliance_frame: tcp_origin`: x/y/z and
+roll/pitch/yaw retain the RFT64 measurement-axis orientation, but rotations
+must occur about the TCP endpoint instead of the physical sensor origin.
+Confirm the state/CSV field `force_control_compliance_frame=tcp_origin`, compare
+`control_wrench_compliance` against the applied sensor-axis load, and keep the
+separate `control_wrench_surface` only for the floor-normal interpretation.
+The preceding `sensor_origin` capture remains direction/pivot evidence only;
+repeat every force/torque axis, release, and recenter test at the TCP endpoint
+before using this stage with flow-infer.
 
 For the floor contact channel, keep the stand-frame geometric normal pointing
 outward (`+Z`). The installed sensor's reaction force points opposite that
@@ -183,6 +195,7 @@ applicable config/ownership parts of these requirements:
 - hard-fault server and Python motion-epoch/observation provenance invalidation
 - DeltaTwist normal-axis projection with tangential-state preservation
 - Cartesian loading projection and bounded SE(3) compliance on every enabled axis
+- explicit sensor-origin frame/sign acceptance before TCP-origin promotion
 - fixed Hold equilibrium with no measured-pose ratchet under sustained wrench
 - zero-wrench release recentering to that equilibrium on x/y/z/rx/ry/rz
 - Hold-to-policy first-delta projection without an equilibrium jump
@@ -206,6 +219,14 @@ if the corrected target fails IK or a downstream safety gate. Review the
 per-axis `compliance_limit_axes` together with the separate normal, transverse,
 and rotational contact flags in the GUI and CSV.
 
+The controller must remain proposal-valid throughout load and release sweeps,
+including when velocity reaches its configured bound. The jerk-domain governor
+must preserve a non-empty braking set and recenter without an
+`ExternalForceLimit` or motion-envelope fault. Do not mask a recenter failure by
+increasing the wrench moving average; the acceptance evidence is the selected
+jerk/offset/velocity/acceleration telemetry and a zero-wrench return to the
+fixed equilibrium.
+
 Before flow-infer, validate `cartesian_admittance` in a fixed `Hold` one axis at
 a time. Apply and release a small supervised load in x, y, z, roll, pitch, and
 yaw. The equilibrium pose/source must remain unchanged while held, the bounded
@@ -213,6 +234,12 @@ offset must oppose the wrench without a fault, and `compliance_recenter_active`
 must drive every offset back near zero after release. Stop immediately on an
 equilibrium drift, repeated offset growth, unexpected-axis motion, or a hard
 force/torque threshold event.
+
+For the responsive profile, begin below the 1.5 N / 0.25 Nm deadband and raise
+the load slowly. Verify first motion just outside the deadband, then verify that
+release recenters without chatter before approaching the 20 mm / 0.08 rad
+travel envelope. The hard thresholds are intentionally unchanged; do not use
+them as a hand-guiding travel stop.
 
 The F/T path is not safety-rated. It supplements but never replaces E-stop,
 lease/deadman, stale-state, tracking-error, self-collision, floor, ROI, and

@@ -104,14 +104,30 @@ void CameraManager::start() {
       for (auto& runtime : camera_runtimes_) {
         runtime->supervisor_thread = std::thread(&CameraManager::supervise_camera, this,
                                                  std::ref(*runtime));
+        // Opening several librealsense pipelines concurrently can make devices
+        // sharing a controller fail USB negotiation. Preserve the previously
+        // stable sequential startup while keeping independent supervisors after
+        // startup. A missing camera consumes only its configured timeout.
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(cfg_.reconnect.frame_timeout_ms);
+        while (running_ && std::chrono::steady_clock::now() < deadline) {
+          bool connected = false;
+          {
+            std::lock_guard<std::mutex> lk(mu_);
+            connected = connected_[runtime->cfg.name];
+          }
+          if (connected) break;
+          std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
       }
       return;
     }
     for (auto& runtime : camera_runtimes_) {
-      auto dev = make_device(runtime->cfg);
-      dev->start([this](CapturedFrame&& f) { handle_frame(std::move(f)); });
       {
-        std::lock_guard<std::mutex> lk(runtime->device_mu);
+        std::lock_guard<std::mutex> lifecycle_lk(device_lifecycle_mu_);
+        auto dev = make_device(runtime->cfg);
+        dev->start([this](CapturedFrame&& f) { handle_frame(std::move(f)); });
+        std::lock_guard<std::mutex> device_lk(runtime->device_mu);
         runtime->device = std::move(dev);
       }
       {
@@ -124,6 +140,7 @@ void CameraManager::start() {
   } catch (...) {
     running_ = false;
     for (auto& runtime : camera_runtimes_) {
+      std::lock_guard<std::mutex> lifecycle_lk(device_lifecycle_mu_);
       std::lock_guard<std::mutex> lk(runtime->device_mu);
       if (runtime->device) runtime->device->stop();
       runtime->device.reset();
@@ -139,6 +156,7 @@ void CameraManager::stop() {
   for (auto& runtime : camera_runtimes_) runtime->wake_cv.notify_all();
   for (auto& runtime : camera_runtimes_) {
     if (runtime->supervisor_thread.joinable()) runtime->supervisor_thread.join();
+    std::lock_guard<std::mutex> lifecycle_lk(device_lifecycle_mu_);
     std::lock_guard<std::mutex> lk(runtime->device_mu);
     if (runtime->device) runtime->device->stop();
     runtime->device.reset();
@@ -194,10 +212,19 @@ void CameraManager::supervise_camera(CameraRuntime& runtime) {
     runtime.last_frame_time_ns = 0;
     const uint64_t start_ns = now_ns(cfg_.server.clock);
     try {
-      auto dev = make_device(runtime.cfg);
-      dev->start([this](CapturedFrame&& frame) { handle_frame(std::move(frame)); });
+      CameraConfig attempt_cfg = runtime.cfg;
+      if (retry && attempt_cfg.backend == "realsense") {
+        // Sensor controls and intrinsics are persistent for the device session
+        // and were already applied on initial startup. Reissuing XU controls
+        // while a USB device is recovering can block for many seconds and delay
+        // the frame-timeout state machine, so reconnect only restores streams.
+        attempt_cfg.controls = {};
+      }
       {
-        std::lock_guard<std::mutex> lk(runtime.device_mu);
+        std::lock_guard<std::mutex> lifecycle_lk(device_lifecycle_mu_);
+        auto dev = make_device(attempt_cfg);
+        dev->start([this](CapturedFrame&& frame) { handle_frame(std::move(frame)); });
+        std::lock_guard<std::mutex> device_lk(runtime.device_mu);
         runtime.device = std::move(dev);
       }
       std::cerr << "[CAM] pipeline started " << runtime.cfg.name << " serial="
@@ -248,6 +275,7 @@ void CameraManager::supervise_camera(CameraRuntime& runtime) {
         }
       }
       {
+        std::lock_guard<std::mutex> lifecycle_lk(device_lifecycle_mu_);
         std::lock_guard<std::mutex> lk(runtime.device_mu);
         if (runtime.device) runtime.device->stop();
         runtime.device.reset();
@@ -256,6 +284,7 @@ void CameraManager::supervise_camera(CameraRuntime& runtime) {
       retry = timed_out;
     } catch (const std::exception& e) {
       {
+        std::lock_guard<std::mutex> lifecycle_lk(device_lifecycle_mu_);
         std::lock_guard<std::mutex> lk(runtime.device_mu);
         if (runtime.device) runtime.device->stop();
         runtime.device.reset();

@@ -202,8 +202,8 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(left_force.contact_enter_force_n, right_force.contact_enter_force_n));
         RB_CHECK(near(left_force.contact_release_force_n, right_force.contact_release_force_n));
         RB_CHECK(near(left_force.target_force_n, 2.0));
-        RB_CHECK(near(left_force.contact_release_force_n, 3.0));
-        RB_CHECK(near(left_force.contact_enter_force_n, 6.0));
+        RB_CHECK(near(left_force.contact_release_force_n, 2.75));
+        RB_CHECK(near(left_force.contact_enter_force_n, 3.5));
         RB_CHECK(
             left_force.target_force_n + left_force.force_deadband_n <=
             left_force.contact_release_force_n
@@ -217,10 +217,10 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(left_force.compliance_axes.roll);
         RB_CHECK(left_force.compliance_axes.pitch);
         RB_CHECK(left_force.compliance_axes.yaw);
-        RB_CHECK(near(left_force.transverse_contact_enter_force_n, 5.0));
-        RB_CHECK(near(left_force.transverse_contact_release_force_n, 4.0));
-        RB_CHECK(near(left_force.torque_contact_enter_nm, 0.9));
-        RB_CHECK(near(left_force.torque_contact_release_nm, 0.7));
+        RB_CHECK(near(left_force.transverse_contact_enter_force_n, 2.5));
+        RB_CHECK(near(left_force.transverse_contact_release_force_n, 1.5));
+        RB_CHECK(near(left_force.torque_contact_enter_nm, 0.45));
+        RB_CHECK(near(left_force.torque_contact_release_nm, 0.30));
         RB_CHECK(near(
             left_force.transverse_contact_enter_force_n,
             right_force.transverse_contact_enter_force_n
@@ -240,6 +240,8 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(right_force.compliance_axes.x && right_force.compliance_axes.y);
         RB_CHECK(right_force.compliance_axes.z && right_force.compliance_axes.roll);
         RB_CHECK(right_force.compliance_axes.pitch && right_force.compliance_axes.yaw);
+        RB_CHECK(left_force.compliance_frame == "tcp_origin");
+        RB_CHECK(left_force.compliance_frame == right_force.compliance_frame);
         RB_CHECK(near(left_force.hard_force_norm_n, 45.0));
         RB_CHECK(near(left_force.hard_force_norm_n, right_force.hard_force_norm_n));
         RB_CHECK(near(left_force.hard_torque_norm_nm, 7.0));
@@ -258,14 +260,17 @@ bool testRepositoryConfigsParse() {
         ));
         const auto& normal_force = stack_real.force_control.normal_admittance;
         RB_CHECK(near(normal_force.virtual_mass_kg, 8.0));
-        RB_CHECK(near(stack_real.force_control.virtual_mass[0], 8.0));
-        RB_CHECK(near(stack_real.force_control.virtual_mass[3], 0.8));
-        RB_CHECK(near(stack_real.force_control.damping[0], 100.0));
-        RB_CHECK(near(stack_real.force_control.damping[3], 10.0));
-        RB_CHECK(near(stack_real.force_control.stiffness[2], 300.0));
-        RB_CHECK(near(stack_real.force_control.wrench_deadband[0], 3.0));
-        RB_CHECK(near(stack_real.force_control.wrench_deadband[2], 3.0));
-        RB_CHECK(near(stack_real.force_control.wrench_deadband[3], 0.6));
+        RB_CHECK(near(stack_real.force_control.virtual_mass[0], 2.0));
+        RB_CHECK(near(stack_real.force_control.virtual_mass[3], 0.2));
+        RB_CHECK(near(stack_real.force_control.damping[0], 26.0));
+        RB_CHECK(near(stack_real.force_control.damping[3], 2.8));
+        RB_CHECK(near(stack_real.force_control.stiffness[2], 80.0));
+        RB_CHECK(near(stack_real.force_control.wrench_deadband[0], 1.5));
+        RB_CHECK(near(stack_real.force_control.wrench_deadband[2], 1.5));
+        RB_CHECK(near(stack_real.force_control.wrench_deadband[3], 0.25));
+        RB_CHECK(near(stack_real.force_control.max_pos_offset_m, 0.02));
+        RB_CHECK(near(stack_real.force_control.max_linear_velocity_m_s, 0.03));
+        RB_CHECK(near(stack_real.force_control.max_linear_jerk_m_s3, 2.0));
         RB_CHECK(near(normal_force.damping_n_s_m, 160.0));
         RB_CHECK(near(normal_force.stiffness_n_m, 0.0));
         RB_CHECK(near(normal_force.max_unload_offset_m, 0.01));
@@ -382,7 +387,7 @@ bool testGuardedAdmittanceReleaseProfileValidation() {
         std::string body = readFile(stack_real_path);
         RB_CHECK(replaceOnce(
             &body,
-            "    contact_release_force_n: 3.0\n",
+            "    contact_release_force_n: 2.75\n",
             "    contact_release_force_n: 2.0\n"
         ));
         const std::string path = writeTempConfig("force-release-at-target", body);
@@ -414,8 +419,8 @@ bool testGuardedAdmittanceReleaseProfileValidation() {
         std::string body = readFile(stack_real_path);
         RB_CHECK(replaceOnce(
             &body,
-            "    contact_release_force_n: 3.0\n",
-            "    contact_release_force_n: 6.0\n"
+            "    contact_release_force_n: 2.75\n",
+            "    contact_release_force_n: 3.5\n"
         ));
         const std::string path = writeTempConfig("force-release-at-entry", body);
         const bool rejected = loadRejectsContaining(
@@ -705,6 +710,7 @@ bool testForceControlSchemaAndActivation() {
         "  left:\n"
         "    enable: true\n"
         "    surface_source: floor_constraint\n"
+        "    compliance_frame: sensor_origin\n"
         "    target_force_n: 3.0\n"
         "    contact_enter_force_n: 5.0\n"
         "    contact_release_force_n: 1.0\n"
@@ -735,6 +741,7 @@ bool testForceControlSchemaAndActivation() {
     RB_CHECK(monitor_enabled.force_control.operating_mode == "monitor");
     RB_CHECK(monitor_enabled.force_control.update_rate_hz == 500);
     RB_CHECK(monitor_enabled.force_control.left.enable);
+    RB_CHECK(monitor_enabled.force_control.left.compliance_frame == "sensor_origin");
     RB_CHECK(near(monitor_enabled.force_control.left.target_force_n, 3.0));
     RB_CHECK(monitor_enabled.force_control.left.hard_limit_debounce_samples == 4);
     RB_CHECK(near(
@@ -772,6 +779,40 @@ bool testForceControlSchemaAndActivation() {
         loadRejects(invalid_release_velocity_path);
     ::unlink(invalid_release_velocity_path.c_str());
     RB_CHECK(invalid_release_velocity_rejected);
+
+    const std::string invalid_compliance_frame_path = writeTempConfig(
+        "force-invalid-compliance-frame",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_control:\n"
+        "  provider: null\n"
+        "  enable: false\n"
+        "  left:\n"
+        "    compliance_frame: tool_magic\n"
+    );
+    const bool invalid_compliance_frame_rejected =
+        loadRejects(invalid_compliance_frame_path);
+    ::unlink(invalid_compliance_frame_path.c_str());
+    RB_CHECK(invalid_compliance_frame_rejected);
+
+    const std::string unconfigured_sensor_frame_path = writeTempConfig(
+        "force-unconfigured-sensor-frame",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  source: rbpodo_eft\n"
+        "  left:\n"
+        "    enable: true\n"
+        "force_control:\n"
+        "  provider: project_native\n"
+        "  enable: true\n"
+        "  operating_mode: monitor\n"
+        "  left:\n"
+        "    enable: true\n"
+        "    compliance_frame: sensor_origin\n"
+    );
+    const bool unconfigured_sensor_frame_rejected =
+        loadRejects(unconfigured_sensor_frame_path);
+    ::unlink(unconfigured_sensor_frame_path.c_str());
+    RB_CHECK(unconfigured_sensor_frame_rejected);
 
     const std::string invalid_mass_path = writeTempConfig(
         "force-invalid-mass",

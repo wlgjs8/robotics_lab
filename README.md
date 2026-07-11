@@ -209,6 +209,15 @@ Hold 또는 최신 policy command 평형점을 기준으로 순응하고, 외력
 chunk와 gripper 실행을 계속하고, hard limit만 기존 fault/중단 경로를
 유지합니다. 이 설정은 production acceptance가 아니며 단계별 CSV
 evidence가 필요합니다.
+현재 실기 검증 frame은 `tcp_origin`으로, RFT64 기즈모의 축 방향은
+유지하면서 compliance 회전 중심을 TCP 끝점으로 옮깁니다. 이전
+`sensor_origin` 런에서 센서 원점 회전과 202.642 mm 레버암이 TCP 복귀
+경로를 크게 결합시키는 현상을 확인한 뒤 승격한 단계입니다. 속도 한계와
+recenter 구간은 출력 평균을 늘리지 않고
+jerk-domain의 재귀적으로 유효한 braking envelope로 제한합니다.
+현재 responsive profile은 1.5 N / 0.25 Nm quiet zone 밖에서 반응하며,
+최대 20 mm / 0.08 rad까지 제한된 순응 이동을 허용합니다. 40 N normal,
+45 N resultant, 7 Nm hard guard는 그대로 유지됩니다.
 상세 계약은 `rb_servo_server/docs/force_control.md`, 실센서 특성화와
 승격 evidence는 `docs/runbooks/ft_force_control_acceptance.md`에 기록합니다.
 

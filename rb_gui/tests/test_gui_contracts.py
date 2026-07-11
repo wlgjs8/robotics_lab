@@ -3249,6 +3249,7 @@ class GuiContractsTest(unittest.TestCase):
             "operating_mode": "guarded_admittance",
             "state": "regulating",
             "surface_source": "floor_constraint",
+            "compliance_frame": "sensor_origin",
             "normal_stand": [0.0, 0.0, 1.0],
             "contact_active": True,
             "normal_contact_active": False,
@@ -3260,7 +3261,9 @@ class GuiContractsTest(unittest.TestCase):
             "rotational_regulating": False,
             "loading_projection_active": True,
             "control_wrench_surface": [1.0, 2.0, 3.0, 0.1, 0.2, 0.3],
+            "control_wrench_compliance": [4.0, 5.0, 6.0, 0.4, 0.5, 0.6],
             "wrench_error_surface": [0.5, -0.5, 1.5, -0.1, 0.0, 0.1],
+            "wrench_error_compliance": [3.5, 4.5, 5.5, 0.35, 0.45, 0.55],
             "compliance_offset_surface": [0.001, 0.002, 0.003, 0.01, 0.02, 0.03],
             "compliance_velocity_surface": [0.004, 0.005, 0.006, 0.04, 0.05, 0.06],
             "compliance_acceleration_surface": [0.007, 0.008, 0.009, 0.07, 0.08, 0.09],
@@ -3317,6 +3320,10 @@ class GuiContractsTest(unittest.TestCase):
         )
         self.assertEqual(latest.left.force_control.operating_mode, "guarded_admittance")
         self.assertEqual(latest.left.force_control.state, "regulating")
+        self.assertEqual(
+            latest.left.force_control.compliance_frame,
+            "sensor_origin",
+        )
         self.assertEqual(latest.left.force_control.normal_stand, (0.0, 0.0, 1.0))
         self.assertTrue(latest.left.force_control.contact_active)
         self.assertFalse(latest.left.force_control.normal_contact_active)
@@ -3330,6 +3337,14 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(
             latest.left.force_control.control_wrench_surface,
             (1.0, 2.0, 3.0, 0.1, 0.2, 0.3),
+        )
+        self.assertEqual(
+            latest.left.force_control.control_wrench_compliance,
+            (4.0, 5.0, 6.0, 0.4, 0.5, 0.6),
+        )
+        self.assertEqual(
+            latest.left.force_control.wrench_error_compliance,
+            (3.5, 4.5, 5.5, 0.35, 0.45, 0.55),
         )
         self.assertEqual(
             latest.left.force_control.accepted_policy_delta_surface,
@@ -3372,6 +3387,8 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("health_verified=False", status)
         self.assertIn("safety_rated=False", status)
         self.assertIn("contact=True", status)
+        self.assertIn("compliance_frame=sensor_origin", status)
+        self.assertIn("control_wrench_compliance=", status)
         self.assertIn("normal_contact=False", status)
         self.assertIn("transverse_contact=True", status)
         self.assertIn("rotational_contact=True", status)

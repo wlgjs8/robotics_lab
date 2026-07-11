@@ -364,7 +364,16 @@ compliance mode, soft contact preserves the active flow-infer chunk and gripper
 execution while loading translation/rotation increments are projected and a
 bounded SE(3) correction is composed around a fixed Hold or latest accepted
 policy-command equilibrium. Zero-wrench stiffness recenters all six offsets
-without absorbing measured motion into that equilibrium. Hard-limit faults retain the normal
+without absorbing measured motion into that equilibrium. The current real
+profile regulates in the RFT64 sensor-axis orientation about the TCP endpoint.
+This `tcp_origin` stage follows the sensor-origin direction capture and removes
+the 202.642 mm sensor-to-TCP lever arm from the compliance pivot while leaving
+the hard-guard wrench path unchanged.
+The Cartesian controller selects jerk from a recursively viable braking
+envelope rather than integrating and clamping state, so velocity-bound
+recentering retains braking authority without adding wrench averaging.
+Surface-normal and resultant hard-limit calculations remain in their existing
+TCP/stand path. Hard-limit faults retain the normal
 motion-epoch interruption path. Activation, telemetry, and promotion constraints are defined in
 `rb_servo_server/docs/force_control.md`. The path is not safety-rated;
 `stack_real.yaml` currently exposes a supervised experimental dual-arm

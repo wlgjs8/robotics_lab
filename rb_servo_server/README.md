@@ -7,7 +7,7 @@ The server is designed for:
 1. fast mock-mode development without robots,
 2. Rainbow rbpodo real/controller-simulation backends through `IRobotBackend`,
 3. Python VLA / imitation policy integration through UDP commands,
-4. Cartesian TCP control and inactive force/admittance scaffolding.
+4. Cartesian TCP control and supervised experimental force/compliance control.
 
 ## Current status
 
@@ -30,7 +30,8 @@ Implemented in this server:
 - mandatory Pinocchio/Eigen FK, IK, and Cartesian math support
 - Cartesian command routing when kinematics and Cartesian config gates are
   enabled
-- default-off F/T monitor, contact guard, and unilateral normal admittance
+- F/T monitor, contact guard, unilateral normal admittance, and bounded 6D
+  Cartesian compliance; activation remains explicit per stack/arm
 - gripper command forwarding to the out-of-process `gripper_server`
 
 Still pending:
@@ -172,9 +173,13 @@ The C++ receive timestamp is used for timeout checks.
 ## Force-control status
 
 Force control is connected to the Cartesian servo path. The tracked real stack
-currently exposes a supervised experimental dual-arm guarded-admittance stage
-with identical per-arm contact parameters; the simulation stack remains off. Physical production
-acceptance is still required. See `docs/force_control.md`.
+currently exposes a supervised experimental dual-arm Cartesian-admittance stage
+with identical per-arm contact parameters. Its first six-axis stage uses the
+RFT64 sensor axes and physical sensor origin; the simulation stack remains off.
+Physical production acceptance is still required. See `docs/force_control.md`.
+The current responsive profile starts outside a 1.5 N / 0.25 Nm quiet zone and
+allows up to 20 mm / 0.08 rad bounded compliance. Separate hard guards remain
+40 N normal, 45 N resultant, and 7 Nm.
 
 ## Viser operator GUI
 

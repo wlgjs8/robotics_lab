@@ -291,8 +291,11 @@ bool testStatePublisherSerializesForceTelemetry() {
     snapshot.left_force_control.transverse_regulating = true;
     snapshot.left_force_control.rotational_regulating = true;
     snapshot.left_force_control.loading_projection_active = true;
+    snapshot.left_force_control.compliance_frame = "sensor_origin";
     snapshot.left_force_control.control_wrench_surface = {1.0, 2.0, 5.0, 0.1, 0.2, 0.3};
+    snapshot.left_force_control.control_wrench_compliance = {4.0, 5.0, 6.0, 0.4, 0.5, 0.6};
     snapshot.left_force_control.wrench_error_surface = {0.5, 1.5, 2.5, 0.05, 0.15, 0.25};
+    snapshot.left_force_control.wrench_error_compliance = {3.5, 4.5, 5.5, 0.35, 0.45, 0.55};
     snapshot.left_force_control.compliance_offset_surface = {0.001, 0.002, 0.003, 0.01, 0.02, 0.03};
     snapshot.left_force_control.compliance_velocity_surface = {0.01, 0.02, 0.03, 0.1, 0.2, 0.3};
     snapshot.left_force_control.compliance_acceleration_surface = {0.1, 0.2, 0.3, 1.0, 2.0, 3.0};
@@ -327,6 +330,7 @@ bool testStatePublisherSerializesForceTelemetry() {
     RB_CHECK(ft.at("tare_generation").get<uint64_t>() == 4);
     RB_CHECK(ft.at("residual_tare_tcp").at(2).get<double>() == 23.5);
     RB_CHECK(force.at("state").get<std::string>() == "release_braking");
+    RB_CHECK(force.at("compliance_frame").get<std::string>() == "sensor_origin");
     RB_CHECK(force.at("contact_active").get<bool>());
     RB_CHECK(!force.at("normal_contact_active").get<bool>());
     RB_CHECK(force.at("transverse_contact_active").get<bool>());
@@ -345,7 +349,9 @@ bool testStatePublisherSerializesForceTelemetry() {
     RB_CHECK(force.at("rotational_regulating").get<bool>());
     RB_CHECK(force.at("loading_projection_active").get<bool>());
     RB_CHECK(force.at("control_wrench_surface").at(2).get<double>() == 5.0);
+    RB_CHECK(force.at("control_wrench_compliance").at(0).get<double>() == 4.0);
     RB_CHECK(force.at("wrench_error_surface").at(1).get<double>() == 1.5);
+    RB_CHECK(force.at("wrench_error_compliance").at(4).get<double>() == 0.45);
     RB_CHECK(force.at("compliance_offset_surface").at(5).get<double>() == 0.03);
     RB_CHECK(force.at("compliance_velocity_surface").at(0).get<double>() == 0.01);
     RB_CHECK(force.at("compliance_acceleration_surface").at(3).get<double>() == 1.0);

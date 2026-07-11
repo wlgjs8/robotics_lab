@@ -47,20 +47,20 @@ rb_servo::ForceControlCommand xCommand() {
 
 rb_servo::ForceControlConfig realProfileConfig() {
     rb_servo::ForceControlConfig config = controllerConfig();
-    config.virtual_mass = {8.0, 8.0, 8.0, 0.8, 0.8, 0.8};
-    config.damping = {100.0, 100.0, 100.0, 10.0, 10.0, 10.0};
-    config.stiffness = {300.0, 300.0, 300.0, 30.0, 30.0, 30.0};
-    config.wrench_deadband = {3.0, 3.0, 3.0, 0.6, 0.6, 0.6};
-    config.max_pos_offset_m = 0.01;
-    config.max_rot_offset_rad = 0.035;
-    config.max_linear_velocity_m_s = 0.015;
-    config.max_angular_velocity_rad_s = 0.05;
-    config.max_linear_acceleration_m_s2 = 0.12;
-    config.max_angular_acceleration_rad_s2 = 0.5;
-    config.max_linear_jerk_m_s3 = 0.8;
-    config.max_angular_jerk_rad_s3 = 3.0;
+    config.virtual_mass = {2.0, 2.0, 2.0, 0.2, 0.2, 0.2};
+    config.damping = {26.0, 26.0, 26.0, 2.8, 2.8, 2.8};
+    config.stiffness = {80.0, 80.0, 80.0, 8.0, 8.0, 8.0};
+    config.wrench_deadband = {1.5, 1.5, 1.5, 0.25, 0.25, 0.25};
+    config.max_pos_offset_m = 0.02;
+    config.max_rot_offset_rad = 0.08;
+    config.max_linear_velocity_m_s = 0.03;
+    config.max_angular_velocity_rad_s = 0.15;
+    config.max_linear_acceleration_m_s2 = 0.25;
+    config.max_angular_acceleration_rad_s2 = 1.5;
+    config.max_linear_jerk_m_s3 = 2.0;
+    config.max_angular_jerk_rad_s3 = 10.0;
     config.max_pos_step_m = 0.001;
-    config.max_rot_step_rad = 0.001;
+    config.max_rot_step_rad = 0.002;
     config.max_energy_j = 100.0;
     return config;
 }
@@ -391,6 +391,38 @@ bool testRealProfileReleaseSweepRemainsRecursivelyFeasible() {
     return true;
 }
 
+bool testResponsiveRealProfileMovesOnWeakWrenchAndUsesExpandedTravel() {
+    const rb_servo::ForceControlConfig config = realProfileConfig();
+    rb_servo::ForceController controller(config);
+    controller.engage();
+    constexpr double dt = 0.002;
+
+    rb_servo::Wrench6D weak_wrench;
+    weak_wrench.fx = 2.0;
+    for (int i = 0; i < 125; ++i) {
+        const auto proposal = controller.propose(
+            weak_wrench, xCommand(), rb_servo::Vec6{}, dt
+        );
+        RB_CHECK(proposal.valid);
+        RB_CHECK(controller.commit(proposal));
+    }
+    RB_CHECK(controller.state().offset_tcp.x < -0.0005);
+
+    rb_servo::Wrench6D guiding_wrench;
+    guiding_wrench.fx = 3.0;
+    for (int i = 0; i < 2000; ++i) {
+        const auto proposal = controller.propose(
+            guiding_wrench, xCommand(), rb_servo::Vec6{}, dt
+        );
+        RB_CHECK(proposal.valid);
+        RB_CHECK(controller.commit(proposal));
+    }
+    RB_CHECK(controller.state().offset_tcp.x < -0.015);
+    RB_CHECK(std::abs(controller.state().offset_tcp.x) <=
+             config.max_pos_offset_m + 1e-9);
+    return true;
+}
+
 bool testProposalProvenancePreventsStaleOrCrossControllerCommit() {
     rb_servo::ForceController first(controllerConfig());
     rb_servo::ForceController second(controllerConfig());
@@ -449,6 +481,7 @@ int main() {
     if (!testRealProfileVelocityBoundaryBrakesWithoutFault()) return 1;
     if (!testRealProfileAllCartesianAxesStayBoundedWithoutFault()) return 1;
     if (!testRealProfileReleaseSweepRemainsRecursivelyFeasible()) return 1;
+    if (!testResponsiveRealProfileMovesOnWeakWrenchAndUsesExpandedTravel()) return 1;
     if (!testProposalProvenancePreventsStaleOrCrossControllerCommit()) return 1;
     if (!testWrenchDeadbandSuppressesNoiseAndPreservesExcessSign()) return 1;
     std::cout << "force_controller tests passed\n";

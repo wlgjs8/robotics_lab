@@ -1735,6 +1735,13 @@ void validateConfig(const DualArmConfig& cfg) {
         if (!ft.enable) {
             throw std::runtime_error(path + ".enable=true requires matching force_torque arm enable=true");
         }
+        if ((compliance_frame == "sensor_origin" ||
+             compliance_frame == "tcp_origin") && !ft.frame_configured) {
+            throw std::runtime_error(
+                path + ".compliance_frame=" + compliance_frame +
+                " requires the matching force_torque frame_configured=true"
+            );
+        }
         if (!(arm.contact_release_force_n < arm.contact_enter_force_n)) {
             throw std::runtime_error(path + " requires contact_release_force_n < contact_enter_force_n");
         }

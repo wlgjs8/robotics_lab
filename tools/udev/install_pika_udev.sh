@@ -19,6 +19,7 @@ echo "[pika-udev] installing $RULE -> $DEST (sudo)"
 sudo cp "$RULE" "$DEST"
 sudo udevadm control --reload-rules
 sudo udevadm trigger --subsystem-match=tty --action=add
+sudo udevadm settle --timeout=10
 
 echo "[pika-udev] done. Current symlinks:"
 missing=0

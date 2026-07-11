@@ -308,6 +308,7 @@ void writeForceTelemetryHeader(std::ostream& os, const char* side) {
        << ',' << side << "_force_control_operating_mode"
        << ',' << side << "_force_control_state"
        << ',' << side << "_force_control_surface_source"
+       << ',' << side << "_force_control_compliance_frame"
        << ',' << side << "_force_control_normal_stand_x"
        << ',' << side << "_force_control_normal_stand_y"
        << ',' << side << "_force_control_normal_stand_z"
@@ -321,7 +322,9 @@ void writeForceTelemetryHeader(std::ostream& os, const char* side) {
        << ',' << side << "_force_control_rotational_regulating"
        << ',' << side << "_force_control_loading_projection_active";
     writeWrenchHeader(os, side, "force_control_control_wrench_surface");
+    writeWrenchHeader(os, side, "force_control_control_wrench_compliance");
     writeWrenchHeader(os, side, "force_control_wrench_error_surface");
+    writeWrenchHeader(os, side, "force_control_wrench_error_compliance");
     writeDeltaTwistVecHeader(os, side, "force_control_compliance_offset_surface");
     writeDeltaTwistVecHeader(os, side, "force_control_compliance_velocity_surface");
     writeDeltaTwistVecHeader(os, side, "force_control_compliance_acceleration_surface");
@@ -604,6 +607,7 @@ void writeForceTelemetryColumns(
        << ',' << csvEscape(control.operating_mode)
        << ',' << csvEscape(control.state)
        << ',' << csvEscape(control.surface_source)
+       << ',' << csvEscape(control.compliance_frame)
        << ',' << control.normal_stand[0]
        << ',' << control.normal_stand[1]
        << ',' << control.normal_stand[2]
@@ -617,7 +621,9 @@ void writeForceTelemetryColumns(
        << ',' << control.rotational_regulating
        << ',' << control.loading_projection_active;
     writeWrenchColumns(os, control.control_wrench_surface);
+    writeWrenchColumns(os, control.control_wrench_compliance);
     writeWrenchColumns(os, control.wrench_error_surface);
+    writeWrenchColumns(os, control.wrench_error_compliance);
     writeDeltaTwistVecColumns(os, {
         control.compliance_offset_surface.x,
         control.compliance_offset_surface.y,

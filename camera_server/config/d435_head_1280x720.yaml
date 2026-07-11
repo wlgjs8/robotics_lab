@@ -126,7 +126,11 @@ health:
   warn_if_bundle_skew_ms_gt: 10
 
 reconnect:
-  enabled: true
+  # Native librealsense multi-pipeline restart is disabled in this active
+  # high-bandwidth profile until simultaneous stall recovery no longer causes
+  # a process-level allocator abort. The reconnect implementation remains
+  # available for mock/controller acceptance and isolated-camera testing.
+  enabled: false
   max_attempts: 0
   retry_interval_ms: 1000
-  frame_timeout_ms: 2000
+  frame_timeout_ms: 5000

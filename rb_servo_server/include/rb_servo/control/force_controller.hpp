@@ -28,9 +28,10 @@ struct ForceControllerProposal {
     uint64_t base_state_revision = 0;
 };
 
-// Project-native bounded Cartesian admittance. DualArmServoLoop composes its
-// proposal in a deterministic surface frame and commits it only after the
-// corrected Cartesian target passes IK, every final safety gate, and send.
+// Project-native bounded Cartesian admittance. DualArmServoLoop supplies the
+// wrench and measured twist in the configured compliance frame, then commits
+// the proposal only after the corrected Cartesian target passes IK, every
+// final safety gate, and send.
 class ForceController {
 public:
     explicit ForceController(ForceControlConfig config);

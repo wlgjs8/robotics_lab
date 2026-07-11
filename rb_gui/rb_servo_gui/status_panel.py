@@ -153,6 +153,8 @@ def _format_arm_force_status(arm: ArmSnapshot) -> str:
             parts.append(f"mode={force_control.operating_mode}")
         if force_control.state is not None:
             parts.append(f"controller={force_control.state}")
+        if force_control.compliance_frame is not None:
+            parts.append(f"compliance_frame={force_control.compliance_frame}")
         if force_control.contact_active is not None:
             parts.append(f"contact={force_control.contact_active}")
         if force_control.normal_contact_active is not None:
@@ -194,7 +196,12 @@ def _format_arm_force_status(arm: ArmSnapshot) -> str:
             parts.append(f"recenter={force_control.compliance_recenter_active}")
         vector_fields = (
             ("control_wrench_surface", force_control.control_wrench_surface),
+            (
+                "control_wrench_compliance",
+                force_control.control_wrench_compliance,
+            ),
             ("wrench_error_surface", force_control.wrench_error_surface),
+            ("wrench_error_compliance", force_control.wrench_error_compliance),
             ("compliance_offset_surface", force_control.compliance_offset_surface),
             ("compliance_velocity_surface", force_control.compliance_velocity_surface),
             (

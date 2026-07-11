@@ -20,8 +20,10 @@ force_control:
   supervised_experimental_real: true
   left:
     enable: true
+    compliance_frame: tcp_origin
   right:
     enable: true
+    compliance_frame: tcp_origin
 ```
 
 The physical acceptance profile is managed directly in `stack_real.yaml`, one
@@ -54,10 +56,27 @@ rbpodo eft wrench
   -> fast external wrench     (hard guard)
   -> one LPF update per fresh controller sample
   -> control external wrench  (contact/admittance)
-  -> TCP-to-stand rotation
-  -> deterministic surface frame
-  -> normal unloading + tangential/rotational compliance
+  -> branch A: stand/surface projection (floor normal + hard-limit telemetry)
+  -> branch B: configured compliance frame (symmetric 6D controller)
+  -> normal unloading + selected-frame translational/rotational compliance
 ```
+
+`force_control.<arm>.compliance_frame` selects branch B:
+
+- `surface`: stand-fixed surface axes, with the origin at the TCP.
+- `sensor_origin`: RFT64 measurement axes and the physical sensor origin from
+  `T_tcp_sensor`. This was the first physical direction/pivot bring-up stage and
+  matches the F/T gizmo origin.
+- `tcp_origin`: the same sensor-axis orientation translated to the TCP origin.
+  This is the current `stack_real.yaml` acceptance stage after sensor-origin
+  captures showed that rotation about the physical sensor origin coupled the
+  202.642 mm lever arm into the TCP return path.
+
+The hard force/torque guard does not move with this selector: resultant force,
+resultant torque, and floor-normal compression remain computed from the fast
+compensated TCP/stand wrench. Changing the compliance frame therefore cannot
+rotate or bypass the existing hard thresholds. A sensor/TCP frame selection is
+rejected unless the matching F/T transform is marked `frame_configured`.
 
 The current rbpodo adapter provides six finite EFT fields. The backend also
 publishes an acquisition sequence that advances only when a new CobotData
@@ -137,8 +156,10 @@ Cartesian compliance keeps a command equilibrium separately from its bounded
 fixed; it is never replaced by the measured TCP on later ticks. Under
 flow-infer, each accepted/projected policy delta advances the equilibrium, and
 the first `Hold -> policy` delta is projected by the same rule. Policy deltas
-that load the measured reaction wrench are removed in the deterministic surface
-frame. The compliant offset is composed with Pinocchio SE(3) operations.
+that load the measured reaction wrench are removed in the selected compliance
+frame. The compliant offset is composed with Pinocchio SE(3) operations. For
+`sensor_origin`, rotation is applied about the physical sensor origin; for
+`tcp_origin`, it is applied about the TCP endpoint.
 
 When external wrench returns inside the six-axis deadband, Cartesian stiffness
 and damping drive the offset and velocity back to zero around that equilibrium.
@@ -184,9 +205,17 @@ jitter remains telemetry but does not change the jerk envelope from one tick to
 the next.
 
 The Cartesian controller applies the same symmetric zero-wrench spring rule to
-all three translations and all three rotations. Reaching an offset, velocity,
-acceleration, jerk, or per-tick step envelope is a valid bounded compliance
-result, not a force fault. Telemetry exposes `compliance_limit_axes` and
+all three translations and all three rotations. Its control input is jerk. On
+every tick it intersects jerk, acceleration, velocity, position, and future
+braking constraints before advancing any state. A recursively viable soft
+operating envelope preserves braking authority; the configured hard envelope
+remains available only for deterministic recovery if a prior state is on the
+numerical boundary. This replaces integrate-then-clamp behavior and does not
+depend on increasing the wrench moving average.
+
+Reaching an offset, velocity, acceleration, jerk, or per-tick step envelope is
+a valid bounded compliance result, not a force fault. Telemetry exposes
+`compliance_limit_axes` and
 `compliance_limit_reason=jerk_limited_motion_envelope` so an operator can
 distinguish normal compliance saturation from a hard force/torque trip.
 
@@ -246,9 +275,11 @@ force_control:
   left:
     enable: true
     surface_source: floor_constraint
+    # surface | sensor_origin | tcp_origin
+    compliance_frame: sensor_origin
     target_force_n: 2.0
-    contact_enter_force_n: 6.0
-    contact_release_force_n: 3.0
+    contact_enter_force_n: 3.5
+    contact_release_force_n: 2.75
     force_deadband_n: 0.5
     hard_normal_force_n: 15.0
     hard_force_norm_n: 20.0
@@ -269,17 +300,24 @@ force_control:
     max_normal_jerk_m_s3: 2.0
     max_normal_step_m: 0.001
     max_energy_j: 2.0
-  # Cartesian surface-frame order: tangent-x, tangent-y, normal, roll, pitch, yaw.
+  # Cartesian selected-frame order: x, y, z, roll, pitch, yaw.
   # cartesian_admittance owns all six axes and regulates zero wrench.
-  virtual_mass: [8.0, 8.0, 8.0, 0.8, 0.8, 0.8]
-  damping: [100.0, 100.0, 100.0, 10.0, 10.0, 10.0]
-  stiffness: [300.0, 300.0, 300.0, 30.0, 30.0, 30.0]
-  wrench_deadband: [3.0, 3.0, 3.0, 0.6, 0.6, 0.6]
-  max_pos_offset_m: 0.01
-  max_rot_offset_rad: 0.035
-  max_linear_velocity_m_s: 0.015
-  max_angular_velocity_rad_s: 0.05
+  virtual_mass: [2.0, 2.0, 2.0, 0.2, 0.2, 0.2]
+  damping: [26.0, 26.0, 26.0, 2.8, 2.8, 2.8]
+  stiffness: [80.0, 80.0, 80.0, 8.0, 8.0, 8.0]
+  wrench_deadband: [1.5, 1.5, 1.5, 0.25, 0.25, 0.25]
+  max_pos_offset_m: 0.02
+  max_rot_offset_rad: 0.08
+  max_linear_velocity_m_s: 0.03
+  max_angular_velocity_rad_s: 0.15
 ```
+
+The tracked responsive hand-guiding profile begins responding outside 1.5 N or
+0.25 Nm, allows 20 mm / 0.08 rad compliance travel, and uses lower virtual
+mass with near-critical damping. Its faster motion envelope is 0.03 m/s and
+0.15 rad/s with 0.25 m/s² / 1.5 rad/s² acceleration and 2.0 m/s³ /
+10 rad/s³ jerk. These are compliance limits, not hard-contact thresholds; the
+40 N normal, 45 N resultant, and 7 Nm hard guards remain unchanged.
 
 Each active arm must also enable its F/T pipeline. Threshold ordering is
 validated as `target < release < enter < hard_normal`, with
@@ -288,6 +326,8 @@ validated as `target < release < enter < hard_normal`, with
 `release_velocity_threshold_m_s`. Motion-affecting modes require kinematics,
 `servo.send_at_tick_start: false`, an update rate equal to the servo rate, and
 an enforcing selected floor plane.
+`sensor_origin` and `tcp_origin` additionally require the matching
+`force_torque.<arm>.frame_configured: true` transform.
 Automatic post-init tare requires `safety.init_motion_planner.enable: true`,
 because that sequencer verifies completion against measured joints.
 Physical real force motion additionally requires both `allow_in_real: true` and
@@ -316,6 +356,13 @@ epoch. Full compensated wrench fields remain available in state telemetry. The
 GUI does not provide an enable toggle or tuning controls. The servo CSV records
 the same per-arm raw/TCP/fast/control wrenches, freshness and health fields, and
 force-control state so a completed physical test remains auditable offline.
+State JSON, GUI status, and CSV identify `compliance_frame` and publish both
+`control_wrench_surface` (floor interpretation) and
+`control_wrench_compliance`/`wrench_error_compliance` (the actual 6D controller
+input/error). Historical fields ending in `_surface` for compliance
+offset/velocity/acceleration and policy deltas are retained for log-schema
+compatibility; their components follow `compliance_frame` when that selector is
+not `surface`.
 Monitor telemetry also publishes `fast_normal_force_n`, `fast_force_norm_n`,
 `fast_torque_norm_nm`, `contact_threshold_exceeded`, and
 `hard_limit_threshold_exceeded`, `hard_limit_sample_count`, and

@@ -64,6 +64,10 @@ class CameraManager {
   Recorder& recorder_;
   DeviceFactory device_factory_;
   std::vector<std::unique_ptr<CameraRuntime>> camera_runtimes_;
+  // librealsense pipeline start/stop may touch process-global USB/context state.
+  // Serialize lifecycle transitions while allowing steady-state capture to run
+  // independently per camera.
+  mutable std::mutex device_lifecycle_mu_;
   mutable std::mutex mu_;
   std::map<std::string, StreamStats> stats_;
   std::map<std::string, bool> connected_;
