@@ -33,8 +33,8 @@ force_control:
 
 The physical acceptance profile is managed directly in `stack_real.yaml`, one
 reviewed setting at a time. In this gate all three translations and rotations
-can modify a fixed Hold target. Roll/pitch/yaw share a 0.12 Nm deadband,
-5 Nm/rad stiffness, 2.0 Nms/rad damping, and 0.2 virtual mass. Both geometric floor
+can modify a fixed Hold target. Roll/pitch/yaw share a 0.10 Nm deadband,
+3 Nm/rad stiffness, 1.55 Nms/rad damping, and 0.2 virtual mass. Both geometric floor
 constraints are disabled by explicit operator decision, so neither the TCP nor
 gripper-tip floor backstop is present. The implementation is not safety-rated
 and does not replace E-stop, lease/deadman, tracking, collision, ROI, or final
@@ -260,7 +260,7 @@ catch-up. Telemetry publishes the equilibrium pose, its `hold_anchor` or
 `policy_target` source, and whether recentering is active. Scalar and 6D
 controller proposals use the same two-phase commit boundary.
 
-The tracked Gate 3C profile also enables `blockwise_release_recenter`. Its
+The tracked Gate 3D test profile also enables `blockwise_release_recenter`. Its
 translation and rotation blocks retain the existing component deadbands, but a
 quiet sibling axis does not start its spring return while another axis in the
 same block remains loaded. After the whole block is released, the controller
@@ -268,14 +268,24 @@ intersects each axis' existing jerk-feasibility interval and applies one common
 scale to the block's unconstrained jerk vector. This preserves the released 3D
 translation or rotation direction instead of letting independent jerk clamps
 reshape it. Translation and rotation are intentionally separate because their
-units, gains, and motion limits differ. A load that returns immediately exits
-the coupled recenter path and re-enters the existing loaded-hold path.
+units, gains, and motion limits differ. Coupling applies only while every
+enabled axis in the block remains inside its recursively viable soft envelope.
+If one axis needs hard-envelope recovery, the controller keeps every axis'
+already-selected per-axis jerk for that tick; this may briefly deviate from the
+latched return direction, but it preserves recursive feasibility. Coupling
+resumes automatically after all axes re-enter the soft envelope. A load that
+returns immediately exits the coupled recenter path and re-enters the existing
+loaded-hold path.
 
 State JSON and servo CSV expose the transition directly through
 `compliance_translation_recenter_coupled`,
 `compliance_rotation_recenter_coupled`,
 `compliance_translation_recenter_deferred`, and
-`compliance_rotation_recenter_deferred`.
+`compliance_rotation_recenter_deferred`. During a fully released return,
+`*_recenter_coupled` may briefly become false while
+`compliance_limit_axes`/`jerk_limited_motion_envelope` reports bounded recovery;
+this is expected only if `proposal_valid` remains true and no safety latch is
+raised.
 
 ## Normal admittance
 

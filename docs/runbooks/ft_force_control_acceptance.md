@@ -191,15 +191,15 @@ All rotations now use the same profile:
 
 ```yaml
 virtual_mass:    [..., 0.2, 0.2, 0.2]
-damping:         [..., 2.0, 2.0, 2.0]
-stiffness:       [..., 5.0, 5.0, 5.0]
-wrench_deadband: [..., 0.12, 0.12, 0.12]
+damping:         [..., 1.55, 1.55, 1.55]
+stiffness:       [..., 3.0, 3.0, 3.0]
+wrench_deadband: [..., 0.10, 0.10, 0.10]
 ```
 
-The selected 0.12 Nm deadband remains above the measured no-contact p99 values
+The selected 0.10 Nm deadband remains above the measured no-contact p99 values
 of 0.068/0.074/0.005 Nm for Tx/Ty/Tz. At 0.2 Nm, each axis' static model predicts
-0.016 rad (0.92 degrees), compared with 0.0083 rad (0.48 degrees) for the prior
-yaw profile. The 0.08 rad angular limit is reached at approximately 0.52 Nm.
+0.033 rad (1.91 degrees). The 0.08 rad angular limit is reached at approximately
+0.34 Nm.
 
 1. Use `make run MODE=real`, Init Motion, and terminal fixed Hold only.
 2. Test right Roll, Pitch, then Yaw independently with a small moment. Start
@@ -228,9 +228,12 @@ This gate specifically checks the multi-axis zig-zag reported after Gate 3C.
    smaller amplitude, without changing the tared starting orientation.
 4. In the CSV, confirm the partial-release interval sets
    `compliance_translation_recenter_deferred` or
-   `compliance_rotation_recenter_deferred`. Full release must set the matching
-   `*_recenter_coupled` field while `proposal_valid=1` and no hard limit/fault
-   occurs.
+   `compliance_rotation_recenter_deferred`. Full release should set the matching
+   `*_recenter_coupled` field while the block remains in its soft envelope. A
+   brief `*_recenter_coupled=0` together with
+   `compliance_limit_axes`/`jerk_limited_motion_envelope` is the expected
+   per-axis hard-envelope recovery fallback; require `proposal_valid=1`, no
+   `ExternalForceLimit` latch, and coupling to resume after the recovery.
 5. Stop on a direction reversal, new oscillation, opposite-block motion, IK or
    safety rejection, or any hard force/torque event.
 

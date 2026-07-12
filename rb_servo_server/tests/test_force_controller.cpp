@@ -48,9 +48,9 @@ rb_servo::ForceControlCommand xCommand() {
 rb_servo::ForceControlConfig realProfileConfig() {
     rb_servo::ForceControlConfig config = controllerConfig();
     config.virtual_mass = {2.0, 2.0, 2.0, 0.2, 0.2, 0.2};
-    config.damping = {26.0, 26.0, 26.0, 2.0, 2.0, 2.0};
-    config.stiffness = {80.0, 80.0, 80.0, 5.0, 5.0, 5.0};
-    config.wrench_deadband = {1.5, 1.5, 1.5, 0.12, 0.12, 0.12};
+    config.damping = {26.0, 26.0, 26.0, 1.55, 1.55, 1.55};
+    config.stiffness = {80.0, 80.0, 80.0, 3.0, 3.0, 3.0};
+    config.wrench_deadband = {1.5, 1.5, 1.5, 0.10, 0.10, 0.10};
     config.blockwise_release_recenter = true;
     config.max_pos_offset_m = 0.02;
     config.max_rot_offset_rad = 0.08;
@@ -372,9 +372,9 @@ bool testRealProfileRotationsShareSensitivityBelowContactTelemetryThreshold() {
 
     const auto proposal = controller.propose(wrench, command, rb_servo::Vec6{}, 0.002);
     RB_CHECK(proposal.valid);
-    RB_CHECK(near(proposal.wrench_error_tcp.tx, -0.03));
-    RB_CHECK(near(proposal.wrench_error_tcp.ty, -0.03));
-    RB_CHECK(near(proposal.wrench_error_tcp.tz, -0.03));
+    RB_CHECK(near(proposal.wrench_error_tcp.tx, -0.05));
+    RB_CHECK(near(proposal.wrench_error_tcp.ty, -0.05));
+    RB_CHECK(near(proposal.wrench_error_tcp.tz, -0.05));
     RB_CHECK(proposal.state.offset_tcp.rx < 0.0);
     RB_CHECK(proposal.state.offset_tcp.ry < 0.0);
     RB_CHECK(proposal.state.offset_tcp.rz < 0.0);
@@ -443,7 +443,9 @@ bool testBlockwiseReleaseDefersSiblingAndPreservesReturnDirection() {
         RB_CHECK(controller.commit(proposal));
     }
     RB_CHECK(observed_coupled);
-    RB_CHECK(minimum_direction_cosine > 0.999);
+    // Hard-envelope recovery is allowed to deviate briefly from the common
+    // direction; normal soft-envelope recentering remains coupled.
+    RB_CHECK(minimum_direction_cosine > 0.995);
     RB_CHECK(std::hypot(
         controller.state().offset_tcp.x,
         controller.state().offset_tcp.y
@@ -515,6 +517,93 @@ bool testBlockwiseReleaseDefersSiblingAndPreservesReturnDirection() {
         rotation_controller.state().offset_tcp.rx,
         rotation_controller.state().offset_tcp.ry
     ) < 1e-4);
+    return true;
+}
+
+bool testBlockwiseReleaseKeepsSingleAxisGovernorWithAllAxesEnabled() {
+    const rb_servo::ForceControlConfig config = realProfileConfig();
+    rb_servo::ForceController controller(config);
+    controller.engage();
+    rb_servo::ForceControlCommand command;
+    command.mode = rb_servo::ForceControlMode::Admittance;
+    command.enabled_axis = {true, true, true, true, true, true};
+    constexpr double dt = 0.002;
+
+    rb_servo::Wrench6D wrench;
+    wrench.fx = 9.75;
+    for (int i = 0; i < 2000; ++i) {
+        const auto proposal = controller.propose(
+            wrench, command, rb_servo::Vec6{}, dt
+        );
+        RB_CHECK(proposal.valid);
+        RB_CHECK(controller.commit(proposal));
+    }
+    for (int i = 0; i < 3000; ++i) {
+        const auto proposal = controller.propose(
+            rb_servo::Wrench6D{}, command, rb_servo::Vec6{}, dt
+        );
+        RB_CHECK(proposal.valid);
+        RB_CHECK(!proposal.translation_recenter_coupled);
+        RB_CHECK(controller.commit(proposal));
+    }
+    RB_CHECK(std::abs(controller.state().offset_tcp.x) < 1e-4);
+    return true;
+}
+
+bool testBlockwiseReleasePreservesHardEnvelopeRecoveryJerk() {
+    const rb_servo::ForceControlConfig config = realProfileConfig();
+    rb_servo::ForceController controller(config);
+    controller.engage();
+    rb_servo::ForceControlCommand command;
+    command.mode = rb_servo::ForceControlMode::Admittance;
+    command.enabled_axis = {true, true, true, true, true, true};
+    constexpr double dt = 0.002;
+
+    struct TranslationPhase {
+        int ticks;
+        double fx;
+        double fy;
+        double fz;
+    };
+    // Deterministic reduction of the multi-axis load/release sequence that
+    // reproduced the 2026-07-12 real-log latch. During the final release, one
+    // axis leaves the soft recursively feasible set. Common recenter scaling
+    // must not overwrite that axis' hard-envelope recovery jerk.
+    constexpr TranslationPhase phases[] = {
+        {423, -2.5, 7.5, 7.5},
+        {457, -7.5, -2.5, 5.0},
+        {153, 0.0, 0.0, 2.5},
+        {195, 0.0, 0.0, 0.0},
+    };
+
+    bool observed_coupled_recenter = false;
+    bool observed_recovery_fallback = false;
+    for (std::size_t phase_index = 0;
+         phase_index < std::size(phases);
+         ++phase_index) {
+        const TranslationPhase& phase = phases[phase_index];
+        rb_servo::Wrench6D wrench;
+        wrench.fx = phase.fx;
+        wrench.fy = phase.fy;
+        wrench.fz = phase.fz;
+        for (int tick = 0; tick < phase.ticks; ++tick) {
+            const auto proposal = controller.propose(
+                wrench, command, rb_servo::Vec6{}, dt
+            );
+            RB_CHECK(proposal.valid);
+            if (phase_index + 1 == std::size(phases)) {
+                observed_coupled_recenter = observed_coupled_recenter ||
+                    proposal.translation_recenter_coupled;
+                observed_recovery_fallback = observed_recovery_fallback ||
+                    (observed_coupled_recenter &&
+                     !proposal.translation_recenter_coupled &&
+                     proposal.saturated);
+            }
+            RB_CHECK(controller.commit(proposal));
+        }
+    }
+    RB_CHECK(observed_coupled_recenter);
+    RB_CHECK(observed_recovery_fallback);
     return true;
 }
 
@@ -940,6 +1029,8 @@ int main() {
     if (!testRealProfileAllCartesianAxesStayBoundedWithoutFault()) return 1;
     if (!testRealProfileRotationsShareSensitivityBelowContactTelemetryThreshold()) return 1;
     if (!testBlockwiseReleaseDefersSiblingAndPreservesReturnDirection()) return 1;
+    if (!testBlockwiseReleaseKeepsSingleAxisGovernorWithAllAxesEnabled()) return 1;
+    if (!testBlockwiseReleasePreservesHardEnvelopeRecoveryJerk()) return 1;
     if (!testRealProfileReleaseSweepRemainsRecursivelyFeasible()) return 1;
     if (!testResponsiveRealProfileMovesOnWeakWrenchAndUsesExpandedTravel()) return 1;
     if (!testRealProfileSustainedWrenchNeverReturnsTowardZero()) return 1;

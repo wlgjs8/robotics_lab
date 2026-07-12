@@ -540,7 +540,7 @@ force_control:
   left:
     enable: true
     surface_source: none
-    # Gate 3C: express all six controller axes in the corrected URDF/FT-axis
+    # Gate 3D: express all six controller axes in the corrected URDF/FT-axis
     # orientation and apply the correction about the TCP endpoint.
     compliance_frame: tcp_origin
     # Shared dual-arm profile. The latest accepted floor contact peaked at

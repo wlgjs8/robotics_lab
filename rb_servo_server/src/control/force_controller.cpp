@@ -87,10 +87,9 @@ bool sharedFeasibleJerkScale(
 ) {
     double lower_scale = 0.0;
     double upper_scale = 1.0;
-    std::size_t enabled_axis_count = 0;
+    std::size_t coupled_axis_count = 0;
     for (std::size_t i = begin; i < end; ++i) {
         if (enabled[i] == 0.0) continue;
-        ++enabled_axis_count;
         const double desired = desired_jerk[i];
         if (std::abs(desired) <=
             128.0 * std::numeric_limits<double>::epsilon()) {
@@ -99,12 +98,13 @@ bool sharedFeasibleJerkScale(
             }
             continue;
         }
+        ++coupled_axis_count;
         const double first = intervals[i].lower / desired;
         const double second = intervals[i].upper / desired;
         lower_scale = std::max(lower_scale, std::min(first, second));
         upper_scale = std::min(upper_scale, std::max(first, second));
     }
-    if (enabled_axis_count < 2 || lower_scale > upper_scale) return false;
+    if (coupled_axis_count < 2 || lower_scale > upper_scale) return false;
     *scale = std::clamp(upper_scale, 0.0, 1.0);
     return *scale >= lower_scale;
 }
@@ -924,11 +924,17 @@ ForceControllerProposal ForceController::propose(
 
     // In a fully released block, scale the unconstrained jerk vector once for
     // all enabled axes. This retains the SMD return direction while still
-    // intersecting every axis' recursively feasible jerk interval. Translation
-    // and rotation remain separate blocks because their units and configured
-    // dynamics are intentionally different.
+    // intersecting every axis' recursively feasible jerk interval. A hard-
+    // envelope recovery jerk is authoritative, however: replacing it with the
+    // common SMD scale can make the next state recursively infeasible and fault
+    // one tick later. Resume coupling only after every axis is back inside its
+    // soft envelope. Translation and rotation remain separate blocks because
+    // their units and configured dynamics are intentionally different.
     const auto couple_recenter = [&](std::size_t begin, std::size_t end, bool active) {
         if (!active) return false;
+        for (std::size_t i = begin; i < end; ++i) {
+            if (enabled[i] != 0.0 && recovering_axes[i]) return false;
+        }
         double shared_scale = 0.0;
         if (!sharedFeasibleJerkScale(
                 begin,

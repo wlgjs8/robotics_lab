@@ -387,9 +387,12 @@ wrench averaging.
 The tracked real profile additionally couples release recentering within the
 three translation axes and within the three rotation axes. Sibling springs are
 deferred until their block is fully released, then one common feasible jerk
-scale preserves that block's return direction under the existing motion
-envelopes. This removes the observed component-by-component zig-zag without
-mixing linear and angular units or changing the accepted hard limits.
+scale preserves that block's return direction while every axis remains inside
+its recursively viable soft envelope. If any axis needs hard-envelope recovery,
+its per-axis recovery jerk remains authoritative; block coupling resumes after
+all axes re-enter the soft envelope. This removes the observed
+component-by-component zig-zag without allowing the direction preference to
+override a hard-limit recovery or mixing linear and angular units.
 Surface-normal and resultant hard-limit calculations remain in their existing
 TCP/stand path. Hard-limit faults retain the normal
 motion-epoch interruption path. Activation, telemetry, and promotion constraints are defined in
