@@ -81,7 +81,11 @@ from .recording_control import (
     parse_udp_endpoint,
 )
 from .realtime_health import RealtimeTimingHistory, realtime_health_html
-from .safety import OperatorSafety, normalize_observed_mode_backend
+from .safety import (
+    OperatorSafety,
+    normalize_observed_mode_backend,
+    server_safety_constraint_config_enabled,
+)
 from .scene import (
     _DEFAULT_LEFT_POSE,
     _DEFAULT_RIGHT_POSE,
@@ -277,6 +281,13 @@ def _env_float(name: str, fallback: float) -> float:
 def _env_positive_float(name: str, fallback: float) -> float:
     value = _env_float(name, fallback)
     return value if value > 0.0 else fallback
+
+
+def _env_bool(name: str, fallback: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return fallback
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def _env_joint6(name: str, fallback: tuple[float, ...]) -> tuple[float, ...] | None:
@@ -1663,6 +1674,192 @@ def _set_waypoint_as_init(handles: dict[str, Any], safety: OperatorSafety) -> tu
     return True, f"init motion set to '{name}'; {suffix}"
 
 
+# --- Startup force auto-tare (Init Motion no-op path) -----------------------
+# Force zeroing (the software zero used as the F/T hard-limit reference) is
+# established by an Init Motion. When the server publishes tare_state
+# "awaiting_init_motion" it is waiting for that press. In the common case the arm
+# is ALREADY parked at the configured init pose when the stack starts, so the
+# server's Init Motion no-op path (measured joints within noop_tol_deg of the
+# goal) tares WITHOUT any motion. This auto-presses Init Motion once at startup
+# in exactly that no-motion case so the operator does not have to.
+#
+# SAFETY: the at-init tolerance MUST stay <= the server's EFFECTIVE Init Motion
+# no-op tolerance, which is max(init_motion_planner.noop_tol_deg,
+# waypoint_tol_deg) (NOT noop_tol_deg alone). That is the guarantee that a GUI
+# "already at init" verdict also makes the server take the no-op path; if the arm
+# is NOT at init, no auto-press is sent and the arm never moves on its own. The
+# tolerance is read from the server config so it tracks the site's real no-op
+# band (a parked arm typically drifts ~1 deg from the saved init pose via servo
+# settling / gravity sag, which a fixed sub-deg tolerance would never match).
+#
+# NO FALLBACK / fail-closed: if the server no-op tolerance cannot be read, the
+# feature does NOT fire — a guessed tolerance could let the GUI auto-press when
+# the server would actually plan a move. RB_GUI_STARTUP_INIT_TARE=0 disables it.
+_STARTUP_INIT_TARE_TOL_MARGIN_DEG = 0.1  # drift guard below the server no-op band
+_AWAITING_INIT_MOTION_TARE_STATE = "awaiting_init_motion"
+
+
+def _server_init_noop_tol_deg() -> float | None:
+    """The server's EFFECTIVE Init Motion no-op tolerance —
+    max(init_motion_planner.noop_tol_deg, waypoint_tol_deg) — read from the server
+    config at RB_GUI_SERVER_CONFIG_PATH. None when unavailable/unparseable (the
+    caller must fail closed; there is no assumed default)."""
+    path = os.environ.get("RB_GUI_SERVER_CONFIG_PATH", "").strip()
+    if not path:
+        return None
+    try:
+        import yaml  # local import: optional dependency used only here
+
+        with open(path, encoding="utf-8") as handle:
+            cfg = yaml.safe_load(handle)
+        ip = cfg["safety"]["init_motion_planner"]
+        tol = max(
+            float(ip.get("noop_tol_deg", 0.0)),
+            float(ip.get("waypoint_tol_deg", 0.0)),
+        )
+    except Exception:  # noqa: BLE001 - unreadable config -> fail closed (None)
+        return None
+    return tol if math.isfinite(tol) and tol > 0.0 else None
+
+
+def _startup_init_tare_tol_deg() -> float | None:
+    """GUI at-init tolerance for the startup auto-tare, or None when it cannot be
+    determined from the server config. Kept within the server's effective no-op
+    band (minus a small drift margin) so a GUI 'already at init' verdict always
+    coincides with the server's no-motion no-op path. There is deliberately NO
+    fixed fallback: an unreadable server config returns None and the auto-tare
+    does not fire (fail-closed). Honors RB_GUI_STARTUP_INIT_TARE_TOL_DEG but never
+    above the safe cap."""
+    server_tol = _server_init_noop_tol_deg()
+    if server_tol is None:
+        return None
+    safe_cap = max(0.05, server_tol - _STARTUP_INIT_TARE_TOL_MARGIN_DEG)
+    return min(_env_positive_float("RB_GUI_STARTUP_INIT_TARE_TOL_DEG", safe_cap), safe_cap)
+
+
+def _joints_within_tol(
+    measured: tuple[float, ...] | None,
+    target: tuple[float, ...] | None,
+    tol_deg: float,
+) -> bool:
+    if not measured or not target or len(measured) != len(target):
+        return False
+    return all(
+        math.isfinite(m) and math.isfinite(t) and abs(m - t) <= tol_deg
+        for m, t in zip(measured, target)
+    )
+
+
+def _arm_awaiting_init_tare(arm: ArmSnapshot | None) -> bool:
+    """True when the server is waiting for an Init Motion to establish this arm's
+    force software zero (auto-tare enabled, not yet valid, awaiting init motion)."""
+    ft = getattr(arm, "force_torque", None) if arm is not None else None
+    if ft is None:
+        return False
+    return (
+        bool(ft.auto_tare_enabled)
+        and not bool(ft.tare_valid)
+        and ft.tare_state == _AWAITING_INIT_MOTION_TARE_STATE
+    )
+
+
+def _startup_init_tare_arms(
+    latest: StateSnapshot | None,
+    stale: bool,
+    init_left_deg: tuple[float, ...] | None,
+    init_right_deg: tuple[float, ...] | None,
+    tol_deg: float,
+) -> str | None:
+    """Arm selector ('both'/'left'/'right') for an automatic startup Init Motion
+    that establishes the force software zero WITHOUT motion, or None.
+
+    An arm qualifies only when it is BOTH (a) already at its configured init pose
+    within tol_deg — so the server takes the no-op path and never plans a move —
+    AND (b) awaiting an Init Motion to auto-tare. Returns None on missing/stale
+    state or when no arm qualifies, so it can never trigger a move."""
+    if latest is None or stale:
+        return None
+    left_ok = (
+        init_left_deg is not None
+        and _arm_awaiting_init_tare(latest.left)
+        and _joints_within_tol(
+            getattr(latest.left, "q_actual_deg", None), init_left_deg, tol_deg
+        )
+    )
+    right_ok = (
+        init_right_deg is not None
+        and _arm_awaiting_init_tare(latest.right)
+        and _joints_within_tol(
+            getattr(latest.right, "q_actual_deg", None), init_right_deg, tol_deg
+        )
+    )
+    if left_ok and right_ok:
+        return "both"
+    if left_ok:
+        return "left"
+    if right_ok:
+        return "right"
+    return None
+
+
+def _maybe_auto_init_tare_on_startup(
+    handles: dict[str, Any],
+    safety: OperatorSafety,
+    latest: StateSnapshot | None,
+    stale: bool,
+    init_motion_disabled: bool,
+) -> None:
+    """Press Init Motion once at startup when the arm is already at the init pose,
+    so the force software zero (auto-tare) is established without operator action
+    and without any motion. At most one attempt per session; strictly gated so it
+    can never plan a move. Disabled with RB_GUI_STARTUP_INIT_TARE=0."""
+    if handles.get("_auto_init_tare_done"):
+        return
+    if not _env_bool("RB_GUI_STARTUP_INIT_TARE", True):
+        handles["_auto_init_tare_done"] = True
+        return
+    if init_motion_disabled:
+        return  # init motion not commandable yet -> retry on a later tick
+    tol_deg = _startup_init_tare_tol_deg()
+    if tol_deg is None:
+        # Fail-closed: without the server's no-op tolerance we cannot guarantee a
+        # no-motion press, so auto-tare stays off this session (manual Init Motion
+        # remains the fallback). This is a fixed condition -> stop re-checking.
+        handles["_auto_init_tare_done"] = True
+        print(
+            "[rb_gui] startup auto-tare disabled: could not read the server "
+            "init-motion no-op tolerance from RB_GUI_SERVER_CONFIG_PATH; "
+            "press Init Motion manually",
+            flush=True,
+        )
+        return
+    arms = _startup_init_tare_arms(
+        latest,
+        stale,
+        safety.init_left_joint_deg,
+        safety.init_right_joint_deg,
+        tol_deg,
+    )
+    if arms is None:
+        return  # no arm both at-init and awaiting tare -> never force a move
+    # A qualifying arm exists: this is the intended no-motion tare. Attempt once
+    # (mark done regardless of the send outcome so a persistent block, e.g. a
+    # foreign lease, does not spam) and leave the manual button as the fallback.
+    # Guard the send: this runs inside the GUI update loop, so a send exception
+    # must not tear the loop down.
+    handles["_auto_init_tare_done"] = True
+    try:
+        ok, message = _send_arm_init_override(
+            safety, handles.get("scene", {}), handles, arms
+        )
+    except Exception as exc:  # noqa: BLE001 - never crash the update loop
+        ok, message = False, f"send raised {type(exc).__name__}: {exc}"
+    text = f"auto Init Motion tare ({arms}) at startup: {message}"
+    if "last_action" in handles:
+        handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + text
+    print(f"[rb_gui] {text}", flush=True)
+
+
 def _capture_waypoint(handles: dict[str, Any], store: StateStore, name: str) -> tuple[bool, str]:
     name = (name or "").strip()
     if not name:
@@ -2919,6 +3116,14 @@ def build_gui(
                     handles["waypoint_status"].value = info
 
         with _op_tabs.add_tab("안전"):
+            stand_floor_config_enabled = server_safety_constraint_config_enabled(
+                "floor_constraint"
+            )
+            user_floor_config_enabled = server_safety_constraint_config_enabled(
+                "user_floor_constraint"
+            )
+            handles["stand_floor_config_enabled"] = stand_floor_config_enabled
+            handles["user_floor_config_enabled"] = user_floor_config_enabled
             with server.gui.add_folder("Stand Safety Floor"):
                 # Runtime enforce on/off. Startup authority belongs to the server
                 # config, so the first state always initializes this checkbox. A stale
@@ -2926,9 +3131,10 @@ def build_gui(
                 if hasattr(server.gui, "add_checkbox"):
                     floor_enforce = server.gui.add_checkbox(
                         "Enforce stand floor",
-                        initial_value=True,
+                        initial_value=stand_floor_config_enabled is not False,
                     )
                     handles["floor_enforce_toggle"] = floor_enforce
+                    _set_disabled(floor_enforce, stand_floor_config_enabled is False)
 
                     @floor_enforce.on_update
                     def _(_: Any) -> None:
@@ -2950,6 +3156,7 @@ def build_gui(
                 handles["floor_slider"] = floor_slider
                 floor_send = server.gui.add_button("Send floor z")
                 handles["floor_send_button"] = floor_send
+                _set_disabled(floor_send, stand_floor_config_enabled is False)
                 handles["floor_set_status"] = server.gui.add_text(
                     "Floor set status", initial_value="idle", disabled=True
                 )
@@ -3003,9 +3210,19 @@ def build_gui(
                     initial_value=float(uf_state.get("margin_mm", 0.0)),
                 )
                 fit_apply = server.gui.add_button("Fit & Apply plane")
+                handles["user_floor_fit_apply_button"] = fit_apply
+                _set_disabled(fit_apply, user_floor_config_enabled is False)
                 if hasattr(server.gui, "add_checkbox"):
                     handles["user_floor_enforce_toggle"] = server.gui.add_checkbox(
-                        "Enforce user floor", initial_value=bool(uf_state.get("enabled", False))
+                        "Enforce user floor",
+                        initial_value=(
+                            bool(uf_state.get("enabled", False))
+                            and user_floor_config_enabled is not False
+                        ),
+                    )
+                    _set_disabled(
+                        handles["user_floor_enforce_toggle"],
+                        user_floor_config_enabled is False,
                     )
 
                 def _refresh_user_floor_texts() -> None:
@@ -5049,6 +5266,16 @@ def update_gui(
     # focused, so a periodic repaint never clobbers a value the operator is typing).
     handles["_latest_state"] = latest
     handles["_state_stale"] = stale
+    # One no-motion Init Motion press at startup when already parked at the init
+    # pose, so force auto-tare (the software zero) is established without the
+    # operator pressing Init Motion. Strictly gated so it can never plan a move.
+    _maybe_auto_init_tare_on_startup(
+        handles,
+        safety,
+        latest,
+        stale,
+        init_motion_disabled=bool(disabled_states.get("init_motion", True)),
+    )
     if "tcp_ptp_axis_vec" in handles:
         _refresh_tcp_ptp_axis_fields(handles)
     readiness = safety.readiness()
@@ -5203,8 +5430,21 @@ def update_gui(
         want = bool(uf_state.get("enabled", False)) and isinstance(plane, Mapping)
         uf = latest.user_floor_constraint if latest is not None else None
         confirmed = isinstance(uf, Mapping) and bool(uf.get("enabled", False))
+        rejected = uf.get("last_set_reject_reason") if isinstance(uf, Mapping) else None
+        config_enabled = handles.get("user_floor_config_enabled")
+        if config_enabled is None:
+            config_enabled = server_safety_constraint_config_enabled(
+                "user_floor_constraint"
+            )
         attempts = handles.get("user_floor_resend_attempts", 0)
-        if not want or confirmed or attempts >= 50:
+        disabled_by_config = config_enabled is False or rejected == "user_floor_disabled"
+        if disabled_by_config:
+            handles["user_floor_resent"] = True
+            if "user_floor_set_status" in handles:
+                handles["user_floor_set_status"].value = (
+                    "restore skipped: user floor disabled by server config"
+                )
+        elif not want or confirmed or attempts >= 50:
             if want and not confirmed and attempts >= 50 and "user_floor_set_status" in handles:
                 handles["user_floor_set_status"].value = "restore gave up (server kept rejecting)"
             handles["user_floor_resent"] = True

@@ -510,6 +510,11 @@ class FlowMatchingActionSource:
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
         self._last_overlay_payload: dict[str, Any] | None = None
         self._chunk_overlay_seq = 0
+        self._stream_emitted_policy_steps = 0
+        self._active_chunk_metadata: dict[str, object] | None = None
+        self._stream_next_chunk_metadata: dict[str, object] | None = None
+        self._stream_activation_candidate_metadata: dict[str, object] | None = None
+        self.checkpoint_id = str(Path(checkpoint_path).expanduser())
         # Terminal chunk dump (debug): when FLOW_INFER_PRINT_CHUNK is truthy, print
         # every freshly-inferred action chunk step-by-step for both arms — position
         # deltas in meters, rotation deltas converted rad->deg, plus gripper target.
@@ -1273,6 +1278,9 @@ class FlowMatchingActionSource:
                 self._print_step_debug(step, payload)  # per-policy-step (foh_se3), not per servo tick
             else:
                 self._current_step_intent = self._emit_step_intent(step, payload, gripper_targets)
+            self._stream_emitted_policy_steps = int(
+                getattr(self, "_stream_emitted_policy_steps", 0)
+            ) + 1
         elif foh and self._chunk is not None:
             # Between policy steps: re-interpolate the absolute target every servo tick.
             self._current_step_intent = self._foh_tick_intent(now_monotonic, stall=False)
@@ -1364,6 +1372,41 @@ class FlowMatchingActionSource:
 
     def _activate_chunk(self, chunk: np.ndarray, now_monotonic: float) -> None:
         self._record_inference_activation(now_monotonic)
+        metadata = dict(getattr(self, "_stream_activation_candidate_metadata", None) or {})
+        observation_step_seq = int(
+            metadata.get(
+                "observation_step_seq",
+                getattr(self, "_stream_emitted_policy_steps", 0),
+            )
+        )
+        activation_step_seq = int(getattr(self, "_stream_emitted_policy_steps", 0))
+        source_start_index = max(0, activation_step_seq - observation_step_seq)
+        original_horizon = int(chunk.shape[0])
+        if source_start_index >= original_horizon:
+            self._active_chunk_metadata = {
+                **metadata,
+                "observation_step_seq": observation_step_seq,
+                "activation_step_seq": activation_step_seq,
+                "source_start_index": source_start_index,
+                "original_horizon": original_horizon,
+                "selected_horizon": 0,
+                "alignment_outcome": "exhausted",
+            }
+            self._stream_activation_candidate_metadata = None
+            self._chunk = None
+            return
+        if source_start_index > 0:
+            chunk = np.asarray(chunk[source_start_index:], dtype=chunk.dtype)
+        self._active_chunk_metadata = {
+            **metadata,
+            "observation_step_seq": observation_step_seq,
+            "activation_step_seq": activation_step_seq,
+            "source_start_index": source_start_index,
+            "original_horizon": original_horizon,
+            "selected_horizon": int(chunk.shape[0]),
+            "alignment_outcome": "aligned",
+        }
+        self._stream_activation_candidate_metadata = None
         self._overlay_chain_advance()
         self._chunk = chunk
         self._chunk_index = 0
@@ -1666,6 +1709,7 @@ class FlowMatchingActionSource:
                 camera_diagnostics=self._camera_diagnostics_snapshot(),
                 execute_steps=int(execute_limit),
                 runway_steps=int(self._current_chunk_overlay_runway_steps()),
+                chunk_metadata=dict(getattr(self, "_active_chunk_metadata", None) or {}),
             )
         except Exception:
             return
@@ -1795,6 +1839,7 @@ class FlowMatchingActionSource:
         """Measure one inline local/remote inference without changing its behavior."""
         inference_seq, request_ns = self._begin_inference_request()
         worker_start_ns = self._inference_now_ns()
+        observation_step_seq = int(getattr(self, "_stream_emitted_policy_steps", 0))
         chunk: np.ndarray | None = None
         try:
             chunk = self._sample_and_align_chunk(payload)
@@ -1811,6 +1856,19 @@ class FlowMatchingActionSource:
                 succeeded=chunk is not None,
             )
             self._stream_activation_candidate_timing = timing if chunk is not None else None
+            self._stream_activation_candidate_metadata = (
+                {
+                    "checkpoint_id": str(getattr(self, "checkpoint_id", "unknown")),
+                    "inference_seq": int(inference_seq),
+                    "observation_step_seq": observation_step_seq,
+                    "observation_bundle_seq": getattr(self, "_last_obs_camera_seq", None),
+                    "proprio": copy.deepcopy(
+                        getattr(self, "_last_velproprio_diagnostics", None)
+                    ),
+                }
+                if chunk is not None
+                else None
+            )
 
     def _ensure_stream_state(self) -> None:
         if getattr(self, "_stream_inited", False):
@@ -1819,6 +1877,8 @@ class FlowMatchingActionSource:
         self._step_deadline = 0.0
         self._current_step_intent = None
         self._stream_next_chunk = None
+        self._stream_next_chunk_metadata = None
+        self._stream_activation_candidate_metadata = None
         self._stream_pending = False
         self._stream_shutdown = False
         self._stream_request = None
@@ -1860,6 +1920,7 @@ class FlowMatchingActionSource:
                 inference_seq = 0
                 request_ns = self._inference_now_ns()
             worker_start_ns = self._inference_now_ns()
+            observation_step_seq = int(getattr(self, "_stream_emitted_policy_steps", 0))
             try:
                 chunk = self._sample_and_align_chunk(payload)
             except Exception as exc:  # noqa: BLE001 - inference must not kill the worker
@@ -1888,6 +1949,19 @@ class FlowMatchingActionSource:
                     succeeded=chunk is not None,
                 )
                 self._stream_next_chunk = chunk
+                self._stream_next_chunk_metadata = (
+                    {
+                        "checkpoint_id": str(getattr(self, "checkpoint_id", "unknown")),
+                        "inference_seq": int(inference_seq),
+                        "observation_step_seq": observation_step_seq,
+                        "observation_bundle_seq": getattr(self, "_last_obs_camera_seq", None),
+                        "proprio": copy.deepcopy(
+                            getattr(self, "_last_velproprio_diagnostics", None)
+                        ),
+                    }
+                    if chunk is not None
+                    else None
+                )
                 self._stream_ready_timing = timing if chunk is not None else None
                 self._stream_pending = False
                 self._stream_inflight_generation = None
@@ -1915,6 +1989,10 @@ class FlowMatchingActionSource:
             self._stream_next_chunk = None
             if chunk is not None:
                 self._stream_activation_candidate_timing = self._stream_ready_timing
+                self._stream_activation_candidate_metadata = getattr(
+                    self, "_stream_next_chunk_metadata", None
+                )
+            self._stream_next_chunk_metadata = None
             self._stream_ready_timing = None
         return chunk
 
@@ -2047,6 +2125,9 @@ class FlowMatchingActionSource:
     def _camera_diagnostics_snapshot(self) -> dict[str, object] | None:
         details = getattr(self, "_last_inference_camera_diagnostics", None)
         snapshot: dict[str, object] = dict(details) if isinstance(details, dict) else {}
+        velproprio = getattr(self, "_last_velproprio_diagnostics", None)
+        if isinstance(velproprio, dict):
+            snapshot["velocity_proprio"] = copy.deepcopy(velproprio)
         camera_client = getattr(self, "camera_client", None)
         client_snapshot = getattr(camera_client, "diagnostics_snapshot", None)
         if callable(client_snapshot):
@@ -2433,6 +2514,8 @@ class FlowMatchingActionSource:
                 with self._stream_lock:
                     self._stream_generation = int(getattr(self, "_stream_generation", 0)) + 1
                     self._stream_next_chunk = None
+                    self._stream_next_chunk_metadata = None
+                    self._stream_activation_candidate_metadata = None
                     self._stream_pending = False
                     self._stream_request = None
                     self._stream_ready_timing = None

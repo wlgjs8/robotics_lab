@@ -202,22 +202,15 @@ tracked real rbpodo template의 supported safety range는 명시적 per-joint
 
 Project-native F/T monitor, contact guard, 법선방향 unilateral admittance,
 6D Cartesian compliance가 servo motion path에 통합되어 있습니다.
-`stack_real.yaml`은 양팔에 동일한 supervised experimental
-Cartesian-admittance profile을 적용합니다. 6축 zero-wrench spring은 고정
-Hold 또는 최신 policy command 평형점을 기준으로 순응하고, 외력이
-사라지면 그 평형점으로 복귀합니다. Soft contact에서는 flow-infer
-chunk와 gripper 실행을 계속하고, hard limit만 기존 fault/중단 경로를
-유지합니다. 이 설정은 production acceptance가 아니며 단계별 CSV
-evidence가 필요합니다.
-현재 실기 검증 frame은 `tcp_origin`으로, RFT64 기즈모의 축 방향은
-유지하면서 compliance 회전 중심을 TCP 끝점으로 옮깁니다. 이전
-`sensor_origin` 런에서 센서 원점 회전과 202.642 mm 레버암이 TCP 복귀
-경로를 크게 결합시키는 현상을 확인한 뒤 승격한 단계입니다. 속도 한계와
-recenter 구간은 출력 평균을 늘리지 않고
-jerk-domain의 재귀적으로 유효한 braking envelope로 제한합니다.
-현재 responsive profile은 1.5 N / 0.25 Nm quiet zone 밖에서 반응하며,
-최대 20 mm / 0.08 rad까지 제한된 순응 이동을 허용합니다. 40 N normal,
-45 N resultant, 7 Nm hard guard는 그대로 유지됩니다.
+`stack_real.yaml`의 force path는 현재 양팔 supervised Gate 2
+translation-only Cartesian compliance입니다. `surface_source: none`과
+`compliance_frame: tcp_origin`을 사용하므로, 변환된 rbpodo EFT/TCP 축에서
+순응 translation을 계산하고 TCP 끝점을 correction 원점으로 사용합니다.
+rotation은 torque 축과 payload/COM 검증 전까지 잠겨 있습니다. 명시적인
+운영자 결정으로 stand/user geometric
+floor도 모두 꺼져 있어 TCP/gripper-tip floor velocity damper와 hard plane
+backstop이 없습니다. ROI, self-collision, tracking, lease/deadman, E-stop은
+유지되지만 wrist F/T는 upstream link 접촉을 모두 감지할 수 없습니다.
 상세 계약은 `rb_servo_server/docs/force_control.md`, 실센서 특성화와
 승격 evidence는 `docs/runbooks/ft_force_control_acceptance.md`에 기록합니다.
 

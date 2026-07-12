@@ -343,6 +343,11 @@ class VelocityProprioCameraFrameTest(unittest.TestCase):
         out = src._proprio_state(_payload(_IDENT, _IDENT))
 
         np.testing.assert_allclose(out, np.zeros(12), atol=1e-7)
+        self.assertFalse(src._last_velproprio_diagnostics["valid"])
+        self.assertEqual(
+            src._last_velproprio_diagnostics["zero_reason"],
+            "camera_time_unavailable",
+        )
 
     def test_translation_uses_interpolated_local_delta_without_dt_scaling(self) -> None:
         dt = 0.2
@@ -358,11 +363,20 @@ class VelocityProprioCameraFrameTest(unittest.TestCase):
         self._push(src, "left", 0.85, [1.0, 2.01, 3.0] + q_z90)
         self._push(src, "left", 0.95, [1.0, 2.03, 3.0] + q_z90)
         self._push(src, "left", 1.05, [1.0, 2.05, 3.0] + q_z90)
+        self._push(src, "right", 0.75, _IDENT)
+        self._push(src, "right", 1.05, _IDENT)
 
         out = src._proprio_state(_payload(_IDENT, _IDENT))
 
         np.testing.assert_allclose(out[:6], [0.04, 0.0, 0.0, 0.0, 0.0, 0.0], atol=1e-6)
         np.testing.assert_allclose(out[6:], np.zeros(6), atol=1e-6)
+        self.assertTrue(src._last_velproprio_diagnostics["valid"])
+        self.assertIsNone(src._last_velproprio_diagnostics["zero_reason"])
+        np.testing.assert_allclose(
+            src._last_velproprio_diagnostics["arms"]["left"]["delta"],
+            [0.04, 0.0, 0.0, 0.0, 0.0, 0.0],
+            atol=1e-6,
+        )
 
     def test_rotation_delta_is_raw_local_rotvec(self) -> None:
         src = self._make_source(policy_dt=0.1)

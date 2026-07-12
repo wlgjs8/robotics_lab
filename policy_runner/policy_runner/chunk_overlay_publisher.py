@@ -8,7 +8,7 @@ from typing import Callable
 from .robot_state_client import parse_udp_endpoint
 
 
-CHUNK_OVERLAY_SCHEMA_VERSION = "robotics_lab.chunk_overlay.v2"
+CHUNK_OVERLAY_SCHEMA_VERSION = "robotics_lab.chunk_overlay.v3"
 
 
 class ChunkOverlayPublisher:
@@ -47,6 +47,7 @@ class ChunkOverlayPublisher:
         camera_diagnostics: dict[str, object] | None = None,
         execute_steps: int | None = None,
         runway_steps: int | None = None,
+        chunk_metadata: dict[str, object] | None = None,
     ) -> None:
         try:
             horizon = len(left) if left is not None else len(right or [])
@@ -72,6 +73,8 @@ class ChunkOverlayPublisher:
                 packet["execute_steps"] = int(execute_steps)
             if runway_steps is not None:
                 packet["runway_steps"] = int(runway_steps)
+            if chunk_metadata is not None:
+                packet["chunk_metadata"] = chunk_metadata
             data = json.dumps(packet, separators=(",", ":")).encode("utf-8")
         except (BlockingIOError, OSError, TypeError, ValueError):
             return

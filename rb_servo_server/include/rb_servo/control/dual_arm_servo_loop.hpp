@@ -515,6 +515,11 @@ private:
     enum class InitMotionStatus { Idle, Planning, Executing, Done, Failed };
     struct InitMotionExec {
         InitMotionStatus status = InitMotionStatus::Idle;
+        // Init Motion is a one-shot request, but CommandBuffer keeps the accepted
+        // packet visible until its timeout.  Remember the request sequence so the
+        // same cached packet cannot repeatedly re-anchor Hold to q_actual.
+        bool request_seen = false;
+        uint64_t request_seq = 0;
         bool has_target = false;
         bool left_active = false;
         bool right_active = false;
@@ -717,6 +722,7 @@ private:
         SmdPoseTracker* smd_tracker,
         const ArmMountConfig& mount,
         const JointArray& previous_sent_q_deg,
+        const Pose6D& actual_feedback_pose,
         double dt_sec
     );
     ArmCommand applyDeltaTwistFollowerStage(
@@ -771,6 +777,12 @@ private:
         std::optional<Pose6D> stage_tcp_target_stand;
         double follower_divergence_pos_m = 0.0;
         double follower_divergence_ang_rad = 0.0;
+        double follower_projection_error_m = 0.0;
+        double follower_projection_error_rad = 0.0;
+        int follower_projection_error_count = 0;
+        double follower_actual_lead_m = 0.0;
+        double follower_actual_lead_rad = 0.0;
+        int follower_actual_lead_error_count = 0;
         std::uint64_t follower_reanchor_count = 0;
         bool safety_intervention_recent = false;
         double delta_twist_pending_linear_norm_m = 0.0;

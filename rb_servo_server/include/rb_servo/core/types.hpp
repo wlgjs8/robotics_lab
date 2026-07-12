@@ -443,6 +443,12 @@ struct CartesianSolveTelemetry {
     std::optional<Pose6D> stage_tcp_target_stand;  // pose-track stage output handed to IK
     double follower_divergence_pos_m = 0.0;
     double follower_divergence_ang_rad = 0.0;
+    double follower_projection_error_m = 0.0;
+    double follower_projection_error_rad = 0.0;
+    int follower_projection_error_count = 0;
+    double follower_actual_lead_m = 0.0;
+    double follower_actual_lead_rad = 0.0;
+    int follower_actual_lead_error_count = 0;
     uint64_t follower_reanchor_count = 0;          // explained strict-divergence reanchors
     bool safety_intervention_recent = false;       // debounced signal seen by follower stage
     double delta_twist_pending_linear_norm_m = 0.0;

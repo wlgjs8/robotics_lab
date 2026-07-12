@@ -7,9 +7,9 @@ Cartesian compliance mode, soft contact does not invalidate the current policy
 chunk: inference and gripper execution continue while the server projects
 loading policy increments and adds a bounded SE(3) compliance correction.
 
-The controller-simulation config remains inert. The tracked physical-real
-config currently exposes a supervised experimental dual-arm motion stage after
-the 2026-07-11 software-zero/sign/selectivity captures:
+The controller-simulation config remains inert. After the 2026-07-12 positive
+X/Y/Z frame capture, the tracked physical-real config exposes a supervised
+translation-only Hold compliance gate:
 
 ```yaml
 force_control:
@@ -20,30 +20,46 @@ force_control:
   supervised_experimental_real: true
   left:
     enable: true
+    surface_source: none
     compliance_frame: tcp_origin
+    compliance_axes: [true, true, true, false, false, false]
   right:
     enable: true
+    surface_source: none
     compliance_frame: tcp_origin
+    compliance_axes: [true, true, true, false, false, false]
 ```
 
 The physical acceptance profile is managed directly in `stack_real.yaml`, one
-reviewed setting at a time. The implementation is not safety-rated and does not replace E-stop, lease/deadman,
-tracking, collision, floor, ROI, or final joint safety checks.
+reviewed setting at a time. In this gate the three translations can modify a
+fixed Hold target; rotations remain locked because payload/COM and torque-axis
+acceptance are pending. Both geometric floor constraints are disabled by
+explicit operator decision, so neither the TCP nor gripper-tip floor backstop
+is present. The implementation is not safety-rated and does not replace E-stop,
+lease/deadman, tracking, collision, ROI, or final joint safety checks.
 
 ## Installed sensor frame
 
 Both active robot URDFs place the Robotous RFT64-6A01 between joint 6 and the
-Pika gripper. The explicit measurement frame is `ft_sensor_measurement`. The
-CAD-derived pose of that frame in the controller TCP frame is:
+Pika gripper. The explicit CAD measurement frame is `ft_sensor_measurement`.
+Its CAD-derived pose in the controller TCP frame is:
 
 ```yaml
 T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
 ```
 
-The convention is `point_tcp = T_tcp_sensor * point_sensor`. This transform is
-geometry evidence only. Per-arm serial, wrench axis/sign, controller selection,
-bias, payload, tare, and positive-load checks still require the acceptance
-runbook before an enforcing mode is used.
+The rbpodo EFT output-axis frame was checked separately because it does not
+follow that CAD yaw. The 2026-07-12 right-arm +X/+Y/+Z reaction capture and the
+operator's identical-hardware declaration establish the active physical
+runtime value for both arms:
+
+```yaml
+T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 0.0]
+```
+
+The convention is `point_tcp = T_tcp_sensor * point_sensor`. This positive-force
+axis result does not accept torque axes, per-arm serials, payload/COM, bias, or
+production force motion; those remain in the acceptance runbook.
 
 ## Wrench path
 
@@ -68,15 +84,36 @@ rbpodo eft wrench
   `T_tcp_sensor`. This was the first physical direction/pivot bring-up stage and
   matches the F/T gizmo origin.
 - `tcp_origin`: the same sensor-axis orientation translated to the TCP origin.
-  This is the current `stack_real.yaml` acceptance stage after sensor-origin
-  captures showed that rotation about the physical sensor origin coupled the
-  202.642 mm lever arm into the TCP return path.
+  This is the active Gate 2 frame: translation is controlled in the accepted
+  rbpodo EFT/TCP axes while the correction is applied about the TCP endpoint.
+  Gate 1 used `surface` only to make the initial sign check stand-fixed.
 
 The hard force/torque guard does not move with this selector: resultant force,
 resultant torque, and floor-normal compression remain computed from the fast
 compensated TCP/stand wrench. Changing the compliance frame therefore cannot
 rotate or bypass the existing hard thresholds. A sensor/TCP frame selection is
 rejected unless the matching F/T transform is marked `frame_configured`.
+
+`force_control.<arm>.surface_source` selects the stand-frame contact normal used
+by branch A (floor-normal compression telemetry and the scalar normal
+unloading):
+
+- `floor_constraint`: the horizontal stand +Z axis. A motion-affecting force
+  mode with this selector requires an enforcing `safety.floor_constraint`.
+- `user_floor_plane`: the runtime tilted `safety.user_floor_constraint` normal,
+  and requires that plane enforcing.
+- `none`: the **floorless posture** — no geometric surface. The server-owned
+  `floor_constraint` and `user_floor_constraint` may both be disabled, so the
+  arm runs without the User/Stand floor velocity damper (useful for a bolt-pick
+  approach that the geometric floor slow-zone would otherwise brake). Branch A
+  falls back to the nominal stand +Z as the hard-normal reference axis, so the
+  resultant-force, resultant-torque, and +Z compression hard guards are
+  unchanged. `none` carries no unilateral unload surface, so it is accepted only
+  for `monitor` and the symmetric 6D `cartesian_admittance`; `guard` and
+  `guarded_admittance` (which regulate a surface-normal contact) still require an
+  enforcing floor / user plane. Selecting `none` does not disable the floor for
+  other subsystems — it only removes force control's dependency on it; the floor
+  still applies to every motion primitive whenever it is separately enabled.
 
 The current rbpodo adapter provides six finite EFT fields. The backend also
 publishes an acquisition sequence that advances only when a new CobotData
@@ -121,6 +158,33 @@ valid zero. Until acceptance, enforcing force modes remain unavailable.
 Left-only and right-only Init Motion tare only that arm; a dual-arm request tares
 both independently.
 
+An accepted Init Motion sequence number is processed once even though the
+`CommandBuffer` retains the packet until its timeout. Completion hands the arm
+to `Hold` at the last accepted/sent reference. The cached packet cannot
+re-enter the no-op path or repeatedly re-anchor that Hold reference to the
+measured joints while an operator applies an external load. A later explicit
+Init Motion request with a new sequence remains able to plan again.
+
+Because the arm is usually already parked at the configured init pose when the
+stack starts, the server's Init Motion no-op path (measured joints within
+`safety.init_motion_planner.noop_tol_deg` of the goal) establishes the software
+zero WITHOUT moving. The GUI auto-presses Init Motion once at startup in exactly
+that no-motion case (arm at init pose AND `tare_state == awaiting_init_motion`),
+so a fresh `make run` reaches an accepted zero without an operator press. The
+auto-press is strictly gated to the already-at-init case — an arm parked away
+from the init pose is never auto-pressed (that would plan a real move), so the
+operator must press Init Motion manually there. Disable the automatic press with
+`RB_GUI_STARTUP_INIT_TARE=0`. The GUI reads the server's EFFECTIVE no-op band —
+`max(init_motion_planner.noop_tol_deg, waypoint_tol_deg)` — from
+`RB_GUI_SERVER_CONFIG_PATH` and auto-presses only within that band minus a small
+drift margin, so a GUI "already at init" verdict always coincides with the
+server's no-op path (a parked arm typically drifts ~1° from the saved init pose
+via servo settling / gravity sag, which the old fixed sub-degree tolerance never
+matched). There is NO fallback tolerance: if the server config cannot be read the
+auto-press stays off (fail-closed) rather than guessing a band that might let the
+server plan a move. `RB_GUI_STARTUP_INIT_TARE_TOL_DEG` may lower the band but
+never above the safe cap.
+
 In legacy `guarded_admittance`, the accepted normal target is:
 
 ```text
@@ -161,8 +225,18 @@ frame. The compliant offset is composed with Pinocchio SE(3) operations. For
 `sensor_origin`, rotation is applied about the physical sensor origin; for
 `tcp_origin`, it is applied about the TCP endpoint.
 
-When external wrench returns inside the six-axis deadband, Cartesian stiffness
-and damping drive the offset and velocity back to zero around that equilibrium.
+While an axis wrench remains outside its deadband in the same direction as the
+existing compliant offset, the Cartesian jerk governor preserves a terminal
+loaded-hold trajectory: it may continue moving or brake away from zero, but it
+does not reverse the offset toward zero. At the motion boundary it reaches zero
+velocity and acceleration instead of using a return-direction reversal as a
+valid braking result. If contact returns while stiffness is already recentering
+the axis, the bounded loaded-return branch first brakes that existing return
+velocity; the loaded-hold invariant takes over once the velocity is stationary
+or points with the load. This avoids treating a physically unavoidable jerk-limited
+recontact transient as a controller fault. When external wrench returns inside
+the six-axis deadband, Cartesian stiffness and damping drive the offset and
+velocity back to zero around that equilibrium.
 The correction is not absorbed into the equilibrium, so release returns to the
 current command pose without a motion-epoch reset or a pre-contact chunk
 catch-up. Telemetry publishes the equilibrium pose, its `hold_anchor` or
@@ -204,14 +278,29 @@ The discrete admittance integrator uses the configured force-control period
 jitter remains telemetry but does not change the jerk envelope from one tick to
 the next.
 
-The Cartesian controller applies the same symmetric zero-wrench spring rule to
-all three translations and all three rotations. Its control input is jerk. On
-every tick it intersects jerk, acceleration, velocity, position, and future
-braking constraints before advancing any state. A recursively viable soft
-operating envelope preserves braking authority; the configured hard envelope
-remains available only for deterministic recovery if a prior state is on the
-numerical boundary. This replaces integrate-then-clamp behavior and does not
-depend on increasing the wrench moving average.
+The Cartesian controller applies the same diagonal SMD rule to all three
+translations and all three rotations:
+
+```text
+M_i x_i_ddot + D_i x_i_dot + K_i x_i = wrench_error_i
+```
+
+This nominal continuous-time displacement model is second order, not first
+order. The bounded implementation stores displacement, velocity, and
+acceleration and selects jerk as its control input. It is therefore implemented
+as three coupled first-order state updates, with deadband, loaded-hold,
+passivity, and motion-envelope switching making the complete controller a
+constrained hybrid system rather than a single linear first-order equation.
+Measured physical TCP twist contributes to the passivity-energy observer; the
+SMD damping term uses the virtual compliant velocity.
+
+On every tick the controller intersects jerk, acceleration, velocity, position,
+and future braking constraints before advancing any state. A recursively viable
+soft operating envelope preserves both boundary braking and loaded-hold
+authority; the configured hard envelope remains available only for
+deterministic recovery if a prior state is on the numerical boundary. This
+replaces integrate-then-clamp behavior and does not depend on increasing the
+wrench moving average.
 
 Reaching an offset, velocity, acceleration, jerk, or per-tick step envelope is
 a valid bounded compliance result, not a force fault. Telemetry exposes
@@ -259,7 +348,7 @@ force_torque:
     residual_tare_min_samples: 500
     residual_tare_max_force_stddev_n: 0.75
     residual_tare_max_torque_stddev_nm: 0.15
-    T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
+    T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 0.0]
     sensor_bias: [0, 0, 0, 0, 0, 0]
     payload_mass_kg: 0.0
     payload_com_tcp_m: [0, 0, 0]
@@ -324,8 +413,10 @@ validated as `target < release < enter < hard_normal`, with
 `target + force_deadband <= release`,
 `hard_force_norm >= hard_normal`, and a positive finite
 `release_velocity_threshold_m_s`. Motion-affecting modes require kinematics,
-`servo.send_at_tick_start: false`, an update rate equal to the servo rate, and
-an enforcing selected floor plane.
+`servo.send_at_tick_start: false`, and an update rate equal to the servo rate.
+The `floor_constraint` / `user_floor_plane` surface sources additionally require
+their enforcing plane; `surface_source: none` (the floorless posture, accepted
+only for `monitor` / `cartesian_admittance`) requires no floor.
 `sensor_origin` and `tcp_origin` additionally require the matching
 `force_torque.<arm>.frame_configured: true` transform.
 Automatic post-init tare requires `safety.init_motion_planner.enable: true`,

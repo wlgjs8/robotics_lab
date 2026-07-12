@@ -57,6 +57,30 @@ bool testBiasThenTransformWithMomentArm() {
     return true;
 }
 
+bool testAcceptedRbpodoEftForceAxisMapping() {
+    rb_servo::FtWrenchPipelineConfig config = baseConfig();
+    config.t_tcp_sensor.z = -0.202642;
+    rb_servo::FtWrenchPipeline pipeline(config);
+
+    rb_servo::FtRawSample raw = sample(1, 1'000'000'000ULL);
+    raw.wrench_sensor.fx = 3.0;
+    raw.wrench_sensor.fy = 4.0;
+    raw.wrench_sensor.fz = 5.0;
+    const auto out = pipeline.process(raw, rb_servo::Pose6D{}, raw.host_time_ns);
+
+    RB_CHECK(out.healthy);
+    // The accepted physical profile has no runtime yaw: rbpodo EFT +X/+Y/+Z
+    // remain TCP +X/+Y/+Z. The 202.642 mm sensor-to-TCP lever arm still shifts
+    // the wrench moment to the TCP origin.
+    RB_CHECK(near(out.wrench_tcp.fx, 3.0));
+    RB_CHECK(near(out.wrench_tcp.fy, 4.0));
+    RB_CHECK(near(out.wrench_tcp.fz, 5.0));
+    RB_CHECK(near(out.wrench_tcp.tx, 0.202642 * 4.0));
+    RB_CHECK(near(out.wrench_tcp.ty, -0.202642 * 3.0));
+    RB_CHECK(near(out.wrench_tcp.tz, 0.0));
+    return true;
+}
+
 bool testRotationAndPayloadCompensation() {
     rb_servo::FtWrenchPipelineConfig rotation_config = baseConfig();
     rotation_config.t_tcp_sensor.rz = kPi * 0.5;
@@ -321,6 +345,7 @@ bool testResidualTareEligibilityAndFilterReset() {
 
 int main() {
     if (!testBiasThenTransformWithMomentArm()) return 1;
+    if (!testAcceptedRbpodoEftForceAxisMapping()) return 1;
     if (!testRotationAndPayloadCompensation()) return 1;
     if (!testResidualTareAndLowPass()) return 1;
     if (!testLowPassAdvancesOnlyOnNewAcquisition()) return 1;

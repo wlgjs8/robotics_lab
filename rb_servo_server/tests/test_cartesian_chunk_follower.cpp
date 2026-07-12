@@ -15,6 +15,7 @@ using rb_servo::control::CartesianChunkFollower;
 using rb_servo::control::CartesianChunkFollowerConfig;
 using rb_servo::control::ChunkFrame;
 using rb_servo::Pose6D;
+using rb_servo::Vec6;
 
 static int g_failures = 0;
 static void check(bool ok, const char* name) {
@@ -253,6 +254,43 @@ int main() {
         firstSegmentCorner(deadband_cfg, makeAngularReverseFrame(6.0e-4), &solved);
     check(solved, "angular supra-threshold reversal segment solves");
     check(angular_supra, "angular reversal above 5e-4 rad is a corner");
+  }
+
+  // -- Test 7: delta-preview integrates local rows and faults on persistent slip.
+  std::printf("Test 7: delta-preview integration + projection guard\n");
+  {
+    CartesianChunkFollowerConfig preview_cfg;
+    preview_cfg.window = {/*L*/ 0, /*C*/ 3, /*R*/ 1, /*smooth*/ 1};
+    preview_cfg.max_projection_error_m = 1e-6;
+    preview_cfg.max_projection_error_rad = 1e-6;
+    preview_cfg.max_consecutive_projection_errors = 2;
+    preview_cfg.max_actual_lead_m = 0.001;
+    preview_cfg.max_actual_lead_rad = 0.001;
+    preview_cfg.max_consecutive_actual_lead_errors = 2;
+    CartesianChunkFollower f(preview_cfg);
+    ChunkFrame frame;
+    frame.policy_dt = 1.0 / 30.0;
+    frame.wire_seq = 909;
+    frame.recv_seq = 44;
+    for (int i = 0; i < 4; ++i) {
+      frame.delta.push_back(Vec6{0.01, 0.0, 0.0, 0.0, 0.0, 0.0});
+      frame.grip.push_back(20.0 + i);
+    }
+    Pose6D start;
+    start.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+    f.submitDeltaFrame(frame, start);
+    check(f.active(), "delta frame activates the shared Ruckig follower");
+    for (int i = 0; i < 40; ++i) f.tick(TICK);
+    check(f.diag().seg_target_stand.x > 0.02,
+          "local delta rows integrate into cumulative forward absolute knots");
+    check(f.diag().infeasible_fault, "persistent projection error reaches configured fault count");
+
+    Pose6D far_actual = start;
+    far_actual.x = -1.0;
+    f.updateActualLead(far_actual);
+    for (int i = 0; i < 20; ++i) f.tick(TICK);
+    f.updateActualLead(far_actual);
+    check(f.diag().actual_lead_fault, "actual lead reaches configured policy-frame fault count");
   }
 
   std::printf("\n=== %s (%d failure%s) ===\n",

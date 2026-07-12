@@ -42,6 +42,11 @@ void CartesianChunkFollower::deactivate() {
   active_ = false;
   have_segment_ = false;
   window_.deactivate();
+  diag_.consecutive_projection_errors = 0;
+  diag_.consecutive_actual_lead_errors = 0;
+  diag_.infeasible_fault = false;
+  diag_.actual_lead_fault = false;
+  actual_lead_checked_segment_ = -1;
 }
 
 void CartesianChunkFollower::reanchor(const Pose6D& reference) {
@@ -77,6 +82,38 @@ void CartesianChunkFollower::submitFrame(const ChunkFrame& frame,
   // boundary builds toward the new frame's poses from the current state.
 }
 
+void CartesianChunkFollower::submitDeltaFrame(const ChunkFrame& frame,
+                                               const Pose6D& current_pose) {
+  if (frame.delta.empty() || frame.delta.size() != frame.grip.size()) return;
+  ChunkFrame integrated = frame;
+  integrated.pose.clear();
+  integrated.pose.reserve(frame.delta.size());
+  Pose6D cursor = active_ ? last_pose_ : current_pose;
+  for (const Vec6& d : frame.delta) {
+    Pose6D delta;
+    delta.x = d.x; delta.y = d.y; delta.z = d.z;
+    delta.rx = d.rx; delta.ry = d.ry; delta.rz = d.rz;
+    cursor = math::composeDeltaLocal(cursor, delta);
+    integrated.pose.push_back(cursor);
+  }
+  submitFrame(integrated, current_pose);
+}
+
+void CartesianChunkFollower::updateActualLead(const Pose6D& actual_pose) {
+  diag_.actual_lead_m = math::positionDistance(last_pose_, actual_pose);
+  diag_.actual_lead_rad = math::orientationDistanceRad(last_pose_, actual_pose);
+  if (actual_lead_checked_segment_ == diag_.segments) return;
+  actual_lead_checked_segment_ = diag_.segments;
+  const bool violated =
+      cfg_.max_actual_lead_m > 0.0 && cfg_.max_actual_lead_rad > 0.0 &&
+      (diag_.actual_lead_m > cfg_.max_actual_lead_m ||
+       diag_.actual_lead_rad > cfg_.max_actual_lead_rad);
+  diag_.consecutive_actual_lead_errors =
+      violated ? diag_.consecutive_actual_lead_errors + 1 : 0;
+  diag_.actual_lead_fault = cfg_.max_consecutive_actual_lead_errors > 0 &&
+      diag_.consecutive_actual_lead_errors >= cfg_.max_consecutive_actual_lead_errors;
+}
+
 Pose6D CartesianChunkFollower::tick(double dt_tick) {
   if (!active_) return last_pose_;
 
@@ -106,6 +143,25 @@ void CartesianChunkFollower::stepToNextSegment() {
     current_grip_ = window_.gripAt(k);       // gripper phase-locked to consumed step
     const BoundarySample<6> sample = buildSample(k);
     diag_.last_solve = core_.solve(sample);
+    const auto& realized = core_.p0();
+    double pos_sq = 0.0;
+    double ang_sq = 0.0;
+    for (int axis = 0; axis < 3; ++axis) {
+      const double ep = sample.pf[axis] - realized[axis];
+      const double er = sample.pf[axis + 3] - realized[axis + 3];
+      pos_sq += ep * ep;
+      ang_sq += er * er;
+    }
+    diag_.projection_error_m = std::sqrt(pos_sq);
+    diag_.projection_error_rad = std::sqrt(ang_sq);
+    const bool projection_violated =
+        cfg_.max_projection_error_m > 0.0 && cfg_.max_projection_error_rad > 0.0 &&
+        (diag_.projection_error_m > cfg_.max_projection_error_m ||
+         diag_.projection_error_rad > cfg_.max_projection_error_rad);
+    diag_.consecutive_projection_errors =
+        projection_violated ? diag_.consecutive_projection_errors + 1 : 0;
+    diag_.infeasible_fault = cfg_.max_consecutive_projection_errors > 0 &&
+        diag_.consecutive_projection_errors >= cfg_.max_consecutive_projection_errors;
     diag_.stall = false;
     diag_.seg_target_stand = tangentPose(sample.pf);
     diag_.seg_step_index = static_cast<int>(k);
@@ -118,6 +174,9 @@ void CartesianChunkFollower::stepToNextSegment() {
     // at the current pose (jerk-limited hold), and flag the stall.
     diag_.last_solve = ringDown();
     diag_.stall = true;
+    diag_.projection_error_m = 0.0;
+    diag_.projection_error_rad = 0.0;
+    diag_.consecutive_projection_errors = 0;
     ++diag_.stall_count;
     diag_.seg_target_stand = tangentPose(core_.p0());
     diag_.seg_step_index = -1;

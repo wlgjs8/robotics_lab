@@ -237,6 +237,12 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         "delta_twist_max_lead_m",
         "delta_twist_max_lead_rad",
         "delta_twist_stale_residual_timeout_sec",
+        "preview_max_projection_error_m",
+        "preview_max_projection_error_rad",
+        "preview_max_consecutive_projection_errors",
+        "preview_max_actual_lead_m",
+        "preview_max_actual_lead_rad",
+        "preview_max_consecutive_actual_lead_errors",
         "chunk_feed_timeout_sec",
     }, path);
     if (has(node, "enable")) out->enable = asBool(node["enable"], path + ".enable");
@@ -246,6 +252,8 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
             out->controller = RuckigFollowerController::RuckigWaypoint;
         } else if (value == "delta_twist") {
             out->controller = RuckigFollowerController::DeltaTwist;
+        } else if (value == "delta_preview") {
+            out->controller = RuckigFollowerController::DeltaPreview;
         } else {
             fail("Unknown " + path + ".controller: " + value, node["controller"]);
         }
@@ -336,6 +344,32 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
                 node["delta_twist_stale_residual_timeout_sec"],
                 path + ".delta_twist_stale_residual_timeout_sec"
             );
+    }
+    if (has(node, "preview_max_projection_error_m")) {
+        out->preview_max_projection_error_m = asDouble(
+            node["preview_max_projection_error_m"], path + ".preview_max_projection_error_m");
+    }
+    if (has(node, "preview_max_projection_error_rad")) {
+        out->preview_max_projection_error_rad = asDouble(
+            node["preview_max_projection_error_rad"], path + ".preview_max_projection_error_rad");
+    }
+    if (has(node, "preview_max_consecutive_projection_errors")) {
+        out->preview_max_consecutive_projection_errors = asInt(
+            node["preview_max_consecutive_projection_errors"],
+            path + ".preview_max_consecutive_projection_errors");
+    }
+    if (has(node, "preview_max_actual_lead_m")) {
+        out->preview_max_actual_lead_m = asDouble(
+            node["preview_max_actual_lead_m"], path + ".preview_max_actual_lead_m");
+    }
+    if (has(node, "preview_max_actual_lead_rad")) {
+        out->preview_max_actual_lead_rad = asDouble(
+            node["preview_max_actual_lead_rad"], path + ".preview_max_actual_lead_rad");
+    }
+    if (has(node, "preview_max_consecutive_actual_lead_errors")) {
+        out->preview_max_consecutive_actual_lead_errors = asInt(
+            node["preview_max_consecutive_actual_lead_errors"],
+            path + ".preview_max_consecutive_actual_lead_errors");
     }
     if (has(node, "chunk_feed_timeout_sec")) {
         out->chunk_feed_timeout_sec = asDouble(node["chunk_feed_timeout_sec"], path + ".chunk_feed_timeout_sec");
@@ -1675,9 +1709,25 @@ void validateConfig(const DualArmConfig& cfg) {
         const std::string& path
     ) {
         const std::string surface = lower(arm.surface_source);
-        if (!(surface == "floor_constraint" || surface == "user_floor_plane")) {
+        if (!(surface == "floor_constraint" || surface == "user_floor_plane" ||
+              surface == "none")) {
             throw std::runtime_error(
-                path + ".surface_source must be floor_constraint or user_floor_plane"
+                path + ".surface_source must be floor_constraint, user_floor_plane, or none"
+            );
+        }
+        // surface_source: none is the floorless posture. The server-owned floor
+        // and user-plane constraints may be fully disabled; the wrench pipeline
+        // falls back to the nominal stand +Z as the hard-normal reference axis
+        // (see dual_arm_servo_loop normal_stand). It carries no geometric contact
+        // surface, so it is only meaningful for the modes that do NOT regulate a
+        // unilateral surface-normal contact: monitor preflight and the symmetric
+        // zero-wrench 6D cartesian_admittance. guard / guarded_admittance drive a
+        // surface-normal unload and MUST bind an enforcing floor / user plane.
+        if (surface == "none" &&
+            !(force_mode == "monitor" || force_mode == "cartesian_admittance")) {
+            throw std::runtime_error(
+                path + ".surface_source=none requires operating_mode monitor or "
+                "cartesian_admittance"
             );
         }
         const std::string compliance_frame = lower(arm.compliance_frame);
@@ -2035,6 +2085,32 @@ void validateConfig(const DualArmConfig& cfg) {
             rf.delta_twist_stale_residual_timeout_sec,
             path + ".delta_twist_stale_residual_timeout_sec"
         );
+        if (rf.controller == RuckigFollowerController::DeltaPreview) {
+            validatePositiveFinite(
+                rf.preview_max_projection_error_m,
+                path + ".preview_max_projection_error_m");
+            validatePositiveFinite(
+                rf.preview_max_projection_error_rad,
+                path + ".preview_max_projection_error_rad");
+            validatePositiveFinite(
+                rf.preview_max_actual_lead_m,
+                path + ".preview_max_actual_lead_m");
+            validatePositiveFinite(
+                rf.preview_max_actual_lead_rad,
+                path + ".preview_max_actual_lead_rad");
+            if (rf.preview_max_consecutive_projection_errors < 1) {
+                throw std::runtime_error(
+                    path + ".preview_max_consecutive_projection_errors must be >= 1");
+            }
+            if (rf.preview_max_consecutive_actual_lead_errors < 1) {
+                throw std::runtime_error(
+                    path + ".preview_max_consecutive_actual_lead_errors must be >= 1");
+            }
+            if (rf.fallback_policy != RuckigFollowerFallbackPolicy::Fault) {
+                throw std::runtime_error(
+                    path + ".controller=delta_preview requires fallback_policy=fault");
+            }
+        }
         if (rf.enable && cfg.network.chunk_frame_bind.empty()) {
             throw std::runtime_error(
                 path + ".enable=true requires network.chunk_frame_bind (dedicated chunk-frame UDP ingest)"

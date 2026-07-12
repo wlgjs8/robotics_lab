@@ -8,7 +8,8 @@ import time
 DOF = 6
 TCP_DISPLAY_MODES = ("auto", "actual", "reference", "both")
 CIRCLE_OVERLAY_SCHEMA_VERSION = "robotics_lab.circle_overlay.v1"
-CHUNK_OVERLAY_SCHEMA_VERSION = "robotics_lab.chunk_overlay.v2"
+CHUNK_OVERLAY_SCHEMA_VERSION = "robotics_lab.chunk_overlay.v3"
+LEGACY_CHUNK_OVERLAY_SCHEMA_VERSION = "robotics_lab.chunk_overlay.v2"
 # TODO: tune with operator.
 EXTERNAL_BOX_NEAR_M = 0.10
 EXTERNAL_BOX_COLLISION_M = 0.0
@@ -243,7 +244,11 @@ class ChunkOverlaySnapshot:
         *,
         received_monotonic: float | None = None,
     ) -> "ChunkOverlaySnapshot | None":
-        if data.get("schema_version") != CHUNK_OVERLAY_SCHEMA_VERSION:
+        wire_schema = data.get("schema_version")
+        if wire_schema not in {
+            CHUNK_OVERLAY_SCHEMA_VERSION,
+            LEGACY_CHUNK_OVERLAY_SCHEMA_VERSION,
+        }:
             return None
         seq = data.get("seq")
         horizon = data.get("horizon")
@@ -269,7 +274,7 @@ class ChunkOverlaySnapshot:
         if not left_poses and not right_poses:
             return None
         return cls(
-            schema_version=CHUNK_OVERLAY_SCHEMA_VERSION,
+            schema_version=str(wire_schema),
             received_monotonic=time.monotonic() if received_monotonic is None else received_monotonic,
             seq=seq,
             policy_dt_sec=policy_dt_sec,

@@ -134,6 +134,41 @@ class AnalyzeServoLogTest(unittest.TestCase):
             self.assertEqual(metrics["chunk_diagnostics"]["unique_wire_sequences"], 0)
             self.assertEqual(metrics["delta_twist"]["left"]["rows"], 0)
             self.assertEqual(metrics["delta_twist"]["right"]["rows"], 0)
+            self.assertEqual(metrics["delta_preview"]["left"]["rows"], 0)
+            self.assertEqual(metrics["delta_preview"]["right"]["rows"], 0)
+
+    def test_delta_preview_projection_and_actual_lead_are_summarized(self) -> None:
+        fields = [
+            "left_follower_controller",
+            *[
+                f"left_follower_{suffix}"
+                for suffix in (
+                    *analyze_servo_log.DELTA_PREVIEW_FLOAT_SUFFIXES,
+                    *analyze_servo_log.DELTA_PREVIEW_INTEGER_SUFFIXES,
+                )
+            ],
+        ]
+        rows = [
+            {
+                "left_follower_controller": "delta_preview",
+                "left_follower_projection_error_m": 0.001 * (index + 1),
+                "left_follower_projection_error_rad": 0.01 * (index + 1),
+                "left_follower_projection_error_count": index,
+                "left_follower_actual_lead_m": 0.002 * (index + 1),
+                "left_follower_actual_lead_rad": 0.02 * (index + 1),
+                "left_follower_actual_lead_error_count": index + 1,
+            }
+            for index in range(3)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "delta-preview.csv"
+            self.make_log(path, rows=3, extra_fieldnames=fields, row_overrides=rows)
+
+            metrics = analyze_servo_log.analyze_csv(path)
+            left = metrics["delta_preview"]["left"]
+            self.assertEqual(left["rows"], 3)
+            self.assertEqual(left["series"]["projection_error_m"]["p99"], 0.003)
+            self.assertEqual(left["series"]["actual_lead_error_count"]["p50"], 2)
 
     def test_optional_chunk_and_delta_twist_diagnostics_are_summarized(self) -> None:
         shared_fields = list(analyze_servo_log.CHUNK_DIAGNOSTIC_INTEGER_COLUMNS) + list(

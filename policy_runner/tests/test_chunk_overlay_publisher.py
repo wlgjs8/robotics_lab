@@ -52,7 +52,7 @@ class ChunkOverlayPublisherTest(unittest.TestCase):
         self.assertEqual(address, ("127.0.0.1", 50262))
         packet = json.loads(data.decode("utf-8"))
         self.assertEqual(packet["schema_version"], CHUNK_OVERLAY_SCHEMA_VERSION)
-        self.assertEqual(packet["schema_version"], "robotics_lab.chunk_overlay.v2")
+        self.assertEqual(packet["schema_version"], "robotics_lab.chunk_overlay.v3")
         self.assertEqual(packet["host_time_ns"], 123456789)
         self.assertEqual(packet["seq"], 3)
         self.assertEqual(packet["policy_dt_sec"], 0.5)
@@ -85,13 +85,14 @@ class ChunkOverlayPublisherTest(unittest.TestCase):
                 camera_diagnostics={"outcome": "ok", "bundle_seq": 1234},
                 execute_steps=12,
                 runway_steps=4,
+                chunk_metadata={"source_start_index": 7, "proprio": {"valid": True}},
             )
         finally:
             publisher.close()
 
         self.assertEqual(len(sock.sent), 1)
         packet = json.loads(sock.sent[0][0].decode("utf-8"))
-        self.assertEqual(packet["schema_version"], "robotics_lab.chunk_overlay.v2")
+        self.assertEqual(packet["schema_version"], "robotics_lab.chunk_overlay.v3")
         self.assertEqual(packet["left_delta"], [[0.01, 0.02, 0.03, 0.1, 0.2, 0.3, 50.0]])
         self.assertNotIn("right_delta", packet)
         self.assertEqual(
@@ -101,6 +102,7 @@ class ChunkOverlayPublisherTest(unittest.TestCase):
         self.assertEqual(packet["camera_diagnostics"], {"outcome": "ok", "bundle_seq": 1234})
         self.assertEqual(packet["execute_steps"], 12)
         self.assertEqual(packet["runway_steps"], 4)
+        self.assertEqual(packet["chunk_metadata"]["source_start_index"], 7)
 
 
 if __name__ == "__main__":

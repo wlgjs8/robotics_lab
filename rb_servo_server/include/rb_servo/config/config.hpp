@@ -1018,7 +1018,8 @@ enum class RuckigFollowerFallbackPolicy {
 
 enum class RuckigFollowerController {
     RuckigWaypoint,
-    DeltaTwist
+    DeltaTwist,
+    DeltaPreview
 };
 
 // Per-profile chunk-follower stage that REPLACES the pose_track_smd step while
@@ -1075,6 +1076,14 @@ struct RuckigFollowerConfig {
     double delta_twist_max_lead_m = 0.060;
     double delta_twist_max_lead_rad = 0.30;
     double delta_twist_stale_residual_timeout_sec = 0.15;
+    // delta_preview safety contract. Zero means unspecified and is rejected
+    // whenever controller=delta_preview; no motion-relevant fallback exists.
+    double preview_max_projection_error_m = 0.0;
+    double preview_max_projection_error_rad = 0.0;
+    int preview_max_consecutive_projection_errors = 0;
+    double preview_max_actual_lead_m = 0.0;
+    double preview_max_actual_lead_rad = 0.0;
+    int preview_max_consecutive_actual_lead_errors = 0;
     // Feed-liveness watchdog: with no fresh chunk frame for this long the
     // follower deactivates (falls back to pose_track_smd / hold).
     double chunk_feed_timeout_sec = 1.5;

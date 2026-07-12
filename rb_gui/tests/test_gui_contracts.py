@@ -39,6 +39,12 @@ from rb_servo_gui.app import (
     _trigger_box_detect,
     _send_arm_init_override,
     _send_arm_init_cancel_resume,
+    _startup_init_tare_arms,
+    _startup_init_tare_tol_deg,
+    _server_init_noop_tol_deg,
+    _joints_within_tol,
+    _arm_awaiting_init_tare,
+    _maybe_auto_init_tare_on_startup,
     _foot_pedal_action_map,
     _update_arm_init_panel,
     _lifecycle_init_motion_layout_html,
@@ -148,7 +154,11 @@ from rb_servo_gui.recording_control import (
     SPACEMOUSE_ASSIGNMENT_COMMAND_SCHEMA,
     SpaceMouseCommandResult,
 )
-from rb_servo_gui.safety import OperatorSafety, normalize_observed_mode_backend
+from rb_servo_gui.safety import (
+    OperatorSafety,
+    normalize_observed_mode_backend,
+    server_safety_constraint_config_enabled,
+)
 from rb_servo_gui.scene import (
     _FLOOR_CHECK_POINTS_TCP_FRAME,
     _FLOOR_CHECK_POINTS_TCP_FRAME_CLOSED,
@@ -4695,6 +4705,88 @@ class FloorConstraintGuiTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.build_set_user_safety_floor_plane((0, 0, float("nan")), (0, 0, 1))
 
+    def test_server_floor_capabilities_follow_tracked_stack_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "stack.yaml"
+            path.write_text(
+                "safety:\n"
+                "  floor_constraint:\n"
+                "    enable: false\n"
+                "  user_floor_constraint:\n"
+                "    enable: true\n",
+                encoding="utf-8",
+            )
+            self.assertIs(
+                server_safety_constraint_config_enabled("floor_constraint", path),
+                False,
+            )
+            self.assertIs(
+                server_safety_constraint_config_enabled("user_floor_constraint", path),
+                True,
+            )
+
+            path.write_text("safety: [malformed]\n", encoding="utf-8")
+            self.assertIsNone(
+                server_safety_constraint_config_enabled("floor_constraint", path)
+            )
+            self.assertIsNone(
+                server_safety_constraint_config_enabled(
+                    "floor_constraint", Path(tmp) / "missing.yaml"
+                )
+            )
+            with self.assertRaises(ValueError):
+                server_safety_constraint_config_enabled("roi_box", path)
+
+    def test_disabled_floor_configs_never_emit_gui_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "stack.yaml"
+            path.write_text(
+                "safety:\n"
+                "  floor_constraint:\n"
+                "    enable: false\n"
+                "  user_floor_constraint:\n"
+                "    enable: false\n",
+                encoding="utf-8",
+            )
+            store = StateStore(stale_after_sec=5.0)
+            self.assertTrue(
+                store.update_from_json_bytes(
+                    json.dumps(sample_state()).encode(),
+                    received_monotonic=time.monotonic(),
+                )
+            )
+            client = RecordingClient()
+            safety = OperatorSafety(store, client)
+            with mock.patch.dict(
+                os.environ, {"RB_GUI_SERVER_CONFIG_PATH": str(path)}, clear=False
+            ):
+                # Repeated startup/user actions stay local when the server config
+                # opts both constraints out.  This is the regression for the
+                # SetUserSafetyFloorPlane rejection flood in server.log.
+                for _ in range(3):
+                    ok, message = safety.send_set_floor_enabled(True)
+                    self.assertFalse(ok)
+                    self.assertIn("no command sent", message)
+                    ok, message = safety.send_set_user_floor_plane(
+                        (0.0, 0.0, 0.0),
+                        (0.0, 0.0, 1.0),
+                        enable=True,
+                    )
+                    self.assertFalse(ok)
+                    self.assertIn("no command sent", message)
+
+                # Asking to turn an already config-disabled constraint off is a
+                # successful no-op, not another lifecycle command.
+                self.assertTrue(safety.send_set_floor_enabled(False)[0])
+                self.assertTrue(
+                    safety.send_set_user_floor_plane(
+                        (0.0, 0.0, 0.0),
+                        (0.0, 0.0, 1.0),
+                        enable=False,
+                    )[0]
+                )
+            self.assertEqual(client.sent_packets, [])
+
     def test_fit_plane_horizontal_and_tilted(self):
         from rb_servo_gui.plane_fit import fit_plane, tilt_deg
 
@@ -6589,6 +6681,238 @@ class IkInfeasibleRegionTest(unittest.TestCase):
     def test_asset_path_honors_env_override(self):
         with mock.patch.dict(os.environ, {"RB_GUI_IK_INFEASIBLE": "/tmp/custom_ik.npz"}):
             self.assertEqual(str(_ik_infeasible_path()), "/tmp/custom_ik.npz")
+
+
+class StartupInitTareTest(unittest.TestCase):
+    # The sample_state base arm already reports q_actual_deg == _INIT.
+    _INIT = (0.0, -30.0, 80.0, 0.0, 60.0, 0.0)
+
+    def _arm(self, q=None, *, auto_tare=True, tare_valid=False,
+             tare_state="awaiting_init_motion"):
+        """Override fields layered onto the sample base arm (which is at _INIT)."""
+        over = {}
+        if q is not None:
+            over["q_actual_deg"] = list(q)
+        if auto_tare is not None:
+            over["force_torque"] = {
+                "auto_tare_enabled": auto_tare,
+                "tare_valid": tare_valid,
+                "tare_state": tare_state,
+            }
+        return over
+
+    def _state(self, left, right):
+        data = sample_state()
+        data["left"].update(left)
+        data["right"].update(right)
+        return StateSnapshot.parse(data)
+
+    def test_joints_within_tol_boundary(self):
+        base = (0.0, -30.0, 80.0, 0.0, 60.0, 0.0)
+        near = (0.2, -30.2, 80.1, -0.1, 60.2, 0.05)   # every axis <= 0.3
+        far = (0.0, -30.0, 80.0, 0.0, 60.0, 0.4)       # last axis 0.4 > 0.3
+        self.assertTrue(_joints_within_tol(near, base, 0.3))
+        self.assertFalse(_joints_within_tol(far, base, 0.3))
+        self.assertFalse(_joints_within_tol(None, base, 0.3))
+        self.assertFalse(_joints_within_tol(base, None, 0.3))
+
+    def test_arm_awaiting_init_tare_flag(self):
+        state = self._state(self._arm(self._INIT), self._arm(self._INIT))
+        self.assertTrue(_arm_awaiting_init_tare(state.left))
+        tared = self._state(
+            self._arm(self._INIT, tare_valid=True, tare_state="accepted"),
+            self._arm(self._INIT),
+        )
+        self.assertFalse(_arm_awaiting_init_tare(tared.left))
+
+    def test_both_at_init_and_awaiting_returns_both(self):
+        state = self._state(self._arm(self._INIT), self._arm(self._INIT))
+        self.assertEqual(
+            _startup_init_tare_arms(state, False, self._INIT, self._INIT, 0.3), "both"
+        )
+
+    def test_only_awaiting_arm_selected_when_other_already_tared(self):
+        state = self._state(
+            self._arm(self._INIT),
+            self._arm(self._INIT, tare_valid=True, tare_state="accepted"),
+        )
+        self.assertEqual(
+            _startup_init_tare_arms(state, False, self._INIT, self._INIT, 0.3), "left"
+        )
+
+    def test_arm_off_init_pose_is_never_selected(self):
+        # SAFETY: an arm parked away from the init pose must NOT be auto-pressed,
+        # or the server would plan and MOVE it at startup.
+        off = (0.0, -30.0, 80.0, 0.0, 60.0, 5.0)  # last axis 5 deg off
+        state = self._state(self._arm(off), self._arm(off))
+        self.assertIsNone(
+            _startup_init_tare_arms(state, False, self._INIT, self._INIT, 0.3)
+        )
+        # one arm at init, the other off -> only the at-init arm
+        mixed = self._state(self._arm(self._INIT), self._arm(off))
+        self.assertEqual(
+            _startup_init_tare_arms(mixed, False, self._INIT, self._INIT, 0.3), "left"
+        )
+
+    def test_not_awaiting_or_stale_or_missing_returns_none(self):
+        settling = self._state(
+            self._arm(self._INIT, tare_state="settling"),
+            self._arm(self._INIT, tare_state="settling"),
+        )
+        self.assertIsNone(
+            _startup_init_tare_arms(settling, False, self._INIT, self._INIT, 0.3)
+        )
+        no_autotare = self._state(
+            self._arm(self._INIT, auto_tare=False),
+            self._arm(self._INIT, auto_tare=False),
+        )
+        self.assertIsNone(
+            _startup_init_tare_arms(no_autotare, False, self._INIT, self._INIT, 0.3)
+        )
+        good = self._state(self._arm(self._INIT), self._arm(self._INIT))
+        self.assertIsNone(_startup_init_tare_arms(good, True, self._INIT, self._INIT, 0.3))
+        self.assertIsNone(_startup_init_tare_arms(None, False, self._INIT, self._INIT, 0.3))
+        self.assertIsNone(_startup_init_tare_arms(good, False, None, None, 0.3))
+
+    def test_maybe_auto_tare_sends_once_and_marks_done(self):
+        state = self._state(self._arm(self._INIT), self._arm(self._INIT))
+        safety = mock.Mock(init_left_joint_deg=self._INIT, init_right_joint_deg=self._INIT)
+        handles = {"scene": {}, "last_action": mock.Mock(value="")}
+        path = self._write_server_cfg(0.75, 1.5)  # tol -> 1.4; arm at exactly init
+        with mock.patch("rb_servo_gui.app._send_arm_init_override",
+                        return_value=(True, "sent")) as send, \
+                mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": path}):
+            _maybe_auto_init_tare_on_startup(
+                handles, safety, state, False, init_motion_disabled=False
+            )
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(send.call_args.args[3], "both")
+            self.assertTrue(handles["_auto_init_tare_done"])
+            # second tick must not re-send
+            _maybe_auto_init_tare_on_startup(
+                handles, safety, state, False, init_motion_disabled=False
+            )
+            self.assertEqual(send.call_count, 1)
+
+    def test_maybe_auto_tare_fail_closed_without_server_config(self):
+        # NO fallback: without a readable server no-op tolerance the auto-tare must
+        # not fire (and stops re-checking), even with the arm exactly at init.
+        state = self._state(self._arm(self._INIT), self._arm(self._INIT))
+        safety = mock.Mock(init_left_joint_deg=self._INIT, init_right_joint_deg=self._INIT)
+        handles = {"scene": {}}
+        with mock.patch("rb_servo_gui.app._send_arm_init_override") as send, \
+                mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": ""}, clear=False):
+            _maybe_auto_init_tare_on_startup(
+                handles, safety, state, False, init_motion_disabled=False
+            )
+            send.assert_not_called()
+            self.assertTrue(handles["_auto_init_tare_done"])
+
+    def test_maybe_auto_tare_does_not_send_when_init_motion_disabled(self):
+        state = self._state(self._arm(self._INIT), self._arm(self._INIT))
+        safety = mock.Mock(init_left_joint_deg=self._INIT, init_right_joint_deg=self._INIT)
+        handles = {"scene": {}}
+        with mock.patch("rb_servo_gui.app._send_arm_init_override") as send:
+            _maybe_auto_init_tare_on_startup(
+                handles, safety, state, False, init_motion_disabled=True
+            )
+            send.assert_not_called()
+            self.assertNotIn("_auto_init_tare_done", handles)  # retries later
+
+    def test_maybe_auto_tare_env_disable(self):
+        state = self._state(self._arm(self._INIT), self._arm(self._INIT))
+        safety = mock.Mock(init_left_joint_deg=self._INIT, init_right_joint_deg=self._INIT)
+        handles = {"scene": {}}
+        with mock.patch("rb_servo_gui.app._send_arm_init_override") as send, \
+                mock.patch.dict(os.environ, {"RB_GUI_STARTUP_INIT_TARE": "0"}):
+            _maybe_auto_init_tare_on_startup(
+                handles, safety, state, False, init_motion_disabled=False
+            )
+            send.assert_not_called()
+            self.assertTrue(handles["_auto_init_tare_done"])
+
+    def test_maybe_auto_tare_off_init_never_sends(self):
+        off = (0.0, -30.0, 80.0, 0.0, 60.0, 5.0)
+        state = self._state(self._arm(off), self._arm(off))
+        safety = mock.Mock(init_left_joint_deg=self._INIT, init_right_joint_deg=self._INIT)
+        handles = {"scene": {}}
+        path = self._write_server_cfg(0.75, 1.5)  # valid tol; skip is due to off-init
+        with mock.patch("rb_servo_gui.app._send_arm_init_override") as send, \
+                mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": path}):
+            _maybe_auto_init_tare_on_startup(
+                handles, safety, state, False, init_motion_disabled=False
+            )
+            send.assert_not_called()
+
+    def _write_server_cfg(self, noop_tol, waypoint_tol):
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix=".yaml")
+        os.close(fd)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "safety:\n"
+                "  init_motion_planner:\n"
+                f"    noop_tol_deg: {noop_tol}\n"
+                f"    waypoint_tol_deg: {waypoint_tol}\n"
+            )
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def test_server_noop_tol_is_max_of_noop_and_waypoint(self):
+        path = self._write_server_cfg(0.75, 1.5)
+        with mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": path}):
+            self.assertAlmostEqual(_server_init_noop_tol_deg(), 1.5)
+        # unreadable / unset -> None
+        with mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": ""}, clear=False):
+            self.assertIsNone(_server_init_noop_tol_deg())
+        with mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": "/no/such.yaml"}):
+            self.assertIsNone(_server_init_noop_tol_deg())
+
+    def test_startup_tol_tracks_server_band_with_margin(self):
+        # server effective no-op band 1.5 deg -> GUI tol 1.5 - 0.1 margin = 1.4,
+        # which must cover the real ~1.3 deg parked drift seen on hardware.
+        path = self._write_server_cfg(0.75, 1.5)
+        with mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": path},
+                             clear=False):
+            os.environ.pop("RB_GUI_STARTUP_INIT_TARE_TOL_DEG", None)
+            self.assertAlmostEqual(_startup_init_tare_tol_deg(), 1.4)
+
+    def test_startup_tol_env_override_capped_at_safe_band(self):
+        path = self._write_server_cfg(0.75, 1.5)  # safe cap = 1.4
+        with mock.patch.dict(
+            os.environ,
+            {"RB_GUI_SERVER_CONFIG_PATH": path, "RB_GUI_STARTUP_INIT_TARE_TOL_DEG": "9.0"},
+        ):
+            # an over-large override is clamped to the safe cap, never above it
+            self.assertAlmostEqual(_startup_init_tare_tol_deg(), 1.4)
+        with mock.patch.dict(
+            os.environ,
+            {"RB_GUI_SERVER_CONFIG_PATH": path, "RB_GUI_STARTUP_INIT_TARE_TOL_DEG": "0.5"},
+        ):
+            self.assertAlmostEqual(_startup_init_tare_tol_deg(), 0.5)
+
+    def test_startup_tol_is_none_when_no_server_config(self):
+        # NO fallback: an unreadable server config yields None (fail-closed), not a
+        # guessed default. The caller must then not fire the auto-tare.
+        with mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": ""}, clear=False):
+            os.environ.pop("RB_GUI_STARTUP_INIT_TARE_TOL_DEG", None)
+            self.assertIsNone(_startup_init_tare_tol_deg())
+        with mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": "/no/such.yaml"}):
+            os.environ.pop("RB_GUI_STARTUP_INIT_TARE_TOL_DEG", None)
+            self.assertIsNone(_startup_init_tare_tol_deg())
+
+    def test_real_parked_drift_would_fire_with_server_band(self):
+        # Reproduces the 16:35 hardware case: arm parked ~1.2-1.28 deg off the
+        # saved init pose. With the server band (1.4 GUI tol) it now qualifies.
+        init_l = (233.953, 53.924, 116.337, -68.926, -114.089, -129.767)
+        meas_l = (234.538, 54.034, 116.338, -68.533, -114.325, -128.567)
+        init_r = (-234.082, -42.955, -119.408, 72.211, 106.032, 125.144)
+        meas_r = (-234.317, -42.413, -118.465, 70.929, 105.534, 126.171)
+        state = self._state(self._arm(meas_l), self._arm(meas_r))
+        self.assertIsNone(_startup_init_tare_arms(state, False, init_l, init_r, 0.3))
+        self.assertEqual(
+            _startup_init_tare_arms(state, False, init_l, init_r, 1.4), "both"
+        )
 
 
 if __name__ == "__main__":

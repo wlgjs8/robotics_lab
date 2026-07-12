@@ -2641,6 +2641,104 @@ bool testRealHoldFreezesLastReferenceNotDriftedActual() {
     return true;
 }
 
+bool testCompletedInitMotionCachedPacketDoesNotReanchorHoldToActual() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.servo.rate_hz = 100;
+    cfg.safety.self_collision.enable = true;
+    cfg.safety.self_collision.monitor_only = true;
+    const std::filesystem::path repo_root =
+        std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
+    const std::filesystem::path unified_urdf_dir =
+        repo_root.parent_path() /
+        "mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e";
+    cfg.safety.self_collision.mesh.unified_urdf =
+        (unified_urdf_dir / "dual_rb3_730e_ver5.urdf").string();
+    cfg.safety.self_collision.mesh.package_dirs = {unified_urdf_dir.string()};
+    if (!std::filesystem::is_regular_file(
+            cfg.safety.self_collision.mesh.unified_urdf)) {
+        std::cout << "SKIP: cached Init Motion Hold regression requires unified URDF ("
+                  << cfg.safety.self_collision.mesh.unified_urdf << ")\n";
+        return true;
+    }
+    cfg.safety.init_motion_planner.enable = true;
+    cfg.safety.init_motion_planner.noop_tol_deg = 1.5;
+    cfg.safety.init_motion_planner.waypoint_tol_deg = 1.5;
+    cfg.safety.max_tracking_error_deg = 1000.0;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+    auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    TestBackend* left_backend = left.get();
+    TestBackend* right_backend = right.get();
+    rb_servo::DualArmServoLoop loop(std::move(left), std::move(right), cfg, &buffer, nullptr);
+
+    RB_CHECK(loop.start());
+    rb_servo::DualArmCommand arm_motion = command(rb_servo::ControlMode::ArmMotion);
+    arm_motion.left.timeout_sec = 1.0;
+    arm_motion.right.timeout_sec = 1.0;
+    buffer.setCommand(arm_motion);
+    RB_CHECK(waitUntil(
+        [&] { return loop.motionState() == rb_servo::ServerMotionState::ArmedHold; },
+        std::chrono::milliseconds(1000)
+    ));
+
+    rb_servo::DualArmCommand init = command(rb_servo::ControlMode::JointTarget);
+    init.seq = 9201;
+    init.left.q_target_deg = initial;
+    init.right.q_target_deg = initial;
+    init.left.has_joint_target = true;
+    init.right.has_joint_target = true;
+    init.left.joint_target_profile = rb_servo::JointTargetProfile::InitMotion;
+    init.right.joint_target_profile = rb_servo::JointTargetProfile::InitMotion;
+    init.left.timeout_sec = 1.0;
+    init.right.timeout_sec = 1.0;
+    buffer.setCommand(init);
+
+    // The first observation is a measured no-op.  Completion must immediately
+    // hand command ownership to Hold even while CommandBuffer still returns the
+    // cached Init Motion packet.
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        return snapshot.command.seq == init.seq &&
+               snapshot.init_motion.status == "done" &&
+               snapshot.command.left.mode == rb_servo::ControlMode::Hold &&
+               snapshot.command.right.mode == rb_servo::ControlMode::Hold &&
+               !snapshot.command.left.has_joint_target &&
+               !snapshot.command.right.has_joint_target;
+    }, std::chrono::milliseconds(1000)));
+
+    // Simulate a hand load moving measured joints inside the no-op tolerance.
+    // The old implementation treated every cached tick as a fresh request and
+    // repeatedly snapped previous_sent to this q_actual value.
+    left_backend->setAcceptSendWithoutStateUpdate(true);
+    right_backend->setAcceptSendWithoutStateUpdate(true);
+    left_backend->setActualJoints(joints(0.5));
+    right_backend->setActualJoints(joints(0.5));
+
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        return snapshot.command.seq == init.seq &&
+               sameJointArray(snapshot.left_state.q_actual_deg, joints(0.5)) &&
+               sameJointArray(snapshot.right_state.q_actual_deg, joints(0.5)) &&
+               snapshot.command.left.mode == rb_servo::ControlMode::Hold &&
+               snapshot.command.right.mode == rb_servo::ControlMode::Hold;
+    }, std::chrono::milliseconds(1000)));
+    sleepTicks();
+
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    const rb_servo::ServoTarget previous = loop.previousSentTarget();
+    loop.stop();
+    RB_CHECK(snapshot.command.seq == init.seq);
+    RB_CHECK(snapshot.command.left.mode == rb_servo::ControlMode::Hold);
+    RB_CHECK(snapshot.command.right.mode == rb_servo::ControlMode::Hold);
+    RB_CHECK(sameJointArray(snapshot.left_sent_q_deg, initial));
+    RB_CHECK(sameJointArray(snapshot.right_sent_q_deg, initial));
+    RB_CHECK(sameJointArray(previous.left_q_target_deg, initial));
+    RB_CHECK(sameJointArray(previous.right_q_target_deg, initial));
+    RB_CHECK(!snapshot.fault_latched);
+    return true;
+}
+
 bool testGripperSetpointSurvivesHoldRewrite() {
     // A SpaceMouse button-only gripper press (cap neutral) arrives as a Hold/Hold
     // command carrying gripper_target. The explicit-dual-hold rewrite path must
@@ -7133,6 +7231,7 @@ int main() {
     if (!testRbpodoAsyncSupervisionFlagDoesNotBypassPhysicalRealLatch()) return 1;
     if (!testRbpodoAsyncHoldStreamsServoJWithoutLatch()) return 1;
     if (!testRealHoldFreezesLastReferenceNotDriftedActual()) return 1;
+    if (!testCompletedInitMotionCachedPacketDoesNotReanchorHoldToActual()) return 1;
     if (!testGripperSetpointSurvivesHoldRewrite()) return 1;
     if (!testEmergencyStopStillRequiresResetAfterArmMotion()) return 1;
     if (!testPhysicalRealSendFailureStillHardLatches()) return 1;

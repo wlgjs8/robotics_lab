@@ -1204,6 +1204,40 @@ bool testRuckigFollowerControllerConfig() {
     RB_CHECK(delta_cfg.cartesian_control.tcp_pose_target_profiles.front().ruckig_follower.controller ==
              rb_servo::RuckigFollowerController::RuckigWaypoint);
 
+    const std::string preview_path = writeTempConfig(
+        "ruckig-follower-controller-preview",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    controller: delta_preview\n"
+        "    fallback_policy: fault\n"
+        "    preview_max_projection_error_m: 0.001\n"
+        "    preview_max_projection_error_rad: 0.004\n"
+        "    preview_max_consecutive_projection_errors: 3\n"
+        "    preview_max_actual_lead_m: 0.006\n"
+        "    preview_max_actual_lead_rad: 0.017\n"
+        "    preview_max_consecutive_actual_lead_errors: 3\n"
+    );
+    const rb_servo::DualArmConfig preview_cfg = rb_servo::loadConfigFromYaml(preview_path);
+    ::unlink(preview_path.c_str());
+    RB_CHECK(preview_cfg.cartesian_control.ruckig_follower.controller ==
+             rb_servo::RuckigFollowerController::DeltaPreview);
+    RB_CHECK(near(preview_cfg.cartesian_control.ruckig_follower.preview_max_actual_lead_m, 0.006));
+
+    const std::string preview_missing_bound_path = writeTempConfig(
+        "ruckig-follower-controller-preview-missing-bound",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    controller: delta_preview\n"
+        "    fallback_policy: fault\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(
+        preview_missing_bound_path,
+        "preview_max_projection_error_m"
+    ));
+    ::unlink(preview_missing_bound_path.c_str());
+
     const std::string bad_controller_path = writeTempConfig(
         "ruckig-follower-bad-controller",
         "schema: robotics_lab.rb_servo_server.v1\n"

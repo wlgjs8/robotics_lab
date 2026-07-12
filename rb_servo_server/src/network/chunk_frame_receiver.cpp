@@ -172,6 +172,53 @@ void parseOptionalDiagnostics(const json& packet, ChunkFrameReceiver::Diagnostic
     parseOptionalFiniteDouble(*camera, "right_focus_score", &out->camera_right_focus_score);
 }
 
+void parseChunkMetadata(const json& packet, ChunkFrameReceiver::Frame* out) {
+    if (!out) return;
+    const auto it = packet.find("chunk_metadata");
+    if (it == packet.end() || !it->is_object()) return;
+    parseOptionalUint64(*it, "observation_step_seq", &out->observation_step_seq);
+    parseOptionalUint64(*it, "activation_step_seq", &out->activation_step_seq);
+    parseOptionalNonnegativeInt(*it, "source_start_index", &out->source_start_index);
+    parseOptionalNonnegativeInt(*it, "original_horizon", &out->original_horizon);
+    parseOptionalNonnegativeInt(*it, "selected_horizon", &out->selected_horizon);
+    const auto proprio = it->find("proprio");
+    if (proprio != it->end() && proprio->is_object()) {
+        const auto valid = proprio->find("valid");
+        if (valid != proprio->end() && valid->is_boolean()) {
+            out->proprio_valid = valid->get<bool>();
+        }
+    }
+    const auto has_uint64 = [&](const char* key) {
+        const auto value = it->find(key);
+        return value != it->end() && value->is_number_unsigned();
+    };
+    const auto has_nonnegative_int = [&](const char* key) {
+        const auto value = it->find(key);
+        if (value == it->end() || !value->is_number_integer()) return false;
+        try {
+            const long long parsed = value->get<long long>();
+            return parsed >= 0 && parsed <= std::numeric_limits<int>::max();
+        } catch (const json::exception&) {
+            return false;
+        }
+    };
+    const bool required_fields =
+        has_uint64("observation_step_seq") && has_uint64("activation_step_seq") &&
+        has_nonnegative_int("source_start_index") &&
+        has_nonnegative_int("original_horizon") &&
+        has_nonnegative_int("selected_horizon") &&
+        proprio != it->end() && proprio->is_object() &&
+        proprio->contains("valid") && (*proprio)["valid"].is_boolean();
+    const bool alignment_consistent =
+        out->activation_step_seq >= out->observation_step_seq &&
+        out->activation_step_seq - out->observation_step_seq ==
+            static_cast<std::uint64_t>(out->source_start_index) &&
+        out->selected_horizon > 0 &&
+        out->original_horizon >= out->selected_horizon &&
+        out->source_start_index + out->selected_horizon == out->original_horizon;
+    out->chunk_metadata_present = required_fields && alignment_consistent;
+}
+
 }  // namespace
 
 ChunkFrameReceiver::ChunkFrameReceiver(const std::string& bind_uri) : bind_uri_(bind_uri) {}
@@ -196,10 +243,12 @@ bool ChunkFrameReceiver::parsePacket(const char* data, std::size_t size, Frame* 
     if (schema_it == packet.end() || !schema_it->is_string()) return false;
     const std::string schema = schema_it->get<std::string>();
     if (schema != "robotics_lab.chunk_overlay.v2" &&
+        schema != "robotics_lab.chunk_overlay.v3" &&
         schema != "robotics_lab.chunk_frame.v1") {
         return false;
     }
     Frame frame;
+    frame.schema_generation = schema == "robotics_lab.chunk_overlay.v3" ? 3 : 2;
     const auto seq_it = packet.find("seq");
     if (seq_it == packet.end() || !seq_it->is_number()) return false;
     frame.seq = seq_it->get<std::uint64_t>();
@@ -226,6 +275,7 @@ bool ChunkFrameReceiver::parsePacket(const char* data, std::size_t size, Frame* 
     }
 
     parseOptionalDiagnostics(packet, &frame.diagnostics);
+    parseChunkMetadata(packet, &frame);
 
     frame.recv_steady_sec = steadyNowSec();
     *out = frame;

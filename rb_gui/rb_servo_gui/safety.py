@@ -15,6 +15,33 @@ from .state_receiver import StateStore
 _FLOOR_Z_LINE_RE = re.compile(r"^(\s*z_min_m\s*:\s*)([0-9.eE+-]+)(.*)$")
 
 
+def server_safety_constraint_config_enabled(
+    constraint: Literal["floor_constraint", "user_floor_constraint"],
+    config_path: str | Path | None = None,
+) -> bool | None:
+    """Return the tracked server config's safety enable flag.
+
+    ``None`` means the launch config is unavailable or malformed.  This is a
+    read-only GUI capability check; the server remains the runtime authority.
+    """
+    if constraint not in ("floor_constraint", "user_floor_constraint"):
+        raise ValueError(f"unsupported safety constraint {constraint}")
+    raw_path = str(config_path) if config_path is not None else os.environ.get(
+        "RB_GUI_SERVER_CONFIG_PATH", ""
+    ).strip()
+    if not raw_path:
+        return None
+    try:
+        import yaml
+
+        with Path(raw_path).open(encoding="utf-8") as handle:
+            config = yaml.safe_load(handle)
+        enabled = config["safety"][constraint]["enable"]
+    except Exception:  # unreadable/invalid launch config -> capability unknown
+        return None
+    return enabled if isinstance(enabled, bool) else None
+
+
 def persist_floor_z_to_config(config_path: str | Path, floor_z_m: float) -> tuple[bool, str]:
     """Rewrite floor_constraint.z_min_m in the server config yaml (text-level,
     comments preserved) so a viser "Send floor z" survives a stack restart.
@@ -410,6 +437,11 @@ class OperatorSafety:
         latest = self.latest_valid()
         if latest is None:
             return False, "state stream missing or stale"
+        configured = server_safety_constraint_config_enabled("floor_constraint")
+        if configured is False:
+            if not enabled:
+                return True, "stand floor already disabled by server config; no command sent"
+            return False, "stand floor disabled by server config; no command sent"
         try:
             self.command_client.send_set_safety_floor_enabled(
                 bool(enabled), timeout_sec=self.command_timeout_sec
@@ -470,6 +502,11 @@ class OperatorSafety:
         latest = self.latest_valid()
         if latest is None:
             return False, "state stream missing or stale"
+        configured = server_safety_constraint_config_enabled("user_floor_constraint")
+        if configured is False:
+            if not enable:
+                return True, "user floor already disabled by server config; no command sent"
+            return False, "user floor disabled by server config; no command sent"
         try:
             self.command_client.send_set_user_safety_floor_plane(
                 point_m, normal, margin_m=margin_m, enable=enable,

@@ -162,6 +162,16 @@ DELTA_TWIST_ACCEL_COMMAND_SUFFIXES = (
     "ry_rad_s2",
     "rz_rad_s2",
 )
+DELTA_PREVIEW_FLOAT_SUFFIXES = (
+    "projection_error_m",
+    "projection_error_rad",
+    "actual_lead_m",
+    "actual_lead_rad",
+)
+DELTA_PREVIEW_INTEGER_SUFFIXES = (
+    "projection_error_count",
+    "actual_lead_error_count",
+)
 
 
 class AnalysisError(Exception):
@@ -295,6 +305,28 @@ def make_chunk_diagnostics_bucket() -> dict[str, object]:
             for column in (*CHUNK_DIAGNOSTIC_INTEGER_COLUMNS, *CHUNK_DIAGNOSTIC_FLOAT_COLUMNS)
         },
         "wire_sequences": set(),
+    }
+
+
+def make_delta_preview_bucket() -> dict[str, object]:
+    return {
+        "rows": 0,
+        "values": {
+            suffix: []
+            for suffix in (*DELTA_PREVIEW_FLOAT_SUFFIXES, *DELTA_PREVIEW_INTEGER_SUFFIXES)
+        },
+    }
+
+
+def finalize_delta_preview_bucket(bucket: dict[str, object]) -> dict[str, object]:
+    values = bucket["values"]
+    assert isinstance(values, dict)
+    return {
+        "rows": bucket["rows"],
+        "series": {
+            suffix: percentile_summary(samples)
+            for suffix, samples in values.items()
+        },
     }
 
 
@@ -451,6 +483,10 @@ def analyze_csv(path: Path) -> dict[str, object]:
             "left": make_delta_twist_bucket(),
             "right": make_delta_twist_bucket(),
         }
+        delta_preview_series = {
+            "left": make_delta_preview_bucket(),
+            "right": make_delta_preview_bucket(),
+        }
         chunk_diagnostics = make_chunk_diagnostics_bucket()
         first_loop_start_ns: float | None = None
         last_loop_end_ns: float | None = None
@@ -515,6 +551,23 @@ def analyze_csv(path: Path) -> dict[str, object]:
                     tracking_errors[arm].append(abs(actual - sent))
 
                 controller = (row.get(f"{arm}_follower_controller") or "").strip()
+                preview_bucket = delta_preview_series[arm]
+                preview_values = preview_bucket["values"]
+                assert isinstance(preview_values, dict)
+                preview_row_present = controller == "delta_preview"
+                for suffix in DELTA_PREVIEW_FLOAT_SUFFIXES:
+                    value = optional_float(row, f"{arm}_follower_{suffix}", row_number)
+                    if value is not None:
+                        preview_row_present = True
+                        preview_values[suffix].append(value)
+                for suffix in DELTA_PREVIEW_INTEGER_SUFFIXES:
+                    value = optional_int(row, f"{arm}_follower_{suffix}", row_number)
+                    if value is not None:
+                        preview_row_present = True
+                        preview_values[suffix].append(value)
+                if preview_row_present:
+                    preview_bucket["rows"] = int(preview_bucket["rows"]) + 1
+
                 delta_columns = (
                     f"{arm}_delta_twist_pending_linear_norm_m",
                     f"{arm}_delta_twist_pending_angular_norm_rad",
@@ -679,6 +732,10 @@ def analyze_csv(path: Path) -> dict[str, object]:
         "delta_twist": {
             "left": finalize_delta_twist_bucket(delta_twist_series["left"]),
             "right": finalize_delta_twist_bucket(delta_twist_series["right"]),
+        },
+        "delta_preview": {
+            "left": finalize_delta_preview_bucket(delta_preview_series["left"]),
+            "right": finalize_delta_preview_bucket(delta_preview_series["right"]),
         },
     }
 
@@ -883,6 +940,25 @@ def format_report(metrics: dict[str, object], budget: ProfileBudget, failures: S
                 f"  {arm} angular_realized_ratio: "
                 f"{fmt_percentiles(arm_metrics.get('angular_realized_ratio'))}"
             )
+
+    delta_preview = metrics.get("delta_preview")
+    if isinstance(delta_preview, dict) and any(
+        isinstance(delta_preview.get(arm), dict)
+        and int(delta_preview[arm].get("rows", 0)) > 0
+        for arm in ("left", "right")
+    ):
+        lines.append("delta_preview:")
+        for arm in ("left", "right"):
+            arm_metrics = delta_preview.get(arm)
+            if not isinstance(arm_metrics, dict) or int(arm_metrics.get("rows", 0)) <= 0:
+                continue
+            lines.append(f"  {arm}: rows={arm_metrics['rows']}")
+            series = arm_metrics.get("series")
+            if isinstance(series, dict):
+                for suffix in (*DELTA_PREVIEW_FLOAT_SUFFIXES, *DELTA_PREVIEW_INTEGER_SUFFIXES):
+                    summary = series.get(suffix)
+                    if isinstance(summary, dict) and int(summary.get("count", 0)) > 0:
+                        lines.append(f"  {arm} {suffix}: {fmt_percentiles(summary)}")
     if failures:
         lines.append("budget_failures:")
         lines.extend(f"- {failure}" for failure in failures)

@@ -66,6 +66,23 @@ static std::string withDiagnostics(std::string packet) {
   return packet;
 }
 
+static std::string asV3WithMetadata(std::string packet, bool proprio_valid) {
+  const std::string from = "robotics_lab.chunk_overlay.v2";
+  const std::string to = "robotics_lab.chunk_overlay.v3";
+  std::size_t pos = 0;
+  while ((pos = packet.find(from, pos)) != std::string::npos) {
+    packet.replace(pos, from.size(), to);
+    pos += to.size();
+  }
+  packet.pop_back();
+  packet +=
+      ",\"chunk_metadata\":{\"observation_step_seq\":12,"
+      "\"activation_step_seq\":19,\"source_start_index\":7,"
+      "\"original_horizon\":24,\"selected_horizon\":17,"
+      "\"proprio\":{\"valid\":" + std::string(proprio_valid ? "true" : "false") + "}}}";
+  return packet;
+}
+
 int main() {
   // -- Test 1: parsePacket accepts the producer's overlay wire format. --------
   std::printf("Test 1: parsePacket\n");
@@ -137,8 +154,30 @@ int main() {
     check(frame.left_delta.count == ChunkFrameReceiver::kMaxSteps, "delta steps clamped to kMaxSteps");
   }
 
-  // -- Test 5: live loopback receive + receiver_seq dedup. ---------------------
-  std::printf("Test 5: loopback receive\n");
+  // -- Test 5: v3 alignment/proprio metadata is preserved for fail-closed use. -
+  std::printf("Test 5: v3 metadata\n");
+  {
+    const std::string pkt = asV3WithMetadata(makePacket(9, 8, true, true), true);
+    ChunkFrameReceiver::Frame frame;
+    check(ChunkFrameReceiver::parsePacket(pkt.data(), pkt.size(), &frame), "v3 packet parses");
+    check(frame.schema_generation == 3, "v3 generation marked");
+    check(frame.chunk_metadata_present && frame.proprio_valid, "proprio validity preserved");
+    check(frame.source_start_index == 7 && frame.selected_horizon == 17,
+          "alignment indices preserved");
+
+    std::string inconsistent = asV3WithMetadata(makePacket(10, 8, true, true), true);
+    const std::string valid_selected = "\"selected_horizon\":17";
+    const std::size_t selected_pos = inconsistent.find(valid_selected);
+    inconsistent.replace(selected_pos, valid_selected.size(), "\"selected_horizon\":18");
+    check(ChunkFrameReceiver::parsePacket(
+              inconsistent.data(), inconsistent.size(), &frame),
+          "inconsistent v3 packet remains diagnostic-readable");
+    check(!frame.chunk_metadata_present,
+          "inconsistent alignment metadata cannot satisfy motion contract");
+  }
+
+  // -- Test 6: live loopback receive + receiver_seq dedup. ---------------------
+  std::printf("Test 6: loopback receive\n");
   {
     const int port = 57263;
     ChunkFrameReceiver receiver("udp://127.0.0.1:" + std::to_string(port));
@@ -180,8 +219,8 @@ int main() {
     check(true, "receiver stops cleanly");
   }
 
-  // -- Test 6: empty bind = disabled but start() succeeds. ---------------------
-  std::printf("Test 6: disabled receiver\n");
+  // -- Test 7: empty bind = disabled but start() succeeds. ---------------------
+  std::printf("Test 7: disabled receiver\n");
   {
     ChunkFrameReceiver receiver("");
     check(receiver.start(), "empty bind starts as no-op");

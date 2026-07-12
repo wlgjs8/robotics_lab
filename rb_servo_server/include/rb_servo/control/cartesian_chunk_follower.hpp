@@ -27,6 +27,12 @@ struct CartesianChunkFollowerConfig {
   AxisLimit ang{2.0, 12.0, 60.0};  // angular per-axis limits (rad ...)
   ChunkWindowConfig window{};
   GuardConfig guard{};
+  double max_projection_error_m{0.0};
+  double max_projection_error_rad{0.0};
+  int max_consecutive_projection_errors{0};
+  double max_actual_lead_m{0.0};
+  double max_actual_lead_rad{0.0};
+  int max_consecutive_actual_lead_errors{0};
 };
 
 struct FollowerDiag {
@@ -40,6 +46,14 @@ struct FollowerDiag {
   int seg_step_index{-1};        // absolute chunk index (-1 = ring-down/no data)
   std::uint64_t seg_wire_seq{0}; // producer packet seq / flow chunk id
   std::uint64_t seg_recv_seq{0}; // receiver-local accepted-frame count
+  double projection_error_m{0.0};
+  double projection_error_rad{0.0};
+  int consecutive_projection_errors{0};
+  double actual_lead_m{0.0};
+  double actual_lead_rad{0.0};
+  int consecutive_actual_lead_errors{0};
+  bool infeasible_fault{false};
+  bool actual_lead_fault{false};
 };
 
 class CartesianChunkFollower {
@@ -55,6 +69,11 @@ class CartesianChunkFollower {
   // Already active: preempt — swap the window frame but KEEP the chained state
   // (receding-horizon, no discontinuity at the chunk seam).
   void submitFrame(const ChunkFrame& frame, const Pose6D& current_pose);
+  // Delta-preview input: integrate each local/body delta on the server using
+  // the canonical Eigen/Pinocchio SE(3) path, then feed the resulting absolute
+  // knots to the same Ruckig receding-horizon follower.
+  void submitDeltaFrame(const ChunkFrame& frame, const Pose6D& current_pose);
+  void updateActualLead(const Pose6D& actual_pose);
 
   bool active() const { return active_; }
   void deactivate();
@@ -102,6 +121,7 @@ class CartesianChunkFollower {
   double current_grip_{0.0};
   Pose6D last_pose_{};
   FollowerDiag diag_{};
+  int actual_lead_checked_segment_{-1};
 };
 
 }  // namespace rb_servo::control

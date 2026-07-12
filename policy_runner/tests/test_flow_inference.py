@@ -332,5 +332,60 @@ class FlowInferenceCliTest(unittest.TestCase):
         self.assertEqual(snapshot["activation_monotonic_ns"], 2_013_000_000)
 
 
+    def test_chunk_activation_skips_only_policy_steps_emitted_after_observation(self) -> None:
+        import numpy as np
+
+        from policy_runner.flow_inference import FlowMatchingActionSource
+
+        source = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
+        source._init_inference_timing_state()
+        source._stream_activation_candidate_timing = None
+        source._stream_activation_candidate_metadata = {
+            "observation_step_seq": 10,
+            "observation_bundle_seq": 123,
+        }
+        source._stream_emitted_policy_steps = 13
+        source._last_overlay_payload = None
+        source._chunk_crossfade_steps = 0
+        source.policy_dt_sec = 1.0 / 30.0
+        source._print_chunk_enabled = False
+        source._print_tracking_enabled = False
+        source._chunk_overlay_publisher = None
+        source._overlay_chain_pending = None
+        source._inference_clock_ns = lambda: 1_000_000_000
+
+        chunk = np.arange(8 * 14, dtype=np.float32).reshape(8, 14)
+        source._activate_chunk(chunk, now_monotonic=1.0)
+
+        self.assertTrue(np.array_equal(source._chunk, chunk[3:]))
+        self.assertEqual(source._active_chunk_metadata["source_start_index"], 3)
+        self.assertEqual(source._active_chunk_metadata["selected_horizon"], 5)
+
+    def test_cold_start_alignment_keeps_row_zero(self) -> None:
+        import numpy as np
+
+        from policy_runner.flow_inference import FlowMatchingActionSource
+
+        source = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
+        source._init_inference_timing_state()
+        source._stream_activation_candidate_timing = None
+        source._stream_activation_candidate_metadata = {"observation_step_seq": 0}
+        source._stream_emitted_policy_steps = 0
+        source._last_overlay_payload = None
+        source._chunk_crossfade_steps = 0
+        source.policy_dt_sec = 1.0 / 30.0
+        source._print_chunk_enabled = False
+        source._print_tracking_enabled = False
+        source._chunk_overlay_publisher = None
+        source._overlay_chain_pending = None
+        source._inference_clock_ns = lambda: 1_000_000_000
+
+        chunk = np.arange(4 * 14, dtype=np.float32).reshape(4, 14)
+        source._activate_chunk(chunk, now_monotonic=1.0)
+
+        self.assertTrue(np.array_equal(source._chunk, chunk))
+        self.assertEqual(source._active_chunk_metadata["source_start_index"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

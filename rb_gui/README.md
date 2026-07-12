@@ -31,6 +31,15 @@ freedrive, and safety floor/ROI/user plane controls. One-shot commands
 auto-bracket the command-source lease per click (no operator take/release
 control), and the server remains the lease arbiter.
 
+The GUI also reads the tracked server config path exported by the stack
+launcher. When `safety.floor_constraint.enable` or
+`safety.user_floor_constraint.enable` is `false`, its corresponding controls
+initialize OFF and disabled. A persisted user-floor plane is not restored, and
+enable/disable requests are handled as local no-ops, so the GUI does not flood
+the server with lifecycle commands that the configured safety capability cannot
+accept. If the config cannot be read, capability remains unknown and the server
+still makes the authoritative accept/reject decision.
+
 ## F/T Sensor Visualization
 
 The scene renders each Robotous RFT64-6A01 URDF/CAD measurement-frame estimate

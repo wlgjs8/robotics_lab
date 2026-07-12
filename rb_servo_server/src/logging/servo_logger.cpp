@@ -122,6 +122,12 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_follower_corner"
        << ',' << side << "_follower_divergence_pos_m"
        << ',' << side << "_follower_divergence_ang_rad"
+       << ',' << side << "_follower_projection_error_m"
+       << ',' << side << "_follower_projection_error_rad"
+       << ',' << side << "_follower_projection_error_count"
+       << ',' << side << "_follower_actual_lead_m"
+       << ',' << side << "_follower_actual_lead_rad"
+       << ',' << side << "_follower_actual_lead_error_count"
        << ',' << side << "_follower_reanchor_count"
        << ',' << side << "_safety_intervention_recent"
        << ',' << side << "_delta_twist_pending_linear_norm_m"
@@ -794,6 +800,12 @@ void writeArmProfilingColumns(
        << ',' << telemetry.follower_corner
        << ',' << telemetry.follower_divergence_pos_m
        << ',' << telemetry.follower_divergence_ang_rad
+       << ',' << telemetry.follower_projection_error_m
+       << ',' << telemetry.follower_projection_error_rad
+       << ',' << telemetry.follower_projection_error_count
+       << ',' << telemetry.follower_actual_lead_m
+       << ',' << telemetry.follower_actual_lead_rad
+       << ',' << telemetry.follower_actual_lead_error_count
        << ',' << telemetry.follower_reanchor_count
        << ',' << telemetry.safety_intervention_recent
        << ',' << telemetry.delta_twist_pending_linear_norm_m

@@ -365,21 +365,25 @@ execution while loading translation/rotation increments are projected and a
 bounded SE(3) correction is composed around a fixed Hold or latest accepted
 policy-command equilibrium. Zero-wrench stiffness recenters all six offsets
 without absorbing measured motion into that equilibrium. The current real
-profile regulates in the RFT64 sensor-axis orientation about the TCP endpoint.
-This `tcp_origin` stage follows the sensor-origin direction capture and removes
-the 202.642 mm sensor-to-TCP lever arm from the compliance pivot while leaving
-the hard-guard wrench path unchanged.
+profile is a supervised translation-only Hold gate using `tcp_origin`: the
+controller follows the accepted rbpodo EFT/TCP-axis orientation and applies the
+correction about the TCP endpoint. Rotational axes remain disabled.
 The Cartesian controller selects jerk from a recursively viable braking
-envelope rather than integrating and clamping state, so velocity-bound
-recentering retains braking authority without adding wrench averaging.
+envelope rather than integrating and clamping state. A same-direction wrench
+outside an axis deadband reserves a zero-velocity, zero-acceleration loaded
+hold without allowing the compliant offset to reverse toward zero; deadband
+release restores the nominal stiffness-driven recenter path. Recontact during
+that return is first jerk-bounded to a stop before the loaded-hold invariant
+takes ownership. This preserves boundary braking, recontact, and release
+recentering authority without adding wrench averaging.
 Surface-normal and resultant hard-limit calculations remain in their existing
 TCP/stand path. Hard-limit faults retain the normal
 motion-epoch interruption path. Activation, telemetry, and promotion constraints are defined in
 `rb_servo_server/docs/force_control.md`. The path is not safety-rated;
-`stack_real.yaml` currently exposes a supervised experimental dual-arm
-Cartesian-admittance stage with identical per-arm contact parameters. This is a
-physical bring-up configuration, not production
-acceptance.
+`stack_real.yaml` currently exposes a dual-arm supervised Gate 2 profile. Both
+geometric floor constraints are disabled by explicit operator decision, so the
+TCP/gripper-tip floor velocity damper and hard plane backstop are absent. This
+is a physical bring-up configuration, not production acceptance.
 
 ```yaml
 force_control:
@@ -408,6 +412,16 @@ Cartesian point-to-point final-pose target. It is MoveJ-like at the TCP level. F
 `policy_runner flow-infer` composes each ee_local per-step policy delta onto
 the measured or running TCP pose and emits absolute `tcp_target_stand`
 `TcpPoseTarget` setpoints.
+
+For the tracked real flow profile, the chunk overlay is schema v3 and the server
+uses `delta_preview`: the publisher aligns a warm result by the number of policy
+steps actually emitted since its camera observation, then the server integrates
+the remaining ee-local deltas and feeds the existing Ruckig p/v/a preview chain.
+Velocity proprio is the measured body delta over the image-time window; an
+unavailable bracket is explicit metadata and prevents preview activation. The
+server bounds both requested-to-preview projection error and
+preview-command-to-measured-TCP lead with mandatory config limits and a
+persistent fault policy.
 
 ### `TcpLinearMove`
 

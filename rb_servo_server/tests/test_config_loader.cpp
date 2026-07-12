@@ -188,6 +188,23 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(stack_real.force_torque.right.enable);
         RB_CHECK(stack_real.force_torque.left.frame_configured);
         RB_CHECK(stack_real.force_torque.right.frame_configured);
+        const auto& left_ft = stack_real.force_torque.left;
+        const auto& right_ft = stack_real.force_torque.right;
+        RB_CHECK(left_ft.calibration_id ==
+                 "right-derived-identical-hardware-force-axis-20260712");
+        RB_CHECK(right_ft.calibration_id == "physical-positive-force-axis-20260712");
+        RB_CHECK(near(left_ft.t_tcp_sensor.x, 0.0));
+        RB_CHECK(near(left_ft.t_tcp_sensor.y, 0.0));
+        RB_CHECK(near(left_ft.t_tcp_sensor.z, -0.202642));
+        RB_CHECK(near(left_ft.t_tcp_sensor.rx, 0.0));
+        RB_CHECK(near(left_ft.t_tcp_sensor.ry, 0.0));
+        RB_CHECK(near(left_ft.t_tcp_sensor.rz, 0.0));
+        RB_CHECK(near(right_ft.t_tcp_sensor.x, left_ft.t_tcp_sensor.x));
+        RB_CHECK(near(right_ft.t_tcp_sensor.y, left_ft.t_tcp_sensor.y));
+        RB_CHECK(near(right_ft.t_tcp_sensor.z, left_ft.t_tcp_sensor.z));
+        RB_CHECK(near(right_ft.t_tcp_sensor.rx, left_ft.t_tcp_sensor.rx));
+        RB_CHECK(near(right_ft.t_tcp_sensor.ry, left_ft.t_tcp_sensor.ry));
+        RB_CHECK(near(right_ft.t_tcp_sensor.rz, left_ft.t_tcp_sensor.rz));
         RB_CHECK(stack_real.force_control.provider == "project_native");
         RB_CHECK(stack_real.force_control.enable);
         RB_CHECK(stack_real.force_control.operating_mode == "cartesian_admittance");
@@ -195,8 +212,11 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(stack_real.force_control.supervised_experimental_real);
         RB_CHECK(stack_real.force_control.left.enable);
         RB_CHECK(stack_real.force_control.right.enable);
+        RB_CHECK(!stack_real.safety.floor_constraint.enable);
+        RB_CHECK(!stack_real.safety.user_floor_constraint.enable);
         const auto& left_force = stack_real.force_control.left;
         const auto& right_force = stack_real.force_control.right;
+        RB_CHECK(left_force.surface_source == "none");
         RB_CHECK(left_force.surface_source == right_force.surface_source);
         RB_CHECK(near(left_force.target_force_n, right_force.target_force_n));
         RB_CHECK(near(left_force.contact_enter_force_n, right_force.contact_enter_force_n));
@@ -214,9 +234,9 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(left_force.compliance_axes.x);
         RB_CHECK(left_force.compliance_axes.y);
         RB_CHECK(left_force.compliance_axes.z);
-        RB_CHECK(left_force.compliance_axes.roll);
-        RB_CHECK(left_force.compliance_axes.pitch);
-        RB_CHECK(left_force.compliance_axes.yaw);
+        RB_CHECK(!left_force.compliance_axes.roll);
+        RB_CHECK(!left_force.compliance_axes.pitch);
+        RB_CHECK(!left_force.compliance_axes.yaw);
         RB_CHECK(near(left_force.transverse_contact_enter_force_n, 2.5));
         RB_CHECK(near(left_force.transverse_contact_release_force_n, 1.5));
         RB_CHECK(near(left_force.torque_contact_enter_nm, 0.45));
@@ -238,8 +258,10 @@ bool testRepositoryConfigsParse() {
             right_force.torque_contact_release_nm
         ));
         RB_CHECK(right_force.compliance_axes.x && right_force.compliance_axes.y);
-        RB_CHECK(right_force.compliance_axes.z && right_force.compliance_axes.roll);
-        RB_CHECK(right_force.compliance_axes.pitch && right_force.compliance_axes.yaw);
+        RB_CHECK(right_force.compliance_axes.z);
+        RB_CHECK(!right_force.compliance_axes.roll);
+        RB_CHECK(!right_force.compliance_axes.pitch);
+        RB_CHECK(!right_force.compliance_axes.yaw);
         RB_CHECK(left_force.compliance_frame == "tcp_origin");
         RB_CHECK(left_force.compliance_frame == right_force.compliance_frame);
         RB_CHECK(near(left_force.hard_force_norm_n, 45.0));
@@ -859,6 +881,99 @@ bool testForceControlSchemaAndActivation() {
     const bool missing_identity_rejected = loadRejects(missing_identity_path);
     ::unlink(missing_identity_path.c_str());
     RB_CHECK(missing_identity_rejected);
+    return true;
+}
+
+// The floorless posture: motion-affecting cartesian_admittance must load with
+// BOTH the stand floor_constraint and the user_floor_constraint disabled, via
+// surface_source: none. This is the User/Stand-floor-free run path (bolt-pick
+// compliance without the geometric floor velocity damper). guard /
+// guarded_admittance still bind an enforcing floor, and floor_constraint /
+// user_floor_plane surfaces still require their plane (no fail-closed regression).
+bool testFloorlessForceControlSurfaceSourceNone() {
+    // Shared valid cartesian_admittance body; only surface_source / mode vary.
+    const auto forceControlBody = [](const std::string& surface_source,
+                                     const std::string& operating_mode) {
+        return std::string(
+            "schema: robotics_lab.rb_servo_server.v1\n"
+            "servo:\n"
+            "  send_at_tick_start: false\n"
+            "kinematics:\n"
+            "  enable: true\n"
+            "  provider: pinocchio\n"
+            "  urdf: \"" + rb3UrdfPath() + "\"\n"
+            "safety:\n"
+            "  floor_constraint:\n"
+            "    enable: false\n"
+            "  user_floor_constraint:\n"
+            "    enable: false\n"
+            "force_torque:\n"
+            "  source: rbpodo_eft\n"
+            "  left:\n"
+            "    enable: true\n"
+            "    frame_configured: true\n"
+            "    sensor_identity: rft64-left\n"
+            "    calibration_id: characterization-v1\n"
+            "    freshness_source: sequence\n"
+            "force_control:\n"
+            "  provider: project_native\n"
+            "  enable: true\n"
+            "  operating_mode: ") + operating_mode + "\n"
+            "  update_rate_hz: 500\n"
+            "  left:\n"
+            "    enable: true\n"
+            "    surface_source: " + surface_source + "\n"
+            "    compliance_frame: tcp_origin\n"
+            "    target_force_n: 2.0\n"
+            "    contact_enter_force_n: 3.5\n"
+            "    contact_release_force_n: 2.75\n"
+            "    force_deadband_n: 0.5\n"
+            "    hard_normal_force_n: 15.0\n"
+            "    hard_force_norm_n: 20.0\n"
+            "    hard_torque_norm_nm: 3.0\n"
+            "    debounce_samples: 3\n"
+            "    hard_limit_debounce_samples: 5\n"
+            "    release_dwell_sec: 0.1\n"
+            "    release_velocity_threshold_m_s: 0.002\n"
+            "    compliance_axes: [false, true, true, true, false, false]\n"
+            "  right:\n"
+            "    enable: false\n";
+    };
+
+    // 1) Floorless acceptance: cartesian_admittance + surface_source: none loads
+    //    with both floors disabled.
+    const std::string floorless_path = writeTempConfig(
+        "force-floorless-none", forceControlBody("none", "cartesian_admittance"));
+    const rb_servo::DualArmConfig floorless =
+        rb_servo::loadConfigFromYaml(floorless_path);
+    ::unlink(floorless_path.c_str());
+    RB_CHECK(floorless.force_control.enable);
+    RB_CHECK(floorless.force_control.operating_mode == "cartesian_admittance");
+    RB_CHECK(floorless.force_control.left.surface_source == "none");
+    RB_CHECK(!floorless.safety.floor_constraint.enable);
+    RB_CHECK(!floorless.safety.user_floor_constraint.enable);
+
+    // 2) Regression: surface_source: floor_constraint with the floor disabled
+    //    still fails closed (motion-affecting force control needs its plane).
+    const std::string missing_floor_path = writeTempConfig(
+        "force-floorless-floor-required",
+        forceControlBody("floor_constraint", "cartesian_admittance"));
+    const bool missing_floor_rejected = loadRejectsContaining(
+        missing_floor_path, "requires an enforcing safety.floor_constraint");
+    ::unlink(missing_floor_path.c_str());
+    RB_CHECK(missing_floor_rejected);
+
+    // 3) Restriction: surface_source: none is rejected for a surface-normal
+    //    unload mode (guarded_admittance) — it has no geometric contact surface.
+    const std::string none_guarded_path = writeTempConfig(
+        "force-floorless-none-guarded",
+        forceControlBody("none", "guarded_admittance"));
+    const bool none_guarded_rejected = loadRejectsContaining(
+        none_guarded_path,
+        "surface_source=none requires operating_mode monitor or cartesian_admittance");
+    ::unlink(none_guarded_path.c_str());
+    RB_CHECK(none_guarded_rejected);
+
     return true;
 }
 
@@ -1671,6 +1786,7 @@ int main() {
     if (!testUnknownKeysAndSchemaFail()) return 1;
     if (!testStatePublisherEndpointsParseAndValidate()) return 1;
     if (!testForceControlSchemaAndActivation()) return 1;
+    if (!testFloorlessForceControlSurfaceSourceNone()) return 1;
     if (!testCommandSourceConfigParsesAndValidates()) return 1;
     if (!testCartesianControlTuningParsesAndValidates()) return 1;
     if (!testRemovedRawScriptBackendRejected()) return 1;

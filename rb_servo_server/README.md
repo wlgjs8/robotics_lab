@@ -22,7 +22,9 @@ Implemented in this server:
 - tracking-error guard with configurable policy
 - latched fault state for EmergencyStop / real-mode tracking errors / robot state errors
 - fail-safe command validation so missing payloads do not become zero joint targets
-- Hold mode streaming the current actual joint position as a recoverable pause
+- Hold mode preserving the last accepted/sent joint reference as a recoverable
+  pause; measured-pose re-anchoring is reserved for explicit lifecycle
+  transitions such as Init Motion start/no-op, freedrive exit, and fault reset
 - capped filter dt so one late tick does not create a large motion step
 - servo period/jitter/filter-dt/safety logging
 - structured backend result taxonomy for mock and rbpodo paths
@@ -90,9 +92,30 @@ python3 tools/analyze_servo_log.py logs/servo_log.csv
 The servo CSV also carries the latest chunk-frame receive age/interarrival,
 policy inference timing, camera bundle/frame age and focus indicators, plus
 DeltaTwist per-arm execution budgets, acceleration commands, and a stable
-14-bit clamp mask. `analyze_servo_log.py` summarizes these optional columns and
+14-bit clamp mask. For `delta_preview`, it additionally records the Ruckig
+projection error and the commanded-pose lead over measured TCP, including each
+persistent-error count. `analyze_servo_log.py` summarizes these optional columns and
 continues to accept older logs that do not contain them. These fields are CSV
 telemetry only; they are not added to state JSON and do not affect control.
+
+## Flow chunk preview controller
+
+`cartesian_control`'s active `ruckig_follower.controller: delta_preview` profile is the
+timestamp-aligned flow-infer path. It accepts only chunk overlay schema v3 with
+valid camera-frame velocity proprio metadata, drops policy rows already elapsed
+between observation and activation on the publisher, integrates the remaining
+ee-local deltas with the canonical Eigen/Pinocchio SE(3) path, and previews the
+result through the existing Ruckig position/velocity/acceleration chain. Both
+arms consume the same aligned policy row; per-arm motion is preserved, including
+the near-zero inactive-arm intervals present in sequential PIKA UMI episodes.
+
+The projection-error and actual-lead thresholds and their consecutive-error
+budgets are mandatory positive config values. `fallback_policy: fault` is also
+mandatory for this controller. Missing v3 metadata, invalid velocity proprio,
+or persistent infeasibility therefore holds and ultimately faults; the server
+does not substitute guessed bounds. The legacy `delta_twist` controller remains
+parseable for regression profiles but is no longer selected by the tracked real
+flow profile.
 
 ## Hardware-free validation
 
@@ -116,7 +139,7 @@ Fail-safe rule:
 ```text
 valid command   → filtered/clamped target
 invalid command → previous safe sent target
-stale command   → Hold
+stale command   → Hold at the last accepted/sent reference
 Cartesian/IK not available → previous safe sent target
 EmergencyStop   → latch current/last-safe pose and ignore motion commands
 real tracking error → fault latch by default
@@ -173,13 +196,13 @@ The C++ receive timestamp is used for timeout checks.
 ## Force-control status
 
 Force control is connected to the Cartesian servo path. The tracked real stack
-currently exposes a supervised experimental dual-arm Cartesian-admittance stage
-with identical per-arm contact parameters. Its first six-axis stage uses the
-RFT64 sensor axes and physical sensor origin; the simulation stack remains off.
-Physical production acceptance is still required. See `docs/force_control.md`.
-The current responsive profile starts outside a 1.5 N / 0.25 Nm quiet zone and
-allows up to 20 mm / 0.08 rad bounded compliance. Separate hard guards remain
-40 N normal, 45 N resultant, and 7 Nm.
+is currently at supervised Gate 2: translation-only `cartesian_admittance`,
+`surface_source: none`, and `compliance_frame: tcp_origin`. The controller axes
+therefore follow the accepted rbpodo EFT/TCP orientation and corrections use the
+TCP endpoint. Rotations remain locked. Both geometric floor constraints are off
+by explicit operator decision, so this profile has no TCP/gripper-tip floor
+backstop. The simulation stack remains force-off. See
+`docs/force_control.md` and the acceptance runbook.
 
 ## Viser operator GUI
 

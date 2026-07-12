@@ -423,6 +423,215 @@ bool testResponsiveRealProfileMovesOnWeakWrenchAndUsesExpandedTravel() {
     return true;
 }
 
+bool testRealProfileSustainedWrenchNeverReturnsTowardZero() {
+    const rb_servo::ForceControlConfig config = realProfileConfig();
+    rb_servo::ForceController controller(config);
+    controller.engage();
+    constexpr double dt = 0.002;
+
+    rb_servo::ForceControlCommand command;
+    command.mode = rb_servo::ForceControlMode::Admittance;
+    command.enabled_axis.y = true;
+    command.enabled_axis.roll = true;
+
+    // These loads exceed the configured deadbands and drive both axes into the
+    // real profile's bounded travel envelope. While the same-direction wrench
+    // remains active, neither axis may move back toward the zero-offset command
+    // equilibrium. Recentring is reserved for the zero-wrench phase.
+    rb_servo::Wrench6D wrench;
+    wrench.fy = 6.0;
+    wrench.tx = 1.2;
+    double furthest_y = 0.0;
+    double furthest_rx = 0.0;
+    double max_y_return = 0.0;
+    double max_rx_return = 0.0;
+    for (int i = 0; i < 4000; ++i) {
+        const auto proposal = controller.propose(
+            wrench, command, rb_servo::Vec6{}, dt
+        );
+        if (!proposal.valid) {
+            std::cerr << "sustained-wrench hold i=" << i
+                      << ": " << proposal.reason << "\n";
+        }
+        RB_CHECK(proposal.valid);
+        RB_CHECK(proposal.wrench_error_tcp.fy < 0.0);
+        RB_CHECK(proposal.wrench_error_tcp.tx < 0.0);
+        furthest_y = std::min(furthest_y, proposal.state.offset_tcp.y);
+        furthest_rx = std::min(furthest_rx, proposal.state.offset_tcp.rx);
+        max_y_return = std::max(
+            max_y_return, proposal.state.offset_tcp.y - furthest_y
+        );
+        max_rx_return = std::max(
+            max_rx_return, proposal.state.offset_tcp.rx - furthest_rx
+        );
+        RB_CHECK(controller.commit(proposal));
+    }
+    RB_CHECK(controller.state().offset_tcp.y < -0.015);
+    RB_CHECK(controller.state().offset_tcp.rx < -0.06);
+    if (max_y_return > 1e-12 || max_rx_return > 1e-12) {
+        std::cerr << "sustained return y=" << max_y_return
+                  << " rx=" << max_rx_return << "\n";
+    }
+    RB_CHECK(max_y_return <= 1e-12);
+    RB_CHECK(max_rx_return <= 1e-12);
+
+    // The weak loads leave only 0.5 N / 0.1 Nm after deadband removal. Their
+    // corresponding spring terms are larger at the displaced pose, so the
+    // unconstrained SMD equation would recenter despite continued contact.
+    // Loaded hold must instead keep the furthest reached position.
+    wrench.fy = 2.0;
+    wrench.tx = 0.35;
+    furthest_y = controller.state().offset_tcp.y;
+    furthest_rx = controller.state().offset_tcp.rx;
+    for (int i = 0; i < 1500; ++i) {
+        const auto proposal = controller.propose(
+            wrench, command, rb_servo::Vec6{}, dt
+        );
+        RB_CHECK(proposal.valid);
+        RB_CHECK(proposal.wrench_error_tcp.fy < 0.0);
+        RB_CHECK(proposal.wrench_error_tcp.tx < 0.0);
+        furthest_y = std::min(furthest_y, proposal.state.offset_tcp.y);
+        furthest_rx = std::min(furthest_rx, proposal.state.offset_tcp.rx);
+        RB_CHECK(proposal.state.offset_tcp.y <= furthest_y + 1e-12);
+        RB_CHECK(proposal.state.offset_tcp.rx <= furthest_rx + 1e-12);
+        RB_CHECK(controller.commit(proposal));
+    }
+    RB_CHECK(std::abs(controller.state().velocity_tcp.y) < 1e-9);
+    RB_CHECK(std::abs(controller.state().velocity_tcp.rx) < 1e-9);
+    RB_CHECK(std::abs(controller.state().acceleration_tcp.y) < 1e-9);
+    RB_CHECK(std::abs(controller.state().acceleration_tcp.rx) < 1e-9);
+
+    for (int i = 0; i < 3000; ++i) {
+        const auto proposal = controller.propose(
+            rb_servo::Wrench6D{}, command, rb_servo::Vec6{}, dt
+        );
+        RB_CHECK(proposal.valid);
+        RB_CHECK(controller.commit(proposal));
+    }
+    RB_CHECK(std::abs(controller.state().offset_tcp.y) < 1e-4);
+    RB_CHECK(std::abs(controller.state().offset_tcp.rx) < 1e-4);
+
+    // Exercise the mirrored positive-offset transform as well.
+    rb_servo::ForceController mirrored(config);
+    mirrored.engage();
+    wrench.fy = -6.0;
+    wrench.tx = -1.2;
+    for (int i = 0; i < 4000; ++i) {
+        const auto proposal = mirrored.propose(
+            wrench, command, rb_servo::Vec6{}, dt
+        );
+        RB_CHECK(proposal.valid);
+        RB_CHECK(mirrored.commit(proposal));
+    }
+    RB_CHECK(mirrored.state().offset_tcp.y > 0.015);
+    RB_CHECK(mirrored.state().offset_tcp.rx > 0.06);
+    wrench.fy = -2.0;
+    wrench.tx = -0.35;
+    double positive_y = mirrored.state().offset_tcp.y;
+    double positive_rx = mirrored.state().offset_tcp.rx;
+    for (int i = 0; i < 1500; ++i) {
+        const auto proposal = mirrored.propose(
+            wrench, command, rb_servo::Vec6{}, dt
+        );
+        RB_CHECK(proposal.valid);
+        positive_y = std::max(positive_y, proposal.state.offset_tcp.y);
+        positive_rx = std::max(positive_rx, proposal.state.offset_tcp.rx);
+        RB_CHECK(proposal.state.offset_tcp.y >= positive_y - 1e-12);
+        RB_CHECK(proposal.state.offset_tcp.rx >= positive_rx - 1e-12);
+        RB_CHECK(mirrored.commit(proposal));
+    }
+    return true;
+}
+
+bool testRealProfileRecontactWhileRecenteringBrakesWithoutFault() {
+    const rb_servo::ForceControlConfig config = realProfileConfig();
+    constexpr double dt = 0.002;
+    for (double measured_sign : {-1.0, 1.0}) {
+        const double correction_direction = -measured_sign;
+        for (int release_ticks : {10, 50, 100, 200}) {
+            rb_servo::ForceController controller(config);
+            controller.engage();
+
+            rb_servo::Wrench6D strong_load;
+            strong_load.fx = measured_sign * 6.0;
+            for (int i = 0; i < 2500; ++i) {
+                const auto proposal = controller.propose(
+                    strong_load, xCommand(), rb_servo::Vec6{}, dt
+                );
+                RB_CHECK(proposal.valid);
+                RB_CHECK(controller.commit(proposal));
+            }
+            RB_CHECK(
+                correction_direction * controller.state().offset_tcp.x > 0.015
+            );
+
+            // Begin the stiffness-driven return, then restore a weaker contact
+            // while velocity still points toward zero. The controller cannot
+            // reverse that velocity in one jerk-limited tick; recontact must
+            // remain proposal-valid while the return branch brakes it.
+            for (int i = 0; i < release_ticks; ++i) {
+                const auto proposal = controller.propose(
+                    rb_servo::Wrench6D{}, xCommand(), rb_servo::Vec6{}, dt
+                );
+                RB_CHECK(proposal.valid);
+                RB_CHECK(controller.commit(proposal));
+            }
+            RB_CHECK(
+                correction_direction * controller.state().offset_tcp.x > 0.0
+            );
+            RB_CHECK(
+                correction_direction * controller.state().velocity_tcp.x < 0.0
+            );
+
+            rb_servo::Wrench6D weak_recontact;
+            weak_recontact.fx = measured_sign * 2.0;
+            bool stopped_return = false;
+            double aligned_offset_when_stopped = 0.0;
+            for (int i = 0; i < 3000; ++i) {
+                const auto proposal = controller.propose(
+                    weak_recontact, xCommand(), rb_servo::Vec6{}, dt
+                );
+                if (!proposal.valid) {
+                    std::cerr << "recontact braking sign=" << measured_sign
+                              << " release_ticks=" << release_ticks
+                              << " i=" << i << ": " << proposal.reason << "\n";
+                }
+                RB_CHECK(proposal.valid);
+                RB_CHECK(
+                    correction_direction * proposal.wrench_error_tcp.fx > 0.0
+                );
+                RB_CHECK(controller.commit(proposal));
+
+                const double aligned_velocity = correction_direction *
+                    controller.state().velocity_tcp.x;
+                const double aligned_offset = correction_direction *
+                    controller.state().offset_tcp.x;
+                if (!stopped_return && aligned_velocity >= 0.0) {
+                    stopped_return = true;
+                    aligned_offset_when_stopped = aligned_offset;
+                }
+                if (stopped_return) {
+                    RB_CHECK(aligned_offset >= aligned_offset_when_stopped - 1e-12);
+                }
+            }
+            if (!stopped_return) {
+                std::cerr << "recontact did not stop sign=" << measured_sign
+                          << " release_ticks=" << release_ticks
+                          << " x=" << controller.state().offset_tcp.x
+                          << " v=" << controller.state().velocity_tcp.x
+                          << " a=" << controller.state().acceleration_tcp.x << "\n";
+            }
+            RB_CHECK(stopped_return);
+            RB_CHECK(
+                correction_direction * controller.state().offset_tcp.x > 0.0
+            );
+            RB_CHECK(std::abs(controller.state().velocity_tcp.x) < 1e-9);
+            RB_CHECK(std::abs(controller.state().acceleration_tcp.x) < 1e-9);
+        }
+    }
+    return true;
+}
+
 bool testProposalProvenancePreventsStaleOrCrossControllerCommit() {
     rb_servo::ForceController first(controllerConfig());
     rb_servo::ForceController second(controllerConfig());
@@ -482,6 +691,8 @@ int main() {
     if (!testRealProfileAllCartesianAxesStayBoundedWithoutFault()) return 1;
     if (!testRealProfileReleaseSweepRemainsRecursivelyFeasible()) return 1;
     if (!testResponsiveRealProfileMovesOnWeakWrenchAndUsesExpandedTravel()) return 1;
+    if (!testRealProfileSustainedWrenchNeverReturnsTowardZero()) return 1;
+    if (!testRealProfileRecontactWhileRecenteringBrakesWithoutFault()) return 1;
     if (!testProposalProvenancePreventsStaleOrCrossControllerCommit()) return 1;
     if (!testWrenchDeadbandSuppressesNoiseAndPreservesExcessSign()) return 1;
     std::cout << "force_controller tests passed\n";

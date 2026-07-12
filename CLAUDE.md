@@ -131,3 +131,5 @@ Scattered docs don't all track the latest direction. Key gotchas (full list in `
 ## Development Rules
 
 Work only on the assigned task; prefer small reviewable changes; keep configs strict and fail-closed; update tests, docs, and acceptance scripts together with behavior. Never fake rbpodo, Pinocchio, RealSense, SpaceMouse, or camera APIs — if a dependency is missing, report it and don't claim the gate passed. Don't claim C++/Pinocchio/Cartesian runtime acceptance passed unless the command was actually run.
+
+No silent fallback defaults for safety-relevant parameters (applies to every component — C++, `rb_gui`, `policy_runner`). Any value that bounds motion, contact, a tolerance, geometry/frames, or another safety-affecting decision must come from its authoritative source (server config, contract doc, measured evidence). If that source is missing or unreadable, FAIL CLOSED — don't fire/move, return `None`/error, and surface the reason — rather than substituting a guessed or hard-coded default that can be wrong in the unsafe direction (e.g. a tolerance that lets the server plan a move when the caller assumed a no-op).

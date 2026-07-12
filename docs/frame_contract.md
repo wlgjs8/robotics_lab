@@ -58,12 +58,12 @@ the same direction: the pose of the F/T sensor frame expressed in that arm's
 TCP frame. Sensor-fixed bias is removed before applying this wrench transform;
 payload/gravity and residual tare are then removed in the TCP frame.
 
-The active RB3-730/Pika URDFs explicitly define the Robotous RFT64-6A01
+The active RB3-730/Pika URDFs explicitly define the Robotous RFT64-6A01 CAD
 measurement frame as `ft_sensor_measurement`. The combined Pika CAD already
 contains the sensor geometry: the RFT64 body matches the CAD from
 `attachment_site` z=15 mm through z=45 mm. The sensor's model-defined
 measurement site is the tool-side face at z=45 mm, with the Pika CAD's +90
-degree yaw convention. Both active URDFs therefore encode:
+degree yaw convention. Both active URDFs therefore encode the geometry estimate:
 
 ```text
 T_attachment_ft_sensor_base        = xyz [0, 0, 0.015], rpy [0, 0, pi/2]
@@ -71,12 +71,23 @@ T_ft_sensor_base_measurement       = xyz [0, 0, 0.030], rpy [0, 0, 0]
 T_tcp_sensor                       = xyz [0, 0, -0.202642], rpy [0, 0, pi/2]
 ```
 
-This is a CAD-derived configured transform, not positive-axis acceptance. The
-controller-reported raw wrench axes must still be checked with a known positive
-load on all six axes before this frame is eligible for enforcement. `rb_gui`
-reads the measurement-frame estimate from the viewer URDF and renders the raw
-wrench in those URDF/CAD-authored local axes; the GUI labels the axes and sensor
-presence as unverified and does not infer a frame from a mesh or zero config.
+The rbpodo EFT fields do not use that CAD yaw. In the 2026-07-12 right-arm
+positive-endpoint-to-TCP capture, the former `+pi/2` runtime rotation produced
+`+X -> +Y` and `+Y -> -X`, while Z polarity was correct. Removing that rotation
+gives the accepted positive reaction mapping `+X -> +X`, `+Y -> +Y`, and
+`+Z -> +Z`. The operator declared both installed arm/sensor assemblies
+identical, so the tracked physical profile uses for both arms:
+
+```text
+T_tcp_rbpodo_eft = xyz [0, 0, -0.202642], rpy [0, 0, 0]
+```
+
+This acceptance covers the three positive force axes only. Torque-axis checks,
+sensor serials, payload/COM, and production force-motion acceptance remain
+pending. `rb_gui` still reads `ft_sensor_measurement` from the viewer URDF for
+the CAD-local sensor overlay; use the TCP gizmo together with the transformed
+surface/compliance wrench for the controller-axis check. CAD orientation must
+not be substituted for the empirically accepted rbpodo EFT source frame.
 
 ## Mount Orientation Convention
 

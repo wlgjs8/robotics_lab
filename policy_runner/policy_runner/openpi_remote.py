@@ -453,6 +453,12 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self._last_obs_camera_bundle: Any | None = None
         self._last_obs_camera_time_sec: float | None = None
         self._last_obs_camera_seq: int | None = None
+        self._last_velproprio_diagnostics: dict[str, object] = {
+            "sample_mode": self.velproprio_sample_mode,
+            "source": self.velproprio_source,
+            "valid": False,
+            "zero_reason": "not_sampled",
+        }
         self.command_family = FLOW_COMMAND_LABEL
         # Fake-image smoke mode runs camera-less so the runtime does not gate on frames.
         self.camera_names = [] if self._fake_images else [str(name) for name in camera_names]
@@ -578,6 +584,16 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # via RB_GUI_CHUNK_OVERLAY_ENDPOINT; telemetry-only, best-effort UDP.
         self._last_overlay_payload = None
         self._chunk_overlay_seq = 0
+        self._stream_emitted_policy_steps = 0
+        self._active_chunk_metadata: dict[str, object] | None = None
+        self._stream_next_chunk_metadata: dict[str, object] | None = None
+        self._stream_activation_candidate_metadata: dict[str, object] | None = None
+        self.checkpoint_id = str(
+            os.environ.get("FLOW_INFER_CHECKPOINT")
+            or server_metadata.get("checkpoint_id")
+            or server_metadata.get("checkpoint")
+            or "openpi_remote"
+        )
         # Terminal chunk dump (debug). This class skips super().__init__, so the
         # attributes the inherited _print_chunk_steps reads must be set here or the
         # dump silently no-ops for openpi-remote rollouts. Gated on
@@ -1359,7 +1375,16 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             t_cur_float = float(t_cur)
         except Exception:  # noqa: BLE001
             t_cur_float = float("nan")
+        diagnostics: dict[str, object] = {
+            "sample_mode": "camera_frame",
+            "source": "measured",
+            "camera_time_sec": None if not np.isfinite(t_cur_float) else t_cur_float,
+            "policy_dt_sec": float(self.policy_dt_sec),
+            "arms": {},
+        }
         if t_cur is None or not np.isfinite(t_cur_float):
+            diagnostics.update({"valid": False, "zero_reason": "camera_time_unavailable"})
+            self._last_velproprio_diagnostics = diagnostics
             return {"left": np.zeros(6, dtype=np.float64), "right": np.zeros(6, dtype=np.float64)}
         t_cur = t_cur_float
         t_prev = t_cur - float(self.policy_dt_sec)
@@ -1368,11 +1393,34 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             prev_pose = self._pose_history_at(side, t_prev)
             if cur_pose is None or prev_pose is None:
                 out[side] = np.zeros(6, dtype=np.float64)
+                diagnostics["arms"][side] = {
+                    "valid": False,
+                    "zero_reason": "pose_history_bracket_unavailable",
+                    "target_prev_time_sec": t_prev,
+                    "target_cur_time_sec": t_cur,
+                    "delta": out[side].tolist(),
+                }
                 continue
             r_prev = Rotation.from_quat(prev_pose[3:7])
             pos_delta_local = r_prev.inv().apply(cur_pose[:3] - prev_pose[:3])
             rot_delta = (r_prev.inv() * Rotation.from_quat(cur_pose[3:7])).as_rotvec()
             out[side] = np.concatenate([pos_delta_local, rot_delta])
+            diagnostics["arms"][side] = {
+                "valid": True,
+                "zero_reason": None,
+                "target_prev_time_sec": t_prev,
+                "target_cur_time_sec": t_cur,
+                "delta": out[side].tolist(),
+            }
+        arm_details = diagnostics["arms"]
+        diagnostics["valid"] = bool(
+            isinstance(arm_details, dict)
+            and all(bool(arm_details.get(side, {}).get("valid")) for side in ("left", "right"))
+        )
+        diagnostics["zero_reason"] = (
+            None if diagnostics["valid"] else "one_or_more_pose_history_brackets_unavailable"
+        )
+        self._last_velproprio_diagnostics = diagnostics
         return out
 
     def _proprio_state_velocity(self, payload: dict[str, Any]) -> np.ndarray:

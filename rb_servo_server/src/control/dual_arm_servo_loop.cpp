@@ -385,6 +385,12 @@ bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFoll
         a.delta_twist_max_lead_m != b.delta_twist_max_lead_m ||
         a.delta_twist_max_lead_rad != b.delta_twist_max_lead_rad ||
         a.delta_twist_stale_residual_timeout_sec != b.delta_twist_stale_residual_timeout_sec ||
+        a.preview_max_projection_error_m != b.preview_max_projection_error_m ||
+        a.preview_max_projection_error_rad != b.preview_max_projection_error_rad ||
+        a.preview_max_consecutive_projection_errors != b.preview_max_consecutive_projection_errors ||
+        a.preview_max_actual_lead_m != b.preview_max_actual_lead_m ||
+        a.preview_max_actual_lead_rad != b.preview_max_actual_lead_rad ||
+        a.preview_max_consecutive_actual_lead_errors != b.preview_max_consecutive_actual_lead_errors ||
         a.chunk_feed_timeout_sec != b.chunk_feed_timeout_sec;
 }
 
@@ -397,6 +403,12 @@ control::CartesianChunkFollowerConfig makeChunkFollowerConfig(const RuckigFollow
     cfg.window.reserve_R = rf.reserve_steps;
     cfg.window.smoothing_window = rf.smoothing_window;
     cfg.guard.af_damping_beta = rf.af_damping_beta;
+    cfg.max_projection_error_m = rf.preview_max_projection_error_m;
+    cfg.max_projection_error_rad = rf.preview_max_projection_error_rad;
+    cfg.max_consecutive_projection_errors = rf.preview_max_consecutive_projection_errors;
+    cfg.max_actual_lead_m = rf.preview_max_actual_lead_m;
+    cfg.max_actual_lead_rad = rf.preview_max_actual_lead_rad;
+    cfg.max_consecutive_actual_lead_errors = rf.preview_max_consecutive_actual_lead_errors;
     return cfg;
 }
 
@@ -2065,6 +2077,9 @@ bool DualArmServoLoop::updateForceRuntime(
     runtime.control.target_force_n = arm_config.target_force_n;
     runtime.control.motion_epoch = motion_epoch_;
 
+    // user_floor_plane tracks the runtime tilted plane; floor_constraint and the
+    // floorless "none" posture both use the nominal stand +Z as the hard-normal
+    // reference axis (no enforcing floor is required for "none").
     const math::Vector3 normal = arm_config.surface_source == "user_floor_plane"
         ? effectiveUserFloorNormal() : math::Vector3(0.0, 0.0, 1.0);
     runtime.control.normal_stand = {normal.x(), normal.y(), normal.z()};
@@ -5237,6 +5252,12 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.stage_tcp_target_stand = abc.stage_tcp_target_stand;
     solve.follower_divergence_pos_m = abc.follower_divergence_pos_m;
     solve.follower_divergence_ang_rad = abc.follower_divergence_ang_rad;
+    solve.follower_projection_error_m = abc.follower_projection_error_m;
+    solve.follower_projection_error_rad = abc.follower_projection_error_rad;
+    solve.follower_projection_error_count = abc.follower_projection_error_count;
+    solve.follower_actual_lead_m = abc.follower_actual_lead_m;
+    solve.follower_actual_lead_rad = abc.follower_actual_lead_rad;
+    solve.follower_actual_lead_error_count = abc.follower_actual_lead_error_count;
     solve.follower_reanchor_count = abc.follower_reanchor_count;
     solve.safety_intervention_recent = abc.safety_intervention_recent;
     solve.delta_twist_pending_linear_norm_m = abc.delta_twist_pending_linear_norm_m;
@@ -5393,12 +5414,14 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     SmdPoseTracker* smd_tracker,
     const ArmMountConfig& mount,
     const JointArray& previous_sent_q_deg,
+    const Pose6D& actual_feedback_pose,
     double dt_sec
 ) {
     const RuckigFollowerConfig& rf = profile.ruckig_follower;
+    const bool delta_preview = rf.controller == RuckigFollowerController::DeltaPreview;
     AbcTelemetry& abc = arm_id == ArmId::Left ? left_abc_telemetry_ : right_abc_telemetry_;
     // Reset follower telemetry each tick; re-filled below when the follower drives.
-    abc.follower_controller = "ruckig_waypoint";
+    abc.follower_controller = delta_preview ? "delta_preview" : "ruckig_waypoint";
     abc.follower_active = false;
     abc.follower_wire_seq = 0;
     abc.follower_recv_seq = 0;
@@ -5413,6 +5436,12 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.stage_tcp_target_stand.reset();
     abc.follower_divergence_pos_m = 0.0;
     abc.follower_divergence_ang_rad = 0.0;
+    abc.follower_projection_error_m = 0.0;
+    abc.follower_projection_error_rad = 0.0;
+    abc.follower_projection_error_count = 0;
+    abc.follower_actual_lead_m = 0.0;
+    abc.follower_actual_lead_rad = 0.0;
+    abc.follower_actual_lead_error_count = 0;
     abc.delta_twist_pending_linear_norm_m = 0.0;
     abc.delta_twist_pending_angular_norm_rad = 0.0;
     abc.delta_twist_step_delta = Vec6{};
@@ -5596,9 +5625,23 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     if (chunk_frame_cache_recv_seq_ != 0 &&
         chunk_frame_cache_recv_seq_ != *submitted_recv_seq &&
         arm_present) {
-        transition_reason = "chunk frame " +
+        transition_reason = (delta_preview ? "delta preview frame " : "chunk frame ") +
             seq_labels(chunk_frame_cache_.seq, chunk_frame_cache_.receiver_seq);
-        follower->submitFrame(toControlChunkFrame(chunk_frame_cache_, arm_id), reference);
+        const bool preview_contract_valid =
+            chunk_frame_cache_.schema_generation == 3 &&
+            chunk_frame_cache_.chunk_metadata_present &&
+            chunk_frame_cache_.proprio_valid &&
+            (arm_id == ArmId::Left ? chunk_frame_cache_.has_left_delta
+                                   : chunk_frame_cache_.has_right_delta);
+        if (delta_preview && preview_contract_valid) {
+            follower->submitDeltaFrame(toControlChunkFrame(chunk_frame_cache_, arm_id), reference);
+        } else if (!delta_preview) {
+            follower->submitFrame(toControlChunkFrame(chunk_frame_cache_, arm_id), reference);
+        } else {
+            follower->deactivate();
+            transition_reason = "delta preview rejected v3/proprio contract " +
+                seq_labels(chunk_frame_cache_.seq, chunk_frame_cache_.receiver_seq);
+        }
         *submitted_wire_seq = chunk_frame_cache_.seq;
         *submitted_recv_seq = chunk_frame_cache_.receiver_seq;
     }
@@ -5637,7 +5680,30 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     smd_tracker->deactivate();
     ArmCommand smoothed = command;
     smoothed.tcp_target_stand = follower->tick(dt_sec);
+    if (delta_preview) {
+        follower->updateActualLead(actual_feedback_pose);
+    }
     const control::FollowerDiag& diag = follower->diag();
+    abc.follower_projection_error_m = diag.projection_error_m;
+    abc.follower_projection_error_rad = diag.projection_error_rad;
+    abc.follower_projection_error_count = diag.consecutive_projection_errors;
+    abc.follower_actual_lead_m = diag.actual_lead_m;
+    abc.follower_actual_lead_rad = diag.actual_lead_rad;
+    abc.follower_actual_lead_error_count = diag.consecutive_actual_lead_errors;
+    if (delta_preview && (diag.infeasible_fault || diag.actual_lead_fault)) {
+        std::ostringstream reason;
+        reason << toString(arm_id)
+               << (diag.infeasible_fault ? " delta_preview_projection_fault" :
+                                            " delta_preview_actual_lead_fault")
+               << " projection_error_m=" << diag.projection_error_m
+               << " projection_error_rad=" << diag.projection_error_rad
+               << " projection_count=" << diag.consecutive_projection_errors
+               << " actual_lead_m=" << diag.actual_lead_m
+               << " actual_lead_rad=" << diag.actual_lead_rad
+               << " actual_lead_count=" << diag.consecutive_actual_lead_errors
+               << " " << diag_seq_labels(diag);
+        recordChunkFollowerFaultRequest(arm_id, reason.str());
+    }
     abc.follower_active = true;
     abc.follower_wire_seq = diag.seg_wire_seq;
     abc.follower_recv_seq = diag.seg_recv_seq;
@@ -6279,6 +6345,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 &left_pose_track_smd_,
                 config_.left_mount,
                 left_prev_sent_q_deg_,
+                left_delta_twist_actual_feedback,
                 dt_sec
             );
         }
@@ -6318,6 +6385,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 &right_pose_track_smd_,
                 config_.right_mount,
                 right_prev_sent_q_deg_,
+                right_delta_twist_actual_feedback,
                 dt_sec
             );
         }
@@ -7649,6 +7717,8 @@ DualArmCommand DualArmServoLoop::makeHoldCommand(
     const RobotState& right_state,
     uint64_t now_ns
 ) const {
+    (void)left_state;
+    (void)right_state;
     DualArmCommand cmd;
     cmd.host_time_ns = now_ns;
     cmd.left.arm_id = ArmId::Left;
@@ -7662,8 +7732,12 @@ DualArmCommand DualArmServoLoop::makeHoldCommand(
     // left the servo with zero commanded error, so it produced no restoring
     // torque and the arm crept ~5-8 deg to its gravity-settled pose at
     // startup/idle (and the q_sent->q_actual feedback added a small tremble).
-    cmd.left.q_target_deg = chooseSafeHoldTarget(left_state, left_prev_sent_q_deg_);
-    cmd.right.q_target_deg = chooseSafeHoldTarget(right_state, right_prev_sent_q_deg_);
+    // Keep q_target consistent with the Hold contract as well.  Hold currently
+    // leaves has_joint_target=false and TrajectoryFilter uses previous_sent, but
+    // carrying q_actual here made this command unsafe if a later rewrite retained
+    // the payload flag and obscured the real equilibrium in telemetry/debugging.
+    cmd.left.q_target_deg = left_prev_sent_q_deg_;
+    cmd.right.q_target_deg = right_prev_sent_q_deg_;
     return cmd;
 }
 
@@ -8152,12 +8226,6 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             c.right.has_joint_target = false;
         }
     };
-    const auto reached = [](const JointArray& a, const JointArray& b, double tol) {
-        for (int i = 0; i < kDof; ++i) {
-            if (std::abs(a[i] - b[i]) > tol) return false;
-        }
-        return true;
-    };
     const auto sequence_active = [](const InitMotionExec& e) {
         return e.status == InitMotionStatus::Planning ||
                e.status == InitMotionStatus::Executing;
@@ -8337,12 +8405,14 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
     };
 
     const auto process_exec = [&](InitMotionExec& ex, PlannerRequester requester,
-                                  bool request_left, bool request_right, bool fresh_profile) {
-        // Launch (or relaunch on a changed target) a plan from the MEASURED joint pose
+                                  bool request_left, bool request_right, bool fresh_request) {
+        // Launch a new one-shot request from the MEASURED joint pose
         // when it is available. For single-arm init, freeze the non-selected arm in the
         // planner at its measured pose; do not use last-sent references because SMD/flow
         // can intentionally lead the physical robot by a small amount.
-        if (fresh_profile && (request_left || request_right)) {
+        if (fresh_request && (request_left || request_right)) {
+            ex.request_seen = true;
+            ex.request_seq = command.seq;
             const JointArray target_left =
                 request_left ? command.left.q_target_deg : current_left_q;
             const JointArray target_right =
@@ -8367,11 +8437,6 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                 hold_selected(command, ex);
                 return;
             }
-            const bool new_target = !ex.has_target ||
-                (request_left && !reached(target_left, ex.target_left, 1e-6)) ||
-                (request_right && !reached(target_right, ex.target_right, 1e-6)) ||
-                ex.left_active != request_left ||
-                ex.right_active != request_right;
             const auto launch_plan = [&]() {
                 reanchor_selected_to_measured(request_left, request_right);
                 ex.target_left = target_left;
@@ -8421,12 +8486,10 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                 ex.plan_generation = postPlannerJob(std::move(job));
                 std::cerr << "[INFO] JointTarget init_motion: planning collision-free path from measured pose\n";
             };
-            if (ex.status == InitMotionStatus::Idle ||
-                ((ex.status == InitMotionStatus::Executing ||
-                  ex.status == InitMotionStatus::Done ||
-                  ex.status == InitMotionStatus::Failed) && new_target)) {
-                launch_plan();
-            }
+            // A genuinely new sequence is an explicit operator request.  Re-plan
+            // even when the endpoint matches the previous request: the robot may
+            // have been moved since completion and the new press must remain usable.
+            launch_plan();
         }
 
         // Runaway bound (progress-aware): a committed sequence gives up (Failed -> hold) so a
@@ -8581,13 +8644,11 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                 break;
             }
             case InitMotionStatus::Done: {
-                // Hold at the PLANNED final waypoint (not the raw requested target) so a
-                // no-op plan or wrapped-branch plan cannot reintroduce a small post-done jump.
-                const std::pair<JointArray, JointArray> goal_wp = ex.waypoints.empty()
-                    ? std::pair<JointArray, JointArray>{ex.target_left, ex.target_right}
-                    : ex.waypoints.back();
-                rewrite_selected(command, ex, goal_wp.first, goal_wp.second);
-                set_arrival_stop(command, ex, goal_wp.first, goal_wp.second);
+                // Terminal ownership is Hold, not a perpetually replayed
+                // JointTarget.  previous_sent is already the realized final
+                // waypoint, so this preserves restoring authority without letting
+                // the cached Init Motion packet re-enter/re-anchor the sequencer.
+                hold_selected(command, ex);
                 break;
             }
             case InitMotionStatus::Planning:
@@ -8605,17 +8666,27 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
     // not pause the OTHER arm's in-flight init while its command is fresh — both run
     // concurrently. (Both-arm init drives the left exec for both arms; the right exec was
     // reset above, so it is idle and not continued here.)
-    const bool left_exec_fresh = is_init && left_init;
-    const bool right_exec_fresh = is_init && right_init && !left_init;
-    if (left_exec_fresh) {
-        process_exec(left_init_motion_exec_, PlannerRequester::LeftInit, true, right_init, true);
+    const bool left_exec_requested = is_init && left_init;
+    const bool right_exec_requested = is_init && right_init && !left_init;
+    const bool left_exec_fresh = left_exec_requested &&
+        (!left_init_motion_exec_.request_seen ||
+         left_init_motion_exec_.request_seq != command.seq);
+    const bool right_exec_fresh = right_exec_requested &&
+        (!right_init_motion_exec_.request_seen ||
+         right_init_motion_exec_.request_seq != command.seq);
+    if (left_exec_requested) {
+        process_exec(
+            left_init_motion_exec_, PlannerRequester::LeftInit, true, right_init,
+            left_exec_fresh);
     } else if (sequence_active(left_init_motion_exec_)) {
         process_exec(left_init_motion_exec_, PlannerRequester::LeftInit,
                      left_init_motion_exec_.left_active,
                      left_init_motion_exec_.right_active, false);
     }
-    if (right_exec_fresh) {
-        process_exec(right_init_motion_exec_, PlannerRequester::RightInit, false, true, true);
+    if (right_exec_requested) {
+        process_exec(
+            right_init_motion_exec_, PlannerRequester::RightInit, false, true,
+            right_exec_fresh);
     } else if (sequence_active(right_init_motion_exec_)) {
         process_exec(right_init_motion_exec_, PlannerRequester::RightInit,
                      right_init_motion_exec_.left_active,

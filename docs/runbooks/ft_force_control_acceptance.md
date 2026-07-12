@@ -14,9 +14,8 @@ real-enforcement gate cannot currently pass. The explicit
 a supervised acceptance stage; it does not close this gate.
 
 `stack_sim.yaml` remains force-off. The tracked `stack_real.yaml` is the single
-physical bring-up profile and currently exposes a dual-arm supervised
-experimental Cartesian-admittance stage with an identical per-arm contact
-profile.
+physical bring-up profile and currently exposes Gate 2 supervised
+translation-only Cartesian compliance in a fixed Hold. Rotation remains locked.
 The production gate above remains
 blocked because the EFT source does not provide independent sensor health:
 
@@ -29,18 +28,90 @@ force_control:
   supervised_experimental_real: true
   left:
     enable: true
+    surface_source: none
     compliance_frame: tcp_origin
+    compliance_axes: [true, true, true, false, false, false]
   right:
     enable: true
+    surface_source: none
     compliance_frame: tcp_origin
+    compliance_axes: [true, true, true, false, false, false]
 ```
 
 Do not use controller `pgmode` as evidence of physical F/T dynamics.
 
-Start the supervised experimental profile with `make run MODE=real`. It is a
-bring-up exposure requested after the per-arm monitor captures, not evidence
-that the full promotion ladder or production gate has passed. Any failure
-returns this block to monitor mode.
+Start the active gate with `make run MODE=real`. Both `safety.floor_constraint` and
+`safety.user_floor_constraint` are disabled by explicit operator decision to
+remove their approach velocity dampers. This also removes the TCP/gripper-tip
+geometric floor backstop from every motion primitive. Wrist F/T cannot detect
+every upstream-link or stand collision; ROI, self-collision, tracking,
+lease/deadman, and the physical E-stop remain necessary but are not substitutes
+for that removed floor plane.
+
+The GUI must show both floor enforcement controls OFF/disabled and must skip a
+persisted user-floor restore. `logs/stack/server.log` must not contain a repeated
+`SetSafetyFloorEnabled` or `SetUserSafetyFloorPlane ... user_floor_disabled`
+rejection stream. A repeated stream is a stop-and-fix condition before the sign
+capture because it obscures the evidence log.
+
+### Gate 1: dual-arm manual sign/frame capture
+
+1. Keep flow-infer, teleop, jog, and gripper commands inactive. Have an operator
+   at the E-stop and clear the complete swept volume of both arms.
+2. Start `make run MODE=real`, perform the existing supervised Init Motion only
+   if required for software zero, and then issue no motion commands.
+3. Confirm both arms report `operating_mode=monitor`,
+   `force_control_compliance_frame=surface`, accepted/fresh tare, and no fault.
+   Any unexpected robot motion is an immediate stop condition because the F/T
+   monitor itself has no motion authority.
+   After Init Motion reports `done`, also confirm the command is terminal
+   `Hold`; a gentle perturbation must not make the sent Hold reference ratchet
+   along with measured joints while the cached Init Motion packet is still
+   fresh.
+4. For the current translation-axis gate, push the right arm once per TCP gizmo
+   positive endpoint toward the TCP center in Z, X, and Y, leaving a clear
+   neutral interval between loads. The observed wrench is the opposing reaction,
+   so each accepted transformed component is positive. The 2026-07-12 capture
+   completed this step twice per axis. The operator declared the left assembly
+   identical, so the same runtime mapping is applied without a duplicate left
+   capture. Negative-force and torque-axis captures are deferred until a stage
+   that can promote rotational or production force behavior.
+5. Stop on stale/invalid tare, unexplained cross-axis response, reversed sign,
+   hard-threshold telemetry, any safety/IK/backend fault, or any robot motion.
+6. Preserve `logs/servo_log_<timestamp>.csv` (and the latest
+   `logs/servo_log.csv` link) plus `logs/stack/server.log`. Do not promote the
+   controller until both-arm logs are reviewed.
+
+No additional logger is required for this gate: the existing CSV already
+contains raw sensor, TCP, fast/control surface/compliance wrench, freshness,
+tare, contact/threshold, TCP pose, and controller-state columns.
+
+### Gate 2: translation-only Hold compliance
+
+1. Keep flow-infer, teleop, jog, gripper commands, and all environment contact
+   inactive. This stage tests only a fixed Hold in free space.
+2. Confirm both arms have `ft_tare_state=accepted`,
+   `operating_mode=cartesian_admittance`, `compliance_frame=tcp_origin`, and
+   translation-only axes `[true,true,true,false,false,false]` before touching an
+   arm. Stop if either arm is not zeroed and healthy.
+3. Start below the configured 1.5 N translation deadband and raise one load
+   slowly just beyond it. The TCP must yield toward the hand's push (opposite
+   the reported reaction wrench), while orientation remains held.
+4. Release fully. The fixed command equilibrium must not ratchet with measured
+   pose, and the translation offset must recenter smoothly to zero. Leave a
+   clear settled interval before changing axes.
+5. Validate Z, then X, then Y in the live TCP gizmo axes. Use only the small
+   force needed to observe motion;
+   the preceding sign capture showed that a strong tangential push can cross the
+   unchanged 7 Nm TCP torque hard limit through the 202.642 mm lever arm.
+6. Stop immediately on unexpected-axis motion, orientation motion, chatter,
+   equilibrium drift, stale/tare invalidation, IK/safety rejection, or any hard
+   force/torque threshold telemetry. Preserve the CSV and server log for review.
+
+This gate intentionally does not test policy/contact interaction. The next gate
+will admit motion only when it does not increase the measured contact load while
+retaining tangential and unloading motion; it must not be enabled until this
+free-space compliance/recenter capture is reviewed.
 
 ## Per-arm accepted profile
 
@@ -59,14 +130,14 @@ explicitly labelled as unaccepted estimates.
 | Overrange signal and evidence | pending | pending |
 | Backend frame sequence evidence | implemented; physical log acceptance pending | implemented; physical log acceptance pending |
 | Independent sensor sequence/time evidence | unavailable | unavailable |
-| `T_tcp_sensor` | `[0, 0, -0.202642, 0, 0, pi/2]`; URDF/CAD-derived, axis acceptance pending | `[0, 0, -0.202642, 0, 0, pi/2]`; URDF/CAD-derived, axis acceptance pending |
-| Positive force/torque axis check | pending | pending |
+| `T_tcp_sensor` | `[0, 0, -0.202642, 0, 0, 0]`; inherited by operator declaration from identical right hardware | `[0, 0, -0.202642, 0, 0, 0]`; physical +X/+Y/+Z reaction capture, 2026-07-12 |
+| Positive force/torque axis check | +Fx/+Fy/+Fz inherited from identical right hardware; torque pending | +Fx/+Fy/+Fz accepted, two repetitions each; torque pending |
 | Tool/payload mass | pending | pending |
 | Payload center of mass in TCP | pending | pending |
 | Sensor bias artifact | pending | pending |
 | Residual tare procedure | automatic after successful left/both Init Motion; physical acceptance pending | automatic after successful right/both Init Motion; physical acceptance pending |
-| Profile revision/hash | pending | pending |
-| Reviewer and date | pending | pending |
+| Profile revision/hash | `right-derived-identical-hardware-force-axis-20260712` | `physical-positive-force-axis-20260712` |
+| Reviewer and date | operator declaration, 2026-07-12 | operator + log review, 2026-07-12 |
 
 Mounting evidence is recorded in `IMG_9188.JPG`. The image confirms the
 joint-6 -> silver sensor/adapter stack -> Pika ordering; arm identity, per-arm
@@ -76,25 +147,27 @@ CAD at `attachment_site` z=15..45 mm; the explicit URDF measurement frame is at
 the model's tool-side `sensor_site`, z=45 mm. This geometric match does not
 replace the positive-axis load test below.
 
-The transform convention is:
+The URDF remains CAD geometry evidence with a `+pi/2` sensor yaw. The rbpodo EFT
+fields were empirically found to align with TCP X/Y, so the runtime source-frame
+yaw is zero. The transform convention is:
 
 ```text
 point_tcp = T_tcp_sensor * point_sensor
 ```
 
-Record a manual positive load on every force and torque axis. A sign or frame
-mismatch is a hard failure; do not compensate for it by changing a contact
-threshold.
+Before rotational or production force behavior is promoted, record the still
+pending torque-axis loads. A sign or frame mismatch is a hard failure; do not
+compensate for it by changing a contact threshold.
 
-The current acceptance stage uses `compliance_frame: tcp_origin`: x/y/z and
-roll/pitch/yaw retain the RFT64 measurement-axis orientation, but rotations
-must occur about the TCP endpoint instead of the physical sensor origin.
-Confirm the state/CSV field `force_control_compliance_frame=tcp_origin`, compare
-`control_wrench_compliance` against the applied sensor-axis load, and keep the
-separate `control_wrench_surface` only for the floor-normal interpretation.
-The preceding `sensor_origin` capture remains direction/pivot evidence only;
-repeat every force/torque axis, release, and recenter test at the TCP endpoint
-before using this stage with flow-infer.
+The completed Gate 1 profile used `compliance_frame: surface`: x/y/z and
+roll/pitch/yaw are expressed in stand-fixed axes at the TCP. Confirm the
+preserved Gate 1 CSV field `force_control_compliance_frame=surface` and compare
+`control_wrench_compliance` against the applied stand-axis load. This removes
+moving-TCP orientation from the first sign decision. Gate 2 now uses
+`compliance_frame: tcp_origin`: the controller axes follow the accepted rbpodo
+EFT/TCP orientation while the correction pivot stays at the TCP endpoint.
+Translation must be repeated in this frame before policy/contact testing;
+rotation remains disabled until the torque axes and payload/COM are accepted.
 
 For the floor contact channel, keep the stand-frame geometric normal pointing
 outward (`+Z`). The installed sensor's reaction force points opposite that
@@ -198,6 +271,7 @@ applicable config/ownership parts of these requirements:
 - explicit sensor-origin frame/sign acceptance before TCP-origin promotion
 - fixed Hold equilibrium with no measured-pose ratchet under sustained wrench
 - zero-wrench release recentering to that equilibrium on x/y/z/rx/ry/rz
+- release-phase recontact brakes the return before loaded hold, without a fault
 - Hold-to-policy first-delta projection without an equilibrium jump
 - legacy guarded-mode reset interlock requiring a fresh post-event observation and chunk
 
@@ -227,11 +301,18 @@ increasing the wrench moving average; the acceptance evidence is the selected
 jerk/offset/velocity/acceleration telemetry and a zero-wrench return to the
 fixed equilibrium.
 
+Also reapply the same-axis load while a released offset is still recentering.
+The return velocity must brake without crossing the command equilibrium or
+latching a motion-envelope fault; after it stops, sustained load must not drive
+the compliant offset back toward zero. Repeat both wrench signs for at least
+one translation and one rotation before promotion.
+
 Before flow-infer, validate `cartesian_admittance` in a fixed `Hold` one axis at
-a time. Apply and release a small supervised load in x, y, z, roll, pitch, and
-yaw. The equilibrium pose/source must remain unchanged while held, the bounded
-offset must oppose the wrench without a fault, and `compliance_recenter_active`
-must drive every offset back near zero after release. Stop immediately on an
+a time. The active Gate 2 profile covers x, y, and z only; roll, pitch, and yaw
+remain locked until payload/COM and torque-axis evidence are accepted. The
+equilibrium pose/source must remain unchanged while held, the bounded offset
+must oppose the wrench without a fault, and `compliance_recenter_active` must
+drive every enabled offset back near zero after release. Stop immediately on an
 equilibrium drift, repeated offset growth, unexpected-axis motion, or a hard
 force/torque threshold event.
 

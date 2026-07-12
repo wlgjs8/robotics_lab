@@ -165,11 +165,12 @@ safety:
     arrival_decel_deg_s2: 40.0     # 작을수록 더 완만/긴 감속; cap=√(2·a·d) deg/s
     arrival_min_speed_deg_s: 3.0   # tail이 waypoint_tol로 빨리 안착하도록 최저속도 floor
   floor_constraint:
-    # Required server-owned surface/normal envelope for the supervised
-    # guarded-admittance stage. This intentionally restores the geometric floor
-    # backstop; its velocity-damper effect must be separated from the F/T
-    # response in the first flow-infer rollout evidence.
-    enable: true
+    # 2026-07-12 force-control Gate 1: explicitly disabled by operator decision
+    # so the 60 mm geometric velocity damper cannot alter bolt-pick approach
+    # proprioception. This removes the TCP/gripper-tip floor backstop for every
+    # motion primitive; ROI, self-collision, tracking, lease/deadman, and E-stop
+    # remain, but wrist F/T cannot detect every upstream-link/stand collision.
+    enable: false
     z_min_m: 0.0000
     runtime_min_z_m: -0.2
     runtime_max_z_m: 0.5
@@ -461,13 +462,15 @@ logging:
 
 force_torque:
   source: rbpodo_eft
-  # Stage 1 monitor profile. The URDF/CAD transform is configured, but axis
-  # signs, payload, serials, bias, and automatic tare still require measured acceptance.
+  # Stage 1 accepted source profile. The rbpodo EFT translation-axis mapping was
+  # accepted from the 2026-07-12 right-arm +X/+Y/+Z reaction capture. The
+  # operator declared the left arm mechanically/electrically identical, so it
+  # uses the same mapping. Torque axes, payload, serials, and bias remain pending.
   left: &ft_arm_monitor
     enable: true
     frame_configured: true
     sensor_identity: "left-rft64-6a01-operator-confirmed-serial-pending"
-    calibration_id: "urdf-cad-frame-estimate-axis-unverified"
+    calibration_id: "right-derived-identical-hardware-force-axis-20260712"
     # Backend sequence advances only on a newly received CobotData state frame;
     # cached/held states retain the previous value and fail the stall bound.
     freshness_source: sequence
@@ -487,7 +490,9 @@ force_torque:
     # admitting the measured stationary sensor noise.
     residual_tare_max_force_stddev_n: 0.75
     residual_tare_max_torque_stddev_nm: 0.15
-    T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
+    # rbpodo EFT axes align with TCP axes. The previous CAD-derived +pi/2 yaw
+    # produced +X load -> +Y reaction and +Y load -> -X reaction.
+    T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 0.0]
     sensor_bias: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     payload_mass_kg: 0.0
     payload_com_tcp_m: [0.0, 0.0, 0.0]
@@ -496,7 +501,7 @@ force_torque:
     enable: true
     frame_configured: true
     sensor_identity: "right-rft64-6a01-operator-confirmed-serial-pending"
-    calibration_id: "urdf-cad-frame-estimate-axis-unverified"
+    calibration_id: "physical-positive-force-axis-20260712"
     freshness_source: sequence
     max_sample_age_sec: 0.02
     max_source_stall_sec: 0.02
@@ -508,17 +513,21 @@ force_torque:
     residual_tare_min_samples: 500
     residual_tare_max_force_stddev_n: 0.75
     residual_tare_max_torque_stddev_nm: 0.15
-    T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
+    # Positive-endpoint-to-TCP pushes established the reaction mapping:
+    # +Z -> +Z, +X -> +X, +Y -> +Y after removing the former +pi/2 yaw.
+    T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 0.0]
     sensor_bias: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     payload_mass_kg: 0.0
     payload_com_tcp_m: [0.0, 0.0, 0.0]
     residual_tare_tcp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-# Supervised experimental dual-arm force-motion stage. Both arms use the same
-# floor-normal contact profile; software zero remains independent per arm.
-# The 2026-07-11 captures established positive floor-compression polarity on
-# both arms, and the nominal bolt pickup established the task-contact ceiling.
-# This is not production acceptance and does not replace the E-stop/operator.
+# Gate 2 supervised translation-only Cartesian compliance. The 2026-07-12
+# positive X/Y/Z capture accepted the rbpodo EFT translation frame; the operator
+# declared the left assembly identical. Rotation remains locked because
+# payload/COM and torque-axis acceptance are still pending. Both geometric floor
+# constraints remain disabled by explicit operator decision, so this Hold-only
+# test requires an E-stop operator and a completely clear swept volume. This is
+# not production acceptance.
 force_control:
   provider: project_native
   enable: true
@@ -528,10 +537,10 @@ force_control:
   update_rate_hz: 500
   left:
     enable: true
-    surface_source: floor_constraint
-    # TCP-origin acceptance stage: retain the RFT64 measurement-axis
-    # orientation while translating the compliance pivot to the TCP endpoint.
-    # Surface remains floor-specific and hard guards stay in the TCP/stand path.
+    surface_source: none
+    # Gate 2: express the controller in the accepted rbpodo EFT-axis orientation,
+    # but apply the correction about the TCP endpoint. Rotation is deliberately
+    # locked until payload/COM and torque response are physically accepted.
     compliance_frame: tcp_origin
     # Shared dual-arm profile. The latest accepted floor contact peaked at
     # 23.88 N normal / 24.36 N resultant without crossing the old hard guard.
@@ -552,10 +561,10 @@ force_control:
     transverse_contact_release_force_n: 1.5
     torque_contact_enter_nm: 0.45
     torque_contact_release_nm: 0.30
-    compliance_axes: [true, true, true, true, true, true]
+    compliance_axes: [true, true, true, false, false, false]
   right:
     enable: true
-    surface_source: floor_constraint
+    surface_source: none
     compliance_frame: tcp_origin
     # Identical to the left arm so task behavior and acceptance evidence use a
     # single dual-arm profile.
@@ -574,7 +583,7 @@ force_control:
     transverse_contact_release_force_n: 1.5
     torque_contact_enter_nm: 0.45
     torque_contact_release_nm: 0.30
-    compliance_axes: [true, true, true, true, true, true]
+    compliance_axes: [true, true, true, false, false, false]
   normal_admittance:
     virtual_mass_kg: 8.0
     damping_n_s_m: 160.0
@@ -833,19 +842,17 @@ cartesian_control:
       # ~ 0.0056 m/s per step at j=20); raise only on real-run evidence.
       ruckig_follower:
         enable: true
-        controller: "delta_twist"  # consume conditioned local per-frame action deltas directly
-        # 2026-07-07 real OpenPI velocity-proprio baseline: the model deltas in
-        # the faulting run were only ~1-2 mm / ~0.004-0.007 rad per 33 ms frame,
-        # but residual catch-up drove xi_cmd to ~1 m/s and command lead to the
-        # 50 mm divergence latch. Keep the first real DeltaTwist profile bounded
-        # near the requested action scale; raise only from CSV evidence.
+        controller: "delta_preview"
+        # v3 timestamp-aligned local deltas are integrated into absolute knots by
+        # the server, then followed by the existing Ruckig p/v/a chain. This
+        # removes stale residual catch-up while preserving both arms' predictions.
         max_linear_velocity_m_s: 0.18
         max_linear_accel_m_s2: 1.5
         max_linear_jerk_m_s3: 45.0
         max_angular_velocity_rad_s: 0.60
         max_angular_accel_rad_s2: 3.0
         max_angular_jerk_rad_s3: 120.0
-        discard_head_steps: 0     # producer re-anchors each chunk to measured TCP: latency already absorbed
+        discard_head_steps: 0     # v3 producer already removes rows emitted since observation
         # Match FLOW_INFER_CHUNK_EXECUTE_STEPS=12: consume the complete policy
         # execution window before using reserve rows from the published runway.
         consume_steps: 12
@@ -863,6 +870,14 @@ cartesian_control:
         delta_twist_max_lead_m: 0.020
         delta_twist_max_lead_rad: 0.060
         delta_twist_stale_residual_timeout_sec: 0.15
+        # Required delta_preview fail-closed bounds. These are explicit reviewed
+        # config values; the loader rejects a delta_preview profile if any are absent.
+        preview_max_projection_error_m: 0.001
+        preview_max_projection_error_rad: 0.00436332313  # 0.25 deg
+        preview_max_consecutive_projection_errors: 3
+        preview_max_actual_lead_m: 0.006
+        preview_max_actual_lead_rad: 0.01745329252       # 1.0 deg
+        preview_max_consecutive_actual_lead_errors: 3
         chunk_feed_timeout_sec: 1.5
         fallback_policy: "fault"     # strict: no silent SMD fallback; cold start holds, loss latches ChunkFollowerFault (ResetFault to recover)
         engage_timeout_sec: 3.0      # max wait for the first chunk frame before faulting (fault policy only)

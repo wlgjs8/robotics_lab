@@ -315,6 +315,266 @@ double recoveryJerk(
     return 0.0;
 }
 
+double loadedBoundaryBrakingJerk(
+    const AxisState& state,
+    double load_direction,
+    const AxisMotionLimits& limits,
+    double dt_sec
+) {
+    AxisState aligned{
+        load_direction * state.offset,
+        load_direction * state.velocity,
+        load_direction * state.acceleration,
+    };
+    const double jerk_step = limits.jerk * dt_sec;
+    const auto ramp_to_zero_velocity_delta = [&](double candidate_acceleration) {
+        if (candidate_acceleration >= 0.0) return 0.0;
+        const double ramp_steps = std::ceil(
+            -candidate_acceleration / jerk_step
+        ) - 1.0;
+        const double negative_steps = std::max(0.0, ramp_steps);
+        return dt_sec * (
+            negative_steps * candidate_acceleration +
+            jerk_step * negative_steps * (negative_steps + 1.0) * 0.5
+        );
+    };
+    const auto terminal_velocity = [&](double candidate_acceleration) {
+        return aligned.velocity + candidate_acceleration * dt_sec +
+            ramp_to_zero_velocity_delta(candidate_acceleration);
+    };
+
+    const double more_braking = std::max(
+        -limits.acceleration, aligned.acceleration - jerk_step
+    );
+    double next_acceleration = more_braking;
+    if (terminal_velocity(more_braking) < 0.0) {
+        double reversing = more_braking;
+        double non_reversing = std::min(
+            limits.acceleration, aligned.acceleration + jerk_step
+        );
+        if (terminal_velocity(non_reversing) < 0.0) {
+            next_acceleration = non_reversing;
+        } else {
+            for (int search = 0; search < 40; ++search) {
+                const double midpoint = 0.5 * (reversing + non_reversing);
+                if (terminal_velocity(midpoint) >= 0.0) {
+                    non_reversing = midpoint;
+                } else {
+                    reversing = midpoint;
+                }
+            }
+            next_acceleration = non_reversing;
+        }
+    }
+    const double aligned_jerk = std::clamp(
+        (next_acceleration - aligned.acceleration) / dt_sec,
+        -limits.jerk,
+        limits.jerk
+    );
+    return load_direction * aligned_jerk;
+}
+
+bool loadedStopFeasible(
+    AxisState state,
+    const AxisMotionLimits& limits,
+    double dt_sec
+) {
+    const double velocity_tolerance = scaledTolerance(limits.velocity);
+    const double acceleration_tolerance = scaledTolerance(limits.acceleration);
+    if (!within(state.offset, -limits.offset, limits.offset, limits.offset) ||
+        !within(state.velocity, 0.0, limits.velocity, limits.velocity) ||
+        !within(
+            state.acceleration,
+            -limits.acceleration,
+            limits.acceleration,
+            limits.acceleration
+        )) {
+        return false;
+    }
+    if (state.velocity <= velocity_tolerance &&
+        std::abs(state.acceleration) <= acceleration_tolerance) {
+        return true;
+    }
+
+    const double jerk_step = limits.jerk * dt_sec;
+    const double required_steps = std::ceil(
+        2.0 * limits.acceleration / jerk_step +
+        2.0 * limits.velocity / (limits.acceleration * dt_sec)
+    ) + 8.0;
+    constexpr double kMaxLoadedStopSteps = 4096.0;
+    if (!std::isfinite(required_steps) || required_steps > kMaxLoadedStopSteps) {
+        return false;
+    }
+
+    const auto ramp_to_zero_velocity_delta = [&](double candidate_acceleration) {
+        if (candidate_acceleration >= 0.0) return 0.0;
+        const double ramp_steps = std::ceil(
+            -candidate_acceleration / jerk_step
+        ) - 1.0;
+        const double negative_steps = std::max(0.0, ramp_steps);
+        return dt_sec * (
+            negative_steps * candidate_acceleration +
+            jerk_step * negative_steps * (negative_steps + 1.0) * 0.5
+        );
+    };
+
+    bool ramping_to_hold = false;
+    for (int i = 0; i < static_cast<int>(required_steps); ++i) {
+        if (ramping_to_hold) {
+            state.acceleration = std::min(
+                0.0, state.acceleration + jerk_step
+            );
+            state.velocity += state.acceleration * dt_sec;
+            state.offset += state.velocity * dt_sec;
+            if (!within(state.offset, -limits.offset, limits.offset, limits.offset) ||
+                !within(state.velocity, 0.0, limits.velocity, limits.velocity)) {
+                return false;
+            }
+            if (std::abs(state.acceleration) <= acceleration_tolerance) {
+                return state.velocity <= velocity_tolerance;
+            }
+            continue;
+        }
+
+        const double more_braking = std::max(
+            -limits.acceleration, state.acceleration - jerk_step
+        );
+        const auto terminal_velocity = [&](double candidate_acceleration) {
+            return state.velocity + candidate_acceleration * dt_sec +
+                ramp_to_zero_velocity_delta(candidate_acceleration);
+        };
+        double next_acceleration = more_braking;
+        if (terminal_velocity(more_braking) < 0.0) {
+            double reversing = more_braking;
+            double non_reversing = std::min(
+                limits.acceleration, state.acceleration + jerk_step
+            );
+            if (terminal_velocity(non_reversing) < 0.0) return false;
+            for (int search = 0; search < 40; ++search) {
+                const double midpoint = 0.5 * (reversing + non_reversing);
+                if (terminal_velocity(midpoint) >= 0.0) {
+                    non_reversing = midpoint;
+                } else {
+                    reversing = midpoint;
+                }
+            }
+            next_acceleration = non_reversing;
+            ramping_to_hold = next_acceleration < -acceleration_tolerance;
+        }
+        state.acceleration = next_acceleration;
+        state.velocity += state.acceleration * dt_sec;
+        state.offset += state.velocity * dt_sec;
+        if (!within(state.offset, -limits.offset, limits.offset, limits.offset) ||
+            !within(state.velocity, 0.0, limits.velocity, limits.velocity)) {
+            return false;
+        }
+        if (state.velocity <= velocity_tolerance &&
+            std::abs(state.acceleration) <= acceleration_tolerance) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool loadedHoldStopFeasible(
+    const AxisState& state,
+    const AxisMotionLimits& limits,
+    double dt_sec
+) {
+    const double offset_tolerance = scaledTolerance(limits.offset);
+    if (state.offset < -offset_tolerance) return false;
+    const double meaningful_return_velocity =
+        2.0 * limits.jerk * dt_sec * dt_sec;
+    if (state.velocity >= -meaningful_return_velocity) {
+        return loadedStopFeasible(state, limits, dt_sec);
+    }
+
+    // The axis is already returning toward the command equilibrium when the
+    // load reappears.  Measure the remaining return travel from the zero
+    // boundary and mirror velocity/acceleration so the same one-sided stop
+    // oracle proves that the return can brake before crossing that boundary.
+    return loadedStopFeasible(
+        {
+            limits.offset - state.offset,
+            -state.velocity,
+            -state.acceleration,
+        },
+        limits,
+        dt_sec
+    );
+}
+
+bool tightenToLoadedHoldEnvelope(
+    const AxisState& state,
+    double load_direction,
+    const AxisMotionLimits& limits,
+    double dt_sec,
+    JerkInterval* interval
+) {
+    AxisState aligned{
+        load_direction * state.offset,
+        load_direction * state.velocity,
+        load_direction * state.acceleration,
+    };
+    JerkInterval aligned_interval = load_direction > 0.0
+        ? *interval
+        : JerkInterval{-interval->upper, -interval->lower};
+    const auto feasible = [&](double aligned_jerk) {
+        return loadedHoldStopFeasible(
+            advanceWithJerk(aligned, aligned_jerk, dt_sec), limits, dt_sec
+        );
+    };
+    const double braking_seed = std::clamp(
+        load_direction * loadedBoundaryBrakingJerk(
+            state, load_direction, limits, dt_sec
+        ),
+        aligned_interval.lower,
+        aligned_interval.upper
+    );
+    double seed = braking_seed;
+    bool seed_feasible = feasible(seed);
+    if (!seed_feasible) {
+        // At initial contact the braking action points opposite the applied
+        // load and is intentionally infeasible for a unilateral loaded hold.
+        // Search the small one-dimensional interval for a forward action that
+        // preserves enough room to stop without ever reversing toward zero.
+        constexpr int kSeedSamples = 16;
+        for (int sample = 0; sample <= kSeedSamples && !seed_feasible; ++sample) {
+            const double ratio = static_cast<double>(sample) / kSeedSamples;
+            seed = aligned_interval.lower +
+                ratio * (aligned_interval.upper - aligned_interval.lower);
+            seed_feasible = feasible(seed);
+        }
+    }
+    if (!seed_feasible) return false;
+
+    if (!feasible(aligned_interval.lower)) {
+        double infeasible = aligned_interval.lower;
+        double feasible_bound = seed;
+        for (int i = 0; i < 32; ++i) {
+            const double midpoint = 0.5 * (infeasible + feasible_bound);
+            if (feasible(midpoint)) feasible_bound = midpoint;
+            else infeasible = midpoint;
+        }
+        aligned_interval.lower = feasible_bound;
+    }
+    if (!feasible(aligned_interval.upper)) {
+        double feasible_bound = seed;
+        double infeasible = aligned_interval.upper;
+        for (int i = 0; i < 32; ++i) {
+            const double midpoint = 0.5 * (feasible_bound + infeasible);
+            if (feasible(midpoint)) feasible_bound = midpoint;
+            else infeasible = midpoint;
+        }
+        aligned_interval.upper = feasible_bound;
+    }
+    if (!collapseTinyInterval(&aligned_interval, limits.jerk)) return false;
+    *interval = load_direction > 0.0
+        ? aligned_interval
+        : JerkInterval{-aligned_interval.upper, -aligned_interval.lower};
+    return true;
+}
+
 }  // namespace
 
 ForceController::ForceController(ForceControlConfig config)
@@ -445,13 +705,39 @@ ForceControllerProposal ForceController::propose(
             old_offset[i], old_velocity[i], old_acceleration[i]
         };
         const AxisMotionLimits soft_limits = softGovernorLimits(limits, dt_sec);
+        const double load_direction = std::copysign(1.0, wrench_error[i]);
+        // Loaded hold also handles a contact that returns while the spring is
+        // recentering.  Its feasibility oracle mirrors that existing return
+        // motion and proves it can brake before crossing the zero-offset
+        // boundary; no instantaneous velocity reversal is assumed.
+        const bool loaded_same_direction =
+            config_.stiffness[i] > scaledTolerance(1.0) &&
+            std::abs(wrench_error[i]) > scaledTolerance(1.0) &&
+            load_direction * old_state.offset >=
+                -scaledTolerance(limits.offset);
         JerkInterval interval;
         bool recovering = false;
-        if (!feasibleJerkInterval(old_state, soft_limits, dt_sec, &interval)) {
+        bool soft_feasible = feasibleJerkInterval(
+            old_state, soft_limits, dt_sec, &interval
+        );
+        if (soft_feasible && loaded_same_direction) {
+            soft_feasible = tightenToLoadedHoldEnvelope(
+                old_state, load_direction, soft_limits, dt_sec, &interval
+            );
+        }
+        if (!soft_feasible) {
             recovering = true;
             if (!feasibleJerkInterval(old_state, limits, dt_sec, &interval)) {
                 proposal.reason =
                     "Cartesian axis state is outside the hard jerk-governed motion envelope";
+                return proposal;
+            }
+            if (loaded_same_direction &&
+                !tightenToLoadedHoldEnvelope(
+                    old_state, load_direction, limits, dt_sec, &interval
+                )) {
+                proposal.reason =
+                    "Cartesian loaded axis cannot reach a jerk-bounded hold before reversal";
                 return proposal;
             }
         }
@@ -463,8 +749,21 @@ ForceControllerProposal ForceController::propose(
             -limits.jerk,
             limits.jerk
         );
+        const bool loaded_return_braking = loaded_same_direction &&
+            load_direction * old_state.velocity <
+                -2.0 * limits.jerk * dt_sec * dt_sec;
+        const bool loaded_boundary_hold = loaded_same_direction &&
+            (recovering || loaded_return_braking);
+        const double recovery_jerk = loaded_boundary_hold
+            ? loadedBoundaryBrakingJerk(
+                  old_state,
+                  load_direction,
+                  limits,
+                  dt_sec
+              )
+            : recoveryJerk(old_state, soft_limits);
         const double governed_jerk = std::clamp(
-            recovering ? recoveryJerk(old_state, soft_limits) : desired_jerk,
+            (recovering || loaded_return_braking) ? recovery_jerk : desired_jerk,
             interval.lower,
             interval.upper
         );
@@ -492,7 +791,7 @@ ForceControllerProposal ForceController::propose(
             proposal.reason = "Cartesian jerk governor produced a state outside hard limits";
             return proposal;
         }
-        const bool axis_limited = recovering ||
+        const bool axis_limited = recovering || loaded_return_braking ||
             std::abs(governed_jerk - unbounded_desired_jerk) >
                 scaledTolerance(limits.jerk);
         proposal.limit_axes[i] = axis_limited;
