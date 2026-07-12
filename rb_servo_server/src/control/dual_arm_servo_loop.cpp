@@ -2043,6 +2043,10 @@ bool DualArmServoLoop::updateForceRuntime(
     runtime.control.rotational_regulating = false;
     runtime.control.loading_projection_active = false;
     runtime.control.compliance_recenter_active = false;
+    runtime.control.compliance_translation_recenter_coupled = false;
+    runtime.control.compliance_rotation_recenter_coupled = false;
+    runtime.control.compliance_translation_recenter_deferred = false;
+    runtime.control.compliance_rotation_recenter_deferred = false;
     runtime.control.compliance_limit_axes = {};
     runtime.control.compliance_limit_reason.clear();
     runtime.control.compliance_equilibrium_stand = runtime.rolling_compliance_target;
@@ -2417,6 +2421,14 @@ bool DualArmServoLoop::updateForceRuntime(
         );
         runtime.control.compliance_limit_axes = cartesian_proposal.limit_axes;
         runtime.control.compliance_limit_reason = cartesian_proposal.limit_reason;
+        runtime.control.compliance_translation_recenter_coupled =
+            cartesian_proposal.translation_recenter_coupled;
+        runtime.control.compliance_rotation_recenter_coupled =
+            cartesian_proposal.rotation_recenter_coupled;
+        runtime.control.compliance_translation_recenter_deferred =
+            cartesian_proposal.translation_recenter_deferred;
+        runtime.control.compliance_rotation_recenter_deferred =
+            cartesian_proposal.rotation_recenter_deferred;
         runtime.control.compliance_offset_surface = cartesian_proposal.state.offset_tcp;
         runtime.control.compliance_velocity_surface = cartesian_proposal.state.velocity_tcp;
         runtime.control.compliance_acceleration_surface =

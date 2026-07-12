@@ -523,13 +523,13 @@ force_torque:
     payload_com_tcp_m: [0.0, 0.0, 0.0]
     residual_tare_tcp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-# Gate 2 supervised translation-only Cartesian compliance. The 2026-07-12
-# 18:32 capture corrected the translation frame to the +pi/2 URDF/FT axes; the
-# operator declared the left assembly identical. Rotation remains locked because
-# payload/COM and torque-axis acceptance are still pending. Both geometric floor
-# constraints remain disabled by explicit operator decision, so this Hold-only
-# test requires an E-stop operator and a completely clear swept volume. This is
-# not production acceptance.
+# Gate 3C supervised six-axis Cartesian compliance. The 2026-07-12 19:26
+# capture completed roll/pitch/yaw direction and recenter without a controller
+# fault or hard-limit event. All three rotations now share one more-sensitive,
+# measured-noise-qualified profile. Payload/COM remain pending, so this is still
+# a small-angle, pose-local Hold test. Both geometric floor constraints remain
+# disabled by explicit operator decision, requiring an E-stop operator and a
+# completely clear swept volume. This is not production acceptance.
 force_control:
   provider: project_native
   enable: true
@@ -540,9 +540,8 @@ force_control:
   left:
     enable: true
     surface_source: none
-    # Gate 2: express the controller in the corrected URDF/FT-axis orientation,
-    # but apply the correction about the TCP endpoint. Rotation is deliberately
-    # locked until payload/COM and torque response are physically accepted.
+    # Gate 3C: express all six controller axes in the corrected URDF/FT-axis
+    # orientation and apply the correction about the TCP endpoint.
     compliance_frame: tcp_origin
     # Shared dual-arm profile. The latest accepted floor contact peaked at
     # 23.88 N normal / 24.36 N resultant without crossing the old hard guard.
@@ -563,7 +562,7 @@ force_control:
     transverse_contact_release_force_n: 1.5
     torque_contact_enter_nm: 0.45
     torque_contact_release_nm: 0.30
-    compliance_axes: [true, true, true, false, false, false]
+    compliance_axes: [true, true, true, true, true, true]
   right:
     enable: true
     surface_source: none
@@ -585,7 +584,7 @@ force_control:
     transverse_contact_release_force_n: 1.5
     torque_contact_enter_nm: 0.45
     torque_contact_release_nm: 0.30
-    compliance_axes: [true, true, true, false, false, false]
+    compliance_axes: [true, true, true, true, true, true]
   normal_admittance:
     virtual_mass_kg: 8.0
     damping_n_s_m: 160.0
@@ -597,13 +596,25 @@ force_control:
     max_normal_step_m: 0.001
     max_energy_j: 2.0
   # Selected-frame diagonal zero-wrench compliance [x, y, z, roll, pitch,
-  # yaw]. This responsive hand-guiding profile starts outside a 1.5 N / 0.25
-  # Nm quiet zone, is approximately critically damped, and recenters on the
-  # fixed command equilibrium. Hard force/torque limits above are unchanged.
+  # yaw]. The three rotations share one identical profile (no per-axis split
+  # yet). The 0.10 Nm quiet zone stays above the worst-axis measured no-contact
+  # p99 (Tx/Ty/Tz = 0.068/0.074/0.005 Nm; Ty sets the shared floor, so a common
+  # deadband cannot go much lower without phantom roll/pitch from sensor noise).
+  # Rotational stiffness is lowered to 3.0 Nm/rad for greater response to a
+  # smaller applied moment; rotational damping is re-scaled to 2*sqrt(K*M) =
+  # 2*sqrt(3.0*0.2) ~= 1.55 so each axis stays approximately critically damped
+  # after the stiffness drop and recenters on the fixed command equilibrium.
+  # Hard force/torque limits above are unchanged. Supervised Gate 3A/3B
+  # characterization: validate load/release, chatter, and recenter per axis.
   virtual_mass: [2.0, 2.0, 2.0, 0.2, 0.2, 0.2]
-  damping: [26.0, 26.0, 26.0, 2.8, 2.8, 2.8]
-  stiffness: [80.0, 80.0, 80.0, 8.0, 8.0, 8.0]
-  wrench_deadband: [1.5, 1.5, 1.5, 0.25, 0.25, 0.25]
+  damping: [26.0, 26.0, 26.0, 1.55, 1.55, 1.55]
+  stiffness: [80.0, 80.0, 80.0, 3.0, 3.0, 3.0]
+  wrench_deadband: [1.5, 1.5, 1.5, 0.10, 0.10, 0.10]
+  # Keep translation and rotation return paths coherent: while any axis in a
+  # block remains loaded, released sibling axes brake and hold instead of
+  # springing home independently. Once the block is released, one common
+  # feasible jerk scale preserves its 3D return direction.
+  blockwise_release_recenter: true
   max_dt_sec: 0.02
   max_pos_offset_m: 0.02
   max_rot_offset_rad: 0.08

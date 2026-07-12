@@ -1659,6 +1659,40 @@ void validateConfig(const DualArmConfig& cfg) {
         cfg.force_control.wrench_deadband,
         "force_control.wrench_deadband"
     );
+    if (cfg.force_control.blockwise_release_recenter) {
+        const auto validate_isotropic_recenter_block = [&](std::size_t begin,
+                                                            std::size_t end,
+                                                            const std::string& name) {
+            const double damping_ratio = cfg.force_control.damping[begin] /
+                cfg.force_control.virtual_mass[begin];
+            const double stiffness_ratio = cfg.force_control.stiffness[begin] /
+                cfg.force_control.virtual_mass[begin];
+            for (std::size_t i = begin + 1; i < end; ++i) {
+                const double candidate_damping = cfg.force_control.damping[i] /
+                    cfg.force_control.virtual_mass[i];
+                const double candidate_stiffness = cfg.force_control.stiffness[i] /
+                    cfg.force_control.virtual_mass[i];
+                const double damping_scale = std::max({
+                    1.0, std::abs(damping_ratio), std::abs(candidate_damping),
+                });
+                const double stiffness_scale = std::max({
+                    1.0, std::abs(stiffness_ratio), std::abs(candidate_stiffness),
+                });
+                if (std::abs(candidate_damping - damping_ratio) >
+                        1e-9 * damping_scale ||
+                    std::abs(candidate_stiffness - stiffness_ratio) >
+                        1e-9 * stiffness_scale) {
+                    throw std::runtime_error(
+                        "force_control.blockwise_release_recenter requires equal "
+                        "damping/mass and stiffness/mass ratios within the " +
+                        name + " block"
+                    );
+                }
+            }
+        };
+        validate_isotropic_recenter_block(0, 3, "translation");
+        validate_isotropic_recenter_block(3, 6, "rotation");
+    }
     validatePositiveFinite(cfg.force_control.max_dt_sec, "force_control.max_dt_sec");
     validatePositiveFinite(cfg.force_control.max_pos_offset_m, "force_control.max_pos_offset_m");
     validatePositiveFinite(cfg.force_control.max_rot_offset_rad, "force_control.max_rot_offset_rad");
@@ -3393,6 +3427,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "damping",
             "stiffness",
             "wrench_deadband",
+            "blockwise_release_recenter",
             "max_dt_sec",
             "max_pos_offset_m",
             "max_rot_offset_rad",
@@ -3497,6 +3532,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "damping")) cfg.force_control.damping = parseJointArray(sec["damping"], "force_control.damping");
         if (has(sec, "stiffness")) cfg.force_control.stiffness = parseJointArray(sec["stiffness"], "force_control.stiffness");
         if (has(sec, "wrench_deadband")) cfg.force_control.wrench_deadband = parseJointArray(sec["wrench_deadband"], "force_control.wrench_deadband");
+        if (has(sec, "blockwise_release_recenter")) cfg.force_control.blockwise_release_recenter = asBool(sec["blockwise_release_recenter"], "force_control.blockwise_release_recenter");
         if (has(sec, "max_dt_sec")) cfg.force_control.max_dt_sec = asDouble(sec["max_dt_sec"], "force_control.max_dt_sec");
         if (has(sec, "max_pos_offset_m")) cfg.force_control.max_pos_offset_m = asDouble(sec["max_pos_offset_m"], "force_control.max_pos_offset_m");
         if (has(sec, "max_rot_offset_rad")) cfg.force_control.max_rot_offset_rad = asDouble(sec["max_rot_offset_rad"], "force_control.max_rot_offset_rad");

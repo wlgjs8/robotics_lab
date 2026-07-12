@@ -921,6 +921,12 @@ struct ForceControlConfig {
     std::array<double, 6> damping{80.0, 80.0, 80.0, 8.0, 8.0, 8.0};
     std::array<double, 6> stiffness{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     std::array<double, 6> wrench_deadband{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    // When enabled, translation and rotation each defer per-axis spring
+    // recentering until every enabled axis in that block is released.  The
+    // released block then shares one feasible jerk scale so its return
+    // direction is preserved instead of being reshaped by six independent
+    // jerk clamps.
+    bool blockwise_release_recenter = false;
 
     double max_dt_sec = 0.02;
 

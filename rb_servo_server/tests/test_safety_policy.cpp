@@ -4184,6 +4184,10 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     };
     sample.left_force_control.compliance_equilibrium_source = "policy_target";
     sample.left_force_control.compliance_recenter_active = true;
+    sample.left_force_control.compliance_translation_recenter_coupled = true;
+    sample.left_force_control.compliance_rotation_recenter_coupled = true;
+    sample.left_force_control.compliance_translation_recenter_deferred = false;
+    sample.left_force_control.compliance_rotation_recenter_deferred = true;
     sample.left_force_control.compliance_limit_axes = {
         true, false, false, false, true, false,
     };
@@ -4288,6 +4292,14 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
         index_of("left_force_control_compliance_equilibrium_source");
     const std::size_t recenter_active =
         index_of("left_force_control_compliance_recenter_active");
+    const std::size_t translation_recenter_coupled =
+        index_of("left_force_control_compliance_translation_recenter_coupled");
+    const std::size_t rotation_recenter_coupled =
+        index_of("left_force_control_compliance_rotation_recenter_coupled");
+    const std::size_t translation_recenter_deferred =
+        index_of("left_force_control_compliance_translation_recenter_deferred");
+    const std::size_t rotation_recenter_deferred =
+        index_of("left_force_control_compliance_rotation_recenter_deferred");
     const std::size_t limit_axis_x = index_of("left_force_control_limit_axis_x");
     const std::size_t limit_axis_pitch =
         index_of("left_force_control_limit_axis_pitch");
@@ -4430,6 +4442,10 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(row.at(equilibrium_rz) == "0.3");
     RB_CHECK(row.at(equilibrium_source) == "policy_target");
     RB_CHECK(row.at(recenter_active) == "1");
+    RB_CHECK(row.at(translation_recenter_coupled) == "1");
+    RB_CHECK(row.at(rotation_recenter_coupled) == "1");
+    RB_CHECK(row.at(translation_recenter_deferred) == "0");
+    RB_CHECK(row.at(rotation_recenter_deferred) == "1");
     RB_CHECK(row.at(limit_axis_x) == "1");
     RB_CHECK(row.at(limit_axis_pitch) == "1");
     RB_CHECK(row.at(limit_reason) == "jerk_limited_motion_envelope");

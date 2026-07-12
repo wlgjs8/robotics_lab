@@ -202,13 +202,18 @@ tracked real rbpodo template의 supported safety range는 명시적 per-joint
 
 Project-native F/T monitor, contact guard, 법선방향 unilateral admittance,
 6D Cartesian compliance가 servo motion path에 통합되어 있습니다.
-`stack_real.yaml`의 force path는 현재 양팔 supervised Gate 2
-translation-only Cartesian compliance입니다. `surface_source: none`과
+`stack_real.yaml`의 force path는 현재 양팔 supervised Gate 3C
+6축 Cartesian compliance입니다. `surface_source: none`과
 `compliance_frame: tcp_origin`을 사용하므로, URDF와 일치하는 +90도 FT
 sensor 축에서 순응 translation을 계산하고 TCP 끝점을 correction 원점으로
 사용합니다. GUI의 runtime FT control 기즈모가 시험 축의 기준이며 일반 TCP
 pose 기즈모는 X/Y force-axis 판정에 사용하지 않습니다.
-rotation은 torque 축과 payload/COM 검증 전까지 잠겨 있습니다. 명시적인
+세 회전축 방향/복귀가 확인되어 Roll/Pitch/Yaw가 동일한 측정-noise 기반
+고감도 mass/damping/stiffness/deadband를 사용합니다. 명시적인 blockwise
+release recenter를 사용해 translation/rotation 내부의 일부 축만 먼저
+spring 복귀하지 않게 하고, 블록 전체 release 뒤에는 공통 feasible jerk scale로
+복귀 방향을 유지합니다. payload/COM 검증 전까지는 동일 시작 자세의 작은 각도
+Hold 시험으로 제한됩니다. 명시적인
 운영자 결정으로 stand/user geometric
 floor도 모두 꺼져 있어 TCP/gripper-tip floor velocity damper와 hard plane
 backstop이 없습니다. ROI, self-collision, tracking, lease/deadman, E-stop은

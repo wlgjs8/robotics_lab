@@ -194,6 +194,14 @@ nlohmann::json forceControlJson(const ForceControlTelemetry& value) {
         })},
         {"compliance_equilibrium_source", value.compliance_equilibrium_source},
         {"compliance_recenter_active", value.compliance_recenter_active},
+        {"compliance_translation_recenter_coupled",
+            value.compliance_translation_recenter_coupled},
+        {"compliance_rotation_recenter_coupled",
+            value.compliance_rotation_recenter_coupled},
+        {"compliance_translation_recenter_deferred",
+            value.compliance_translation_recenter_deferred},
+        {"compliance_rotation_recenter_deferred",
+            value.compliance_rotation_recenter_deferred},
         {"compliance_limit_axes", value.compliance_limit_axes},
         {"compliance_limit_reason", value.compliance_limit_reason.empty()
             ? nlohmann::json(nullptr)

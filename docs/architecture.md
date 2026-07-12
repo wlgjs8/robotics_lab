@@ -365,11 +365,13 @@ execution while loading translation/rotation increments are projected and a
 bounded SE(3) correction is composed around a fixed Hold or latest accepted
 policy-command equilibrium. Zero-wrench stiffness recenters all six offsets
 without absorbing measured motion into that equilibrium. The current real
-profile is a supervised translation-only Hold gate using `tcp_origin`: the
+profile is a supervised six-axis Hold gate using `tcp_origin`: the
 controller follows the corrected +90 degree URDF/FT-axis orientation and
 applies the correction about the TCP endpoint. The runtime FT control gizmo,
-not the generic TCP pose gizmo, names the test axes. Rotational axes remain
-disabled.
+not the generic TCP pose gizmo, names the test axes. Gate 3C follows the
+roll/pitch/yaw direction/recenter capture and gives all three rotations one
+measured-noise-qualified sensitive profile. The common angular motion and
+hard-torque bounds are unchanged.
 The Cartesian controller selects jerk from a recursively viable braking
 envelope rather than integrating and clamping state. A same-direction wrench
 outside an axis deadband reserves a zero-velocity, zero-acceleration loaded
@@ -382,6 +384,12 @@ while the controller brakes toward a reachable loaded hold; this bounded
 transient no longer becomes an `ExternalForceLimit` fault. This preserves
 boundary braking, recontact, and release recentering authority without adding
 wrench averaging.
+The tracked real profile additionally couples release recentering within the
+three translation axes and within the three rotation axes. Sibling springs are
+deferred until their block is fully released, then one common feasible jerk
+scale preserves that block's return direction under the existing motion
+envelopes. This removes the observed component-by-component zig-zag without
+mixing linear and angular units or changing the accepted hard limits.
 Surface-normal and resultant hard-limit calculations remain in their existing
 TCP/stand path. Hard-limit faults retain the normal
 motion-epoch interruption path. Activation, telemetry, and promotion constraints are defined in

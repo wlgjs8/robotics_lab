@@ -310,6 +310,10 @@ bool testStatePublisherSerializesForceTelemetry() {
     };
     snapshot.left_force_control.compliance_equilibrium_source = "policy_target";
     snapshot.left_force_control.compliance_recenter_active = true;
+    snapshot.left_force_control.compliance_translation_recenter_coupled = true;
+    snapshot.left_force_control.compliance_rotation_recenter_coupled = true;
+    snapshot.left_force_control.compliance_translation_recenter_deferred = false;
+    snapshot.left_force_control.compliance_rotation_recenter_deferred = true;
     snapshot.left_force_control.compliance_limit_axes = {
         true, false, false, false, true, false,
     };
@@ -370,6 +374,10 @@ bool testStatePublisherSerializesForceTelemetry() {
     RB_CHECK(force.at("compliance_equilibrium_source").get<std::string>() ==
              "policy_target");
     RB_CHECK(force.at("compliance_recenter_active").get<bool>());
+    RB_CHECK(force.at("compliance_translation_recenter_coupled").get<bool>());
+    RB_CHECK(force.at("compliance_rotation_recenter_coupled").get<bool>());
+    RB_CHECK(!force.at("compliance_translation_recenter_deferred").get<bool>());
+    RB_CHECK(force.at("compliance_rotation_recenter_deferred").get<bool>());
     RB_CHECK(force.at("compliance_limit_axes").at(0).get<bool>());
     RB_CHECK(force.at("compliance_limit_axes").at(4).get<bool>());
     RB_CHECK(force.at("compliance_limit_reason").get<std::string>() ==

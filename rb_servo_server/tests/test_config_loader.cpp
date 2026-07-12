@@ -235,9 +235,9 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(left_force.compliance_axes.x);
         RB_CHECK(left_force.compliance_axes.y);
         RB_CHECK(left_force.compliance_axes.z);
-        RB_CHECK(!left_force.compliance_axes.roll);
-        RB_CHECK(!left_force.compliance_axes.pitch);
-        RB_CHECK(!left_force.compliance_axes.yaw);
+        RB_CHECK(left_force.compliance_axes.roll);
+        RB_CHECK(left_force.compliance_axes.pitch);
+        RB_CHECK(left_force.compliance_axes.yaw);
         RB_CHECK(near(left_force.transverse_contact_enter_force_n, 2.5));
         RB_CHECK(near(left_force.transverse_contact_release_force_n, 1.5));
         RB_CHECK(near(left_force.torque_contact_enter_nm, 0.45));
@@ -260,9 +260,9 @@ bool testRepositoryConfigsParse() {
         ));
         RB_CHECK(right_force.compliance_axes.x && right_force.compliance_axes.y);
         RB_CHECK(right_force.compliance_axes.z);
-        RB_CHECK(!right_force.compliance_axes.roll);
-        RB_CHECK(!right_force.compliance_axes.pitch);
-        RB_CHECK(!right_force.compliance_axes.yaw);
+        RB_CHECK(right_force.compliance_axes.roll);
+        RB_CHECK(right_force.compliance_axes.pitch);
+        RB_CHECK(right_force.compliance_axes.yaw);
         RB_CHECK(left_force.compliance_frame == "tcp_origin");
         RB_CHECK(left_force.compliance_frame == right_force.compliance_frame);
         RB_CHECK(near(left_force.hard_force_norm_n, 45.0));
@@ -286,11 +286,19 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(stack_real.force_control.virtual_mass[0], 2.0));
         RB_CHECK(near(stack_real.force_control.virtual_mass[3], 0.2));
         RB_CHECK(near(stack_real.force_control.damping[0], 26.0));
-        RB_CHECK(near(stack_real.force_control.damping[3], 2.8));
+        RB_CHECK(near(stack_real.force_control.damping[3], 2.0));
+        RB_CHECK(near(stack_real.force_control.damping[4], 2.0));
+        RB_CHECK(near(stack_real.force_control.damping[5], 2.0));
         RB_CHECK(near(stack_real.force_control.stiffness[2], 80.0));
+        RB_CHECK(near(stack_real.force_control.stiffness[3], 5.0));
+        RB_CHECK(near(stack_real.force_control.stiffness[4], 5.0));
+        RB_CHECK(near(stack_real.force_control.stiffness[5], 5.0));
         RB_CHECK(near(stack_real.force_control.wrench_deadband[0], 1.5));
         RB_CHECK(near(stack_real.force_control.wrench_deadband[2], 1.5));
-        RB_CHECK(near(stack_real.force_control.wrench_deadband[3], 0.25));
+        RB_CHECK(near(stack_real.force_control.wrench_deadband[3], 0.12));
+        RB_CHECK(near(stack_real.force_control.wrench_deadband[4], 0.12));
+        RB_CHECK(near(stack_real.force_control.wrench_deadband[5], 0.12));
+        RB_CHECK(stack_real.force_control.blockwise_release_recenter);
         RB_CHECK(near(stack_real.force_control.max_pos_offset_m, 0.02));
         RB_CHECK(near(stack_real.force_control.max_linear_velocity_m_s, 0.03));
         RB_CHECK(near(stack_real.force_control.max_linear_jerk_m_s3, 2.0));
@@ -848,6 +856,21 @@ bool testForceControlSchemaAndActivation() {
     const bool invalid_mass_rejected = loadRejects(invalid_mass_path);
     ::unlink(invalid_mass_path.c_str());
     RB_CHECK(invalid_mass_rejected);
+
+    const std::string anisotropic_coupled_recenter_path = writeTempConfig(
+        "force-anisotropic-coupled-recenter",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_control:\n"
+        "  provider: null\n"
+        "  enable: false\n"
+        "  blockwise_release_recenter: true\n"
+        "  virtual_mass: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]\n"
+        "  damping: [1.0, 2.0, 1.0, 1.0, 1.0, 1.0]\n"
+    );
+    const bool anisotropic_coupled_recenter_rejected =
+        loadRejects(anisotropic_coupled_recenter_path);
+    ::unlink(anisotropic_coupled_recenter_path.c_str());
+    RB_CHECK(anisotropic_coupled_recenter_rejected);
 
     const std::string invalid_alpha_path = writeTempConfig(
         "force-invalid-alpha",

@@ -343,6 +343,10 @@ void writeForceTelemetryHeader(std::ostream& os, const char* side) {
     os
        << ',' << side << "_force_control_compliance_equilibrium_source"
        << ',' << side << "_force_control_compliance_recenter_active"
+       << ',' << side << "_force_control_compliance_translation_recenter_coupled"
+       << ',' << side << "_force_control_compliance_rotation_recenter_coupled"
+       << ',' << side << "_force_control_compliance_translation_recenter_deferred"
+       << ',' << side << "_force_control_compliance_rotation_recenter_deferred"
        << ',' << side << "_force_control_limit_axis_x"
        << ',' << side << "_force_control_limit_axis_y"
        << ',' << side << "_force_control_limit_axis_z"
@@ -657,6 +661,10 @@ void writeForceTelemetryColumns(
     os
        << ',' << csvEscape(control.compliance_equilibrium_source)
        << ',' << control.compliance_recenter_active
+       << ',' << control.compliance_translation_recenter_coupled
+       << ',' << control.compliance_rotation_recenter_coupled
+       << ',' << control.compliance_translation_recenter_deferred
+       << ',' << control.compliance_rotation_recenter_deferred
        << ',' << control.compliance_limit_axes[0]
        << ',' << control.compliance_limit_axes[1]
        << ',' << control.compliance_limit_axes[2]

@@ -77,6 +77,38 @@ struct JerkInterval {
     double upper = 0.0;
 };
 
+bool sharedFeasibleJerkScale(
+    std::size_t begin,
+    std::size_t end,
+    const AxisValues& enabled,
+    const AxisValues& desired_jerk,
+    const std::array<JerkInterval, 6>& intervals,
+    double* scale
+) {
+    double lower_scale = 0.0;
+    double upper_scale = 1.0;
+    std::size_t enabled_axis_count = 0;
+    for (std::size_t i = begin; i < end; ++i) {
+        if (enabled[i] == 0.0) continue;
+        ++enabled_axis_count;
+        const double desired = desired_jerk[i];
+        if (std::abs(desired) <=
+            128.0 * std::numeric_limits<double>::epsilon()) {
+            if (intervals[i].lower > 0.0 || intervals[i].upper < 0.0) {
+                return false;
+            }
+            continue;
+        }
+        const double first = intervals[i].lower / desired;
+        const double second = intervals[i].upper / desired;
+        lower_scale = std::max(lower_scale, std::min(first, second));
+        upper_scale = std::min(upper_scale, std::max(first, second));
+    }
+    if (enabled_axis_count < 2 || lower_scale > upper_scale) return false;
+    *scale = std::clamp(upper_scale, 0.0, 1.0);
+    return *scale >= lower_scale;
+}
+
 double scaledTolerance(double scale) {
     return 128.0 * std::numeric_limits<double>::epsilon() *
         std::max(1.0, std::abs(scale));
@@ -665,21 +697,89 @@ ForceControllerProposal ForceController::propose(
     const double pos_step = tighten(config_.max_pos_step_m, command.max_pos_step_m);
     const double rot_step = tighten(config_.max_rot_step_rad, command.max_rot_step_rad);
 
+    // Preserve the established component deadbands while making release a
+    // block decision.  A sibling axis that becomes quiet while another axis
+    // is still loaded must not start its spring return independently.
     for (std::size_t i = 0; i < 6; ++i) {
         if (enabled[i] == 0.0) continue;
-
-        // The installed sensor reports the reaction wrench on the TCP.  A
-        // positive correction must therefore oppose an excess measured
-        // wrench, i.e. target - measured.  Remove the configured quiet-zone
-        // without introducing a discontinuity at its boundary.
         const double raw_error = target[i] - measured[i];
         const double deadband = config_.wrench_deadband[i];
         wrench_error[i] = std::abs(raw_error) <= deadband
             ? 0.0
             : raw_error - std::copysign(deadband, raw_error);
+    }
+    const auto block_loaded = [&](std::size_t begin, std::size_t end) {
+        for (std::size_t i = begin; i < end; ++i) {
+            if (enabled[i] != 0.0 &&
+                std::abs(wrench_error[i]) > scaledTolerance(1.0)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto block_residual = [&](std::size_t begin, std::size_t end) {
+        for (std::size_t i = begin; i < end; ++i) {
+            if (enabled[i] != 0.0 &&
+                (std::abs(old_offset[i]) > scaledTolerance(1.0) ||
+                 std::abs(old_velocity[i]) > scaledTolerance(1.0) ||
+                 std::abs(old_acceleration[i]) > scaledTolerance(1.0))) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto quiet_axis_residual = [&](std::size_t begin, std::size_t end) {
+        for (std::size_t i = begin; i < end; ++i) {
+            if (enabled[i] != 0.0 &&
+                std::abs(wrench_error[i]) <= scaledTolerance(1.0) &&
+                (std::abs(old_offset[i]) > scaledTolerance(1.0) ||
+                 std::abs(old_velocity[i]) > scaledTolerance(1.0) ||
+                 std::abs(old_acceleration[i]) > scaledTolerance(1.0))) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const bool translation_loaded = block_loaded(0, 3);
+    const bool rotation_loaded = block_loaded(3, 6);
+    const bool translation_residual = block_residual(0, 3);
+    const bool rotation_residual = block_residual(3, 6);
+    const bool translation_recenter = config_.blockwise_release_recenter &&
+        !translation_loaded && translation_residual;
+    const bool rotation_recenter = config_.blockwise_release_recenter &&
+        !rotation_loaded && rotation_residual;
+    proposal.translation_recenter_deferred =
+        config_.blockwise_release_recenter && translation_loaded &&
+        quiet_axis_residual(0, 3);
+    proposal.rotation_recenter_deferred =
+        config_.blockwise_release_recenter && rotation_loaded &&
+        quiet_axis_residual(3, 6);
+
+    std::array<AxisMotionLimits, 6> axis_limits{};
+    std::array<AxisState, 6> old_states{};
+    std::array<JerkInterval, 6> jerk_intervals{};
+    AxisValues unbounded_desired_jerk{};
+    AxisValues governed_jerk{};
+    std::array<bool, 6> recovering_axes{};
+    std::array<bool, 6> loaded_return_braking_axes{};
+    std::array<bool, 6> loaded_hold_deferred_axes{};
+
+    for (std::size_t i = 0; i < 6; ++i) {
+        if (enabled[i] == 0.0) continue;
+
+        // The installed sensor reports the reaction wrench on the TCP.  A
+        // positive correction must therefore oppose an excess measured
+        // wrench. During a partial block release, retain damping but suppress
+        // the quiet sibling's spring so it brakes and holds until the whole
+        // translation/rotation block is released.
+        const bool sibling_loaded = i < 3 ? translation_loaded : rotation_loaded;
+        const bool defer_axis_spring = config_.blockwise_release_recenter &&
+            sibling_loaded && std::abs(wrench_error[i]) <= scaledTolerance(1.0);
+        const double effective_stiffness =
+            defer_axis_spring ? 0.0 : config_.stiffness[i];
         const double raw_acceleration =
             (wrench_error[i] - config_.damping[i] * old_velocity[i] -
-             config_.stiffness[i] * old_offset[i]) /
+             effective_stiffness * old_offset[i]) /
             config_.virtual_mass[i];
 
         const bool translation = i < 3;
@@ -787,10 +887,10 @@ ForceControllerProposal ForceController::propose(
             }
         }
 
-        const double unbounded_desired_jerk =
+        unbounded_desired_jerk[i] =
             (raw_acceleration - old_acceleration[i]) / dt_sec;
         const double desired_jerk = std::clamp(
-            unbounded_desired_jerk,
+            unbounded_desired_jerk[i],
             -limits.jerk,
             limits.jerk
         );
@@ -807,13 +907,55 @@ ForceControllerProposal ForceController::propose(
                   dt_sec
               )
             : recoveryJerk(old_state, soft_limits);
-        const double governed_jerk = std::clamp(
-            (recovering || loaded_return_braking) ? recovery_jerk : desired_jerk,
+        governed_jerk[i] = std::clamp(
+            (recovering || loaded_return_braking || loaded_hold_deferred)
+                ? recovery_jerk
+                : desired_jerk,
             interval.lower,
             interval.upper
         );
+        axis_limits[i] = limits;
+        old_states[i] = old_state;
+        jerk_intervals[i] = interval;
+        recovering_axes[i] = recovering;
+        loaded_return_braking_axes[i] = loaded_return_braking;
+        loaded_hold_deferred_axes[i] = loaded_hold_deferred;
+    }
+
+    // In a fully released block, scale the unconstrained jerk vector once for
+    // all enabled axes. This retains the SMD return direction while still
+    // intersecting every axis' recursively feasible jerk interval. Translation
+    // and rotation remain separate blocks because their units and configured
+    // dynamics are intentionally different.
+    const auto couple_recenter = [&](std::size_t begin, std::size_t end, bool active) {
+        if (!active) return false;
+        double shared_scale = 0.0;
+        if (!sharedFeasibleJerkScale(
+                begin,
+                end,
+                enabled,
+                unbounded_desired_jerk,
+                jerk_intervals,
+                &shared_scale
+            )) {
+            return false;
+        }
+        for (std::size_t i = begin; i < end; ++i) {
+            if (enabled[i] == 0.0) continue;
+            governed_jerk[i] = shared_scale * unbounded_desired_jerk[i];
+        }
+        return true;
+    };
+    proposal.translation_recenter_coupled =
+        couple_recenter(0, 3, translation_recenter);
+    proposal.rotation_recenter_coupled =
+        couple_recenter(3, 6, rotation_recenter);
+
+    for (std::size_t i = 0; i < 6; ++i) {
+        if (enabled[i] == 0.0) continue;
+        const AxisMotionLimits& limits = axis_limits[i];
         const AxisState next_state = advanceWithJerk(
-            old_state, governed_jerk, dt_sec
+            old_states[i], governed_jerk[i], dt_sec
         );
         if (!within(
                 next_state.acceleration,
@@ -836,9 +978,9 @@ ForceControllerProposal ForceController::propose(
             proposal.reason = "Cartesian jerk governor produced a state outside hard limits";
             return proposal;
         }
-        const bool axis_limited = recovering || loaded_return_braking ||
-            loaded_hold_deferred ||
-            std::abs(governed_jerk - unbounded_desired_jerk) >
+        const bool axis_limited = recovering_axes[i] ||
+            loaded_return_braking_axes[i] || loaded_hold_deferred_axes[i] ||
+            std::abs(governed_jerk[i] - unbounded_desired_jerk[i]) >
                 scaledTolerance(limits.jerk);
         proposal.limit_axes[i] = axis_limited;
         proposal.saturated = proposal.saturated || axis_limited;

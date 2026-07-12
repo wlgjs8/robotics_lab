@@ -196,12 +196,14 @@ The C++ receive timestamp is used for timeout checks.
 ## Force-control status
 
 Force control is connected to the Cartesian servo path. The tracked real stack
-is currently at supervised Gate 2: translation-only `cartesian_admittance`,
+is currently at supervised Gate 3D: six-axis `cartesian_admittance`,
 `surface_source: none`, and `compliance_frame: tcp_origin`. The controller axes
 therefore follow the accepted rbpodo EFT/TCP orientation and corrections use the
-TCP endpoint. Rotations remain locked. Both geometric floor constraints are off
-by explicit operator decision, so this profile has no TCP/gripper-tip floor
-backstop. The simulation stack remains force-off. See
+TCP endpoint. Translation and rotation each use block-coherent release
+recentering so sibling axes do not spring home independently and a common
+feasible jerk scale preserves the released 3D direction. Both geometric floor
+constraints are off by explicit operator decision, so this profile has no
+TCP/gripper-tip floor backstop. The simulation stack remains force-off. See
 `docs/force_control.md` and the acceptance runbook.
 
 ## Viser operator GUI

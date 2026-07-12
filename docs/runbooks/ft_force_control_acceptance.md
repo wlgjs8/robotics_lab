@@ -14,8 +14,9 @@ real-enforcement gate cannot currently pass. The explicit
 a supervised acceptance stage; it does not close this gate.
 
 `stack_sim.yaml` remains force-off. The tracked `stack_real.yaml` is the single
-physical bring-up profile and currently exposes Gate 2 supervised
-translation-only Cartesian compliance in a fixed Hold. Rotation remains locked.
+physical bring-up profile and currently exposes Gate 3C supervised six-axis
+Cartesian compliance in a fixed Hold. Production force behavior remains
+blocked.
 The production gate above remains
 blocked because the EFT source does not provide independent sensor health:
 
@@ -30,12 +31,12 @@ force_control:
     enable: true
     surface_source: none
     compliance_frame: tcp_origin
-    compliance_axes: [true, true, true, false, false, false]
+    compliance_axes: [true, true, true, true, true, true]
   right:
     enable: true
     surface_source: none
     compliance_frame: tcp_origin
-    compliance_axes: [true, true, true, false, false, false]
+    compliance_axes: [true, true, true, true, true, true]
 ```
 
 Do not use controller `pgmode` as evidence of physical F/T dynamics.
@@ -118,6 +119,121 @@ will admit motion only when it does not increase the measured contact load while
 retaining tangential and unloading motion; it must not be enabled until this
 free-space compliance/recenter capture is reviewed.
 
+The clean post-fix repeat is `servo_log_20260712_190425.csv`: 50,437 samples,
+zero force-controller fault reason, zero hard-limit sample, and zero fault
+latch. Right-arm X/Y/Z offsets each reached approximately 19.9 mm and returned
+to numerical zero. This closes the Gate 2 late-recontact regression check; it
+does not promote policy/contact behavior.
+
+### Gate 3A: yaw Hold compliance
+
+1. Use only `make run MODE=real`, Init Motion, and the terminal fixed Hold.
+   Keep flow-infer, teleop, jog, gripper commands, environment contact, and the
+   other arm inactive. Keep an operator at the E-stop and clear the full
+   orientation swept volume.
+2. Confirm accepted/fresh tare, `compliance_frame=tcp_origin`, and axes
+   `[true,true,true,false,false,true]`. Roll and pitch must remain held.
+3. Grasp near the TCP and apply a slow, nearly pure moment about the large
+   runtime FT-control gizmo +Z axis. Do not push on a long lever: the unchanged
+   hard limit is 7 Nm. Cross the 0.25 Nm quiet zone gradually.
+4. The TCP must yaw with the applied twist, not against it, and the yaw offset
+   must remain within 0.08 rad. Release fully; it must recenter smoothly to the
+   fixed Hold orientation without roll/pitch motion or equilibrium ratcheting.
+   Repeat twice with a settled neutral interval.
+5. Stop immediately on opposite-direction rotation, roll/pitch motion, chatter,
+   equilibrium drift, stale/tare invalidation, IK/safety/backend rejection, or
+   any hard force/torque threshold. Preserve the CSV and server log.
+
+The preceding translation log measured at most 1.18/1.14/0.43 Nm on Tx/Ty/Tz,
+while no-contact torque norm had 99th-percentile magnitude 0.142 Nm. This is why
+Gate 3A admits yaw first and does not yet admit roll/pitch. Payload mass and COM
+remain zero in the tracked profile, so this is a pose-local, small-angle Hold
+test only; do not change the starting orientation after tare.
+
+The operator confirmed correct yaw direction and recenter in the 19:11 and
+19:16 captures. `servo_log_20260712_191136.csv` and
+`servo_log_20260712_191634.csv` contain zero force-controller fault reason and
+zero hard-limit sample. Right yaw reached the configured 0.08 rad neighborhood;
+the latter capture exercised both yaw directions. This closes Gate 3A.
+
+### Gate 3B: roll/pitch Hold compliance and sensitive yaw
+
+1. Use `make run MODE=real`, Init Motion, and terminal fixed Hold only. Confirm
+   axes `[true,true,true,true,true,true]`, fresh accepted tare, and the same
+   starting orientation used for tare.
+2. On the right arm, apply a slow nearly pure moment around runtime FT-control
+   +X (roll), then release completely and wait for recenter. Repeat twice.
+3. Repeat independently around runtime FT-control +Y (pitch). Orientation must
+   follow the applied twist and return to the fixed Hold orientation. Stop on
+   reversed direction or material motion on the other rotational axis.
+4. Recheck yaw with a smaller moment. Its deadband is now 0.15 Nm, stiffness is
+   6 Nm/rad, and near-critical damping is 2.2 Nms/rad. At 0.3 Nm the static
+   model predicts about 0.025 rad (1.43 degrees), versus 0.00625 rad
+   (0.36 degrees) in the prior profile.
+5. The common angular limits remain 0.08 rad, 0.15 rad/s, 1.5 rad/s2, and the
+   unchanged hard torque limit is 7 Nm. Stop on chatter, equilibrium drift,
+   stale/tare invalidation, IK/safety/backend rejection, or any hard threshold.
+   Preserve the CSV and server log.
+
+Payload mass and COM are still zero. Roll/pitch change gravity orientation more
+directly than yaw, so this remains a small-angle, pose-local characterization;
+do not use policy motion or change the initial orientation during this gate.
+
+The operator confirmed that all three rotational axes followed the applied
+moment and recentered. `servo_log_20260712_192634.csv` contains 62,015 samples,
+zero force-controller fault reason, zero hard-limit sample, and final right
+roll/pitch/yaw offsets numerically at zero. Each axis reached approximately
+0.0794 rad during the capture. This closes Gate 3B.
+
+### Gate 3C: uniform sensitive rotational compliance
+
+All rotations now use the same profile:
+
+```yaml
+virtual_mass:    [..., 0.2, 0.2, 0.2]
+damping:         [..., 2.0, 2.0, 2.0]
+stiffness:       [..., 5.0, 5.0, 5.0]
+wrench_deadband: [..., 0.12, 0.12, 0.12]
+```
+
+The selected 0.12 Nm deadband remains above the measured no-contact p99 values
+of 0.068/0.074/0.005 Nm for Tx/Ty/Tz. At 0.2 Nm, each axis' static model predicts
+0.016 rad (0.92 degrees), compared with 0.0083 rad (0.48 degrees) for the prior
+yaw profile. The 0.08 rad angular limit is reached at approximately 0.52 Nm.
+
+1. Use `make run MODE=real`, Init Motion, and terminal fixed Hold only.
+2. Test right Roll, Pitch, then Yaw independently with a small moment. Start
+   below the previous force and leave a complete recenter interval between axes.
+3. Confirm each axis has comparable onset, displacement, and recenter behavior.
+   Stop if no-contact jitter appears or one axis materially drives another.
+4. Preserve the CSV and server log. Do not use policy motion or change the
+   initial orientation while payload/COM remain uncharacterized.
+
+### Gate 3D: block-coherent multi-axis release
+
+The tracked real profile enables:
+
+```yaml
+blockwise_release_recenter: true
+```
+
+This gate specifically checks the multi-axis zig-zag reported after Gate 3C.
+
+1. Use `make run MODE=real`, Init Motion, and fixed Hold only.
+2. Apply a combined X/Y translation load, hold it briefly, then release one
+   component while keeping the other loaded. The released component may brake,
+   but must not spring back toward the equilibrium independently.
+3. Release the remaining force. The translation offset must return on one
+   visually coherent direction. Repeat with a combined Roll/Pitch moment at
+   smaller amplitude, without changing the tared starting orientation.
+4. In the CSV, confirm the partial-release interval sets
+   `compliance_translation_recenter_deferred` or
+   `compliance_rotation_recenter_deferred`. Full release must set the matching
+   `*_recenter_coupled` field while `proposal_valid=1` and no hard limit/fault
+   occurs.
+5. Stop on a direction reversal, new oscillation, opposite-block motion, IK or
+   safety rejection, or any hard force/torque event.
+
 ## Per-arm accepted profile
 
 Record the accepted per-arm values in `stack_real.yaml` and preserve the
@@ -136,7 +252,7 @@ explicitly labelled as unaccepted estimates.
 | Backend frame sequence evidence | implemented; physical log acceptance pending | implemented; physical log acceptance pending |
 | Independent sensor sequence/time evidence | unavailable | unavailable |
 | `T_tcp_sensor` | `[0, 0, -0.202642, 0, 0, pi/2]`; inherited from identical right hardware | `[0, 0, -0.202642, 0, 0, pi/2]`; corrected translation-axis capture, 2026-07-12 |
-| Positive force/torque axis check | +Fx/+Fy/+Fz inherited from identical right assembly; torque pending | +Fx/+Fy/+Fz direction/recenter observed with corrected runtime FT gizmo, `servo_log_20260712_184841.csv`; torque pending |
+| Positive force/torque axis check | +Fx/+Fy/+Fz and Tx/Ty/Tz behavior inherited from identical right assembly | +Fx/+Fy/+Fz direction/recenter observed in `servo_log_20260712_184841.csv` and clean repeat `servo_log_20260712_190425.csv`; yaw accepted with `servo_log_20260712_191136.csv` and `servo_log_20260712_191634.csv`; roll/pitch/yaw accepted by operator with `servo_log_20260712_192634.csv` |
 | Tool/payload mass | pending | pending |
 | Payload center of mass in TCP | pending | pending |
 | Sensor bias artifact | pending | pending |
@@ -162,9 +278,9 @@ transform convention is:
 point_tcp = T_tcp_sensor * point_sensor
 ```
 
-Before rotational or production force behavior is promoted, record the still
-pending torque-axis loads. A sign or frame mismatch is a hard failure; do not
-compensate for it by changing a contact threshold.
+Before production force behavior is promoted, record and review all three
+torque-axis loads. A sign or frame mismatch is a hard failure; do not compensate
+for it by changing a contact threshold.
 
 The completed Gate 1 profile used `compliance_frame: surface`: x/y/z and
 roll/pitch/yaw are expressed in stand-fixed axes at the TCP. Confirm the
@@ -174,10 +290,13 @@ moving-TCP orientation from the first sign decision. Gate 2 now uses
 `compliance_frame: tcp_origin`: the controller axes follow the corrected
 `+pi/2` FT orientation while the correction pivot stays at the TCP endpoint.
 The 2026-07-12 18:48 runtime-FT-control-gizmo capture completed the right-arm
-translation direction and recenter observation. That run also exposed a
-late-recontact jerk-governor fault, so Gate 2 still requires a clean post-fix
-repeat before policy/contact promotion. Rotation remains disabled until the
-torque axes and payload/COM are accepted.
+translation direction and recenter observation. That run exposed a
+late-recontact jerk-governor fault; the 19:04 repeat completed without a
+force-controller fault, hard-limit event, or fault latch. The subsequent 19:11
+and 19:16 captures confirmed yaw direction/recenter without a controller or
+hard-limit fault. The 19:26 capture then confirmed roll/pitch/yaw direction and
+recenter without a controller or hard-limit fault. Gate 3C gives all three
+rotations the same more-sensitive profile. Payload/COM remain pending.
 
 For the floor contact channel, keep the stand-frame geometric normal pointing
 outward (`+Z`). The installed sensor's reaction force points opposite that
@@ -281,6 +400,7 @@ applicable config/ownership parts of these requirements:
 - explicit sensor-origin frame/sign acceptance before TCP-origin promotion
 - fixed Hold equilibrium with no measured-pose ratchet under sustained wrench
 - zero-wrench release recentering to that equilibrium on x/y/z/rx/ry/rz
+- block-coherent partial release and direction-preserving 3D translation/rotation return
 - release-phase recontact brakes the return before loaded hold, without a fault
 - Hold-to-policy first-delta projection without an equilibrium jump
 - legacy guarded-mode reset interlock requiring a fresh post-event observation and chunk
@@ -318,8 +438,9 @@ the compliant offset back toward zero. Repeat both wrench signs for at least
 one translation and one rotation before promotion.
 
 Before flow-infer, validate `cartesian_admittance` in a fixed `Hold` one axis at
-a time. The active Gate 2 profile covers x, y, and z only; roll, pitch, and yaw
-remain locked until payload/COM and torque-axis evidence are accepted. The
+a time, followed by the Gate 3D combined-axis release test. The active Gate 3C
+profile enables all six axes only for the accepted fixed-orientation,
+pose-local supervised test. The
 equilibrium pose/source must remain unchanged while held, the bounded offset
 must oppose the wrench without a fault, and `compliance_recenter_active` must
 drive every enabled offset back near zero after release. Stop immediately on an

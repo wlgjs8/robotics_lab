@@ -20,6 +20,10 @@ struct ForceControllerProposal {
     Wrench6D wrench_error_tcp;
     std::array<bool, 6> limit_axes{};
     std::string limit_reason;
+    bool translation_recenter_coupled = false;
+    bool rotation_recenter_coupled = false;
+    bool translation_recenter_deferred = false;
+    bool rotation_recenter_deferred = false;
     bool valid = false;
     bool saturated = false;
     std::string reason;

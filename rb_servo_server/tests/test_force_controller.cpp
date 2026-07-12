@@ -48,9 +48,10 @@ rb_servo::ForceControlCommand xCommand() {
 rb_servo::ForceControlConfig realProfileConfig() {
     rb_servo::ForceControlConfig config = controllerConfig();
     config.virtual_mass = {2.0, 2.0, 2.0, 0.2, 0.2, 0.2};
-    config.damping = {26.0, 26.0, 26.0, 2.8, 2.8, 2.8};
-    config.stiffness = {80.0, 80.0, 80.0, 8.0, 8.0, 8.0};
-    config.wrench_deadband = {1.5, 1.5, 1.5, 0.25, 0.25, 0.25};
+    config.damping = {26.0, 26.0, 26.0, 2.0, 2.0, 2.0};
+    config.stiffness = {80.0, 80.0, 80.0, 5.0, 5.0, 5.0};
+    config.wrench_deadband = {1.5, 1.5, 1.5, 0.12, 0.12, 0.12};
+    config.blockwise_release_recenter = true;
     config.max_pos_offset_m = 0.02;
     config.max_rot_offset_rad = 0.08;
     config.max_linear_velocity_m_s = 0.03;
@@ -309,6 +310,13 @@ bool testRealProfileVelocityBoundaryBrakesWithoutFault() {
         const auto proposal = controller.propose(
             rb_servo::Wrench6D{}, xCommand(), rb_servo::Vec6{}, dt
         );
+        if (!proposal.valid) {
+            std::cerr << "real-profile release i=" << i
+                      << " x=" << previous.offset_tcp.x
+                      << " v=" << previous.velocity_tcp.x
+                      << " a=" << previous.acceleration_tcp.x
+                      << ": " << proposal.reason << "\n";
+        }
         RB_CHECK(proposal.valid);
         RB_CHECK(std::abs(
             proposal.state.acceleration_tcp.x - previous.acceleration_tcp.x
@@ -346,6 +354,167 @@ bool testRealProfileAllCartesianAxesStayBoundedWithoutFault() {
         RB_CHECK(controller.commit(proposal));
     }
     for (bool limited : observed_limit) RB_CHECK(limited);
+    return true;
+}
+
+bool testRealProfileRotationsShareSensitivityBelowContactTelemetryThreshold() {
+    const rb_servo::ForceControlConfig config = realProfileConfig();
+    rb_servo::ForceController controller(config);
+    controller.engage();
+
+    rb_servo::ForceControlCommand command;
+    command.mode = rb_servo::ForceControlMode::Admittance;
+    command.enabled_axis = {false, false, false, true, true, true};
+    rb_servo::Wrench6D wrench;
+    wrench.tx = 0.15;
+    wrench.ty = 0.15;
+    wrench.tz = 0.15;
+
+    const auto proposal = controller.propose(wrench, command, rb_servo::Vec6{}, 0.002);
+    RB_CHECK(proposal.valid);
+    RB_CHECK(near(proposal.wrench_error_tcp.tx, -0.03));
+    RB_CHECK(near(proposal.wrench_error_tcp.ty, -0.03));
+    RB_CHECK(near(proposal.wrench_error_tcp.tz, -0.03));
+    RB_CHECK(proposal.state.offset_tcp.rx < 0.0);
+    RB_CHECK(proposal.state.offset_tcp.ry < 0.0);
+    RB_CHECK(proposal.state.offset_tcp.rz < 0.0);
+    return true;
+}
+
+bool testBlockwiseReleaseDefersSiblingAndPreservesReturnDirection() {
+    const rb_servo::ForceControlConfig config = realProfileConfig();
+    rb_servo::ForceController controller(config);
+    controller.engage();
+
+    rb_servo::ForceControlCommand command;
+    command.mode = rb_servo::ForceControlMode::Admittance;
+    command.enabled_axis = {true, true, false, false, false, false};
+    constexpr double dt = 0.002;
+
+    rb_servo::Wrench6D loaded;
+    loaded.fx = 3.0;
+    loaded.fy = 4.0;
+    for (int i = 0; i < 2500; ++i) {
+        const auto proposal = controller.propose(
+            loaded, command, rb_servo::Vec6{}, dt
+        );
+        RB_CHECK(proposal.valid);
+        RB_CHECK(controller.commit(proposal));
+    }
+
+    rb_servo::Wrench6D y_only;
+    y_only.fy = loaded.fy;
+    const double x_at_partial_release = controller.state().offset_tcp.x;
+    bool observed_deferred = false;
+    for (int i = 0; i < 1000; ++i) {
+        const auto proposal = controller.propose(
+            y_only, command, rb_servo::Vec6{}, dt
+        );
+        RB_CHECK(proposal.valid);
+        observed_deferred = observed_deferred ||
+            proposal.translation_recenter_deferred;
+        RB_CHECK(controller.commit(proposal));
+    }
+    RB_CHECK(observed_deferred);
+    RB_CHECK(std::abs(controller.state().offset_tcp.x - x_at_partial_release) < 1e-5);
+
+    const double release_x = controller.state().offset_tcp.x;
+    const double release_y = controller.state().offset_tcp.y;
+    const double release_norm = std::hypot(release_x, release_y);
+    RB_CHECK(release_norm > 0.005);
+    bool observed_coupled = false;
+    double minimum_direction_cosine = 1.0;
+    for (int i = 0; i < 5000; ++i) {
+        const auto proposal = controller.propose(
+            rb_servo::Wrench6D{}, command, rb_servo::Vec6{}, dt
+        );
+        RB_CHECK(proposal.valid);
+        observed_coupled = observed_coupled ||
+            proposal.translation_recenter_coupled;
+        const double x = proposal.state.offset_tcp.x;
+        const double y = proposal.state.offset_tcp.y;
+        const double norm = std::hypot(x, y);
+        if (norm > 0.001) {
+            minimum_direction_cosine = std::min(
+                minimum_direction_cosine,
+                (x * release_x + y * release_y) / (norm * release_norm)
+            );
+        }
+        RB_CHECK(controller.commit(proposal));
+    }
+    RB_CHECK(observed_coupled);
+    RB_CHECK(minimum_direction_cosine > 0.999);
+    RB_CHECK(std::hypot(
+        controller.state().offset_tcp.x,
+        controller.state().offset_tcp.y
+    ) < 1e-4);
+
+    rb_servo::ForceController rotation_controller(config);
+    rotation_controller.engage();
+    rb_servo::ForceControlCommand rotation_command;
+    rotation_command.mode = rb_servo::ForceControlMode::Admittance;
+    rotation_command.enabled_axis = {false, false, false, true, true, false};
+    rb_servo::Wrench6D rotation_load;
+    rotation_load.tx = 0.3;
+    rotation_load.ty = 0.5;
+    for (int i = 0; i < 2500; ++i) {
+        const auto proposal = rotation_controller.propose(
+            rotation_load, rotation_command, rb_servo::Vec6{}, dt
+        );
+        RB_CHECK(proposal.valid);
+        RB_CHECK(rotation_controller.commit(proposal));
+    }
+
+    rb_servo::Wrench6D pitch_only;
+    pitch_only.ty = rotation_load.ty;
+    const double roll_at_partial_release =
+        rotation_controller.state().offset_tcp.rx;
+    bool observed_rotation_deferred = false;
+    for (int i = 0; i < 1000; ++i) {
+        const auto proposal = rotation_controller.propose(
+            pitch_only, rotation_command, rb_servo::Vec6{}, dt
+        );
+        RB_CHECK(proposal.valid);
+        observed_rotation_deferred = observed_rotation_deferred ||
+            proposal.rotation_recenter_deferred;
+        RB_CHECK(rotation_controller.commit(proposal));
+    }
+    RB_CHECK(observed_rotation_deferred);
+    RB_CHECK(std::abs(
+        rotation_controller.state().offset_tcp.rx - roll_at_partial_release
+    ) < 1e-5);
+
+    const double release_roll = rotation_controller.state().offset_tcp.rx;
+    const double release_pitch = rotation_controller.state().offset_tcp.ry;
+    const double rotation_release_norm = std::hypot(release_roll, release_pitch);
+    RB_CHECK(rotation_release_norm > 0.01);
+    bool observed_rotation_coupled = false;
+    double minimum_rotation_direction_cosine = 1.0;
+    for (int i = 0; i < 5000; ++i) {
+        const auto proposal = rotation_controller.propose(
+            rb_servo::Wrench6D{}, rotation_command, rb_servo::Vec6{}, dt
+        );
+        RB_CHECK(proposal.valid);
+        observed_rotation_coupled = observed_rotation_coupled ||
+            proposal.rotation_recenter_coupled;
+        const double roll = proposal.state.offset_tcp.rx;
+        const double pitch = proposal.state.offset_tcp.ry;
+        const double norm = std::hypot(roll, pitch);
+        if (norm > 0.002) {
+            minimum_rotation_direction_cosine = std::min(
+                minimum_rotation_direction_cosine,
+                (roll * release_roll + pitch * release_pitch) /
+                    (norm * rotation_release_norm)
+            );
+        }
+        RB_CHECK(rotation_controller.commit(proposal));
+    }
+    RB_CHECK(observed_rotation_coupled);
+    RB_CHECK(minimum_rotation_direction_cosine > 0.999);
+    RB_CHECK(std::hypot(
+        rotation_controller.state().offset_tcp.rx,
+        rotation_controller.state().offset_tcp.ry
+    ) < 1e-4);
     return true;
 }
 
@@ -769,6 +938,8 @@ int main() {
     if (!testEveryValidProposalHonorsFiniteDifferenceDynamics()) return 1;
     if (!testRealProfileVelocityBoundaryBrakesWithoutFault()) return 1;
     if (!testRealProfileAllCartesianAxesStayBoundedWithoutFault()) return 1;
+    if (!testRealProfileRotationsShareSensitivityBelowContactTelemetryThreshold()) return 1;
+    if (!testBlockwiseReleaseDefersSiblingAndPreservesReturnDirection()) return 1;
     if (!testRealProfileReleaseSweepRemainsRecursivelyFeasible()) return 1;
     if (!testResponsiveRealProfileMovesOnWeakWrenchAndUsesExpandedTravel()) return 1;
     if (!testRealProfileSustainedWrenchNeverReturnsTowardZero()) return 1;

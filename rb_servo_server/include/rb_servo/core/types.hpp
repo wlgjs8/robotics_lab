@@ -587,6 +587,10 @@ struct ForceControlTelemetry {
     Pose6D compliance_equilibrium_stand;
     std::string compliance_equilibrium_source = "unavailable";
     bool compliance_recenter_active = false;
+    bool compliance_translation_recenter_coupled = false;
+    bool compliance_rotation_recenter_coupled = false;
+    bool compliance_translation_recenter_deferred = false;
+    bool compliance_rotation_recenter_deferred = false;
     Vec6 raw_policy_delta_surface;
     Vec6 accepted_policy_delta_surface;
     std::array<bool, 6> compliance_limit_axes{};

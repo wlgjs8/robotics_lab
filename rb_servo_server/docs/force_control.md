@@ -8,8 +8,9 @@ chunk: inference and gripper execution continue while the server projects
 loading policy increments and adds a bounded SE(3) compliance correction.
 
 The controller-simulation config remains inert. After the 2026-07-12 positive
-X/Y/Z frame capture, the tracked physical-real config exposes a supervised
-translation-only Hold compliance gate:
+X/Y/Z frame capture, clean post-fix repeat, and roll/pitch/yaw
+direction/recenter captures, the tracked physical-real config exposes a
+supervised six-axis Hold compliance gate:
 
 ```yaml
 force_control:
@@ -22,21 +23,22 @@ force_control:
     enable: true
     surface_source: none
     compliance_frame: tcp_origin
-    compliance_axes: [true, true, true, false, false, false]
+    compliance_axes: [true, true, true, true, true, true]
   right:
     enable: true
     surface_source: none
     compliance_frame: tcp_origin
-    compliance_axes: [true, true, true, false, false, false]
+    compliance_axes: [true, true, true, true, true, true]
 ```
 
 The physical acceptance profile is managed directly in `stack_real.yaml`, one
-reviewed setting at a time. In this gate the three translations can modify a
-fixed Hold target; rotations remain locked because payload/COM and torque-axis
-acceptance are pending. Both geometric floor constraints are disabled by
-explicit operator decision, so neither the TCP nor gripper-tip floor backstop
-is present. The implementation is not safety-rated and does not replace E-stop,
-lease/deadman, tracking, collision, ROI, or final joint safety checks.
+reviewed setting at a time. In this gate all three translations and rotations
+can modify a fixed Hold target. Roll/pitch/yaw share a 0.12 Nm deadband,
+5 Nm/rad stiffness, 2.0 Nms/rad damping, and 0.2 virtual mass. Both geometric floor
+constraints are disabled by explicit operator decision, so neither the TCP nor
+gripper-tip floor backstop is present. The implementation is not safety-rated
+and does not replace E-stop, lease/deadman, tracking, collision, ROI, or final
+joint safety checks.
 
 ## Installed sensor frame
 
@@ -59,11 +61,15 @@ T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
 ```
 
 The convention is `point_tcp = T_tcp_sensor * point_sensor`. The corrected
-2026-07-12 18:48 physical capture then showed right-arm +X/+Y/+Z translation in
-the pushed runtime FT-control-gizmo direction and zero-wrench recentering. The
-operator declared the left assembly identical, so the same mapping is retained
-for both arms. Torque axes, per-arm serials, payload/COM, bias, and production
-force motion remain pending in the acceptance runbook.
+2026-07-12 18:48 physical capture showed right-arm +X/+Y/+Z translation in the
+pushed runtime FT-control-gizmo direction and zero-wrench recentering; the
+19:04 repeat completed without a controller or hard-limit fault. The operator
+declared the left assembly identical, so the same mapping is retained for both
+arms. The 19:11 and 19:16 captures confirmed supervised yaw direction and
+recenter, and the 19:26 capture confirmed roll/pitch/yaw direction and recenter,
+without controller or hard-limit faults. All rotations now share the same
+sensitive characterization profile. Per-arm serials, payload/COM, bias, and
+production force motion remain pending in the acceptance runbook.
 
 ## Wrench path
 
@@ -254,6 +260,23 @@ catch-up. Telemetry publishes the equilibrium pose, its `hold_anchor` or
 `policy_target` source, and whether recentering is active. Scalar and 6D
 controller proposals use the same two-phase commit boundary.
 
+The tracked Gate 3C profile also enables `blockwise_release_recenter`. Its
+translation and rotation blocks retain the existing component deadbands, but a
+quiet sibling axis does not start its spring return while another axis in the
+same block remains loaded. After the whole block is released, the controller
+intersects each axis' existing jerk-feasibility interval and applies one common
+scale to the block's unconstrained jerk vector. This preserves the released 3D
+translation or rotation direction instead of letting independent jerk clamps
+reshape it. Translation and rotation are intentionally separate because their
+units, gains, and motion limits differ. A load that returns immediately exits
+the coupled recenter path and re-enters the existing loaded-hold path.
+
+State JSON and servo CSV expose the transition directly through
+`compliance_translation_recenter_coupled`,
+`compliance_rotation_recenter_coupled`,
+`compliance_translation_recenter_deferred`, and
+`compliance_rotation_recenter_deferred`.
+
 ## Normal admittance
 
 The scalar controller uses positive compressive force and positive outward
@@ -406,6 +429,7 @@ force_control:
   damping: [26.0, 26.0, 26.0, 2.8, 2.8, 2.8]
   stiffness: [80.0, 80.0, 80.0, 8.0, 8.0, 8.0]
   wrench_deadband: [1.5, 1.5, 1.5, 0.25, 0.25, 0.25]
+  blockwise_release_recenter: false
   max_pos_offset_m: 0.02
   max_rot_offset_rad: 0.08
   max_linear_velocity_m_s: 0.03
