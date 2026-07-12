@@ -450,8 +450,9 @@
        The sensor mesh occupies attachment_site z=0.015..0.045 m: a 15 mm
        robot-side adapter followed by the 30 mm sensor body. The measurement
        origin is the RFT64 sensor_site at the tool-side face. The +90 deg yaw
-       matches the baked Pika/RFT CAD orientation; controller wrench-axis
-       acceptance is still pending. -->
+       matches the baked Pika/RFT CAD orientation. This is a mechanical CAD
+       frame only; the accepted rbpodo EFT/control frame is configured and
+       published separately by rb_servo_server. -->
   <link name="ft_sensor_base"/>
   <link name="ft_sensor_measurement"/>
   <link name="tool">

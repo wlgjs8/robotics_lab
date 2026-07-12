@@ -717,13 +717,52 @@ ForceControllerProposal ForceController::propose(
                 -scaledTolerance(limits.offset);
         JerkInterval interval;
         bool recovering = false;
+        bool loaded_hold_deferred = false;
         bool soft_feasible = feasibleJerkInterval(
             old_state, soft_limits, dt_sec, &interval
         );
         if (soft_feasible && loaded_same_direction) {
-            soft_feasible = tightenToLoadedHoldEnvelope(
-                old_state, load_direction, soft_limits, dt_sec, &interval
-            );
+            JerkInterval loaded_interval = interval;
+            if (tightenToLoadedHoldEnvelope(
+                    old_state,
+                    load_direction,
+                    soft_limits,
+                    dt_sec,
+                    &loaded_interval
+                )) {
+                interval = loaded_interval;
+            } else {
+                JerkInterval hard_loaded_interval;
+                const bool hard_motion_feasible = feasibleJerkInterval(
+                    old_state, limits, dt_sec, &hard_loaded_interval
+                );
+                if (!hard_motion_feasible) {
+                    proposal.reason =
+                        "Cartesian axis state is outside the hard jerk-governed motion envelope";
+                    return proposal;
+                }
+                if (tightenToLoadedHoldEnvelope(
+                        old_state,
+                        load_direction,
+                        limits,
+                        dt_sec,
+                        &hard_loaded_interval
+                    )) {
+                    recovering = true;
+                    interval = hard_loaded_interval;
+                } else {
+                    // A load can reappear so late in a stiffness-driven return
+                    // that the current velocity/acceleration cannot be stopped
+                    // before a small equilibrium crossing.  Likewise, noisy
+                    // deadband transitions can leave acceleration that must
+                    // pass through a brief return transient before a loaded
+                    // hold is dynamically reachable.  Preserve the ordinary
+                    // jerk-safe envelope and brake toward the loaded hold;
+                    // faulting cannot make the physically unavoidable
+                    // transient disappear.
+                    loaded_hold_deferred = true;
+                }
+            }
         }
         if (!soft_feasible) {
             recovering = true;
@@ -732,13 +771,19 @@ ForceControllerProposal ForceController::propose(
                     "Cartesian axis state is outside the hard jerk-governed motion envelope";
                 return proposal;
             }
-            if (loaded_same_direction &&
-                !tightenToLoadedHoldEnvelope(
-                    old_state, load_direction, limits, dt_sec, &interval
-                )) {
-                proposal.reason =
-                    "Cartesian loaded axis cannot reach a jerk-bounded hold before reversal";
-                return proposal;
+            if (loaded_same_direction) {
+                JerkInterval loaded_interval = interval;
+                if (tightenToLoadedHoldEnvelope(
+                        old_state,
+                        load_direction,
+                        limits,
+                        dt_sec,
+                        &loaded_interval
+                    )) {
+                    interval = loaded_interval;
+                } else {
+                    loaded_hold_deferred = true;
+                }
             }
         }
 
@@ -753,7 +798,7 @@ ForceControllerProposal ForceController::propose(
             load_direction * old_state.velocity <
                 -2.0 * limits.jerk * dt_sec * dt_sec;
         const bool loaded_boundary_hold = loaded_same_direction &&
-            (recovering || loaded_return_braking);
+            (recovering || loaded_return_braking || loaded_hold_deferred);
         const double recovery_jerk = loaded_boundary_hold
             ? loadedBoundaryBrakingJerk(
                   old_state,
@@ -792,6 +837,7 @@ ForceControllerProposal ForceController::propose(
             return proposal;
         }
         const bool axis_limited = recovering || loaded_return_braking ||
+            loaded_hold_deferred ||
             std::abs(governed_jerk - unbounded_desired_jerk) >
                 scaledTolerance(limits.jerk);
         proposal.limit_axes[i] = axis_limited;

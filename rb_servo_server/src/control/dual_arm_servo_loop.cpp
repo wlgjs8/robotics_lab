@@ -2074,6 +2074,7 @@ bool DualArmServoLoop::updateForceRuntime(
     runtime.control.operating_mode = config_.force_control.operating_mode;
     runtime.control.surface_source = arm_config.surface_source;
     runtime.control.compliance_frame = arm_config.compliance_frame;
+    runtime.control.compliance_frame_pose_valid = false;
     runtime.control.target_force_n = arm_config.target_force_n;
     runtime.control.motion_epoch = motion_epoch_;
 
@@ -2100,6 +2101,21 @@ bool DualArmServoLoop::updateForceRuntime(
         }
         return false;
     }
+
+    // Resolve and publish the exact controller frame as soon as the actual TCP
+    // is available. This pose is configuration/geometry state, not a claim
+    // that the wrench pipeline is healthy or that force motion is active.
+    const Pose6D& tcp = *state.tcp_actual_stand;
+    const math::Matrix3 r_stand_surface = surfaceFrameFromNormal(normal);
+    const pinocchio::SE3 t_tcp_compliance = complianceFrameTcp(
+        arm_config, ft_config, tcp, r_stand_surface
+    );
+    const pinocchio::SE3 t_stand_compliance =
+        math::se3FromPose(tcp) * t_tcp_compliance;
+    runtime.compliance_frame_actual_stand = math::poseFromSe3(t_stand_compliance);
+    runtime.control.compliance_frame_actual_stand =
+        runtime.compliance_frame_actual_stand;
+    runtime.control.compliance_frame_pose_valid = true;
 
     FtRawSample raw;
     raw.wrench_sensor = state.eft_wrench;
@@ -2205,7 +2221,6 @@ bool DualArmServoLoop::updateForceRuntime(
         return false;
     }
 
-    const Pose6D& tcp = *state.tcp_actual_stand;
     const math::Matrix3 r_stand_tcp = math::rotationFromPose(tcp);
     const auto forceStand = [&r_stand_tcp](const Wrench6D& wrench) -> math::Vector3 {
         return r_stand_tcp * math::Vector3(wrench.fx, wrench.fy, wrench.fz);
@@ -2217,7 +2232,6 @@ bool DualArmServoLoop::updateForceRuntime(
     const math::Vector3 torque_control_stand = torqueStand(output.control_external_wrench_tcp);
     const math::Vector3 force_fast_stand = forceStand(output.fast_external_wrench_tcp);
     const math::Vector3 torque_fast_stand = torqueStand(output.fast_external_wrench_tcp);
-    const math::Matrix3 r_stand_surface = surfaceFrameFromNormal(normal);
     const math::Vector3 force_control_surface =
         r_stand_surface.transpose() * force_control_stand;
     const math::Vector3 torque_control_surface =
@@ -2227,12 +2241,6 @@ bool DualArmServoLoop::updateForceRuntime(
         torque_control_surface.x(), torque_control_surface.y(), torque_control_surface.z(),
     };
     runtime.control.control_wrench_surface = runtime.control_wrench_surface;
-    const pinocchio::SE3 t_tcp_compliance = complianceFrameTcp(
-        arm_config, ft_config, tcp, r_stand_surface
-    );
-    const pinocchio::SE3 t_stand_compliance =
-        math::se3FromPose(tcp) * t_tcp_compliance;
-    runtime.compliance_frame_actual_stand = math::poseFromSe3(t_stand_compliance);
     runtime.control_wrench_compliance = transformWrenchFrame(
         t_tcp_compliance.inverse(), output.control_external_wrench_tcp
     );

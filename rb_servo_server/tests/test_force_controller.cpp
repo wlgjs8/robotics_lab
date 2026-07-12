@@ -632,6 +632,86 @@ bool testRealProfileRecontactWhileRecenteringBrakesWithoutFault() {
     return true;
 }
 
+bool testRealProfileLateRecontactDeadbandChatterRemainsValid() {
+    const rb_servo::ForceControlConfig config = realProfileConfig();
+    constexpr double dt = 0.002;
+    for (double measured_sign : {-1.0, 1.0}) {
+        const double correction_direction = -measured_sign;
+        rb_servo::ForceController controller(config);
+        controller.engage();
+
+        rb_servo::Wrench6D strong_load;
+        strong_load.fx = measured_sign * 6.0;
+        for (int i = 0; i < 2500; ++i) {
+            const auto proposal = controller.propose(
+                strong_load, xCommand(), rb_servo::Vec6{}, dt
+            );
+            RB_CHECK(proposal.valid);
+            RB_CHECK(controller.commit(proposal));
+        }
+
+        // Release almost all the way back to the command equilibrium while the
+        // spring still has return velocity. Near-deadband contact chatter from
+        // this state previously drove the loaded-hold oracle into a fault even
+        // though the ordinary jerk-bounded motion envelope remained valid.
+        bool reached_late_recontact_state = false;
+        for (int i = 0; i < 10000; ++i) {
+            const auto proposal = controller.propose(
+                rb_servo::Wrench6D{}, xCommand(), rb_servo::Vec6{}, dt
+            );
+            RB_CHECK(proposal.valid);
+            RB_CHECK(controller.commit(proposal));
+            const double aligned_offset = correction_direction *
+                controller.state().offset_tcp.x;
+            const double aligned_velocity = correction_direction *
+                controller.state().velocity_tcp.x;
+            if (aligned_offset > 0.0 && aligned_offset < 1e-4 &&
+                aligned_velocity < 0.0) {
+                reached_late_recontact_state = true;
+                break;
+            }
+        }
+        RB_CHECK(reached_late_recontact_state);
+
+        rb_servo::Wrench6D weak_recontact;
+        for (int i = 0; i < 3000; ++i) {
+            // Exercise the measured near-deadband chatter shape from the
+            // physical capture: several loaded samples followed by several
+            // released samples while the spring is still returning.
+            weak_recontact.fx = (i % 12) < 8 ? measured_sign * 2.6 : 0.0;
+            const auto proposal = controller.propose(
+                weak_recontact, xCommand(), rb_servo::Vec6{}, dt
+            );
+            if (!proposal.valid) {
+                const auto& state = controller.state();
+                std::cerr << "late recontact sign=" << measured_sign
+                          << " i=" << i
+                          << " x=" << state.offset_tcp.x
+                          << " v=" << state.velocity_tcp.x
+                          << " a=" << state.acceleration_tcp.x
+                          << ": " << proposal.reason << "\n";
+            }
+            RB_CHECK(proposal.valid);
+            RB_CHECK(controller.commit(proposal));
+        }
+
+        // Once the contact remains continuously loaded, the controller must
+        // settle on the load side of the equilibrium without a proposal fault.
+        weak_recontact.fx = measured_sign * 2.6;
+        for (int i = 0; i < 1000; ++i) {
+            const auto proposal = controller.propose(
+                weak_recontact, xCommand(), rb_servo::Vec6{}, dt
+            );
+            RB_CHECK(proposal.valid);
+            RB_CHECK(controller.commit(proposal));
+        }
+        RB_CHECK(
+            correction_direction * controller.state().offset_tcp.x > 0.0
+        );
+    }
+    return true;
+}
+
 bool testProposalProvenancePreventsStaleOrCrossControllerCommit() {
     rb_servo::ForceController first(controllerConfig());
     rb_servo::ForceController second(controllerConfig());
@@ -693,6 +773,7 @@ int main() {
     if (!testResponsiveRealProfileMovesOnWeakWrenchAndUsesExpandedTravel()) return 1;
     if (!testRealProfileSustainedWrenchNeverReturnsTowardZero()) return 1;
     if (!testRealProfileRecontactWhileRecenteringBrakesWithoutFault()) return 1;
+    if (!testRealProfileLateRecontactDeadbandChatterRemainsValid()) return 1;
     if (!testProposalProvenancePreventsStaleOrCrossControllerCommit()) return 1;
     if (!testWrenchDeadbandSuppressesNoiseAndPreservesExcessSign()) return 1;
     std::cout << "force_controller tests passed\n";

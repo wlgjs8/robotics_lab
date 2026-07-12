@@ -4156,6 +4156,10 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     sample.left_force_control.operating_mode = "monitor";
     sample.left_force_control.state = "release_braking";
     sample.left_force_control.compliance_frame = "sensor_origin";
+    sample.left_force_control.compliance_frame_pose_valid = true;
+    sample.left_force_control.compliance_frame_actual_stand = {
+        0.31, -0.12, 0.44, 0.0, 0.0, 1.5707963267948966,
+    };
     sample.left_force_control.measured_force_n = 6.75;
     sample.left_force_control.fast_normal_force_n = 7.25;
     sample.left_force_control.fast_force_norm_n = 8.5;
@@ -4252,6 +4256,12 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     const std::size_t force_state = index_of("left_force_control_state");
     const std::size_t compliance_frame =
         index_of("left_force_control_compliance_frame");
+    const std::size_t compliance_frame_valid =
+        index_of("left_force_control_compliance_frame_pose_valid");
+    const std::size_t compliance_frame_x =
+        index_of("left_force_control_compliance_frame_actual_stand_x_m");
+    const std::size_t compliance_frame_rz =
+        index_of("left_force_control_compliance_frame_actual_stand_rz_rad");
     const std::size_t compliance_active = index_of("left_force_control_compliance_active");
     const std::size_t normal_contact =
         index_of("left_force_control_normal_contact_active");
@@ -4333,6 +4343,9 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(force_mode > init_left_goal_deficit);
     RB_CHECK(force_state > init_left_goal_deficit);
     RB_CHECK(compliance_frame > force_state);
+    RB_CHECK(compliance_frame_valid > compliance_frame);
+    RB_CHECK(compliance_frame_x > compliance_frame_valid);
+    RB_CHECK(compliance_frame_rz > compliance_frame_x);
     RB_CHECK(compliance_active > force_state);
     RB_CHECK(normal_contact > force_state);
     RB_CHECK(transverse_contact > normal_contact);
@@ -4398,6 +4411,9 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(row.at(ft_tare_generation) == "3");
     RB_CHECK(row.at(ft_tare_fz) == "23.5");
     RB_CHECK(row.at(compliance_frame) == "sensor_origin");
+    RB_CHECK(row.at(compliance_frame_valid) == "1");
+    RB_CHECK(row.at(compliance_frame_x) == "0.31");
+    RB_CHECK(row.at(compliance_frame_rz) == "1.5708");
     RB_CHECK(row.at(compliance_frame_wrench_fy) == "2.5");
     RB_CHECK(row.at(compliance_frame_error_tz) == "0.4");
     RB_CHECK(row.at(force_mode) == "monitor");
@@ -4870,6 +4886,11 @@ bool testTcpOriginRotationalComplianceKeepsTcpTranslationFixed() {
     RB_CHECK(corrected_target.has_value());
     const rb_servo::Pose6D& equilibrium =
         snapshot.right_force_control.compliance_equilibrium_stand;
+    RB_CHECK(snapshot.right_force_control.compliance_frame_pose_valid);
+    RB_CHECK(std::abs(
+        snapshot.right_force_control.compliance_frame_actual_stand.rz -
+        1.5707963267948966
+    ) < 1e-9);
     RB_CHECK(std::abs(corrected_target->x - equilibrium.x) < 1e-9);
     RB_CHECK(std::abs(corrected_target->y - equilibrium.y) < 1e-9);
     RB_CHECK(std::abs(corrected_target->z - equilibrium.z) < 1e-9);

@@ -3260,6 +3260,8 @@ class GuiContractsTest(unittest.TestCase):
             "state": "regulating",
             "surface_source": "floor_constraint",
             "compliance_frame": "sensor_origin",
+            "compliance_frame_pose_valid": True,
+            "compliance_frame_actual_stand": [0.31, -0.12, 0.44, 0.0, 0.0, 1.5707963267948966],
             "normal_stand": [0.0, 0.0, 1.0],
             "contact_active": True,
             "normal_contact_active": False,
@@ -3333,6 +3335,15 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(
             latest.left.force_control.compliance_frame,
             "sensor_origin",
+        )
+        self.assertTrue(latest.left.force_control.compliance_frame_pose_valid)
+        self.assertAlmostEqual(
+            latest.left.force_control.compliance_frame_actual_stand.x,
+            0.31,
+        )
+        self.assertAlmostEqual(
+            latest.left.force_control.compliance_frame_actual_stand.rz,
+            1.5707963267948966,
         )
         self.assertEqual(latest.left.force_control.normal_stand, (0.0, 0.0, 1.0))
         self.assertTrue(latest.left.force_control.contact_active)
@@ -3888,27 +3899,34 @@ class GuiContractsTest(unittest.TestCase):
             )
             self.assertIsNone(_ft_sensor_pose_tcp_from_urdf(path))
 
-    def test_scene_fallback_adds_read_only_ft_sensor_frames_from_urdf(self):
+    def test_scene_fallback_adds_separate_cad_and_control_frames(self):
         scene = ShapeCheckingScene()
         handles = _add_scene_fallback(RecordingServer(scene=scene))
 
         frame_by_name = {name: (kwargs, handle) for name, kwargs, handle in scene.frames}
         for arm in ("left", "right"):
-            kwargs, handle = frame_by_name[f"/stand/{arm}_tcp/ft_sensor"]
+            kwargs, handle = frame_by_name[f"/stand/{arm}_tcp/ft_sensor_cad"]
             np.testing.assert_allclose(kwargs["position"], (0.0, 0.0, -0.202642), atol=1e-9)
             np.testing.assert_allclose(
                 kwargs["wxyz"], (math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5)), atol=1e-9
             )
             self.assertTrue(kwargs["show_axes"])
             self.assertFalse(handle.visible)
+            control_kwargs, control_handle = frame_by_name[
+                f"/stand/{arm}_force_control_frame"
+            ]
+            np.testing.assert_allclose(control_kwargs["position"], (0.0, 0.0, 0.0))
+            np.testing.assert_allclose(control_kwargs["wxyz"], (1.0, 0.0, 0.0, 0.0))
+            self.assertFalse(control_handle.visible)
             self.assertIn(f"{arm}_ft_force", handles)
-            self.assertIn("URDF/CAD estimate", handles[f"{arm}_ft_sensor_label"].text)
-            self.assertIn("axes unverified", handles[f"{arm}_ft_sensor_label"].text)
+            self.assertIn("FT sensor frame", handles[f"{arm}_ft_sensor_label"].text)
+            self.assertIn("+90° yaw", handles[f"{arm}_ft_sensor_label"].text)
+            self.assertIn("sensor origin", handles[f"{arm}_ft_sensor_label"].text)
         self.assertFalse(
             any("ft_sensor" in name for name, _kwargs, _handle in scene.transform_controls)
         )
 
-    def test_ft_sensor_overlay_tracks_actual_tcp_and_raw_sensor_force(self):
+    def test_ft_overlay_keeps_cad_separate_from_server_control_frame(self):
         state = sample_state()
         state["left"].update(
             {
@@ -3922,8 +3940,17 @@ class GuiContractsTest(unittest.TestCase):
                 },
                 "tcp_actual_valid": True,
                 "tcp_deferred": False,
-                "eft_wrench": [3.0, 4.0, 0.0, 0.1, -0.2, 0.3],
-                "eft_valid": True,
+                "force_torque": {"healthy": True, "stale": False},
+                "force_control": {
+                    "enabled": True,
+                    "operating_mode": "cartesian_admittance",
+                    "compliance_frame": "tcp_origin",
+                    "compliance_frame_pose_valid": True,
+                    "compliance_frame_actual_stand": [
+                        0.3, 0.1, 0.4, 0.0, 0.0, 1.5707963267948966
+                    ],
+                    "control_wrench_compliance": [3.0, 4.0, 0.0, 0.1, -0.2, 0.3],
+                },
             }
         )
         store, _, _ = self.make_safety(state)
@@ -3933,23 +3960,42 @@ class GuiContractsTest(unittest.TestCase):
 
         self.assertTrue(handles["left_ft_sensor_frame"].visible)
         self.assertTrue(handles["left_ft_sensor_label"].visible)
+        self.assertTrue(handles["left_ft_control_frame"].visible)
+        self.assertTrue(handles["left_ft_control_label"].visible)
+        np.testing.assert_allclose(
+            handles["left_ft_control_frame"].position, (0.3, 0.1, 0.4), atol=1e-9
+        )
+        np.testing.assert_allclose(
+            handles["left_ft_control_frame"].wxyz,
+            (math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5)),
+            atol=1e-9,
+        )
+        np.testing.assert_allclose(
+            handles["left_ft_control_frame"].wxyz,
+            handles["left_ft_sensor_frame"].wxyz,
+            atol=1e-9,
+        )
         self.assertTrue(handles["left_ft_force"].visible)
         np.testing.assert_allclose(
             handles["left_ft_force"].points,
             np.asarray([[[0.0, 0.0, 0.0], [0.006, 0.008, 0.0]]], dtype=np.float32),
             atol=1e-7,
         )
-        self.assertIn("|F|=5.0 N", handles["left_ft_sensor_label"].text)
-        self.assertIn("decoded only / presence unverified", handles["left_ft_sensor_label"].text)
+        self.assertIn("FT sensor frame", handles["left_ft_sensor_label"].text)
+        self.assertIn("|F|=5.0 N", handles["left_ft_control_label"].text)
+        self.assertIn("tcp_origin", handles["left_ft_control_label"].text)
         self.assertAlmostEqual(handles["left_ft_force"].head_length, 0.0035)
         self.assertFalse(handles["right_ft_sensor_frame"].visible)
+        self.assertFalse(handles["right_ft_control_frame"].visible)
 
         update_ft_sensor_overlay(handles, store.latest(), stale=True, show=True)
         self.assertFalse(handles["left_ft_sensor_frame"].visible)
         self.assertFalse(handles["left_ft_sensor_label"].visible)
+        self.assertFalse(handles["left_ft_control_frame"].visible)
+        self.assertFalse(handles["left_ft_control_label"].visible)
         self.assertFalse(handles["left_ft_force"].visible)
 
-    def test_ft_sensor_frame_remains_visible_when_raw_wrench_is_invalid(self):
+    def test_ft_control_frame_remains_visible_when_control_wrench_is_invalid(self):
         state = sample_state()
         state["left"].update(
             {
@@ -3963,8 +4009,13 @@ class GuiContractsTest(unittest.TestCase):
                 },
                 "tcp_actual_valid": True,
                 "tcp_deferred": False,
-                "eft_wrench": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                "eft_valid": False,
+                "force_control": {
+                    "enabled": True,
+                    "operating_mode": "monitor",
+                    "compliance_frame": "tcp_origin",
+                    "compliance_frame_pose_valid": True,
+                    "compliance_frame_actual_stand": [0.3, 0.1, 0.4, 0.0, 0.0, 0.0],
+                },
             }
         )
         store, _, _ = self.make_safety(state)
@@ -3974,15 +4025,23 @@ class GuiContractsTest(unittest.TestCase):
 
         self.assertTrue(handles["left_ft_sensor_frame"].visible)
         self.assertTrue(handles["left_ft_sensor_label"].visible)
+        self.assertTrue(handles["left_ft_control_frame"].visible)
         self.assertFalse(handles["left_ft_force"].visible)
-        self.assertIn("raw wrench invalid", handles["left_ft_sensor_label"].text)
+        self.assertIn("control wrench invalid", handles["left_ft_control_label"].text)
 
     def test_ft_sensor_overlay_uses_supported_line_fallback_without_arrows(self):
         state = self.tcp_available_state()
         state["left"].update(
             {
-                "eft_wrench": [0.0, 10.0, 0.0, 0.0, 0.0, 0.0],
-                "eft_valid": True,
+                "force_torque": {"healthy": True, "stale": False},
+                "force_control": {
+                    "enabled": True,
+                    "operating_mode": "monitor",
+                    "compliance_frame": "tcp_origin",
+                    "compliance_frame_pose_valid": True,
+                    "compliance_frame_actual_stand": [0.3, 0.1, 0.4, 0.0, 0.0, 0.0],
+                    "control_wrench_compliance": [0.0, 10.0, 0.0, 0.0, 0.0, 0.0],
+                },
             }
         )
         store, _, _ = self.make_safety(state)
@@ -4002,8 +4061,16 @@ class GuiContractsTest(unittest.TestCase):
         state = self.tcp_available_state()
         state["left"].update(
             {
-                "eft_wrench": [float("nan"), 0.0, 0.0, 0.0, 0.0, 0.0],
-                "eft_valid": True,
+                "force_control": {
+                    "enabled": True,
+                    "operating_mode": "monitor",
+                    "compliance_frame": "tcp_origin",
+                    "compliance_frame_pose_valid": True,
+                    "compliance_frame_actual_stand": [0.3, 0.1, 0.4, 0.0, 0.0, 0.0],
+                    "control_wrench_compliance": [
+                        float("nan"), 0.0, 0.0, 0.0, 0.0, 0.0
+                    ],
+                },
             }
         )
         store, _, _ = self.make_safety(state)
@@ -4011,12 +4078,23 @@ class GuiContractsTest(unittest.TestCase):
 
         update_ft_sensor_overlay(handles, store.latest(), stale=False, show=True)
         self.assertTrue(handles["left_ft_sensor_frame"].visible)
+        self.assertTrue(handles["left_ft_control_frame"].visible)
         self.assertFalse(handles["left_ft_force"].visible)
-        self.assertIn("raw wrench invalid", handles["left_ft_sensor_label"].text)
+        self.assertIn("control wrench invalid", handles["left_ft_control_label"].text)
 
-        update_ft_sensor_overlay(handles, store.latest(), stale=False, show=False)
+        update_ft_sensor_overlay(
+            handles, store.latest(), stale=False, show=False, show_control=True
+        )
         self.assertFalse(handles["left_ft_sensor_frame"].visible)
         self.assertFalse(handles["left_ft_sensor_label"].visible)
+        self.assertTrue(handles["left_ft_control_frame"].visible)
+
+        update_ft_sensor_overlay(
+            handles, store.latest(), stale=False, show=True, show_control=False
+        )
+        self.assertTrue(handles["left_ft_sensor_frame"].visible)
+        self.assertFalse(handles["left_ft_control_frame"].visible)
+        self.assertFalse(handles["left_ft_control_label"].visible)
         self.assertFalse(handles["left_ft_force"].visible)
 
     def test_scene_fallback_uses_viser_compatible_empty_geometry_arrays(self):

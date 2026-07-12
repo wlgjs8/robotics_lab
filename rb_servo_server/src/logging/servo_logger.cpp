@@ -315,6 +315,9 @@ void writeForceTelemetryHeader(std::ostream& os, const char* side) {
        << ',' << side << "_force_control_state"
        << ',' << side << "_force_control_surface_source"
        << ',' << side << "_force_control_compliance_frame"
+       << ',' << side << "_force_control_compliance_frame_pose_valid";
+    writePoseHeader(os, side, "force_control_compliance_frame_actual_stand");
+    os
        << ',' << side << "_force_control_normal_stand_x"
        << ',' << side << "_force_control_normal_stand_y"
        << ',' << side << "_force_control_normal_stand_z"
@@ -614,6 +617,14 @@ void writeForceTelemetryColumns(
        << ',' << csvEscape(control.state)
        << ',' << csvEscape(control.surface_source)
        << ',' << csvEscape(control.compliance_frame)
+       << ',' << control.compliance_frame_pose_valid;
+    writePoseColumns(
+        os,
+        control.compliance_frame_pose_valid
+            ? std::optional<Pose6D>{control.compliance_frame_actual_stand}
+            : std::nullopt
+    );
+    os
        << ',' << control.normal_stand[0]
        << ',' << control.normal_stand[1]
        << ',' << control.normal_stand[2]

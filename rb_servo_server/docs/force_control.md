@@ -48,18 +48,22 @@ Its CAD-derived pose in the controller TCP frame is:
 T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
 ```
 
-The rbpodo EFT output-axis frame was checked separately because it does not
-follow that CAD yaw. The 2026-07-12 right-arm +X/+Y/+Z reaction capture and the
-operator's identical-hardware declaration establish the active physical
-runtime value for both arms:
+The first 2026-07-12 right-arm review mixed TCP-gizmo and FT-gizmo axis names
+and temporarily selected yaw zero. The later Cartesian-compliance capture
+invalidated that interpretation: runtime X/Y followed the TCP triad while the
+operator load referenced the +90 degree FT triad. The corrected supervised
+test value for both identical arm/sensor assemblies is therefore:
 
 ```yaml
-T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 0.0]
+T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
 ```
 
-The convention is `point_tcp = T_tcp_sensor * point_sensor`. This positive-force
-axis result does not accept torque axes, per-arm serials, payload/COM, bias, or
-production force motion; those remain in the acceptance runbook.
+The convention is `point_tcp = T_tcp_sensor * point_sensor`. The corrected
+2026-07-12 18:48 physical capture then showed right-arm +X/+Y/+Z translation in
+the pushed runtime FT-control-gizmo direction and zero-wrench recentering. The
+operator declared the left assembly identical, so the same mapping is retained
+for both arms. Torque axes, per-arm serials, payload/COM, bias, and production
+force motion remain pending in the acceptance runbook.
 
 ## Wrench path
 
@@ -82,10 +86,11 @@ rbpodo eft wrench
 - `surface`: stand-fixed surface axes, with the origin at the TCP.
 - `sensor_origin`: RFT64 measurement axes and the physical sensor origin from
   `T_tcp_sensor`. This was the first physical direction/pivot bring-up stage and
-  matches the F/T gizmo origin.
+  matches both the runtime control gizmo origin and the +90 degree URDF sensor
+  axes when this selector is active.
 - `tcp_origin`: the same sensor-axis orientation translated to the TCP origin.
-  This is the active Gate 2 frame: translation is controlled in the accepted
-  rbpodo EFT/TCP axes while the correction is applied about the TCP endpoint.
+  This is the active Gate 2 frame: translation is controlled in the corrected
+  +90 degree FT axes while the correction is applied about the TCP endpoint.
   Gate 1 used `surface` only to make the initial sign check stand-fixed.
 
 The hard force/torque guard does not move with this selector: resultant force,
@@ -237,6 +242,12 @@ or points with the load. This avoids treating a physically unavoidable jerk-limi
 recontact transient as a controller fault. When external wrench returns inside
 the six-axis deadband, Cartesian stiffness and damping drive the offset and
 velocity back to zero around that equilibrium.
+If deadband chatter makes a strict no-reversal loaded hold temporarily
+unreachable even in the hard motion envelope, the controller retains the
+ordinary jerk-safe envelope and brakes toward a reachable loaded hold. It may
+briefly continue the already-realized return motion, but offset, velocity,
+acceleration, jerk, and step bounds remain enforced. This condition is bounded
+telemetry, not an `ExternalForceLimit` fault.
 The correction is not absorbed into the equilibrium, so release returns to the
 current command pose without a motion-epoch reset or a pre-contact chunk
 catch-up. Telemetry publishes the equilibrium pose, its `hold_anchor` or
@@ -348,7 +359,7 @@ force_torque:
     residual_tare_min_samples: 500
     residual_tare_max_force_stddev_n: 0.75
     residual_tare_max_torque_stddev_nm: 0.15
-    T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 0.0]
+    T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
     sensor_bias: [0, 0, 0, 0, 0, 0]
     payload_mass_kg: 0.0
     payload_com_tcp_m: [0, 0, 0]
@@ -450,7 +461,10 @@ force-control state so a completed physical test remains auditable offline.
 State JSON, GUI status, and CSV identify `compliance_frame` and publish both
 `control_wrench_surface` (floor interpretation) and
 `control_wrench_compliance`/`wrench_error_compliance` (the actual 6D controller
-input/error). Historical fields ending in `_surface` for compliance
+input/error). They also publish `compliance_frame_pose_valid` and the resolved
+`compliance_frame_actual_stand` pose used for that tick, so visualization and
+offline logs never need to reconstruct a moving control frame from CAD data.
+Historical fields ending in `_surface` for compliance
 offset/velocity/acceleration and policy deltas are retained for log-schema
 compatibility; their components follow `compliance_frame` when that selector is
 not `surface`.

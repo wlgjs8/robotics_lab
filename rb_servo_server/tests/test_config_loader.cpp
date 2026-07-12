@@ -191,14 +191,15 @@ bool testRepositoryConfigsParse() {
         const auto& left_ft = stack_real.force_torque.left;
         const auto& right_ft = stack_real.force_torque.right;
         RB_CHECK(left_ft.calibration_id ==
-                 "right-derived-identical-hardware-force-axis-20260712");
-        RB_CHECK(right_ft.calibration_id == "physical-positive-force-axis-20260712");
+                 "right-derived-identical-positive-force-ft-axis-20260712");
+        RB_CHECK(right_ft.calibration_id ==
+                 "physical-positive-force-ft-axis-20260712");
         RB_CHECK(near(left_ft.t_tcp_sensor.x, 0.0));
         RB_CHECK(near(left_ft.t_tcp_sensor.y, 0.0));
         RB_CHECK(near(left_ft.t_tcp_sensor.z, -0.202642));
         RB_CHECK(near(left_ft.t_tcp_sensor.rx, 0.0));
         RB_CHECK(near(left_ft.t_tcp_sensor.ry, 0.0));
-        RB_CHECK(near(left_ft.t_tcp_sensor.rz, 0.0));
+        RB_CHECK(near(left_ft.t_tcp_sensor.rz, 1.5707963267948966));
         RB_CHECK(near(right_ft.t_tcp_sensor.x, left_ft.t_tcp_sensor.x));
         RB_CHECK(near(right_ft.t_tcp_sensor.y, left_ft.t_tcp_sensor.y));
         RB_CHECK(near(right_ft.t_tcp_sensor.z, left_ft.t_tcp_sensor.z));

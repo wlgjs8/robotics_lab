@@ -204,8 +204,10 @@ Project-native F/T monitor, contact guard, 법선방향 unilateral admittance,
 6D Cartesian compliance가 servo motion path에 통합되어 있습니다.
 `stack_real.yaml`의 force path는 현재 양팔 supervised Gate 2
 translation-only Cartesian compliance입니다. `surface_source: none`과
-`compliance_frame: tcp_origin`을 사용하므로, 변환된 rbpodo EFT/TCP 축에서
-순응 translation을 계산하고 TCP 끝점을 correction 원점으로 사용합니다.
+`compliance_frame: tcp_origin`을 사용하므로, URDF와 일치하는 +90도 FT
+sensor 축에서 순응 translation을 계산하고 TCP 끝점을 correction 원점으로
+사용합니다. GUI의 runtime FT control 기즈모가 시험 축의 기준이며 일반 TCP
+pose 기즈모는 X/Y force-axis 판정에 사용하지 않습니다.
 rotation은 torque 축과 payload/COM 검증 전까지 잠겨 있습니다. 명시적인
 운영자 결정으로 stand/user geometric
 floor도 모두 꺼져 있어 TCP/gripper-tip floor velocity damper와 hard plane

@@ -68,14 +68,16 @@ capture because it obscures the evidence log.
    `Hold`; a gentle perturbation must not make the sent Hold reference ratchet
    along with measured joints while the cached Init Motion packet is still
    fresh.
-4. For the current translation-axis gate, push the right arm once per TCP gizmo
-   positive endpoint toward the TCP center in Z, X, and Y, leaving a clear
-   neutral interval between loads. The observed wrench is the opposing reaction,
-   so each accepted transformed component is positive. The 2026-07-12 capture
-   completed this step twice per axis. The operator declared the left assembly
-   identical, so the same runtime mapping is applied without a duplicate left
-   capture. Negative-force and torque-axis captures are deferred until a stage
-   that can promote rotational or production force behavior.
+4. For the current translation-axis gate, show the large runtime FT control
+   gizmo and hide the generic TCP pose gizmo. Push the right arm once per
+   runtime FT gizmo positive endpoint toward its origin in Z, X, and Y, leaving
+   a clear neutral interval between loads. The observed wrench is the opposing
+   reaction, so each accepted transformed component is positive. The earlier
+   2026-07-12 capture mixed TCP- and FT-gizmo names and is not X/Y
+   acceptance evidence. The operator declared the left assembly identical, so
+   the same corrected candidate mapping is applied to both arms. Negative-force
+   and torque-axis captures are deferred until a stage that can promote
+   rotational or production force behavior.
 5. Stop on stale/invalid tare, unexplained cross-axis response, reversed sign,
    hard-threshold telemetry, any safety/IK/backend fault, or any robot motion.
 6. Preserve `logs/servo_log_<timestamp>.csv` (and the latest
@@ -93,15 +95,18 @@ tare, contact/threshold, TCP pose, and controller-state columns.
 2. Confirm both arms have `ft_tare_state=accepted`,
    `operating_mode=cartesian_admittance`, `compliance_frame=tcp_origin`, and
    translation-only axes `[true,true,true,false,false,false]` before touching an
-   arm. Stop if either arm is not zeroed and healthy.
+   arm. In the GUI, the small sensor-origin triad and large runtime control triad
+   must be parallel (+90 degrees from the generic TCP triad) and differ only in
+   origin. Stop if either arm is not zeroed and healthy or these axes disagree.
 3. Start below the configured 1.5 N translation deadband and raise one load
    slowly just beyond it. The TCP must yield toward the hand's push (opposite
    the reported reaction wrench), while orientation remains held.
 4. Release fully. The fixed command equilibrium must not ratchet with measured
    pose, and the translation offset must recenter smoothly to zero. Leave a
    clear settled interval before changing axes.
-5. Validate Z, then X, then Y in the live TCP gizmo axes. Use only the small
-   force needed to observe motion;
+5. Validate Z, then X, then Y using only the large runtime FT control gizmo axis
+   names. Hide the generic TCP pose gizmo during this capture. Use only the
+   small force needed to observe motion;
    the preceding sign capture showed that a strong tangential push can cross the
    unchanged 7 Nm TCP torque hard limit through the 202.642 mm lever arm.
 6. Stop immediately on unexpected-axis motion, orientation motion, chatter,
@@ -130,13 +135,13 @@ explicitly labelled as unaccepted estimates.
 | Overrange signal and evidence | pending | pending |
 | Backend frame sequence evidence | implemented; physical log acceptance pending | implemented; physical log acceptance pending |
 | Independent sensor sequence/time evidence | unavailable | unavailable |
-| `T_tcp_sensor` | `[0, 0, -0.202642, 0, 0, 0]`; inherited by operator declaration from identical right hardware | `[0, 0, -0.202642, 0, 0, 0]`; physical +X/+Y/+Z reaction capture, 2026-07-12 |
-| Positive force/torque axis check | +Fx/+Fy/+Fz inherited from identical right hardware; torque pending | +Fx/+Fy/+Fz accepted, two repetitions each; torque pending |
+| `T_tcp_sensor` | `[0, 0, -0.202642, 0, 0, pi/2]`; inherited from identical right hardware | `[0, 0, -0.202642, 0, 0, pi/2]`; corrected translation-axis capture, 2026-07-12 |
+| Positive force/torque axis check | +Fx/+Fy/+Fz inherited from identical right assembly; torque pending | +Fx/+Fy/+Fz direction/recenter observed with corrected runtime FT gizmo, `servo_log_20260712_184841.csv`; torque pending |
 | Tool/payload mass | pending | pending |
 | Payload center of mass in TCP | pending | pending |
 | Sensor bias artifact | pending | pending |
 | Residual tare procedure | automatic after successful left/both Init Motion; physical acceptance pending | automatic after successful right/both Init Motion; physical acceptance pending |
-| Profile revision/hash | `right-derived-identical-hardware-force-axis-20260712` | `physical-positive-force-axis-20260712` |
+| Profile revision/hash | `right-derived-identical-positive-force-ft-axis-20260712` | `physical-positive-force-ft-axis-20260712` |
 | Reviewer and date | operator declaration, 2026-07-12 | operator + log review, 2026-07-12 |
 
 Mounting evidence is recorded in `IMG_9188.JPG`. The image confirms the
@@ -147,9 +152,11 @@ CAD at `attachment_site` z=15..45 mm; the explicit URDF measurement frame is at
 the model's tool-side `sensor_site`, z=45 mm. This geometric match does not
 replace the positive-axis load test below.
 
-The URDF remains CAD geometry evidence with a `+pi/2` sensor yaw. The rbpodo EFT
-fields were empirically found to align with TCP X/Y, so the runtime source-frame
-yaw is zero. The transform convention is:
+The URDF remains geometry evidence with a `+pi/2` sensor yaw. The former
+yaw-zero interpretation mixed TCP and FT gizmo names and was invalidated by
+the 18:32 compliance capture. The corrected supervised profile keeps the
+runtime source/control orientation aligned with the FT sensor gizmo. The
+transform convention is:
 
 ```text
 point_tcp = T_tcp_sensor * point_sensor
@@ -164,10 +171,13 @@ roll/pitch/yaw are expressed in stand-fixed axes at the TCP. Confirm the
 preserved Gate 1 CSV field `force_control_compliance_frame=surface` and compare
 `control_wrench_compliance` against the applied stand-axis load. This removes
 moving-TCP orientation from the first sign decision. Gate 2 now uses
-`compliance_frame: tcp_origin`: the controller axes follow the accepted rbpodo
-EFT/TCP orientation while the correction pivot stays at the TCP endpoint.
-Translation must be repeated in this frame before policy/contact testing;
-rotation remains disabled until the torque axes and payload/COM are accepted.
+`compliance_frame: tcp_origin`: the controller axes follow the corrected
+`+pi/2` FT orientation while the correction pivot stays at the TCP endpoint.
+The 2026-07-12 18:48 runtime-FT-control-gizmo capture completed the right-arm
+translation direction and recenter observation. That run also exposed a
+late-recontact jerk-governor fault, so Gate 2 still requires a clean post-fix
+repeat before policy/contact promotion. Rotation remains disabled until the
+torque axes and payload/COM are accepted.
 
 For the floor contact channel, keep the stand-frame geometric normal pointing
 outward (`+Z`). The installed sensor's reaction force points opposite that

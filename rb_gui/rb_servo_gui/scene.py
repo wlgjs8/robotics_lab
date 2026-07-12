@@ -38,7 +38,8 @@ _FT_SENSOR_MODEL = "Robotous RFT64-6A01"
 _FT_FORCE_SCALE_M_PER_N = 0.002
 _FT_FORCE_MAX_LENGTH_M = 0.12
 _FT_FORCE_DISPLAY_DEADBAND_N = 0.25
-_FT_OVERLAY_QUALIFIER = "URDF/CAD estimate · axes unverified"
+_FT_CAD_QUALIFIER = "FT sensor frame · URDF/CAD · +90° yaw · sensor origin"
+_FT_CONTROL_QUALIFIER = "runtime FT compliance frame · server-resolved"
 
 
 def _points_array(points: Any = ()) -> Any:
@@ -894,44 +895,62 @@ def update_floor_plane(scene_handles: dict[str, Any], floor: Mapping[str, Any] |
 
 
 def _add_ft_sensor_overlay(server: Any, handles: dict[str, Any]) -> None:
-    """Add read-only, unaccepted RFT64 frame estimates and raw-force vectors.
+    """Add separate mechanical-CAD and runtime force-control frames.
 
-    The local pose comes only from the explicit URDF measurement link. The
-    scene paths are children of each live actual-TCP frame, so Viser composes
-    ``T_stand_tcp * T_tcp_sensor`` without duplicating transform math here.
-    The label deliberately marks the CAD-authored axes as unverified until the
-    per-arm positive-axis/load acceptance is complete.
+    The small sensor frame comes only from the explicit URDF measurement link
+    and describes the mechanical CAD assembly. It is not used to interpret
+    controller wrench fields. The larger control frame is populated only from
+    the server-published, resolved compliance-frame pose; its force vector is
+    therefore expressed in exactly the same frame used by the controller.
     """
     pose = _ft_sensor_pose_tcp_from_urdf()
     if pose is None:
         handles["ft_sensor_frame_error"] = (
-            f"URDF link {_FT_SENSOR_LINK!r} is absent or invalid; F/T overlay disabled"
+            f"URDF link {_FT_SENSOR_LINK!r} is absent or invalid; CAD overlay disabled"
         )
-        return
-    position, wxyz = pose
-    handles["ft_sensor_pose_tcp"] = (*position, *wxyz)
+    else:
+        position, wxyz = pose
+        handles["ft_sensor_pose_tcp"] = (*position, *wxyz)
     for arm in ("left", "right"):
-        prefix = f"/stand/{arm}_tcp/ft_sensor"
+        cad_prefix = f"/stand/{arm}_tcp/ft_sensor_cad"
+        control_prefix = f"/stand/{arm}_force_control_frame"
         try:
-            handles[f"{arm}_ft_sensor_frame"] = server.scene.add_frame(
-                prefix,
-                position=position,
-                wxyz=wxyz,
+            if pose is not None:
+                handles[f"{arm}_ft_sensor_frame"] = server.scene.add_frame(
+                    cad_prefix,
+                    position=position,
+                    wxyz=wxyz,
+                    show_axes=True,
+                    axes_length=0.035,
+                    axes_radius=0.0015,
+                    visible=False,
+                )
+                if hasattr(server.scene, "add_label"):
+                    handles[f"{arm}_ft_sensor_label"] = server.scene.add_label(
+                        f"{cad_prefix}/label",
+                        f"{arm} {_FT_SENSOR_MODEL} {_FT_CAD_QUALIFIER}",
+                        position=(0.0, 0.0, 0.042),
+                        visible=False,
+                    )
+            handles[f"{arm}_ft_control_frame"] = server.scene.add_frame(
+                control_prefix,
+                position=(0.0, 0.0, 0.0),
+                wxyz=(1.0, 0.0, 0.0, 0.0),
                 show_axes=True,
-                axes_length=0.045,
-                axes_radius=0.002,
+                axes_length=0.065,
+                axes_radius=0.0025,
                 visible=False,
             )
             if hasattr(server.scene, "add_label"):
-                handles[f"{arm}_ft_sensor_label"] = server.scene.add_label(
-                    f"{prefix}/label",
-                    f"{arm} {_FT_SENSOR_MODEL} {_FT_OVERLAY_QUALIFIER} · raw wrench invalid",
-                    position=(0.0, 0.0, 0.055),
+                handles[f"{arm}_ft_control_label"] = server.scene.add_label(
+                    f"{control_prefix}/label",
+                    f"{arm} {_FT_CONTROL_QUALIFIER} · unavailable",
+                    position=(0.0, 0.0, 0.075),
                     visible=False,
                 )
             if hasattr(server.scene, "add_arrows"):
                 handles[f"{arm}_ft_force"] = server.scene.add_arrows(
-                    f"{prefix}/raw_force",
+                    f"{control_prefix}/control_force",
                     points=_line_segments_array(),
                     colors=(255, 70, 70),
                     shaft_radius=0.002,
@@ -942,7 +961,7 @@ def _add_ft_sensor_overlay(server: Any, handles: dict[str, Any]) -> None:
                 handles[f"{arm}_ft_force_mode"] = "arrows"
             elif hasattr(server.scene, "add_line_segments"):
                 handles[f"{arm}_ft_force"] = server.scene.add_line_segments(
-                    f"{prefix}/raw_force",
+                    f"{control_prefix}/control_force",
                     points=_line_segments_array(),
                     colors=_line_segment_colors_array(),
                     line_width=5.0,
@@ -975,21 +994,23 @@ def _ft_force_segment(
 
 
 def update_ft_sensor_overlay(
-    scene_handles: dict[str, Any], latest: Any, *, stale: bool, show: bool = True
+    scene_handles: dict[str, Any], latest: Any, *, stale: bool, show: bool = True,
+    show_control: bool = True,
 ) -> None:
-    """Update F/T frame visibility and the raw sensor-frame force vector.
+    """Update the independent CAD and server-resolved control-frame overlays.
 
-    The frame remains useful when the wrench is unavailable, but only while the
-    actual TCP pose is current. The raw-force vector requires a fresh state
-    stream, ``eft_valid``, and a finite six-axis sample. This visualization does
-    not imply that the force-control pipeline or motion path is active.
+    The CAD frame follows the current TCP but never claims to be a controller
+    frame. The control frame and force vector fail closed unless the server has
+    published a fresh, valid resolved pose and a finite compliance-frame wrench.
     """
     if not isinstance(scene_handles, dict):
         return
     for arm in ("left", "right"):
         frame = scene_handles.get(f"{arm}_ft_sensor_frame")
+        control_frame = scene_handles.get(f"{arm}_ft_control_frame")
         force_handle = scene_handles.get(f"{arm}_ft_force")
         label = scene_handles.get(f"{arm}_ft_sensor_label")
+        control_label = scene_handles.get(f"{arm}_ft_control_label")
         arm_state = getattr(latest, arm, None) if latest is not None else None
         actual_pose = None
         if arm_state is not None:
@@ -1007,10 +1028,46 @@ def update_ft_sensor_overlay(
         _set_visible(frame, frame_visible)
         _set_visible(label, frame_visible)
 
-        wrench = getattr(arm_state, "eft_wrench", None) if arm_state is not None else None
+        control = getattr(arm_state, "force_control", None) if arm_state is not None else None
+        control_pose = (
+            getattr(control, "compliance_frame_actual_stand", None)
+            if control is not None else None
+        )
+        control_visible = bool(
+            show_control
+            and not stale
+            and control is not None
+            and getattr(control, "enabled", False)
+            and getattr(control, "compliance_frame_pose_valid", False)
+            and control_pose is not None
+        )
+        if control_visible and control_frame is not None:
+            try:
+                control_frame.position = _pose_position(control_pose)
+                control_frame.wxyz = _pose_wxyz(control_pose)
+            except Exception as exc:
+                scene_handles[f"{arm}_ft_control_frame_update_error"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+                control_visible = False
+        _set_visible(control_frame, control_visible)
+        _set_visible(control_label, control_visible)
+
+        wrench = (
+            getattr(control, "control_wrench_compliance", None)
+            if control is not None else None
+        )
+        force_torque = (
+            getattr(arm_state, "force_torque", None) if arm_state is not None else None
+        )
+        wrench_valid = bool(
+            force_torque is not None
+            and getattr(force_torque, "healthy", False)
+            and not getattr(force_torque, "stale", True)
+        )
         force_sample = (
             _ft_force_segment(wrench)
-            if frame_visible and getattr(arm_state, "eft_valid", False) and wrench is not None
+            if control_visible and wrench_valid and wrench is not None
             else None
         )
         force_visible = bool(force_sample is not None and force_sample[1] > 1e-9)
@@ -1040,18 +1097,26 @@ def update_ft_sensor_overlay(
 
         if label is not None and frame_visible:
             try:
-                if force_sample is None:
-                    label.text = (
-                        f"{arm} {_FT_SENSOR_MODEL} {_FT_OVERLAY_QUALIFIER} · raw wrench invalid"
-                    )
-                else:
+                label.text = f"{arm} {_FT_SENSOR_MODEL} {_FT_CAD_QUALIFIER}"
+            except Exception:
+                pass
+
+        if control_label is not None and control_visible:
+            try:
+                frame_name = getattr(control, "compliance_frame", None) or "unknown"
+                mode = getattr(control, "operating_mode", None) or "unknown"
+                if force_sample is not None:
                     values = tuple(float(value) for value in wrench)
-                    label.text = (
-                        f"{arm} {_FT_SENSOR_MODEL} {_FT_OVERLAY_QUALIFIER} · "
-                        f"decoded only / presence unverified · "
+                    control_label.text = (
+                        f"{arm} {_FT_CONTROL_QUALIFIER} · {frame_name} · {mode} · "
                         f"F=({values[0]:+.1f}, {values[1]:+.1f}, {values[2]:+.1f}) N · "
                         f"|F|={force_sample[1]:.1f} N · "
                         f"T=({values[3]:+.2f}, {values[4]:+.2f}, {values[5]:+.2f}) Nm"
+                    )
+                else:
+                    control_label.text = (
+                        f"{arm} {_FT_CONTROL_QUALIFIER} · {frame_name} · {mode} · "
+                        "control wrench invalid"
                     )
             except Exception:
                 pass

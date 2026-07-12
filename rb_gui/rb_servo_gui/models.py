@@ -431,6 +431,8 @@ class ForceControlSnapshot:
     state: str | None = None
     surface_source: str | None = None
     compliance_frame: str | None = None
+    compliance_frame_pose_valid: bool | None = None
+    compliance_frame_actual_stand: Pose6D | None = None
     normal_stand: tuple[float, float, float] | None = None
     contact_active: bool | None = None
     normal_contact_active: bool | None = None
@@ -485,6 +487,12 @@ class ForceControlSnapshot:
             state=_optional_str(value.get("state")),
             surface_source=_optional_str(value.get("surface_source")),
             compliance_frame=_optional_str(value.get("compliance_frame")),
+            compliance_frame_pose_valid=_optional_bool(
+                value.get("compliance_frame_pose_valid")
+            ),
+            compliance_frame_actual_stand=Pose6D.parse(
+                value.get("compliance_frame_actual_stand")
+            ),
             normal_stand=_finite_vec3(value.get("normal_stand")),
             contact_active=_optional_bool(value.get("contact_active")),
             normal_contact_active=_optional_bool(value.get("normal_contact_active")),

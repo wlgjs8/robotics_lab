@@ -71,23 +71,31 @@ T_ft_sensor_base_measurement       = xyz [0, 0, 0.030], rpy [0, 0, 0]
 T_tcp_sensor                       = xyz [0, 0, -0.202642], rpy [0, 0, pi/2]
 ```
 
-The rbpodo EFT fields do not use that CAD yaw. In the 2026-07-12 right-arm
-positive-endpoint-to-TCP capture, the former `+pi/2` runtime rotation produced
-`+X -> +Y` and `+Y -> -X`, while Z polarity was correct. Removing that rotation
-gives the accepted positive reaction mapping `+X -> +X`, `+Y -> +Y`, and
-`+Z -> +Z`. The operator declared both installed arm/sensor assemblies
-identical, so the tracked physical profile uses for both arms:
+The first 2026-07-12 right-arm axis review mixed names from the TCP gizmo and
+the yaw-offset CAD sensor gizmo and temporarily removed this yaw. The 18:32
+Cartesian-compliance capture then showed that the published runtime frame was
+identical to the TCP frame while operator loads referenced the sensor gizmo;
+X and Y consequently moved on the other displayed sensor axis. That capture
+invalidates the yaw-zero acceptance. The operator declared both installed
+arm/sensor assemblies identical, so the corrected supervised test profile uses
+the explicit URDF/FT orientation for both arms:
 
 ```text
-T_tcp_rbpodo_eft = xyz [0, 0, -0.202642], rpy [0, 0, 0]
+T_tcp_rbpodo_eft = xyz [0, 0, -0.202642], rpy [0, 0, pi/2]
 ```
 
-This acceptance covers the three positive force axes only. Torque-axis checks,
-sensor serials, payload/COM, and production force-motion acceptance remain
-pending. `rb_gui` still reads `ft_sensor_measurement` from the viewer URDF for
-the CAD-local sensor overlay; use the TCP gizmo together with the transformed
-surface/compliance wrench for the controller-axis check. CAD orientation must
-not be substituted for the empirically accepted rbpodo EFT source frame.
+The corrected 18:48 capture observed right-arm +X/+Y/+Z translation in the
+pushed runtime-frame direction and zero-wrench recentering; the operator
+declared the left assembly identical. Torque-axis checks, sensor serials,
+payload/COM, and production force-motion acceptance remain pending. `rb_gui`
+reads `ft_sensor_measurement` from the viewer URDF for the small sensor-origin
+overlay. The server separately publishes
+`compliance_frame_actual_stand` plus
+`compliance_frame_pose_valid`; the GUI renders that larger runtime triad and its
+`control_wrench_compliance` vector only when both telemetry and the state stream
+are valid. In the corrected `tcp_origin` profile the two triads share an
+orientation and differ only in origin; the TCP pose gizmo remains a separate
+frame and is not an F/T-axis test reference.
 
 ## Mount Orientation Convention
 

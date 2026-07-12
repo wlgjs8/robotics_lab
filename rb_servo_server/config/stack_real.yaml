@@ -462,15 +462,17 @@ logging:
 
 force_torque:
   source: rbpodo_eft
-  # Stage 1 accepted source profile. The rbpodo EFT translation-axis mapping was
-  # accepted from the 2026-07-12 right-arm +X/+Y/+Z reaction capture. The
-  # operator declared the left arm mechanically/electrically identical, so it
-  # uses the same mapping. Torque axes, payload, serials, and bias remain pending.
+  # Corrected supervised source profile. The earlier right-arm X/Y labels mixed
+  # the TCP and FT gizmos; the 18:32 compliance capture invalidated yaw zero.
+  # The operator declared the left arm mechanically/electrically identical, so
+  # both use the +pi/2 URDF/FT mapping. The 18:48 capture observed corrected
+  # +X/+Y/+Z translation and recentering. Torque axes, payload, serials, and
+  # bias remain pending.
   left: &ft_arm_monitor
     enable: true
     frame_configured: true
     sensor_identity: "left-rft64-6a01-operator-confirmed-serial-pending"
-    calibration_id: "right-derived-identical-hardware-force-axis-20260712"
+    calibration_id: "right-derived-identical-positive-force-ft-axis-20260712"
     # Backend sequence advances only on a newly received CobotData state frame;
     # cached/held states retain the previous value and fail the stall bound.
     freshness_source: sequence
@@ -490,9 +492,9 @@ force_torque:
     # admitting the measured stationary sensor noise.
     residual_tare_max_force_stddev_n: 0.75
     residual_tare_max_torque_stddev_nm: 0.15
-    # rbpodo EFT axes align with TCP axes. The previous CAD-derived +pi/2 yaw
-    # produced +X load -> +Y reaction and +Y load -> -X reaction.
-    T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 0.0]
+    # The runtime EFT/control axes follow the explicit URDF sensor frame.
+    # +pi/2 yaw makes the sensor X/Y gizmo and compliance X/Y physically agree.
+    T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
     sensor_bias: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     payload_mass_kg: 0.0
     payload_com_tcp_m: [0.0, 0.0, 0.0]
@@ -501,7 +503,7 @@ force_torque:
     enable: true
     frame_configured: true
     sensor_identity: "right-rft64-6a01-operator-confirmed-serial-pending"
-    calibration_id: "physical-positive-force-axis-20260712"
+    calibration_id: "physical-positive-force-ft-axis-20260712"
     freshness_source: sequence
     max_sample_age_sec: 0.02
     max_source_stall_sec: 0.02
@@ -513,17 +515,17 @@ force_torque:
     residual_tare_min_samples: 500
     residual_tare_max_force_stddev_n: 0.75
     residual_tare_max_torque_stddev_nm: 0.15
-    # Positive-endpoint-to-TCP pushes established the reaction mapping:
-    # +Z -> +Z, +X -> +X, +Y -> +Y after removing the former +pi/2 yaw.
-    T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 0.0]
+    # The 18:32 capture invalidated yaw zero; the 18:48 corrected capture then
+    # observed +X/+Y/+Z translation in the pushed runtime FT-control direction.
+    T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
     sensor_bias: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     payload_mass_kg: 0.0
     payload_com_tcp_m: [0.0, 0.0, 0.0]
     residual_tare_tcp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 # Gate 2 supervised translation-only Cartesian compliance. The 2026-07-12
-# positive X/Y/Z capture accepted the rbpodo EFT translation frame; the operator
-# declared the left assembly identical. Rotation remains locked because
+# 18:32 capture corrected the translation frame to the +pi/2 URDF/FT axes; the
+# operator declared the left assembly identical. Rotation remains locked because
 # payload/COM and torque-axis acceptance are still pending. Both geometric floor
 # constraints remain disabled by explicit operator decision, so this Hold-only
 # test requires an E-stop operator and a completely clear swept volume. This is
@@ -538,7 +540,7 @@ force_control:
   left:
     enable: true
     surface_source: none
-    # Gate 2: express the controller in the accepted rbpodo EFT-axis orientation,
+    # Gate 2: express the controller in the corrected URDF/FT-axis orientation,
     # but apply the correction about the TCP endpoint. Rotation is deliberately
     # locked until payload/COM and torque response are physically accepted.
     compliance_frame: tcp_origin

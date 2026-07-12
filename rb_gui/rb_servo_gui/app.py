@@ -2705,6 +2705,7 @@ def build_gui(
         chunk_overlay_history_count = _gui_setting_int(_ov, "chunk_overlay_history_count", 12)
         tcp_gizmo_visible = _gui_setting_bool(_ov, "tcp_gizmo_visible", True)
         ft_sensor_gizmo_visible = _gui_setting_bool(_ov, "ft_sensor_gizmo_visible", True)
+        ft_control_gizmo_visible = _gui_setting_bool(_ov, "ft_control_gizmo_visible", True)
         tcp_trail_limit = _gui_setting_int(_ov, "tcp_trail_limit", 600)
         if chunk_overlay_axes_stride <= 0:
             chunk_overlay_axes_stride = 2
@@ -2854,7 +2855,7 @@ def build_gui(
                     _hide_tcp_gizmos(handles)
 
             handles["ft_sensor_gizmo_toggle"] = server.gui.add_checkbox(
-                "F/T URDF/CAD frame(축 미검증) 및 raw force 표시",
+                "F/T sensor frame(URDF/CAD, sensor origin) 표시",
                 initial_value=ft_sensor_gizmo_visible,
             )
 
@@ -2867,7 +2868,22 @@ def build_gui(
                     "ft_sensor_gizmo_visible", handles["ft_sensor_gizmo_visible"]
                 )
 
+            handles["ft_control_gizmo_toggle"] = server.gui.add_checkbox(
+                "F/T runtime control frame(TCP origin) 및 force 표시",
+                initial_value=ft_control_gizmo_visible,
+            )
+
+            @handles["ft_control_gizmo_toggle"].on_update
+            def _(_: Any) -> None:
+                handles["ft_control_gizmo_visible"] = bool(
+                    handles["ft_control_gizmo_toggle"].value
+                )
+                _update_gui_setting(
+                    "ft_control_gizmo_visible", handles["ft_control_gizmo_visible"]
+                )
+
         handles["ft_sensor_gizmo_visible"] = ft_sensor_gizmo_visible
+        handles["ft_control_gizmo_visible"] = ft_control_gizmo_visible
 
         handles["ops"] = server.gui.add_text(
             "Container ops",
@@ -5494,6 +5510,7 @@ def update_gui(
         latest,
         stale=stale,
         show=bool(handles.get("ft_sensor_gizmo_visible", True)),
+        show_control=bool(handles.get("ft_control_gizmo_visible", True)),
     )
     # After markers (TCP frames now posed): toggle the orange floor-check points,
     # which are parented under /stand/<arm>_tcp and ride those poses.

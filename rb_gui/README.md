@@ -42,19 +42,22 @@ still makes the authoritative accept/reject decision.
 
 ## F/T Sensor Visualization
 
-The scene renders each Robotous RFT64-6A01 URDF/CAD measurement-frame estimate
-as a read-only child of the live actual TCP frame. Its local pose is loaded from
-the explicit `ft_sensor_measurement` link in the active viewer URDF; missing or
-invalid URDF frame data disables the overlay instead of falling back to a
-guessed origin. When the state stream is current and `eft_valid` is true, the
-raw controller-reported force vector is drawn in the authored local axes and
-the label shows all six raw wrench components. The label explicitly states
-that the axes and sensor presence are unverified: `eft_valid` currently proves
-finite decoding only. This display is diagnostic only and does not indicate
-that force control is active. When the server publishes the optional
-`force_torque`, `force_control`, and `motion_epoch` telemetry, the status tab
-and Pose/FT monitor also show the declared source assurance, contact state, and
-controller state. Those fields are read-only; the GUI has no force-control
+The scene deliberately separates two Robotous RFT64-6A01 frames. The small
+`ft_sensor_measurement` triad is loaded from the viewer URDF and represents the
+Pika/RFT sensor frame at the physical sensor origin, including its +90 degree
+yaw. Missing or invalid URDF data disables only this reference overlay instead
+of substituting a guessed transform.
+
+The larger runtime triad is driven exclusively by the server's resolved
+`force_control.compliance_frame_actual_stand` pose and its validity flag. The
+red force arrow is `control_wrench_compliance`, expressed under that same
+runtime frame; raw rbpodo EFT components are never drawn under the CAD axes.
+The runtime overlay fails closed on stale state, an invalid pose, or a disabled
+force controller. In the corrected real `tcp_origin` profile the small sensor
+triad and large runtime triad must be parallel and differ only in origin. The
+large runtime triad is the sole X/Y/Z reference for compliance testing; the
+generic TCP pose triad is not. Independent GUI checkboxes control the sensor
+and runtime overlays. All fields remain read-only; the GUI has no force-control
 enable or tuning control.
 
 ## Realtime Timing Health

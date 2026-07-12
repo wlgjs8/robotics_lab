@@ -366,16 +366,22 @@ bounded SE(3) correction is composed around a fixed Hold or latest accepted
 policy-command equilibrium. Zero-wrench stiffness recenters all six offsets
 without absorbing measured motion into that equilibrium. The current real
 profile is a supervised translation-only Hold gate using `tcp_origin`: the
-controller follows the accepted rbpodo EFT/TCP-axis orientation and applies the
-correction about the TCP endpoint. Rotational axes remain disabled.
+controller follows the corrected +90 degree URDF/FT-axis orientation and
+applies the correction about the TCP endpoint. The runtime FT control gizmo,
+not the generic TCP pose gizmo, names the test axes. Rotational axes remain
+disabled.
 The Cartesian controller selects jerk from a recursively viable braking
 envelope rather than integrating and clamping state. A same-direction wrench
 outside an axis deadband reserves a zero-velocity, zero-acceleration loaded
 hold without allowing the compliant offset to reverse toward zero; deadband
 release restores the nominal stiffness-driven recenter path. Recontact during
 that return is first jerk-bounded to a stop before the loaded-hold invariant
-takes ownership. This preserves boundary braking, recontact, and release
-recentering authority without adding wrench averaging.
+takes ownership. If a noisy deadband transition makes no-reversal stopping
+temporarily unreachable, the ordinary jerk-safe envelope remains authoritative
+while the controller brakes toward a reachable loaded hold; this bounded
+transient no longer becomes an `ExternalForceLimit` fault. This preserves
+boundary braking, recontact, and release recentering authority without adding
+wrench averaging.
 Surface-normal and resultant hard-limit calculations remain in their existing
 TCP/stand path. Hard-limit faults retain the normal
 motion-epoch interruption path. Activation, telemetry, and promotion constraints are defined in

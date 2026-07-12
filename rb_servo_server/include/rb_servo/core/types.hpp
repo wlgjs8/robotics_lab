@@ -565,6 +565,8 @@ struct ForceControlTelemetry {
     std::string state = "inactive";
     std::string surface_source = "floor_constraint";
     std::string compliance_frame = "surface";
+    bool compliance_frame_pose_valid = false;
+    Pose6D compliance_frame_actual_stand;
     std::array<double, 3> normal_stand{0.0, 0.0, 1.0};
     bool contact_active = false;
     bool normal_contact_active = false;

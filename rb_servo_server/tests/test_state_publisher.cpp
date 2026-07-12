@@ -292,6 +292,10 @@ bool testStatePublisherSerializesForceTelemetry() {
     snapshot.left_force_control.rotational_regulating = true;
     snapshot.left_force_control.loading_projection_active = true;
     snapshot.left_force_control.compliance_frame = "sensor_origin";
+    snapshot.left_force_control.compliance_frame_pose_valid = true;
+    snapshot.left_force_control.compliance_frame_actual_stand = {
+        0.31, -0.12, 0.44, 0.0, 0.0, 1.5707963267948966,
+    };
     snapshot.left_force_control.control_wrench_surface = {1.0, 2.0, 5.0, 0.1, 0.2, 0.3};
     snapshot.left_force_control.control_wrench_compliance = {4.0, 5.0, 6.0, 0.4, 0.5, 0.6};
     snapshot.left_force_control.wrench_error_surface = {0.5, 1.5, 2.5, 0.05, 0.15, 0.25};
@@ -331,6 +335,10 @@ bool testStatePublisherSerializesForceTelemetry() {
     RB_CHECK(ft.at("residual_tare_tcp").at(2).get<double>() == 23.5);
     RB_CHECK(force.at("state").get<std::string>() == "release_braking");
     RB_CHECK(force.at("compliance_frame").get<std::string>() == "sensor_origin");
+    RB_CHECK(force.at("compliance_frame_pose_valid").get<bool>());
+    RB_CHECK(force.at("compliance_frame_actual_stand").at(0).get<double>() == 0.31);
+    RB_CHECK(force.at("compliance_frame_actual_stand").at(5).get<double>() ==
+             1.5707963267948966);
     RB_CHECK(force.at("contact_active").get<bool>());
     RB_CHECK(!force.at("normal_contact_active").get<bool>());
     RB_CHECK(force.at("transverse_contact_active").get<bool>());
