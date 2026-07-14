@@ -169,6 +169,37 @@ valid zero. Until acceptance, enforcing force modes remain unavailable.
 Left-only and right-only Init Motion tare only that arm; a dual-arm request tares
 both independently.
 
+The GUI payload/CoG workflow uses the ordinary `JointTarget` primitive with
+`joint_target_profile: payload_identification`. Observing that profile latches a
+per-arm `payload_identification_inhibit`, invalidates the pose-local tare, and
+resets the Cartesian compliance state before the identification move proceeds.
+For each live identification packet, force-Hold promotion is suppressed on both
+arms: the selected arm remains on its direct JointTarget and the peer's explicit
+Hold cannot become a Cartesian admittance target. A rejected/unavailable profile
+uses the same two-arm joint-hold posture for that packet.
+Admission also requires a currently healthy, non-stale selected-arm F/T stream.
+The command shape is server-enforced: exactly one arm may carry a finite
+`payload_identification` JointTarget and the peer must be a payload-free Hold.
+Both-profile and profile-plus-peer-motion packets fail closed to two-arm Hold
+with `InvalidCommand`.
+While the identification inhibit makes the normal tare-dependent force path
+unavailable, enforcing force-control profiles continue to debounce the configured
+hard limits against the raw pre-tare TCP wrench; crossing one still latches the
+normal external-force fault.
+The latch prevents an expired calibration command from falling back to a Hold
+that is promoted into Cartesian admittance. Stop, lease loss, command timeout,
+and faults do not clear it while the server remains running. Only a later
+successful Init Motion tare for that arm clears the inhibit. A server restart
+does not restore this runtime telemetry latch, but the existing invalid-tare
+startup posture still keeps force motion fail-closed until Init Motion accepts a
+new tare. State JSON and the CSV expose the latch/profile so sample collection
+can wait for server confirmation.
+
+The same state surface publishes `gravity_tcp`, the stand gravity vector
+expressed in the actual TCP orientation for that controller sample. It is paired
+with the pre-payload/pre-tare `wrench_tcp` input for offline payload
+identification; it is not a new control input and does not alter the wrench path.
+
 An accepted Init Motion sequence number is processed once even though the
 `CommandBuffer` retains the packet until its timeout. Completion hands the arm
 to `Hold` at the last accepted/sent reference. The cached packet cannot

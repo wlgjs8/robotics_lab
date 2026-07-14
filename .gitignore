@@ -69,3 +69,6 @@ data*/
 # Local Python virtualenvs
 .venv/
 venv/
+
+# Documents
+*.pdf

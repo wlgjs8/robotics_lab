@@ -111,11 +111,12 @@ safety:
   tracking_error_policy: fault_latch
   controller_simulation_tracking_error_source: reference
   controller_simulation_tracking_error_nonlatching: true
-  # warn_only: the Rainbow VIRTUAL control box simulates the arm, so q_actual
-  # genuinely follows commands — physical-motion latching would trip instantly.
-  # (On a REAL controller in pgmode sim, q_actual stays still, so this guard
-  # only mattered there; the VM is the primary sim target now.)
-  controller_simulation_physical_motion_policy: warn_only
+  # This tracked profile currently targets the physical RB3-730 control boxes
+  # held in pgmode simulation. Their encoders must remain still; any physical
+  # motion indication is therefore an immediate server-owned fault latch. A
+  # Virtual ControlBox, whose simulated q_actual legitimately follows commands,
+  # needs a future explicit topology contract before it can use this profile.
+  controller_simulation_physical_motion_policy: fault_latch
   controller_simulation_physical_motion_threshold_deg: 0.05
   latch_fault_on_robot_state_error: true
   stop_both_arms_on_single_arm_error: true
@@ -365,6 +366,9 @@ logging:
 
 force_torque:
   source: rbpodo_eft
+  # No deterministic F/T gravity fixture exists in controller pgmode.
+  payload_identification:
+    enable: false
   left: &ft_arm_disabled
     enable: false
     frame_configured: false
@@ -485,7 +489,9 @@ cartesian_control:
   # divergence 가드도 reference 기준이어야 함 — actual 기준이면 적분 명령이
   controller_simulation_divergence_source: reference
   allow_in_simulation: true
-  allow_in_real: true                          # PHYSICAL real Cartesian (config-gated; no env)
+  # This tracked launch config is controller-simulation-only. A mistaken switch
+  # to operation_mode=real must not inherit Cartesian motion authority.
+  allow_in_real: false
   allow_in_controller_simulation: true        # pgmode controller-simulation
   warn_ik_duration_us: 3000
   fail_ik_duration_us: 5000
@@ -502,32 +508,95 @@ cartesian_control:
   max_cartesian_step_rad: 0.1
   
   exceed_limit_policy: clamp
-  # SMD pose tracking for streaming TcpPoseTarget (UMI teleop): received target
-  # deltas integrate into a goal pose; the published target follows it as a
-  # critically damped (zeta=1) second-order system stepped every 2ms tick.
-  # Mass is fixed at 1.0. TUNE HERE: raise natural_frequency_*_hz step by step
-  # (0.5 -> 0.8 -> 1.2 -> 2.0 ...) for snappier tracking; translation and
-  # rotation are independent. Settling time ~ 1/(zeta*2*pi*fn) * 4.
-  pose_track_smd:
-    enable: true
-    # UNIFIED-TO-REAL (2026-06-21): vff on + fn=1.0 to match stack_real.yaml.
-    # velocity_feedforward removes SMD phase lag (sim 22-ep clean subset: pos p95
-    # 17.9->1.75mm, lag 90->22ms, 21/22 REAL_READY). fn=1.0 (vs sim's old 3.0) is
-    # the mild low-pass that holds wrist-band HF down so vff's accuracy gain does
-    # not cost camera blur — the accurate+smooth combination for real ts=1.0.
-    velocity_feedforward: true
-    damping_ratio_linear: 1.0
-    natural_frequency_linear_hz: 1.0
-    damping_ratio_angular: 1.0
-    natural_frequency_angular_hz: 1.0
-    # Saturation clamps (vector-norm, direction-preserving). Mass=1.0 so the
-    # accel clamp IS the max-force clamp; zeta/fn dynamics stay exact inside
-    # the limits. NOTE with these numbers a full-speed (50mm/s) stop is force-
-    # limited to ~12.5mm of glide (v^2/2a) on large moves.
-    max_linear_velocity_m_s: 0.40 # 250 mm/s (was 50 - capped fast teleop)
-    max_linear_accel_m_s2: 1.0           # 1 m/s^2 (was 0.1 - sluggish catch-up)
-    max_angular_velocity_rad_s: 1.745329252  # 100 deg/s (was 50)
-    max_angular_accel_rad_s2: 6.981317008    # 400 deg/s^2 (was 100)
+  # Keep the command-facing profiles identical to stack_real.yaml. The only
+  # control difference is the pgmode feedback source above (tcp_ref/q_target),
+  # plus this file's controller-simulation-only authority settings.
+  tcp_pose_target_profile_default: umi_large_smooth
+  tcp_pose_target_profiles:
+    spacemouse_precise:
+      pose_track_smd:
+        enable: true
+        damping_ratio_linear: 1.0
+        damping_ratio_angular: 1.0
+        natural_frequency_linear_hz: 1.8
+        natural_frequency_angular_hz: 1.3
+        velocity_feedforward: false
+        max_linear_velocity_m_s: 0.18
+        max_linear_accel_m_s2: 0.5
+        max_angular_velocity_rad_s: 0.60
+        max_angular_accel_rad_s2: 1.80
+      max_smd_goal_lead_m: 0.020
+      max_smd_goal_lead_rad: 0.08
+    umi_large_smooth:
+      pose_track_smd:
+        enable: true
+        damping_ratio_linear: 1.0
+        damping_ratio_angular: 1.0
+        natural_frequency_linear_hz: 2.0
+        natural_frequency_angular_hz: 1.5
+        velocity_feedforward: true
+        max_linear_velocity_m_s: 0.30
+        max_linear_accel_m_s2: 2.50
+        max_angular_velocity_rad_s: 1.4
+        max_angular_accel_rad_s2: 3.0
+        reengage_relatch_max_step_m: 0.012
+        reengage_relatch_max_step_rad: 0.12
+        singularity_scale_full_sigma: 0.12
+        singularity_scale_floor_sigma: 0.05
+        singularity_scale_min: 0.12
+      max_smd_goal_lead_m: 0.080
+      max_smd_goal_lead_rad: 0.40
+    flow_infer_smooth:
+      pose_track_smd:
+        enable: true
+        damping_ratio_linear: 1.0
+        damping_ratio_angular: 1.0
+        natural_frequency_linear_hz: 1.6
+        natural_frequency_angular_hz: 1.6
+        velocity_feedforward: true
+        max_linear_velocity_m_s: 0.50
+        max_linear_accel_m_s2: 1.20
+        max_angular_velocity_rad_s: 1.80
+        max_angular_accel_rad_s2: 5.00
+        reengage_relatch_max_step_m: 0.010
+        reengage_relatch_max_step_rad: 0.10
+        singularity_scale_full_sigma: 0.12
+        singularity_scale_floor_sigma: 0.05
+        singularity_scale_min: 0.12
+      ruckig_follower:
+        enable: true
+        controller: "delta_preview"
+        max_linear_velocity_m_s: 0.18
+        max_linear_accel_m_s2: 1.5
+        max_linear_jerk_m_s3: 45.0
+        max_angular_velocity_rad_s: 0.60
+        max_angular_accel_rad_s2: 3.0
+        max_angular_jerk_rad_s3: 120.0
+        discard_head_steps: 0
+        consume_steps: 12
+        reserve_steps: 2
+        smoothing_window: 3
+        af_damping_beta: 1.0
+        delta_twist_clear_residual_on_new_frame: true
+        delta_twist_min_time_to_go_sec: 0.015
+        delta_twist_tau_sec: 0.020
+        delta_twist_residual_drain_steps: 1
+        delta_twist_max_residual_m: 0.006
+        delta_twist_max_residual_rad: 0.050
+        delta_twist_max_lead_m: 0.020
+        delta_twist_max_lead_rad: 0.060
+        delta_twist_stale_residual_timeout_sec: 0.15
+        preview_max_projection_error_m: 0.001
+        preview_max_projection_error_rad: 0.00436332313
+        preview_max_consecutive_projection_errors: 3
+        preview_max_actual_lead_m: 0.006
+        preview_max_actual_lead_rad: 0.01745329252
+        preview_max_consecutive_actual_lead_errors: 3
+        chunk_feed_timeout_sec: 1.5
+        fallback_policy: "fault"
+        engage_timeout_sec: 3.0
+      max_smd_goal_lead_m: 0.080
+      max_smd_goal_lead_rad: 0.35
   linear_move:
     min_duration_sec: 0.05
     max_duration_sec: 10.0

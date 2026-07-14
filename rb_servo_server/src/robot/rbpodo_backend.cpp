@@ -804,6 +804,9 @@ struct RbpodoBackend::Impl {
     // Advances only after a newly received CobotData state frame is decoded.
     // Held/cache returns deliberately preserve their source frame's sequence.
     uint64_t state_acquisition_sequence = 0;
+    // Advances for every direct SDK request_data() attempt, including timeout
+    // and exception exits, so packet captures can be correlated one-to-one.
+    uint64_t state_request_sequence = 0;
     // Consecutive transient readState misses currently being tolerated (held)
     // under the controller-simulation read-miss carve-out. Reset on any valid read.
     // In pipelined mode this counts ticks without a fresh frame (diagnostic only;
@@ -974,6 +977,8 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
     impl_->servo_engage_ramp_start_ns = 0;
     impl_->last_servo_j_send_ns = 0;
     try {
+        bool operation_mode_switch_confirmed = false;
+        bool activation_confirmed = false;
         // Reconcile the controller's pgmode (operation mode) with the config:
         // if the pendant/controller is in the other mode, switch it and VERIFY
         // the switch took effect before continuing. This makes `make run
@@ -1109,6 +1114,7 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
                               << rbpodoModeName(expected_simulation) << " for "
                               << impl_->config.name << " in "
                               << (nowSteadyNs() - verify_start_ns) / 1'000'000'000.0 << " s\n";
+                    operation_mode_switch_confirmed = true;
                 }
             }
         }
@@ -1179,6 +1185,7 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
                         std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     }
                     if (activated) {
+                        activation_confirmed = true;
                         std::cerr << "[INFO] RbpodoBackend robot activated for "
                                   << impl_->config.name << " in "
                                   << (nowSteadyNs() - act_start_ns) / 1'000'000'000.0 << " s\n";
@@ -1213,7 +1220,7 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
             std::cerr << "[INFO] RbpodoBackend applied speed_bar=" << impl_->config.speed_bar
                       << " for " << impl_->config.name << "\n";
         }
-        const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+        auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
         if (!state) {
             std::cerr << "[ERROR] RbpodoBackend initialize failed: no state from "
                       << impl_->config.ip << "\n";
@@ -1229,8 +1236,44 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
             );
         }
 
-        const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
+        RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
         RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
+        // set_operation_mode()/activate() are confirmed from controller state
+        // above, but the data-channel socket can still contain a pre-transition
+        // SystemState response. A single final read then makes one-shot
+        // `make run MODE=sim` fail startup with wrong_mode/servo_disabled even
+        // though a later response already proved the transition complete.
+        // Drain only when this initialize call performed and confirmed such a
+        // transition. Never substitute a guessed state: if a matching, healthy
+        // frame does not arrive within the bounded window, preserve the last
+        // observed state and let the normal fail-closed startup gate reject it.
+        const auto final_state_matches_confirmed_transition = [&]() {
+            const bool mode_matches = !operation_mode_switch_confirmed ||
+                operationModeMatchesConfig(impl_->config, snapshot);
+            const bool activation_matches = !activation_confirmed || mapped.servo_enabled;
+            return mode_matches && activation_matches;
+        };
+        if (!mapped.has_error && !final_state_matches_confirmed_transition()) {
+            const uint64_t refresh_start_ns = nowSteadyNs();
+            const uint64_t refresh_deadline_ns = refresh_start_ns + 5'000'000'000ULL;
+            while (nowSteadyNs() < refresh_deadline_ns) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                auto refreshed = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+                if (!refreshed) continue;
+                state = std::move(refreshed);
+                snapshot = snapshotFromSystemState(*state);
+                mapped = mapRbpodoSystemStateSnapshot(
+                    impl_->arm_id, snapshot, impl_->config);
+                if (mapped.has_error || final_state_matches_confirmed_transition()) break;
+            }
+            std::cerr << "[INFO] RbpodoBackend post-transition state refresh for "
+                      << impl_->config.name << " completed in "
+                      << (nowSteadyNs() - refresh_start_ns) / 1'000'000'000.0
+                      << " s: pgmode="
+                      << rbpodoPgModeLabel(snapshot.real_vs_simulation_mode)
+                      << " servo_enabled=" << (mapped.servo_enabled ? "true" : "false")
+                      << " has_error=" << (mapped.has_error ? "true" : "false") << "\n";
+        }
         mapped.acquisition_sequence = ++impl_->state_acquisition_sequence;
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, mapped);
         attachMotionReadinessDiagnostic(&mapped, impl_->last_state_error);
@@ -1333,8 +1376,25 @@ BackendResult<RobotState> RbpodoBackend::readState() {
         return readStatePipelined(start);
     }
 
+    BackendReadExchangeTiming exchange_timing;
+    exchange_timing.available = true;
+    exchange_timing.exchange_sequence = ++impl_->state_request_sequence;
+    exchange_timing.source = "rbpodo_sdk_request_data";
+    const auto with_exchange_timing = [&](BackendResult<RobotState> result) {
+        result.read_exchange_timing = exchange_timing;
+        return result;
+    };
+
     try {
+        exchange_timing.request_data_call_start_steady_ns = nowSteadyNs();
+        exchange_timing.request_data_call_start_system_ns = nowSystemNs();
         const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+        exchange_timing.request_data_call_return_steady_ns = nowSteadyNs();
+        exchange_timing.request_data_call_return_system_ns = nowSystemNs();
+        exchange_timing.request_data_call_duration_us = static_cast<double>(
+            exchange_timing.request_data_call_return_steady_ns -
+            exchange_timing.request_data_call_start_steady_ns
+        ) / 1000.0;
         if (!state) {
             // Controller-simulation read-miss carve-out: a single missing CobotData
             // frame is treated as a transient gap (hold the last valid state and stay
@@ -1355,11 +1415,13 @@ BackendResult<RobotState> RbpodoBackend::readState() {
                           << impl_->config.name << "; holding last state ("
                           << impl_->consecutive_read_misses << "/"
                           << impl_->config.max_consecutive_read_misses << ")\n";
-                return okResult(BackendOp::ReadState, held, makeBackendTiming(start, nowSteadyNs()));
+                return with_exchange_timing(
+                    okResult(BackendOp::ReadState, held, makeBackendTiming(start, nowSteadyNs()))
+                );
             }
             out_state.connection_state = RobotConnectionState::Disconnected;
             impl_->connected = false;
-            return failedResult<RobotState>(
+            return with_exchange_timing(failedResult<RobotState>(
                 BackendOp::ReadState,
                 backendError(
                     BackendErrorKind::TransportReadFailed,
@@ -1368,7 +1430,7 @@ BackendResult<RobotState> RbpodoBackend::readState() {
                     "rbpodo_read_state_unavailable"
                 ),
                 makeBackendTiming(start, nowSteadyNs())
-            );
+            ));
         }
         impl_->consecutive_read_misses = 0;
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
@@ -1378,21 +1440,29 @@ BackendResult<RobotState> RbpodoBackend::readState() {
         attachMotionReadinessDiagnostic(&out_state, impl_->last_state_error);
         impl_->last_state_cache = out_state.has_valid_joint_state ? std::make_optional(out_state) : std::nullopt;
         if (const auto acquisition_error = rbpodoStateAcquisitionError(out_state)) {
-            return failedResultWithValue(
+            return with_exchange_timing(failedResultWithValue(
                 BackendOp::ReadState,
                 *acquisition_error,
                 out_state,
                 makeBackendTiming(start, nowSteadyNs())
-            );
+            ));
         }
-        return okResult(BackendOp::ReadState, out_state, makeBackendTiming(start, nowSteadyNs()));
+        return with_exchange_timing(
+            okResult(BackendOp::ReadState, out_state, makeBackendTiming(start, nowSteadyNs()))
+        );
     } catch (const std::exception& exc) {
+        exchange_timing.request_data_call_return_steady_ns = nowSteadyNs();
+        exchange_timing.request_data_call_return_system_ns = nowSystemNs();
+        exchange_timing.request_data_call_duration_us = static_cast<double>(
+            exchange_timing.request_data_call_return_steady_ns -
+            exchange_timing.request_data_call_start_steady_ns
+        ) / 1000.0;
         std::cerr << "[WARN] RbpodoBackend readState failed for " << impl_->config.name
                   << ": " << exc.what() << "\n";
         out_state.connection_state = RobotConnectionState::Error;
         out_state.has_error = true;
         out_state.error_code = -1;
-        return failedResult<RobotState>(
+        return with_exchange_timing(failedResult<RobotState>(
             BackendOp::ReadState,
             backendError(
                 BackendErrorKind::TransportReadFailed,
@@ -1401,7 +1471,7 @@ BackendResult<RobotState> RbpodoBackend::readState() {
                 "rbpodo_read_exception"
             ),
             makeBackendTiming(start, nowSteadyNs())
-        );
+        ));
     }
 #endif
 }

@@ -295,6 +295,9 @@ void writeForceTelemetryHeader(std::ostream& os, const char* side) {
        << ',' << side << "_ft_safety_rated";
     writeWrenchHeader(os, side, "ft_raw_sensor");
     writeWrenchHeader(os, side, "ft_wrench_tcp");
+    os << ',' << side << "_ft_gravity_tcp_x_m_s2"
+       << ',' << side << "_ft_gravity_tcp_y_m_s2"
+       << ',' << side << "_ft_gravity_tcp_z_m_s2";
     writeWrenchHeader(os, side, "ft_fast_external");
     writeWrenchHeader(os, side, "ft_control_external");
     os << ',' << side << "_ft_healthy"
@@ -307,7 +310,9 @@ void writeForceTelemetryHeader(std::ostream& os, const char* side) {
        << ',' << side << "_ft_tare_state"
        << ',' << side << "_ft_tare_sample_count"
        << ',' << side << "_ft_tare_generation"
-       << ',' << side << "_ft_tare_reason";
+       << ',' << side << "_ft_tare_reason"
+       << ',' << side << "_ft_payload_identification_inhibit"
+       << ',' << side << "_ft_joint_target_profile";
     writeWrenchHeader(os, side, "ft_residual_tare_tcp");
     os
        << ',' << side << "_force_control_enabled"
@@ -517,6 +522,8 @@ void ServoLogger::writeHeader() {
     file_ << ",left_state_age_us,right_state_age_us,left_send_result_age_us,right_send_result_age_us";
     file_ << ",left_send_within_period,right_send_within_period,left_send_period_overrun,right_send_period_overrun,left_send_command_deadline_missed,right_send_command_deadline_missed";
     file_ << ",left_send_deadline_hit,right_send_deadline_hit,dispatch_skew_us,left_worker_loop_read_duration_us,right_worker_loop_read_duration_us";
+    file_ << ",left_reqdata_timing_available,left_reqdata_exchange_sequence,left_reqdata_timing_source,left_reqdata_call_start_steady_ns,left_reqdata_call_start_system_ns,left_reqdata_call_return_steady_ns,left_reqdata_call_return_system_ns,left_reqdata_call_duration_us";
+    file_ << ",right_reqdata_timing_available,right_reqdata_exchange_sequence,right_reqdata_timing_source,right_reqdata_call_start_steady_ns,right_reqdata_call_start_system_ns,right_reqdata_call_return_steady_ns,right_reqdata_call_return_system_ns,right_reqdata_call_duration_us";
     for (int i = 0; i < kDof; ++i) file_ << ",left_q_actual_" << i;
     for (int i = 0; i < kDof; ++i) file_ << ",right_q_actual_" << i;
     for (int i = 0; i < kDof; ++i) file_ << ",left_q_sent_" << i;
@@ -601,6 +608,9 @@ void writeForceTelemetryColumns(
        << ',' << ft.safety_rated;
     writeWrenchColumns(os, ft.raw_sensor_wrench);
     writeWrenchColumns(os, ft.wrench_tcp);
+    os << ',' << ft.gravity_tcp[0]
+       << ',' << ft.gravity_tcp[1]
+       << ',' << ft.gravity_tcp[2];
     writeWrenchColumns(os, ft.fast_external_wrench);
     writeWrenchColumns(os, ft.control_external_wrench);
     os << ',' << ft.healthy
@@ -613,7 +623,9 @@ void writeForceTelemetryColumns(
        << ',' << csvEscape(ft.tare_state)
        << ',' << ft.tare_sample_count
        << ',' << ft.tare_generation
-       << ',' << csvEscape(ft.tare_reason);
+       << ',' << csvEscape(ft.tare_reason)
+       << ',' << ft.payload_identification_inhibit
+       << ',' << csvEscape(ft.joint_target_profile);
     writeWrenchColumns(os, ft.residual_tare_tcp);
     os
        << ',' << control.enabled
@@ -1183,7 +1195,23 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << sendWithinPeriod(sample, sample.right_send_end_ns) << ','
           << sample.send_skew_us << ','
           << sample.left_last_read.duration_us << ','
-          << sample.right_last_read.duration_us;
+          << sample.right_last_read.duration_us << ','
+          << sample.left_last_read.read_exchange_timing.available << ','
+          << sample.left_last_read.read_exchange_timing.exchange_sequence << ','
+          << csvEscape(sample.left_last_read.read_exchange_timing.source) << ','
+          << sample.left_last_read.read_exchange_timing.request_data_call_start_steady_ns << ','
+          << sample.left_last_read.read_exchange_timing.request_data_call_start_system_ns << ','
+          << sample.left_last_read.read_exchange_timing.request_data_call_return_steady_ns << ','
+          << sample.left_last_read.read_exchange_timing.request_data_call_return_system_ns << ','
+          << sample.left_last_read.read_exchange_timing.request_data_call_duration_us << ','
+          << sample.right_last_read.read_exchange_timing.available << ','
+          << sample.right_last_read.read_exchange_timing.exchange_sequence << ','
+          << csvEscape(sample.right_last_read.read_exchange_timing.source) << ','
+          << sample.right_last_read.read_exchange_timing.request_data_call_start_steady_ns << ','
+          << sample.right_last_read.read_exchange_timing.request_data_call_start_system_ns << ','
+          << sample.right_last_read.read_exchange_timing.request_data_call_return_steady_ns << ','
+          << sample.right_last_read.read_exchange_timing.request_data_call_return_system_ns << ','
+          << sample.right_last_read.read_exchange_timing.request_data_call_duration_us;
     for (double v : sample.left_state.q_actual_deg) file_ << ',' << v;
     for (double v : sample.right_state.q_actual_deg) file_ << ',' << v;
     for (double v : sample.left_sent_q_deg) file_ << ',' << v;

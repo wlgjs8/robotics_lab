@@ -378,6 +378,7 @@ class ForceTorqueSnapshot:
     safety_rated: bool | None = None
     raw_sensor_wrench: tuple[float, ...] | None = None
     wrench_tcp: tuple[float, ...] | None = None
+    gravity_tcp: tuple[float, float, float] | None = None
     fast_external_wrench: tuple[float, ...] | None = None
     control_external_wrench: tuple[float, ...] | None = None
     healthy: bool | None = None
@@ -392,6 +393,8 @@ class ForceTorqueSnapshot:
     tare_generation: int | None = None
     tare_reason: str | None = None
     residual_tare_tcp: tuple[float, ...] | None = None
+    payload_identification_inhibit: bool | None = None
+    joint_target_profile: str | None = None
     raw: Mapping[str, Any] | None = None
 
     @classmethod
@@ -406,6 +409,7 @@ class ForceTorqueSnapshot:
             safety_rated=_optional_bool(value.get("safety_rated")),
             raw_sensor_wrench=finite_joint_array(value.get("raw_sensor_wrench")),
             wrench_tcp=finite_joint_array(value.get("wrench_tcp")),
+            gravity_tcp=_finite_vec3(value.get("gravity_tcp")),
             fast_external_wrench=finite_joint_array(value.get("fast_external_wrench")),
             control_external_wrench=finite_joint_array(value.get("control_external_wrench")),
             healthy=_optional_bool(value.get("healthy")),
@@ -420,6 +424,10 @@ class ForceTorqueSnapshot:
             tare_generation=_optional_nonnegative_int(value.get("tare_generation")),
             tare_reason=_optional_str(value.get("tare_reason")),
             residual_tare_tcp=finite_joint_array(value.get("residual_tare_tcp")),
+            payload_identification_inhibit=_optional_bool(
+                value.get("payload_identification_inhibit")
+            ),
+            joint_target_profile=_optional_str(value.get("joint_target_profile")),
             raw=value,
         )
 
@@ -958,6 +966,7 @@ class StateSnapshot:
     recording: Mapping[str, Any] | None
     arm_init: Mapping[str, Any] | None
     init_motion: Mapping[str, Any] | None
+    payload_identification: Mapping[str, Any] | None
     motion_epoch: int | None
     raw: Mapping[str, Any]
 
@@ -1009,6 +1018,12 @@ class StateSnapshot:
             recording=data.get("recording") if isinstance(data.get("recording"), Mapping) else None,
             arm_init=data.get("arm_init") if isinstance(data.get("arm_init"), Mapping) else None,
             init_motion=data.get("init_motion") if isinstance(data.get("init_motion"), Mapping) else None,
+            payload_identification=(
+                data["force_torque"].get("payload_identification")
+                if isinstance(data.get("force_torque"), Mapping)
+                and isinstance(data["force_torque"].get("payload_identification"), Mapping)
+                else None
+            ),
             motion_epoch=_optional_nonnegative_int(data.get("motion_epoch")),
             raw=data,
         )

@@ -852,8 +852,25 @@ struct FtWrenchPipelineConfig {
     Wrench6D residual_tare_tcp;
 };
 
+struct PayloadIdentificationConfig {
+    // Disabled unless the tracked stack explicitly supplies and validates the
+    // complete acquisition/fit profile. Zero values are deliberately invalid
+    // when enable=true; callers must never invent motion or acceptance bounds.
+    bool enable = false;
+    int min_poses = 0;
+    double arrival_tolerance_deg = 0.0;
+    double settle_sec = 0.0;
+    int samples_per_pose = 0;
+    double max_force_stddev_n = 0.0;
+    double max_torque_stddev_nm = 0.0;
+    double max_force_fit_rms_n = 0.0;
+    double max_torque_fit_rms_nm = 0.0;
+    double max_design_condition_number = 0.0;
+};
+
 struct ForceTorqueConfig {
     std::string source = "null";
+    PayloadIdentificationConfig payload_identification;
     FtWrenchPipelineConfig left;
     FtWrenchPipelineConfig right;
 };

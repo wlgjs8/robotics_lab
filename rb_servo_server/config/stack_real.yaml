@@ -462,6 +462,21 @@ logging:
 
 force_torque:
   source: rbpodo_eft
+  # Supervised payload/CoG identification profile used by the rb_gui CoG tab.
+  # Motion still uses the ordinary leased/deadman JointTarget path. These
+  # acquisition bounds reuse the accepted InitMotion/tare window; fit bounds
+  # gate only a PROVISIONAL report and never apply a payload automatically.
+  payload_identification:
+    enable: true
+    min_poses: 5
+    arrival_tolerance_deg: 1.5
+    settle_sec: 0.5
+    samples_per_pose: 500
+    max_force_stddev_n: 0.75
+    max_torque_stddev_nm: 0.15
+    max_force_fit_rms_n: 0.75
+    max_torque_fit_rms_nm: 0.15
+    max_design_condition_number: 1000.0
   # Corrected supervised source profile. The earlier right-arm X/Y labels mixed
   # the TCP and FT gizmos; the 18:32 compliance capture invalidated yaw zero.
   # The operator declared the left arm mechanically/electrically identical, so
@@ -533,6 +548,7 @@ force_torque:
 force_control:
   provider: project_native
   enable: true
+  # operating_mode: monitor
   operating_mode: cartesian_admittance
   allow_in_real: true
   supervised_experimental_real: true

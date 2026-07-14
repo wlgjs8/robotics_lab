@@ -13,6 +13,12 @@ from typing import Any, Mapping
 
 from .box_detect_control import BoxDetectCommandClient, BoxDetectCommandResult
 from .command_client import CommandClient
+from .cog_gui import (
+    CogGuiSession,
+    CogGuiStatus,
+    CogIdentificationConfig,
+    resolve_cog_waypoints,
+)
 from .geometry import (
     _add_matrix3,
     _add_vec3,
@@ -1290,6 +1296,206 @@ def _delete_waypoint(handles: dict[str, Any]) -> tuple[bool, str]:
     return True, name
 
 
+def _cog_config_from_state(latest: StateSnapshot | None) -> CogIdentificationConfig:
+    return CogIdentificationConfig.parse(
+        latest.payload_identification if latest is not None else None
+    )
+
+
+def _cog_reports_root() -> str:
+    configured = os.environ.get("RB_GUI_COG_REPORT_DIR", "").strip()
+    if configured:
+        return configured
+    return str(Path(__file__).resolve().parents[2] / "logs" / "cog_calibration")
+
+
+def _format_cog_status(status: CogGuiStatus) -> str:
+    waypoint = "—"
+    if status.current_name is not None:
+        waypoint = f"{status.current_index + 1}/{status.waypoint_count} {status.current_name}"
+    error = "—" if status.max_joint_error_deg is None else f"{status.max_joint_error_deg:.3f} deg"
+    stability = "—"
+    if (
+        status.current_force_stddev_n is not None
+        and status.current_torque_stddev_nm is not None
+    ):
+        stability = (
+            f"F={status.current_force_stddev_n:.4g} N, "
+            f"T={status.current_torque_stddev_nm:.4g} Nm"
+        )
+    return (
+        f"state={status.state} | arm={status.arm or '—'} | waypoint={waypoint} | "
+        f"joint error={error} | settle={status.settle_elapsed_sec:.2f}s | "
+        f"samples={status.sample_count} | stability max std={stability} | "
+        f"accepted={status.accepted_count}\n{status.message}"
+    )
+
+
+def _format_cog_pose_states(status: CogGuiStatus) -> str:
+    if not status.pose_states:
+        return "no frozen waypoint list"
+    return " | ".join(f"{name}:{state}" for name, state in status.pose_states)
+
+
+def _format_cog_result(status: CogGuiStatus) -> str:
+    estimate = status.result
+    if estimate is None:
+        return "PROVISIONAL / NOT APPLIED — no calculation"
+    cog_mm = tuple(value * 1000.0 for value in estimate.cog_tcp_m)
+    ambiguity = (
+        "; gravity compensation ambiguous: " + ", ".join(estimate.ambiguity_reasons)
+        if estimate.gravity_compensation_ambiguous
+        else ""
+    )
+    correlation = (
+        "unavailable"
+        if estimate.force_gravity_correlation is None
+        else f"{estimate.force_gravity_correlation:.5g}"
+    )
+    loo_mass = estimate.max_leave_one_out_mass_delta_kg
+    loo_cog = estimate.max_leave_one_out_cog_delta_m
+    leave_one_out = (
+        "unavailable"
+        if loo_mass is None or loo_cog is None
+        else f"max mass delta={loo_mass:.5g} kg, max CoG delta={loo_cog * 1000.0:.3f} mm"
+    )
+    return (
+        "PROVISIONAL / NOT APPLIED\n"
+        f"mass={estimate.mass_kg:.6g} kg, CoG TCP=({cog_mm[0]:.3f}, {cog_mm[1]:.3f}, {cog_mm[2]:.3f}) mm\n"
+        f"force bias={estimate.force_bias_n} N, torque bias={estimate.torque_bias_nm} Nm\n"
+        f"fit RMS: force={estimate.force_fit_rms_n:.5g} N, torque={estimate.torque_fit_rms_nm:.5g} Nm\n"
+        f"design: force rank={estimate.force_design_rank}, cond={estimate.force_design_condition:.5g}; "
+        f"torque rank={estimate.torque_design_rank}, cond={estimate.torque_design_condition:.5g}\n"
+        f"gravity correlation={correlation}; leave-one-pose-out: {leave_one_out}"
+        f"{ambiguity}"
+    )
+
+
+def _cog_session_active(handles: Mapping[str, Any]) -> bool:
+    session = handles.get("cog_session")
+    return isinstance(session, CogGuiSession) and session.status().active
+
+
+def _set_cog_conflict_controls(handles: dict[str, Any], active: bool) -> None:
+    """Keep E-stop live while excluding other GUI motion during CoG capture."""
+    if not active:
+        # Lifecycle/init/TCP send controls are restored by their normal safety
+        # refresh earlier in update_gui.  Restore only controls that have no
+        # independent readiness updater, and only to their captured pre-session
+        # state; never unconditionally enable a safety-gated control.
+        previous = handles.pop("_cog_non_authority_disabled", None)
+        if isinstance(previous, list):
+            for control, disabled in previous:
+                _set_disabled(control, bool(disabled))
+        return
+    non_authority_controls: list[Any] = []
+    for key in (
+        "freedrive_buttons",
+        "tcp_ptp_arm_buttons",
+        "tcp_frame_buttons",
+        "tcp_linear_arm_buttons",
+        "tcp_linear_orientation_buttons",
+    ):
+        non_authority_controls.extend(handles.get(key, {}).values())
+    for key in (
+        "waypoint_move_buttons",
+        "joint_jog_controls",
+        "waypoint_edit_controls",
+    ):
+        non_authority_controls.extend(handles.get(key, ()))
+    for key in ("gripper_slider_left", "gripper_slider_right"):
+        control = handles.get(key)
+        if control is not None:
+            non_authority_controls.append(control)
+    if "_cog_non_authority_disabled" not in handles:
+        handles["_cog_non_authority_disabled"] = [
+            (control, bool(getattr(control, "disabled", False)))
+            for control in non_authority_controls
+        ]
+    for mode, button in handles.get("lifecycle_buttons", {}).items():
+        if active and mode != "EmergencyStop":
+            _set_disabled(button, True)
+    groups = (
+        "init_motion_buttons",
+        "freedrive_buttons",
+        "tcp_ptp_arm_buttons",
+        "tcp_frame_buttons",
+        "tcp_linear_arm_buttons",
+        "tcp_linear_orientation_buttons",
+    )
+    if active:
+        for key in groups:
+            for control in handles.get(key, {}).values():
+                _set_disabled(control, True)
+        for key in (
+            "waypoint_move_buttons",
+            "tcp_pose_buttons",
+            "tcp_linear_buttons",
+            "joint_jog_controls",
+            "waypoint_edit_controls",
+        ):
+            for control in handles.get(key, ()):
+                _set_disabled(control, True)
+        for key in ("gripper_slider_left", "gripper_slider_right"):
+            control = handles.get(key)
+            if control is not None:
+                _set_disabled(control, True)
+
+
+def _update_cog_panel(
+    handles: dict[str, Any], latest: StateSnapshot | None, *, stale: bool
+) -> None:
+    session = handles.get("cog_session")
+    if not isinstance(session, CogGuiSession):
+        return
+    session.watchdog(latest, stale=stale)
+    status = session.status()
+    if "cog_status" in handles:
+        handles["cog_status"].value = _format_cog_status(status)
+    if "cog_pose_status" in handles:
+        handles["cog_pose_status"].value = _format_cog_pose_states(status)
+    if "cog_result" in handles:
+        handles["cog_result"].value = _format_cog_result(status)
+    active = status.active
+    _set_cog_conflict_controls(handles, active)
+    for key in ("cog_arm", "cog_prefix", "cog_refresh"):
+        control = handles.get(key)
+        if control is not None:
+            _set_disabled(control, active)
+    start_reason: str | None = None
+    if not active:
+        if stale or latest is None:
+            start_reason = "state stream missing or stale"
+        else:
+            try:
+                config = _cog_config_from_state(latest)
+                resolve_cog_waypoints(
+                    handles.get("waypoints", {}),
+                    prefix=str(getattr(handles.get("cog_prefix"), "value", "")),
+                    arm=str(getattr(handles.get("cog_arm"), "value", "")),
+                    min_poses=config.min_poses,
+                )
+                arm = str(getattr(handles.get("cog_arm"), "value", ""))
+                safety_reason = session.preflight_reason(arm)
+                if safety_reason:
+                    raise ValueError(safety_reason)
+            except ValueError as exc:
+                start_reason = str(exc)
+    if handles.get("cog_start") is not None:
+        _set_disabled(handles["cog_start"], active or start_reason is not None)
+    for key, enabled in (
+        ("cog_run", status.state in {"waiting_lease", "armed", "moving", "settling", "sampling"}),
+        ("cog_retry", status.state == "review"),
+        ("cog_skip", status.state in {"armed", "review"}),
+        ("cog_stop", active),
+        ("cog_calculate", status.state in {"complete", "stopped", "calculated"}),
+        ("cog_save", status.result is not None and status.saved_report is None),
+    ):
+        control = handles.get(key)
+        if control is not None:
+            _set_disabled(control, not enabled)
+
+
 # ---- User Safety Floor: captured floor-contact points + fitted plane ----
 
 
@@ -1813,6 +2019,8 @@ def _maybe_auto_init_tare_on_startup(
     so the force software zero (auto-tare) is established without operator action
     and without any motion. At most one attempt per session; strictly gated so it
     can never plan a move. Disabled with RB_GUI_STARTUP_INIT_TARE=0."""
+    if _cog_session_active(handles):
+        return
     if handles.get("_auto_init_tare_done"):
         return
     if not _env_bool("RB_GUI_STARTUP_INIT_TARE", True):
@@ -3106,6 +3314,13 @@ def build_gui(
             # pose (persisted to JSON) and delete (kept at the bottom).
             set_init_button = server.gui.add_button("Init Motion 으로 설정하기")
             delete_button = server.gui.add_button("WayPoint 삭제", color="red")
+            handles["waypoint_edit_controls"] = [
+                waypoint_name_input,
+                capture_button,
+                waypoint_dropdown,
+                set_init_button,
+                delete_button,
+            ]
 
             @set_init_button.on_click
             def _(_: Any) -> None:
@@ -3130,6 +3345,138 @@ def build_gui(
                     handles["waypoint_status"].value = f"deleted '{info}'; {_persist_waypoints(handles)}"
                 else:
                     handles["waypoint_status"].value = info
+
+        with _op_tabs.add_tab("CoG"):
+            handles["cog_note"] = server.gui.add_text(
+                "Payload CoG identification",
+                initial_value=(
+                    "한 팔씩 saved joint waypoints를 순서대로 실행합니다. Start는 lease만 요청하고 "
+                    "움직이지 않습니다. Run/Continue를 누르는 동안에만 이동/샘플링합니다. "
+                    "결과는 PROVISIONAL / NOT APPLIED 입니다."
+                ),
+                disabled=True,
+            )
+            # A dropdown is intentional here: unlike viser button groups it
+            # supports both an explicit initial value and disabling the arm
+            # selector while an identification session is active.
+            handles["cog_arm"] = server.gui.add_dropdown(
+                "Active arm", ("left", "right"), initial_value="right"
+            )
+            handles["cog_prefix"] = server.gui.add_text(
+                "Waypoint prefix", initial_value="joint"
+            )
+            handles["cog_preflight"] = server.gui.add_text(
+                "Preflight", initial_value="Refresh/Validate before Start", disabled=True
+            )
+            handles["cog_status"] = server.gui.add_text(
+                "Session", initial_value="state=idle", disabled=True
+            )
+            handles["cog_pose_status"] = server.gui.add_text(
+                "Pose states", initial_value="no frozen waypoint list", disabled=True
+            )
+            handles["cog_result"] = server.gui.add_text(
+                "Result",
+                initial_value="PROVISIONAL / NOT APPLIED — no calculation",
+                disabled=True,
+            )
+            handles["cog_session"] = CogGuiSession(safety)
+            store.add_update_callback(handles["cog_session"].on_snapshot)
+
+            handles["cog_refresh"] = server.gui.add_button("Refresh / Validate")
+            handles["cog_start"] = server.gui.add_button("Start (no motion)", color="green")
+            handles["cog_run"] = server.gui.add_button("Run / Continue (hold)")
+            handles["cog_retry"] = server.gui.add_button("Retry current pose")
+            handles["cog_skip"] = server.gui.add_button("Skip current pose")
+            handles["cog_stop"] = server.gui.add_button("Stop + Hold", color="red")
+            handles["cog_calculate"] = server.gui.add_button("Calculate provisional CoG")
+            handles["cog_save"] = server.gui.add_button("Save report")
+
+            def _validate_cog_selection() -> tuple[bool, str]:
+                try:
+                    config = _cog_config_from_state(store.latest())
+                    resolved = resolve_cog_waypoints(
+                        handles.get("waypoints", {}),
+                        prefix=str(handles["cog_prefix"].value),
+                        arm=str(handles["cog_arm"].value),
+                        min_poses=config.min_poses,
+                    )
+                except ValueError as exc:
+                    return False, str(exc)
+                names = ", ".join(item.name for item in resolved)
+                return True, (
+                    f"valid: {len(resolved)} unique {handles['cog_arm'].value} pose(s), "
+                    f"natural order [{names}]; samples/pose={config.samples_per_pose}, "
+                    f"settle={config.settle_sec:g}s, tolerance={config.arrival_tolerance_deg:g}deg"
+                )
+
+            @handles["cog_refresh"].on_click
+            def _(_: Any) -> None:
+                ok, message = _validate_cog_selection()
+                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+            @handles["cog_start"].on_click
+            def _(_: Any) -> None:
+                try:
+                    config = _cog_config_from_state(store.latest())
+                    resolved = resolve_cog_waypoints(
+                        handles.get("waypoints", {}),
+                        prefix=str(handles["cog_prefix"].value),
+                        arm=str(handles["cog_arm"].value),
+                        min_poses=config.min_poses,
+                    )
+                except ValueError as exc:
+                    ok, message = False, str(exc)
+                else:
+                    ok, message = handles["cog_session"].start(
+                        arm=str(handles["cog_arm"].value),
+                        waypoints=resolved,
+                        config=config,
+                    )
+                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
+                handles["cog_status"].value = _format_cog_status(
+                    handles["cog_session"].status()
+                )
+                if ok:
+                    _update_cog_panel(handles, store.latest(), stale=store.is_stale())
+
+            @handles["cog_run"].on_hold(callback_hz=10.0)
+            def _(_: Any) -> None:
+                ok, message = handles["cog_session"].run_pulse(
+                    store.latest(), stale=store.is_stale()
+                )
+                handles["cog_status"].value = _format_cog_status(
+                    handles["cog_session"].status()
+                )
+                if not ok:
+                    handles["cog_preflight"].value = "BLOCKED: " + message
+
+            @handles["cog_retry"].on_click
+            def _(_: Any) -> None:
+                ok, message = handles["cog_session"].retry()
+                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+            @handles["cog_skip"].on_click
+            def _(_: Any) -> None:
+                ok, message = handles["cog_session"].skip()
+                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+            @handles["cog_stop"].on_click
+            def _(_: Any) -> None:
+                ok, message = handles["cog_session"].stop()
+                handles["cog_preflight"].value = ("OK: " if ok else "WARNING: ") + message
+
+            @handles["cog_calculate"].on_click
+            def _(_: Any) -> None:
+                ok, message = handles["cog_session"].calculate()
+                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
+                handles["cog_result"].value = _format_cog_result(
+                    handles["cog_session"].status()
+                )
+
+            @handles["cog_save"].on_click
+            def _(_: Any) -> None:
+                ok, message = handles["cog_session"].save(_cog_reports_root())
+                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
 
         with _op_tabs.add_tab("안전"):
             stand_floor_config_enabled = server_safety_constraint_config_enabled(
@@ -3569,6 +3916,7 @@ def build_gui(
             # the −/+ button decides the sign.
             jog_arm = server.gui.add_button_group("Arm", ("left", "right"))
             jog_step = server.gui.add_slider("Step deg", min=0.1, max=5.0, step=0.1, initial_value=0.5)
+            handles["joint_jog_controls"] = [jog_arm, jog_step]
             handles["jog_status"] = server.gui.add_text("Jog status", initial_value="idle", disabled=True)
 
             def _jog_joint_nudge(joint_index: int, sign: float) -> None:
@@ -3577,6 +3925,7 @@ def build_gui(
 
             def _add_joint_jog_row(joint_index: int) -> None:
                 group = server.gui.add_button_group("", ("-", _nudge_label(f"J{joint_index + 1}"), "+"))
+                handles["joint_jog_controls"].append(group)
 
                 @group.on_click
                 def _(_: Any, group: Any = group, joint_index: int = joint_index) -> None:
@@ -5301,6 +5650,7 @@ def update_gui(
     _update_recording_panel(handles, latest, stale=stale)
     _update_spacemouse_panel(handles)
     _update_arm_init_panel(handles, latest, stale=stale)
+    _update_cog_panel(handles, latest, stale=stale)
     if latest is None:
         _update_realtime_health(
             handles,

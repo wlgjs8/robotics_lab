@@ -1972,6 +1972,56 @@ void validateConfig(const DualArmConfig& cfg) {
     );
 
     const bool any_ft_enabled = cfg.force_torque.left.enable || cfg.force_torque.right.enable;
+    const auto& payload_id = cfg.force_torque.payload_identification;
+    if (payload_id.enable) {
+        if (payload_id.min_poses < 5) {
+            throw std::runtime_error(
+                "force_torque.payload_identification.min_poses must be >= 5"
+            );
+        }
+        validatePositiveFinite(
+            payload_id.arrival_tolerance_deg,
+            "force_torque.payload_identification.arrival_tolerance_deg"
+        );
+        validatePositiveFinite(
+            payload_id.settle_sec,
+            "force_torque.payload_identification.settle_sec"
+        );
+        if (payload_id.samples_per_pose < 2) {
+            throw std::runtime_error(
+                "force_torque.payload_identification.samples_per_pose must be >= 2"
+            );
+        }
+        validatePositiveFinite(
+            payload_id.max_force_stddev_n,
+            "force_torque.payload_identification.max_force_stddev_n"
+        );
+        validatePositiveFinite(
+            payload_id.max_torque_stddev_nm,
+            "force_torque.payload_identification.max_torque_stddev_nm"
+        );
+        validatePositiveFinite(
+            payload_id.max_force_fit_rms_n,
+            "force_torque.payload_identification.max_force_fit_rms_n"
+        );
+        validatePositiveFinite(
+            payload_id.max_torque_fit_rms_nm,
+            "force_torque.payload_identification.max_torque_fit_rms_nm"
+        );
+        if (!std::isfinite(payload_id.max_design_condition_number) ||
+            payload_id.max_design_condition_number <= 1.0) {
+            throw std::runtime_error(
+                "force_torque.payload_identification.max_design_condition_number "
+                "must be finite and > 1"
+            );
+        }
+        if (!any_ft_enabled || ft_source != "rbpodo_eft") {
+            throw std::runtime_error(
+                "force_torque.payload_identification.enable=true requires an enabled "
+                "rbpodo_eft force_torque arm"
+            );
+        }
+    }
     const bool any_auto_tare =
         (cfg.force_torque.left.enable &&
          cfg.force_torque.left.auto_tare_after_init_motion) ||
@@ -3549,9 +3599,40 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
 
     if (has(root, "force_torque")) {
         const YAML::Node sec = root["force_torque"];
-        validateAllowedKeys(sec, {"source", "left", "right"}, "force_torque");
+        validateAllowedKeys(
+            sec,
+            {"source", "payload_identification", "left", "right"},
+            "force_torque"
+        );
         if (has(sec, "source")) {
             cfg.force_torque.source = lower(asString(sec["source"], "force_torque.source"));
+        }
+        if (has(sec, "payload_identification")) {
+            const YAML::Node profile = sec["payload_identification"];
+            const std::string path = "force_torque.payload_identification";
+            validateAllowedKeys(profile, {
+                "enable",
+                "min_poses",
+                "arrival_tolerance_deg",
+                "settle_sec",
+                "samples_per_pose",
+                "max_force_stddev_n",
+                "max_torque_stddev_nm",
+                "max_force_fit_rms_n",
+                "max_torque_fit_rms_nm",
+                "max_design_condition_number",
+            }, path);
+            auto& out = cfg.force_torque.payload_identification;
+            if (has(profile, "enable")) out.enable = asBool(profile["enable"], path + ".enable");
+            if (has(profile, "min_poses")) out.min_poses = asInt(profile["min_poses"], path + ".min_poses");
+            if (has(profile, "arrival_tolerance_deg")) out.arrival_tolerance_deg = asDouble(profile["arrival_tolerance_deg"], path + ".arrival_tolerance_deg");
+            if (has(profile, "settle_sec")) out.settle_sec = asDouble(profile["settle_sec"], path + ".settle_sec");
+            if (has(profile, "samples_per_pose")) out.samples_per_pose = asInt(profile["samples_per_pose"], path + ".samples_per_pose");
+            if (has(profile, "max_force_stddev_n")) out.max_force_stddev_n = asDouble(profile["max_force_stddev_n"], path + ".max_force_stddev_n");
+            if (has(profile, "max_torque_stddev_nm")) out.max_torque_stddev_nm = asDouble(profile["max_torque_stddev_nm"], path + ".max_torque_stddev_nm");
+            if (has(profile, "max_force_fit_rms_n")) out.max_force_fit_rms_n = asDouble(profile["max_force_fit_rms_n"], path + ".max_force_fit_rms_n");
+            if (has(profile, "max_torque_fit_rms_nm")) out.max_torque_fit_rms_nm = asDouble(profile["max_torque_fit_rms_nm"], path + ".max_torque_fit_rms_nm");
+            if (has(profile, "max_design_condition_number")) out.max_design_condition_number = asDouble(profile["max_design_condition_number"], path + ".max_design_condition_number");
         }
         const auto parse_ft_arm = [&](
             const YAML::Node& ft,

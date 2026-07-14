@@ -55,9 +55,13 @@ Wrench6D transformWrench(const Pose6D& t_target_source, const Wrench6D& source) 
     };
 }
 
-Wrench6D payloadWrenchTcp(const FtWrenchPipelineConfig& config, const Pose6D& tcp_pose_stand) {
-    const Eigen::Vector3d gravity_stand(0.0, 0.0, -kGravityMps2 * config.payload_mass_kg);
-    const Eigen::Vector3d force_tcp = math::rotationFromPose(tcp_pose_stand).transpose() * gravity_stand;
+Eigen::Vector3d gravityTcp(const Pose6D& tcp_pose_stand) {
+    const Eigen::Vector3d gravity_stand(0.0, 0.0, -kGravityMps2);
+    return math::rotationFromPose(tcp_pose_stand).transpose() * gravity_stand;
+}
+
+Wrench6D payloadWrenchTcp(const FtWrenchPipelineConfig& config, const Eigen::Vector3d& gravity_tcp) {
+    const Eigen::Vector3d force_tcp = config.payload_mass_kg * gravity_tcp;
     const Eigen::Vector3d com(
         config.payload_com_tcp_m[0],
         config.payload_com_tcp_m[1],
@@ -207,6 +211,8 @@ FtWrenchPipelineOutput FtWrenchPipeline::process(
     uint64_t now_ns
 ) {
     FtWrenchPipelineOutput out;
+    const Eigen::Vector3d gravity_tcp = gravityTcp(tcp_pose_stand);
+    out.gravity_tcp = {gravity_tcp.x(), gravity_tcp.y(), gravity_tcp.z()};
     const auto reject = [&](const std::string& reason, bool stale = false) {
         out.healthy = false;
         out.stale = stale;
@@ -263,7 +269,7 @@ FtWrenchPipelineOutput FtWrenchPipeline::process(
 
     const Wrench6D unbiased_sensor = subtract(sample.wrench_sensor, config_.sensor_bias);
     out.wrench_tcp = transformWrench(config_.t_tcp_sensor, unbiased_sensor);
-    out.payload_wrench_tcp = payloadWrenchTcp(config_, tcp_pose_stand);
+    out.payload_wrench_tcp = payloadWrenchTcp(config_, gravity_tcp);
     out.pre_tare_external_wrench_tcp = subtract(out.wrench_tcp, out.payload_wrench_tcp);
     out.fast_external_wrench_tcp = subtract(out.pre_tare_external_wrench_tcp, config_.residual_tare_tcp);
 

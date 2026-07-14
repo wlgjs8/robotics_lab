@@ -60,6 +60,37 @@ generic TCP pose triad is not. Independent GUI checkboxes control the sensor
 and runtime overlays. All fields remain read-only; the GUI has no force-control
 enable or tuning control.
 
+## CoG Waypoint Calibration
+
+The `조작 -> CoG` tab identifies one arm's provisional payload mass and TCP-frame
+center of gravity from saved joint waypoints. Create at least five safe,
+orientation-diverse WayPoints first (for example `joint1` through `joint10`),
+then choose the arm and matching prefix in the CoG tab.
+
+`Start` only freezes and validates the waypoint list and acquires the GUI lease;
+it sends no motion target. Robot motion is renewed only while the operator holds
+`Run/Continue`. The selected arm receives the ordinary leased/deadman
+`JointTarget` path with `joint_target_profile: payload_identification`; the other
+arm remains a stationary joint `Hold` and server-side force-Hold promotion is
+suppressed for both arms while each identification packet is active. Releasing
+the button lets the existing command timeout stop renewal. The operator-authored
+waypoint order is not collision-free planning, so the complete swept volume must
+be clear and an E-stop operator remains required.
+
+At each arrived/settled pose, the 100 Hz state callback collects unique fresh
+`wrench_tcp` and `gravity_tcp` samples using the server-published acquisition
+profile. A noisy pose is stopped for explicit Retry or Skip. `Calculate` performs
+a weighted least-squares estimate and reports mass, TCP CoG, wrench bias,
+residuals, weighted-design rank/condition, gravity-correlation ambiguity, and
+leave-one-pose-out diagnostics. `Save report` atomically publishes the JSON/CSV
+evidence bundle under `logs/cog_calibration/<run_id>/`.
+
+Every result is labelled `PROVISIONAL / NOT APPLIED`. The GUI does not edit
+`stack_real.yaml`, `active_calibration.yaml`, or Rainbow controller payload
+settings. Entering the identification profile also leaves that arm's force
+motion inhibited after Stop/timeout; only a later successful Init Motion tare
+clears the inhibit and permits the normal Cartesian compliance path again.
+
 ## Realtime Timing Health
 
 The Status tab renders three read-only health cards for `SERVO_J`, robot

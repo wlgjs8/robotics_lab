@@ -237,6 +237,46 @@ This gate specifically checks the multi-axis zig-zag reported after Gate 3C.
 5. Stop on a direction reversal, new oscillation, opposite-block motion, IK or
    safety rejection, or any hard force/torque event.
 
+### Payload/CoG waypoint identification
+
+This stage produces a provisional server-side payload candidate; it does not
+apply or accept a payload.
+
+1. In the WayPoint tab, teach at least five one-arm joint poses with materially
+   different tool orientations and a manually verified safe order. Name them
+   with one prefix such as `joint1` ... `joint10`. A direct JointTarget sequence
+   is not collision-free planning.
+2. Clear the full swept volume, keep the other arm stationary, keep the tool
+   unloaded and out of contact, assign an E-stop operator, and open `조작 -> CoG`.
+3. Select exactly one arm, refresh/validate the prefix, and press `Start`.
+   `Start` must not move the arm. Confirm the GUI lease and server profile are
+   ready before holding `Run/Continue`.
+4. Keep `Run/Continue` held while each target moves, settles, and collects the
+   configured number of unique fresh samples. Releasing the button pauses target
+   renewal through the normal command timeout. Do not steady the wrist by hand;
+   stable external contact can look like a valid bias.
+5. A pose outside the configured force/torque variance bound must stop for an
+   explicit Retry or Skip. Stop immediately on stale/unhealthy F/T, hard-limit
+   telemetry, fault, lease loss, unexpected compliance, or an unsafe path.
+6. After at least five accepted poses, press `Calculate`, review mass, TCP CoG,
+   wrench bias, force/torque fit RMS, matrix rank/condition, ambiguity warning,
+   and leave-one-pose-out residuals, then `Save report`. Preserve the report with
+   the matching servo CSV and server log.
+7. The output is always `PROVISIONAL / NOT APPLIED`. Do not copy it into
+   `stack_real.yaml` or the Rainbow controller until a separate review compares
+   repeated and held-out pose results. Run right and left as separate sessions.
+8. Identification intentionally leaves `payload_identification_inhibit=true`
+   and the old tare invalid. With the arm unloaded at the intended start pose,
+   run the normal Init Motion tare and confirm `tare_state=accepted` before
+   resuming Cartesian compliance.
+
+The tracked real acquisition profile reuses the existing 1.5 degree InitMotion
+waypoint tolerance, 0.5 second tare settling time, 500 fresh samples, and measured
+stationary 0.75 N / 0.15 Nm variance bounds. Fit and condition bounds gate only
+the provisional calculation; they do not authorize automatic payload or force
+control changes. Controller pgmode has no deterministic F/T gravity fixture, so
+its profile remains disabled.
+
 ## Per-arm accepted profile
 
 Record the accepted per-arm values in `stack_real.yaml` and preserve the

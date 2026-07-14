@@ -125,6 +125,7 @@ nlohmann::json forceTorqueJson(const ForceTorqueTelemetry& value) {
         {"safety_rated", value.safety_rated},
         {"raw_sensor_wrench", wrenchJson(value.raw_sensor_wrench)},
         {"wrench_tcp", wrenchJson(value.wrench_tcp)},
+        {"gravity_tcp", value.gravity_tcp},
         {"fast_external_wrench", wrenchJson(value.fast_external_wrench)},
         {"control_external_wrench", wrenchJson(value.control_external_wrench)},
         {"healthy", value.healthy},
@@ -139,6 +140,25 @@ nlohmann::json forceTorqueJson(const ForceTorqueTelemetry& value) {
         {"tare_generation", value.tare_generation},
         {"tare_reason", value.tare_reason},
         {"residual_tare_tcp", wrenchJson(value.residual_tare_tcp)},
+        {"payload_identification_inhibit", value.payload_identification_inhibit},
+        {"joint_target_profile", value.joint_target_profile},
+    };
+}
+
+nlohmann::json payloadIdentificationConfigJson(
+    const PayloadIdentificationConfigTelemetry& value
+) {
+    return {
+        {"enable", value.enable},
+        {"min_poses", value.min_poses},
+        {"arrival_tolerance_deg", value.arrival_tolerance_deg},
+        {"settle_sec", value.settle_sec},
+        {"samples_per_pose", value.samples_per_pose},
+        {"max_force_stddev_n", value.max_force_stddev_n},
+        {"max_torque_stddev_nm", value.max_torque_stddev_nm},
+        {"max_force_fit_rms_n", value.max_force_fit_rms_n},
+        {"max_torque_fit_rms_nm", value.max_torque_fit_rms_nm},
+        {"max_design_condition_number", value.max_design_condition_number},
     };
 }
 
@@ -683,6 +703,17 @@ nlohmann::json backendCallJson(const BackendCallSnapshot& call, bool send_call) 
         out["send_acceptance_semantics"] = call.acceptance_semantics;
     } else {
         out["ok"] = call.ok;
+        const BackendReadExchangeTiming& timing = call.read_exchange_timing;
+        out["reqdata_exchange"] = {
+            {"available", timing.available},
+            {"sequence", timing.exchange_sequence},
+            {"source", timing.source},
+            {"call_start_steady_ns", timing.request_data_call_start_steady_ns},
+            {"call_start_system_ns", timing.request_data_call_start_system_ns},
+            {"call_return_steady_ns", timing.request_data_call_return_steady_ns},
+            {"call_return_system_ns", timing.request_data_call_return_system_ns},
+            {"call_duration_us", timing.request_data_call_duration_us},
+        };
     }
     return out;
 }
@@ -1578,6 +1609,10 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         rbpodoAsyncQueuePolicyString(config_.servo.rbpodo_async_streaming.queue_policy);
     message["cartesian_control_snapshot"] = cartesianControlSnapshotJson(config_.cartesian_control);
     message["kinematics_snapshot"] = kinematicsSnapshotJson(config_.kinematics);
+    message["force_torque"] = {
+        {"payload_identification", payloadIdentificationConfigJson(
+            snapshot.payload_identification_config)},
+    };
     message["startup_validation"] = startupValidationJson(snapshot.startup_validation);
     const bool worker_enabled =
         config_.servo.io_model == ServoIoModel::Worker ||

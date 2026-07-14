@@ -1212,14 +1212,24 @@ bool testCartesianCommandParser() {
     RB_CHECK(std::abs(out.left.q_target_deg[0] - 1.0) < kEpsilon);
     RB_CHECK(std::abs(out.right.q_target_deg[5] - 1.0) < kEpsilon);
 
+    RB_CHECK(server.parseMessage(
+        R"({"schema_version":1,"seq":11,"mode":"JointTarget","timeout_sec":0.2,"left":{"mode":"JointTarget","q_target_deg":[1,2,3,4,5,6],"joint_target_profile":"payload_identification"},"right":{"mode":"Hold"}})",
+        now,
+        &out
+    ));
+    RB_CHECK(out.left.joint_target_profile ==
+        rb_servo::JointTargetProfile::PayloadIdentification);
+    RB_CHECK(rb_servo::toString(out.left.joint_target_profile) ==
+        "payload_identification");
+
     RB_CHECK(!server.parseMessage(
-        R"({"schema_version":1,"seq":11,"mode":"JointTarget","timeout_sec":0.2,"left":{"mode":"JointTarget","q_target_deg":[1,2,3,4,5,6],"joint_target_profile":"bad"},"right":{"mode":"Hold"}})",
+        R"({"schema_version":1,"seq":12,"mode":"JointTarget","timeout_sec":0.2,"left":{"mode":"JointTarget","q_target_deg":[1,2,3,4,5,6],"joint_target_profile":"bad"},"right":{"mode":"Hold"}})",
         now,
         &out
     ));
 
     RB_CHECK(server.parseMessage(
-        R"({"schema_version":1,"seq":12,"mode":"Hold","timeout_sec":0.2,"left":{"mode":"TcpPoseTarget","tcp_target_stand":[0.2,0.0,0.4,0,0,0]},"right":{"mode":"Hold"}})",
+        R"({"schema_version":1,"seq":13,"mode":"Hold","timeout_sec":0.2,"left":{"mode":"TcpPoseTarget","tcp_target_stand":[0.2,0.0,0.4,0,0,0]},"right":{"mode":"Hold"}})",
         now,
         &out
     ));
@@ -3410,6 +3420,14 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     snapshot.left_last_read.error_name = "fault_latched";
     snapshot.left_last_read.error_code = "2222";
     snapshot.left_last_read.duration_us = 12.0;
+    snapshot.left_last_read.read_exchange_timing.available = true;
+    snapshot.left_last_read.read_exchange_timing.exchange_sequence = 77;
+    snapshot.left_last_read.read_exchange_timing.source = "rbpodo_sdk_request_data";
+    snapshot.left_last_read.read_exchange_timing.request_data_call_start_steady_ns = 100'000;
+    snapshot.left_last_read.read_exchange_timing.request_data_call_start_system_ns = 200'000;
+    snapshot.left_last_read.read_exchange_timing.request_data_call_return_steady_ns = 112'000;
+    snapshot.left_last_read.read_exchange_timing.request_data_call_return_system_ns = 212'000;
+    snapshot.left_last_read.read_exchange_timing.request_data_call_duration_us = 12.0;
     snapshot.right_last_read.ok = true;
     snapshot.left_last_send.ok = true;
     snapshot.left_last_send.accepted = false;
@@ -3515,6 +3533,19 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     snapshot.startup_validation.right.acquisition_ok = true;
     snapshot.startup_validation.right.motion_ready = true;
     snapshot.startup_validation.right.read_only_diagnostic = true;
+    snapshot.left_force_torque.gravity_tcp = {1.0, 2.0, 3.0};
+    snapshot.left_force_torque.payload_identification_inhibit = true;
+    snapshot.left_force_torque.joint_target_profile = "payload_identification";
+    snapshot.payload_identification_config.enable = true;
+    snapshot.payload_identification_config.min_poses = 7;
+    snapshot.payload_identification_config.arrival_tolerance_deg = 0.4;
+    snapshot.payload_identification_config.settle_sec = 0.6;
+    snapshot.payload_identification_config.samples_per_pose = 250;
+    snapshot.payload_identification_config.max_force_stddev_n = 0.8;
+    snapshot.payload_identification_config.max_torque_stddev_nm = 0.09;
+    snapshot.payload_identification_config.max_force_fit_rms_n = 1.1;
+    snapshot.payload_identification_config.max_torque_fit_rms_nm = 0.12;
+    snapshot.payload_identification_config.max_design_condition_number = 1.0e5;
     snapshot.logger_dropped_samples = 0;
 
     rb_servo::StatePublisher publisher(cfg);
@@ -3523,7 +3554,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     const char* top_keys[] = {
         "schema_version", "tick", "host_time_ns", "loop_start_time_ns", "loop_end_time_ns",
         "period_ms", "jitter_ms", "filter_dt_ms", "command_seq", "command_source", "observed_mode", "observed_backend",
-        "cartesian_control_snapshot", "kinematics_snapshot", "startup_validation", "left", "right",
+        "cartesian_control_snapshot", "kinematics_snapshot", "force_torque",
+        "startup_validation", "left", "right",
         "send_skew_us", "send_within_period", "send_period_overrun", "send_command_deadline_missed",
         "send_deadline_hit", "send_deadline_hit_deprecated_alias_for",
         "send_suppressed", "send_policy", "safety_verdict", "motion_state", "fault_latched",
@@ -3601,6 +3633,26 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("kinematics_snapshot").at("joint_names").size() == 6);
     RB_CHECK(json.at("kinematics_snapshot").at("ik").at("damping").get<double>() == 0.004);
     RB_CHECK(json.at("kinematics_snapshot").at("ik").at("max_iterations").get<int>() == 31);
+    const auto& payload_identification =
+        json.at("force_torque").at("payload_identification");
+    RB_CHECK(payload_identification.at("enable").get<bool>());
+    RB_CHECK(payload_identification.at("min_poses").get<int>() == 7);
+    RB_CHECK(payload_identification.at("arrival_tolerance_deg").get<double>() == 0.4);
+    RB_CHECK(payload_identification.at("settle_sec").get<double>() == 0.6);
+    RB_CHECK(payload_identification.at("samples_per_pose").get<int>() == 250);
+    RB_CHECK(payload_identification.at("max_force_stddev_n").get<double>() == 0.8);
+    RB_CHECK(payload_identification.at("max_torque_stddev_nm").get<double>() == 0.09);
+    RB_CHECK(payload_identification.at("max_force_fit_rms_n").get<double>() == 1.1);
+    RB_CHECK(payload_identification.at("max_torque_fit_rms_nm").get<double>() == 0.12);
+    RB_CHECK(payload_identification.at("max_design_condition_number").get<double>() == 1.0e5);
+    const auto& left_force_torque = json.at("left").at("force_torque");
+    RB_CHECK(left_force_torque.at("gravity_tcp").size() == 3);
+    RB_CHECK(left_force_torque.at("gravity_tcp").at(0).get<double>() == 1.0);
+    RB_CHECK(left_force_torque.at("gravity_tcp").at(1).get<double>() == 2.0);
+    RB_CHECK(left_force_torque.at("gravity_tcp").at(2).get<double>() == 3.0);
+    RB_CHECK(left_force_torque.at("payload_identification_inhibit").get<bool>());
+    RB_CHECK(left_force_torque.at("joint_target_profile").get<std::string>() ==
+        "payload_identification");
     RB_CHECK(json.at("left").at("mode").get<std::string>() == "JointTarget");
     RB_CHECK(json.at("right").at("mode").get<std::string>() == "Hold");
     RB_CHECK(json.at("left").at("cartesian_gate").at("backend_type").get<std::string>() == "mock");
@@ -3650,6 +3702,15 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(json.at("left").at("last_read").at("backend_error_kind").get<std::string>() == "RobotFault");
     RB_CHECK(json.at("left").at("last_read").at("error_name").get<std::string>() == "fault_latched");
     RB_CHECK(json.at("left").at("last_read").at("error_code").get<std::string>() == "2222");
+    const auto& reqdata_exchange = json.at("left").at("last_read").at("reqdata_exchange");
+    RB_CHECK(reqdata_exchange.at("available").get<bool>());
+    RB_CHECK(reqdata_exchange.at("sequence").get<uint64_t>() == 77);
+    RB_CHECK(reqdata_exchange.at("source").get<std::string>() == "rbpodo_sdk_request_data");
+    RB_CHECK(reqdata_exchange.at("call_start_steady_ns").get<uint64_t>() == 100'000);
+    RB_CHECK(reqdata_exchange.at("call_start_system_ns").get<uint64_t>() == 200'000);
+    RB_CHECK(reqdata_exchange.at("call_return_steady_ns").get<uint64_t>() == 112'000);
+    RB_CHECK(reqdata_exchange.at("call_return_system_ns").get<uint64_t>() == 212'000);
+    RB_CHECK(reqdata_exchange.at("call_duration_us").get<double>() == 12.0);
     RB_CHECK(!json.at("left").at("last_send").at("accepted").get<bool>());
     RB_CHECK(json.at("left").at("last_send").at("backend_error_kind").get<std::string>() == "SuppressedByPolicy");
     RB_CHECK(json.at("left").at("last_send").at("error_name").get<std::string>() == "read_only");
@@ -4152,6 +4213,9 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     sample.left_force_torque.tare_generation = 3;
     sample.left_force_torque.tare_reason = "accepted";
     sample.left_force_torque.residual_tare_tcp.fz = 23.5;
+    sample.left_force_torque.gravity_tcp = {1.25, -2.5, -9.0};
+    sample.left_force_torque.payload_identification_inhibit = true;
+    sample.left_force_torque.joint_target_profile = "payload_identification";
     sample.left_force_control.enabled = true;
     sample.left_force_control.operating_mode = "monitor";
     sample.left_force_control.state = "release_braking";
@@ -4194,6 +4258,14 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     sample.left_force_control.compliance_limit_reason =
         "jerk_limited_motion_envelope";
     sample.left_force_control.motion_epoch = 9;
+    sample.left_last_read.read_exchange_timing.available = true;
+    sample.left_last_read.read_exchange_timing.exchange_sequence = 91;
+    sample.left_last_read.read_exchange_timing.source = "rbpodo_sdk_request_data";
+    sample.left_last_read.read_exchange_timing.request_data_call_start_steady_ns = 1'000'000;
+    sample.left_last_read.read_exchange_timing.request_data_call_start_system_ns = 2'000'000;
+    sample.left_last_read.read_exchange_timing.request_data_call_return_steady_ns = 1'010'000;
+    sample.left_last_read.read_exchange_timing.request_data_call_return_system_ns = 2'010'000;
+    sample.left_last_read.read_exchange_timing.request_data_call_duration_us = 10.0;
     logger.push(sample);
 
     const std::filesystem::path latest = std::filesystem::path(cfg.directory) / "servo_log.csv";
@@ -4218,6 +4290,12 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
             : static_cast<std::size_t>(std::distance(header.begin(), it));
     };
     const std::size_t old_last = index_of("right_q_actual_jerk_deg_s3_5");
+    const std::size_t reqdata_available = index_of("left_reqdata_timing_available");
+    const std::size_t reqdata_sequence = index_of("left_reqdata_exchange_sequence");
+    const std::size_t reqdata_source = index_of("left_reqdata_timing_source");
+    const std::size_t reqdata_start_system = index_of("left_reqdata_call_start_system_ns");
+    const std::size_t reqdata_return_system = index_of("left_reqdata_call_return_system_ns");
+    const std::size_t reqdata_duration = index_of("left_reqdata_call_duration_us");
     const std::size_t chunk_wire_seq = index_of("chunk_frame_wire_seq");
     const std::size_t chunk_inference_latency = index_of("chunk_inference_latency_ms");
     const std::size_t chunk_camera_focus = index_of("chunk_camera_right_focus_score");
@@ -4256,6 +4334,13 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     const std::size_t ft_tare_state = index_of("left_ft_tare_state");
     const std::size_t ft_tare_generation = index_of("left_ft_tare_generation");
     const std::size_t ft_tare_fz = index_of("left_ft_residual_tare_tcp_fz_n");
+    const std::size_t ft_gravity_x = index_of("left_ft_gravity_tcp_x_m_s2");
+    const std::size_t ft_gravity_y = index_of("left_ft_gravity_tcp_y_m_s2");
+    const std::size_t ft_gravity_z = index_of("left_ft_gravity_tcp_z_m_s2");
+    const std::size_t ft_payload_inhibit =
+        index_of("left_ft_payload_identification_inhibit");
+    const std::size_t ft_joint_target_profile =
+        index_of("left_ft_joint_target_profile");
     const std::size_t force_mode = index_of("left_force_control_operating_mode");
     const std::size_t force_state = index_of("left_force_control_state");
     const std::size_t compliance_frame =
@@ -4314,6 +4399,12 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     const std::size_t hard_limit = index_of("left_force_control_hard_limit_exceeded");
     const std::size_t motion_epoch = index_of("left_force_control_motion_epoch");
     RB_CHECK(old_last < header.size());
+    RB_CHECK(reqdata_available < header.size());
+    RB_CHECK(reqdata_sequence < header.size());
+    RB_CHECK(reqdata_source < header.size());
+    RB_CHECK(reqdata_start_system < header.size());
+    RB_CHECK(reqdata_return_system < header.size());
+    RB_CHECK(reqdata_duration < header.size());
     RB_CHECK(chunk_wire_seq < header.size());
     RB_CHECK(chunk_inference_latency < header.size());
     RB_CHECK(chunk_camera_focus < header.size());
@@ -4352,6 +4443,11 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(ft_tare_state > init_left_goal_deficit);
     RB_CHECK(ft_tare_generation > init_left_goal_deficit);
     RB_CHECK(ft_tare_fz > init_left_goal_deficit);
+    RB_CHECK(ft_gravity_x > init_left_goal_deficit);
+    RB_CHECK(ft_gravity_y > ft_gravity_x);
+    RB_CHECK(ft_gravity_z > ft_gravity_y);
+    RB_CHECK(ft_payload_inhibit > ft_gravity_z);
+    RB_CHECK(ft_joint_target_profile > ft_payload_inhibit);
     RB_CHECK(force_mode > init_left_goal_deficit);
     RB_CHECK(force_state > init_left_goal_deficit);
     RB_CHECK(compliance_frame > force_state);
@@ -4385,6 +4481,12 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(hard_limit > hard_count);
     RB_CHECK(motion_epoch > init_left_goal_deficit);
     RB_CHECK(row.at(branch_rate) == "1");
+    RB_CHECK(row.at(reqdata_available) == "1");
+    RB_CHECK(row.at(reqdata_sequence) == "91");
+    RB_CHECK(row.at(reqdata_source) == "rbpodo_sdk_request_data");
+    RB_CHECK(row.at(reqdata_start_system) == "2000000");
+    RB_CHECK(row.at(reqdata_return_system) == "2010000");
+    RB_CHECK(row.at(reqdata_duration) == "10");
     RB_CHECK(row.at(chunk_wire_seq) == "70");
     RB_CHECK(row.at(chunk_inference_latency) == "77.5");
     RB_CHECK(row.at(chunk_camera_focus) == "45.5");
@@ -4422,6 +4524,11 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(row.at(ft_tare_state) == "accepted");
     RB_CHECK(row.at(ft_tare_generation) == "3");
     RB_CHECK(row.at(ft_tare_fz) == "23.5");
+    RB_CHECK(row.at(ft_gravity_x) == "1.25");
+    RB_CHECK(row.at(ft_gravity_y) == "-2.5");
+    RB_CHECK(row.at(ft_gravity_z) == "-9");
+    RB_CHECK(row.at(ft_payload_inhibit) == "1");
+    RB_CHECK(row.at(ft_joint_target_profile) == "payload_identification");
     RB_CHECK(row.at(compliance_frame) == "sensor_origin");
     RB_CHECK(row.at(compliance_frame_valid) == "1");
     RB_CHECK(row.at(compliance_frame_x) == "0.31");
@@ -4459,6 +4566,310 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(row.at(hard_limit) == "0");
     RB_CHECK(row.at(motion_epoch) == "9");
     std::filesystem::remove_all(cfg.directory);
+    return true;
+}
+
+bool testPayloadIdentificationProfileLatchesForceMotionInhibit() {
+    rb_servo::DualArmConfig cfg = testConfig();
+    configureCartesianLoopTest(&cfg);
+    const std::filesystem::path repo_root =
+        std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
+    const std::filesystem::path unified_urdf_dir =
+        repo_root.parent_path() /
+        "mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e";
+    cfg.safety.self_collision.enable = true;
+    cfg.safety.self_collision.monitor_only = true;
+    cfg.safety.self_collision.mesh.unified_urdf =
+        (unified_urdf_dir / "dual_rb3_730e_ver5.urdf").string();
+    cfg.safety.self_collision.mesh.package_dirs = {unified_urdf_dir.string()};
+    cfg.safety.init_motion_planner.enable = true;
+    cfg.safety.init_motion_planner.noop_tol_deg = 1.5;
+    cfg.safety.init_motion_planner.waypoint_tol_deg = 1.5;
+    cfg.servo.send_at_tick_start = false;
+    cfg.servo.command_timeout_sec = 0.03;
+    cfg.safety.floor_constraint.enable = true;
+    cfg.safety.floor_constraint.z_min_m = -1.0;
+    cfg.force_torque.source = "rbpodo_eft";
+    cfg.force_torque.payload_identification.enable = true;
+    cfg.force_torque.left.enable = true;
+    cfg.force_torque.left.frame_configured = true;
+    cfg.force_torque.left.freshness_source = "sequence";
+    cfg.force_torque.left.control_lpf_alpha = 1.0;
+    cfg.force_torque.right.enable = true;
+    cfg.force_torque.right.frame_configured = true;
+    cfg.force_torque.right.auto_tare_after_init_motion = true;
+    cfg.force_torque.right.auto_tare_settle_sec = 0.001;
+    cfg.force_torque.right.residual_tare_min_samples = 3;
+    cfg.force_torque.right.residual_tare_max_force_stddev_n = 0.1;
+    cfg.force_torque.right.residual_tare_max_torque_stddev_nm = 0.01;
+    cfg.force_control.provider = "project_native";
+    cfg.force_control.enable = true;
+    cfg.force_control.operating_mode = "cartesian_admittance";
+    cfg.force_control.update_rate_hz = cfg.servo.rate_hz;
+    cfg.force_control.left.enable = true;
+    cfg.force_control.left.contact_enter_force_n = 4.0;
+    cfg.force_control.left.contact_release_force_n = 2.0;
+    cfg.force_control.left.hard_normal_force_n = 100.0;
+    cfg.force_control.left.hard_force_norm_n = 200.0;
+    cfg.force_control.left.hard_torque_norm_nm = 100.0;
+    cfg.force_control.left.debounce_samples = 1;
+    cfg.force_control.left.transverse_contact_enter_force_n = 4.0;
+    cfg.force_control.left.transverse_contact_release_force_n = 2.0;
+    cfg.force_control.left.torque_contact_enter_nm = 0.5;
+    cfg.force_control.left.torque_contact_release_nm = 0.2;
+    cfg.force_control.left.compliance_axes = {true, true, true, true, true, true};
+    cfg.force_control.virtual_mass = {1.0, 1.0, 1.0, 0.5, 0.5, 0.5};
+    cfg.force_control.damping = {20.0, 20.0, 20.0, 5.0, 5.0, 5.0};
+    cfg.force_control.stiffness = {100.0, 100.0, 100.0, 20.0, 20.0, 20.0};
+    cfg.force_control.wrench_deadband = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    cfg.force_control.max_energy_j = 100.0;
+
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+    auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    left->setEftWrench(rb_servo::Wrench6D{8.0, -7.0, 6.0, 1.0, -1.0, 1.0});
+    right->setEftWrench(rb_servo::Wrench6D{});
+    rb_servo::CommandBuffer buffer;
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::move(left), std::move(right), cfg, &buffer, nullptr, kinematics);
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    RB_CHECK(waitUntil([&] {
+        return loop.motionState() == rb_servo::ServerMotionState::ArmedHold;
+    }));
+    RB_CHECK(waitUntil([&] {
+        return loop.latestSnapshot().left_force_control.proposal_committed;
+    }, std::chrono::milliseconds(2000)));
+    RB_CHECK(waitUntil([&] {
+        const auto snapshot = loop.latestSnapshot();
+        return snapshot.right_force_torque.healthy &&
+            !snapshot.right_force_torque.stale;
+    }));
+
+    const auto rejected_as_two_arm_hold = [
+        &buffer,
+        &loop
+    ](const rb_servo::DualArmCommand& malformed) {
+        buffer.setCommand(malformed);
+        rb_servo::ServoSnapshot rejected;
+        const bool observed = waitUntil([&] {
+            rejected = loop.latestSnapshot();
+            return rejected.command.seq == malformed.seq &&
+                rejected.safety_verdict == rb_servo::SafetyVerdict::InvalidCommand;
+        });
+        const bool held = observed &&
+            rejected.command.left.mode == rb_servo::ControlMode::Hold &&
+            rejected.command.right.mode == rb_servo::ControlMode::Hold &&
+            !rejected.command.left.has_joint_target &&
+            !rejected.command.right.has_joint_target &&
+            !rejected.left_force_torque.payload_identification_inhibit &&
+            !rejected.right_force_torque.payload_identification_inhibit &&
+            !rejected.fault_latched;
+        if (!held) {
+            std::cerr
+                << "payload-identification malformed rejection mismatch: observed="
+                << observed << " seq=" << rejected.command.seq
+                << " verdict=" << rb_servo::toString(rejected.safety_verdict)
+                << " modes=" << rb_servo::toString(rejected.command.left.mode) << "/"
+                << rb_servo::toString(rejected.command.right.mode)
+                << " targets=" << rejected.command.left.has_joint_target << "/"
+                << rejected.command.right.has_joint_target
+                << " inhibits="
+                << rejected.left_force_torque.payload_identification_inhibit << "/"
+                << rejected.right_force_torque.payload_identification_inhibit
+                << " fault=" << rejected.fault_latched << "\n";
+        }
+        return held;
+    };
+
+    // The server, not only rb_gui, owns the exclusive one-arm packet shape.
+    // Two calibration profiles must not latch either arm or move either target.
+    rb_servo::DualArmCommand both_identify = command(rb_servo::ControlMode::Hold);
+    both_identify.seq = 42;
+    both_identify.host_time_ns = rb_servo::nowSteadyNs();
+    for (rb_servo::ArmCommand* arm : {&both_identify.left, &both_identify.right}) {
+        arm->mode = rb_servo::ControlMode::JointTarget;
+        arm->has_joint_target = true;
+        arm->q_target_deg = initial;
+        arm->joint_target_profile =
+            rb_servo::JointTargetProfile::PayloadIdentification;
+    }
+    RB_CHECK(rejected_as_two_arm_hold(both_identify));
+
+    // A valid profile combined with any peer motion is likewise an atomic
+    // rejection; the peer may only be a payload-free Hold.
+    rb_servo::DualArmCommand identify_with_peer_motion =
+        command(rb_servo::ControlMode::Hold);
+    identify_with_peer_motion.seq = 43;
+    identify_with_peer_motion.host_time_ns = rb_servo::nowSteadyNs();
+    identify_with_peer_motion.left.mode = rb_servo::ControlMode::JointTarget;
+    identify_with_peer_motion.left.has_joint_target = true;
+    identify_with_peer_motion.left.q_target_deg = joints(0.5);
+    identify_with_peer_motion.right.mode = rb_servo::ControlMode::JointTarget;
+    identify_with_peer_motion.right.has_joint_target = true;
+    identify_with_peer_motion.right.q_target_deg = initial;
+    identify_with_peer_motion.right.joint_target_profile =
+        rb_servo::JointTargetProfile::PayloadIdentification;
+    RB_CHECK(rejected_as_two_arm_hold(identify_with_peer_motion));
+
+    rb_servo::DualArmCommand identify = command(rb_servo::ControlMode::Hold);
+    identify.seq = 44;
+    identify.host_time_ns = rb_servo::nowSteadyNs();
+    identify.right.mode = rb_servo::ControlMode::JointTarget;
+    identify.right.has_joint_target = true;
+    identify.right.q_target_deg = initial;
+    identify.right.joint_target_profile =
+        rb_servo::JointTargetProfile::PayloadIdentification;
+    identify.left.timeout_sec = 0.03;
+    identify.right.timeout_sec = 0.03;
+    buffer.setCommand(identify);
+
+    rb_servo::ServoSnapshot snapshot;
+    RB_CHECK(waitUntil([&] {
+        snapshot = loop.latestSnapshot();
+        return snapshot.command.seq == identify.seq &&
+            snapshot.right_force_torque.payload_identification_inhibit &&
+            snapshot.right_force_torque.joint_target_profile ==
+                "payload_identification";
+    }));
+    RB_CHECK(!snapshot.right_force_torque.tare_valid);
+    RB_CHECK(snapshot.right_force_control.state ==
+        "payload_identification_inhibited");
+    RB_CHECK(!snapshot.right_force_control.proposal_committed);
+    RB_CHECK(!snapshot.left_force_control.proposal_committed);
+
+    // A stale/expired acquisition packet becoming Hold is not a release event.
+    // Only an accepted later InitMotion tare may clear this latch.
+    RB_CHECK(waitUntil([&] {
+        snapshot = loop.latestSnapshot();
+        return snapshot.command.right.mode == rb_servo::ControlMode::Hold &&
+            snapshot.right_force_torque.payload_identification_inhibit;
+    }, std::chrono::milliseconds(500)));
+    RB_CHECK(!snapshot.fault_latched);
+
+    rb_servo::DualArmCommand retare = command(rb_servo::ControlMode::Hold);
+    retare.seq = 45;
+    retare.host_time_ns = rb_servo::nowSteadyNs();
+    retare.right.mode = rb_servo::ControlMode::JointTarget;
+    retare.right.has_joint_target = true;
+    retare.right.q_target_deg = initial;
+    retare.right.joint_target_profile = rb_servo::JointTargetProfile::InitMotion;
+    retare.left.timeout_sec = 0.5;
+    retare.right.timeout_sec = 0.5;
+    buffer.setCommand(retare);
+    RB_CHECK(waitUntil([&] {
+        snapshot = loop.latestSnapshot();
+        return snapshot.right_force_torque.tare_valid &&
+            snapshot.right_force_torque.tare_state == "accepted" &&
+            !snapshot.right_force_torque.payload_identification_inhibit;
+    }, std::chrono::milliseconds(1000)));
+    RB_CHECK(!snapshot.fault_latched);
+    loop.stop();
+
+    // Admission failure must also be a pure two-arm joint hold for that packet;
+    // it must not fall through to either arm's Cartesian force-Hold promotion.
+    cfg.force_torque.payload_identification.enable = false;
+    auto rejected_left = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Left, initial, false);
+    auto rejected_right = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Right, initial, false);
+    rejected_left->setEftWrench(
+        rb_servo::Wrench6D{8.0, -7.0, 6.0, 1.0, -1.0, 1.0});
+    rb_servo::CommandBuffer rejected_buffer;
+    rb_servo::DualArmServoLoop rejected_loop(
+        std::move(rejected_left),
+        std::move(rejected_right),
+        cfg,
+        &rejected_buffer,
+        nullptr,
+        std::make_shared<FakeCartesianKinematics>()
+    );
+    RB_CHECK(rejected_loop.start());
+    rejected_buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    RB_CHECK(waitUntil([&] {
+        return rejected_loop.motionState() == rb_servo::ServerMotionState::ArmedHold;
+    }));
+    RB_CHECK(waitUntil([&] {
+        return rejected_loop.latestSnapshot().left_force_control.proposal_committed;
+    }, std::chrono::milliseconds(2000)));
+    identify.seq = 45;
+    identify.host_time_ns = rb_servo::nowSteadyNs();
+    rejected_buffer.setCommand(identify);
+    RB_CHECK(waitUntil([&] {
+        snapshot = rejected_loop.latestSnapshot();
+        return snapshot.command.seq == identify.seq &&
+            snapshot.safety_verdict == rb_servo::SafetyVerdict::InvalidCommand;
+    }));
+    RB_CHECK(!snapshot.right_force_torque.payload_identification_inhibit);
+    RB_CHECK(!snapshot.left_force_control.proposal_committed);
+    RB_CHECK(!snapshot.right_force_control.proposal_committed);
+    RB_CHECK(!snapshot.fault_latched);
+    rejected_loop.stop();
+    return true;
+}
+
+bool testPayloadIdentificationRetainsRawHardLimitGuard() {
+    rb_servo::DualArmConfig cfg = testConfig();
+    configureCartesianLoopTest(&cfg);
+    cfg.force_torque.source = "rbpodo_eft";
+    cfg.force_torque.payload_identification.enable = true;
+    cfg.force_torque.right.enable = true;
+    cfg.force_torque.right.frame_configured = true;
+    cfg.force_torque.right.auto_tare_after_init_motion = true;
+    cfg.force_control.provider = "project_native";
+    cfg.force_control.enable = true;
+    cfg.force_control.operating_mode = "cartesian_admittance";
+    cfg.force_control.right.enable = true;
+    cfg.force_control.right.surface_source = "none";
+    cfg.force_control.right.hard_normal_force_n = 5.0;
+    cfg.force_control.right.hard_force_norm_n = 5.0;
+    cfg.force_control.right.hard_torque_norm_nm = 5.0;
+    cfg.force_control.right.hard_limit_debounce_samples = 2;
+
+    rb_servo::Wrench6D hard_wrench;
+    hard_wrench.fz = -10.0;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+    auto right = std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false);
+    right->setEftWrench(hard_wrench);
+    rb_servo::CommandBuffer buffer;
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::move(left), std::move(right), cfg, &buffer, nullptr, kinematics);
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    RB_CHECK(waitUntil([&] {
+        return loop.motionState() == rb_servo::ServerMotionState::ArmedHold;
+    }));
+    RB_CHECK(waitUntil([&] {
+        return loop.latestSnapshot().right_force_torque.healthy;
+    }));
+
+    rb_servo::DualArmCommand identify = command(rb_servo::ControlMode::Hold);
+    identify.seq = 46;
+    identify.host_time_ns = rb_servo::nowSteadyNs();
+    identify.right.mode = rb_servo::ControlMode::JointTarget;
+    identify.right.has_joint_target = true;
+    identify.right.q_target_deg = initial;
+    identify.right.joint_target_profile =
+        rb_servo::JointTargetProfile::PayloadIdentification;
+    buffer.setCommand(identify);
+
+    rb_servo::ServoSnapshot snapshot;
+    RB_CHECK(waitUntil([&] {
+        snapshot = loop.latestSnapshot();
+        return snapshot.fault_latched;
+    }, std::chrono::milliseconds(1000)));
+    RB_CHECK(snapshot.safety_verdict == rb_servo::SafetyVerdict::ExternalForceLimit ||
+        snapshot.safety_verdict == rb_servo::SafetyVerdict::FaultLatched);
+    RB_CHECK(snapshot.right_force_torque.payload_identification_inhibit);
+    RB_CHECK(snapshot.right_force_control.hard_limit_threshold_exceeded);
+    RB_CHECK(snapshot.right_force_control.hard_limit_exceeded);
+    RB_CHECK(snapshot.right_force_control.fast_force_norm_n >= 10.0);
+    loop.stop();
     return true;
 }
 
@@ -6080,6 +6491,64 @@ bool testResetFaultRequiresFreshValidState() {
     return true;
 }
 
+bool testControllerSimulationResetFaultResyncUsesReference() {
+    const auto run_case = [](rb_servo::DualArmConfig cfg, bool expect_reference) {
+        rb_servo::CommandBuffer buffer;
+        const rb_servo::JointArray actual = joints(0.0);
+        rb_servo::DualArmServoLoop loop(
+            std::make_unique<TestBackend>(
+                rb_servo::ArmId::Left,
+                actual,
+                false,
+                rb_servo::BackendErrorKind::ControllerRejected,
+                std::nullopt,
+                true
+            ),
+            std::make_unique<TestBackend>(
+                rb_servo::ArmId::Right,
+                actual,
+                false,
+                rb_servo::BackendErrorKind::ControllerRejected,
+                std::nullopt,
+                true
+            ),
+            cfg,
+            &buffer,
+            nullptr
+        );
+        RB_CHECK(loop.start());
+        rb_servo::DualArmCommand target = command(rb_servo::ControlMode::JointTarget);
+        target.left.q_target_deg = joints(7.0);
+        target.right.q_target_deg = joints(7.0);
+        target.left.has_joint_target = true;
+        target.right.has_joint_target = true;
+        buffer.setCommand(target);
+        RB_CHECK(waitUntil([&] {
+            return sameJointArray(loop.previousSentTarget().left_q_target_deg, joints(7.0));
+        }));
+
+        buffer.setCommand(command(rb_servo::ControlMode::EmergencyStop));
+        RB_CHECK(waitUntil([&] { return loop.faultLatched(); }));
+        buffer.setCommand(command(rb_servo::ControlMode::ResetFault));
+        RB_CHECK(waitUntil([&] { return !loop.faultLatched(); }));
+        const rb_servo::ServoTarget previous = loop.previousSentTarget();
+        loop.stop();
+        RB_CHECK(sameJointArray(
+            previous.left_q_target_deg,
+            expect_reference ? joints(7.0) : actual
+        ));
+        RB_CHECK(sameJointArray(
+            previous.right_q_target_deg,
+            expect_reference ? joints(7.0) : actual
+        ));
+        return true;
+    };
+
+    RB_CHECK(run_case(rbpodoControllerSimulationConfig(), true));
+    RB_CHECK(run_case(rbpodoPhysicalRealConfig(), false));
+    return true;
+}
+
 bool testDisarmAndCartesianHoldPreviousTarget() {
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = testConfig();
@@ -6557,8 +7026,13 @@ bool testRbpodoControllerSimulationNonStreamingCartesianGate() {
 
     rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
     configureCartesianLoopTest(&cfg);
+    cfg.servo.send_at_tick_start = true;
     cfg.cartesian_control.allow_in_controller_simulation = true;
     cfg.cartesian_control.allow_in_real = false;
+    cfg.cartesian_control.controller_simulation_servo_state_source =
+        rb_servo::CartesianControllerSimulationStateSource::Reference;
+    cfg.cartesian_control.controller_simulation_divergence_source =
+        rb_servo::CartesianControllerSimulationStateSource::Reference;
 
     for (const rb_servo::ControlMode mode : nonStreamingCartesianModes()) {
         rb_servo::ServoSnapshot snapshot;
@@ -6566,6 +7040,9 @@ bool testRbpodoControllerSimulationNonStreamingCartesianGate() {
         RB_CHECK(runLeftNonStreamingCartesianCase(cfg, mode, &snapshot, &ik_observed, true));
         RB_CHECK(snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok);
         RB_CHECK(snapshot.left_cartesian_solve.status == "ok");
+        RB_CHECK(snapshot.left_cartesian_solve.cartesian_servo_state_source == "reference");
+        RB_CHECK(snapshot.left_cartesian_solve.cartesian_divergence_source == "reference");
+        RB_CHECK(snapshot.left_cartesian_solve.q_reference_for_servo_valid);
         RB_CHECK(ik_observed);
         RB_CHECK(checkPublishedLeftCartesianGate(cfg, snapshot, true, true, ""));
     }
@@ -6589,6 +7066,7 @@ bool testRbpodoControllerSimulationNonStreamingCartesianGate() {
         ));
         RB_CHECK(snapshot.safety_verdict == rb_servo::SafetyVerdict::Ok);
         RB_CHECK(snapshot.left_cartesian_solve.status == "ok");
+        RB_CHECK(snapshot.left_cartesian_solve.cartesian_servo_state_source == "actual");
         RB_CHECK(ik_observed);
         RB_CHECK(checkPublishedLeftCartesianGate(physical_real_cfg, snapshot, true, false, ""));
     }
@@ -6608,6 +7086,150 @@ bool testRbpodoControllerSimulationNonStreamingCartesianGate() {
         RB_CHECK(checkPublishedLeftCartesianGate(simulation_cfg, snapshot, true, false, ""));
     }
 
+    return true;
+}
+
+bool testRbpodoControllerSimulationCartesianIkSeedUsesReference() {
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+    configureCartesianLoopTest(&cfg);
+    cfg.cartesian_control.allow_in_controller_simulation = true;
+    cfg.cartesian_control.allow_in_real = false;
+    cfg.cartesian_control.controller_simulation_servo_state_source =
+        rb_servo::CartesianControllerSimulationStateSource::Reference;
+    cfg.cartesian_control.controller_simulation_divergence_source =
+        rb_servo::CartesianControllerSimulationStateSource::Reference;
+
+    rb_servo::CommandBuffer buffer;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Left,
+        initial,
+        false,
+        rb_servo::BackendErrorKind::ControllerRejected,
+        initial,
+        true
+    );
+    auto right = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Right,
+        initial,
+        false,
+        rb_servo::BackendErrorKind::ControllerRejected,
+        initial,
+        true
+    );
+    // Model a controller reference that is delayed relative to accepted sends.
+    // This is the pairing that previously made every later IK solve seed from
+    // the newer sent target while its TCP feedback still came from q_ref=0.
+    left->setFreezeReferenceOnSend(true);
+    right->setFreezeReferenceOnSend(true);
+
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::move(left),
+        std::move(right),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    rb_servo::DualArmCommand cartesian =
+        leftNonStreamingCartesianCommand(rb_servo::ControlMode::TcpPoseTarget);
+    cartesian.left.timeout_sec = 1.0;
+    cartesian.right.timeout_sec = 1.0;
+    buffer.setCommand(cartesian);
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoTarget sent = loop.previousSentTarget();
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        return snapshot.command.seq == cartesian.seq &&
+               snapshot.left_cartesian_solve.status == "ok" &&
+               sent.left_q_target_deg[0] > 3.9;
+    }, std::chrono::milliseconds(1000)));
+    sleepTicks();
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    RB_CHECK(snapshot.left_cartesian_solve.cartesian_servo_state_source == "reference");
+    RB_CHECK(std::abs(snapshot.left_cartesian_solve.q_ik_seed_deg[0]) < kEpsilon);
+    RB_CHECK(loop.previousSentTarget().left_q_target_deg[0] > 3.9);
+    RB_CHECK(!snapshot.fault_latched);
+    loop.stop();
+    return true;
+}
+
+bool testControllerSimulationTickStartSendHistoryStaysBounded() {
+    rb_servo::DualArmConfig cfg = rbpodoControllerSimulationConfig();
+    configureCartesianLoopTest(&cfg);
+    cfg.servo.rate_hz = 500;
+    cfg.servo.send_at_tick_start = true;
+    cfg.cartesian_control.allow_in_controller_simulation = true;
+    cfg.cartesian_control.allow_in_real = false;
+    cfg.cartesian_control.controller_simulation_servo_state_source =
+        rb_servo::CartesianControllerSimulationStateSource::Reference;
+    cfg.cartesian_control.controller_simulation_divergence_source =
+        rb_servo::CartesianControllerSimulationStateSource::Reference;
+    // Match the order of magnitude of the tracked pgmode stack. With the old
+    // two-send-old bookkeeping, this acceleration-limited history formed an
+    // alternating recurrence and quickly escaped the 4 degree IK target.
+    cfg.safety.dq_max_deg_s = joints(170.0);
+    cfg.safety.ddq_max_deg_s2 = joints(1500.0);
+
+    rb_servo::CommandBuffer buffer;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto left = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Left,
+        initial,
+        false,
+        rb_servo::BackendErrorKind::ControllerRejected,
+        initial,
+        true
+    );
+    auto right = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Right,
+        initial,
+        false,
+        rb_servo::BackendErrorKind::ControllerRejected,
+        initial,
+        true
+    );
+    // A delayed/frozen q_ref models the physical control-box pgmode response;
+    // accepted sends advance only the loop's sent-target history.
+    left->setFreezeReferenceOnSend(true);
+    right->setFreezeReferenceOnSend(true);
+
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::move(left), std::move(right), cfg, &buffer, nullptr, kinematics);
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+    rb_servo::DualArmCommand cartesian =
+        leftNonStreamingCartesianCommand(rb_servo::ControlMode::TcpPoseTarget);
+    cartesian.left.timeout_sec = 1.0;
+    cartesian.right.timeout_sec = 1.0;
+    buffer.setCommand(cartesian);
+
+    double maximum_abs_sent_deg = 0.0;
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoTarget sent = loop.previousSentTarget();
+        maximum_abs_sent_deg = std::max(
+            maximum_abs_sent_deg, std::abs(sent.left_q_target_deg[0]));
+        return sent.left_q_target_deg[0] > 0.1;
+    }, std::chrono::milliseconds(500)));
+    const auto sample_deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    while (std::chrono::steady_clock::now() < sample_deadline) {
+        const rb_servo::ServoTarget sent = loop.previousSentTarget();
+        maximum_abs_sent_deg = std::max(
+            maximum_abs_sent_deg, std::abs(sent.left_q_target_deg[0]));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+    loop.stop();
+
+    RB_CHECK(maximum_abs_sent_deg <= 4.01);
+    RB_CHECK(!snapshot.fault_latched);
+    RB_CHECK(snapshot.left_cartesian_solve.cartesian_servo_state_source == "reference");
     return true;
 }
 
@@ -7227,6 +7849,131 @@ bool testFreedriveTeachOnFailureAbortsAndReleases() {
     return true;
 }
 
+bool testFreedriveExitReanchorsCartesianComplianceToTaughtPose() {
+    rb_servo::DualArmConfig cfg = rbpodoPhysicalRealConfig();
+    configureCartesianLoopTest(&cfg);
+    cfg.servo.allow_freedrive = true;
+    cfg.servo.send_at_tick_start = false;
+    cfg.servo.command_timeout_sec = 5.0;
+    cfg.cartesian_control.allow_in_real = true;
+    cfg.safety.floor_constraint.enable = true;
+    cfg.safety.floor_constraint.z_min_m = -1.0;
+    cfg.force_torque.source = "rbpodo_eft";
+    cfg.force_torque.right.enable = true;
+    cfg.force_torque.right.frame_configured = true;
+    cfg.force_torque.right.freshness_source = "sequence";
+    cfg.force_torque.right.control_lpf_alpha = 1.0;
+    cfg.force_control.provider = "project_native";
+    cfg.force_control.enable = true;
+    cfg.force_control.operating_mode = "cartesian_admittance";
+    cfg.force_control.allow_in_real = true;
+    cfg.force_control.supervised_experimental_real = true;
+    cfg.force_control.update_rate_hz = cfg.servo.rate_hz;
+    cfg.force_control.right.enable = true;
+    cfg.force_control.right.surface_source = "none";
+    cfg.force_control.right.compliance_frame = "tcp_origin";
+    cfg.force_control.right.hard_normal_force_n = 100.0;
+    cfg.force_control.right.hard_force_norm_n = 100.0;
+    cfg.force_control.right.hard_torque_norm_nm = 100.0;
+    cfg.force_control.right.compliance_axes = {true, true, true, true, true, true};
+    cfg.force_control.virtual_mass = {1.0, 1.0, 1.0, 0.5, 0.5, 0.5};
+    cfg.force_control.damping = {20.0, 20.0, 20.0, 5.0, 5.0, 5.0};
+    cfg.force_control.stiffness = {100.0, 100.0, 100.0, 20.0, 20.0, 20.0};
+    cfg.force_control.wrench_deadband = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    cfg.force_control.max_energy_j = 100.0;
+
+    rb_servo::CommandBuffer buffer;
+    const rb_servo::JointArray initial = joints(0.0);
+    rb_servo::JointArray taught = initial;
+    taught[0] = 10.0;
+    taught[1] = 20.0;
+    taught[2] = 30.0;
+    auto left_backend = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Left, initial, false);
+    auto right_backend = std::make_unique<TestBackend>(
+        rb_servo::ArmId::Right, initial, false);
+    TestBackend* right = right_backend.get();
+    right->setControllerMotionState(1);
+    right->setEftWrench(rb_servo::Wrench6D{});
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    const rb_servo::Pose6D taught_tcp = kinematics->computeTcpStand(
+        rb_servo::ArmId::Right, taught, cfg.right_mount);
+    rb_servo::DualArmServoLoop loop(
+        std::move(left_backend), std::move(right_backend), cfg, &buffer,
+        nullptr, kinematics);
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    RB_CHECK(waitUntil([&] {
+        return loop.motionState() == rb_servo::ServerMotionState::ArmedHold;
+    }));
+    rb_servo::DualArmCommand hold = command(rb_servo::ControlMode::Hold);
+    hold.seq = 2;
+    hold.host_time_ns = rb_servo::nowSteadyNs();
+    hold.left.timeout_sec = 5.0;
+    hold.right.timeout_sec = 5.0;
+    buffer.setCommand(hold);
+
+    rb_servo::ServoSnapshot snap;
+    RB_CHECK(waitUntil([&] {
+        snap = loop.latestSnapshot();
+        return snap.right_force_control.proposal_committed &&
+            snap.right_force_control.compliance_equilibrium_source == "hold_anchor";
+    }, std::chrono::milliseconds(1500)));
+    const uint64_t epoch_before_teaching = snap.motion_epoch;
+
+    buffer.setCommand(freedriveCommand(3, std::nullopt, true));
+    RB_CHECK(waitUntil([&] {
+        snap = loop.latestSnapshot();
+        return snap.right_freedrive_stage == "active";
+    }, std::chrono::milliseconds(1000)));
+    right->setActualJoints(taught);
+    RB_CHECK(waitUntil([&] {
+        snap = loop.latestSnapshot();
+        return std::abs(snap.right_state.q_actual_deg[0] - taught[0]) < 1e-9 &&
+            std::abs(snap.right_state.q_actual_deg[1] - taught[1]) < 1e-9 &&
+            std::abs(snap.right_state.q_actual_deg[2] - taught[2]) < 1e-9;
+    }, std::chrono::milliseconds(500)));
+
+    buffer.setCommand(freedriveCommand(4, std::nullopt, false));
+    RB_CHECK(waitUntil([&] {
+        snap = loop.latestSnapshot();
+        return snap.right_freedrive_stage == "off" &&
+            snap.motion_epoch > epoch_before_teaching;
+    }, std::chrono::milliseconds(1000)));
+    RB_CHECK(snap.right_force_control.compliance_equilibrium_source == "hold_anchor");
+    RB_CHECK(std::abs(
+        snap.right_force_control.compliance_equilibrium_stand.x - taught_tcp.x) < 1e-9);
+    RB_CHECK(std::abs(
+        snap.right_force_control.compliance_equilibrium_stand.y - taught_tcp.y) < 1e-9);
+    RB_CHECK(std::abs(
+        snap.right_force_control.compliance_equilibrium_stand.z - taught_tcp.z) < 1e-9);
+    RB_CHECK(!snap.right_force_control.compliance_active);
+    RB_CHECK(!snap.right_force_control.proposal_committed);
+
+    // Direct teaching deliberately disarms motion. Re-arm as the operator/GUI
+    // would; Cartesian force Hold must resume around the taught pose, not the
+    // pre-teaching equilibrium.
+    rb_servo::DualArmCommand rearm = command(rb_servo::ControlMode::ArmMotion);
+    rearm.seq = 5;
+    rearm.host_time_ns = rb_servo::nowSteadyNs();
+    buffer.setCommand(rearm);
+    RB_CHECK(waitUntil([&] {
+        snap = loop.latestSnapshot();
+        return loop.motionState() == rb_servo::ServerMotionState::ArmedHold &&
+            snap.right_force_control.proposal_committed;
+    }, std::chrono::milliseconds(1500)));
+    sleepTicks();
+    snap = loop.latestSnapshot();
+    for (std::size_t i = 0; i < taught.size(); ++i) {
+        RB_CHECK(std::abs(snap.right_state.q_actual_deg[i] - taught[i]) < 1e-6);
+        RB_CHECK(std::abs(snap.right_sent_q_deg[i] - taught[i]) < 1e-6);
+    }
+    RB_CHECK(!snap.fault_latched);
+    loop.stop();
+    return true;
+}
+
 int main() {
     if (!testCommandValidation()) return 1;
     if (!testSetExternalBoxesCommandParser()) return 1;
@@ -7236,6 +7983,7 @@ int main() {
     if (!testParsedExternalBoxesDoNotDisplaceMotionLatest()) return 1;
     if (!testFreedriveArmingQuiescesUntilIdleThenEngages()) return 1;
     if (!testFreedriveTeachOnFailureAbortsAndReleases()) return 1;
+    if (!testFreedriveExitReanchorsCartesianComplianceToTaughtPose()) return 1;
     if (!testCommandSequenceRequiredAndMonotonic()) return 1;
     if (!testCommandSourceMetadataAndLeaseEnforcement()) return 1;
     if (!testCartesianCommandParser()) return 1;
@@ -7285,6 +8033,8 @@ int main() {
     if (!testStatePublisherUsesConfiguredPublishRate()) return 1;
     if (!testLoggerZeroCapacityDropsWithoutBlocking()) return 1;
     if (!testServoLoggerAppendsTcpPoseTargetDebugColumns()) return 1;
+    if (!testPayloadIdentificationProfileLatchesForceMotionInhibit()) return 1;
+    if (!testPayloadIdentificationRetainsRawHardLimitGuard()) return 1;
     if (!testForceRuntimeUsesTimestampAfterBackendStateRead()) return 1;
     if (!testForceHardLimitRequiresConsecutiveFreshSamples()) return 1;
     if (!testGuardedAdmittanceContinuesAcrossUpstreamHold()) return 1;
@@ -7310,12 +8060,15 @@ int main() {
     if (!testEmergencyWinsAndResetDoesNotRun()) return 1;
     if (!testResetFaultFailureKeepsFaultLatched()) return 1;
     if (!testResetFaultRequiresFreshValidState()) return 1;
+    if (!testControllerSimulationResetFaultResyncUsesReference()) return 1;
     if (!testDisarmAndCartesianHoldPreviousTarget()) return 1;
     if (!testCartesianPoseTargetUsesIkInSimulation()) return 1;
     if (!testChunkFollowerDeactivatesAcrossBothArmJointTargetGap()) return 1;
     if (!testTcpLinearMoveUsesIkInSimulationOnly()) return 1;
     if (!testRbpodoControllerSimulationStartupReferenceSource()) return 1;
     if (!testRbpodoControllerSimulationNonStreamingCartesianGate()) return 1;
+    if (!testRbpodoControllerSimulationCartesianIkSeedUsesReference()) return 1;
+    if (!testControllerSimulationTickStartSendHistoryStaysBounded()) return 1;
     if (!testCartesianIkFailureHoldsPreviousSafeTarget()) return 1;
     if (!testSingleArmIkFailureDoesNotFreezeHealthyArm()) return 1;
     if (!testCartesianIkDurationBudgetFailureIsSimulatorOnly()) return 1;

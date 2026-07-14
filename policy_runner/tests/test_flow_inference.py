@@ -79,6 +79,73 @@ class FlowInferenceCliTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             pose_from_state_payload(payload, "left", source="nope")
 
+    def test_pose_from_state_payload_uses_reference_in_controller_simulation(self) -> None:
+        from policy_runner.flow_dataset import pose_from_state_payload
+
+        gate = {
+            "operation_mode": "simulation",
+            "physical_motion_expected": False,
+            "controller_simulation_servo_state_source": "reference",
+        }
+        payload = {
+            "left": {
+                "tcp_stand": {
+                    "x": 1.0, "y": 0.0, "z": 0.0,
+                    "quaternion_xyzw": [0, 0, 0, 1],
+                },
+                "tcp_ref_valid": True,
+                "tcp_ref_stand": {
+                    "x": 2.0, "y": 0.0, "z": 0.0,
+                    "quaternion_xyzw": [0, 0, 0, 1],
+                },
+                "physical_motion_expected": False,
+                "cartesian_gate": gate,
+            },
+            "right": {
+                "tcp_stand": {
+                    "x": 3.0, "y": 0.0, "z": 0.0,
+                    "quaternion_xyzw": [0, 0, 0, 1],
+                },
+                "tcp_ref_valid": False,
+                "physical_motion_expected": False,
+                "cartesian_gate": gate,
+            },
+        }
+
+        self.assertEqual(pose_from_state_payload(payload, "left")[0], 2.0)
+        self.assertEqual(pose_from_state_payload(payload, "left", source="actual")[0], 1.0)
+        with self.assertRaisesRegex(ValueError, "reference pose"):
+            pose_from_state_payload(payload, "right")
+
+    def test_pose_from_state_payload_keeps_actual_source_for_physical_real(self) -> None:
+        from policy_runner.flow_dataset import pose_from_state_payload
+
+        payload = {
+            "left": {
+                "tcp_stand": {
+                    "x": 1.0, "y": 0.0, "z": 0.0,
+                    "quaternion_xyzw": [0, 0, 0, 1],
+                },
+                "tcp_ref_valid": True,
+                "tcp_ref_stand": {
+                    "x": 2.0, "y": 0.0, "z": 0.0,
+                    "quaternion_xyzw": [0, 0, 0, 1],
+                },
+                "physical_motion_expected": True,
+                "controller_simulation_mode": None,
+                "cartesian_gate": {
+                    "operation_mode": "real",
+                    "physical_motion_expected": True,
+                    "controller_simulation_servo_state_source": "reference",
+                },
+            }
+        }
+
+        self.assertEqual(pose_from_state_payload(payload, "left")[0], 1.0)
+        self.assertEqual(
+            pose_from_state_payload(payload, "left", source="reference")[0], 2.0
+        )
+
     def test_rtc_shift_prev_chunk_advances_by_executed_window(self) -> None:
         import numpy as np
 

@@ -127,6 +127,7 @@ from rb_servo_gui.app import (
     parse_args,
     update_scene_markers,
 )
+from rb_servo_gui.cog_gui import CogGuiSession
 from rb_servo_gui.box_detect_control import (
     BOX_DETECT_COMMAND_SCHEMA,
     BoxDetectCommandClient,
@@ -447,8 +448,23 @@ class RecordingGui:
         self.buttons.append((label, kwargs, button))
         return button
 
-    def add_button_group(self, label, options, **kwargs):
-        initial = kwargs.get("initial_value", tuple(options)[0] if options else None)
+    def add_button_group(
+        self,
+        label,
+        options,
+        *,
+        disabled=False,
+        visible=True,
+        hint=None,
+        order=None,
+    ):
+        kwargs = {
+            "disabled": disabled,
+            "visible": visible,
+            "hint": hint,
+            "order": order,
+        }
+        initial = tuple(options)[0] if options else None
         group = RecordingInput(initial, options=tuple(options), **kwargs)
         self.button_groups.append((label, tuple(options), kwargs, group))
         return group
@@ -5293,6 +5309,13 @@ class FloorConstraintGuiTest(unittest.TestCase):
                 self.assertEqual(handles["scene"]["tcp_trail_limit"], 1250)
                 self.assertEqual(handles["force_status"].value, "Force: no state")
                 self.assertTrue(handles["force_status"].disabled)
+                self.assertEqual(handles["cog_arm"].value, "right")
+                self.assertTrue(
+                    any(
+                        label == "Active arm" and options == ("left", "right")
+                        for label, options, _kwargs, _handle in server.gui.dropdowns
+                    )
+                )
 
                 checkboxes = {label: handle.value for label, _kwargs, handle in server.gui.checkboxes}
                 self.assertFalse(checkboxes["예측 chunk 궤적 표시"])
@@ -6871,6 +6894,21 @@ class StartupInitTareTest(unittest.TestCase):
                 handles, safety, state, False, init_motion_disabled=False
             )
             self.assertEqual(send.call_count, 1)
+
+    def test_maybe_auto_tare_waits_until_cog_session_ends(self):
+        state = self._state(self._arm(self._INIT), self._arm(self._INIT))
+        safety = mock.Mock(init_left_joint_deg=self._INIT, init_right_joint_deg=self._INIT)
+        cog = CogGuiSession(mock.Mock())
+        cog._state = "armed"
+        handles = {"scene": {}, "cog_session": cog}
+        path = self._write_server_cfg(0.75, 1.5)
+        with mock.patch("rb_servo_gui.app._send_arm_init_override") as send, \
+                mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": path}):
+            _maybe_auto_init_tare_on_startup(
+                handles, safety, state, False, init_motion_disabled=False
+            )
+        send.assert_not_called()
+        self.assertNotIn("_auto_init_tare_done", handles)
 
     def test_maybe_auto_tare_fail_closed_without_server_config(self):
         # NO fallback: without a readable server no-op tolerance the auto-tare must

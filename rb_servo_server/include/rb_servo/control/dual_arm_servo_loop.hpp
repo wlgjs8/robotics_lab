@@ -309,7 +309,11 @@ private:
     );
     void setMotionState(ServerMotionState state);
     ServoTarget currentFaultHoldTarget() const;
-    JointArray chooseSafeHoldTarget(const RobotState& state, const JointArray& previous_sent) const;
+    JointArray chooseSafeHoldTarget(
+        ArmId arm_id,
+        const RobotState& state,
+        const JointArray& previous_sent
+    ) const;
     double computeFilterDtSec(uint64_t actual_period_ns, uint64_t nominal_period_ns) const;
     void resetChunkFollowerEngageWait(ArmId arm_id);
     void clearChunkFollowerFaultRequests();
@@ -326,6 +330,7 @@ private:
     );
     void invalidatePostInitTare(ArmId arm_id, uint64_t command_seq);
     void beginPostInitTare(ArmId arm_id, uint64_t now_ns);
+    bool latchPayloadIdentificationInhibit(ArmId arm_id);
     void applyForceCorrection(ArmId arm_id, ArmCommand* command);
     void finishForceProposals(
         bool left_accepted,
@@ -383,6 +388,7 @@ private:
         uint64_t tare_not_before_ns = 0;
         uint64_t last_init_tare_command_seq = 0;
         uint64_t tare_generation = 0;
+        bool payload_identification_inhibit = false;
     };
     FtWrenchPipeline left_ft_pipeline_;
     FtWrenchPipeline right_ft_pipeline_;

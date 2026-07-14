@@ -73,6 +73,12 @@ cd /home/plaif/workspace/robotics_lab
 make run MODE=sim
 ```
 
+The tracked sim profile currently targets the physical controller boxes held in
+pgmode simulation. It tracks `q_target`/`tcp_ref_stand`, keeps physical-real
+Cartesian authority off, and fault-latches any encoder-motion indication. A
+Virtual ControlBox, whose simulated `q_actual` moves, is not accepted by this
+profile without a future explicit endpoint-topology contract.
+
 For a hardware-free mock smoke, use a temporary YAML outside the repository and
 pass it explicitly:
 
@@ -88,6 +94,50 @@ Inspect timing:
 python3 tools/plot_servo_log.py logs/servo_log.csv
 python3 tools/analyze_servo_log.py logs/servo_log.csv
 ```
+
+For direct rbpodo `request_data()` latency, record a bounded passive capture
+alongside the already-supervised server run (the capture command does not start
+the server or authorize motion):
+
+```bash
+cd /home/plaif/workspace/robotics_lab
+scripts/capture_rbpodo_reqdata_timing.sh \
+  --interface enp6s0 \
+  --left-ip 172.28.60.200 \
+  --right-ip 172.28.60.201 \
+  --duration-sec 120 \
+  --output /tmp/rbpodo_reqdata.pcapng
+
+python3 rb_servo_server/tools/analyze_reqdata_timing.py \
+  --servo-log rb_servo_server/logs/servo_log.csv \
+  --pcap /tmp/rbpodo_reqdata.pcapng \
+  --left-ip 172.28.60.200 \
+  --right-ip 172.28.60.201 \
+  --output-csv /tmp/rbpodo_reqdata_timing.csv
+```
+
+Use the interface carrying controller traffic; `dumpcap -D` lists available
+interfaces. The primary servo CSV records both steady-clock and system-clock
+boundaries around the SDK call. The analyzer uses `tshark` to add the host
+capture timestamp of the outbound `reqdata` payload and the first inbound
+CobotData SystemState packet, then reports these phases independently:
+
+- `call_start_to_reqdata_tx_us`: SDK/host work before the packet reaches the
+  host capture point.
+- `reqdata_tx_to_response_first_rx_us`: controller response plus network time.
+- `response_first_rx_to_request_data_return_us`: remaining TCP-frame delivery,
+  SDK polling/parsing, and host scheduling before the SDK returns.
+- `backend_read_outside_request_data_us`: `readState()` work outside the SDK
+  call, including state mapping and fault classification.
+
+The capture is duration-bounded and stores only the first 128 bytes of each
+packet. The inbound timestamp is the first response-frame packet at the host
+capture point, not a controller-internal timestamp or necessarily the final TCP
+segment.
+The direct-call fields are unavailable when `state_read_pipelined: true`, because
+that path does not invoke the vendor SDK's `request_data()` method. Packet
+captures contain controller state traffic and should be handled as diagnostic
+artifacts.
 
 The servo CSV also carries the latest chunk-frame receive age/interarrival,
 policy inference timing, camera bundle/frame age and focus indicators, plus

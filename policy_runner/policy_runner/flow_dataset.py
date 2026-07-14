@@ -534,8 +534,8 @@ def runtime_proprio_from_state(
 ) -> np.ndarray:
     frame = normalize_action_frame(action_frame)
     delta_fn = pose_delta_local
-    left_pose = _pose_from_state_arm(payload.get("left", {}))
-    right_pose = _pose_from_state_arm(payload.get("right", {}))
+    left_pose = pose_from_state_payload(payload, "left", source="auto")
+    right_pose = pose_from_state_payload(payload, "right", source="auto")
     left_gripper = _float_or_zero(_nested_first(payload.get("left", {}), "gripper", "gripper_position"))
     right_gripper = _float_or_zero(_nested_first(payload.get("right", {}), "gripper", "gripper_position"))
     left_features = np.concatenate([delta_fn(reset_left_pose, left_pose), [left_gripper]])
@@ -544,20 +544,26 @@ def runtime_proprio_from_state(
 
 
 def pose_from_state_payload(
-    payload: dict[str, Any], side: str, source: str = "actual"
+    payload: dict[str, Any], side: str, source: str = "auto"
 ) -> np.ndarray:
     """Absolute stand pose7 for one arm from a servo state payload.
 
-    source="actual"  (default): measured pose, FK(q_actual) — tcp_stand.
+    source="auto"    (default): controller tracking pose. This is tcp_ref_stand
+    for rbpodo pgmode simulation when the server declares reference servo state,
+    otherwise tcp_actual_stand. A required reference that is absent fails closed.
+    source="actual": measured physical pose, FK(q_actual) — tcp_stand.
+    source="reference": controller reference pose, FK(q_target) — tcp_ref_stand.
     source="command": commanded pose, FK(q_sent) — tcp_command_stand (falls
     back to measured when absent). Used to anchor chunk-delta integration on
     the command state instead of the measured state.
     """
     if side not in {"left", "right"}:
         raise ValueError("side must be left or right")
-    if source not in {"actual", "command"}:
-        raise ValueError("source must be actual or command")
-    return _pose_from_state_arm(payload.get(side, {}), source)
+    if source not in {"auto", "actual", "reference", "command"}:
+        raise ValueError("source must be auto, actual, reference, or command")
+    arm = payload.get(side, {})
+    resolved = _automatic_tracking_pose_source(arm) if source == "auto" else source
+    return _pose_from_state_arm(arm, resolved)
 
 
 def normalize_runtime_proprio(proprio: np.ndarray, stats: dict[str, Any]) -> np.ndarray:
@@ -1173,6 +1179,30 @@ def _has_nonzero_pose(values: np.ndarray) -> bool:
     return bool(np.isfinite(values).all() and np.any(np.abs(values[:, :3]) > 1e-9))
 
 
+def _automatic_tracking_pose_source(value: Any) -> str:
+    arm = value if isinstance(value, dict) else {}
+    gate = arm.get("cartesian_gate") if isinstance(arm.get("cartesian_gate"), dict) else {}
+    controller_sim = arm.get("controller_simulation_mode")
+    operation_mode = str(gate.get("operation_mode", "")).strip().lower()
+    configured_source = str(
+        gate.get("controller_simulation_servo_state_source", "")
+    ).strip().lower()
+    physical_motion_expected = arm.get(
+        "physical_motion_expected", gate.get("physical_motion_expected")
+    )
+    controller_sim_active = (
+        operation_mode in {"simulation", "sim"}
+        and physical_motion_expected is False
+    ) or isinstance(controller_sim, dict)
+    if controller_sim_active and configured_source == "reference":
+        return "reference"
+    if isinstance(controller_sim, dict):
+        recommended = str(controller_sim.get("recommended_tracking_pose", "")).strip()
+        if recommended == "tcp_ref_stand":
+            return "reference"
+    return "actual"
+
+
 def _pose_from_state_arm(value: Any, source: str = "actual") -> np.ndarray:
     arm = value if isinstance(value, dict) else {}
     if source == "command":
@@ -1180,6 +1210,12 @@ def _pose_from_state_arm(value: Any, source: str = "actual") -> np.ndarray:
         # measured pose when the command pose is absent (e.g. before the first
         # send), so callers degrade to the legacy behavior instead of zeros.
         pose = arm.get("tcp_command_stand") or arm.get("tcp_stand") or arm.get("tcp_actual_stand") or {}
+    elif source == "reference":
+        if arm.get("tcp_ref_valid") is False:
+            raise ValueError("controller reference pose is invalid")
+        pose = arm.get("tcp_ref_stand")
+        if not isinstance(pose, dict):
+            raise ValueError("controller reference pose is unavailable")
     else:
         pose = arm.get("tcp_stand") or arm.get("tcp_actual_stand") or {}
     if not isinstance(pose, dict):
@@ -1190,11 +1226,22 @@ def _pose_from_state_arm(value: Any, source: str = "actual") -> np.ndarray:
     if isinstance(q, (list, tuple)) and len(q) >= 4:
         qx, qy, qz, qw = q[:4]
     else:
+        if source == "reference" and not all(
+            name in pose for name in ("qx", "qy", "qz", "qw")
+        ):
+            raise ValueError("controller reference pose quaternion is unavailable")
         qx = pose.get("qx", 0.0)
         qy = pose.get("qy", 0.0)
         qz = pose.get("qz", 0.0)
         qw = pose.get("qw", 1.0)
-    return np.asarray(
+    if source == "reference":
+        raw_values = [pose.get("x"), pose.get("y"), pose.get("z"), qx, qy, qz, qw]
+        try:
+            if not all(math.isfinite(float(item)) for item in raw_values):
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            raise ValueError("controller reference pose is incomplete or non-finite") from exc
+    out = np.asarray(
         [
             _float_or_zero(pose.get("x")),
             _float_or_zero(pose.get("y")),
@@ -1206,6 +1253,11 @@ def _pose_from_state_arm(value: Any, source: str = "actual") -> np.ndarray:
         ],
         dtype=np.float32,
     )
+    if source == "reference" and (
+        not np.isfinite(out).all() or float(np.linalg.norm(out[3:7])) < 1e-8
+    ):
+        raise ValueError("controller reference pose is non-finite or has an invalid quaternion")
+    return out
 
 
 def _decode_hdf5_attr(value: Any) -> str:

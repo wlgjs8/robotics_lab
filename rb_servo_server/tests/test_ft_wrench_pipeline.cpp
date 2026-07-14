@@ -95,6 +95,9 @@ bool testRotationAndPayloadCompensation() {
     RB_CHECK(rotation_out.healthy);
     RB_CHECK(near(rotation_out.wrench_tcp.fx, 0.0, 1e-12));
     RB_CHECK(near(rotation_out.wrench_tcp.fy, 3.0, 1e-12));
+    RB_CHECK(near(rotation_out.gravity_tcp[0], 0.0, 1e-12));
+    RB_CHECK(near(rotation_out.gravity_tcp[1], 0.0, 1e-12));
+    RB_CHECK(near(rotation_out.gravity_tcp[2], -kGravity, 1e-12));
 
     rb_servo::FtWrenchPipelineConfig payload_config = baseConfig();
     payload_config.payload_mass_kg = 1.0;
@@ -120,6 +123,9 @@ bool testRotationAndPayloadCompensation() {
     tilted.wrench_sensor.tz = -kGravity * 0.1;
     const auto tilted_out = tilted_pipeline.process(tilted, tilted_tcp, tilted.host_time_ns);
     RB_CHECK(tilted_out.healthy);
+    RB_CHECK(near(tilted_out.gravity_tcp[0], 0.0, 1e-12));
+    RB_CHECK(near(tilted_out.gravity_tcp[1], -kGravity, 1e-12));
+    RB_CHECK(near(tilted_out.gravity_tcp[2], 0.0, 1e-12));
     RB_CHECK(near(tilted_out.fast_external_wrench_tcp.fy, 0.0, 1e-10));
     RB_CHECK(near(tilted_out.fast_external_wrench_tcp.tz, 0.0, 1e-10));
     return true;

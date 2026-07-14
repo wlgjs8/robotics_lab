@@ -163,7 +163,8 @@ controller-simulation 경로는 실제 controller IP에 접속하므로 config�
 않습니다(`physical_motion_expected=false`). 이 carve-out은
 `cartesian_control.allow_in_controller_simulation: true`와
 `servo.allow_controller_simulation_motion: true` config로 열립니다(env 불필요).
-Tracking은 보통 controller reference인 `tcp_ref_stand`를 사용합니다.
+Tracking은 controller reference인 `tcp_ref_stand`를 사용하며, tracked sim
+profile은 physical control-box topology이므로 encoder motion을 fault-latch합니다.
 
 `make run`(real, `operation_mode: real`)과 `make run MODE=sim`(pgmode-sim,
 `operation_mode: simulation`)이 사용하는 두 stack config가 단일 진실원천이며,
@@ -316,9 +317,10 @@ make run MODE=sim   # pgmode controller-simulation
 ```
 
 소스를 고친 뒤에는 먼저 `make build`으로 stack을 빌드/설치합니다(rbpodo
-backend 포함). 하드웨어 없이 controller-simulation을 돌리려면 Rainbow 가상
-control-box VM 2대를 `make vm-up`으로 띄운 뒤 `make run MODE=sim`을 씁니다
-(`make vm-down` / `make vm-status`).
+backend 포함). `make vm-up`으로 관리하는 Rainbow Virtual ControlBox에서는
+simulated `q_actual`이 움직이므로, 현재 physical-box용 `stack_sim.yaml`의
+physical-motion fault latch와 양립하지 않습니다. VM 재승격에는 endpoint topology를
+명시하는 별도 contract와 review가 필요합니다; local launch YAML로 우회하지 않습니다.
 
 `make build`는 증분 빌드이며, layout-sensitive `config.hpp`가 바뀌면 서버
 object 전체만 자동으로 다시 컴파일합니다. CMake cache/toolchain/build-tree를
@@ -347,6 +349,40 @@ scope dashboard는 별도 fanout 포트 `50356`을 기본으로 수신하므로,
 checkpoint/config/python은 각각 `FLOW_INFER_CHECKPOINT`, `FLOW_INFER_CONFIG`,
 `FLOW_INFER_PYTHON`으로 바꿀 수 있고, `OPENPI_REMOTE_SKIP_WARMUP`,
 `RB_ALLOW_REAL_GRIPPER`, `DISPLAY` 등 호출 환경은 그대로 상속됩니다.
+
+실제 카메라 없이 controller pgmode simulation에서 같은 OpenPI 경로를
+검증할 때도 서버는 추적되는 `stack_sim.yaml`만 사용하고, 녹화 HDF5의 손목
+RGB-D는 물리 camera_server와
+겹치지 않는 `:5700`으로 재생합니다:
+
+```bash
+ACTION_SOURCE=none SCOPE_DASHBOARD=0 GRIPPER_SERVER=0 make run MODE=sim
+
+# another terminal; physical camera_server :5600 is untouched
+python3 scripts/offline_camera_replay.py --episode /path/to/episode_000.hdf5
+
+# first prove pgmode simulation telemetry before sending a policy command
+python3 scripts/controller_sim_state_monitor.py --port 50356 --gate 20
+
+OPENPI_REMOTE_SKIP_WARMUP=1 make flow-infer-sim-offline \
+  FLOW_INFER_ARGS='--proprio-mode velocity --depth-z-near-mm 50 --depth-z-far-mm 700 --depth-units-m 1e-4'
+```
+
+`stack_sim.yaml` registers the same `spacemouse_precise`, `umi_large_smooth`,
+and `flow_infer_smooth` command profiles as `stack_real.yaml`. In controller
+simulation only, the closed-loop tracking pose is `tcp_ref_stand`/`q_target`;
+an unavailable reference fails closed. `stack_sim.yaml` keeps
+`cartesian_control.allow_in_real: false`, and the offline flow config keeps both
+real arm and real gripper authority disabled. The sim-only Make target defaults
+to the pgmode-validated 6-step execution window; the physical-real launcher
+retains its existing 12-step default. Because the tracked sim topology targets
+physical control boxes held in pgmode, any encoder motion indication is a
+server-owned `fault_latch`; a Virtual ControlBox needs a separately reviewed,
+explicit topology contract before using this profile.
+
+The controller-box pgmode parameter comparison, storage provenance, long-run
+evidence, and interpretation boundary are recorded in
+[`docs/reports/flow_infer_pgmode_sim_param_search.md`](docs/reports/flow_infer_pgmode_sim_param_search.md).
 
 DeltaTwistFollower + velocity-proprio 안정성 확인을 위한 첫 실행 baseline은
 아래처럼 둡니다. RTC/ensemble은 기본 안정성 확인 뒤 별도로 opt-in합니다.

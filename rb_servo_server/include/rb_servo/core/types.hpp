@@ -118,7 +118,8 @@ enum class ControlMode {
 
 enum class JointTargetProfile {
     Direct,
-    InitMotion
+    InitMotion,
+    PayloadIdentification
 };
 
 enum class ServerMotionState {
@@ -543,6 +544,7 @@ struct ForceTorqueTelemetry {
     bool safety_rated = false;
     Wrench6D raw_sensor_wrench;
     Wrench6D wrench_tcp;
+    std::array<double, 3> gravity_tcp{};
     Wrench6D fast_external_wrench;
     Wrench6D control_external_wrench;
     bool healthy = false;
@@ -557,6 +559,24 @@ struct ForceTorqueTelemetry {
     uint64_t tare_generation = 0;
     std::string tare_reason;
     Wrench6D residual_tare_tcp;
+    bool payload_identification_inhibit = false;
+    std::string joint_target_profile = "direct";
+};
+
+// Effective, server-owned payload-identification profile published to clients.
+// This mirrors the validated config without exposing config.hpp through the
+// core telemetry types (config.hpp already depends on this header).
+struct PayloadIdentificationConfigTelemetry {
+    bool enable = false;
+    int min_poses = 0;
+    double arrival_tolerance_deg = 0.0;
+    double settle_sec = 0.0;
+    int samples_per_pose = 0;
+    double max_force_stddev_n = 0.0;
+    double max_torque_stddev_nm = 0.0;
+    double max_force_fit_rms_n = 0.0;
+    double max_torque_fit_rms_nm = 0.0;
+    double max_design_condition_number = 0.0;
 };
 
 struct ForceControlTelemetry {
@@ -793,6 +813,22 @@ struct ServoTarget {
     JointArray right_q_target_deg{};
 };
 
+// Timing around the vendor SDK's blocking CobotData::request_data() call.
+// System-clock stamps can be correlated with passive packet-capture timestamps;
+// steady-clock stamps remain suitable for in-process duration measurements.
+// This is deliberately distinct from BackendTiming, which covers the entire
+// readState() operation, including state mapping and fault classification.
+struct BackendReadExchangeTiming {
+    bool available = false;
+    uint64_t exchange_sequence = 0;
+    std::string source = "none";
+    uint64_t request_data_call_start_steady_ns = 0;
+    uint64_t request_data_call_start_system_ns = 0;
+    uint64_t request_data_call_return_steady_ns = 0;
+    uint64_t request_data_call_return_system_ns = 0;
+    double request_data_call_duration_us = 0.0;
+};
+
 struct BackendCallSnapshot {
     bool ok = true;
     bool accepted = true;
@@ -801,6 +837,7 @@ struct BackendCallSnapshot {
     std::string error_code;
     std::string error_message;
     double duration_us = 0.0;
+    BackendReadExchangeTiming read_exchange_timing;
     std::string state_after_source = "none";
     BackendAckPolicy ack_policy = BackendAckPolicy::BackendDefault;
     bool ack_observed = false;
@@ -1155,6 +1192,7 @@ struct ServoSnapshot {
     ForceTorqueTelemetry right_force_torque;
     ForceControlTelemetry left_force_control;
     ForceControlTelemetry right_force_control;
+    PayloadIdentificationConfigTelemetry payload_identification_config;
     uint64_t motion_epoch = 0;
 
     DualArmCommand command;

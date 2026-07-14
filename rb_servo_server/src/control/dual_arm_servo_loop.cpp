@@ -581,7 +581,7 @@ RunMode cartesianComputationRunModeForArm(
 ) {
     const RunMode run_mode = backendConfigForArm(config, command.arm_id).run_mode;
     if (run_mode == RunMode::Real &&
-        isStreamingCartesianMode(command.mode) &&
+        isCartesianMode(command.mode) &&
         controllerSimulationCartesianGateOpen(config, backendConfigForArm(config, command.arm_id))) {
         return RunMode::Simulation;
     }
@@ -616,7 +616,7 @@ bool controllerSimulationReferenceSourceActive(
     if (source != CartesianControllerSimulationStateSource::Reference) return false;
     const BackendConfig& backend = backendConfigForArm(config, command.arm_id);
     return backend.run_mode == RunMode::Real &&
-        isStreamingCartesianMode(command.mode) &&
+        isCartesianMode(command.mode) &&
         controllerSimulationCartesianGateOpen(config, backend);
 }
 
@@ -1311,6 +1311,7 @@ BackendCallSnapshot readCallSnapshot(
     snapshot.error_code = error.code;
     snapshot.error_message = error.message;
     snapshot.duration_us = result.timing.duration_us;
+    snapshot.read_exchange_timing = result.read_exchange_timing;
     return snapshot;
 }
 
@@ -1982,6 +1983,89 @@ void DualArmServoLoop::invalidatePostInitTare(ArmId arm_id, uint64_t command_seq
     cartesian_controller.release();
 }
 
+bool DualArmServoLoop::latchPayloadIdentificationInhibit(ArmId arm_id) {
+    ForceArmRuntime& runtime =
+        arm_id == ArmId::Left ? left_force_runtime_ : right_force_runtime_;
+    FtWrenchPipeline& pipeline =
+        arm_id == ArmId::Left ? left_ft_pipeline_ : right_ft_pipeline_;
+    NormalForceController& controller = arm_id == ArmId::Left
+        ? left_normal_force_controller_ : right_normal_force_controller_;
+    ForceController& cartesian_controller = arm_id == ArmId::Left
+        ? left_cartesian_force_controller_ : right_cartesian_force_controller_;
+    const FtWrenchPipelineConfig& ft_config = arm_id == ArmId::Left
+        ? config_.force_torque.left : config_.force_torque.right;
+
+    // The profile is unusable unless the server owns an explicit profile and
+    // this arm has the post-InitMotion tare path that is the only release event.
+    // Holding here is safer than allowing a profile that can never establish or
+    // later restore a valid software zero.
+    if (!config_.force_torque.payload_identification.enable ||
+        !ft_config.enable || !ft_config.auto_tare_after_init_motion ||
+        !runtime.ft.healthy || runtime.ft.stale) {
+        return false;
+    }
+    if (runtime.payload_identification_inhibit) {
+        return true;
+    }
+
+    runtime.payload_identification_inhibit = true;
+    runtime.tare_valid = false;
+    runtime.tare_waiting_for_init_completion = false;
+    runtime.tare_collecting = false;
+    runtime.tare_not_before_ns = 0;
+    runtime.ft.payload_identification_inhibit = true;
+    runtime.ft.tare_valid = false;
+    runtime.ft.tare_state = "awaiting_init_motion";
+    runtime.ft.tare_sample_count = 0;
+    runtime.ft.tare_reason =
+        "payload identification invalidated software zero; run Init Motion to re-tare";
+    pipeline.cancelResidualTare();
+
+    runtime.pending_proposal.reset();
+    runtime.pending_proposal_applied = false;
+    runtime.pending_cartesian_proposal.reset();
+    runtime.pending_cartesian_proposal_applied = false;
+    runtime.rolling_compliance_target_valid = false;
+    runtime.rolling_compliance_target_source = "unavailable";
+    runtime.pending_rolling_compliance_target_valid = false;
+    runtime.pending_rolling_compliance_target_source = "unavailable";
+    runtime.compliance_hold_target_this_tick = false;
+    runtime.control.contact_active = false;
+    runtime.control.normal_contact_active = false;
+    runtime.control.transverse_contact_active = false;
+    runtime.control.rotational_contact_active = false;
+    runtime.control.compliance_active = false;
+    runtime.control.normal_regulating = false;
+    runtime.control.transverse_regulating = false;
+    runtime.control.rotational_regulating = false;
+    runtime.control.proposal_valid = false;
+    runtime.control.proposal_committed = false;
+    runtime.control.state = "payload_identification_inhibited";
+    runtime.normal_contact_active = false;
+    runtime.transverse_contact_active = false;
+    runtime.rotational_contact_active = false;
+    runtime.contact_anchor_valid = false;
+    runtime.enter_count = 0;
+    runtime.transverse_enter_count = 0;
+    runtime.rotational_enter_count = 0;
+    runtime.hard_limit_count = 0;
+    runtime.release_start_ns = 0;
+    runtime.release_hold_pending = false;
+    runtime.release_hold_applied = false;
+    runtime.release_hold_clear_requested = false;
+    runtime.control.correction_m = 0.0;
+    runtime.control.velocity_m_s = 0.0;
+    runtime.control.acceleration_m_s2 = 0.0;
+    runtime.control.energy_j = 0.0;
+    controller.release();
+    cartesian_controller.release();
+
+    std::cerr << "[INFO] FT " << toString(arm_id)
+              << " payload-identification force-motion inhibit latched; "
+                 "Init Motion re-tare required\n";
+    return true;
+}
+
 void DualArmServoLoop::beginPostInitTare(ArmId arm_id, uint64_t now_ns) {
     ForceArmRuntime& runtime =
         arm_id == ArmId::Left ? left_force_runtime_ : right_force_runtime_;
@@ -2063,6 +2147,8 @@ bool DualArmServoLoop::updateForceRuntime(
     runtime.ft.sensor_health_verified = false;
     runtime.ft.safety_rated = false;
     runtime.ft.raw_sensor_wrench = state.eft_wrench;
+    runtime.ft.payload_identification_inhibit =
+        runtime.payload_identification_inhibit;
     runtime.ft.auto_tare_enabled = ft_config.auto_tare_after_init_motion;
     runtime.ft.tare_valid = runtime.tare_valid;
     runtime.ft.tare_generation = runtime.tare_generation;
@@ -2135,6 +2221,7 @@ bool DualArmServoLoop::updateForceRuntime(
     const FtWrenchPipelineOutput output =
         pipeline.process(raw, *state.tcp_actual_stand, now_ns);
     runtime.ft.wrench_tcp = output.wrench_tcp;
+    runtime.ft.gravity_tcp = output.gravity_tcp;
     runtime.ft.fast_external_wrench = output.fast_external_wrench_tcp;
     runtime.ft.control_external_wrench = output.control_external_wrench_tcp;
     runtime.ft.healthy = output.healthy;
@@ -2142,6 +2229,58 @@ bool DualArmServoLoop::updateForceRuntime(
     runtime.ft.freshness_value = output.freshness_value;
     runtime.ft.freshness_advanced = output.freshness_advanced;
     runtime.ft.reason = output.reason;
+
+    // Payload identification deliberately invalidates the software tare so the
+    // GUI can collect the pre-payload/pre-tare TCP wrench.  The normal force
+    // path returns early while that tare is invalid, so retain a separate raw
+    // wrench hard guard here.  Otherwise calibration motion could continue with
+    // stale/unhealthy F/T data or never publish/latch the configured hard limit.
+    if (runtime.payload_identification_inhibit && !output.healthy) {
+        runtime.control.state = "unavailable";
+        runtime.control.fault_reason =
+            "payload identification F/T pipeline unhealthy: " + output.reason;
+        if (runtime.control.enabled &&
+            config_.force_control.operating_mode != "monitor") {
+            if (fault_reason) *fault_reason = runtime.control.fault_reason;
+            return true;
+        }
+    }
+    if (runtime.payload_identification_inhibit && output.healthy &&
+        runtime.control.enabled &&
+        config_.force_control.operating_mode != "monitor") {
+        const math::Matrix3 r_stand_tcp = math::rotationFromPose(tcp);
+        const math::Vector3 raw_force_stand = r_stand_tcp * math::Vector3(
+            output.wrench_tcp.fx, output.wrench_tcp.fy, output.wrench_tcp.fz
+        );
+        const math::Vector3 raw_torque_stand = r_stand_tcp * math::Vector3(
+            output.wrench_tcp.tx, output.wrench_tcp.ty, output.wrench_tcp.tz
+        );
+        runtime.control.fast_normal_force_n = -normal.dot(raw_force_stand);
+        runtime.control.fast_force_norm_n = raw_force_stand.norm();
+        runtime.control.fast_torque_norm_nm = raw_torque_stand.norm();
+        const bool hard_limit_threshold_exceeded =
+            runtime.control.fast_normal_force_n >= arm_config.hard_normal_force_n ||
+            runtime.control.fast_force_norm_n >= arm_config.hard_force_norm_n ||
+            runtime.control.fast_torque_norm_nm >= arm_config.hard_torque_norm_nm;
+        runtime.control.hard_limit_threshold_exceeded = hard_limit_threshold_exceeded;
+        if (output.freshness_advanced) {
+            if (!hard_limit_threshold_exceeded) {
+                runtime.hard_limit_count = 0;
+            } else if (runtime.hard_limit_count < arm_config.hard_limit_debounce_samples) {
+                ++runtime.hard_limit_count;
+            }
+        }
+        runtime.control.hard_limit_sample_count = runtime.hard_limit_count;
+        runtime.control.hard_limit_exceeded =
+            runtime.hard_limit_count >= arm_config.hard_limit_debounce_samples;
+        if (runtime.control.hard_limit_exceeded) {
+            runtime.control.state = "fault";
+            runtime.control.fault_reason =
+                "payload identification raw force/torque hard limit exceeded";
+            if (fault_reason) *fault_reason = runtime.control.fault_reason;
+            return true;
+        }
+    }
 
     const auto update_tare = [&]() {
         // Init Motion completion plus the configured settle time is the stationarity
@@ -2155,7 +2294,11 @@ bool DualArmServoLoop::updateForceRuntime(
         } else if (update.state == FtTareState::Accepted) {
             runtime.tare_collecting = false;
             runtime.tare_valid = true;
+            const bool payload_identification_inhibit_was_latched =
+                runtime.payload_identification_inhibit;
+            runtime.payload_identification_inhibit = false;
             runtime.ft.tare_valid = true;
+            runtime.ft.payload_identification_inhibit = false;
             runtime.ft.tare_state = "accepted";
             runtime.ft.residual_tare_tcp = pipeline.residualTareTcp();
             runtime.previous_actual_pose_ns = 0;
@@ -2174,6 +2317,11 @@ bool DualArmServoLoop::updateForceRuntime(
             std::cerr << "[INFO] FT " << toString(arm_id)
                       << " post-init software zero accepted (samples="
                       << update.sample_count << ")\n";
+            if (payload_identification_inhibit_was_latched) {
+                std::cerr << "[INFO] FT " << toString(arm_id)
+                          << " payload-identification force-motion inhibit cleared "
+                             "after accepted Init Motion tare\n";
+            }
         } else if (update.state == FtTareState::Rejected) {
             runtime.tare_collecting = false;
             runtime.tare_valid = false;
@@ -2209,10 +2357,20 @@ bool DualArmServoLoop::updateForceRuntime(
             return false;
         }
         if (!runtime.tare_valid) {
-            runtime.control.state = runtime.ft.tare_state == "rejected"
-                ? "tare_rejected" : "awaiting_init_tare";
+            runtime.control.state = runtime.payload_identification_inhibit
+                ? "payload_identification_inhibited"
+                : (runtime.ft.tare_state == "rejected"
+                    ? "tare_rejected" : "awaiting_init_tare");
             return false;
         }
+    }
+
+    // Defensive backstop for configurations without automatic tare. Such a
+    // configuration cannot normally admit the profile, but an already-latched
+    // runtime must still never re-enter a force-motion path.
+    if (runtime.payload_identification_inhibit) {
+        runtime.control.state = "payload_identification_inhibited";
+        return false;
     }
 
     if (!output.healthy) {
@@ -3426,6 +3584,15 @@ void DualArmServoLoop::loopMain() {
     };
     PendingTopSend pending_top_send;
     const bool send_at_top = config_.servo.send_at_tick_start;
+    // In pgmode the safety filter advances a purely commanded/reference robot;
+    // it must therefore see the target that was actually dispatched at the top
+    // of this tick. Leaving bookkeeping until the end of the tick makes the
+    // acceleration limiter operate on a two-send-old history and forms an
+    // unstable alternating recurrence. Keep the physical-real timing unchanged
+    // until that lane has its own supervised acceptance evidence.
+    const bool controller_sim_top_send_bookkeeping =
+        send_at_top && controllerSimulationMotionRequired(config_) &&
+        controllerSimulationMotionGateOpen(config_);
 
     // Hybrid sleep-then-spin: sleep_until(next_tick - slack), then busy-spin the
     // final `slack` so the tick lands on phase without the C-state exit +
@@ -3497,6 +3664,19 @@ void DualArmServoLoop::loopMain() {
                 loop_start,
                 pending_top_send.deadline_ns
             );
+            if (controller_sim_top_send_bookkeeping) {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                if (dual_send_result.left.result.accepted &&
+                    !fault_latched_before_send && !send_suppressed) {
+                    left_prevprev_sent_q_deg_ = left_prev_sent_q_deg_;
+                    left_prev_sent_q_deg_ = sent_target.left_q_target_deg;
+                }
+                if (dual_send_result.right.result.accepted &&
+                    !fault_latched_before_send && !send_suppressed) {
+                    right_prevprev_sent_q_deg_ = right_prev_sent_q_deg_;
+                    right_prev_sent_q_deg_ = sent_target.right_q_target_deg;
+                }
+            }
             pending_top_send.valid = false;
         }
         // Fail-closed: if external-box keep-out is enforced but the producer feed is
@@ -3705,6 +3885,47 @@ void DualArmServoLoop::loopMain() {
             hold.right.gripper_target = source_command.right.gripper_target;
             return hold;
         };
+        const auto is_payload_identification_arm = [](const ArmCommand& arm) {
+            return arm.joint_target_profile ==
+                JointTargetProfile::PayloadIdentification;
+        };
+        const auto is_plain_hold_arm = [](const ArmCommand& arm) {
+            return arm.mode == ControlMode::Hold &&
+                arm.joint_target_profile == JointTargetProfile::Direct &&
+                !arm.has_joint_target && !arm.has_arrival_stop &&
+                !arm.has_tcp_target && !arm.has_linear_move_duration &&
+                !arm.has_linear_move_linear_speed &&
+                !arm.has_linear_move_angular_speed &&
+                !arm.has_linear_move_orientation_mode &&
+                !arm.has_gripper && !arm.has_freedrive &&
+                arm.force_control.mode == ForceControlMode::Off;
+        };
+        const auto is_payload_identification_target = [
+            &is_payload_identification_arm
+        ](const ArmCommand& arm) {
+            return is_payload_identification_arm(arm) &&
+                arm.mode == ControlMode::JointTarget && arm.has_joint_target &&
+                finiteJointArray(arm.q_target_deg) && !arm.has_arrival_stop &&
+                !arm.has_tcp_target && !arm.has_linear_move_duration &&
+                !arm.has_linear_move_linear_speed &&
+                !arm.has_linear_move_angular_speed &&
+                !arm.has_linear_move_orientation_mode &&
+                !arm.has_gripper && !arm.has_freedrive &&
+                arm.force_control.mode == ForceControlMode::Off;
+        };
+        const bool left_payload_identification =
+            is_payload_identification_arm(command.left);
+        const bool right_payload_identification =
+            is_payload_identification_arm(command.right);
+        const bool payload_identification_profile_present =
+            left_payload_identification || right_payload_identification;
+        const bool payload_identification_shape_valid =
+            left_payload_identification != right_payload_identification &&
+            ((is_payload_identification_target(command.left) &&
+              is_plain_hold_arm(command.right)) ||
+             (is_payload_identification_target(command.right) &&
+              is_plain_hold_arm(command.left)));
+        bool payload_identification_shape_rejected = false;
         if (isSyntheticHoldCommand(command)) {
             command = metadata_hold(command);
         }
@@ -3883,6 +4104,27 @@ void DualArmServoLoop::loopMain() {
             clearLatchedCartesianTargets();
             setMotionState(ServerMotionState::ConnectedHold);
             command = metadata_hold(command);
+        } else if (payload_identification_profile_present &&
+                   !payload_identification_shape_valid) {
+            // Payload identification is an exclusive one-arm calibration
+            // operation. Reject the entire packet before Freedrive or any
+            // motion primitive can consume a malformed peer command. Preserve
+            // the profile only for rejection telemetry and to suppress
+            // Cartesian force-Hold promotion on this packet.
+            DualArmCommand rejected = makeHoldCommand(
+                left_state, right_state, loop_start);
+            rejected.seq = command.seq;
+            rejected.host_time_ns = command.host_time_ns;
+            rejected.source = command.source;
+            rejected.lease = command.lease;
+            rejected.left.timeout_sec = command.left.timeout_sec;
+            rejected.right.timeout_sec = command.right.timeout_sec;
+            rejected.left.joint_target_profile =
+                command.left.joint_target_profile;
+            rejected.right.joint_target_profile =
+                command.right.joint_target_profile;
+            command = rejected;
+            payload_identification_shape_rejected = true;
         } else if (isExplicitDualHoldCommand(command)) {
             if (!fault_latched_.load() &&
                 motion_state_.load() == ServerMotionState::Running) {
@@ -3911,6 +4153,14 @@ void DualArmServoLoop::loopMain() {
             command = metadata_hold(command);
         }
 
+        // Preserve the profile received from the authoritative command path.
+        // applyInitMotionSequencer rewrites init_motion into direct waypoints,
+        // while this field remains the operator-visible pre-rewrite profile.
+        left_force_runtime_.ft.joint_target_profile =
+            toString(command.left.joint_target_profile);
+        right_force_runtime_.ft.joint_target_profile =
+            toString(command.right.joint_target_profile);
+
         // Advance the per-arm free-drive arming state machine every tick. Once an
         // arm leaves Off, anyFreedriveActive() suppresses servo_j to both
         // controllers (currentSendPolicy()=="freedrive") so the controller settles
@@ -3929,6 +4179,8 @@ void DualArmServoLoop::loopMain() {
         std::string init_profile_after_left = init_profile_before_left;
         std::string init_profile_after_right = init_profile_before_right;
         std::string init_non_init_arm_preserved_mode;
+        bool payload_identification_profile_rejected =
+            payload_identification_shape_rejected;
         if (!fault_latched_.load()) {
             left_safety_tracking_ = SafetyTrackingTelemetry{};
             right_safety_tracking_ = SafetyTrackingTelemetry{};
@@ -3974,6 +4226,35 @@ void DualArmServoLoop::loopMain() {
             safety_verdict = SafetyVerdict::Ok;
         } else {
             SafetyVerdict command_verdict = SafetyVerdict::Ok;
+            const auto apply_payload_identification_profile = [this](
+                ArmId arm_id,
+                ArmCommand* arm_command
+            ) {
+                if (!arm_command || arm_command->mode != ControlMode::JointTarget ||
+                    arm_command->joint_target_profile !=
+                        JointTargetProfile::PayloadIdentification) {
+                    return true;
+                }
+                if (latchPayloadIdentificationInhibit(arm_id)) {
+                    return true;
+                }
+
+                ForceArmRuntime& runtime = arm_id == ArmId::Left
+                    ? left_force_runtime_ : right_force_runtime_;
+                runtime.ft.tare_reason =
+                    "payload_identification profile unavailable: enable profile, arm F/T, "
+                    "and automatic post-InitMotion tare";
+                arm_command->mode = ControlMode::Hold;
+                arm_command->has_joint_target = false;
+                return false;
+            };
+            const bool left_payload_profile_ok =
+                apply_payload_identification_profile(ArmId::Left, &command.left);
+            const bool right_payload_profile_ok =
+                apply_payload_identification_profile(ArmId::Right, &command.right);
+            payload_identification_profile_rejected =
+                payload_identification_profile_rejected ||
+                !left_payload_profile_ok || !right_payload_profile_ok;
             // Collision-free TcpLinearMove: decide Straight (pass through to the exact
             // MoveL) vs Detour (rewrite to a streamed JointTarget collision-free path).
             command = applyCollisionFreeLinearMove(command, left_state, right_state);
@@ -4010,6 +4291,9 @@ void DualArmServoLoop::loopMain() {
             const bool motion_requested = commandRequestsMotion(command);
             const ServoTarget desired =
                 computeServoTarget(left_state, right_state, command, filter_dt_sec, &command_verdict);
+            if (payload_identification_profile_rejected) {
+                command_verdict = SafetyVerdict::InvalidCommand;
+            }
 
             // computeServoTarget already encodes the correct PER-ARM result in `desired`:
             // an arm whose Cartesian/IK solve failed is held at its prev_sent target, while
@@ -4234,11 +4518,13 @@ void DualArmServoLoop::loopMain() {
 
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            if (left_ok && !fault_latched_before_send && !send_suppressed) {
+            if (!controller_sim_top_send_bookkeeping && left_ok &&
+                !fault_latched_before_send && !send_suppressed) {
                 left_prevprev_sent_q_deg_ = left_prev_sent_q_deg_;
                 left_prev_sent_q_deg_ = sent_target.left_q_target_deg;
             }
-            if (right_ok && !fault_latched_before_send && !send_suppressed) {
+            if (!controller_sim_top_send_bookkeeping && right_ok &&
+                !fault_latched_before_send && !send_suppressed) {
                 right_prevprev_sent_q_deg_ = right_prev_sent_q_deg_;
                 right_prev_sent_q_deg_ = sent_target.right_q_target_deg;
             }
@@ -4422,6 +4708,24 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.right_force_torque = right_force_runtime_.ft;
             latest_snapshot_.left_force_control = left_force_runtime_.control;
             latest_snapshot_.right_force_control = right_force_runtime_.control;
+            const auto& payload_id = config_.force_torque.payload_identification;
+            latest_snapshot_.payload_identification_config.enable = payload_id.enable;
+            latest_snapshot_.payload_identification_config.min_poses = payload_id.min_poses;
+            latest_snapshot_.payload_identification_config.arrival_tolerance_deg =
+                payload_id.arrival_tolerance_deg;
+            latest_snapshot_.payload_identification_config.settle_sec = payload_id.settle_sec;
+            latest_snapshot_.payload_identification_config.samples_per_pose =
+                payload_id.samples_per_pose;
+            latest_snapshot_.payload_identification_config.max_force_stddev_n =
+                payload_id.max_force_stddev_n;
+            latest_snapshot_.payload_identification_config.max_torque_stddev_nm =
+                payload_id.max_torque_stddev_nm;
+            latest_snapshot_.payload_identification_config.max_force_fit_rms_n =
+                payload_id.max_force_fit_rms_n;
+            latest_snapshot_.payload_identification_config.max_torque_fit_rms_nm =
+                payload_id.max_torque_fit_rms_nm;
+            latest_snapshot_.payload_identification_config.max_design_condition_number =
+                payload_id.max_design_condition_number;
             latest_snapshot_.motion_epoch = motion_epoch_;
             latest_snapshot_.command = command;
             latest_snapshot_.left_sent_q_deg = sent_target.left_q_target_deg;
@@ -6131,10 +6435,22 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     invalidate_non_cartesian_equilibrium(left_force_runtime_, command.left.mode);
     invalidate_non_cartesian_equilibrium(right_force_runtime_, command.right.mode);
 
+    // A payload-identification packet is an exclusive joint-space operation.
+    // Suppress Cartesian force-Hold promotion on BOTH arms for this packet: the
+    // selected arm must stay on its JointTarget path, and the peer's explicit
+    // Hold must remain a stationary joint hold. Checking the raw profile also
+    // covers fail-closed admission, where the selected command was rewritten
+    // to Hold because the profile was unavailable.
+    const bool payload_identification_command =
+        command.left.joint_target_profile ==
+            JointTargetProfile::PayloadIdentification ||
+        command.right.joint_target_profile ==
+            JointTargetProfile::PayloadIdentification;
+
     // A Cartesian-admittance Hold is an active fixed equilibrium, not a fresh
     // measured-pose target each tick. This prevents the compliance offset from
     // ratcheting the command in the direction of motion.
-    const auto promote_force_hold = [this, &command](
+    const auto promote_force_hold = [this, &command, payload_identification_command](
         ArmId arm_id,
         const RobotState& state,
         ControlMode raw_command_mode,
@@ -6143,8 +6459,14 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         if (!arm_command) {
             return false;
         }
+        if (payload_identification_command) {
+            return false;
+        }
         ForceArmRuntime& runtime = arm_id == ArmId::Left
             ? left_force_runtime_ : right_force_runtime_;
+        if (runtime.payload_identification_inhibit) {
+            return false;
+        }
         if (runtime.release_hold_pending) {
             arm_command->mode = ControlMode::TcpPoseTarget;
             arm_command->tcp_target_stand = runtime.release_hold_pose;
@@ -6273,6 +6595,47 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             effective_command.tcp_target_profile,
             &right_profile_found
         );
+        // Resolve the Cartesian feedback state before advancing any stateful
+        // tracker. Physical-real uses q_actual/tcp_actual. An rbpodo control box
+        // held in pgmode simulation uses q_target/tcp_ref instead, because its
+        // physical encoders intentionally remain still. Missing reference state
+        // is fail-closed and must not mutate the chunk/SMD followers.
+        const CartesianServoStateSelection left_servo_state =
+            selectCartesianServoStateForArm(config_, effective_command.left, left_state);
+        const CartesianServoStateSelection right_servo_state =
+            selectCartesianServoStateForArm(config_, effective_command.right, right_state);
+        if (!left_servo_state.ok || !right_servo_state.ok) {
+            if (command_verdict) *command_verdict = SafetyVerdict::CartesianUnavailable;
+            if (!left_servo_state.ok) {
+                left_last_cartesian_solve_ = cartesianUnavailableTelemetry(
+                    left_state,
+                    config_.cartesian_control,
+                    left_servo_state.reason
+                );
+                left_last_cartesian_solve_.cartesian_servo_state_source =
+                    left_servo_state.context.servo_state_source;
+                left_last_cartesian_solve_.cartesian_divergence_source =
+                    left_servo_state.context.divergence_source;
+                left_last_cartesian_solve_.q_reference_for_servo_valid =
+                    left_servo_state.context.q_reference_for_servo_valid;
+            }
+            if (!right_servo_state.ok) {
+                right_last_cartesian_solve_ = cartesianUnavailableTelemetry(
+                    right_state,
+                    config_.cartesian_control,
+                    right_servo_state.reason
+                );
+                right_last_cartesian_solve_.cartesian_servo_state_source =
+                    right_servo_state.context.servo_state_source;
+                right_last_cartesian_solve_.cartesian_divergence_source =
+                    right_servo_state.context.divergence_source;
+                right_last_cartesian_solve_.q_reference_for_servo_valid =
+                    right_servo_state.context.q_reference_for_servo_valid;
+            }
+            target.left_q_target_deg = left_prev_sent_q_deg_;
+            target.right_q_target_deg = right_prev_sent_q_deg_;
+            return target;
+        }
         if (effective_command.left.mode == ControlMode::TcpPoseTarget &&
             left_pose_track_profile_name_ != left_tcp_profile.name) {
             left_pose_track_smd_ = SmdPoseTracker(left_tcp_profile.pose_track_smd);
@@ -6297,14 +6660,14 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         // applySafety(), so strict divergence explanation intentionally reads the
         // previous safety tick's intervention stamp through a short debounce.
         pollChunkFrames();
-        const auto actual_feedback_pose_for_arm = [this](
+        const auto servo_feedback_pose_for_arm = [this](
             const RobotState& state,
             ArmId arm_id,
             const ArmMountConfig& mount,
             const JointArray& previous_sent_q_deg
         ) {
-            if (state.tcp_actual_valid && state.tcp_actual_stand.has_value()) {
-                return *state.tcp_actual_stand;
+            if (state.has_valid_tcp_pose && state.tcp_stand.has_value()) {
+                return *state.tcp_stand;
             }
             if (kinematics_) {
                 return kinematics_->computeTcpStand(arm_id, previous_sent_q_deg, mount);
@@ -6321,10 +6684,10 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             }
             return Pose6D{};
         };
-        const Pose6D left_delta_twist_actual_feedback = actual_feedback_pose_for_arm(
-            left_state, ArmId::Left, config_.left_mount, left_prev_sent_q_deg_);
-        const Pose6D right_delta_twist_actual_feedback = actual_feedback_pose_for_arm(
-            right_state, ArmId::Right, config_.right_mount, right_prev_sent_q_deg_);
+        const Pose6D left_delta_twist_actual_feedback = servo_feedback_pose_for_arm(
+            left_servo_state.state, ArmId::Left, config_.left_mount, left_prev_sent_q_deg_);
+        const Pose6D right_delta_twist_actual_feedback = servo_feedback_pose_for_arm(
+            right_servo_state.state, ArmId::Right, config_.right_mount, right_prev_sent_q_deg_);
         const Pose6D left_delta_twist_execution_feedback = execution_feedback_pose_for_arm(
             ArmId::Left, config_.left_mount, left_prev_sent_q_deg_);
         const Pose6D right_delta_twist_execution_feedback = execution_feedback_pose_for_arm(
@@ -6449,49 +6812,29 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         const RunMode right_cartesian_compute_run_mode =
             cartesianComputationRunModeForArm(config_, effective_command.right);
 
-        const CartesianServoStateSelection left_servo_state =
-            selectCartesianServoStateForArm(config_, effective_command.left, left_state);
-        const CartesianServoStateSelection right_servo_state =
-            selectCartesianServoStateForArm(config_, effective_command.right, right_state);
-        if (!left_servo_state.ok || !right_servo_state.ok) {
-            if (command_verdict) *command_verdict = SafetyVerdict::CartesianUnavailable;
-            if (!left_servo_state.ok) {
-                left_last_cartesian_solve_ = cartesianUnavailableTelemetry(
-                    left_state,
-                    config_.cartesian_control,
-                    left_servo_state.reason
-                );
-                left_last_cartesian_solve_.cartesian_servo_state_source =
-                    left_servo_state.context.servo_state_source;
-                left_last_cartesian_solve_.cartesian_divergence_source =
-                    left_servo_state.context.divergence_source;
-                left_last_cartesian_solve_.q_reference_for_servo_valid =
-                    left_servo_state.context.q_reference_for_servo_valid;
-            }
-            if (!right_servo_state.ok) {
-                right_last_cartesian_solve_ = cartesianUnavailableTelemetry(
-                    right_state,
-                    config_.cartesian_control,
-                    right_servo_state.reason
-                );
-                right_last_cartesian_solve_.cartesian_servo_state_source =
-                    right_servo_state.context.servo_state_source;
-                right_last_cartesian_solve_.cartesian_divergence_source =
-                    right_servo_state.context.divergence_source;
-                right_last_cartesian_solve_.q_reference_for_servo_valid =
-                    right_servo_state.context.q_reference_for_servo_valid;
-            }
-            target.left_q_target_deg = left_prev_sent_q_deg_;
-            target.right_q_target_deg = right_prev_sent_q_deg_;
-            return target;
-        }
+        // The IK seed and the pose used to form the Cartesian error must describe
+        // the same controller state. Physical-real deliberately keeps the
+        // feed-forward previous-sent seed. In controller pgmode, however, tcp_ref
+        // is derived from q_target and is normally one data-frame behind the last
+        // sent target. Combining that delayed pose with the newer sent-joint seed
+        // creates an alternating feedback pair at 500 Hz. Seed pgmode IK from the
+        // selected reference joints instead; this branch is active only when the
+        // explicit controller-simulation reference source is selected.
+        const JointArray& left_cartesian_ik_seed_q_deg =
+            left_servo_state.context.servo_state_source == "reference"
+            ? left_servo_state.state.q_actual_deg
+            : left_prev_sent_q_deg_;
+        const JointArray& right_cartesian_ik_seed_q_deg =
+            right_servo_state.context.servo_state_source == "reference"
+            ? right_servo_state.state.q_actual_deg
+            : right_prev_sent_q_deg_;
 
         const CartesianArmTargetResult left_cartesian_result =
             effective_command.left.mode == ControlMode::TcpLinearMove
             ? cartesian_servo.computeLinearMoveTarget(
                 effective_command.left,
                 left_servo_state.state,
-                left_prev_sent_q_deg_,
+                left_cartesian_ik_seed_q_deg,
                 left_cartesian_compute_run_mode,
                 dt_sec,
                 continue_left_linear ? 0 : command.seq,
@@ -6501,8 +6844,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             : isCartesianMode(effective_command.left.mode)
             ? cartesian.computeArmJointTarget(
                 left_pose_track_command,
-                left_state,
-                left_prev_sent_q_deg_,
+                left_servo_state.state,
+                left_cartesian_ik_seed_q_deg,
                 left_cartesian_compute_run_mode
             )
             : CartesianArmTargetResult{
@@ -6513,6 +6856,12 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             };
         target.left_q_target_deg = left_cartesian_result.q_target_deg;
         left_last_cartesian_solve_ = left_cartesian_result.telemetry;
+        left_last_cartesian_solve_.cartesian_servo_state_source =
+            left_servo_state.context.servo_state_source;
+        left_last_cartesian_solve_.cartesian_divergence_source =
+            left_servo_state.context.divergence_source;
+        left_last_cartesian_solve_.q_reference_for_servo_valid =
+            left_servo_state.context.q_reference_for_servo_valid;
         if (command.left.mode == ControlMode::TcpLinearMove && left_cartesian_servo_path_.active) {
             left_cartesian_servo_path_.lease_enforced = command.lease.enforce_lease;
             left_cartesian_servo_path_.lease_expires_time_ns = command.lease.expires_time_ns;
@@ -6523,7 +6872,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             ? cartesian_servo.computeLinearMoveTarget(
                 effective_command.right,
                 right_servo_state.state,
-                right_prev_sent_q_deg_,
+                right_cartesian_ik_seed_q_deg,
                 right_cartesian_compute_run_mode,
                 dt_sec,
                 continue_right_linear ? 0 : command.seq,
@@ -6533,8 +6882,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             : isCartesianMode(effective_command.right.mode)
             ? cartesian.computeArmJointTarget(
                 right_pose_track_command,
-                right_state,
-                right_prev_sent_q_deg_,
+                right_servo_state.state,
+                right_cartesian_ik_seed_q_deg,
                 right_cartesian_compute_run_mode
             )
             : CartesianArmTargetResult{
@@ -6545,6 +6894,12 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             };
         target.right_q_target_deg = right_cartesian_result.q_target_deg;
         right_last_cartesian_solve_ = right_cartesian_result.telemetry;
+        right_last_cartesian_solve_.cartesian_servo_state_source =
+            right_servo_state.context.servo_state_source;
+        right_last_cartesian_solve_.cartesian_divergence_source =
+            right_servo_state.context.divergence_source;
+        right_last_cartesian_solve_.q_reference_for_servo_valid =
+            right_servo_state.context.q_reference_for_servo_valid;
         if (command.right.mode == ControlMode::TcpLinearMove && right_cartesian_servo_path_.active) {
             right_cartesian_servo_path_.lease_enforced = command.lease.enforce_lease;
             right_cartesian_servo_path_.lease_expires_time_ns = command.lease.expires_time_ns;
@@ -7895,16 +8250,111 @@ bool DualArmServoLoop::anyFreedriveEngaged() const {
 void DualArmServoLoop::resyncArmAfterFreedrive(ArmId arm_id, const RobotState& state) {
     // Clear path state outside the state lock (mirroring clearFaultLatch's ordering).
     clearLatchedCartesianTarget(arm_id);
+
+    // Free-drive changes the measured configuration without advancing any of the
+    // server-owned Cartesian controllers. Re-anchoring only the joint hold would
+    // therefore leave Cartesian admittance pulling toward its pre-teaching
+    // equilibrium as soon as servo_j resumes. Drop every proposal computed before
+    // teach_off, reset the controller dynamics, and seed the fixed Hold equilibrium
+    // from the freshly measured TCP.
+    ForceArmRuntime& force_runtime = arm_id == ArmId::Left
+        ? left_force_runtime_ : right_force_runtime_;
+    NormalForceController& normal_controller = arm_id == ArmId::Left
+        ? left_normal_force_controller_ : right_normal_force_controller_;
+    ForceController& cartesian_controller = arm_id == ArmId::Left
+        ? left_cartesian_force_controller_ : right_cartesian_force_controller_;
+
+    force_runtime.pending_proposal.reset();
+    force_runtime.pending_proposal_applied = false;
+    force_runtime.pending_cartesian_proposal.reset();
+    force_runtime.pending_cartesian_proposal_applied = false;
+    force_runtime.pending_rolling_compliance_target_valid = false;
+    force_runtime.pending_rolling_compliance_target_source = "unavailable";
+    force_runtime.compliance_hold_target_this_tick = false;
+    force_runtime.normal_contact_active = false;
+    force_runtime.transverse_contact_active = false;
+    force_runtime.rotational_contact_active = false;
+    force_runtime.contact_anchor_valid = false;
+    force_runtime.enter_count = 0;
+    force_runtime.transverse_enter_count = 0;
+    force_runtime.rotational_enter_count = 0;
+    force_runtime.release_start_ns = 0;
+    force_runtime.release_hold_pending = false;
+    force_runtime.release_hold_applied = false;
+    force_runtime.release_hold_clear_requested = false;
+    force_runtime.previous_actual_pose_ns = 0;
+
+    force_runtime.control.contact_active = false;
+    force_runtime.control.normal_contact_active = false;
+    force_runtime.control.transverse_contact_active = false;
+    force_runtime.control.rotational_contact_active = false;
+    force_runtime.control.compliance_active = false;
+    force_runtime.control.normal_regulating = false;
+    force_runtime.control.transverse_regulating = false;
+    force_runtime.control.rotational_regulating = false;
+    force_runtime.control.loading_projection_active = false;
+    force_runtime.control.compliance_recenter_active = false;
+    force_runtime.control.compliance_translation_recenter_coupled = false;
+    force_runtime.control.compliance_rotation_recenter_coupled = false;
+    force_runtime.control.compliance_translation_recenter_deferred = false;
+    force_runtime.control.compliance_rotation_recenter_deferred = false;
+    force_runtime.control.compliance_offset_surface = {};
+    force_runtime.control.compliance_velocity_surface = {};
+    force_runtime.control.compliance_acceleration_surface = {};
+    force_runtime.control.raw_policy_delta_surface = {};
+    force_runtime.control.accepted_policy_delta_surface = {};
+    force_runtime.control.compliance_limit_axes = {};
+    force_runtime.control.compliance_limit_reason.clear();
+    force_runtime.control.correction_m = 0.0;
+    force_runtime.control.velocity_m_s = 0.0;
+    force_runtime.control.acceleration_m_s2 = 0.0;
+    force_runtime.control.energy_j = 0.0;
+    force_runtime.control.saturated = false;
+    force_runtime.control.proposal_valid = false;
+    force_runtime.control.proposal_committed = false;
+    normal_controller.release();
+    cartesian_controller.release();
+
+    const bool tcp_reanchored =
+        state.tcp_actual_valid && state.tcp_actual_stand.has_value();
+    if (tcp_reanchored) {
+        force_runtime.previous_raw_compliance_target = *state.tcp_actual_stand;
+        force_runtime.rolling_compliance_target = *state.tcp_actual_stand;
+        force_runtime.rolling_compliance_target_valid = true;
+        force_runtime.rolling_compliance_target_source = "hold_anchor";
+        force_runtime.control.compliance_equilibrium_stand = *state.tcp_actual_stand;
+        force_runtime.control.compliance_equilibrium_source = "hold_anchor";
+    } else {
+        force_runtime.rolling_compliance_target_valid = false;
+        force_runtime.rolling_compliance_target_source = "unavailable";
+        force_runtime.control.compliance_equilibrium_source = "unavailable";
+    }
+
+    // The servo stream was globally suppressed while teaching. A policy/follower
+    // residual assembled before or during that interval must not execute from the
+    // new physical pose. Publish a new epoch and require a fresh source anchor.
+    ++motion_epoch_;
+    left_force_runtime_.control.motion_epoch = motion_epoch_;
+    right_force_runtime_.control.motion_epoch = motion_epoch_;
+    left_delta_twist_follower_.deactivate();
+    right_delta_twist_follower_.deactivate();
+    left_chunk_follower_.deactivate();
+    right_chunk_follower_.deactivate();
+    left_pose_track_smd_.deactivate();
+    right_pose_track_smd_.deactivate();
+    left_chunk_submitted_recv_seq_ = chunk_frame_cache_recv_seq_;
+    right_chunk_submitted_recv_seq_ = chunk_frame_cache_recv_seq_;
+
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (arm_id == ArmId::Left) {
-        const JointArray q = chooseSafeHoldTarget(state, left_prev_sent_q_deg_);
+        const JointArray q = chooseSafeHoldTarget(ArmId::Left, state, left_prev_sent_q_deg_);
         left_prev_sent_q_deg_ = q;
         left_prevprev_sent_q_deg_ = q;
         left_fault_hold_q_deg_ = q;
         left_controller_sim_physical_baseline_q_deg_ = state.q_actual_deg;
         left_output_ma_.reset();
     } else {
-        const JointArray q = chooseSafeHoldTarget(state, right_prev_sent_q_deg_);
+        const JointArray q = chooseSafeHoldTarget(ArmId::Right, state, right_prev_sent_q_deg_);
         right_prev_sent_q_deg_ = q;
         right_prevprev_sent_q_deg_ = q;
         right_fault_hold_q_deg_ = q;
@@ -7912,7 +8362,10 @@ void DualArmServoLoop::resyncArmAfterFreedrive(ArmId arm_id, const RobotState& s
         right_output_ma_.reset();
     }
     std::cerr << "[INFO] freedrive exit resync: " << toString(arm_id)
-              << " held target snapped to current actual joints\n";
+              << " held target snapped to current actual joints; Cartesian force "
+              << (tcp_reanchored ? "equilibrium reanchored to actual TCP"
+                                 : "equilibrium unavailable (actual TCP invalid)")
+              << "; motion_epoch=" << motion_epoch_ << "\n";
 }
 
 namespace {
@@ -9151,8 +9604,10 @@ bool DualArmServoLoop::clearFaultLatch(RobotState& left_state, RobotState& right
     latched_fault_context_.reset();
     left_latched_fault_context_.reset();
     right_latched_fault_context_.reset();
-    left_prev_sent_q_deg_ = chooseSafeHoldTarget(left_state, left_prev_sent_q_deg_);
-    right_prev_sent_q_deg_ = chooseSafeHoldTarget(right_state, right_prev_sent_q_deg_);
+    left_prev_sent_q_deg_ = chooseSafeHoldTarget(
+        ArmId::Left, left_state, left_prev_sent_q_deg_);
+    right_prev_sent_q_deg_ = chooseSafeHoldTarget(
+        ArmId::Right, right_state, right_prev_sent_q_deg_);
     left_prevprev_sent_q_deg_ = left_prev_sent_q_deg_;
     right_prevprev_sent_q_deg_ = right_prev_sent_q_deg_;
     left_controller_sim_physical_baseline_q_deg_ = left_state.q_actual_deg;
@@ -9214,8 +9669,10 @@ void DualArmServoLoop::latchFault(
     right_latched_fault_context_ = contexts.right.has_value()
         ? std::optional<FaultContext>(contextWithReason(*contexts.right, reason))
         : std::nullopt;
-    left_fault_hold_q_deg_ = chooseSafeHoldTarget(left_state, left_prev_sent_q_deg_);
-    right_fault_hold_q_deg_ = chooseSafeHoldTarget(right_state, right_prev_sent_q_deg_);
+    left_fault_hold_q_deg_ = chooseSafeHoldTarget(
+        ArmId::Left, left_state, left_prev_sent_q_deg_);
+    right_fault_hold_q_deg_ = chooseSafeHoldTarget(
+        ArmId::Right, right_state, right_prev_sent_q_deg_);
     setMotionState(verdict == SafetyVerdict::EmergencyStop
         ? ServerMotionState::EmergencyLatched
         : ServerMotionState::FaultLatched);
@@ -9235,9 +9692,21 @@ ServoTarget DualArmServoLoop::currentFaultHoldTarget() const {
 }
 
 JointArray DualArmServoLoop::chooseSafeHoldTarget(
+    ArmId arm_id,
     const RobotState& state,
     const JointArray& previous_sent
 ) const {
+    const BackendConfig& backend = arm_id == ArmId::Left
+        ? config_.left_robot : config_.right_robot;
+    if (isRbpodoControllerSimulationBackend(backend) &&
+        controllerSimulationMotionGateOpen(config_) &&
+        finiteJointArray(state.q_target_deg)) {
+        // A physical control box held in pgmode simulation intentionally keeps
+        // q_actual fixed. Fault/reset and freedrive resync must therefore hold
+        // the simulated controller reference instead of snapping the internal
+        // target back to the physical encoders.
+        return state.q_target_deg;
+    }
     if (isValidJointState(state)) {
         return state.q_actual_deg;
     }

@@ -1231,8 +1231,13 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--max-linear-velocity-m-s",
         type=float,
-        default=0.15,
-        help="Override flow action linear clamp; omitted uses checkpoint action statistics.",
+        default=0.45,
+        help=(
+            "Flow action linear per-step clamp in m/s, applied client-side to the model's "
+            "output deltas as |Δpos| <= v * policy_dt before integration. Default 0.45 covers "
+            "the pika ee_local delta distribution (p99.9 ~= 0.36 m/s); 0.15 clipped ~5%% of "
+            "model outputs. openpi-remote carries no checkpoint action stats, so this value is used directly."
+        ),
     )
     flow_infer.add_argument(
         "--max-angular-velocity-rad-s",

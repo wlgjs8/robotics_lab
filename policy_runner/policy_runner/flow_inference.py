@@ -1641,7 +1641,11 @@ class FlowMatchingActionSource:
                         )
                 else:
                     measured_anchor = np.asarray(
-                        pose_from_state_payload(payload, arm, source=anchor_mode),
+                        pose_from_state_payload(
+                            payload,
+                            arm,
+                            source="auto" if anchor_mode == "actual" else anchor_mode,
+                        ),
                         dtype=np.float64,
                     )
                 cur = measured_anchor
@@ -1764,7 +1768,12 @@ class FlowMatchingActionSource:
         # (its own plan chain); its residual measured_anchor uses (first chunk /
         # legacy fallbacks) map to the command pose.
         src = self._chunk_anchor_source()
-        return "command" if src == "chain" else src
+        if src == "chain":
+            return "command"
+        # "actual" means the robot's effective tracking state. In physical-real
+        # this resolves to tcp_actual. In rbpodo pgmode simulation it resolves to
+        # tcp_ref, matching the server-side controller-simulation feedback lane.
+        return "auto" if src == "actual" else src
 
     def _chunk_anchor_source(self) -> str:
         # Where chunk-delta integration anchors: "actual" (measured pose,

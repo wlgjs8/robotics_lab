@@ -111,7 +111,10 @@ backend call otherwise). While any arm is in free-drive the servo loop sets
 `send_policy == "freedrive"` (suppressing `servo_j` to both controllers, after the
 fault/emergency checks) and bypasses the motion pipeline so the hand-driven actual
 divergence cannot latch a tracking error. On exit the held target is resynced to the
-current actual joints. State JSON exposes top-level
+current actual joints. The same resync resets force/admittance dynamics, re-anchors the
+Cartesian compliance Hold equilibrium to the current actual TCP, invalidates stale
+Cartesian followers, and advances `motion_epoch`; force control therefore cannot pull
+the arm back toward its pre-teaching TCP when `servo_j` resumes. State JSON exposes top-level
 `freedrive.{left_active,right_active,any_active}`. See
 `docs/runbooks/freedrive_direct_teaching.md`.
 
@@ -191,6 +194,31 @@ currently provide. A finite decoded wrench or a changing value is not a
 substitute for those signals.
 Garbage-looking raw flag values must be kept in `rbpodo_diagnostics.raw` rather
 than used as the sole controller `error_code`.
+
+The project-native F/T path also supports a dedicated
+`JointTarget` profile named `payload_identification`. It is not a new motion
+primitive and does not bypass any normal joint, tracking, collision, lease, or
+deadman gate. On the selected arm it invalidates the old pose-local tare and
+latches a force-motion inhibit before calibration motion. While this profile is
+present, Cartesian force-Hold promotion is suppressed for both arms so the
+peer's explicit Hold stays a stationary joint hold. Command expiry or a fallback
+Hold cannot clear the selected-arm inhibit or re-enable its Cartesian admittance;
+only a later accepted Init Motion tare clears it.
+The server accepts only exactly one finite payload-identification JointTarget
+with a payload-free peer Hold. Dual-profile or profile-plus-peer-motion packets
+are rejected atomically as two-arm Hold with `InvalidCommand` before Freedrive
+or another motion path can consume the malformed peer command.
+The profile is rejected unless the selected-arm F/T stream is healthy and fresh.
+In an enforcing force-control profile, the configured hard-limit debounce remains
+active on the raw pre-tare TCP wrench throughout identification.
+
+For this workflow, per-arm `force_torque` state publishes the pre-payload/tare
+`wrench_tcp`, the actual-orientation `gravity_tcp` vector (m/s²), the active
+joint-target profile, and the inhibit state. The top-level
+`force_torque.payload_identification` object publishes the complete effective
+server acquisition/fit profile. Missing/disabled or incomplete configuration
+fails closed in the GUI. Calculated mass/CoG output remains provisional and is
+not written to the controller or stack config automatically.
 
 For rbpodo controller `pgmode` simulation only, configs may opt into
 `servo.controller_simulation_treat_unreliable_status_fields_as_unavailable: true`.
@@ -619,6 +647,51 @@ Required log and state fields for review include:
 - `error_code`
 - M561/M568/M569/M570 when available
 - `q_ref` and `q_actual`
+
+### Direct `request_data()` Packet Timing
+
+The direct rbpodo state-read path records a `BackendReadExchangeTiming` for
+every vendor SDK `CobotData::request_data()` attempt, including timeout and
+exception exits. It is propagated to per-arm `last_read.reqdata_exchange` state
+JSON and to the servo CSV. Each arm has these CSV fields:
+
+- `<arm>_reqdata_timing_available`
+- `<arm>_reqdata_exchange_sequence`
+- `<arm>_reqdata_timing_source`
+- `<arm>_reqdata_call_start_steady_ns`
+- `<arm>_reqdata_call_start_system_ns`
+- `<arm>_reqdata_call_return_steady_ns`
+- `<arm>_reqdata_call_return_system_ns`
+- `<arm>_reqdata_call_duration_us`
+
+`steady_ns` is authoritative for in-process durations. `system_ns` exists only
+to correlate the application boundary with passive packet-capture epoch
+timestamps. The vendor API owns its data socket and does not expose a callback
+at TCP transmit or receive, so the SDK call-start timestamp must not be labeled
+as the exact `reqdata` transmit timestamp.
+
+For exact host-observed packet events, use
+`scripts/capture_rbpodo_reqdata_timing.sh` and
+`rb_servo_server/tools/analyze_reqdata_timing.py`. The derived CSV exposes:
+
+- `reqdata_tx_packet_system_ns`
+- `controller_response_first_rx_packet_system_ns`
+- `request_data_call_return_system_ns`
+- call-start-to-transmit, transmit-to-first-response, and first-response-to-SDK-
+  return durations
+- the system-clock call-boundary duration and its residual against the
+  steady-clock duration, so clock steps/correlation errors remain visible
+- total backend read duration and the portion outside `request_data()`, so SDK
+  wait time is not conflated with state mapping/fault classification
+
+“Response arrival” means the first CobotData SystemState TCP packet observed at
+the host capture point. A multi-segment frame can therefore leave some frame
+delivery in the final phase. Missing packets and clock/correlation mismatches
+must remain explicit classifications; the analyzer must not substitute guessed
+timestamps. This diagnostic path does not replace the rbpodo socket, parse a
+second state into production, alter motion authority, or enable real behavior.
+It is unavailable for `state_read_pipelined: true`, which does not call the SDK
+method.
 
 ## Unsupported Raw Script TCP Paths
 

@@ -43,6 +43,7 @@ std::string toString(JointTargetProfile profile) {
     switch (profile) {
         case JointTargetProfile::Direct: return "direct";
         case JointTargetProfile::InitMotion: return "init_motion";
+        case JointTargetProfile::PayloadIdentification: return "payload_identification";
     }
     return "unknown";
 }
@@ -151,6 +152,9 @@ JointTargetProfile jointTargetProfileFromString(const std::string& value) {
     const std::string v = lower(value);
     if (v == "direct") return JointTargetProfile::Direct;
     if (v == "init_motion") return JointTargetProfile::InitMotion;
+    if (v == "payload_identification") {
+        return JointTargetProfile::PayloadIdentification;
+    }
     throw std::invalid_argument("Unknown joint_target_profile string: " + value);
 }
 

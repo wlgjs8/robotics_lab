@@ -188,6 +188,14 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(stack_real.force_torque.right.enable);
         RB_CHECK(stack_real.force_torque.left.frame_configured);
         RB_CHECK(stack_real.force_torque.right.frame_configured);
+        const auto& payload_id = stack_real.force_torque.payload_identification;
+        RB_CHECK(payload_id.enable);
+        RB_CHECK(payload_id.min_poses == 5);
+        RB_CHECK(near(payload_id.arrival_tolerance_deg, 1.5));
+        RB_CHECK(near(payload_id.settle_sec, 0.5));
+        RB_CHECK(payload_id.samples_per_pose == 500);
+        RB_CHECK(near(payload_id.max_force_stddev_n, 0.75));
+        RB_CHECK(near(payload_id.max_torque_stddev_nm, 0.15));
         const auto& left_ft = stack_real.force_torque.left;
         const auto& right_ft = stack_real.force_torque.right;
         RB_CHECK(left_ft.calibration_id ==
@@ -372,7 +380,7 @@ bool testRepositoryConfigsParse() {
                  rb_servo::ControllerSimulationTrackingErrorSource::Reference);
         RB_CHECK(stack_sim.safety.controller_simulation_tracking_error_nonlatching);
         RB_CHECK(stack_sim.safety.controller_simulation_physical_motion_policy ==
-                 rb_servo::ControllerSimulationPhysicalMotionPolicy::WarnOnly);
+                 rb_servo::ControllerSimulationPhysicalMotionPolicy::FaultLatch);
         RB_CHECK(stack_sim.network.command_bind == "udp://127.0.0.1:50256");
         RB_CHECK(stack_sim.network.state_pub_endpoint == "udp://127.0.0.1:50356");
         RB_CHECK(stack_sim.network.state_pub_endpoints.size() == 5);
@@ -380,14 +388,29 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(stack_sim.network.state_pub_endpoints[2] == "udp://127.0.0.1:50376");
         RB_CHECK(stack_sim.command_source.enforce_lease);
         RB_CHECK(stack_sim.network.command_source_enforce_lease);
+        RB_CHECK(!stack_sim.force_torque.payload_identification.enable);
         RB_CHECK(near(stack_sim.command_source.lease_timeout_sec, 60.0));
         RB_CHECK(stack_sim.cartesian_control.enable);
         RB_CHECK(stack_sim.cartesian_control.allow_in_controller_simulation);
-        RB_CHECK(stack_sim.cartesian_control.allow_in_real);
+        RB_CHECK(!stack_sim.cartesian_control.allow_in_real);
         RB_CHECK(stack_sim.cartesian_control.controller_simulation_servo_state_source ==
                  rb_servo::CartesianControllerSimulationStateSource::Reference);
         RB_CHECK(stack_sim.cartesian_control.controller_simulation_divergence_source ==
                  rb_servo::CartesianControllerSimulationStateSource::Reference);
+        RB_CHECK(stack_sim.cartesian_control.tcp_pose_target_profile_default ==
+                 "umi_large_smooth");
+        RB_CHECK(stack_sim.cartesian_control.tcp_pose_target_profiles.size() == 3);
+        const rb_servo::TcpPoseTargetProfileConfig* sim_flow_profile = nullptr;
+        for (const auto& profile : stack_sim.cartesian_control.tcp_pose_target_profiles) {
+            if (profile.name == "flow_infer_smooth") sim_flow_profile = &profile;
+        }
+        RB_CHECK(sim_flow_profile != nullptr);
+        RB_CHECK(sim_flow_profile->ruckig_follower.controller ==
+                 rb_servo::RuckigFollowerController::DeltaPreview);
+        RB_CHECK(sim_flow_profile->ruckig_follower.consume_steps == 12);
+        RB_CHECK(sim_flow_profile->ruckig_follower.reserve_steps == 2);
+        RB_CHECK(near(sim_flow_profile->ruckig_follower.preview_max_actual_lead_m, 0.006));
+        RB_CHECK(near(sim_flow_profile->pose_track_smd.max_linear_velocity_m_s, 0.50));
         RB_CHECK(stack_sim.force_control.provider == "null");
         RB_CHECK(!stack_sim.force_control.enable);
         RB_CHECK(stack_sim.kinematics.enable);
@@ -905,6 +928,100 @@ bool testForceControlSchemaAndActivation() {
     const bool missing_identity_rejected = loadRejects(missing_identity_path);
     ::unlink(missing_identity_path.c_str());
     RB_CHECK(missing_identity_rejected);
+    return true;
+}
+
+bool testPayloadIdentificationConfigIsExplicitAndFailClosed() {
+    const std::string valid_path = writeTempConfig(
+        "payload-identification-valid",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  source: rbpodo_eft\n"
+        "  payload_identification:\n"
+        "    enable: true\n"
+        "    min_poses: 5\n"
+        "    arrival_tolerance_deg: 1.5\n"
+        "    settle_sec: 0.5\n"
+        "    samples_per_pose: 500\n"
+        "    max_force_stddev_n: 0.75\n"
+        "    max_torque_stddev_nm: 0.15\n"
+        "    max_force_fit_rms_n: 0.75\n"
+        "    max_torque_fit_rms_nm: 0.15\n"
+        "    max_design_condition_number: 1000.0\n"
+        "  left:\n"
+        "    enable: true\n"
+    );
+    const rb_servo::DualArmConfig valid = rb_servo::loadConfigFromYaml(valid_path);
+    ::unlink(valid_path.c_str());
+    const auto& profile = valid.force_torque.payload_identification;
+    RB_CHECK(profile.enable);
+    RB_CHECK(profile.min_poses == 5);
+    RB_CHECK(near(profile.arrival_tolerance_deg, 1.5));
+    RB_CHECK(near(profile.settle_sec, 0.5));
+    RB_CHECK(profile.samples_per_pose == 500);
+    RB_CHECK(near(profile.max_force_stddev_n, 0.75));
+    RB_CHECK(near(profile.max_torque_stddev_nm, 0.15));
+    RB_CHECK(near(profile.max_force_fit_rms_n, 0.75));
+    RB_CHECK(near(profile.max_torque_fit_rms_nm, 0.15));
+    RB_CHECK(near(profile.max_design_condition_number, 1000.0));
+
+    const std::string incomplete_path = writeTempConfig(
+        "payload-identification-incomplete",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  source: rbpodo_eft\n"
+        "  payload_identification:\n"
+        "    enable: true\n"
+        "  left:\n"
+        "    enable: true\n"
+    );
+    const bool incomplete_rejected = loadRejects(incomplete_path);
+    ::unlink(incomplete_path.c_str());
+    RB_CHECK(incomplete_rejected);
+
+    const std::string no_sensor_path = writeTempConfig(
+        "payload-identification-no-sensor",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  source: rbpodo_eft\n"
+        "  payload_identification:\n"
+        "    enable: true\n"
+        "    min_poses: 5\n"
+        "    arrival_tolerance_deg: 1.5\n"
+        "    settle_sec: 0.5\n"
+        "    samples_per_pose: 500\n"
+        "    max_force_stddev_n: 0.75\n"
+        "    max_torque_stddev_nm: 0.15\n"
+        "    max_force_fit_rms_n: 0.75\n"
+        "    max_torque_fit_rms_nm: 0.15\n"
+        "    max_design_condition_number: 1000.0\n"
+    );
+    const bool no_sensor_rejected = loadRejects(no_sensor_path);
+    ::unlink(no_sensor_path.c_str());
+    RB_CHECK(no_sensor_rejected);
+
+    const std::string invalid_condition_path = writeTempConfig(
+        "payload-identification-invalid-condition",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  source: rbpodo_eft\n"
+        "  payload_identification:\n"
+        "    enable: true\n"
+        "    min_poses: 5\n"
+        "    arrival_tolerance_deg: 1.5\n"
+        "    settle_sec: 0.5\n"
+        "    samples_per_pose: 500\n"
+        "    max_force_stddev_n: 0.75\n"
+        "    max_torque_stddev_nm: 0.15\n"
+        "    max_force_fit_rms_n: 0.75\n"
+        "    max_torque_fit_rms_nm: 0.15\n"
+        "    max_design_condition_number: 1.0\n"
+        "  left:\n"
+        "    enable: true\n"
+    );
+    const bool invalid_condition_rejected = loadRejects(invalid_condition_path);
+    ::unlink(invalid_condition_path.c_str());
+    RB_CHECK(invalid_condition_rejected);
     return true;
 }
 
@@ -1810,6 +1927,7 @@ int main() {
     if (!testUnknownKeysAndSchemaFail()) return 1;
     if (!testStatePublisherEndpointsParseAndValidate()) return 1;
     if (!testForceControlSchemaAndActivation()) return 1;
+    if (!testPayloadIdentificationConfigIsExplicitAndFailClosed()) return 1;
     if (!testFloorlessForceControlSurfaceSourceNone()) return 1;
     if (!testCommandSourceConfigParsesAndValidates()) return 1;
     if (!testCartesianControlTuningParsesAndValidates()) return 1;

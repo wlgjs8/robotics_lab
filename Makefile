@@ -3,8 +3,9 @@ COMPOSE_FILE ?= docker-compose.yml
 PROJECT ?= robotics_lab
 POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
+FLOW_INFER_ARGS ?=
 
-.PHONY: run flow-infer-real build rebuild vm-up vm-down vm-status policy-hdf5-audit-smoke deps-hardware-free cam-up cam-engine-rebuild cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
+.PHONY: run flow-infer-real flow-infer-sim-offline build rebuild vm-up vm-down vm-status policy-hdf5-audit-smoke deps-hardware-free cam-up cam-engine-rebuild cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
 
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
@@ -24,6 +25,16 @@ run:
 # uses its own state readback port (50378), so ACTION_SOURCE=none is not needed.
 flow-infer-real:
 	./tools/flow_infer_real_policy.sh
+
+# External OpenPI rollout on the rbpodo controller pgmode-simulation stack.
+# Start `make run MODE=sim` and `scripts/offline_camera_replay.py` first.
+# This target has no real-camera or real/gripper-motion authority. W6 is the
+# pgmode-validated sim default; flow-infer-real keeps its existing W12 default.
+flow-infer-sim-offline:
+	FLOW_INFER_CONFIG=policy_runner/config/flow_sim_offline.yaml \
+	FLOW_INFER_ROLLOUT_MODE=controller_sim \
+	FLOW_INFER_CHUNK_EXECUTE_STEPS=6 \
+	./tools/flow_infer_real_policy.sh $(FLOW_INFER_ARGS)
 
 # Source-build the full local stack for DIRECT real-controller work (no VM):
 # rb_servo_server (rbpodo backend, RB_SERVO_ENABLE_RBPODO=ON) into the path

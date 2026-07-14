@@ -106,6 +106,16 @@ terminal. The stack teleop_mux uses state port `50376`; the flow configs use
 `make run` joint scope dashboard listens on the separate fanout port `50356` by
 default and must not consume the external flow-infer port.
 
+For the physical control boxes held in pgmode simulation, use the tracked
+`policy_runner/config/flow_sim_offline.yaml` through
+`make flow-infer-sim-offline`. It pairs with the normal `make run MODE=sim`
+server path and recorded RGB-D replay on `tcp://127.0.0.1:5700`; it does not use
+the physical camera service on `:5600`. The config disables physical-real arm
+and gripper authority, while an `actual` tracking request automatically resolves
+to the server-declared `tcp_ref_stand` in controller simulation and fails closed
+if that reference is missing. The sim-only launcher defaults to W6; the
+physical-real launcher remains W12.
+
 The tracked real flow profile enables `force_recovery` with
 `contact_behavior: continue` for the server-owned `cartesian_admittance` path.
 Soft contact remains visible in status, but it does not invalidate the active

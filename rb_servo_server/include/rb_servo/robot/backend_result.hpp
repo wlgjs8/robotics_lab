@@ -67,6 +67,7 @@ struct BackendResult {
     T value{};
     BackendError error;
     BackendTiming timing;
+    BackendReadExchangeTiming read_exchange_timing;
 };
 
 struct SendServoJRequest {
