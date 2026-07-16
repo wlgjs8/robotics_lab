@@ -78,6 +78,45 @@ Wrench6D payloadWrenchTcp(const FtWrenchPipelineConfig& config, const Eigen::Vec
     };
 }
 
+Eigen::Vector3d applyRowMajorMatrix(
+    const std::array<double, 9>& matrix,
+    const Eigen::Vector3d& vector
+) {
+    Eigen::Matrix3d eigen_matrix;
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column) {
+            eigen_matrix(row, column) =
+                matrix[static_cast<std::size_t>(3 * row + column)];
+        }
+    }
+    return eigen_matrix * vector;
+}
+
+Wrench6D modeledGravityWrenchTcp(
+    const FtWrenchPipelineConfig& config,
+    const Eigen::Vector3d& gravity_tcp
+) {
+    if (config.gravity_compensation_model == "rigid_payload") {
+        return payloadWrenchTcp(config, gravity_tcp);
+    }
+    if (config.gravity_compensation_model == "controller_compensated_linear") {
+        const Eigen::Vector3d force = applyRowMajorMatrix(
+            config.gravity_force_matrix_n_per_m_s2,
+            gravity_tcp
+        );
+        const Eigen::Vector3d torque = applyRowMajorMatrix(
+            config.gravity_torque_matrix_nm_per_m_s2,
+            gravity_tcp
+        );
+        return {
+            force.x(), force.y(), force.z(),
+            torque.x(), torque.y(), torque.z(),
+        };
+    }
+    // process() rejects unsupported values before this helper is reached.
+    return Wrench6D{};
+}
+
 Wrench6D lowPass(const Wrench6D& previous, const Wrench6D& current, double alpha) {
     const auto old_values = toArray(previous);
     const auto new_values = toArray(current);
@@ -222,6 +261,22 @@ FtWrenchPipelineOutput FtWrenchPipeline::process(
 
     if (!config_.enable) return reject("disabled");
     if (!config_.frame_configured) return reject("T_tcp_sensor is not configured");
+    if (!(config_.gravity_compensation_model == "rigid_payload" ||
+          config_.gravity_compensation_model == "controller_compensated_linear")) {
+        return reject("unsupported gravity compensation model");
+    }
+    if (config_.gravity_compensation_model == "controller_compensated_linear" &&
+        (!config_.gravity_force_matrix_configured ||
+         !config_.gravity_torque_matrix_configured ||
+         config_.gravity_compensation_calibration_id.empty() ||
+         config_.payload_mass_kg != 0.0 ||
+         std::any_of(
+             config_.payload_com_tcp_m.begin(),
+             config_.payload_com_tcp_m.end(),
+             [](double item) { return item != 0.0; }
+         ))) {
+        return reject("controller-compensated gravity model is incomplete or mixed");
+    }
     if (!sample.fields_present) return reject("wrench fields missing");
     if (!sample.sensor_present) return reject("sensor presence not confirmed");
     if (sample.source_fault) return reject("sensor source fault");
@@ -270,7 +325,11 @@ FtWrenchPipelineOutput FtWrenchPipeline::process(
     const Wrench6D unbiased_sensor = subtract(sample.wrench_sensor, config_.sensor_bias);
     out.wrench_tcp = transformWrench(config_.t_tcp_sensor, unbiased_sensor);
     out.payload_wrench_tcp = payloadWrenchTcp(config_, gravity_tcp);
-    out.pre_tare_external_wrench_tcp = subtract(out.wrench_tcp, out.payload_wrench_tcp);
+    out.modeled_gravity_wrench_tcp = modeledGravityWrenchTcp(config_, gravity_tcp);
+    out.pre_tare_external_wrench_tcp = subtract(
+        out.wrench_tcp,
+        out.modeled_gravity_wrench_tcp
+    );
     out.fast_external_wrench_tcp = subtract(out.pre_tare_external_wrench_tcp, config_.residual_tare_tcp);
 
     if (!finite(out.fast_external_wrench_tcp)) return reject("non-finite compensated wrench");

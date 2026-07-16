@@ -225,12 +225,20 @@ ordinary servo CSV records the same raw wrench and transform beside the TCP
 wrench, so the applied wrench transform can be reproduced for each logged
 sample. The top-level
 `force_torque.payload_identification` object publishes the complete effective
-server acquisition/fit profile, including the required `wrench_convention`:
+server acquisition/fit profile, including the required `observation_model`.
+For `rigid_payload`, the additional `wrench_convention` is required:
 
 ```text
 payload_load:    wrench = bias + [m*g, c x (m*g)]
 sensor_reaction: wrench = bias - [m*g, c x (m*g)]
 ```
+
+`controller_compensated_linear` instead fits independent force/torque maps
+`wrench_tcp = A*gravity_tcp + bias` under an explicitly unverified assumption
+that controller feedback has already undergone gravity/source processing. It
+does not publish a physical mass or CoG. A reviewed runtime model requires an
+explicit calibration id and both row-major 3x3 matrices; config rejects mixing
+that model with nonzero rigid payload mass/CoG.
 
 Rainbow's public system-variable contract defines the controller's raw
 `SD_EFT_*` components in the external sensor manufacturer's axes, not as a TCP
@@ -241,9 +249,9 @@ See the [Rainbow system-variable reference](https://rainbowrobotics.github.io/rb
 Missing, unknown, or incomplete configuration fails closed in both the server
 config loader and GUI parser. A fit-bound or model rejection atomically saves a
 `BLOCKED / NOT APPLIED` JSON report and the collected raw sample CSV. A
-successful mass/CoG output remains `PROVISIONAL / NOT APPLIED` and is not
+successful rigid or linear output remains `PROVISIONAL / NOT APPLIED` and is not
 written to the controller or stack config automatically.
-CoG evidence schema v3 aligns each raw sensor wrench, effective
+Gravity-wrench evidence schema v4 aligns each raw sensor wrench, effective
 `T_tcp_sensor`, TCP wrench, gravity vector, actual joints, and actual stand-frame
 TCP pose by the server freshness value. Its JSON report also stores the
 observed and model-predicted force/torque plus their residual for every pose.

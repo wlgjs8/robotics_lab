@@ -2148,6 +2148,9 @@ bool DualArmServoLoop::updateForceRuntime(
     runtime.ft.safety_rated = false;
     runtime.ft.raw_sensor_wrench = state.eft_wrench;
     runtime.ft.t_tcp_sensor = ft_config.t_tcp_sensor;
+    runtime.ft.gravity_compensation_model = ft_config.gravity_compensation_model;
+    runtime.ft.gravity_compensation_calibration_id =
+        ft_config.gravity_compensation_calibration_id;
     runtime.ft.payload_identification_inhibit =
         runtime.payload_identification_inhibit;
     runtime.ft.auto_tare_enabled = ft_config.auto_tare_after_init_motion;
@@ -2223,6 +2226,7 @@ bool DualArmServoLoop::updateForceRuntime(
         pipeline.process(raw, *state.tcp_actual_stand, now_ns);
     runtime.ft.wrench_tcp = output.wrench_tcp;
     runtime.ft.gravity_tcp = output.gravity_tcp;
+    runtime.ft.modeled_gravity_wrench = output.modeled_gravity_wrench_tcp;
     runtime.ft.fast_external_wrench = output.fast_external_wrench_tcp;
     runtime.ft.control_external_wrench = output.control_external_wrench_tcp;
     runtime.ft.healthy = output.healthy;
@@ -4711,6 +4715,8 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.right_force_control = right_force_runtime_.control;
             const auto& payload_id = config_.force_torque.payload_identification;
             latest_snapshot_.payload_identification_config.enable = payload_id.enable;
+            latest_snapshot_.payload_identification_config.observation_model =
+                payload_id.observation_model;
             latest_snapshot_.payload_identification_config.wrench_convention =
                 payload_id.wrench_convention;
             latest_snapshot_.payload_identification_config.min_poses = payload_id.min_poses;

@@ -182,22 +182,35 @@ The command shape is server-enforced: exactly one arm may carry a finite
 `payload_identification` JointTarget and the peer must be a payload-free Hold.
 
 The identification fit has an explicit observation contract. The server-owned
-profile publishes `wrench_convention: payload_load | sensor_reaction`; it is
-required when the profile is enabled and the GUI refuses to infer it from a
-negative fitted mass. The tracked physical profile uses `sensor_reaction`, so
-the estimator fits
-`wrench_tcp = bias - [m*g_tcp, c_tcp x (m*g_tcp)]`. This sign applies only to
-the identification observation model; it does not rewrite the live wrench or
-change the compliance-control sign path.
+profile publishes `observation_model: rigid_payload |
+controller_compensated_linear`. `rigid_payload` additionally requires
+`wrench_convention: payload_load | sensor_reaction` and retains the physical
+mass/CoG solve. `controller_compensated_linear` is for the explicit working
+assumption that controller feedback has already undergone undocumented
+gravity/source processing. It fits `wrench_tcp = A*g_tcp + bias` independently
+for force and torque and does **not** identify a physical mass or CoG.
 
-`servo_log_20260714_153133.csv` contains seven quiet right-arm poses. With the
-old implicit `payload_load` model it produced a negative mass and hid the real
-diagnostic. Under the explicit reaction model it produces a positive candidate
-near 0.7 kg, but the force residual remains several newtons, well above the
-tracked 0.75 N fit bound. That capture therefore remains rejected evidence of a
-source/frame/model mismatch, not an accepted CoG. The GUI now preserves such a
-capture automatically as `BLOCKED / NOT APPLIED` instead of requiring a
-successful estimate before raw samples can be saved.
+Two 2026-07-16 seven-pose right-arm captures are quiet but cannot be represented
+by a signed rigid payload: the rigid force residual is about 3.8 N. A general
+linear gravity-residual map fits the repeated pose means at 0.085--0.088 N force
+and 0.0116--0.0120 Nm torque component RMS, with force/torque matrices repeating
+within about 1.84%/1.52% Frobenius norm. This is evidence that the residual model
+can describe those captures; it is not evidence that Rainbow compensation is
+enabled, nor is it a physical payload/CoG result. Under the operator-requested,
+CAN-unverified assumption, the tracked acquisition profile selects the linear
+model and the tracked right-arm runtime profile selects reviewed report
+`right-20260716T060343Z-421f0157` for an unloaded orientation-sweep gate. The
+left arm remains on `rigid_payload` with zero mass pending its own capture.
+The subsequent 2026-07-16 15:26 capture mixed fingertip and Pika-body contact
+and reached 0.079394 rad rotational offset without a force hard limit or
+controller fault. Its strongest intervals are approximately consistent with
+`tau = r x F` for an off-TCP body contact, but the mixed contact locations make
+it unsuitable for deciding fingertip-frame correctness. The tracked real stack
+therefore retains the right model for telemetry while force control is held at
+`monitor`, `allow_in_real: false`, and `supervised_experimental_real: false`.
+Re-promotion requires the marked fingertip-centre/body-point monitor A/B in the
+physical acceptance runbook; model application alone is not force-motion
+acceptance.
 Both-profile and profile-plus-peer-motion packets fail closed to two-arm Hold
 with `InvalidCommand`.
 While the identification inhibit makes the normal tare-dependent force path
@@ -218,8 +231,8 @@ expressed in the actual TCP orientation for that controller sample. It is paired
 with the pre-payload/pre-tare `wrench_tcp` input for offline payload
 identification; it is not a new control input and does not alter the wrench path.
 It also publishes the raw manufacturer-frame wrench and the effective configured
-`t_tcp_sensor`. The servo CSV records those values together, and CoG evidence
-schema v3 adds actual joints/TCP plus pose-level observed-versus-predicted model
+`t_tcp_sensor`. The servo CSV records those values together, and evidence
+schema v4 adds actual joints/TCP plus pose-level observed-versus-predicted model
 residuals. These are diagnostic-only fields; they do not change the live wrench
 transform or force command.
 
@@ -448,6 +461,10 @@ force_torque:
     residual_tare_max_torque_stddev_nm: 0.15
     T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
     sensor_bias: [0, 0, 0, 0, 0, 0]
+    # A reviewed linear report instead selects
+    # controller_compensated_linear and supplies its calibration id plus both
+    # explicit row-major 3x3 gravity matrices.
+    gravity_compensation_model: rigid_payload
     payload_mass_kg: 0.0
     payload_com_tcp_m: [0, 0, 0]
     residual_tare_tcp: [0, 0, 0, 0, 0, 0]
@@ -524,6 +541,18 @@ Physical real force motion additionally requires both `allow_in_real: true` and
 `supervised_experimental_real: true`; those flags expose an experimental code
 path and are not acceptance evidence.
 
+The wrench pipeline supports exactly one gravity model per arm. `rigid_payload`
+uses `payload_mass_kg` and `payload_com_tcp_m` as before.
+`controller_compensated_linear` requires a non-empty calibration id plus two
+explicit row-major 3x3 matrices and rejects any nonzero rigid payload mass/CoG.
+The selected model computes an orientation-dependent wrench from `gravity_tcp`;
+that wrench is subtracted after `T_tcp_sensor` transformation and before the
+pose-local residual tare. The constant fit bias is deliberately not configured:
+Init Motion tare owns it. State JSON and servo CSV publish the model name,
+calibration id, and modeled gravity wrench. During payload identification the
+existing hard guard still evaluates the pre-model `wrench_tcp`, so a fitted
+model cannot mask an identification hard-limit event.
+
 Run the physical monitor profile with:
 
 ```bash
@@ -534,9 +563,10 @@ Before pressing Init Motion, make sure the selected tool is unloaded and not
 touching the floor, fixture, or another object. The explicit Init Motion action
 is the contact-clear assertion for software zeroing; the variance gate detects
 motion/transients but cannot distinguish steady external contact from tool
-weight. The accepted value is pose-local while payload mass/COM remain zero, so
-re-zero after changing tool orientation. Payload characterization is still
-required before general orientation-dependent force control.
+weight. With `rigid_payload` and zero mass/CoG, the accepted value is pose-local,
+so re-zero after changing tool orientation. A reviewed linear residual model is
+intended to remove that orientation dependence, but it still requires a fresh
+Init Motion tare and supervised orientation-sweep evidence before contact.
 
 Begin with `operating_mode: monitor`. The GUI is deliberately read-only: it
 shows the raw wrench monitor plus freshness/health qualification, software-zero

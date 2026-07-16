@@ -304,6 +304,9 @@ void writeForceTelemetryHeader(std::ostream& os, const char* side) {
     os << ',' << side << "_ft_gravity_tcp_x_m_s2"
        << ',' << side << "_ft_gravity_tcp_y_m_s2"
        << ',' << side << "_ft_gravity_tcp_z_m_s2";
+    os << ',' << side << "_ft_gravity_compensation_model"
+       << ',' << side << "_ft_gravity_compensation_calibration_id";
+    writeWrenchHeader(os, side, "ft_modeled_gravity_wrench");
     writeWrenchHeader(os, side, "ft_fast_external");
     writeWrenchHeader(os, side, "ft_control_external");
     os << ',' << side << "_ft_healthy"
@@ -623,6 +626,9 @@ void writeForceTelemetryColumns(
     os << ',' << ft.gravity_tcp[0]
        << ',' << ft.gravity_tcp[1]
        << ',' << ft.gravity_tcp[2];
+    os << ',' << csvEscape(ft.gravity_compensation_model)
+       << ',' << csvEscape(ft.gravity_compensation_calibration_id);
+    writeWrenchColumns(os, ft.modeled_gravity_wrench);
     writeWrenchColumns(os, ft.fast_external_wrench);
     writeWrenchColumns(os, ft.control_external_wrench);
     os << ',' << ft.healthy

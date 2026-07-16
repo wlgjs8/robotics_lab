@@ -1,9 +1,11 @@
-"""Pure payload-identification math and report helpers for the CoG GUI.
+"""Pure gravity-wrench identification math and report helpers for the CoG GUI.
 
 The server supplies both inputs in the TCP frame: the pre-payload/pre-tare
 ``wrench_tcp`` and the gravity vector resolved from the measured TCP
 orientation.  The server-owned profile also supplies the required observation
-sign as ``wrench_convention``; this module never guesses it from a fitted mass.
+model contract.  A rigid payload requires an explicit ``wrench_convention``;
+controller-compensated feedback instead uses a general linear gravity-residual
+model and does not claim a physical mass or CoG.
 This module deliberately owns no robot commands and never applies an estimate
 to either server configuration or a controller.
 """
@@ -36,6 +38,7 @@ _COG_EVIDENCE_CONTRACT = {
     "transformed_wrench_frame": "tcp",
     "transform_convention": "point_tcp = T_tcp_sensor * point_sensor",
     "model_inputs": ["wrench_tcp", "gravity_tcp"],
+    "controller_compensated_assumption_verified": False,
 }
 
 
@@ -248,6 +251,7 @@ class CogLeaveOneOutDiagnostic:
 
 @dataclass(frozen=True)
 class CogEstimate:
+    observation_model: str
     wrench_convention: str
     mass_kg: float
     mass_std_error_kg: float
@@ -290,6 +294,73 @@ class CogEstimate:
 
 
 @dataclass(frozen=True)
+class GravityResidualLeaveOneOutDiagnostic:
+    omitted_pose: str
+    valid: bool
+    error: str | None = None
+    force_residual_n: tuple[float, float, float] | None = None
+    torque_residual_nm: tuple[float, float, float] | None = None
+    force_residual_norm_n: float | None = None
+    torque_residual_norm_nm: float | None = None
+
+
+@dataclass(frozen=True)
+class ControllerCompensatedGravityEstimate:
+    """General TCP gravity-residual map, not a physical payload/CoG estimate."""
+
+    observation_model: str
+    force_matrix_n_per_m_s2: tuple[tuple[float, float, float], ...]
+    torque_matrix_nm_per_m_s2: tuple[tuple[float, float, float], ...]
+    force_bias_n: tuple[float, float, float]
+    torque_bias_nm: tuple[float, float, float]
+    force_fit_rms_n: float
+    torque_fit_rms_nm: float
+    force_design_rank: int
+    force_design_condition: float
+    torque_design_rank: int
+    torque_design_condition: float
+    pose_residuals: tuple[CogPoseResidual, ...]
+    leave_one_out: tuple[GravityResidualLeaveOneOutDiagnostic, ...]
+    physical_mass_cog_identifiable: bool = False
+    controller_compensation_assumed: bool = True
+    provisional: bool = True
+    applied: bool = False
+
+    @property
+    def max_leave_one_out_force_residual_n(self) -> float | None:
+        values = [
+            item.force_residual_norm_n
+            for item in self.leave_one_out
+            if item.valid and item.force_residual_norm_n is not None
+        ]
+        return max(values, default=None)
+
+    @property
+    def max_leave_one_out_torque_residual_nm(self) -> float | None:
+        values = [
+            item.torque_residual_norm_nm
+            for item in self.leave_one_out
+            if item.valid and item.torque_residual_norm_nm is not None
+        ]
+        return max(values, default=None)
+
+    @property
+    def runtime_config_candidate(self) -> dict[str, Any]:
+        return {
+            "gravity_compensation_model": "controller_compensated_linear",
+            "gravity_force_matrix_n_per_m_s2": [
+                value for row in self.force_matrix_n_per_m_s2 for value in row
+            ],
+            "gravity_torque_matrix_nm_per_m_s2": [
+                value for row in self.torque_matrix_nm_per_m_s2 for value in row
+            ],
+        }
+
+
+GravityWrenchEstimate = CogEstimate | ControllerCompensatedGravityEstimate
+
+
+@dataclass(frozen=True)
 class CogReportPaths:
     report_json: Path
     samples_csv: Path
@@ -314,6 +385,21 @@ class _SolveResult:
     measured_force_variation_rms_n: float
     gravity_compensation_ambiguous: bool
     ambiguity_reasons: tuple[str, ...]
+    pose_residuals: tuple[CogPoseResidual, ...]
+
+
+@dataclass(frozen=True)
+class _GravityResidualSolveResult:
+    force_matrix: np.ndarray
+    torque_matrix: np.ndarray
+    force_bias: np.ndarray
+    torque_bias: np.ndarray
+    force_fit_rms_n: float
+    torque_fit_rms_nm: float
+    force_design_rank: int
+    force_design_condition: float
+    torque_design_rank: int
+    torque_design_condition: float
     pose_residuals: tuple[CogPoseResidual, ...]
 
 
@@ -533,6 +619,198 @@ def _solve(
     )
 
 
+def _solve_gravity_residual(
+    summaries: Sequence[CogPoseSummary],
+    *,
+    max_condition_number: float | None,
+) -> _GravityResidualSolveResult:
+    gravity = np.asarray([summary.gravity_tcp_mean for summary in summaries], dtype=float)
+    force = np.asarray([summary.force_tcp_mean_n for summary in summaries], dtype=float)
+    torque = np.asarray([summary.torque_tcp_mean_nm for summary in summaries], dtype=float)
+    counts = np.asarray([summary.sample_count for summary in summaries], dtype=float)
+    force_variance = np.square(
+        np.asarray([summary.force_stddev_n for summary in summaries], dtype=float)
+    )
+    torque_variance = np.square(
+        np.asarray([summary.torque_stddev_nm for summary in summaries], dtype=float)
+    )
+    design = np.column_stack((gravity, np.ones(len(summaries), dtype=float)))
+    raw_rank, _raw_condition = _design_condition(design)
+    if raw_rank < 4:
+        raise CogCalibrationError(
+            "rank_deficient",
+            "gravity orientations do not provide a full-rank linear residual design "
+            f"({raw_rank}/4)",
+        )
+
+    def solve_components(
+        observations: np.ndarray,
+        variance: np.ndarray,
+        label: str,
+    ) -> tuple[np.ndarray, int, float]:
+        weights = _mean_weights(variance, counts)
+        coefficients = np.zeros((3, 4), dtype=float)
+        ranks: list[int] = []
+        conditions: list[float] = []
+        for component in range(3):
+            weighted_design = design * weights[:, component, None]
+            weighted_observations = observations[:, component] * weights[:, component]
+            rank, condition = _design_condition(weighted_design)
+            ranks.append(rank)
+            conditions.append(condition)
+            if rank < 4:
+                raise CogCalibrationError(
+                    "rank_deficient",
+                    f"weighted {label} residual design is rank deficient",
+                )
+            if max_condition_number is not None and condition > max_condition_number:
+                raise CogCalibrationError(
+                    "ill_conditioned",
+                    f"weighted {label} gravity design exceeds explicit condition-number "
+                    f"limit ({condition:.6g} > {max_condition_number:.6g})",
+                )
+            solution, _residuals, solved_rank, _singular = np.linalg.lstsq(
+                weighted_design,
+                weighted_observations,
+                rcond=None,
+            )
+            if solved_rank < 4 or not np.all(np.isfinite(solution)):
+                raise CogCalibrationError(
+                    "non_finite" if not np.all(np.isfinite(solution)) else "rank_deficient",
+                    f"weighted {label} residual solve failed",
+                )
+            coefficients[component] = solution
+        return coefficients, min(ranks), max(conditions)
+
+    force_coefficients, force_rank, force_condition = solve_components(
+        force,
+        force_variance,
+        "force",
+    )
+    torque_coefficients, torque_rank, torque_condition = solve_components(
+        torque,
+        torque_variance,
+        "torque",
+    )
+    predicted_force = gravity @ force_coefficients[:, :3].T + force_coefficients[:, 3]
+    predicted_torque = gravity @ torque_coefficients[:, :3].T + torque_coefficients[:, 3]
+    force_residual = force - predicted_force
+    torque_residual = torque - predicted_torque
+    pose_residuals = tuple(
+        CogPoseResidual(
+            name=summary.name,
+            observed_force_n=tuple(float(value) for value in force[index]),
+            predicted_force_n=tuple(float(value) for value in predicted_force[index]),
+            observed_torque_nm=tuple(float(value) for value in torque[index]),
+            predicted_torque_nm=tuple(float(value) for value in predicted_torque[index]),
+            force_residual_n=tuple(float(value) for value in force_residual[index]),
+            torque_residual_nm=tuple(float(value) for value in torque_residual[index]),
+            force_residual_norm_n=float(np.linalg.norm(force_residual[index])),
+            torque_residual_norm_nm=float(np.linalg.norm(torque_residual[index])),
+        )
+        for index, summary in enumerate(summaries)
+    )
+    return _GravityResidualSolveResult(
+        force_matrix=force_coefficients[:, :3],
+        torque_matrix=torque_coefficients[:, :3],
+        force_bias=force_coefficients[:, 3],
+        torque_bias=torque_coefficients[:, 3],
+        force_fit_rms_n=float(np.sqrt(np.mean(np.square(force_residual)))),
+        torque_fit_rms_nm=float(np.sqrt(np.mean(np.square(torque_residual)))),
+        force_design_rank=force_rank,
+        force_design_condition=force_condition,
+        torque_design_rank=torque_rank,
+        torque_design_condition=torque_condition,
+        pose_residuals=pose_residuals,
+    )
+
+
+def estimate_controller_compensated_gravity(
+    poses: Sequence[CogPoseMeasurement],
+    *,
+    min_poses: int = 5,
+    max_condition_number: float | None = None,
+) -> ControllerCompensatedGravityEstimate:
+    """Fit an orientation-dependent TCP wrench residual without claiming CoG."""
+    if not isinstance(min_poses, int) or isinstance(min_poses, bool) or min_poses < 5:
+        raise ValueError("min_poses must be an integer of at least 5")
+    if max_condition_number is not None:
+        max_condition_number = float(max_condition_number)
+        if not math.isfinite(max_condition_number) or max_condition_number <= 1.0:
+            raise ValueError("max_condition_number must be finite and greater than 1")
+    frozen_poses = tuple(poses)
+    if len(frozen_poses) < min_poses:
+        raise CogCalibrationError(
+            "insufficient_poses",
+            f"need at least {min_poses} accepted poses, got {len(frozen_poses)}",
+        )
+    if any(not isinstance(pose, CogPoseMeasurement) for pose in frozen_poses):
+        raise TypeError("poses must contain only CogPoseMeasurement values")
+    names = [pose.name for pose in frozen_poses]
+    if len(set(names)) != len(names):
+        raise CogCalibrationError("duplicate_pose_name", "pose names must be unique")
+    summaries = tuple(pose.summary() for pose in frozen_poses)
+    solved = _solve_gravity_residual(
+        summaries,
+        max_condition_number=max_condition_number,
+    )
+
+    leave_one_out: list[GravityResidualLeaveOneOutDiagnostic] = []
+    for omitted_index, omitted in enumerate(summaries):
+        remaining = summaries[:omitted_index] + summaries[omitted_index + 1 :]
+        try:
+            candidate = _solve_gravity_residual(
+                remaining,
+                max_condition_number=max_condition_number,
+            )
+        except CogCalibrationError as exc:
+            leave_one_out.append(
+                GravityResidualLeaveOneOutDiagnostic(
+                    omitted_pose=omitted.name,
+                    valid=False,
+                    error=f"{exc.code}: {exc.detail}",
+                )
+            )
+            continue
+        gravity = np.asarray(omitted.gravity_tcp_mean, dtype=float)
+        observed_force = np.asarray(omitted.force_tcp_mean_n, dtype=float)
+        observed_torque = np.asarray(omitted.torque_tcp_mean_nm, dtype=float)
+        predicted_force = candidate.force_matrix @ gravity + candidate.force_bias
+        predicted_torque = candidate.torque_matrix @ gravity + candidate.torque_bias
+        force_residual = observed_force - predicted_force
+        torque_residual = observed_torque - predicted_torque
+        leave_one_out.append(
+            GravityResidualLeaveOneOutDiagnostic(
+                omitted_pose=omitted.name,
+                valid=True,
+                force_residual_n=tuple(float(value) for value in force_residual),
+                torque_residual_nm=tuple(float(value) for value in torque_residual),
+                force_residual_norm_n=float(np.linalg.norm(force_residual)),
+                torque_residual_norm_nm=float(np.linalg.norm(torque_residual)),
+            )
+        )
+
+    return ControllerCompensatedGravityEstimate(
+        observation_model="controller_compensated_linear",
+        force_matrix_n_per_m_s2=tuple(
+            tuple(float(value) for value in row) for row in solved.force_matrix
+        ),
+        torque_matrix_nm_per_m_s2=tuple(
+            tuple(float(value) for value in row) for row in solved.torque_matrix
+        ),
+        force_bias_n=tuple(float(value) for value in solved.force_bias),
+        torque_bias_nm=tuple(float(value) for value in solved.torque_bias),
+        force_fit_rms_n=solved.force_fit_rms_n,
+        torque_fit_rms_nm=solved.torque_fit_rms_nm,
+        force_design_rank=solved.force_design_rank,
+        force_design_condition=solved.force_design_condition,
+        torque_design_rank=solved.torque_design_rank,
+        torque_design_condition=solved.torque_design_condition,
+        pose_residuals=solved.pose_residuals,
+        leave_one_out=tuple(leave_one_out),
+    )
+
+
 def estimate_payload(
     poses: Sequence[CogPoseMeasurement],
     *,
@@ -606,6 +884,7 @@ def estimate_payload(
         )
 
     return CogEstimate(
+        observation_model="rigid_payload",
         wrench_convention=solved.wrench_convention,
         mass_kg=solved.mass_kg,
         mass_std_error_kg=solved.mass_std_error_kg,
@@ -768,7 +1047,7 @@ def save_calibration_report(
     run_id: str,
     arm: str,
     poses: Sequence[CogPoseMeasurement],
-    estimate: CogEstimate,
+    estimate: GravityWrenchEstimate,
     provenance: Mapping[str, Any],
 ) -> CogReportPaths:
     """Atomically save a provisional JSON report and raw-sample CSV."""
@@ -778,12 +1057,18 @@ def save_calibration_report(
         poses=poses,
         provenance=provenance,
     )
-    if not isinstance(estimate, CogEstimate):
-        raise TypeError("estimate must be a CogEstimate")
+    if not isinstance(estimate, (CogEstimate, ControllerCompensatedGravityEstimate)):
+        raise TypeError("estimate must be a supported gravity-wrench estimate")
     if estimate.provisional is not True or estimate.applied is not False:
         raise ValueError("only a PROVISIONAL / NOT APPLIED estimate may be saved")
+    runtime_config_candidate = None
+    if isinstance(estimate, ControllerCompensatedGravityEstimate):
+        runtime_config_candidate = dict(estimate.runtime_config_candidate)
+        runtime_config_candidate["gravity_compensation_calibration_id"] = (
+            run_id if run_id.startswith(f"{arm}-") else f"{arm}-{run_id}"
+        )
     report = {
-        "schema_version": 3,
+        "schema_version": 4,
         "run_id": run_id,
         "arm": arm,
         "status": "PROVISIONAL / NOT APPLIED",
@@ -794,6 +1079,7 @@ def save_calibration_report(
         "provenance": provenance_copy,
         "poses": [asdict(pose.summary()) for pose in frozen_poses],
         "estimate": asdict(estimate),
+        "runtime_config_candidate": runtime_config_candidate,
     }
     return _write_report_bundle(
         output_dir,
@@ -812,7 +1098,7 @@ def save_blocked_calibration_report(
     failure_code: str,
     failure_detail: str,
     provenance: Mapping[str, Any],
-    candidate_estimate: CogEstimate | None = None,
+    candidate_estimate: GravityWrenchEstimate | None = None,
 ) -> CogReportPaths:
     """Save evidence for a rejected calculation without promoting a payload."""
     run_id, arm, frozen_poses, provenance_copy = _validated_report_inputs(
@@ -825,10 +1111,13 @@ def save_blocked_calibration_report(
     failure_detail = str(failure_detail).strip()
     if not failure_code or not failure_detail:
         raise ValueError("blocked report requires a failure code and detail")
-    if candidate_estimate is not None and not isinstance(candidate_estimate, CogEstimate):
-        raise TypeError("candidate_estimate must be a CogEstimate or None")
+    if candidate_estimate is not None and not isinstance(
+        candidate_estimate,
+        (CogEstimate, ControllerCompensatedGravityEstimate),
+    ):
+        raise TypeError("candidate_estimate must be a supported estimate or None")
     report = {
-        "schema_version": 3,
+        "schema_version": 4,
         "run_id": run_id,
         "arm": arm,
         "status": "BLOCKED / NOT APPLIED",

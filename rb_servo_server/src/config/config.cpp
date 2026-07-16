@@ -474,6 +474,20 @@ std::array<double, 3> parseVec3(const YAML::Node& node, const std::string& path)
     };
 }
 
+std::array<double, 9> parseMatrix3RowMajor(
+    const YAML::Node& node,
+    const std::string& path
+) {
+    if (!node.IsSequence() || node.size() != 9) {
+        fail(path + " must contain exactly 9 row-major values", node);
+    }
+    std::array<double, 9> out{};
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        out[i] = asDouble(node[i], path + "[" + std::to_string(i) + "]");
+    }
+    return out;
+}
+
 // Parse a safety constraint's tcp_offset_points sequence (floor/roi/reach/user_floor
 // all share the FloorCheckPointConfig schema). Each entry has a name, the OPEN
 // offset_m: [x, y, z], and an OPTIONAL offset_closed_m: [x, y, z] (the gripper-closed
@@ -1945,6 +1959,58 @@ void validateConfig(const DualArmConfig& cfg) {
                 throw std::runtime_error(path + ".payload_com_tcp_m values must be finite");
             }
         }
+        if (!(ft.gravity_compensation_model == "rigid_payload" ||
+              ft.gravity_compensation_model == "controller_compensated_linear")) {
+            throw std::runtime_error(
+                path + ".gravity_compensation_model must be rigid_payload or "
+                "controller_compensated_linear"
+            );
+        }
+        const auto validate_matrix = [&](const std::array<double, 9>& matrix,
+                                         const std::string& matrix_path) {
+            for (double item : matrix) {
+                if (!std::isfinite(item)) {
+                    throw std::runtime_error(matrix_path + " values must be finite");
+                }
+            }
+        };
+        validate_matrix(
+            ft.gravity_force_matrix_n_per_m_s2,
+            path + ".gravity_force_matrix_n_per_m_s2"
+        );
+        validate_matrix(
+            ft.gravity_torque_matrix_nm_per_m_s2,
+            path + ".gravity_torque_matrix_nm_per_m_s2"
+        );
+        if (ft.gravity_compensation_model == "controller_compensated_linear") {
+            if (!ft.gravity_force_matrix_configured ||
+                !ft.gravity_torque_matrix_configured ||
+                ft.gravity_compensation_calibration_id.empty()) {
+                throw std::runtime_error(
+                    path + ".gravity_compensation_model=controller_compensated_linear "
+                    "requires gravity_compensation_calibration_id and both explicit "
+                    "gravity matrices"
+                );
+            }
+            if (ft.payload_mass_kg != 0.0 ||
+                std::any_of(
+                    ft.payload_com_tcp_m.begin(),
+                    ft.payload_com_tcp_m.end(),
+                    [](double item) { return item != 0.0; }
+                )) {
+                throw std::runtime_error(
+                    path + " cannot combine controller_compensated_linear with a "
+                    "rigid payload mass/CoG"
+                );
+            }
+        } else if (ft.gravity_force_matrix_configured ||
+                   ft.gravity_torque_matrix_configured ||
+                   !ft.gravity_compensation_calibration_id.empty()) {
+            throw std::runtime_error(
+                path + " gravity matrices/calibration id require "
+                "gravity_compensation_model=controller_compensated_linear"
+            );
+        }
         validate_wrench(ft.sensor_bias, path + ".sensor_bias");
         validate_wrench(ft.residual_tare_tcp, path + ".residual_tare_tcp");
         const Pose6D& sensor_pose = ft.t_tcp_sensor;
@@ -1974,11 +2040,25 @@ void validateConfig(const DualArmConfig& cfg) {
     const bool any_ft_enabled = cfg.force_torque.left.enable || cfg.force_torque.right.enable;
     const auto& payload_id = cfg.force_torque.payload_identification;
     if (payload_id.enable) {
-        if (!(payload_id.wrench_convention == "payload_load" ||
-              payload_id.wrench_convention == "sensor_reaction")) {
+        if (!(payload_id.observation_model == "rigid_payload" ||
+              payload_id.observation_model == "controller_compensated_linear")) {
             throw std::runtime_error(
-                "force_torque.payload_identification.wrench_convention must be "
-                "payload_load or sensor_reaction"
+                "force_torque.payload_identification.observation_model must be "
+                "rigid_payload or controller_compensated_linear"
+            );
+        }
+        if (payload_id.observation_model == "rigid_payload") {
+            if (!(payload_id.wrench_convention == "payload_load" ||
+                  payload_id.wrench_convention == "sensor_reaction")) {
+                throw std::runtime_error(
+                    "force_torque.payload_identification.wrench_convention must be "
+                    "payload_load or sensor_reaction for rigid_payload"
+                );
+            }
+        } else if (!payload_id.wrench_convention.empty()) {
+            throw std::runtime_error(
+                "force_torque.payload_identification.wrench_convention must be omitted "
+                "for controller_compensated_linear"
             );
         }
         if (payload_id.min_poses < 5) {
@@ -3619,6 +3699,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             const std::string path = "force_torque.payload_identification";
             validateAllowedKeys(profile, {
                 "enable",
+                "observation_model",
                 "wrench_convention",
                 "min_poses",
                 "arrival_tolerance_deg",
@@ -3632,6 +3713,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             }, path);
             auto& out = cfg.force_torque.payload_identification;
             if (has(profile, "enable")) out.enable = asBool(profile["enable"], path + ".enable");
+            if (has(profile, "observation_model")) out.observation_model = lower(asString(profile["observation_model"], path + ".observation_model"));
             if (has(profile, "wrench_convention")) out.wrench_convention = lower(asString(profile["wrench_convention"], path + ".wrench_convention"));
             if (has(profile, "min_poses")) out.min_poses = asInt(profile["min_poses"], path + ".min_poses");
             if (has(profile, "arrival_tolerance_deg")) out.arrival_tolerance_deg = asDouble(profile["arrival_tolerance_deg"], path + ".arrival_tolerance_deg");
@@ -3666,6 +3748,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "residual_tare_max_torque_stddev_nm",
                 "T_tcp_sensor",
                 "sensor_bias",
+                "gravity_compensation_model",
+                "gravity_compensation_calibration_id",
+                "gravity_force_matrix_n_per_m_s2",
+                "gravity_torque_matrix_nm_per_m_s2",
                 "payload_mass_kg",
                 "payload_com_tcp_m",
                 "residual_tare_tcp",
@@ -3687,6 +3773,16 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ft, "residual_tare_max_torque_stddev_nm")) out.residual_tare_max_torque_stddev_nm = asDouble(ft["residual_tare_max_torque_stddev_nm"], path + ".residual_tare_max_torque_stddev_nm");
             if (has(ft, "T_tcp_sensor")) out.t_tcp_sensor = parsePose6D(ft["T_tcp_sensor"], path + ".T_tcp_sensor");
             if (has(ft, "sensor_bias")) out.sensor_bias = parseWrench6D(ft["sensor_bias"], path + ".sensor_bias");
+            if (has(ft, "gravity_compensation_model")) out.gravity_compensation_model = lower(asString(ft["gravity_compensation_model"], path + ".gravity_compensation_model"));
+            if (has(ft, "gravity_compensation_calibration_id")) out.gravity_compensation_calibration_id = asString(ft["gravity_compensation_calibration_id"], path + ".gravity_compensation_calibration_id");
+            if (has(ft, "gravity_force_matrix_n_per_m_s2")) {
+                out.gravity_force_matrix_n_per_m_s2 = parseMatrix3RowMajor(ft["gravity_force_matrix_n_per_m_s2"], path + ".gravity_force_matrix_n_per_m_s2");
+                out.gravity_force_matrix_configured = true;
+            }
+            if (has(ft, "gravity_torque_matrix_nm_per_m_s2")) {
+                out.gravity_torque_matrix_nm_per_m_s2 = parseMatrix3RowMajor(ft["gravity_torque_matrix_nm_per_m_s2"], path + ".gravity_torque_matrix_nm_per_m_s2");
+                out.gravity_torque_matrix_configured = true;
+            }
             if (has(ft, "payload_mass_kg")) out.payload_mass_kg = asDouble(ft["payload_mass_kg"], path + ".payload_mass_kg");
             if (has(ft, "payload_com_tcp_m")) out.payload_com_tcp_m = parseVec3(ft["payload_com_tcp_m"], path + ".payload_com_tcp_m");
             if (has(ft, "residual_tare_tcp")) out.residual_tare_tcp = parseWrench6D(ft["residual_tare_tcp"], path + ".residual_tare_tcp");

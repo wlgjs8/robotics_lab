@@ -15,6 +15,7 @@ from rb_servo_gui.cog_calibration import (
     CogPoseMeasurement,
     CogSample,
     CogSampleAccumulator,
+    estimate_controller_compensated_gravity,
     estimate_payload,
     save_blocked_calibration_report,
     save_calibration_report,
@@ -234,6 +235,32 @@ class CogCalibrationTest(unittest.TestCase):
         self.assertLess(estimate.mass_kg, 0.8)
         self.assertGreater(estimate.force_fit_rms_n, 3.5)
 
+        residual_estimate = estimate_controller_compensated_gravity(
+            poses,
+            max_condition_number=1000.0,
+        )
+        self.assertEqual(
+            residual_estimate.observation_model,
+            "controller_compensated_linear",
+        )
+        self.assertFalse(residual_estimate.physical_mass_cog_identifiable)
+        self.assertLess(residual_estimate.force_fit_rms_n, 0.2)
+        self.assertLess(residual_estimate.torque_fit_rms_nm, 0.03)
+        self.assertEqual(len(residual_estimate.leave_one_out), len(poses))
+        self.assertTrue(all(item.valid for item in residual_estimate.leave_one_out))
+        self.assertEqual(
+            residual_estimate.runtime_config_candidate["gravity_compensation_model"],
+            "controller_compensated_linear",
+        )
+        self.assertEqual(
+            len(
+                residual_estimate.runtime_config_candidate[
+                    "gravity_force_matrix_n_per_m_s2"
+                ]
+            ),
+            9,
+        )
+
     def test_duplicate_gravity_directions_are_rank_deficient(self) -> None:
         source = synthetic_poses(samples_per_pose=2)[0]
         poses = tuple(
@@ -392,6 +419,32 @@ class CogCalibrationTest(unittest.TestCase):
             self.assertEqual(rows[-1]["pose_name"], f"joint{len(poses)}")
             self.assertEqual(Path(paths.report_json).parent, Path(directory) / "right-20260713T120000Z")
 
+    def test_linear_report_emits_fail_closed_runtime_candidate(self) -> None:
+        poses = synthetic_poses(samples_per_pose=3)
+        estimate = estimate_controller_compensated_gravity(poses)
+        with tempfile.TemporaryDirectory() as directory:
+            paths = save_calibration_report(
+                directory,
+                run_id="right-linear-20260716",
+                arm="right",
+                poses=poses,
+                estimate=estimate,
+                provenance={"controller_compensation_assumed": True},
+            )
+
+            report = json.loads(paths.report_json.read_text(encoding="utf-8"))
+            candidate = report["runtime_config_candidate"]
+            self.assertEqual(report["schema_version"], 4)
+            self.assertEqual(
+                candidate["gravity_compensation_model"],
+                "controller_compensated_linear",
+            )
+            self.assertEqual(
+                candidate["gravity_compensation_calibration_id"],
+                "right-linear-20260716",
+            )
+            self.assertNotIn("payload_mass_kg", candidate)
+
     def test_blocked_report_preserves_samples_and_candidate_without_applying(self) -> None:
         poses = synthetic_poses(samples_per_pose=3)
         candidate = estimate_payload(poses, wrench_convention="payload_load")
@@ -408,7 +461,7 @@ class CogCalibrationTest(unittest.TestCase):
             )
 
             report = json.loads(paths.report_json.read_text(encoding="utf-8"))
-            self.assertEqual(report["schema_version"], 3)
+            self.assertEqual(report["schema_version"], 4)
             self.assertEqual(
                 report["evidence_contract"]["transform_convention"],
                 "point_tcp = T_tcp_sensor * point_sensor",

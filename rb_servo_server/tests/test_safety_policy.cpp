@@ -3534,12 +3534,20 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     snapshot.startup_validation.right.motion_ready = true;
     snapshot.startup_validation.right.read_only_diagnostic = true;
     snapshot.left_force_torque.gravity_tcp = {1.0, 2.0, 3.0};
+    snapshot.left_force_torque.gravity_compensation_model =
+        "controller_compensated_linear";
+    snapshot.left_force_torque.gravity_compensation_calibration_id =
+        "right-linear-test";
+    snapshot.left_force_torque.modeled_gravity_wrench = {
+        1.0, 2.0, 3.0, 0.1, 0.2, 0.3,
+    };
     snapshot.left_force_torque.t_tcp_sensor = {
         0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966,
     };
     snapshot.left_force_torque.payload_identification_inhibit = true;
     snapshot.left_force_torque.joint_target_profile = "payload_identification";
     snapshot.payload_identification_config.enable = true;
+    snapshot.payload_identification_config.observation_model = "rigid_payload";
     snapshot.payload_identification_config.wrench_convention = "sensor_reaction";
     snapshot.payload_identification_config.min_poses = 7;
     snapshot.payload_identification_config.arrival_tolerance_deg = 0.4;
@@ -3649,7 +3657,9 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
         json.at("force_torque").at("payload_identification");
     RB_CHECK(payload_identification.at("enable").get<bool>());
     RB_CHECK(payload_identification.at("wrench_convention").get<std::string>() ==
-        "sensor_reaction");
+             "sensor_reaction");
+    RB_CHECK(payload_identification.at("observation_model").get<std::string>() ==
+             "rigid_payload");
     RB_CHECK(payload_identification.at("min_poses").get<int>() == 7);
     RB_CHECK(payload_identification.at("arrival_tolerance_deg").get<double>() == 0.4);
     RB_CHECK(payload_identification.at("settle_sec").get<double>() == 0.6);
@@ -3664,6 +3674,17 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     RB_CHECK(left_force_torque.at("gravity_tcp").at(0).get<double>() == 1.0);
     RB_CHECK(left_force_torque.at("gravity_tcp").at(1).get<double>() == 2.0);
     RB_CHECK(left_force_torque.at("gravity_tcp").at(2).get<double>() == 3.0);
+    RB_CHECK(
+        left_force_torque.at("gravity_compensation_model").get<std::string>() ==
+        "controller_compensated_linear"
+    );
+    RB_CHECK(
+        left_force_torque.at("gravity_compensation_calibration_id").get<std::string>() ==
+        "right-linear-test"
+    );
+    RB_CHECK(
+        left_force_torque.at("modeled_gravity_wrench").at(4).get<double>() == 0.2
+    );
     RB_CHECK(left_force_torque.at("payload_identification_inhibit").get<bool>());
     RB_CHECK(left_force_torque.at("joint_target_profile").get<std::string>() ==
         "payload_identification");

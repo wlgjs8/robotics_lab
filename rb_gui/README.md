@@ -60,12 +60,14 @@ generic TCP pose triad is not. Independent GUI checkboxes control the sensor
 and runtime overlays. All fields remain read-only; the GUI has no force-control
 enable or tuning control.
 
-## CoG Waypoint Calibration
+## Gravity-Wrench / CoG Waypoint Calibration
 
-The `조작 -> CoG` tab identifies one arm's provisional payload mass and TCP-frame
-center of gravity from saved joint waypoints. Create at least five safe,
-orientation-diverse WayPoints first (for example `joint1` through `joint10`),
-then choose the arm and matching prefix in the CoG tab.
+The `조작 -> CoG / Gravity model` tab identifies one of two server-selected models from saved
+joint waypoints. `rigid_payload` estimates physical payload mass and TCP-frame
+CoG. `controller_compensated_linear` estimates only the orientation-dependent
+residual left in controller-processed feedback; it is not a physical mass/CoG
+result. Create at least five safe, orientation-diverse WayPoints first (for
+example `joint1` through `joint10`), then choose the arm and matching prefix.
 
 `Start` only freezes and validates the waypoint list and acquires the GUI lease;
 it sends no motion target. Robot motion is renewed only while the operator holds
@@ -78,16 +80,17 @@ waypoint order is not collision-free planning, so the complete swept volume must
 be clear and an E-stop operator remains required.
 
 At each arrived/settled pose, the 100 Hz state callback collects unique fresh
-samples from one server state snapshot. Evidence schema v3 records
+samples from one server state snapshot. Evidence schema v4 records
 `raw_sensor_wrench`, the effective `T_tcp_sensor`, `wrench_tcp`, `gravity_tcp`,
 actual joints, and the actual stand-frame TCP pose against the same freshness
-value. That profile must explicitly declare `wrench_convention` as
-`payload_load` or `sensor_reaction`; the GUI never guesses the sign. A noisy pose
-is stopped for explicit Retry or Skip. `Calculate` performs a weighted
-least-squares estimate and reports mass, TCP CoG, wrench bias,
-per-pose observed/predicted force and torque with residuals, weighted-design
-rank/condition, gravity-correlation ambiguity, and
-leave-one-pose-out diagnostics. `Save report` atomically publishes a successful
+value. That profile must explicitly declare `observation_model`. A
+`rigid_payload` profile also requires `wrench_convention: payload_load |
+sensor_reaction`; the GUI never guesses the sign. A noisy pose is stopped for
+explicit Retry or Skip. For `controller_compensated_linear`, `Calculate` fits
+independent 3x3 force and torque maps in `wrench_tcp = A*gravity_tcp + bias`,
+reports held-out residuals, and emits a runtime-config candidate without the
+constant bias (the normal Init Motion tare owns that bias). `Save report`
+atomically publishes a successful
 provisional JSON/CSV evidence bundle under `logs/cog_calibration/<run_id>/`.
 If calculation or a fit bound rejects the capture, the GUI automatically saves
 the same raw samples with a `BLOCKED / NOT APPLIED` diagnostic report; rejected

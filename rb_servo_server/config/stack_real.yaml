@@ -462,15 +462,17 @@ logging:
 
 force_torque:
   source: rbpodo_eft
-  # Supervised payload/CoG identification profile used by the rb_gui CoG tab.
+  # Supervised gravity-wrench/CoG identification profile used by the rb_gui tab.
   # Motion still uses the ordinary leased/deadman JointTarget path. These
   # acquisition bounds reuse the accepted InitMotion/tare window; fit bounds
   # gate only a PROVISIONAL report and never apply a payload automatically.
   payload_identification:
     enable: true
-    # Installed EFT convention established by the supervised compliance sign
-    # captures: the reported wrench opposes the load applied at the TCP.
-    wrench_convention: sensor_reaction
+    # Working assumption requested for the next supervised capture: Rainbow
+    # feedback has already undergone controller gravity/source processing.
+    # This identifies a general orientation-dependent residual map, not a
+    # physical payload mass or CoG. The assumption is not CAN-verified.
+    observation_model: controller_compensated_linear
     min_poses: 5
     arrival_tolerance_deg: 1.5
     settle_sec: 0.5
@@ -514,6 +516,9 @@ force_torque:
     # +pi/2 yaw makes the sensor X/Y gizmo and compliance X/Y physically agree.
     T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
     sensor_bias: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # Left remains on the rigid zero-payload model until an arm-specific report
+    # is captured and reviewed; the right-arm result must not be mirrored here.
+    gravity_compensation_model: rigid_payload
     payload_mass_kg: 0.0
     payload_com_tcp_m: [0.0, 0.0, 0.0]
     residual_tare_tcp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -537,24 +542,33 @@ force_torque:
     # observed +X/+Y/+Z translation in the pushed runtime FT-control direction.
     T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
     sensor_bias: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # Reviewed schema-v4 candidate from
+    # logs/cog_calibration/20260716T060343Z-421f0157/calibration_report.json
+    # sha256: 76a8bdb828a7d624c41e9da44ed0b2a00a6b9aedac3b096fee2049e1fa360ad1
+    # This is a controller-processed residual map under the operator-requested,
+    # CAN-unverified assumption; it is not a physical mass/CoG result.
+    gravity_compensation_model: controller_compensated_linear
+    gravity_compensation_calibration_id: "right-20260716T060343Z-421f0157"
+    # Row-major maps: wrench_tcp = A * gravity_tcp + bias. The constant bias is
+    # deliberately omitted here and remains owned by the post-Init-Motion tare.
+    gravity_force_matrix_n_per_m_s2: [-0.7603111049987973, 1.0013958357019646, -0.01518380064332614, -0.9254727708956185, -0.7791934817445652, -0.020435340561226173, -0.23394181627988272, -0.006012858617312489, 0.25715992798221454]
+    gravity_torque_matrix_nm_per_m_s2: [-0.2206539391248573, -0.14062927088838903, -0.007134530034776744, 0.13306183273551747, -0.2324542571312396, 0.003240768143678019, 0.0014226562246761319, 0.00009072834274200404, 0.0007633213727637278]
     payload_mass_kg: 0.0
     payload_com_tcp_m: [0.0, 0.0, 0.0]
     residual_tare_tcp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-# Gate 3C supervised six-axis Cartesian compliance. The 2026-07-12 19:26
-# capture completed roll/pitch/yaw direction and recenter without a controller
-# fault or hard-limit event. All three rotations now share one more-sensitive,
-# measured-noise-qualified profile. Payload/COM remain pending, so this is still
-# a small-angle, pose-local Hold test. Both geometric floor constraints remain
-# disabled by explicit operator decision, requiring an E-stop operator and a
-# completely clear swept volume. This is not production acceptance.
+# Fail-closed monitor A/B after the 2026-07-16 15:26 right-arm run produced
+# rotation during mixed fingertip/Pika-body pushes. The reviewed right-arm
+# controller-compensated residual model remains configured for telemetry, but
+# force motion is disabled until fingertip-centre and known-offset pushes show
+# that the TCP torque follows tau = r x F with the configured geometry. Both
+# geometric floor constraints remain disabled by explicit operator decision.
 force_control:
   provider: project_native
   enable: true
-  # operating_mode: monitor
-  operating_mode: cartesian_admittance
-  allow_in_real: true
-  supervised_experimental_real: true
+  operating_mode: monitor
+  allow_in_real: false
+  supervised_experimental_real: false
   update_rate_hz: 500
   left:
     enable: true

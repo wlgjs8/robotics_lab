@@ -1,3 +1,4 @@
+#include <array>
 #include <cstdlib>
 #include <cmath>
 #include <filesystem>
@@ -190,6 +191,8 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(stack_real.force_torque.right.frame_configured);
         const auto& payload_id = stack_real.force_torque.payload_identification;
         RB_CHECK(payload_id.enable);
+        RB_CHECK(payload_id.observation_model == "controller_compensated_linear");
+        RB_CHECK(payload_id.wrench_convention.empty());
         RB_CHECK(payload_id.min_poses == 5);
         RB_CHECK(near(payload_id.arrival_tolerance_deg, 1.5));
         RB_CHECK(near(payload_id.settle_sec, 0.5));
@@ -198,6 +201,45 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(payload_id.max_torque_stddev_nm, 0.15));
         const auto& left_ft = stack_real.force_torque.left;
         const auto& right_ft = stack_real.force_torque.right;
+        RB_CHECK(left_ft.gravity_compensation_model == "rigid_payload");
+        RB_CHECK(right_ft.gravity_compensation_model ==
+                 "controller_compensated_linear");
+        RB_CHECK(right_ft.gravity_compensation_calibration_id ==
+                 "right-20260716T060343Z-421f0157");
+        RB_CHECK(right_ft.gravity_force_matrix_configured);
+        RB_CHECK(right_ft.gravity_torque_matrix_configured);
+        const std::array<double, 9> expected_force_matrix{
+            -0.7603111049987973,
+            1.0013958357019646,
+            -0.01518380064332614,
+            -0.9254727708956185,
+            -0.7791934817445652,
+            -0.020435340561226173,
+            -0.23394181627988272,
+            -0.006012858617312489,
+            0.25715992798221454,
+        };
+        const std::array<double, 9> expected_torque_matrix{
+            -0.2206539391248573,
+            -0.14062927088838903,
+            -0.007134530034776744,
+            0.13306183273551747,
+            -0.2324542571312396,
+            0.003240768143678019,
+            0.0014226562246761319,
+            0.00009072834274200404,
+            0.0007633213727637278,
+        };
+        for (std::size_t i = 0; i < expected_force_matrix.size(); ++i) {
+            RB_CHECK(near(right_ft.gravity_force_matrix_n_per_m_s2[i],
+                          expected_force_matrix[i]));
+            RB_CHECK(near(right_ft.gravity_torque_matrix_nm_per_m_s2[i],
+                          expected_torque_matrix[i]));
+        }
+        RB_CHECK(near(right_ft.payload_mass_kg, 0.0));
+        RB_CHECK(near(right_ft.payload_com_tcp_m[0], 0.0));
+        RB_CHECK(near(right_ft.payload_com_tcp_m[1], 0.0));
+        RB_CHECK(near(right_ft.payload_com_tcp_m[2], 0.0));
         RB_CHECK(left_ft.calibration_id ==
                  "right-derived-identical-positive-force-ft-axis-20260712");
         RB_CHECK(right_ft.calibration_id ==
@@ -216,9 +258,9 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(right_ft.t_tcp_sensor.rz, left_ft.t_tcp_sensor.rz));
         RB_CHECK(stack_real.force_control.provider == "project_native");
         RB_CHECK(stack_real.force_control.enable);
-        RB_CHECK(stack_real.force_control.operating_mode == "cartesian_admittance");
-        RB_CHECK(stack_real.force_control.allow_in_real);
-        RB_CHECK(stack_real.force_control.supervised_experimental_real);
+        RB_CHECK(stack_real.force_control.operating_mode == "monitor");
+        RB_CHECK(!stack_real.force_control.allow_in_real);
+        RB_CHECK(!stack_real.force_control.supervised_experimental_real);
         RB_CHECK(stack_real.force_control.left.enable);
         RB_CHECK(stack_real.force_control.right.enable);
         RB_CHECK(!stack_real.safety.floor_constraint.enable);
@@ -441,6 +483,11 @@ bool testGuardedAdmittanceReleaseProfileValidation() {
         std::string body = readFile(stack_real_path);
         RB_CHECK(replaceOnce(
             &body,
+            "  operating_mode: monitor\n",
+            "  operating_mode: cartesian_admittance\n"
+        ));
+        RB_CHECK(replaceOnce(
+            &body,
             "    contact_release_force_n: 2.75\n",
             "    contact_release_force_n: 2.0\n"
         ));
@@ -457,6 +504,11 @@ bool testGuardedAdmittanceReleaseProfileValidation() {
         std::string body = readFile(stack_real_path);
         RB_CHECK(replaceOnce(
             &body,
+            "  operating_mode: monitor\n",
+            "  operating_mode: cartesian_admittance\n"
+        ));
+        RB_CHECK(replaceOnce(
+            &body,
             "    force_deadband_n: 0.5\n",
             "    force_deadband_n: 1.1\n"
         ));
@@ -471,6 +523,11 @@ bool testGuardedAdmittanceReleaseProfileValidation() {
 
     {
         std::string body = readFile(stack_real_path);
+        RB_CHECK(replaceOnce(
+            &body,
+            "  operating_mode: monitor\n",
+            "  operating_mode: cartesian_admittance\n"
+        ));
         RB_CHECK(replaceOnce(
             &body,
             "    contact_release_force_n: 2.75\n",
@@ -939,6 +996,7 @@ bool testPayloadIdentificationConfigIsExplicitAndFailClosed() {
         "  source: rbpodo_eft\n"
         "  payload_identification:\n"
         "    enable: true\n"
+        "    observation_model: rigid_payload\n"
         "    wrench_convention: sensor_reaction\n"
         "    min_poses: 5\n"
         "    arrival_tolerance_deg: 1.5\n"
@@ -956,6 +1014,7 @@ bool testPayloadIdentificationConfigIsExplicitAndFailClosed() {
     ::unlink(valid_path.c_str());
     const auto& profile = valid.force_torque.payload_identification;
     RB_CHECK(profile.enable);
+    RB_CHECK(profile.observation_model == "rigid_payload");
     RB_CHECK(profile.wrench_convention == "sensor_reaction");
     RB_CHECK(profile.min_poses == 5);
     RB_CHECK(near(profile.arrival_tolerance_deg, 1.5));
@@ -988,6 +1047,7 @@ bool testPayloadIdentificationConfigIsExplicitAndFailClosed() {
         "  source: rbpodo_eft\n"
         "  payload_identification:\n"
         "    enable: true\n"
+        "    observation_model: rigid_payload\n"
         "    wrench_convention: guessed\n"
         "    min_poses: 5\n"
         "    arrival_tolerance_deg: 1.5\n"
@@ -1012,6 +1072,7 @@ bool testPayloadIdentificationConfigIsExplicitAndFailClosed() {
         "  source: rbpodo_eft\n"
         "  payload_identification:\n"
         "    enable: true\n"
+        "    observation_model: rigid_payload\n"
         "    wrench_convention: sensor_reaction\n"
         "    min_poses: 5\n"
         "    arrival_tolerance_deg: 1.5\n"
@@ -1034,6 +1095,7 @@ bool testPayloadIdentificationConfigIsExplicitAndFailClosed() {
         "  source: rbpodo_eft\n"
         "  payload_identification:\n"
         "    enable: true\n"
+        "    observation_model: rigid_payload\n"
         "    wrench_convention: sensor_reaction\n"
         "    min_poses: 5\n"
         "    arrival_tolerance_deg: 1.5\n"
@@ -1050,6 +1112,86 @@ bool testPayloadIdentificationConfigIsExplicitAndFailClosed() {
     const bool invalid_condition_rejected = loadRejects(invalid_condition_path);
     ::unlink(invalid_condition_path.c_str());
     RB_CHECK(invalid_condition_rejected);
+
+    const std::string linear_profile_path = writeTempConfig(
+        "payload-identification-linear",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  source: rbpodo_eft\n"
+        "  payload_identification:\n"
+        "    enable: true\n"
+        "    observation_model: controller_compensated_linear\n"
+        "    min_poses: 5\n"
+        "    arrival_tolerance_deg: 1.5\n"
+        "    settle_sec: 0.5\n"
+        "    samples_per_pose: 500\n"
+        "    max_force_stddev_n: 0.75\n"
+        "    max_torque_stddev_nm: 0.15\n"
+        "    max_force_fit_rms_n: 0.75\n"
+        "    max_torque_fit_rms_nm: 0.15\n"
+        "    max_design_condition_number: 1000.0\n"
+        "  left:\n"
+        "    enable: true\n"
+    );
+    const rb_servo::DualArmConfig linear_profile =
+        rb_servo::loadConfigFromYaml(linear_profile_path);
+    ::unlink(linear_profile_path.c_str());
+    RB_CHECK(
+        linear_profile.force_torque.payload_identification.observation_model ==
+        "controller_compensated_linear"
+    );
+    RB_CHECK(linear_profile.force_torque.payload_identification.wrench_convention.empty());
+
+    const std::string linear_runtime_path = writeTempConfig(
+        "gravity-compensation-linear",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  right:\n"
+        "    gravity_compensation_model: controller_compensated_linear\n"
+        "    gravity_compensation_calibration_id: right-linear-test\n"
+        "    gravity_force_matrix_n_per_m_s2: [1, 2, 3, 4, 5, 6, 7, 8, 9]\n"
+        "    gravity_torque_matrix_nm_per_m_s2: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]\n"
+        "    payload_mass_kg: 0.0\n"
+        "    payload_com_tcp_m: [0, 0, 0]\n"
+    );
+    const rb_servo::DualArmConfig linear_runtime =
+        rb_servo::loadConfigFromYaml(linear_runtime_path);
+    ::unlink(linear_runtime_path.c_str());
+    RB_CHECK(
+        linear_runtime.force_torque.right.gravity_compensation_model ==
+        "controller_compensated_linear"
+    );
+    RB_CHECK(
+        near(linear_runtime.force_torque.right.gravity_force_matrix_n_per_m_s2[5], 6.0)
+    );
+
+    const std::string incomplete_runtime_path = writeTempConfig(
+        "gravity-compensation-linear-incomplete",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  right:\n"
+        "    gravity_compensation_model: controller_compensated_linear\n"
+        "    gravity_compensation_calibration_id: right-linear-test\n"
+        "    gravity_force_matrix_n_per_m_s2: [1, 2, 3, 4, 5, 6, 7, 8, 9]\n"
+    );
+    const bool incomplete_runtime_rejected = loadRejects(incomplete_runtime_path);
+    ::unlink(incomplete_runtime_path.c_str());
+    RB_CHECK(incomplete_runtime_rejected);
+
+    const std::string combined_runtime_path = writeTempConfig(
+        "gravity-compensation-linear-combined",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  right:\n"
+        "    gravity_compensation_model: controller_compensated_linear\n"
+        "    gravity_compensation_calibration_id: right-linear-test\n"
+        "    gravity_force_matrix_n_per_m_s2: [1, 2, 3, 4, 5, 6, 7, 8, 9]\n"
+        "    gravity_torque_matrix_nm_per_m_s2: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]\n"
+        "    payload_mass_kg: 0.5\n"
+    );
+    const bool combined_runtime_rejected = loadRejects(combined_runtime_path);
+    ::unlink(combined_runtime_path.c_str());
+    RB_CHECK(combined_runtime_rejected);
     return true;
 }
 

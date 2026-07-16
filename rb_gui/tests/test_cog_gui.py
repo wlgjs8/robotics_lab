@@ -24,6 +24,7 @@ from rb_servo_gui.state_receiver import StateStore
 def _config_mapping() -> dict[str, object]:
     return {
         "enable": True,
+        "observation_model": "rigid_payload",
         "wrench_convention": "sensor_reaction",
         "min_poses": 5,
         "arrival_tolerance_deg": 0.5,
@@ -58,6 +59,9 @@ def _state(
         "t_tcp_sensor": [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966],
         "wrench_tcp": [1.0, 2.0, 3.0, 0.1, 0.2, 0.3],
         "gravity_tcp": [0.0, 0.0, -9.81],
+        "gravity_compensation_model": "rigid_payload",
+        "gravity_compensation_calibration_id": "",
+        "modeled_gravity_wrench": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         "payload_identification_inhibit": inhibit,
         "joint_target_profile": profile,
     }
@@ -122,11 +126,27 @@ class _RecordingClient(CommandClient):
 
 
 class CogGuiContractTest(unittest.TestCase):
+    def test_config_requires_explicit_observation_model(self) -> None:
+        config = _config_mapping()
+        del config["observation_model"]
+        with self.assertRaisesRegex(ValueError, "observation_model"):
+            CogIdentificationConfig.parse(config)
+
     def test_config_requires_explicit_wrench_convention(self) -> None:
         config = _config_mapping()
         del config["wrench_convention"]
         with self.assertRaisesRegex(ValueError, "wrench_convention"):
             CogIdentificationConfig.parse(config)
+
+    def test_controller_compensated_model_rejects_wrench_convention(self) -> None:
+        config = _config_mapping()
+        config["observation_model"] = "controller_compensated_linear"
+        with self.assertRaisesRegex(ValueError, "must be empty"):
+            CogIdentificationConfig.parse(config)
+        del config["wrench_convention"]
+        parsed = CogIdentificationConfig.parse(config)
+        self.assertEqual(parsed.observation_model, "controller_compensated_linear")
+        self.assertIsNone(parsed.wrench_convention)
 
     def test_conflict_control_restore_preserves_preexisting_disabled_state(self) -> None:
         class Control:
@@ -162,6 +182,8 @@ class CogGuiContractTest(unittest.TestCase):
         self.assertIsNotNone(ft)
         assert ft is not None
         self.assertEqual(ft.gravity_tcp, (0.0, 0.0, -9.81))
+        self.assertEqual(ft.gravity_compensation_model, "rigid_payload")
+        self.assertEqual(ft.modeled_gravity_wrench, (0.0,) * 6)
         self.assertTrue(ft.payload_identification_inhibit)
         self.assertEqual(ft.joint_target_profile, "payload_identification")
 
@@ -432,6 +454,72 @@ class CogGuiContractTest(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("diagnostic evidence already saved", repeated_message)
             self.assertNotIn("save failed", repeated_message)
+
+    def test_controller_compensated_calculation_returns_residual_not_cog(self) -> None:
+        mapping = _config_mapping()
+        mapping["observation_model"] = "controller_compensated_linear"
+        del mapping["wrench_convention"]
+        config = CogIdentificationConfig.parse(mapping)
+        gravity_vectors = np.asarray(
+            [
+                [0.0, 0.0, -9.80665],
+                [0.0, -9.80665, 0.0],
+                [-9.80665, 0.0, 0.0],
+                [0.0, 9.80665, 0.0],
+                [9.80665, 0.0, 0.0],
+                [5.662, 5.662, -5.662],
+                [-5.662, 5.662, -5.662],
+            ]
+        )
+        force_matrix = np.asarray(
+            [[-0.7, 1.0, 0.0], [-0.9, -0.8, -0.04], [-0.2, 0.0, 0.25]]
+        )
+        torque_matrix = np.asarray(
+            [[-0.22, -0.14, -0.01], [0.13, -0.23, 0.0], [0.0, 0.0, 0.001]]
+        )
+        poses = []
+        freshness = 1
+        for index, gravity in enumerate(gravity_vectors):
+            wrench = tuple(force_matrix @ gravity + np.asarray([-1.0, 9.7, -24.9]))
+            wrench += tuple(torque_matrix @ gravity + np.asarray([2.3, 0.1, 0.03]))
+            samples = []
+            for _sample_index in range(3):
+                samples.append(
+                    CogSample(
+                        freshness_value=freshness,
+                        wrench_tcp=wrench,
+                        gravity_tcp=tuple(gravity),
+                        received_monotonic=float(freshness),
+                    )
+                )
+                freshness += 1
+            poses.append(
+                CogPoseMeasurement(
+                    f"joint{index + 1}",
+                    tuple(float(index + joint) for joint in range(6)),
+                    tuple(samples),
+                )
+            )
+
+        client = _RecordingClient()
+        store = StateStore(stale_after_sec=5.0)
+        session = CogGuiSession(OperatorSafety(store, client))
+        session._config = config
+        session._arm = "right"
+        session._accepted = poses
+        session._run_id = "right-linear"
+        session._state = "complete"
+
+        ok, message = session.calculate()
+
+        self.assertTrue(ok, message)
+        result = session.status().result
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.observation_model, "controller_compensated_linear")
+        self.assertFalse(result.physical_mass_cog_identifiable)
+        self.assertLess(result.force_fit_rms_n, 1e-10)
+        self.assertLess(result.torque_fit_rms_nm, 1e-10)
 
 
 if __name__ == "__main__":

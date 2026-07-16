@@ -1348,6 +1348,37 @@ def _format_cog_result(status: CogGuiStatus) -> str:
             )
             return f"BLOCKED / NOT APPLIED\n{status.message}{saved}"
         return "PROVISIONAL / NOT APPLIED — no calculation"
+    if estimate.observation_model == "controller_compensated_linear":
+        force_rows = "\n".join(
+            "  [" + ", ".join(f"{value:.9g}" for value in row) + "]"
+            for row in estimate.force_matrix_n_per_m_s2
+        )
+        torque_rows = "\n".join(
+            "  [" + ", ".join(f"{value:.9g}" for value in row) + "]"
+            for row in estimate.torque_matrix_nm_per_m_s2
+        )
+        loo_force = estimate.max_leave_one_out_force_residual_n
+        loo_torque = estimate.max_leave_one_out_torque_residual_nm
+        leave_one_out = (
+            "unavailable"
+            if loo_force is None or loo_torque is None
+            else f"max force={loo_force:.5g} N, max torque={loo_torque:.5g} Nm"
+        )
+        return (
+            "PROVISIONAL / NOT APPLIED\n"
+            "model=controller_compensated_linear (NOT physical mass/CoG)\n"
+            f"force matrix [N/(m/s^2)]:\n{force_rows}\n"
+            f"torque matrix [Nm/(m/s^2)]:\n{torque_rows}\n"
+            f"pose-local tare bias candidate: force={estimate.force_bias_n} N, "
+            f"torque={estimate.torque_bias_nm} Nm\n"
+            f"fit RMS: force={estimate.force_fit_rms_n:.5g} N, "
+            f"torque={estimate.torque_fit_rms_nm:.5g} Nm\n"
+            f"design: force rank={estimate.force_design_rank}, "
+            f"cond={estimate.force_design_condition:.5g}; "
+            f"torque rank={estimate.torque_design_rank}, "
+            f"cond={estimate.torque_design_condition:.5g}\n"
+            f"leave-one-pose-out: {leave_one_out}"
+        )
     cog_mm = tuple(value * 1000.0 for value in estimate.cog_tcp_m)
     ambiguity = (
         "; gravity compensation ambiguous: " + ", ".join(estimate.ambiguity_reasons)
@@ -3354,13 +3385,14 @@ def build_gui(
                 else:
                     handles["waypoint_status"].value = info
 
-        with _op_tabs.add_tab("CoG"):
+        with _op_tabs.add_tab("CoG / Gravity model"):
             handles["cog_note"] = server.gui.add_text(
                 "Payload CoG identification",
                 initial_value=(
                     "한 팔씩 saved joint waypoints를 순서대로 실행합니다. Start는 lease만 요청하고 "
                     "움직이지 않습니다. Run/Continue를 누르는 동안에만 이동/샘플링합니다. "
-                    "결과는 PROVISIONAL / NOT APPLIED 입니다."
+                    "컨트롤러 보상 잔차 모델은 물리 CoG가 아니며 결과는 항상 "
+                    "PROVISIONAL / NOT APPLIED 입니다."
                 ),
                 disabled=True,
             )
@@ -3396,7 +3428,9 @@ def build_gui(
             handles["cog_retry"] = server.gui.add_button("Retry current pose")
             handles["cog_skip"] = server.gui.add_button("Skip current pose")
             handles["cog_stop"] = server.gui.add_button("Stop + Hold", color="red")
-            handles["cog_calculate"] = server.gui.add_button("Calculate provisional CoG")
+            handles["cog_calculate"] = server.gui.add_button(
+                "Calculate provisional gravity model"
+            )
             handles["cog_save"] = server.gui.add_button("Save report")
 
             def _validate_cog_selection() -> tuple[bool, str]:
@@ -3414,7 +3448,8 @@ def build_gui(
                 return True, (
                     f"valid: {len(resolved)} unique {handles['cog_arm'].value} pose(s), "
                     f"natural order [{names}]; samples/pose={config.samples_per_pose}, "
-                    f"settle={config.settle_sec:g}s, tolerance={config.arrival_tolerance_deg:g}deg"
+                    f"settle={config.settle_sec:g}s, tolerance={config.arrival_tolerance_deg:g}deg, "
+                    f"model={config.observation_model}"
                 )
 
             @handles["cog_refresh"].on_click

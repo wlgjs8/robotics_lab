@@ -847,6 +847,17 @@ struct FtWrenchPipelineConfig {
     // T_tcp_sensor: pose of the sensor frame expressed in the TCP frame.
     Pose6D t_tcp_sensor;
     Wrench6D sensor_bias;
+    // Orientation-dependent gravity wrench removed before the pose-local
+    // residual tare.  The legacy rigid_payload model uses payload_mass_kg and
+    // payload_com_tcp_m.  controller_compensated_linear is a separately
+    // identified residual model for controller feedback that is assumed to
+    // have already undergone undocumented gravity/source processing.
+    std::string gravity_compensation_model = "rigid_payload";
+    std::string gravity_compensation_calibration_id;
+    std::array<double, 9> gravity_force_matrix_n_per_m_s2{};
+    std::array<double, 9> gravity_torque_matrix_nm_per_m_s2{};
+    bool gravity_force_matrix_configured = false;
+    bool gravity_torque_matrix_configured = false;
     double payload_mass_kg = 0.0;
     std::array<double, 3> payload_com_tcp_m{};
     Wrench6D residual_tare_tcp;
@@ -857,8 +868,12 @@ struct PayloadIdentificationConfig {
     // complete acquisition/fit profile. Zero values are deliberately invalid
     // when enable=true; callers must never invent motion or acceptance bounds.
     bool enable = false;
-    // Observation model for the pre-payload/pre-tare wrench published to the
-    // GUI.  Empty is deliberately invalid when identification is enabled.
+    // rigid_payload identifies physical mass/CoG.  The linear controller-
+    // compensated model identifies only an orientation-dependent residual and
+    // must never be presented as a physical payload or CoG.
+    std::string observation_model;
+    // Observation sign for the rigid pre-payload/pre-tare wrench model.
+    // Required for rigid_payload and deliberately empty for the linear model.
     // payload_load: w = bias + [m*g, c x (m*g)]
     // sensor_reaction: w = bias - [m*g, c x (m*g)]
     std::string wrench_convention;

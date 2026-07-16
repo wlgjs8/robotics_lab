@@ -237,17 +237,18 @@ This gate specifically checks the multi-axis zig-zag reported after Gate 3C.
 5. Stop on a direction reversal, new oscillation, opposite-block motion, IK or
    safety rejection, or any hard force/torque event.
 
-### Payload/CoG waypoint identification
+### Gravity-wrench / CoG waypoint identification
 
-This stage produces a provisional server-side payload candidate; it does not
-apply or accept a payload.
+This stage produces a provisional rigid-payload or controller-compensated
+gravity-residual candidate; it does not apply or accept either model.
 
 1. In the WayPoint tab, teach at least five one-arm joint poses with materially
    different tool orientations and a manually verified safe order. Name them
    with one prefix such as `joint1` ... `joint10`. A direct JointTarget sequence
    is not collision-free planning.
 2. Clear the full swept volume, keep the other arm stationary, keep the tool
-   unloaded and out of contact, assign an E-stop operator, and open `조작 -> CoG`.
+   unloaded and out of contact, assign an E-stop operator, and open
+   `조작 -> CoG / Gravity model`.
 3. Select exactly one arm, refresh/validate the prefix, and press `Start`.
    `Start` must not move the arm. Confirm the GUI lease and server profile are
    ready before holding `Run/Continue`.
@@ -259,23 +260,34 @@ apply or accept a payload.
    explicit Retry or Skip. Stop immediately on stale/unhealthy F/T, hard-limit
    telemetry, fault, lease loss, unexpected compliance, or an unsafe path.
 6. After at least five accepted poses, press `Calculate`. The server profile's
-   explicit `wrench_convention` is part of the fit contract; the GUI must not
-   infer it from the mass sign. Review mass, TCP CoG, wrench bias, force/torque
-   fit RMS, matrix rank/condition, ambiguity warning, and leave-one-pose-out
-   residuals, then `Save report` for a successful provisional result. A rejected
+   explicit `observation_model` is part of the fit contract. For
+   `rigid_payload`, also review `wrench_convention`, mass and TCP CoG. For
+   `controller_compensated_linear`, review both 3x3 gravity matrices, bias, fit
+   RMS, rank/condition and leave-one-pose-out residuals; do not call those
+   matrices a mass or CoG. Then `Save report` for a successful provisional result. A rejected
    calculation automatically saves a `BLOCKED / NOT APPLIED` report and raw
    sample CSV; preserve that bundle with the matching servo CSV and server log.
-   Evidence schema v3 must contain non-empty raw sensor wrench,
+   Evidence schema v4 must contain non-empty raw sensor wrench,
    `T_tcp_sensor`, actual joint, and actual TCP columns. In the JSON candidate,
    compare each pose's observed and predicted force/torque before changing a
    transform or fit bound.
 7. The output is always `PROVISIONAL / NOT APPLIED`. Do not copy it into
    `stack_real.yaml` or the Rainbow controller until a separate review compares
-   repeated and held-out pose results. Run right and left as separate sessions.
+   repeated and held-out pose results. A linear model must have a unique
+   calibration id and cannot be combined with nonzero payload mass/CoG. Run
+   right and left as separate sessions.
 8. Identification intentionally leaves `payload_identification_inhibit=true`
    and the old tare invalid. With the arm unloaded at the intended start pose,
    run the normal Init Motion tare and confirm `tare_state=accepted` before
    resuming Cartesian compliance.
+9. After separately reviewing and copying a linear runtime candidate, rebuild
+   and first repeat the unloaded orientation sweep. Stop on any unexpected
+   motion, stale/unhealthy F/T, hard-limit telemetry, or torque outside the
+   reviewed evidence envelope. Only then perform a gentle single-axis TCP push.
+   Passing means the commanded translational compliance no longer produces the
+   previous unintended rotation and all released axes recenter. This supervised
+   observation is an experimental gate, not production force acceptance and not
+   proof that the controller's internal compensation assumption is true.
 
 The tracked real acquisition profile reuses the existing 1.5 degree InitMotion
 waypoint tolerance, 0.5 second tare settling time, 500 fresh samples, and measured
@@ -284,16 +296,74 @@ the provisional calculation; they do not authorize automatic payload or force
 control changes. Controller pgmode has no deterministic F/T gravity fixture, so
 its profile remains disabled.
 
-The 2026-07-14 right-arm capture in `servo_log_20260714_153133.csv` passed the
-per-pose noise checks at seven orientations. Applying the corrected
-`sensor_reaction` sign removes the misleading negative-mass failure, but its
-force-model RMS remains multiple newtons versus the configured 0.75 N bound.
-Do not loosen the fit bound or apply that candidate. Resolve the EFT
-source-processing / `T_tcp_sensor` model mismatch first.
-The next capture should be run without changing force gains or transforms. Its
-schema-v3 bundle is the decision artifact: a raw-to-TCP mismatch implicates the
-configured transform/source axes, while a correct transform with a pose-varying
-model residual implicates controller-side preprocessing or the payload model.
+Two 2026-07-16 right-arm captures passed the per-pose noise checks at the same
+seven orientations. The rigid payload model remains invalid (about 3.8 N force
+RMS), while the controller-compensated linear residual fits the repeated pose
+means at 0.085--0.088 N force and 0.0116--0.0120 Nm torque component RMS. The
+force and torque matrices repeated within about 1.84% and 1.52% Frobenius norm,
+respectively. The second schema-v4 report is
+`20260716T060343Z-421f0157` (SHA-256
+`76a8bdb828a7d624c41e9da44ed0b2a00a6b9aedac3b096fee2049e1fa360ad1`).
+
+Under the operator-requested assumption that Rainbow feedback has already
+undergone gravity/source processing, that report is copied to the tracked
+right-arm runtime profile for the next supervised gate. This remains an
+experimental residual model, not physical CoG acceptance or proof of the
+controller assumption. Its maximum leave-one-pose-out force/torque norm is
+0.751 N / 0.121 Nm; the torque evidence is close to and on one component above
+the 0.10 Nm rotational deadband, so an unloaded orientation sweep must precede
+contact.
+
+The post-identification Init Motion attempt in `servo_log_20260716_150320.csv`
+did not authorize contact: right tare was rejected after the one-second window
+reached 3.90 N / 0.695 Nm maximum force/torque standard deviation while the arm
+pose remained nearly stationary. Repeat the tare with the tool, sensor cable,
+and wrist fully unloaded and undisturbed. Do not push unless telemetry shows the
+new calibration id, `tare_state=accepted`, the identification inhibit cleared,
+and healthy/non-stale F/T.
+
+### 2026-07-16 off-origin rotation regression and monitor A/B
+
+The later `servo_log_20260716_152654.csv` did apply calibration
+`right-20260716T060343Z-421f0157`, accepted the right-arm tare, and kept the F/T
+stream healthy and fresh. It nevertheless recorded about 13.76 seconds of
+rotational contact and a maximum rotational compliance offset of 0.079394 rad,
+near the configured 0.08 rad limit. No force hard limit or controller fault
+explains the motion.
+
+The strongest push intervals are consistent with a real moment from an
+off-origin contact: `tau = r x F` explains about 92--93% of the measured torque,
+with an inferred contact point about 0.114--0.121 m behind the software TCP (or
+about 0.082 m forward of the F/T measurement origin). The operator confirmed
+that the capture mixed fingertip-plane and Pika-body/palm pushes, so it cannot
+decide whether a fingertip-centre push is also misframed. A pointwise replay of
+the same capture through the prior raw/zero-payload model gives about 0.509 Nm
+torque RMS versus about 0.454 Nm with the configured linear residual model; this
+capture therefore does not support reverting to raw data.
+
+The tracked real profile is temporarily fail-closed at
+`operating_mode: monitor`, `allow_in_real: false`, and
+`supervised_experimental_real: false`.
+Keep the reviewed right-arm model and transform unchanged while collecting this
+A/B evidence at one fixed, accepted Init Motion pose:
+
+1. Confirm the right calibration id, accepted tare, cleared identification
+   inhibit, and healthy/non-stale F/T. Do not change tool orientation afterward.
+2. With neutral unloaded intervals between trials, push the centre of the
+   fingertip TCP plane in `+X`, `-X`, `+Y`, and `-Y` at only 3--5 N. Record the
+   exact contact point and verify that the compensated TCP torque stays near the
+   stationary noise envelope and below the rotational contact threshold.
+3. Repeat the same directions on one marked Pika-body point. Measure and record
+   that point relative to the fingertip TCP plane; compare the observed torque
+   sign and magnitude with `tau = r x F` using that measured lever arm.
+4. Stop on stale/unhealthy F/T, a rejected tare, unexpected robot motion, a
+   hard-limit/fault indication, or evidence outside the configured envelope.
+
+Promotion back to six-axis Cartesian admittance requires both branches to pass:
+fingertip-centre torque must remain near zero, and the marked body-point torque
+must match the measured lever arm in sign and magnitude. A fingertip-centre
+moment instead blocks promotion and requires correction of the sensor/TCP frame
+or controller wrench convention before any further force-motion run.
 
 ## Per-arm accepted profile
 
@@ -316,6 +386,8 @@ explicitly labelled as unaccepted estimates.
 | Positive force/torque axis check | +Fx/+Fy/+Fz and Tx/Ty/Tz behavior inherited from identical right assembly | +Fx/+Fy/+Fz direction/recenter observed in `servo_log_20260712_184841.csv` and clean repeat `servo_log_20260712_190425.csv`; yaw accepted with `servo_log_20260712_191136.csv` and `servo_log_20260712_191634.csv`; roll/pitch/yaw accepted by operator with `servo_log_20260712_192634.csv` |
 | Tool/payload mass | pending | pending |
 | Payload center of mass in TCP | pending | pending |
+| Gravity compensation model | `rigid_payload`, zero mass; arm-specific residual capture pending | `controller_compensated_linear`, experimental supervised gate |
+| Gravity model evidence | pending | `right-20260716T060343Z-421f0157`; schema v4; report SHA-256 `76a8bdb828a7d624c41e9da44ed0b2a00a6b9aedac3b096fee2049e1fa360ad1` |
 | Sensor bias artifact | pending | pending |
 | Residual tare procedure | automatic after successful left/both Init Motion; physical acceptance pending | automatic after successful right/both Init Motion; physical acceptance pending |
 | Profile revision/hash | `right-derived-identical-positive-force-ft-axis-20260712` | `physical-positive-force-ft-axis-20260712` |

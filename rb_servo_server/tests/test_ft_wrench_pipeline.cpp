@@ -131,6 +131,49 @@ bool testRotationAndPayloadCompensation() {
     return true;
 }
 
+bool testControllerCompensatedLinearGravityResidual() {
+    rb_servo::FtWrenchPipelineConfig config = baseConfig();
+    config.gravity_compensation_model = "controller_compensated_linear";
+    config.gravity_compensation_calibration_id = "right-linear-test";
+    config.gravity_force_matrix_configured = true;
+    config.gravity_torque_matrix_configured = true;
+    config.gravity_force_matrix_n_per_m_s2 = {
+        1.0, 0.0, 0.0,
+        0.0, -0.5, 0.0,
+        0.0, 0.0, 0.25,
+    };
+    config.gravity_torque_matrix_nm_per_m_s2 = {
+        0.0, 0.0, 0.1,
+        0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0,
+    };
+    rb_servo::FtWrenchPipeline pipeline(config);
+    rb_servo::FtRawSample raw = sample(1, 4'000'000'000ULL);
+    raw.wrench_sensor.fz = -0.25 * kGravity;
+    raw.wrench_sensor.tx = -0.1 * kGravity;
+
+    const auto out = pipeline.process(raw, rb_servo::Pose6D{}, raw.host_time_ns);
+
+    RB_CHECK(out.healthy);
+    RB_CHECK(near(out.payload_wrench_tcp.fz, 0.0));
+    RB_CHECK(near(out.modeled_gravity_wrench_tcp.fz, -0.25 * kGravity));
+    RB_CHECK(near(out.modeled_gravity_wrench_tcp.tx, -0.1 * kGravity));
+    RB_CHECK(near(out.fast_external_wrench_tcp.fz, 0.0, 1e-10));
+    RB_CHECK(near(out.fast_external_wrench_tcp.tx, 0.0, 1e-10));
+
+    rb_servo::FtWrenchPipelineConfig incomplete = baseConfig();
+    incomplete.gravity_compensation_model = "controller_compensated_linear";
+    rb_servo::FtWrenchPipeline incomplete_pipeline(incomplete);
+    const auto rejected = incomplete_pipeline.process(
+        raw,
+        rb_servo::Pose6D{},
+        raw.host_time_ns
+    );
+    RB_CHECK(!rejected.healthy);
+    RB_CHECK(rejected.reason.find("incomplete or mixed") != std::string::npos);
+    return true;
+}
+
 bool testResidualTareAndLowPass() {
     rb_servo::FtWrenchPipelineConfig config = baseConfig();
     config.residual_tare_tcp.fx = 1.0;
@@ -353,6 +396,7 @@ int main() {
     if (!testBiasThenTransformWithMomentArm()) return 1;
     if (!testAcceptedRbpodoEftForceAxisMapping()) return 1;
     if (!testRotationAndPayloadCompensation()) return 1;
+    if (!testControllerCompensatedLinearGravityResidual()) return 1;
     if (!testResidualTareAndLowPass()) return 1;
     if (!testLowPassAdvancesOnlyOnNewAcquisition()) return 1;
     if (!testFreshnessUsesSourceSequenceNotValueChanges()) return 1;

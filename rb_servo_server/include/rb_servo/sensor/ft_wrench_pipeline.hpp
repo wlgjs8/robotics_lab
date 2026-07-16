@@ -29,6 +29,7 @@ struct FtWrenchPipelineOutput {
     Wrench6D wrench_tcp;
     std::array<double, 3> gravity_tcp{};
     Wrench6D payload_wrench_tcp;
+    Wrench6D modeled_gravity_wrench_tcp;
     Wrench6D pre_tare_external_wrench_tcp;
     Wrench6D fast_external_wrench_tcp;
     Wrench6D control_external_wrench_tcp;

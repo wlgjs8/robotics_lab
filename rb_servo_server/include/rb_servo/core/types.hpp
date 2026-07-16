@@ -548,6 +548,9 @@ struct ForceTorqueTelemetry {
     Pose6D t_tcp_sensor;
     Wrench6D wrench_tcp;
     std::array<double, 3> gravity_tcp{};
+    std::string gravity_compensation_model = "rigid_payload";
+    std::string gravity_compensation_calibration_id;
+    Wrench6D modeled_gravity_wrench;
     Wrench6D fast_external_wrench;
     Wrench6D control_external_wrench;
     bool healthy = false;
@@ -571,6 +574,7 @@ struct ForceTorqueTelemetry {
 // core telemetry types (config.hpp already depends on this header).
 struct PayloadIdentificationConfigTelemetry {
     bool enable = false;
+    std::string observation_model;
     std::string wrench_convention;
     int min_poses = 0;
     double arrival_tolerance_deg = 0.0;

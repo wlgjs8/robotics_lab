@@ -387,6 +387,7 @@ force_torque:
     residual_tare_max_torque_stddev_nm: 0.01
     T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
     sensor_bias: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    gravity_compensation_model: rigid_payload
     payload_mass_kg: 0.0
     payload_com_tcp_m: [0.0, 0.0, 0.0]
     residual_tare_tcp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

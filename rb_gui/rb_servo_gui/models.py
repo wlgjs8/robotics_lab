@@ -380,6 +380,9 @@ class ForceTorqueSnapshot:
     t_tcp_sensor: Pose6D | None = None
     wrench_tcp: tuple[float, ...] | None = None
     gravity_tcp: tuple[float, float, float] | None = None
+    gravity_compensation_model: str | None = None
+    gravity_compensation_calibration_id: str | None = None
+    modeled_gravity_wrench: tuple[float, ...] | None = None
     fast_external_wrench: tuple[float, ...] | None = None
     control_external_wrench: tuple[float, ...] | None = None
     healthy: bool | None = None
@@ -412,6 +415,15 @@ class ForceTorqueSnapshot:
             t_tcp_sensor=Pose6D.parse(value.get("t_tcp_sensor")),
             wrench_tcp=finite_joint_array(value.get("wrench_tcp")),
             gravity_tcp=_finite_vec3(value.get("gravity_tcp")),
+            gravity_compensation_model=_optional_str(
+                value.get("gravity_compensation_model")
+            ),
+            gravity_compensation_calibration_id=_optional_str(
+                value.get("gravity_compensation_calibration_id")
+            ),
+            modeled_gravity_wrench=finite_joint_array(
+                value.get("modeled_gravity_wrench")
+            ),
             fast_external_wrench=finite_joint_array(value.get("fast_external_wrench")),
             control_external_wrench=finite_joint_array(value.get("control_external_wrench")),
             healthy=_optional_bool(value.get("healthy")),

@@ -40,6 +40,7 @@ policy_runner/spacemouse_registry.py
 policy_runner/tcp_target_pose_conditioner.py
 policy_runner/teleop_capture.py
 policy_runner/training.py
+policy_runner/training_episode_replay.py
 policy_runner/umi_pipeline.py
 policy_runner/action_sources/__init__.py
 policy_runner/action_sources/dual_spacemouse_pose_target.py
@@ -92,5 +93,6 @@ tests/test_recording_and_training.py
 tests/test_spacemouse_device_registry.py
 tests/test_spacemouse_hid_reader.py
 tests/test_teleop_mux.py
+tests/test_training_episode_replay.py
 tests/test_umi_dual_cartesian.py
 tests/test_umi_pipeline.py

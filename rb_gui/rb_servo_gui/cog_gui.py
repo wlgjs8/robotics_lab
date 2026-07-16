@@ -13,10 +13,11 @@ import uuid
 
 from .cog_calibration import (
     CogCalibrationError,
-    CogEstimate,
     CogPoseMeasurement,
     CogSample,
     CogSampleAccumulator,
+    GravityWrenchEstimate,
+    estimate_controller_compensated_gravity,
     estimate_payload,
     save_blocked_calibration_report,
     save_calibration_report,
@@ -40,7 +41,8 @@ def natural_sort_key(value: str) -> tuple[tuple[int, Any], ...]:
 @dataclass(frozen=True)
 class CogIdentificationConfig:
     enable: bool
-    wrench_convention: str
+    observation_model: str
+    wrench_convention: str | None
     min_poses: int
     arrival_tolerance_deg: float
     settle_sec: float
@@ -58,12 +60,26 @@ class CogIdentificationConfig:
             raise ValueError("server payload-identification config is unavailable")
         if value.get("enable") is not True:
             raise ValueError("payload identification is disabled by server config")
-        wrench_convention = value.get("wrench_convention")
-        if wrench_convention not in {"payload_load", "sensor_reaction"}:
+        observation_model = value.get("observation_model")
+        if observation_model not in {"rigid_payload", "controller_compensated_linear"}:
             raise ValueError(
-                "server payload-identification wrench_convention must be "
-                "payload_load or sensor_reaction"
+                "server payload-identification observation_model must be "
+                "rigid_payload or controller_compensated_linear"
             )
+        wrench_convention = value.get("wrench_convention")
+        if observation_model == "rigid_payload":
+            if wrench_convention not in {"payload_load", "sensor_reaction"}:
+                raise ValueError(
+                    "server payload-identification wrench_convention must be "
+                    "payload_load or sensor_reaction for rigid_payload"
+                )
+        elif wrench_convention not in {None, ""}:
+            raise ValueError(
+                "server payload-identification wrench_convention must be empty for "
+                "controller_compensated_linear"
+            )
+        else:
+            wrench_convention = None
 
         def finite_positive(name: str, *, allow_zero: bool = False) -> float:
             raw = value.get(name)
@@ -86,6 +102,7 @@ class CogIdentificationConfig:
             raise ValueError("server payload-identification samples_per_pose must be positive")
         return cls(
             enable=True,
+            observation_model=observation_model,
             wrench_convention=wrench_convention,
             min_poses=min_poses,
             arrival_tolerance_deg=finite_positive("arrival_tolerance_deg"),
@@ -163,7 +180,7 @@ class CogGuiStatus:
     current_torque_stddev_nm: float | None
     accepted_count: int
     message: str
-    result: CogEstimate | None
+    result: GravityWrenchEstimate | None
     saved_report: str | None
     pose_states: tuple[tuple[str, str], ...]
 
@@ -191,7 +208,7 @@ class CogGuiSession:
         self._accepted: list[CogPoseMeasurement] = []
         self._message = "idle"
         self._deadman_until = 0.0
-        self._result: CogEstimate | None = None
+        self._result: GravityWrenchEstimate | None = None
         self._saved_report: str | None = None
         self._run_id: str | None = None
         self._provenance: dict[str, Any] = {}
@@ -457,12 +474,20 @@ class CogGuiSession:
                     f"{self._config.min_poses}"
                 )
             try:
-                estimate = estimate_payload(
-                    tuple(self._accepted),
-                    wrench_convention=self._config.wrench_convention,
-                    min_poses=self._config.min_poses,
-                    max_condition_number=self._config.max_design_condition_number,
-                )
+                if self._config.observation_model == "controller_compensated_linear":
+                    estimate = estimate_controller_compensated_gravity(
+                        tuple(self._accepted),
+                        min_poses=self._config.min_poses,
+                        max_condition_number=self._config.max_design_condition_number,
+                    )
+                else:
+                    assert self._config.wrench_convention is not None
+                    estimate = estimate_payload(
+                        tuple(self._accepted),
+                        wrench_convention=self._config.wrench_convention,
+                        min_poses=self._config.min_poses,
+                        max_condition_number=self._config.max_design_condition_number,
+                    )
             except CogCalibrationError as exc:
                 return self._calculation_blocked_locked(
                     code=exc.code,
@@ -477,7 +502,7 @@ class CogGuiSession:
                     detail=(
                         f"force fit RMS {force_rms:.4g} N exceeds "
                         f"{self._config.max_force_fit_rms_n:.4g} N; the configured "
-                        f"{self._config.wrench_convention} gravity-wrench model does "
+                        f"{self._config.observation_model} gravity-wrench model does "
                         "not match this capture (verify EFT source processing and "
                         "T_tcp_sensor before changing fit bounds)"
                     ),
@@ -490,7 +515,7 @@ class CogGuiSession:
                     detail=(
                         f"torque fit RMS {torque_rms:.4g} Nm exceeds "
                         f"{self._config.max_torque_fit_rms_nm:.4g} Nm; the configured "
-                        f"{self._config.wrench_convention} gravity-wrench model does "
+                        f"{self._config.observation_model} gravity-wrench model does "
                         "not match this capture (verify EFT reference point and "
                         "T_tcp_sensor before changing fit bounds)"
                     ),
@@ -499,7 +524,11 @@ class CogGuiSession:
                 )
             self._result = estimate
             self._state = "calculated"
-            self._message = "PROVISIONAL / NOT APPLIED — calculation complete"
+            self._message = (
+                "PROVISIONAL / NOT APPLIED — controller-compensated residual model complete"
+                if self._config.observation_model == "controller_compensated_linear"
+                else "PROVISIONAL / NOT APPLIED — physical payload calculation complete"
+            )
             return True, self._message
 
     def _calculation_blocked_locked(
@@ -508,7 +537,7 @@ class CogGuiSession:
         code: str,
         detail: str,
         diagnostic_output_dir: str | None,
-        candidate_estimate: CogEstimate | None = None,
+        candidate_estimate: GravityWrenchEstimate | None = None,
     ) -> tuple[bool, str]:
         self._result = None
         self._state = "calculation_blocked"
