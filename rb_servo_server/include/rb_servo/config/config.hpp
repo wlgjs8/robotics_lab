@@ -857,6 +857,11 @@ struct PayloadIdentificationConfig {
     // complete acquisition/fit profile. Zero values are deliberately invalid
     // when enable=true; callers must never invent motion or acceptance bounds.
     bool enable = false;
+    // Observation model for the pre-payload/pre-tare wrench published to the
+    // GUI.  Empty is deliberately invalid when identification is enabled.
+    // payload_load: w = bias + [m*g, c x (m*g)]
+    // sensor_reaction: w = bias - [m*g, c x (m*g)]
+    std::string wrench_convention;
     int min_poses = 0;
     double arrival_tolerance_deg = 0.0;
     double settle_sec = 0.0;

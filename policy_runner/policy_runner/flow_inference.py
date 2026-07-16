@@ -1586,7 +1586,6 @@ class FlowMatchingActionSource:
             return
 
     def _publish_chunk_overlay(self, now_monotonic: float) -> None:
-        _ = now_monotonic
         publisher = getattr(self, "_chunk_overlay_publisher", None)
         chunk = getattr(self, "_chunk", None)
         payload = getattr(self, "_last_overlay_payload", None)
@@ -1715,6 +1714,12 @@ class FlowMatchingActionSource:
                 runway_steps=int(self._current_chunk_overlay_runway_steps()),
                 chunk_metadata=dict(getattr(self, "_active_chunk_metadata", None) or {}),
             )
+            # Record only a successfully published frame.  Finite episode
+            # replay uses this explicit controller-feed boundary to defer its
+            # terminal Hold until the final executable window has elapsed.
+            self._last_chunk_overlay_publish_monotonic = float(now_monotonic)
+            self._last_chunk_overlay_publish_execute_steps = int(execute_limit)
+            self._last_chunk_overlay_publish_policy_dt_sec = float(self.policy_dt_sec or 0.0)
         except Exception:
             return
 
@@ -1814,10 +1819,17 @@ class FlowMatchingActionSource:
         return max(0, min(2, limit - 1))
 
     def _stream_hold_intent(self) -> CommandIntent | None:
-        # Stall (next chunk not ready): re-emit the LAST absolute TcpPoseTarget so the
-        # command stays fresh and the arm holds steady at the target. Returning None
-        # here lets the command go stale; holding the last target until the next
-        # chunk boundary gives a smooth pause instead of a stale-command jerk.
+        # Sequential verification deliberately waits until the executed window is
+        # exhausted before requesting the next chunk.  Send an explicit Hold during
+        # that wait so the server leaves the strict chunk-follower regime instead of
+        # keeping it armed without a fresh preview frame.  The next TcpPoseTarget +
+        # preview frame engages it again.  This preserves the feed-loss watchdog for
+        # a producer that dies while a motion chunk is active.
+        if bool(getattr(self, "sequential_stream_inference", False)):
+            return CommandIntent.hold(timeout_sec=float(self.timeout_sec))
+        # Live asynchronous rollouts keep the prior behavior: re-emit the LAST
+        # absolute TcpPoseTarget so the command remains fresh across a short prefetch
+        # miss without introducing a command-mode transition.
         return getattr(self, "_current_step_intent", None)
 
     def _apply_rotation_axis_mask(self, chunk: np.ndarray) -> np.ndarray:

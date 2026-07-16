@@ -16,6 +16,7 @@ from rb_servo_gui.cog_calibration import (
     CogSample,
     CogSampleAccumulator,
     estimate_payload,
+    save_blocked_calibration_report,
     save_calibration_report,
 )
 
@@ -72,6 +73,17 @@ def synthetic_poses(
                     wrench_tcp=tuple(force) + tuple(torque),
                     gravity_tcp=tuple(gravity),
                     received_monotonic=float(pose_index * samples_per_pose + sample_index) / 100.0,
+                    raw_sensor_wrench=tuple(force) + tuple(torque),
+                    t_tcp_sensor=(0.0, 0.0, -0.202642, 0.0, 0.0, np.pi / 2.0),
+                    q_actual_deg=tuple(float(pose_index + joint) for joint in range(6)),
+                    tcp_actual_stand=(
+                        0.3 + pose_index * 0.001,
+                        -0.1,
+                        0.45,
+                        0.0,
+                        0.0,
+                        0.0,
+                    ),
                 )
             )
             freshness += 1
@@ -109,7 +121,9 @@ class CogCalibrationTest(unittest.TestCase):
         expected_torque_bias = np.asarray([0.025, -0.018, 0.011])
         poses = synthetic_poses(force_noise_n=0.04, torque_noise_nm=0.004, samples_per_pose=200)
 
-        estimate = estimate_payload(poses, min_poses=5)
+        estimate = estimate_payload(
+            poses, wrench_convention="payload_load", min_poses=5
+        )
 
         self.assertAlmostEqual(estimate.mass_kg, expected_mass, delta=0.002)
         np.testing.assert_allclose(estimate.cog_tcp_m, expected_cog, atol=3e-4)
@@ -122,10 +136,103 @@ class CogCalibrationTest(unittest.TestCase):
         self.assertFalse(estimate.gravity_compensation_ambiguous)
         self.assertGreater(estimate.force_gravity_correlation or 0.0, 0.999)
         self.assertEqual(len(estimate.pose_residuals), len(poses))
+        first_residual = estimate.pose_residuals[0]
+        np.testing.assert_allclose(
+            np.asarray(first_residual.observed_force_n)
+            - np.asarray(first_residual.predicted_force_n),
+            first_residual.force_residual_n,
+        )
+        np.testing.assert_allclose(
+            np.asarray(first_residual.observed_torque_nm)
+            - np.asarray(first_residual.predicted_torque_nm),
+            first_residual.torque_residual_nm,
+        )
         self.assertEqual(len(estimate.leave_one_out), len(poses))
         self.assertTrue(all(item.valid for item in estimate.leave_one_out))
         self.assertTrue(estimate.provisional)
         self.assertFalse(estimate.applied)
+
+    def test_sensor_reaction_convention_recovers_positive_payload(self) -> None:
+        load_poses = synthetic_poses(samples_per_pose=20)
+        reaction_poses = tuple(
+            CogPoseMeasurement(
+                pose.name,
+                pose.q_target_deg,
+                tuple(
+                    CogSample(
+                        freshness_value=sample.freshness_value,
+                        wrench_tcp=tuple(-value for value in sample.wrench_tcp),
+                        gravity_tcp=sample.gravity_tcp,
+                        received_monotonic=sample.received_monotonic,
+                    )
+                    for sample in pose.samples
+                ),
+            )
+            for pose in load_poses
+        )
+
+        estimate = estimate_payload(
+            reaction_poses, wrench_convention="sensor_reaction"
+        )
+
+        self.assertEqual(estimate.wrench_convention, "sensor_reaction")
+        self.assertAlmostEqual(estimate.mass_kg, 1.7, places=10)
+        np.testing.assert_allclose(estimate.cog_tcp_m, [0.018, -0.012, 0.145])
+        np.testing.assert_allclose(estimate.force_bias_n, [-0.4, 0.25, -0.1])
+
+    def test_latest_real_capture_signature_is_positive_but_model_mismatched(self) -> None:
+        # Pose means from servo_log_20260714_153133.csv.  This compact fixture
+        # prevents the old negative-mass masking bug from returning: the
+        # reaction convention yields a positive candidate, but the scalar
+        # gravity-wrench residual remains far beyond the tracked fit bound.
+        gravity = np.asarray(
+            [
+                [-4.0774, -7.6627, 4.5638],
+                [-1.8971, 6.4164, 7.1694],
+                [-2.5747, 4.3194, 8.4193],
+                [-4.0267, 8.1109, 3.7643],
+                [0.3731, -1.6678, 9.6566],
+                [2.5515, -6.6953, 6.6957],
+                [0.4461, -4.4086, 8.7485],
+            ]
+        )
+        wrench = np.asarray(
+            [
+                [-5.6031, 18.3302, -25.4884, 4.0257, 1.3740, 0.0229],
+                [6.3918, 5.8654, -25.3729, 1.6701, -1.5151, 0.0419],
+                [4.9918, 7.7160, -24.6019, 2.0312, -1.1574, 0.0350],
+                [9.8217, 6.2791, -25.1770, 1.8774, -2.2205, 0.0326],
+                [-3.2799, 9.7607, -24.7065, 2.2440, 0.6341, 0.0403],
+                [-10.0140, 11.6191, -26.0943, 2.4718, 2.1000, 0.0422],
+                [-6.0903, 11.8469, -24.8146, 2.6231, 1.2807, 0.0403],
+            ]
+        )
+        poses = tuple(
+            CogPoseMeasurement(
+                f"joint{index + 1}",
+                tuple(float(index + joint) for joint in range(6)),
+                tuple(
+                    CogSample(
+                        freshness_value=2 * index + sample_index,
+                        wrench_tcp=tuple(wrench[index]),
+                        gravity_tcp=tuple(gravity[index]),
+                        received_monotonic=float(2 * index + sample_index),
+                    )
+                    for sample_index in range(2)
+                ),
+            )
+            for index in range(len(gravity))
+        )
+
+        estimate = estimate_payload(
+            poses,
+            wrench_convention="sensor_reaction",
+            max_condition_number=1000.0,
+        )
+
+        self.assertGreater(estimate.mass_kg, 0.6)
+        self.assertLess(estimate.mass_kg, 0.8)
+        self.assertGreater(estimate.force_fit_rms_n, 3.5)
 
     def test_duplicate_gravity_directions_are_rank_deficient(self) -> None:
         source = synthetic_poses(samples_per_pose=2)[0]
@@ -147,17 +254,20 @@ class CogCalibrationTest(unittest.TestCase):
         )
 
         with self.assertRaises(CogCalibrationError) as context:
-            estimate_payload(poses, min_poses=5)
+            estimate_payload(
+                poses, wrench_convention="payload_load", min_poses=5
+            )
 
         self.assertEqual(context.exception.code, "rank_deficient")
 
     def test_explicit_condition_limit_rejects_without_hidden_default(self) -> None:
         poses = synthetic_poses(samples_per_pose=5)
-        unconstrained = estimate_payload(poses)
+        unconstrained = estimate_payload(poses, wrench_convention="payload_load")
 
         with self.assertRaises(CogCalibrationError) as context:
             estimate_payload(
                 poses,
+                wrench_convention="payload_load",
                 max_condition_number=max(
                     unconstrained.force_design_condition,
                     unconstrained.torque_design_condition,
@@ -193,7 +303,11 @@ class CogCalibrationTest(unittest.TestCase):
         )
 
         with self.assertRaises(CogCalibrationError) as context:
-            estimate_payload(tuple(poses), max_condition_number=1000.0)
+            estimate_payload(
+                tuple(poses),
+                wrench_convention="payload_load",
+                max_condition_number=1000.0,
+            )
 
         self.assertEqual(context.exception.code, "ill_conditioned")
 
@@ -220,7 +334,9 @@ class CogCalibrationTest(unittest.TestCase):
                 )
             poses.append(CogPoseMeasurement(pose.name, pose.q_target_deg, tuple(samples)))
 
-        estimate = estimate_payload(tuple(poses))
+        estimate = estimate_payload(
+            tuple(poses), wrench_convention="payload_load"
+        )
 
         self.assertTrue(estimate.gravity_compensation_ambiguous)
         self.assertTrue(
@@ -231,7 +347,11 @@ class CogCalibrationTest(unittest.TestCase):
         poses = synthetic_poses(samples_per_pose=2)
         for value in (5.9, "5", True):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                estimate_payload(poses, min_poses=value)  # type: ignore[arg-type]
+                estimate_payload(
+                    poses,
+                    wrench_convention="payload_load",
+                    min_poses=value,
+                )  # type: ignore[arg-type]
 
     def test_gravity_compensated_wrench_is_reported_as_ambiguous(self) -> None:
         poses = synthetic_poses(
@@ -241,14 +361,14 @@ class CogCalibrationTest(unittest.TestCase):
         )
 
         with self.assertRaises(CogCalibrationError) as context:
-            estimate_payload(poses)
+            estimate_payload(poses, wrench_convention="payload_load")
 
         self.assertEqual(context.exception.code, "gravity_compensation_ambiguous")
         self.assertIn("gravity compensated", context.exception.detail)
 
     def test_report_contains_provisional_result_and_raw_samples(self) -> None:
         poses = synthetic_poses(samples_per_pose=3)
-        estimate = estimate_payload(poses)
+        estimate = estimate_payload(poses, wrench_convention="payload_load")
         with tempfile.TemporaryDirectory() as directory:
             paths = save_calibration_report(
                 directory,
@@ -272,9 +392,43 @@ class CogCalibrationTest(unittest.TestCase):
             self.assertEqual(rows[-1]["pose_name"], f"joint{len(poses)}")
             self.assertEqual(Path(paths.report_json).parent, Path(directory) / "right-20260713T120000Z")
 
+    def test_blocked_report_preserves_samples_and_candidate_without_applying(self) -> None:
+        poses = synthetic_poses(samples_per_pose=3)
+        candidate = estimate_payload(poses, wrench_convention="payload_load")
+        with tempfile.TemporaryDirectory() as directory:
+            paths = save_blocked_calibration_report(
+                directory,
+                run_id="right-model-mismatch",
+                arm="right",
+                poses=poses,
+                failure_code="force_fit_rms_exceeded",
+                failure_detail="captured source does not match configured model",
+                provenance={"wrench_convention": "sensor_reaction"},
+                candidate_estimate=candidate,
+            )
+
+            report = json.loads(paths.report_json.read_text(encoding="utf-8"))
+            self.assertEqual(report["schema_version"], 3)
+            self.assertEqual(
+                report["evidence_contract"]["transform_convention"],
+                "point_tcp = T_tcp_sensor * point_sensor",
+            )
+            self.assertEqual(report["status"], "BLOCKED / NOT APPLIED")
+            self.assertTrue(report["blocked"])
+            self.assertFalse(report["applied"])
+            self.assertEqual(report["failure"]["code"], "force_fit_rms_exceeded")
+            self.assertAlmostEqual(report["candidate_estimate"]["mass_kg"], 1.7)
+            with paths.samples_csv.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+                self.assertEqual(len(rows), len(poses) * 3)
+                self.assertEqual(rows[0]["t_tcp_sensor_z_m"], "-0.202642")
+                self.assertEqual(rows[0]["raw_sensor_force_x_n"], "0.4")
+                self.assertNotEqual(rows[0]["q_actual_deg"], "")
+                self.assertNotEqual(rows[0]["tcp_actual_stand_x_m"], "")
+
     def test_report_bundle_is_all_or_nothing_on_write_failure(self) -> None:
         poses = synthetic_poses(samples_per_pose=3)
-        estimate = estimate_payload(poses)
+        estimate = estimate_payload(poses, wrench_convention="payload_load")
         from rb_servo_gui import cog_calibration
 
         real_atomic_write = cog_calibration._atomic_write
@@ -304,7 +458,11 @@ class CogCalibrationTest(unittest.TestCase):
 
     def test_report_rejects_non_provisional_estimate(self) -> None:
         poses = synthetic_poses(samples_per_pose=3)
-        estimate = replace(estimate_payload(poses), provisional=False, applied=True)
+        estimate = replace(
+            estimate_payload(poses, wrench_convention="payload_load"),
+            provisional=False,
+            applied=True,
+        )
         with tempfile.TemporaryDirectory() as directory, self.assertRaises(ValueError):
             save_calibration_report(
                 directory,

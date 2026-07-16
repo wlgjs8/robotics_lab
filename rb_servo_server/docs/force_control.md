@@ -180,6 +180,24 @@ uses the same two-arm joint-hold posture for that packet.
 Admission also requires a currently healthy, non-stale selected-arm F/T stream.
 The command shape is server-enforced: exactly one arm may carry a finite
 `payload_identification` JointTarget and the peer must be a payload-free Hold.
+
+The identification fit has an explicit observation contract. The server-owned
+profile publishes `wrench_convention: payload_load | sensor_reaction`; it is
+required when the profile is enabled and the GUI refuses to infer it from a
+negative fitted mass. The tracked physical profile uses `sensor_reaction`, so
+the estimator fits
+`wrench_tcp = bias - [m*g_tcp, c_tcp x (m*g_tcp)]`. This sign applies only to
+the identification observation model; it does not rewrite the live wrench or
+change the compliance-control sign path.
+
+`servo_log_20260714_153133.csv` contains seven quiet right-arm poses. With the
+old implicit `payload_load` model it produced a negative mass and hid the real
+diagnostic. Under the explicit reaction model it produces a positive candidate
+near 0.7 kg, but the force residual remains several newtons, well above the
+tracked 0.75 N fit bound. That capture therefore remains rejected evidence of a
+source/frame/model mismatch, not an accepted CoG. The GUI now preserves such a
+capture automatically as `BLOCKED / NOT APPLIED` instead of requiring a
+successful estimate before raw samples can be saved.
 Both-profile and profile-plus-peer-motion packets fail closed to two-arm Hold
 with `InvalidCommand`.
 While the identification inhibit makes the normal tare-dependent force path
@@ -199,6 +217,11 @@ The same state surface publishes `gravity_tcp`, the stand gravity vector
 expressed in the actual TCP orientation for that controller sample. It is paired
 with the pre-payload/pre-tare `wrench_tcp` input for offline payload
 identification; it is not a new control input and does not alter the wrench path.
+It also publishes the raw manufacturer-frame wrench and the effective configured
+`t_tcp_sensor`. The servo CSV records those values together, and CoG evidence
+schema v3 adds actual joints/TCP plus pose-level observed-versus-predicted model
+residuals. These are diagnostic-only fields; they do not change the live wrench
+transform or force command.
 
 An accepted Init Motion sequence number is processed once even though the
 `CommandBuffer` retains the packet until its timeout. Completion hands the arm

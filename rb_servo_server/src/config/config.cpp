@@ -1974,6 +1974,13 @@ void validateConfig(const DualArmConfig& cfg) {
     const bool any_ft_enabled = cfg.force_torque.left.enable || cfg.force_torque.right.enable;
     const auto& payload_id = cfg.force_torque.payload_identification;
     if (payload_id.enable) {
+        if (!(payload_id.wrench_convention == "payload_load" ||
+              payload_id.wrench_convention == "sensor_reaction")) {
+            throw std::runtime_error(
+                "force_torque.payload_identification.wrench_convention must be "
+                "payload_load or sensor_reaction"
+            );
+        }
         if (payload_id.min_poses < 5) {
             throw std::runtime_error(
                 "force_torque.payload_identification.min_poses must be >= 5"
@@ -3612,6 +3619,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             const std::string path = "force_torque.payload_identification";
             validateAllowedKeys(profile, {
                 "enable",
+                "wrench_convention",
                 "min_poses",
                 "arrival_tolerance_deg",
                 "settle_sec",
@@ -3624,6 +3632,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             }, path);
             auto& out = cfg.force_torque.payload_identification;
             if (has(profile, "enable")) out.enable = asBool(profile["enable"], path + ".enable");
+            if (has(profile, "wrench_convention")) out.wrench_convention = lower(asString(profile["wrench_convention"], path + ".wrench_convention"));
             if (has(profile, "min_poses")) out.min_poses = asInt(profile["min_poses"], path + ".min_poses");
             if (has(profile, "arrival_tolerance_deg")) out.arrival_tolerance_deg = asDouble(profile["arrival_tolerance_deg"], path + ".arrival_tolerance_deg");
             if (has(profile, "settle_sec")) out.settle_sec = asDouble(profile["settle_sec"], path + ".settle_sec");

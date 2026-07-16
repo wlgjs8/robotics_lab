@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import tempfile
 import time
 import unittest
 
+import numpy as np
+
+from rb_servo_gui.cog_calibration import CogPoseMeasurement, CogSample
 from rb_servo_gui.cog_gui import (
     CogGuiSession,
     CogIdentificationConfig,
@@ -19,6 +24,7 @@ from rb_servo_gui.state_receiver import StateStore
 def _config_mapping() -> dict[str, object]:
     return {
         "enable": True,
+        "wrench_convention": "sensor_reaction",
         "min_poses": 5,
         "arrival_tolerance_deg": 0.5,
         "settle_sec": 0.0,
@@ -48,6 +54,8 @@ def _state(
         "stale": False,
         "freshness_value": freshness,
         "freshness_advanced": True,
+        "raw_sensor_wrench": [1.0, 2.0, 3.0, 0.1, 0.2, 0.3],
+        "t_tcp_sensor": [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966],
         "wrench_tcp": [1.0, 2.0, 3.0, 0.1, 0.2, 0.3],
         "gravity_tcp": [0.0, 0.0, -9.81],
         "payload_identification_inhibit": inhibit,
@@ -62,6 +70,8 @@ def _state(
         "connection_state": "Connected",
         "send_ok": True,
         "error_code": 0,
+        "tcp_actual_stand": [0.3, -0.1, 0.45, 0.0, 0.0, 0.0],
+        "tcp_actual_valid": True,
         "force_torque": ft,
     }
     command_source: dict[str, object] = {"active": source_id is not None}
@@ -112,6 +122,12 @@ class _RecordingClient(CommandClient):
 
 
 class CogGuiContractTest(unittest.TestCase):
+    def test_config_requires_explicit_wrench_convention(self) -> None:
+        config = _config_mapping()
+        del config["wrench_convention"]
+        with self.assertRaisesRegex(ValueError, "wrench_convention"):
+            CogIdentificationConfig.parse(config)
+
     def test_conflict_control_restore_preserves_preexisting_disabled_state(self) -> None:
         class Control:
             def __init__(self, disabled: bool) -> None:
@@ -342,6 +358,80 @@ class CogGuiContractTest(unittest.TestCase):
         session.watchdog(store.latest(), stale=False)
         self.assertFalse(client.hold_lease)
         self.assertFalse(safety.payload_identification_active)
+
+    def test_calculation_rejection_automatically_saves_diagnostic_evidence(self) -> None:
+        store = StateStore(stale_after_sec=5.0)
+        client = _RecordingClient()
+        session = CogGuiSession(OperatorSafety(store, client, command_timeout_sec=1.0))
+        config_data = _config_mapping()
+        config_data["max_force_fit_rms_n"] = 0.001
+        config = CogIdentificationConfig.parse(config_data)
+        directions = np.asarray(
+            [
+                [0.0, 0.0, -1.0],
+                [0.0, -1.0, 0.0],
+                [-1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0],
+            ]
+        )
+        mass = 1.7
+        cog = np.asarray([0.018, -0.012, 0.145])
+        poses: list[CogPoseMeasurement] = []
+        freshness = 1
+        for index, direction in enumerate(directions):
+            gravity = 9.80665 * direction
+            payload_force = mass * gravity
+            reaction_force = -payload_force + np.asarray([0.4, -0.25, 0.1])
+            if index == 0:
+                reaction_force = reaction_force + np.asarray([0.1, 0.0, 0.0])
+            reaction_torque = -np.cross(cog, payload_force) + np.asarray(
+                [0.025, -0.018, 0.011]
+            )
+            samples = []
+            for sample_index in range(3):
+                samples.append(
+                    CogSample(
+                        freshness_value=freshness,
+                        wrench_tcp=tuple(reaction_force) + tuple(reaction_torque),
+                        gravity_tcp=tuple(gravity),
+                        received_monotonic=float(freshness),
+                    )
+                )
+                freshness += 1
+            poses.append(
+                CogPoseMeasurement(
+                    f"joint{index + 1}",
+                    tuple(float(index + joint) for joint in range(6)),
+                    tuple(samples),
+                )
+            )
+        session._config = config
+        session._arm = "right"
+        session._accepted = poses
+        session._run_id = "right-gui-blocked"
+        session._provenance = {"server_config": dict(config.raw)}
+        session._state = "complete"
+
+        with tempfile.TemporaryDirectory() as directory:
+            ok, message = session.calculate(directory)
+
+            self.assertFalse(ok)
+            self.assertIn("force_fit_rms_exceeded", message)
+            status = session.status()
+            self.assertEqual(status.state, "calculation_blocked")
+            self.assertIsNone(status.result)
+            self.assertIsNotNone(status.saved_report)
+            assert status.saved_report is not None
+            report = json.loads(Path(status.saved_report).read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "BLOCKED / NOT APPLIED")
+            self.assertEqual(report["failure"]["code"], "force_fit_rms_exceeded")
+            self.assertEqual(report["candidate_estimate"]["wrench_convention"], "sensor_reaction")
+
+            ok, repeated_message = session.calculate(directory)
+            self.assertFalse(ok)
+            self.assertIn("diagnostic evidence already saved", repeated_message)
+            self.assertNotIn("save failed", repeated_message)
 
 
 if __name__ == "__main__":

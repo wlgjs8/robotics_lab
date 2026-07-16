@@ -171,27 +171,32 @@ The backend preserves the raw values in per-arm state JSON under
 The backend also decodes the controller's external F/T sensor wrench
 (`sdata.eft_fx..eft_mz`) into `RobotState.eft_wrench` / `eft_valid`, published
 in per-arm state JSON as `eft_wrench` (`[fx, fy, fz, tx, ty, tz]`, N / Nm),
-`eft_valid`, and `eft_source: "rbpodo.sdata.eft"`. The values are in the
-controller-reported external-sensor frame (tool-flange mounted), NOT verified
-as a TCP-frame wrench — `RobotState.wrench_tcp` remains reserved for the
-(TCP-frame) force-control path and is not populated from `eft_*`. The
-controller reports zeros when no external FT sensor is selected; `eft_valid`
-is `false` when the values are non-finite or the state frame ended before the
-eft fields (short/old-firmware frame; boundary constant
+`eft_valid`, and `eft_source: "rbpodo.sdata.eft"`. Rainbow's public system-variable
+contract defines these axes as the external sensor manufacturer's X/Y/Z axes;
+it does not define them as TCP axes. `eft_valid` proves only that the state frame
+contained finite fields. It is not sensor-presence, fault, overrange, zeroing,
+or payload-compensation evidence. The flag is `false` when the values are
+non-finite or the state frame ended before the eft fields (short/old-firmware
+frame; boundary constant
 `kRbpodoStateFrameEftEndOffsetBytes`, pinned to the SDK struct by a
-static_assert in the rbpodo-enabled build). Telemetry only: nothing in the
-motion/safety path consumes `eft_*` yet. Boolean status flags with values other than `0` or
+static_assert in the rbpodo-enabled build).
+
+The supervised project-native `rbpodo_eft` adapter currently feeds those
+manufacturer-frame values into `FtWrenchPipeline`. The configured
+`T_tcp_sensor` maps the sensor wrench to the server's pre-payload/pre-tare
+`wrench_tcp`; source assurance remains `controller_frame_only` and
+`sensor_health_verified=false`. This is an experimental bring-up path, not a
+claim that the source is production-qualified. Boolean status flags with values other than `0` or
 `1`, non-finite or implausibly tiny nonzero controller time, and unknown
 `real_vs_simulation_mode` values mark `diagnostics_suspect=true`.
 Suspicious diagnostics do not make `readState()` fail when joint acquisition is
 otherwise valid, but they do make the state motion-unsafe and block
 `sendServoJ()` with a `RobotFault` named `rbpodo_diagnostics_suspect`.
 
-The standalone `FtWrenchPipeline` is deliberately not fed from `eft_*` yet.
-Enforcing use requires independent sensor-presence, acquisition-freshness,
-sensor-fault, and overrange evidence that this rbpodo state surface does not
-currently provide. A finite decoded wrench or a changing value is not a
-substitute for those signals.
+Production enforcing use still requires independent sensor-presence,
+acquisition-freshness, sensor-fault, and overrange evidence that this rbpodo
+state surface does not currently provide. A finite decoded wrench or a changing
+value is not a substitute for those signals.
 Garbage-looking raw flag values must be kept in `rbpodo_diagnostics.raw` rather
 than used as the sole controller `error_code`.
 
@@ -213,12 +218,35 @@ In an enforcing force-control profile, the configured hard-limit debounce remain
 active on the raw pre-tare TCP wrench throughout identification.
 
 For this workflow, per-arm `force_torque` state publishes the pre-payload/tare
-`wrench_tcp`, the actual-orientation `gravity_tcp` vector (m/s²), the active
-joint-target profile, and the inhibit state. The top-level
+`wrench_tcp`, the manufacturer-frame `raw_sensor_wrench`, the effective
+configured six-vector `t_tcp_sensor`, the actual-orientation `gravity_tcp`
+vector (m/s²), the active joint-target profile, and the inhibit state. The
+ordinary servo CSV records the same raw wrench and transform beside the TCP
+wrench, so the applied wrench transform can be reproduced for each logged
+sample. The top-level
 `force_torque.payload_identification` object publishes the complete effective
-server acquisition/fit profile. Missing/disabled or incomplete configuration
-fails closed in the GUI. Calculated mass/CoG output remains provisional and is
-not written to the controller or stack config automatically.
+server acquisition/fit profile, including the required `wrench_convention`:
+
+```text
+payload_load:    wrench = bias + [m*g, c x (m*g)]
+sensor_reaction: wrench = bias - [m*g, c x (m*g)]
+```
+
+Rainbow's public system-variable contract defines the controller's raw
+`SD_EFT_*` components in the external sensor manufacturer's axes, not as a TCP
+wrench. The project-native pipeline therefore remains responsible for the
+configured `T_tcp_sensor` wrench transform before publishing `wrench_tcp`.
+See the [Rainbow system-variable reference](https://rainbowrobotics.github.io/rb_cobot_docs/technical_docs/system_variables).
+
+Missing, unknown, or incomplete configuration fails closed in both the server
+config loader and GUI parser. A fit-bound or model rejection atomically saves a
+`BLOCKED / NOT APPLIED` JSON report and the collected raw sample CSV. A
+successful mass/CoG output remains `PROVISIONAL / NOT APPLIED` and is not
+written to the controller or stack config automatically.
+CoG evidence schema v3 aligns each raw sensor wrench, effective
+`T_tcp_sensor`, TCP wrench, gravity vector, actual joints, and actual stand-frame
+TCP pose by the server freshness value. Its JSON report also stores the
+observed and model-predicted force/torque plus their residual for every pose.
 
 For rbpodo controller `pgmode` simulation only, configs may opt into
 `servo.controller_simulation_treat_unreliable_status_fields_as_unavailable: true`.

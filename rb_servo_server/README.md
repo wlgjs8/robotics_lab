@@ -79,6 +79,11 @@ Cartesian authority off, and fault-latches any encoder-motion indication. A
 Virtual ControlBox, whose simulated `q_actual` moves, is not accepted by this
 profile without a future explicit endpoint-topology contract.
 
+When startup changes pgmode or activates a controller, the backend reopens and
+re-primes the dedicated pipelined state socket after the transition is confirmed.
+This prevents a response requested before the transition from becoming the final
+startup verdict; failure to re-prime still fails startup closed.
+
 For a hardware-free mock smoke, use a temporary YAML outside the repository and
 pass it explicitly:
 

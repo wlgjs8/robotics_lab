@@ -287,6 +287,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         *,
         timeout_sec: float = 0.2,
         camera_client: Any | None = None,
+        episode_observation_provider: Any | None = None,
         policy_dt_sec: float | None = None,
         max_linear_velocity_m_s: float | None = None,
         max_angular_velocity_rad_s: float | None = None,
@@ -342,6 +343,12 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
 
         self.timeout_sec = float(timeout_sec)
         self.camera_client = camera_client
+        self.episode_observation_provider = episode_observation_provider
+        # A finite saved-episode replay must terminate the server-side preview
+        # explicitly.  Releasing the lease alone leaves the last chunk's runway
+        # available until command freshness expires, which executes rows that
+        # are intentionally outside the provider's finite replay window.
+        self._training_episode_completion_hold_emitted = False
         self._camera_runtime_config: Any | None = None
         self._camera_runtime_state = "disabled"
         self._camera_runtime_started: float | None = None
@@ -461,7 +468,13 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         }
         self.command_family = FLOW_COMMAND_LABEL
         # Fake-image smoke mode runs camera-less so the runtime does not gate on frames.
-        self.camera_names = [] if self._fake_images else [str(name) for name in camera_names]
+        # A teacher-forced training-episode provider supplies the exact saved
+        # observations directly.  It must never fall through to a live camera.
+        self.camera_names = (
+            []
+            if self._fake_images or self.episode_observation_provider is not None
+            else [str(name) for name in camera_names]
+        )
         # Depth (Option A): an include_depth checkpoint also gets *_wrist_0_depth through the same
         # SigLIP. The live D405 depth stream names are the color names with color->depth; the camera
         # bundle client MUST be built with include_depth=True (main.py) so z16 is decoded.
@@ -513,6 +526,13 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             chunk_execute_steps,
             self.action_horizon,
         )
+        if self.episode_observation_provider is not None:
+            if bool(rtc_enabled):
+                raise ValueError("teacher-forced training replay does not support RTC")
+            self.episode_observation_provider.configure(
+                self.action_horizon,
+                self.chunk_execute_steps,
+            )
         self.chunk_overlay_runway_steps = _resolve_chunk_overlay_runway_steps(chunk_overlay_runway_steps)
         self.policy_dt_sec = float(policy_dt_sec) if policy_dt_sec else (1.0 / 30.0)
         self.max_linear_velocity_m_s = (
@@ -902,6 +922,14 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         blocked, guard_intent = self._camera_runtime_gate(float(now_monotonic))
         if blocked:
             return guard_intent
+        replay_completion = self._training_episode_completion_reason()
+        if (
+            replay_completion is not None
+            and not bool(getattr(self, "_training_episode_completion_hold_emitted", False))
+            and self._training_episode_final_overlay_elapsed(float(now_monotonic))
+        ):
+            self._training_episode_completion_hold_emitted = True
+            return CommandIntent.hold(timeout_sec=self.timeout_sec)
         intent = super().next_intent(snapshot, now_monotonic)
         if (
             getattr(self, "velproprio_sample_mode", "replan") == "fixed_step"
@@ -1677,22 +1705,67 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
         if not hasattr(self, "_last_inference_camera_diagnostics"):
             self._last_inference_camera_diagnostics = {"outcome": "camera_state_unavailable"}
-        images, decode_count, missing_count = self._raw_camera_images()
+        replay_sample = None
+        replay_provider = getattr(self, "episode_observation_provider", None)
+        if replay_provider is not None:
+            replay_sample = replay_provider.next_sample()
+            if replay_sample is None:
+                self._last_inference_camera_diagnostics["outcome"] = "training_episode_exhausted"
+                return None
+            obs = dict(replay_sample.observation)
+            obs["prompt"] = self.prompt
+            decode_count, missing_count = 4, 0
+            recorded_state = np.asarray(obs.get("observation/state"), dtype=np.float32)
+            if recorded_state.shape != (12,) or not np.all(np.isfinite(recorded_state)):
+                self._last_inference_camera_diagnostics["outcome"] = (
+                    "invalid_training_episode_velocity_proprio"
+                )
+                return None
+            # delta_preview is fail-closed on the same chunk-metadata validity
+            # bit used by live camera-frame velocity proprio.  A converted
+            # training state is already the exact incoming body delta for this
+            # saved frame, so mark both arms valid and carry the values for
+            # audit instead of leaving the live sampler's "not_sampled" state.
+            self._last_velproprio_diagnostics = {
+                "sample_mode": "training_episode_recorded",
+                "source": "training_episode",
+                "valid": True,
+                "zero_reason": None,
+                "frame_index": int(replay_sample.frame_index),
+                "arms": {
+                    "left": {
+                        "valid": True,
+                        "zero_reason": None,
+                        "delta": recorded_state[:6].astype(float).tolist(),
+                    },
+                    "right": {
+                        "valid": True,
+                        "zero_reason": None,
+                        "delta": recorded_state[6:12].astype(float).tolist(),
+                    },
+                },
+            }
+            self._last_inference_camera_diagnostics = {
+                "outcome": "training_episode_observation",
+                "frame_index": int(replay_sample.frame_index),
+            }
+        else:
+            images, decode_count, missing_count = self._raw_camera_images()
+            if images is None:
+                return None  # fail-closed without frames, same as the in-house sources
+            obs = {
+                "observation/left_wrist_0_rgb": images["left"],
+                "observation/right_wrist_0_rgb": images["right"],
+                "observation/state": self._proprio_state(payload),
+                "prompt": self.prompt,
+            }
+            if getattr(self, "include_depth", False):
+                obs["observation/left_wrist_0_depth"] = images["left_depth"]
+                obs["observation/right_wrist_0_depth"] = images["right_depth"]
         self.last_image_decode_count = decode_count
         self.last_missing_camera_count = missing_count
         self.image_decode_count += decode_count
         self.missing_camera_count += missing_count
-        if images is None:
-            return None  # fail-closed without frames, same as the in-house sources
-        obs = {
-            "observation/left_wrist_0_rgb": images["left"],
-            "observation/right_wrist_0_rgb": images["right"],
-            "observation/state": self._proprio_state(payload),
-            "prompt": self.prompt,
-        }
-        if getattr(self, "include_depth", False):
-            obs["observation/left_wrist_0_depth"] = images["left_depth"]
-            obs["observation/right_wrist_0_depth"] = images["right_depth"]
         if self.rtc_enabled and self._rtc_prev_raw_chunk is not None:
             # Round-trip the previous MODEL-SPACE chunk so the server freezes the
             # first `inference_delay` actions and inpaints the rest toward it.
@@ -1730,6 +1803,10 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             return None
         self._last_inference_camera_diagnostics["outcome"] = "ok"
         chunk = chunk[:, :14].copy()
+        if replay_sample is not None:
+            # Keep model-space values (including gripper fraction) for an
+            # apples-to-apples comparison with the converted training action.
+            replay_provider.record_prediction(replay_sample, chunk)
         if self.rtc_enabled:
             # Cache the server's MODEL-SPACE chunk (pre output-transform) to seed
             # the next infer's prev_action_chunk. Round-tripped opaque: NOT the
@@ -1753,3 +1830,64 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         chunk[:, _GRIP_DIMS[0]] *= 100.0
         chunk[:, _GRIP_DIMS[1]] *= 100.0
         return chunk
+
+    def _training_episode_completion_reason(self) -> str | None:
+        provider = getattr(self, "episode_observation_provider", None)
+        if provider is None:
+            return None
+        return provider.completion_reason(
+            int(getattr(self, "_stream_emitted_policy_steps", 0))
+        )
+
+    def _training_episode_final_overlay_elapsed(self, now_monotonic: float) -> bool:
+        """True only after the final controller preview window has run in full.
+
+        The Python stream counter reaches the finite-episode boundary before the
+        server-side delta-preview follower necessarily finishes the final frame.
+        Sending Hold at that instant truncates the last policy row.  Use metadata
+        captured after the overlay publisher returned successfully and wait for
+        its explicit execute window; missing metadata fails closed.
+        """
+        if getattr(self, "episode_observation_provider", None) is None:
+            return True
+        try:
+            published = float(self._last_chunk_overlay_publish_monotonic)
+            execute_steps = int(self._last_chunk_overlay_publish_execute_steps)
+            policy_dt_sec = float(self._last_chunk_overlay_publish_policy_dt_sec)
+            now = float(now_monotonic)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return False
+        if (
+            not np.isfinite(published)
+            or not np.isfinite(policy_dt_sec)
+            or not np.isfinite(now)
+            or execute_steps <= 0
+            or policy_dt_sec <= 0.0
+        ):
+            return False
+        return now >= published + execute_steps * policy_dt_sec
+
+    def completion_reason(self) -> str | None:
+        reason = self._training_episode_completion_reason()
+        if reason is None:
+            return None
+        # Let the normal policy_runner command path send one explicit Hold after
+        # the final execute window and before reporting completion. This
+        # deactivates delta_preview on the next servo tick.
+        if not bool(getattr(self, "_training_episode_completion_hold_emitted", False)):
+            return None
+        return reason
+
+    def close(self) -> None:
+        super().close()
+        provider = getattr(self, "episode_observation_provider", None)
+        close_provider = getattr(provider, "close", None)
+        if callable(close_provider):
+            close_provider()
+        close_client = getattr(getattr(self, "_client", None), "close", None)
+        if callable(close_client):
+            close_client()
+        action_log = getattr(self, "_action_log", None)
+        if action_log is not None:
+            action_log.close()
+            self._action_log = None

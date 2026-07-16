@@ -312,6 +312,10 @@ def run(
             label = "camera_abort" if abort_reason == "camera_stale_timeout" else "force_recovery_abort"
             print(f"policy_runner {label}: {abort_reason}", file=stderr)
             return FORCE_RECOVERY_TIMEOUT_EXIT_CODE
+        completion_reason = _completion_reason(source)
+        if completion_reason is not None:
+            print(f"policy_runner completed: {completion_reason}", file=stderr)
+            return 0
         sleep_fn(period)
         return None
     _capture = TeleopCaptureLogger()
@@ -733,6 +737,17 @@ def _terminal_abort_reason(source: object) -> str | None:
     return resolved or None
 
 
+def _completion_reason(source: object) -> str | None:
+    hook = getattr(source, "completion_reason", None)
+    if not callable(hook):
+        return None
+    value = hook()
+    if value is None:
+        return None
+    resolved = str(value).strip()
+    return resolved or None
+
+
 def _handle_spacemouse_control_payloads(source: object, payloads) -> None:
     handler = getattr(source, "handle_spacemouse_control", None)
     if not callable(handler):
@@ -1059,6 +1074,43 @@ def _main_with_subcommands(argv: list[str]) -> int:
         "--episodes-dir",
         default=None,
         help="HDF5 episode file or directory for rollout-mode offline_eval.",
+    )
+    flow_infer.add_argument(
+        "--training-episode-hdf5",
+        default=None,
+        help=(
+            "Controller-simulation only: teacher-force an OpenPI remote policy with the saved "
+            "RGB-D and velocity proprio from this raw training episode, then execute its predictions."
+        ),
+    )
+    flow_infer.add_argument(
+        "--training-episode-retarget-config",
+        default="calibration/umi_retarget_eelocal.yaml",
+        help="Authoritative tracker-to-TCP retarget YAML used when the training dataset was converted.",
+    )
+    flow_infer.add_argument(
+        "--training-episode-output-dir",
+        default="outputs/training_episode_replay",
+        help="Directory for teacher-forced model predictions and comparison metrics.",
+    )
+    flow_infer.add_argument(
+        "--training-episode-video-dir",
+        default=None,
+        help=(
+            "Optional directory containing the four final LeRobot training MP4 stream directories. "
+            "When omitted, decoded images come from the raw HDF5."
+        ),
+    )
+    flow_infer.add_argument(
+        "--training-episode-parquet",
+        default=None,
+        help="Optional matching LeRobot parquet; state/action equality is validated before motion.",
+    )
+    flow_infer.add_argument(
+        "--training-episode-start-frame",
+        type=int,
+        default=0,
+        help="First training frame used as a teacher-forced chunk anchor.",
     )
     flow_infer.add_argument(
         "--max-offline-samples",
@@ -2003,8 +2055,85 @@ def _main_with_subcommands(argv: list[str]) -> int:
             print(f"wrote rollout_summary: {args.rollout_summary}", flush=True)
             return 0
 
+        training_episode_provider = None
+        if args.training_episode_hdf5 is not None:
+            if checkpoint_kind != "openpi_remote":
+                print(
+                    "policy_runner flow-infer training-episode replay requires an openpi:// checkpoint",
+                    file=sys.stderr,
+                )
+                return 2
+            if rollout_policy.mode != RolloutMode.CONTROLLER_SIM:
+                print(
+                    "policy_runner flow-infer training-episode replay is controller_sim only",
+                    file=sys.stderr,
+                )
+                return 2
+            replay_errors = []
+            if bool(config.safety.allow_real_motion):
+                replay_errors.append("safety.allow_real_motion must be false")
+            if str(config.gripper.backend) != "none":
+                replay_errors.append("gripper.backend must be none")
+            if bool(config.safety.allow_real_gripper_motion):
+                replay_errors.append("safety.allow_real_gripper_motion must be false")
+            if not bool(args.include_depth) or bool(args.blank_depth):
+                replay_errors.append("use --include-depth without --blank-depth")
+            if str(args.proprio_mode) != "velocity":
+                replay_errors.append("--proprio-mode must be velocity")
+            if bool(getattr(args, "rtc", False)):
+                replay_errors.append("--rtc must be disabled")
+            if not bool(getattr(args, "sequential_chunk_inference", False)):
+                replay_errors.append("--sequential-chunk-inference is required")
+            if str(getattr(args, "chunk_stitch_mode", "boundary")) != "boundary":
+                replay_errors.append("--chunk-stitch-mode must be boundary")
+            if int(getattr(args, "chunk_overlay_runway_steps", -1)) != 0:
+                replay_errors.append("--chunk-overlay-runway-steps must be 0")
+            if int(getattr(args, "chunk_crossfade_steps", -1)) != 0:
+                replay_errors.append("--chunk-crossfade-steps must be 0")
+            if str(getattr(args, "chunk_anchor_source", "actual")) != "chain":
+                replay_errors.append("--chunk-anchor-source must be chain")
+            if str(args.tcp_target_pose_reanchor_mode) != "last_emitted_continuous":
+                replay_errors.append(
+                    "--tcp-target-pose-reanchor-mode must be last_emitted_continuous"
+                )
+            if bool(args.camera_preview):
+                replay_errors.append("--camera-preview must be disabled")
+            if _parse_rotation_axes(args) != (True, True, True):
+                replay_errors.append("all rotation axes must remain enabled")
+            if str(args.execute_arms) != "both":
+                replay_errors.append("--execute-arms must be both")
+            if replay_errors:
+                print(
+                    "policy_runner flow-infer training-episode replay rejected: "
+                    + "; ".join(replay_errors),
+                    file=sys.stderr,
+                )
+                return 2
+            from .training_episode_replay import TrainingEpisodeReplay
+
+            try:
+                training_episode_provider = TrainingEpisodeReplay(
+                    args.training_episode_hdf5,
+                    retarget_config=args.training_episode_retarget_config,
+                    output_dir=args.training_episode_output_dir,
+                    training_video_dir=args.training_episode_video_dir,
+                    training_parquet=args.training_episode_parquet,
+                    depth_z_near_mm=float(args.depth_z_near_mm),
+                    depth_z_far_mm=float(args.depth_z_far_mm),
+                    depth_units_m=float(args.depth_units_m),
+                    start_frame=int(args.training_episode_start_frame),
+                )
+            except ValueError as exc:
+                print(f"policy_runner flow-infer training-episode replay rejected: {exc}", file=sys.stderr)
+                return 2
+            print(
+                "[flow-infer] training-episode teacher forcing ON: saved RGB-D + recorded velocity "
+                "proprio; live cameras disabled; controller output remains pgmode simulation only",
+                flush=True,
+            )
+
         camera_client = None
-        if config.camera.enable:
+        if config.camera.enable and training_episode_provider is None:
             from .camera_bundle_client import CameraBundleClient
 
             camera_client = CameraBundleClient(
@@ -2019,7 +2148,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 ),
             )
         preview_process = None
-        if args.camera_preview and config.camera.enable:
+        if args.camera_preview and config.camera.enable and training_episode_provider is None:
             import subprocess
 
             # Same ZMQ bundle/shm + resolve_frame mapping as the runtime; PUB
@@ -2261,6 +2390,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     args.checkpoint,
                     **source_kwargs,
                     **tcp_tp_kwargs,
+                    episode_observation_provider=training_episode_provider,
                     camera_names=_wrist_camera_names,
                     wrist_crop_frac=float(config.camera.wrist_crop_frac),
                     action_horizon=args.action_horizon,
@@ -2536,10 +2666,14 @@ def _main_with_subcommands(argv: list[str]) -> int:
             print(f"policy_runner flow-infer rollout-mode rejected: {exc}", file=sys.stderr)
             if camera_client is not None:
                 camera_client.close()
+            if training_episode_provider is not None:
+                training_episode_provider.close()
             return 2
         except Exception:
             if camera_client is not None:
                 camera_client.close()
+            if training_episode_provider is not None:
+                training_episode_provider.close()
             raise
         finally:
             # Disable+disconnect the serial grippers on every exit path.

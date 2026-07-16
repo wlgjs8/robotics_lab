@@ -5,7 +5,7 @@ POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 FLOW_INFER_ARGS ?=
 
-.PHONY: run flow-infer-real flow-infer-sim-offline build rebuild vm-up vm-down vm-status policy-hdf5-audit-smoke deps-hardware-free cam-up cam-engine-rebuild cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
+.PHONY: run flow-infer-real flow-infer-sim-offline flow-infer-training-replay build rebuild vm-up vm-down vm-status policy-hdf5-audit-smoke deps-hardware-free cam-up cam-engine-rebuild cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
 
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
@@ -35,6 +35,12 @@ flow-infer-sim-offline:
 	FLOW_INFER_ROLLOUT_MODE=controller_sim \
 	FLOW_INFER_CHUNK_EXECUTE_STEPS=6 \
 	./tools/flow_infer_real_policy.sh $(FLOW_INFER_ARGS)
+
+# Exact saved-observation replay into the live OpenPI server, followed by
+# pgmode controller-simulation execution. Requires make run MODE=sim first.
+# Set FLOW_TRAINING_EPISODE_HDF5; no live camera or physical gripper is used.
+flow-infer-training-replay:
+	./tools/flow_infer_training_episode_replay.sh $(FLOW_INFER_ARGS)
 
 # Source-build the full local stack for DIRECT real-controller work (no VM):
 # rb_servo_server (rbpodo backend, RB_SERVO_ENABLE_RBPODO=ON) into the path

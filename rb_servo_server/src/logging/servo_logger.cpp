@@ -294,6 +294,12 @@ void writeForceTelemetryHeader(std::ostream& os, const char* side) {
        << ',' << side << "_ft_sensor_health_verified"
        << ',' << side << "_ft_safety_rated";
     writeWrenchHeader(os, side, "ft_raw_sensor");
+    os << ',' << side << "_ft_t_tcp_sensor_x_m"
+       << ',' << side << "_ft_t_tcp_sensor_y_m"
+       << ',' << side << "_ft_t_tcp_sensor_z_m"
+       << ',' << side << "_ft_t_tcp_sensor_rx_rad"
+       << ',' << side << "_ft_t_tcp_sensor_ry_rad"
+       << ',' << side << "_ft_t_tcp_sensor_rz_rad";
     writeWrenchHeader(os, side, "ft_wrench_tcp");
     os << ',' << side << "_ft_gravity_tcp_x_m_s2"
        << ',' << side << "_ft_gravity_tcp_y_m_s2"
@@ -607,6 +613,12 @@ void writeForceTelemetryColumns(
        << ',' << ft.sensor_health_verified
        << ',' << ft.safety_rated;
     writeWrenchColumns(os, ft.raw_sensor_wrench);
+    os << ',' << ft.t_tcp_sensor.x
+       << ',' << ft.t_tcp_sensor.y
+       << ',' << ft.t_tcp_sensor.z
+       << ',' << ft.t_tcp_sensor.rx
+       << ',' << ft.t_tcp_sensor.ry
+       << ',' << ft.t_tcp_sensor.rz;
     writeWrenchColumns(os, ft.wrench_tcp);
     os << ',' << ft.gravity_tcp[0]
        << ',' << ft.gravity_tcp[1]

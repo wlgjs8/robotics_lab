@@ -93,6 +93,16 @@ inline constexpr std::size_t kRbpodoStateFrameEftEndOffsetBytes = 512;
 // hardware-free tests.
 bool rbpodoStateFrameIncludesEft(std::size_t frame_bytes);
 
+// A controller mode switch or activation can leave the dedicated pipelined
+// CobotData socket with a response requested before the transition. Re-prime
+// that socket only when it is enabled and initialize() actually confirmed a
+// state-changing controller transition. Exposed for hardware-free policy tests.
+bool rbpodoPipelinedChannelNeedsReprime(
+    bool state_read_pipelined,
+    bool operation_mode_switch_confirmed,
+    bool activation_confirmed
+);
+
 std::optional<BackendError> rbpodoMotionReadinessError(
     const BackendConfig& config,
     const RbpodoSystemStateSnapshot& snapshot,

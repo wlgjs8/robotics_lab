@@ -3534,9 +3534,13 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     snapshot.startup_validation.right.motion_ready = true;
     snapshot.startup_validation.right.read_only_diagnostic = true;
     snapshot.left_force_torque.gravity_tcp = {1.0, 2.0, 3.0};
+    snapshot.left_force_torque.t_tcp_sensor = {
+        0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966,
+    };
     snapshot.left_force_torque.payload_identification_inhibit = true;
     snapshot.left_force_torque.joint_target_profile = "payload_identification";
     snapshot.payload_identification_config.enable = true;
+    snapshot.payload_identification_config.wrench_convention = "sensor_reaction";
     snapshot.payload_identification_config.min_poses = 7;
     snapshot.payload_identification_config.arrival_tolerance_deg = 0.4;
     snapshot.payload_identification_config.settle_sec = 0.6;
@@ -3595,6 +3599,14 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     }
 
     RB_CHECK(json.at("schema_version").get<int>() == 1);
+    RB_CHECK(
+        json.at("left").at("force_torque").at("t_tcp_sensor").at(2).get<double>()
+        == -0.202642
+    );
+    RB_CHECK(
+        json.at("left").at("force_torque").at("t_tcp_sensor").at(5).get<double>()
+        == 1.5707963267948966
+    );
     RB_CHECK(json.at("tick").get<uint64_t>() == 123);
     RB_CHECK(json.at("host_time_ns").get<uint64_t>() == 2'000);
     RB_CHECK(json.at("loop_start_time_ns").get<uint64_t>() == 1'000);
@@ -3636,6 +3648,8 @@ bool testStatePublisherSerializesServoSnapshotSchema() {
     const auto& payload_identification =
         json.at("force_torque").at("payload_identification");
     RB_CHECK(payload_identification.at("enable").get<bool>());
+    RB_CHECK(payload_identification.at("wrench_convention").get<std::string>() ==
+        "sensor_reaction");
     RB_CHECK(payload_identification.at("min_poses").get<int>() == 7);
     RB_CHECK(payload_identification.at("arrival_tolerance_deg").get<double>() == 0.4);
     RB_CHECK(payload_identification.at("settle_sec").get<double>() == 0.6);
@@ -4201,6 +4215,9 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     sample.left_force_torque.source = "rbpodo_eft";
     sample.left_force_torque.source_assurance = "controller_frame_only";
     sample.left_force_torque.raw_sensor_wrench.fz = -22.5;
+    sample.left_force_torque.t_tcp_sensor = {
+        0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966,
+    };
     sample.left_force_torque.control_external_wrench.fz = 7.25;
     sample.left_force_torque.healthy = true;
     sample.left_force_torque.freshness_value = 1234;
@@ -4327,6 +4344,8 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     const std::size_t init_left_goal_category = index_of("init_motion_left_goal_pair_category");
     const std::size_t init_left_goal_deficit = index_of("init_motion_left_goal_margin_deficit_m");
     const std::size_t ft_raw_fz = index_of("left_ft_raw_sensor_fz_n");
+    const std::size_t ft_transform_z = index_of("left_ft_t_tcp_sensor_z_m");
+    const std::size_t ft_transform_rz = index_of("left_ft_t_tcp_sensor_rz_rad");
     const std::size_t ft_control_fz = index_of("left_ft_control_external_fz_n");
     const std::size_t ft_healthy = index_of("left_ft_healthy");
     const std::size_t ft_freshness = index_of("left_ft_freshness_value");
@@ -4436,6 +4455,8 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(init_left_goal_category > old_last);
     RB_CHECK(init_left_goal_deficit > old_last);
     RB_CHECK(ft_raw_fz > init_left_goal_deficit);
+    RB_CHECK(ft_transform_z > ft_raw_fz);
+    RB_CHECK(ft_transform_rz > ft_transform_z);
     RB_CHECK(ft_control_fz > init_left_goal_deficit);
     RB_CHECK(ft_healthy > init_left_goal_deficit);
     RB_CHECK(ft_freshness > init_left_goal_deficit);
@@ -4517,6 +4538,8 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(row.at(init_left_goal_category) == "intra-arm");
     RB_CHECK(row.at(init_left_goal_deficit) == "0.0042");
     RB_CHECK(row.at(ft_raw_fz) == "-22.5");
+    RB_CHECK(row.at(ft_transform_z) == "-0.202642");
+    RB_CHECK(row.at(ft_transform_rz) == "1.5708");
     RB_CHECK(row.at(ft_control_fz) == "7.25");
     RB_CHECK(row.at(ft_healthy) == "1");
     RB_CHECK(row.at(ft_freshness) == "1234");

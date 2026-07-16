@@ -939,6 +939,7 @@ bool testPayloadIdentificationConfigIsExplicitAndFailClosed() {
         "  source: rbpodo_eft\n"
         "  payload_identification:\n"
         "    enable: true\n"
+        "    wrench_convention: sensor_reaction\n"
         "    min_poses: 5\n"
         "    arrival_tolerance_deg: 1.5\n"
         "    settle_sec: 0.5\n"
@@ -955,6 +956,7 @@ bool testPayloadIdentificationConfigIsExplicitAndFailClosed() {
     ::unlink(valid_path.c_str());
     const auto& profile = valid.force_torque.payload_identification;
     RB_CHECK(profile.enable);
+    RB_CHECK(profile.wrench_convention == "sensor_reaction");
     RB_CHECK(profile.min_poses == 5);
     RB_CHECK(near(profile.arrival_tolerance_deg, 1.5));
     RB_CHECK(near(profile.settle_sec, 0.5));
@@ -979,6 +981,30 @@ bool testPayloadIdentificationConfigIsExplicitAndFailClosed() {
     ::unlink(incomplete_path.c_str());
     RB_CHECK(incomplete_rejected);
 
+    const std::string invalid_convention_path = writeTempConfig(
+        "payload-identification-invalid-convention",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  source: rbpodo_eft\n"
+        "  payload_identification:\n"
+        "    enable: true\n"
+        "    wrench_convention: guessed\n"
+        "    min_poses: 5\n"
+        "    arrival_tolerance_deg: 1.5\n"
+        "    settle_sec: 0.5\n"
+        "    samples_per_pose: 500\n"
+        "    max_force_stddev_n: 0.75\n"
+        "    max_torque_stddev_nm: 0.15\n"
+        "    max_force_fit_rms_n: 0.75\n"
+        "    max_torque_fit_rms_nm: 0.15\n"
+        "    max_design_condition_number: 1000.0\n"
+        "  left:\n"
+        "    enable: true\n"
+    );
+    const bool invalid_convention_rejected = loadRejects(invalid_convention_path);
+    ::unlink(invalid_convention_path.c_str());
+    RB_CHECK(invalid_convention_rejected);
+
     const std::string no_sensor_path = writeTempConfig(
         "payload-identification-no-sensor",
         "schema: robotics_lab.rb_servo_server.v1\n"
@@ -986,6 +1012,7 @@ bool testPayloadIdentificationConfigIsExplicitAndFailClosed() {
         "  source: rbpodo_eft\n"
         "  payload_identification:\n"
         "    enable: true\n"
+        "    wrench_convention: sensor_reaction\n"
         "    min_poses: 5\n"
         "    arrival_tolerance_deg: 1.5\n"
         "    settle_sec: 0.5\n"
@@ -1007,6 +1034,7 @@ bool testPayloadIdentificationConfigIsExplicitAndFailClosed() {
         "  source: rbpodo_eft\n"
         "  payload_identification:\n"
         "    enable: true\n"
+        "    wrench_convention: sensor_reaction\n"
         "    min_poses: 5\n"
         "    arrival_tolerance_deg: 1.5\n"
         "    settle_sec: 0.5\n"

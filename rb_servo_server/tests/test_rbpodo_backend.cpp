@@ -918,6 +918,19 @@ bool testRbpodoStateFrameIncludesEftBoundary() {
     return true;
 }
 
+bool testPipelinedChannelReprimePolicy() {
+    // No transition means the already-primed channel remains valid.
+    RB_CHECK(!rb_servo::rbpodoPipelinedChannelNeedsReprime(true, false, false));
+    // A disabled pipelined path never opens or re-primes the extra socket.
+    RB_CHECK(!rb_servo::rbpodoPipelinedChannelNeedsReprime(false, true, true));
+    // Either confirmed state-changing transition invalidates the pre-transition
+    // response that connect() requested on the pipelined channel.
+    RB_CHECK(rb_servo::rbpodoPipelinedChannelNeedsReprime(true, true, false));
+    RB_CHECK(rb_servo::rbpodoPipelinedChannelNeedsReprime(true, false, true));
+    RB_CHECK(rb_servo::rbpodoPipelinedChannelNeedsReprime(true, true, true));
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -945,5 +958,6 @@ int main() {
     if (!testExtractNewestRbpodoStateFrame()) return 1;
     if (!testEftWrenchMappedAndSerialized()) return 1;
     if (!testRbpodoStateFrameIncludesEftBoundary()) return 1;
+    if (!testPipelinedChannelReprimePolicy()) return 1;
     return 0;
 }

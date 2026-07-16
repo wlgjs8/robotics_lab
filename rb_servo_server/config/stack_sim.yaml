@@ -575,7 +575,11 @@ cartesian_control:
         discard_head_steps: 0
         consume_steps: 12
         reserve_steps: 2
-        smoothing_window: 3
+        # Offline teacher-forced replay uses short (3-step) delta windows. A
+        # centered width-3 pose filter shortens every integrated window endpoint
+        # by about one third of its final delta, so preserve the literal model
+        # trajectory here; the Ruckig v/a/j bounds remain the smoothing layer.
+        smoothing_window: 1
         af_damping_beta: 1.0
         delta_twist_clear_residual_on_new_frame: true
         delta_twist_min_time_to_go_sec: 0.015

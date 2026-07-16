@@ -468,6 +468,9 @@ force_torque:
   # gate only a PROVISIONAL report and never apply a payload automatically.
   payload_identification:
     enable: true
+    # Installed EFT convention established by the supervised compliance sign
+    # captures: the reported wrench opposes the load applied at the TCP.
+    wrench_convention: sensor_reaction
     min_poses: 5
     arrival_tolerance_deg: 1.5
     settle_sec: 0.5

@@ -3254,6 +3254,7 @@ class GuiContractsTest(unittest.TestCase):
             "sensor_health_verified": False,
             "safety_rated": False,
             "raw_sensor_wrench": [1.0, 2.0, 3.0, 0.1, 0.2, 0.3],
+            "t_tcp_sensor": [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966],
             "wrench_tcp": [3.0, 2.0, 1.0, 0.3, 0.2, 0.1],
             "fast_external_wrench": [0.9, 1.9, 2.9, 0.09, 0.19, 0.29],
             "control_external_wrench": [0.8, 1.8, 2.8, 0.08, 0.18, 0.28],
@@ -3330,6 +3331,10 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(
             latest.left.force_torque.raw_sensor_wrench,
             (1.0, 2.0, 3.0, 0.1, 0.2, 0.3),
+        )
+        self.assertEqual(
+            latest.left.force_torque.t_tcp_sensor.as_tuple(),
+            (0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966),
         )
         self.assertEqual(
             latest.left.force_torque.control_external_wrench,

@@ -258,10 +258,17 @@ apply or accept a payload.
 5. A pose outside the configured force/torque variance bound must stop for an
    explicit Retry or Skip. Stop immediately on stale/unhealthy F/T, hard-limit
    telemetry, fault, lease loss, unexpected compliance, or an unsafe path.
-6. After at least five accepted poses, press `Calculate`, review mass, TCP CoG,
-   wrench bias, force/torque fit RMS, matrix rank/condition, ambiguity warning,
-   and leave-one-pose-out residuals, then `Save report`. Preserve the report with
-   the matching servo CSV and server log.
+6. After at least five accepted poses, press `Calculate`. The server profile's
+   explicit `wrench_convention` is part of the fit contract; the GUI must not
+   infer it from the mass sign. Review mass, TCP CoG, wrench bias, force/torque
+   fit RMS, matrix rank/condition, ambiguity warning, and leave-one-pose-out
+   residuals, then `Save report` for a successful provisional result. A rejected
+   calculation automatically saves a `BLOCKED / NOT APPLIED` report and raw
+   sample CSV; preserve that bundle with the matching servo CSV and server log.
+   Evidence schema v3 must contain non-empty raw sensor wrench,
+   `T_tcp_sensor`, actual joint, and actual TCP columns. In the JSON candidate,
+   compare each pose's observed and predicted force/torque before changing a
+   transform or fit bound.
 7. The output is always `PROVISIONAL / NOT APPLIED`. Do not copy it into
    `stack_real.yaml` or the Rainbow controller until a separate review compares
    repeated and held-out pose results. Run right and left as separate sessions.
@@ -276,6 +283,17 @@ stationary 0.75 N / 0.15 Nm variance bounds. Fit and condition bounds gate only
 the provisional calculation; they do not authorize automatic payload or force
 control changes. Controller pgmode has no deterministic F/T gravity fixture, so
 its profile remains disabled.
+
+The 2026-07-14 right-arm capture in `servo_log_20260714_153133.csv` passed the
+per-pose noise checks at seven orientations. Applying the corrected
+`sensor_reaction` sign removes the misleading negative-mass failure, but its
+force-model RMS remains multiple newtons versus the configured 0.75 N bound.
+Do not loosen the fit bound or apply that candidate. Resolve the EFT
+source-processing / `T_tcp_sensor` model mismatch first.
+The next capture should be run without changing force gains or transforms. Its
+schema-v3 bundle is the decision artifact: a raw-to-TCP mismatch implicates the
+configured transform/source axes, while a correct transform with a pose-varying
+model residual implicates controller-side preprocessing or the payload model.
 
 ## Per-arm accepted profile
 

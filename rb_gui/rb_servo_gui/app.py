@@ -1340,6 +1340,13 @@ def _format_cog_pose_states(status: CogGuiStatus) -> str:
 def _format_cog_result(status: CogGuiStatus) -> str:
     estimate = status.result
     if estimate is None:
+        if status.state == "calculation_blocked":
+            saved = (
+                f"\ndiagnostic report={status.saved_report}"
+                if status.saved_report is not None
+                else ""
+            )
+            return f"BLOCKED / NOT APPLIED\n{status.message}{saved}"
         return "PROVISIONAL / NOT APPLIED — no calculation"
     cog_mm = tuple(value * 1000.0 for value in estimate.cog_tcp_m)
     ambiguity = (
@@ -1361,6 +1368,7 @@ def _format_cog_result(status: CogGuiStatus) -> str:
     )
     return (
         "PROVISIONAL / NOT APPLIED\n"
+        f"wrench convention={estimate.wrench_convention}\n"
         f"mass={estimate.mass_kg:.6g} kg, CoG TCP=({cog_mm[0]:.3f}, {cog_mm[1]:.3f}, {cog_mm[2]:.3f}) mm\n"
         f"force bias={estimate.force_bias_n} N, torque bias={estimate.torque_bias_nm} Nm\n"
         f"fit RMS: force={estimate.force_fit_rms_n:.5g} N, torque={estimate.torque_fit_rms_nm:.5g} Nm\n"
@@ -1488,7 +1496,7 @@ def _update_cog_panel(
         ("cog_retry", status.state == "review"),
         ("cog_skip", status.state in {"armed", "review"}),
         ("cog_stop", active),
-        ("cog_calculate", status.state in {"complete", "stopped", "calculated"}),
+        ("cog_calculate", status.state in {"complete", "stopped", "calculated", "calculation_blocked"}),
         ("cog_save", status.result is not None and status.saved_report is None),
     ):
         control = handles.get(key)
@@ -3467,7 +3475,7 @@ def build_gui(
 
             @handles["cog_calculate"].on_click
             def _(_: Any) -> None:
-                ok, message = handles["cog_session"].calculate()
+                ok, message = handles["cog_session"].calculate(_cog_reports_root())
                 handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
                 handles["cog_result"].value = _format_cog_result(
                     handles["cog_session"].status()

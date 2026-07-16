@@ -78,12 +78,20 @@ waypoint order is not collision-free planning, so the complete swept volume must
 be clear and an E-stop operator remains required.
 
 At each arrived/settled pose, the 100 Hz state callback collects unique fresh
-`wrench_tcp` and `gravity_tcp` samples using the server-published acquisition
-profile. A noisy pose is stopped for explicit Retry or Skip. `Calculate` performs
-a weighted least-squares estimate and reports mass, TCP CoG, wrench bias,
-residuals, weighted-design rank/condition, gravity-correlation ambiguity, and
-leave-one-pose-out diagnostics. `Save report` atomically publishes the JSON/CSV
-evidence bundle under `logs/cog_calibration/<run_id>/`.
+samples from one server state snapshot. Evidence schema v3 records
+`raw_sensor_wrench`, the effective `T_tcp_sensor`, `wrench_tcp`, `gravity_tcp`,
+actual joints, and the actual stand-frame TCP pose against the same freshness
+value. That profile must explicitly declare `wrench_convention` as
+`payload_load` or `sensor_reaction`; the GUI never guesses the sign. A noisy pose
+is stopped for explicit Retry or Skip. `Calculate` performs a weighted
+least-squares estimate and reports mass, TCP CoG, wrench bias,
+per-pose observed/predicted force and torque with residuals, weighted-design
+rank/condition, gravity-correlation ambiguity, and
+leave-one-pose-out diagnostics. `Save report` atomically publishes a successful
+provisional JSON/CSV evidence bundle under `logs/cog_calibration/<run_id>/`.
+If calculation or a fit bound rejects the capture, the GUI automatically saves
+the same raw samples with a `BLOCKED / NOT APPLIED` diagnostic report; rejected
+data is not lost merely because no payload estimate was accepted.
 
 Every result is labelled `PROVISIONAL / NOT APPLIED`. The GUI does not edit
 `stack_real.yaml`, `active_calibration.yaml`, or Rainbow controller payload

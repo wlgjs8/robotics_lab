@@ -30,6 +30,9 @@
 - 최종 physical-box `fault_latch` 구성에서 **3,720.003초**, W6 rollout
   **45/45 PASS**, **327,383 commands**, **10,033 inferences**, command drop 0,
   server physical-motion detection 0, fault 0으로 장기 gate를 통과했다.
+- 사용자 real-controller 시험 뒤 다시 시작한 독립 재실행도 **3,720.002초**,
+  W6 rollout **45/45 PASS**, **217,275 commands**, **7,946 inferences**로
+  21/21 validator를 통과해 같은 결론을 재현했다.
 
 ## 1. 먼저 확인한 히스토리와 데이터 경로
 
@@ -74,7 +77,9 @@ Flow rollout은 simulation 전용 policy config를 사용한다. 이 config는 r
 real gripper authority를 모두 끄며, server config를 대체하지 않는다.
 
 ```bash
-OPENPI_REMOTE_SKIP_WARMUP=1 make flow-infer-sim-offline \
+OPENPI_REMOTE_SKIP_WARMUP=1 \
+FLOW_INFER_PYTHON=/home/plaif/openpi/.venv/bin/python \
+make flow-infer-sim-offline \
   FLOW_INFER_ARGS='--proprio-mode velocity \
     --depth-z-near-mm 50 --depth-z-far-mm 700 --depth-units-m 1e-4 \
     --chunk-execute-steps 6 --translation-only --max-linear-velocity-m-s 0.005'
@@ -102,6 +107,15 @@ cartesian_control:
 실패했다. backend는 operation mode와 activation을 이미 확인한 경우에 한해 최대
 5초 동안 fresh state를 bounded refresh한다. 일치하는 state가 없으면 기존처럼
 startup을 fail closed한다.
+
+2026-07-14의 `real -> simulation` 재전환에서는 이 blocking data-channel refresh가
+통과한 뒤에도, `connect()`가 전환 전에 미리 요청해 둔 **별도 pipelined state
+socket**의 `real` 응답이 첫 startup read에서 다시 나타나는 두 번째 stale 경로를
+재현했다. mode switch/activation이 controller state로 확인된 경우에만 해당 socket을
+새로 연결하고 `reqdata`를 다시 prime하도록 보강했다. 재연결/prime 실패는 추정값이나
+override로 진행하지 않고 initialize를 fail closed한다. 하드웨어 없는 정책 회귀
+테스트를 추가했으며, 다음 실제 `real -> simulation` one-shot 전환에서 새 re-prime
+로그까지 확인하는 것이 남은 현장 재검증 항목이다.
 
 ### 3.3 pgmode Cartesian state source
 
@@ -151,6 +165,22 @@ profile을 사용할 수 없다.
 않았다. “real과 최대한 동일”은 검증 없이 이 차이를 지우는 것이 아니라 command
 contract를 같게 하고 controller/plant 의미가 다른 값만 명시적으로 남기는 것으로
 적용했다.
+
+### 3.7 `delta_twist`와 현재 `delta_preview`의 관계
+
+현재 tracked `flow_infer_smooth` 경로의 controller는 legacy `delta_twist`가 아니라
+whole-chunk `delta_preview`다. 과거 `delta_twist` 실험 로그 6개에서 dominant arm은
+active tick의 **89.3%~99.7%**가 velocity saturation이었고, translation residual p99가
+0.006 m cap에 닿았으며 path/net 비가 1.21~5.48까지 커졌다. 이는 각 tick에서 delta를
+소비·clamp하는 방식이 학습 chunk의 진행을 왜곡하는 증거다.
+
+반면 최종 62분 `delta_preview` 로그에서는 projection error p99가 좌/우
+0.119/0.102 mm, actual-lead p99가 0.0865/0.0913 mm였고 두 gate의 연속-error count
+p99가 모두 0이었다. 따라서 이번 “delta_twist 개선”의 결론은 legacy knob를 더
+공격적으로 튜닝하는 것이 아니라, ee_local whole chunk를 server에서 preview하고
+reference feedback으로 진행시키는 `delta_preview`를 flow 기본 경로로 유지하는
+것이다. `delta_twist`는 parse/regression surface로 남기되 tracked flow profile로
+되돌리지 않는다.
 
 ## 4. 오프라인 파라미터 재검증
 
@@ -263,3 +293,79 @@ operator-supervised acceptance에서 판단해야 한다.
 
 Force motion, physical Cartesian motion, 실제 camera/gripper는 이번 시험 범위 밖이며
 활성화하지 않았다.
+
+## 8. 2026-07-14 중단 복구 재현
+
+사용자가 중간에 physical-real controller 시험을 한 뒤 감사했을 때 stack/replay/
+flow 프로세스는 모두 종료돼 있었고 양팔 controller는 `real`이었다. 기존 62분
+artifact와 21/21 completion result는 손상되지 않았다. 새 `make run MODE=sim`
+시도에서 3.2의 pipelined stale frame을 재현해 startup이 정책 명령 전에 안전하게
+중단됐고, 수정·빌드 후 이미 simulation으로 전환된 양팔에서 재현 시험을 계속했다.
+
+- 명령 전 gate: 100/100 packet PASS, 양팔 simulation, physical motion detection 0
+- offline episode SHA-256:
+  `bfbcdebd874adbcfe868f0fb02ca7d04f25c8f9040af170a9deecd49967a3864`
+- W6 재현: 120초, 10,495 commands, 379 inferences, command drop 0
+- safety decision: `ok` 10,550, missing camera 0, offline image decode 758
+- gripper proposal/suppression: 4,536/4,536
+- 독립 monitor: 180.005초, 14,919/14,919 `Ok`, fault 0, mode 이탈 0
+- measured `q_actual` TCP 변위: 좌/우 0.0/0.0 m
+- simulated reference TCP 변위: 좌/우 173.7/168.7 mm
+
+즉 사용자의 physical-real 시험은 새 재현만 중단했을 뿐 기존 장시간 결론을
+무효화하지 않았다. 재개 시험도 `q_actual` 정지와 `q_ref/tcp_ref_stand` 진행을
+동시에 확인해 같은 결론을 냈다. 종료 후 읽기 전용 확인에서도 양팔 controller는
+simulation이었다.
+
+재개 시험의 monitor CSV/JSON, rollout summary, server log, 종료 mode 확인과 장시간
+validator 재실행 결과는 아래에 묶었다.
+
+```text
+outputs/flow_infer_pgmode_sim_20260714/resumed_w6_120s/
+```
+
+## 9. 2026-07-14 독립 1시간 재실행
+
+120초 복구 재현 뒤 동일한 tracked sim stack과 같은 W6 profile로 45개 독립
+60초 rollout을 다시 수행했다. 각 trial 뒤 `InitMotion`을 command server의 tracked
+bind port `50256`으로 보내고 20초 동안 reference reset을 기다렸다.
+
+첫 장시간 시도는 reset client의 기본 포트 `50010`을 잘못 사용해 reset 명령이
+server에 도달하지 않았고, 3회차에 누적 reference가
+`delta_preview_actual_lead_fault`를 발생시켜 즉시 중단했다. 이는 controller 결함이
+아니라 실험 orchestration 오류였다. 실패 artifact는 원인 감사용으로 보존하고,
+tracked port를 명시한 새 디렉터리에서 100-packet gate부터 다시 시작했다.
+
+재시도의 최종 결과는 **21/21 checks PASS**였다.
+
+| 항목 | 결과 |
+|---|---:|
+| 독립 monitor | 3,720.002 s / 298,355 packets |
+| W6 rollout | 45/45 PASS |
+| `TcpPoseTarget` command | 217,275 |
+| OpenPI inference | 7,946 |
+| command drop | 0 |
+| gripper proposal / suppression | 94,796 / 94,796 |
+| server physical-motion detection | 0 |
+| fault-latched packets | 0 |
+| max measured FK drift L/R | 2.911 / 1.342 µm |
+| max simulated reference displacement L/R | 89.87 / 97.18 mm |
+
+`q_actual` 기반 TCP 변위는 수 µm에 머문 반면 controller reference는 양팔 모두
+약 9--10 cm 범위를 사용했다. 따라서 physical-box pgmode에서는 실제 encoder를
+폐루프 진행 상태로 사용할 수 없고, server가 선택한 `q_target/tcp_ref_stand`
+reference 경로로 제어 진행을 검증해야 한다는 기존 결론이 다시 확인됐다.
+
+재시도 산출물과 machine-readable 판정은 다음에 보존했다.
+
+```text
+outputs/flow_infer_pgmode_sim_20260714/long_w6_resume_1h_retry/controller_monitor.json
+outputs/flow_infer_pgmode_sim_20260714/long_w6_resume_1h_retry/trials.tsv
+outputs/flow_infer_pgmode_sim_20260714/long_w6_resume_1h_retry/server.log
+outputs/flow_infer_pgmode_sim_20260714/long_w6_resume_1h_retry/validation.json
+```
+
+종료 뒤 `simulation_mode.sh --verify-only`로 양팔이 계속 simulation임을 읽기 전용
+확인했고, stack/replay/monitor/flow 프로세스가 남지 않았음을 확인했다. 이 재현도
+offline camera replay만 사용했으므로 physical-real task success나 실제 servo
+tracking acceptance로 확대 해석하지 않는다.

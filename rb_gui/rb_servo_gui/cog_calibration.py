@@ -2,8 +2,10 @@
 
 The server supplies both inputs in the TCP frame: the pre-payload/pre-tare
 ``wrench_tcp`` and the gravity vector resolved from the measured TCP
-orientation.  This module deliberately owns no robot commands and never
-applies an estimate to either server configuration or a controller.
+orientation.  The server-owned profile also supplies the required observation
+sign as ``wrench_convention``; this module never guesses it from a fitted mass.
+This module deliberately owns no robot commands and never applies an estimate
+to either server configuration or a controller.
 """
 
 from __future__ import annotations
@@ -24,6 +26,17 @@ import numpy as np
 
 
 _NUMERIC_EPS = np.finfo(float).eps
+_WRENCH_CONVENTION_SIGNS = {
+    "payload_load": 1.0,
+    "sensor_reaction": -1.0,
+}
+_COG_EVIDENCE_CONTRACT = {
+    "sample_alignment": "single_server_state_snapshot_and_freshness_value",
+    "raw_wrench_frame": "sensor_manufacturer",
+    "transformed_wrench_frame": "tcp",
+    "transform_convention": "point_tcp = T_tcp_sensor * point_sensor",
+    "model_inputs": ["wrench_tcp", "gravity_tcp"],
+}
 
 
 class CogCalibrationError(ValueError):
@@ -52,6 +65,10 @@ class CogSample:
     wrench_tcp: tuple[float, ...]
     gravity_tcp: tuple[float, ...]
     received_monotonic: float
+    raw_sensor_wrench: tuple[float, ...] | None = None
+    t_tcp_sensor: tuple[float, ...] | None = None
+    q_actual_deg: tuple[float, ...] | None = None
+    tcp_actual_stand: tuple[float, ...] | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.freshness_value, bool) or int(self.freshness_value) < 0:
@@ -65,6 +82,30 @@ class CogSample:
         if not math.isfinite(received) or received < 0.0:
             raise ValueError("received_monotonic must be finite and non-negative")
         object.__setattr__(self, "received_monotonic", received)
+        if self.raw_sensor_wrench is not None:
+            object.__setattr__(
+                self,
+                "raw_sensor_wrench",
+                _finite_tuple(self.raw_sensor_wrench, 6, "raw_sensor_wrench"),
+            )
+        if self.t_tcp_sensor is not None:
+            object.__setattr__(
+                self,
+                "t_tcp_sensor",
+                _finite_tuple(self.t_tcp_sensor, 6, "t_tcp_sensor"),
+            )
+        if self.q_actual_deg is not None:
+            object.__setattr__(
+                self,
+                "q_actual_deg",
+                _finite_tuple(self.q_actual_deg, 6, "q_actual_deg"),
+            )
+        if self.tcp_actual_stand is not None:
+            object.__setattr__(
+                self,
+                "tcp_actual_stand",
+                _finite_tuple(self.tcp_actual_stand, 6, "tcp_actual_stand"),
+            )
 
 
 @dataclass(frozen=True)
@@ -182,6 +223,10 @@ class CogSampleAccumulator:
 @dataclass(frozen=True)
 class CogPoseResidual:
     name: str
+    observed_force_n: tuple[float, float, float]
+    predicted_force_n: tuple[float, float, float]
+    observed_torque_nm: tuple[float, float, float]
+    predicted_torque_nm: tuple[float, float, float]
     force_residual_n: tuple[float, float, float]
     torque_residual_nm: tuple[float, float, float]
     force_residual_norm_n: float
@@ -203,6 +248,7 @@ class CogLeaveOneOutDiagnostic:
 
 @dataclass(frozen=True)
 class CogEstimate:
+    wrench_convention: str
     mass_kg: float
     mass_std_error_kg: float
     cog_tcp_m: tuple[float, float, float]
@@ -251,6 +297,7 @@ class CogReportPaths:
 
 @dataclass(frozen=True)
 class _SolveResult:
+    wrench_convention: str
     mass_kg: float
     mass_std_error_kg: float
     cog_tcp_m: np.ndarray
@@ -276,6 +323,15 @@ def _skew(vector: np.ndarray) -> np.ndarray:
         [[0.0, -z_value, y_value], [z_value, 0.0, -x_value], [-y_value, x_value, 0.0]],
         dtype=float,
     )
+
+
+def _wrench_convention_sign(value: str) -> float:
+    convention = str(value).strip().lower()
+    try:
+        return _WRENCH_CONVENTION_SIGNS[convention]
+    except KeyError as exc:
+        allowed = ", ".join(sorted(_WRENCH_CONVENTION_SIGNS))
+        raise ValueError(f"wrench_convention must be one of: {allowed}") from exc
 
 
 def _design_condition(matrix: np.ndarray) -> tuple[int, float]:
@@ -321,8 +377,10 @@ def _weighted_lstsq(
 def _solve(
     summaries: Sequence[CogPoseSummary],
     *,
+    wrench_convention: str,
     max_condition_number: float | None,
 ) -> _SolveResult:
+    observation_sign = _wrench_convention_sign(wrench_convention)
     gravity = np.asarray([summary.gravity_tcp_mean for summary in summaries], dtype=float)
     force = np.asarray([summary.force_tcp_mean_n for summary in summaries], dtype=float)
     torque = np.asarray([summary.torque_tcp_mean_nm for summary in summaries], dtype=float)
@@ -338,9 +396,9 @@ def _solve(
     torque_design = np.zeros((3 * len(summaries), 6), dtype=float)
     for index, gravity_vector in enumerate(gravity):
         row = slice(3 * index, 3 * index + 3)
-        force_design[row, 0] = gravity_vector
+        force_design[row, 0] = observation_sign * gravity_vector
         force_design[row, 1:] = np.eye(3)
-        torque_design[row, :3] = -_skew(gravity_vector)
+        torque_design[row, :3] = observation_sign * -_skew(gravity_vector)
         torque_design[row, 3:] = np.eye(3)
 
     raw_force_rank, _raw_force_condition = _design_condition(force_design)
@@ -387,7 +445,10 @@ def _solve(
 
     mass = float(force_coefficients[0])
     centered_gravity = gravity - np.mean(gravity, axis=0)
-    centered_force = force - np.mean(force, axis=0)
+    # Correlation is evaluated after aligning the observed wrench with the
+    # configured payload-load direction.  A valid sensor-reaction stream must
+    # therefore correlate positively after the explicit sign inversion.
+    centered_force = observation_sign * (force - np.mean(force, axis=0))
     gravity_norm = float(np.linalg.norm(centered_gravity))
     force_norm = float(np.linalg.norm(centered_force))
     correlation = None
@@ -416,9 +477,12 @@ def _solve(
     if not np.all(np.isfinite(cog)):
         raise CogCalibrationError("non_finite", "recovered CoG contains non-finite values")
 
-    predicted_force = mass * gravity + force_coefficients[1:]
+    predicted_force = observation_sign * mass * gravity + force_coefficients[1:]
     predicted_torque = np.asarray(
-        [np.cross(cog, mass * gravity_vector) for gravity_vector in gravity],
+        [
+            observation_sign * np.cross(cog, mass * gravity_vector)
+            for gravity_vector in gravity
+        ],
         dtype=float,
     ) + torque_coefficients[3:]
     force_residual = force - predicted_force
@@ -436,6 +500,10 @@ def _solve(
     pose_residuals = tuple(
         CogPoseResidual(
             name=summary.name,
+            observed_force_n=tuple(float(value) for value in force[index]),
+            predicted_force_n=tuple(float(value) for value in predicted_force[index]),
+            observed_torque_nm=tuple(float(value) for value in torque[index]),
+            predicted_torque_nm=tuple(float(value) for value in predicted_torque[index]),
             force_residual_n=tuple(float(value) for value in force_residual[index]),
             torque_residual_nm=tuple(float(value) for value in torque_residual[index]),
             force_residual_norm_n=float(np.linalg.norm(force_residual[index])),
@@ -444,6 +512,7 @@ def _solve(
         for index, summary in enumerate(summaries)
     )
     return _SolveResult(
+        wrench_convention=wrench_convention,
         mass_kg=mass,
         mass_std_error_kg=mass_std_error,
         cog_tcp_m=cog,
@@ -467,15 +536,20 @@ def _solve(
 def estimate_payload(
     poses: Sequence[CogPoseMeasurement],
     *,
+    wrench_convention: str,
     min_poses: int = 5,
     max_condition_number: float | None = None,
 ) -> CogEstimate:
     """Estimate mass, TCP CoG, and constant TCP wrench bias.
 
+    ``wrench_convention`` is required because the payload-load and sensor-
+    reaction observation models have opposite signs.
     ``max_condition_number`` has no hidden fallback.  Passing ``None`` records
     the measured condition without declaring a physical acceptance threshold.
     Every successful result remains provisional and unapplied.
     """
+    wrench_convention = str(wrench_convention).strip().lower()
+    _wrench_convention_sign(wrench_convention)
     if not isinstance(min_poses, int) or isinstance(min_poses, bool) or min_poses < 3:
         raise ValueError("min_poses must be an integer of at least 3")
     if max_condition_number is not None:
@@ -494,13 +568,21 @@ def estimate_payload(
     if len(set(names)) != len(names):
         raise CogCalibrationError("duplicate_pose_name", "pose names must be unique")
     summaries = tuple(pose.summary() for pose in frozen_poses)
-    solved = _solve(summaries, max_condition_number=max_condition_number)
+    solved = _solve(
+        summaries,
+        wrench_convention=wrench_convention,
+        max_condition_number=max_condition_number,
+    )
 
     leave_one_out: list[CogLeaveOneOutDiagnostic] = []
     for omitted_index, omitted in enumerate(summaries):
         remaining = summaries[:omitted_index] + summaries[omitted_index + 1 :]
         try:
-            candidate = _solve(remaining, max_condition_number=max_condition_number)
+            candidate = _solve(
+                remaining,
+                wrench_convention=wrench_convention,
+                max_condition_number=max_condition_number,
+            )
         except CogCalibrationError as exc:
             leave_one_out.append(
                 CogLeaveOneOutDiagnostic(
@@ -524,6 +606,7 @@ def estimate_payload(
         )
 
     return CogEstimate(
+        wrench_convention=solved.wrench_convention,
         mass_kg=solved.mass_kg,
         mass_std_error_kg=solved.mass_std_error_kg,
         cog_tcp_m=tuple(float(value) for value in solved.cog_tcp_m),
@@ -562,6 +645,123 @@ def _atomic_write(path: Path, content: str) -> None:
         raise
 
 
+def _validated_report_inputs(
+    *,
+    run_id: str,
+    arm: str,
+    poses: Sequence[CogPoseMeasurement],
+    provenance: Mapping[str, Any],
+) -> tuple[str, str, tuple[CogPoseMeasurement, ...], dict[str, Any]]:
+    run_id = str(run_id).strip()
+    if not run_id or Path(run_id).name != run_id or run_id in {".", ".."}:
+        raise ValueError("run_id must be one safe path component")
+    arm = str(arm).strip().lower()
+    if arm not in {"left", "right"}:
+        raise ValueError("arm must be 'left' or 'right'")
+    frozen_poses = tuple(poses)
+    if any(not isinstance(pose, CogPoseMeasurement) for pose in frozen_poses):
+        raise TypeError("poses must contain only CogPoseMeasurement values")
+    try:
+        provenance_copy = json.loads(json.dumps(dict(provenance), allow_nan=False))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("provenance must be finite JSON-compatible data") from exc
+    return run_id, arm, frozen_poses, provenance_copy
+
+
+def _samples_csv_text(poses: Sequence[CogPoseMeasurement]) -> str:
+    csv_buffer = io.StringIO(newline="")
+    writer = csv.writer(csv_buffer)
+    writer.writerow(
+        [
+            "pose_name",
+            "sample_index",
+            "freshness_value",
+            "received_monotonic",
+            "raw_sensor_force_x_n",
+            "raw_sensor_force_y_n",
+            "raw_sensor_force_z_n",
+            "raw_sensor_torque_x_nm",
+            "raw_sensor_torque_y_nm",
+            "raw_sensor_torque_z_nm",
+            "t_tcp_sensor_x_m",
+            "t_tcp_sensor_y_m",
+            "t_tcp_sensor_z_m",
+            "t_tcp_sensor_rx_rad",
+            "t_tcp_sensor_ry_rad",
+            "t_tcp_sensor_rz_rad",
+            "gravity_tcp_x_m_s2",
+            "gravity_tcp_y_m_s2",
+            "gravity_tcp_z_m_s2",
+            "force_tcp_x_n",
+            "force_tcp_y_n",
+            "force_tcp_z_n",
+            "torque_tcp_x_nm",
+            "torque_tcp_y_nm",
+            "torque_tcp_z_nm",
+            "q_actual_deg",
+            "tcp_actual_stand_x_m",
+            "tcp_actual_stand_y_m",
+            "tcp_actual_stand_z_m",
+            "tcp_actual_stand_rx_rad",
+            "tcp_actual_stand_ry_rad",
+            "tcp_actual_stand_rz_rad",
+            "q_target_deg",
+        ]
+    )
+    for pose in poses:
+        q_target_json = json.dumps(pose.q_target_deg, separators=(",", ":"))
+        for sample_index, sample in enumerate(pose.samples):
+            raw_sensor_wrench = sample.raw_sensor_wrench or ("",) * 6
+            t_tcp_sensor = sample.t_tcp_sensor or ("",) * 6
+            q_actual_json = (
+                json.dumps(sample.q_actual_deg, separators=(",", ":"))
+                if sample.q_actual_deg is not None
+                else ""
+            )
+            tcp_actual_stand = sample.tcp_actual_stand or ("",) * 6
+            writer.writerow(
+                [
+                    pose.name,
+                    sample_index,
+                    sample.freshness_value,
+                    sample.received_monotonic,
+                    *raw_sensor_wrench,
+                    *t_tcp_sensor,
+                    *sample.gravity_tcp,
+                    *sample.wrench_tcp,
+                    q_actual_json,
+                    *tcp_actual_stand,
+                    q_target_json,
+                ]
+            )
+    return csv_buffer.getvalue()
+
+
+def _write_report_bundle(
+    output_dir: str | Path,
+    *,
+    run_id: str,
+    report: Mapping[str, Any],
+    samples_csv_text: str,
+) -> CogReportPaths:
+    output_root = Path(output_dir).expanduser()
+    run_dir = output_root / run_id
+    report_path = run_dir / "calibration_report.json"
+    samples_path = run_dir / "pose_samples.csv"
+    report_text = json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n"
+
+    output_root.mkdir(parents=True, exist_ok=True)
+    temporary_dir = Path(tempfile.mkdtemp(prefix=f".{run_id}.", dir=output_root))
+    try:
+        _atomic_write(temporary_dir / report_path.name, report_text)
+        _atomic_write(temporary_dir / samples_path.name, samples_csv_text)
+        os.rename(temporary_dir, run_dir)
+    except BaseException:
+        shutil.rmtree(temporary_dir, ignore_errors=True)
+        raise
+    return CogReportPaths(report_json=report_path, samples_csv=samples_path)
+
+
 def save_calibration_report(
     output_dir: str | Path,
     *,
@@ -572,84 +772,80 @@ def save_calibration_report(
     provenance: Mapping[str, Any],
 ) -> CogReportPaths:
     """Atomically save a provisional JSON report and raw-sample CSV."""
-    run_id = str(run_id).strip()
-    if not run_id or Path(run_id).name != run_id or run_id in {".", ".."}:
-        raise ValueError("run_id must be one safe path component")
-    arm = str(arm).strip().lower()
-    if arm not in {"left", "right"}:
-        raise ValueError("arm must be 'left' or 'right'")
-    frozen_poses = tuple(poses)
-    if any(not isinstance(pose, CogPoseMeasurement) for pose in frozen_poses):
-        raise TypeError("poses must contain only CogPoseMeasurement values")
+    run_id, arm, frozen_poses, provenance_copy = _validated_report_inputs(
+        run_id=run_id,
+        arm=arm,
+        poses=poses,
+        provenance=provenance,
+    )
     if not isinstance(estimate, CogEstimate):
         raise TypeError("estimate must be a CogEstimate")
     if estimate.provisional is not True or estimate.applied is not False:
         raise ValueError("only a PROVISIONAL / NOT APPLIED estimate may be saved")
-    try:
-        provenance_copy = json.loads(json.dumps(dict(provenance), allow_nan=False))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("provenance must be finite JSON-compatible data") from exc
-
-    output_root = Path(output_dir).expanduser()
-    run_dir = output_root / run_id
-    report_path = run_dir / "calibration_report.json"
-    samples_path = run_dir / "pose_samples.csv"
-    summaries = [pose.summary() for pose in frozen_poses]
     report = {
-        "schema_version": 1,
+        "schema_version": 3,
         "run_id": run_id,
         "arm": arm,
         "status": "PROVISIONAL / NOT APPLIED",
         "provisional": True,
+        "blocked": False,
         "applied": False,
+        "evidence_contract": _COG_EVIDENCE_CONTRACT,
         "provenance": provenance_copy,
-        "poses": [asdict(summary) for summary in summaries],
+        "poses": [asdict(pose.summary()) for pose in frozen_poses],
         "estimate": asdict(estimate),
     }
-    report_text = json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n"
-
-    csv_buffer = io.StringIO(newline="")
-    writer = csv.writer(csv_buffer)
-    writer.writerow(
-        [
-            "pose_name",
-            "sample_index",
-            "freshness_value",
-            "received_monotonic",
-            "gravity_tcp_x_m_s2",
-            "gravity_tcp_y_m_s2",
-            "gravity_tcp_z_m_s2",
-            "force_tcp_x_n",
-            "force_tcp_y_n",
-            "force_tcp_z_n",
-            "torque_tcp_x_nm",
-            "torque_tcp_y_nm",
-            "torque_tcp_z_nm",
-            "q_target_deg",
-        ]
+    return _write_report_bundle(
+        output_dir,
+        run_id=run_id,
+        report=report,
+        samples_csv_text=_samples_csv_text(frozen_poses),
     )
-    for pose in frozen_poses:
-        q_target_json = json.dumps(pose.q_target_deg, separators=(",", ":"))
-        for sample_index, sample in enumerate(pose.samples):
-            writer.writerow(
-                [
-                    pose.name,
-                    sample_index,
-                    sample.freshness_value,
-                    sample.received_monotonic,
-                    *sample.gravity_tcp,
-                    *sample.wrench_tcp,
-                    q_target_json,
-                ]
-            )
 
-    output_root.mkdir(parents=True, exist_ok=True)
-    temporary_dir = Path(tempfile.mkdtemp(prefix=f".{run_id}.", dir=output_root))
-    try:
-        _atomic_write(temporary_dir / report_path.name, report_text)
-        _atomic_write(temporary_dir / samples_path.name, csv_buffer.getvalue())
-        os.rename(temporary_dir, run_dir)
-    except BaseException:
-        shutil.rmtree(temporary_dir, ignore_errors=True)
-        raise
-    return CogReportPaths(report_json=report_path, samples_csv=samples_path)
+
+def save_blocked_calibration_report(
+    output_dir: str | Path,
+    *,
+    run_id: str,
+    arm: str,
+    poses: Sequence[CogPoseMeasurement],
+    failure_code: str,
+    failure_detail: str,
+    provenance: Mapping[str, Any],
+    candidate_estimate: CogEstimate | None = None,
+) -> CogReportPaths:
+    """Save evidence for a rejected calculation without promoting a payload."""
+    run_id, arm, frozen_poses, provenance_copy = _validated_report_inputs(
+        run_id=run_id,
+        arm=arm,
+        poses=poses,
+        provenance=provenance,
+    )
+    failure_code = str(failure_code).strip()
+    failure_detail = str(failure_detail).strip()
+    if not failure_code or not failure_detail:
+        raise ValueError("blocked report requires a failure code and detail")
+    if candidate_estimate is not None and not isinstance(candidate_estimate, CogEstimate):
+        raise TypeError("candidate_estimate must be a CogEstimate or None")
+    report = {
+        "schema_version": 3,
+        "run_id": run_id,
+        "arm": arm,
+        "status": "BLOCKED / NOT APPLIED",
+        "provisional": False,
+        "blocked": True,
+        "applied": False,
+        "failure": {"code": failure_code, "detail": failure_detail},
+        "evidence_contract": _COG_EVIDENCE_CONTRACT,
+        "provenance": provenance_copy,
+        "poses": [asdict(pose.summary()) for pose in frozen_poses],
+        "candidate_estimate": (
+            asdict(candidate_estimate) if candidate_estimate is not None else None
+        ),
+    }
+    return _write_report_bundle(
+        output_dir,
+        run_id=run_id,
+        report=report,
+        samples_csv_text=_samples_csv_text(frozen_poses),
+    )

@@ -116,6 +116,46 @@ to the server-declared `tcp_ref_stand` in controller simulation and fails closed
 if that reference is missing. The sim-only launcher defaults to W6; the
 physical-real launcher remains W12.
 
+To replay the policy from a *specific training observation* instead of looping
+an offline camera publisher against live controller proprio, use the dedicated
+teacher-forced path. It feeds the saved RGB-D plus the converter-equivalent 12-D
+velocity state to the OpenPI server, executes the first W3 rows of each H24
+prediction through the normal `TcpPoseTarget`/`delta_preview` controller path,
+and exits after all full chunks are consumed:
+
+```bash
+# Terminal 1: controller boxes must already be held in pgmode simulation.
+ACTION_SOURCE=none GRIPPER_SERVER=0 SCOPE_DASHBOARD=0 make run MODE=sim
+
+# Terminal 2: no camera process is started or read.
+FLOW_TRAINING_EPISODE_HDF5=/path/to/train_episode.hdf5 \
+FLOW_TRAINING_EPISODE_VIDEO_DIR=/path/to/lerobot_episode_bundle \
+FLOW_TRAINING_EPISODE_PARQUET=/path/to/episode.parquet \
+make flow-infer-training-replay
+```
+
+`FLOW_INFER_CHUNK_EXECUTE_STEPS` defaults to 3, with overlay runway and
+crossfade both fixed to zero. This executes 32 non-overlapping H24 predictions
+for 96 policy steps. The tracked controller-simulation stack uses
+`smoothing_window: 1` for this literal delta replay: applying its former
+centered width-3 pose filter to a three-row integrated window shortened every
+window endpoint by roughly one third of the last delta. Velocity, acceleration,
+jerk, projection-error, actual-lead, IK, collision, floor, and lease gates
+remain active. The runner defers its terminal `Hold` until the final three-row
+controller window has elapsed.
+
+The final LeRobot H264 stream directories and parquet are optional. When given,
+the runner verifies that converted state/actions match the parquet and consumes
+the exact stored training MP4 frames; otherwise it decodes the raw HDF5 RGB-D.
+The replay is fail-closed to `controller_sim`, `gripper.backend: none`, full
+rotation, sequential boundary chunks, chain anchoring, and
+`last_emitted_continuous` re-anchoring. Artifacts under
+`outputs/training_episode_replay` contain the raw model chunks, matching ground
+truth chunks, source hashes, prediction error, and predicted/ground-truth path
+metrics. Controller tracking remains visible in the normal action log, rollout
+summary, and pgmode state monitor. This path never authorizes physical-real
+motion and does not contact the live camera service.
+
 The tracked real flow profile enables `force_recovery` with
 `contact_behavior: continue` for the server-owned `cartesian_admittance` path.
 Soft contact remains visible in status, but it does not invalidate the active

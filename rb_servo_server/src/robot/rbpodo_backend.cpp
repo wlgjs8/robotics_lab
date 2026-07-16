@@ -1274,6 +1274,38 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
                       << " servo_enabled=" << (mapped.servo_enabled ? "true" : "false")
                       << " has_error=" << (mapped.has_error ? "true" : "false") << "\n";
         }
+        // connect() primes the dedicated non-blocking state socket before
+        // initialize() reconciles pgmode/activation. Its queued response can
+        // therefore describe the pre-transition controller state even though
+        // the blocking data channel above already confirmed the new state.
+        // Recreate and prime the socket after a confirmed transition so the
+        // first startup-validation read cannot consume that stale response.
+        if (rbpodoPipelinedChannelNeedsReprime(
+                impl_->config.state_read_pipelined,
+                operation_mode_switch_confirmed,
+                activation_confirmed)) {
+            impl_->pipelined_state_sock = std::make_unique<rb::podo::Socket>(
+                impl_->config.ip,
+                static_cast<int>(rb::podo::kDataPort)
+            );
+            impl_->pipelined_rx_buf.clear();
+            if (!impl_->pipelined_state_sock->send(rb::podo::kRequestDataCommand)) {
+                impl_->pipelined_state_sock.reset();
+                impl_->connected = false;
+                return failedResult<RobotState>(
+                    BackendOp::Initialize,
+                    backendError(
+                        BackendErrorKind::TransportConnectFailed,
+                        "rbpodo post-transition pipelined state channel prime failed",
+                        "",
+                        "rbpodo_pipelined_transition_reprime_failed"
+                    ),
+                    makeBackendTiming(start, nowSteadyNs())
+                );
+            }
+            std::cerr << "[INFO] RbpodoBackend re-primed pipelined state channel after "
+                      << "confirmed controller transition for " << impl_->config.name << "\n";
+        }
         mapped.acquisition_sequence = ++impl_->state_acquisition_sequence;
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, mapped);
         attachMotionReadinessDiagnostic(&mapped, impl_->last_state_error);
@@ -1347,6 +1379,15 @@ bool rbpodoStateFrameIncludesEft(std::size_t frame_bytes) {
     // SystemState.sdata image, header included) pinned to the SDK struct by a
     // static_assert next to snapshotFromSystemState() in the rbpodo-enabled build.
     return frame_bytes >= kRbpodoStateFrameEftEndOffsetBytes;
+}
+
+bool rbpodoPipelinedChannelNeedsReprime(
+    bool state_read_pipelined,
+    bool operation_mode_switch_confirmed,
+    bool activation_confirmed
+) {
+    return state_read_pipelined &&
+        (operation_mode_switch_confirmed || activation_confirmed);
 }
 
 BackendResult<RobotState> RbpodoBackend::readState() {

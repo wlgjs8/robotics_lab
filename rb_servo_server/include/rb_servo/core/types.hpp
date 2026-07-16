@@ -298,8 +298,8 @@ struct RobotState {
     double fk_duration_us = 0.0;
     Wrench6D wrench_tcp;
     // External F/T sensor wrench decoded from the rbpodo state frame
-    // (sdata.eft_fx..eft_mz; N / Nm). Frame is the controller-reported external
-    // sensor frame (tool-flange mounted), NOT verified as TCP frame — kept
+    // (sdata.eft_fx..eft_mz; N / Nm). Rainbow defines the component axes as the
+    // external sensor manufacturer's frame, NOT a verified TCP frame — kept
     // separate from wrench_tcp, which is reserved for the (TCP-frame)
     // force-control path. Zeros when no external FT sensor is selected on the
     // controller. eft_valid = fields present in the state frame and finite.
@@ -543,6 +543,9 @@ struct ForceTorqueTelemetry {
     bool sensor_health_verified = false;
     bool safety_rated = false;
     Wrench6D raw_sensor_wrench;
+    // Effective configured transform used by the server for this sample.
+    // Convention: point_tcp = T_tcp_sensor * point_sensor.
+    Pose6D t_tcp_sensor;
     Wrench6D wrench_tcp;
     std::array<double, 3> gravity_tcp{};
     Wrench6D fast_external_wrench;
@@ -568,6 +571,7 @@ struct ForceTorqueTelemetry {
 // core telemetry types (config.hpp already depends on this header).
 struct PayloadIdentificationConfigTelemetry {
     bool enable = false;
+    std::string wrench_convention;
     int min_poses = 0;
     double arrival_tolerance_deg = 0.0;
     double settle_sec = 0.0;

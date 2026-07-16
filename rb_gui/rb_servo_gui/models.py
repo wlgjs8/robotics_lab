@@ -377,6 +377,7 @@ class ForceTorqueSnapshot:
     sensor_health_verified: bool | None = None
     safety_rated: bool | None = None
     raw_sensor_wrench: tuple[float, ...] | None = None
+    t_tcp_sensor: Pose6D | None = None
     wrench_tcp: tuple[float, ...] | None = None
     gravity_tcp: tuple[float, float, float] | None = None
     fast_external_wrench: tuple[float, ...] | None = None
@@ -408,6 +409,7 @@ class ForceTorqueSnapshot:
             sensor_health_verified=_optional_bool(value.get("sensor_health_verified")),
             safety_rated=_optional_bool(value.get("safety_rated")),
             raw_sensor_wrench=finite_joint_array(value.get("raw_sensor_wrench")),
+            t_tcp_sensor=Pose6D.parse(value.get("t_tcp_sensor")),
             wrench_tcp=finite_joint_array(value.get("wrench_tcp")),
             gravity_tcp=_finite_vec3(value.get("gravity_tcp")),
             fast_external_wrench=finite_joint_array(value.get("fast_external_wrench")),

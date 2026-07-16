@@ -2147,6 +2147,7 @@ bool DualArmServoLoop::updateForceRuntime(
     runtime.ft.sensor_health_verified = false;
     runtime.ft.safety_rated = false;
     runtime.ft.raw_sensor_wrench = state.eft_wrench;
+    runtime.ft.t_tcp_sensor = ft_config.t_tcp_sensor;
     runtime.ft.payload_identification_inhibit =
         runtime.payload_identification_inhibit;
     runtime.ft.auto_tare_enabled = ft_config.auto_tare_after_init_motion;
@@ -4710,6 +4711,8 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.right_force_control = right_force_runtime_.control;
             const auto& payload_id = config_.force_torque.payload_identification;
             latest_snapshot_.payload_identification_config.enable = payload_id.enable;
+            latest_snapshot_.payload_identification_config.wrench_convention =
+                payload_id.wrench_convention;
             latest_snapshot_.payload_identification_config.min_poses = payload_id.min_poses;
             latest_snapshot_.payload_identification_config.arrival_tolerance_deg =
                 payload_id.arrival_tolerance_deg;

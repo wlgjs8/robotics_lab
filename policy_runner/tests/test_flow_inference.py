@@ -60,6 +60,28 @@ class FlowInferenceCliTest(unittest.TestCase):
         dummy.sequential_stream_inference = True
         self.assertEqual(FlowMatchingActionSource._stream_prefetch_at(dummy), 24)
 
+    def test_sequential_stream_stall_uses_explicit_hold(self) -> None:
+        from types import SimpleNamespace
+
+        from policy_runner.flow_inference import FlowMatchingActionSource
+
+        previous = object()
+        dummy = SimpleNamespace(
+            sequential_stream_inference=True,
+            timeout_sec=0.37,
+            _current_step_intent=previous,
+        )
+
+        intent = FlowMatchingActionSource._stream_hold_intent(dummy)
+
+        self.assertEqual(intent.mode, "Hold")
+        self.assertEqual(intent.timeout_sec, 0.37)
+        self.assertEqual(intent.left, {})
+        self.assertEqual(intent.right, {})
+
+        dummy.sequential_stream_inference = False
+        self.assertIs(FlowMatchingActionSource._stream_hold_intent(dummy), previous)
+
     def test_pose_from_state_payload_command_source_and_fallback(self) -> None:
         from policy_runner.flow_dataset import pose_from_state_payload
 

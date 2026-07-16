@@ -18,6 +18,7 @@ from .cog_calibration import (
     CogSample,
     CogSampleAccumulator,
     estimate_payload,
+    save_blocked_calibration_report,
     save_calibration_report,
 )
 from .models import StateSnapshot
@@ -39,6 +40,7 @@ def natural_sort_key(value: str) -> tuple[tuple[int, Any], ...]:
 @dataclass(frozen=True)
 class CogIdentificationConfig:
     enable: bool
+    wrench_convention: str
     min_poses: int
     arrival_tolerance_deg: float
     settle_sec: float
@@ -56,6 +58,12 @@ class CogIdentificationConfig:
             raise ValueError("server payload-identification config is unavailable")
         if value.get("enable") is not True:
             raise ValueError("payload identification is disabled by server config")
+        wrench_convention = value.get("wrench_convention")
+        if wrench_convention not in {"payload_load", "sensor_reaction"}:
+            raise ValueError(
+                "server payload-identification wrench_convention must be "
+                "payload_load or sensor_reaction"
+            )
 
         def finite_positive(name: str, *, allow_zero: bool = False) -> float:
             raw = value.get(name)
@@ -78,6 +86,7 @@ class CogIdentificationConfig:
             raise ValueError("server payload-identification samples_per_pose must be positive")
         return cls(
             enable=True,
+            wrench_convention=wrench_convention,
             min_poses=min_poses,
             arrival_tolerance_deg=finite_positive("arrival_tolerance_deg"),
             settle_sec=finite_positive("settle_sec", allow_zero=True),
@@ -366,14 +375,22 @@ class CogGuiSession:
             if ft.freshness_advanced is not True:
                 return
             assert ft.freshness_value is not None
+            assert ft.raw_sensor_wrench is not None
+            assert ft.t_tcp_sensor is not None
             assert ft.wrench_tcp is not None
             assert ft.gravity_tcp is not None
+            assert arm_state.q_actual_deg is not None
+            assert arm_state.tcp_actual_stand is not None
             self._accumulator.add(
                 CogSample(
                     freshness_value=ft.freshness_value,
                     wrench_tcp=ft.wrench_tcp,
                     gravity_tcp=ft.gravity_tcp,
                     received_monotonic=latest.received_monotonic,
+                    raw_sensor_wrench=ft.raw_sensor_wrench,
+                    t_tcp_sensor=ft.t_tcp_sensor.as_tuple(),
+                    q_actual_deg=arm_state.q_actual_deg,
+                    tcp_actual_stand=arm_state.tcp_actual_stand.as_tuple(),
                 )
             )
             if self._accumulator.sample_count >= self._config.samples_per_pose:
@@ -430,7 +447,7 @@ class CogGuiSession:
             self._message = f"{self._message}; {release_message}"
             return ok, self._message
 
-    def calculate(self) -> tuple[bool, str]:
+    def calculate(self, diagnostic_output_dir: str | None = None) -> tuple[bool, str]:
         with self._lock:
             if self._config is None:
                 return False, "payload-identification session has no server config"
@@ -442,30 +459,86 @@ class CogGuiSession:
             try:
                 estimate = estimate_payload(
                     tuple(self._accepted),
+                    wrench_convention=self._config.wrench_convention,
                     min_poses=self._config.min_poses,
                     max_condition_number=self._config.max_design_condition_number,
                 )
             except CogCalibrationError as exc:
-                self._message = f"calculation blocked: {exc}"
-                return False, self._message
+                return self._calculation_blocked_locked(
+                    code=exc.code,
+                    detail=exc.detail,
+                    diagnostic_output_dir=diagnostic_output_dir,
+                )
             force_rms = estimate.force_fit_rms_n
             torque_rms = estimate.torque_fit_rms_nm
             if force_rms > self._config.max_force_fit_rms_n:
-                self._message = (
-                    f"calculation blocked: force fit RMS {force_rms:.4g} N exceeds "
-                    f"{self._config.max_force_fit_rms_n:.4g} N"
+                return self._calculation_blocked_locked(
+                    code="force_fit_rms_exceeded",
+                    detail=(
+                        f"force fit RMS {force_rms:.4g} N exceeds "
+                        f"{self._config.max_force_fit_rms_n:.4g} N; the configured "
+                        f"{self._config.wrench_convention} gravity-wrench model does "
+                        "not match this capture (verify EFT source processing and "
+                        "T_tcp_sensor before changing fit bounds)"
+                    ),
+                    diagnostic_output_dir=diagnostic_output_dir,
+                    candidate_estimate=estimate,
                 )
-                return False, self._message
             if torque_rms > self._config.max_torque_fit_rms_nm:
-                self._message = (
-                    f"calculation blocked: torque fit RMS {torque_rms:.4g} Nm exceeds "
-                    f"{self._config.max_torque_fit_rms_nm:.4g} Nm"
+                return self._calculation_blocked_locked(
+                    code="torque_fit_rms_exceeded",
+                    detail=(
+                        f"torque fit RMS {torque_rms:.4g} Nm exceeds "
+                        f"{self._config.max_torque_fit_rms_nm:.4g} Nm; the configured "
+                        f"{self._config.wrench_convention} gravity-wrench model does "
+                        "not match this capture (verify EFT reference point and "
+                        "T_tcp_sensor before changing fit bounds)"
+                    ),
+                    diagnostic_output_dir=diagnostic_output_dir,
+                    candidate_estimate=estimate,
                 )
-                return False, self._message
             self._result = estimate
             self._state = "calculated"
             self._message = "PROVISIONAL / NOT APPLIED — calculation complete"
             return True, self._message
+
+    def _calculation_blocked_locked(
+        self,
+        *,
+        code: str,
+        detail: str,
+        diagnostic_output_dir: str | None,
+        candidate_estimate: CogEstimate | None = None,
+    ) -> tuple[bool, str]:
+        self._result = None
+        self._state = "calculation_blocked"
+        self._message = f"calculation blocked [{code}]: {detail}"
+        if self._saved_report is not None:
+            self._message += f"; diagnostic evidence already saved: {self._saved_report}"
+            return False, self._message
+        if (
+            diagnostic_output_dir is None
+            or self._arm is None
+            or self._run_id is None
+        ):
+            return False, self._message
+        try:
+            paths = save_blocked_calibration_report(
+                output_dir=diagnostic_output_dir,
+                run_id=self._run_id,
+                arm=self._arm,
+                poses=tuple(self._accepted),
+                failure_code=code,
+                failure_detail=detail,
+                provenance=dict(self._provenance),
+                candidate_estimate=candidate_estimate,
+            )
+        except (CogCalibrationError, OSError, TypeError, ValueError) as exc:
+            self._message += f"; diagnostic report save failed: {exc}"
+            return False, self._message
+        self._saved_report = str(paths.report_json)
+        self._message += f"; diagnostic evidence saved: {self._saved_report}"
+        return False, self._message
 
     def save(self, output_dir: str) -> tuple[bool, str]:
         with self._lock:
@@ -589,8 +662,20 @@ class CogGuiSession:
             return f"{self._arm} F/T pipeline is unavailable"
         if ft.healthy is not True or ft.stale is not False:
             return f"{self._arm} F/T sensor is unhealthy or stale"
-        if ft.wrench_tcp is None or ft.gravity_tcp is None or ft.freshness_value is None:
+        if (
+            ft.raw_sensor_wrench is None
+            or ft.t_tcp_sensor is None
+            or ft.wrench_tcp is None
+            or ft.gravity_tcp is None
+            or ft.freshness_value is None
+        ):
             return f"{self._arm} payload-identification telemetry is incomplete"
+        if (
+            arm_state.q_actual_deg is None
+            or arm_state.tcp_actual_valid is not True
+            or arm_state.tcp_actual_stand is None
+        ):
+            return f"{self._arm} actual pose telemetry is incomplete"
         force_control = arm_state.force_control
         if force_control is not None and force_control.hard_limit_exceeded is True:
             return f"{self._arm} force hard limit is active"

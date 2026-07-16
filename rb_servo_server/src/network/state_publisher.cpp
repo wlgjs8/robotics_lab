@@ -124,6 +124,14 @@ nlohmann::json forceTorqueJson(const ForceTorqueTelemetry& value) {
         {"sensor_health_verified", value.sensor_health_verified},
         {"safety_rated", value.safety_rated},
         {"raw_sensor_wrench", wrenchJson(value.raw_sensor_wrench)},
+        {"t_tcp_sensor", {
+            value.t_tcp_sensor.x,
+            value.t_tcp_sensor.y,
+            value.t_tcp_sensor.z,
+            value.t_tcp_sensor.rx,
+            value.t_tcp_sensor.ry,
+            value.t_tcp_sensor.rz,
+        }},
         {"wrench_tcp", wrenchJson(value.wrench_tcp)},
         {"gravity_tcp", value.gravity_tcp},
         {"fast_external_wrench", wrenchJson(value.fast_external_wrench)},
@@ -150,6 +158,7 @@ nlohmann::json payloadIdentificationConfigJson(
 ) {
     return {
         {"enable", value.enable},
+        {"wrench_convention", value.wrench_convention},
         {"min_poses", value.min_poses},
         {"arrival_tolerance_deg", value.arrival_tolerance_deg},
         {"settle_sec", value.settle_sec},
