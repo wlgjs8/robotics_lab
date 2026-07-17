@@ -50,7 +50,7 @@ RUN python3 -m pip install -r /tmp/requirements.txt
 # TensorRT 가속 (Blackwell sm_120 -> TRT 10.x cu12). 엔진 빌드/실행은 tensorrt python API.
 # TRT 10.x 고정: 11.x는 FP16 BuilderFlag 제거(strongly-typed 전환)라 repo의 --fp16 경로와 불일치.
 # 10.7+ 는 Blackwell(sm_120) 지원. 엔진은 런타임과 동일 TRT 버전이어야 함.
-RUN python3 -m pip install "tensorrt<11" onnx onnxscript
+RUN python3 -m pip install "tensorrt-cu12<11" onnx onnxscript
 
 # --- C++ camera_server 빌드 ---
 WORKDIR /app

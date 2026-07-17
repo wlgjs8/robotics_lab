@@ -6,11 +6,10 @@
 # i.e. which socket each gripper is plugged into. Keep each gripper in its own
 # socket and these names stay put across reboots / ttyUSB renumbering.
 #
-# Mapping recaptured 2026-07-11 after the USB hub topology changed. The right
-# mapping retained its existing physical identity; verify the new left path
-# with the identification command below before relying on it for motion:
-#   USB port 3-3.4     -> left  gripper (currently ttyUSB1)
-#   USB port 3-2.4.4   -> right gripper (currently ttyUSB0)
+# Mapping recaptured 2026-07-17 after migrating to the RTX 5090 control PC.
+# Each gripper shares a physical hub with its already-identified wrist D405:
+#   USB port 9-1.3.1.4 -> left  gripper (currently ttyUSB0; D405 260322278348)
+#   USB port 9-1.3.2.4 -> right gripper (currently ttyUSB1; D405 412622272078)
 # VERIFY before trusting:  python3 scripts/umi_gripper_follow.py --ident left
 # If a gripper moves to a different socket, update the KERNELS value below.
 # Find it with `udevadm info -a -n /dev/ttyUSB0`; use the USB device KERNELS
@@ -18,5 +17,5 @@
 #
 # Install:  see tools/udev/install_pika_udev.sh
 
-SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7522", KERNELS=="3-3.4", SYMLINK+="pika-left",  GROUP="dialout", MODE="0660"
-SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7522", KERNELS=="3-2.4.4", SYMLINK+="pika-right", GROUP="dialout", MODE="0660"
+SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7522", KERNELS=="3-2.4", SYMLINK+="pika-left",  GROUP="dialout", MODE="0660"
+SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7522", KERNELS=="3-1.4", SYMLINK+="pika-right", GROUP="dialout", MODE="0660"
