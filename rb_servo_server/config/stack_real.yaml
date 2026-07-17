@@ -557,18 +557,29 @@ force_torque:
     payload_com_tcp_m: [0.0, 0.0, 0.0]
     residual_tare_tcp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-# Fail-closed monitor A/B after the 2026-07-16 15:26 right-arm run produced
-# rotation during mixed fingertip/Pika-body pushes. The reviewed right-arm
-# controller-compensated residual model remains configured for telemetry, but
-# force motion is disabled until fingertip-centre and known-offset pushes show
-# that the TCP torque follows tau = r x F with the configured geometry. Both
-# geometric floor constraints remain disabled by explicit operator decision.
+# 2026-07-17: RIGHT-arm supervised cartesian_admittance re-enabled by operator
+# decision. Evidence: post-tare multi-direction pushes (servo_log_20260717_164350,
+# _153921; scripts/analyze_ft_application_point.py) fit one consistent contact
+# point (+0.002, +0.008, -0.176) m in the TCP frame -- the lower Pika body,
+# physically plausible with the configured T_tcp_sensor -- and axial pushes fit
+# on-axis (|tau|/|F| ~ 0.012-0.016 m). This explains the 2026-07-16 15:26
+# rotation as real tau = r x F from off-TCP pushes, not a frame error.
+# 2026-07-17 (later): LEFT arm enabled identically to the right by operator
+# decision (translation-only compliance). Left has NO arm-specific push
+# validation; supporting evidence is indirect -- the operator-declared
+# identical assembly (2026-07-12) and the identical whole-log noise-lever
+# signature (~-0.213 m) on both arms. NOTE the left gravity model is
+# rigid_payload with payload_mass 0 (tare-only): orientation changes of a few
+# degrees from the tare pose push ~1.5 N phantom force past the deadband, so
+# watch left no-contact wrench during rollouts until a left gravity
+# calibration is captured.
+# Both geometric floor constraints remain disabled by explicit operator decision.
 force_control:
   provider: project_native
   enable: true
-  operating_mode: monitor
-  allow_in_real: false
-  supervised_experimental_real: false
+  operating_mode: cartesian_admittance
+  allow_in_real: true
+  supervised_experimental_real: true
   update_rate_hz: 500
   left:
     enable: true
@@ -576,26 +587,33 @@ force_control:
     # Gate 3D: express all six controller axes in the corrected URDF/FT-axis
     # orientation and apply the correction about the TCP endpoint.
     compliance_frame: tcp_origin
-    # Shared dual-arm profile. The latest accepted floor contact peaked at
-    # 23.88 N normal / 24.36 N resultant without crossing the old hard guard.
-    # Keep margin for task contact while remaining well below the earlier
-    # 100+ N floor-press event. Hard limits require 5 fresh samples (10 ms).
+    # Shared dual-arm profile. Hard limits calibrated 2026-07-17 from four
+    # supervised freedrive floor impacts on the right arm
+    # (servo_log_20260717_172120): peaks 36.2/57.4/65.9/66.1 N, rise 8-16 ms,
+    # no-contact noise max 3.8 N. 30 N normal / 35 N resultant catches every
+    # reproduced impact class; the 36 N impact held >30 N for only 12 ms, so
+    # the hard debounce is 3 fresh samples (~11 ms at the measured ~280 Hz EFT
+    # freshness -- 5 samples ~18 ms would miss it). Margin above the accepted
+    # 23.88 N task-contact precedent is ~6 N: watch for false hard faults
+    # during heavy task contact before tightening further.
     target_force_n: 2.0
     contact_enter_force_n: 3.5
     contact_release_force_n: 2.75
     force_deadband_n: 0.5
-    hard_normal_force_n: 40.0
-    hard_force_norm_n: 45.0
+    hard_normal_force_n: 30.0
+    hard_force_norm_n: 35.0
     hard_torque_norm_nm: 7.0
     debounce_samples: 3
-    hard_limit_debounce_samples: 5
+    hard_limit_debounce_samples: 3
     release_dwell_sec: 0.1
     release_velocity_threshold_m_s: 0.002
     transverse_contact_enter_force_n: 2.5
     transverse_contact_release_force_n: 1.5
     torque_contact_enter_nm: 0.45
     torque_contact_release_nm: 0.30
-    compliance_axes: [true, true, true, true, true, true]
+    # Translation-only, mirroring the right arm (see the right-arm note below
+    # for the push-run evidence and the rotation re-enable condition).
+    compliance_axes: [true, true, true, false, false, false]
   right:
     enable: true
     surface_source: none
@@ -606,18 +624,26 @@ force_control:
     contact_enter_force_n: 3.5
     contact_release_force_n: 2.75
     force_deadband_n: 0.5
-    hard_normal_force_n: 40.0
-    hard_force_norm_n: 45.0
+    hard_normal_force_n: 30.0
+    hard_force_norm_n: 35.0
     hard_torque_norm_nm: 7.0
     debounce_samples: 3
-    hard_limit_debounce_samples: 5
+    hard_limit_debounce_samples: 3
     release_dwell_sec: 0.1
     release_velocity_threshold_m_s: 0.002
     transverse_contact_enter_force_n: 2.5
     transverse_contact_release_force_n: 1.5
     torque_contact_enter_nm: 0.45
     torque_contact_release_nm: 0.30
-    compliance_axes: [true, true, true, true, true, true]
+    # 2026-07-17 17:0x push runs (servo_log_20260717_170148/_170254): the FT-side
+    # push fit the configured sensor origin to 1 mm (transform CORRECT); observed
+    # rotations were real tau = r x F -- the open-jaw fingertip sits +-58 mm off
+    # the TCP and the 0.10 Nm torque deadband vs 1.5 N force deadband makes any
+    # contact lever > 67 mm rotate before it translates. Operator decision:
+    # TRANSLATION-ONLY compliance for contact tasks; re-enable rotations only
+    # with a raised torque deadband (~0.30 Nm) after the closed-jaw
+    # fingertip-centre check.
+    compliance_axes: [true, true, true, false, false, false]
   normal_admittance:
     virtual_mass_kg: 8.0
     damping_n_s_m: 160.0

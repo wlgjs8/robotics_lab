@@ -359,6 +359,24 @@ A/B evidence at one fixed, accepted Init Motion pose:
 4. Stop on stale/unhealthy F/T, a rejected tare, unexpected robot motion, a
    hard-limit/fault indication, or evidence outside the configured envelope.
 
+Analyze each capture offline with
+`scripts/analyze_ft_application_point.py` (per-push baseline-subtracted
+application point and `tau = r x F` verdict; thresholds below match the
+3--5 N protocol pushes):
+
+```bash
+python3 scripts/analyze_ft_application_point.py logs/servo_log_<run>.csv \
+    --arm right --enter-n 2.5 --exit-n 1.5 --min-delta-n 2 \
+    --expect-r 0,0,0 --tol-mm 15 --json artifacts/ft_application_point_<run>.json
+```
+
+For the marked body-point branch, replace `--expect-r 0,0,0` with the measured
+lever arm of that point in the TCP frame. The script also flags a missing
+residual tare (large quiet baseline; auto tare fires only after Init Motion)
+and reports a whole-log correlation fit whose effective lever should sit at
+the tool CoM / cable clamp -- a value behind the sensor measurement face
+(z < -0.2026 m) on a push-free capture is a sensor-origin-offset suspect.
+
 Promotion back to six-axis Cartesian admittance requires both branches to pass:
 fingertip-centre torque must remain near zero, and the marked body-point torque
 must match the measured lever arm in sign and magnitude. A fingertip-centre
