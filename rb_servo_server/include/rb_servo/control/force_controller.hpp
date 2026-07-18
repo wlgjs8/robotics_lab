@@ -32,6 +32,17 @@ struct ForceControllerProposal {
     uint64_t base_state_revision = 0;
 };
 
+// Inverse of the applyForceCorrection composition: strip a COMMITTED compliance
+// offset from a measured stand-frame pose. Follower divergence checks use this
+// so deliberate compliance never counts as tracking divergence (actual lead
+// measures the servo's true plan-vs-robot split, not the admittance offset).
+// t_tcp_compliance_pose is the compliance frame in the TCP frame (the same
+// transform applyForceCorrection composed the offset with); offset_tcp is the
+// committed ForceControllerState offset. A zero offset returns the input pose.
+Pose6D removeComplianceOffsetFromMeasured(const Pose6D& measured_stand,
+                                          const Pose6D& t_tcp_compliance_pose,
+                                          const Pose6D& offset_tcp);
+
 // Project-native bounded Cartesian admittance. DualArmServoLoop supplies the
 // wrench and measured twist in the configured compliance frame, then commits
 // the proposal only after the corrected Cartesian target passes IK, every

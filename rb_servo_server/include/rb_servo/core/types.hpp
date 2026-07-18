@@ -450,6 +450,8 @@ struct CartesianSolveTelemetry {
     double follower_actual_lead_m = 0.0;
     double follower_actual_lead_rad = 0.0;
     int follower_actual_lead_error_count = 0;
+    bool follower_loading_projection_active = false;  // wrench-gated plan projection engaged
+    double follower_contact_shift_m = 0.0;            // accumulated projected plan shift
     uint64_t follower_reanchor_count = 0;          // explained strict-divergence reanchors
     bool safety_intervention_recent = false;       // debounced signal seen by follower stage
     double delta_twist_pending_linear_norm_m = 0.0;

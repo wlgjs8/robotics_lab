@@ -2122,6 +2122,8 @@ bool DualArmServoLoop::updateForceRuntime(
     runtime.control.proposal_valid = false;
     runtime.control.proposal_committed = false;
     runtime.control.compliance_active = false;
+    runtime.t_tcp_compliance_valid = false;
+    runtime.follower_loading_reaction_valid = false;
     runtime.control.normal_regulating = false;
     runtime.control.transverse_regulating = false;
     runtime.control.rotational_regulating = false;
@@ -2210,6 +2212,8 @@ bool DualArmServoLoop::updateForceRuntime(
     runtime.control.compliance_frame_actual_stand =
         runtime.compliance_frame_actual_stand;
     runtime.control.compliance_frame_pose_valid = true;
+    runtime.t_tcp_compliance_pose = math::poseFromSe3(t_tcp_compliance);
+    runtime.t_tcp_compliance_valid = true;
 
     FtRawSample raw;
     raw.wrench_sensor = state.eft_wrench;
@@ -2574,6 +2578,29 @@ bool DualArmServoLoop::updateForceRuntime(
         runtime.control.proposal_valid = cartesian_proposal.valid;
         runtime.control.saturated = cartesian_proposal.saturated;
         runtime.control.wrench_error_compliance = cartesian_proposal.wrench_error_tcp;
+        // Stand-frame loading direction for the chunk follower's wrench-gated
+        // projection: the negation of the deadband-filtered wrench error, the
+        // same convention the policy-delta loading projection uses below.
+        {
+            const math::Vector3 reaction_compliance(
+                -cartesian_proposal.wrench_error_tcp.fx,
+                -cartesian_proposal.wrench_error_tcp.fy,
+                -cartesian_proposal.wrench_error_tcp.fz
+            );
+            const math::Vector3 reaction_stand =
+                t_stand_compliance.rotation() * reaction_compliance;
+            runtime.follower_loading_reaction_stand = {
+                reaction_stand.x(), reaction_stand.y(), reaction_stand.z()
+            };
+            // Gate on the DEBOUNCED contact classifier, not the raw deadband:
+            // a grasped payload's inertial/grip wrench during fast free motion
+            // crosses the deadband transiently (2026-07-18 12:05 run: 2.5-6.9 N
+            // sign-flipping Fz during the post-pick lift yanked the plan by up
+            // to 20 mm per chunk and ended in a 49 N collision). Environmental
+            // contact latches enter/release hysteresis; inertial spikes do not.
+            runtime.follower_loading_reaction_valid = runtime.control.enabled &&
+                (runtime.normal_contact_active || runtime.transverse_contact_active);
+        }
         const pinocchio::SE3 t_tcp_surface(
             r_stand_tcp.transpose() * r_stand_surface,
             math::Vector3::Zero()
@@ -5591,6 +5618,8 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.follower_actual_lead_m = abc.follower_actual_lead_m;
     solve.follower_actual_lead_rad = abc.follower_actual_lead_rad;
     solve.follower_actual_lead_error_count = abc.follower_actual_lead_error_count;
+    solve.follower_loading_projection_active = abc.follower_loading_projection_active;
+    solve.follower_contact_shift_m = abc.follower_contact_shift_m;
     solve.follower_reanchor_count = abc.follower_reanchor_count;
     solve.safety_intervention_recent = abc.safety_intervention_recent;
     solve.delta_twist_pending_linear_norm_m = abc.delta_twist_pending_linear_norm_m;
@@ -6012,9 +6041,31 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     log_transition();
     smd_tracker->deactivate();
     ArmCommand smoothed = command;
+    const ForceArmRuntime& force_runtime =
+        arm_id == ArmId::Left ? left_force_runtime_ : right_force_runtime_;
+    // Contact-aware following: hand the follower this tick's deadband-filtered
+    // loading direction so segment advances never integrate into a loaded
+    // contact (invalid -> strict no-op, identical to the blind follower).
+    follower->setExternalReaction(
+        Eigen::Vector3d(force_runtime.follower_loading_reaction_stand[0],
+                        force_runtime.follower_loading_reaction_stand[1],
+                        force_runtime.follower_loading_reaction_stand[2]),
+        force_runtime.follower_loading_reaction_valid);
     smoothed.tcp_target_stand = follower->tick(dt_sec);
     if (delta_preview) {
-        follower->updateActualLead(actual_feedback_pose);
+        // Compliance-aware actual lead: strip the committed admittance offset
+        // from the measured pose so deliberate compliance is not counted as
+        // plan-vs-robot divergence (zero offset -> identity).
+        Pose6D lead_feedback = actual_feedback_pose;
+        if (force_runtime.t_tcp_compliance_valid) {
+            const ForceController& cartesian_controller =
+                arm_id == ArmId::Left ? left_cartesian_force_controller_
+                                      : right_cartesian_force_controller_;
+            lead_feedback = removeComplianceOffsetFromMeasured(
+                lead_feedback, force_runtime.t_tcp_compliance_pose,
+                cartesian_controller.state().offset_tcp);
+        }
+        follower->updateActualLead(lead_feedback);
     }
     const control::FollowerDiag& diag = follower->diag();
     abc.follower_projection_error_m = diag.projection_error_m;
@@ -6023,6 +6074,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.follower_actual_lead_m = diag.actual_lead_m;
     abc.follower_actual_lead_rad = diag.actual_lead_rad;
     abc.follower_actual_lead_error_count = diag.consecutive_actual_lead_errors;
+    abc.follower_loading_projection_active = diag.loading_projection_active;
+    abc.follower_contact_shift_m = diag.contact_shift_m;
     if (delta_preview && (diag.infeasible_fault || diag.actual_lead_fault)) {
         std::ostringstream reason;
         reason << toString(arm_id)

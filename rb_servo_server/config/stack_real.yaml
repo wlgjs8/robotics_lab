@@ -516,9 +516,18 @@ force_torque:
     # +pi/2 yaw makes the sensor X/Y gizmo and compliance X/Y physically agree.
     T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
     sensor_bias: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    # Left remains on the rigid zero-payload model until an arm-specific report
-    # is captured and reviewed; the right-arm result must not be mirrored here.
-    gravity_compensation_model: rigid_payload
+    # 2026-07-17: left arm-specific report captured and reviewed
+    # (logs/cog_calibration/20260717T104253Z-7e5aaba4/calibration_report.json,
+    # sha256 3974410ef594ef385ad884af6fec52e387d33d843f124e049e5f70d9af6e0297;
+    # force rms 0.246 N, torque rms 0.029 Nm, rank 4/4, condition 79.7 -- all
+    # within the server acceptance bounds). Replaces the interim zero-payload
+    # tare-only posture that produced 1.5-3.4 N free-air phantom force during
+    # fast repositioning (19:29 rollout fault). Controller-processed residual
+    # map, same CAN-unverified assumption as the right arm.
+    gravity_compensation_model: controller_compensated_linear
+    gravity_compensation_calibration_id: "left-20260717T104253Z-7e5aaba4"
+    gravity_force_matrix_n_per_m_s2: [-0.8030954616401327, 1.0438581747472622, 0.04213688651453337, -1.0133240613162646, -0.7795436740738728, 0.03731134787197895, 0.0031399349497533845, -0.015941258270182335, 0.3510946753055837]
+    gravity_torque_matrix_nm_per_m_s2: [-0.11301076870204503, -0.13904065897112153, 0.007945205497173832, 0.14263918844333365, -0.12121775210911886, -0.008530067636504404, 0.002740982054259277, 0.00018039365451322058, -0.0014896767865300528]
     payload_mass_kg: 0.0
     payload_com_tcp_m: [0.0, 0.0, 0.0]
     residual_tare_tcp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -568,11 +577,9 @@ force_torque:
 # decision (translation-only compliance). Left has NO arm-specific push
 # validation; supporting evidence is indirect -- the operator-declared
 # identical assembly (2026-07-12) and the identical whole-log noise-lever
-# signature (~-0.213 m) on both arms. NOTE the left gravity model is
-# rigid_payload with payload_mass 0 (tare-only): orientation changes of a few
-# degrees from the tare pose push ~1.5 N phantom force past the deadband, so
-# watch left no-contact wrench during rollouts until a left gravity
-# calibration is captured.
+# signature (~-0.213 m) on both arms. The left gravity map landed the same
+# evening (left-20260717T104253Z-7e5aaba4, see force_torque.left), closing the
+# free-air phantom-force gap the interim tare-only posture had.
 # Both geometric floor constraints remain disabled by explicit operator decision.
 force_control:
   provider: project_native
@@ -665,9 +672,25 @@ force_control:
   # after the stiffness drop and recenters on the fixed command equilibrium.
   # Hard force/torque limits above are unchanged. Supervised Gate 3A/3B
   # characterization: validate load/release, chatter, and recenter per axis.
+  # 2026-07-17 19:21 rollout: TRANSLATION stiffness 80 -> 0 (pure mass-damper).
+  # With the policy equilibrium below the floor, the 80 N/m spring recentered
+  # the unloaded offset back INTO the surface: left arm complied a 13 N touch
+  # down to 1-3 N at -7.6 mm offset, then the recenter re-pressed the rigid
+  # floor to a 372 N spike -> ExternalForceLimit latch. K=0 lets the offset
+  # rest where contact put it; release drains via the policy target moving
+  # away. Response caps below are raised 2-4x in the same change so the unload
+  # can track a 100-300 ms force ramp, and the offset cap is pulled UNDER the
+  # follower's 15 mm actual-lead budget (it was 20 mm > 15 mm: a deep contact
+  # would have tripped delta_preview_actual_lead_fault before saturating).
   virtual_mass: [2.0, 2.0, 2.0, 0.2, 0.2, 0.2]
   damping: [26.0, 26.0, 26.0, 1.55, 1.55, 1.55]
-  stiffness: [80.0, 80.0, 80.0, 3.0, 3.0, 3.0]
+  stiffness: [0.0, 0.0, 0.0, 3.0, 3.0, 3.0]
+  # 2026-07-17 (Phase 3 restore): translation deadband back to 1.5 N. The
+  # interim 2.5 N was a shield against LEFT free-air phantom force (no gravity
+  # model, 1.5-3.4 N during fast repositioning -> K=0 offset drift + false
+  # 19 N contact in the 19:29 run); the left controller_compensated_linear map
+  # (left-20260717T104253Z-7e5aaba4) now removes that phantom at the source,
+  # so contact sensitivity is restored.
   wrench_deadband: [1.5, 1.5, 1.5, 0.10, 0.10, 0.10]
   # Keep translation and rotation return paths coherent: while any axis in a
   # block remains loaded, released sibling axes brake and hold instead of
@@ -675,13 +698,13 @@ force_control:
   # feasible jerk scale preserves its 3D return direction.
   blockwise_release_recenter: true
   max_dt_sec: 0.02
-  max_pos_offset_m: 0.02
+  max_pos_offset_m: 0.012
   max_rot_offset_rad: 0.08
-  max_linear_velocity_m_s: 0.03
+  max_linear_velocity_m_s: 0.06
   max_angular_velocity_rad_s: 0.15
-  max_linear_acceleration_m_s2: 0.25
+  max_linear_acceleration_m_s2: 0.8
   max_angular_acceleration_rad_s2: 1.5
-  max_linear_jerk_m_s3: 2.0
+  max_linear_jerk_m_s3: 8.0
   max_angular_jerk_rad_s3: 10.0
   max_pos_step_m: 0.001
   max_rot_step_rad: 0.002
@@ -918,12 +941,23 @@ cartesian_control:
         # v3 timestamp-aligned local deltas are integrated into absolute knots by
         # the server, then followed by the existing Ruckig p/v/a chain. This
         # removes stale residual catch-up while preserving both arms' predictions.
-        max_linear_velocity_m_s: 0.18
-        max_linear_accel_m_s2: 1.5
-        max_linear_jerk_m_s3: 45.0
+        # 2026-07-17: raised from the first-hardware conservative set
+        # (0.18 / 1.5 / 45) on real-run evidence, operator decision "follow the
+        # model's predicted actions more faithfully": (a) training-distribution
+        # motion reaches ~0.45 m/s (flow_infer_pgmode_sim_param_search), so
+        # 0.18 clipped even the SPEED_SCALE=0.5 rollout (~0.22 m/s); (b) the
+        # 18:08 real rollout latched delta_preview_projection_fault at 2.6 mm
+        # because jerk 45 allows only ~12 mm/s velocity change per 33 ms
+        # segment (dv <= j*dt^2/4) -- too slow for policy direction changes;
+        # jerk 120 -> ~33 mm/s per segment. FT hard limit 30 N (11 ms
+        # debounce), 50 mm divergence latch, ROI/self-collision, and
+        # supervised E-stop remain the safety envelope for the faster motion.
+        max_linear_velocity_m_s: 0.25 #0.45
+        max_linear_accel_m_s2: 3.0
+        max_linear_jerk_m_s3: 120.0
         max_angular_velocity_rad_s: 0.60
-        max_angular_accel_rad_s2: 3.0
-        max_angular_jerk_rad_s3: 120.0
+        max_angular_accel_rad_s2: 6.0
+        max_angular_jerk_rad_s3: 360.0
         discard_head_steps: 0     # v3 producer already removes rows emitted since observation
         # Match FLOW_INFER_CHUNK_EXECUTE_STEPS=12: consume the complete policy
         # execution window before using reserve rows from the published runway.
@@ -944,10 +978,23 @@ cartesian_control:
         delta_twist_stale_residual_timeout_sec: 0.15
         # Required delta_preview fail-closed bounds. These are explicit reviewed
         # config values; the loader rejects a delta_preview profile if any are absent.
-        preview_max_projection_error_m: 0.001
+        # 2026-07-17 real-run recalibration: the original 1 mm / 3-segment
+        # projection budget latched on the first real-speed rollout (2.6 mm
+        # excursion during a policy direction change, no contact) -- it was a
+        # hardware-free provisional value. 2 mm / 5 segments still fails closed
+        # ~12x under the 50 mm divergence latch. actual_lead budget (Phase 3
+        # re-tighten after the contact-aware follower landed): the committed
+        # compliance offset is now REMOVED from the lead measurement
+        # (removeComplianceOffsetFromMeasured) and the wrench-gated loading
+        # projection keeps the plan from advancing into contact, so lead is
+        # pure plan-vs-robot tracking again. The honest residual is fast-motion
+        # servo lag -- measured ~16 mm at 0.25 m/s in the 19:29 run
+        # (v_max x ~65 ms effective rbpodo lag) -- so 20 mm covers it with
+        # margin. Tighten further only with telemetry showing lower real lag.
+        preview_max_projection_error_m: 0.002
         preview_max_projection_error_rad: 0.00436332313  # 0.25 deg
-        preview_max_consecutive_projection_errors: 3
-        preview_max_actual_lead_m: 0.006
+        preview_max_consecutive_projection_errors: 5
+        preview_max_actual_lead_m: 0.020
         preview_max_actual_lead_rad: 0.01745329252       # 1.0 deg
         preview_max_consecutive_actual_lead_errors: 3
         chunk_feed_timeout_sec: 1.5

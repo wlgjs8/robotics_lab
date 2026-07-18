@@ -201,7 +201,15 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(payload_id.max_torque_stddev_nm, 0.15));
         const auto& left_ft = stack_real.force_torque.left;
         const auto& right_ft = stack_real.force_torque.right;
-        RB_CHECK(left_ft.gravity_compensation_model == "rigid_payload");
+        // 2026-07-17: left arm-specific gravity map captured and applied
+        // (left-20260717T104253Z-7e5aaba4); the interim rigid_payload
+        // zero-mass posture is retired for both arms.
+        RB_CHECK(left_ft.gravity_compensation_model ==
+                 "controller_compensated_linear");
+        RB_CHECK(left_ft.gravity_compensation_calibration_id ==
+                 "left-20260717T104253Z-7e5aaba4");
+        RB_CHECK(left_ft.gravity_force_matrix_configured);
+        RB_CHECK(left_ft.gravity_torque_matrix_configured);
         RB_CHECK(right_ft.gravity_compensation_model ==
                  "controller_compensated_linear");
         RB_CHECK(right_ft.gravity_compensation_calibration_id ==
@@ -258,9 +266,12 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(right_ft.t_tcp_sensor.rz, left_ft.t_tcp_sensor.rz));
         RB_CHECK(stack_real.force_control.provider == "project_native");
         RB_CHECK(stack_real.force_control.enable);
-        RB_CHECK(stack_real.force_control.operating_mode == "monitor");
-        RB_CHECK(!stack_real.force_control.allow_in_real);
-        RB_CHECK(!stack_real.force_control.supervised_experimental_real);
+        // 2026-07-17 operator decision: supervised dual-arm cartesian_admittance
+        // (translation-only axes) with the freedrive-calibrated 30/35 N hard
+        // limits; the fail-closed monitor posture is retired.
+        RB_CHECK(stack_real.force_control.operating_mode == "cartesian_admittance");
+        RB_CHECK(stack_real.force_control.allow_in_real);
+        RB_CHECK(stack_real.force_control.supervised_experimental_real);
         RB_CHECK(stack_real.force_control.left.enable);
         RB_CHECK(stack_real.force_control.right.enable);
         RB_CHECK(!stack_real.safety.floor_constraint.enable);
@@ -280,14 +291,16 @@ bool testRepositoryConfigsParse() {
             left_force.contact_release_force_n
         );
         RB_CHECK(near(left_force.force_deadband_n, right_force.force_deadband_n));
-        RB_CHECK(near(left_force.hard_normal_force_n, 40.0));
+        RB_CHECK(near(left_force.hard_normal_force_n, 30.0));
         RB_CHECK(near(left_force.hard_normal_force_n, right_force.hard_normal_force_n));
+        // Translation-only compliance: rotations stay off until the closed-jaw
+        // fingertip-centre check passes with a raised torque deadband.
         RB_CHECK(left_force.compliance_axes.x);
         RB_CHECK(left_force.compliance_axes.y);
         RB_CHECK(left_force.compliance_axes.z);
-        RB_CHECK(left_force.compliance_axes.roll);
-        RB_CHECK(left_force.compliance_axes.pitch);
-        RB_CHECK(left_force.compliance_axes.yaw);
+        RB_CHECK(!left_force.compliance_axes.roll);
+        RB_CHECK(!left_force.compliance_axes.pitch);
+        RB_CHECK(!left_force.compliance_axes.yaw);
         RB_CHECK(near(left_force.transverse_contact_enter_force_n, 2.5));
         RB_CHECK(near(left_force.transverse_contact_release_force_n, 1.5));
         RB_CHECK(near(left_force.torque_contact_enter_nm, 0.45));
@@ -310,17 +323,20 @@ bool testRepositoryConfigsParse() {
         ));
         RB_CHECK(right_force.compliance_axes.x && right_force.compliance_axes.y);
         RB_CHECK(right_force.compliance_axes.z);
-        RB_CHECK(right_force.compliance_axes.roll);
-        RB_CHECK(right_force.compliance_axes.pitch);
-        RB_CHECK(right_force.compliance_axes.yaw);
+        RB_CHECK(!right_force.compliance_axes.roll);
+        RB_CHECK(!right_force.compliance_axes.pitch);
+        RB_CHECK(!right_force.compliance_axes.yaw);
         RB_CHECK(left_force.compliance_frame == "tcp_origin");
         RB_CHECK(left_force.compliance_frame == right_force.compliance_frame);
-        RB_CHECK(near(left_force.hard_force_norm_n, 45.0));
+        RB_CHECK(near(left_force.hard_force_norm_n, 35.0));
         RB_CHECK(near(left_force.hard_force_norm_n, right_force.hard_force_norm_n));
         RB_CHECK(near(left_force.hard_torque_norm_nm, 7.0));
         RB_CHECK(near(left_force.hard_torque_norm_nm, right_force.hard_torque_norm_nm));
         RB_CHECK(left_force.debounce_samples == right_force.debounce_samples);
-        RB_CHECK(left_force.hard_limit_debounce_samples == 5);
+        // 3 fresh samples (~11 ms at the measured ~280 Hz EFT freshness): the
+        // 36 N freedrive floor impact held >30 N for only 12 ms, so 5 samples
+        // (~18 ms) would miss that impact class.
+        RB_CHECK(left_force.hard_limit_debounce_samples == 3);
         RB_CHECK(
             left_force.hard_limit_debounce_samples ==
             right_force.hard_limit_debounce_samples
@@ -339,7 +355,10 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(stack_real.force_control.damping[3], 1.55));
         RB_CHECK(near(stack_real.force_control.damping[4], 1.55));
         RB_CHECK(near(stack_real.force_control.damping[5], 1.55));
-        RB_CHECK(near(stack_real.force_control.stiffness[2], 80.0));
+        // Translation stiffness 0: pure mass-damper so the compliance never
+        // spring-recenters back into a contact (the 19:21 left-arm 372 N
+        // spike); rotations keep their spring (axes disabled anyway).
+        RB_CHECK(near(stack_real.force_control.stiffness[2], 0.0));
         RB_CHECK(near(stack_real.force_control.stiffness[3], 3.0));
         RB_CHECK(near(stack_real.force_control.stiffness[4], 3.0));
         RB_CHECK(near(stack_real.force_control.stiffness[5], 3.0));
@@ -349,9 +368,11 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(stack_real.force_control.wrench_deadband[4], 0.10));
         RB_CHECK(near(stack_real.force_control.wrench_deadband[5], 0.10));
         RB_CHECK(stack_real.force_control.blockwise_release_recenter);
-        RB_CHECK(near(stack_real.force_control.max_pos_offset_m, 0.02));
-        RB_CHECK(near(stack_real.force_control.max_linear_velocity_m_s, 0.03));
-        RB_CHECK(near(stack_real.force_control.max_linear_jerk_m_s3, 2.0));
+        // Offset cap sits under the follower's 20 mm actual-lead budget; the
+        // response caps are the 2026-07-17 contact-tracking raise.
+        RB_CHECK(near(stack_real.force_control.max_pos_offset_m, 0.012));
+        RB_CHECK(near(stack_real.force_control.max_linear_velocity_m_s, 0.06));
+        RB_CHECK(near(stack_real.force_control.max_linear_jerk_m_s3, 8.0));
         RB_CHECK(near(normal_force.damping_n_s_m, 160.0));
         RB_CHECK(near(normal_force.stiffness_n_m, 0.0));
         RB_CHECK(near(normal_force.max_unload_offset_m, 0.01));
@@ -481,11 +502,8 @@ bool testGuardedAdmittanceReleaseProfileValidation() {
 
     {
         std::string body = readFile(stack_real_path);
-        RB_CHECK(replaceOnce(
-            &body,
-            "  operating_mode: monitor\n",
-            "  operating_mode: cartesian_admittance\n"
-        ));
+        // The tracked real profile already runs cartesian_admittance
+        // (2026-07-17), so per-arm admittance validation is active as-is.
         RB_CHECK(replaceOnce(
             &body,
             "    contact_release_force_n: 2.75\n",
@@ -502,11 +520,8 @@ bool testGuardedAdmittanceReleaseProfileValidation() {
 
     {
         std::string body = readFile(stack_real_path);
-        RB_CHECK(replaceOnce(
-            &body,
-            "  operating_mode: monitor\n",
-            "  operating_mode: cartesian_admittance\n"
-        ));
+        // The tracked real profile already runs cartesian_admittance
+        // (2026-07-17), so per-arm admittance validation is active as-is.
         RB_CHECK(replaceOnce(
             &body,
             "    force_deadband_n: 0.5\n",
@@ -523,11 +538,8 @@ bool testGuardedAdmittanceReleaseProfileValidation() {
 
     {
         std::string body = readFile(stack_real_path);
-        RB_CHECK(replaceOnce(
-            &body,
-            "  operating_mode: monitor\n",
-            "  operating_mode: cartesian_admittance\n"
-        ));
+        // The tracked real profile already runs cartesian_admittance
+        // (2026-07-17), so per-arm admittance validation is active as-is.
         RB_CHECK(replaceOnce(
             &body,
             "    contact_release_force_n: 2.75\n",

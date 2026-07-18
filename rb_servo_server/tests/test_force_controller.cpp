@@ -2,6 +2,7 @@
 #include <iostream>
 
 #include "rb_servo/control/force_controller.hpp"
+#include "rb_servo/math/se3.hpp"
 
 namespace {
 
@@ -1015,6 +1016,44 @@ bool testWrenchDeadbandSuppressesNoiseAndPreservesExcessSign() {
     return true;
 }
 
+bool testRemoveComplianceOffsetInvertsAppliedCorrection() {
+    // Base command pose with a non-trivial orientation.
+    rb_servo::Pose6D base;
+    base.x = 0.42; base.y = -0.11; base.z = 0.31;
+    base.rx = 0.2; base.ry = -0.4; base.rz = 1.1;
+
+    // tcp_origin-style compliance frame: +90 deg yaw, zero translation.
+    rb_servo::Pose6D c_pose;
+    c_pose.rz = 1.5707963267948966;
+
+    // Committed translation-only offset (rotation axes disabled in the real profile).
+    rb_servo::Pose6D offset;
+    offset.x = 0.008; offset.y = -0.003; offset.z = 0.005;
+
+    // measured = base * (C * offset * C^-1): the exact applyForceCorrection composition.
+    const pinocchio::SE3 c = rb_servo::math::se3FromPose(c_pose);
+    const pinocchio::SE3 d(
+        rb_servo::math::exp3(rb_servo::math::Vector3(offset.rx, offset.ry, offset.rz)),
+        rb_servo::math::Vector3(offset.x, offset.y, offset.z)
+    );
+    const rb_servo::Pose6D measured = rb_servo::math::poseFromSe3(
+        rb_servo::math::se3FromPose(base) * (c * d * c.inverse())
+    );
+
+    const rb_servo::Pose6D recovered =
+        rb_servo::removeComplianceOffsetFromMeasured(measured, c_pose, offset);
+    RB_CHECK(rb_servo::math::positionDistance(recovered, base) < 1e-9);
+    RB_CHECK(rb_servo::math::orientationDistanceRad(recovered, base) < 1e-9);
+
+    // A zero offset is the identity: divergence checks see the raw measured pose.
+    rb_servo::Pose6D zero_offset;
+    const rb_servo::Pose6D untouched =
+        rb_servo::removeComplianceOffsetFromMeasured(measured, c_pose, zero_offset);
+    RB_CHECK(rb_servo::math::positionDistance(untouched, measured) < 1e-12);
+    RB_CHECK(rb_servo::math::orientationDistanceRad(untouched, measured) < 1e-12);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -1038,6 +1077,7 @@ int main() {
     if (!testRealProfileLateRecontactDeadbandChatterRemainsValid()) return 1;
     if (!testProposalProvenancePreventsStaleOrCrossControllerCommit()) return 1;
     if (!testWrenchDeadbandSuppressesNoiseAndPreservesExcessSign()) return 1;
+    if (!testRemoveComplianceOffsetInvertsAppliedCorrection()) return 1;
     std::cout << "force_controller tests passed\n";
     return 0;
 }

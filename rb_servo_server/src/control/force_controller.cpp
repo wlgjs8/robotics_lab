@@ -1,5 +1,7 @@
 #include "rb_servo/control/force_controller.hpp"
 
+#include "rb_servo/math/se3.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -8,6 +10,24 @@
 #include <utility>
 
 namespace rb_servo {
+
+Pose6D removeComplianceOffsetFromMeasured(const Pose6D& measured_stand,
+                                          const Pose6D& t_tcp_compliance_pose,
+                                          const Pose6D& offset_tcp) {
+    const pinocchio::SE3 c = math::se3FromPose(t_tcp_compliance_pose);
+    const pinocchio::SE3 offset(
+        math::exp3(math::Vector3(offset_tcp.rx, offset_tcp.ry, offset_tcp.rz)),
+        math::Vector3(offset_tcp.x, offset_tcp.y, offset_tcp.z)
+    );
+    // applyForceCorrection composes: sent = command * (c * offset * c^-1).
+    // The measured pose tracks `sent`, so right-multiply by the inverse of the
+    // same TCP-local correction to recover the un-complied pose.
+    const pinocchio::SE3 correction = c * offset * c.inverse();
+    return math::poseFromSe3(
+        math::se3FromPose(measured_stand) * correction.inverse()
+    );
+}
+
 namespace {
 
 using AxisValues = std::array<double, 6>;

@@ -389,6 +389,15 @@ private:
         uint64_t last_init_tare_command_seq = 0;
         uint64_t tare_generation = 0;
         bool payload_identification_inhibit = false;
+        // Per-tick compliance frame (TCP-local) for the follower's compliance-
+        // aware actual-lead compensation; valid once the frame is resolved.
+        Pose6D t_tcp_compliance_pose;
+        bool t_tcp_compliance_valid = false;
+        // Deadband-filtered loading direction (stand frame) for the chunk
+        // follower's wrench-gated loading projection. Valid only while the
+        // pipeline is healthy and cartesian_admittance is active this tick.
+        std::array<double, 3> follower_loading_reaction_stand{{0.0, 0.0, 0.0}};
+        bool follower_loading_reaction_valid = false;
     };
     FtWrenchPipeline left_ft_pipeline_;
     FtWrenchPipeline right_ft_pipeline_;
@@ -789,6 +798,8 @@ private:
         double follower_actual_lead_m = 0.0;
         double follower_actual_lead_rad = 0.0;
         int follower_actual_lead_error_count = 0;
+        bool follower_loading_projection_active = false;
+        double follower_contact_shift_m = 0.0;
         std::uint64_t follower_reanchor_count = 0;
         bool safety_intervention_recent = false;
         double delta_twist_pending_linear_norm_m = 0.0;
