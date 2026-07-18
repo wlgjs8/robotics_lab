@@ -84,6 +84,7 @@ BackendResult<RobotState> MockBackend::readState() {
             makeBackendTiming(start, nowSteadyNs())
         );
     }
+    state.acquisition_sequence = ++state_acquisition_sequence_;
     return okResult(BackendOp::ReadState, state, makeBackendTiming(start, nowSteadyNs()));
 }
 

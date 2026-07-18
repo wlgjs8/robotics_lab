@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <set>
 #include <stdexcept>
 
 namespace camera_server {
@@ -105,6 +106,28 @@ AppConfig load_config(const std::string& path) {
     cfg.sync.publish_incomplete_bundles = node_as(n["publish_incomplete_bundles"], cfg.sync.publish_incomplete_bundles);
   }
 
+  if (auto groups = root["bundle_groups"]) {
+    if (!groups.IsMap()) throw std::runtime_error("bundle_groups must be a mapping");
+    for (const auto& it : groups) {
+      BundleGroupConfig group;
+      group.name = it.first.as<std::string>();
+      const auto n = it.second;
+      group.topic = node_as(n["topic"], group.topic);
+      group.master_stream = node_as(n["master_stream"], std::string());
+      group.max_bundle_time_diff_ms =
+          node_as(n["max_bundle_time_diff_ms"], cfg.sync.max_bundle_time_diff_ms);
+      group.publish_incomplete_bundles =
+          node_as(n["publish_incomplete_bundles"], cfg.sync.publish_incomplete_bundles);
+      if (const auto streams = n["required_streams"]) {
+        if (!streams.IsSequence()) {
+          throw std::runtime_error("bundle_groups." + group.name + ".required_streams must be a sequence");
+        }
+        for (const auto& stream : streams) group.required_streams.push_back(stream.as<std::string>());
+      }
+      cfg.bundle_groups.push_back(std::move(group));
+    }
+  }
+
   if (auto cams = root["cameras"]) {
     for (const auto& it : cams) {
       CameraConfig cam;
@@ -150,6 +173,8 @@ AppConfig load_config(const std::string& path) {
 
   if (auto n = root["health"]) {
     cfg.health.publish_rate_hz = node_as(n["publish_rate_hz"], cfg.health.publish_rate_hz);
+    cfg.health.fps_window_sec = node_as(n["fps_window_sec"], cfg.health.fps_window_sec);
+    cfg.health.warn_if_fps_below = node_as(n["warn_if_fps_below"], cfg.health.warn_if_fps_below);
     cfg.health.warn_if_frame_age_ms_gt = node_as(n["warn_if_frame_age_ms_gt"], cfg.health.warn_if_frame_age_ms_gt);
     cfg.health.warn_if_drop_count_increases = node_as(n["warn_if_drop_count_increases"], cfg.health.warn_if_drop_count_increases);
     cfg.health.warn_if_bundle_skew_ms_gt = node_as(n["warn_if_bundle_skew_ms_gt"], cfg.health.warn_if_bundle_skew_ms_gt);
@@ -159,6 +184,7 @@ AppConfig load_config(const std::string& path) {
     cfg.reconnect.enabled = node_as(n["enabled"], cfg.reconnect.enabled);
     cfg.reconnect.max_attempts = node_as(n["max_attempts"], cfg.reconnect.max_attempts);
     cfg.reconnect.retry_interval_ms = node_as(n["retry_interval_ms"], cfg.reconnect.retry_interval_ms);
+    cfg.reconnect.frame_timeout_ms = node_as(n["frame_timeout_ms"], cfg.reconnect.frame_timeout_ms);
   }
 
   validate_config(cfg);
@@ -174,6 +200,18 @@ std::vector<std::string> required_stream_keys(const AppConfig& cfg) {
     }
   }
   return keys;
+}
+
+std::vector<BundleGroupConfig> effective_bundle_groups(const AppConfig& cfg) {
+  if (!cfg.bundle_groups.empty()) return cfg.bundle_groups;
+  BundleGroupConfig legacy;
+  legacy.name = "default";
+  legacy.topic = cfg.metadata.bundle_topic;
+  legacy.master_stream = stream_key(cfg.sync.master_camera, "color");
+  legacy.required_streams = required_stream_keys(cfg);
+  legacy.max_bundle_time_diff_ms = cfg.sync.max_bundle_time_diff_ms;
+  legacy.publish_incomplete_bundles = cfg.sync.publish_incomplete_bundles;
+  return {legacy};
 }
 
 uint64_t required_shared_memory_bytes(const AppConfig& cfg) {
@@ -210,8 +248,15 @@ void validate_config(const AppConfig& cfg) {
   if (cfg.sync.bundle_policy != "nearest_timestamp" && cfg.sync.bundle_policy != "frame_number") {
     throw std::runtime_error("sync.bundle_policy must be nearest_timestamp or frame_number");
   }
-  if (cfg.reconnect.enabled) {
-    throw std::runtime_error("reconnect.enabled=true is not implemented yet");
+  if (cfg.health.publish_rate_hz <= 0.0 || cfg.health.fps_window_sec <= 0.0 ||
+      cfg.health.warn_if_fps_below < 0.0) {
+    throw std::runtime_error("health publish/window/fps thresholds must be positive");
+  }
+  if (cfg.reconnect.enabled && cfg.reconnect.retry_interval_ms == 0) {
+    throw std::runtime_error("reconnect.retry_interval_ms must be > 0 when reconnect is enabled");
+  }
+  if (cfg.reconnect.enabled && cfg.reconnect.frame_timeout_ms < 100) {
+    throw std::runtime_error("reconnect.frame_timeout_ms must be >= 100 when reconnect is enabled");
   }
   for (const auto& cam : cfg.cameras) {
     if (cam.name.empty()) throw std::runtime_error("camera name cannot be empty");
@@ -244,6 +289,33 @@ void validate_config(const AppConfig& cfg) {
       if (scfg.width <= 0 || scfg.height <= 0) throw std::runtime_error(cam.name + "." + name + " dimensions must be positive");
       if (scfg.fps <= 0) throw std::runtime_error(cam.name + "." + name + " fps must be positive");
       (void)bytes_per_pixel_for_format(scfg.format);
+    }
+  }
+  const auto available = required_stream_keys(cfg);
+  const std::set<std::string> available_set(available.begin(), available.end());
+  std::set<std::string> group_names;
+  std::set<std::string> group_topics;
+  for (const auto& group : effective_bundle_groups(cfg)) {
+    if (group.name.empty() || !group_names.insert(group.name).second) {
+      throw std::runtime_error("bundle group names must be non-empty and unique");
+    }
+    if (group.topic.empty() || !group_topics.insert(group.topic).second) {
+      throw std::runtime_error("bundle group topics must be non-empty and unique");
+    }
+    if (group.required_streams.empty()) {
+      throw std::runtime_error("bundle group " + group.name + " requires at least one stream");
+    }
+    if (std::find(group.required_streams.begin(), group.required_streams.end(), group.master_stream) ==
+        group.required_streams.end()) {
+      throw std::runtime_error("bundle group " + group.name + " master_stream must be required");
+    }
+    if (group.max_bundle_time_diff_ms <= 0.0) {
+      throw std::runtime_error("bundle group " + group.name + " max_bundle_time_diff_ms must be positive");
+    }
+    for (const auto& key : group.required_streams) {
+      if (available_set.count(key) == 0) {
+        throw std::runtime_error("bundle group " + group.name + " references unknown stream " + key);
+      }
     }
   }
   const uint64_t configured = cfg.shared_memory.size_mb * 1024ull * 1024ull;

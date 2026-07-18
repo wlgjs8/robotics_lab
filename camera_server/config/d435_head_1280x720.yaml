@@ -14,7 +14,6 @@ server:
   mode: capture_only
   clock: monotonic_raw
   simulate_cameras: false
-
 shared_memory:
   name: "/camera_server_frames"
   size_mb: 1536
@@ -33,6 +32,43 @@ sync:
   bundle_policy: nearest_timestamp
   max_bundle_time_diff_ms: 33.0
   publish_incomplete_bundles: false
+
+# Publish independent consumer groups so a delayed head/stereo frame cannot
+# suppress the wrist RGB-D cadence used by the real policy. Keep the legacy
+# full-rig topic during migration for existing diagnostics and recorders.
+bundle_groups:
+  legacy:
+    topic: "camera.bundle"
+    master_stream: "head.color"
+    required_streams:
+      - "head.color"
+      - "head.ir_left"
+      - "head.ir_right"
+      - "left_realsense.color"
+      - "left_realsense.depth"
+      - "right_realsense.color"
+      - "right_realsense.depth"
+    max_bundle_time_diff_ms: 33.0
+    publish_incomplete_bundles: false
+  policy:
+    topic: "camera.bundle.policy"
+    master_stream: "left_realsense.color"
+    required_streams:
+      - "left_realsense.color"
+      - "left_realsense.depth"
+      - "right_realsense.color"
+      - "right_realsense.depth"
+    max_bundle_time_diff_ms: 33.0
+    publish_incomplete_bundles: false
+  stereo:
+    topic: "camera.bundle.stereo"
+    master_stream: "head.color"
+    required_streams:
+      - "head.color"
+      - "head.ir_left"
+      - "head.ir_right"
+    max_bundle_time_diff_ms: 33.0
+    publish_incomplete_bundles: false
 
 cameras:
   head:
@@ -83,11 +119,18 @@ recording:
 
 health:
   publish_rate_hz: 1
+  fps_window_sec: 5
+  warn_if_fps_below: 29
   warn_if_frame_age_ms_gt: 100
   warn_if_drop_count_increases: true
   warn_if_bundle_skew_ms_gt: 10
 
 reconnect:
+  # Native librealsense multi-pipeline restart is disabled in this active
+  # high-bandwidth profile until simultaneous stall recovery no longer causes
+  # a process-level allocator abort. The reconnect implementation remains
+  # available for mock/controller acceptance and isolated-camera testing.
   enabled: false
   max_attempts: 0
   retry_interval_ms: 1000
+  frame_timeout_ms: 5000

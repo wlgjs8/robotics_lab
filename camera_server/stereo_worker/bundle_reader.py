@@ -67,6 +67,17 @@ class BundleReader:
             return {}
         parts = self._sock.recv_multipart()
         meta = self._parse(parts)
+        # Keep latency bounded when a slow consumer falls behind: discard queued
+        # metadata and decode only the newest exact-topic bundle. ZMQ SUB uses
+        # prefix matching, so `camera.bundle` also receives the group subtopics.
+        while True:
+            try:
+                parts = self._sock.recv_multipart(flags=self._zmq.NOBLOCK)
+            except self._zmq.Again:
+                break
+            candidate = self._parse(parts)
+            if candidate is not None:
+                meta = candidate
         if not meta:
             return {}
         out = {}

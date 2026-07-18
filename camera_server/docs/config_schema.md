@@ -53,6 +53,18 @@ sync:
   max_bundle_time_diff_ms: 33.0
   publish_incomplete_bundles: false
 
+bundle_groups:              # optional; omitted profiles retain one legacy group
+  policy:
+    topic: "camera.bundle.policy"
+    master_stream: "left_realsense.color"
+    required_streams:
+      - "left_realsense.color"
+      - "left_realsense.depth"
+      - "right_realsense.color"
+      - "right_realsense.depth"
+    max_bundle_time_diff_ms: 33.0
+    publish_incomplete_bundles: false
+
 cameras:
   head:
     backend: realsense      # realsense (default, depth-capable) | uvc (V4L2 fisheye)
@@ -127,14 +139,17 @@ recording:
 
 health:
   publish_rate_hz: 1
+  fps_window_sec: 5
+  warn_if_fps_below: 29
   warn_if_frame_age_ms_gt: 100
   warn_if_drop_count_increases: true
   warn_if_bundle_skew_ms_gt: 10
 
 reconnect:
-  enabled: false
+  enabled: true
   max_attempts: 0
   retry_interval_ms: 1000
+  frame_timeout_ms: 2000
 ```
 
 ## Camera backends
@@ -169,7 +184,13 @@ reconnect:
 - initial sync combinations are strict:
   - `sync.mode: software` requires `sync.bundle_policy: nearest_timestamp`
   - `sync.mode: hardware` requires `sync.bundle_policy: frame_number`
-- `reconnect.enabled: true` fails validation until reconnect is implemented
+- reconnect supervision is per camera: a stalled/missing camera is restarted
+  without stopping healthy camera pipelines
+- `max_attempts: 0` retries indefinitely; a positive value bounds retries after
+  each disconnect, `retry_interval_ms` is the delay between attempts, and
+  `frame_timeout_ms` (minimum 100 ms) declares a pipeline stalled
+- bundle group names and topics must be unique; every required/master stream
+  must refer to an enabled stream
 - stream FPS must be 30 initially unless explicitly changed
 - width/height must be positive
 - shared memory size must fit configured streams and ring slots
@@ -239,6 +260,6 @@ config copy.
 Schema loader/validator는 `src/config/config.cpp`에 있다. 현재 repository-root
 `make cam-up` 기본 production config는 `config/d435_head_1280x720.yaml`,
 hardware 없는 검증 config는 `config/mock_triple_realsense.yaml`이다. Validator는
-serial placeholder, mock serial gate, sync mode/policy 조합, reconnect disabled
+serial placeholder, mock serial gate, sync mode/policy 조합, reconnect parameter
 state, required serial, positive dimensions/FPS, supported formats, POSIX shm
 name, loopback metadata bind, shared-memory capacity를 검사한다.

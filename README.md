@@ -71,7 +71,7 @@ pgmode-real(실제 RB3-730E 하드웨어)에서 구동/검증된 항목:
 - **정책 task 성공률** — rollout 모션은 부드럽지만 부정확(예: 좌완이 grasp 대신
   충돌). 런타임이 아니라 **모델 품질 / 데이터 커버리지 / appearance-domain gap**
   문제이며 init-pose 분포 매칭이 진행 중(`umi_init_from_grasp.py`)
-- force control (`provider: null`, `enable: false` 유지)
+- default-off project-native F/T monitor/contact guard/normal admittance
 - 고속 물리 circle 단계 (15 cm / 16 s 이상, transition ladder P7–P9)
 - 실측 hand-eye / 카메라 calibration은 일반 geometry-의존 정책엔 여전히 미완이지만,
   **현재 배포된 pika Sense≡Gripper + ee_local + 이미지조건 정책에는 불필요**
@@ -121,7 +121,7 @@ rb_servo_server
 
 rbpodo 컨트롤러 `pgmode` 시뮬레이션은 위와 같은 팔별 rbpodo endpoint 구조를
 그대로 쓰되, 대상이 Virtual ControlBox VM 또는 `pgmode`로 둔 실제 box입니다.
-site/VM config는 gitignore된 `rb_servo_server/config/local/`에 둡니다.
+실행 설정은 추적되는 `stack_real.yaml`과 `stack_sim.yaml`에서만 관리합니다.
 
 ## Safety
 
@@ -135,7 +135,7 @@ site/VM config는 gitignore된 `rb_servo_server/config/local/`에 둡니다.
 제거됐습니다. `run_mode`/`operation_mode`는 이제 telemetry 라벨이며 실행 허용
 여부를 결정하지 않습니다.
 
-실제 모션의 실행 권한은 **site-local config + `rb_servo_server`의 mode-독립
+실제 모션의 실행 권한은 **추적되는 stack config + `rb_servo_server`의 mode-독립
 안전 계층**이 결정합니다.
 
 - safety filter (joint clamp, stand-frame floor plane)
@@ -145,7 +145,7 @@ site/VM config는 gitignore된 `rb_servo_server/config/local/`에 둡니다.
 - client deadman
 - 운영자 감독 + 하드웨어 E-stop은 물리 운용 절차로 유지
 
-실제 동작은 `rb_servo_server/config/local/`의 site config가 명시적으로 허용해야
+실제 동작은 `rb_servo_server/config/stack_real.yaml`이 명시적으로 허용해야
 합니다. policy측 `SafetyGate`의 real-Cartesian 차단은 PR #13으로 은퇴했고,
 stale state/fault/camera/kinematics 같은 client-side readiness만 남습니다. 실제
 Cartesian 모션의 최종 허용/거부는 `rb_servo_server`가 맡습니다.
@@ -163,7 +163,8 @@ controller-simulation 경로는 실제 controller IP에 접속하므로 config�
 않습니다(`physical_motion_expected=false`). 이 carve-out은
 `cartesian_control.allow_in_controller_simulation: true`와
 `servo.allow_controller_simulation_motion: true` config로 열립니다(env 불필요).
-Tracking은 보통 controller reference인 `tcp_ref_stand`를 사용합니다.
+Tracking은 controller reference인 `tcp_ref_stand`를 사용하며, tracked sim
+profile은 physical control-box topology이므로 encoder motion을 fault-latch합니다.
 
 `make run`(real, `operation_mode: real`)과 `make run MODE=sim`(pgmode-sim,
 `operation_mode: simulation`)이 사용하는 두 stack config가 단일 진실원천이며,
@@ -200,12 +201,36 @@ tracked real rbpodo template의 supported safety range는 명시적 per-joint
 정규화는 control/safety/tracking/log source-of-truth에 쓰지 않습니다.
 자세한 내용은 `docs/joint_range_policy.md`를 봅니다.
 
-Force control은 비활성 상태를 유지합니다.
+Project-native F/T monitor, contact guard, 법선방향 unilateral admittance,
+6D Cartesian compliance가 servo motion path에 통합되어 있습니다.
+`stack_real.yaml`의 force path는 현재 양팔 supervised Gate 3D 시험 프로파일인
+6축 Cartesian compliance입니다. `surface_source: none`과
+`compliance_frame: tcp_origin`을 사용하므로, URDF와 일치하는 +90도 FT
+sensor 축에서 순응 translation을 계산하고 TCP 끝점을 correction 원점으로
+사용합니다. GUI의 runtime FT control 기즈모가 시험 축의 기준이며 일반 TCP
+pose 기즈모는 X/Y force-axis 판정에 사용하지 않습니다.
+세 회전축 방향/복귀가 확인되어 Roll/Pitch/Yaw가 동일한 측정-noise 기반
+고감도 mass/damping/stiffness/deadband를 사용합니다. 명시적인 blockwise
+release recenter를 사용해 translation/rotation 내부의 일부 축만 먼저
+spring 복귀하지 않게 하고, 블록 전체 release 뒤에는 공통 feasible jerk scale로
+복귀 방향을 유지합니다. 어느 축이 hard motion-envelope recovery를 필요로 하면
+그 구간에는 축별 recovery jerk를 우선하고, 모든 축이 soft envelope로 돌아온 뒤
+공통 scale을 재개합니다. payload/COM 검증 전까지는 동일 시작 자세의 작은 각도
+Hold 시험으로 제한됩니다. 명시적인
+운영자 결정으로 stand/user geometric
+floor도 모두 꺼져 있어 TCP/gripper-tip floor velocity damper와 hard plane
+backstop이 없습니다. ROI, self-collision, tracking, lease/deadman, E-stop은
+유지되지만 wrist F/T는 upstream link 접촉을 모두 감지할 수 없습니다.
+상세 계약은 `rb_servo_server/docs/force_control.md`, 실센서 특성화와
+승격 evidence는 `docs/runbooks/ft_force_control_acceptance.md`에 기록합니다.
 
 ```yaml
 force_control:
-  provider: null
-  enable: false
+  provider: project_native
+  enable: true
+  operating_mode: cartesian_admittance
+  allow_in_real: true
+  supervised_experimental_real: true
 ```
 
 ## Motion Primitive 요약
@@ -279,9 +304,8 @@ python3 scripts/rbpodo_servo_acceptance.py --help
 ```
 
 Start with read-only. Use the tracked `rb_servo_server/config/stack_real.yaml`
-as the reference template, then make a site-specific copy under
-`rb_servo_server/config/local/` for read-only or motion procedures. Local real
-configs are gitignored and must carry the site/operator-specific safety choices.
+directly and change one reviewed acceptance-stage setting at a time. Do not
+create parallel local real profiles.
 
 통합 운영자 stack 시작(native — Docker 아님). `make run`이
 `rb_servo_server` + viser GUI + `policy_runner`(SpaceMouse + UMI teleop)를 한
@@ -293,9 +317,14 @@ make run MODE=sim   # pgmode controller-simulation
 ```
 
 소스를 고친 뒤에는 먼저 `make build`으로 stack을 빌드/설치합니다(rbpodo
-backend 포함). 하드웨어 없이 controller-simulation을 돌리려면 Rainbow 가상
-control-box VM 2대를 `make vm-up`으로 띄운 뒤 `make run MODE=sim`을 씁니다
-(`make vm-down` / `make vm-status`).
+backend 포함). `make vm-up`으로 관리하는 Rainbow Virtual ControlBox에서는
+simulated `q_actual`이 움직이므로, 현재 physical-box용 `stack_sim.yaml`의
+physical-motion fault latch와 양립하지 않습니다. VM 재승격에는 endpoint topology를
+명시하는 별도 contract와 review가 필요합니다; local launch YAML로 우회하지 않습니다.
+
+`make build`는 증분 빌드이며, layout-sensitive `config.hpp`가 바뀌면 서버
+object 전체만 자동으로 다시 컴파일합니다. CMake cache/toolchain/build-tree를
+완전히 초기화해야 할 때만 `make rebuild`를 사용합니다.
 
 SpaceMouse / UMI teleop는 `make run`이 띄우는 `policy_runner`에서 상시 동시
 운용됩니다(별도 teleop 모드 불필요). policy 학습은 GPU 서버에서 native
@@ -321,19 +350,52 @@ checkpoint/config/python은 각각 `FLOW_INFER_CHECKPOINT`, `FLOW_INFER_CONFIG`,
 `FLOW_INFER_PYTHON`으로 바꿀 수 있고, `OPENPI_REMOTE_SKIP_WARMUP`,
 `RB_ALLOW_REAL_GRIPPER`, `DISPLAY` 등 호출 환경은 그대로 상속됩니다.
 
+실제 카메라 없이 controller pgmode simulation에서 같은 OpenPI 경로를
+검증할 때도 서버는 추적되는 `stack_sim.yaml`만 사용하고, 녹화 HDF5의 손목
+RGB-D는 물리 camera_server와
+겹치지 않는 `:5700`으로 재생합니다:
+
+```bash
+ACTION_SOURCE=none SCOPE_DASHBOARD=0 GRIPPER_SERVER=0 make run MODE=sim
+
+# another terminal; physical camera_server :5600 is untouched
+python3 scripts/offline_camera_replay.py --episode /path/to/episode_000.hdf5
+
+# first prove pgmode simulation telemetry before sending a policy command
+python3 scripts/controller_sim_state_monitor.py --port 50356 --gate 20
+
+OPENPI_REMOTE_SKIP_WARMUP=1 make flow-infer-sim-offline \
+  FLOW_INFER_ARGS='--proprio-mode velocity --depth-z-near-mm 50 --depth-z-far-mm 700 --depth-units-m 1e-4'
+```
+
+`stack_sim.yaml` registers the same `spacemouse_precise`, `umi_large_smooth`,
+and `flow_infer_smooth` command profiles as `stack_real.yaml`. In controller
+simulation only, the closed-loop tracking pose is `tcp_ref_stand`/`q_target`;
+an unavailable reference fails closed. `stack_sim.yaml` keeps
+`cartesian_control.allow_in_real: false`, and the offline flow config keeps both
+real arm and real gripper authority disabled. The sim-only Make target defaults
+to the pgmode-validated 6-step execution window; the physical-real launcher
+retains its existing 12-step default. Because the tracked sim topology targets
+physical control boxes held in pgmode, any encoder motion indication is a
+server-owned `fault_latch`; a Virtual ControlBox needs a separately reviewed,
+explicit topology contract before using this profile.
+
+The controller-box pgmode parameter comparison, storage provenance, long-run
+evidence, and interpretation boundary are recorded in
+[`docs/reports/flow_infer_pgmode_sim_param_search.md`](docs/reports/flow_infer_pgmode_sim_param_search.md).
+
 DeltaTwistFollower + velocity-proprio 안정성 확인을 위한 첫 실행 baseline은
 아래처럼 둡니다. RTC/ensemble은 기본 안정성 확인 뒤 별도로 opt-in합니다.
 
 ```bash
 FLOW_INFER_STITCH=boundary \
 FLOW_INFER_ACTION_HORIZON=24 \
-FLOW_INFER_CHUNK_EXECUTE_STEPS=6 \
+FLOW_INFER_CHUNK_EXECUTE_STEPS=12 \
 FLOW_INFER_CHUNK_OVERLAY_RUNWAY_STEPS=4 \
 FLOW_INFER_VELPROPRIO_SOURCE=measured \
 FLOW_INFER_VELPROPRIO_SAMPLE=camera_frame \
 FLOW_INFER_PRINT_CHUNK=0 \
 FLOW_INFER_PRINT_TRACKING=0 \
-FLOW_INFER_SPEED_SCALE=1.0 \
 RB_ALLOW_REAL_GRIPPER=1 \
 ./tools/flow_infer_real_policy.sh \
   --proprio-mode velocity \
@@ -341,30 +403,6 @@ RB_ALLOW_REAL_GRIPPER=1 \
   --depth-z-far-mm 700 \
   --depth-units-m 1e-4
 ```
-
-Near-floor bolt-pick preset은 `rb_servo_server/config/stack_real.yaml`의
-`cartesian_control.tcp_target_profiles.flow_infer_smooth.ruckig_follower`에
-있습니다. 이 preset은 hard floor safety 값을 낮추지 않습니다.
-`SurfaceActionProjector`가 hard floor 위의 soft band에서 infeasible down/forward
-action을 버리고, `GraspCommit`은 low-clearance pick에서만 stop-close-lift를
-보조합니다. 일반 조작이나 place 동작용 의미로 해석하지 마세요.
-
-첫 검증은 보수적으로 진행합니다.
-
-1. 볼트 없이 실행해 floor projector와 lift path가 hard safety를 건드리지 않는지 확인합니다.
-2. 가능하면 real gripper를 끄거나 fake close 상태로 한 번 더 확인합니다.
-3. 마지막에 `RB_ALLOW_REAL_GRIPPER=1`로 real gripper를 켭니다.
-4. 각 run 뒤 servo CSV를 분석합니다.
-
-```bash
-python3 rb_servo_server/tools/analyze_servo_log.py logs/servo_log.csv --profile rbsim-local100
-```
-
-특히 `Near-floor pick analysis`에서 `surface_min_tip_dist_m`,
-`surface_projected_*`/`surface_discarded_*`, `grasp_phase`,
-`delta_twist_blocked`, near-floor lead, 그리고 `blocked_step_consumed_ticks`를
-확인합니다. sliding warning이 뜨면 close 직전 arm translation이 아직 남아 있는
-것이고, projector inactive warning이 뜨면 config/profile 선택부터 확인합니다.
 
 HDF5 policy episodes should be audited before `flow-train`:
 
@@ -417,10 +455,5 @@ Tracked stack configs:
 - `rb_servo_server/config/stack_sim.yaml` — rbpodo controller-simulation (`make run MODE=sim`)
 - `rb_servo_server/config/stack_real.yaml` — physical real stack (`make run`, operator-supervised)
 
-Site-local mock / real / 컨트롤러 시뮬레이션(VM·onbox) config (gitignore):
-
-- `rb_servo_server/config/local/*.yaml`
-- e.g. `rb_servo_server/config/local/stack_real_readonly.yaml`
-- e.g. `rb_servo_server/config/local/stack_real_motion.yaml`
-
-실행 가능한 tracked real robot config는 추가하면 안 됩니다.
+추가 real/local launch config는 만들지 않습니다. 실제 단계별 변경은
+`stack_real.yaml` 한 파일에서 review와 CSV evidence를 남기며 진행합니다.

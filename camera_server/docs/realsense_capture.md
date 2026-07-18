@@ -120,7 +120,8 @@ If camera disconnects:
 2. stop that device pipeline
 3. attempt reconnect if enabled
 4. mark bundles incomplete while camera unavailable
-5. do not crash the entire server unless configured as required-fail-fast
+5. keep other camera pipelines alive; with reconnect disabled, retain startup
+   fail-fast for missing required devices
 
 For real robot experiments, fail-fast may be safer during early development.
 

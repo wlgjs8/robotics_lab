@@ -12,7 +12,7 @@ Intel RealSense x 3
 camera_server
   ├── CameraManager
   ├── RealsenseDevice x 3
-  ├── FrameSynchronizer
+  ├── FrameSynchronizerSet (consumer-specific groups)
   ├── SharedMemoryRingBuffer
   ├── MetadataPublisher, ZeroMQ PUB
   ├── Recorder, optional async writer
@@ -90,10 +90,14 @@ main thread
   - signal handling
   - start/stop lifecycle
 
-camera callback threads, librealsense-owned or wrapper-owned
+librealsense callback threads
   - timestamp frame
-  - acquire/copy frame into shared memory slot
-  - push frame metadata to synchronizer
+  - retain the owning `rs2::frame` in a bounded drop-oldest queue
+  - return immediately
+
+per-camera processing threads
+  - copy frame streams into independent shared-memory rings
+  - push small metadata objects to the synchronizer thread
   - never write to disk
   - never run inference
 
@@ -114,13 +118,11 @@ health monitor thread
 
 The RealSense capture callback must remain lightweight.
 
-Allowed in callback:
+Allowed in the librealsense callback:
 
 - record `CLOCK_MONOTONIC_RAW` or `CLOCK_MONOTONIC` timestamp
-- copy frame bytes into preallocated shared memory slot
-- capture frame number and RealSense metadata
 - increment atomic counters
-- push small metadata object to an internal queue
+- enqueue an owning frame handle to the bounded per-camera queue
 
 Forbidden in callback:
 
@@ -141,10 +143,10 @@ On any camera failure:
 - keep other cameras alive if possible
 - mark frame bundle as incomplete
 - increment error counter
-- optionally attempt reconnect according to config
+- when reconnect is enabled, supervise and restart each failed camera independently
 
 `policy_runner` must be able to detect stale or incomplete camera bundles and avoid using them.
 
 ## 구현 매핑
 
-이 아키텍처는 현재 코드에서 다음 컴포넌트로 구현된다. `CameraManager`가 lifecycle과 stats를 소유하고, `RealsenseDevice`/mock backend가 capture callback을 제공하며, callback path는 timestamp capture, raw byte copy to shared memory, small metadata handoff만 수행한다. `FrameSynchronizer`는 master camera frame cadence에서만 bundle 생성을 시도하며 software mode는 nearest timestamp, hardware mode는 frame_number 기준으로 required streams를 선택한다. `Recorder`는 별도 bounded queue를 사용하므로 policy shared-memory path를 막지 않는다.
+이 아키텍처는 현재 코드에서 다음 컴포넌트로 구현된다. `CameraManager`가 카메라별 supervisor, lifecycle과 stats를 소유하며 frame timeout 또는 start 실패 시 해당 장치만 bounded retry로 재생성한다. `RealSenseDevice`는 librealsense callback에서 owning frame handle만 bounded queue에 넣은 뒤 per-camera worker에서 SHM copy를 수행한다. SHM 쓰기는 stream ring별 mutex를 사용해 서로 다른 카메라/스트림이 직렬화되지 않는다. `FrameSynchronizerSet`은 consumer별 독립 bundle group을 만들며 active profile은 legacy full-rig, policy wrist RGB-D, stereo head group을 각각 발행한다. `Recorder`는 별도 bounded queue를 사용하므로 policy shared-memory path를 막지 않는다.

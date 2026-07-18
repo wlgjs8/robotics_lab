@@ -10,6 +10,11 @@ option(CAMERA_SERVER_BUILD_TESTS "Build camera_server tests" ON)
 option(CAMERA_SERVER_FORCE_MOCK_CAMERA "Do not compile RealSense backend" OFF)
 option(CAMERA_SERVER_FORCE_ZMQ_STUB "Do not compile ZeroMQ publisher backend" OFF)
 option(CAMERA_SERVER_FORCE_NO_OPENCV "Do not compile the UVC/OpenCV fisheye backend" OFF)
+set(CAMERA_SERVER_REALSENSE_BACKEND "system" CACHE STRING "RealSense transport backend label (system, native, or rsusb)")
+set_property(CACHE CAMERA_SERVER_REALSENSE_BACKEND PROPERTY STRINGS system native rsusb)
+if(NOT CAMERA_SERVER_REALSENSE_BACKEND MATCHES "^(system|native|rsusb)$")
+  message(FATAL_ERROR "CAMERA_SERVER_REALSENSE_BACKEND must be system, native, or rsusb")
+endif()
 
 find_package(Threads REQUIRED)
 find_package(yaml-cpp REQUIRED)
@@ -63,6 +68,7 @@ target_compile_definitions(camera_server_lib PUBLIC
   CAMERA_SERVER_HAVE_REALSENSE=$<BOOL:${CAMERA_SERVER_HAVE_REALSENSE}>
   CAMERA_SERVER_HAVE_ZMQ=$<BOOL:${CAMERA_SERVER_HAVE_ZMQ}>
   CAMERA_SERVER_HAVE_OPENCV=$<BOOL:${CAMERA_SERVER_HAVE_OPENCV}>
+  CAMERA_SERVER_REALSENSE_BACKEND="${CAMERA_SERVER_REALSENSE_BACKEND}"
 )
 
 if(CAMERA_SERVER_HAVE_OPENCV)
@@ -100,6 +106,11 @@ if(CAMERA_SERVER_BUILD_TESTS)
   enable_testing()
   add_executable(camera_server_tests tests/test_camera_server.cpp)
   target_link_libraries(camera_server_tests PRIVATE camera_server_lib)
+  # The test harness uses assert() for both execution and verification, so keep
+  # assertions active even when the container image is built in Release mode.
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(camera_server_tests PRIVATE -UNDEBUG)
+  endif()
   add_test(NAME camera_server_tests COMMAND camera_server_tests)
   set_tests_properties(camera_server_tests PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endif()

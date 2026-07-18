@@ -26,6 +26,7 @@ class MetadataPublisher {
   void stop();
   bool publish(const std::string& topic, const std::string& payload);
   bool publish_bundle(const FrameBundleMeta& bundle);
+  bool publish_bundle(const std::string& topic, const FrameBundleMeta& bundle);
   bool publish_health(const HealthSnapshot& health);
   uint64_t publish_count() const { return publish_count_.load(); }
   uint64_t error_count() const { return error_count_.load(); }

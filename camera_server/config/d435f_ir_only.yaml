@@ -70,6 +70,7 @@ health:
   warn_if_bundle_skew_ms_gt: 10
 
 reconnect:
-  enabled: false
+  enabled: true
   max_attempts: 0
   retry_interval_ms: 1000
+  frame_timeout_ms: 2000

@@ -17,8 +17,10 @@
 #include "rb_servo/control/cartesian_servo_controller.hpp"
 #include "rb_servo/control/command_buffer.hpp"
 #include "rb_servo/control/delta_twist_follower.hpp"
-#include "rb_servo/control/grasp_commit_coordinator.hpp"
+#include "rb_servo/control/force_controller.hpp"
 #include "rb_servo/control/joint_moving_average.hpp"
+#include "rb_servo/control/normal_force_controller.hpp"
+#include "rb_servo/control/realtime_timing.hpp"
 #include "rb_servo/control/smd_pose_tracker.hpp"
 #include "rb_servo/network/chunk_frame_receiver.hpp"
 #include "rb_servo/control/self_collision.hpp"
@@ -34,6 +36,7 @@
 #include "rb_servo/kinematics/i_kinematics.hpp"
 #include "rb_servo/logging/servo_logger.hpp"
 #include "rb_servo/robot/i_robot_backend.hpp"
+#include "rb_servo/sensor/ft_wrench_pipeline.hpp"
 
 namespace rb_servo {
 
@@ -306,7 +309,11 @@ private:
     );
     void setMotionState(ServerMotionState state);
     ServoTarget currentFaultHoldTarget() const;
-    JointArray chooseSafeHoldTarget(const RobotState& state, const JointArray& previous_sent) const;
+    JointArray chooseSafeHoldTarget(
+        ArmId arm_id,
+        const RobotState& state,
+        const JointArray& previous_sent
+    ) const;
     double computeFilterDtSec(uint64_t actual_period_ns, uint64_t nominal_period_ns) const;
     void resetChunkFollowerEngageWait(ArmId arm_id);
     void clearChunkFollowerFaultRequests();
@@ -314,6 +321,22 @@ private:
     bool latchChunkFollowerFaultRequests(const RobotState& left_state, const RobotState& right_state);
     void markSafetyIntervention(ArmId arm_id, uint64_t now_ns);
     bool safetyInterventionRecent(ArmId arm_id, uint64_t now_ns) const;
+    bool updateForceRuntime(
+        ArmId arm_id,
+        const RobotState& state,
+        double dt_sec,
+        uint64_t now_ns,
+        std::string* fault_reason
+    );
+    void invalidatePostInitTare(ArmId arm_id, uint64_t command_seq);
+    void beginPostInitTare(ArmId arm_id, uint64_t now_ns);
+    bool latchPayloadIdentificationInhibit(ArmId arm_id);
+    void applyForceCorrection(ArmId arm_id, ArmCommand* command);
+    void finishForceProposals(
+        bool left_accepted,
+        bool right_accepted,
+        SafetyVerdict verdict
+    );
 
 private:
     std::unique_ptr<IRobotBackend> left_robot_;
@@ -322,6 +345,86 @@ private:
     std::unique_ptr<ArmWorker> right_worker_;
 
     DualArmConfig config_;
+
+    struct ForceArmRuntime {
+        ForceTorqueTelemetry ft;
+        ForceControlTelemetry control;
+        Pose6D contact_anchor;
+        bool contact_anchor_valid = false;
+        bool normal_contact_active = false;
+        ContactForceNormalEstimator contact_force_normal_estimator;
+        double contact_cartesian_normal_offset_m = 0.0;
+        bool transverse_contact_active = false;
+        bool rotational_contact_active = false;
+        int enter_count = 0;
+        int transverse_enter_count = 0;
+        int rotational_enter_count = 0;
+        int hard_limit_count = 0;
+        uint64_t release_start_ns = 0;
+        Pose6D release_hold_pose;
+        bool release_hold_pending = false;
+        bool release_hold_applied = false;
+        bool release_hold_clear_requested = false;
+        Pose6D previous_actual_pose;
+        uint64_t previous_actual_pose_ns = 0;
+        Pose6D sent_tcp_sample_older;
+        Pose6D sent_tcp_sample_newer;
+        uint64_t sent_tcp_sample_older_ns = 0;
+        uint64_t sent_tcp_sample_newer_ns = 0;
+        int sent_tcp_sample_count = 0;
+        std::optional<NormalForceControllerProposal> pending_proposal;
+        bool pending_proposal_applied = false;
+        std::optional<ForceControllerProposal> pending_cartesian_proposal;
+        bool pending_cartesian_proposal_applied = false;
+        Wrench6D control_wrench_surface;
+        Wrench6D control_wrench_compliance;
+        Vec6 actual_twist_compliance;
+        Pose6D compliance_frame_actual_stand;
+        Pose6D previous_raw_compliance_target;
+        Pose6D rolling_compliance_target;
+        bool rolling_compliance_target_valid = false;
+        std::string rolling_compliance_target_source = "unavailable";
+        Pose6D pending_previous_raw_compliance_target;
+        Pose6D pending_rolling_compliance_target;
+        bool pending_rolling_compliance_target_valid = false;
+        std::string pending_rolling_compliance_target_source = "unavailable";
+        bool compliance_hold_target_this_tick = false;
+        bool tare_valid = false;
+        bool tare_waiting_for_init_completion = false;
+        bool tare_collecting = false;
+        uint64_t tare_not_before_ns = 0;
+        uint64_t last_init_tare_command_seq = 0;
+        uint64_t tare_generation = 0;
+        bool payload_identification_inhibit = false;
+        // Per-tick compliance frame (TCP-local) for the follower's compliance-
+        // aware actual-lead compensation; valid once the frame is resolved.
+        Pose6D t_tcp_compliance_pose;
+        bool t_tcp_compliance_valid = false;
+        // Deadband-filtered loading direction (stand frame) for the chunk
+        // follower's wrench-gated loading projection. Valid only while the
+        // pipeline is healthy and cartesian_admittance is active this tick.
+        std::array<double, 3> follower_loading_reaction_stand{{0.0, 0.0, 0.0}};
+        bool follower_loading_reaction_valid = false;
+        // True when the chunk follower produced this tick's Cartesian target.
+        // The rolling compliance equilibrium then adopts the follower output
+        // verbatim instead of re-projecting policy deltas: the follower's
+        // wrench-gated projection already removed contact loading, and running
+        // BOTH projections let the equilibrium and the plan drift apart
+        // (2026-07-18 14:16 run: an 11.6 mm plan-vs-equilibrium gap consumed
+        // the actual-lead budget and latched at 21.4 mm with only ~0.3 deg of
+        // real joint tracking error).
+        bool chunk_follower_drove_this_tick = false;
+        bool follower_contact_normal_owned = false;
+    };
+    FtWrenchPipeline left_ft_pipeline_;
+    FtWrenchPipeline right_ft_pipeline_;
+    NormalForceController left_normal_force_controller_;
+    NormalForceController right_normal_force_controller_;
+    ForceController left_cartesian_force_controller_;
+    ForceController right_cartesian_force_controller_;
+    ForceArmRuntime left_force_runtime_;
+    ForceArmRuntime right_force_runtime_;
+    uint64_t motion_epoch_ = 0;
 
     CommandBuffer* command_buffer_ = nullptr;
     ServoLogger* logger_ = nullptr;
@@ -340,6 +443,7 @@ private:
 
     uint64_t tick_ = 0;
     uint64_t last_loop_start_ns_ = 0;
+    RealtimeTimingAccumulator realtime_timing_accumulator_;
 
     JointArray left_prev_sent_q_deg_{};
     JointArray right_prev_sent_q_deg_{};
@@ -443,6 +547,11 @@ private:
     enum class InitMotionStatus { Idle, Planning, Executing, Done, Failed };
     struct InitMotionExec {
         InitMotionStatus status = InitMotionStatus::Idle;
+        // Init Motion is a one-shot request, but CommandBuffer keeps the accepted
+        // packet visible until its timeout.  Remember the request sequence so the
+        // same cached packet cannot repeatedly re-anchor Hold to q_actual.
+        bool request_seen = false;
+        uint64_t request_seq = 0;
         bool has_target = false;
         bool left_active = false;
         bool right_active = false;
@@ -601,8 +710,6 @@ private:
     control::CartesianChunkFollower right_chunk_follower_{control::CartesianChunkFollowerConfig{}};
     control::DeltaTwistFollower left_delta_twist_follower_{control::DeltaTwistFollowerConfig{}};
     control::DeltaTwistFollower right_delta_twist_follower_{control::DeltaTwistFollowerConfig{}};
-    control::GraspCommitCoordinator grasp_commit_coordinator_{GraspCommitConfig{}};
-    GraspCommitConfig grasp_commit_built_{};
     RuckigFollowerConfig left_chunk_follower_built_{};
     RuckigFollowerConfig right_chunk_follower_built_{};
     std::uint64_t left_chunk_submitted_wire_seq_ = 0;
@@ -615,6 +722,8 @@ private:
     double right_chunk_engage_wait_start_sec_ = 0.0;
     std::uint64_t left_chunk_follower_reanchor_count_ = 0;
     std::uint64_t right_chunk_follower_reanchor_count_ = 0;
+    std::uint64_t left_chunk_follower_warm_resume_count_ = 0;
+    std::uint64_t right_chunk_follower_warm_resume_count_ = 0;
     uint64_t left_chunk_follower_reanchor_log_ns_ = 0;
     uint64_t right_chunk_follower_reanchor_log_ns_ = 0;
     struct ChunkFollowerFaultRequest {
@@ -647,6 +756,7 @@ private:
         SmdPoseTracker* smd_tracker,
         const ArmMountConfig& mount,
         const JointArray& previous_sent_q_deg,
+        const Pose6D& actual_feedback_pose,
         double dt_sec
     );
     ArmCommand applyDeltaTwistFollowerStage(
@@ -662,7 +772,6 @@ private:
         const JointArray& previous_sent_q_deg,
         const Pose6D& actual_feedback_pose,
         const Pose6D& execution_feedback_pose,
-        int safety_block_reason_mask,
         double dt_sec
     );
     JointMovingAverage left_output_ma_{0};
@@ -702,7 +811,16 @@ private:
         std::optional<Pose6D> stage_tcp_target_stand;
         double follower_divergence_pos_m = 0.0;
         double follower_divergence_ang_rad = 0.0;
+        double follower_projection_error_m = 0.0;
+        double follower_projection_error_rad = 0.0;
+        int follower_projection_error_count = 0;
+        double follower_actual_lead_m = 0.0;
+        double follower_actual_lead_rad = 0.0;
+        int follower_actual_lead_error_count = 0;
+        bool follower_loading_projection_active = false;
+        double follower_contact_shift_m = 0.0;
         std::uint64_t follower_reanchor_count = 0;
+        std::uint64_t follower_warm_resume_count = 0;
         bool safety_intervention_recent = false;
         double delta_twist_pending_linear_norm_m = 0.0;
         double delta_twist_pending_angular_norm_rad = 0.0;
@@ -736,46 +854,12 @@ private:
         double delta_twist_ang_feedback_cos = 1.0;
         bool delta_twist_xi_ref_clamped_norm = false;
         bool delta_twist_xi_cmd_clamped_norm = false;
-        bool delta_twist_blocked = false;
-        int delta_twist_block_reason = 0;
-        double delta_twist_block_elapsed_sec = 0.0;
-        bool delta_twist_block_requires_fresh_chunk = false;
-        bool delta_twist_residual_cleared_by_block = false;
-        bool delta_twist_step_consumed_this_tick = false;
-        int surface_mode = 0;
-        bool surface_active = false;
-        bool surface_close_soon = false;
-        bool surface_hull_scaled = false;
-        double surface_min_tip_dist_m = std::numeric_limits<double>::quiet_NaN();
-        double surface_down_scale = 1.0;
-        double surface_tangent_scale = 1.0;
-        double surface_hull_alpha = 1.0;
-        Vec6 surface_raw_delta{};
-        Vec6 surface_projected_delta{};
-        Vec6 surface_discarded_delta{};
-        double surface_raw_linear_norm_m = 0.0;
-        double surface_projected_linear_norm_m = 0.0;
-        double surface_discarded_linear_norm_m = 0.0;
-        double surface_raw_angular_norm_rad = 0.0;
-        double surface_projected_angular_norm_rad = 0.0;
-        double surface_discarded_angular_norm_rad = 0.0;
-        int grasp_phase = 0;
-        bool grasp_commit_active = false;
-        bool grasp_close_soon = false;
-        bool grasp_ready = false;
-        double grasp_sync_wait_sec = 0.0;
-        double grasp_closing_hold_elapsed_sec = 0.0;
-        double grasp_lift_elapsed_sec = 0.0;
-        double grasp_lift_progress = 0.0;
-        bool grasp_gripper_override_active = false;
-        bool grasp_policy_delta_dropped = false;
-        bool grasp_resume_wait_fresh_chunk = false;
-        bool grasp_blocked = false;
-        int grasp_phase_before_block = 0;
-        std::optional<double> gripper_policy_cmd;
-        std::optional<double> gripper_effective_cmd;
-        bool gripper_close_soon = false;
-        bool gripper_closing_hold_active = false;
+        int delta_twist_frame_rows = 0;
+        int delta_twist_normal_budget = 0;
+        int delta_twist_total_budget = 0;
+        int delta_twist_steps_remaining = 0;
+        std::uint32_t delta_twist_clamp_mask = 0;
+        Vec6 delta_twist_accel_cmd{};
     };
     AbcTelemetry left_abc_telemetry_;
     AbcTelemetry right_abc_telemetry_;

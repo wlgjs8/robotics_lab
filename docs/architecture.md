@@ -22,7 +22,7 @@ The mock / rbpodo controller-simulation (pgmode) stack remains the regression ba
 
 Real motion is now an active bring-up lane (see Maturity Boundary), not a
 deferred milestone. Execution authority is config-driven and server-owned:
-site-local config plus the mode-independent safety layers decide whether motion
+the tracked stack config plus the mode-independent safety layers decide whether motion
 is sent. Operator supervision and an E-stop remain physical operation procedure,
 and passing simulator acceptance is never permission to move hardware.
 
@@ -121,7 +121,7 @@ them only by deployment target, via config filename suffix and docs:
 - `…controller_sim_vm.yaml` — target is a Virtual ControlBox VM (no physical hardware on the wire)
 - `…controller_sim_onbox.yaml` — target is a physical controller box held in `pgmode`
 
-Site/VM configs live in gitignored `rb_servo_server/config/local/`.
+Launch settings live only in the tracked `stack_real.yaml` and `stack_sim.yaml`.
 
 ## Controller Topology
 
@@ -135,7 +135,7 @@ rb_servo_server
 
 The rbpodo controller `pgmode` simulation reuses this same per-arm rbpodo
 endpoint shape, but targets a Virtual ControlBox VM or a physical box held in
-`pgmode` (site/VM configs under gitignored `rb_servo_server/config/local/`),
+`pgmode` (configured by the tracked simulation stack),
 distinguished only by deployment target.
 
 ## State Publication Fanout
@@ -170,9 +170,8 @@ env vars**. The legacy execution gates — `RB_ALLOW_REAL_ROBOT`,
 `run_mode`/`operation_mode` are telemetry labels only and do not decide whether
 motion is allowed.
 
-Real-motion execution authority is owned by **site-local config
-(`rb_servo_server/config/local/`) + the mode-independent safety layers**. Real
-motion requires the site config to enable it explicitly
+Real-motion execution authority is owned by **the tracked stack config + the
+mode-independent safety layers**. Real motion requires `stack_real.yaml` to enable it explicitly
 (`cartesian_control.allow_in_real: true`). Operator-supervised acceptance remains
 the physical operating process. This config-driven path has already carried a
 supervised dual-arm physical Cartesian circle
@@ -258,6 +257,10 @@ flags, and the last reject reason are published every state tick under
 `floor_constraint`. `monitor_only: true` publishes telemetry without clamping
 and is never a real-motion safety posture. Enabling the constraint requires
 `kinematics.enable: true` (TCP FK source) — enforced at config load.
+The GUI initializes its floor-enforcement checkbox from this published server
+state and does not restore a prior GUI-side disable across launches; the tracked
+stack config remains the startup authority. An operator may still change the
+runtime state explicitly during the current supervised session.
 
 ### Reachable-workspace shell constraint (`safety.reach_constraint`)
 
@@ -317,12 +320,8 @@ rb_servo_server/config/stack_real.yaml
 rb_servo_server/config/stack_sim.yaml
 ```
 
-Do not add additional tracked runnable real robot configs. Site-owned real
-variants and acceptance-stage copies belong under:
-
-```text
-rb_servo_server/config/local/
-```
+Do not add parallel runnable real robot configs. Advance acceptance stages by
+changing one reviewed setting at a time in `stack_real.yaml`.
 
 The legacy `dual_real*.example.yaml` template surface is no longer tracked.
 
@@ -358,12 +357,58 @@ Deprecated simulator config names are archived under `docs/archive/configs/`
 for historical reference only. They are not runnable source-of-truth profiles
 and must not be used for new smoke or acceptance evidence.
 
-Force control is intentionally unavailable:
+Force control is integrated as a server-owned path: rbpodo EFT samples feed the
+compensated wrench pipeline, contact guard, unilateral surface-normal
+admittance, and bounded 6D Cartesian compliance before IK. In Cartesian
+compliance mode, soft contact preserves the active flow-infer chunk and gripper
+execution while loading translation/rotation increments are projected and a
+bounded SE(3) correction is composed around a fixed Hold or latest accepted
+policy-command equilibrium. Zero-wrench stiffness recenters all six offsets
+without absorbing measured motion into that equilibrium. The current real
+profile is a supervised six-axis Hold gate using `tcp_origin`: the
+controller follows the corrected +90 degree URDF/FT-axis orientation and
+applies the correction about the TCP endpoint. The runtime FT control gizmo,
+not the generic TCP pose gizmo, names the test axes. Gate 3C follows the
+roll/pitch/yaw direction/recenter capture and gives all three rotations one
+measured-noise-qualified sensitive profile. The common angular motion and
+hard-torque bounds are unchanged.
+The Cartesian controller selects jerk from a recursively viable braking
+envelope rather than integrating and clamping state. A same-direction wrench
+outside an axis deadband reserves a zero-velocity, zero-acceleration loaded
+hold without allowing the compliant offset to reverse toward zero; deadband
+release restores the nominal stiffness-driven recenter path. Recontact during
+that return is first jerk-bounded to a stop before the loaded-hold invariant
+takes ownership. If a noisy deadband transition makes no-reversal stopping
+temporarily unreachable, the ordinary jerk-safe envelope remains authoritative
+while the controller brakes toward a reachable loaded hold; this bounded
+transient no longer becomes an `ExternalForceLimit` fault. This preserves
+boundary braking, recontact, and release recentering authority without adding
+wrench averaging.
+The tracked real profile additionally couples release recentering within the
+three translation axes and within the three rotation axes. Sibling springs are
+deferred until their block is fully released, then one common feasible jerk
+scale preserves that block's return direction while every axis remains inside
+its recursively viable soft envelope. If any axis needs hard-envelope recovery,
+its per-axis recovery jerk remains authoritative; block coupling resumes after
+all axes re-enter the soft envelope. This removes the observed
+component-by-component zig-zag without allowing the direction preference to
+override a hard-limit recovery or mixing linear and angular units.
+Surface-normal and resultant hard-limit calculations remain in their existing
+TCP/stand path. Hard-limit faults retain the normal
+motion-epoch interruption path. Activation, telemetry, and promotion constraints are defined in
+`rb_servo_server/docs/force_control.md`. The path is not safety-rated;
+`stack_real.yaml` currently exposes a dual-arm supervised Gate 2 profile. Both
+geometric floor constraints are disabled by explicit operator decision, so the
+TCP/gripper-tip floor velocity damper and hard plane backstop are absent. This
+is a physical bring-up configuration, not production acceptance.
 
 ```yaml
 force_control:
-  provider: null
-  enable: false
+  provider: project_native
+  enable: true
+  operating_mode: cartesian_admittance
+  allow_in_real: true
+  supervised_experimental_real: true
 ```
 
 ## Motion Primitive Contract
@@ -384,6 +429,16 @@ Cartesian point-to-point final-pose target. It is MoveJ-like at the TCP level. F
 `policy_runner flow-infer` composes each ee_local per-step policy delta onto
 the measured or running TCP pose and emits absolute `tcp_target_stand`
 `TcpPoseTarget` setpoints.
+
+For the tracked real flow profile, the chunk overlay is schema v3 and the server
+uses `delta_preview`: the publisher aligns a warm result by the number of policy
+steps actually emitted since its camera observation, then the server integrates
+the remaining ee-local deltas and feeds the existing Ruckig p/v/a preview chain.
+Velocity proprio is the measured body delta over the image-time window; an
+unavailable bracket is explicit metadata and prevents preview activation. The
+server bounds both requested-to-preview projection error and
+preview-command-to-measured-TCP lead with mandatory config limits and a
+persistent fault policy.
 
 ### `TcpLinearMove`
 

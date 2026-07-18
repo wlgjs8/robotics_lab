@@ -17,9 +17,11 @@ stand
   left_base
     left_tcp
       left_wrist_camera
+      left_ft_sensor
   right_base
     right_tcp
       right_wrist_camera
+      right_ft_sensor
   head_camera
 ```
 
@@ -47,7 +49,53 @@ T_stand_right_base
 T_left_tcp_left_wrist_camera
 T_right_tcp_right_wrist_camera
 T_stand_head_camera
+T_left_tcp_left_ft_sensor
+T_right_tcp_right_ft_sensor
 ```
+
+Force-control configuration uses the arm-local generic name `T_tcp_sensor` for
+the same direction: the pose of the F/T sensor frame expressed in that arm's
+TCP frame. Sensor-fixed bias is removed before applying this wrench transform;
+payload/gravity and residual tare are then removed in the TCP frame.
+
+The active RB3-730/Pika URDFs explicitly define the Robotous RFT64-6A01 CAD
+measurement frame as `ft_sensor_measurement`. The combined Pika CAD already
+contains the sensor geometry: the RFT64 body matches the CAD from
+`attachment_site` z=15 mm through z=45 mm. The sensor's model-defined
+measurement site is the tool-side face at z=45 mm, with the Pika CAD's +90
+degree yaw convention. Both active URDFs therefore encode the geometry estimate:
+
+```text
+T_attachment_ft_sensor_base        = xyz [0, 0, 0.015], rpy [0, 0, pi/2]
+T_ft_sensor_base_measurement       = xyz [0, 0, 0.030], rpy [0, 0, 0]
+T_tcp_sensor                       = xyz [0, 0, -0.202642], rpy [0, 0, pi/2]
+```
+
+The first 2026-07-12 right-arm axis review mixed names from the TCP gizmo and
+the yaw-offset CAD sensor gizmo and temporarily removed this yaw. The 18:32
+Cartesian-compliance capture then showed that the published runtime frame was
+identical to the TCP frame while operator loads referenced the sensor gizmo;
+X and Y consequently moved on the other displayed sensor axis. That capture
+invalidates the yaw-zero acceptance. The operator declared both installed
+arm/sensor assemblies identical, so the corrected supervised test profile uses
+the explicit URDF/FT orientation for both arms:
+
+```text
+T_tcp_rbpodo_eft = xyz [0, 0, -0.202642], rpy [0, 0, pi/2]
+```
+
+The corrected 18:48 capture observed right-arm +X/+Y/+Z translation in the
+pushed runtime-frame direction and zero-wrench recentering; the operator
+declared the left assembly identical. Torque-axis checks, sensor serials,
+payload/COM, and production force-motion acceptance remain pending. `rb_gui`
+reads `ft_sensor_measurement` from the viewer URDF for the small sensor-origin
+overlay. The server separately publishes
+`compliance_frame_actual_stand` plus
+`compliance_frame_pose_valid`; the GUI renders that larger runtime triad and its
+`control_wrench_compliance` vector only when both telemetry and the state stream
+are valid. In the corrected `tcp_origin` profile the two triads share an
+orientation and differ only in origin; the TCP pose gizmo remains a separate
+frame and is not an F/T-axis test reference.
 
 ## Mount Orientation Convention
 

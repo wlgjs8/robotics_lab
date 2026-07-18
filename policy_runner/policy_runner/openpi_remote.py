@@ -39,7 +39,8 @@ from typing import Any, TextIO
 import numpy as np
 
 from .action_sources.tcp_pose_target import cartesian_action_requirements
-from .camera_bundle_client import resolve_frame
+from .camera_bundle_client import bundle_clock_ns, resolve_frame
+from .camera_diagnostics import BackgroundRgbSnapshotWriter, rgb_image_metrics
 from .flow_dataset import pose_from_state_payload
 from .chunk_overlay_publisher import ChunkOverlayPublisher
 from .flow_inference import (
@@ -56,6 +57,7 @@ from .flow_inference import (
     rotate_flow_arm_vectors,
 )
 from .gripper import GripperRuntime
+from .servo_command_client import CommandIntent
 from .tcp_target_pose_conditioner import CONDITIONING_MODES, REANCHOR_MODES
 
 OPENPI_CHECKPOINT_PREFIX = "openpi://"
@@ -285,6 +287,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         *,
         timeout_sec: float = 0.2,
         camera_client: Any | None = None,
+        episode_observation_provider: Any | None = None,
         policy_dt_sec: float | None = None,
         max_linear_velocity_m_s: float | None = None,
         max_angular_velocity_rad_s: float | None = None,
@@ -340,6 +343,22 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
 
         self.timeout_sec = float(timeout_sec)
         self.camera_client = camera_client
+        self.episode_observation_provider = episode_observation_provider
+        # A finite saved-episode replay must terminate the server-side preview
+        # explicitly.  Releasing the lease alone leaves the last chunk's runway
+        # available until command freshness expires, which executes rows that
+        # are intentionally outside the provider's finite replay window.
+        self._training_episode_completion_hold_emitted = False
+        self._camera_runtime_config: Any | None = None
+        self._camera_runtime_state = "disabled"
+        self._camera_runtime_started: float | None = None
+        self._camera_runtime_unavailable_since: float | None = None
+        self._camera_runtime_last_seq: int | None = None
+        self._camera_runtime_rejected_seq: int | None = None
+        self._camera_runtime_consecutive = 0
+        self._camera_runtime_terminal_abort_reason: str | None = None
+        self._camera_runtime_missing_streams: list[str] = []
+        self._camera_runtime_latest_age_ms: float | None = None
         self.sample_steps = int(sample_steps)
         self.max_linear_step_m = float(max_linear_step_m)
         self.max_angular_step_rad = float(max_angular_step_rad)
@@ -441,9 +460,21 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self._last_obs_camera_bundle: Any | None = None
         self._last_obs_camera_time_sec: float | None = None
         self._last_obs_camera_seq: int | None = None
+        self._last_velproprio_diagnostics: dict[str, object] = {
+            "sample_mode": self.velproprio_sample_mode,
+            "source": self.velproprio_source,
+            "valid": False,
+            "zero_reason": "not_sampled",
+        }
         self.command_family = FLOW_COMMAND_LABEL
         # Fake-image smoke mode runs camera-less so the runtime does not gate on frames.
-        self.camera_names = [] if self._fake_images else [str(name) for name in camera_names]
+        # A teacher-forced training-episode provider supplies the exact saved
+        # observations directly.  It must never fall through to a live camera.
+        self.camera_names = (
+            []
+            if self._fake_images or self.episode_observation_provider is not None
+            else [str(name) for name in camera_names]
+        )
         # Depth (Option A): an include_depth checkpoint also gets *_wrist_0_depth through the same
         # SigLIP. The live D405 depth stream names are the color names with color->depth; the camera
         # bundle client MUST be built with include_depth=True (main.py) so z16 is decoded.
@@ -495,6 +526,13 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             chunk_execute_steps,
             self.action_horizon,
         )
+        if self.episode_observation_provider is not None:
+            if bool(rtc_enabled):
+                raise ValueError("teacher-forced training replay does not support RTC")
+            self.episode_observation_provider.configure(
+                self.action_horizon,
+                self.chunk_execute_steps,
+            )
         self.chunk_overlay_runway_steps = _resolve_chunk_overlay_runway_steps(chunk_overlay_runway_steps)
         self.policy_dt_sec = float(policy_dt_sec) if policy_dt_sec else (1.0 / 30.0)
         self.max_linear_velocity_m_s = (
@@ -521,11 +559,20 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self._reset_right_pose: np.ndarray | None = None
         self._chunk: np.ndarray | None = None
         self._chunk_index = 0
+        # This subclass deliberately skips FlowMatchingActionSource.__init__, so
+        # mirror the server force/contact epoch state used by inherited
+        # next_intent(). Without it the first real-policy state raises before an
+        # action can be emitted.
+        self._last_server_motion_epoch: int | None = None
         self._warned_missing_camera_client = False
         self.last_image_decode_count = 0
         self.last_missing_camera_count = 0
         self.image_decode_count = 0
         self.missing_camera_count = 0
+        self._last_inference_camera_diagnostics: dict[str, object] = {
+            "outcome": "not_sampled"
+        }
+        self._diagnostic_image_writer = BackgroundRgbSnapshotWriter()
         # Real-Time Chunking (RTC). When enabled, each infer sends the previous
         # chunk back to the server (`prev_action_chunk`) so it freezes the first
         # `inference_delay` actions and inpaints the rest -- smooth async replan
@@ -557,6 +604,16 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # via RB_GUI_CHUNK_OVERLAY_ENDPOINT; telemetry-only, best-effort UDP.
         self._last_overlay_payload = None
         self._chunk_overlay_seq = 0
+        self._stream_emitted_policy_steps = 0
+        self._active_chunk_metadata: dict[str, object] | None = None
+        self._stream_next_chunk_metadata: dict[str, object] | None = None
+        self._stream_activation_candidate_metadata: dict[str, object] | None = None
+        self.checkpoint_id = str(
+            os.environ.get("FLOW_INFER_CHECKPOINT")
+            or server_metadata.get("checkpoint_id")
+            or server_metadata.get("checkpoint")
+            or "openpi_remote"
+        )
         # Terminal chunk dump (debug). This class skips super().__init__, so the
         # attributes the inherited _print_chunk_steps reads must be set here or the
         # dump silently no-ops for openpi-remote rollouts. Gated on
@@ -854,15 +911,25 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         return float(t_img_mono)
 
     def next_intent(self, snapshot, now_monotonic):  # type: ignore[override]
-        # Record measured pose every control tick for history-based velocity-proprio modes.
-        # fixed_step reads a fixed ~policy_dt window; camera_frame interpolates at the camera
-        # observation time and one policy_dt earlier. Cheap bounded ring.
         self._last_now_monotonic = now_monotonic
+        # Force ownership is server-driven and takes precedence over camera
+        # readiness. Process it before the camera guard so a simultaneous camera
+        # outage cannot delay contact invalidation or its frozen-gripper Hold.
+        force_blocked, force_intent = self._force_recovery_gate(snapshot, now_monotonic)
+        if force_blocked:
+            return force_intent
+        self._handle_server_motion_epoch(snapshot)
+        blocked, guard_intent = self._camera_runtime_gate(float(now_monotonic))
+        if blocked:
+            return guard_intent
+        replay_completion = self._training_episode_completion_reason()
         if (
-            getattr(self, "velproprio_sample_mode", "replan") in ("fixed_step", "camera_frame")
-            and self.proprio_mode != "pose"
+            replay_completion is not None
+            and not bool(getattr(self, "_training_episode_completion_hold_emitted", False))
+            and self._training_episode_final_overlay_elapsed(float(now_monotonic))
         ):
-            self._record_pose_history(getattr(snapshot, "payload", None), now_monotonic)
+            self._training_episode_completion_hold_emitted = True
+            return CommandIntent.hold(timeout_sec=self.timeout_sec)
         intent = super().next_intent(snapshot, now_monotonic)
         if (
             getattr(self, "velproprio_sample_mode", "replan") == "fixed_step"
@@ -871,6 +938,180 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         ):
             self._record_command_pose_history(intent, now_monotonic)
         return intent
+
+    def configure_camera_runtime(self, config: Any) -> None:
+        """Enable the OpenPI camera guard from the runtime camera config.
+
+        The guard is intentionally source-owned: the camera bundle is consumed
+        before policy inference, so no physical motion intent can precede the
+        required sequence of accepted wrist observations.
+        """
+        self._camera_runtime_config = config
+        required = int(getattr(config, "readiness_bundle_count", 0) or 0)
+        enabled = bool(self.camera_names) and not self._fake_images and required > 0
+        self._camera_runtime_state = "startup" if enabled else "disabled"
+        self._camera_runtime_started = None
+        self._camera_runtime_unavailable_since = None
+        self._camera_runtime_last_seq = None
+        self._camera_runtime_rejected_seq = None
+        self._camera_runtime_consecutive = 0
+        self._camera_runtime_terminal_abort_reason = None
+        self._camera_runtime_missing_streams = []
+        self._camera_runtime_latest_age_ms = None
+
+    @property
+    def camera_terminal_abort_reason(self) -> str | None:
+        return self._camera_runtime_terminal_abort_reason
+
+    @property
+    def terminal_abort_reason(self) -> str | None:
+        """Expose camera failure first, then the base force-recovery reason."""
+        return self._camera_runtime_terminal_abort_reason or super().terminal_abort_reason
+
+    def camera_runtime_status(self) -> dict[str, object]:
+        config = self._camera_runtime_config
+        return {
+            "state": self._camera_runtime_state,
+            "required_consecutive_bundles": int(
+                getattr(config, "readiness_bundle_count", 0) or 0
+            ),
+            "consecutive_fresh_complete_bundles": int(self._camera_runtime_consecutive),
+            "latest_bundle_seq": self._camera_runtime_last_seq,
+            "latest_bundle_age_ms": self._camera_runtime_latest_age_ms,
+            "missing_streams": list(self._camera_runtime_missing_streams),
+            "terminal_abort_reason": self._camera_runtime_terminal_abort_reason,
+        }
+
+    def _camera_runtime_gate(
+        self, now_monotonic: float
+    ) -> tuple[bool, CommandIntent | None]:
+        if self._camera_runtime_state == "disabled":
+            return False, None
+        if self._camera_runtime_terminal_abort_reason is not None:
+            return True, self._camera_runtime_hold_intent()
+
+        if self._camera_runtime_started is None:
+            self._camera_runtime_started = now_monotonic
+
+        bundle, received_new, rejected_seq = self._camera_runtime_poll()
+        accepted, seq, missing, age_ms = self._camera_runtime_bundle_status(bundle)
+        self._camera_runtime_missing_streams = missing
+        self._camera_runtime_latest_age_ms = age_ms
+
+        if rejected_seq is not None:
+            self._camera_runtime_rejected_seq = rejected_seq
+        if accepted and seq is not None and self._camera_runtime_rejected_seq is not None:
+            if seq <= self._camera_runtime_rejected_seq:
+                accepted = False
+        if accepted and received_new and seq is not None:
+            if self._camera_runtime_last_seq is None or seq > self._camera_runtime_last_seq:
+                self._camera_runtime_last_seq = seq
+                self._camera_runtime_rejected_seq = None
+                self._camera_runtime_consecutive += 1
+
+        config = self._camera_runtime_config
+        if self._camera_runtime_state == "startup":
+            if not accepted and (received_new or rejected_seq is not None):
+                self._camera_runtime_consecutive = 0
+            required = int(getattr(config, "readiness_bundle_count", 0) or 0)
+            if accepted and self._camera_runtime_consecutive >= required:
+                self._camera_runtime_state = "running"
+                self._camera_runtime_unavailable_since = None
+                print(
+                    "[flow-infer] camera preflight ready: "
+                    f"{self._camera_runtime_consecutive}/{required} consecutive fresh complete bundles",
+                    file=self.stderr,
+                    flush=True,
+                )
+                return False, None
+            timeout = float(getattr(config, "readiness_timeout_sec", 1.0))
+            if now_monotonic - float(self._camera_runtime_started) >= timeout:
+                self._camera_runtime_state = "timed_out"
+                self._camera_runtime_terminal_abort_reason = "camera_stale_timeout"
+            return True, self._camera_runtime_hold_intent()
+
+        if accepted:
+            self._camera_runtime_unavailable_since = None
+            return False, None
+        if self._camera_runtime_unavailable_since is None:
+            self._camera_runtime_unavailable_since = now_monotonic
+        timeout = float(getattr(config, "stale_timeout_sec", 1.0))
+        if now_monotonic - float(self._camera_runtime_unavailable_since) >= timeout:
+            self._camera_runtime_state = "timed_out"
+            self._camera_runtime_terminal_abort_reason = "camera_stale_timeout"
+        return True, self._camera_runtime_hold_intent()
+
+    def _camera_runtime_poll(self) -> tuple[Any | None, bool, int | None]:
+        client = self.camera_client
+        if client is None:
+            return None, False, None
+        bundle = None
+        poll = getattr(client, "poll", None)
+        if callable(poll):
+            try:
+                bundle = poll(timeout_ms=0)
+            except TypeError:
+                bundle = poll(0)
+        received_new = bundle is not None
+        rejected_seq: int | None = None
+        if bundle is None:
+            diagnostics = getattr(client, "diagnostics_snapshot", None)
+            if callable(diagnostics):
+                try:
+                    outcome = dict(diagnostics()).get("last_poll", {})
+                    outcome_name = str(outcome.get("outcome", ""))
+                    if outcome_name not in {"", "no_message", "recv_race"}:
+                        raw_seq = outcome.get("bundle_seq")
+                        rejected_seq = int(raw_seq) if raw_seq is not None else None
+                except Exception:  # noqa: BLE001 - health telemetry is best effort
+                    pass
+            latest = getattr(client, "latest", None)
+            if callable(latest):
+                bundle = latest()
+        return bundle, received_new, rejected_seq
+
+    def _camera_runtime_bundle_status(
+        self, bundle: Any | None
+    ) -> tuple[bool, int | None, list[str], float | None]:
+        missing: list[str] = []
+        if bundle is None or not bool(getattr(bundle, "complete", False)):
+            return False, None, list(self.camera_names), None
+        frames = getattr(bundle, "frames", {})
+        for camera_name in self.camera_names:
+            frame = resolve_frame(frames, camera_name)
+            if getattr(frame, "pixels", None) is None:
+                missing.append(str(camera_name))
+        client_fresh = getattr(self.camera_client, "is_fresh", None)
+        fresh = bool(client_fresh(bundle)) if callable(client_fresh) else False
+        try:
+            seq = int(getattr(bundle, "bundle_seq", 0) or 0)
+        except Exception:  # noqa: BLE001
+            seq = 0
+        try:
+            bundle_time_ns = int(getattr(bundle, "bundle_time_ns", 0) or 0)
+            age_ms = max(0.0, (bundle_clock_ns() - bundle_time_ns) / 1_000_000.0)
+        except Exception:  # noqa: BLE001
+            age_ms = None
+        return bool(fresh and not missing and seq > 0), (seq or None), missing, age_ms
+
+    def _camera_runtime_hold_intent(self) -> CommandIntent:
+        targets = getattr(self, "_current_gripper_targets", {})
+        fallback = getattr(self, "_gripper_targets_by_arm", {})
+        return CommandIntent.gripper_target(
+            left=targets.get("left") if targets.get("left") is not None else fallback.get("left"),
+            right=targets.get("right") if targets.get("right") is not None else fallback.get("right"),
+            timeout_sec=self.timeout_sec,
+        )
+
+    def _before_policy_intent(self, snapshot, now_monotonic) -> None:  # type: ignore[override]
+        # The base class calls this only when inference may run, or after the
+        # force-recovery clear has reset all pre-contact history. Thus camera-frame
+        # velocity proprio can never bridge across a contact discontinuity.
+        if (
+            getattr(self, "velproprio_sample_mode", "replan") in ("fixed_step", "camera_frame")
+            and self.proprio_mode != "pose"
+        ):
+            self._record_pose_history(getattr(snapshot, "payload", None), now_monotonic)
 
     def _record_pose_history(self, payload, now_monotonic) -> None:
         if payload is None or now_monotonic is None:
@@ -1162,7 +1403,16 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             t_cur_float = float(t_cur)
         except Exception:  # noqa: BLE001
             t_cur_float = float("nan")
+        diagnostics: dict[str, object] = {
+            "sample_mode": "camera_frame",
+            "source": "measured",
+            "camera_time_sec": None if not np.isfinite(t_cur_float) else t_cur_float,
+            "policy_dt_sec": float(self.policy_dt_sec),
+            "arms": {},
+        }
         if t_cur is None or not np.isfinite(t_cur_float):
+            diagnostics.update({"valid": False, "zero_reason": "camera_time_unavailable"})
+            self._last_velproprio_diagnostics = diagnostics
             return {"left": np.zeros(6, dtype=np.float64), "right": np.zeros(6, dtype=np.float64)}
         t_cur = t_cur_float
         t_prev = t_cur - float(self.policy_dt_sec)
@@ -1171,11 +1421,34 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             prev_pose = self._pose_history_at(side, t_prev)
             if cur_pose is None or prev_pose is None:
                 out[side] = np.zeros(6, dtype=np.float64)
+                diagnostics["arms"][side] = {
+                    "valid": False,
+                    "zero_reason": "pose_history_bracket_unavailable",
+                    "target_prev_time_sec": t_prev,
+                    "target_cur_time_sec": t_cur,
+                    "delta": out[side].tolist(),
+                }
                 continue
             r_prev = Rotation.from_quat(prev_pose[3:7])
             pos_delta_local = r_prev.inv().apply(cur_pose[:3] - prev_pose[:3])
             rot_delta = (r_prev.inv() * Rotation.from_quat(cur_pose[3:7])).as_rotvec()
             out[side] = np.concatenate([pos_delta_local, rot_delta])
+            diagnostics["arms"][side] = {
+                "valid": True,
+                "zero_reason": None,
+                "target_prev_time_sec": t_prev,
+                "target_cur_time_sec": t_cur,
+                "delta": out[side].tolist(),
+            }
+        arm_details = diagnostics["arms"]
+        diagnostics["valid"] = bool(
+            isinstance(arm_details, dict)
+            and all(bool(arm_details.get(side, {}).get("valid")) for side in ("left", "right"))
+        )
+        diagnostics["zero_reason"] = (
+            None if diagnostics["valid"] else "one_or_more_pose_history_brackets_unavailable"
+        )
+        self._last_velproprio_diagnostics = diagnostics
         return out
 
     def _proprio_state_velocity(self, payload: dict[str, Any]) -> np.ndarray:
@@ -1253,9 +1526,16 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
 
     def _raw_camera_images(self) -> tuple[dict[str, np.ndarray] | None, int, int]:
         """Full-resolution HWC uint8 RGB frames keyed left/right; None if missing."""
+        if not hasattr(self, "_last_inference_camera_diagnostics"):
+            self._last_inference_camera_diagnostics = {"outcome": "not_sampled"}
         if self._fake_images:
             self._clear_last_obs_camera_bundle()
             zero = np.zeros((480, 640, 3), dtype=np.uint8)
+            self._last_inference_camera_diagnostics = {
+                "outcome": "fake_images",
+                "bundle_seq": None,
+                "rgb": {"left": rgb_image_metrics(zero), "right": rgb_image_metrics(zero)},
+            }
             return {"left": zero, "right": zero.copy()}, 2, 0
         bundle = self._poll_camera_bundle()
         bundle_frames = getattr(bundle, "frames", {}) if bundle is not None else {}
@@ -1266,6 +1546,8 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         images: dict[str, np.ndarray] = {}
         decode_count = 0
         missing_count = 0
+        missing_streams: list[str] = []
+        decode_failures: list[str] = []
         for key, camera_name in (("left", self.camera_names[0]), ("right", self.camera_names[1])):
             # Bundle frames are keyed '<camera>.<stream>' (e.g. 'left_realsense.color')
             # while checkpoint camera names use '<camera>_<stream>'
@@ -1275,6 +1557,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             pixels = getattr(frame, "pixels", None)
             if pixels is None:
                 missing_count += 1
+                missing_streams.append(str(camera_name))
                 continue
             array = np.asarray(pixels)
             if array.ndim == 3 and array.shape[-1] == 3:
@@ -1283,6 +1566,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 bgr = cv2.imdecode(array.astype(np.uint8), cv2.IMREAD_COLOR)
                 if bgr is None:
                     missing_count += 1
+                    decode_failures.append(str(camera_name))
                     continue
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             if self.wrist_crop_frac > 0.0:
@@ -1290,8 +1574,53 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             images[key] = rgb
             decode_count += 1
         if missing_count > 0 or len(images) < 2:
+            self._last_inference_camera_diagnostics = {
+                "outcome": "missing_rgb",
+                "bundle_seq": None if bundle is None else int(getattr(bundle, "bundle_seq", 0) or 0),
+                "missing_streams": missing_streams,
+                "decode_failures": decode_failures,
+                "decoded_rgb_count": decode_count,
+            }
             self._clear_last_obs_camera_bundle()
             return None, decode_count, max(missing_count, 2 - len(images))
+        bundle_seq = 0 if bundle is None else int(getattr(bundle, "bundle_seq", 0) or 0)
+        bundle_now_ns = bundle_clock_ns()
+        bundle_time_ns = 0 if bundle is None else int(getattr(bundle, "bundle_time_ns", 0) or 0)
+        bundle_age_ms = (
+            max(0.0, (bundle_now_ns - bundle_time_ns) / 1_000_000.0)
+            if bundle_time_ns > 0
+            else 0.0
+        )
+        frame_diagnostics: dict[str, int | float] = {}
+        for side, camera_name in (("left", self.camera_names[0]), ("right", self.camera_names[1])):
+            frame = resolve_frame(bundle_frames, camera_name)
+            frame_number = int(getattr(frame, "frame_number", 0) or 0)
+            frame_time_ns = int(getattr(frame, "host_arrival_time_ns", 0) or 0)
+            frame_diagnostics[f"{side}_frame_number"] = frame_number
+            frame_diagnostics[f"{side}_frame_age_ms"] = (
+                max(0.0, (bundle_now_ns - frame_time_ns) / 1_000_000.0)
+                if frame_time_ns > 0
+                else 0.0
+            )
+        rgb_metrics = {side: rgb_image_metrics(images[side]) for side in ("left", "right")}
+        self._last_inference_camera_diagnostics = {
+            "outcome": "camera_ready",
+            "bundle_seq": bundle_seq,
+            "bundle_time_ns": bundle_time_ns,
+            "bundle_age_ms": bundle_age_ms,
+            "hardware_synced": False if bundle is None else bool(getattr(bundle, "hardware_synced", False)),
+            "sync_policy": "" if bundle is None else str(getattr(bundle, "sync_policy", "") or ""),
+            "max_time_diff_ms": 0.0 if bundle is None else float(getattr(bundle, "max_time_diff_ms", 0.0) or 0.0),
+            "max_skew_ms": 0.0 if bundle is None else float(getattr(bundle, "max_time_diff_ms", 0.0) or 0.0),
+            "drop_counters": {} if bundle is None else dict(getattr(bundle, "drop_counters", {}) or {}),
+            "rgb": rgb_metrics,
+            "left_focus_score": float(rgb_metrics["left"]["focus_gradient_energy"]),
+            "right_focus_score": float(rgb_metrics["right"]["focus_gradient_energy"]),
+            **frame_diagnostics,
+        }
+        snapshot_writer = getattr(self, "_diagnostic_image_writer", None)
+        if snapshot_writer is not None:
+            snapshot_writer.submit(bundle_seq, images)
         if getattr(self, "include_depth", False):
             # Resolve the live D405 depth (z16 -> uint16 HxW from the bundle client when its
             # include_depth=True) and encode it with the SAME _depth_to_image as the training
@@ -1308,6 +1637,8 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 frame = resolve_frame(bundle_frames, depth_name)
                 px = getattr(frame, "pixels", None)
                 if px is None:
+                    self._last_inference_camera_diagnostics["outcome"] = "missing_depth"
+                    self._last_inference_camera_diagnostics["missing_streams"] = [str(depth_name)]
                     self._clear_last_obs_camera_bundle()
                     return None, decode_count, 2
                 images[key] = _depth_to_image(
@@ -1372,22 +1703,69 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
 
     # ---------------------------------------------------------------- infer --
     def _sample_chunk(self, payload: dict[str, Any]) -> np.ndarray | None:
-        images, decode_count, missing_count = self._raw_camera_images()
+        if not hasattr(self, "_last_inference_camera_diagnostics"):
+            self._last_inference_camera_diagnostics = {"outcome": "camera_state_unavailable"}
+        replay_sample = None
+        replay_provider = getattr(self, "episode_observation_provider", None)
+        if replay_provider is not None:
+            replay_sample = replay_provider.next_sample()
+            if replay_sample is None:
+                self._last_inference_camera_diagnostics["outcome"] = "training_episode_exhausted"
+                return None
+            obs = dict(replay_sample.observation)
+            obs["prompt"] = self.prompt
+            decode_count, missing_count = 4, 0
+            recorded_state = np.asarray(obs.get("observation/state"), dtype=np.float32)
+            if recorded_state.shape != (12,) or not np.all(np.isfinite(recorded_state)):
+                self._last_inference_camera_diagnostics["outcome"] = (
+                    "invalid_training_episode_velocity_proprio"
+                )
+                return None
+            # delta_preview is fail-closed on the same chunk-metadata validity
+            # bit used by live camera-frame velocity proprio.  A converted
+            # training state is already the exact incoming body delta for this
+            # saved frame, so mark both arms valid and carry the values for
+            # audit instead of leaving the live sampler's "not_sampled" state.
+            self._last_velproprio_diagnostics = {
+                "sample_mode": "training_episode_recorded",
+                "source": "training_episode",
+                "valid": True,
+                "zero_reason": None,
+                "frame_index": int(replay_sample.frame_index),
+                "arms": {
+                    "left": {
+                        "valid": True,
+                        "zero_reason": None,
+                        "delta": recorded_state[:6].astype(float).tolist(),
+                    },
+                    "right": {
+                        "valid": True,
+                        "zero_reason": None,
+                        "delta": recorded_state[6:12].astype(float).tolist(),
+                    },
+                },
+            }
+            self._last_inference_camera_diagnostics = {
+                "outcome": "training_episode_observation",
+                "frame_index": int(replay_sample.frame_index),
+            }
+        else:
+            images, decode_count, missing_count = self._raw_camera_images()
+            if images is None:
+                return None  # fail-closed without frames, same as the in-house sources
+            obs = {
+                "observation/left_wrist_0_rgb": images["left"],
+                "observation/right_wrist_0_rgb": images["right"],
+                "observation/state": self._proprio_state(payload),
+                "prompt": self.prompt,
+            }
+            if getattr(self, "include_depth", False):
+                obs["observation/left_wrist_0_depth"] = images["left_depth"]
+                obs["observation/right_wrist_0_depth"] = images["right_depth"]
         self.last_image_decode_count = decode_count
         self.last_missing_camera_count = missing_count
         self.image_decode_count += decode_count
         self.missing_camera_count += missing_count
-        if images is None:
-            return None  # fail-closed without frames, same as the in-house sources
-        obs = {
-            "observation/left_wrist_0_rgb": images["left"],
-            "observation/right_wrist_0_rgb": images["right"],
-            "observation/state": self._proprio_state(payload),
-            "prompt": self.prompt,
-        }
-        if getattr(self, "include_depth", False):
-            obs["observation/left_wrist_0_depth"] = images["left_depth"]
-            obs["observation/right_wrist_0_depth"] = images["right_depth"]
         if self.rtc_enabled and self._rtc_prev_raw_chunk is not None:
             # Round-trip the previous MODEL-SPACE chunk so the server freezes the
             # first `inference_delay` actions and inpaints the rest toward it.
@@ -1404,13 +1782,17 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         try:
             result = self._client.infer(obs)
         except Exception as exc:  # noqa: BLE001 - remote failure must not crash the loop
+            self._last_inference_camera_diagnostics["outcome"] = "remote_inference_error"
+            self._last_inference_camera_diagnostics["error_type"] = type(exc).__name__
             print(f"openpi remote inference failed: {type(exc).__name__}: {exc}", file=self.stderr, flush=True)
             return None
         chunk = np.asarray(result.get("actions"), dtype=np.float32)
         if chunk.ndim != 2 or chunk.shape[1] < 14:
+            self._last_inference_camera_diagnostics["outcome"] = "invalid_action_shape"
             print(f"openpi remote returned unexpected action shape {chunk.shape}", file=self.stderr, flush=True)
             return None
         if int(chunk.shape[0]) != int(self.action_horizon):
+            self._last_inference_camera_diagnostics["outcome"] = "invalid_action_horizon"
             print(
                 "openpi remote returned action_horizon "
                 f"{int(chunk.shape[0])}, expected {int(self.action_horizon)}; "
@@ -1419,7 +1801,12 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 flush=True,
             )
             return None
+        self._last_inference_camera_diagnostics["outcome"] = "ok"
         chunk = chunk[:, :14].copy()
+        if replay_sample is not None:
+            # Keep model-space values (including gripper fraction) for an
+            # apples-to-apples comparison with the converted training action.
+            replay_provider.record_prediction(replay_sample, chunk)
         if self.rtc_enabled:
             # Cache the server's MODEL-SPACE chunk (pre output-transform) to seed
             # the next infer's prev_action_chunk. Round-tripped opaque: NOT the
@@ -1443,3 +1830,64 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         chunk[:, _GRIP_DIMS[0]] *= 100.0
         chunk[:, _GRIP_DIMS[1]] *= 100.0
         return chunk
+
+    def _training_episode_completion_reason(self) -> str | None:
+        provider = getattr(self, "episode_observation_provider", None)
+        if provider is None:
+            return None
+        return provider.completion_reason(
+            int(getattr(self, "_stream_emitted_policy_steps", 0))
+        )
+
+    def _training_episode_final_overlay_elapsed(self, now_monotonic: float) -> bool:
+        """True only after the final controller preview window has run in full.
+
+        The Python stream counter reaches the finite-episode boundary before the
+        server-side delta-preview follower necessarily finishes the final frame.
+        Sending Hold at that instant truncates the last policy row.  Use metadata
+        captured after the overlay publisher returned successfully and wait for
+        its explicit execute window; missing metadata fails closed.
+        """
+        if getattr(self, "episode_observation_provider", None) is None:
+            return True
+        try:
+            published = float(self._last_chunk_overlay_publish_monotonic)
+            execute_steps = int(self._last_chunk_overlay_publish_execute_steps)
+            policy_dt_sec = float(self._last_chunk_overlay_publish_policy_dt_sec)
+            now = float(now_monotonic)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return False
+        if (
+            not np.isfinite(published)
+            or not np.isfinite(policy_dt_sec)
+            or not np.isfinite(now)
+            or execute_steps <= 0
+            or policy_dt_sec <= 0.0
+        ):
+            return False
+        return now >= published + execute_steps * policy_dt_sec
+
+    def completion_reason(self) -> str | None:
+        reason = self._training_episode_completion_reason()
+        if reason is None:
+            return None
+        # Let the normal policy_runner command path send one explicit Hold after
+        # the final execute window and before reporting completion. This
+        # deactivates delta_preview on the next servo tick.
+        if not bool(getattr(self, "_training_episode_completion_hold_emitted", False)):
+            return None
+        return reason
+
+    def close(self) -> None:
+        super().close()
+        provider = getattr(self, "episode_observation_provider", None)
+        close_provider = getattr(provider, "close", None)
+        if callable(close_provider):
+            close_provider()
+        close_client = getattr(getattr(self, "_client", None), "close", None)
+        if callable(close_client):
+            close_client()
+        action_log = getattr(self, "_action_log", None)
+        if action_log is not None:
+            action_log.close()
+            self._action_log = None

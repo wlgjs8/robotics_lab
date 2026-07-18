@@ -6,14 +6,6 @@
 
 namespace camera_server {
 
-FrameSynchronizer::FrameSynchronizer(const AppConfig& cfg)
-    : required_keys_(required_stream_keys(cfg)), master_key_(stream_key(cfg.sync.master_camera, "color")),
-      sync_(cfg.sync), hardware_synced_(cfg.sync.mode == "hardware") {
-  if (std::find(required_keys_.begin(), required_keys_.end(), master_key_) == required_keys_.end() && !required_keys_.empty()) {
-    master_key_ = required_keys_.front();
-  }
-}
-
 namespace {
 
 const FrameMeta* nearest_by_timestamp(const std::deque<FrameMeta>& frames, uint64_t target_time_ns) {
@@ -44,9 +36,29 @@ void trim_buffer(std::deque<FrameMeta>& frames, size_t max_size) {
 
 }  // namespace
 
+namespace {
+double percentile(std::vector<double> values, double q) {
+  if (values.empty()) return 0.0;
+  std::sort(values.begin(), values.end());
+  const size_t index = static_cast<size_t>(q * static_cast<double>(values.size() - 1));
+  return values[index];
+}
+}  // namespace
+
+FrameSynchronizer::FrameSynchronizer(const AppConfig& cfg)
+    : FrameSynchronizer(cfg.sync, effective_bundle_groups(cfg).front(), cfg.health.fps_window_sec) {}
+
+FrameSynchronizer::FrameSynchronizer(SyncConfig sync, BundleGroupConfig group, double stats_window_sec)
+    : required_keys_(group.required_streams), master_key_(group.master_stream), sync_(std::move(sync)),
+      group_(std::move(group)), hardware_synced_(sync_.mode == "hardware"),
+      stats_window_sec_(stats_window_sec) {}
+
 std::optional<FrameBundleMeta> FrameSynchronizer::push_frame(const FrameMeta& meta,
                                                              const std::map<std::string, uint64_t>& drop_counters) {
   std::lock_guard<std::mutex> lk(mu_);
+  if (std::find(required_keys_.begin(), required_keys_.end(), meta.ring_name) == required_keys_.end()) {
+    return std::nullopt;
+  }
   auto& current_buffer = buffers_[meta.ring_name];
   current_buffer.push_back(meta);
   trim_buffer(current_buffer, max_buffered_frames_);
@@ -59,6 +71,13 @@ std::optional<FrameBundleMeta> FrameSynchronizer::push_frame(const FrameMeta& me
   if (master_it == buffers_.end() || master_it->second.empty()) return std::nullopt;
   const FrameMeta master = master_it->second.back();
   if (master.frame_number != 0 && master.frame_number <= last_emitted_master_frame_number_) return std::nullopt;
+  if (master.frame_number != 0 && master.frame_number != pending_master_frame_number_) {
+    if (pending_master_frame_number_ != 0 && pending_master_frame_number_ > last_emitted_master_frame_number_) {
+      ++dropped_master_count_;
+      ++incomplete_bundle_count_;
+    }
+    pending_master_frame_number_ = master.frame_number;
+  }
 
   std::map<std::string, FrameMeta> selected;
   selected[master.ring_name] = master;
@@ -89,14 +108,15 @@ std::optional<FrameBundleMeta> FrameSynchronizer::push_frame(const FrameMeta& me
   double diff_ms = 0.0;
   if (min_t != UINT64_MAX && max_t >= min_t) diff_ms = static_cast<double>(max_t - min_t) / 1e6;
   last_max_time_diff_ms_ = diff_ms;
-  if (complete && diff_ms > sync_.max_bundle_time_diff_ms) complete = false;
+  if (complete && diff_ms > group_.max_bundle_time_diff_ms) complete = false;
 
   if (!complete && !sync_.publish_incomplete_bundles) {
-    ++incomplete_bundle_count_;
+    ++incomplete_retry_count_;
     return std::nullopt;
   }
 
   FrameBundleMeta bundle;
+  bundle.group_name = group_.name;
   bundle.bundle_seq = ++bundle_seq_;
   bundle.hardware_synced = hardware_synced_;
   bundle.sync_policy = sync_.bundle_policy;
@@ -104,13 +124,23 @@ std::optional<FrameBundleMeta> FrameSynchronizer::push_frame(const FrameMeta& me
   bundle.complete = complete;
   bundle.drop_counters = drop_counters;
   if (min_t == UINT64_MAX) {
-      bundle.bundle_time_ns = master.host_arrival_time_ns;
+    bundle.bundle_time_ns = master.host_arrival_time_ns;
   } else {
     bundle.bundle_time_ns = min_t + (max_t - min_t) / 2;
   }
   bundle.frames = std::move(selected);
-  if (complete) ++complete_bundle_count_;
-  else ++incomplete_bundle_count_;
+  if (complete) {
+    ++complete_bundle_count_;
+    const uint64_t sample_time_ns = max_t == 0 ? master.host_arrival_time_ns : max_t;
+    completed_samples_.emplace_back(sample_time_ns, diff_ms);
+    const uint64_t window_ns = static_cast<uint64_t>(stats_window_sec_ * 1e9);
+    while (!completed_samples_.empty() && sample_time_ns > completed_samples_.front().first &&
+           sample_time_ns - completed_samples_.front().first > window_ns) {
+      completed_samples_.pop_front();
+    }
+  } else {
+    ++incomplete_bundle_count_;
+  }
   if (master.frame_number != 0) last_emitted_master_frame_number_ = master.frame_number;
 
   for (const auto& key : required_keys_) {
@@ -124,9 +154,9 @@ std::optional<FrameBundleMeta> FrameSynchronizer::push_frame(const FrameMeta& me
       }
     } else {
       const uint64_t horizon_ns = master.host_arrival_time_ns >
-                                          static_cast<uint64_t>(sync_.max_bundle_time_diff_ms * 1e6)
+                                          static_cast<uint64_t>(group_.max_bundle_time_diff_ms * 1e6)
                                       ? master.host_arrival_time_ns -
-                                            static_cast<uint64_t>(sync_.max_bundle_time_diff_ms * 1e6)
+                                            static_cast<uint64_t>(group_.max_bundle_time_diff_ms * 1e6)
                                       : 0;
       while (!frames.empty() && frames.front().host_arrival_time_ns < horizon_ns) frames.pop_front();
     }
@@ -152,6 +182,60 @@ uint64_t FrameSynchronizer::bundle_seq() const {
 double FrameSynchronizer::last_max_time_diff_ms() const {
   std::lock_guard<std::mutex> lk(mu_);
   return last_max_time_diff_ms_;
+}
+
+BundleStats FrameSynchronizer::stats() const {
+  std::lock_guard<std::mutex> lk(mu_);
+  BundleStats out;
+  out.topic = group_.topic;
+  out.bundle_seq = bundle_seq_;
+  out.complete_bundle_count = complete_bundle_count_;
+  out.incomplete_retry_count = incomplete_retry_count_;
+  out.dropped_master_count = dropped_master_count_;
+  out.last_skew_ms = last_max_time_diff_ms_;
+  if (completed_samples_.size() >= 2) {
+    const double span_sec = static_cast<double>(completed_samples_.back().first - completed_samples_.front().first) / 1e9;
+    if (span_sec > 0.0) out.publish_rate_hz = static_cast<double>(completed_samples_.size() - 1) / span_sec;
+  }
+  std::vector<double> skews;
+  skews.reserve(completed_samples_.size());
+  for (const auto& sample : completed_samples_) skews.push_back(sample.second);
+  out.skew_p50_ms = percentile(skews, 0.50);
+  out.skew_p95_ms = percentile(skews, 0.95);
+  out.skew_max_ms = skews.empty() ? 0.0 : *std::max_element(skews.begin(), skews.end());
+  return out;
+}
+
+FrameSynchronizerSet::FrameSynchronizerSet(const AppConfig& cfg) {
+  for (auto group : effective_bundle_groups(cfg)) {
+    SyncConfig sync = cfg.sync;
+    sync.max_bundle_time_diff_ms = group.max_bundle_time_diff_ms;
+    sync.publish_incomplete_bundles = group.publish_incomplete_bundles;
+    groups_.push_back(std::make_unique<FrameSynchronizer>(sync, std::move(group), cfg.health.fps_window_sec));
+  }
+}
+
+std::vector<PublishedBundle> FrameSynchronizerSet::push_frame(
+    const FrameMeta& meta, const std::map<std::string, uint64_t>& drop_counters) {
+  std::vector<PublishedBundle> out;
+  for (auto& group : groups_) {
+    auto bundle = group->push_frame(meta, drop_counters);
+    if (bundle) out.push_back(PublishedBundle{group->topic(), std::move(*bundle)});
+  }
+  return out;
+}
+
+std::map<std::string, BundleStats> FrameSynchronizerSet::stats() const {
+  std::map<std::string, BundleStats> out;
+  for (const auto& group : groups_) out[group->group_name()] = group->stats();
+  return out;
+}
+
+BundleStats FrameSynchronizerSet::compatibility_stats() const {
+  for (const auto& group : groups_) {
+    if (group->topic() == "camera.bundle") return group->stats();
+  }
+  return groups_.empty() ? BundleStats{} : groups_.front()->stats();
 }
 
 }  // namespace camera_server

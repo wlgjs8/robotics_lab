@@ -20,7 +20,7 @@ schema: robotics_lab.policy_runner.v1
 #   - the physical-gate ATTESTATIONS below are declared (operator: validated this session
 #     — real motion + gripper + collision guard exercised under supervision 2026-06-21).
 #   - a live camera section (camera_server ZMQ bundle on 5600) is enabled.
-# Pairs with rb_servo_server/config/local/stack_real.yaml (pgmode real, PHYSICAL motion).
+# Pairs with rb_servo_server/config/stack_real.yaml (pgmode real, PHYSICAL motion).
 # This config binds state on 50378 so it can coexist with make run's teleop_mux
 # state client on 50376.
 # =====================================================================================

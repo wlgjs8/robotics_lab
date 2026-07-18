@@ -16,8 +16,6 @@ using rb_servo::control::ChunkFrame;
 using rb_servo::control::DeltaTwistFollower;
 using rb_servo::control::DeltaTwistFollowerConfig;
 using rb_servo::control::DeltaTwistStepPhase;
-using rb_servo::control::GraspCommitArmCommand;
-using rb_servo::control::GraspPhase;
 
 static int g_failures = 0;
 
@@ -152,6 +150,10 @@ int main() {
     check(follower.windowIndex() == 8, "rows beyond reserve were not consumed");
     check(follower.diag().normal_consumed == 6, "normal consumed count recorded");
     check(follower.diag().reserve_consumed == 2, "reserve consumed count recorded");
+    check(follower.diag().frame_rows == 9, "frame row count recorded");
+    check(follower.diag().normal_budget == 6, "effective normal budget recorded");
+    check(follower.diag().total_budget == 8, "effective total budget recorded");
+    check(follower.diag().steps_remaining == 0, "remaining budget reaches zero");
   }
 
   std::printf("Test B: fresh frame resets phase without zeroing velocity\n");
@@ -193,6 +195,8 @@ int main() {
     linear_x.submitFrame(makeFrame({Vec6{10.0, 0.0, 0.0, 0.0, 0.0, 0.0}}), identityPose());
     (void)linear_x.tick(TICK);
     check(linearNorm(linear_x.diag().xi_ref) <= cfg.lin.v_max + 1e-12, "linear xi_ref norm respects configured limit");
+    check((linear_x.diag().clamp_mask & rb_servo::control::DeltaTwistClampXiRefLinear) != 0,
+          "xi_ref linear clamp bit recorded");
     check(linear_x.diag().xi_ref.x > 0.17, "x direction preserved by norm clamp");
     check(std::fabs(linear_x.diag().xi_ref.y) < 1e-12, "no off-axis y from x-only clamp");
 
@@ -207,6 +211,28 @@ int main() {
     (void)angular_xy.tick(TICK);
     check(angularNorm(angular_xy.diag().xi_ref) <= cfg.ang.v_max + 1e-12, "diagonal angular norm respects configured limit");
     check(std::fabs(angular_xy.diag().xi_ref.rx - angular_xy.diag().xi_ref.ry) < 1e-12, "diagonal angular direction ratio preserved");
+    check((angular_xy.diag().clamp_mask & rb_servo::control::DeltaTwistClampXiRefAngular) != 0,
+          "xi_ref angular clamp bit recorded");
+  }
+
+  // Clamp attribution is a telemetry contract; it must not alter the shaper.
+  std::printf("Test C2: acceleration/jerk shaping diagnostics identify clamp stages\n");
+  {
+    DeltaTwistFollowerConfig cfg = fastConfig();
+    cfg.lin = AxisLimit{10.0, 0.10, 0.20};
+    cfg.max_residual_m = 10.0;
+    cfg.max_lead_m = 10.0;
+    DeltaTwistFollower follower(cfg);
+    follower.submitFrame(makeFrame({Vec6{0.10, 0.0, 0.0, 0.0, 0.0, 0.0}}), identityPose());
+    (void)follower.tick(TICK);
+    check((follower.diag().clamp_mask &
+           rb_servo::control::DeltaTwistClampDesiredAccelLinear) != 0,
+          "desired linear acceleration clamp bit recorded");
+    check((follower.diag().clamp_mask &
+           rb_servo::control::DeltaTwistClampDesiredJerkLinear) != 0,
+          "desired linear jerk clamp bit recorded");
+    check(finiteVec6(follower.diag().accel_cmd), "accel_cmd telemetry is finite");
+    check(follower.diag().accel_cmd.x > 0.0, "accel_cmd telemetry preserves direction");
   }
 
   std::printf("Test D: min time-to-go prevents end-frame spike\n");
@@ -324,6 +350,9 @@ int main() {
     }
     check(max_lead_m <= cfg.max_lead_m + 1e-9, "linear command lead stays clamped");
     check(max_lead_rad <= cfg.max_lead_rad + 1e-9, "angular command lead stays clamped");
+    check((follower.diag().clamp_mask & rb_servo::control::DeltaTwistClampLeadLinear) != 0 ||
+          (follower.diag().clamp_mask & rb_servo::control::DeltaTwistClampLeadAngular) != 0,
+          "command lead clamp bit recorded");
   }
 
   std::printf("Test I: missing delta rows do not activate\n");
@@ -334,32 +363,6 @@ int main() {
     f.grip.push_back(1.0);
     follower.submitFrame(f, identityPose());
     check(!follower.active(), "frame without deltas rejected");
-  }
-
-  std::printf("Test I2: surface projector discards delta instead of residualizing it\n");
-  {
-    DeltaTwistFollowerConfig cfg = fastConfig();
-    cfg.surface_action_projector.enable = true;
-    cfg.surface_action_projector.floor_z_m = 0.0;
-    cfg.surface_action_projector.floor_z_m_configured = true;
-    cfg.surface_action_projector.soft_floor_margin_m = 0.012;
-    cfg.surface_action_projector.stop_floor_margin_m = 0.002;
-    cfg.surface_action_projector.max_tangent_delta_near_floor_m = 1.0;
-    cfg.surface_action_projector.max_down_delta_near_floor_m = 0.0002;
-    cfg.surface_action_projector.max_yaw_delta_near_floor_rad = 1.0;
-    cfg.surface_action_projector.max_pitch_roll_delta_near_floor_rad = 1.0;
-    DeltaTwistFollower follower(cfg);
-    Pose6D near_floor = identityPose();
-    near_floor.z = 0.004;
-    follower.submitFrame(makeFrame({Vec6{0.0, 0.0, -0.004, 0.0, 0.0, 0.0}}), near_floor);
-    check(follower.diag().surface_projection.active, "surface projector activates near floor");
-    check(follower.diag().step_delta.z < -0.003, "raw step delta remains visible in telemetry");
-    check(follower.diag().projected_step_delta.z > follower.diag().step_delta.z,
-          "projected step delta is reduced before pending residual");
-    check(std::fabs(follower.pendingDelta().z - follower.diag().projected_step_delta.z) < 1e-12,
-          "pending residual receives projected delta only");
-    check(follower.diag().surface_projection.discarded_delta_local.z < 0.0,
-          "discarded downward delta is reported");
   }
 
   std::printf("Test J: reanchor clears dangerous residual\n");
@@ -378,140 +381,7 @@ int main() {
     check(angularNorm(follower.diag().pending_delta) < 1e-9, "old pending rotation cleared on reanchor");
   }
 
-  std::printf("Test K: grasp closing hold drops incoming policy deltas\n");
-  {
-    DeltaTwistFollower follower(fastConfig());
-    const Pose6D start = identityPose();
-    follower.submitFrame(makeFrame({
-        Vec6{0.03, 0.0, 0.0, 0.0, 0.0, 0.0},
-        Vec6{0.05, 0.0, 0.0, 0.0, 0.0, 0.0},
-    }), start);
-    follower.setFeedbackPose(start);
-    GraspCommitArmCommand hold;
-    hold.phase = GraspPhase::ClosingHold;
-    hold.commit_active = true;
-    hold.drop_policy_delta = true;
-    hold.clear_residual = true;
-    hold.hold_pose = true;
-    hold.gripper_override_active = true;
-    hold.gripper_target = 0.0;
-    hold.policy_delta_dropped = true;
-    follower.setGraspCommitCommand(hold);
-    const Pose6D out = tickOpenLoop(follower, POLICY_DT * 1.1);
-    check(linearNorm(follower.pendingDelta()) < 1e-12, "closing hold keeps pending residual clear");
-    check(follower.windowConsumed() == 2, "closing hold consumes old rows only as dropped deltas");
-    check(follower.diag().grasp_commit.policy_delta_dropped, "grasp telemetry reports dropped policy delta");
-    check(follower.currentGrip() == 0.0, "closing hold keeps gripper close target");
-    check(rb_servo::math::positionDistance(out, start) < 1e-9, "closing hold keeps pose at feedback reference");
-  }
-
-  std::printf("Test K2: blocked pause does not consume steps or grow residual\n");
-  {
-    DeltaTwistFollower follower(fastConfig());
-    const Pose6D start = identityPose();
-    follower.submitFrame(makeFrame({
-        Vec6{0.010, 0.0, 0.0, 0.0, 0.0, 0.0},
-        Vec6{0.020, 0.0, 0.0, 0.0, 0.0, 0.0},
-        Vec6{0.030, 0.0, 0.0, 0.0, 0.0, 0.0},
-    }), start);
-    const int consumed_before = follower.windowConsumed();
-    follower.setBlocked(true, 0x11);
-    for (int i = 0; i < 4; ++i) {
-      follower.pauseBlocked(start, POLICY_DT);
-    }
-    check(follower.windowConsumed() == consumed_before, "blocked pause does not consume policy rows");
-    check(follower.diag().seg_step_index == 0, "blocked pause leaves current follower_step unchanged");
-    check(linearNorm(follower.pendingDelta()) < 1e-12, "blocked pause clears pending residual");
-    check(follower.diag().blocked, "blocked telemetry is set");
-    check(follower.diag().block_reason == 0x11, "blocked reason bitmask is preserved");
-  }
-
-  std::printf("Test K3: block timeout requires fresh chunk before resume\n");
-  {
-    DeltaTwistFollowerConfig cfg = fastConfig();
-    cfg.block_requires_fresh_chunk_sec = 0.010;
-    DeltaTwistFollower follower(cfg);
-    const Pose6D start = identityPose();
-    follower.submitFrame(makeFrame({
-        Vec6{0.010, 0.0, 0.0, 0.0, 0.0, 0.0},
-        Vec6{0.020, 0.0, 0.0, 0.0, 0.0, 0.0},
-    }), start);
-    follower.setBlocked(true, 0x01);
-    follower.pauseBlocked(start, 0.020);
-    check(follower.diag().block_requires_fresh_chunk, "long block marks current window stale");
-    const int consumed_before = follower.windowConsumed();
-    follower.setBlocked(false);
-    (void)follower.tick(POLICY_DT);
-    check(follower.windowConsumed() == consumed_before, "old rows are not consumed after unblock without fresh chunk");
-    check(follower.diag().block_requires_fresh_chunk, "fresh chunk is still required after unblock");
-    ChunkFrame fresh = makeFrame({
-        Vec6{0.003, 0.0, 0.0, 0.0, 0.0, 0.0},
-    });
-    fresh.recv_seq = 100;
-    fresh.wire_seq = 101;
-    follower.submitFrame(fresh, start);
-    check(!follower.diag().block_requires_fresh_chunk, "fresh chunk clears stale-window requirement");
-    check(follower.windowConsumed() == 1, "fresh chunk consumes its first row normally");
-    check(follower.diag().seg_recv_seq == 100, "fresh chunk recv_seq is reported");
-  }
-
-  std::printf("Test K4: safety block during grasp commit clears residual and keeps gripper stable\n");
-  {
-    DeltaTwistFollower follower(fastConfig());
-    const Pose6D start = identityPose();
-    follower.submitFrame(makeFrame({
-        Vec6{0.030, 0.0, 0.0, 0.0, 0.0, 0.0},
-        Vec6{0.050, 0.0, 0.0, 0.0, 0.0, 0.0},
-    }), start);
-    GraspCommitArmCommand closing;
-    closing.phase = GraspPhase::ClosingHold;
-    closing.commit_active = true;
-    closing.drop_policy_delta = true;
-    closing.clear_residual = true;
-    closing.hold_pose = true;
-    closing.gripper_override_active = true;
-    closing.gripper_target = 0.0;
-    closing.policy_delta_dropped = true;
-    follower.setGraspCommitCommand(closing);
-    follower.setBlocked(true, 0x02);
-    follower.pauseBlocked(start, POLICY_DT);
-    check(linearNorm(follower.pendingDelta()) < 1e-12, "blocked grasp commit clears residual");
-    check(follower.windowConsumed() == 1, "blocked grasp commit does not consume more rows");
-    check(follower.currentGrip() == 0.0, "blocked closing keeps stable close gripper target");
-    check(follower.diag().grasp_commit.gripper_override_active, "grasp gripper override remains visible");
-  }
-
-  std::printf("Test L: grasp lift out moves upward and holds gripper closed\n");
-  {
-    DeltaTwistFollower follower(fastConfig());
-    const Pose6D start = identityPose();
-    follower.submitFrame(makeFrame({
-        Vec6{0.0, 0.0, 0.0, 0.0, 0.0, 0.0},
-    }), start);
-    follower.setFeedbackPose(start);
-    GraspCommitArmCommand lift;
-    lift.phase = GraspPhase::LiftOut;
-    lift.commit_active = true;
-    lift.drop_policy_delta = true;
-    lift.clear_residual = true;
-    lift.lift_active = true;
-    lift.gripper_override_active = true;
-    lift.gripper_target = 0.0;
-    lift.policy_delta_dropped = true;
-    lift.lift_height_m = 0.030;
-    lift.lift_progress = 0.5;
-    follower.setGraspCommitCommand(lift);
-    const Pose6D mid = follower.tick(TICK);
-    check(mid.z > 0.014 && mid.z < 0.016, "lift progress moves pose in stand +z");
-    check(follower.currentGrip() == 0.0, "lift keeps gripper close target");
-    lift.lift_progress = 1.0;
-    follower.setGraspCommitCommand(lift);
-    const Pose6D top = follower.tick(TICK);
-    check(top.z > 0.029 && top.z < 0.031, "lift reaches configured height at full progress");
-    check(linearNorm(follower.pendingDelta()) < 1e-12, "lift does not accumulate pending residual");
-  }
-
-  std::printf("Test M: telemetry step phase reaches ringdown\n");
+  std::printf("Test K: telemetry step phase reaches ringdown\n");
   {
     DeltaTwistFollowerConfig cfg = fastConfig();
     cfg.consume_steps = 1;

@@ -8,7 +8,8 @@ import time
 DOF = 6
 TCP_DISPLAY_MODES = ("auto", "actual", "reference", "both")
 CIRCLE_OVERLAY_SCHEMA_VERSION = "robotics_lab.circle_overlay.v1"
-CHUNK_OVERLAY_SCHEMA_VERSION = "robotics_lab.chunk_overlay.v2"
+CHUNK_OVERLAY_SCHEMA_VERSION = "robotics_lab.chunk_overlay.v3"
+LEGACY_CHUNK_OVERLAY_SCHEMA_VERSION = "robotics_lab.chunk_overlay.v2"
 # TODO: tune with operator.
 EXTERNAL_BOX_NEAR_M = 0.10
 EXTERNAL_BOX_COLLISION_M = 0.0
@@ -25,6 +26,14 @@ def finite_joint_array(value: Any) -> tuple[float, ...] | None:
             return None
         out.append(float(item))
     return tuple(out)
+
+
+def finite_bool_array(value: Any) -> tuple[bool, ...] | None:
+    if not isinstance(value, list | tuple) or len(value) != DOF:
+        return None
+    if not all(isinstance(item, bool) for item in value):
+        return None
+    return tuple(value)
 
 
 @dataclass(frozen=True)
@@ -235,7 +244,11 @@ class ChunkOverlaySnapshot:
         *,
         received_monotonic: float | None = None,
     ) -> "ChunkOverlaySnapshot | None":
-        if data.get("schema_version") != CHUNK_OVERLAY_SCHEMA_VERSION:
+        wire_schema = data.get("schema_version")
+        if wire_schema not in {
+            CHUNK_OVERLAY_SCHEMA_VERSION,
+            LEGACY_CHUNK_OVERLAY_SCHEMA_VERSION,
+        }:
             return None
         seq = data.get("seq")
         horizon = data.get("horizon")
@@ -261,7 +274,7 @@ class ChunkOverlaySnapshot:
         if not left_poses and not right_poses:
             return None
         return cls(
-            schema_version=CHUNK_OVERLAY_SCHEMA_VERSION,
+            schema_version=str(wire_schema),
             received_monotonic=time.monotonic() if received_monotonic is None else received_monotonic,
             seq=seq,
             policy_dt_sec=policy_dt_sec,
@@ -357,6 +370,234 @@ class CommandSourceSnapshot:
 
 
 @dataclass(frozen=True)
+class ForceTorqueSnapshot:
+    enabled: bool | None = None
+    source: str | None = None
+    source_assurance: str | None = None
+    sensor_health_verified: bool | None = None
+    safety_rated: bool | None = None
+    raw_sensor_wrench: tuple[float, ...] | None = None
+    t_tcp_sensor: Pose6D | None = None
+    wrench_tcp: tuple[float, ...] | None = None
+    gravity_tcp: tuple[float, float, float] | None = None
+    gravity_compensation_model: str | None = None
+    gravity_compensation_calibration_id: str | None = None
+    modeled_gravity_wrench: tuple[float, ...] | None = None
+    fast_external_wrench: tuple[float, ...] | None = None
+    control_external_wrench: tuple[float, ...] | None = None
+    healthy: bool | None = None
+    stale: bool | None = None
+    freshness_value: int | None = None
+    freshness_advanced: bool | None = None
+    reason: str | None = None
+    auto_tare_enabled: bool | None = None
+    tare_valid: bool | None = None
+    tare_state: str | None = None
+    tare_sample_count: int | None = None
+    tare_generation: int | None = None
+    tare_reason: str | None = None
+    residual_tare_tcp: tuple[float, ...] | None = None
+    payload_identification_inhibit: bool | None = None
+    joint_target_profile: str | None = None
+    raw: Mapping[str, Any] | None = None
+
+    @classmethod
+    def parse(cls, value: Any) -> "ForceTorqueSnapshot | None":
+        if not isinstance(value, Mapping):
+            return None
+        return cls(
+            enabled=_optional_bool(value.get("enabled")),
+            source=_optional_str(value.get("source")),
+            source_assurance=_optional_str(value.get("source_assurance")),
+            sensor_health_verified=_optional_bool(value.get("sensor_health_verified")),
+            safety_rated=_optional_bool(value.get("safety_rated")),
+            raw_sensor_wrench=finite_joint_array(value.get("raw_sensor_wrench")),
+            t_tcp_sensor=Pose6D.parse(value.get("t_tcp_sensor")),
+            wrench_tcp=finite_joint_array(value.get("wrench_tcp")),
+            gravity_tcp=_finite_vec3(value.get("gravity_tcp")),
+            gravity_compensation_model=_optional_str(
+                value.get("gravity_compensation_model")
+            ),
+            gravity_compensation_calibration_id=_optional_str(
+                value.get("gravity_compensation_calibration_id")
+            ),
+            modeled_gravity_wrench=finite_joint_array(
+                value.get("modeled_gravity_wrench")
+            ),
+            fast_external_wrench=finite_joint_array(value.get("fast_external_wrench")),
+            control_external_wrench=finite_joint_array(value.get("control_external_wrench")),
+            healthy=_optional_bool(value.get("healthy")),
+            stale=_optional_bool(value.get("stale")),
+            freshness_value=_optional_nonnegative_int(value.get("freshness_value")),
+            freshness_advanced=_optional_bool(value.get("freshness_advanced")),
+            reason=_optional_str(value.get("reason")),
+            auto_tare_enabled=_optional_bool(value.get("auto_tare_enabled")),
+            tare_valid=_optional_bool(value.get("tare_valid")),
+            tare_state=_optional_str(value.get("tare_state")),
+            tare_sample_count=_optional_nonnegative_int(value.get("tare_sample_count")),
+            tare_generation=_optional_nonnegative_int(value.get("tare_generation")),
+            tare_reason=_optional_str(value.get("tare_reason")),
+            residual_tare_tcp=finite_joint_array(value.get("residual_tare_tcp")),
+            payload_identification_inhibit=_optional_bool(
+                value.get("payload_identification_inhibit")
+            ),
+            joint_target_profile=_optional_str(value.get("joint_target_profile")),
+            raw=value,
+        )
+
+
+@dataclass(frozen=True)
+class ForceControlSnapshot:
+    enabled: bool | None = None
+    operating_mode: str | None = None
+    state: str | None = None
+    surface_source: str | None = None
+    compliance_frame: str | None = None
+    compliance_frame_pose_valid: bool | None = None
+    compliance_frame_actual_stand: Pose6D | None = None
+    normal_stand: tuple[float, float, float] | None = None
+    contact_active: bool | None = None
+    normal_contact_active: bool | None = None
+    transverse_contact_active: bool | None = None
+    rotational_contact_active: bool | None = None
+    compliance_active: bool | None = None
+    normal_regulating: bool | None = None
+    transverse_regulating: bool | None = None
+    rotational_regulating: bool | None = None
+    loading_projection_active: bool | None = None
+    control_wrench_surface: tuple[float, ...] | None = None
+    control_wrench_compliance: tuple[float, ...] | None = None
+    wrench_error_surface: tuple[float, ...] | None = None
+    wrench_error_compliance: tuple[float, ...] | None = None
+    compliance_offset_surface: tuple[float, ...] | None = None
+    compliance_velocity_surface: tuple[float, ...] | None = None
+    compliance_acceleration_surface: tuple[float, ...] | None = None
+    raw_policy_delta_surface: tuple[float, ...] | None = None
+    accepted_policy_delta_surface: tuple[float, ...] | None = None
+    compliance_equilibrium_stand: Pose6D | None = None
+    compliance_equilibrium_source: str | None = None
+    compliance_recenter_active: bool | None = None
+    compliance_limit_axes: tuple[bool, ...] | None = None
+    compliance_limit_reason: str | None = None
+    measured_force_n: float | None = None
+    fast_normal_force_n: float | None = None
+    fast_force_norm_n: float | None = None
+    fast_torque_norm_nm: float | None = None
+    contact_threshold_exceeded: bool | None = None
+    hard_limit_threshold_exceeded: bool | None = None
+    hard_limit_sample_count: int | None = None
+    hard_limit_exceeded: bool | None = None
+    target_force_n: float | None = None
+    correction_m: float | None = None
+    velocity_m_s: float | None = None
+    acceleration_m_s2: float | None = None
+    energy_j: float | None = None
+    saturated: bool | None = None
+    proposal_valid: bool | None = None
+    proposal_committed: bool | None = None
+    fault_reason: str | None = None
+    motion_epoch: int | None = None
+    raw: Mapping[str, Any] | None = None
+
+    @classmethod
+    def parse(cls, value: Any) -> "ForceControlSnapshot | None":
+        if not isinstance(value, Mapping):
+            return None
+        return cls(
+            enabled=_optional_bool(value.get("enabled")),
+            operating_mode=_optional_str(value.get("operating_mode")),
+            state=_optional_str(value.get("state")),
+            surface_source=_optional_str(value.get("surface_source")),
+            compliance_frame=_optional_str(value.get("compliance_frame")),
+            compliance_frame_pose_valid=_optional_bool(
+                value.get("compliance_frame_pose_valid")
+            ),
+            compliance_frame_actual_stand=Pose6D.parse(
+                value.get("compliance_frame_actual_stand")
+            ),
+            normal_stand=_finite_vec3(value.get("normal_stand")),
+            contact_active=_optional_bool(value.get("contact_active")),
+            normal_contact_active=_optional_bool(value.get("normal_contact_active")),
+            transverse_contact_active=_optional_bool(
+                value.get("transverse_contact_active")
+            ),
+            rotational_contact_active=_optional_bool(
+                value.get("rotational_contact_active")
+            ),
+            compliance_active=_optional_bool(value.get("compliance_active")),
+            normal_regulating=_optional_bool(value.get("normal_regulating")),
+            transverse_regulating=_optional_bool(value.get("transverse_regulating")),
+            rotational_regulating=_optional_bool(value.get("rotational_regulating")),
+            loading_projection_active=_optional_bool(
+                value.get("loading_projection_active")
+            ),
+            control_wrench_surface=finite_joint_array(
+                value.get("control_wrench_surface")
+            ),
+            control_wrench_compliance=finite_joint_array(
+                value.get("control_wrench_compliance")
+            ),
+            wrench_error_surface=finite_joint_array(value.get("wrench_error_surface")),
+            wrench_error_compliance=finite_joint_array(
+                value.get("wrench_error_compliance")
+            ),
+            compliance_offset_surface=finite_joint_array(
+                value.get("compliance_offset_surface")
+            ),
+            compliance_velocity_surface=finite_joint_array(
+                value.get("compliance_velocity_surface")
+            ),
+            compliance_acceleration_surface=finite_joint_array(
+                value.get("compliance_acceleration_surface")
+            ),
+            raw_policy_delta_surface=finite_joint_array(
+                value.get("raw_policy_delta_surface")
+            ),
+            accepted_policy_delta_surface=finite_joint_array(
+                value.get("accepted_policy_delta_surface")
+            ),
+            compliance_equilibrium_stand=Pose6D.parse(
+                value.get("compliance_equilibrium_stand")
+            ),
+            compliance_equilibrium_source=_optional_str(
+                value.get("compliance_equilibrium_source")
+            ),
+            compliance_recenter_active=_optional_bool(
+                value.get("compliance_recenter_active")
+            ),
+            compliance_limit_axes=finite_bool_array(
+                value.get("compliance_limit_axes")
+            ),
+            compliance_limit_reason=_optional_str(
+                value.get("compliance_limit_reason")
+            ),
+            measured_force_n=_optional_finite(value.get("measured_force_n")),
+            fast_normal_force_n=_optional_finite(value.get("fast_normal_force_n")),
+            fast_force_norm_n=_optional_finite(value.get("fast_force_norm_n")),
+            fast_torque_norm_nm=_optional_finite(value.get("fast_torque_norm_nm")),
+            contact_threshold_exceeded=_optional_bool(value.get("contact_threshold_exceeded")),
+            hard_limit_threshold_exceeded=_optional_bool(
+                value.get("hard_limit_threshold_exceeded")
+            ),
+            hard_limit_sample_count=_optional_nonnegative_int(
+                value.get("hard_limit_sample_count")
+            ),
+            hard_limit_exceeded=_optional_bool(value.get("hard_limit_exceeded")),
+            target_force_n=_optional_finite(value.get("target_force_n")),
+            correction_m=_optional_finite(value.get("correction_m")),
+            velocity_m_s=_optional_finite(value.get("velocity_m_s")),
+            acceleration_m_s2=_optional_finite(value.get("acceleration_m_s2")),
+            energy_j=_optional_finite(value.get("energy_j")),
+            saturated=_optional_bool(value.get("saturated")),
+            proposal_valid=_optional_bool(value.get("proposal_valid")),
+            proposal_committed=_optional_bool(value.get("proposal_committed")),
+            fault_reason=_optional_str(value.get("fault_reason")),
+            motion_epoch=_optional_nonnegative_int(value.get("motion_epoch")),
+            raw=value,
+        )
+
+
+@dataclass(frozen=True)
 class ArmSnapshot:
     mode: str
     q_actual_deg: tuple[float, ...] | None
@@ -396,6 +637,15 @@ class ArmSnapshot:
     # (gripper_state.v1 feedback stamped by the bridge). None when no valid feed.
     gripper_percent: float | None = None
     gripper_moving: bool = False
+    # External F/T sensor wrench from the server's rbpodo decode
+    # (state JSON `eft_wrench`: [fx, fy, fz, tx, ty, tz], N / Nm, sensor frame).
+    # None when absent/non-finite; eft_valid mirrors the server's validity flag.
+    eft_wrench: tuple[float, ...] | None = None
+    eft_valid: bool = False
+    # Optional server-owned force pipeline telemetry. The GUI only observes these
+    # blocks; it never enables or configures force control.
+    force_torque: ForceTorqueSnapshot | None = None
+    force_control: ForceControlSnapshot | None = None
 
     @classmethod
     def parse(
@@ -501,6 +751,10 @@ class ArmSnapshot:
             cartesian_solve=CartesianSolveSnapshot.parse(data.get("cartesian_solve")),
             gripper_percent=gripper_percent,
             gripper_moving=gripper_moving,
+            eft_wrench=finite_joint_array(data.get("eft_wrench")),
+            eft_valid=bool(data.get("eft_valid", False)),
+            force_torque=ForceTorqueSnapshot.parse(data.get("force_torque")),
+            force_control=ForceControlSnapshot.parse(data.get("force_control")),
         )
 
     def selected_tcp_pose(self, mode: str = "auto") -> Pose6D | None:
@@ -606,6 +860,10 @@ def _optional_str(value: Any) -> str | None:
 
 def _optional_int(value: Any) -> int | None:
     return int(value) if isinstance(value, int) else None
+
+
+def _optional_nonnegative_int(value: Any) -> int | None:
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def _optional_finite(value: Any) -> float | None:
@@ -722,6 +980,8 @@ class StateSnapshot:
     recording: Mapping[str, Any] | None
     arm_init: Mapping[str, Any] | None
     init_motion: Mapping[str, Any] | None
+    payload_identification: Mapping[str, Any] | None
+    motion_epoch: int | None
     raw: Mapping[str, Any]
 
     @classmethod
@@ -772,6 +1032,13 @@ class StateSnapshot:
             recording=data.get("recording") if isinstance(data.get("recording"), Mapping) else None,
             arm_init=data.get("arm_init") if isinstance(data.get("arm_init"), Mapping) else None,
             init_motion=data.get("init_motion") if isinstance(data.get("init_motion"), Mapping) else None,
+            payload_identification=(
+                data["force_torque"].get("payload_identification")
+                if isinstance(data.get("force_torque"), Mapping)
+                and isinstance(data["force_torque"].get("payload_identification"), Mapping)
+                else None
+            ),
+            motion_epoch=_optional_nonnegative_int(data.get("motion_epoch")),
             raw=data,
         )
 

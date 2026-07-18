@@ -55,14 +55,14 @@ IRobotBackend
   MockBackend / RbpodoBackend
 ```
 
-Force-control future path:
+Force-control path:
 
 ```text
-Tcp command + desired wrench
+TcpPoseTarget + rbpodo EFT wrench
         ↓
-CartesianController
+DeltaTwist/chunk follower
         ↓
-ForceController
+F/T pipeline + contact supervisor + NormalForceController
         ↓
 IK
         ↓
@@ -87,7 +87,7 @@ Already implemented:
 - send failure policy that records only successfully sent targets
 - real-mode startup/config checks for realtime setup, local command bind, and conservative safety policy
 - capped filter dt and acceleration-overshoot guard
-- force-control types/config/interface scaffold
+- default-off F/T monitor, guard, and normal-admittance runtime
 - thread-safe `ServoSnapshot` read surface for tests/debug/publisher integration
 - send timestamp/skew/duration logging for left/right servo commands
 
@@ -98,7 +98,7 @@ Still pending:
 - better command buffer for RT priority inversion
 - action chunk interpolation
 - Cartesian FK/IK
-- force control integration into Cartesian layer
+- physical F/T characterization and staged force acceptance
 
 
 ## v3 fail-safe requirements
@@ -242,12 +242,19 @@ Do not call Rainbow FK/IK inside the high-rate loop except for debugging. Use lo
 
 ## Milestone 5: force control integration
 
-Force control is currently included as a design scaffold.
+Force control is integrated into `DualArmServoLoop` and disabled in tracked
+configs. Site-local profiles can select monitor, guard, or guarded normal
+admittance. Physical enforcement remains unaccepted until the F/T runbook
+evidence is complete.
 
 Use files:
 
 - `include/rb_servo/control/force_controller.hpp`
 - `src/control/force_controller.cpp`
+- `include/rb_servo/control/normal_force_controller.hpp`
+- `src/control/normal_force_controller.cpp`
+- `include/rb_servo/sensor/ft_wrench_pipeline.hpp`
+- `src/sensor/ft_wrench_pipeline.cpp`
 - `include/rb_servo/sensor/i_force_torque_sensor.hpp`
 - `include/rb_servo/sensor/mock_force_torque_sensor.hpp`
 - `src/sensor/mock_force_torque_sensor.cpp`
@@ -265,19 +272,18 @@ nominal TCP target
 
 Do not apply force compensation directly to joint targets.
 
-Before using real contact:
+Before physical promotion:
 
-- verify force sensor sign convention
-- implement tare/bias
-- clamp position offset and per-tick step
-- log measured wrench, target wrench, TCP compensation
-- start with tiny gains
+- supply independent sensor presence/fault/overrange/freshness signals
+- verify `T_tcp_sensor`, sign, bias, tare, payload, and gravity compensation
+- validate monitor-only contact supervision and telemetry on the installed sensor
+- measure same-tick send suppression and flow-chunk epoch invalidation
+- validate DeltaTwist tangential ownership while projecting the contact normal
+- pass deterministic loop replay before supervised hardware acceptance
 
-If integrating `mo_forcecontroller`:
-
-- wrap it behind `ForceController`
-- make sampling time configurable
-- use the configured loop `dt_sec`; the supported robot-control target is `Ts=0.002`
+The project-native `NormalForceController` uses the actual loop `dt_sec`,
+unilateral server hard caps, a passivity observer, and propose/commit state
+updates. See `docs/force_control.md` for the active schema and promotion gates.
 
 ## Coding rules
 
@@ -298,6 +304,6 @@ A good next Codex task is:
 3. jitter columns exist and have meaningful values
 4. YAML changes are reflected at runtime
 5. no regression to real/controller-simulation placeholder build
-6. force-control scaffold compiles but remains disabled by default
+6. tracked force config stays disabled and force-control tests pass
 7. invalid `JointTarget` without `q_target_deg` holds previous target and never moves to zeros
 8. `EmergencyStop` latches fault and ignores later motion commands until `ResetFault`

@@ -3,8 +3,9 @@ COMPOSE_FILE ?= docker-compose.yml
 PROJECT ?= robotics_lab
 POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
+FLOW_INFER_ARGS ?=
 
-.PHONY: run flow-infer-real build vm-up vm-down vm-status policy-hdf5-audit-smoke deps-hardware-free cam-up cam-engine-rebuild cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
+.PHONY: run flow-infer-real flow-infer-sim-offline flow-infer-training-replay build rebuild vm-up vm-down vm-status policy-hdf5-audit-smoke deps-hardware-free cam-up cam-engine-rebuild cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
 
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
@@ -25,6 +26,22 @@ run:
 flow-infer-real:
 	./tools/flow_infer_real_policy.sh
 
+# External OpenPI rollout on the rbpodo controller pgmode-simulation stack.
+# Start `make run MODE=sim` and `scripts/offline_camera_replay.py` first.
+# This target has no real-camera or real/gripper-motion authority. W6 is the
+# pgmode-validated sim default; flow-infer-real keeps its existing W12 default.
+flow-infer-sim-offline:
+	FLOW_INFER_CONFIG=policy_runner/config/flow_sim_offline.yaml \
+	FLOW_INFER_ROLLOUT_MODE=controller_sim \
+	FLOW_INFER_CHUNK_EXECUTE_STEPS=6 \
+	./tools/flow_infer_real_policy.sh $(FLOW_INFER_ARGS)
+
+# Exact saved-observation replay into the live OpenPI server, followed by
+# pgmode controller-simulation execution. Requires make run MODE=sim first.
+# Set FLOW_TRAINING_EPISODE_HDF5; no live camera or physical gripper is used.
+flow-infer-training-replay:
+	./tools/flow_infer_training_episode_replay.sh $(FLOW_INFER_ARGS)
+
 # Source-build the full local stack for DIRECT real-controller work (no VM):
 # rb_servo_server (rbpodo backend, RB_SERVO_ENABLE_RBPODO=ON) into the path
 # `make run` launches, + setcap, + rb_gui/policy_runner editable installs.
@@ -32,6 +49,11 @@ flow-infer-real:
 # install is one-time). Override jobs with BUILD_JOBS=N.
 build:
 	./tools/build_stack.sh
+
+# Explicit hard reset for cache/toolchain/build-tree recovery. Normal source
+# edits, including config.hpp layout changes, stay on the incremental build path.
+rebuild:
+	./tools/build_stack.sh --clean
 
 # Rainbow VIRTUAL control-box VMs (vendor OVA): boot 2 VMs and map them to the
 # real controller IPs so `make run MODE=sim` works without hardware.
@@ -80,10 +102,15 @@ deps-hardware-free:
 #   make cam-up CAMERA_CONFIG=/app/config/head_wrists.yaml STEREO_CAM_K=/app/config/d435_ir_640x480_K.txt  # 헤드 IR 640x480
 CAMERA_CONFIG ?= /app/config/d435_head_1280x720.yaml
 STEREO_CAM_JSON ?= /app/config/__no_advanced__.json
+LIBREALSENSE_VERSION ?= 2.58.1
+LIBREALSENSE_REF ?= bf2778061d5dd29776e9aca8765f75852671760b
+LIBREALSENSE_BACKEND ?= native
 # 헤드 1280x720 IR intrinsics는 camera_server가 기동 시 디바이스에서 덤프(아래 경로).
 STEREO_CAM_K ?= /app/stereo_worker/d435_ir_1280x720_K.txt
 
 cam-up:
+	LIBREALSENSE_VERSION=$(LIBREALSENSE_VERSION) LIBREALSENSE_REF=$(LIBREALSENSE_REF) \
+	LIBREALSENSE_BACKEND=$(LIBREALSENSE_BACKEND) \
 	CAMERA_CONFIG=$(CAMERA_CONFIG) CAMERA_REALSENSE_JSON=$(STEREO_CAM_JSON) \
 	STEREO_INTRINSICS=$(STEREO_CAM_K) \
 		$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile real_camera up -d --build camera_server

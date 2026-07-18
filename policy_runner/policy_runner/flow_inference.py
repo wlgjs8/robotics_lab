@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TextIO
@@ -485,6 +486,10 @@ class FlowMatchingActionSource:
         self._reset_right_pose: np.ndarray | None = None
         self._chunk: np.ndarray | None = None
         self._chunk_index = 0
+        self._last_server_motion_epoch: int | None = None
+        self._force_recovery_config: Any | None = None
+        self._init_force_recovery_state()
+        self._init_inference_timing_state()
         self._warned_missing_camera_client = False
         self.last_image_decode_count = 0
         self.last_missing_camera_count = 0
@@ -505,6 +510,11 @@ class FlowMatchingActionSource:
         self._gripper_targets_by_arm: dict[str, float | None] = {"left": None, "right": None}
         self._last_overlay_payload: dict[str, Any] | None = None
         self._chunk_overlay_seq = 0
+        self._stream_emitted_policy_steps = 0
+        self._active_chunk_metadata: dict[str, object] | None = None
+        self._stream_next_chunk_metadata: dict[str, object] | None = None
+        self._stream_activation_candidate_metadata: dict[str, object] | None = None
+        self.checkpoint_id = str(Path(checkpoint_path).expanduser())
         # Terminal chunk dump (debug): when FLOW_INFER_PRINT_CHUNK is truthy, print
         # every freshly-inferred action chunk step-by-step for both arms — position
         # deltas in meters, rotation deltas converted rad->deg, plus gripper target.
@@ -622,6 +632,11 @@ class FlowMatchingActionSource:
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         self._last_overlay_payload = snapshot.payload
+        blocked, recovery_intent = self._force_recovery_gate(snapshot, now_monotonic)
+        if blocked:
+            return recovery_intent
+        self._handle_server_motion_epoch(snapshot)
+        self._before_policy_intent(snapshot, now_monotonic)
         if getattr(self, "enable_async_chunking", False):
             return self._next_intent_streamed(snapshot, now_monotonic)
         payload = snapshot.payload
@@ -640,18 +655,14 @@ class FlowMatchingActionSource:
             return self._no_policy_input_intent()
 
         if self._chunk is None or self._chunk_index >= self._current_chunk_execute_limit():
-            chunk = self._sample_chunk(payload)
+            chunk = self._sample_and_align_chunk_timed(payload)
             if chunk is None:
                 self._chunk = None
                 return self._no_policy_input_intent()
-            if self.ee_local_r_align is not None:
-                # Policy steps are in the training EE frame (e.g. pika tip);
-                # convert to the RB TCP body frame: v_tcp = R_alignT . v_tip.
-                chunk = rotate_flow_arm_vectors(chunk, self.ee_local_r_align.T)
-            chunk = self._apply_rotation_axis_mask(chunk)
             self._chunk = chunk
             self._chunk_index = 0
             self._steps_since_boundary = 0  # restart the crossfade ramp at the boundary
+            self._record_inference_activation()
             self._print_chunk_steps(chunk)
             self._begin_chunk_tracking(chunk, payload, now_monotonic)
             self._publish_chunk_overlay(now_monotonic)
@@ -661,6 +672,494 @@ class FlowMatchingActionSource:
         gripper_targets = self._integrate_gripper_targets(step, payload)
         self._dispatch_gripper_step(step)
         return self._emit_step_intent(step, payload, gripper_targets)
+
+    def configure_force_recovery(self, config: Any) -> None:
+        """Enable the bimanual policy gate without changing server force ownership."""
+        self._force_recovery_config = config
+        self._init_force_recovery_state()
+
+    def _init_force_recovery_state(self) -> None:
+        self._force_recovery_state = "running"
+        self._force_recovery_contact_started: float | None = None
+        self._force_recovery_release_time: float | None = None
+        self._force_recovery_quiet_since: float | None = None
+        self._force_recovery_prev_pose: dict[str, tuple[float, np.ndarray] | None] = {
+            "left": None,
+            "right": None,
+        }
+        self._force_recovery_frozen_gripper: dict[str, float | None] = {
+            "left": None,
+            "right": None,
+        }
+        self._force_recovery_camera_barrier_seq: int | None = None
+        self._force_recovery_camera_barrier_received: float | None = None
+        self._force_recovery_camera_latest_seq: int | None = None
+        self._force_recovery_camera_latest_received: float | None = None
+        self._force_recovery_camera_fresh = not bool(getattr(self, "camera_names", ()))
+        self._force_recovery_blocked_on = "none"
+        self._force_recovery_last_now: float | None = None
+        self._force_recovery_arm_status = {
+            arm: {"contact_active": False, "measured_normal_force_n": None}
+            for arm in ("left", "right")
+        }
+        self._force_recovery_tcp_velocity = {
+            arm: {"linear_m_s": None, "angular_rad_s": None}
+            for arm in ("left", "right")
+        }
+        self._force_recovery_terminal_abort_reason: str | None = None
+        self._force_recovery_counters = {
+            "contact_events": 0,
+            "recontacts": 0,
+            "chunk_invalidations": 0,
+            "hold_intents": 0,
+            "measured_reanchors": 0,
+            "cold_inference_restarts": 0,
+            "timeouts": 0,
+            "contact_timeouts": 0,
+            "settling_timeouts": 0,
+            "camera_stale_timeouts": 0,
+        }
+
+    def _before_policy_intent(
+        self, snapshot: StateSnapshot, now_monotonic: float
+    ) -> None:
+        _ = (snapshot, now_monotonic)
+
+    @property
+    def force_recovery_terminal_abort_reason(self) -> str | None:
+        return getattr(self, "_force_recovery_terminal_abort_reason", None)
+
+    @property
+    def terminal_abort_reason(self) -> str | None:
+        camera_reason = getattr(self, "_camera_terminal_abort_reason", None)
+        if camera_reason is not None:
+            resolved = str(camera_reason).strip()
+            if resolved:
+                return resolved
+        return self.force_recovery_terminal_abort_reason
+
+    def force_recovery_status(self) -> dict[str, Any]:
+        config = getattr(self, "_force_recovery_config", None)
+        counters = dict(getattr(self, "_force_recovery_counters", {}))
+        now = getattr(self, "_force_recovery_last_now", None)
+        contact_started = getattr(self, "_force_recovery_contact_started", None)
+        release_time = getattr(self, "_force_recovery_release_time", None)
+        contact_elapsed = (
+            None
+            if now is None or contact_started is None
+            else max(0.0, float(now) - float(contact_started))
+        )
+        settling_elapsed = (
+            None
+            if now is None or release_time is None
+            else max(0.0, float(now) - float(release_time))
+        )
+        camera_received = getattr(self, "_force_recovery_camera_latest_received", None)
+        camera_age = (
+            None
+            if now is None or camera_received is None
+            else max(0.0, float(now) - float(camera_received))
+        )
+        return {
+            "enabled": bool(getattr(config, "enable", False)),
+            "contact_behavior": str(getattr(config, "contact_behavior", "recover")),
+            "state": str(getattr(self, "_force_recovery_state", "running")),
+            "blocked_on": str(getattr(self, "_force_recovery_blocked_on", "none")),
+            "terminal_abort_reason": self.force_recovery_terminal_abort_reason,
+            "contact_elapsed_sec": contact_elapsed,
+            "settling_elapsed_sec": settling_elapsed,
+            "settle_time_sec": float(getattr(config, "settle_time_sec", 0.12)),
+            "max_linear_velocity_m_s": float(
+                getattr(config, "max_linear_velocity_m_s", 0.002)
+            ),
+            "max_angular_velocity_rad_s": float(
+                getattr(config, "max_angular_velocity_rad_s", 0.05)
+            ),
+            "contact_timeout_sec": float(
+                getattr(config, "contact_timeout_sec", 5.0)
+            ),
+            "settling_timeout_sec": float(
+                getattr(config, "settling_timeout_sec", 2.0)
+            ),
+            "arms": {
+                arm: dict(values)
+                for arm, values in getattr(self, "_force_recovery_arm_status", {}).items()
+            },
+            "measured_tcp_velocity": {
+                arm: dict(values)
+                for arm, values in getattr(self, "_force_recovery_tcp_velocity", {}).items()
+            },
+            "camera": {
+                "barrier_seq": getattr(self, "_force_recovery_camera_barrier_seq", None),
+                "latest_seq": getattr(self, "_force_recovery_camera_latest_seq", None),
+                "latest_age_sec": camera_age,
+                "fresh": bool(getattr(self, "_force_recovery_camera_fresh", False)),
+            },
+            "inflight_worker_generation": self._force_recovery_inflight_generation(),
+            "frozen_gripper_targets": dict(
+                getattr(self, "_force_recovery_frozen_gripper", {})
+            ),
+            "counters": counters,
+            "velproprio_sample_mode": getattr(self, "velproprio_sample_mode", None),
+            "velproprio_source": getattr(self, "velproprio_source", None),
+        }
+
+    @staticmethod
+    def _force_contact_active(payload: dict[str, Any]) -> bool:
+        for arm in ("left", "right"):
+            arm_payload = payload.get(arm, {})
+            force_control = arm_payload.get("force_control", {}) if isinstance(arm_payload, dict) else {}
+            if isinstance(force_control, dict) and force_control.get("contact_active") is True:
+                return True
+        return False
+
+    def _force_recovery_gate(
+        self, snapshot: StateSnapshot, now_monotonic: float
+    ) -> tuple[bool, CommandIntent | None]:
+        config = getattr(self, "_force_recovery_config", None)
+        if not bool(getattr(config, "enable", False)):
+            return False, None
+
+        now = float(now_monotonic)
+        payload = snapshot.payload
+        self._force_recovery_last_now = now
+        self._update_force_recovery_arm_status(payload)
+        contact = self._force_contact_active(payload)
+        if str(getattr(config, "contact_behavior", "recover")) == "continue":
+            self._force_recovery_state = "running"
+            self._force_recovery_blocked_on = "none"
+            return False, None
+        state = str(getattr(self, "_force_recovery_state", "running"))
+
+        if contact and state != "contact":
+            if state == "settling":
+                self._force_recovery_counters["recontacts"] += 1
+            self._enter_force_contact(payload, now)
+            return True, self._force_recovery_hold_intent()
+
+        if state == "contact":
+            self._sync_force_recovery_motion_epoch(payload)
+            if contact:
+                self._force_recovery_blocked_on = "contact_active"
+                if self._force_recovery_phase_timed_out(now, "contact"):
+                    return True, self._force_recovery_hold_intent()
+                return True, self._force_recovery_hold_intent()
+            self._begin_force_recovery_settling(snapshot, now)
+            return True, self._force_recovery_hold_intent()
+
+        if state == "settling":
+            self._sync_force_recovery_motion_epoch(payload)
+            self._record_force_recovery_pose_history(snapshot, now)
+            quiet = self._update_force_recovery_quiet_window(payload, now)
+            fresh_camera = self._force_recovery_has_fresh_camera(now)
+            stream_quiescent = self._force_recovery_stream_quiescent()
+            if not quiet:
+                self._force_recovery_blocked_on = "tcp_motion"
+            elif not fresh_camera:
+                self._force_recovery_blocked_on = "stale_camera"
+            elif not stream_quiescent:
+                self._force_recovery_blocked_on = "stale_worker"
+            else:
+                self._force_recovery_blocked_on = "none"
+            if self._force_recovery_phase_timed_out(now, "settling"):
+                return True, self._force_recovery_hold_intent()
+            if quiet and fresh_camera and stream_quiescent:
+                self._complete_force_recovery(snapshot)
+                return False, None
+            return True, self._force_recovery_hold_intent()
+
+        if state == "timed_out":
+            self._sync_force_recovery_motion_epoch(payload)
+            return True, self._force_recovery_hold_intent()
+
+        return False, None
+
+    def _enter_force_contact(self, payload: dict[str, Any], now: float) -> None:
+        self._force_recovery_frozen_gripper = {
+            arm: self._force_recovery_gripper_target(payload, arm)
+            for arm in ("left", "right")
+        }
+        self._invalidate_policy_chunks(reason="force_contact")
+        self._force_recovery_counters["chunk_invalidations"] += 1
+        self._force_recovery_counters["contact_events"] += 1
+        self._force_recovery_state = "contact"
+        self._force_recovery_blocked_on = "contact_active"
+        self._force_recovery_contact_started = now
+        self._force_recovery_release_time = None
+        self._force_recovery_quiet_since = None
+        self._force_recovery_prev_pose = {"left": None, "right": None}
+        self._force_recovery_terminal_abort_reason = None
+        self._sync_force_recovery_motion_epoch(payload)
+
+    def _begin_force_recovery_settling(
+        self, snapshot: StateSnapshot, now: float
+    ) -> None:
+        bundle = self._poll_camera_bundle() if getattr(self, "camera_names", ()) else None
+        self._force_recovery_camera_barrier_seq = self._camera_bundle_seq(bundle)
+        self._force_recovery_camera_barrier_received = self._camera_bundle_received(bundle)
+        reset_rtc = getattr(self, "reset_rtc", None)
+        if callable(reset_rtc):
+            reset_rtc()
+        self._clear_target_pose_state(preserve_gripper_targets=True)
+        self._force_recovery_state = "settling"
+        self._force_recovery_blocked_on = "tcp_motion"
+        self._force_recovery_release_time = now
+        self._force_recovery_quiet_since = now
+        self._force_recovery_prev_pose = {"left": None, "right": None}
+        self._record_force_recovery_pose_history(snapshot, now)
+        self._update_force_recovery_quiet_window(snapshot.payload, now)
+        self._sync_force_recovery_motion_epoch(snapshot.payload)
+
+    def _complete_force_recovery(self, snapshot: StateSnapshot) -> None:
+        self._clear_target_pose_state(preserve_gripper_targets=True)
+        for arm, value in self._force_recovery_frozen_gripper.items():
+            if value is not None:
+                self._gripper_targets_by_arm[arm] = float(value)
+        self._reset_left_pose = pose_from_state_payload(snapshot.payload, "left")
+        self._reset_right_pose = pose_from_state_payload(snapshot.payload, "right")
+        self._force_recovery_state = "running"
+        self._force_recovery_blocked_on = "none"
+        self._force_recovery_contact_started = None
+        self._force_recovery_release_time = None
+        self._force_recovery_counters["measured_reanchors"] += 1
+        self._force_recovery_counters["cold_inference_restarts"] += 1
+        self._sync_force_recovery_motion_epoch(snapshot.payload)
+
+    def _force_recovery_phase_timed_out(self, now: float, phase: str) -> bool:
+        config = getattr(self, "_force_recovery_config", None)
+        if phase == "contact":
+            started = getattr(self, "_force_recovery_contact_started", None)
+            timeout = float(getattr(config, "contact_timeout_sec", 5.0))
+            reason = "force_contact_timeout"
+            counter = "contact_timeouts"
+        elif phase == "settling":
+            started = getattr(self, "_force_recovery_release_time", None)
+            timeout = float(getattr(config, "settling_timeout_sec", 2.0))
+            camera_blocked = getattr(self, "_force_recovery_blocked_on", "none") == "stale_camera"
+            reason = "camera_stale_timeout" if camera_blocked else "force_settling_timeout"
+            counter = "camera_stale_timeouts" if camera_blocked else "settling_timeouts"
+        else:
+            raise ValueError(f"unsupported force recovery phase: {phase}")
+        if started is None or now - float(started) < timeout:
+            return False
+        if self._force_recovery_state != "timed_out":
+            self._force_recovery_state = "timed_out"
+            self._force_recovery_terminal_abort_reason = reason
+            self._force_recovery_counters["timeouts"] += 1
+            self._force_recovery_counters[counter] += 1
+        return True
+
+    def _force_recovery_hold_intent(self) -> CommandIntent:
+        self._force_recovery_counters["hold_intents"] += 1
+        frozen = self._force_recovery_frozen_gripper
+        return CommandIntent.gripper_target(
+            left=frozen.get("left"),
+            right=frozen.get("right"),
+            timeout_sec=self.timeout_sec,
+        )
+
+    def _force_recovery_gripper_target(
+        self, payload: dict[str, Any], arm: str
+    ) -> float | None:
+        for mapping_name in ("_current_gripper_targets", "_gripper_targets_by_arm"):
+            mapping = getattr(self, mapping_name, None)
+            if isinstance(mapping, dict) and mapping.get(arm) is not None:
+                return float(mapping[arm])
+        value = _gripper_value_from_payload(payload, arm)
+        if value is None:
+            value = self._live_gripper_percent(arm)
+        return None if value is None else float(value)
+
+    def _record_force_recovery_pose_history(
+        self, snapshot: StateSnapshot, now: float
+    ) -> None:
+        self._before_policy_intent(snapshot, now)
+
+    def _update_force_recovery_quiet_window(
+        self, payload: dict[str, Any], now: float
+    ) -> bool:
+        config = self._force_recovery_config
+        moving = False
+        valid_arms = 0
+        velocities: dict[str, dict[str, float | None]] = {
+            arm: {"linear_m_s": None, "angular_rad_s": None}
+            for arm in ("left", "right")
+        }
+        for arm in ("left", "right"):
+            try:
+                pose = np.asarray(pose_from_state_payload(payload, arm), dtype=np.float64)
+            except Exception:
+                moving = True
+                continue
+            valid_arms += 1
+            previous = self._force_recovery_prev_pose.get(arm)
+            self._force_recovery_prev_pose[arm] = (now, pose.copy())
+            if previous is None:
+                continue
+            previous_time, previous_pose = previous
+            dt = now - float(previous_time)
+            if dt <= 0.0:
+                moving = True
+                continue
+            linear_velocity = float(np.linalg.norm(pose[:3] - previous_pose[:3])) / dt
+            angular_velocity = np.radians(_quat_angle_deg(previous_pose[3:7], pose[3:7])) / dt
+            velocities[arm] = {
+                "linear_m_s": linear_velocity,
+                "angular_rad_s": float(angular_velocity),
+            }
+            if (
+                linear_velocity > float(config.max_linear_velocity_m_s)
+                or angular_velocity > float(config.max_angular_velocity_rad_s)
+            ):
+                moving = True
+        self._force_recovery_tcp_velocity = velocities
+        if moving or valid_arms != 2:
+            self._force_recovery_quiet_since = now
+            return False
+        quiet_since = self._force_recovery_quiet_since
+        if quiet_since is None:
+            self._force_recovery_quiet_since = now
+            return False
+        required = max(0.12, float(config.settle_time_sec), float(self.policy_dt_sec))
+        return now - float(quiet_since) >= required
+
+    def _force_recovery_has_fresh_camera(self, now: float | None = None) -> bool:
+        if not getattr(self, "camera_names", ()):
+            self._force_recovery_camera_fresh = True
+            return True
+        bundle = self._poll_camera_bundle()
+        seq = self._camera_bundle_seq(bundle)
+        received = self._camera_bundle_received(bundle)
+        self._force_recovery_camera_latest_seq = seq
+        self._force_recovery_camera_latest_received = received
+        if self._count_missing_camera_frames(bundle) != 0:
+            self._force_recovery_camera_fresh = False
+            return False
+        barrier_seq = self._force_recovery_camera_barrier_seq
+        barrier_received = self._force_recovery_camera_barrier_received
+        if seq is not None and barrier_seq is not None:
+            fresh = seq > barrier_seq
+        elif received is not None and barrier_received is not None:
+            fresh = received > barrier_received
+        else:
+            release_time = self._force_recovery_release_time
+            fresh = received is not None and release_time is not None and received > release_time
+        self._force_recovery_camera_fresh = bool(fresh)
+        return bool(fresh)
+
+    def _update_force_recovery_arm_status(self, payload: dict[str, Any]) -> None:
+        status: dict[str, dict[str, Any]] = {}
+        for arm in ("left", "right"):
+            arm_payload = payload.get(arm, {})
+            force = arm_payload.get("force_control", {}) if isinstance(arm_payload, dict) else {}
+            measured: float | None = None
+            if isinstance(force, dict):
+                raw_measured = force.get("measured_force_n")
+                if isinstance(raw_measured, (int, float)) and not isinstance(raw_measured, bool):
+                    measured = float(raw_measured)
+            status[arm] = {
+                "contact_active": bool(
+                    isinstance(force, dict) and force.get("contact_active") is True
+                ),
+                "measured_normal_force_n": measured,
+            }
+        self._force_recovery_arm_status = status
+
+    @staticmethod
+    def _camera_bundle_seq(bundle: Any | None) -> int | None:
+        try:
+            return int(getattr(bundle, "bundle_seq")) if bundle is not None else None
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _camera_bundle_received(bundle: Any | None) -> float | None:
+        try:
+            return float(getattr(bundle, "received_monotonic")) if bundle is not None else None
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def _sync_force_recovery_motion_epoch(self, payload: dict[str, Any]) -> None:
+        raw_epoch = payload.get("motion_epoch")
+        if isinstance(raw_epoch, bool) or not isinstance(raw_epoch, (int, float)):
+            return
+        try:
+            self._last_server_motion_epoch = int(raw_epoch)
+        except (OverflowError, ValueError):
+            pass
+
+    def _force_recovery_stream_quiescent(self) -> bool:
+        lock = getattr(self, "_stream_lock", None)
+        if lock is None:
+            return True
+        with lock:
+            inflight = getattr(self, "_stream_inflight_generation", None)
+            return inflight is None
+
+    def _force_recovery_inflight_generation(self) -> int | None:
+        lock = getattr(self, "_stream_lock", None)
+        if lock is None:
+            return None
+        with lock:
+            value = getattr(self, "_stream_inflight_generation", None)
+            return None if value is None else int(value)
+
+    def _on_stale_inference_completion(self) -> None:
+        """Remove subclass inference side effects before recovery can replan.
+
+        OpenPI sampling updates RTC guidance, pose history, and the camera
+        watermark before returning its chunk. A generation check can discard the
+        chunk, but it cannot undo those writes, so reset them here and restart the
+        post-release observation window after the stale worker has exited.
+        """
+        bundle = getattr(self, "_last_obs_camera_bundle", None)
+        barrier_seq = self._camera_bundle_seq(bundle)
+        if barrier_seq is None:
+            raw_seq = getattr(self, "_last_obs_camera_seq", None)
+            try:
+                barrier_seq = None if raw_seq is None else int(raw_seq)
+            except (TypeError, ValueError):
+                barrier_seq = None
+        barrier_received = self._camera_bundle_received(bundle)
+        reset_rtc = getattr(self, "reset_rtc", None)
+        if callable(reset_rtc):
+            reset_rtc()
+        if getattr(self, "_force_recovery_state", "running") == "settling":
+            now = time.monotonic()
+            self._force_recovery_last_now = now
+            self._force_recovery_camera_barrier_seq = barrier_seq
+            self._force_recovery_camera_barrier_received = barrier_received
+            self._force_recovery_quiet_since = now
+            self._force_recovery_prev_pose = {"left": None, "right": None}
+
+    def _handle_server_motion_epoch(self, snapshot: StateSnapshot) -> None:
+        """Invalidate every cached/in-flight action after a server contact event.
+
+        The server increments motion_epoch when force ownership enters/exits or
+        an external-force fault is raised. An older policy chunk must never
+        resume its accumulated normal delta after that discontinuity.
+        """
+        raw_epoch = snapshot.payload.get("motion_epoch")
+        if isinstance(raw_epoch, bool) or not isinstance(raw_epoch, (int, float)):
+            return
+        try:
+            epoch = int(raw_epoch)
+        except (OverflowError, ValueError):
+            return
+        if self._last_server_motion_epoch is None:
+            self._last_server_motion_epoch = epoch
+            return
+        if epoch == self._last_server_motion_epoch:
+            return
+        self._last_server_motion_epoch = epoch
+        self._clear_target_pose_state()
+        self._invalidate_policy_chunks(reason="server_motion_epoch")
+        try:
+            self._reset_left_pose = pose_from_state_payload(snapshot.payload, "left")
+            self._reset_right_pose = pose_from_state_payload(snapshot.payload, "right")
+        except Exception:
+            self._reset_left_pose = None
+            self._reset_right_pose = None
 
     # ----------------------------------------------------------- streamed --
     def _next_intent_streamed(
@@ -693,7 +1192,7 @@ class FlowMatchingActionSource:
                 and not self._stream_pending
                 and not bool(getattr(self, "nonblocking_stream_inference", False))
             ):
-                chunk = self._sample_and_align_chunk(payload)
+                chunk = self._sample_and_align_chunk_timed(payload)
             if chunk is None:
                 self._request_prefetch(payload)
                 sched = self._ensure_chunk_ensemble()
@@ -779,6 +1278,9 @@ class FlowMatchingActionSource:
                 self._print_step_debug(step, payload)  # per-policy-step (foh_se3), not per servo tick
             else:
                 self._current_step_intent = self._emit_step_intent(step, payload, gripper_targets)
+            self._stream_emitted_policy_steps = int(
+                getattr(self, "_stream_emitted_policy_steps", 0)
+            ) + 1
         elif foh and self._chunk is not None:
             # Between policy steps: re-interpolate the absolute target every servo tick.
             self._current_step_intent = self._foh_tick_intent(now_monotonic, stall=False)
@@ -869,6 +1371,42 @@ class FlowMatchingActionSource:
         self._overlay_chain_pending = {"left": None, "right": None}
 
     def _activate_chunk(self, chunk: np.ndarray, now_monotonic: float) -> None:
+        self._record_inference_activation(now_monotonic)
+        metadata = dict(getattr(self, "_stream_activation_candidate_metadata", None) or {})
+        observation_step_seq = int(
+            metadata.get(
+                "observation_step_seq",
+                getattr(self, "_stream_emitted_policy_steps", 0),
+            )
+        )
+        activation_step_seq = int(getattr(self, "_stream_emitted_policy_steps", 0))
+        source_start_index = max(0, activation_step_seq - observation_step_seq)
+        original_horizon = int(chunk.shape[0])
+        if source_start_index >= original_horizon:
+            self._active_chunk_metadata = {
+                **metadata,
+                "observation_step_seq": observation_step_seq,
+                "activation_step_seq": activation_step_seq,
+                "source_start_index": source_start_index,
+                "original_horizon": original_horizon,
+                "selected_horizon": 0,
+                "alignment_outcome": "exhausted",
+            }
+            self._stream_activation_candidate_metadata = None
+            self._chunk = None
+            return
+        if source_start_index > 0:
+            chunk = np.asarray(chunk[source_start_index:], dtype=chunk.dtype)
+        self._active_chunk_metadata = {
+            **metadata,
+            "observation_step_seq": observation_step_seq,
+            "activation_step_seq": activation_step_seq,
+            "source_start_index": source_start_index,
+            "original_horizon": original_horizon,
+            "selected_horizon": int(chunk.shape[0]),
+            "alignment_outcome": "aligned",
+        }
+        self._stream_activation_candidate_metadata = None
         self._overlay_chain_advance()
         self._chunk = chunk
         self._chunk_index = 0
@@ -1048,7 +1586,6 @@ class FlowMatchingActionSource:
             return
 
     def _publish_chunk_overlay(self, now_monotonic: float) -> None:
-        _ = now_monotonic
         publisher = getattr(self, "_chunk_overlay_publisher", None)
         chunk = getattr(self, "_chunk", None)
         payload = getattr(self, "_last_overlay_payload", None)
@@ -1103,7 +1640,11 @@ class FlowMatchingActionSource:
                         )
                 else:
                     measured_anchor = np.asarray(
-                        pose_from_state_payload(payload, arm, source=anchor_mode),
+                        pose_from_state_payload(
+                            payload,
+                            arm,
+                            source="auto" if anchor_mode == "actual" else anchor_mode,
+                        ),
                         dtype=np.float64,
                     )
                 cur = measured_anchor
@@ -1167,7 +1708,18 @@ class FlowMatchingActionSource:
                 left_delta=projected_delta["left"],
                 right_delta=projected_delta["right"],
                 host_time_ns=time.time_ns(),
+                inference_timing=self._inference_timing_snapshot(),
+                camera_diagnostics=self._camera_diagnostics_snapshot(),
+                execute_steps=int(execute_limit),
+                runway_steps=int(self._current_chunk_overlay_runway_steps()),
+                chunk_metadata=dict(getattr(self, "_active_chunk_metadata", None) or {}),
             )
+            # Record only a successfully published frame.  Finite episode
+            # replay uses this explicit controller-feed boundary to defer its
+            # terminal Hold until the final executable window has elapsed.
+            self._last_chunk_overlay_publish_monotonic = float(now_monotonic)
+            self._last_chunk_overlay_publish_execute_steps = int(execute_limit)
+            self._last_chunk_overlay_publish_policy_dt_sec = float(self.policy_dt_sec or 0.0)
         except Exception:
             return
 
@@ -1221,7 +1773,12 @@ class FlowMatchingActionSource:
         # (its own plan chain); its residual measured_anchor uses (first chunk /
         # legacy fallbacks) map to the command pose.
         src = self._chunk_anchor_source()
-        return "command" if src == "chain" else src
+        if src == "chain":
+            return "command"
+        # "actual" means the robot's effective tracking state. In physical-real
+        # this resolves to tcp_actual. In rbpodo pgmode simulation it resolves to
+        # tcp_ref, matching the server-side controller-simulation feedback lane.
+        return "auto" if src == "actual" else src
 
     def _chunk_anchor_source(self) -> str:
         # Where chunk-delta integration anchors: "actual" (measured pose,
@@ -1262,10 +1819,17 @@ class FlowMatchingActionSource:
         return max(0, min(2, limit - 1))
 
     def _stream_hold_intent(self) -> CommandIntent | None:
-        # Stall (next chunk not ready): re-emit the LAST absolute TcpPoseTarget so the
-        # command stays fresh and the arm holds steady at the target. Returning None
-        # here lets the command go stale; holding the last target until the next
-        # chunk boundary gives a smooth pause instead of a stale-command jerk.
+        # Sequential verification deliberately waits until the executed window is
+        # exhausted before requesting the next chunk.  Send an explicit Hold during
+        # that wait so the server leaves the strict chunk-follower regime instead of
+        # keeping it armed without a fresh preview frame.  The next TcpPoseTarget +
+        # preview frame engages it again.  This preserves the feed-loss watchdog for
+        # a producer that dies while a motion chunk is active.
+        if bool(getattr(self, "sequential_stream_inference", False)):
+            return CommandIntent.hold(timeout_sec=float(self.timeout_sec))
+        # Live asynchronous rollouts keep the prior behavior: re-emit the LAST
+        # absolute TcpPoseTarget so the command remains fresh across a short prefetch
+        # miss without introducing a command-mode transition.
         return getattr(self, "_current_step_intent", None)
 
     def _apply_rotation_axis_mask(self, chunk: np.ndarray) -> np.ndarray:
@@ -1292,6 +1856,41 @@ class FlowMatchingActionSource:
             chunk = rotate_flow_arm_vectors(chunk, self.ee_local_r_align.T)
         return self._apply_rotation_axis_mask(chunk)
 
+    def _sample_and_align_chunk_timed(self, payload: dict[str, Any]) -> np.ndarray | None:
+        """Measure one inline local/remote inference without changing its behavior."""
+        inference_seq, request_ns = self._begin_inference_request()
+        worker_start_ns = self._inference_now_ns()
+        observation_step_seq = int(getattr(self, "_stream_emitted_policy_steps", 0))
+        chunk: np.ndarray | None = None
+        try:
+            chunk = self._sample_and_align_chunk(payload)
+            return chunk
+        finally:
+            worker_end_ns = self._inference_now_ns()
+            ready_ns = self._inference_now_ns()
+            timing = self._record_inference_completion(
+                inference_seq=inference_seq,
+                request_ns=request_ns,
+                worker_start_ns=worker_start_ns,
+                worker_end_ns=worker_end_ns,
+                ready_ns=ready_ns,
+                succeeded=chunk is not None,
+            )
+            self._stream_activation_candidate_timing = timing if chunk is not None else None
+            self._stream_activation_candidate_metadata = (
+                {
+                    "checkpoint_id": str(getattr(self, "checkpoint_id", "unknown")),
+                    "inference_seq": int(inference_seq),
+                    "observation_step_seq": observation_step_seq,
+                    "observation_bundle_seq": getattr(self, "_last_obs_camera_seq", None),
+                    "proprio": copy.deepcopy(
+                        getattr(self, "_last_velproprio_diagnostics", None)
+                    ),
+                }
+                if chunk is not None
+                else None
+            )
+
     def _ensure_stream_state(self) -> None:
         if getattr(self, "_stream_inited", False):
             return
@@ -1299,11 +1898,16 @@ class FlowMatchingActionSource:
         self._step_deadline = 0.0
         self._current_step_intent = None
         self._stream_next_chunk = None
+        self._stream_next_chunk_metadata = None
+        self._stream_activation_candidate_metadata = None
         self._stream_pending = False
         self._stream_shutdown = False
         self._stream_request = None
+        self._stream_inflight_generation = None
         self._stream_stall_count = 0
         self._stream_generation = 0
+        if not hasattr(self, "_inference_timing_lock"):
+            self._init_inference_timing_state()
         self._stream_lock = threading.Lock()
         self._stream_cv = threading.Condition(self._stream_lock)
         self._stream_thread = threading.Thread(
@@ -1320,10 +1924,24 @@ class FlowMatchingActionSource:
                     return
                 request = self._stream_request
                 self._stream_request = None
-            if isinstance(request, tuple) and len(request) == 2:
+                if isinstance(request, tuple) and len(request) >= 1:
+                    self._stream_inflight_generation = int(request[0])
+                else:
+                    self._stream_inflight_generation = int(
+                        getattr(self, "_stream_generation", 0)
+                    )
+            if isinstance(request, tuple) and len(request) == 4:
+                generation, inference_seq, request_ns, payload = request
+            elif isinstance(request, tuple) and len(request) == 2:
                 generation, payload = request
+                inference_seq = 0
+                request_ns = self._inference_now_ns()
             else:
                 generation, payload = int(getattr(self, "_stream_generation", 0)), request
+                inference_seq = 0
+                request_ns = self._inference_now_ns()
+            worker_start_ns = self._inference_now_ns()
+            observation_step_seq = int(getattr(self, "_stream_emitted_policy_steps", 0))
             try:
                 chunk = self._sample_and_align_chunk(payload)
             except Exception as exc:  # noqa: BLE001 - inference must not kill the worker
@@ -1333,10 +1951,41 @@ class FlowMatchingActionSource:
                     flush=True,
                 )
                 chunk = None
+            worker_end_ns = self._inference_now_ns()
+            ready_ns = self._inference_now_ns()
             with self._stream_lock:
-                if int(generation) == int(getattr(self, "_stream_generation", 0)):
-                    self._stream_next_chunk = chunk
+                if int(generation) != int(getattr(self, "_stream_generation", 0)):
+                    # Contact/reset invalidated this request while it was in flight.
+                    # Do not let its late completion clear or overwrite a newer
+                    # generation's pending request, chunk, or timing telemetry.
+                    self._stream_inflight_generation = None
+                    self._on_stale_inference_completion()
+                    continue
+                timing = self._record_inference_completion(
+                    inference_seq=int(inference_seq),
+                    request_ns=int(request_ns),
+                    worker_start_ns=worker_start_ns,
+                    worker_end_ns=worker_end_ns,
+                    ready_ns=ready_ns,
+                    succeeded=chunk is not None,
+                )
+                self._stream_next_chunk = chunk
+                self._stream_next_chunk_metadata = (
+                    {
+                        "checkpoint_id": str(getattr(self, "checkpoint_id", "unknown")),
+                        "inference_seq": int(inference_seq),
+                        "observation_step_seq": observation_step_seq,
+                        "observation_bundle_seq": getattr(self, "_last_obs_camera_seq", None),
+                        "proprio": copy.deepcopy(
+                            getattr(self, "_last_velproprio_diagnostics", None)
+                        ),
+                    }
+                    if chunk is not None
+                    else None
+                )
+                self._stream_ready_timing = timing if chunk is not None else None
                 self._stream_pending = False
+                self._stream_inflight_generation = None
 
     def _request_prefetch(self, payload: dict[str, Any]) -> None:
         with self._stream_cv:
@@ -1345,14 +1994,229 @@ class FlowMatchingActionSource:
             self._stream_pending = True
             # Snapshot the state payload for the worker so a mutable camera/state
             # object cannot be changed by the command loop while inference is reading it.
-            self._stream_request = (int(getattr(self, "_stream_generation", 0)), copy.deepcopy(payload))
+            payload_snapshot = copy.deepcopy(payload)
+            inference_seq, request_ns = self._begin_inference_request()
+            self._stream_request = (
+                int(getattr(self, "_stream_generation", 0)),
+                inference_seq,
+                request_ns,
+                payload_snapshot,
+            )
             self._stream_cv.notify()
 
     def _take_prefetched(self) -> np.ndarray | None:
         with self._stream_lock:
             chunk = self._stream_next_chunk
             self._stream_next_chunk = None
+            if chunk is not None:
+                self._stream_activation_candidate_timing = self._stream_ready_timing
+                self._stream_activation_candidate_metadata = getattr(
+                    self, "_stream_next_chunk_metadata", None
+                )
+            self._stream_next_chunk_metadata = None
+            self._stream_ready_timing = None
         return chunk
+
+    def _init_inference_timing_state(self) -> None:
+        self._inference_seq = 0
+        self._inference_last_worker_start_ns = 0
+        self._inference_timing_lock = threading.Lock()
+        self._inference_timing_latest: dict[str, object] | None = None
+        self._inference_timing_history = {
+            name: deque(maxlen=64)
+            for name in (
+                "queue_wait_ms",
+                "inference_latency_ms",
+                "ready_wait_ms",
+                "inference_period_ms",
+                "inference_period_jitter_ms",
+            )
+        }
+        self._stream_ready_timing: dict[str, object] | None = None
+        self._stream_activation_candidate_timing: dict[str, object] | None = None
+        self._inference_diagnostics_events: deque[dict[str, object]] = deque(maxlen=64)
+        self._inference_diagnostics_total = 0
+
+    def _inference_now_ns(self) -> int:
+        clock = getattr(self, "_inference_clock_ns", None)
+        return int(clock()) if callable(clock) else time.monotonic_ns()
+
+    def _begin_inference_request(self) -> tuple[int, int]:
+        if not hasattr(self, "_inference_timing_lock"):
+            self._init_inference_timing_state()
+        with self._inference_timing_lock:
+            self._inference_seq = int(getattr(self, "_inference_seq", 0)) + 1
+            return self._inference_seq, self._inference_now_ns()
+
+    def _record_inference_completion(
+        self,
+        *,
+        inference_seq: int,
+        request_ns: int,
+        worker_start_ns: int,
+        worker_end_ns: int,
+        ready_ns: int,
+        succeeded: bool | None = None,
+    ) -> dict[str, object]:
+        queue_wait_ms = max(0.0, (worker_start_ns - request_ns) / 1_000_000.0)
+        inference_latency_ms = max(0.0, (worker_end_ns - worker_start_ns) / 1_000_000.0)
+        previous_start_ns = int(getattr(self, "_inference_last_worker_start_ns", 0))
+        inference_period_ms = (
+            max(0.0, (worker_start_ns - previous_start_ns) / 1_000_000.0)
+            if previous_start_ns > 0
+            else None
+        )
+        timing: dict[str, object] = {
+            "seq": int(inference_seq),
+            "request_monotonic_ns": int(request_ns),
+            "worker_start_monotonic_ns": int(worker_start_ns),
+            "worker_end_monotonic_ns": int(worker_end_ns),
+            "chunk_ready_monotonic_ns": int(ready_ns),
+            "activation_monotonic_ns": None,
+            "queue_wait_ms": queue_wait_ms,
+            "inference_latency_ms": inference_latency_ms,
+            "ready_wait_ms": None,
+            "inference_period_ms": inference_period_ms,
+            "inference_period_nominal_ms": None,
+            "inference_period_jitter_ms": None,
+        }
+        event: dict[str, object] = {
+            "seq": int(inference_seq),
+            "succeeded": succeeded,
+            "timing": dict(timing),
+            "camera": self._camera_diagnostics_snapshot(),
+        }
+        lock = getattr(self, "_inference_timing_lock", None)
+        if lock is None:
+            return timing
+        with lock:
+            self._inference_last_worker_start_ns = int(worker_start_ns)
+            self._inference_timing_history["queue_wait_ms"].append(queue_wait_ms)
+            self._inference_timing_history["inference_latency_ms"].append(inference_latency_ms)
+            if inference_period_ms is not None:
+                self._inference_timing_history["inference_period_ms"].append(inference_period_ms)
+                periods = sorted(self._inference_timing_history["inference_period_ms"])
+                middle = len(periods) // 2
+                nominal_ms = (
+                    periods[middle]
+                    if len(periods) % 2 == 1
+                    else 0.5 * (periods[middle - 1] + periods[middle])
+                )
+                jitter_ms = abs(inference_period_ms - nominal_ms)
+                jitter_history = self._inference_timing_history["inference_period_jitter_ms"]
+                jitter_history.clear()
+                jitter_history.extend(abs(period_ms - nominal_ms) for period_ms in periods)
+                timing["inference_period_nominal_ms"] = nominal_ms
+                timing["inference_period_jitter_ms"] = jitter_ms
+            self._inference_timing_latest = dict(timing)
+            self._inference_diagnostics_total += 1
+            event["timing"] = dict(timing)
+            self._inference_diagnostics_events.append(event)
+        return timing
+
+    def _record_inference_activation(self, now_monotonic: float | None = None) -> None:
+        timing = getattr(self, "_stream_activation_candidate_timing", None)
+        if not isinstance(timing, dict):
+            return
+        activation_ns = (
+            self._inference_now_ns()
+            if now_monotonic is None
+            else int(max(0.0, float(now_monotonic)) * 1_000_000_000.0)
+        )
+        ready_ns = int(timing.get("chunk_ready_monotonic_ns", activation_ns) or activation_ns)
+        # Inline fallback inference starts after the command loop captured
+        # now_monotonic, so that supplied value can predate chunk readiness.
+        if activation_ns < ready_ns:
+            activation_ns = self._inference_now_ns()
+        ready_wait_ms = max(0.0, (activation_ns - ready_ns) / 1_000_000.0)
+        activated = dict(timing)
+        activated["activation_monotonic_ns"] = activation_ns
+        activated["ready_wait_ms"] = ready_wait_ms
+        lock = getattr(self, "_inference_timing_lock", None)
+        if lock is not None:
+            with lock:
+                self._inference_timing_history["ready_wait_ms"].append(ready_wait_ms)
+                self._inference_timing_latest = activated
+                for event in reversed(self._inference_diagnostics_events):
+                    if int(event.get("seq", -1)) == int(activated.get("seq", -2)):
+                        event["timing"] = dict(activated)
+                        break
+        self._stream_activation_candidate_timing = None
+
+    def _camera_diagnostics_snapshot(self) -> dict[str, object] | None:
+        details = getattr(self, "_last_inference_camera_diagnostics", None)
+        snapshot: dict[str, object] = dict(details) if isinstance(details, dict) else {}
+        velproprio = getattr(self, "_last_velproprio_diagnostics", None)
+        if isinstance(velproprio, dict):
+            snapshot["velocity_proprio"] = copy.deepcopy(velproprio)
+        camera_client = getattr(self, "camera_client", None)
+        client_snapshot = getattr(camera_client, "diagnostics_snapshot", None)
+        if callable(client_snapshot):
+            try:
+                snapshot["client"] = client_snapshot()
+            except Exception:  # noqa: BLE001 - diagnostics are best effort.
+                pass
+        writer_snapshot = getattr(getattr(self, "_diagnostic_image_writer", None), "snapshot", None)
+        if callable(writer_snapshot):
+            try:
+                snapshot["image_snapshots"] = writer_snapshot()
+            except Exception:  # noqa: BLE001 - diagnostics are best effort.
+                pass
+        return snapshot or None
+
+    def inference_diagnostics_snapshot(self) -> dict[str, object]:
+        if not hasattr(self, "_inference_timing_lock"):
+            self._init_inference_timing_state()
+        with self._inference_timing_lock:
+            events = [copy.deepcopy(event) for event in self._inference_diagnostics_events]
+            return {
+                "total_inferences": int(self._inference_diagnostics_total),
+                "retained_inferences": len(events),
+                "rolling_window": 64,
+                "events": events,
+                "latest_camera": self._camera_diagnostics_snapshot(),
+            }
+
+    @staticmethod
+    def _inference_metric_summary(values: object) -> dict[str, float | int] | None:
+        samples = [float(value) for value in values] if values is not None else []
+        if not samples:
+            return None
+        ordered = sorted(samples)
+        p95_index = max(0, min(len(ordered) - 1, int(np.ceil(0.95 * len(ordered))) - 1))
+        return {
+            "samples": len(ordered),
+            "p95_ms": ordered[p95_index],
+            "max_ms": ordered[-1],
+        }
+
+    def _inference_timing_snapshot(self) -> dict[str, object] | None:
+        lock = getattr(self, "_inference_timing_lock", None)
+        if lock is None:
+            return None
+        with lock:
+            latest = getattr(self, "_inference_timing_latest", None)
+            if not isinstance(latest, dict):
+                return None
+            history = {
+                name: self._inference_metric_summary(values)
+                for name, values in self._inference_timing_history.items()
+            }
+            jitter_summary = history.get("inference_period_jitter_ms")
+            return {
+                **latest,
+                "stall_count": int(getattr(self, "_stream_stall_count", 0)),
+                "rolling_window": 64,
+                "rolling": {name: summary for name, summary in history.items() if summary is not None},
+                "inference_period_jitter": {
+                    "definition": "abs(start_to_start_period_ms - rolling_median_period_ms)",
+                    "nominal_ms": latest.get("inference_period_nominal_ms"),
+                    "last_ms": latest.get("inference_period_jitter_ms"),
+                    "p95_ms": None if jitter_summary is None else jitter_summary["p95_ms"],
+                    "max_ms": None if jitter_summary is None else jitter_summary["max_ms"],
+                    "samples": 0 if jitter_summary is None else jitter_summary["samples"],
+                },
+            }
 
     @property
     def gripper_command_count(self) -> int:
@@ -1571,7 +2435,12 @@ class FlowMatchingActionSource:
         targets[arm] = pose_compose_local(targets[arm], np.asarray(conditioned_delta, dtype=np.float32))
         return tuple(float(value) for value in targets[arm].tolist())
 
-    def _clear_target_pose_state(self, arms: tuple[str, ...] | list[str] | None = None) -> None:
+    def _clear_target_pose_state(
+        self,
+        arms: tuple[str, ...] | list[str] | None = None,
+        *,
+        preserve_gripper_targets: bool = False,
+    ) -> None:
         selected = tuple(arms or ("left", "right"))
         targets = getattr(self, "_target_pose_by_arm", None)
         if targets is not None:
@@ -1579,7 +2448,7 @@ class FlowMatchingActionSource:
                 if arm in targets:
                     targets[arm] = None
         gripper_targets = getattr(self, "_gripper_targets_by_arm", None)
-        if gripper_targets is not None:
+        if gripper_targets is not None and not preserve_gripper_targets:
             for arm in selected:
                 if arm in gripper_targets:
                     gripper_targets[arm] = None
@@ -1666,8 +2535,12 @@ class FlowMatchingActionSource:
                 with self._stream_lock:
                     self._stream_generation = int(getattr(self, "_stream_generation", 0)) + 1
                     self._stream_next_chunk = None
+                    self._stream_next_chunk_metadata = None
+                    self._stream_activation_candidate_metadata = None
                     self._stream_pending = False
                     self._stream_request = None
+                    self._stream_ready_timing = None
+                    self._stream_activation_candidate_timing = None
             except Exception:
                 pass
         if hasattr(self, "_stream_cv"):
@@ -2007,6 +2880,9 @@ class FlowMatchingActionSource:
         close_overlay = getattr(getattr(self, "_chunk_overlay_publisher", None), "close", None)
         if callable(close_overlay):
             close_overlay()
+        close_diagnostics = getattr(getattr(self, "_diagnostic_image_writer", None), "close", None)
+        if callable(close_diagnostics):
+            close_diagnostics()
         close = getattr(self.camera_client, "close", None)
         if callable(close):
             close()
@@ -3206,7 +4082,14 @@ def _gripper_value_from_payload(payload: dict[str, Any], arm: str) -> float | No
     for container_name in ("gripper", "gripper_state"):
         container = arm_payload.get(container_name)
         if isinstance(container, dict):
-            for key in ("gripper_position", "position", "target", "value"):
+            for key in (
+                "target_percent",
+                "percent",
+                "gripper_position",
+                "position",
+                "target",
+                "value",
+            ):
                 value = _positive_or_zero_float(container.get(key))
                 if value is not None:
                     return value

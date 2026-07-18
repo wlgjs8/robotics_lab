@@ -111,7 +111,10 @@ backend call otherwise). While any arm is in free-drive the servo loop sets
 `send_policy == "freedrive"` (suppressing `servo_j` to both controllers, after the
 fault/emergency checks) and bypasses the motion pipeline so the hand-driven actual
 divergence cannot latch a tracking error. On exit the held target is resynced to the
-current actual joints. State JSON exposes top-level
+current actual joints. The same resync resets force/admittance dynamics, re-anchors the
+Cartesian compliance Hold equilibrium to the current actual TCP, invalidates stale
+Cartesian followers, and advances `motion_epoch`; force control therefore cannot pull
+the arm back toward its pre-teaching TCP when `servo_j` resumes. State JSON exposes top-level
 `freedrive.{left_active,right_active,any_active}`. See
 `docs/runbooks/freedrive_direct_teaching.md`.
 
@@ -163,14 +166,95 @@ The backend preserves the raw values in per-arm state JSON under
 `rbpodo_diagnostics.raw`, including `time`, `real_vs_simulation_mode`,
 `init_state_info`, `init_error`, `op_stat_sos_flag`, `op_stat_ems_flag`,
 `op_stat_soft_estop_occur`, `op_stat_collision_occur`, and
-`op_stat_self_collision`. Boolean status flags with values other than `0` or
+`op_stat_self_collision`.
+
+The backend also decodes the controller's external F/T sensor wrench
+(`sdata.eft_fx..eft_mz`) into `RobotState.eft_wrench` / `eft_valid`, published
+in per-arm state JSON as `eft_wrench` (`[fx, fy, fz, tx, ty, tz]`, N / Nm),
+`eft_valid`, and `eft_source: "rbpodo.sdata.eft"`. Rainbow's public system-variable
+contract defines these axes as the external sensor manufacturer's X/Y/Z axes;
+it does not define them as TCP axes. `eft_valid` proves only that the state frame
+contained finite fields. It is not sensor-presence, fault, overrange, zeroing,
+or payload-compensation evidence. The flag is `false` when the values are
+non-finite or the state frame ended before the eft fields (short/old-firmware
+frame; boundary constant
+`kRbpodoStateFrameEftEndOffsetBytes`, pinned to the SDK struct by a
+static_assert in the rbpodo-enabled build).
+
+The supervised project-native `rbpodo_eft` adapter currently feeds those
+manufacturer-frame values into `FtWrenchPipeline`. The configured
+`T_tcp_sensor` maps the sensor wrench to the server's pre-payload/pre-tare
+`wrench_tcp`; source assurance remains `controller_frame_only` and
+`sensor_health_verified=false`. This is an experimental bring-up path, not a
+claim that the source is production-qualified. Boolean status flags with values other than `0` or
 `1`, non-finite or implausibly tiny nonzero controller time, and unknown
 `real_vs_simulation_mode` values mark `diagnostics_suspect=true`.
 Suspicious diagnostics do not make `readState()` fail when joint acquisition is
 otherwise valid, but they do make the state motion-unsafe and block
 `sendServoJ()` with a `RobotFault` named `rbpodo_diagnostics_suspect`.
+
+Production enforcing use still requires independent sensor-presence,
+acquisition-freshness, sensor-fault, and overrange evidence that this rbpodo
+state surface does not currently provide. A finite decoded wrench or a changing
+value is not a substitute for those signals.
 Garbage-looking raw flag values must be kept in `rbpodo_diagnostics.raw` rather
 than used as the sole controller `error_code`.
+
+The project-native F/T path also supports a dedicated
+`JointTarget` profile named `payload_identification`. It is not a new motion
+primitive and does not bypass any normal joint, tracking, collision, lease, or
+deadman gate. On the selected arm it invalidates the old pose-local tare and
+latches a force-motion inhibit before calibration motion. While this profile is
+present, Cartesian force-Hold promotion is suppressed for both arms so the
+peer's explicit Hold stays a stationary joint hold. Command expiry or a fallback
+Hold cannot clear the selected-arm inhibit or re-enable its Cartesian admittance;
+only a later accepted Init Motion tare clears it.
+The server accepts only exactly one finite payload-identification JointTarget
+with a payload-free peer Hold. Dual-profile or profile-plus-peer-motion packets
+are rejected atomically as two-arm Hold with `InvalidCommand` before Freedrive
+or another motion path can consume the malformed peer command.
+The profile is rejected unless the selected-arm F/T stream is healthy and fresh.
+In an enforcing force-control profile, the configured hard-limit debounce remains
+active on the raw pre-tare TCP wrench throughout identification.
+
+For this workflow, per-arm `force_torque` state publishes the pre-payload/tare
+`wrench_tcp`, the manufacturer-frame `raw_sensor_wrench`, the effective
+configured six-vector `t_tcp_sensor`, the actual-orientation `gravity_tcp`
+vector (m/s²), the active joint-target profile, and the inhibit state. The
+ordinary servo CSV records the same raw wrench and transform beside the TCP
+wrench, so the applied wrench transform can be reproduced for each logged
+sample. The top-level
+`force_torque.payload_identification` object publishes the complete effective
+server acquisition/fit profile, including the required `observation_model`.
+For `rigid_payload`, the additional `wrench_convention` is required:
+
+```text
+payload_load:    wrench = bias + [m*g, c x (m*g)]
+sensor_reaction: wrench = bias - [m*g, c x (m*g)]
+```
+
+`controller_compensated_linear` instead fits independent force/torque maps
+`wrench_tcp = A*gravity_tcp + bias` under an explicitly unverified assumption
+that controller feedback has already undergone gravity/source processing. It
+does not publish a physical mass or CoG. A reviewed runtime model requires an
+explicit calibration id and both row-major 3x3 matrices; config rejects mixing
+that model with nonzero rigid payload mass/CoG.
+
+Rainbow's public system-variable contract defines the controller's raw
+`SD_EFT_*` components in the external sensor manufacturer's axes, not as a TCP
+wrench. The project-native pipeline therefore remains responsible for the
+configured `T_tcp_sensor` wrench transform before publishing `wrench_tcp`.
+See the [Rainbow system-variable reference](https://rainbowrobotics.github.io/rb_cobot_docs/technical_docs/system_variables).
+
+Missing, unknown, or incomplete configuration fails closed in both the server
+config loader and GUI parser. A fit-bound or model rejection atomically saves a
+`BLOCKED / NOT APPLIED` JSON report and the collected raw sample CSV. A
+successful rigid or linear output remains `PROVISIONAL / NOT APPLIED` and is not
+written to the controller or stack config automatically.
+Gravity-wrench evidence schema v4 aligns each raw sensor wrench, effective
+`T_tcp_sensor`, TCP wrench, gravity vector, actual joints, and actual stand-frame
+TCP pose by the server freshness value. Its JSON report also stores the
+observed and model-predicted force/torque plus their residual for every pose.
 
 For rbpodo controller `pgmode` simulation only, configs may opt into
 `servo.controller_simulation_treat_unreliable_status_fields_as_unavailable: true`.
@@ -311,11 +395,11 @@ Real `sendServoJ()` requires:
 - valid state acquisition
 - controller motion readiness
 - config `send_servo_commands: true`
-- site-local config that enables real motion (the legacy `RB_ALLOW_REAL_*` env
+- the tracked stack config enabling real motion (the legacy `RB_ALLOW_REAL_*` env
   gates were removed from the server runtime)
 
 Cartesian primitives are config-gated. `TcpPoseTarget` and `TcpLinearMove`
-require `cartesian_control.enable: true` and the relevant site-local
+require `cartesian_control.enable: true` and the relevant tracked-stack
 Cartesian gate for the active topology.
 
 The only real-controller carve-out is rbpodo controller `pgmode` simulation.
@@ -346,9 +430,9 @@ Real stop/reset APIs remain conservative until verified. If no verified API is w
 Rbpodo is the primary vendor-library real backend. The current tracked launch
 configs are `rb_servo_server/config/stack_real.yaml` and
 `rb_servo_server/config/stack_sim.yaml`; the legacy `dual_real*.example.yaml`
-template surface is no longer tracked. Site-specific variants and acceptance
-stage copies belong under `rb_servo_server/config/local/`, which is
-intentionally user-owned and gitignored.
+template surface is no longer tracked. Do not create site-specific launch
+copies; acceptance-stage settings are changed one at a time in the tracked
+stack config with matching evidence.
 
 ### Rbpodo ACK Semantics
 
@@ -377,7 +461,7 @@ telemetry must show:
 
 ACK-off is an experimental supervised acceptance mode, not a safe mode. Real
 motion with ACK waiting disabled is config-driven and must be enabled explicitly
-in the site-local config (the legacy `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION` env
+in the tracked real config (the legacy `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION` env
 gate was removed from the server runtime).
 
 ACK-off runs need stronger monitoring because immediate controller rejection is
@@ -599,6 +683,51 @@ Required log and state fields for review include:
 - `error_code`
 - M561/M568/M569/M570 when available
 - `q_ref` and `q_actual`
+
+### Direct `request_data()` Packet Timing
+
+The direct rbpodo state-read path records a `BackendReadExchangeTiming` for
+every vendor SDK `CobotData::request_data()` attempt, including timeout and
+exception exits. It is propagated to per-arm `last_read.reqdata_exchange` state
+JSON and to the servo CSV. Each arm has these CSV fields:
+
+- `<arm>_reqdata_timing_available`
+- `<arm>_reqdata_exchange_sequence`
+- `<arm>_reqdata_timing_source`
+- `<arm>_reqdata_call_start_steady_ns`
+- `<arm>_reqdata_call_start_system_ns`
+- `<arm>_reqdata_call_return_steady_ns`
+- `<arm>_reqdata_call_return_system_ns`
+- `<arm>_reqdata_call_duration_us`
+
+`steady_ns` is authoritative for in-process durations. `system_ns` exists only
+to correlate the application boundary with passive packet-capture epoch
+timestamps. The vendor API owns its data socket and does not expose a callback
+at TCP transmit or receive, so the SDK call-start timestamp must not be labeled
+as the exact `reqdata` transmit timestamp.
+
+For exact host-observed packet events, use
+`scripts/capture_rbpodo_reqdata_timing.sh` and
+`rb_servo_server/tools/analyze_reqdata_timing.py`. The derived CSV exposes:
+
+- `reqdata_tx_packet_system_ns`
+- `controller_response_first_rx_packet_system_ns`
+- `request_data_call_return_system_ns`
+- call-start-to-transmit, transmit-to-first-response, and first-response-to-SDK-
+  return durations
+- the system-clock call-boundary duration and its residual against the
+  steady-clock duration, so clock steps/correlation errors remain visible
+- total backend read duration and the portion outside `request_data()`, so SDK
+  wait time is not conflated with state mapping/fault classification
+
+“Response arrival” means the first CobotData SystemState TCP packet observed at
+the host capture point. A multi-segment frame can therefore leave some frame
+delivery in the final phase. Missing packets and clock/correlation mismatches
+must remain explicit classifications; the analyzer must not substitute guessed
+timestamps. This diagnostic path does not replace the rbpodo socket, parse a
+second state into production, alter motion authority, or enable real behavior.
+It is unavailable for `state_read_pipelined: true`, which does not call the SDK
+method.
 
 ## Unsupported Raw Script TCP Paths
 

@@ -1085,6 +1085,40 @@ bool testRuckigFollowerFallbackPolicyConfig() {
         defaults.cartesian_control.tcp_pose_target_profiles.front().ruckig_follower.engage_timeout_sec,
         3.0
     ));
+    RB_CHECK(near(defaults.cartesian_control.ruckig_follower.hold_bounce_resume_sec, 0.0));
+
+    const std::string missing_resume_path = writeTempConfig(
+        "ruckig-follower-missing-hold-resume",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "network:\n"
+        "  chunk_frame_bind: udp://127.0.0.1:50999\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    enable: true\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(
+        missing_resume_path,
+        "cartesian_control.ruckig_follower.hold_bounce_resume_sec"
+    ));
+    ::unlink(missing_resume_path.c_str());
+
+    const std::string explicit_resume_path = writeTempConfig(
+        "ruckig-follower-explicit-hold-resume",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "network:\n"
+        "  chunk_frame_bind: udp://127.0.0.1:50999\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    enable: true\n"
+        "    hold_bounce_resume_sec: 0.5\n"
+    );
+    const rb_servo::DualArmConfig explicit_resume =
+        rb_servo::loadConfigFromYaml(explicit_resume_path);
+    ::unlink(explicit_resume_path.c_str());
+    RB_CHECK(near(
+        explicit_resume.cartesian_control.ruckig_follower.hold_bounce_resume_sec,
+        0.5
+    ));
 
     const std::string fault_path = writeTempConfig(
         "ruckig-follower-fallback-fault",
@@ -1182,45 +1216,6 @@ bool testRuckigFollowerControllerConfig() {
         "    delta_twist_max_lead_m: 0.091\n"
         "    delta_twist_max_lead_rad: 0.51\n"
         "    delta_twist_stale_residual_timeout_sec: 0.19\n"
-        "    delta_twist_pause_on_safety_block: false\n"
-        "    delta_twist_block_requires_fresh_chunk_sec: 0.071\n"
-        "    delta_twist_block_clear_residual: false\n"
-        "    surface_action_projector:\n"
-        "      enable: true\n"
-        "      floor_z_m: 0.012\n"
-        "      floor_normal_stand: [0.0, 0.0, 1.0]\n"
-        "      soft_floor_margin_m: 0.022\n"
-        "      stop_floor_margin_m: 0.003\n"
-        "      close_floor_band_m: 0.018\n"
-        "      min_tip_margin_m: 0.004\n"
-        "      tangent_coupling: 0.7\n"
-        "      close_tangent_scale: 0.2\n"
-        "      preclose_tangent_scale: 0.0\n"
-        "      max_tangent_delta_near_floor_m: 0.0007\n"
-        "      max_down_delta_near_floor_m: 0.0003\n"
-        "      max_yaw_delta_near_floor_rad: 0.011\n"
-        "      max_pitch_roll_delta_near_floor_rad: 0.004\n"
-        "      close_lookahead_steps: 5\n"
-        "      close_threshold: 25.0\n"
-        "      close_is_greater: false\n"
-        "      gripper_floor_check_points_tcp:\n"
-        "        - { name: tip_a, offset_m: [0.05, 0.01, 0.0], offset_closed_m: [0.01, 0.01, 0.0] }\n"
-        "      hull_line_search_iters: 9\n"
-        "    grasp_commit:\n"
-        "      enable: true\n"
-        "      close_threshold: 25.0\n"
-        "      close_is_greater: false\n"
-        "      close_lookahead_steps: 6\n"
-        "      commit_floor_band_m: 0.016\n"
-        "      both_arm_sync_timeout_sec: 0.12\n"
-        "      preclose_translation_scale: 0.1\n"
-        "      preclose_angular_scale: 0.3\n"
-        "      closing_hold_sec: 0.21\n"
-        "      lift_height_m: 0.031\n"
-        "      lift_duration_sec: 0.36\n"
-        "      bimanual_sync: true\n"
-        "      freeze_gripper_until_commit: true\n"
-        "      close_target: 0.0\n"
         "  tcp_pose_target_profile_default: strict\n"
         "  tcp_pose_target_profiles:\n"
         "    strict:\n"
@@ -1240,35 +1235,42 @@ bool testRuckigFollowerControllerConfig() {
     RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_max_lead_m, 0.091));
     RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_max_lead_rad, 0.51));
     RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_stale_residual_timeout_sec, 0.19));
-    RB_CHECK(!delta_cfg.cartesian_control.ruckig_follower.delta_twist_pause_on_safety_block);
-    RB_CHECK(near(delta_cfg.cartesian_control.ruckig_follower.delta_twist_block_requires_fresh_chunk_sec, 0.071));
-    RB_CHECK(!delta_cfg.cartesian_control.ruckig_follower.delta_twist_block_clear_residual);
-    const auto& sp = delta_cfg.cartesian_control.ruckig_follower.surface_action_projector;
-    RB_CHECK(sp.enable);
-    RB_CHECK(near(sp.floor_z_m, 0.012));
-    RB_CHECK(sp.floor_z_m_configured);
-    RB_CHECK(near(sp.soft_floor_margin_m, 0.022));
-    RB_CHECK(near(sp.stop_floor_margin_m, 0.003));
-    RB_CHECK(near(sp.tangent_coupling, 0.7));
-    RB_CHECK(near(sp.max_down_delta_near_floor_m, 0.0003));
-    RB_CHECK(sp.close_lookahead_steps == 5);
-    RB_CHECK(near(sp.close_threshold, 25.0));
-    RB_CHECK(!sp.close_is_greater);
-    RB_CHECK(sp.gripper_floor_check_points_tcp.size() == 1);
-    RB_CHECK(sp.hull_line_search_iters == 9);
-    const auto& gc = delta_cfg.cartesian_control.ruckig_follower.grasp_commit;
-    RB_CHECK(gc.enable);
-    RB_CHECK(gc.close_lookahead_steps == 6);
-    RB_CHECK(near(gc.commit_floor_band_m, 0.016));
-    RB_CHECK(near(gc.preclose_translation_scale, 0.1));
-    RB_CHECK(near(gc.preclose_angular_scale, 0.3));
-    RB_CHECK(near(gc.closing_hold_sec, 0.21));
-    RB_CHECK(near(gc.lift_height_m, 0.031));
-    RB_CHECK(near(gc.lift_duration_sec, 0.36));
-    RB_CHECK(gc.freeze_gripper_until_commit);
-    RB_CHECK(near(gc.close_target, 0.0));
     RB_CHECK(delta_cfg.cartesian_control.tcp_pose_target_profiles.front().ruckig_follower.controller ==
              rb_servo::RuckigFollowerController::RuckigWaypoint);
+
+    const std::string preview_path = writeTempConfig(
+        "ruckig-follower-controller-preview",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    controller: delta_preview\n"
+        "    fallback_policy: fault\n"
+        "    preview_max_projection_error_m: 0.001\n"
+        "    preview_max_projection_error_rad: 0.004\n"
+        "    preview_max_consecutive_projection_errors: 3\n"
+        "    preview_max_actual_lead_m: 0.006\n"
+        "    preview_max_actual_lead_rad: 0.017\n"
+        "    preview_max_consecutive_actual_lead_errors: 3\n"
+    );
+    const rb_servo::DualArmConfig preview_cfg = rb_servo::loadConfigFromYaml(preview_path);
+    ::unlink(preview_path.c_str());
+    RB_CHECK(preview_cfg.cartesian_control.ruckig_follower.controller ==
+             rb_servo::RuckigFollowerController::DeltaPreview);
+    RB_CHECK(near(preview_cfg.cartesian_control.ruckig_follower.preview_max_actual_lead_m, 0.006));
+
+    const std::string preview_missing_bound_path = writeTempConfig(
+        "ruckig-follower-controller-preview-missing-bound",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    controller: delta_preview\n"
+        "    fallback_policy: fault\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(
+        preview_missing_bound_path,
+        "preview_max_projection_error_m"
+    ));
+    ::unlink(preview_missing_bound_path.c_str());
 
     const std::string bad_controller_path = writeTempConfig(
         "ruckig-follower-bad-controller",
@@ -1308,49 +1310,6 @@ bool testRuckigFollowerControllerConfig() {
         "cartesian_control.ruckig_follower.delta_twist_min_time_to_go_sec"
     ));
     ::unlink(bad_min_tgo_path.c_str());
-
-    const std::string bad_block_fresh_path = writeTempConfig(
-        "ruckig-follower-bad-delta-block-fresh",
-        "schema: robotics_lab.rb_servo_server.v1\n"
-        "cartesian_control:\n"
-        "  ruckig_follower:\n"
-        "    delta_twist_block_requires_fresh_chunk_sec: 0.0\n"
-    );
-    RB_CHECK(loadRejectsWithMessage(
-        bad_block_fresh_path,
-        "cartesian_control.ruckig_follower.delta_twist_block_requires_fresh_chunk_sec"
-    ));
-    ::unlink(bad_block_fresh_path.c_str());
-
-    const std::string bad_surface_path = writeTempConfig(
-        "ruckig-follower-bad-surface-projector",
-        "schema: robotics_lab.rb_servo_server.v1\n"
-        "cartesian_control:\n"
-        "  ruckig_follower:\n"
-        "    surface_action_projector:\n"
-        "      enable: true\n"
-        "      floor_normal_stand: [0.0, 0.0, 0.0]\n"
-    );
-    RB_CHECK(loadRejectsWithMessage(
-        bad_surface_path,
-        "cartesian_control.ruckig_follower.surface_action_projector.floor_normal_stand"
-    ));
-    ::unlink(bad_surface_path.c_str());
-
-    const std::string bad_grasp_path = writeTempConfig(
-        "ruckig-follower-bad-grasp-commit",
-        "schema: robotics_lab.rb_servo_server.v1\n"
-        "cartesian_control:\n"
-        "  ruckig_follower:\n"
-        "    grasp_commit:\n"
-        "      enable: true\n"
-        "      preclose_angular_scale: 1.5\n"
-    );
-    RB_CHECK(loadRejectsWithMessage(
-        bad_grasp_path,
-        "cartesian_control.ruckig_follower.grasp_commit.preclose_angular_scale"
-    ));
-    ::unlink(bad_grasp_path.c_str());
 
     return true;
 }

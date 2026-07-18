@@ -47,7 +47,7 @@ esac
 ACTION_SOURCE="${ACTION_SOURCE:-teleop_mux}"
 
 SERVER_BIN="rb_servo_server/build/rbpodo_real_gate/rb_servo_server"
-SERVER_CFG="rb_servo_server/config/stack_${MODE}.yaml"
+SERVER_CFG="${SERVER_CONFIG:-rb_servo_server/config/stack_${MODE}.yaml}"
 POLICY_CFG="policy_runner/config/stack_${MODE}.yaml"
 LOG_DIR="logs/stack"
 mkdir -p "$LOG_DIR"
@@ -141,6 +141,10 @@ ensure_rt_caps() {
 [ -x "$SERVER_BIN" ] || { echo "[stack] server binary missing: $SERVER_BIN (build rbpodo_real_gate first)" >&2; exit 1; }
 [ -f "$SERVER_CFG" ] || { echo "[stack] missing $SERVER_CFG" >&2; exit 1; }
 [ -f "$POLICY_CFG" ] || { echo "[stack] missing $POLICY_CFG" >&2; exit 1; }
+case "$SERVER_CFG" in
+  /*) SERVER_CFG_ABS="$SERVER_CFG" ;;
+  *) SERVER_CFG_ABS="$PWD/$SERVER_CFG" ;;
+esac
 
 # Preflight: a previous run interrupted mid-startup (e.g. Ctrl-C during a slow
 # pgmode switch) can leave OUR processes alive holding the command/state ports
@@ -247,7 +251,7 @@ PYTHONPATH=rb_gui \
   RB_GUI_STATE_BIND=0.0.0.0 RB_GUI_STATE_PORT=50366 \
   RB_GUI_COMMAND_HOST=127.0.0.1 RB_GUI_COMMAND_PORT=50256 \
   RB_GUI_CIRCLE_OVERLAY_BIND=none \
-  RB_GUI_SERVER_CONFIG_PATH="$PWD/$SERVER_CFG" \
+  RB_GUI_SERVER_CONFIG_PATH="$SERVER_CFG_ABS" \
   python3 -m rb_servo_gui.app >"$LOG_DIR/gui.log" 2>&1 &
 PIDS+=($!)
 

@@ -4,7 +4,8 @@ import json
 import mmap
 import struct
 import time
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -74,6 +75,9 @@ class CameraBundle:
     complete: bool
     received_monotonic: float
     frames: dict[str, CameraFrame]
+    sync_policy: str = ""
+    max_time_diff_ms: float = 0.0
+    drop_counters: dict[str, int] = field(default_factory=dict)
 
 
 class _ShmCache:
@@ -117,6 +121,7 @@ class CameraBundleClient:
         max_age_ms: float = 100.0,
         include_depth: bool = False,
         include_ir: bool = False,
+        health_topic: str = "camera.health",
     ):
         try:
             import numpy  # noqa: F401
@@ -145,39 +150,81 @@ class CameraBundleClient:
         # HWM=4 -> 400 ms gap gives a 427 ms-old frame (stale); HWM>=16 -> ~30 ms.
         self._sock.setsockopt(zmq.RCVHWM, 60)
         self._sock.connect(zmq_endpoint)
+        self._health_sock = self._ctx.socket(zmq.SUB)
+        self._health_sock.setsockopt_string(zmq.SUBSCRIBE, health_topic)
+        self._health_sock.setsockopt(zmq.RCVHWM, 8)
+        self._health_sock.connect(zmq_endpoint)
         self._endpoint = zmq_endpoint
         self._topic = topic
+        self._health_topic = str(health_topic)
         self._max_age_ms = float(max_age_ms)
         self._include_depth = bool(include_depth)  # opt-in z16 decode (collection only)
         self._include_ir = bool(include_ir)  # opt-in y8 IR decode (stereo worker)
         self._shm_cache = _ShmCache()
         self._latest: CameraBundle | None = None
+        self._latest_health: dict[str, Any] | None = None
+        self._poll_outcomes: Counter[str] = Counter()
+        self._last_poll: dict[str, Any] = {"outcome": "never_polled"}
         self._closed = False
+
+    def _set_poll_outcome(self, outcome: str, **details: Any) -> None:
+        self._poll_outcomes[str(outcome)] += 1
+        self._last_poll = {
+            "outcome": str(outcome),
+            "monotonic_ns": time.monotonic_ns(),
+            **details,
+        }
+
+    def _poll_health(self) -> None:
+        latest: list[bytes] | None = None
+        while True:
+            try:
+                latest = self._health_sock.recv_multipart(flags=self._zmq.NOBLOCK)
+            except self._zmq.Again:
+                break
+        if latest is not None:
+            decoded = self._decode_message_for_topic(latest, self._health_topic)
+            if decoded is not None:
+                self._latest_health = decoded
 
     def poll(self, timeout_ms: int = 0) -> CameraBundle | None:
         """Receive and decode the latest complete camera bundle if available."""
 
         if self._closed:
             return None
+        self._poll_health()
         poller = self._zmq.Poller()
         poller.register(self._sock, self._zmq.POLLIN)
         socks = dict(poller.poll(timeout=int(timeout_ms)))
         if self._sock not in socks:
+            self._set_poll_outcome("no_message")
             return None
         try:
             parts = self._sock.recv_multipart(flags=self._zmq.NOBLOCK)
         except self._zmq.Again:
+            self._set_poll_outcome("recv_race")
             return None
+        # ZMQ subscriptions are prefix matches. A legacy `camera.bundle`
+        # subscriber therefore also receives `camera.bundle.policy` and
+        # `camera.bundle.stereo`; retain the newest exact-topic message only.
+        meta = self._decode_message(parts)
         while True:
             try:
                 parts = self._sock.recv_multipart(flags=self._zmq.NOBLOCK)
             except self._zmq.Again:
                 break
-        meta = self._decode_message(parts)
-        if meta is None or not bool(meta.get("complete", False)):
+            candidate = self._decode_message(parts)
+            if candidate is not None:
+                meta = candidate
+        if meta is None:
+            self._set_poll_outcome("no_exact_topic_message")
+            return None
+        if not bool(meta.get("complete", False)):
+            self._set_poll_outcome("incomplete_bundle", bundle_seq=int(meta.get("bundle_seq", 0) or 0))
             return None
         frames_meta = meta.get("frames", {})
         if not isinstance(frames_meta, dict):
+            self._set_poll_outcome("malformed_frames")
             return None
 
         decoded: dict[str, CameraFrame] = {}
@@ -195,9 +242,15 @@ class CameraBundleClient:
                 continue
             try:
                 decoded[str(cam_name)] = self._decode_frame(str(cam_name), frame_meta)
-            except Exception:
+            except Exception as exc:
+                self._set_poll_outcome(
+                    "frame_decode_error",
+                    camera_name=str(cam_name),
+                    error_type=type(exc).__name__,
+                )
                 return None
         if not decoded:
+            self._set_poll_outcome("no_decodable_frames")
             return None
 
         bundle = CameraBundle(
@@ -207,8 +260,21 @@ class CameraBundleClient:
             complete=True,
             received_monotonic=time.monotonic(),
             frames=decoded,
+            sync_policy=str(meta.get("sync_policy", "") or ""),
+            max_time_diff_ms=float(meta.get("max_time_diff_ms", 0.0) or 0.0),
+            drop_counters={
+                str(key): int(value)
+                for key, value in (meta.get("drop_counters", {}) or {}).items()
+                if isinstance(value, (int, float))
+            },
         )
+        self._poll_health()
         self._latest = bundle
+        self._set_poll_outcome(
+            "ok",
+            bundle_seq=bundle.bundle_seq,
+            frame_count=len(bundle.frames),
+        )
         return bundle
 
     def latest(self) -> CameraBundle | None:
@@ -221,23 +287,56 @@ class CameraBundleClient:
         age_ns = bundle_clock_ns() - active.bundle_time_ns
         return age_ns >= 0 and age_ns < self._max_age_ms * 1_000_000
 
+    def diagnostics_snapshot(self) -> dict[str, Any]:
+        latest = self._latest
+        age_ms: float | None = None
+        if latest is not None:
+            age_ns = bundle_clock_ns() - latest.bundle_time_ns
+            if age_ns >= 0:
+                age_ms = age_ns / 1_000_000.0
+        return {
+            "endpoint": self._endpoint,
+            "topic": self._topic,
+            "last_poll": dict(self._last_poll),
+            "poll_outcome_counts": dict(sorted(self._poll_outcomes.items())),
+            "latest_bundle": None
+            if latest is None
+            else {
+                "bundle_seq": latest.bundle_seq,
+                "bundle_time_ns": latest.bundle_time_ns,
+                "age_ms": age_ms,
+                "fresh": self.is_fresh(latest),
+                "hardware_synced": latest.hardware_synced,
+                "sync_policy": latest.sync_policy,
+                "max_time_diff_ms": latest.max_time_diff_ms,
+                "frame_names": sorted(latest.frames),
+                "drop_counters": dict(latest.drop_counters),
+            },
+            "camera_health": None if self._latest_health is None else dict(self._latest_health),
+        }
+
     def close(self) -> None:
         if self._closed:
             return
         self._sock.close(linger=0)
+        self._health_sock.close(linger=0)
         self._shm_cache.close()
         self._closed = True
 
     def _decode_message(self, parts: list[bytes]) -> dict[str, Any] | None:
+        return self._decode_message_for_topic(parts, self._topic)
+
+    @staticmethod
+    def _decode_message_for_topic(parts: list[bytes], topic_name: str) -> dict[str, Any] | None:
         if len(parts) == 2:
             topic, payload = parts
-            if topic.decode("utf-8", errors="replace") != self._topic:
+            if topic.decode("utf-8", errors="replace") != topic_name:
                 return None
             text = payload.decode("utf-8", errors="replace")
         elif len(parts) == 1:
             text = parts[0].decode("utf-8", errors="replace")
-            if text.startswith(self._topic + " "):
-                text = text[len(self._topic) + 1:]
+            if text.startswith(topic_name + " "):
+                text = text[len(topic_name) + 1:]
         else:
             return None
         try:

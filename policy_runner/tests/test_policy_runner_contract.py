@@ -392,9 +392,9 @@ class PolicyRunnerContractTest(unittest.TestCase):
             if callable(close):
                 close()
 
-    def test_stack_configs_record_six_rgbd_streams_at_30hz(self):
+    def test_stack_configs_record_expected_rgbd_streams_at_30hz(self):
         config_dir = Path(__file__).resolve().parents[1] / "config"
-        expected = [
+        full_rig = [
             "left_realsense_color",
             "left_realsense_depth",
             "right_realsense_color",
@@ -402,12 +402,16 @@ class PolicyRunnerContractTest(unittest.TestCase):
             "head_color",
             "head_depth",
         ]
+        wrist_priority = full_rig[:4]
         for name in ("stack_sim.yaml", "stack_real.yaml", "flow_real_realsense.yaml"):
             with self.subTest(name=name):
                 cfg = load_config(config_dir / name)
                 self.assertEqual(cfg.recording.rate_hz, 30.0)
+                expected = wrist_priority if name == "flow_real_realsense.yaml" else full_rig
                 self.assertEqual(cfg.camera.expected_cameras, expected)
                 self.assertTrue(cfg.camera.record_zero_on_missing)
+                if name == "flow_real_realsense.yaml":
+                    self.assertEqual(cfg.camera.bundle_topic, "camera.bundle.policy")
 
     def test_make_run_keeps_external_flow_infer_state_port_available(self):
         repo_root = Path(__file__).resolve().parents[2]
@@ -440,7 +444,7 @@ class PolicyRunnerContractTest(unittest.TestCase):
         wrapper = (repo_root / "tools/flow_infer_real_policy.sh").read_text()
 
         self.assertIn('ACTION_HORIZON="${FLOW_INFER_ACTION_HORIZON:-24}"', wrapper)
-        self.assertIn('CHUNK_EXECUTE_STEPS="${FLOW_INFER_CHUNK_EXECUTE_STEPS:-6}"', wrapper)
+        self.assertIn('CHUNK_EXECUTE_STEPS="${FLOW_INFER_CHUNK_EXECUTE_STEPS:-12}"', wrapper)
         self.assertIn('CHUNK_OVERLAY_RUNWAY_STEPS="${FLOW_INFER_CHUNK_OVERLAY_RUNWAY_STEPS:-4}"', wrapper)
         self.assertIn('SPEED_SCALE="${FLOW_INFER_SPEED_SCALE:-1.0}"', wrapper)
         self.assertIn('CHUNK_CROSSFADE_STEPS="${FLOW_INFER_CHUNK_CROSSFADE_STEPS:-2}"', wrapper)
@@ -843,8 +847,14 @@ class PolicyRunnerContractTest(unittest.TestCase):
 
         self.assertEqual(real_cfg.umi_dual_cartesian.sample_hold_timeout_sec, 0.5)
         self.assertEqual(sim_cfg.umi_dual_cartesian.sample_hold_timeout_sec, 0.05)
-        self.assertEqual(real_cfg.spacemouse_pose_target_dual.sample_stale_timeout_sec, 0.05)
+        self.assertEqual(real_cfg.spacemouse_pose_target_dual.sample_stale_timeout_sec, 0.02)
         self.assertEqual(sim_cfg.spacemouse_pose_target_dual.sample_stale_timeout_sec, 0.05)
+        self.assertTrue(real_cfg.spacemouse_pose_target_dual.discovery.enable)
+        self.assertTrue(sim_cfg.spacemouse_pose_target_dual.discovery.enable)
+        self.assertEqual(real_cfg.spacemouse_pose_target_dual.discovery.interface_number, 0)
+        self.assertIsNone(real_cfg.spacemouse_pose_target_dual.left.path)
+        self.assertIsNone(real_cfg.spacemouse_pose_target_dual.right.path)
+        self.assertFalse(real_cfg.spacemouse_pose_target_dual.startup_requires_neutral)
         self.assertTrue(real_cfg.spacemouse_pose_target_dual.gripper_buttons.enable)
         self.assertTrue(sim_cfg.spacemouse_pose_target_dual.gripper_buttons.enable)
         self.assertEqual(real_cfg.spacemouse_pose_target_dual.gripper_buttons.close_button, 0)

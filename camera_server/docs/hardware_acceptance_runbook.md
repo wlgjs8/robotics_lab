@@ -196,8 +196,8 @@ Acceptance:
 Perform this only when the operator confirms which camera may be unplugged.
 Never unplug a device used by production workloads.
 
-`reconnect.enabled: true` is not implemented and fails config validation in P0.
-This run observes disconnect health behavior only; leave reconnect disabled.
+Tracked real-camera profiles enable reconnect. Each camera is supervised
+independently, so this run must verify that only the unplugged pipeline restarts.
 
 Record:
 
@@ -207,7 +207,10 @@ disconnect_time:
 health_event_time:
 server_crashed: yes/no
 bundle_behavior: incomplete/dropped/other
-reconnect_enabled: no
+reconnect_enabled: yes
+healthy_camera_stream_continued: yes/no
+reconnect_attempt_count:
+reconnect_success_count:
 residual_errors:
 ```
 
@@ -216,8 +219,8 @@ Acceptance:
 - Server does not crash unexpectedly.
 - Health reports the disconnect.
 - Bundles become incomplete or are dropped according to config.
-- Reconnect remains disabled; any reconnect test is a follow-up after the
-  implementation lands.
+- The unplugged camera reconnects within the configured retry/timeout envelope.
+- Every other camera continues producing frames during recovery.
 
 ## 6. Docker and policy-reader run
 

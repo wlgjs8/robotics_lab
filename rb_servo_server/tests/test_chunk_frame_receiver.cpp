@@ -50,11 +50,44 @@ static std::string makePacket(int seq, int horizon, bool with_right, bool with_d
   return out;
 }
 
+static std::string withDiagnostics(std::string packet) {
+  packet.pop_back();
+  packet +=
+      ",\"chunk_execute_steps\":12,\"chunk_overlay_runway_steps\":4"
+      ",\"inference_timing\":{\"seq\":91,\"queue_wait_ms\":1.25,"
+      "\"inference_latency_ms\":77.5,\"ready_wait_ms\":3.5,"
+      "\"inference_period_ms\":401.0,\"inference_period_jitter_ms\":6.0,"
+      "\"stall_count\":2}"
+      ",\"camera_diagnostics\":{\"bundle_seq\":301,\"bundle_age_ms\":12.5,"
+      "\"max_skew_ms\":4.25,\"left_frame_number\":1001,"
+      "\"right_frame_number\":1002,\"left_frame_age_ms\":8.0,"
+      "\"right_frame_age_ms\":9.0,\"left_focus_score\":44.5,"
+      "\"right_focus_score\":45.5}}";
+  return packet;
+}
+
+static std::string asV3WithMetadata(std::string packet, bool proprio_valid) {
+  const std::string from = "robotics_lab.chunk_overlay.v2";
+  const std::string to = "robotics_lab.chunk_overlay.v3";
+  std::size_t pos = 0;
+  while ((pos = packet.find(from, pos)) != std::string::npos) {
+    packet.replace(pos, from.size(), to);
+    pos += to.size();
+  }
+  packet.pop_back();
+  packet +=
+      ",\"chunk_metadata\":{\"observation_step_seq\":12,"
+      "\"activation_step_seq\":19,\"source_start_index\":7,"
+      "\"original_horizon\":24,\"selected_horizon\":17,"
+      "\"proprio\":{\"valid\":" + std::string(proprio_valid ? "true" : "false") + "}}}";
+  return packet;
+}
+
 int main() {
   // -- Test 1: parsePacket accepts the producer's overlay wire format. --------
   std::printf("Test 1: parsePacket\n");
   {
-    const std::string pkt = makePacket(7, 16, /*with_right=*/false);
+    const std::string pkt = withDiagnostics(makePacket(7, 16, /*with_right=*/false));
     ChunkFrameReceiver::Frame frame;
     check(ChunkFrameReceiver::parsePacket(pkt.data(), pkt.size(), &frame), "valid packet parses");
     check(frame.seq == 7, "producer seq parsed");
@@ -64,6 +97,13 @@ int main() {
     check(frame.left.step[3][0] == 0.03, "step x values land");
     check(frame.left.step[3][7] == 23.0, "grip values land");
     check(frame.policy_dt_sec > 0.033 && frame.policy_dt_sec < 0.034, "policy_dt parsed");
+    check(frame.diagnostics.execute_steps == 12, "execute steps diagnostic parsed");
+    check(frame.diagnostics.runway_steps == 4, "runway steps diagnostic parsed");
+    check(frame.diagnostics.inference_seq == 91, "inference seq diagnostic parsed");
+    check(frame.diagnostics.inference_latency_ms == 77.5, "inference latency diagnostic parsed");
+    check(frame.diagnostics.inference_stall_count == 2, "inference stall diagnostic parsed");
+    check(frame.diagnostics.camera_bundle_seq == 301, "camera bundle diagnostic parsed");
+    check(frame.diagnostics.camera_right_focus_score == 45.5, "camera focus diagnostic parsed");
   }
 
   // -- Test 2: malformed / wrong-schema packets are rejected. ------------------
@@ -80,6 +120,15 @@ int main() {
     check(!ChunkFrameReceiver::parsePacket(bad4.data(), bad4.size(), &frame), "degenerate quaternion rejected");
     const std::string bad5 = "{\"schema_version\":\"robotics_lab.chunk_overlay.v2\",\"seq\":1,\"policy_dt_sec\":0.033,\"left\":[[0,0,0,0,0,0,1,0]],\"left_delta\":[[0,0,0,0,0,\"bad\",0]]}";
     check(!ChunkFrameReceiver::parsePacket(bad5.data(), bad5.size(), &frame), "malformed delta row rejected");
+    std::string optional_bad = makePacket(2, 1, false);
+    optional_bad.pop_back();
+    optional_bad += ",\"chunk_execute_steps\":\"bad\",\"inference_timing\":{\"inference_latency_ms\":\"bad\",\"stall_count\":-1},\"camera_diagnostics\":[]}";
+    check(ChunkFrameReceiver::parsePacket(optional_bad.data(), optional_bad.size(), &frame),
+          "malformed optional diagnostics do not reject motion frame");
+    check(frame.diagnostics.execute_steps == 0 &&
+          frame.diagnostics.inference_latency_ms == 0.0 &&
+          frame.diagnostics.inference_stall_count == 0,
+          "malformed optional diagnostics remain zero");
   }
 
   // -- Test 3: optional delta rows parse. -------------------------------------
@@ -105,8 +154,30 @@ int main() {
     check(frame.left_delta.count == ChunkFrameReceiver::kMaxSteps, "delta steps clamped to kMaxSteps");
   }
 
-  // -- Test 5: live loopback receive + receiver_seq dedup. ---------------------
-  std::printf("Test 5: loopback receive\n");
+  // -- Test 5: v3 alignment/proprio metadata is preserved for fail-closed use. -
+  std::printf("Test 5: v3 metadata\n");
+  {
+    const std::string pkt = asV3WithMetadata(makePacket(9, 8, true, true), true);
+    ChunkFrameReceiver::Frame frame;
+    check(ChunkFrameReceiver::parsePacket(pkt.data(), pkt.size(), &frame), "v3 packet parses");
+    check(frame.schema_generation == 3, "v3 generation marked");
+    check(frame.chunk_metadata_present && frame.proprio_valid, "proprio validity preserved");
+    check(frame.source_start_index == 7 && frame.selected_horizon == 17,
+          "alignment indices preserved");
+
+    std::string inconsistent = asV3WithMetadata(makePacket(10, 8, true, true), true);
+    const std::string valid_selected = "\"selected_horizon\":17";
+    const std::size_t selected_pos = inconsistent.find(valid_selected);
+    inconsistent.replace(selected_pos, valid_selected.size(), "\"selected_horizon\":18");
+    check(ChunkFrameReceiver::parsePacket(
+              inconsistent.data(), inconsistent.size(), &frame),
+          "inconsistent v3 packet remains diagnostic-readable");
+    check(!frame.chunk_metadata_present,
+          "inconsistent alignment metadata cannot satisfy motion contract");
+  }
+
+  // -- Test 6: live loopback receive + receiver_seq dedup. ---------------------
+  std::printf("Test 6: loopback receive\n");
   {
     const int port = 57263;
     ChunkFrameReceiver receiver("udp://127.0.0.1:" + std::to_string(port));
@@ -141,14 +212,15 @@ int main() {
     }
     check(got, "second frame supersedes (receiver_seq=2)");
     check(frame.seq == 56, "producer seq follows independently");
+    check(frame.interarrival_sec > 0.0, "receiver interarrival stamped");
 
     ::close(sender);
     receiver.stop();
     check(true, "receiver stops cleanly");
   }
 
-  // -- Test 6: empty bind = disabled but start() succeeds. ---------------------
-  std::printf("Test 6: disabled receiver\n");
+  // -- Test 7: empty bind = disabled but start() succeeds. ---------------------
+  std::printf("Test 7: disabled receiver\n");
   {
     ChunkFrameReceiver receiver("");
     check(receiver.start(), "empty bind starts as no-op");

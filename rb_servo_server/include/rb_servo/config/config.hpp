@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <optional>
 #include <string>
 #include <vector>
@@ -757,6 +758,14 @@ struct ServoConfig {
     bool enable_realtime_priority = true;
     int realtime_priority = 80;
     int cpu_core = -1;
+    // Hybrid sleep-then-spin tail (microseconds). 0 = plain sleep_until (default,
+    // unchanged). When > 0 the loop sleeps until `slack` before the tick, then
+    // busy-spins the last `slack` so wake-up carries no C-state/scheduler jitter.
+    // GUARDED at loop start: spin is silently disabled (falls back to sleep_until)
+    // unless enable_realtime_priority is true AND kernel.sched_rt_runtime_us == -1
+    // (RT throttling off) — otherwise a ~100% RT spin would be throttled ~50 ms/s.
+    // Must be < the tick period. Only worthwhile on a dedicated isolated cpu_core.
+    int spin_slack_us = 0;
     double worker_read_period_sec = 0.002;
 
     // Use actual period for logging, but cap filter dt so one late tick does not
@@ -815,20 +824,164 @@ struct ScopeConfig {
     size_t max_samples_per_batch = 64;
 };
 
+struct FtWrenchPipelineConfig {
+    // Runtime activation remains explicit and fail-closed. The rbpodo EFT
+    // adapter does not provide an independent sensor-health channel, so real
+    // use is experimental and must be accepted through site-local config.
+    bool enable = false;
+    bool frame_configured = false;
+    std::string sensor_identity;
+    std::string calibration_id;
+    std::string freshness_source = "sequence";
+    double max_sample_age_sec = 0.02;
+    double max_source_stall_sec = 0.02;
+    double control_lpf_alpha = 0.2;
+    bool inertial_compensation_enable = false;
+    double inertial_effective_mass_kg = 0.0;
+    double inertial_accel_lpf_alpha = 0.0;
+    double max_tcp_speed_m_s = 0.0;
+    double max_tcp_accel_m_s2 = 0.0;
+    bool auto_tare_after_init_motion = false;
+    double auto_tare_settle_sec = 0.5;
+    int residual_tare_min_samples = 50;
+    double residual_tare_max_force_stddev_n = 0.1;
+    double residual_tare_max_torque_stddev_nm = 0.01;
+
+    // T_tcp_sensor: pose of the sensor frame expressed in the TCP frame.
+    Pose6D t_tcp_sensor;
+    Wrench6D sensor_bias;
+    // Orientation-dependent gravity wrench removed before the pose-local
+    // residual tare.  The legacy rigid_payload model uses payload_mass_kg and
+    // payload_com_tcp_m.  controller_compensated_linear is a separately
+    // identified residual model for controller feedback that is assumed to
+    // have already undergone undocumented gravity/source processing.
+    std::string gravity_compensation_model = "rigid_payload";
+    std::string gravity_compensation_calibration_id;
+    std::array<double, 9> gravity_force_matrix_n_per_m_s2{};
+    std::array<double, 9> gravity_torque_matrix_nm_per_m_s2{};
+    bool gravity_force_matrix_configured = false;
+    bool gravity_torque_matrix_configured = false;
+    double payload_mass_kg = 0.0;
+    std::array<double, 3> payload_com_tcp_m{};
+    Wrench6D residual_tare_tcp;
+};
+
+struct PayloadIdentificationConfig {
+    // Disabled unless the tracked stack explicitly supplies and validates the
+    // complete acquisition/fit profile. Zero values are deliberately invalid
+    // when enable=true; callers must never invent motion or acceptance bounds.
+    bool enable = false;
+    // rigid_payload identifies physical mass/CoG.  The linear controller-
+    // compensated model identifies only an orientation-dependent residual and
+    // must never be presented as a physical payload or CoG.
+    std::string observation_model;
+    // Observation sign for the rigid pre-payload/pre-tare wrench model.
+    // Required for rigid_payload and deliberately empty for the linear model.
+    // payload_load: w = bias + [m*g, c x (m*g)]
+    // sensor_reaction: w = bias - [m*g, c x (m*g)]
+    std::string wrench_convention;
+    int min_poses = 0;
+    double arrival_tolerance_deg = 0.0;
+    double settle_sec = 0.0;
+    int samples_per_pose = 0;
+    double max_force_stddev_n = 0.0;
+    double max_torque_stddev_nm = 0.0;
+    double max_force_fit_rms_n = 0.0;
+    double max_torque_fit_rms_nm = 0.0;
+    double max_design_condition_number = 0.0;
+};
+
+struct ForceTorqueConfig {
+    std::string source = "null";
+    PayloadIdentificationConfig payload_identification;
+    FtWrenchPipelineConfig left;
+    FtWrenchPipelineConfig right;
+};
+
+struct ForceControlArmConfig {
+    bool enable = false;
+    // V1 supports one stand-frame normal: a server-owned plane, or a direction
+    // captured from measured force at the start of a debounced contact episode.
+    std::string surface_source = "floor_constraint";
+    // Frame used by the symmetric 6D Cartesian admittance controller.
+    // surface: selected stand-fixed surface axes at the TCP origin.
+    // sensor_origin: URDF/configured sensor axes and measurement origin.
+    // tcp_origin: sensor axes translated to the TCP origin.
+    std::string compliance_frame = "surface";
+    double target_force_n = 0.0;
+    double contact_enter_force_n = 0.0;
+    double contact_release_force_n = 0.0;
+    double force_deadband_n = 0.0;
+    double hard_normal_force_n = 0.0;
+    double hard_force_norm_n = 0.0;
+    double hard_torque_norm_nm = 0.0;
+    int debounce_samples = 1;
+    int hard_limit_debounce_samples = 1;
+    double release_dwell_sec = 0.0;
+    double release_velocity_threshold_m_s = 0.002;
+    // Soft-contact hysteresis for the five non-normal Cartesian compliance
+    // axes.  The known surface normal keeps using the scalar thresholds above.
+    double transverse_contact_enter_force_n = 5.0;
+    double transverse_contact_release_force_n = 4.0;
+    double torque_contact_enter_nm = 0.9;
+    double torque_contact_release_nm = 0.7;
+    ForceControlAxis compliance_axes;
+};
+
+struct NormalAdmittanceConfig {
+    double virtual_mass_kg = 5.0;
+    double damping_n_s_m = 80.0;
+    double stiffness_n_m = 0.0;
+    double max_unload_offset_m = 0.01;
+    double max_normal_velocity_m_s = 0.02;
+    double max_normal_acceleration_m_s2 = 0.2;
+    double max_normal_jerk_m_s3 = 2.0;
+    double max_normal_step_m = 0.001;
+    double max_energy_j = 2.0;
+};
+
 struct ForceControlConfig {
     std::string provider = "null";
     bool enable = false;
-    int update_rate_hz = 200;
+    std::string operating_mode = "monitor";
+    bool allow_in_real = false;
+    // rbpodo EFT does not expose an independent sensor presence/fault/
+    // overrange channel. This explicit opt-in prevents a generic real-motion
+    // allow flag from silently treating controller-frame freshness as a
+    // safety-rated sensor contract.
+    bool supervised_experimental_real = false;
+    int update_rate_hz = 500;
 
-    // Simple admittance fallback used before integrating mo_forcecontroller.
-    double admittance_gain_pos = 0.0002;  // m / (N*s) applied as gain * error * dt
-    double admittance_gain_rot = 0.0001;  // rad / (Nm*s)
-    double force_lpf_alpha = 0.2;
+    ForceControlArmConfig left;
+    ForceControlArmConfig right;
+    NormalAdmittanceConfig normal_admittance;
+
+    // Diagonal Cartesian admittance parameters ordered [x,y,z,rx,ry,rz].
+    std::array<double, 6> virtual_mass{5.0, 5.0, 5.0, 0.5, 0.5, 0.5};
+    std::array<double, 6> damping{80.0, 80.0, 80.0, 8.0, 8.0, 8.0};
+    std::array<double, 6> stiffness{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    std::array<double, 6> wrench_deadband{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    // When enabled, translation and rotation each defer per-axis spring
+    // recentering until every enabled axis in that block is released.  The
+    // released block then shares one feasible jerk scale so its return
+    // direction is preserved instead of being reshaped by six independent
+    // jerk clamps.
+    bool blockwise_release_recenter = false;
+
+    double max_dt_sec = 0.02;
 
     double max_pos_offset_m = 0.01;
     double max_rot_offset_rad = 0.1;
+    double max_linear_velocity_m_s = 0.02;
+    double max_angular_velocity_rad_s = 0.2;
+    double max_linear_acceleration_m_s2 = 0.2;
+    double max_angular_acceleration_rad_s2 = 2.0;
+    double max_linear_jerk_m_s3 = 2.0;
+    double max_angular_jerk_rad_s3 = 20.0;
     double max_pos_step_m = 0.001;
     double max_rot_step_rad = 0.01;
+    double max_energy_j = 2.0;
+
 };
 
 struct LinearMoveConfig {
@@ -909,76 +1062,19 @@ enum class RuckigFollowerFallbackPolicy {
     Fault
 };
 
+// What a sustained delta_preview projection-budget breach does. Fault latches
+// (bring-up default); Warn logs and keeps following — the projection gate is a
+// plan-fidelity alarm, while lead / the divergence latch / ROI / self-collision
+// / FT hard limits own runaway safety.
+enum class RuckigProjectionFaultPolicy {
+    Fault,
+    Warn
+};
+
 enum class RuckigFollowerController {
     RuckigWaypoint,
-    DeltaTwist
-};
-
-// Optional pre-controller projector for OpenPI DeltaTwist action rows near the
-// floor. This is not a safety layer: it discards local action components that
-// are physically infeasible near the configured floor before they become
-// DeltaTwist residual. The hard floor/ROI/self-collision filters remain final.
-struct SurfaceActionProjectorConfig {
-    bool enable = false;
-
-    double floor_z_m = 0.0;
-    bool floor_z_m_configured = false;  // internal: lets profile inherit safety.floor_constraint.z_min_m
-    std::array<double, 3> floor_normal_stand{0.0, 0.0, 1.0};
-
-    double soft_floor_margin_m = 0.012;
-    double stop_floor_margin_m = 0.002;
-    double close_floor_band_m = 0.015;
-    double min_tip_margin_m = 0.002;
-
-    double tangent_coupling = 0.80;
-    double close_tangent_scale = 0.15;
-    double preclose_tangent_scale = 0.0;
-
-    double max_tangent_delta_near_floor_m = 0.0005;
-    double max_down_delta_near_floor_m = 0.0002;
-    double max_yaw_delta_near_floor_rad = 0.010;
-    double max_pitch_roll_delta_near_floor_rad = 0.003;
-
-    // Gripper values in chunk frames are opening percent in the current flow
-    // stack: 0 = closed, 100 = open. Defaults therefore detect close by values
-    // falling below the threshold.
-    int close_lookahead_steps = 4;
-    double close_threshold = 25.0;
-    bool close_is_greater = false;
-
-    // TCP-frame floor check points. Empty means the DeltaTwist builder may
-    // inherit safety.floor_constraint.tcp_offset_points; if still empty, the
-    // projector falls back to the TCP origin.
-    std::vector<FloorCheckPointConfig> gripper_floor_check_points_tcp;
-    int hull_line_search_iters = 8;
-};
-
-// Optional near-floor pick assist for DeltaTwist/OpenPI. This is intentionally
-// separate from the hard floor/safety stack: it freezes/drops policy deltas
-// during the final close/lift contact phase so unexecutable forward/down action
-// does not become stale residual. Disabled by default.
-struct GraspCommitConfig {
-    bool enable = false;
-
-    // Gripper values in the flow stack are opening percent (0 = closed,
-    // 100 = open), so defaults detect close intent by falling below threshold.
-    double close_threshold = 25.0;
-    bool close_is_greater = false;
-    int close_lookahead_steps = 4;
-
-    double commit_floor_band_m = 0.015;
-    double both_arm_sync_timeout_sec = 0.150;
-
-    double preclose_translation_scale = 0.0;
-    double preclose_angular_scale = 0.25;
-
-    double closing_hold_sec = 0.200;
-    double lift_height_m = 0.030;
-    double lift_duration_sec = 0.350;
-
-    bool bimanual_sync = true;
-    bool freeze_gripper_until_commit = false;
-    double close_target = 0.0;
+    DeltaTwist,
+    DeltaPreview
 };
 
 // Per-profile chunk-follower stage that REPLACES the pose_track_smd step while
@@ -1035,11 +1131,28 @@ struct RuckigFollowerConfig {
     double delta_twist_max_lead_m = 0.060;
     double delta_twist_max_lead_rad = 0.30;
     double delta_twist_stale_residual_timeout_sec = 0.15;
-    bool delta_twist_pause_on_safety_block = true;
-    double delta_twist_block_requires_fresh_chunk_sec = 0.050;
-    bool delta_twist_block_clear_residual = true;
-    SurfaceActionProjectorConfig surface_action_projector;
-    GraspCommitConfig grasp_commit;
+    // delta_preview safety contract. Zero means unspecified and is rejected
+    // whenever controller=delta_preview; no motion-relevant fallback exists.
+    double preview_max_projection_error_m = 0.0;
+    double preview_max_projection_error_rad = 0.0;
+    int preview_max_consecutive_projection_errors = 0;
+    double preview_max_actual_lead_m = 0.0;
+    double preview_max_actual_lead_rad = 0.0;
+    int preview_max_consecutive_actual_lead_errors = 0;
+    RuckigProjectionFaultPolicy preview_projection_fault_policy =
+        RuckigProjectionFaultPolicy::Fault;
+    // Quasi-static gate for the wrench-gated loading projection: the follower
+    // only projects contact loading out of the plan while its own linear plan
+    // acceleration is below this bound. Fast transit acceleration puts a real
+    // m*a inertial component (up to ~10 N for the 3.5 kg tool) into the
+    // measured wrench that the gravity map cannot remove, and a projection
+    // firing on that inertial "contact" yanks the plan. Exceeding the bound
+    // fails toward the baseline blind follower (assist off, motion untouched).
+    double loading_projection_max_accel_m_s2 = 0.5;
+    // Brief upstream Hold interleaves may preserve the active chunk and its
+    // chained p/v/a state. Zero is deliberately invalid for an enabled
+    // follower: every active profile must select the reviewed grace window.
+    double hold_bounce_resume_sec = 0.0;
     // Feed-liveness watchdog: with no fresh chunk frame for this long the
     // follower deactivates (falls back to pose_track_smd / hold).
     double chunk_feed_timeout_sec = 1.5;
@@ -1123,6 +1236,7 @@ struct DualArmConfig {
     CommandSourceConfig command_source;
     LoggingConfig logging;
     ScopeConfig scope;
+    ForceTorqueConfig force_torque;
     ForceControlConfig force_control;
     CartesianControlConfig cartesian_control;
     KinematicsConfig kinematics;

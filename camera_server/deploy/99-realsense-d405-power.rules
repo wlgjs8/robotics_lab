@@ -1,0 +1,5 @@
+# Optional diagnostic fallback for Intel RealSense D405 (8086:0b5b).
+# Install only after the firmware/SDK-aligned native-backend test still shows
+# runtime suspend or USB disconnects. `power/control=on` disables autosuspend
+# for D405 devices without changing other USB peripherals.
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="8086", ATTR{idProduct}=="0b5b", TEST=="power/control", ATTR{power/control}="on"

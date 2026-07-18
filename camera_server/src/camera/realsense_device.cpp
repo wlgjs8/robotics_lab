@@ -1,9 +1,11 @@
 #include "camera_server/camera/realsense_device.hpp"
 
 #include "camera_server/core/clock.hpp"
+#include "camera_server/core/bounded_queue.hpp"
 
 #include <chrono>
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -14,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 
 #if CAMERA_SERVER_HAVE_REALSENSE
 #include <librealsense2/rs.hpp>
@@ -22,13 +25,118 @@
 
 namespace camera_server {
 
-std::vector<std::string> discover_realsense_serials() {
-  std::vector<std::string> serials;
+namespace {
+
+std::tuple<int, int, int, int> parse_version(const std::string& text) {
+  std::tuple<int, int, int, int> out{0, 0, 0, 0};
+  std::stringstream input(text);
+  std::string part;
+  int values[4]{0, 0, 0, 0};
+  size_t index = 0;
+  while (index < 4 && std::getline(input, part, '.')) {
+    try {
+      values[index] = std::stoi(part);
+    } catch (...) {
+      return {0, 0, 0, 0};
+    }
+    ++index;
+  }
+  return {values[0], values[1], values[2], values[3]};
+}
+
+}  // namespace
+
+std::vector<RealSenseDeviceInfo> discover_realsense_devices() {
+  std::vector<RealSenseDeviceInfo> devices;
 #if CAMERA_SERVER_HAVE_REALSENSE
   rs2::context ctx;
-  for (auto&& dev : ctx.query_devices()) serials.emplace_back(dev.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER));
+  for (auto&& dev : ctx.query_devices()) {
+    auto get = [&](rs2_camera_info field) -> std::string {
+      return dev.supports(field) ? dev.get_info(field) : std::string();
+    };
+    RealSenseDeviceInfo info;
+    info.name = get(RS2_CAMERA_INFO_NAME);
+    info.serial = get(RS2_CAMERA_INFO_SERIAL_NUMBER);
+    info.firmware_version = get(RS2_CAMERA_INFO_FIRMWARE_VERSION);
+    info.recommended_firmware_version = get(RS2_CAMERA_INFO_RECOMMENDED_FIRMWARE_VERSION);
+    info.physical_port = get(RS2_CAMERA_INFO_PHYSICAL_PORT);
+    info.product_id = get(RS2_CAMERA_INFO_PRODUCT_ID);
+    info.usb_type = get(RS2_CAMERA_INFO_USB_TYPE_DESCRIPTOR);
+    devices.push_back(std::move(info));
+  }
 #endif
+  return devices;
+}
+
+std::vector<std::string> discover_realsense_serials() {
+  std::vector<std::string> serials;
+  for (const auto& device : discover_realsense_devices()) serials.push_back(device.serial);
   return serials;
+}
+
+std::string librealsense_sdk_version() {
+#if CAMERA_SERVER_HAVE_REALSENSE
+  rs2_error* error = nullptr;
+  const int version = rs2_get_api_version(&error);
+  if (error != nullptr) {
+    const std::string message = rs2_get_error_message(error);
+    rs2_free_error(error);
+    throw std::runtime_error("failed to query librealsense SDK version: " + message);
+  }
+  return std::to_string(version / 10000) + "." + std::to_string((version / 100) % 100) + "." +
+         std::to_string(version % 100);
+#else
+  return "unavailable";
+#endif
+}
+
+std::string librealsense_backend() {
+#if CAMERA_SERVER_HAVE_REALSENSE
+  return CAMERA_SERVER_REALSENSE_BACKEND;
+#else
+  return "unavailable";
+#endif
+}
+
+void validate_realsense_preflight(const AppConfig& cfg,
+                                  const std::vector<RealSenseDeviceInfo>& devices,
+                                  const std::string& sdk_version) {
+  if (cfg.server.simulate_cameras) return;
+  bool requires_realsense = false;
+  for (const auto& camera : cfg.cameras) {
+    if (camera.backend == "realsense" && camera.required) requires_realsense = true;
+  }
+  if (!requires_realsense) return;
+  if (parse_version(sdk_version) < parse_version("2.58.1")) {
+    throw std::runtime_error("librealsense SDK " + sdk_version +
+                             " is older than required 2.58.1 for the deployed D400 firmware set");
+  }
+
+  std::map<std::string, RealSenseDeviceInfo> by_serial;
+  for (const auto& device : devices) by_serial[device.serial] = device;
+  std::string d405_firmware;
+  for (const auto& camera : cfg.cameras) {
+    if (camera.backend != "realsense" || !camera.required) continue;
+    const auto found = by_serial.find(camera.serial);
+    if (found == by_serial.end()) continue;  // Missing-device error retains the connected-serial detail.
+    const auto& device = found->second;
+    if (device.usb_type.empty() || device.usb_type.front() != '3') {
+      throw std::runtime_error("required RealSense camera is not on USB3: " + camera.name +
+                               " serial=" + camera.serial + " usb_type=" + device.usb_type);
+    }
+    if (device.product_id != "0B5B") continue;
+    if (parse_version(device.firmware_version) < parse_version("5.17.0.10")) {
+      throw std::runtime_error("D405 firmware is older than required 5.17.0.10: " + camera.name +
+                               " serial=" + camera.serial + " firmware=" + device.firmware_version);
+    }
+    if (d405_firmware.empty()) {
+      d405_firmware = device.firmware_version;
+    } else if (device.firmware_version != d405_firmware) {
+      throw std::runtime_error("configured D405 cameras must use identical firmware: expected=" +
+                               d405_firmware + " got=" + device.firmware_version +
+                               " serial=" + camera.serial);
+    }
+  }
 }
 
 class MockCameraDevice final : public ICameraDevice {
@@ -94,6 +202,40 @@ std::unique_ptr<ICameraDevice> make_mock_camera_device(const CameraConfig& cfg, 
 }
 
 #if CAMERA_SERVER_HAVE_REALSENSE
+namespace {
+
+class AtomicTimingWindow {
+ public:
+  void record(uint64_t value_ns) {
+    samples_[next_.fetch_add(1, std::memory_order_relaxed) % samples_.size()].store(
+        value_ns, std::memory_order_relaxed);
+  }
+
+  std::pair<double, double> p95_max_us() const {
+    std::vector<uint64_t> values;
+    values.reserve(samples_.size());
+    for (const auto& sample : samples_) {
+      const auto value = sample.load(std::memory_order_relaxed);
+      if (value != 0) values.push_back(value);
+    }
+    if (values.empty()) return {0.0, 0.0};
+    std::sort(values.begin(), values.end());
+    const size_t p95 = static_cast<size_t>(0.95 * static_cast<double>(values.size() - 1));
+    return {static_cast<double>(values[p95]) / 1000.0, static_cast<double>(values.back()) / 1000.0};
+  }
+
+ private:
+  std::array<std::atomic<uint64_t>, 256> samples_{};
+  std::atomic<uint64_t> next_{0};
+};
+
+uint64_t steady_now_ns() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+}  // namespace
+
 class RealSenseDevice final : public ICameraDevice {
  public:
   RealSenseDevice(CameraConfig cfg, ClockKind clock, SyncConfig sync)
@@ -101,6 +243,7 @@ class RealSenseDevice final : public ICameraDevice {
   ~RealSenseDevice() override { stop(); }
 
   void start(FrameCallback cb) override {
+    if (running_.load()) return;
     cb_ = std::move(cb);
     configure_hardware_sync_if_requested();
     maybe_load_advanced_json();
@@ -121,15 +264,71 @@ class RealSenseDevice final : public ICameraDevice {
       rs_cfg.enable_stream(RS2_STREAM_INFRARED, 2, cfg_.ir_right.width, cfg_.ir_right.height,
                            cfg_.ir_right.format == "y16" ? RS2_FORMAT_Y16 : RS2_FORMAT_Y8, cfg_.ir_right.fps);
     }
-    rs2::pipeline_profile profile = pipe_.start(rs_cfg, [this](const rs2::frame& frame) { on_frame(frame); });
+    running_ = true;
+    frame_thread_ = std::thread(&RealSenseDevice::frame_loop, this);
+    rs2::pipeline_profile profile;
+    try {
+      profile = pipe_.start(rs_cfg, [this](const rs2::frame& frame) { enqueue_frame(frame); });
+    } catch (...) {
+      running_ = false;
+      frame_queue_.close();
+      if (frame_thread_.joinable()) frame_thread_.join();
+      throw;
+    }
     apply_controls_and_dump_intrinsics(profile);
   }
 
   void stop() override {
+    if (!running_.exchange(false)) return;
     try { pipe_.stop(); } catch (...) {}
+    frame_queue_.close();
+    if (frame_thread_.joinable()) frame_thread_.join();
+  }
+
+  CameraCaptureStats capture_stats() const override {
+    CameraCaptureStats out;
+    out.queue_drop_count = queue_drop_count_.load(std::memory_order_relaxed);
+    out.queue_depth = frame_queue_.size();
+    const auto callback = callback_timing_.p95_max_us();
+    const auto wait = queue_wait_timing_.p95_max_us();
+    const auto process = process_timing_.p95_max_us();
+    out.callback_enqueue_us_p95 = callback.first;
+    out.callback_enqueue_us_max = callback.second;
+    out.queue_wait_us_p95 = wait.first;
+    out.queue_wait_us_max = wait.second;
+    out.frame_process_us_p95 = process.first;
+    out.frame_process_us_max = process.second;
+    return out;
   }
 
  private:
+  struct QueuedFrame {
+    rs2::frame frame;
+    uint64_t host_arrival_time_ns{0};
+    uint64_t enqueue_steady_ns{0};
+  };
+
+  void enqueue_frame(const rs2::frame& frame) {
+    if (!running_.load(std::memory_order_relaxed)) return;
+    const uint64_t begin_ns = steady_now_ns();
+    QueuedFrame queued{frame, now_ns(clock_), begin_ns};
+    if (!frame_queue_.try_push_drop_oldest(std::move(queued))) {
+      queue_drop_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+    callback_timing_.record(steady_now_ns() - begin_ns);
+  }
+
+  void frame_loop() {
+    while (true) {
+      auto queued = frame_queue_.pop_wait();
+      if (!queued) break;
+      const uint64_t process_start_ns = steady_now_ns();
+      queue_wait_timing_.record(process_start_ns - queued->enqueue_steady_ns);
+      process_frame(queued->frame, queued->host_arrival_time_ns);
+      process_timing_.record(steady_now_ns() - process_start_ns);
+    }
+  }
+
   // 수집(.40)과 동일한 rs400 advanced-mode JSON을 pipeline start 전에 적용한다.
   // 경로는 env CAMERA_SERVER_REALSENSE_JSON. 실패해도 캡처는 계속(드라이버 기본값).
   // JSON에 controls-autoexposure-auto=True가 있으면 노출은 그대로 auto 유지.
@@ -337,10 +536,9 @@ class RealSenseDevice final : public ICameraDevice {
     cb_(std::move(f));
   }
 
-  void on_frame(const rs2::frame& frame) {
+  void process_frame(const rs2::frame& frame, uint64_t host_t) {
     try {
       if (auto fs = frame.as<rs2::frameset>()) {
-        const uint64_t host_t = now_ns(clock_);
         if (cfg_.color.enabled) {
           auto color = fs.get_color_frame();
           if (color) on_video_frame(color, "color", cfg_.color, host_t);
@@ -359,7 +557,6 @@ class RealSenseDevice final : public ICameraDevice {
         }
       } else if (auto vf = frame.as<rs2::video_frame>()) {
         const auto profile = vf.get_profile().stream_type();
-        const uint64_t host_t = now_ns(clock_);
         if (profile == RS2_STREAM_COLOR && cfg_.color.enabled) on_video_frame(vf, "color", cfg_.color, host_t);
         if (profile == RS2_STREAM_DEPTH && cfg_.depth.enabled) on_video_frame(vf, "depth", cfg_.depth, host_t);
         if (profile == RS2_STREAM_INFRARED) {
@@ -378,6 +575,13 @@ class RealSenseDevice final : public ICameraDevice {
   SyncConfig sync_;
   FrameCallback cb_;
   rs2::pipeline pipe_;
+  BoundedQueue<QueuedFrame> frame_queue_{2};
+  std::atomic<bool> running_{false};
+  std::atomic<uint64_t> queue_drop_count_{0};
+  std::thread frame_thread_;
+  AtomicTimingWindow callback_timing_;
+  AtomicTimingWindow queue_wait_timing_;
+  AtomicTimingWindow process_timing_;
 };
 #endif
 

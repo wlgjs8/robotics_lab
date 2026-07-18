@@ -57,7 +57,7 @@ int main(int argc, char** argv) {
     shm.create(cfg);
     camera_server::MetadataPublisher publisher(cfg.metadata);
     publisher.start();
-    camera_server::FrameSynchronizer synchronizer(cfg);
+    camera_server::FrameSynchronizerSet synchronizer(cfg);
     camera_server::Recorder recorder(cfg.recording);
     recorder.start();
     camera_server::CameraManager manager(cfg, shm, publisher, synchronizer, recorder);

@@ -30,13 +30,30 @@ struct CapturedFrame {
 
 using FrameCallback = std::function<void(CapturedFrame&&)>;
 
+struct RealSenseDeviceInfo {
+  std::string name;
+  std::string serial;
+  std::string firmware_version;
+  std::string recommended_firmware_version;
+  std::string physical_port;
+  std::string product_id;
+  std::string usb_type;
+};
+
 std::vector<std::string> discover_realsense_serials();
+std::vector<RealSenseDeviceInfo> discover_realsense_devices();
+std::string librealsense_sdk_version();
+std::string librealsense_backend();
+void validate_realsense_preflight(const AppConfig& cfg,
+                                  const std::vector<RealSenseDeviceInfo>& devices,
+                                  const std::string& sdk_version);
 
 class ICameraDevice {
  public:
   virtual ~ICameraDevice() = default;
   virtual void start(FrameCallback cb) = 0;
   virtual void stop() = 0;
+  virtual CameraCaptureStats capture_stats() const { return {}; }
 };
 
 std::unique_ptr<ICameraDevice> make_realsense_device(const CameraConfig& cfg, ClockKind clock);

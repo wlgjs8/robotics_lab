@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
@@ -85,6 +86,139 @@ bool parseArmDelta(const json& arm_node, ChunkFrameReceiver::ArmDeltaSteps* out)
     return true;
 }
 
+void parseOptionalNonnegativeInt(const json& object, const char* key, int* out) {
+    if (!out || !object.is_object()) return;
+    const auto it = object.find(key);
+    if (it == object.end() || !it->is_number_integer()) return;
+    try {
+        const long long value = it->get<long long>();
+        if (value >= 0 && value <= std::numeric_limits<int>::max()) {
+            *out = static_cast<int>(value);
+        }
+    } catch (const json::exception&) {
+    }
+}
+
+void parseOptionalUint64(const json& object, const char* key, std::uint64_t* out) {
+    if (!out || !object.is_object()) return;
+    const auto it = object.find(key);
+    if (it == object.end() || !it->is_number_unsigned()) return;
+    try {
+        *out = it->get<std::uint64_t>();
+    } catch (const json::exception&) {
+    }
+}
+
+void parseOptionalFiniteDouble(const json& object, const char* key, double* out) {
+    if (!out || !object.is_object()) return;
+    const auto it = object.find(key);
+    if (it == object.end() || !it->is_number()) return;
+    try {
+        const double value = it->get<double>();
+        if (std::isfinite(value) && value >= 0.0) *out = value;
+    } catch (const json::exception&) {
+    }
+}
+
+void parseOptionalDiagnostics(const json& packet, ChunkFrameReceiver::Diagnostics* out) {
+    if (!out) return;
+    parseOptionalNonnegativeInt(packet, "execute_steps", &out->execute_steps);
+    parseOptionalNonnegativeInt(packet, "chunk_execute_steps", &out->execute_steps);
+    parseOptionalNonnegativeInt(packet, "runway_steps", &out->runway_steps);
+    parseOptionalNonnegativeInt(packet, "chunk_overlay_runway_steps", &out->runway_steps);
+
+    const auto timing_it = packet.find("inference_timing");
+    if (timing_it != packet.end() && timing_it->is_object()) {
+        const json& timing = *timing_it;
+        parseOptionalUint64(timing, "seq", &out->inference_seq);
+        parseOptionalFiniteDouble(timing, "queue_wait_ms", &out->inference_queue_wait_ms);
+        parseOptionalFiniteDouble(timing, "inference_latency_ms", &out->inference_latency_ms);
+        parseOptionalFiniteDouble(timing, "ready_wait_ms", &out->inference_ready_wait_ms);
+        parseOptionalFiniteDouble(timing, "inference_period_ms", &out->inference_period_ms);
+        parseOptionalFiniteDouble(
+            timing, "inference_period_jitter_ms", &out->inference_period_jitter_ms);
+        parseOptionalUint64(timing, "stall_count", &out->inference_stall_count);
+    }
+
+    // Camera diagnostics may be emitted as a top-level object or nested beside
+    // inference timing. Accept both without making either shape contractual for
+    // motion-frame validity.
+    const json* camera = nullptr;
+    for (const char* key : {"camera_diagnostics", "camera_timing", "camera"}) {
+        const auto it = packet.find(key);
+        if (it != packet.end() && it->is_object()) {
+            camera = &*it;
+            break;
+        }
+    }
+    if (!camera && timing_it != packet.end() && timing_it->is_object()) {
+        for (const char* key : {"camera_diagnostics", "camera_timing", "camera"}) {
+            const auto it = timing_it->find(key);
+            if (it != timing_it->end() && it->is_object()) {
+                camera = &*it;
+                break;
+            }
+        }
+    }
+    if (!camera) return;
+    parseOptionalUint64(*camera, "bundle_seq", &out->camera_bundle_seq);
+    parseOptionalFiniteDouble(*camera, "bundle_age_ms", &out->camera_bundle_age_ms);
+    parseOptionalFiniteDouble(*camera, "max_skew_ms", &out->camera_max_skew_ms);
+    parseOptionalUint64(*camera, "left_frame_number", &out->camera_left_frame_number);
+    parseOptionalUint64(*camera, "right_frame_number", &out->camera_right_frame_number);
+    parseOptionalFiniteDouble(*camera, "left_frame_age_ms", &out->camera_left_frame_age_ms);
+    parseOptionalFiniteDouble(*camera, "right_frame_age_ms", &out->camera_right_frame_age_ms);
+    parseOptionalFiniteDouble(*camera, "left_focus_score", &out->camera_left_focus_score);
+    parseOptionalFiniteDouble(*camera, "right_focus_score", &out->camera_right_focus_score);
+}
+
+void parseChunkMetadata(const json& packet, ChunkFrameReceiver::Frame* out) {
+    if (!out) return;
+    const auto it = packet.find("chunk_metadata");
+    if (it == packet.end() || !it->is_object()) return;
+    parseOptionalUint64(*it, "observation_step_seq", &out->observation_step_seq);
+    parseOptionalUint64(*it, "activation_step_seq", &out->activation_step_seq);
+    parseOptionalNonnegativeInt(*it, "source_start_index", &out->source_start_index);
+    parseOptionalNonnegativeInt(*it, "original_horizon", &out->original_horizon);
+    parseOptionalNonnegativeInt(*it, "selected_horizon", &out->selected_horizon);
+    const auto proprio = it->find("proprio");
+    if (proprio != it->end() && proprio->is_object()) {
+        const auto valid = proprio->find("valid");
+        if (valid != proprio->end() && valid->is_boolean()) {
+            out->proprio_valid = valid->get<bool>();
+        }
+    }
+    const auto has_uint64 = [&](const char* key) {
+        const auto value = it->find(key);
+        return value != it->end() && value->is_number_unsigned();
+    };
+    const auto has_nonnegative_int = [&](const char* key) {
+        const auto value = it->find(key);
+        if (value == it->end() || !value->is_number_integer()) return false;
+        try {
+            const long long parsed = value->get<long long>();
+            return parsed >= 0 && parsed <= std::numeric_limits<int>::max();
+        } catch (const json::exception&) {
+            return false;
+        }
+    };
+    const bool required_fields =
+        has_uint64("observation_step_seq") && has_uint64("activation_step_seq") &&
+        has_nonnegative_int("source_start_index") &&
+        has_nonnegative_int("original_horizon") &&
+        has_nonnegative_int("selected_horizon") &&
+        proprio != it->end() && proprio->is_object() &&
+        proprio->contains("valid") && (*proprio)["valid"].is_boolean();
+    const bool alignment_consistent =
+        out->activation_step_seq >= out->observation_step_seq &&
+        out->activation_step_seq - out->observation_step_seq ==
+            static_cast<std::uint64_t>(out->source_start_index) &&
+        out->selected_horizon > 0 &&
+        out->original_horizon >= out->selected_horizon &&
+        out->source_start_index + out->selected_horizon == out->original_horizon;
+    out->chunk_metadata_present = required_fields && alignment_consistent;
+}
+
 }  // namespace
 
 ChunkFrameReceiver::ChunkFrameReceiver(const std::string& bind_uri) : bind_uri_(bind_uri) {}
@@ -109,10 +243,12 @@ bool ChunkFrameReceiver::parsePacket(const char* data, std::size_t size, Frame* 
     if (schema_it == packet.end() || !schema_it->is_string()) return false;
     const std::string schema = schema_it->get<std::string>();
     if (schema != "robotics_lab.chunk_overlay.v2" &&
+        schema != "robotics_lab.chunk_overlay.v3" &&
         schema != "robotics_lab.chunk_frame.v1") {
         return false;
     }
     Frame frame;
+    frame.schema_generation = schema == "robotics_lab.chunk_overlay.v3" ? 3 : 2;
     const auto seq_it = packet.find("seq");
     if (seq_it == packet.end() || !seq_it->is_number()) return false;
     frame.seq = seq_it->get<std::uint64_t>();
@@ -137,6 +273,9 @@ bool ChunkFrameReceiver::parsePacket(const char* data, std::size_t size, Frame* 
         frame.has_right_delta = parseArmDelta(*right_delta_it, &frame.right_delta);
         if (!frame.has_right_delta || !frame.has_right) return false;
     }
+
+    parseOptionalDiagnostics(packet, &frame.diagnostics);
+    parseChunkMetadata(packet, &frame);
 
     frame.recv_steady_sec = steadyNowSec();
     *out = frame;
@@ -222,6 +361,10 @@ void ChunkFrameReceiver::threadMain() {
             // under, so a copied frame always carries its own consistent seq
             // (the atomic latest_seq_ is only a cheap "anything new?" gate).
             frame.receiver_seq = latest_seq_.load(std::memory_order_relaxed) + 1;
+            if (latest_.recv_steady_sec > 0.0 &&
+                frame.recv_steady_sec >= latest_.recv_steady_sec) {
+                frame.interarrival_sec = frame.recv_steady_sec - latest_.recv_steady_sec;
+            }
             latest_ = frame;
         }
         latest_seq_.fetch_add(1, std::memory_order_acq_rel);

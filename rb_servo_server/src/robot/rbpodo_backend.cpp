@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
@@ -448,6 +449,15 @@ RobotState mapRbpodoSystemStateSnapshot(
     out_state.q_ref_valid = finiteJointArray(out_state.q_target_deg);
     out_state.q_ref_source = "rbpodo.sdata.jnt_ref";
     out_state.rbpodo_sdk_state_source = "CobotData.request_data";
+    out_state.eft_wrench.fx = snapshot.eft[0];
+    out_state.eft_wrench.fy = snapshot.eft[1];
+    out_state.eft_wrench.fz = snapshot.eft[2];
+    out_state.eft_wrench.tx = snapshot.eft[3];
+    out_state.eft_wrench.ty = snapshot.eft[4];
+    out_state.eft_wrench.tz = snapshot.eft[5];
+    out_state.eft_valid = snapshot.eft_in_frame &&
+        std::all_of(snapshot.eft.begin(), snapshot.eft.end(),
+                    [](double v) { return std::isfinite(v); });
     out_state.rbpodo_state_decode_policy =
         decode_options.real_motion_suspect_diagnostics_accepted
             ? "real_motion_suspect_diagnostics_accepted"
@@ -608,8 +618,22 @@ RbpodoSystemStateSnapshot snapshotFromSystemState(const rb::podo::SystemState& r
         snapshot.q_actual_deg[static_cast<std::size_t>(i)] = rb_state.sdata.jnt_ang[i];
         snapshot.q_target_deg[static_cast<std::size_t>(i)] = rb_state.sdata.jnt_ref[i];
     }
+    snapshot.eft[0] = static_cast<double>(rb_state.sdata.eft_fx);
+    snapshot.eft[1] = static_cast<double>(rb_state.sdata.eft_fy);
+    snapshot.eft[2] = static_cast<double>(rb_state.sdata.eft_fz);
+    snapshot.eft[3] = static_cast<double>(rb_state.sdata.eft_mx);
+    snapshot.eft[4] = static_cast<double>(rb_state.sdata.eft_my);
+    snapshot.eft[5] = static_cast<double>(rb_state.sdata.eft_mz);
     return snapshot;
 }
+
+// Pin the exported wire-format constant to the SDK struct layout: the type-0x03
+// frame IS the SystemState.sdata layout (header included), so the eft fields
+// are present iff the frame covers the last one (eft_mz).
+static_assert(
+    kRbpodoStateFrameEftEndOffsetBytes ==
+        offsetof(rb::podo::SystemState, sdata.eft_mz) + sizeof(rb::podo::SystemState{}.sdata.eft_mz),
+    "kRbpodoStateFrameEftEndOffsetBytes is out of sync with the rbpodo SystemState layout");
 
 std::optional<RobotState> recentStateCache(
     const std::optional<RobotState>& cached_state,
@@ -777,6 +801,12 @@ struct RbpodoBackend::Impl {
     std::string pipelined_rx_buf;
     std::optional<RobotState> last_state_cache;
     std::optional<BackendError> last_state_error;
+    // Advances only after a newly received CobotData state frame is decoded.
+    // Held/cache returns deliberately preserve their source frame's sequence.
+    uint64_t state_acquisition_sequence = 0;
+    // Advances for every direct SDK request_data() attempt, including timeout
+    // and exception exits, so packet captures can be correlated one-to-one.
+    uint64_t state_request_sequence = 0;
     // Consecutive transient readState misses currently being tolerated (held)
     // under the controller-simulation read-miss carve-out. Reset on any valid read.
     // In pipelined mode this counts ticks without a fresh frame (diagnostic only;
@@ -852,6 +882,7 @@ BackendResult<RobotState> RbpodoBackend::connect() {
         impl_->connected = true;
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
         RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
+        mapped.acquisition_sequence = ++impl_->state_acquisition_sequence;
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, mapped);
         attachMotionReadinessDiagnostic(&mapped, impl_->last_state_error);
         impl_->last_state_cache = mapped.has_valid_joint_state ? std::make_optional(mapped) : std::nullopt;
@@ -946,6 +977,8 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
     impl_->servo_engage_ramp_start_ns = 0;
     impl_->last_servo_j_send_ns = 0;
     try {
+        bool operation_mode_switch_confirmed = false;
+        bool activation_confirmed = false;
         // Reconcile the controller's pgmode (operation mode) with the config:
         // if the pendant/controller is in the other mode, switch it and VERIFY
         // the switch took effect before continuing. This makes `make run
@@ -1081,6 +1114,7 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
                               << rbpodoModeName(expected_simulation) << " for "
                               << impl_->config.name << " in "
                               << (nowSteadyNs() - verify_start_ns) / 1'000'000'000.0 << " s\n";
+                    operation_mode_switch_confirmed = true;
                 }
             }
         }
@@ -1151,6 +1185,7 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
                         std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     }
                     if (activated) {
+                        activation_confirmed = true;
                         std::cerr << "[INFO] RbpodoBackend robot activated for "
                                   << impl_->config.name << " in "
                                   << (nowSteadyNs() - act_start_ns) / 1'000'000'000.0 << " s\n";
@@ -1185,7 +1220,7 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
             std::cerr << "[INFO] RbpodoBackend applied speed_bar=" << impl_->config.speed_bar
                       << " for " << impl_->config.name << "\n";
         }
-        const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+        auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
         if (!state) {
             std::cerr << "[ERROR] RbpodoBackend initialize failed: no state from "
                       << impl_->config.ip << "\n";
@@ -1201,8 +1236,77 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
             );
         }
 
-        const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
+        RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
         RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
+        // set_operation_mode()/activate() are confirmed from controller state
+        // above, but the data-channel socket can still contain a pre-transition
+        // SystemState response. A single final read then makes one-shot
+        // `make run MODE=sim` fail startup with wrong_mode/servo_disabled even
+        // though a later response already proved the transition complete.
+        // Drain only when this initialize call performed and confirmed such a
+        // transition. Never substitute a guessed state: if a matching, healthy
+        // frame does not arrive within the bounded window, preserve the last
+        // observed state and let the normal fail-closed startup gate reject it.
+        const auto final_state_matches_confirmed_transition = [&]() {
+            const bool mode_matches = !operation_mode_switch_confirmed ||
+                operationModeMatchesConfig(impl_->config, snapshot);
+            const bool activation_matches = !activation_confirmed || mapped.servo_enabled;
+            return mode_matches && activation_matches;
+        };
+        if (!mapped.has_error && !final_state_matches_confirmed_transition()) {
+            const uint64_t refresh_start_ns = nowSteadyNs();
+            const uint64_t refresh_deadline_ns = refresh_start_ns + 5'000'000'000ULL;
+            while (nowSteadyNs() < refresh_deadline_ns) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                auto refreshed = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+                if (!refreshed) continue;
+                state = std::move(refreshed);
+                snapshot = snapshotFromSystemState(*state);
+                mapped = mapRbpodoSystemStateSnapshot(
+                    impl_->arm_id, snapshot, impl_->config);
+                if (mapped.has_error || final_state_matches_confirmed_transition()) break;
+            }
+            std::cerr << "[INFO] RbpodoBackend post-transition state refresh for "
+                      << impl_->config.name << " completed in "
+                      << (nowSteadyNs() - refresh_start_ns) / 1'000'000'000.0
+                      << " s: pgmode="
+                      << rbpodoPgModeLabel(snapshot.real_vs_simulation_mode)
+                      << " servo_enabled=" << (mapped.servo_enabled ? "true" : "false")
+                      << " has_error=" << (mapped.has_error ? "true" : "false") << "\n";
+        }
+        // connect() primes the dedicated non-blocking state socket before
+        // initialize() reconciles pgmode/activation. Its queued response can
+        // therefore describe the pre-transition controller state even though
+        // the blocking data channel above already confirmed the new state.
+        // Recreate and prime the socket after a confirmed transition so the
+        // first startup-validation read cannot consume that stale response.
+        if (rbpodoPipelinedChannelNeedsReprime(
+                impl_->config.state_read_pipelined,
+                operation_mode_switch_confirmed,
+                activation_confirmed)) {
+            impl_->pipelined_state_sock = std::make_unique<rb::podo::Socket>(
+                impl_->config.ip,
+                static_cast<int>(rb::podo::kDataPort)
+            );
+            impl_->pipelined_rx_buf.clear();
+            if (!impl_->pipelined_state_sock->send(rb::podo::kRequestDataCommand)) {
+                impl_->pipelined_state_sock.reset();
+                impl_->connected = false;
+                return failedResult<RobotState>(
+                    BackendOp::Initialize,
+                    backendError(
+                        BackendErrorKind::TransportConnectFailed,
+                        "rbpodo post-transition pipelined state channel prime failed",
+                        "",
+                        "rbpodo_pipelined_transition_reprime_failed"
+                    ),
+                    makeBackendTiming(start, nowSteadyNs())
+                );
+            }
+            std::cerr << "[INFO] RbpodoBackend re-primed pipelined state channel after "
+                      << "confirmed controller transition for " << impl_->config.name << "\n";
+        }
+        mapped.acquisition_sequence = ++impl_->state_acquisition_sequence;
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, mapped);
         attachMotionReadinessDiagnostic(&mapped, impl_->last_state_error);
         impl_->last_state_cache = mapped.has_valid_joint_state ? std::make_optional(mapped) : std::nullopt;
@@ -1270,6 +1374,22 @@ std::optional<std::string> extractNewestRbpodoStateFrame(std::string& buf) {
     return newest;
 }
 
+bool rbpodoStateFrameIncludesEft(std::size_t frame_bytes) {
+    // kRbpodoStateFrameEftEndOffsetBytes is a wire-format constant (frame ==
+    // SystemState.sdata image, header included) pinned to the SDK struct by a
+    // static_assert next to snapshotFromSystemState() in the rbpodo-enabled build.
+    return frame_bytes >= kRbpodoStateFrameEftEndOffsetBytes;
+}
+
+bool rbpodoPipelinedChannelNeedsReprime(
+    bool state_read_pipelined,
+    bool operation_mode_switch_confirmed,
+    bool activation_confirmed
+) {
+    return state_read_pipelined &&
+        (operation_mode_switch_confirmed || activation_confirmed);
+}
+
 BackendResult<RobotState> RbpodoBackend::readState() {
     const uint64_t start = nowSteadyNs();
 #ifndef RB_SERVO_ENABLE_RBPODO
@@ -1297,8 +1417,25 @@ BackendResult<RobotState> RbpodoBackend::readState() {
         return readStatePipelined(start);
     }
 
+    BackendReadExchangeTiming exchange_timing;
+    exchange_timing.available = true;
+    exchange_timing.exchange_sequence = ++impl_->state_request_sequence;
+    exchange_timing.source = "rbpodo_sdk_request_data";
+    const auto with_exchange_timing = [&](BackendResult<RobotState> result) {
+        result.read_exchange_timing = exchange_timing;
+        return result;
+    };
+
     try {
+        exchange_timing.request_data_call_start_steady_ns = nowSteadyNs();
+        exchange_timing.request_data_call_start_system_ns = nowSystemNs();
         const auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
+        exchange_timing.request_data_call_return_steady_ns = nowSteadyNs();
+        exchange_timing.request_data_call_return_system_ns = nowSystemNs();
+        exchange_timing.request_data_call_duration_us = static_cast<double>(
+            exchange_timing.request_data_call_return_steady_ns -
+            exchange_timing.request_data_call_start_steady_ns
+        ) / 1000.0;
         if (!state) {
             // Controller-simulation read-miss carve-out: a single missing CobotData
             // frame is treated as a transient gap (hold the last valid state and stay
@@ -1319,11 +1456,13 @@ BackendResult<RobotState> RbpodoBackend::readState() {
                           << impl_->config.name << "; holding last state ("
                           << impl_->consecutive_read_misses << "/"
                           << impl_->config.max_consecutive_read_misses << ")\n";
-                return okResult(BackendOp::ReadState, held, makeBackendTiming(start, nowSteadyNs()));
+                return with_exchange_timing(
+                    okResult(BackendOp::ReadState, held, makeBackendTiming(start, nowSteadyNs()))
+                );
             }
             out_state.connection_state = RobotConnectionState::Disconnected;
             impl_->connected = false;
-            return failedResult<RobotState>(
+            return with_exchange_timing(failedResult<RobotState>(
                 BackendOp::ReadState,
                 backendError(
                     BackendErrorKind::TransportReadFailed,
@@ -1332,30 +1471,39 @@ BackendResult<RobotState> RbpodoBackend::readState() {
                     "rbpodo_read_state_unavailable"
                 ),
                 makeBackendTiming(start, nowSteadyNs())
-            );
+            ));
         }
         impl_->consecutive_read_misses = 0;
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
         out_state = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
+        out_state.acquisition_sequence = ++impl_->state_acquisition_sequence;
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, out_state);
         attachMotionReadinessDiagnostic(&out_state, impl_->last_state_error);
         impl_->last_state_cache = out_state.has_valid_joint_state ? std::make_optional(out_state) : std::nullopt;
         if (const auto acquisition_error = rbpodoStateAcquisitionError(out_state)) {
-            return failedResultWithValue(
+            return with_exchange_timing(failedResultWithValue(
                 BackendOp::ReadState,
                 *acquisition_error,
                 out_state,
                 makeBackendTiming(start, nowSteadyNs())
-            );
+            ));
         }
-        return okResult(BackendOp::ReadState, out_state, makeBackendTiming(start, nowSteadyNs()));
+        return with_exchange_timing(
+            okResult(BackendOp::ReadState, out_state, makeBackendTiming(start, nowSteadyNs()))
+        );
     } catch (const std::exception& exc) {
+        exchange_timing.request_data_call_return_steady_ns = nowSteadyNs();
+        exchange_timing.request_data_call_return_system_ns = nowSystemNs();
+        exchange_timing.request_data_call_duration_us = static_cast<double>(
+            exchange_timing.request_data_call_return_steady_ns -
+            exchange_timing.request_data_call_start_steady_ns
+        ) / 1000.0;
         std::cerr << "[WARN] RbpodoBackend readState failed for " << impl_->config.name
                   << ": " << exc.what() << "\n";
         out_state.connection_state = RobotConnectionState::Error;
         out_state.has_error = true;
         out_state.error_code = -1;
-        return failedResult<RobotState>(
+        return with_exchange_timing(failedResult<RobotState>(
             BackendOp::ReadState,
             backendError(
                 BackendErrorKind::TransportReadFailed,
@@ -1364,7 +1512,7 @@ BackendResult<RobotState> RbpodoBackend::readState() {
                 "rbpodo_read_exception"
             ),
             makeBackendTiming(start, nowSteadyNs())
-        );
+        ));
     }
 #endif
 }
@@ -1441,8 +1589,12 @@ BackendResult<RobotState> RbpodoBackend::readStatePipelined(uint64_t start_ns) {
             std::min(sizeof(rb::podo::SystemState), frame->size())
         );
         impl_->consecutive_read_misses = 0;
-        const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(state);
+        RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(state);
+        // The zero-initialized decode pads short (old-firmware) frames; only
+        // publish eft as sensor readings when the frame actually covered them.
+        snapshot.eft_in_frame = rbpodoStateFrameIncludesEft(frame->size());
         RobotState out_state = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
+        out_state.acquisition_sequence = ++impl_->state_acquisition_sequence;
         out_state.rbpodo_sdk_state_source = "CobotData.pipelined";
         impl_->last_state_error = rbpodoMotionReadinessError(impl_->config, snapshot, out_state);
         attachMotionReadinessDiagnostic(&out_state, impl_->last_state_error);
@@ -1763,6 +1915,7 @@ BackendResult<RobotState> RbpodoBackend::resetFault() {
             if (state) {
                 const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
                 RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
+                mapped.acquisition_sequence = ++impl_->state_acquisition_sequence;
                 return okResult(BackendOp::ResetFault, mapped, makeBackendTiming(start, nowSteadyNs()));
             }
         } catch (const std::exception&) {
@@ -1830,6 +1983,7 @@ BackendResult<RobotState> RbpodoBackend::setFreedrive(bool on) {
             if (state) {
                 const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
                 state_after = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
+                state_after.acquisition_sequence = ++impl_->state_acquisition_sequence;
                 if (state_after.has_valid_joint_state) {
                     impl_->last_state_cache = state_after;
                 }

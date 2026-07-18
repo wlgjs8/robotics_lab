@@ -20,6 +20,14 @@ rb_servo_server
 Example host-only addresses are `192.168.56.101` and `192.168.56.102`; replace
 them locally and keep actual site values out of tracked configs.
 
+The repository-managed stack uses `vboxnet0` with host address `10.0.2.1/24`.
+`make vm-up` first queries VirtualBox so its service recreates configured
+host-only adapters after a host reboot. It then verifies the Linux interface
+and synchronizes the VirtualBox user configuration's persisted `vboxnet0`
+address to `10.0.2.1/24` before changing the Linux interface, host routes, or
+DNAT state. This prevents a later `VBoxManage` call from restoring
+VirtualBox's default `192.168.56.1/24` address.
+
 ## OVA Metadata Check
 
 ```bash

@@ -37,9 +37,8 @@ class TeleopMuxActionSource:
     Whole-robot exclusivity (not per-arm) keeps one operator source in charge
     of both arms at a time.
 
-    A missing/broken SpaceMouse HID degrades to UMI-only operation: the first
-    SpaceMouse error disables that side for the rest of the run (logged once;
-    one safety Hold is emitted if it died while owning the robot).
+    Fatal SpaceMouse reader errors degrade to UMI-only operation. Managed HID
+    discovery absorbs ordinary unplug/replug transitions and keeps polling.
     """
 
     def __init__(
@@ -120,6 +119,20 @@ class TeleopMuxActionSource:
             self.spacemouse_source.close()
         finally:
             self.umi_source.close()
+
+    def spacemouse_status(self):
+        allowed = self._owner == OWNER_IDLE
+        reason = "" if allowed else f"teleop_owner:{self._owner}"
+        return self.spacemouse_source.spacemouse_status(
+            assignment_change_allowed=allowed,
+            block_reason=reason,
+        )
+
+    def handle_spacemouse_control(self, payload) -> bool:
+        return self.spacemouse_source.handle_spacemouse_control(
+            payload,
+            assignment_change_allowed=self._owner == OWNER_IDLE,
+        )
 
     def _spacemouse_intent(
         self,

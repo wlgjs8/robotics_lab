@@ -5,7 +5,7 @@ Drives _sample_chunk with a fake websocket client (no server, no model) to lock:
 - RTC ON cold start: no prev sent, but the server's MODEL-SPACE rtc_raw_actions is
   cached (NOT the gripper-rescaled actions).
 - RTC ON warm: prev_action_chunk + d/execute_horizon/schedule/max_guidance_weight
-  ride in the obs, and prev == the cached raw chunk.
+  ride in the obs, and prev is advanced by the executed window.
 - reset_rtc cold-starts again.
 
 Built via __new__ to skip the connecting __init__. Guarded by torch availability
@@ -23,12 +23,14 @@ try:
         OpenpiRemoteActionSource,
         _resolve_openpi_action_horizon,
         _resolve_openpi_chunk_execute_steps,
+        rtc_shift_prev_chunk,
     )
 except Exception:  # torch (a transitive import) may be absent
     np = None
     OpenpiRemoteActionSource = None  # type: ignore[assignment]
     _resolve_openpi_action_horizon = None  # type: ignore[assignment]
     _resolve_openpi_chunk_execute_steps = None  # type: ignore[assignment]
+    rtc_shift_prev_chunk = None  # type: ignore[assignment]
 
 _HORIZON = 4
 _GRIP_LEFT, _GRIP_RIGHT = 6, 13
@@ -141,7 +143,12 @@ class OpenpiRemoteRtcTest(unittest.TestCase):
         src._sample_chunk({})  # warm call sends prev
         obs = src._client.sent_obs[-1]
         self.assertIn("prev_action_chunk", obs)
-        self.assertTrue(np.allclose(obs["prev_action_chunk"], raw))
+        self.assertTrue(
+            np.allclose(
+                obs["prev_action_chunk"],
+                rtc_shift_prev_chunk(raw, src.chunk_execute_steps),
+            )
+        )
         self.assertEqual(obs["inference_delay"], 2)  # min(2, chunk_execute_steps=3)
         self.assertEqual(obs["execute_horizon"], 3)
         self.assertEqual(obs["prefix_attention_schedule"], "exp")
@@ -156,7 +163,12 @@ class OpenpiRemoteRtcTest(unittest.TestCase):
         self.assertEqual(obs["execute_horizon"], 24)
         self.assertEqual(obs["inference_delay"], 2)
         self.assertEqual(obs["prev_action_chunk"].shape[0], 24)
-        self.assertTrue(np.allclose(obs["prev_action_chunk"], raw))
+        self.assertTrue(
+            np.allclose(
+                obs["prev_action_chunk"],
+                rtc_shift_prev_chunk(raw, src.chunk_execute_steps),
+            )
+        )
 
     def test_inference_delay_clamped_to_execute_horizon(self) -> None:
         src, _ = _make_source(rtc_enabled=True)

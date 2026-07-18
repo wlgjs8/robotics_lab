@@ -5,6 +5,10 @@ services:
     build:
       context: ./camera_server
       dockerfile: Dockerfile
+      args:
+        LIBREALSENSE_VERSION: ${LIBREALSENSE_VERSION:-2.58.1}
+        LIBREALSENSE_REF: ${LIBREALSENSE_REF:-bf2778061d5dd29776e9aca8765f75852671760b}
+        LIBREALSENSE_BACKEND: ${LIBREALSENSE_BACKEND:-native}
     image: robotics_lab/camera_server:dev
     container_name: camera_server
     ipc: host
@@ -51,6 +55,10 @@ services:
       # camera_server가 기동 시 디바이스 값을 /app/stereo_worker/d435_ir_1280x720_K.txt 로
       # 덤프하므로 그 경로로 주입한다(640x480 기본값은 정적 손파일).
       STEREO_INTRINSICS: ${STEREO_INTRINSICS:-/app/config/d435_ir_640x480_K.txt}
+      # Head inference and wrist fusion consume independent bundle groups so
+      # stereo processing cannot backpressure the real-policy wrist stream.
+      STEREO_BUNDLE_TOPIC: ${STEREO_BUNDLE_TOPIC:-camera.bundle.stereo}
+      STEREO_WRIST_BUNDLE_TOPIC: ${STEREO_WRIST_BUNDLE_TOPIC:-camera.bundle.policy}
       # 캡처+워커 동시 기동 런처가 사용. 0이면 캡처만(워커 수동).
       STEREO_WORKER_AUTOSTART: ${STEREO_WORKER_AUTOSTART:-1}
       # 검출된 박스 2개를 rb_servo_server CollisionMonitor에 keep-out 으로 전송

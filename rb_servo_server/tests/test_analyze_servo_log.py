@@ -130,10 +130,141 @@ class AnalyzeServoLogTest(unittest.TestCase):
             metrics = analyze_servo_log.analyze_csv(path)
 
             self.assertEqual(metrics["safety_verdict_counts"], {})
+            self.assertEqual(metrics["chunk_diagnostics"]["rows"], 0)
+            self.assertEqual(metrics["chunk_diagnostics"]["unique_wire_sequences"], 0)
             self.assertEqual(metrics["delta_twist"]["left"]["rows"], 0)
             self.assertEqual(metrics["delta_twist"]["right"]["rows"], 0)
-            self.assertEqual(metrics["near_floor_pick_analysis"]["left"]["near_floor_ticks"], 0)
-            self.assertEqual(metrics["near_floor_pick_analysis"]["right"]["near_floor_ticks"], 0)
+            self.assertEqual(metrics["delta_preview"]["left"]["rows"], 0)
+            self.assertEqual(metrics["delta_preview"]["right"]["rows"], 0)
+
+    def test_delta_preview_projection_and_actual_lead_are_summarized(self) -> None:
+        fields = [
+            "left_follower_controller",
+            *[
+                f"left_follower_{suffix}"
+                for suffix in (
+                    *analyze_servo_log.DELTA_PREVIEW_FLOAT_SUFFIXES,
+                    *analyze_servo_log.DELTA_PREVIEW_INTEGER_SUFFIXES,
+                )
+            ],
+        ]
+        rows = [
+            {
+                "left_follower_controller": "delta_preview",
+                "left_follower_projection_error_m": 0.001 * (index + 1),
+                "left_follower_projection_error_rad": 0.01 * (index + 1),
+                "left_follower_projection_error_count": index,
+                "left_follower_actual_lead_m": 0.002 * (index + 1),
+                "left_follower_actual_lead_rad": 0.02 * (index + 1),
+                "left_follower_actual_lead_error_count": index + 1,
+            }
+            for index in range(3)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "delta-preview.csv"
+            self.make_log(path, rows=3, extra_fieldnames=fields, row_overrides=rows)
+
+            metrics = analyze_servo_log.analyze_csv(path)
+            left = metrics["delta_preview"]["left"]
+            self.assertEqual(left["rows"], 3)
+            self.assertEqual(left["series"]["projection_error_m"]["p99"], 0.003)
+            self.assertEqual(left["series"]["actual_lead_error_count"]["p50"], 2)
+
+    def test_optional_chunk_and_delta_twist_diagnostics_are_summarized(self) -> None:
+        shared_fields = list(analyze_servo_log.CHUNK_DIAGNOSTIC_INTEGER_COLUMNS) + list(
+            analyze_servo_log.CHUNK_DIAGNOSTIC_FLOAT_COLUMNS
+        )
+        arm_fields = [
+            "left_follower_controller",
+            "left_delta_twist_frame_rows",
+            "left_delta_twist_normal_budget",
+            "left_delta_twist_total_budget",
+            "left_delta_twist_steps_remaining",
+            "left_delta_twist_clamp_mask",
+            *[
+                f"left_delta_twist_accel_cmd_{suffix}"
+                for suffix in analyze_servo_log.DELTA_TWIST_ACCEL_COMMAND_SUFFIXES
+            ],
+        ]
+        rows: list[dict[str, object]] = []
+        for index in range(3):
+            row: dict[str, object] = {
+                "chunk_frame_wire_seq": 10 + min(index, 1),
+                "chunk_frame_recv_seq": 20 + min(index, 1),
+                "chunk_frame_horizon": 16,
+                "chunk_frame_execute_steps": 12,
+                "chunk_frame_runway_steps": 4,
+                "chunk_inference_seq": 30 + min(index, 1),
+                "chunk_inference_stall_count": index,
+                "chunk_camera_bundle_seq": 40 + index,
+                "chunk_camera_left_frame_number": 50 + index,
+                "chunk_camera_right_frame_number": 60 + index,
+                "chunk_frame_policy_dt_sec": 0.0668,
+                "chunk_frame_age_ms": 100.0 + 100.0 * index,
+                "chunk_frame_interarrival_ms": 800.0 + 10.0 * index,
+                "chunk_inference_queue_wait_ms": 1.0 + index,
+                "chunk_inference_latency_ms": 700.0 + 10.0 * index,
+                "chunk_inference_ready_wait_ms": 2.0 + index,
+                "chunk_inference_period_ms": 810.0 + 10.0 * index,
+                "chunk_inference_period_jitter_ms": 5.0 + index,
+                "chunk_camera_bundle_age_ms": 10.0 + index,
+                "chunk_camera_max_skew_ms": 3.0 + index,
+                "chunk_camera_left_frame_age_ms": 11.0 + index,
+                "chunk_camera_right_frame_age_ms": 12.0 + index,
+                "chunk_camera_left_focus_score": 100.0 + index,
+                "chunk_camera_right_focus_score": 200.0 + index,
+                "left_follower_controller": "delta_twist",
+                "left_delta_twist_frame_rows": 16,
+                "left_delta_twist_normal_budget": 6,
+                "left_delta_twist_total_budget": 8,
+                "left_delta_twist_steps_remaining": 8 - index,
+                "left_delta_twist_clamp_mask": (1 << 0) | (1 << 2) if index == 0 else (
+                    (1 << 2) | (1 << 13) if index == 1 else 0
+                ),
+            }
+            for axis, suffix in enumerate(analyze_servo_log.DELTA_TWIST_ACCEL_COMMAND_SUFFIXES):
+                row[f"left_delta_twist_accel_cmd_{suffix}"] = float(index - axis)
+            rows.append(row)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "chunk-diagnostics.csv"
+            self.make_log(
+                path,
+                rows=len(rows),
+                extra_fieldnames=shared_fields + arm_fields,
+                row_overrides=rows,
+            )
+
+            metrics = analyze_servo_log.analyze_csv(path)
+            report = analyze_servo_log.format_report(
+                metrics,
+                analyze_servo_log.BUDGETS["rbsim-local100"],
+                failures=[],
+            )
+
+            chunk = metrics["chunk_diagnostics"]
+            self.assertEqual(chunk["rows"], 3)
+            self.assertEqual(chunk["unique_wire_sequences"], 2)
+            self.assertEqual(chunk["series"]["chunk_frame_age_ms"]["p50"], 200.0)
+            self.assertEqual(chunk["series"]["chunk_inference_latency_ms"]["p99"], 720.0)
+            self.assertEqual(chunk["series"]["chunk_camera_max_skew_ms"]["p90"], 5.0)
+
+            left = metrics["delta_twist"]["left"]
+            self.assertEqual(left["frame_rows"]["p50"], 16)
+            self.assertEqual(left["normal_budget"]["p50"], 6)
+            self.assertEqual(left["total_budget"]["p50"], 8)
+            self.assertEqual(left["steps_remaining"]["p50"], 7)
+            self.assertEqual(
+                left["clamp_mask_counts"],
+                {"lead_angular": 1, "pending_linear": 1, "xi_ref_velocity_linear": 2},
+            )
+            self.assertEqual(left["accel_command"]["x_m_s2"]["p50"], 1.0)
+            self.assertEqual(left["accel_command"]["rz_rad_s2"]["p50"], -4.0)
+            self.assertIn("chunk_diagnostics: rows=3 unique_wire_sequences=2", report)
+            self.assertIn("chunk_inference_latency_ms: count=3", report)
+            self.assertIn("left clamp_mask_counts:", report)
+            self.assertIn("left steps_remaining: count=3", report)
+            self.assertIn("left accel_cmd_rz_rad_s2: count=3", report)
 
     def test_delta_twist_summary_uses_optional_columns(self) -> None:
         extra = [
@@ -160,31 +291,6 @@ class AnalyzeServoLogTest(unittest.TestCase):
             "left_delta_twist_min_time_to_go_used",
             "left_delta_twist_xi_ref_clamped_norm",
             "left_delta_twist_xi_cmd_clamped_norm",
-            "left_surface_mode",
-            "left_surface_active",
-            "left_surface_close_soon",
-            "left_surface_hull_scaled",
-            "left_surface_min_tip_dist_m",
-            "left_surface_down_scale",
-            "left_surface_tangent_scale",
-            "left_surface_hull_alpha",
-            "left_surface_raw_linear_norm_m",
-            "left_surface_projected_linear_norm_m",
-            "left_surface_discarded_linear_norm_m",
-            "left_surface_raw_angular_norm_rad",
-            "left_surface_projected_angular_norm_rad",
-            "left_surface_discarded_angular_norm_rad",
-            "left_grasp_phase",
-            "left_grasp_commit_active",
-            "left_grasp_close_soon",
-            "left_grasp_ready",
-            "left_grasp_sync_wait_sec",
-            "left_grasp_closing_hold_elapsed_sec",
-            "left_grasp_lift_elapsed_sec",
-            "left_grasp_lift_progress",
-            "left_grasp_gripper_override_active",
-            "left_grasp_policy_delta_dropped",
-            "left_grasp_resume_wait_fresh_chunk",
             "left_stage_tcp_target_stand_x_m",
             "left_stage_tcp_target_stand_y_m",
             "left_stage_tcp_target_stand_z_m",
@@ -215,31 +321,6 @@ class AnalyzeServoLogTest(unittest.TestCase):
                 "left_delta_twist_min_time_to_go_used": "0",
                 "left_delta_twist_xi_ref_clamped_norm": "0",
                 "left_delta_twist_xi_cmd_clamped_norm": "0",
-                "left_surface_mode": "0",
-                "left_surface_active": "0",
-                "left_surface_close_soon": "0",
-                "left_surface_hull_scaled": "0",
-                "left_surface_min_tip_dist_m": "0.030",
-                "left_surface_down_scale": "1.0",
-                "left_surface_tangent_scale": "1.0",
-                "left_surface_hull_alpha": "1.0",
-                "left_surface_raw_linear_norm_m": "0.002",
-                "left_surface_projected_linear_norm_m": "0.002",
-                "left_surface_discarded_linear_norm_m": "0.0",
-                "left_surface_raw_angular_norm_rad": "0.010",
-                "left_surface_projected_angular_norm_rad": "0.010",
-                "left_surface_discarded_angular_norm_rad": "0.0",
-                "left_grasp_phase": "0",
-                "left_grasp_commit_active": "0",
-                "left_grasp_close_soon": "0",
-                "left_grasp_ready": "0",
-                "left_grasp_sync_wait_sec": "0.0",
-                "left_grasp_closing_hold_elapsed_sec": "0.0",
-                "left_grasp_lift_elapsed_sec": "0.0",
-                "left_grasp_lift_progress": "0.0",
-                "left_grasp_gripper_override_active": "0",
-                "left_grasp_policy_delta_dropped": "0",
-                "left_grasp_resume_wait_fresh_chunk": "0",
                 "left_stage_tcp_target_stand_x_m": "0.0",
                 "left_stage_tcp_target_stand_y_m": "0.0",
                 "left_stage_tcp_target_stand_z_m": "0.0",
@@ -269,31 +350,6 @@ class AnalyzeServoLogTest(unittest.TestCase):
                 "left_delta_twist_min_time_to_go_used": "1",
                 "left_delta_twist_xi_ref_clamped_norm": "1",
                 "left_delta_twist_xi_cmd_clamped_norm": "0",
-                "left_surface_mode": "1",
-                "left_surface_active": "1",
-                "left_surface_close_soon": "0",
-                "left_surface_hull_scaled": "0",
-                "left_surface_min_tip_dist_m": "0.010",
-                "left_surface_down_scale": "0.5",
-                "left_surface_tangent_scale": "0.6",
-                "left_surface_hull_alpha": "1.0",
-                "left_surface_raw_linear_norm_m": "0.003",
-                "left_surface_projected_linear_norm_m": "0.0015",
-                "left_surface_discarded_linear_norm_m": "0.0015",
-                "left_surface_raw_angular_norm_rad": "0.020",
-                "left_surface_projected_angular_norm_rad": "0.015",
-                "left_surface_discarded_angular_norm_rad": "0.005",
-                "left_grasp_phase": "2",
-                "left_grasp_commit_active": "1",
-                "left_grasp_close_soon": "1",
-                "left_grasp_ready": "1",
-                "left_grasp_sync_wait_sec": "0.02",
-                "left_grasp_closing_hold_elapsed_sec": "0.0",
-                "left_grasp_lift_elapsed_sec": "0.0",
-                "left_grasp_lift_progress": "0.0",
-                "left_grasp_gripper_override_active": "0",
-                "left_grasp_policy_delta_dropped": "1",
-                "left_grasp_resume_wait_fresh_chunk": "0",
                 "left_stage_tcp_target_stand_x_m": "1.0",
                 "left_stage_tcp_target_stand_y_m": "0.0",
                 "left_stage_tcp_target_stand_z_m": "0.0",
@@ -323,31 +379,6 @@ class AnalyzeServoLogTest(unittest.TestCase):
                 "left_delta_twist_min_time_to_go_used": "1",
                 "left_delta_twist_xi_ref_clamped_norm": "1",
                 "left_delta_twist_xi_cmd_clamped_norm": "1",
-                "left_surface_mode": "2",
-                "left_surface_active": "1",
-                "left_surface_close_soon": "1",
-                "left_surface_hull_scaled": "0",
-                "left_surface_min_tip_dist_m": "0.006",
-                "left_surface_down_scale": "0.0",
-                "left_surface_tangent_scale": "0.0",
-                "left_surface_hull_alpha": "1.0",
-                "left_surface_raw_linear_norm_m": "0.004",
-                "left_surface_projected_linear_norm_m": "0.000",
-                "left_surface_discarded_linear_norm_m": "0.004",
-                "left_surface_raw_angular_norm_rad": "0.030",
-                "left_surface_projected_angular_norm_rad": "0.010",
-                "left_surface_discarded_angular_norm_rad": "0.020",
-                "left_grasp_phase": "3",
-                "left_grasp_commit_active": "1",
-                "left_grasp_close_soon": "1",
-                "left_grasp_ready": "1",
-                "left_grasp_sync_wait_sec": "0.04",
-                "left_grasp_closing_hold_elapsed_sec": "0.10",
-                "left_grasp_lift_elapsed_sec": "0.0",
-                "left_grasp_lift_progress": "0.0",
-                "left_grasp_gripper_override_active": "1",
-                "left_grasp_policy_delta_dropped": "1",
-                "left_grasp_resume_wait_fresh_chunk": "0",
                 "left_stage_tcp_target_stand_x_m": "0.0",
                 "left_stage_tcp_target_stand_y_m": "0.0",
                 "left_stage_tcp_target_stand_z_m": "0.0",
@@ -377,31 +408,6 @@ class AnalyzeServoLogTest(unittest.TestCase):
                 "left_delta_twist_min_time_to_go_used": "0",
                 "left_delta_twist_xi_ref_clamped_norm": "0",
                 "left_delta_twist_xi_cmd_clamped_norm": "0",
-                "left_surface_mode": "3",
-                "left_surface_active": "1",
-                "left_surface_close_soon": "0",
-                "left_surface_hull_scaled": "1",
-                "left_surface_min_tip_dist_m": "0.004",
-                "left_surface_down_scale": "1.0",
-                "left_surface_tangent_scale": "1.0",
-                "left_surface_hull_alpha": "0.5",
-                "left_surface_raw_linear_norm_m": "0.005",
-                "left_surface_projected_linear_norm_m": "0.0025",
-                "left_surface_discarded_linear_norm_m": "0.0025",
-                "left_surface_raw_angular_norm_rad": "0.040",
-                "left_surface_projected_angular_norm_rad": "0.020",
-                "left_surface_discarded_angular_norm_rad": "0.020",
-                "left_grasp_phase": "4",
-                "left_grasp_commit_active": "1",
-                "left_grasp_close_soon": "0",
-                "left_grasp_ready": "1",
-                "left_grasp_sync_wait_sec": "0.04",
-                "left_grasp_closing_hold_elapsed_sec": "0.20",
-                "left_grasp_lift_elapsed_sec": "0.10",
-                "left_grasp_lift_progress": "0.30",
-                "left_grasp_gripper_override_active": "1",
-                "left_grasp_policy_delta_dropped": "1",
-                "left_grasp_resume_wait_fresh_chunk": "0",
                 "left_stage_tcp_target_stand_x_m": "0.01",
                 "left_stage_tcp_target_stand_y_m": "0.0",
                 "left_stage_tcp_target_stand_z_m": "0.0",
@@ -433,20 +439,6 @@ class AnalyzeServoLogTest(unittest.TestCase):
             self.assertEqual(left["follower_step_distribution"], {"0": 1, "1": 2, "2": 1})
             self.assertEqual(left["step_kind_counts"], {"normal": 2, "reserve": 1, "ringdown": 1})
             self.assertEqual(left["accel_clamp_counts"], {"safety_accel_clamped": 1})
-            self.assertEqual(left["surface_active_ticks"], 3)
-            self.assertEqual(left["surface_close_soon_ticks"], 1)
-            self.assertEqual(left["surface_hull_scaled_ticks"], 1)
-            self.assertEqual(left["surface_mode_counts"], {"0": 1, "1": 1, "2": 1, "3": 1})
-            self.assertEqual(left["grasp_commit_active_ticks"], 3)
-            self.assertEqual(left["grasp_close_soon_ticks"], 2)
-            self.assertEqual(left["grasp_ready_ticks"], 3)
-            self.assertEqual(left["grasp_gripper_override_ticks"], 2)
-            self.assertEqual(left["grasp_policy_delta_dropped_ticks"], 3)
-            self.assertEqual(left["grasp_resume_wait_ticks"], 0)
-            self.assertEqual(
-                left["grasp_phase_counts"],
-                {"closing_hold": 1, "lift_out": 1, "normal": 1, "pregrasp_commit": 1},
-            )
             self.assertEqual(left["pending_residual_linear_norm_m"]["p50"], 0.2)
             self.assertEqual(left["pending_residual_linear_norm_m"]["p90"], 0.4)
             self.assertEqual(left["xi_ref_angular_norm_rad_s"]["p99"], 4.1)
@@ -455,11 +447,6 @@ class AnalyzeServoLogTest(unittest.TestCase):
             self.assertEqual(left["realized_yaw_delta_rad"]["p50"], -0.12)
             self.assertEqual(left["yaw_realized_ratio"]["p90"], 1.0)
             self.assertEqual(left["linear_realized_ratio"]["p50"], 0.5)
-            self.assertEqual(left["surface_discarded_linear_norm_m"]["p90"], 0.004)
-            self.assertEqual(left["surface_tangent_scale"]["p50"], 0.6)
-            self.assertEqual(left["grasp_sync_wait_sec"]["p90"], 0.04)
-            self.assertEqual(left["grasp_closing_hold_elapsed_sec"]["p99"], 0.2)
-            self.assertEqual(left["grasp_lift_progress"]["p99"], 0.3)
             self.assertEqual(left["yaw_sign_match_percent"], 50.0)
             self.assertGreater(left["stage_path_to_net_ratio"], 100.0)
             self.assertTrue(any("path/net" in warning for warning in left["warnings"]))
@@ -467,126 +454,8 @@ class AnalyzeServoLogTest(unittest.TestCase):
             self.assertIn("safety_verdict_counts: JointLimitClamped=1, Ok=3", report)
             self.assertIn("step_kind_counts={'normal': 2, 'reserve': 1, 'ringdown': 1}", report)
             self.assertIn("feedback_source_counts: {'2': 4}", report)
-            self.assertIn("surface: active_ticks=3 close_soon_ticks=1 hull_scaled_ticks=1", report)
-            self.assertIn("grasp: commit_active_ticks=3 close_soon_ticks=2", report)
-            self.assertIn("phase_counts={'closing_hold': 1, 'lift_out': 1, 'normal': 1, 'pregrasp_commit': 1}", report)
             self.assertIn("yaw_sign_match_percent: 50.000", report)
             self.assertIn("left xi_cmd_angular_norm_rad_s: count=4", report)
-
-    def test_near_floor_analysis_warns_on_sliding_during_close(self) -> None:
-        extra = [
-            "safety_verdict",
-            "left_follower_controller",
-            "left_surface_min_tip_dist_m",
-            "left_surface_active",
-            "left_surface_close_soon",
-            "left_surface_raw_dx_m",
-            "left_surface_raw_dy_m",
-            "left_surface_raw_dz_m",
-            "left_surface_projected_dx_m",
-            "left_surface_projected_dy_m",
-            "left_surface_projected_dz_m",
-            "left_surface_discarded_dx_m",
-            "left_surface_discarded_dy_m",
-            "left_surface_discarded_dz_m",
-            "left_surface_raw_linear_norm_m",
-            "left_surface_projected_linear_norm_m",
-            "left_surface_discarded_linear_norm_m",
-            "left_surface_down_scale",
-            "left_surface_tangent_scale",
-            "left_grasp_phase",
-            "left_grasp_close_soon",
-            "left_gripper_close_soon",
-            "left_gripper_closing_hold_active",
-        ]
-        rows = [
-            {
-                "safety_verdict": "Ok",
-                "left_follower_controller": "delta_twist",
-                "left_surface_min_tip_dist_m": "0.006",
-                "left_surface_active": "1",
-                "left_surface_close_soon": "1",
-                "left_surface_raw_dx_m": "0.0020",
-                "left_surface_raw_dy_m": "0.0000",
-                "left_surface_raw_dz_m": "-0.0010",
-                "left_surface_projected_dx_m": "0.0010",
-                "left_surface_projected_dy_m": "0.0000",
-                "left_surface_projected_dz_m": "0.0000",
-                "left_surface_discarded_dx_m": "0.0010",
-                "left_surface_discarded_dy_m": "0.0000",
-                "left_surface_discarded_dz_m": "-0.0010",
-                "left_surface_raw_linear_norm_m": "0.002236",
-                "left_surface_projected_linear_norm_m": "0.0010",
-                "left_surface_discarded_linear_norm_m": "0.001414",
-                "left_surface_down_scale": "0.0",
-                "left_surface_tangent_scale": "0.5",
-                "left_grasp_phase": "3",
-                "left_grasp_close_soon": "1",
-                "left_gripper_close_soon": "1",
-                "left_gripper_closing_hold_active": "1",
-            },
-        ]
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "near-floor-sliding.csv"
-            self.make_log(path, rows=len(rows), extra_fieldnames=extra, row_overrides=rows)
-
-            metrics = analyze_servo_log.analyze_csv(path)
-            report = analyze_servo_log.format_report(
-                metrics,
-                analyze_servo_log.BUDGETS["rbsim-local100"],
-                failures=[],
-            )
-
-            left = metrics["near_floor_pick_analysis"]["left"]
-            self.assertEqual(left["near_floor_ticks"], 1)
-            self.assertEqual(left["sliding_risk_ticks"], 1)
-            self.assertEqual(left["closing_translation_ticks"], 1)
-            self.assertIn("Sliding risk: arm translation during close", left["warnings"])
-            self.assertIn("Near-floor pick analysis:", report)
-            self.assertIn("Sliding risk: arm translation during close", report)
-
-    def test_near_floor_analysis_warns_on_step_consumed_while_blocked(self) -> None:
-        extra = [
-            "safety_verdict",
-            "left_follower_controller",
-            "left_follower_step",
-            "left_delta_twist_blocked",
-            "left_delta_twist_step_consumed_this_tick",
-            "left_surface_min_tip_dist_m",
-            "left_surface_active",
-            "left_surface_close_soon",
-            "left_surface_projected_linear_norm_m",
-        ]
-        rows = [
-            {
-                "safety_verdict": "FloorViolation",
-                "left_follower_controller": "delta_twist",
-                "left_follower_step": "4",
-                "left_delta_twist_blocked": "1",
-                "left_delta_twist_step_consumed_this_tick": "1",
-                "left_surface_min_tip_dist_m": "0.004",
-                "left_surface_active": "1",
-                "left_surface_close_soon": "1",
-                "left_surface_projected_linear_norm_m": "0.0",
-            },
-        ]
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "near-floor-blocked.csv"
-            self.make_log(path, rows=len(rows), extra_fieldnames=extra, row_overrides=rows)
-
-            metrics = analyze_servo_log.analyze_csv(path)
-            report = analyze_servo_log.format_report(
-                metrics,
-                analyze_servo_log.BUDGETS["rbsim-local100"],
-                failures=[],
-            )
-
-            left = metrics["near_floor_pick_analysis"]["left"]
-            self.assertEqual(left["blocked_ticks"], 1)
-            self.assertEqual(left["blocked_step_consumed_ticks"], 1)
-            self.assertEqual(left["safety_verdict_counts"], {"FloorViolation": 1})
-            self.assertIn("Safety phase mismatch: step consumed while blocked", left["warnings"])
-            self.assertIn("Safety phase mismatch: step consumed while blocked", report)
 
 
 if __name__ == "__main__":

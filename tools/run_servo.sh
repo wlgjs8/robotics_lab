@@ -27,7 +27,7 @@ case "$MODE" in
 esac
 
 SERVER_BIN="rb_servo_server/build/rbpodo_real_gate/rb_servo_server"
-SERVER_CFG="rb_servo_server/config/local/stack_${MODE}.yaml"
+SERVER_CFG="rb_servo_server/config/stack_${MODE}.yaml"
 LOG_DIR="logs"
 TS="$(date +%Y%m%d_%H%M%S)"
 SERVER_LOG="$LOG_DIR/server_${TS}.log"

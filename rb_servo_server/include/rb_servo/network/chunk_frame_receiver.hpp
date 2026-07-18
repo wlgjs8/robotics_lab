@@ -2,7 +2,7 @@
 // feeding the Ruckig chunk-follower.
 //
 // Wire format: the producer's chunk-overlay packet (chunk_overlay_publisher.py,
-// schema "robotics_lab.chunk_overlay.v2") — measured-anchored absolute stand
+// schema "robotics_lab.chunk_overlay.v2|v3") — measured-anchored absolute stand
 // pose7+grip per step, plus optional conditioned local/body-frame delta rows:
 //   { "schema_version": "robotics_lab.chunk_overlay.v2", "seq": N,
 //     "policy_dt_sec": 0.033, "horizon": H, "host_time_ns": ...,
@@ -10,6 +10,10 @@
 //     "right": [[...] * H] | null,
 //     "left_delta":  [[dx,dy,dz,drx,dry,drz,grip] * H],   // optional
 //     "right_delta": [[dx,dy,dz,drx,dry,drz,grip] * H] }  // optional
+// v3 additionally carries chunk_metadata with observation/activation policy-step
+// sequences, the selected source range, and velocity-proprio validity. The
+// delta_preview controller requires these fields to be complete and internally
+// consistent; v2 remains diagnostic/legacy-follower input only.
 // The producer fans the same packet out to the GUI overlay port and to this
 // bind; DELIBERATELY separate from the lease-gated command socket so the 500 Hz
 // command stream can never starve the ~1-2 Hz chunk feed (see
@@ -47,11 +51,36 @@ public:
         int count = 0;
         std::array<std::array<double, kDeltaStepDims>, kMaxSteps> step{};
     };
+    // Optional producer-side diagnostics carried by chunk_overlay.v2. These are
+    // telemetry only: malformed or absent values remain zero and must never
+    // invalidate an otherwise valid motion frame.
+    struct Diagnostics {
+        int execute_steps = 0;
+        int runway_steps = 0;
+        std::uint64_t inference_seq = 0;
+        double inference_queue_wait_ms = 0.0;
+        double inference_latency_ms = 0.0;
+        double inference_ready_wait_ms = 0.0;
+        double inference_period_ms = 0.0;
+        double inference_period_jitter_ms = 0.0;
+        std::uint64_t inference_stall_count = 0;
+        std::uint64_t camera_bundle_seq = 0;
+        double camera_bundle_age_ms = 0.0;
+        double camera_max_skew_ms = 0.0;
+        std::uint64_t camera_left_frame_number = 0;
+        std::uint64_t camera_right_frame_number = 0;
+        double camera_left_frame_age_ms = 0.0;
+        double camera_right_frame_age_ms = 0.0;
+        double camera_left_focus_score = 0.0;
+        double camera_right_focus_score = 0.0;
+    };
     struct Frame {
+        int schema_generation = 0;       // 2 or 3
         std::uint64_t seq = 0;           // producer seq (may reset on restart)
         std::uint64_t receiver_seq = 0;  // receiver-monotonic; use for dedup
         double policy_dt_sec = 0.0;
         double recv_steady_sec = 0.0;  // steadyNowSec() at parse time
+        double interarrival_sec = 0.0; // receiver-local accepted-frame interval
         bool has_left = false;
         bool has_right = false;
         ArmSteps left;
@@ -60,6 +89,14 @@ public:
         bool has_right_delta = false;
         ArmDeltaSteps left_delta;
         ArmDeltaSteps right_delta;
+        bool chunk_metadata_present = false;
+        bool proprio_valid = false;
+        std::uint64_t observation_step_seq = 0;
+        std::uint64_t activation_step_seq = 0;
+        int source_start_index = 0;
+        int original_horizon = 0;
+        int selected_horizon = 0;
+        Diagnostics diagnostics;
     };
 
     explicit ChunkFrameReceiver(const std::string& bind_uri);

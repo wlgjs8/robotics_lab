@@ -13,6 +13,12 @@ from typing import Any, Mapping
 
 from .box_detect_control import BoxDetectCommandClient, BoxDetectCommandResult
 from .command_client import CommandClient
+from .cog_gui import (
+    CogGuiSession,
+    CogGuiStatus,
+    CogIdentificationConfig,
+    resolve_cog_waypoints,
+)
 from .geometry import (
     _add_matrix3,
     _add_vec3,
@@ -75,11 +81,17 @@ from .recording_control import (
     RecordingCommandResult,
     RecordingStatusReceiver,
     RecordingStatusStore,
+    SpaceMouseCommandResult,
     normalize_arm_init_status,
     normalize_recording_status,
     parse_udp_endpoint,
 )
-from .safety import OperatorSafety, normalize_observed_mode_backend
+from .realtime_health import RealtimeTimingHistory, realtime_health_html
+from .safety import (
+    OperatorSafety,
+    normalize_observed_mode_backend,
+    server_safety_constraint_config_enabled,
+)
 from .scene import (
     _DEFAULT_LEFT_POSE,
     _DEFAULT_RIGHT_POSE,
@@ -104,6 +116,7 @@ from .scene import (
     update_chunk_overlay,
     update_circle_overlay,
     update_floor_check_points,
+    update_ft_sensor_overlay,
     update_floor_plane,
     update_floor_plane_preview,
     update_roi_box,
@@ -125,8 +138,10 @@ from .status_panel import (
     _format_arm_cartesian_solve,
     _format_cartesian_solve_status,
     _format_circle_overlay_status,
+    _eft_monitor_axis_values,
     _format_scene_asset_status,
     _format_fk_status,
+    _format_force_status,
     _format_init_motion_status,
     _format_joint_monitor_value,
     _format_joints,
@@ -272,6 +287,13 @@ def _env_float(name: str, fallback: float) -> float:
 def _env_positive_float(name: str, fallback: float) -> float:
     value = _env_float(name, fallback)
     return value if value > 0.0 else fallback
+
+
+def _env_bool(name: str, fallback: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return fallback
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def _env_joint6(name: str, fallback: tuple[float, ...]) -> tuple[float, ...] | None:
@@ -1274,6 +1296,245 @@ def _delete_waypoint(handles: dict[str, Any]) -> tuple[bool, str]:
     return True, name
 
 
+def _cog_config_from_state(latest: StateSnapshot | None) -> CogIdentificationConfig:
+    return CogIdentificationConfig.parse(
+        latest.payload_identification if latest is not None else None
+    )
+
+
+def _cog_reports_root() -> str:
+    configured = os.environ.get("RB_GUI_COG_REPORT_DIR", "").strip()
+    if configured:
+        return configured
+    return str(Path(__file__).resolve().parents[2] / "logs" / "cog_calibration")
+
+
+def _format_cog_status(status: CogGuiStatus) -> str:
+    waypoint = "—"
+    if status.current_name is not None:
+        waypoint = f"{status.current_index + 1}/{status.waypoint_count} {status.current_name}"
+    error = "—" if status.max_joint_error_deg is None else f"{status.max_joint_error_deg:.3f} deg"
+    stability = "—"
+    if (
+        status.current_force_stddev_n is not None
+        and status.current_torque_stddev_nm is not None
+    ):
+        stability = (
+            f"F={status.current_force_stddev_n:.4g} N, "
+            f"T={status.current_torque_stddev_nm:.4g} Nm"
+        )
+    return (
+        f"state={status.state} | arm={status.arm or '—'} | waypoint={waypoint} | "
+        f"joint error={error} | settle={status.settle_elapsed_sec:.2f}s | "
+        f"samples={status.sample_count} | stability max std={stability} | "
+        f"accepted={status.accepted_count}\n{status.message}"
+    )
+
+
+def _format_cog_pose_states(status: CogGuiStatus) -> str:
+    if not status.pose_states:
+        return "no frozen waypoint list"
+    return " | ".join(f"{name}:{state}" for name, state in status.pose_states)
+
+
+def _format_cog_result(status: CogGuiStatus) -> str:
+    estimate = status.result
+    if estimate is None:
+        if status.state == "calculation_blocked":
+            saved = (
+                f"\ndiagnostic report={status.saved_report}"
+                if status.saved_report is not None
+                else ""
+            )
+            return f"BLOCKED / NOT APPLIED\n{status.message}{saved}"
+        return "PROVISIONAL / NOT APPLIED — no calculation"
+    if estimate.observation_model == "controller_compensated_linear":
+        force_rows = "\n".join(
+            "  [" + ", ".join(f"{value:.9g}" for value in row) + "]"
+            for row in estimate.force_matrix_n_per_m_s2
+        )
+        torque_rows = "\n".join(
+            "  [" + ", ".join(f"{value:.9g}" for value in row) + "]"
+            for row in estimate.torque_matrix_nm_per_m_s2
+        )
+        loo_force = estimate.max_leave_one_out_force_residual_n
+        loo_torque = estimate.max_leave_one_out_torque_residual_nm
+        leave_one_out = (
+            "unavailable"
+            if loo_force is None or loo_torque is None
+            else f"max force={loo_force:.5g} N, max torque={loo_torque:.5g} Nm"
+        )
+        return (
+            "PROVISIONAL / NOT APPLIED\n"
+            "model=controller_compensated_linear (NOT physical mass/CoG)\n"
+            f"force matrix [N/(m/s^2)]:\n{force_rows}\n"
+            f"torque matrix [Nm/(m/s^2)]:\n{torque_rows}\n"
+            f"pose-local tare bias candidate: force={estimate.force_bias_n} N, "
+            f"torque={estimate.torque_bias_nm} Nm\n"
+            f"fit RMS: force={estimate.force_fit_rms_n:.5g} N, "
+            f"torque={estimate.torque_fit_rms_nm:.5g} Nm\n"
+            f"design: force rank={estimate.force_design_rank}, "
+            f"cond={estimate.force_design_condition:.5g}; "
+            f"torque rank={estimate.torque_design_rank}, "
+            f"cond={estimate.torque_design_condition:.5g}\n"
+            f"leave-one-pose-out: {leave_one_out}"
+        )
+    cog_mm = tuple(value * 1000.0 for value in estimate.cog_tcp_m)
+    ambiguity = (
+        "; gravity compensation ambiguous: " + ", ".join(estimate.ambiguity_reasons)
+        if estimate.gravity_compensation_ambiguous
+        else ""
+    )
+    correlation = (
+        "unavailable"
+        if estimate.force_gravity_correlation is None
+        else f"{estimate.force_gravity_correlation:.5g}"
+    )
+    loo_mass = estimate.max_leave_one_out_mass_delta_kg
+    loo_cog = estimate.max_leave_one_out_cog_delta_m
+    leave_one_out = (
+        "unavailable"
+        if loo_mass is None or loo_cog is None
+        else f"max mass delta={loo_mass:.5g} kg, max CoG delta={loo_cog * 1000.0:.3f} mm"
+    )
+    return (
+        "PROVISIONAL / NOT APPLIED\n"
+        f"wrench convention={estimate.wrench_convention}\n"
+        f"mass={estimate.mass_kg:.6g} kg, CoG TCP=({cog_mm[0]:.3f}, {cog_mm[1]:.3f}, {cog_mm[2]:.3f}) mm\n"
+        f"force bias={estimate.force_bias_n} N, torque bias={estimate.torque_bias_nm} Nm\n"
+        f"fit RMS: force={estimate.force_fit_rms_n:.5g} N, torque={estimate.torque_fit_rms_nm:.5g} Nm\n"
+        f"design: force rank={estimate.force_design_rank}, cond={estimate.force_design_condition:.5g}; "
+        f"torque rank={estimate.torque_design_rank}, cond={estimate.torque_design_condition:.5g}\n"
+        f"gravity correlation={correlation}; leave-one-pose-out: {leave_one_out}"
+        f"{ambiguity}"
+    )
+
+
+def _cog_session_active(handles: Mapping[str, Any]) -> bool:
+    session = handles.get("cog_session")
+    return isinstance(session, CogGuiSession) and session.status().active
+
+
+def _set_cog_conflict_controls(handles: dict[str, Any], active: bool) -> None:
+    """Keep E-stop live while excluding other GUI motion during CoG capture."""
+    if not active:
+        # Lifecycle/init/TCP send controls are restored by their normal safety
+        # refresh earlier in update_gui.  Restore only controls that have no
+        # independent readiness updater, and only to their captured pre-session
+        # state; never unconditionally enable a safety-gated control.
+        previous = handles.pop("_cog_non_authority_disabled", None)
+        if isinstance(previous, list):
+            for control, disabled in previous:
+                _set_disabled(control, bool(disabled))
+        return
+    non_authority_controls: list[Any] = []
+    for key in (
+        "freedrive_buttons",
+        "tcp_ptp_arm_buttons",
+        "tcp_frame_buttons",
+        "tcp_linear_arm_buttons",
+        "tcp_linear_orientation_buttons",
+    ):
+        non_authority_controls.extend(handles.get(key, {}).values())
+    for key in (
+        "waypoint_move_buttons",
+        "joint_jog_controls",
+        "waypoint_edit_controls",
+    ):
+        non_authority_controls.extend(handles.get(key, ()))
+    for key in ("gripper_slider_left", "gripper_slider_right"):
+        control = handles.get(key)
+        if control is not None:
+            non_authority_controls.append(control)
+    if "_cog_non_authority_disabled" not in handles:
+        handles["_cog_non_authority_disabled"] = [
+            (control, bool(getattr(control, "disabled", False)))
+            for control in non_authority_controls
+        ]
+    for mode, button in handles.get("lifecycle_buttons", {}).items():
+        if active and mode != "EmergencyStop":
+            _set_disabled(button, True)
+    groups = (
+        "init_motion_buttons",
+        "freedrive_buttons",
+        "tcp_ptp_arm_buttons",
+        "tcp_frame_buttons",
+        "tcp_linear_arm_buttons",
+        "tcp_linear_orientation_buttons",
+    )
+    if active:
+        for key in groups:
+            for control in handles.get(key, {}).values():
+                _set_disabled(control, True)
+        for key in (
+            "waypoint_move_buttons",
+            "tcp_pose_buttons",
+            "tcp_linear_buttons",
+            "joint_jog_controls",
+            "waypoint_edit_controls",
+        ):
+            for control in handles.get(key, ()):
+                _set_disabled(control, True)
+        for key in ("gripper_slider_left", "gripper_slider_right"):
+            control = handles.get(key)
+            if control is not None:
+                _set_disabled(control, True)
+
+
+def _update_cog_panel(
+    handles: dict[str, Any], latest: StateSnapshot | None, *, stale: bool
+) -> None:
+    session = handles.get("cog_session")
+    if not isinstance(session, CogGuiSession):
+        return
+    session.watchdog(latest, stale=stale)
+    status = session.status()
+    if "cog_status" in handles:
+        handles["cog_status"].value = _format_cog_status(status)
+    if "cog_pose_status" in handles:
+        handles["cog_pose_status"].value = _format_cog_pose_states(status)
+    if "cog_result" in handles:
+        handles["cog_result"].value = _format_cog_result(status)
+    active = status.active
+    _set_cog_conflict_controls(handles, active)
+    for key in ("cog_arm", "cog_prefix", "cog_refresh"):
+        control = handles.get(key)
+        if control is not None:
+            _set_disabled(control, active)
+    start_reason: str | None = None
+    if not active:
+        if stale or latest is None:
+            start_reason = "state stream missing or stale"
+        else:
+            try:
+                config = _cog_config_from_state(latest)
+                resolve_cog_waypoints(
+                    handles.get("waypoints", {}),
+                    prefix=str(getattr(handles.get("cog_prefix"), "value", "")),
+                    arm=str(getattr(handles.get("cog_arm"), "value", "")),
+                    min_poses=config.min_poses,
+                )
+                arm = str(getattr(handles.get("cog_arm"), "value", ""))
+                safety_reason = session.preflight_reason(arm)
+                if safety_reason:
+                    raise ValueError(safety_reason)
+            except ValueError as exc:
+                start_reason = str(exc)
+    if handles.get("cog_start") is not None:
+        _set_disabled(handles["cog_start"], active or start_reason is not None)
+    for key, enabled in (
+        ("cog_run", status.state in {"waiting_lease", "armed", "moving", "settling", "sampling"}),
+        ("cog_retry", status.state == "review"),
+        ("cog_skip", status.state in {"armed", "review"}),
+        ("cog_stop", active),
+        ("cog_calculate", status.state in {"complete", "stopped", "calculated", "calculation_blocked"}),
+        ("cog_save", status.result is not None and status.saved_report is None),
+    ):
+        control = handles.get(key)
+        if control is not None:
+            _set_disabled(control, not enabled)
+
+
 # ---- User Safety Floor: captured floor-contact points + fitted plane ----
 
 
@@ -1420,6 +1681,46 @@ def _gui_setting_float(settings: Mapping[str, Any], key: str, default: float) ->
         return value
     except Exception:
         return float(default)
+
+
+def _roi_initial_slider_specs(
+    settings: Mapping[str, Any],
+) -> dict[str, tuple[float, float, float, float]]:
+    """Return bootstrap slider ranges and values in millimetres.
+
+    The authoritative range arrives shortly afterwards in the server state
+    ``roi_box.runtime_min_m/runtime_max_m`` block.  Until that first state is
+    received, the slider still has to be constructible: viser rejects an
+    initial value outside its declared range.  Include valid persisted values
+    in the temporary range so a wider server envelope from a previous session
+    cannot terminate the GUI during startup.
+    """
+    defaults = {
+        "x": (-500.0, 500.0),
+        "y": (-1000.0, 0.0),
+        "z": (0.0, 1000.0),
+    }
+    saved_lo = _roi_bounds_floats(settings.get("roi_min_m"))
+    saved_hi = _roi_bounds_floats(settings.get("roi_max_m"))
+    if saved_lo is not None and saved_hi is not None and all(
+        saved_lo[k] <= saved_hi[k] for k in range(3)
+    ):
+        values = {
+            axis: (saved_lo[k] * 1000.0, saved_hi[k] * 1000.0)
+            for k, axis in enumerate(("x", "y", "z"))
+        }
+    else:
+        values = defaults
+
+    return {
+        axis: (
+            min(-1500.0, lo_mm),
+            max(1500.0, hi_mm),
+            lo_mm,
+            hi_mm,
+        )
+        for axis, (lo_mm, hi_mm) in values.items()
+    }
 
 
 def _gui_setting_int(settings: Mapping[str, Any], key: str, default: int) -> int:
@@ -1618,6 +1919,194 @@ def _set_waypoint_as_init(handles: dict[str, Any], safety: OperatorSafety) -> tu
     return True, f"init motion set to '{name}'; {suffix}"
 
 
+# --- Startup force auto-tare (Init Motion no-op path) -----------------------
+# Force zeroing (the software zero used as the F/T hard-limit reference) is
+# established by an Init Motion. When the server publishes tare_state
+# "awaiting_init_motion" it is waiting for that press. In the common case the arm
+# is ALREADY parked at the configured init pose when the stack starts, so the
+# server's Init Motion no-op path (measured joints within noop_tol_deg of the
+# goal) tares WITHOUT any motion. This auto-presses Init Motion once at startup
+# in exactly that no-motion case so the operator does not have to.
+#
+# SAFETY: the at-init tolerance MUST stay <= the server's EFFECTIVE Init Motion
+# no-op tolerance, which is max(init_motion_planner.noop_tol_deg,
+# waypoint_tol_deg) (NOT noop_tol_deg alone). That is the guarantee that a GUI
+# "already at init" verdict also makes the server take the no-op path; if the arm
+# is NOT at init, no auto-press is sent and the arm never moves on its own. The
+# tolerance is read from the server config so it tracks the site's real no-op
+# band (a parked arm typically drifts ~1 deg from the saved init pose via servo
+# settling / gravity sag, which a fixed sub-deg tolerance would never match).
+#
+# NO FALLBACK / fail-closed: if the server no-op tolerance cannot be read, the
+# feature does NOT fire — a guessed tolerance could let the GUI auto-press when
+# the server would actually plan a move. RB_GUI_STARTUP_INIT_TARE=0 disables it.
+_STARTUP_INIT_TARE_TOL_MARGIN_DEG = 0.1  # drift guard below the server no-op band
+_AWAITING_INIT_MOTION_TARE_STATE = "awaiting_init_motion"
+
+
+def _server_init_noop_tol_deg() -> float | None:
+    """The server's EFFECTIVE Init Motion no-op tolerance —
+    max(init_motion_planner.noop_tol_deg, waypoint_tol_deg) — read from the server
+    config at RB_GUI_SERVER_CONFIG_PATH. None when unavailable/unparseable (the
+    caller must fail closed; there is no assumed default)."""
+    path = os.environ.get("RB_GUI_SERVER_CONFIG_PATH", "").strip()
+    if not path:
+        return None
+    try:
+        import yaml  # local import: optional dependency used only here
+
+        with open(path, encoding="utf-8") as handle:
+            cfg = yaml.safe_load(handle)
+        ip = cfg["safety"]["init_motion_planner"]
+        tol = max(
+            float(ip.get("noop_tol_deg", 0.0)),
+            float(ip.get("waypoint_tol_deg", 0.0)),
+        )
+    except Exception:  # noqa: BLE001 - unreadable config -> fail closed (None)
+        return None
+    return tol if math.isfinite(tol) and tol > 0.0 else None
+
+
+def _startup_init_tare_tol_deg() -> float | None:
+    """GUI at-init tolerance for the startup auto-tare, or None when it cannot be
+    determined from the server config. Kept within the server's effective no-op
+    band (minus a small drift margin) so a GUI 'already at init' verdict always
+    coincides with the server's no-motion no-op path. There is deliberately NO
+    fixed fallback: an unreadable server config returns None and the auto-tare
+    does not fire (fail-closed). Honors RB_GUI_STARTUP_INIT_TARE_TOL_DEG but never
+    above the safe cap."""
+    server_tol = _server_init_noop_tol_deg()
+    if server_tol is None:
+        return None
+    safe_cap = max(0.05, server_tol - _STARTUP_INIT_TARE_TOL_MARGIN_DEG)
+    return min(_env_positive_float("RB_GUI_STARTUP_INIT_TARE_TOL_DEG", safe_cap), safe_cap)
+
+
+def _joints_within_tol(
+    measured: tuple[float, ...] | None,
+    target: tuple[float, ...] | None,
+    tol_deg: float,
+) -> bool:
+    if not measured or not target or len(measured) != len(target):
+        return False
+    return all(
+        math.isfinite(m) and math.isfinite(t) and abs(m - t) <= tol_deg
+        for m, t in zip(measured, target)
+    )
+
+
+def _arm_awaiting_init_tare(arm: ArmSnapshot | None) -> bool:
+    """True when the server is waiting for an Init Motion to establish this arm's
+    force software zero (auto-tare enabled, not yet valid, awaiting init motion)."""
+    ft = getattr(arm, "force_torque", None) if arm is not None else None
+    if ft is None:
+        return False
+    return (
+        bool(ft.auto_tare_enabled)
+        and not bool(ft.tare_valid)
+        and ft.tare_state == _AWAITING_INIT_MOTION_TARE_STATE
+    )
+
+
+def _startup_init_tare_arms(
+    latest: StateSnapshot | None,
+    stale: bool,
+    init_left_deg: tuple[float, ...] | None,
+    init_right_deg: tuple[float, ...] | None,
+    tol_deg: float,
+) -> str | None:
+    """Arm selector ('both'/'left'/'right') for an automatic startup Init Motion
+    that establishes the force software zero WITHOUT motion, or None.
+
+    An arm qualifies only when it is BOTH (a) already at its configured init pose
+    within tol_deg — so the server takes the no-op path and never plans a move —
+    AND (b) awaiting an Init Motion to auto-tare. Returns None on missing/stale
+    state or when no arm qualifies, so it can never trigger a move."""
+    if latest is None or stale:
+        return None
+    left_ok = (
+        init_left_deg is not None
+        and _arm_awaiting_init_tare(latest.left)
+        and _joints_within_tol(
+            getattr(latest.left, "q_actual_deg", None), init_left_deg, tol_deg
+        )
+    )
+    right_ok = (
+        init_right_deg is not None
+        and _arm_awaiting_init_tare(latest.right)
+        and _joints_within_tol(
+            getattr(latest.right, "q_actual_deg", None), init_right_deg, tol_deg
+        )
+    )
+    if left_ok and right_ok:
+        return "both"
+    if left_ok:
+        return "left"
+    if right_ok:
+        return "right"
+    return None
+
+
+def _maybe_auto_init_tare_on_startup(
+    handles: dict[str, Any],
+    safety: OperatorSafety,
+    latest: StateSnapshot | None,
+    stale: bool,
+    init_motion_disabled: bool,
+) -> None:
+    """Press Init Motion once at startup when the arm is already at the init pose,
+    so the force software zero (auto-tare) is established without operator action
+    and without any motion. At most one attempt per session; strictly gated so it
+    can never plan a move. Disabled with RB_GUI_STARTUP_INIT_TARE=0."""
+    if _cog_session_active(handles):
+        return
+    if handles.get("_auto_init_tare_done"):
+        return
+    if not _env_bool("RB_GUI_STARTUP_INIT_TARE", True):
+        handles["_auto_init_tare_done"] = True
+        return
+    if init_motion_disabled:
+        return  # init motion not commandable yet -> retry on a later tick
+    tol_deg = _startup_init_tare_tol_deg()
+    if tol_deg is None:
+        # Fail-closed: without the server's no-op tolerance we cannot guarantee a
+        # no-motion press, so auto-tare stays off this session (manual Init Motion
+        # remains the fallback). This is a fixed condition -> stop re-checking.
+        handles["_auto_init_tare_done"] = True
+        print(
+            "[rb_gui] startup auto-tare disabled: could not read the server "
+            "init-motion no-op tolerance from RB_GUI_SERVER_CONFIG_PATH; "
+            "press Init Motion manually",
+            flush=True,
+        )
+        return
+    arms = _startup_init_tare_arms(
+        latest,
+        stale,
+        safety.init_left_joint_deg,
+        safety.init_right_joint_deg,
+        tol_deg,
+    )
+    if arms is None:
+        return  # no arm both at-init and awaiting tare -> never force a move
+    # A qualifying arm exists: this is the intended no-motion tare. Attempt once
+    # (mark done regardless of the send outcome so a persistent block, e.g. a
+    # foreign lease, does not spam) and leave the manual button as the fallback.
+    # Guard the send: this runs inside the GUI update loop, so a send exception
+    # must not tear the loop down.
+    handles["_auto_init_tare_done"] = True
+    try:
+        ok, message = _send_arm_init_override(
+            safety, handles.get("scene", {}), handles, arms
+        )
+    except Exception as exc:  # noqa: BLE001 - never crash the update loop
+        ok, message = False, f"send raised {type(exc).__name__}: {exc}"
+    text = f"auto Init Motion tare ({arms}) at startup: {message}"
+    if "last_action" in handles:
+        handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + text
+    print(f"[rb_gui] {text}", flush=True)
+
+
 def _capture_waypoint(handles: dict[str, Any], store: StateStore, name: str) -> tuple[bool, str]:
     name = (name or "").strip()
     if not name:
@@ -1744,11 +2233,16 @@ def _build_stand_world_monitor(server: Any, handles: dict[str, Any], *, order: f
             disabled=True,
         )
         handles["stand_world_monitor_values"] = {"left": {}, "right": {}}
+        handles["eft_monitor_values"] = {"left": {}, "right": {}}
         for arm in ("left", "right"):
             with server.gui.add_folder(arm, expand_by_default=True):
                 for field in _STAND_WORLD_POSE_FIELDS:
                     handle = server.gui.add_text(f"{arm} {field}", initial_value="invalid", disabled=True)
                     handles["stand_world_monitor_values"][arm][field] = handle
+                # External F/T sensor (rbpodo eft_*, sensor frame).
+                for field, label in (("force", "FT F [N]"), ("torque", "FT T [Nm]"), ("magnitude", "FT |F| [N]")):
+                    handle = server.gui.add_text(f"{arm} {label}", initial_value="invalid", disabled=True)
+                    handles["eft_monitor_values"][arm][field] = handle
 
 
 def _operator_monitor_layout() -> tuple[float, float, float]:
@@ -1808,6 +2302,10 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
      static header cards) stable across dynamic body refreshes. */
   .rb-monitor-joint-card {{ left: var(--rb-monitor-gap); }}
   .rb-monitor-stand-card {{ left: var(--rb-monitor-gap); }}
+  /* FT Monitor lives in its own right column beside the Joint/Pose left column,
+     so it spans the full viewport height (base body-card rules) instead of
+     sharing the left-column split. */
+  .rb-monitor-ft-card {{ left: calc(var(--rb-monitor-gap) * 2 + var(--rb-monitor-width)); }}
   .rb-monitor-joint-card.rb-monitor-body-card {{ max-height: calc(var(--rb-monitor-split) - 5.95em); }}
   .rb-monitor-stand-card.rb-monitor-header-card {{ top: var(--rb-monitor-split); }}
   .rb-monitor-stand-card.rb-monitor-body-card {{ top: calc(var(--rb-monitor-split) + 4.95em); max-height: calc(100vh - var(--rb-monitor-split) - 5.95em); }}
@@ -1898,6 +2396,9 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
     <label><input id="rb-stand-unit-deg" name="rb-stand-unit" type="radio" checked> deg</label>
     <label><input id="rb-stand-unit-rad" name="rb-stand-unit" type="radio"> rad</label>
   </div>
+</div>
+<div class="rb-monitor-card rb-monitor-header-card rb-monitor-ft-card">
+  <div class="rb-monitor-title">FT Monitor</div>
 </div>
 """
 
@@ -2021,6 +2522,39 @@ def _render_stand_world_monitor_rows(
     return "".join(parts)
 
 
+def _render_ft_monitor_rows(
+    latest: StateSnapshot | None, *, stale: bool, uptime: str | None = None
+) -> str:
+    """External F/T sensor (rbpodo eft_*, sensor frame): live contact wrench, per
+    arm. Split out of the Pose Monitor into its own right-column FT Monitor card."""
+    if latest is None:
+        status = "No state stream"
+        arms = (("left", None), ("right", None))
+    else:
+        status = f"{'stale' if stale else 'live'}, tick={latest.tick}"
+        if uptime:
+            status += f", up={uptime}"
+        arms = (("left", latest.left), ("right", latest.right))
+    parts = [f'<div class="rb-monitor-status">{escape(status)}</div>']
+    for arm, arm_state in arms:
+        parts.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">{escape(arm)}</div>')
+        # One axis per row (single short number) so the card fits its column
+        # width without a horizontal scrollbar.
+        fx, fy, fz, mag, tx, ty, tz = _eft_monitor_axis_values(arm_state, stale=stale)
+        for label, value in (
+            ("Fx [N]", fx),
+            ("Fy [N]", fy),
+            ("Fz [N]", fz),
+            ("|F| [N]", mag),
+            ("Tx [Nm]", tx),
+            ("Ty [Nm]", ty),
+            ("Tz [Nm]", tz),
+        ):
+            parts.append(_operator_monitor_row(label, escape(value)))
+        parts.append("</div>")
+    return "".join(parts)
+
+
 def _operator_monitor_dynamic_html(
     latest: StateSnapshot | None, *, stale: bool, uptime: str | None = None
 ) -> str:
@@ -2030,6 +2564,9 @@ def _operator_monitor_dynamic_html(
         + "</div>"
         + '<div class="rb-monitor-card rb-monitor-body-card rb-monitor-stand-card">'
         + _render_stand_world_monitor_rows(latest, stale=stale, uptime=uptime)
+        + "</div>"
+        + '<div class="rb-monitor-card rb-monitor-body-card rb-monitor-ft-card">'
+        + _render_ft_monitor_rows(latest, stale=stale, uptime=uptime)
         + "</div>"
     )
 
@@ -2151,6 +2688,46 @@ def _status_summary_html(
         _status_chip("결함", "없음" if not fault_active else "FAULT", "ok" if not fault_active else "bad"),
     ]
     return '<div style="display:flex;flex-wrap:wrap;padding:0.25em 0 0.1em;">' + "".join(chips) + "</div>"
+
+
+def _update_realtime_health(
+    handles: dict[str, Any],
+    latest: StateSnapshot | None,
+    chunk_overlay_store: ChunkOverlayStore | None,
+    *,
+    stale: bool,
+) -> None:
+    handle = handles.get("realtime_health")
+    chunk = chunk_overlay_store.latest() if chunk_overlay_store is not None else None
+    chunk_current = (
+        chunk is not None
+        and chunk_overlay_store is not None
+        and not chunk_overlay_store.is_stale()
+    )
+    html = realtime_health_html(
+        latest.raw if latest is not None else None,
+        chunk.raw if chunk_current else None,
+        stale=stale,
+    )
+    if handle is not None:
+        try:
+            handle.content = html
+        except Exception:
+            try:
+                handle.value = "Realtime timing telemetry unavailable"
+            except Exception:
+                pass
+    history = handles.get("realtime_history")
+    if isinstance(history, RealtimeTimingHistory) and history.add(
+        latest.raw if latest is not None and not stale else None,
+        chunk.raw if chunk_current else None,
+    ):
+        plot = handles.get("realtime_plot")
+        if plot is not None:
+            try:
+                plot.figure = history.figure()
+            except Exception:
+                pass
 
 
 def _tab_theme_html(dark: bool = True) -> str:
@@ -2304,6 +2881,20 @@ def build_gui(
                     fault_active=False,
                 )
             )
+            handles["realtime_health"] = _add_status_html(
+                realtime_health_html(None, None, stale=True)
+            )
+        handles["realtime_history"] = RealtimeTimingHistory()
+        _add_plotly = getattr(server.gui, "add_plotly", None)
+        if callable(_add_plotly):
+            try:
+                with server.gui.add_folder("Realtime timing · 최근 30초", expand_by_default=True):
+                    handles["realtime_plot"] = _add_plotly(
+                        handles["realtime_history"].figure(),
+                        aspect=1.35,
+                    )
+            except Exception:
+                pass
         handles["connection"] = server.gui.add_text("Connection", initial_value="disconnected", disabled=True)
         handles["mode"] = server.gui.add_text("Observed mode/backend", initial_value=f"{safety.observed_server_mode}/{safety.observed_backend}", disabled=True)
         handles["readiness"] = server.gui.add_text("Readiness", initial_value="No-Go: no state", disabled=True)
@@ -2340,6 +2931,11 @@ def build_gui(
             "User Safety floor", initial_value="user floor: no state", disabled=True
         )
         handles["fk_status"] = server.gui.add_text("FK/TCP", initial_value="FK: no state", disabled=True)
+        handles["force_status"] = server.gui.add_text(
+            "F/T + force controller",
+            initial_value="Force: no state",
+            disabled=True,
+        )
         handles["tcp_tracking"] = server.gui.add_text("TCP tracking", initial_value="TCP tracking: no state", disabled=True)
         handles["pgmode_status"] = server.gui.add_text("pgmode simulation", initial_value="pgmode_sim: no state", disabled=True)
         handles["circle_overlay"] = server.gui.add_text(
@@ -2355,6 +2951,8 @@ def build_gui(
         chunk_overlay_axes_stride = _gui_setting_int(_ov, "chunk_overlay_axes_stride", 2)
         chunk_overlay_history_count = _gui_setting_int(_ov, "chunk_overlay_history_count", 12)
         tcp_gizmo_visible = _gui_setting_bool(_ov, "tcp_gizmo_visible", True)
+        ft_sensor_gizmo_visible = _gui_setting_bool(_ov, "ft_sensor_gizmo_visible", True)
+        ft_control_gizmo_visible = _gui_setting_bool(_ov, "ft_control_gizmo_visible", True)
         tcp_trail_limit = _gui_setting_int(_ov, "tcp_trail_limit", 600)
         if chunk_overlay_axes_stride <= 0:
             chunk_overlay_axes_stride = 2
@@ -2503,6 +3101,37 @@ def build_gui(
                 if not handles["tcp_gizmo_visible"]:
                     _hide_tcp_gizmos(handles)
 
+            handles["ft_sensor_gizmo_toggle"] = server.gui.add_checkbox(
+                "F/T sensor frame(URDF/CAD, sensor origin) 표시",
+                initial_value=ft_sensor_gizmo_visible,
+            )
+
+            @handles["ft_sensor_gizmo_toggle"].on_update
+            def _(_: Any) -> None:
+                handles["ft_sensor_gizmo_visible"] = bool(
+                    handles["ft_sensor_gizmo_toggle"].value
+                )
+                _update_gui_setting(
+                    "ft_sensor_gizmo_visible", handles["ft_sensor_gizmo_visible"]
+                )
+
+            handles["ft_control_gizmo_toggle"] = server.gui.add_checkbox(
+                "F/T runtime control frame(TCP origin) 및 force 표시",
+                initial_value=ft_control_gizmo_visible,
+            )
+
+            @handles["ft_control_gizmo_toggle"].on_update
+            def _(_: Any) -> None:
+                handles["ft_control_gizmo_visible"] = bool(
+                    handles["ft_control_gizmo_toggle"].value
+                )
+                _update_gui_setting(
+                    "ft_control_gizmo_visible", handles["ft_control_gizmo_visible"]
+                )
+
+        handles["ft_sensor_gizmo_visible"] = ft_sensor_gizmo_visible
+        handles["ft_control_gizmo_visible"] = ft_control_gizmo_visible
+
         handles["ops"] = server.gui.add_text(
             "Container ops",
             initial_value="manual compose commands only; no Docker socket in GUI",
@@ -2531,30 +3160,6 @@ def build_gui(
                 def _(_: Any, mode: str = mode) -> None:
                     ok, message = safety.send_lifecycle(mode)
                     handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
-
-            # Explicit lease ownership. One-shot GUI commands bracket the lease per
-            # click; holding the lease gives the operator continuous command
-            # authority until release. The server
-            # rejects an Acquire while another source (e.g. policy_runner teleop)
-            # owns it — the lease-owner line below makes that visible.
-            # Collapsed by default, like 직접교시 below: holding the lease takes
-            # control authority away from other command sources, so it stays
-            # folded to avoid accidental toggles.
-            with server.gui.add_folder("제어권 (Lease)", expand_by_default=False):
-                handles["lease_owner_status"] = server.gui.add_text(
-                    "Lease owner", initial_value="unknown", disabled=True
-                )
-                take_control = server.gui.add_checkbox("Take control (hold lease)", initial_value=False)
-                handles["take_control_toggle"] = take_control
-
-                @take_control.on_update
-                def _(_: Any) -> None:
-                    if take_control.value:
-                        safety.command_client.acquire_lease()
-                        handles["last_action"].value = "OK: lease held (Take control ON)"
-                    else:
-                        safety.command_client.release_lease()
-                        handles["last_action"].value = "OK: lease released (Take control OFF)"
 
             # Per-arm direct teaching (free-drive). Releases servo_j authority on
             # the chosen arm's controller so it can be hand-guided, then re-acquires
@@ -2748,6 +3353,13 @@ def build_gui(
             # pose (persisted to JSON) and delete (kept at the bottom).
             set_init_button = server.gui.add_button("Init Motion 으로 설정하기")
             delete_button = server.gui.add_button("WayPoint 삭제", color="red")
+            handles["waypoint_edit_controls"] = [
+                waypoint_name_input,
+                capture_button,
+                waypoint_dropdown,
+                set_init_button,
+                delete_button,
+            ]
 
             @set_init_button.on_click
             def _(_: Any) -> None:
@@ -2773,33 +3385,167 @@ def build_gui(
                 else:
                     handles["waypoint_status"].value = info
 
+        with _op_tabs.add_tab("CoG / Gravity model"):
+            handles["cog_note"] = server.gui.add_text(
+                "Payload CoG identification",
+                initial_value=(
+                    "한 팔씩 saved joint waypoints를 순서대로 실행합니다. Start는 lease만 요청하고 "
+                    "움직이지 않습니다. Run/Continue를 누르는 동안에만 이동/샘플링합니다. "
+                    "컨트롤러 보상 잔차 모델은 물리 CoG가 아니며 결과는 항상 "
+                    "PROVISIONAL / NOT APPLIED 입니다."
+                ),
+                disabled=True,
+            )
+            # A dropdown is intentional here: unlike viser button groups it
+            # supports both an explicit initial value and disabling the arm
+            # selector while an identification session is active.
+            handles["cog_arm"] = server.gui.add_dropdown(
+                "Active arm", ("left", "right"), initial_value="right"
+            )
+            handles["cog_prefix"] = server.gui.add_text(
+                "Waypoint prefix", initial_value="joint"
+            )
+            handles["cog_preflight"] = server.gui.add_text(
+                "Preflight", initial_value="Refresh/Validate before Start", disabled=True
+            )
+            handles["cog_status"] = server.gui.add_text(
+                "Session", initial_value="state=idle", disabled=True
+            )
+            handles["cog_pose_status"] = server.gui.add_text(
+                "Pose states", initial_value="no frozen waypoint list", disabled=True
+            )
+            handles["cog_result"] = server.gui.add_text(
+                "Result",
+                initial_value="PROVISIONAL / NOT APPLIED — no calculation",
+                disabled=True,
+            )
+            handles["cog_session"] = CogGuiSession(safety)
+            store.add_update_callback(handles["cog_session"].on_snapshot)
+
+            handles["cog_refresh"] = server.gui.add_button("Refresh / Validate")
+            handles["cog_start"] = server.gui.add_button("Start (no motion)", color="green")
+            handles["cog_run"] = server.gui.add_button("Run / Continue (hold)")
+            handles["cog_retry"] = server.gui.add_button("Retry current pose")
+            handles["cog_skip"] = server.gui.add_button("Skip current pose")
+            handles["cog_stop"] = server.gui.add_button("Stop + Hold", color="red")
+            handles["cog_calculate"] = server.gui.add_button(
+                "Calculate provisional gravity model"
+            )
+            handles["cog_save"] = server.gui.add_button("Save report")
+
+            def _validate_cog_selection() -> tuple[bool, str]:
+                try:
+                    config = _cog_config_from_state(store.latest())
+                    resolved = resolve_cog_waypoints(
+                        handles.get("waypoints", {}),
+                        prefix=str(handles["cog_prefix"].value),
+                        arm=str(handles["cog_arm"].value),
+                        min_poses=config.min_poses,
+                    )
+                except ValueError as exc:
+                    return False, str(exc)
+                names = ", ".join(item.name for item in resolved)
+                return True, (
+                    f"valid: {len(resolved)} unique {handles['cog_arm'].value} pose(s), "
+                    f"natural order [{names}]; samples/pose={config.samples_per_pose}, "
+                    f"settle={config.settle_sec:g}s, tolerance={config.arrival_tolerance_deg:g}deg, "
+                    f"model={config.observation_model}"
+                )
+
+            @handles["cog_refresh"].on_click
+            def _(_: Any) -> None:
+                ok, message = _validate_cog_selection()
+                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+            @handles["cog_start"].on_click
+            def _(_: Any) -> None:
+                try:
+                    config = _cog_config_from_state(store.latest())
+                    resolved = resolve_cog_waypoints(
+                        handles.get("waypoints", {}),
+                        prefix=str(handles["cog_prefix"].value),
+                        arm=str(handles["cog_arm"].value),
+                        min_poses=config.min_poses,
+                    )
+                except ValueError as exc:
+                    ok, message = False, str(exc)
+                else:
+                    ok, message = handles["cog_session"].start(
+                        arm=str(handles["cog_arm"].value),
+                        waypoints=resolved,
+                        config=config,
+                    )
+                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
+                handles["cog_status"].value = _format_cog_status(
+                    handles["cog_session"].status()
+                )
+                if ok:
+                    _update_cog_panel(handles, store.latest(), stale=store.is_stale())
+
+            @handles["cog_run"].on_hold(callback_hz=10.0)
+            def _(_: Any) -> None:
+                ok, message = handles["cog_session"].run_pulse(
+                    store.latest(), stale=store.is_stale()
+                )
+                handles["cog_status"].value = _format_cog_status(
+                    handles["cog_session"].status()
+                )
+                if not ok:
+                    handles["cog_preflight"].value = "BLOCKED: " + message
+
+            @handles["cog_retry"].on_click
+            def _(_: Any) -> None:
+                ok, message = handles["cog_session"].retry()
+                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+            @handles["cog_skip"].on_click
+            def _(_: Any) -> None:
+                ok, message = handles["cog_session"].skip()
+                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+            @handles["cog_stop"].on_click
+            def _(_: Any) -> None:
+                ok, message = handles["cog_session"].stop()
+                handles["cog_preflight"].value = ("OK: " if ok else "WARNING: ") + message
+
+            @handles["cog_calculate"].on_click
+            def _(_: Any) -> None:
+                ok, message = handles["cog_session"].calculate(_cog_reports_root())
+                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
+                handles["cog_result"].value = _format_cog_result(
+                    handles["cog_session"].status()
+                )
+
+            @handles["cog_save"].on_click
+            def _(_: Any) -> None:
+                ok, message = handles["cog_session"].save(_cog_reports_root())
+                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
+
         with _op_tabs.add_tab("안전"):
+            stand_floor_config_enabled = server_safety_constraint_config_enabled(
+                "floor_constraint"
+            )
+            user_floor_config_enabled = server_safety_constraint_config_enabled(
+                "user_floor_constraint"
+            )
+            handles["stand_floor_config_enabled"] = stand_floor_config_enabled
+            handles["user_floor_config_enabled"] = user_floor_config_enabled
             with server.gui.add_folder("Stand Safety Floor"):
-                # Runtime enforce on/off. The operator's last choice is persisted to
-                # the GUI settings file and restored here as the checkbox default; once
-                # the state stream is live it is re-applied to the server (see the
-                # one-shot block in update_gui) so the saved choice wins over
-                # the config default. With no saved preference we fall back to syncing
-                # from telemetry on the first state (see _update_floor_panel). Only
-                # effective when floor_constraint.enable=true in the server config.
-                _floor_pref = _load_gui_settings().get("stand_floor_enforce")
-                _floor_pref = _floor_pref if isinstance(_floor_pref, bool) else None
-                handles["stand_floor_enforce_pref"] = _floor_pref
+                # Runtime enforce on/off. Startup authority belongs to the server
+                # config, so the first state always initializes this checkbox. A stale
+                # GUI preference must never disable a configured safety envelope.
                 if hasattr(server.gui, "add_checkbox"):
                     floor_enforce = server.gui.add_checkbox(
                         "Enforce stand floor",
-                        initial_value=_floor_pref if _floor_pref is not None else True,
+                        initial_value=stand_floor_config_enabled is not False,
                     )
                     handles["floor_enforce_toggle"] = floor_enforce
+                    _set_disabled(floor_enforce, stand_floor_config_enabled is False)
 
                     @floor_enforce.on_update
                     def _(_: Any) -> None:
                         enabled = bool(floor_enforce.value)
                         ok, message = safety.send_set_floor_enabled(enabled)
-                        # Remember the operator's choice for the next launch (and so the
-                        # restore block stops fighting telemetry from here on).
-                        handles["stand_floor_enforce_pref"] = enabled
-                        _update_gui_setting("stand_floor_enforce", enabled)
                         handles["floor_set_status"].value = ("OK: " if ok else "BLOCKED: ") + message
                 handles["floor_applied"] = server.gui.add_text(
                     "Applied z", initial_value="no state", disabled=True
@@ -2816,6 +3562,7 @@ def build_gui(
                 handles["floor_slider"] = floor_slider
                 floor_send = server.gui.add_button("Send floor z")
                 handles["floor_send_button"] = floor_send
+                _set_disabled(floor_send, stand_floor_config_enabled is False)
                 handles["floor_set_status"] = server.gui.add_text(
                     "Floor set status", initial_value="idle", disabled=True
                 )
@@ -2869,9 +3616,19 @@ def build_gui(
                     initial_value=float(uf_state.get("margin_mm", 0.0)),
                 )
                 fit_apply = server.gui.add_button("Fit & Apply plane")
+                handles["user_floor_fit_apply_button"] = fit_apply
+                _set_disabled(fit_apply, user_floor_config_enabled is False)
                 if hasattr(server.gui, "add_checkbox"):
                     handles["user_floor_enforce_toggle"] = server.gui.add_checkbox(
-                        "Enforce user floor", initial_value=bool(uf_state.get("enabled", False))
+                        "Enforce user floor",
+                        initial_value=(
+                            bool(uf_state.get("enabled", False))
+                            and user_floor_config_enabled is not False
+                        ),
+                    )
+                    _set_disabled(
+                        handles["user_floor_enforce_toggle"],
+                        user_floor_config_enabled is False,
                     )
 
                 def _refresh_user_floor_texts() -> None:
@@ -2999,33 +3756,20 @@ def build_gui(
                 # plus viser's compact integrated number box. _update_roi_panel
                 # syncs their range to the server's runtime envelope and brings them
                 # up at the applied bounds on the first state.
-                _roi_axis_defaults_mm = {
-                    "x": (-500.0, 500.0),
-                    "y": (-1000.0, 0.0),
-                    "z": (0.0, 1000.0),
-                }
                 # 저장된 ROI(settings.json roi_min_m/roi_max_m)가 있으면 그 값으로 시작 →
                 # 재시작 후에도 perception/viz 클립 영역 유지(검출 워커와 같은 박스).
-                _roi_saved = _load_gui_settings()
-                _roi_lo_s = _roi_saved.get("roi_min_m")
-                _roi_hi_s = _roi_saved.get("roi_max_m")
-                if (isinstance(_roi_lo_s, (list, tuple)) and isinstance(_roi_hi_s, (list, tuple))
-                        and len(_roi_lo_s) == 3 and len(_roi_hi_s) == 3):
-                    try:
-                        _roi_axis_defaults_mm = {
-                            _a: (float(_roi_lo_s[_i]) * 1000.0, float(_roi_hi_s[_i]) * 1000.0)
-                            for _i, _a in enumerate(("x", "y", "z"))
-                        }
-                    except (TypeError, ValueError):
-                        pass
+                # 이 범위는 첫 서버 상태 전까지만 쓰는 bootstrap 값이다. 이후
+                # _update_roi_panel이 서버가 publish한 runtime envelope/applied bounds로
+                # 범위와 값을 동기화한다.
+                _roi_slider_specs = _roi_initial_slider_specs(_load_gui_settings())
                 for _axis in ("x", "y", "z"):
-                    _lo_default, _hi_default = _roi_axis_defaults_mm[_axis]
+                    _slider_min, _slider_max, _lo_default, _hi_default = _roi_slider_specs[_axis]
                     handles[f"roi_{_axis}_min"] = server.gui.add_slider(
-                        f"{_axis.upper()} min mm", min=-1500.0, max=1500.0, step=5.0,
+                        f"{_axis.upper()} min mm", min=_slider_min, max=_slider_max, step=5.0,
                         initial_value=_lo_default,
                     )
                     handles[f"roi_{_axis}_max"] = server.gui.add_slider(
-                        f"{_axis.upper()} max mm", min=-1500.0, max=1500.0, step=5.0,
+                        f"{_axis.upper()} max mm", min=_slider_min, max=_slider_max, step=5.0,
                         initial_value=_hi_default,
                     )
                 roi_send = server.gui.add_button("Send ROI box")
@@ -3171,6 +3915,42 @@ def build_gui(
                         disabled=True,
                     )
 
+        with _op_tabs.add_tab("SpaceMouse"):
+            handles["spacemouse_summary"] = server.gui.add_text(
+                "감지 장치", initial_value="policy_runner 상태 대기 중", disabled=True
+            )
+            handles["spacemouse_left_select"] = server.gui.add_dropdown(
+                "왼팔 SpaceMouse", ("미배정",), initial_value="미배정"
+            )
+            handles["spacemouse_right_select"] = server.gui.add_dropdown(
+                "오른팔 SpaceMouse", ("미배정",), initial_value="미배정"
+            )
+            handles["spacemouse_assignment_dirty"] = False
+            handles["spacemouse_syncing"] = False
+            handles["spacemouse_pending_seq"] = 0
+
+            def _mark_spacemouse_dirty(_: Any = None) -> None:
+                if not handles.get("spacemouse_syncing", False):
+                    handles["spacemouse_assignment_dirty"] = True
+
+            handles["spacemouse_left_select"].on_update(_mark_spacemouse_dirty)
+            handles["spacemouse_right_select"].on_update(_mark_spacemouse_dirty)
+            apply_button = server.gui.add_button("좌/우 배정 적용", color="green")
+            swap_button = server.gui.add_button("좌우 교환")
+            handles["spacemouse_apply_button"] = apply_button
+            handles["spacemouse_swap_button"] = swap_button
+            handles["spacemouse_command_status"] = server.gui.add_text(
+                "배정 상태", initial_value="미배정 장치는 로봇을 움직이지 않습니다", disabled=True
+            )
+
+            @apply_button.on_click
+            def _(_: Any) -> None:
+                _send_spacemouse_assignment(handles)
+
+            @swap_button.on_click
+            def _(_: Any) -> None:
+                _send_spacemouse_swap(handles)
+
     with tabs.add_tab("이동"):
         _move_tabs = server.gui.add_tab_group()
         with _move_tabs.add_tab("관절"):
@@ -3179,6 +3959,7 @@ def build_gui(
             # the −/+ button decides the sign.
             jog_arm = server.gui.add_button_group("Arm", ("left", "right"))
             jog_step = server.gui.add_slider("Step deg", min=0.1, max=5.0, step=0.1, initial_value=0.5)
+            handles["joint_jog_controls"] = [jog_arm, jog_step]
             handles["jog_status"] = server.gui.add_text("Jog status", initial_value="idle", disabled=True)
 
             def _jog_joint_nudge(joint_index: int, sign: float) -> None:
@@ -3187,6 +3968,7 @@ def build_gui(
 
             def _add_joint_jog_row(joint_index: int) -> None:
                 group = server.gui.add_button_group("", ("-", _nudge_label(f"J{joint_index + 1}"), "+"))
+                handles["joint_jog_controls"].append(group)
 
                 @group.on_click
                 def _(_: Any, group: Any = group, joint_index: int = joint_index) -> None:
@@ -3619,6 +4401,24 @@ def build_gui(
             initial_value=f"policy_runner {record_host}:{record_port}",
             disabled=True,
         )
+        # Master On/Off gate for the whole episode-recording feature. Always OFF
+        # when `make run` brings the GUI up (initial_value=False, not persisted):
+        # only when this is ON does a 수집 시작 / 'b' hotkey / foot-pedal press
+        # actually start (and save) an episode. Stopping an in-progress episode is
+        # never gated. See _toggle_episode_recording / _update_recording_panel.
+        if hasattr(server.gui, "add_checkbox"):
+            handles["recording_enabled"] = server.gui.add_checkbox(
+                "녹화 활성화 (Enable)", initial_value=False
+            )
+
+            @handles["recording_enabled"].on_update
+            def _(_: Any) -> None:
+                _update_recording_panel(
+                    handles,
+                    handles.get("_latest_state"),
+                    stale=bool(handles.get("_state_stale", True)),
+                )
+
         start_button = server.gui.add_button("수집 시작", color="green")
         stop_button = server.gui.add_button("수집 종료", color="red")
         toggle_button = server.gui.add_button("record-toggle-hotkey-b")
@@ -3836,6 +4636,140 @@ def _recording_status_block(
     return normalize_recording_status(None)
 
 
+def _spacemouse_status_block(handles: dict[str, Any]) -> dict[str, Any] | None:
+    store = handles.get("recording_status_store")
+    if isinstance(store, RecordingStatusStore):
+        return store.latest_spacemouse()
+    return None
+
+
+def _spacemouse_selected_connection(handle: Any) -> str | None:
+    value = str(getattr(handle, "value", "") or "").strip()
+    return None if value in {"", "미배정"} else value
+
+
+def _send_spacemouse_assignment(handles: dict[str, Any]) -> bool:
+    status = _spacemouse_status_block(handles)
+    client = handles.get("recording_cmd_client")
+    send = getattr(client, "send_spacemouse_assignments", None)
+    if status is None or not callable(send):
+        handles["spacemouse_command_status"].value = "BLOCKED: policy_runner 상태/제어 없음"
+        return False
+    result = send(
+        status_generation=int(status.get("generation", -1)),
+        left_connection_id=_spacemouse_selected_connection(handles.get("spacemouse_left_select")),
+        right_connection_id=_spacemouse_selected_connection(handles.get("spacemouse_right_select")),
+    )
+    return _apply_spacemouse_command_result(handles, result)
+
+
+def _send_spacemouse_swap(handles: dict[str, Any]) -> bool:
+    status = _spacemouse_status_block(handles)
+    client = handles.get("recording_cmd_client")
+    send = getattr(client, "send_spacemouse_swap", None)
+    if status is None or not callable(send):
+        handles["spacemouse_command_status"].value = "BLOCKED: policy_runner 상태/제어 없음"
+        return False
+    return _apply_spacemouse_command_result(
+        handles,
+        send(status_generation=int(status.get("generation", -1))),
+    )
+
+
+def _apply_spacemouse_command_result(handles: dict[str, Any], result: SpaceMouseCommandResult) -> bool:
+    prefix = "PENDING: " if result.ok else "BLOCKED: "
+    handles["spacemouse_command_status"].value = prefix + result.message
+    if result.ok and isinstance(result.payload, Mapping):
+        handles["spacemouse_pending_seq"] = int(result.payload.get("seq", 0) or 0)
+    return result.ok
+
+
+def _update_spacemouse_panel(handles: dict[str, Any]) -> None:
+    if "spacemouse_summary" not in handles:
+        return
+    status = _spacemouse_status_block(handles)
+    store = handles.get("recording_status_store")
+    stale = not isinstance(store, RecordingStatusStore) or store.is_stale(threshold_sec=2.0)
+    if status is None:
+        handles["spacemouse_summary"].value = "policy_runner 상태 없음"
+        _set_disabled(handles.get("spacemouse_apply_button"), True)
+        _set_disabled(handles.get("spacemouse_swap_button"), True)
+        return
+    devices = status.get("devices") if isinstance(status.get("devices"), list) else []
+    input_policy = status.get("input_policy") if isinstance(status.get("input_policy"), Mapping) else {}
+    side_gates = status.get("side_gates") if isinstance(status.get("side_gates"), Mapping) else {}
+    connection_ids = [
+        str(device.get("connection_id"))
+        for device in devices
+        if isinstance(device, Mapping) and device.get("connection_id")
+    ]
+    options = ("미배정", *connection_ids)
+    for key in ("spacemouse_left_select", "spacemouse_right_select"):
+        handle = handles.get(key)
+        if handle is not None:
+            try:
+                handle.options = options
+            except Exception:
+                pass
+    if not handles.get("spacemouse_assignment_dirty", False):
+        left = str(status.get("left_connection_id") or "미배정")
+        right = str(status.get("right_connection_id") or "미배정")
+        handles["spacemouse_syncing"] = True
+        try:
+            if handles.get("spacemouse_left_select") is not None:
+                handles["spacemouse_left_select"].value = left if left in options else "미배정"
+            if handles.get("spacemouse_right_select") is not None:
+                handles["spacemouse_right_select"].value = right if right in options else "미배정"
+        finally:
+            handles["spacemouse_syncing"] = False
+    rows = [
+        "policy "
+        f"deadman={'on' if bool(input_policy.get('require_deadman', False)) else 'off'} "
+        f"startup-neutral={'on' if bool(input_policy.get('startup_requires_neutral', False)) else 'off'} "
+        f"deadband={float(input_policy.get('deadband', 0.0) or 0.0):.3f} "
+        f"activation={float(input_policy.get('activation_deadband', 0.0) or 0.0):.3f}"
+    ]
+    for index, device in enumerate(devices):
+        if not isinstance(device, Mapping):
+            continue
+        arm = str(device.get("arm", "unassigned") or "unassigned")
+        gate = side_gates.get(arm) if arm in {"left", "right"} else None
+        gate = gate if isinstance(gate, Mapping) else {}
+        raw_axes = device.get("raw_axes")
+        raw_text = "no-sample"
+        if isinstance(raw_axes, (list, tuple)) and len(raw_axes) == 6:
+            raw_text = "(" + ",".join(f"{float(value):+.2f}" for value in raw_axes) + ")"
+        sample_age = device.get("sample_age_sec")
+        age_text = "n/a" if sample_age is None else f"{float(sample_age):.3f}s"
+        gate_text = str(gate.get("gate", "unassigned"))
+        if gate_text == "startup_neutral":
+            elapsed = float(gate.get("neutral_hold_elapsed_sec", 0.0) or 0.0)
+            required = float(input_policy.get("startup_neutral_hold_sec", 0.0) or 0.0)
+            gate_text = f"startup-neutral {elapsed:.2f}/{required:.2f}s"
+        rows.append(
+            f"{chr(ord('A') + index)}={device.get('connection_id')} "
+            f"arm={arm} activity={float(device.get('activity', 0.0) or 0.0):.2f} "
+            f"neutral={bool(device.get('neutral', True))} age={age_text} gate={gate_text}\n"
+            f"  raw={raw_text}"
+        )
+    handles["spacemouse_summary"].value = "\n".join(rows) if rows else "감지된 SpaceMouse 없음"
+    allowed = bool(status.get("assignment_change_allowed", False)) and not stale
+    _set_disabled(handles.get("spacemouse_apply_button"), not allowed)
+    both_assigned = bool(status.get("left_connection_id")) and bool(status.get("right_connection_id"))
+    _set_disabled(handles.get("spacemouse_swap_button"), not allowed or not both_assigned)
+    pending = int(handles.get("spacemouse_pending_seq", 0) or 0)
+    acknowledged = int(status.get("last_command_seq", 0) or 0)
+    if pending and acknowledged >= pending:
+        result = str(status.get("last_result", "") or "")
+        error = str(status.get("last_error", "") or "")
+        handles["spacemouse_command_status"].value = (
+            "OK: 배정 적용됨" if result == "accepted" else f"BLOCKED: {error or result or 'unknown'}"
+        )
+        handles["spacemouse_pending_seq"] = 0
+        if result == "accepted":
+            handles["spacemouse_assignment_dirty"] = False
+
+
 def _recording_is_active(handles: dict[str, Any], latest: StateSnapshot | None = None) -> bool:
     return bool(_recording_status_block(handles, latest).get("recording", False))
 
@@ -3855,6 +4789,23 @@ def _apply_recording_result(
     if "recording_command_status" in handles:
         handles["recording_command_status"].value = ("OK: " if ok else "BLOCKED: ") + message
     return ok
+
+
+def _recording_enabled(handles: dict[str, Any]) -> bool:
+    """Master On/Off gate for episode recording.
+
+    Backed by the "녹화 활성화" checkbox in the 에피소드 tab, which is always OFF
+    when the GUI starts (default at every `make run`). When the checkbox handle is
+    absent (headless/older test fixtures that don't wire it) recording is treated
+    as enabled so legacy behavior and existing tests are preserved.
+    """
+    toggle = handles.get("recording_enabled")
+    if toggle is None:
+        return True
+    try:
+        return bool(toggle.value)
+    except Exception:
+        return True
 
 
 def _toggle_episode_recording(
@@ -3882,6 +4833,13 @@ def _toggle_episode_recording(
     if command == "stop" and not active:
         if "recording_command_status" in handles:
             handles["recording_command_status"].value = "already idle"
+        return False
+    # Master gate: a start (수집 시작 / 'b' / foot-pedal from idle) only fires when
+    # the 녹화 활성화 toggle is ON. Stopping an in-progress episode is never gated,
+    # so 'b' can always end a recording even after the toggle is switched off.
+    if command == "start" and not _recording_enabled(handles):
+        if "recording_command_status" in handles:
+            handles["recording_command_status"].value = "BLOCKED: 녹화 비활성화 (녹화 활성화 토글 OFF)"
         return False
     client = handles.get("recording_cmd_client")
     send = getattr(client, "send", None)
@@ -3930,8 +4888,12 @@ def _update_recording_panel(handles: dict[str, Any], latest: StateSnapshot | Non
         handles["recording_episode"].value = episode
     if "recording_frames" in handles:
         handles["recording_frames"].value = f"{frames} @ {rate:.1f} Hz"
+    enabled = _recording_enabled(handles)
     if "recording_start_button" in handles:
-        _set_disabled(handles["recording_start_button"], recording)
+        # Start is available only while the master toggle is ON and nothing is
+        # already recording. Stop stays live whenever an episode is in progress
+        # (even after the toggle is switched off) so it can always be ended.
+        _set_disabled(handles["recording_start_button"], recording or not enabled)
     if "recording_stop_button" in handles:
         _set_disabled(handles["recording_stop_button"], not recording)
 
@@ -4066,19 +5028,15 @@ def _update_floor_panel(handles: dict[str, Any], latest: StateSnapshot | None) -
     update_floor_plane(handles.get("scene", {}), floor)
     # One-shot: bring the enforce checkbox up at the server-reported state, then leave
     # it operator-controlled (guarded by a flag so we don't fight the user's clicks).
-    # Skip this when the operator has a persisted preference: that choice is restored
-    # as the checkbox default and pushed to the server in _build_status_updater, so we
-    # must not overwrite it from telemetry here (see update_gui).
     if (
         "floor_enforce_toggle" in handles
         and isinstance(floor, Mapping)
         and not handles.get("floor_enforce_synced", False)
     ):
-        if handles.get("stand_floor_enforce_pref") is None:
-            try:
-                handles["floor_enforce_toggle"].value = bool(floor.get("enabled", False))
-            except Exception:
-                pass
+        try:
+            handles["floor_enforce_toggle"].value = bool(floor.get("enabled", False))
+        except Exception:
+            pass
         handles["floor_enforce_synced"] = True
     slider = handles.get("floor_slider")
     if not isinstance(floor, Mapping) or not bool(floor.get("enabled", False)):
@@ -4142,6 +5100,25 @@ def _roi_bounds_floats(value: Any) -> list[float] | None:
     return out
 
 
+def _set_slider_server_range(handle: Any, minimum: float, maximum: float) -> None:
+    """Apply a server-owned slider range without transiently invalid state.
+
+    Viser validates the current value whenever min/max changes.  Expand first,
+    clamp the value into the new server range, and only then shrink to the exact
+    envelope.  This also handles stale settings from a wider previous profile.
+    """
+    if not (math.isfinite(minimum) and math.isfinite(maximum) and maximum > minimum):
+        return
+    current = float(handle.value)
+    old_min = float(handle.min)
+    old_max = float(handle.max)
+    handle.min = min(old_min, minimum, current)
+    handle.max = max(old_max, maximum, current)
+    handle.value = max(minimum, min(maximum, current))
+    handle.min = minimum
+    handle.max = maximum
+
+
 def _update_roi_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> None:
     roi = latest.roi_box if latest is not None else None
     # The "ROI 영역 표시" checkbox (default ON) controls scene visibility,
@@ -4163,8 +5140,11 @@ def _update_roi_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> 
             if runtime_max[k] > runtime_min[k]:
                 for suffix in ("min", "max"):
                     try:
-                        handles[f"roi_{a}_{suffix}"].min = runtime_min[k] * 1000.0
-                        handles[f"roi_{a}_{suffix}"].max = runtime_max[k] * 1000.0
+                        _set_slider_server_range(
+                            handles[f"roi_{a}_{suffix}"],
+                            runtime_min[k] * 1000.0,
+                            runtime_max[k] * 1000.0,
+                        )
                     except Exception:
                         pass
     # First-state init: bring the inputs up at the server-applied bounds (once).
@@ -4694,6 +5674,16 @@ def update_gui(
     # focused, so a periodic repaint never clobbers a value the operator is typing).
     handles["_latest_state"] = latest
     handles["_state_stale"] = stale
+    # One no-motion Init Motion press at startup when already parked at the init
+    # pose, so force auto-tare (the software zero) is established without the
+    # operator pressing Init Motion. Strictly gated so it can never plan a move.
+    _maybe_auto_init_tare_on_startup(
+        handles,
+        safety,
+        latest,
+        stale,
+        init_motion_disabled=bool(disabled_states.get("init_motion", True)),
+    )
     if "tcp_ptp_axis_vec" in handles:
         _refresh_tcp_ptp_axis_fields(handles)
     readiness = safety.readiness()
@@ -4701,8 +5691,16 @@ def update_gui(
     _update_circle_overlay_gui(handles, overlay_store)
     _update_chunk_overlay_gui(handles, chunk_overlay_store, latest)
     _update_recording_panel(handles, latest, stale=stale)
+    _update_spacemouse_panel(handles)
     _update_arm_init_panel(handles, latest, stale=stale)
+    _update_cog_panel(handles, latest, stale=stale)
     if latest is None:
+        _update_realtime_health(
+            handles,
+            None,
+            chunk_overlay_store,
+            stale=True,
+        )
         _update_operator_monitors(handles, None, stale=True)
         if "status_summary" in handles:
             handles["status_summary"].content = _status_summary_html(
@@ -4727,6 +5725,8 @@ def update_gui(
         update_user_floor_plane(handles.get("scene", {}), None)
         if "fk_status" in handles:
             handles["fk_status"].value = _format_fk_status(None, stale=True)
+        if "force_status" in handles:
+            handles["force_status"].value = _format_force_status(None, stale=True)
         if "tcp_tracking" in handles:
             handles["tcp_tracking"].value = _format_tcp_tracking_status(
                 None,
@@ -4751,6 +5751,12 @@ def update_gui(
         return
 
     handles["connection"].value = "stale" if stale else "live"
+    _update_realtime_health(
+        handles,
+        latest,
+        chunk_overlay_store,
+        stale=stale,
+    )
     mode_parts = [
         f"desired={safety.desired_mode}",
         f"observed={safety.observed_server_mode}",
@@ -4833,8 +5839,21 @@ def update_gui(
         want = bool(uf_state.get("enabled", False)) and isinstance(plane, Mapping)
         uf = latest.user_floor_constraint if latest is not None else None
         confirmed = isinstance(uf, Mapping) and bool(uf.get("enabled", False))
+        rejected = uf.get("last_set_reject_reason") if isinstance(uf, Mapping) else None
+        config_enabled = handles.get("user_floor_config_enabled")
+        if config_enabled is None:
+            config_enabled = server_safety_constraint_config_enabled(
+                "user_floor_constraint"
+            )
         attempts = handles.get("user_floor_resend_attempts", 0)
-        if not want or confirmed or attempts >= 50:
+        disabled_by_config = config_enabled is False or rejected == "user_floor_disabled"
+        if disabled_by_config:
+            handles["user_floor_resent"] = True
+            if "user_floor_set_status" in handles:
+                handles["user_floor_set_status"].value = (
+                    "restore skipped: user floor disabled by server config"
+                )
+        elif not want or confirmed or attempts >= 50:
             if want and not confirmed and attempts >= 50 and "user_floor_set_status" in handles:
                 handles["user_floor_set_status"].value = "restore gave up (server kept rejecting)"
             handles["user_floor_resent"] = True
@@ -4846,28 +5865,10 @@ def update_gui(
             handles["user_floor_resend_attempts"] = attempts + 1
             if "user_floor_set_status" in handles:
                 handles["user_floor_set_status"].value = ("restoring... " if ok else "restore failed: ") + msg
-    # Re-apply the operator's persisted "Enforce stand floor" choice once the state
-    # stream is live, so the GUI's last setting wins over the server's config default on
-    # every launch. Same retry-until-confirmed pattern (the startup command can be
-    # dropped). No-op when there is no saved preference (checkbox just mirrors telemetry).
-    if not stale and not handles.get("floor_enforce_resent", False):
-        pref = handles.get("stand_floor_enforce_pref")
-        floor = latest.floor_constraint if latest is not None else None
-        server_enabled = (
-            bool(floor.get("enabled", False)) if isinstance(floor, Mapping) else None
-        )
-        attempts = handles.get("floor_enforce_resend_attempts", 0)
-        if not isinstance(pref, bool) or server_enabled == pref or attempts >= 50:
-            handles["floor_enforce_resent"] = True
-        else:
-            ok, msg = safety.send_set_floor_enabled(pref)
-            handles["floor_enforce_resend_attempts"] = attempts + 1
-            if "floor_set_status" in handles:
-                handles["floor_set_status"].value = (
-                    "restoring... " if ok else "restore failed: "
-                ) + msg
     if "fk_status" in handles:
         handles["fk_status"].value = _format_fk_status(latest, stale=stale)
+    if "force_status" in handles:
+        handles["force_status"].value = _format_force_status(latest, stale=stale)
     if "tcp_tracking" in handles:
         handles["tcp_tracking"].value = _format_tcp_tracking_status(
             latest,
@@ -4896,6 +5897,13 @@ def update_gui(
         latest,
         tcp_display_mode=_tcp_display_mode(handles),
         show_tcp_gizmo=_tcp_gizmo_visible(handles),
+    )
+    update_ft_sensor_overlay(
+        handles.get("scene", {}),
+        latest,
+        stale=stale,
+        show=bool(handles.get("ft_sensor_gizmo_visible", True)),
+        show_control=bool(handles.get("ft_control_gizmo_visible", True)),
     )
     # After markers (TCP frames now posed): toggle the orange floor-check points,
     # which are parented under /stand/<arm>_tcp and ride those poses.

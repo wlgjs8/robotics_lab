@@ -120,6 +120,40 @@ class CommandClient:
             "right": {"mode": "JointTarget", "q_target_deg": [float(v) for v in right_q]},
         })
 
+    def build_joint_target_arm(
+        self,
+        arm: str,
+        q_target_deg: tuple[float, ...],
+        *,
+        joint_target_profile: str | None = None,
+        timeout_sec: float = 0.2,
+    ) -> dict[str, Any]:
+        """Build a one-arm JointTarget while the other arm explicitly holds.
+
+        The top-level mode stays ``Hold`` because the command is intentionally
+        uncoupled.  The server still receives the selected arm's normal
+        JointTarget primitive and remains responsible for all motion gates.
+        """
+        if arm not in {"left", "right"}:
+            raise ValueError("arm must be left or right")
+        target = {
+            "mode": "JointTarget",
+            "q_target_deg": self._finite_six(q_target_deg, f"{arm} joint target"),
+        }
+        if joint_target_profile is not None:
+            profile = str(joint_target_profile).strip()
+            if not profile:
+                raise ValueError("joint target profile must be non-empty")
+            target["joint_target_profile"] = profile
+        return self._with_source({
+            "seq": self.next_seq(),
+            "mode": "Hold",
+            "timeout_sec": timeout_sec,
+            "coupled_timeout": True,
+            "left": target if arm == "left" else {"mode": "Hold"},
+            "right": target if arm == "right" else {"mode": "Hold"},
+        })
+
     def build_init_motion(
         self,
         left_q: tuple[float, ...],

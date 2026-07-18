@@ -33,6 +33,7 @@ private:
     JointArray q_target_deg_{};
 
     uint64_t last_update_time_ns_ = 0;
+    uint64_t state_acquisition_sequence_ = 0;
 };
 
 }  // namespace rb_servo

@@ -1,7 +1,7 @@
 schema: robotics_lab.policy_runner.v1
 # =====================================================================================
 # STACK CONFIG (REAL) — single source of truth for `make run MODE=real`.
-# Pairs with rb_servo_server/config/local/stack_real.yaml (pgmode real, PHYSICAL).
+# Pairs with rb_servo_server/config/stack_real.yaml (pgmode real, PHYSICAL).
 # Both teleop sources run side by side (action_source: teleop_mux): the first
 # source to engage (SpaceMouse cap deflection / UMI deadman) owns the whole
 # robot until it returns to idle. To isolate one source for debugging:
@@ -64,6 +64,13 @@ safety:
 command_rate_hz: 500
 
 spacemouse_pose_target_dual:
+  discovery:
+    enable: true
+    vendor_id: 0x256f
+    product_id: 0xc652
+    interface_number: 0
+    scan_period_sec: 0.5
+    poll_period_sec: 0.002
   max_linear_step_m: 0.001
   max_angular_step_rad: 0.006
   # Target-lead: how far the commanded target may run AHEAD of the current pose.
@@ -90,24 +97,24 @@ spacemouse_pose_target_dual:
     open_button: 14
     open_percent: 100.0
     close_percent: 10.0
-  # IDLE->ACTIVE needs activation_deadband
-  # (hysteresis vs deadband); startup/stale-reconnect requires the cap held
-  # neutral for startup_neutral_hold_sec before motion is accepted.
+  # IDLE->ACTIVE still needs activation_deadband (hysteresis vs deadband).
+  # Diagnostic profile: startup-neutral is temporarily disabled so receiver
+  # center bias can be distinguished from HID/assignment failures. Restore
+  # startup_requires_neutral=true after the dual-device diagnosis.
   require_deadman: false
   activation_deadband: 0.10
-  startup_requires_neutral: true
+  startup_requires_neutral: false
   startup_neutral_hold_sec: 0.3
   left:
     device: null
-    # 3Dconnexion receiver A (USB 3-1.1) interface 1.0 = the 6-DOF motion node.
-    # hidraw2..5 are the same receiver's non-motion interfaces (no samples).
-    path: /dev/hidraw1
+    # Runtime assignment is operator-owned in rb_gui. These receivers expose no
+    # unique USB serial, so fixed hidraw paths and USB-port identity are unsafe.
+    path: null
     device_number: 0
     deadman_button: 0
   right:
     device: null
-    # receiver B (USB 3-1.2) interface 1.0.
-    path: /dev/hidraw10
+    path: null
     device_number: 0
     deadman_button: 0
 

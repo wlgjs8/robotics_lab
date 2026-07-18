@@ -29,12 +29,22 @@ from rb_servo_gui.app import (
     _gripper_cmd_endpoint,
     _recording_cmd_endpoint,
     _recording_status_bind_endpoint,
+    _roi_initial_slider_specs,
     _push_gripper_percent,
     _toggle_episode_recording,
     _update_recording_panel,
+    _update_spacemouse_panel,
+    _send_spacemouse_assignment,
+    _send_spacemouse_swap,
     _trigger_box_detect,
     _send_arm_init_override,
     _send_arm_init_cancel_resume,
+    _startup_init_tare_arms,
+    _startup_init_tare_tol_deg,
+    _server_init_noop_tol_deg,
+    _joints_within_tol,
+    _arm_awaiting_init_tare,
+    _maybe_auto_init_tare_on_startup,
     _foot_pedal_action_map,
     _update_arm_init_panel,
     _lifecycle_init_motion_layout_html,
@@ -63,6 +73,7 @@ from rb_servo_gui.app import (
     _format_cartesian_solve_status,
     _format_circle_overlay_status,
     _format_fk_status,
+    _format_force_status,
     _format_init_motion_status,
     _format_scene_asset_status,
     _format_joint_monitor_value,
@@ -116,6 +127,7 @@ from rb_servo_gui.app import (
     parse_args,
     update_scene_markers,
 )
+from rb_servo_gui.cog_gui import CogGuiSession
 from rb_servo_gui.box_detect_control import (
     BOX_DETECT_COMMAND_SCHEMA,
     BoxDetectCommandClient,
@@ -140,8 +152,14 @@ from rb_servo_gui.recording_control import (
     ArmInitCommandResult,
     RecordingCommandClient,
     RecordingStatusStore,
+    SPACEMOUSE_ASSIGNMENT_COMMAND_SCHEMA,
+    SpaceMouseCommandResult,
 )
-from rb_servo_gui.safety import OperatorSafety, normalize_observed_mode_backend
+from rb_servo_gui.safety import (
+    OperatorSafety,
+    normalize_observed_mode_backend,
+    server_safety_constraint_config_enabled,
+)
 from rb_servo_gui.scene import (
     _FLOOR_CHECK_POINTS_TCP_FRAME,
     _FLOOR_CHECK_POINTS_TCP_FRAME_CLOSED,
@@ -153,6 +171,7 @@ from rb_servo_gui.scene import (
     _circle_overlay_points,
     _ensure_sc_world_frame,
     _finger_position_m,
+    _ft_sensor_pose_tcp_from_urdf,
     _interpolated_floor_check_points,
     _ik_infeasible_path,
     _reference_ghost_active,
@@ -162,6 +181,7 @@ from rb_servo_gui.scene import (
     set_ik_infeasible_region_visible,
     update_circle_overlay,
     update_floor_check_points,
+    update_ft_sensor_overlay,
     update_floor_plane,
     update_floor_plane_preview,
     update_roi_box,
@@ -428,8 +448,23 @@ class RecordingGui:
         self.buttons.append((label, kwargs, button))
         return button
 
-    def add_button_group(self, label, options, **kwargs):
-        initial = kwargs.get("initial_value", tuple(options)[0] if options else None)
+    def add_button_group(
+        self,
+        label,
+        options,
+        *,
+        disabled=False,
+        visible=True,
+        hint=None,
+        order=None,
+    ):
+        kwargs = {
+            "disabled": disabled,
+            "visible": visible,
+            "hint": hint,
+            "order": order,
+        }
+        initial = tuple(options)[0] if options else None
         group = RecordingInput(initial, options=tuple(options), **kwargs)
         self.button_groups.append((label, tuple(options), kwargs, group))
         return group
@@ -450,6 +485,7 @@ class RecordingGui:
         return number
 
     def add_slider(self, label, **kwargs):
+        assert kwargs["min"] <= kwargs.get("initial_value") <= kwargs["max"]
         slider = RecordingInput(kwargs.get("initial_value"), **kwargs)
         self.sliders.append((label, kwargs, slider))
         return slider
@@ -502,6 +538,7 @@ class ShapeCheckingScene(RecordingScene):
         super().__init__()
         self.point_clouds = []
         self.line_segments = []
+        self.arrows = []
         self.meshes = []
         self.icospheres = []
         self.transform_controls = []
@@ -526,6 +563,16 @@ class ShapeCheckingScene(RecordingScene):
         handle.colors = colors_array
         handle.visible = kwargs.get("visible", True)
         self.line_segments.append((name, points_array, colors_array, kwargs, handle))
+        return handle
+
+    def add_arrows(self, name, points, colors, **kwargs):
+        points_array = np.asarray(points)
+        self.assert_line_segment_arrays(points_array, np.asarray(colors))
+        handle = RecordingSceneHandle()
+        handle.points = points_array
+        handle.colors = np.asarray(colors)
+        handle.visible = kwargs.get("visible", True)
+        self.arrows.append((name, points_array, colors, kwargs, handle))
         return handle
 
     def add_transform_controls(self, name, **kwargs):
@@ -560,6 +607,15 @@ class ShapeCheckingScene(RecordingScene):
     def assert_line_segment_arrays(points, colors):
         assert points.ndim == 3 and points.shape[1:] == (2, 3)
         assert colors.shape in {points.shape, (3,)}
+
+
+class LineOnlyShapeCheckingScene(ShapeCheckingScene):
+    """Viser 0.2.12-compatible scene surface without ``add_arrows``."""
+
+    def __getattribute__(self, name):
+        if name == "add_arrows":
+            raise AttributeError(name)
+        return super().__getattribute__(name)
 
 
 class RecordingServer:
@@ -1345,6 +1401,45 @@ class GuiContractsTest(unittest.TestCase):
         self.assertFalse(handles["recording_start_button"].disabled)
         self.assertTrue(handles["recording_stop_button"].disabled)
 
+    def test_recording_master_gate_blocks_start_but_never_stop(self):
+        # The 녹화 활성화 toggle is OFF (its default at every make-run GUI launch):
+        # a start (수집 시작 / 'b' / foot-pedal from idle) must not fire and no
+        # command may reach policy_runner, while a stop of an in-progress episode
+        # is never gated.
+        client = RecordingCommandFake()
+        handles = {
+            "recording_cmd_client": client,
+            "recording_enabled": RecordingInput(value=False),
+            "recording_last_toggle_monotonic": float("-inf"),
+            "recording_task": RecordingText("fold towel"),
+            "recording_operator": RecordingText("operator-a"),
+            "recording_state": RecordingText("idle"),
+            "recording_episode": RecordingText(""),
+            "recording_frames": RecordingText(""),
+            "recording_command_status": RecordingText(""),
+            "recording_start_button": RecordingButton(),
+            "recording_stop_button": RecordingButton(),
+        }
+
+        # OFF + idle: start blocked, nothing sent to policy_runner.
+        self.assertFalse(_toggle_episode_recording(handles, target="start", monotonic_fn=lambda: 10.0))
+        self.assertEqual(client.calls, [])
+        self.assertIn("BLOCKED", handles["recording_command_status"].value)
+
+        # Panel reflects the gate: start button disabled while the toggle is OFF.
+        _update_recording_panel(handles, None, stale=False)
+        self.assertTrue(handles["recording_start_button"].disabled)
+
+        # Flip the toggle ON: start now fires and reaches policy_runner.
+        handles["recording_enabled"].value = True
+        self.assertTrue(_toggle_episode_recording(handles, target="start", monotonic_fn=lambda: 20.0))
+        self.assertEqual(client.calls, [{"command": "start", "task": "fold towel", "operator": "operator-a"}])
+
+        # Toggle back OFF while recording: a stop is still allowed (never gated).
+        handles["recording_enabled"].value = False
+        self.assertTrue(_toggle_episode_recording(handles, target="stop", monotonic_fn=lambda: 30.0))
+        self.assertEqual(client.calls[-1]["command"], "stop")
+
     def test_trigger_box_detect_debounce_and_busy_state(self):
         class BoxDetectCommandFake:
             def __init__(self, ok=True, message="box detect_now sent"):
@@ -1553,6 +1648,132 @@ class GuiContractsTest(unittest.TestCase):
         self.assertTrue(store.is_stale(now=7.0))
         self.assertFalse(store.update_from_packet(b"not json"))
         self.assertEqual(store.invalid_packets, 1)
+
+    def test_spacemouse_control_client_emits_atomic_assignment_and_swap(self):
+        class _Sock:
+            def __init__(self, *_args):
+                self.sent = []
+
+            def sendto(self, data, endpoint):
+                self.sent.append((json.loads(data.decode()), endpoint))
+                return len(data)
+
+            def close(self):
+                pass
+
+        sock = _Sock()
+        client = RecordingCommandClient(
+            "127.0.0.1", 50441, socket_factory=lambda *_args: sock
+        )
+        result = client.send_spacemouse_assignments(
+            status_generation=4,
+            left_connection_id="sm-a",
+            right_connection_id="sm-b",
+        )
+        self.assertTrue(result.ok)
+        payload, endpoint = sock.sent[0]
+        self.assertEqual(endpoint, ("127.0.0.1", 50441))
+        self.assertEqual(payload["schema"], SPACEMOUSE_ASSIGNMENT_COMMAND_SCHEMA)
+        self.assertEqual(payload["command"], "set")
+        self.assertEqual(payload["status_generation"], 4)
+        swap = client.send_spacemouse_swap(status_generation=5)
+        self.assertTrue(swap.ok)
+        self.assertEqual(sock.sent[1][0]["command"], "swap")
+
+    def test_spacemouse_status_panel_and_ack(self):
+        store = RecordingStatusStore()
+        store.update(
+            {"recording": False},
+            spacemouse={
+                "generation": 9,
+                "assignment_change_allowed": True,
+                "left_connection_id": "sm-a",
+                "right_connection_id": "sm-b",
+                "devices": [
+                    {
+                        "connection_id": "sm-a",
+                        "arm": "left",
+                        "activity": 0.4,
+                        "neutral": False,
+                        "sample_age_sec": 0.01,
+                        "raw_axes": [0.4, 0.0, 0.0, 0.0, 0.08, 0.0],
+                    },
+                    {"connection_id": "sm-b", "arm": "right", "activity": 0.0, "neutral": True},
+                ],
+                "input_policy": {
+                    "require_deadman": False,
+                    "deadband": 0.06,
+                    "activation_deadband": 0.1,
+                    "startup_requires_neutral": True,
+                    "startup_neutral_hold_sec": 0.3,
+                },
+                "side_gates": {
+                    "left": {
+                        "gate": "startup_neutral",
+                        "neutral_hold_elapsed_sec": 0.0,
+                    },
+                    "right": {"gate": "ready"},
+                },
+                "last_command_seq": 3,
+                "last_result": "accepted",
+                "last_error": "",
+            },
+            received_monotonic=time.monotonic(),
+        )
+        handles = {
+            "recording_status_store": store,
+            "spacemouse_summary": RecordingText(),
+            "spacemouse_left_select": RecordingInput("미배정"),
+            "spacemouse_right_select": RecordingInput("미배정"),
+            "spacemouse_apply_button": RecordingButton(),
+            "spacemouse_swap_button": RecordingButton(),
+            "spacemouse_command_status": RecordingText(),
+            "spacemouse_assignment_dirty": False,
+            "spacemouse_pending_seq": 3,
+        }
+        _update_spacemouse_panel(handles)
+        self.assertIn("sm-a", handles["spacemouse_summary"].value)
+        self.assertIn("deadman=off", handles["spacemouse_summary"].value)
+        self.assertIn("startup-neutral 0.00/0.30s", handles["spacemouse_summary"].value)
+        self.assertIn("+0.08", handles["spacemouse_summary"].value)
+        self.assertEqual(handles["spacemouse_left_select"].value, "sm-a")
+        self.assertEqual(handles["spacemouse_right_select"].value, "sm-b")
+        self.assertFalse(handles["spacemouse_apply_button"].disabled)
+        self.assertFalse(handles["spacemouse_swap_button"].disabled)
+        self.assertEqual(handles["spacemouse_command_status"].value, "OK: 배정 적용됨")
+
+    def test_spacemouse_gui_sends_current_generation(self):
+        store = RecordingStatusStore()
+        store.update(
+            {"recording": False},
+            spacemouse={"generation": 12, "devices": []},
+            received_monotonic=time.monotonic(),
+        )
+
+        class _Client:
+            def __init__(self):
+                self.calls = []
+
+            def send_spacemouse_assignments(self, **kwargs):
+                self.calls.append(("set", kwargs))
+                return SpaceMouseCommandResult(True, "sent", {"seq": 8})
+
+            def send_spacemouse_swap(self, **kwargs):
+                self.calls.append(("swap", kwargs))
+                return SpaceMouseCommandResult(True, "sent", {"seq": 9})
+
+        client = _Client()
+        handles = {
+            "recording_status_store": store,
+            "recording_cmd_client": client,
+            "spacemouse_left_select": RecordingInput("sm-a"),
+            "spacemouse_right_select": RecordingInput("sm-b"),
+            "spacemouse_command_status": RecordingText(),
+        }
+        self.assertTrue(_send_spacemouse_assignment(handles))
+        self.assertTrue(_send_spacemouse_swap(handles))
+        self.assertEqual(client.calls[0][1]["status_generation"], 12)
+        self.assertEqual(client.calls[1][1]["status_generation"], 12)
 
     def test_arm_init_command_client_emits_control_schema(self):
         class _Sock:
@@ -2942,6 +3163,14 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn(".rb-monitor-stand-card.rb-monitor-header-card { top: var(--rb-monitor-split); }", html)
         self.assertIn(".rb-monitor-joint-card.rb-monitor-body-card { max-height: calc(var(--rb-monitor-split) - 5.95em); }", html)
         self.assertIn("Pose Monitor", html)
+        # FT split out of the Pose Monitor into its own right-column card.
+        self.assertNotIn("Pose Monitor · FT", html)
+        self.assertIn("FT Monitor", html)
+        self.assertIn(
+            ".rb-monitor-ft-card { left: calc(var(--rb-monitor-gap) * 2 + var(--rb-monitor-width)); }",
+            html,
+        )
+        self.assertIn("rb-monitor-header-card rb-monitor-ft-card", html)
         self.assertIn('id="rb-joint-unit-rad"', html)
         self.assertIn('id="rb-stand-unit-rad"', html)
         self.assertIn("body:has(#rb-joint-unit-rad:checked)", html)
@@ -2983,6 +3212,276 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("stale, tick=1", stale_html)
         self.assertNotIn("xyz=mm", stale_html)
         self.assertIn("invalid", stale_html)
+
+    def test_operator_monitor_dynamic_html_renders_eft_wrench(self):
+        # External F/T sensor rows (rbpodo eft_*) render per arm in the dedicated
+        # FT Monitor card. One axis per row (single short number) so the narrow
+        # card fits without a horizontal scrollbar: force (1 decimal), torque
+        # (2 decimals), |F| magnitude.
+        state = self.tcp_available_state()
+        state["left"]["eft_wrench"] = [7.4, 6.7, -38.5, -0.12, -0.48, 0.23]
+        state["left"]["eft_valid"] = True
+        state["right"]["eft_wrench"] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        state["right"]["eft_valid"] = False
+        store, _, _ = self.make_safety(state)
+        latest = store.latest()
+        # Parser surfaces the wrench + validity flag per arm.
+        self.assertEqual(latest.left.eft_wrench, (7.4, 6.7, -38.5, -0.12, -0.48, 0.23))
+        self.assertTrue(latest.left.eft_valid)
+        self.assertFalse(latest.right.eft_valid)
+        html = _operator_monitor_dynamic_html(latest, stale=False)
+        # FT readings live in their own FT Monitor body card, not the Pose card.
+        self.assertIn("rb-monitor-body-card rb-monitor-ft-card", html)
+        for label in ("Fx [N]", "Fy [N]", "Fz [N]", "|F| [N]", "Tx [Nm]", "Ty [Nm]", "Tz [Nm]"):
+            self.assertIn(label, html)
+        # No 3-vector packed onto one line (that was the horizontal-scroll driver).
+        self.assertNotIn("+7.4 +6.7 -38.5", html)
+        for axis_value in ("+7.4", "+6.7", "-38.5", "-0.12", "-0.48", "+0.23"):
+            self.assertIn(axis_value, html)
+        self.assertIn("39.8", html)  # |F| = sqrt(7.4^2 + 6.7^2 + 38.5^2)
+        # Server-invalid (right arm) and stale streams must not show readings.
+        stale_html = _operator_monitor_dynamic_html(latest, stale=True)
+        self.assertNotIn("+7.4", stale_html)
+        self.assertNotIn("-38.5", stale_html)
+
+    def test_force_telemetry_parser_and_read_only_status(self):
+        state = self.tcp_available_state()
+        state["motion_epoch"] = 42
+        state["left"]["force_torque"] = {
+            "enabled": True,
+            "source": "rbpodo_eft",
+            "source_assurance": "controller_frame_only",
+            "sensor_health_verified": False,
+            "safety_rated": False,
+            "raw_sensor_wrench": [1.0, 2.0, 3.0, 0.1, 0.2, 0.3],
+            "t_tcp_sensor": [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966],
+            "wrench_tcp": [3.0, 2.0, 1.0, 0.3, 0.2, 0.1],
+            "fast_external_wrench": [0.9, 1.9, 2.9, 0.09, 0.19, 0.29],
+            "control_external_wrench": [0.8, 1.8, 2.8, 0.08, 0.18, 0.28],
+            "healthy": True,
+            "stale": False,
+            "freshness_value": 1234,
+            "freshness_advanced": True,
+            "reason": "ok",
+            "auto_tare_enabled": True,
+            "tare_valid": True,
+            "tare_state": "accepted",
+            "tare_sample_count": 500,
+            "tare_generation": 2,
+            "tare_reason": "accepted",
+            "residual_tare_tcp": [0.0, 0.0, 23.5, 0.1, 0.2, 0.3],
+        }
+        state["left"]["force_control"] = {
+            "enabled": True,
+            "operating_mode": "guarded_admittance",
+            "state": "regulating",
+            "surface_source": "floor_constraint",
+            "compliance_frame": "sensor_origin",
+            "compliance_frame_pose_valid": True,
+            "compliance_frame_actual_stand": [0.31, -0.12, 0.44, 0.0, 0.0, 1.5707963267948966],
+            "normal_stand": [0.0, 0.0, 1.0],
+            "contact_active": True,
+            "normal_contact_active": False,
+            "transverse_contact_active": True,
+            "rotational_contact_active": True,
+            "compliance_active": True,
+            "normal_regulating": True,
+            "transverse_regulating": False,
+            "rotational_regulating": False,
+            "loading_projection_active": True,
+            "control_wrench_surface": [1.0, 2.0, 3.0, 0.1, 0.2, 0.3],
+            "control_wrench_compliance": [4.0, 5.0, 6.0, 0.4, 0.5, 0.6],
+            "wrench_error_surface": [0.5, -0.5, 1.5, -0.1, 0.0, 0.1],
+            "wrench_error_compliance": [3.5, 4.5, 5.5, 0.35, 0.45, 0.55],
+            "compliance_offset_surface": [0.001, 0.002, 0.003, 0.01, 0.02, 0.03],
+            "compliance_velocity_surface": [0.004, 0.005, 0.006, 0.04, 0.05, 0.06],
+            "compliance_acceleration_surface": [0.007, 0.008, 0.009, 0.07, 0.08, 0.09],
+            "raw_policy_delta_surface": [0.01, 0.02, -0.03, 0.1, 0.2, -0.3],
+            "accepted_policy_delta_surface": [0.01, 0.0, 0.0, 0.1, 0.0, 0.0],
+            "compliance_equilibrium_stand": [0.41, -0.22, 0.33, 0.1, -0.2, 0.3],
+            "compliance_equilibrium_source": "policy_target",
+            "compliance_recenter_active": True,
+            "compliance_limit_axes": [True, False, False, False, True, False],
+            "compliance_limit_reason": "jerk_limited_motion_envelope",
+            "measured_force_n": 8.2,
+            "fast_normal_force_n": 9.2,
+            "fast_force_norm_n": 10.2,
+            "fast_torque_norm_nm": 1.2,
+            "contact_threshold_exceeded": True,
+            "hard_limit_threshold_exceeded": True,
+            "hard_limit_sample_count": 2,
+            "hard_limit_exceeded": False,
+            "target_force_n": 8.0,
+            "correction_m": 0.0003,
+            "velocity_m_s": 0.002,
+            "acceleration_m_s2": 0.01,
+            "energy_j": 0.04,
+            "saturated": True,
+            "proposal_valid": True,
+            "proposal_committed": True,
+            "fault_reason": None,
+            "motion_epoch": 42,
+        }
+        store, _, _ = self.make_safety(state)
+        latest = store.latest()
+
+        self.assertEqual(latest.motion_epoch, 42)
+        self.assertEqual(latest.left.force_torque.source, "rbpodo_eft")
+        self.assertEqual(latest.left.force_torque.source_assurance, "controller_frame_only")
+        self.assertEqual(
+            latest.left.force_torque.raw_sensor_wrench,
+            (1.0, 2.0, 3.0, 0.1, 0.2, 0.3),
+        )
+        self.assertEqual(
+            latest.left.force_torque.t_tcp_sensor.as_tuple(),
+            (0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966),
+        )
+        self.assertEqual(
+            latest.left.force_torque.control_external_wrench,
+            (0.8, 1.8, 2.8, 0.08, 0.18, 0.28),
+        )
+        self.assertEqual(latest.left.force_torque.freshness_value, 1234)
+        self.assertTrue(latest.left.force_torque.freshness_advanced)
+        self.assertTrue(latest.left.force_torque.auto_tare_enabled)
+        self.assertTrue(latest.left.force_torque.tare_valid)
+        self.assertEqual(latest.left.force_torque.tare_state, "accepted")
+        self.assertEqual(latest.left.force_torque.tare_sample_count, 500)
+        self.assertEqual(latest.left.force_torque.tare_generation, 2)
+        self.assertEqual(
+            latest.left.force_torque.residual_tare_tcp,
+            (0.0, 0.0, 23.5, 0.1, 0.2, 0.3),
+        )
+        self.assertEqual(latest.left.force_control.operating_mode, "guarded_admittance")
+        self.assertEqual(latest.left.force_control.state, "regulating")
+        self.assertEqual(
+            latest.left.force_control.compliance_frame,
+            "sensor_origin",
+        )
+        self.assertTrue(latest.left.force_control.compliance_frame_pose_valid)
+        self.assertAlmostEqual(
+            latest.left.force_control.compliance_frame_actual_stand.x,
+            0.31,
+        )
+        self.assertAlmostEqual(
+            latest.left.force_control.compliance_frame_actual_stand.rz,
+            1.5707963267948966,
+        )
+        self.assertEqual(latest.left.force_control.normal_stand, (0.0, 0.0, 1.0))
+        self.assertTrue(latest.left.force_control.contact_active)
+        self.assertFalse(latest.left.force_control.normal_contact_active)
+        self.assertTrue(latest.left.force_control.transverse_contact_active)
+        self.assertTrue(latest.left.force_control.rotational_contact_active)
+        self.assertTrue(latest.left.force_control.compliance_active)
+        self.assertTrue(latest.left.force_control.normal_regulating)
+        self.assertFalse(latest.left.force_control.transverse_regulating)
+        self.assertFalse(latest.left.force_control.rotational_regulating)
+        self.assertTrue(latest.left.force_control.loading_projection_active)
+        self.assertEqual(
+            latest.left.force_control.control_wrench_surface,
+            (1.0, 2.0, 3.0, 0.1, 0.2, 0.3),
+        )
+        self.assertEqual(
+            latest.left.force_control.control_wrench_compliance,
+            (4.0, 5.0, 6.0, 0.4, 0.5, 0.6),
+        )
+        self.assertEqual(
+            latest.left.force_control.wrench_error_compliance,
+            (3.5, 4.5, 5.5, 0.35, 0.45, 0.55),
+        )
+        self.assertEqual(
+            latest.left.force_control.accepted_policy_delta_surface,
+            (0.01, 0.0, 0.0, 0.1, 0.0, 0.0),
+        )
+        self.assertEqual(
+            latest.left.force_control.compliance_limit_axes,
+            (True, False, False, False, True, False),
+        )
+        self.assertEqual(
+            latest.left.force_control.compliance_limit_reason,
+            "jerk_limited_motion_envelope",
+        )
+        self.assertEqual(
+            latest.left.force_control.compliance_equilibrium_source,
+            "policy_target",
+        )
+        self.assertAlmostEqual(
+            latest.left.force_control.compliance_equilibrium_stand.x,
+            0.41,
+        )
+        self.assertTrue(latest.left.force_control.compliance_recenter_active)
+        self.assertAlmostEqual(latest.left.force_control.measured_force_n, 8.2)
+        self.assertAlmostEqual(latest.left.force_control.fast_normal_force_n, 9.2)
+        self.assertAlmostEqual(latest.left.force_control.fast_force_norm_n, 10.2)
+        self.assertAlmostEqual(latest.left.force_control.fast_torque_norm_nm, 1.2)
+        self.assertTrue(latest.left.force_control.contact_threshold_exceeded)
+        self.assertTrue(latest.left.force_control.hard_limit_threshold_exceeded)
+        self.assertEqual(latest.left.force_control.hard_limit_sample_count, 2)
+        self.assertFalse(latest.left.force_control.hard_limit_exceeded)
+        self.assertTrue(latest.left.force_control.proposal_committed)
+        self.assertEqual(latest.left.force_control.motion_epoch, 42)
+        self.assertIsNone(latest.right.force_torque)
+        self.assertIsNone(latest.right.force_control)
+
+        status = _format_force_status(latest, stale=False)
+        self.assertIn("motion_epoch=42", status)
+        self.assertIn("source=rbpodo_eft", status)
+        self.assertIn("assurance=controller_frame_only", status)
+        self.assertIn("health_verified=False", status)
+        self.assertIn("safety_rated=False", status)
+        self.assertIn("contact=True", status)
+        self.assertIn("compliance_frame=sensor_origin", status)
+        self.assertIn("control_wrench_compliance=", status)
+        self.assertIn("normal_contact=False", status)
+        self.assertIn("transverse_contact=True", status)
+        self.assertIn("rotational_contact=True", status)
+        self.assertIn("equilibrium_source=policy_target", status)
+        self.assertIn("recenter=True", status)
+        self.assertIn("compliance=True", status)
+        self.assertIn("normal_regulating=True", status)
+        self.assertIn("transverse_regulating=False", status)
+        self.assertIn("rotational_regulating=False", status)
+        self.assertIn("loading_projection=True", status)
+        self.assertIn(
+            "control_wrench_surface=[+1.0000,+2.0000,+3.0000,+0.1000,+0.2000,+0.3000]",
+            status,
+        )
+        self.assertIn(
+            "wrench_error_surface=[+0.5000,-0.5000,+1.5000,-0.1000,+0.0000,+0.1000]",
+            status,
+        )
+        self.assertIn(
+            "accepted_policy_delta_surface=[+0.0100,+0.0000,+0.0000,+0.1000,+0.0000,+0.0000]",
+            status,
+        )
+        self.assertIn("fast_normal=9.200N", status)
+        self.assertIn("force_norm=10.200N", status)
+        self.assertIn("torque_norm=1.200Nm", status)
+        self.assertIn("hard_threshold=True", status)
+        self.assertIn("hard_count=2", status)
+        self.assertIn("contact_threshold=True", status)
+        self.assertIn("hard_limit=False", status)
+        self.assertIn("limit_axes=x+ry", status)
+        self.assertIn("limit_reason=jerk_limited_motion_envelope", status)
+        self.assertIn("controller=regulating", status)
+        self.assertIn("normal_force=8.200N", status)
+        self.assertIn("target=8.000N", status)
+        self.assertIn("unload=0.300mm", status)
+        self.assertIn("right telemetry unavailable", status)
+        # The FT Monitor card shows only the raw wrench axes now — the verbose
+        # force-controller status string is no longer surfaced there.
+        self.assertNotIn("FT status", _operator_monitor_dynamic_html(latest, stale=False))
+        self.assertNotIn("assurance=controller_frame_only", _operator_monitor_dynamic_html(latest, stale=False))
+        self.assertEqual(_format_force_status(latest, stale=True), "State stream stale")
+
+    def test_force_telemetry_is_backward_compatible_when_absent(self):
+        store, _, _ = self.make_safety(sample_state())
+        latest = store.latest()
+        self.assertIsNone(latest.motion_epoch)
+        self.assertIsNone(latest.left.force_torque)
+        self.assertIsNone(latest.left.force_control)
+        self.assertIn("motion_epoch=unavailable", _format_force_status(latest, stale=False))
+        self.assertNotIn("FT status", _operator_monitor_dynamic_html(latest, stale=False))
+        self.assertEqual(_format_force_status(None, stale=True), "Force: no state")
 
     def test_operator_monitors_use_fixed_html_overlay_when_available(self):
         server = RecordingServer(scene=RecordingScene())
@@ -3397,6 +3896,227 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("left tcp_ref_stand controller-sim reference", label_texts)
         self.assertIn("right tcp_actual_stand physical-state inspection", label_texts)
         self.assertIn("right tcp_ref_stand controller-sim reference", label_texts)
+
+    def test_ft_sensor_measurement_pose_is_authored_by_both_robot_urdfs(self):
+        descriptions = Path(__file__).resolve().parents[2] / "rb_servo_server" / "descriptions"
+        expected_position = (0.0, 0.0, -0.202642)
+        expected_wxyz = (math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5))
+        for filename in ("rb3_730e.urdf", "rb3_730e_pika_articulated.urdf"):
+            pose = _ft_sensor_pose_tcp_from_urdf(descriptions / "urdf" / filename)
+            self.assertIsNotNone(pose)
+            position, wxyz = pose
+            np.testing.assert_allclose(position, expected_position, atol=1e-9)
+            np.testing.assert_allclose(wxyz, expected_wxyz, atol=1e-9)
+
+    def test_ft_sensor_pose_fails_closed_when_urdf_link_is_absent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "no_ft.urdf"
+            path.write_text(
+                """<robot name="no_ft">
+  <link name="tcp"/>
+</robot>
+""",
+                encoding="utf-8",
+            )
+            self.assertIsNone(_ft_sensor_pose_tcp_from_urdf(path))
+
+    def test_scene_fallback_adds_separate_cad_and_control_frames(self):
+        scene = ShapeCheckingScene()
+        handles = _add_scene_fallback(RecordingServer(scene=scene))
+
+        frame_by_name = {name: (kwargs, handle) for name, kwargs, handle in scene.frames}
+        for arm in ("left", "right"):
+            kwargs, handle = frame_by_name[f"/stand/{arm}_tcp/ft_sensor_cad"]
+            np.testing.assert_allclose(kwargs["position"], (0.0, 0.0, -0.202642), atol=1e-9)
+            np.testing.assert_allclose(
+                kwargs["wxyz"], (math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5)), atol=1e-9
+            )
+            self.assertTrue(kwargs["show_axes"])
+            self.assertFalse(handle.visible)
+            control_kwargs, control_handle = frame_by_name[
+                f"/stand/{arm}_force_control_frame"
+            ]
+            np.testing.assert_allclose(control_kwargs["position"], (0.0, 0.0, 0.0))
+            np.testing.assert_allclose(control_kwargs["wxyz"], (1.0, 0.0, 0.0, 0.0))
+            self.assertFalse(control_handle.visible)
+            self.assertIn(f"{arm}_ft_force", handles)
+            self.assertIn("FT sensor frame", handles[f"{arm}_ft_sensor_label"].text)
+            self.assertIn("+90° yaw", handles[f"{arm}_ft_sensor_label"].text)
+            self.assertIn("sensor origin", handles[f"{arm}_ft_sensor_label"].text)
+        self.assertFalse(
+            any("ft_sensor" in name for name, _kwargs, _handle in scene.transform_controls)
+        )
+
+    def test_ft_overlay_keeps_cad_separate_from_server_control_frame(self):
+        state = sample_state()
+        state["left"].update(
+            {
+                "tcp_actual_stand": {
+                    "x": 0.3,
+                    "y": 0.1,
+                    "z": 0.4,
+                    "rx": 0.0,
+                    "ry": 0.0,
+                    "rz": 0.0,
+                },
+                "tcp_actual_valid": True,
+                "tcp_deferred": False,
+                "force_torque": {"healthy": True, "stale": False},
+                "force_control": {
+                    "enabled": True,
+                    "operating_mode": "cartesian_admittance",
+                    "compliance_frame": "tcp_origin",
+                    "compliance_frame_pose_valid": True,
+                    "compliance_frame_actual_stand": [
+                        0.3, 0.1, 0.4, 0.0, 0.0, 1.5707963267948966
+                    ],
+                    "control_wrench_compliance": [3.0, 4.0, 0.0, 0.1, -0.2, 0.3],
+                },
+            }
+        )
+        store, _, _ = self.make_safety(state)
+        handles = _add_scene_fallback(RecordingServer(scene=ShapeCheckingScene()))
+
+        update_ft_sensor_overlay(handles, store.latest(), stale=False, show=True)
+
+        self.assertTrue(handles["left_ft_sensor_frame"].visible)
+        self.assertTrue(handles["left_ft_sensor_label"].visible)
+        self.assertTrue(handles["left_ft_control_frame"].visible)
+        self.assertTrue(handles["left_ft_control_label"].visible)
+        np.testing.assert_allclose(
+            handles["left_ft_control_frame"].position, (0.3, 0.1, 0.4), atol=1e-9
+        )
+        np.testing.assert_allclose(
+            handles["left_ft_control_frame"].wxyz,
+            (math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5)),
+            atol=1e-9,
+        )
+        np.testing.assert_allclose(
+            handles["left_ft_control_frame"].wxyz,
+            handles["left_ft_sensor_frame"].wxyz,
+            atol=1e-9,
+        )
+        self.assertTrue(handles["left_ft_force"].visible)
+        np.testing.assert_allclose(
+            handles["left_ft_force"].points,
+            np.asarray([[[0.0, 0.0, 0.0], [0.006, 0.008, 0.0]]], dtype=np.float32),
+            atol=1e-7,
+        )
+        self.assertIn("FT sensor frame", handles["left_ft_sensor_label"].text)
+        self.assertIn("|F|=5.0 N", handles["left_ft_control_label"].text)
+        self.assertIn("tcp_origin", handles["left_ft_control_label"].text)
+        self.assertAlmostEqual(handles["left_ft_force"].head_length, 0.0035)
+        self.assertFalse(handles["right_ft_sensor_frame"].visible)
+        self.assertFalse(handles["right_ft_control_frame"].visible)
+
+        update_ft_sensor_overlay(handles, store.latest(), stale=True, show=True)
+        self.assertFalse(handles["left_ft_sensor_frame"].visible)
+        self.assertFalse(handles["left_ft_sensor_label"].visible)
+        self.assertFalse(handles["left_ft_control_frame"].visible)
+        self.assertFalse(handles["left_ft_control_label"].visible)
+        self.assertFalse(handles["left_ft_force"].visible)
+
+    def test_ft_control_frame_remains_visible_when_control_wrench_is_invalid(self):
+        state = sample_state()
+        state["left"].update(
+            {
+                "tcp_actual_stand": {
+                    "x": 0.3,
+                    "y": 0.1,
+                    "z": 0.4,
+                    "rx": 0.0,
+                    "ry": 0.0,
+                    "rz": 0.0,
+                },
+                "tcp_actual_valid": True,
+                "tcp_deferred": False,
+                "force_control": {
+                    "enabled": True,
+                    "operating_mode": "monitor",
+                    "compliance_frame": "tcp_origin",
+                    "compliance_frame_pose_valid": True,
+                    "compliance_frame_actual_stand": [0.3, 0.1, 0.4, 0.0, 0.0, 0.0],
+                },
+            }
+        )
+        store, _, _ = self.make_safety(state)
+        handles = _add_scene_fallback(RecordingServer(scene=ShapeCheckingScene()))
+
+        update_ft_sensor_overlay(handles, store.latest(), stale=False, show=True)
+
+        self.assertTrue(handles["left_ft_sensor_frame"].visible)
+        self.assertTrue(handles["left_ft_sensor_label"].visible)
+        self.assertTrue(handles["left_ft_control_frame"].visible)
+        self.assertFalse(handles["left_ft_force"].visible)
+        self.assertIn("control wrench invalid", handles["left_ft_control_label"].text)
+
+    def test_ft_sensor_overlay_uses_supported_line_fallback_without_arrows(self):
+        state = self.tcp_available_state()
+        state["left"].update(
+            {
+                "force_torque": {"healthy": True, "stale": False},
+                "force_control": {
+                    "enabled": True,
+                    "operating_mode": "monitor",
+                    "compliance_frame": "tcp_origin",
+                    "compliance_frame_pose_valid": True,
+                    "compliance_frame_actual_stand": [0.3, 0.1, 0.4, 0.0, 0.0, 0.0],
+                    "control_wrench_compliance": [0.0, 10.0, 0.0, 0.0, 0.0, 0.0],
+                },
+            }
+        )
+        store, _, _ = self.make_safety(state)
+        handles = _add_scene_fallback(RecordingServer(scene=LineOnlyShapeCheckingScene()))
+
+        update_ft_sensor_overlay(handles, store.latest(), stale=False, show=True)
+
+        self.assertEqual(handles["left_ft_force_mode"], "line")
+        self.assertTrue(handles["left_ft_force"].visible)
+        np.testing.assert_allclose(
+            handles["left_ft_force"].points,
+            np.asarray([[[0.0, 0.0, 0.0], [0.0, 0.02, 0.0]]], dtype=np.float32),
+            atol=1e-7,
+        )
+
+    def test_ft_sensor_overlay_fails_closed_for_hidden_or_bad_samples(self):
+        state = self.tcp_available_state()
+        state["left"].update(
+            {
+                "force_control": {
+                    "enabled": True,
+                    "operating_mode": "monitor",
+                    "compliance_frame": "tcp_origin",
+                    "compliance_frame_pose_valid": True,
+                    "compliance_frame_actual_stand": [0.3, 0.1, 0.4, 0.0, 0.0, 0.0],
+                    "control_wrench_compliance": [
+                        float("nan"), 0.0, 0.0, 0.0, 0.0, 0.0
+                    ],
+                },
+            }
+        )
+        store, _, _ = self.make_safety(state)
+        handles = _add_scene_fallback(RecordingServer(scene=ShapeCheckingScene()))
+
+        update_ft_sensor_overlay(handles, store.latest(), stale=False, show=True)
+        self.assertTrue(handles["left_ft_sensor_frame"].visible)
+        self.assertTrue(handles["left_ft_control_frame"].visible)
+        self.assertFalse(handles["left_ft_force"].visible)
+        self.assertIn("control wrench invalid", handles["left_ft_control_label"].text)
+
+        update_ft_sensor_overlay(
+            handles, store.latest(), stale=False, show=False, show_control=True
+        )
+        self.assertFalse(handles["left_ft_sensor_frame"].visible)
+        self.assertFalse(handles["left_ft_sensor_label"].visible)
+        self.assertTrue(handles["left_ft_control_frame"].visible)
+
+        update_ft_sensor_overlay(
+            handles, store.latest(), stale=False, show=True, show_control=False
+        )
+        self.assertTrue(handles["left_ft_sensor_frame"].visible)
+        self.assertFalse(handles["left_ft_control_frame"].visible)
+        self.assertFalse(handles["left_ft_control_label"].visible)
+        self.assertFalse(handles["left_ft_force"].visible)
 
     def test_scene_fallback_uses_viser_compatible_empty_geometry_arrays(self):
         scene = ShapeCheckingScene()
@@ -4084,6 +4804,88 @@ class FloorConstraintGuiTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.build_set_user_safety_floor_plane((0, 0, float("nan")), (0, 0, 1))
 
+    def test_server_floor_capabilities_follow_tracked_stack_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "stack.yaml"
+            path.write_text(
+                "safety:\n"
+                "  floor_constraint:\n"
+                "    enable: false\n"
+                "  user_floor_constraint:\n"
+                "    enable: true\n",
+                encoding="utf-8",
+            )
+            self.assertIs(
+                server_safety_constraint_config_enabled("floor_constraint", path),
+                False,
+            )
+            self.assertIs(
+                server_safety_constraint_config_enabled("user_floor_constraint", path),
+                True,
+            )
+
+            path.write_text("safety: [malformed]\n", encoding="utf-8")
+            self.assertIsNone(
+                server_safety_constraint_config_enabled("floor_constraint", path)
+            )
+            self.assertIsNone(
+                server_safety_constraint_config_enabled(
+                    "floor_constraint", Path(tmp) / "missing.yaml"
+                )
+            )
+            with self.assertRaises(ValueError):
+                server_safety_constraint_config_enabled("roi_box", path)
+
+    def test_disabled_floor_configs_never_emit_gui_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "stack.yaml"
+            path.write_text(
+                "safety:\n"
+                "  floor_constraint:\n"
+                "    enable: false\n"
+                "  user_floor_constraint:\n"
+                "    enable: false\n",
+                encoding="utf-8",
+            )
+            store = StateStore(stale_after_sec=5.0)
+            self.assertTrue(
+                store.update_from_json_bytes(
+                    json.dumps(sample_state()).encode(),
+                    received_monotonic=time.monotonic(),
+                )
+            )
+            client = RecordingClient()
+            safety = OperatorSafety(store, client)
+            with mock.patch.dict(
+                os.environ, {"RB_GUI_SERVER_CONFIG_PATH": str(path)}, clear=False
+            ):
+                # Repeated startup/user actions stay local when the server config
+                # opts both constraints out.  This is the regression for the
+                # SetUserSafetyFloorPlane rejection flood in server.log.
+                for _ in range(3):
+                    ok, message = safety.send_set_floor_enabled(True)
+                    self.assertFalse(ok)
+                    self.assertIn("no command sent", message)
+                    ok, message = safety.send_set_user_floor_plane(
+                        (0.0, 0.0, 0.0),
+                        (0.0, 0.0, 1.0),
+                        enable=True,
+                    )
+                    self.assertFalse(ok)
+                    self.assertIn("no command sent", message)
+
+                # Asking to turn an already config-disabled constraint off is a
+                # successful no-op, not another lifecycle command.
+                self.assertTrue(safety.send_set_floor_enabled(False)[0])
+                self.assertTrue(
+                    safety.send_set_user_floor_plane(
+                        (0.0, 0.0, 0.0),
+                        (0.0, 0.0, 1.0),
+                        enable=False,
+                    )[0]
+                )
+            self.assertEqual(client.sent_packets, [])
+
     def test_fit_plane_horizontal_and_tilted(self):
         from rb_servo_gui.plane_fit import fit_plane, tilt_deg
 
@@ -4484,6 +5286,8 @@ class FloorConstraintGuiTest(unittest.TestCase):
                     ("chunk_overlay_history_count", 9),
                     ("tcp_gizmo_visible", False),
                     ("tcp_trail_limit", 1250),
+                    ("roi_min_m", [-1.2, -1.6, -0.2]),
+                    ("roi_max_m", [1.2, 0.6, 1.6]),
                 ):
                     gui_app._update_gui_setting(key, value)
 
@@ -4508,12 +5312,27 @@ class FloorConstraintGuiTest(unittest.TestCase):
                 self.assertEqual(handles["chunk_overlay_history_count"], 9)
                 self.assertFalse(handles["tcp_gizmo_visible"])
                 self.assertEqual(handles["scene"]["tcp_trail_limit"], 1250)
+                self.assertEqual(handles["force_status"].value, "Force: no state")
+                self.assertTrue(handles["force_status"].disabled)
+                self.assertEqual(handles["cog_arm"].value, "right")
+                self.assertTrue(
+                    any(
+                        label == "Active arm" and options == ("left", "right")
+                        for label, options, _kwargs, _handle in server.gui.dropdowns
+                    )
+                )
 
                 checkboxes = {label: handle.value for label, _kwargs, handle in server.gui.checkboxes}
                 self.assertFalse(checkboxes["예측 chunk 궤적 표시"])
                 self.assertFalse(checkboxes["웨이포인트 자세(6DOF) 표시"])
                 self.assertNotIn("TCP 명령 궤적 표시", checkboxes)
                 self.assertFalse(checkboxes["TCP 기즈모 표시"])
+                self.assertFalse(
+                    any(
+                        "force control" in label.lower() or "force controller" in label.lower()
+                        for label in checkboxes
+                    )
+                )
 
                 sliders = {label: (kwargs, handle) for label, kwargs, handle in server.gui.sliders}
                 dot_kwargs, dot_handle = sliders["웨이포인트 dot 크기"]
@@ -4536,17 +5355,23 @@ class FloorConstraintGuiTest(unittest.TestCase):
                 self.assertEqual(trail_kwargs["max"], 3000)
                 self.assertEqual(trail_kwargs["step"], 50)
                 self.assertEqual(trail_handle.value, 1250)
+                y_min_kwargs, y_min_handle = sliders["Y min mm"]
+                z_max_kwargs, z_max_handle = sliders["Z max mm"]
+                self.assertEqual(y_min_kwargs["min"], -1600.0)
+                self.assertEqual(y_min_handle.value, -1600.0)
+                self.assertEqual(z_max_kwargs["max"], 1600.0)
+                self.assertEqual(z_max_handle.value, 1600.0)
             finally:
                 os.environ.pop("RB_GUI_SETTINGS_PATH", None)
 
-    def test_update_floor_panel_keeps_saved_enforce_preference(self):
+    def test_update_floor_panel_server_state_overrides_stale_saved_preference(self):
         from rb_servo_gui.models import StateSnapshot
 
         class FakeCheckbox:
             def __init__(self, value):
                 self.value = value
 
-        # Operator previously turned enforce OFF; server config still reports it ON.
+        # A stale historical GUI preference must not override the server config.
         toggle = FakeCheckbox(False)
         handles = {
             "floor_enforce_toggle": toggle,
@@ -4556,8 +5381,7 @@ class FloorConstraintGuiTest(unittest.TestCase):
             sample_state(floor_constraint=self._floor_block(enabled=True))
         )
         _update_floor_panel(handles, state)
-        # Saved preference wins: the checkbox is NOT overwritten from telemetry.
-        self.assertFalse(toggle.value)
+        self.assertTrue(toggle.value)
         self.assertTrue(handles.get("floor_enforce_synced"))
 
     def test_update_floor_panel_syncs_enforce_when_no_preference(self):
@@ -4900,6 +5724,13 @@ class RoiBoxGuiTest(unittest.TestCase):
         self.assertIsNotNone(without)
         self.assertIsNone(without.roi_box)
 
+    def test_initial_slider_specs_reject_invalid_saved_bounds(self):
+        specs = _roi_initial_slider_specs({
+            "roi_min_m": [-1.2, 0.5, -0.2],
+            "roi_max_m": [1.2, -0.5, 1.6],
+        })
+        self.assertEqual(specs["y"], (-1500.0, 1500.0, -1000.0, 0.0))
+
     def test_format_roi_box_status(self):
         from rb_servo_gui.models import StateSnapshot
 
@@ -5008,6 +5839,55 @@ class RoiBoxGuiTest(unittest.TestCase):
         handles["roi_x_min"].value = -250.0
         _update_roi_panel(handles, state)
         self.assertAlmostEqual(handles["roi_x_min"].value, -250.0)
+
+    def test_update_roi_panel_safely_shrinks_stale_bootstrap_range(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        class StrictSlider:
+            def __init__(self, value):
+                self._min = -2500.0
+                self._max = 2500.0
+                self._value = value
+
+            @property
+            def min(self):
+                return self._min
+
+            @min.setter
+            def min(self, value):
+                assert value <= self._value <= self._max
+                self._min = value
+
+            @property
+            def max(self):
+                return self._max
+
+            @max.setter
+            def max(self, value):
+                assert self._min <= self._value <= value
+                self._max = value
+
+            @property
+            def value(self):
+                return self._value
+
+            @value.setter
+            def value(self, value):
+                assert self._min <= value <= self._max
+                self._value = value
+
+        handles = {
+            f"roi_{axis}_{suffix}": StrictSlider(-2000.0 if suffix == "min" else 2000.0)
+            for axis in ("x", "y", "z")
+            for suffix in ("min", "max")
+        }
+        state = StateSnapshot.parse(sample_state(roi_box=self._roi_block()))
+        _update_roi_panel(handles, state)
+
+        self.assertEqual(handles["roi_y_min"].min, -1500.0)
+        self.assertEqual(handles["roi_y_min"].max, 500.0)
+        self.assertEqual(handles["roi_y_min"].value, -1000.0)
+        self.assertEqual(handles["roi_z_max"].value, 1000.0)
 
     def test_persist_roi_bounds_rewrites_min_max_and_keeps_comments(self):
         import tempfile
@@ -5907,6 +6787,253 @@ class IkInfeasibleRegionTest(unittest.TestCase):
     def test_asset_path_honors_env_override(self):
         with mock.patch.dict(os.environ, {"RB_GUI_IK_INFEASIBLE": "/tmp/custom_ik.npz"}):
             self.assertEqual(str(_ik_infeasible_path()), "/tmp/custom_ik.npz")
+
+
+class StartupInitTareTest(unittest.TestCase):
+    # The sample_state base arm already reports q_actual_deg == _INIT.
+    _INIT = (0.0, -30.0, 80.0, 0.0, 60.0, 0.0)
+
+    def _arm(self, q=None, *, auto_tare=True, tare_valid=False,
+             tare_state="awaiting_init_motion"):
+        """Override fields layered onto the sample base arm (which is at _INIT)."""
+        over = {}
+        if q is not None:
+            over["q_actual_deg"] = list(q)
+        if auto_tare is not None:
+            over["force_torque"] = {
+                "auto_tare_enabled": auto_tare,
+                "tare_valid": tare_valid,
+                "tare_state": tare_state,
+            }
+        return over
+
+    def _state(self, left, right):
+        data = sample_state()
+        data["left"].update(left)
+        data["right"].update(right)
+        return StateSnapshot.parse(data)
+
+    def test_joints_within_tol_boundary(self):
+        base = (0.0, -30.0, 80.0, 0.0, 60.0, 0.0)
+        near = (0.2, -30.2, 80.1, -0.1, 60.2, 0.05)   # every axis <= 0.3
+        far = (0.0, -30.0, 80.0, 0.0, 60.0, 0.4)       # last axis 0.4 > 0.3
+        self.assertTrue(_joints_within_tol(near, base, 0.3))
+        self.assertFalse(_joints_within_tol(far, base, 0.3))
+        self.assertFalse(_joints_within_tol(None, base, 0.3))
+        self.assertFalse(_joints_within_tol(base, None, 0.3))
+
+    def test_arm_awaiting_init_tare_flag(self):
+        state = self._state(self._arm(self._INIT), self._arm(self._INIT))
+        self.assertTrue(_arm_awaiting_init_tare(state.left))
+        tared = self._state(
+            self._arm(self._INIT, tare_valid=True, tare_state="accepted"),
+            self._arm(self._INIT),
+        )
+        self.assertFalse(_arm_awaiting_init_tare(tared.left))
+
+    def test_both_at_init_and_awaiting_returns_both(self):
+        state = self._state(self._arm(self._INIT), self._arm(self._INIT))
+        self.assertEqual(
+            _startup_init_tare_arms(state, False, self._INIT, self._INIT, 0.3), "both"
+        )
+
+    def test_only_awaiting_arm_selected_when_other_already_tared(self):
+        state = self._state(
+            self._arm(self._INIT),
+            self._arm(self._INIT, tare_valid=True, tare_state="accepted"),
+        )
+        self.assertEqual(
+            _startup_init_tare_arms(state, False, self._INIT, self._INIT, 0.3), "left"
+        )
+
+    def test_arm_off_init_pose_is_never_selected(self):
+        # SAFETY: an arm parked away from the init pose must NOT be auto-pressed,
+        # or the server would plan and MOVE it at startup.
+        off = (0.0, -30.0, 80.0, 0.0, 60.0, 5.0)  # last axis 5 deg off
+        state = self._state(self._arm(off), self._arm(off))
+        self.assertIsNone(
+            _startup_init_tare_arms(state, False, self._INIT, self._INIT, 0.3)
+        )
+        # one arm at init, the other off -> only the at-init arm
+        mixed = self._state(self._arm(self._INIT), self._arm(off))
+        self.assertEqual(
+            _startup_init_tare_arms(mixed, False, self._INIT, self._INIT, 0.3), "left"
+        )
+
+    def test_not_awaiting_or_stale_or_missing_returns_none(self):
+        settling = self._state(
+            self._arm(self._INIT, tare_state="settling"),
+            self._arm(self._INIT, tare_state="settling"),
+        )
+        self.assertIsNone(
+            _startup_init_tare_arms(settling, False, self._INIT, self._INIT, 0.3)
+        )
+        no_autotare = self._state(
+            self._arm(self._INIT, auto_tare=False),
+            self._arm(self._INIT, auto_tare=False),
+        )
+        self.assertIsNone(
+            _startup_init_tare_arms(no_autotare, False, self._INIT, self._INIT, 0.3)
+        )
+        good = self._state(self._arm(self._INIT), self._arm(self._INIT))
+        self.assertIsNone(_startup_init_tare_arms(good, True, self._INIT, self._INIT, 0.3))
+        self.assertIsNone(_startup_init_tare_arms(None, False, self._INIT, self._INIT, 0.3))
+        self.assertIsNone(_startup_init_tare_arms(good, False, None, None, 0.3))
+
+    def test_maybe_auto_tare_sends_once_and_marks_done(self):
+        state = self._state(self._arm(self._INIT), self._arm(self._INIT))
+        safety = mock.Mock(init_left_joint_deg=self._INIT, init_right_joint_deg=self._INIT)
+        handles = {"scene": {}, "last_action": mock.Mock(value="")}
+        path = self._write_server_cfg(0.75, 1.5)  # tol -> 1.4; arm at exactly init
+        with mock.patch("rb_servo_gui.app._send_arm_init_override",
+                        return_value=(True, "sent")) as send, \
+                mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": path}):
+            _maybe_auto_init_tare_on_startup(
+                handles, safety, state, False, init_motion_disabled=False
+            )
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(send.call_args.args[3], "both")
+            self.assertTrue(handles["_auto_init_tare_done"])
+            # second tick must not re-send
+            _maybe_auto_init_tare_on_startup(
+                handles, safety, state, False, init_motion_disabled=False
+            )
+            self.assertEqual(send.call_count, 1)
+
+    def test_maybe_auto_tare_waits_until_cog_session_ends(self):
+        state = self._state(self._arm(self._INIT), self._arm(self._INIT))
+        safety = mock.Mock(init_left_joint_deg=self._INIT, init_right_joint_deg=self._INIT)
+        cog = CogGuiSession(mock.Mock())
+        cog._state = "armed"
+        handles = {"scene": {}, "cog_session": cog}
+        path = self._write_server_cfg(0.75, 1.5)
+        with mock.patch("rb_servo_gui.app._send_arm_init_override") as send, \
+                mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": path}):
+            _maybe_auto_init_tare_on_startup(
+                handles, safety, state, False, init_motion_disabled=False
+            )
+        send.assert_not_called()
+        self.assertNotIn("_auto_init_tare_done", handles)
+
+    def test_maybe_auto_tare_fail_closed_without_server_config(self):
+        # NO fallback: without a readable server no-op tolerance the auto-tare must
+        # not fire (and stops re-checking), even with the arm exactly at init.
+        state = self._state(self._arm(self._INIT), self._arm(self._INIT))
+        safety = mock.Mock(init_left_joint_deg=self._INIT, init_right_joint_deg=self._INIT)
+        handles = {"scene": {}}
+        with mock.patch("rb_servo_gui.app._send_arm_init_override") as send, \
+                mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": ""}, clear=False):
+            _maybe_auto_init_tare_on_startup(
+                handles, safety, state, False, init_motion_disabled=False
+            )
+            send.assert_not_called()
+            self.assertTrue(handles["_auto_init_tare_done"])
+
+    def test_maybe_auto_tare_does_not_send_when_init_motion_disabled(self):
+        state = self._state(self._arm(self._INIT), self._arm(self._INIT))
+        safety = mock.Mock(init_left_joint_deg=self._INIT, init_right_joint_deg=self._INIT)
+        handles = {"scene": {}}
+        with mock.patch("rb_servo_gui.app._send_arm_init_override") as send:
+            _maybe_auto_init_tare_on_startup(
+                handles, safety, state, False, init_motion_disabled=True
+            )
+            send.assert_not_called()
+            self.assertNotIn("_auto_init_tare_done", handles)  # retries later
+
+    def test_maybe_auto_tare_env_disable(self):
+        state = self._state(self._arm(self._INIT), self._arm(self._INIT))
+        safety = mock.Mock(init_left_joint_deg=self._INIT, init_right_joint_deg=self._INIT)
+        handles = {"scene": {}}
+        with mock.patch("rb_servo_gui.app._send_arm_init_override") as send, \
+                mock.patch.dict(os.environ, {"RB_GUI_STARTUP_INIT_TARE": "0"}):
+            _maybe_auto_init_tare_on_startup(
+                handles, safety, state, False, init_motion_disabled=False
+            )
+            send.assert_not_called()
+            self.assertTrue(handles["_auto_init_tare_done"])
+
+    def test_maybe_auto_tare_off_init_never_sends(self):
+        off = (0.0, -30.0, 80.0, 0.0, 60.0, 5.0)
+        state = self._state(self._arm(off), self._arm(off))
+        safety = mock.Mock(init_left_joint_deg=self._INIT, init_right_joint_deg=self._INIT)
+        handles = {"scene": {}}
+        path = self._write_server_cfg(0.75, 1.5)  # valid tol; skip is due to off-init
+        with mock.patch("rb_servo_gui.app._send_arm_init_override") as send, \
+                mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": path}):
+            _maybe_auto_init_tare_on_startup(
+                handles, safety, state, False, init_motion_disabled=False
+            )
+            send.assert_not_called()
+
+    def _write_server_cfg(self, noop_tol, waypoint_tol):
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix=".yaml")
+        os.close(fd)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "safety:\n"
+                "  init_motion_planner:\n"
+                f"    noop_tol_deg: {noop_tol}\n"
+                f"    waypoint_tol_deg: {waypoint_tol}\n"
+            )
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def test_server_noop_tol_is_max_of_noop_and_waypoint(self):
+        path = self._write_server_cfg(0.75, 1.5)
+        with mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": path}):
+            self.assertAlmostEqual(_server_init_noop_tol_deg(), 1.5)
+        # unreadable / unset -> None
+        with mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": ""}, clear=False):
+            self.assertIsNone(_server_init_noop_tol_deg())
+        with mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": "/no/such.yaml"}):
+            self.assertIsNone(_server_init_noop_tol_deg())
+
+    def test_startup_tol_tracks_server_band_with_margin(self):
+        # server effective no-op band 1.5 deg -> GUI tol 1.5 - 0.1 margin = 1.4,
+        # which must cover the real ~1.3 deg parked drift seen on hardware.
+        path = self._write_server_cfg(0.75, 1.5)
+        with mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": path},
+                             clear=False):
+            os.environ.pop("RB_GUI_STARTUP_INIT_TARE_TOL_DEG", None)
+            self.assertAlmostEqual(_startup_init_tare_tol_deg(), 1.4)
+
+    def test_startup_tol_env_override_capped_at_safe_band(self):
+        path = self._write_server_cfg(0.75, 1.5)  # safe cap = 1.4
+        with mock.patch.dict(
+            os.environ,
+            {"RB_GUI_SERVER_CONFIG_PATH": path, "RB_GUI_STARTUP_INIT_TARE_TOL_DEG": "9.0"},
+        ):
+            # an over-large override is clamped to the safe cap, never above it
+            self.assertAlmostEqual(_startup_init_tare_tol_deg(), 1.4)
+        with mock.patch.dict(
+            os.environ,
+            {"RB_GUI_SERVER_CONFIG_PATH": path, "RB_GUI_STARTUP_INIT_TARE_TOL_DEG": "0.5"},
+        ):
+            self.assertAlmostEqual(_startup_init_tare_tol_deg(), 0.5)
+
+    def test_startup_tol_is_none_when_no_server_config(self):
+        # NO fallback: an unreadable server config yields None (fail-closed), not a
+        # guessed default. The caller must then not fire the auto-tare.
+        with mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": ""}, clear=False):
+            os.environ.pop("RB_GUI_STARTUP_INIT_TARE_TOL_DEG", None)
+            self.assertIsNone(_startup_init_tare_tol_deg())
+        with mock.patch.dict(os.environ, {"RB_GUI_SERVER_CONFIG_PATH": "/no/such.yaml"}):
+            os.environ.pop("RB_GUI_STARTUP_INIT_TARE_TOL_DEG", None)
+            self.assertIsNone(_startup_init_tare_tol_deg())
+
+    def test_real_parked_drift_would_fire_with_server_band(self):
+        # Reproduces the 16:35 hardware case: arm parked ~1.2-1.28 deg off the
+        # saved init pose. With the server band (1.4 GUI tol) it now qualifies.
+        init_l = (233.953, 53.924, 116.337, -68.926, -114.089, -129.767)
+        meas_l = (234.538, 54.034, 116.338, -68.533, -114.325, -128.567)
+        init_r = (-234.082, -42.955, -119.408, 72.211, 106.032, 125.144)
+        meas_r = (-234.317, -42.413, -118.465, 70.929, 105.534, 126.171)
+        state = self._state(self._arm(meas_l), self._arm(meas_r))
+        self.assertIsNone(_startup_init_tare_arms(state, False, init_l, init_r, 0.3))
+        self.assertEqual(
+            _startup_init_tare_arms(state, False, init_l, init_r, 1.4), "both"
+        )
 
 
 if __name__ == "__main__":

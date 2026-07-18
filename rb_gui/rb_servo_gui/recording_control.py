@@ -13,6 +13,7 @@ RECORD_COMMAND_SCHEMA = "robotics_lab.record_cmd.v1"
 RECORD_STATUS_SCHEMA = "robotics_lab.recording_state.v1"
 ARM_INIT_COMMAND_SCHEMA = "robotics_lab.arm_init_cmd.v1"
 ARM_INIT_STATE_SCHEMA = "robotics_lab.arm_init_state.v1"
+SPACEMOUSE_ASSIGNMENT_COMMAND_SCHEMA = "robotics_lab.spacemouse_assignment_cmd.v1"
 
 
 def parse_udp_endpoint(raw: str | None, *, default_host: str, default_port: int) -> tuple[str, int]:
@@ -40,6 +41,13 @@ class RecordingCommandResult:
 
 @dataclass(frozen=True)
 class ArmInitCommandResult:
+    ok: bool
+    message: str
+    payload: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class SpaceMouseCommandResult:
     ok: bool
     message: str
     payload: dict[str, Any] | None = None
@@ -116,6 +124,45 @@ class RecordingCommandClient:
             return ArmInitCommandResult(False, f"arm init {arms} send failed: {exc}", payload)
         self.sent_packets.append(payload)
         return ArmInitCommandResult(True, f"arm init {arms} {action} sent", payload)
+
+    def send_spacemouse_assignments(
+        self,
+        *,
+        status_generation: int,
+        left_connection_id: str | None,
+        right_connection_id: str | None,
+    ) -> SpaceMouseCommandResult:
+        left = str(left_connection_id or "").strip() or None
+        right = str(right_connection_id or "").strip() or None
+        if left is not None and left == right:
+            return SpaceMouseCommandResult(False, "duplicate SpaceMouse assignment")
+        return self._send_spacemouse(
+            {
+                "command": "set",
+                "status_generation": int(status_generation),
+                "left_connection_id": left,
+                "right_connection_id": right,
+            }
+        )
+
+    def send_spacemouse_swap(self, *, status_generation: int) -> SpaceMouseCommandResult:
+        return self._send_spacemouse(
+            {"command": "swap", "status_generation": int(status_generation)}
+        )
+
+    def _send_spacemouse(self, fields: Mapping[str, Any]) -> SpaceMouseCommandResult:
+        self.seq += 1
+        payload = {
+            "schema": SPACEMOUSE_ASSIGNMENT_COMMAND_SCHEMA,
+            "seq": self.seq,
+            **dict(fields),
+        }
+        try:
+            self._socket.sendto(json.dumps(payload, separators=(",", ":")).encode("utf-8"), self.endpoint)
+        except OSError as exc:
+            return SpaceMouseCommandResult(False, f"SpaceMouse command send failed: {exc}", payload)
+        self.sent_packets.append(payload)
+        return SpaceMouseCommandResult(True, "SpaceMouse command sent; awaiting status ack", payload)
 
     def close(self) -> None:
         self._socket.close()
@@ -204,6 +251,7 @@ class RecordingStatusStore:
         self.invalid_packets = 0
         self._latest: dict[str, Any] | None = None
         self._latest_arm_init: dict[str, Any] | None = None
+        self._latest_spacemouse: dict[str, Any] | None = None
         self._latest_packet: dict[str, Any] | None = None
         self._by_session: dict[tuple[str, str], dict[str, Any]] = {}
         self._received_monotonic = float("-inf")
@@ -214,6 +262,7 @@ class RecordingStatusStore:
         block: Mapping[str, Any],
         *,
         arm_init: Mapping[str, Any] | None = None,
+        spacemouse: Mapping[str, Any] | None = None,
         metadata: Mapping[str, Any] | None = None,
         received_monotonic: float | None = None,
     ) -> None:
@@ -225,6 +274,7 @@ class RecordingStatusStore:
         packet = {
             "recording": dict(status),
             "arm_init": None if arm_init_status is None else dict(arm_init_status),
+            "spacemouse": None if spacemouse is None else dict(spacemouse),
             **meta,
             "received_monotonic": received,
         }
@@ -232,6 +282,8 @@ class RecordingStatusStore:
             self._latest = status
             if arm_init_status is not None:
                 self._latest_arm_init = arm_init_status
+            if spacemouse is not None:
+                self._latest_spacemouse = dict(spacemouse)
             self._latest_packet = packet
             key = (meta.get("command_source_id", ""), meta.get("command_session_id", ""))
             if key[0] and key[1]:
@@ -256,6 +308,7 @@ class RecordingStatusStore:
                 self.invalid_packets += 1
             return False
         arm_init = payload.get("arm_init")
+        spacemouse = payload.get("spacemouse")
         metadata = {
             "runner_role": payload.get("runner_role"),
             "action_source": payload.get("action_source"),
@@ -268,6 +321,7 @@ class RecordingStatusStore:
         self.update(
             recording,
             arm_init=arm_init if isinstance(arm_init, Mapping) else None,
+            spacemouse=spacemouse if isinstance(spacemouse, Mapping) else None,
             metadata=metadata,
             received_monotonic=received_monotonic,
         )
@@ -280,6 +334,10 @@ class RecordingStatusStore:
     def latest_arm_init(self) -> dict[str, Any] | None:
         with self._lock:
             return None if self._latest_arm_init is None else dict(self._latest_arm_init)
+
+    def latest_spacemouse(self) -> dict[str, Any] | None:
+        with self._lock:
+            return None if self._latest_spacemouse is None else dict(self._latest_spacemouse)
 
     def latest_packet(self) -> dict[str, Any] | None:
         with self._lock:
@@ -353,6 +411,8 @@ def _copy_packet(packet: Mapping[str, Any]) -> dict[str, Any]:
         copied["recording"] = dict(copied["recording"])
     if isinstance(copied.get("arm_init"), Mapping):
         copied["arm_init"] = dict(copied["arm_init"])
+    if isinstance(copied.get("spacemouse"), Mapping):
+        copied["spacemouse"] = dict(copied["spacemouse"])
     return copied
 
 

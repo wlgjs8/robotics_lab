@@ -10,8 +10,8 @@ operator-supervised lane that has carried a dual-arm physical Cartesian circle
 `docs/runbooks/pgmode_real_transition.md`. Real-motion execution authority is
 config-driven and server-owned, and is **no longer gated on env vars**: the legacy
 `RB_ALLOW_REAL_*` execution gates were removed from the server runtime, and real
-motion is now decided solely by site-local config + the mode-independent safety
-layers (`rb_servo_server/config/local/`). The `-2001` suspect-diagnostics
+motion is now decided solely by the tracked stack config + the mode-independent
+safety layers. The `-2001` suspect-diagnostics
 acceptance is a per-arm config opt-in
 (`allow_real_motion_with_suspect_diagnostics: true`, no env).
 The policy-side `SafetyGate` real-Cartesian block was retired (PR #13); stale

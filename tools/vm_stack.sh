@@ -33,6 +33,7 @@ export VBOX_LOG_DEST="dir=$VM_LOG_DIR"
 LEFT_VM=rb-cb-left;   LEFT_GUEST=10.0.2.7
 RIGHT_VM=rb-cb-right; RIGHT_GUEST=10.0.2.8
 HOST_IF=vboxnet0;     HOST_IP=10.0.2.1/24
+HOST_IPV4=${HOST_IP%/*}; HOST_NETMASK=255.255.255.0
 REAL_LEFT=172.28.60.200
 REAL_RIGHT=172.28.60.201
 
@@ -60,6 +61,31 @@ if [ -n "${SUDO_ASKPASS:-}" ]; then SUDO="sudo -A"; fi
 
 dnat_rule() { # $1=-A|-D|-C  $2=real ip  $3=guest ip
   $SUDO iptables -t nat "$1" OUTPUT -d "$2" -j DNAT --to-destination "$3"
+}
+
+ensure_hostonly_if() {
+  # After a host reboot VBoxSVC may not have recreated configured host-only
+  # adapters yet. Querying VirtualBox starts the service and restores them.
+  if ! vboxmanage list hostonlyifs >/dev/null; then
+    echo "[vm] failed to initialize VirtualBox host-only networking" >&2
+    return 1
+  fi
+  if ! ip link show dev "$HOST_IF" >/dev/null 2>&1; then
+    echo "[vm] required VirtualBox host-only interface $HOST_IF is unavailable" >&2
+    echo "[vm] check: VBoxManage list hostonlyifs" >&2
+    return 1
+  fi
+  # Keep VirtualBox's persisted address aligned with this stack. Otherwise a
+  # later VBoxManage call can restore its default 192.168.56.1 address and
+  # discard the routes installed by map_up. The actual Linux interface remains
+  # configured through the privileged ip commands in map_up.
+  if ! vboxmanage setextradata global \
+    "HostOnly/$HOST_IF/IPAddress" "$HOST_IPV4" ||
+    ! vboxmanage setextradata global \
+      "HostOnly/$HOST_IF/IPNetMask" "$HOST_NETMASK"; then
+    echo "[vm] failed to persist the VirtualBox address for $HOST_IF" >&2
+    return 1
+  fi
 }
 
 map_up() {
@@ -111,6 +137,8 @@ wait_port() { # $1=ip
 
 case "${1:-}" in
   up)
+    echo "[vm] initializing VirtualBox host-only networking ($HOST_IF)"
+    ensure_hostonly_if
     echo "[vm] mapping $REAL_LEFT->$LEFT_GUEST, $REAL_RIGHT->$RIGHT_GUEST"
     map_up
     echo "[vm] starting VMs (headless)"

@@ -118,7 +118,8 @@ enum class ControlMode {
 
 enum class JointTargetProfile {
     Direct,
-    InitMotion
+    InitMotion,
+    PayloadIdentification
 };
 
 enum class ServerMotionState {
@@ -170,6 +171,7 @@ enum class SafetyVerdict {
     FloorViolation,
     RoiViolation,
     ChunkFollowerFault,
+    ExternalForceLimit,
     UnknownError
 };
 
@@ -250,11 +252,12 @@ struct ForceControlCommand {
     Wrench6D target_wrench;
     ForceControlAxis enabled_axis;
 
-    // Force controller output clamps. They are applied before Cartesian IK.
-    double max_pos_offset_m = 0.01;
-    double max_rot_offset_rad = 0.1;
-    double max_pos_step_m = 0.001;
-    double max_rot_step_rad = 0.01;
+    // Optional per-command clamps. Zero means "use the server hard limit";
+    // positive values may only tighten, never enlarge, the configured limits.
+    double max_pos_offset_m = 0.0;
+    double max_rot_offset_rad = 0.0;
+    double max_pos_step_m = 0.0;
+    double max_rot_step_rad = 0.0;
 };
 
 struct RobotState {
@@ -262,6 +265,9 @@ struct RobotState {
 
     uint64_t host_time_ns = 0;
     uint64_t robot_time_ns = 0;
+    // Backend-owned sequence that advances only when a fresh state frame is
+    // acquired. Cached/held states retain the sequence of their source frame.
+    uint64_t acquisition_sequence = 0;
 
     JointArray q_actual_deg{};
     JointArray q_target_deg{};
@@ -291,6 +297,14 @@ struct RobotState {
     bool tcp_deferred = true;
     double fk_duration_us = 0.0;
     Wrench6D wrench_tcp;
+    // External F/T sensor wrench decoded from the rbpodo state frame
+    // (sdata.eft_fx..eft_mz; N / Nm). Rainbow defines the component axes as the
+    // external sensor manufacturer's frame, NOT a verified TCP frame — kept
+    // separate from wrench_tcp, which is reserved for the (TCP-frame)
+    // force-control path. Zeros when no external FT sensor is selected on the
+    // controller. eft_valid = fields present in the state frame and finite.
+    Wrench6D eft_wrench;
+    bool eft_valid = false;
 
     RobotConnectionState connection_state = RobotConnectionState::Disconnected;
 
@@ -430,7 +444,16 @@ struct CartesianSolveTelemetry {
     std::optional<Pose6D> stage_tcp_target_stand;  // pose-track stage output handed to IK
     double follower_divergence_pos_m = 0.0;
     double follower_divergence_ang_rad = 0.0;
+    double follower_projection_error_m = 0.0;
+    double follower_projection_error_rad = 0.0;
+    int follower_projection_error_count = 0;
+    double follower_actual_lead_m = 0.0;
+    double follower_actual_lead_rad = 0.0;
+    int follower_actual_lead_error_count = 0;
+    bool follower_loading_projection_active = false;  // wrench-gated plan projection engaged
+    double follower_contact_shift_m = 0.0;            // accumulated projected plan shift
     uint64_t follower_reanchor_count = 0;          // explained strict-divergence reanchors
+    uint64_t follower_warm_resume_count = 0;       // brief Hold resumes preserving chained p/v/a
     bool safety_intervention_recent = false;       // debounced signal seen by follower stage
     double delta_twist_pending_linear_norm_m = 0.0;
     double delta_twist_pending_angular_norm_rad = 0.0;
@@ -464,52 +487,47 @@ struct CartesianSolveTelemetry {
     double delta_twist_ang_feedback_cos = 1.0;
     bool delta_twist_xi_ref_clamped_norm = false;
     bool delta_twist_xi_cmd_clamped_norm = false;
-    bool delta_twist_blocked = false;
-    int delta_twist_block_reason = 0;
-    double delta_twist_block_elapsed_sec = 0.0;
-    bool delta_twist_block_requires_fresh_chunk = false;
-    bool delta_twist_residual_cleared_by_block = false;
-    bool delta_twist_step_consumed_this_tick = false;
-    int surface_mode = 0;
-    bool surface_active = false;
-    bool surface_close_soon = false;
-    bool surface_hull_scaled = false;
-    double surface_min_tip_dist_m = std::numeric_limits<double>::quiet_NaN();
-    double surface_down_scale = 1.0;
-    double surface_tangent_scale = 1.0;
-    double surface_hull_alpha = 1.0;
-    Vec6 surface_raw_delta{};
-    Vec6 surface_projected_delta{};
-    Vec6 surface_discarded_delta{};
-    double surface_raw_linear_norm_m = 0.0;
-    double surface_projected_linear_norm_m = 0.0;
-    double surface_discarded_linear_norm_m = 0.0;
-    double surface_raw_angular_norm_rad = 0.0;
-    double surface_projected_angular_norm_rad = 0.0;
-    double surface_discarded_angular_norm_rad = 0.0;
-    int grasp_phase = 0;
-    bool grasp_commit_active = false;
-    bool grasp_close_soon = false;
-    bool grasp_ready = false;
-    double grasp_sync_wait_sec = 0.0;
-    double grasp_closing_hold_elapsed_sec = 0.0;
-    double grasp_lift_elapsed_sec = 0.0;
-    double grasp_lift_progress = 0.0;
-    bool grasp_gripper_override_active = false;
-    bool grasp_policy_delta_dropped = false;
-    bool grasp_resume_wait_fresh_chunk = false;
-    bool grasp_blocked = false;
-    int grasp_phase_before_block = 0;
-    std::optional<double> gripper_policy_cmd;
-    std::optional<double> gripper_effective_cmd;
-    bool gripper_close_soon = false;
-    bool gripper_closing_hold_active = false;
+    int delta_twist_frame_rows = 0;
+    int delta_twist_normal_budget = 0;
+    int delta_twist_total_budget = 0;
+    int delta_twist_steps_remaining = 0;
+    std::uint32_t delta_twist_clamp_mask = 0;
+    Vec6 delta_twist_accel_cmd{};
     // Final-stage output moving average (C). q_target before/after the boxcar.
     bool output_ma_present = false;
     int output_ma_window = 0;
     JointArray q_target_before_output_ma_deg{};
     JointArray q_target_after_output_ma_deg{};
     SafetyClampTelemetry safety_clamp;
+};
+
+// Shared producer/receiver diagnostics for the active whole-chunk frame. This
+// lives only in ServoSample/CSV; state JSON remains intentionally unchanged.
+struct ChunkFrameTelemetry {
+    std::uint64_t wire_seq = 0;
+    std::uint64_t recv_seq = 0;
+    double policy_dt_sec = 0.0;
+    int horizon = 0;
+    int execute_steps = 0;
+    int runway_steps = 0;
+    double age_ms = 0.0;
+    double interarrival_ms = 0.0;
+    std::uint64_t inference_seq = 0;
+    double inference_queue_wait_ms = 0.0;
+    double inference_latency_ms = 0.0;
+    double inference_ready_wait_ms = 0.0;
+    double inference_period_ms = 0.0;
+    double inference_period_jitter_ms = 0.0;
+    std::uint64_t inference_stall_count = 0;
+    std::uint64_t camera_bundle_seq = 0;
+    double camera_bundle_age_ms = 0.0;
+    double camera_max_skew_ms = 0.0;
+    std::uint64_t camera_left_frame_number = 0;
+    std::uint64_t camera_right_frame_number = 0;
+    double camera_left_frame_age_ms = 0.0;
+    double camera_right_frame_age_ms = 0.0;
+    double camera_left_focus_score = 0.0;
+    double camera_right_focus_score = 0.0;
 };
 
 struct SafetyTrackingTelemetry {
@@ -519,6 +537,113 @@ struct SafetyTrackingTelemetry {
     double command_reference_tracking_error_deg = 0.0;
     double physical_command_actual_error_deg = 0.0;
     bool controller_simulation_physical_motion_detected = false;
+};
+
+struct ForceTorqueTelemetry {
+    bool enabled = false;
+    std::string source = "null";
+    std::string source_assurance = "unavailable";
+    bool sensor_health_verified = false;
+    bool safety_rated = false;
+    Wrench6D raw_sensor_wrench;
+    // Effective configured transform used by the server for this sample.
+    // Convention: point_tcp = T_tcp_sensor * point_sensor.
+    Pose6D t_tcp_sensor;
+    Wrench6D wrench_tcp;
+    std::array<double, 3> gravity_tcp{};
+    std::string gravity_compensation_model = "rigid_payload";
+    std::string gravity_compensation_calibration_id;
+    Wrench6D modeled_gravity_wrench;
+    Wrench6D fast_external_wrench;
+    Wrench6D control_external_wrench;
+    bool healthy = false;
+    bool stale = false;
+    uint64_t freshness_value = 0;
+    bool freshness_advanced = false;
+    std::string reason = "disabled";
+    bool auto_tare_enabled = false;
+    bool tare_valid = false;
+    std::string tare_state = "disabled";
+    int tare_sample_count = 0;
+    uint64_t tare_generation = 0;
+    std::string tare_reason;
+    Wrench6D residual_tare_tcp;
+    bool payload_identification_inhibit = false;
+    std::string joint_target_profile = "direct";
+};
+
+// Effective, server-owned payload-identification profile published to clients.
+// This mirrors the validated config without exposing config.hpp through the
+// core telemetry types (config.hpp already depends on this header).
+struct PayloadIdentificationConfigTelemetry {
+    bool enable = false;
+    std::string observation_model;
+    std::string wrench_convention;
+    int min_poses = 0;
+    double arrival_tolerance_deg = 0.0;
+    double settle_sec = 0.0;
+    int samples_per_pose = 0;
+    double max_force_stddev_n = 0.0;
+    double max_torque_stddev_nm = 0.0;
+    double max_force_fit_rms_n = 0.0;
+    double max_torque_fit_rms_nm = 0.0;
+    double max_design_condition_number = 0.0;
+};
+
+struct ForceControlTelemetry {
+    bool enabled = false;
+    std::string operating_mode = "monitor";
+    std::string state = "inactive";
+    std::string surface_source = "floor_constraint";
+    std::string compliance_frame = "surface";
+    bool compliance_frame_pose_valid = false;
+    Pose6D compliance_frame_actual_stand;
+    std::array<double, 3> normal_stand{0.0, 0.0, 1.0};
+    bool contact_active = false;
+    bool normal_contact_active = false;
+    bool transverse_contact_active = false;
+    bool rotational_contact_active = false;
+    bool compliance_active = false;
+    bool normal_regulating = false;
+    bool transverse_regulating = false;
+    bool rotational_regulating = false;
+    bool loading_projection_active = false;
+    Wrench6D control_wrench_surface;
+    Wrench6D control_wrench_compliance;
+    Wrench6D wrench_error_surface;
+    Wrench6D wrench_error_compliance;
+    Pose6D compliance_offset_surface;
+    Vec6 compliance_velocity_surface;
+    Vec6 compliance_acceleration_surface;
+    Pose6D compliance_equilibrium_stand;
+    std::string compliance_equilibrium_source = "unavailable";
+    bool compliance_recenter_active = false;
+    bool compliance_translation_recenter_coupled = false;
+    bool compliance_rotation_recenter_coupled = false;
+    bool compliance_translation_recenter_deferred = false;
+    bool compliance_rotation_recenter_deferred = false;
+    Vec6 raw_policy_delta_surface;
+    Vec6 accepted_policy_delta_surface;
+    std::array<bool, 6> compliance_limit_axes{};
+    std::string compliance_limit_reason;
+    double measured_force_n = 0.0;
+    double fast_normal_force_n = 0.0;
+    double fast_force_norm_n = 0.0;
+    double fast_torque_norm_nm = 0.0;
+    bool contact_threshold_exceeded = false;
+    bool hard_limit_threshold_exceeded = false;
+    int hard_limit_sample_count = 0;
+    bool hard_limit_exceeded = false;
+    double target_force_n = 0.0;
+    double correction_m = 0.0;
+    double velocity_m_s = 0.0;
+    double acceleration_m_s2 = 0.0;
+    double energy_j = 0.0;
+    bool saturated = false;
+    bool proposal_valid = false;
+    bool proposal_committed = false;
+    std::string fault_reason;
+    uint64_t motion_epoch = 0;
 };
 
 struct ArmCommand {
@@ -699,6 +824,22 @@ struct ServoTarget {
     JointArray right_q_target_deg{};
 };
 
+// Timing around the vendor SDK's blocking CobotData::request_data() call.
+// System-clock stamps can be correlated with passive packet-capture timestamps;
+// steady-clock stamps remain suitable for in-process duration measurements.
+// This is deliberately distinct from BackendTiming, which covers the entire
+// readState() operation, including state mapping and fault classification.
+struct BackendReadExchangeTiming {
+    bool available = false;
+    uint64_t exchange_sequence = 0;
+    std::string source = "none";
+    uint64_t request_data_call_start_steady_ns = 0;
+    uint64_t request_data_call_start_system_ns = 0;
+    uint64_t request_data_call_return_steady_ns = 0;
+    uint64_t request_data_call_return_system_ns = 0;
+    double request_data_call_duration_us = 0.0;
+};
+
 struct BackendCallSnapshot {
     bool ok = true;
     bool accepted = true;
@@ -707,6 +848,7 @@ struct BackendCallSnapshot {
     std::string error_code;
     std::string error_message;
     double duration_us = 0.0;
+    BackendReadExchangeTiming read_exchange_timing;
     std::string state_after_source = "none";
     BackendAckPolicy ack_policy = BackendAckPolicy::BackendDefault;
     bool ack_observed = false;
@@ -913,9 +1055,17 @@ struct ServoSample {
 
     RobotState left_state;
     RobotState right_state;
+    // Persist the same per-tick F/T and force-control truth surface that is
+    // published over UDP so supervised hardware tests remain auditable after
+    // the live GUI/state consumers have exited.
+    ForceTorqueTelemetry left_force_torque;
+    ForceTorqueTelemetry right_force_torque;
+    ForceControlTelemetry left_force_control;
+    ForceControlTelemetry right_force_control;
 
     DualArmCommand command;
     CommandBufferReadTelemetry command_buffer_read;
+    ChunkFrameTelemetry chunk_frame;
 
     JointArray left_sent_q_deg{};
     JointArray right_sent_q_deg{};
@@ -989,6 +1139,45 @@ struct ServoSample {
     std::string self_collision_pair;
 };
 
+struct RealtimeTimingRange {
+    double last = 0.0;
+    double p95 = 0.0;
+    double max = 0.0;
+};
+
+struct ServoRealtimeTimingTelemetry {
+    double target_rate_hz = 0.0;
+    double observed_rate_hz = 0.0;
+    double send_rate_hz = 0.0;
+    RealtimeTimingRange period_ms;
+    RealtimeTimingRange jitter_ms;
+    RealtimeTimingRange wake_latency_us;
+    RealtimeTimingRange pre_send_us;
+    RealtimeTimingRange send_duration_us;
+    uint64_t deadline_miss_count = 0;
+    uint64_t catch_up_count = 0;
+};
+
+struct FeedbackRealtimeTimingTelemetry {
+    double frame_rate_hz = 0.0;
+    double fresh_rate_hz = 0.0;
+    uint64_t held_count = 0;
+    RealtimeTimingRange period_ms;
+    RealtimeTimingRange jitter_ms;
+    RealtimeTimingRange age_us;
+    RealtimeTimingRange phase_us;
+    bool freshness_reliable = false;
+    bool robot_time_available = false;
+    bool robot_time_monotonic = false;
+};
+
+struct RealtimeTimingTelemetry {
+    double window_sec = 0.0;
+    ServoRealtimeTimingTelemetry servo;
+    FeedbackRealtimeTimingTelemetry left_feedback;
+    FeedbackRealtimeTimingTelemetry right_feedback;
+};
+
 // One near pair from the URDF mesh self-collision monitor: the two closest
 // witness points (stand frame) on the two geometries + their signed clearance.
 // Lets a viewer draw the close-call segments over the URDF meshes (the mesh-mode
@@ -1010,6 +1199,12 @@ struct ServoSnapshot {
 
     RobotState left_state;
     RobotState right_state;
+    ForceTorqueTelemetry left_force_torque;
+    ForceTorqueTelemetry right_force_torque;
+    ForceControlTelemetry left_force_control;
+    ForceControlTelemetry right_force_control;
+    PayloadIdentificationConfigTelemetry payload_identification_config;
+    uint64_t motion_epoch = 0;
 
     DualArmCommand command;
 
@@ -1021,6 +1216,11 @@ struct ServoSnapshot {
     double period_ms = 0.0;
     double jitter_ms = 0.0;
     double filter_dt_ms = 0.0;
+
+    // Producer-side rolling cadence statistics. Absent for snapshots that did
+    // not originate from the live servo loop (for example static unit-test or
+    // compatibility snapshots).
+    std::optional<RealtimeTimingTelemetry> realtime_timing;
 
     SafetyVerdict safety_verdict = SafetyVerdict::Ok;
     ServerMotionState motion_state = ServerMotionState::Disconnected;

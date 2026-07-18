@@ -76,13 +76,6 @@ void writeDeltaTwistVecHeader(std::ostream& os, const char* side, const char* na
        << ',' << side << '_' << name << "_drz_rad";
 }
 
-void writeOptionalDoubleColumn(std::ostream& os, const std::optional<double>& value) {
-    os << ',';
-    if (value.has_value() && std::isfinite(*value)) {
-        os << *value;
-    }
-}
-
 void writeArmProfilingHeader(std::ostream& os, const char* side) {
     writePoseHeader(os, side, "command_tcp_target_stand");
     writePoseHeader(os, side, "smd_goal_stand");
@@ -129,7 +122,16 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_follower_corner"
        << ',' << side << "_follower_divergence_pos_m"
        << ',' << side << "_follower_divergence_ang_rad"
+       << ',' << side << "_follower_projection_error_m"
+       << ',' << side << "_follower_projection_error_rad"
+       << ',' << side << "_follower_projection_error_count"
+       << ',' << side << "_follower_actual_lead_m"
+       << ',' << side << "_follower_actual_lead_rad"
+       << ',' << side << "_follower_actual_lead_error_count"
+       << ',' << side << "_follower_loading_projection_active"
+       << ',' << side << "_follower_contact_shift_m"
        << ',' << side << "_follower_reanchor_count"
+       << ',' << side << "_follower_warm_resume_count"
        << ',' << side << "_safety_intervention_recent"
        << ',' << side << "_delta_twist_pending_linear_norm_m"
        << ',' << side << "_delta_twist_pending_angular_norm_rad"
@@ -163,46 +165,17 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_delta_twist_ang_feedback_cos"
        << ',' << side << "_delta_twist_xi_ref_clamped_norm"
        << ',' << side << "_delta_twist_xi_cmd_clamped_norm"
-       << ',' << side << "_delta_twist_blocked"
-       << ',' << side << "_delta_twist_block_reason"
-       << ',' << side << "_delta_twist_block_elapsed_sec"
-       << ',' << side << "_delta_twist_block_requires_fresh_chunk"
-       << ',' << side << "_delta_twist_residual_cleared_by_block"
-       << ',' << side << "_delta_twist_step_consumed_this_tick"
-       << ',' << side << "_surface_mode"
-       << ',' << side << "_surface_active"
-       << ',' << side << "_surface_close_soon"
-       << ',' << side << "_surface_hull_scaled"
-       << ',' << side << "_surface_min_tip_dist_m"
-       << ',' << side << "_surface_down_scale"
-       << ',' << side << "_surface_tangent_scale"
-       << ',' << side << "_surface_hull_alpha";
-    writeDeltaTwistVecHeader(os, side, "surface_raw");
-    writeDeltaTwistVecHeader(os, side, "surface_projected");
-    writeDeltaTwistVecHeader(os, side, "surface_discarded");
-    os << ',' << side << "_surface_raw_linear_norm_m"
-       << ',' << side << "_surface_projected_linear_norm_m"
-       << ',' << side << "_surface_discarded_linear_norm_m"
-       << ',' << side << "_surface_raw_angular_norm_rad"
-       << ',' << side << "_surface_projected_angular_norm_rad"
-       << ',' << side << "_surface_discarded_angular_norm_rad"
-       << ',' << side << "_grasp_phase"
-       << ',' << side << "_grasp_commit_active"
-       << ',' << side << "_grasp_close_soon"
-       << ',' << side << "_grasp_ready"
-       << ',' << side << "_grasp_sync_wait_sec"
-       << ',' << side << "_grasp_closing_hold_elapsed_sec"
-       << ',' << side << "_grasp_lift_elapsed_sec"
-       << ',' << side << "_grasp_lift_progress"
-       << ',' << side << "_grasp_gripper_override_active"
-       << ',' << side << "_grasp_policy_delta_dropped"
-       << ',' << side << "_grasp_resume_wait_fresh_chunk"
-       << ',' << side << "_grasp_blocked"
-       << ',' << side << "_grasp_phase_before_block"
-       << ',' << side << "_gripper_policy_cmd"
-       << ',' << side << "_gripper_effective_cmd"
-       << ',' << side << "_gripper_close_soon"
-       << ',' << side << "_gripper_closing_hold_active"
+       << ',' << side << "_delta_twist_frame_rows"
+       << ',' << side << "_delta_twist_normal_budget"
+       << ',' << side << "_delta_twist_total_budget"
+       << ',' << side << "_delta_twist_steps_remaining"
+       << ',' << side << "_delta_twist_clamp_mask"
+       << ',' << side << "_delta_twist_accel_cmd_x_m_s2"
+       << ',' << side << "_delta_twist_accel_cmd_y_m_s2"
+       << ',' << side << "_delta_twist_accel_cmd_z_m_s2"
+       << ',' << side << "_delta_twist_accel_cmd_rx_rad_s2"
+       << ',' << side << "_delta_twist_accel_cmd_ry_rad_s2"
+       << ',' << side << "_delta_twist_accel_cmd_rz_rad_s2"
        << ',' << side << "_output_ma_present"
        << ',' << side << "_output_ma_window";
     writeJointArrayHeader(os, side, "q_target_before_output_ma");
@@ -308,6 +281,116 @@ void writeInitMotionHeader(std::ostream& os) {
        << ",self_collision_pair";
 }
 
+void writeWrenchHeader(std::ostream& os, const char* side, const char* name) {
+    os << ',' << side << '_' << name << "_fx_n"
+       << ',' << side << '_' << name << "_fy_n"
+       << ',' << side << '_' << name << "_fz_n"
+       << ',' << side << '_' << name << "_tx_nm"
+       << ',' << side << '_' << name << "_ty_nm"
+       << ',' << side << '_' << name << "_tz_nm";
+}
+
+void writeForceTelemetryHeader(std::ostream& os, const char* side) {
+    os << ',' << side << "_ft_enabled"
+       << ',' << side << "_ft_source"
+       << ',' << side << "_ft_source_assurance"
+       << ',' << side << "_ft_sensor_health_verified"
+       << ',' << side << "_ft_safety_rated";
+    writeWrenchHeader(os, side, "ft_raw_sensor");
+    os << ',' << side << "_ft_t_tcp_sensor_x_m"
+       << ',' << side << "_ft_t_tcp_sensor_y_m"
+       << ',' << side << "_ft_t_tcp_sensor_z_m"
+       << ',' << side << "_ft_t_tcp_sensor_rx_rad"
+       << ',' << side << "_ft_t_tcp_sensor_ry_rad"
+       << ',' << side << "_ft_t_tcp_sensor_rz_rad";
+    writeWrenchHeader(os, side, "ft_wrench_tcp");
+    os << ',' << side << "_ft_gravity_tcp_x_m_s2"
+       << ',' << side << "_ft_gravity_tcp_y_m_s2"
+       << ',' << side << "_ft_gravity_tcp_z_m_s2";
+    os << ',' << side << "_ft_gravity_compensation_model"
+       << ',' << side << "_ft_gravity_compensation_calibration_id";
+    writeWrenchHeader(os, side, "ft_modeled_gravity_wrench");
+    writeWrenchHeader(os, side, "ft_fast_external");
+    writeWrenchHeader(os, side, "ft_control_external");
+    os << ',' << side << "_ft_healthy"
+       << ',' << side << "_ft_stale"
+       << ',' << side << "_ft_freshness_value"
+       << ',' << side << "_ft_freshness_advanced"
+       << ',' << side << "_ft_reason"
+       << ',' << side << "_ft_auto_tare_enabled"
+       << ',' << side << "_ft_tare_valid"
+       << ',' << side << "_ft_tare_state"
+       << ',' << side << "_ft_tare_sample_count"
+       << ',' << side << "_ft_tare_generation"
+       << ',' << side << "_ft_tare_reason"
+       << ',' << side << "_ft_payload_identification_inhibit"
+       << ',' << side << "_ft_joint_target_profile";
+    writeWrenchHeader(os, side, "ft_residual_tare_tcp");
+    os
+       << ',' << side << "_force_control_enabled"
+       << ',' << side << "_force_control_operating_mode"
+       << ',' << side << "_force_control_state"
+       << ',' << side << "_force_control_surface_source"
+       << ',' << side << "_force_control_compliance_frame"
+       << ',' << side << "_force_control_compliance_frame_pose_valid";
+    writePoseHeader(os, side, "force_control_compliance_frame_actual_stand");
+    os
+       << ',' << side << "_force_control_normal_stand_x"
+       << ',' << side << "_force_control_normal_stand_y"
+       << ',' << side << "_force_control_normal_stand_z"
+       << ',' << side << "_force_control_contact_active"
+       << ',' << side << "_force_control_normal_contact_active"
+       << ',' << side << "_force_control_transverse_contact_active"
+       << ',' << side << "_force_control_rotational_contact_active"
+       << ',' << side << "_force_control_compliance_active"
+       << ',' << side << "_force_control_normal_regulating"
+       << ',' << side << "_force_control_transverse_regulating"
+       << ',' << side << "_force_control_rotational_regulating"
+       << ',' << side << "_force_control_loading_projection_active";
+    writeWrenchHeader(os, side, "force_control_control_wrench_surface");
+    writeWrenchHeader(os, side, "force_control_control_wrench_compliance");
+    writeWrenchHeader(os, side, "force_control_wrench_error_surface");
+    writeWrenchHeader(os, side, "force_control_wrench_error_compliance");
+    writeDeltaTwistVecHeader(os, side, "force_control_compliance_offset_surface");
+    writeDeltaTwistVecHeader(os, side, "force_control_compliance_velocity_surface");
+    writeDeltaTwistVecHeader(os, side, "force_control_compliance_acceleration_surface");
+    writeDeltaTwistVecHeader(os, side, "force_control_raw_policy_delta_surface");
+    writeDeltaTwistVecHeader(os, side, "force_control_accepted_policy_delta_surface");
+    writePoseHeader(os, side, "force_control_compliance_equilibrium_stand");
+    os
+       << ',' << side << "_force_control_compliance_equilibrium_source"
+       << ',' << side << "_force_control_compliance_recenter_active"
+       << ',' << side << "_force_control_compliance_translation_recenter_coupled"
+       << ',' << side << "_force_control_compliance_rotation_recenter_coupled"
+       << ',' << side << "_force_control_compliance_translation_recenter_deferred"
+       << ',' << side << "_force_control_compliance_rotation_recenter_deferred"
+       << ',' << side << "_force_control_limit_axis_x"
+       << ',' << side << "_force_control_limit_axis_y"
+       << ',' << side << "_force_control_limit_axis_z"
+       << ',' << side << "_force_control_limit_axis_roll"
+       << ',' << side << "_force_control_limit_axis_pitch"
+       << ',' << side << "_force_control_limit_axis_yaw"
+       << ',' << side << "_force_control_limit_reason"
+       << ',' << side << "_force_control_measured_normal_force_n"
+       << ',' << side << "_force_control_fast_normal_force_n"
+       << ',' << side << "_force_control_fast_force_norm_n"
+       << ',' << side << "_force_control_fast_torque_norm_nm"
+       << ',' << side << "_force_control_contact_threshold_exceeded"
+       << ',' << side << "_force_control_hard_limit_threshold_exceeded"
+       << ',' << side << "_force_control_hard_limit_sample_count"
+       << ',' << side << "_force_control_hard_limit_exceeded"
+       << ',' << side << "_force_control_target_force_n"
+       << ',' << side << "_force_control_correction_m"
+       << ',' << side << "_force_control_velocity_m_s"
+       << ',' << side << "_force_control_acceleration_m_s2"
+       << ',' << side << "_force_control_energy_j"
+       << ',' << side << "_force_control_saturated"
+       << ',' << side << "_force_control_proposal_valid"
+       << ',' << side << "_force_control_proposal_committed"
+       << ',' << side << "_force_control_fault_reason"
+       << ',' << side << "_force_control_motion_epoch";
+}
+
 }  // namespace
 
 ServoLogger::ServoLogger(const LoggingConfig& config) : config_(config) {}
@@ -319,6 +402,16 @@ ServoLogger::~ServoLogger() {
 bool ServoLogger::start() {
     if (!config_.enable) return true;
     if (running_) return true;
+
+    // Preallocate the ring once, off the RT path, so push() never allocates.
+    // queue_capacity == 0 leaves the ring empty and push drops every sample
+    // (preserves the prior capacity==0 behavior). Sized to queue_capacity, it
+    // holds ~queue_capacity/rate seconds of backlog before evicting oldest.
+    ring_.assign(config_.queue_capacity, ServoSample{});
+    head_ = 0;
+    size_ = 0;
+    drain_buffer_.clear();
+    drain_buffer_.reserve(config_.queue_capacity);
 
     std::filesystem::create_directories(config_.directory);
     // One file per run: servo_log_<YYYYMMDD_HHMMSS>.csv (no longer truncated/
@@ -365,16 +458,28 @@ void ServoLogger::stop() {
 void ServoLogger::push(const ServoSample& sample) {
     if (!config_.enable || !running_) return;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (config_.queue_capacity == 0) {
+        // try_to_lock, never block: if the consumer holds the mutex (it can be
+        // preempted while draining on a loaded non-RT core), a plain lock would
+        // priority-invert the FIFO-80 servo loop for milliseconds. Dropping a
+        // log row (counted below, surfaced as logger_dropped_samples) is the
+        // correct RT trade — the servo tick must not stall to log itself.
+        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+        if (!lock.owns_lock()) {
             dropped_samples_.fetch_add(1, std::memory_order_relaxed);
             return;
         }
-        if (queue_.size() >= config_.queue_capacity) {
-            queue_.pop_front();
+        if (ring_.empty()) {  // queue_capacity == 0: logging disabled at the queue
+            dropped_samples_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (size_ >= ring_.size()) {  // full: evict oldest, no allocation
+            head_ = (head_ + 1) % ring_.size();
+            --size_;
             dropped_samples_.fetch_add(1, std::memory_order_relaxed);
         }
-        queue_.push_back(sample);
+        const size_t write_index = (head_ + size_) % ring_.size();
+        ring_[write_index] = sample;  // fixed-slot copy; deque node growth is gone
+        ++size_;
     }
     cv_.notify_one();
 }
@@ -383,18 +488,30 @@ uint64_t ServoLogger::droppedSamples() const {
     return dropped_samples_.load(std::memory_order_relaxed);
 }
 
+void ServoLogger::drainInto(std::vector<ServoSample>& out) {
+    out.clear();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (ring_.empty() || size_ == 0) return;
+    for (size_t i = 0; i < size_; ++i) {
+        out.push_back(ring_[(head_ + i) % ring_.size()]);
+    }
+    head_ = 0;
+    size_ = 0;
+}
+
 void ServoLogger::threadMain() {
     while (running_) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait_for(lock, std::chrono::milliseconds(config_.flush_period_ms), [&] {
-            return !queue_.empty() || !running_;
-        });
-        while (!queue_.empty()) {
-            ServoSample sample = queue_.front();
-            queue_.pop_front();
-            lock.unlock();
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait_for(lock, std::chrono::milliseconds(config_.flush_period_ms), [&] {
+                return size_ > 0 || !running_;
+            });
+        }
+        // Copy the pending batch out under the lock, then write it with the lock
+        // released so the RT producer's try_lock in push() rarely contends.
+        drainInto(drain_buffer_);
+        for (const ServoSample& sample : drain_buffer_) {
             writeSample(sample);
-            lock.lock();
         }
         if (file_) file_.flush();
     }
@@ -407,6 +524,9 @@ void ServoLogger::writeHeader() {
     file_ << ",command_buffer_latest_seq,command_buffer_latest_left_mode,command_buffer_latest_right_mode,command_buffer_latest_host_time_ns,command_buffer_latest_age_ms,command_buffer_latest_timeout_ms,command_buffer_latest_timeout_valid,command_buffer_latest_usable,command_buffer_latest_client_send_age_ms";
     file_ << ",command_buffer_lifecycle_seq,command_buffer_lifecycle_left_mode,command_buffer_lifecycle_right_mode,command_buffer_lifecycle_host_time_ns,command_buffer_lifecycle_age_ms,command_buffer_lifecycle_timeout_ms,command_buffer_lifecycle_timeout_valid,command_buffer_lifecycle_usable";
     file_ << ",command_buffer_external_boxes_pending,command_buffer_external_boxes_consumed,command_buffer_external_boxes_applied,command_buffer_external_boxes_seq,command_buffer_external_boxes_left_mode,command_buffer_external_boxes_right_mode,command_buffer_external_boxes_host_time_ns,command_buffer_external_boxes_age_ms,command_buffer_external_boxes_client_send_age_ms";
+    file_ << ",chunk_frame_wire_seq,chunk_frame_recv_seq,chunk_frame_policy_dt_sec,chunk_frame_horizon,chunk_frame_execute_steps,chunk_frame_runway_steps,chunk_frame_age_ms,chunk_frame_interarrival_ms";
+    file_ << ",chunk_inference_seq,chunk_inference_queue_wait_ms,chunk_inference_latency_ms,chunk_inference_ready_wait_ms,chunk_inference_period_ms,chunk_inference_period_jitter_ms,chunk_inference_stall_count";
+    file_ << ",chunk_camera_bundle_seq,chunk_camera_bundle_age_ms,chunk_camera_max_skew_ms,chunk_camera_left_frame_number,chunk_camera_right_frame_number,chunk_camera_left_frame_age_ms,chunk_camera_right_frame_age_ms,chunk_camera_left_focus_score,chunk_camera_right_focus_score";
     file_ << ",left_send_ok,right_send_ok";
     file_ << ",fault_context_verdict,fault_context_domain,fault_context_arm,fault_context_backend_op,fault_context_backend_error_kind,fault_context_backend_error_name,fault_context_backend_error_code,fault_context_retryable,fault_context_recoverable,fault_context_robot_fault,fault_context_transport_fault,fault_context_state_after_source,fault_context_reason";
     file_ << ",left_send_start_ns,left_send_end_ns,right_send_start_ns,right_send_end_ns,send_skew_us,left_send_duration_us,right_send_duration_us";
@@ -414,6 +534,8 @@ void ServoLogger::writeHeader() {
     file_ << ",left_state_age_us,right_state_age_us,left_send_result_age_us,right_send_result_age_us";
     file_ << ",left_send_within_period,right_send_within_period,left_send_period_overrun,right_send_period_overrun,left_send_command_deadline_missed,right_send_command_deadline_missed";
     file_ << ",left_send_deadline_hit,right_send_deadline_hit,dispatch_skew_us,left_worker_loop_read_duration_us,right_worker_loop_read_duration_us";
+    file_ << ",left_reqdata_timing_available,left_reqdata_exchange_sequence,left_reqdata_timing_source,left_reqdata_call_start_steady_ns,left_reqdata_call_start_system_ns,left_reqdata_call_return_steady_ns,left_reqdata_call_return_system_ns,left_reqdata_call_duration_us";
+    file_ << ",right_reqdata_timing_available,right_reqdata_exchange_sequence,right_reqdata_timing_source,right_reqdata_call_start_steady_ns,right_reqdata_call_start_system_ns,right_reqdata_call_return_steady_ns,right_reqdata_call_return_system_ns,right_reqdata_call_duration_us";
     for (int i = 0; i < kDof; ++i) file_ << ",left_q_actual_" << i;
     for (int i = 0; i < kDof; ++i) file_ << ",right_q_actual_" << i;
     for (int i = 0; i < kDof; ++i) file_ << ",left_q_sent_" << i;
@@ -429,6 +551,8 @@ void ServoLogger::writeHeader() {
     file_ << ",sched_wake_time_ns,prev_sleep_enter_time_ns"
              ",wake_latency_us,sleep_entry_margin_us"
              ",left_pre_send_us,right_pre_send_us";
+    writeForceTelemetryHeader(file_, "left");
+    writeForceTelemetryHeader(file_, "right");
     file_ << '\n';
 }
 
@@ -470,6 +594,135 @@ std::string csvEscape(const std::string& value) {
     }
     out += '"';
     return out;
+}
+
+void writeWrenchColumns(std::ostream& os, const Wrench6D& wrench) {
+    os << ',' << wrench.fx
+       << ',' << wrench.fy
+       << ',' << wrench.fz
+       << ',' << wrench.tx
+       << ',' << wrench.ty
+       << ',' << wrench.tz;
+}
+
+void writeDeltaTwistVecColumns(std::ostream& os, const Vec6& value);
+void writePoseColumns(std::ostream& os, const std::optional<Pose6D>& pose);
+
+void writeForceTelemetryColumns(
+    std::ostream& os,
+    const ForceTorqueTelemetry& ft,
+    const ForceControlTelemetry& control
+) {
+    os << ',' << ft.enabled
+       << ',' << csvEscape(ft.source)
+       << ',' << csvEscape(ft.source_assurance)
+       << ',' << ft.sensor_health_verified
+       << ',' << ft.safety_rated;
+    writeWrenchColumns(os, ft.raw_sensor_wrench);
+    os << ',' << ft.t_tcp_sensor.x
+       << ',' << ft.t_tcp_sensor.y
+       << ',' << ft.t_tcp_sensor.z
+       << ',' << ft.t_tcp_sensor.rx
+       << ',' << ft.t_tcp_sensor.ry
+       << ',' << ft.t_tcp_sensor.rz;
+    writeWrenchColumns(os, ft.wrench_tcp);
+    os << ',' << ft.gravity_tcp[0]
+       << ',' << ft.gravity_tcp[1]
+       << ',' << ft.gravity_tcp[2];
+    os << ',' << csvEscape(ft.gravity_compensation_model)
+       << ',' << csvEscape(ft.gravity_compensation_calibration_id);
+    writeWrenchColumns(os, ft.modeled_gravity_wrench);
+    writeWrenchColumns(os, ft.fast_external_wrench);
+    writeWrenchColumns(os, ft.control_external_wrench);
+    os << ',' << ft.healthy
+       << ',' << ft.stale
+       << ',' << ft.freshness_value
+       << ',' << ft.freshness_advanced
+       << ',' << csvEscape(ft.reason)
+       << ',' << ft.auto_tare_enabled
+       << ',' << ft.tare_valid
+       << ',' << csvEscape(ft.tare_state)
+       << ',' << ft.tare_sample_count
+       << ',' << ft.tare_generation
+       << ',' << csvEscape(ft.tare_reason)
+       << ',' << ft.payload_identification_inhibit
+       << ',' << csvEscape(ft.joint_target_profile);
+    writeWrenchColumns(os, ft.residual_tare_tcp);
+    os
+       << ',' << control.enabled
+       << ',' << csvEscape(control.operating_mode)
+       << ',' << csvEscape(control.state)
+       << ',' << csvEscape(control.surface_source)
+       << ',' << csvEscape(control.compliance_frame)
+       << ',' << control.compliance_frame_pose_valid;
+    writePoseColumns(
+        os,
+        control.compliance_frame_pose_valid
+            ? std::optional<Pose6D>{control.compliance_frame_actual_stand}
+            : std::nullopt
+    );
+    os
+       << ',' << control.normal_stand[0]
+       << ',' << control.normal_stand[1]
+       << ',' << control.normal_stand[2]
+       << ',' << control.contact_active
+       << ',' << control.normal_contact_active
+       << ',' << control.transverse_contact_active
+       << ',' << control.rotational_contact_active
+       << ',' << control.compliance_active
+       << ',' << control.normal_regulating
+       << ',' << control.transverse_regulating
+       << ',' << control.rotational_regulating
+       << ',' << control.loading_projection_active;
+    writeWrenchColumns(os, control.control_wrench_surface);
+    writeWrenchColumns(os, control.control_wrench_compliance);
+    writeWrenchColumns(os, control.wrench_error_surface);
+    writeWrenchColumns(os, control.wrench_error_compliance);
+    writeDeltaTwistVecColumns(os, {
+        control.compliance_offset_surface.x,
+        control.compliance_offset_surface.y,
+        control.compliance_offset_surface.z,
+        control.compliance_offset_surface.rx,
+        control.compliance_offset_surface.ry,
+        control.compliance_offset_surface.rz,
+    });
+    writeDeltaTwistVecColumns(os, control.compliance_velocity_surface);
+    writeDeltaTwistVecColumns(os, control.compliance_acceleration_surface);
+    writeDeltaTwistVecColumns(os, control.raw_policy_delta_surface);
+    writeDeltaTwistVecColumns(os, control.accepted_policy_delta_surface);
+    writePoseColumns(os, std::optional<Pose6D>{control.compliance_equilibrium_stand});
+    os
+       << ',' << csvEscape(control.compliance_equilibrium_source)
+       << ',' << control.compliance_recenter_active
+       << ',' << control.compliance_translation_recenter_coupled
+       << ',' << control.compliance_rotation_recenter_coupled
+       << ',' << control.compliance_translation_recenter_deferred
+       << ',' << control.compliance_rotation_recenter_deferred
+       << ',' << control.compliance_limit_axes[0]
+       << ',' << control.compliance_limit_axes[1]
+       << ',' << control.compliance_limit_axes[2]
+       << ',' << control.compliance_limit_axes[3]
+       << ',' << control.compliance_limit_axes[4]
+       << ',' << control.compliance_limit_axes[5]
+       << ',' << csvEscape(control.compliance_limit_reason)
+       << ',' << control.measured_force_n
+       << ',' << control.fast_normal_force_n
+       << ',' << control.fast_force_norm_n
+       << ',' << control.fast_torque_norm_nm
+       << ',' << control.contact_threshold_exceeded
+       << ',' << control.hard_limit_threshold_exceeded
+       << ',' << control.hard_limit_sample_count
+       << ',' << control.hard_limit_exceeded
+       << ',' << control.target_force_n
+       << ',' << control.correction_m
+       << ',' << control.velocity_m_s
+       << ',' << control.acceleration_m_s2
+       << ',' << control.energy_j
+       << ',' << control.saturated
+       << ',' << control.proposal_valid
+       << ',' << control.proposal_committed
+       << ',' << csvEscape(control.fault_reason)
+       << ',' << control.motion_epoch;
 }
 
 // Per-arm Cartesian IK/solve diagnostics row values. Field order MUST match
@@ -599,7 +852,16 @@ void writeArmProfilingColumns(
        << ',' << telemetry.follower_corner
        << ',' << telemetry.follower_divergence_pos_m
        << ',' << telemetry.follower_divergence_ang_rad
+       << ',' << telemetry.follower_projection_error_m
+       << ',' << telemetry.follower_projection_error_rad
+       << ',' << telemetry.follower_projection_error_count
+       << ',' << telemetry.follower_actual_lead_m
+       << ',' << telemetry.follower_actual_lead_rad
+       << ',' << telemetry.follower_actual_lead_error_count
+       << ',' << telemetry.follower_loading_projection_active
+       << ',' << telemetry.follower_contact_shift_m
        << ',' << telemetry.follower_reanchor_count
+       << ',' << telemetry.follower_warm_resume_count
        << ',' << telemetry.safety_intervention_recent
        << ',' << telemetry.delta_twist_pending_linear_norm_m
        << ',' << telemetry.delta_twist_pending_angular_norm_rad
@@ -633,46 +895,17 @@ void writeArmProfilingColumns(
        << ',' << telemetry.delta_twist_ang_feedback_cos
        << ',' << telemetry.delta_twist_xi_ref_clamped_norm
        << ',' << telemetry.delta_twist_xi_cmd_clamped_norm
-       << ',' << telemetry.delta_twist_blocked
-       << ',' << telemetry.delta_twist_block_reason
-       << ',' << telemetry.delta_twist_block_elapsed_sec
-       << ',' << telemetry.delta_twist_block_requires_fresh_chunk
-       << ',' << telemetry.delta_twist_residual_cleared_by_block
-       << ',' << telemetry.delta_twist_step_consumed_this_tick
-       << ',' << telemetry.surface_mode
-       << ',' << telemetry.surface_active
-       << ',' << telemetry.surface_close_soon
-       << ',' << telemetry.surface_hull_scaled
-       << ',' << telemetry.surface_min_tip_dist_m
-       << ',' << telemetry.surface_down_scale
-       << ',' << telemetry.surface_tangent_scale
-       << ',' << telemetry.surface_hull_alpha;
-    writeDeltaTwistVecColumns(os, telemetry.surface_raw_delta);
-    writeDeltaTwistVecColumns(os, telemetry.surface_projected_delta);
-    writeDeltaTwistVecColumns(os, telemetry.surface_discarded_delta);
-    os << ',' << telemetry.surface_raw_linear_norm_m
-       << ',' << telemetry.surface_projected_linear_norm_m
-       << ',' << telemetry.surface_discarded_linear_norm_m
-       << ',' << telemetry.surface_raw_angular_norm_rad
-       << ',' << telemetry.surface_projected_angular_norm_rad
-       << ',' << telemetry.surface_discarded_angular_norm_rad
-       << ',' << telemetry.grasp_phase
-       << ',' << telemetry.grasp_commit_active
-       << ',' << telemetry.grasp_close_soon
-       << ',' << telemetry.grasp_ready
-       << ',' << telemetry.grasp_sync_wait_sec
-       << ',' << telemetry.grasp_closing_hold_elapsed_sec
-       << ',' << telemetry.grasp_lift_elapsed_sec
-       << ',' << telemetry.grasp_lift_progress
-       << ',' << telemetry.grasp_gripper_override_active
-       << ',' << telemetry.grasp_policy_delta_dropped
-       << ',' << telemetry.grasp_resume_wait_fresh_chunk
-       << ',' << telemetry.grasp_blocked
-       << ',' << telemetry.grasp_phase_before_block;
-    writeOptionalDoubleColumn(os, telemetry.gripper_policy_cmd);
-    writeOptionalDoubleColumn(os, telemetry.gripper_effective_cmd);
-    os << ',' << telemetry.gripper_close_soon
-       << ',' << telemetry.gripper_closing_hold_active
+       << ',' << telemetry.delta_twist_frame_rows
+       << ',' << telemetry.delta_twist_normal_budget
+       << ',' << telemetry.delta_twist_total_budget
+       << ',' << telemetry.delta_twist_steps_remaining
+       << ',' << telemetry.delta_twist_clamp_mask
+       << ',' << telemetry.delta_twist_accel_cmd.x
+       << ',' << telemetry.delta_twist_accel_cmd.y
+       << ',' << telemetry.delta_twist_accel_cmd.z
+       << ',' << telemetry.delta_twist_accel_cmd.rx
+       << ',' << telemetry.delta_twist_accel_cmd.ry
+       << ',' << telemetry.delta_twist_accel_cmd.rz
        << ',' << telemetry.output_ma_present
        << ',' << telemetry.output_ma_window;
     if (telemetry.output_ma_present) {
@@ -909,6 +1142,30 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << sample.command_buffer_read.external_boxes_host_time_ns << ','
           << sample.command_buffer_read.external_boxes_age_ms << ','
           << sample.command_buffer_read.external_boxes_client_send_age_ms << ','
+          << sample.chunk_frame.wire_seq << ','
+          << sample.chunk_frame.recv_seq << ','
+          << sample.chunk_frame.policy_dt_sec << ','
+          << sample.chunk_frame.horizon << ','
+          << sample.chunk_frame.execute_steps << ','
+          << sample.chunk_frame.runway_steps << ','
+          << sample.chunk_frame.age_ms << ','
+          << sample.chunk_frame.interarrival_ms << ','
+          << sample.chunk_frame.inference_seq << ','
+          << sample.chunk_frame.inference_queue_wait_ms << ','
+          << sample.chunk_frame.inference_latency_ms << ','
+          << sample.chunk_frame.inference_ready_wait_ms << ','
+          << sample.chunk_frame.inference_period_ms << ','
+          << sample.chunk_frame.inference_period_jitter_ms << ','
+          << sample.chunk_frame.inference_stall_count << ','
+          << sample.chunk_frame.camera_bundle_seq << ','
+          << sample.chunk_frame.camera_bundle_age_ms << ','
+          << sample.chunk_frame.camera_max_skew_ms << ','
+          << sample.chunk_frame.camera_left_frame_number << ','
+          << sample.chunk_frame.camera_right_frame_number << ','
+          << sample.chunk_frame.camera_left_frame_age_ms << ','
+          << sample.chunk_frame.camera_right_frame_age_ms << ','
+          << sample.chunk_frame.camera_left_focus_score << ','
+          << sample.chunk_frame.camera_right_focus_score << ','
           << sample.left_send_ok << ','
           << sample.right_send_ok << ',';
     if (sample.latched_fault_context.has_value()) {
@@ -962,7 +1219,23 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << sendWithinPeriod(sample, sample.right_send_end_ns) << ','
           << sample.send_skew_us << ','
           << sample.left_last_read.duration_us << ','
-          << sample.right_last_read.duration_us;
+          << sample.right_last_read.duration_us << ','
+          << sample.left_last_read.read_exchange_timing.available << ','
+          << sample.left_last_read.read_exchange_timing.exchange_sequence << ','
+          << csvEscape(sample.left_last_read.read_exchange_timing.source) << ','
+          << sample.left_last_read.read_exchange_timing.request_data_call_start_steady_ns << ','
+          << sample.left_last_read.read_exchange_timing.request_data_call_start_system_ns << ','
+          << sample.left_last_read.read_exchange_timing.request_data_call_return_steady_ns << ','
+          << sample.left_last_read.read_exchange_timing.request_data_call_return_system_ns << ','
+          << sample.left_last_read.read_exchange_timing.request_data_call_duration_us << ','
+          << sample.right_last_read.read_exchange_timing.available << ','
+          << sample.right_last_read.read_exchange_timing.exchange_sequence << ','
+          << csvEscape(sample.right_last_read.read_exchange_timing.source) << ','
+          << sample.right_last_read.read_exchange_timing.request_data_call_start_steady_ns << ','
+          << sample.right_last_read.read_exchange_timing.request_data_call_start_system_ns << ','
+          << sample.right_last_read.read_exchange_timing.request_data_call_return_steady_ns << ','
+          << sample.right_last_read.read_exchange_timing.request_data_call_return_system_ns << ','
+          << sample.right_last_read.read_exchange_timing.request_data_call_duration_us;
     for (double v : sample.left_state.q_actual_deg) file_ << ',' << v;
     for (double v : sample.right_state.q_actual_deg) file_ << ',' << v;
     for (double v : sample.left_sent_q_deg) file_ << ',' << v;
@@ -1010,6 +1283,8 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << ',' << sleep_entry_margin_us
           << ',' << left_pre_send_us
           << ',' << right_pre_send_us;
+    writeForceTelemetryColumns(file_, sample.left_force_torque, sample.left_force_control);
+    writeForceTelemetryColumns(file_, sample.right_force_torque, sample.right_force_control);
     file_ << '\n';
 }
 

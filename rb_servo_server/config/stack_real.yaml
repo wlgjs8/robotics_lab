@@ -50,6 +50,13 @@ servo:
   enable_realtime_priority: true
   realtime_priority: 80
   cpu_core: 3
+  # Hybrid sleep-then-spin tail (us). 0 = plain sleep_until (default). Set e.g.
+  # 50 to busy-spin the last 50us of each 2ms tick and remove C-state/scheduler
+  # wake jitter on the dedicated isolated cpu_core. REQUIRES RT throttling off
+  # (`sudo sysctl kernel.sched_rt_runtime_us=-1`); otherwise the server logs a
+  # warning and falls back to sleep_until (a busy RT spin would be throttled
+  # ~50ms/s). Must be < the tick period.
+  spin_slack_us: 0
   filter_dt_min_ratio: 0.5
   # Final-stage joint MA: 40 ticks @500Hz = 80ms boxcar (~40ms delay).
   output_moving_average_window: 1
@@ -158,7 +165,12 @@ safety:
     arrival_decel_deg_s2: 40.0     # 작을수록 더 완만/긴 감속; cap=√(2·a·d) deg/s
     arrival_min_speed_deg_s: 3.0   # tail이 waypoint_tol로 빨리 안착하도록 최저속도 floor
   floor_constraint:
-    enable: true
+    # 2026-07-12 force-control Gate 1: explicitly disabled by operator decision
+    # so the 60 mm geometric velocity damper cannot alter bolt-pick approach
+    # proprioception. This removes the TCP/gripper-tip floor backstop for every
+    # motion primitive; ROI, self-collision, tracking, lease/deadman, and E-stop
+    # remain, but wrist F/T cannot detect every upstream-link/stand collision.
+    enable: false
     z_min_m: 0.0000
     runtime_min_z_m: -0.2
     runtime_max_z_m: 0.5
@@ -192,7 +204,10 @@ safety:
   # bounds는 sim에서 검증한 값 재사용, 강제(monitor_only=false)는 real floor와 동일.
   roi_box:
     enable: true
-    min_m: [-0.450, -0.900, 0.000]
+    # 2026-07-09 (ft branch): z 하한만 0.000 → -0.200 (runtime_min과 동일). 바닥면이
+    # 스탠드 플로어와 같은 높이(z=0)라 플로어를 꺼도 테이블 접근 감속이 남던 것을
+    # 제거 — 바닥 backstop은 FT 센서로 대체, x/y/상단 작업공간 제한은 유지.
+    min_m: [-0.450, -0.900, -0.200]
     max_m: [0.450, -0.150, 0.800]
     runtime_min_m: [-1.2, -1.6, -0.2]
     runtime_max_m: [1.2, 0.6, 1.6]
@@ -221,7 +236,9 @@ safety:
   # 있다. 팁이 바닥 닿을 때의 TCP 원점 자취 = 평면 → "TCP 원점이 평면 위" = "팁이
   # 실제 바닥 위". 팁 자체의 수평 backstop은 stand floor가 계속 담당.
   user_floor_constraint:
-    enable: true
+    # 2026-07-09 (ft branch): DISABLED — floor_constraint와 같은 이유(모델 관측
+    # velocity 훼손 방지, FT 센서로 대체). viser Fit & Apply Send는 거부된다.
+    enable: false
     max_tilt_deg: 35.0
     runtime_min_point_z_m: -0.2
     runtime_max_point_z_m: 0.5
@@ -313,7 +330,10 @@ safety:
       #   - { name: work_table, shape: box, parent_frame: stand,
       #       size_m: [1.2, 0.8, 0.04], xyz_m: [0.0, -0.2, 0.0], rpy: [0,0,0] }
       external_boxes:
-        enable: true
+        # 2026-07-09 (ft branch): DISABLED — 박스 keep-out barrier 감속이 모델 관측
+        # velocity를 훼손함(FT 센서 접촉 감지로 대체). enable: false면 box-feed
+        # (SetExternalBoxes) startup 요구 + stale-feed watchdog도 함께 사라진다.
+        enable: false
         max_count: 2
         size_m: [0.380, 0.240, 0.105]
         margin_m: [0.000, 0.000, 0.020]   # per-axis [x,y,z] box-local; x,y=SIDE, z=HEIGHT.
@@ -344,7 +364,11 @@ safety:
       # (the measured table surface), so the two floors agree. The InitMotion planner
       # avoids this box too.
       ground_plane:
-        enable: true
+        # 2026-07-09 (ft branch): DISABLED — whole-arm 바닥 박스도 external barrier
+        # 감속원이므로 플로어들과 함께 끔(모델 관측 velocity 보존, FT 센서로 대체).
+        # InitMotion planner 오라클에서도 빠짐 — 팔꿈치/손목의 테이블 하강은 이제
+        # arm<->arm / arm<->stand self-collision만 막는다.
+        enable: false
         # z_m: 0.001             # startup/fallback top face (used until a floor drives it)
         z_m: 0.0005             # startup/fallback top face (used until a floor drives it)
         size_m: [4.0, 4.0]      # lateral extents [Lx, Ly]
@@ -436,9 +460,295 @@ logging:
   flush_period_ms: 100
   queue_capacity: 4096
 
+force_torque:
+  source: rbpodo_eft
+  # Supervised gravity-wrench/CoG identification profile used by the rb_gui tab.
+  # Motion still uses the ordinary leased/deadman JointTarget path. These
+  # acquisition bounds reuse the accepted InitMotion/tare window; fit bounds
+  # gate only a PROVISIONAL report and never apply a payload automatically.
+  payload_identification:
+    enable: true
+    # Working assumption requested for the next supervised capture: Rainbow
+    # feedback has already undergone controller gravity/source processing.
+    # This identifies a general orientation-dependent residual map, not a
+    # physical payload mass or CoG. The assumption is not CAN-verified.
+    observation_model: controller_compensated_linear
+    min_poses: 5
+    arrival_tolerance_deg: 1.5
+    settle_sec: 0.5
+    samples_per_pose: 500
+    max_force_stddev_n: 0.75
+    max_torque_stddev_nm: 0.15
+    max_force_fit_rms_n: 0.75
+    max_torque_fit_rms_nm: 0.15
+    max_design_condition_number: 1000.0
+  # Corrected supervised source profile. The earlier right-arm X/Y labels mixed
+  # the TCP and FT gizmos; the 18:32 compliance capture invalidated yaw zero.
+  # The operator declared the left arm mechanically/electrically identical, so
+  # both use the +pi/2 URDF/FT mapping. The 18:48 capture observed corrected
+  # +X/+Y/+Z translation and recentering. Torque axes, payload, serials, and
+  # bias remain pending.
+  left: &ft_arm_monitor
+    enable: true
+    frame_configured: true
+    sensor_identity: "left-rft64-6a01-operator-confirmed-serial-pending"
+    calibration_id: "right-derived-identical-positive-force-ft-axis-20260712"
+    # Backend sequence advances only on a newly received CobotData state frame;
+    # cached/held states retain the previous value and fail the stall bound.
+    freshness_source: sequence
+    max_sample_age_sec: 0.02
+    max_source_stall_sec: 0.02
+    control_lpf_alpha: 0.2
+    # 2026-07-18: keep inertial subtraction fail-closed. The fit
+    # (scripts/fit_ft_inertial_mass.py on servo_log_20260718_141627, both arms)
+    # found NO linear inertial term (effective mass ~0.005/0.0004 kg with
+    # sign-inconsistent axes): the rbpodo EFT is a controller-side external
+    # force estimate that already subtracts the controller's own dynamic
+    # model, so transit-time wrench spikes are model RESIDUAL transients, not
+    # clean m*a. Leave disabled unless a future fit on richer excitation shows
+    # a consistent positive mass.
+    inertial_compensation_enable: false
+    inertial_effective_mass_kg: 0.0
+    inertial_accel_lpf_alpha: 0.0
+    max_tcp_speed_m_s: 0.0
+    max_tcp_accel_m_s2: 0.0
+    # Every successful Init Motion for this arm explicitly authorizes a
+    # pose-local software zero. Collection starts only after the arm reaches
+    # the measured goal and remains settled for 0.5 s.
+    auto_tare_after_init_motion: true
+    auto_tare_settle_sec: 0.5
+    residual_tare_min_samples: 500
+    # Latest physical no-contact data: ~0.29..0.46 N and ~0.06..0.09 Nm
+    # per-axis stddev. These bounds reject motion/contact transients while
+    # admitting the measured stationary sensor noise.
+    residual_tare_max_force_stddev_n: 0.75
+    residual_tare_max_torque_stddev_nm: 0.15
+    # The runtime EFT/control axes follow the explicit URDF sensor frame.
+    # +pi/2 yaw makes the sensor X/Y gizmo and compliance X/Y physically agree.
+    T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
+    sensor_bias: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # 2026-07-17: left arm-specific report captured and reviewed
+    # (logs/cog_calibration/20260717T104253Z-7e5aaba4/calibration_report.json,
+    # sha256 3974410ef594ef385ad884af6fec52e387d33d843f124e049e5f70d9af6e0297;
+    # force rms 0.246 N, torque rms 0.029 Nm, rank 4/4, condition 79.7 -- all
+    # within the server acceptance bounds). Replaces the interim zero-payload
+    # tare-only posture that produced 1.5-3.4 N free-air phantom force during
+    # fast repositioning (19:29 rollout fault). Controller-processed residual
+    # map, same CAN-unverified assumption as the right arm.
+    gravity_compensation_model: controller_compensated_linear
+    gravity_compensation_calibration_id: "left-20260717T104253Z-7e5aaba4"
+    gravity_force_matrix_n_per_m_s2: [-0.8030954616401327, 1.0438581747472622, 0.04213688651453337, -1.0133240613162646, -0.7795436740738728, 0.03731134787197895, 0.0031399349497533845, -0.015941258270182335, 0.3510946753055837]
+    gravity_torque_matrix_nm_per_m_s2: [-0.11301076870204503, -0.13904065897112153, 0.007945205497173832, 0.14263918844333365, -0.12121775210911886, -0.008530067636504404, 0.002740982054259277, 0.00018039365451322058, -0.0014896767865300528]
+    payload_mass_kg: 0.0
+    payload_com_tcp_m: [0.0, 0.0, 0.0]
+    residual_tare_tcp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  right:
+    enable: true
+    frame_configured: true
+    sensor_identity: "right-rft64-6a01-operator-confirmed-serial-pending"
+    calibration_id: "physical-positive-force-ft-axis-20260712"
+    freshness_source: sequence
+    max_sample_age_sec: 0.02
+    max_source_stall_sec: 0.02
+    control_lpf_alpha: 0.2
+    # 2026-07-18: keep inertial subtraction fail-closed. The fit
+    # (scripts/fit_ft_inertial_mass.py on servo_log_20260718_141627, both arms)
+    # found NO linear inertial term (effective mass ~0.005/0.0004 kg with
+    # sign-inconsistent axes): the rbpodo EFT is a controller-side external
+    # force estimate that already subtracts the controller's own dynamic
+    # model, so transit-time wrench spikes are model RESIDUAL transients, not
+    # clean m*a. Leave disabled unless a future fit on richer excitation shows
+    # a consistent positive mass.
+    inertial_compensation_enable: false
+    inertial_effective_mass_kg: 0.0
+    inertial_accel_lpf_alpha: 0.0
+    max_tcp_speed_m_s: 0.0
+    max_tcp_accel_m_s2: 0.0
+    auto_tare_after_init_motion: true
+    auto_tare_settle_sec: 0.5
+    residual_tare_min_samples: 500
+    residual_tare_max_force_stddev_n: 0.75
+    residual_tare_max_torque_stddev_nm: 0.15
+    # The 18:32 capture invalidated yaw zero; the 18:48 corrected capture then
+    # observed +X/+Y/+Z translation in the pushed runtime FT-control direction.
+    T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
+    sensor_bias: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # Reviewed schema-v4 candidate from
+    # logs/cog_calibration/20260716T060343Z-421f0157/calibration_report.json
+    # sha256: 76a8bdb828a7d624c41e9da44ed0b2a00a6b9aedac3b096fee2049e1fa360ad1
+    # This is a controller-processed residual map under the operator-requested,
+    # CAN-unverified assumption; it is not a physical mass/CoG result.
+    gravity_compensation_model: controller_compensated_linear
+    gravity_compensation_calibration_id: "right-20260716T060343Z-421f0157"
+    # Row-major maps: wrench_tcp = A * gravity_tcp + bias. The constant bias is
+    # deliberately omitted here and remains owned by the post-Init-Motion tare.
+    gravity_force_matrix_n_per_m_s2: [-0.7603111049987973, 1.0013958357019646, -0.01518380064332614, -0.9254727708956185, -0.7791934817445652, -0.020435340561226173, -0.23394181627988272, -0.006012858617312489, 0.25715992798221454]
+    gravity_torque_matrix_nm_per_m_s2: [-0.2206539391248573, -0.14062927088838903, -0.007134530034776744, 0.13306183273551747, -0.2324542571312396, 0.003240768143678019, 0.0014226562246761319, 0.00009072834274200404, 0.0007633213727637278]
+    payload_mass_kg: 0.0
+    payload_com_tcp_m: [0.0, 0.0, 0.0]
+    residual_tare_tcp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# 2026-07-17: RIGHT-arm supervised cartesian_admittance re-enabled by operator
+# decision. Evidence: post-tare multi-direction pushes (servo_log_20260717_164350,
+# _153921; scripts/analyze_ft_application_point.py) fit one consistent contact
+# point (+0.002, +0.008, -0.176) m in the TCP frame -- the lower Pika body,
+# physically plausible with the configured T_tcp_sensor -- and axial pushes fit
+# on-axis (|tau|/|F| ~ 0.012-0.016 m). This explains the 2026-07-16 15:26
+# rotation as real tau = r x F from off-TCP pushes, not a frame error.
+# 2026-07-17 (later): LEFT arm enabled identically to the right by operator
+# decision (translation-only compliance). Left has NO arm-specific push
+# validation; supporting evidence is indirect -- the operator-declared
+# identical assembly (2026-07-12) and the identical whole-log noise-lever
+# signature (~-0.213 m) on both arms. The left gravity map landed the same
+# evening (left-20260717T104253Z-7e5aaba4, see force_torque.left), closing the
+# free-air phantom-force gap the interim tare-only posture had.
+# Both geometric floor constraints remain disabled by explicit operator decision.
 force_control:
-  provider: null
-  enable: false
+  # 2026-07-18: surface_source: contact_force is available for guarded
+  # placement. It freezes n=-normalize(control force) at debounced episode
+  # entry, gives the scalar 2 N controller exclusive normal-axis ownership,
+  # and leaves tangential policy/compliance active. It is deliberately NOT
+  # selected here; first activation is a supervised operator decision. Design:
+  # rb_servo_server/docs/guarded_contact_design.md
+  provider: project_native
+  enable: true
+  operating_mode: cartesian_admittance
+  allow_in_real: true
+  supervised_experimental_real: true
+  update_rate_hz: 500
+  left:
+    enable: true
+    # 2026-07-18 15:09 run (SPEED_SCALE=1.0): left-arm floor touch at pick
+    # height spiked 32.2 N -> ExternalForceLimit. Supervised FIRST ACTIVATION
+    # of guarded contact: on debounced contact entry the measured-force normal
+    # is frozen and the scalar 2 N controller owns that axis; tangential
+    # policy/compliance continue. Revert to `none` to disable. Design:
+    # docs/guarded_contact_design.md
+    surface_source: contact_force
+    # Gate 3D: express all six controller axes in the corrected URDF/FT-axis
+    # orientation and apply the correction about the TCP endpoint.
+    compliance_frame: tcp_origin
+    # Shared dual-arm profile. Hard limits calibrated 2026-07-17 from four
+    # supervised freedrive floor impacts on the right arm
+    # (servo_log_20260717_172120): peaks 36.2/57.4/65.9/66.1 N, rise 8-16 ms,
+    # no-contact noise max 3.8 N. 30 N normal / 35 N resultant catches every
+    # reproduced impact class; the 36 N impact held >30 N for only 12 ms, so
+    # the hard debounce is 3 fresh samples (~11 ms at the measured ~280 Hz EFT
+    # freshness -- 5 samples ~18 ms would miss it). Margin above the accepted
+    # 23.88 N task-contact precedent is ~6 N: watch for false hard faults
+    # during heavy task contact before tightening further.
+    target_force_n: 2.0
+    contact_enter_force_n: 3.5
+    contact_release_force_n: 2.75
+    force_deadband_n: 0.5
+    hard_normal_force_n: 30.0
+    hard_force_norm_n: 35.0
+    hard_torque_norm_nm: 7.0
+    debounce_samples: 3
+    hard_limit_debounce_samples: 3
+    release_dwell_sec: 0.1
+    release_velocity_threshold_m_s: 0.002
+    transverse_contact_enter_force_n: 2.5
+    transverse_contact_release_force_n: 1.5
+    torque_contact_enter_nm: 0.45
+    torque_contact_release_nm: 0.30
+    # Translation-only, mirroring the right arm (see the right-arm note below
+    # for the push-run evidence and the rotation re-enable condition).
+    compliance_axes: [true, true, true, false, false, false]
+  right:
+    enable: true
+    # 2026-07-18 15:09 run (SPEED_SCALE=1.0): left-arm floor touch at pick
+    # height spiked 32.2 N -> ExternalForceLimit. Supervised FIRST ACTIVATION
+    # of guarded contact: on debounced contact entry the measured-force normal
+    # is frozen and the scalar 2 N controller owns that axis; tangential
+    # policy/compliance continue. Revert to `none` to disable. Design:
+    # docs/guarded_contact_design.md
+    surface_source: contact_force
+    compliance_frame: tcp_origin
+    # Identical to the left arm so task behavior and acceptance evidence use a
+    # single dual-arm profile.
+    target_force_n: 2.0
+    contact_enter_force_n: 3.5
+    contact_release_force_n: 2.75
+    force_deadband_n: 0.5
+    hard_normal_force_n: 30.0
+    hard_force_norm_n: 35.0
+    hard_torque_norm_nm: 7.0
+    debounce_samples: 3
+    hard_limit_debounce_samples: 3
+    release_dwell_sec: 0.1
+    release_velocity_threshold_m_s: 0.002
+    transverse_contact_enter_force_n: 2.5
+    transverse_contact_release_force_n: 1.5
+    torque_contact_enter_nm: 0.45
+    torque_contact_release_nm: 0.30
+    # 2026-07-17 17:0x push runs (servo_log_20260717_170148/_170254): the FT-side
+    # push fit the configured sensor origin to 1 mm (transform CORRECT); observed
+    # rotations were real tau = r x F -- the open-jaw fingertip sits +-58 mm off
+    # the TCP and the 0.10 Nm torque deadband vs 1.5 N force deadband makes any
+    # contact lever > 67 mm rotate before it translates. Operator decision:
+    # TRANSLATION-ONLY compliance for contact tasks; re-enable rotations only
+    # with a raised torque deadband (~0.30 Nm) after the closed-jaw
+    # fingertip-centre check.
+    compliance_axes: [true, true, true, false, false, false]
+  normal_admittance:
+    virtual_mass_kg: 8.0
+    damping_n_s_m: 160.0
+    stiffness_n_m: 0.0
+    max_unload_offset_m: 0.01
+    max_normal_velocity_m_s: 0.015
+    max_normal_acceleration_m_s2: 0.12
+    max_normal_jerk_m_s3: 0.8
+    max_normal_step_m: 0.001
+    max_energy_j: 2.0
+  # Selected-frame diagonal zero-wrench compliance [x, y, z, roll, pitch,
+  # yaw]. The three rotations share one identical profile (no per-axis split
+  # yet). The 0.10 Nm quiet zone stays above the worst-axis measured no-contact
+  # p99 (Tx/Ty/Tz = 0.068/0.074/0.005 Nm; Ty sets the shared floor, so a common
+  # deadband cannot go much lower without phantom roll/pitch from sensor noise).
+  # Rotational stiffness is lowered to 3.0 Nm/rad for greater response to a
+  # smaller applied moment; rotational damping is re-scaled to 2*sqrt(K*M) =
+  # 2*sqrt(3.0*0.2) ~= 1.55 so each axis stays approximately critically damped
+  # after the stiffness drop and recenters on the fixed command equilibrium.
+  # Hard force/torque limits above are unchanged. Supervised Gate 3A/3B
+  # characterization: validate load/release, chatter, and recenter per axis.
+  # 2026-07-17 19:21 rollout: TRANSLATION stiffness 80 -> 0 (pure mass-damper).
+  # With the policy equilibrium below the floor, the 80 N/m spring recentered
+  # the unloaded offset back INTO the surface: left arm complied a 13 N touch
+  # down to 1-3 N at -7.6 mm offset, then the recenter re-pressed the rigid
+  # floor to a 372 N spike -> ExternalForceLimit latch. K=0 lets the offset
+  # rest where contact put it; release drains via the policy target moving
+  # away. Response caps below are raised 2-4x in the same change so the unload
+  # can track a 100-300 ms force ramp, and the offset cap is pulled UNDER the
+  # follower's 15 mm actual-lead budget (it was 20 mm > 15 mm: a deep contact
+  # would have tripped delta_preview_actual_lead_fault before saturating).
+  virtual_mass: [2.0, 2.0, 2.0, 0.2, 0.2, 0.2]
+  damping: [26.0, 26.0, 26.0, 1.55, 1.55, 1.55]
+  stiffness: [0.0, 0.0, 0.0, 3.0, 3.0, 3.0]
+  # 2026-07-17 (Phase 3 restore): translation deadband back to 1.5 N. The
+  # interim 2.5 N was a shield against LEFT free-air phantom force (no gravity
+  # model, 1.5-3.4 N during fast repositioning -> K=0 offset drift + false
+  # 19 N contact in the 19:29 run); the left controller_compensated_linear map
+  # (left-20260717T104253Z-7e5aaba4) now removes that phantom at the source,
+  # so contact sensitivity is restored.
+  wrench_deadband: [1.5, 1.5, 1.5, 0.10, 0.10, 0.10]
+  # Keep translation and rotation return paths coherent: while any axis in a
+  # block remains loaded, released sibling axes brake and hold instead of
+  # springing home independently. Once the block is released, one common
+  # feasible jerk scale preserves its 3D return direction.
+  blockwise_release_recenter: true
+  max_dt_sec: 0.02
+  max_pos_offset_m: 0.012
+  max_rot_offset_rad: 0.08
+  max_linear_velocity_m_s: 0.06
+  max_angular_velocity_rad_s: 0.15
+  max_linear_acceleration_m_s2: 0.8
+  max_angular_acceleration_rad_s2: 1.5
+  max_linear_jerk_m_s3: 8.0
+  max_angular_jerk_rad_s3: 10.0
+  max_pos_step_m: 0.001
+  max_rot_step_rad: 0.002
+  max_energy_j: 2.0
 
 kinematics:
   enable: true
@@ -667,19 +977,45 @@ cartesian_control:
       # ~ 0.0056 m/s per step at j=20); raise only on real-run evidence.
       ruckig_follower:
         enable: true
-        controller: "delta_twist"  # consume conditioned local per-frame action deltas directly
-        # Near-floor bolt-pick preset (2026-07): conservative DeltaTwist limits
-        # for low-clearance pickup. Do not lower the hard safety floor for this
-        # task; the SurfaceActionProjector below only works above the existing
-        # hard floor plane and the final safety stack remains the guard.
-        max_linear_velocity_m_s: 0.12
-        max_linear_accel_m_s2: 1.0
-        max_linear_jerk_m_s3: 35.0
-        max_angular_velocity_rad_s: 0.45
-        max_angular_accel_rad_s2: 2.5
-        max_angular_jerk_rad_s3: 90.0
-        discard_head_steps: 0     # producer re-anchors each chunk to measured TCP: latency already absorbed
-        consume_steps: 6          # consume only window rows; rows 6-11 are runway neighbors + late-frame coast
+        controller: "delta_preview"
+        # v3 timestamp-aligned local deltas are integrated into absolute knots by
+        # the server, then followed by the existing Ruckig p/v/a chain. This
+        # removes stale residual catch-up while preserving both arms' predictions.
+        # 2026-07-17: raised from the first-hardware conservative set
+        # (0.18 / 1.5 / 45) on real-run evidence, operator decision "follow the
+        # model's predicted actions more faithfully": (a) training-distribution
+        # motion reaches ~0.45 m/s (flow_infer_pgmode_sim_param_search), so
+        # 0.18 clipped even the SPEED_SCALE=0.5 rollout (~0.22 m/s); (b) the
+        # 18:08 real rollout latched delta_preview_projection_fault at 2.6 mm
+        # because jerk 45 allows only ~12 mm/s velocity change per 33 ms
+        # segment (dv <= j*dt^2/4) -- too slow for policy direction changes;
+        # jerk 120 -> ~33 mm/s per segment. FT hard limit 30 N (11 ms
+        # debounce), 50 mm divergence latch, ROI/self-collision, and
+        # supervised E-stop remain the safety envelope for the faster motion.
+        # 2026-07-18 14:28 run (SPEED_SCALE=1.0): the 0.25 m/s pairing for
+        # scale 0.5 clipped full-speed policy transients -- projection fault at
+        # 4.05 mm / 0.55 deg (rotation budget also exceeded) during a 204 mm/s
+        # direction change with no contact. 0.45 matches the training
+        # distribution top; angular velocity raised for full-speed wrist
+        # reorientation headroom.
+        # 2026-07-18 14:48 run (SPEED_SCALE=1.0, projection window already at
+        # 12 segments): projection error 13.9 mm / 1.3 deg SUSTAINED past
+        # 400 ms with no contact -- full-speed policy chunks demand sustained
+        # tracking beyond accel 3 / jerk 120, not just reversal transients.
+        # Operator decision: follow the model's chunks harder. Inertial
+        # consequence: ~17.5 N m*a transients at 5 m/s2 with the ~3.5 kg tool;
+        # watch for EFT-residual spikes against the 30/35 N hard limits before
+        # raising further.
+        max_linear_velocity_m_s: 0.45
+        max_linear_accel_m_s2: 5.0
+        max_linear_jerk_m_s3: 300.0
+        max_angular_velocity_rad_s: 0.90
+        max_angular_accel_rad_s2: 9.0
+        max_angular_jerk_rad_s3: 540.0
+        discard_head_steps: 0     # v3 producer already removes rows emitted since observation
+        # Match FLOW_INFER_CHUNK_EXECUTE_STEPS=12: consume the complete policy
+        # execution window before using reserve rows from the published runway.
+        consume_steps: 12
         reserve_steps: 2
         smoothing_window: 3
         af_damping_beta: 1.0 #0.2  # P3: honest central-diff curvature; clampAbs(af, a_max) bounds it (beta<1 = per-waypoint micro-brake)
@@ -687,65 +1023,62 @@ cartesian_control:
         delta_twist_min_time_to_go_sec: 0.015
         delta_twist_tau_sec: 0.020
         delta_twist_residual_drain_steps: 1
-        delta_twist_max_residual_m: 0.004
-        delta_twist_max_residual_rad: 0.035
+        delta_twist_max_residual_m: 0.006
+        delta_twist_max_residual_rad: 0.050
         # Must stay below the strict chunk-follower divergence latch
         # (50 mm / 0.1 rad) so lead clamp engages before safety fault.
-        delta_twist_max_lead_m: 0.006
-        delta_twist_max_lead_rad: 0.025
+        delta_twist_max_lead_m: 0.020
+        delta_twist_max_lead_rad: 0.060
         delta_twist_stale_residual_timeout_sec: 0.15
-        delta_twist_pause_on_safety_block: true
-        delta_twist_block_requires_fresh_chunk_sec: 0.050
-        delta_twist_block_clear_residual: true
-        # Soft pre-controller projection for the near-floor pick phase. This does
-        # not lower or replace the hard floor; it prevents infeasible down/forward
-        # OpenPI deltas from becoming DeltaTwist residual before the final safety
-        # stack sees the command. Omit floor_z_m here so the projector references
-        # the existing safety.floor_constraint plane rather than defining a new
-        # floor value. Discarded near-floor action is intentionally dropped, not
-        # saved for later catch-up.
-        surface_action_projector:
-          enable: true
-          soft_floor_margin_m: 0.012
-          stop_floor_margin_m: 0.002
-          close_floor_band_m: 0.015
-          min_tip_margin_m: 0.002
-          tangent_coupling: 0.80
-          close_tangent_scale: 0.15
-          preclose_tangent_scale: 0.0
-          max_tangent_delta_near_floor_m: 0.0005
-          max_down_delta_near_floor_m: 0.0002
-          max_yaw_delta_near_floor_rad: 0.010
-          max_pitch_roll_delta_near_floor_rad: 0.003
-          close_lookahead_steps: 4
-          # Pika gripper command convention in this stack is opening percent
-          # (0=closed, 100=open), so close intent is "less than threshold".
-          # If a future normalized close command is used, set 0.60 + true in
-          # a site-local config instead.
-          close_threshold: 25.0  # gripper opening percent: 0=closed, 100=open
-          close_is_greater: false
-          hull_line_search_iters: 8
-        # Optional near-floor pick assist for low-clearance bolt pickup only:
-        # once close intent is detected at the surface, stop sliding forward,
-        # close, lift, then wait for a fresh policy chunk. This is not a general
-        # manipulation mode and does not change the hard safety floor or place
-        # behavior. Toggle enable=false in site-local config to return to pure
-        # projected DeltaTwist without the stop-close-lift phase.
-        grasp_commit:
-          enable: true
-          close_threshold: 25.0  # gripper opening percent: 0=closed, 100=open
-          close_is_greater: false
-          close_lookahead_steps: 4
-          commit_floor_band_m: 0.015
-          both_arm_sync_timeout_sec: 0.150
-          preclose_translation_scale: 0.0
-          preclose_angular_scale: 0.25
-          closing_hold_sec: 0.200
-          lift_height_m: 0.030
-          lift_duration_sec: 0.350
-          bimanual_sync: true
-          freeze_gripper_until_commit: false
-          close_target: 0.0
+        # Required delta_preview fail-closed bounds. These are explicit reviewed
+        # config values; the loader rejects a delta_preview profile if any are absent.
+        # 2026-07-17 real-run recalibration: the original 1 mm / 3-segment
+        # projection budget latched on the first real-speed rollout (2.6 mm
+        # excursion during a policy direction change, no contact) -- it was a
+        # hardware-free provisional value. 2 mm / 5 segments still fails closed
+        # ~12x under the 50 mm divergence latch. actual_lead budget (Phase 3
+        # re-tighten after the contact-aware follower landed): the committed
+        # compliance offset is now REMOVED from the lead measurement
+        # (removeComplianceOffsetFromMeasured) and the wrench-gated loading
+        # projection keeps the plan from advancing into contact, so lead is
+        # pure plan-vs-robot tracking again. The honest residual is fast-motion
+        # servo lag -- measured ~16 mm at 0.25 m/s in the 19:29 run
+        # (v_max x ~65 ms effective rbpodo lag). 2026-07-18: v_max raised to
+        # 0.45 for SPEED_SCALE=1.0, so the same formula gives ~29 mm of honest
+        # full-speed lag; 35 mm covers it with margin while the 50 mm
+        # divergence latch remains the runaway backstop. Tighten only with
+        # telemetry showing lower real lag.
+        preview_max_projection_error_m: 0.002
+        preview_max_projection_error_rad: 0.00436332313  # 0.25 deg
+        preview_max_consecutive_projection_errors: 12 #5
+        # 2026-07-18 SPEED_SCALE=1.0 operator decision: FOLLOW whatever chunk
+        # the model outputs (smoothed at the configured Ruckig dynamics) —
+        # sustained projection-budget breaches log a throttled warning instead
+        # of latching. Runaway safety is owned by the lead gates below, the
+        # 50 mm divergence latch, ROI/self-collision, and the FT hard limits.
+        preview_projection_fault_policy: "warn"
+        preview_max_actual_lead_m: 0.035
+        # 14:51 run: the 1.0 deg angular lead budget was never scaled with the
+        # speed raises — honest full-speed rotational lag is ~0.9 rad/s x
+        # ~65 ms ~= 3.3 deg, so a fast wrist reorientation latched on angle
+        # while positional lead sat at ~5 mm. 4 deg = pairing + margin.
+        preview_max_actual_lead_rad: 0.06981317008       # 4.0 deg
+        preview_max_consecutive_actual_lead_errors: 3
+        # Quasi-static gate for the contact-aware loading projection. The
+        # 2026-07-18 12:13 place-transit run showed fast-transit inertial
+        # wrench (2.5-5 N, m*a of the ~3.5 kg tool, direction-stable during a
+        # sustained acceleration) latching the transverse contact classifier
+        # and firing the projection mid-transit: the plan yank spiked a 57 N
+        # inertial reading and latched a phantom ExternalForceLimit. The
+        # projection now runs only while the plan's linear acceleration is
+        # below this bound (a real surface press is quasi-static); transit
+        # impacts remain owned by the 30/35 N hard limits.
+        loading_projection_max_accel_m_s2: 0.5
+        # 2026-07-18 12:44: eight synchronized 10--360 ms Hold bounces in
+        # 32 s repeatedly cold-seeded the follower at v=0 while the arms were
+        # moving. Preserve the frozen chained position/velocity for a bounded
+        # resume; longer gaps still discard the chunk and cold-start.
+        hold_bounce_resume_sec: 0.5
         chunk_feed_timeout_sec: 1.5
         fallback_policy: "fault"     # strict: no silent SMD fallback; cold start holds, loss latches ChunkFollowerFault (ResetFault to recover)
         engage_timeout_sec: 3.0      # max wait for the first chunk frame before faulting (fault policy only)

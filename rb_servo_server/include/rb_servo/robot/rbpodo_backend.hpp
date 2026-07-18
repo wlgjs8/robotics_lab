@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -29,6 +30,14 @@ struct RbpodoSystemStateSnapshot {
     // The controller's ground-truth direct-teaching state (set_freedrive_mode only
     // ACKs receipt, so this is the only reliable confirmation that teach engaged).
     int is_freedrive_mode = 0;
+    // sdata.eft_fx..eft_mz: external F/T sensor wrench [fx, fy, fz, mx, my, mz]
+    // (N / Nm, controller-reported external-sensor frame). Zeros when no external
+    // FT sensor is selected on the controller.
+    std::array<double, 6> eft{};
+    // False when the decoded state frame ended before the eft fields (short /
+    // old-firmware frame) — the zeros above are then padding, not readings. The
+    // blocking SDK path cannot observe the frame length and leaves this true.
+    bool eft_in_frame = true;
 };
 
 struct RbpodoStateDecodeOptions {
@@ -70,6 +79,29 @@ std::optional<BackendError> rbpodoStateAcquisitionError(const RobotState& mapped
 // none completed. A trailing partial frame is left in buf for the next drain.
 // Used by the pipelined readState() path; exposed for hardware-free tests.
 std::optional<std::string> extractNewestRbpodoStateFrame(std::string& buf);
+
+// Wire offset (bytes, frame start == sdata start, header included) of the end
+// of the external F/T sensor fields (sdata.eft_fx..eft_mz) in a type-0x03
+// state frame. Fixed by the controller wire format; pinned to the SDK struct
+// layout by a static_assert in rbpodo_backend.cpp when rbpodo is compiled in.
+inline constexpr std::size_t kRbpodoStateFrameEftEndOffsetBytes = 512;
+
+// True when a raw type-0x03 state frame of `frame_bytes` bytes is long enough
+// to contain the external F/T sensor fields (sdata.eft_fx..eft_mz). Frames from
+// older firmware can end earlier; the zero-initialized decode then yields
+// padding zeros, which must not be published as sensor readings. Exposed for
+// hardware-free tests.
+bool rbpodoStateFrameIncludesEft(std::size_t frame_bytes);
+
+// A controller mode switch or activation can leave the dedicated pipelined
+// CobotData socket with a response requested before the transition. Re-prime
+// that socket only when it is enabled and initialize() actually confirmed a
+// state-changing controller transition. Exposed for hardware-free policy tests.
+bool rbpodoPipelinedChannelNeedsReprime(
+    bool state_read_pipelined,
+    bool operation_mode_switch_confirmed,
+    bool activation_confirmed
+);
 
 std::optional<BackendError> rbpodoMotionReadinessError(
     const BackendConfig& config,
