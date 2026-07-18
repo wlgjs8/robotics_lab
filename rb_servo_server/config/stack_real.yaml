@@ -618,7 +618,13 @@ force_control:
   update_rate_hz: 500
   left:
     enable: true
-    surface_source: none
+    # 2026-07-18 15:09 run (SPEED_SCALE=1.0): left-arm floor touch at pick
+    # height spiked 32.2 N -> ExternalForceLimit. Supervised FIRST ACTIVATION
+    # of guarded contact: on debounced contact entry the measured-force normal
+    # is frozen and the scalar 2 N controller owns that axis; tangential
+    # policy/compliance continue. Revert to `none` to disable. Design:
+    # docs/guarded_contact_design.md
+    surface_source: contact_force
     # Gate 3D: express all six controller axes in the corrected URDF/FT-axis
     # orientation and apply the correction about the TCP endpoint.
     compliance_frame: tcp_origin
@@ -651,7 +657,13 @@ force_control:
     compliance_axes: [true, true, true, false, false, false]
   right:
     enable: true
-    surface_source: none
+    # 2026-07-18 15:09 run (SPEED_SCALE=1.0): left-arm floor touch at pick
+    # height spiked 32.2 N -> ExternalForceLimit. Supervised FIRST ACTIVATION
+    # of guarded contact: on debounced contact entry the measured-force normal
+    # is frozen and the scalar 2 N controller owns that axis; tangential
+    # policy/compliance continue. Revert to `none` to disable. Design:
+    # docs/guarded_contact_design.md
+    surface_source: contact_force
     compliance_frame: tcp_origin
     # Identical to the left arm so task behavior and acceptance evidence use a
     # single dual-arm profile.
@@ -986,12 +998,20 @@ cartesian_control:
         # direction change with no contact. 0.45 matches the training
         # distribution top; angular velocity raised for full-speed wrist
         # reorientation headroom.
+        # 2026-07-18 14:48 run (SPEED_SCALE=1.0, projection window already at
+        # 12 segments): projection error 13.9 mm / 1.3 deg SUSTAINED past
+        # 400 ms with no contact -- full-speed policy chunks demand sustained
+        # tracking beyond accel 3 / jerk 120, not just reversal transients.
+        # Operator decision: follow the model's chunks harder. Inertial
+        # consequence: ~17.5 N m*a transients at 5 m/s2 with the ~3.5 kg tool;
+        # watch for EFT-residual spikes against the 30/35 N hard limits before
+        # raising further.
         max_linear_velocity_m_s: 0.45
-        max_linear_accel_m_s2: 3.0
-        max_linear_jerk_m_s3: 120.0
+        max_linear_accel_m_s2: 5.0
+        max_linear_jerk_m_s3: 300.0
         max_angular_velocity_rad_s: 0.90
-        max_angular_accel_rad_s2: 6.0
-        max_angular_jerk_rad_s3: 360.0
+        max_angular_accel_rad_s2: 9.0
+        max_angular_jerk_rad_s3: 540.0
         discard_head_steps: 0     # v3 producer already removes rows emitted since observation
         # Match FLOW_INFER_CHUNK_EXECUTE_STEPS=12: consume the complete policy
         # execution window before using reserve rows from the published runway.
@@ -1030,9 +1050,19 @@ cartesian_control:
         # telemetry showing lower real lag.
         preview_max_projection_error_m: 0.002
         preview_max_projection_error_rad: 0.00436332313  # 0.25 deg
-        preview_max_consecutive_projection_errors: 5
+        preview_max_consecutive_projection_errors: 12 #5
+        # 2026-07-18 SPEED_SCALE=1.0 operator decision: FOLLOW whatever chunk
+        # the model outputs (smoothed at the configured Ruckig dynamics) —
+        # sustained projection-budget breaches log a throttled warning instead
+        # of latching. Runaway safety is owned by the lead gates below, the
+        # 50 mm divergence latch, ROI/self-collision, and the FT hard limits.
+        preview_projection_fault_policy: "warn"
         preview_max_actual_lead_m: 0.035
-        preview_max_actual_lead_rad: 0.01745329252       # 1.0 deg
+        # 14:51 run: the 1.0 deg angular lead budget was never scaled with the
+        # speed raises — honest full-speed rotational lag is ~0.9 rad/s x
+        # ~65 ms ~= 3.3 deg, so a fast wrist reorientation latched on angle
+        # while positional lead sat at ~5 mm. 4 deg = pairing + margin.
+        preview_max_actual_lead_rad: 0.06981317008       # 4.0 deg
         preview_max_consecutive_actual_lead_errors: 3
         # Quasi-static gate for the contact-aware loading projection. The
         # 2026-07-18 12:13 place-transit run showed fast-transit inertial

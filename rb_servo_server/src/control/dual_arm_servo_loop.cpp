@@ -392,6 +392,7 @@ bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFoll
         a.preview_max_actual_lead_rad != b.preview_max_actual_lead_rad ||
         a.preview_max_consecutive_actual_lead_errors != b.preview_max_consecutive_actual_lead_errors ||
         a.hold_bounce_resume_sec != b.hold_bounce_resume_sec ||
+        a.preview_projection_fault_policy != b.preview_projection_fault_policy ||
         a.chunk_feed_timeout_sec != b.chunk_feed_timeout_sec;
 }
 
@@ -2929,8 +2930,20 @@ bool DualArmServoLoop::updateForceRuntime(
     runtime.control.compliance_active =
         mode == "cartesian_admittance" || runtime.control.normal_regulating;
 
-    const bool below_release =
-        measured_normal <= arm_config.contact_release_force_n;
+    // Release semantics differ by surface source. The legacy thresholds
+    // (release 2.75 N) detect "contact is ending" for a compliance that never
+    // TARGETS a contact force. A contact_force guarded episode REGULATES
+    // 2.0 N, i.e. permanently below 2.75 N, so the legacy threshold released
+    // the instant regulation succeeded and oscillated regulating <->
+    // release_braking (2026-07-18 15:13 run, 3 bounces in 80 ms) before
+    // deadlocking in release_hold. A guarded episode ends only when contact
+    // truly vanishes: normal force inside the sensor deadband (e.g. the
+    // grasped bolt lifted off the floor), still debounced by the existing
+    // velocity threshold + release dwell.
+    const double release_threshold_n = contact_force_surface
+        ? arm_config.force_deadband_n
+        : arm_config.contact_release_force_n;
+    const bool below_release = measured_normal <= release_threshold_n;
     if (below_release) {
         runtime.control.state = "release_braking";
         if (std::abs(controller.state().unload_velocity_m_s) <=
@@ -6404,11 +6417,34 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.follower_actual_lead_error_count = diag.consecutive_actual_lead_errors;
     abc.follower_loading_projection_active = diag.loading_projection_active;
     abc.follower_contact_shift_m = diag.contact_shift_m;
-    if (delta_preview && (diag.infeasible_fault || diag.actual_lead_fault)) {
+    // The projection gate is a plan-FIDELITY alarm (Ruckig cannot reach the
+    // requested knots), not a runaway guard: lead, the 50 mm divergence latch,
+    // ROI, self-collision, and the FT hard limits own safety. With
+    // preview_projection_fault_policy: warn the operator chooses to FOLLOW the
+    // model's chunks (smoothed at the configured dynamics) and only log
+    // sustained infeasibility instead of latching (2026-07-18 SPEED_SCALE=1.0
+    // decision). Lead faults always latch — they measure the ROBOT diverging.
+    const bool projection_latches =
+        rf.preview_projection_fault_policy != RuckigProjectionFaultPolicy::Warn;
+    if (delta_preview && diag.infeasible_fault && !projection_latches) {
+        static thread_local double last_projection_warn_sec = 0.0;
+        const double now_sec = ChunkFrameReceiver::steadyNowSec();
+        if (now_sec - last_projection_warn_sec > 1.0) {
+            last_projection_warn_sec = now_sec;
+            std::cerr << "[chunk_follower] " << toString(arm_id)
+                      << " projection infeasibility (warn policy):"
+                      << " err_m=" << diag.projection_error_m
+                      << " err_rad=" << diag.projection_error_rad
+                      << " count=" << diag.consecutive_projection_errors << "\n";
+        }
+    }
+    if (delta_preview &&
+        ((diag.infeasible_fault && projection_latches) || diag.actual_lead_fault)) {
         std::ostringstream reason;
         reason << toString(arm_id)
-               << (diag.infeasible_fault ? " delta_preview_projection_fault" :
-                                            " delta_preview_actual_lead_fault")
+               << (diag.infeasible_fault && projection_latches
+                       ? " delta_preview_projection_fault"
+                       : " delta_preview_actual_lead_fault")
                << " projection_error_m=" << diag.projection_error_m
                << " projection_error_rad=" << diag.projection_error_rad
                << " projection_count=" << diag.consecutive_projection_errors
@@ -6867,14 +6903,30 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             arm_command->tcp_target_stand = runtime.release_hold_pose;
             arm_command->has_tcp_target = true;
             runtime.release_hold_applied = true;
-            // flow-infer acknowledges the release epoch by returning Hold
-            // during its re-anchor/reset cycle. Keep overriding even that Hold
-            // for one accepted backend tick; only then may a later Cartesian
-            // command take ownership again. A stale TcpPoseTarget stream can
-            // therefore never clear this latch by itself.
+            // flow-infer acknowledges the release epoch by returning a REAL
+            // Hold during its re-anchor/reset cycle (legacy stream client) —
+            // OR, in the delta_preview chunk era, by delivering a FRESH chunk
+            // frame after the release latched the cache sequence: the
+            // re-anchored chunk IS the client's acknowledgment. The chunk
+            // client never sends a deliberate Hold, so the legacy-only
+            // condition deadlocked release_hold for 34 s while the policy
+            // re-inferred in a loop (2026-07-18 15:13 run). A stale
+            // TcpPoseTarget stream still cannot clear the latch: the recorded
+            // sequence only advances on genuinely new frames.
+            const std::uint64_t release_submitted_seq = arm_id == ArmId::Left
+                ? left_chunk_submitted_recv_seq_
+                : right_chunk_submitted_recv_seq_;
+            const bool arm_frame_present = arm_id == ArmId::Left
+                ? chunk_frame_cache_.has_left
+                : chunk_frame_cache_.has_right;
+            const bool fresh_chunk_after_release =
+                chunk_frame_cache_recv_seq_ != 0 &&
+                chunk_frame_cache_recv_seq_ != release_submitted_seq &&
+                arm_frame_present;
             runtime.release_hold_clear_requested =
-                raw_command_mode == ControlMode::Hold &&
-                !isSyntheticHoldCommand(command);
+                (raw_command_mode == ControlMode::Hold &&
+                 !isSyntheticHoldCommand(command)) ||
+                fresh_chunk_after_release;
             return true;
         }
         if (arm_command->mode != ControlMode::Hold ||

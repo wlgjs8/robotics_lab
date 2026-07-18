@@ -185,6 +185,14 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(flow_profile->ruckig_follower.consume_steps == 12);
         RB_CHECK(flow_profile->ruckig_follower.reserve_steps == 2);
         RB_CHECK(near(flow_profile->ruckig_follower.hold_bounce_resume_sec, 0.5));
+        // 2026-07-18 SPEED_SCALE=1.0 posture: projection fidelity warns (the
+        // model's chunks are followed), lead budgets scaled to the full-speed
+        // honest lag (35 mm / 4 deg).
+        RB_CHECK(flow_profile->ruckig_follower.preview_projection_fault_policy ==
+                 rb_servo::RuckigProjectionFaultPolicy::Warn);
+        RB_CHECK(near(flow_profile->ruckig_follower.preview_max_actual_lead_m, 0.035));
+        RB_CHECK(near(flow_profile->ruckig_follower.preview_max_actual_lead_rad,
+                      0.06981317008));
         RB_CHECK(stack_real.force_torque.source == "rbpodo_eft");
         RB_CHECK(stack_real.force_torque.left.enable);
         RB_CHECK(stack_real.force_torque.right.enable);
@@ -285,7 +293,9 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(!stack_real.safety.user_floor_constraint.enable);
         const auto& left_force = stack_real.force_control.left;
         const auto& right_force = stack_real.force_control.right;
-        RB_CHECK(left_force.surface_source == "none");
+        // 2026-07-18: supervised first activation of guarded contact after the
+        // 15:09 full-speed 32 N pick floor spike (see stack_real.yaml note).
+        RB_CHECK(left_force.surface_source == "contact_force");
         RB_CHECK(left_force.surface_source == right_force.surface_source);
         RB_CHECK(near(left_force.target_force_n, right_force.target_force_n));
         RB_CHECK(near(left_force.contact_enter_force_n, right_force.contact_enter_force_n));

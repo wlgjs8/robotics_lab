@@ -243,6 +243,7 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         "preview_max_actual_lead_m",
         "preview_max_actual_lead_rad",
         "preview_max_consecutive_actual_lead_errors",
+        "preview_projection_fault_policy",
         "loading_projection_max_accel_m_s2",
         "hold_bounce_resume_sec",
         "chunk_feed_timeout_sec",
@@ -376,6 +377,19 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
     if (has(node, "hold_bounce_resume_sec")) {
         out->hold_bounce_resume_sec = asDouble(
             node["hold_bounce_resume_sec"], path + ".hold_bounce_resume_sec");
+    }
+    if (has(node, "preview_projection_fault_policy")) {
+        const std::string policy = lower(asString(
+            node["preview_projection_fault_policy"],
+            path + ".preview_projection_fault_policy"));
+        if (policy == "fault") {
+            out->preview_projection_fault_policy = RuckigProjectionFaultPolicy::Fault;
+        } else if (policy == "warn") {
+            out->preview_projection_fault_policy = RuckigProjectionFaultPolicy::Warn;
+        } else {
+            throw std::runtime_error(
+                path + ".preview_projection_fault_policy must be fault or warn");
+        }
     }
     if (has(node, "preview_max_consecutive_actual_lead_errors")) {
         out->preview_max_consecutive_actual_lead_errors = asInt(

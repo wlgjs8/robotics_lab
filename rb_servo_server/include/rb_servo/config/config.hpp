@@ -1062,6 +1062,15 @@ enum class RuckigFollowerFallbackPolicy {
     Fault
 };
 
+// What a sustained delta_preview projection-budget breach does. Fault latches
+// (bring-up default); Warn logs and keeps following — the projection gate is a
+// plan-fidelity alarm, while lead / the divergence latch / ROI / self-collision
+// / FT hard limits own runaway safety.
+enum class RuckigProjectionFaultPolicy {
+    Fault,
+    Warn
+};
+
 enum class RuckigFollowerController {
     RuckigWaypoint,
     DeltaTwist,
@@ -1130,6 +1139,8 @@ struct RuckigFollowerConfig {
     double preview_max_actual_lead_m = 0.0;
     double preview_max_actual_lead_rad = 0.0;
     int preview_max_consecutive_actual_lead_errors = 0;
+    RuckigProjectionFaultPolicy preview_projection_fault_policy =
+        RuckigProjectionFaultPolicy::Fault;
     // Quasi-static gate for the wrench-gated loading projection: the follower
     // only projects contact loading out of the plan while its own linear plan
     // acceleration is below this bound. Fast transit acceleration puts a real
