@@ -40,6 +40,8 @@ void CartesianChunkFollower::reconfigure(const CartesianChunkFollowerConfig& cfg
 
 void CartesianChunkFollower::deactivate() {
   active_ = false;
+  hold_paused_ = false;
+  hold_pause_start_sec_ = 0.0;
   have_segment_ = false;
   window_.deactivate();
   diag_.consecutive_projection_errors = 0;
@@ -48,19 +50,68 @@ void CartesianChunkFollower::deactivate() {
   diag_.actual_lead_fault = false;
   actual_lead_checked_segment_ = -1;
   loading_dir_valid_ = false;
+  contact_normal_owned_ = false;
   prev_loading_dir_valid_ = false;
   contact_shift_.setZero();
   diag_.loading_projection_active = false;
   diag_.contact_shift_m = 0.0;
 }
 
+void CartesianChunkFollower::pauseForHold(double now_sec) {
+  if (!active_ || hold_paused_) return;
+  hold_paused_ = true;
+  hold_pause_start_sec_ = now_sec;
+}
+
+bool CartesianChunkFollower::expireHoldPause(double now_sec, double grace_sec) {
+  if (!hold_paused_) return false;
+  const double elapsed_sec = now_sec - hold_pause_start_sec_;
+  if (!std::isfinite(now_sec) || !std::isfinite(grace_sec) || grace_sec <= 0.0 ||
+      !std::isfinite(elapsed_sec) || elapsed_sec < 0.0 || elapsed_sec > grace_sec) {
+    deactivate();
+    return true;
+  }
+  return false;
+}
+
+HoldResumeResult CartesianChunkFollower::resumeFromHold(
+    const Pose6D& live_reference,
+    double now_sec,
+    double grace_sec,
+    double position_tolerance_m,
+    double orientation_tolerance_rad) {
+  if (!hold_paused_) return HoldResumeResult::NotPaused;
+  const double elapsed_sec = now_sec - hold_pause_start_sec_;
+  if (!std::isfinite(now_sec) || !std::isfinite(grace_sec) || grace_sec <= 0.0 ||
+      !std::isfinite(elapsed_sec) || elapsed_sec < 0.0 || elapsed_sec > grace_sec) {
+    deactivate();
+    return HoldResumeResult::GraceExpired;
+  }
+
+  hold_paused_ = false;
+  hold_pause_start_sec_ = 0.0;
+  if (math::positionDistance(last_pose_, live_reference) > position_tolerance_m ||
+      math::orientationDistanceRad(last_pose_, live_reference) >
+          orientation_tolerance_rad) {
+    // Leave the follower active so the servo loop's existing strict-divergence
+    // policy can choose its already-audited safety reanchor or cold/fault path.
+    return HoldResumeResult::Diverged;
+  }
+  return HoldResumeResult::WarmResumed;
+}
+
 void CartesianChunkFollower::setExternalReaction(
-    const Eigen::Vector3d& loading_dir_stand, bool valid) {
+    const Eigen::Vector3d& loading_dir_stand,
+    bool valid,
+    bool contact_normal_owned) {
   loading_dir_stand_ = loading_dir_stand;
   loading_dir_valid_ = valid;
+  contact_normal_owned_ = valid && contact_normal_owned;
 }
 
 void CartesianChunkFollower::reanchor(const Pose6D& reference) {
+  hold_paused_ = false;
+  hold_pause_start_sec_ = 0.0;
   R0_ref_ = Eigen::Quaterniond(math::rotationFromPose(reference)).normalized();
   std::array<double, 6> p0{reference.x, reference.y, reference.z, 0.0, 0.0, 0.0};
   core_.seed(p0);        // zero velocity/acceleration; keep the active window untouched
@@ -131,7 +182,7 @@ void CartesianChunkFollower::updateActualLead(const Pose6D& actual_pose) {
 }
 
 Pose6D CartesianChunkFollower::tick(double dt_tick) {
-  if (!active_) return last_pose_;
+  if (!active_ || hold_paused_) return last_pose_;
 
   t_in_seg_ += dt_tick;
   if (!have_segment_ || t_in_seg_ >= seg_dt_) {
@@ -182,13 +233,18 @@ void CartesianChunkFollower::stepToNextSegment() {
           std::sqrt(a0[0] * a0[0] + a0[1] * a0[1] + a0[2] * a0[2]);
       const bool quasi_static =
           plan_accel <= cfg_.loading_projection_max_accel_m_s2;
-      if (r2 > 1e-12 && consistent && quasi_static) {
+      // A debounced contact_force episode is itself evidence of real contact,
+      // so only that episode-scoped ownership may bypass the quasi-static gate.
+      // Direction consistency and the per-segment removal clamp remain active.
+      if (r2 > 1e-12 && consistent &&
+          (quasi_static || contact_normal_owned_)) {
         const auto& p0 = core_.p0();
         const Eigen::Vector3d advance =
             positionOf(window_.poseAt(k)) + contact_shift_ -
             Eigen::Vector3d(p0[0], p0[1], p0[2]);
         const double loading = loading_dir_stand_.dot(advance);
-        if (loading > 0.0) {
+        if (loading > 0.0 ||
+            (contact_normal_owned_ && std::abs(loading) > 0.0)) {
           Eigen::Vector3d removal = loading_dir_stand_ * (loading / r2);
           // Bound the per-segment plan pull to one segment of travel at the
           // linear velocity limit: the plan cannot have been advancing faster,

@@ -184,11 +184,18 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(flow_profile->max_smd_goal_lead_rad, 0.35));
         RB_CHECK(flow_profile->ruckig_follower.consume_steps == 12);
         RB_CHECK(flow_profile->ruckig_follower.reserve_steps == 2);
+        RB_CHECK(near(flow_profile->ruckig_follower.hold_bounce_resume_sec, 0.5));
         RB_CHECK(stack_real.force_torque.source == "rbpodo_eft");
         RB_CHECK(stack_real.force_torque.left.enable);
         RB_CHECK(stack_real.force_torque.right.enable);
         RB_CHECK(stack_real.force_torque.left.frame_configured);
         RB_CHECK(stack_real.force_torque.right.frame_configured);
+        RB_CHECK(!stack_real.force_torque.left.inertial_compensation_enable);
+        RB_CHECK(!stack_real.force_torque.right.inertial_compensation_enable);
+        RB_CHECK(near(stack_real.force_torque.left.inertial_effective_mass_kg, 0.0));
+        RB_CHECK(near(stack_real.force_torque.right.inertial_effective_mass_kg, 0.0));
+        RB_CHECK(near(stack_real.force_torque.left.inertial_accel_lpf_alpha, 0.0));
+        RB_CHECK(near(stack_real.force_torque.right.inertial_accel_lpf_alpha, 0.0));
         const auto& payload_id = stack_real.force_torque.payload_identification;
         RB_CHECK(payload_id.enable);
         RB_CHECK(payload_id.observation_model == "controller_compensated_linear");
@@ -472,6 +479,7 @@ bool testRepositoryConfigsParse() {
                  rb_servo::RuckigFollowerController::DeltaPreview);
         RB_CHECK(sim_flow_profile->ruckig_follower.consume_steps == 12);
         RB_CHECK(sim_flow_profile->ruckig_follower.reserve_steps == 2);
+        RB_CHECK(near(sim_flow_profile->ruckig_follower.hold_bounce_resume_sec, 0.5));
         RB_CHECK(near(sim_flow_profile->ruckig_follower.preview_max_actual_lead_m, 0.006));
         RB_CHECK(near(sim_flow_profile->pose_track_smd.max_linear_velocity_m_s, 0.50));
         RB_CHECK(stack_sim.force_control.provider == "null");
@@ -975,6 +983,33 @@ bool testForceControlSchemaAndActivation() {
     ::unlink(invalid_alpha_path.c_str());
     RB_CHECK(invalid_alpha_rejected);
 
+    const std::string invalid_inertial_mass_path = writeTempConfig(
+        "force-invalid-inertial-mass",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  left:\n"
+        "    inertial_compensation_enable: true\n"
+        "    inertial_effective_mass_kg: 0.0\n"
+        "    inertial_accel_lpf_alpha: 0.5\n"
+    );
+    const bool invalid_inertial_mass_rejected =
+        loadRejects(invalid_inertial_mass_path);
+    ::unlink(invalid_inertial_mass_path.c_str());
+    RB_CHECK(invalid_inertial_mass_rejected);
+
+    const std::string missing_inertial_alpha_path = writeTempConfig(
+        "force-missing-inertial-alpha",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_torque:\n"
+        "  left:\n"
+        "    inertial_compensation_enable: true\n"
+        "    inertial_effective_mass_kg: 2.0\n"
+    );
+    const bool missing_inertial_alpha_rejected =
+        loadRejects(missing_inertial_alpha_path);
+    ::unlink(missing_inertial_alpha_path.c_str());
+    RB_CHECK(missing_inertial_alpha_rejected);
+
     const std::string invalid_freshness_path = writeTempConfig(
         "force-invalid-freshness",
         "schema: robotics_lab.rb_servo_server.v1\n"
@@ -1275,6 +1310,19 @@ bool testFloorlessForceControlSurfaceSourceNone() {
     RB_CHECK(floorless.force_control.left.surface_source == "none");
     RB_CHECK(!floorless.safety.floor_constraint.enable);
     RB_CHECK(!floorless.safety.user_floor_constraint.enable);
+
+    // contact_force derives and freezes its frame from the debounced measured
+    // contact, so it requires an F/T frame but no geometric floor.
+    const std::string contact_force_path = writeTempConfig(
+        "force-floorless-contact-force",
+        forceControlBody("contact_force", "cartesian_admittance"));
+    const rb_servo::DualArmConfig contact_force =
+        rb_servo::loadConfigFromYaml(contact_force_path);
+    ::unlink(contact_force_path.c_str());
+    RB_CHECK(contact_force.force_control.left.surface_source == "contact_force");
+    RB_CHECK(contact_force.force_torque.left.frame_configured);
+    RB_CHECK(!contact_force.safety.floor_constraint.enable);
+    RB_CHECK(!contact_force.safety.user_floor_constraint.enable);
 
     // 2) Regression: surface_source: floor_constraint with the floor disabled
     //    still fails closed (motion-affecting force control needs its plane).

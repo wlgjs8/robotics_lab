@@ -836,6 +836,9 @@ struct FtWrenchPipelineConfig {
     double max_sample_age_sec = 0.02;
     double max_source_stall_sec = 0.02;
     double control_lpf_alpha = 0.2;
+    bool inertial_compensation_enable = false;
+    double inertial_effective_mass_kg = 0.0;
+    double inertial_accel_lpf_alpha = 0.0;
     double max_tcp_speed_m_s = 0.0;
     double max_tcp_accel_m_s2 = 0.0;
     bool auto_tare_after_init_motion = false;
@@ -897,8 +900,8 @@ struct ForceTorqueConfig {
 
 struct ForceControlArmConfig {
     bool enable = false;
-    // V1 supports a single verified stand-frame contact normal. The normal is
-    // supplied by one of the existing server-owned plane constraints.
+    // V1 supports one stand-frame normal: a server-owned plane, or a direction
+    // captured from measured force at the start of a debounced contact episode.
     std::string surface_source = "floor_constraint";
     // Frame used by the symmetric 6D Cartesian admittance controller.
     // surface: selected stand-fixed surface axes at the TCP origin.
@@ -1135,6 +1138,10 @@ struct RuckigFollowerConfig {
     // firing on that inertial "contact" yanks the plan. Exceeding the bound
     // fails toward the baseline blind follower (assist off, motion untouched).
     double loading_projection_max_accel_m_s2 = 0.5;
+    // Brief upstream Hold interleaves may preserve the active chunk and its
+    // chained p/v/a state. Zero is deliberately invalid for an enabled
+    // follower: every active profile must select the reviewed grace window.
+    double hold_bounce_resume_sec = 0.0;
     // Feed-liveness watchdog: with no fresh chunk frame for this long the
     // follower deactivates (falls back to pose_track_smd / hold).
     double chunk_feed_timeout_sec = 1.5;

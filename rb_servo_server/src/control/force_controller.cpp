@@ -11,6 +11,32 @@
 
 namespace rb_servo {
 
+void ContactForceNormalEstimator::update(
+    bool episode_active,
+    const math::Vector3& force_control_stand
+) {
+    if (!episode_active) {
+        reset();
+        return;
+    }
+    if (episode_active_) return;
+    episode_active_ = true;
+    if (!force_control_stand.allFinite() ||
+        !(force_control_stand.squaredNorm() > 0.0)) {
+        valid_ = false;
+        normal_stand_.setZero();
+        return;
+    }
+    normal_stand_ = -force_control_stand.normalized();
+    valid_ = true;
+}
+
+void ContactForceNormalEstimator::reset() {
+    episode_active_ = false;
+    valid_ = false;
+    normal_stand_.setZero();
+}
+
 Pose6D removeComplianceOffsetFromMeasured(const Pose6D& measured_stand,
                                           const Pose6D& t_tcp_compliance_pose,
                                           const Pose6D& offset_tcp) {

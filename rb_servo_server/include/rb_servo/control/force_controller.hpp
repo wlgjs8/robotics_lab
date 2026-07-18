@@ -2,11 +2,29 @@
 
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/core/types.hpp"
+#include "rb_servo/math/se3.hpp"
 
 #include <cstdint>
 #include <string>
 
 namespace rb_servo {
+
+// Episode-scoped measured contact normal. The first active sample captures
+// -normalize(force_control_stand); subsequent active samples cannot steer it.
+// Leaving the episode invalidates the frame. A failed entry capture remains
+// invalid until the next episode instead of silently guessing a direction.
+class ContactForceNormalEstimator {
+public:
+    void update(bool episode_active, const math::Vector3& force_control_stand);
+    void reset();
+    bool valid() const { return valid_; }
+    const math::Vector3& normalStand() const { return normal_stand_; }
+
+private:
+    bool episode_active_ = false;
+    bool valid_ = false;
+    math::Vector3 normal_stand_{math::Vector3::Zero()};
+};
 
 struct ForceControllerState {
     Pose6D offset_tcp;

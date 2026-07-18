@@ -499,6 +499,17 @@ force_torque:
     max_sample_age_sec: 0.02
     max_source_stall_sec: 0.02
     control_lpf_alpha: 0.2
+    # 2026-07-18: keep inertial subtraction fail-closed. The fit
+    # (scripts/fit_ft_inertial_mass.py on servo_log_20260718_141627, both arms)
+    # found NO linear inertial term (effective mass ~0.005/0.0004 kg with
+    # sign-inconsistent axes): the rbpodo EFT is a controller-side external
+    # force estimate that already subtracts the controller's own dynamic
+    # model, so transit-time wrench spikes are model RESIDUAL transients, not
+    # clean m*a. Leave disabled unless a future fit on richer excitation shows
+    # a consistent positive mass.
+    inertial_compensation_enable: false
+    inertial_effective_mass_kg: 0.0
+    inertial_accel_lpf_alpha: 0.0
     max_tcp_speed_m_s: 0.0
     max_tcp_accel_m_s2: 0.0
     # Every successful Init Motion for this arm explicitly authorizes a
@@ -540,6 +551,17 @@ force_torque:
     max_sample_age_sec: 0.02
     max_source_stall_sec: 0.02
     control_lpf_alpha: 0.2
+    # 2026-07-18: keep inertial subtraction fail-closed. The fit
+    # (scripts/fit_ft_inertial_mass.py on servo_log_20260718_141627, both arms)
+    # found NO linear inertial term (effective mass ~0.005/0.0004 kg with
+    # sign-inconsistent axes): the rbpodo EFT is a controller-side external
+    # force estimate that already subtracts the controller's own dynamic
+    # model, so transit-time wrench spikes are model RESIDUAL transients, not
+    # clean m*a. Leave disabled unless a future fit on richer excitation shows
+    # a consistent positive mass.
+    inertial_compensation_enable: false
+    inertial_effective_mass_kg: 0.0
+    inertial_accel_lpf_alpha: 0.0
     max_tcp_speed_m_s: 0.0
     max_tcp_accel_m_s2: 0.0
     auto_tare_after_init_motion: true
@@ -582,6 +604,12 @@ force_torque:
 # free-air phantom-force gap the interim tare-only posture had.
 # Both geometric floor constraints remain disabled by explicit operator decision.
 force_control:
+  # 2026-07-18: surface_source: contact_force is available for guarded
+  # placement. It freezes n=-normalize(control force) at debounced episode
+  # entry, gives the scalar 2 N controller exclusive normal-axis ownership,
+  # and leaves tangential policy/compliance active. It is deliberately NOT
+  # selected here; first activation is a supervised operator decision. Design:
+  # rb_servo_server/docs/guarded_contact_design.md
   provider: project_native
   enable: true
   operating_mode: cartesian_admittance
@@ -952,10 +980,16 @@ cartesian_control:
         # jerk 120 -> ~33 mm/s per segment. FT hard limit 30 N (11 ms
         # debounce), 50 mm divergence latch, ROI/self-collision, and
         # supervised E-stop remain the safety envelope for the faster motion.
-        max_linear_velocity_m_s: 0.25 #0.45
+        # 2026-07-18 14:28 run (SPEED_SCALE=1.0): the 0.25 m/s pairing for
+        # scale 0.5 clipped full-speed policy transients -- projection fault at
+        # 4.05 mm / 0.55 deg (rotation budget also exceeded) during a 204 mm/s
+        # direction change with no contact. 0.45 matches the training
+        # distribution top; angular velocity raised for full-speed wrist
+        # reorientation headroom.
+        max_linear_velocity_m_s: 0.45
         max_linear_accel_m_s2: 3.0
         max_linear_jerk_m_s3: 120.0
-        max_angular_velocity_rad_s: 0.60
+        max_angular_velocity_rad_s: 0.90
         max_angular_accel_rad_s2: 6.0
         max_angular_jerk_rad_s3: 360.0
         discard_head_steps: 0     # v3 producer already removes rows emitted since observation
@@ -989,12 +1023,15 @@ cartesian_control:
         # projection keeps the plan from advancing into contact, so lead is
         # pure plan-vs-robot tracking again. The honest residual is fast-motion
         # servo lag -- measured ~16 mm at 0.25 m/s in the 19:29 run
-        # (v_max x ~65 ms effective rbpodo lag) -- so 20 mm covers it with
-        # margin. Tighten further only with telemetry showing lower real lag.
+        # (v_max x ~65 ms effective rbpodo lag). 2026-07-18: v_max raised to
+        # 0.45 for SPEED_SCALE=1.0, so the same formula gives ~29 mm of honest
+        # full-speed lag; 35 mm covers it with margin while the 50 mm
+        # divergence latch remains the runaway backstop. Tighten only with
+        # telemetry showing lower real lag.
         preview_max_projection_error_m: 0.002
         preview_max_projection_error_rad: 0.00436332313  # 0.25 deg
         preview_max_consecutive_projection_errors: 5
-        preview_max_actual_lead_m: 0.020
+        preview_max_actual_lead_m: 0.035
         preview_max_actual_lead_rad: 0.01745329252       # 1.0 deg
         preview_max_consecutive_actual_lead_errors: 3
         # Quasi-static gate for the contact-aware loading projection. The
@@ -1007,6 +1044,11 @@ cartesian_control:
         # below this bound (a real surface press is quasi-static); transit
         # impacts remain owned by the 30/35 N hard limits.
         loading_projection_max_accel_m_s2: 0.5
+        # 2026-07-18 12:44: eight synchronized 10--360 ms Hold bounces in
+        # 32 s repeatedly cold-seeded the follower at v=0 while the arms were
+        # moving. Preserve the frozen chained position/velocity for a bounded
+        # resume; longer gaps still discard the chunk and cold-start.
+        hold_bounce_resume_sec: 0.5
         chunk_feed_timeout_sec: 1.5
         fallback_policy: "fault"     # strict: no silent SMD fallback; cold start holds, loss latches ChunkFollowerFault (ResetFault to recover)
         engage_timeout_sec: 3.0      # max wait for the first chunk frame before faulting (fault policy only)

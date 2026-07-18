@@ -21,6 +21,11 @@ bool near(double lhs, double rhs, double tolerance = 1e-9) {
     return std::abs(lhs - rhs) <= tolerance;
 }
 
+bool sameWrench(const rb_servo::Wrench6D& lhs, const rb_servo::Wrench6D& rhs) {
+    return lhs.fx == rhs.fx && lhs.fy == rhs.fy && lhs.fz == rhs.fz &&
+        lhs.tx == rhs.tx && lhs.ty == rhs.ty && lhs.tz == rhs.tz;
+}
+
 rb_servo::FtWrenchPipelineConfig baseConfig() {
     rb_servo::FtWrenchPipelineConfig config;
     config.enable = true;
@@ -171,6 +176,68 @@ bool testControllerCompensatedLinearGravityResidual() {
     );
     RB_CHECK(!rejected.healthy);
     RB_CHECK(rejected.reason.find("incomplete or mixed") != std::string::npos);
+    return true;
+}
+
+bool testInertialCompensationRemovesCommandedMassAcceleration() {
+    rb_servo::FtWrenchPipelineConfig config = baseConfig();
+    config.inertial_compensation_enable = true;
+    config.inertial_effective_mass_kg = 2.5;
+    config.inertial_accel_lpf_alpha = 1.0;
+    rb_servo::FtWrenchPipeline pipeline(config);
+    pipeline.setTcpLinearAcceleration(rb_servo::math::Vector3(1.2, -0.4, 0.8));
+
+    rb_servo::FtRawSample raw = sample(1, 5'000'000'000ULL);
+    raw.wrench_sensor.fx = 3.0;
+    raw.wrench_sensor.fy = -1.0;
+    raw.wrench_sensor.fz = 2.0;
+    raw.wrench_sensor.tx = 0.7;
+    raw.wrench_sensor.ty = -0.2;
+    const auto out = pipeline.process(raw, rb_servo::Pose6D{}, raw.host_time_ns);
+
+    RB_CHECK(out.healthy);
+    RB_CHECK(near(out.pre_tare_external_wrench_tcp.fx, 0.0, 1e-12));
+    RB_CHECK(near(out.pre_tare_external_wrench_tcp.fy, 0.0, 1e-12));
+    RB_CHECK(near(out.pre_tare_external_wrench_tcp.fz, 0.0, 1e-12));
+    RB_CHECK(near(out.fast_external_wrench_tcp.fx, 0.0, 1e-12));
+    RB_CHECK(near(out.fast_external_wrench_tcp.tx, 0.7, 1e-12));
+    RB_CHECK(near(out.fast_external_wrench_tcp.ty, -0.2, 1e-12));
+    return true;
+}
+
+bool testDisabledInertialCompensationIsUnchanged() {
+    rb_servo::FtWrenchPipelineConfig config = baseConfig();
+    rb_servo::FtWrenchPipeline baseline(config);
+    rb_servo::FtWrenchPipeline with_unused_acceleration(config);
+    with_unused_acceleration.setTcpLinearAcceleration(
+        rb_servo::math::Vector3(100.0, -200.0, 300.0));
+
+    rb_servo::FtRawSample raw = sample(1, 6'000'000'000ULL);
+    raw.wrench_sensor = {1.0, -2.0, 3.0, -4.0, 5.0, -6.0};
+    const auto expected = baseline.process(raw, rb_servo::Pose6D{}, raw.host_time_ns);
+    const auto actual = with_unused_acceleration.process(
+        raw, rb_servo::Pose6D{}, raw.host_time_ns);
+
+    RB_CHECK(expected.healthy == actual.healthy);
+    RB_CHECK(expected.stale == actual.stale);
+    RB_CHECK(expected.freshness_value == actual.freshness_value);
+    RB_CHECK(expected.freshness_advanced == actual.freshness_advanced);
+    RB_CHECK(expected.reason == actual.reason);
+    RB_CHECK(expected.gravity_tcp == actual.gravity_tcp);
+    RB_CHECK(sameWrench(expected.wrench_tcp, actual.wrench_tcp));
+    RB_CHECK(sameWrench(expected.payload_wrench_tcp, actual.payload_wrench_tcp));
+    RB_CHECK(sameWrench(
+        expected.modeled_gravity_wrench_tcp,
+        actual.modeled_gravity_wrench_tcp));
+    RB_CHECK(sameWrench(
+        expected.pre_tare_external_wrench_tcp,
+        actual.pre_tare_external_wrench_tcp));
+    RB_CHECK(sameWrench(
+        expected.fast_external_wrench_tcp,
+        actual.fast_external_wrench_tcp));
+    RB_CHECK(sameWrench(
+        expected.control_external_wrench_tcp,
+        actual.control_external_wrench_tcp));
     return true;
 }
 
@@ -397,6 +464,8 @@ int main() {
     if (!testAcceptedRbpodoEftForceAxisMapping()) return 1;
     if (!testRotationAndPayloadCompensation()) return 1;
     if (!testControllerCompensatedLinearGravityResidual()) return 1;
+    if (!testInertialCompensationRemovesCommandedMassAcceleration()) return 1;
+    if (!testDisabledInertialCompensationIsUnchanged()) return 1;
     if (!testResidualTareAndLowPass()) return 1;
     if (!testLowPassAdvancesOnlyOnNewAcquisition()) return 1;
     if (!testFreshnessUsesSourceSequenceNotValueChanges()) return 1;

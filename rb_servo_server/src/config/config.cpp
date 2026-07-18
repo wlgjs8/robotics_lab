@@ -244,6 +244,7 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         "preview_max_actual_lead_rad",
         "preview_max_consecutive_actual_lead_errors",
         "loading_projection_max_accel_m_s2",
+        "hold_bounce_resume_sec",
         "chunk_feed_timeout_sec",
     }, path);
     if (has(node, "enable")) out->enable = asBool(node["enable"], path + ".enable");
@@ -371,6 +372,10 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         out->loading_projection_max_accel_m_s2 = asDouble(
             node["loading_projection_max_accel_m_s2"],
             path + ".loading_projection_max_accel_m_s2");
+    }
+    if (has(node, "hold_bounce_resume_sec")) {
+        out->hold_bounce_resume_sec = asDouble(
+            node["hold_bounce_resume_sec"], path + ".hold_bounce_resume_sec");
     }
     if (has(node, "preview_max_consecutive_actual_lead_errors")) {
         out->preview_max_consecutive_actual_lead_errors = asInt(
@@ -1764,9 +1769,10 @@ void validateConfig(const DualArmConfig& cfg) {
     ) {
         const std::string surface = lower(arm.surface_source);
         if (!(surface == "floor_constraint" || surface == "user_floor_plane" ||
-              surface == "none")) {
+              surface == "contact_force" || surface == "none")) {
             throw std::runtime_error(
-                path + ".surface_source must be floor_constraint, user_floor_plane, or none"
+                path + ".surface_source must be floor_constraint, user_floor_plane, "
+                "contact_force, or none"
             );
         }
         // surface_source: none is the floorless posture. The server-owned floor
@@ -1844,6 +1850,12 @@ void validateConfig(const DualArmConfig& cfg) {
             throw std::runtime_error(
                 path + ".compliance_frame=" + compliance_frame +
                 " requires the matching force_torque frame_configured=true"
+            );
+        }
+        if (surface == "contact_force" && !ft.frame_configured) {
+            throw std::runtime_error(
+                path + ".surface_source=contact_force requires the matching "
+                "force_torque frame_configured=true"
             );
         }
         if (!(arm.contact_release_force_n < arm.contact_enter_force_n)) {
@@ -1944,6 +1956,32 @@ void validateConfig(const DualArmConfig& cfg) {
         if (!std::isfinite(ft.control_lpf_alpha) ||
             ft.control_lpf_alpha < 0.0 || ft.control_lpf_alpha > 1.0) {
             throw std::runtime_error(path + ".control_lpf_alpha must be in [0, 1]");
+        }
+        validateNonNegativeFinite(
+            ft.inertial_effective_mass_kg,
+            path + ".inertial_effective_mass_kg"
+        );
+        if (ft.inertial_compensation_enable) {
+            if (!(ft.inertial_effective_mass_kg > 0.0)) {
+                throw std::runtime_error(
+                    path + ".inertial_compensation_enable=true requires "
+                    "inertial_effective_mass_kg > 0"
+                );
+            }
+            if (!std::isfinite(ft.inertial_accel_lpf_alpha) ||
+                ft.inertial_accel_lpf_alpha <= 0.0 ||
+                ft.inertial_accel_lpf_alpha > 1.0) {
+                throw std::runtime_error(
+                    path + ".inertial_accel_lpf_alpha must be in (0, 1] when "
+                    "inertial compensation is enabled"
+                );
+            }
+        } else if (!std::isfinite(ft.inertial_accel_lpf_alpha) ||
+                   ft.inertial_accel_lpf_alpha < 0.0 ||
+                   ft.inertial_accel_lpf_alpha > 1.0) {
+            throw std::runtime_error(
+                path + ".inertial_accel_lpf_alpha must be in [0, 1]"
+            );
         }
         validateNonNegativeFinite(ft.max_tcp_speed_m_s, path + ".max_tcp_speed_m_s");
         validateNonNegativeFinite(ft.max_tcp_accel_m_s2, path + ".max_tcp_accel_m_s2");
@@ -2234,6 +2272,12 @@ void validateConfig(const DualArmConfig& cfg) {
         validatePositiveFinite(rf.max_angular_jerk_rad_s3, path + ".max_angular_jerk_rad_s3");
         validatePositiveFinite(rf.chunk_feed_timeout_sec, path + ".chunk_feed_timeout_sec");
         validatePositiveFinite(rf.engage_timeout_sec, path + ".engage_timeout_sec");
+        if (rf.enable) {
+            validatePositiveFinite(
+                rf.hold_bounce_resume_sec,
+                path + ".hold_bounce_resume_sec"
+            );
+        }
         if (rf.discard_head_steps < 0) {
             throw std::runtime_error(path + ".discard_head_steps must be >= 0");
         }
@@ -3745,6 +3789,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "max_sample_age_sec",
                 "max_source_stall_sec",
                 "control_lpf_alpha",
+                "inertial_compensation_enable",
+                "inertial_effective_mass_kg",
+                "inertial_accel_lpf_alpha",
                 "max_tcp_speed_m_s",
                 "max_tcp_accel_m_s2",
                 "auto_tare_after_init_motion",
@@ -3770,6 +3817,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ft, "max_sample_age_sec")) out.max_sample_age_sec = asDouble(ft["max_sample_age_sec"], path + ".max_sample_age_sec");
             if (has(ft, "max_source_stall_sec")) out.max_source_stall_sec = asDouble(ft["max_source_stall_sec"], path + ".max_source_stall_sec");
             if (has(ft, "control_lpf_alpha")) out.control_lpf_alpha = asDouble(ft["control_lpf_alpha"], path + ".control_lpf_alpha");
+            if (has(ft, "inertial_compensation_enable")) out.inertial_compensation_enable = asBool(ft["inertial_compensation_enable"], path + ".inertial_compensation_enable");
+            if (has(ft, "inertial_effective_mass_kg")) out.inertial_effective_mass_kg = asDouble(ft["inertial_effective_mass_kg"], path + ".inertial_effective_mass_kg");
+            if (has(ft, "inertial_accel_lpf_alpha")) out.inertial_accel_lpf_alpha = asDouble(ft["inertial_accel_lpf_alpha"], path + ".inertial_accel_lpf_alpha");
             if (has(ft, "max_tcp_speed_m_s")) out.max_tcp_speed_m_s = asDouble(ft["max_tcp_speed_m_s"], path + ".max_tcp_speed_m_s");
             if (has(ft, "max_tcp_accel_m_s2")) out.max_tcp_accel_m_s2 = asDouble(ft["max_tcp_accel_m_s2"], path + ".max_tcp_accel_m_s2");
             if (has(ft, "auto_tare_after_init_motion")) out.auto_tare_after_init_motion = asBool(ft["auto_tare_after_init_motion"], path + ".auto_tare_after_init_motion");

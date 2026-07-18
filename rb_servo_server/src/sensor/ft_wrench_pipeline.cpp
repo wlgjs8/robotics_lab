@@ -138,12 +138,21 @@ std::string lower(std::string value) {
 
 FtWrenchPipeline::FtWrenchPipeline(FtWrenchPipelineConfig config) : config_(std::move(config)) {}
 
+void FtWrenchPipeline::setTcpLinearAcceleration(const math::Vector3& a_tcp_mps2) {
+    tcp_linear_acceleration_m_s2_ = a_tcp_mps2;
+    tcp_linear_acceleration_supplied_ = true;
+}
+
 void FtWrenchPipeline::reset() {
     filtered_external_ = Wrench6D{};
     filter_initialized_ = false;
     source_initialized_ = false;
     last_source_value_ = 0;
     last_source_advance_ns_ = 0;
+    tcp_linear_acceleration_m_s2_.setZero();
+    filtered_tcp_linear_acceleration_m_s2_.setZero();
+    tcp_linear_acceleration_supplied_ = false;
+    inertial_accel_filter_initialized_ = false;
     cancelResidualTare();
 }
 
@@ -261,6 +270,11 @@ FtWrenchPipelineOutput FtWrenchPipeline::process(
 
     if (!config_.enable) return reject("disabled");
     if (!config_.frame_configured) return reject("T_tcp_sensor is not configured");
+    if (config_.inertial_compensation_enable &&
+        (!tcp_linear_acceleration_supplied_ ||
+         !tcp_linear_acceleration_m_s2_.allFinite())) {
+        return reject("commanded TCP acceleration is unavailable or non-finite");
+    }
     if (!(config_.gravity_compensation_model == "rigid_payload" ||
           config_.gravity_compensation_model == "controller_compensated_linear")) {
         return reject("unsupported gravity compensation model");
@@ -326,10 +340,36 @@ FtWrenchPipelineOutput FtWrenchPipeline::process(
     out.wrench_tcp = transformWrench(config_.t_tcp_sensor, unbiased_sensor);
     out.payload_wrench_tcp = payloadWrenchTcp(config_, gravity_tcp);
     out.modeled_gravity_wrench_tcp = modeledGravityWrenchTcp(config_, gravity_tcp);
-    out.pre_tare_external_wrench_tcp = subtract(
+    Wrench6D gravity_removed_external = subtract(
         out.wrench_tcp,
         out.modeled_gravity_wrench_tcp
     );
+    if (config_.inertial_compensation_enable) {
+        if (!inertial_accel_filter_initialized_) {
+            filtered_tcp_linear_acceleration_m_s2_ = tcp_linear_acceleration_m_s2_;
+            inertial_accel_filter_initialized_ = true;
+        } else if (freshness_advanced) {
+            const double alpha = config_.inertial_accel_lpf_alpha;
+            filtered_tcp_linear_acceleration_m_s2_ =
+                (1.0 - alpha) * filtered_tcp_linear_acceleration_m_s2_ +
+                alpha * tcp_linear_acceleration_m_s2_;
+        }
+        const math::Vector3 inertial_force_tcp =
+            config_.inertial_effective_mass_kg *
+            filtered_tcp_linear_acceleration_m_s2_;
+        // V1 compensates translation only. Rotational inertia and the torque
+        // from an offset CoM stay out of scope until a CoM/inertia model has
+        // been identified and reviewed on both physical arms.
+        const Wrench6D inertial_wrench_tcp{
+            inertial_force_tcp.x(), inertial_force_tcp.y(), inertial_force_tcp.z(),
+            0.0, 0.0, 0.0,
+        };
+        gravity_removed_external = subtract(
+            gravity_removed_external,
+            inertial_wrench_tcp
+        );
+    }
+    out.pre_tare_external_wrench_tcp = gravity_removed_external;
     out.fast_external_wrench_tcp = subtract(out.pre_tare_external_wrench_tcp, config_.residual_tare_tcp);
 
     if (!finite(out.fast_external_wrench_tcp)) return reject("non-finite compensated wrench");

@@ -1085,6 +1085,40 @@ bool testRuckigFollowerFallbackPolicyConfig() {
         defaults.cartesian_control.tcp_pose_target_profiles.front().ruckig_follower.engage_timeout_sec,
         3.0
     ));
+    RB_CHECK(near(defaults.cartesian_control.ruckig_follower.hold_bounce_resume_sec, 0.0));
+
+    const std::string missing_resume_path = writeTempConfig(
+        "ruckig-follower-missing-hold-resume",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "network:\n"
+        "  chunk_frame_bind: udp://127.0.0.1:50999\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    enable: true\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(
+        missing_resume_path,
+        "cartesian_control.ruckig_follower.hold_bounce_resume_sec"
+    ));
+    ::unlink(missing_resume_path.c_str());
+
+    const std::string explicit_resume_path = writeTempConfig(
+        "ruckig-follower-explicit-hold-resume",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "network:\n"
+        "  chunk_frame_bind: udp://127.0.0.1:50999\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    enable: true\n"
+        "    hold_bounce_resume_sec: 0.5\n"
+    );
+    const rb_servo::DualArmConfig explicit_resume =
+        rb_servo::loadConfigFromYaml(explicit_resume_path);
+    ::unlink(explicit_resume_path.c_str());
+    RB_CHECK(near(
+        explicit_resume.cartesian_control.ruckig_follower.hold_bounce_resume_sec,
+        0.5
+    ));
 
     const std::string fault_path = writeTempConfig(
         "ruckig-follower-fallback-fault",

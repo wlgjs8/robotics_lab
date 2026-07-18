@@ -352,6 +352,8 @@ private:
         Pose6D contact_anchor;
         bool contact_anchor_valid = false;
         bool normal_contact_active = false;
+        ContactForceNormalEstimator contact_force_normal_estimator;
+        double contact_cartesian_normal_offset_m = 0.0;
         bool transverse_contact_active = false;
         bool rotational_contact_active = false;
         int enter_count = 0;
@@ -365,6 +367,11 @@ private:
         bool release_hold_clear_requested = false;
         Pose6D previous_actual_pose;
         uint64_t previous_actual_pose_ns = 0;
+        Pose6D sent_tcp_sample_older;
+        Pose6D sent_tcp_sample_newer;
+        uint64_t sent_tcp_sample_older_ns = 0;
+        uint64_t sent_tcp_sample_newer_ns = 0;
+        int sent_tcp_sample_count = 0;
         std::optional<NormalForceControllerProposal> pending_proposal;
         bool pending_proposal_applied = false;
         std::optional<ForceControllerProposal> pending_cartesian_proposal;
@@ -398,6 +405,16 @@ private:
         // pipeline is healthy and cartesian_admittance is active this tick.
         std::array<double, 3> follower_loading_reaction_stand{{0.0, 0.0, 0.0}};
         bool follower_loading_reaction_valid = false;
+        // True when the chunk follower produced this tick's Cartesian target.
+        // The rolling compliance equilibrium then adopts the follower output
+        // verbatim instead of re-projecting policy deltas: the follower's
+        // wrench-gated projection already removed contact loading, and running
+        // BOTH projections let the equilibrium and the plan drift apart
+        // (2026-07-18 14:16 run: an 11.6 mm plan-vs-equilibrium gap consumed
+        // the actual-lead budget and latched at 21.4 mm with only ~0.3 deg of
+        // real joint tracking error).
+        bool chunk_follower_drove_this_tick = false;
+        bool follower_contact_normal_owned = false;
     };
     FtWrenchPipeline left_ft_pipeline_;
     FtWrenchPipeline right_ft_pipeline_;
@@ -705,6 +722,8 @@ private:
     double right_chunk_engage_wait_start_sec_ = 0.0;
     std::uint64_t left_chunk_follower_reanchor_count_ = 0;
     std::uint64_t right_chunk_follower_reanchor_count_ = 0;
+    std::uint64_t left_chunk_follower_warm_resume_count_ = 0;
+    std::uint64_t right_chunk_follower_warm_resume_count_ = 0;
     uint64_t left_chunk_follower_reanchor_log_ns_ = 0;
     uint64_t right_chunk_follower_reanchor_log_ns_ = 0;
     struct ChunkFollowerFaultRequest {
@@ -801,6 +820,7 @@ private:
         bool follower_loading_projection_active = false;
         double follower_contact_shift_m = 0.0;
         std::uint64_t follower_reanchor_count = 0;
+        std::uint64_t follower_warm_resume_count = 0;
         bool safety_intervention_recent = false;
         double delta_twist_pending_linear_norm_m = 0.0;
         double delta_twist_pending_angular_norm_rad = 0.0;

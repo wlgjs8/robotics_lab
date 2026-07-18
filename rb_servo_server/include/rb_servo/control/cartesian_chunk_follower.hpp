@@ -65,6 +65,13 @@ struct FollowerDiag {
   double contact_shift_m{0.0};
 };
 
+enum class HoldResumeResult {
+  NotPaused,
+  WarmResumed,
+  GraceExpired,
+  Diverged,
+};
+
 class CartesianChunkFollower {
  public:
   explicit CartesianChunkFollower(const CartesianChunkFollowerConfig& cfg);
@@ -94,10 +101,24 @@ class CartesianChunkFollower {
   // passes through and contact release causes no snap-back. Invalid (the
   // default) is a strict no-op: behavior is identical to the pre-projection
   // follower, so an unhealthy wrench pipeline degrades safely.
-  void setExternalReaction(const Eigen::Vector3d& loading_dir_stand, bool valid);
+  void setExternalReaction(const Eigen::Vector3d& loading_dir_stand,
+                           bool valid,
+                           bool contact_normal_owned = false);
 
   bool active() const { return active_; }
+  bool holdPaused() const { return hold_paused_; }
   void deactivate();
+
+  // Freeze an active chunk during a brief upstream Hold. No segment/window
+  // time advances until resumeFromHold succeeds. Non-Hold mode changes still
+  // use deactivate() and discard the window.
+  void pauseForHold(double now_sec);
+  bool expireHoldPause(double now_sec, double grace_sec);
+  HoldResumeResult resumeFromHold(const Pose6D& live_reference,
+                                  double now_sec,
+                                  double grace_sec,
+                                  double position_tolerance_m,
+                                  double orientation_tolerance_rad);
 
   // Strict-divergence recovery when an external safety constraint already
   // explained the plan-vs-sent split. Keeps the active chunk window and consume
@@ -138,6 +159,8 @@ class CartesianChunkFollower {
   double t_in_seg_{0.0};
   bool have_segment_{false};
   bool active_{false};
+  bool hold_paused_{false};
+  double hold_pause_start_sec_{0.0};
 
   double current_grip_{0.0};
   Pose6D last_pose_{};
@@ -147,6 +170,7 @@ class CartesianChunkFollower {
   // Loading-projection state (see setExternalReaction).
   Eigen::Vector3d loading_dir_stand_{Eigen::Vector3d::Zero()};
   bool loading_dir_valid_{false};
+  bool contact_normal_owned_{false};
   Eigen::Vector3d contact_shift_{Eigen::Vector3d::Zero()};
   Eigen::Vector3d prev_loading_dir_{Eigen::Vector3d::Zero()};
   bool prev_loading_dir_valid_{false};

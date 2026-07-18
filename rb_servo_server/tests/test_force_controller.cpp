@@ -1054,6 +1054,26 @@ bool testRemoveComplianceOffsetInvertsAppliedCorrection() {
     return true;
 }
 
+bool testContactForceNormalEstimatorFreezesForEpisode() {
+    rb_servo::ContactForceNormalEstimator estimator;
+    estimator.update(false, rb_servo::math::Vector3(1.0, 0.0, 0.0));
+    RB_CHECK(!estimator.valid());
+
+    estimator.update(true, rb_servo::math::Vector3(3.0, 4.0, 0.0));
+    RB_CHECK(estimator.valid());
+    RB_CHECK((estimator.normalStand() -
+              rb_servo::math::Vector3(-0.6, -0.8, 0.0)).norm() < 1e-12);
+
+    estimator.update(true, rb_servo::math::Vector3(0.0, 0.0, -10.0));
+    RB_CHECK((estimator.normalStand() -
+              rb_servo::math::Vector3(-0.6, -0.8, 0.0)).norm() < 1e-12);
+
+    estimator.update(false, rb_servo::math::Vector3::Zero());
+    RB_CHECK(!estimator.valid());
+    RB_CHECK(estimator.normalStand().isZero(0.0));
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -1078,6 +1098,7 @@ int main() {
     if (!testProposalProvenancePreventsStaleOrCrossControllerCommit()) return 1;
     if (!testWrenchDeadbandSuppressesNoiseAndPreservesExcessSign()) return 1;
     if (!testRemoveComplianceOffsetInvertsAppliedCorrection()) return 1;
+    if (!testContactForceNormalEstimatorFreezesForEpisode()) return 1;
     std::cout << "force_controller tests passed\n";
     return 0;
 }

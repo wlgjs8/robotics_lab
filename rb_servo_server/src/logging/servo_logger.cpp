@@ -131,6 +131,7 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_follower_loading_projection_active"
        << ',' << side << "_follower_contact_shift_m"
        << ',' << side << "_follower_reanchor_count"
+       << ',' << side << "_follower_warm_resume_count"
        << ',' << side << "_safety_intervention_recent"
        << ',' << side << "_delta_twist_pending_linear_norm_m"
        << ',' << side << "_delta_twist_pending_angular_norm_rad"
@@ -860,6 +861,7 @@ void writeArmProfilingColumns(
        << ',' << telemetry.follower_loading_projection_active
        << ',' << telemetry.follower_contact_shift_m
        << ',' << telemetry.follower_reanchor_count
+       << ',' << telemetry.follower_warm_resume_count
        << ',' << telemetry.safety_intervention_recent
        << ',' << telemetry.delta_twist_pending_linear_norm_m
        << ',' << telemetry.delta_twist_pending_angular_norm_rad

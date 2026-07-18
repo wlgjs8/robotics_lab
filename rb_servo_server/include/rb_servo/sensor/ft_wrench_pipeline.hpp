@@ -2,6 +2,7 @@
 
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/core/types.hpp"
+#include "rb_servo/math/se3.hpp"
 
 #include <array>
 #include <cstdint>
@@ -57,6 +58,10 @@ public:
         const Pose6D& tcp_pose_stand,
         uint64_t now_ns
     );
+    // Commanded TCP linear acceleration expressed in TCP coordinates. The
+    // servo loop supplies zero until its sent-command differentiator has three
+    // samples; this setter performs no filtering or frame conversion.
+    void setTcpLinearAcceleration(const math::Vector3& a_tcp_mps2);
     void beginResidualTare();
     FtTareUpdate updateResidualTare(
         const FtWrenchPipelineOutput& output,
@@ -71,6 +76,10 @@ private:
     FtWrenchPipelineConfig config_;
     Wrench6D filtered_external_{};
     bool filter_initialized_ = false;
+    math::Vector3 tcp_linear_acceleration_m_s2_{math::Vector3::Zero()};
+    math::Vector3 filtered_tcp_linear_acceleration_m_s2_{math::Vector3::Zero()};
+    bool tcp_linear_acceleration_supplied_ = false;
+    bool inertial_accel_filter_initialized_ = false;
     bool source_initialized_ = false;
     uint64_t last_source_value_ = 0;
     uint64_t last_source_advance_ns_ = 0;

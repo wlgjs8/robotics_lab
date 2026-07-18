@@ -453,6 +453,7 @@ struct CartesianSolveTelemetry {
     bool follower_loading_projection_active = false;  // wrench-gated plan projection engaged
     double follower_contact_shift_m = 0.0;            // accumulated projected plan shift
     uint64_t follower_reanchor_count = 0;          // explained strict-divergence reanchors
+    uint64_t follower_warm_resume_count = 0;       // brief Hold resumes preserving chained p/v/a
     bool safety_intervention_recent = false;       // debounced signal seen by follower stage
     double delta_twist_pending_linear_norm_m = 0.0;
     double delta_twist_pending_angular_norm_rad = 0.0;

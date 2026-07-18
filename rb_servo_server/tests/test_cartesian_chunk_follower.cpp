@@ -14,6 +14,7 @@
 using rb_servo::control::CartesianChunkFollower;
 using rb_servo::control::CartesianChunkFollowerConfig;
 using rb_servo::control::ChunkFrame;
+using rb_servo::control::HoldResumeResult;
 using rb_servo::Pose6D;
 using rb_servo::Vec6;
 
@@ -130,6 +131,64 @@ int main() {
     check(prev.z > 0.15 && prev.z < 0.25, "off-axis (z) stays put");
     std::printf("    max per-tick jump = %.5f m, final x = %.4f (start %.4f)\n",
                 max_jump, prev.x, start.x);
+  }
+
+  // -- Test: brief Hold freezes time and preserves the chained velocity. -----
+  std::printf("Test: warm resume preserves frozen chained state\n");
+  {
+    CartesianChunkFollower f(cfg);
+    ChunkFrame frame = makeRef(18, 0.20, 0.0);
+    const Pose6D start = frame.pose[cfg.window.discard_head_L];
+    f.submitFrame(frame, start);
+    Pose6D before_prev = start;
+    Pose6D before = start;
+    for (int i = 0; i < 100; ++i) {
+      before_prev = before;
+      before = f.tick(TICK);
+    }
+    const double travel_before = rb_servo::math::positionDistance(before_prev, before);
+    const std::size_t index_before = f.windowIndex();
+    const int consumed_before = f.windowConsumed();
+    const double phase_before = f.tInSegment();
+
+    f.pauseForHold(10.0);
+    check(f.holdPaused(), "brief Hold marks the active follower paused");
+    bool frozen = true;
+    for (int i = 0; i < 180; ++i) {
+      frozen &= poseNear(f.tick(TICK), before, 1e-12, 1e-12);
+    }
+    check(frozen, "Hold ticks do not advance the emitted pose");
+    check(f.windowIndex() == index_before && f.windowConsumed() == consumed_before &&
+              std::fabs(f.tInSegment() - phase_before) < 1e-12,
+          "Hold ticks freeze window consumption and segment time");
+    check(f.resumeFromHold(before, 10.36, 0.5, 0.05, 0.10) ==
+              HoldResumeResult::WarmResumed,
+          "gap inside grace window warm-resumes");
+    const Pose6D after = f.tick(TICK);
+    const double travel_after = rb_servo::math::positionDistance(before, after);
+    check(travel_after <= cfg.lin.v_max * TICK + 1e-9,
+          "first resumed tick stays within one velocity-limited tick");
+    check(travel_before > 1e-7 && travel_after > 0.25 * travel_before,
+          "warm resume retains mid-motion velocity instead of cold-seeding at zero");
+  }
+
+  // -- Test: a Hold beyond the grace window returns to cold-start semantics. -
+  std::printf("Test: expired Hold gap cold-starts\n");
+  {
+    CartesianChunkFollower f(cfg);
+    ChunkFrame frame = makeRef(18, 0.20, 0.0);
+    f.submitFrame(frame, frame.pose[cfg.window.discard_head_L]);
+    for (int i = 0; i < 100; ++i) f.tick(TICK);
+    const Pose6D frozen = f.lastPose();
+    f.pauseForHold(20.0);
+    check(f.resumeFromHold(frozen, 20.51, 0.5, 0.05, 0.10) ==
+              HoldResumeResult::GraceExpired,
+          "gap beyond grace reports expiry");
+    check(!f.active() && !f.holdPaused(), "expired Hold discards the active window");
+    f.submitFrame(frame, frozen);
+    const Pose6D cold_first = f.tick(TICK);
+    check(poseNear(cold_first, frozen, 1e-12, 1e-12),
+          "next frame cold-starts from the live reference with zero state");
   }
 
   // -- Test 2: stall ring-down when the window is exhausted. ------------------
@@ -436,6 +495,42 @@ int main() {
     check(z_last < start.z - 5e-3,
           "descent proceeds when the quasi-static gate is not met");
     check(f.diag().contact_shift_m < 1e-12, "no shift accumulates past the gate");
+  }
+
+  // -- Test: only contact-force ownership bypasses the quasi-static gate. ---
+  std::printf("Test: contact-force episode owns normal past accel gate\n");
+  {
+    CartesianChunkFollowerConfig gcfg = cfg;
+    gcfg.loading_projection_max_accel_m_s2 = -1.0;  // ordinary gate never met
+    CartesianChunkFollower f(gcfg);
+    ChunkFrame frame;
+    frame.policy_dt = SEG;
+    for (int i = 0; i < 16; ++i) {
+      const double t = i * SEG;
+      Pose6D p;
+      p.x = 0.03 * t;
+      p.y = 0.0;
+      p.z = 0.2 - 0.03 * t;
+      p.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+      frame.pose.push_back(p);
+      frame.grip.push_back(20.0);
+    }
+    const Pose6D start = frame.pose[cfg.window.discard_head_L];
+    f.submitFrame(frame, start);
+    f.setExternalReaction(
+        Eigen::Vector3d(0.0, 0.0, -1.0), true, true);  // contact_force episode
+    bool projection_seen = false;
+    double min_z = start.z;
+    double x_last = start.x;
+    for (int i = 0; i < 200; ++i) {
+      const Pose6D pose = f.tick(TICK);
+      projection_seen |= f.diag().loading_projection_active;
+      min_z = std::min(min_z, pose.z);
+      x_last = pose.x;
+    }
+    check(projection_seen, "debounced contact-force ownership bypasses accel gate");
+    check(min_z > start.z - 2e-3, "owned normal motion is projected out");
+    check(x_last > start.x + 5e-3, "owned-normal projection preserves tangential motion");
   }
 
   std::printf("\n=== %s (%d failure%s) ===\n",

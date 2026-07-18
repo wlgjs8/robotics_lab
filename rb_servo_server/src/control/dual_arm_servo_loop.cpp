@@ -391,6 +391,7 @@ bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFoll
         a.preview_max_actual_lead_m != b.preview_max_actual_lead_m ||
         a.preview_max_actual_lead_rad != b.preview_max_actual_lead_rad ||
         a.preview_max_consecutive_actual_lead_errors != b.preview_max_consecutive_actual_lead_errors ||
+        a.hold_bounce_resume_sec != b.hold_bounce_resume_sec ||
         a.chunk_feed_timeout_sec != b.chunk_feed_timeout_sec;
 }
 
@@ -1965,6 +1966,9 @@ void DualArmServoLoop::invalidatePostInitTare(ArmId arm_id, uint64_t command_seq
     runtime.control.transverse_contact_active = false;
     runtime.control.rotational_contact_active = false;
     runtime.normal_contact_active = false;
+    runtime.contact_force_normal_estimator.reset();
+    runtime.contact_cartesian_normal_offset_m = 0.0;
+    runtime.follower_contact_normal_owned = false;
     runtime.transverse_contact_active = false;
     runtime.rotational_contact_active = false;
     runtime.contact_anchor_valid = false;
@@ -2043,6 +2047,9 @@ bool DualArmServoLoop::latchPayloadIdentificationInhibit(ArmId arm_id) {
     runtime.control.proposal_committed = false;
     runtime.control.state = "payload_identification_inhibited";
     runtime.normal_contact_active = false;
+    runtime.contact_force_normal_estimator.reset();
+    runtime.contact_cartesian_normal_offset_m = 0.0;
+    runtime.follower_contact_normal_owned = false;
     runtime.transverse_contact_active = false;
     runtime.rotational_contact_active = false;
     runtime.contact_anchor_valid = false;
@@ -2125,6 +2132,7 @@ bool DualArmServoLoop::updateForceRuntime(
     runtime.control.compliance_active = false;
     runtime.t_tcp_compliance_valid = false;
     runtime.follower_loading_reaction_valid = false;
+    runtime.follower_contact_normal_owned = false;
     runtime.control.normal_regulating = false;
     runtime.control.transverse_regulating = false;
     runtime.control.rotational_regulating = false;
@@ -2175,12 +2183,22 @@ bool DualArmServoLoop::updateForceRuntime(
     runtime.control.target_force_n = arm_config.target_force_n;
     runtime.control.motion_epoch = motion_epoch_;
 
+    const bool contact_force_surface = arm_config.surface_source == "contact_force";
     // user_floor_plane tracks the runtime tilted plane; floor_constraint and the
-    // floorless "none" posture both use the nominal stand +Z as the hard-normal
-    // reference axis (no enforcing floor is required for "none").
-    const math::Vector3 normal = arm_config.surface_source == "user_floor_plane"
-        ? effectiveUserFloorNormal() : math::Vector3(0.0, 0.0, 1.0);
-    runtime.control.normal_stand = {normal.x(), normal.y(), normal.z()};
+    // floorless "none" posture use nominal stand +Z. contact_force has no frame
+    // outside a debounced episode; +Z below is only an internal placeholder
+    // until the current F/T sample can enter/capture, never an active Branch-A
+    // normal and never published as one.
+    math::Vector3 normal = arm_config.surface_source == "user_floor_plane"
+        ? effectiveUserFloorNormal()
+        : contact_force_surface && runtime.contact_force_normal_estimator.valid()
+            ? runtime.contact_force_normal_estimator.normalStand()
+            : math::Vector3(0.0, 0.0, 1.0);
+    const bool initial_normal_valid =
+        !contact_force_surface || runtime.contact_force_normal_estimator.valid();
+    runtime.control.normal_stand = initial_normal_valid
+        ? std::array<double, 3>{normal.x(), normal.y(), normal.z()}
+        : std::array<double, 3>{0.0, 0.0, 0.0};
 
     if (!ft_config.enable) {
         runtime.ft.healthy = false;
@@ -2203,11 +2221,11 @@ bool DualArmServoLoop::updateForceRuntime(
     // is available. This pose is configuration/geometry state, not a claim
     // that the wrench pipeline is healthy or that force motion is active.
     const Pose6D& tcp = *state.tcp_actual_stand;
-    const math::Matrix3 r_stand_surface = surfaceFrameFromNormal(normal);
-    const pinocchio::SE3 t_tcp_compliance = complianceFrameTcp(
+    math::Matrix3 r_stand_surface = surfaceFrameFromNormal(normal);
+    pinocchio::SE3 t_tcp_compliance = complianceFrameTcp(
         arm_config, ft_config, tcp, r_stand_surface
     );
-    const pinocchio::SE3 t_stand_compliance =
+    pinocchio::SE3 t_stand_compliance =
         math::se3FromPose(tcp) * t_tcp_compliance;
     runtime.compliance_frame_actual_stand = math::poseFromSe3(t_stand_compliance);
     runtime.control.compliance_frame_actual_stand =
@@ -2227,6 +2245,68 @@ bool DualArmServoLoop::updateForceRuntime(
     // rbpodo has no independent presence bit. This is deliberately weaker
     // than verified sensor health and is exposed as controller_frame_only.
     raw.sensor_present = state.eft_valid && ft_config.frame_configured;
+
+    math::Vector3 commanded_acceleration_tcp = math::Vector3::Zero();
+    try {
+        if (kinematics_) {
+            const JointArray& sent_q = arm_id == ArmId::Left
+                ? left_prev_sent_q_deg_ : right_prev_sent_q_deg_;
+            const ArmMountConfig& mount = arm_id == ArmId::Left
+                ? config_.left_mount : config_.right_mount;
+            const Pose6D sent_tcp =
+                kinematics_->computeTcpStand(arm_id, sent_q, mount);
+            if (runtime.sent_tcp_sample_count >= 2 &&
+                now_ns > runtime.sent_tcp_sample_newer_ns &&
+                runtime.sent_tcp_sample_newer_ns > runtime.sent_tcp_sample_older_ns) {
+                const double newer_dt_sec = static_cast<double>(
+                    now_ns - runtime.sent_tcp_sample_newer_ns) * 1e-9;
+                const double older_dt_sec = static_cast<double>(
+                    runtime.sent_tcp_sample_newer_ns -
+                    runtime.sent_tcp_sample_older_ns) * 1e-9;
+                if (newer_dt_sec <= config_.force_control.max_dt_sec &&
+                    older_dt_sec <= config_.force_control.max_dt_sec) {
+                    const math::Vector3 current_position(
+                        sent_tcp.x, sent_tcp.y, sent_tcp.z);
+                    const math::Vector3 newer_position(
+                        runtime.sent_tcp_sample_newer.x,
+                        runtime.sent_tcp_sample_newer.y,
+                        runtime.sent_tcp_sample_newer.z);
+                    const math::Vector3 older_position(
+                        runtime.sent_tcp_sample_older.x,
+                        runtime.sent_tcp_sample_older.y,
+                        runtime.sent_tcp_sample_older.z);
+                    const math::Vector3 newer_velocity =
+                        (current_position - newer_position) / newer_dt_sec;
+                    const math::Vector3 older_velocity =
+                        (newer_position - older_position) / older_dt_sec;
+                    const math::Vector3 acceleration_stand =
+                        2.0 * (newer_velocity - older_velocity) /
+                        (newer_dt_sec + older_dt_sec);
+                    commanded_acceleration_tcp =
+                        math::rotationFromPose(sent_tcp).transpose() *
+                        acceleration_stand;
+                } else {
+                    runtime.sent_tcp_sample_count = 0;
+                }
+            }
+            runtime.sent_tcp_sample_older = runtime.sent_tcp_sample_newer;
+            runtime.sent_tcp_sample_older_ns = runtime.sent_tcp_sample_newer_ns;
+            runtime.sent_tcp_sample_newer = sent_tcp;
+            runtime.sent_tcp_sample_newer_ns = now_ns;
+            runtime.sent_tcp_sample_count =
+                std::min(runtime.sent_tcp_sample_count + 1, 2);
+        } else {
+            runtime.sent_tcp_sample_count = 0;
+        }
+    } catch (const std::exception&) {
+        runtime.sent_tcp_sample_count = 0;
+        commanded_acceleration_tcp.setZero();
+    }
+    // Three valid sent-command TCP samples are required before the double
+    // difference is meaningful. Startup/gap ticks explicitly supply zero;
+    // the pipeline then phase-matches its own acceleration LPF to fresh EFT
+    // acquisitions before subtracting m*a.
+    pipeline.setTcpLinearAcceleration(commanded_acceleration_tcp);
     const FtWrenchPipelineOutput output =
         pipeline.process(raw, *state.tcp_actual_stand, now_ns);
     runtime.ft.wrench_tcp = output.wrench_tcp;
@@ -2404,6 +2484,74 @@ bool DualArmServoLoop::updateForceRuntime(
     const math::Vector3 torque_control_stand = torqueStand(output.control_external_wrench_tcp);
     const math::Vector3 force_fast_stand = forceStand(output.fast_external_wrench_tcp);
     const math::Vector3 torque_fast_stand = torqueStand(output.fast_external_wrench_tcp);
+
+    // contact_force enters on resultant control force because no normal exists
+    // yet. Capture n=-normalize(F) exactly once at the debounced rising edge,
+    // then freeze it until the existing release-brake/dwell state completes.
+    bool contact_force_entered = false;
+    if (contact_force_surface && runtime.control.enabled &&
+        config_.force_control.operating_mode == "cartesian_admittance" &&
+        output.freshness_advanced) {
+        if (!runtime.normal_contact_active) {
+            if (force_control_stand.norm() >= arm_config.contact_enter_force_n) {
+                if (++runtime.enter_count >= arm_config.debounce_samples) {
+                    runtime.normal_contact_active = true;
+                    runtime.enter_count = 0;
+                    runtime.contact_force_normal_estimator.update(
+                        true, force_control_stand);
+                    if (!runtime.contact_force_normal_estimator.valid()) {
+                        runtime.normal_contact_active = false;
+                        runtime.control.state = "fault";
+                        runtime.control.fault_reason =
+                            "contact-force normal capture failed";
+                        if (fault_reason) *fault_reason = runtime.control.fault_reason;
+                        return true;
+                    }
+                    runtime.contact_anchor = tcp;
+                    runtime.contact_anchor_valid = true;
+                    runtime.release_start_ns = 0;
+                    controller.engage();
+                    contact_force_entered = true;
+                }
+            } else {
+                runtime.enter_count = 0;
+            }
+        }
+    }
+    if (contact_force_surface && runtime.normal_contact_active) {
+        runtime.contact_force_normal_estimator.update(true, force_control_stand);
+        if (!runtime.contact_force_normal_estimator.valid()) {
+            runtime.control.state = "fault";
+            runtime.control.fault_reason = "contact-force episode lost its normal";
+            if (fault_reason) *fault_reason = runtime.control.fault_reason;
+            return true;
+        }
+        normal = runtime.contact_force_normal_estimator.normalStand();
+        runtime.control.normal_stand = {normal.x(), normal.y(), normal.z()};
+        r_stand_surface = surfaceFrameFromNormal(normal);
+        t_tcp_compliance = complianceFrameTcp(
+            arm_config, ft_config, tcp, r_stand_surface);
+        t_stand_compliance = math::se3FromPose(tcp) * t_tcp_compliance;
+        runtime.compliance_frame_actual_stand = math::poseFromSe3(t_stand_compliance);
+        runtime.control.compliance_frame_actual_stand =
+            runtime.compliance_frame_actual_stand;
+        runtime.control.compliance_frame_pose_valid = true;
+        runtime.t_tcp_compliance_pose = math::poseFromSe3(t_tcp_compliance);
+        runtime.t_tcp_compliance_valid = true;
+        if (contact_force_entered) {
+            const Pose6D& committed_offset = cartesian_controller.state().offset_tcp;
+            const math::Vector3 committed_translation_compliance(
+                committed_offset.x, committed_offset.y, committed_offset.z);
+            runtime.contact_cartesian_normal_offset_m = normal.dot(
+                t_stand_compliance.rotation() * committed_translation_compliance);
+        }
+    } else if (contact_force_surface) {
+        runtime.control.normal_stand = {0.0, 0.0, 0.0};
+        if (arm_config.compliance_frame == "surface") {
+            runtime.control.compliance_frame_pose_valid = false;
+            runtime.t_tcp_compliance_valid = false;
+        }
+    }
     const math::Vector3 force_control_surface =
         r_stand_surface.transpose() * force_control_stand;
     const math::Vector3 torque_control_surface =
@@ -2422,8 +2570,13 @@ bool DualArmServoLoop::updateForceRuntime(
     // wrench on the TCP, so floor compression projects opposite that outward
     // normal.  Keep the geometric normal unchanged for unloading motion and
     // negate only the wrench projection to expose positive compressive force.
-    const double measured_normal = -normal.dot(force_control_stand);
-    const double fast_normal = -normal.dot(force_fast_stand);
+    const bool normal_frame_valid =
+        !contact_force_surface || runtime.contact_force_normal_estimator.valid();
+    const double measured_normal = normal_frame_valid
+        ? -normal.dot(force_control_stand) : 0.0;
+    const double fast_normal = normal_frame_valid
+        ? -normal.dot(force_fast_stand)
+        : force_fast_stand.norm();
     runtime.control.measured_force_n = measured_normal;
     runtime.control.fast_normal_force_n = fast_normal;
     runtime.control.fast_force_norm_n = force_fast_stand.norm();
@@ -2441,7 +2594,9 @@ bool DualArmServoLoop::updateForceRuntime(
         transverse_force_n >= arm_config.transverse_contact_enter_force_n ||
         control_torque_norm_nm >= arm_config.torque_contact_enter_nm;
     runtime.control.contact_threshold_exceeded =
-        measured_normal >= arm_config.contact_enter_force_n ||
+        (contact_force_surface
+            ? force_control_stand.norm() >= arm_config.contact_enter_force_n
+            : measured_normal >= arm_config.contact_enter_force_n) ||
         (config_.force_control.operating_mode == "cartesian_admittance" &&
          cartesian_soft_contact);
     const bool hard_limit_threshold_exceeded =
@@ -2462,17 +2617,19 @@ bool DualArmServoLoop::updateForceRuntime(
 
     if (config_.force_control.operating_mode == "cartesian_admittance" &&
         output.freshness_advanced) {
-        if (runtime.normal_contact_active) {
-            if (measured_normal <= arm_config.contact_release_force_n) {
-                runtime.normal_contact_active = false;
-            }
-        } else if (measured_normal >= arm_config.contact_enter_force_n) {
-            if (++runtime.enter_count >= arm_config.debounce_samples) {
-                runtime.normal_contact_active = true;
+        if (!contact_force_surface) {
+            if (runtime.normal_contact_active) {
+                if (measured_normal <= arm_config.contact_release_force_n) {
+                    runtime.normal_contact_active = false;
+                }
+            } else if (measured_normal >= arm_config.contact_enter_force_n) {
+                if (++runtime.enter_count >= arm_config.debounce_samples) {
+                    runtime.normal_contact_active = true;
+                    runtime.enter_count = 0;
+                }
+            } else {
                 runtime.enter_count = 0;
             }
-        } else {
-            runtime.enter_count = 0;
         }
         if (runtime.transverse_contact_active) {
             if (transverse_force_n <= arm_config.transverse_contact_release_force_n) {
@@ -2562,17 +2719,52 @@ bool DualArmServoLoop::updateForceRuntime(
     const double controller_dt_sec =
         1.0 / static_cast<double>(config_.force_control.update_rate_hz);
     if (mode == "cartesian_admittance") {
+        if (contact_force_surface && runtime.release_hold_pending) {
+            runtime.control.state = "release_hold";
+            return false;
+        }
+        if (contact_force_surface && arm_config.compliance_frame == "surface" &&
+            !runtime.t_tcp_compliance_valid) {
+            // A surface-frame Cartesian controller has no defined axes before
+            // measured contact establishes the episode normal.
+            runtime.control.state = "armed";
+            return false;
+        }
         if (!cartesian_controller.engaged()) cartesian_controller.engage();
         ForceControlCommand cartesian_command;
         cartesian_command.mode = ForceControlMode::Admittance;
         cartesian_command.enabled_axis = arm_config.compliance_axes;
-        // Cartesian compliance is a symmetric, zero-wrench six-axis spring
-        // around the current command equilibrium. The legacy scalar unilateral
-        // normal controller remains exclusive to guarded_admittance.
+        Wrench6D cartesian_wrench = runtime.control_wrench_compliance;
+        Vec6 cartesian_twist = runtime.actual_twist_compliance;
+        if (contact_force_surface && runtime.normal_contact_active) {
+            const math::Matrix3 r_stand_compliance =
+                t_stand_compliance.rotation();
+            math::Vector3 tangent_force_stand = r_stand_compliance * math::Vector3(
+                cartesian_wrench.fx, cartesian_wrench.fy, cartesian_wrench.fz);
+            tangent_force_stand -= normal * normal.dot(tangent_force_stand);
+            const math::Vector3 tangent_force_compliance =
+                r_stand_compliance.transpose() * tangent_force_stand;
+            cartesian_wrench.fx = tangent_force_compliance.x();
+            cartesian_wrench.fy = tangent_force_compliance.y();
+            cartesian_wrench.fz = tangent_force_compliance.z();
+
+            math::Vector3 tangent_velocity_stand =
+                r_stand_compliance * math::Vector3(
+                    cartesian_twist.x, cartesian_twist.y, cartesian_twist.z);
+            tangent_velocity_stand -= normal * normal.dot(tangent_velocity_stand);
+            const math::Vector3 tangent_velocity_compliance =
+                r_stand_compliance.transpose() * tangent_velocity_stand;
+            cartesian_twist.x = tangent_velocity_compliance.x();
+            cartesian_twist.y = tangent_velocity_compliance.y();
+            cartesian_twist.z = tangent_velocity_compliance.z();
+        }
+        // During contact_force, the symmetric Cartesian controller receives
+        // only tangential translation; the scalar unilateral controller below
+        // exclusively owns the frozen measured normal.
         const ForceControllerProposal cartesian_proposal = cartesian_controller.propose(
-            runtime.control_wrench_compliance,
+            cartesian_wrench,
             cartesian_command,
-            runtime.actual_twist_compliance,
+            cartesian_twist,
             controller_dt_sec
         );
         runtime.pending_cartesian_proposal = cartesian_proposal;
@@ -2582,7 +2774,13 @@ bool DualArmServoLoop::updateForceRuntime(
         // Stand-frame loading direction for the chunk follower's wrench-gated
         // projection: the negation of the deadband-filtered wrench error, the
         // same convention the policy-delta loading projection uses below.
-        {
+        if (contact_force_surface && runtime.normal_contact_active) {
+            runtime.follower_loading_reaction_stand = {
+                -normal.x(), -normal.y(), -normal.z()
+            };
+            runtime.follower_loading_reaction_valid = true;
+            runtime.follower_contact_normal_owned = true;
+        } else {
             const math::Vector3 reaction_compliance(
                 -cartesian_proposal.wrench_error_tcp.fx,
                 -cartesian_proposal.wrench_error_tcp.fy,
@@ -2661,7 +2859,9 @@ bool DualArmServoLoop::updateForceRuntime(
             wrench_drive;
         runtime.control.compliance_recenter_active =
             !wrench_drive && (linear_residual || angular_residual);
-        runtime.control.target_force_n = 0.0;
+        runtime.control.target_force_n =
+            contact_force_surface && runtime.normal_contact_active
+                ? arm_config.target_force_n : 0.0;
         runtime.control.energy_j = cartesian_proposal.state.observed_energy_j;
         if (!cartesian_proposal.valid) {
             runtime.control.state = "fault";
@@ -2673,7 +2873,9 @@ bool DualArmServoLoop::updateForceRuntime(
         }
         runtime.control.state = runtime.control.compliance_active
             ? "regulating" : "armed";
-        return false;
+        if (!(contact_force_surface && runtime.normal_contact_active)) {
+            return false;
+        }
     }
 
     // A release hold is retried until the measured-pose target reaches the
@@ -2751,6 +2953,22 @@ bool DualArmServoLoop::updateForceRuntime(
             runtime.release_hold_applied = false;
             runtime.release_hold_clear_requested = false;
             runtime.normal_contact_active = false;
+            if (contact_force_surface) {
+                runtime.contact_force_normal_estimator.update(
+                    false, math::Vector3::Zero());
+                runtime.control.normal_stand = {0.0, 0.0, 0.0};
+                runtime.follower_loading_reaction_valid = false;
+                runtime.follower_contact_normal_owned = false;
+                runtime.pending_cartesian_proposal.reset();
+                runtime.pending_cartesian_proposal_applied = false;
+                cartesian_controller.reset();
+                cartesian_controller.engage();
+                runtime.rolling_compliance_target = tcp;
+                runtime.previous_raw_compliance_target = tcp;
+                runtime.rolling_compliance_target_valid = true;
+                runtime.rolling_compliance_target_source = "release_hold";
+                runtime.contact_cartesian_normal_offset_m = 0.0;
+            }
             sync_contact_telemetry();
             runtime.contact_anchor = tcp;
             runtime.contact_anchor_valid = true;
@@ -2834,11 +3052,18 @@ void DualArmServoLoop::applyForceCorrection(ArmId arm_id, ArmCommand* command) {
     if (!normal_available && !cartesian_available) {
         return;
     }
-    const math::Vector3 normal(
+    const bool contact_normal_owned =
+        arm_config.surface_source == "contact_force" &&
+        runtime.normal_contact_active &&
+        runtime.contact_force_normal_estimator.valid();
+    math::Vector3 normal(
         runtime.control.normal_stand[0],
         runtime.control.normal_stand[1],
         runtime.control.normal_stand[2]
     );
+    if (!contact_normal_owned && !(normal.squaredNorm() > 0.0)) {
+        normal = math::Vector3(0.0, 0.0, 1.0);
+    }
     const math::Matrix3 r_stand_surface = surfaceFrameFromNormal(normal);
     const math::Matrix3 r_stand_compliance =
         math::rotationFromPose(runtime.compliance_frame_actual_stand);
@@ -2858,6 +3083,19 @@ void DualArmServoLoop::applyForceCorrection(ArmId arm_id, ArmCommand* command) {
             candidate_previous_raw_target = raw_target;
             candidate_rolling_target = raw_target;
             candidate_source = "policy_target";
+        } else if (runtime.chunk_follower_drove_this_tick) {
+            // The chunk follower produced this target and its wrench-gated
+            // loading projection already removed contact loading (episode
+            // tangent projection included under contact_force ownership).
+            // Adopt it verbatim: running the equilibrium's own delta
+            // projection ON TOP double-books the contact and lets the
+            // equilibrium drift from the plan (2026-07-18 14:16 run: 11.6 mm
+            // plan-vs-equilibrium gap consumed the 20 mm actual-lead budget
+            // with only ~0.3 deg of real joint tracking error).
+            candidate_previous_raw_target = raw_target;
+            candidate_rolling_target = raw_target;
+            candidate_source = "policy_target";
+            runtime.control.loading_projection_active = false;
         } else {
             // On Hold -> policy ownership transfer, project the first policy
             // delta from the fixed Hold equilibrium as well. Resetting directly
@@ -2875,19 +3113,28 @@ void DualArmServoLoop::applyForceCorrection(ArmId arm_id, ArmCommand* command) {
             math::Vector3 raw_delta_surface =
                 r_stand_compliance.transpose() * raw_delta_stand;
             const math::Vector3 original_linear_delta_surface = raw_delta_surface;
-            // Use only the wrench outside the configured deadband. This keeps
-            // quiet sensor residuals from projecting the policy equilibrium.
-            const math::Vector3 effective_reaction(
-                -runtime.control.wrench_error_compliance.fx,
-                -runtime.control.wrench_error_compliance.fy,
-                -runtime.control.wrench_error_compliance.fz
-            );
-            const double translation_loading =
-                effective_reaction.dot(raw_delta_surface);
-            if (translation_loading > 0.0 &&
-                effective_reaction.squaredNorm() > 1e-12) {
-                raw_delta_surface -= effective_reaction *
-                    (translation_loading / effective_reaction.squaredNorm());
+            if (contact_normal_owned) {
+                // The scalar guarded controller owns both signs of motion on
+                // the frozen normal for the entire episode. Policy translation
+                // is therefore tangent-only, independent of wrench deadband.
+                raw_delta_stand -= normal * normal.dot(raw_delta_stand);
+                raw_delta_surface =
+                    r_stand_compliance.transpose() * raw_delta_stand;
+            } else {
+                // Use only the wrench outside the configured deadband. This keeps
+                // quiet sensor residuals from projecting the policy equilibrium.
+                const math::Vector3 effective_reaction(
+                    -runtime.control.wrench_error_compliance.fx,
+                    -runtime.control.wrench_error_compliance.fy,
+                    -runtime.control.wrench_error_compliance.fz
+                );
+                const double translation_loading =
+                    effective_reaction.dot(raw_delta_surface);
+                if (translation_loading > 0.0 &&
+                    effective_reaction.squaredNorm() > 1e-12) {
+                    raw_delta_surface -= effective_reaction *
+                        (translation_loading / effective_reaction.squaredNorm());
+                }
             }
 
             const math::Matrix3 raw_rotation = math::rotationFromPose(raw_target);
@@ -2966,10 +3213,12 @@ void DualArmServoLoop::applyForceCorrection(ArmId arm_id, ArmCommand* command) {
     // outward unload offset; tangential motion and orientation remain intact.
     if (normal_available) {
         const double policy_normal_offset = normal.dot(target - anchor);
-        const double accepted_normal_offset = std::max(
-            policy_normal_offset,
-            runtime.pending_proposal->state.unload_offset_m
-        );
+        const double accepted_normal_offset = contact_normal_owned
+            ? runtime.pending_proposal->state.unload_offset_m
+            : std::max(
+                policy_normal_offset,
+                runtime.pending_proposal->state.unload_offset_m
+            );
         target += normal * (accepted_normal_offset - policy_normal_offset);
         runtime.pending_proposal_applied = true;
     }
@@ -2978,7 +3227,19 @@ void DualArmServoLoop::applyForceCorrection(ArmId arm_id, ArmCommand* command) {
     command->tcp_target_stand.z = target.z();
 
     if (cartesian_available) {
-        const Pose6D& offset = runtime.pending_cartesian_proposal->state.offset_tcp;
+        Pose6D offset = runtime.pending_cartesian_proposal->state.offset_tcp;
+        if (contact_normal_owned) {
+            math::Vector3 translation_stand = r_stand_compliance *
+                math::Vector3(offset.x, offset.y, offset.z);
+            translation_stand += normal * (
+                runtime.contact_cartesian_normal_offset_m -
+                normal.dot(translation_stand));
+            const math::Vector3 translation_compliance =
+                r_stand_compliance.transpose() * translation_stand;
+            offset.x = translation_compliance.x();
+            offset.y = translation_compliance.y();
+            offset.z = translation_compliance.z();
+        }
         const pinocchio::SE3 t_stand_tcp = math::se3FromPose(
             command->tcp_target_stand
         );
@@ -5622,6 +5883,7 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.follower_loading_projection_active = abc.follower_loading_projection_active;
     solve.follower_contact_shift_m = abc.follower_contact_shift_m;
     solve.follower_reanchor_count = abc.follower_reanchor_count;
+    solve.follower_warm_resume_count = abc.follower_warm_resume_count;
     solve.safety_intervention_recent = abc.safety_intervention_recent;
     solve.delta_twist_pending_linear_norm_m = abc.delta_twist_pending_linear_norm_m;
     solve.delta_twist_pending_angular_norm_rad = abc.delta_twist_pending_angular_norm_rad;
@@ -5848,7 +6110,11 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     std::uint64_t& reanchor_count = arm_id == ArmId::Left
         ? left_chunk_follower_reanchor_count_
         : right_chunk_follower_reanchor_count_;
+    std::uint64_t& warm_resume_count = arm_id == ArmId::Left
+        ? left_chunk_follower_warm_resume_count_
+        : right_chunk_follower_warm_resume_count_;
     abc.follower_reanchor_count = reanchor_count;
+    abc.follower_warm_resume_count = warm_resume_count;
     abc.safety_intervention_recent = intervention_recent;
     const bool fault_policy = rf.fallback_policy == RuckigFollowerFallbackPolicy::Fault;
     const bool was_active = follower->active();
@@ -5882,6 +6148,21 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
             previous_sent_q_deg, dt_sec));
     };
+    if (rf.enable && chunk_frame_receiver_ && command.mode == ControlMode::Hold &&
+        follower->active()) {
+        // The 2026-07-18 12:44 stream reached this path through two dispatch
+        // shapes: a raw dual Hold bypassed the Cartesian branch entirely, while
+        // Cartesian admittance promoted a raw Hold and took the force-hold branch.
+        // Both used to call deactivate(), even though their 10--360 ms gaps were
+        // far shorter than chunk_feed_timeout_sec. Freeze segment/window time;
+        // the Hold path owns the robot until a bounded warm resume or expiry.
+        const double now_sec = ChunkFrameReceiver::steadyNowSec();
+        follower->pauseForHold(now_sec);
+        follower->expireHoldPause(now_sec, rf.hold_bounce_resume_sec);
+        resetChunkFollowerEngageWait(arm_id);
+        smd_tracker->deactivate();
+        return with_stage_telemetry(command);
+    }
     if (!rf.enable || !chunk_frame_receiver_ || command.mode != ControlMode::TcpPoseTarget ||
         !command.has_tcp_target || !kinematics_) {
         // Not in the follower regime: deactivate (drops the stale window) and run
@@ -5931,6 +6212,24 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         smoothed.tcp_target_stand = reference;
         return smoothed;
     };
+    if (follower->holdPaused()) {
+        const control::HoldResumeResult resume = follower->resumeFromHold(
+            reference,
+            ChunkFrameReceiver::steadyNowSec(),
+            rf.hold_bounce_resume_sec,
+            kPoseTrackReanchorPosTolM,
+            kPoseTrackReanchorAngTolRad
+        );
+        if (resume == control::HoldResumeResult::WarmResumed) {
+            ++warm_resume_count;
+            abc.follower_warm_resume_count = warm_resume_count;
+            transition_reason = "warm resume";
+        } else if (resume == control::HoldResumeResult::GraceExpired) {
+            transition_reason = "Hold grace expired";
+        } else if (resume == control::HoldResumeResult::Diverged) {
+            transition_reason = "Hold resume divergence";
+        }
+    }
     if (follower->active()) {
         const control::FollowerDiag& active_diag = follower->diag();
         abc.follower_wire_seq = active_diag.seg_wire_seq;
@@ -6073,8 +6372,14 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         Eigen::Vector3d(force_runtime.follower_loading_reaction_stand[0],
                         force_runtime.follower_loading_reaction_stand[1],
                         force_runtime.follower_loading_reaction_stand[2]),
-        force_runtime.follower_loading_reaction_valid);
+        force_runtime.follower_loading_reaction_valid,
+        force_runtime.follower_contact_normal_owned);
     smoothed.tcp_target_stand = follower->tick(dt_sec);
+    // Tell the force path this target is follower-produced (already loading-
+    // projected) so the rolling equilibrium adopts it verbatim instead of
+    // double-projecting and drifting away from the plan.
+    (arm_id == ArmId::Left ? left_force_runtime_ : right_force_runtime_)
+        .chunk_follower_drove_this_tick = true;
     if (delta_preview) {
         // Compliance-aware actual lead: strip the committed admittance offset
         // from the measured pose so deliberate compliance is not counted as
@@ -6435,6 +6740,11 @@ ServoTarget DualArmServoLoop::computeServoTarget(
 ) {
     if (command_verdict) *command_verdict = SafetyVerdict::Ok;
     clearChunkFollowerFaultRequests();
+    // Per-tick provenance: applyChunkFollowerStage sets these when the chunk
+    // follower produces the Cartesian target this tick; every other dispatch
+    // shape leaves them false so the equilibrium keeps its own projection.
+    left_force_runtime_.chunk_follower_drove_this_tick = false;
+    right_force_runtime_.chunk_follower_drove_this_tick = false;
     ServoTarget target;
     const bool synthetic_hold = isSyntheticHoldCommand(command);
     const auto clear_left_linear_path = [&]() {
@@ -6598,6 +6908,28 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         ArmId::Left, left_state, command.left.mode, &effective_command.left);
     const bool right_force_hold = promote_force_hold(
         ArmId::Right, right_state, command.right.mode, &effective_command.right);
+
+    const auto pause_chunk_follower_for_hold = [this](
+        ArmId arm_id,
+        ControlMode raw_mode,
+        control::CartesianChunkFollower& follower,
+        const RuckigFollowerConfig& built_config
+    ) {
+        if (raw_mode != ControlMode::Hold || !follower.active() ||
+            !built_config.enable ||
+            built_config.controller == RuckigFollowerController::DeltaTwist) {
+            follower.deactivate();
+            resetChunkFollowerEngageWait(arm_id);
+            return false;
+        }
+        const double now_sec = ChunkFrameReceiver::steadyNowSec();
+        follower.pauseForHold(now_sec);
+        if (follower.expireHoldPause(now_sec, built_config.hold_bounce_resume_sec)) {
+            resetChunkFollowerEngageWait(arm_id);
+            return false;
+        }
+        return true;
+    };
 
     if (isCartesianMode(effective_command.left.mode) || isCartesianMode(effective_command.right.mode)) {
         bool cartesian_available =
@@ -6779,7 +7111,11 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             ArmId::Right, config_.right_mount, right_prev_sent_q_deg_);
         ArmCommand left_pose_track_command;
         if (left_force_hold) {
-            left_chunk_follower_.deactivate();
+            pause_chunk_follower_for_hold(
+                ArmId::Left,
+                command.left.mode,
+                left_chunk_follower_,
+                left_chunk_follower_built_);
             left_delta_twist_follower_.deactivate();
             left_pose_track_smd_.deactivate();
             left_pose_track_command = effective_command.left;
@@ -6819,7 +7155,11 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         }
         ArmCommand right_pose_track_command;
         if (right_force_hold) {
-            right_chunk_follower_.deactivate();
+            pause_chunk_follower_for_hold(
+                ArmId::Right,
+                command.right.mode,
+                right_chunk_follower_,
+                right_chunk_follower_built_);
             right_delta_twist_follower_.deactivate();
             right_pose_track_smd_.deactivate();
             right_pose_track_command = effective_command.right;
@@ -7017,14 +7357,17 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     }
 
     // No arm is in Cartesian mode, so applyChunkFollowerStage() did not run.
-    // Drop both chunk follower variants here to preserve the invariant that a
-    // follower cannot outlive the streaming TcpPoseTarget command that fed it.
-    left_chunk_follower_.deactivate();
-    right_chunk_follower_.deactivate();
+    // A raw dual Hold reaches this dispatch path directly. Before warm-resume,
+    // it unconditionally deactivated both followers; the force-Hold promotion
+    // above was the second unconditional path seen in the 2026-07-18 12:44
+    // bounce evidence. Preserve a bounded, frozen chunk only for raw Hold;
+    // every other mode switch still drops the streaming state immediately.
+    pause_chunk_follower_for_hold(
+        ArmId::Left, command.left.mode, left_chunk_follower_, left_chunk_follower_built_);
+    pause_chunk_follower_for_hold(
+        ArmId::Right, command.right.mode, right_chunk_follower_, right_chunk_follower_built_);
     left_delta_twist_follower_.deactivate();
     right_delta_twist_follower_.deactivate();
-    resetChunkFollowerEngageWait(ArmId::Left);
-    resetChunkFollowerEngageWait(ArmId::Right);
 
     target.left_q_target_deg = left_traj_filter_.computeJointTarget(
         command.left,
@@ -8357,6 +8700,9 @@ void DualArmServoLoop::resyncArmAfterFreedrive(ArmId arm_id, const RobotState& s
     force_runtime.pending_rolling_compliance_target_source = "unavailable";
     force_runtime.compliance_hold_target_this_tick = false;
     force_runtime.normal_contact_active = false;
+    force_runtime.contact_force_normal_estimator.reset();
+    force_runtime.contact_cartesian_normal_offset_m = 0.0;
+    force_runtime.follower_contact_normal_owned = false;
     force_runtime.transverse_contact_active = false;
     force_runtime.rotational_contact_active = false;
     force_runtime.contact_anchor_valid = false;
@@ -8368,6 +8714,7 @@ void DualArmServoLoop::resyncArmAfterFreedrive(ArmId arm_id, const RobotState& s
     force_runtime.release_hold_applied = false;
     force_runtime.release_hold_clear_requested = false;
     force_runtime.previous_actual_pose_ns = 0;
+    force_runtime.sent_tcp_sample_count = 0;
 
     force_runtime.control.contact_active = false;
     force_runtime.control.normal_contact_active = false;
