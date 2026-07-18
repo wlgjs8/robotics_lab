@@ -409,6 +409,7 @@ control::CartesianChunkFollowerConfig makeChunkFollowerConfig(const RuckigFollow
     cfg.max_actual_lead_m = rf.preview_max_actual_lead_m;
     cfg.max_actual_lead_rad = rf.preview_max_actual_lead_rad;
     cfg.max_consecutive_actual_lead_errors = rf.preview_max_consecutive_actual_lead_errors;
+    cfg.loading_projection_max_accel_m_s2 = rf.loading_projection_max_accel_m_s2;
     return cfg;
 }
 
@@ -5901,8 +5902,30 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         *submitted_recv_seq = 0;
     }
     // Live reference = FK of the previously SENT joints (same anchor discipline
-    // as the SMD path).
-    const Pose6D reference = kinematics_->computeTcpStand(arm_id, previous_sent_q_deg, mount);
+    // as the SMD path). The sent joints already CONTAIN the committed compliance
+    // offset, and applyForceCorrection re-applies that offset downstream every
+    // tick — so strip it here. Without this the engage-wait hold is not a fixed
+    // point: hold target = FK(sent) + offset ratchets by one offset per tick and
+    // crawls at the velocity clamp along the offset direction (2026-07-18 12:28
+    // run: a chunk-feed gap deactivated the follower mid-transit with an
+    // 10.7 mm persistent K=0 offset and the arm took off at ~0.5 m/s until the
+    // inertial spike latched ExternalForceLimit). A cold-start re-engage
+    // likewise anchors at the stripped pose so anchor + offset reproduces the
+    // previous sent pose exactly (no double-counted offset jump).
+    Pose6D reference = kinematics_->computeTcpStand(arm_id, previous_sent_q_deg, mount);
+    {
+        const ForceArmRuntime& reference_force_runtime =
+            arm_id == ArmId::Left ? left_force_runtime_ : right_force_runtime_;
+        if (reference_force_runtime.t_tcp_compliance_valid) {
+            const ForceController& reference_cartesian_controller =
+                arm_id == ArmId::Left ? left_cartesian_force_controller_
+                                      : right_cartesian_force_controller_;
+            reference = removeComplianceOffsetFromMeasured(
+                reference,
+                reference_force_runtime.t_tcp_compliance_pose,
+                reference_cartesian_controller.state().offset_tcp);
+        }
+    }
     const auto hold_at_reference = [&]() {
         ArmCommand smoothed = command;
         smoothed.tcp_target_stand = reference;

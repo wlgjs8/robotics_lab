@@ -33,6 +33,9 @@ struct CartesianChunkFollowerConfig {
   double max_actual_lead_m{0.0};
   double max_actual_lead_rad{0.0};
   int max_consecutive_actual_lead_errors{0};
+  // Quasi-static gate: loading projection only runs while the plan's linear
+  // acceleration is below this (fast-transit inertial wrench is not contact).
+  double loading_projection_max_accel_m_s2{0.5};
 };
 
 struct FollowerDiag {

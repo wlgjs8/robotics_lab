@@ -243,6 +243,7 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         "preview_max_actual_lead_m",
         "preview_max_actual_lead_rad",
         "preview_max_consecutive_actual_lead_errors",
+        "loading_projection_max_accel_m_s2",
         "chunk_feed_timeout_sec",
     }, path);
     if (has(node, "enable")) out->enable = asBool(node["enable"], path + ".enable");
@@ -365,6 +366,11 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
     if (has(node, "preview_max_actual_lead_rad")) {
         out->preview_max_actual_lead_rad = asDouble(
             node["preview_max_actual_lead_rad"], path + ".preview_max_actual_lead_rad");
+    }
+    if (has(node, "loading_projection_max_accel_m_s2")) {
+        out->loading_projection_max_accel_m_s2 = asDouble(
+            node["loading_projection_max_accel_m_s2"],
+            path + ".loading_projection_max_accel_m_s2");
     }
     if (has(node, "preview_max_consecutive_actual_lead_errors")) {
         out->preview_max_consecutive_actual_lead_errors = asInt(

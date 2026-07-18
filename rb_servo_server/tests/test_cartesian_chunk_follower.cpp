@@ -294,9 +294,13 @@ int main() {
   }
 
   // -- Test: wrench-gated loading projection (contact-aware following). ------
+  // These blocks isolate direction/clamp semantics, so the quasi-static accel
+  // gate is opened wide; the gate itself is tested separately below.
+  CartesianChunkFollowerConfig pcfg = cfg;
+  pcfg.loading_projection_max_accel_m_s2 = 100.0;
   std::printf("Test: loading projection blocks contact-loading advance\n");
   {
-    CartesianChunkFollower f(cfg);
+    CartesianChunkFollower f(pcfg);
     // Reference descends in -z while advancing in +x (policy pressing a floor).
     ChunkFrame frame;
     frame.policy_dt = SEG;
@@ -352,7 +356,7 @@ int main() {
   // -- Test: sign-flipping reaction (inertial wrench) never yanks the plan. --
   std::printf("Test: direction-inconsistent reaction is rejected\n");
   {
-    CartesianChunkFollower f(cfg);
+    CartesianChunkFollower f(pcfg);
     ChunkFrame frame;
     frame.policy_dt = SEG;
     for (int i = 0; i < 16; ++i) {
@@ -404,6 +408,34 @@ int main() {
     for (int i = 0; i < 200; ++i) z_last = f.tick(TICK).z;
     check(z_last < start.z - 5e-3, "descent proceeds normally with no valid reaction");
     check(f.diag().contact_shift_m < 1e-12, "no plan shift accumulates when invalid");
+  }
+
+  // -- Test: quasi-static gate stands the projection down when not met. ------
+  std::printf("Test: accel gate suppresses projection when unmet\n");
+  {
+    CartesianChunkFollowerConfig gcfg = cfg;
+    gcfg.loading_projection_max_accel_m_s2 = -1.0;  // gate can never be met
+    CartesianChunkFollower f(gcfg);
+    ChunkFrame frame;
+    frame.policy_dt = SEG;
+    for (int i = 0; i < 16; ++i) {
+      const double t = i * SEG;
+      Pose6D p;
+      p.x = 0.0;
+      p.y = 0.0;
+      p.z = 0.2 - 0.03 * t;
+      p.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+      frame.pose.push_back(p);
+      frame.grip.push_back(20.0);
+    }
+    const Pose6D start = frame.pose[cfg.window.discard_head_L];
+    f.submitFrame(frame, start);
+    f.setExternalReaction(Eigen::Vector3d(0.0, 0.0, -1.0), true);  // stable dir
+    double z_last = start.z;
+    for (int i = 0; i < 200; ++i) z_last = f.tick(TICK).z;
+    check(z_last < start.z - 5e-3,
+          "descent proceeds when the quasi-static gate is not met");
+    check(f.diag().contact_shift_m < 1e-12, "no shift accumulates past the gate");
   }
 
   std::printf("\n=== %s (%d failure%s) ===\n",

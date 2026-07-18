@@ -997,6 +997,16 @@ cartesian_control:
         preview_max_actual_lead_m: 0.020
         preview_max_actual_lead_rad: 0.01745329252       # 1.0 deg
         preview_max_consecutive_actual_lead_errors: 3
+        # Quasi-static gate for the contact-aware loading projection. The
+        # 2026-07-18 12:13 place-transit run showed fast-transit inertial
+        # wrench (2.5-5 N, m*a of the ~3.5 kg tool, direction-stable during a
+        # sustained acceleration) latching the transverse contact classifier
+        # and firing the projection mid-transit: the plan yank spiked a 57 N
+        # inertial reading and latched a phantom ExternalForceLimit. The
+        # projection now runs only while the plan's linear acceleration is
+        # below this bound (a real surface press is quasi-static); transit
+        # impacts remain owned by the 30/35 N hard limits.
+        loading_projection_max_accel_m_s2: 0.5
         chunk_feed_timeout_sec: 1.5
         fallback_policy: "fault"     # strict: no silent SMD fallback; cold start holds, loss latches ChunkFollowerFault (ResetFault to recover)
         engage_timeout_sec: 3.0      # max wait for the first chunk frame before faulting (fault policy only)

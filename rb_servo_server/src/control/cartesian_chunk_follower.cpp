@@ -172,7 +172,17 @@ void CartesianChunkFollower::stepToNextSegment() {
       // wrench flips sign with the motion and must never yank the plan.
       const bool consistent = prev_loading_dir_valid_ &&
           loading_dir_stand_.dot(prev_loading_dir_) > 0.0;
-      if (r2 > 1e-12 && consistent) {
+      // Quasi-static gate: during fast transit the measured wrench carries a
+      // real m*a inertial component the gravity map cannot remove; a real
+      // surface press happens at near-zero plan acceleration. Above the bound
+      // the projection stands down (baseline follower; hard limits still own
+      // impact protection).
+      const auto& a0 = core_.a0();
+      const double plan_accel =
+          std::sqrt(a0[0] * a0[0] + a0[1] * a0[1] + a0[2] * a0[2]);
+      const bool quasi_static =
+          plan_accel <= cfg_.loading_projection_max_accel_m_s2;
+      if (r2 > 1e-12 && consistent && quasi_static) {
         const auto& p0 = core_.p0();
         const Eigen::Vector3d advance =
             positionOf(window_.poseAt(k)) + contact_shift_ -
