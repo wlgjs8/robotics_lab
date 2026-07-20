@@ -2494,7 +2494,56 @@ bool DualArmServoLoop::updateForceRuntime(
         config_.force_control.operating_mode == "cartesian_admittance" &&
         output.freshness_advanced) {
         if (!runtime.normal_contact_active) {
-            if (force_control_stand.norm() >= arm_config.contact_enter_force_n) {
+            // Episode ENTRY gates (2026-07-18 15:23 runs): transit grip/
+            // inertial residuals reached 3.5-9.5 N with a ROTATING direction
+            // and froze bogus lateral normals for seconds, warping the
+            // post-pick motion. A real surface contact is (a) approached at
+            // low commanded speed and (b) pushes in a stable direction across
+            // the debounce window. Either gate failing resets the debounce.
+            double commanded_speed_m_s =
+                std::numeric_limits<double>::infinity();
+            if (runtime.sent_tcp_sample_count >= 2 &&
+                runtime.sent_tcp_sample_newer_ns >
+                    runtime.sent_tcp_sample_older_ns) {
+                const double dt_s = static_cast<double>(
+                    runtime.sent_tcp_sample_newer_ns -
+                    runtime.sent_tcp_sample_older_ns) * 1e-9;
+                const math::Vector3 dp(
+                    runtime.sent_tcp_sample_newer.x - runtime.sent_tcp_sample_older.x,
+                    runtime.sent_tcp_sample_newer.y - runtime.sent_tcp_sample_older.y,
+                    runtime.sent_tcp_sample_newer.z - runtime.sent_tcp_sample_older.z);
+                if (dt_s > 0.0) commanded_speed_m_s = dp.norm() / dt_s;
+            }
+            const bool entry_speed_ok =
+                commanded_speed_m_s <= arm_config.contact_entry_max_speed_m_s;
+            bool entry_direction_ok = false;
+            const double f_norm = force_control_stand.norm();
+            if (f_norm > 1e-9) {
+                const math::Vector3 dir = force_control_stand / f_norm;
+                const math::Vector3 first(
+                    runtime.contact_entry_first_dir[0],
+                    runtime.contact_entry_first_dir[1],
+                    runtime.contact_entry_first_dir[2]);
+                constexpr double kEntryDirCosMin = 0.866;  // 30 deg cone
+                if (!runtime.contact_entry_first_dir_valid ||
+                    dir.dot(first) >= kEntryDirCosMin) {
+                    entry_direction_ok = true;
+                    if (!runtime.contact_entry_first_dir_valid) {
+                        runtime.contact_entry_first_dir = {
+                            dir.x(), dir.y(), dir.z()};
+                        runtime.contact_entry_first_dir_valid = true;
+                    }
+                } else {
+                    // Rotated out of the cone: restart the window on the new
+                    // direction so a genuine contact after a transient still
+                    // enters promptly.
+                    runtime.contact_entry_first_dir = {dir.x(), dir.y(), dir.z()};
+                    runtime.contact_entry_first_dir_valid = true;
+                    runtime.enter_count = 0;
+                }
+            }
+            if (force_control_stand.norm() >= arm_config.contact_enter_force_n &&
+                entry_speed_ok && entry_direction_ok) {
                 if (++runtime.enter_count >= arm_config.debounce_samples) {
                     runtime.normal_contact_active = true;
                     runtime.enter_count = 0;
@@ -2511,11 +2560,13 @@ bool DualArmServoLoop::updateForceRuntime(
                     runtime.contact_anchor = tcp;
                     runtime.contact_anchor_valid = true;
                     runtime.release_start_ns = 0;
+                    runtime.contact_entry_first_dir_valid = false;
                     controller.engage();
                     contact_force_entered = true;
                 }
             } else {
                 runtime.enter_count = 0;
+                runtime.contact_entry_first_dir_valid = false;
             }
         }
     }
@@ -2792,14 +2843,17 @@ bool DualArmServoLoop::updateForceRuntime(
             runtime.follower_loading_reaction_stand = {
                 reaction_stand.x(), reaction_stand.y(), reaction_stand.z()
             };
-            // Gate on the DEBOUNCED contact classifier, not the raw deadband:
-            // a grasped payload's inertial/grip wrench during fast free motion
-            // crosses the deadband transiently (2026-07-18 12:05 run: 2.5-6.9 N
-            // sign-flipping Fz during the post-pick lift yanked the plan by up
-            // to 20 mm per chunk and ended in a 49 N collision). Environmental
-            // contact latches enter/release hysteresis; inertial spikes do not.
+            // Layer-4 gate (generic redesign 2026-07-18): project policy
+            // loading only while the deadband-filtered force EXCEEDS the
+            // Layer-3 force limit — the same threshold that opens the
+            // back-off envelope. Grip/inertial transit residuals measured
+            // 2.5-9.5 N stay far below a 15 N limit, so no classifier or
+            // frozen-normal state is needed; the direction refreshes every
+            // tick from the measured wrench. force_limit_n <= 0 disables the
+            // layer entirely.
             runtime.follower_loading_reaction_valid = runtime.control.enabled &&
-                (runtime.normal_contact_active || runtime.transverse_contact_active);
+                config_.force_control.force_limit_n > 0.0 &&
+                reaction_compliance.norm() >= config_.force_control.force_limit_n;
         }
         const pinocchio::SE3 t_tcp_surface(
             r_stand_tcp.transpose() * r_stand_surface,

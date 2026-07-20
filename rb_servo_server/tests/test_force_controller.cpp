@@ -1016,6 +1016,53 @@ bool testWrenchDeadbandSuppressesNoiseAndPreservesExcessSign() {
     return true;
 }
 
+bool testForceLimiterOpensTranslationEnvelopeAboveLimit() {
+    // Base compliance: velocity capped at 0.05 m/s. Limiter: above 10 N the
+    // envelope opens 0.02 m/s per excess N up to 0.25 m/s.
+    rb_servo::ForceControlConfig config = controllerConfig();
+    config.damping = {10.0, 10.0, 10.0, 10.0, 10.0, 10.0};
+    config.max_linear_velocity_m_s = 0.05;
+    config.force_limit_n = 10.0;
+    config.backoff_gain_m_s_per_n = 0.02;
+    config.backoff_max_velocity_m_s = 0.25;
+
+    const auto steady_velocity = [&](double force_n) -> double {
+        rb_servo::ForceController controller(config);
+        controller.engage();
+        rb_servo::Wrench6D wrench;
+        wrench.fx = force_n;
+        double v = 0.0;
+        for (int i = 0; i < 400; ++i) {
+            const auto proposal = controller.propose(
+                wrench, xCommand(), rb_servo::Vec6{}, 0.002);
+            // A failed propose/commit returns 0: the outer checks then fail
+            // loudly on the velocity expectations.
+            if (!proposal.valid || !controller.commit(proposal)) return 0.0;
+            v = controller.state().velocity_tcp.x;
+        }
+        return v;
+    };
+
+    // Below the limit: pinned at the base cap (offset moves along -x since the
+    // wrench error is target(0) - measured(+F)).
+    const double v_below = steady_velocity(8.0);
+    RB_CHECK(std::abs(v_below) <= 0.05 + 1e-9);
+    RB_CHECK(std::abs(std::abs(v_below) - 0.05) < 5e-3);
+    // 25 N: excess after the 0-deadband error = 15 N -> +0.3 clamped by the
+    // 0.25 backoff ceiling -> envelope 0.25.
+    const double v_above = steady_velocity(25.0);
+    RB_CHECK(std::abs(v_above) > 0.05 + 5e-3);
+    RB_CHECK(std::abs(v_above) <= 0.25 + 1e-9);
+
+    // Disabled limiter (force_limit_n = 0): high force stays at the base cap.
+    config.force_limit_n = 0.0;
+    config.backoff_gain_m_s_per_n = 0.0;
+    config.backoff_max_velocity_m_s = 0.0;
+    const double v_disabled = steady_velocity(25.0);
+    RB_CHECK(std::abs(v_disabled) <= 0.05 + 1e-9);
+    return true;
+}
+
 bool testRemoveComplianceOffsetInvertsAppliedCorrection() {
     // Base command pose with a non-trivial orientation.
     rb_servo::Pose6D base;
@@ -1099,6 +1146,7 @@ int main() {
     if (!testWrenchDeadbandSuppressesNoiseAndPreservesExcessSign()) return 1;
     if (!testRemoveComplianceOffsetInvertsAppliedCorrection()) return 1;
     if (!testContactForceNormalEstimatorFreezesForEpisode()) return 1;
+    if (!testForceLimiterOpensTranslationEnvelopeAboveLimit()) return 1;
     std::cout << "force_controller tests passed\n";
     return 0;
 }

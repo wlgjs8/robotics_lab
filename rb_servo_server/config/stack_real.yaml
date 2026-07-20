@@ -618,13 +618,21 @@ force_control:
   update_rate_hz: 500
   left:
     enable: true
-    # 2026-07-18 15:09 run (SPEED_SCALE=1.0): left-arm floor touch at pick
-    # height spiked 32.2 N -> ExternalForceLimit. Supervised FIRST ACTIVATION
-    # of guarded contact: on debounced contact entry the measured-force normal
-    # is frozen and the scalar 2 N controller owns that axis; tangential
-    # policy/compliance continue. Revert to `none` to disable. Design:
-    # docs/guarded_contact_design.md
-    surface_source: contact_force
+    # 2026-07-18 (generic redesign): contact_force guarded episodes RETIRED by
+    # operator decision — the episode/frozen-normal machinery was task-specific
+    # (surface pressing) and spurious transit episodes warped free motion
+    # (15:23 runs). The generic replacement is the task-agnostic Layer-3 force
+    # limiter + Layer-4 loading projection below (force_limit_n), which need no
+    # pre-defined or frozen normal: the per-tick measured force IS the
+    # direction. The contact_force implementation remains available but
+    # unselected.
+    surface_source: none
+    # Episode entry gate (2026-07-18 15:23 runs): transit grip/inertial
+    # residuals (3.5-9.5 N, rotating direction) froze bogus lateral normals
+    # for up to 7 s and warped the post-pick motion. Entry now also requires
+    # commanded TCP speed at/below this bound (real contact is a decelerating
+    # approach) plus a 30-deg force-direction-consistency window in code.
+    contact_entry_max_speed_m_s: 0.15
     # Gate 3D: express all six controller axes in the corrected URDF/FT-axis
     # orientation and apply the correction about the TCP endpoint.
     compliance_frame: tcp_origin
@@ -657,13 +665,21 @@ force_control:
     compliance_axes: [true, true, true, false, false, false]
   right:
     enable: true
-    # 2026-07-18 15:09 run (SPEED_SCALE=1.0): left-arm floor touch at pick
-    # height spiked 32.2 N -> ExternalForceLimit. Supervised FIRST ACTIVATION
-    # of guarded contact: on debounced contact entry the measured-force normal
-    # is frozen and the scalar 2 N controller owns that axis; tangential
-    # policy/compliance continue. Revert to `none` to disable. Design:
-    # docs/guarded_contact_design.md
-    surface_source: contact_force
+    # 2026-07-18 (generic redesign): contact_force guarded episodes RETIRED by
+    # operator decision — the episode/frozen-normal machinery was task-specific
+    # (surface pressing) and spurious transit episodes warped free motion
+    # (15:23 runs). The generic replacement is the task-agnostic Layer-3 force
+    # limiter + Layer-4 loading projection below (force_limit_n), which need no
+    # pre-defined or frozen normal: the per-tick measured force IS the
+    # direction. The contact_force implementation remains available but
+    # unselected.
+    surface_source: none
+    # Episode entry gate (2026-07-18 15:23 runs): transit grip/inertial
+    # residuals (3.5-9.5 N, rotating direction) froze bogus lateral normals
+    # for up to 7 s and warped the post-pick motion. Entry now also requires
+    # commanded TCP speed at/below this bound (real contact is a decelerating
+    # approach) plus a 30-deg force-direction-consistency window in code.
+    contact_entry_max_speed_m_s: 0.15
     compliance_frame: tcp_origin
     # Identical to the left arm so task behavior and acceptance evidence use a
     # single dual-arm profile.
@@ -722,6 +738,18 @@ force_control:
   # can track a 100-300 ms force ramp, and the offset cap is pulled UNDER the
   # follower's 15 mm actual-lead budget (it was 20 mm > 15 mm: a deep contact
   # would have tripped delta_preview_actual_lead_fault before saturating).
+  # Layer-3 generic force limiter (2026-07-18 redesign): above force_limit_n
+  # the translation response envelope opens proportionally to the excess force
+  # so the arm ACTIVELY backs off along the measured force direction — floor
+  # press, box bump, any direction, no pre-defined normal, no episode state.
+  # 15 N sits above every measured no-contact residual (transit grip/inertial
+  # 2.5-9.5 N in the 15:23 runs) and well under the 30/35 N hard limits, which
+  # remain the final stop. gain 0.02 -> +0.2 m/s at 10 N excess; escape speed
+  # capped at 0.25 m/s. The same threshold gates the Layer-4 loading
+  # projection (policy advance into the measured force is removed per tick).
+  force_limit_n: 15.0
+  backoff_gain_m_s_per_n: 0.02
+  backoff_max_velocity_m_s: 0.25
   virtual_mass: [2.0, 2.0, 2.0, 0.2, 0.2, 0.2]
   damping: [26.0, 26.0, 26.0, 1.55, 1.55, 1.55]
   stiffness: [0.0, 0.0, 0.0, 3.0, 3.0, 3.0]
@@ -738,7 +766,12 @@ force_control:
   # feasible jerk scale preserves its 3D return direction.
   blockwise_release_recenter: true
   max_dt_sec: 0.02
-  max_pos_offset_m: 0.012
+  # 2026-07-18 redesign: 12 -> 30 mm. Offset saturation was a force-buildup
+  # path (the 19:21 left-arm 372 N event began after the cap pinned); the
+  # Layer-3 back-off needs escape headroom. The follower lead check strips the
+  # committed offset (removeComplianceOffsetFromMeasured), so the 35 mm lead
+  # budget is unaffected; the 50 mm divergence latch remains the backstop.
+  max_pos_offset_m: 0.030
   max_rot_offset_rad: 0.08
   max_linear_velocity_m_s: 0.06
   max_angular_velocity_rad_s: 0.15

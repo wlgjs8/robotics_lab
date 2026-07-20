@@ -1698,6 +1698,30 @@ void validateConfig(const DualArmConfig& cfg) {
         cfg.force_control.wrench_deadband,
         "force_control.wrench_deadband"
     );
+    validateNonNegativeFinite(cfg.force_control.force_limit_n, "force_control.force_limit_n");
+    validateNonNegativeFinite(
+        cfg.force_control.backoff_gain_m_s_per_n,
+        "force_control.backoff_gain_m_s_per_n"
+    );
+    validateNonNegativeFinite(
+        cfg.force_control.backoff_max_velocity_m_s,
+        "force_control.backoff_max_velocity_m_s"
+    );
+    if (cfg.force_control.force_limit_n > 0.0) {
+        if (!(cfg.force_control.backoff_gain_m_s_per_n > 0.0)) {
+            throw std::runtime_error(
+                "force_control.force_limit_n > 0 requires a positive "
+                "backoff_gain_m_s_per_n"
+            );
+        }
+        if (cfg.force_control.backoff_max_velocity_m_s <
+            cfg.force_control.max_linear_velocity_m_s) {
+            throw std::runtime_error(
+                "force_control.backoff_max_velocity_m_s must be >= "
+                "max_linear_velocity_m_s when the force limiter is enabled"
+            );
+        }
+    }
     if (cfg.force_control.blockwise_release_recenter) {
         const auto validate_isotropic_recenter_block = [&](std::size_t begin,
                                                             std::size_t end,
@@ -1870,6 +1894,17 @@ void validateConfig(const DualArmConfig& cfg) {
             throw std::runtime_error(
                 path + ".surface_source=contact_force requires the matching "
                 "force_torque frame_configured=true"
+            );
+        }
+        validateNonNegativeFinite(
+            arm.contact_entry_max_speed_m_s,
+            path + ".contact_entry_max_speed_m_s"
+        );
+        if (surface == "contact_force" && force_motion_affecting &&
+            !(arm.contact_entry_max_speed_m_s > 0.0)) {
+            throw std::runtime_error(
+                path + ".surface_source=contact_force requires an explicit "
+                "positive contact_entry_max_speed_m_s (episode entry gate)"
             );
         }
         if (!(arm.contact_release_force_n < arm.contact_enter_force_n)) {
@@ -3624,6 +3659,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "left",
             "right",
             "normal_admittance",
+            "force_limit_n",
+            "backoff_gain_m_s_per_n",
+            "backoff_max_velocity_m_s",
             "virtual_mass",
             "damping",
             "stiffness",
@@ -3656,6 +3694,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             validateAllowedKeys(arm, {
                 "enable",
                 "surface_source",
+                "contact_entry_max_speed_m_s",
                 "compliance_frame",
                 "target_force_n",
                 "contact_enter_force_n",
@@ -3676,6 +3715,11 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             }, path);
             if (has(arm, "enable")) out.enable = asBool(arm["enable"], path + ".enable");
             if (has(arm, "surface_source")) out.surface_source = lower(asString(arm["surface_source"], path + ".surface_source"));
+            if (has(arm, "contact_entry_max_speed_m_s")) {
+                out.contact_entry_max_speed_m_s = asDouble(
+                    arm["contact_entry_max_speed_m_s"],
+                    path + ".contact_entry_max_speed_m_s");
+            }
             if (has(arm, "compliance_frame")) out.compliance_frame = lower(asString(arm["compliance_frame"], path + ".compliance_frame"));
             if (has(arm, "target_force_n")) out.target_force_n = asDouble(arm["target_force_n"], path + ".target_force_n");
             if (has(arm, "contact_enter_force_n")) out.contact_enter_force_n = asDouble(arm["contact_enter_force_n"], path + ".contact_enter_force_n");
@@ -3733,6 +3777,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "damping")) cfg.force_control.damping = parseJointArray(sec["damping"], "force_control.damping");
         if (has(sec, "stiffness")) cfg.force_control.stiffness = parseJointArray(sec["stiffness"], "force_control.stiffness");
         if (has(sec, "wrench_deadband")) cfg.force_control.wrench_deadband = parseJointArray(sec["wrench_deadband"], "force_control.wrench_deadband");
+        if (has(sec, "force_limit_n")) cfg.force_control.force_limit_n = asDouble(sec["force_limit_n"], "force_control.force_limit_n");
+        if (has(sec, "backoff_gain_m_s_per_n")) cfg.force_control.backoff_gain_m_s_per_n = asDouble(sec["backoff_gain_m_s_per_n"], "force_control.backoff_gain_m_s_per_n");
+        if (has(sec, "backoff_max_velocity_m_s")) cfg.force_control.backoff_max_velocity_m_s = asDouble(sec["backoff_max_velocity_m_s"], "force_control.backoff_max_velocity_m_s");
         if (has(sec, "blockwise_release_recenter")) cfg.force_control.blockwise_release_recenter = asBool(sec["blockwise_release_recenter"], "force_control.blockwise_release_recenter");
         if (has(sec, "max_dt_sec")) cfg.force_control.max_dt_sec = asDouble(sec["max_dt_sec"], "force_control.max_dt_sec");
         if (has(sec, "max_pos_offset_m")) cfg.force_control.max_pos_offset_m = asDouble(sec["max_pos_offset_m"], "force_control.max_pos_offset_m");

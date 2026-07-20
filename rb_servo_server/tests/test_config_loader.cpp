@@ -293,10 +293,14 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(!stack_real.safety.user_floor_constraint.enable);
         const auto& left_force = stack_real.force_control.left;
         const auto& right_force = stack_real.force_control.right;
-        // 2026-07-18: supervised first activation of guarded contact after the
-        // 15:09 full-speed 32 N pick floor spike (see stack_real.yaml note).
-        RB_CHECK(left_force.surface_source == "contact_force");
+        // 2026-07-18 generic redesign: guarded contact_force episodes retired
+        // (task-specific); the task-agnostic Layer-3 force limiter + Layer-4
+        // loading projection replace them. Tracked profile is back on `none`.
+        RB_CHECK(left_force.surface_source == "none");
         RB_CHECK(left_force.surface_source == right_force.surface_source);
+        RB_CHECK(near(stack_real.force_control.force_limit_n, 15.0));
+        RB_CHECK(near(stack_real.force_control.backoff_gain_m_s_per_n, 0.02));
+        RB_CHECK(near(stack_real.force_control.backoff_max_velocity_m_s, 0.25));
         RB_CHECK(near(left_force.target_force_n, right_force.target_force_n));
         RB_CHECK(near(left_force.contact_enter_force_n, right_force.contact_enter_force_n));
         RB_CHECK(near(left_force.contact_release_force_n, right_force.contact_release_force_n));
@@ -385,9 +389,10 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(stack_real.force_control.wrench_deadband[4], 0.10));
         RB_CHECK(near(stack_real.force_control.wrench_deadband[5], 0.10));
         RB_CHECK(stack_real.force_control.blockwise_release_recenter);
-        // Offset cap sits under the follower's 20 mm actual-lead budget; the
-        // response caps are the 2026-07-17 contact-tracking raise.
-        RB_CHECK(near(stack_real.force_control.max_pos_offset_m, 0.012));
+        // 2026-07-18 redesign: 30 mm back-off escape headroom (the follower
+        // lead check strips the committed offset, so the lead budget is
+        // unaffected).
+        RB_CHECK(near(stack_real.force_control.max_pos_offset_m, 0.030));
         RB_CHECK(near(stack_real.force_control.max_linear_velocity_m_s, 0.06));
         RB_CHECK(near(stack_real.force_control.max_linear_jerk_m_s3, 8.0));
         RB_CHECK(near(normal_force.damping_n_s_m, 160.0));
@@ -1291,6 +1296,7 @@ bool testFloorlessForceControlSurfaceSourceNone() {
             "  left:\n"
             "    enable: true\n"
             "    surface_source: " + surface_source + "\n"
+            "    contact_entry_max_speed_m_s: 0.15\n"
             "    compliance_frame: tcp_origin\n"
             "    target_force_n: 2.0\n"
             "    contact_enter_force_n: 3.5\n"

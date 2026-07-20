@@ -405,6 +405,12 @@ private:
         // pipeline is healthy and cartesian_admittance is active this tick.
         std::array<double, 3> follower_loading_reaction_stand{{0.0, 0.0, 0.0}};
         bool follower_loading_reaction_valid = false;
+        // contact_force episode entry direction-consistency window: the force
+        // direction at the first debounce sample; later samples must stay in a
+        // 30 deg cone or the window restarts (transit residuals rotate, real
+        // contact does not).
+        std::array<double, 3> contact_entry_first_dir{{0.0, 0.0, 0.0}};
+        bool contact_entry_first_dir_valid = false;
         // True when the chunk follower produced this tick's Cartesian target.
         // The rolling compliance equilibrium then adopts the follower output
         // verbatim instead of re-projecting policy deltas: the follower's

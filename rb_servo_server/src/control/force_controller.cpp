@@ -754,6 +754,32 @@ ForceControllerProposal ForceController::propose(
             ? 0.0
             : raw_error - std::copysign(deadband, raw_error);
     }
+    // Layer-3 generic force limiter: above force_limit_n the TRANSLATION
+    // response envelope opens proportionally to the excess force. The escape
+    // direction needs no model or frozen normal — the per-axis wrench error IS
+    // the drive; the wider envelope just lets the existing mass-damper follow
+    // it fast enough that the contact force saturates near the limit instead
+    // of climbing into the hard-limit latch. (The comparison uses the
+    // deadband-shaved error norm, i.e. it is deadband-conservative.)
+    double translation_velocity_boost = 0.0;
+    double translation_dynamic_scale = 1.0;
+    if (config_.force_limit_n > 0.0) {
+        const double error_norm = std::sqrt(
+            wrench_error[0] * wrench_error[0] +
+            wrench_error[1] * wrench_error[1] +
+            wrench_error[2] * wrench_error[2]);
+        const double excess = error_norm - config_.force_limit_n;
+        if (excess > 0.0) {
+            const double headroom = std::max(
+                0.0,
+                config_.backoff_max_velocity_m_s - config_.max_linear_velocity_m_s);
+            translation_velocity_boost = std::min(
+                config_.backoff_gain_m_s_per_n * excess, headroom);
+            translation_dynamic_scale = 1.0 +
+                translation_velocity_boost /
+                    std::max(1e-9, config_.max_linear_velocity_m_s);
+        }
+    }
     const auto block_loaded = [&](std::size_t begin, std::size_t end) {
         for (std::size_t i = begin; i < end; ++i) {
             if (enabled[i] != 0.0 &&
@@ -830,13 +856,13 @@ ForceControllerProposal ForceController::propose(
 
         const bool translation = i < 3;
         const double acceleration_limit = translation
-            ? config_.max_linear_acceleration_m_s2
+            ? config_.max_linear_acceleration_m_s2 * translation_dynamic_scale
             : config_.max_angular_acceleration_rad_s2;
         const double jerk_limit = translation
-            ? config_.max_linear_jerk_m_s3
+            ? config_.max_linear_jerk_m_s3 * translation_dynamic_scale
             : config_.max_angular_jerk_rad_s3;
         const double velocity_limit = translation
-            ? config_.max_linear_velocity_m_s
+            ? config_.max_linear_velocity_m_s + translation_velocity_boost
             : config_.max_angular_velocity_rad_s;
         const double offset_limit = translation ? pos_offset : rot_offset;
         const double step_limit = translation ? pos_step : rot_step;

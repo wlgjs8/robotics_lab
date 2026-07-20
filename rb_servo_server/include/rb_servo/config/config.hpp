@@ -903,6 +903,13 @@ struct ForceControlArmConfig {
     // V1 supports one stand-frame normal: a server-owned plane, or a direction
     // captured from measured force at the start of a debounced contact episode.
     std::string surface_source = "floor_constraint";
+    // contact_force episode ENTRY gate: an episode may only start while the
+    // commanded TCP speed is at or below this. Real surface contact happens in
+    // a decelerating approach; grip/inertial residuals during fast transit
+    // (2026-07-18 15:23 runs: 3.5-9.5 N with rotating direction) must never
+    // freeze a bogus normal. Zero is invalid for a motion-affecting
+    // contact_force profile — the gate must be an explicit reviewed choice.
+    double contact_entry_max_speed_m_s = 0.0;
     // Frame used by the symmetric 6D Cartesian admittance controller.
     // surface: selected stand-fixed surface axes at the TCP origin.
     // sensor_origin: URDF/configured sensor axes and measurement origin.
@@ -955,6 +962,17 @@ struct ForceControlConfig {
     ForceControlArmConfig left;
     ForceControlArmConfig right;
     NormalAdmittanceConfig normal_admittance;
+
+    // Layer-3 generic force limiter (task-agnostic back-off). Above
+    // force_limit_n the TRANSLATION response envelope opens proportionally to
+    // the excess force so the arm actively escapes along the measured force
+    // direction — no pre-defined normal, no episode state: the per-tick
+    // deadband-filtered wrench IS the direction. force_limit_n <= 0 disables
+    // the layer (plain bounded compliance). When enabled, validation requires
+    // a positive gain and backoff_max_velocity_m_s >= max_linear_velocity_m_s.
+    double force_limit_n = 0.0;
+    double backoff_gain_m_s_per_n = 0.0;
+    double backoff_max_velocity_m_s = 0.0;
 
     // Diagonal Cartesian admittance parameters ordered [x,y,z,rx,ry,rz].
     std::array<double, 6> virtual_mass{5.0, 5.0, 5.0, 0.5, 0.5, 0.5};
