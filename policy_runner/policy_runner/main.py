@@ -1071,6 +1071,14 @@ def _main_with_subcommands(argv: list[str]) -> int:
         help="Path for rollout_summary JSON output.",
     )
     flow_infer.add_argument(
+        "--rollout-step-log",
+        default=None,
+        help=(
+            "Optional per-policy-step JSONL telemetry path. File I/O runs on a "
+            "best-effort background writer and is disabled on logging failure."
+        ),
+    )
+    flow_infer.add_argument(
         "--episodes-dir",
         default=None,
         help="HDF5 episode file or directory for rollout-mode offline_eval.",
@@ -2460,6 +2468,12 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 )
             source.runner_role = "flow_infer"
             source.name = "flow_infer"
+            source.configure_rollout_step_log(args.rollout_step_log)
+            if args.rollout_step_log:
+                print(
+                    f"[flow-infer] rollout step telemetry={args.rollout_step_log}",
+                    flush=True,
+                )
             source.configure_force_recovery(config.force_recovery)
             configure_camera_runtime = getattr(source, "configure_camera_runtime", None)
             if callable(configure_camera_runtime):

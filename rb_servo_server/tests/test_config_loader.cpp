@@ -183,7 +183,9 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(flow_profile->max_smd_goal_lead_m, 0.080));
         RB_CHECK(near(flow_profile->max_smd_goal_lead_rad, 0.35));
         RB_CHECK(flow_profile->ruckig_follower.consume_steps == 12);
-        RB_CHECK(flow_profile->ruckig_follower.reserve_steps == 2);
+        // 2026-07-23 operator tuning: reserve 2 -> 4 during the bolt-pick
+        // rollout iterations.
+        RB_CHECK(flow_profile->ruckig_follower.reserve_steps == 4);
         RB_CHECK(near(flow_profile->ruckig_follower.hold_bounce_resume_sec, 0.5));
         // 2026-07-18 SPEED_SCALE=1.0 posture: projection fidelity warns (the
         // model's chunks are followed), lead budgets scaled to the full-speed
@@ -368,6 +370,20 @@ bool testRepositoryConfigsParse() {
             RB_CHECK(near(
                 stack_real.force_control.release_bleed_stiffness[axis], 0.0));
         }
+        // Hard-limit retreat (2026-07-23): the debounced hard limit runs a
+        // bounded admittance retreat instead of freezing (the 12:35 latch
+        // pressed 57->74 N for 4.5 s); latch remains the escalation for
+        // wedged/no-direction/repeated episodes.
+        RB_CHECK(stack_real.force_control.hard_limit_policy == "retreat");
+        RB_CHECK(near(stack_real.force_control.retreat_distance_m, 0.010));
+        RB_CHECK(near(stack_real.force_control.retreat_virtual_force_n, 20.0));
+        RB_CHECK(near(stack_real.force_control.retreat_timeout_sec, 1.0));
+        RB_CHECK(stack_real.force_control.retreat_max_attempts == 6);
+        RB_CHECK(near(stack_real.force_control.retreat_attempt_window_sec, 10.0));
+        RB_CHECK(
+            stack_real.force_control.retreat_distance_m <=
+            stack_real.force_control.max_pos_offset_m
+        );
         RB_CHECK(near(left_force.hard_torque_norm_nm, 7.0));
         RB_CHECK(near(left_force.hard_torque_norm_nm, right_force.hard_torque_norm_nm));
         RB_CHECK(left_force.debounce_samples == right_force.debounce_samples);

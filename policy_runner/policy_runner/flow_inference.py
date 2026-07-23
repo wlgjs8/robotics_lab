@@ -45,6 +45,7 @@ from .tcp_target_pose_conditioner import (
 )
 from .gripper import REAL_GRIPPER_ENV, GripperRuntime, gripper_commands_from_flow_step
 from .robot_state_client import StateSnapshot
+from .rollout_step_log import RolloutStepLogger
 from .rollout_modes import RolloutMode, RolloutModeValidationError, parse_rollout_mode
 from .servo_command_client import CommandIntent
 
@@ -553,6 +554,9 @@ class FlowMatchingActionSource:
         self._action_log: TextIO | None = None
         self._action_log_seq = 0
         self._action_log = _open_action_log(self.stderr)
+        self._rollout_step_logger: RolloutStepLogger | None = None
+        self._rollout_step_chunk_seq = 0
+        self._rollout_step_active_chunk_id: int | None = None
 
     # --------------------------------------------------------- override hooks --
     def on_arm_init_override_start(self, arms: tuple[str, ...], snapshot: StateSnapshot) -> None:
@@ -661,17 +665,28 @@ class FlowMatchingActionSource:
                 return self._no_policy_input_intent()
             self._chunk = chunk
             self._chunk_index = 0
+            self._begin_rollout_step_chunk()
             self._steps_since_boundary = 0  # restart the crossfade ramp at the boundary
             self._record_inference_activation()
             self._print_chunk_steps(chunk)
             self._begin_chunk_tracking(chunk, payload, now_monotonic)
             self._publish_chunk_overlay(now_monotonic)
         self._log_chunk_tracking(payload, now_monotonic, int(self._chunk_index))
-        step = self._chunk[self._chunk_index]
+        chunk_step_index = int(self._chunk_index)
+        step = self._chunk[chunk_step_index]
         self._chunk_index += 1
         gripper_targets = self._integrate_gripper_targets(step, payload)
         self._dispatch_gripper_step(step)
-        return self._emit_step_intent(step, payload, gripper_targets)
+        intent = self._emit_step_intent(step, payload, gripper_targets)
+        self._log_rollout_policy_step(
+            step=step,
+            payload=payload,
+            intent=intent,
+            gripper_targets=gripper_targets,
+            now_monotonic=now_monotonic,
+            chunk_step_index=chunk_step_index,
+        )
+        return intent
 
     def configure_force_recovery(self, config: Any) -> None:
         """Enable the bimanual policy gate without changing server force ownership."""
@@ -1243,8 +1258,37 @@ class FlowMatchingActionSource:
                         # Re-emit the last absolute target (no abrupt jump); flag stall.
                         self._current_step_intent = self._foh_tick_intent(now_monotonic, stall=True)
                         self._log_foh_action(None, self._current_step_intent, now_monotonic)
+                        self._log_rollout_policy_step(
+                            step=None,
+                            payload=payload,
+                            intent=self._current_step_intent,
+                            gripper_targets=getattr(
+                                self,
+                                "_current_gripper_targets",
+                                {"left": None, "right": None},
+                            ),
+                            now_monotonic=now_monotonic,
+                            chunk_step_index=None,
+                            stall=True,
+                            hold=True,
+                        )
                         return self._current_step_intent
-                    return self._stream_hold_intent()
+                    stall_intent = self._stream_hold_intent()
+                    self._log_rollout_policy_step(
+                        step=None,
+                        payload=payload,
+                        intent=stall_intent,
+                        gripper_targets=getattr(
+                            self,
+                            "_current_gripper_targets",
+                            {"left": None, "right": None},
+                        ),
+                        now_monotonic=now_monotonic,
+                        chunk_step_index=None,
+                        stall=True,
+                        hold=True,
+                    )
+                    return stall_intent
 
         # Kick the next inference once far enough into the chunk that it should
         # finish before the executable window drains (no boundary stall).
@@ -1278,6 +1322,14 @@ class FlowMatchingActionSource:
                 self._print_step_debug(step, payload)  # per-policy-step (foh_se3), not per servo tick
             else:
                 self._current_step_intent = self._emit_step_intent(step, payload, gripper_targets)
+            self._log_rollout_policy_step(
+                step=step,
+                payload=payload,
+                intent=self._current_step_intent,
+                gripper_targets=gripper_targets,
+                now_monotonic=now_monotonic,
+                chunk_step_index=int(self._chunk_index),
+            )
             self._stream_emitted_policy_steps = int(
                 getattr(self, "_stream_emitted_policy_steps", 0)
             ) + 1
@@ -1303,6 +1355,78 @@ class FlowMatchingActionSource:
         self._log_action_step(step, intent)
         self._print_step_debug(step, payload)
         return intent
+
+    def configure_rollout_step_log(self, path: str | Path | None) -> None:
+        """Attach the optional telemetry-only per-policy-step JSONL sink."""
+        previous = getattr(self, "_rollout_step_logger", None)
+        if previous is not None:
+            previous.close()
+        self._rollout_step_logger = None
+        if path is None or not str(path).strip():
+            return
+        try:
+            self._rollout_step_logger = RolloutStepLogger(path)
+        except Exception:  # noqa: BLE001 - logging must never block a rollout.
+            self._rollout_step_logger = None
+
+    def _begin_rollout_step_chunk(self) -> None:
+        sequence = int(getattr(self, "_rollout_step_chunk_seq", 0)) + 1
+        self._rollout_step_chunk_seq = sequence
+        self._rollout_step_active_chunk_id = sequence
+
+    def _log_rollout_policy_step(
+        self,
+        *,
+        step: np.ndarray | None,
+        payload: dict[str, Any],
+        intent: CommandIntent | None,
+        gripper_targets: dict[str, float | None],
+        now_monotonic: float,
+        chunk_step_index: int | None,
+        stall: bool = False,
+        hold: bool = False,
+    ) -> None:
+        logger = getattr(self, "_rollout_step_logger", None)
+        if logger is None:
+            return
+        try:
+            raw_by_arm: dict[str, Any] | None = None
+            if step is not None:
+                raw = np.asarray(step, dtype=np.float64).reshape(-1)
+                raw_by_arm = {
+                    "left": raw[0:6] if raw.size >= 6 else None,
+                    "right": raw[7:13] if raw.size >= 13 else None,
+                }
+            conditioned = (
+                dict(getattr(self, "_foh_last_targets", {}) or {})
+                if self._tcp_tp_foh_active()
+                else None
+            )
+            timing = self._inference_timing_snapshot()
+            latency = (
+                timing.get("inference_latency_ms")
+                if isinstance(timing, dict)
+                else None
+            )
+            logger.log_step(
+                state_payload=payload,
+                command_intent=intent,
+                conditioned_targets=conditioned,
+                raw_delta_ee_local=raw_by_arm,
+                gripper_cmd_pct=gripper_targets,
+                chunk_id=getattr(self, "_rollout_step_active_chunk_id", None),
+                chunk_step_index=chunk_step_index,
+                stall=stall,
+                hold=hold,
+                inference_latency_ms=latency,
+                t_mono=now_monotonic,
+            )
+        except Exception:  # noqa: BLE001 - telemetry must never affect control.
+            try:
+                logger.close()
+            except Exception:
+                pass
+            self._rollout_step_logger = None
 
     def _print_step_debug(self, step: np.ndarray, payload: dict[str, Any]) -> None:
         """Per-step ACTION (post r_align ee_local delta + gripper) and PROPRIO
@@ -1410,6 +1534,7 @@ class FlowMatchingActionSource:
         self._overlay_chain_advance()
         self._chunk = chunk
         self._chunk_index = 0
+        self._begin_rollout_step_chunk()
         self._steps_since_boundary = 0  # restart the crossfade ramp at the boundary
         self._step_deadline = now_monotonic + float(self.policy_dt_sec)
         self._print_chunk_steps(chunk)
@@ -2883,6 +3008,9 @@ class FlowMatchingActionSource:
         close_diagnostics = getattr(getattr(self, "_diagnostic_image_writer", None), "close", None)
         if callable(close_diagnostics):
             close_diagnostics()
+        close_step_log = getattr(getattr(self, "_rollout_step_logger", None), "close", None)
+        if callable(close_step_log):
+            close_step_log()
         close = getattr(self.camera_client, "close", None)
         if callable(close):
             close()

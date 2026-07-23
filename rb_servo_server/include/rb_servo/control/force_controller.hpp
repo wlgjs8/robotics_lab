@@ -31,6 +31,12 @@ struct ForceControllerState {
     Vec6 velocity_tcp;
     Vec6 acceleration_tcp;
     double observed_energy_j = 0.0;
+    // Committed Layer-3 envelope opening (velocity boost, m/s). The boost
+    // rises instantly with the wrench-error excess but may only DECAY at a
+    // rate the jerk governor can brake against — a step collapse (fast force
+    // release) strands a legally-fast state outside the shrunk envelope and
+    // faults the proposal (2026-07-23 12:55/13:08 runs).
+    double envelope_boost_m_s = 0.0;
 };
 
 struct ForceControllerProposal {

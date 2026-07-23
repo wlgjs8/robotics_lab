@@ -1721,6 +1721,49 @@ void validateConfig(const DualArmConfig& cfg) {
         cfg.force_control.backoff_max_velocity_m_s,
         "force_control.backoff_max_velocity_m_s"
     );
+    if (cfg.force_control.hard_limit_policy != "latch" &&
+        cfg.force_control.hard_limit_policy != "retreat") {
+        throw std::runtime_error(
+            "force_control.hard_limit_policy must be 'latch' or 'retreat'"
+        );
+    }
+    if (cfg.force_control.hard_limit_policy == "retreat") {
+        if (cfg.force_control.enable &&
+            cfg.force_control.operating_mode != "cartesian_admittance") {
+            throw std::runtime_error(
+                "force_control.hard_limit_policy 'retreat' requires "
+                "operating_mode cartesian_admittance"
+            );
+        }
+        validatePositiveFinite(
+            cfg.force_control.retreat_distance_m,
+            "force_control.retreat_distance_m"
+        );
+        validatePositiveFinite(
+            cfg.force_control.retreat_virtual_force_n,
+            "force_control.retreat_virtual_force_n"
+        );
+        validatePositiveFinite(
+            cfg.force_control.retreat_timeout_sec,
+            "force_control.retreat_timeout_sec"
+        );
+        if (cfg.force_control.retreat_max_attempts < 0) {
+            throw std::runtime_error(
+                "force_control.retreat_max_attempts must be non-negative"
+            );
+        }
+        validatePositiveFinite(
+            cfg.force_control.retreat_attempt_window_sec,
+            "force_control.retreat_attempt_window_sec"
+        );
+        if (cfg.force_control.retreat_distance_m >
+            cfg.force_control.max_pos_offset_m) {
+            throw std::runtime_error(
+                "force_control.retreat_distance_m must fit inside "
+                "max_pos_offset_m (the retreat rides the admittance offset)"
+            );
+        }
+    }
     if (cfg.force_control.force_limit_n > 0.0) {
         if (!(cfg.force_control.backoff_gain_m_s_per_n > 0.0)) {
             throw std::runtime_error(
@@ -3690,6 +3733,12 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "force_limit_n",
             "backoff_gain_m_s_per_n",
             "backoff_max_velocity_m_s",
+            "hard_limit_policy",
+            "retreat_distance_m",
+            "retreat_virtual_force_n",
+            "retreat_timeout_sec",
+            "retreat_max_attempts",
+            "retreat_attempt_window_sec",
             "virtual_mass",
             "damping",
             "stiffness",
@@ -3806,6 +3855,12 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "damping")) cfg.force_control.damping = parseJointArray(sec["damping"], "force_control.damping");
         if (has(sec, "stiffness")) cfg.force_control.stiffness = parseJointArray(sec["stiffness"], "force_control.stiffness");
         if (has(sec, "release_bleed_stiffness")) cfg.force_control.release_bleed_stiffness = parseJointArray(sec["release_bleed_stiffness"], "force_control.release_bleed_stiffness");
+        if (has(sec, "hard_limit_policy")) cfg.force_control.hard_limit_policy = lower(asString(sec["hard_limit_policy"], "force_control.hard_limit_policy"));
+        if (has(sec, "retreat_distance_m")) cfg.force_control.retreat_distance_m = asDouble(sec["retreat_distance_m"], "force_control.retreat_distance_m");
+        if (has(sec, "retreat_virtual_force_n")) cfg.force_control.retreat_virtual_force_n = asDouble(sec["retreat_virtual_force_n"], "force_control.retreat_virtual_force_n");
+        if (has(sec, "retreat_timeout_sec")) cfg.force_control.retreat_timeout_sec = asDouble(sec["retreat_timeout_sec"], "force_control.retreat_timeout_sec");
+        if (has(sec, "retreat_max_attempts")) cfg.force_control.retreat_max_attempts = asInt(sec["retreat_max_attempts"], "force_control.retreat_max_attempts");
+        if (has(sec, "retreat_attempt_window_sec")) cfg.force_control.retreat_attempt_window_sec = asDouble(sec["retreat_attempt_window_sec"], "force_control.retreat_attempt_window_sec");
         if (has(sec, "wrench_deadband")) cfg.force_control.wrench_deadband = parseJointArray(sec["wrench_deadband"], "force_control.wrench_deadband");
         if (has(sec, "force_limit_n")) cfg.force_control.force_limit_n = asDouble(sec["force_limit_n"], "force_control.force_limit_n");
         if (has(sec, "backoff_gain_m_s_per_n")) cfg.force_control.backoff_gain_m_s_per_n = asDouble(sec["backoff_gain_m_s_per_n"], "force_control.backoff_gain_m_s_per_n");

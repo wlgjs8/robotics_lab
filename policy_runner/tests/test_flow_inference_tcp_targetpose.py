@@ -246,6 +246,41 @@ class FlowInferenceTcpPoseTargetTest(unittest.TestCase):
         # S_0 = measured.x + one clamped step (0.01 m, within the 1.0 m/s * 0.02 s cap)
         self.assertAlmostEqual(x, 0.4 + 0.01, places=4)
 
+    def test_foh_rollout_step_log_records_policy_ticks_not_servo_ticks(self) -> None:
+        assert torch is not None and np is not None
+        measured = _pose7([0.4, 0.0, 0.3], [0.0, 0.0, 0.0, 1.0])
+        chunk = _action_chunk(*([[0.0, 0.0, -0.002, 0.0, 0.0, 0.0, 25.0]] * 8))
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._streamed_source(tmp, "foh_se3")
+            log_path = Path(tmp) / "rollout_steps.jsonl"
+            source.configure_rollout_step_log(log_path)
+            try:
+                with mock.patch(
+                    "policy_runner.flow_inference.sample_action_chunks", return_value=chunk
+                ):
+                    state = _sample_state(left_pose=measured)
+                    source.next_intent(state, 0.0)
+                    source.next_intent(state, 0.004)
+                    source.next_intent(state, 0.008)
+                    source.next_intent(state, 0.02)
+            finally:
+                source.close()
+            records = [
+                json.loads(line)
+                for line in log_path.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual([record["chunk_step_index"] for record in records], [0, 1])
+        self.assertEqual(records[0]["chunk_id"], 1)
+        self.assertAlmostEqual(
+            records[0]["arms"]["left"]["raw_delta_ee_local"][2],
+            -0.002,
+            places=7,
+        )
+        self.assertEqual(len(records[0]["arms"]["left"]["cmd_pose"]), 7)
+
+
 def _sample_state(*, left_pose: np.ndarray) -> StateSnapshot:
     right_pose = _pose7([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0])
     return StateSnapshot(

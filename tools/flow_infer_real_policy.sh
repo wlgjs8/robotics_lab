@@ -18,9 +18,10 @@ CHUNK_OVERLAY_RUNWAY_STEPS="${FLOW_INFER_CHUNK_OVERLAY_RUNWAY_STEPS:-4}"
 SPEED_SCALE="${FLOW_INFER_SPEED_SCALE:-1.0}"
 CHUNK_CROSSFADE_STEPS="${FLOW_INFER_CHUNK_CROSSFADE_STEPS:-2}"
 TCP_REANCHOR_MODE="${FLOW_INFER_TCP_REANCHOR_MODE:-measured_blend}"
-TCP_BLEND_STEPS="${FLOW_INFER_TCP_BLEND_STEPS:-8}"
+TCP_BLEND_STEPS="${FLOW_INFER_TCP_BLEND_STEPS:-2}"
 ROLLOUT_SUMMARY="${FLOW_INFER_ROLLOUT_SUMMARY:-outputs/rollout_summary.json}"
 VELPROPRIO_SOURCE="${FLOW_INFER_VELPROPRIO_SOURCE:-measured}"
+STEP_LOG="${FLOW_INFER_STEP_LOG:-}"
 
 mkdir -p "$(dirname "$ROLLOUT_SUMMARY")"
 export PYTHONPATH="$PWD/policy_runner${PYTHONPATH:+:$PYTHONPATH}"
@@ -53,6 +54,11 @@ echo "[flow-infer] chunk_overlay_endpoint=$RB_GUI_CHUNK_OVERLAY_ENDPOINT (rb_gui
 echo "[flow-infer] config=$CONFIG"
 echo "[flow-infer] rollout_mode=$ROLLOUT_MODE"
 echo "[flow-infer] rollout_summary=$ROLLOUT_SUMMARY"
+STEP_LOG_ARGS=()
+if [ -n "$STEP_LOG" ]; then
+  STEP_LOG_ARGS+=(--rollout-step-log "$STEP_LOG")
+  echo "[flow-infer] rollout_step_log=$STEP_LOG"
+fi
 echo "[flow-infer] speed_scale=$SPEED_SCALE chunk_execute_steps=$CHUNK_EXECUTE_STEPS overlay_runway_steps=$CHUNK_OVERLAY_RUNWAY_STEPS crossfade=$CHUNK_CROSSFADE_STEPS reanchor=$TCP_REANCHOR_MODE"
 echo "[flow-infer] inherited env: OPENPI_REMOTE_SKIP_WARMUP=${OPENPI_REMOTE_SKIP_WARMUP-<unset>} RB_ALLOW_REAL_GRIPPER=${RB_ALLOW_REAL_GRIPPER-<unset>} DISPLAY=${DISPLAY-<unset>}"
 
@@ -184,4 +190,5 @@ exec "$PYTHON_BIN" -m policy_runner flow-infer \
   --include-depth \
   --gripper-action-mode absolute \
   --rollout-summary "$ROLLOUT_SUMMARY" \
+  "${STEP_LOG_ARGS[@]}" \
   "$@"

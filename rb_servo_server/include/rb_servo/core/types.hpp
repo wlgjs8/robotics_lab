@@ -258,6 +258,15 @@ struct ForceControlCommand {
     double max_rot_offset_rad = 0.0;
     double max_pos_step_m = 0.0;
     double max_rot_step_rad = 0.0;
+
+    // Gate for the released-state offset bleed. The bleed exists to restore
+    // unload budget under an ACTIVELY MOVING policy equilibrium; draining
+    // toward a static in-contact anchor (e.g. a Hold frozen at an in-surface
+    // pose after a mid-press client abort) re-creates the contact and drives
+    // a perpetual bounce limit cycle (2026-07-23 14:20 run: ~0.6 s / 7 mm /
+    // 5-9 N oscillation on Hold). The servo loop sets this true only while
+    // the compliance equilibrium follows a live policy target.
+    bool allow_release_bleed = true;
 };
 
 struct RobotState {

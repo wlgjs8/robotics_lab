@@ -1977,6 +1977,12 @@ void DualArmServoLoop::invalidatePostInitTare(ArmId arm_id, uint64_t command_seq
     runtime.transverse_enter_count = 0;
     runtime.rotational_enter_count = 0;
     runtime.hard_limit_count = 0;
+    runtime.retreat_active = false;
+    runtime.retreat_braking = false;
+    runtime.retreat_virtual_current_n = 0.0;
+    runtime.retreat_started_ns = 0;
+    runtime.retreat_attempt_count = 0;
+    runtime.retreat_window_start_ns = 0;
     runtime.release_start_ns = 0;
     runtime.release_hold_pending = false;
     runtime.release_hold_applied = false;
@@ -2058,6 +2064,12 @@ bool DualArmServoLoop::latchPayloadIdentificationInhibit(ArmId arm_id) {
     runtime.transverse_enter_count = 0;
     runtime.rotational_enter_count = 0;
     runtime.hard_limit_count = 0;
+    runtime.retreat_active = false;
+    runtime.retreat_braking = false;
+    runtime.retreat_virtual_current_n = 0.0;
+    runtime.retreat_started_ns = 0;
+    runtime.retreat_attempt_count = 0;
+    runtime.retreat_window_start_ns = 0;
     runtime.release_start_ns = 0;
     runtime.release_hold_pending = false;
     runtime.release_hold_applied = false;
@@ -2761,7 +2773,14 @@ bool DualArmServoLoop::updateForceRuntime(
     }
 
     const bool hard_limit = runtime.control.hard_limit_exceeded;
-    if (hard_limit) {
+    // hard_limit_policy retreat: the debounced hard limit starts a bounded
+    // retreat episode inside the cartesian_admittance path below instead of
+    // latching. The scalar contact_force normal episode keeps the latch —
+    // its frozen-normal ownership predates the generic escape machinery.
+    const bool retreat_capable =
+        config_.force_control.hard_limit_policy == "retreat" &&
+        mode == "cartesian_admittance" && !contact_force_surface;
+    if (hard_limit && !retreat_capable) {
         runtime.control.state = "fault";
         runtime.control.fault_reason = "external force/torque hard limit exceeded";
         if (fault_reason) *fault_reason = runtime.control.fault_reason;
@@ -2786,6 +2805,14 @@ bool DualArmServoLoop::updateForceRuntime(
         ForceControlCommand cartesian_command;
         cartesian_command.mode = ForceControlMode::Admittance;
         cartesian_command.enabled_axis = arm_config.compliance_axes;
+        // Bleed only under a live policy equilibrium. A static hold anchor
+        // frozen at an in-surface pose (client aborted mid-press) turns the
+        // bleed into a perpetual touch-escape-drain bounce: the drain itself
+        // re-creates the contact (2026-07-23 14:20 Hold oscillation, ~0.6 s /
+        // 7 mm / 5-9 N). On Hold the escaped offset is simply kept and the
+        // arm rests contact-free until a policy target moves the equilibrium.
+        cartesian_command.allow_release_bleed =
+            runtime.rolling_compliance_target_source == "policy_target";
         Wrench6D cartesian_wrench = runtime.control_wrench_compliance;
         Vec6 cartesian_twist = runtime.actual_twist_compliance;
         if (contact_force_surface && runtime.normal_contact_active) {
@@ -2809,6 +2836,144 @@ bool DualArmServoLoop::updateForceRuntime(
             cartesian_twist.x = tangent_velocity_compliance.x();
             cartesian_twist.y = tangent_velocity_compliance.y();
             cartesian_twist.z = tangent_velocity_compliance.z();
+        }
+        // Hard-limit retreat episode management (hard_limit_policy: retreat).
+        if (retreat_capable) {
+            const auto retreat_latch = [&](const std::string& why) {
+                runtime.retreat_active = false;
+                runtime.control.state = "fault";
+                runtime.control.fault_reason = why;
+                if (fault_reason) *fault_reason = why;
+                return true;
+            };
+            if (hard_limit && !runtime.retreat_active &&
+                !fault_latched_.load()) {
+                if (config_.force_control.retreat_max_attempts > 0) {
+                    const uint64_t window_ns = static_cast<uint64_t>(
+                        config_.force_control.retreat_attempt_window_sec * 1e9);
+                    if (runtime.retreat_window_start_ns == 0 ||
+                        now_ns - runtime.retreat_window_start_ns > window_ns) {
+                        runtime.retreat_window_start_ns = now_ns;
+                        runtime.retreat_attempt_count = 0;
+                    }
+                    if (runtime.retreat_attempt_count >=
+                        config_.force_control.retreat_max_attempts) {
+                        return retreat_latch(
+                            "external force/torque hard limit exceeded "
+                            "(retreat attempts exhausted)");
+                    }
+                }
+                const double press_norm = force_fast_stand.norm();
+                if (!(press_norm > 1e-6)) {
+                    // Torque-only trigger or degenerate force: no defined
+                    // translation escape direction — keep the latch.
+                    return retreat_latch(
+                        "external force/torque hard limit exceeded "
+                        "(no retreat direction)");
+                }
+                ++runtime.retreat_attempt_count;
+                runtime.retreat_active = true;
+                runtime.retreat_braking = false;
+                runtime.retreat_virtual_current_n =
+                    config_.force_control.retreat_virtual_force_n;
+                const math::Vector3 press = force_fast_stand / press_norm;
+                runtime.retreat_press_stand = {press.x(), press.y(), press.z()};
+                runtime.retreat_started_ns = now_ns;
+                const Pose6D& off0 = cartesian_controller.state().offset_tcp;
+                runtime.retreat_start_offset = {off0.x, off0.y, off0.z};
+            } else if (runtime.retreat_active) {
+                const math::Vector3 press_stand(
+                    runtime.retreat_press_stand[0],
+                    runtime.retreat_press_stand[1],
+                    runtime.retreat_press_stand[2]);
+                const math::Vector3 escape_compliance =
+                    t_stand_compliance.rotation().transpose() * (-press_stand);
+                const auto& committed = cartesian_controller.state();
+                const Pose6D& off = committed.offset_tcp;
+                const math::Vector3 offset_delta(
+                    off.x - runtime.retreat_start_offset[0],
+                    off.y - runtime.retreat_start_offset[1],
+                    off.z - runtime.retreat_start_offset[2]);
+                const bool displaced = offset_delta.dot(escape_compliance) >=
+                    config_.force_control.retreat_distance_m;
+                const bool unloaded =
+                    !runtime.control.hard_limit_threshold_exceeded;
+                // Budget guard: the escape must remain brakeable inside the
+                // UNBOOSTED envelope before the per-axis offset cap. The
+                // Layer-3 dynamic scale follows the wrench error, so once the
+                // real press decays the acceleration limit collapses back to
+                // base — a fast state near the cap then fails the jerk
+                // governor's brake-before-cap oracle and would fault
+                // (2026-07-23 12:55 run). Enter braking with margin instead.
+                const double escape_speed =
+                    escape_compliance.x() * committed.velocity_tcp.x +
+                    escape_compliance.y() * committed.velocity_tcp.y +
+                    escape_compliance.z() * committed.velocity_tcp.z;
+                const double worst_axis_offset = std::max({
+                    std::abs(off.x), std::abs(off.y), std::abs(off.z)});
+                const double budget_m = std::max(
+                    1e-4,
+                    config_.force_control.max_pos_offset_m - worst_axis_offset);
+                const double base_acc =
+                    config_.force_control.max_linear_acceleration_m_s2;
+                const bool budget_low =
+                    escape_speed > 0.0 &&
+                    escape_speed * escape_speed / (2.0 * budget_m) >=
+                        0.5 * base_acc;
+                const uint64_t timeout_ns = static_cast<uint64_t>(
+                    config_.force_control.retreat_timeout_sec * 1e9);
+                if (!runtime.retreat_braking &&
+                    (displaced || budget_low ||
+                     worst_axis_offset >=
+                         0.8 * config_.force_control.max_pos_offset_m)) {
+                    runtime.retreat_braking = true;
+                }
+                if (runtime.retreat_braking) {
+                    // Ramp the virtual wrench off (~50 ms) so the Layer-3
+                    // envelope shrinks continuously while damping brakes the
+                    // escape; a step release strands the state outside the
+                    // collapsed envelope.
+                    const double release_rate_n_s =
+                        config_.force_control.retreat_virtual_force_n / 0.05;
+                    runtime.retreat_virtual_current_n = std::max(
+                        0.0,
+                        runtime.retreat_virtual_current_n -
+                            release_rate_n_s * controller_dt_sec);
+                    if (runtime.retreat_virtual_current_n <= 0.0) {
+                        runtime.retreat_active = false;
+                        runtime.retreat_braking = false;
+                        if (unloaded) runtime.hard_limit_count = 0;
+                    }
+                } else if (now_ns - runtime.retreat_started_ns > timeout_ns) {
+                    if (unloaded) {
+                        // Partial escape but the force is back under the hard
+                        // threshold — ramp off and resume; Layer-3 keeps
+                        // handling any residual load.
+                        runtime.retreat_braking = true;
+                    } else {
+                        // Retreating did not unload (wedged/jammed): final stop.
+                        return retreat_latch(
+                            "external force/torque hard limit exceeded "
+                            "(retreat timed out without unloading)");
+                    }
+                }
+            }
+            if (runtime.retreat_active &&
+                runtime.retreat_virtual_current_n > 0.0) {
+                // Virtual wrench: amplify the measured press so the existing
+                // admittance escape (and its Layer-3 envelope opening) drives
+                // the offset away from the contact. Telemetry keeps the real
+                // measured wrench; only the controller drive sees the boost.
+                const math::Vector3 press_compliance =
+                    t_stand_compliance.rotation().transpose() * math::Vector3(
+                        runtime.retreat_press_stand[0],
+                        runtime.retreat_press_stand[1],
+                        runtime.retreat_press_stand[2]);
+                const double boost = runtime.retreat_virtual_current_n;
+                cartesian_wrench.fx += press_compliance.x() * boost;
+                cartesian_wrench.fy += press_compliance.y() * boost;
+                cartesian_wrench.fz += press_compliance.z() * boost;
+            }
         }
         // During contact_force, the symmetric Cartesian controller receives
         // only tangential translation; the scalar unilateral controller below
@@ -2926,8 +3091,9 @@ bool DualArmServoLoop::updateForceRuntime(
             }
             return true;
         }
-        runtime.control.state = runtime.control.compliance_active
-            ? "regulating" : "armed";
+        runtime.control.state = runtime.retreat_active
+            ? "retreating"
+            : (runtime.control.compliance_active ? "regulating" : "armed");
         if (!(contact_force_surface && runtime.normal_contact_active)) {
             return false;
         }

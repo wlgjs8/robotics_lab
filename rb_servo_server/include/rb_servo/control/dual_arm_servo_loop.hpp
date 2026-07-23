@@ -360,6 +360,23 @@ private:
         int transverse_enter_count = 0;
         int rotational_enter_count = 0;
         int hard_limit_count = 0;
+        // Hard-limit retreat episode (force_control.hard_limit_policy:
+        // retreat): direction is the measured stand-frame press at trigger;
+        // progress is the committed admittance-offset displacement along the
+        // escape (-press) direction since the episode started.
+        bool retreat_active = false;
+        // Braking phase: the virtual wrench ramps to zero over ~50 ms instead
+        // of stepping off — the Layer-3 envelope follows the wrench error, so
+        // a step collapse strands a fast escape state outside the shrunk
+        // envelope (2026-07-23 12:55 run: proposal-infeasible latch mid
+        // retreat as the real force decayed).
+        bool retreat_braking = false;
+        double retreat_virtual_current_n = 0.0;
+        std::array<double, 3> retreat_press_stand{{0.0, 0.0, 0.0}};
+        std::array<double, 3> retreat_start_offset{{0.0, 0.0, 0.0}};
+        uint64_t retreat_started_ns = 0;
+        int retreat_attempt_count = 0;
+        uint64_t retreat_window_start_ns = 0;
         uint64_t release_start_ns = 0;
         Pose6D release_hold_pose;
         bool release_hold_pending = false;

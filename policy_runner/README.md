@@ -210,6 +210,26 @@ used instead. Writing runs on a bounded background queue and reports queue,
 capacity, and write-error counters, so storage latency never blocks inference.
 Use `FLOW_INFER_DIAGNOSTIC_IMAGES=off` (the default) for normal runs.
 
+Per-policy-step z/force/gripper diagnosis is also opt-in. The logger uses a
+bounded background writer; a file or queue failure disables only this telemetry
+and does not alter command generation:
+
+```bash
+FLOW_INFER_STEP_LOG=logs/bolt_pick_steps.jsonl \
+./tools/flow_infer_real_policy.sh ...
+
+python3 scripts/analyze_rollout_step_log.py \
+  logs/bolt_pick_steps.jsonl \
+  --png logs/bolt_pick_steps.png
+```
+
+Each `robotics_lab.policy_runner.rollout_step.v1` line carries the conditioned
+absolute stand-frame command pose, the state-selected measured/reference pose,
+the pre-FOH ee-local model delta, measured and commanded gripper openings, and
+available force-control/F/T telemetry for both arms. Missing telemetry is
+recorded as `null`, never substituted with a guessed value. Without `--png`, or
+when matplotlib is unavailable, the analyzer still prints the text summary.
+
 ## HDF5 Schema
 
 Current recordings use schema `robotics_lab.episode.v1`. The action group stores

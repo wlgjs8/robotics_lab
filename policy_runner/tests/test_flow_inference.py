@@ -35,6 +35,7 @@ class FlowInferenceCliTest(unittest.TestCase):
         # --allow-tcp-target-pose no-op flag was removed, not retained.
         self.assertNotIn("--allow-tcp-target-pose", result.stdout)
         self.assertIn("--sequential-chunk-inference", result.stdout)
+        self.assertIn("--rollout-step-log", result.stdout)
 
     def test_sequential_stream_inference_disables_midchunk_prefetch_kick(self) -> None:
         # Unbound-method call: exercise the kick threshold without constructing

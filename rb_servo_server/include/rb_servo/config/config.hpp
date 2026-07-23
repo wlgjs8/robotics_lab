@@ -974,6 +974,26 @@ struct ForceControlConfig {
     double backoff_gain_m_s_per_n = 0.0;
     double backoff_max_velocity_m_s = 0.0;
 
+    // Hard-limit policy. "latch" (default): the debounced hard force/torque
+    // limit faults and freezes motion. "retreat": instead of latching, run a
+    // bounded retreat episode — a virtual wrench of retreat_virtual_force_n
+    // along the measured press direction drives the admittance offset away
+    // from the contact until the TCP has escaped retreat_distance_m and the
+    // instantaneous force is back under the hard threshold; policy streaming
+    // and inference continue throughout (no fault). The latch remains the
+    // fail-closed backstop: it fires when the retreat cannot unload within
+    // retreat_timeout_sec, when no press direction is measurable, when the
+    // scalar contact_force episode owns the normal, or when episodes trigger
+    // more than retreat_max_attempts times per retreat_attempt_window_sec
+    // (0 attempts = unlimited retreats). Requires operating_mode
+    // cartesian_admittance.
+    std::string hard_limit_policy = "latch";
+    double retreat_distance_m = 0.010;
+    double retreat_virtual_force_n = 20.0;
+    double retreat_timeout_sec = 1.0;
+    int retreat_max_attempts = 0;
+    double retreat_attempt_window_sec = 10.0;
+
     // Diagonal Cartesian admittance parameters ordered [x,y,z,rx,ry,rz].
     std::array<double, 6> virtual_mass{5.0, 5.0, 5.0, 0.5, 0.5, 0.5};
     std::array<double, 6> damping{80.0, 80.0, 80.0, 8.0, 8.0, 8.0};

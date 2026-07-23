@@ -516,10 +516,32 @@ force_control:
   # re-contact re-loads the block and stops the bleed the same tick. Prevents
   # the K=0 offset ratchet across repeated contacts of a hovering policy
   # (2026-07-22 servo_log_20260722_172914: offset -7 -> -22 -> -30 mm cap,
-  # third press 31.6 N ExternalForceLimit). 0 = off.
+  # third press 31.6 N ExternalForceLimit). 0 = off. The bleed runs only
+  # while the compliance equilibrium follows a live policy target
+  # (ForceControlCommand.allow_release_bleed): on Hold the escaped offset is
+  # kept, because draining toward a static in-surface hold anchor re-creates
+  # the contact in a perpetual bounce (2026-07-23 14:20 Hold oscillation).
   release_bleed_stiffness: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   wrench_deadband: [1.5, 1.5, 1.5, 0.25, 0.25, 0.25]
   blockwise_release_recenter: false
+  # Hard-limit policy. "latch" (default): the debounced hard force/torque
+  # limit faults and freezes motion. "retreat": run a bounded retreat episode
+  # instead — a virtual wrench of retreat_virtual_force_n along the measured
+  # press direction drives the admittance offset away from the contact until
+  # the TCP escapes retreat_distance_m with the force back under the hard
+  # threshold; policy streaming and inference continue (state: "retreating").
+  # The latch remains the fail-closed backstop: retreat that cannot unload
+  # within retreat_timeout_sec (wedged), a torque-only trigger with no escape
+  # direction, the scalar contact_force episode, or more than
+  # retreat_max_attempts episodes per retreat_attempt_window_sec (0 =
+  # unlimited) still latch. Requires operating_mode cartesian_admittance;
+  # retreat_distance_m must fit inside max_pos_offset_m.
+  hard_limit_policy: latch
+  retreat_distance_m: 0.010
+  retreat_virtual_force_n: 20.0
+  retreat_timeout_sec: 1.0
+  retreat_max_attempts: 0
+  retreat_attempt_window_sec: 10.0
   max_pos_offset_m: 0.02
   max_rot_offset_rad: 0.08
   max_linear_velocity_m_s: 0.03

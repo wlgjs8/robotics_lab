@@ -33,6 +33,7 @@ policy_runner/record_control.py
 policy_runner/recording.py
 policy_runner/robot_state_client.py
 policy_runner/rollout_modes.py
+policy_runner/rollout_step_log.py
 policy_runner/safety.py
 policy_runner/servo_command_client.py
 policy_runner/spacemouse.py
@@ -55,6 +56,7 @@ robotics_lab_policy_runner.egg-info/dependency_links.txt
 robotics_lab_policy_runner.egg-info/entry_points.txt
 robotics_lab_policy_runner.egg-info/requires.txt
 robotics_lab_policy_runner.egg-info/top_level.txt
+tests/test_analyze_rollout_step_log.py
 tests/test_camera_bundle_client.py
 tests/test_camera_diagnostics.py
 tests/test_camera_preview.py
@@ -90,6 +92,7 @@ tests/test_phase_metrics.py
 tests/test_policy_runner_contract.py
 tests/test_rbpodo_controller_sim_safety.py
 tests/test_recording_and_training.py
+tests/test_rollout_step_log.py
 tests/test_spacemouse_device_registry.py
 tests/test_spacemouse_hid_reader.py
 tests/test_teleop_mux.py

@@ -1184,6 +1184,83 @@ bool testReleasedStateOffsetBleedDrainsZeroStiffnessOffset() {
     const double mid_bleed_offset = bleed_controller.state().offset_tcp.x;
     RB_CHECK(drive(bleed_controller, 10.0, 500));
     RB_CHECK(bleed_controller.state().offset_tcp.x < mid_bleed_offset);
+
+    // Hold gating: with allow_release_bleed=false (static hold equilibrium —
+    // e.g. a client abort froze an in-surface anchor) the configured bleed
+    // spring must stay inert so the escaped offset rests contact-free instead
+    // of draining back into the surface (2026-07-23 14:20 Hold bounce).
+    rb_servo::ForceController hold_gated(config);
+    hold_gated.engage();
+    RB_CHECK(drive(hold_gated, 10.0, 1000));
+    const double gated_loaded_offset = hold_gated.state().offset_tcp.x;
+    rb_servo::ForceControlCommand gated = xCommand();
+    gated.allow_release_bleed = false;
+    for (int i = 0; i < 3000; ++i) {
+        rb_servo::Wrench6D wrench;
+        const auto p = hold_gated.propose(wrench, gated, rb_servo::Vec6{}, dt);
+        RB_CHECK(p.valid);
+        RB_CHECK(hold_gated.commit(p));
+    }
+    RB_CHECK(std::abs(hold_gated.state().offset_tcp.x) >=
+             0.9 * std::abs(gated_loaded_offset));
+    return true;
+}
+
+bool testForceLimiterEnvelopeSurvivesStepForceRelease() {
+    // 2026-07-23 12:55/13:08 regression: the Layer-3 envelope followed the
+    // instantaneous wrench error, so an abrupt force release (bolt lift-off,
+    // grasp settling, retreat unload) collapsed the velocity/acceleration
+    // limits around a legally-fast escape state and the proposal hard-faulted
+    // ("Cartesian axis state is outside the hard jerk-governed motion
+    // envelope"). The boost must open instantly but decay only as fast as the
+    // governor can brake the state back inside.
+    rb_servo::ForceControlConfig config = controllerConfig();
+    config.virtual_mass = {2.0, 2.0, 2.0, 0.2, 0.2, 0.2};
+    config.damping = {26.0, 26.0, 26.0, 1.55, 1.55, 1.55};
+    config.stiffness = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    config.wrench_deadband = {1.5, 1.5, 1.5, 0.10, 0.10, 0.10};
+    config.force_limit_n = 15.0;
+    config.backoff_gain_m_s_per_n = 0.02;
+    config.backoff_max_velocity_m_s = 0.25;
+    config.max_pos_offset_m = 0.03;
+    config.max_linear_velocity_m_s = 0.06;
+    config.max_linear_acceleration_m_s2 = 0.8;
+    config.max_linear_jerk_m_s3 = 8.0;
+    config.max_pos_step_m = 0.001;
+    rb_servo::ForceController controller(config);
+    controller.engage();
+    const double dt = 0.002;
+    // 150 ms of a 25 N press opens the envelope and builds an escape speed
+    // beyond the base velocity limit.
+    for (int i = 0; i < 75; ++i) {
+        rb_servo::Wrench6D wrench;
+        wrench.fx = 25.0;
+        const auto p = controller.propose(wrench, xCommand(), rb_servo::Vec6{}, dt);
+        RB_CHECK(p.valid);
+        RB_CHECK(controller.commit(p));
+    }
+    RB_CHECK(std::abs(controller.state().velocity_tcp.x) >
+             config.max_linear_velocity_m_s);
+    RB_CHECK(controller.state().envelope_boost_m_s > 0.0);
+    // Abrupt full release: every proposal must remain valid while the boost
+    // decays and the state brakes back inside the base envelope.
+    for (int i = 0; i < 1000; ++i) {
+        rb_servo::Wrench6D wrench;
+        const auto p = controller.propose(wrench, xCommand(), rb_servo::Vec6{}, dt);
+        if (!p.valid) {
+            std::cerr << "release tick " << i << " reason=" << p.reason
+                      << " v=" << controller.state().velocity_tcp.x
+                      << " off=" << controller.state().offset_tcp.x
+                      << " acc=" << controller.state().acceleration_tcp.x
+                      << " boost=" << controller.state().envelope_boost_m_s
+                      << "\n";
+        }
+        RB_CHECK(p.valid);
+        RB_CHECK(controller.commit(p));
+    }
+    RB_CHECK(std::abs(controller.state().velocity_tcp.x) <=
+             config.max_linear_velocity_m_s + 1e-9);
+    RB_CHECK(near(controller.state().envelope_boost_m_s, 0.0, 1e-9));
     return true;
 }
 
@@ -1214,6 +1291,7 @@ int main() {
     if (!testContactForceNormalEstimatorFreezesForEpisode()) return 1;
     if (!testForceLimiterOpensTranslationEnvelopeAboveLimit()) return 1;
     if (!testReleasedStateOffsetBleedDrainsZeroStiffnessOffset()) return 1;
+    if (!testForceLimiterEnvelopeSurvivesStepForceRelease()) return 1;
     std::cout << "force_controller tests passed\n";
     return 0;
 }

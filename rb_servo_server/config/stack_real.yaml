@@ -759,6 +759,26 @@ force_control:
   force_limit_n: 15.0
   backoff_gain_m_s_per_n: 0.02
   backoff_max_velocity_m_s: 0.25
+  # Hard-limit retreat (2026-07-23 operator decision): never freeze on the
+  # hard limit in normal operation. The 12:35 rollout showed the latch itself
+  # is harmful — it froze the last (in-surface) command and the position loop
+  # kept pressing 57 -> 74 N for 4.5 s until operator intervention
+  # (servo_log_20260723_123549 ticks 16054+). With 'retreat', the debounced
+  # hard limit instead injects a 20 N virtual press along the measured force
+  # direction so the admittance escapes ~10 mm through its own jerk envelope
+  # (passivity-safe: virtual press x escape twist = negative power), policy
+  # streaming/inference continue, and the release_bleed_stiffness spring then
+  # drains the retreat offset gently on the next approach. Escalation to the
+  # latch stays fail-closed: retreat that cannot unload within 1 s
+  # (wedged/jammed), a torque-only trigger with no escape direction, or more
+  # than 6 episodes in 10 s still latch. Set retreat_max_attempts: 0 for
+  # unlimited retreats.
+  hard_limit_policy: retreat
+  retreat_distance_m: 0.010
+  retreat_virtual_force_n: 20.0
+  retreat_timeout_sec: 1.0
+  retreat_max_attempts: 6
+  retreat_attempt_window_sec: 10.0
   virtual_mass: [2.0, 2.0, 2.0, 0.2, 0.2, 0.2]
   damping: [26.0, 26.0, 26.0, 1.55, 1.55, 1.55]
   stiffness: [0.0, 0.0, 0.0, 3.0, 3.0, 3.0]
@@ -1075,7 +1095,7 @@ cartesian_control:
         # Match FLOW_INFER_CHUNK_EXECUTE_STEPS=12: consume the complete policy
         # execution window before using reserve rows from the published runway.
         consume_steps: 12
-        reserve_steps: 2
+        reserve_steps: 4 #2
         smoothing_window: 3
         af_damping_beta: 1.0 #0.2  # P3: honest central-diff curvature; clampAbs(af, a_max) bounds it (beta<1 = per-waypoint micro-brake)
         delta_twist_clear_residual_on_new_frame: true
