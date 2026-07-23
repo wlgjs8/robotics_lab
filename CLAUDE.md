@@ -115,8 +115,9 @@ make build       # source-build + install the native stack (rbpodo backend) into
 make vm-up / vm-down / vm-status   # boot/stop the Rainbow virtual control-box VMs for hardware-free MODE=sim
 make pgmode-sim-up / pgmode-sim-down   # native rb_servo_server + rb_gui controller-sim bring-up
 make cam-up / cam-down / cam-status   # the only Docker stack: camera_server (D435 head stereo + dual D405 wrists + stereo_worker, one container); cam-engine-rebuild rebuilds the 1280 TRT engine
+make cam-up-wrists    # wrist-only rig: dual D405 without the head D435 (no head stereo/box detect; wrist RGB-D bundles + wrist clouds still flow)
 ```
-GUI: `http://127.0.0.1:8080`. Docker is used ONLY for `camera_server`; everything else runs natively. Camera lifecycle is managed by the 4 `cam-*` targets (`cam-up`/`cam-down`/`cam-status`/`cam-engine-rebuild`); override the rig with `make cam-up CAMERA_CONFIG=/app/config/<rig>.yaml`. Flow-matching training runs natively on the GPU server with `python3 -m policy_runner flow-train`.
+GUI: `http://127.0.0.1:8080`. Docker is used ONLY for `camera_server`; everything else runs natively. Camera lifecycle is managed by the `cam-*` targets (`cam-up`/`cam-up-wrists`/`cam-down`/`cam-status`/`cam-engine-rebuild`); override the rig with `make cam-up CAMERA_CONFIG=/app/config/<rig>.yaml`. Flow-matching training runs natively on the GPU server with `python3 -m policy_runner flow-train`.
 
 ML data flow: audit HDF5 episodes (`python3 -m policy_runner hdf5-audit ...`, schema `robotics_lab.policy_runner.hdf5_audit.v1`) before flow-train. `flow-infer` requires explicit `--rollout-mode` (`offline_eval` / `sim_dryrun` / `controller_sim` / `real_readonly` / `real_policy`); `real_policy` enforces measured/accepted retarget, collision, gripper, and geometry gates — satisfiable, and exercised live (a full real_policy rollout has run on hardware).
 

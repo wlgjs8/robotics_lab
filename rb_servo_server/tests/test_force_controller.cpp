@@ -1121,6 +1121,72 @@ bool testContactForceNormalEstimatorFreezesForEpisode() {
     return true;
 }
 
+bool testReleasedStateOffsetBleedDrainsZeroStiffnessOffset() {
+    // K=0 translation profile with the released-state bleed spring: a contact
+    // builds a protective offset; once the wrench is fully released the offset
+    // must drain toward zero (tau = damping/bleed ~= 2 s) instead of resting
+    // where contact put it (the pre-bleed ratchet: 2026-07-22
+    // servo_log_20260722_172914). While the load persists the bleed must stay
+    // inert — identical trajectory to a bleed-less controller — so the
+    // in-contact spring re-press that motivated K=0 stays impossible.
+    rb_servo::ForceControlConfig config = controllerConfig();
+    config.virtual_mass = {2.0, 2.0, 2.0, 0.2, 0.2, 0.2};
+    config.damping = {26.0, 26.0, 26.0, 1.55, 1.55, 1.55};
+    config.stiffness = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    config.release_bleed_stiffness = {13.0, 13.0, 13.0, 0.0, 0.0, 0.0};
+    config.wrench_deadband = {1.5, 1.5, 1.5, 0.10, 0.10, 0.10};
+    config.max_pos_offset_m = 0.03;
+    config.max_linear_velocity_m_s = 0.06;
+    config.max_linear_acceleration_m_s2 = 1.0;
+    config.max_linear_jerk_m_s3 = 8.0;
+    config.max_pos_step_m = 0.001;
+
+    rb_servo::ForceControlConfig no_bleed = config;
+    no_bleed.release_bleed_stiffness = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+    const double dt = 0.002;
+    const auto drive = [&](rb_servo::ForceController& controller, double fx, int ticks) {
+        for (int i = 0; i < ticks; ++i) {
+            rb_servo::Wrench6D wrench;
+            wrench.fx = fx;
+            const auto proposal =
+                controller.propose(wrench, xCommand(), rb_servo::Vec6{}, dt);
+            if (!proposal.valid) return false;
+            if (!controller.commit(proposal)) return false;
+        }
+        return true;
+    };
+
+    rb_servo::ForceController bleed_controller(config);
+    rb_servo::ForceController hold_controller(no_bleed);
+    bleed_controller.engage();
+    hold_controller.engage();
+
+    // Loaded phase (2 s of a 10 N press): the bleed spring must be inert while
+    // the block is loaded, so both controllers land on the same offset.
+    RB_CHECK(drive(bleed_controller, 10.0, 1000));
+    RB_CHECK(drive(hold_controller, 10.0, 1000));
+    const double loaded_offset = bleed_controller.state().offset_tcp.x;
+    RB_CHECK(loaded_offset < -0.01);
+    RB_CHECK(near(loaded_offset, hold_controller.state().offset_tcp.x, 1e-12));
+
+    // Released phase (6 s quiet). Without the bleed the offset rests where
+    // contact put it; with the bleed it drains toward zero (~3 tau).
+    RB_CHECK(drive(hold_controller, 0.0, 3000));
+    RB_CHECK(std::abs(hold_controller.state().offset_tcp.x) >=
+             0.9 * std::abs(loaded_offset));
+    RB_CHECK(drive(bleed_controller, 0.0, 3000));
+    RB_CHECK(std::abs(bleed_controller.state().offset_tcp.x) <=
+             0.25 * std::abs(loaded_offset));
+
+    // Re-contact stops the bleed the same tick: under a fresh press the offset
+    // must move away from zero again (unload), not continue recentering.
+    const double mid_bleed_offset = bleed_controller.state().offset_tcp.x;
+    RB_CHECK(drive(bleed_controller, 10.0, 500));
+    RB_CHECK(bleed_controller.state().offset_tcp.x < mid_bleed_offset);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -1147,6 +1213,7 @@ int main() {
     if (!testRemoveComplianceOffsetInvertsAppliedCorrection()) return 1;
     if (!testContactForceNormalEstimatorFreezesForEpisode()) return 1;
     if (!testForceLimiterOpensTranslationEnvelopeAboveLimit()) return 1;
+    if (!testReleasedStateOffsetBleedDrainsZeroStiffnessOffset()) return 1;
     std::cout << "force_controller tests passed\n";
     return 0;
 }

@@ -509,6 +509,15 @@ force_control:
   virtual_mass: [2.0, 2.0, 2.0, 0.2, 0.2, 0.2]
   damping: [26.0, 26.0, 26.0, 2.8, 2.8, 2.8]
   stiffness: [80.0, 80.0, 80.0, 8.0, 8.0, 8.0]
+  # Released-state offset bleed for zero-stiffness axes (only meaningful where
+  # stiffness is 0; rejected if both are set on one axis). While the axis
+  # block is fully released (inside the wrench deadband), a K=0 axis recenters
+  # its residual offset with this spring (tau ~= damping / bleed); any
+  # re-contact re-loads the block and stops the bleed the same tick. Prevents
+  # the K=0 offset ratchet across repeated contacts of a hovering policy
+  # (2026-07-22 servo_log_20260722_172914: offset -7 -> -22 -> -30 mm cap,
+  # third press 31.6 N ExternalForceLimit). 0 = off.
+  release_bleed_stiffness: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   wrench_deadband: [1.5, 1.5, 1.5, 0.25, 0.25, 0.25]
   blockwise_release_recenter: false
   max_pos_offset_m: 0.02

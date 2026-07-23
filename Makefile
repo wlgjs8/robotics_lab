@@ -5,7 +5,7 @@ POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 FLOW_INFER_ARGS ?=
 
-.PHONY: run flow-infer-real flow-infer-sim-offline flow-infer-training-replay build rebuild vm-up vm-down vm-status policy-hdf5-audit-smoke deps-hardware-free cam-up cam-engine-rebuild cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
+.PHONY: run flow-infer-real flow-infer-sim-offline flow-infer-training-replay build rebuild vm-up vm-down vm-status policy-hdf5-audit-smoke deps-hardware-free cam-up cam-up-wrists cam-engine-rebuild cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
 
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
@@ -93,7 +93,7 @@ deps-hardware-free:
 	./scripts/install_deps_ubuntu.sh --profile hardware-free
 
 # --- Camera (D435 head stereo + dual D405 wrists + stereo_worker, one container) ---
-# 카메라 관련 make 타겟은 4개로 통합: cam-up / cam-down / cam-status / cam-engine-rebuild.
+# 카메라 관련 make 타겟: cam-up / cam-up-wrists(head 없이) / cam-down / cam-status / cam-engine-rebuild.
 # `make run` 으로 로봇 스택을 띄운 뒤 `make cam-up` 한 줄이면 D435 헤드(IR 스테레오) + 손목
 # D405 2개 캡처와 스테레오 워커(viser 포인트클라우드 / 박스검출 / external-box 송신)가 한
 # 컨테이너에서 함께 뜬다(run_all.sh 가 캡처+워커 둘 다 기동).
@@ -107,14 +107,22 @@ LIBREALSENSE_REF ?= bf2778061d5dd29776e9aca8765f75852671760b
 LIBREALSENSE_BACKEND ?= native
 # 헤드 1280x720 IR intrinsics는 camera_server가 기동 시 디바이스에서 덤프(아래 경로).
 STEREO_CAM_K ?= /app/stereo_worker/d435_ir_1280x720_K.txt
+# 1 = head D435 사용(기본). 0 = wrist-only (head 스테레오/박스검출 비활성).
+STEREO_HEAD ?= 1
 
 cam-up:
 	LIBREALSENSE_VERSION=$(LIBREALSENSE_VERSION) LIBREALSENSE_REF=$(LIBREALSENSE_REF) \
 	LIBREALSENSE_BACKEND=$(LIBREALSENSE_BACKEND) \
 	CAMERA_CONFIG=$(CAMERA_CONFIG) CAMERA_REALSENSE_JSON=$(STEREO_CAM_JSON) \
-	STEREO_INTRINSICS=$(STEREO_CAM_K) \
+	STEREO_INTRINSICS=$(STEREO_CAM_K) STEREO_HEAD=$(STEREO_HEAD) \
 		$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile real_camera up -d --build camera_server
 	@echo "camera_server (D435 head + dual D405 + stereo_worker) up. 상태: make cam-status / 로그: docker logs -f camera_server"
+
+# head D435 없이 손목 D405 두 대만으로 기동(잦은 head/허브 USB 장애 격리용).
+# head 스테레오 클라우드/박스검출/external-box 송신은 비활성, 손목 RGB-D 번들
+# (camera.bundle.policy + wrist_left/right)과 손목 클라우드 발행은 그대로 동작한다.
+cam-up-wrists:
+	$(MAKE) cam-up CAMERA_CONFIG=/app/config/dual_realsense_d405.yaml STEREO_HEAD=0
 
 # IR 1280x720(->736 패딩)용 TRT 엔진 재빌드. GPU+torch+tensorrt 필요 -> camera_server
 # 컨테이너 안에서 실행. ONNX 재export 후 tf32 엔진 빌드까지 순차 수행.
@@ -124,11 +132,22 @@ cam-engine-rebuild:
 
 cam-status:
 	@docker ps --filter name=camera_server --format "container: {{.Status}}" || true
-	@docker logs --tail 1 camera_server 2>&1 | grep -E "status=" || echo "capture: (no status yet)"
 	@docker logs camera_server 2>&1 | grep -E "\[run\] fps=" | tail -1 || echo "worker: (no fps yet)"
 	@(ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q 5601 \
 		&& echo "stereo cloud: tcp 5601 LISTEN (viser 연동 가능)" \
 		|| echo "stereo cloud: 5601 down (worker 미발행)"
+	@status_line=$$(docker logs --tail 300 camera_server 2>&1 | grep -E "\[CAM\] status=" | tail -1); \
+	if [ -z "$$status_line" ]; then \
+		echo "capture: (no status yet)"; exit 1; \
+	fi; \
+	echo "$$status_line"; \
+	case "$$status_line" in \
+	*"status=ok"*) printf '\033[32mcamera: OK\033[0m\n' ;; \
+	*) printf '\033[1;31mcamera: %s\033[0m\n' "$$(echo "$$status_line" | sed -n 's/.*status=\([a-z]*\).*/\1/p' | tr 'a-z' 'A-Z')"; \
+		echo "$$status_line" | tr '|' '\n' | grep "STALLED" | sed 's/^ */  stalled: /' || true; \
+		echo "$$status_line" | grep -o 'reasons=.*' | sed 's/^/  /' || true; \
+		exit 1 ;; \
+	esac
 
 cam-down:
 	-docker stop camera_server

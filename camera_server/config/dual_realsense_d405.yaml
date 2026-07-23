@@ -36,6 +36,50 @@ sync:
   max_bundle_time_diff_ms: 17.0
   publish_incomplete_bundles: false
 
+# Same consumer-group layout as the head rig (d435_head_1280x720.yaml), minus the
+# head/stereo groups: `policy` feeds the real_policy runtime gate (both wrists,
+# all-or-nothing on purpose), `wrist_left`/`wrist_right` keep each side's RGB-D
+# flowing independently so one dead camera cannot hide the healthy side
+# (stereo_worker wrist clouds / rb_gui). `legacy` keeps camera.bundle for
+# recorders/diagnostics that subscribe to the full-rig topic.
+bundle_groups:
+  legacy:
+    topic: "camera.bundle"
+    master_stream: "left_realsense.color"
+    required_streams:
+      - "left_realsense.color"
+      - "left_realsense.depth"
+      - "right_realsense.color"
+      - "right_realsense.depth"
+    max_bundle_time_diff_ms: 17.0
+    publish_incomplete_bundles: false
+  policy:
+    topic: "camera.bundle.policy"
+    master_stream: "left_realsense.color"
+    required_streams:
+      - "left_realsense.color"
+      - "left_realsense.depth"
+      - "right_realsense.color"
+      - "right_realsense.depth"
+    max_bundle_time_diff_ms: 17.0
+    publish_incomplete_bundles: false
+  wrist_left:
+    topic: "camera.bundle.wrist_left"
+    master_stream: "left_realsense.color"
+    required_streams:
+      - "left_realsense.color"
+      - "left_realsense.depth"
+    max_bundle_time_diff_ms: 17.0
+    publish_incomplete_bundles: false
+  wrist_right:
+    topic: "camera.bundle.wrist_right"
+    master_stream: "right_realsense.color"
+    required_streams:
+      - "right_realsense.color"
+      - "right_realsense.depth"
+    max_bundle_time_diff_ms: 17.0
+    publish_incomplete_bundles: false
+
 cameras:
   left_realsense:
     serial: "260322278348"

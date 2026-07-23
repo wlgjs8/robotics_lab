@@ -847,8 +847,22 @@ ForceControllerProposal ForceController::propose(
         const bool sibling_loaded = i < 3 ? translation_loaded : rotation_loaded;
         const bool defer_axis_spring = config_.blockwise_release_recenter &&
             sibling_loaded && std::abs(wrench_error[i]) <= scaledTolerance(1.0);
-        const double effective_stiffness =
+        double effective_stiffness =
             defer_axis_spring ? 0.0 : config_.stiffness[i];
+        // Released-state offset bleed: a zero-stiffness axis whose whole block
+        // is unloaded (every enabled sibling inside the wrench deadband) drains
+        // its residual protective offset with the configured bleed spring.
+        // Without this the K=0 offset ratchets to max_pos_offset_m across
+        // repeated contacts of a hovering/re-approaching policy and the unload
+        // authority collapses (2026-07-22 servo_log_20260722_172914). Any
+        // re-contact re-loads the block and stops the bleed the same tick, so
+        // the in-contact spring re-press that motivated K=0 stays impossible.
+        if (effective_stiffness == 0.0 && !defer_axis_spring &&
+            !sibling_loaded &&
+            config_.release_bleed_stiffness[i] > 0.0 &&
+            std::abs(wrench_error[i]) <= scaledTolerance(1.0)) {
+            effective_stiffness = config_.release_bleed_stiffness[i];
+        }
         const double raw_acceleration =
             (wrench_error[i] - config_.damping[i] * old_velocity[i] -
              effective_stiffness * old_offset[i]) /

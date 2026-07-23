@@ -5588,6 +5588,14 @@ def _update_stereo_wrist(handles: dict[str, Any]) -> None:
             parts_status.append(f"{arm}: 대기")
             continue
         xyz, rgb, age_ms = data
+        # 발행이 멈춘 쪽(카메라 사망/번들 정지)은 마지막 클라우드를 계속 그리지 말고
+        # 숨긴다 — GUI만 봐도 어느 손목 카메라가 죽었는지 드러나야 한다.
+        # (wrist 발행 주기는 worker ~3Hz × wrist_every=3 ≈ 1s → 5s면 확실한 사망 신호)
+        if age_ms > 5000.0:
+            if h is not None:
+                h.visible = False
+            parts_status.append(f"{arm}: ⚠ 끊김 {age_ms / 1000.0:.0f}s")
+            continue
         if xyz.shape[0] == 0:
             if h is not None:
                 h.visible = False

@@ -978,6 +978,20 @@ struct ForceControlConfig {
     std::array<double, 6> virtual_mass{5.0, 5.0, 5.0, 0.5, 0.5, 0.5};
     std::array<double, 6> damping{80.0, 80.0, 80.0, 8.0, 8.0, 8.0};
     std::array<double, 6> stiffness{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    // Released-state offset bleed for zero-stiffness axes. With stiffness 0 the
+    // protective admittance offset never drains on its own; a policy that
+    // hovers at the contact and re-approaches (instead of moving away) ratchets
+    // the offset up to max_pos_offset_m across repeated contacts, after which
+    // the unload authority is gone and the next press runs straight into the
+    // hard force limit (2026-07-22 servo_log_20260722_172914: three floor
+    // contacts, offset -7 -> -22 -> -30 mm(cap), peaks 6.6 -> 15.6 -> 31.6 N
+    // latch). While an axis BLOCK is fully released (every enabled axis inside
+    // the wrench deadband), a zero-stiffness axis uses this spring value so the
+    // residual offset decays toward the equilibrium (tau ~= damping/bleed).
+    // Any re-contact re-loads the block and immediately stops the bleed, so
+    // the in-contact spring re-press that motivated stiffness 0 stays
+    // impossible. 0 disables the bleed (offset rests where contact put it).
+    std::array<double, 6> release_bleed_stiffness{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     std::array<double, 6> wrench_deadband{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     // When enabled, translation and rotation each defer per-axis spring
     // recentering until every enabled axis in that block is released.  The

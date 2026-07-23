@@ -645,12 +645,21 @@ force_control:
     # freshness -- 5 samples ~18 ms would miss it). Margin above the accepted
     # 23.88 N task-contact precedent is ~6 N: watch for false hard faults
     # during heavy task contact before tightening further.
+    # 2026-07-22 operator decision: tightened 30/35 -> 25/28 N for earlier
+    # protection after a real_policy bolt-pick rollout pressed the rigid floor
+    # 0.6 -> 28 N in ~20 ms and latched ExternalForceLimit
+    # (servo_log_20260722_140522 ticks 7136-7156). 25 N stays above the
+    # measured first-contact transients (9-11 N) and no-contact noise (3.8 N)
+    # but sits BELOW the 23.88 N task-contact precedent -- the operator accepts
+    # false hard faults on heavy grasp presses as the tripwire for whether the
+    # policy actually needs that much force; if legit grasps latch repeatedly,
+    # this value is the floor (revert to 30/35 or strengthen Layer-3 instead).
     target_force_n: 2.0
     contact_enter_force_n: 3.5
     contact_release_force_n: 2.75
     force_deadband_n: 0.5
-    hard_normal_force_n: 30.0
-    hard_force_norm_n: 35.0
+    hard_normal_force_n: 25.0
+    hard_force_norm_n: 28.0
     hard_torque_norm_nm: 7.0
     debounce_samples: 3
     hard_limit_debounce_samples: 3
@@ -687,8 +696,8 @@ force_control:
     contact_enter_force_n: 3.5
     contact_release_force_n: 2.75
     force_deadband_n: 0.5
-    hard_normal_force_n: 30.0
-    hard_force_norm_n: 35.0
+    hard_normal_force_n: 25.0
+    hard_force_norm_n: 28.0
     hard_torque_norm_nm: 7.0
     debounce_samples: 3
     hard_limit_debounce_samples: 3
@@ -753,6 +762,23 @@ force_control:
   virtual_mass: [2.0, 2.0, 2.0, 0.2, 0.2, 0.2]
   damping: [26.0, 26.0, 26.0, 1.55, 1.55, 1.55]
   stiffness: [0.0, 0.0, 0.0, 3.0, 3.0, 3.0]
+  # Released-state offset bleed (2026-07-23). K=0's "release drains via the
+  # policy target moving away" assumption fails against a policy that hovers
+  # at the contact and re-approaches: the 2026-07-22 17:29 bolt-pick run
+  # ratcheted the right-arm offset -7 -> -22 -> -30 mm (= max_pos_offset_m
+  # cap) across three floor contacts, equilibrium sank to -22 mm below the
+  # surface, and the third press ran 6.6 -> 15.6 -> 31.6 N into the
+  # ExternalForceLimit latch with no unload authority left
+  # (servo_log_20260722_172914 rows 8796/9264/10114). While the translation
+  # block is fully RELEASED (inside the wrench deadband) K=0 axes recenter
+  # with this spring instead: tau = damping/bleed = 26/13 ~= 2.0 s;
+  # worst-case return speed from the 30 mm cap ~16 mm/s, under the response
+  # caps, and a re-touch enters contact at the 1.5 N deadband where the
+  # mass-damper takes over. Re-contact re-loads the block and stops the bleed
+  # the same tick, so the in-contact spring re-press that caused the
+  # 2026-07-17 372 N spike (K=80 always-on) remains impossible. Rotations
+  # keep 0 (they already recenter via their 3.0 Nm/rad spring).
+  release_bleed_stiffness: [13.0, 13.0, 13.0, 0.0, 0.0, 0.0]
   # 2026-07-17 (Phase 3 restore): translation deadband back to 1.5 N. The
   # interim 2.5 N was a shield against LEFT free-air phantom force (no gravity
   # model, 1.5-3.4 N during fast repositioning -> K=0 offset drift + false

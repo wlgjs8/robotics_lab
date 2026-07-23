@@ -312,7 +312,12 @@ bool testRepositoryConfigsParse() {
             left_force.contact_release_force_n
         );
         RB_CHECK(near(left_force.force_deadband_n, right_force.force_deadband_n));
-        RB_CHECK(near(left_force.hard_normal_force_n, 30.0));
+        // 2026-07-22 operator decision: 30/35 -> 25/28 N for earlier
+        // protection after a bolt-pick press ran 0.6 -> 28 N in ~20 ms and
+        // latched (servo_log_20260722_140522). Sits above the measured
+        // first-contact transients (9-11 N) but below the 23.88 N
+        // task-contact precedent — deliberate tripwire.
+        RB_CHECK(near(left_force.hard_normal_force_n, 25.0));
         RB_CHECK(near(left_force.hard_normal_force_n, right_force.hard_normal_force_n));
         // Translation-only compliance: rotations stay off until the closed-jaw
         // fingertip-centre check passes with a raised torque deadband.
@@ -349,8 +354,20 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(!right_force.compliance_axes.yaw);
         RB_CHECK(left_force.compliance_frame == "tcp_origin");
         RB_CHECK(left_force.compliance_frame == right_force.compliance_frame);
-        RB_CHECK(near(left_force.hard_force_norm_n, 35.0));
+        RB_CHECK(near(left_force.hard_force_norm_n, 28.0));
         RB_CHECK(near(left_force.hard_force_norm_n, right_force.hard_force_norm_n));
+        // Released-state offset bleed: K=0 translations drain their residual
+        // offset (tau = 26/13 ~= 2 s) only while the block is fully released;
+        // rotations keep 0 (their 3.0 Nm/rad spring already recenters).
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            RB_CHECK(near(stack_real.force_control.stiffness[axis], 0.0));
+            RB_CHECK(near(
+                stack_real.force_control.release_bleed_stiffness[axis], 13.0));
+        }
+        for (std::size_t axis = 3; axis < 6; ++axis) {
+            RB_CHECK(near(
+                stack_real.force_control.release_bleed_stiffness[axis], 0.0));
+        }
         RB_CHECK(near(left_force.hard_torque_norm_nm, 7.0));
         RB_CHECK(near(left_force.hard_torque_norm_nm, right_force.hard_torque_norm_nm));
         RB_CHECK(left_force.debounce_samples == right_force.debounce_samples);

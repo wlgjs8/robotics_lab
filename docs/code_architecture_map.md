@@ -56,7 +56,7 @@ The `rbpodo` backend also serves **controller (`pgmode`) simulation** (`run_mode
 | chunk frame in → `rb_servo_server` | UDP JSON | 50264 | `network.chunk_frame_bind`; separate from the lease-gated command socket |
 | state out ← `rb_servo_server` | UDP JSON fanout | 50356 (scope), 50366 (viser GUI), 50376 (`make run` policy_runner), 50378 (external flow-infer), 50386 (camera/stereo worker) | `network.state_pub_endpoints` list |
 | gripper command / feedback | UDP JSON | 50410 / 50420 | `gripper.command_endpoint` and `gripper.feedback_bind`; launched by `tools/run_stack.sh` |
-| camera metadata | ZMQ PUB | 5600 | topics `camera.bundle`, `camera.health` |
+| camera metadata | ZMQ PUB | 5600 | topics `camera.health` + bundle groups: `camera.bundle` (legacy full-rig), `camera.bundle.policy` (both wrists, real_policy gate), `camera.bundle.stereo` (head IR, head rig only), `camera.bundle.wrist_left`/`.wrist_right` (per-side wrist RGB-D so one dead camera cannot block the healthy side). Wrist-only rig: `make cam-up-wrists` (dual_realsense_d405.yaml + `STEREO_HEAD=0`, no head D435) |
 | camera images | POSIX shared memory ring | `/camera_server_frames` (real) / `/camera_server_frames_test` (mock) | atomic seq begin/end for reader/writer coordination |
 | GUI web | HTTP (viser) | 8080 | |
 | GUI overlay → gui | UDP JSON | 50261 | optional overlay, off by default |

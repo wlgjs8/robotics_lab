@@ -1695,6 +1695,20 @@ void validateConfig(const DualArmConfig& cfg) {
     validateNonNegativeFiniteArray(cfg.force_control.damping, "force_control.damping");
     validateNonNegativeFiniteArray(cfg.force_control.stiffness, "force_control.stiffness");
     validateNonNegativeFiniteArray(
+        cfg.force_control.release_bleed_stiffness,
+        "force_control.release_bleed_stiffness"
+    );
+    for (std::size_t i = 0; i < 6; ++i) {
+        if (cfg.force_control.release_bleed_stiffness[i] > 0.0 &&
+            cfg.force_control.stiffness[i] > 0.0) {
+            throw std::runtime_error(
+                "force_control.release_bleed_stiffness is only meaningful on "
+                "zero-stiffness axes (axis " + std::to_string(i) +
+                " has both stiffness and release_bleed_stiffness > 0)"
+            );
+        }
+    }
+    validateNonNegativeFiniteArray(
         cfg.force_control.wrench_deadband,
         "force_control.wrench_deadband"
     );
@@ -1730,10 +1744,18 @@ void validateConfig(const DualArmConfig& cfg) {
                 cfg.force_control.virtual_mass[begin];
             const double stiffness_ratio = cfg.force_control.stiffness[begin] /
                 cfg.force_control.virtual_mass[begin];
+            // The released-state bleed spring drives the same block-coupled
+            // recenter motion, so it must obey the same isotropy contract.
+            const double bleed_ratio =
+                cfg.force_control.release_bleed_stiffness[begin] /
+                cfg.force_control.virtual_mass[begin];
             for (std::size_t i = begin + 1; i < end; ++i) {
                 const double candidate_damping = cfg.force_control.damping[i] /
                     cfg.force_control.virtual_mass[i];
                 const double candidate_stiffness = cfg.force_control.stiffness[i] /
+                    cfg.force_control.virtual_mass[i];
+                const double candidate_bleed =
+                    cfg.force_control.release_bleed_stiffness[i] /
                     cfg.force_control.virtual_mass[i];
                 const double damping_scale = std::max({
                     1.0, std::abs(damping_ratio), std::abs(candidate_damping),
@@ -1741,13 +1763,19 @@ void validateConfig(const DualArmConfig& cfg) {
                 const double stiffness_scale = std::max({
                     1.0, std::abs(stiffness_ratio), std::abs(candidate_stiffness),
                 });
+                const double bleed_scale = std::max({
+                    1.0, std::abs(bleed_ratio), std::abs(candidate_bleed),
+                });
                 if (std::abs(candidate_damping - damping_ratio) >
                         1e-9 * damping_scale ||
                     std::abs(candidate_stiffness - stiffness_ratio) >
-                        1e-9 * stiffness_scale) {
+                        1e-9 * stiffness_scale ||
+                    std::abs(candidate_bleed - bleed_ratio) >
+                        1e-9 * bleed_scale) {
                     throw std::runtime_error(
                         "force_control.blockwise_release_recenter requires equal "
-                        "damping/mass and stiffness/mass ratios within the " +
+                        "damping/mass, stiffness/mass, and "
+                        "release_bleed_stiffness/mass ratios within the " +
                         name + " block"
                     );
                 }
@@ -3665,6 +3693,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "virtual_mass",
             "damping",
             "stiffness",
+            "release_bleed_stiffness",
             "wrench_deadband",
             "blockwise_release_recenter",
             "max_dt_sec",
@@ -3776,6 +3805,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "virtual_mass")) cfg.force_control.virtual_mass = parseJointArray(sec["virtual_mass"], "force_control.virtual_mass");
         if (has(sec, "damping")) cfg.force_control.damping = parseJointArray(sec["damping"], "force_control.damping");
         if (has(sec, "stiffness")) cfg.force_control.stiffness = parseJointArray(sec["stiffness"], "force_control.stiffness");
+        if (has(sec, "release_bleed_stiffness")) cfg.force_control.release_bleed_stiffness = parseJointArray(sec["release_bleed_stiffness"], "force_control.release_bleed_stiffness");
         if (has(sec, "wrench_deadband")) cfg.force_control.wrench_deadband = parseJointArray(sec["wrench_deadband"], "force_control.wrench_deadband");
         if (has(sec, "force_limit_n")) cfg.force_control.force_limit_n = asDouble(sec["force_limit_n"], "force_control.force_limit_n");
         if (has(sec, "backoff_gain_m_s_per_n")) cfg.force_control.backoff_gain_m_s_per_n = asDouble(sec["backoff_gain_m_s_per_n"], "force_control.backoff_gain_m_s_per_n");

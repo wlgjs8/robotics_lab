@@ -31,6 +31,14 @@ cd "$(dirname "$0")/.."
 
 MODE="${1:-real}"
 
+# Match tools/build_stack.sh so the interpreter receiving the editable installs
+# is also the one that launches viser, policy_runner, and helper processes.
+# Without this, `make build` can install into .venv while `make run` uses the
+# system python3 and the GUI immediately dies on imports such as numpy/viser.
+if [ -n "${STACK_PYTHON:-}" ]; then PY="$STACK_PYTHON"
+elif [ -x ".venv/bin/python" ]; then PY=".venv/bin/python"
+else PY="python3"; fi
+
 case "$MODE" in
   real|sim) ;;
   *) echo "usage: $0 [real|sim]" >&2; exit 2 ;;
@@ -165,10 +173,10 @@ preflight_kill_stale() {
   pkill -9 -f "$1" 2>/dev/null || true
 }
 preflight_kill_stale "rb_servo_server" "$SERVER_BIN"
-preflight_kill_stale "viser GUI"       "python3 -m rb_servo_gui.app"
-preflight_kill_stale "scope dashboard" "python3 -u scripts/servo_scope_dashboard.py"
-preflight_kill_stale "policy_runner"   "python3 -u -m policy_runner --config policy_runner/config/stack_"
-[ "$GRIPPER_SERVER_ON" = "1" ] && preflight_kill_stale "gripper_server" "python3 -u -m policy_runner.gripper_server"
+preflight_kill_stale "viser GUI"       "rb_servo_gui.app"
+preflight_kill_stale "scope dashboard" "scripts/servo_scope_dashboard.py"
+preflight_kill_stale "policy_runner"   "policy_runner --config policy_runner/config/stack_"
+[ "$GRIPPER_SERVER_ON" = "1" ] && preflight_kill_stale "gripper_server" "policy_runner.gripper_server"
 
 if [ "$MODE" = "real" ]; then
   echo "============================================================"
@@ -213,6 +221,7 @@ trap cleanup EXIT
 
 echo "[stack] mode=$MODE source=$ACTION_SOURCE (spacemouse + umi side by side)"
 echo "[stack] server: $SERVER_CFG"
+echo "[stack] python: $PY"
 echo "[stack] external flow-infer state readback: udp://127.0.0.1:50378"
 if [ "$SCOPE_DASHBOARD_ON" = "1" ]; then
   echo "[stack] joint scope dashboard state listen: ${SCOPE_DASHBOARD_STATE_LISTEN}"
@@ -252,11 +261,17 @@ PYTHONPATH=rb_gui \
   RB_GUI_COMMAND_HOST=127.0.0.1 RB_GUI_COMMAND_PORT=50256 \
   RB_GUI_CIRCLE_OVERLAY_BIND=none \
   RB_GUI_SERVER_CONFIG_PATH="$SERVER_CFG_ABS" \
-  python3 -m rb_servo_gui.app >"$LOG_DIR/gui.log" 2>&1 &
+  "$PY" -m rb_servo_gui.app >"$LOG_DIR/gui.log" 2>&1 &
 PIDS+=($!)
+sleep 1
+if ! kill -0 "${PIDS[-1]}" 2>/dev/null; then
+  echo "[stack] viser GUI exited during startup:" >&2
+  tail -10 "$LOG_DIR/gui.log" >&2
+  exit 1
+fi
 
 if [ "$SCOPE_DASHBOARD_ON" = "1" ]; then
-  python3 -u scripts/servo_scope_dashboard.py \
+  "$PY" -u scripts/servo_scope_dashboard.py \
     --listen "$SCOPE_DASHBOARD_STATE_LISTEN" \
     --host "$SCOPE_DASHBOARD_HOST" \
     --port "$SCOPE_DASHBOARD_PORT" \
@@ -273,7 +288,7 @@ fi
 
 if [ "$GRIPPER_SERVER_ON" = "1" ]; then
   echo "[stack] gripper_server: backend=$GRIPPER_BACKEND cmd<-127.0.0.1:50410 feedback->127.0.0.1:50420 ${GRIPPER_SERVER_ARGS:-} ${GRIPPER_SERVER_DEBUG_ARGS:-}"
-  python3 -u -m policy_runner.gripper_server \
+  "$PY" -u -m policy_runner.gripper_server \
     --backend "$GRIPPER_BACKEND" --bind 127.0.0.1:50410 --state-endpoint 127.0.0.1:50420 \
     ${GRIPPER_SERVER_DEBUG_ARGS:-} ${GRIPPER_SERVER_ARGS:-} >"$LOG_DIR/gripper_server.log" 2>&1 &
   PIDS+=($!)
@@ -309,7 +324,7 @@ case "$ACTION_SOURCE" in
     PYTHONPATH=policy_runner \
       POLICY_RUNNER_UMI_TELEOP_LOG="${POLICY_RUNNER_UMI_TELEOP_LOG-auto}" \
       POLICY_RUNNER_TELEOP_CAPTURE="${POLICY_RUNNER_TELEOP_CAPTURE-auto}" \
-      python3 -u -m policy_runner --config "$POLICY_CFG" --action-source "$ACTION_SOURCE" $VERBOSE_FLAG \
+      "$PY" -u -m policy_runner --config "$POLICY_CFG" --action-source "$ACTION_SOURCE" $VERBOSE_FLAG \
       2>&1 | tee "$LOG_DIR/policy.log"
     ;;
 esac

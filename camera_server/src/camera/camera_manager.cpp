@@ -405,6 +405,17 @@ HealthSnapshot CameraManager::snapshot() const {
     h.camera_usb_type[cam.name] = device.usb_type;
   }
   h.stream_stats = stats_;
+  // fps_window_hz is only recomputed when a frame arrives, so a stalled stream
+  // would report its last (healthy-looking) rate forever. Zero it once a full
+  // fps window has elapsed with no frame; last_frame_time_ns and host_time_ns
+  // share cfg_.server.clock (see apply_health_thresholds age check).
+  const uint64_t fps_window_ns = static_cast<uint64_t>(cfg_.health.fps_window_sec * 1e9);
+  for (auto& [stream_key, st] : h.stream_stats) {
+    if (st.last_frame_time_ns != 0 && h.host_time_ns > st.last_frame_time_ns &&
+        h.host_time_ns - st.last_frame_time_ns > fps_window_ns) {
+      st.fps_window_hz = 0.0;
+    }
+  }
   h.bundle_groups = synchronizer_.stats();
   const auto compat = synchronizer_.compatibility_stats();
   h.bundle_seq = compat.bundle_seq;

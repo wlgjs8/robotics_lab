@@ -129,8 +129,20 @@ void HealthMonitor::loop() {
     for (const auto& [key, st] : snap.stream_stats) {
       std::cerr << " | " << key << ' ' << st.fps_window_hz << "fps(window) drop="
                 << st.frame_number_gap_drop_count << "(+" << st.frame_number_gap_drop_delta << ')';
+      if (st.last_frame_time_ns != 0 && snap.host_time_ns > st.last_frame_time_ns) {
+        const double age_ms = static_cast<double>(snap.host_time_ns - st.last_frame_time_ns) / 1e6;
+        if (age_ms > cfg_.warn_if_frame_age_ms_gt) std::cerr << " age=" << age_ms << "ms STALLED";
+      }
     }
-    std::cerr << " | shm_ok=" << (snap.shm_size_bytes > 0 ? 1 : 0) << " | rec_q=" << snap.recorder_queue_depth << '\n';
+    std::cerr << " | shm_ok=" << (snap.shm_size_bytes > 0 ? 1 : 0) << " | rec_q=" << snap.recorder_queue_depth;
+    if (snap.status != "ok" && !snap.status_reasons.empty()) {
+      std::cerr << " | reasons=";
+      for (size_t i = 0; i < snap.status_reasons.size(); ++i) {
+        if (i) std::cerr << ',';
+        std::cerr << snap.status_reasons[i];
+      }
+    }
+    std::cerr << '\n';
     previous_snapshot_ = snap;
     have_previous_snapshot_ = true;
     std::this_thread::sleep_for(period);
