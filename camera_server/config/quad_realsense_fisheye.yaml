@@ -8,16 +8,23 @@
 # right_realsense.color / .depth, left_fisheye.color, right_fisheye.color.
 # policy_runner's resolve_frame() maps checkpoint name 'X_color' -> 'X.color'.
 #
-# RealSense (librealsense serials, from dual_realsense_d405.yaml; left/right
+# RealSense (librealsense serials, from dual_realsense_d405.yaml; original left/right
 # verified physically 2026-06-12): left=260322278348, right=412622272078.
+# 2026-07-23: the two wrist modules were physically swapped between arms. Each arm's
+# gripper + RealSense + fisheye share ONE USB-C cable, so the cabling moved WITH the
+# hardware. Consequence (verified via the gripper udev functional test on the same day):
+#   - RealSense is serial-identified -> the serial FOLLOWS the unit, so left/right serials
+#     ARE swapped below: left=412622272078, right=260322278348.
+#   - fisheye is by-path (USB socket) identified -> the socket->arm mapping is UNCHANGED
+#     (cable moved with the module), so the fisheye device paths are NOT swapped.
 #
 # Fisheye selected by USB by-path (stable across reboots), paired to the RealSense
 # on the SAME USB hub (mirrors pika/pika_win/fisheye.py hub mapping). On this host:
 #   hub 1.3.1: RealSense USB-iSerial 313123070562 + fisheye /dev/video12 (1.3.1.1)
 #   hub 1.3.2: RealSense USB-iSerial 243323070989 + fisheye /dev/video14 (1.3.2.1)
-# !!! VERIFY left/right by covering each fisheye lens before trusting a rollout:
-#     left_fisheye MUST be on the same arm as left_realsense (260322278348). If the
-#     left RealSense sits on hub 1.3.2, swap the two device paths below.
+# !!! This fisheye rig was NOT run/verified after the 2026-07-23 swap. RE-VERIFY left/right
+#     by covering each fisheye lens before trusting a rollout: left_fisheye MUST be on the
+#     same arm as left_realsense (now 412622272078). If it is not, swap the two paths.
 server:
   name: camera_server
   mode: capture_only
@@ -51,7 +58,7 @@ sync:
 cameras:
   left_realsense:
     backend: realsense
-    serial: "260322278348"
+    serial: "412622272078"
     required: true
     streams:
       color:
@@ -68,7 +75,7 @@ cameras:
         format: z16
   right_realsense:
     backend: realsense
-    serial: "412622272078"
+    serial: "260322278348"
     required: true
     streams:
       color:
@@ -85,7 +92,8 @@ cameras:
         format: z16
   left_fisheye:
     backend: uvc
-    # Same hub as left_realsense — VERIFY (see header).
+    # Same hub as left_realsense — VERIFY (see header). by-path NOT swapped (cabling moved
+    # with the module on the 2026-07-23 arm swap; socket->arm mapping unchanged).
     device: "/dev/v4l/by-path/pci-0000:09:00.3-usb-0:1.3.1.1:1.0-video-index0"
     required: true
     streams:

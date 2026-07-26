@@ -8,7 +8,11 @@
 # attached to this PC (USB3, bus 4): 412622272078, 260322278348.
 # (Note: these differ from the USB iSerial values 243323070989/313123070562.)
 # Left/right assignment verified physically 2026-06-12 (right lens covered):
-#   left arm  = 260322278348, right arm = 412622272078.
+#   (original) left arm = 260322278348, right arm = 412622272078.
+# 2026-07-23: the two wrist cameras were physically swapped between arms, so the
+# side->serial binding below is swapped to match (serial follows the physical unit):
+#   left arm  = 412622272078, right arm = 260322278348.
+# RE-VERIFY by covering the RIGHT lens before trusting a rollout.
 server:
   name: camera_server
   mode: capture_only
@@ -82,7 +86,7 @@ bundle_groups:
 
 cameras:
   left_realsense:
-    serial: "260322278348"
+    serial: "412622272078"
     required: true
     streams:
       color:
@@ -98,7 +102,7 @@ cameras:
         fps: 30
         format: z16
   right_realsense:
-    serial: "412622272078"
+    serial: "260322278348"
     required: true
     streams:
       color:

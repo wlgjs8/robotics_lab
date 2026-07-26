@@ -279,6 +279,7 @@ bool testStatePublisherSerializesForceTelemetry() {
     snapshot.left_force_control.measured_force_n = 5.0;
     snapshot.left_force_control.fast_normal_force_n = 5.5;
     snapshot.left_force_control.fast_force_norm_n = 7.0;
+    snapshot.left_force_control.fast_force_rate_n_per_ms = 1.75;
     snapshot.left_force_control.fast_torque_norm_nm = 0.8;
     snapshot.left_force_control.contact_threshold_exceeded = true;
     snapshot.left_force_control.hard_limit_threshold_exceeded = true;
@@ -349,6 +350,7 @@ bool testStatePublisherSerializesForceTelemetry() {
     RB_CHECK(force.at("rotational_contact_active").get<bool>());
     RB_CHECK(force.at("fast_normal_force_n").get<double>() == 5.5);
     RB_CHECK(force.at("fast_force_norm_n").get<double>() == 7.0);
+    RB_CHECK(force.at("fast_force_rate_n_per_ms").get<double>() == 1.75);
     RB_CHECK(force.at("fast_torque_norm_nm").get<double>() == 0.8);
     RB_CHECK(force.at("contact_threshold_exceeded").get<bool>());
     RB_CHECK(force.at("hard_limit_threshold_exceeded").get<bool>());

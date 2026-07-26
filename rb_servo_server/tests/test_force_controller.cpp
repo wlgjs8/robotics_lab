@@ -1063,6 +1063,60 @@ bool testForceLimiterOpensTranslationEnvelopeAboveLimit() {
     return true;
 }
 
+bool testReflexOnlyDeadbandKeepsRetreatDriveInsideBaseEnvelope() {
+    // Tracked 2026-07-24 posture: no continuous response below 20 N and no
+    // Layer-3 boost. At a 25 N hard trip, adding the 20 N retreat virtual
+    // wrench yields 45 N measured drive; deadband shaving leaves 25 N error.
+    rb_servo::ForceControlConfig config = controllerConfig();
+    config.virtual_mass = {2.0, 2.0, 2.0, 0.2, 0.2, 0.2};
+    config.damping = {26.0, 26.0, 26.0, 1.55, 1.55, 1.55};
+    config.stiffness = {0.0, 0.0, 0.0, 3.0, 3.0, 3.0};
+    config.wrench_deadband = {20.0, 20.0, 20.0, 0.10, 0.10, 0.10};
+    config.force_limit_n = 0.0;
+    config.backoff_gain_m_s_per_n = 0.02;
+    config.backoff_max_velocity_m_s = 0.25;
+    config.max_pos_offset_m = 0.03;
+    config.max_linear_velocity_m_s = 0.06;
+    config.max_linear_acceleration_m_s2 = 0.8;
+    config.max_linear_jerk_m_s3 = 8.0;
+    config.max_pos_step_m = 0.001;
+    config.max_energy_j = 100.0;
+    constexpr double dt_sec = 0.002;
+
+    rb_servo::ForceController quiet_controller(config);
+    quiet_controller.engage();
+    rb_servo::Wrench6D quiet_wrench;
+    quiet_wrench.fx = 19.0;
+    const auto quiet = quiet_controller.propose(
+        quiet_wrench, xCommand(), rb_servo::Vec6{}, dt_sec);
+    RB_CHECK(quiet.valid);
+    RB_CHECK(near(quiet.wrench_error_tcp.fx, 0.0));
+    RB_CHECK(near(quiet.state.offset_tcp.x, 0.0));
+
+    rb_servo::ForceController retreat_controller(config);
+    retreat_controller.engage();
+    rb_servo::Wrench6D retreat_wrench;
+    retreat_wrench.fx = 45.0;
+    int reached_20mm_tick = -1;
+    for (int tick = 0; tick < 500; ++tick) {
+        const auto proposal = retreat_controller.propose(
+            retreat_wrench, xCommand(), rb_servo::Vec6{}, dt_sec);
+        RB_CHECK(proposal.valid);
+        RB_CHECK(near(proposal.wrench_error_tcp.fx, -25.0));
+        RB_CHECK(retreat_controller.commit(proposal));
+        RB_CHECK(std::abs(retreat_controller.state().velocity_tcp.x) <=
+                 config.max_linear_velocity_m_s + 1e-9);
+        RB_CHECK(near(retreat_controller.state().envelope_boost_m_s, 0.0));
+        if (retreat_controller.state().offset_tcp.x <= -0.020) {
+            reached_20mm_tick = tick;
+            break;
+        }
+    }
+    RB_CHECK(reached_20mm_tick >= 0);
+    RB_CHECK((reached_20mm_tick + 1) * dt_sec < 1.0);
+    return true;
+}
+
 bool testRemoveComplianceOffsetInvertsAppliedCorrection() {
     // Base command pose with a non-trivial orientation.
     rb_servo::Pose6D base;
@@ -1206,6 +1260,55 @@ bool testReleasedStateOffsetBleedDrainsZeroStiffnessOffset() {
     return true;
 }
 
+bool testRetreatEnvelopeBoostOpensAndDecaysWithoutLayer3() {
+    // Reflex-only profile (force_limit_n == 0): a retreat episode requests the
+    // envelope opening via the command so the reflex can reverse a driven
+    // descent quickly (2026-07-24 88 N press-through without it). The boost
+    // must open while commanded, let the axis exceed the base velocity limit,
+    // stay proposal-valid through the command's removal (hysteresis + reseed),
+    // and decay back to the base envelope.
+    rb_servo::ForceControlConfig config = controllerConfig();
+    config.virtual_mass = {2.0, 2.0, 2.0, 0.2, 0.2, 0.2};
+    config.damping = {26.0, 26.0, 26.0, 1.55, 1.55, 1.55};
+    config.stiffness = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    config.wrench_deadband = {20.0, 20.0, 20.0, 0.10, 0.10, 0.10};
+    config.force_limit_n = 0.0;
+    config.backoff_max_velocity_m_s = 0.25;
+    config.max_pos_offset_m = 0.03;
+    config.max_linear_velocity_m_s = 0.06;
+    config.max_linear_acceleration_m_s2 = 0.8;
+    config.max_linear_jerk_m_s3 = 8.0;
+    config.max_pos_step_m = 0.001;
+    rb_servo::ForceController controller(config);
+    controller.engage();
+    const double dt = 0.002;
+    // Episode: 45 N virtual+measured press with the boost commanded.
+    rb_servo::ForceControlCommand boosted = xCommand();
+    boosted.retreat_envelope_boost_m_s = 0.19;
+    for (int i = 0; i < 100; ++i) {
+        rb_servo::Wrench6D wrench;
+        wrench.fx = 45.0;
+        const auto p = controller.propose(wrench, boosted, rb_servo::Vec6{}, dt);
+        RB_CHECK(p.valid);
+        RB_CHECK(controller.commit(p));
+    }
+    RB_CHECK(std::abs(controller.state().velocity_tcp.x) >
+             config.max_linear_velocity_m_s);
+    RB_CHECK(controller.state().envelope_boost_m_s > 0.0);
+    // Episode end: command removed, wrench released — every proposal must stay
+    // valid while the hysteresis ramps the envelope shut.
+    for (int i = 0; i < 1000; ++i) {
+        rb_servo::Wrench6D wrench;
+        const auto p = controller.propose(wrench, xCommand(), rb_servo::Vec6{}, dt);
+        RB_CHECK(p.valid);
+        RB_CHECK(controller.commit(p));
+    }
+    RB_CHECK(std::abs(controller.state().velocity_tcp.x) <=
+             config.max_linear_velocity_m_s + 1e-9);
+    RB_CHECK(near(controller.state().envelope_boost_m_s, 0.0, 1e-9));
+    return true;
+}
+
 bool testForceLimiterEnvelopeSurvivesStepForceRelease() {
     // 2026-07-23 12:55/13:08 regression: the Layer-3 envelope followed the
     // instantaneous wrench error, so an abrupt force release (bolt lift-off,
@@ -1290,8 +1393,10 @@ int main() {
     if (!testRemoveComplianceOffsetInvertsAppliedCorrection()) return 1;
     if (!testContactForceNormalEstimatorFreezesForEpisode()) return 1;
     if (!testForceLimiterOpensTranslationEnvelopeAboveLimit()) return 1;
+    if (!testReflexOnlyDeadbandKeepsRetreatDriveInsideBaseEnvelope()) return 1;
     if (!testReleasedStateOffsetBleedDrainsZeroStiffnessOffset()) return 1;
     if (!testForceLimiterEnvelopeSurvivesStepForceRelease()) return 1;
+    if (!testRetreatEnvelopeBoostOpensAndDecaysWithoutLayer3()) return 1;
     std::cout << "force_controller tests passed\n";
     return 0;
 }

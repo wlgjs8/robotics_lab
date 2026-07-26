@@ -360,6 +360,12 @@ private:
         int transverse_enter_count = 0;
         int rotational_enter_count = 0;
         int hard_limit_count = 0;
+        // Resultant fast-force differentiator. It advances only with a fresh
+        // F/T acquisition and uses the backend sample's host timestamp, not
+        // the 500 Hz servo tick period.
+        bool fast_force_rate_initialized = false;
+        double previous_fast_force_norm_n = 0.0;
+        uint64_t previous_fast_force_sample_ns = 0;
         // Hard-limit retreat episode (force_control.hard_limit_policy:
         // retreat): direction is the measured stand-frame press at trigger;
         // progress is the committed admittance-offset displacement along the
@@ -409,6 +415,11 @@ private:
         bool tare_valid = false;
         bool tare_waiting_for_init_completion = false;
         bool tare_collecting = false;
+        // Bounded auto-retry of the post-init residual tare window: a single
+        // 1 s window is spoiled by intermittent disturbances (gripper servo
+        // twitch, wrist-camera cable sway — 2026-07-23 20:33 fx stddev 1.571 N
+        // rejected one run while its 12 s-earlier twin accepted).
+        int tare_retry_count = 0;
         uint64_t tare_not_before_ns = 0;
         uint64_t last_init_tare_command_seq = 0;
         uint64_t tare_generation = 0;

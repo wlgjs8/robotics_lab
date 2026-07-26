@@ -374,6 +374,7 @@ void writeForceTelemetryHeader(std::ostream& os, const char* side) {
        << ',' << side << "_force_control_measured_normal_force_n"
        << ',' << side << "_force_control_fast_normal_force_n"
        << ',' << side << "_force_control_fast_force_norm_n"
+       << ',' << side << "_force_control_fast_force_rate_n_per_ms"
        << ',' << side << "_force_control_fast_torque_norm_nm"
        << ',' << side << "_force_control_contact_threshold_exceeded"
        << ',' << side << "_force_control_hard_limit_threshold_exceeded"
@@ -708,6 +709,7 @@ void writeForceTelemetryColumns(
        << ',' << control.measured_force_n
        << ',' << control.fast_normal_force_n
        << ',' << control.fast_force_norm_n
+       << ',' << control.fast_force_rate_n_per_ms
        << ',' << control.fast_torque_norm_nm
        << ',' << control.contact_threshold_exceeded
        << ',' << control.hard_limit_threshold_exceeded

@@ -243,6 +243,7 @@ nlohmann::json forceControlJson(const ForceControlTelemetry& value) {
         {"measured_force_n", value.measured_force_n},
         {"fast_normal_force_n", value.fast_normal_force_n},
         {"fast_force_norm_n", value.fast_force_norm_n},
+        {"fast_force_rate_n_per_ms", value.fast_force_rate_n_per_ms},
         {"fast_torque_norm_nm", value.fast_torque_norm_nm},
         {"contact_threshold_exceeded", value.contact_threshold_exceeded},
         {"hard_limit_threshold_exceeded", value.hard_limit_threshold_exceeded},

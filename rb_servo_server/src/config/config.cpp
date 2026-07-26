@@ -1914,6 +1914,21 @@ void validateConfig(const DualArmConfig& cfg) {
         validateNonNegativeFinite(arm.hard_normal_force_n, path + ".hard_normal_force_n");
         validateNonNegativeFinite(arm.hard_force_norm_n, path + ".hard_force_norm_n");
         validateNonNegativeFinite(arm.hard_torque_norm_nm, path + ".hard_torque_norm_nm");
+        validateNonNegativeFinite(
+            arm.hard_limit_rate_n_per_ms,
+            path + ".hard_limit_rate_n_per_ms"
+        );
+        validateNonNegativeFinite(
+            arm.hard_limit_rate_floor_n,
+            path + ".hard_limit_rate_floor_n"
+        );
+        if (arm.hard_limit_rate_n_per_ms > 0.0 &&
+            !(arm.hard_limit_rate_floor_n > 0.0)) {
+            throw std::runtime_error(
+                path + ".hard_limit_rate_n_per_ms > 0 requires a positive "
+                "hard_limit_rate_floor_n"
+            );
+        }
         if (arm.debounce_samples < 1) {
             throw std::runtime_error(path + ".debounce_samples must be >= 1");
         }
@@ -3781,6 +3796,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "hard_normal_force_n",
                 "hard_force_norm_n",
                 "hard_torque_norm_nm",
+                "hard_limit_rate_n_per_ms",
+                "hard_limit_rate_floor_n",
                 "debounce_samples",
                 "hard_limit_debounce_samples",
                 "release_dwell_sec",
@@ -3806,6 +3823,16 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(arm, "hard_normal_force_n")) out.hard_normal_force_n = asDouble(arm["hard_normal_force_n"], path + ".hard_normal_force_n");
             if (has(arm, "hard_force_norm_n")) out.hard_force_norm_n = asDouble(arm["hard_force_norm_n"], path + ".hard_force_norm_n");
             if (has(arm, "hard_torque_norm_nm")) out.hard_torque_norm_nm = asDouble(arm["hard_torque_norm_nm"], path + ".hard_torque_norm_nm");
+            if (has(arm, "hard_limit_rate_n_per_ms")) {
+                out.hard_limit_rate_n_per_ms = asDouble(
+                    arm["hard_limit_rate_n_per_ms"],
+                    path + ".hard_limit_rate_n_per_ms");
+            }
+            if (has(arm, "hard_limit_rate_floor_n")) {
+                out.hard_limit_rate_floor_n = asDouble(
+                    arm["hard_limit_rate_floor_n"],
+                    path + ".hard_limit_rate_floor_n");
+            }
             if (has(arm, "debounce_samples")) out.debounce_samples = asInt(arm["debounce_samples"], path + ".debounce_samples");
             if (has(arm, "hard_limit_debounce_samples")) out.hard_limit_debounce_samples = asInt(arm["hard_limit_debounce_samples"], path + ".hard_limit_debounce_samples");
             if (has(arm, "release_dwell_sec")) out.release_dwell_sec = asDouble(arm["release_dwell_sec"], path + ".release_dwell_sec");

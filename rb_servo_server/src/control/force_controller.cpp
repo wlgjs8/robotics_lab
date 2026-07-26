@@ -763,21 +763,32 @@ ForceControllerProposal ForceController::propose(
     // deadband-shaved error norm, i.e. it is deadband-conservative.)
     double translation_velocity_boost = 0.0;
     double translation_dynamic_scale = 1.0;
-    if (config_.force_limit_n > 0.0) {
-        const double error_norm = std::sqrt(
-            wrench_error[0] * wrench_error[0] +
-            wrench_error[1] * wrench_error[1] +
-            wrench_error[2] * wrench_error[2]);
-        const double excess = error_norm - config_.force_limit_n;
+    {
+        const double headroom = std::max(
+            0.0,
+            config_.backoff_max_velocity_m_s - config_.max_linear_velocity_m_s);
         double demanded_boost = 0.0;
-        if (excess > 0.0) {
-            const double headroom = std::max(
-                0.0,
-                config_.backoff_max_velocity_m_s - config_.max_linear_velocity_m_s);
-            demanded_boost = std::min(
-                config_.backoff_gain_m_s_per_n * excess, headroom);
+        if (config_.force_limit_n > 0.0) {
+            const double error_norm = std::sqrt(
+                wrench_error[0] * wrench_error[0] +
+                wrench_error[1] * wrench_error[1] +
+                wrench_error[2] * wrench_error[2]);
+            const double excess = error_norm - config_.force_limit_n;
+            if (excess > 0.0) {
+                demanded_boost = std::min(
+                    config_.backoff_gain_m_s_per_n * excess, headroom);
+            }
         }
-        // Asymmetric envelope hysteresis: open instantly with the excess, but
+        // Hard-limit retreat episodes request their own envelope opening so
+        // the reflex reverses a driven descent quickly even in the
+        // reflex-only profile (force_limit_n 0). Without it the escape runs
+        // on the base envelope and a 0.05 m/s policy descent takes ~120 ms to
+        // reverse while the contact climbs to ~88 N
+        // (servo_log_20260724_142820 ticks 600404-600470).
+        demanded_boost = std::max(
+            demanded_boost,
+            std::min(command.retreat_envelope_boost_m_s, headroom));
+        // Asymmetric envelope hysteresis: open instantly with the demand, but
         // decay no faster than half the base acceleration limit — the widened
         // velocity/acceleration envelope must never shrink faster than the
         // governor can brake the state back inside it. A step collapse when
@@ -901,19 +912,22 @@ ForceControllerProposal ForceController::propose(
             acceleration_limit,
             jerk_limit,
         };
-        // Dynamic-envelope reseed: with Layer-3 active the limits follow the
-        // wrench error, so an abrupt force release can shrink the envelope
-        // around a committed state that was legal one tick earlier
-        // (2026-07-23 13:08 run: grip-release collapse hard-faulted the
-        // proposal and latched ExternalForceLimit mid rollout). A state the
-        // strict oracle cannot govern is clamped back inside the current
-        // limits — the commanded offset stays continuous; the bounded
-        // velocity/acceleration discontinuity (<= the backoff cap) is
-        // absorbed by the joint-side servo filtering — and if even the
-        // clamped state cannot brake before the offset cap it re-seeds at
-        // rest, which is always feasible inside the cap. Static-limit
-        // profiles (force_limit_n == 0) keep the fail-closed fault.
-        if (config_.force_limit_n > 0.0) {
+        // Dynamic-envelope reseed: with Layer-3 or a retreat-episode boost
+        // active the limits follow the wrench error / episode, so an abrupt
+        // force release can shrink the envelope around a committed state that
+        // was legal one tick earlier (2026-07-23 13:08 run: grip-release
+        // collapse hard-faulted the proposal and latched ExternalForceLimit
+        // mid rollout). A state the strict oracle cannot govern is clamped
+        // back inside the current limits — the commanded offset stays
+        // continuous; the bounded velocity/acceleration discontinuity (<= the
+        // backoff cap) is absorbed by the joint-side servo filtering — and if
+        // even the clamped state cannot brake before the offset cap it
+        // re-seeds at rest, which is always feasible inside the cap.
+        // Static-limit profiles (no Layer-3, no episode boost active or
+        // decaying) keep the fail-closed fault.
+        if (config_.force_limit_n > 0.0 ||
+            command.retreat_envelope_boost_m_s > 0.0 ||
+            state_.envelope_boost_m_s > 0.0) {
             JerkInterval probe;
             const AxisState committed{
                 old_offset[i], old_velocity[i], old_acceleration[i]};

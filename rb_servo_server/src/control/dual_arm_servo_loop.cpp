@@ -1948,6 +1948,7 @@ void DualArmServoLoop::invalidatePostInitTare(ArmId arm_id, uint64_t command_seq
     runtime.tare_waiting_for_init_completion = true;
     runtime.tare_collecting = false;
     runtime.tare_not_before_ns = 0;
+    runtime.tare_retry_count = 0;
     runtime.ft.tare_state = "awaiting_init_completion";
     runtime.ft.tare_sample_count = 0;
     runtime.ft.tare_reason = "init motion requested; previous software zero invalidated";
@@ -1977,6 +1978,10 @@ void DualArmServoLoop::invalidatePostInitTare(ArmId arm_id, uint64_t command_seq
     runtime.transverse_enter_count = 0;
     runtime.rotational_enter_count = 0;
     runtime.hard_limit_count = 0;
+    runtime.fast_force_rate_initialized = false;
+    runtime.previous_fast_force_norm_n = 0.0;
+    runtime.previous_fast_force_sample_ns = 0;
+    runtime.control.fast_force_rate_n_per_ms = 0.0;
     runtime.retreat_active = false;
     runtime.retreat_braking = false;
     runtime.retreat_virtual_current_n = 0.0;
@@ -2025,6 +2030,7 @@ bool DualArmServoLoop::latchPayloadIdentificationInhibit(ArmId arm_id) {
     runtime.tare_waiting_for_init_completion = false;
     runtime.tare_collecting = false;
     runtime.tare_not_before_ns = 0;
+    runtime.tare_retry_count = 0;
     runtime.ft.payload_identification_inhibit = true;
     runtime.ft.tare_valid = false;
     runtime.ft.tare_state = "awaiting_init_motion";
@@ -2064,6 +2070,10 @@ bool DualArmServoLoop::latchPayloadIdentificationInhibit(ArmId arm_id) {
     runtime.transverse_enter_count = 0;
     runtime.rotational_enter_count = 0;
     runtime.hard_limit_count = 0;
+    runtime.fast_force_rate_initialized = false;
+    runtime.previous_fast_force_norm_n = 0.0;
+    runtime.previous_fast_force_sample_ns = 0;
+    runtime.control.fast_force_rate_n_per_ms = 0.0;
     runtime.retreat_active = false;
     runtime.retreat_braking = false;
     runtime.retreat_virtual_current_n = 0.0;
@@ -2397,6 +2407,7 @@ bool DualArmServoLoop::updateForceRuntime(
         } else if (update.state == FtTareState::Accepted) {
             runtime.tare_collecting = false;
             runtime.tare_valid = true;
+            runtime.tare_retry_count = 0;
             const bool payload_identification_inhibit_was_latched =
                 runtime.payload_identification_inhibit;
             runtime.payload_identification_inhibit = false;
@@ -2429,9 +2440,32 @@ bool DualArmServoLoop::updateForceRuntime(
             runtime.tare_collecting = false;
             runtime.tare_valid = false;
             runtime.ft.tare_valid = false;
-            runtime.ft.tare_state = "rejected";
-            std::cerr << "[WARN] FT " << toString(arm_id)
-                      << " post-init software zero rejected: " << update.reason << "\n";
+            // Intermittent disturbances (gripper servo twitch, wrist-camera
+            // cable sway) can spoil a single window: 2026-07-23 20:33 rejected
+            // fx stddev 1.571 N on a run whose 12 s-earlier twin accepted.
+            // Re-settle and retry a bounded number of windows before declaring
+            // the zero unusable — the operator's contact-free Init Motion
+            // assertion still stands across retries.
+            constexpr int kResidualTareMaxRetries = 5;
+            if (runtime.tare_retry_count < kResidualTareMaxRetries) {
+                ++runtime.tare_retry_count;
+                runtime.tare_not_before_ns = now_ns + static_cast<uint64_t>(
+                    ft_config.auto_tare_settle_sec * 1e9);
+                runtime.ft.tare_state = "settling";
+                runtime.ft.tare_reason = update.reason + " -- retrying (" +
+                    std::to_string(runtime.tare_retry_count) + "/" +
+                    std::to_string(kResidualTareMaxRetries) + ")";
+                std::cerr << "[WARN] FT " << toString(arm_id)
+                          << " post-init software zero rejected: " << update.reason
+                          << " -- retry " << runtime.tare_retry_count << "/"
+                          << kResidualTareMaxRetries << "\n";
+            } else {
+                runtime.ft.tare_state = "rejected";
+                std::cerr << "[WARN] FT " << toString(arm_id)
+                          << " post-init software zero rejected after "
+                          << kResidualTareMaxRetries << " retries: "
+                          << update.reason << "\n";
+            }
         }
     };
 
@@ -2645,6 +2679,26 @@ bool DualArmServoLoop::updateForceRuntime(
     runtime.control.fast_normal_force_n = fast_normal;
     runtime.control.fast_force_norm_n = force_fast_stand.norm();
     runtime.control.fast_torque_norm_nm = torque_fast_stand.norm();
+    if (output.freshness_advanced) {
+        // Differentiate only across newly acquired F/T samples. The backend
+        // host timestamp belongs to the acquired state frame, so its delta
+        // reflects the ~280 Hz EFT stream even though this method is called by
+        // the 500 Hz servo loop. Missing/non-monotonic timestamps safely
+        // re-seed the differentiator and cannot synthesize a rate trip.
+        runtime.control.fast_force_rate_n_per_ms = 0.0;
+        if (runtime.fast_force_rate_initialized &&
+            state.host_time_ns > runtime.previous_fast_force_sample_ns) {
+            const double sample_dt_ms = static_cast<double>(
+                state.host_time_ns - runtime.previous_fast_force_sample_ns) * 1e-6;
+            runtime.control.fast_force_rate_n_per_ms =
+                (runtime.control.fast_force_norm_n -
+                 runtime.previous_fast_force_norm_n) / sample_dt_ms;
+        }
+        runtime.previous_fast_force_norm_n =
+            runtime.control.fast_force_norm_n;
+        runtime.previous_fast_force_sample_ns = state.host_time_ns;
+        runtime.fast_force_rate_initialized = state.host_time_ns > 0;
+    }
     const double transverse_force_n = std::hypot(
         runtime.control_wrench_compliance.fx,
         runtime.control_wrench_compliance.fy
@@ -2663,10 +2717,16 @@ bool DualArmServoLoop::updateForceRuntime(
             : measured_normal >= arm_config.contact_enter_force_n) ||
         (config_.force_control.operating_mode == "cartesian_admittance" &&
          cartesian_soft_contact);
+    const bool hard_limit_rate_exceeded =
+        arm_config.hard_limit_rate_n_per_ms > 0.0 &&
+        runtime.control.fast_force_norm_n >= arm_config.hard_limit_rate_floor_n &&
+        runtime.control.fast_force_rate_n_per_ms >=
+            arm_config.hard_limit_rate_n_per_ms;
     const bool hard_limit_threshold_exceeded =
         fast_normal >= arm_config.hard_normal_force_n ||
         runtime.control.fast_force_norm_n >= arm_config.hard_force_norm_n ||
-        runtime.control.fast_torque_norm_nm >= arm_config.hard_torque_norm_nm;
+        runtime.control.fast_torque_norm_nm >= arm_config.hard_torque_norm_nm ||
+        hard_limit_rate_exceeded;
     runtime.control.hard_limit_threshold_exceeded = hard_limit_threshold_exceeded;
     if (output.freshness_advanced) {
         if (!hard_limit_threshold_exceeded) {
@@ -2961,9 +3021,9 @@ bool DualArmServoLoop::updateForceRuntime(
             if (runtime.retreat_active &&
                 runtime.retreat_virtual_current_n > 0.0) {
                 // Virtual wrench: amplify the measured press so the existing
-                // admittance escape (and its Layer-3 envelope opening) drives
-                // the offset away from the contact. Telemetry keeps the real
-                // measured wrench; only the controller drive sees the boost.
+                // admittance escape drives the offset away from the contact.
+                // Telemetry keeps the real measured wrench; only the
+                // controller drive sees the boost.
                 const math::Vector3 press_compliance =
                     t_stand_compliance.rotation().transpose() * math::Vector3(
                         runtime.retreat_press_stand[0],
@@ -2973,6 +3033,18 @@ bool DualArmServoLoop::updateForceRuntime(
                 cartesian_wrench.fx += press_compliance.x() * boost;
                 cartesian_wrench.fy += press_compliance.y() * boost;
                 cartesian_wrench.fz += press_compliance.z() * boost;
+                // Episode-scoped envelope opening (reflex-only profile has no
+                // Layer-3 boost): ask the controller for the full backoff
+                // headroom, scaled down with the virtual-wrench ramp so the
+                // hysteresis sees a smooth release at episode end.
+                const double headroom = std::max(
+                    0.0,
+                    config_.force_control.backoff_max_velocity_m_s -
+                        config_.force_control.max_linear_velocity_m_s);
+                cartesian_command.retreat_envelope_boost_m_s = headroom *
+                    (runtime.retreat_virtual_current_n /
+                     std::max(1e-9,
+                              config_.force_control.retreat_virtual_force_n));
             }
         }
         // During contact_force, the symmetric Cartesian controller receives
@@ -3016,9 +3088,17 @@ bool DualArmServoLoop::updateForceRuntime(
             // frozen-normal state is needed; the direction refreshes every
             // tick from the measured wrench. force_limit_n <= 0 disables the
             // layer entirely.
+            // Layer-4 gate, extended for retreat episodes: in the reflex-only
+            // profile (force_limit_n 0) the projection still must remove the
+            // policy's advance into the contact WHILE a retreat is escaping —
+            // otherwise the policy keeps driving the equilibrium down against
+            // the reflex (2026-07-24 88 N press-through).
             runtime.follower_loading_reaction_valid = runtime.control.enabled &&
-                config_.force_control.force_limit_n > 0.0 &&
-                reaction_compliance.norm() >= config_.force_control.force_limit_n;
+                ((config_.force_control.force_limit_n > 0.0 &&
+                  reaction_compliance.norm() >=
+                      config_.force_control.force_limit_n) ||
+                 (runtime.retreat_active &&
+                  reaction_compliance.norm() > 1e-9));
         }
         const pinocchio::SE3 t_tcp_surface(
             r_stand_tcp.transpose() * r_stand_surface,
@@ -8981,6 +9061,10 @@ void DualArmServoLoop::resyncArmAfterFreedrive(ArmId arm_id, const RobotState& s
     force_runtime.enter_count = 0;
     force_runtime.transverse_enter_count = 0;
     force_runtime.rotational_enter_count = 0;
+    force_runtime.hard_limit_count = 0;
+    force_runtime.fast_force_rate_initialized = false;
+    force_runtime.previous_fast_force_norm_n = 0.0;
+    force_runtime.previous_fast_force_sample_ns = 0;
     force_runtime.release_start_ns = 0;
     force_runtime.release_hold_pending = false;
     force_runtime.release_hold_applied = false;
@@ -8997,6 +9081,7 @@ void DualArmServoLoop::resyncArmAfterFreedrive(ArmId arm_id, const RobotState& s
     force_runtime.control.transverse_regulating = false;
     force_runtime.control.rotational_regulating = false;
     force_runtime.control.loading_projection_active = false;
+    force_runtime.control.fast_force_rate_n_per_ms = 0.0;
     force_runtime.control.compliance_recenter_active = false;
     force_runtime.control.compliance_translation_recenter_coupled = false;
     force_runtime.control.compliance_rotation_recenter_coupled = false;

@@ -259,6 +259,15 @@ struct ForceControlCommand {
     double max_pos_step_m = 0.0;
     double max_rot_step_rad = 0.0;
 
+    // Per-tick envelope opening requested by a hard-limit retreat episode
+    // (m/s of velocity boost, clamped to the backoff headroom). Lets the
+    // retreat reflex reverse a driven descent quickly even when Layer-3 is
+    // disabled (reflex-only profile): without it the escape runs on the base
+    // envelope and a 0.05 m/s policy descent takes ~120 ms to reverse while
+    // the contact climbs to ~88 N (servo_log_20260724_142820). The
+    // controller's hysteresis ramps the opening off safely after the episode.
+    double retreat_envelope_boost_m_s = 0.0;
+
     // Gate for the released-state offset bleed. The bleed exists to restore
     // unload budget under an ACTIVELY MOVING policy equilibrium; draining
     // toward a static in-contact anchor (e.g. a Hold frozen at an in-surface
@@ -638,6 +647,7 @@ struct ForceControlTelemetry {
     double measured_force_n = 0.0;
     double fast_normal_force_n = 0.0;
     double fast_force_norm_n = 0.0;
+    double fast_force_rate_n_per_ms = 0.0;
     double fast_torque_norm_nm = 0.0;
     bool contact_threshold_exceeded = false;
     bool hard_limit_threshold_exceeded = false;

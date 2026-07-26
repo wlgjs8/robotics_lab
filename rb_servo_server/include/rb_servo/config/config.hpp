@@ -922,6 +922,12 @@ struct ForceControlArmConfig {
     double hard_normal_force_n = 0.0;
     double hard_force_norm_n = 0.0;
     double hard_torque_norm_nm = 0.0;
+    // Optional resultant-force rise-rate hard-limit trigger. The rate is
+    // evaluated only across fresh F/T acquisitions using their host sample
+    // timestamps. Zero disables the trigger; a positive rate requires a
+    // positive arming floor so near-zero noise cannot trip it.
+    double hard_limit_rate_n_per_ms = 0.0;
+    double hard_limit_rate_floor_n = 10.0;
     int debounce_samples = 1;
     int hard_limit_debounce_samples = 1;
     double release_dwell_sec = 0.0;

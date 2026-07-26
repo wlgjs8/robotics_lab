@@ -516,12 +516,23 @@ force_torque:
     # pose-local software zero. Collection starts only after the arm reaches
     # the measured goal and remains settled for 0.5 s.
     auto_tare_after_init_motion: true
-    auto_tare_settle_sec: 0.5
+    # 2026-07-23 20:49: post-init mechanical ringing (gripper fingers +
+    # re-routed wrist-camera cable) rings the jaw axis. A DUAL-arm Init Motion
+    # excites the whole structure: the first window 1-2 s after completion
+    # still reads fx stddev ~5.3 N, ~2-3 s reads ~2.6 N, and ~3-4 s passes
+    # under 1.5 N. 3.0 s settle puts the first window past the ring-down so
+    # the tare normally accepts in one window; the bounded auto-retry remains
+    # the bad-day safety net.
+    auto_tare_settle_sec: 3.0
     residual_tare_min_samples: 500
     # Latest physical no-contact data: ~0.29..0.46 N and ~0.06..0.09 Nm
     # per-axis stddev. These bounds reject motion/contact transients while
     # admitting the measured stationary sensor noise.
-    residual_tare_max_force_stddev_n: 0.75
+    # 2026-07-23 20:43 evidence: ring-down tail sits ~1.5 N on fx while the
+    # quiet-floor left arm stays under 0.75. 1.5 N still rejects contact-scale
+    # disturbance (grip/inertial transients measured 2.5-9.5 N) and the zero
+    # quality is mean-based (stderr = stddev/sqrt(500) <= 0.07 N).
+    residual_tare_max_force_stddev_n: 1.5
     residual_tare_max_torque_stddev_nm: 0.15
     # The runtime EFT/control axes follow the explicit URDF sensor frame.
     # +pi/2 yaw makes the sensor X/Y gizmo and compliance X/Y physically agree.
@@ -565,9 +576,20 @@ force_torque:
     max_tcp_speed_m_s: 0.0
     max_tcp_accel_m_s2: 0.0
     auto_tare_after_init_motion: true
-    auto_tare_settle_sec: 0.5
+    # 2026-07-23 20:49: post-init mechanical ringing (gripper fingers +
+    # re-routed wrist-camera cable) rings the jaw axis. A DUAL-arm Init Motion
+    # excites the whole structure: the first window 1-2 s after completion
+    # still reads fx stddev ~5.3 N, ~2-3 s reads ~2.6 N, and ~3-4 s passes
+    # under 1.5 N. 3.0 s settle puts the first window past the ring-down so
+    # the tare normally accepts in one window; the bounded auto-retry remains
+    # the bad-day safety net.
+    auto_tare_settle_sec: 3.0
     residual_tare_min_samples: 500
-    residual_tare_max_force_stddev_n: 0.75
+    # 2026-07-23 20:43 evidence: ring-down tail sits ~1.5 N on fx while the
+    # quiet-floor left arm stays under 0.75. 1.5 N still rejects contact-scale
+    # disturbance (grip/inertial transients measured 2.5-9.5 N) and the zero
+    # quality is mean-based (stderr = stddev/sqrt(500) <= 0.07 N).
+    residual_tare_max_force_stddev_n: 1.5
     residual_tare_max_torque_stddev_nm: 0.15
     # The 18:32 capture invalidated yaw zero; the 18:48 corrected capture then
     # observed +X/+Y/+Z translation in the pushed runtime FT-control direction.
@@ -658,9 +680,25 @@ force_control:
     contact_enter_force_n: 3.5
     contact_release_force_n: 2.75
     force_deadband_n: 0.5
-    hard_normal_force_n: 25.0
-    hard_force_norm_n: 28.0
+    # 2026-07-24 operator decision: pure 10 N reflex. All continuous force
+    # control is retired; any debounced contact at/above 10 N normal or 12 N
+    # resultant triggers the 20 mm retreat reflex and nothing below it moves
+    # the arm. NOTE: the trained bolt-pick press (~23.9 N precedent) now also
+    # triggers the reflex — accepted while the policy is iterated; the slam
+    # class (47-119 N impacts, 2026-07-24 sessions) is cut off at ~10-15 N.
+    hard_normal_force_n: 10.0
+    hard_force_norm_n: 12.0
     hard_torque_norm_nm: 7.0
+    # 2026-07-24 servo_log_20260724_*: policy floor slams rose 2-5 N/ms
+    # and crossed 10 N roughly 10-20 ms before the 25 N absolute trip, while
+    # the legitimate ~23.9 N task press rose well under 0.5 N/ms. Arm the
+    # resultant-force rate trigger only at 10 N; the shared 3-fresh-sample
+    # debounce below still applies.
+    # 2026-07-24: rate trigger retired with the pure 10 N reflex — the
+    # absolute threshold now sits below every slam trajectory, so dF/dt adds
+    # nothing (it existed to fire early while the absolute limit was 25 N).
+    hard_limit_rate_n_per_ms: 0.0
+    hard_limit_rate_floor_n: 10.0
     debounce_samples: 3
     hard_limit_debounce_samples: 3
     release_dwell_sec: 0.1
@@ -696,9 +734,22 @@ force_control:
     contact_enter_force_n: 3.5
     contact_release_force_n: 2.75
     force_deadband_n: 0.5
-    hard_normal_force_n: 25.0
-    hard_force_norm_n: 28.0
+    # 2026-07-24 operator decision: pure 10 N reflex. All continuous force
+    # control is retired; any debounced contact at/above 10 N normal or 12 N
+    # resultant triggers the 20 mm retreat reflex and nothing below it moves
+    # the arm. NOTE: the trained bolt-pick press (~23.9 N precedent) now also
+    # triggers the reflex — accepted while the policy is iterated; the slam
+    # class (47-119 N impacts, 2026-07-24 sessions) is cut off at ~10-15 N.
+    hard_normal_force_n: 10.0
+    hard_force_norm_n: 12.0
     hard_torque_norm_nm: 7.0
+    # 2026-07-24: same dual-arm rise-rate posture and servo_log_20260724_*
+    # evidence as the left arm (2-5 N/ms slams, <0.5 N/ms task presses).
+    # 2026-07-24: rate trigger retired with the pure 10 N reflex — the
+    # absolute threshold now sits below every slam trajectory, so dF/dt adds
+    # nothing (it existed to fire early while the absolute limit was 25 N).
+    hard_limit_rate_n_per_ms: 0.0
+    hard_limit_rate_floor_n: 10.0
     debounce_samples: 3
     hard_limit_debounce_samples: 3
     release_dwell_sec: 0.1
@@ -747,37 +798,31 @@ force_control:
   # can track a 100-300 ms force ramp, and the offset cap is pulled UNDER the
   # follower's 15 mm actual-lead budget (it was 20 mm > 15 mm: a deep contact
   # would have tripped delta_preview_actual_lead_fault before saturating).
-  # Layer-3 generic force limiter (2026-07-18 redesign): above force_limit_n
-  # the translation response envelope opens proportionally to the excess force
-  # so the arm ACTIVELY backs off along the measured force direction — floor
-  # press, box bump, any direction, no pre-defined normal, no episode state.
-  # 15 N sits above every measured no-contact residual (transit grip/inertial
-  # 2.5-9.5 N in the 15:23 runs) and well under the 30/35 N hard limits, which
-  # remain the final stop. gain 0.02 -> +0.2 m/s at 10 N excess; escape speed
-  # capped at 0.25 m/s. The same threshold gates the Layer-4 loading
-  # projection (policy advance into the measured force is removed per tick).
-  force_limit_n: 15.0
+  # 2026-07-24 reflex-only posture: force_limit_n=0 disables the continuous
+  # Layer-3 proportional envelope boost and Layer-4 loading projection, so
+  # sub-reflex policy actions pass through unchanged. Keep the reviewed
+  # backoff parameters explicit for audit/possible future re-promotion; they
+  # are inert while the limit is zero.
+  force_limit_n: 0.0
   backoff_gain_m_s_per_n: 0.02
   backoff_max_velocity_m_s: 0.25
-  # Hard-limit retreat (2026-07-23 operator decision): never freeze on the
-  # hard limit in normal operation. The 12:35 rollout showed the latch itself
-  # is harmful — it froze the last (in-surface) command and the position loop
-  # kept pressing 57 -> 74 N for 4.5 s until operator intervention
-  # (servo_log_20260723_123549 ticks 16054+). With 'retreat', the debounced
-  # hard limit instead injects a 20 N virtual press along the measured force
-  # direction so the admittance escapes ~10 mm through its own jerk envelope
-  # (passivity-safe: virtual press x escape twist = negative power), policy
-  # streaming/inference continue, and the release_bleed_stiffness spring then
-  # drains the retreat offset gently on the next approach. Escalation to the
-  # latch stays fail-closed: retreat that cannot unload within 1 s
-  # (wedged/jammed), a torque-only trigger with no escape direction, or more
-  # than 6 episodes in 10 s still latch. Set retreat_max_attempts: 0 for
-  # unlimited retreats.
+  # 2026-07-24 reflex retreat: servo_log_20260724_* recorded successful
+  # retreats followed by policy re-approach, with attempt exhaustion causing
+  # 5 of today's 7 latches. Unlimited attempts absorb that behavior as bounded
+  # bouncing; repeated-policy escalation now occurs only when a retreat times
+  # out without unloading (a true wedge). The existing torque-only/no-force
+  # direction backstop remains a direct fail-closed latch.
+  #
+  # The 20 N virtual wrench is added along the measured press before the
+  # 20 N translation deadband: near the 25 N hard trip it leaves about 25 N
+  # of drive (25 measured + 20 virtual - 20 deadband), so retreat remains
+  # effective with Layer-3 disabled. The base 0.06 m/s, 0.8 m/s^2, 8 m/s^3
+  # envelope covers 20 mm in about 0.4 s, within the unchanged 1.0 s timeout.
   hard_limit_policy: retreat
-  retreat_distance_m: 0.010
+  retreat_distance_m: 0.030 #0.020
   retreat_virtual_force_n: 20.0
   retreat_timeout_sec: 1.0
-  retreat_max_attempts: 6
+  retreat_max_attempts: 0
   retreat_attempt_window_sec: 10.0
   virtual_mass: [2.0, 2.0, 2.0, 0.2, 0.2, 0.2]
   damping: [26.0, 26.0, 26.0, 1.55, 1.55, 1.55]
@@ -799,24 +844,24 @@ force_control:
   # 2026-07-17 372 N spike (K=80 always-on) remains impossible. Rotations
   # keep 0 (they already recenter via their 3.0 Nm/rad spring).
   release_bleed_stiffness: [13.0, 13.0, 13.0, 0.0, 0.0, 0.0]
-  # 2026-07-17 (Phase 3 restore): translation deadband back to 1.5 N. The
-  # interim 2.5 N was a shield against LEFT free-air phantom force (no gravity
-  # model, 1.5-3.4 N during fast repositioning -> K=0 offset drift + false
-  # 19 N contact in the 19:29 run); the left controller_compensated_linear map
-  # (left-20260717T104253Z-7e5aaba4) now removes that phantom at the source,
-  # so contact sensitivity is restored.
-  wrench_deadband: [1.5, 1.5, 1.5, 0.10, 0.10, 0.10]
+  # 2026-07-24 reflex-only profile: a 20 N translation deadband suppresses
+  # always-on admittance below the reflex threshold; disabled rotation axes
+  # retain their characterized 0.10 Nm values. The higher deadband reduces
+  # tare-precision demand, but both 3.0 s settle and tare variance gates stay
+  # unchanged because the raw fast hard-limit wrench still depends on the
+  # accepted tare zero (servo_log_20260724_*).
+  wrench_deadband: [20.0, 20.0, 20.0, 0.10, 0.10, 0.10]
   # Keep translation and rotation return paths coherent: while any axis in a
   # block remains loaded, released sibling axes brake and hold instead of
   # springing home independently. Once the block is released, one common
   # feasible jerk scale preserves its 3D return direction.
   blockwise_release_recenter: true
   max_dt_sec: 0.02
-  # 2026-07-18 redesign: 12 -> 30 mm. Offset saturation was a force-buildup
-  # path (the 19:21 left-arm 372 N event began after the cap pinned); the
-  # Layer-3 back-off needs escape headroom. The follower lead check strips the
-  # committed offset (removeComplianceOffsetFromMeasured), so the 35 mm lead
-  # budget is unaffected; the 50 mm divergence latch remains the backstop.
+  # 2026-07-24: the 20 mm retreat stays below this 30 mm offset cap. Code
+  # inspection confirms removeComplianceOffsetFromMeasured strips committed
+  # retreat/compliance offset from the active delta_preview follower's 35 mm
+  # actual-lead check, so the retreat does not consume that budget; the 50 mm
+  # divergence latch remains the backstop.
   max_pos_offset_m: 0.030
   max_rot_offset_rad: 0.08
   max_linear_velocity_m_s: 0.06
@@ -827,7 +872,15 @@ force_control:
   max_angular_jerk_rad_s3: 10.0
   max_pos_step_m: 0.001
   max_rot_step_rad: 0.002
-  max_energy_j: 2.0
+  # 2026-07-24: 2 -> 20 J. The passivity budget was scoped to continuous
+  # admittance stability, but in the pure 10 N reflex regime the observer
+  # integrates the POLICY's pressing work (measured wrench x actual twist,
+  # ~24 N x 0.05 m/s = 1.2 W during grasp presses); repeated press episodes
+  # crossed 2 J and latched "passivity energy limit exceeded"
+  # (servo_log_20260724_154213 row 86932) with no admittance instability
+  # involved. 20 J keeps the observer as a runaway backstop while the 10/12 N
+  # hard thresholds own contact safety.
+  max_energy_j: 20.0
 
 kinematics:
   enable: true
@@ -1087,17 +1140,40 @@ cartesian_control:
         # raising further.
         max_linear_velocity_m_s: 0.45
         max_linear_accel_m_s2: 5.0
+        # 2026-07-24 (reverted same day): the 220/400 jerk experiment did not
+        # reduce measured roughness and coincided with shallower model z
+        # commands that step-log analysis attributed to the MODEL/scene, not
+        # tracking (cmd-vs-meas gap stayed ~2 mm at every jerk setting).
+        # Restored to the validated values pending a scene-controlled A/B.
         max_linear_jerk_m_s3: 300.0
         max_angular_velocity_rad_s: 0.90
         max_angular_accel_rad_s2: 9.0
         max_angular_jerk_rad_s3: 540.0
         discard_head_steps: 0     # v3 producer already removes rows emitted since observation
-        # Match FLOW_INFER_CHUNK_EXECUTE_STEPS=12: consume the complete policy
-        # execution window before using reserve rows from the published runway.
-        consume_steps: 12
+        # Match FLOW_INFER_CHUNK_EXECUTE_STEPS: consume exactly the policy
+        # execution window at normal pace before decelerating into reserve rows
+        # from the published runway. 2026-07-24: 12 -> 6 to match the RTC
+        # freshest-chunk deployment (EXECUTE_STEPS=6, replan every 6 steps).
+        # With consume 12 a late frame kept the follower running rows 7-12 of
+        # the STALE chunk at full speed; consume 6 + reserve 4 instead follows
+        # only the fresh window and decelerates ~178 ms into the runway tail
+        # when the next chunk is late.
+        consume_steps: 5
         reserve_steps: 4 #2
-        smoothing_window: 3
-        af_damping_beta: 1.0 #0.2  # P3: honest central-diff curvature; clampAbs(af, a_max) bounds it (beta<1 = per-waypoint micro-brake)
+        smoothing_window: 1
+        # 2026-07-24: 1.0 -> 0.6 paired with smoothing_window 1. Removing the
+        # positional moving-average restored waypoint fidelity but exposed the
+        # model's row-to-row noise in the central-diff accel feedforward
+        # (measured second-difference roughness up ~40-70% on the right arm).
+        # beta damps ONLY the accel feedforward (per-waypoint micro-brake) --
+        # position waypoints stay exact, so path fidelity is preserved while
+        # the derivative-domain jitter is attenuated.
+        # 2026-07-24 (2nd pass): 0.6 -> 0.8. Two runs at 0.6 showed descent
+        # authority loss (right z_min 16-17 mm vs 9-15 mm before) WITHOUT a
+        # roughness win (730/458 um) -- the accel micro-brake damps the real
+        # final-approach deceleration as much as the noise. Smoothing moved to
+        # the jerk caps above instead; beta stays slightly <1 as a mild guard.
+        af_damping_beta: 1.0 #0.8 #0.6 #0.2  # P3: honest central-diff curvature; clampAbs(af, a_max) bounds it (beta<1 = per-waypoint micro-brake). 2026-07-24: beta sweep (1.0/0.8/0.6) showed no effect on descent tracking (gap ~2 mm throughout) -- restored to honest 1.0.
         delta_twist_clear_residual_on_new_frame: true
         delta_twist_min_time_to_go_sec: 0.015
         delta_twist_tau_sec: 0.020
