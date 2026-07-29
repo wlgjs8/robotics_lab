@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <vector>
 
 using rb_servo::control::CartesianChunkFollower;
 using rb_servo::control::CartesianChunkFollowerConfig;
@@ -692,6 +693,88 @@ int main() {
                 lead_running * 1000.0, lead_paused * 1000.0);
     check(lead_running > 0.005, "unpaused follower does outrun a held robot (defect reproduced)");
     check(lead_paused < 1e-9, "safety-hold pause freezes the plan at the held pose");
+  }
+
+  // -- Measurement: synthetic streams do NOT reproduce the hardware head effect. -------
+  // Hardware (servo_log_20260729_184823.csv, right arm, n~7300/row) shows the FIRST segment of
+  // each new chunk missing its one-policy-step deadline 34% of the time, decaying monotonically
+  // 34/22/19/16/12/6% over rows 0..5 (duration/seg_dt p90 1.76 -> 1.00). Position is continuous
+  // across the swap (the anchor fix above); the velocity/acceleration boundary state is not.
+  //
+  // NEGATIVE RESULT, kept so nobody re-derives it: neither a smoothly-continued curved stream
+  // nor one with injected replan disagreement reproduces that HEAD CONCENTRATION. Sweeping both
+  // curvature and mismatch, every operating point degrades all rows EQUALLY (e.g. at 42% the
+  // split is r0..r4 = 42/42/42/42/42), with a sharp cliff between feasible and saturated. So a
+  // synthetic chunk cannot validate a change to the head boundary condition (e.g. seeding af
+  // from the forward second difference instead of 0) -- that needs REAL recorded chunks replayed
+  // through the follower. Capture them with FLOW_INFER_PRINT_CHUNK=1.
+  std::printf("Test: chunk-swap feasibility is uniform on synthetic streams (negative result)\n");
+  {
+    CartesianChunkFollowerConfig hcfg;
+    hcfg.window = {/*L*/ 0, /*C*/ 10, /*R*/ 2, /*smooth*/ 1};
+    const double step_m = 0.03 * SEG;
+    const double dphi = 0.03;
+    const double mismatch = 0.065;   // the operating point whose overall rate is closest to hw
+    const int EXECUTE = 5;
+    auto curved = [&](int n, double phase0, std::uint64_t wseq) {
+      ChunkFrame fr;
+      fr.policy_dt = SEG;
+      fr.wire_seq = wseq;
+      fr.recv_seq = 20;
+      fr.recv_time = 0.0;
+      for (int i = 0; i < n; ++i) {
+        const double ph = phase0 + i * dphi;
+        Vec6 d{};
+        d.x = step_m * std::cos(ph);
+        d.y = step_m * std::sin(ph);
+        fr.delta.push_back(d);
+        fr.grip.push_back(0.0);
+      }
+      return fr;
+    };
+    CartesianChunkFollower f(hcfg);
+    Pose6D origin;
+    origin.x = 0.0; origin.y = 0.0; origin.z = 0.2;
+    origin.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+    std::vector<std::vector<double>> ratio_by_row(EXECUTE + 1);
+    int segments_seen = f.diag().segments;
+    double phase = 0.0;
+    std::uint64_t seq = 55;
+    f.submitDeltaFrame(curved(40, phase, seq), origin);
+    const int ticks_per_seg = static_cast<int>(SEG / TICK);
+    for (int chunk = 0; chunk < 400; ++chunk) {
+      for (int s = 0; s < EXECUTE; ++s) {
+        for (int t = 0; t < ticks_per_seg; ++t) {
+          f.tick(TICK);
+          if (f.diag().segments != segments_seen) {
+            segments_seen = f.diag().segments;
+            const int row = f.diag().seg_step_index;
+            if (row >= 0 && row <= EXECUTE && chunk > 2) {
+              ratio_by_row[row].push_back(f.diag().last_solve.duration / SEG);
+            }
+          }
+        }
+      }
+      phase += EXECUTE * dphi + mismatch * std::sin(2.399963 * chunk);
+      f.submitDeltaFrame(curved(40, phase, ++seq), f.lastPose());
+    }
+    auto over105 = [](const std::vector<double>& v) {
+      if (v.empty()) return 0.0;
+      return 100.0 * static_cast<double>(std::count_if(
+          v.begin(), v.end(), [](double x) { return x > 1.05; })) / v.size();
+    };
+    std::printf("    row>1.05%%:");
+    double head = 0.0, tail_max = 0.0;
+    for (int r = 0; r <= EXECUTE; ++r) {
+      if (ratio_by_row[r].size() < 20) continue;
+      const double o = over105(ratio_by_row[r]);
+      std::printf(" r%d=%.0f", r, o);
+      if (r == 0) head = o; else tail_max = std::max(tail_max, o);
+    }
+    std::printf("   (hardware for contrast: 34/22/19/16/12/6)\n");
+    check(head > 5.0, "synthetic swap does stress the solver");
+    check(std::fabs(head - tail_max) < 10.0,
+          "synthetic difficulty is uniform across rows, unlike hardware");
   }
 
   std::printf("\n=== %s (%d failure%s) ===\n",
