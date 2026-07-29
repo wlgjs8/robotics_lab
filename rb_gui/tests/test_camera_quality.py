@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -17,7 +18,10 @@ from rb_servo_gui.camera_quality import (
     camera_quality_html,
     compute_blur_effect,
 )
-from rb_servo_gui.app import _update_camera_quality
+from rb_servo_gui.app import (
+    _operator_monitor_dynamic_html,
+    _update_camera_quality,
+)
 from rb_servo_gui.models import StateSnapshot
 
 try:
@@ -276,6 +280,73 @@ class CameraQualityAnalyzerTest(unittest.TestCase):
             _update_camera_quality(handles)
             self.assertTrue(preview_handle.visible)
             self.assertIsNotNone(preview_handle.image)
+        finally:
+            store.close()
+
+    def test_fixed_monitor_shows_right_then_left_blur_and_shake(self) -> None:
+        analyzer = CameraQualityAnalyzer("left")
+        sample, preview = analyzer.analyze(
+            _frame(_textured_image(), index=1, time_sec=10.0),
+            None,
+            None,
+        )
+        right = replace(
+            sample,
+            arm="right",
+            blur_effect=0.3214,
+            shake_px_s_rms=12.34,
+        )
+        left = replace(
+            sample,
+            arm="left",
+            blur_effect=0.1234,
+            shake_px_s_rms=4.56,
+        )
+        store = CameraQualityStore(enable_csv=False)
+        try:
+            store.update(left, preview)
+            store.update(right, preview)
+            html = _operator_monitor_dynamic_html(
+                None,
+                stale=True,
+                camera_quality_store=store,
+                now=10.1,
+            )
+            camera_html = html[html.index("rb-monitor-body-card rb-monitor-camera-card") :]
+
+            self.assertLess(camera_html.index("RIGHT"), camera_html.index("LEFT"))
+            self.assertIn("0.321", camera_html)
+            self.assertIn("12.3", camera_html)
+            self.assertIn("0.123", camera_html)
+            self.assertIn("4.6", camera_html)
+            self.assertIn("receiver=live", camera_html)
+
+            stale_html = _operator_monitor_dynamic_html(
+                None,
+                stale=True,
+                camera_quality_store=store,
+                now=10.7,
+            )
+            stale_camera = stale_html[
+                stale_html.index("rb-monitor-body-card rb-monitor-camera-card") :
+            ]
+            self.assertEqual(stale_camera.count("N/A"), 4)
+            self.assertNotIn("0.321", stale_camera)
+            self.assertNotIn("12.3", stale_camera)
+        finally:
+            store.close()
+
+    def test_camera_quality_plot_and_history_are_removed(self) -> None:
+        package = Path(__file__).resolve().parents[1] / "rb_servo_gui"
+        camera_source = (package / "camera_quality.py").read_text(encoding="utf-8")
+        app_source = (package / "app.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("seconds from now", camera_source)
+        self.assertNotIn("camera_quality_figure", camera_source)
+        self.assertNotIn("camera_quality_plot", app_source)
+        store = CameraQualityStore(enable_csv=False)
+        try:
+            self.assertFalse(hasattr(store, "histories"))
         finally:
             store.close()
 

@@ -147,6 +147,9 @@ change or through the GUI button. Low-texture or unreliable-flow frames are
 marked explicitly; blur values from different scenes should not be compared as
 an absolute lens-quality threshold.
 
+The fixed operator overlay also shows an at-a-glance `Camera Quality Monitor`
+below `FT Monitor`, with raw Blur and Shake values ordered RIGHT then LEFT.
+
 Preview images are off by default and, when enabled, update at 5 Hz. Scalar
 samples are written for the entire GUI process to
 `logs/camera_quality/camera_quality_<KST>.csv`; image pixels are never written

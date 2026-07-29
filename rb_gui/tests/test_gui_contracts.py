@@ -3163,14 +3163,28 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn(".rb-monitor-stand-card.rb-monitor-header-card { top: var(--rb-monitor-split); }", html)
         self.assertIn(".rb-monitor-joint-card.rb-monitor-body-card { max-height: calc(var(--rb-monitor-split) - 5.95em); }", html)
         self.assertIn("Pose Monitor", html)
-        # FT split out of the Pose Monitor into its own right-column card.
+        # FT and Camera Quality share the right column, stacked at the same split.
         self.assertNotIn("Pose Monitor · FT", html)
         self.assertIn("FT Monitor", html)
+        self.assertIn("Camera Quality Monitor", html)
         self.assertIn(
             ".rb-monitor-ft-card { left: calc(var(--rb-monitor-gap) * 2 + var(--rb-monitor-width)); }",
             html,
         )
+        self.assertIn(
+            ".rb-monitor-camera-card { left: calc(var(--rb-monitor-gap) * 2 + var(--rb-monitor-width)); }",
+            html,
+        )
+        self.assertIn(
+            ".rb-monitor-ft-card.rb-monitor-body-card { max-height: calc(var(--rb-monitor-split) - 5.95em); }",
+            html,
+        )
+        self.assertIn(
+            ".rb-monitor-camera-card.rb-monitor-header-card { top: var(--rb-monitor-split); }",
+            html,
+        )
         self.assertIn("rb-monitor-header-card rb-monitor-ft-card", html)
+        self.assertIn("rb-monitor-header-card rb-monitor-camera-card", html)
         self.assertIn('id="rb-joint-unit-rad"', html)
         self.assertIn('id="rb-stand-unit-rad"', html)
         self.assertIn("body:has(#rb-joint-unit-rad:checked)", html)
@@ -3503,6 +3517,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(folder_labels[0], "Operator Monitors")
         self.assertIn("Joint Monitor", folder_labels)
         self.assertIn("Stand/World Monitor", folder_labels)
+        self.assertIn("Camera Quality Monitor", folder_labels)
 
     def test_safety_floor_user_floor_roi_folder_order(self):
         source = (Path(__file__).resolve().parents[1] / "rb_servo_gui" / "app.py").read_text(

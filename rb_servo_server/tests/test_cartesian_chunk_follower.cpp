@@ -639,6 +639,61 @@ int main() {
     check(worst > 0.85, "chunk-swap travel is preserved at EVERY submit phase");
   }
 
+  // -- Test: a held robot must not be outrun by the plan. --------------------
+  // The floor/ROI/self-collision stage clamps an arm to its previous sent joints, but it runs
+  // AFTER command generation, so the follower used to keep integrating deltas against a robot
+  // that was standing still. Measured on servo_log_20260729_165037.csv: eight RoiViolation
+  // episodes (right gripper tip crossing roi_box y=-0.150) grew actual_lead from 1.3 mm to
+  // 40.7 mm / 4.5 deg and ended the rollout in delta_preview_actual_lead_fault -- and each time
+  // the verdict flipped back to Ok the arm lunged to close that gap. dual_arm_servo_loop now
+  // calls pauseForHold() whenever safetyInterventionRecent() is set; this locks the invariant
+  // that the pause actually bounds the divergence.
+  std::printf("Test: safety-hold pause bounds plan-vs-actual divergence\n");
+  {
+    CartesianChunkFollowerConfig hcfg;
+    hcfg.window = {/*L*/ 0, /*C*/ 10, /*R*/ 2, /*smooth*/ 1};
+    const double vx = 0.03;
+    const double step = vx * SEG;
+    auto deltaFrame = [&](int n, std::uint64_t wseq) {
+      ChunkFrame fr;
+      fr.policy_dt = SEG;
+      fr.wire_seq = wseq;
+      fr.recv_seq = 20;
+      fr.recv_time = 0.0;
+      for (int i = 0; i < n; ++i) {
+        Vec6 d{};
+        d.x = step;
+        fr.delta.push_back(d);
+        fr.grip.push_back(0.0);
+      }
+      return fr;
+    };
+    Pose6D origin;
+    origin.x = 0.0; origin.y = 0.0; origin.z = 0.2;
+    origin.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+
+    // Drive both instances identically, then stall the "robot" at a fixed pose for 300 ms
+    // (the longest measured RoiViolation episode was 92 ms).
+    const int stalled_ticks = static_cast<int>(0.300 / TICK);
+    double lead_running = 0.0, lead_paused = 0.0;
+    for (int paused = 0; paused < 2; ++paused) {
+      CartesianChunkFollower f(hcfg);
+      f.submitDeltaFrame(deltaFrame(60, 55), origin);
+      for (int i = 0; i < 200; ++i) f.tick(TICK);
+      const Pose6D stuck = f.tick(TICK);  // the pose the clamped robot is frozen at
+      if (paused) f.pauseForHold(100.0);
+      for (int i = 0; i < stalled_ticks; ++i) {
+        f.tick(TICK);
+        f.updateActualLead(stuck);  // robot is held by the safety layer: actual never moves
+      }
+      (paused ? lead_paused : lead_running) = f.diag().actual_lead_m;
+    }
+    std::printf("    lead after 300 ms held: running=%.1f mm  paused=%.1f mm\n",
+                lead_running * 1000.0, lead_paused * 1000.0);
+    check(lead_running > 0.005, "unpaused follower does outrun a held robot (defect reproduced)");
+    check(lead_paused < 1e-9, "safety-hold pause freezes the plan at the held pose");
+  }
+
   std::printf("\n=== %s (%d failure%s) ===\n",
               g_failures == 0 ? "ALL TESTS PASSED" : "TEST FAILURES",
               g_failures, g_failures == 1 ? "" : "s");

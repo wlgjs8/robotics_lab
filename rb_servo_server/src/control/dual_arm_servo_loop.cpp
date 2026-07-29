@@ -6525,7 +6525,22 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         smoothed.tcp_target_stand = reference;
         return smoothed;
     };
-    if (follower->holdPaused()) {
+    // Safety-layer hold: the floor/ROI/self-collision stage clamps this arm to its previous
+    // sent joints, but that stage runs AFTER command generation, so the follower never learned
+    // the command was refused and kept integrating deltas against a stationary robot. Measured
+    // on servo_log_20260729_165037.csv: eight RoiViolation episodes (right gripper tip crossing
+    // roi_box.max_m y=-0.150) drove actual_lead 1.3 mm -> 40.7 mm / 4.5 deg, ending the rollout
+    // in delta_preview_actual_lead_fault, and every time the verdict flipped back to Ok the arm
+    // lunged to catch up the ran-ahead plan. Freezing the plan here does NOT stop the robot any
+    // earlier -- the safety layer already stopped it -- it only stops the plan from running away
+    // while it is stopped. Same pause/expire pair the Hold path uses, so the bounded-grace
+    // deactivation policy is unchanged (and prevents a deadlock if the block never clears).
+    if (intervention_recent && follower->active()) {
+        const double safety_hold_now_sec = ChunkFrameReceiver::steadyNowSec();
+        follower->pauseForHold(safety_hold_now_sec);
+        follower->expireHoldPause(safety_hold_now_sec, rf.hold_bounce_resume_sec);
+        transition_reason = "safety intervention hold";
+    } else if (follower->holdPaused()) {
         const control::HoldResumeResult resume = follower->resumeFromHold(
             reference,
             ChunkFrameReceiver::steadyNowSec(),
