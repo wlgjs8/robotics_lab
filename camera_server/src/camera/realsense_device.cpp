@@ -526,6 +526,21 @@ class RealSenseDevice final : public ICameraDevice {
     f.host_arrival_time_ns = host_t;
     f.realsense_timestamp_ms = vf.get_timestamp();
     f.sensor_timestamp_ns = static_cast<uint64_t>(vf.get_timestamp() * 1e6);
+    // Frame metadata is optional by device, stream, firmware, kernel/backend,
+    // and auto-exposure mode. Follow librealsense's check-then-query contract;
+    // never substitute a current sensor option for missing per-frame evidence.
+    if (vf.supports_frame_metadata(RS2_FRAME_METADATA_ACTUAL_EXPOSURE)) {
+      f.actual_exposure_us =
+          static_cast<double>(vf.get_frame_metadata(RS2_FRAME_METADATA_ACTUAL_EXPOSURE));
+    }
+    if (vf.supports_frame_metadata(RS2_FRAME_METADATA_GAIN_LEVEL)) {
+      f.gain_level =
+          static_cast<double>(vf.get_frame_metadata(RS2_FRAME_METADATA_GAIN_LEVEL));
+    }
+    if (vf.supports_frame_metadata(RS2_FRAME_METADATA_AUTO_EXPOSURE)) {
+      f.auto_exposure =
+          vf.get_frame_metadata(RS2_FRAME_METADATA_AUTO_EXPOSURE) != 0;
+    }
     f.width = static_cast<uint32_t>(vf.get_width());
     f.height = static_cast<uint32_t>(vf.get_height());
     f.stride_bytes = static_cast<uint32_t>(vf.get_stride_in_bytes());

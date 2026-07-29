@@ -57,6 +57,10 @@ class ArmSeries:
     corner: list[bool] = field(default_factory=list)
     duration: list[float] = field(default_factory=list)
     alpha: list[float] = field(default_factory=list)
+    # Wire policy_dt of the chunk frame driving this tick. T-slip is "the solver needed longer than
+    # ONE ROW", so the reference is the row period on the wire, NOT a hardcoded 30 Hz -- a K=3
+    # decimated checkpoint runs 100 ms rows and a 0.0334 reference reports 100% T-slip on a healthy run.
+    policy_dt: list[float] = field(default_factory=list)
 
 
 def fnum(row: dict, key: str, default: float = float("nan")) -> float:
@@ -137,6 +141,7 @@ def load(csv_path: str, arms: list[str], t0: float | None, t1: float | None):
                 s.stall.append(row.get(f"{arm}_follower_stall", "0") in ("1", "true", "True"))
                 s.corner.append(row.get(f"{arm}_follower_corner", "0") in ("1", "true", "True"))
                 s.duration.append(fnum(row, f"{arm}_follower_duration_sec"))
+                s.policy_dt.append(fnum(row, "chunk_frame_policy_dt_sec"))
                 s.alpha.append(fnum(row, f"{arm}_follower_alpha", 1.0))
     return series
 
@@ -257,13 +262,19 @@ def summarize(arm: str, s: ArmSeries) -> None:
 
     pos_cmd = [dist(a, b) for a, b in zip(s.pf, s.cmd) if a and b]
     pos_act = [dist(a, b) for a, b in zip(s.pf, s.act) if a and b]
-    over = [d for d in s.duration if d > 0.0334 + 1e-4]
+    # Per-tick reference = that tick's wire row period; fall back to the median observed dt.
+    _dts = [d for d in s.policy_dt if d == d and d > 1e-4]
+    _fallback = statistics.median(_dts) if _dts else float("nan")
+    _ref = [(p if (p == p and p > 1e-4) else _fallback) for p in s.policy_dt]
+    over = [d for d, r in zip(s.duration, _ref) if r == r and d > r + 1e-4]
+    _row_ms = f"{_fallback * 1000:.1f}ms" if _fallback == _fallback else "unknown"
     print(
         f"[{arm}] ticks={len(s.t)} span={s.t[-1] - s.t[0]:.1f}s chunks={len(set(s.seq))} "
         f"stall={sum(s.stall)} corner={sum(s.corner)}\n"
         f"      pf-vs-cmd  median={statistics.median(pos_cmd) * 1000:.2f}mm p95={sorted(pos_cmd)[int(0.95 * len(pos_cmd)) - 1] * 1000:.2f}mm\n"
         f"      pf-vs-act  median={statistics.median(pos_act) * 1000:.2f}mm p95={sorted(pos_act)[int(0.95 * len(pos_act)) - 1] * 1000:.2f}mm\n"
-        f"      T-slip ticks={len(over)} ({100.0 * len(over) / max(1, len(s.duration)):.1f}%)  "
+        f"      T-slip ticks={len(over)}/{len(s.duration)} "
+        f"({100.0 * len(over) / max(1, len(s.duration)):.1f}%, vs wire row={_row_ms})  "
         f"alpha<1 ticks={sum(1 for a in s.alpha if a < 0.999)}"
     )
 

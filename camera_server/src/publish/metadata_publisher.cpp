@@ -35,6 +35,15 @@ void json_frame_fields(std::ostringstream& os, const FrameMeta& m, bool include_
   os << "\"host_arrival_time_ns\":" << m.host_arrival_time_ns << ',';
   os << "\"sensor_timestamp_ns\":" << m.sensor_timestamp_ns << ',';
   os << "\"realsense_timestamp_ms\":" << std::fixed << std::setprecision(3) << m.realsense_timestamp_ms << ',';
+  if (m.actual_exposure_us.has_value()) {
+    os << "\"actual_exposure_us\":" << *m.actual_exposure_us << ',';
+  }
+  if (m.gain_level.has_value()) {
+    os << "\"gain_level\":" << *m.gain_level << ',';
+  }
+  if (m.auto_exposure.has_value()) {
+    os << "\"auto_exposure\":" << (*m.auto_exposure ? "true" : "false") << ',';
+  }
   os << "\"width\":" << m.width << ',';
   os << "\"height\":" << m.height << ',';
   os << "\"stride_bytes\":" << m.stride_bytes << ',';

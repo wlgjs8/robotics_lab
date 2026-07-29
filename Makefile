@@ -130,24 +130,36 @@ cam-engine-rebuild:
 	docker exec -it camera_server bash /app/stereo_worker/rebuild_engine_1280.sh
 	@echo "엔진 재빌드 완료. worker 재기동(컨테이너 재시작) 후 반영."
 
+# `docker ps -a`(-a 필수: 죽은 컨테이너도 보여준다) + 카메라별 USB 링크 속도 + capture 상태.
+# USB3 미달 카메라 하나가 preflight에서 camera_server 전체를 죽이므로(required RealSense
+# camera is not on USB3), 링크 속도를 capture 상태보다 먼저 보여준다.
 cam-status:
-	@docker ps --filter name=camera_server --format "container: {{.Status}}" || true
+	@docker ps -a --filter name=camera_server --format "container: {{.Status}}" | head -1 || true
 	@docker logs camera_server 2>&1 | grep -E "\[run\] fps=" | tail -1 || echo "worker: (no fps yet)"
 	@(ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q 5601 \
 		&& echo "stereo cloud: tcp 5601 LISTEN (viser 연동 가능)" \
 		|| echo "stereo cloud: 5601 down (worker 미발행)"
-	@status_line=$$(docker logs --tail 300 camera_server 2>&1 | grep -E "\[CAM\] status=" | tail -1); \
+	@rc=0; python3 tools/cam_usb_status.py || rc=1; \
+	if ! docker ps --filter name=camera_server --format "{{.Status}}" | grep -q .; then \
+		printf '\033[1;31mcamera: CONTAINER DOWN\033[0m\n'; \
+		docker logs --tail 200 camera_server 2>&1 | grep -iE "fatal|error" | tail -3 | sed 's/^/  /'; \
+		exit 1; \
+	fi; \
+	status_line=$$(docker logs --tail 300 camera_server 2>&1 | grep -E "\[CAM\] status=" | tail -1); \
 	if [ -z "$$status_line" ]; then \
 		echo "capture: (no status yet)"; exit 1; \
 	fi; \
 	echo "$$status_line"; \
 	case "$$status_line" in \
-	*"status=ok"*) printf '\033[32mcamera: OK\033[0m\n' ;; \
+	*"status=ok"*) \
+		if [ $$rc -eq 0 ]; then printf '\033[32mcamera: OK\033[0m\n'; \
+		else printf '\033[1;33mcamera: capture OK / usb link 이상 — 위 usb links 참고\033[0m\n'; fi ;; \
 	*) printf '\033[1;31mcamera: %s\033[0m\n' "$$(echo "$$status_line" | sed -n 's/.*status=\([a-z]*\).*/\1/p' | tr 'a-z' 'A-Z')"; \
 		echo "$$status_line" | tr '|' '\n' | grep "STALLED" | sed 's/^ */  stalled: /' || true; \
 		echo "$$status_line" | grep -o 'reasons=.*' | sed 's/^/  /' || true; \
 		exit 1 ;; \
-	esac
+	esac; \
+	exit $$rc
 
 cam-down:
 	-docker stop camera_server

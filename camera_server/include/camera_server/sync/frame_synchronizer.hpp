@@ -21,6 +21,7 @@ class FrameSynchronizer {
 
   std::optional<FrameBundleMeta> push_frame(const FrameMeta& meta,
                                             const std::map<std::string, uint64_t>& drop_counters);
+  bool reset_camera_generation(const std::string& camera_name);
   uint64_t complete_bundle_count() const;
   uint64_t incomplete_bundle_count() const;
   uint64_t bundle_seq() const;
@@ -60,6 +61,7 @@ class FrameSynchronizerSet {
   explicit FrameSynchronizerSet(const AppConfig& cfg);
   std::vector<PublishedBundle> push_frame(const FrameMeta& meta,
                                           const std::map<std::string, uint64_t>& drop_counters);
+  size_t reset_camera_generation(const std::string& camera_name);
   std::map<std::string, BundleStats> stats() const;
   BundleStats compatibility_stats() const;
 

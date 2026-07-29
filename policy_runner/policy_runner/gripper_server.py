@@ -20,6 +20,9 @@ the servo_state JSON; the wire schemas here are forward-compatible with that.
 Run:    python3 -m policy_runner.gripper_server --backend sim
 Monitor: python3 -m policy_runner.gripper_server --monitor
 Send:    python3 -m policy_runner.gripper_server --send left=50,right=80
+
+The tracked real launcher uses camera-serial/USB-topology auto-pairing instead
+of fixed tty or udev arm names. Pairing finishes before the Pika backend opens.
 """
 from __future__ import annotations
 
@@ -33,10 +36,15 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
 from .gripper import GripperCommand, PikaSerialGripperBackend
+from .pika_usb_pairing import (
+    ARMS,
+    PikaUsbPairing,
+    PikaUsbPairingError,
+    resolve_pika_usb_pairing_from_camera_health,
+)
 
 COMMAND_SCHEMA = "robotics_lab.gripper_cmd.v1"
 STATE_SCHEMA = "robotics_lab.gripper_state.v1"
-ARMS = ("left", "right")
 _MOVING_EPS_PERCENT = 1.0
 
 
@@ -422,12 +430,15 @@ def _parse_endpoint(text: str) -> tuple[str, int]:
     return (host or "127.0.0.1", int(port))
 
 
-def _build_config_from_args(args: argparse.Namespace) -> GripperServerConfig:
+def _build_config_from_args(
+    args: argparse.Namespace,
+    ports: Mapping[str, str],
+) -> GripperServerConfig:
     return GripperServerConfig(
         command_bind=_parse_endpoint(args.bind),
         state_endpoints=tuple(_parse_endpoint(e) for e in (args.state_endpoint or ["127.0.0.1:50420"])),
         backend=args.backend,
-        ports={"left": args.left_port, "right": args.right_port},
+        ports=dict(ports),
         sdk_path=args.pika_sdk_path,
         rate_hz=args.rate,
         stale_timeout_sec=args.stale_timeout,
@@ -436,6 +447,52 @@ def _build_config_from_args(args: argparse.Namespace) -> GripperServerConfig:
         debug_stats=args.debug_stats,
         debug_stats_period_sec=args.debug_stats_period,
     )
+
+
+def _print_pairing_summary(pairing: PikaUsbPairing) -> None:
+    for arm in ARMS:
+        pair = pairing.arms[arm]
+        print(
+            f"[pika-pairing] {arm} camera={pair.camera_name} "
+            f"serial={pair.camera_serial} camera_usb={pair.camera_usb_device_node} "
+            f"controller={pair.controller_path} root_port={pair.root_port} "
+            f"gripper_usb={pair.gripper_usb_device_node} "
+            f"tty={pair.gripper_tty} port={pair.gripper_port}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _resolve_ports_from_args(
+    args: argparse.Namespace,
+) -> tuple[dict[str, str], PikaUsbPairing | None]:
+    if args.auto_pair_camera_config:
+        if args.left_port is not None or args.right_port is not None:
+            raise PikaUsbPairingError(
+                "--auto-pair-camera-config cannot be combined with "
+                "--left-port or --right-port"
+            )
+        if args.backend != "pika" and not args.resolve_pairing_only:
+            raise PikaUsbPairingError(
+                "--auto-pair-camera-config is valid only with --backend pika"
+            )
+        pairing = resolve_pika_usb_pairing_from_camera_health(
+            args.auto_pair_camera_config,
+            endpoint=args.camera_health_endpoint,
+            topic=args.camera_health_topic,
+            timeout_sec=args.pairing_timeout_sec,
+        )
+        _print_pairing_summary(pairing)
+        return pairing.ports, pairing
+
+    if args.resolve_pairing_only:
+        raise PikaUsbPairingError(
+            "--resolve-pairing-only requires --auto-pair-camera-config"
+        )
+    return {
+        "left": args.left_port or "/dev/pika-left",
+        "right": args.right_port or "/dev/pika-right",
+    }, None
 
 
 def _send_once(spec: str, bind: str) -> None:
@@ -475,8 +532,45 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--backend", choices=("sim", "pika"), default="sim")
     p.add_argument("--bind", default="0.0.0.0:50410", help="command listen endpoint")
     p.add_argument("--state-endpoint", action="append", help="state publish endpoint (repeatable)")
-    p.add_argument("--left-port", default="/dev/pika-left")
-    p.add_argument("--right-port", default="/dev/pika-right")
+    p.add_argument(
+        "--left-port",
+        default=None,
+        help="explicit left serial path (default /dev/pika-left outside auto-pair mode)",
+    )
+    p.add_argument(
+        "--right-port",
+        default=None,
+        help="explicit right serial path (default /dev/pika-right outside auto-pair mode)",
+    )
+    p.add_argument(
+        "--auto-pair-camera-config",
+        default=None,
+        help=(
+            "resolve Pika serial ports from camera.health plus the tracked "
+            "left/right RealSense serials in this camera YAML"
+        ),
+    )
+    p.add_argument(
+        "--camera-health-endpoint",
+        default="tcp://127.0.0.1:5600",
+        help="camera_server metadata PUB endpoint used for auto-pairing",
+    )
+    p.add_argument(
+        "--camera-health-topic",
+        default="camera.health",
+        help="camera_server health topic used for auto-pairing",
+    )
+    p.add_argument(
+        "--pairing-timeout-sec",
+        type=float,
+        default=5.0,
+        help="maximum startup wait for a valid camera health message",
+    )
+    p.add_argument(
+        "--resolve-pairing-only",
+        action="store_true",
+        help="print the proven pairing as JSON without opening the Pika backend",
+    )
     p.add_argument("--pika-sdk-path", default=None)
     p.add_argument("--rate", type=float, default=50.0)
     p.add_argument("--stale-timeout", type=float, default=0.5)
@@ -507,12 +601,23 @@ def main(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             pass
         return 0
-    config = _build_config_from_args(args)
-    server = GripperServer(config).start()
+    try:
+        ports, pairing = _resolve_ports_from_args(args)
+        if args.resolve_pairing_only:
+            assert pairing is not None
+            print(json.dumps(pairing.to_dict(), indent=2, sort_keys=True))
+            return 0
+        config = _build_config_from_args(args, ports)
+        server = GripperServer(config).start()
+    except (PikaUsbPairingError, RuntimeError, ValueError, OSError) as exc:
+        print(f"gripper_server startup failed: {exc}", file=sys.stderr, flush=True)
+        return 2
     print(
         f"gripper_server up: backend={config.backend} cmd<-{config.command_bind} "
-        f"state->{list(config.state_endpoints)} rate={config.rate_hz}Hz on_stale={config.on_stale}",
+        f"state->{list(config.state_endpoints)} rate={config.rate_hz}Hz "
+        f"on_stale={config.on_stale} ports={dict(config.ports)}",
         file=sys.stderr,
+        flush=True,
     )
     server.run()
     return 0

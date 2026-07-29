@@ -119,8 +119,10 @@ If camera disconnects:
 1. publish health event
 2. stop that device pipeline
 3. attempt reconnect if enabled
-4. mark bundles incomplete while camera unavailable
-5. keep other camera pipelines alive; with reconnect disabled, retain startup
+4. after the first recovered frame, reset every affected bundle group's
+   buffered generation state before reporting the camera connected
+5. mark bundles incomplete while camera unavailable
+6. keep other camera pipelines alive; with reconnect disabled, retain startup
    fail-fast for missing required devices
 
 For real robot experiments, fail-fast may be safer during early development.

@@ -62,6 +62,9 @@ Example JSON payload:
   "host_arrival_time_ns": 1234567890000,
   "sensor_timestamp_ns": 1234567889900,
   "realsense_timestamp_ms": 1234567.889,
+  "actual_exposure_us": 6951,
+  "gain_level": 16,
+  "auto_exposure": true,
   "width": 640,
   "height": 480,
   "stride_bytes": 1920,
@@ -75,6 +78,12 @@ Example JSON payload:
   "valid": true
 }
 ```
+
+`actual_exposure_us`, `gain_level`, `auto_exposure`는 optional RealSense
+per-frame metadata다. 장치/stream/firmware/backend가 해당 metadata를 지원할 때만
+포함하며 mock/UVC 또는 지원하지 않는 RealSense 프레임에서는 필드를 생략한다.
+현재 sensor option을 per-frame 값으로 추정하여 대체하지 않는다. 이 optional 확장은
+`camera_server.frame.v1`과 `camera_server.bundle.v1` schema version을 변경하지 않는다.
 
 ## 5. Bundle metadata schema
 

@@ -89,7 +89,11 @@ if [ "$MODE" = "real" ]; then
   # power-on directions, so that startup motion lands asymmetrically (observed:
   # right opens, left closes). Hold each gripper at its current power-on position
   # instead. Re-enable with GRIPPER_SERVER_ARGS=... --home-on-connect.
-  GRIPPER_SERVER_ARGS="${GRIPPER_SERVER_ARGS---left-port /dev/pika-left --right-port /dev/pika-right --pika-sdk-path $PIKA_SDK_PATH --no-home-on-connect}"
+  # The tracked D405 serial mapping + live camera.health physical_port are the
+  # arm identity source. The gripper_server joins that identity to the CH340 on
+  # the same xHCI root port and fails closed instead of trusting tty numbering or
+  # the legacy fixed /dev/pika-* links. camera_server must already be running.
+  GRIPPER_SERVER_ARGS="${GRIPPER_SERVER_ARGS---auto-pair-camera-config camera_server/config/dual_realsense_d405.yaml --camera-health-endpoint tcp://127.0.0.1:5600 --camera-health-topic camera.health --pairing-timeout-sec 5 --pika-sdk-path $PIKA_SDK_PATH --no-home-on-connect}"
 else
   GRIPPER_BACKEND="sim"
   GRIPPER_SERVER_ARGS="${GRIPPER_SERVER_ARGS-}"
@@ -193,7 +197,8 @@ cleanup() {
   trap - EXIT
   echo
   echo "[stack] stopping..."
-  # Kill in reverse order (policy first so it releases the lease, then GUI, server).
+  # Kill in reverse order (policy first so it releases the lease, then GUI,
+  # server, and finally the gripper process that was started first).
   for ((i = ${#PIDS[@]} - 1; i >= 0; i--)); do
     kill "${PIDS[$i]}" 2>/dev/null || true
   done
@@ -226,16 +231,47 @@ echo "[stack] external flow-infer state readback: udp://127.0.0.1:50378"
 if [ "$SCOPE_DASHBOARD_ON" = "1" ]; then
   echo "[stack] joint scope dashboard state listen: ${SCOPE_DASHBOARD_STATE_LISTEN}"
 fi
+
+# Start the gripper owner before the arm server. In real mode this is also the
+# camera-serial/USB-topology preflight: if camera_server is absent, the identity
+# is ambiguous, or the Pika backend cannot connect, make run must fail before an
+# arm command endpoint comes up. --no-home-on-connect keeps this startup check
+# motionless. MODE=sim uses the hardware-free backend and has no camera dependency.
+if [ "$GRIPPER_SERVER_ON" = "1" ]; then
+  echo "[stack] gripper_server: backend=$GRIPPER_BACKEND cmd<-127.0.0.1:50410 feedback->127.0.0.1:50420 ${GRIPPER_SERVER_ARGS:-} ${GRIPPER_SERVER_DEBUG_ARGS:-}"
+  "$PY" -u -m policy_runner.gripper_server \
+    --backend "$GRIPPER_BACKEND" --bind 127.0.0.1:50410 --state-endpoint 127.0.0.1:50420 \
+    ${GRIPPER_SERVER_DEBUG_ARGS:-} ${GRIPPER_SERVER_ARGS:-} >"$LOG_DIR/gripper_server.log" 2>&1 &
+  GRIPPER_PID=$!
+  PIDS+=("$GRIPPER_PID")
+  for _ in $(seq 1 100); do
+    if grep -q "gripper_server up:" "$LOG_DIR/gripper_server.log" 2>/dev/null; then break; fi
+    if ! kill -0 "$GRIPPER_PID" 2>/dev/null; then
+      echo "[stack] gripper_server exited during startup:" >&2
+      tail -10 "$LOG_DIR/gripper_server.log" >&2
+      exit 1
+    fi
+    sleep 0.1
+  done
+  grep -q "gripper_server up:" "$LOG_DIR/gripper_server.log" || {
+    echo "[stack] gripper_server did not become ready in 10s:" >&2
+    tail -10 "$LOG_DIR/gripper_server.log" >&2
+    exit 1
+  }
+  echo "[stack] gripper_server up."
+fi
+
 ensure_rt_caps
 "$SERVER_BIN" --config "$SERVER_CFG" >"$LOG_DIR/server.log" 2>&1 &
-PIDS+=($!)
+SERVER_PID=$!
+PIDS+=("$SERVER_PID")
 
 # Wait until the command server is up (or fail fast on config/RT errors).
 # Generous deadline: an automatic pgmode switch (sim<->real) can take tens of
 # seconds PER ARM on the controller before the server finishes initializing.
 for i in $(seq 1 750); do
   if grep -q "CommandServer listening" "$LOG_DIR/server.log" 2>/dev/null; then break; fi
-  if ! kill -0 "${PIDS[0]}" 2>/dev/null; then
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
     echo "[stack] server exited during startup:" >&2
     tail -5 "$LOG_DIR/server.log" >&2
     exit 1
@@ -283,23 +319,6 @@ if [ "$SCOPE_DASHBOARD_ON" = "1" ]; then
     echo "[stack] WARNING: joint scope dashboard exited during startup:" >&2
     tail -5 "$LOG_DIR/scope_dashboard.log" >&2
     echo "[stack] (stack continues; set SCOPE_DASHBOARD=0 to skip this dashboard)" >&2
-  fi
-fi
-
-if [ "$GRIPPER_SERVER_ON" = "1" ]; then
-  echo "[stack] gripper_server: backend=$GRIPPER_BACKEND cmd<-127.0.0.1:50410 feedback->127.0.0.1:50420 ${GRIPPER_SERVER_ARGS:-} ${GRIPPER_SERVER_DEBUG_ARGS:-}"
-  "$PY" -u -m policy_runner.gripper_server \
-    --backend "$GRIPPER_BACKEND" --bind 127.0.0.1:50410 --state-endpoint 127.0.0.1:50420 \
-    ${GRIPPER_SERVER_DEBUG_ARGS:-} ${GRIPPER_SERVER_ARGS:-} >"$LOG_DIR/gripper_server.log" 2>&1 &
-  PIDS+=($!)
-  # pika backend binds the serial ports immediately; surface an early crash
-  # (missing /dev/pika-*, pika_sdk, port already open) without blocking. The sim
-  # backend never fails this way.
-  sleep 1
-  if ! kill -0 "${PIDS[-1]}" 2>/dev/null; then
-    echo "[stack] WARNING: gripper_server exited during startup — gripper will NOT move/update:" >&2
-    tail -5 "$LOG_DIR/gripper_server.log" >&2
-    echo "[stack] (stack continues; fix serial/pika_sdk and rerun, or GRIPPER_SERVER=0 to silence)" >&2
   fi
 fi
 

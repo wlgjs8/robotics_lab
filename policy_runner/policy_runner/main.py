@@ -289,14 +289,21 @@ def run(
 
     def _finish_tick(snapshot: StateSnapshot, now_value: float) -> int | None:
         action_source_name = str(getattr(source, "name", config.action_source))
+        _t = monotonic_fn() if _prof.on else 0.0
         recording_supervisor.record_frame(
             snapshot,
             action_packet=last_record_packet,
             action_host_time_ns=last_record_packet_time_ns,
             action_seq=last_record_packet_seq,
         )
+        if _prof.on:
+            _prof.add("record_frame", monotonic_fn() - _t)
+            _t = monotonic_fn()
         recording_supervisor.stamp_snapshot(snapshot)
         arm_init_override.stamp_snapshot(snapshot)
+        if _prof.on:
+            _prof.add("stamp2", monotonic_fn() - _t)
+            _t = monotonic_fn()
         recording_supervisor.publish_status(
             now_monotonic=now_value,
             arm_init=arm_init_override.status_block(),
@@ -307,6 +314,8 @@ def run(
             force_recovery=_force_recovery_status(source),
             camera_runtime=_camera_runtime_status(source),
         )
+        if _prof.on:
+            _prof.add("publish_status", monotonic_fn() - _t)
         abort_reason = _terminal_abort_reason(source)
         if abort_reason is not None:
             label = "camera_abort" if abort_reason == "camera_stale_timeout" else "force_recovery_abort"
@@ -316,7 +325,10 @@ def run(
         if completion_reason is not None:
             print(f"policy_runner completed: {completion_reason}", file=stderr)
             return 0
+        _ts = monotonic_fn() if _prof.on else 0.0
         sleep_fn(period)
+        if _prof.on:
+            _prof.add("sleep", monotonic_fn() - _ts)
         return None
     _capture = TeleopCaptureLogger()
 
@@ -353,10 +365,74 @@ def run(
             drop_reason=drop_reason,
         )
 
+    # Tick profiler (FLOW_INFER_TICK_PROFILE=1; telemetry only, off by default).
+    #
+    # Why: with policy_dt = 33.4 ms (SPEED_SCALE=1.0) the rollout only achieved a ~45 ms
+    # step period, while the MINIMUM observed step was exactly 33.4 ms -- so the loop can
+    # reach 30 Hz but usually misses the deadline. Cameras (29.7 fps, bundle age 21 ms) and
+    # inference (94 ms of a 235 ms budget) were both ruled out, which leaves this Python
+    # tick. _step_deadline is reset from the CURRENT time, so lateness is absorbed rather
+    # than caught up: the achieved rate silently settles at whatever the tick can sustain.
+    # This names the phase responsible instead of guessing.
+    class _TickProfile:
+        __slots__ = ("on", "t_prev", "acc", "n", "last_report", "worst")
+
+        def __init__(self) -> None:
+            self.on = os.environ.get("FLOW_INFER_TICK_PROFILE", "0") == "1"
+            self.t_prev = None
+            self.acc: dict[str, float] = {}
+            self.n = 0
+            self.last_report = None
+            self.worst: dict[str, float] = {}
+
+        def tick(self, t: float) -> None:
+            if not self.on:
+                return
+            if self.t_prev is not None:
+                self.add("TOTAL", t - self.t_prev)
+                self.n += 1
+            self.t_prev = t
+            if self.last_report is None:
+                self.last_report = t
+            elif t - self.last_report >= 5.0 and self.n:
+                # "other" = the part of the tick no timer covers. Chasing it is the point:
+                # the first profiling pass had TOTAL=9.0 ms with every named phase <=0.7 ms.
+                total = self.acc.get("TOTAL", 0.0)
+                named = sum(v for k, v in self.acc.items() if k != "TOTAL")
+                parts = " ".join(
+                    f"{k}={self.acc[k] / self.n * 1000:.2f}/{self.worst[k] * 1000:.0f}"
+                    for k in sorted(self.acc, key=lambda k: -self.acc[k])
+                )
+                other = (total - named) / self.n * 1000
+                print(
+                    f"[tick-profile] n={self.n} mean/max ms  {parts} OTHER={other:.2f}",
+                    file=stderr,
+                    flush=True,
+                )
+                self.acc.clear()
+                self.worst.clear()
+                self.n = 0
+                self.last_report = t
+
+        def add(self, key: str, dt: float) -> None:
+            if not self.on:
+                return
+            self.acc[key] = self.acc.get(key, 0.0) + dt
+            if dt > self.worst.get(key, 0.0):
+                self.worst[key] = dt
+
+    _prof = _TickProfile()
+    if _prof.on:
+        print("[tick-profile] enabled (mean/max ms per phase, every 5 s)", file=stderr, flush=True)
+
     try:
         while True:
+            _tick_t0 = monotonic_fn() if _prof.on else 0.0
             snapshot = state_client.latest
             now = monotonic_fn()
+            _prof.tick(_tick_t0 if _prof.on else now)
+            if _prof.on:
+                _prof.add("snapshot", now - _tick_t0)
             if snapshot is None:
                 if now >= startup_deadline:
                     print(
@@ -381,6 +457,7 @@ def run(
                     suffix = f" {' '.join(fields)}" if fields else ""
                     print(f"policy_runner fault_latch_abort:{suffix}", file=stderr)
                     return FAULT_LATCH_EXIT_CODE
+            _t0 = monotonic_fn() if _prof.on else 0.0
             action_source_name = str(getattr(source, "name", config.action_source))
             drain_payloads = getattr(recording_supervisor, "drain_control_payloads", None)
             dispatch_payloads = getattr(recording_supervisor, "dispatch_control_payloads", None)
@@ -405,11 +482,22 @@ def run(
             recording_supervisor.stamp_snapshot(snapshot)
             arm_init_override.stamp_snapshot(snapshot)
             _clear_tick_record_packet()
+            if _prof.on:
+                _prof.add("pre_intent", monotonic_fn() - _t0)
+            _t0 = monotonic_fn() if _prof.on else 0.0
             if state_sink is not None:
                 state_sink(snapshot)
+            if _prof.on:
+                _prof.add("state_sink", monotonic_fn() - _t0)
+            _t0 = monotonic_fn() if _prof.on else 0.0
             if rollout_recorder is not None:
                 rollout_recorder.record_state(snapshot)
+            if _prof.on:
+                _prof.add("record_state", monotonic_fn() - _t0)
+            _t0 = monotonic_fn() if _prof.on else 0.0
             intent = source.next_intent(snapshot, now)
+            if _prof.on:
+                _prof.add("next_intent", monotonic_fn() - _t0)
             intent = arm_init_override.compose_intent(intent)
             source_requirements = getattr(source, "requirements", None)
             requirements = (
@@ -417,7 +505,10 @@ def run(
                 if intent_uses_source_requirements(intent, arm_init_override)
                 else None
             )
+            _t0 = monotonic_fn() if _prof.on else 0.0
             decision = safety_gate.evaluate(snapshot, intent, requirements, now)
+            if _prof.on:
+                _prof.add("safety_gate", monotonic_fn() - _t0)
             _capture.log(now, source, intent, decision.allowed, phase="pre")
             if rollout_recorder is not None:
                 rollout_recorder.record_decision(decision)
@@ -576,7 +667,10 @@ def run(
                         if abort_code is not None:
                             return abort_code
                         continue
+                _t0 = monotonic_fn() if _prof.on else 0.0
                 seq = command_client.send(intent)
+                if _prof.on:
+                    _prof.add("cmd_send", monotonic_fn() - _t0)
                 _remember_sent_intent(intent, seq)
                 _log_final_and_capture(
                     intent,

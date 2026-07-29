@@ -121,10 +121,10 @@ if ! getcap "$SERVER_BIN" 2>/dev/null | grep -q cap_sys_nice; then
 fi
 
 # 4) Python components — editable installs (edits live without reinstall).
-echo "[build] pip install -e rb_gui + policy_runner[spacemouse]  (python: $PY)"
-if ! "$PY" -m pip install -e rb_gui -e "policy_runner[spacemouse]"; then
+echo "[build] pip install -e rb_gui + policy_runner[spacemouse,gripper]  (python: $PY)"
+if ! "$PY" -m pip install -e rb_gui -e "policy_runner[spacemouse,gripper]"; then
   echo "[build] WARN: editable install failed (PEP 668 / no venv?). Retrying with --user" >&2
-  "$PY" -m pip install --user -e rb_gui -e "policy_runner[spacemouse]" \
+  "$PY" -m pip install --user -e rb_gui -e "policy_runner[spacemouse,gripper]" \
     || echo "[build] WARN: pip install failed; install rb_gui/policy_runner deps manually" >&2
 fi
 

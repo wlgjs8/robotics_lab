@@ -533,6 +533,112 @@ int main() {
     check(x_last > start.x + 5e-3, "owned-normal projection preserves tangential motion");
   }
 
+
+  // -- Test: chunk-swap head behaviour (fix + characterization). --------------
+  // (a) FIXED: flankIndex(k,-1,n) clamps to k at the window head, so d_k used to be
+  //     0 there -- halving the central-difference vf, injecting a spurious
+  //     af = +d_kp1/dt^2, and zeroing sign_dk so the corner test could never fire.
+  //     buildSample now falls back to the forward difference at the head.
+  // (b) FIXED (was: 0.33-0.54x travel loss for ~3 segments after every swap, with
+  //     last_solve.duration/dt spiking to ~5 and the motion transiently reversing, on a
+  //     PERFECTLY constant-velocity delta stream). Root cause: submitDeltaFrame anchored
+  //     the integration at last_pose_ (the MID-segment emitted sample) while the next
+  //     solve starts from the Ruckig chained state p0_, which solve() leaves at the END
+  //     of the current segment -- so the first new knot was only
+  //     d - d_prev*(1 - t_in_seg/seg_dt) ahead of the solve's start, i.e. ~0 (or negative)
+  //     when the frame landed early in a segment. Now anchored at core_.p0().
+  //     Hardware corroboration of the pre-fix behaviour:
+  //     logs/servo_log_20260724_160210.csv emitted follower speed by consumed row
+  //     index (right arm) = 20.4 / 27.6 / 42.4 / 47.9 / 45.9 mm/s, and
+  //     outputs/sweep/20260729_0840*_fixedstep_command.jsonl showed a 0.70x displacement
+  //     notch one row after each swap (n~880/row).
+  std::printf("Test: chunk-swap head (fix + known-defect characterization)\n");
+  {
+    CartesianChunkFollowerConfig hcfg;
+    hcfg.window = {/*L*/ 0, /*C*/ 10, /*R*/ 2, /*smooth*/ 1};
+    const double vx = 0.03;  // constant speed -> zero reference curvature
+    const double step = vx * SEG;
+    auto makeDeltaFrame = [&](int n, std::uint64_t wseq) {
+      ChunkFrame fr;
+      fr.policy_dt = SEG;
+      fr.wire_seq = wseq;
+      fr.recv_seq = 20;
+      fr.recv_time = 0.0;
+      for (int i = 0; i < n; ++i) {
+        Vec6 d{};
+        d.x = step;
+        fr.delta.push_back(d);
+        fr.grip.push_back(0.0);
+      }
+      return fr;
+    };
+
+    CartesianChunkFollower f(hcfg);
+    Pose6D origin;
+    origin.x = 0.0; origin.y = 0.0; origin.z = 0.2;
+    origin.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+    f.submitDeltaFrame(makeDeltaFrame(40, 55), origin);
+    for (int i = 0; i < 250; ++i) f.tick(TICK);
+
+    const int n3 = static_cast<int>(3 * SEG / TICK);
+    Pose6D a = f.tick(TICK);
+    Pose6D b = a;
+    for (int i = 0; i < n3; ++i) b = f.tick(TICK);
+    const double steady = b.x - a.x;
+    check(steady > 0.8 * 3 * step, "steady state tracks the constant delta stream");
+
+    const Pose6D at = f.tick(TICK);
+    f.submitDeltaFrame(makeDeltaFrame(40, 56), at);
+    const bool head_corner = f.diag().last_solve.corner;
+    Pose6D c = at;
+    for (int i = 0; i < n3; ++i) c = f.tick(TICK);
+    const double swap = c.x - at.x;
+    const double ratio = steady > 1e-12 ? swap / steady : 0.0;
+    std::printf("    3-seg travel: steady=%.6f m  across-swap=%.6f m  ratio=%.3f\n",
+                steady, swap, ratio);
+    check(!head_corner, "fresh-chunk head reports no phantom corner (flank-clamp fix)");
+    check(ratio > 0.85, "chunk swap preserves travel on a constant-velocity delta stream");
+
+    // (c) The defect was PHASE-dependent: submitting early in a segment lost the most
+    //     travel, so a single submit phase can pass by luck. Sweep the whole segment and
+    //     require every phase to keep the travel AND never reverse.
+    double worst = 1.0;
+    int worst_phase = -1;
+    const int ticks_per_seg = static_cast<int>(SEG / TICK);
+    for (int phase = 0; phase < ticks_per_seg; ++phase) {
+      CartesianChunkFollower g(hcfg);
+      g.submitDeltaFrame(makeDeltaFrame(40, 55), origin);
+      for (int i = 0; i < 250; ++i) g.tick(TICK);
+      // measure this instance's own steady rate over 3 segments
+      Pose6D s0 = g.tick(TICK);
+      Pose6D s1 = s0;
+      for (int i = 0; i < n3; ++i) s1 = g.tick(TICK);
+      const double steady_i = s1.x - s0.x;
+      // land the swap `phase` ticks into a segment
+      Pose6D at_i = s1;
+      for (int i = 0; i < phase; ++i) at_i = g.tick(TICK);
+      g.submitDeltaFrame(makeDeltaFrame(40, 56), at_i);
+      Pose6D prev = at_i, cur = at_i;
+      double min_tick_dx = 1.0;
+      for (int i = 0; i < n3; ++i) {
+        cur = g.tick(TICK);
+        min_tick_dx = std::min(min_tick_dx, cur.x - prev.x);
+        prev = cur;
+      }
+      const double r = steady_i > 1e-12 ? (cur.x - at_i.x) / steady_i : 0.0;
+      if (r < worst) { worst = r; worst_phase = phase; }
+      if (min_tick_dx < -1e-9) {
+        std::printf("    phase %d/%d REVERSED (min per-tick dx=%.3e m)\n",
+                    phase, ticks_per_seg, min_tick_dx);
+        check(false, "chunk swap never reverses the motion");
+        break;
+      }
+    }
+    std::printf("    worst-phase ratio over %d submit phases: %.3f (phase %d)\n",
+                ticks_per_seg, worst, worst_phase);
+    check(worst > 0.85, "chunk-swap travel is preserved at EVERY submit phase");
+  }
+
   std::printf("\n=== %s (%d failure%s) ===\n",
               g_failures == 0 ? "ALL TESTS PASSED" : "TEST FAILURES",
               g_failures, g_failures == 1 ? "" : "s");

@@ -89,6 +89,45 @@ Button-only gripper commands are per-arm `Hold` payloads with
 are honored when the mux is idle or already owned by SpaceMouse; UMI ownership
 continues to suppress SpaceMouse intents.
 
+### Pika USB pairing
+
+The physical wrist module carries its D405 and CH340-based Pika gripper through
+one host cable. The CH340 adapters have no unique serial, so the real
+`gripper_server` does not trust `ttyUSB` numbering or the legacy fixed
+`/dev/pika-left` / `/dev/pika-right` udev links. At startup it:
+
+1. reads the accepted left/right D405 librealsense serials from
+   `camera_server/config/dual_realsense_d405.yaml`;
+2. requires a live `camera.health` message from `tcp://127.0.0.1:5600`;
+3. joins each camera's xHCI controller/root port to exactly one `1a86:7522`
+   CH340 and opens that device through `/dev/serial/by-path`.
+
+Every missing, duplicate, or conflicting identity fails closed before the Pika
+backend opens. There is no fixed-port fallback. Start the physical camera
+service before the real stack:
+
+```bash
+make cam-up-wrists  # or make cam-up with another accepted config containing both wrists
+make run
+```
+
+If camera health or pairing is unavailable within five seconds,
+`gripper_server` exits and `make run` tears down the stack with a nonzero
+status. Replugging while the stack is running does not trigger automatic
+reassignment; restart the stack so both pairs are proven again. A motionless
+diagnostic prints the resolved mapping without importing/opening the Pika SDK:
+
+```bash
+PYTHONPATH=policy_runner .venv/bin/python -m policy_runner.gripper_server \
+  --backend pika \
+  --auto-pair-camera-config camera_server/config/dual_realsense_d405.yaml \
+  --resolve-pairing-only
+```
+
+Explicit `--left-port` / `--right-port` remain available for isolated
+diagnostics but cannot be combined with auto-pairing. `MODE=sim` and an
+explicit `GRIPPER_SERVER=0` remain camera-independent.
+
 ## Flow/OpenPI Rollout
 
 `flow-infer` and OpenPI remote rollout always compose ee_local policy deltas into

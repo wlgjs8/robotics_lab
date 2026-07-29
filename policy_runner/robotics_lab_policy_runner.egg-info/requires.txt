@@ -3,6 +3,10 @@
 pyzmq>=25.0.0
 numpy>=1.24.0
 
+[gripper]
+pyzmq>=25.0.0
+PyYAML>=6.0
+
 [ml]
 torch>=2.0
 torchvision>=0.15

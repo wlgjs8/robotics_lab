@@ -89,6 +89,8 @@ Acceptance:
 - bundles become incomplete or are dropped according to config
 - the disconnected camera reconnects independently
 - unaffected cameras continue increasing their frame counters during recovery
+- every affected bundle group resumes even when the restarted camera's frame
+  number returns to 1; no bundle combines pre- and post-reconnect frames
 - health exposes disconnect, attempt, success, exhaustion, and last-error state
 
 ## 9. Docker test

@@ -7,7 +7,15 @@ name = "rb-servo-gui"
 version = "0.1.0"
 description = "Viser operator console for rb_servo_server"
 requires-python = ">=3.10"
-dependencies = ["viser>=0.2.12", "numpy>=1.26", "trimesh>=4.0", "yourdfpy>=0.0.56", "plotly>=5.0"]
+dependencies = [
+  "viser>=0.2.12",
+  "numpy>=1.26",
+  "trimesh>=4.0",
+  "yourdfpy>=0.0.56",
+  "plotly>=5.0",
+  "pyzmq>=25.0",
+  "opencv-python-headless>=4.8",
+]
 
 [tool.setuptools.packages.find]
 include = ["rb_servo_gui*"]

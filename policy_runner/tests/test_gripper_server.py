@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import socket
 import time
 import unittest
+from unittest import mock
 
 from policy_runner.gripper_server import (
     COMMAND_SCHEMA,
@@ -11,8 +14,10 @@ from policy_runner.gripper_server import (
     GripperServer,
     GripperServerConfig,
     SimPikaGripper,
+    main,
     parse_command,
 )
+from policy_runner.pika_usb_pairing import PikaArmPairing, PikaUsbPairing
 
 
 def _cmd_bytes(left=None, right=None, deadman=True):
@@ -204,6 +209,65 @@ class UdpRoundTripTest(unittest.TestCase):
         finally:
             srv.close()
             listener.close()
+
+
+class GripperServerCliTest(unittest.TestCase):
+    @staticmethod
+    def _pairing() -> PikaUsbPairing:
+        arms = {}
+        for arm, root in (("left", "1"), ("right", "2")):
+            arms[arm] = PikaArmPairing(
+                arm=arm,
+                camera_name=f"{arm}_realsense",
+                camera_serial=f"{arm.upper()}_SERIAL",
+                camera_physical_port=f"/sys/devices/controller/usb4/4-{root}/4-{root}.2",
+                camera_usb_device_node=f"4-{root}.2",
+                controller_path="/sys/devices/controller",
+                root_port=root,
+                gripper_usb_device_node=f"3-{root}.1.4",
+                gripper_tty=f"ttyUSB{root}",
+                gripper_port=f"/dev/serial/by-path/gripper-{arm}",
+            )
+        return PikaUsbPairing(arms=arms)
+
+    def test_resolve_only_prints_pairing_without_opening_backend(self):
+        stdout = io.StringIO()
+        with (
+            mock.patch(
+                "policy_runner.gripper_server.resolve_pika_usb_pairing_from_camera_health",
+                return_value=self._pairing(),
+            ),
+            mock.patch("policy_runner.gripper_server.GripperServer") as server_cls,
+            contextlib.redirect_stdout(stdout),
+        ):
+            rc = main(
+                [
+                    "--backend",
+                    "pika",
+                    "--auto-pair-camera-config",
+                    "cameras.yaml",
+                    "--resolve-pairing-only",
+                ]
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["schema"], "robotics_lab.pika_usb_pairing.v1")
+        server_cls.assert_not_called()
+
+    def test_auto_pair_and_explicit_port_are_mutually_exclusive(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            rc = main(
+                [
+                    "--backend",
+                    "pika",
+                    "--auto-pair-camera-config",
+                    "cameras.yaml",
+                    "--left-port",
+                    "/dev/ttyUSB0",
+                ]
+            )
+        self.assertEqual(rc, 2)
+        self.assertIn("cannot be combined", stderr.getvalue())
 
 
 if __name__ == "__main__":

@@ -454,6 +454,27 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertIn('"$PY" -u -m policy_runner.gripper_server', run_stack_text)
         self.assertIn('"$PY" -u -m policy_runner --config', run_stack_text)
         self.assertNotIn('python3 -m rb_servo_gui.app', run_stack_text)
+        self.assertIn('policy_runner[spacemouse,gripper]', build_stack_text)
+
+    def test_real_gripper_startup_auto_pairs_and_fails_the_stack_closed(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        run_stack_text = (repo_root / "tools/run_stack.sh").read_text()
+
+        self.assertIn(
+            "--auto-pair-camera-config camera_server/config/dual_realsense_d405.yaml",
+            run_stack_text,
+        )
+        self.assertIn("--camera-health-endpoint tcp://127.0.0.1:5600", run_stack_text)
+        self.assertIn("--pairing-timeout-sec 5", run_stack_text)
+        self.assertIn('grep -q "gripper_server up:"', run_stack_text)
+        self.assertIn("[stack] gripper_server exited during startup:", run_stack_text)
+        self.assertNotIn("WARNING: gripper_server exited during startup", run_stack_text)
+        self.assertLess(
+            run_stack_text.index('"$PY" -u -m policy_runner.gripper_server'),
+            run_stack_text.index('"$SERVER_BIN" --config "$SERVER_CFG"'),
+        )
+        self.assertIn('SERVER_PID=$!', run_stack_text)
+        self.assertIn('kill -0 "$SERVER_PID"', run_stack_text)
 
     def test_flow_infer_real_wrapper_defaults_to_delta_twist_baseline(self):
         repo_root = Path(__file__).resolve().parents[2]

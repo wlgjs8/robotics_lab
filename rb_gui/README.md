@@ -125,6 +125,49 @@ policy chunk overlay. Missing blocks remain backward compatible and are shown
 as unavailable. These displays are diagnostic telemetry only; they do not
 change loop scheduling, command behavior, or safety gates.
 
+## Wrist-Camera Quality Diagnostics
+
+The `카메라 품질` tab subscribes directly to the independent
+`camera.bundle.wrist_left` and `camera.bundle.wrist_right` topics and analyzes
+the two D405 color streams at 320x240. It reports separate metrics instead of a
+single ambiguous score:
+
+- Crété-Roffet no-reference blur effect (`0` sharp, `1` blurred), plus a
+  stationary per-arm baseline learned after a one-second settle and a
+  three-second collection window
+- sparse PyrLK/RANSAC global image motion and a one-second RMS of the
+  above-2-Hz residual (`shake`)
+- optional actual exposure/gain metadata and estimated exposure smear in pixels
+- time-aligned TCP linear/angular speed, joint-speed RMS, and
+  `q_sent - q_actual` RMS from the server state stream
+
+The baseline is learned only while fresh robot telemetry and image flow both
+indicate that the arm is stationary. It resets on camera reconnection/serial
+change or through the GUI button. Low-texture or unreliable-flow frames are
+marked explicitly; blur values from different scenes should not be compared as
+an absolute lens-quality threshold.
+
+Preview images are off by default and, when enabled, update at 5 Hz. Scalar
+samples are written for the entire GUI process to
+`logs/camera_quality/camera_quality_<KST>.csv`; image pixels are never written
+by this diagnostic. The feature is read-only and is never used as a motion
+gate, controller input, or safety decision.
+
+Environment overrides:
+
+```bash
+RB_GUI_CAMERA_QUALITY=0
+RB_GUI_CAMERA_QUALITY_ENDPOINT=tcp://127.0.0.1:5600
+RB_GUI_CAMERA_QUALITY_LEFT_TOPIC=camera.bundle.wrist_left
+RB_GUI_CAMERA_QUALITY_RIGHT_TOPIC=camera.bundle.wrist_right
+RB_GUI_CAMERA_QUALITY_CSV_DIR=logs/camera_quality
+```
+
+If camera_server is absent, a topic is missing, or OpenCV/ZMQ is unavailable,
+only this panel remains waiting/disabled; GUI and stack startup continue.
+RealSense `actual_exposure_us`, `gain_level`, and `auto_exposure` fields are
+optional and display as `N/A` when the device/backend does not expose them.
+
 ## Running Tests
 
 ```bash

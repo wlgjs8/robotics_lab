@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -61,6 +62,12 @@ struct FrameMeta {
   uint64_t host_arrival_time_ns{0};
   uint64_t sensor_timestamp_ns{0};
   double realsense_timestamp_ms{0.0};
+  // Optional per-frame RealSense metadata. These values describe the image
+  // that was actually captured; they stay absent for mock/UVC devices or when
+  // the device/backend does not expose the requested metadata attribute.
+  std::optional<double> actual_exposure_us;
+  std::optional<double> gain_level;
+  std::optional<bool> auto_exposure;
   int width{0};
   int height{0};
   int stride_bytes{0};

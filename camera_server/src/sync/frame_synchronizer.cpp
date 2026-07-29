@@ -34,6 +34,12 @@ void trim_buffer(std::deque<FrameMeta>& frames, size_t max_size) {
   while (frames.size() > max_size) frames.pop_front();
 }
 
+bool stream_belongs_to_camera(const std::string& stream_key, const std::string& camera_name) {
+  return stream_key.size() > camera_name.size() &&
+         stream_key.compare(0, camera_name.size(), camera_name) == 0 &&
+         stream_key[camera_name.size()] == '.';
+}
+
 }  // namespace
 
 namespace {
@@ -164,6 +170,28 @@ std::optional<FrameBundleMeta> FrameSynchronizer::push_frame(const FrameMeta& me
   return bundle;
 }
 
+bool FrameSynchronizer::reset_camera_generation(const std::string& camera_name) {
+  std::lock_guard<std::mutex> lk(mu_);
+  const bool affected = std::any_of(required_keys_.begin(), required_keys_.end(),
+                                    [&](const std::string& key) {
+                                      return stream_belongs_to_camera(key, camera_name);
+                                    });
+  if (!affected) return false;
+
+  // A restarted pipeline starts a new frame-number generation. Discard every
+  // buffered frame in this group so a pre-reconnect frame cannot be paired
+  // with a post-reconnect frame. Lifetime counters remain cumulative, while
+  // windowed rate/skew telemetry restarts from post-reconnect samples.
+  buffers_.clear();
+  pending_master_frame_number_ = 0;
+  completed_samples_.clear();
+  last_max_time_diff_ms_ = 0.0;
+  if (stream_belongs_to_camera(master_key_, camera_name)) {
+    last_emitted_master_frame_number_ = 0;
+  }
+  return true;
+}
+
 uint64_t FrameSynchronizer::complete_bundle_count() const {
   std::lock_guard<std::mutex> lk(mu_);
   return complete_bundle_count_;
@@ -223,6 +251,14 @@ std::vector<PublishedBundle> FrameSynchronizerSet::push_frame(
     if (bundle) out.push_back(PublishedBundle{group->topic(), std::move(*bundle)});
   }
   return out;
+}
+
+size_t FrameSynchronizerSet::reset_camera_generation(const std::string& camera_name) {
+  size_t reset_count = 0;
+  for (auto& group : groups_) {
+    if (group->reset_camera_generation(camera_name)) ++reset_count;
+  }
+  return reset_count;
 }
 
 std::map<std::string, BundleStats> FrameSynchronizerSet::stats() const {

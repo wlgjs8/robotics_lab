@@ -6,6 +6,9 @@ Requires-Python: >=3.10
 Provides-Extra: spacemouse
 Requires-Dist: hidapi; extra == "spacemouse"
 Requires-Dist: pyspacemouse; extra == "spacemouse"
+Provides-Extra: gripper
+Requires-Dist: pyzmq>=25.0.0; extra == "gripper"
+Requires-Dist: PyYAML>=6.0; extra == "gripper"
 Provides-Extra: recording
 Requires-Dist: h5py>=3.10.0; extra == "recording"
 Requires-Dist: numpy>=1.24.0; extra == "recording"
