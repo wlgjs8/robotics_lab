@@ -2249,7 +2249,10 @@ def _build_stand_world_monitor(server: Any, handles: dict[str, Any], *, order: f
                     handle = server.gui.add_text(f"{arm} {field}", initial_value="invalid", disabled=True)
                     handles["stand_world_monitor_values"][arm][field] = handle
                 # External F/T sensor (rbpodo eft_*, sensor frame).
-                for field, label in (("force", "FT F [N]"), ("torque", "FT T [Nm]"), ("magnitude", "FT |F| [N]")):
+                for field, label in (
+                    ("force", "FT F [N]"),
+                    ("torque", "FT T [Nm]"),
+                ):
                     handle = server.gui.add_text(f"{arm} {label}", initial_value="invalid", disabled=True)
                     handles["eft_monitor_values"][arm][field] = handle
 
@@ -2686,12 +2689,14 @@ def _render_ft_monitor_rows(
         parts.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">{escape(arm)}</div>')
         # One axis per row (single short number) so the card fits its column
         # width without a horizontal scrollbar.
-        fx, fy, fz, mag, tx, ty, tz = _eft_monitor_axis_values(arm_state, stale=stale)
+        fx, fy, fz, tx, ty, tz = _eft_monitor_axis_values(
+            arm_state,
+            stale=stale,
+        )
         for label, value in (
             ("Fx [N]", fx),
             ("Fy [N]", fy),
             ("Fz [N]", fz),
-            ("|F| [N]", mag),
             ("Tx [Nm]", tx),
             ("Ty [Nm]", ty),
             ("Tz [Nm]", tz),

@@ -957,41 +957,43 @@ def _update_joint_monitor(handles: dict[str, Any], latest: StateSnapshot | None,
             )
 
 
-def _eft_monitor_values(arm_state: Any, *, stale: bool) -> tuple[str, str, str]:
-    """(force, torque, |F|) display strings for one arm's external F/T sensor
+def _eft_monitor_values(arm_state: Any, *, stale: bool) -> tuple[str, str]:
+    """Force and torque display strings for one arm's external F/T sensor
     (rbpodo sdata.eft_*, sensor frame, N / Nm). 'invalid' when the feed is
     stale, the server flags it invalid, or the fields are absent (mock)."""
     eft = getattr(arm_state, "eft_wrench", None) if arm_state is not None else None
     valid = bool(getattr(arm_state, "eft_valid", False)) and eft is not None and not stale
     if not valid:
-        return ("invalid", "invalid", "invalid")
+        return ("invalid", "invalid")
     force = " ".join(f"{v:+.1f}" for v in eft[:3])
     torque = " ".join(f"{v:+.2f}" for v in eft[3:])
-    magnitude = f"{math.sqrt(eft[0] ** 2 + eft[1] ** 2 + eft[2] ** 2):.1f}"
-    return (force, torque, magnitude)
+    return (force, torque)
 
 
-def _eft_monitor_axis_values(arm_state: Any, *, stale: bool) -> tuple[str, str, str, str, str, str, str]:
-    """(fx, fy, fz, |F|, tx, ty, tz) display strings for one arm's external F/T
+def _eft_monitor_axis_values(
+    arm_state: Any,
+    *,
+    stale: bool,
+) -> tuple[str, str, str, str, str, str]:
+    """(fx, fy, fz, tx, ty, tz) display strings for one arm's external F/T
     sensor, same validity gate as `_eft_monitor_values`. One number per cell so a
     narrow monitor card renders each axis on its own row without a horizontal
     scrollbar. 'invalid' per cell when the feed is stale/invalid/absent."""
     eft = getattr(arm_state, "eft_wrench", None) if arm_state is not None else None
     valid = bool(getattr(arm_state, "eft_valid", False)) and eft is not None and not stale
     if not valid:
-        return ("invalid",) * 7
+        return ("invalid",) * 6
     fx, fy, fz = (f"{v:+.1f}" for v in eft[:3])
     tx, ty, tz = (f"{v:+.2f}" for v in eft[3:])
-    magnitude = f"{math.sqrt(eft[0] ** 2 + eft[1] ** 2 + eft[2] ** 2):.1f}"
-    return (fx, fy, fz, magnitude, tx, ty, tz)
+    return (fx, fy, fz, tx, ty, tz)
 
 
 def _update_eft_monitor_handles(handles: dict[str, Any], arm: str, arm_state: Any, *, stale: bool) -> None:
     eft_handles = handles.get("eft_monitor_values", {}).get(arm, {})
     if not eft_handles:
         return
-    force, torque, magnitude = _eft_monitor_values(arm_state, stale=stale)
-    for field, value in (("force", force), ("torque", torque), ("magnitude", magnitude)):
+    force, torque = _eft_monitor_values(arm_state, stale=stale)
+    for field, value in (("force", force), ("torque", torque)):
         handle = eft_handles.get(field)
         if handle is not None:
             handle.value = value

@@ -3231,7 +3231,7 @@ class GuiContractsTest(unittest.TestCase):
         # External F/T sensor rows (rbpodo eft_*) render per arm in the dedicated
         # FT Monitor card. One axis per row (single short number) so the narrow
         # card fits without a horizontal scrollbar: force (1 decimal), torque
-        # (2 decimals), |F| magnitude.
+        # (2 decimals). Six axes per arm match the Joint Monitor's six rows.
         state = self.tcp_available_state()
         state["left"]["eft_wrench"] = [7.4, 6.7, -38.5, -0.12, -0.48, 0.23]
         state["left"]["eft_valid"] = True
@@ -3246,13 +3246,18 @@ class GuiContractsTest(unittest.TestCase):
         html = _operator_monitor_dynamic_html(latest, stale=False)
         # FT readings live in their own FT Monitor body card, not the Pose card.
         self.assertIn("rb-monitor-body-card rb-monitor-ft-card", html)
-        for label in ("Fx [N]", "Fy [N]", "Fz [N]", "|F| [N]", "Tx [Nm]", "Ty [Nm]", "Tz [Nm]"):
+        ft_start = html.index("rb-monitor-body-card rb-monitor-ft-card")
+        ft_end = html.index("rb-monitor-body-card rb-monitor-camera-card")
+        ft_html = html[ft_start:ft_end]
+        for label in ("Fx [N]", "Fy [N]", "Fz [N]", "Tx [Nm]", "Ty [Nm]", "Tz [Nm]"):
             self.assertIn(label, html)
+        self.assertNotIn("|F| [N]", ft_html)
+        self.assertEqual(ft_html.count("rb-monitor-row"), 12)
         # No 3-vector packed onto one line (that was the horizontal-scroll driver).
         self.assertNotIn("+7.4 +6.7 -38.5", html)
         for axis_value in ("+7.4", "+6.7", "-38.5", "-0.12", "-0.48", "+0.23"):
             self.assertIn(axis_value, html)
-        self.assertIn("39.8", html)  # |F| = sqrt(7.4^2 + 6.7^2 + 38.5^2)
+        self.assertNotIn("39.8", ft_html)
         # Server-invalid (right arm) and stale streams must not show readings.
         stale_html = _operator_monitor_dynamic_html(latest, stale=True)
         self.assertNotIn("+7.4", stale_html)
@@ -3518,6 +3523,8 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("Joint Monitor", folder_labels)
         self.assertIn("Stand/World Monitor", folder_labels)
         self.assertIn("Camera Quality Monitor", folder_labels)
+        text_labels = [label for label, _kwargs, _handle in server.gui.texts]
+        self.assertFalse(any("|F|" in label for label in text_labels))
 
     def test_safety_floor_user_floor_roi_folder_order(self):
         source = (Path(__file__).resolve().parents[1] / "rb_servo_gui" / "app.py").read_text(
