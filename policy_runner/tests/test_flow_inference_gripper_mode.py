@@ -45,6 +45,7 @@ def _make_source(
     close_snap_percent: float = 0.0,
     close_bias_left: float | None = None,
     close_bias_right: float | None = None,
+    command_deadband_percent: float = 0.0,
 ) -> "FlowMatchingActionSource":
     assert FlowMatchingActionSource is not None
     source = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
@@ -71,6 +72,8 @@ def _make_source(
     source.gripper_open_hold_steps = int(open_hold_steps)
     source._gripper_integrate_count = 0
     source._gripper_hold_open_now = False
+    source.gripper_command_deadband_percent = float(command_deadband_percent)
+    source._gripper_last_sent_by_arm = {"left": None, "right": None}
     return source
 
 
@@ -257,3 +260,55 @@ class GripperOpenHoldStepsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(FlowMatchingActionSource is None, "torch is not installed")
+class GripperCommandDeadbandTest(unittest.TestCase):
+    """The jaw is re-targeted every policy step with no rate limit; the deadband
+    re-holds the last SENT value so per-step model jitter does not reach it."""
+
+    @staticmethod
+    def _drive(source, right_openings):
+        out = []
+        for value in right_openings:
+            step = np.zeros(14, dtype=np.float32)
+            step[6] = 80.0          # left parked wide open
+            step[13] = float(value)
+            out.append(source._integrate_gripper_targets(step, {})["right"])
+        return out
+
+    def test_off_by_default_passes_every_jitter_through(self) -> None:
+        source = _make_source(absolute=True)
+        self.assertEqual(self._drive(source, [40.0, 42.0, 40.5, 43.0]),
+                         [40.0, 42.0, 40.5, 43.0])
+
+    def test_sub_deadband_jitter_is_held(self) -> None:
+        source = _make_source(absolute=True, command_deadband_percent=5.0)
+        # 42.0/40.5 are within 5% of the latched 40.0 -> held; 47.0 exceeds it.
+        self.assertEqual(self._drive(source, [40.0, 42.0, 40.5, 47.0, 48.0]),
+                         [40.0, 40.0, 40.0, 47.0, 47.0])
+
+    def test_full_close_is_never_suppressed(self) -> None:
+        # The failure this exemption exists for: a jaw latched at 4% must still
+        # accept a close-snapped 0% under a 5% deadband, or the grasp never happens.
+        source = _make_source(absolute=True, command_deadband_percent=5.0,
+                              close_snap_percent=15.0)
+        self.assertEqual(self._drive(source, [4.0, 3.0]), [0.0, 0.0])
+
+    def test_release_from_full_close_is_never_suppressed(self) -> None:
+        source = _make_source(absolute=True, command_deadband_percent=5.0)
+        # 0 -> 2 is a 2% move, inside the deadband, but leaving the closed state
+        # must not be swallowed either.
+        self.assertEqual(self._drive(source, [0.0, 2.0]), [0.0, 2.0])
+
+    def test_dispatch_path_sees_the_same_command(self) -> None:
+        source = _make_source(absolute=True, command_deadband_percent=5.0)
+        self._drive(source, [40.0])
+        step = np.zeros(14, dtype=np.float32)
+        step[13] = 42.0     # jitter within the deadband
+        source._integrate_gripper_targets(step, {})
+        source._dispatch_gripper_step(step)
+        values = [r.command.value for r in source.gripper_runtime.results]
+        # [left, right]; the right jaw must see the HELD 40.0, not the 42.0 jitter.
+        self.assertEqual(len(values), 2)
+        self.assertAlmostEqual(values[1], 40.0, places=6)

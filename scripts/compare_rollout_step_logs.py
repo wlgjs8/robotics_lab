@@ -15,6 +15,14 @@ Metrics per run:
   v_cmd mm/s      mean commanded TCP speed over both arms (from cmd_pose)
   zgap p95 mm     p95 of |cmd_minus_meas_z_mm| (command-vs-measured z tracking)
   grip tog        gripper command open/close toggle count (both arms)
+  d_cfg           configured --rtc-inference-delay (the rows the server freezes)
+  d_real          mean REALIZED delay (source_start_index: policy steps emitted
+                  between the chunk's observation and its activation)
+  d_ok%           fraction of chunks where realized == configured. Below ~100 means
+                  the frozen prefix does not line up with the dropped prefix:
+                  d_real < d_cfg replays stale plan, d_real > d_cfg jumps at the
+                  boundary. Pair --rtc-inference-delay with
+                  (chunk_execute_steps - stream_prefetch_at) to fix it.
 
 Usage:
   python3 scripts/compare_rollout_step_logs.py outputs/sweep/*.jsonl
@@ -58,6 +66,10 @@ def summarize_log(path: Path) -> dict[str, object]:
     prev_cmd: dict[str, list[float] | None] = {"left": None, "right": None}
     prev_grip_open: dict[str, bool | None] = {"left": None, "right": None}
     bad_lines = 0
+    rtc_configured: set[int] = set()
+    rtc_realized: list[int] = []
+    rtc_errors: list[int] = []
+    prev_rtc_chunk_id: object = object()
 
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -80,6 +92,22 @@ def summarize_log(path: Path) -> dict[str, object]:
             latency = record.get("inference_latency_ms")
             if isinstance(latency, (int, float)) and math.isfinite(latency):
                 latencies.append(float(latency))
+
+            # RTC delay accounting is per chunk, but the record is per step: sample it
+            # once per chunk_id so a long chunk does not outweigh a short one.
+            rtc = record.get("rtc")
+            chunk_id = record.get("chunk_id")
+            if isinstance(rtc, dict) and chunk_id != prev_rtc_chunk_id:
+                prev_rtc_chunk_id = chunk_id
+                configured = rtc.get("configured_delay")
+                realized = rtc.get("realized_delay")
+                error = rtc.get("delay_error")
+                if isinstance(configured, int):
+                    rtc_configured.add(configured)
+                if isinstance(realized, int):
+                    rtc_realized.append(realized)
+                if isinstance(error, int):
+                    rtc_errors.append(error)
 
             t_mono = record.get("t_mono")
             dt = None
@@ -134,6 +162,15 @@ def summarize_log(path: Path) -> dict[str, object]:
         "v_cmd_mm_s": (sum(speeds_mm_s) / len(speeds_mm_s)) if speeds_mm_s else None,
         "zgap_p95_mm": _percentile(z_gaps_mm, 0.95),
         "gripper_toggles": gripper_toggles,
+        "rtc_d_cfg": (
+            str(sorted(rtc_configured)[0]) if len(rtc_configured) == 1
+            else ("/".join(str(v) for v in sorted(rtc_configured)) if rtc_configured else None)
+        ),
+        "rtc_d_real": (sum(rtc_realized) / len(rtc_realized)) if rtc_realized else None,
+        "rtc_d_match_pct": (
+            100.0 * sum(1 for e in rtc_errors if e == 0) / len(rtc_errors)
+            if rtc_errors else None
+        ),
         "bad_lines": bad_lines,
     }
 
@@ -156,7 +193,8 @@ def main() -> int:
     rows = [summarize_log(Path(p)) for p in args.logs]
     header = (
         f"{'run':<32} {'steps':>6} {'stall%':>7} {'hold%':>7} "
-        f"{'lat_p50':>8} {'lat_p90':>8} {'v_cmd':>8} {'zgap_p95':>9} {'grip_tog':>8}"
+        f"{'lat_p50':>8} {'lat_p90':>8} {'v_cmd':>8} {'zgap_p95':>9} {'grip_tog':>8} "
+        f"{'d_cfg':>6} {'d_real':>7} {'d_ok%':>6}"
     )
     print(header)
     print("-" * len(header))
@@ -166,7 +204,9 @@ def main() -> int:
             f"{_fmt(row['stall_pct']):>7} {_fmt(row['hold_pct']):>7} "
             f"{_fmt(row['lat_p50_ms']):>8} {_fmt(row['lat_p90_ms']):>8} "
             f"{_fmt(row['v_cmd_mm_s']):>8} {_fmt(row['zgap_p95_mm']):>9} "
-            f"{_fmt(row['gripper_toggles']):>8}"
+            f"{_fmt(row['gripper_toggles']):>8} "
+            f"{_fmt(row['rtc_d_cfg']):>6} {_fmt(row['rtc_d_real'], 2):>7} "
+            f"{_fmt(row['rtc_d_match_pct']):>6}"
         )
         if row["bad_lines"]:
             print(f"  (warning: {row['bad_lines']} unparseable/foreign lines skipped)")

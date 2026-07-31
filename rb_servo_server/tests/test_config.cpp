@@ -4,6 +4,8 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <utility>
+#include <vector>
 #include <unistd.h>
 
 #include "rb_servo/config/config.hpp"
@@ -1185,6 +1187,156 @@ bool testRuckigFollowerFallbackPolicyConfig() {
         "cartesian_control.ruckig_follower.engage_timeout_sec"
     ));
     ::unlink(infinite_timeout_path.c_str());
+
+    // The quasi-static gate is a `plan_accel <= bound` comparison, so a negative or
+    // non-finite bound is never satisfiable: it silently disables the wrench-gated
+    // loading projection while the config still declares it on. Must fail closed.
+    for (const char* bad : {"-1.0", "0.0", ".nan"}) {
+        const std::string bad_gate_path = writeTempConfig(
+            "ruckig-follower-bad-loading-gate",
+            std::string(
+                "schema: robotics_lab.rb_servo_server.v1\n"
+                "cartesian_control:\n"
+                "  ruckig_follower:\n"
+                "    loading_projection_max_accel_m_s2: "
+            ) + bad + "\n"
+        );
+        RB_CHECK(loadRejectsWithMessage(
+            bad_gate_path,
+            "cartesian_control.ruckig_follower.loading_projection_max_accel_m_s2"
+        ));
+        ::unlink(bad_gate_path.c_str());
+    }
+
+    // Corner guard knobs: defaults must reproduce the previously hard-coded values,
+    // out-of-range values must fail closed rather than be clamped.
+    const std::string corner_default_path = writeTempConfig(
+        "ruckig-follower-corner-defaults",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+    );
+    const rb_servo::DualArmConfig corner_defaults =
+        rb_servo::loadConfigFromYaml(corner_default_path);
+    ::unlink(corner_default_path.c_str());
+    RB_CHECK(near(corner_defaults.cartesian_control.ruckig_follower.corner_deadband_lin_m, 3e-4));
+    RB_CHECK(near(corner_defaults.cartesian_control.ruckig_follower.corner_deadband_ang_rad, 5e-4));
+    RB_CHECK(near(corner_defaults.cartesian_control.ruckig_follower.corner_velocity_scale, 0.25));
+
+    const std::string corner_set_path = writeTempConfig(
+        "ruckig-follower-corner-set",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    corner_deadband_lin_m: 0.001\n"
+        "    corner_deadband_ang_rad: 0.003\n"
+        "    corner_velocity_scale: 1.0\n"
+    );
+    const rb_servo::DualArmConfig corner_set = rb_servo::loadConfigFromYaml(corner_set_path);
+    ::unlink(corner_set_path.c_str());
+    RB_CHECK(near(corner_set.cartesian_control.ruckig_follower.corner_deadband_lin_m, 0.001));
+    RB_CHECK(near(corner_set.cartesian_control.ruckig_follower.corner_deadband_ang_rad, 0.003));
+    RB_CHECK(near(corner_set.cartesian_control.ruckig_follower.corner_velocity_scale, 1.0));
+
+    for (const auto& [key, bad] : std::vector<std::pair<const char*, const char*>>{
+             {"corner_deadband_lin_m", "-0.001"},
+             {"corner_deadband_lin_m", ".nan"},
+             {"corner_deadband_ang_rad", "-0.001"},
+             {"corner_deadband_ang_rad", ".nan"},
+             {"corner_velocity_scale", "-0.1"},
+             {"corner_velocity_scale", "1.5"},   // >1 would accelerate INTO a reversal
+             {"corner_velocity_scale", ".nan"}}) {
+        const std::string bad_path = writeTempConfig(
+            "ruckig-follower-bad-corner",
+            std::string(
+                "schema: robotics_lab.rb_servo_server.v1\n"
+                "cartesian_control:\n"
+                "  ruckig_follower:\n    ") + key + ": " + bad + "\n"
+        );
+        RB_CHECK(loadRejectsWithMessage(
+            bad_path, std::string("cartesian_control.ruckig_follower.") + key));
+        ::unlink(bad_path.c_str());
+    }
+
+    // af damping split by axis class. The legacy scalar must still drive BOTH so tracked configs
+    // (stack_sim.yaml still uses it) keep their exact behavior, and the per-class keys must win
+    // over it regardless of key order in the mapping.
+    const std::string af_default_path = writeTempConfig(
+        "ruckig-follower-af-defaults",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+    );
+    const rb_servo::DualArmConfig af_defaults = rb_servo::loadConfigFromYaml(af_default_path);
+    ::unlink(af_default_path.c_str());
+    RB_CHECK(near(af_defaults.cartesian_control.ruckig_follower.af_damping_beta_lin, 0.85));
+    RB_CHECK(near(af_defaults.cartesian_control.ruckig_follower.af_damping_beta_ang, 0.85));
+
+    const std::string af_legacy_path = writeTempConfig(
+        "ruckig-follower-af-legacy",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    af_damping_beta: 0.6\n"
+    );
+    const rb_servo::DualArmConfig af_legacy = rb_servo::loadConfigFromYaml(af_legacy_path);
+    ::unlink(af_legacy_path.c_str());
+    RB_CHECK(near(af_legacy.cartesian_control.ruckig_follower.af_damping_beta_lin, 0.6));
+    RB_CHECK(near(af_legacy.cartesian_control.ruckig_follower.af_damping_beta_ang, 0.6));
+
+    const std::string af_split_path = writeTempConfig(
+        "ruckig-follower-af-split",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    af_damping_beta: 0.6\n"
+        "    af_damping_beta_lin: 1.0\n"
+        "    af_damping_beta_ang: 0.25\n"
+    );
+    const rb_servo::DualArmConfig af_split = rb_servo::loadConfigFromYaml(af_split_path);
+    ::unlink(af_split_path.c_str());
+    RB_CHECK(near(af_split.cartesian_control.ruckig_follower.af_damping_beta_lin, 1.0));
+    RB_CHECK(near(af_split.cartesian_control.ruckig_follower.af_damping_beta_ang, 0.25));
+
+    for (const auto& [key, bad] : std::vector<std::pair<const char*, const char*>>{
+             {"af_damping_beta_lin", "0.0"},    // (0, 1]: 0 would erase the feedforward entirely
+             {"af_damping_beta_lin", "1.5"},
+             {"af_damping_beta_lin", ".nan"},
+             {"af_damping_beta_ang", "0.0"},
+             {"af_damping_beta_ang", "-0.1"},
+             {"af_damping_beta_ang", ".nan"}}) {
+        const std::string bad_path = writeTempConfig(
+            "ruckig-follower-bad-af",
+            std::string(
+                "schema: robotics_lab.rb_servo_server.v1\n"
+                "cartesian_control:\n"
+                "  ruckig_follower:\n    ") + key + ": " + bad + "\n"
+        );
+        RB_CHECK(loadRejectsWithMessage(
+            bad_path, std::string("cartesian_control.ruckig_follower.") + key));
+        ::unlink(bad_path.c_str());
+    }
+    // The legacy scalar must fail closed through the same range check.
+    const std::string af_bad_legacy_path = writeTempConfig(
+        "ruckig-follower-bad-af-legacy",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    af_damping_beta: 1.5\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(af_bad_legacy_path,
+                                    "cartesian_control.ruckig_follower.af_damping_beta"));
+    ::unlink(af_bad_legacy_path.c_str());
+
+    const std::string good_gate_path = writeTempConfig(
+        "ruckig-follower-good-loading-gate",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    loading_projection_max_accel_m_s2: 0.5\n"
+    );
+    const rb_servo::DualArmConfig good_gate = rb_servo::loadConfigFromYaml(good_gate_path);
+    ::unlink(good_gate_path.c_str());
+    RB_CHECK(near(
+        good_gate.cartesian_control.ruckig_follower.loading_projection_max_accel_m_s2,
+        0.5
+    ));
 
     return true;
 }

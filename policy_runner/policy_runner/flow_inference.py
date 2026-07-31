@@ -398,6 +398,13 @@ class FlowMatchingActionSource:
         # the jaw cracked open. 0 = off. Absolute (non-binary) mode only. Set from
         # the `--gripper-close-snap-percent` CLI flag in main.py.
         self.gripper_close_snap_percent = 0.0
+        # Re-hold the last SENT gripper command until the target moves more than
+        # this (opening percent), so per-step model jitter does not re-target the
+        # jaw at 30 Hz. 0 = off. The fully-closed (0%) state is exempt in both
+        # directions so a grasp commitment or its release is never suppressed.
+        # Set from `--gripper-command-deadband-percent` in main.py.
+        self.gripper_command_deadband_percent = 0.0
+        self._gripper_last_sent_by_arm: dict[str, float | None] = {"left": None, "right": None}
         # ROTATION-AXIS MASK: per-axis gate over the policy's per-arm rotation
         # action (rx, ry, rz at action indices 3/4/5 and 10/11/12). Each entry
         # True keeps that axis, False zeros it before the action is applied so the
@@ -930,6 +937,12 @@ class FlowMatchingActionSource:
         for arm, value in self._force_recovery_frozen_gripper.items():
             if value is not None:
                 self._gripper_targets_by_arm[arm] = float(value)
+                # Re-seed the deadband latch too: the frozen value IS what the jaw
+                # now holds, so the next policy target must be measured against it
+                # rather than against whatever was latched before the recovery.
+                latch = getattr(self, "_gripper_last_sent_by_arm", None)
+                if isinstance(latch, dict):
+                    latch[arm] = float(value)
         self._reset_left_pose = pose_from_state_payload(snapshot.payload, "left")
         self._reset_right_pose = pose_from_state_payload(snapshot.payload, "right")
         self._force_recovery_state = "running"
@@ -1374,6 +1387,72 @@ class FlowMatchingActionSource:
         self._rollout_step_chunk_seq = sequence
         self._rollout_step_active_chunk_id = sequence
 
+    def _rtc_delay_telemetry(self) -> dict[str, Any] | None:
+        """Configured vs realized RTC inference delay for the active chunk.
+
+        ``rtc_inference_delay`` is a static CLI value; the delay that actually occurs
+        is ``source_start_index`` -- how many policy steps were emitted between the
+        observation the chunk was inferred from and its activation. The server freezes
+        ``configured`` rows and the warm-row alignment drops ``realized`` rows, so the
+        frozen prefix covers exactly the dropped prefix only when the two agree.
+        Returns None when RTC is off (nothing to account for).
+        """
+        if not bool(getattr(self, "rtc_enabled", False)):
+            return None
+        metadata = getattr(self, "_active_chunk_metadata", None)
+        if not isinstance(metadata, dict):
+            return None
+        replan = int(
+            getattr(self, "rtc_replan_period", 0) or self._resolved_chunk_execute_steps()
+        )
+        configured = int(
+            np.clip(int(getattr(self, "rtc_inference_delay", 0)), 0, max(0, replan))
+        )
+        realized = metadata.get("source_start_index")
+        telemetry: dict[str, Any] = {
+            "configured_delay": configured,
+            "realized_delay": realized,
+            "execute_horizon": replan,
+            "schedule": str(getattr(self, "rtc_prefix_attention_schedule", "")),
+            "alignment_outcome": metadata.get("alignment_outcome"),
+        }
+        self._note_rtc_delay_divergence(configured, realized)
+        return telemetry
+
+    def _resolved_chunk_execute_steps(self) -> int:
+        try:
+            return int(self.chunk_execute_steps)
+        except (TypeError, ValueError):
+            return 0
+
+    def _note_rtc_delay_divergence(self, configured: int, realized: Any) -> None:
+        """Warn once when the realized delay stops matching the configured freeze.
+
+        A single transient mismatch is normal (a stall holds the emit counter still);
+        a persistent one means every chunk boundary is either replaying stale plan
+        (realized < configured) or jumping (realized > configured), which is exactly
+        the failure `docs/rtc_design.md` §7 flags as the main `d`-estimation risk.
+        """
+        if realized is None:
+            return
+        streak = int(getattr(self, "_rtc_delay_mismatch_streak", 0))
+        if int(realized) == configured:
+            self._rtc_delay_mismatch_streak = 0
+            return
+        streak += 1
+        self._rtc_delay_mismatch_streak = streak
+        if streak < 8 or bool(getattr(self, "_rtc_delay_mismatch_warned", False)):
+            return
+        self._rtc_delay_mismatch_warned = True
+        direction = "over-freeze (stale replay)" if int(realized) < configured else "under-freeze (boundary jump)"
+        print(
+            f"[flow-infer] WARNING RTC inference_delay mismatch for {streak} consecutive "
+            f"chunks: configured d={configured}, realized={int(realized)} -> {direction}. "
+            f"Pair --rtc-inference-delay with (chunk_execute_steps - stream_prefetch_at).",
+            file=sys.stderr,
+            flush=True,
+        )
+
     def _log_rollout_policy_step(
         self,
         *,
@@ -1419,6 +1498,7 @@ class FlowMatchingActionSource:
                 stall=stall,
                 hold=hold,
                 inference_latency_ms=latency,
+                rtc=self._rtc_delay_telemetry(),
                 t_mono=now_monotonic,
             )
         except Exception:  # noqa: BLE001 - telemetry must never affect control.
@@ -2454,11 +2534,17 @@ class FlowMatchingActionSource:
             for idx in (6, 13):  # left, right gripper dims in the 14-D action step
                 if step.shape[0] > idx:
                     arm = "left" if idx == 6 else "right"
-                    step[idx] = (
-                        hold_value
-                        if hold_open
-                        else self._map_gripper_opening(float(step[idx]), arm)
-                    )
+                    if hold_open:
+                        step[idx] = hold_value
+                    else:
+                        # _integrate_gripper_targets already ran for THIS step and
+                        # decided the deadband, so read its decision instead of
+                        # re-deciding here -- re-calling the stateful helper would
+                        # advance the last-sent latch twice per step and let the
+                        # serial backend drift away from the motion-packet target.
+                        step[idx] = self._gripper_command_for_dispatch(
+                            arm, float(step[idx])
+                        )
         commands = gripper_commands_from_flow_step(
             step.tolist(),
             arm_mask=self.arm_mask.tolist(),
@@ -2980,8 +3066,61 @@ class FlowMatchingActionSource:
                 # there, so when the hold ends the policy resumes closing from the open
                 # state (not from a drifted accumulator).
                 self._gripper_targets_by_arm[arm] = hold_value
-            targets[arm] = self._gripper_targets_by_arm[arm]
+            targets[arm] = self._hold_gripper_within_deadband(
+                arm, self._gripper_targets_by_arm[arm]
+            )
         return targets
+
+    def _hold_gripper_within_deadband(self, arm: str, target: float | None) -> float | None:
+        """Suppress sub-deadband re-targeting of the gripper (chatter, not motion).
+
+        The gripper channel is dispatched every policy step with no rate limit,
+        slew limit or hysteresis, so the model's per-step jitter reaches the jaw
+        directly. Measured 2026-07-31 on the right arm: 4.8-9.1 command changes
+        per SECOND, mean dwell 2.3-3.8 steps (77-127 ms), and 28-50% of those
+        changes reversing direction (open->close->open). A grasp is a monotone
+        close followed by a monotone open, so that reversal traffic is noise, and
+        at 30 Hz it is audible as buzz.
+
+        Re-holding the last SENT value until the target moves more than
+        `gripper_command_deadband_percent` cut the churn ~3x offline (9.1 -> 3.0
+        changes/s at 5%) with **zero** added lag and a mean tracking error of
+        1.4-1.7%. Full-close events were unchanged in all four recorded runs.
+
+        The 0% (fully closed) state is exempt in BOTH directions so the grasp
+        commitment and its release can never be swallowed: without that, a jaw
+        sitting at 4% would refuse a close-snapped 0% under a 5% deadband and the
+        grasp would silently never happen. Off (0.0) by default.
+        """
+        if target is None:
+            return None
+        deadband = float(getattr(self, "gripper_command_deadband_percent", 0.0) or 0.0)
+        sent = getattr(self, "_gripper_last_sent_by_arm", None)
+        if not isinstance(sent, dict):
+            sent = {"left": None, "right": None}
+            self._gripper_last_sent_by_arm = sent
+        value = float(target)
+        last = sent.get(arm)
+        committed = value == 0.0 or last == 0.0
+        if deadband > 0.0 and last is not None and not committed and abs(value - last) <= deadband:
+            return float(last)
+        sent[arm] = value
+        return value
+
+    def _gripper_command_for_dispatch(self, arm: str, raw_percent: float) -> float:
+        """Read-only view of this step's gripper decision, for the serial backend.
+
+        Mirrors _hold_gripper_within_deadband without touching its latch: the
+        motion-packet path already decided (and latched) the value earlier in the
+        same step, so both consumers must see the identical command.
+        """
+        mapped = self._map_gripper_opening(float(raw_percent), arm)
+        deadband = float(getattr(self, "gripper_command_deadband_percent", 0.0) or 0.0)
+        if deadband <= 0.0:
+            return mapped
+        sent = getattr(self, "_gripper_last_sent_by_arm", None)
+        last = sent.get(arm) if isinstance(sent, dict) else None
+        return mapped if last is None else float(last)
 
     def _allow_gripper_targets_in_motion_packet(self) -> bool:
         mode = str(getattr(self.gripper_runtime, "rollout_mode", "") or "").strip().lower()

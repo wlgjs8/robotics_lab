@@ -136,6 +136,12 @@ set_property(
 add_executable(ik_feasibility_grid tools/ik_feasibility_grid.cpp)
 target_link_libraries(ik_feasibility_grid PRIVATE rb_servo_core)
 
+# Offline chunk-follower replay + limit sweep. Feeds a recorded absolute knot
+# stream through the real CartesianChunkFollower so the Ruckig segment-duration
+# budget can be characterised without hardware.
+add_executable(follower_replay tools/follower_replay.cpp)
+target_link_libraries(follower_replay PRIVATE rb_servo_core)
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(test_backend_result tests/test_backend_result.cpp)

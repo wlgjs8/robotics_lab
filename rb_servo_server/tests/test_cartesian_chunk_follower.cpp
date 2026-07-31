@@ -314,6 +314,66 @@ int main() {
         firstSegmentCorner(deadband_cfg, makeAngularReverseFrame(6.0e-4), &solved);
     check(solved, "angular supra-threshold reversal segment solves");
     check(angular_supra, "angular reversal above 5e-4 rad is a corner");
+
+    // The deadbands are config-driven, not hard-coded: widening the angular
+    // deadband must reclassify a reversal that the default would have flagged.
+    // This is the knob for the measured rotational-noise firing rate (2026-07-31:
+    // rotation axes alone tripped the guard on 17-38% of segments).
+    CartesianChunkFollowerConfig wide_cfg = deadband_cfg;
+    wide_cfg.guard.corner_deadband_ang_rad = 5.0e-3;   // 0.29 deg
+    const bool angular_widened =
+        firstSegmentCorner(wide_cfg, makeAngularReverseFrame(6.0e-4), &solved);
+    check(solved, "widened-deadband reversal segment solves");
+    check(!angular_widened,
+          "widening corner_deadband_ang_rad reclassifies the same reversal as noise");
+
+    CartesianChunkFollowerConfig tight_cfg = deadband_cfg;
+    tight_cfg.guard.corner_deadband_lin_m = 1.0e-4;    // 0.1 mm
+    const bool linear_tightened =
+        firstSegmentCorner(tight_cfg, makeLinearReverseFrame(2.0e-4), &solved);
+    check(solved, "tightened-deadband reversal segment solves");
+    check(linear_tightened,
+          "tightening corner_deadband_lin_m promotes a sub-default reversal to a corner");
+  }
+
+  // -- Test 6b: corner_velocity_scale is the configured ring-down. -------------
+  std::printf("Test 6b: corner_velocity_scale\n");
+  {
+    // The scale multiplies the TARGET velocity, i.e. the speed the segment carries
+    // at its far end -- so probe the last tick of the corner segment, not the first
+    // (the segment starts from the seeded zero-velocity state either way).
+    // makeLinearReverseFrame is SYMMETRIC (d_k = -d_kp1), so its central-difference
+    // vf is exactly zero and no scale factor is observable. Use an ASYMMETRIC
+    // reversal (+4 mm then -3 mm) so vf != 0 while both flanks clear the deadband.
+    ChunkFrame asym;
+    asym.policy_dt = SEG;
+    asym.pose = {poseWithXAndYaw(0.0, 0.0), poseWithXAndYaw(4.0e-3, 0.0),
+                 poseWithXAndYaw(1.0e-3, 0.0), poseWithXAndYaw(1.0e-3, 0.0),
+                 poseWithXAndYaw(1.0e-3, 0.0), poseWithXAndYaw(1.0e-3, 0.0)};
+    asym.grip.assign(asym.pose.size(), 20.0);
+
+    auto exitSpeed = [&asym](double scale) {
+      CartesianChunkFollowerConfig c;
+      c.window = {/*L*/ 1, /*C*/ 3, /*R*/ 1, /*smooth*/ 1};
+      c.guard.corner_velocity_scale = scale;
+      const ChunkFrame& frame = asym;
+      CartesianChunkFollower f(c);
+      f.submitFrame(frame, frame.pose[static_cast<std::size_t>(c.window.discard_head_L)]);
+      const int ticks = static_cast<int>(SEG / TICK);   // one full segment
+      Pose6D prev{}, cur{};
+      for (int i = 0; i < ticks; ++i) {
+        prev = cur;
+        cur = f.tick(TICK);
+      }
+      return std::hypot(cur.x - prev.x, cur.y - prev.y) / TICK;
+    };
+    const double v_hard = exitSpeed(0.0);      // full stop at the reversal
+    const double v_default = exitSpeed(0.25);
+    const double v_soft = exitSpeed(1.0);      // no velocity cut
+    std::printf("    corner exit speed: scale0=%.6f scale0.25=%.6f scale1=%.6f m/s\n",
+                v_hard, v_default, v_soft);
+    check(v_soft > v_default, "corner_velocity_scale=1.0 exits the corner faster than 0.25");
+    check(v_default > v_hard, "corner_velocity_scale=0.25 exits faster than a full stop");
   }
 
   // -- Test 7: delta-preview integrates local rows and faults on persistent slip.

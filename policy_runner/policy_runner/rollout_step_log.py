@@ -144,6 +144,7 @@ class RolloutStepLogger:
         stall: bool = False,
         hold: bool = False,
         inference_latency_ms: float | None = None,
+        rtc: Mapping[str, Any] | None = None,
         t_mono: float | None = None,
         t_wall: float | None = None,
     ) -> bool:
@@ -161,6 +162,7 @@ class RolloutStepLogger:
                 stall=stall,
                 hold=hold,
                 inference_latency_ms=inference_latency_ms,
+                rtc=rtc,
                 t_mono=time.monotonic() if t_mono is None else t_mono,
                 t_wall=time.time() if t_wall is None else t_wall,
             )
@@ -207,6 +209,7 @@ def build_rollout_step_record(
     inference_latency_ms: float | None,
     t_mono: float,
     t_wall: float,
+    rtc: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     mono = _required_finite_float(t_mono, "t_mono")
     wall = _required_finite_float(t_wall, "t_wall")
@@ -245,6 +248,9 @@ def build_rollout_step_record(
     latency = _finite_float(inference_latency_ms)
     if latency is not None:
         record["inference_latency_ms"] = latency
+    rtc_record = _rtc_record(rtc)
+    if rtc_record is not None:
+        record["rtc"] = rtc_record
 
     payload = state_payload if isinstance(state_payload, Mapping) else {}
     for arm in _ARMS:
@@ -293,6 +299,45 @@ def build_rollout_step_record(
         }
         record["arms"][arm] = arm_record
     return record
+
+
+def _rtc_record(rtc: Any) -> dict[str, Any] | None:
+    """Per-chunk RTC delay accounting: what we told the server vs what happened.
+
+    ``configured_delay`` is the static ``--rtc-inference-delay`` the client sends as
+    ``inference_delay``; the server hard-freezes exactly that many leading rows of the
+    new chunk. ``realized_delay`` is ``source_start_index`` -- the policy steps actually
+    emitted between the observation this chunk was inferred from and its activation,
+    i.e. the rows the warm-row alignment drops. They must match: the frozen prefix is
+    exactly the dropped prefix only when ``realized == configured``. ``delay_error``
+    < 0 means we over-froze (frozen rows bleed into the executed window -> the robot
+    replays stale plan); > 0 means we under-froze (executed rows had no continuity
+    guarantee -> chunk-boundary jump).
+    """
+    if not isinstance(rtc, Mapping):
+        return None
+    configured = _finite_int(rtc.get("configured_delay"))
+    realized = _finite_int(rtc.get("realized_delay"))
+    if configured is None and realized is None:
+        return None
+    out: dict[str, Any] = {
+        "configured_delay": configured,
+        "realized_delay": realized,
+        "delay_error": (
+            None if configured is None or realized is None else realized - configured
+        ),
+    }
+    for key in ("execute_horizon", "schedule", "alignment_outcome"):
+        value = rtc.get(key)
+        if value is None:
+            continue
+        out[key] = value if isinstance(value, str) else _finite_int(value)
+    return out
+
+
+def _finite_int(value: Any) -> int | None:
+    resolved = _finite_float(value)
+    return None if resolved is None else int(resolved)
 
 
 def _arm_mapping(payload: Mapping[str, Any], arm: str) -> Mapping[str, Any]:

@@ -1176,7 +1176,13 @@ struct RuckigFollowerConfig {
     int consume_steps = 16;
     int reserve_steps = 1;             // central-difference lookahead (>= 1)
     int smoothing_window = 3;          // odd; pre-difference chunk smoothing
-    double af_damping_beta = 0.85;     // feedforward accel damping (0, 1]
+    // Feedforward accel damping, (0, 1], split by axis class 2026-07-31 because the two classes
+    // sit at 31% and 95% of their acceleration limits -- see control::GuardConfig for the
+    // measurement and why the single scalar could not be tuned. The legacy scalar
+    // `af_damping_beta` key is still accepted and seeds BOTH (existing configs keep their
+    // behavior); the per-class keys override it.
+    double af_damping_beta_lin = 0.85;
+    double af_damping_beta_ang = 0.85;
     // DeltaTwistFollower params. The model delta is a per-policy-frame local
     // displacement, not m/s; these tune how that backlog is drained into an
     // internally jerk-limited body twist.
@@ -1189,6 +1195,20 @@ struct RuckigFollowerConfig {
     double delta_twist_max_lead_m = 0.060;
     double delta_twist_max_lead_rad = 0.30;
     double delta_twist_stale_residual_timeout_sec = 0.15;
+    // Corner (direction-reversal) ring-down guard of the chunk follower. A flanking
+    // step below the deadband contributes sign 0 and cannot form a reversal pair, so
+    // a LARGER deadband means the guard ignores small wobble. Size them against the
+    // real per-step displacement: at 30 Hz the policy commands ~2 mm / ~0.3 deg per
+    // step, and 0.3 deg split across three rotation axes leaves per-axis components
+    // only a few times the 0.029 deg default -- rotational sign noise then trips the
+    // guard on a large fraction of segments. Because ruckig time-synchronizes the
+    // segment, one braked rotation axis stretches the whole 6-DoF duration and slows
+    // translation too. Defaults reproduce the previously hard-coded values exactly.
+    double corner_deadband_lin_m = 3e-4;
+    double corner_deadband_ang_rad = 5e-4;
+    // Target-velocity ring-down for a reversing axis (target acceleration is always
+    // zeroed). 1.0 disables the velocity cut and keeps only the acceleration reset.
+    double corner_velocity_scale = 0.25;
     // delta_preview safety contract. Zero means unspecified and is rejected
     // whenever controller=delta_preview; no motion-relevant fallback exists.
     double preview_max_projection_error_m = 0.0;

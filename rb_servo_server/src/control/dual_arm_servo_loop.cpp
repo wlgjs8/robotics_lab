@@ -375,7 +375,11 @@ bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFoll
         a.consume_steps != b.consume_steps ||
         a.reserve_steps != b.reserve_steps ||
         a.smoothing_window != b.smoothing_window ||
-        a.af_damping_beta != b.af_damping_beta ||
+        a.af_damping_beta_lin != b.af_damping_beta_lin ||
+        a.af_damping_beta_ang != b.af_damping_beta_ang ||
+        a.corner_deadband_lin_m != b.corner_deadband_lin_m ||
+        a.corner_deadband_ang_rad != b.corner_deadband_ang_rad ||
+        a.corner_velocity_scale != b.corner_velocity_scale ||
         a.delta_twist_tau_sec != b.delta_twist_tau_sec ||
         a.delta_twist_residual_drain_steps != b.delta_twist_residual_drain_steps ||
         a.delta_twist_clear_residual_on_new_frame != b.delta_twist_clear_residual_on_new_frame ||
@@ -391,6 +395,7 @@ bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFoll
         a.preview_max_actual_lead_m != b.preview_max_actual_lead_m ||
         a.preview_max_actual_lead_rad != b.preview_max_actual_lead_rad ||
         a.preview_max_consecutive_actual_lead_errors != b.preview_max_consecutive_actual_lead_errors ||
+        a.loading_projection_max_accel_m_s2 != b.loading_projection_max_accel_m_s2 ||
         a.hold_bounce_resume_sec != b.hold_bounce_resume_sec ||
         a.preview_projection_fault_policy != b.preview_projection_fault_policy ||
         a.chunk_feed_timeout_sec != b.chunk_feed_timeout_sec;
@@ -404,7 +409,11 @@ control::CartesianChunkFollowerConfig makeChunkFollowerConfig(const RuckigFollow
     cfg.window.consume_C = rf.consume_steps;
     cfg.window.reserve_R = rf.reserve_steps;
     cfg.window.smoothing_window = rf.smoothing_window;
-    cfg.guard.af_damping_beta = rf.af_damping_beta;
+    cfg.guard.af_damping_beta_lin = rf.af_damping_beta_lin;
+    cfg.guard.af_damping_beta_ang = rf.af_damping_beta_ang;
+    cfg.guard.corner_deadband_lin_m = rf.corner_deadband_lin_m;
+    cfg.guard.corner_deadband_ang_rad = rf.corner_deadband_ang_rad;
+    cfg.guard.corner_velocity_scale = rf.corner_velocity_scale;
     cfg.max_projection_error_m = rf.preview_max_projection_error_m;
     cfg.max_projection_error_rad = rf.preview_max_projection_error_rad;
     cfg.max_consecutive_projection_errors = rf.preview_max_consecutive_projection_errors;

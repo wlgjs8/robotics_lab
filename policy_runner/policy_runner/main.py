@@ -1573,8 +1573,28 @@ def _main_with_subcommands(argv: list[str]) -> int:
         help="ABSOLUTE close-snap deadzone (opening percent): after mapping, any gripper opening "
              "STRICTLY BELOW this snaps to 0 (fully closed), so small policy jitter near the closed "
              "end does not leave the jaw cracked open. E.g. 10 -> any commanded opening <10%% closes "
-             "fully. Clamped to [0,100]; 0 = off (DEFAULT). Absolute mode only (no effect in delta; "
-             "binary already snaps to --gripper-close-percent).",
+             "fully. Clamped to [0,100]; DEFAULT 15.0, and 0 turns the snap OFF. Turning it off is "
+             "load-bearing, not cosmetic: the deployed pi05 checkpoints floor their gripper channel "
+             "around 2-12%% opening and never command a full close on their own, so --gripper-close-"
+             "snap-percent 0 leaves the jaw cracked open at every grasp and NO pick can succeed "
+             "(measured 2026-07-30: 0/8 snap-off runs closed past 2.2%%, vs 5 successful picks with "
+             "the default). Absolute mode only (no effect in delta; binary already snaps to "
+             "--gripper-close-percent).",
+    )
+    flow_infer.add_argument(
+        "--gripper-command-deadband-percent",
+        type=float,
+        default=0.0,
+        help="Re-hold the last SENT gripper command until the target moves more than this "
+             "(opening percent). The gripper channel is otherwise dispatched every policy "
+             "step with no rate limit or hysteresis, so model jitter re-targets the jaw at "
+             "30 Hz -- measured 2026-07-31 on the right arm at 4.8-9.1 command changes per "
+             "SECOND, mean dwell 2.3-3.8 steps, 28-50%% of them reversing direction, which "
+             "is audible as buzz. Offline on four recorded runs, 5%% cut the churn ~3x "
+             "(9.1 -> 3.0 changes/s) with ZERO added lag, 1.4-1.7%% mean tracking error, and "
+             "no change to any full-close event. The fully-closed (0%%) state is exempt in "
+             "both directions so a grasp commitment / release is never suppressed. "
+             "0 = off (DEFAULT). Absolute and binary modes both honour it.",
     )
     flow_infer.add_argument(
         "--rtc",
@@ -2701,6 +2721,9 @@ def _main_with_subcommands(argv: list[str]) -> int:
             source.gripper_close_snap_percent = float(
                 getattr(args, "gripper_close_snap_percent", 0.0) or 0.0
             )
+            source.gripper_command_deadband_percent = float(
+                getattr(args, "gripper_command_deadband_percent", 0.0) or 0.0
+            )
             # Per-axis rotation gate: keep only the selected rx/ry/rz axes of the
             # per-arm rotation action; disabled axes are zeroed so the arm holds
             # that orientation component (translation + gripper unchanged). Applies
@@ -2725,8 +2748,14 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 _lb = float(getattr(source, "gripper_close_bias_left", 0.0) or 0.0)
                 _rb = float(getattr(source, "gripper_close_bias_right", 0.0) or 0.0)
                 detail = f", close-bias L={_lb:g}%/R={_rb:g}%" if (_lb or _rb) else ""
+                # Announce close-snap in BOTH states. It used to print only when
+                # non-zero, so `--gripper-close-snap-percent 0` looked identical to
+                # the default in the banner while silently making every grasp
+                # impossible (the checkpoints never command a full close on their own).
                 if source.gripper_close_snap_percent:
                     detail += f", close-snap<{source.gripper_close_snap_percent:g}%"
+                else:
+                    detail += ", close-snap OFF (policy must command full close itself)"
             else:
                 detail = ""
             print(

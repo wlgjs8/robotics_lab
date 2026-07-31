@@ -1139,16 +1139,44 @@ cartesian_control:
         # watch for EFT-residual spikes against the 30/35 N hard limits before
         # raising further.
         max_linear_velocity_m_s: 0.45
+        # 2026-07-31: speed_scale 1.0 trembling was diagnosed as SEGMENT
+        # INFEASIBILITY, not roughness in the reference. The follower solves one
+        # Ruckig segment per policy step with minimum_duration=dt, consumes only
+        # the first dt, then re-solves toward the next knot -- so duration/dt is
+        # the fraction of each plan that actually executes. Measured on hardware
+        # (tools/follower_feasibility.py):
+        #     speed 0.75, these limits  -> duration/dt p50 1.204, converged 26%  smooth
+        #     speed 1.00, these limits  -> duration/dt p50 3.116, converged  1%  TREMBLES
+        # i.e. at 33.4 ms only ~1/3 of each planned segment ran before it was
+        # thrown away and re-aimed, which is the sawtooth that reads as trembling.
+        #
+        # rb_servo_server/tools/follower_replay --sweep, replaying the RECORDED
+        # trembling knot stream offline, isolates the binding axis. Raising the
+        # LINEAR limits alone changed nothing (p50 1.934 at lin_a 5->20 and at
+        # lin_j 300->3000); ruckig time-synchronizes the 6 DoF, so the saturated
+        # ANGULAR axes were setting the duration for translation too:
+        #     baseline                     p50 1.934  >1.5 69.5%  conv  4.5%
+        #     ang_j 2000                   p50 1.445  >1.5 46.3%  conv 23.8%
+        #     + ang_a 20                   p50 1.078  >1.5 20.6%  conv 42.2%
+        #     + lin_j 600                  p50 1.000  >1.5 10.2%  conv 61.3%
+        # The last row matches the smooth speed-0.75 profile (p50 1.000, >1.5
+        # 8.3%, conv 66.4%) on the same tool, and re-running the 0.75 stream with
+        # these limits is strictly better (conv 98.9%), so this is not a trade.
+        # af_damping_beta and the corner ring-down were also swept and made
+        # feasibility WORSE when relaxed -- they are helping, leave them alone.
+        #
+        # These bound the follower's Cartesian REFERENCE generation only. The
+        # joint-level guards downstream are unchanged and still own actual motion:
+        # safety.dq_max_deg_s / ddq_max_deg_s2, the tracking-error latch, the
+        # stand-frame floor, the async URDF-mesh CollisionMonitor, and the FT
+        # hard limits. PENDING supervised physical confirmation: re-run
+        # tools/follower_feasibility.py on the next real servo log and check
+        # duration/dt p50 lands near 1.2 (target <= 1.3).
         max_linear_accel_m_s2: 5.0
-        # 2026-07-24 (reverted same day): the 220/400 jerk experiment did not
-        # reduce measured roughness and coincided with shallower model z
-        # commands that step-log analysis attributed to the MODEL/scene, not
-        # tracking (cmd-vs-meas gap stayed ~2 mm at every jerk setting).
-        # Restored to the validated values pending a scene-controlled A/B.
-        max_linear_jerk_m_s3: 300.0
+        max_linear_jerk_m_s3: 2000.0    # 300.0 -> 600.0 (see above)
         max_angular_velocity_rad_s: 0.90
-        max_angular_accel_rad_s2: 9.0
-        max_angular_jerk_rad_s3: 540.0
+        max_angular_accel_rad_s2: 20.0   # 9.0 -> 20.0 (see above)
+        max_angular_jerk_rad_s3: 4000.0  # 540.0 -> 2000.0 (BINDING axis; see above)
         discard_head_steps: 0     # v3 producer already removes rows emitted since observation
         # Match FLOW_INFER_CHUNK_EXECUTE_STEPS: consume exactly the policy
         # execution window at normal pace before decelerating into reserve rows
@@ -1173,7 +1201,63 @@ cartesian_control:
         # roughness win (730/458 um) -- the accel micro-brake damps the real
         # final-approach deceleration as much as the noise. Smoothing moved to
         # the jerk caps above instead; beta stays slightly <1 as a mild guard.
-        af_damping_beta: 1.0 #0.8 #0.6 #0.2  # P3: honest central-diff curvature; clampAbs(af, a_max) bounds it (beta<1 = per-waypoint micro-brake). 2026-07-24: beta sweep (1.0/0.8/0.6) showed no effect on descent tracking (gap ~2 mm throughout) -- restored to honest 1.0.
+        # Feedforward accel damping. af = (d_{k+1} - d_k)/dt^2, so it multiplies policy-knot noise
+        # by 1/dt^2 (~900x at 30 Hz) and DOUBLES when SPEED_SCALE goes 0.75 -> 1.0 for the same
+        # commanded path. Split per axis class on 2026-07-31 because the classes are nowhere near
+        # each other (E1 rollouts, right arm, SPEED_SCALE 1.0):
+        #     translation af p90 = 1.53 m/s^2   =  31% of max_linear_accel   (headroom)
+        #     rotation    af p90 = 8.56 rad/s^2 =  95% of max_angular_accel  (saturated)
+        # With rotation alone eating 95% of the accel limit, ruckig could not reach the knot inside
+        # dt: right arm `converged` 1.5% / projection p90 6.3 mm, vs left 70.6% / 0.13 mm. beta=1.0
+        # was costing tracking fidelity, not preserving it.
+        #
+        # The 2026-07-24 single-scalar sweep (1.0/0.8/0.6) was abandoned because 0.6 lost descent
+        # authority (right z_min 16-17 mm vs 9-15 mm). That is a TRANSLATION regression -- the class
+        # that has headroom. One scalar could not damp rotational noise without also damping the
+        # real final-approach deceleration, which is exactly why this is now two knobs.
+        #
+        # BOTH STAY AT 1.0. Damping the rotation class was proposed from the saturation numbers
+        # above and is REFUTED by the follower_replay sweep recorded under max_linear_velocity_m_s:
+        # relaxing beta made feasibility WORSE, not better.
+        #
+        # Why the saturation reading was misleading: the cost of a segment is not |af|, it is
+        # |af_target - a0| / dt -- the jerk needed to swing acceleration from the chained current
+        # state to the target. a0 already carries the honest curvature, so shrinking af_target
+        # ENLARGES that mismatch and spends jerk forcing the arm to arrive flatter than it is
+        # actually travelling. af is a boundary condition, not a demand; a smaller one is not a
+        # cheaper one.
+        #
+        # The binding constraint was the angular limits themselves (ang_j 540 -> 2000, ang_a 9 ->
+        # 20), which is what actually moved duration/dt p50 to 1.000.
+        #
+        # The split is kept because it makes the knob measurable per axis class -- the earlier
+        # single scalar could not separate rotational noise from the translational final-approach
+        # deceleration, which is why the 2026-07-24 sweep lost descent authority (right z_min
+        # 16-17 mm vs 9-15 mm) with no roughness win. Sweep with follower_replay --beta-ang /
+        # --beta-lin before changing either.
+        af_damping_beta_lin: 1.0
+        af_damping_beta_ang: 1.0
+        # Corner (direction-reversal) ring-down guard. A flanking step below the
+        # deadband contributes sign 0 and cannot form a reversal pair, so a LARGER
+        # deadband makes the guard ignore more wobble.
+        #
+        # 2026-07-31 measurement (right arm, flow-infer rollouts): the guard fires on
+        # 23-41% of segments, and 17-38 points of that come from the ROTATION axes
+        # alone -- translation contributes only 2-12%. Cause is a scale mismatch: the
+        # policy commands ~2 mm and ~0.30 deg per 30 Hz step, and 0.30 deg split over
+        # three rotation axes leaves per-axis components only 3-7x the 0.029 deg
+        # default, so rotational sign noise reverses constantly. The cost is not
+        # confined to the reversing axis -- ruckig time-synchronizes the segment, so
+        # one braked rotation axis stretches the whole 6-DoF duration (measured
+        # follower `converged` 26% -> 4-14% as corner rose).
+        #
+        # Values below are the historical hard-coded defaults, unchanged: this block
+        # exists so the guard is measurable and sweepable, not to retune it. Raise
+        # corner_deadband_ang_rad (0.029 deg -> ~0.1-0.3 deg) to test the rotational
+        # -noise hypothesis; raise corner_velocity_scale toward 1.0 to soften the cut.
+        corner_deadband_lin_m: 0.0003        # 0.3 mm
+        corner_deadband_ang_rad: 0.0005      # 0.029 deg
+        corner_velocity_scale: 0.25          # target-velocity ring-down at a reversal
         delta_twist_clear_residual_on_new_frame: true
         delta_twist_min_time_to_go_sec: 0.015
         delta_twist_tau_sec: 0.020

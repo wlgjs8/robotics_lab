@@ -228,6 +228,8 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         "reserve_steps",
         "smoothing_window",
         "af_damping_beta",
+        "af_damping_beta_lin",
+        "af_damping_beta_ang",
         "delta_twist_tau_sec",
         "delta_twist_residual_drain_steps",
         "delta_twist_clear_residual_on_new_frame",
@@ -245,6 +247,9 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         "preview_max_consecutive_actual_lead_errors",
         "preview_projection_fault_policy",
         "loading_projection_max_accel_m_s2",
+        "corner_deadband_lin_m",
+        "corner_deadband_ang_rad",
+        "corner_velocity_scale",
         "hold_bounce_resume_sec",
         "chunk_feed_timeout_sec",
     }, path);
@@ -304,8 +309,32 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
     if (has(node, "smoothing_window")) {
         out->smoothing_window = asInt(node["smoothing_window"], path + ".smoothing_window");
     }
+    // Legacy scalar first so the per-class keys below can override it. A config that only sets
+    // `af_damping_beta` therefore keeps its exact previous behavior on both axis classes.
     if (has(node, "af_damping_beta")) {
-        out->af_damping_beta = asDouble(node["af_damping_beta"], path + ".af_damping_beta");
+        const double beta = asDouble(node["af_damping_beta"], path + ".af_damping_beta");
+        out->af_damping_beta_lin = beta;
+        out->af_damping_beta_ang = beta;
+    }
+    if (has(node, "af_damping_beta_lin")) {
+        out->af_damping_beta_lin =
+            asDouble(node["af_damping_beta_lin"], path + ".af_damping_beta_lin");
+    }
+    if (has(node, "af_damping_beta_ang")) {
+        out->af_damping_beta_ang =
+            asDouble(node["af_damping_beta_ang"], path + ".af_damping_beta_ang");
+    }
+    if (has(node, "corner_deadband_lin_m")) {
+        out->corner_deadband_lin_m =
+            asDouble(node["corner_deadband_lin_m"], path + ".corner_deadband_lin_m");
+    }
+    if (has(node, "corner_deadband_ang_rad")) {
+        out->corner_deadband_ang_rad =
+            asDouble(node["corner_deadband_ang_rad"], path + ".corner_deadband_ang_rad");
+    }
+    if (has(node, "corner_velocity_scale")) {
+        out->corner_velocity_scale =
+            asDouble(node["corner_velocity_scale"], path + ".corner_velocity_scale");
     }
     if (has(node, "delta_twist_tau_sec")) {
         out->delta_twist_tau_sec = asDouble(node["delta_twist_tau_sec"], path + ".delta_twist_tau_sec");
@@ -2425,9 +2454,41 @@ void validateConfig(const DualArmConfig& cfg) {
         if (rf.smoothing_window < 1 || rf.smoothing_window % 2 == 0) {
             throw std::runtime_error(path + ".smoothing_window must be an odd integer >= 1");
         }
-        if (!std::isfinite(rf.af_damping_beta) || rf.af_damping_beta <= 0.0 || rf.af_damping_beta > 1.0) {
-            throw std::runtime_error(path + ".af_damping_beta must be in (0, 1]");
+        if (!std::isfinite(rf.af_damping_beta_lin) || rf.af_damping_beta_lin <= 0.0 ||
+            rf.af_damping_beta_lin > 1.0) {
+            throw std::runtime_error(path +
+                                     ".af_damping_beta_lin must be in (0, 1] (also set by the "
+                                     "legacy af_damping_beta key)");
         }
+        if (!std::isfinite(rf.af_damping_beta_ang) || rf.af_damping_beta_ang <= 0.0 ||
+            rf.af_damping_beta_ang > 1.0) {
+            throw std::runtime_error(path +
+                                     ".af_damping_beta_ang must be in (0, 1] (also set by the "
+                                     "legacy af_damping_beta key)");
+        }
+        // Corner guard. Deadbands are >= 0 (0 = every non-zero step is signed, so the
+        // guard is maximally sensitive); a larger deadband ignores more wobble. The
+        // velocity ring-down lives in [0, 1]: 0 brakes to a standstill at every
+        // reversal, 1 keeps only the acceleration reset. Above 1 would ACCELERATE into
+        // a reversal, so it is rejected rather than clamped.
+        if (!std::isfinite(rf.corner_deadband_lin_m) || rf.corner_deadband_lin_m < 0.0) {
+            throw std::runtime_error(path + ".corner_deadband_lin_m must be finite and >= 0");
+        }
+        if (!std::isfinite(rf.corner_deadband_ang_rad) || rf.corner_deadband_ang_rad < 0.0) {
+            throw std::runtime_error(path + ".corner_deadband_ang_rad must be finite and >= 0");
+        }
+        if (!std::isfinite(rf.corner_velocity_scale) ||
+            rf.corner_velocity_scale < 0.0 || rf.corner_velocity_scale > 1.0) {
+            throw std::runtime_error(path + ".corner_velocity_scale must be in [0, 1]");
+        }
+        // Quasi-static gate for the wrench-gated loading projection. The gate is a
+        // `plan_accel <= bound` comparison (cartesian_chunk_follower.cpp), so NaN or a
+        // negative bound makes it unsatisfiable and silently stands the contact assist
+        // down for the whole run while the config still declares it. Fail closed at load
+        // instead: a contact-bounding value must come from its authoritative source.
+        validatePositiveFinite(
+            rf.loading_projection_max_accel_m_s2,
+            path + ".loading_projection_max_accel_m_s2");
         validatePositiveFinite(rf.delta_twist_tau_sec, path + ".delta_twist_tau_sec");
         if (rf.delta_twist_residual_drain_steps < 1) {
             throw std::runtime_error(path + ".delta_twist_residual_drain_steps must be >= 1");

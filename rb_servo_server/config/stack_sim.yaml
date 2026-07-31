@@ -582,6 +582,12 @@ cartesian_control:
         # trajectory here; the Ruckig v/a/j bounds remain the smoothing layer.
         smoothing_window: 1
         af_damping_beta: 1.0
+        # Corner (direction-reversal) ring-down guard -- historical hard-coded values,
+        # kept explicit so sim mirrors stack_real. See stack_real.yaml for the
+        # 2026-07-31 measurement showing the rotation axes dominate the firing rate.
+        corner_deadband_lin_m: 0.0003        # 0.3 mm
+        corner_deadband_ang_rad: 0.0005      # 0.029 deg
+        corner_velocity_scale: 0.25
         delta_twist_clear_residual_on_new_frame: true
         delta_twist_min_time_to_go_sec: 0.015
         delta_twist_tau_sec: 0.020

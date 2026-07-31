@@ -149,6 +149,54 @@ class RolloutStepLoggerTest(unittest.TestCase):
         self.assertIsNone(record["arms"]["right"]["compliance_offset_surface"])
         self.assertIsNone(record["arms"]["right"]["wrench_tcp_fz"])
 
+    def test_rtc_block_records_configured_vs_realized_delay(self) -> None:
+        record = build_rollout_step_record(
+            state_payload=_state_payload(),
+            command_intent=None,
+            conditioned_targets=None,
+            raw_delta_ee_local=None,
+            gripper_cmd_pct=None,
+            chunk_id=1,
+            chunk_step_index=0,
+            stall=False,
+            hold=False,
+            inference_latency_ms=None,
+            rtc={
+                "configured_delay": 3,
+                "realized_delay": 5,
+                "execute_horizon": 5,
+                "schedule": "exp",
+                "alignment_outcome": "aligned",
+            },
+            t_mono=1.0,
+            t_wall=2.0,
+        )
+        # realized > configured: the executed window ran rows the server never froze.
+        self.assertEqual(record["rtc"]["configured_delay"], 3)
+        self.assertEqual(record["rtc"]["realized_delay"], 5)
+        self.assertEqual(record["rtc"]["delay_error"], 2)
+        self.assertEqual(record["rtc"]["execute_horizon"], 5)
+        self.assertEqual(record["rtc"]["schedule"], "exp")
+        self.assertEqual(record["rtc"]["alignment_outcome"], "aligned")
+
+    def test_rtc_block_absent_when_rtc_off(self) -> None:
+        record = build_rollout_step_record(
+            state_payload=_state_payload(),
+            command_intent=None,
+            conditioned_targets=None,
+            raw_delta_ee_local=None,
+            gripper_cmd_pct=None,
+            chunk_id=1,
+            chunk_step_index=0,
+            stall=False,
+            hold=False,
+            inference_latency_ms=None,
+            rtc=None,
+            t_mono=1.0,
+            t_wall=2.0,
+        )
+        self.assertNotIn("rtc", record)
+
     def test_hot_path_writer_exception_disables_logging_without_raising(self) -> None:
         class ExplodingWriter:
             enabled = True
