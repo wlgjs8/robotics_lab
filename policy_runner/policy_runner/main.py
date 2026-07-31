@@ -1597,6 +1597,30 @@ def _main_with_subcommands(argv: list[str]) -> int:
              "0 = off (DEFAULT). Absolute and binary modes both honour it.",
     )
     flow_infer.add_argument(
+        "--chunk-knot-filter-hz",
+        type=float,
+        default=0.0,
+        help="Zero-phase FIR low-pass cutoff (Hz) applied to the chunk's per-step POSE "
+             "deltas before execution and before the overlay/follower feed. The gripper "
+             "channel is NOT filtered. 0 = off (DEFAULT). "
+             "Measured 2026-07-31 on the vibrating left arm: the policy's own 30 Hz action "
+             "stream carries 26.5%% of its energy at 5-10 Hz, against 2.3%% for a human UMI "
+             "teleop run doing the same pick-and-place on the same stand at higher speed; "
+             "the stand's ~13/17 Hz modes turn that shoulder into the vibration. Offline "
+             "(tools/follower_replay), 7 taps @5 Hz gave 5-10 Hz 27.4->18.5%%, 13-19 Hz "
+             "4.3->1.4%%, path deviation p95 2.8 mm, descent travel preserved to 1%%. "
+             "Zero phase because the chunk carries H=24 rows while ~5 execute, so the "
+             "forward half of the kernel reads real future knots.",
+    )
+    flow_infer.add_argument(
+        "--chunk-knot-filter-taps",
+        type=int,
+        default=7,
+        help="FIR length for --chunk-knot-filter-hz (odd, >=3). Longer = sharper stopband "
+             "but more of the chunk consumed as filter context. 7 is the measured "
+             "cost/benefit knee; 11 @3 Hz reached 5-10 Hz 10.0%% at p95 4.8 mm deviation.",
+    )
+    flow_infer.add_argument(
         "--rtc",
         action="store_true",
         help="Enable Real-Time Chunking (RTC) for the openpi remote source: the server freezes the "
@@ -2724,6 +2748,26 @@ def _main_with_subcommands(argv: list[str]) -> int:
             source.gripper_command_deadband_percent = float(
                 getattr(args, "gripper_command_deadband_percent", 0.0) or 0.0
             )
+            _knot_hz = float(getattr(args, "chunk_knot_filter_hz", 0.0) or 0.0)
+            if _knot_hz > 0.0:
+                from scipy.signal import firwin
+                _taps = int(getattr(args, "chunk_knot_filter_taps", 7) or 7)
+                if _taps < 3 or _taps % 2 == 0:
+                    raise ValueError("--chunk-knot-filter-taps must be odd and >= 3")
+                _knot_fs = 1.0 / float(policy_dt_sec)
+                if not (_knot_hz < 0.5 * _knot_fs):
+                    raise ValueError(
+                        f"--chunk-knot-filter-hz {_knot_hz:g} must be below the policy "
+                        f"Nyquist {0.5 * _knot_fs:.2f} Hz (policy_dt {policy_dt_sec:.4f}s)"
+                    )
+                source._chunk_knot_filter_taps = firwin(
+                    _taps, _knot_hz, fs=_knot_fs, window="hamming"
+                )
+                print(
+                    f"[flow-infer] chunk knot filter: {_taps}-tap zero-phase FIR @"
+                    f"{_knot_hz:g}Hz (policy {_knot_fs:.1f}Hz) on pose deltas; gripper unfiltered",
+                    flush=True,
+                )
             # Per-axis rotation gate: keep only the selected rx/ry/rz axes of the
             # per-arm rotation action; disabled axes are zeroed so the arm holds
             # that orientation component (translation + gripper unchanged). Applies

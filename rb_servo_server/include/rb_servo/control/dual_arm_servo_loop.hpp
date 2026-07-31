@@ -18,6 +18,7 @@
 #include "rb_servo/control/command_buffer.hpp"
 #include "rb_servo/control/delta_twist_follower.hpp"
 #include "rb_servo/control/force_controller.hpp"
+#include "rb_servo/control/follower_output_smd.hpp"
 #include "rb_servo/control/joint_moving_average.hpp"
 #include "rb_servo/control/normal_force_controller.hpp"
 #include "rb_servo/control/realtime_timing.hpp"
@@ -742,6 +743,8 @@ private:
     // path; delta_twist consumes local action deltas through a separate state.
     control::CartesianChunkFollower left_chunk_follower_{control::CartesianChunkFollowerConfig{}};
     control::CartesianChunkFollower right_chunk_follower_{control::CartesianChunkFollowerConfig{}};
+    control::FollowerOutputSmd left_follower_output_smd_{FollowerOutputSmdConfig{}};
+    control::FollowerOutputSmd right_follower_output_smd_{FollowerOutputSmdConfig{}};
     control::DeltaTwistFollower left_delta_twist_follower_{control::DeltaTwistFollowerConfig{}};
     control::DeltaTwistFollower right_delta_twist_follower_{control::DeltaTwistFollowerConfig{}};
     RuckigFollowerConfig left_chunk_follower_built_{};
@@ -788,6 +791,7 @@ private:
         std::uint64_t* submitted_wire_seq,
         std::uint64_t* submitted_recv_seq,
         SmdPoseTracker* smd_tracker,
+        control::FollowerOutputSmd* output_smd,
         const ArmMountConfig& mount,
         const JointArray& previous_sent_q_deg,
         const Pose6D& actual_feedback_pose,
@@ -843,6 +847,10 @@ private:
         bool follower_corner = false;
         std::optional<Pose6D> follower_pf_stand;
         std::optional<Pose6D> stage_tcp_target_stand;
+        bool follower_output_smd_active = false;
+        double follower_output_smd_lag_m = 0.0;
+        double follower_output_smd_lag_rad = 0.0;
+        std::optional<Pose6D> follower_prefilter_stand;
         double follower_divergence_pos_m = 0.0;
         double follower_divergence_ang_rad = 0.0;
         double follower_projection_error_m = 0.0;

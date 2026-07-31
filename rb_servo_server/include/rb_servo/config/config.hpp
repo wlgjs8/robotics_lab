@@ -994,7 +994,25 @@ struct ForceControlConfig {
     // (0 attempts = unlimited retreats). Requires operating_mode
     // cartesian_admittance.
     std::string hard_limit_policy = "latch";
+    // Retreat travel CAP, not a target: the escape brakes at whichever of
+    // retreat_release_force_n / this distance / the offset-budget guards comes
+    // first. Config validation enforces retreat_distance_m < max_pos_offset_m,
+    // because when the two were equal (both 30 mm, 2026-07-24 -> 07-31) the
+    // 0.8*max_pos_offset braking guard at 24 mm ALWAYS fired first and the
+    // distance condition became dead code.
     double retreat_distance_m = 0.010;
+    // Force-terminated retreat: brake once the measured external force falls to
+    // this level. 0 disables it (distance/budget termination only).
+    //
+    // Distance alone is open-loop on the wrong quantity. Measured 2026-07-31
+    // (left arm, servo_log_20260731_153934): when the compliance offset started
+    // near zero the arm unloaded to 1.3-2.2 N after only 12-16 mm of escape, but
+    // once repeated contacts had ratcheted the offset to 24-29 mm there was no
+    // room left, the escape ended with 6.0-8.8 N still applied, and the next
+    // press stacked on top -- a 24 N plateau across 19 retreat episodes. Braking
+    // on the force instead of on a fixed distance ends the escape as soon as the
+    // objective is met and keeps escaping while it is not.
+    double retreat_release_force_n = 0.0;
     double retreat_virtual_force_n = 20.0;
     double retreat_timeout_sec = 1.0;
     int retreat_max_attempts = 0;
@@ -1135,6 +1153,19 @@ enum class RuckigFollowerController {
     DeltaPreview
 };
 
+// Continuous output conditioning for the Cartesian chunk follower. This is a
+// pure post-follower stage: chunk chaining, projection, divergence, and actual-
+// lead accounting continue to use the unfiltered follower state.
+struct FollowerOutputSmdConfig {
+    bool enable = false;
+    double nf_linear_hz = 3.5;
+    double nf_angular_hz = 2.5;
+    double damping_ratio = 1.0;
+    bool velocity_ff = true;
+    // 0 follows the natural frequency of each domain independently.
+    double velocity_ff_lpf_hz = 0.0;
+};
+
 // Per-profile chunk-follower stage that REPLACES the pose_track_smd step while
 // active. The default controller consumes measured-anchored absolute waypoint
 // rows through the Ruckig receding-horizon follower; delta_twist consumes
@@ -1176,6 +1207,7 @@ struct RuckigFollowerConfig {
     int consume_steps = 16;
     int reserve_steps = 1;             // central-difference lookahead (>= 1)
     int smoothing_window = 3;          // odd; pre-difference chunk smoothing
+    FollowerOutputSmdConfig output_smd;
     // Feedforward accel damping, (0, 1], split by axis class 2026-07-31 because the two classes
     // sit at 31% and 95% of their acceleration limits -- see control::GuardConfig for the
     // measurement and why the single scalar could not be tuned. The legacy scalar

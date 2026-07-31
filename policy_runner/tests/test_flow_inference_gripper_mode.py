@@ -312,3 +312,63 @@ class GripperCommandDeadbandTest(unittest.TestCase):
         # [left, right]; the right jaw must see the HELD 40.0, not the 42.0 jitter.
         self.assertEqual(len(values), 2)
         self.assertAlmostEqual(values[1], 40.0, places=6)
+
+
+@unittest.skipIf(FlowMatchingActionSource is None, "torch is not installed")
+class ChunkKnotFilterTest(unittest.TestCase):
+    """Zero-phase FIR over the chunk's pose deltas (not the gripper)."""
+
+    @staticmethod
+    def _source(taps=None):
+        s = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
+        s._chunk_knot_filter_taps = taps
+        s._chunk_knot_filter_context = None
+        return s
+
+    def test_off_by_default_returns_the_chunk_unchanged(self) -> None:
+        s = self._source(None)
+        c = np.random.RandomState(0).randn(19, 14).astype(np.float32)
+        self.assertIs(s._band_limit_chunk(c), c)
+
+    def test_gripper_channel_is_never_filtered(self) -> None:
+        # The gripper is near-binary; low-passing it would blunt the close.
+        s = self._source(np.ones(5) / 5.0)
+        c = np.zeros((19, 14), dtype=np.float32)
+        c[:, 6] = np.tile([0.0, 100.0], 10)[:19]     # left gripper square wave
+        c[:, 13] = np.tile([100.0, 0.0], 10)[:19]    # right gripper square wave
+        out = s._band_limit_chunk(c)
+        np.testing.assert_allclose(out[:, 6], c[:, 6])
+        np.testing.assert_allclose(out[:, 13], c[:, 13])
+
+    def test_constant_motion_is_preserved(self) -> None:
+        # A normalised kernel must pass DC untouched: steady travel keeps its rate.
+        s = self._source(np.ones(5) / 5.0)
+        c = np.zeros((19, 14), dtype=np.float32)
+        c[:, 0] = 2.0
+        out = s._band_limit_chunk(c)
+        np.testing.assert_allclose(out[:, 0], 2.0, atol=1e-5)
+
+    def test_alternating_ripple_is_attenuated(self) -> None:
+        s = self._source(np.ones(5) / 5.0)
+        c = np.zeros((19, 14), dtype=np.float32)
+        c[:, 0] = np.where(np.arange(19) % 2 == 0, 1.0, -1.0)   # Nyquist ripple
+        out = s._band_limit_chunk(c)
+        self.assertLess(float(np.std(out[2:-2, 0])), 0.25 * float(np.std(c[:, 0])))
+
+    def test_context_carries_across_chunks_instead_of_edge_padding(self) -> None:
+        # The backward half must come from the PREVIOUS chunk, or the rows about
+        # to execute get distorted by replicated edge samples.
+        s = self._source(np.ones(5) / 5.0)
+        first = np.zeros((19, 14), dtype=np.float32); first[:, 0] = 1.0
+        s._band_limit_chunk(first)
+        self.assertIsNotNone(s._chunk_knot_filter_context)
+        self.assertEqual(s._chunk_knot_filter_context.shape[0], 2)
+        second = np.zeros((19, 14), dtype=np.float32); second[:, 0] = 1.0
+        out = s._band_limit_chunk(second)
+        # Continuous 1.0 stream across the seam -> row 0 must stay 1.0, not sag.
+        self.assertAlmostEqual(float(out[0, 0]), 1.0, places=5)
+
+    def test_short_chunk_is_passed_through(self) -> None:
+        s = self._source(np.ones(7) / 7.0)
+        c = np.ones((2, 14), dtype=np.float32)
+        np.testing.assert_allclose(s._band_limit_chunk(c), c)

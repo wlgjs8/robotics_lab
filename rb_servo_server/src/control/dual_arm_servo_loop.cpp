@@ -375,6 +375,12 @@ bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFoll
         a.consume_steps != b.consume_steps ||
         a.reserve_steps != b.reserve_steps ||
         a.smoothing_window != b.smoothing_window ||
+        a.output_smd.enable != b.output_smd.enable ||
+        a.output_smd.nf_linear_hz != b.output_smd.nf_linear_hz ||
+        a.output_smd.nf_angular_hz != b.output_smd.nf_angular_hz ||
+        a.output_smd.damping_ratio != b.output_smd.damping_ratio ||
+        a.output_smd.velocity_ff != b.output_smd.velocity_ff ||
+        a.output_smd.velocity_ff_lpf_hz != b.output_smd.velocity_ff_lpf_hz ||
         a.af_damping_beta_lin != b.af_damping_beta_lin ||
         a.af_damping_beta_ang != b.af_damping_beta_ang ||
         a.corner_deadband_lin_m != b.corner_deadband_lin_m ||
@@ -2991,8 +2997,19 @@ bool DualArmServoLoop::updateForceRuntime(
                         0.5 * base_acc;
                 const uint64_t timeout_ns = static_cast<uint64_t>(
                     config_.force_control.retreat_timeout_sec * 1e9);
+                // Force-terminated escape: end as soon as the contact is actually
+                // off, instead of after a fixed distance. force_fast_stand is the
+                // same per-tick measured wrench the hard limit trips on, so this
+                // closes the loop on the quantity the retreat exists to reduce.
+                // Distance / budget / offset-cap remain as backstops so a wrench
+                // that never decays (wedged, FT drift) still terminates -- and the
+                // timeout->latch path below is unchanged.
+                const double release_force_n =
+                    config_.force_control.retreat_release_force_n;
+                const bool force_released =
+                    release_force_n > 0.0 && force_fast_stand.norm() <= release_force_n;
                 if (!runtime.retreat_braking &&
-                    (displaced || budget_low ||
+                    (force_released || displaced || budget_low ||
                      worst_axis_offset >=
                          0.8 * config_.force_control.max_pos_offset_m)) {
                     runtime.retreat_braking = true;
@@ -3307,12 +3324,14 @@ bool DualArmServoLoop::updateForceRuntime(
             if (arm_id == ArmId::Left) {
                 left_delta_twist_follower_.deactivate();
                 left_chunk_follower_.deactivate();
+                left_follower_output_smd_.deactivate();
                 left_pose_track_smd_.deactivate();
                 left_chunk_submitted_recv_seq_ = chunk_frame_cache_recv_seq_;
                 left_output_ma_.reset();
             } else {
                 right_delta_twist_follower_.deactivate();
                 right_chunk_follower_.deactivate();
+                right_follower_output_smd_.deactivate();
                 right_pose_track_smd_.deactivate();
                 right_chunk_submitted_recv_seq_ = chunk_frame_cache_recv_seq_;
                 right_output_ma_.reset();
@@ -6194,6 +6213,10 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.follower_corner = abc.follower_corner;
     solve.follower_pf_stand = abc.follower_pf_stand;
     solve.stage_tcp_target_stand = abc.stage_tcp_target_stand;
+    solve.follower_output_smd_active = abc.follower_output_smd_active;
+    solve.follower_output_smd_lag_m = abc.follower_output_smd_lag_m;
+    solve.follower_output_smd_lag_rad = abc.follower_output_smd_lag_rad;
+    solve.follower_prefilter_stand = abc.follower_prefilter_stand;
     solve.follower_divergence_pos_m = abc.follower_divergence_pos_m;
     solve.follower_divergence_ang_rad = abc.follower_divergence_ang_rad;
     solve.follower_projection_error_m = abc.follower_projection_error_m;
@@ -6359,6 +6382,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     std::uint64_t* submitted_wire_seq,
     std::uint64_t* submitted_recv_seq,
     SmdPoseTracker* smd_tracker,
+    control::FollowerOutputSmd* output_smd,
     const ArmMountConfig& mount,
     const JointArray& previous_sent_q_deg,
     const Pose6D& actual_feedback_pose,
@@ -6381,6 +6405,10 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.follower_corner = false;
     abc.follower_pf_stand.reset();
     abc.stage_tcp_target_stand.reset();
+    abc.follower_output_smd_active = false;
+    abc.follower_output_smd_lag_m = 0.0;
+    abc.follower_output_smd_lag_rad = 0.0;
+    abc.follower_prefilter_stand.reset();
     abc.follower_divergence_pos_m = 0.0;
     abc.follower_divergence_ang_rad = 0.0;
     abc.follower_projection_error_m = 0.0;
@@ -6465,6 +6493,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                   << (!transition_reason.empty() ? ")" : "") << "\n";
     };
     const auto smd_fallback = [&]() {
+        output_smd->deactivate();
         log_transition();
         return with_stage_telemetry(applyPoseTrackSmd(
             command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
@@ -6480,6 +6509,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         // the Hold path owns the robot until a bounded warm resume or expiry.
         const double now_sec = ChunkFrameReceiver::steadyNowSec();
         follower->pauseForHold(now_sec);
+        output_smd->deactivate();
         follower->expireHoldPause(now_sec, rf.hold_bounce_resume_sec);
         resetChunkFollowerEngageWait(arm_id);
         smd_tracker->deactivate();
@@ -6493,6 +6523,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         // streaming command.
         transition_reason = "mode/enable";
         follower->deactivate();
+        output_smd->deactivate();
         resetChunkFollowerEngageWait(arm_id);
         return smd_fallback();
     }
@@ -6500,6 +6531,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     // In-place (keeps the prewarmed ruckig OTG): cheap enough for the RT tick.
     if (ruckigFollowerConfigChanged(*built_cfg, rf)) {
         follower->reconfigure(makeChunkFollowerConfig(rf));
+        *output_smd = control::FollowerOutputSmd(rf.output_smd);
         *built_cfg = rf;
         *submitted_wire_seq = 0;
         *submitted_recv_seq = 0;
@@ -6530,6 +6562,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         }
     }
     const auto hold_at_reference = [&]() {
+        output_smd->deactivate();
         ArmCommand smoothed = command;
         smoothed.tcp_target_stand = reference;
         return smoothed;
@@ -6547,9 +6580,13 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     if (intervention_recent && follower->active()) {
         const double safety_hold_now_sec = ChunkFrameReceiver::steadyNowSec();
         follower->pauseForHold(safety_hold_now_sec);
+        output_smd->deactivate();
         follower->expireHoldPause(safety_hold_now_sec, rf.hold_bounce_resume_sec);
         transition_reason = "safety intervention hold";
     } else if (follower->holdPaused()) {
+        // Warm resume always re-seeds the output stage from the latest sent pose;
+        // the preserved p/v/a belongs only to the pre-filter follower.
+        output_smd->deactivate();
         const control::HoldResumeResult resume = follower->resumeFromHold(
             reference,
             ChunkFrameReceiver::steadyNowSec(),
@@ -6583,6 +6620,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                 ? "feed timeout -> fault " + diag_seq_labels(active_diag)
                 : "feed timeout " + diag_seq_labels(active_diag);
             follower->deactivate();
+            output_smd->deactivate();
             if (fault_policy) {
                 smd_tracker->deactivate();
                 std::ostringstream reason;
@@ -6603,6 +6641,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                 // Otherwise keep the legacy drop/fault or SMD re-anchor behavior.
                 if (fault_policy && intervention_recent) {
                     follower->reanchor(reference);
+                    output_smd->deactivate();
                     ++reanchor_count;
                     abc.follower_reanchor_count = reanchor_count;
                     uint64_t& last_log_ns = arm_id == ArmId::Left
@@ -6623,6 +6662,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                         ? "divergence -> fault " + diag_seq_labels(active_diag)
                         : "divergence re-anchor " + diag_seq_labels(active_diag);
                     follower->deactivate();
+                    output_smd->deactivate();
                     if (fault_policy) {
                         smd_tracker->deactivate();
                         std::ostringstream reason;
@@ -6660,6 +6700,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             follower->submitFrame(toControlChunkFrame(chunk_frame_cache_, arm_id), reference);
         } else {
             follower->deactivate();
+            output_smd->deactivate();
             transition_reason = "delta preview rejected v3/proprio contract " +
                 seq_labels(chunk_frame_cache_.seq, chunk_frame_cache_.receiver_seq);
         }
@@ -6711,7 +6752,27 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                         force_runtime.follower_loading_reaction_stand[2]),
         force_runtime.follower_loading_reaction_valid,
         force_runtime.follower_contact_normal_owned);
-    smoothed.tcp_target_stand = follower->tick(dt_sec);
+    const Pose6D pre_filter = follower->tick(dt_sec);
+    abc.follower_prefilter_stand = pre_filter;
+    const Vec6 follower_velocity = follower->currentVelocity().value_or(Vec6{});
+    if (rf.output_smd.enable) {
+        if (!output_smd->active()) {
+            // `reference` is FK of the previous sent target with the committed
+            // compliance offset removed, i.e. the last sent pose in this stage's
+            // pre-compliance domain. Never cold-seed from an older filter state.
+            output_smd->reset(reference, follower_velocity);
+        }
+        smoothed.tcp_target_stand =
+            output_smd->step(pre_filter, follower_velocity, dt_sec);
+        abc.follower_output_smd_active = output_smd->active();
+        abc.follower_output_smd_lag_m = output_smd->lagPos();
+        abc.follower_output_smd_lag_rad = output_smd->lagAng();
+    } else {
+        output_smd->deactivate();
+        smoothed.tcp_target_stand = pre_filter;
+    }
+    // Ordering constraint: force/compliance composes downstream on this target;
+    // the contact reflex must never be low-passed by the follower output SMD.
     // Tell the force path this target is follower-produced (already loading-
     // projected) so the rolling equilibrium adopts it verbatim instead of
     // double-projecting and drifting away from the plan.
@@ -6822,6 +6883,10 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     abc.follower_corner = false;
     abc.follower_pf_stand.reset();
     abc.stage_tcp_target_stand.reset();
+    abc.follower_output_smd_active = false;
+    abc.follower_output_smd_lag_m = 0.0;
+    abc.follower_output_smd_lag_rad = 0.0;
+    abc.follower_prefilter_stand.reset();
     abc.follower_divergence_pos_m = 0.0;
     abc.follower_divergence_ang_rad = 0.0;
     abc.delta_twist_pending_linear_norm_m = 0.0;
@@ -7105,6 +7170,12 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     // shape leaves them false so the equilibrium keeps its own projection.
     left_force_runtime_.chunk_follower_drove_this_tick = false;
     right_force_runtime_.chunk_follower_drove_this_tick = false;
+    for (AbcTelemetry* abc : {&left_abc_telemetry_, &right_abc_telemetry_}) {
+        abc->follower_output_smd_active = false;
+        abc->follower_output_smd_lag_m = 0.0;
+        abc->follower_output_smd_lag_rad = 0.0;
+        abc->follower_prefilter_stand.reset();
+    }
     ServoTarget target;
     const bool synthetic_hold = isSyntheticHoldCommand(command);
     const auto clear_left_linear_path = [&]() {
@@ -7157,6 +7228,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
 
     if (isCommandModeMissingPayload(command.left) || isCommandModeMissingPayload(command.right)) {
         if (command_verdict) *command_verdict = SafetyVerdict::InvalidCommand;
+        left_follower_output_smd_.deactivate();
+        right_follower_output_smd_.deactivate();
         target.left_q_target_deg = left_prev_sent_q_deg_;
         target.right_q_target_deg = right_prev_sent_q_deg_;
         return target;
@@ -7289,8 +7362,13 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         ArmId arm_id,
         ControlMode raw_mode,
         control::CartesianChunkFollower& follower,
+        control::FollowerOutputSmd& output_smd,
         const RuckigFollowerConfig& built_config
     ) {
+        // Hold/mode-exit owns the sent target. A later warm resume may preserve
+        // follower p/v/a, but the output conditioner must re-seed from that new
+        // last-sent target rather than continue from a stale pose.
+        output_smd.deactivate();
         if (raw_mode != ControlMode::Hold || !follower.active() ||
             !built_config.enable ||
             built_config.controller == RuckigFollowerController::DeltaTwist) {
@@ -7332,6 +7410,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         }
         if (!cartesian_available) {
             if (command_verdict) *command_verdict = SafetyVerdict::CartesianUnavailable;
+            left_follower_output_smd_.deactivate();
+            right_follower_output_smd_.deactivate();
             if (isCartesianMode(effective_command.left.mode)) {
                 left_last_cartesian_solve_ = cartesianUnavailableTelemetry(
                     left_state,
@@ -7399,6 +7479,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             selectCartesianServoStateForArm(config_, effective_command.right, right_state);
         if (!left_servo_state.ok || !right_servo_state.ok) {
             if (command_verdict) *command_verdict = SafetyVerdict::CartesianUnavailable;
+            left_follower_output_smd_.deactivate();
+            right_follower_output_smd_.deactivate();
             if (!left_servo_state.ok) {
                 left_last_cartesian_solve_ = cartesianUnavailableTelemetry(
                     left_state,
@@ -7491,12 +7573,14 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 ArmId::Left,
                 command.left.mode,
                 left_chunk_follower_,
+                left_follower_output_smd_,
                 left_chunk_follower_built_);
             left_delta_twist_follower_.deactivate();
             left_pose_track_smd_.deactivate();
             left_pose_track_command = effective_command.left;
         } else if (left_tcp_profile.ruckig_follower.controller == RuckigFollowerController::DeltaTwist) {
             left_chunk_follower_.deactivate();
+            left_follower_output_smd_.deactivate();
             left_pose_track_command = applyDeltaTwistFollowerStage(
                 ArmId::Left,
                 effective_command.left,
@@ -7523,6 +7607,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 &left_chunk_submitted_wire_seq_,
                 &left_chunk_submitted_recv_seq_,
                 &left_pose_track_smd_,
+                &left_follower_output_smd_,
                 config_.left_mount,
                 left_prev_sent_q_deg_,
                 left_delta_twist_actual_feedback,
@@ -7535,12 +7620,14 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 ArmId::Right,
                 command.right.mode,
                 right_chunk_follower_,
+                right_follower_output_smd_,
                 right_chunk_follower_built_);
             right_delta_twist_follower_.deactivate();
             right_pose_track_smd_.deactivate();
             right_pose_track_command = effective_command.right;
         } else if (right_tcp_profile.ruckig_follower.controller == RuckigFollowerController::DeltaTwist) {
             right_chunk_follower_.deactivate();
+            right_follower_output_smd_.deactivate();
             right_pose_track_command = applyDeltaTwistFollowerStage(
                 ArmId::Right,
                 effective_command.right,
@@ -7567,6 +7654,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 &right_chunk_submitted_wire_seq_,
                 &right_chunk_submitted_recv_seq_,
                 &right_pose_track_smd_,
+                &right_follower_output_smd_,
                 config_.right_mount,
                 right_prev_sent_q_deg_,
                 right_delta_twist_actual_feedback,
@@ -7724,9 +7812,11 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             }
             if (left_cartesian_result.verdict != SafetyVerdict::Ok) {
                 target.left_q_target_deg = left_prev_sent_q_deg_;
+                left_follower_output_smd_.deactivate();
             }
             if (right_cartesian_result.verdict != SafetyVerdict::Ok) {
                 target.right_q_target_deg = right_prev_sent_q_deg_;
+                right_follower_output_smd_.deactivate();
             }
         }
         return target;
@@ -7739,9 +7829,11 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     // bounce evidence. Preserve a bounded, frozen chunk only for raw Hold;
     // every other mode switch still drops the streaming state immediately.
     pause_chunk_follower_for_hold(
-        ArmId::Left, command.left.mode, left_chunk_follower_, left_chunk_follower_built_);
+        ArmId::Left, command.left.mode, left_chunk_follower_,
+        left_follower_output_smd_, left_chunk_follower_built_);
     pause_chunk_follower_for_hold(
-        ArmId::Right, command.right.mode, right_chunk_follower_, right_chunk_follower_built_);
+        ArmId::Right, command.right.mode, right_chunk_follower_,
+        right_follower_output_smd_, right_chunk_follower_built_);
     left_delta_twist_follower_.deactivate();
     right_delta_twist_follower_.deactivate();
 
@@ -9153,6 +9245,8 @@ void DualArmServoLoop::resyncArmAfterFreedrive(ArmId arm_id, const RobotState& s
     right_delta_twist_follower_.deactivate();
     left_chunk_follower_.deactivate();
     right_chunk_follower_.deactivate();
+    left_follower_output_smd_.deactivate();
+    right_follower_output_smd_.deactivate();
     left_pose_track_smd_.deactivate();
     right_pose_track_smd_.deactivate();
     left_chunk_submitted_recv_seq_ = chunk_frame_cache_recv_seq_;
@@ -10460,6 +10554,8 @@ void DualArmServoLoop::latchFault(
     const LatchedDualFaultContext& contexts
 ) {
     clearLatchedCartesianTargets();
+    left_follower_output_smd_.deactivate();
+    right_follower_output_smd_.deactivate();
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (fault_latched_.load()) return;
     fault_latched_.store(true);

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <cmath>
@@ -390,16 +391,28 @@ bool testRepositoryConfigsParse() {
         // 2026-07-24: double retreat travel and absorb persistent policy
         // re-approach with unlimited bounded episodes. A timeout without
         // unloading remains the repeated-policy escalation path.
+        // 2026-07-31: the escape is now FORCE-terminated (retreat_release_force_n);
+        // distance is only the cap. It must stay under the 0.8*max_pos_offset_m
+        // braking guard or it is unreachable -- when distance == cap == 30 mm the
+        // guard at 24 mm always fired first and the distance condition was dead.
         RB_CHECK(stack_real.force_control.hard_limit_policy == "retreat");
-        RB_CHECK(near(stack_real.force_control.retreat_distance_m, 0.020));
+        RB_CHECK(near(stack_real.force_control.retreat_distance_m, 0.035));
+        RB_CHECK(near(stack_real.force_control.retreat_release_force_n, 3.0));
         RB_CHECK(near(stack_real.force_control.retreat_virtual_force_n, 20.0));
         RB_CHECK(near(stack_real.force_control.retreat_timeout_sec, 1.0));
         RB_CHECK(stack_real.force_control.retreat_max_attempts == 0);
         RB_CHECK(near(stack_real.force_control.retreat_attempt_window_sec, 10.0));
         RB_CHECK(
-            stack_real.force_control.retreat_distance_m <=
-            stack_real.force_control.max_pos_offset_m
+            stack_real.force_control.retreat_distance_m <
+            0.8 * stack_real.force_control.max_pos_offset_m
         );
+        // The release target must be a real release condition, not a same-tick
+        // no-op: strictly below the smaller hard trigger on both arms.
+        RB_CHECK(
+            stack_real.force_control.retreat_release_force_n <
+            std::min(left_force.hard_normal_force_n, left_force.hard_force_norm_n)
+        );
+        RB_CHECK(near(stack_real.force_control.max_pos_offset_m, 0.045));
         RB_CHECK(near(left_force.hard_torque_norm_nm, 7.0));
         RB_CHECK(near(left_force.hard_torque_norm_nm, right_force.hard_torque_norm_nm));
         RB_CHECK(left_force.debounce_samples == right_force.debounce_samples);
@@ -443,7 +456,7 @@ bool testRepositoryConfigsParse() {
         // 2026-07-18 redesign: 30 mm back-off escape headroom (the follower
         // lead check strips the committed offset, so the lead budget is
         // unaffected).
-        RB_CHECK(near(stack_real.force_control.max_pos_offset_m, 0.030));
+        RB_CHECK(near(stack_real.force_control.max_pos_offset_m, 0.045));
         RB_CHECK(near(stack_real.force_control.max_linear_velocity_m_s, 0.06));
         RB_CHECK(near(stack_real.force_control.max_linear_jerk_m_s3, 8.0));
         RB_CHECK(near(normal_force.damping_n_s_m, 160.0));

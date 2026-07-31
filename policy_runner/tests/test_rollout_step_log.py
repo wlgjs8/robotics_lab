@@ -149,6 +149,43 @@ class RolloutStepLoggerTest(unittest.TestCase):
         self.assertIsNone(record["arms"]["right"]["compliance_offset_surface"])
         self.assertIsNone(record["arms"]["right"]["wrench_tcp_fz"])
 
+    def test_gripper_feedback_age_is_recorded_and_never_fabricated(self) -> None:
+        payload = _state_payload()
+        payload["left"]["gripper"]["feedback_age_ms"] = 23.5
+        record = build_rollout_step_record(
+            state_payload=payload, command_intent=None, conditioned_targets=None,
+            raw_delta_ee_local=None, gripper_cmd_pct=None, chunk_id=1,
+            chunk_step_index=0, stall=False, hold=False, inference_latency_ms=None,
+            t_mono=1.0, t_wall=2.0,
+        )
+        self.assertAlmostEqual(record["arms"]["left"]["gripper_feedback_age_ms"], 23.5)
+        # No stamp -> None. A fabricated 0 would read as "feedback is instant" and
+        # send the latency split the wrong way.
+        self.assertIsNone(record["arms"]["right"]["gripper_feedback_age_ms"])
+
+    def test_force_control_state_is_recorded_per_arm(self) -> None:
+        # An unprotected rollout (FT zero never ran because no Init Motion
+        # preceded it) must be visible in the log, not inferable.
+        payload = _state_payload()
+        payload["left"]["force_control"] = {"enabled": True, "state": "awaiting_init_tare"}
+        record = build_rollout_step_record(
+            state_payload=payload,
+            command_intent=None,
+            conditioned_targets=None,
+            raw_delta_ee_local=None,
+            gripper_cmd_pct=None,
+            chunk_id=1,
+            chunk_step_index=0,
+            stall=False,
+            hold=False,
+            inference_latency_ms=None,
+            t_mono=1.0,
+            t_wall=2.0,
+        )
+        self.assertEqual(record["arms"]["left"]["force_control_state"], "awaiting_init_tare")
+        # Absent force_control block -> null, never a fabricated "armed".
+        self.assertIsNone(record["arms"]["right"]["force_control_state"])
+
     def test_rtc_block_records_configured_vs_realized_delay(self) -> None:
         record = build_rollout_step_record(
             state_payload=_state_payload(),

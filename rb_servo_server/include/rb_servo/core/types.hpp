@@ -460,6 +460,10 @@ struct CartesianSolveTelemetry {
     bool follower_corner = false;       // corner ring-down fired on some axis
     std::optional<Pose6D> follower_pf_stand;  // active segment target pose
     std::optional<Pose6D> stage_tcp_target_stand;  // pose-track stage output handed to IK
+    bool follower_output_smd_active = false;
+    double follower_output_smd_lag_m = 0.0;
+    double follower_output_smd_lag_rad = 0.0;
+    std::optional<Pose6D> follower_prefilter_stand;  // raw per-tick follower emission
     double follower_divergence_pos_m = 0.0;
     double follower_divergence_ang_rad = 0.0;
     double follower_projection_error_m = 0.0;

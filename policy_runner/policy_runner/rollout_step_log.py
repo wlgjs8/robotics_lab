@@ -286,6 +286,24 @@ def build_rollout_step_record(
             "raw_delta_ee_local": _finite_vector(raw_delta, 6),
             "gripper_cmd_pct": _finite_float(gripper_cmd),
             "gripper_meas_pct": _measured_gripper_pct(payload, arm),
+            # Publish->receive age of the gripper_state.v1 message `gripper_meas_pct`
+            # came from. Measured 2026-07-31: commanding a full close took 104-139 ms
+            # to show ANY jaw motion and 278-347 ms to settle, by which point the arm
+            # had already lifted 47-65 mm -- the "closes on the way up" failure. That
+            # total is the sum of a slow jaw and late-reported feedback, and the two
+            # need opposite fixes, so log the reported-late part separately.
+            "gripper_feedback_age_ms": _gripper_feedback_age_ms(payload, arm),
+            # Force-control arming state. The FT software zero only runs after an
+            # Init Motion (auto_tare_after_init_motion), so a rollout started
+            # without one sits in awaiting_init_tare for its whole duration with
+            # the contact reflex NEVER armed -- and with safety.floor_constraint
+            # disabled that leaves no floor backstop at all. Recording it per step
+            # makes an unprotected run visible in the log instead of inferable.
+            "force_control_state": (
+                str(force_control.get("state"))
+                if force_control.get("state") is not None
+                else None
+            ),
             "compliance_offset_surface": _finite_vector(
                 force_control.get("compliance_offset_surface"),
                 6,
@@ -431,6 +449,27 @@ def _measured_gripper_pct(payload: Mapping[str, Any], arm: str) -> float | None:
             value = _finite_float(container.get(key))
             if value is not None:
                 return value
+    return None
+
+
+def _gripper_feedback_age_ms(payload: Mapping[str, Any], arm: str) -> float | None:
+    """Age of the gripper feedback message backing this step's measured percent.
+
+    Mirrors _measured_gripper_pct's container search so the age always describes
+    the same block the percent was read from. None when the bridge could not stamp
+    it (no usable host_time_ns) -- never a fabricated 0, which would read as
+    "feedback is instant" and send the latency hunt in the wrong direction.
+    """
+    arm_payload = _arm_mapping(payload, arm)
+    for container_name in ("gripper", "gripper_state"):
+        container = arm_payload.get(container_name)
+        if not isinstance(container, Mapping):
+            continue
+        if container.get("valid") is False or container.get("stale") is True:
+            continue
+        value = _finite_float(container.get("feedback_age_ms"))
+        if value is not None:
+            return value
     return None
 
 

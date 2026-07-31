@@ -1288,6 +1288,10 @@ nlohmann::json gripperFeedbackJson(const GripperArmFeedback& fb) {
         {"moving", fb.moving},
         {"ok", fb.ok},
         {"fault", fb.fault.empty() ? nlohmann::json(nullptr) : nlohmann::json(fb.fault)},
+        // Publish->receive age of the gripper_state.v1 message this came from, so a
+        // consumer can tell a slow JAW from late-reported feedback. null when the
+        // payload carried no usable stamp (never a fabricated 0).
+        {"feedback_age_ms", finiteDoubleJson(fb.feedback_age_ms)},
     };
 }
 

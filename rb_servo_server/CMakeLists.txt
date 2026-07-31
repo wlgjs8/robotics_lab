@@ -35,6 +35,7 @@ add_library(rb_servo_core
     src/control/cartesian_servo_controller.cpp
     src/control/cartesian_trajectory_planner.cpp
     src/control/smd_pose_tracker.cpp
+    src/control/follower_output_smd.cpp
     src/control/chunk_window.cpp
     src/control/cartesian_chunk_follower.cpp
     src/control/delta_twist_follower.cpp
@@ -259,6 +260,10 @@ if(BUILD_TESTING)
     add_executable(test_smd_pose_tracker tests/test_smd_pose_tracker.cpp)
     target_link_libraries(test_smd_pose_tracker PRIVATE rb_servo_core)
     add_test(NAME smd_pose_tracker COMMAND test_smd_pose_tracker)
+
+    add_executable(test_follower_output_smd tests/test_follower_output_smd.cpp)
+    target_link_libraries(test_follower_output_smd PRIVATE rb_servo_core)
+    add_test(NAME follower_output_smd COMMAND test_follower_output_smd)
 
     add_executable(test_joint_smd_tracker tests/test_joint_smd_tracker.cpp)
     target_link_libraries(test_joint_smd_tracker PRIVATE rb_servo_core)

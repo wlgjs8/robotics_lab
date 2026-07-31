@@ -120,6 +120,12 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_follower_converged"
        << ',' << side << "_follower_stall"
        << ',' << side << "_follower_corner"
+       << ',' << side << "_follower_output_smd_active"
+       << ',' << side << "_follower_output_smd_lag_m"
+       << ',' << side << "_follower_output_smd_lag_rad"
+       << ',' << side << "_follower_prefilter_stand_x_m"
+       << ',' << side << "_follower_prefilter_stand_y_m"
+       << ',' << side << "_follower_prefilter_stand_z_m"
        << ',' << side << "_follower_divergence_pos_m"
        << ',' << side << "_follower_divergence_ang_rad"
        << ',' << side << "_follower_projection_error_m"
@@ -852,7 +858,17 @@ void writeArmProfilingColumns(
        << ',' << telemetry.follower_converged
        << ',' << telemetry.follower_stall
        << ',' << telemetry.follower_corner
-       << ',' << telemetry.follower_divergence_pos_m
+       << ',' << telemetry.follower_output_smd_active
+       << ',' << telemetry.follower_output_smd_lag_m
+       << ',' << telemetry.follower_output_smd_lag_rad;
+    if (telemetry.follower_prefilter_stand.has_value()) {
+        os << ',' << telemetry.follower_prefilter_stand->x
+           << ',' << telemetry.follower_prefilter_stand->y
+           << ',' << telemetry.follower_prefilter_stand->z;
+    } else {
+        os << ",,,";
+    }
+    os << ',' << telemetry.follower_divergence_pos_m
        << ',' << telemetry.follower_divergence_ang_rad
        << ',' << telemetry.follower_projection_error_m
        << ',' << telemetry.follower_projection_error_rad

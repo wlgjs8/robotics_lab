@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -20,6 +21,21 @@ struct GripperArmFeedback {
     bool moving = false;
     bool ok = false;
     std::string fault;         // empty => none
+    // Age of the gripper_state.v1 message this block came from:
+    // (bridge receive time) - (gripper_server publish stamp). The two processes
+    // stamp with DIFFERENT clocks -- gripper_server uses Python time.time_ns()
+    // (CLOCK_REALTIME) while the rest of this server runs on steady_clock -- so
+    // the receive side must use system_clock for this one comparison or the
+    // number is meaningless. NaN when the payload carried no usable host_time_ns.
+    //
+    // Why it exists: the measured gripper close->feedback latency was 104-139 ms
+    // onset and 278-347 ms to settle (2026-07-31 rollouts), more than the command
+    // pipeline can account for (bridge 50 Hz + server 50 Hz + backend 60 Hz cap
+    // ~= 45-95 ms round trip), but there was NO telemetry separating "the jaw is
+    // slow" from "the feedback is reported late". Without that split, compensating
+    // by shifting the gripper channel forward is guesswork: over-shifting closes
+    // the jaw before contact and pushes the object away.
+    double feedback_age_ms = std::numeric_limits<double>::quiet_NaN();
 };
 
 // Bridge to the out-of-process gripper_server (docs/plans/gripper_server_design.md).

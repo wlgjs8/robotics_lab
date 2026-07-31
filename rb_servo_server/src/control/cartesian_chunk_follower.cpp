@@ -213,6 +213,14 @@ Pose6D CartesianChunkFollower::tick(double dt_tick) {
   return last_pose_;
 }
 
+std::optional<Vec6> CartesianChunkFollower::currentVelocity() const {
+  if (!active_ || hold_paused_ || !have_segment_ || !core_.hasState()) {
+    return std::nullopt;
+  }
+  const auto& v = core_.v0();
+  return Vec6{v[0], v[1], v[2], v[3], v[4], v[5]};
+}
+
 void CartesianChunkFollower::stepToNextSegment() {
   // Re-linearize the orientation tangent onto the state chained from the
   // PREVIOUS solve, and reset the rotation axes to 0 for the new segment. Must

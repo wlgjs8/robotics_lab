@@ -16,6 +16,8 @@
 //   follower_replay <knots.txt> [--dt SEC] [--execute N] [--runway N]
 //                   [--lin-v V --lin-a A --lin-j J] [--ang-v V --ang-a A --ang-j J]
 //                   [--beta B | --beta-lin B --beta-ang B] [--corner-ang R] [--corner-scale S]
+//                   [--output-smd-nf-lin HZ --output-smd-nf-ang HZ]
+//                   [--output-smd-no-ff]
 //                   [--sweep]
 //
 // --beta sets both axis classes (legacy); --beta-lin/--beta-ang override per class. The split
@@ -23,6 +25,8 @@
 // limits (31% vs 95% on the right arm at SPEED_SCALE 1.0) -- see control::GuardConfig.
 
 #include "rb_servo/control/cartesian_chunk_follower.hpp"
+#include "rb_servo/control/follower_output_smd.hpp"
+#include "rb_servo/control/smd_pose_tracker.hpp"
 #include "rb_servo/math/se3.hpp"
 
 #include <algorithm>
@@ -55,6 +59,19 @@ struct Options {
   double corner_lin = 3e-4;
   double corner_scale = 0.25;
   bool sweep = false;
+  // Cascade the production SmdPoseTracker AFTER the follower. The chunk-follower
+  // path currently REPLACES the SMD stage (dual_arm_servo_loop deactivates it),
+  // which removes the only low-pass in the chain -- and the measured stand modes
+  // sit at 12-18 Hz, right inside the band a 30 Hz command stream can excite.
+  bool smd = false;
+  double smd_nf_lin = 2.0;
+  double smd_nf_ang = 1.5;
+  double smd_zeta = 1.0;
+  bool smd_ff = true;
+  double output_smd_nf_lin = 0.0;
+  double output_smd_nf_ang = 0.0;
+  bool output_smd_ff = true;
+  std::string dump;
 };
 
 std::vector<Pose6D> loadKnots(const std::string& path) {
@@ -89,7 +106,10 @@ double pct(std::vector<double>& v, double q) {
 // Replays the knot stream the way the producer publishes it: a fresh frame every
 // `execute` steps carrying execute+runway rows, submitted to an already-active
 // follower (preempt), exactly like the boundary stitch mode on hardware.
-Result replay(const std::vector<Pose6D>& knots, const Options& o) {
+Result replay(const std::vector<Pose6D>& knots, const Options& o,
+              rb_servo::SmdPoseTracker* smd = nullptr,
+              rb_servo::control::FollowerOutputSmd* output_smd = nullptr,
+              std::FILE* dump = nullptr) {
   CartesianChunkFollowerConfig cfg;
   cfg.lin = rb_servo::control::AxisLimit{o.lin_v, o.lin_a, o.lin_j};
   cfg.ang = rb_servo::control::AxisLimit{o.ang_v, o.ang_a, o.ang_j};
@@ -121,7 +141,39 @@ Result replay(const std::vector<Pose6D>& knots, const Options& o) {
     f.submitFrame(frame, knots[start]);
 
     for (int s = 0; s < o.execute; ++s) {
-      for (int t = 0; t < tick_per_seg; ++t) f.tick(0.002);
+      for (int t = 0; t < tick_per_seg; ++t) {
+        const Pose6D raw = f.tick(0.002);
+        Pose6D legacy_out = raw;
+        if (smd) {
+          // Same order the servo loop would use: follower output IS the command
+          // the SMD tracks, stepped at the 500 Hz servo tick.
+          if (!smd->active()) smd->reset(raw);
+          smd->updateGoalFromCommand(raw);
+          legacy_out = smd->step(0.002);
+        }
+        Pose6D filtered_out = raw;
+        if (output_smd) {
+          const rb_servo::Vec6 xi = f.currentVelocity().value_or(rb_servo::Vec6{});
+          filtered_out = output_smd->step(raw, xi, 0.002);
+        }
+        if (dump) {
+          if (output_smd) {
+            // The first six columns remain the existing raw/legacy-SMD xyz.
+            // Output-SMD flags append the post-filter xyz+rpy pose.
+            std::fprintf(dump,
+                         "%.9f %.9f %.9f %.9f %.9f %.9f "
+                         "%.9f %.9f %.9f %.9f %.9f %.9f\n",
+                         raw.x, raw.y, raw.z,
+                         legacy_out.x, legacy_out.y, legacy_out.z,
+                         filtered_out.x, filtered_out.y, filtered_out.z,
+                         filtered_out.rx, filtered_out.ry, filtered_out.rz);
+          } else {
+            std::fprintf(dump, "%.9f %.9f %.9f %.9f %.9f %.9f\n",
+                         raw.x, raw.y, raw.z,
+                         legacy_out.x, legacy_out.y, legacy_out.z);
+          }
+        }
+      }
       const auto& d = f.diag();
       if (d.segments != last_segments) {   // one sample per solved segment
         last_segments = d.segments;
@@ -182,16 +234,59 @@ int main(int argc, char** argv) {
     else if (a == "--corner-ang") num(o.corner_ang);
     else if (a == "--corner-scale") num(o.corner_scale);
     else if (a == "--sweep") o.sweep = true;
+    else if (a == "--smd") o.smd = true;
+    else if (a == "--smd-nf-lin") num(o.smd_nf_lin);
+    else if (a == "--smd-nf-ang") num(o.smd_nf_ang);
+    else if (a == "--smd-zeta") num(o.smd_zeta);
+    else if (a == "--smd-no-ff") o.smd_ff = false;
+    else if (a == "--output-smd-nf-lin") num(o.output_smd_nf_lin);
+    else if (a == "--output-smd-nf-ang") num(o.output_smd_nf_ang);
+    else if (a == "--output-smd-no-ff") o.output_smd_ff = false;
+    else if (a == "--dump") { if (i + 1 < argc) o.dump = argv[++i]; }
+  }
+  const bool output_smd_requested =
+      o.output_smd_nf_lin != 0.0 || o.output_smd_nf_ang != 0.0;
+  if (output_smd_requested &&
+      (!(o.output_smd_nf_lin > 0.5 && o.output_smd_nf_lin < 25.0) ||
+       !(o.output_smd_nf_ang > 0.5 && o.output_smd_nf_ang < 25.0))) {
+    std::fprintf(stderr,
+                 "output SMD requires both natural frequencies in (0.5, 25) Hz; "
+                 "leave both absent/0 to disable\n");
+    return 2;
   }
   const std::vector<Pose6D> knots = loadKnots(o.path);
   if (knots.size() < 20) { std::fprintf(stderr, "need >=20 knots, got %zu\n", knots.size()); return 2; }
   std::printf("knots=%zu  dt=%.4fs  execute=%d runway=%d\n", knots.size(), o.dt, o.execute, o.runway);
 
+  // Build the production SMD with the requested bandwidth. The tracked teleop
+  // profile (umi_large_smooth) runs nf 2.0/1.5 Hz zeta 1.0 with feedforward on,
+  // and is smooth on this exact stand at high speed -- that is the reference the
+  // policy path is missing.
+  rb_servo::PoseTrackSmdConfig scfg;
+  scfg.enable = true;
+  scfg.damping_ratio_linear = o.smd_zeta;
+  scfg.damping_ratio_angular = o.smd_zeta;
+  scfg.natural_frequency_linear_hz = o.smd_nf_lin;
+  scfg.natural_frequency_angular_hz = o.smd_nf_ang;
+  scfg.velocity_feedforward = o.smd_ff;
+  rb_servo::SmdPoseTracker smd_tracker(scfg);
+  rb_servo::FollowerOutputSmdConfig output_smd_cfg;
+  output_smd_cfg.enable = output_smd_requested;
+  if (output_smd_requested) {
+    output_smd_cfg.nf_linear_hz = o.output_smd_nf_lin;
+    output_smd_cfg.nf_angular_hz = o.output_smd_nf_ang;
+  }
+  output_smd_cfg.velocity_ff = o.output_smd_ff;
+  rb_servo::control::FollowerOutputSmd output_smd_tracker(output_smd_cfg);
+  std::FILE* dump = o.dump.empty() ? nullptr : std::fopen(o.dump.c_str(), "w");
+
   if (!o.sweep) {
     char buf[256];
     std::snprintf(buf, sizeof(buf), "lin a=%.1f j=%.0f | ang a=%.1f j=%.0f | beta lin=%.2f ang=%.2f",
                   o.lin_a, o.lin_j, o.ang_a, o.ang_j, o.beta_lin, o.beta_ang);
-    printRow(buf, replay(knots, o));
+    printRow(buf, replay(knots, o, o.smd ? &smd_tracker : nullptr,
+                         output_smd_requested ? &output_smd_tracker : nullptr, dump));
+    if (dump) std::fclose(dump);
     return 0;
   }
 

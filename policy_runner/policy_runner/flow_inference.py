@@ -404,6 +404,11 @@ class FlowMatchingActionSource:
         # directions so a grasp commitment or its release is never suppressed.
         # Set from `--gripper-command-deadband-percent` in main.py.
         self.gripper_command_deadband_percent = 0.0
+        # Zero-phase FIR low-pass over the chunk's per-step POSE deltas (the
+        # gripper dim is excluded). None = off. Built from
+        # --chunk-knot-filter-hz / --chunk-knot-filter-taps in main.py.
+        self._chunk_knot_filter_taps: np.ndarray | None = None
+        self._chunk_knot_filter_context: np.ndarray | None = None
         self._gripper_last_sent_by_arm: dict[str, float | None] = {"left": None, "right": None}
         # ROTATION-AXIS MASK: per-axis gate over the policy's per-arm rotation
         # action (rx, ry, rz at action indices 3/4/5 and 10/11/12). Each entry
@@ -643,6 +648,7 @@ class FlowMatchingActionSource:
 
     def next_intent(self, snapshot: StateSnapshot, now_monotonic: float) -> CommandIntent | None:
         self._last_overlay_payload = snapshot.payload
+        self._warn_force_control_not_armed(snapshot.payload, now_monotonic)
         blocked, recovery_intent = self._force_recovery_gate(snapshot, now_monotonic)
         if blocked:
             return recovery_intent
@@ -1387,6 +1393,128 @@ class FlowMatchingActionSource:
         self._rollout_step_chunk_seq = sequence
         self._rollout_step_active_chunk_id = sequence
 
+    # Force control is only protecting the arm in these states; everything else
+    # (awaiting_init_tare, zeroing, settling, tare_rejected, fault, disabled)
+    # means the contact reflex is NOT armed.
+    _FORCE_CONTROL_ARMED_STATES = ("armed", "regulating", "retreating")
+
+    def _warn_force_control_not_armed(
+        self, payload: dict[str, Any], now_monotonic: float
+    ) -> None:
+        """Surface an unprotected rollout instead of letting it run silently.
+
+        The FT software zero only runs after an Init Motion
+        (force_torque.<arm>.auto_tare_after_init_motion, and only the init
+        completion clears tare_waiting_for_init_completion), so a rollout started
+        without one sits in `awaiting_init_tare` for its entire duration with the
+        contact reflex never armed. Because safety.floor_constraint is disabled on
+        this profile, that leaves NO floor backstop -- measured 2026-07-31,
+        servo_log_20260731_160030 spent all 24.7 s unarmed with the compliance
+        offset pinned at 0.00 mm.
+
+        Observability only: motion is not gated here.
+        """
+        try:
+            states = {}
+            for arm in ("left", "right"):
+                arm_payload = payload.get(arm)
+                fc = arm_payload.get("force_control") if isinstance(arm_payload, dict) else None
+                if isinstance(fc, dict) and fc.get("enabled"):
+                    states[arm] = str(fc.get("state") or "unknown")
+            if not states:
+                return
+            unarmed = {
+                arm: state
+                for arm, state in states.items()
+                if state not in self._FORCE_CONTROL_ARMED_STATES
+            }
+            last = getattr(self, "_force_control_warn_state", None)
+            if not unarmed:
+                if last is not None:
+                    print(
+                        "[flow-infer] force control ARMED: "
+                        + " ".join(f"{a}={s}" for a, s in sorted(states.items())),
+                        flush=True,
+                    )
+                    self._force_control_warn_state = None
+                return
+            # Re-warn on every state change, then at most every 5 s, so a long
+            # unprotected run keeps saying so without flooding the terminal.
+            key = tuple(sorted(unarmed.items()))
+            last_ns = float(getattr(self, "_force_control_warn_at", 0.0) or 0.0)
+            if key == last and (now_monotonic - last_ns) < 5.0:
+                return
+            self._force_control_warn_state = key
+            self._force_control_warn_at = now_monotonic
+            print(
+                "[flow-infer] WARNING force control NOT ARMED: "
+                + " ".join(f"{a}={s}" for a, s in key)
+                + " -- the contact reflex is inactive and safety.floor_constraint "
+                  "is disabled, so this arm has no floor backstop. The FT zero only "
+                  "runs after an Init Motion; run one before the rollout.",
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception:  # noqa: BLE001 - telemetry must never affect control.
+            return
+
+    # Pose dims of the 14-D action row, per arm. Index 6/13 are the GRIPPER and are
+    # deliberately excluded: that channel is near-binary and low-passing it would
+    # blunt the close, which is the one thing a grasp cannot afford.
+    _CHUNK_POSE_DIMS = tuple(range(0, 6)) + tuple(range(7, 13))
+
+    def _band_limit_chunk(self, chunk: np.ndarray) -> np.ndarray:
+        """Zero-phase FIR low-pass over the chunk's per-step pose deltas.
+
+        Measured 2026-07-31 (left arm, the one that vibrates): the policy's own
+        30 Hz action stream already carries 26.5% of its energy at 5-10 Hz, versus
+        2.3% for a human UMI teleop run doing the SAME pick-and-place on the SAME
+        stand at HIGHER speed. The chunk follower passes that through (27.4%), the
+        IK roughly doubles it into joint space (49.9% of q_sent, vs 1.1% for
+        teleop), and the stand -- a lightly damped structure with modes at ~13 Hz
+        (right) and ~17 Hz (left) -- amplifies the shoulder into the 34.8% of FT
+        energy that is felt and heard as vibration.
+
+        Filtering the DELTAS is equivalent to filtering the integrated knot path
+        (convolution commutes with the cumulative sum) but applies once, uniformly,
+        to execution, the overlay/follower feed and the tracking log.
+
+        Zero phase, not merely small phase: the chunk carries H=24 rows while only
+        ~5 execute, so the forward half of a symmetric kernel reads REAL future
+        knots rather than an extrapolation. The backward half uses the previous
+        chunk's filtered tail so the filter stays continuous across boundaries --
+        edge-padding there would distort exactly the rows about to execute.
+
+        Offline on a recorded left-arm rollout (tools/follower_replay), fir7 @5Hz:
+        5-10 Hz 27.4% -> 18.5%, 13-19 Hz 4.3% -> 1.4%, path deviation p95 2.8 mm,
+        and the z travel (descent authority) preserved to within 1%. Off by default.
+        """
+        taps = getattr(self, "_chunk_knot_filter_taps", None)
+        if taps is None or chunk is None or chunk.ndim != 2:
+            return chunk
+        try:
+            half = len(taps) // 2
+            if chunk.shape[0] <= half:
+                return chunk
+            dims = [d for d in self._CHUNK_POSE_DIMS if d < chunk.shape[1]]
+            body = np.asarray(chunk[:, dims], dtype=np.float64)
+            ctx = getattr(self, "_chunk_knot_filter_context", None)
+            if ctx is not None and ctx.shape == (half, body.shape[1]):
+                left = ctx
+            else:
+                left = np.repeat(body[:1], half, axis=0)
+            padded = np.vstack([left, body, np.repeat(body[-1:], half, axis=0)])
+            out = np.empty_like(body)
+            for k in range(body.shape[1]):
+                out[:, k] = np.convolve(padded[:, k], taps, mode="valid")
+            filtered = np.array(chunk, dtype=chunk.dtype, copy=True)
+            filtered[:, dims] = out.astype(chunk.dtype)
+            # Carry the tail forward so the next chunk's backward half is real data.
+            self._chunk_knot_filter_context = out[-half:].copy()
+            return filtered
+        except Exception:  # noqa: BLE001 - never let conditioning break the rollout
+            return chunk
+
     def _rtc_delay_telemetry(self) -> dict[str, Any] | None:
         """Configured vs realized RTC inference delay for the active chunk.
 
@@ -1601,6 +1729,7 @@ class FlowMatchingActionSource:
             return
         if source_start_index > 0:
             chunk = np.asarray(chunk[source_start_index:], dtype=chunk.dtype)
+        chunk = self._band_limit_chunk(chunk)
         self._active_chunk_metadata = {
             **metadata,
             "observation_step_seq": observation_step_seq,
@@ -2736,6 +2865,10 @@ class FlowMatchingActionSource:
         sched = getattr(self, "_chunk_ensemble", None)
         if sched is not None:
             sched.reset()
+        # The knot filter's backward half is the PREVIOUS chunk's tail; after a
+        # contact/reset epoch that tail no longer describes the motion about to
+        # resume, so drop it and let the next chunk edge-pad instead.
+        self._chunk_knot_filter_context = None
         self._chunk = None
         self._chunk_index = 0
         self._steps_since_boundary = 0

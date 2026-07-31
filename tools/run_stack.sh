@@ -232,16 +232,27 @@ if [ "$SCOPE_DASHBOARD_ON" = "1" ]; then
   echo "[stack] joint scope dashboard state listen: ${SCOPE_DASHBOARD_STATE_LISTEN}"
 fi
 
+# GRIPPER_SERVER_EXTRA_ARGS APPENDS to the gripper_server command line; use it for
+# opt-in diagnostics such as --latency-probe. Do NOT use GRIPPER_SERVER_ARGS for
+# that: in real mode that variable already carries the REQUIRED --pika-sdk-path /
+# camera auto-pairing flags (see above) and setting it from the environment
+# replaces them wholesale, which fails startup with "No module named 'pika'".
+#
+# Gripper loop rate. Left at the stock 50 Hz: a 100 Hz trial changed the measured
+# command->jaw latency by nothing, because --latency-probe showed this stage's
+# queueing is 0.1 ms (the chain is 5.0 ms bridge + 0.1 ms queue + 24.4 ms motor).
+# Override with GRIPPER_SERVER_RATE_HZ if a future measurement justifies it.
 # Start the gripper owner before the arm server. In real mode this is also the
 # camera-serial/USB-topology preflight: if camera_server is absent, the identity
 # is ambiguous, or the Pika backend cannot connect, make run must fail before an
 # arm command endpoint comes up. --no-home-on-connect keeps this startup check
 # motionless. MODE=sim uses the hardware-free backend and has no camera dependency.
 if [ "$GRIPPER_SERVER_ON" = "1" ]; then
-  echo "[stack] gripper_server: backend=$GRIPPER_BACKEND cmd<-127.0.0.1:50410 feedback->127.0.0.1:50420 ${GRIPPER_SERVER_ARGS:-} ${GRIPPER_SERVER_DEBUG_ARGS:-}"
+  echo "[stack] gripper_server: backend=$GRIPPER_BACKEND cmd<-127.0.0.1:50410 feedback->127.0.0.1:50420 ${GRIPPER_SERVER_ARGS:-} ${GRIPPER_SERVER_DEBUG_ARGS:-} ${GRIPPER_SERVER_EXTRA_ARGS:-}"
   "$PY" -u -m policy_runner.gripper_server \
     --backend "$GRIPPER_BACKEND" --bind 127.0.0.1:50410 --state-endpoint 127.0.0.1:50420 \
-    ${GRIPPER_SERVER_DEBUG_ARGS:-} ${GRIPPER_SERVER_ARGS:-} >"$LOG_DIR/gripper_server.log" 2>&1 &
+    --rate "${GRIPPER_SERVER_RATE_HZ:-50}" \
+    ${GRIPPER_SERVER_DEBUG_ARGS:-} ${GRIPPER_SERVER_EXTRA_ARGS:-} ${GRIPPER_SERVER_ARGS:-} >"$LOG_DIR/gripper_server.log" 2>&1 &
   GRIPPER_PID=$!
   PIDS+=("$GRIPPER_PID")
   for _ in $(seq 1 100); do

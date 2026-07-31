@@ -210,6 +210,41 @@ void parsePoseTrackSmdConfig(const YAML::Node& smd, const std::string& path, Pos
     }
 }
 
+void parseFollowerOutputSmdConfig(
+    const YAML::Node& node,
+    const std::string& path,
+    FollowerOutputSmdConfig* out
+) {
+    if (!out) return;
+    validateAllowedKeys(node, {
+        "enable",
+        "nf_linear_hz",
+        "nf_angular_hz",
+        "damping_ratio",
+        "velocity_ff",
+        "velocity_ff_lpf_hz",
+    }, path);
+    if (has(node, "enable")) {
+        out->enable = asBool(node["enable"], path + ".enable");
+    }
+    if (has(node, "nf_linear_hz")) {
+        out->nf_linear_hz = asDouble(node["nf_linear_hz"], path + ".nf_linear_hz");
+    }
+    if (has(node, "nf_angular_hz")) {
+        out->nf_angular_hz = asDouble(node["nf_angular_hz"], path + ".nf_angular_hz");
+    }
+    if (has(node, "damping_ratio")) {
+        out->damping_ratio = asDouble(node["damping_ratio"], path + ".damping_ratio");
+    }
+    if (has(node, "velocity_ff")) {
+        out->velocity_ff = asBool(node["velocity_ff"], path + ".velocity_ff");
+    }
+    if (has(node, "velocity_ff_lpf_hz")) {
+        out->velocity_ff_lpf_hz =
+            asDouble(node["velocity_ff_lpf_hz"], path + ".velocity_ff_lpf_hz");
+    }
+}
+
 void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, RuckigFollowerConfig* out) {
     if (!out) return;
     validateAllowedKeys(node, {
@@ -227,6 +262,7 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         "consume_steps",
         "reserve_steps",
         "smoothing_window",
+        "output_smd",
         "af_damping_beta",
         "af_damping_beta_lin",
         "af_damping_beta_ang",
@@ -308,6 +344,10 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
     }
     if (has(node, "smoothing_window")) {
         out->smoothing_window = asInt(node["smoothing_window"], path + ".smoothing_window");
+    }
+    if (has(node, "output_smd")) {
+        parseFollowerOutputSmdConfig(
+            node["output_smd"], path + ".output_smd", &out->output_smd);
     }
     // Legacy scalar first so the per-class keys below can override it. A config that only sets
     // `af_damping_beta` therefore keeps its exact previous behavior on both axis classes.
@@ -1785,12 +1825,43 @@ void validateConfig(const DualArmConfig& cfg) {
             cfg.force_control.retreat_attempt_window_sec,
             "force_control.retreat_attempt_window_sec"
         );
-        if (cfg.force_control.retreat_distance_m >
-            cfg.force_control.max_pos_offset_m) {
+        // The escape brakes as soon as the worst-axis offset reaches
+        // 0.8*max_pos_offset_m, so a retreat_distance_m at or above that bound is
+        // unreachable and the distance condition silently becomes dead code. The
+        // old check used '>' against the full cap, which let 30 mm == 30 mm pass:
+        // every 2026-07-31 retreat episode then terminated on the 24 mm offset
+        // guard, and the ones that started from an already-ratcheted offset ended
+        // with 6.0-8.8 N still applied. Require real headroom instead.
+        if (cfg.force_control.retreat_distance_m >=
+            0.8 * cfg.force_control.max_pos_offset_m) {
             throw std::runtime_error(
-                "force_control.retreat_distance_m must fit inside "
-                "max_pos_offset_m (the retreat rides the admittance offset)"
+                "force_control.retreat_distance_m must be < 0.8 * max_pos_offset_m "
+                "(the escape brakes at that offset, so a larger distance is "
+                "unreachable and the retreat would terminate on the offset guard)"
             );
+        }
+        if (!std::isfinite(cfg.force_control.retreat_release_force_n) ||
+            cfg.force_control.retreat_release_force_n < 0.0) {
+            throw std::runtime_error(
+                "force_control.retreat_release_force_n must be finite and >= 0 "
+                "(0 disables force-terminated retreat)"
+            );
+        }
+        // A release target at or above the trigger would end the escape on the
+        // tick it began, i.e. no retreat at all. Must sit strictly below both
+        // hard thresholds to be a release condition rather than a no-op.
+        if (cfg.force_control.retreat_release_force_n > 0.0) {
+            const double trigger = std::min(cfg.force_control.left.hard_normal_force_n,
+                                            cfg.force_control.left.hard_force_norm_n);
+            const double trigger_r = std::min(cfg.force_control.right.hard_normal_force_n,
+                                              cfg.force_control.right.hard_force_norm_n);
+            if (cfg.force_control.retreat_release_force_n >= std::min(trigger, trigger_r)) {
+                throw std::runtime_error(
+                    "force_control.retreat_release_force_n must be < the smallest "
+                    "hard_normal_force_n / hard_force_norm_n, otherwise the retreat "
+                    "releases on the tick it triggers"
+                );
+            }
         }
     }
     if (cfg.force_control.force_limit_n > 0.0) {
@@ -2453,6 +2524,26 @@ void validateConfig(const DualArmConfig& cfg) {
         }
         if (rf.smoothing_window < 1 || rf.smoothing_window % 2 == 0) {
             throw std::runtime_error(path + ".smoothing_window must be an odd integer >= 1");
+        }
+        const auto validate_output_nf = [&path](double value, const char* field) {
+            if (!std::isfinite(value) || value <= 0.5 || value >= 25.0) {
+                throw std::runtime_error(
+                    path + ".output_smd." + field + " must be in (0.5, 25) Hz");
+            }
+        };
+        validate_output_nf(rf.output_smd.nf_linear_hz, "nf_linear_hz");
+        validate_output_nf(rf.output_smd.nf_angular_hz, "nf_angular_hz");
+        if (!std::isfinite(rf.output_smd.damping_ratio) ||
+            rf.output_smd.damping_ratio < 0.7 || rf.output_smd.damping_ratio > 2.0) {
+            throw std::runtime_error(
+                path + ".output_smd.damping_ratio must be in [0.7, 2]");
+        }
+        if (!std::isfinite(rf.output_smd.velocity_ff_lpf_hz) ||
+            (rf.output_smd.velocity_ff_lpf_hz != 0.0 &&
+             (rf.output_smd.velocity_ff_lpf_hz <= 0.5 ||
+              rf.output_smd.velocity_ff_lpf_hz >= 25.0))) {
+            throw std::runtime_error(
+                path + ".output_smd.velocity_ff_lpf_hz must be 0 or in (0.5, 25) Hz");
         }
         if (!std::isfinite(rf.af_damping_beta_lin) || rf.af_damping_beta_lin <= 0.0 ||
             rf.af_damping_beta_lin > 1.0) {
@@ -3811,6 +3902,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "backoff_max_velocity_m_s",
             "hard_limit_policy",
             "retreat_distance_m",
+            "retreat_release_force_n",
             "retreat_virtual_force_n",
             "retreat_timeout_sec",
             "retreat_max_attempts",
@@ -3945,6 +4037,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "release_bleed_stiffness")) cfg.force_control.release_bleed_stiffness = parseJointArray(sec["release_bleed_stiffness"], "force_control.release_bleed_stiffness");
         if (has(sec, "hard_limit_policy")) cfg.force_control.hard_limit_policy = lower(asString(sec["hard_limit_policy"], "force_control.hard_limit_policy"));
         if (has(sec, "retreat_distance_m")) cfg.force_control.retreat_distance_m = asDouble(sec["retreat_distance_m"], "force_control.retreat_distance_m");
+        if (has(sec, "retreat_release_force_n")) cfg.force_control.retreat_release_force_n = asDouble(sec["retreat_release_force_n"], "force_control.retreat_release_force_n");
         if (has(sec, "retreat_virtual_force_n")) cfg.force_control.retreat_virtual_force_n = asDouble(sec["retreat_virtual_force_n"], "force_control.retreat_virtual_force_n");
         if (has(sec, "retreat_timeout_sec")) cfg.force_control.retreat_timeout_sec = asDouble(sec["retreat_timeout_sec"], "force_control.retreat_timeout_sec");
         if (has(sec, "retreat_max_attempts")) cfg.force_control.retreat_max_attempts = asInt(sec["retreat_max_attempts"], "force_control.retreat_max_attempts");

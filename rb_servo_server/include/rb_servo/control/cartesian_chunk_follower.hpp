@@ -20,6 +20,8 @@
 
 #include <Eigen/Geometry>
 
+#include <optional>
+
 namespace rb_servo::control {
 
 struct CartesianChunkFollowerConfig {
@@ -131,6 +133,12 @@ class CartesianChunkFollower {
 
   double currentGrip() const { return current_grip_; }
   const Pose6D& lastPose() const { return last_pose_; }
+  // Chained Ruckig end-state velocity for the active segment. Axes 0--2 are
+  // stand-frame translation; axes 3--5 are the unscaled R0_ref-local tangent
+  // coordinates used by tangentPose() (q = R0_ref * exp(theta)). A fresh engage
+  // has only a zero-velocity seed and no solved segment, so it reports no valid
+  // velocity.
+  std::optional<Vec6> currentVelocity() const;
   const FollowerDiag& diag() const { return diag_; }
   double tInSegment() const { return t_in_seg_; }
   std::uint64_t windowWireSeq() const { return window_.wireSeq(); }
