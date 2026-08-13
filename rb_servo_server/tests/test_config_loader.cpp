@@ -377,12 +377,16 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(left_force.hard_force_norm_n, 12.0));
         RB_CHECK(near(left_force.hard_force_norm_n, right_force.hard_force_norm_n));
         // Released-state offset bleed: K=0 translations drain their residual
-        // offset (tau = 26/13 ~= 2 s) only while the block is fully released;
-        // rotations keep 0 (their 3.0 Nm/rad spring already recenters).
+        // offset only while the block is fully released; rotations keep 0
+        // (their 3.0 Nm/rad spring already recenters).
+        // 2026-08-12: 13 -> 26 (tau = 26/26 ~= 1 s). At tau = 2 s the drain was
+        // slower than the policy's re-approach period, so retreats ratcheted
+        // (servo_log_20260812_114302, left arm). The return stays inside the
+        // 60 mm/s and 0.8 m/s^2 response caps and overdamped (zeta = 1.80).
         for (std::size_t axis = 0; axis < 3; ++axis) {
             RB_CHECK(near(stack_real.force_control.stiffness[axis], 0.0));
             RB_CHECK(near(
-                stack_real.force_control.release_bleed_stiffness[axis], 13.0));
+                stack_real.force_control.release_bleed_stiffness[axis], 26.0));
         }
         for (std::size_t axis = 3; axis < 6; ++axis) {
             RB_CHECK(near(

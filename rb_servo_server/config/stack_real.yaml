@@ -873,7 +873,22 @@ force_control:
   # the same tick, so the in-contact spring re-press that caused the
   # 2026-07-17 372 N spike (K=80 always-on) remains impossible. Rotations
   # keep 0 (they already recenter via their 3.0 Nm/rad spring).
-  release_bleed_stiffness: [13.0, 13.0, 13.0, 0.0, 0.0, 0.0]
+  #
+  # 2026-08-12: 13 -> 26 (tau 2.0 -> 1.0 s). At K=13 the drain is slower than
+  # the policy's re-approach period, so a single reflex costs ~10 s of lost z
+  # authority and repeated presses still ratchet. Measured on
+  # servo_log_20260812_114302 (E1 baseline, left arm): a retreat to -33 mm took
+  # 11 s to reach -0.11 mm, and ticks 28000-30000 show the offset oscillating
+  # -41/-25/-24/-14/-24 mm because each re-approach landed before the previous
+  # offset had drained. Simulated from the 45 mm cap (m=2, c=26): K=13 reaches
+  # 95% at 5.8 s / 0.5 mm residual at 8.7 s, peak 20 mm/s and 0.29 m/s^2; K=26
+  # reaches 95% at 2.8 s / 0.5 mm at 4.2 s, peak 39 mm/s and 0.59 m/s^2 -- both
+  # still inside the 60 mm/s and 0.8 m/s^2 response caps, so the return stays
+  # spring-shaped rather than envelope-saturated. K=39 was rejected: its
+  # 0.88 m/s^2 exceeds the acceleration cap. Damping ratio stays overdamped
+  # (zeta = c/(2*sqrt(K*m)) = 1.80), so there is no recenter overshoot that
+  # could drive the tool back into the surface.
+  release_bleed_stiffness: [26.0, 26.0, 26.0, 0.0, 0.0, 0.0]
   # 2026-07-24 reflex-only profile: a 20 N translation deadband suppresses
   # always-on admittance below the reflex threshold; disabled rotation axes
   # retain their characterized 0.10 Nm values. The higher deadband reduces
