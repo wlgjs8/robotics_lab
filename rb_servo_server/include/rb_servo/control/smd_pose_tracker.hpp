@@ -74,10 +74,26 @@ public:
 
     // Feed the most recent IK solve's task-Jacobian min singular value so the NEXT
     // step() can scale the tracking velocity down near a singularity (manipulability
-    // guard, config singularity_scale_*). A value <= 0 means the solve did not compute
-    // the SVD (common in healthy poses) -> treated as unknown -> no scaling. Only a real
-    // positive sigma scales. Pure velocity scaling: never touches IK damping/iterations.
-    void setMinSingular(double sigma) { last_min_singular_ = sigma; }
+    // guard, config singularity_scale_*). Pure velocity scaling: never touches IK
+    // damping/iterations.
+    //
+    // A sample <= 0 means "this solve did not measure sigma" — the IK converged before
+    // taking a DLS step (common in healthy poses: ~41% of solves) or it failed outright.
+    // Such a sample is NOT a reading of 'well conditioned'; it carries no information, so
+    // it must not overwrite the last real measurement. Overwriting it was a live bug: an
+    // IK max_iterations failure fed 0.0, the guard read that as unknown, and the velocity
+    // cap snapped back to FULL SPEED on exactly the deepest-singular ticks. Measured
+    // 2026-08-14 (logs/servo_log_20260814_100223.csv, left arm): during two singularity
+    // events the scale alternated 0.12 <-> 1.0 at 6-18 Hz on 38-43% of ticks. Holding the
+    // last real sample keeps the guard engaged until the arm actually backs out.
+    //
+    // This is not free in healthy operation: replaying that run's sigma, 16% of normal
+    // teleop ticks change (they sit inside the ramp and used to be spuriously released to
+    // full speed by an unmeasured neighbour), mean scale 0.746 -> 0.717 on those ticks.
+    // That is the guard doing what it was configured to do, not a regression.
+    void setMinSingular(double sigma) {
+        if (sigma > 0.0) last_min_singular_ = sigma;
+    }
 
     Pose6D goalPose() const;
 

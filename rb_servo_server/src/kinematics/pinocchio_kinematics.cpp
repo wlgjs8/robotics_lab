@@ -625,6 +625,14 @@ IkResult PinocchioKinematics::solveIkDamped(
         iterations,
         elapsedUs()
     );
+    // Carry the conditioning out of the FAILURE return too. A max_iterations failure is
+    // the deepest-singular tick there is — the DLS damping ramp is precisely what ran the
+    // step size down until the iteration budget ran out — so dropping sigma here both
+    // blinds the log at the only tick that explains the stall AND (via setMinSingular)
+    // releases the SMD manipulability guard to full speed exactly there. See
+    // config/stack_real.yaml singular_region_eps/damping_max notes.
+    result.min_singular_value = last_min_singular_value;
+    result.applied_damping = last_applied_damping;
     if (hit_joint_limit) {
         // Name the offending joint so a joint_limit failure is actionable (which axis
         // pinned, and how far inside its limit) instead of just "joint_limit".

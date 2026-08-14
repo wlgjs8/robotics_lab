@@ -1138,9 +1138,25 @@ cartesian_control:
         # so full=0.15 was throttling normal motion (guard active 33% of ticks -> "slow").
         # 0.12 keeps full speed through normal operation and only engages when genuinely
         # closer in (lurch ~0.11, deep ~0.03). If lurches return, lower scale_min/floor.
+        # 2026-08-14 (left arm, logs/servo_log_20260814_100223.csv): lurches returned —
+        # following the note above, scale_min 0.12 -> 0.02. Two singularity events (wrist,
+        # J5 through 0 at t=46s; elbow, J3 through 0 at t=79s) drove sigma to 0, IK iters
+        # 1->100 -> max_iterations, and the IK landed on a branch up to 59.9 deg away
+        # EVERY tick (median raw jump 5.9, p90 48.0; all 377 branch-jump ticks burned both
+        # damping retries without recovering). q_actual peaked at 415 deg/s and the
+        # commanded pose swung 18-30 deg out and back at 6-18 Hz.
+        # 0.12 was not enough to stop entry: at the floor the SMD still tracks at 12% of
+        # 0.30 m/s = 36 mm/s, which walks straight into the exact singularity. 0.02 gives
+        # 6 mm/s — the arm effectively stops and the operator backs out — while keeping
+        # the invariant above (scale > 0 = never freezes, recovers on its own).
+        # Bounded by measurement, not guesswork: in that run 0 of 22,009 normal teleop
+        # ticks (Running + ik ok, event windows excluded) had 0 < sigma <= 0.05, i.e. the
+        # floor region is never touched in healthy operation, while 29% of the two event
+        # windows sat in it. full_sigma/floor_sigma are UNCHANGED, so the onset of the
+        # ramp — the part measured to throttle normal motion — is untouched.
         singularity_scale_full_sigma: 0.12
         singularity_scale_floor_sigma: 0.05
-        singularity_scale_min: 0.12
+        singularity_scale_min: 0.02
       max_smd_goal_lead_m: 0.080
       max_smd_goal_lead_rad: 0.40 #0.35
     flow_infer_smooth:

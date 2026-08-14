@@ -349,6 +349,64 @@ bool testSingularityVelocityScaling() {
     return true;
 }
 
+// Regression for the 2026-08-14 left-arm singularity lurch. An IK solve that fails
+// (max_iterations) or converges before taking a DLS step reports sigma 0.0. That is the
+// ABSENCE of a measurement, not a reading of "well conditioned", so it must not clear the
+// last real sigma and hand the tracker its full velocity cap back. On hardware it did
+// exactly that: the scale alternated 0.12 <-> 1.0 at 6-18 Hz across the singularity,
+// on 38-43% of the ticks in the two event windows.
+bool testUnmeasuredSigmaDoesNotReleaseTheSingularityGuard() {
+    rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
+    cfg.natural_frequency_linear_hz = 1.0;
+    cfg.max_linear_velocity_m_s = 0.10;
+    cfg.singularity_scale_full_sigma = 0.10;
+    cfg.singularity_scale_floor_sigma = 0.04;
+    cfg.singularity_scale_min = 0.20;
+
+    // Feed `first` once, then `rest` on every subsequent solve, and report peak speed.
+    auto peak_velocity_after = [&](double first, double rest) {
+        rb_servo::SmdPoseTracker t(cfg);
+        t.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+        t.updateGoalFromCommand({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+        t.updateGoalFromCommand({1.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+        t.setMinSingular(first);
+        double vmax = 0.0, prev = 0.0;
+        for (int i = 0; i < 800; ++i) {
+            t.setMinSingular(rest);
+            const double x = t.step(kDt).x;
+            vmax = std::max(vmax, (x - prev) / kDt);
+            prev = x;
+        }
+        return vmax;
+    };
+
+    const double still_measured = peak_velocity_after(0.04, 0.04);
+    const double unmeasured = peak_velocity_after(0.04, 0.0);   // IK failure ticks
+    const double negative = peak_velocity_after(0.04, -1.0);    // explicit "unknown"
+    RB_CHECK(unmeasured < 0.03);                                // stays throttled
+    RB_CHECK(std::abs(unmeasured - still_measured) < 1e-9);     // identical to holding it
+    RB_CHECK(std::abs(negative - still_measured) < 1e-9);
+    // A real recovery still releases the guard — this must not become a one-way latch.
+    RB_CHECK(peak_velocity_after(0.04, 0.20) > 0.08);
+
+    // reset()/deactivate() drop the retained sample: a re-anchor is a new pose context.
+    rb_servo::SmdPoseTracker t(cfg);
+    t.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    t.setMinSingular(0.04);
+    t.deactivate();
+    t.reset({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    t.updateGoalFromCommand({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    t.updateGoalFromCommand({1.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    double vmax = 0.0, prev = 0.0;
+    for (int i = 0; i < 800; ++i) {
+        const double x = t.step(kDt).x;
+        vmax = std::max(vmax, (x - prev) / kDt);
+        prev = x;
+    }
+    RB_CHECK(vmax > 0.08);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -363,6 +421,7 @@ int main() {
     if (!testDeactivateAndReanchor()) return 1;
     if (!testReengageRelatchRejectsStaleJump()) return 1;
     if (!testSingularityVelocityScaling()) return 1;
+    if (!testUnmeasuredSigmaDoesNotReleaseTheSingularityGuard()) return 1;
     std::cout << "smd_pose_tracker tests passed\n";
     return 0;
 }

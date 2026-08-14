@@ -158,6 +158,7 @@ bool testRepositoryConfigsParse() {
         bool has_umi = false;
         bool has_flow = false;
         const rb_servo::TcpPoseTargetProfileConfig* flow_profile = nullptr;
+        const rb_servo::TcpPoseTargetProfileConfig* umi_profile = nullptr;
         for (const auto& profile : stack_real.cartesian_control.tcp_pose_target_profiles) {
             has_spacemouse = has_spacemouse || profile.name == "spacemouse_precise";
             has_umi = has_umi || profile.name == "umi_large_smooth";
@@ -165,11 +166,21 @@ bool testRepositoryConfigsParse() {
             if (profile.name == "flow_infer_smooth") {
                 flow_profile = &profile;
             }
+            if (profile.name == "umi_large_smooth") {
+                umi_profile = &profile;
+            }
         }
         RB_CHECK(has_spacemouse);
         RB_CHECK(has_umi);
         RB_CHECK(has_flow);
         RB_CHECK(flow_profile != nullptr);
+        RB_CHECK(umi_profile != nullptr);
+        // UMI teleop singularity guard. The ramp onset (full/floor) is the part that was
+        // measured to throttle normal motion, so it is pinned; scale_min was lowered
+        // 0.12 -> 0.02 on 2026-08-14 after the left-arm lurch (see stack_real.yaml).
+        RB_CHECK(near(umi_profile->pose_track_smd.singularity_scale_full_sigma, 0.12));
+        RB_CHECK(near(umi_profile->pose_track_smd.singularity_scale_floor_sigma, 0.05));
+        RB_CHECK(near(umi_profile->pose_track_smd.singularity_scale_min, 0.02));
         RB_CHECK(near(flow_profile->pose_track_smd.natural_frequency_linear_hz, 1.6));
         RB_CHECK(near(flow_profile->pose_track_smd.natural_frequency_angular_hz, 1.6));
         RB_CHECK(near(flow_profile->pose_track_smd.max_linear_velocity_m_s, 0.50));
