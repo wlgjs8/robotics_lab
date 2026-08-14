@@ -9,6 +9,7 @@ rb_servo_gui/cog_calibration.py
 rb_servo_gui/cog_gui.py
 rb_servo_gui/command_client.py
 rb_servo_gui/geometry.py
+rb_servo_gui/head_preview.py
 rb_servo_gui/models.py
 rb_servo_gui/overlay_receiver.py
 rb_servo_gui/plane_fit.py
@@ -30,4 +31,5 @@ tests/test_chunk_overlay.py
 tests/test_cog_calibration.py
 tests/test_cog_gui.py
 tests/test_gui_contracts.py
+tests/test_head_preview.py
 tests/test_realtime_health.py

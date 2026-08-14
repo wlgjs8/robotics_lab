@@ -171,6 +171,36 @@ only this panel remains waiting/disabled; GUI and stack startup continue.
 RealSense `actual_exposure_us`, `gain_level`, and `auto_exposure` fields are
 optional and display as `N/A` when the device/backend does not expose them.
 
+## Head-Camera View
+
+The same `카메라 품질` tab carries an optional head (D435 color) viewer below the
+wrist previews. It is display-only: a separate ZMQ subscriber on the head bundle
+group (`camera.bundle.stereo`, stream `head.color`) plus the same shared-memory
+ring the wrist previews use. It never feeds recording, the model, or a safety
+decision — policy inference keeps reading the wrist-only `camera.bundle.policy`
+group, so enabling this view changes nothing about what the model sees.
+
+The `head view 표시 (5 Hz)` checkbox is off by default and gates the receiver
+itself, not just the panel: while off, no head frame is copied out of shared
+memory (the source is 1280x720 at 30 fps). While on, one frame per 200 ms is
+copied, decimated to ~480 px wide, and JPEG-encoded for the browser. The status
+line shows the source/preview resolution, frame age, and staleness.
+
+Rig dependence: `make cam-up` (head D435 + both wrists) publishes the head
+bundle group, so the view is live. `make cam-up-wrists` has no head camera at
+all, so the panel stays `waiting` — that is the expected wrist-only state, not
+an error. The legacy `head_wrists.yaml` rig has no per-group split and carries
+`head.color` on `camera.bundle`; point the topic override there for that rig.
+
+Environment overrides:
+
+```bash
+RB_GUI_HEAD_PREVIEW=0
+RB_GUI_HEAD_PREVIEW_ENDPOINT=tcp://127.0.0.1:5600
+RB_GUI_HEAD_PREVIEW_TOPIC=camera.bundle.stereo
+RB_GUI_HEAD_PREVIEW_STREAM=head.color
+```
+
 ## Running Tests
 
 ```bash

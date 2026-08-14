@@ -238,6 +238,90 @@ static bool test_escape_head_followed_precisely() {
     return true;
 }
 
+// ---------------------------------------------------------------------------------
+// initMotionRequestIsFresh: a streaming client must not relaunch the planner every tick.
+//
+// Regression target (2026-08-13): freshness was `request_seq != command.seq`. A one-shot
+// GUI command is re-served from the command buffer with a CONSTANT seq, so that held; but
+// policy_runner's arm_init latch re-emits the same logical InitMotion every tick with a
+// FRESH seq. Every tick then looked like a new press, launch_plan() reset status to
+// Planning and cleared the waypoints, and the async plan was discarded before it could be
+// consumed — 1722 "planning collision-free path" vs 2 "plan found", arm held in place
+// until the stream stopped.
+// ---------------------------------------------------------------------------------
+namespace {
+
+JointArray q_of(double v) {
+    JointArray q{};
+    q.fill(v);
+    return q;
+}
+
+InitMotionRequestView streaming_exec(uint64_t seq, bool active) {
+    InitMotionRequestView ex;
+    ex.request_seen = true;
+    ex.request_seq = seq;
+    ex.sequence_active = active;
+    ex.has_target = true;
+    ex.left_active = false;
+    ex.right_active = true;
+    ex.target_left = q_of(0.0);
+    ex.target_right = q_of(30.0);
+    return ex;
+}
+
+}  // namespace
+
+bool test_request_freshness() {
+    const JointArray same_goal = q_of(30.0);
+    const JointArray other_goal = q_of(45.0);
+    const JointArray zero = q_of(0.0);
+    const double tol = 0.5;
+
+    // First request ever seen -> fresh (plan must launch).
+    {
+        InitMotionRequestView ex;  // request_seen = false
+        RB_CHECK(initMotionRequestIsFresh(ex, 100, false, true, zero, same_goal, tol));
+    }
+    // One-shot GUI command re-served with the SAME seq -> not fresh (already handled).
+    {
+        const InitMotionRequestView ex = streaming_exec(100, /*active=*/true);
+        RB_CHECK(!initMotionRequestIsFresh(ex, 100, false, true, zero, same_goal, tol));
+    }
+    // THE BUG: streaming latch, new seq every tick, identical goal, sequence in flight.
+    // Must NOT relaunch, otherwise the planner is reset forever.
+    {
+        const InitMotionRequestView ex = streaming_exec(100, /*active=*/true);
+        for (uint64_t seq = 101; seq < 120; ++seq) {
+            RB_CHECK(!initMotionRequestIsFresh(ex, seq, false, true, zero, same_goal, tol));
+        }
+    }
+    // Within tolerance counts as the same goal (jitter must not relaunch).
+    {
+        const InitMotionRequestView ex = streaming_exec(100, /*active=*/true);
+        JointArray jittered = same_goal;
+        jittered[2] += tol * 0.5;
+        RB_CHECK(!initMotionRequestIsFresh(ex, 101, false, true, zero, jittered, tol));
+    }
+    // A genuine RETARGET while in flight is still honoured.
+    {
+        const InitMotionRequestView ex = streaming_exec(100, /*active=*/true);
+        RB_CHECK(initMotionRequestIsFresh(ex, 101, false, true, zero, other_goal, tol));
+    }
+    // Pressing again AFTER the sequence finished replans even for the same endpoint: the
+    // robot may have been moved since, so the new press must remain usable.
+    {
+        const InitMotionRequestView ex = streaming_exec(100, /*active=*/false);
+        RB_CHECK(initMotionRequestIsFresh(ex, 101, false, true, zero, same_goal, tol));
+    }
+    // Changing which arms are selected is a new request even mid-flight.
+    {
+        const InitMotionRequestView ex = streaming_exec(100, /*active=*/true);
+        RB_CHECK(initMotionRequestIsFresh(ex, 101, true, true, same_goal, same_goal, tol));
+    }
+    return true;
+}
+
 int main() {
     bool ok = true;
     ok = test_projection_advances_past_cut_corner() && ok;
@@ -245,6 +329,7 @@ int main() {
     ok = test_escape_head_asymptotic_tracker_does_not_deadlock() && ok;
     ok = test_degenerate_segment_is_passed() && ok;
     ok = test_escape_head_followed_precisely() && ok;
+    ok = test_request_freshness() && ok;
     if (!ok) {
         std::cerr << "test_init_motion_pursuit: FAILED\n";
         return 1;

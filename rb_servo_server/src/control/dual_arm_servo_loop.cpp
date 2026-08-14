@@ -10048,12 +10048,43 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
     // reset above, so it is idle and not continued here.)
     const bool left_exec_requested = is_init && left_init;
     const bool right_exec_requested = is_init && right_init && !left_init;
-    const bool left_exec_fresh = left_exec_requested &&
-        (!left_init_motion_exec_.request_seen ||
-         left_init_motion_exec_.request_seq != command.seq);
-    const bool right_exec_fresh = right_exec_requested &&
-        (!right_init_motion_exec_.request_seen ||
-         right_init_motion_exec_.request_seq != command.seq);
+    // Freshness is a NEW OPERATOR REQUEST, not a new packet. A one-shot GUI command is
+    // re-delivered from the command buffer with a CONSTANT seq, so seq alone used to be a
+    // good proxy — but policy_runner's arm_init latch (ArmInitOverrideController::
+    // compose_intent) re-emits the SAME logical InitMotion every tick, and every packet
+    // carries a fresh seq. That made each tick look like a new press: launch_plan() reset
+    // status to Planning and cleared the waypoints, so the async planner's result was
+    // discarded before takePlannerResult() could consume it, and the arm sat held in place
+    // (rewrite_selected holds while Planning) until the stream stopped. Evidence
+    // (2026-08-13, servo_log_20260813_155705): 1722 "planning collision-free path" vs 2
+    // "plan found"; the right arm was pinned in `planning` for ~3.7k ticks and reached the
+    // init pose 118 ticks after flow-infer was killed. A committed sequence therefore
+    // relaunches only on a materially different goal; an idle/done/failed exec still
+    // replans on the next distinct seq, so pressing again after completion still works.
+    const double init_request_tol_deg = std::max(
+        0.0,
+        std::max(config_.safety.init_motion_planner.noop_tol_deg,
+                 config_.safety.init_motion_planner.waypoint_tol_deg));
+    const auto exec_is_fresh = [&](const InitMotionExec& ex, bool requested,
+                                   bool request_left, bool request_right) {
+        if (!requested) return false;
+        InitMotionRequestView view;
+        view.request_seen = ex.request_seen;
+        view.request_seq = ex.request_seq;
+        view.sequence_active = sequence_active(ex);
+        view.has_target = ex.has_target;
+        view.left_active = ex.left_active;
+        view.right_active = ex.right_active;
+        view.target_left = ex.target_left;
+        view.target_right = ex.target_right;
+        return initMotionRequestIsFresh(
+            view, command.seq, request_left, request_right,
+            command.left.q_target_deg, command.right.q_target_deg, init_request_tol_deg);
+    };
+    const bool left_exec_fresh =
+        exec_is_fresh(left_init_motion_exec_, left_exec_requested, true, right_init);
+    const bool right_exec_fresh =
+        exec_is_fresh(right_init_motion_exec_, right_exec_requested, false, true);
     if (left_exec_requested) {
         process_exec(
             left_init_motion_exec_, PlannerRequester::LeftInit, true, right_init,
@@ -10073,6 +10104,40 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                      right_init_motion_exec_.right_active, false);
     }
     return command;
+}
+
+bool initMotionRequestIsFresh(
+    const InitMotionRequestView& ex,
+    uint64_t command_seq,
+    bool request_left,
+    bool request_right,
+    const JointArray& command_target_left,
+    const JointArray& command_target_right,
+    double tol_deg) {
+    // First request this exec has ever seen.
+    if (!ex.request_seen) return true;
+    // Same packet re-served from the command buffer (one-shot GUI command held across
+    // ticks) — already handled on the tick it arrived.
+    if (ex.request_seq == command_seq) return false;
+    // Distinct seq with no committed sequence in flight: a genuine new press. Replan even
+    // when the endpoint matches the previous one — the robot may have been moved since
+    // that sequence completed, so the new press must remain usable.
+    if (!ex.sequence_active) return true;
+    // Distinct seq while Planning/Executing. This is the streaming-client case: relaunch
+    // ONLY for a materially different goal, otherwise the per-tick re-emission would reset
+    // the planner forever and the arm would never leave the hold.
+    if (!ex.has_target) return true;
+    if (ex.left_active != request_left || ex.right_active != request_right) return true;
+    const double tol = std::max(0.0, tol_deg);
+    for (int i = 0; i < kDof; ++i) {
+        if (request_left && std::abs(command_target_left[i] - ex.target_left[i]) > tol) {
+            return true;
+        }
+        if (request_right && std::abs(command_target_right[i] - ex.target_right[i]) > tol) {
+            return true;
+        }
+    }
+    return false;
 }
 
 PursuitStep pursueWaypointsStep(

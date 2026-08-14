@@ -934,4 +934,34 @@ PursuitStep pursueWaypointsStep(
     double lookahead_deg,
     int escape_count = 0);
 
+// Minimal view of an InitMotionExec for the freshness predicate below (the exec type
+// itself is private to DualArmServoLoop).
+struct InitMotionRequestView {
+    bool request_seen = false;
+    uint64_t request_seq = 0;
+    bool sequence_active = false;  // status is Planning or Executing
+    bool has_target = false;
+    bool left_active = false;
+    bool right_active = false;
+    JointArray target_left{};
+    JointArray target_right{};
+};
+
+// True when an incoming init_motion command is a NEW OPERATOR REQUEST for this exec and
+// must (re)launch the planner, rather than a re-delivery of the request already in
+// flight. Packet seq alone is NOT sufficient: a one-shot GUI command is re-served from
+// the command buffer with a constant seq, but policy_runner's arm_init latch re-emits the
+// same logical InitMotion every tick with a FRESH seq. Treating the latter as a new press
+// relaunched the planner every tick and the async plan was never consumed (see
+// applyInitMotionSequencer). Stateless, so it is unit-testable in isolation (see
+// test_init_motion_pursuit).
+bool initMotionRequestIsFresh(
+    const InitMotionRequestView& ex,
+    uint64_t command_seq,
+    bool request_left,
+    bool request_right,
+    const JointArray& command_target_left,
+    const JointArray& command_target_right,
+    double tol_deg);
+
 }  // namespace rb_servo

@@ -22,6 +22,12 @@ from .camera_quality import (
     camera_quality_html,
 )
 from .command_client import CommandClient
+from .head_preview import (
+    DEFAULT_HEAD_STREAM,
+    DEFAULT_HEAD_TOPIC,
+    HeadPreviewReceiver,
+    HeadPreviewStore,
+)
 from .cog_gui import (
     CogGuiSession,
     CogGuiStatus,
@@ -3019,12 +3025,14 @@ def build_gui(
     chunk_overlay_store: ChunkOverlayStore | None = None,
     recording_status_store: RecordingStatusStore | None = None,
     camera_quality_store: CameraQualityStore | None = None,
+    head_preview_store: HeadPreviewStore | None = None,
 ) -> dict[str, Any]:
     handles: dict[str, Any] = {}
     handles["circle_overlay_enabled"] = overlay_store is not None
     handles["chunk_overlay_enabled"] = chunk_overlay_store is not None
     handles["recording_status_store"] = recording_status_store
     handles["camera_quality_store"] = camera_quality_store
+    handles["head_preview_store"] = head_preview_store
     # Dark mode is the default; set RB_GUI_DARK_MODE=0 to launch in light mode.
     dark_default = os.environ.get("RB_GUI_DARK_MODE", "1") != "0"
     handles["dark_mode"] = dark_default
@@ -3379,6 +3387,8 @@ def build_gui(
                     preview_handle = handles.get(f"camera_quality_preview_{arm}")
                     if preview_handle is not None:
                         preview_handle.visible = visible
+
+        _build_head_preview_panel(server, handles, head_preview_store)
 
     with tabs.add_tab("조작"):
         _op_tabs = server.gui.add_tab_group()
@@ -5868,6 +5878,78 @@ def _update_stereo_wrist(handles: dict[str, Any]) -> None:
         st.value = ("off" if not on else (", ".join(parts_status) if parts_status else "waiting…"))
 
 
+def _build_head_preview_panel(
+    server: Any,
+    handles: dict[str, Any],
+    head_preview_store: HeadPreviewStore | None,
+) -> None:
+    """Head (D435 color) viewer next to the wrist previews. Display-only.
+
+    The head rig is optional — `make cam-up-wrists` runs without the D435 — so an
+    absent topic stays a `waiting` status instead of an error. Model inference is
+    unaffected either way: it reads `camera.bundle.policy`, which is wrist-only.
+    """
+
+    if head_preview_store is None:
+        server.gui.add_text(
+            "Head view",
+            initial_value="disabled (RB_GUI_HEAD_PREVIEW=0)",
+            disabled=True,
+        )
+        return
+    handles["head_preview_toggle"] = server.gui.add_checkbox(
+        "head view 표시 (5 Hz)",
+        initial_value=False,
+    )
+    handles["head_preview_status"] = server.gui.add_text(
+        "Head view",
+        initial_value=head_preview_store.status_text(),
+        disabled=True,
+    )
+    handles["head_preview_image"] = server.gui.add_image(
+        np.zeros((270, 480, 3), dtype=np.uint8),
+        label="head",
+        format="jpeg",
+        jpeg_quality=75,
+        visible=False,
+    )
+    handles["head_preview_last_monotonic"] = float("-inf")
+
+    @handles["head_preview_toggle"].on_update
+    def _(_: Any) -> None:
+        enabled = bool(handles["head_preview_toggle"].value)
+        # Gate the receiver too: while off it skips the 1280x720 shm copy.
+        head_preview_store.set_enabled(enabled)
+        image_handle = handles.get("head_preview_image")
+        if image_handle is not None:
+            image_handle.visible = enabled
+
+
+def _update_head_preview(handles: dict[str, Any]) -> None:
+    store = handles.get("head_preview_store")
+    if not isinstance(store, HeadPreviewStore):
+        return
+    now = time.monotonic()
+    status_handle = handles.get("head_preview_status")
+    if status_handle is not None:
+        status_handle.value = store.status_text(now=now)
+    toggle = handles.get("head_preview_toggle")
+    if not bool(getattr(toggle, "value", False)):
+        return
+    last = float(handles.get("head_preview_last_monotonic", float("-inf")))
+    if now - last < 0.2:
+        return
+    image = store.preview()
+    image_handle = handles.get("head_preview_image")
+    if image is not None and image_handle is not None:
+        try:
+            image_handle.image = image
+            image_handle.visible = True
+        except Exception:
+            pass
+    handles["head_preview_last_monotonic"] = now
+
+
 def _update_camera_quality(handles: dict[str, Any]) -> None:
     store = handles.get("camera_quality_store")
     if not isinstance(store, CameraQualityStore):
@@ -5948,6 +6030,7 @@ def update_gui(
         _update_tcp_linear_selection_buttons(handles)
     stale = store.is_stale()
     _update_camera_quality(handles)
+    _update_head_preview(handles)
     # Stash the live snapshot so the TCP PTP fields can mirror the current pose
     # every tick (the patched viser NumberInput ignores server updates while it is
     # focused, so a periodic repaint never clobbers a value the operator is typing).
@@ -6602,6 +6685,24 @@ def main(argv: list[str] | None = None) -> None:
             },
         )
         camera_quality_receiver.start()
+    # Optional head (D435 color) viewer. Independent of the wrist quality path so
+    # it works with RB_GUI_CAMERA_QUALITY=0, and stays quiet on the wrist-only rig
+    # (`make cam-up-wrists` publishes no head bundle group).
+    head_preview_store: HeadPreviewStore | None = None
+    head_preview_receiver: HeadPreviewReceiver | None = None
+    if os.environ.get("RB_GUI_HEAD_PREVIEW", "1") != "0":
+        head_preview_store = HeadPreviewStore(
+            topic=os.environ.get("RB_GUI_HEAD_PREVIEW_TOPIC", DEFAULT_HEAD_TOPIC),
+            stream=os.environ.get("RB_GUI_HEAD_PREVIEW_STREAM", DEFAULT_HEAD_STREAM),
+        )
+        head_preview_receiver = HeadPreviewReceiver(
+            head_preview_store,
+            endpoint=os.environ.get(
+                "RB_GUI_HEAD_PREVIEW_ENDPOINT",
+                "tcp://127.0.0.1:5600",
+            ),
+        )
+        head_preview_receiver.start()
     receiver = StateReceiver(store, host=state_host, port=state_port)
     receiver.start()
     # 스테레오 pointcloud 워커(camera_server 컨테이너) 구독. 고급→Pointcloud 토글로 표시.
@@ -6669,6 +6770,7 @@ def main(argv: list[str] | None = None) -> None:
         chunk_overlay_store=chunk_overlay_store,
         recording_status_store=recording_status_store,
         camera_quality_store=camera_quality_store,
+        head_preview_store=head_preview_store,
     )
     handles["_stereo_store"] = stereo_store
     # Global foot-pedal hotkeys (PCsensor FootSwitch -> a/b/c), read straight from the
@@ -6695,9 +6797,15 @@ def main(argv: list[str] | None = None) -> None:
         if camera_quality_receiver is not None
         else ", camera quality disabled"
     )
+    head_preview_status = (
+        f", head view {head_preview_store.topic}/{head_preview_store.stream}"
+        if head_preview_receiver is not None and head_preview_store is not None
+        else ", head view disabled"
+    )
     print(
         f"rb_servo_gui listening on http://{host}:{port}, UDP state {state_host}:{state_port}"
-        f"{overlay_status}{chunk_overlay_status}{recording_status}{camera_quality_status}",
+        f"{overlay_status}{chunk_overlay_status}{recording_status}{camera_quality_status}"
+        f"{head_preview_status}",
         flush=True,
     )
 
@@ -6717,6 +6825,8 @@ def main(argv: list[str] | None = None) -> None:
             camera_quality_receiver.stop()
         if camera_quality_store is not None:
             camera_quality_store.close()
+        if head_preview_receiver is not None:
+            head_preview_receiver.stop()
         stereo_receiver.stop()
         if overlay_receiver is not None:
             overlay_receiver.stop()

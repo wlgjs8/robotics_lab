@@ -3710,10 +3710,11 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(left_target.position, (0.32, 0.13, 0.45))
         self.assertFalse(left_tcp.visible)
         self.assertTrue(left_ref.visible)
-        self.assertFalse(left_tcp_label.visible)
         self.assertTrue(left_ref_label.visible)
-        self.assertEqual(left_tcp_label.position, (0.32, 0.13, 0.495))
         self.assertEqual(left_ref_label.position, (0.41, 0.21, 0.555))
+        # The actual-TCP gizmo carries no caption; a stale handle is never driven.
+        self.assertIsNone(left_tcp_label.visible)
+        self.assertIsNone(left_tcp_label.position)
         self.assertFalse(handles["left_tcp_trail"].visible)
         self.assertFalse(handles["left_tcp_ref_trail"].visible)
         self.assertEqual(handles["left_tcp_trail_points"], [])
@@ -3723,13 +3724,13 @@ class GuiContractsTest(unittest.TestCase):
         update_scene_markers(handles, store.latest(), tcp_display_mode="both")
         self.assertTrue(left_tcp.visible)
         self.assertTrue(left_ref.visible)
-        self.assertTrue(left_tcp_label.visible)
+        self.assertIsNone(left_tcp_label.visible)
         self.assertTrue(left_ref_label.visible)
 
         update_scene_markers(handles, store.latest(), tcp_display_mode="actual")
         self.assertTrue(left_tcp.visible)
         self.assertFalse(left_ref.visible)
-        self.assertTrue(left_tcp_label.visible)
+        self.assertIsNone(left_tcp_label.visible)
         self.assertFalse(left_ref_label.visible)
 
     def test_scene_update_hides_all_tcp_trails_without_accumulating_points(self):
@@ -3910,14 +3911,17 @@ class GuiContractsTest(unittest.TestCase):
             np.asarray(_FLOOR_CHECK_POINTS_TCP_FRAME, dtype=np.float32),
         )
 
-    def test_scene_fallback_labels_actual_and_reference_tcp_markers(self):
+    def test_scene_fallback_labels_only_the_reference_tcp_marker(self):
         server = RecordingServer(scene=RecordingScene())
         _add_scene_fallback(server)
         label_texts = [text for _name, text, _kwargs, _handle in server.scene.labels]
-        self.assertIn("left tcp_actual_stand physical-state inspection", label_texts)
         self.assertIn("left tcp_ref_stand controller-sim reference", label_texts)
-        self.assertIn("right tcp_actual_stand physical-state inspection", label_texts)
         self.assertIn("right tcp_ref_stand controller-sim reference", label_texts)
+        # The actual-TCP gizmo is intentionally uncaptioned (operator-visible clutter).
+        self.assertEqual(
+            [text for text in label_texts if "tcp_actual_stand" in text],
+            [],
+        )
 
     def test_ft_sensor_measurement_pose_is_authored_by_both_robot_urdfs(self):
         descriptions = Path(__file__).resolve().parents[2] / "rb_servo_server" / "descriptions"

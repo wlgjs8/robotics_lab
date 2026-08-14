@@ -118,6 +118,10 @@ cam-up:
 		$(COMPOSE) -p $(PROJECT) -f $(COMPOSE_FILE) --profile real_camera up -d --build camera_server
 	@echo "camera_server (D435 head + dual D405 + stereo_worker) up. 상태: make cam-status / 로그: docker logs -f camera_server"
 
+# rb_gui `카메라 품질` 탭의 `head view 표시 (5 Hz)` 는 이 타겟으로 뜬 head 색상
+# 스트림(camera.bundle.stereo / head.color)을 보여준다. 모델 추론 입력은 그대로
+# 손목 전용(camera.bundle.policy)이라 head 카메라를 켜도 정책이 보는 것은 안 바뀐다.
+
 # head D435 없이 손목 D405 두 대만으로 기동(잦은 head/허브 USB 장애 격리용).
 # head 스테레오 클라우드/박스검출/external-box 송신은 비활성, 손목 RGB-D 번들
 # (camera.bundle.policy + wrist_left/right)과 손목 클라우드 발행은 그대로 동작한다.
