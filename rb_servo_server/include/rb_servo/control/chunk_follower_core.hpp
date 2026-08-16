@@ -11,7 +11,7 @@
 // position (3) and, later, the orientation rotation-vector (3) into the axes.
 // Orientation log3/exp3 lives in the servo-loop layer (se3.cpp), not here.
 //
-// SPIKE FINDINGS baked in (see tools/ruckig_spike.cpp):
+// SPIKE FINDINGS baked in (the throwaway spike harness is in git history):
 //   - ruckig 0.9.2 honors non-zero target_acceleration + minimum_duration.
 //   - at dt=33ms the convergence regime is JERK-limited: |Δv|_cap = j·dt²/4.
 //   - construct once + PRE-WARM (first calculate() is a ~3ms one-time hit).
