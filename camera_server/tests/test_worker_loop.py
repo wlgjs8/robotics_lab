@@ -23,138 +23,57 @@ def _load_module(name: str, rel: str):
 worker = _load_module("stereo_worker_worker_loop", "stereo_worker/worker.py")
 
 
-def _box(label="green"):
-    T = np.eye(4)
-    T[:3, 3] = (0.1, -0.7, 0.055)
-    return {
-        "T": T,
-        "dims": (0.34, 0.20, 0.11),
-        "footprint": (0.34, 0.20),
-        "n": 900,
-        "label": label,
-        "fitness": 0.7,
-        "rmse": 0.006,
-    }
+class WristCloudTest(unittest.TestCase):
+    """D405 z16 depth -> 카메라 프레임 3D점. 모델 없는 순수 deprojection."""
+
+    def _frames(self, depth_raw):
+        depth = np.full((8, 8), depth_raw, np.uint16)
+        color = np.zeros((8, 8, 3), np.uint8)
+        color[..., 0] = 200
+        return depth, color
+
+    def test_deprojects_with_d405_intrinsics_and_depth_scale(self):
+        # 0.30 m -> z16 raw = 0.30 / 1e-4 = 3000.
+        depth, color = self._frames(3000)
+
+        xyz, rgb = worker.wrist_cloud(depth, color, stride=1)
+
+        self.assertEqual(xyz.shape[0], 64)
+        self.assertEqual(rgb.shape, (64, 3))
+        np.testing.assert_allclose(xyz[:, 2], 0.30, atol=1e-6)
+        # 픽셀 (0,0): X = (0 - cx)/fx * z
+        np.testing.assert_allclose(
+            xyz[0, 0], (0.0 - worker.WRIST_CX) / worker.WRIST_FX * 0.30, atol=1e-6)
+        np.testing.assert_allclose(
+            xyz[0, 1], (0.0 - worker.WRIST_CY) / worker.WRIST_FY * 0.30, atol=1e-6)
+        np.testing.assert_array_equal(rgb[0], (200, 0, 0))
+
+    def test_drops_points_outside_the_z_window(self):
+        # 0.02 m (zmin=0.05 미만) 과 2.0 m (zmax=1.2 초과) 는 모두 버려진다.
+        for raw in (200, 20000):
+            with self.subTest(raw=raw):
+                depth, color = self._frames(raw)
+                xyz, rgb = worker.wrist_cloud(depth, color, stride=1)
+                self.assertEqual(xyz.shape[0], 0)
+                self.assertEqual(rgb.shape[0], 0)
+
+    def test_zero_depth_is_dropped(self):
+        """D405가 매칭 실패한 픽셀은 0을 낸다 — 원점 점으로 새어나가면 안 된다."""
+        depth, color = self._frames(0)
+
+        xyz, _ = worker.wrist_cloud(depth, color, stride=1)
+
+        self.assertEqual(xyz.shape[0], 0)
+
+    def test_stride_subsamples_the_pixel_grid(self):
+        depth, color = self._frames(3000)
+
+        xyz, _ = worker.wrist_cloud(depth, color, stride=2)
+
+        self.assertEqual(xyz.shape[0], 16)   # 8x8 -> 4x4
 
 
-class LockStateTest(unittest.TestCase):
-    def test_new_lock_state_initial_shape(self):
-        self.assertEqual(
-            worker._new_lock_state(),
-            {
-                "locked": False,
-                "box": None,
-                "lock_seq": 0,
-                "lock_monotonic": None,
-                "last_result": None,
-            },
-        )
-
-
-class LockGateTest(unittest.TestCase):
-    def test_evaluate_lock_gate_reasons(self):
-        cases = [
-            (None, (False, "reject_no_track")),
-            ({"rmse": None, "fitness": 1.0}, (False, "reject_rmse")),
-            ({"rmse": 0.013, "fitness": 1.0}, (False, "reject_rmse")),
-            ({"rmse": 0.012, "fitness": None}, (False, "reject_fitness")),
-            ({"rmse": 0.012, "fitness": 0.49}, (False, "reject_fitness")),
-            ({"rmse": 0.012, "fitness": 0.5}, (True, "ok")),
-        ]
-
-        for candidate, expected in cases:
-            with self.subTest(candidate=candidate):
-                self.assertEqual(worker.evaluate_lock_gate(candidate, 0.012, 0.5), expected)
-
-    def test_evaluate_lock_gate_checks_rmse_before_fitness(self):
-        candidate = {"rmse": 0.013, "fitness": 0.49}
-
-        self.assertEqual(worker.evaluate_lock_gate(candidate, 0.012, 0.5),
-                         (False, "reject_rmse"))
-
-
-class HeartbeatBoxesTest(unittest.TestCase):
-    def test_build_heartbeat_boxes_outputs_only_locked_boxes_with_lock_fields(self):
-        locks = {
-            "green": {
-                "locked": True,
-                "box": _box("green"),
-                "lock_seq": 3,
-                "lock_monotonic": 8.25,
-                "last_result": "ok",
-            },
-            "gray": worker._new_lock_state(),
-        }
-
-        boxes = worker.build_heartbeat_boxes(locks, now_monotonic=10.0)
-
-        self.assertEqual(len(boxes), 1)
-        self.assertEqual(boxes[0]["label"], "green")
-        self.assertTrue(boxes[0]["locked"])
-        self.assertEqual(boxes[0]["lock_seq"], 3)
-        self.assertAlmostEqual(boxes[0]["lock_age_s"], 1.75)
-        self.assertEqual(boxes[0]["n"], 900)
-
-    def test_build_heartbeat_boxes_locked_without_monotonic_has_none_age(self):
-        locks = {
-            "green": {
-                "locked": True,
-                "box": _box("green"),
-                "lock_seq": 1,
-                "lock_monotonic": None,
-                "last_result": "ok",
-            },
-        }
-
-        boxes = worker.build_heartbeat_boxes(locks, now_monotonic=10.0)
-
-        self.assertIsNone(boxes[0]["lock_age_s"])
-
-
-class LockStatusTest(unittest.TestCase):
-    def test_build_lock_status_includes_all_labels(self):
-        locks = {
-            "green": {
-                "locked": True,
-                "box": _box("green"),
-                "lock_seq": 2,
-                "lock_monotonic": 7.0,
-                "last_result": "ok",
-            },
-            "gray": worker._new_lock_state(),
-            "blue": {
-                "locked": False,
-                "box": None,
-                "lock_seq": 0,
-                "lock_monotonic": None,
-                "last_result": "reject_rmse",
-            },
-        }
-
-        status = worker.build_lock_status(locks, now_monotonic=10.5)
-
-        self.assertEqual(set(status), {"green", "gray", "blue"})
-        self.assertEqual(status["green"], {
-            "locked": True,
-            "lock_seq": 2,
-            "lock_age_s": 3.5,
-            "last_result": "ok",
-        })
-        self.assertEqual(status["gray"], {
-            "locked": False,
-            "lock_seq": 0,
-            "lock_age_s": None,
-            "last_result": None,
-        })
-        self.assertEqual(status["blue"], {
-            "locked": False,
-            "lock_seq": 0,
-            "lock_age_s": None,
-            "last_result": "reject_rmse",
-        })
-
-
-class PublishBoxesLockTelemetryTest(unittest.TestCase):
+class PublishWristTest(unittest.TestCase):
     class FakeSocket:
         def __init__(self):
             self.parts = None
@@ -162,47 +81,47 @@ class PublishBoxesLockTelemetryTest(unittest.TestCase):
         def send_multipart(self, parts):
             self.parts = parts
 
-    def _publisher(self):
+    def _publisher(self, viz_max_pts=0):
         pub = worker.CloudPublisher.__new__(worker.CloudPublisher)
         pub._json = json
         pub._sock = self.FakeSocket()
+        pub._viz_max_pts = viz_max_pts
         return pub
 
-    def _payload(self, pub):
-        self.assertEqual(pub._sock.parts[0], b"stereo.boxes")
-        return json.loads(pub._sock.parts[1].decode())
-
-    def test_publish_boxes_without_lock_args_has_backward_compatible_payload(self):
+    def test_publishes_stereo_wrist_topic_with_arm_and_count_header(self):
         pub = self._publisher()
+        xyz = np.arange(9, dtype=np.float32).reshape(3, 3)
+        rgb = np.full((3, 3), 7, np.uint8)
 
-        pub.publish_boxes(7, [_box("gray")])
+        pub.publish_wrist("left", 11, xyz, rgb)
 
-        payload = self._payload(pub)
-        self.assertNotIn("phase", payload)
-        self.assertNotIn("locks", payload)
+        topic, header, xyz_buf, rgb_buf = pub._sock.parts
+        self.assertEqual(topic, b"stereo.wrist")
+        self.assertEqual(json.loads(header.decode()), {"arm": "left", "seq": 11, "n": 3})
+        np.testing.assert_array_equal(
+            np.frombuffer(xyz_buf, np.float32).reshape(-1, 3), xyz)
+        np.testing.assert_array_equal(
+            np.frombuffer(rgb_buf, np.uint8).reshape(-1, 3), rgb)
 
-    def test_publish_boxes_adds_phase_locks_and_box_lock_fields_when_present(self):
-        pub = self._publisher()
-        box = _box("gray")
-        box.update({"locked": True, "lock_seq": 2, "lock_age_s": 1.5})
-        locks = {
-            "gray": {
-                "locked": True,
-                "lock_seq": 2,
-                "lock_age_s": 1.5,
-                "last_result": "ok",
-            },
-        }
+    def test_viz_cap_subsamples_and_reports_the_capped_count(self):
+        pub = self._publisher(viz_max_pts=2)
+        xyz = np.arange(15, dtype=np.float32).reshape(5, 3)
+        rgb = np.zeros((5, 3), np.uint8)
 
-        pub.publish_boxes(9, [box], phase="burst", locks=locks)
+        pub.publish_wrist("right", 4, xyz, rgb)
 
-        payload = self._payload(pub)
-        self.assertEqual(payload["phase"], "burst")
-        self.assertEqual(payload["locks"], locks)
-        encoded = payload["boxes"][0]
-        self.assertIs(encoded["locked"], True)
-        self.assertEqual(encoded["lock_seq"], 2)
-        self.assertEqual(encoded["lock_age_s"], 1.5)
+        header = json.loads(pub._sock.parts[1].decode())
+        self.assertEqual(header["n"], 2)
+        self.assertEqual(np.frombuffer(pub._sock.parts[2], np.float32).size, 6)
+
+    def test_cap_is_a_noop_when_under_the_limit(self):
+        pub = self._publisher(viz_max_pts=100)
+        xyz = np.zeros((5, 3), np.float32)
+
+        capped_xyz, capped_rgb = pub._cap(0, xyz, np.zeros((5, 3), np.uint8))
+
+        self.assertIs(capped_xyz, xyz)
+        self.assertEqual(capped_rgb.shape[0], 5)
 
 
 if __name__ == "__main__":

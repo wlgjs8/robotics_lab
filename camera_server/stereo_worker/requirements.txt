@@ -1,14 +1,4 @@
-# torch/torchvision는 Dockerfile에서 cu128 인덱스로 설치 (Blackwell sm_120)
-# Fast-FoundationStereo 런타임 의존성
-timm
-einops
-omegaconf
-scipy
-scikit-image
-opencv-contrib-python
-imageio
-pyyaml
-open3d
+# stereo_worker(wrist-only) 런타임 의존성. head 스테레오 추론(Fast-FoundationStereo)
+# 제거(2026-08-16) 후 남은 것은 번들 구독 + deprojection + publish 뿐이다.
 numpy
-# 워커 IPC (camera_server 번들 구독 / pointcloud publish)
 pyzmq

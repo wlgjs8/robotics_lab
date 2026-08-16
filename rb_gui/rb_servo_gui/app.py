@@ -15,7 +15,6 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from .box_detect_control import BoxDetectCommandClient, BoxDetectCommandResult
 from .camera_quality import (
     ARMS as CAMERA_QUALITY_ARMS,
     CameraQualityReceiver,
@@ -70,22 +69,17 @@ from .geometry import (
     _xyzw_to_wxyz,
 )
 from .models import (
-    EXTERNAL_BOX_LABEL_SLOTS,
     ArmSnapshot,
     ChunkOverlaySnapshot,
     CircleOverlaySnapshot,
     Pose6D,
     StateSnapshot,
-    box_lock_status_text,
-    external_box_display,
 )
 from .chunk_overlay_receiver import ChunkOverlayReceiver, ChunkOverlayStore
 from .overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
 from .pointcloud_receiver import (
     StereoCloudReceiver,
     StereoCloudStore,
-    load_T_stand_cam,
-    save_T_stand_cam,
     load_T_tcp_cam,
     save_T_tcp_cam,
     mat_to_wxyz,
@@ -1654,8 +1648,8 @@ def _save_gui_settings(settings: Mapping[str, Any]) -> tuple[bool, str]:
         directory = os.path.dirname(path)
         if directory:
             os.makedirs(directory, exist_ok=True)
-        # 원자적 쓰기(temp+replace): camera_server stereo_worker가 1Hz로 이 파일을 읽으므로
-        # 부분 기록 상태를 읽지 않게 한다(truncated json → 워커가 기본 ROI로 폴백하는 깜빡임 방지).
+        # 원자적 쓰기(temp+replace): 슬라이더 드래그 중 잦은 저장으로 파일이 잘린 상태가
+        # 남지 않게 한다(truncated json → 다음 부팅에서 설정 전체 유실 방지).
         tmp = f"{path}.tmp"
         with open(tmp, "w", encoding="utf-8") as handle:
             json.dump(dict(settings), handle, indent=2, sort_keys=True)
@@ -4001,9 +3995,9 @@ def build_gui(
                 # plus viser's compact integrated number box. _update_roi_panel
                 # syncs their range to the server's runtime envelope and brings them
                 # up at the applied bounds on the first state.
-                # 저장된 ROI(settings.json roi_min_m/roi_max_m)가 있으면 그 값으로 시작 →
-                # 재시작 후에도 perception/viz 클립 영역 유지(검출 워커와 같은 박스).
-                # 이 범위는 첫 서버 상태 전까지만 쓰는 bootstrap 값이다. 이후
+                # 저장된 ROI(settings.json roi_min_m/roi_max_m)가 있으면 그 값(=마지막으로
+                # Send한 바운드)으로 시작한다. 이 범위는 첫 서버 상태 전까지만 쓰는
+                # bootstrap 값이다. 이후
                 # _update_roi_panel이 서버가 publish한 runtime envelope/applied bounds로
                 # 범위와 값을 동기화한다.
                 _roi_slider_specs = _roi_initial_slider_specs(_load_gui_settings())
@@ -4041,13 +4035,12 @@ def build_gui(
                     lo, hi = _roi_slider_bounds()
                     ok, message = safety.send_set_roi_bounds(lo, hi)
                     handles["roi_set_status"].value = ("OK: " if ok else "BLOCKED: ") + message
-                    _persist_roi_settings(handles)   # perception/viz 클립 영역도 함께 적용
+                    _persist_roi_settings(handles)   # 다음 부팅의 슬라이더 bootstrap 값
 
                 def _roi_preview(_: Any) -> None:
                     # Live yellow preview box while dragging any bound slider.
                     lo, hi = _roi_slider_bounds()
                     update_roi_box_preview(handles.get("scene", {}), lo, hi)
-                    _persist_roi_settings(handles)   # 드래그 즉시 검출/클라우드 클립에 반영(≤1s)
 
                 for _axis in ("x", "y", "z"):
                     handles[f"roi_{_axis}_min"].on_update(_roi_preview)
@@ -4476,12 +4469,6 @@ def build_gui(
         _adv_tabs = server.gui.add_tab_group()
         with _adv_tabs.add_tab("Pointcloud"):
             _pc = _load_gui_settings()
-            handles["pc_enable"] = server.gui.add_checkbox(
-                "스테레오 pointcloud 표시", initial_value=bool(_pc.get("pc_enable", False)))
-            handles["pc_box_enable"] = server.gui.add_checkbox(
-                "매칭 박스 표시",
-                initial_value=bool(_pc.get("pc_box_enable", _pc.get("pc_enable", False))),
-            )
             handles["pc_size"] = server.gui.add_slider(
                 "point size", min=0.001, max=0.02, step=0.001,
                 initial_value=float(_pc.get("pc_size", 0.004)))
@@ -4494,70 +4481,12 @@ def build_gui(
             handles["pc_dmax"] = server.gui.add_slider(
                 "depth max (m)", min=0.1, max=4.0, step=0.05,
                 initial_value=float(_pc.get("pc_dmax", 3.0)))
-            # stand-Z 점 상한 (mm, 0=off). Safety ROI(로봇 safety용 Z)와 독립한
-            # perception 전용 높이 컷 → ROI Z는 로봇 모션용으로 높게 두고 클라우드/검출만
-            # 낮게 자른다(로봇팔·배경 noise 제거). settings.json pc_clip_z_max_m(=값/1000)로
-            # 영속화, camera_server stereo_worker가 1Hz로 읽어 viz·검출 양쪽에 적용.
-            handles["pc_clip_z_max_mm"] = server.gui.add_slider(
-                "stand Z 상한 (mm, 0=off)", min=0, max=500, step=10,
-                initial_value=float(_pc.get("pc_clip_z_max_m", 0.150)) * 1000.0)
-            handles["pc_status"] = server.gui.add_text(
-                "pointcloud status", initial_value="off", disabled=True)
             # 설정 영속화: 변경 시 settings.json에 저장 (재시작 후에도 유지)
-            for _k in ("pc_enable", "pc_box_enable", "pc_size", "pc_max_k", "pc_dmin",
-                       "pc_dmax", "pc_clip_z_max_mm"):
+            for _k in ("pc_size", "pc_max_k", "pc_dmin", "pc_dmax"):
                 handles[_k].on_update(lambda _evt: _persist_pc_settings(handles))
 
-            box_detect_host, box_detect_port = _box_detect_cmd_endpoint()
-            handles["box_detect_cmd_client"] = BoxDetectCommandClient(box_detect_host, box_detect_port)
-            handles["box_detect_busy"] = False
-            handles["box_detect_busy_since"] = float("-inf")
-            handles["box_detect_seen_burst"] = False
-            handles["box_detect_last_trigger_monotonic"] = float("-inf")
-            handles["box_detect_button"] = server.gui.add_button("🎯 박스 재탐지")
-            handles["box_detect_status_green"] = server.gui.add_text(
-                "green box", initial_value="탐지 전", disabled=True)
-            handles["box_detect_status_gray"] = server.gui.add_text(
-                "gray box", initial_value="탐지 전", disabled=True)
-
-            @handles["box_detect_button"].on_click
-            def _(_evt) -> None:
-                _trigger_box_detect(handles)
-
-            with server.gui.add_folder("수동 캘리브레이션 (T_stand_cam)", expand_by_default=False):
-                handles["pc_calib_mode"] = server.gui.add_checkbox("캘리브레이션 모드(기즈모)", initial_value=False)
-                handles["pc_calib_save"] = server.gui.add_button("💾 캘리브레이션 저장")
-                handles["pc_calib_reset"] = server.gui.add_button("↩ 저장값으로 리셋")
-                handles["pc_calib_status"] = server.gui.add_text(
-                    "calib pose", initial_value="(기즈모로 URDF 로봇팔과 정렬 후 저장)", disabled=True)
-
-            # 클라우드 부모 프레임(=T_stand_cam) + 캘리브용 기즈모 (씬 노드)
-            T0 = load_T_stand_cam()
-            handles["_T_stand_cam_init"] = T0
-            handles["pc_cam_frame"] = server.scene.add_frame(
-                "/stereo_cam", show_axes=False,
-                wxyz=tuple(mat_to_wxyz(T0[:3, :3])), position=tuple(T0[:3, 3]))
-            handles["pc_cam_gizmo"] = server.scene.add_transform_controls(
-                "/stereo_cam_gizmo", scale=0.3, line_width=2.5, depth_test=False, visible=False,
-                wxyz=tuple(mat_to_wxyz(T0[:3, :3])), position=tuple(T0[:3, 3]))
-
-            @handles["pc_calib_save"].on_click
-            def _(_evt) -> None:
-                import numpy as np
-                g = handles["pc_cam_gizmo"]
-                T = np.eye(4); T[:3, :3] = wxyz_to_mat(g.wxyz); T[:3, 3] = np.array(g.position)
-                ok, msg = save_T_stand_cam(T)
-                handles["pc_calib_status"].value = (f"✅ 저장: {msg}" if ok else f"❌ {msg}")
-
-            @handles["pc_calib_reset"].on_click
-            def _(_evt) -> None:
-                T = load_T_stand_cam()
-                for h in (handles["pc_cam_gizmo"], handles["pc_cam_frame"]):
-                    h.wxyz = tuple(mat_to_wxyz(T[:3, :3])); h.position = tuple(T[:3, 3])
-                handles["pc_calib_status"].value = "저장값으로 리셋됨"
-
             # --- 손목(D405) raw 클라우드 오버레이 (모델 추론 X) ---
-            # 워커가 stereo.wrist로 카메라 프레임 클라우드를 저속 발행. rb_gui는 이를
+            # camera_server가 stereo.wrist로 카메라 프레임 클라우드를 저속 발행. rb_gui는 이를
             # /stand/{arm}_tcp(실시간 TCP) 자식의 핸드아이(T_tcp_cam) 프레임 아래 렌더한다.
             # 핸드아이는 추정 초기값 + 기즈모 수동 캘리브(저장/로드).
             handles["pc_wrist_enable"] = server.gui.add_checkbox(
@@ -4695,19 +4624,10 @@ def _persist_pc_settings(handles: dict[str, Any]) -> None:
     """Pointcloud 표시 설정을 settings.json에 병합 저장 (재시작 후 유지)."""
     try:
         s = _load_gui_settings()
-        s["pc_enable"] = bool(handles["pc_enable"].value)
-        if handles.get("pc_box_enable") is not None:
-            s["pc_box_enable"] = bool(handles["pc_box_enable"].value)
         s["pc_size"] = float(handles["pc_size"].value)
         s["pc_max_k"] = int(handles["pc_max_k"].value)
         s["pc_dmin"] = float(handles["pc_dmin"].value)
         s["pc_dmax"] = float(handles["pc_dmax"].value)
-        if handles.get("pc_clip_z_max_mm") is not None:
-            _zc_mm = float(handles["pc_clip_z_max_mm"].value)
-            if _zc_mm > 0:                       # 0 = off → 키 제거(상한 없음)
-                s["pc_clip_z_max_m"] = _zc_mm / 1000.0
-            else:
-                s.pop("pc_clip_z_max_m", None)
         if handles.get("pc_wrist_enable") is not None:
             s["pc_wrist_enable"] = bool(handles["pc_wrist_enable"].value)
         _save_gui_settings(s)
@@ -4715,92 +4635,10 @@ def _persist_pc_settings(handles: dict[str, Any]) -> None:
         pass
 
 
-_BOX_DETECT_BUSY_TIMEOUT_S = 8.0  # client-side fallback only, independent of the worker's actual
-                                   # (server-side, env-configurable STEREO_BOX_BURST_S, default 4.0s)
-                                   # burst duration — just generous enough that a real burst always
-                                   # finishes first; only fires on a truly unresponsive worker.
-
-
-def _trigger_box_detect(handles: dict[str, Any], *, monotonic_fn=time.monotonic) -> bool:
-    if handles.get("box_detect_busy"):
-        return False
-    now = monotonic_fn()
-    last = handles.get("box_detect_last_trigger_monotonic", float("-inf"))
-    try:
-        last_value = float(last)
-    except (TypeError, ValueError):
-        last_value = float("-inf")
-    if now - last_value < 1.0:
-        return False
-    client = handles.get("box_detect_cmd_client")
-    send = getattr(client, "send_detect_now", None)
-    if not callable(send):
-        return False
-    try:
-        result = send()
-    except OSError as exc:
-        result = BoxDetectCommandResult(False, f"box detect_now send failed: {exc}")
-    if not result.ok:
-        for key in ("box_detect_status_green", "box_detect_status_gray"):
-            if key in handles:
-                handles[key].value = f"BLOCKED: {result.message}"
-        return False
-    handles["box_detect_last_trigger_monotonic"] = now
-    handles["box_detect_busy"] = True
-    handles["box_detect_busy_since"] = now
-    handles["box_detect_seen_burst"] = False
-    if "box_detect_button" in handles:
-        _set_disabled(handles["box_detect_button"], True)
-    return True
-
-
-def _update_box_detect_status(handles: dict[str, Any], *, monotonic_fn=time.monotonic) -> None:
-    """Called every update_gui() tick. While the OLD locked box is still what's rendered (the
-    worker always heartbeats the previous lock during a burst, never the in-progress candidate —
-    see worker.py's build_heartbeat_boxes), this refreshes only the green/gray status text.
-
-    `phase`/`locks` come from the worker in real time even mid-burst (it republishes every frame
-    while phase=="burst" too, not just once at the end), so once the worker's own burst-start
-    sets last_result="pending" that reaches the GUI almost immediately — we don't need to fake a
-    local "탐지 중…" text. The local busy/seen_burst/timeout bookkeeping below exists ONLY to
-    (a) keep the button disabled for the duration of a burst, and (b) detect a truly unresponsive
-    worker (UDP send always reports ok=True even if nothing is listening) so the button doesn't
-    stay stuck disabled forever.
-    """
-    store = handles.get("_stereo_store")
-    latest_locks = store.latest_locks() if store is not None else None
-    locks = (latest_locks or {}).get("locks") or {}
-    phase = (latest_locks or {}).get("phase")
-
-    timed_out = False
-    if handles.get("box_detect_busy"):
-        if phase == "burst":
-            handles["box_detect_seen_burst"] = True
-        now = monotonic_fn()
-        since = float(handles.get("box_detect_busy_since", now))
-        finished = phase == "idle" and handles.get("box_detect_seen_burst")
-        timed_out = (not finished) and (now - since > _BOX_DETECT_BUSY_TIMEOUT_S)
-        if finished or timed_out:
-            handles["box_detect_busy"] = False
-            if "box_detect_button" in handles:
-                _set_disabled(handles["box_detect_button"], False)
-
-    if timed_out:
-        for key in ("box_detect_status_green", "box_detect_status_gray"):
-            if key in handles:
-                handles[key].value = "응답 없음"
-        return
-
-    if "box_detect_status_green" in handles:
-        handles["box_detect_status_green"].value = box_lock_status_text(locks.get("green"))
-    if "box_detect_status_gray" in handles:
-        handles["box_detect_status_gray"].value = box_lock_status_text(locks.get("gray"))
-
-
 def _persist_roi_settings(handles: dict[str, Any]) -> None:
     """현재 ROI 슬라이더 바운드를 settings.json(roi_min_m/roi_max_m, stand 프레임 m)에
-    저장. camera_server stereo_worker(box_detect)가 이 값을 읽어 박스 검출 영역 + publish
-    클라우드(head/손목) 클립 영역으로 쓴다 → viser 시각화와 검출이 같은 Safety ROI로 정렬."""
+    저장 → 재시작 시 슬라이더가 서버 state를 받기 전까지 이 값으로 부팅한다
+    (_roi_initial_slider_specs)."""
     try:
         fn = handles.get("roi_slider_bounds_fn")
         if not callable(fn):
@@ -4836,15 +4674,6 @@ def _recording_cmd_endpoint() -> tuple[str, int]:
         os.environ.get("RB_GUI_RECORD_CMD_ENDPOINT", "udp://127.0.0.1:50441"),
         default_host="127.0.0.1",
         default_port=50441,
-    )
-
-
-def _box_detect_cmd_endpoint() -> tuple[str, int]:
-    """stereo_worker box_detect_cmd.v1 destination (must match its STEREO_TRIGGER_ENDPOINT)."""
-    return parse_udp_endpoint(
-        os.environ.get("RB_GUI_BOX_DETECT_CMD_ENDPOINT", "udp://127.0.0.1:50387"),
-        default_host="127.0.0.1",
-        default_port=50387,
     )
 
 
@@ -5538,234 +5367,6 @@ def _update_lease_owner(
         handle.value = f"held by {owner} — stop or release it before the GUI can take control"
 
 
-_BOX_MESH: Any = "uninit"
-_EXTERNAL_BOX_COLLISION_RED = (220, 60, 60)
-# TODO: tune with operator.
-_EXTERNAL_BOX_LABEL_Z_OFFSET_M = 0.06
-
-
-def _box_mesh():
-    """box.stl(open-tray) -> (verts[m, 중심정렬], faces). 1회 로드 캐시."""
-    global _BOX_MESH
-    if _BOX_MESH != "uninit":
-        return _BOX_MESH
-    try:
-        import numpy as np
-        import trimesh
-        path = os.environ.get("RB_GUI_BOX_STL", "/home/plaif/workspace/box.stl")
-        m = trimesh.load(path, force="mesh")
-        v = np.asarray(m.vertices, dtype=np.float64)
-        v = (v - (v.min(0) + v.max(0)) / 2.0) * 0.001        # 중심정렬 + mm->m
-        _BOX_MESH = (v.astype(np.float32), np.asarray(m.faces, dtype=np.uint32))
-    except Exception:
-        _BOX_MESH = None
-    return _BOX_MESH
-
-
-def _update_stereo_boxes(handles: dict[str, Any], latest: StateSnapshot | None = None) -> None:
-    """검출된 박스(stereo.boxes, T_stand)를 box.stl 메쉬로 각각 렌더."""
-    server = handles.get("_server")
-    store = handles.get("_stereo_store")
-    toggle = handles.get("pc_box_enable")
-    if toggle is None:
-        toggle = handles.get("pc_enable")
-    if server is None or store is None or toggle is None:
-        return
-    hs = handles.setdefault("_box_handles", {})
-    label_hs = handles.setdefault("_box_dist_labels", {})
-    if not bool(getattr(toggle, "value", False)):
-        for h in hs.values():
-            try:
-                h.visible = False
-            except Exception:
-                pass
-        for h in label_hs.values():
-            try:
-                h.visible = False
-            except Exception:
-                pass
-        return
-    mesh = _box_mesh()
-    boxes, _seq = store.latest_boxes()
-    label_color = {"green": (40, 220, 80), "gray": (170, 170, 180)}
-    fallback = [(240, 150, 40), (80, 160, 240), (230, 60, 200), (240, 220, 60)]
-    sc = latest.self_collision if latest is not None else None
-    clearances = sc.get("external_box_clearance_m") if isinstance(sc, Mapping) else None
-    if not isinstance(clearances, (list, tuple)):
-        clearances = []
-    seen = set()
-    for i, b in enumerate(boxes[:4]):
-        T = b["T"]; pos = tuple(float(v) for v in T[:3, 3])
-        wxyz = tuple(float(v) for v in mat_to_wxyz(T[:3, :3]))
-        box_label = b.get("label")
-        slot = EXTERNAL_BOX_LABEL_SLOTS.get(str(box_label)) if box_label is not None else None
-        clearance = clearances[slot] if slot is not None and slot < len(clearances) else None
-        display = external_box_display(clearance)
-        normal_color = label_color.get(box_label, fallback[i % 4])
-        col_i = _EXTERNAL_BOX_COLLISION_RED if display["in_collision"] else normal_color
-        name = f"box{i}"; seen.add(name)
-        if name in hs:
-            h = hs[name]; h.position = pos; h.wxyz = wxyz; h.visible = True
-            try:
-                h.color = col_i
-            except Exception:
-                pass
-        elif mesh is not None:
-            hs[name] = server.scene.add_mesh_simple(
-                f"/stereo_box_{i}", mesh[0], mesh[1], color=col_i,
-                opacity=0.55, side="double", flat_shading=True, position=pos, wxyz=wxyz)
-        else:  # STL 로드 실패 시 박스로 폴백
-            hs[name] = server.scene.add_box(
-                f"/stereo_box_{i}", color=col_i, dimensions=tuple(float(v) for v in b["dims"]),
-                wireframe=True, position=pos, wxyz=wxyz)
-        dims = b.get("dims", (0.0, 0.0, 0.0))
-        try:
-            label_z = pos[2] + max(0.0, float(dims[2]) / 2.0) + _EXTERNAL_BOX_LABEL_Z_OFFSET_M
-        except Exception:
-            label_z = pos[2] + _EXTERNAL_BOX_LABEL_Z_OFFSET_M
-        label_pos = (pos[0], pos[1], label_z)
-        if display["show_label"]:
-            label_text = display["label"]
-        elif b.get("locked"):
-            label_text = "🔒"
-        else:
-            label_text = None
-
-        label_handle = label_hs.get(name)
-        if label_text and hasattr(server.scene, "add_label"):
-            if label_handle is None:
-                label_hs[name] = server.scene.add_label(
-                    f"/stereo_box_{i}_clearance",
-                    text=label_text,
-                    position=label_pos,
-                    visible=True,
-                )
-            else:
-                try:
-                    label_handle.text = label_text
-                    label_handle.position = label_pos
-                    label_handle.visible = True
-                except Exception:
-                    pass
-        elif label_handle is not None:
-            try:
-                label_handle.visible = False
-            except Exception:
-                pass
-    for name, h in hs.items():
-        if name not in seen:
-            try:
-                h.visible = False
-            except Exception:
-                pass
-    for name, h in label_hs.items():
-        if name not in seen:
-            try:
-                h.visible = False
-            except Exception:
-                pass
-
-
-def _update_stereo_cloud(handles: dict[str, Any]) -> None:
-    """stereo_worker 클라우드를 /stereo_cam(=T_stand_cam) 프레임의 자식으로 렌더.
-    클라우드는 카메라 좌표계 점이고, 부모 프레임이 stand 배치를 담당. 캘리브 모드에선
-    기즈모로 그 프레임을 옮겨 URDF 로봇팔과 정렬한다."""
-    import numpy as np
-    toggle = handles.get("pc_enable")
-    server = handles.get("_server")
-    store = handles.get("_stereo_store")
-    status = handles.get("pc_status")
-    if toggle is None or server is None or store is None:
-        return
-
-    # 캘리브레이션 모드: 기즈모 표시 + 기즈모 pose를 클라우드 부모 프레임에 복사
-    gizmo = handles.get("pc_cam_gizmo")
-    frame = handles.get("pc_cam_frame")
-    calib = handles.get("pc_calib_mode")
-    calib_on = bool(getattr(calib, "value", False))
-    if gizmo is not None:
-        gizmo.visible = calib_on
-        if calib_on and frame is not None:
-            frame.wxyz = gizmo.wxyz
-            frame.position = gizmo.position
-            cs = handles.get("pc_calib_status")
-            if cs is not None:
-                p = np.array(gizmo.position)
-                cs.value = f"xyz=({p[0]:.4f}, {p[1]:.4f}, {p[2]:.4f}) m"
-
-    if not toggle.value:
-        h = handles.get("pc_handle")
-        if h is not None:
-            h.visible = False
-        if status is not None:
-            status.value = "off"
-        return
-    data = store.latest()
-    if data is None:
-        if status is not None:
-            status.value = "waiting for stereo_worker (5601)…"
-        return
-    xyz, rgb, seq, age_ms = data
-    dmin = float(handles["pc_dmin"].value) if handles.get("pc_dmin") else 0.0
-    dmax = float(handles["pc_dmax"].value) if handles.get("pc_dmax") else 1e9
-    max_pts = int(handles["pc_max_k"].value) * 1000 if handles.get("pc_max_k") else 80000
-    psize = float(handles["pc_size"].value) if handles.get("pc_size") else 0.004
-    # seq/필터/표시값이 모두 그대로면 재전송 생략 (중복 방지). 슬라이더 변경 시엔 즉시 갱신.
-    param_key = (round(dmin, 3), round(dmax, 3), max_pts, round(psize, 4))
-    key = (seq,) + param_key
-    if key == handles.get("_pc_last_key") and handles.get("pc_handle") is not None:
-        handles["pc_handle"].visible = True
-        return
-    # 슬라이더 변경(param_key)은 즉시 반영하되, 클라우드 seq 갱신(~14fps)만으로 오는 재렌더는
-    # throttle해 웹소켓/브라우저 부하를 제한한다(노드 재전송이 비싸므로 ~5Hz로 캡).
-    now = time.monotonic()
-    params_changed = param_key != handles.get("_pc_last_param_key")
-    if (not params_changed and handles.get("pc_handle") is not None
-            and (now - handles.get("_pc_last_render_t", 0.0)) < 0.2):
-        handles["pc_handle"].visible = True
-        return
-    # depth(=카메라 z) 범위 밖 점 제거
-    z = xyz[:, 2]
-    m = (z >= dmin) & (z <= dmax)
-    xyz, rgb = xyz[m], rgb[m]
-    if xyz.shape[0] == 0:
-        h = handles.get("pc_handle")
-        if h is not None:
-            h.visible = False
-        if status is not None:
-            status.value = f"depth {dmin:.2f}~{dmax:.2f}m 범위 내 점 없음"
-        handles["_pc_last_key"] = key
-        return
-    # 표시 다운샘플 (웹소켓 부하 제한)
-    n_in = xyz.shape[0]
-    if n_in > max_pts:
-        idx = np.random.default_rng(seq if seq >= 0 else 0).choice(n_in, max_pts, replace=False)
-        xyz, rgb = xyz[idx], rgb[idx]
-    # /stereo_cam 의 자식 -> 부모 프레임(T_stand_cam)이 stand 배치 적용. 점은 카메라 좌표계.
-    pts = xyz.astype(np.float32)
-    cols = rgb.astype(np.uint8)
-    h = handles.get("pc_handle")
-    if h is not None and not params_changed:
-        # seq만 바뀐 갱신은 노드 재생성 없이 buffer만 교체(점수 가변도 OK — user_floor와 동일 패턴).
-        try:
-            h.points = pts
-            h.colors = cols
-            h.visible = True
-        except Exception:
-            h = None
-    else:
-        h = None
-    if h is None:  # 최초 생성 또는 슬라이더(point_size/shape) 변경 시에만 재생성
-        handles["pc_handle"] = server.scene.add_point_cloud(
-            "/stereo_cam/cloud", points=pts, colors=cols,
-            point_size=psize, point_shape="rounded")
-    handles["_pc_last_key"] = key
-    handles["_pc_last_param_key"] = param_key
-    handles["_pc_last_render_t"] = now
-    if status is not None:
-        status.value = f"{xyz.shape[0]}/{n_in} pts, depth {dmin:.2f}~{dmax:.2f}m, age {age_ms:.0f}ms (seq {seq})"
-
-
 def _update_stereo_wrist(handles: dict[str, Any]) -> None:
     """손목(D405) raw 클라우드를 /stand/{arm}_tcp/wrist_cam(=T_tcp_cam) 자식으로 렌더.
     점은 카메라 광학 좌표계, 부모(실시간 TCP × 핸드아이)가 stand 배치를 담당. 캘리브
@@ -5996,11 +5597,8 @@ def update_gui(
     overlay_store: CircleOverlayStore | None = None,
     chunk_overlay_store: ChunkOverlayStore | None = None,
 ) -> None:
-    _update_stereo_cloud(handles)  # 로봇 상태와 무관 — 항상 갱신
     latest = store.latest()
-    _update_stereo_boxes(handles, latest)  # 검출된 박스 렌더
-    _update_box_detect_status(handles)  # 박스 재탐지 버튼 상태(green/gray 잠금 텍스트)
-    _update_stereo_wrist(handles)  # 손목 raw 클라우드 오버레이
+    _update_stereo_wrist(handles)  # 손목 raw 클라우드 오버레이 (로봇 상태와 무관 — 항상 갱신)
     disabled_states = safety.control_disabled_states()
     disabled_reasons = safety.control_disabled_reasons()
     for mode, button in handles.get("lifecycle_buttons", {}).items():
@@ -6778,7 +6376,7 @@ def main(argv: list[str] | None = None) -> None:
         head_preview_receiver.start()
     receiver = StateReceiver(store, host=state_host, port=state_port)
     receiver.start()
-    # 스테레오 pointcloud 워커(camera_server 컨테이너) 구독. 고급→Pointcloud 토글로 표시.
+    # 손목(D405) pointcloud(camera_server 컨테이너) 구독. 고급→Pointcloud 토글로 표시.
     stereo_store = StereoCloudStore()
     stereo_endpoint = os.environ.get("RB_GUI_STEREO_CLOUD_ENDPOINT", "tcp://127.0.0.1:5601")
     stereo_receiver = StereoCloudReceiver(stereo_store, endpoint=stereo_endpoint)

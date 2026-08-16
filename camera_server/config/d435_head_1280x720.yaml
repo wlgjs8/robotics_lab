@@ -1,14 +1,8 @@
-# D435 head(IR 스테레오 1280x720 + RGB 1280x720) + 손목 D405 2개(color+depth). USB3.
+# D435 head(RGB 1280x720) + 손목 D405 2개(color+depth). USB3.
 #
-# head_wrists.yaml(640x480 IR) 대체본. 변경점:
-#  - head IR_left/IR_right 640x480 -> 1280x720 (고해상도 disparity). color는 동일 1280x720.
-#  - head.controls: 학습형 스테레오(FoundationStereo)에 맞춰 IR projector(emitter) OFF +
-#    IR 노출 제어. emitter 도트 패턴은 매칭을 해치고 광택면 정반사 disparity 편향을 유발.
-#  - dump_intrinsics_path: 기동 시 디바이스가 보고하는 1280x720 IR intrinsics+baseline을
-#    FoundationStereo K.txt 포맷으로 자동 기록(손-K.txt 취약성 제거).
-#
-# 주의: 1280x720은 720이 32의 배수가 아니므로 stereo_worker가 736으로 패딩해 추론한다.
-# TRT 엔진을 736x1280로 재빌드해야 한다(make cam-engine-rebuild).
+# head는 rb_gui `카메라 품질` 탭의 head view(색상)만 담당한다. head IR 스테레오 페어는
+# Fast-FoundationStereo disparity 입력 전용이었고 2026-08-16 그 파이프라인과 함께
+# 제거됐다(docs/archive/head_stereo/README.md). 모델 추론 입력은 손목 전용이다.
 server:
   name: camera_server
   mode: capture_only
@@ -42,8 +36,6 @@ bundle_groups:
     master_stream: "head.color"
     required_streams:
       - "head.color"
-      - "head.ir_left"
-      - "head.ir_right"
       - "left_realsense.color"
       - "left_realsense.depth"
       - "right_realsense.color"
@@ -85,8 +77,6 @@ bundle_groups:
     master_stream: "head.color"
     required_streams:
       - "head.color"
-      - "head.ir_left"
-      - "head.ir_right"
     max_bundle_time_diff_ms: 33.0
     publish_incomplete_bundles: false
 
@@ -97,25 +87,9 @@ cameras:
     streams:
       color: { enabled: true,  width: 1280, height: 720, fps: 30, format: rgb8 }
       depth: { enabled: false, width: 640,  height: 480, fps: 30, format: z16 }
-      ir_left:  { enabled: true, width: 1280, height: 720, fps: 30, format: y8 }
-      ir_right: { enabled: true, width: 1280, height: 720, fps: 30, format: y8 }
     controls:
-      # IR projector ON. 측정 결과(2026-06-27): 이 장면은 무광 테이블/박스라
-      # 텍스처를 거의 전적으로 emitter 도트에 의존한다. emitter OFF 시 IR이
-      # mean 21 / texture std 3.8 / 무텍스처 96% 로 무너져 평면·박스 정밀도가
-      # 급락했다(ON: mean 83 / std 67 / 무텍스처 1%). 따라서 ON 유지.
-      # 광택 초록 박스의 정반사 disparity 편향은 emitter를 끄는 대신 소프트웨어
-      # (2D 색 + 평면기하 융합)로 처리한다.
-      emitter_enabled: 1
+      # 색상만 쓰므로 emitter/IR 노출은 드라이버 기본값에 맡긴다(-1 = 미설정).
       auto_exposure: 1
-      # 초록 박스 정반사를 줄이려면 도트 세기를 낮춰 A/B: laser_power 100~360(mW, 기본 150)
-      # laser_power: 150
-      # 수동 노출 비교 시: auto_exposure: 0 후 ir_exposure_us / ir_gain 지정.
-      # ir_exposure_us: 8500
-      # ir_gain: 16
-      # /app/config 는 read-only 마운트 -> 쓰기 가능한 stereo_worker(host rw)로 덤프.
-      # 호스트에선 camera_server/stereo_worker/d435_ir_1280x720_K.txt 로 나타남.
-      dump_intrinsics_path: "/app/stereo_worker/d435_ir_1280x720_K.txt"
   left_realsense:
     # 2026-07-23: wrist cameras physically swapped between arms; serial follows the unit.
     serial: "412622272078"

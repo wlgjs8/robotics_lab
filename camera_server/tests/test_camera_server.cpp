@@ -112,7 +112,9 @@ void test_priority_bundle_config() {
   assert(groups[3].topic == "camera.bundle.wrist_right");
   assert(groups[3].required_streams.size() == 2);
   assert(groups[4].topic == "camera.bundle.stereo");
-  assert(groups[4].required_streams.size() == 3);
+  // head.color 만. IR 페어는 Fast-FoundationStereo disparity 입력이었고 그 파이프라인과
+  // 함께 제거됐다(2026-08-16) — 이 그룹은 이제 rb_gui head view(색상) 전용이다.
+  assert(groups[4].required_streams.size() == 1);
   assert(cfg.health.fps_window_sec == 5.0);
   assert(cfg.health.warn_if_fps_below == 29.0);
 }

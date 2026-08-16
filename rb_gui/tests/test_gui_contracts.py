@@ -25,7 +25,6 @@ from rb_servo_gui.app import (
     _TCP_FRAME_STAND,
     _apply_tcp_pose_step_and_send_pose_target,
     _apply_tcp_pose_step_to_target,
-    _box_detect_cmd_endpoint,
     _gripper_cmd_endpoint,
     _recording_cmd_endpoint,
     _recording_status_bind_endpoint,
@@ -36,7 +35,6 @@ from rb_servo_gui.app import (
     _update_spacemouse_panel,
     _send_spacemouse_assignment,
     _send_spacemouse_swap,
-    _trigger_box_detect,
     _send_arm_init_override,
     _send_arm_init_cancel_resume,
     _startup_init_tare_arms,
@@ -101,7 +99,6 @@ from rb_servo_gui.app import (
     _send_tcp_linear_move_from_marker,
     _send_init_motion_and_reset_targets,
     _update_floor_panel,
-    _update_box_detect_status,
     _update_roi_panel,
     _update_lease_owner,
     _tcp_display_mode,
@@ -129,11 +126,6 @@ from rb_servo_gui.app import (
     update_scene_markers,
 )
 from rb_servo_gui.cog_gui import CogGuiSession
-from rb_servo_gui.box_detect_control import (
-    BOX_DETECT_COMMAND_SCHEMA,
-    BoxDetectCommandClient,
-    BoxDetectCommandResult,
-)
 from rb_servo_gui.command_client import CommandClient
 from rb_servo_gui import geometry as gui_geometry
 from rb_servo_gui.models import (
@@ -143,7 +135,6 @@ from rb_servo_gui.models import (
     CircleOverlaySnapshot,
     Pose6D,
     StateSnapshot,
-    box_lock_status_text,
     external_box_display,
 )
 from rb_servo_gui.overlay_receiver import CircleOverlayReceiver, CircleOverlayStore, parse_udp_bind
@@ -1361,17 +1352,6 @@ class GuiContractsTest(unittest.TestCase):
             if old_status is not None:
                 os.environ["RB_GUI_RECORD_STATUS_BIND"] = old_status
 
-    def test_box_detect_cmd_endpoint_default_and_env(self):
-        old = os.environ.pop("RB_GUI_BOX_DETECT_CMD_ENDPOINT", None)
-        try:
-            self.assertEqual(_box_detect_cmd_endpoint(), ("127.0.0.1", 50387))
-            os.environ["RB_GUI_BOX_DETECT_CMD_ENDPOINT"] = "udp://10.0.0.5:51387"
-            self.assertEqual(_box_detect_cmd_endpoint(), ("10.0.0.5", 51387))
-        finally:
-            os.environ.pop("RB_GUI_BOX_DETECT_CMD_ENDPOINT", None)
-            if old is not None:
-                os.environ["RB_GUI_BOX_DETECT_CMD_ENDPOINT"] = old
-
     def test_recording_toggle_debounce_and_metadata(self):
         client = RecordingCommandFake()
         handles = {
@@ -1440,149 +1420,6 @@ class GuiContractsTest(unittest.TestCase):
         handles["recording_enabled"].value = False
         self.assertTrue(_toggle_episode_recording(handles, target="stop", monotonic_fn=lambda: 30.0))
         self.assertEqual(client.calls[-1]["command"], "stop")
-
-    def test_trigger_box_detect_debounce_and_busy_state(self):
-        class BoxDetectCommandFake:
-            def __init__(self, ok=True, message="box detect_now sent"):
-                self.calls = 0
-                self._ok = ok
-                self._message = message
-
-            def send_detect_now(self, labels=None):
-                self.calls += 1
-                return BoxDetectCommandResult(self._ok, self._message)
-
-        client = BoxDetectCommandFake()
-        handles = {
-            "box_detect_cmd_client": client,
-            "box_detect_button": RecordingButton(),
-            "box_detect_status_green": RecordingText(),
-            "box_detect_status_gray": RecordingText(),
-            "box_detect_busy": False,
-            "box_detect_last_trigger_monotonic": float("-inf"),
-        }
-
-        self.assertTrue(_trigger_box_detect(handles, monotonic_fn=lambda: 10.0))
-        self.assertEqual(client.calls, 1)
-        self.assertTrue(handles["box_detect_busy"])
-        self.assertTrue(handles["box_detect_button"].disabled)
-
-        self.assertFalse(_trigger_box_detect(handles, monotonic_fn=lambda: 10.4))
-        self.assertEqual(client.calls, 1)
-
-        handles["box_detect_busy"] = False
-        self.assertFalse(_trigger_box_detect(handles, monotonic_fn=lambda: 10.5))
-        self.assertEqual(client.calls, 1)
-
-        failing = BoxDetectCommandFake(ok=False, message="boom")
-        fail_handles = {
-            "box_detect_cmd_client": failing,
-            "box_detect_button": RecordingButton(),
-            "box_detect_status_green": RecordingText(),
-            "box_detect_status_gray": RecordingText(),
-            "box_detect_busy": False,
-            "box_detect_last_trigger_monotonic": float("-inf"),
-        }
-        self.assertFalse(_trigger_box_detect(fail_handles, monotonic_fn=lambda: 20.0))
-        self.assertEqual(failing.calls, 1)
-        self.assertFalse(fail_handles["box_detect_busy"])
-        self.assertIn("BLOCKED", fail_handles["box_detect_status_green"].value)
-        self.assertIn("boom", fail_handles["box_detect_status_green"].value)
-        self.assertIn("BLOCKED", fail_handles["box_detect_status_gray"].value)
-        self.assertIn("boom", fail_handles["box_detect_status_gray"].value)
-
-    def test_update_box_detect_status_state_machine(self):
-        from rb_servo_gui import app as gui_app
-
-        class BoxDetectStoreFake:
-            def __init__(self, phase=None, locks=None):
-                self._phase = phase
-                self._locks = locks or {}
-
-            def latest_locks(self):
-                if self._phase is None and not self._locks:
-                    return None
-                return {"phase": self._phase, "locks": dict(self._locks)}
-
-        locks = {
-            "green": {
-                "last_result": "ok",
-                "locked": True,
-                "lock_seq": 1,
-                "lock_age_s": 4.0,
-            },
-            "gray": {
-                "last_result": None,
-                "locked": False,
-                "lock_seq": 0,
-                "lock_age_s": None,
-            },
-        }
-        handles = {
-            "_stereo_store": BoxDetectStoreFake(phase="idle", locks=locks),
-            "box_detect_status_green": RecordingText(),
-            "box_detect_status_gray": RecordingText(),
-            "box_detect_button": RecordingButton(),
-        }
-        _update_box_detect_status(handles, monotonic_fn=lambda: 10.0)
-        self.assertEqual(handles["box_detect_status_green"].value, box_lock_status_text(locks["green"]))
-        self.assertEqual(handles["box_detect_status_gray"].value, box_lock_status_text(locks["gray"]))
-
-        button = RecordingButton()
-        button.disabled = True
-        handles = {
-            "_stereo_store": BoxDetectStoreFake(phase="idle"),
-            "box_detect_status_green": RecordingText(),
-            "box_detect_status_gray": RecordingText(),
-            "box_detect_button": button,
-            "box_detect_busy": True,
-            "box_detect_busy_since": 20.0,
-            "box_detect_seen_burst": False,
-        }
-        _update_box_detect_status(handles, monotonic_fn=lambda: 20.4)
-        self.assertTrue(handles["box_detect_busy"])
-        self.assertTrue(handles["box_detect_button"].disabled)
-
-        store = BoxDetectStoreFake(phase="burst")
-        button = RecordingButton()
-        button.disabled = True
-        handles = {
-            "_stereo_store": store,
-            "box_detect_status_green": RecordingText(),
-            "box_detect_status_gray": RecordingText(),
-            "box_detect_button": button,
-            "box_detect_busy": True,
-            "box_detect_busy_since": 30.0,
-            "box_detect_seen_burst": False,
-        }
-        _update_box_detect_status(handles, monotonic_fn=lambda: 30.5)
-        self.assertTrue(handles["box_detect_seen_burst"])
-        self.assertTrue(handles["box_detect_busy"])
-        store._phase = "idle"
-        _update_box_detect_status(handles, monotonic_fn=lambda: 30.7)
-        self.assertFalse(handles["box_detect_busy"])
-        self.assertFalse(handles["box_detect_button"].disabled)
-
-        button = RecordingButton()
-        button.disabled = True
-        since = 40.0
-        handles = {
-            "_stereo_store": BoxDetectStoreFake(),
-            "box_detect_status_green": RecordingText(),
-            "box_detect_status_gray": RecordingText(),
-            "box_detect_button": button,
-            "box_detect_busy": True,
-            "box_detect_busy_since": since,
-            "box_detect_seen_burst": False,
-        }
-        _update_box_detect_status(
-            handles,
-            monotonic_fn=lambda: since + gui_app._BOX_DETECT_BUSY_TIMEOUT_S + 1.0,
-        )
-        self.assertFalse(handles["box_detect_busy"])
-        self.assertFalse(handles["box_detect_button"].disabled)
-        self.assertEqual(handles["box_detect_status_green"].value, "응답 없음")
-        self.assertEqual(handles["box_detect_status_gray"].value, "응답 없음")
 
     def test_recording_status_panel_prefers_state_block_and_store_fallback(self):
         from rb_servo_gui.models import StateSnapshot
@@ -1806,76 +1643,6 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(payload["arms"], "left")
         self.assertEqual(payload["action"], "toggle")
         self.assertEqual(payload["left_q_deg"], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
-
-    def test_box_detect_command_client_emits_control_schema(self):
-        class _Sock:
-            def __init__(self, *_args):
-                self.sent = []
-
-            def sendto(self, data, endpoint):
-                self.sent.append((json.loads(data.decode()), endpoint))
-                return len(data)
-
-            def close(self):
-                pass
-
-        sock = _Sock()
-        client = BoxDetectCommandClient(
-            "127.0.0.1",
-            50387,
-            socket_factory=lambda *_args: sock,
-        )
-
-        result = client.send_detect_now()
-        self.assertTrue(result.ok, result.message)
-        payload, endpoint = sock.sent[0]
-        self.assertEqual(endpoint, ("127.0.0.1", 50387))
-        self.assertEqual(
-            payload,
-            {
-                "schema": BOX_DETECT_COMMAND_SCHEMA,
-                "seq": 1,
-                "command": "detect_now",
-            },
-        )
-        self.assertNotIn("labels", payload)
-
-        result = client.send_detect_now(labels=["green"])
-        self.assertTrue(result.ok, result.message)
-        payload, _endpoint = sock.sent[1]
-        self.assertEqual(payload["seq"], 2)
-        self.assertEqual(payload["labels"], ["green"])
-        self.assertEqual(client.sent_packets[-1]["labels"], ["green"])
-
-        result = client.send_detect_now()
-        self.assertTrue(result.ok, result.message)
-        payload, _endpoint = sock.sent[2]
-        self.assertEqual(payload["seq"], 3)
-
-    def test_box_detect_command_client_rejects_invalid_labels_without_send(self):
-        class _Sock:
-            def __init__(self, *_args):
-                self.sent = []
-
-            def sendto(self, data, endpoint):
-                self.sent.append((json.loads(data.decode()), endpoint))
-                return len(data)
-
-            def close(self):
-                pass
-
-        sock = _Sock()
-        client = BoxDetectCommandClient(socket_factory=lambda *_args: sock)
-
-        result = client.send_detect_now(labels=["green", "purple"])
-        self.assertFalse(result.ok)
-        self.assertEqual(sock.sent, [])
-        self.assertEqual(client.sent_packets, [])
-
-        result = client.send_detect_now(labels=[])
-        self.assertFalse(result.ok)
-        self.assertEqual(sock.sent, [])
-        self.assertEqual(client.sent_packets, [])
 
     def test_recording_status_store_keeps_arm_init_status_block(self):
         store = RecordingStatusStore()
@@ -5378,8 +5145,7 @@ class FloorConstraintGuiTest(unittest.TestCase):
                     observed_backend="mock",
                 )
                 server = RecordingServer(scene=ShapeCheckingScene())
-                with mock.patch("rb_servo_gui.app.load_T_stand_cam", return_value=np.eye(4)), \
-                        mock.patch("rb_servo_gui.app.load_T_tcp_cam", return_value=np.eye(4)):
+                with mock.patch("rb_servo_gui.app.load_T_tcp_cam", return_value=np.eye(4)):
                     handles = build_gui(server, safety, store)
 
                 self.assertFalse(handles["chunk_overlay_visible"])
@@ -5505,26 +5271,6 @@ class ExternalBoxTelemetryGuiTest(unittest.TestCase):
         self.assertFalse(none["show_label"])
         self.assertEqual(none["label"], "")
 
-    def test_box_lock_status_text_helper(self):
-        cases = [
-            (None, "탐지 전"),
-            ({"last_result": None}, "탐지 전"),
-            ({"last_result": "pending"}, "탐지 중…"),
-            ({"last_result": "reject_rmse", "fitness": 0.1}, "탐지 실패 - 다시 시도하세요"),
-            ({"last_result": "reject_fitness", "fitness": 0.1}, "탐지 실패 - 다시 시도하세요"),
-            ({"last_result": "reject_no_track", "fitness": 0.1}, "탐지 실패 - 다시 시도하세요"),
-            ({"last_result": "ok", "lock_age_s": None, "fitness": 0.1}, "잠김"),
-        ]
-        for lock, expected in cases:
-            text = box_lock_status_text(lock)
-            self.assertEqual(text, expected)
-            self.assertNotIn("fitness", text)
-
-        text = box_lock_status_text({"last_result": "ok", "lock_age_s": 12.0, "fitness": 0.1})
-        self.assertIn("잠김", text)
-        self.assertIn("12", text)
-        self.assertNotIn("fitness", text)
-
     def test_state_snapshot_parses_external_box_clearance(self):
         snap = StateSnapshot.parse(sample_state(self_collision={
             "enabled": True,
@@ -5544,54 +5290,20 @@ class ExternalBoxTelemetryGuiTest(unittest.TestCase):
 
 
 class StereoCloudStoreTest(unittest.TestCase):
-    def test_latest_locks_sticky_independent_of_boxes(self):
+    def test_latest_wrist_is_per_arm_and_reports_age(self):
         store = StereoCloudStore()
-        self.assertIsNone(store.latest_locks())
+        self.assertIsNone(store.latest_wrist("left"))
 
-        locks = {
-            "green": {
-                "locked": True,
-                "lock_seq": 2,
-                "lock_age_s": 1.5,
-                "last_result": "ok",
-            },
-            "gray": {
-                "locked": False,
-                "lock_seq": 0,
-                "lock_age_s": None,
-                "last_result": None,
-            },
-        }
-        store.update_boxes([], 1, phase="idle", locks=locks)
-        self.assertEqual(store.latest_locks(), {"phase": "idle", "locks": locks})
-
-        store.update_boxes([], 2)
-        self.assertEqual(store.latest_locks(), {"phase": "idle", "locks": locks})
-        boxes, seq = store.latest_boxes()
-        self.assertEqual(boxes, [])
-        self.assertEqual(seq, 2)
-
-    def test_update_boxes_round_trips_lock_fields(self):
-        store = StereoCloudStore()
-        boxes = [
-            {
-                "T": np.eye(4),
-                "dims": (0.38, 0.24, 0.11),
-                "label": "green",
-                "locked": True,
-                "lock_seq": 3,
-                "lock_age_s": 8.0,
-            }
-        ]
-        store.update_boxes(boxes, 9, phase="idle", locks={
-            "green": {"locked": True, "lock_seq": 3, "lock_age_s": 8.0, "last_result": "ok"},
-            "gray": {"locked": False, "lock_seq": 0, "lock_age_s": None, "last_result": None},
-        })
-        latest_boxes, seq = store.latest_boxes()
-        self.assertEqual(seq, 9)
-        self.assertEqual(latest_boxes[0]["locked"], True)
-        self.assertEqual(latest_boxes[0]["lock_seq"], 3)
-        self.assertEqual(latest_boxes[0]["lock_age_s"], 8.0)
+        xyz = np.zeros((2, 3), dtype=np.float32)
+        rgb = np.zeros((2, 3), dtype=np.uint8)
+        store.update_wrist("left", xyz, rgb)
+        left = store.latest_wrist("left")
+        self.assertIsNotNone(left)
+        self.assertIs(left[0], xyz)
+        self.assertIs(left[1], rgb)
+        self.assertGreaterEqual(left[2], 0.0)
+        # 한쪽 팔만 갱신해도 다른 팔은 여전히 미수신이어야 한다(팔별 독립 보관).
+        self.assertIsNone(store.latest_wrist("right"))
 
 
 class PointcloudGuiTest(unittest.TestCase):
@@ -5599,18 +5311,17 @@ class PointcloudGuiTest(unittest.TestCase):
         def __init__(self, value):
             self.value = value
 
-    def test_persist_pc_settings_includes_box_toggle(self):
+    def test_persist_pc_settings_round_trips_wrist_cloud_settings(self):
         import os
         import tempfile
         from rb_servo_gui import app as gui_app
 
         handles = {
-            "pc_enable": self._Value(False),
-            "pc_box_enable": self._Value(True),
             "pc_size": self._Value(0.006),
             "pc_max_k": self._Value(90),
             "pc_dmin": self._Value(0.25),
             "pc_dmax": self._Value(2.75),
+            "pc_wrist_enable": self._Value(True),
         }
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "settings.json")
@@ -5618,156 +5329,13 @@ class PointcloudGuiTest(unittest.TestCase):
             try:
                 gui_app._persist_pc_settings(handles)
                 loaded = gui_app._load_gui_settings()
-                self.assertEqual(loaded.get("pc_enable"), False)
-                self.assertEqual(loaded.get("pc_box_enable"), True)
                 self.assertAlmostEqual(loaded.get("pc_size"), 0.006)
                 self.assertEqual(loaded.get("pc_max_k"), 90)
                 self.assertAlmostEqual(loaded.get("pc_dmin"), 0.25)
                 self.assertAlmostEqual(loaded.get("pc_dmax"), 2.75)
+                self.assertEqual(loaded.get("pc_wrist_enable"), True)
             finally:
                 os.environ.pop("RB_GUI_SETTINGS_PATH", None)
-
-    def test_update_stereo_boxes_uses_box_toggle_independent_of_cloud_toggle(self):
-        from rb_servo_gui import app as gui_app
-
-        class _Scene:
-            def __init__(self):
-                self.meshes = {}
-                self.labels = {}
-
-            def add_mesh_simple(self, name, vertices, faces, **kwargs):
-                handle = RecordingSceneHandle()
-                handle.position = kwargs.get("position")
-                handle.wxyz = kwargs.get("wxyz")
-                handle.visible = kwargs.get("visible", True)
-                handle.color = kwargs.get("color")
-                self.meshes[name] = handle
-                return handle
-
-            def add_label(self, name, text, **kwargs):
-                handle = RecordingSceneHandle()
-                handle.text = text
-                handle.position = kwargs.get("position")
-                handle.visible = kwargs.get("visible", True)
-                self.labels[name] = handle
-                return handle
-
-        class _Server:
-            def __init__(self, scene):
-                self.scene = scene
-
-        class _Store:
-            def __init__(self, boxes):
-                self.boxes = boxes
-
-            def latest_boxes(self):
-                return list(self.boxes), 7
-
-        t0 = np.eye(4)
-        t1 = np.eye(4)
-        t1[:3, 3] = [0.1, 0.2, 0.3]
-        boxes = [
-            {"T": t0, "dims": (0.38, 0.24, 0.11), "label": "green"},
-            {"T": t1, "dims": (0.38, 0.24, 0.11), "label": "gray"},
-        ]
-        old_mesh = gui_app._BOX_MESH
-        gui_app._BOX_MESH = (
-            np.zeros((3, 3), dtype=np.float32),
-            np.array([[0, 1, 2]], dtype=np.uint32),
-        )
-        self.addCleanup(lambda: setattr(gui_app, "_BOX_MESH", old_mesh))
-
-        scene = _Scene()
-        handles = {
-            "_server": _Server(scene),
-            "_stereo_store": _Store(boxes),
-            "pc_enable": self._Value(False),
-            "pc_box_enable": self._Value(True),
-        }
-        latest = StateSnapshot.parse(sample_state(self_collision={
-            "external_box_clearance_m": [0.050, 0.0],
-            "external_box_min_clearance_m": 0.0,
-        }))
-        gui_app._update_stereo_boxes(handles, latest)
-
-        self.assertEqual(set(scene.meshes), {"/stereo_box_0", "/stereo_box_1"})
-        self.assertEqual(set(handles["_box_handles"]), {"box0", "box1"})
-        self.assertTrue(handles["_box_handles"]["box0"].visible)
-        self.assertTrue(handles["_box_handles"]["box1"].visible)
-        self.assertEqual(handles["_box_handles"]["box0"].color, (40, 220, 80))
-        self.assertEqual(handles["_box_handles"]["box1"].color, gui_app._EXTERNAL_BOX_COLLISION_RED)
-        self.assertEqual(handles["_box_dist_labels"]["box0"].text, "50 mm")
-        self.assertTrue(handles["_box_dist_labels"]["box0"].visible)
-        self.assertNotIn("box1", handles["_box_dist_labels"])
-
-        handles["pc_box_enable"].value = False
-        gui_app._update_stereo_boxes(handles)
-        self.assertFalse(handles["_box_handles"]["box0"].visible)
-        self.assertFalse(handles["_box_handles"]["box1"].visible)
-        self.assertFalse(handles["_box_dist_labels"]["box0"].visible)
-
-    def test_update_stereo_boxes_shows_lock_badge_without_clearance_label(self):
-        from rb_servo_gui import app as gui_app
-
-        class _Scene:
-            def __init__(self):
-                self.meshes = {}
-                self.labels = {}
-
-            def add_mesh_simple(self, name, vertices, faces, **kwargs):
-                handle = RecordingSceneHandle()
-                handle.position = kwargs.get("position")
-                handle.wxyz = kwargs.get("wxyz")
-                handle.visible = kwargs.get("visible", True)
-                handle.color = kwargs.get("color")
-                self.meshes[name] = handle
-                return handle
-
-            def add_label(self, name, text, **kwargs):
-                handle = RecordingSceneHandle()
-                handle.text = text
-                handle.position = kwargs.get("position")
-                handle.visible = kwargs.get("visible", True)
-                self.labels[name] = handle
-                return handle
-
-        class _Server:
-            def __init__(self, scene):
-                self.scene = scene
-
-        class _Store:
-            def __init__(self, boxes):
-                self.boxes = boxes
-
-            def latest_boxes(self):
-                return list(self.boxes), 8
-
-        t0 = np.eye(4)
-        t1 = np.eye(4)
-        t1[:3, 3] = [0.1, 0.2, 0.3]
-        boxes = [
-            {"T": t0, "dims": (0.38, 0.24, 0.11), "label": "green", "locked": True},
-            {"T": t1, "dims": (0.38, 0.24, 0.11), "label": "gray"},
-        ]
-        old_mesh = gui_app._BOX_MESH
-        gui_app._BOX_MESH = (
-            np.zeros((3, 3), dtype=np.float32),
-            np.array([[0, 1, 2]], dtype=np.uint32),
-        )
-        self.addCleanup(lambda: setattr(gui_app, "_BOX_MESH", old_mesh))
-
-        scene = _Scene()
-        handles = {
-            "_server": _Server(scene),
-            "_stereo_store": _Store(boxes),
-            "pc_enable": self._Value(False),
-            "pc_box_enable": self._Value(True),
-        }
-        gui_app._update_stereo_boxes(handles, latest=None)
-
-        self.assertEqual(handles["_box_dist_labels"]["box0"].text, "🔒")
-        self.assertTrue(handles["_box_dist_labels"]["box0"].visible)
-        self.assertNotIn("box1", handles["_box_dist_labels"])
 
 
 class RoiBoxGuiTest(unittest.TestCase):

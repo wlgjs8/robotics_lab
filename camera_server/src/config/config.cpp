@@ -155,8 +155,6 @@ AppConfig load_config(const std::string& path) {
         cam.controls.auto_exposure = node_as(c["auto_exposure"], cam.controls.auto_exposure);
         cam.controls.ir_exposure_us = node_as(c["ir_exposure_us"], cam.controls.ir_exposure_us);
         cam.controls.ir_gain = node_as(c["ir_gain"], cam.controls.ir_gain);
-        cam.controls.dump_intrinsics_path =
-            node_as(c["dump_intrinsics_path"], cam.controls.dump_intrinsics_path);
       }
       cfg.cameras.push_back(cam);
     }

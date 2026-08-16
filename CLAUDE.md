@@ -45,7 +45,7 @@ camera_server (C++) ──────┘ (RealSense/mock, shared-memory image t
 
 State fanout: `rb_servo_server` is the sole owner of UDP state publication via `network.state_pub_endpoints` (list). Commands go directly to `network.command_bind`. Benchmark overlay streams (desired geometry/metrics) are separate from robot state and must never carry commands.
 
-Ports/protocols (verified against compose + config; full table in `docs/code_architecture_map.md`): commands in `UDP 50256`; chunk frames on `UDP 50264`; state fanout to `UDP 50356` (joint scope dashboard), `50366` (viser GUI), `50376` (stack policy_runner/teleop_mux), `50378` (external flow-infer readback), and `50386` (camera_server stereo_worker wrist-fusion); gripper command/feedback `UDP 50410`/`50420`; camera metadata `ZMQ 5600` (`camera.bundle`/`camera.health`) with images in a POSIX shared-memory ring (`/camera_server_frames`); GUI web `HTTP 8080`; optional circle overlay `UDP 50261`. Command JSON `{seq, mode, left{…}, right{…}}` (`mode` parsed by `controlModeFromString` in `src/core/types.cpp`); state JSON schema `robotics_lab.servo_state.v1`.
+Ports/protocols (verified against compose + config; full table in `docs/code_architecture_map.md`): commands in `UDP 50256`; chunk frames on `UDP 50264`; state fanout to `UDP 50356` (joint scope dashboard), `50366` (viser GUI), `50376` (stack policy_runner/teleop_mux), `50378` (external flow-infer readback), and `50386` (spare consumer slot; the camera_server wrist-fusion consumer was removed with the head-stereo pipeline); gripper command/feedback `UDP 50410`/`50420`; camera metadata `ZMQ 5600` (`camera.bundle`/`camera.health`) with images in a POSIX shared-memory ring (`/camera_server_frames`); GUI web `HTTP 8080`; optional circle overlay `UDP 50261`. Command JSON `{seq, mode, left{…}, right{…}}` (`mode` parsed by `controlModeFromString` in `src/core/types.cpp`); state JSON schema `robotics_lab.servo_state.v1`.
 
 ## Canonical Terminology (use everywhere — config, docs, GUI, logs, tests)
 
@@ -114,10 +114,10 @@ Operator stacks (native via `Makefile`; the GUI/servo/policy stack runs without 
 make run               # full local teleop stack: rb_servo_server + viser GUI + policy_runner (SpaceMouse + UMI); pgmode real
 make run MODE=sim      # same stack, pgmode controller-simulation
 make build       # source-build + install the native stack (rbpodo backend) into the path `make run` launches
-make cam-up / cam-down / cam-status   # the only Docker stack: camera_server (D435 head stereo + dual D405 wrists + stereo_worker, one container); cam-engine-rebuild rebuilds the 1280 TRT engine
-make cam-up-wrists    # wrist-only rig: dual D405 without the head D435 (no head stereo/box detect; wrist RGB-D bundles + wrist clouds still flow)
+make cam-up / cam-down / cam-status   # the only Docker stack: camera_server (D435 head color + dual D405 wrists + stereo_worker, one container)
+make cam-up-wrists    # wrist-only rig: dual D405 without the head D435 (no head-view panel; wrist RGB-D bundles + wrist clouds still flow)
 ```
-GUI: `http://127.0.0.1:8080`. Docker is used ONLY for `camera_server`; everything else runs natively. Camera lifecycle is managed by the `cam-*` targets (`cam-up`/`cam-up-wrists`/`cam-down`/`cam-status`/`cam-engine-rebuild`); override the rig with `make cam-up CAMERA_CONFIG=/app/config/<rig>.yaml`. Flow-matching training runs natively on the GPU server with `python3 -m policy_runner flow-train`.
+GUI: `http://127.0.0.1:8080`. Docker is used ONLY for `camera_server`; everything else runs natively. Camera lifecycle is managed by the `cam-*` targets (`cam-up`/`cam-up-wrists`/`cam-down`/`cam-status`); override the rig with `make cam-up CAMERA_CONFIG=/app/config/<rig>.yaml`. Flow-matching training runs natively on the GPU server with `python3 -m policy_runner flow-train`.
 
 ML data flow: audit HDF5 episodes (`python3 -m policy_runner hdf5-audit ...`, schema `robotics_lab.policy_runner.hdf5_audit.v1`) before flow-train. `flow-infer` requires explicit `--rollout-mode` (`offline_eval` / `sim_dryrun` / `controller_sim` / `real_readonly` / `real_policy`); `real_policy` enforces measured/accepted retarget, collision, gripper, and geometry gates — satisfiable, and exercised live (a full real_policy rollout has run on hardware).
 

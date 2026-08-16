@@ -1,6 +1,6 @@
-# head(D435 IR스테레오 + RGB) + 손목 D405 2개(color+depth, raw 클라우드/정책용). USB3.
-# head IR 640x480 = TRT 엔진/K 일치. head color 1280x720 = d435_color_calib.json 일치.
-# 손목 D405는 raw depth -> 모델 없이 backproject (정책 + viser 오버레이 공용 번들).
+# head(D435 RGB) + 손목 D405 2개(color+depth, raw 클라우드/정책용). USB3.
+# head는 rb_gui head view(색상) 전용 — IR 스테레오 페어는 Fast-FoundationStereo
+# 입력이었고 2026-08-16 제거됐다. 손목 D405는 raw depth -> 모델 없이 backproject.
 server:
   name: camera_server
   mode: capture_only
@@ -34,8 +34,6 @@ cameras:
     streams:
       color: { enabled: true,  width: 1280, height: 720, fps: 30, format: rgb8 }
       depth: { enabled: false, width: 640,  height: 480, fps: 30, format: z16 }
-      ir_left:  { enabled: true, width: 640, height: 480, fps: 30, format: y8 }
-      ir_right: { enabled: true, width: 640, height: 480, fps: 30, format: y8 }
   left_realsense:
     # 2026-07-23: wrist cameras physically swapped between arms; serial follows the unit.
     serial: "412622272078"

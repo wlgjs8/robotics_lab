@@ -1,4 +1,6 @@
 # USB2 검증용: D435 IR 페어만 (color/depth 비활성). camera_server IR 플러밍 확인.
+# 진단 전용 리그다 — head-stereo 파이프라인 제거(2026-08-16) 이후 IR 스트림을
+# 소비하는 런타임은 없다. 캡처 경로 자체를 확인할 때만 쓴다.
 # RGB까지 동시 스트림은 USB3 필요(USB2는 3-스트림 조합 resolve 불가).
 server:
   name: camera_server

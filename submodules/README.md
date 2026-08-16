@@ -7,8 +7,10 @@ This directory contains the external source checkouts declared in the root
 
 | Path | Upstream | Role |
 | --- | --- | --- |
-| `Fast-FoundationStereo/` | `https://github.com/wlgjs8/Fast-FoundationStereo.git` | Stereo perception dependency |
 | `controller-manager/` | `https://github.com/PLAIF-dev/controller-manager` | Company controller stack consumed through `cm_bridge` |
+
+`Fast-FoundationStereo/` was removed on 2026-08-16 together with the head-stereo
+depth pipeline it powered — see `docs/archive/head_stereo/README.md`.
 
 Initialize all pinned checkouts with:
 

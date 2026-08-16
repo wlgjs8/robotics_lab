@@ -8,12 +8,12 @@ from robot motion acceptance.
 Canonical stack profile (`make cam-up`, default
 `CAMERA_CONFIG=/app/config/d435_head_1280x720.yaml`):
 
-- head: Intel RealSense D435, color 1280x720@30 plus IR left/right
-  1280x720@30 for the stereo worker
+- head: Intel RealSense D435, color 1280x720@30 (rb_gui head-view panel only;
+  the IR pair was removed with the head-stereo pipeline, 2026-08-16)
 - left wrist: Intel RealSense D405, color 640x480@30 plus depth 640x480@30
 - right wrist: Intel RealSense D405, color 640x480@30 plus depth 640x480@30
 - stereo worker: launched in the same `camera_server` container by
-  `camera_server/stereo_worker/run_all.sh`
+  `camera_server/stereo_worker/run_all.sh`; publishes wrist D405 clouds only
 
 Supported explicit variants:
 
@@ -152,7 +152,7 @@ operator:
 repo_commit:
 config_file:
 profile:
-  head: D435 RGB 1280x720@30 + IR stereo 1280x720@30
+  head: D435 RGB 1280x720@30
   left_wrist: D405 RGB-D 640x480@30
   right_wrist: D405 RGB-D 640x480@30
 serials:

@@ -909,23 +909,6 @@ def external_box_display(
     }
 
 
-def box_lock_status_text(lock: Mapping[str, Any] | None) -> str:
-    """label 하나의 잠금 상태(stereo.boxes의 top-level locks[label] 항목)를 operator용
-    한국어 문구로. fitness는 표시하지 않는다 — 배포 기본 ICP 방식에서 구조적으로 ~0.70에
-    수렴하는 약한 신호라 operator에게 오해를 줄 수 있다(evaluate_lock_gate 참고)."""
-    if not isinstance(lock, Mapping):
-        return "탐지 전"
-    last_result = lock.get("last_result")
-    if last_result == "ok":
-        age = _optional_finite(lock.get("lock_age_s"))
-        return f"잠김 ({age:.0f}초 전)" if age is not None else "잠김"
-    if last_result in ("reject_rmse", "reject_fitness", "reject_no_track"):
-        return "탐지 실패 - 다시 시도하세요"
-    if last_result == "pending":
-        return "탐지 중…"
-    return "탐지 전"
-
-
 def _field_value(
     data: Mapping[str, Any],
     key: str,

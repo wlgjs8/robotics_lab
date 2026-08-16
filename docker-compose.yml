@@ -1,5 +1,5 @@
 services:
-  # camera_server 단일 컨테이너: C++ 캡처(librealsense) + GPU 스테레오 추론(Fast-FoundationStereo).
+  # camera_server 단일 컨테이너: C++ 캡처(librealsense) + stereo_worker(손목 클라우드 발행).
   camera_server:
     profiles: ["real_camera"]
     build:
@@ -15,14 +15,6 @@ services:
     shm_size: "2gb"
     network_mode: host
     privileged: true
-    # GPU (스테레오 추론용; Blackwell)
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     devices:
       - /dev/bus/usb:/dev/bus/usb
     volumes:
@@ -30,17 +22,10 @@ services:
       - /run/udev:/run/udev:ro
       - ./camera_server/config:/app/config:ro
       - ./camera_server/episodes:/data/episodes
-      # 스테레오 모델 코드/가중치(큰 파일)는 이미지에 굽지 않고 마운트
-      - ./submodules/Fast-FoundationStereo:/app/Fast-FoundationStereo
       - ./camera_server/stereo_worker:/app/stereo_worker
-      # 박스 검출용: T_stand_cam(캘리브) + rb_gui settings(depth 범위) 읽기 전용
-      - ${RB_T_STAND_CAM:-/home/plaif/workspace/T_stand_cam.npy}:/app/state/T_stand_cam.npy:ro
-      - ${RB_GUI_STATE_DIR:-/home/plaif/.rb_servo_gui}:/app/rb_gui_state:ro
-      # 손목 핸드아이 T_tcp_cam (rb_gui 기즈모가 갱신) — 아이디어2 손목 클라우드 병합용
-      - ./calibration:/calibration:ro
-    # 호스트 데스크톱/입력 응답성 보호: stereo 추론+캡처를 코어 4/5/6에 격리(0/1/2/7은
-    # GNOME/Xorg/USB-IRQ용, 3은 서보 RT isolcpus 격리). 미설정 시 추론 2스레드가 데스크톱
-    # 코어로 올라타 마우스/키보드 랙. live 조정은 `docker update --cpuset-cpus=... camera_server`.
+    # 호스트 데스크톱/입력 응답성 보호: 캡처+워커를 코어 4/5/6에 격리(0/1/2/7은
+    # GNOME/Xorg/USB-IRQ용, 3은 서보 RT isolcpus 격리).
+    # live 조정은 `docker update --cpuset-cpus=... camera_server`.
     cpuset: "4,5,6"
     environment:
       # Container path; override with CAMERA_CONFIG (see Makefile cam-up).
@@ -49,39 +34,15 @@ services:
       # capture PC (.40) and this inference PC share identical camera settings.
       # Empty value disables it (falls back to driver defaults).
       CAMERA_SERVER_REALSENSE_JSON: ${CAMERA_REALSENSE_JSON:-/app/config/realsense_d405_advanced.json}
-      FFS_DIR: /app/Fast-FoundationStereo
-      STEREO_WEIGHTS: /app/Fast-FoundationStereo/weights/23-36-37/model_best_bp2_serialize.pth
-      # stereo_worker가 읽는 FoundationStereo K.txt(intrinsics+baseline). 1280x720 헤드는
-      # camera_server가 기동 시 디바이스 값을 /app/stereo_worker/d435_ir_1280x720_K.txt 로
-      # 덤프하므로 그 경로로 주입한다(640x480 기본값은 정적 손파일).
-      STEREO_INTRINSICS: ${STEREO_INTRINSICS:-/app/config/d435_ir_640x480_K.txt}
-      # Head inference and wrist fusion consume independent bundle groups so
-      # stereo processing cannot backpressure the real-policy wrist stream.
-      STEREO_BUNDLE_TOPIC: ${STEREO_BUNDLE_TOPIC:-camera.bundle.stereo}
       # 좌/우 독립 wrist 그룹 구독이 worker 기본값. 한쪽 손목 카메라가 죽어도 건강한
       # 쪽 클라우드는 계속 흐른다. 단일 토픽으로 되돌리려면 이 env를 명시.
       STEREO_WRIST_BUNDLE_TOPIC: ${STEREO_WRIST_BUNDLE_TOPIC:-}
-      # 0 = head D435 없는 wrist-only 리그(dual_realsense_d405.yaml): head 스테레오
-      # 추론/박스검출/융합 비활성, 손목 클라우드 발행만 수행 (make cam-up-wrists).
-      STEREO_HEAD: ${STEREO_HEAD:-1}
       # 캡처+워커 동시 기동 런처가 사용. 0이면 캡처만(워커 수동).
       STEREO_WORKER_AUTOSTART: ${STEREO_WORKER_AUTOSTART:-1}
-      # 검출된 박스 2개를 rb_servo_server CollisionMonitor에 keep-out 으로 전송
-      # (UDP SetExternalBoxes, net=host). 0이면 송신 안 함.
-      STEREO_SEND_EXTERNAL_BOXES: ${STEREO_SEND_EXTERNAL_BOXES:-1}
-      # 반드시 servo의 network.command_bind 포트와 일치해야 함. 이 사이트 stack_real.yaml은
-      # 50256을 쓴다(안 맞추면 박스 패킷이 버려짐).
-      STEREO_COMMAND_ENDPOINT: ${STEREO_COMMAND_ENDPOINT:-127.0.0.1:50256}
-      # CPU 경량화 튜닝(호스트 env로 오버라이드). HEAD_HZ=0은 매 프레임(캡처율), >0은 그 Hz로
-      # 데시메이트(추론 2스레드가 최대 레버 → 기본 3Hz; 정지 트레이 검출/viz엔 충분).
-      # 컨테이너 재생성(RealSense 재오픈) 없이 live로 바꾸려면 stereo_worker/head_hz.txt에
-      # 값 쓰고 worker만 재시작(파일이 env보다 우선).
-      STEREO_HEAD_HZ: ${STEREO_HEAD_HZ:-3}
-      STEREO_IDLE_STRIDE: ${STEREO_IDLE_STRIDE:-2}         # burst 아닐 때 head 클라우드 픽셀 stride(계산량↓)
-      STEREO_DETECT_PROFILE: ${STEREO_DETECT_PROFILE:-0}   # 1=박스 detect 단계별 ms 로그
-      STEREO_TORCH_THREADS: ${STEREO_TORCH_THREADS:-2}
-      # numpy/OpenBLAS/OMP 스레드 상한(cloud 재투영의 코어 확산 억제). 최대 레버:
-      # 기본 2면 CPU ~305%->~119% (fps 손실 0, 전체율 6.5fps 유지). 0/빈값=제한 없음.
+      # 손목 클라우드 발행 주기(N프레임마다 1회)와 프레임당 viz 점수 상한.
+      STEREO_WRIST_EVERY: ${STEREO_WRIST_EVERY:-3}
+      STEREO_VIZ_MAX_PTS: ${STEREO_VIZ_MAX_PTS:-30000}
+      # numpy/OpenBLAS/OMP 스레드 상한(deprojection의 코어 확산 억제). 0/빈값=제한 없음.
       OMP_NUM_THREADS: ${OMP_NUM_THREADS:-2}
       OPENBLAS_NUM_THREADS: ${OPENBLAS_NUM_THREADS:-2}
     # 한 컨테이너에서 camera_server(C++) + stereo_worker 동시 기동 (docker compose up/start 한 번에 둘 다)
@@ -89,4 +50,4 @@ services:
     command: []
     labels:
       rb-servo.role: "real-camera"
-      rb-servo.hardware: "realsense+gpu"
+      rb-servo.hardware: "realsense"
