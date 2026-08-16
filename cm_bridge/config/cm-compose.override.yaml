@@ -1,0 +1,18 @@
+# cm_bridge overlay for controller-manager's docker-compose.yaml.
+# Why: the submodule compose's chimp-sils seeding block predates the 0032 §6b
+# platform-device-file layout (it copies a retired robot-config/ tree), so a
+# fresh SILS container cannot resolve active.yaml on its own. Rather than edit
+# the READ-ONLY submodule, point the binary's #1 resolution rule
+# ($CHIMP_ACTIVE_YAML, src/main.cpp:33-43) at the seeded platform device file
+# on the bind mount. Seed it on the host first (SILS loopback shell):
+#   cd submodules/controller-manager
+#   sed -e '0,/ip: ""/s//ip: "127.0.0.1"/' -e '0,/ip: ""/s//ip: "127.0.0.2"/' \
+#       platforms/chimpanzee/params-presets/dual-arm-body-nominal.yaml \
+#       > platforms/chimpanzee/active.yaml
+# Run:
+#   docker compose -f submodules/controller-manager/docker-compose.yaml \
+#                  -f cm_bridge/config/cm-compose.override.yaml up -d chimp-sils
+services:
+  chimp-sils:
+    environment:
+      CHIMP_ACTIVE_YAML: /cm-ws/src/controller-manager/platforms/chimpanzee/active.yaml
