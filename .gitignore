@@ -3,6 +3,7 @@
 **/build*/
 **/cmake-build-*/
 **/CMakeFiles/
+*.egg-info/
 **/CMakeCache.txt
 **/CTestTestfile.cmake
 **/cmake_install.cmake
@@ -20,10 +21,6 @@
 **/episodes/
 **/checkpoints/
 outputs/
-camera_server/episodes/
-rb_servo_server/config/dual_real.yaml
-calibration/local/
-geometry/local/
 
 # Python caches
 **/__pycache__/
@@ -35,17 +32,12 @@ geometry/local/
 # Local agent/runtime state
 .omx/
 **/.omx/
-.codex/
-**/.codex/
-.agents/
-**/.agents/
-**/.claude/settings.local.json
+**/**/**/.claude/settings.local.json
 
 # Local/vendor integration checkouts
 rb_servo_server/submodules/
 
 # Migration backups
-.git-backups/
 
 # OS/editor files
 .DS_Store

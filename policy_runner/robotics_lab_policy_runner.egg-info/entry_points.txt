@@ -1,2 +1,0 @@
-[console_scripts]
-policy-runner = policy_runner.main:main

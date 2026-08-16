@@ -294,6 +294,14 @@ if(BUILD_TESTING)
     add_test(NAME joint_moving_average COMMAND test_joint_moving_average)
 
     set(RB_GUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../rb_gui")
+    # Prefer the repo venv. The GUI/policy suites need trimesh/viser/plotly, which are
+    # installed there and NOT in the system interpreter — find_package(Python3) alone
+    # picks system python and the suites then report import errors as test failures.
+    # Override with -DPython3_EXECUTABLE=... if you keep your env elsewhere.
+    set(RB_VENV_PYTHON "${CMAKE_CURRENT_SOURCE_DIR}/../.venv/bin/python")
+    if(NOT DEFINED Python3_EXECUTABLE AND EXISTS "${RB_VENV_PYTHON}")
+        set(Python3_EXECUTABLE "${RB_VENV_PYTHON}")
+    endif()
     find_package(Python3 COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
         if(EXISTS "${RB_GUI_DIR}/tests")
