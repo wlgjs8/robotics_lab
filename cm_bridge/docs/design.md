@@ -81,26 +81,53 @@ unmodified) — sources of truth in `docs/code_architecture_map.md`:
 - Gripper 50410/50420 stays on its existing path (grippers are not
   controller-manager's concern on this rig; unchanged).
 
-## 5. Open item #1 — controller-manager streaming input (probe in P1)
+## 5. RESOLVED — streaming input = `FollowUnit` (code analysis 2026-08-16)
 
-controller-manager's production tasks are planned motions (MovJ/MovL/…); its
-continuous-follow story has three candidates found in exploration:
+Candidates were analyzed read-only at pin 41de741. Verdicts:
 
-| Candidate | Where | Notes |
-|---|---|---|
-| `MovF` / `MovH` / `MovHF` follow tasks | `src/arm/tasks/` | follow-style tasks; semantics for a 30 Hz reactive stream + late-chunk behavior unknown — read + SILS-test in P1 |
-| `StreamSegment` / `StreamPool` ("Design-B") | `src/core/` | purpose-built streaming, currently **gated off** — find the gate flag, check maturity in SILS |
-| `StreamFollower` | `src/arm/motions/` | the delta-stream follower (alpha-law retired, `alpha=1`) |
+- **`FollowUnit` (`task Follow`) — SELECTED.** External topic
+  `/chimpanzee/<side>/cmd/follow` (`geometry_msgs/PoseArray`); each Pose is a
+  **per-period FLANGE-FRAME DELTA** (position m, orientation quaternion ->
+  rotvec at the IPC boundary, `ControllerIpc.cpp:552-574`). Latest-value
+  seqlock slot, chunk <= 64 (config cap 50): **REPLACE-at-boundary is the
+  native contract** (`Channels.h:596-608`, `Tasks.cpp:3198-3213`) -- exactly
+  our receding-horizon chunk semantics. Timing: one delta per
+  `input_period_ms` (default 20 ms -> set **33.3** for our 30 Hz),
+  `playback_margin 0.2*T` jitter buffer; a missed boundary commands zero
+  delta and STAYS in Follow; silence exit only after `silence_periods*T`
+  (2T) AND at rest (`Tasks.cpp:3367-3397`). Auto-enters Follow from
+  OnTask+Idle on the first fresh chunk. Covered by `follow_unit_test`,
+  `follow6_test`, SILS probe `verification/sils/follow6_stream.py`.
+- `MovF/MovH/MovHF` -- one-shot register->replay units (action `Move` +
+  `Sync` release), no append, never retargeted mid-run. Infeasible.
+- `StreamSegment`/`StreamPool` (Design-B) -- internal cell->arm transport,
+  production-gated off (`ENABLE_CELL_STREAM = false`), no external ingress.
+  Do not target.
+- `StreamFollower` (`ChunkPacer`) -- helper inside the units; the Cartesian
+  half is test-only (production FollowUnit uses Ruckig `CartChannel`s). Not
+  an ingress.
 
-P1 resolves this **empirically in SILS** (no hardware): feed a synthetic 30 Hz
-waypoint stream through each viable input; measure continuity, late-input
-behavior, re-anchor semantics. We proceed without pre-consulting the owner per
-operator decision (2026-08-16); if all three fail the requirement, THEN we
-bring findings + a concrete ask to the owner.
+**Fortunate alignment:** flow-infer's native action space is already
+per-step ee_local deltas -- the bridge translates delta-to-delta (frame
+convention + quaternion encoding audit in P1), not absolute-to-delta.
 
-Requirement the winner must meet (from robotics_lab runtime semantics):
-30 Hz waypoint rows, tolerate one late row (runway ≈ 4 rows), accept
-re-anchor at chunk boundaries, no hold-still during normal replan cadence.
+Bridge obligations discovered with the selection:
+
+1. **Envelope**: shipped follow envelope is `max_vel_mms 50` / `max_rot_dps
+   10`, clipping oversize deltas with a WARN. Our task performs ~64 deg/s
+   yaw maneuvers -> the rotation envelope must be raised in our platform
+   `follow.yaml` (config-only, live-retunable via edit+`reset`), re-deriving
+   `cart_acc_mms2` per that file's own `sqrt(v*j)` zero-margin note.
+2. **`admittance_overlay: true` by default** on the follow path -- disable
+   for pure position replay until force control is deliberately enabled
+   (section 7); contact force on this path is currently unbounded upstream.
+3. **Entry/exit choreography**: bridge drives `enable -> task on -> task
+   idle` before streaming; while another unit runs, follow deposits are
+   discarded. Singularity guard = full brake to Enabled and the stream stops
+   being read; re-entry needs `task on -> task idle` -- the bridge must
+   detect this and surface it fail-closed.
+4. `input_period_ms 33.3` + keep `silence_periods >= 2` so one late ~33 ms
+   row can never exit the unit.
 
 ## 6. Open item #2 — CollisionMonitor port
 
