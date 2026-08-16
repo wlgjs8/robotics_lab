@@ -1572,17 +1572,17 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--gripper-close-bias-left",
         type=float,
-        default=2.0,
+        default=4.0,
         help="LEFT-arm ABSOLUTE close-bias override (opening percent). Wins over --gripper-close-bias. "
-             "When unset, falls back to --gripper-close-bias, then to the left default (2.0). "
+             "When unset, falls back to --gripper-close-bias, then to the left default (4.0). "
              "Clamped to [0,100]; no effect in delta/binary mode.",
     )
     flow_infer.add_argument(
         "--gripper-close-bias-right",
         type=float,
-        default=6.0,
+        default=4.0,
         help="RIGHT-arm ABSOLUTE close-bias override (opening percent). Wins over --gripper-close-bias. "
-             "When unset, falls back to --gripper-close-bias, then to the right default (6.0). "
+             "When unset, falls back to --gripper-close-bias, then to the right default (4.0). "
              "Clamped to [0,100]; no effect in delta/binary mode.",
     )
     flow_infer.add_argument(
