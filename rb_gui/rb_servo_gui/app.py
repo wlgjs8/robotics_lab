@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import glob
 import json
 import math
@@ -6579,9 +6580,20 @@ def _open_foot_pedal_device():
     try:
         dev.grab()
     except Exception as exc:  # noqa: BLE001
+        # EBUSY means another process already grabbed it — not a permission problem.
+        # The usual culprit is the pika UMI teleop publisher started BEFORE this GUI:
+        # its --mute-other-pedals (on by default in run_umi_teleop_publish.sh) grabs
+        # every pedal it is not using, to stop pedal keystrokes leaking into the
+        # terminal. Start robotics_lab first, or run that publisher with
+        # MUTE_OTHER_PEDALS=0.
+        busy = getattr(exc, "errno", None) == errno.EBUSY
+        hint = ("another process already holds it (pika teleop publisher with "
+                "--mute-other-pedals? start robotics_lab first, or set MUTE_OTHER_PEDALS=0)"
+                if busy else
+                "add your user to the 'input' group (sudo usermod -aG input $USER) and re-login")
         print(
-            f"rb_servo_gui: foot pedal grab failed ({type(exc).__name__}: {exc}); "
-            "add your user to the 'input' group (sudo usermod -aG input $USER) and re-login",
+            f"rb_servo_gui: foot pedal grab failed on {dev.path} "
+            f"({type(exc).__name__}: {exc}); {hint}",
             flush=True,
         )
         try:
