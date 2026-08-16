@@ -1,0 +1,103 @@
+# cm_bridge REAL device file for the robotics_lab dual RB3-730E rig (P3 draft).
+# Generated 2026-08-16 from the monkey preset shell with:
+#   - MOUNTS REPLACED by robotics_lab's calibrated stand->arm-base transforms
+#     (stack_real.yaml base_pose_in_stand, rotvec->matrix, m->mm). This DEFINES
+#     CM base_frame == robotics_lab stand, so the bridge state republish
+#     extrinsic is exactly identity (design.md D3 resolved).
+#     NOTE: the preset's own mounts describe the MONKEY cell (different
+#     machine, |t| differs by ~90 mm) — they must not be used on this rig.
+#   - ips: left=172.28.60.200 right=172.28.60.201 (stack_real.yaml).
+# STILL TODO before a real start (CM fails closed on both):
+#   - serial_number: fill from each arm's nameplate.
+#   - tool: currently none — REQUIRED to add a pika tool preset (TCP offset)
+#     before policy rollouts: FollowUnit integrates rotation deltas about the
+#     configured tool point; with tool none a wrist rotation about the wrong
+#     point displaces the real TCP by (offset x angle).
+#   - DH: nominal rb3-730es — verify the box's calibration adoption on first
+#     connect (RB3-730E vs ES lengths must FK-cross-check).
+# Install: cp to submodules/controller-manager/platforms/monkey/active.yaml
+# (gitignored device file; run_cm_stack.sh real will do this).
+# PRESET SHELL (schema 2, 0032 SS6b - not loaded directly): copy to the platform device file ->
+#   cp params-presets/dual-arm.yaml ../active.yaml   (platforms/monkey/active.yaml)
+# then FILL THE SHELL: ip/serial per arm, then calibrate. A blank ip refuses to boot.
+# =============================================================================
+# MONKEY - dual RB3-730ES cell, NO BODY (owner 2026-08-15). Two arms on a fixed mount.
+#
+# Mount transforms: the FIRST-SUPPLY reference matrices (ARM-BASE -> BODY-BASE), INVERTED,
+# with the symmetry policy applied - left rotation snapped to the exact design constants,
+# right = the exact mirror (the right's supplied rotation was a contaminated export, 0.329 deg
+# off; owner ruled the cell symmetric). RULED THE REFERENCE 2026-08-15 (owner, fourth ruling)
+# after a full round-trip: a later T_wrt_Body supply (169.95 / +-197.07 / 585.26) was briefly
+# installed, but the STAND ver3 CAD's arm seats sit at +-160.1 / 582.5 stand-local - they mate
+# with THESE mounts to 0.36 mm and CANNOT mate with the T_wrt_Body ones under any rigid stand
+# placement (74 mm spacing difference). T_wrt_Body describes a DIFFERENT configuration; do not
+# install it against the ver3 stand.
+#
+# The model's DH is FILLED (models/rb3-730es.yaml, 2026-08-15: extracted from the vendor URDF
+# chain, FK-verified to 0.000000 mm, reach 286+344+100 = 730). This shell still holds DEVICE
+# placeholders - ip/serial and the machine's calibrated values - so before a REAL run, fill
+# arms.<side>.ip with the control-box addresses (the seed leaves SILS loopback) and enter this
+# machine's own calibration. (Stop-order removed 2026-08-16: it named an UNFILLED model and
+# outlived the fix by a day, which is how a real safety marker gets ignored.)
+# =============================================================================
+schema: 2
+platform: monkey         # THE NAMESPACE ROOT - node name, /monkey/... names, sockets                   # 0032 SS6b - preset and active.yaml share ONE schema (one empty, one filled)
+base_frame: "base"          # common reference frame name
+
+# NO BODY in this cell: `joints: []` IS the no-waist configuration (0014 S8) - no transport,
+# nothing body-shaped follows from the chimpanzee assets on purpose (owner 2026-08-15).
+body:
+  transform: { xyz: [0.0, 0.0, 0.0], rpy: [0.0, 0.0, 0.0] }
+  joints: []
+
+# Base structure the arms are mounted on. UI/URDF ONLY — the controller does not read
+# this key (core/Config.cpp ignores unknown keys). The URDF composer uses it to place
+# the stand geometry; the descriptor derives its transform from THIS file's mount
+# matrices (see stands/dual-rb3-730e-ver3.yaml header).
+stand: "stands/dual-rb3-730e-ver3.yaml"
+
+arms:
+  left:
+    model: rb3-730es             # -> params-presets/models/rb3-730es.yaml (nominal DH + motion envelope)
+    ip: "172.28.60.200"                       # DEVICE - blank in the shell: a blank ip REFUSES to boot ("fill the
+                                 # shell"). env.sh's seed fills SILS loopback; real boxes need real IPs.
+    serial_number: ""            # DEVICE - fill from the arm's nameplate
+    eft:  RFT64-6A01-A           # -> params-presets/efts/RFT64-6A01-A.yaml (nominal product values)
+    tool: none                   # -> params-presets/tools/none.yaml (bare flange; name the taught tool here)
+    transform:                   # base_frame -> left-arm mount (design-snapped inverse; +y side)
+      - [ -0.147200669389, +0.375268761423, +0.915153167307, +157.070000]
+      - [ +0.019542134882, -0.923948030861, +0.382018509017, -170.360000]
+      - [ +0.988913579589, +0.074117426880, +0.128672215871, +580.360000]
+      - [  0.0,             0.0,             0.0,             1.0]
+    # THE MACHINE'S DH - starts as the model's nominal (TODO_FILL upstream); the box's
+    # calibration adoption + persist keep it current once real numbers exist.
+    dh_parameters:           # = the model's URDF-extracted nominal (FK-verified; see the model file)
+      - { joint: 1, theta_offset:   0.0, d: 145.30, a:   0.00, alpha: -90.0 }
+      - { joint: 2, theta_offset: -90.0, d:  -6.45, a: 286.00, alpha:   0.0 }
+      - { joint: 3, theta_offset:  90.0, d:   0.00, a:   0.00, alpha:  90.0 }
+      - { joint: 4, theta_offset:   0.0, d: 344.00, a:   0.00, alpha: -90.0 }
+      - { joint: 5, theta_offset:   0.0, d:   0.00, a:   0.00, alpha:  90.0 }
+      - { joint: 6, theta_offset:   0.0, d: 100.00, a:   0.00, alpha:   0.0 }
+    # tool_calibrations:   # MEASURED per-(arm,tool) list - `ft identify` results are entered here
+    # eft_correction:      # this sensor's measured axis correction on THIS arm (7-pose fit)
+
+  right:
+    model: rb3-730es
+    ip: "172.28.60.201"                       # DEVICE - blank in the shell (see left)
+    serial_number: ""
+    eft:  RFT64-6A01-A
+    tool: none
+    transform:                   # base_frame -> right-arm mount (EXACT mirror of the left; -y side)
+      - [ -0.147200669389, -0.375268761423, -0.915153167307, -157.070000]
+      - [ -0.019542134882, -0.923948030861, +0.382018509017, -170.360000]
+      - [ -0.988913579589, +0.074117426880, +0.128672215871, +580.360000]
+      - [  0.0,             0.0,             0.0,             1.0]
+    dh_parameters:           # = the model's URDF-extracted nominal (FK-verified; see the model file)
+      - { joint: 1, theta_offset:   0.0, d: 145.30, a:   0.00, alpha: -90.0 }
+      - { joint: 2, theta_offset: -90.0, d:  -6.45, a: 286.00, alpha:   0.0 }
+      - { joint: 3, theta_offset:  90.0, d:   0.00, a:   0.00, alpha:  90.0 }
+      - { joint: 4, theta_offset:   0.0, d: 344.00, a:   0.00, alpha: -90.0 }
+      - { joint: 5, theta_offset:   0.0, d:   0.00, a:   0.00, alpha:  90.0 }
+      - { joint: 6, theta_offset:   0.0, d: 100.00, a:   0.00, alpha:   0.0 }
+    # tool_calibrations:
+    # eft_correction:
