@@ -1,0 +1,375 @@
+# cm_bridge overlay copy of platforms/monkey/params-tasks/follow.yaml
+# (submodule file is TRACKED = read-only rule; this copy is bind-mounted over
+# the container path by cm-compose.override.yaml). Diffs from upstream:
+#   input_period_ms    20.0 -> 33.4   (flow-infer policy_dt, 30 Hz rows)
+#   max_rot_dps        10.0 -> 90.0   (task yaw maneuvers measured ~64 deg/s;
+#                                      rot accel/jerk are DERIVED via the
+#                                      rot/vel ratio per upstream's own note)
+#   max_vel_mms        50.0 -> 150.0  (flow clamps linear at 300 mm/s; 50 would
+#                                      clip normal approach speeds)
+#   admittance_overlay true -> false  (pure position replay until force control
+#                                      is deliberately enabled - design.md S7)
+# Re-tune on the hardware ladder (P3); keep this file in sync when the
+# submodule's follow.yaml changes shape (the SILS gate is the canary).
+# follow.yaml - the REAL-TIME STREAM FOLLOWER's tuning (wiki/decisions/0025).
+#
+# Edit + `reset` = live retune (TaskConfig reload). Missing file/key -> compiled-in defaults
+# (TaskConfig.h), never fatal. The TASKCFG summary line confirms what is live.
+#
+# ONE PIPE (owner 2026-08-02): teleop and the policy's Delta Action Chunking share this channel.
+# MESSAGE = CHUNK (geometry_msgs/PoseArray; teleop sends chunks of 1). DELTAS ARE FLANGE-FRAME
+# (owner: tool axes eliminated - same arm always compatible; the unit conjugates by the mounted
+# tool's rotation, identity for every shipped tool). One delta is consumed per
+# input period T and executed at CONSTANT RATE ||delta||/T - the delta magnitude IS that period's
+# velocity limit ("다음 커맨드가 들어오기 전에 로봇이 도착하면 안되잖아"). A new chunk REPLACES
+# the unconsumed tail at the next period boundary (receding horizon).
+
+# T - the input cadence, SHARED by teleop and chunk playback (the internal chunk-consumption
+# period; owner: "가능하면 teleop과 같은"). The silence rule counts in units of T.
+#
+# 20 ms = 50 Hz, MATCHED TO THE MEASURED SOURCE (2026-08-02). The SpaceMouse emits a new
+# sample every 16.00 ms (62.5 Hz) - measured two independent ways that agree exactly: our own
+# raw hidraw read (med 15.99 ms) and the stock spacenavd -> libspnav -> spacenav_node path
+# (med 16.00 ms). USB is not the limit (endpoint bInterval = 1, i.e. the host polls at 1 kHz);
+# it is the puck's own firmware period. Anything faster than the source is pure repetition:
+# the previous T = 4 ms published each sample four times. The device node now publishes 50 Hz
+# and the bridge runs --period-ms 20 to match. Silence window = 2 * 20 = 40 ms.
+input_period_ms:   33.4
+
+# Quiet INPUT PERIODS (units of T) with the adopted chunk exhausted before the unit publishes
+# rest, reports Done and FALLS BACK TO IDLE (owner: past 2 periods with no data, leave the mode;
+# a resuming stream re-enters on its first message).
+silence_periods: 2
+
+# Playback margin epsilon (fraction of T): a per-period stream (teleop) starts playing epsilon*T
+# late, so send jitter up to epsilon*T never starves the pacer mid-period. Chunk tails self-buffer
+# and are unaffected. Size from MEASURED send jitter; data collection trains under the same plant.
+playback_margin: 0.2
+
+# Longest chunk accepted whole (deltas per message). An over-length message is refused WHOLE -
+# never truncated (a cut chunk is a different plan than the one sent). Hard ceiling
+# FollowChunk::kMaxChunk (64).
+max_chunk: 50
+
+# THE CARTESIAN ENVELOPE, at the REDUCED speeds the owner set for the first 6-DOF test
+# (2026-08-03): 50 mm/s and 10 deg/s. Both channels are Ruckig in CARTESIAN - translation in mm,
+# rotation in DEGREES - so these numbers are SPHERE limits: 50 mm/s is 50 mm/s in every direction,
+# diagonals included (the per-axis box is derived by dividing a and j by sqrt(3), in CartChannel).
+#
+# max_vel_mms / max_rot_dps also cap one input period's delta (||delta|| <= max_vel*T), the safety
+# backstop a compliant source never touches. That cap is no longer LOAD-BEARING the way it was
+# under the s-tracker (where it was the only thing keeping the arrival velocity a legal Ruckig
+# input); the target-distance law has no arrival velocity at all. It stays as a backstop.
+#
+# *** DO NOT RAISE cart_acc_mms2 WITHOUT RE-DERIVING THE SPEED BOUND. ***
+# The braking distance v^2/2a + v*a/2j is MINIMISED at a = sqrt(v*j); above that it grows again,
+# the target sits further ahead, and the reference settles FASTER than commanded. At this envelope
+#     translation  sqrt(50 * 5000) = 500 = cart_acc_mms2   EXACTLY
+#     rotation     sqrt(10 * 1000) = 100 = derived alpha   EXACTLY
+# so there is ZERO margin. These accelerations are the largest values that still hold the speed
+# bound, not an arbitrary choice.
+max_vel_mms:    150.0      # [mm/s]  translation sphere limit
+cart_acc_mms2:  500.0     # [mm/s^2]  AT the sqrt(v*j) optimum - see above before changing
+cart_jerk_mms3: 5000.0    # [mm/s^3]
+# [deg/s] rotation sphere limit, AND the trans<->rot time-scale conversion: the rotation channel's
+# acceleration and jerk are DERIVED as cart_acc/cart_jerk * (max_rot_dps/max_vel_mms), i.e.
+# 100 deg/s^2 and 1000 deg/s^3 here, so both halves share their run-up and braking times exactly.
+max_rot_dps:    90.0
+
+# NO ik_max_dps HERE. The IK joint-rate ceiling is the ARM's own motion.max_vel
+# (robot-config/arms/<side>-arm.yaml, 180 deg/s), read directly in FollowUnit::start.
+# It is NOT JOINT_STEP_LIMIT_DPS (250) - that is the last-line RT error guard, set
+# deliberately ABOVE the arm's limit. Restating either one here is how they got
+# confused in the first place (owner, 2026-08-03).
+
+# THE FOLLOW PATH'S OWN JOINT ENVELOPE IS GONE (owner 2026-08-03: *"관절 속도를 깎는 행위는 다시
+# 되돌려줘"*). joint_max_dps / joint_max_dps2 / joint_max_dps3 are DELETED KEYS - leaving them here
+# would silently do nothing. 20 deg/s turned out to be tighter than the CARTESIAN envelope at
+# ordinary poses (pure 10 deg/s rotation at the home pose needs ~24 deg/s of joint motion, so the
+# tool was held to 9.279 in normal work), and a single uniform scalar cannot enforce a jerk bound
+# anyway. Joint rates near a singularity are the DLS's job.
+
+# ---- THE SINGULARITY GUARD: one threshold, one action - `task stop` --------------------------
+# HARDWARE 2026-08-03: near a singularity the tool lurched - the DLS axis kill redistributed the
+# refused direction's demand onto the remaining five, and a first "slow down, then stop" design
+# made it WORSE (the ramp left the arm crawling and the brake handover reversed all six joints).
+# The shipped rule is the owner's sentence: *"task stop으로 종료하면 될 일이잖아."* The guard fires
+# at sigma_fade (DERIVED in DlsClik: 2*sigma_cut = 4*lambda_max = 0.036755 - exactly where axis
+# attenuation would begin, and only 1.24x under the test home pose's 0.0457, so there is little
+# room between "working" and "attenuating" at this envelope) and does exactly what an operator
+# `task stop` does, at full speed: unified joint brake -> Enabled, stream off. SYSTEM origin -
+# `task resume` cannot cancel it and a still-running teleop cannot re-enter (Enabled has no task
+# machine; chunks deposit and expire unseen). Re-entry is deliberate: task on -> task idle.
+sing_guard:       true
+# VESTIGIAL, parsed but read by nothing since the single-threshold design (kept so an existing
+# deployment file does not warn):
+sing_slow_sigma:  0.0735
+sing_stop_sigma:  0.008
+sing_stop_scale:  0.10
+
+# ---- NO FORCE-CEILING LEASH: TRIED 2026-08-04, REVERTED THE SAME DAY ON HARDWARE ------------
+# `leash_fmax_n` / `leash_mmax_nm` are DELETED KEYS - writing them here does nothing.
+# The idea was to project `ref_` (the channel output the IK tracks) onto a ball of radius
+# L = F_max/k about the EMITTED pose, which pins the overlay spring's stretch and therefore the
+# contact force. Against a modelled wall it worked perfectly: 10.00 N, flat, for 12 s.
+# ON THE ROBOT IT FAILED, AND THE WALL RIG STRUCTURALLY COULD NOT HAVE SHOWN IT:
+#   holding F = k*L requires the leash CENTRE to follow the contact, and that centre carries the
+#   overlay's own deviation - so an external push moves the centre, the leash drags `ref_` after
+#   it, and THE FOLLOWED POSE WALKS. With the operator's stream idle nothing opposes the drag: a
+#   bare hand on the tool walks the arm, and the force decays instead of holding. The ceiling
+#   mechanism and the origin walk are the same equation, so this cannot be tuned out.
+#   (owner: *"힘의 유지가 되질 않고 있어... 외부 힘을 가할 때, 원점이 옮겨지는 치명적인 문제"*)
+# Centring on the NOMINAL instead does not rescue it - that gap is only the CLIK residual, so the
+# leash would never engage and would bound nothing.
+# CONSEQUENCE, STATED PLAINLY: the contact force is UNBOUNDED again. A sustained push winds it up
+# without limit. Any future bound must come from somewhere other than feeding the achieved pose
+# back into the reference chain.
+
+
+
+# WHICH FRAME THE TELEMETRY REPORTS THE STREAM'S INPUT IN: flange | tcp | base | root.
+# The wire is FLANGE-frame and the unit conjugates every delta to the TCP, so those two are the
+# unit's own internal view. `base` is this arm's base. `root` is the CELL base - the frame both
+# arms and the `func write` recorder share, and therefore the only one in which the two arms'
+# numbers can be compared against each other or against a recording.
+telemetry_frame: root
+
+# The CLIK correction time constant: kcorr = 1/(2*clik_tau_s) [1/s]. Spelled `leash_tau_s` until
+# 2026-08-03, when the translation leash was removed and the name stopped being true.
+clik_tau_s:    0.02
+
+# ---- the WAIST lane's Pi_B leash (aux/JointChunkPacer ONLY) -----------------------------------
+# THE TRANSLATION LEASH IS GONE (owner 2026-08-03: *"리쉬는 애초에 필요한게 아니었어"*). It existed
+# to bound a carrot against a tracker that could stall; the target-distance law cannot stall, so
+# there is nothing to bound - and the leash's own designed side effect, a sustained push WALKING
+# the followed pose, went with it. `leash_min_mm` / `leash_max_mm` are DELETED keys: leaving them
+# here would silently do nothing.
+# What remains is the WAIST's own projection on the aux lane, which is a different mechanism on a
+# different lane and still wants a geodesic radius.
+leash_tau_s:   0.02
+leash_min_deg: 1.0
+leash_max_deg: 15.0
+
+# The shared admittance force overlay (0025 force section; arm/motions/AdmittanceOverlay.h) on
+# this unit's emitted command. Parameters = admittance.yaml (the ONE admittance surface).
+# Force control's wrench->command correction bypasses Ruckig/pacing INSIDE the same 2 ms tick -
+# the overlay is composed after the pacer, never behind it.
+# ENABLED 2026-08-03 (owner). The overlay makes the arm YIELD to a measured wrench instead of
+# pushing through it - but read the next paragraph before trusting a force number.
+admittance_overlay: false
+
+# ---- FORCE CONTROL: PER-AXIS mass / damper / stiffness (owner 2026-08-05) ---------------------
+# *"follow 기능의 force control을 translation/rotation을 각 축마다의 mass, damper, stiffness를
+# 입력할 수 있는 구조로 바꿔줘"*
+#
+# THIS BLOCK IS THE FOLLOW UNIT'S FORCE LAW - not an option layered over a scalar default. The
+# isotropic (mass_kg / inertia_kgm2 / zeta / fn_hz) surface that used to live here is GONE FROM
+# THIS PATH: those keys are now REFUSED WITH AN ERROR under `admittance:` below, because writing
+# them asks for a compliance change and gets none. Edit + `reset` = live retune with no restart,
+# and the TASKCFG banner prints every axis at boot and after every reset, so what is live is
+# visible without opening this file.
+#
+# THE MODEL, PER AXIS:   m*d'' + b*d' + k*d = wrench     (d = deviation from the followed pose)
+#   translation [x  y  z ]   m [kg]        b [N*s/m]       k [N/m]
+#   rotation    [rx ry rz]   m [kg*m^2]    b [N*m*s/rad]   k [N*m/rad]
+# Axes are the ARM BASE frame (the deviation has always integrated there; the follow wire's own
+# flange frame is the unit's internal view and is deliberately not a second frame to tune in).
+# A steady force deflects F/k and b decides how it gets there: b = 2*zeta*sqrt(k*m) is the
+# critical-damping reference, zeta > 1 = overdamped, no overshoot (the owner's 2026-08-03 setting).
+#
+# AS SHIPPED the six rows reproduce the surface this path ran until 2026-08-05 (10 kg / 1 kg*m^2,
+# zeta 2.0, fn 1.5 Hz) digit for digit - the STRUCTURE changed and the feel did not:
+#     k_t = 888.3 N/m      ->  10 N deflects 11.26 mm
+#     k_r =  88.8 N*m/rad  ->  1 N*m deflects 0.65 deg
+# THESE ARE ALSO THE COMPILED DEFAULTS (TaskConfig.h). Keep the two in step when you retune: task
+# config is never fatal, so a params/ directory that fails to resolve runs the compiled values
+# silently, and a default that disagrees with what ships is a silent retune.
+#
+# OPTIONAL PER ROW, both defaulting to plain compliance:
+#   mode: force  + ref_force: <N | N*m>   that axis WALKS until the measured wrench matches
+#          ref_force (k unused). *** WITH THE DEVIATION FENCE REMOVED (next block) A FORCE AXIS IN
+#          FREE SPACE NEVER STOPS WALKING *** - the fence used to be its designed stop. Arm a FORCE
+#          axis only in a direction that actually meets contact.
+#   mode: rigid                           that axis does not deviate at all (same as m: 0).
+# ALL SIX ROWS OR NONE: a malformed block is reported and DISCARDED WHOLE, leaving the compiled
+# defaults live - a half-declared law is a different law than the one you think you wrote.
+# It acts only while `admittance_overlay: false` covers the unit; that flag is the switch.
+# =============================================================================================
+# THE FORCE LAW, SOLVED FOR A 25 N CONVERGED CONTACT FORCE (owner, 2026-08-06)
+# =============================================================================================
+# The three numbers are NOT independent. With k = 0 the converged contact force is b*v_max - a
+# BY-PRODUCT OF HOW FAST THE OPERATOR HAPPENS TO BE STREAMING, not a designed amount (measured:
+# 6.16 N at 50 mm/s, 4.01 at 25, 1.87 at 10, all with the same declared threshold). A spring is
+# what makes the declared force the actual force:
+#
+#     k > 0  +  force_gate   ->  F converges to force_gate.max_force_n EXACTLY,
+#                                and the deviation to max_force_n / k.
+#
+# *** NEITHER HALF MAY SHIP ALONE. *** k > 0 with no gate ramps the force at k_series*v_n forever
+# (MEASURED 961 N in 40 s); the loader refuses that combination at INIT. The gate with k = 0
+# bounds the force but not the deviation (measured 9.5 m of offset in 300 s).
+#
+# DESIGN EQUATIONS - re-derive from these, do not hand-tune one number:
+#     k = max_force_n / d_max                       25 N / 25 mm  = 1000 N/m
+#     b = 2*zeta*sqrt(m*(k + k_env))                zeta = 0.25, k_env = 5e4 (hard plastic)
+#     m  is the OWNER'S CONSTRAINT: 10..15 kg. Lower m gives a lower impact peak and a higher
+#        continuous damping ratio, but LOWERS the discrete stability ceiling (below) and lets the
+#        robot's instantaneous force outrun the spring. Do not go under 10.
+#
+# WHY zeta = 0.25 AND NOT 1.0. Critical damping is WORSE here, measured: the gate already
+# stabilises the loop (residual ringing is <= 0.65 N at EVERY b, because once F reaches the
+# threshold the trajectory stops and nothing drives an oscillation), while a large b physically
+# RESISTS the offset's retreat at the moment of impact and raises the peak - 65.4 N at zeta = 1.0
+# against 47.2 N at zeta = 0.25 (m = 15, k_env = 5e4). zeta = 0.25 is better on impact, on return
+# time and on the discrete budget, and gives up nothing that matters.
+#
+# ---- THE TABLE. Pick a row, copy BOTH numbers. Every row converges to 25 N. ------------------
+#   m [kg]   b [N.s/m]   impact peak @5e4   discrete-stability ceiling   offset return tau
+#   ------   ---------   ----------------   --------------------------   -----------------
+#     10        357            39.4 N              178,000 N/m                0.36 s
+#     11        375            41.1 N              186,000 N/m                0.37 s
+#     12        391            42.8 N              195,000 N/m                0.39 s
+#     13        407            44.3 N              203,000 N/m                0.41 s
+#     14        423            45.8 N              210,000 N/m                0.42 s
+#     15        437            47.2 N              218,000 N/m                0.44 s   <- LIVE
+#
+# TWO THINGS THE TABLE IS TELLING YOU, both measured and neither obvious:
+#  1. THE IMPACT PEAK IS NOT 25 N. First contact at the full 50 mm/s spikes to ~47 N against hard
+#     plastic (~66 N against aluminium) because the impact resolves in 30-50 ms while the gate
+#     needs ~70 ms to arrive (20 ms period boundary + the Ruckig rate ramp). The gate regulates the
+#     SUSTAINED force; it cannot catch the transient. The only lever is approach speed:
+#     50 mm/s -> 47.2 N,  30 mm/s -> 28.2 N,  20 mm/s -> 24.4 N.  (For reference the PREVIOUS
+#     shipped law peaked at 45.5 N here and converged to 9.7 N, so the peak is unchanged and only
+#     the convergence became a designed number.)
+#  2. THE DISCRETE-STABILITY CEILING IS REAL AND THE OLD VALUES WERE UNDER IT. `step_axes` is
+#     semi-implicit Euler, so b < m/dt = 500*m is the no-per-tick-oscillation limit (b < 2m/dt
+#     diverges outright) - every row above uses only 6-7 % of that budget. The binding limit is the
+#     other one: the CLOSED loop with one tick of measurement delay. The PREVIOUS m=15,b=195 went
+#     |eig| >= 1 at k_env = 97,000 N/m, i.e. it was DISCRETELY DIVERGENT against an aluminium jig.
+#     Every row above clears 178,000+.
+# =============================================================================================
+force_control:
+  translation:
+    - {m: 15.0, b: 437.0, k: 1000.0}     # x
+    - {m: 15.0, b: 437.0, k: 1000.0}     # y
+    - {m: 15.0, b: 437.0, k: 1000.0}     # z
+  rotation:
+    - {m:  1.0, b:  15.8, k:   20.1}     # rx
+    - {m:  1.0, b:  15.8, k:   20.1}     # ry
+    - {m:  1.0, b:  15.8, k:   20.1}     # rz
+# ROTATION IS DERIVED UNDER A STATED ASSUMPTION AND NEEDS HARDWARE TUNING. It cannot be solved
+# from first principles without the contact geometry: the rotational environment stiffness is
+# k_env * L^2 for a contact at lever L, and L is not known. These use L = 140 mm (the measured
+# SRO->TCP distance), giving M_thr = 25 N * 0.14 = 3.5 N.m at e_max = 10 deg -> k_r = 20.1, and
+# b_r = 2*0.25*sqrt(m_r*(k_r + 5e4*0.14^2)) = 15.8. Treat them as a starting point, not a result.
+
+# THE FORCE GATE - the delta's reflection ratio falls as the contact force rises.
+# `max_force_n` IS the force the sustained contact converges to (that is what k > 0 buys).
+# A `knee` or a `g_min` here is REFUSED at load: a knee doubles the gate's loop gain, and any
+# floor above zero leaves the trajectory creeping, which with k > 0 ramps the force forever
+# (measured 367 N after 300 s at g_min = 0.05). See wiki/decisions/0028.
+force_gate:
+  max_force_n:    25.0     # [N]   converged contact force
+  max_torque_nm:   3.5     # [Nm]  = max_force_n * 0.140 m, same assumption as k_r above
+  close_tau_s:     0.10    # [s]   fast to close - protective
+  open_tau_s:      0.40    # [s]   slow to open  - a fast re-open makes the gate a relay
+
+# ---- THE DEVIATION REGION IS UNBOUNDED (owner 2026-08-05) -------------------------------------
+# *"force control에 의해 벗어나는 영역의 제한은 없애"*. 0 = NO LIMIT on that part, and 0 is what
+# ships: force control may walk this unit's command away from the followed pose as far as the
+# wrench takes it. The 50 mm / 15 deg fence that used to clamp the deviation (and publish a
+# SATURATED warning while pinned) is no longer applied on this path. The batch kinds - movl, movh,
+# movf, movhf, movlf - keep theirs; this removal is scoped to the follow unit.
+#
+# WHAT STILL BOUNDS IT, so "no limit" is not read as "nothing left": the deviation RATE caps in
+# `admittance:` below, the per-joint velocity clamp inside the overlay's IK recomposition, whether
+# the deviated pose is solvable at all (unsolvable -> the nominal holds for that tick, counted and
+# logged), and the last-line JointStepLimit guard. Set either key non-zero to fence this path again.
+# THE DEVIATION FENCE IS A DEAD BACKSTOP, NOT AN OPERATING LIMIT (owner 2026-08-05 removed the
+# operating limit: *"force control에 의해 벗어나는 영역의 제한은 없애"*, and that stands - this is
+# not it). The design converges the deviation to max_force_n/k = 25 mm, so 40 mm is never reached
+# in normal operation and the arm never feels it. It exists because the 25 mm bound is created by
+# the GATE reaching zero, and the gate depends on the wrench being right - which this tree does
+# NOT yet guarantee (the tool identification has not run; see 0012's FT trust status). A
+# sensor-independent backstop is cheap and this is the one place it earns its keep.
+# Adversarially verified 2026-08-06: |d| <= F/k holds ONLY at a true static equilibrium; while the
+# trajectory is still advancing there is no equilibrium at all, so k alone bounds nothing.
+max_deviation_mm:  40.0
+max_deviation_deg: 15.0
+
+# ---- DEVIATION-DYNAMICS RATE CAPS - all that is left in this block ---------------------------
+# They bound how FAST the deviation may grow, which is what keeps the recomposed pose solvable and
+# the emitted step under the RT guard. They are NOT the region limit above, and deleting them
+# would not be "no limit" - it would be an unbounded per-tick jump.
+# REFUSED HERE, loudly, rather than silently ignored: mass_kg / inertia_kgm2 / zeta / fn_hz (moved
+# to force_control above), and max_jerk_t/_r, kcorr, smin, dls_lambda, tare_sec (they belong to the
+# Admittance TASK's resolved-rate stage in admittance.yaml and were never read by the overlay).
+admittance:
+  max_vel_t:     0.50     # translation [m/s]
+  max_acc_t:     5.0      #             [m/s^2]
+  max_vel_r:     2.00     # rotation    [rad/s]
+  max_acc_r:    20.0      #             [rad/s^2]
+
+# =============================================================================================
+# PARAMETER SETS - GENERATED, NOT TYPED.  regenerate with:
+#     python3 tools/follow_force_params.py --v-max 50 [--d-max 25] [--forces ...] [--masses ...]
+# Method, and what every column means: docs/follow-force-parameters.md
+#
+# USE A WHOLE ROW. The five numbers of a row (k, b, k_r, b_r, and the gate threshold that names the
+# force) are one solve; mixing a b from one row with a k from another is not a tuning, it is a
+# different system. Owner 2026-08-06: *"그 테이블을 신뢰하고 있기에 follow 파라미터를 계산한 방식으로
+# 뽑은 세트만 사용할거야."*
+#
+# TO APPLY A ROW, edit BOTH blocks - they are a matched pair the loader enforces:
+#     force_control.translation[*] : m, b from the row; k = F_max / d_max (printed per force block)
+#     force_control.rotation[*]    : m_r = 1.0, b_r from the row; k_r printed per force block
+#     force_gate.max_force_n       : the force the block converges to
+#     force_gate.max_torque_nm     : M_thr printed per force block (= F_max * 0.140 m)
+# =============================================================================================
+# ==== GENERATED BY tools/follow_force_params.py --v-max 50 (d_max = 25 mm, zeta = 0.25, k_env = 5e+04) ====
+#   envelope: v 50 mm/s | a 500.0 = sqrt(v*j) | j 5000  ||  rot 10.0 deg/s | alpha 100.0 | rjerk 1000
+#   (sqrt(v*j) check: trans 500.0 == a, rot 100.0 == alpha - both EXACT by construction)
+#
+#  --- converge to 10 N  ->  k = 400 N/m,  rotation: M_thr 1.40 Nm, k_r 8.0 Nm/rad (m_r 1) ---
+#      m [kg]   b [N.s/m]   b_r [Nm.s/rad]   impact peak   stab ceiling   tau_ret   b/b_lim   K_gate
+#         10       355.0         15.72          35.4 N        177082      0.89s      7.1%   3.00/s
+#         11       372.3         15.72          37.1 N        185745      0.93s      6.8%   3.00/s
+#         12       388.8         15.72          38.7 N        194022      0.97s      6.5%   3.00/s
+#         13       404.7         15.72          40.3 N        201961      1.01s      6.2%   3.00/s
+#         14       420.0         15.72          41.8 N        209600      1.05s      6.0%   3.00/s
+#         15       434.7         15.72          43.3 N        216971      1.09s      5.8%   3.00/s
+#  --- converge to 15 N  ->  k = 600 N/m,  rotation: M_thr 2.10 Nm, k_r 12.0 Nm/rad (m_r 1) ---
+#      m [kg]   b [N.s/m]   b_r [Nm.s/rad]   impact peak   stab ceiling   tau_ret   b/b_lim   K_gate
+#         10       355.7         15.75          35.4 N        177234      0.59s      7.1%   3.00/s
+#         11       373.0         15.75          37.1 N        185914      0.62s      6.8%   3.00/s
+#         12       389.6         15.75          38.7 N        194208      0.65s      6.5%   3.00/s
+#         13       405.5         15.75          40.3 N        202162      0.68s      6.2%   3.00/s
+#         14       420.8         15.75          41.8 N        209816      0.70s      6.0%   3.00/s
+#         15       435.6         15.75          43.3 N        217202      0.73s      5.8%   3.00/s
+#  --- converge to 20 N  ->  k = 800 N/m,  rotation: M_thr 2.80 Nm, k_r 16.0 Nm/rad (m_r 1) ---
+#      m [kg]   b [N.s/m]   b_r [Nm.s/rad]   impact peak   stab ceiling   tau_ret   b/b_lim   K_gate
+#         10       356.4         15.78          35.4 N        177385      0.45s      7.1%   3.00/s
+#         11       373.8         15.78          37.1 N        186082      0.47s      6.8%   3.00/s
+#         12       390.4         15.78          38.7 N        194392      0.49s      6.5%   3.00/s
+#         13       406.3         15.78          40.3 N        202362      0.51s      6.3%   3.00/s
+#         14       421.7         15.78          41.8 N        210032      0.53s      6.0%   3.00/s
+#         15       436.5         15.78          43.3 N        217432      0.55s      5.8%   3.00/s
+#  --- converge to 25 N  ->  k = 1000 N/m,  rotation: M_thr 3.50 Nm, k_r 20.1 Nm/rad (m_r 1) ---
+#      m [kg]   b [N.s/m]   b_r [Nm.s/rad]   impact peak   stab ceiling   tau_ret   b/b_lim   K_gate
+#         10       357.1         15.81          35.4 N        177536      0.36s      7.1%   3.00/s
+#         11       374.5         15.81          37.1 N        186250      0.37s      6.8%   3.00/s
+#         12       391.2         15.81          38.7 N        194576      0.39s      6.5%   3.00/s
+#         13       407.1         15.81          40.3 N        202562      0.41s      6.3%   3.00/s
+#         14       422.5         15.81          41.8 N        210246      0.42s      6.0%   3.00/s
+#         15       437.3         15.81          43.3 N        217661      0.44s      5.8%   3.00/s
+#  --- converge to 30 N  ->  k = 1200 N/m,  rotation: M_thr 4.20 Nm, k_r 24.1 Nm/rad (m_r 1) ---
+#      m [kg]   b [N.s/m]   b_r [Nm.s/rad]   impact peak   stab ceiling   tau_ret   b/b_lim   K_gate
+#         10       357.8         15.84          35.4 N        177685      0.30s      7.2%   3.00/s
+#         11       375.2         15.84          37.1 N        186417      0.31s      6.8%   3.00/s
+#         12       391.9         15.84          38.7 N        194759      0.33s      6.5%   3.00/s
+#         13       407.9         15.84          40.3 N        202761      0.34s      6.3%   3.00/s
+#         14       423.3         15.84          41.8 N        210460      0.35s      6.0%   3.00/s
+#         15       438.2         15.84          43.3 N        217889      0.37s      5.8%   3.00/s
+#
+#   K_gate = 1.5*v_max/d_max = 3.00/s for EVERY row (it does not depend on F_max);
+#   against the ~0.07s loop lag that is K*T_d = 0.21 (comfortable).

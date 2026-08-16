@@ -42,5 +42,10 @@ services:
     volumes:
       - chimp_ws:/cm-ws
       - ../../submodules/controller-manager:/cm-ws/src/controller-manager
+      # Tuned follow profile shadows the TRACKED submodule file (read-only rule):
+      # input_period 33.4ms / rot 90 dps / vel 150 mm/s / admittance off.
+      - ../../cm_bridge/config/follow.monkey.yaml:/cm-ws/src/controller-manager/platforms/monkey/params-tasks/follow.yaml:ro
+      # Bridge sources (run separately via `docker exec` or a bridge service).
+      - ../../cm_bridge/src:/cm-bridge-src:ro
     working_dir: /cm-ws
     command: ["bash", "-lc", "exec ros2 run controller_manager plaif_chimpanzee"]
