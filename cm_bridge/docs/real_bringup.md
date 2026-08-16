@@ -36,8 +36,12 @@ energized. Check:
 
 ## 3. Energize + idle (operator console)
 
-- [ ] `enable` -> both arms Enabled (right first by design), `task on`,
-      per-arm `task idle`. Watch: no faults, qsync fill converges ~5.
+- [ ] Canonical console sequence (LIVE-VERIFIED 2026-08-16; `disable` drops
+      the box back to SIMULATION, and `reset` — param reload — only works in
+      Disabled):
+        `enable` (13s) -> **`mode real`** -> `task on` -> per-arm `task idle`.
+      Watch: no faults, qsync fill converges ~5. Param retune cycle =
+      `disable` -> `reset` -> `enable` -> `mode real` -> `task on` -> idle.
 - [ ] Deadman/E-stop within reach from here on.
 
 ## 4. First motion — single arm, MOVJ
