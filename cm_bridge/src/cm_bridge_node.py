@@ -214,12 +214,14 @@ class StateRepublisher:
 
     def _publish(self):
         self._seq += 1
+        fault = getattr(self, "fault_provider", lambda: None)()
         state = {
             "schema": "robotics_lab.servo_state.v1",
             "seq": self._seq,
             "source": "cm_bridge",
-            "fault_latched": False,
-            "motion_state": "Running",
+            "fault_latched": fault is not None,
+            "latched_fault_reason": fault or "",
+            "motion_state": "FaultLatched" if fault is not None else "Running",
             "command_source": {
                 "active": True, "expired": False, "enforce_lease": False,
                 "active_source_id": "cm_bridge", "active_session_id": "cm",
@@ -314,12 +316,23 @@ class ResetIngress:
             self._node.get_logger().error(f"move server absent for {side}")
             return
         fut = client.send_goal_async(goal)
-        fut.add_done_callback(lambda f, s=side: self._release(s))
+        fut.add_done_callback(lambda f, s=side: self._on_goal_response(f, s))
+
+    def _on_goal_response(self, fut, side):
+        gh = fut.result()
+        if gh is None or not gh.accepted:
+            self._node.get_logger().error(f"MOVJ goal REJECTED for {side}")
+            return
+        self._release(side)
 
     def _release(self, side):
         req = self._Sync.Request()
         req.target = self.SYNC_TARGET[side]
-        self._sync.call_async(req)
+        sfut = self._sync.call_async(req)
+        sfut.add_done_callback(
+            lambda f, s=side: self._node.get_logger().info(
+                f"sync {s}: accepted={getattr(f.result(), 'accepted', None)} "
+                f"msg={getattr(f.result(), 'message', '')!r}"))
 
     def stop(self):
         self._stop.set()
@@ -346,6 +359,13 @@ class CmBridge(Node):
             endpoints.append((host, int(port)))
         self._state = StateRepublisher(self, args.platform, endpoints)
         self._reset = ResetIngress(self, args)
+        # P2 fail-closed latch: collision monitor trips via the control port;
+        # a latched bridge drops all follow chunks and reports fault_latched
+        # until an explicit collision_clear (operator decision).
+        self.latched_reason = None
+        self._state.fault_provider = lambda: self.latched_reason
+        threading.Thread(target=self._control_loop, daemon=True,
+                         name="control-ingress").start()
         self._last_pub_ns = {"left": 0, "right": 0}
         self._ingress = ChunkIngress(args.chunk_bind, self._on_frame)
         self._ingress.start()
@@ -356,8 +376,28 @@ class CmBridge(Node):
             f"chunk policy_dt must match the mounted follow profile)"
         )
 
+    def _control_loop(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        host, port = self.args.control_bind.split(":")
+        sock.bind((host, int(port)))
+        while True:
+            try:
+                data, _ = sock.recvfrom(4096)
+                msg = json.loads(data.decode("utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if msg.get("cmd") == "collision_trip":
+                self.latched_reason = str(msg.get("reason", "collision"))
+                self.get_logger().error(f"COLLISION TRIP latched: {self.latched_reason}")
+            elif msg.get("cmd") == "collision_clear":
+                self.get_logger().warning("collision latch cleared by operator")
+                self.latched_reason = None
+
     def _on_frame(self, frame):
         # Called from the ingress thread; rclpy publishers are thread-safe.
+        if self.latched_reason is not None:
+            return  # fail-closed: no follow chunks while latched
         for side, rows in frame["arms"].items():
             deltas = rows_to_local_deltas(rows)
             if not deltas:
@@ -389,8 +429,9 @@ def main():
     ap.add_argument("--platform", default="monkey")
     ap.add_argument("--chunk-bind", default="0.0.0.0:50264")
     ap.add_argument("--command-bind", default="0.0.0.0:50256")
+    ap.add_argument("--control-bind", default="127.0.0.1:50259")
     ap.add_argument("--state-endpoints",
-                    default="127.0.0.1:50356,127.0.0.1:50366,127.0.0.1:50376,127.0.0.1:50378",
+                    default="127.0.0.1:50356,127.0.0.1:50366,127.0.0.1:50376,127.0.0.1:50378,127.0.0.1:50388",
                     help="servo_state.v1 UDP fanout targets (legacy port map)")
     args, ros_args = ap.parse_known_args()
     rclpy.init(args=ros_args)
