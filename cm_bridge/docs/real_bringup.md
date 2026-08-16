@@ -10,6 +10,11 @@ Operator-supervised. Every step fail-closed; rollback at any point =
 - [ ] Boxes on firmware 26071103 (updated 2026-08-16; CM re-verifies at init and
       refuses otherwise).
 - [ ] rb_servo_server stopped (script refuses otherwise — verified live).
+- [ ] **Box bring-up done: `./tools/robot_on.sh`** (`pgmode real` + `mc jall init`)
+      with CM DOWN (`run_cm_stack.sh down`) so the 5000 channel is exclusive.
+      Verify via CM diagnostics after restart: `sim_mode: '0'`, `init_state`
+      progressed, `estopped: '0'`. Skipping this yields error 202
+      ServoOnTimeout at enable (observed live 2026-08-16).
 
 ## 1. Controller up, arms cold
 
