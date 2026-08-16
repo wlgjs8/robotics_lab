@@ -16,3 +16,31 @@ services:
   chimp-sils:
     environment:
       CHIMP_ACTIVE_YAML: /cm-ws/src/controller-manager/platforms/chimpanzee/active.yaml
+
+  # Our rig's platform: monkey = dual RB3-730ES cell, no body — matches the
+  # robotics_lab dual RB3-730 rig. Same image/binary; the device file selects
+  # the platform. Seed platforms/monkey/active.yaml first (loopback shell):
+  #   sed -e '0,/ip: ""/s//ip: "127.0.0.1"/' -e '0,/ip: ""/s//ip: "127.0.0.2"/' \
+  #       platforms/monkey/params-presets/dual-arm.yaml > platforms/monkey/active.yaml
+  # Run:
+  #   docker compose -f submodules/controller-manager/docker-compose.yaml \
+  #                  -f cm_bridge/config/cm-compose.override.yaml up -d monkey-sils
+  monkey-sils:
+    image: chimpanzee-ros:humble
+    container_name: monkey-sils
+    network_mode: host
+    ipc: host
+    cap_add: [SYS_NICE]
+    ulimits:
+      rtprio: 99
+      memlock: -1
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}
+      CONTROL_MANAGER_SILS: "1"
+      CONTROL_MANAGER_ACTIVE_YAML: /cm-ws/src/controller-manager/platforms/monkey/active.yaml
+    volumes:
+      - chimp_ws:/cm-ws
+      - ../../submodules/controller-manager:/cm-ws/src/controller-manager
+    working_dir: /cm-ws
+    command: ["bash", "-lc", "exec ros2 run controller_manager plaif_chimpanzee"]

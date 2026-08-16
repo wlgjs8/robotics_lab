@@ -5,7 +5,7 @@ POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 FLOW_INFER_ARGS ?=
 
-.PHONY: run flow-infer-real flow-infer-sim-offline flow-infer-training-replay build rebuild vm-up vm-down vm-status policy-hdf5-audit-smoke deps-hardware-free cam-up cam-up-wrists cam-engine-rebuild cam-status cam-down pgmode-sim-build pgmode-sim-up pgmode-sim-down ik-infeasible
+.PHONY: run flow-infer-real flow-infer-sim-offline flow-infer-training-replay build rebuild policy-hdf5-audit-smoke deps-hardware-free cam-up cam-up-wrists cam-engine-rebuild cam-status cam-down ik-infeasible
 
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
@@ -17,8 +17,20 @@ FLOW_INFER_ARGS ?=
 #   make run VERBOSE=1        -> live teleop input + send/drop stats
 #   make run GRIPPER_SERVER=0 -> skip the gripper server
 MODE ?= sim
+# Controller selection (2026-08-16, combined-stack transition):
+#   CONTROLLER=cm     (DEFAULT) controller-manager owns the servo_j loop + force
+#                     control via cm_bridge; rb_servo_server does NOT run.
+#                     Status: SILS bring-up validated; the cm_bridge command
+#                     path (P1) and the real-hardware device file (P3) are still
+#                     in progress, so MODE=real fails closed with guidance.
+#   CONTROLLER=legacy the pre-transition rb_servo_server stack (unchanged).
+CONTROLLER ?= cm
 run:
+ifeq ($(CONTROLLER),cm)
+	./cm_bridge/run_cm_stack.sh $(MODE)
+else
 	./tools/run_stack.sh $(MODE)
+endif
 
 # External OpenPI/flow policy entrypoint. Start `make run` first, then run this
 # in another terminal; teleop_mux releases the lease while idle and flow-infer
@@ -42,7 +54,7 @@ flow-infer-sim-offline:
 flow-infer-training-replay:
 	./tools/flow_infer_training_episode_replay.sh $(FLOW_INFER_ARGS)
 
-# Source-build the full local stack for DIRECT real-controller work (no VM):
+# Source-build the full local stack for DIRECT real-controller work:
 # rb_servo_server (rbpodo backend, RB_SERVO_ENABLE_RBPODO=ON) into the path
 # `make run` launches, + setcap, + rb_gui/policy_runner editable installs.
 # Run this after editing source, then `make run`. Idempotent (rbpodo SDK
@@ -55,8 +67,6 @@ build:
 rebuild:
 	./tools/build_stack.sh --clean
 
-# Rainbow VIRTUAL control-box VMs (vendor OVA): boot 2 VMs and map them to the
-# real controller IPs so `make run MODE=sim` works without hardware.
 # Regenerate the viser "A 영역 (특이점 원통)" overlay asset: a per-arm base-axis
 # (J1) velocity-singularity cylinder (vendor "A 영역"), radius R = v_ref/dq_max,
 # axial extent FK-clipped to the reach envelope. Pure Python (seconds); only
@@ -68,13 +78,6 @@ ik-infeasible:
 		--speed-mps $(or $(IK_CYL_SPEED),0.25) \
 		--dqmax-deg $(or $(IK_CYL_DQMAX),60) \
 		$(if $(IK_CYL_RADIUS),--radius-m $(IK_CYL_RADIUS),)
-
-vm-up:
-	./tools/vm_stack.sh up
-vm-down:
-	./tools/vm_stack.sh down
-vm-status:
-	./tools/vm_stack.sh status
 
 policy-hdf5-audit-smoke:
 	mkdir -p "$(POLICY_HDF5_AUDIT_OUT)"
@@ -168,15 +171,3 @@ cam-status:
 cam-down:
 	-docker stop camera_server
 	-docker rm camera_server
-
-# --- rbpodo pgmode-simulation (native; dual Virtual ControlBox VMs) ---
-# One-command bring-up of rb_servo_server + rb_gui (viser) on this WSL box.
-# Controller-simulation only; uses stack_sim.yaml and does not enable real motion.
-pgmode-sim-build:
-	bash tools/vm/pgmode_sim_build.sh
-
-pgmode-sim-up:
-	bash tools/vm/pgmode_sim_up.sh
-
-pgmode-sim-down:
-	bash tools/vm/pgmode_sim_down.sh
