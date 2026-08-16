@@ -21,8 +21,8 @@ motion, `rb_servo_server` makes the final allow/deny decision. A full `flow-infe
 the Pika Gripper Backend) and the async URDF-mesh `CollisionMonitor` have run on the
 physical robot; the `real_policy` rollout-mode gate stays fully enforced and was
 satisfied via accepted/validated config. Remaining gaps: policy task success
-(model-side, not runtime) and force control (still `provider: null`,
-`enable: false`). Measured hand-eye calibration is unneeded for the deployed pika
+(model-side, not runtime) and force control (live on real; moving to
+controller-manager — see `AGENTS.md` §Force Control). Measured hand-eye calibration is unneeded for the deployed pika
 ee_local image-conditioned policy but still required for general geometry-dependent
 policy.
 

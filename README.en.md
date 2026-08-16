@@ -65,7 +65,7 @@ Not yet production-ready:
   arm reaches into a collision instead of grasping). This is a model-quality /
   data-coverage / appearance-domain-gap problem, not a runtime one; init-pose
   distribution matching is in progress (`umi_init_from_grasp.py`)
-- force control (`provider: null`, `enable: false`)
+- force control (live on real; moving to controller-manager)
 - fast physical circle stages (15 cm / 16 s and above, transition ladder P7–P9)
 - measured hand-eye / camera calibration is still pending for general
   geometry-dependent policy, but is **not needed** for the currently deployed pika
@@ -139,13 +139,11 @@ suspect diagnostics in real mode is a per-arm config opt-in
 EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error still latch
 regardless of config.
 
-Force control remains inactive:
-
-```yaml
-force_control:
-  provider: null
-  enable: false
-```
+Force control is **live on real** (`provider: project_native`,
+`operating_mode: cartesian_admittance`, `allow_in_real: true`, hard limits
+10/12 N + 7 Nm with a retreat policy) and is scheduled to move to
+`controller-manager`. See `AGENTS.md` §Force Control for the direction and the
+removal gate. Earlier revisions of this file claimed `provider: null` — stale.
 
 ## Motion Primitive Summary
 

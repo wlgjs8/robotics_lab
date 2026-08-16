@@ -75,7 +75,8 @@ IK
 sendServoJ
 ```
 
-Force control is disabled in tracked configs. Site-local activation follows the
+Force control is ENABLED in the tracked real config (cartesian admittance) and is
+moving to controller-manager; see `AGENTS.md` §Force Control. Historically:
 staged sensor/frame/sign/threshold acceptance runbook and remains subordinate to
 the final joint safety gate.
 

@@ -14,7 +14,7 @@ joint-only acceptance run after read-only state publishing has been verified.
   `servo.send_servo_commands: false` for any read-only real connection and is set
   to `true` only for the first-motion run.
 - Command and state endpoints remain loopback unless separately reviewed.
-- Cartesian/TCP and force control remain disabled.
+- Historical note: at the time of this runbook Cartesian/TCP and force control were disabled. Both are live today.
 - `RbpodoBackend::initialize()` is read-only: it must not enter operation mode
   or set speed bar during the read-only run.
 - Read-only state publishing can be healthy with `servo_enabled=false` when

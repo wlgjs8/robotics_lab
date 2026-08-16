@@ -62,7 +62,8 @@ acceptance.
 
 ## Force control
 
-Force control is present but disabled by default:
+Force control is enabled in the tracked real config (see `AGENTS.md` §Force
+Control); the struct defaults below are the disabled shape:
 
 ```yaml
 force_control:
