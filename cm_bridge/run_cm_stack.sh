@@ -45,12 +45,28 @@ case "$MODE" in
     echo "  Until then: make run CONTROLLER=legacy MODE=real" >&2
     exit 1
     ;;
+  gate)
+    seed_monkey_active_yaml
+    "${COMPOSE[@]}" up -d monkey-sils
+    sleep 7
+    docker exec monkey-sils bash -lc 'source /cm-ws/install/setup.bash
+for c in enable "task on"; do ros2 service call /monkey/cell/cmd/console cell_msgs/srv/Command "{command: $c}" >/dev/null; sleep 2.5; done
+ros2 service call /monkey/left/cmd/console cell_msgs/srv/Command "{command: task idle}" >/dev/null
+ros2 service call /monkey/right/cmd/console cell_msgs/srv/Command "{command: task idle}" >/dev/null'
+    docker exec monkey-sils bash -lc 'pkill -f "cm_bridge_nod[e]" 2>/dev/null; true'
+    docker exec -d monkey-sils bash -lc 'source /cm-ws/install/setup.bash && exec python3 /cm-bridge-src/cm_bridge_node.py --platform monkey > /tmp/cm_bridge.log 2>&1'
+    sleep 3
+    python3 "$ROOT/cm_bridge/tests/cm_sils_gate.py"
+    rc=$?
+    "${COMPOSE[@]}" stop monkey-sils >/dev/null
+    exit $rc
+    ;;
   down|stop)
     "${COMPOSE[@]}" stop monkey-sils chimp-sils 2>/dev/null || true
     echo "[cm-stack] stopped"
     ;;
   *)
-    echo "usage: run_cm_stack.sh {sim|real|down}" >&2
+    echo "usage: run_cm_stack.sh {sim|real|gate|down}" >&2
     exit 2
     ;;
 esac

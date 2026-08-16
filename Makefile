@@ -25,6 +25,11 @@ MODE ?= sim
 #                     in progress, so MODE=real fails closed with guidance.
 #   CONTROLLER=legacy the pre-transition rb_servo_server stack (unchanged).
 CONTROLLER ?= cm
+# P1 acceptance: SILS up -> arms OnTask(Idle) -> bridge -> 3-check gate.
+# Also the submodule pin-bump verification gate (cm_bridge/docs/design.md §8).
+cm-sils-gate:
+	./cm_bridge/run_cm_stack.sh gate
+
 run:
 ifeq ($(CONTROLLER),cm)
 	./cm_bridge/run_cm_stack.sh $(MODE)
