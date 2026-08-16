@@ -48,7 +48,13 @@ case "$MODE" in
       echo "  Fill both arms' serial_number from the nameplates, then retry." >&2
       exit 1
     fi
-    cp "$DEV" "$CM/platforms/monkey/active.yaml"
+    # CM persists box-adopted DH into the device file as root -> plain cp can
+    # hit EACCES on re-install; fall back to a root write via the container.
+    if ! cp "$DEV" "$CM/platforms/monkey/active.yaml" 2>/dev/null; then
+      "${COMPOSE[@]}" up -d monkey-real >/dev/null 2>&1
+      docker exec -i monkey-real bash -c 'cat > /cm-ws/src/controller-manager/platforms/monkey/active.yaml' < "$DEV"
+      docker restart monkey-real >/dev/null
+    fi
     echo "[cm-stack] installed REAL device file -> platforms/monkey/active.yaml"
     "${COMPOSE[@]}" up -d monkey-real
     sleep 8

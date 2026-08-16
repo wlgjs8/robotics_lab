@@ -1,7 +1,9 @@
 # cm_bridge REAL device file for the robotics_lab dual RB3-730E rig (P3 draft).
 # Generated 2026-08-16 from the monkey preset shell with:
 #   - MOUNTS REPLACED by robotics_lab's calibrated stand->arm-base transforms
-#     (stack_real.yaml base_pose_in_stand, rotvec->matrix, m->mm). This DEFINES
+#     (stack_real.yaml base_pose_in_stand COMPOSED with the measured Rz(-90deg)
+#     CM-armbase<->URDF-link0 frame correction, live FK cross-check 2026-08-16;
+#     residual ~1-2mm). This DEFINES
 #     CM base_frame == robotics_lab stand, so the bridge state republish
 #     extrinsic is exactly identity (design.md D3 resolved).
 #     NOTE: the preset's own mounts describe the MONKEY cell (different
@@ -61,13 +63,13 @@ arms:
     model: rb3-730es             # -> params-presets/models/rb3-730es.yaml (nominal DH + motion envelope)
     ip: "172.28.60.200"                       # DEVICE - blank in the shell: a blank ip REFUSES to boot ("fill the
                                  # shell"). env.sh's seed fills SILS loopback; real boxes need real IPs.
-    serial_number: ""            # DEVICE - fill from the arm's nameplate
+    serial_number: "RB3-730E-XXXXXX"            # DEVICE - fill from the arm's nameplate
     eft:  RFT64-6A01-A           # -> params-presets/efts/RFT64-6A01-A.yaml (nominal product values)
     tool: pika                   # -> tools/pika.yaml (bind-mounted cm_bridge preset; ft identify required for force)
     transform:                   # base_frame -> left-arm mount (design-snapped inverse; +y side)
-      - [ -0.147200669389, +0.375268761423, +0.915153167307, +157.070000]
-      - [ +0.019542134882, -0.923948030861, +0.382018509017, -170.360000]
-      - [ +0.988913579589, +0.074117426880, +0.128672215871, +580.360000]
+      - [ -0.373966014173, -0.147591969221, +0.915623301836, +157.543405]
+      - [ +0.924642906690, +0.017317462528, +0.380441323464, -170.278101]
+      - [ -0.072006356323, +0.988896716606, +0.129993724987, +580.258619]
       - [  0.0,             0.0,             0.0,             1.0]
     # THE MACHINE'S DH - starts as the model's nominal (TODO_FILL upstream); the box's
     # calibration adoption + persist keep it current once real numbers exist.
@@ -84,13 +86,13 @@ arms:
   right:
     model: rb3-730es
     ip: "172.28.60.201"                       # DEVICE - blank in the shell (see left)
-    serial_number: ""
+    serial_number: "RB3-730E-XXXXXX"
     eft:  RFT64-6A01-A
     tool: pika
     transform:                   # base_frame -> right-arm mount (EXACT mirror of the left; -y side)
-      - [ -0.147200669389, -0.375268761423, -0.915153167307, -157.070000]
-      - [ -0.019542134882, -0.923948030861, +0.382018509017, -170.360000]
-      - [ -0.988913579589, +0.074117426880, +0.128672215871, +580.360000]
+      - [ +0.375093343841, -0.147358838672, -0.915199626350, -159.091702]
+      - [ +0.924006764868, -0.019669060083, +0.381869907893, -169.893950]
+      - [ -0.074273022590, -0.988887506616, +0.128782830279, +580.369768]
       - [  0.0,             0.0,             0.0,             1.0]
     dh_parameters:           # = the model's URDF-extracted nominal (FK-verified; see the model file)
       - { joint: 1, theta_offset:   0.0, d: 145.30, a:   0.00, alpha: -90.0 }
