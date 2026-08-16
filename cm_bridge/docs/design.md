@@ -194,3 +194,79 @@ upstream, the gate fails here, not on the robot.
   exclusive by construction (single owner of the rbpodo sockets).
 - **ROS 2 runtime on the robot PC** — Docker path first; native Jazzy needs an
   OS decision (24.04) that is out of scope here.
+
+## 10. P1–P3 implementation plan toward `make run MODE=real` (2026-08-16)
+
+### Decisions (settled)
+
+- **D1 Bridge runtime = Python (rclpy) inside the CM docker image** (host
+  network; UDP + DDS both reachable). 30 Hz × small messages needs no C++;
+  the collision gate runs pinocchio+hpp-fcl Python bindings at 30 Hz (33
+  geom / 337 pairs is sub-ms). Port to C++ only if measured necessary.
+- **D2 Delta conversion is frame-independent.** A follow delta is the LOCAL
+  relative transform between consecutive absolute chunk rows
+  (T_k^-1 * T_k+1): no stand<->CM-root extrinsic enters the DELTA path.
+  What must agree is the TOOL POINT the rows and CM describe (R1 audit:
+  FollowUnit delta frame vs our TCP; fix by selecting the matching CM tool
+  preset or transporting deltas across the known tool offset).
+- **D3 State republish needs the extrinsic.** `servo_state.v1` carries
+  stand-frame absolutes -> map CM-root poses using robotics_lab calibration.
+  Field set = audit of what policy_runner/rb_gui actually read.
+- **D4 follow tuning without editing CM**: `params-tasks/follow.yaml` is
+  TRACKED (read-only rule applies) -> ship
+  `cm_bridge/config/follow.monkey.yaml` (input_period_ms 33.3, rotation
+  envelope raised per task yaw ~64 deg/s, admittance_overlay OFF) and
+  bind-mount it over the container path in the compose overlay. Optional
+  later: upstream PR (owner's call).
+- **D5 P1 MVP scope**: policy chunk stream + episode reset (command JSON
+  `JointTarget`/`init_motion` -> CM `Move` action MOVJ) + gripper (existing
+  UDP path, unchanged) + state republish. SpaceMouse/UMI teleop deferred.
+- **D6 Single controller owner**: `run_cm_stack.sh real` will launch CM +
+  bridge + rb_gui + policy_runner + gripper bridge and refuses while
+  rb_servo_server runs (already enforced in sim).
+
+### P1 — bridge command path (SILS, no hardware)
+
+1. `cm_bridge/src/cm_bridge_node.py`: chunk UDP 50264 ingress (wire format
+   per `docs/code_architecture_map.md`), absolute-row -> per-period delta
+   conversion, `/monkey/<side>/cmd/follow` PoseArray chunks (~4 deltas,
+   REPLACE cadence), command JSON 50256 subset (reset/init -> MOVJ), CM
+   state audit + subscribe -> `servo_state.v1` UDP fanout re-publish.
+2. `cm_bridge/config/follow.monkey.yaml` + compose overlay mount (D4).
+3. `cm_bridge/tests/cm_sils_gate.py`: scripted 30 Hz stream — drop-one
+   (stays in Follow), mid-tail REPLACE (re-anchors), silence exit timing,
+   state-fanout field assertions. Wire as `make cm-sils-gate`.
+4. Exit: rb_gui renders CM-driven state; synthetic chunks track in SILS.
+
+### P2 — safety gate port
+
+- Pinocchio-python collision monitor loading rb_servo_server's URDF/geom
+  set; gate rows pre-publish; latched fault stops streaming and surfaces on
+  the fanout. Floor-plane FK check at the same gate. Exit: canned collision
+  trajectory trips fail-closed in SILS.
+
+### P3 — real hardware
+
+- Fill `platforms/monkey/active.yaml` (gitignored device file): box IPs
+  .200/.201 + serials, pika tool preset, FT preset (RFT64-6A01-A) when
+  force control turns on.
+- **Mount reconciliation**: CM monkey preset carries the FIRST-SUPPLY
+  inverted/symmetrized mounts; robotics_lab has its own
+  `calibration/active_calibration.yaml` + `stack_real.yaml` mounts. Compare
+  numerically; the delta path tolerates offsets but state absolutes and
+  collision geometry must use one truth.
+- Supervised ladder: enable/idle only -> single-arm low-envelope follow ->
+  dual-arm -> policy rollout A/B vs `CONTROLLER=legacy`.
+- Unlock: flip `run_cm_stack.sh real` from fail-closed to launch once P1+P2
+  gates are green and the device file is filled.
+
+### Risks
+
+- R1 follow delta frame semantics (flange vs tool) — audit first, day 1.
+- R2 which CM topics expose q/tcp state at usable rate — audit
+  (`CellView`/`Health`/per-arm topics); worst case add a bridge-side poll.
+- R3 `servo_state.v1` field completeness for flow-infer (silent breakage)
+  — mitigated by the field audit + gate assertions.
+- R4 overlay-mounted follow.yaml drifting on submodule pulls — the SILS
+  gate is the canary.
+- R5 stand<->CM-root calibration mismatch (P3 measurement).
