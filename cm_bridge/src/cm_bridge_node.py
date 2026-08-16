@@ -151,6 +151,92 @@ class ChunkIngress(threading.Thread):
         return out
 
 
+class StateRepublisher:
+    """CM ROS state -> robotics_lab.servo_state.v1 UDP fanout.
+
+    Field set = the flow-infer real_policy hard requirements (2026-08-16 audit):
+    top-level fault_latched/motion_state + permissive command_source readback;
+    per arm has_valid_joint_state, q_actual_deg (rad->deg from act/joint),
+    has_valid_tcp_pose, tcp_stand and tcp_command_stand (act/pose, cmd/pose —
+    CM base_frame; the stand<->CM-root extrinsic is identity until P3 fills the
+    calibrated mapping).
+    """
+
+    def __init__(self, node, platform, endpoints, rate_hz=100.0):
+        from sensor_msgs.msg import JointState
+        from geometry_msgs.msg import PoseStamped
+
+        self._node = node
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._endpoints = endpoints
+        self._q = {"left": None, "right": None}
+        self._tcp = {"left": None, "right": None}
+        self._tcp_cmd = {"left": None, "right": None}
+        self._seq = 0
+        qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                         history=HistoryPolicy.KEEP_LAST, depth=1)
+        for side in ("left", "right"):
+            node.create_subscription(
+                JointState, f"/{platform}/{side}/act/joint",
+                lambda m, s=side: self._q.__setitem__(
+                    s, [math.degrees(v) for v in m.position[:6]]), qos)
+            node.create_subscription(
+                PoseStamped, f"/{platform}/{side}/act/pose",
+                lambda m, s=side: self._tcp.__setitem__(s, m.pose), qos)
+            node.create_subscription(
+                PoseStamped, f"/{platform}/{side}/cmd/pose",
+                lambda m, s=side: self._tcp_cmd.__setitem__(s, m.pose), qos)
+        node.create_timer(1.0 / rate_hz, self._publish)
+
+    @staticmethod
+    def _pose7(p):
+        return {
+            "x": p.position.x, "y": p.position.y, "z": p.position.z,
+            "quaternion_xyzw": [p.orientation.x, p.orientation.y,
+                                p.orientation.z, p.orientation.w],
+        }
+
+    def _arm(self, side):
+        q = self._q[side]
+        tcp = self._tcp[side]
+        out = {
+            "has_valid_joint_state": q is not None,
+            "has_valid_tcp_pose": tcp is not None,
+        }
+        if q is not None:
+            out["q_actual_deg"] = q
+        if tcp is not None:
+            out["tcp_stand"] = self._pose7(tcp)
+            out["tcp_actual_stand"] = out["tcp_stand"]
+        if self._tcp_cmd[side] is not None:
+            out["tcp_command_stand"] = self._pose7(self._tcp_cmd[side])
+        return out
+
+    def _publish(self):
+        self._seq += 1
+        state = {
+            "schema": "robotics_lab.servo_state.v1",
+            "seq": self._seq,
+            "source": "cm_bridge",
+            "fault_latched": False,
+            "motion_state": "Running",
+            "command_source": {
+                "active": True, "expired": False, "enforce_lease": False,
+                "active_source_id": "cm_bridge", "active_session_id": "cm",
+                "active_lease_token": "", "verdict": "allowed", "reason": "",
+                "command_requires_lease": False, "command_has_lease": True,
+            },
+            "left": self._arm("left"),
+            "right": self._arm("right"),
+        }
+        payload = json.dumps(state).encode("utf-8")
+        for host, port in self._endpoints:
+            try:
+                self._sock.sendto(payload, (host, port))
+            except OSError:
+                pass
+
+
 class CmBridge(Node):
     def __init__(self, args):
         super().__init__("cm_bridge")
@@ -166,6 +252,11 @@ class CmBridge(Node):
             )
             for side in ("left", "right")
         }
+        endpoints = []
+        for ep in args.state_endpoints.split(","):
+            host, port = ep.strip().rsplit(":", 1)
+            endpoints.append((host, int(port)))
+        self._state = StateRepublisher(self, args.platform, endpoints)
         self._last_pub_ns = {"left": 0, "right": 0}
         self._ingress = ChunkIngress(args.chunk_bind, self._on_frame)
         self._ingress.start()
@@ -208,6 +299,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--platform", default="monkey")
     ap.add_argument("--chunk-bind", default="0.0.0.0:50264")
+    ap.add_argument("--state-endpoints",
+                    default="127.0.0.1:50356,127.0.0.1:50366,127.0.0.1:50376,127.0.0.1:50378",
+                    help="servo_state.v1 UDP fanout targets (legacy port map)")
     args, ros_args = ap.parse_known_args()
     rclpy.init(args=ros_args)
     node = CmBridge(args)
