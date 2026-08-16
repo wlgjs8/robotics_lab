@@ -424,7 +424,7 @@ class GripperRuntime:
             if bool(getattr(self.backend, "supports_controller_simulation", False)):
                 return None
             return self._drop(command, "controller_sim_gripper_logged_noop")
-        if mode in {"offline_eval", "sim_dryrun", "real_readonly"}:
+        if mode in {"sim_dryrun", "real_readonly"}:
             return self._drop(command, f"{mode}_gripper_logged_noop")
         return self._drop(command, "gripper_backend_not_configured")
 

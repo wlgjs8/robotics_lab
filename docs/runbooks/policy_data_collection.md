@@ -39,7 +39,7 @@ gates were removed from the server runtime); none of that is policy-runner
 physical-motion approval.
 
 Flow-policy rollout must also declare `--rollout-mode`; the policy runner must
-not infer rollout authority from `mode: real` alone. Use `offline_eval` for
+not infer rollout authority from `mode: real` alone. Use `sim_dryrun` for
 checkpoint plus HDF5 sample review without state or UDP clients, `sim_dryrun`
 for mock/simulator state with dropped intents by default, `controller_sim` for
 the rbpodo `controller_simulation` carve-out, `real_readonly` for

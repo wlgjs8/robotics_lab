@@ -134,9 +134,16 @@ explicit `GRIPPER_SERVER=0` remain camera-independent.
 absolute `TcpPoseTarget` setpoints. There is no public command-family selection
 or opt-in flag for target-pose rollout.
 
-Live rollout still requires an explicit `--rollout-mode`. `controller_sim` and
-`real_policy` require a policy dt from CLI or checkpoint stats; dry-run and
+Live rollout still requires an explicit `--rollout-mode` (`sim_dryrun`,
+`controller_sim`, `real_readonly`, `real_policy`). `controller_sim` and
+`real_policy` require a policy dt from `--policy-dt-sec`; dry-run and
 read-only modes may use the command-rate fallback.
+
+`--checkpoint` accepts only an `openpi://HOST:PORT` remote policy server. The
+in-repo training stack (`flow-train`, `ml-preflight`, `imitation-*`, `train`,
+`infer`, the `pc_v1` point-cloud family) and the `offline_eval` rollout mode
+were removed once the deployed policy became the external OpenPI pi0.5 server;
+a local `.pt` path is rejected fail-closed.
 
 For live OpenPI `real_policy`, keep `make run` running and start
 `tools/flow_infer_real_policy.sh` or `make flow-infer-real` from another

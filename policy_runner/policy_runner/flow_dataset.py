@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import glob
 import io
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -148,7 +147,6 @@ class FlowHdf5Dataset:
         self.action_horizon = int(action_horizon)
         self.image_size = int(image_size)
         self.action_frame = normalize_action_frame(action_frame)
-        self._phase_boundary_cache: dict[str, Any] = {}
         if image_crop not in IMAGE_CROP_MODES:
             raise ValueError(f"image_crop must be one of: {', '.join(IMAGE_CROP_MODES)}")
         self.image_crop = image_crop
@@ -237,21 +235,6 @@ class FlowHdf5Dataset:
             "image_decode_count": np.asarray(decode_count, dtype=np.int64),
             "missing_camera_count": np.asarray(missing_count, dtype=np.int64),
         }
-
-    def phase_boundaries_for_episode(self, episode_index: int):
-        from .phase_segmentation import extract_phase_boundaries
-
-        episode = self.episodes[int(episode_index)]
-        key = str(episode.path)
-        boundaries = self._phase_boundary_cache.get(key)
-        if boundaries is None:
-            boundaries = extract_phase_boundaries(
-                episode.left_gripper,
-                episode.right_gripper,
-                episode.length,
-            )
-            self._phase_boundary_cache[key] = boundaries
-        return boundaries
 
 
 def discover_hdf5_episodes(
@@ -478,12 +461,6 @@ def compute_dataset_statistics(
     }
 
 
-def write_dataset_statistics(path: str | Path, stats: dict[str, Any]) -> None:
-    output = Path(path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(stats, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
 def normalize_flow_sample(sample: dict[str, np.ndarray], stats: dict[str, Any]) -> dict[str, np.ndarray]:
     out = dict(sample)
     out["proprio"] = _normalize_array(
@@ -505,14 +482,6 @@ def normalize_flow_sample(sample: dict[str, np.ndarray], stats: dict[str, Any]) 
             1e-6,
         )
     return out
-
-
-def denormalize_actions(actions: Any, stats: dict[str, Any]):
-    import torch
-
-    mean = torch.as_tensor(stats["action_mean"], dtype=actions.dtype, device=actions.device)
-    std = torch.as_tensor(stats["action_std"], dtype=actions.dtype, device=actions.device)
-    return actions * std.view(1, 1, -1) + mean.view(1, 1, -1)
 
 
 def action_mask_from_arm_mask(arm_mask: np.ndarray, action_horizon: int) -> np.ndarray:

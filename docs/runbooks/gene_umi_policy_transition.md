@@ -55,23 +55,15 @@ writes manifest/report metadata. `umi-convert` writes a
 pipelines; they do not open a live UMI hardware SDK and do not send robot
 commands.
 
-## Flow-Train / Flow-Infer Path
+## Training / Flow-Infer Path
 
-Run dependency preflight before training:
+Training no longer happens in this repo. The in-repo flow-matching stack
+(`flow-train`, `ml-preflight`, `imitation-*`) was removed on 2026-08-16; the
+deployed pi0.5 policy is trained by the external **openpi** trainer on the GPU
+servers and served over the wire. This repo audits the episodes and runs
+inference against that server.
 
-```bash
-PYTHONPATH=policy_runner python3 -m policy_runner ml-preflight --vision-backbone tiny_cnn
-```
-
-Train with audited HDF5 episodes:
-
-```bash
-PYTHONPATH=policy_runner python3 -m policy_runner flow-train \
-  --episodes-dir data/umi_episodes \
-  --checkpoint outputs/flow_policy.pt \
-  --vision-backbone tiny_cnn \
-  --write-eval-report outputs/flow_eval_report.md
-```
+Audit the HDF5 episodes here (see above), then train with openpi's own tooling.
 
 Run `flow-infer` only with an explicit `--rollout-mode`. Live rollout composes
 each per-step action delta into an absolute `TcpPoseTarget` setpoint using
@@ -83,7 +75,6 @@ Keep these lanes separate:
 
 | Lane | Command authority | Motion evidence |
 | --- | --- | --- |
-| `offline_eval` | none | checkpoint plus HDF5 action chunk review |
 | `sim_dryrun` | dropped by default | mock state and SafetyGate decisions |
 | `controller_sim` | rbpodo controller `pgmode` simulation only | controller reference with `physical_motion_expected=false` |
 | `real_readonly` / `real_supervised` | none | real state/camera observation and rollout summary |
@@ -95,7 +86,7 @@ Example offline evaluation:
 PYTHONPATH=policy_runner python3 -m policy_runner flow-infer \
   --config policy_runner/config/stack_sim.yaml \
   --checkpoint outputs/flow_policy.pt \
-  --rollout-mode offline_eval \
+  --rollout-mode sim_dryrun \
   --episodes-dir data/umi_episodes \
   --rollout-summary outputs/rollout_summary.json
 ```
@@ -137,7 +128,7 @@ The manifest must include paths and metadata for:
 
 - control default validation reports
 - `hdf5-audit` JSON/Markdown outputs
-- `flow-train` checkpoints plus `flow_eval_summary` and reports
+- training checkpoints plus eval summaries and reports (produced by the external openpi trainer)
 - `flow-infer` `rollout_summary` JSON
 - pgmode transition or physical-promotion dry-run reports
 

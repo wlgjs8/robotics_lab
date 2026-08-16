@@ -14,7 +14,6 @@ ROLLOUT_SUMMARY_SCHEMA = "robotics_lab.policy_runner.rollout_summary.v1"
 
 
 class RolloutMode(str, Enum):
-    OFFLINE_EVAL = "offline_eval"
     SIM_DRYRUN = "sim_dryrun"
     CONTROLLER_SIM = "controller_sim"
     REAL_READONLY = "real_readonly"
@@ -57,8 +56,6 @@ class RolloutModePolicy:
 
     @property
     def may_send_commands(self) -> bool:
-        if self.mode == RolloutMode.OFFLINE_EVAL:
-            return False
         if self.mode == RolloutMode.SIM_DRYRUN:
             return self.send_dryrun_commands
         if self.mode == RolloutMode.REAL_READONLY:
@@ -74,12 +71,10 @@ class RolloutModePolicy:
         return self.mode == RolloutMode.REAL_POLICY
 
     @property
-    def requires_live_state(self) -> bool:
-        return self.mode != RolloutMode.OFFLINE_EVAL
-
-    @property
     def cameras_required_if_checkpoint_expects(self) -> bool:
-        return self.mode != RolloutMode.OFFLINE_EVAL
+        # offline_eval 이 사라진 뒤 모든 롤아웃 모드는 라이브 상태/카메라를 요구한다.
+        # rollout_summary 스키마의 published 필드라 상수로 남긴다.
+        return True
 
     @property
     def report_fields(self) -> dict[str, object]:
@@ -112,8 +107,6 @@ class RolloutModePolicy:
                     "checkpoint expects cameras, so live rollout requires camera.enable=true"
                 )
 
-        if self.mode == RolloutMode.OFFLINE_EVAL:
-            return
         if self.mode == RolloutMode.SIM_DRYRUN:
             if mode == "real":
                 raise RolloutModeValidationError(

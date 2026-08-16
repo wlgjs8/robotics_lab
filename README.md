@@ -339,7 +339,8 @@ object 전체만 자동으로 다시 컴파일합니다. CMake cache/toolchain/b
 
 SpaceMouse / UMI teleop는 `make run`이 띄우는 `policy_runner`에서 상시 동시
 운용됩니다(별도 teleop 모드 불필요). policy 학습은 GPU 서버에서 native
-`python3 -m policy_runner flow-train`으로 수행하며, inference는
+정책 학습은 GPU 서버의 외부 openpi 트레이너가 수행합니다(레포 내 학습 스택은
+2026-08-16 제거). 이 레포는 추론과 데이터 수집만 담당하며, inference는
 `python3 -m policy_runner flow-infer`(아래 `--rollout-mode` 참고)로 실행합니다.
 실제 OpenPI `real_policy` rollout은 `make run`을 그대로 띄운 상태에서 별도
 터미널의 얇은 wrapper로 시작합니다. `ACTION_SOURCE=none`은 필요하지 않습니다:
@@ -414,7 +415,7 @@ RB_ALLOW_REAL_GRIPPER=1 \
   --depth-units-m 1e-4
 ```
 
-HDF5 policy episodes should be audited before `flow-train`:
+HDF5 policy episodes should be audited before training:
 
 ```bash
 python3 -m policy_runner hdf5-audit \
@@ -434,7 +435,7 @@ real policy rollout remains blocked unless the manifest retarget transform to
 
 `flow-infer` requires an explicit `--rollout-mode` so inferred actions are not
 implicitly routed by the old `mode: real` flag. Supported values are
-`offline_eval`, `sim_dryrun`, `controller_sim`, `real_readonly`, and
+`sim_dryrun`, `controller_sim`, `real_readonly`, and
 `real_policy`; each run writes a machine-readable `rollout_summary` to
 `outputs/rollout_summary.json` unless `--rollout-summary` is supplied.
 `controller_sim` is the rbpodo `controller_simulation` carve-out only:
