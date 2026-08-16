@@ -1,0 +1,142 @@
+# Wrist-only 60 fps rig: dual D405 (color+depth 640x480@60), no fisheye.
+# Interim profile until the 90 fps recollection (2026-08-16): 60 fps is the
+# highest rate whose AE stays near the 30 fps training brightness — exposure
+# 15.4 ms, brightness left -3% / right -9% (paired same-scene measurement),
+# policy A/B: left at the noise floor (cum 0.11 mm < 0.25), right residual
+# 0.40 mm (~1/10 of the 4 mm pass mark). At 90 fps the gap is physical:
+# exposure capped at 9.9 ms AND analog gain saturated at 248 (verified), so
+# only scene lighting can close it — see dual_realsense_d405_90fps.yaml.
+# Serials verified 2026-08-16 (rs-enumerate physical ports, pci-0000:13:00.0):
+#   hub 1: left arm  = 412622272078, hub 2: right arm = 260322278348
+# (2026-07-23 swap binding: serial follows the physical unit.)
+server:
+  name: camera_server
+  mode: capture_only
+  clock: monotonic_raw
+  simulate_cameras: false
+
+shared_memory:
+  # Distinct from /camera_server_frames: that segment is a root-owned leftover a
+  # non-root native run cannot unlink. Consumers follow the shm_name embedded in
+  # bundle metadata, so the name is free to differ.
+  name: "/camera_server_frames_60"
+  size_mb: 1024
+  # 60 Hz wraps a 4-slot ring in 67 ms; 8 slots keeps ~133 ms of history.
+  ring_slots: 8
+  unlink_on_start: true
+
+metadata:
+  transport: zmq_pub
+  pub_bind: "tcp://127.0.0.1:5600"
+  health_topic: "camera.health"
+  bundle_topic: "camera.bundle"
+
+sync:
+  mode: software
+  master_camera: left_realsense
+  bundle_policy: nearest_timestamp
+  # Free-running left/right phase offset is random per session; measured pairing
+  # skew sat at ~10.2 ms in the 2026-08-16 validation run, so 11 ms left <1 ms
+  # margin. 15 ms (< one 16.7 ms period) keeps a full margin while still
+  # rejecting a >1-frame-stale pairing.
+  max_bundle_time_diff_ms: 15.0
+  publish_incomplete_bundles: false
+
+# Same consumer-group layout as dual_realsense_d405.yaml — REQUIRED by the live
+# consumers: flow-infer subscribes camera.bundle.policy (stale_timeout 1.0 s -> a
+# missing group aborts the rollout with camera_stale_timeout) and the rb_gui
+# camera-quality monitor subscribes camera.bundle.wrist_left/right (missing ->
+# blur N/A).
+bundle_groups:
+  legacy:
+    topic: "camera.bundle"
+    master_stream: "left_realsense.color"
+    required_streams:
+      - "left_realsense.color"
+      - "left_realsense.depth"
+      - "right_realsense.color"
+      - "right_realsense.depth"
+    max_bundle_time_diff_ms: 15.0
+    publish_incomplete_bundles: false
+  policy:
+    topic: "camera.bundle.policy"
+    master_stream: "left_realsense.color"
+    required_streams:
+      - "left_realsense.color"
+      - "left_realsense.depth"
+      - "right_realsense.color"
+      - "right_realsense.depth"
+    max_bundle_time_diff_ms: 15.0
+    publish_incomplete_bundles: false
+  wrist_left:
+    topic: "camera.bundle.wrist_left"
+    master_stream: "left_realsense.color"
+    required_streams:
+      - "left_realsense.color"
+      - "left_realsense.depth"
+    max_bundle_time_diff_ms: 15.0
+    publish_incomplete_bundles: false
+  wrist_right:
+    topic: "camera.bundle.wrist_right"
+    master_stream: "right_realsense.color"
+    required_streams:
+      - "right_realsense.color"
+      - "right_realsense.depth"
+    max_bundle_time_diff_ms: 15.0
+    publish_incomplete_bundles: false
+
+cameras:
+  left_realsense:
+    backend: realsense
+    serial: "412622272078"
+    required: true
+    streams:
+      color:
+        enabled: true
+        width: 640
+        height: 480
+        fps: 60
+        format: rgb8
+      depth:
+        enabled: true
+        width: 640
+        height: 480
+        fps: 60
+        format: z16
+  right_realsense:
+    backend: realsense
+    serial: "260322278348"
+    required: true
+    streams:
+      color:
+        enabled: true
+        width: 640
+        height: 480
+        fps: 60
+        format: rgb8
+      depth:
+        enabled: true
+        width: 640
+        height: 480
+        fps: 60
+        format: z16
+
+recording:
+  enabled: false
+  output_dir: "/data/episodes"
+  queue_capacity_frames: 300
+  writer_threads: 4
+  drop_policy: drop_oldest
+  raw_format: true
+
+health:
+  publish_rate_hz: 1
+  warn_if_frame_age_ms_gt: 100
+  warn_if_drop_count_increases: true
+  warn_if_bundle_skew_ms_gt: 15
+
+reconnect:
+  enabled: true
+  max_attempts: 0
+  retry_interval_ms: 1000
+  frame_timeout_ms: 2000

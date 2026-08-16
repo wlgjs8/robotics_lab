@@ -17,7 +17,12 @@ WEIGHTS = os.environ.get("STEREO_WEIGHTS",
                          f"{FFS_DIR}/weights/23-36-37/model_best_bp2_serialize.pth")
 BUNDLE_ENDPOINT = os.environ.get("CAMERA_BUNDLE_ENDPOINT", "tcp://127.0.0.1:5600")
 STEREO_BUNDLE_TOPIC = os.environ.get("STEREO_BUNDLE_TOPIC", "camera.bundle.stereo")
-STEREO_WRIST_BUNDLE_TOPIC = os.environ.get("STEREO_WRIST_BUNDLE_TOPIC", "camera.bundle.policy")
+# 손목 번들: 좌/우 독립 그룹을 기본 구독해 한쪽 손목 카메라가 죽어도 건강한 쪽
+# RGB-D는 계속 흐른다(예전 camera.bundle.policy 단일 구독은 4스트림 complete 게이트라
+# 한쪽 사망 시 양쪽이 함께 끊겼다). STEREO_WRIST_BUNDLE_TOPIC 명시 시 단일 토픽 구독.
+_wrist_topic_env = os.environ.get("STEREO_WRIST_BUNDLE_TOPIC")
+STEREO_WRIST_BUNDLE_TOPICS = ([_wrist_topic_env] if _wrist_topic_env
+                              else ["camera.bundle.wrist_left", "camera.bundle.wrist_right"])
 CLOUD_PUB_BIND = os.environ.get("CLOUD_PUB_BIND", "tcp://127.0.0.1:5601")
 CLOUD_TOPIC = os.environ.get("CLOUD_TOPIC", "stereo.cloud")
 STEREO_CAMERA = os.environ.get("STEREO_CAMERA", "head")
@@ -311,30 +316,42 @@ def cmd_run(args):
     from bundle_reader import BundleReader
     from external_boxes_sender import ExternalBoxesSender
 
-    wait_for_file(STEREO_INTRINSICS)
-    if not os.path.exists(STEREO_INTRINSICS):
-        print(f"[run] FATAL: intrinsics {STEREO_INTRINSICS} 가 없음.\n"
-              f"       1280x720 헤드는 camera_server(C++)가 기동 시 이 파일을 덤프해야 한다.\n"
-              f"       덤프가 없으면 보통 Docker 이미지가 새 C++로 재빌드되지 않은 것:\n"
-              f"       `make cam-up`(--build 포함) 으로 이미지를 재빌드하라.", flush=True)
-        raise SystemExit(2)
-    K, baseline = load_ktxt(STEREO_INTRINSICS)
-    print(f"[run] intrinsics fx={K[0,0]:.1f} cx={K[0,2]:.1f} cy={K[1,2]:.1f} "
-          f"baseline={baseline*1000:.1f}mm  src={STEREO_INTRINSICS}  "
-          f"bundle={BUNDLE_ENDPOINT} topics[head={STEREO_BUNDLE_TOPIC} "
-          f"wrist={STEREO_WRIST_BUNDLE_TOPIC}] pub={CLOUD_PUB_BIND}", flush=True)
-    use_trt = os.path.exists(STEREO_ENGINE) and not args.force_torch
-    if use_trt:
-        from stereo_model import TrtStereoModel
-        model = TrtStereoModel(FFS_DIR, STEREO_ENGINE)
-        print(f"[run] backend=TensorRT  engine={STEREO_ENGINE}", flush=True)
+    # STEREO_HEAD=0: head D435 없이 손목(D405)만으로 동작 — head 스테레오 추론/박스
+    # 검출/융합은 비활성, 손목 raw 클라우드 발행만 수행한다(dual_realsense_d405 rig).
+    head_on = os.environ.get("STEREO_HEAD", "1") != "0"
+    K = baseline = None
+    model = None
+    calib = None
+    if head_on:
+        wait_for_file(STEREO_INTRINSICS)
+        if not os.path.exists(STEREO_INTRINSICS):
+            print(f"[run] FATAL: intrinsics {STEREO_INTRINSICS} 가 없음.\n"
+                  f"       1280x720 헤드는 camera_server(C++)가 기동 시 이 파일을 덤프해야 한다.\n"
+                  f"       덤프가 없으면 보통 Docker 이미지가 새 C++로 재빌드되지 않은 것:\n"
+                  f"       `make cam-up`(--build 포함) 으로 이미지를 재빌드하라.\n"
+                  f"       (head 없는 rig라면 STEREO_HEAD=0 으로 wrist-only 모드를 쓴다)", flush=True)
+            raise SystemExit(2)
+        K, baseline = load_ktxt(STEREO_INTRINSICS)
+        print(f"[run] intrinsics fx={K[0,0]:.1f} cx={K[0,2]:.1f} cy={K[1,2]:.1f} "
+              f"baseline={baseline*1000:.1f}mm  src={STEREO_INTRINSICS}  "
+              f"bundle={BUNDLE_ENDPOINT} topics[head={STEREO_BUNDLE_TOPIC} "
+              f"wrist={','.join(STEREO_WRIST_BUNDLE_TOPICS)}] pub={CLOUD_PUB_BIND}", flush=True)
+        use_trt = os.path.exists(STEREO_ENGINE) and not args.force_torch
+        if use_trt:
+            from stereo_model import TrtStereoModel
+            model = TrtStereoModel(FFS_DIR, STEREO_ENGINE)
+            print(f"[run] backend=TensorRT  engine={STEREO_ENGINE}", flush=True)
+        else:
+            from stereo_model import FoundationStereoModel
+            model = FoundationStereoModel(FFS_DIR, WEIGHTS, valid_iters=args.valid_iters)
+            print(f"[run] backend=PyTorch  weights={WEIGHTS}", flush=True)
+        print("[run] model loaded", flush=True)
+        calib = load_color_calib(COLOR_CALIB_PATH)
+        print(f"[run] color calib: {'loaded ('+COLOR_CALIB_PATH+')' if calib else 'none -> IR 명암'}", flush=True)
     else:
-        from stereo_model import FoundationStereoModel
-        model = FoundationStereoModel(FFS_DIR, WEIGHTS, valid_iters=args.valid_iters)
-        print(f"[run] backend=PyTorch  weights={WEIGHTS}", flush=True)
-    print("[run] model loaded", flush=True)
-    calib = load_color_calib(COLOR_CALIB_PATH)
-    print(f"[run] color calib: {'loaded ('+COLOR_CALIB_PATH+')' if calib else 'none -> IR 명암'}", flush=True)
+        print(f"[run] head OFF (STEREO_HEAD=0): wrist-only 모드 — head 스테레오/박스검출/융합 비활성. "
+              f"bundle={BUNDLE_ENDPOINT} topics[wrist={','.join(STEREO_WRIST_BUNDLE_TOPICS)}] "
+              f"pub={CLOUD_PUB_BIND}", flush=True)
 
     cam = STEREO_CAMERA
     k_irl, k_irr, k_col = f"{cam}.ir_left", f"{cam}.ir_right", f"{cam}.color"
@@ -345,9 +362,10 @@ def cmd_run(args):
     wrist_cams = [("left", "left_realsense.color", "left_realsense.depth"),
                   ("right", "right_realsense.color", "right_realsense.depth")]
     wrist_want = {key for _arm, kc, kd in wrist_cams for key in (kc, kd)}
-    head_reader = BundleReader(endpoint=BUNDLE_ENDPOINT, topic=STEREO_BUNDLE_TOPIC)
-    wrist_reader = (BundleReader(endpoint=BUNDLE_ENDPOINT, topic=STEREO_WRIST_BUNDLE_TOPIC)
-                    if wrist_on else None)
+    head_reader = (BundleReader(endpoint=BUNDLE_ENDPOINT, topic=STEREO_BUNDLE_TOPIC)
+                   if head_on else None)
+    wrist_readers = ([BundleReader(endpoint=BUNDLE_ENDPOINT, topic=t)
+                      for t in STEREO_WRIST_BUNDLE_TOPICS] if wrist_on else [])
     # viz 전용 점수 상한(0=무제한). 16만 head 클라우드를 그대로 흘리면 rb_gui 수신 스레드
     # + viser 웹소켓을 포화시킨다 → 발행 직전 캡. detect는 disp 경로라 위치 추정 무손실.
     viz_max_pts = int(os.environ.get("STEREO_VIZ_MAX_PTS", "30000"))
@@ -363,7 +381,7 @@ def cmd_run(args):
               f"source_id={STEREO_BOX_SOURCE_ID}", flush=True)
 
     detector = None
-    if os.environ.get("STEREO_DETECT", "1") != "0":
+    if head_on and os.environ.get("STEREO_DETECT", "1") != "0":
         try:
             from box_detect import BoxDetector, BoxTracker
             detector = BoxDetector(
@@ -456,54 +474,70 @@ def cmd_run(args):
         print(f"[run] idle cloud stride: {idle_stride} (STEREO_IDLE_STRIDE; burst 중엔 1=full)", flush=True)
     while True:
         _t = time.perf_counter()
-        frames = head_reader.poll(head_want, timeout_ms=500)
-        if wrist_reader is not None:
-            frames.update(wrist_reader.poll(wrist_want, timeout_ms=0))
+        # head가 죽거나 없어도 손목 처리는 계속되어야 한다(편측/전체 카메라 장애 격리).
+        # head_on일 때 head poll이 페이싱(최대 100ms 대기), wrist-only면 첫 wrist poll이 페이싱.
+        if head_reader is not None:
+            frames = head_reader.poll(head_want, timeout_ms=100)
+        else:
+            frames = {}
+        for _wi, _wr in enumerate(wrist_readers):
+            _wt = 200 if (head_reader is None and _wi == 0) else 0
+            frames.update(_wr.poll(wrist_want, timeout_ms=_wt))
         if detector is not None:
             now_m = time.monotonic()
             if (now_m - last_heartbeat_t) >= STEREO_BOX_HEARTBEAT_S:
                 external_boxes_sender.send(build_heartbeat_boxes(locks, now_m))
                 last_heartbeat_t = now_m
+        if not frames:
+            continue   # 이번 틱 수신 없음(모든 카메라 유휴/장애) — poll timeout이 페이싱
         irl = frames.get(k_irl); irr = frames.get(k_irr)
-        if irl is None or irr is None:
-            continue
+        # head 프레임이 없으면(미장착/사망/rate cap) head 파이프라인만 쉬고 손목은 계속.
+        head_ready = head_on and model is not None and irl is not None and irr is not None
         _t = _ck(prof, "poll", _t)
-        if head_hz > 0.0:
+        if head_ready and head_hz > 0.0:
             _now = time.monotonic()
             if (_now - last_proc_t) < (1.0 / head_hz):
-                continue   # rate cap: 이번 프레임은 통째로 건너뛰어 CPU를 쉰다(heartbeat는 유지)
-            last_proc_t = _now
-        disp = model.infer_disparity(irl.pixels, irr.pixels)
-        _t = _ck(prof, "infer", _t)
+                head_ready = False   # rate cap: head 파이프라인만 쉰다(heartbeat/손목은 유지)
+            else:
+                last_proc_t = _now
+        disp = None
+        xyz = rgb = None
+        head_share_xyz = None
         col = frames.get(k_col)
-        roi_cloud = effective_clip_roi(detector) if roi_clip_on else None
-        cloud_clipped = False
-        if calib is not None and col is not None:
-            # color_cloud에 T_sc+roi를 주면 ROI subset만 재투영(+ROI clip 일체화). burst 중에만
-            # full(stride=1) — detect가 이 클라우드를 공유하므로. 평상시엔 idle_stride로 솎음.
-            cloud_stride = 1 if phase == "burst" else idle_stride
-            xyz, rgb = color_cloud(disp, col.pixels, K, baseline, calib, dmin=0.1, dmax=args.zfar,
-                                   T_sc=(detector._T_sc if roi_cloud is not None else None),
-                                   roi=roi_cloud, stride=cloud_stride)
-            cloud_clipped = roi_cloud is not None
-            if not warned_rgb:
-                print("[run] RGB 매핑 ON (color->IR 재투영)", flush=True); warned_rgb = True
-        else:
-            xyz, rgb = model.disparity_to_cloud(disp, irl.pixels, K, baseline, zfar=args.zfar)
-            if not warned_rgb:
-                print(f"[run] IR 명암 사용 (calib={calib is not None}, color={col is not None})", flush=True)
-                warned_rgb = True
-        # detect와 공유할 head 클라우드(IR 프레임, color 경로일 때만). detect가 이걸 stand로만
-        # 변환해 재계산을 피한다(중복 제거). IR-명암 경로는 색이 없어 공유 안 함(None).
-        head_share_xyz = xyz if (calib is not None and col is not None) else None
-        if xyz.shape[0] == 0:
-            continue  # 유효 점 없음(예: fp16 NaN/범위밖) -> publish/통계 건너뜀
-        if roi_clip_on and not cloud_clipped:            # 아직 안 잘린 경로(IR 등)만 클립
-            hm = roi_clip_mask(xyz, detector._T_sc, effective_clip_roi(detector))
-            pub.publish(seq, time.time_ns(), xyz[hm], rgb[hm])
-        else:
-            pub.publish(seq, time.time_ns(), xyz, rgb)
-        _t = _ck(prof, "cloud+pub", _t)
+        if head_ready:
+            disp = model.infer_disparity(irl.pixels, irr.pixels)
+            _t = _ck(prof, "infer", _t)
+            roi_cloud = effective_clip_roi(detector) if roi_clip_on else None
+            cloud_clipped = False
+            if calib is not None and col is not None:
+                # color_cloud에 T_sc+roi를 주면 ROI subset만 재투영(+ROI clip 일체화). burst 중에만
+                # full(stride=1) — detect가 이 클라우드를 공유하므로. 평상시엔 idle_stride로 솎음.
+                cloud_stride = 1 if phase == "burst" else idle_stride
+                xyz, rgb = color_cloud(disp, col.pixels, K, baseline, calib, dmin=0.1, dmax=args.zfar,
+                                       T_sc=(detector._T_sc if roi_cloud is not None else None),
+                                       roi=roi_cloud, stride=cloud_stride)
+                cloud_clipped = roi_cloud is not None
+                if not warned_rgb:
+                    print("[run] RGB 매핑 ON (color->IR 재투영)", flush=True); warned_rgb = True
+            else:
+                xyz, rgb = model.disparity_to_cloud(disp, irl.pixels, K, baseline, zfar=args.zfar)
+                if not warned_rgb:
+                    print(f"[run] IR 명암 사용 (calib={calib is not None}, color={col is not None})", flush=True)
+                    warned_rgb = True
+            # detect와 공유할 head 클라우드(IR 프레임, color 경로일 때만). detect가 이걸 stand로만
+            # 변환해 재계산을 피한다(중복 제거). IR-명암 경로는 색이 없어 공유 안 함(None).
+            head_share_xyz = xyz if (calib is not None and col is not None) else None
+            if xyz.shape[0] == 0:
+                # 유효 점 없음(예: fp16 NaN/범위밖) -> head publish/detect만 건너뜀(손목은 계속)
+                head_ready = False
+                disp = None
+                head_share_xyz = None
+            elif roi_clip_on and not cloud_clipped:        # 아직 안 잘린 경로(IR 등)만 클립
+                hm = roi_clip_mask(xyz, detector._T_sc, effective_clip_roi(detector))
+                pub.publish(seq, time.time_ns(), xyz[hm], rgb[hm])
+            else:
+                pub.publish(seq, time.time_ns(), xyz, rgb)
+            _t = _ck(prof, "cloud+pub", _t)
 
         # 손목 raw 클라우드 계산(병합+발행 공용, 카메라 프레임). 소비되는 프레임에서만
         # 계산한다: publish는 wrist_every마다, fusion은 해당 arm의 live pose가 있을 때만.
@@ -578,13 +612,14 @@ def cmd_run(args):
 
             try:
                 if phase == "burst":
-                    raw = detector.detect(disp, color_img=(col.pixels if col is not None else None),
-                                          extra_xyz=extra_xyz, extra_rgb=extra_rgb,
-                                          head_xyz_ir=head_share_xyz, head_rgb=rgb)
-                    targeted = [d for d in raw if d.get("label") in burst_labels]
-                    candidates = burst_tracker.update(targeted) if burst_tracker is not None else targeted
-                    for cand in candidates:
-                        burst_candidates[cand.get("label")] = cand
+                    if disp is not None:   # head 프레임이 없으면 이번 틱 검출은 건너뛴다
+                        raw = detector.detect(disp, color_img=(col.pixels if col is not None else None),
+                                              extra_xyz=extra_xyz, extra_rgb=extra_rgb,
+                                              head_xyz_ir=head_share_xyz, head_rgb=rgb)
+                        targeted = [d for d in raw if d.get("label") in burst_labels]
+                        candidates = burst_tracker.update(targeted) if burst_tracker is not None else targeted
+                        for cand in candidates:
+                            burst_candidates[cand.get("label")] = cand
 
                     if time.monotonic() >= burst_deadline:
                         summary = []
@@ -660,14 +695,19 @@ def cmd_run(args):
                 dprof_str = "  detect[" + " ".join(
                     f"{k.strip()}={1000.0*v/nwin:.0f}" for k, v in detector._prof.items()) + "]"
                 detector._prof = {}
-            print(f"[run] fps={fps:.1f} cloud_pts={xyz.shape[0]} boxes={n_boxes} "
-                  f"z[{xyz[:,2].min():.2f},{xyz[:,2].max():.2f}]m{fuse_str}{prof_str}{dprof_str}", flush=True)
+            if xyz is not None and xyz.shape[0] > 0:
+                cloud_str = f"cloud_pts={xyz.shape[0]} z[{xyz[:,2].min():.2f},{xyz[:,2].max():.2f}]m"
+            else:
+                cloud_str = "cloud_pts=0(head없음)" if head_on else "head=off"
+            print(f"[run] fps={fps:.1f} {cloud_str} boxes={n_boxes} "
+                  f"{fuse_str}{prof_str}{dprof_str}", flush=True)
         if args.max_frames and seq >= args.max_frames:
             print(f"[run] reached max_frames={args.max_frames}, exit", flush=True)
             break
-    head_reader.close()
-    if wrist_reader is not None:
-        wrist_reader.close()
+    if head_reader is not None:
+        head_reader.close()
+    for _wr in wrist_readers:
+        _wr.close()
 
 
 def cmd_smoke(args):

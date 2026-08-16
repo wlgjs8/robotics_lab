@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cctype>
+#include <cstdio>
 #include <limits>
 #include <utility>
 
@@ -239,7 +240,16 @@ FtTareUpdate FtWrenchPipeline::updateResidualTare(
         const double limit = i < 3
             ? config_.residual_tare_max_force_stddev_n
             : config_.residual_tare_max_torque_stddev_nm;
-        if (stddev > limit) return reject("tare window variance exceeds limit");
+        if (stddev > limit) {
+            static constexpr const char* kAxisNames[6] = {
+                "fx", "fy", "fz", "tx", "ty", "tz"};
+            char detail[128];
+            std::snprintf(
+                detail, sizeof(detail),
+                "tare window variance exceeds limit (%s stddev %.3f > %.3f %s)",
+                kAxisNames[i], stddev, limit, i < 3 ? "N" : "Nm");
+            return reject(detail);
+        }
     }
 
     config_.residual_tare_tcp = fromArray(means);

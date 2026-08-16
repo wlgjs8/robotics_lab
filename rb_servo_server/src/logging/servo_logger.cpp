@@ -120,6 +120,12 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_follower_converged"
        << ',' << side << "_follower_stall"
        << ',' << side << "_follower_corner"
+       << ',' << side << "_follower_output_smd_active"
+       << ',' << side << "_follower_output_smd_lag_m"
+       << ',' << side << "_follower_output_smd_lag_rad"
+       << ',' << side << "_follower_prefilter_stand_x_m"
+       << ',' << side << "_follower_prefilter_stand_y_m"
+       << ',' << side << "_follower_prefilter_stand_z_m"
        << ',' << side << "_follower_divergence_pos_m"
        << ',' << side << "_follower_divergence_ang_rad"
        << ',' << side << "_follower_projection_error_m"
@@ -374,6 +380,7 @@ void writeForceTelemetryHeader(std::ostream& os, const char* side) {
        << ',' << side << "_force_control_measured_normal_force_n"
        << ',' << side << "_force_control_fast_normal_force_n"
        << ',' << side << "_force_control_fast_force_norm_n"
+       << ',' << side << "_force_control_fast_force_rate_n_per_ms"
        << ',' << side << "_force_control_fast_torque_norm_nm"
        << ',' << side << "_force_control_contact_threshold_exceeded"
        << ',' << side << "_force_control_hard_limit_threshold_exceeded"
@@ -708,6 +715,7 @@ void writeForceTelemetryColumns(
        << ',' << control.measured_force_n
        << ',' << control.fast_normal_force_n
        << ',' << control.fast_force_norm_n
+       << ',' << control.fast_force_rate_n_per_ms
        << ',' << control.fast_torque_norm_nm
        << ',' << control.contact_threshold_exceeded
        << ',' << control.hard_limit_threshold_exceeded
@@ -850,7 +858,17 @@ void writeArmProfilingColumns(
        << ',' << telemetry.follower_converged
        << ',' << telemetry.follower_stall
        << ',' << telemetry.follower_corner
-       << ',' << telemetry.follower_divergence_pos_m
+       << ',' << telemetry.follower_output_smd_active
+       << ',' << telemetry.follower_output_smd_lag_m
+       << ',' << telemetry.follower_output_smd_lag_rad;
+    if (telemetry.follower_prefilter_stand.has_value()) {
+        os << ',' << telemetry.follower_prefilter_stand->x
+           << ',' << telemetry.follower_prefilter_stand->y
+           << ',' << telemetry.follower_prefilter_stand->z;
+    } else {
+        os << ",,,";
+    }
+    os << ',' << telemetry.follower_divergence_pos_m
        << ',' << telemetry.follower_divergence_ang_rad
        << ',' << telemetry.follower_projection_error_m
        << ',' << telemetry.follower_projection_error_rad

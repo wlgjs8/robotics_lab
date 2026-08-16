@@ -63,6 +63,14 @@ D435 firmware `5.17.3.10`. Before acceptance, both D405 devices must report
 firmware `5.17.0.10`. Startup fails closed for an older SDK, USB2 connection,
 older D405 firmware, or mismatched D405 firmware pair.
 
+A `required: true` RealSense that enumerates at USB2 aborts startup before any
+`[CAM] status=` line exists, so `make cam-status` reports every configured
+camera's link speed first (`tools/cam_usb_status.py`; reads sysfs, never opens
+the device, safe to run while streaming). It names the hop where a chain drops
+below SuperSpeed — which separates a bad camera cable from a hub whose upstream
+link failed to come up, the latter re-enumerating the whole chain on the
+controller's USB2 bus.
+
 Run native V4L2 first. If it reproduces USB `-71`/disconnect after the version
 alignment, apply the D405-only autosuspend rule documented in
 `camera_server/docs/docker_deployment.md` and repeat. Use

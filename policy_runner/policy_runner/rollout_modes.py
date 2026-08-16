@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
@@ -283,6 +284,16 @@ class RolloutSummaryRecorder:
     force_recovery: dict[str, Any] = field(default_factory=dict)
     camera_runtime: dict[str, Any] = field(default_factory=dict)
     inference_diagnostics: dict[str, Any] = field(default_factory=dict)
+    # These three are SUMMARY-ONLY fields (they are read once, by to_dict). Rebuilding them
+    # every control tick cost ~5.7 ms/tick: inference_diagnostics_snapshot() deep-copies a
+    # rolling window of 64 inference events AND takes the lock shared with the inference
+    # thread. The window fills at one event per chunk (~235 ms), i.e. ~15 s -- exactly the
+    # observed ramp from 0.7 ms to 5.7 ms per tick followed by a plateau. That inflated the
+    # loop from 3.2 ms to 8.8 ms, which quantizes the policy step deadline and pinned the
+    # achieved rate near 21 Hz. Refresh on a wall-clock interval instead; to_dict() forces a
+    # final refresh so the written summary is still current.
+    diagnostics_refresh_sec: float = 0.5
+    _diag_next_refresh: float = 0.0
 
     def record_state(self, snapshot: Any) -> None:
         payload = getattr(snapshot, "payload", snapshot)
@@ -311,7 +322,7 @@ class RolloutSummaryRecorder:
         )
         self.physical_motion_expected = physical_motion_expected
 
-    def record_source(self, source: Any) -> None:
+    def record_source(self, source: Any, *, force: bool = False) -> None:
         self.image_decode_count = int(getattr(source, "image_decode_count", self.image_decode_count) or 0)
         self.missing_camera_count = int(
             getattr(source, "missing_camera_count", self.missing_camera_count) or 0
@@ -337,6 +348,10 @@ class RolloutSummaryRecorder:
         self.gripper_dropped_count = int(
             getattr(source, "gripper_dropped_count", self.gripper_dropped_count) or 0
         )
+        now = time.monotonic()
+        if not force and now < self._diag_next_refresh:
+            return
+        self._diag_next_refresh = now + max(0.0, float(self.diagnostics_refresh_sec))
         force_status = getattr(source, "force_recovery_status", None)
         if callable(force_status):
             self.force_recovery = dict(force_status())
@@ -377,7 +392,7 @@ class RolloutSummaryRecorder:
 
     def to_dict(self, source: Any | None = None) -> dict[str, Any]:
         if source is not None:
-            self.record_source(source)
+            self.record_source(source, force=True)
         selected_arm = self.selected_arm or _selected_arm_label(self.selected_arms)
         data = {
             **self.policy.report_fields,

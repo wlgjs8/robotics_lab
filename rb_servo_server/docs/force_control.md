@@ -9,8 +9,8 @@ loading policy increments and adds a bounded SE(3) compliance correction.
 
 The controller-simulation config remains inert. After the 2026-07-12 positive
 X/Y/Z frame capture, clean post-fix repeat, and roll/pitch/yaw
-direction/recenter captures, the tracked physical-real config exposes a
-supervised six-axis Hold compliance gate:
+direction/recenter captures, the tracked physical-real config now exposes the
+2026-07-24 translation-only reflex profile:
 
 ```yaml
 force_control:
@@ -23,22 +23,22 @@ force_control:
     enable: true
     surface_source: none
     compliance_frame: tcp_origin
-    compliance_axes: [true, true, true, true, true, true]
+    compliance_axes: [true, true, true, false, false, false]
   right:
     enable: true
     surface_source: none
     compliance_frame: tcp_origin
-    compliance_axes: [true, true, true, true, true, true]
+    compliance_axes: [true, true, true, false, false, false]
 ```
 
 The physical acceptance profile is managed directly in `stack_real.yaml`, one
-reviewed setting at a time. In this gate all three translations and rotations
-can modify a fixed Hold target. Roll/pitch/yaw share a 0.10 Nm deadband,
-3 Nm/rad stiffness, 1.55 Nms/rad damping, and 0.2 virtual mass. Both geometric floor
-constraints are disabled by explicit operator decision, so neither the TCP nor
-gripper-tip floor backstop is present. The implementation is not safety-rated
-and does not replace E-stop, lease/deadman, tracking, collision, ROI, or final
-joint safety checks.
+reviewed setting at a time. All three translations can modify a fixed Hold or
+policy equilibrium only after a hard-limit reflex; rotations retain their
+characterized parameters but their compliance axes are disabled. Both
+geometric floor constraints are disabled by explicit operator decision, so
+neither the TCP nor gripper-tip floor backstop is present. The implementation
+is not safety-rated and does not replace E-stop, lease/deadman, tracking,
+collision, ROI, or final joint safety checks.
 
 ## Installed sensor frame
 
@@ -488,6 +488,10 @@ force_control:
     hard_normal_force_n: 15.0
     hard_force_norm_n: 20.0
     hard_torque_norm_nm: 3.0
+    # Disabled by default. When positive, the resultant fast-force rise rate
+    # is an additional hard-limit threshold once force reaches the arming floor.
+    hard_limit_rate_n_per_ms: 0.0
+    hard_limit_rate_floor_n: 10.0
     debounce_samples: 3
     hard_limit_debounce_samples: 5
     release_dwell_sec: 0.1
@@ -509,20 +513,85 @@ force_control:
   virtual_mass: [2.0, 2.0, 2.0, 0.2, 0.2, 0.2]
   damping: [26.0, 26.0, 26.0, 2.8, 2.8, 2.8]
   stiffness: [80.0, 80.0, 80.0, 8.0, 8.0, 8.0]
+  # Released-state offset bleed for zero-stiffness axes (only meaningful where
+  # stiffness is 0; rejected if both are set on one axis). While the axis
+  # block is fully released (inside the wrench deadband), a K=0 axis recenters
+  # its residual offset with this spring (tau ~= damping / bleed); any
+  # re-contact re-loads the block and stops the bleed the same tick. Prevents
+  # the K=0 offset ratchet across repeated contacts of a hovering policy
+  # (2026-07-22 servo_log_20260722_172914: offset -7 -> -22 -> -30 mm cap,
+  # third press 31.6 N ExternalForceLimit). 0 = off. The bleed runs only
+  # while the compliance equilibrium follows a live policy target
+  # (ForceControlCommand.allow_release_bleed): on Hold the escaped offset is
+  # kept, because draining toward a static in-surface hold anchor re-creates
+  # the contact in a perpetual bounce (2026-07-23 14:20 Hold oscillation).
+  release_bleed_stiffness: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   wrench_deadband: [1.5, 1.5, 1.5, 0.25, 0.25, 0.25]
   blockwise_release_recenter: false
+  # Hard-limit policy. "latch" (default): the debounced hard force/torque
+  # limit faults and freezes motion. "retreat": run a bounded retreat episode
+  # instead — a virtual wrench of retreat_virtual_force_n along the measured
+  # press direction drives the admittance offset away from the contact until
+  # the TCP escapes retreat_distance_m with the force back under the hard
+  # threshold; policy streaming and inference continue (state: "retreating").
+  # The latch remains the fail-closed backstop: retreat that cannot unload
+  # within retreat_timeout_sec (wedged), a torque-only trigger with no escape
+  # direction, the scalar contact_force episode, or more than
+  # retreat_max_attempts episodes per retreat_attempt_window_sec (0 =
+  # unlimited) still latch. Requires operating_mode cartesian_admittance;
+  # retreat_distance_m must fit inside max_pos_offset_m.
+  hard_limit_policy: latch
+  retreat_distance_m: 0.010
+  retreat_virtual_force_n: 20.0
+  retreat_timeout_sec: 1.0
+  retreat_max_attempts: 0
+  retreat_attempt_window_sec: 10.0
   max_pos_offset_m: 0.02
   max_rot_offset_rad: 0.08
   max_linear_velocity_m_s: 0.03
   max_angular_velocity_rad_s: 0.15
 ```
 
-The tracked responsive hand-guiding profile begins responding outside 1.5 N or
-0.25 Nm, allows 20 mm / 0.08 rad compliance travel, and uses lower virtual
-mass with near-critical damping. Its faster motion envelope is 0.03 m/s and
-0.15 rad/s with 0.25 m/s² / 1.5 rad/s² acceleration and 2.0 m/s³ /
-10 rad/s³ jerk. These are compliance limits, not hard-contact thresholds; the
-40 N normal, 45 N resultant, and 7 Nm hard guards remain unchanged.
+The tracked physical-real profile is reflex-only as of 2026-07-24. Its
+translation `wrench_deadband` is 20 N and `force_limit_n` is zero, so ordinary
+sub-reflex policy actions receive no continuous admittance response, Layer-3
+proportional backoff, or Layer-4 loading projection. Rotation retains the
+0.10 Nm deadband but rotational compliance axes remain disabled. As of the
+2026-07-24 pure-reflex decision the hard thresholds are 10 N normal, 12 N
+resultant, and 7 Nm torque: any debounced contact at/above 10 N triggers the
+retreat backoff and nothing below it moves the arm. (The trained bolt-pick
+press of ~23.9 N also triggers the reflex — an accepted trade while the
+policy is iterated; slam impacts formerly peaking 47-119 N are cut off near
+10-15 N.)
+
+The rate trigger is retired in this profile (`hard_limit_rate_n_per_ms: 0.0`)
+because the 10 N absolute threshold sits below every slam trajectory. The
+mechanism remains available: the server differentiates
+`fast_force_norm_n` only when `freshness_advanced` is true, using the actual
+backend host-time delta between those fresh samples rather than the 500 Hz
+servo period. The rate condition is:
+
+```text
+fast_force_norm_n >= hard_limit_rate_floor_n
+and fast_force_rate_n_per_ms >= hard_limit_rate_n_per_ms
+```
+
+It is OR-ed with the normal/resultant/torque hard thresholds before the shared
+fresh-sample debounce, so the configured three-sample debounce applies
+uniformly. A zero rate threshold disables this trigger; configuration rejects
+negative/non-finite values and requires a positive floor when the rate is
+enabled. The payload-identification pre-tare hard-limit path intentionally
+retains only the absolute force/torque thresholds.
+
+The same tracked profile uses a 20 mm retreat inside the 30 mm compliance
+offset cap, unlimited retreat attempts, and the base 0.06 m/s translation
+envelope. At a roughly 10-15 N measured trip, the 20 N virtual retreat
+wrench leaves roughly 10-15 N of controller error after the 20 N deadband,
+and the episode-scoped envelope boost carries the escape. The
+base-envelope retreat reaches 20 mm in about 0.4 s, below the unchanged 1.0 s
+timeout. The active `delta_preview` actual-lead check removes the committed
+compliance offset before enforcing its 35 mm budget, so this retreat does not
+consume that follower lead budget.
 
 Each active arm must also enable its F/T pipeline. Threshold ordering is
 validated as `target < release < enter < hard_normal`, with
@@ -587,7 +656,8 @@ offset/velocity/acceleration and policy deltas are retained for log-schema
 compatibility; their components follow `compliance_frame` when that selector is
 not `surface`.
 Monitor telemetry also publishes `fast_normal_force_n`, `fast_force_norm_n`,
-`fast_torque_norm_nm`, `contact_threshold_exceeded`, and
+`fast_force_rate_n_per_ms`, `fast_torque_norm_nm`,
+`contact_threshold_exceeded`, and
 `hard_limit_threshold_exceeded`, `hard_limit_sample_count`, and
 `hard_limit_exceeded`. The threshold flag is the raw current-sample result;
 only consecutive fresh F/T samples advance the count, and the debounced flag

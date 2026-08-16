@@ -289,14 +289,21 @@ def run(
 
     def _finish_tick(snapshot: StateSnapshot, now_value: float) -> int | None:
         action_source_name = str(getattr(source, "name", config.action_source))
+        _t = monotonic_fn() if _prof.on else 0.0
         recording_supervisor.record_frame(
             snapshot,
             action_packet=last_record_packet,
             action_host_time_ns=last_record_packet_time_ns,
             action_seq=last_record_packet_seq,
         )
+        if _prof.on:
+            _prof.add("record_frame", monotonic_fn() - _t)
+            _t = monotonic_fn()
         recording_supervisor.stamp_snapshot(snapshot)
         arm_init_override.stamp_snapshot(snapshot)
+        if _prof.on:
+            _prof.add("stamp2", monotonic_fn() - _t)
+            _t = monotonic_fn()
         recording_supervisor.publish_status(
             now_monotonic=now_value,
             arm_init=arm_init_override.status_block(),
@@ -307,6 +314,8 @@ def run(
             force_recovery=_force_recovery_status(source),
             camera_runtime=_camera_runtime_status(source),
         )
+        if _prof.on:
+            _prof.add("publish_status", monotonic_fn() - _t)
         abort_reason = _terminal_abort_reason(source)
         if abort_reason is not None:
             label = "camera_abort" if abort_reason == "camera_stale_timeout" else "force_recovery_abort"
@@ -316,7 +325,10 @@ def run(
         if completion_reason is not None:
             print(f"policy_runner completed: {completion_reason}", file=stderr)
             return 0
+        _ts = monotonic_fn() if _prof.on else 0.0
         sleep_fn(period)
+        if _prof.on:
+            _prof.add("sleep", monotonic_fn() - _ts)
         return None
     _capture = TeleopCaptureLogger()
 
@@ -353,10 +365,102 @@ def run(
             drop_reason=drop_reason,
         )
 
+    # Tick profiler (FLOW_INFER_TICK_PROFILE=1; telemetry only, off by default).
+    #
+    # Why: with policy_dt = 33.4 ms (SPEED_SCALE=1.0) the rollout only achieved a ~45 ms
+    # step period, while the MINIMUM observed step was exactly 33.4 ms -- so the loop can
+    # reach 30 Hz but usually misses the deadline. Cameras (29.7 fps, bundle age 21 ms) and
+    # inference (94 ms of a 235 ms budget) were both ruled out, which leaves this Python
+    # tick. _step_deadline is reset from the CURRENT time, so lateness is absorbed rather
+    # than caught up: the achieved rate silently settles at whatever the tick can sustain.
+    # This names the phase responsible instead of guessing.
+    class _TickProfile:
+        __slots__ = ("on", "t_prev", "acc", "n", "last_report", "worst", "cur", "spike_sec")
+
+        def __init__(self) -> None:
+            self.on = os.environ.get("FLOW_INFER_TICK_PROFILE", "0") == "1"
+            self.t_prev = None
+            self.acc: dict[str, float] = {}
+            self.n = 0
+            self.last_report = None
+            self.worst: dict[str, float] = {}
+            # Per-tick phase durations, dumped immediately when one tick blows
+            # past the spike threshold. The 5 s aggregate above can only say
+            # WHICH phase held the worst single tick; this says which phases the
+            # offending tick itself spent its time in (the 60-150 ms loop
+            # freezes observed 2026-08-14 skip a chunk and stall the arm, and
+            # arrive rarely enough that the aggregate hides them).
+            self.cur: dict[str, float] = {}
+            # 50 ms: the 20260814_145123 run had two 67-76 ms loop stalls that each
+            # slipped a policy step and cost a hold tick, sitting just under the
+            # original 80 ms threshold.
+            self.spike_sec = float(os.environ.get("FLOW_INFER_TICK_SPIKE_MS", "50")) / 1000.0
+
+        def tick(self, t: float) -> None:
+            if not self.on:
+                return
+            if self.t_prev is not None:
+                total = t - self.t_prev
+                self.add("TOTAL", total)
+                self.n += 1
+                if total >= self.spike_sec:
+                    named = sum(v for k, v in self.cur.items() if k != "TOTAL")
+                    parts = " ".join(
+                        f"{k}={v * 1000:.1f}"
+                        for k, v in sorted(self.cur.items(), key=lambda kv: -kv[1])
+                        if k != "TOTAL"
+                    )
+                    print(
+                        f"[tick-spike] dt={total * 1000:.0f}ms {parts} "
+                        f"OTHER={(total - named) * 1000:.1f}",
+                        file=stderr,
+                        flush=True,
+                    )
+            self.cur = {}
+            self.t_prev = t
+            if self.last_report is None:
+                self.last_report = t
+            elif t - self.last_report >= 5.0 and self.n:
+                # "other" = the part of the tick no timer covers. Chasing it is the point:
+                # the first profiling pass had TOTAL=9.0 ms with every named phase <=0.7 ms.
+                total = self.acc.get("TOTAL", 0.0)
+                named = sum(v for k, v in self.acc.items() if k != "TOTAL")
+                parts = " ".join(
+                    f"{k}={self.acc[k] / self.n * 1000:.2f}/{self.worst[k] * 1000:.0f}"
+                    for k in sorted(self.acc, key=lambda k: -self.acc[k])
+                )
+                other = (total - named) / self.n * 1000
+                print(
+                    f"[tick-profile] n={self.n} mean/max ms  {parts} OTHER={other:.2f}",
+                    file=stderr,
+                    flush=True,
+                )
+                self.acc.clear()
+                self.worst.clear()
+                self.n = 0
+                self.last_report = t
+
+        def add(self, key: str, dt: float) -> None:
+            if not self.on:
+                return
+            self.acc[key] = self.acc.get(key, 0.0) + dt
+            if key != "TOTAL":
+                self.cur[key] = self.cur.get(key, 0.0) + dt
+            if dt > self.worst.get(key, 0.0):
+                self.worst[key] = dt
+
+    _prof = _TickProfile()
+    if _prof.on:
+        print("[tick-profile] enabled (mean/max ms per phase, every 5 s)", file=stderr, flush=True)
+
     try:
         while True:
+            _tick_t0 = monotonic_fn() if _prof.on else 0.0
             snapshot = state_client.latest
             now = monotonic_fn()
+            _prof.tick(_tick_t0 if _prof.on else now)
+            if _prof.on:
+                _prof.add("snapshot", now - _tick_t0)
             if snapshot is None:
                 if now >= startup_deadline:
                     print(
@@ -381,6 +485,7 @@ def run(
                     suffix = f" {' '.join(fields)}" if fields else ""
                     print(f"policy_runner fault_latch_abort:{suffix}", file=stderr)
                     return FAULT_LATCH_EXIT_CODE
+            _t0 = monotonic_fn() if _prof.on else 0.0
             action_source_name = str(getattr(source, "name", config.action_source))
             drain_payloads = getattr(recording_supervisor, "drain_control_payloads", None)
             dispatch_payloads = getattr(recording_supervisor, "dispatch_control_payloads", None)
@@ -405,11 +510,22 @@ def run(
             recording_supervisor.stamp_snapshot(snapshot)
             arm_init_override.stamp_snapshot(snapshot)
             _clear_tick_record_packet()
+            if _prof.on:
+                _prof.add("pre_intent", monotonic_fn() - _t0)
+            _t0 = monotonic_fn() if _prof.on else 0.0
             if state_sink is not None:
                 state_sink(snapshot)
+            if _prof.on:
+                _prof.add("state_sink", monotonic_fn() - _t0)
+            _t0 = monotonic_fn() if _prof.on else 0.0
             if rollout_recorder is not None:
                 rollout_recorder.record_state(snapshot)
+            if _prof.on:
+                _prof.add("record_state", monotonic_fn() - _t0)
+            _t0 = monotonic_fn() if _prof.on else 0.0
             intent = source.next_intent(snapshot, now)
+            if _prof.on:
+                _prof.add("next_intent", monotonic_fn() - _t0)
             intent = arm_init_override.compose_intent(intent)
             source_requirements = getattr(source, "requirements", None)
             requirements = (
@@ -417,7 +533,10 @@ def run(
                 if intent_uses_source_requirements(intent, arm_init_override)
                 else None
             )
+            _t0 = monotonic_fn() if _prof.on else 0.0
             decision = safety_gate.evaluate(snapshot, intent, requirements, now)
+            if _prof.on:
+                _prof.add("safety_gate", monotonic_fn() - _t0)
             _capture.log(now, source, intent, decision.allowed, phase="pre")
             if rollout_recorder is not None:
                 rollout_recorder.record_decision(decision)
@@ -576,7 +695,10 @@ def run(
                         if abort_code is not None:
                             return abort_code
                         continue
+                _t0 = monotonic_fn() if _prof.on else 0.0
                 seq = command_client.send(intent)
+                if _prof.on:
+                    _prof.add("cmd_send", monotonic_fn() - _t0)
                 _remember_sent_intent(intent, seq)
                 _log_final_and_capture(
                     intent,
@@ -1071,6 +1193,14 @@ def _main_with_subcommands(argv: list[str]) -> int:
         help="Path for rollout_summary JSON output.",
     )
     flow_infer.add_argument(
+        "--rollout-step-log",
+        default=None,
+        help=(
+            "Optional per-policy-step JSONL telemetry path. File I/O runs on a "
+            "best-effort background writer and is disabled on logging failure."
+        ),
+    )
+    flow_infer.add_argument(
         "--episodes-dir",
         default=None,
         help="HDF5 episode file or directory for rollout-mode offline_eval.",
@@ -1442,17 +1572,17 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--gripper-close-bias-left",
         type=float,
-        default=2.0,
+        default=4.0,
         help="LEFT-arm ABSOLUTE close-bias override (opening percent). Wins over --gripper-close-bias. "
-             "When unset, falls back to --gripper-close-bias, then to the left default (2.0). "
+             "When unset, falls back to --gripper-close-bias, then to the left default (4.0). "
              "Clamped to [0,100]; no effect in delta/binary mode.",
     )
     flow_infer.add_argument(
         "--gripper-close-bias-right",
         type=float,
-        default=6.0,
+        default=4.0,
         help="RIGHT-arm ABSOLUTE close-bias override (opening percent). Wins over --gripper-close-bias. "
-             "When unset, falls back to --gripper-close-bias, then to the right default (6.0). "
+             "When unset, falls back to --gripper-close-bias, then to the right default (4.0). "
              "Clamped to [0,100]; no effect in delta/binary mode.",
     )
     flow_infer.add_argument(
@@ -1471,8 +1601,52 @@ def _main_with_subcommands(argv: list[str]) -> int:
         help="ABSOLUTE close-snap deadzone (opening percent): after mapping, any gripper opening "
              "STRICTLY BELOW this snaps to 0 (fully closed), so small policy jitter near the closed "
              "end does not leave the jaw cracked open. E.g. 10 -> any commanded opening <10%% closes "
-             "fully. Clamped to [0,100]; 0 = off (DEFAULT). Absolute mode only (no effect in delta; "
-             "binary already snaps to --gripper-close-percent).",
+             "fully. Clamped to [0,100]; DEFAULT 15.0, and 0 turns the snap OFF. Turning it off is "
+             "load-bearing, not cosmetic: the deployed pi05 checkpoints floor their gripper channel "
+             "around 2-12%% opening and never command a full close on their own, so --gripper-close-"
+             "snap-percent 0 leaves the jaw cracked open at every grasp and NO pick can succeed "
+             "(measured 2026-07-30: 0/8 snap-off runs closed past 2.2%%, vs 5 successful picks with "
+             "the default). Absolute mode only (no effect in delta; binary already snaps to "
+             "--gripper-close-percent).",
+    )
+    flow_infer.add_argument(
+        "--gripper-command-deadband-percent",
+        type=float,
+        default=0.0,
+        help="Re-hold the last SENT gripper command until the target moves more than this "
+             "(opening percent). The gripper channel is otherwise dispatched every policy "
+             "step with no rate limit or hysteresis, so model jitter re-targets the jaw at "
+             "30 Hz -- measured 2026-07-31 on the right arm at 4.8-9.1 command changes per "
+             "SECOND, mean dwell 2.3-3.8 steps, 28-50%% of them reversing direction, which "
+             "is audible as buzz. Offline on four recorded runs, 5%% cut the churn ~3x "
+             "(9.1 -> 3.0 changes/s) with ZERO added lag, 1.4-1.7%% mean tracking error, and "
+             "no change to any full-close event. The fully-closed (0%%) state is exempt in "
+             "both directions so a grasp commitment / release is never suppressed. "
+             "0 = off (DEFAULT). Absolute and binary modes both honour it.",
+    )
+    flow_infer.add_argument(
+        "--chunk-knot-filter-hz",
+        type=float,
+        default=0.0,
+        help="Zero-phase FIR low-pass cutoff (Hz) applied to the chunk's per-step POSE "
+             "deltas before execution and before the overlay/follower feed. The gripper "
+             "channel is NOT filtered. 0 = off (DEFAULT). "
+             "Measured 2026-07-31 on the vibrating left arm: the policy's own 30 Hz action "
+             "stream carries 26.5%% of its energy at 5-10 Hz, against 2.3%% for a human UMI "
+             "teleop run doing the same pick-and-place on the same stand at higher speed; "
+             "the stand's ~13/17 Hz modes turn that shoulder into the vibration. Offline "
+             "(tools/follower_replay), 7 taps @5 Hz gave 5-10 Hz 27.4->18.5%%, 13-19 Hz "
+             "4.3->1.4%%, path deviation p95 2.8 mm, descent travel preserved to 1%%. "
+             "Zero phase because the chunk carries H=24 rows while ~5 execute, so the "
+             "forward half of the kernel reads real future knots.",
+    )
+    flow_infer.add_argument(
+        "--chunk-knot-filter-taps",
+        type=int,
+        default=7,
+        help="FIR length for --chunk-knot-filter-hz (odd, >=3). Longer = sharper stopband "
+             "but more of the chunk consumed as filter context. 7 is the measured "
+             "cost/benefit knee; 11 @3 Hz reached 5-10 Hz 10.0%% at p95 4.8 mm deviation.",
     )
     flow_infer.add_argument(
         "--rtc",
@@ -2460,6 +2634,12 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 )
             source.runner_role = "flow_infer"
             source.name = "flow_infer"
+            source.configure_rollout_step_log(args.rollout_step_log)
+            if args.rollout_step_log:
+                print(
+                    f"[flow-infer] rollout step telemetry={args.rollout_step_log}",
+                    flush=True,
+                )
             source.configure_force_recovery(config.force_recovery)
             configure_camera_runtime = getattr(source, "configure_camera_runtime", None)
             if callable(configure_camera_runtime):
@@ -2593,6 +2773,29 @@ def _main_with_subcommands(argv: list[str]) -> int:
             source.gripper_close_snap_percent = float(
                 getattr(args, "gripper_close_snap_percent", 0.0) or 0.0
             )
+            source.gripper_command_deadband_percent = float(
+                getattr(args, "gripper_command_deadband_percent", 0.0) or 0.0
+            )
+            _knot_hz = float(getattr(args, "chunk_knot_filter_hz", 0.0) or 0.0)
+            if _knot_hz > 0.0:
+                from scipy.signal import firwin
+                _taps = int(getattr(args, "chunk_knot_filter_taps", 7) or 7)
+                if _taps < 3 or _taps % 2 == 0:
+                    raise ValueError("--chunk-knot-filter-taps must be odd and >= 3")
+                _knot_fs = 1.0 / float(policy_dt_sec)
+                if not (_knot_hz < 0.5 * _knot_fs):
+                    raise ValueError(
+                        f"--chunk-knot-filter-hz {_knot_hz:g} must be below the policy "
+                        f"Nyquist {0.5 * _knot_fs:.2f} Hz (policy_dt {policy_dt_sec:.4f}s)"
+                    )
+                source._chunk_knot_filter_taps = firwin(
+                    _taps, _knot_hz, fs=_knot_fs, window="hamming"
+                )
+                print(
+                    f"[flow-infer] chunk knot filter: {_taps}-tap zero-phase FIR @"
+                    f"{_knot_hz:g}Hz (policy {_knot_fs:.1f}Hz) on pose deltas; gripper unfiltered",
+                    flush=True,
+                )
             # Per-axis rotation gate: keep only the selected rx/ry/rz axes of the
             # per-arm rotation action; disabled axes are zeroed so the arm holds
             # that orientation component (translation + gripper unchanged). Applies
@@ -2617,8 +2820,14 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 _lb = float(getattr(source, "gripper_close_bias_left", 0.0) or 0.0)
                 _rb = float(getattr(source, "gripper_close_bias_right", 0.0) or 0.0)
                 detail = f", close-bias L={_lb:g}%/R={_rb:g}%" if (_lb or _rb) else ""
+                # Announce close-snap in BOTH states. It used to print only when
+                # non-zero, so `--gripper-close-snap-percent 0` looked identical to
+                # the default in the banner while silently making every grasp
+                # impossible (the checkpoints never command a full close on their own).
                 if source.gripper_close_snap_percent:
                     detail += f", close-snap<{source.gripper_close_snap_percent:g}%"
+                else:
+                    detail += ", close-snap OFF (policy must command full close itself)"
             else:
                 detail = ""
             print(

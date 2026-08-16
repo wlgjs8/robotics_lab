@@ -237,6 +237,14 @@ void CameraManager::supervise_camera(CameraRuntime& runtime) {
         const uint64_t last_frame_ns = runtime.last_frame_time_ns.load(std::memory_order_relaxed);
         if (last_frame_ns != 0 && !reported_connected) {
           const bool reconnected = recovery_pending;
+          size_t reset_bundle_groups = 0;
+          if (reconnected) {
+            // The first frame proves that a new device pipeline is producing
+            // data. Reset affected synchronizers before declaring the camera
+            // connected so a restarted master frame counter cannot leave a
+            // per-camera or policy bundle permanently stalled.
+            reset_bundle_groups = synchronizer_.reset_camera_generation(runtime.cfg.name);
+          }
           reported_connected = true;
           {
             std::lock_guard<std::mutex> lk(mu_);
@@ -253,7 +261,9 @@ void CameraManager::supervise_camera(CameraRuntime& runtime) {
           retry = false;
           recovery_pending = false;
           std::cerr << "[CAM] streaming " << runtime.cfg.name
-                    << (reconnected ? " (reconnected)" : "") << '\n';
+                    << (reconnected ? " (reconnected)" : "");
+          if (reconnected) std::cerr << " reset_bundle_groups=" << reset_bundle_groups;
+          std::cerr << '\n';
         }
         const uint64_t reference_ns = last_frame_ns == 0 ? start_ns : last_frame_ns;
         const uint64_t current_ns = now_ns(cfg_.server.clock);
@@ -319,6 +329,9 @@ void CameraManager::handle_frame(CapturedFrame&& frame) {
     auto meta = shm_.write_frame(frame.camera_name, frame.serial, frame.stream, frame.frame_number,
                                  frame.host_arrival_time_ns, frame.sensor_timestamp_ns,
                                  frame.realsense_timestamp_ms, frame.stride_bytes, data, size_bytes);
+    meta.actual_exposure_us = frame.actual_exposure_us;
+    meta.gain_level = frame.gain_level;
+    meta.auto_exposure = frame.auto_exposure;
     if (recorder_.enabled()) {
       bool accepted = recorder_.enqueue_copy(meta, data, size_bytes);
       if (!accepted) {
@@ -405,6 +418,17 @@ HealthSnapshot CameraManager::snapshot() const {
     h.camera_usb_type[cam.name] = device.usb_type;
   }
   h.stream_stats = stats_;
+  // fps_window_hz is only recomputed when a frame arrives, so a stalled stream
+  // would report its last (healthy-looking) rate forever. Zero it once a full
+  // fps window has elapsed with no frame; last_frame_time_ns and host_time_ns
+  // share cfg_.server.clock (see apply_health_thresholds age check).
+  const uint64_t fps_window_ns = static_cast<uint64_t>(cfg_.health.fps_window_sec * 1e9);
+  for (auto& [stream_key, st] : h.stream_stats) {
+    if (st.last_frame_time_ns != 0 && h.host_time_ns > st.last_frame_time_ns &&
+        h.host_time_ns - st.last_frame_time_ns > fps_window_ns) {
+      st.fps_window_hz = 0.0;
+    }
+  }
   h.bundle_groups = synchronizer_.stats();
   const auto compat = synchronizer_.compatibility_stats();
   h.bundle_seq = compat.bundle_seq;

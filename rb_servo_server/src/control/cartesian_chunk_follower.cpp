@@ -151,7 +151,27 @@ void CartesianChunkFollower::submitDeltaFrame(const ChunkFrame& frame,
   ChunkFrame integrated = frame;
   integrated.pose.clear();
   integrated.pose.reserve(frame.delta.size());
-  Pose6D cursor = active_ ? last_pose_ : current_pose;
+  // Anchor the integration at the CHAINED PLAN STATE, not at the pose we happen to be
+  // emitting right now.
+  //
+  // ChunkFollowerSegment::solve() advances p0_/v0_/a0_ to the END of the segment it just
+  // solved (chunk_follower_core.hpp:160), while last_pose_ = sampleAt(t_in_seg_) is the
+  // MID-segment sample. A frame can land at any t_in_seg_, so anchoring at last_pose_ made
+  // the first new knot land at  last_pose_ + d, i.e. only
+  //     d - d_prev * (1 - t_in_seg_/seg_dt)
+  // ahead of where the next solve actually starts (core_.p0()). Submitting early in a
+  // segment therefore produced a near-zero — or, when d_prev > d, NEGATIVE — first advance:
+  // a stall/reversal at every chunk swap on a perfectly constant-velocity delta stream,
+  // with no curvature in the input to blame. Measured on hardware as a ~0.70x displacement
+  // notch one row after every swap (outputs/sweep/20260729_0840*_fixedstep_command.jsonl,
+  // n~880/row) plus an 11% hold rate on the last executed row, i.e. visible juddering that
+  // blurs the wrist cameras the policy is conditioned on.
+  //
+  // core_.p0() is exactly where the next solve begins, so knot[0] = p0 (+) d is a true
+  // one-step advance regardless of submit phase. Both anchors already carry the
+  // loading-projection shift (buildSample adds contact_shift_ before the solve), so the
+  // debt-clearing below is unaffected.
+  Pose6D cursor = active_ ? tangentPose(core_.p0()) : current_pose;
   for (const Vec6& d : frame.delta) {
     Pose6D delta;
     delta.x = d.x; delta.y = d.y; delta.z = d.z;
@@ -191,6 +211,14 @@ Pose6D CartesianChunkFollower::tick(double dt_tick) {
   }
   last_pose_ = sampleAt(std::min(t_in_seg_, seg_dt_));
   return last_pose_;
+}
+
+std::optional<Vec6> CartesianChunkFollower::currentVelocity() const {
+  if (!active_ || hold_paused_ || !have_segment_ || !core_.hasState()) {
+    return std::nullopt;
+  }
+  const auto& v = core_.v0();
+  return Vec6{v[0], v[1], v[2], v[3], v[4], v[5]};
 }
 
 void CartesianChunkFollower::stepToNextSegment() {
@@ -335,13 +363,25 @@ BoundarySample<6> CartesianChunkFollower::buildSample(std::size_t k) const {
   }
 
   const double dt = seg_dt_;
+  // At the window HEAD there is no backward neighbour: flankIndex(k,-1,n) clamps to k itself, so a
+  // naive d_k would be 0 -- which halves the central-difference vf, injects a full-magnitude spurious
+  // af (+d_kp1/dt^2), and zeroes sign_dk so the corner test can never fire. ChunkWindow::activate()
+  // rewinds the cursor to the head on EVERY submitted frame, so that notch landed on row 0 of every
+  // chunk, i.e. at the replan rate. Measured on logs/servo_log_20260724_160210.csv, emitted follower
+  // speed by consumed row index (right arm): 20.4 / 27.6 / 42.4 / 47.9 / 45.9 mm/s -- row0 was 0.43x
+  // the steady state, and with CHUNK_EXECUTE_STEPS=5 three of five executed rows were still ramping
+  // (~23% average speed loss plus a periodic lurch). Fall back to the plain FORWARD difference and
+  // claim no curvature; sign_dk then matches sign_dkp1, so no phantom corner either.
+  // The TAIL clamp (d_kp1 == 0 at k == n-1) is deliberately left as-is: decelerating into the last
+  // published knot is the desired ring-down behaviour when the window runs dry.
+  const bool has_prev = k > 0;
   BoundarySample<6> s;
   for (int a = 0; a < 6; ++a) {
-    const double d_k = vk[a] - vm1[a];
     const double d_kp1 = vp1[a] - vk[a];
+    const double d_k = has_prev ? (vk[a] - vm1[a]) : d_kp1;
     s.pf[a] = vk[a];
     s.vf[a] = (d_k + d_kp1) / (2 * dt);
-    s.af[a] = (d_kp1 - d_k) / (dt * dt);
+    s.af[a] = has_prev ? (d_kp1 - d_k) / (dt * dt) : 0.0;
     const double deadband =
         std::max(0.0, a < 3 ? cfg_.guard.corner_deadband_lin_m
                             : cfg_.guard.corner_deadband_ang_rad);

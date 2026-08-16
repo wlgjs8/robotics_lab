@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <cmath>
@@ -157,6 +158,7 @@ bool testRepositoryConfigsParse() {
         bool has_umi = false;
         bool has_flow = false;
         const rb_servo::TcpPoseTargetProfileConfig* flow_profile = nullptr;
+        const rb_servo::TcpPoseTargetProfileConfig* umi_profile = nullptr;
         for (const auto& profile : stack_real.cartesian_control.tcp_pose_target_profiles) {
             has_spacemouse = has_spacemouse || profile.name == "spacemouse_precise";
             has_umi = has_umi || profile.name == "umi_large_smooth";
@@ -164,11 +166,21 @@ bool testRepositoryConfigsParse() {
             if (profile.name == "flow_infer_smooth") {
                 flow_profile = &profile;
             }
+            if (profile.name == "umi_large_smooth") {
+                umi_profile = &profile;
+            }
         }
         RB_CHECK(has_spacemouse);
         RB_CHECK(has_umi);
         RB_CHECK(has_flow);
         RB_CHECK(flow_profile != nullptr);
+        RB_CHECK(umi_profile != nullptr);
+        // UMI teleop singularity guard. The ramp onset (full/floor) is the part that was
+        // measured to throttle normal motion, so it is pinned; scale_min was lowered
+        // 0.12 -> 0.02 on 2026-08-14 after the left-arm lurch (see stack_real.yaml).
+        RB_CHECK(near(umi_profile->pose_track_smd.singularity_scale_full_sigma, 0.12));
+        RB_CHECK(near(umi_profile->pose_track_smd.singularity_scale_floor_sigma, 0.05));
+        RB_CHECK(near(umi_profile->pose_track_smd.singularity_scale_min, 0.02));
         RB_CHECK(near(flow_profile->pose_track_smd.natural_frequency_linear_hz, 1.6));
         RB_CHECK(near(flow_profile->pose_track_smd.natural_frequency_angular_hz, 1.6));
         RB_CHECK(near(flow_profile->pose_track_smd.max_linear_velocity_m_s, 0.50));
@@ -182,8 +194,11 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(flow_profile->pose_track_smd.singularity_scale_min, 0.12));
         RB_CHECK(near(flow_profile->max_smd_goal_lead_m, 0.080));
         RB_CHECK(near(flow_profile->max_smd_goal_lead_rad, 0.35));
-        RB_CHECK(flow_profile->ruckig_follower.consume_steps == 12);
-        RB_CHECK(flow_profile->ruckig_follower.reserve_steps == 2);
+        // 2026-07-24 operator tuning during bolt-pick iterations: 12 -> 5.
+        RB_CHECK(flow_profile->ruckig_follower.consume_steps == 5);
+        // 2026-07-23 operator tuning: reserve 2 -> 4 during the bolt-pick
+        // rollout iterations.
+        RB_CHECK(flow_profile->ruckig_follower.reserve_steps == 4);
         RB_CHECK(near(flow_profile->ruckig_follower.hold_bounce_resume_sec, 0.5));
         // 2026-07-18 SPEED_SCALE=1.0 posture: projection fidelity warns (the
         // model's chunks are followed), lead budgets scaled to the full-speed
@@ -293,10 +308,14 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(!stack_real.safety.user_floor_constraint.enable);
         const auto& left_force = stack_real.force_control.left;
         const auto& right_force = stack_real.force_control.right;
-        // 2026-07-18: supervised first activation of guarded contact after the
-        // 15:09 full-speed 32 N pick floor spike (see stack_real.yaml note).
-        RB_CHECK(left_force.surface_source == "contact_force");
+        // 2026-07-24 reflex-only posture: floorless Cartesian compliance stays
+        // selected, while force_limit_n=0 disables continuous Layer-3 boost
+        // and Layer-4 policy loading projection.
+        RB_CHECK(left_force.surface_source == "none");
         RB_CHECK(left_force.surface_source == right_force.surface_source);
+        RB_CHECK(near(stack_real.force_control.force_limit_n, 0.0));
+        RB_CHECK(near(stack_real.force_control.backoff_gain_m_s_per_n, 0.02));
+        RB_CHECK(near(stack_real.force_control.backoff_max_velocity_m_s, 0.25));
         RB_CHECK(near(left_force.target_force_n, right_force.target_force_n));
         RB_CHECK(near(left_force.contact_enter_force_n, right_force.contact_enter_force_n));
         RB_CHECK(near(left_force.contact_release_force_n, right_force.contact_release_force_n));
@@ -308,8 +327,29 @@ bool testRepositoryConfigsParse() {
             left_force.contact_release_force_n
         );
         RB_CHECK(near(left_force.force_deadband_n, right_force.force_deadband_n));
-        RB_CHECK(near(left_force.hard_normal_force_n, 30.0));
+        // 2026-07-22 operator decision: 30/35 -> 25/28 N for earlier
+        // protection after a bolt-pick press ran 0.6 -> 28 N in ~20 ms and
+        // latched (servo_log_20260722_140522). Sits above the measured
+        // first-contact transients (9-11 N) but below the 23.88 N
+        // task-contact precedent — deliberate tripwire.
+        // 2026-07-24 pure 10 N reflex: continuous force control retired;
+        // any debounced contact >= 10 N triggers the retreat backoff.
+        RB_CHECK(near(left_force.hard_normal_force_n, 10.0));
         RB_CHECK(near(left_force.hard_normal_force_n, right_force.hard_normal_force_n));
+        // 2026-07-24 servo_log_20260724_*: 2-5 N/ms slams versus task
+        // presses well below 0.5 N/ms; arm only once resultant force is 10 N.
+        // Rate trigger retired with the 10 N absolute threshold (it existed
+        // to fire early while the absolute limit was 25 N).
+        RB_CHECK(near(left_force.hard_limit_rate_n_per_ms, 0.0));
+        RB_CHECK(near(left_force.hard_limit_rate_floor_n, 10.0));
+        RB_CHECK(near(
+            left_force.hard_limit_rate_n_per_ms,
+            right_force.hard_limit_rate_n_per_ms
+        ));
+        RB_CHECK(near(
+            left_force.hard_limit_rate_floor_n,
+            right_force.hard_limit_rate_floor_n
+        ));
         // Translation-only compliance: rotations stay off until the closed-jaw
         // fingertip-centre check passes with a raised torque deadband.
         RB_CHECK(left_force.compliance_axes.x);
@@ -345,8 +385,49 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(!right_force.compliance_axes.yaw);
         RB_CHECK(left_force.compliance_frame == "tcp_origin");
         RB_CHECK(left_force.compliance_frame == right_force.compliance_frame);
-        RB_CHECK(near(left_force.hard_force_norm_n, 35.0));
+        RB_CHECK(near(left_force.hard_force_norm_n, 12.0));
         RB_CHECK(near(left_force.hard_force_norm_n, right_force.hard_force_norm_n));
+        // Released-state offset bleed: K=0 translations drain their residual
+        // offset only while the block is fully released; rotations keep 0
+        // (their 3.0 Nm/rad spring already recenters).
+        // 2026-08-12: 13 -> 26 (tau = 26/26 ~= 1 s). At tau = 2 s the drain was
+        // slower than the policy's re-approach period, so retreats ratcheted
+        // (servo_log_20260812_114302, left arm). The return stays inside the
+        // 60 mm/s and 0.8 m/s^2 response caps and overdamped (zeta = 1.80).
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            RB_CHECK(near(stack_real.force_control.stiffness[axis], 0.0));
+            RB_CHECK(near(
+                stack_real.force_control.release_bleed_stiffness[axis], 26.0));
+        }
+        for (std::size_t axis = 3; axis < 6; ++axis) {
+            RB_CHECK(near(
+                stack_real.force_control.release_bleed_stiffness[axis], 0.0));
+        }
+        // 2026-07-24: double retreat travel and absorb persistent policy
+        // re-approach with unlimited bounded episodes. A timeout without
+        // unloading remains the repeated-policy escalation path.
+        // 2026-07-31: the escape is now FORCE-terminated (retreat_release_force_n);
+        // distance is only the cap. It must stay under the 0.8*max_pos_offset_m
+        // braking guard or it is unreachable -- when distance == cap == 30 mm the
+        // guard at 24 mm always fired first and the distance condition was dead.
+        RB_CHECK(stack_real.force_control.hard_limit_policy == "retreat");
+        RB_CHECK(near(stack_real.force_control.retreat_distance_m, 0.035));
+        RB_CHECK(near(stack_real.force_control.retreat_release_force_n, 3.0));
+        RB_CHECK(near(stack_real.force_control.retreat_virtual_force_n, 20.0));
+        RB_CHECK(near(stack_real.force_control.retreat_timeout_sec, 1.0));
+        RB_CHECK(stack_real.force_control.retreat_max_attempts == 0);
+        RB_CHECK(near(stack_real.force_control.retreat_attempt_window_sec, 10.0));
+        RB_CHECK(
+            stack_real.force_control.retreat_distance_m <
+            0.8 * stack_real.force_control.max_pos_offset_m
+        );
+        // The release target must be a real release condition, not a same-tick
+        // no-op: strictly below the smaller hard trigger on both arms.
+        RB_CHECK(
+            stack_real.force_control.retreat_release_force_n <
+            std::min(left_force.hard_normal_force_n, left_force.hard_force_norm_n)
+        );
+        RB_CHECK(near(stack_real.force_control.max_pos_offset_m, 0.045));
         RB_CHECK(near(left_force.hard_torque_norm_nm, 7.0));
         RB_CHECK(near(left_force.hard_torque_norm_nm, right_force.hard_torque_norm_nm));
         RB_CHECK(left_force.debounce_samples == right_force.debounce_samples);
@@ -379,15 +460,18 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(stack_real.force_control.stiffness[3], 3.0));
         RB_CHECK(near(stack_real.force_control.stiffness[4], 3.0));
         RB_CHECK(near(stack_real.force_control.stiffness[5], 3.0));
-        RB_CHECK(near(stack_real.force_control.wrench_deadband[0], 1.5));
-        RB_CHECK(near(stack_real.force_control.wrench_deadband[2], 1.5));
+        // 2026-07-24 reflex-only translation deadband; rotation values remain.
+        RB_CHECK(near(stack_real.force_control.wrench_deadband[0], 20.0));
+        RB_CHECK(near(stack_real.force_control.wrench_deadband[1], 20.0));
+        RB_CHECK(near(stack_real.force_control.wrench_deadband[2], 20.0));
         RB_CHECK(near(stack_real.force_control.wrench_deadband[3], 0.10));
         RB_CHECK(near(stack_real.force_control.wrench_deadband[4], 0.10));
         RB_CHECK(near(stack_real.force_control.wrench_deadband[5], 0.10));
         RB_CHECK(stack_real.force_control.blockwise_release_recenter);
-        // Offset cap sits under the follower's 20 mm actual-lead budget; the
-        // response caps are the 2026-07-17 contact-tracking raise.
-        RB_CHECK(near(stack_real.force_control.max_pos_offset_m, 0.012));
+        // 2026-07-18 redesign: 30 mm back-off escape headroom (the follower
+        // lead check strips the committed offset, so the lead budget is
+        // unaffected).
+        RB_CHECK(near(stack_real.force_control.max_pos_offset_m, 0.045));
         RB_CHECK(near(stack_real.force_control.max_linear_velocity_m_s, 0.06));
         RB_CHECK(near(stack_real.force_control.max_linear_jerk_m_s3, 8.0));
         RB_CHECK(near(normal_force.damping_n_s_m, 160.0));
@@ -772,6 +856,8 @@ bool testForceControlSchemaAndActivation() {
     RB_CHECK(inactive.force_control.update_rate_hz == 500);
     RB_CHECK(near(inactive.force_control.virtual_mass[2], 5.0));
     RB_CHECK(near(inactive.force_control.max_linear_velocity_m_s, 0.01));
+    RB_CHECK(near(inactive.force_control.left.hard_limit_rate_n_per_ms, 0.0));
+    RB_CHECK(near(inactive.force_control.left.hard_limit_rate_floor_n, 10.0));
     RB_CHECK(inactive.force_torque.source == "rbpodo_eft");
     RB_CHECK(!inactive.force_torque.left.enable);
     RB_CHECK(inactive.force_torque.left.frame_configured);
@@ -859,6 +945,8 @@ bool testForceControlSchemaAndActivation() {
         "    hard_normal_force_n: 20.0\n"
         "    hard_force_norm_n: 30.0\n"
         "    hard_torque_norm_nm: 5.0\n"
+        "    hard_limit_rate_n_per_ms: 1.25\n"
+        "    hard_limit_rate_floor_n: 9.0\n"
         "    debounce_samples: 3\n"
         "    hard_limit_debounce_samples: 4\n"
         "    release_dwell_sec: 0.1\n"
@@ -885,6 +973,10 @@ bool testForceControlSchemaAndActivation() {
     RB_CHECK(monitor_enabled.force_control.left.compliance_frame == "sensor_origin");
     RB_CHECK(near(monitor_enabled.force_control.left.target_force_n, 3.0));
     RB_CHECK(monitor_enabled.force_control.left.hard_limit_debounce_samples == 4);
+    RB_CHECK(near(
+        monitor_enabled.force_control.left.hard_limit_rate_n_per_ms, 1.25));
+    RB_CHECK(near(
+        monitor_enabled.force_control.left.hard_limit_rate_floor_n, 9.0));
     RB_CHECK(near(
         monitor_enabled.force_control.left.release_velocity_threshold_m_s,
         0.003
@@ -920,6 +1012,53 @@ bool testForceControlSchemaAndActivation() {
         loadRejects(invalid_release_velocity_path);
     ::unlink(invalid_release_velocity_path.c_str());
     RB_CHECK(invalid_release_velocity_rejected);
+
+    const std::string negative_hard_rate_path = writeTempConfig(
+        "force-negative-hard-rate",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_control:\n"
+        "  provider: null\n"
+        "  enable: false\n"
+        "  left:\n"
+        "    hard_limit_rate_n_per_ms: -0.1\n"
+    );
+    const bool negative_hard_rate_rejected =
+        loadRejectsContaining(
+            negative_hard_rate_path, "hard_limit_rate_n_per_ms");
+    ::unlink(negative_hard_rate_path.c_str());
+    RB_CHECK(negative_hard_rate_rejected);
+
+    const std::string negative_hard_rate_floor_path = writeTempConfig(
+        "force-negative-hard-rate-floor",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_control:\n"
+        "  provider: null\n"
+        "  enable: false\n"
+        "  left:\n"
+        "    hard_limit_rate_floor_n: -1.0\n"
+    );
+    const bool negative_hard_rate_floor_rejected =
+        loadRejectsContaining(
+            negative_hard_rate_floor_path, "hard_limit_rate_floor_n");
+    ::unlink(negative_hard_rate_floor_path.c_str());
+    RB_CHECK(negative_hard_rate_floor_rejected);
+
+    const std::string enabled_hard_rate_without_floor_path = writeTempConfig(
+        "force-hard-rate-without-floor",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "force_control:\n"
+        "  provider: null\n"
+        "  enable: false\n"
+        "  left:\n"
+        "    hard_limit_rate_n_per_ms: 1.5\n"
+        "    hard_limit_rate_floor_n: 0.0\n"
+    );
+    const bool enabled_hard_rate_without_floor_rejected =
+        loadRejectsContaining(
+            enabled_hard_rate_without_floor_path,
+            "requires a positive hard_limit_rate_floor_n");
+    ::unlink(enabled_hard_rate_without_floor_path.c_str());
+    RB_CHECK(enabled_hard_rate_without_floor_rejected);
 
     const std::string invalid_compliance_frame_path = writeTempConfig(
         "force-invalid-compliance-frame",
@@ -1291,6 +1430,7 @@ bool testFloorlessForceControlSurfaceSourceNone() {
             "  left:\n"
             "    enable: true\n"
             "    surface_source: " + surface_source + "\n"
+            "    contact_entry_max_speed_m_s: 0.15\n"
             "    compliance_frame: tcp_origin\n"
             "    target_force_n: 2.0\n"
             "    contact_enter_force_n: 3.5\n"

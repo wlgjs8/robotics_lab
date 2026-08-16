@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Install the stable /dev/pika-left and /dev/pika-right symlinks for the two
-# robot-side Pika Grippers (see 99-pika-grippers.rules for why USB port path is
-# the only stable discriminator). Needs sudo.
+# Install legacy fixed-port /dev/pika-left and /dev/pika-right symlinks for
+# direct diagnostics. The main make-run stack auto-pairs from camera.health and
+# does not use these links. Needs sudo.
 #
 #   tools/udev/install_pika_udev.sh
 #
@@ -16,6 +16,7 @@ DEST="/etc/udev/rules.d/$RULE"
 [ -f "$RULE" ] || { echo "missing $RULE next to this script" >&2; exit 1; }
 
 echo "[pika-udev] installing $RULE -> $DEST (sudo)"
+echo "[pika-udev] WARNING: legacy fixed-port mapping; main make run does not need this"
 sudo cp "$RULE" "$DEST"
 sudo udevadm control --reload-rules
 sudo udevadm trigger --subsystem-match=tty --action=add

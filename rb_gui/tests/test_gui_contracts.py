@@ -46,6 +46,7 @@ from rb_servo_gui.app import (
     _arm_awaiting_init_tare,
     _maybe_auto_init_tare_on_startup,
     _foot_pedal_action_map,
+    _open_foot_pedal_device,
     _update_arm_init_panel,
     _lifecycle_init_motion_layout_html,
     _update_gripper_feedback,
@@ -2135,6 +2136,57 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("INPUT", script)
         self.assertIn("TEXTAREA", script)
 
+    def test_foot_pedal_ambiguous_devices_fail_closed_without_grabbing(self):
+        """Several identical pedals -> disabled, never a guess.
+
+        This rig runs two PCsensor pedals (3553:b001, no serial, identical evdev
+        capabilities): the 3-switch one is rb_gui's, the 1-switch one is the pika UMI
+        teleop clutch. Nothing in software tells them apart, and _open_foot_pedal_device
+        grabs its pick exclusively — so guessing would fire InitMotion from the teleop
+        pedal AND steal the clutch. It must return None and must not open/grab anything.
+        """
+        candidates = ["/dev/input/by-path/pci-0000:11:00.0-usb-0:4:1.0-event-kbd",
+                      "/dev/input/by-path/pci-0000:13:00.0-usb-0:9:1.0-event-kbd"]
+        with mock.patch.dict(os.environ, {"RB_GUI_FOOT_PEDAL_DEVICE": ""}, clear=False), \
+                mock.patch("rb_servo_gui.app._foot_pedal_candidates", return_value=candidates), \
+                mock.patch("evdev.InputDevice") as input_device:
+            self.assertIsNone(_open_foot_pedal_device())
+        input_device.assert_not_called()
+
+    def test_foot_pedal_single_device_is_opened_and_grabbed(self):
+        only = "/dev/input/by-path/pci-0000:13:00.0-usb-0:9:1.0-event-kbd"
+        dev = mock.MagicMock()
+        dev.path, dev.name = only, "PCsensor FootSwitch Keyboard"
+        with mock.patch.dict(os.environ, {"RB_GUI_FOOT_PEDAL_DEVICE": ""}, clear=False), \
+                mock.patch("rb_servo_gui.app._foot_pedal_candidates", return_value=[only]), \
+                mock.patch("evdev.InputDevice", return_value=dev) as input_device:
+            self.assertIs(_open_foot_pedal_device(), dev)
+        input_device.assert_called_once_with(only)
+        dev.grab.assert_called_once()
+
+    def test_input_node_by_path_resolves_through_by_path_only(self):
+        """Node identity must come from by-path, never by-id.
+
+        udev creates exactly ONE `usb-PCsensor_FootSwitch-event-kbd` symlink for two
+        identical pedals, so by-id silently follows plug order and cannot address the
+        other pedal at all. by-path keys off the physical USB port, so it is unique."""
+        from rb_servo_gui.app import _input_node_by_path
+        link = "/dev/input/by-path/pci-0000:13:00.0-usb-0:9:1.0-event-kbd"
+        with mock.patch("rb_servo_gui.app.glob.glob", return_value=[link]) as g, \
+                mock.patch("rb_servo_gui.app.os.path.realpath",
+                           side_effect=lambda p: "/dev/input/event9"):
+            self.assertEqual(_input_node_by_path("/dev/input/event9"), link)
+        patterns = [c.args[0] for c in g.call_args_list]
+        self.assertTrue(patterns)
+        for pattern in patterns:
+            self.assertIn("by-path", pattern)
+            self.assertNotIn("by-id", pattern)
+
+    def test_input_node_by_path_falls_back_to_raw_node(self):
+        from rb_servo_gui.app import _input_node_by_path
+        with mock.patch("rb_servo_gui.app.glob.glob", return_value=[]):
+            self.assertEqual(_input_node_by_path("/dev/input/event9"), "/dev/input/event9")
+
     def test_foot_pedal_action_map_routes_a_to_left_c_to_right_b_to_record(self):
         try:
             from evdev import ecodes as e
@@ -3163,14 +3215,28 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn(".rb-monitor-stand-card.rb-monitor-header-card { top: var(--rb-monitor-split); }", html)
         self.assertIn(".rb-monitor-joint-card.rb-monitor-body-card { max-height: calc(var(--rb-monitor-split) - 5.95em); }", html)
         self.assertIn("Pose Monitor", html)
-        # FT split out of the Pose Monitor into its own right-column card.
+        # FT and Camera Quality share the right column, stacked at the same split.
         self.assertNotIn("Pose Monitor · FT", html)
         self.assertIn("FT Monitor", html)
+        self.assertIn("Camera Quality Monitor", html)
         self.assertIn(
             ".rb-monitor-ft-card { left: calc(var(--rb-monitor-gap) * 2 + var(--rb-monitor-width)); }",
             html,
         )
+        self.assertIn(
+            ".rb-monitor-camera-card { left: calc(var(--rb-monitor-gap) * 2 + var(--rb-monitor-width)); }",
+            html,
+        )
+        self.assertIn(
+            ".rb-monitor-ft-card.rb-monitor-body-card { max-height: calc(var(--rb-monitor-split) - 5.95em); }",
+            html,
+        )
+        self.assertIn(
+            ".rb-monitor-camera-card.rb-monitor-header-card { top: var(--rb-monitor-split); }",
+            html,
+        )
         self.assertIn("rb-monitor-header-card rb-monitor-ft-card", html)
+        self.assertIn("rb-monitor-header-card rb-monitor-camera-card", html)
         self.assertIn('id="rb-joint-unit-rad"', html)
         self.assertIn('id="rb-stand-unit-rad"', html)
         self.assertIn("body:has(#rb-joint-unit-rad:checked)", html)
@@ -3217,7 +3283,7 @@ class GuiContractsTest(unittest.TestCase):
         # External F/T sensor rows (rbpodo eft_*) render per arm in the dedicated
         # FT Monitor card. One axis per row (single short number) so the narrow
         # card fits without a horizontal scrollbar: force (1 decimal), torque
-        # (2 decimals), |F| magnitude.
+        # (2 decimals). Six axes per arm match the Joint Monitor's six rows.
         state = self.tcp_available_state()
         state["left"]["eft_wrench"] = [7.4, 6.7, -38.5, -0.12, -0.48, 0.23]
         state["left"]["eft_valid"] = True
@@ -3232,13 +3298,18 @@ class GuiContractsTest(unittest.TestCase):
         html = _operator_monitor_dynamic_html(latest, stale=False)
         # FT readings live in their own FT Monitor body card, not the Pose card.
         self.assertIn("rb-monitor-body-card rb-monitor-ft-card", html)
-        for label in ("Fx [N]", "Fy [N]", "Fz [N]", "|F| [N]", "Tx [Nm]", "Ty [Nm]", "Tz [Nm]"):
+        ft_start = html.index("rb-monitor-body-card rb-monitor-ft-card")
+        ft_end = html.index("rb-monitor-body-card rb-monitor-camera-card")
+        ft_html = html[ft_start:ft_end]
+        for label in ("Fx [N]", "Fy [N]", "Fz [N]", "Tx [Nm]", "Ty [Nm]", "Tz [Nm]"):
             self.assertIn(label, html)
+        self.assertNotIn("|F| [N]", ft_html)
+        self.assertEqual(ft_html.count("rb-monitor-row"), 12)
         # No 3-vector packed onto one line (that was the horizontal-scroll driver).
         self.assertNotIn("+7.4 +6.7 -38.5", html)
         for axis_value in ("+7.4", "+6.7", "-38.5", "-0.12", "-0.48", "+0.23"):
             self.assertIn(axis_value, html)
-        self.assertIn("39.8", html)  # |F| = sqrt(7.4^2 + 6.7^2 + 38.5^2)
+        self.assertNotIn("39.8", ft_html)
         # Server-invalid (right arm) and stale streams must not show readings.
         stale_html = _operator_monitor_dynamic_html(latest, stale=True)
         self.assertNotIn("+7.4", stale_html)
@@ -3503,6 +3574,9 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(folder_labels[0], "Operator Monitors")
         self.assertIn("Joint Monitor", folder_labels)
         self.assertIn("Stand/World Monitor", folder_labels)
+        self.assertIn("Camera Quality Monitor", folder_labels)
+        text_labels = [label for label, _kwargs, _handle in server.gui.texts]
+        self.assertFalse(any("|F|" in label for label in text_labels))
 
     def test_safety_floor_user_floor_roi_folder_order(self):
         source = (Path(__file__).resolve().parents[1] / "rb_servo_gui" / "app.py").read_text(
@@ -3688,10 +3762,11 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(left_target.position, (0.32, 0.13, 0.45))
         self.assertFalse(left_tcp.visible)
         self.assertTrue(left_ref.visible)
-        self.assertFalse(left_tcp_label.visible)
         self.assertTrue(left_ref_label.visible)
-        self.assertEqual(left_tcp_label.position, (0.32, 0.13, 0.495))
         self.assertEqual(left_ref_label.position, (0.41, 0.21, 0.555))
+        # The actual-TCP gizmo carries no caption; a stale handle is never driven.
+        self.assertIsNone(left_tcp_label.visible)
+        self.assertIsNone(left_tcp_label.position)
         self.assertFalse(handles["left_tcp_trail"].visible)
         self.assertFalse(handles["left_tcp_ref_trail"].visible)
         self.assertEqual(handles["left_tcp_trail_points"], [])
@@ -3701,13 +3776,13 @@ class GuiContractsTest(unittest.TestCase):
         update_scene_markers(handles, store.latest(), tcp_display_mode="both")
         self.assertTrue(left_tcp.visible)
         self.assertTrue(left_ref.visible)
-        self.assertTrue(left_tcp_label.visible)
+        self.assertIsNone(left_tcp_label.visible)
         self.assertTrue(left_ref_label.visible)
 
         update_scene_markers(handles, store.latest(), tcp_display_mode="actual")
         self.assertTrue(left_tcp.visible)
         self.assertFalse(left_ref.visible)
-        self.assertTrue(left_tcp_label.visible)
+        self.assertIsNone(left_tcp_label.visible)
         self.assertFalse(left_ref_label.visible)
 
     def test_scene_update_hides_all_tcp_trails_without_accumulating_points(self):
@@ -3888,14 +3963,17 @@ class GuiContractsTest(unittest.TestCase):
             np.asarray(_FLOOR_CHECK_POINTS_TCP_FRAME, dtype=np.float32),
         )
 
-    def test_scene_fallback_labels_actual_and_reference_tcp_markers(self):
+    def test_scene_fallback_labels_only_the_reference_tcp_marker(self):
         server = RecordingServer(scene=RecordingScene())
         _add_scene_fallback(server)
         label_texts = [text for _name, text, _kwargs, _handle in server.scene.labels]
-        self.assertIn("left tcp_actual_stand physical-state inspection", label_texts)
         self.assertIn("left tcp_ref_stand controller-sim reference", label_texts)
-        self.assertIn("right tcp_actual_stand physical-state inspection", label_texts)
         self.assertIn("right tcp_ref_stand controller-sim reference", label_texts)
+        # The actual-TCP gizmo is intentionally uncaptioned (operator-visible clutter).
+        self.assertEqual(
+            [text for text in label_texts if "tcp_actual_stand" in text],
+            [],
+        )
 
     def test_ft_sensor_measurement_pose_is_authored_by_both_robot_urdfs(self):
         descriptions = Path(__file__).resolve().parents[2] / "rb_servo_server" / "descriptions"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import errno
+import glob
 import json
 import math
 import os
@@ -11,8 +13,23 @@ from html import escape
 from pathlib import Path
 from typing import Any, Mapping
 
+import numpy as np
+
 from .box_detect_control import BoxDetectCommandClient, BoxDetectCommandResult
+from .camera_quality import (
+    ARMS as CAMERA_QUALITY_ARMS,
+    CameraQualityReceiver,
+    CameraQualityStore,
+    RobotMotionTracker,
+    camera_quality_html,
+)
 from .command_client import CommandClient
+from .head_preview import (
+    DEFAULT_HEAD_STREAM,
+    DEFAULT_HEAD_TOPIC,
+    HeadPreviewReceiver,
+    HeadPreviewStore,
+)
 from .cog_gui import (
     CogGuiSession,
     CogGuiStatus,
@@ -214,11 +231,11 @@ _DEFAULT_INIT_LEFT_JOINTS_DEG = (259.0, 75.6, 129.5, -55.6, -131.2, -161.7)
 _DEFAULT_INIT_RIGHT_JOINTS_DEG = (-253.7, -76.9, -127.6, 65.7, 143.7, 166.9)
 _OPERATOR_MONITOR_WIDTH_EM = 18.0
 _OPERATOR_MONITOR_GAP_EM = 1.0
-# Vertical anchor (em, in monitor-card font size) where the Pose Monitor stacks
-# below the Joint Monitor. Sized to clear the Joint card's full content (12 joint
-# rows + status) so it never needs an inner scrollbar, plus a small gap so the two
-# panels sit slightly apart instead of touching. Override with RB_GUI_MONITOR_SPLIT_EM.
+# Vertical anchor (em, in monitor-card font size) where the lower monitor cards
+# begin in both columns. Sized to clear the Joint and FT content above them.
+# Override with RB_GUI_MONITOR_SPLIT_EM.
 _OPERATOR_MONITOR_SPLIT_EM = 35.5
+_CAMERA_QUALITY_MONITOR_STALE_SEC = 0.5
 
 
 def _tcp_gizmo_visible(handles: dict[str, Any]) -> bool:
@@ -2240,9 +2257,47 @@ def _build_stand_world_monitor(server: Any, handles: dict[str, Any], *, order: f
                     handle = server.gui.add_text(f"{arm} {field}", initial_value="invalid", disabled=True)
                     handles["stand_world_monitor_values"][arm][field] = handle
                 # External F/T sensor (rbpodo eft_*, sensor frame).
-                for field, label in (("force", "FT F [N]"), ("torque", "FT T [Nm]"), ("magnitude", "FT |F| [N]")):
+                for field, label in (
+                    ("force", "FT F [N]"),
+                    ("torque", "FT T [Nm]"),
+                ):
                     handle = server.gui.add_text(f"{arm} {label}", initial_value="invalid", disabled=True)
                     handles["eft_monitor_values"][arm][field] = handle
+
+
+def _build_camera_quality_monitor(
+    server: Any,
+    handles: dict[str, Any],
+    *,
+    order: float | None = None,
+) -> None:
+    with server.gui.add_folder(
+        "Camera Quality Monitor",
+        expand_by_default=True,
+        order=order,
+    ):
+        handles["camera_quality_monitor_status"] = server.gui.add_text(
+            "Status",
+            initial_value="disabled",
+            disabled=True,
+        )
+        handles["camera_quality_monitor_values"] = {"right": {}, "left": {}}
+        for arm in ("right", "left"):
+            with server.gui.add_folder(arm.upper(), expand_by_default=True):
+                handles["camera_quality_monitor_values"][arm]["blur"] = (
+                    server.gui.add_text(
+                        "Blur",
+                        initial_value="N/A",
+                        disabled=True,
+                    )
+                )
+                handles["camera_quality_monitor_values"][arm]["shake"] = (
+                    server.gui.add_text(
+                        "Shake [px/s]",
+                        initial_value="N/A",
+                        disabled=True,
+                    )
+                )
 
 
 def _operator_monitor_layout() -> tuple[float, float, float]:
@@ -2263,8 +2318,8 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
       var(--rb-monitor-target-width),
       max(13.5em, calc((100vw - (3 * var(--rb-monitor-gap))) / 2))
     );
-    /* Pose Monitor stacks just below the Joint Monitor's natural bottom (em, in
-       card font size) — clamped so it never runs off a short viewport. */
+    /* Lower monitor cards stack below the upper cards at this common vertical
+       anchor (em, in card font size), clamped for short viewports. */
     --rb-monitor-split: min({split_em:.3f}em, 60vh);
   }}
   .rb-monitor-card {{
@@ -2297,18 +2352,19 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
     padding: 0.6em 0.8em 0.75em;
     border-radius: 0 0 0.45em 0.45em;
   }}
-  /* Joint Monitor (top half) and Pose Monitor (bottom half) stack in the same
-     left column. Viewport-half split keeps the deg/rad radios (which live in the
-     static header cards) stable across dynamic body refreshes. */
+  /* Joint/Pose share the left column; FT/Camera Quality share the right column.
+     The common viewport split keeps every static header stable across dynamic
+     body refreshes. */
   .rb-monitor-joint-card {{ left: var(--rb-monitor-gap); }}
   .rb-monitor-stand-card {{ left: var(--rb-monitor-gap); }}
-  /* FT Monitor lives in its own right column beside the Joint/Pose left column,
-     so it spans the full viewport height (base body-card rules) instead of
-     sharing the left-column split. */
   .rb-monitor-ft-card {{ left: calc(var(--rb-monitor-gap) * 2 + var(--rb-monitor-width)); }}
+  .rb-monitor-camera-card {{ left: calc(var(--rb-monitor-gap) * 2 + var(--rb-monitor-width)); }}
   .rb-monitor-joint-card.rb-monitor-body-card {{ max-height: calc(var(--rb-monitor-split) - 5.95em); }}
   .rb-monitor-stand-card.rb-monitor-header-card {{ top: var(--rb-monitor-split); }}
   .rb-monitor-stand-card.rb-monitor-body-card {{ top: calc(var(--rb-monitor-split) + 4.95em); max-height: calc(100vh - var(--rb-monitor-split) - 5.95em); }}
+  .rb-monitor-ft-card.rb-monitor-body-card {{ max-height: calc(var(--rb-monitor-split) - 5.95em); }}
+  .rb-monitor-camera-card.rb-monitor-header-card {{ top: var(--rb-monitor-split); }}
+  .rb-monitor-camera-card.rb-monitor-body-card {{ top: calc(var(--rb-monitor-split) + 4.95em); max-height: calc(100vh - var(--rb-monitor-split) - 5.95em); }}
   .rb-monitor-title {{
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-weight: 650;
@@ -2400,6 +2456,9 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
 <div class="rb-monitor-card rb-monitor-header-card rb-monitor-ft-card">
   <div class="rb-monitor-title">FT Monitor</div>
 </div>
+<div class="rb-monitor-card rb-monitor-header-card rb-monitor-camera-card">
+  <div class="rb-monitor-title">Camera Quality Monitor</div>
+</div>
 """
 
 
@@ -2413,6 +2472,104 @@ def _operator_monitor_invalid_pair() -> str:
 
 def _operator_monitor_row(label: str, value_html: str) -> str:
     return f'<div class="rb-monitor-row"><span>{escape(label)}</span><span>{value_html}</span></div>'
+
+
+def _camera_quality_monitor_status(store: CameraQualityStore | None) -> str:
+    if store is None:
+        return "disabled"
+    status = store.status()
+    text = f"receiver={status['receiver']}"
+    if status["error"]:
+        text += f" · {status['error']}"
+    return text
+
+
+def _camera_quality_monitor_values(
+    store: CameraQualityStore | None,
+    arm: str,
+    *,
+    now: float,
+) -> tuple[str, str]:
+    if store is None:
+        return "N/A", "N/A"
+    sample = store.latest(arm)
+    if (
+        sample is None
+        or now - sample.received_monotonic > _CAMERA_QUALITY_MONITOR_STALE_SEC
+    ):
+        return "N/A", "N/A"
+    blur = (
+        f"{sample.blur_effect:.3f}"
+        if math.isfinite(sample.blur_effect)
+        else "N/A"
+    )
+    shake = (
+        f"{sample.shake_px_s_rms:.1f}"
+        if sample.shake_px_s_rms is not None
+        and math.isfinite(sample.shake_px_s_rms)
+        else "N/A"
+    )
+    return blur, shake
+
+
+def _render_camera_quality_monitor_rows(
+    store: CameraQualityStore | None,
+    *,
+    now: float | None = None,
+) -> str:
+    timestamp = time.monotonic() if now is None else float(now)
+    parts = [
+        '<div class="rb-monitor-status">'
+        + escape(_camera_quality_monitor_status(store))
+        + "</div>"
+    ]
+    for arm in ("right", "left"):
+        blur, shake = _camera_quality_monitor_values(
+            store,
+            arm,
+            now=timestamp,
+        )
+        parts.append(
+            '<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">'
+            + arm.upper()
+            + "</div>"
+        )
+        parts.append(_operator_monitor_row("Blur", escape(blur)))
+        parts.append(_operator_monitor_row("Shake [px/s]", escape(shake)))
+        parts.append("</div>")
+    return "".join(parts)
+
+
+def _update_camera_quality_monitor_fallback(
+    handles: dict[str, Any],
+    *,
+    now: float | None = None,
+) -> None:
+    store = handles.get("camera_quality_store")
+    if not isinstance(store, CameraQualityStore):
+        store = None
+    status_handle = handles.get("camera_quality_monitor_status")
+    if status_handle is not None:
+        status_handle.value = _camera_quality_monitor_status(store)
+    timestamp = time.monotonic() if now is None else float(now)
+    values = handles.get("camera_quality_monitor_values")
+    if not isinstance(values, Mapping):
+        return
+    for arm in ("right", "left"):
+        blur, shake = _camera_quality_monitor_values(
+            store,
+            arm,
+            now=timestamp,
+        )
+        arm_values = values.get(arm)
+        if not isinstance(arm_values, Mapping):
+            continue
+        blur_handle = arm_values.get("blur")
+        if blur_handle is not None:
+            blur_handle.value = blur
+        shake_handle = arm_values.get("shake")
+        if shake_handle is not None:
+            shake_handle.value = shake
 
 
 def _arm_is_controller_sim(arm_state: Any) -> bool:
@@ -2540,12 +2697,14 @@ def _render_ft_monitor_rows(
         parts.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">{escape(arm)}</div>')
         # One axis per row (single short number) so the card fits its column
         # width without a horizontal scrollbar.
-        fx, fy, fz, mag, tx, ty, tz = _eft_monitor_axis_values(arm_state, stale=stale)
+        fx, fy, fz, tx, ty, tz = _eft_monitor_axis_values(
+            arm_state,
+            stale=stale,
+        )
         for label, value in (
             ("Fx [N]", fx),
             ("Fy [N]", fy),
             ("Fz [N]", fz),
-            ("|F| [N]", mag),
             ("Tx [Nm]", tx),
             ("Ty [Nm]", ty),
             ("Tz [Nm]", tz),
@@ -2556,7 +2715,12 @@ def _render_ft_monitor_rows(
 
 
 def _operator_monitor_dynamic_html(
-    latest: StateSnapshot | None, *, stale: bool, uptime: str | None = None
+    latest: StateSnapshot | None,
+    *,
+    stale: bool,
+    uptime: str | None = None,
+    camera_quality_store: CameraQualityStore | None = None,
+    now: float | None = None,
 ) -> str:
     return (
         '<div class="rb-monitor-card rb-monitor-body-card rb-monitor-joint-card">'
@@ -2567,6 +2731,9 @@ def _operator_monitor_dynamic_html(
         + "</div>"
         + '<div class="rb-monitor-card rb-monitor-body-card rb-monitor-ft-card">'
         + _render_ft_monitor_rows(latest, stale=stale, uptime=uptime)
+        + "</div>"
+        + '<div class="rb-monitor-card rb-monitor-body-card rb-monitor-camera-card">'
+        + _render_camera_quality_monitor_rows(camera_quality_store, now=now)
         + "</div>"
     )
 
@@ -2630,7 +2797,19 @@ def _build_operator_monitors(server: Any, handles: dict[str, Any]) -> None:
             _operator_monitor_static_html(monitor_width_em, gap_em, split_em),
             order=0.0,
         )
-        handles["operator_monitor_content"] = add_html(_operator_monitor_dynamic_html(None, stale=True), order=0.1)
+        camera_quality_store = handles.get("camera_quality_store")
+        handles["operator_monitor_content"] = add_html(
+            _operator_monitor_dynamic_html(
+                None,
+                stale=True,
+                camera_quality_store=(
+                    camera_quality_store
+                    if isinstance(camera_quality_store, CameraQualityStore)
+                    else None
+                ),
+            ),
+            order=0.1,
+        )
         return
     handles["operator_monitor_panel_mode"] = "root_gui_fallback"
     folder = server.gui.add_folder("Operator Monitors", expand_by_default=True, order=0.0)
@@ -2638,19 +2817,31 @@ def _build_operator_monitors(server: Any, handles: dict[str, Any]) -> None:
     with folder:
         _build_joint_monitor(server, handles, order=0.0)
         _build_stand_world_monitor(server, handles, order=0.1)
+        _build_camera_quality_monitor(server, handles, order=0.2)
 
 
 def _update_operator_monitors(handles: dict[str, Any], latest: StateSnapshot | None, *, stale: bool) -> None:
     content = handles.get("operator_monitor_content")
     uptime = _server_uptime_hms(handles, latest)
+    camera_quality_store = handles.get("camera_quality_store")
+    if not isinstance(camera_quality_store, CameraQualityStore):
+        camera_quality_store = None
+    now = time.monotonic()
     if content is not None:
         try:
-            content.content = _operator_monitor_dynamic_html(latest, stale=stale, uptime=uptime)
+            content.content = _operator_monitor_dynamic_html(
+                latest,
+                stale=stale,
+                uptime=uptime,
+                camera_quality_store=camera_quality_store,
+                now=now,
+            )
             return
         except Exception:
             pass
     _update_joint_monitor(handles, latest, stale=stale)
     _update_stand_world_monitor(handles, latest, stale=stale)
+    _update_camera_quality_monitor_fallback(handles, now=now)
 
 
 # Colored at-a-glance status chips (replaces scanning the wall of Status text rows).
@@ -2835,11 +3026,15 @@ def build_gui(
     overlay_store: CircleOverlayStore | None = None,
     chunk_overlay_store: ChunkOverlayStore | None = None,
     recording_status_store: RecordingStatusStore | None = None,
+    camera_quality_store: CameraQualityStore | None = None,
+    head_preview_store: HeadPreviewStore | None = None,
 ) -> dict[str, Any]:
     handles: dict[str, Any] = {}
     handles["circle_overlay_enabled"] = overlay_store is not None
     handles["chunk_overlay_enabled"] = chunk_overlay_store is not None
     handles["recording_status_store"] = recording_status_store
+    handles["camera_quality_store"] = camera_quality_store
+    handles["head_preview_store"] = head_preview_store
     # Dark mode is the default; set RB_GUI_DARK_MODE=0 to launch in light mode.
     dark_default = os.environ.get("RB_GUI_DARK_MODE", "1") != "0"
     handles["dark_mode"] = dark_default
@@ -3146,6 +3341,56 @@ def build_gui(
             def _(_: Any, mode: str = mode) -> None:
                 safety.set_desired_mode(mode)
                 _update_desired_mode_buttons(handles, safety.desired_mode)
+
+    with tabs.add_tab("카메라 품질"):
+        if camera_quality_store is None:
+            server.gui.add_text(
+                "Camera quality",
+                initial_value="disabled (RB_GUI_CAMERA_QUALITY=0)",
+                disabled=True,
+            )
+        else:
+            add_html = getattr(server.gui, "add_html", None)
+            if callable(add_html):
+                handles["camera_quality_status"] = add_html(
+                    camera_quality_html(camera_quality_store)
+                )
+            handles["camera_quality_preview_toggle"] = server.gui.add_checkbox(
+                "좌우 wrist preview 표시 (5 Hz)",
+                initial_value=False,
+            )
+            handles["camera_quality_reset_baseline"] = server.gui.add_button(
+                "자동 정지 기준선 초기화"
+            )
+            handles["camera_quality_csv"] = server.gui.add_text(
+                "CSV",
+                initial_value=str(camera_quality_store.csv_path or "unavailable"),
+                disabled=True,
+            )
+            initial_image = np.zeros((240, 320, 3), dtype=np.uint8)
+            for arm in CAMERA_QUALITY_ARMS:
+                handles[f"camera_quality_preview_{arm}"] = server.gui.add_image(
+                    initial_image,
+                    label=f"{arm} wrist",
+                    format="jpeg",
+                    jpeg_quality=75,
+                    visible=False,
+                )
+            handles["camera_quality_last_preview_monotonic"] = float("-inf")
+
+            @handles["camera_quality_reset_baseline"].on_click
+            def _(_: Any) -> None:
+                camera_quality_store.request_baseline_reset()
+
+            @handles["camera_quality_preview_toggle"].on_update
+            def _(_: Any) -> None:
+                visible = bool(handles["camera_quality_preview_toggle"].value)
+                for arm in CAMERA_QUALITY_ARMS:
+                    preview_handle = handles.get(f"camera_quality_preview_{arm}")
+                    if preview_handle is not None:
+                        preview_handle.visible = visible
+
+        _build_head_preview_panel(server, handles, head_preview_store)
 
     with tabs.add_tab("조작"):
         _op_tabs = server.gui.add_tab_group()
@@ -5588,6 +5833,14 @@ def _update_stereo_wrist(handles: dict[str, Any]) -> None:
             parts_status.append(f"{arm}: 대기")
             continue
         xyz, rgb, age_ms = data
+        # 발행이 멈춘 쪽(카메라 사망/번들 정지)은 마지막 클라우드를 계속 그리지 말고
+        # 숨긴다 — GUI만 봐도 어느 손목 카메라가 죽었는지 드러나야 한다.
+        # (wrist 발행 주기는 worker ~3Hz × wrist_every=3 ≈ 1s → 5s면 확실한 사망 신호)
+        if age_ms > 5000.0:
+            if h is not None:
+                h.visible = False
+            parts_status.append(f"{arm}: ⚠ 끊김 {age_ms / 1000.0:.0f}s")
+            continue
         if xyz.shape[0] == 0:
             if h is not None:
                 h.visible = False
@@ -5625,6 +5878,115 @@ def _update_stereo_wrist(handles: dict[str, Any]) -> None:
     st = handles.get("pc_wrist_status")
     if st is not None:
         st.value = ("off" if not on else (", ".join(parts_status) if parts_status else "waiting…"))
+
+
+def _build_head_preview_panel(
+    server: Any,
+    handles: dict[str, Any],
+    head_preview_store: HeadPreviewStore | None,
+) -> None:
+    """Head (D435 color) viewer next to the wrist previews. Display-only.
+
+    The head rig is optional — `make cam-up-wrists` runs without the D435 — so an
+    absent topic stays a `waiting` status instead of an error. Model inference is
+    unaffected either way: it reads `camera.bundle.policy`, which is wrist-only.
+    """
+
+    if head_preview_store is None:
+        server.gui.add_text(
+            "Head view",
+            initial_value="disabled (RB_GUI_HEAD_PREVIEW=0)",
+            disabled=True,
+        )
+        return
+    handles["head_preview_toggle"] = server.gui.add_checkbox(
+        "head view 표시 (5 Hz)",
+        initial_value=False,
+    )
+    handles["head_preview_status"] = server.gui.add_text(
+        "Head view",
+        initial_value=head_preview_store.status_text(),
+        disabled=True,
+    )
+    handles["head_preview_image"] = server.gui.add_image(
+        np.zeros((270, 480, 3), dtype=np.uint8),
+        label="head",
+        format="jpeg",
+        jpeg_quality=75,
+        visible=False,
+    )
+    handles["head_preview_last_monotonic"] = float("-inf")
+
+    @handles["head_preview_toggle"].on_update
+    def _(_: Any) -> None:
+        enabled = bool(handles["head_preview_toggle"].value)
+        # Gate the receiver too: while off it skips the 1280x720 shm copy.
+        head_preview_store.set_enabled(enabled)
+        image_handle = handles.get("head_preview_image")
+        if image_handle is not None:
+            image_handle.visible = enabled
+
+
+def _update_head_preview(handles: dict[str, Any]) -> None:
+    store = handles.get("head_preview_store")
+    if not isinstance(store, HeadPreviewStore):
+        return
+    now = time.monotonic()
+    status_handle = handles.get("head_preview_status")
+    if status_handle is not None:
+        status_handle.value = store.status_text(now=now)
+    toggle = handles.get("head_preview_toggle")
+    if not bool(getattr(toggle, "value", False)):
+        return
+    last = float(handles.get("head_preview_last_monotonic", float("-inf")))
+    if now - last < 0.2:
+        return
+    image = store.preview()
+    image_handle = handles.get("head_preview_image")
+    if image is not None and image_handle is not None:
+        try:
+            image_handle.image = image
+            image_handle.visible = True
+        except Exception:
+            pass
+    handles["head_preview_last_monotonic"] = now
+
+
+def _update_camera_quality(handles: dict[str, Any]) -> None:
+    store = handles.get("camera_quality_store")
+    if not isinstance(store, CameraQualityStore):
+        return
+    now = time.monotonic()
+    status_handle = handles.get("camera_quality_status")
+    if status_handle is not None:
+        try:
+            status_handle.content = camera_quality_html(store, now=now)
+        except Exception:
+            pass
+    csv_handle = handles.get("camera_quality_csv")
+    if csv_handle is not None:
+        status = store.status()
+        csv_text = status["csv_path"] or "unavailable"
+        if status["csv_error"]:
+            csv_text += " · ERROR " + status["csv_error"]
+        csv_handle.value = csv_text
+
+    preview_toggle = handles.get("camera_quality_preview_toggle")
+    preview_on = bool(getattr(preview_toggle, "value", False))
+    last_preview = float(
+        handles.get("camera_quality_last_preview_monotonic", float("-inf"))
+    )
+    if preview_on and now - last_preview >= 0.2:
+        for arm in CAMERA_QUALITY_ARMS:
+            image = store.preview(arm)
+            preview_handle = handles.get(f"camera_quality_preview_{arm}")
+            if image is not None and preview_handle is not None:
+                try:
+                    preview_handle.image = image
+                    preview_handle.visible = True
+                except Exception:
+                    pass
+        handles["camera_quality_last_preview_monotonic"] = now
 
 
 def update_gui(
@@ -5669,6 +6031,8 @@ def update_gui(
     if "tcp_linear_arm_buttons" in handles or "tcp_linear_orientation_buttons" in handles:
         _update_tcp_linear_selection_buttons(handles)
     stale = store.is_stale()
+    _update_camera_quality(handles)
+    _update_head_preview(handles)
     # Stash the live snapshot so the TCP PTP fields can mirror the current pose
     # every tick (the patched viser NumberInput ignores server updates while it is
     # focused, so a periodic repaint never clobbers a value the operator is typing).
@@ -6096,7 +6460,57 @@ def _disable_viser_wasd_keys() -> None:
 
 
 _FOOT_PEDAL_DEVICE_ENV = "RB_GUI_FOOT_PEDAL_DEVICE"
-_FOOT_PEDAL_DEFAULT_PATH = "/dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd"
+
+
+def _input_node_by_path(node: str) -> str:
+    """/dev/input/eventN -> its /dev/input/by-path symlink, or the node unchanged.
+
+    by-path keys off the physical USB port, so it survives replug/reboot (the eventN
+    number does not) and stays unique when several identical pedals are attached."""
+    try:
+        target = os.path.realpath(node)
+        for link in glob.glob("/dev/input/by-path/*-event-kbd"):
+            if os.path.realpath(link) == target:
+                return link
+    except Exception:
+        pass
+    return node
+
+
+def _foot_pedal_candidates(evdev, ecodes) -> list[str]:
+    """Every foot-pedal KEYBOARD node, as stable by-path paths (sorted, deduped).
+
+    Deliberately does NOT use /dev/input/by-id. Two PCsensor pedals are identical
+    down to idVendor:idProduct (3553:b001), bcdDevice, product string, interface
+    layout and evdev capability bitmap, and they carry no serial — so udev creates
+    `usb-PCsensor_FootSwitch-event-kbd` for whichever enumerates first and NONE for
+    the other. That symlink therefore silently points at a different physical pedal
+    depending on plug order, and the second pedal is unreachable through it."""
+    try:
+        nodes = evdev.list_devices()
+    except Exception:
+        return []
+    found: list[str] = []
+    for path in nodes:
+        try:
+            cand = evdev.InputDevice(path)
+        except Exception:
+            continue
+        try:
+            name = (cand.name or "").lower()
+            keys = cand.capabilities().get(ecodes.EV_KEY, [])
+            # Keyboard interface only: the pedal's extra HID node may emit a key-down
+            # without the matching key-up, and the mouse node emits no usable keys.
+            if (("foot" in name or "pcsensor" in name)
+                    and "mouse" not in name
+                    and ecodes.KEY_A in keys):
+                found.append(_input_node_by_path(path))
+        finally:
+            try:
+                cand.close()
+            except Exception:
+                pass
+    return sorted(set(found))
 
 
 def _open_foot_pedal_device():
@@ -6106,11 +6520,15 @@ def _open_foot_pedal_device():
     directly works regardless of viser/browser focus or which terminal is active,
     and grab() (EVIOCGRAB) keeps the pedal from ALSO typing a/b/c into whatever
     window is focused. Returns a grabbed evdev.InputDevice or None (evdev missing,
-    no matching device, or access denied). Best-effort: never raises.
+    no matching device, no permission, or an ambiguous choice). Never raises.
 
-    Device selection: $RB_GUI_FOOT_PEDAL_DEVICE override, then the stable by-id
-    path, then a scan for a foot-switch node that exposes KEY_A (the keyboard
-    interface, not the device's mouse/extra nodes)."""
+    Device selection: $RB_GUI_FOOT_PEDAL_DEVICE if set, else auto-detect ONLY when
+    exactly one foot-pedal keyboard is attached. With several attached the choice is
+    safety-relevant and undecidable in software — this pedal fires InitMotion, and
+    grab() would additionally steal a pedal another consumer needs (the pika UMI
+    teleop clutch reads its own pedal, see ~/workspace/pika). Identical pedals cannot
+    be told apart by any descriptor, so guessing could both move the robot from the
+    wrong pedal and kill the teleop clutch. Fail closed and make the operator pin it."""
     try:
         import evdev
         from evdev import ecodes
@@ -6122,31 +6540,37 @@ def _open_foot_pedal_device():
         return None
     dev = None
     override = os.environ.get(_FOOT_PEDAL_DEVICE_ENV, "").strip()
-    for path in [p for p in (override, _FOOT_PEDAL_DEFAULT_PATH) if p]:
+    if override:
         try:
-            if os.path.exists(path):
-                dev = evdev.InputDevice(path)
-                break
-        except Exception:
-            dev = None
-    if dev is None:
-        try:
-            for path in evdev.list_devices():
-                try:
-                    cand = evdev.InputDevice(path)
-                except Exception:
-                    continue
-                name = (cand.name or "").lower()
-                keys = cand.capabilities().get(ecodes.EV_KEY, [])
-                if ("foot" in name or "pcsensor" in name) and ecodes.KEY_A in keys:
-                    dev = cand
-                    break
-                try:
-                    cand.close()
-                except Exception:
-                    pass
-        except Exception:
-            dev = None
+            dev = evdev.InputDevice(override)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"rb_servo_gui: foot pedal {_FOOT_PEDAL_DEVICE_ENV}={override} unusable "
+                f"({type(exc).__name__}: {exc})",
+                flush=True,
+            )
+            return None
+    else:
+        candidates = _foot_pedal_candidates(evdev, ecodes)
+        if len(candidates) > 1:
+            print(
+                "rb_servo_gui: foot pedal DISABLED — several pedals attached and they are "
+                "indistinguishable in software (same 3553:b001, no serial, same capabilities). "
+                f"Pin one with {_FOOT_PEDAL_DEVICE_ENV}=<path>:\n  "
+                + "\n  ".join(candidates),
+                flush=True,
+            )
+            return None
+        if candidates:
+            try:
+                dev = evdev.InputDevice(candidates[0])
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"rb_servo_gui: foot pedal {candidates[0]} unusable "
+                    f"({type(exc).__name__}: {exc})",
+                    flush=True,
+                )
+                return None
     if dev is None:
         print(
             f"rb_servo_gui: foot pedal not found (set {_FOOT_PEDAL_DEVICE_ENV} to its /dev/input path)",
@@ -6156,9 +6580,20 @@ def _open_foot_pedal_device():
     try:
         dev.grab()
     except Exception as exc:  # noqa: BLE001
+        # EBUSY means another process already grabbed it — not a permission problem.
+        # The usual culprit is the pika UMI teleop publisher started BEFORE this GUI:
+        # its --mute-other-pedals (on by default in run_umi_teleop_publish.sh) grabs
+        # every pedal it is not using, to stop pedal keystrokes leaking into the
+        # terminal. Start robotics_lab first, or run that publisher with
+        # MUTE_OTHER_PEDALS=0.
+        busy = getattr(exc, "errno", None) == errno.EBUSY
+        hint = ("another process already holds it (pika teleop publisher with "
+                "--mute-other-pedals? start robotics_lab first, or set MUTE_OTHER_PEDALS=0)"
+                if busy else
+                "add your user to the 'input' group (sudo usermod -aG input $USER) and re-login")
         print(
-            f"rb_servo_gui: foot pedal grab failed ({type(exc).__name__}: {exc}); "
-            "add your user to the 'input' group (sudo usermod -aG input $USER) and re-login",
+            f"rb_servo_gui: foot pedal grab failed on {dev.path} "
+            f"({type(exc).__name__}: {exc}); {hint}",
             flush=True,
         )
         try:
@@ -6293,6 +6728,54 @@ def main(argv: list[str] | None = None) -> None:
     init_motion_timeout_sec = _env_float("RB_GUI_INIT_MOTION_TIMEOUT_SEC", 10.0)
 
     store = StateStore()
+    camera_quality_store: CameraQualityStore | None = None
+    camera_quality_receiver: CameraQualityReceiver | None = None
+    if os.environ.get("RB_GUI_CAMERA_QUALITY", "1") != "0":
+        robot_motion = RobotMotionTracker()
+        store.add_update_callback(robot_motion.update)
+        camera_quality_store = CameraQualityStore(
+            csv_dir=os.environ.get(
+                "RB_GUI_CAMERA_QUALITY_CSV_DIR",
+                "logs/camera_quality",
+            )
+        )
+        camera_quality_receiver = CameraQualityReceiver(
+            camera_quality_store,
+            robot_motion,
+            endpoint=os.environ.get(
+                "RB_GUI_CAMERA_QUALITY_ENDPOINT",
+                "tcp://127.0.0.1:5600",
+            ),
+            topics={
+                "left": os.environ.get(
+                    "RB_GUI_CAMERA_QUALITY_LEFT_TOPIC",
+                    "camera.bundle.wrist_left",
+                ),
+                "right": os.environ.get(
+                    "RB_GUI_CAMERA_QUALITY_RIGHT_TOPIC",
+                    "camera.bundle.wrist_right",
+                ),
+            },
+        )
+        camera_quality_receiver.start()
+    # Optional head (D435 color) viewer. Independent of the wrist quality path so
+    # it works with RB_GUI_CAMERA_QUALITY=0, and stays quiet on the wrist-only rig
+    # (`make cam-up-wrists` publishes no head bundle group).
+    head_preview_store: HeadPreviewStore | None = None
+    head_preview_receiver: HeadPreviewReceiver | None = None
+    if os.environ.get("RB_GUI_HEAD_PREVIEW", "1") != "0":
+        head_preview_store = HeadPreviewStore(
+            topic=os.environ.get("RB_GUI_HEAD_PREVIEW_TOPIC", DEFAULT_HEAD_TOPIC),
+            stream=os.environ.get("RB_GUI_HEAD_PREVIEW_STREAM", DEFAULT_HEAD_STREAM),
+        )
+        head_preview_receiver = HeadPreviewReceiver(
+            head_preview_store,
+            endpoint=os.environ.get(
+                "RB_GUI_HEAD_PREVIEW_ENDPOINT",
+                "tcp://127.0.0.1:5600",
+            ),
+        )
+        head_preview_receiver.start()
     receiver = StateReceiver(store, host=state_host, port=state_port)
     receiver.start()
     # 스테레오 pointcloud 워커(camera_server 컨테이너) 구독. 고급→Pointcloud 토글로 표시.
@@ -6359,6 +6842,8 @@ def main(argv: list[str] | None = None) -> None:
         overlay_store=overlay_store,
         chunk_overlay_store=chunk_overlay_store,
         recording_status_store=recording_status_store,
+        camera_quality_store=camera_quality_store,
+        head_preview_store=head_preview_store,
     )
     handles["_stereo_store"] = stereo_store
     # Global foot-pedal hotkeys (PCsensor FootSwitch -> a/b/c), read straight from the
@@ -6380,9 +6865,20 @@ def main(argv: list[str] | None = None) -> None:
         if chunk_overlay_bind is not None
         else ", chunk overlay disabled"
     )
+    camera_quality_status = (
+        f", camera quality {camera_quality_receiver.endpoint}"
+        if camera_quality_receiver is not None
+        else ", camera quality disabled"
+    )
+    head_preview_status = (
+        f", head view {head_preview_store.topic}/{head_preview_store.stream}"
+        if head_preview_receiver is not None and head_preview_store is not None
+        else ", head view disabled"
+    )
     print(
         f"rb_servo_gui listening on http://{host}:{port}, UDP state {state_host}:{state_port}"
-        f"{overlay_status}{chunk_overlay_status}{recording_status}",
+        f"{overlay_status}{chunk_overlay_status}{recording_status}{camera_quality_status}"
+        f"{head_preview_status}",
         flush=True,
     )
 
@@ -6398,6 +6894,12 @@ def main(argv: list[str] | None = None) -> None:
             time.sleep(0.1)
     finally:
         receiver.stop()
+        if camera_quality_receiver is not None:
+            camera_quality_receiver.stop()
+        if camera_quality_store is not None:
+            camera_quality_store.close()
+        if head_preview_receiver is not None:
+            head_preview_receiver.stop()
         stereo_receiver.stop()
         if overlay_receiver is not None:
             overlay_receiver.stop()

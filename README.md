@@ -322,6 +322,11 @@ simulated `q_actual`이 움직이므로, 현재 physical-box용 `stack_sim.yaml`
 physical-motion fault latch와 양립하지 않습니다. VM 재승격에는 endpoint topology를
 명시하는 별도 contract와 review가 필요합니다; local launch YAML로 우회하지 않습니다.
 
+`make build`와 `make run`은 `STACK_PYTHON`이 지정되면 그 interpreter를 함께
+사용하고, 아니면 repo의 `.venv/bin/python`을 우선 사용한 뒤 system `python3`로
+fallback합니다. 이 선택은 viser GUI, scope dashboard, gripper server,
+`policy_runner`에 동일하게 적용됩니다.
+
 `make build`는 증분 빌드이며, layout-sensitive `config.hpp`가 바뀌면 서버
 object 전체만 자동으로 다시 컴파일합니다. CMake cache/toolchain/build-tree를
 완전히 초기화해야 할 때만 `make rebuild`를 사용합니다.

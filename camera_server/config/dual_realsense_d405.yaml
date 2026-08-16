@@ -8,7 +8,11 @@
 # attached to this PC (USB3, bus 4): 412622272078, 260322278348.
 # (Note: these differ from the USB iSerial values 243323070989/313123070562.)
 # Left/right assignment verified physically 2026-06-12 (right lens covered):
-#   left arm  = 260322278348, right arm = 412622272078.
+#   (original) left arm = 260322278348, right arm = 412622272078.
+# 2026-07-23: the two wrist cameras were physically swapped between arms, so the
+# side->serial binding below is swapped to match (serial follows the physical unit):
+#   left arm  = 412622272078, right arm = 260322278348.
+# RE-VERIFY by covering the RIGHT lens before trusting a rollout.
 server:
   name: camera_server
   mode: capture_only
@@ -36,9 +40,53 @@ sync:
   max_bundle_time_diff_ms: 17.0
   publish_incomplete_bundles: false
 
+# Same consumer-group layout as the head rig (d435_head_1280x720.yaml), minus the
+# head/stereo groups: `policy` feeds the real_policy runtime gate (both wrists,
+# all-or-nothing on purpose), `wrist_left`/`wrist_right` keep each side's RGB-D
+# flowing independently so one dead camera cannot hide the healthy side
+# (stereo_worker wrist clouds / rb_gui). `legacy` keeps camera.bundle for
+# recorders/diagnostics that subscribe to the full-rig topic.
+bundle_groups:
+  legacy:
+    topic: "camera.bundle"
+    master_stream: "left_realsense.color"
+    required_streams:
+      - "left_realsense.color"
+      - "left_realsense.depth"
+      - "right_realsense.color"
+      - "right_realsense.depth"
+    max_bundle_time_diff_ms: 17.0
+    publish_incomplete_bundles: false
+  policy:
+    topic: "camera.bundle.policy"
+    master_stream: "left_realsense.color"
+    required_streams:
+      - "left_realsense.color"
+      - "left_realsense.depth"
+      - "right_realsense.color"
+      - "right_realsense.depth"
+    max_bundle_time_diff_ms: 17.0
+    publish_incomplete_bundles: false
+  wrist_left:
+    topic: "camera.bundle.wrist_left"
+    master_stream: "left_realsense.color"
+    required_streams:
+      - "left_realsense.color"
+      - "left_realsense.depth"
+    max_bundle_time_diff_ms: 17.0
+    publish_incomplete_bundles: false
+  wrist_right:
+    topic: "camera.bundle.wrist_right"
+    master_stream: "right_realsense.color"
+    required_streams:
+      - "right_realsense.color"
+      - "right_realsense.depth"
+    max_bundle_time_diff_ms: 17.0
+    publish_incomplete_bundles: false
+
 cameras:
   left_realsense:
-    serial: "260322278348"
+    serial: "412622272078"
     required: true
     streams:
       color:
@@ -54,7 +102,7 @@ cameras:
         fps: 30
         format: z16
   right_realsense:
-    serial: "412622272078"
+    serial: "260322278348"
     required: true
     streams:
       color:

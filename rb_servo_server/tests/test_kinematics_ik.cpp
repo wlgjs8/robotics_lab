@@ -609,6 +609,29 @@ bool testIkConditioningDiagnosticsPopulated() {
     RB_CHECK(std::isfinite(result.solution_jump_deg));
     RB_CHECK(result.solution_jump_deg >= 0.0);
     RB_CHECK(!result.branch_jump_suspected);
+
+    // A max_iterations FAILURE must carry the conditioning out too. That tick is the
+    // deepest-singular one there is — the damping ramp is what shrank the step until the
+    // budget ran out — so dropping sigma there both blinds the log at the only tick that
+    // explains the stall and (via SmdPoseTracker::setMinSingular) reads as "not measured",
+    // which released the manipulability velocity guard to full speed exactly there.
+    rb_servo::KinematicsConfig one_iter_cfg = cfg;
+    one_iter_cfg.ik.max_iterations = 1;
+    rb_servo::PinocchioKinematics one_iter_kin(one_iter_cfg);
+    rb_servo::JointArray far_q = seed;
+    far_q[1] += 8.0;
+    far_q[2] -= 8.0;
+    const rb_servo::Pose6D far_pose =
+        one_iter_kin.computeTcpStand(rb_servo::ArmId::Left, far_q, mount);
+    const rb_servo::IkResult failed =
+        one_iter_kin.solveIk(rb_servo::ArmId::Left, far_pose, seed, mount);
+    RB_CHECK(!failed.success);
+    RB_CHECK(failed.reason == rb_servo::ik_solver::kReasonMaxIterations ||
+             failed.reason == rb_servo::ik_solver::kReasonJointLimit);
+    RB_CHECK(std::isfinite(failed.min_singular_value));
+    RB_CHECK(failed.min_singular_value > 0.0);
+    RB_CHECK(std::isfinite(failed.applied_damping));
+    RB_CHECK(failed.applied_damping >= cfg.ik.damping - 1e-9);
     return true;
 }
 

@@ -166,3 +166,9 @@ count, and skew percentiles in `camera.health.bundle_groups`.
 ## 구현 파일
 
 Software sync는 `src/sync/frame_synchronizer.cpp`에 구현되어 있다. Group별 recent-frame deque를 유지하고 각 `master_stream`을 기준으로 bundle 생성을 시도한다. Software mode는 master timestamp에 가장 가까운 required stream frame을 선택하고, hardware mode는 동일 `frame_number` frame을 선택한다. Host arrival timestamp의 max-min skew가 group threshold 이하일 때만 `complete=true`가 된다. Policy path는 incomplete/high-skew bundle을 기본 drop한다.
+
+카메라 pipeline 재연결이 성공하면 `CameraManager`는 해당 카메라가 포함된
+모든 bundle group의 buffered frame과 rate/skew window를 비운다. 재연결된
+카메라가 group master이면 이전 `last_emitted_master_frame_number`도
+초기화하여, 장치 frame number가 1부터 다시 시작해도 bundle 발행이 즉시
+재개된다. Lifetime bundle/drop counter는 진단 연속성을 위해 보존한다.

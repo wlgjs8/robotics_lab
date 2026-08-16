@@ -2331,16 +2331,15 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         handles["left_tcp_ref"] = server.scene.add_frame("/stand/left_tcp_ref", show_axes=True, axes_length=0.055, axes_radius=0.002, position=(0.1601, -0.1725, 0.78))
         handles["right_tcp_ref"] = server.scene.add_frame("/stand/right_tcp_ref", show_axes=True, axes_length=0.055, axes_radius=0.002, position=(-0.1601, -0.1725, 0.78))
         if hasattr(server.scene, "add_label"):
+            # No label on the actual-TCP gizmo: it is the frame the operator reads
+            # continuously in every run mode, so a permanent floating caption is
+            # pure clutter over the arm. The reference gizmo keeps its label — it
+            # only appears in the controller-sim reference display, where naming
+            # which TCP source is drawn is what disambiguates the two gizmos.
             for arm, position in (
                 ("left", (0.1601, -0.1725, 0.78)),
                 ("right", (-0.1601, -0.1725, 0.78)),
             ):
-                handles[f"{arm}_tcp_label"] = server.scene.add_label(
-                    f"/stand/{arm}_tcp_label",
-                    f"{arm} tcp_actual_stand physical-state inspection",
-                    position=_tcp_label_position(position),
-                    visible=False,
-                )
                 handles[f"{arm}_tcp_ref_label"] = server.scene.add_label(
                     f"/stand/{arm}_tcp_ref_label",
                     f"{arm} tcp_ref_stand controller-sim reference",
@@ -2574,7 +2573,6 @@ def _hide_tcp_handles(scene_handles: dict[str, Any], arm: str, *, include_target
         f"{arm}_tcp_trail",
         f"{arm}_tcp_ref_trail",
         f"{arm}_tcp_cmd_trail",
-        f"{arm}_tcp_label",
         f"{arm}_tcp_ref_label",
     ]
     if include_target:
@@ -2949,7 +2947,6 @@ def update_scene_markers(
 
     for arm, (position, wxyz) in actual_updates.items():
         updates[f"{arm}_tcp"] = position
-        updates[f"{arm}_tcp_label"] = _tcp_label_position(position)
         target_key = f"{arm}_tcp_target"
         if target_key not in scene_handles or f"{arm}_tcp_target_user_moved" not in scene_handles:
             updates[target_key] = position
@@ -2983,7 +2980,6 @@ def update_scene_markers(
         )
         _set_visible(scene_handles.get(f"{arm}_tcp"), actual_visible)
         _set_visible(scene_handles.get(f"{arm}_tcp_ref"), ref_visible)
-        _set_visible(scene_handles.get(f"{arm}_tcp_label"), actual_visible)
         _set_visible(scene_handles.get(f"{arm}_tcp_ref_label"), ref_visible)
         _set_visible(scene_handles.get(f"{arm}_tcp_trail"), False)
         _set_visible(scene_handles.get(f"{arm}_tcp_ref_trail"), False)
@@ -2995,7 +2991,6 @@ def update_scene_markers(
         if arm not in actual_updates:
             _set_visible(scene_handles.get(f"{arm}_tcp"), False)
             _set_visible(scene_handles.get(f"{arm}_tcp_trail"), False)
-            _set_visible(scene_handles.get(f"{arm}_tcp_label"), False)
             _set_visible(scene_handles.get(f"{arm}_tcp_target"), False)
 
     for key, position in updates.items():

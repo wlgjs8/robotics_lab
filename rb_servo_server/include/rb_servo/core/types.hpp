@@ -258,6 +258,24 @@ struct ForceControlCommand {
     double max_rot_offset_rad = 0.0;
     double max_pos_step_m = 0.0;
     double max_rot_step_rad = 0.0;
+
+    // Per-tick envelope opening requested by a hard-limit retreat episode
+    // (m/s of velocity boost, clamped to the backoff headroom). Lets the
+    // retreat reflex reverse a driven descent quickly even when Layer-3 is
+    // disabled (reflex-only profile): without it the escape runs on the base
+    // envelope and a 0.05 m/s policy descent takes ~120 ms to reverse while
+    // the contact climbs to ~88 N (servo_log_20260724_142820). The
+    // controller's hysteresis ramps the opening off safely after the episode.
+    double retreat_envelope_boost_m_s = 0.0;
+
+    // Gate for the released-state offset bleed. The bleed exists to restore
+    // unload budget under an ACTIVELY MOVING policy equilibrium; draining
+    // toward a static in-contact anchor (e.g. a Hold frozen at an in-surface
+    // pose after a mid-press client abort) re-creates the contact and drives
+    // a perpetual bounce limit cycle (2026-07-23 14:20 run: ~0.6 s / 7 mm /
+    // 5-9 N oscillation on Hold). The servo loop sets this true only while
+    // the compliance equilibrium follows a live policy target.
+    bool allow_release_bleed = true;
 };
 
 struct RobotState {
@@ -442,6 +460,10 @@ struct CartesianSolveTelemetry {
     bool follower_corner = false;       // corner ring-down fired on some axis
     std::optional<Pose6D> follower_pf_stand;  // active segment target pose
     std::optional<Pose6D> stage_tcp_target_stand;  // pose-track stage output handed to IK
+    bool follower_output_smd_active = false;
+    double follower_output_smd_lag_m = 0.0;
+    double follower_output_smd_lag_rad = 0.0;
+    std::optional<Pose6D> follower_prefilter_stand;  // raw per-tick follower emission
     double follower_divergence_pos_m = 0.0;
     double follower_divergence_ang_rad = 0.0;
     double follower_projection_error_m = 0.0;
@@ -629,6 +651,7 @@ struct ForceControlTelemetry {
     double measured_force_n = 0.0;
     double fast_normal_force_n = 0.0;
     double fast_force_norm_n = 0.0;
+    double fast_force_rate_n_per_ms = 0.0;
     double fast_torque_norm_nm = 0.0;
     bool contact_threshold_exceeded = false;
     bool hard_limit_threshold_exceeded = false;

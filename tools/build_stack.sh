@@ -10,7 +10,8 @@
 #
 # Usage: tools/build_stack.sh [--clean]
 #   --clean removes only the rb_servo_server build tree used by make run.
-# Overrides: BUILD_JOBS, RBPODO_TAG, RBPODO_SRC, BUILD_STACK_PYTHON.
+# Overrides: BUILD_JOBS, RBPODO_TAG, RBPODO_SRC, STACK_PYTHON.
+# BUILD_STACK_PYTHON remains a build-only compatibility override.
 set -euo pipefail
 
 CLEAN_BUILD=0
@@ -32,8 +33,10 @@ BUILD_DIR="rb_servo_server/build/rbpodo_real_gate"   # the path tools/run_stack.
 SERVER_BIN="$BUILD_DIR/rb_servo_server"
 RT_CAPS="cap_sys_nice,cap_ipc_lock+ep"
 
-# Python for the editable installs: prefer a repo venv, else system python3.
-if [ -n "${BUILD_STACK_PYTHON:-}" ]; then PY="$BUILD_STACK_PYTHON"
+# Python for the editable installs: use the same STACK_PYTHON override that
+# run_stack.sh understands, prefer the repo venv, else use system python3.
+if [ -n "${STACK_PYTHON:-}" ]; then PY="$STACK_PYTHON"
+elif [ -n "${BUILD_STACK_PYTHON:-}" ]; then PY="$BUILD_STACK_PYTHON"
 elif [ -x ".venv/bin/python" ]; then PY=".venv/bin/python"
 else PY="python3"; fi
 
@@ -118,10 +121,10 @@ if ! getcap "$SERVER_BIN" 2>/dev/null | grep -q cap_sys_nice; then
 fi
 
 # 4) Python components — editable installs (edits live without reinstall).
-echo "[build] pip install -e rb_gui + policy_runner[spacemouse]  (python: $PY)"
-if ! "$PY" -m pip install -e rb_gui -e "policy_runner[spacemouse]"; then
+echo "[build] pip install -e rb_gui + policy_runner[spacemouse,gripper]  (python: $PY)"
+if ! "$PY" -m pip install -e rb_gui -e "policy_runner[spacemouse,gripper]"; then
   echo "[build] WARN: editable install failed (PEP 668 / no venv?). Retrying with --user" >&2
-  "$PY" -m pip install --user -e rb_gui -e "policy_runner[spacemouse]" \
+  "$PY" -m pip install --user -e rb_gui -e "policy_runner[spacemouse,gripper]" \
     || echo "[build] WARN: pip install failed; install rb_gui/policy_runner deps manually" >&2
 fi
 

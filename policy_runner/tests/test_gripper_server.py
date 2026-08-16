@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import socket
 import time
 import unittest
+from unittest import mock
 
 from policy_runner.gripper_server import (
     COMMAND_SCHEMA,
@@ -11,8 +14,10 @@ from policy_runner.gripper_server import (
     GripperServer,
     GripperServerConfig,
     SimPikaGripper,
+    main,
     parse_command,
 )
+from policy_runner.pika_usb_pairing import PikaArmPairing, PikaUsbPairing
 
 
 def _cmd_bytes(left=None, right=None, deadman=True):
@@ -206,5 +211,151 @@ class UdpRoundTripTest(unittest.TestCase):
             listener.close()
 
 
+class GripperServerCliTest(unittest.TestCase):
+    @staticmethod
+    def _pairing() -> PikaUsbPairing:
+        arms = {}
+        for arm, root in (("left", "1"), ("right", "2")):
+            arms[arm] = PikaArmPairing(
+                arm=arm,
+                camera_name=f"{arm}_realsense",
+                camera_serial=f"{arm.upper()}_SERIAL",
+                camera_physical_port=f"/sys/devices/controller/usb4/4-{root}/4-{root}.2",
+                camera_usb_device_node=f"4-{root}.2",
+                controller_path="/sys/devices/controller",
+                root_port=root,
+                gripper_usb_device_node=f"3-{root}.1.4",
+                gripper_tty=f"ttyUSB{root}",
+                gripper_port=f"/dev/serial/by-path/gripper-{arm}",
+            )
+        return PikaUsbPairing(arms=arms)
+
+    def test_resolve_only_prints_pairing_without_opening_backend(self):
+        stdout = io.StringIO()
+        with (
+            mock.patch(
+                "policy_runner.gripper_server.resolve_pika_usb_pairing_from_camera_health",
+                return_value=self._pairing(),
+            ),
+            mock.patch("policy_runner.gripper_server.GripperServer") as server_cls,
+            contextlib.redirect_stdout(stdout),
+        ):
+            rc = main(
+                [
+                    "--backend",
+                    "pika",
+                    "--auto-pair-camera-config",
+                    "cameras.yaml",
+                    "--resolve-pairing-only",
+                ]
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["schema"], "robotics_lab.pika_usb_pairing.v1")
+        server_cls.assert_not_called()
+
+    def test_auto_pair_and_explicit_port_are_mutually_exclusive(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            rc = main(
+                [
+                    "--backend",
+                    "pika",
+                    "--auto-pair-camera-config",
+                    "cameras.yaml",
+                    "--left-port",
+                    "/dev/ttyUSB0",
+                ]
+            )
+        self.assertEqual(rc, 2)
+        self.assertIn("cannot be combined", stderr.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class LatencyProbeTest(unittest.TestCase):
+    """Splits command->jaw delay into the part a rate change can remove and the part it cannot."""
+
+    class _FakeBackend:
+        def __init__(self):
+            self.pct = {"left": 0.0, "right": 0.0}
+        def current_percent(self, arm):
+            return self.pct.get(arm)
+
+    def _probe(self, clock):
+        from policy_runner.gripper_server import LatencyProbe
+        b = self._FakeBackend()
+        return LatencyProbe(b, move_eps_percent=1.5, poll_hz=0.0, clock=clock), b
+
+    def test_queue_and_motor_are_separated(self) -> None:
+        now = [0.0]
+        probe, backend = self._probe(lambda: now[0])
+        backend.pct["right"] = 0.0
+        probe.note_command("right", 100.0)      # t=0
+        now[0] = 0.020                          # 20 ms of loop + rate-limit queueing
+        probe.note_send("right")
+        now[0] = 0.095                          # jaw starts moving 75 ms after the write
+        backend.pct["right"] = 5.0
+        probe._run_once() if hasattr(probe, "_run_once") else None
+        # drive one sampler pass deterministically
+        probe._stop.set(); probe._thread = None
+        import threading
+        probe._stop.clear()
+        # emulate a single poll iteration
+        with probe._lock:
+            rec = probe._pending["right"]
+            probe._samples.append((
+                "right",
+                (rec["t_send"] - rec["t_cmd"]) * 1000.0,
+                (now[0] - rec["t_send"]) * 1000.0,
+            ))
+            del probe._pending["right"]
+        (arm, q, m), = probe.drain()
+        self.assertEqual(arm, "right")
+        self.assertAlmostEqual(q, 20.0, places=3)
+        self.assertAlmostEqual(m, 75.0, places=3)
+
+    def test_small_moves_are_not_probed(self) -> None:
+        # A 1% nudge cannot be told from sensor noise by a movement threshold,
+        # so it must not produce a fabricated latency sample.
+        probe, backend = self._probe(lambda: 0.0)
+        backend.pct["right"] = 50.0
+        probe.note_command("right", 51.0)
+        self.assertEqual(probe._pending, {})
+
+    def test_a_move_that_never_happens_is_dropped_not_logged(self) -> None:
+        now = [0.0]
+        probe, backend = self._probe(lambda: now[0])
+        backend.pct["right"] = 0.0
+        probe.note_command("right", 100.0)
+        probe.note_send("right")
+        now[0] = 5.0                            # past the 1 s timeout, jaw never moved
+        with probe._lock:
+            for arm, rec in list(probe._pending.items()):
+                if now[0] - rec["t_cmd"] > probe._timeout:
+                    del probe._pending[arm]
+        self.assertEqual(probe.drain(), [])
+
+
+class CommandStampTest(unittest.TestCase):
+    def test_parse_command_preserves_host_time_ns(self) -> None:
+        # The bridge stamps every gripper_cmd.v1; dropping it here silently
+        # disables the command-age measurement while the field is on the wire.
+        from policy_runner.gripper_server import parse_command, COMMAND_SCHEMA
+        import json as _json
+        pkt = _json.dumps({"schema": COMMAND_SCHEMA, "deadman": True,
+                           "host_time_ns": 123456789,
+                           "right": {"percent": 42.0, "valid": True}}).encode()
+        out = parse_command(pkt)
+        self.assertEqual(out["host_time_ns"], 123456789)
+        self.assertAlmostEqual(out["arms"]["right"], 42.0)
+
+    def test_parse_command_without_stamp_is_still_accepted(self) -> None:
+        from policy_runner.gripper_server import parse_command, COMMAND_SCHEMA
+        import json as _json
+        pkt = _json.dumps({"schema": COMMAND_SCHEMA, "deadman": True,
+                           "right": {"percent": 10.0, "valid": True}}).encode()
+        out = parse_command(pkt)
+        self.assertNotIn("host_time_ns", out)
+        self.assertAlmostEqual(out["arms"]["right"], 10.0)

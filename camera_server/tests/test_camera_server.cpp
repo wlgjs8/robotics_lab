@@ -103,12 +103,16 @@ void test_priority_bundle_config() {
   if (!std::ifstream(path).good()) path = "../config/d435_head_1280x720.yaml";
   const auto cfg = load_config(path);
   const auto groups = effective_bundle_groups(cfg);
-  assert(groups.size() == 3);
+  assert(groups.size() == 5);
   assert(groups[0].topic == "camera.bundle");
   assert(groups[1].topic == "camera.bundle.policy");
   assert(groups[1].required_streams.size() == 4);
-  assert(groups[2].topic == "camera.bundle.stereo");
-  assert(groups[2].required_streams.size() == 3);
+  assert(groups[2].topic == "camera.bundle.wrist_left");
+  assert(groups[2].required_streams.size() == 2);
+  assert(groups[3].topic == "camera.bundle.wrist_right");
+  assert(groups[3].required_streams.size() == 2);
+  assert(groups[4].topic == "camera.bundle.stereo");
+  assert(groups[4].required_streams.size() == 3);
   assert(cfg.health.fps_window_sec == 5.0);
   assert(cfg.health.warn_if_fps_below == 29.0);
 }
@@ -251,15 +255,18 @@ void test_per_camera_reconnect_keeps_other_camera_streaming() {
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
   bool recovered = false;
   uint64_t right_frames_before_recovery = 0;
+  uint64_t bundles_before_recovery = 0;
   while (std::chrono::steady_clock::now() < deadline) {
     const auto snapshot = manager.snapshot();
     const auto& left_reconnect = snapshot.camera_reconnect_stats.at(cfg.cameras[0].name);
     if (left_reconnect.disconnect_count > 0 && right_frames_before_recovery == 0) {
       right_frames_before_recovery = snapshot.stream_stats.at(cfg.cameras[1].name + ".color").frame_count;
+      bundles_before_recovery = snapshot.complete_bundle_count;
     }
     if (left_reconnect.success_count > 0 &&
         snapshot.camera_connected.at(cfg.cameras[0].name) &&
-        snapshot.camera_connected.at(cfg.cameras[1].name)) {
+        snapshot.camera_connected.at(cfg.cameras[1].name) &&
+        snapshot.complete_bundle_count > bundles_before_recovery) {
       recovered = true;
       break;
     }
@@ -274,6 +281,7 @@ void test_per_camera_reconnect_keeps_other_camera_streaming() {
   assert(final_snapshot.camera_reconnect_stats.at(cfg.cameras[0].name).success_count >= 1);
   assert(final_snapshot.stream_stats.at(cfg.cameras[1].name + ".color").frame_count >
          right_frames_before_recovery);
+  assert(final_snapshot.complete_bundle_count > bundles_before_recovery);
 }
 
 void test_realsense_preflight_contract() {
@@ -534,6 +542,38 @@ void test_synchronizer_and_drop_schema() {
   assert(json.find("\"complete\":true") != std::string::npos);
 }
 
+void test_optional_capture_metadata_json() {
+  FrameMeta frame;
+  frame.camera_name = "left_realsense";
+  frame.serial = "412622272078";
+  frame.stream = "color";
+  frame.ring_name = "left_realsense.color";
+  frame.frame_number = 42;
+  frame.actual_exposure_us = 6951.0;
+  frame.gain_level = 16.0;
+  frame.auto_exposure = true;
+  frame.valid = true;
+
+  const auto frame_json = frame_to_json(frame);
+  assert(frame_json.find("\"actual_exposure_us\":6951") != std::string::npos);
+  assert(frame_json.find("\"gain_level\":16") != std::string::npos);
+  assert(frame_json.find("\"auto_exposure\":true") != std::string::npos);
+
+  FrameBundleMeta bundle;
+  bundle.complete = true;
+  bundle.frames[frame.ring_name] = frame;
+  const auto bundle_json = bundle_to_json(bundle);
+  assert(bundle_json.find("\"actual_exposure_us\":6951") != std::string::npos);
+
+  frame.actual_exposure_us.reset();
+  frame.gain_level.reset();
+  frame.auto_exposure.reset();
+  const auto absent_json = frame_to_json(frame);
+  assert(absent_json.find("actual_exposure_us") == std::string::npos);
+  assert(absent_json.find("gain_level") == std::string::npos);
+  assert(absent_json.find("auto_exposure") == std::string::npos);
+}
+
 void test_bundle_groups_publish_independently() {
   auto cfg = make_test_config();
   cfg.bundle_groups = {
@@ -572,6 +612,96 @@ void test_bundle_groups_publish_independently() {
   assert(published.size() == 1);
   assert(published[0].topic == "camera.bundle.policy");
   assert(published[0].bundle.frames.size() == 2);
+}
+
+void test_master_camera_generation_reset_resumes_lower_frame_numbers() {
+  auto cfg = make_test_config();
+  cfg.bundle_groups = {
+      BundleGroupConfig{"wrist_right", "camera.bundle.wrist_right", "right_wrist.color",
+                        {"right_wrist.color"}, 20.0, false},
+  };
+  validate_config(cfg);
+  FrameSynchronizerSet sync(cfg);
+  std::map<std::string, uint64_t> drops;
+  const uint64_t t = now_ns();
+
+  FrameMeta right;
+  right.camera_name = "right_wrist";
+  right.stream = "color";
+  right.ring_name = "right_wrist.color";
+  right.frame_number = 100;
+  right.host_arrival_time_ns = t;
+  right.valid = true;
+  auto published = sync.push_frame(right, drops);
+  assert(published.size() == 1);
+
+  right.frame_number = 101;
+  right.host_arrival_time_ns = t + 33333333;
+  published = sync.push_frame(right, drops);
+  assert(published.size() == 1);
+  auto stats = sync.stats().at("wrist_right");
+  assert(stats.bundle_seq == 2);
+  assert(stats.complete_bundle_count == 2);
+  assert(stats.publish_rate_hz > 0.0);
+
+  assert(sync.reset_camera_generation("right_wrist") == 1);
+  stats = sync.stats().at("wrist_right");
+  assert(stats.bundle_seq == 2);
+  assert(stats.complete_bundle_count == 2);
+  assert(stats.publish_rate_hz == 0.0);
+  assert(stats.last_skew_ms == 0.0);
+
+  right.frame_number = 1;
+  right.host_arrival_time_ns = t + 1000000000;
+  published = sync.push_frame(right, drops);
+  assert(published.size() == 1);
+  assert(published[0].bundle.bundle_seq == 3);
+  assert(published[0].bundle.frames.at("right_wrist.color").frame_number == 1);
+}
+
+void test_non_master_camera_generation_reset_discards_old_group_buffers() {
+  auto cfg = make_test_config();
+  cfg.cameras.resize(2);
+  cfg.bundle_groups = {
+      BundleGroupConfig{"policy", "camera.bundle.policy", "head.color",
+                        {"head.color", "left_wrist.color"}, 20.0, false},
+  };
+  validate_config(cfg);
+  FrameSynchronizerSet sync(cfg);
+  std::map<std::string, uint64_t> drops;
+  const uint64_t t = now_ns();
+
+  FrameMeta head;
+  head.camera_name = "head";
+  head.stream = "color";
+  head.ring_name = "head.color";
+  head.frame_number = 100;
+  head.host_arrival_time_ns = t;
+  head.valid = true;
+  FrameMeta left = head;
+  left.camera_name = "left_wrist";
+  left.ring_name = "left_wrist.color";
+  left.host_arrival_time_ns = t + 1000000;
+  assert(sync.push_frame(head, drops).empty());
+  auto published = sync.push_frame(left, drops);
+  assert(published.size() == 1);
+
+  assert(sync.reset_camera_generation("left_wrist") == 1);
+  left.frame_number = 1;
+  left.host_arrival_time_ns = t + 1000000000;
+  assert(sync.push_frame(left, drops).empty());
+
+  // The old master generation remains gated, while the next master frame can
+  // pair only with the post-reconnect non-master frame.
+  head.host_arrival_time_ns = t + 1001000000;
+  assert(sync.push_frame(head, drops).empty());
+  head.frame_number = 101;
+  head.host_arrival_time_ns = t + 1002000000;
+  published = sync.push_frame(head, drops);
+  assert(published.size() == 1);
+  assert(published[0].bundle.bundle_seq == 2);
+  assert(published[0].bundle.frames.at("head.color").frame_number == 101);
+  assert(published[0].bundle.frames.at("left_wrist.color").frame_number == 1);
 }
 
 void test_bundle_retry_and_master_drop_are_distinct() {
@@ -773,7 +903,10 @@ int main() {
   test_shared_memory_open_rejects_invalid_slot_offsets();
   test_hardware_sync_uses_selected_master_frame_number();
   test_synchronizer_and_drop_schema();
+  test_optional_capture_metadata_json();
   test_bundle_groups_publish_independently();
+  test_master_camera_generation_reset_resumes_lower_frame_numbers();
+  test_non_master_camera_generation_reset_discards_old_group_buffers();
   test_bundle_retry_and_master_drop_are_distinct();
   test_health_json();
   test_queue_drop_newest_factory_skips_payload_creation();

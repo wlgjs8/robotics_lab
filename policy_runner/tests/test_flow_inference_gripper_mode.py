@@ -45,6 +45,7 @@ def _make_source(
     close_snap_percent: float = 0.0,
     close_bias_left: float | None = None,
     close_bias_right: float | None = None,
+    command_deadband_percent: float = 0.0,
 ) -> "FlowMatchingActionSource":
     assert FlowMatchingActionSource is not None
     source = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
@@ -71,6 +72,8 @@ def _make_source(
     source.gripper_open_hold_steps = int(open_hold_steps)
     source._gripper_integrate_count = 0
     source._gripper_hold_open_now = False
+    source.gripper_command_deadband_percent = float(command_deadband_percent)
+    source._gripper_last_sent_by_arm = {"left": None, "right": None}
     return source
 
 
@@ -257,3 +260,115 @@ class GripperOpenHoldStepsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(FlowMatchingActionSource is None, "torch is not installed")
+class GripperCommandDeadbandTest(unittest.TestCase):
+    """The jaw is re-targeted every policy step with no rate limit; the deadband
+    re-holds the last SENT value so per-step model jitter does not reach it."""
+
+    @staticmethod
+    def _drive(source, right_openings):
+        out = []
+        for value in right_openings:
+            step = np.zeros(14, dtype=np.float32)
+            step[6] = 80.0          # left parked wide open
+            step[13] = float(value)
+            out.append(source._integrate_gripper_targets(step, {})["right"])
+        return out
+
+    def test_off_by_default_passes_every_jitter_through(self) -> None:
+        source = _make_source(absolute=True)
+        self.assertEqual(self._drive(source, [40.0, 42.0, 40.5, 43.0]),
+                         [40.0, 42.0, 40.5, 43.0])
+
+    def test_sub_deadband_jitter_is_held(self) -> None:
+        source = _make_source(absolute=True, command_deadband_percent=5.0)
+        # 42.0/40.5 are within 5% of the latched 40.0 -> held; 47.0 exceeds it.
+        self.assertEqual(self._drive(source, [40.0, 42.0, 40.5, 47.0, 48.0]),
+                         [40.0, 40.0, 40.0, 47.0, 47.0])
+
+    def test_full_close_is_never_suppressed(self) -> None:
+        # The failure this exemption exists for: a jaw latched at 4% must still
+        # accept a close-snapped 0% under a 5% deadband, or the grasp never happens.
+        source = _make_source(absolute=True, command_deadband_percent=5.0,
+                              close_snap_percent=15.0)
+        self.assertEqual(self._drive(source, [4.0, 3.0]), [0.0, 0.0])
+
+    def test_release_from_full_close_is_never_suppressed(self) -> None:
+        source = _make_source(absolute=True, command_deadband_percent=5.0)
+        # 0 -> 2 is a 2% move, inside the deadband, but leaving the closed state
+        # must not be swallowed either.
+        self.assertEqual(self._drive(source, [0.0, 2.0]), [0.0, 2.0])
+
+    def test_dispatch_path_sees_the_same_command(self) -> None:
+        source = _make_source(absolute=True, command_deadband_percent=5.0)
+        self._drive(source, [40.0])
+        step = np.zeros(14, dtype=np.float32)
+        step[13] = 42.0     # jitter within the deadband
+        source._integrate_gripper_targets(step, {})
+        source._dispatch_gripper_step(step)
+        values = [r.command.value for r in source.gripper_runtime.results]
+        # [left, right]; the right jaw must see the HELD 40.0, not the 42.0 jitter.
+        self.assertEqual(len(values), 2)
+        self.assertAlmostEqual(values[1], 40.0, places=6)
+
+
+@unittest.skipIf(FlowMatchingActionSource is None, "torch is not installed")
+class ChunkKnotFilterTest(unittest.TestCase):
+    """Zero-phase FIR over the chunk's pose deltas (not the gripper)."""
+
+    @staticmethod
+    def _source(taps=None):
+        s = FlowMatchingActionSource.__new__(FlowMatchingActionSource)
+        s._chunk_knot_filter_taps = taps
+        s._chunk_knot_filter_context = None
+        return s
+
+    def test_off_by_default_returns_the_chunk_unchanged(self) -> None:
+        s = self._source(None)
+        c = np.random.RandomState(0).randn(19, 14).astype(np.float32)
+        self.assertIs(s._band_limit_chunk(c), c)
+
+    def test_gripper_channel_is_never_filtered(self) -> None:
+        # The gripper is near-binary; low-passing it would blunt the close.
+        s = self._source(np.ones(5) / 5.0)
+        c = np.zeros((19, 14), dtype=np.float32)
+        c[:, 6] = np.tile([0.0, 100.0], 10)[:19]     # left gripper square wave
+        c[:, 13] = np.tile([100.0, 0.0], 10)[:19]    # right gripper square wave
+        out = s._band_limit_chunk(c)
+        np.testing.assert_allclose(out[:, 6], c[:, 6])
+        np.testing.assert_allclose(out[:, 13], c[:, 13])
+
+    def test_constant_motion_is_preserved(self) -> None:
+        # A normalised kernel must pass DC untouched: steady travel keeps its rate.
+        s = self._source(np.ones(5) / 5.0)
+        c = np.zeros((19, 14), dtype=np.float32)
+        c[:, 0] = 2.0
+        out = s._band_limit_chunk(c)
+        np.testing.assert_allclose(out[:, 0], 2.0, atol=1e-5)
+
+    def test_alternating_ripple_is_attenuated(self) -> None:
+        s = self._source(np.ones(5) / 5.0)
+        c = np.zeros((19, 14), dtype=np.float32)
+        c[:, 0] = np.where(np.arange(19) % 2 == 0, 1.0, -1.0)   # Nyquist ripple
+        out = s._band_limit_chunk(c)
+        self.assertLess(float(np.std(out[2:-2, 0])), 0.25 * float(np.std(c[:, 0])))
+
+    def test_context_carries_across_chunks_instead_of_edge_padding(self) -> None:
+        # The backward half must come from the PREVIOUS chunk, or the rows about
+        # to execute get distorted by replicated edge samples.
+        s = self._source(np.ones(5) / 5.0)
+        first = np.zeros((19, 14), dtype=np.float32); first[:, 0] = 1.0
+        s._band_limit_chunk(first)
+        self.assertIsNotNone(s._chunk_knot_filter_context)
+        self.assertEqual(s._chunk_knot_filter_context.shape[0], 2)
+        second = np.zeros((19, 14), dtype=np.float32); second[:, 0] = 1.0
+        out = s._band_limit_chunk(second)
+        # Continuous 1.0 stream across the seam -> row 0 must stay 1.0, not sag.
+        self.assertAlmostEqual(float(out[0, 0]), 1.0, places=5)
+
+    def test_short_chunk_is_passed_through(self) -> None:
+        s = self._source(np.ones(7) / 7.0)
+        c = np.ones((2, 14), dtype=np.float32)
+        np.testing.assert_allclose(s._band_limit_chunk(c), c)

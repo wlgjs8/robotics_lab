@@ -18,6 +18,7 @@
 #include "rb_servo/control/command_buffer.hpp"
 #include "rb_servo/control/delta_twist_follower.hpp"
 #include "rb_servo/control/force_controller.hpp"
+#include "rb_servo/control/follower_output_smd.hpp"
 #include "rb_servo/control/joint_moving_average.hpp"
 #include "rb_servo/control/normal_force_controller.hpp"
 #include "rb_servo/control/realtime_timing.hpp"
@@ -360,6 +361,29 @@ private:
         int transverse_enter_count = 0;
         int rotational_enter_count = 0;
         int hard_limit_count = 0;
+        // Resultant fast-force differentiator. It advances only with a fresh
+        // F/T acquisition and uses the backend sample's host timestamp, not
+        // the 500 Hz servo tick period.
+        bool fast_force_rate_initialized = false;
+        double previous_fast_force_norm_n = 0.0;
+        uint64_t previous_fast_force_sample_ns = 0;
+        // Hard-limit retreat episode (force_control.hard_limit_policy:
+        // retreat): direction is the measured stand-frame press at trigger;
+        // progress is the committed admittance-offset displacement along the
+        // escape (-press) direction since the episode started.
+        bool retreat_active = false;
+        // Braking phase: the virtual wrench ramps to zero over ~50 ms instead
+        // of stepping off — the Layer-3 envelope follows the wrench error, so
+        // a step collapse strands a fast escape state outside the shrunk
+        // envelope (2026-07-23 12:55 run: proposal-infeasible latch mid
+        // retreat as the real force decayed).
+        bool retreat_braking = false;
+        double retreat_virtual_current_n = 0.0;
+        std::array<double, 3> retreat_press_stand{{0.0, 0.0, 0.0}};
+        std::array<double, 3> retreat_start_offset{{0.0, 0.0, 0.0}};
+        uint64_t retreat_started_ns = 0;
+        int retreat_attempt_count = 0;
+        uint64_t retreat_window_start_ns = 0;
         uint64_t release_start_ns = 0;
         Pose6D release_hold_pose;
         bool release_hold_pending = false;
@@ -392,6 +416,11 @@ private:
         bool tare_valid = false;
         bool tare_waiting_for_init_completion = false;
         bool tare_collecting = false;
+        // Bounded auto-retry of the post-init residual tare window: a single
+        // 1 s window is spoiled by intermittent disturbances (gripper servo
+        // twitch, wrist-camera cable sway — 2026-07-23 20:33 fx stddev 1.571 N
+        // rejected one run while its 12 s-earlier twin accepted).
+        int tare_retry_count = 0;
         uint64_t tare_not_before_ns = 0;
         uint64_t last_init_tare_command_seq = 0;
         uint64_t tare_generation = 0;
@@ -405,6 +434,12 @@ private:
         // pipeline is healthy and cartesian_admittance is active this tick.
         std::array<double, 3> follower_loading_reaction_stand{{0.0, 0.0, 0.0}};
         bool follower_loading_reaction_valid = false;
+        // contact_force episode entry direction-consistency window: the force
+        // direction at the first debounce sample; later samples must stay in a
+        // 30 deg cone or the window restarts (transit residuals rotate, real
+        // contact does not).
+        std::array<double, 3> contact_entry_first_dir{{0.0, 0.0, 0.0}};
+        bool contact_entry_first_dir_valid = false;
         // True when the chunk follower produced this tick's Cartesian target.
         // The rolling compliance equilibrium then adopts the follower output
         // verbatim instead of re-projecting policy deltas: the follower's
@@ -708,6 +743,8 @@ private:
     // path; delta_twist consumes local action deltas through a separate state.
     control::CartesianChunkFollower left_chunk_follower_{control::CartesianChunkFollowerConfig{}};
     control::CartesianChunkFollower right_chunk_follower_{control::CartesianChunkFollowerConfig{}};
+    control::FollowerOutputSmd left_follower_output_smd_{FollowerOutputSmdConfig{}};
+    control::FollowerOutputSmd right_follower_output_smd_{FollowerOutputSmdConfig{}};
     control::DeltaTwistFollower left_delta_twist_follower_{control::DeltaTwistFollowerConfig{}};
     control::DeltaTwistFollower right_delta_twist_follower_{control::DeltaTwistFollowerConfig{}};
     RuckigFollowerConfig left_chunk_follower_built_{};
@@ -754,6 +791,7 @@ private:
         std::uint64_t* submitted_wire_seq,
         std::uint64_t* submitted_recv_seq,
         SmdPoseTracker* smd_tracker,
+        control::FollowerOutputSmd* output_smd,
         const ArmMountConfig& mount,
         const JointArray& previous_sent_q_deg,
         const Pose6D& actual_feedback_pose,
@@ -809,6 +847,10 @@ private:
         bool follower_corner = false;
         std::optional<Pose6D> follower_pf_stand;
         std::optional<Pose6D> stage_tcp_target_stand;
+        bool follower_output_smd_active = false;
+        double follower_output_smd_lag_m = 0.0;
+        double follower_output_smd_lag_rad = 0.0;
+        std::optional<Pose6D> follower_prefilter_stand;
         double follower_divergence_pos_m = 0.0;
         double follower_divergence_ang_rad = 0.0;
         double follower_projection_error_m = 0.0;
@@ -891,5 +933,35 @@ PursuitStep pursueWaypointsStep(
     double waypoint_tol_deg,
     double lookahead_deg,
     int escape_count = 0);
+
+// Minimal view of an InitMotionExec for the freshness predicate below (the exec type
+// itself is private to DualArmServoLoop).
+struct InitMotionRequestView {
+    bool request_seen = false;
+    uint64_t request_seq = 0;
+    bool sequence_active = false;  // status is Planning or Executing
+    bool has_target = false;
+    bool left_active = false;
+    bool right_active = false;
+    JointArray target_left{};
+    JointArray target_right{};
+};
+
+// True when an incoming init_motion command is a NEW OPERATOR REQUEST for this exec and
+// must (re)launch the planner, rather than a re-delivery of the request already in
+// flight. Packet seq alone is NOT sufficient: a one-shot GUI command is re-served from
+// the command buffer with a constant seq, but policy_runner's arm_init latch re-emits the
+// same logical InitMotion every tick with a FRESH seq. Treating the latter as a new press
+// relaunched the planner every tick and the async plan was never consumed (see
+// applyInitMotionSequencer). Stateless, so it is unit-testable in isolation (see
+// test_init_motion_pursuit).
+bool initMotionRequestIsFresh(
+    const InitMotionRequestView& ex,
+    uint64_t command_seq,
+    bool request_left,
+    bool request_right,
+    const JointArray& command_target_left,
+    const JointArray& command_target_right,
+    double tol_deg);
 
 }  // namespace rb_servo

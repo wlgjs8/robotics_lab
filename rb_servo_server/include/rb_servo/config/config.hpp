@@ -903,6 +903,13 @@ struct ForceControlArmConfig {
     // V1 supports one stand-frame normal: a server-owned plane, or a direction
     // captured from measured force at the start of a debounced contact episode.
     std::string surface_source = "floor_constraint";
+    // contact_force episode ENTRY gate: an episode may only start while the
+    // commanded TCP speed is at or below this. Real surface contact happens in
+    // a decelerating approach; grip/inertial residuals during fast transit
+    // (2026-07-18 15:23 runs: 3.5-9.5 N with rotating direction) must never
+    // freeze a bogus normal. Zero is invalid for a motion-affecting
+    // contact_force profile — the gate must be an explicit reviewed choice.
+    double contact_entry_max_speed_m_s = 0.0;
     // Frame used by the symmetric 6D Cartesian admittance controller.
     // surface: selected stand-fixed surface axes at the TCP origin.
     // sensor_origin: URDF/configured sensor axes and measurement origin.
@@ -915,6 +922,12 @@ struct ForceControlArmConfig {
     double hard_normal_force_n = 0.0;
     double hard_force_norm_n = 0.0;
     double hard_torque_norm_nm = 0.0;
+    // Optional resultant-force rise-rate hard-limit trigger. The rate is
+    // evaluated only across fresh F/T acquisitions using their host sample
+    // timestamps. Zero disables the trigger; a positive rate requires a
+    // positive arming floor so near-zero noise cannot trip it.
+    double hard_limit_rate_n_per_ms = 0.0;
+    double hard_limit_rate_floor_n = 10.0;
     int debounce_samples = 1;
     int hard_limit_debounce_samples = 1;
     double release_dwell_sec = 0.0;
@@ -956,10 +969,73 @@ struct ForceControlConfig {
     ForceControlArmConfig right;
     NormalAdmittanceConfig normal_admittance;
 
+    // Layer-3 generic force limiter (task-agnostic back-off). Above
+    // force_limit_n the TRANSLATION response envelope opens proportionally to
+    // the excess force so the arm actively escapes along the measured force
+    // direction — no pre-defined normal, no episode state: the per-tick
+    // deadband-filtered wrench IS the direction. force_limit_n <= 0 disables
+    // the layer (plain bounded compliance). When enabled, validation requires
+    // a positive gain and backoff_max_velocity_m_s >= max_linear_velocity_m_s.
+    double force_limit_n = 0.0;
+    double backoff_gain_m_s_per_n = 0.0;
+    double backoff_max_velocity_m_s = 0.0;
+
+    // Hard-limit policy. "latch" (default): the debounced hard force/torque
+    // limit faults and freezes motion. "retreat": instead of latching, run a
+    // bounded retreat episode — a virtual wrench of retreat_virtual_force_n
+    // along the measured press direction drives the admittance offset away
+    // from the contact until the TCP has escaped retreat_distance_m and the
+    // instantaneous force is back under the hard threshold; policy streaming
+    // and inference continue throughout (no fault). The latch remains the
+    // fail-closed backstop: it fires when the retreat cannot unload within
+    // retreat_timeout_sec, when no press direction is measurable, when the
+    // scalar contact_force episode owns the normal, or when episodes trigger
+    // more than retreat_max_attempts times per retreat_attempt_window_sec
+    // (0 attempts = unlimited retreats). Requires operating_mode
+    // cartesian_admittance.
+    std::string hard_limit_policy = "latch";
+    // Retreat travel CAP, not a target: the escape brakes at whichever of
+    // retreat_release_force_n / this distance / the offset-budget guards comes
+    // first. Config validation enforces retreat_distance_m < max_pos_offset_m,
+    // because when the two were equal (both 30 mm, 2026-07-24 -> 07-31) the
+    // 0.8*max_pos_offset braking guard at 24 mm ALWAYS fired first and the
+    // distance condition became dead code.
+    double retreat_distance_m = 0.010;
+    // Force-terminated retreat: brake once the measured external force falls to
+    // this level. 0 disables it (distance/budget termination only).
+    //
+    // Distance alone is open-loop on the wrong quantity. Measured 2026-07-31
+    // (left arm, servo_log_20260731_153934): when the compliance offset started
+    // near zero the arm unloaded to 1.3-2.2 N after only 12-16 mm of escape, but
+    // once repeated contacts had ratcheted the offset to 24-29 mm there was no
+    // room left, the escape ended with 6.0-8.8 N still applied, and the next
+    // press stacked on top -- a 24 N plateau across 19 retreat episodes. Braking
+    // on the force instead of on a fixed distance ends the escape as soon as the
+    // objective is met and keeps escaping while it is not.
+    double retreat_release_force_n = 0.0;
+    double retreat_virtual_force_n = 20.0;
+    double retreat_timeout_sec = 1.0;
+    int retreat_max_attempts = 0;
+    double retreat_attempt_window_sec = 10.0;
+
     // Diagonal Cartesian admittance parameters ordered [x,y,z,rx,ry,rz].
     std::array<double, 6> virtual_mass{5.0, 5.0, 5.0, 0.5, 0.5, 0.5};
     std::array<double, 6> damping{80.0, 80.0, 80.0, 8.0, 8.0, 8.0};
     std::array<double, 6> stiffness{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    // Released-state offset bleed for zero-stiffness axes. With stiffness 0 the
+    // protective admittance offset never drains on its own; a policy that
+    // hovers at the contact and re-approaches (instead of moving away) ratchets
+    // the offset up to max_pos_offset_m across repeated contacts, after which
+    // the unload authority is gone and the next press runs straight into the
+    // hard force limit (2026-07-22 servo_log_20260722_172914: three floor
+    // contacts, offset -7 -> -22 -> -30 mm(cap), peaks 6.6 -> 15.6 -> 31.6 N
+    // latch). While an axis BLOCK is fully released (every enabled axis inside
+    // the wrench deadband), a zero-stiffness axis uses this spring value so the
+    // residual offset decays toward the equilibrium (tau ~= damping/bleed).
+    // Any re-contact re-loads the block and immediately stops the bleed, so
+    // the in-contact spring re-press that motivated stiffness 0 stays
+    // impossible. 0 disables the bleed (offset rests where contact put it).
+    std::array<double, 6> release_bleed_stiffness{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     std::array<double, 6> wrench_deadband{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     // When enabled, translation and rotation each defer per-axis spring
     // recentering until every enabled axis in that block is released.  The
@@ -1077,6 +1153,19 @@ enum class RuckigFollowerController {
     DeltaPreview
 };
 
+// Continuous output conditioning for the Cartesian chunk follower. This is a
+// pure post-follower stage: chunk chaining, projection, divergence, and actual-
+// lead accounting continue to use the unfiltered follower state.
+struct FollowerOutputSmdConfig {
+    bool enable = false;
+    double nf_linear_hz = 3.5;
+    double nf_angular_hz = 2.5;
+    double damping_ratio = 1.0;
+    bool velocity_ff = true;
+    // 0 follows the natural frequency of each domain independently.
+    double velocity_ff_lpf_hz = 0.0;
+};
+
 // Per-profile chunk-follower stage that REPLACES the pose_track_smd step while
 // active. The default controller consumes measured-anchored absolute waypoint
 // rows through the Ruckig receding-horizon follower; delta_twist consumes
@@ -1118,7 +1207,14 @@ struct RuckigFollowerConfig {
     int consume_steps = 16;
     int reserve_steps = 1;             // central-difference lookahead (>= 1)
     int smoothing_window = 3;          // odd; pre-difference chunk smoothing
-    double af_damping_beta = 0.85;     // feedforward accel damping (0, 1]
+    FollowerOutputSmdConfig output_smd;
+    // Feedforward accel damping, (0, 1], split by axis class 2026-07-31 because the two classes
+    // sit at 31% and 95% of their acceleration limits -- see control::GuardConfig for the
+    // measurement and why the single scalar could not be tuned. The legacy scalar
+    // `af_damping_beta` key is still accepted and seeds BOTH (existing configs keep their
+    // behavior); the per-class keys override it.
+    double af_damping_beta_lin = 0.85;
+    double af_damping_beta_ang = 0.85;
     // DeltaTwistFollower params. The model delta is a per-policy-frame local
     // displacement, not m/s; these tune how that backlog is drained into an
     // internally jerk-limited body twist.
@@ -1131,6 +1227,20 @@ struct RuckigFollowerConfig {
     double delta_twist_max_lead_m = 0.060;
     double delta_twist_max_lead_rad = 0.30;
     double delta_twist_stale_residual_timeout_sec = 0.15;
+    // Corner (direction-reversal) ring-down guard of the chunk follower. A flanking
+    // step below the deadband contributes sign 0 and cannot form a reversal pair, so
+    // a LARGER deadband means the guard ignores small wobble. Size them against the
+    // real per-step displacement: at 30 Hz the policy commands ~2 mm / ~0.3 deg per
+    // step, and 0.3 deg split across three rotation axes leaves per-axis components
+    // only a few times the 0.029 deg default -- rotational sign noise then trips the
+    // guard on a large fraction of segments. Because ruckig time-synchronizes the
+    // segment, one braked rotation axis stretches the whole 6-DoF duration and slows
+    // translation too. Defaults reproduce the previously hard-coded values exactly.
+    double corner_deadband_lin_m = 3e-4;
+    double corner_deadband_ang_rad = 5e-4;
+    // Target-velocity ring-down for a reversing axis (target acceleration is always
+    // zeroed). 1.0 disables the velocity cut and keeps only the acceleration reset.
+    double corner_velocity_scale = 0.25;
     // delta_preview safety contract. Zero means unspecified and is rejected
     // whenever controller=delta_preview; no motion-relevant fallback exists.
     double preview_max_projection_error_m = 0.0;

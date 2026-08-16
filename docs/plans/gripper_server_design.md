@@ -18,6 +18,12 @@ Current implementation:
 - **Phase 3 — GUI/state consumers.** `rb_gui` parses gripper feedback and exposes
   gripper controls/visualization. `tools/run_stack.sh` launches the gripper
   server by default: sim backend in `MODE=sim`, Pika backend in `MODE=real`.
+- **Physical USB identity.** The real Pika backend resolves each serial port
+  from the accepted left/right D405 serial in live `camera.health` plus the
+  shared xHCI root-port topology. It requires exactly one CH340 per camera and
+  opens `/dev/serial/by-path`; tty enumeration, fixed udev port rules, and
+  `/dev/pika-*` are not runtime identity sources. Pairing failure is fatal to
+  `make run`, and runtime replug requires a stack restart.
 
 Earlier (GUI-only viz):
 - **B2a articulated-gripper visualization.** `pika_gripper.STL` split into

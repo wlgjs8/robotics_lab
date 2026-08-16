@@ -47,12 +47,15 @@ void SmdPoseTracker::reset(const Pose6D& pose) {
     previous_goal_position_ = position_;
     previous_goal_rotation_ = rotation_;
     previous_command_.reset();
+    // A re-anchor is a new pose context; the retained sigma described the old one.
+    last_min_singular_ = -1.0;
     active_ = true;
 }
 
 void SmdPoseTracker::deactivate() {
     active_ = false;
     previous_command_.reset();
+    last_min_singular_ = -1.0;
 }
 
 void SmdPoseTracker::updateGoalFromCommand(const Pose6D& command_pose) {
@@ -107,9 +110,9 @@ Pose6D SmdPoseTracker::step(double dt_sec) {
     // to singularity_scale_min at floor) so a near-singular pose is approached gently
     // instead of lurching, and the operator feels the slow-down and backs out. This is
     // velocity-only — it never touches IK damping or iteration count — so it cannot cause
-    // an IK max_iterations stall. Disabled when full_sigma <= 0; sigma <= 0 means the IK
-    // did NOT compute the SVD this solve (common in healthy poses) -> treat as unknown ->
-    // NO scaling (full speed). Only a real, positive singular value scales.
+    // an IK max_iterations stall. Disabled when full_sigma <= 0, and until the first real
+    // sigma sample arrives (last_min_singular_ < 0). Unmeasured solves never clear the
+    // retained sample — see setMinSingular().
     double vel_scale = 1.0;
     if (config_.singularity_scale_full_sigma > 0.0 && last_min_singular_ > 0.0) {
         const double full = config_.singularity_scale_full_sigma;

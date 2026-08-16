@@ -243,6 +243,7 @@ nlohmann::json forceControlJson(const ForceControlTelemetry& value) {
         {"measured_force_n", value.measured_force_n},
         {"fast_normal_force_n", value.fast_normal_force_n},
         {"fast_force_norm_n", value.fast_force_norm_n},
+        {"fast_force_rate_n_per_ms", value.fast_force_rate_n_per_ms},
         {"fast_torque_norm_nm", value.fast_torque_norm_nm},
         {"contact_threshold_exceeded", value.contact_threshold_exceeded},
         {"hard_limit_threshold_exceeded", value.hard_limit_threshold_exceeded},
@@ -1287,6 +1288,10 @@ nlohmann::json gripperFeedbackJson(const GripperArmFeedback& fb) {
         {"moving", fb.moving},
         {"ok", fb.ok},
         {"fault", fb.fault.empty() ? nlohmann::json(nullptr) : nlohmann::json(fb.fault)},
+        // Publish->receive age of the gripper_state.v1 message this came from, so a
+        // consumer can tell a slow JAW from late-reported feedback. null when the
+        // payload carried no usable stamp (never a fabricated 0).
+        {"feedback_age_ms", finiteDoubleJson(fb.feedback_age_ms)},
     };
 }
 

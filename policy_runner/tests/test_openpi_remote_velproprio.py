@@ -455,5 +455,115 @@ class VelocityProprioCameraFrameTest(unittest.TestCase):
             )
 
 
+@unittest.skipIf(OpenpiRemoteActionSource is None, "torch is not installed")
+class VelocityProprioDiagnosticsValidityTest(unittest.TestCase):
+    """Every sampler must publish chunk_metadata.proprio.valid.
+
+    The C++ chunk follower is fail-closed on that bit (dual_arm_servo_loop.cpp
+    preview_contract_valid): a delta-preview frame whose proprio is not reported valid is
+    rejected, the follower never engages, and the rollout dies with
+    `chunk_follower_engage_timeout` after 3 s. Only the camera_frame sampler used to set it,
+    so fixed_step and replan left the constructor's {"valid": False, "not_sampled"} in place
+    and could never drive the deployed delta-preview path at all -- which also made
+    velproprio_source='command' (it REQUIRES fixed_step) unreachable on the real robot.
+    """
+
+    def _fixed_step_source(self, *, policy_dt=1.0 / 30.0, velproprio_source="measured"):
+        from collections import deque
+
+        src = OpenpiRemoteActionSource.__new__(OpenpiRemoteActionSource)
+        src.proprio_mode = "velocity"
+        src._state_dim = 12
+        src.ee_local_r_align = resolve_ee_local_r_align(None)
+        src.policy_dt_sec = policy_dt
+        src.velproprio_sample_mode = "fixed_step"
+        src.velproprio_source = velproprio_source
+        src._pose_history = {"left": deque(maxlen=512), "right": deque(maxlen=512)}
+        src._command_pose_history = {"left": deque(maxlen=512), "right": deque(maxlen=512)}
+        src._last_command_pose_by_arm = {"left": None, "right": None}
+        src._last_now_monotonic = None
+        src._vel_prev_pose_by_arm = {"left": None, "right": None}
+        src._vel_prev_sample_t = None
+        src._last_velproprio_diagnostics = {"valid": False, "zero_reason": "not_sampled"}
+        src._live_gripper_percent = lambda side: None
+        return src
+
+    def _push(self, src, side, t, pose):
+        src._pose_history[side].append((float(t), np.asarray(pose, dtype=np.float64)))
+
+    def test_fixed_step_measured_publishes_valid_once_window_exists(self) -> None:
+        src = self._fixed_step_source()
+        dt = src.policy_dt_sec
+        cur = [0.01, 0.0, 0.0, 0, 0, 0, 1]
+        for side, pose in (("left", cur), ("right", _IDENT)):
+            self._push(src, side, 0.0, _IDENT)
+            self._push(src, side, dt, pose)
+        src._last_now_monotonic = dt
+        src._proprio_state(_payload(cur, _IDENT))
+        diag = src._last_velproprio_diagnostics
+        self.assertEqual(diag["sample_mode"], "fixed_step")
+        self.assertEqual(diag["source"], "measured")
+        self.assertTrue(diag["valid"], diag)
+        self.assertIsNone(diag["zero_reason"])
+        for side in ("left", "right"):
+            self.assertTrue(diag["arms"][side]["valid"], side)
+
+    def test_fixed_step_cold_start_reports_invalid_with_reason(self) -> None:
+        # Fail-closed must stay fail-closed: no window yet -> velocity 0 AND valid False,
+        # so the follower correctly refuses a frame whose proprio is fabricated zeros.
+        src = self._fixed_step_source()
+        self._push(src, "left", 0.0, _IDENT)
+        self._push(src, "right", 0.0, _IDENT)
+        src._last_now_monotonic = 0.0
+        src._proprio_state(_payload(_IDENT, _IDENT))
+        diag = src._last_velproprio_diagnostics
+        self.assertFalse(diag["valid"], diag)
+        self.assertEqual(diag["zero_reason"], "one_or_more_lookback_windows_unavailable")
+        self.assertEqual(diag["arms"]["left"]["zero_reason"], "lookback_window_unavailable")
+
+    def test_fixed_step_command_publishes_valid(self) -> None:
+        # velproprio_source='command' is only reachable via fixed_step, so if fixed_step never
+        # published validity the command mitigation could never run on hardware.
+        dt = 1.0 / 30.0
+        src = self._fixed_step_source(policy_dt=dt, velproprio_source="command")
+        for i, t in enumerate((0.0, dt, 2 * dt)):
+            src._record_command_pose_history(
+                tcp_pose_target_stand_intent(
+                    left=[0.01 * i, 0.0, 0.0, 0, 0, 0, 1], right=_IDENT
+                ),
+                t,
+            )
+        src._last_now_monotonic = 2 * dt
+        src._proprio_state(_payload(_IDENT, _IDENT))
+        diag = src._last_velproprio_diagnostics
+        self.assertEqual(diag["source"], "command")
+        self.assertTrue(diag["valid"], diag)
+
+    def test_replan_publishes_valid_after_first_sample(self) -> None:
+        from collections import deque
+
+        src = OpenpiRemoteActionSource.__new__(OpenpiRemoteActionSource)
+        src.proprio_mode = "velocity"
+        src._state_dim = 12
+        src.ee_local_r_align = resolve_ee_local_r_align(None)
+        src.policy_dt_sec = 1.0 / 30.0
+        src.velproprio_sample_mode = "replan"
+        src.velproprio_source = "measured"
+        src._pose_history = {"left": deque(maxlen=512), "right": deque(maxlen=512)}
+        src._vel_prev_pose_by_arm = {"left": None, "right": None}
+        src._vel_prev_sample_t = None
+        src._last_velproprio_diagnostics = {"valid": False, "zero_reason": "not_sampled"}
+        src._live_gripper_percent = lambda side: None
+
+        src._proprio_state(_payload(_IDENT, _IDENT))
+        self.assertFalse(src._last_velproprio_diagnostics["valid"])
+        self.assertEqual(
+            src._last_velproprio_diagnostics["arms"]["left"]["zero_reason"],
+            "no_previous_replan_sample",
+        )
+        src._proprio_state(_payload([0.01, 0.0, 0.0, 0, 0, 0, 1], _IDENT))
+        self.assertTrue(src._last_velproprio_diagnostics["valid"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -19,6 +20,9 @@ struct CapturedFrame {
   uint64_t host_arrival_time_ns{0};
   uint64_t sensor_timestamp_ns{0};
   double realsense_timestamp_ms{0.0};
+  std::optional<double> actual_exposure_us;
+  std::optional<double> gain_level;
+  std::optional<bool> auto_exposure;
   uint32_t width{0};
   uint32_t height{0};
   uint32_t stride_bytes{0};

@@ -37,13 +37,14 @@ cameras:
       ir_left:  { enabled: true, width: 640, height: 480, fps: 30, format: y8 }
       ir_right: { enabled: true, width: 640, height: 480, fps: 30, format: y8 }
   left_realsense:
-    serial: "260322278348"
+    # 2026-07-23: wrist cameras physically swapped between arms; serial follows the unit.
+    serial: "412622272078"
     required: true
     streams:
       color: { enabled: true, width: 640, height: 480, fps: 30, format: rgb8 }
       depth: { enabled: true, width: 640, height: 480, fps: 30, format: z16 }
   right_realsense:
-    serial: "412622272078"
+    serial: "260322278348"
     required: true
     streams:
       color: { enabled: true, width: 640, height: 480, fps: 30, format: rgb8 }

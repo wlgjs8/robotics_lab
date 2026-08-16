@@ -1016,6 +1016,107 @@ bool testWrenchDeadbandSuppressesNoiseAndPreservesExcessSign() {
     return true;
 }
 
+bool testForceLimiterOpensTranslationEnvelopeAboveLimit() {
+    // Base compliance: velocity capped at 0.05 m/s. Limiter: above 10 N the
+    // envelope opens 0.02 m/s per excess N up to 0.25 m/s.
+    rb_servo::ForceControlConfig config = controllerConfig();
+    config.damping = {10.0, 10.0, 10.0, 10.0, 10.0, 10.0};
+    config.max_linear_velocity_m_s = 0.05;
+    config.force_limit_n = 10.0;
+    config.backoff_gain_m_s_per_n = 0.02;
+    config.backoff_max_velocity_m_s = 0.25;
+
+    const auto steady_velocity = [&](double force_n) -> double {
+        rb_servo::ForceController controller(config);
+        controller.engage();
+        rb_servo::Wrench6D wrench;
+        wrench.fx = force_n;
+        double v = 0.0;
+        for (int i = 0; i < 400; ++i) {
+            const auto proposal = controller.propose(
+                wrench, xCommand(), rb_servo::Vec6{}, 0.002);
+            // A failed propose/commit returns 0: the outer checks then fail
+            // loudly on the velocity expectations.
+            if (!proposal.valid || !controller.commit(proposal)) return 0.0;
+            v = controller.state().velocity_tcp.x;
+        }
+        return v;
+    };
+
+    // Below the limit: pinned at the base cap (offset moves along -x since the
+    // wrench error is target(0) - measured(+F)).
+    const double v_below = steady_velocity(8.0);
+    RB_CHECK(std::abs(v_below) <= 0.05 + 1e-9);
+    RB_CHECK(std::abs(std::abs(v_below) - 0.05) < 5e-3);
+    // 25 N: excess after the 0-deadband error = 15 N -> +0.3 clamped by the
+    // 0.25 backoff ceiling -> envelope 0.25.
+    const double v_above = steady_velocity(25.0);
+    RB_CHECK(std::abs(v_above) > 0.05 + 5e-3);
+    RB_CHECK(std::abs(v_above) <= 0.25 + 1e-9);
+
+    // Disabled limiter (force_limit_n = 0): high force stays at the base cap.
+    config.force_limit_n = 0.0;
+    config.backoff_gain_m_s_per_n = 0.0;
+    config.backoff_max_velocity_m_s = 0.0;
+    const double v_disabled = steady_velocity(25.0);
+    RB_CHECK(std::abs(v_disabled) <= 0.05 + 1e-9);
+    return true;
+}
+
+bool testReflexOnlyDeadbandKeepsRetreatDriveInsideBaseEnvelope() {
+    // Tracked 2026-07-24 posture: no continuous response below 20 N and no
+    // Layer-3 boost. At a 25 N hard trip, adding the 20 N retreat virtual
+    // wrench yields 45 N measured drive; deadband shaving leaves 25 N error.
+    rb_servo::ForceControlConfig config = controllerConfig();
+    config.virtual_mass = {2.0, 2.0, 2.0, 0.2, 0.2, 0.2};
+    config.damping = {26.0, 26.0, 26.0, 1.55, 1.55, 1.55};
+    config.stiffness = {0.0, 0.0, 0.0, 3.0, 3.0, 3.0};
+    config.wrench_deadband = {20.0, 20.0, 20.0, 0.10, 0.10, 0.10};
+    config.force_limit_n = 0.0;
+    config.backoff_gain_m_s_per_n = 0.02;
+    config.backoff_max_velocity_m_s = 0.25;
+    config.max_pos_offset_m = 0.03;
+    config.max_linear_velocity_m_s = 0.06;
+    config.max_linear_acceleration_m_s2 = 0.8;
+    config.max_linear_jerk_m_s3 = 8.0;
+    config.max_pos_step_m = 0.001;
+    config.max_energy_j = 100.0;
+    constexpr double dt_sec = 0.002;
+
+    rb_servo::ForceController quiet_controller(config);
+    quiet_controller.engage();
+    rb_servo::Wrench6D quiet_wrench;
+    quiet_wrench.fx = 19.0;
+    const auto quiet = quiet_controller.propose(
+        quiet_wrench, xCommand(), rb_servo::Vec6{}, dt_sec);
+    RB_CHECK(quiet.valid);
+    RB_CHECK(near(quiet.wrench_error_tcp.fx, 0.0));
+    RB_CHECK(near(quiet.state.offset_tcp.x, 0.0));
+
+    rb_servo::ForceController retreat_controller(config);
+    retreat_controller.engage();
+    rb_servo::Wrench6D retreat_wrench;
+    retreat_wrench.fx = 45.0;
+    int reached_20mm_tick = -1;
+    for (int tick = 0; tick < 500; ++tick) {
+        const auto proposal = retreat_controller.propose(
+            retreat_wrench, xCommand(), rb_servo::Vec6{}, dt_sec);
+        RB_CHECK(proposal.valid);
+        RB_CHECK(near(proposal.wrench_error_tcp.fx, -25.0));
+        RB_CHECK(retreat_controller.commit(proposal));
+        RB_CHECK(std::abs(retreat_controller.state().velocity_tcp.x) <=
+                 config.max_linear_velocity_m_s + 1e-9);
+        RB_CHECK(near(retreat_controller.state().envelope_boost_m_s, 0.0));
+        if (retreat_controller.state().offset_tcp.x <= -0.020) {
+            reached_20mm_tick = tick;
+            break;
+        }
+    }
+    RB_CHECK(reached_20mm_tick >= 0);
+    RB_CHECK((reached_20mm_tick + 1) * dt_sec < 1.0);
+    return true;
+}
+
 bool testRemoveComplianceOffsetInvertsAppliedCorrection() {
     // Base command pose with a non-trivial orientation.
     rb_servo::Pose6D base;
@@ -1074,6 +1175,198 @@ bool testContactForceNormalEstimatorFreezesForEpisode() {
     return true;
 }
 
+bool testReleasedStateOffsetBleedDrainsZeroStiffnessOffset() {
+    // K=0 translation profile with the released-state bleed spring: a contact
+    // builds a protective offset; once the wrench is fully released the offset
+    // must drain toward zero (tau = damping/bleed ~= 2 s) instead of resting
+    // where contact put it (the pre-bleed ratchet: 2026-07-22
+    // servo_log_20260722_172914). While the load persists the bleed must stay
+    // inert — identical trajectory to a bleed-less controller — so the
+    // in-contact spring re-press that motivated K=0 stays impossible.
+    rb_servo::ForceControlConfig config = controllerConfig();
+    config.virtual_mass = {2.0, 2.0, 2.0, 0.2, 0.2, 0.2};
+    config.damping = {26.0, 26.0, 26.0, 1.55, 1.55, 1.55};
+    config.stiffness = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    config.release_bleed_stiffness = {13.0, 13.0, 13.0, 0.0, 0.0, 0.0};
+    config.wrench_deadband = {1.5, 1.5, 1.5, 0.10, 0.10, 0.10};
+    config.max_pos_offset_m = 0.03;
+    config.max_linear_velocity_m_s = 0.06;
+    config.max_linear_acceleration_m_s2 = 1.0;
+    config.max_linear_jerk_m_s3 = 8.0;
+    config.max_pos_step_m = 0.001;
+
+    rb_servo::ForceControlConfig no_bleed = config;
+    no_bleed.release_bleed_stiffness = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+    const double dt = 0.002;
+    const auto drive = [&](rb_servo::ForceController& controller, double fx, int ticks) {
+        for (int i = 0; i < ticks; ++i) {
+            rb_servo::Wrench6D wrench;
+            wrench.fx = fx;
+            const auto proposal =
+                controller.propose(wrench, xCommand(), rb_servo::Vec6{}, dt);
+            if (!proposal.valid) return false;
+            if (!controller.commit(proposal)) return false;
+        }
+        return true;
+    };
+
+    rb_servo::ForceController bleed_controller(config);
+    rb_servo::ForceController hold_controller(no_bleed);
+    bleed_controller.engage();
+    hold_controller.engage();
+
+    // Loaded phase (2 s of a 10 N press): the bleed spring must be inert while
+    // the block is loaded, so both controllers land on the same offset.
+    RB_CHECK(drive(bleed_controller, 10.0, 1000));
+    RB_CHECK(drive(hold_controller, 10.0, 1000));
+    const double loaded_offset = bleed_controller.state().offset_tcp.x;
+    RB_CHECK(loaded_offset < -0.01);
+    RB_CHECK(near(loaded_offset, hold_controller.state().offset_tcp.x, 1e-12));
+
+    // Released phase (6 s quiet). Without the bleed the offset rests where
+    // contact put it; with the bleed it drains toward zero (~3 tau).
+    RB_CHECK(drive(hold_controller, 0.0, 3000));
+    RB_CHECK(std::abs(hold_controller.state().offset_tcp.x) >=
+             0.9 * std::abs(loaded_offset));
+    RB_CHECK(drive(bleed_controller, 0.0, 3000));
+    RB_CHECK(std::abs(bleed_controller.state().offset_tcp.x) <=
+             0.25 * std::abs(loaded_offset));
+
+    // Re-contact stops the bleed the same tick: under a fresh press the offset
+    // must move away from zero again (unload), not continue recentering.
+    const double mid_bleed_offset = bleed_controller.state().offset_tcp.x;
+    RB_CHECK(drive(bleed_controller, 10.0, 500));
+    RB_CHECK(bleed_controller.state().offset_tcp.x < mid_bleed_offset);
+
+    // Hold gating: with allow_release_bleed=false (static hold equilibrium —
+    // e.g. a client abort froze an in-surface anchor) the configured bleed
+    // spring must stay inert so the escaped offset rests contact-free instead
+    // of draining back into the surface (2026-07-23 14:20 Hold bounce).
+    rb_servo::ForceController hold_gated(config);
+    hold_gated.engage();
+    RB_CHECK(drive(hold_gated, 10.0, 1000));
+    const double gated_loaded_offset = hold_gated.state().offset_tcp.x;
+    rb_servo::ForceControlCommand gated = xCommand();
+    gated.allow_release_bleed = false;
+    for (int i = 0; i < 3000; ++i) {
+        rb_servo::Wrench6D wrench;
+        const auto p = hold_gated.propose(wrench, gated, rb_servo::Vec6{}, dt);
+        RB_CHECK(p.valid);
+        RB_CHECK(hold_gated.commit(p));
+    }
+    RB_CHECK(std::abs(hold_gated.state().offset_tcp.x) >=
+             0.9 * std::abs(gated_loaded_offset));
+    return true;
+}
+
+bool testRetreatEnvelopeBoostOpensAndDecaysWithoutLayer3() {
+    // Reflex-only profile (force_limit_n == 0): a retreat episode requests the
+    // envelope opening via the command so the reflex can reverse a driven
+    // descent quickly (2026-07-24 88 N press-through without it). The boost
+    // must open while commanded, let the axis exceed the base velocity limit,
+    // stay proposal-valid through the command's removal (hysteresis + reseed),
+    // and decay back to the base envelope.
+    rb_servo::ForceControlConfig config = controllerConfig();
+    config.virtual_mass = {2.0, 2.0, 2.0, 0.2, 0.2, 0.2};
+    config.damping = {26.0, 26.0, 26.0, 1.55, 1.55, 1.55};
+    config.stiffness = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    config.wrench_deadband = {20.0, 20.0, 20.0, 0.10, 0.10, 0.10};
+    config.force_limit_n = 0.0;
+    config.backoff_max_velocity_m_s = 0.25;
+    config.max_pos_offset_m = 0.03;
+    config.max_linear_velocity_m_s = 0.06;
+    config.max_linear_acceleration_m_s2 = 0.8;
+    config.max_linear_jerk_m_s3 = 8.0;
+    config.max_pos_step_m = 0.001;
+    rb_servo::ForceController controller(config);
+    controller.engage();
+    const double dt = 0.002;
+    // Episode: 45 N virtual+measured press with the boost commanded.
+    rb_servo::ForceControlCommand boosted = xCommand();
+    boosted.retreat_envelope_boost_m_s = 0.19;
+    for (int i = 0; i < 100; ++i) {
+        rb_servo::Wrench6D wrench;
+        wrench.fx = 45.0;
+        const auto p = controller.propose(wrench, boosted, rb_servo::Vec6{}, dt);
+        RB_CHECK(p.valid);
+        RB_CHECK(controller.commit(p));
+    }
+    RB_CHECK(std::abs(controller.state().velocity_tcp.x) >
+             config.max_linear_velocity_m_s);
+    RB_CHECK(controller.state().envelope_boost_m_s > 0.0);
+    // Episode end: command removed, wrench released — every proposal must stay
+    // valid while the hysteresis ramps the envelope shut.
+    for (int i = 0; i < 1000; ++i) {
+        rb_servo::Wrench6D wrench;
+        const auto p = controller.propose(wrench, xCommand(), rb_servo::Vec6{}, dt);
+        RB_CHECK(p.valid);
+        RB_CHECK(controller.commit(p));
+    }
+    RB_CHECK(std::abs(controller.state().velocity_tcp.x) <=
+             config.max_linear_velocity_m_s + 1e-9);
+    RB_CHECK(near(controller.state().envelope_boost_m_s, 0.0, 1e-9));
+    return true;
+}
+
+bool testForceLimiterEnvelopeSurvivesStepForceRelease() {
+    // 2026-07-23 12:55/13:08 regression: the Layer-3 envelope followed the
+    // instantaneous wrench error, so an abrupt force release (bolt lift-off,
+    // grasp settling, retreat unload) collapsed the velocity/acceleration
+    // limits around a legally-fast escape state and the proposal hard-faulted
+    // ("Cartesian axis state is outside the hard jerk-governed motion
+    // envelope"). The boost must open instantly but decay only as fast as the
+    // governor can brake the state back inside.
+    rb_servo::ForceControlConfig config = controllerConfig();
+    config.virtual_mass = {2.0, 2.0, 2.0, 0.2, 0.2, 0.2};
+    config.damping = {26.0, 26.0, 26.0, 1.55, 1.55, 1.55};
+    config.stiffness = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    config.wrench_deadband = {1.5, 1.5, 1.5, 0.10, 0.10, 0.10};
+    config.force_limit_n = 15.0;
+    config.backoff_gain_m_s_per_n = 0.02;
+    config.backoff_max_velocity_m_s = 0.25;
+    config.max_pos_offset_m = 0.03;
+    config.max_linear_velocity_m_s = 0.06;
+    config.max_linear_acceleration_m_s2 = 0.8;
+    config.max_linear_jerk_m_s3 = 8.0;
+    config.max_pos_step_m = 0.001;
+    rb_servo::ForceController controller(config);
+    controller.engage();
+    const double dt = 0.002;
+    // 150 ms of a 25 N press opens the envelope and builds an escape speed
+    // beyond the base velocity limit.
+    for (int i = 0; i < 75; ++i) {
+        rb_servo::Wrench6D wrench;
+        wrench.fx = 25.0;
+        const auto p = controller.propose(wrench, xCommand(), rb_servo::Vec6{}, dt);
+        RB_CHECK(p.valid);
+        RB_CHECK(controller.commit(p));
+    }
+    RB_CHECK(std::abs(controller.state().velocity_tcp.x) >
+             config.max_linear_velocity_m_s);
+    RB_CHECK(controller.state().envelope_boost_m_s > 0.0);
+    // Abrupt full release: every proposal must remain valid while the boost
+    // decays and the state brakes back inside the base envelope.
+    for (int i = 0; i < 1000; ++i) {
+        rb_servo::Wrench6D wrench;
+        const auto p = controller.propose(wrench, xCommand(), rb_servo::Vec6{}, dt);
+        if (!p.valid) {
+            std::cerr << "release tick " << i << " reason=" << p.reason
+                      << " v=" << controller.state().velocity_tcp.x
+                      << " off=" << controller.state().offset_tcp.x
+                      << " acc=" << controller.state().acceleration_tcp.x
+                      << " boost=" << controller.state().envelope_boost_m_s
+                      << "\n";
+        }
+        RB_CHECK(p.valid);
+        RB_CHECK(controller.commit(p));
+    }
+    RB_CHECK(std::abs(controller.state().velocity_tcp.x) <=
+             config.max_linear_velocity_m_s + 1e-9);
+    RB_CHECK(near(controller.state().envelope_boost_m_s, 0.0, 1e-9));
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -1099,6 +1392,11 @@ int main() {
     if (!testWrenchDeadbandSuppressesNoiseAndPreservesExcessSign()) return 1;
     if (!testRemoveComplianceOffsetInvertsAppliedCorrection()) return 1;
     if (!testContactForceNormalEstimatorFreezesForEpisode()) return 1;
+    if (!testForceLimiterOpensTranslationEnvelopeAboveLimit()) return 1;
+    if (!testReflexOnlyDeadbandKeepsRetreatDriveInsideBaseEnvelope()) return 1;
+    if (!testReleasedStateOffsetBleedDrainsZeroStiffnessOffset()) return 1;
+    if (!testForceLimiterEnvelopeSurvivesStepForceRelease()) return 1;
+    if (!testRetreatEnvelopeBoostOpensAndDecaysWithoutLayer3()) return 1;
     std::cout << "force_controller tests passed\n";
     return 0;
 }

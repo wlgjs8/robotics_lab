@@ -56,10 +56,55 @@ struct BoundarySample {
 };
 
 struct GuardConfig {
-  double af_damping_beta{0.85};   // (0.7, 1]; damps the feedforward af
+  // Feedforward accel damping, (0, 1], SPLIT BY AXIS CLASS (axes 0-2 linear, 3-5 angular).
+  //
+  // af is a second difference of the policy knots divided by dt^2 (see buildSample), so it
+  // multiplies knot noise by 1/dt^2 -- ~900x at 30 Hz -- and grows QUADRATICALLY as dt shrinks:
+  // the same commanded path demands 2x the af at SPEED_SCALE 1.0 that it does at 0.75.
+  //
+  // 2026-07-31 measurement (E1 rollouts, right arm, SPEED_SCALE 1.0) showed the two axis classes
+  // are nowhere near each other, which is why a single scalar could not be tuned:
+  //     translation af p90 = 1.53 m/s^2   =  31% of a_max   (headroom)
+  //     rotation    af p90 = 8.56 rad/s^2 =  95% of a_max   (saturated)
+  // With the rotation target alone consuming 95% of the acceleration limit, ruckig could not reach
+  // the knot inside dt -- `converged` 1.5% and projection error p90 6.3 mm on the right arm, versus
+  // 70.6% / 0.13 mm on the left. So beta=1.0 was not buying fidelity, it was losing it.
+  //
+  // The earlier single-scalar sweep (2026-07-24: 1.0/0.8/0.6) was abandoned because 0.6 cost
+  // descent authority (right z_min 16-17 mm vs 9-15 mm). That regression is TRANSLATION -- the very
+  // axis class with headroom. Damping the two classes together traded away real final-approach
+  // deceleration to suppress rotational noise. Split so each can be set on its own evidence.
+  //
+  // DO NOT reach for these to fix trembling. Damping the rotation class was proposed from the 95%
+  // reading above and REFUTED by the follower_replay sweep: relaxing beta made feasibility WORSE.
+  // The cost of a segment is |af_target - a0| / dt, not |af| -- a0 already carries the honest
+  // curvature, so shrinking af_target enlarges that mismatch and spends jerk arriving flatter than
+  // the arm is actually travelling. af is a boundary condition, not a demand. The binding
+  // constraint was the angular limits themselves (see stack_real.yaml ruckig_follower).
+  //
+  // The split is kept because it makes the knob measurable per axis class: one scalar could not
+  // separate rotational noise from the translational final-approach deceleration, which is why the
+  // 2026-07-24 sweep lost descent authority with no roughness win.
+  double af_damping_beta_lin{0.85};
+  double af_damping_beta_ang{0.85};
   double eps_clamp{1e-9};         // limit clamp tolerance
+  // Corner (direction-reversal) detection deadbands, per axis class. A flanking
+  // step displacement below the deadband contributes sign 0, which cannot form a
+  // reversal pair -- so a LARGER deadband makes the guard ignore small wobble.
+  // These must be sized against the actual per-step displacement: at 30 Hz the
+  // policy commands ~2 mm and ~0.3 deg per step, and 0.3 deg spread over three
+  // rotation axes leaves per-axis components only a few times the 5e-4 rad
+  // (0.029 deg) default -- so rotational sign noise trips the guard on a large
+  // fraction of segments even when the motion is visually smooth.
   double corner_deadband_lin_m{3e-4};
   double corner_deadband_ang_rad{5e-4};
+  // Ring-down applied to the target velocity of an axis whose flanking steps
+  // reverse (its target acceleration is always zeroed). 1.0 = no ring-down.
+  // NOTE the cost is not confined to the reversing axis: ruckig runs its default
+  // TIME synchronization here (buildInput sets minimum_duration but never
+  // in.synchronization), so braking one axis stretches the whole 6-DoF segment
+  // duration and can push it past dt -- i.e. rotational wobble slows translation.
+  double corner_velocity_scale{0.25};
   int    ladder_rungs{3};         // retained for compatibility; predictive ladder is unused
 };
 
@@ -217,15 +262,21 @@ class ChunkFollowerSegment {
       in.current_acceleration[d] = clampAbs(a0_[d], L.a_max, guard_.eps_clamp);
 
       // target: pf unchanged; vf/af time-dilated by α (vf·α, af·α²) then damped.
+      // Axes 0-2 are stand-frame translation, 3-5 the rotation vector about R0_ref_ (see
+      // CartesianChunkFollower::buildSample), the same split the corner deadbands already use.
+      // N<=3 instantiations (the pure-translation unit tests) take the linear beta on every axis,
+      // so they are unchanged as long as the two betas are equal.
+      const double af_beta =
+          (d < 3) ? guard_.af_damping_beta_lin : guard_.af_damping_beta_ang;
       double vf = alpha * s.vf[d];
-      double af = alpha * alpha * s.af[d] * guard_.af_damping_beta;
+      double af = alpha * alpha * s.af[d] * af_beta;
 
       // corner: direction reversal between the flanking steps → ring down af,
       // and pull vf toward zero (do NOT carry acceleration through a reversal).
       if (s.sign_dk[d] != 0 && s.sign_dkp1[d] != 0 &&
           s.sign_dk[d] != s.sign_dkp1[d]) {
         af = 0.0;
-        vf *= 0.25;  // ring-down; keeps vf & af co-scaled toward the corner
+        vf *= guard_.corner_velocity_scale;  // ring-down toward the corner
         corner = true;
       }
 

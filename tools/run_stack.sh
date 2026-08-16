@@ -31,6 +31,14 @@ cd "$(dirname "$0")/.."
 
 MODE="${1:-real}"
 
+# Match tools/build_stack.sh so the interpreter receiving the editable installs
+# is also the one that launches viser, policy_runner, and helper processes.
+# Without this, `make build` can install into .venv while `make run` uses the
+# system python3 and the GUI immediately dies on imports such as numpy/viser.
+if [ -n "${STACK_PYTHON:-}" ]; then PY="$STACK_PYTHON"
+elif [ -x ".venv/bin/python" ]; then PY=".venv/bin/python"
+else PY="python3"; fi
+
 case "$MODE" in
   real|sim) ;;
   *) echo "usage: $0 [real|sim]" >&2; exit 2 ;;
@@ -81,7 +89,11 @@ if [ "$MODE" = "real" ]; then
   # power-on directions, so that startup motion lands asymmetrically (observed:
   # right opens, left closes). Hold each gripper at its current power-on position
   # instead. Re-enable with GRIPPER_SERVER_ARGS=... --home-on-connect.
-  GRIPPER_SERVER_ARGS="${GRIPPER_SERVER_ARGS---left-port /dev/pika-left --right-port /dev/pika-right --pika-sdk-path $PIKA_SDK_PATH --no-home-on-connect}"
+  # The tracked D405 serial mapping + live camera.health physical_port are the
+  # arm identity source. The gripper_server joins that identity to the CH340 on
+  # the same xHCI root port and fails closed instead of trusting tty numbering or
+  # the legacy fixed /dev/pika-* links. camera_server must already be running.
+  GRIPPER_SERVER_ARGS="${GRIPPER_SERVER_ARGS---auto-pair-camera-config camera_server/config/dual_realsense_d405.yaml --camera-health-endpoint tcp://127.0.0.1:5600 --camera-health-topic camera.health --pairing-timeout-sec 5 --pika-sdk-path $PIKA_SDK_PATH --no-home-on-connect}"
 else
   GRIPPER_BACKEND="sim"
   GRIPPER_SERVER_ARGS="${GRIPPER_SERVER_ARGS-}"
@@ -165,10 +177,10 @@ preflight_kill_stale() {
   pkill -9 -f "$1" 2>/dev/null || true
 }
 preflight_kill_stale "rb_servo_server" "$SERVER_BIN"
-preflight_kill_stale "viser GUI"       "python3 -m rb_servo_gui.app"
-preflight_kill_stale "scope dashboard" "python3 -u scripts/servo_scope_dashboard.py"
-preflight_kill_stale "policy_runner"   "python3 -u -m policy_runner --config policy_runner/config/stack_"
-[ "$GRIPPER_SERVER_ON" = "1" ] && preflight_kill_stale "gripper_server" "python3 -u -m policy_runner.gripper_server"
+preflight_kill_stale "viser GUI"       "rb_servo_gui.app"
+preflight_kill_stale "scope dashboard" "scripts/servo_scope_dashboard.py"
+preflight_kill_stale "policy_runner"   "policy_runner --config policy_runner/config/stack_"
+[ "$GRIPPER_SERVER_ON" = "1" ] && preflight_kill_stale "gripper_server" "policy_runner.gripper_server"
 
 if [ "$MODE" = "real" ]; then
   echo "============================================================"
@@ -185,7 +197,8 @@ cleanup() {
   trap - EXIT
   echo
   echo "[stack] stopping..."
-  # Kill in reverse order (policy first so it releases the lease, then GUI, server).
+  # Kill in reverse order (policy first so it releases the lease, then GUI,
+  # server, and finally the gripper process that was started first).
   for ((i = ${#PIDS[@]} - 1; i >= 0; i--)); do
     kill "${PIDS[$i]}" 2>/dev/null || true
   done
@@ -213,20 +226,63 @@ trap cleanup EXIT
 
 echo "[stack] mode=$MODE source=$ACTION_SOURCE (spacemouse + umi side by side)"
 echo "[stack] server: $SERVER_CFG"
+echo "[stack] python: $PY"
 echo "[stack] external flow-infer state readback: udp://127.0.0.1:50378"
 if [ "$SCOPE_DASHBOARD_ON" = "1" ]; then
   echo "[stack] joint scope dashboard state listen: ${SCOPE_DASHBOARD_STATE_LISTEN}"
 fi
+
+# GRIPPER_SERVER_EXTRA_ARGS APPENDS to the gripper_server command line; use it for
+# opt-in diagnostics such as --latency-probe. Do NOT use GRIPPER_SERVER_ARGS for
+# that: in real mode that variable already carries the REQUIRED --pika-sdk-path /
+# camera auto-pairing flags (see above) and setting it from the environment
+# replaces them wholesale, which fails startup with "No module named 'pika'".
+#
+# Gripper loop rate. Left at the stock 50 Hz: a 100 Hz trial changed the measured
+# command->jaw latency by nothing, because --latency-probe showed this stage's
+# queueing is 0.1 ms (the chain is 5.0 ms bridge + 0.1 ms queue + 24.4 ms motor).
+# Override with GRIPPER_SERVER_RATE_HZ if a future measurement justifies it.
+# Start the gripper owner before the arm server. In real mode this is also the
+# camera-serial/USB-topology preflight: if camera_server is absent, the identity
+# is ambiguous, or the Pika backend cannot connect, make run must fail before an
+# arm command endpoint comes up. --no-home-on-connect keeps this startup check
+# motionless. MODE=sim uses the hardware-free backend and has no camera dependency.
+if [ "$GRIPPER_SERVER_ON" = "1" ]; then
+  echo "[stack] gripper_server: backend=$GRIPPER_BACKEND cmd<-127.0.0.1:50410 feedback->127.0.0.1:50420 ${GRIPPER_SERVER_ARGS:-} ${GRIPPER_SERVER_DEBUG_ARGS:-} ${GRIPPER_SERVER_EXTRA_ARGS:-}"
+  "$PY" -u -m policy_runner.gripper_server \
+    --backend "$GRIPPER_BACKEND" --bind 127.0.0.1:50410 --state-endpoint 127.0.0.1:50420 \
+    --rate "${GRIPPER_SERVER_RATE_HZ:-50}" \
+    ${GRIPPER_SERVER_DEBUG_ARGS:-} ${GRIPPER_SERVER_EXTRA_ARGS:-} ${GRIPPER_SERVER_ARGS:-} >"$LOG_DIR/gripper_server.log" 2>&1 &
+  GRIPPER_PID=$!
+  PIDS+=("$GRIPPER_PID")
+  for _ in $(seq 1 100); do
+    if grep -q "gripper_server up:" "$LOG_DIR/gripper_server.log" 2>/dev/null; then break; fi
+    if ! kill -0 "$GRIPPER_PID" 2>/dev/null; then
+      echo "[stack] gripper_server exited during startup:" >&2
+      tail -10 "$LOG_DIR/gripper_server.log" >&2
+      exit 1
+    fi
+    sleep 0.1
+  done
+  grep -q "gripper_server up:" "$LOG_DIR/gripper_server.log" || {
+    echo "[stack] gripper_server did not become ready in 10s:" >&2
+    tail -10 "$LOG_DIR/gripper_server.log" >&2
+    exit 1
+  }
+  echo "[stack] gripper_server up."
+fi
+
 ensure_rt_caps
 "$SERVER_BIN" --config "$SERVER_CFG" >"$LOG_DIR/server.log" 2>&1 &
-PIDS+=($!)
+SERVER_PID=$!
+PIDS+=("$SERVER_PID")
 
 # Wait until the command server is up (or fail fast on config/RT errors).
 # Generous deadline: an automatic pgmode switch (sim<->real) can take tens of
 # seconds PER ARM on the controller before the server finishes initializing.
 for i in $(seq 1 750); do
   if grep -q "CommandServer listening" "$LOG_DIR/server.log" 2>/dev/null; then break; fi
-  if ! kill -0 "${PIDS[0]}" 2>/dev/null; then
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
     echo "[stack] server exited during startup:" >&2
     tail -5 "$LOG_DIR/server.log" >&2
     exit 1
@@ -246,17 +302,36 @@ echo "[stack] viser GUI: http://127.0.0.1:${GUI_PORT}"
 if [ "$SCOPE_DASHBOARD_ON" = "1" ]; then
   echo "[stack] joint scope dashboard: http://127.0.0.1:${SCOPE_DASHBOARD_PORT}"
 fi
+# Foot pedal (InitMotion left/right + record toggle). Two identical PCsensor pedals
+# are attached to this rig — the 3-switch one drives rb_gui, the 1-switch one is the
+# pika UMI teleop clutch (~/workspace/pika). They share 3553:b001, carry no serial and
+# expose identical evdev capabilities, so ONLY the physical USB port tells them apart
+# and rb_gui fails closed rather than guessing (it grabs the device exclusively, so a
+# wrong guess would both fire InitMotion from the teleop pedal and kill that clutch).
+# Pin the 3-switch pedal by by-path; override per-site with RB_GUI_FOOT_PEDAL_DEVICE.
+FOOT_PEDAL_DEVICE="${RB_GUI_FOOT_PEDAL_DEVICE:-/dev/input/by-path/pci-0000:13:00.0-usb-0:9:1.0-event-kbd}"
+if [ ! -e "$FOOT_PEDAL_DEVICE" ]; then
+  echo "[stack] foot pedal not at $FOOT_PEDAL_DEVICE — rb_gui pedal stays disabled." >&2
+  echo "[stack]       fix: RB_GUI_FOOT_PEDAL_DEVICE=<path> make run   (list: ls -l /dev/input/by-path/*event-kbd)" >&2
+fi
 PYTHONPATH=rb_gui \
   RB_GUI_DESCRIPTIONS_DIR="$PWD/rb_servo_server/descriptions" \
   RB_GUI_STATE_BIND=0.0.0.0 RB_GUI_STATE_PORT=50366 \
   RB_GUI_COMMAND_HOST=127.0.0.1 RB_GUI_COMMAND_PORT=50256 \
   RB_GUI_CIRCLE_OVERLAY_BIND=none \
   RB_GUI_SERVER_CONFIG_PATH="$SERVER_CFG_ABS" \
-  python3 -m rb_servo_gui.app >"$LOG_DIR/gui.log" 2>&1 &
+  RB_GUI_FOOT_PEDAL_DEVICE="$FOOT_PEDAL_DEVICE" \
+  "$PY" -m rb_servo_gui.app >"$LOG_DIR/gui.log" 2>&1 &
 PIDS+=($!)
+sleep 1
+if ! kill -0 "${PIDS[-1]}" 2>/dev/null; then
+  echo "[stack] viser GUI exited during startup:" >&2
+  tail -10 "$LOG_DIR/gui.log" >&2
+  exit 1
+fi
 
 if [ "$SCOPE_DASHBOARD_ON" = "1" ]; then
-  python3 -u scripts/servo_scope_dashboard.py \
+  "$PY" -u scripts/servo_scope_dashboard.py \
     --listen "$SCOPE_DASHBOARD_STATE_LISTEN" \
     --host "$SCOPE_DASHBOARD_HOST" \
     --port "$SCOPE_DASHBOARD_PORT" \
@@ -268,23 +343,6 @@ if [ "$SCOPE_DASHBOARD_ON" = "1" ]; then
     echo "[stack] WARNING: joint scope dashboard exited during startup:" >&2
     tail -5 "$LOG_DIR/scope_dashboard.log" >&2
     echo "[stack] (stack continues; set SCOPE_DASHBOARD=0 to skip this dashboard)" >&2
-  fi
-fi
-
-if [ "$GRIPPER_SERVER_ON" = "1" ]; then
-  echo "[stack] gripper_server: backend=$GRIPPER_BACKEND cmd<-127.0.0.1:50410 feedback->127.0.0.1:50420 ${GRIPPER_SERVER_ARGS:-} ${GRIPPER_SERVER_DEBUG_ARGS:-}"
-  python3 -u -m policy_runner.gripper_server \
-    --backend "$GRIPPER_BACKEND" --bind 127.0.0.1:50410 --state-endpoint 127.0.0.1:50420 \
-    ${GRIPPER_SERVER_DEBUG_ARGS:-} ${GRIPPER_SERVER_ARGS:-} >"$LOG_DIR/gripper_server.log" 2>&1 &
-  PIDS+=($!)
-  # pika backend binds the serial ports immediately; surface an early crash
-  # (missing /dev/pika-*, pika_sdk, port already open) without blocking. The sim
-  # backend never fails this way.
-  sleep 1
-  if ! kill -0 "${PIDS[-1]}" 2>/dev/null; then
-    echo "[stack] WARNING: gripper_server exited during startup — gripper will NOT move/update:" >&2
-    tail -5 "$LOG_DIR/gripper_server.log" >&2
-    echo "[stack] (stack continues; fix serial/pika_sdk and rerun, or GRIPPER_SERVER=0 to silence)" >&2
   fi
 fi
 
@@ -309,7 +367,7 @@ case "$ACTION_SOURCE" in
     PYTHONPATH=policy_runner \
       POLICY_RUNNER_UMI_TELEOP_LOG="${POLICY_RUNNER_UMI_TELEOP_LOG-auto}" \
       POLICY_RUNNER_TELEOP_CAPTURE="${POLICY_RUNNER_TELEOP_CAPTURE-auto}" \
-      python3 -u -m policy_runner --config "$POLICY_CFG" --action-source "$ACTION_SOURCE" $VERBOSE_FLAG \
+      "$PY" -u -m policy_runner --config "$POLICY_CFG" --action-source "$ACTION_SOURCE" $VERBOSE_FLAG \
       2>&1 | tee "$LOG_DIR/policy.log"
     ;;
 esac

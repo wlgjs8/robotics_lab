@@ -375,7 +375,17 @@ bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFoll
         a.consume_steps != b.consume_steps ||
         a.reserve_steps != b.reserve_steps ||
         a.smoothing_window != b.smoothing_window ||
-        a.af_damping_beta != b.af_damping_beta ||
+        a.output_smd.enable != b.output_smd.enable ||
+        a.output_smd.nf_linear_hz != b.output_smd.nf_linear_hz ||
+        a.output_smd.nf_angular_hz != b.output_smd.nf_angular_hz ||
+        a.output_smd.damping_ratio != b.output_smd.damping_ratio ||
+        a.output_smd.velocity_ff != b.output_smd.velocity_ff ||
+        a.output_smd.velocity_ff_lpf_hz != b.output_smd.velocity_ff_lpf_hz ||
+        a.af_damping_beta_lin != b.af_damping_beta_lin ||
+        a.af_damping_beta_ang != b.af_damping_beta_ang ||
+        a.corner_deadband_lin_m != b.corner_deadband_lin_m ||
+        a.corner_deadband_ang_rad != b.corner_deadband_ang_rad ||
+        a.corner_velocity_scale != b.corner_velocity_scale ||
         a.delta_twist_tau_sec != b.delta_twist_tau_sec ||
         a.delta_twist_residual_drain_steps != b.delta_twist_residual_drain_steps ||
         a.delta_twist_clear_residual_on_new_frame != b.delta_twist_clear_residual_on_new_frame ||
@@ -391,6 +401,7 @@ bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFoll
         a.preview_max_actual_lead_m != b.preview_max_actual_lead_m ||
         a.preview_max_actual_lead_rad != b.preview_max_actual_lead_rad ||
         a.preview_max_consecutive_actual_lead_errors != b.preview_max_consecutive_actual_lead_errors ||
+        a.loading_projection_max_accel_m_s2 != b.loading_projection_max_accel_m_s2 ||
         a.hold_bounce_resume_sec != b.hold_bounce_resume_sec ||
         a.preview_projection_fault_policy != b.preview_projection_fault_policy ||
         a.chunk_feed_timeout_sec != b.chunk_feed_timeout_sec;
@@ -404,7 +415,11 @@ control::CartesianChunkFollowerConfig makeChunkFollowerConfig(const RuckigFollow
     cfg.window.consume_C = rf.consume_steps;
     cfg.window.reserve_R = rf.reserve_steps;
     cfg.window.smoothing_window = rf.smoothing_window;
-    cfg.guard.af_damping_beta = rf.af_damping_beta;
+    cfg.guard.af_damping_beta_lin = rf.af_damping_beta_lin;
+    cfg.guard.af_damping_beta_ang = rf.af_damping_beta_ang;
+    cfg.guard.corner_deadband_lin_m = rf.corner_deadband_lin_m;
+    cfg.guard.corner_deadband_ang_rad = rf.corner_deadband_ang_rad;
+    cfg.guard.corner_velocity_scale = rf.corner_velocity_scale;
     cfg.max_projection_error_m = rf.preview_max_projection_error_m;
     cfg.max_projection_error_rad = rf.preview_max_projection_error_rad;
     cfg.max_consecutive_projection_errors = rf.preview_max_consecutive_projection_errors;
@@ -1948,6 +1963,7 @@ void DualArmServoLoop::invalidatePostInitTare(ArmId arm_id, uint64_t command_seq
     runtime.tare_waiting_for_init_completion = true;
     runtime.tare_collecting = false;
     runtime.tare_not_before_ns = 0;
+    runtime.tare_retry_count = 0;
     runtime.ft.tare_state = "awaiting_init_completion";
     runtime.ft.tare_sample_count = 0;
     runtime.ft.tare_reason = "init motion requested; previous software zero invalidated";
@@ -1977,6 +1993,16 @@ void DualArmServoLoop::invalidatePostInitTare(ArmId arm_id, uint64_t command_seq
     runtime.transverse_enter_count = 0;
     runtime.rotational_enter_count = 0;
     runtime.hard_limit_count = 0;
+    runtime.fast_force_rate_initialized = false;
+    runtime.previous_fast_force_norm_n = 0.0;
+    runtime.previous_fast_force_sample_ns = 0;
+    runtime.control.fast_force_rate_n_per_ms = 0.0;
+    runtime.retreat_active = false;
+    runtime.retreat_braking = false;
+    runtime.retreat_virtual_current_n = 0.0;
+    runtime.retreat_started_ns = 0;
+    runtime.retreat_attempt_count = 0;
+    runtime.retreat_window_start_ns = 0;
     runtime.release_start_ns = 0;
     runtime.release_hold_pending = false;
     runtime.release_hold_applied = false;
@@ -2019,6 +2045,7 @@ bool DualArmServoLoop::latchPayloadIdentificationInhibit(ArmId arm_id) {
     runtime.tare_waiting_for_init_completion = false;
     runtime.tare_collecting = false;
     runtime.tare_not_before_ns = 0;
+    runtime.tare_retry_count = 0;
     runtime.ft.payload_identification_inhibit = true;
     runtime.ft.tare_valid = false;
     runtime.ft.tare_state = "awaiting_init_motion";
@@ -2058,6 +2085,16 @@ bool DualArmServoLoop::latchPayloadIdentificationInhibit(ArmId arm_id) {
     runtime.transverse_enter_count = 0;
     runtime.rotational_enter_count = 0;
     runtime.hard_limit_count = 0;
+    runtime.fast_force_rate_initialized = false;
+    runtime.previous_fast_force_norm_n = 0.0;
+    runtime.previous_fast_force_sample_ns = 0;
+    runtime.control.fast_force_rate_n_per_ms = 0.0;
+    runtime.retreat_active = false;
+    runtime.retreat_braking = false;
+    runtime.retreat_virtual_current_n = 0.0;
+    runtime.retreat_started_ns = 0;
+    runtime.retreat_attempt_count = 0;
+    runtime.retreat_window_start_ns = 0;
     runtime.release_start_ns = 0;
     runtime.release_hold_pending = false;
     runtime.release_hold_applied = false;
@@ -2385,6 +2422,7 @@ bool DualArmServoLoop::updateForceRuntime(
         } else if (update.state == FtTareState::Accepted) {
             runtime.tare_collecting = false;
             runtime.tare_valid = true;
+            runtime.tare_retry_count = 0;
             const bool payload_identification_inhibit_was_latched =
                 runtime.payload_identification_inhibit;
             runtime.payload_identification_inhibit = false;
@@ -2417,9 +2455,32 @@ bool DualArmServoLoop::updateForceRuntime(
             runtime.tare_collecting = false;
             runtime.tare_valid = false;
             runtime.ft.tare_valid = false;
-            runtime.ft.tare_state = "rejected";
-            std::cerr << "[WARN] FT " << toString(arm_id)
-                      << " post-init software zero rejected: " << update.reason << "\n";
+            // Intermittent disturbances (gripper servo twitch, wrist-camera
+            // cable sway) can spoil a single window: 2026-07-23 20:33 rejected
+            // fx stddev 1.571 N on a run whose 12 s-earlier twin accepted.
+            // Re-settle and retry a bounded number of windows before declaring
+            // the zero unusable — the operator's contact-free Init Motion
+            // assertion still stands across retries.
+            constexpr int kResidualTareMaxRetries = 5;
+            if (runtime.tare_retry_count < kResidualTareMaxRetries) {
+                ++runtime.tare_retry_count;
+                runtime.tare_not_before_ns = now_ns + static_cast<uint64_t>(
+                    ft_config.auto_tare_settle_sec * 1e9);
+                runtime.ft.tare_state = "settling";
+                runtime.ft.tare_reason = update.reason + " -- retrying (" +
+                    std::to_string(runtime.tare_retry_count) + "/" +
+                    std::to_string(kResidualTareMaxRetries) + ")";
+                std::cerr << "[WARN] FT " << toString(arm_id)
+                          << " post-init software zero rejected: " << update.reason
+                          << " -- retry " << runtime.tare_retry_count << "/"
+                          << kResidualTareMaxRetries << "\n";
+            } else {
+                runtime.ft.tare_state = "rejected";
+                std::cerr << "[WARN] FT " << toString(arm_id)
+                          << " post-init software zero rejected after "
+                          << kResidualTareMaxRetries << " retries: "
+                          << update.reason << "\n";
+            }
         }
     };
 
@@ -2494,7 +2555,56 @@ bool DualArmServoLoop::updateForceRuntime(
         config_.force_control.operating_mode == "cartesian_admittance" &&
         output.freshness_advanced) {
         if (!runtime.normal_contact_active) {
-            if (force_control_stand.norm() >= arm_config.contact_enter_force_n) {
+            // Episode ENTRY gates (2026-07-18 15:23 runs): transit grip/
+            // inertial residuals reached 3.5-9.5 N with a ROTATING direction
+            // and froze bogus lateral normals for seconds, warping the
+            // post-pick motion. A real surface contact is (a) approached at
+            // low commanded speed and (b) pushes in a stable direction across
+            // the debounce window. Either gate failing resets the debounce.
+            double commanded_speed_m_s =
+                std::numeric_limits<double>::infinity();
+            if (runtime.sent_tcp_sample_count >= 2 &&
+                runtime.sent_tcp_sample_newer_ns >
+                    runtime.sent_tcp_sample_older_ns) {
+                const double dt_s = static_cast<double>(
+                    runtime.sent_tcp_sample_newer_ns -
+                    runtime.sent_tcp_sample_older_ns) * 1e-9;
+                const math::Vector3 dp(
+                    runtime.sent_tcp_sample_newer.x - runtime.sent_tcp_sample_older.x,
+                    runtime.sent_tcp_sample_newer.y - runtime.sent_tcp_sample_older.y,
+                    runtime.sent_tcp_sample_newer.z - runtime.sent_tcp_sample_older.z);
+                if (dt_s > 0.0) commanded_speed_m_s = dp.norm() / dt_s;
+            }
+            const bool entry_speed_ok =
+                commanded_speed_m_s <= arm_config.contact_entry_max_speed_m_s;
+            bool entry_direction_ok = false;
+            const double f_norm = force_control_stand.norm();
+            if (f_norm > 1e-9) {
+                const math::Vector3 dir = force_control_stand / f_norm;
+                const math::Vector3 first(
+                    runtime.contact_entry_first_dir[0],
+                    runtime.contact_entry_first_dir[1],
+                    runtime.contact_entry_first_dir[2]);
+                constexpr double kEntryDirCosMin = 0.866;  // 30 deg cone
+                if (!runtime.contact_entry_first_dir_valid ||
+                    dir.dot(first) >= kEntryDirCosMin) {
+                    entry_direction_ok = true;
+                    if (!runtime.contact_entry_first_dir_valid) {
+                        runtime.contact_entry_first_dir = {
+                            dir.x(), dir.y(), dir.z()};
+                        runtime.contact_entry_first_dir_valid = true;
+                    }
+                } else {
+                    // Rotated out of the cone: restart the window on the new
+                    // direction so a genuine contact after a transient still
+                    // enters promptly.
+                    runtime.contact_entry_first_dir = {dir.x(), dir.y(), dir.z()};
+                    runtime.contact_entry_first_dir_valid = true;
+                    runtime.enter_count = 0;
+                }
+            }
+            if (force_control_stand.norm() >= arm_config.contact_enter_force_n &&
+                entry_speed_ok && entry_direction_ok) {
                 if (++runtime.enter_count >= arm_config.debounce_samples) {
                     runtime.normal_contact_active = true;
                     runtime.enter_count = 0;
@@ -2511,11 +2621,13 @@ bool DualArmServoLoop::updateForceRuntime(
                     runtime.contact_anchor = tcp;
                     runtime.contact_anchor_valid = true;
                     runtime.release_start_ns = 0;
+                    runtime.contact_entry_first_dir_valid = false;
                     controller.engage();
                     contact_force_entered = true;
                 }
             } else {
                 runtime.enter_count = 0;
+                runtime.contact_entry_first_dir_valid = false;
             }
         }
     }
@@ -2582,6 +2694,26 @@ bool DualArmServoLoop::updateForceRuntime(
     runtime.control.fast_normal_force_n = fast_normal;
     runtime.control.fast_force_norm_n = force_fast_stand.norm();
     runtime.control.fast_torque_norm_nm = torque_fast_stand.norm();
+    if (output.freshness_advanced) {
+        // Differentiate only across newly acquired F/T samples. The backend
+        // host timestamp belongs to the acquired state frame, so its delta
+        // reflects the ~280 Hz EFT stream even though this method is called by
+        // the 500 Hz servo loop. Missing/non-monotonic timestamps safely
+        // re-seed the differentiator and cannot synthesize a rate trip.
+        runtime.control.fast_force_rate_n_per_ms = 0.0;
+        if (runtime.fast_force_rate_initialized &&
+            state.host_time_ns > runtime.previous_fast_force_sample_ns) {
+            const double sample_dt_ms = static_cast<double>(
+                state.host_time_ns - runtime.previous_fast_force_sample_ns) * 1e-6;
+            runtime.control.fast_force_rate_n_per_ms =
+                (runtime.control.fast_force_norm_n -
+                 runtime.previous_fast_force_norm_n) / sample_dt_ms;
+        }
+        runtime.previous_fast_force_norm_n =
+            runtime.control.fast_force_norm_n;
+        runtime.previous_fast_force_sample_ns = state.host_time_ns;
+        runtime.fast_force_rate_initialized = state.host_time_ns > 0;
+    }
     const double transverse_force_n = std::hypot(
         runtime.control_wrench_compliance.fx,
         runtime.control_wrench_compliance.fy
@@ -2600,10 +2732,16 @@ bool DualArmServoLoop::updateForceRuntime(
             : measured_normal >= arm_config.contact_enter_force_n) ||
         (config_.force_control.operating_mode == "cartesian_admittance" &&
          cartesian_soft_contact);
+    const bool hard_limit_rate_exceeded =
+        arm_config.hard_limit_rate_n_per_ms > 0.0 &&
+        runtime.control.fast_force_norm_n >= arm_config.hard_limit_rate_floor_n &&
+        runtime.control.fast_force_rate_n_per_ms >=
+            arm_config.hard_limit_rate_n_per_ms;
     const bool hard_limit_threshold_exceeded =
         fast_normal >= arm_config.hard_normal_force_n ||
         runtime.control.fast_force_norm_n >= arm_config.hard_force_norm_n ||
-        runtime.control.fast_torque_norm_nm >= arm_config.hard_torque_norm_nm;
+        runtime.control.fast_torque_norm_nm >= arm_config.hard_torque_norm_nm ||
+        hard_limit_rate_exceeded;
     runtime.control.hard_limit_threshold_exceeded = hard_limit_threshold_exceeded;
     if (output.freshness_advanced) {
         if (!hard_limit_threshold_exceeded) {
@@ -2710,7 +2848,14 @@ bool DualArmServoLoop::updateForceRuntime(
     }
 
     const bool hard_limit = runtime.control.hard_limit_exceeded;
-    if (hard_limit) {
+    // hard_limit_policy retreat: the debounced hard limit starts a bounded
+    // retreat episode inside the cartesian_admittance path below instead of
+    // latching. The scalar contact_force normal episode keeps the latch —
+    // its frozen-normal ownership predates the generic escape machinery.
+    const bool retreat_capable =
+        config_.force_control.hard_limit_policy == "retreat" &&
+        mode == "cartesian_admittance" && !contact_force_surface;
+    if (hard_limit && !retreat_capable) {
         runtime.control.state = "fault";
         runtime.control.fault_reason = "external force/torque hard limit exceeded";
         if (fault_reason) *fault_reason = runtime.control.fault_reason;
@@ -2735,6 +2880,14 @@ bool DualArmServoLoop::updateForceRuntime(
         ForceControlCommand cartesian_command;
         cartesian_command.mode = ForceControlMode::Admittance;
         cartesian_command.enabled_axis = arm_config.compliance_axes;
+        // Bleed only under a live policy equilibrium. A static hold anchor
+        // frozen at an in-surface pose (client aborted mid-press) turns the
+        // bleed into a perpetual touch-escape-drain bounce: the drain itself
+        // re-creates the contact (2026-07-23 14:20 Hold oscillation, ~0.6 s /
+        // 7 mm / 5-9 N). On Hold the escaped offset is simply kept and the
+        // arm rests contact-free until a policy target moves the equilibrium.
+        cartesian_command.allow_release_bleed =
+            runtime.rolling_compliance_target_source == "policy_target";
         Wrench6D cartesian_wrench = runtime.control_wrench_compliance;
         Vec6 cartesian_twist = runtime.actual_twist_compliance;
         if (contact_force_surface && runtime.normal_contact_active) {
@@ -2758,6 +2911,167 @@ bool DualArmServoLoop::updateForceRuntime(
             cartesian_twist.x = tangent_velocity_compliance.x();
             cartesian_twist.y = tangent_velocity_compliance.y();
             cartesian_twist.z = tangent_velocity_compliance.z();
+        }
+        // Hard-limit retreat episode management (hard_limit_policy: retreat).
+        if (retreat_capable) {
+            const auto retreat_latch = [&](const std::string& why) {
+                runtime.retreat_active = false;
+                runtime.control.state = "fault";
+                runtime.control.fault_reason = why;
+                if (fault_reason) *fault_reason = why;
+                return true;
+            };
+            if (hard_limit && !runtime.retreat_active &&
+                !fault_latched_.load()) {
+                if (config_.force_control.retreat_max_attempts > 0) {
+                    const uint64_t window_ns = static_cast<uint64_t>(
+                        config_.force_control.retreat_attempt_window_sec * 1e9);
+                    if (runtime.retreat_window_start_ns == 0 ||
+                        now_ns - runtime.retreat_window_start_ns > window_ns) {
+                        runtime.retreat_window_start_ns = now_ns;
+                        runtime.retreat_attempt_count = 0;
+                    }
+                    if (runtime.retreat_attempt_count >=
+                        config_.force_control.retreat_max_attempts) {
+                        return retreat_latch(
+                            "external force/torque hard limit exceeded "
+                            "(retreat attempts exhausted)");
+                    }
+                }
+                const double press_norm = force_fast_stand.norm();
+                if (!(press_norm > 1e-6)) {
+                    // Torque-only trigger or degenerate force: no defined
+                    // translation escape direction — keep the latch.
+                    return retreat_latch(
+                        "external force/torque hard limit exceeded "
+                        "(no retreat direction)");
+                }
+                ++runtime.retreat_attempt_count;
+                runtime.retreat_active = true;
+                runtime.retreat_braking = false;
+                runtime.retreat_virtual_current_n =
+                    config_.force_control.retreat_virtual_force_n;
+                const math::Vector3 press = force_fast_stand / press_norm;
+                runtime.retreat_press_stand = {press.x(), press.y(), press.z()};
+                runtime.retreat_started_ns = now_ns;
+                const Pose6D& off0 = cartesian_controller.state().offset_tcp;
+                runtime.retreat_start_offset = {off0.x, off0.y, off0.z};
+            } else if (runtime.retreat_active) {
+                const math::Vector3 press_stand(
+                    runtime.retreat_press_stand[0],
+                    runtime.retreat_press_stand[1],
+                    runtime.retreat_press_stand[2]);
+                const math::Vector3 escape_compliance =
+                    t_stand_compliance.rotation().transpose() * (-press_stand);
+                const auto& committed = cartesian_controller.state();
+                const Pose6D& off = committed.offset_tcp;
+                const math::Vector3 offset_delta(
+                    off.x - runtime.retreat_start_offset[0],
+                    off.y - runtime.retreat_start_offset[1],
+                    off.z - runtime.retreat_start_offset[2]);
+                const bool displaced = offset_delta.dot(escape_compliance) >=
+                    config_.force_control.retreat_distance_m;
+                const bool unloaded =
+                    !runtime.control.hard_limit_threshold_exceeded;
+                // Budget guard: the escape must remain brakeable inside the
+                // UNBOOSTED envelope before the per-axis offset cap. The
+                // Layer-3 dynamic scale follows the wrench error, so once the
+                // real press decays the acceleration limit collapses back to
+                // base — a fast state near the cap then fails the jerk
+                // governor's brake-before-cap oracle and would fault
+                // (2026-07-23 12:55 run). Enter braking with margin instead.
+                const double escape_speed =
+                    escape_compliance.x() * committed.velocity_tcp.x +
+                    escape_compliance.y() * committed.velocity_tcp.y +
+                    escape_compliance.z() * committed.velocity_tcp.z;
+                const double worst_axis_offset = std::max({
+                    std::abs(off.x), std::abs(off.y), std::abs(off.z)});
+                const double budget_m = std::max(
+                    1e-4,
+                    config_.force_control.max_pos_offset_m - worst_axis_offset);
+                const double base_acc =
+                    config_.force_control.max_linear_acceleration_m_s2;
+                const bool budget_low =
+                    escape_speed > 0.0 &&
+                    escape_speed * escape_speed / (2.0 * budget_m) >=
+                        0.5 * base_acc;
+                const uint64_t timeout_ns = static_cast<uint64_t>(
+                    config_.force_control.retreat_timeout_sec * 1e9);
+                // Force-terminated escape: end as soon as the contact is actually
+                // off, instead of after a fixed distance. force_fast_stand is the
+                // same per-tick measured wrench the hard limit trips on, so this
+                // closes the loop on the quantity the retreat exists to reduce.
+                // Distance / budget / offset-cap remain as backstops so a wrench
+                // that never decays (wedged, FT drift) still terminates -- and the
+                // timeout->latch path below is unchanged.
+                const double release_force_n =
+                    config_.force_control.retreat_release_force_n;
+                const bool force_released =
+                    release_force_n > 0.0 && force_fast_stand.norm() <= release_force_n;
+                if (!runtime.retreat_braking &&
+                    (force_released || displaced || budget_low ||
+                     worst_axis_offset >=
+                         0.8 * config_.force_control.max_pos_offset_m)) {
+                    runtime.retreat_braking = true;
+                }
+                if (runtime.retreat_braking) {
+                    // Ramp the virtual wrench off (~50 ms) so the Layer-3
+                    // envelope shrinks continuously while damping brakes the
+                    // escape; a step release strands the state outside the
+                    // collapsed envelope.
+                    const double release_rate_n_s =
+                        config_.force_control.retreat_virtual_force_n / 0.05;
+                    runtime.retreat_virtual_current_n = std::max(
+                        0.0,
+                        runtime.retreat_virtual_current_n -
+                            release_rate_n_s * controller_dt_sec);
+                    if (runtime.retreat_virtual_current_n <= 0.0) {
+                        runtime.retreat_active = false;
+                        runtime.retreat_braking = false;
+                        if (unloaded) runtime.hard_limit_count = 0;
+                    }
+                } else if (now_ns - runtime.retreat_started_ns > timeout_ns) {
+                    if (unloaded) {
+                        // Partial escape but the force is back under the hard
+                        // threshold — ramp off and resume; Layer-3 keeps
+                        // handling any residual load.
+                        runtime.retreat_braking = true;
+                    } else {
+                        // Retreating did not unload (wedged/jammed): final stop.
+                        return retreat_latch(
+                            "external force/torque hard limit exceeded "
+                            "(retreat timed out without unloading)");
+                    }
+                }
+            }
+            if (runtime.retreat_active &&
+                runtime.retreat_virtual_current_n > 0.0) {
+                // Virtual wrench: amplify the measured press so the existing
+                // admittance escape drives the offset away from the contact.
+                // Telemetry keeps the real measured wrench; only the
+                // controller drive sees the boost.
+                const math::Vector3 press_compliance =
+                    t_stand_compliance.rotation().transpose() * math::Vector3(
+                        runtime.retreat_press_stand[0],
+                        runtime.retreat_press_stand[1],
+                        runtime.retreat_press_stand[2]);
+                const double boost = runtime.retreat_virtual_current_n;
+                cartesian_wrench.fx += press_compliance.x() * boost;
+                cartesian_wrench.fy += press_compliance.y() * boost;
+                cartesian_wrench.fz += press_compliance.z() * boost;
+                // Episode-scoped envelope opening (reflex-only profile has no
+                // Layer-3 boost): ask the controller for the full backoff
+                // headroom, scaled down with the virtual-wrench ramp so the
+                // hysteresis sees a smooth release at episode end.
+                const double headroom = std::max(
+                    0.0,
+                    config_.force_control.backoff_max_velocity_m_s -
+                        config_.force_control.max_linear_velocity_m_s);
+                cartesian_command.retreat_envelope_boost_m_s = headroom *
+                    (runtime.retreat_virtual_current_n /
+                     std::max(1e-9,
+                              config_.force_control.retreat_virtual_force_n));
+            }
         }
         // During contact_force, the symmetric Cartesian controller receives
         // only tangential translation; the scalar unilateral controller below
@@ -2792,14 +3106,25 @@ bool DualArmServoLoop::updateForceRuntime(
             runtime.follower_loading_reaction_stand = {
                 reaction_stand.x(), reaction_stand.y(), reaction_stand.z()
             };
-            // Gate on the DEBOUNCED contact classifier, not the raw deadband:
-            // a grasped payload's inertial/grip wrench during fast free motion
-            // crosses the deadband transiently (2026-07-18 12:05 run: 2.5-6.9 N
-            // sign-flipping Fz during the post-pick lift yanked the plan by up
-            // to 20 mm per chunk and ended in a 49 N collision). Environmental
-            // contact latches enter/release hysteresis; inertial spikes do not.
+            // Layer-4 gate (generic redesign 2026-07-18): project policy
+            // loading only while the deadband-filtered force EXCEEDS the
+            // Layer-3 force limit — the same threshold that opens the
+            // back-off envelope. Grip/inertial transit residuals measured
+            // 2.5-9.5 N stay far below a 15 N limit, so no classifier or
+            // frozen-normal state is needed; the direction refreshes every
+            // tick from the measured wrench. force_limit_n <= 0 disables the
+            // layer entirely.
+            // Layer-4 gate, extended for retreat episodes: in the reflex-only
+            // profile (force_limit_n 0) the projection still must remove the
+            // policy's advance into the contact WHILE a retreat is escaping —
+            // otherwise the policy keeps driving the equilibrium down against
+            // the reflex (2026-07-24 88 N press-through).
             runtime.follower_loading_reaction_valid = runtime.control.enabled &&
-                (runtime.normal_contact_active || runtime.transverse_contact_active);
+                ((config_.force_control.force_limit_n > 0.0 &&
+                  reaction_compliance.norm() >=
+                      config_.force_control.force_limit_n) ||
+                 (runtime.retreat_active &&
+                  reaction_compliance.norm() > 1e-9));
         }
         const pinocchio::SE3 t_tcp_surface(
             r_stand_tcp.transpose() * r_stand_surface,
@@ -2872,8 +3197,9 @@ bool DualArmServoLoop::updateForceRuntime(
             }
             return true;
         }
-        runtime.control.state = runtime.control.compliance_active
-            ? "regulating" : "armed";
+        runtime.control.state = runtime.retreat_active
+            ? "retreating"
+            : (runtime.control.compliance_active ? "regulating" : "armed");
         if (!(contact_force_surface && runtime.normal_contact_active)) {
             return false;
         }
@@ -2998,12 +3324,14 @@ bool DualArmServoLoop::updateForceRuntime(
             if (arm_id == ArmId::Left) {
                 left_delta_twist_follower_.deactivate();
                 left_chunk_follower_.deactivate();
+                left_follower_output_smd_.deactivate();
                 left_pose_track_smd_.deactivate();
                 left_chunk_submitted_recv_seq_ = chunk_frame_cache_recv_seq_;
                 left_output_ma_.reset();
             } else {
                 right_delta_twist_follower_.deactivate();
                 right_chunk_follower_.deactivate();
+                right_follower_output_smd_.deactivate();
                 right_pose_track_smd_.deactivate();
                 right_chunk_submitted_recv_seq_ = chunk_frame_cache_recv_seq_;
                 right_output_ma_.reset();
@@ -5885,6 +6213,10 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.follower_corner = abc.follower_corner;
     solve.follower_pf_stand = abc.follower_pf_stand;
     solve.stage_tcp_target_stand = abc.stage_tcp_target_stand;
+    solve.follower_output_smd_active = abc.follower_output_smd_active;
+    solve.follower_output_smd_lag_m = abc.follower_output_smd_lag_m;
+    solve.follower_output_smd_lag_rad = abc.follower_output_smd_lag_rad;
+    solve.follower_prefilter_stand = abc.follower_prefilter_stand;
     solve.follower_divergence_pos_m = abc.follower_divergence_pos_m;
     solve.follower_divergence_ang_rad = abc.follower_divergence_ang_rad;
     solve.follower_projection_error_m = abc.follower_projection_error_m;
@@ -6050,6 +6382,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     std::uint64_t* submitted_wire_seq,
     std::uint64_t* submitted_recv_seq,
     SmdPoseTracker* smd_tracker,
+    control::FollowerOutputSmd* output_smd,
     const ArmMountConfig& mount,
     const JointArray& previous_sent_q_deg,
     const Pose6D& actual_feedback_pose,
@@ -6072,6 +6405,10 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.follower_corner = false;
     abc.follower_pf_stand.reset();
     abc.stage_tcp_target_stand.reset();
+    abc.follower_output_smd_active = false;
+    abc.follower_output_smd_lag_m = 0.0;
+    abc.follower_output_smd_lag_rad = 0.0;
+    abc.follower_prefilter_stand.reset();
     abc.follower_divergence_pos_m = 0.0;
     abc.follower_divergence_ang_rad = 0.0;
     abc.follower_projection_error_m = 0.0;
@@ -6156,6 +6493,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                   << (!transition_reason.empty() ? ")" : "") << "\n";
     };
     const auto smd_fallback = [&]() {
+        output_smd->deactivate();
         log_transition();
         return with_stage_telemetry(applyPoseTrackSmd(
             command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
@@ -6171,6 +6509,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         // the Hold path owns the robot until a bounded warm resume or expiry.
         const double now_sec = ChunkFrameReceiver::steadyNowSec();
         follower->pauseForHold(now_sec);
+        output_smd->deactivate();
         follower->expireHoldPause(now_sec, rf.hold_bounce_resume_sec);
         resetChunkFollowerEngageWait(arm_id);
         smd_tracker->deactivate();
@@ -6184,6 +6523,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         // streaming command.
         transition_reason = "mode/enable";
         follower->deactivate();
+        output_smd->deactivate();
         resetChunkFollowerEngageWait(arm_id);
         return smd_fallback();
     }
@@ -6191,6 +6531,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     // In-place (keeps the prewarmed ruckig OTG): cheap enough for the RT tick.
     if (ruckigFollowerConfigChanged(*built_cfg, rf)) {
         follower->reconfigure(makeChunkFollowerConfig(rf));
+        *output_smd = control::FollowerOutputSmd(rf.output_smd);
         *built_cfg = rf;
         *submitted_wire_seq = 0;
         *submitted_recv_seq = 0;
@@ -6221,11 +6562,31 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         }
     }
     const auto hold_at_reference = [&]() {
+        output_smd->deactivate();
         ArmCommand smoothed = command;
         smoothed.tcp_target_stand = reference;
         return smoothed;
     };
-    if (follower->holdPaused()) {
+    // Safety-layer hold: the floor/ROI/self-collision stage clamps this arm to its previous
+    // sent joints, but that stage runs AFTER command generation, so the follower never learned
+    // the command was refused and kept integrating deltas against a stationary robot. Measured
+    // on servo_log_20260729_165037.csv: eight RoiViolation episodes (right gripper tip crossing
+    // roi_box.max_m y=-0.150) drove actual_lead 1.3 mm -> 40.7 mm / 4.5 deg, ending the rollout
+    // in delta_preview_actual_lead_fault, and every time the verdict flipped back to Ok the arm
+    // lunged to catch up the ran-ahead plan. Freezing the plan here does NOT stop the robot any
+    // earlier -- the safety layer already stopped it -- it only stops the plan from running away
+    // while it is stopped. Same pause/expire pair the Hold path uses, so the bounded-grace
+    // deactivation policy is unchanged (and prevents a deadlock if the block never clears).
+    if (intervention_recent && follower->active()) {
+        const double safety_hold_now_sec = ChunkFrameReceiver::steadyNowSec();
+        follower->pauseForHold(safety_hold_now_sec);
+        output_smd->deactivate();
+        follower->expireHoldPause(safety_hold_now_sec, rf.hold_bounce_resume_sec);
+        transition_reason = "safety intervention hold";
+    } else if (follower->holdPaused()) {
+        // Warm resume always re-seeds the output stage from the latest sent pose;
+        // the preserved p/v/a belongs only to the pre-filter follower.
+        output_smd->deactivate();
         const control::HoldResumeResult resume = follower->resumeFromHold(
             reference,
             ChunkFrameReceiver::steadyNowSec(),
@@ -6259,6 +6620,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                 ? "feed timeout -> fault " + diag_seq_labels(active_diag)
                 : "feed timeout " + diag_seq_labels(active_diag);
             follower->deactivate();
+            output_smd->deactivate();
             if (fault_policy) {
                 smd_tracker->deactivate();
                 std::ostringstream reason;
@@ -6279,6 +6641,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                 // Otherwise keep the legacy drop/fault or SMD re-anchor behavior.
                 if (fault_policy && intervention_recent) {
                     follower->reanchor(reference);
+                    output_smd->deactivate();
                     ++reanchor_count;
                     abc.follower_reanchor_count = reanchor_count;
                     uint64_t& last_log_ns = arm_id == ArmId::Left
@@ -6299,6 +6662,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                         ? "divergence -> fault " + diag_seq_labels(active_diag)
                         : "divergence re-anchor " + diag_seq_labels(active_diag);
                     follower->deactivate();
+                    output_smd->deactivate();
                     if (fault_policy) {
                         smd_tracker->deactivate();
                         std::ostringstream reason;
@@ -6336,6 +6700,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             follower->submitFrame(toControlChunkFrame(chunk_frame_cache_, arm_id), reference);
         } else {
             follower->deactivate();
+            output_smd->deactivate();
             transition_reason = "delta preview rejected v3/proprio contract " +
                 seq_labels(chunk_frame_cache_.seq, chunk_frame_cache_.receiver_seq);
         }
@@ -6387,7 +6752,27 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                         force_runtime.follower_loading_reaction_stand[2]),
         force_runtime.follower_loading_reaction_valid,
         force_runtime.follower_contact_normal_owned);
-    smoothed.tcp_target_stand = follower->tick(dt_sec);
+    const Pose6D pre_filter = follower->tick(dt_sec);
+    abc.follower_prefilter_stand = pre_filter;
+    const Vec6 follower_velocity = follower->currentVelocity().value_or(Vec6{});
+    if (rf.output_smd.enable) {
+        if (!output_smd->active()) {
+            // `reference` is FK of the previous sent target with the committed
+            // compliance offset removed, i.e. the last sent pose in this stage's
+            // pre-compliance domain. Never cold-seed from an older filter state.
+            output_smd->reset(reference, follower_velocity);
+        }
+        smoothed.tcp_target_stand =
+            output_smd->step(pre_filter, follower_velocity, dt_sec);
+        abc.follower_output_smd_active = output_smd->active();
+        abc.follower_output_smd_lag_m = output_smd->lagPos();
+        abc.follower_output_smd_lag_rad = output_smd->lagAng();
+    } else {
+        output_smd->deactivate();
+        smoothed.tcp_target_stand = pre_filter;
+    }
+    // Ordering constraint: force/compliance composes downstream on this target;
+    // the contact reflex must never be low-passed by the follower output SMD.
     // Tell the force path this target is follower-produced (already loading-
     // projected) so the rolling equilibrium adopts it verbatim instead of
     // double-projecting and drifting away from the plan.
@@ -6498,6 +6883,10 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     abc.follower_corner = false;
     abc.follower_pf_stand.reset();
     abc.stage_tcp_target_stand.reset();
+    abc.follower_output_smd_active = false;
+    abc.follower_output_smd_lag_m = 0.0;
+    abc.follower_output_smd_lag_rad = 0.0;
+    abc.follower_prefilter_stand.reset();
     abc.follower_divergence_pos_m = 0.0;
     abc.follower_divergence_ang_rad = 0.0;
     abc.delta_twist_pending_linear_norm_m = 0.0;
@@ -6781,6 +7170,12 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     // shape leaves them false so the equilibrium keeps its own projection.
     left_force_runtime_.chunk_follower_drove_this_tick = false;
     right_force_runtime_.chunk_follower_drove_this_tick = false;
+    for (AbcTelemetry* abc : {&left_abc_telemetry_, &right_abc_telemetry_}) {
+        abc->follower_output_smd_active = false;
+        abc->follower_output_smd_lag_m = 0.0;
+        abc->follower_output_smd_lag_rad = 0.0;
+        abc->follower_prefilter_stand.reset();
+    }
     ServoTarget target;
     const bool synthetic_hold = isSyntheticHoldCommand(command);
     const auto clear_left_linear_path = [&]() {
@@ -6833,6 +7228,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
 
     if (isCommandModeMissingPayload(command.left) || isCommandModeMissingPayload(command.right)) {
         if (command_verdict) *command_verdict = SafetyVerdict::InvalidCommand;
+        left_follower_output_smd_.deactivate();
+        right_follower_output_smd_.deactivate();
         target.left_q_target_deg = left_prev_sent_q_deg_;
         target.right_q_target_deg = right_prev_sent_q_deg_;
         return target;
@@ -6965,8 +7362,13 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         ArmId arm_id,
         ControlMode raw_mode,
         control::CartesianChunkFollower& follower,
+        control::FollowerOutputSmd& output_smd,
         const RuckigFollowerConfig& built_config
     ) {
+        // Hold/mode-exit owns the sent target. A later warm resume may preserve
+        // follower p/v/a, but the output conditioner must re-seed from that new
+        // last-sent target rather than continue from a stale pose.
+        output_smd.deactivate();
         if (raw_mode != ControlMode::Hold || !follower.active() ||
             !built_config.enable ||
             built_config.controller == RuckigFollowerController::DeltaTwist) {
@@ -7008,6 +7410,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         }
         if (!cartesian_available) {
             if (command_verdict) *command_verdict = SafetyVerdict::CartesianUnavailable;
+            left_follower_output_smd_.deactivate();
+            right_follower_output_smd_.deactivate();
             if (isCartesianMode(effective_command.left.mode)) {
                 left_last_cartesian_solve_ = cartesianUnavailableTelemetry(
                     left_state,
@@ -7075,6 +7479,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             selectCartesianServoStateForArm(config_, effective_command.right, right_state);
         if (!left_servo_state.ok || !right_servo_state.ok) {
             if (command_verdict) *command_verdict = SafetyVerdict::CartesianUnavailable;
+            left_follower_output_smd_.deactivate();
+            right_follower_output_smd_.deactivate();
             if (!left_servo_state.ok) {
                 left_last_cartesian_solve_ = cartesianUnavailableTelemetry(
                     left_state,
@@ -7167,12 +7573,14 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 ArmId::Left,
                 command.left.mode,
                 left_chunk_follower_,
+                left_follower_output_smd_,
                 left_chunk_follower_built_);
             left_delta_twist_follower_.deactivate();
             left_pose_track_smd_.deactivate();
             left_pose_track_command = effective_command.left;
         } else if (left_tcp_profile.ruckig_follower.controller == RuckigFollowerController::DeltaTwist) {
             left_chunk_follower_.deactivate();
+            left_follower_output_smd_.deactivate();
             left_pose_track_command = applyDeltaTwistFollowerStage(
                 ArmId::Left,
                 effective_command.left,
@@ -7199,6 +7607,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 &left_chunk_submitted_wire_seq_,
                 &left_chunk_submitted_recv_seq_,
                 &left_pose_track_smd_,
+                &left_follower_output_smd_,
                 config_.left_mount,
                 left_prev_sent_q_deg_,
                 left_delta_twist_actual_feedback,
@@ -7211,12 +7620,14 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 ArmId::Right,
                 command.right.mode,
                 right_chunk_follower_,
+                right_follower_output_smd_,
                 right_chunk_follower_built_);
             right_delta_twist_follower_.deactivate();
             right_pose_track_smd_.deactivate();
             right_pose_track_command = effective_command.right;
         } else if (right_tcp_profile.ruckig_follower.controller == RuckigFollowerController::DeltaTwist) {
             right_chunk_follower_.deactivate();
+            right_follower_output_smd_.deactivate();
             right_pose_track_command = applyDeltaTwistFollowerStage(
                 ArmId::Right,
                 effective_command.right,
@@ -7243,6 +7654,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 &right_chunk_submitted_wire_seq_,
                 &right_chunk_submitted_recv_seq_,
                 &right_pose_track_smd_,
+                &right_follower_output_smd_,
                 config_.right_mount,
                 right_prev_sent_q_deg_,
                 right_delta_twist_actual_feedback,
@@ -7400,9 +7812,11 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             }
             if (left_cartesian_result.verdict != SafetyVerdict::Ok) {
                 target.left_q_target_deg = left_prev_sent_q_deg_;
+                left_follower_output_smd_.deactivate();
             }
             if (right_cartesian_result.verdict != SafetyVerdict::Ok) {
                 target.right_q_target_deg = right_prev_sent_q_deg_;
+                right_follower_output_smd_.deactivate();
             }
         }
         return target;
@@ -7415,9 +7829,11 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     // bounce evidence. Preserve a bounded, frozen chunk only for raw Hold;
     // every other mode switch still drops the streaming state immediately.
     pause_chunk_follower_for_hold(
-        ArmId::Left, command.left.mode, left_chunk_follower_, left_chunk_follower_built_);
+        ArmId::Left, command.left.mode, left_chunk_follower_,
+        left_follower_output_smd_, left_chunk_follower_built_);
     pause_chunk_follower_for_hold(
-        ArmId::Right, command.right.mode, right_chunk_follower_, right_chunk_follower_built_);
+        ArmId::Right, command.right.mode, right_chunk_follower_,
+        right_follower_output_smd_, right_chunk_follower_built_);
     left_delta_twist_follower_.deactivate();
     right_delta_twist_follower_.deactivate();
 
@@ -8761,6 +9177,10 @@ void DualArmServoLoop::resyncArmAfterFreedrive(ArmId arm_id, const RobotState& s
     force_runtime.enter_count = 0;
     force_runtime.transverse_enter_count = 0;
     force_runtime.rotational_enter_count = 0;
+    force_runtime.hard_limit_count = 0;
+    force_runtime.fast_force_rate_initialized = false;
+    force_runtime.previous_fast_force_norm_n = 0.0;
+    force_runtime.previous_fast_force_sample_ns = 0;
     force_runtime.release_start_ns = 0;
     force_runtime.release_hold_pending = false;
     force_runtime.release_hold_applied = false;
@@ -8777,6 +9197,7 @@ void DualArmServoLoop::resyncArmAfterFreedrive(ArmId arm_id, const RobotState& s
     force_runtime.control.transverse_regulating = false;
     force_runtime.control.rotational_regulating = false;
     force_runtime.control.loading_projection_active = false;
+    force_runtime.control.fast_force_rate_n_per_ms = 0.0;
     force_runtime.control.compliance_recenter_active = false;
     force_runtime.control.compliance_translation_recenter_coupled = false;
     force_runtime.control.compliance_rotation_recenter_coupled = false;
@@ -8824,6 +9245,8 @@ void DualArmServoLoop::resyncArmAfterFreedrive(ArmId arm_id, const RobotState& s
     right_delta_twist_follower_.deactivate();
     left_chunk_follower_.deactivate();
     right_chunk_follower_.deactivate();
+    left_follower_output_smd_.deactivate();
+    right_follower_output_smd_.deactivate();
     left_pose_track_smd_.deactivate();
     right_pose_track_smd_.deactivate();
     left_chunk_submitted_recv_seq_ = chunk_frame_cache_recv_seq_;
@@ -9625,12 +10048,43 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
     // reset above, so it is idle and not continued here.)
     const bool left_exec_requested = is_init && left_init;
     const bool right_exec_requested = is_init && right_init && !left_init;
-    const bool left_exec_fresh = left_exec_requested &&
-        (!left_init_motion_exec_.request_seen ||
-         left_init_motion_exec_.request_seq != command.seq);
-    const bool right_exec_fresh = right_exec_requested &&
-        (!right_init_motion_exec_.request_seen ||
-         right_init_motion_exec_.request_seq != command.seq);
+    // Freshness is a NEW OPERATOR REQUEST, not a new packet. A one-shot GUI command is
+    // re-delivered from the command buffer with a CONSTANT seq, so seq alone used to be a
+    // good proxy — but policy_runner's arm_init latch (ArmInitOverrideController::
+    // compose_intent) re-emits the SAME logical InitMotion every tick, and every packet
+    // carries a fresh seq. That made each tick look like a new press: launch_plan() reset
+    // status to Planning and cleared the waypoints, so the async planner's result was
+    // discarded before takePlannerResult() could consume it, and the arm sat held in place
+    // (rewrite_selected holds while Planning) until the stream stopped. Evidence
+    // (2026-08-13, servo_log_20260813_155705): 1722 "planning collision-free path" vs 2
+    // "plan found"; the right arm was pinned in `planning` for ~3.7k ticks and reached the
+    // init pose 118 ticks after flow-infer was killed. A committed sequence therefore
+    // relaunches only on a materially different goal; an idle/done/failed exec still
+    // replans on the next distinct seq, so pressing again after completion still works.
+    const double init_request_tol_deg = std::max(
+        0.0,
+        std::max(config_.safety.init_motion_planner.noop_tol_deg,
+                 config_.safety.init_motion_planner.waypoint_tol_deg));
+    const auto exec_is_fresh = [&](const InitMotionExec& ex, bool requested,
+                                   bool request_left, bool request_right) {
+        if (!requested) return false;
+        InitMotionRequestView view;
+        view.request_seen = ex.request_seen;
+        view.request_seq = ex.request_seq;
+        view.sequence_active = sequence_active(ex);
+        view.has_target = ex.has_target;
+        view.left_active = ex.left_active;
+        view.right_active = ex.right_active;
+        view.target_left = ex.target_left;
+        view.target_right = ex.target_right;
+        return initMotionRequestIsFresh(
+            view, command.seq, request_left, request_right,
+            command.left.q_target_deg, command.right.q_target_deg, init_request_tol_deg);
+    };
+    const bool left_exec_fresh =
+        exec_is_fresh(left_init_motion_exec_, left_exec_requested, true, right_init);
+    const bool right_exec_fresh =
+        exec_is_fresh(right_init_motion_exec_, right_exec_requested, false, true);
     if (left_exec_requested) {
         process_exec(
             left_init_motion_exec_, PlannerRequester::LeftInit, true, right_init,
@@ -9650,6 +10104,40 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                      right_init_motion_exec_.right_active, false);
     }
     return command;
+}
+
+bool initMotionRequestIsFresh(
+    const InitMotionRequestView& ex,
+    uint64_t command_seq,
+    bool request_left,
+    bool request_right,
+    const JointArray& command_target_left,
+    const JointArray& command_target_right,
+    double tol_deg) {
+    // First request this exec has ever seen.
+    if (!ex.request_seen) return true;
+    // Same packet re-served from the command buffer (one-shot GUI command held across
+    // ticks) — already handled on the tick it arrived.
+    if (ex.request_seq == command_seq) return false;
+    // Distinct seq with no committed sequence in flight: a genuine new press. Replan even
+    // when the endpoint matches the previous one — the robot may have been moved since
+    // that sequence completed, so the new press must remain usable.
+    if (!ex.sequence_active) return true;
+    // Distinct seq while Planning/Executing. This is the streaming-client case: relaunch
+    // ONLY for a materially different goal, otherwise the per-tick re-emission would reset
+    // the planner forever and the arm would never leave the hold.
+    if (!ex.has_target) return true;
+    if (ex.left_active != request_left || ex.right_active != request_right) return true;
+    const double tol = std::max(0.0, tol_deg);
+    for (int i = 0; i < kDof; ++i) {
+        if (request_left && std::abs(command_target_left[i] - ex.target_left[i]) > tol) {
+            return true;
+        }
+        if (request_right && std::abs(command_target_right[i] - ex.target_right[i]) > tol) {
+            return true;
+        }
+    }
+    return false;
 }
 
 PursuitStep pursueWaypointsStep(
@@ -10131,6 +10619,8 @@ void DualArmServoLoop::latchFault(
     const LatchedDualFaultContext& contexts
 ) {
     clearLatchedCartesianTargets();
+    left_follower_output_smd_.deactivate();
+    right_follower_output_smd_.deactivate();
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (fault_latched_.load()) return;
     fault_latched_.store(true);

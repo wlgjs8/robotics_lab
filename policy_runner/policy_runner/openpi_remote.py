@@ -1253,18 +1253,38 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         if wall_dt is not None and wall_dt > 1e-6:
             scale = float(np.clip(float(self.policy_dt_sec) / wall_dt, 0.0, 1.0))
         out: dict[str, np.ndarray] = {}
+        # Same fail-closed contract as fixed_step: publish real validity so the C++ follower's
+        # chunk_metadata.proprio.valid gate can pass once a previous sample exists.
+        diagnostics: dict[str, object] = {
+            "sample_mode": "replan",
+            "source": "measured",
+            "policy_dt_sec": float(self.policy_dt_sec),
+            "wall_dt_sec": None if wall_dt is None else float(wall_dt),
+            "scale": scale,
+            "arms": {},
+        }
+        arms: dict[str, object] = diagnostics["arms"]  # type: ignore[assignment]
         for side in ("left", "right"):
             pose = np.asarray(pose_from_state_payload(payload, side), dtype=np.float64)
             prev = self._vel_prev_pose_by_arm[side]
             if prev is None:
                 vel = np.zeros(6, dtype=np.float64)
+                arms[side] = {"valid": False, "zero_reason": "no_previous_replan_sample"}
             else:
                 r_prev = Rotation.from_quat(prev[3:7])
                 pos_vel = r_prev.inv().apply(pose[:3] - prev[:3]) * scale
                 rot_vel = (r_prev.inv() * Rotation.from_quat(pose[3:7])).as_rotvec() * scale
                 vel = np.concatenate([pos_vel, rot_vel])
+                arms[side] = {"valid": True, "zero_reason": None, "delta": vel.tolist()}
             self._vel_prev_pose_by_arm[side] = pose.copy()
             out[side] = vel
+        diagnostics["valid"] = bool(
+            all(bool(arms.get(side, {}).get("valid")) for side in ("left", "right"))  # type: ignore[union-attr]
+        )
+        diagnostics["zero_reason"] = (
+            None if diagnostics["valid"] else "one_or_more_arms_missing_previous_sample"
+        )
+        self._last_velproprio_diagnostics = diagnostics
         return out
 
     def _arm_body_velocities_fixed_step(self, payload: dict[str, Any]) -> dict[str, np.ndarray]:
@@ -1282,11 +1302,25 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         now = self._last_now_monotonic
         use_command = getattr(self, "velproprio_source", "measured") == "command"
         out: dict[str, np.ndarray] = {}
+        # The C++ chunk follower is fail-closed on chunk_metadata.proprio.valid
+        # (dual_arm_servo_loop.cpp preview_contract_valid); a frame whose proprio is not
+        # reported valid is rejected and the follower never engages -> engage_timeout fault.
+        # Only the camera_frame sampler used to publish that bit, so fixed_step/replan left
+        # the constructor's {"valid": False, "zero_reason": "not_sampled"} in place and could
+        # never drive the delta-preview path at all. Report real per-arm validity here.
+        diagnostics: dict[str, object] = {
+            "sample_mode": "fixed_step",
+            "source": "command" if use_command else "measured",
+            "policy_dt_sec": float(self.policy_dt_sec),
+            "arms": {},
+        }
+        arms: dict[str, object] = diagnostics["arms"]  # type: ignore[assignment]
         for side in ("left", "right"):
             if use_command:
                 hist_samples = self._velproprio_history_snapshot(side, history=self._command_pose_history)
                 if not hist_samples:
                     out[side] = np.zeros(6, dtype=np.float64)
+                    arms[side] = {"valid": False, "zero_reason": "command_history_empty"}
                     continue
                 cur_t, cur = hist_samples[-1]
                 cur = np.asarray(cur, dtype=np.float64)
@@ -1301,6 +1335,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 prev, dt = self._velproprio_lookback(side, now)
             if prev is None or dt is None:
                 out[side] = np.zeros(6, dtype=np.float64)
+                arms[side] = {"valid": False, "zero_reason": "lookback_window_unavailable"}
                 continue
             # Normalize the ~one-step window to exactly one policy step. dt ~= policy_dt so the
             # ratio ~1; the clamp only guards a sparse buffer (never the latency blow-up the
@@ -1310,6 +1345,20 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             pos_vel = r_prev.inv().apply(cur[:3] - prev[:3]) * scale
             rot_vel = (r_prev.inv() * Rotation.from_quat(cur[3:7])).as_rotvec() * scale
             out[side] = np.concatenate([pos_vel, rot_vel])
+            arms[side] = {
+                "valid": True,
+                "zero_reason": None,
+                "window_dt_sec": float(dt),
+                "scale": scale,
+                "delta": out[side].tolist(),
+            }
+        diagnostics["valid"] = bool(
+            all(bool(arms.get(side, {}).get("valid")) for side in ("left", "right"))  # type: ignore[union-attr]
+        )
+        diagnostics["zero_reason"] = (
+            None if diagnostics["valid"] else "one_or_more_lookback_windows_unavailable"
+        )
+        self._last_velproprio_diagnostics = diagnostics
         return out
 
     def _velproprio_lookback(

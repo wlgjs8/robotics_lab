@@ -3,11 +3,13 @@ pyproject.toml
 rb_servo_gui/__init__.py
 rb_servo_gui/app.py
 rb_servo_gui/box_detect_control.py
+rb_servo_gui/camera_quality.py
 rb_servo_gui/chunk_overlay_receiver.py
 rb_servo_gui/cog_calibration.py
 rb_servo_gui/cog_gui.py
 rb_servo_gui/command_client.py
 rb_servo_gui/geometry.py
+rb_servo_gui/head_preview.py
 rb_servo_gui/models.py
 rb_servo_gui/overlay_receiver.py
 rb_servo_gui/plane_fit.py
@@ -24,8 +26,10 @@ rb_servo_gui.egg-info/dependency_links.txt
 rb_servo_gui.egg-info/entry_points.txt
 rb_servo_gui.egg-info/requires.txt
 rb_servo_gui.egg-info/top_level.txt
+tests/test_camera_quality.py
 tests/test_chunk_overlay.py
 tests/test_cog_calibration.py
 tests/test_cog_gui.py
 tests/test_gui_contracts.py
+tests/test_head_preview.py
 tests/test_realtime_health.py

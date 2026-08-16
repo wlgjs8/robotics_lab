@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <limits>
 #include <cstring>
 #include <iostream>
 #include <vector>
@@ -23,6 +24,16 @@ using json = nlohmann::json;
 constexpr char kCommandSchema[] = "robotics_lab.gripper_cmd.v1";
 constexpr char kStateSchema[] = "robotics_lab.gripper_state.v1";
 
+// CLOCK_REALTIME, to be comparable with the gripper_server's Python
+// time.time_ns() publish stamp. Deliberately NOT steady_clock: this is the one
+// cross-process comparison in the bridge.
+uint64_t nowRealtimeNs() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+}
+
 uint64_t nowSteadyNs() {
     return static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -31,8 +42,10 @@ uint64_t nowSteadyNs() {
 }
 
 // Read a per-arm feedback block; tolerates null percent (no live read => ok=false).
-void parseArmFeedback(const json& msg, const char* arm, GripperArmFeedback* out) {
+void parseArmFeedback(const json& msg, const char* arm, GripperArmFeedback* out,
+                      double feedback_age_ms) {
     *out = GripperArmFeedback{};
+    out->feedback_age_ms = feedback_age_ms;
     auto it = msg.find(arm);
     if (it == msg.end() || !it->is_object()) return;
     const json& block = *it;
@@ -177,9 +190,21 @@ void GripperBridge::receiveLoop() {
         if (msg.is_discarded() || !msg.is_object()) continue;
         if (msg.value("schema", std::string()) != kStateSchema) continue;
         const uint64_t now = nowSteadyNs();
+        // Transport+publish age of THIS message, so a late-reported jaw can be
+        // told apart from a slow one. Guarded: a missing//bogus stamp stays NaN
+        // rather than producing a fabricated age.
+        double age_ms = std::numeric_limits<double>::quiet_NaN();
+        const json stamp = msg.value("host_time_ns", json(nullptr));
+        if (stamp.is_number_unsigned() || stamp.is_number_integer()) {
+            const uint64_t sent_ns = stamp.get<uint64_t>();
+            const uint64_t recv_ns = nowRealtimeNs();
+            if (recv_ns >= sent_ns) {
+                age_ms = static_cast<double>(recv_ns - sent_ns) / 1e6;
+            }
+        }
         std::lock_guard<std::mutex> lock(fb_mutex_);
-        parseArmFeedback(msg, "left", &left_fb_);
-        parseArmFeedback(msg, "right", &right_fb_);
+        parseArmFeedback(msg, "left", &left_fb_, age_ms);
+        parseArmFeedback(msg, "right", &right_fb_, age_ms);
         left_fb_time_ns_ = now;
         right_fb_time_ns_ = now;
     }

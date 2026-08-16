@@ -729,9 +729,9 @@ ForceControllerProposal ForceController::propose(
         return proposal;
     }
 
-    const AxisValues old_offset = poseValues(state_.offset_tcp);
-    const AxisValues old_velocity = vecValues(state_.velocity_tcp);
-    const AxisValues old_acceleration = vecValues(state_.acceleration_tcp);
+    AxisValues old_offset = poseValues(state_.offset_tcp);
+    AxisValues old_velocity = vecValues(state_.velocity_tcp);
+    AxisValues old_acceleration = vecValues(state_.acceleration_tcp);
     const AxisValues enabled = enabledAxes(command.enabled_axis);
     AxisValues next_offset = old_offset;
     AxisValues next_velocity = old_velocity;
@@ -753,6 +753,57 @@ ForceControllerProposal ForceController::propose(
         wrench_error[i] = std::abs(raw_error) <= deadband
             ? 0.0
             : raw_error - std::copysign(deadband, raw_error);
+    }
+    // Layer-3 generic force limiter: above force_limit_n the TRANSLATION
+    // response envelope opens proportionally to the excess force. The escape
+    // direction needs no model or frozen normal — the per-axis wrench error IS
+    // the drive; the wider envelope just lets the existing mass-damper follow
+    // it fast enough that the contact force saturates near the limit instead
+    // of climbing into the hard-limit latch. (The comparison uses the
+    // deadband-shaved error norm, i.e. it is deadband-conservative.)
+    double translation_velocity_boost = 0.0;
+    double translation_dynamic_scale = 1.0;
+    {
+        const double headroom = std::max(
+            0.0,
+            config_.backoff_max_velocity_m_s - config_.max_linear_velocity_m_s);
+        double demanded_boost = 0.0;
+        if (config_.force_limit_n > 0.0) {
+            const double error_norm = std::sqrt(
+                wrench_error[0] * wrench_error[0] +
+                wrench_error[1] * wrench_error[1] +
+                wrench_error[2] * wrench_error[2]);
+            const double excess = error_norm - config_.force_limit_n;
+            if (excess > 0.0) {
+                demanded_boost = std::min(
+                    config_.backoff_gain_m_s_per_n * excess, headroom);
+            }
+        }
+        // Hard-limit retreat episodes request their own envelope opening so
+        // the reflex reverses a driven descent quickly even in the
+        // reflex-only profile (force_limit_n 0). Without it the escape runs
+        // on the base envelope and a 0.05 m/s policy descent takes ~120 ms to
+        // reverse while the contact climbs to ~88 N
+        // (servo_log_20260724_142820 ticks 600404-600470).
+        demanded_boost = std::max(
+            demanded_boost,
+            std::min(command.retreat_envelope_boost_m_s, headroom));
+        // Asymmetric envelope hysteresis: open instantly with the demand, but
+        // decay no faster than half the base acceleration limit — the widened
+        // velocity/acceleration envelope must never shrink faster than the
+        // governor can brake the state back inside it. A step collapse when
+        // the contact force releases abruptly strands the escape velocity
+        // outside the new envelope and hard-faults the proposal
+        // (2026-07-23 12:55 retreat / 13:08 regulating latches).
+        const double boost_decay_rate =
+            0.5 * config_.max_linear_acceleration_m_s2;
+        translation_velocity_boost = std::max(
+            demanded_boost,
+            state_.envelope_boost_m_s - boost_decay_rate * dt_sec);
+        translation_velocity_boost = std::max(0.0, translation_velocity_boost);
+        translation_dynamic_scale = 1.0 +
+            translation_velocity_boost /
+                std::max(1e-9, config_.max_linear_velocity_m_s);
     }
     const auto block_loaded = [&](std::size_t begin, std::size_t end) {
         for (std::size_t i = begin; i < end; ++i) {
@@ -821,22 +872,36 @@ ForceControllerProposal ForceController::propose(
         const bool sibling_loaded = i < 3 ? translation_loaded : rotation_loaded;
         const bool defer_axis_spring = config_.blockwise_release_recenter &&
             sibling_loaded && std::abs(wrench_error[i]) <= scaledTolerance(1.0);
-        const double effective_stiffness =
+        double effective_stiffness =
             defer_axis_spring ? 0.0 : config_.stiffness[i];
-        const double raw_acceleration =
+        // Released-state offset bleed: a zero-stiffness axis whose whole block
+        // is unloaded (every enabled sibling inside the wrench deadband) drains
+        // its residual protective offset with the configured bleed spring.
+        // Without this the K=0 offset ratchets to max_pos_offset_m across
+        // repeated contacts of a hovering/re-approaching policy and the unload
+        // authority collapses (2026-07-22 servo_log_20260722_172914). Any
+        // re-contact re-loads the block and stops the bleed the same tick, so
+        // the in-contact spring re-press that motivated K=0 stays impossible.
+        if (effective_stiffness == 0.0 && !defer_axis_spring &&
+            !sibling_loaded && command.allow_release_bleed &&
+            config_.release_bleed_stiffness[i] > 0.0 &&
+            std::abs(wrench_error[i]) <= scaledTolerance(1.0)) {
+            effective_stiffness = config_.release_bleed_stiffness[i];
+        }
+        double raw_acceleration =
             (wrench_error[i] - config_.damping[i] * old_velocity[i] -
              effective_stiffness * old_offset[i]) /
             config_.virtual_mass[i];
 
         const bool translation = i < 3;
         const double acceleration_limit = translation
-            ? config_.max_linear_acceleration_m_s2
+            ? config_.max_linear_acceleration_m_s2 * translation_dynamic_scale
             : config_.max_angular_acceleration_rad_s2;
         const double jerk_limit = translation
-            ? config_.max_linear_jerk_m_s3
+            ? config_.max_linear_jerk_m_s3 * translation_dynamic_scale
             : config_.max_angular_jerk_rad_s3;
         const double velocity_limit = translation
-            ? config_.max_linear_velocity_m_s
+            ? config_.max_linear_velocity_m_s + translation_velocity_boost
             : config_.max_angular_velocity_rad_s;
         const double offset_limit = translation ? pos_offset : rot_offset;
         const double step_limit = translation ? pos_step : rot_step;
@@ -847,6 +912,44 @@ ForceControllerProposal ForceController::propose(
             acceleration_limit,
             jerk_limit,
         };
+        // Dynamic-envelope reseed: with Layer-3 or a retreat-episode boost
+        // active the limits follow the wrench error / episode, so an abrupt
+        // force release can shrink the envelope around a committed state that
+        // was legal one tick earlier (2026-07-23 13:08 run: grip-release
+        // collapse hard-faulted the proposal and latched ExternalForceLimit
+        // mid rollout). A state the strict oracle cannot govern is clamped
+        // back inside the current limits — the commanded offset stays
+        // continuous; the bounded velocity/acceleration discontinuity (<= the
+        // backoff cap) is absorbed by the joint-side servo filtering — and if
+        // even the clamped state cannot brake before the offset cap it
+        // re-seeds at rest, which is always feasible inside the cap.
+        // Static-limit profiles (no Layer-3, no episode boost active or
+        // decaying) keep the fail-closed fault.
+        if (config_.force_limit_n > 0.0 ||
+            command.retreat_envelope_boost_m_s > 0.0 ||
+            state_.envelope_boost_m_s > 0.0) {
+            JerkInterval probe;
+            const AxisState committed{
+                old_offset[i], old_velocity[i], old_acceleration[i]};
+            if (!feasibleJerkInterval(committed, limits, dt_sec, &probe)) {
+                old_velocity[i] = std::clamp(
+                    old_velocity[i], -limits.velocity, limits.velocity);
+                old_acceleration[i] = std::clamp(
+                    old_acceleration[i], -limits.acceleration,
+                    limits.acceleration);
+                const AxisState clamped{
+                    old_offset[i], old_velocity[i], old_acceleration[i]};
+                if (!feasibleJerkInterval(clamped, limits, dt_sec, &probe)) {
+                    old_velocity[i] = 0.0;
+                    old_acceleration[i] = 0.0;
+                }
+                raw_acceleration =
+                    (wrench_error[i] - config_.damping[i] * old_velocity[i] -
+                     effective_stiffness * old_offset[i]) /
+                    config_.virtual_mass[i];
+                proposal.saturated = true;
+            }
+        }
         const AxisState old_state{
             old_offset[i], old_velocity[i], old_acceleration[i]
         };
@@ -1055,6 +1158,7 @@ ForceControllerProposal ForceController::propose(
     proposal.state.velocity_tcp = toVec(next_velocity);
     proposal.state.acceleration_tcp = toVec(next_acceleration);
     proposal.state.observed_energy_j = energy;
+    proposal.state.envelope_boost_m_s = translation_velocity_boost;
     proposal.wrench_error_tcp = toWrench(wrench_error);
     proposal.valid = true;
     proposal.limit_reason = proposal.saturated ? "jerk_limited_motion_envelope" : "";

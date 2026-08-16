@@ -1,0 +1,142 @@
+# Wrist-only 90 fps rig: dual D405 (color+depth 640x480@90), fisheye DISABLED
+# (2026-08-16, user decision: policy consumes realsense only; the per-arm USB-C
+# cable now carries just D405 + gripper serial). Derived from
+# quad_realsense_fisheye_90fps.yaml; see that file for the fisheye device paths.
+# D405 640x480 rgb8/z16 @90 verified native (0 drops, dual-cam). Known cost at
+# 90 fps: AE exposure 32 -> 10 ms, brightness -24%/-41% vs the 30 fps training
+# distribution -- confirmed live 2026-08-16 (left-arm action attenuation + right
+# gripper vision-gate flapping). Pair with exposure/gain compensation before a
+# rollout, or add scene lighting.
+server:
+  name: camera_server
+  mode: capture_only
+  clock: monotonic_raw
+  simulate_cameras: false
+
+shared_memory:
+  # Distinct name: /camera_server_frames is a root-owned leftover from a 08-14 Docker
+  # run and cannot be unlinked from this user. Consumers follow the shm_name embedded
+  # in bundle metadata, so the name is free to differ.
+  name: "/camera_server_frames_90exp"
+  size_mb: 1024
+  # 90 Hz wraps a 4-slot ring in 44 ms; 8 slots keeps ~89 ms of history for consumers.
+  ring_slots: 8
+  unlink_on_start: true
+
+metadata:
+  transport: zmq_pub
+  pub_bind: "tcp://127.0.0.1:5600"
+  health_topic: "camera.health"
+  bundle_topic: "camera.bundle"
+
+sync:
+  mode: software
+  master_camera: left_realsense
+  bundle_policy: nearest_timestamp
+  # Measured 2026-08-16: fisheye-vs-realsense host stamps carry a CONSTANT ~10.5 ms
+  # offset (MJPG decode + UVC path), so an 11 ms window sat exactly at the limit
+  # (skew p50 9.9 / max 11.0 with complete bundles). 15 ms gives margin over that
+  # constant offset while still rejecting a genuinely stale (>1 frame) pairing.
+  max_bundle_time_diff_ms: 15.0
+  publish_incomplete_bundles: false
+
+# Same consumer-group layout as dual_realsense_d405.yaml — REQUIRED by the live
+# consumers: flow-infer subscribes camera.bundle.policy (stale_timeout 1.0 s -> a
+# missing group aborts the rollout with camera_stale_timeout) and the rb_gui
+# camera-quality monitor subscribes camera.bundle.wrist_left/right (missing ->
+# blur N/A). The policy group stays wrist RGB-D only (realsense pair, tight
+# window: measured RS<->RS skew 0.03 ms at 90 fps); fisheyes ride the legacy
+# full-rig bundle with the wider window for their constant ~10.5 ms stamp offset.
+bundle_groups:
+  legacy:
+    topic: "camera.bundle"
+    master_stream: "left_realsense.color"
+    required_streams:
+      - "left_realsense.color"
+      - "left_realsense.depth"
+      - "right_realsense.color"
+      - "right_realsense.depth"
+    max_bundle_time_diff_ms: 15.0
+    publish_incomplete_bundles: false
+  policy:
+    topic: "camera.bundle.policy"
+    master_stream: "left_realsense.color"
+    required_streams:
+      - "left_realsense.color"
+      - "left_realsense.depth"
+      - "right_realsense.color"
+      - "right_realsense.depth"
+    max_bundle_time_diff_ms: 11.0
+    publish_incomplete_bundles: false
+  wrist_left:
+    topic: "camera.bundle.wrist_left"
+    master_stream: "left_realsense.color"
+    required_streams:
+      - "left_realsense.color"
+      - "left_realsense.depth"
+    max_bundle_time_diff_ms: 11.0
+    publish_incomplete_bundles: false
+  wrist_right:
+    topic: "camera.bundle.wrist_right"
+    master_stream: "right_realsense.color"
+    required_streams:
+      - "right_realsense.color"
+      - "right_realsense.depth"
+    max_bundle_time_diff_ms: 11.0
+    publish_incomplete_bundles: false
+
+cameras:
+  left_realsense:
+    backend: realsense
+    serial: "412622272078"
+    required: true
+    streams:
+      color:
+        enabled: true
+        width: 640
+        height: 480
+        fps: 90
+        format: rgb8
+      depth:
+        enabled: true
+        width: 640
+        height: 480
+        fps: 90
+        format: z16
+  right_realsense:
+    backend: realsense
+    serial: "260322278348"
+    required: true
+    streams:
+      color:
+        enabled: true
+        width: 640
+        height: 480
+        fps: 90
+        format: rgb8
+      depth:
+        enabled: true
+        width: 640
+        height: 480
+        fps: 90
+        format: z16
+
+recording:
+  enabled: false
+  output_dir: "/data/episodes"
+  queue_capacity_frames: 300
+  writer_threads: 4
+  drop_policy: drop_oldest
+  raw_format: true
+
+health:
+  publish_rate_hz: 1
+  warn_if_frame_age_ms_gt: 100
+  warn_if_drop_count_increases: true
+  warn_if_bundle_skew_ms_gt: 11
+
+reconnect:
+  enabled: true
+  max_attempts: 0
+  retry_interval_ms: 1000
+  frame_timeout_ms: 2000

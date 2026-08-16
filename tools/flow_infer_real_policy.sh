@@ -18,9 +18,36 @@ CHUNK_OVERLAY_RUNWAY_STEPS="${FLOW_INFER_CHUNK_OVERLAY_RUNWAY_STEPS:-4}"
 SPEED_SCALE="${FLOW_INFER_SPEED_SCALE:-1.0}"
 CHUNK_CROSSFADE_STEPS="${FLOW_INFER_CHUNK_CROSSFADE_STEPS:-2}"
 TCP_REANCHOR_MODE="${FLOW_INFER_TCP_REANCHOR_MODE:-measured_blend}"
-TCP_BLEND_STEPS="${FLOW_INFER_TCP_BLEND_STEPS:-8}"
+TCP_BLEND_STEPS="${FLOW_INFER_TCP_BLEND_STEPS:-2}"
 ROLLOUT_SUMMARY="${FLOW_INFER_ROLLOUT_SUMMARY:-outputs/rollout_summary.json}"
 VELPROPRIO_SOURCE="${FLOW_INFER_VELPROPRIO_SOURCE:-measured}"
+STEP_LOG="${FLOW_INFER_STEP_LOG:-}"
+# Wall-clock duration of ONE action-chunk row. MUST equal the training converter's
+# --action-step-frames / dataset fps: 1/30 = 0.0334 for the legacy per-frame-delta checkpoints,
+# 3/30 = 0.1 for a K=3 decimated one. Getting it wrong is SILENT and severe -- the chunk is replayed
+# at the wrong rate AND the client per-axis clamp (v_max * policy_dt) truncates the action tails.
+# Unset -> the runner's own default (0.0334); set it explicitly for any non-30Hz-row checkpoint.
+# NOTE: this same value is also the velocity-proprio finite-difference window (openpi_remote
+# _arm_body_velocities_camera_frame differences the measured pose over policy_dt), which is correct
+# because the converter builds proprio over the same K-frame window.
+POLICY_DT="${FLOW_INFER_POLICY_DT:-}"
+# Whether to send live D405 depth as observation/*_wrist_0_depth. MUST match the served
+# checkpoint's training: the RGB-D converters (depth_z50*) need it, the wrist-RGB-only ones
+# (pi05_pika_umi_wrist_*_h24_80k, which drop depth AND base_0_rgb to cut image tokens 1280->512)
+# must NOT get it. This used to be hardcoded on, and `--include-depth` is a bare store_true with
+# no `--no-` counterpart, so an RGB-only checkpoint could not be driven from this script at all.
+# Default stays 1 so existing depth_z50 commands are unchanged; set 0 for the wrist-only models.
+INCLUDE_DEPTH="${FLOW_INFER_INCLUDE_DEPTH:-1}"
+DEPTH_ARGS=()
+case "$INCLUDE_DEPTH" in
+  1|true|yes|on)  DEPTH_ARGS=(--include-depth) ;;
+  0|false|no|off) DEPTH_ARGS=() ;;
+  *) echo "FLOW_INFER_INCLUDE_DEPTH must be 0/1 (got '$INCLUDE_DEPTH')" >&2; exit 2 ;;
+esac
+POLICY_DT_ARGS=()
+if [ -n "$POLICY_DT" ]; then
+  POLICY_DT_ARGS=(--policy-dt-sec "$POLICY_DT")
+fi
 
 mkdir -p "$(dirname "$ROLLOUT_SUMMARY")"
 export PYTHONPATH="$PWD/policy_runner${PYTHONPATH:+:$PYTHONPATH}"
@@ -53,7 +80,14 @@ echo "[flow-infer] chunk_overlay_endpoint=$RB_GUI_CHUNK_OVERLAY_ENDPOINT (rb_gui
 echo "[flow-infer] config=$CONFIG"
 echo "[flow-infer] rollout_mode=$ROLLOUT_MODE"
 echo "[flow-infer] rollout_summary=$ROLLOUT_SUMMARY"
+STEP_LOG_ARGS=()
+if [ -n "$STEP_LOG" ]; then
+  STEP_LOG_ARGS+=(--rollout-step-log "$STEP_LOG")
+  echo "[flow-infer] rollout_step_log=$STEP_LOG"
+fi
 echo "[flow-infer] speed_scale=$SPEED_SCALE chunk_execute_steps=$CHUNK_EXECUTE_STEPS overlay_runway_steps=$CHUNK_OVERLAY_RUNWAY_STEPS crossfade=$CHUNK_CROSSFADE_STEPS reanchor=$TCP_REANCHOR_MODE"
+echo "[flow-infer] policy_dt_sec=${POLICY_DT:-<runner default 0.0334>} (must match the checkpoint's action-step-frames/fps)"
+echo "[flow-infer] include_depth=${INCLUDE_DEPTH} -> args:${DEPTH_ARGS[*]:-<none, RGB-only>} (must match the served checkpoint's training)"
 echo "[flow-infer] inherited env: OPENPI_REMOTE_SKIP_WARMUP=${OPENPI_REMOTE_SKIP_WARMUP-<unset>} RB_ALLOW_REAL_GRIPPER=${RB_ALLOW_REAL_GRIPPER-<unset>} DISPLAY=${DISPLAY-<unset>}"
 
 RTC_ARGS=()
@@ -174,6 +208,7 @@ exec "$PYTHON_BIN" -m policy_runner flow-infer \
   --chunk-execute-steps "$CHUNK_EXECUTE_STEPS" \
   --chunk-overlay-runway-steps "$CHUNK_OVERLAY_RUNWAY_STEPS" \
   --speed-scale "$SPEED_SCALE" \
+  "${POLICY_DT_ARGS[@]}" \
   --chunk-crossfade-steps "$CHUNK_CROSSFADE_STEPS" \
   --tcp-target-pose-conditioning foh_se3 \
   --tcp-target-pose-reanchor-mode "$TCP_REANCHOR_MODE" \
@@ -181,7 +216,8 @@ exec "$PYTHON_BIN" -m policy_runner flow-infer \
   "${RTC_ARGS[@]}" \
   "${SEQ_ARGS[@]}" \
   "${VELPROPRIO_ARGS[@]}" \
-  --include-depth \
+  "${DEPTH_ARGS[@]}" \
   --gripper-action-mode absolute \
   --rollout-summary "$ROLLOUT_SUMMARY" \
+  "${STEP_LOG_ARGS[@]}" \
   "$@"

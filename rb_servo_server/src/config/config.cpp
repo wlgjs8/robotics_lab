@@ -210,6 +210,41 @@ void parsePoseTrackSmdConfig(const YAML::Node& smd, const std::string& path, Pos
     }
 }
 
+void parseFollowerOutputSmdConfig(
+    const YAML::Node& node,
+    const std::string& path,
+    FollowerOutputSmdConfig* out
+) {
+    if (!out) return;
+    validateAllowedKeys(node, {
+        "enable",
+        "nf_linear_hz",
+        "nf_angular_hz",
+        "damping_ratio",
+        "velocity_ff",
+        "velocity_ff_lpf_hz",
+    }, path);
+    if (has(node, "enable")) {
+        out->enable = asBool(node["enable"], path + ".enable");
+    }
+    if (has(node, "nf_linear_hz")) {
+        out->nf_linear_hz = asDouble(node["nf_linear_hz"], path + ".nf_linear_hz");
+    }
+    if (has(node, "nf_angular_hz")) {
+        out->nf_angular_hz = asDouble(node["nf_angular_hz"], path + ".nf_angular_hz");
+    }
+    if (has(node, "damping_ratio")) {
+        out->damping_ratio = asDouble(node["damping_ratio"], path + ".damping_ratio");
+    }
+    if (has(node, "velocity_ff")) {
+        out->velocity_ff = asBool(node["velocity_ff"], path + ".velocity_ff");
+    }
+    if (has(node, "velocity_ff_lpf_hz")) {
+        out->velocity_ff_lpf_hz =
+            asDouble(node["velocity_ff_lpf_hz"], path + ".velocity_ff_lpf_hz");
+    }
+}
+
 void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, RuckigFollowerConfig* out) {
     if (!out) return;
     validateAllowedKeys(node, {
@@ -227,7 +262,10 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         "consume_steps",
         "reserve_steps",
         "smoothing_window",
+        "output_smd",
         "af_damping_beta",
+        "af_damping_beta_lin",
+        "af_damping_beta_ang",
         "delta_twist_tau_sec",
         "delta_twist_residual_drain_steps",
         "delta_twist_clear_residual_on_new_frame",
@@ -245,6 +283,9 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         "preview_max_consecutive_actual_lead_errors",
         "preview_projection_fault_policy",
         "loading_projection_max_accel_m_s2",
+        "corner_deadband_lin_m",
+        "corner_deadband_ang_rad",
+        "corner_velocity_scale",
         "hold_bounce_resume_sec",
         "chunk_feed_timeout_sec",
     }, path);
@@ -304,8 +345,36 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
     if (has(node, "smoothing_window")) {
         out->smoothing_window = asInt(node["smoothing_window"], path + ".smoothing_window");
     }
+    if (has(node, "output_smd")) {
+        parseFollowerOutputSmdConfig(
+            node["output_smd"], path + ".output_smd", &out->output_smd);
+    }
+    // Legacy scalar first so the per-class keys below can override it. A config that only sets
+    // `af_damping_beta` therefore keeps its exact previous behavior on both axis classes.
     if (has(node, "af_damping_beta")) {
-        out->af_damping_beta = asDouble(node["af_damping_beta"], path + ".af_damping_beta");
+        const double beta = asDouble(node["af_damping_beta"], path + ".af_damping_beta");
+        out->af_damping_beta_lin = beta;
+        out->af_damping_beta_ang = beta;
+    }
+    if (has(node, "af_damping_beta_lin")) {
+        out->af_damping_beta_lin =
+            asDouble(node["af_damping_beta_lin"], path + ".af_damping_beta_lin");
+    }
+    if (has(node, "af_damping_beta_ang")) {
+        out->af_damping_beta_ang =
+            asDouble(node["af_damping_beta_ang"], path + ".af_damping_beta_ang");
+    }
+    if (has(node, "corner_deadband_lin_m")) {
+        out->corner_deadband_lin_m =
+            asDouble(node["corner_deadband_lin_m"], path + ".corner_deadband_lin_m");
+    }
+    if (has(node, "corner_deadband_ang_rad")) {
+        out->corner_deadband_ang_rad =
+            asDouble(node["corner_deadband_ang_rad"], path + ".corner_deadband_ang_rad");
+    }
+    if (has(node, "corner_velocity_scale")) {
+        out->corner_velocity_scale =
+            asDouble(node["corner_velocity_scale"], path + ".corner_velocity_scale");
     }
     if (has(node, "delta_twist_tau_sec")) {
         out->delta_twist_tau_sec = asDouble(node["delta_twist_tau_sec"], path + ".delta_twist_tau_sec");
@@ -1695,9 +1764,121 @@ void validateConfig(const DualArmConfig& cfg) {
     validateNonNegativeFiniteArray(cfg.force_control.damping, "force_control.damping");
     validateNonNegativeFiniteArray(cfg.force_control.stiffness, "force_control.stiffness");
     validateNonNegativeFiniteArray(
+        cfg.force_control.release_bleed_stiffness,
+        "force_control.release_bleed_stiffness"
+    );
+    for (std::size_t i = 0; i < 6; ++i) {
+        if (cfg.force_control.release_bleed_stiffness[i] > 0.0 &&
+            cfg.force_control.stiffness[i] > 0.0) {
+            throw std::runtime_error(
+                "force_control.release_bleed_stiffness is only meaningful on "
+                "zero-stiffness axes (axis " + std::to_string(i) +
+                " has both stiffness and release_bleed_stiffness > 0)"
+            );
+        }
+    }
+    validateNonNegativeFiniteArray(
         cfg.force_control.wrench_deadband,
         "force_control.wrench_deadband"
     );
+    validateNonNegativeFinite(cfg.force_control.force_limit_n, "force_control.force_limit_n");
+    validateNonNegativeFinite(
+        cfg.force_control.backoff_gain_m_s_per_n,
+        "force_control.backoff_gain_m_s_per_n"
+    );
+    validateNonNegativeFinite(
+        cfg.force_control.backoff_max_velocity_m_s,
+        "force_control.backoff_max_velocity_m_s"
+    );
+    if (cfg.force_control.hard_limit_policy != "latch" &&
+        cfg.force_control.hard_limit_policy != "retreat") {
+        throw std::runtime_error(
+            "force_control.hard_limit_policy must be 'latch' or 'retreat'"
+        );
+    }
+    if (cfg.force_control.hard_limit_policy == "retreat") {
+        if (cfg.force_control.enable &&
+            cfg.force_control.operating_mode != "cartesian_admittance") {
+            throw std::runtime_error(
+                "force_control.hard_limit_policy 'retreat' requires "
+                "operating_mode cartesian_admittance"
+            );
+        }
+        validatePositiveFinite(
+            cfg.force_control.retreat_distance_m,
+            "force_control.retreat_distance_m"
+        );
+        validatePositiveFinite(
+            cfg.force_control.retreat_virtual_force_n,
+            "force_control.retreat_virtual_force_n"
+        );
+        validatePositiveFinite(
+            cfg.force_control.retreat_timeout_sec,
+            "force_control.retreat_timeout_sec"
+        );
+        if (cfg.force_control.retreat_max_attempts < 0) {
+            throw std::runtime_error(
+                "force_control.retreat_max_attempts must be non-negative"
+            );
+        }
+        validatePositiveFinite(
+            cfg.force_control.retreat_attempt_window_sec,
+            "force_control.retreat_attempt_window_sec"
+        );
+        // The escape brakes as soon as the worst-axis offset reaches
+        // 0.8*max_pos_offset_m, so a retreat_distance_m at or above that bound is
+        // unreachable and the distance condition silently becomes dead code. The
+        // old check used '>' against the full cap, which let 30 mm == 30 mm pass:
+        // every 2026-07-31 retreat episode then terminated on the 24 mm offset
+        // guard, and the ones that started from an already-ratcheted offset ended
+        // with 6.0-8.8 N still applied. Require real headroom instead.
+        if (cfg.force_control.retreat_distance_m >=
+            0.8 * cfg.force_control.max_pos_offset_m) {
+            throw std::runtime_error(
+                "force_control.retreat_distance_m must be < 0.8 * max_pos_offset_m "
+                "(the escape brakes at that offset, so a larger distance is "
+                "unreachable and the retreat would terminate on the offset guard)"
+            );
+        }
+        if (!std::isfinite(cfg.force_control.retreat_release_force_n) ||
+            cfg.force_control.retreat_release_force_n < 0.0) {
+            throw std::runtime_error(
+                "force_control.retreat_release_force_n must be finite and >= 0 "
+                "(0 disables force-terminated retreat)"
+            );
+        }
+        // A release target at or above the trigger would end the escape on the
+        // tick it began, i.e. no retreat at all. Must sit strictly below both
+        // hard thresholds to be a release condition rather than a no-op.
+        if (cfg.force_control.retreat_release_force_n > 0.0) {
+            const double trigger = std::min(cfg.force_control.left.hard_normal_force_n,
+                                            cfg.force_control.left.hard_force_norm_n);
+            const double trigger_r = std::min(cfg.force_control.right.hard_normal_force_n,
+                                              cfg.force_control.right.hard_force_norm_n);
+            if (cfg.force_control.retreat_release_force_n >= std::min(trigger, trigger_r)) {
+                throw std::runtime_error(
+                    "force_control.retreat_release_force_n must be < the smallest "
+                    "hard_normal_force_n / hard_force_norm_n, otherwise the retreat "
+                    "releases on the tick it triggers"
+                );
+            }
+        }
+    }
+    if (cfg.force_control.force_limit_n > 0.0) {
+        if (!(cfg.force_control.backoff_gain_m_s_per_n > 0.0)) {
+            throw std::runtime_error(
+                "force_control.force_limit_n > 0 requires a positive "
+                "backoff_gain_m_s_per_n"
+            );
+        }
+        if (cfg.force_control.backoff_max_velocity_m_s <
+            cfg.force_control.max_linear_velocity_m_s) {
+            throw std::runtime_error(
+                "force_control.backoff_max_velocity_m_s must be >= "
+                "max_linear_velocity_m_s when the force limiter is enabled"
+            );
+        }
+    }
     if (cfg.force_control.blockwise_release_recenter) {
         const auto validate_isotropic_recenter_block = [&](std::size_t begin,
                                                             std::size_t end,
@@ -1706,10 +1887,18 @@ void validateConfig(const DualArmConfig& cfg) {
                 cfg.force_control.virtual_mass[begin];
             const double stiffness_ratio = cfg.force_control.stiffness[begin] /
                 cfg.force_control.virtual_mass[begin];
+            // The released-state bleed spring drives the same block-coupled
+            // recenter motion, so it must obey the same isotropy contract.
+            const double bleed_ratio =
+                cfg.force_control.release_bleed_stiffness[begin] /
+                cfg.force_control.virtual_mass[begin];
             for (std::size_t i = begin + 1; i < end; ++i) {
                 const double candidate_damping = cfg.force_control.damping[i] /
                     cfg.force_control.virtual_mass[i];
                 const double candidate_stiffness = cfg.force_control.stiffness[i] /
+                    cfg.force_control.virtual_mass[i];
+                const double candidate_bleed =
+                    cfg.force_control.release_bleed_stiffness[i] /
                     cfg.force_control.virtual_mass[i];
                 const double damping_scale = std::max({
                     1.0, std::abs(damping_ratio), std::abs(candidate_damping),
@@ -1717,13 +1906,19 @@ void validateConfig(const DualArmConfig& cfg) {
                 const double stiffness_scale = std::max({
                     1.0, std::abs(stiffness_ratio), std::abs(candidate_stiffness),
                 });
+                const double bleed_scale = std::max({
+                    1.0, std::abs(bleed_ratio), std::abs(candidate_bleed),
+                });
                 if (std::abs(candidate_damping - damping_ratio) >
                         1e-9 * damping_scale ||
                     std::abs(candidate_stiffness - stiffness_ratio) >
-                        1e-9 * stiffness_scale) {
+                        1e-9 * stiffness_scale ||
+                    std::abs(candidate_bleed - bleed_ratio) >
+                        1e-9 * bleed_scale) {
                     throw std::runtime_error(
                         "force_control.blockwise_release_recenter requires equal "
-                        "damping/mass and stiffness/mass ratios within the " +
+                        "damping/mass, stiffness/mass, and "
+                        "release_bleed_stiffness/mass ratios within the " +
                         name + " block"
                     );
                 }
@@ -1819,6 +2014,21 @@ void validateConfig(const DualArmConfig& cfg) {
         validateNonNegativeFinite(arm.hard_normal_force_n, path + ".hard_normal_force_n");
         validateNonNegativeFinite(arm.hard_force_norm_n, path + ".hard_force_norm_n");
         validateNonNegativeFinite(arm.hard_torque_norm_nm, path + ".hard_torque_norm_nm");
+        validateNonNegativeFinite(
+            arm.hard_limit_rate_n_per_ms,
+            path + ".hard_limit_rate_n_per_ms"
+        );
+        validateNonNegativeFinite(
+            arm.hard_limit_rate_floor_n,
+            path + ".hard_limit_rate_floor_n"
+        );
+        if (arm.hard_limit_rate_n_per_ms > 0.0 &&
+            !(arm.hard_limit_rate_floor_n > 0.0)) {
+            throw std::runtime_error(
+                path + ".hard_limit_rate_n_per_ms > 0 requires a positive "
+                "hard_limit_rate_floor_n"
+            );
+        }
         if (arm.debounce_samples < 1) {
             throw std::runtime_error(path + ".debounce_samples must be >= 1");
         }
@@ -1870,6 +2080,17 @@ void validateConfig(const DualArmConfig& cfg) {
             throw std::runtime_error(
                 path + ".surface_source=contact_force requires the matching "
                 "force_torque frame_configured=true"
+            );
+        }
+        validateNonNegativeFinite(
+            arm.contact_entry_max_speed_m_s,
+            path + ".contact_entry_max_speed_m_s"
+        );
+        if (surface == "contact_force" && force_motion_affecting &&
+            !(arm.contact_entry_max_speed_m_s > 0.0)) {
+            throw std::runtime_error(
+                path + ".surface_source=contact_force requires an explicit "
+                "positive contact_entry_max_speed_m_s (episode entry gate)"
             );
         }
         if (!(arm.contact_release_force_n < arm.contact_enter_force_n)) {
@@ -2304,9 +2525,61 @@ void validateConfig(const DualArmConfig& cfg) {
         if (rf.smoothing_window < 1 || rf.smoothing_window % 2 == 0) {
             throw std::runtime_error(path + ".smoothing_window must be an odd integer >= 1");
         }
-        if (!std::isfinite(rf.af_damping_beta) || rf.af_damping_beta <= 0.0 || rf.af_damping_beta > 1.0) {
-            throw std::runtime_error(path + ".af_damping_beta must be in (0, 1]");
+        const auto validate_output_nf = [&path](double value, const char* field) {
+            if (!std::isfinite(value) || value <= 0.5 || value >= 25.0) {
+                throw std::runtime_error(
+                    path + ".output_smd." + field + " must be in (0.5, 25) Hz");
+            }
+        };
+        validate_output_nf(rf.output_smd.nf_linear_hz, "nf_linear_hz");
+        validate_output_nf(rf.output_smd.nf_angular_hz, "nf_angular_hz");
+        if (!std::isfinite(rf.output_smd.damping_ratio) ||
+            rf.output_smd.damping_ratio < 0.7 || rf.output_smd.damping_ratio > 2.0) {
+            throw std::runtime_error(
+                path + ".output_smd.damping_ratio must be in [0.7, 2]");
         }
+        if (!std::isfinite(rf.output_smd.velocity_ff_lpf_hz) ||
+            (rf.output_smd.velocity_ff_lpf_hz != 0.0 &&
+             (rf.output_smd.velocity_ff_lpf_hz <= 0.5 ||
+              rf.output_smd.velocity_ff_lpf_hz >= 25.0))) {
+            throw std::runtime_error(
+                path + ".output_smd.velocity_ff_lpf_hz must be 0 or in (0.5, 25) Hz");
+        }
+        if (!std::isfinite(rf.af_damping_beta_lin) || rf.af_damping_beta_lin <= 0.0 ||
+            rf.af_damping_beta_lin > 1.0) {
+            throw std::runtime_error(path +
+                                     ".af_damping_beta_lin must be in (0, 1] (also set by the "
+                                     "legacy af_damping_beta key)");
+        }
+        if (!std::isfinite(rf.af_damping_beta_ang) || rf.af_damping_beta_ang <= 0.0 ||
+            rf.af_damping_beta_ang > 1.0) {
+            throw std::runtime_error(path +
+                                     ".af_damping_beta_ang must be in (0, 1] (also set by the "
+                                     "legacy af_damping_beta key)");
+        }
+        // Corner guard. Deadbands are >= 0 (0 = every non-zero step is signed, so the
+        // guard is maximally sensitive); a larger deadband ignores more wobble. The
+        // velocity ring-down lives in [0, 1]: 0 brakes to a standstill at every
+        // reversal, 1 keeps only the acceleration reset. Above 1 would ACCELERATE into
+        // a reversal, so it is rejected rather than clamped.
+        if (!std::isfinite(rf.corner_deadband_lin_m) || rf.corner_deadband_lin_m < 0.0) {
+            throw std::runtime_error(path + ".corner_deadband_lin_m must be finite and >= 0");
+        }
+        if (!std::isfinite(rf.corner_deadband_ang_rad) || rf.corner_deadband_ang_rad < 0.0) {
+            throw std::runtime_error(path + ".corner_deadband_ang_rad must be finite and >= 0");
+        }
+        if (!std::isfinite(rf.corner_velocity_scale) ||
+            rf.corner_velocity_scale < 0.0 || rf.corner_velocity_scale > 1.0) {
+            throw std::runtime_error(path + ".corner_velocity_scale must be in [0, 1]");
+        }
+        // Quasi-static gate for the wrench-gated loading projection. The gate is a
+        // `plan_accel <= bound` comparison (cartesian_chunk_follower.cpp), so NaN or a
+        // negative bound makes it unsatisfiable and silently stands the contact assist
+        // down for the whole run while the config still declares it. Fail closed at load
+        // instead: a contact-bounding value must come from its authoritative source.
+        validatePositiveFinite(
+            rf.loading_projection_max_accel_m_s2,
+            path + ".loading_projection_max_accel_m_s2");
         validatePositiveFinite(rf.delta_twist_tau_sec, path + ".delta_twist_tau_sec");
         if (rf.delta_twist_residual_drain_steps < 1) {
             throw std::runtime_error(path + ".delta_twist_residual_drain_steps must be >= 1");
@@ -3624,9 +3897,20 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "left",
             "right",
             "normal_admittance",
+            "force_limit_n",
+            "backoff_gain_m_s_per_n",
+            "backoff_max_velocity_m_s",
+            "hard_limit_policy",
+            "retreat_distance_m",
+            "retreat_release_force_n",
+            "retreat_virtual_force_n",
+            "retreat_timeout_sec",
+            "retreat_max_attempts",
+            "retreat_attempt_window_sec",
             "virtual_mass",
             "damping",
             "stiffness",
+            "release_bleed_stiffness",
             "wrench_deadband",
             "blockwise_release_recenter",
             "max_dt_sec",
@@ -3656,6 +3940,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             validateAllowedKeys(arm, {
                 "enable",
                 "surface_source",
+                "contact_entry_max_speed_m_s",
                 "compliance_frame",
                 "target_force_n",
                 "contact_enter_force_n",
@@ -3664,6 +3949,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "hard_normal_force_n",
                 "hard_force_norm_n",
                 "hard_torque_norm_nm",
+                "hard_limit_rate_n_per_ms",
+                "hard_limit_rate_floor_n",
                 "debounce_samples",
                 "hard_limit_debounce_samples",
                 "release_dwell_sec",
@@ -3676,6 +3963,11 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             }, path);
             if (has(arm, "enable")) out.enable = asBool(arm["enable"], path + ".enable");
             if (has(arm, "surface_source")) out.surface_source = lower(asString(arm["surface_source"], path + ".surface_source"));
+            if (has(arm, "contact_entry_max_speed_m_s")) {
+                out.contact_entry_max_speed_m_s = asDouble(
+                    arm["contact_entry_max_speed_m_s"],
+                    path + ".contact_entry_max_speed_m_s");
+            }
             if (has(arm, "compliance_frame")) out.compliance_frame = lower(asString(arm["compliance_frame"], path + ".compliance_frame"));
             if (has(arm, "target_force_n")) out.target_force_n = asDouble(arm["target_force_n"], path + ".target_force_n");
             if (has(arm, "contact_enter_force_n")) out.contact_enter_force_n = asDouble(arm["contact_enter_force_n"], path + ".contact_enter_force_n");
@@ -3684,6 +3976,16 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(arm, "hard_normal_force_n")) out.hard_normal_force_n = asDouble(arm["hard_normal_force_n"], path + ".hard_normal_force_n");
             if (has(arm, "hard_force_norm_n")) out.hard_force_norm_n = asDouble(arm["hard_force_norm_n"], path + ".hard_force_norm_n");
             if (has(arm, "hard_torque_norm_nm")) out.hard_torque_norm_nm = asDouble(arm["hard_torque_norm_nm"], path + ".hard_torque_norm_nm");
+            if (has(arm, "hard_limit_rate_n_per_ms")) {
+                out.hard_limit_rate_n_per_ms = asDouble(
+                    arm["hard_limit_rate_n_per_ms"],
+                    path + ".hard_limit_rate_n_per_ms");
+            }
+            if (has(arm, "hard_limit_rate_floor_n")) {
+                out.hard_limit_rate_floor_n = asDouble(
+                    arm["hard_limit_rate_floor_n"],
+                    path + ".hard_limit_rate_floor_n");
+            }
             if (has(arm, "debounce_samples")) out.debounce_samples = asInt(arm["debounce_samples"], path + ".debounce_samples");
             if (has(arm, "hard_limit_debounce_samples")) out.hard_limit_debounce_samples = asInt(arm["hard_limit_debounce_samples"], path + ".hard_limit_debounce_samples");
             if (has(arm, "release_dwell_sec")) out.release_dwell_sec = asDouble(arm["release_dwell_sec"], path + ".release_dwell_sec");
@@ -3732,7 +4034,18 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "virtual_mass")) cfg.force_control.virtual_mass = parseJointArray(sec["virtual_mass"], "force_control.virtual_mass");
         if (has(sec, "damping")) cfg.force_control.damping = parseJointArray(sec["damping"], "force_control.damping");
         if (has(sec, "stiffness")) cfg.force_control.stiffness = parseJointArray(sec["stiffness"], "force_control.stiffness");
+        if (has(sec, "release_bleed_stiffness")) cfg.force_control.release_bleed_stiffness = parseJointArray(sec["release_bleed_stiffness"], "force_control.release_bleed_stiffness");
+        if (has(sec, "hard_limit_policy")) cfg.force_control.hard_limit_policy = lower(asString(sec["hard_limit_policy"], "force_control.hard_limit_policy"));
+        if (has(sec, "retreat_distance_m")) cfg.force_control.retreat_distance_m = asDouble(sec["retreat_distance_m"], "force_control.retreat_distance_m");
+        if (has(sec, "retreat_release_force_n")) cfg.force_control.retreat_release_force_n = asDouble(sec["retreat_release_force_n"], "force_control.retreat_release_force_n");
+        if (has(sec, "retreat_virtual_force_n")) cfg.force_control.retreat_virtual_force_n = asDouble(sec["retreat_virtual_force_n"], "force_control.retreat_virtual_force_n");
+        if (has(sec, "retreat_timeout_sec")) cfg.force_control.retreat_timeout_sec = asDouble(sec["retreat_timeout_sec"], "force_control.retreat_timeout_sec");
+        if (has(sec, "retreat_max_attempts")) cfg.force_control.retreat_max_attempts = asInt(sec["retreat_max_attempts"], "force_control.retreat_max_attempts");
+        if (has(sec, "retreat_attempt_window_sec")) cfg.force_control.retreat_attempt_window_sec = asDouble(sec["retreat_attempt_window_sec"], "force_control.retreat_attempt_window_sec");
         if (has(sec, "wrench_deadband")) cfg.force_control.wrench_deadband = parseJointArray(sec["wrench_deadband"], "force_control.wrench_deadband");
+        if (has(sec, "force_limit_n")) cfg.force_control.force_limit_n = asDouble(sec["force_limit_n"], "force_control.force_limit_n");
+        if (has(sec, "backoff_gain_m_s_per_n")) cfg.force_control.backoff_gain_m_s_per_n = asDouble(sec["backoff_gain_m_s_per_n"], "force_control.backoff_gain_m_s_per_n");
+        if (has(sec, "backoff_max_velocity_m_s")) cfg.force_control.backoff_max_velocity_m_s = asDouble(sec["backoff_max_velocity_m_s"], "force_control.backoff_max_velocity_m_s");
         if (has(sec, "blockwise_release_recenter")) cfg.force_control.blockwise_release_recenter = asBool(sec["blockwise_release_recenter"], "force_control.blockwise_release_recenter");
         if (has(sec, "max_dt_sec")) cfg.force_control.max_dt_sec = asDouble(sec["max_dt_sec"], "force_control.max_dt_sec");
         if (has(sec, "max_pos_offset_m")) cfg.force_control.max_pos_offset_m = asDouble(sec["max_pos_offset_m"], "force_control.max_pos_offset_m");

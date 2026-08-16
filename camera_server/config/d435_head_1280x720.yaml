@@ -60,6 +60,26 @@ bundle_groups:
       - "right_realsense.depth"
     max_bundle_time_diff_ms: 33.0
     publish_incomplete_bundles: false
+  # Per-side wrist groups: one dead wrist camera must not suppress the healthy
+  # side's RGB-D flow (stereo_worker wrist clouds / rb_gui). The joint `policy`
+  # group above stays all-or-nothing on purpose — the real_policy runtime gate
+  # requires both wrists and fail-closes on an incomplete pair.
+  wrist_left:
+    topic: "camera.bundle.wrist_left"
+    master_stream: "left_realsense.color"
+    required_streams:
+      - "left_realsense.color"
+      - "left_realsense.depth"
+    max_bundle_time_diff_ms: 33.0
+    publish_incomplete_bundles: false
+  wrist_right:
+    topic: "camera.bundle.wrist_right"
+    master_stream: "right_realsense.color"
+    required_streams:
+      - "right_realsense.color"
+      - "right_realsense.depth"
+    max_bundle_time_diff_ms: 33.0
+    publish_incomplete_bundles: false
   stereo:
     topic: "camera.bundle.stereo"
     master_stream: "head.color"
@@ -97,13 +117,14 @@ cameras:
       # 호스트에선 camera_server/stereo_worker/d435_ir_1280x720_K.txt 로 나타남.
       dump_intrinsics_path: "/app/stereo_worker/d435_ir_1280x720_K.txt"
   left_realsense:
-    serial: "260322278348"
+    # 2026-07-23: wrist cameras physically swapped between arms; serial follows the unit.
+    serial: "412622272078"
     required: true
     streams:
       color: { enabled: true, width: 640, height: 480, fps: 30, format: rgb8 }
       depth: { enabled: true, width: 640, height: 480, fps: 30, format: z16 }
   right_realsense:
-    serial: "412622272078"
+    serial: "260322278348"
     required: true
     streams:
       color: { enabled: true, width: 640, height: 480, fps: 30, format: rgb8 }

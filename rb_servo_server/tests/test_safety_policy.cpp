@@ -269,6 +269,9 @@ public:
         eft_wrench_ = wrench;
         eft_valid_ = true;
     }
+    void setEftForceRampPerFreshSample(double force_step_n) {
+        eft_force_ramp_step_n_.store(force_step_n);
+    }
     int readCount() const { return read_count_; }
     int resetCount() const { return reset_count_; }
     int sendCount() const { return send_count_.load(); }
@@ -291,8 +294,16 @@ private:
         state.q_actual_valid = valid_joint_state_;
         state.q_ref_valid = q_ref_valid_ && valid_joint_state_;
         state.q_ref_source = "test.q_ref";
-        state.eft_wrench = eft_wrench_;
-        state.eft_valid = eft_valid_;
+        const double eft_force_ramp_step_n =
+            eft_force_ramp_step_n_.load();
+        if (eft_force_ramp_step_n > 0.0) {
+            state.eft_wrench.fz = -eft_force_ramp_step_n *
+                static_cast<double>(state.acquisition_sequence);
+            state.eft_valid = true;
+        } else {
+            state.eft_wrench = eft_wrench_;
+            state.eft_valid = eft_valid_;
+        }
         state.has_valid_joint_state = valid_joint_state_;
         state.connection_state = connected_
             ? rb_servo::RobotConnectionState::Connected
@@ -356,6 +367,7 @@ private:
     mutable std::atomic<uint64_t> acquisition_sequence_{0};
     rb_servo::Wrench6D eft_wrench_{};
     bool eft_valid_ = false;
+    std::atomic<double> eft_force_ramp_step_n_{0.0};
     int read_count_ = 0;
     int reset_count_ = 0;
     std::atomic<int> send_count_{0};
@@ -4265,6 +4277,7 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     sample.left_force_control.measured_force_n = 6.75;
     sample.left_force_control.fast_normal_force_n = 7.25;
     sample.left_force_control.fast_force_norm_n = 8.5;
+    sample.left_force_control.fast_force_rate_n_per_ms = 1.75;
     sample.left_force_control.fast_torque_norm_nm = 0.75;
     sample.left_force_control.contact_threshold_exceeded = true;
     sample.left_force_control.hard_limit_exceeded = false;
@@ -4432,6 +4445,8 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     const std::size_t measured_force = index_of("left_force_control_measured_normal_force_n");
     const std::size_t fast_normal_force = index_of("left_force_control_fast_normal_force_n");
     const std::size_t fast_force_norm = index_of("left_force_control_fast_force_norm_n");
+    const std::size_t fast_force_rate =
+        index_of("left_force_control_fast_force_rate_n_per_ms");
     const std::size_t fast_torque_norm = index_of("left_force_control_fast_torque_norm_nm");
     const std::size_t contact_threshold = index_of("left_force_control_contact_threshold_exceeded");
     const std::size_t hard_threshold = index_of("left_force_control_hard_limit_threshold_exceeded");
@@ -4516,7 +4531,8 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(measured_force > init_left_goal_deficit);
     RB_CHECK(fast_normal_force > measured_force);
     RB_CHECK(fast_force_norm > fast_normal_force);
-    RB_CHECK(fast_torque_norm > fast_force_norm);
+    RB_CHECK(fast_force_rate > fast_force_norm);
+    RB_CHECK(fast_torque_norm > fast_force_rate);
     RB_CHECK(contact_threshold > fast_torque_norm);
     RB_CHECK(hard_threshold > contact_threshold);
     RB_CHECK(hard_count > hard_threshold);
@@ -4603,6 +4619,7 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     RB_CHECK(row.at(measured_force) == "6.75");
     RB_CHECK(row.at(fast_normal_force) == "7.25");
     RB_CHECK(row.at(fast_force_norm) == "8.5");
+    RB_CHECK(row.at(fast_force_rate) == "1.75");
     RB_CHECK(row.at(fast_torque_norm) == "0.75");
     RB_CHECK(row.at(contact_threshold) == "1");
     RB_CHECK(row.at(hard_threshold) == "0");
@@ -4990,6 +5007,90 @@ bool testForceRuntimeUsesTimestampAfterBackendStateRead() {
     RB_CHECK(snapshot.right_force_control.state == "monitoring");
     RB_CHECK(!snapshot.fault_latched);
     loop.stop();
+    return true;
+}
+
+bool testForceRiseRateTriggerUsesFreshSampleTimeAndSharedDebounce() {
+    const auto rateConfig = [] {
+        rb_servo::DualArmConfig cfg = testConfig();
+        configureCartesianLoopTest(&cfg);
+        cfg.force_torque.source = "rbpodo_eft";
+        cfg.force_torque.right.enable = true;
+        cfg.force_torque.right.frame_configured = true;
+        cfg.force_torque.right.freshness_source = "sequence";
+        cfg.force_torque.right.control_lpf_alpha = 1.0;
+        cfg.force_control.provider = "project_native";
+        cfg.force_control.enable = true;
+        cfg.force_control.operating_mode = "monitor";
+        cfg.force_control.update_rate_hz = cfg.servo.rate_hz;
+        cfg.force_control.right.enable = true;
+        cfg.force_control.right.hard_normal_force_n = 1000.0;
+        cfg.force_control.right.hard_force_norm_n = 1000.0;
+        cfg.force_control.right.hard_torque_norm_nm = 1000.0;
+        cfg.force_control.right.hard_limit_rate_n_per_ms = 1.5;
+        cfg.force_control.right.hard_limit_rate_floor_n = 10.0;
+        cfg.force_control.right.hard_limit_debounce_samples = 3;
+        return cfg;
+    };
+    const rb_servo::JointArray initial = joints(0.0);
+
+    // A deliberately slow 4 N rise on each ~20 ms backend acquisition is
+    // about 0.2 N/ms. It crosses the 10 N floor without tripping the rate
+    // threshold, proving the differentiator uses fresh-sample timing rather
+    // than the nominal 5 ms servo period.
+    {
+        rb_servo::DualArmConfig cfg = rateConfig();
+        auto left = std::make_unique<TestBackend>(
+            rb_servo::ArmId::Left, initial, false);
+        auto right = std::make_unique<TestBackend>(
+            rb_servo::ArmId::Right, initial, false);
+        right->setReadSleepMs(20);
+        right->setEftForceRampPerFreshSample(4.0);
+        rb_servo::CommandBuffer buffer;
+        rb_servo::DualArmServoLoop loop(
+            std::move(left), std::move(right), cfg, &buffer, nullptr,
+            std::make_shared<FakeCartesianKinematics>());
+        RB_CHECK(loop.start());
+        rb_servo::ServoSnapshot snapshot;
+        RB_CHECK(waitUntil([&] {
+            snapshot = loop.latestSnapshot();
+            return snapshot.right_force_control.fast_force_norm_n >= 12.0 &&
+                snapshot.right_force_control.fast_force_rate_n_per_ms > 0.0;
+        }, std::chrono::milliseconds(1000)));
+        RB_CHECK(snapshot.right_force_control.fast_force_rate_n_per_ms < 0.5);
+        RB_CHECK(!snapshot.right_force_control.hard_limit_threshold_exceeded);
+        RB_CHECK(snapshot.right_force_control.hard_limit_sample_count == 0);
+        RB_CHECK(!snapshot.fault_latched);
+        loop.stop();
+    }
+
+    // A 10 N rise per normal servo acquisition is in the observed slam band.
+    // It must be OR-ed into the same three-fresh-sample debounce while the
+    // absolute 1000 N/Nm test thresholds remain untouched.
+    {
+        rb_servo::DualArmConfig cfg = rateConfig();
+        auto left = std::make_unique<TestBackend>(
+            rb_servo::ArmId::Left, initial, false);
+        auto right = std::make_unique<TestBackend>(
+            rb_servo::ArmId::Right, initial, false);
+        right->setEftForceRampPerFreshSample(10.0);
+        rb_servo::CommandBuffer buffer;
+        rb_servo::DualArmServoLoop loop(
+            std::move(left), std::move(right), cfg, &buffer, nullptr,
+            std::make_shared<FakeCartesianKinematics>());
+        RB_CHECK(loop.start());
+        rb_servo::ServoSnapshot snapshot;
+        RB_CHECK(waitUntil([&] {
+            snapshot = loop.latestSnapshot();
+            return snapshot.right_force_control.hard_limit_exceeded &&
+                snapshot.right_force_control.fast_force_rate_n_per_ms >= 1.5 &&
+                snapshot.right_force_control.fast_force_norm_n < 1000.0;
+        }, std::chrono::milliseconds(1000)));
+        RB_CHECK(snapshot.right_force_control.hard_limit_threshold_exceeded);
+        RB_CHECK(snapshot.right_force_control.hard_limit_sample_count >= 3);
+        RB_CHECK(!snapshot.fault_latched);
+        loop.stop();
+    }
     return true;
 }
 
@@ -8080,6 +8181,7 @@ int main() {
     if (!testPayloadIdentificationProfileLatchesForceMotionInhibit()) return 1;
     if (!testPayloadIdentificationRetainsRawHardLimitGuard()) return 1;
     if (!testForceRuntimeUsesTimestampAfterBackendStateRead()) return 1;
+    if (!testForceRiseRateTriggerUsesFreshSampleTimeAndSharedDebounce()) return 1;
     if (!testForceHardLimitRequiresConsecutiveFreshSamples()) return 1;
     if (!testGuardedAdmittanceContinuesAcrossUpstreamHold()) return 1;
     if (!testCartesianTransverseComplianceKeepsSoftContactInCurrentMotionEpoch()) return 1;

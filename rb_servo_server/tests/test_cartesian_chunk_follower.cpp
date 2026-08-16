@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <vector>
 
 using rb_servo::control::CartesianChunkFollower;
 using rb_servo::control::CartesianChunkFollowerConfig;
@@ -313,6 +314,66 @@ int main() {
         firstSegmentCorner(deadband_cfg, makeAngularReverseFrame(6.0e-4), &solved);
     check(solved, "angular supra-threshold reversal segment solves");
     check(angular_supra, "angular reversal above 5e-4 rad is a corner");
+
+    // The deadbands are config-driven, not hard-coded: widening the angular
+    // deadband must reclassify a reversal that the default would have flagged.
+    // This is the knob for the measured rotational-noise firing rate (2026-07-31:
+    // rotation axes alone tripped the guard on 17-38% of segments).
+    CartesianChunkFollowerConfig wide_cfg = deadband_cfg;
+    wide_cfg.guard.corner_deadband_ang_rad = 5.0e-3;   // 0.29 deg
+    const bool angular_widened =
+        firstSegmentCorner(wide_cfg, makeAngularReverseFrame(6.0e-4), &solved);
+    check(solved, "widened-deadband reversal segment solves");
+    check(!angular_widened,
+          "widening corner_deadband_ang_rad reclassifies the same reversal as noise");
+
+    CartesianChunkFollowerConfig tight_cfg = deadband_cfg;
+    tight_cfg.guard.corner_deadband_lin_m = 1.0e-4;    // 0.1 mm
+    const bool linear_tightened =
+        firstSegmentCorner(tight_cfg, makeLinearReverseFrame(2.0e-4), &solved);
+    check(solved, "tightened-deadband reversal segment solves");
+    check(linear_tightened,
+          "tightening corner_deadband_lin_m promotes a sub-default reversal to a corner");
+  }
+
+  // -- Test 6b: corner_velocity_scale is the configured ring-down. -------------
+  std::printf("Test 6b: corner_velocity_scale\n");
+  {
+    // The scale multiplies the TARGET velocity, i.e. the speed the segment carries
+    // at its far end -- so probe the last tick of the corner segment, not the first
+    // (the segment starts from the seeded zero-velocity state either way).
+    // makeLinearReverseFrame is SYMMETRIC (d_k = -d_kp1), so its central-difference
+    // vf is exactly zero and no scale factor is observable. Use an ASYMMETRIC
+    // reversal (+4 mm then -3 mm) so vf != 0 while both flanks clear the deadband.
+    ChunkFrame asym;
+    asym.policy_dt = SEG;
+    asym.pose = {poseWithXAndYaw(0.0, 0.0), poseWithXAndYaw(4.0e-3, 0.0),
+                 poseWithXAndYaw(1.0e-3, 0.0), poseWithXAndYaw(1.0e-3, 0.0),
+                 poseWithXAndYaw(1.0e-3, 0.0), poseWithXAndYaw(1.0e-3, 0.0)};
+    asym.grip.assign(asym.pose.size(), 20.0);
+
+    auto exitSpeed = [&asym](double scale) {
+      CartesianChunkFollowerConfig c;
+      c.window = {/*L*/ 1, /*C*/ 3, /*R*/ 1, /*smooth*/ 1};
+      c.guard.corner_velocity_scale = scale;
+      const ChunkFrame& frame = asym;
+      CartesianChunkFollower f(c);
+      f.submitFrame(frame, frame.pose[static_cast<std::size_t>(c.window.discard_head_L)]);
+      const int ticks = static_cast<int>(SEG / TICK);   // one full segment
+      Pose6D prev{}, cur{};
+      for (int i = 0; i < ticks; ++i) {
+        prev = cur;
+        cur = f.tick(TICK);
+      }
+      return std::hypot(cur.x - prev.x, cur.y - prev.y) / TICK;
+    };
+    const double v_hard = exitSpeed(0.0);      // full stop at the reversal
+    const double v_default = exitSpeed(0.25);
+    const double v_soft = exitSpeed(1.0);      // no velocity cut
+    std::printf("    corner exit speed: scale0=%.6f scale0.25=%.6f scale1=%.6f m/s\n",
+                v_hard, v_default, v_soft);
+    check(v_soft > v_default, "corner_velocity_scale=1.0 exits the corner faster than 0.25");
+    check(v_default > v_hard, "corner_velocity_scale=0.25 exits faster than a full stop");
   }
 
   // -- Test 7: delta-preview integrates local rows and faults on persistent slip.
@@ -531,6 +592,249 @@ int main() {
     check(projection_seen, "debounced contact-force ownership bypasses accel gate");
     check(min_z > start.z - 2e-3, "owned normal motion is projected out");
     check(x_last > start.x + 5e-3, "owned-normal projection preserves tangential motion");
+  }
+
+
+  // -- Test: chunk-swap head behaviour (fix + characterization). --------------
+  // (a) FIXED: flankIndex(k,-1,n) clamps to k at the window head, so d_k used to be
+  //     0 there -- halving the central-difference vf, injecting a spurious
+  //     af = +d_kp1/dt^2, and zeroing sign_dk so the corner test could never fire.
+  //     buildSample now falls back to the forward difference at the head.
+  // (b) FIXED (was: 0.33-0.54x travel loss for ~3 segments after every swap, with
+  //     last_solve.duration/dt spiking to ~5 and the motion transiently reversing, on a
+  //     PERFECTLY constant-velocity delta stream). Root cause: submitDeltaFrame anchored
+  //     the integration at last_pose_ (the MID-segment emitted sample) while the next
+  //     solve starts from the Ruckig chained state p0_, which solve() leaves at the END
+  //     of the current segment -- so the first new knot was only
+  //     d - d_prev*(1 - t_in_seg/seg_dt) ahead of the solve's start, i.e. ~0 (or negative)
+  //     when the frame landed early in a segment. Now anchored at core_.p0().
+  //     Hardware corroboration of the pre-fix behaviour:
+  //     logs/servo_log_20260724_160210.csv emitted follower speed by consumed row
+  //     index (right arm) = 20.4 / 27.6 / 42.4 / 47.9 / 45.9 mm/s, and
+  //     outputs/sweep/20260729_0840*_fixedstep_command.jsonl showed a 0.70x displacement
+  //     notch one row after each swap (n~880/row).
+  std::printf("Test: chunk-swap head (fix + known-defect characterization)\n");
+  {
+    CartesianChunkFollowerConfig hcfg;
+    hcfg.window = {/*L*/ 0, /*C*/ 10, /*R*/ 2, /*smooth*/ 1};
+    const double vx = 0.03;  // constant speed -> zero reference curvature
+    const double step = vx * SEG;
+    auto makeDeltaFrame = [&](int n, std::uint64_t wseq) {
+      ChunkFrame fr;
+      fr.policy_dt = SEG;
+      fr.wire_seq = wseq;
+      fr.recv_seq = 20;
+      fr.recv_time = 0.0;
+      for (int i = 0; i < n; ++i) {
+        Vec6 d{};
+        d.x = step;
+        fr.delta.push_back(d);
+        fr.grip.push_back(0.0);
+      }
+      return fr;
+    };
+
+    CartesianChunkFollower f(hcfg);
+    Pose6D origin;
+    origin.x = 0.0; origin.y = 0.0; origin.z = 0.2;
+    origin.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+    f.submitDeltaFrame(makeDeltaFrame(40, 55), origin);
+    for (int i = 0; i < 250; ++i) f.tick(TICK);
+
+    const int n3 = static_cast<int>(3 * SEG / TICK);
+    Pose6D a = f.tick(TICK);
+    Pose6D b = a;
+    for (int i = 0; i < n3; ++i) b = f.tick(TICK);
+    const double steady = b.x - a.x;
+    check(steady > 0.8 * 3 * step, "steady state tracks the constant delta stream");
+
+    const Pose6D at = f.tick(TICK);
+    f.submitDeltaFrame(makeDeltaFrame(40, 56), at);
+    const bool head_corner = f.diag().last_solve.corner;
+    Pose6D c = at;
+    for (int i = 0; i < n3; ++i) c = f.tick(TICK);
+    const double swap = c.x - at.x;
+    const double ratio = steady > 1e-12 ? swap / steady : 0.0;
+    std::printf("    3-seg travel: steady=%.6f m  across-swap=%.6f m  ratio=%.3f\n",
+                steady, swap, ratio);
+    check(!head_corner, "fresh-chunk head reports no phantom corner (flank-clamp fix)");
+    check(ratio > 0.85, "chunk swap preserves travel on a constant-velocity delta stream");
+
+    // (c) The defect was PHASE-dependent: submitting early in a segment lost the most
+    //     travel, so a single submit phase can pass by luck. Sweep the whole segment and
+    //     require every phase to keep the travel AND never reverse.
+    double worst = 1.0;
+    int worst_phase = -1;
+    const int ticks_per_seg = static_cast<int>(SEG / TICK);
+    for (int phase = 0; phase < ticks_per_seg; ++phase) {
+      CartesianChunkFollower g(hcfg);
+      g.submitDeltaFrame(makeDeltaFrame(40, 55), origin);
+      for (int i = 0; i < 250; ++i) g.tick(TICK);
+      // measure this instance's own steady rate over 3 segments
+      Pose6D s0 = g.tick(TICK);
+      Pose6D s1 = s0;
+      for (int i = 0; i < n3; ++i) s1 = g.tick(TICK);
+      const double steady_i = s1.x - s0.x;
+      // land the swap `phase` ticks into a segment
+      Pose6D at_i = s1;
+      for (int i = 0; i < phase; ++i) at_i = g.tick(TICK);
+      g.submitDeltaFrame(makeDeltaFrame(40, 56), at_i);
+      Pose6D prev = at_i, cur = at_i;
+      double min_tick_dx = 1.0;
+      for (int i = 0; i < n3; ++i) {
+        cur = g.tick(TICK);
+        min_tick_dx = std::min(min_tick_dx, cur.x - prev.x);
+        prev = cur;
+      }
+      const double r = steady_i > 1e-12 ? (cur.x - at_i.x) / steady_i : 0.0;
+      if (r < worst) { worst = r; worst_phase = phase; }
+      if (min_tick_dx < -1e-9) {
+        std::printf("    phase %d/%d REVERSED (min per-tick dx=%.3e m)\n",
+                    phase, ticks_per_seg, min_tick_dx);
+        check(false, "chunk swap never reverses the motion");
+        break;
+      }
+    }
+    std::printf("    worst-phase ratio over %d submit phases: %.3f (phase %d)\n",
+                ticks_per_seg, worst, worst_phase);
+    check(worst > 0.85, "chunk-swap travel is preserved at EVERY submit phase");
+  }
+
+  // -- Test: a held robot must not be outrun by the plan. --------------------
+  // The floor/ROI/self-collision stage clamps an arm to its previous sent joints, but it runs
+  // AFTER command generation, so the follower used to keep integrating deltas against a robot
+  // that was standing still. Measured on servo_log_20260729_165037.csv: eight RoiViolation
+  // episodes (right gripper tip crossing roi_box y=-0.150) grew actual_lead from 1.3 mm to
+  // 40.7 mm / 4.5 deg and ended the rollout in delta_preview_actual_lead_fault -- and each time
+  // the verdict flipped back to Ok the arm lunged to close that gap. dual_arm_servo_loop now
+  // calls pauseForHold() whenever safetyInterventionRecent() is set; this locks the invariant
+  // that the pause actually bounds the divergence.
+  std::printf("Test: safety-hold pause bounds plan-vs-actual divergence\n");
+  {
+    CartesianChunkFollowerConfig hcfg;
+    hcfg.window = {/*L*/ 0, /*C*/ 10, /*R*/ 2, /*smooth*/ 1};
+    const double vx = 0.03;
+    const double step = vx * SEG;
+    auto deltaFrame = [&](int n, std::uint64_t wseq) {
+      ChunkFrame fr;
+      fr.policy_dt = SEG;
+      fr.wire_seq = wseq;
+      fr.recv_seq = 20;
+      fr.recv_time = 0.0;
+      for (int i = 0; i < n; ++i) {
+        Vec6 d{};
+        d.x = step;
+        fr.delta.push_back(d);
+        fr.grip.push_back(0.0);
+      }
+      return fr;
+    };
+    Pose6D origin;
+    origin.x = 0.0; origin.y = 0.0; origin.z = 0.2;
+    origin.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+
+    // Drive both instances identically, then stall the "robot" at a fixed pose for 300 ms
+    // (the longest measured RoiViolation episode was 92 ms).
+    const int stalled_ticks = static_cast<int>(0.300 / TICK);
+    double lead_running = 0.0, lead_paused = 0.0;
+    for (int paused = 0; paused < 2; ++paused) {
+      CartesianChunkFollower f(hcfg);
+      f.submitDeltaFrame(deltaFrame(60, 55), origin);
+      for (int i = 0; i < 200; ++i) f.tick(TICK);
+      const Pose6D stuck = f.tick(TICK);  // the pose the clamped robot is frozen at
+      if (paused) f.pauseForHold(100.0);
+      for (int i = 0; i < stalled_ticks; ++i) {
+        f.tick(TICK);
+        f.updateActualLead(stuck);  // robot is held by the safety layer: actual never moves
+      }
+      (paused ? lead_paused : lead_running) = f.diag().actual_lead_m;
+    }
+    std::printf("    lead after 300 ms held: running=%.1f mm  paused=%.1f mm\n",
+                lead_running * 1000.0, lead_paused * 1000.0);
+    check(lead_running > 0.005, "unpaused follower does outrun a held robot (defect reproduced)");
+    check(lead_paused < 1e-9, "safety-hold pause freezes the plan at the held pose");
+  }
+
+  // -- Measurement: synthetic streams do NOT reproduce the hardware head effect. -------
+  // Hardware (servo_log_20260729_184823.csv, right arm, n~7300/row) shows the FIRST segment of
+  // each new chunk missing its one-policy-step deadline 34% of the time, decaying monotonically
+  // 34/22/19/16/12/6% over rows 0..5 (duration/seg_dt p90 1.76 -> 1.00). Position is continuous
+  // across the swap (the anchor fix above); the velocity/acceleration boundary state is not.
+  //
+  // NEGATIVE RESULT, kept so nobody re-derives it: neither a smoothly-continued curved stream
+  // nor one with injected replan disagreement reproduces that HEAD CONCENTRATION. Sweeping both
+  // curvature and mismatch, every operating point degrades all rows EQUALLY (e.g. at 42% the
+  // split is r0..r4 = 42/42/42/42/42), with a sharp cliff between feasible and saturated. So a
+  // synthetic chunk cannot validate a change to the head boundary condition (e.g. seeding af
+  // from the forward second difference instead of 0) -- that needs REAL recorded chunks replayed
+  // through the follower. Capture them with FLOW_INFER_PRINT_CHUNK=1.
+  std::printf("Test: chunk-swap feasibility is uniform on synthetic streams (negative result)\n");
+  {
+    CartesianChunkFollowerConfig hcfg;
+    hcfg.window = {/*L*/ 0, /*C*/ 10, /*R*/ 2, /*smooth*/ 1};
+    const double step_m = 0.03 * SEG;
+    const double dphi = 0.03;
+    const double mismatch = 0.065;   // the operating point whose overall rate is closest to hw
+    const int EXECUTE = 5;
+    auto curved = [&](int n, double phase0, std::uint64_t wseq) {
+      ChunkFrame fr;
+      fr.policy_dt = SEG;
+      fr.wire_seq = wseq;
+      fr.recv_seq = 20;
+      fr.recv_time = 0.0;
+      for (int i = 0; i < n; ++i) {
+        const double ph = phase0 + i * dphi;
+        Vec6 d{};
+        d.x = step_m * std::cos(ph);
+        d.y = step_m * std::sin(ph);
+        fr.delta.push_back(d);
+        fr.grip.push_back(0.0);
+      }
+      return fr;
+    };
+    CartesianChunkFollower f(hcfg);
+    Pose6D origin;
+    origin.x = 0.0; origin.y = 0.0; origin.z = 0.2;
+    origin.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+    std::vector<std::vector<double>> ratio_by_row(EXECUTE + 1);
+    int segments_seen = f.diag().segments;
+    double phase = 0.0;
+    std::uint64_t seq = 55;
+    f.submitDeltaFrame(curved(40, phase, seq), origin);
+    const int ticks_per_seg = static_cast<int>(SEG / TICK);
+    for (int chunk = 0; chunk < 400; ++chunk) {
+      for (int s = 0; s < EXECUTE; ++s) {
+        for (int t = 0; t < ticks_per_seg; ++t) {
+          f.tick(TICK);
+          if (f.diag().segments != segments_seen) {
+            segments_seen = f.diag().segments;
+            const int row = f.diag().seg_step_index;
+            if (row >= 0 && row <= EXECUTE && chunk > 2) {
+              ratio_by_row[row].push_back(f.diag().last_solve.duration / SEG);
+            }
+          }
+        }
+      }
+      phase += EXECUTE * dphi + mismatch * std::sin(2.399963 * chunk);
+      f.submitDeltaFrame(curved(40, phase, ++seq), f.lastPose());
+    }
+    auto over105 = [](const std::vector<double>& v) {
+      if (v.empty()) return 0.0;
+      return 100.0 * static_cast<double>(std::count_if(
+          v.begin(), v.end(), [](double x) { return x > 1.05; })) / v.size();
+    };
+    std::printf("    row>1.05%%:");
+    double head = 0.0, tail_max = 0.0;
+    for (int r = 0; r <= EXECUTE; ++r) {
+      if (ratio_by_row[r].size() < 20) continue;
+      const double o = over105(ratio_by_row[r]);
+      std::printf(" r%d=%.0f", r, o);
+      if (r == 0) head = o; else tail_max = std::max(tail_max, o);
+    }
+    std::printf("   (hardware for contrast: 34/22/19/16/12/6)\n");
+    check(head > 5.0, "synthetic swap does stress the solver");
+    check(std::fabs(head - tail_max) < 10.0,
+          "synthetic difficulty is uniform across rows, unlike hardware");
   }
 
   std::printf("\n=== %s (%d failure%s) ===\n",
