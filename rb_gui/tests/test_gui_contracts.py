@@ -46,6 +46,7 @@ from rb_servo_gui.app import (
     _arm_awaiting_init_tare,
     _maybe_auto_init_tare_on_startup,
     _foot_pedal_action_map,
+    _open_foot_pedal_device,
     _update_arm_init_panel,
     _lifecycle_init_motion_layout_html,
     _update_gripper_feedback,
@@ -2134,6 +2135,57 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("수집 종료", script)
         self.assertIn("INPUT", script)
         self.assertIn("TEXTAREA", script)
+
+    def test_foot_pedal_ambiguous_devices_fail_closed_without_grabbing(self):
+        """Several identical pedals -> disabled, never a guess.
+
+        This rig runs two PCsensor pedals (3553:b001, no serial, identical evdev
+        capabilities): the 3-switch one is rb_gui's, the 1-switch one is the pika UMI
+        teleop clutch. Nothing in software tells them apart, and _open_foot_pedal_device
+        grabs its pick exclusively — so guessing would fire InitMotion from the teleop
+        pedal AND steal the clutch. It must return None and must not open/grab anything.
+        """
+        candidates = ["/dev/input/by-path/pci-0000:11:00.0-usb-0:4:1.0-event-kbd",
+                      "/dev/input/by-path/pci-0000:13:00.0-usb-0:9:1.0-event-kbd"]
+        with mock.patch.dict(os.environ, {"RB_GUI_FOOT_PEDAL_DEVICE": ""}, clear=False), \
+                mock.patch("rb_servo_gui.app._foot_pedal_candidates", return_value=candidates), \
+                mock.patch("evdev.InputDevice") as input_device:
+            self.assertIsNone(_open_foot_pedal_device())
+        input_device.assert_not_called()
+
+    def test_foot_pedal_single_device_is_opened_and_grabbed(self):
+        only = "/dev/input/by-path/pci-0000:13:00.0-usb-0:9:1.0-event-kbd"
+        dev = mock.MagicMock()
+        dev.path, dev.name = only, "PCsensor FootSwitch Keyboard"
+        with mock.patch.dict(os.environ, {"RB_GUI_FOOT_PEDAL_DEVICE": ""}, clear=False), \
+                mock.patch("rb_servo_gui.app._foot_pedal_candidates", return_value=[only]), \
+                mock.patch("evdev.InputDevice", return_value=dev) as input_device:
+            self.assertIs(_open_foot_pedal_device(), dev)
+        input_device.assert_called_once_with(only)
+        dev.grab.assert_called_once()
+
+    def test_input_node_by_path_resolves_through_by_path_only(self):
+        """Node identity must come from by-path, never by-id.
+
+        udev creates exactly ONE `usb-PCsensor_FootSwitch-event-kbd` symlink for two
+        identical pedals, so by-id silently follows plug order and cannot address the
+        other pedal at all. by-path keys off the physical USB port, so it is unique."""
+        from rb_servo_gui.app import _input_node_by_path
+        link = "/dev/input/by-path/pci-0000:13:00.0-usb-0:9:1.0-event-kbd"
+        with mock.patch("rb_servo_gui.app.glob.glob", return_value=[link]) as g, \
+                mock.patch("rb_servo_gui.app.os.path.realpath",
+                           side_effect=lambda p: "/dev/input/event9"):
+            self.assertEqual(_input_node_by_path("/dev/input/event9"), link)
+        patterns = [c.args[0] for c in g.call_args_list]
+        self.assertTrue(patterns)
+        for pattern in patterns:
+            self.assertIn("by-path", pattern)
+            self.assertNotIn("by-id", pattern)
+
+    def test_input_node_by_path_falls_back_to_raw_node(self):
+        from rb_servo_gui.app import _input_node_by_path
+        with mock.patch("rb_servo_gui.app.glob.glob", return_value=[]):
+            self.assertEqual(_input_node_by_path("/dev/input/event9"), "/dev/input/event9")
 
     def test_foot_pedal_action_map_routes_a_to_left_c_to_right_b_to_record(self):
         try:

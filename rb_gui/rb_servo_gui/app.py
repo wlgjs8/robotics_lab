@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import math
 import os
@@ -6458,7 +6459,57 @@ def _disable_viser_wasd_keys() -> None:
 
 
 _FOOT_PEDAL_DEVICE_ENV = "RB_GUI_FOOT_PEDAL_DEVICE"
-_FOOT_PEDAL_DEFAULT_PATH = "/dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd"
+
+
+def _input_node_by_path(node: str) -> str:
+    """/dev/input/eventN -> its /dev/input/by-path symlink, or the node unchanged.
+
+    by-path keys off the physical USB port, so it survives replug/reboot (the eventN
+    number does not) and stays unique when several identical pedals are attached."""
+    try:
+        target = os.path.realpath(node)
+        for link in glob.glob("/dev/input/by-path/*-event-kbd"):
+            if os.path.realpath(link) == target:
+                return link
+    except Exception:
+        pass
+    return node
+
+
+def _foot_pedal_candidates(evdev, ecodes) -> list[str]:
+    """Every foot-pedal KEYBOARD node, as stable by-path paths (sorted, deduped).
+
+    Deliberately does NOT use /dev/input/by-id. Two PCsensor pedals are identical
+    down to idVendor:idProduct (3553:b001), bcdDevice, product string, interface
+    layout and evdev capability bitmap, and they carry no serial — so udev creates
+    `usb-PCsensor_FootSwitch-event-kbd` for whichever enumerates first and NONE for
+    the other. That symlink therefore silently points at a different physical pedal
+    depending on plug order, and the second pedal is unreachable through it."""
+    try:
+        nodes = evdev.list_devices()
+    except Exception:
+        return []
+    found: list[str] = []
+    for path in nodes:
+        try:
+            cand = evdev.InputDevice(path)
+        except Exception:
+            continue
+        try:
+            name = (cand.name or "").lower()
+            keys = cand.capabilities().get(ecodes.EV_KEY, [])
+            # Keyboard interface only: the pedal's extra HID node may emit a key-down
+            # without the matching key-up, and the mouse node emits no usable keys.
+            if (("foot" in name or "pcsensor" in name)
+                    and "mouse" not in name
+                    and ecodes.KEY_A in keys):
+                found.append(_input_node_by_path(path))
+        finally:
+            try:
+                cand.close()
+            except Exception:
+                pass
+    return sorted(set(found))
 
 
 def _open_foot_pedal_device():
@@ -6468,11 +6519,15 @@ def _open_foot_pedal_device():
     directly works regardless of viser/browser focus or which terminal is active,
     and grab() (EVIOCGRAB) keeps the pedal from ALSO typing a/b/c into whatever
     window is focused. Returns a grabbed evdev.InputDevice or None (evdev missing,
-    no matching device, or access denied). Best-effort: never raises.
+    no matching device, no permission, or an ambiguous choice). Never raises.
 
-    Device selection: $RB_GUI_FOOT_PEDAL_DEVICE override, then the stable by-id
-    path, then a scan for a foot-switch node that exposes KEY_A (the keyboard
-    interface, not the device's mouse/extra nodes)."""
+    Device selection: $RB_GUI_FOOT_PEDAL_DEVICE if set, else auto-detect ONLY when
+    exactly one foot-pedal keyboard is attached. With several attached the choice is
+    safety-relevant and undecidable in software — this pedal fires InitMotion, and
+    grab() would additionally steal a pedal another consumer needs (the pika UMI
+    teleop clutch reads its own pedal, see ~/workspace/pika). Identical pedals cannot
+    be told apart by any descriptor, so guessing could both move the robot from the
+    wrong pedal and kill the teleop clutch. Fail closed and make the operator pin it."""
     try:
         import evdev
         from evdev import ecodes
@@ -6484,31 +6539,37 @@ def _open_foot_pedal_device():
         return None
     dev = None
     override = os.environ.get(_FOOT_PEDAL_DEVICE_ENV, "").strip()
-    for path in [p for p in (override, _FOOT_PEDAL_DEFAULT_PATH) if p]:
+    if override:
         try:
-            if os.path.exists(path):
-                dev = evdev.InputDevice(path)
-                break
-        except Exception:
-            dev = None
-    if dev is None:
-        try:
-            for path in evdev.list_devices():
-                try:
-                    cand = evdev.InputDevice(path)
-                except Exception:
-                    continue
-                name = (cand.name or "").lower()
-                keys = cand.capabilities().get(ecodes.EV_KEY, [])
-                if ("foot" in name or "pcsensor" in name) and ecodes.KEY_A in keys:
-                    dev = cand
-                    break
-                try:
-                    cand.close()
-                except Exception:
-                    pass
-        except Exception:
-            dev = None
+            dev = evdev.InputDevice(override)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"rb_servo_gui: foot pedal {_FOOT_PEDAL_DEVICE_ENV}={override} unusable "
+                f"({type(exc).__name__}: {exc})",
+                flush=True,
+            )
+            return None
+    else:
+        candidates = _foot_pedal_candidates(evdev, ecodes)
+        if len(candidates) > 1:
+            print(
+                "rb_servo_gui: foot pedal DISABLED — several pedals attached and they are "
+                "indistinguishable in software (same 3553:b001, no serial, same capabilities). "
+                f"Pin one with {_FOOT_PEDAL_DEVICE_ENV}=<path>:\n  "
+                + "\n  ".join(candidates),
+                flush=True,
+            )
+            return None
+        if candidates:
+            try:
+                dev = evdev.InputDevice(candidates[0])
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"rb_servo_gui: foot pedal {candidates[0]} unusable "
+                    f"({type(exc).__name__}: {exc})",
+                    flush=True,
+                )
+                return None
     if dev is None:
         print(
             f"rb_servo_gui: foot pedal not found (set {_FOOT_PEDAL_DEVICE_ENV} to its /dev/input path)",

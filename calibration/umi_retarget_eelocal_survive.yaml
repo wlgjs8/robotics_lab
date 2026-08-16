@@ -1,0 +1,42 @@
+schema: robotics_lab.umi_retarget.v1
+status: configured_estimate   # identity world R: NOT a measured survive->stand alignment.
+                              # Same gate as umi_retarget_eelocal.yaml — must stay
+                              # non-"measured"/"accepted" so real rollout stays blocked
+                              # (PHYSICAL_ROLLOUT_RETARGET_STATUSES).
+# libsurvive variant of calibration/umi_retarget_eelocal.yaml.
+#
+# Use this for episodes collected by ~/workspace/pika with --pose-backend survive
+# (HDF5 attrs: pose_frame=survive_world, pose_backend=libsurvive). The SteamVR
+# variant stays as-is for the existing steamvr_world corpus (e.g. /data/pika/bolt);
+# umi-convert refuses a mismatch between retarget source_pose_frame and the episode
+# pose_frame, so the two corpora cannot be silently mixed.
+#
+#   python3 -m policy_runner umi-convert ... \
+#       --retarget-config calibration/umi_retarget_eelocal_survive.yaml
+source_pose_frame: survive_world
+# T_tcp_umi_gripper is IDENTICAL to the SteamVR variant — the tool offset is a
+# device-frame quantity and does not depend on which tracking backend produced the
+# world pose. Training is ee_local, which is invariant to the absolute world frame
+# (the unmeasured world R cancels in pose_init^-1 . pose_now), so libsurvive's world
+# origin differing from SteamVR's does not change the converted data.
+#   X = R_corr . Trans(0.172, 0, -0.076) . R_align
+#   R_corr  = Rx(-20deg).[Ry(-90deg).Rx(-90deg)]   (pika_sdk vive_tracker.py)
+#   R_align = [0 0 1; -1 0 0; 0 -1 0]              (stack_real.yaml umi r_align)
+#   T_tcp_umi_gripper = inv(X)
+#
+# WHY THIS VARIANT IS BETTER GROUNDED THAN THE STEAMVR ONE:
+# the SteamVR config carries the caveat "R_corr assumes the OpenVR tracker body frame
+# matches libsurvive's (pending calibration-clip confirmation)". R_corr was defined in
+# libsurvive's raw tracker frame in the first place (pika_sdk vive_tracker.py), so on
+# this backend that assumption is not needed — the body frame is the native one.
+# The world R remains unmeasured, hence status stays configured_estimate.
+left:
+  T_tcp_umi_gripper: [0.0, -0.076, -0.172, 0.0, 0.173648178, 0.984807753, 0.0]
+  gripper_open_close_units: percent
+right:
+  T_tcp_umi_gripper: [0.0, -0.076, -0.172, 0.0, 0.173648178, 0.984807753, 0.0]
+  gripper_open_close_units: percent
+quality:
+  measured_date: null
+  max_translation_error_m: null
+  max_rotation_error_rad: null

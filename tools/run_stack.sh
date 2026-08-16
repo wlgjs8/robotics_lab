@@ -302,12 +302,25 @@ echo "[stack] viser GUI: http://127.0.0.1:${GUI_PORT}"
 if [ "$SCOPE_DASHBOARD_ON" = "1" ]; then
   echo "[stack] joint scope dashboard: http://127.0.0.1:${SCOPE_DASHBOARD_PORT}"
 fi
+# Foot pedal (InitMotion left/right + record toggle). Two identical PCsensor pedals
+# are attached to this rig — the 3-switch one drives rb_gui, the 1-switch one is the
+# pika UMI teleop clutch (~/workspace/pika). They share 3553:b001, carry no serial and
+# expose identical evdev capabilities, so ONLY the physical USB port tells them apart
+# and rb_gui fails closed rather than guessing (it grabs the device exclusively, so a
+# wrong guess would both fire InitMotion from the teleop pedal and kill that clutch).
+# Pin the 3-switch pedal by by-path; override per-site with RB_GUI_FOOT_PEDAL_DEVICE.
+FOOT_PEDAL_DEVICE="${RB_GUI_FOOT_PEDAL_DEVICE:-/dev/input/by-path/pci-0000:13:00.0-usb-0:9:1.0-event-kbd}"
+if [ ! -e "$FOOT_PEDAL_DEVICE" ]; then
+  echo "[stack] foot pedal not at $FOOT_PEDAL_DEVICE — rb_gui pedal stays disabled." >&2
+  echo "[stack]       fix: RB_GUI_FOOT_PEDAL_DEVICE=<path> make run   (list: ls -l /dev/input/by-path/*event-kbd)" >&2
+fi
 PYTHONPATH=rb_gui \
   RB_GUI_DESCRIPTIONS_DIR="$PWD/rb_servo_server/descriptions" \
   RB_GUI_STATE_BIND=0.0.0.0 RB_GUI_STATE_PORT=50366 \
   RB_GUI_COMMAND_HOST=127.0.0.1 RB_GUI_COMMAND_PORT=50256 \
   RB_GUI_CIRCLE_OVERLAY_BIND=none \
   RB_GUI_SERVER_CONFIG_PATH="$SERVER_CFG_ABS" \
+  RB_GUI_FOOT_PEDAL_DEVICE="$FOOT_PEDAL_DEVICE" \
   "$PY" -m rb_servo_gui.app >"$LOG_DIR/gui.log" 2>&1 &
 PIDS+=($!)
 sleep 1
