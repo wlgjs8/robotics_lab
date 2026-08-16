@@ -7,8 +7,9 @@
 #                                      rot/vel ratio per upstream's own note)
 #   max_vel_mms        50.0 -> 150.0  (flow clamps linear at 300 mm/s; 50 would
 #                                      clip normal approach speeds)
-#   admittance_overlay true -> false  (pure position replay until force control
-#                                      is deliberately enabled - design.md S7)
+#   admittance_overlay: true (2026-08-16 operator decision: distal-of-J6 contact
+#                             is force-control territory; REAL force validity
+#                             additionally requires ft identify - tools.pika.yaml)
 # Re-tune on the hardware ladder (P3); keep this file in sync when the
 # submodule's follow.yaml changes shape (the SILS gate is the canary).
 # follow.yaml - the REAL-TIME STREAM FOLLOWER's tuning (wiki/decisions/0025).
@@ -156,7 +157,7 @@ leash_max_deg: 15.0
 # the overlay is composed after the pacer, never behind it.
 # ENABLED 2026-08-03 (owner). The overlay makes the arm YIELD to a measured wrench instead of
 # pushing through it - but read the next paragraph before trusting a force number.
-admittance_overlay: false
+admittance_overlay: true
 
 # ---- FORCE CONTROL: PER-AXIS mass / damper / stiffness (owner 2026-08-05) ---------------------
 # *"follow 기능의 force control을 translation/rotation을 각 축마다의 mass, damper, stiffness를

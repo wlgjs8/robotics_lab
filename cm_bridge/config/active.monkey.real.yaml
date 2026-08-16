@@ -63,7 +63,7 @@ arms:
                                  # shell"). env.sh's seed fills SILS loopback; real boxes need real IPs.
     serial_number: ""            # DEVICE - fill from the arm's nameplate
     eft:  RFT64-6A01-A           # -> params-presets/efts/RFT64-6A01-A.yaml (nominal product values)
-    tool: none                   # -> params-presets/tools/none.yaml (bare flange; name the taught tool here)
+    tool: pika                   # -> tools/pika.yaml (bind-mounted cm_bridge preset; ft identify required for force)
     transform:                   # base_frame -> left-arm mount (design-snapped inverse; +y side)
       - [ -0.147200669389, +0.375268761423, +0.915153167307, +157.070000]
       - [ +0.019542134882, -0.923948030861, +0.382018509017, -170.360000]
@@ -86,7 +86,7 @@ arms:
     ip: "172.28.60.201"                       # DEVICE - blank in the shell (see left)
     serial_number: ""
     eft:  RFT64-6A01-A
-    tool: none
+    tool: pika
     transform:                   # base_frame -> right-arm mount (EXACT mirror of the left; -y side)
       - [ -0.147200669389, -0.375268761423, -0.915153167307, -157.070000]
       - [ -0.019542134882, -0.923948030861, +0.382018509017, -170.360000]

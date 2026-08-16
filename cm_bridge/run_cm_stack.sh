@@ -37,13 +37,33 @@ case "$MODE" in
     echo "           policy_runner/rb_gui are not wired to this controller yet."
     ;;
   real)
-    echo "[cm-stack] FAIL-CLOSED: CONTROLLER=cm MODE=real is not ready yet." >&2
-    echo "  Missing: (a) cm_bridge command path (P1) — chunk UDP 50264 -> /monkey/<side>/cmd/follow," >&2
-    echo "           state -> servo_state.v1 re-publish; (b) CollisionMonitor gate (P2);" >&2
-    echo "           (c) platforms/monkey/active.yaml filled with the REAL box IPs/serials +" >&2
-    echo "           this rig's calibrated mounts (P3). See cm_bridge/docs/design.md §9." >&2
-    echo "  Until then: make run CONTROLLER=legacy MODE=real" >&2
-    exit 1
+    # Single controller owner.
+    if pgrep -f "rb_servo_server.*--config" >/dev/null 2>&1; then
+      echo "[cm-stack] FATAL: rb_servo_server is running. Stop it first." >&2; exit 1
+    fi
+    DEV="$ROOT/cm_bridge/config/active.monkey.real.yaml"
+    # Fail-closed: serials must be filled by the operator (nameplates).
+    if grep -q 'serial_number: ""' "$DEV"; then
+      echo "[cm-stack] FAIL-CLOSED: serial_number is blank in $DEV" >&2
+      echo "  Fill both arms' serial_number from the nameplates, then retry." >&2
+      exit 1
+    fi
+    cp "$DEV" "$CM/platforms/monkey/active.yaml"
+    echo "[cm-stack] installed REAL device file -> platforms/monkey/active.yaml"
+    "${COMPOSE[@]}" up -d monkey-real
+    sleep 8
+    if docker logs monkey-real 2>&1 | grep -aq "ConfigInvalid\|EXIT_FAILURE\|refus"; then
+      echo "[cm-stack] FATAL: controller refused to init (firmware/config gate):" >&2
+      docker logs monkey-real 2>&1 | tail -8 >&2
+      "${COMPOSE[@]}" stop monkey-real >/dev/null; exit 1
+    fi
+    docker exec -d monkey-real bash -lc 'source /cm-ws/install/setup.bash && exec python3 /cm-bridge-src/cm_bridge_node.py --platform monkey > /tmp/cm_bridge.log 2>&1'
+    nohup "$ROOT/.venv/bin/python" "$ROOT/cm_bridge/src/collision_monitor.py" \
+      > "$ROOT/logs/collision_monitor_$(date +%Y%m%d_%H%M%S).log" 2>&1 &
+    echo "[cm-stack] CM real up + bridge + collision monitor."
+    echo "[cm-stack] Arms are NOT energized. Operator ladder (cm_bridge/docs/real_bringup.md):"
+    echo "  docker exec monkey-real bash -lc 'source /cm-ws/install/setup.bash && ros2 service call /monkey/cell/cmd/console cell_msgs/srv/Command \"{command: enable}\"'"
+    echo "  ... then {command: task on}, per-arm {command: task idle}"
     ;;
   gate)
     seed_monkey_active_yaml
@@ -62,7 +82,8 @@ ros2 service call /monkey/right/cmd/console cell_msgs/srv/Command "{command: tas
     exit $rc
     ;;
   down|stop)
-    "${COMPOSE[@]}" stop monkey-sils chimp-sils 2>/dev/null || true
+    "${COMPOSE[@]}" stop monkey-sils monkey-real chimp-sils 2>/dev/null || true
+    pkill -f "collision_monito[r]" 2>/dev/null || true
     echo "[cm-stack] stopped"
     ;;
   *)

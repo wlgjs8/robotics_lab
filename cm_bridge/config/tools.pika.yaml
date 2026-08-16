@@ -1,0 +1,33 @@
+# cm_bridge tool preset — PIKA gripper on the robotics_lab dual RB3-730E rig.
+# Bind-mounted to submodules/controller-manager/platforms/monkey/params-presets/
+# tools/pika.yaml by cm-compose.override.yaml (tools/ is TRACKED = read-only rule).
+#
+# GEOMETRY (measured/URDF-derived, no guesses):
+#   robotics_lab TCP convention = pika fingertip-center plane at z=247.642 mm
+#   from attachment_site (stack_real.yaml floor-constraint comment, tape-measured
+#   tip plane) with attachment_site == flange face (URDF link6 -> attachment_site
+#   = DH d6). CM composes flange -> TCP = Trans(eft.offset) * [R(rpy)|xyz] with
+#   xyz measured FROM THE SENSOR ORIGIN; efts/RFT64-6A01-A.yaml puts the SRO at
+#   flange z+45 mm (matches our URDF ft chain 15+30 mm) so:
+#     tool xyz = 247.642 - 45.0 = 202.642 mm along +z, rpy = 0 (flange-aligned
+#     TCP; jaw axis = TCP x).
+#   VERIFY before first real motion (ladder step): CM cmd/pose TCP at a known q
+#   must match rb_servo_server FK TCP at the same q to <1 mm.
+#
+# PAYLOAD: mass/com are set to ZERO on purpose — we have no measured value and
+# the repo rule forbids guessed safety-relevant constants. Consequence: the
+# compensated wrench carries the full tool weight as bias, so FORCE-ARMED
+# operation (admittance overlay) is INVALID until `ft identify` (CM tool
+# calibration) runs on each arm with this tool and its result is entered in the
+# device file's tool_calibrations. Pure position replay is unaffected.
+name: "pika"
+
+transform:
+  xyz: [0.0, 0.0, 202.642]     # mm, from the SRO (RFT64 preset z+45 from flange)
+  rpy: [0.0, 0.0, 0.0]         # deg — VERIFY via FK cross-check (see header)
+
+mass: 0.0                      # kg  — TODO ft identify (see header; do NOT guess)
+com:  [0.0, 0.0, 0.0]          # mm  — TODO ft identify
+
+applied_force:
+  xyz: [0.0, 0.0, 202.642]     # tip plane: where tool forces are applied
