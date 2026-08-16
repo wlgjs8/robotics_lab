@@ -9,9 +9,13 @@ margin breach OR a stale state stream it TRIPS fail-closed: a UDP control
 message latches the bridge (follow chunks dropped, fault_latched=true on the
 fanout, so flow-infer's SafetyGate blocks).
 
-v1 limitations (documented, not silent): no articulated pika gripper hulls
-(the C++ monitor attaches them programmatically; URDF-only coverage here) and
-no velocity barrier/braking — the CM controller owns motion; our action is
+Scope (operator decision 2026-08-16): PROXIMAL ONLY — arm links 0..5 vs
+each other / the other arm / the stand. Everything distal of joint 6 (link6,
+attachment site, pika gripper/fingers/tool) is EXCLUDED from the hard gate:
+task contact there is delegated to CM's force controller (Admittance) — that
+delegation requires the force path to be ARMED on real rollouts (P3 item;
+the current follow overlay ships admittance_overlay off for pure replay).
+No velocity barrier/braking — the CM controller owns motion; our action is
 stream cutoff + latch. Margins: inter d_hard 0.025 m, intra-arm 0.005 m
 (stack_real.yaml values).
 
@@ -37,6 +41,9 @@ DISABLED_GLOBS = [  # stack_real.yaml collision.mesh.disabled_collision_pairs
     ("*left*link4*", "*left*link6*"), ("*right*link4*", "*right*link6*"),
 ]
 STAND_IGNORE_ARM_SUBSTRINGS = ["link0"]  # stand<->link0 structural
+# Distal-of-joint-6 bodies: excluded from the hard collision gate entirely —
+# contact at the tool side is force-control territory, not a latch condition.
+DISTAL_SUBSTRINGS = ["link6", "attachment", "gripper", "finger", "tool"]
 D_HARD_INTER = 0.025   # arm<->arm, arm<->stand [m]
 D_HARD_INTRA = 0.005   # same-arm non-adjacent [m]
 STALE_TRIP_S = 0.25
@@ -58,6 +65,8 @@ def build():
     for pr in cmodel.collisionPairs:
         a, b = geoms[pr.first], geoms[pr.second]
         na, nb = a.name, b.name
+        if any(d in na or d in nb for d in DISTAL_SUBSTRINGS):
+            continue  # distal of joint 6 -> force-control territory
         # adjacent links on the same joint chain: parentJoint distance <= 1
         if arm_of(na) == arm_of(nb) != "stand":
             if abs(int(a.parentJoint) - int(b.parentJoint)) <= 1:
