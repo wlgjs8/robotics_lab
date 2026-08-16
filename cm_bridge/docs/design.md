@@ -149,8 +149,9 @@ Idle transition) and surface the fault on the state fanout.
 controller-manager provides Admittance (task) with `FtConfig` / `Wrench` /
 `AxisCompliance{,Set}` messages. Bridge exposes a minimal pass-through first
 (enable/disable + parameter set + wrench telemetry on the state fanout).
-robotics_lab's own force stack (`mo_forcecontroller` experiments) stays
-untouched as reference until parity is verified.
+The legacy `submodules/mo_forcecontroller` tree was removed on 2026-08-16;
+historical force-experiment code lives in git history, and controller-manager's
+Admittance path is the sole forward direction.
 
 ## 8. Submodule update gate (SILS)
 

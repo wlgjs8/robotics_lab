@@ -10,6 +10,13 @@
 
 `robotics_lab`는 dual-arm RB3-730 시스템을 통합하기 위한 작업 공간입니다. 서보 제어, rbpodo 백엔드(실로봇 + 컨트롤러 `pgmode` 시뮬레이션), 카메라 캡처, `policy_runner`, 운영자 GUI를 함께 다룹니다.
 
+> **통합 제어기 스택 진행 중 (2026-08-16~)**: 회사 제어기
+> `submodules/controller-manager`(읽기 전용 서브모듈, 펌웨어 26071103에서
+> servo_j LPF-off + 큐 위상 조절)를 `cm_bridge/`가 프로세스 경계로 연결하는
+> 작업이 진행 중입니다. 전환기 동안 `rb_servo_server`는 기존대로 동작하며,
+> 설계와 단계 계획은 `cm_bridge/docs/design.md`를 보십시오.
+> `submodules/mo_forcecontroller`/`mo_grippers`는 2026-08-16 제거됐습니다.
+
 ## 현재 단계
 
 현재 프로젝트 단계는 **rbpodo pgmode-real 물리 로봇 브링업**입니다.

@@ -192,6 +192,7 @@ Use `docs/frame_contract.md` and `calibration/active_calibration.yaml` as the fr
 ## Development Rules
 
 - Work only on the assigned task.
+- Never commit inside `submodules/controller-manager` — it is a read-only, SHA-pinned submodule (company controller stack). Updates are pin bumps gated by the cm_bridge SILS test; fixes go upstream as PRs. See `submodules/README.md` and `cm_bridge/docs/design.md`.
 - Prefer small, reviewable changes.
 - Keep configs explicit about what they enable and what safety layer owns it.
 - Update tests, docs, and acceptance scripts together with behavior changes.
