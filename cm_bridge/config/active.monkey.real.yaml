@@ -1,24 +1,19 @@
-# cm_bridge REAL device file for the robotics_lab dual RB3-730E rig (P3 draft).
-# Generated 2026-08-16 from the monkey preset shell with:
-#   - MOUNTS REPLACED by robotics_lab's calibrated stand->arm-base transforms
-#     (stack_real.yaml base_pose_in_stand COMPOSED with the measured Rz(-90deg)
-#     CM-armbase<->URDF-link0 frame correction, live FK cross-check 2026-08-16;
-#     residual ~1-2mm). This DEFINES
-#     CM base_frame == robotics_lab stand, so the bridge state republish
-#     extrinsic is exactly identity (design.md D3 resolved).
-#     NOTE: the preset's own mounts describe the MONKEY cell (different
-#     machine, |t| differs by ~90 mm) — they must not be used on this rig.
-#   - ips: left=172.28.60.200 right=172.28.60.201 (stack_real.yaml).
-# STILL TODO before a real start (CM fails closed on both):
-#   - serial_number: fill from each arm's nameplate.
-#   - tool: currently none — REQUIRED to add a pika tool preset (TCP offset)
-#     before policy rollouts: FollowUnit integrates rotation deltas about the
-#     configured tool point; with tool none a wrist rotation about the wrong
-#     point displaces the real TCP by (offset x angle).
-#   - DH: nominal rb3-730es — verify the box's calibration adoption on first
-#     connect (RB3-730E vs ES lengths must FK-cross-check).
-# Install: cp to submodules/controller-manager/platforms/monkey/active.yaml
-# (gitignored device file; run_cm_stack.sh real will do this).
+# cm_bridge REAL device file — dual RB3-730 rig (P3, rev2 2026-08-16 night).
+# MOUNTS = the monkey preset's supply/CAD matrices, UNCHANGED. Rationale (A9
+# root cause): CM derives the arm gravity vector from these mounts and pushes
+# 'config mount' to the box EVERY boot; the preset rows reproduce the rig's
+# verified reference gravity exactly (Notion 양팔로봇 참조 중력 벡터:
+# L [0.5,-0.707,0.5], R [-0.5,-0.707,0.5]). The earlier rev replaced them with
+# robotics_lab stand-frame mounts — stand is NOT gravity-aligned, the box
+# stored a wrong mounting and UI activation failed Angle Sync (A9).
+# FRAME CONTRACT CHANGE: CM base_frame is now the supply/base frame, NOT the
+# robotics_lab stand. The bridge republishes CM-base poses as-is; command path
+# (deltas) and collision monitor (q) are frame-independent; policy proprio is
+# reset-relative. Absolute-frame consumers are flagged in design.md.
+# NOTE: stack_real stand mounts and the supply CAD disagree on RELATIVE arm
+# geometry (no common rigid transform, ~1.1m/168deg residual) — the stand
+# values are likely approximate; do not mix the two conventions.
+# TODO: real nameplate serials (current values are operator placeholders).
 # PRESET SHELL (schema 2, 0032 SS6b - not loaded directly): copy to the platform device file ->
 #   cp params-presets/dual-arm.yaml ../active.yaml   (platforms/monkey/active.yaml)
 # then FILL THE SHELL: ip/serial per arm, then calibrate. A blank ip refuses to boot.
@@ -65,11 +60,11 @@ arms:
                                  # shell"). env.sh's seed fills SILS loopback; real boxes need real IPs.
     serial_number: "RB3-730E-XXXXXX"            # DEVICE - fill from the arm's nameplate
     eft:  RFT64-6A01-A           # -> params-presets/efts/RFT64-6A01-A.yaml (nominal product values)
-    tool: pika                   # -> tools/pika.yaml (bind-mounted cm_bridge preset; ft identify required for force)
+    tool: pika                   # -> params-presets/tools/none.yaml (bare flange; name the taught tool here)
     transform:                   # base_frame -> left-arm mount (design-snapped inverse; +y side)
-      - [ -0.373966014173, -0.147591969221, +0.915623301836, +157.543405]
-      - [ +0.924642906690, +0.017317462528, +0.380441323464, -170.278101]
-      - [ -0.072006356323, +0.988896716606, +0.129993724987, +580.258619]
+      - [ -0.500000000000, -0.707106781187, -0.500000000000,  171.749256]
+      - [ -0.707106781187,  0.000000000000,  0.707106781187,  160.457378]
+      - [ -0.500000000000,  0.707106781187, -0.500000000000,  482.249744]
       - [  0.0,             0.0,             0.0,             1.0]
     # THE MACHINE'S DH - starts as the model's nominal (TODO_FILL upstream); the box's
     # calibration adoption + persist keep it current once real numbers exist.
@@ -90,9 +85,9 @@ arms:
     eft:  RFT64-6A01-A
     tool: pika
     transform:                   # base_frame -> right-arm mount (EXACT mirror of the left; -y side)
-      - [ +0.375093343841, -0.147358838672, -0.915199626350, -159.091702]
-      - [ +0.924006764868, -0.019669060083, +0.381869907893, -169.893950]
-      - [ -0.074273022590, -0.988887506616, +0.128782830279, +580.369768]
+      - [  0.500000000000, -0.707106781187, -0.500000000000,  171.749256]
+      - [ -0.707106781187,  0.000000000000, -0.707106781187, -160.457378]
+      - [  0.500000000000,  0.707106781187, -0.500000000000,  482.249744]
       - [  0.0,             0.0,             0.0,             1.0]
     dh_parameters:           # = the model's URDF-extracted nominal (FK-verified; see the model file)
       - { joint: 1, theta_offset:   0.0, d: 145.30, a:   0.00, alpha: -90.0 }
