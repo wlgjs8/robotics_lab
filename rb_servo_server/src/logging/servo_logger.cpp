@@ -530,7 +530,6 @@ void ServoLogger::writeHeader() {
     file_ << ",command_buffer_returned_seq,command_buffer_returned_left_mode,command_buffer_returned_right_mode,command_buffer_returned_host_time_ns,command_buffer_returned_age_ms,command_buffer_returned_client_send_age_ms";
     file_ << ",command_buffer_latest_seq,command_buffer_latest_left_mode,command_buffer_latest_right_mode,command_buffer_latest_host_time_ns,command_buffer_latest_age_ms,command_buffer_latest_timeout_ms,command_buffer_latest_timeout_valid,command_buffer_latest_usable,command_buffer_latest_client_send_age_ms";
     file_ << ",command_buffer_lifecycle_seq,command_buffer_lifecycle_left_mode,command_buffer_lifecycle_right_mode,command_buffer_lifecycle_host_time_ns,command_buffer_lifecycle_age_ms,command_buffer_lifecycle_timeout_ms,command_buffer_lifecycle_timeout_valid,command_buffer_lifecycle_usable";
-    file_ << ",command_buffer_external_boxes_pending,command_buffer_external_boxes_consumed,command_buffer_external_boxes_applied,command_buffer_external_boxes_seq,command_buffer_external_boxes_left_mode,command_buffer_external_boxes_right_mode,command_buffer_external_boxes_host_time_ns,command_buffer_external_boxes_age_ms,command_buffer_external_boxes_client_send_age_ms";
     file_ << ",chunk_frame_wire_seq,chunk_frame_recv_seq,chunk_frame_policy_dt_sec,chunk_frame_horizon,chunk_frame_execute_steps,chunk_frame_runway_steps,chunk_frame_age_ms,chunk_frame_interarrival_ms";
     file_ << ",chunk_inference_seq,chunk_inference_queue_wait_ms,chunk_inference_latency_ms,chunk_inference_ready_wait_ms,chunk_inference_period_ms,chunk_inference_period_jitter_ms,chunk_inference_stall_count";
     file_ << ",chunk_camera_bundle_seq,chunk_camera_bundle_age_ms,chunk_camera_max_skew_ms,chunk_camera_left_frame_number,chunk_camera_right_frame_number,chunk_camera_left_frame_age_ms,chunk_camera_right_frame_age_ms,chunk_camera_left_focus_score,chunk_camera_right_focus_score";
@@ -1151,15 +1150,6 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << sample.command_buffer_read.lifecycle_timeout_ms << ','
           << sample.command_buffer_read.lifecycle_timeout_valid << ','
           << sample.command_buffer_read.lifecycle_usable << ','
-          << sample.command_buffer_read.external_boxes_pending << ','
-          << sample.command_buffer_read.external_boxes_consumed << ','
-          << sample.command_buffer_read.external_boxes_applied << ','
-          << sample.command_buffer_read.external_boxes_seq << ','
-          << toString(sample.command_buffer_read.external_boxes_left_mode) << ','
-          << toString(sample.command_buffer_read.external_boxes_right_mode) << ','
-          << sample.command_buffer_read.external_boxes_host_time_ns << ','
-          << sample.command_buffer_read.external_boxes_age_ms << ','
-          << sample.command_buffer_read.external_boxes_client_send_age_ms << ','
           << sample.chunk_frame.wire_seq << ','
           << sample.chunk_frame.recv_seq << ','
           << sample.chunk_frame.policy_dt_sec << ','

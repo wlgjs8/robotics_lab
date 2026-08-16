@@ -244,9 +244,7 @@ private:
     bool commandRequestsSetSafetyFloorZ(const DualArmCommand& command) const;
     bool commandRequestsSetSafetyFloorEnabled(const DualArmCommand& command) const;
     bool commandRequestsSetSafetyRoiBounds(const DualArmCommand& command) const;
-    bool commandRequestsSetExternalBoxes(const DualArmCommand& command) const;
     bool commandRequestsSetUserSafetyFloorPlane(const DualArmCommand& command) const;
-    bool applySetExternalBoxesCommand(const DualArmCommand& command);
     bool commandRequestsEmergencyStop(const DualArmCommand& command) const;
     bool commandRequestsArmMotion(const DualArmCommand& command) const;
     bool commandRequestsDisarmMotion(const DualArmCommand& command) const;
@@ -526,19 +524,6 @@ private:
     // mode. last_collision_verdict_ caches the latest verdict for telemetry.
     std::unique_ptr<CollisionMonitor> collision_monitor_;
     CollisionMonitorConfig collision_monitor_cfg_{};
-    // External keep-out box feed liveness. When the boxes are ENFORCED
-    // (external_boxes.enable && !monitor_only) the keep-out is useless without a live
-    // producer feed (the box geometry stays parked/inert), and that loss is silent. To
-    // keep it diagnosable we FAIL CLOSED: if no fresh SetExternalBoxes feed arrives
-    // (producer never started, or it stopped), checkExternalBoxFeedOrAbort() aborts the
-    // process with a loud reason instead of running on without keep-out. Inert when the
-    // boxes are monitor_only or disabled (the current default config). Liveness itself
-    // is stamped at RECEIVE time on the CommandBuffer
-    // (CommandBuffer::lastExternalBoxReceiveNs), independent of the external-box side
-    // slot, so control-loop scheduling cannot hide a live producer or false-abort.
-    uint64_t external_box_enforce_start_ns_ = 0;    // first enforced tick (startup-grace anchor)
-    void checkExternalBoxFeedOrAbort(uint64_t now_ns);
-
     // Collision-free InitMotion planner + sequencer state (safety.init_motion_planner).
     // The planner owns a PRIVATE CollisionMonitor (incl. the ground plane) and is null
     // when the feature is disabled (then InitMotion falls back to a direct JointTarget).

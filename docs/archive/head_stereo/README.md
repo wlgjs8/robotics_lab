@@ -34,14 +34,16 @@ keep-out feed below.
 
 ## What was given up (read this before assuming nothing changed)
 
-**Automatic keep-out boxes are gone.** The tray keep-out boxes that
-`box_detect` published to `rb_servo_server`'s `CollisionMonitor` via
-`SetExternalBoxes` no longer have a producer. The server-side parser, the
-`source_id: "stereo_worker"` contract, and its tests all still exist and work —
-nothing feeds them. **If a real-motion procedure relied on those automatic
-boxes, that protection must be replaced with manually configured boxes or an
-operator procedure.** The server's own URDF-mesh self-collision guard, floor
-plane, tracking-error latch, and lease/deadman are unaffected.
+**Automatic keep-out boxes are gone** — but they were already switched off on
+real hardware well before this. `stack_real.yaml` set
+`external_boxes.enable: false` on 2026-07-10 because the box keep-out barrier's
+deceleration corrupted the policy's observed velocity; **F/T-sensor contact
+detection replaced it**. Only `stack_sim.yaml` still had it enabled.
+
+Removing the producer here left the server-side `SetExternalBoxes` path with no
+feed at all, so that whole feature was deleted too (see below). The server's own
+URDF-mesh self-collision guard, floor plane, tracking-error latch, and
+lease/deadman are unaffected, and remain the real-motion safety layers.
 
 Also gone: the head 3D point cloud in the viser scene, the `🎯 박스 재탐지`
 button and box lock telemetry, head/wrist cloud fusion, and Safety-ROI clipping
@@ -67,7 +69,11 @@ Submodule `submodules/Fast-FoundationStereo`; in `camera_server/stereo_worker/`:
 `localize_fp16.py`, `d435_ir_1280x720_K.txt`; `camera_server/config/`
 `d435_ir_640x480_K.txt` and `d435_color_calib.json`; the `tools/box_*.py`
 probes; the `camera_server/tests/test_box_*.py` and
-`test_external_boxes_sender.py` suites; `make cam-engine-rebuild`; the
+`test_external_boxes_sender.py` suites; the entire server-side `external_box`
+feature (the `SetExternalBoxes` ControlMode, its command parser and buffer side
+slot, `CollisionMonitor`'s box geometry/barrier/telemetry, the feed-liveness
+abort watchdog, the `external_boxes` config block, 3 `servo_state.v1` fields and
+9 CSV log columns, and `tools/sim_box_barrier.cpp`); `make cam-engine-rebuild`; the
 `dump_intrinsics_path` camera control (its only consumer was the FFS K.txt); and
 the CUDA/torch/TensorRT layers of `camera_server/Dockerfile`, which is now a
 plain `ubuntu:22.04` image.

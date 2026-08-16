@@ -15,7 +15,7 @@ from .geometry import (
     _pose_position,
     _pose_wxyz,
 )
-from .models import EXTERNAL_BOX_COLLISION_M, ChunkOverlaySnapshot, CircleOverlaySnapshot
+from .models import ChunkOverlaySnapshot, CircleOverlaySnapshot
 
 _ROBOT_JOINT_NAMES = (
     "base_joint",
@@ -1606,27 +1606,24 @@ def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) ->
     stand); a violated state without a recognizable pair falls back to all-red
     (conservative). pgmode real (physical_motion_expected=True): the ACTUAL
     robot (q_actual) turns red. pgmode simulation: the commanded ghost (q_sent)
-    turns red while the solid robot keeps showing the true (stationary) state.
-    External-box collision telemetry is per-box only in this first pass, so any
-    box collision turns both arms red."""
+    turns red while the solid robot keeps showing the true (stationary) state."""
     if not isinstance(scene_handles, dict):
         return
     sc = getattr(latest, "self_collision", None) if latest is not None else None
     violated = isinstance(sc, Mapping) and bool(sc.get("violated", False))
-    box_collision = _external_box_collision(sc)
     _update_self_collision_witness_markers(scene_handles, sc, violated)
     pair = sc.get("pair") if isinstance(sc, Mapping) else None
     if violated and pair not in ("left_right", "left_stand", "right_stand"):
         pair = "all"  # unknown/legacy pair info: keep the conservative all-red
-    left_red = box_collision or (violated and pair in ("left_right", "left_stand", "all"))
-    right_red = box_collision or (violated and pair in ("left_right", "right_stand", "all"))
+    left_red = violated and pair in ("left_right", "left_stand", "all")
+    right_red = violated and pair in ("left_right", "right_stand", "all")
     stand_red = violated and pair in ("left_stand", "right_stand", "all")
     physical_real = latest is not None and (
         getattr(latest.left, "physical_motion_expected", None) is True
         or getattr(latest.right, "physical_motion_expected", None) is True
     )
 
-    if violated or box_collision:
+    if violated:
         for key, arm_state, arm_red in (
             ("left_urdf_collision", latest.left, left_red),
             ("right_urdf_collision", latest.right, right_red),
@@ -1650,23 +1647,11 @@ def update_self_collision_overlay(scene_handles: dict[str, Any], latest: Any) ->
     # z-fighting at the identical configuration — per arm, only the red one.
     _set_visible(scene_handles.get("left_base"), not (left_red and physical_real))
     _set_visible(scene_handles.get("right_base"), not (right_red and physical_real))
-    if (violated or box_collision) and not physical_real:
+    if violated and not physical_real:
         if left_red:
             _set_visible(scene_handles.get("left_base_ref"), False)
         if right_red:
             _set_visible(scene_handles.get("right_base_ref"), False)
-
-
-def _external_box_collision(sc: Mapping[str, Any] | None) -> bool:
-    clearances = sc.get("external_box_clearance_m") if isinstance(sc, Mapping) else None
-    if not isinstance(clearances, (list, tuple)):
-        return False
-    return any(
-        isinstance(c, (int, float))
-        and math.isfinite(float(c))
-        and float(c) <= EXTERNAL_BOX_COLLISION_M
-        for c in clearances
-    )
 
 
 # Frame that maps the monitor's URDF-WORLD-frame self-collision geometry into the

@@ -55,10 +55,7 @@ bool isLifecycleCommand(const DualArmCommand& command) {
     return isLifecycleMode(command.left.mode) || isLifecycleMode(command.right.mode);
 }
 
-bool isExternalBoxesCommand(const DualArmCommand& command) {
-    return command.left.mode == ControlMode::SetExternalBoxes ||
-           command.right.mode == ControlMode::SetExternalBoxes;
-}
+
 
 bool isUsableCommand(const DualArmCommand& command, uint64_t now_ns) {
     if (!validTimeout(command.left.timeout_sec) || !validTimeout(command.right.timeout_sec)) {
@@ -118,27 +115,11 @@ void recordLifecycle(
     telemetry->lifecycle_usable = isUsableCommand(command, now_ns);
 }
 
-void recordExternalBoxes(
-    CommandBufferReadTelemetry* telemetry,
-    const DualArmCommand& command,
-    uint64_t now_ns
-) {
-    if (telemetry == nullptr) return;
-    telemetry->external_boxes_consumed = true;
-    telemetry->external_boxes_seq = command.seq;
-    telemetry->external_boxes_left_mode = command.left.mode;
-    telemetry->external_boxes_right_mode = command.right.mode;
-    telemetry->external_boxes_host_time_ns = command.host_time_ns;
-    telemetry->external_boxes_age_ms = commandAgeMs(command, now_ns);
-    telemetry->external_boxes_client_send_age_ms = clientSendAgeMs(command, now_ns);
-}
 }  // namespace
 
 void CommandBuffer::setCommand(const DualArmCommand& command) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (isExternalBoxesCommand(command)) {
-        pending_external_boxes_command_ = command;
-    } else if (isLifecycleCommand(command)) {
+    if (isLifecycleCommand(command)) {
         constexpr size_t kMaxPendingLifecycleCommands = 16;
         if (pending_lifecycle_commands_.size() >= kMaxPendingLifecycleCommands) {
             pending_lifecycle_commands_.pop_front();
@@ -164,15 +145,7 @@ void CommandBuffer::updateLease(const CommandSourceLeaseState& lease, uint64_t n
     latest_command_->lease = lease;
 }
 
-void CommandBuffer::noteExternalBoxReceived(uint64_t receive_time_ns) {
-    // Lock-free single-scalar publish from the receive thread; independent of the
-    // latest_command_ slot so a saturating motion stream cannot hide it.
-    last_external_box_receive_ns_.store(receive_time_ns, std::memory_order_relaxed);
-}
 
-uint64_t CommandBuffer::lastExternalBoxReceiveNs() const {
-    return last_external_box_receive_ns_.load(std::memory_order_relaxed);
-}
 
 DualArmCommand CommandBuffer::latestOrHold(
     uint64_t now_ns,
@@ -183,7 +156,6 @@ DualArmCommand CommandBuffer::latestOrHold(
         *telemetry = CommandBufferReadTelemetry{};
         telemetry->pending_lifecycle_count =
             static_cast<uint64_t>(pending_lifecycle_commands_.size());
-        telemetry->external_boxes_pending = pending_external_boxes_command_.has_value();
     }
     while (!pending_lifecycle_commands_.empty()) {
         DualArmCommand command = pending_lifecycle_commands_.front();
@@ -234,22 +206,6 @@ DualArmCommand CommandBuffer::latestOrHold(
     return cmd;
 }
 
-std::optional<DualArmCommand> CommandBuffer::consumeLatestExternalBoxes(
-    uint64_t now_ns,
-    CommandBufferReadTelemetry* telemetry
-) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (telemetry != nullptr) {
-        telemetry->external_boxes_pending =
-            telemetry->external_boxes_pending || pending_external_boxes_command_.has_value();
-    }
-    if (!pending_external_boxes_command_.has_value()) {
-        return std::nullopt;
-    }
-    DualArmCommand command = *pending_external_boxes_command_;
-    pending_external_boxes_command_.reset();
-    recordExternalBoxes(telemetry, command, now_ns);
-    return command;
-}
+
 
 }  // namespace rb_servo

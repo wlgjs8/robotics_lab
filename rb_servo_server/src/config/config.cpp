@@ -1256,41 +1256,6 @@ void validateConfig(const DualArmConfig& cfg) {
             throw std::runtime_error(
                 "safety.self_collision.mesh.intra_arm.d_slow_m must be >= d_hard_m");
         }
-        if (m.external_boxes.max_count < 0) {
-            throw std::runtime_error(
-                "safety.self_collision.mesh.external_boxes.max_count must be >= 0");
-        }
-        for (std::size_t i = 0; i < m.external_boxes.size_m.size(); ++i) {
-            validatePositiveFinite(
-                m.external_boxes.size_m[i],
-                "safety.self_collision.mesh.external_boxes.size_m[" + std::to_string(i) + "]");
-        }
-        for (std::size_t i = 0; i < m.external_boxes.margin_m.size(); ++i) {
-            validateNonNegativeFinite(
-                m.external_boxes.margin_m[i],
-                "safety.self_collision.mesh.external_boxes.margin_m[" + std::to_string(i) + "]");
-        }
-        validatePositiveFinite(
-            m.external_boxes.stale_timeout_s,
-            "safety.self_collision.mesh.external_boxes.stale_timeout_s");
-        if (m.external_boxes.stale_policy != "hold" &&
-            m.external_boxes.stale_policy != "disable") {
-            throw std::runtime_error(
-                "safety.self_collision.mesh.external_boxes.stale_policy must be 'hold' or 'disable'");
-        }
-        {
-            const auto& b = m.external_boxes.barrier;
-            validateNonNegativeFinite(b.d_hard_m, "safety.self_collision.mesh.external_boxes.barrier.d_hard_m");
-            validatePositiveFinite(b.d_slow_m, "safety.self_collision.mesh.external_boxes.barrier.d_slow_m");
-            validatePositiveFinite(b.a_brake_m_s2, "safety.self_collision.mesh.external_boxes.barrier.a_brake_m_s2");
-            validateNonNegativeFinite(b.hyst_m, "safety.self_collision.mesh.external_boxes.barrier.hyst_m");
-            validateNonNegativeFinite(b.recover_speed_m_s, "safety.self_collision.mesh.external_boxes.barrier.recover_speed_m_s");
-            validatePositiveFinite(b.latency_s, "safety.self_collision.mesh.external_boxes.barrier.latency_s");
-            if (b.d_slow_m < b.d_hard_m) {
-                throw std::runtime_error(
-                    "safety.self_collision.mesh.external_boxes.barrier.d_slow_m must be >= d_hard_m");
-            }
-        }
         if (m.d_slow_m < m.d_hard_m) {
             throw std::runtime_error(
                 "safety.self_collision.mesh.d_slow_m must be >= d_hard_m");
@@ -3193,8 +3158,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "ground_plane",
                     "external",
                     "intra_arm",
-                    "external_boxes",
-                }, "safety.self_collision.mesh");
+                            }, "safety.self_collision.mesh");
                 auto& mc = cfg.safety.self_collision.mesh;
                 if (has(m, "unified_urdf")) {
                     mc.unified_urdf = resolvePathForConfig(
@@ -3361,57 +3325,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     if (has(ia, "recover_speed_m_s")) x.recover_speed_m_s = asDouble(ia["recover_speed_m_s"], "safety.self_collision.mesh.intra_arm.recover_speed_m_s");
                     if (has(ia, "latency_s")) x.latency_s = asDouble(ia["latency_s"], "safety.self_collision.mesh.intra_arm.latency_s");
                 }
-                if (has(m, "external_boxes")) {
-                    const YAML::Node eb = m["external_boxes"];
-                    validateAllowedKeys(eb, {
-                        "enable", "max_count", "size_m", "margin_m", "monitor_only",
-                        "stale_timeout_s", "stale_policy", "barrier",
-                    }, "safety.self_collision.mesh.external_boxes");
-                    auto& x = mc.external_boxes;
-                    if (has(eb, "enable")) x.enable = asBool(eb["enable"], "safety.self_collision.mesh.external_boxes.enable");
-                    if (has(eb, "max_count")) x.max_count = asInt(eb["max_count"], "safety.self_collision.mesh.external_boxes.max_count");
-                    if (has(eb, "size_m")) {
-                        const YAML::Node sz = eb["size_m"];
-                        if (!sz.IsSequence() || sz.size() != 3) {
-                            fail("safety.self_collision.mesh.external_boxes.size_m must be 3 values [x, y, z]", sz);
                         }
-                        for (std::size_t i = 0; i < 3; ++i) {
-                            x.size_m[i] = asDouble(sz[i], "safety.self_collision.mesh.external_boxes.size_m");
-                        }
-                    }
-                    if (has(eb, "margin_m")) {
-                        const YAML::Node mg = eb["margin_m"];
-                        if (mg.IsSequence()) {
-                            if (mg.size() != 3) {
-                                fail("safety.self_collision.mesh.external_boxes.margin_m must be a scalar or 3 values [x, y, z]", mg);
-                            }
-                            for (std::size_t i = 0; i < 3; ++i) {
-                                x.margin_m[i] = asDouble(mg[i], "safety.self_collision.mesh.external_boxes.margin_m");
-                            }
-                        } else {
-                            const double v = asDouble(mg, "safety.self_collision.mesh.external_boxes.margin_m");
-                            x.margin_m = {v, v, v};
-                        }
-                    }
-                    if (has(eb, "monitor_only")) x.monitor_only = asBool(eb["monitor_only"], "safety.self_collision.mesh.external_boxes.monitor_only");
-                    if (has(eb, "stale_timeout_s")) x.stale_timeout_s = asDouble(eb["stale_timeout_s"], "safety.self_collision.mesh.external_boxes.stale_timeout_s");
-                    if (has(eb, "stale_policy")) x.stale_policy = asString(eb["stale_policy"], "safety.self_collision.mesh.external_boxes.stale_policy");
-                    if (has(eb, "barrier")) {
-                        const YAML::Node br = eb["barrier"];
-                        validateAllowedKeys(br, {
-                            "d_hard_m", "d_slow_m", "a_brake_m_s2", "hyst_m",
-                            "recover_speed_m_s", "latency_s",
-                        }, "safety.self_collision.mesh.external_boxes.barrier");
-                        auto& b = x.barrier;
-                        if (has(br, "d_hard_m")) b.d_hard_m = asDouble(br["d_hard_m"], "safety.self_collision.mesh.external_boxes.barrier.d_hard_m");
-                        if (has(br, "d_slow_m")) b.d_slow_m = asDouble(br["d_slow_m"], "safety.self_collision.mesh.external_boxes.barrier.d_slow_m");
-                        if (has(br, "a_brake_m_s2")) b.a_brake_m_s2 = asDouble(br["a_brake_m_s2"], "safety.self_collision.mesh.external_boxes.barrier.a_brake_m_s2");
-                        if (has(br, "hyst_m")) b.hyst_m = asDouble(br["hyst_m"], "safety.self_collision.mesh.external_boxes.barrier.hyst_m");
-                        if (has(br, "recover_speed_m_s")) b.recover_speed_m_s = asDouble(br["recover_speed_m_s"], "safety.self_collision.mesh.external_boxes.barrier.recover_speed_m_s");
-                        if (has(br, "latency_s")) b.latency_s = asDouble(br["latency_s"], "safety.self_collision.mesh.external_boxes.barrier.latency_s");
-                    }
-                }
-            }
         }
         if (has(sec, "floor_constraint")) {
             const YAML::Node fc = sec["floor_constraint"];

@@ -111,7 +111,6 @@ JointArray TrajectoryFilter::computeJointTarget(
         case ControlMode::ResetFault:
         case ControlMode::SetSafetyFloorZ:
         case ControlMode::SetSafetyRoiBounds:
-        case ControlMode::SetExternalBoxes:
             joint_smd_.deactivate();
             out = holdTarget(previous_sent_target);
             break;

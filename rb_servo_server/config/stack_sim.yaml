@@ -269,31 +269,6 @@ safety:
       # elbow/wrist can dip below it). Top face at z_m; kept == floor_constraint.z_min_m
       # so the two floors agree. The InitMotion planner avoids this box too. Raise z_m
       # to exercise whole-arm floor braking more aggressively in sim.
-      external_boxes:
-        enable: true
-        max_count: 2
-        size_m: [0.380, 0.240, 0.105]
-        margin_m: [0.000, 0.000, 0.020]   # per-axis [x,y,z] box-local; x,y=SIDE, z=HEIGHT.
-                                          # side 0mm + d_hard 5mm = ~5mm side keep-out;
-                                          # height 20mm + d_hard 5mm = ~25mm top/bottom keep-out.
-        monitor_only: true    # ENFORCE (real): velocity-damper decel/hold at the box surface
-        stale_timeout_s: 0.5
-        stale_policy: hold
-        # BOX-ONLY keep-out barrier (SEPARATE from the floor's `external:` set below).
-        # 2026-07-02 TIGHTER keep-out: shrunk from the wide 2026-07-01 zone now that
-        # box-position estimates are trusted closer — height margin 40→20mm, d_hard 10→5mm,
-        # d_slow 80→20mm. Slow-zone width d_slow−d_hard = 15mm still satisfies the invariant
-        # d_slow ≥ d_hard + v_max²/(2·a_brake): with a_brake=6, v_max(0.32–0.40) needs
-        # ≤18.3mm, so it still brakes the command ceiling (√(2·6·0.015)=0.42 m/s).
-        # TRADEOFF: this drops the extra teleop-overshoot margin the 80mm zone gave
-        # (that braked ~0.92 m/s); recover>0 still ejects if a fast approach penetrates.
-        barrier:
-          d_hard_m: 0.005          # hard floor (never cross); + margin 20mm = ~25mm from real box
-          d_slow_m: 0.045          # wider slow zone: softer approach to external boxes
-          a_brake_m_s2: 2.5        # softer braking reduces limit-cycle vibration near boundary
-          hyst_m: 0.010            # larger hysteresis suppresses brake/release toggling from noisy box estimates
-          recover_speed_m_s: 0.000 # avoid active push-out limit cycles; command away from boundary instead
-          latency_s: 0.015
       ground_plane:
         enable: true
         # z_m: 0.001             # startup/fallback top face (used until a floor drives it)

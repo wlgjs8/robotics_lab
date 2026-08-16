@@ -335,34 +335,6 @@ safety:
       #       size_m: [0.07, 0.10, 0.04], xyz_m: [0.0, 0.05, 0.05], rpy: [0,0,0] }
       #   - { name: work_table, shape: box, parent_frame: stand,
       #       size_m: [1.2, 0.8, 0.04], xyz_m: [0.0, -0.2, 0.0], rpy: [0,0,0] }
-      external_boxes:
-        # 2026-07-09 (ft branch): DISABLED — 박스 keep-out barrier 감속이 모델 관측
-        # velocity를 훼손함(FT 센서 접촉 감지로 대체). enable: false면 box-feed
-        # (SetExternalBoxes) startup 요구 + stale-feed watchdog도 함께 사라진다.
-        enable: false
-        max_count: 2
-        size_m: [0.380, 0.240, 0.105]
-        margin_m: [0.000, 0.000, 0.020]   # per-axis [x,y,z] box-local; x,y=SIDE, z=HEIGHT.
-                                          # side 0mm + d_hard 5mm = ~5mm side keep-out;
-                                          # height 20mm + d_hard 5mm = ~25mm top/bottom keep-out.
-        monitor_only: false    # ENFORCE (real): velocity-damper decel/hold at the box surface
-        stale_timeout_s: 0.5
-        stale_policy: hold
-        # BOX-ONLY keep-out barrier (SEPARATE from the floor's `external:` set below).
-        # 2026-07-02 TIGHTER keep-out: shrunk from the wide 2026-07-01 zone now that
-        # box-position estimates are trusted closer — height margin 40→20mm, d_hard 10→5mm,
-        # d_slow 80→20mm. Slow-zone width d_slow−d_hard = 15mm still satisfies the invariant
-        # d_slow ≥ d_hard + v_max²/(2·a_brake): with a_brake=6, v_max(0.32–0.40) needs
-        # ≤18.3mm, so it still brakes the command ceiling (√(2·6·0.015)=0.42 m/s).
-        # TRADEOFF: this drops the extra teleop-overshoot margin the 80mm zone gave
-        # (that braked ~0.92 m/s); recover>0 still ejects if a fast approach penetrates.
-        barrier:
-          d_hard_m: 0.005          # hard floor (never cross); + margin 20mm = ~25mm from real box
-          d_slow_m: 0.045          # wider slow zone: softer approach to external boxes
-          a_brake_m_s2: 2.5        # softer braking reduces limit-cycle vibration near boundary
-          hyst_m: 0.010            # larger hysteresis suppresses brake/release toggling from noisy box estimates
-          recover_speed_m_s: 0.000 # avoid active push-out limit cycles; command away from boundary instead
-          latency_s: 0.015
       # WHOLE-ARM floor: a large thin static box (world frame) so the SAME mesh
       # barrier that guards arm<->arm / arm<->stand also keeps EVERY arm link above
       # the floor (floor_constraint only checks the TCP + offset points, so an
@@ -1108,7 +1080,7 @@ cartesian_control:
         # accel/nf (accel clamp churning). Ease nf 2.5->2.0 and linear accel 2.8->2.0 to
         # stay in the controller's smooth-tracking envelope; KEEP the high velocity (top
         # speed is not the jerk source). Rotation raised conservatively again on
-        # 2026-07-07 after SetExternalBoxes no longer displaced teleop motion:
+        # 2026-07-07 after the box-feed side slot stopped displacing teleop motion:
         # logs showed smooth motion, no IK failures, but angular source/server
         # lead clamped at 0.20 rad and angular ff hit the 1.0 rad/s ceiling.
         # A later 0.30 rad / 1.2 rad/s run still hit rotation lead + velocity

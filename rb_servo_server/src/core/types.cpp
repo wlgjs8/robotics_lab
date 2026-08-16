@@ -32,7 +32,6 @@ std::string toString(ControlMode mode) {
         case ControlMode::SetSafetyFloorZ: return "SetSafetyFloorZ";
         case ControlMode::SetSafetyFloorEnabled: return "SetSafetyFloorEnabled";
         case ControlMode::SetSafetyRoiBounds: return "SetSafetyRoiBounds";
-        case ControlMode::SetExternalBoxes: return "SetExternalBoxes";
         case ControlMode::SetUserSafetyFloorPlane: return "SetUserSafetyFloorPlane";
         case ControlMode::Freedrive: return "Freedrive";
     }
@@ -138,7 +137,6 @@ ControlMode controlModeFromString(const std::string& mode) {
         return ControlMode::SetSafetyFloorEnabled;
     }
     if (m == "setsafetyroibounds" || m == "set_safety_roi_bounds") return ControlMode::SetSafetyRoiBounds;
-    if (m == "setexternalboxes" || m == "set_external_boxes") return ControlMode::SetExternalBoxes;
     if (m == "setusersafetyfloorplane" || m == "set_user_safety_floor_plane") {
         return ControlMode::SetUserSafetyFloorPlane;
     }

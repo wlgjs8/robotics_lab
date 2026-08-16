@@ -49,9 +49,7 @@ bool nameContainsAny(const std::string& name, const std::vector<std::string>& su
     return false;
 }
 
-bool nameStartsWith(const std::string& name, const std::string& prefix) {
-    return name.rfind(prefix, 0) == 0;
-}
+
 
 bool globMatch(const std::string& pattern, const std::string& text) {
     std::size_t p = 0;
@@ -131,20 +129,7 @@ bool collisionVerdictStale(const CollisionVerdict& v, double now_s, double max_s
     return (now_s - v.stamp_s) > max_staleness_s;
 }
 
-const char* externalBoxFeedAbortReason(bool feed_seen, double since_enforce_start_s,
-                                       double since_last_feed_s, double startup_grace_s,
-                                       double feed_timeout_s) {
-    if (!feed_seen) {
-        if (since_enforce_start_s > startup_grace_s) {
-            return "no SetExternalBoxes feed received since startup (producer not running?)";
-        }
-        return nullptr;  // still inside startup grace
-    }
-    if (since_last_feed_s > feed_timeout_s) {
-        return "SetExternalBoxes feed went stale (producer stopped sending)";
-    }
-    return nullptr;
-}
+
 
 double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
                               double verdict_age_s) {
@@ -179,28 +164,20 @@ void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitor
     if (!v.valid) return;
     const double age = std::max(0.0, verdict_age_s);
     for (const auto& p : v.near) {
-        // Per-category barrier set. A keep-out BOX gets its own set (WIDE slow zone so a
-        // fast teleop approach is braked before the hard floor — the floor's 5 mm slow
-        // zone stops only ~0.12 m/s and let teleop overshoot ~40 mm into the box). The
-        // floor (ground_plane, `external`) keeps the tight external_* set; intra-arm and
-        // arm<->arm/stand keep their own. Monitor-only boxes are reported but not enforced.
-        if (p.external_box && cfg.external_boxes.monitor_only) continue;
-        const double d_hard = p.external_box ? cfg.external_box_d_hard_m
-                            : p.external     ? cfg.external_d_hard_m
-                            : p.intra_arm    ? cfg.intra_arm_d_hard_m
-                                             : cfg.d_hard_m;
-        const double d_slow = p.external_box ? cfg.external_box_d_slow_m
-                            : p.external     ? cfg.external_d_slow_m
-                            : p.intra_arm    ? cfg.intra_arm_d_slow_m
-                                             : cfg.d_slow_m;
-        const double a_brake = p.external_box ? cfg.external_box_a_brake_m_s2
-                             : p.external     ? cfg.external_a_brake_m_s2
-                             : p.intra_arm    ? cfg.intra_arm_a_brake_m_s2
-                                              : cfg.a_brake_m_s2;
-        const double recover = p.external_box ? cfg.external_box_recover_speed_m_s
-                             : p.external     ? cfg.external_recover_speed_m_s
-                             : p.intra_arm    ? cfg.intra_arm_recover_speed_m_s
-                                              : cfg.recover_speed_m_s;
+        // Per-category barrier set. The floor (ground_plane, `external`) keeps the tight
+        // external_* set; intra-arm and arm<->arm/stand keep their own.
+        const double d_hard = p.external  ? cfg.external_d_hard_m
+                            : p.intra_arm ? cfg.intra_arm_d_hard_m
+                                          : cfg.d_hard_m;
+        const double d_slow = p.external  ? cfg.external_d_slow_m
+                            : p.intra_arm ? cfg.intra_arm_d_slow_m
+                                          : cfg.d_slow_m;
+        const double a_brake = p.external  ? cfg.external_a_brake_m_s2
+                             : p.intra_arm ? cfg.intra_arm_a_brake_m_s2
+                                           : cfg.a_brake_m_s2;
+        const double recover = p.external  ? cfg.external_recover_speed_m_s
+                             : p.intra_arm ? cfg.intra_arm_recover_speed_m_s
+                                           : cfg.recover_speed_m_s;
         const double closing = p.rate_m_s < 0.0 ? -p.rate_m_s : 0.0;
         const double d_now = p.d_m - closing * age;  // age-extrapolated clearance
         if (d_now >= d_slow) continue;
@@ -334,11 +311,9 @@ struct CollisionMonitor::Impl {
     // Runtime-controlled external boxes are preallocated once in the fixed
     // GeometryModel and parked when disabled/stale. The caller only updates poses;
     // all GeometryObject placement writes happen on the monitor thread.
-    std::vector<std::size_t> external_box_indices_;
     // per-collision-pair external flag (1 = arm<->external obstacle, e.g. ground_plane).
     std::vector<char> pair_external_;
     // per-collision-pair runtime external-box flag, distinct from ground_plane external.
-    std::vector<char> pair_external_box_;
     // per-collision-pair intra-arm flag (1 = same-arm non-adjacent link pair).
     std::vector<char> pair_intra_;
     std::vector<std::string> pair_category_;
@@ -385,9 +360,7 @@ struct CollisionMonitor::Impl {
     bool gp_enabled_ = false;      // guarded by in_mtx
     Eigen::Vector3d gp_point_ = Eigen::Vector3d::Zero();    // guarded by in_mtx
     Eigen::Vector3d gp_normal_ = Eigen::Vector3d::UnitZ();  // guarded by in_mtx
-    bool external_boxes_controlled_ = false;                // guarded by in_mtx
-    std::vector<ExternalBoxPose> external_box_poses_;       // guarded by in_mtx
-    double external_boxes_stamp_s_ = 0.0;                   // guarded by in_mtx
+
 
     // published verdict (lock-free read via atomic shared_ptr)
     std::shared_ptr<const CollisionVerdict> published;
@@ -421,9 +394,7 @@ struct CollisionMonitor::Impl {
         if (pair_external_.size() != geom.collisionPairs.size()) {
             pair_external_.assign(geom.collisionPairs.size(), 0);
         }
-        if (pair_external_box_.size() != geom.collisionPairs.size()) {
-            pair_external_box_.assign(geom.collisionPairs.size(), 0);
-        }
+
         if (pair_intra_.size() != geom.collisionPairs.size()) {
             pair_intra_.assign(geom.collisionPairs.size(), 0);
         }
@@ -467,14 +438,6 @@ struct CollisionMonitor::Impl {
         return o_M_stand_ * pinocchio::SE3(rot, center);
     }
 
-    // Runtime external boxes use center pose {R,t} in the same STAND frame accepted by
-    // setGroundPlanePose(). R is guaranteed orthonormal by the caller and is not
-    // reconditioned here.
-    pinocchio::SE3 externalBoxPlacement(bool enabled, const ExternalBoxPose& pose) const {
-        if (!enabled) return disabledObstaclePlacement();
-        return o_M_stand_ * pinocchio::SE3(pose.R, pose.t);
-    }
-
     // Apply the latest requested ground-plane pose to the geometry model (monitor
     // thread only, just before computeDistances). No-op until setGroundPlanePose ran.
     void applyGroundPlanePose() {
@@ -490,38 +453,6 @@ struct CollisionMonitor::Impl {
         }
         if (!controlled) return;
         geom.geometryObjects[gp_index_].placement = groundPlanePlacement(enabled, point, normal);
-    }
-
-    // Apply the latest external-box poses (monitor thread only, just before distance
-    // computation). Geometry is fixed; only placement changes. Stale "hold" keeps the
-    // last applied placements, while stale "disable" parks every preallocated slot.
-    void applyExternalBoxes() {
-        if (external_box_indices_.empty()) return;
-        bool controlled;
-        double stamp;
-        std::vector<ExternalBoxPose> poses;
-        {
-            std::lock_guard<std::mutex> lk(in_mtx);
-            controlled = external_boxes_controlled_;
-            stamp = external_boxes_stamp_s_;
-            poses = external_box_poses_;
-        }
-        if (!controlled) return;
-        const double now = nowMonotonicS();
-        if (now - stamp > cfg.external_boxes.stale_timeout_s) {
-            if (cfg.external_boxes.stale_policy == "disable") {
-                for (const std::size_t idx : external_box_indices_) {
-                    geom.geometryObjects[idx].placement = disabledObstaclePlacement();
-                }
-            }
-            return;
-        }
-        for (std::size_t k = 0; k < external_box_indices_.size(); ++k) {
-            const bool enabled = k < poses.size() && poses[k].enable;
-            const ExternalBoxPose pose = enabled ? poses[k] : ExternalBoxPose{};
-            geom.geometryObjects[external_box_indices_[k]].placement =
-                externalBoxPlacement(enabled, pose);
-        }
     }
 
     // Reposition each arm's two finger hulls along the local jaw axis (+X) for the live
@@ -727,33 +658,6 @@ struct CollisionMonitor::Impl {
             geom.addGeometryObject(pinocchio::GeometryObject(
                 e.name, fr.parentJoint, fid, fr.placement * local, shape));
         }
-        if (cfg.external_boxes.enable) {
-            if (cfg.external_boxes.max_count < 0) {
-                throw std::runtime_error("collision_monitor: external_boxes.max_count must be >= 0");
-            }
-            if (!model.existFrame(cfg.stand_frame)) {
-                throw std::runtime_error("collision_monitor: external_boxes stand_frame not found: " +
-                                         cfg.stand_frame);
-            }
-            const auto fid = model.getFrameId(cfg.stand_frame);
-            const auto& fr = model.frames[fid];
-            std::array<double, 3> dims{};
-            for (int i = 0; i < 3; ++i) {
-                dims[i] = cfg.external_boxes.size_m[i] + 2.0 * cfg.external_boxes.margin_m[i];
-                if (!std::isfinite(dims[i]) || dims[i] <= 0.0) {
-                    throw std::runtime_error(
-                        "collision_monitor: external_boxes inflated size must be finite and > 0");
-                }
-            }
-            external_box_indices_.reserve(static_cast<std::size_t>(cfg.external_boxes.max_count));
-            for (int k = 0; k < cfg.external_boxes.max_count; ++k) {
-                const std::string name = "external_box_" + std::to_string(k);
-                auto shape = std::make_shared<coal::Box>(dims[0], dims[1], dims[2]);
-                geom.addGeometryObject(pinocchio::GeometryObject(
-                    name, fr.parentJoint, fid, fr.placement * disabledObstaclePlacement(), shape));
-                external_box_indices_.push_back(geom.getGeometryId(name));
-            }
-        }
         curatePairs();
     }
 
@@ -771,7 +675,7 @@ struct CollisionMonitor::Impl {
     }
 
     void curatePairs() {
-        enum class PairCategory { LeftRight, ArmStand, IntraArm, External, ExternalBox };
+        enum class PairCategory { LeftRight, ArmStand, IntraArm, External };
         const auto sideString = [](Side side) {
             switch (side) {
                 case Side::Left: return "left";
@@ -786,7 +690,6 @@ struct CollisionMonitor::Impl {
                 case PairCategory::ArmStand: return "arm-stand";
                 case PairCategory::IntraArm: return "intra-arm";
                 case PairCategory::External: return "external";
-                case PairCategory::ExternalBox: return "external-box";
             }
             return "unknown";
         };
@@ -796,9 +699,7 @@ struct CollisionMonitor::Impl {
             // the self-collision threshold set.
             return geom.geometryObjects[i].name == "ground_plane";
         };
-        const auto isExternalBoxGeometry = [&](std::size_t i) {
-            return nameStartsWith(geom.geometryObjects[i].name, "external_box_");
-        };
+
         const auto parentFrameName = [&](std::size_t i) -> std::string {
             const auto fid = geom.geometryObjects[i].parentFrame;
             if (fid < model.frames.size()) return model.frames[fid].name;
@@ -848,13 +749,12 @@ struct CollisionMonitor::Impl {
         }
         geom.removeAllCollisionPairs();
         pair_external_.clear();
-        pair_external_box_.clear();
         pair_intra_.clear();
         pair_category_.clear();
         pair_left_.clear();
         pair_right_.clear();
         std::size_t n_lr = 0, n_arm_stand = 0, n_intra = 0, n_external = 0;
-        std::size_t n_external_box = 0, n_disabled = 0;
+        std::size_t n_disabled = 0;
         const auto tryAddPair = [&](std::size_t a, std::size_t b, PairCategory category) {
             if (const CollisionPairPattern* rule = disabledRule(a, b)) {
                 ++n_disabled;
@@ -870,7 +770,6 @@ struct CollisionMonitor::Impl {
             }
             geom.addCollisionPair(pinocchio::CollisionPair(a, b));
             pair_external_.push_back(category == PairCategory::External ? 1 : 0);
-            pair_external_box_.push_back(category == PairCategory::ExternalBox ? 1 : 0);
             pair_intra_.push_back(category == PairCategory::IntraArm ? 1 : 0);
             pair_category_.push_back(categoryString(category));
             const Side sa = classify(a);
@@ -882,7 +781,6 @@ struct CollisionMonitor::Impl {
                 case PairCategory::ArmStand: ++n_arm_stand; break;
                 case PairCategory::IntraArm: ++n_intra; break;
                 case PairCategory::External: ++n_external; break;
-                case PairCategory::ExternalBox: ++n_external_box; break;
             }
         };
         // left <-> right (whole arms)
@@ -892,15 +790,13 @@ struct CollisionMonitor::Impl {
         for (const auto& arm : {li, ri}) {
             for (auto a : arm) {
                 for (auto b : si) {
-                    const bool box = isExternalBoxGeometry(b);
-                    if (!box &&
-                        nameContainsAny(geom.geometryObjects[a].name,
+                    if (nameContainsAny(geom.geometryObjects[a].name,
                                         cfg.stand_ignore_arm_substrings)) {
                         continue;
                     }
                     const PairCategory category = isExternalGeometry(b)
                         ? PairCategory::External
-                        : (box ? PairCategory::ExternalBox : PairCategory::ArmStand);
+                        : PairCategory::ArmStand;
                     tryAddPair(a, b, category);
                 }
             }
@@ -925,7 +821,6 @@ struct CollisionMonitor::Impl {
                   << ") pairs=" << geom.collisionPairs.size()
                   << " [left-right=" << n_lr << " arm-stand=" << n_arm_stand
                   << " intra-arm=" << n_intra << " external=" << n_external
-                  << " external-box=" << n_external_box
                   << " disabled=" << n_disabled << "]"
                   << " disabled_collision_pairs=" << cfg.disabled_collision_pairs.size()
                   << " stand_ignore=[";
@@ -964,44 +859,17 @@ struct CollisionMonitor::Impl {
         double self_min = std::numeric_limits<double>::infinity();
         double intra_min = std::numeric_limits<double>::infinity();
         double ext_min = std::numeric_limits<double>::infinity();
-        double ext_box_min = std::numeric_limits<double>::infinity();
-        std::vector<double> ext_box_clearance(
-            external_box_indices_.size(), std::numeric_limits<double>::infinity());
         bool hard = false;
-        const bool enforce_external_boxes = !cfg.external_boxes.monitor_only;
         for (std::size_t k = 0; k < np; ++k) {
             const double d = gdata.distanceResults[k].min_distance;
             cur[k] = d;
             const bool ext = k < pair_external_.size() && pair_external_[k];
-            const bool ext_box = k < pair_external_box_.size() && pair_external_box_[k];
             const bool intra = k < pair_intra_.size() && pair_intra_[k];
-            if (ext_box) {
-                if (d < ext_box_min) ext_box_min = d;
-                const auto& cp = geom.collisionPairs[k];
-                auto it = std::find(external_box_indices_.begin(),
-                                    external_box_indices_.end(),
-                                    static_cast<std::size_t>(cp.first));
-                if (it == external_box_indices_.end()) {
-                    it = std::find(external_box_indices_.begin(),
-                                   external_box_indices_.end(),
-                                   static_cast<std::size_t>(cp.second));
-                }
-                if (it != external_box_indices_.end()) {
-                    const std::size_t slot = static_cast<std::size_t>(
-                        std::distance(external_box_indices_.begin(), it));
-                    if (d < ext_box_clearance[slot]) ext_box_clearance[slot] = d;
-                }
-            }
-            if (ext_box && !enforce_external_boxes) {
-                continue;
-            }
             ds.emplace_back(d, k);
             if (d < dmin) { dmin = d; kmin = k; }
             if (ext) {
                 if (d < ext_min) ext_min = d;
                 if (d < cfg.external_d_hard_m) hard = true;
-            } else if (ext_box) {
-                if (d < cfg.external_box_d_hard_m) hard = true;
             } else if (intra) {
                 if (d < intra_min) intra_min = d;
                 if (d < cfg.intra_arm_d_hard_m) hard = true;
@@ -1014,8 +882,6 @@ struct CollisionMonitor::Impl {
         v.self_min_clearance_m = self_min;
         v.intra_arm_min_clearance_m = intra_min;
         v.external_min_clearance_m = ext_min;
-        v.external_box_min_clearance_m = ext_box_min;
-        v.external_box_clearance_m = std::move(ext_box_clearance);
         v.hard_violation = hard;
         const std::size_t K = std::min<std::size_t>(cfg.max_near_pairs, ds.size());
         std::partial_sort(ds.begin(), ds.begin() + K, ds.end(),
@@ -1057,7 +923,6 @@ struct CollisionMonitor::Impl {
             p.name_a = geom.geometryObjects[cp.first].name;
             p.name_b = geom.geometryObjects[cp.second].name;
             p.external = k < pair_external_.size() && pair_external_[k];
-            p.external_box = k < pair_external_box_.size() && pair_external_box_[k];
             p.intra_arm = k < pair_intra_.size() && pair_intra_[k];
             // d_dot = n^T (v_b - v_a) = J_n * qdot. Slice into command left/right cols.
             const pinocchio::JointIndex ja = geom.geometryObjects[cp.first].parentJoint;
@@ -1089,7 +954,6 @@ struct CollisionMonitor::Impl {
     CollisionVerdict evalLocked(const JointArray& l, const JointArray& r) {
         setQ(l, r);  // writes the target config into q
         applyGroundPlanePose();  // track the operator's active floor (if controlled)
-        applyExternalBoxes();    // track camera-provided keep-out boxes (if controlled)
         applyGripperFingers();   // track the live jaw open percent (articulated gripper)
         const int N = std::max(1, cfg.swept_samples);
         Eigen::VectorXd q_eval = q;  // configuration gdata ends up at (for J_n)
@@ -1132,9 +996,7 @@ struct CollisionMonitor::Impl {
             if (!pairActive(k, include_left, include_right)) continue;
             const double d = gdata.distanceResults[k].min_distance;
             const bool ext = k < pair_external_.size() && pair_external_[k];
-            const bool ext_box = k < pair_external_box_.size() && pair_external_box_[k];
             const bool intra = k < pair_intra_.size() && pair_intra_[k];
-            if (ext_box && cfg.external_boxes.monitor_only) continue;
             if (d < s.min_clearance_m) {
                 s.min_clearance_m = d;
                 s.nearest_distance_m = d;
@@ -1152,8 +1014,6 @@ struct CollisionMonitor::Impl {
             if (ext) {
                 if (d < s.external_min_clearance_m) s.external_min_clearance_m = d;
                 if (d < cfg.external_d_hard_m) s.hard_violation = true;
-            } else if (ext_box) {
-                if (d < cfg.external_box_d_hard_m) s.hard_violation = true;
             } else if (intra) {
                 if (d < s.intra_arm_min_clearance_m) s.intra_arm_min_clearance_m = d;
                 if (d < cfg.intra_arm_d_hard_m) s.hard_violation = true;
@@ -1171,7 +1031,6 @@ struct CollisionMonitor::Impl {
                                                bool include_right = true) {
         setQ(l, r);
         applyGroundPlanePose();
-        applyExternalBoxes();
         applyGripperFingers();
         pinocchio::computeDistances(model, data, geom, gdata, q);
         return summarizeCurrentDistances(include_left, include_right);
@@ -1187,7 +1046,6 @@ struct CollisionMonitor::Impl {
         }
         setQ(l, r);
         applyGroundPlanePose();
-        applyExternalBoxes();
         applyGripperFingers();
         pinocchio::updateGeometryPlacements(model, data, geom, gdata, q);
         const std::size_t np = geom.collisionPairs.size();
@@ -1204,14 +1062,11 @@ struct CollisionMonitor::Impl {
             const double d = res.min_distance;
             if (!std::isfinite(d)) return false;
             const bool ext = k < pair_external_.size() && pair_external_[k];
-            const bool ext_box = k < pair_external_box_.size() && pair_external_box_[k];
             const bool intra = k < pair_intra_.size() && pair_intra_[k];
-            if (ext_box && cfg.external_boxes.monitor_only) continue;
             const double threshold =
-                  ext_box ? std::max(external_thresh_m, cfg.external_box_d_hard_m)
-                : ext     ? std::max(external_thresh_m, cfg.external_d_hard_m)
-                : intra   ? std::max(intra_arm_thresh_m, cfg.intra_arm_d_hard_m)
-                          : std::max(self_thresh_m, cfg.d_hard_m);
+                  ext   ? std::max(external_thresh_m, cfg.external_d_hard_m)
+                : intra ? std::max(intra_arm_thresh_m, cfg.intra_arm_d_hard_m)
+                        : std::max(self_thresh_m, cfg.d_hard_m);
             if (d <= threshold) return false;
         }
         return true;
@@ -1278,14 +1133,6 @@ void CollisionMonitor::setGroundPlanePose(bool enabled, const Eigen::Vector3d& p
     impl_->gp_enabled_ = enabled;
     impl_->gp_point_ = point;
     impl_->gp_normal_ = normal;
-}
-
-void CollisionMonitor::setExternalBoxes(const std::vector<ExternalBoxPose>& boxes,
-                                        double stamp_monotonic_s) {
-    std::lock_guard<std::mutex> lk(impl_->in_mtx);
-    impl_->external_boxes_controlled_ = true;
-    impl_->external_box_poses_ = boxes;
-    impl_->external_boxes_stamp_s_ = stamp_monotonic_s;
 }
 
 bool CollisionMonitor::hasGroundPlane() const {

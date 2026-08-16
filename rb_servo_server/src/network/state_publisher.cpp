@@ -1844,21 +1844,6 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         } else {
             self_collision["min_clearance_m"] = nullptr;
         }
-        if (std::isfinite(snapshot.self_collision_external_box_min_clearance_m)) {
-            self_collision["external_box_min_clearance_m"] =
-                snapshot.self_collision_external_box_min_clearance_m;
-        } else {
-            self_collision["external_box_min_clearance_m"] = nullptr;
-        }
-        {
-            nlohmann::json arr = nlohmann::json::array();
-            for (const double clearance : snapshot.self_collision_external_box_clearance_m) {
-                arr.push_back(std::isfinite(clearance)
-                    ? nlohmann::json(clearance)
-                    : nlohmann::json(nullptr));
-            }
-            self_collision["external_box_clearance_m"] = std::move(arr);
-        }
         self_collision["left_bone"] = snapshot.self_collision_left_bone;
         self_collision["right_bone"] = snapshot.self_collision_right_bone;
         self_collision["pair"] = snapshot.self_collision_pair.empty()
@@ -1889,7 +1874,6 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
                 entry["p_b_m"] = p.p_b_m;
                 entry["clearance_m"] = p.clearance_m;
                 entry["external"] = p.external;
-                entry["external_box"] = p.external_box;
                 arr.push_back(std::move(entry));
             }
             self_collision["near_pairs"] = std::move(arr);

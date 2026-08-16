@@ -143,40 +143,6 @@ struct CollisionMonitorConfig {
     double intra_arm_hyst_m = 0.005;
     double intra_arm_recover_speed_m_s = 0.0;
     double intra_arm_latency_s = 0.010;
-
-    // ---- EXTERNAL-BOX keep-out velocity-barrier params ----
-    // Applied ONLY to arm<->runtime-external-box pairs (the detected NTC-321 keep-out
-    // boxes). Kept SEPARATE from the floor's external_* set above: a box is a keep-out the
-    // operator drives TOWARD at teleop speed, so the slow zone must be WIDE enough to brake
-    // the fastest approach before the hard floor. The stoppable approach speed is
-    // sqrt(2*a_brake*(d_slow - d_hard)); the floor's 5 mm slow zone stops only ~0.12 m/s,
-    // but SpaceMouse teleop reaches ~0.8 m/s and overshot ~40 mm INTO the box. These
-    // defaults stop ~0.9 m/s (sqrt(2*6*(0.080-0.010))) and actively eject on penetration.
-    double external_box_d_hard_m = 0.010;
-    double external_box_d_slow_m = 0.080;
-    double external_box_a_brake_m_s2 = 6.0;
-    double external_box_hyst_m = 0.010;
-    double external_box_recover_speed_m_s = 0.030;  // >0: push back out if it does penetrate
-    double external_box_latency_s = 0.010;
-
-    struct ExternalBoxesConfig {
-        bool enable = false;
-        int max_count = 2;
-        std::array<double, 3> size_m{0.380, 0.240, 0.105};  // NTC-321 outer extents
-        std::array<double, 3> margin_m{0.025, 0.025, 0.025};  // per-axis [x,y,z] box-local inflation; index 2 = height
-        bool monitor_only = true;
-        double stale_timeout_s = 0.5;
-        std::string stale_policy = "hold";  // "hold" | "disable"
-    };
-    ExternalBoxesConfig external_boxes;
-};
-
-struct ExternalBoxPose {
-    bool enable = false;
-    // Caller guarantees R is orthonormal; CollisionMonitor stores and applies it as-is.
-    Eigen::Matrix3d R = Eigen::Matrix3d::Identity();
-    // Box center in the same stand frame used by setGroundPlanePose's `point`.
-    Eigen::Vector3d t = Eigen::Vector3d::Zero();
 };
 
 // One reported near pair (witness points + approach direction in stand frame).
@@ -192,9 +158,6 @@ struct CollisionNearPair {
     // True if this is an arm<->EXTERNAL-obstacle pair (the floor / ground_plane), which
     // uses the external_* barrier params (smaller d_hard) instead of the self set.
     bool external = false;
-    // True for arm<->runtime external box pairs. Kept distinct from `external`
-    // so ground-plane semantics and telemetry remain unchanged.
-    bool external_box = false;
     // True for same-arm non-adjacent link pairs. These use intra_arm_* barrier
     // params instead of the arm<->arm / arm<->stand self set.
     bool intra_arm = false;
@@ -221,10 +184,6 @@ struct CollisionVerdict {
     double self_min_clearance_m = std::numeric_limits<double>::infinity();
     double intra_arm_min_clearance_m = std::numeric_limits<double>::infinity();
     double external_min_clearance_m = std::numeric_limits<double>::infinity();
-    double external_box_min_clearance_m = std::numeric_limits<double>::infinity();
-    // Per preallocated external box slot (slot 0=green, slot 1=gray).
-    // +inf means no finite/active pair for that slot.
-    std::vector<double> external_box_clearance_m;
     // Signed rate of the CURRENTLY-critical (global-min) pair's clearance, tracked
     // per-pair so a switch of which pair is closest does not corrupt it.
     // + = separating, - = approaching.
@@ -324,19 +283,6 @@ bool collisionPairPatternMatches(const CollisionPairPattern& rule,
                                  const std::string& name_a,
                                  const std::string& name_b);
 
-// Fail-closed liveness decision for an ENFORCED external-box keep-out feed. Pure (all
-// times in seconds) so it is unit-testable. Returns a human-readable abort reason, or
-// nullptr if the feed is acceptable. Semantics:
-//   - feed never seen: acceptable only within the startup grace (producer may be coming
-//     up); past the grace -> abort (producer not running).
-//   - feed seen before: acceptable only if the last feed is within feed_timeout_s;
-//     a larger gap -> abort (producer stopped). Generous vs a normal multi-Hz feed so a
-//     transient blip never false-aborts.
-// Caller applies this ONLY when the boxes are enforced (enable && !monitor_only).
-const char* externalBoxFeedAbortReason(bool feed_seen, double since_enforce_start_s,
-                                       double since_last_feed_s, double startup_grace_s,
-                                       double feed_timeout_s);
-
 // Owns the geometry model + the monitor thread + the published verdict.
 class CollisionMonitor {
 public:
@@ -361,12 +307,6 @@ public:
     // Safe to call from servo_j. `normal` must be (near) unit and is used as-is.
     void setGroundPlanePose(bool enabled, const Eigen::Vector3d& point,
                             const Eigen::Vector3d& normal);
-
-    // Runtime update for preallocated external keep-out boxes. Cheap
-    // mutex-guarded store; the monitor thread applies placements before its next
-    // distance eval. No-op if external_boxes.enable=false at construction.
-    void setExternalBoxes(const std::vector<ExternalBoxPose>& boxes,
-                          double stamp_monotonic_s);
 
     // True if the model contains a "ground_plane" geometry (i.e. it can be tracked).
     bool hasGroundPlane() const;

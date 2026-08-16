@@ -3790,20 +3790,6 @@ DualArmServoLoop::DualArmServoLoop(
             inherit(m.intra_arm.recover_speed_m_s, m.recover_speed_m_s);
         collision_monitor_cfg_.intra_arm_latency_s =
             inherit(m.intra_arm.latency_s, m.latency_s);
-        collision_monitor_cfg_.external_boxes.enable = m.external_boxes.enable;
-        collision_monitor_cfg_.external_boxes.max_count = m.external_boxes.max_count;
-        collision_monitor_cfg_.external_boxes.size_m = m.external_boxes.size_m;
-        collision_monitor_cfg_.external_boxes.margin_m = m.external_boxes.margin_m;
-        collision_monitor_cfg_.external_boxes.monitor_only = m.external_boxes.monitor_only;
-        collision_monitor_cfg_.external_boxes.stale_timeout_s = m.external_boxes.stale_timeout_s;
-        collision_monitor_cfg_.external_boxes.stale_policy = m.external_boxes.stale_policy;
-        // Box-only keep-out barrier set (separate from the floor's external_* above).
-        collision_monitor_cfg_.external_box_d_hard_m = m.external_boxes.barrier.d_hard_m;
-        collision_monitor_cfg_.external_box_d_slow_m = m.external_boxes.barrier.d_slow_m;
-        collision_monitor_cfg_.external_box_a_brake_m_s2 = m.external_boxes.barrier.a_brake_m_s2;
-        collision_monitor_cfg_.external_box_hyst_m = m.external_boxes.barrier.hyst_m;
-        collision_monitor_cfg_.external_box_recover_speed_m_s = m.external_boxes.barrier.recover_speed_m_s;
-        collision_monitor_cfg_.external_box_latency_s = m.external_boxes.barrier.latency_s;
         collision_monitor_cfg_.extra_collision.clear();
         for (const auto& e : m.extra_collision) {
             ExtraCollisionShape s;
@@ -4145,43 +4131,6 @@ bool DualArmServoLoop::initializeWorkers() {
     return false;
 }
 
-void DualArmServoLoop::checkExternalBoxFeedOrAbort(uint64_t now_ns) {
-    // Only when external-box keep-out is ENFORCED. When monitor_only (the default) or
-    // disabled, a missing feed is expected/harmless, so this is a no-op.
-    if (!collision_monitor_ || !collision_monitor_cfg_.external_boxes.enable ||
-        collision_monitor_cfg_.external_boxes.monitor_only) {
-        return;
-    }
-    if (external_box_enforce_start_ns_ == 0) external_box_enforce_start_ns_ = now_ns;
-    // Liveness is measured at RECEIVE time (network thread stamps every accepted
-    // SetExternalBoxes packet on the CommandBuffer), NOT at apply time. The payload
-    // is consumed from an external-box side slot so it cannot displace the high-rate
-    // motion stream; the receive stamp still catches a genuinely dead/stopped producer.
-    // Startup grace lets the producer come up; after the first feed, a gap beyond
-    // the timeout means it stopped. Decision is in the pure (tested) helper.
-    constexpr double kStartupGraceS = 10.0;
-    constexpr double kFeedTimeoutS = 3.0;
-    const uint64_t last_receive_ns =
-        command_buffer_ ? command_buffer_->lastExternalBoxReceiveNs() : 0;
-    const bool feed_seen = last_receive_ns != 0;
-    const double since_last_feed_s =
-        feed_seen ? nsToSec(now_ns - last_receive_ns) : 0.0;
-    const char* reason = externalBoxFeedAbortReason(
-        feed_seen, nsToSec(now_ns - external_box_enforce_start_ns_),
-        since_last_feed_s, kStartupGraceS, kFeedTimeoutS);
-    if (!reason) return;
-    std::cerr << "\n[FATAL][collision_monitor] external-box keep-out is ENFORCED"
-                 " (external_boxes.enable=true, monitor_only=false) but " << reason << ".\n"
-                 "Refusing to run on without keep-out (fail-closed). Resolve one of:\n"
-                 "  - start the box producer so SetExternalBoxes is sent to the command port"
-                 " (camera/stereo with STEREO_SEND_EXTERNAL_BOXES=1), or\n"
-                 "  - set safety.self_collision.mesh.external_boxes.monitor_only: true"
-                 " (report-only), or\n"
-                 "  - set external_boxes.enable: false to disable the feature.\n"
-                 "Aborting." << std::endl;
-    std::abort();
-}
-
 void DualArmServoLoop::loopMain() {
     if (!configureRealtimeForLoop()) {
         startup_ok_ = false;
@@ -4314,10 +4263,6 @@ void DualArmServoLoop::loopMain() {
             }
             pending_top_send.valid = false;
         }
-        // Fail-closed: if external-box keep-out is enforced but the producer feed is
-        // missing/stale, abort instead of silently running without keep-out (no-op when
-        // monitor_only/disabled — the default config).
-        checkExternalBoxFeedOrAbort(loop_start);
         bool async_supervision_degraded_this_tick = false;
         bool async_supervision_degraded_warned_this_tick = false;
         tracking_error_degraded_this_tick_ = false;
@@ -4564,14 +4509,6 @@ void DualArmServoLoop::loopMain() {
         if (isSyntheticHoldCommand(command)) {
             command = metadata_hold(command);
         }
-        if (command_buffer_) {
-            std::optional<DualArmCommand> external_boxes_command =
-                command_buffer_->consumeLatestExternalBoxes(loop_start, &command_buffer_read);
-            if (external_boxes_command.has_value()) {
-                command_buffer_read.external_boxes_applied =
-                    applySetExternalBoxesCommand(*external_boxes_command);
-            }
-        }
         const bool read_only_command_blocked = readOnlyMode() && commandBlockedByReadOnly(command);
 
         if (read_only_command_blocked) {
@@ -4692,9 +4629,6 @@ void DualArmServoLoop::loopMain() {
                               << "] m by source_id=" << command.source.source_id << "\n";
                 }
             }
-            command = metadata_hold(command);
-        } else if (commandRequestsSetExternalBoxes(command)) {
-            (void)applySetExternalBoxesCommand(command);
             command = metadata_hold(command);
         } else if (commandRequestsSetUserSafetyFloorPlane(command)) {
             // Leaseless runtime set/enable of the user-defined tilted floor plane.
@@ -5380,10 +5314,6 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.self_collision_checked = last_self_collision_.checked;
             latest_snapshot_.self_collision_violated = last_self_collision_.violated;
             latest_snapshot_.self_collision_min_clearance_m = last_self_collision_.min_clearance_m;
-            latest_snapshot_.self_collision_external_box_min_clearance_m =
-                last_collision_verdict_.external_box_min_clearance_m;
-            latest_snapshot_.self_collision_external_box_clearance_m =
-                last_collision_verdict_.external_box_clearance_m;
             // Telemetry "margin" is the hard floor the mesh barrier defends.
             latest_snapshot_.self_collision_margin_m = config_.safety.self_collision.mesh.d_hard_m;
             latest_snapshot_.self_collision_left_bone = last_self_collision_.left_bone;
@@ -5415,7 +5345,7 @@ void DualArmServoLoop::loopMain() {
                         p.name_a, p.name_b,
                         {p.p_a.x(), p.p_a.y(), p.p_a.z()},
                         {p.p_b.x(), p.p_b.y(), p.p_b.z()},
-                        p.d_m, p.external, p.external_box});
+                        p.d_m, p.external});
                 }
             }
             {
@@ -9029,76 +8959,6 @@ bool DualArmServoLoop::commandRequestsSetSafetyFloorEnabled(const DualArmCommand
 bool DualArmServoLoop::commandRequestsSetSafetyRoiBounds(const DualArmCommand& command) const {
     return command.left.mode == ControlMode::SetSafetyRoiBounds ||
            command.right.mode == ControlMode::SetSafetyRoiBounds;
-}
-
-bool DualArmServoLoop::commandRequestsSetExternalBoxes(const DualArmCommand& command) const {
-    return command.left.mode == ControlMode::SetExternalBoxes ||
-           command.right.mode == ControlMode::SetExternalBoxes;
-}
-
-bool DualArmServoLoop::applySetExternalBoxesCommand(const DualArmCommand& command) {
-    // Leaseless runtime update of preallocated external keep-out boxes.
-    // No-op unless the mesh CollisionMonitor was built with external boxes.
-    if (!command.has_external_boxes) {
-        std::cerr << "[WARN] SetExternalBoxes rejected: missing boxes payload\n";
-        return false;
-    }
-    if (!collision_monitor_ || !collision_monitor_cfg_.external_boxes.enable) {
-        std::cerr << "[DEBUG] SetExternalBoxes ignored: external boxes disabled or monitor absent\n";
-        return false;
-    }
-
-    const int max_count = collision_monitor_cfg_.external_boxes.max_count;
-    std::vector<ExternalBoxPose> poses(static_cast<std::size_t>(std::max(0, max_count)));
-    int accepted = 0;
-    int ignored_unknown = 0;
-    int ignored_out_of_range = 0;
-    int ignored_invalid_rotation = 0;
-    for (const auto& box : command.external_boxes) {
-        int slot = -1;
-        if (box.label == "green") {
-            slot = 0;
-        } else if (box.label == "gray") {
-            slot = 1;
-        } else {
-            ++ignored_unknown;
-            continue;
-        }
-        if (slot < 0 || slot >= max_count) {
-            ++ignored_out_of_range;
-            continue;
-        }
-
-        Eigen::Matrix3d R;
-        Eigen::Vector3d t;
-        for (int row = 0; row < 3; ++row) {
-            for (int col = 0; col < 3; ++col) {
-                R(row, col) = box.T_stand_box[static_cast<std::size_t>(row * 4 + col)];
-            }
-            t(row) = box.T_stand_box[static_cast<std::size_t>(row * 4 + 3)];
-        }
-        Eigen::Quaterniond q(R);
-        const double q_norm = q.norm();
-        if (!std::isfinite(q_norm) || q_norm <= 0.0) {
-            ++ignored_invalid_rotation;
-            continue;
-        }
-        q.normalize();
-        ExternalBoxPose pose;
-        pose.enable = box.enable;
-        pose.R = q.toRotationMatrix();
-        pose.t = t;
-        poses[static_cast<std::size_t>(slot)] = pose;
-        ++accepted;
-    }
-    const double stamp_s = nsToSec(nowSteadyNs());
-    collision_monitor_->setExternalBoxes(poses, stamp_s);
-    std::cerr << "[DEBUG] SetExternalBoxes applied " << accepted
-              << " box(es), ignored_unknown=" << ignored_unknown
-              << " ignored_out_of_range=" << ignored_out_of_range
-              << " ignored_invalid_rotation=" << ignored_invalid_rotation
-              << " by source_id=" << command.source.source_id << "\n";
-    return true;
 }
 
 bool DualArmServoLoop::commandRequestsSetUserSafetyFloorPlane(const DualArmCommand& command) const {

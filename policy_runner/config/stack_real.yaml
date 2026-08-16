@@ -152,7 +152,7 @@ umi_dual_cartesian:
     # so this mainly removes the position lead the operator perceives as follow latency.
     # max_target_lead_m: 0.012
     # 2026-07-07: 0.20->0.30->0.40 rad for UMI right-arm rotation following. The
-    # post-SetExternalBoxes-slot run was smooth, but rpy lead was still clamped
+    # follow-up run was smooth, but rpy lead was still clamped
     # at 0.30 rad while the operator input reached ~0.38 rad; keep linear lead
     # unchanged because linear tracking felt good.
     max_target_lead_m: 0.050
