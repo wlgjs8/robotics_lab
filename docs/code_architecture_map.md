@@ -48,7 +48,7 @@ Verified by reading source under `rb_servo_server/`, `rb_gui/`, `policy_runner/`
 
 In the **real** topology the per-arm backend is the `rbpodo` backend talking to real controllers at `172.28.60.200` (left) / `172.28.60.201` (right). Hardware-free runs use `MockBackend`.
 
-The `rbpodo` backend also serves **controller (`pgmode`) simulation** (`run_mode: real`, `operation_mode: simulation`), pointed either at a Virtual ControlBox VM or a physical box held in `pgmode` — the same code path, distinguished only by deployment target. See the "Simulation flavors" table in `docs/architecture.md`. (The former hardware-free software-simulator flavor was removed.)
+The `rbpodo` backend also serves **controller (`pgmode`) simulation** (`run_mode: real`, `operation_mode: simulation`), pointed at a physical box held in `pgmode` — the same code path and the same addresses as real. See the "Simulation flavors" table in `docs/architecture.md`. (The former hardware-free software-simulator flavor was removed, as was the Rainbow Virtual ControlBox VM lane on 2026-08-16 — `docs/archive/vm_lane/README.md`.)
 
 ### Port reference
 

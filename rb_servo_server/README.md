@@ -75,9 +75,7 @@ make run MODE=sim
 
 The tracked sim profile currently targets the physical controller boxes held in
 pgmode simulation. It tracks `q_target`/`tcp_ref_stand`, keeps physical-real
-Cartesian authority off, and fault-latches any encoder-motion indication. A
-Virtual ControlBox, whose simulated `q_actual` moves, is not accepted by this
-profile without a future explicit endpoint-topology contract.
+Cartesian authority off, and fault-latches any encoder-motion indication.
 
 When startup changes pgmode or activates a controller, the backend reopens and
 re-primes the dedicated pipelined state socket after the transition is confirmed.
@@ -178,9 +176,8 @@ Hardware-free validation runs C++/Python tests and, when a temporary mock config
 available, mock-mode smoke against that explicit YAML. Cartesian
 behavior is covered by Pinocchio-backed C++ tests and active-stack smoke. For
 controller-level simulation, use the rbpodo controller `pgmode` simulation
-(`make run MODE=sim`) or the Rainbow virtual control-box VMs. The old
-software-simulator-oriented Cartesian acceptance runner is no longer part of
-this validation surface.
+(`make run MODE=sim`). The old software-simulator-oriented Cartesian acceptance
+runner is no longer part of this validation surface.
 
 This lane is not Rainbow Robotics external simulator/OVA, real robot, privileged
 Docker, or production network validation.

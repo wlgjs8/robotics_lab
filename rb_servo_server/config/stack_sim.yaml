@@ -73,12 +73,13 @@ servo:
   # stays the trusted self-collision guard. Controller-sim gated → never affects real motion.
   controller_simulation_demote_self_collision_fault: true
   # Per-arm direct teaching (free-drive) opt-in. Fail-closed: without this the
-  # server rejects every Freedrive command. Enabled here for VM-sim verification
-  # of the toggle/resync path against the virtual control boxes.
+  # server rejects every Freedrive command. Enabled here for pgmode-sim
+  # verification of the toggle/resync path against the control boxes.
   allow_freedrive: true
-  # Rainbow VIRTUAL control box (RBVirtualSimulator VM): activation (stage 6)
-  # is impossible by design ([A187]) and init_error=187 is permanently set —
-  # accept both in controller-simulation operation only.
+  # Some controller-simulation targets never reach activation (stage 6) and keep
+  # init_error set permanently ([A187]) — accept both in controller-simulation
+  # operation only. (Originated with the removed Virtual ControlBox lane; kept as
+  # live fail-closed surface, see docs/servo_backend_contract.md.)
   allow_controller_simulation_init_error: true
   allow_controller_simulation_not_activated: true
   # Controller-sim advisory carve-outs are intentionally OMITTED here: they are inert in
@@ -113,9 +114,7 @@ safety:
   controller_simulation_tracking_error_nonlatching: true
   # This tracked profile currently targets the physical RB3-730 control boxes
   # held in pgmode simulation. Their encoders must remain still; any physical
-  # motion indication is therefore an immediate server-owned fault latch. A
-  # Virtual ControlBox, whose simulated q_actual legitimately follows commands,
-  # needs a future explicit topology contract before it can use this profile.
+  # motion indication is therefore an immediate server-owned fault latch.
   controller_simulation_physical_motion_policy: fault_latch
   controller_simulation_physical_motion_threshold_deg: 0.05
   latch_fault_on_robot_state_error: true

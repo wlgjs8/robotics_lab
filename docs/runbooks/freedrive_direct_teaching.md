@@ -54,7 +54,7 @@ no physical teach-pendant button.
 
 - **Config opt-in.** `servo.allow_freedrive: true` is required. Default is `false`;
   the server rejects every `Freedrive` command otherwise. It is enabled in the
-  VM-sim stack config (`rb_servo_server/config/stack_sim.yaml`).
+  pgmode-sim stack config (`rb_servo_server/config/stack_sim.yaml`).
 - **Leased.** `Freedrive` requires the command-source lease (like `ArmMotion`/`ResetFault`),
   so a stray client cannot toggle it. The GUI brackets it with Acquire/Release.
 - **Global send suppression.** While *any* arm is in free-drive the server sends **no
@@ -113,20 +113,16 @@ Operator tab → **직접교시 (Direct Teaching)** folder:
 - `왼팔 교시 OFF (재동기화)` / `오른팔 교시 OFF (재동기화)` / `양팔 교시 OFF (재동기화)` — exit + resync.
 - `Freedrive` status line shows the live `freedrive` state from the stream.
 
-## VM-sim verification procedure
+## pgmode-sim verification procedure
 
-The VM-sim stack runs the **rbpodo backend against the Rainbow virtual control boxes**
-(`run_mode: real`, `operation_mode: simulation`, `io_model: direct`), so it exercises the
-real `set_freedrive_mode` command path and the server state machine end-to-end with no
-physical robot. (A virtual control box may no-op `freedrive_teach_on`; the value here is
-verifying command plumbing, the sticky state machine, send suppression, the resync, and
-the GUI — not gravity compensation itself.)
+The pgmode-sim stack runs the **rbpodo backend against the physical control boxes held
+in `pgmode`** (`run_mode: real`, `operation_mode: simulation`, `io_model: direct`), so it
+exercises the real `set_freedrive_mode` command path and the server state machine
+end-to-end without commanding physical motion. (A box in `pgmode` may no-op
+`freedrive_teach_on`; the value here is verifying command plumbing, the sticky state
+machine, send suppression, the resync, and the GUI — not gravity compensation itself.)
 
-1. Boot the virtual control boxes:
-   ```bash
-   make vm-up && make vm-status
-   ```
-2. Confirm the gate is set (already added):
+1. Confirm the gate is set (already added):
    ```bash
    grep allow_freedrive rb_servo_server/config/stack_sim.yaml   # -> allow_freedrive: true
    ```

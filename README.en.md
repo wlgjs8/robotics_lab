@@ -111,9 +111,8 @@ rb_servo_server
 ```
 
 The rbpodo controller `pgmode` simulation reuses this per-arm rbpodo endpoint
-shape, targeting either a Virtual ControlBox VM or a physical box held in
-`pgmode`. Site/VM configs live under gitignored
-`rb_servo_server/config/local/`.
+shape, targeting a physical box held in `pgmode`. Site configs live under
+gitignored `rb_servo_server/config/local/`.
 
 ## Safety
 
@@ -184,7 +183,7 @@ ctest --test-dir rb_servo_server/build --output-on-failure
 
 Cartesian behavior is covered by the Pinocchio-backed C++ tests above, then
 exercised on the active stack: mock smoke when a local mock config is available,
-rbpodo controller `pgmode` simulation / VM, and real hardware only through the
+rbpodo controller `pgmode` simulation, and real hardware only through the
 separate supervised runbooks. The old software-simulator-oriented Cartesian
 acceptance runner was removed with the retired simulator-first Cartesian
 acceptance lane.
@@ -198,8 +197,8 @@ make run MODE=sim   # pgmode controller-simulation
 ```
 
 After editing source, build/install the stack first with `make build`.
-For hardware-free controller-simulation, boot the two Rainbow virtual
-control-box VMs with `make vm-up` and then run `make run MODE=sim`.
+`MODE=sim` also connects to the physical control boxes (held in `pgmode`);
+there is no hardware-free controller-simulation lane.
 
 Open:
 
@@ -214,7 +213,7 @@ Tracked stack configs:
 - `rb_servo_server/config/stack_sim.yaml` — rbpodo controller-simulation (`make run MODE=sim`)
 - `rb_servo_server/config/stack_real.yaml` — physical real stack (`make run`, operator-supervised)
 
-Site-local mock / real / controller-simulation (VM·onbox) configs (gitignored):
+Site-local mock / real / controller-simulation configs (gitignored):
 
 - `rb_servo_server/config/local/*.yaml`
 - e.g. `rb_servo_server/config/local/stack_real_readonly.yaml`

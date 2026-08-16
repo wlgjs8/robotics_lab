@@ -784,12 +784,12 @@ class GuiContractsTest(unittest.TestCase):
             }
         return state
 
-    def test_all_actions_reachable_for_mock_simulator_and_vm_pgmode_sim(self):
+    def test_all_actions_reachable_for_mock_simulator_and_pgmode_sim(self):
         # End-to-end gate contract for the hardware-free stacks the GUI is opened
         # against. The server is the sole authority; the GUI mirrors it:
         #   - mock backend (no FK): joint controls open, Cartesian honestly gated
         #     by the server's FK/Cartesian gate (server cannot do Cartesian).
-        #   - simulator stack and VM pgmode controller-sim (FK + open Cartesian
+        #   - simulator stack and pgmode controller-sim (FK + open Cartesian
         #     gate): every motion primitive is reachable, no env unlock needed.
         joint_actions = ("JointTarget",)
         # Mock backend: valid joints, no TCP pose.
@@ -801,15 +801,15 @@ class GuiContractsTest(unittest.TestCase):
         self.assertFalse(mock_states["lifecycle:ArmMotion"])
         self.assertTrue(mock_states["tcp_pose"])  # honest: server has no Cartesian here
 
-        # Simulator stack (pinocchio FK, allow_in_simulation) and VM pgmode
+        # Simulator stack (pinocchio FK, allow_in_simulation) and pgmode
         # controller-sim (rbpodo, operation_mode=simulation, streaming Cartesian).
         simulator_state = self.tcp_available_state(observed_mode="simulation", observed_backend="simulator")
         for arm in ("left", "right"):
             simulator_state[arm]["cartesian_available"] = True
-        vm_pgmode_state = self.pgmode_spacemouse_state()
+        pgmode_state = self.pgmode_spacemouse_state()
         for label, state, observed, backend in (
             ("simulator", simulator_state, "simulation", "simulator"),
-            ("vm_pgmode_sim", vm_pgmode_state, "real", "rbpodo"),
+            ("pgmode_sim", pgmode_state, "real", "rbpodo"),
         ):
             _, _, safety = self.make_safety(state, observed=observed, observed_backend=backend)
             for action in joint_actions:

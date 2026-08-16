@@ -16,7 +16,7 @@ Hardware-free validation may exercise:
 > The old per-arm software-simulator backend and its hardware-free simulator
 > lane were retired. Hardware-free validation now uses the mock backend;
 > controller behavior beyond mock is validated on rbpodo controller `pgmode`
-> simulation (VM or onbox) and real.
+> simulation and real.
 
 It does not prove:
 
@@ -83,7 +83,7 @@ acceptance evidence.
 Run `rb_servo_server` with an explicit temporary mock config outside the
 repository and drive it with the bundled sender tools; the
 state stream and servo log are the smoke evidence. Controller behavior beyond
-mock is validated on rbpodo controller `pgmode` simulation (VM or onbox).
+mock is validated on rbpodo controller `pgmode` simulation.
 
 ## Direct And Worker I/O
 

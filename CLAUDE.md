@@ -105,7 +105,7 @@ ctest --test-dir rb_servo_server/build --output-on-failure
 
 Cartesian behavior is validated with the Pinocchio-backed C++ tests plus
 active-stack smoke/acceptance on mock when a local mock config is available,
-rbpodo controller `pgmode` simulation / VM, and physical real only through the
+rbpodo controller `pgmode` simulation, and physical real only through the
 separate supervised runbooks. The prior simulator-first hardware-free Cartesian
 acceptance lane and its software-simulator-oriented runner were retired.
 
@@ -114,8 +114,6 @@ Operator stacks (native via `Makefile`; the GUI/servo/policy stack runs without 
 make run               # full local teleop stack: rb_servo_server + viser GUI + policy_runner (SpaceMouse + UMI); pgmode real
 make run MODE=sim      # same stack, pgmode controller-simulation
 make build       # source-build + install the native stack (rbpodo backend) into the path `make run` launches
-make vm-up / vm-down / vm-status   # boot/stop the Rainbow virtual control-box VMs for hardware-free MODE=sim
-make pgmode-sim-up / pgmode-sim-down   # native rb_servo_server + rb_gui controller-sim bring-up
 make cam-up / cam-down / cam-status   # the only Docker stack: camera_server (D435 head stereo + dual D405 wrists + stereo_worker, one container); cam-engine-rebuild rebuilds the 1280 TRT engine
 make cam-up-wrists    # wrist-only rig: dual D405 without the head D435 (no head stereo/box detect; wrist RGB-D bundles + wrist clouds still flow)
 ```

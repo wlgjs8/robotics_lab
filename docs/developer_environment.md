@@ -88,7 +88,7 @@ frame-conversion behavior. Missing Pinocchio is a dependency failure.
 
 Cartesian PTP, Linear, and Twist behavior is covered by the Pinocchio-backed C++
 test suite, then exercised on the active stack: mock smoke when a local mock
-config is available, rbpodo controller `pgmode` simulation / VM for
+config is available, rbpodo controller `pgmode` simulation for
 controller-sim evidence, and physical real only through the separate supervised
 runbooks. The prior software-simulator-oriented Cartesian acceptance runner was
 removed with the retired simulator-first lane.
@@ -111,9 +111,10 @@ http://127.0.0.1:8080
 
 Stop with `Ctrl+C`.
 
-For hardware-free controller-simulation without physical boxes, boot the two
-Rainbow virtual control-box VMs with `make vm-up` and then run
-`make run MODE=sim` (`make vm-down` / `make vm-status`).
+`MODE=sim` still talks to the physical control boxes (held in `pgmode`) at
+`172.28.60.200/.201`. There is no hardware-free controller-simulation lane; the
+Rainbow Virtual ControlBox VM path was removed on 2026-08-16
+(`docs/archive/vm_lane/README.md`). Hardware-free work uses the mock backend.
 
 ## Real Camera Dependencies
 

@@ -111,15 +111,12 @@ canonical config keys, never by the bare word "simulation":
 Controller simulation is `run_mode: real` (it really connects to a controller)
 with the controller's `operation_mode: simulation`.
 
-Within controller simulation the **target** may be a Virtual ControlBox **VM** or
-a **physical** controller box in `pgmode`. These are behaviourally identical to
-the server — same `rbpodo` backend, same `operation_mode: simulation`, same
-config-driven carve-out — so they must NOT get new `run_mode`/`backend_type`
-values. Distinguish
-them only by deployment target, via config filename suffix and docs:
-
-- `…controller_sim_vm.yaml` — target is a Virtual ControlBox VM (no physical hardware on the wire)
-- `…controller_sim_onbox.yaml` — target is a physical controller box held in `pgmode`
+The controller-simulation target is a **physical** controller box held in
+`pgmode` — same `rbpodo` backend, same `operation_mode: simulation`, same
+config-driven carve-out as real operation, so it must NOT get new
+`run_mode`/`backend_type` values. (The Rainbow Virtual ControlBox VM lane that
+once shared this flavor was removed on 2026-08-16; see
+`docs/archive/vm_lane/README.md`.)
 
 Launch settings live only in the tracked `stack_real.yaml` and `stack_sim.yaml`.
 
@@ -134,9 +131,8 @@ rb_servo_server
 ```
 
 The rbpodo controller `pgmode` simulation reuses this same per-arm rbpodo
-endpoint shape, but targets a Virtual ControlBox VM or a physical box held in
-`pgmode` (configured by the tracked simulation stack),
-distinguished only by deployment target.
+endpoint shape and the same addresses, but targets a physical box held in
+`pgmode` (configured by the tracked simulation stack).
 
 ## State Publication Fanout
 
@@ -561,7 +557,7 @@ Hardware-free validation is described in `docs/hardware_free_validation.md`.
 
 Cartesian behavior is validated with the Pinocchio-backed C++ tests plus
 active-stack smoke/acceptance on mock when a local mock config is available,
-rbpodo controller `pgmode` simulation / VM, and physical real only through the
+rbpodo controller `pgmode` simulation, and physical real only through the
 separate supervised runbooks. The old software-simulator-oriented Cartesian
 acceptance runner is no longer part of the active validation surface.
 

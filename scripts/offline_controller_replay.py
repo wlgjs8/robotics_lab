@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Offline replay of the flow-infer ee_local delta-twist controller against
-recorded episodes — no robot, no VM, no model.
+recorded episodes — no robot, no controller, no model.
 
 It asks a single question: *can the delta-twist controller reproduce the
 input/output of the episodes the policy was trained on?* It answers by pushing

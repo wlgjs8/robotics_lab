@@ -287,9 +287,11 @@ unambiguous). It suppresses ONLY those two fields; SOS, EMS, soft-estop,
 not trust the controller's self-collision status, operators should pair it with
 the server-side `safety.self_collision` capsule guard.
 
-Rainbow Virtual ControlBox controller-simulation targets may permanently
-report `init_error != 0` and `init_state_info != 6` even while accepting
-simulation `move_servo_j` commands and updating controller reference joints.
+Some controller-simulation targets may permanently report `init_error != 0` and
+`init_state_info != 6` even while accepting simulation `move_servo_j` commands
+and updating controller reference joints. (This shape originated with the
+Rainbow Virtual ControlBox lane, removed 2026-08-16 —
+`docs/archive/vm_lane/README.md`; the config gates below remain live surface.)
 The server may tolerate only tightly-scoped controller-simulation shapes when
 all matching config gates are open: `operation_mode: simulation` and
 `servo.allow_controller_simulation_motion: true` with the controller confirmed

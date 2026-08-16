@@ -60,9 +60,9 @@ rb_servo_server
 ```
 
 The rbpodo controller `pgmode` simulation topology mirrors this controller shape
-(one rbpodo endpoint per arm), targeting either a Virtual ControlBox VM or a
-physical box held in `pgmode`. The tracked `stack_real.yaml` and
-`stack_sim.yaml` files are the only launch configs.
+(one rbpodo endpoint per arm), targeting a physical box held in `pgmode`. The
+tracked `stack_real.yaml` and `stack_sim.yaml` files are the only launch
+configs.
 
 ## Safety Boundary
 
@@ -225,7 +225,7 @@ ctest --test-dir rb_servo_server/build --output-on-failure
 
 For Cartesian behavior, use the Pinocchio-backed C++ tests plus active-stack
 smoke/acceptance on mock when a local mock config is available, rbpodo
-controller `pgmode` simulation / VM, and physical real only through the separate
+controller `pgmode` simulation, and physical real only through the separate
 supervised runbooks. The old software-simulator-oriented Cartesian acceptance
 runner has been removed.
 

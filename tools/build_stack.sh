@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Source-build the local teleop stack for DIRECT real-controller operation
-# (no VM): rb_servo_server (rbpodo backend) + rb_gui + policy_runner.
+# Source-build the local teleop stack for DIRECT real-controller operation:
+# rb_servo_server (rbpodo backend) + rb_gui + policy_runner.
 #
 # Re-run after editing source; then `make run` connects straight to the
-# physical controllers — no `make vm-up` needed. Idempotent: the one-time
+# physical controllers. Idempotent: the one-time
 # rbpodo C++ SDK clone/install is skipped when already present, and the Python
 # components are editable installs (subsequent source edits are live, no
 # reinstall). The C++ server is rebuilt every run.
@@ -129,5 +129,5 @@ if ! "$PY" -m pip install -e rb_gui -e "policy_runner[spacemouse,gripper]"; then
 fi
 
 echo "[build] done -> $SERVER_BIN"
-echo "[build] next: make run            # direct real controller, no VM"
+echo "[build] next: make run            # direct real controller"
 echo "[build]       make run MODE=sim   # controller-simulation (same binary)"

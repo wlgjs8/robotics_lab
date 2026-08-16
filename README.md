@@ -127,7 +127,7 @@ rb_servo_server
 ```
 
 rbpodo 컨트롤러 `pgmode` 시뮬레이션은 위와 같은 팔별 rbpodo endpoint 구조를
-그대로 쓰되, 대상이 Virtual ControlBox VM 또는 `pgmode`로 둔 실제 box입니다.
+그대로 쓰되, 대상이 `pgmode`로 둔 실제 box입니다.
 실행 설정은 추적되는 `stack_real.yaml`과 `stack_sim.yaml`에서만 관리합니다.
 
 ## Safety
@@ -292,7 +292,7 @@ ctest --test-dir rb_servo_server/build --output-on-failure
 
 Cartesian behavior is covered by the Pinocchio-backed C++ tests above, then
 exercised on the active stack: mock smoke when a local mock config is available,
-rbpodo controller `pgmode` simulation / VM, and real hardware only through the
+rbpodo controller `pgmode` simulation, and real hardware only through the
 separate supervised runbooks. The old software-simulator-oriented Cartesian
 acceptance runner was removed with the retired simulator-first Cartesian
 acceptance lane.
@@ -324,10 +324,9 @@ make run MODE=sim   # pgmode controller-simulation
 ```
 
 소스를 고친 뒤에는 먼저 `make build`으로 stack을 빌드/설치합니다(rbpodo
-backend 포함). `make vm-up`으로 관리하는 Rainbow Virtual ControlBox에서는
-simulated `q_actual`이 움직이므로, 현재 physical-box용 `stack_sim.yaml`의
-physical-motion fault latch와 양립하지 않습니다. VM 재승격에는 endpoint topology를
-명시하는 별도 contract와 review가 필요합니다; local launch YAML로 우회하지 않습니다.
+backend 포함). `MODE=sim`도 `pgmode`로 둔 실제 control box에 접속합니다 —
+hardware-free 컨트롤러 시뮬레이션 레인은 없으며, Rainbow Virtual ControlBox VM
+경로는 2026-08-16에 제거되었습니다(`docs/archive/vm_lane/README.md`).
 
 `make build`와 `make run`은 `STACK_PYTHON`이 지정되면 그 interpreter를 함께
 사용하고, 아니면 repo의 `.venv/bin/python`을 우선 사용한 뒤 system `python3`로
@@ -389,8 +388,7 @@ real arm and real gripper authority disabled. The sim-only Make target defaults
 to the pgmode-validated 6-step execution window; the physical-real launcher
 retains its existing 12-step default. Because the tracked sim topology targets
 physical control boxes held in pgmode, any encoder motion indication is a
-server-owned `fault_latch`; a Virtual ControlBox needs a separately reviewed,
-explicit topology contract before using this profile.
+server-owned `fault_latch`.
 
 The controller-box pgmode parameter comparison, storage provenance, long-run
 evidence, and interpretation boundary are recorded in

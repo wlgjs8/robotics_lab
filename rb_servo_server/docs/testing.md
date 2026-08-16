@@ -50,9 +50,9 @@ those remain separate human-gated hardware tasks.
 Hardware-free testing uses C++/Python unit tests plus an explicit local mock
 config when mock-mode smoke is needed. Cartesian behavior is validated against
 Pinocchio-backed C++ tests and active-stack smoke. Controller-level simulation
-uses the rbpodo controller `pgmode` simulation (`make run MODE=sim`) or the
-Rainbow virtual control-box VMs. The old software-simulator-oriented Cartesian
-acceptance runner is no longer part of this validation surface.
+uses the rbpodo controller `pgmode` simulation (`make run MODE=sim`). The old
+software-simulator-oriented Cartesian acceptance runner is no longer part of
+this validation surface.
 
 This path does not validate Rainbow Robotics external simulator/OVA, real robot
 motion, realtime scheduling acceptance, privileged Docker, broad network
