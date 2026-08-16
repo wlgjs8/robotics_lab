@@ -38,7 +38,7 @@ configuration with `body.joints: []`).
 
 | # | Precondition | Status |
 |---|---|---|
-| 1 | RB control boxes on firmware build **26071103** (label 8.7.3). controller-manager refuses to init otherwise (`Arm.cpp:48-60`). | **In progress** — operator updating boxes (2026-08-16). Verify with `get_control_box_info()` after update. |
+| 1 | RB control boxes on firmware build **26071103** (label 8.7.3). controller-manager refuses to init otherwise (`Arm.cpp:48-60`). | **Done** — operator updated both boxes 2026-08-16 evening, version confirmed by operator. Bridge still re-verifies via CM's own init gate at first bring-up. |
 | 2 | ROS 2 runtime for controller-manager (Jazzy native on 24.04, or the repo's Humble Docker path). Robot PC is Ubuntu 22.04 → start with the **Docker path** (`controller-manager/Makefile` + `docker-compose.yaml`), revisit native later. | Open |
 | 3 | A platform `active.yaml` for this rig under `controller-manager/platforms/` conventions (device file, gitignored there). Our copy lives in `cm_bridge/config/` and is installed/mounted at launch. | Open (P1) |
 | 4 | GitHub access to `PLAIF-dev/controller-manager` from every clone of robotics_lab. | Done (submodule added) |
