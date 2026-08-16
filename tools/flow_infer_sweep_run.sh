@@ -25,6 +25,10 @@ SWEEP_DIR="outputs/sweep"
 mkdir -p "$SWEEP_DIR"
 STEP_LOG="$SWEEP_DIR/${STAMP}_${TAG}.jsonl"
 META="$SWEEP_DIR/${STAMP}_${TAG}.meta"
+# Persist the runner console (tick-profile / tick-spike lines go to stderr and
+# were previously lost with the terminal scrollback; the 2026-08-14 loop-freeze
+# diagnosis needs them next to the step log).
+CONSOLE_LOG="$SWEEP_DIR/${STAMP}_${TAG}.console.log"
 
 {
   echo "tag=$TAG"
@@ -34,5 +38,6 @@ META="$SWEEP_DIR/${STAMP}_${TAG}.meta"
 } > "$META"
 echo "[sweep] step_log=$STEP_LOG"
 echo "[sweep] meta=$META"
+echo "[sweep] console=$CONSOLE_LOG"
 
-FLOW_INFER_STEP_LOG="$STEP_LOG" ./tools/flow_infer_real_policy.sh "$@"
+FLOW_INFER_STEP_LOG="$STEP_LOG" ./tools/flow_infer_real_policy.sh "$@" 2>&1 | tee "$CONSOLE_LOG"

@@ -375,7 +375,7 @@ def run(
     # than caught up: the achieved rate silently settles at whatever the tick can sustain.
     # This names the phase responsible instead of guessing.
     class _TickProfile:
-        __slots__ = ("on", "t_prev", "acc", "n", "last_report", "worst")
+        __slots__ = ("on", "t_prev", "acc", "n", "last_report", "worst", "cur", "spike_sec")
 
         def __init__(self) -> None:
             self.on = os.environ.get("FLOW_INFER_TICK_PROFILE", "0") == "1"
@@ -384,13 +384,39 @@ def run(
             self.n = 0
             self.last_report = None
             self.worst: dict[str, float] = {}
+            # Per-tick phase durations, dumped immediately when one tick blows
+            # past the spike threshold. The 5 s aggregate above can only say
+            # WHICH phase held the worst single tick; this says which phases the
+            # offending tick itself spent its time in (the 60-150 ms loop
+            # freezes observed 2026-08-14 skip a chunk and stall the arm, and
+            # arrive rarely enough that the aggregate hides them).
+            self.cur: dict[str, float] = {}
+            # 50 ms: the 20260814_145123 run had two 67-76 ms loop stalls that each
+            # slipped a policy step and cost a hold tick, sitting just under the
+            # original 80 ms threshold.
+            self.spike_sec = float(os.environ.get("FLOW_INFER_TICK_SPIKE_MS", "50")) / 1000.0
 
         def tick(self, t: float) -> None:
             if not self.on:
                 return
             if self.t_prev is not None:
-                self.add("TOTAL", t - self.t_prev)
+                total = t - self.t_prev
+                self.add("TOTAL", total)
                 self.n += 1
+                if total >= self.spike_sec:
+                    named = sum(v for k, v in self.cur.items() if k != "TOTAL")
+                    parts = " ".join(
+                        f"{k}={v * 1000:.1f}"
+                        for k, v in sorted(self.cur.items(), key=lambda kv: -kv[1])
+                        if k != "TOTAL"
+                    )
+                    print(
+                        f"[tick-spike] dt={total * 1000:.0f}ms {parts} "
+                        f"OTHER={(total - named) * 1000:.1f}",
+                        file=stderr,
+                        flush=True,
+                    )
+            self.cur = {}
             self.t_prev = t
             if self.last_report is None:
                 self.last_report = t
@@ -418,6 +444,8 @@ def run(
             if not self.on:
                 return
             self.acc[key] = self.acc.get(key, 0.0) + dt
+            if key != "TOTAL":
+                self.cur[key] = self.cur.get(key, 0.0) + dt
             if dt > self.worst.get(key, 0.0):
                 self.worst[key] = dt
 

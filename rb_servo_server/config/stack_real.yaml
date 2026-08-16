@@ -1250,11 +1250,33 @@ cartesian_control:
         # hard limits. PENDING supervised physical confirmation: re-run
         # tools/follower_feasibility.py on the next real servo log and check
         # duration/dt p50 lands near 1.2 (target <= 1.3).
-        max_linear_accel_m_s2: 6.0
-        max_linear_jerk_m_s3: 2000.0    # 300.0 -> 600.0 (see above)
+        #
+        # 2026-08-14: global p50 hit 1.000 (feasibility verdict OK on
+        # servo_log_20260814_134450) but BURSTS remained and were matched
+        # tick-for-tick to the observed intermittent trembling and micro-pauses
+        # (left arm post-reset: duration/dt p90 1.79, >1.5 on 13.9% of segments,
+        # converged 74.6%; all three observed pauses sat inside >50 ms-segment
+        # clusters, including free-space ones — no contact, no force offset).
+        # follower_replay one-factor sweep on that run's recorded knot stream
+        # (outputs/follower_replay/knots_left_post.txt) showed BOTH acceleration
+        # classes binding this time, velocities/jerks/corner-guard not:
+        #     baseline (6 / 20)          >1.5 13.9%  conv 74.6%  projP95 5.33mm
+        #     ang_a 20->40 alone         >1.5  9.7%  conv 80.5%
+        #     lin_a  6->12 alone         >1.5  9.4%  conv 79.2%
+        #     both + jerks doubled       >1.5  2.2%  conv 93.4%  projP95 0.22mm
+        # (right arm same change: >1.5 3.1% -> 0.4%, conv 97.9%.) Doubling the
+        # jerks alongside keeps the accel headroom reachable within dt. The
+        # aggressive tier (lin_a 20 / ang_a 60) reached conv 97.7% but is not
+        # taken: at 12 m/s^2 the ~3.5 kg tool's m*a transient is ~40 N against
+        # the 10/12 N reflex thresholds, so watch EFT residuals during fast
+        # free-space transients on the confirmation run; if spurious retreat
+        # reflexes appear, this accel raise (not the reflex threshold) is the
+        # first suspect. SPEED_SCALE stays 1.0 by operator decision.
+        max_linear_accel_m_s2: 12.0     # 6.0 -> 12.0 (2026-08-14, binding; see above)
+        max_linear_jerk_m_s3: 4000.0    # 2000.0 -> 4000.0 (2026-08-14 paired raise)
         max_angular_velocity_rad_s: 0.90
-        max_angular_accel_rad_s2: 20.0   # 9.0 -> 20.0 (see above)
-        max_angular_jerk_rad_s3: 4000.0  # 540.0 -> 2000.0 (BINDING axis; see above)
+        max_angular_accel_rad_s2: 40.0   # 20.0 -> 40.0 (2026-08-14, binding; see above)
+        max_angular_jerk_rad_s3: 8000.0  # 4000.0 -> 8000.0 (2026-08-14 paired raise)
         discard_head_steps: 0     # v3 producer already removes rows emitted since observation
         # Match FLOW_INFER_CHUNK_EXECUTE_STEPS: consume exactly the policy
         # execution window at normal pace before decelerating into reserve rows
