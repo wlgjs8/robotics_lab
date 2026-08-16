@@ -15,8 +15,13 @@ left_robot:
   speed_bar: 1.0                  # applied at backend initialize via set_speed_bar()
   servo_t1_sec: 0.002
   servo_t2_sec: 0.021
-  servo_gain: 1.0           # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
-  # script-level 10.0 disables controller LPF but produced jerk/jitter on hardware.
+  servo_gain: 1.0           # 0.5 caused ~5deg servo lag + right servo deactivation (pre-26071103 firmware)
+  # alpha: box scales by 0.1 internally; 10.0 = LPF OFF. Boxes run firmware 26071103
+  # (updated 2026-08-16). Baseline stays 1.0 (LPF on): the earlier "alpha 10 = jerk"
+  # observation predates this firmware AND was taken through the rbpodo SDK's default
+  # ~6-significant-digit command formatting (1e-3..1e-4 deg staircase at our angles;
+  # controller-manager needed %.7f for clean LPF-off). Re-attempt LPF-off only after
+  # raising the wire precision (rbpodo_src joint_to_string) — see cm_bridge/docs/design.md.
   servo_alpha: 1.0
   disable_waiting_ack: true    # ACK-off 500Hz streaming; config-driven, no RB_ALLOW_* env gate
 
@@ -30,8 +35,9 @@ right_robot:
   speed_bar: 1.0               # applied at backend initialize via set_speed_bar()
   servo_t1_sec: 0.002
   servo_t2_sec: 0.021
-  servo_gain: 1.0                 # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
-  # script-level 10.0 disables controller LPF but produced jerk/jitter on hardware.
+  servo_gain: 1.0                 # 0.5 caused ~5deg servo lag + right servo deactivation (pre-26071103 firmware)
+  # alpha 1.0 = LPF on (baseline). See the left arm block for the firmware-26071103 /
+  # wire-precision context before trying 10.0 (LPF off); keep both arms identical.
   servo_alpha: 1.0
   disable_waiting_ack: true    # ACK-off 500Hz streaming; config-driven, no RB_ALLOW_* env gate
 
