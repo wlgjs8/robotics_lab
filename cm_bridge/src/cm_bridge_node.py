@@ -237,6 +237,94 @@ class StateRepublisher:
                 pass
 
 
+class ResetIngress:
+    """Legacy command JSON (UDP 50256) JointTarget/init_motion -> CM MOVJ.
+
+    P1 scope: only `mode == "JointTarget"` is honored (episode reset). The goal
+    is REGISTERED on /<platform>/<side>/cmd/move (cell_msgs/action/Move,
+    kind=MOVJ, one Waypoint) and released with srv/Sync target LEFT/RIGHT.
+    Units (SILS-verified 2026-08-16): Move waypoints are DEGREES (matches the
+    legacy wire q_target_deg directly; note the STATE topics are radians).
+    """
+
+    SYNC_TARGET = {"left": 0, "right": 1}
+
+    def __init__(self, node, args):
+        from rclpy.action import ActionClient
+        from cell_msgs.action import Move
+        from cell_msgs.msg import Waypoint
+        from cell_msgs.srv import Sync
+
+        self._node = node
+        self._Move, self._Waypoint, self._Sync = Move, Waypoint, Sync
+        self._move = {
+            s: ActionClient(node, Move, f"/{args.platform}/{s}/cmd/move")
+            for s in ("left", "right")
+        }
+        self._sync = node.create_client(Sync, f"/{args.platform}/cell/cmd/sync")
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        host, port = args.command_bind.split(":")
+        self._sock.bind((host, int(port)))
+        self._sock.settimeout(0.5)
+        self._stop = threading.Event()
+        self._pending = []
+        self._plock = threading.Lock()
+        threading.Thread(target=self._loop, daemon=True, name="reset-ingress").start()
+        # Action/service calls must run on the rclpy executor thread, not the
+        # ingress thread (wait-set/context races otherwise) — drain via timer.
+        node.create_timer(0.1, self._drain)
+
+    def _loop(self):
+        while not self._stop.is_set():
+            try:
+                data, _ = self._sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            try:
+                cmd = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if cmd.get("mode") != "JointTarget":
+                continue  # P1: everything else is FollowUnit's or out of scope
+            for side in ("left", "right"):
+                arm = cmd.get(side) or {}
+                q_deg = arm.get("q_target_deg")
+                if isinstance(q_deg, list) and len(q_deg) >= 6:
+                    self._node.get_logger().info(f"reset MOVJ {side}: {q_deg[:6]}")
+                    with self._plock:
+                        self._pending.append((side, [float(v) for v in q_deg[:6]]))
+
+    def _drain(self):
+        with self._plock:
+            items, self._pending = self._pending, []
+        for side, q_deg in items:
+            self._send_movj(side, q_deg)
+
+    def _send_movj(self, side, q_deg, velocity_pct=20.0):
+        goal = self._Move.Goal()
+        goal.kind = 1  # MOVJ
+        wp = self._Waypoint()
+        wp.v = [float(v) for v in q_deg]
+        goal.waypoints = [wp]
+        goal.velocity_pct = [float(velocity_pct)]
+        goal.smoothing_pct = 0.0
+        client = self._move[side]
+        if not client.server_is_ready():
+            self._node.get_logger().error(f"move server absent for {side}")
+            return
+        fut = client.send_goal_async(goal)
+        fut.add_done_callback(lambda f, s=side: self._release(s))
+
+    def _release(self, side):
+        req = self._Sync.Request()
+        req.target = self.SYNC_TARGET[side]
+        self._sync.call_async(req)
+
+    def stop(self):
+        self._stop.set()
+
+
 class CmBridge(Node):
     def __init__(self, args):
         super().__init__("cm_bridge")
@@ -257,6 +345,7 @@ class CmBridge(Node):
             host, port = ep.strip().rsplit(":", 1)
             endpoints.append((host, int(port)))
         self._state = StateRepublisher(self, args.platform, endpoints)
+        self._reset = ResetIngress(self, args)
         self._last_pub_ns = {"left": 0, "right": 0}
         self._ingress = ChunkIngress(args.chunk_bind, self._on_frame)
         self._ingress.start()
@@ -299,6 +388,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--platform", default="monkey")
     ap.add_argument("--chunk-bind", default="0.0.0.0:50264")
+    ap.add_argument("--command-bind", default="0.0.0.0:50256")
     ap.add_argument("--state-endpoints",
                     default="127.0.0.1:50356,127.0.0.1:50366,127.0.0.1:50376,127.0.0.1:50378",
                     help="servo_state.v1 UDP fanout targets (legacy port map)")
