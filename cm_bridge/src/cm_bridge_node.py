@@ -234,12 +234,19 @@ class StateRepublisher:
             "fault_latched": fault is not None,
             "latched_fault_reason": fault or "",
             "motion_state": "FaultLatched" if fault is not None else "Running",
-            "command_source": {
+            # Lease ECHO: CM owns the single command path, so there is no real
+            # arbitration here — but legacy clients (flow-infer real_policy)
+            # send AcquireLease and BLOCK until the readback names THEM. Echo
+            # the last claimant so that handshake completes; unclaimed keeps
+            # the permissive cm_bridge stamp.
+            "command_source": (lambda lease: {
                 "active": True, "expired": False, "enforce_lease": False,
-                "active_source_id": "cm_bridge", "active_session_id": "cm",
-                "active_lease_token": "", "verdict": "allowed", "reason": "",
+                "active_source_id": lease[0] if lease else "cm_bridge",
+                "active_session_id": lease[1] if lease else "cm",
+                "active_lease_token": "cm-echo" if lease else "",
+                "verdict": "allowed", "reason": "",
                 "command_requires_lease": False, "command_has_lease": True,
-            },
+            })(getattr(self, "lease_provider", lambda: None)()),
             "left": self._arm("left"),
             "right": self._arm("right"),
         }
@@ -352,6 +359,13 @@ class ResetIngress:
                 cmd = json.loads(data.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
+            mode = cmd.get("mode")
+            if mode in ("AcquireLease", "ReleaseLease"):
+                sid, ses = cmd.get("source_id"), cmd.get("session_id")
+                claim = (sid, ses) if (mode == "AcquireLease" and sid and ses) else None
+                self._node.set_lease_echo(claim)
+                self._node.get_logger().info(f"lease echo: {mode} -> {claim}")
+                continue
             gl = (cmd.get("left") or {}).get("gripper_target")
             gr = (cmd.get("right") or {}).get("gripper_target")
             if gl is not None or gr is not None:
@@ -429,6 +443,11 @@ class CmBridge(Node):
         self._state = StateRepublisher(self, args.platform, endpoints)
         self.gripper = GripperForwarder()
         self._state.gripper = self.gripper
+        # Lease echo state must exist BEFORE ResetIngress spawns its thread
+        # (an AcquireLease can arrive immediately).
+        self._lease_echo = None            # (source_id, session_id) of last AcquireLease
+        self._lease_lock = threading.Lock()
+        self._state.lease_provider = lambda: self._lease_echo
         self._reset = ResetIngress(self, args)
         # P2 fail-closed latch: collision monitor trips via the control port;
         # a latched bridge drops all follow chunks and reports fault_latched
@@ -446,6 +465,11 @@ class CmBridge(Node):
             f"(period audit: FollowUnit consumes one delta per input_period_ms; "
             f"chunk policy_dt must match the mounted follow profile)"
         )
+
+    def set_lease_echo(self, claim):
+        """(source_id, session_id) of the last AcquireLease, None on release."""
+        with self._lease_lock:
+            self._lease_echo = claim
 
     def _control_loop(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
