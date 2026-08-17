@@ -10,7 +10,6 @@ import socket
 import threading
 import time
 from html import escape
-from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
@@ -28,12 +27,6 @@ from .head_preview import (
     DEFAULT_HEAD_TOPIC,
     HeadPreviewReceiver,
     HeadPreviewStore,
-)
-from .cog_gui import (
-    CogGuiSession,
-    CogGuiStatus,
-    CogIdentificationConfig,
-    resolve_cog_waypoints,
 )
 from .geometry import (
     _add_matrix3,
@@ -152,7 +145,6 @@ from .status_panel import (
     _eft_monitor_axis_values,
     _format_scene_asset_status,
     _format_fk_status,
-    _format_force_status,
     _format_init_motion_status,
     _format_joint_monitor_value,
     _format_joints,
@@ -299,12 +291,6 @@ def _env_positive_float(name: str, fallback: float) -> float:
     value = _env_float(name, fallback)
     return value if value > 0.0 else fallback
 
-
-def _env_bool(name: str, fallback: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
-        return fallback
-    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def _env_joint6(name: str, fallback: tuple[float, ...]) -> tuple[float, ...] | None:
@@ -1307,245 +1293,6 @@ def _delete_waypoint(handles: dict[str, Any]) -> tuple[bool, str]:
     return True, name
 
 
-def _cog_config_from_state(latest: StateSnapshot | None) -> CogIdentificationConfig:
-    return CogIdentificationConfig.parse(
-        latest.payload_identification if latest is not None else None
-    )
-
-
-def _cog_reports_root() -> str:
-    configured = os.environ.get("RB_GUI_COG_REPORT_DIR", "").strip()
-    if configured:
-        return configured
-    return str(Path(__file__).resolve().parents[2] / "logs" / "cog_calibration")
-
-
-def _format_cog_status(status: CogGuiStatus) -> str:
-    waypoint = "—"
-    if status.current_name is not None:
-        waypoint = f"{status.current_index + 1}/{status.waypoint_count} {status.current_name}"
-    error = "—" if status.max_joint_error_deg is None else f"{status.max_joint_error_deg:.3f} deg"
-    stability = "—"
-    if (
-        status.current_force_stddev_n is not None
-        and status.current_torque_stddev_nm is not None
-    ):
-        stability = (
-            f"F={status.current_force_stddev_n:.4g} N, "
-            f"T={status.current_torque_stddev_nm:.4g} Nm"
-        )
-    return (
-        f"state={status.state} | arm={status.arm or '—'} | waypoint={waypoint} | "
-        f"joint error={error} | settle={status.settle_elapsed_sec:.2f}s | "
-        f"samples={status.sample_count} | stability max std={stability} | "
-        f"accepted={status.accepted_count}\n{status.message}"
-    )
-
-
-def _format_cog_pose_states(status: CogGuiStatus) -> str:
-    if not status.pose_states:
-        return "no frozen waypoint list"
-    return " | ".join(f"{name}:{state}" for name, state in status.pose_states)
-
-
-def _format_cog_result(status: CogGuiStatus) -> str:
-    estimate = status.result
-    if estimate is None:
-        if status.state == "calculation_blocked":
-            saved = (
-                f"\ndiagnostic report={status.saved_report}"
-                if status.saved_report is not None
-                else ""
-            )
-            return f"BLOCKED / NOT APPLIED\n{status.message}{saved}"
-        return "PROVISIONAL / NOT APPLIED — no calculation"
-    if estimate.observation_model == "controller_compensated_linear":
-        force_rows = "\n".join(
-            "  [" + ", ".join(f"{value:.9g}" for value in row) + "]"
-            for row in estimate.force_matrix_n_per_m_s2
-        )
-        torque_rows = "\n".join(
-            "  [" + ", ".join(f"{value:.9g}" for value in row) + "]"
-            for row in estimate.torque_matrix_nm_per_m_s2
-        )
-        loo_force = estimate.max_leave_one_out_force_residual_n
-        loo_torque = estimate.max_leave_one_out_torque_residual_nm
-        leave_one_out = (
-            "unavailable"
-            if loo_force is None or loo_torque is None
-            else f"max force={loo_force:.5g} N, max torque={loo_torque:.5g} Nm"
-        )
-        return (
-            "PROVISIONAL / NOT APPLIED\n"
-            "model=controller_compensated_linear (NOT physical mass/CoG)\n"
-            f"force matrix [N/(m/s^2)]:\n{force_rows}\n"
-            f"torque matrix [Nm/(m/s^2)]:\n{torque_rows}\n"
-            f"pose-local tare bias candidate: force={estimate.force_bias_n} N, "
-            f"torque={estimate.torque_bias_nm} Nm\n"
-            f"fit RMS: force={estimate.force_fit_rms_n:.5g} N, "
-            f"torque={estimate.torque_fit_rms_nm:.5g} Nm\n"
-            f"design: force rank={estimate.force_design_rank}, "
-            f"cond={estimate.force_design_condition:.5g}; "
-            f"torque rank={estimate.torque_design_rank}, "
-            f"cond={estimate.torque_design_condition:.5g}\n"
-            f"leave-one-pose-out: {leave_one_out}"
-        )
-    cog_mm = tuple(value * 1000.0 for value in estimate.cog_tcp_m)
-    ambiguity = (
-        "; gravity compensation ambiguous: " + ", ".join(estimate.ambiguity_reasons)
-        if estimate.gravity_compensation_ambiguous
-        else ""
-    )
-    correlation = (
-        "unavailable"
-        if estimate.force_gravity_correlation is None
-        else f"{estimate.force_gravity_correlation:.5g}"
-    )
-    loo_mass = estimate.max_leave_one_out_mass_delta_kg
-    loo_cog = estimate.max_leave_one_out_cog_delta_m
-    leave_one_out = (
-        "unavailable"
-        if loo_mass is None or loo_cog is None
-        else f"max mass delta={loo_mass:.5g} kg, max CoG delta={loo_cog * 1000.0:.3f} mm"
-    )
-    return (
-        "PROVISIONAL / NOT APPLIED\n"
-        f"wrench convention={estimate.wrench_convention}\n"
-        f"mass={estimate.mass_kg:.6g} kg, CoG TCP=({cog_mm[0]:.3f}, {cog_mm[1]:.3f}, {cog_mm[2]:.3f}) mm\n"
-        f"force bias={estimate.force_bias_n} N, torque bias={estimate.torque_bias_nm} Nm\n"
-        f"fit RMS: force={estimate.force_fit_rms_n:.5g} N, torque={estimate.torque_fit_rms_nm:.5g} Nm\n"
-        f"design: force rank={estimate.force_design_rank}, cond={estimate.force_design_condition:.5g}; "
-        f"torque rank={estimate.torque_design_rank}, cond={estimate.torque_design_condition:.5g}\n"
-        f"gravity correlation={correlation}; leave-one-pose-out: {leave_one_out}"
-        f"{ambiguity}"
-    )
-
-
-def _cog_session_active(handles: Mapping[str, Any]) -> bool:
-    session = handles.get("cog_session")
-    return isinstance(session, CogGuiSession) and session.status().active
-
-
-def _set_cog_conflict_controls(handles: dict[str, Any], active: bool) -> None:
-    """Keep E-stop live while excluding other GUI motion during CoG capture."""
-    if not active:
-        # Lifecycle/init/TCP send controls are restored by their normal safety
-        # refresh earlier in update_gui.  Restore only controls that have no
-        # independent readiness updater, and only to their captured pre-session
-        # state; never unconditionally enable a safety-gated control.
-        previous = handles.pop("_cog_non_authority_disabled", None)
-        if isinstance(previous, list):
-            for control, disabled in previous:
-                _set_disabled(control, bool(disabled))
-        return
-    non_authority_controls: list[Any] = []
-    for key in (
-        "freedrive_buttons",
-        "tcp_ptp_arm_buttons",
-        "tcp_frame_buttons",
-        "tcp_linear_arm_buttons",
-        "tcp_linear_orientation_buttons",
-    ):
-        non_authority_controls.extend(handles.get(key, {}).values())
-    for key in (
-        "waypoint_move_buttons",
-        "joint_jog_controls",
-        "waypoint_edit_controls",
-    ):
-        non_authority_controls.extend(handles.get(key, ()))
-    for key in ("gripper_slider_left", "gripper_slider_right"):
-        control = handles.get(key)
-        if control is not None:
-            non_authority_controls.append(control)
-    if "_cog_non_authority_disabled" not in handles:
-        handles["_cog_non_authority_disabled"] = [
-            (control, bool(getattr(control, "disabled", False)))
-            for control in non_authority_controls
-        ]
-    for mode, button in handles.get("lifecycle_buttons", {}).items():
-        if active and mode != "EmergencyStop":
-            _set_disabled(button, True)
-    groups = (
-        "init_motion_buttons",
-        "freedrive_buttons",
-        "tcp_ptp_arm_buttons",
-        "tcp_frame_buttons",
-        "tcp_linear_arm_buttons",
-        "tcp_linear_orientation_buttons",
-    )
-    if active:
-        for key in groups:
-            for control in handles.get(key, {}).values():
-                _set_disabled(control, True)
-        for key in (
-            "waypoint_move_buttons",
-            "tcp_pose_buttons",
-            "tcp_linear_buttons",
-            "joint_jog_controls",
-            "waypoint_edit_controls",
-        ):
-            for control in handles.get(key, ()):
-                _set_disabled(control, True)
-        for key in ("gripper_slider_left", "gripper_slider_right"):
-            control = handles.get(key)
-            if control is not None:
-                _set_disabled(control, True)
-
-
-def _update_cog_panel(
-    handles: dict[str, Any], latest: StateSnapshot | None, *, stale: bool
-) -> None:
-    session = handles.get("cog_session")
-    if not isinstance(session, CogGuiSession):
-        return
-    session.watchdog(latest, stale=stale)
-    status = session.status()
-    if "cog_status" in handles:
-        handles["cog_status"].value = _format_cog_status(status)
-    if "cog_pose_status" in handles:
-        handles["cog_pose_status"].value = _format_cog_pose_states(status)
-    if "cog_result" in handles:
-        handles["cog_result"].value = _format_cog_result(status)
-    active = status.active
-    _set_cog_conflict_controls(handles, active)
-    for key in ("cog_arm", "cog_prefix", "cog_refresh"):
-        control = handles.get(key)
-        if control is not None:
-            _set_disabled(control, active)
-    start_reason: str | None = None
-    if not active:
-        if stale or latest is None:
-            start_reason = "state stream missing or stale"
-        else:
-            try:
-                config = _cog_config_from_state(latest)
-                resolve_cog_waypoints(
-                    handles.get("waypoints", {}),
-                    prefix=str(getattr(handles.get("cog_prefix"), "value", "")),
-                    arm=str(getattr(handles.get("cog_arm"), "value", "")),
-                    min_poses=config.min_poses,
-                )
-                arm = str(getattr(handles.get("cog_arm"), "value", ""))
-                safety_reason = session.preflight_reason(arm)
-                if safety_reason:
-                    raise ValueError(safety_reason)
-            except ValueError as exc:
-                start_reason = str(exc)
-    if handles.get("cog_start") is not None:
-        _set_disabled(handles["cog_start"], active or start_reason is not None)
-    for key, enabled in (
-        ("cog_run", status.state in {"waiting_lease", "armed", "moving", "settling", "sampling"}),
-        ("cog_retry", status.state == "review"),
-        ("cog_skip", status.state in {"armed", "review"}),
-        ("cog_stop", active),
-        ("cog_calculate", status.state in {"complete", "stopped", "calculated", "calculation_blocked"}),
-        ("cog_save", status.result is not None and status.saved_report is None),
-    ):
-        control = handles.get(key)
-        if control is not None:
-            _set_disabled(control, not enabled)
-
-
 # ---- User Safety Floor: captured floor-contact points + fitted plane ----
 
 
@@ -1928,194 +1675,6 @@ def _set_waypoint_as_init(handles: dict[str, Any], safety: OperatorSafety) -> tu
     saved_ok, info = _save_init_joints(left_q, right_q)
     suffix = f"saved to {info}" if saved_ok else f"save failed: {info}"
     return True, f"init motion set to '{name}'; {suffix}"
-
-
-# --- Startup force auto-tare (Init Motion no-op path) -----------------------
-# Force zeroing (the software zero used as the F/T hard-limit reference) is
-# established by an Init Motion. When the server publishes tare_state
-# "awaiting_init_motion" it is waiting for that press. In the common case the arm
-# is ALREADY parked at the configured init pose when the stack starts, so the
-# server's Init Motion no-op path (measured joints within noop_tol_deg of the
-# goal) tares WITHOUT any motion. This auto-presses Init Motion once at startup
-# in exactly that no-motion case so the operator does not have to.
-#
-# SAFETY: the at-init tolerance MUST stay <= the server's EFFECTIVE Init Motion
-# no-op tolerance, which is max(init_motion_planner.noop_tol_deg,
-# waypoint_tol_deg) (NOT noop_tol_deg alone). That is the guarantee that a GUI
-# "already at init" verdict also makes the server take the no-op path; if the arm
-# is NOT at init, no auto-press is sent and the arm never moves on its own. The
-# tolerance is read from the server config so it tracks the site's real no-op
-# band (a parked arm typically drifts ~1 deg from the saved init pose via servo
-# settling / gravity sag, which a fixed sub-deg tolerance would never match).
-#
-# NO FALLBACK / fail-closed: if the server no-op tolerance cannot be read, the
-# feature does NOT fire — a guessed tolerance could let the GUI auto-press when
-# the server would actually plan a move. RB_GUI_STARTUP_INIT_TARE=0 disables it.
-_STARTUP_INIT_TARE_TOL_MARGIN_DEG = 0.1  # drift guard below the server no-op band
-_AWAITING_INIT_MOTION_TARE_STATE = "awaiting_init_motion"
-
-
-def _server_init_noop_tol_deg() -> float | None:
-    """The server's EFFECTIVE Init Motion no-op tolerance —
-    max(init_motion_planner.noop_tol_deg, waypoint_tol_deg) — read from the server
-    config at RB_GUI_SERVER_CONFIG_PATH. None when unavailable/unparseable (the
-    caller must fail closed; there is no assumed default)."""
-    path = os.environ.get("RB_GUI_SERVER_CONFIG_PATH", "").strip()
-    if not path:
-        return None
-    try:
-        import yaml  # local import: optional dependency used only here
-
-        with open(path, encoding="utf-8") as handle:
-            cfg = yaml.safe_load(handle)
-        ip = cfg["safety"]["init_motion_planner"]
-        tol = max(
-            float(ip.get("noop_tol_deg", 0.0)),
-            float(ip.get("waypoint_tol_deg", 0.0)),
-        )
-    except Exception:  # noqa: BLE001 - unreadable config -> fail closed (None)
-        return None
-    return tol if math.isfinite(tol) and tol > 0.0 else None
-
-
-def _startup_init_tare_tol_deg() -> float | None:
-    """GUI at-init tolerance for the startup auto-tare, or None when it cannot be
-    determined from the server config. Kept within the server's effective no-op
-    band (minus a small drift margin) so a GUI 'already at init' verdict always
-    coincides with the server's no-motion no-op path. There is deliberately NO
-    fixed fallback: an unreadable server config returns None and the auto-tare
-    does not fire (fail-closed). Honors RB_GUI_STARTUP_INIT_TARE_TOL_DEG but never
-    above the safe cap."""
-    server_tol = _server_init_noop_tol_deg()
-    if server_tol is None:
-        return None
-    safe_cap = max(0.05, server_tol - _STARTUP_INIT_TARE_TOL_MARGIN_DEG)
-    return min(_env_positive_float("RB_GUI_STARTUP_INIT_TARE_TOL_DEG", safe_cap), safe_cap)
-
-
-def _joints_within_tol(
-    measured: tuple[float, ...] | None,
-    target: tuple[float, ...] | None,
-    tol_deg: float,
-) -> bool:
-    if not measured or not target or len(measured) != len(target):
-        return False
-    return all(
-        math.isfinite(m) and math.isfinite(t) and abs(m - t) <= tol_deg
-        for m, t in zip(measured, target)
-    )
-
-
-def _arm_awaiting_init_tare(arm: ArmSnapshot | None) -> bool:
-    """True when the server is waiting for an Init Motion to establish this arm's
-    force software zero (auto-tare enabled, not yet valid, awaiting init motion)."""
-    ft = getattr(arm, "force_torque", None) if arm is not None else None
-    if ft is None:
-        return False
-    return (
-        bool(ft.auto_tare_enabled)
-        and not bool(ft.tare_valid)
-        and ft.tare_state == _AWAITING_INIT_MOTION_TARE_STATE
-    )
-
-
-def _startup_init_tare_arms(
-    latest: StateSnapshot | None,
-    stale: bool,
-    init_left_deg: tuple[float, ...] | None,
-    init_right_deg: tuple[float, ...] | None,
-    tol_deg: float,
-) -> str | None:
-    """Arm selector ('both'/'left'/'right') for an automatic startup Init Motion
-    that establishes the force software zero WITHOUT motion, or None.
-
-    An arm qualifies only when it is BOTH (a) already at its configured init pose
-    within tol_deg — so the server takes the no-op path and never plans a move —
-    AND (b) awaiting an Init Motion to auto-tare. Returns None on missing/stale
-    state or when no arm qualifies, so it can never trigger a move."""
-    if latest is None or stale:
-        return None
-    left_ok = (
-        init_left_deg is not None
-        and _arm_awaiting_init_tare(latest.left)
-        and _joints_within_tol(
-            getattr(latest.left, "q_actual_deg", None), init_left_deg, tol_deg
-        )
-    )
-    right_ok = (
-        init_right_deg is not None
-        and _arm_awaiting_init_tare(latest.right)
-        and _joints_within_tol(
-            getattr(latest.right, "q_actual_deg", None), init_right_deg, tol_deg
-        )
-    )
-    if left_ok and right_ok:
-        return "both"
-    if left_ok:
-        return "left"
-    if right_ok:
-        return "right"
-    return None
-
-
-def _maybe_auto_init_tare_on_startup(
-    handles: dict[str, Any],
-    safety: OperatorSafety,
-    latest: StateSnapshot | None,
-    stale: bool,
-    init_motion_disabled: bool,
-) -> None:
-    """Press Init Motion once at startup when the arm is already at the init pose,
-    so the force software zero (auto-tare) is established without operator action
-    and without any motion. At most one attempt per session; strictly gated so it
-    can never plan a move. Disabled with RB_GUI_STARTUP_INIT_TARE=0."""
-    if _cog_session_active(handles):
-        return
-    if handles.get("_auto_init_tare_done"):
-        return
-    if not _env_bool("RB_GUI_STARTUP_INIT_TARE", True):
-        handles["_auto_init_tare_done"] = True
-        return
-    if init_motion_disabled:
-        return  # init motion not commandable yet -> retry on a later tick
-    tol_deg = _startup_init_tare_tol_deg()
-    if tol_deg is None:
-        # Fail-closed: without the server's no-op tolerance we cannot guarantee a
-        # no-motion press, so auto-tare stays off this session (manual Init Motion
-        # remains the fallback). This is a fixed condition -> stop re-checking.
-        handles["_auto_init_tare_done"] = True
-        print(
-            "[rb_gui] startup auto-tare disabled: could not read the server "
-            "init-motion no-op tolerance from RB_GUI_SERVER_CONFIG_PATH; "
-            "press Init Motion manually",
-            flush=True,
-        )
-        return
-    arms = _startup_init_tare_arms(
-        latest,
-        stale,
-        safety.init_left_joint_deg,
-        safety.init_right_joint_deg,
-        tol_deg,
-    )
-    if arms is None:
-        return  # no arm both at-init and awaiting tare -> never force a move
-    # A qualifying arm exists: this is the intended no-motion tare. Attempt once
-    # (mark done regardless of the send outcome so a persistent block, e.g. a
-    # foreign lease, does not spam) and leave the manual button as the fallback.
-    # Guard the send: this runs inside the GUI update loop, so a send exception
-    # must not tear the loop down.
-    handles["_auto_init_tare_done"] = True
-    try:
-        ok, message = _send_arm_init_override(
-            safety, handles.get("scene", {}), handles, arms
-        )
-    except Exception as exc:  # noqa: BLE001 - never crash the update loop
-        ok, message = False, f"send raised {type(exc).__name__}: {exc}"
-    text = f"auto Init Motion tare ({arms}) at startup: {message}"
-    if "last_action" in handles:
-        handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + text
-    print(f"[rb_gui] {text}", flush=True)
 
 
 def _capture_waypoint(handles: dict[str, Any], store: StateStore, name: str) -> tuple[bool, str]:
@@ -3120,11 +2679,6 @@ def build_gui(
             "User Safety floor", initial_value="user floor: no state", disabled=True
         )
         handles["fk_status"] = server.gui.add_text("FK/TCP", initial_value="FK: no state", disabled=True)
-        handles["force_status"] = server.gui.add_text(
-            "F/T + force controller",
-            initial_value="Force: no state",
-            disabled=True,
-        )
         handles["tcp_tracking"] = server.gui.add_text("TCP tracking", initial_value="TCP tracking: no state", disabled=True)
         handles["pgmode_status"] = server.gui.add_text("pgmode simulation", initial_value="pgmode_sim: no state", disabled=True)
         handles["circle_overlay"] = server.gui.add_text(
@@ -3141,7 +2695,6 @@ def build_gui(
         chunk_overlay_history_count = _gui_setting_int(_ov, "chunk_overlay_history_count", 12)
         tcp_gizmo_visible = _gui_setting_bool(_ov, "tcp_gizmo_visible", True)
         ft_sensor_gizmo_visible = _gui_setting_bool(_ov, "ft_sensor_gizmo_visible", True)
-        ft_control_gizmo_visible = _gui_setting_bool(_ov, "ft_control_gizmo_visible", True)
         tcp_trail_limit = _gui_setting_int(_ov, "tcp_trail_limit", 600)
         if chunk_overlay_axes_stride <= 0:
             chunk_overlay_axes_stride = 2
@@ -3304,22 +2857,7 @@ def build_gui(
                     "ft_sensor_gizmo_visible", handles["ft_sensor_gizmo_visible"]
                 )
 
-            handles["ft_control_gizmo_toggle"] = server.gui.add_checkbox(
-                "F/T runtime control frame(TCP origin) 및 force 표시",
-                initial_value=ft_control_gizmo_visible,
-            )
-
-            @handles["ft_control_gizmo_toggle"].on_update
-            def _(_: Any) -> None:
-                handles["ft_control_gizmo_visible"] = bool(
-                    handles["ft_control_gizmo_toggle"].value
-                )
-                _update_gui_setting(
-                    "ft_control_gizmo_visible", handles["ft_control_gizmo_visible"]
-                )
-
         handles["ft_sensor_gizmo_visible"] = ft_sensor_gizmo_visible
-        handles["ft_control_gizmo_visible"] = ft_control_gizmo_visible
 
         handles["ops"] = server.gui.add_text(
             "Container ops",
@@ -3623,142 +3161,6 @@ def build_gui(
                     handles["waypoint_status"].value = f"deleted '{info}'; {_persist_waypoints(handles)}"
                 else:
                     handles["waypoint_status"].value = info
-
-        with _op_tabs.add_tab("CoG / Gravity model"):
-            handles["cog_note"] = server.gui.add_text(
-                "Payload CoG identification",
-                initial_value=(
-                    "한 팔씩 saved joint waypoints를 순서대로 실행합니다. Start는 lease만 요청하고 "
-                    "움직이지 않습니다. Run/Continue를 누르는 동안에만 이동/샘플링합니다. "
-                    "컨트롤러 보상 잔차 모델은 물리 CoG가 아니며 결과는 항상 "
-                    "PROVISIONAL / NOT APPLIED 입니다."
-                ),
-                disabled=True,
-            )
-            # A dropdown is intentional here: unlike viser button groups it
-            # supports both an explicit initial value and disabling the arm
-            # selector while an identification session is active.
-            handles["cog_arm"] = server.gui.add_dropdown(
-                "Active arm", ("left", "right"), initial_value="right"
-            )
-            handles["cog_prefix"] = server.gui.add_text(
-                "Waypoint prefix", initial_value="joint"
-            )
-            handles["cog_preflight"] = server.gui.add_text(
-                "Preflight", initial_value="Refresh/Validate before Start", disabled=True
-            )
-            handles["cog_status"] = server.gui.add_text(
-                "Session", initial_value="state=idle", disabled=True
-            )
-            handles["cog_pose_status"] = server.gui.add_text(
-                "Pose states", initial_value="no frozen waypoint list", disabled=True
-            )
-            handles["cog_result"] = server.gui.add_text(
-                "Result",
-                initial_value="PROVISIONAL / NOT APPLIED — no calculation",
-                disabled=True,
-            )
-            handles["cog_session"] = CogGuiSession(safety)
-            store.add_update_callback(handles["cog_session"].on_snapshot)
-
-            handles["cog_refresh"] = server.gui.add_button("Refresh / Validate")
-            handles["cog_start"] = server.gui.add_button("Start (no motion)", color="green")
-            handles["cog_run"] = server.gui.add_button("Run / Continue (hold)")
-            handles["cog_retry"] = server.gui.add_button("Retry current pose")
-            handles["cog_skip"] = server.gui.add_button("Skip current pose")
-            handles["cog_stop"] = server.gui.add_button("Stop + Hold", color="red")
-            handles["cog_calculate"] = server.gui.add_button(
-                "Calculate provisional gravity model"
-            )
-            handles["cog_save"] = server.gui.add_button("Save report")
-
-            def _validate_cog_selection() -> tuple[bool, str]:
-                try:
-                    config = _cog_config_from_state(store.latest())
-                    resolved = resolve_cog_waypoints(
-                        handles.get("waypoints", {}),
-                        prefix=str(handles["cog_prefix"].value),
-                        arm=str(handles["cog_arm"].value),
-                        min_poses=config.min_poses,
-                    )
-                except ValueError as exc:
-                    return False, str(exc)
-                names = ", ".join(item.name for item in resolved)
-                return True, (
-                    f"valid: {len(resolved)} unique {handles['cog_arm'].value} pose(s), "
-                    f"natural order [{names}]; samples/pose={config.samples_per_pose}, "
-                    f"settle={config.settle_sec:g}s, tolerance={config.arrival_tolerance_deg:g}deg, "
-                    f"model={config.observation_model}"
-                )
-
-            @handles["cog_refresh"].on_click
-            def _(_: Any) -> None:
-                ok, message = _validate_cog_selection()
-                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
-
-            @handles["cog_start"].on_click
-            def _(_: Any) -> None:
-                try:
-                    config = _cog_config_from_state(store.latest())
-                    resolved = resolve_cog_waypoints(
-                        handles.get("waypoints", {}),
-                        prefix=str(handles["cog_prefix"].value),
-                        arm=str(handles["cog_arm"].value),
-                        min_poses=config.min_poses,
-                    )
-                except ValueError as exc:
-                    ok, message = False, str(exc)
-                else:
-                    ok, message = handles["cog_session"].start(
-                        arm=str(handles["cog_arm"].value),
-                        waypoints=resolved,
-                        config=config,
-                    )
-                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
-                handles["cog_status"].value = _format_cog_status(
-                    handles["cog_session"].status()
-                )
-                if ok:
-                    _update_cog_panel(handles, store.latest(), stale=store.is_stale())
-
-            @handles["cog_run"].on_hold(callback_hz=10.0)
-            def _(_: Any) -> None:
-                ok, message = handles["cog_session"].run_pulse(
-                    store.latest(), stale=store.is_stale()
-                )
-                handles["cog_status"].value = _format_cog_status(
-                    handles["cog_session"].status()
-                )
-                if not ok:
-                    handles["cog_preflight"].value = "BLOCKED: " + message
-
-            @handles["cog_retry"].on_click
-            def _(_: Any) -> None:
-                ok, message = handles["cog_session"].retry()
-                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
-
-            @handles["cog_skip"].on_click
-            def _(_: Any) -> None:
-                ok, message = handles["cog_session"].skip()
-                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
-
-            @handles["cog_stop"].on_click
-            def _(_: Any) -> None:
-                ok, message = handles["cog_session"].stop()
-                handles["cog_preflight"].value = ("OK: " if ok else "WARNING: ") + message
-
-            @handles["cog_calculate"].on_click
-            def _(_: Any) -> None:
-                ok, message = handles["cog_session"].calculate(_cog_reports_root())
-                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
-                handles["cog_result"].value = _format_cog_result(
-                    handles["cog_session"].status()
-                )
-
-            @handles["cog_save"].on_click
-            def _(_: Any) -> None:
-                ok, message = handles["cog_session"].save(_cog_reports_root())
-                handles["cog_preflight"].value = ("OK: " if ok else "BLOCKED: ") + message
 
         with _op_tabs.add_tab("안전"):
             stand_floor_config_enabled = server_safety_constraint_config_enabled(
@@ -5636,16 +5038,6 @@ def update_gui(
     # focused, so a periodic repaint never clobbers a value the operator is typing).
     handles["_latest_state"] = latest
     handles["_state_stale"] = stale
-    # One no-motion Init Motion press at startup when already parked at the init
-    # pose, so force auto-tare (the software zero) is established without the
-    # operator pressing Init Motion. Strictly gated so it can never plan a move.
-    _maybe_auto_init_tare_on_startup(
-        handles,
-        safety,
-        latest,
-        stale,
-        init_motion_disabled=bool(disabled_states.get("init_motion", True)),
-    )
     if "tcp_ptp_axis_vec" in handles:
         _refresh_tcp_ptp_axis_fields(handles)
     readiness = safety.readiness()
@@ -5655,7 +5047,6 @@ def update_gui(
     _update_recording_panel(handles, latest, stale=stale)
     _update_spacemouse_panel(handles)
     _update_arm_init_panel(handles, latest, stale=stale)
-    _update_cog_panel(handles, latest, stale=stale)
     if latest is None:
         _update_realtime_health(
             handles,
@@ -5687,8 +5078,6 @@ def update_gui(
         update_user_floor_plane(handles.get("scene", {}), None)
         if "fk_status" in handles:
             handles["fk_status"].value = _format_fk_status(None, stale=True)
-        if "force_status" in handles:
-            handles["force_status"].value = _format_force_status(None, stale=True)
         if "tcp_tracking" in handles:
             handles["tcp_tracking"].value = _format_tcp_tracking_status(
                 None,
@@ -5829,8 +5218,6 @@ def update_gui(
                 handles["user_floor_set_status"].value = ("restoring... " if ok else "restore failed: ") + msg
     if "fk_status" in handles:
         handles["fk_status"].value = _format_fk_status(latest, stale=stale)
-    if "force_status" in handles:
-        handles["force_status"].value = _format_force_status(latest, stale=stale)
     if "tcp_tracking" in handles:
         handles["tcp_tracking"].value = _format_tcp_tracking_status(
             latest,
@@ -5865,7 +5252,6 @@ def update_gui(
         latest,
         stale=stale,
         show=bool(handles.get("ft_sensor_gizmo_visible", True)),
-        show_control=bool(handles.get("ft_control_gizmo_visible", True)),
     )
     # After markers (TCP frames now posed): toggle the orange floor-check points,
     # which are parented under /stand/<arm>_tcp and ride those poses.
