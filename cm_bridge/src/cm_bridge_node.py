@@ -175,11 +175,18 @@ class StateRepublisher:
         self._seq = 0
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                          history=HistoryPolicy.KEEP_LAST, depth=1)
+        from geometry_msgs.msg import WrenchStamped
+        self._wrench = {"left": None, "right": None}
         for side in ("left", "right"):
             node.create_subscription(
                 JointState, f"/{platform}/{side}/act/joint",
                 lambda m, s=side: self._q.__setitem__(
                     s, [math.degrees(v) for v in m.position[:6]]), qos)
+            node.create_subscription(
+                WrenchStamped, f"/{platform}/{side}/act/wrench_af",
+                lambda m, s=side: self._wrench.__setitem__(
+                    s, [m.wrench.force.x, m.wrench.force.y, m.wrench.force.z,
+                        m.wrench.torque.x, m.wrench.torque.y, m.wrench.torque.z]), qos)
             node.create_subscription(
                 PoseStamped, f"/{platform}/{side}/act/pose",
                 lambda m, s=side: self._tcp.__setitem__(s, m.pose), qos)
@@ -213,6 +220,8 @@ class StateRepublisher:
         g = getattr(self, "gripper", None)
         if g is not None and g.position[side] is not None:
             out["gripper"] = {"gripper_position": g.position[side]}
+        if self._wrench[side] is not None:
+            out["wrench_af"] = self._wrench[side]
         return out
 
     def _publish(self):
