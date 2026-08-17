@@ -49,12 +49,6 @@ void CartesianChunkFollower::deactivate() {
   diag_.infeasible_fault = false;
   diag_.actual_lead_fault = false;
   actual_lead_checked_segment_ = -1;
-  loading_dir_valid_ = false;
-  contact_normal_owned_ = false;
-  prev_loading_dir_valid_ = false;
-  contact_shift_.setZero();
-  diag_.loading_projection_active = false;
-  diag_.contact_shift_m = 0.0;
 }
 
 void CartesianChunkFollower::pauseForHold(double now_sec) {
@@ -100,15 +94,6 @@ HoldResumeResult CartesianChunkFollower::resumeFromHold(
   return HoldResumeResult::WarmResumed;
 }
 
-void CartesianChunkFollower::setExternalReaction(
-    const Eigen::Vector3d& loading_dir_stand,
-    bool valid,
-    bool contact_normal_owned) {
-  loading_dir_stand_ = loading_dir_stand;
-  loading_dir_valid_ = valid;
-  contact_normal_owned_ = valid && contact_normal_owned;
-}
-
 void CartesianChunkFollower::reanchor(const Pose6D& reference) {
   hold_paused_ = false;
   hold_pause_start_sec_ = 0.0;
@@ -139,7 +124,6 @@ void CartesianChunkFollower::submitFrame(const ChunkFrame& frame,
     last_pose_ = current_pose;
     current_grip_ = window_.gripAt(window_.index());
     active_ = true;
-    contact_shift_.setZero();  // fresh anchor: no accumulated plan shift
   }
   // else: preempt — window frame swapped, chained core state kept. The next
   // boundary builds toward the new frame's poses from the current state.
@@ -168,9 +152,7 @@ void CartesianChunkFollower::submitDeltaFrame(const ChunkFrame& frame,
   // blurs the wrist cameras the policy is conditioned on.
   //
   // core_.p0() is exactly where the next solve begins, so knot[0] = p0 (+) d is a true
-  // one-step advance regardless of submit phase. Both anchors already carry the
-  // loading-projection shift (buildSample adds contact_shift_ before the solve), so the
-  // debt-clearing below is unaffected.
+  // one-step advance regardless of submit phase.
   Pose6D cursor = active_ ? tangentPose(core_.p0()) : current_pose;
   for (const Vec6& d : frame.delta) {
     Pose6D delta;
@@ -179,10 +161,6 @@ void CartesianChunkFollower::submitDeltaFrame(const ChunkFrame& frame,
     cursor = math::composeDeltaLocal(cursor, delta);
     integrated.pose.push_back(cursor);
   }
-  // The new knots were just integrated from the EMITTED pose (which already
-  // sits where the loading projection left it), so the accumulated plan shift
-  // is baked into the new plan: clear the debt for the fresh window.
-  contact_shift_.setZero();
   submitFrame(integrated, current_pose);
 }
 
@@ -236,62 +214,6 @@ void CartesianChunkFollower::stepToNextSegment() {
   if (window_.active() && window_.hasTailStep()) {
     const std::size_t k = window_.index();
     current_grip_ = window_.gripAt(k);       // gripper phase-locked to consumed step
-    // Wrench-gated loading projection: before solving toward this segment's
-    // knot, remove the component of the remaining plan advance that presses
-    // into a loaded contact (same projection convention as the servo loop's
-    // policy-delta path). The removal accumulates as a plan shift applied to
-    // every knot in buildSample, so the chained core state stays continuous,
-    // tangential motion passes through, and release causes no snap-back.
-    diag_.loading_projection_active = false;
-    if (loading_dir_valid_) {
-      const double r2 = loading_dir_stand_.squaredNorm();
-      // Direction-consistency gate: only project when the loading direction
-      // agrees with the previous segment's (dot > 0). A real environmental
-      // contact pushes in a stable direction; a grasped payload's inertial
-      // wrench flips sign with the motion and must never yank the plan.
-      const bool consistent = prev_loading_dir_valid_ &&
-          loading_dir_stand_.dot(prev_loading_dir_) > 0.0;
-      // Quasi-static gate: during fast transit the measured wrench carries a
-      // real m*a inertial component the gravity map cannot remove; a real
-      // surface press happens at near-zero plan acceleration. Above the bound
-      // the projection stands down (baseline follower; hard limits still own
-      // impact protection).
-      const auto& a0 = core_.a0();
-      const double plan_accel =
-          std::sqrt(a0[0] * a0[0] + a0[1] * a0[1] + a0[2] * a0[2]);
-      const bool quasi_static =
-          plan_accel <= cfg_.loading_projection_max_accel_m_s2;
-      // A debounced contact_force episode is itself evidence of real contact,
-      // so only that episode-scoped ownership may bypass the quasi-static gate.
-      // Direction consistency and the per-segment removal clamp remain active.
-      if (r2 > 1e-12 && consistent &&
-          (quasi_static || contact_normal_owned_)) {
-        const auto& p0 = core_.p0();
-        const Eigen::Vector3d advance =
-            positionOf(window_.poseAt(k)) + contact_shift_ -
-            Eigen::Vector3d(p0[0], p0[1], p0[2]);
-        const double loading = loading_dir_stand_.dot(advance);
-        if (loading > 0.0 ||
-            (contact_normal_owned_ && std::abs(loading) > 0.0)) {
-          Eigen::Vector3d removal = loading_dir_stand_ * (loading / r2);
-          // Bound the per-segment plan pull to one segment of travel at the
-          // linear velocity limit: the plan cannot have been advancing faster,
-          // so a larger removal only encodes stale lag, not fresh loading.
-          const double max_step = cfg_.lin.v_max * seg_dt_;
-          const double removal_norm = removal.norm();
-          if (removal_norm > max_step && removal_norm > 1e-12) {
-            removal *= max_step / removal_norm;
-          }
-          contact_shift_ -= removal;
-          diag_.loading_projection_active = true;
-        }
-      }
-      prev_loading_dir_ = loading_dir_stand_;
-      prev_loading_dir_valid_ = r2 > 1e-12;
-    } else {
-      prev_loading_dir_valid_ = false;
-    }
-    diag_.contact_shift_m = contact_shift_.norm();
     const BoundarySample<6> sample = buildSample(k);
     diag_.last_solve = core_.solve(sample);
     const auto& realized = core_.p0();
@@ -325,8 +247,6 @@ void CartesianChunkFollower::stepToNextSegment() {
     // at the current pose (jerk-limited hold), and flag the stall.
     diag_.last_solve = ringDown();
     diag_.stall = true;
-    diag_.loading_projection_active = false;
-    diag_.contact_shift_m = contact_shift_.norm();
     diag_.projection_error_m = 0.0;
     diag_.projection_error_rad = 0.0;
     diag_.consecutive_projection_errors = 0;
@@ -354,11 +274,9 @@ BoundarySample<6> CartesianChunkFollower::buildSample(std::size_t k) const {
   const Eigen::Vector3d posm1 = positionOf(pm1), posk = positionOf(pk), posp1 = positionOf(pp1);
   const Eigen::Vector3d rm1 = rotvec(pm1), rk = rotvec(pk), rp1 = rotvec(pp1);
   for (int d = 0; d < 3; ++d) {
-    // Positions carry the accumulated loading-projection shift; a constant
-    // shift leaves the finite-difference velocity/accel targets unchanged.
-    vm1[d] = posm1[d] + contact_shift_[d];
-    vk[d] = posk[d] + contact_shift_[d];
-    vp1[d] = posp1[d] + contact_shift_[d];
+    vm1[d] = posm1[d];
+    vk[d] = posk[d];
+    vp1[d] = posp1[d];
     vm1[d + 3] = rm1[d]; vk[d + 3] = rk[d]; vp1[d + 3] = rp1[d];
   }
 

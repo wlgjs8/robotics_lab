@@ -25,9 +25,6 @@
 - `docs/camera_sync.md`  
   RealSense sync strategy; camera stays out of the servo process.
 
-- `docs/force_control.md`  
-  Optional force/admittance design and integration plan.
-
 - `docs/config_examples.md`  
   Config notes.
 

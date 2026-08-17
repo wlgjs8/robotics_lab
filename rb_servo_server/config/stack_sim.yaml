@@ -338,66 +338,6 @@ logging:
   flush_period_ms: 100
   queue_capacity: 4096
 
-force_torque:
-  source: rbpodo_eft
-  # No deterministic F/T gravity fixture exists in controller pgmode.
-  payload_identification:
-    enable: false
-  left: &ft_arm_disabled
-    enable: false
-    frame_configured: false
-    sensor_identity: ""
-    calibration_id: ""
-    freshness_source: source_time
-    max_sample_age_sec: 0.02
-    max_source_stall_sec: 0.02
-    control_lpf_alpha: 0.2
-    max_tcp_speed_m_s: 0.0
-    max_tcp_accel_m_s2: 0.0
-    auto_tare_after_init_motion: false
-    auto_tare_settle_sec: 0.5
-    residual_tare_min_samples: 50
-    residual_tare_max_force_stddev_n: 0.1
-    residual_tare_max_torque_stddev_nm: 0.01
-    T_tcp_sensor: [0.0, 0.0, -0.202642, 0.0, 0.0, 1.5707963267948966]
-    sensor_bias: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    gravity_compensation_model: rigid_payload
-    payload_mass_kg: 0.0
-    payload_com_tcp_m: [0.0, 0.0, 0.0]
-    residual_tare_tcp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-  right: *ft_arm_disabled
-
-force_control:
-  provider: null
-  enable: false
-  operating_mode: monitor
-  allow_in_real: false
-  supervised_experimental_real: false
-  update_rate_hz: 500
-  left: &force_arm_disabled
-    enable: false
-    surface_source: floor_constraint
-    target_force_n: 0.0
-    contact_enter_force_n: 0.0
-    contact_release_force_n: 0.0
-    force_deadband_n: 0.0
-    hard_normal_force_n: 0.0
-    hard_force_norm_n: 0.0
-    hard_torque_norm_nm: 0.0
-    debounce_samples: 1
-    release_dwell_sec: 0.0
-  right: *force_arm_disabled
-  normal_admittance:
-    virtual_mass_kg: 5.0
-    damping_n_s_m: 80.0
-    stiffness_n_m: 0.0
-    max_unload_offset_m: 0.01
-    max_normal_velocity_m_s: 0.02
-    max_normal_acceleration_m_s2: 0.2
-    max_normal_jerk_m_s3: 2.0
-    max_normal_step_m: 0.001
-    max_energy_j: 2.0
-
 kinematics:
   enable: true
   provider: pinocchio

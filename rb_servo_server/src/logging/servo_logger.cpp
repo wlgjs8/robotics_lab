@@ -134,8 +134,6 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_follower_actual_lead_m"
        << ',' << side << "_follower_actual_lead_rad"
        << ',' << side << "_follower_actual_lead_error_count"
-       << ',' << side << "_follower_loading_projection_active"
-       << ',' << side << "_follower_contact_shift_m"
        << ',' << side << "_follower_reanchor_count"
        << ',' << side << "_follower_warm_resume_count"
        << ',' << side << "_safety_intervention_recent"
@@ -285,117 +283,6 @@ void writeInitMotionHeader(std::ostream& os) {
        << ",init_motion_aggregate_goal_margin_deficit_m"
        << ",self_collision_min_clearance_m"
        << ",self_collision_pair";
-}
-
-void writeWrenchHeader(std::ostream& os, const char* side, const char* name) {
-    os << ',' << side << '_' << name << "_fx_n"
-       << ',' << side << '_' << name << "_fy_n"
-       << ',' << side << '_' << name << "_fz_n"
-       << ',' << side << '_' << name << "_tx_nm"
-       << ',' << side << '_' << name << "_ty_nm"
-       << ',' << side << '_' << name << "_tz_nm";
-}
-
-void writeForceTelemetryHeader(std::ostream& os, const char* side) {
-    os << ',' << side << "_ft_enabled"
-       << ',' << side << "_ft_source"
-       << ',' << side << "_ft_source_assurance"
-       << ',' << side << "_ft_sensor_health_verified"
-       << ',' << side << "_ft_safety_rated";
-    writeWrenchHeader(os, side, "ft_raw_sensor");
-    os << ',' << side << "_ft_t_tcp_sensor_x_m"
-       << ',' << side << "_ft_t_tcp_sensor_y_m"
-       << ',' << side << "_ft_t_tcp_sensor_z_m"
-       << ',' << side << "_ft_t_tcp_sensor_rx_rad"
-       << ',' << side << "_ft_t_tcp_sensor_ry_rad"
-       << ',' << side << "_ft_t_tcp_sensor_rz_rad";
-    writeWrenchHeader(os, side, "ft_wrench_tcp");
-    os << ',' << side << "_ft_gravity_tcp_x_m_s2"
-       << ',' << side << "_ft_gravity_tcp_y_m_s2"
-       << ',' << side << "_ft_gravity_tcp_z_m_s2";
-    os << ',' << side << "_ft_gravity_compensation_model"
-       << ',' << side << "_ft_gravity_compensation_calibration_id";
-    writeWrenchHeader(os, side, "ft_modeled_gravity_wrench");
-    writeWrenchHeader(os, side, "ft_fast_external");
-    writeWrenchHeader(os, side, "ft_control_external");
-    os << ',' << side << "_ft_healthy"
-       << ',' << side << "_ft_stale"
-       << ',' << side << "_ft_freshness_value"
-       << ',' << side << "_ft_freshness_advanced"
-       << ',' << side << "_ft_reason"
-       << ',' << side << "_ft_auto_tare_enabled"
-       << ',' << side << "_ft_tare_valid"
-       << ',' << side << "_ft_tare_state"
-       << ',' << side << "_ft_tare_sample_count"
-       << ',' << side << "_ft_tare_generation"
-       << ',' << side << "_ft_tare_reason"
-       << ',' << side << "_ft_payload_identification_inhibit"
-       << ',' << side << "_ft_joint_target_profile";
-    writeWrenchHeader(os, side, "ft_residual_tare_tcp");
-    os
-       << ',' << side << "_force_control_enabled"
-       << ',' << side << "_force_control_operating_mode"
-       << ',' << side << "_force_control_state"
-       << ',' << side << "_force_control_surface_source"
-       << ',' << side << "_force_control_compliance_frame"
-       << ',' << side << "_force_control_compliance_frame_pose_valid";
-    writePoseHeader(os, side, "force_control_compliance_frame_actual_stand");
-    os
-       << ',' << side << "_force_control_normal_stand_x"
-       << ',' << side << "_force_control_normal_stand_y"
-       << ',' << side << "_force_control_normal_stand_z"
-       << ',' << side << "_force_control_contact_active"
-       << ',' << side << "_force_control_normal_contact_active"
-       << ',' << side << "_force_control_transverse_contact_active"
-       << ',' << side << "_force_control_rotational_contact_active"
-       << ',' << side << "_force_control_compliance_active"
-       << ',' << side << "_force_control_normal_regulating"
-       << ',' << side << "_force_control_transverse_regulating"
-       << ',' << side << "_force_control_rotational_regulating"
-       << ',' << side << "_force_control_loading_projection_active";
-    writeWrenchHeader(os, side, "force_control_control_wrench_surface");
-    writeWrenchHeader(os, side, "force_control_control_wrench_compliance");
-    writeWrenchHeader(os, side, "force_control_wrench_error_surface");
-    writeWrenchHeader(os, side, "force_control_wrench_error_compliance");
-    writeDeltaTwistVecHeader(os, side, "force_control_compliance_offset_surface");
-    writeDeltaTwistVecHeader(os, side, "force_control_compliance_velocity_surface");
-    writeDeltaTwistVecHeader(os, side, "force_control_compliance_acceleration_surface");
-    writeDeltaTwistVecHeader(os, side, "force_control_raw_policy_delta_surface");
-    writeDeltaTwistVecHeader(os, side, "force_control_accepted_policy_delta_surface");
-    writePoseHeader(os, side, "force_control_compliance_equilibrium_stand");
-    os
-       << ',' << side << "_force_control_compliance_equilibrium_source"
-       << ',' << side << "_force_control_compliance_recenter_active"
-       << ',' << side << "_force_control_compliance_translation_recenter_coupled"
-       << ',' << side << "_force_control_compliance_rotation_recenter_coupled"
-       << ',' << side << "_force_control_compliance_translation_recenter_deferred"
-       << ',' << side << "_force_control_compliance_rotation_recenter_deferred"
-       << ',' << side << "_force_control_limit_axis_x"
-       << ',' << side << "_force_control_limit_axis_y"
-       << ',' << side << "_force_control_limit_axis_z"
-       << ',' << side << "_force_control_limit_axis_roll"
-       << ',' << side << "_force_control_limit_axis_pitch"
-       << ',' << side << "_force_control_limit_axis_yaw"
-       << ',' << side << "_force_control_limit_reason"
-       << ',' << side << "_force_control_measured_normal_force_n"
-       << ',' << side << "_force_control_fast_normal_force_n"
-       << ',' << side << "_force_control_fast_force_norm_n"
-       << ',' << side << "_force_control_fast_force_rate_n_per_ms"
-       << ',' << side << "_force_control_fast_torque_norm_nm"
-       << ',' << side << "_force_control_contact_threshold_exceeded"
-       << ',' << side << "_force_control_hard_limit_threshold_exceeded"
-       << ',' << side << "_force_control_hard_limit_sample_count"
-       << ',' << side << "_force_control_hard_limit_exceeded"
-       << ',' << side << "_force_control_target_force_n"
-       << ',' << side << "_force_control_correction_m"
-       << ',' << side << "_force_control_velocity_m_s"
-       << ',' << side << "_force_control_acceleration_m_s2"
-       << ',' << side << "_force_control_energy_j"
-       << ',' << side << "_force_control_saturated"
-       << ',' << side << "_force_control_proposal_valid"
-       << ',' << side << "_force_control_proposal_committed"
-       << ',' << side << "_force_control_fault_reason"
-       << ',' << side << "_force_control_motion_epoch";
 }
 
 }  // namespace
@@ -557,8 +444,6 @@ void ServoLogger::writeHeader() {
     file_ << ",sched_wake_time_ns,prev_sleep_enter_time_ns"
              ",wake_latency_us,sleep_entry_margin_us"
              ",left_pre_send_us,right_pre_send_us";
-    writeForceTelemetryHeader(file_, "left");
-    writeForceTelemetryHeader(file_, "right");
     file_ << '\n';
 }
 
@@ -602,135 +487,8 @@ std::string csvEscape(const std::string& value) {
     return out;
 }
 
-void writeWrenchColumns(std::ostream& os, const Wrench6D& wrench) {
-    os << ',' << wrench.fx
-       << ',' << wrench.fy
-       << ',' << wrench.fz
-       << ',' << wrench.tx
-       << ',' << wrench.ty
-       << ',' << wrench.tz;
-}
-
 void writeDeltaTwistVecColumns(std::ostream& os, const Vec6& value);
 void writePoseColumns(std::ostream& os, const std::optional<Pose6D>& pose);
-
-void writeForceTelemetryColumns(
-    std::ostream& os,
-    const ForceTorqueTelemetry& ft,
-    const ForceControlTelemetry& control
-) {
-    os << ',' << ft.enabled
-       << ',' << csvEscape(ft.source)
-       << ',' << csvEscape(ft.source_assurance)
-       << ',' << ft.sensor_health_verified
-       << ',' << ft.safety_rated;
-    writeWrenchColumns(os, ft.raw_sensor_wrench);
-    os << ',' << ft.t_tcp_sensor.x
-       << ',' << ft.t_tcp_sensor.y
-       << ',' << ft.t_tcp_sensor.z
-       << ',' << ft.t_tcp_sensor.rx
-       << ',' << ft.t_tcp_sensor.ry
-       << ',' << ft.t_tcp_sensor.rz;
-    writeWrenchColumns(os, ft.wrench_tcp);
-    os << ',' << ft.gravity_tcp[0]
-       << ',' << ft.gravity_tcp[1]
-       << ',' << ft.gravity_tcp[2];
-    os << ',' << csvEscape(ft.gravity_compensation_model)
-       << ',' << csvEscape(ft.gravity_compensation_calibration_id);
-    writeWrenchColumns(os, ft.modeled_gravity_wrench);
-    writeWrenchColumns(os, ft.fast_external_wrench);
-    writeWrenchColumns(os, ft.control_external_wrench);
-    os << ',' << ft.healthy
-       << ',' << ft.stale
-       << ',' << ft.freshness_value
-       << ',' << ft.freshness_advanced
-       << ',' << csvEscape(ft.reason)
-       << ',' << ft.auto_tare_enabled
-       << ',' << ft.tare_valid
-       << ',' << csvEscape(ft.tare_state)
-       << ',' << ft.tare_sample_count
-       << ',' << ft.tare_generation
-       << ',' << csvEscape(ft.tare_reason)
-       << ',' << ft.payload_identification_inhibit
-       << ',' << csvEscape(ft.joint_target_profile);
-    writeWrenchColumns(os, ft.residual_tare_tcp);
-    os
-       << ',' << control.enabled
-       << ',' << csvEscape(control.operating_mode)
-       << ',' << csvEscape(control.state)
-       << ',' << csvEscape(control.surface_source)
-       << ',' << csvEscape(control.compliance_frame)
-       << ',' << control.compliance_frame_pose_valid;
-    writePoseColumns(
-        os,
-        control.compliance_frame_pose_valid
-            ? std::optional<Pose6D>{control.compliance_frame_actual_stand}
-            : std::nullopt
-    );
-    os
-       << ',' << control.normal_stand[0]
-       << ',' << control.normal_stand[1]
-       << ',' << control.normal_stand[2]
-       << ',' << control.contact_active
-       << ',' << control.normal_contact_active
-       << ',' << control.transverse_contact_active
-       << ',' << control.rotational_contact_active
-       << ',' << control.compliance_active
-       << ',' << control.normal_regulating
-       << ',' << control.transverse_regulating
-       << ',' << control.rotational_regulating
-       << ',' << control.loading_projection_active;
-    writeWrenchColumns(os, control.control_wrench_surface);
-    writeWrenchColumns(os, control.control_wrench_compliance);
-    writeWrenchColumns(os, control.wrench_error_surface);
-    writeWrenchColumns(os, control.wrench_error_compliance);
-    writeDeltaTwistVecColumns(os, {
-        control.compliance_offset_surface.x,
-        control.compliance_offset_surface.y,
-        control.compliance_offset_surface.z,
-        control.compliance_offset_surface.rx,
-        control.compliance_offset_surface.ry,
-        control.compliance_offset_surface.rz,
-    });
-    writeDeltaTwistVecColumns(os, control.compliance_velocity_surface);
-    writeDeltaTwistVecColumns(os, control.compliance_acceleration_surface);
-    writeDeltaTwistVecColumns(os, control.raw_policy_delta_surface);
-    writeDeltaTwistVecColumns(os, control.accepted_policy_delta_surface);
-    writePoseColumns(os, std::optional<Pose6D>{control.compliance_equilibrium_stand});
-    os
-       << ',' << csvEscape(control.compliance_equilibrium_source)
-       << ',' << control.compliance_recenter_active
-       << ',' << control.compliance_translation_recenter_coupled
-       << ',' << control.compliance_rotation_recenter_coupled
-       << ',' << control.compliance_translation_recenter_deferred
-       << ',' << control.compliance_rotation_recenter_deferred
-       << ',' << control.compliance_limit_axes[0]
-       << ',' << control.compliance_limit_axes[1]
-       << ',' << control.compliance_limit_axes[2]
-       << ',' << control.compliance_limit_axes[3]
-       << ',' << control.compliance_limit_axes[4]
-       << ',' << control.compliance_limit_axes[5]
-       << ',' << csvEscape(control.compliance_limit_reason)
-       << ',' << control.measured_force_n
-       << ',' << control.fast_normal_force_n
-       << ',' << control.fast_force_norm_n
-       << ',' << control.fast_force_rate_n_per_ms
-       << ',' << control.fast_torque_norm_nm
-       << ',' << control.contact_threshold_exceeded
-       << ',' << control.hard_limit_threshold_exceeded
-       << ',' << control.hard_limit_sample_count
-       << ',' << control.hard_limit_exceeded
-       << ',' << control.target_force_n
-       << ',' << control.correction_m
-       << ',' << control.velocity_m_s
-       << ',' << control.acceleration_m_s2
-       << ',' << control.energy_j
-       << ',' << control.saturated
-       << ',' << control.proposal_valid
-       << ',' << control.proposal_committed
-       << ',' << csvEscape(control.fault_reason)
-       << ',' << control.motion_epoch;
-}
 
 // Per-arm Cartesian IK/solve diagnostics row values. Field order MUST match
 // writeCartesianSolveHeader (defined above, near runStamp).
@@ -875,8 +633,6 @@ void writeArmProfilingColumns(
        << ',' << telemetry.follower_actual_lead_m
        << ',' << telemetry.follower_actual_lead_rad
        << ',' << telemetry.follower_actual_lead_error_count
-       << ',' << telemetry.follower_loading_projection_active
-       << ',' << telemetry.follower_contact_shift_m
        << ',' << telemetry.follower_reanchor_count
        << ',' << telemetry.follower_warm_resume_count
        << ',' << telemetry.safety_intervention_recent
@@ -1291,8 +1047,6 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << ',' << sleep_entry_margin_us
           << ',' << left_pre_send_us
           << ',' << right_pre_send_us;
-    writeForceTelemetryColumns(file_, sample.left_force_torque, sample.left_force_control);
-    writeForceTelemetryColumns(file_, sample.right_force_torque, sample.right_force_control);
     file_ << '\n';
 }
 

@@ -17,10 +17,8 @@
 #include "rb_servo/control/cartesian_servo_controller.hpp"
 #include "rb_servo/control/command_buffer.hpp"
 #include "rb_servo/control/delta_twist_follower.hpp"
-#include "rb_servo/control/force_controller.hpp"
 #include "rb_servo/control/follower_output_smd.hpp"
 #include "rb_servo/control/joint_moving_average.hpp"
-#include "rb_servo/control/normal_force_controller.hpp"
 #include "rb_servo/control/realtime_timing.hpp"
 #include "rb_servo/control/smd_pose_tracker.hpp"
 #include "rb_servo/network/chunk_frame_receiver.hpp"
@@ -37,7 +35,6 @@
 #include "rb_servo/kinematics/i_kinematics.hpp"
 #include "rb_servo/logging/servo_logger.hpp"
 #include "rb_servo/robot/i_robot_backend.hpp"
-#include "rb_servo/sensor/ft_wrench_pipeline.hpp"
 
 namespace rb_servo {
 
@@ -320,22 +317,6 @@ private:
     bool latchChunkFollowerFaultRequests(const RobotState& left_state, const RobotState& right_state);
     void markSafetyIntervention(ArmId arm_id, uint64_t now_ns);
     bool safetyInterventionRecent(ArmId arm_id, uint64_t now_ns) const;
-    bool updateForceRuntime(
-        ArmId arm_id,
-        const RobotState& state,
-        double dt_sec,
-        uint64_t now_ns,
-        std::string* fault_reason
-    );
-    void invalidatePostInitTare(ArmId arm_id, uint64_t command_seq);
-    void beginPostInitTare(ArmId arm_id, uint64_t now_ns);
-    bool latchPayloadIdentificationInhibit(ArmId arm_id);
-    void applyForceCorrection(ArmId arm_id, ArmCommand* command);
-    void finishForceProposals(
-        bool left_accepted,
-        bool right_accepted,
-        SafetyVerdict verdict
-    );
 
 private:
     std::unique_ptr<IRobotBackend> left_robot_;
@@ -345,119 +326,7 @@ private:
 
     DualArmConfig config_;
 
-    struct ForceArmRuntime {
-        ForceTorqueTelemetry ft;
-        ForceControlTelemetry control;
-        Pose6D contact_anchor;
-        bool contact_anchor_valid = false;
-        bool normal_contact_active = false;
-        ContactForceNormalEstimator contact_force_normal_estimator;
-        double contact_cartesian_normal_offset_m = 0.0;
-        bool transverse_contact_active = false;
-        bool rotational_contact_active = false;
-        int enter_count = 0;
-        int transverse_enter_count = 0;
-        int rotational_enter_count = 0;
-        int hard_limit_count = 0;
-        // Resultant fast-force differentiator. It advances only with a fresh
-        // F/T acquisition and uses the backend sample's host timestamp, not
-        // the 500 Hz servo tick period.
-        bool fast_force_rate_initialized = false;
-        double previous_fast_force_norm_n = 0.0;
-        uint64_t previous_fast_force_sample_ns = 0;
-        // Hard-limit retreat episode (force_control.hard_limit_policy:
-        // retreat): direction is the measured stand-frame press at trigger;
-        // progress is the committed admittance-offset displacement along the
-        // escape (-press) direction since the episode started.
-        bool retreat_active = false;
-        // Braking phase: the virtual wrench ramps to zero over ~50 ms instead
-        // of stepping off — the Layer-3 envelope follows the wrench error, so
-        // a step collapse strands a fast escape state outside the shrunk
-        // envelope (2026-07-23 12:55 run: proposal-infeasible latch mid
-        // retreat as the real force decayed).
-        bool retreat_braking = false;
-        double retreat_virtual_current_n = 0.0;
-        std::array<double, 3> retreat_press_stand{{0.0, 0.0, 0.0}};
-        std::array<double, 3> retreat_start_offset{{0.0, 0.0, 0.0}};
-        uint64_t retreat_started_ns = 0;
-        int retreat_attempt_count = 0;
-        uint64_t retreat_window_start_ns = 0;
-        uint64_t release_start_ns = 0;
-        Pose6D release_hold_pose;
-        bool release_hold_pending = false;
-        bool release_hold_applied = false;
-        bool release_hold_clear_requested = false;
-        Pose6D previous_actual_pose;
-        uint64_t previous_actual_pose_ns = 0;
-        Pose6D sent_tcp_sample_older;
-        Pose6D sent_tcp_sample_newer;
-        uint64_t sent_tcp_sample_older_ns = 0;
-        uint64_t sent_tcp_sample_newer_ns = 0;
-        int sent_tcp_sample_count = 0;
-        std::optional<NormalForceControllerProposal> pending_proposal;
-        bool pending_proposal_applied = false;
-        std::optional<ForceControllerProposal> pending_cartesian_proposal;
-        bool pending_cartesian_proposal_applied = false;
-        Wrench6D control_wrench_surface;
-        Wrench6D control_wrench_compliance;
-        Vec6 actual_twist_compliance;
-        Pose6D compliance_frame_actual_stand;
-        Pose6D previous_raw_compliance_target;
-        Pose6D rolling_compliance_target;
-        bool rolling_compliance_target_valid = false;
-        std::string rolling_compliance_target_source = "unavailable";
-        Pose6D pending_previous_raw_compliance_target;
-        Pose6D pending_rolling_compliance_target;
-        bool pending_rolling_compliance_target_valid = false;
-        std::string pending_rolling_compliance_target_source = "unavailable";
-        bool compliance_hold_target_this_tick = false;
-        bool tare_valid = false;
-        bool tare_waiting_for_init_completion = false;
-        bool tare_collecting = false;
-        // Bounded auto-retry of the post-init residual tare window: a single
-        // 1 s window is spoiled by intermittent disturbances (gripper servo
-        // twitch, wrist-camera cable sway — 2026-07-23 20:33 fx stddev 1.571 N
-        // rejected one run while its 12 s-earlier twin accepted).
-        int tare_retry_count = 0;
-        uint64_t tare_not_before_ns = 0;
-        uint64_t last_init_tare_command_seq = 0;
-        uint64_t tare_generation = 0;
-        bool payload_identification_inhibit = false;
-        // Per-tick compliance frame (TCP-local) for the follower's compliance-
-        // aware actual-lead compensation; valid once the frame is resolved.
-        Pose6D t_tcp_compliance_pose;
-        bool t_tcp_compliance_valid = false;
-        // Deadband-filtered loading direction (stand frame) for the chunk
-        // follower's wrench-gated loading projection. Valid only while the
-        // pipeline is healthy and cartesian_admittance is active this tick.
-        std::array<double, 3> follower_loading_reaction_stand{{0.0, 0.0, 0.0}};
-        bool follower_loading_reaction_valid = false;
-        // contact_force episode entry direction-consistency window: the force
-        // direction at the first debounce sample; later samples must stay in a
-        // 30 deg cone or the window restarts (transit residuals rotate, real
-        // contact does not).
-        std::array<double, 3> contact_entry_first_dir{{0.0, 0.0, 0.0}};
-        bool contact_entry_first_dir_valid = false;
-        // True when the chunk follower produced this tick's Cartesian target.
-        // The rolling compliance equilibrium then adopts the follower output
-        // verbatim instead of re-projecting policy deltas: the follower's
-        // wrench-gated projection already removed contact loading, and running
-        // BOTH projections let the equilibrium and the plan drift apart
-        // (2026-07-18 14:16 run: an 11.6 mm plan-vs-equilibrium gap consumed
-        // the actual-lead budget and latched at 21.4 mm with only ~0.3 deg of
-        // real joint tracking error).
-        bool chunk_follower_drove_this_tick = false;
-        bool follower_contact_normal_owned = false;
-    };
-    FtWrenchPipeline left_ft_pipeline_;
-    FtWrenchPipeline right_ft_pipeline_;
-    NormalForceController left_normal_force_controller_;
-    NormalForceController right_normal_force_controller_;
-    ForceController left_cartesian_force_controller_;
-    ForceController right_cartesian_force_controller_;
-    ForceArmRuntime left_force_runtime_;
-    ForceArmRuntime right_force_runtime_;
-    uint64_t motion_epoch_ = 0;
+        uint64_t motion_epoch_ = 0;
 
     CommandBuffer* command_buffer_ = nullptr;
     ServoLogger* logger_ = nullptr;
@@ -844,8 +713,6 @@ private:
         double follower_actual_lead_m = 0.0;
         double follower_actual_lead_rad = 0.0;
         int follower_actual_lead_error_count = 0;
-        bool follower_loading_projection_active = false;
-        double follower_contact_shift_m = 0.0;
         std::uint64_t follower_reanchor_count = 0;
         std::uint64_t follower_warm_resume_count = 0;
         bool safety_intervention_recent = false;

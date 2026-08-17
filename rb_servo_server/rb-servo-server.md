@@ -240,50 +240,12 @@ Required features:
 
 Do not call Rainbow FK/IK inside the high-rate loop except for debugging. Use local kinematics in the control loop.
 
-## Milestone 5: force control integration
+## Milestone 5: force control integration (removed)
 
-Force control is integrated into `DualArmServoLoop` and disabled in tracked
-configs. Site-local profiles can select monitor, guard, or guarded normal
-admittance. Physical enforcement remains unaccepted until the F/T runbook
-evidence is complete.
-
-Use files:
-
-- `include/rb_servo/control/force_controller.hpp`
-- `src/control/force_controller.cpp`
-- `include/rb_servo/control/normal_force_controller.hpp`
-- `src/control/normal_force_controller.cpp`
-- `include/rb_servo/sensor/ft_wrench_pipeline.hpp`
-- `src/sensor/ft_wrench_pipeline.cpp`
-- `include/rb_servo/sensor/i_force_torque_sensor.hpp`
-- `include/rb_servo/sensor/mock_force_torque_sensor.hpp`
-- `src/sensor/mock_force_torque_sensor.cpp`
-- `docs/force_control.md`
-
-Integration target:
-
-```text
-nominal TCP target
-  + force/admittance TCP compensation
-  → IK
-  → q_target
-  → servo_j
-```
-
-Do not apply force compensation directly to joint targets.
-
-Before physical promotion:
-
-- supply independent sensor presence/fault/overrange/freshness signals
-- verify `T_tcp_sensor`, sign, bias, tare, payload, and gravity compensation
-- validate monitor-only contact supervision and telemetry on the installed sensor
-- measure same-tick send suppression and flow-chunk epoch invalidation
-- validate DeltaTwist tangential ownership while projecting the contact normal
-- pass deterministic loop replay before supervised hardware acceptance
-
-The project-native `NormalForceController` uses the actual loop `dt_sec`,
-unilateral server hard caps, a passivity observer, and propose/commit state
-updates. See `docs/force_control.md` for the active schema and promotion gates.
+Force control was removed from `rb_servo_server`; it is owned by the
+controller-manager stack (see `cm_bridge/docs/design.md`). The servo loop
+keeps only the raw rbpodo external F/T decode (`RobotState::eft_wrench` /
+`eft_valid`) for telemetry; it drives no motion.
 
 ## Coding rules
 

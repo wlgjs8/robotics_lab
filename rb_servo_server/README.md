@@ -247,16 +247,11 @@ The C++ receive timestamp is used for timeout checks.
 
 ## Force-control status
 
-Force control is connected to the Cartesian servo path. The tracked real stack
-is currently at supervised Gate 3D: six-axis `cartesian_admittance`,
-`surface_source: none`, and `compliance_frame: tcp_origin`. The controller axes
-therefore follow the accepted rbpodo EFT/TCP orientation and corrections use the
-TCP endpoint. Translation and rotation each use block-coherent release
-recentering so sibling axes do not spring home independently and a common
-feasible jerk scale preserves the released 3D direction. Both geometric floor
-constraints are off by explicit operator decision, so this profile has no
-TCP/gripper-tip floor backstop. The simulation stack remains force-off. See
-`docs/force_control.md` and the acceptance runbook.
+Force control has been removed from `rb_servo_server` and is owned by the
+controller-manager stack (`cm_bridge/docs/design.md`). The server still decodes
+the raw rbpodo external F/T wrench into `RobotState::eft_wrench` / `eft_valid`
+and publishes it as telemetry (`eft_wrench` / `eft_valid` / `eft_source`), but
+no server-side control path consumes it.
 
 ## Viser operator GUI
 

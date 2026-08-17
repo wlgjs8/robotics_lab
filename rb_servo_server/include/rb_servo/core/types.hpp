@@ -115,8 +115,7 @@ enum class ControlMode {
 
 enum class JointTargetProfile {
     Direct,
-    InitMotion,
-    PayloadIdentification
+    InitMotion
 };
 
 enum class ServerMotionState {
@@ -126,13 +125,6 @@ enum class ServerMotionState {
     Running,
     FaultLatched,
     EmergencyLatched
-};
-
-enum class ForceControlMode {
-    Off,
-    Admittance,
-    Impedance,
-    ExternalForceSafety
 };
 
 enum class RobotConnectionState {
@@ -168,7 +160,6 @@ enum class SafetyVerdict {
     FloorViolation,
     RoiViolation,
     ChunkFollowerFault,
-    ExternalForceLimit,
     UnknownError
 };
 
@@ -233,46 +224,6 @@ struct RbpodoDiagnosticsSnapshot {
     int stable_error_code = 0;
     RbpodoRawDiagnostics raw;
     std::vector<std::string> unavailable_fields;
-};
-
-struct ForceControlAxis {
-    bool x = false;
-    bool y = false;
-    bool z = false;
-    bool roll = false;
-    bool pitch = false;
-    bool yaw = false;
-};
-
-struct ForceControlCommand {
-    ForceControlMode mode = ForceControlMode::Off;
-    Wrench6D target_wrench;
-    ForceControlAxis enabled_axis;
-
-    // Optional per-command clamps. Zero means "use the server hard limit";
-    // positive values may only tighten, never enlarge, the configured limits.
-    double max_pos_offset_m = 0.0;
-    double max_rot_offset_rad = 0.0;
-    double max_pos_step_m = 0.0;
-    double max_rot_step_rad = 0.0;
-
-    // Per-tick envelope opening requested by a hard-limit retreat episode
-    // (m/s of velocity boost, clamped to the backoff headroom). Lets the
-    // retreat reflex reverse a driven descent quickly even when Layer-3 is
-    // disabled (reflex-only profile): without it the escape runs on the base
-    // envelope and a 0.05 m/s policy descent takes ~120 ms to reverse while
-    // the contact climbs to ~88 N (servo_log_20260724_142820). The
-    // controller's hysteresis ramps the opening off safely after the episode.
-    double retreat_envelope_boost_m_s = 0.0;
-
-    // Gate for the released-state offset bleed. The bleed exists to restore
-    // unload budget under an ACTIVELY MOVING policy equilibrium; draining
-    // toward a static in-contact anchor (e.g. a Hold frozen at an in-surface
-    // pose after a mid-press client abort) re-creates the contact and drives
-    // a perpetual bounce limit cycle (2026-07-23 14:20 run: ~0.6 s / 7 mm /
-    // 5-9 N oscillation on Hold). The servo loop sets this true only while
-    // the compliance equilibrium follows a live policy target.
-    bool allow_release_bleed = true;
 };
 
 struct RobotState {
@@ -469,8 +420,6 @@ struct CartesianSolveTelemetry {
     double follower_actual_lead_m = 0.0;
     double follower_actual_lead_rad = 0.0;
     int follower_actual_lead_error_count = 0;
-    bool follower_loading_projection_active = false;  // wrench-gated plan projection engaged
-    double follower_contact_shift_m = 0.0;            // accumulated projected plan shift
     uint64_t follower_reanchor_count = 0;          // explained strict-divergence reanchors
     uint64_t follower_warm_resume_count = 0;       // brief Hold resumes preserving chained p/v/a
     bool safety_intervention_recent = false;       // debounced signal seen by follower stage
@@ -558,114 +507,6 @@ struct SafetyTrackingTelemetry {
     bool controller_simulation_physical_motion_detected = false;
 };
 
-struct ForceTorqueTelemetry {
-    bool enabled = false;
-    std::string source = "null";
-    std::string source_assurance = "unavailable";
-    bool sensor_health_verified = false;
-    bool safety_rated = false;
-    Wrench6D raw_sensor_wrench;
-    // Effective configured transform used by the server for this sample.
-    // Convention: point_tcp = T_tcp_sensor * point_sensor.
-    Pose6D t_tcp_sensor;
-    Wrench6D wrench_tcp;
-    std::array<double, 3> gravity_tcp{};
-    std::string gravity_compensation_model = "rigid_payload";
-    std::string gravity_compensation_calibration_id;
-    Wrench6D modeled_gravity_wrench;
-    Wrench6D fast_external_wrench;
-    Wrench6D control_external_wrench;
-    bool healthy = false;
-    bool stale = false;
-    uint64_t freshness_value = 0;
-    bool freshness_advanced = false;
-    std::string reason = "disabled";
-    bool auto_tare_enabled = false;
-    bool tare_valid = false;
-    std::string tare_state = "disabled";
-    int tare_sample_count = 0;
-    uint64_t tare_generation = 0;
-    std::string tare_reason;
-    Wrench6D residual_tare_tcp;
-    bool payload_identification_inhibit = false;
-    std::string joint_target_profile = "direct";
-};
-
-// Effective, server-owned payload-identification profile published to clients.
-// This mirrors the validated config without exposing config.hpp through the
-// core telemetry types (config.hpp already depends on this header).
-struct PayloadIdentificationConfigTelemetry {
-    bool enable = false;
-    std::string observation_model;
-    std::string wrench_convention;
-    int min_poses = 0;
-    double arrival_tolerance_deg = 0.0;
-    double settle_sec = 0.0;
-    int samples_per_pose = 0;
-    double max_force_stddev_n = 0.0;
-    double max_torque_stddev_nm = 0.0;
-    double max_force_fit_rms_n = 0.0;
-    double max_torque_fit_rms_nm = 0.0;
-    double max_design_condition_number = 0.0;
-};
-
-struct ForceControlTelemetry {
-    bool enabled = false;
-    std::string operating_mode = "monitor";
-    std::string state = "inactive";
-    std::string surface_source = "floor_constraint";
-    std::string compliance_frame = "surface";
-    bool compliance_frame_pose_valid = false;
-    Pose6D compliance_frame_actual_stand;
-    std::array<double, 3> normal_stand{0.0, 0.0, 1.0};
-    bool contact_active = false;
-    bool normal_contact_active = false;
-    bool transverse_contact_active = false;
-    bool rotational_contact_active = false;
-    bool compliance_active = false;
-    bool normal_regulating = false;
-    bool transverse_regulating = false;
-    bool rotational_regulating = false;
-    bool loading_projection_active = false;
-    Wrench6D control_wrench_surface;
-    Wrench6D control_wrench_compliance;
-    Wrench6D wrench_error_surface;
-    Wrench6D wrench_error_compliance;
-    Pose6D compliance_offset_surface;
-    Vec6 compliance_velocity_surface;
-    Vec6 compliance_acceleration_surface;
-    Pose6D compliance_equilibrium_stand;
-    std::string compliance_equilibrium_source = "unavailable";
-    bool compliance_recenter_active = false;
-    bool compliance_translation_recenter_coupled = false;
-    bool compliance_rotation_recenter_coupled = false;
-    bool compliance_translation_recenter_deferred = false;
-    bool compliance_rotation_recenter_deferred = false;
-    Vec6 raw_policy_delta_surface;
-    Vec6 accepted_policy_delta_surface;
-    std::array<bool, 6> compliance_limit_axes{};
-    std::string compliance_limit_reason;
-    double measured_force_n = 0.0;
-    double fast_normal_force_n = 0.0;
-    double fast_force_norm_n = 0.0;
-    double fast_force_rate_n_per_ms = 0.0;
-    double fast_torque_norm_nm = 0.0;
-    bool contact_threshold_exceeded = false;
-    bool hard_limit_threshold_exceeded = false;
-    int hard_limit_sample_count = 0;
-    bool hard_limit_exceeded = false;
-    double target_force_n = 0.0;
-    double correction_m = 0.0;
-    double velocity_m_s = 0.0;
-    double acceleration_m_s2 = 0.0;
-    double energy_j = 0.0;
-    bool saturated = false;
-    bool proposal_valid = false;
-    bool proposal_committed = false;
-    std::string fault_reason;
-    uint64_t motion_epoch = 0;
-};
-
 struct ArmCommand {
     ArmId arm_id = ArmId::Left;
 
@@ -689,8 +530,6 @@ struct ArmCommand {
     double linear_move_linear_speed_m_s = 0.0;
     double linear_move_angular_speed_rad_s = 0.0;
     LinearMoveOrientationMode linear_move_orientation_mode = LinearMoveOrientationMode::Constant;
-
-    ForceControlCommand force_control;
 
     double gripper_target = 0.0;
     bool has_gripper = false;
@@ -1057,13 +896,6 @@ struct ServoSample {
 
     RobotState left_state;
     RobotState right_state;
-    // Persist the same per-tick F/T and force-control truth surface that is
-    // published over UDP so supervised hardware tests remain auditable after
-    // the live GUI/state consumers have exited.
-    ForceTorqueTelemetry left_force_torque;
-    ForceTorqueTelemetry right_force_torque;
-    ForceControlTelemetry left_force_control;
-    ForceControlTelemetry right_force_control;
 
     DualArmCommand command;
     CommandBufferReadTelemetry command_buffer_read;
@@ -1200,11 +1032,6 @@ struct ServoSnapshot {
 
     RobotState left_state;
     RobotState right_state;
-    ForceTorqueTelemetry left_force_torque;
-    ForceTorqueTelemetry right_force_torque;
-    ForceControlTelemetry left_force_control;
-    ForceControlTelemetry right_force_control;
-    PayloadIdentificationConfigTelemetry payload_identification_config;
     uint64_t motion_epoch = 0;
 
     DualArmCommand command;
@@ -1369,14 +1196,12 @@ std::string toString(ArmId arm_id);
 std::string toString(ControlMode mode);
 std::string toString(JointTargetProfile profile);
 std::string toString(ServerMotionState state);
-std::string toString(ForceControlMode mode);
 std::string toString(BackendAckPolicy policy);
 std::string toString(SafetyVerdict verdict);
 std::string toString(FaultDomain domain);
 std::string toString(TrackingErrorPolicy policy);
 ControlMode controlModeFromString(const std::string& mode);
 JointTargetProfile jointTargetProfileFromString(const std::string& value);
-ForceControlMode forceControlModeFromString(const std::string& mode);
 TrackingErrorPolicy trackingErrorPolicyFromString(const std::string& value);
 
 }  // namespace rb_servo

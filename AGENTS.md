@@ -113,33 +113,34 @@ remains visible and auditable.
 
 ## Force Control
 
-**Direction (2026-08-16 operator decision): force control leaves this repo.**
-`controller-manager`'s Admittance task, reached through `cm_bridge`, becomes the
-sole force path. Do not extend, tune, or add features to `rb_servo_server`'s
-force code — it is scheduled for removal.
+**controller-manager owns force control. `rb_servo_server` has none.**
 
-**Do not describe it as "off". It is live on real right now.** The tracked
-`rb_servo_server/config/stack_real.yaml:623-924` runs
-`provider: project_native`, `enable: true`,
-`operating_mode: cartesian_admittance`, `allow_in_real: true`,
-`supervised_experimental_real: true`, both arms enabled, with 10 N / 12 N / 7 Nm
-hard limits and `hard_limit_policy: retreat`. Earlier revisions of this file
-claimed a read-only monitor posture; that was stale and is corrected here.
+Its project-native force stack (force controller, F/T wrench pipeline, cartesian
+admittance, hard limits + retreat, the energy observer, payload identification)
+was **removed on 2026-08-17** once the gate below was satisfied. Do not
+reintroduce force code here — force belongs to CM's Admittance/follow overlay,
+reached through `cm_bridge`.
 
-**Removal is gated, and the gate is not optional.** Four geometric safety layers
-were switched off on real *because* F/T replaced them —
-`floor_constraint` (`stack_real.yaml:173-179`), the whole-arm
-`self_collision.mesh.ground_plane` (`:344-349`), `user_floor_constraint`
-(`:244-247`), and the `roi_box` z floor lowered to `-0.200` (`:211-216`).
-Deleting force control without restoring those leaves the real arm with **no
-floor backstop of any kind and no contact reaction**. controller-manager's own
-replacement is also not armed yet
-(`cm_bridge/config/follow.monkey.yaml:160 admittance_overlay: false`, whose
-comment states plainly that contact force is then unbounded).
+**The gate that was required, and how it closed.** Four geometric floor layers
+had been switched off on real *because* F/T replaced them, so removing force
+while CM was unarmed would have left the arm with neither. CM's follow force
+overlay is now hardware-verified on this rig (2026-08-17, §6 hand-push): with
+`admittance_overlay` actually armed, left 31.0 N produced 24.3 mm and right
+42.2 N produced 36.6 mm of compliant command deviation, matching F/k at
+k = 1000 N/m, actual tracking the compliant command within 0.5 mm, ~2 s
+spring-back, the 40 mm fence never reached, no faults. The earlier
+"no compliance under live wrench" symptom was a `sed -i` inode replacement under
+a single-file `:ro` bind mount — the container kept reading the pre-edit
+`admittance_overlay: false`; not a controller-manager defect.
 
-Sequence before any force removal touches the servo loop: restore the geometric
-floors (and re-verify a supervised real approach), or arm CM's admittance first.
-Details and the full surgical plan live with the removal task.
+**What CM does not replace.** CM has no absolute force trip with debounce, no
+active retreat, no contact-state machine, and no energy observer. Its force gate
+is a continuous projective attenuation, not a latch. Treat those as gone, not
+migrated.
+
+Raw `eft_wrench` / `eft_valid` telemetry stays in `rb_servo_server` — it is the
+rbpodo state-frame decode feeding the operator's F/T monitor, and has nothing to
+do with the removed force controller.
 
 ## Motion Primitive Contract
 
