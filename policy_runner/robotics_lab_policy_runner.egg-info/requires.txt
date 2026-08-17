@@ -2,6 +2,7 @@
 [camera]
 pyzmq>=25.0.0
 numpy>=1.24.0
+opencv-python>=4.8
 
 [gripper]
 pyzmq>=25.0.0

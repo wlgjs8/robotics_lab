@@ -14,6 +14,7 @@ or let flow-infer spawn/terminate it with --camera-preview.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 
@@ -21,6 +22,32 @@ from .camera_bundle_client import CameraBundleClient, resolve_frame
 
 WINDOW_TITLE = "policy camera preview (q/ESC closes)"
 DEFAULT_PANEL_SIZE = (640, 480)
+
+
+def _opencv_gui_backend(cv2_module) -> str | None:
+    """Return the configured OpenCV HighGUI backend, or None if unavailable."""
+
+    for line in cv2_module.getBuildInformation().splitlines():
+        stripped = line.strip()
+        if stripped.startswith("GUI:"):
+            backend = stripped.partition(":")[2].strip()
+            return backend if backend and backend.upper() != "NONE" else None
+    return None
+
+
+def _repair_qt_font_path() -> None:
+    """Point OpenCV's bundled Qt backend at host fonts when its wheel has none."""
+
+    configured = os.environ.get("QT_QPA_FONTDIR")
+    if configured and os.path.isdir(configured):
+        return
+    for candidate in (
+        "/usr/share/fonts/truetype/dejavu",
+        "/usr/share/fonts/truetype/freefont",
+    ):
+        if os.path.isdir(candidate):
+            os.environ["QT_QPA_FONTDIR"] = candidate
+            return
 
 
 def _depth_to_image(
@@ -95,6 +122,17 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError as exc:  # pragma: no cover - environment guard
         print(f"camera_preview requires cv2/numpy: {exc}", file=sys.stderr)
         return 2
+
+    gui_backend = _opencv_gui_backend(cv2)
+    if gui_backend is None:
+        print(
+            "camera_preview requires a GUI-enabled OpenCV build; detected "
+            "HighGUI backend GUI: NONE (opencv-python-headless cannot open windows)",
+            file=sys.stderr,
+        )
+        return 2
+    if gui_backend.upper().startswith("QT"):
+        _repair_qt_font_path()
 
     cameras = [name.strip() for name in str(args.cameras).split(",") if name.strip()]
     client = CameraBundleClient(

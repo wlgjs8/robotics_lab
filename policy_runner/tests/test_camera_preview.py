@@ -1,6 +1,13 @@
+import os
 import unittest
+from unittest import mock
 
-from policy_runner.camera_preview import _image_window_size, _resize_window_to_image
+from policy_runner.camera_preview import (
+    _image_window_size,
+    _opencv_gui_backend,
+    _repair_qt_font_path,
+    _resize_window_to_image,
+)
 
 
 class _Image:
@@ -14,6 +21,39 @@ class _Cv2:
 
     def resizeWindow(self, title, width, height):  # noqa: N802 - mirrors cv2 API
         self.resize_calls.append((title, width, height))
+
+
+class _Cv2Build:
+    def __init__(self, gui):
+        self.gui = gui
+
+    def getBuildInformation(self):  # noqa: N802 - mirrors cv2 API
+        return f"General configuration\n  GUI: {self.gui}\n"
+
+
+class CameraPreviewBackendTest(unittest.TestCase):
+    def test_detects_gui_backend(self):
+        self.assertEqual(_opencv_gui_backend(_Cv2Build("QT5")), "QT5")
+
+    def test_rejects_headless_or_missing_backend(self):
+        self.assertIsNone(_opencv_gui_backend(_Cv2Build("NONE")))
+
+        class _NoGuiLine:
+            @staticmethod
+            def getBuildInformation():  # noqa: N802 - mirrors cv2 API
+                return "General configuration only"
+
+        self.assertIsNone(_opencv_gui_backend(_NoGuiLine()))
+
+    def test_repairs_missing_qt_wheel_font_directory(self):
+        dejavu = "/usr/share/fonts/truetype/dejavu"
+        with mock.patch.dict(os.environ, {"QT_QPA_FONTDIR": "/missing"}):
+            with mock.patch(
+                "policy_runner.camera_preview.os.path.isdir",
+                side_effect=lambda path: path == dejavu,
+            ):
+                _repair_qt_font_path()
+                self.assertEqual(os.environ["QT_QPA_FONTDIR"], dejavu)
 
 
 class CameraPreviewSizingTest(unittest.TestCase):
