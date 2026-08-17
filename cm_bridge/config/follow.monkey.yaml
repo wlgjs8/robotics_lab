@@ -12,6 +12,15 @@
 #                             additionally requires ft identify - tools.pika.yaml)
 # Re-tune on the hardware ladder (P3); keep this file in sync when the
 # submodule's follow.yaml changes shape (the SILS gate is the canary).
+#
+# EDIT TRAP (cost us the 2026-08-17 zero-compliance day): this file is a
+# SINGLE-FILE bind mount (:ro). `sed -i` and rename-on-save editors replace
+# the INODE, and the running container keeps reading the OLD content while
+# the host file looks updated. After ANY edit here, RECREATE the stack
+# (run_cm_stack.sh down && ... real) — a `docker restart` is NOT enough —
+# and confirm the [TASKCFG] `follow{... adm_overlay=...}` line, which is the
+# only ground truth (the force-law numbers equal the compiled defaults, so
+# the engage log proves nothing about which file was read).
 # follow.yaml - the REAL-TIME STREAM FOLLOWER's tuning (wiki/decisions/0025).
 #
 # Edit + `reset` = live retune (TaskConfig reload). Missing file/key -> compiled-in defaults
