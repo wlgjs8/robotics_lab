@@ -1,7 +1,7 @@
 """RolloutSummaryRecorder must not rebuild summary-only diagnostics every control tick.
 
 record_source() runs once per control-loop tick (~110-290 Hz). Three of the fields it
-maintained -- force_recovery, camera_runtime, inference_diagnostics -- are read exactly once,
+maintained -- camera_runtime, inference_diagnostics -- are read exactly once,
 by to_dict(), when the rollout summary is written. Rebuilding them per tick cost ~5.7 ms/tick
 because OpenpiRemoteActionSource.inference_diagnostics_snapshot() deep-copies a rolling window
 of 64 inference events and takes the lock shared with the inference thread. The window fills at
@@ -22,7 +22,6 @@ class _CountingSource:
     def __init__(self) -> None:
         self.diag_calls = 0
         self.camera_calls = 0
-        self.force_calls = 0
         self.image_decode_count = 0
         self.missing_camera_count = 0
         self.camera_names = ["left_realsense_color"]
@@ -35,11 +34,6 @@ class _CountingSource:
     def camera_runtime_status(self) -> dict[str, object]:
         self.camera_calls += 1
         return {"state": "ready"}
-
-    def force_recovery_status(self) -> dict[str, object]:
-        self.force_calls += 1
-        return {}
-
 
 def _recorder(**kw) -> RolloutSummaryRecorder:
     return RolloutSummaryRecorder(
@@ -59,7 +53,6 @@ class RolloutSummaryDiagnosticsThrottleTest(unittest.TestCase):
         # First call primes the fields; the rest fall inside the refresh interval.
         self.assertEqual(source.diag_calls, 1, "diagnostics rebuilt per tick")
         self.assertEqual(source.camera_calls, 1)
-        self.assertEqual(source.force_calls, 1)
 
     def test_cheap_fields_still_track_every_tick(self) -> None:
         # Throttling must not stop the counters/labels the summary also reports.

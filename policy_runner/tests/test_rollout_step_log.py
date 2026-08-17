@@ -66,14 +66,6 @@ def _state_payload() -> dict:
                 "percent": 12.0,
                 "target_percent": 77.0,
             },
-            "force_control": {
-                "compliance_offset_surface": [0.001, 0.002, 0.003, 0.01, 0.02, 0.03],
-                "correction_m": 0.004,
-            },
-            "force_torque": {
-                "wrench_tcp": [1.0, 2.0, 3.0, 0.1, 0.2, 0.3],
-                "control_external_wrench": [4.0, 5.0, 6.0, 0.4, 0.5, 0.6],
-            },
         },
         "right": {
             "tcp_actual_stand": {
@@ -142,12 +134,6 @@ class RolloutStepLoggerTest(unittest.TestCase):
         self.assertEqual(left_record["gripper_cmd_pct"], 9.0)
         # Measured feedback must not be replaced by the state target_percent.
         self.assertEqual(left_record["gripper_meas_pct"], 12.0)
-        self.assertEqual(left_record["compliance_offset_surface"][2], 0.003)
-        self.assertEqual(left_record["correction_m"], 0.004)
-        self.assertEqual(left_record["wrench_tcp_fz"], 3.0)
-        self.assertEqual(left_record["control_external_wrench_fz"], 6.0)
-        self.assertIsNone(record["arms"]["right"]["compliance_offset_surface"])
-        self.assertIsNone(record["arms"]["right"]["wrench_tcp_fz"])
 
     def test_gripper_feedback_age_is_recorded_and_never_fabricated(self) -> None:
         payload = _state_payload()
@@ -162,29 +148,6 @@ class RolloutStepLoggerTest(unittest.TestCase):
         # No stamp -> None. A fabricated 0 would read as "feedback is instant" and
         # send the latency split the wrong way.
         self.assertIsNone(record["arms"]["right"]["gripper_feedback_age_ms"])
-
-    def test_force_control_state_is_recorded_per_arm(self) -> None:
-        # An unprotected rollout (FT zero never ran because no Init Motion
-        # preceded it) must be visible in the log, not inferable.
-        payload = _state_payload()
-        payload["left"]["force_control"] = {"enabled": True, "state": "awaiting_init_tare"}
-        record = build_rollout_step_record(
-            state_payload=payload,
-            command_intent=None,
-            conditioned_targets=None,
-            raw_delta_ee_local=None,
-            gripper_cmd_pct=None,
-            chunk_id=1,
-            chunk_step_index=0,
-            stall=False,
-            hold=False,
-            inference_latency_ms=None,
-            t_mono=1.0,
-            t_wall=2.0,
-        )
-        self.assertEqual(record["arms"]["left"]["force_control_state"], "awaiting_init_tare")
-        # Absent force_control block -> null, never a fabricated "armed".
-        self.assertIsNone(record["arms"]["right"]["force_control_state"])
 
     def test_rtc_block_records_configured_vs_realized_delay(self) -> None:
         record = build_rollout_step_record(

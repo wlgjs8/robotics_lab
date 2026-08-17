@@ -202,30 +202,6 @@ metrics. Controller tracking remains visible in the normal action log, rollout
 summary, and pgmode state monitor. This path never authorizes physical-real
 motion and does not contact the live camera service.
 
-The tracked real flow profile enables `force_recovery` with
-`contact_behavior: continue` for the server-owned `cartesian_admittance` path.
-Soft contact remains visible in status, but it does not invalidate the active
-chunk, block inference, freeze the gripper, or emit a synthetic `Hold`; the
-server projects loading policy increments and applies bounded compliance. A
-hard force fault still increments the server `motion_epoch`, which invalidates
-cached/in-flight policy work through the normal epoch path.
-
-`contact_behavior: recover` remains available for the legacy guarded path. In
-that mode either arm's `contact_active=true` invalidates cached/in-flight work,
-emits bimanual `Hold` with frozen gripper targets, and waits for contact clear,
-measured TCP settling, and a post-reset camera frame before one cold inference.
-Its contact and settling deadlines report `force_contact_timeout`,
-`force_settling_timeout`, or `camera_stale_timeout`. Live status and
-`rollout_summary.json` expose the selected behavior, blocker, phase timing,
-per-arm contact/force, TCP velocity, camera barrier, and worker generation.
-OpenPI velocity proprio remains measured `camera_frame` data in either mode.
-For velocity checkpoints, each inference now records whether both arms had a
-complete measured-pose bracket at `[camera_time - policy_dt, camera_time]`.
-The exact per-arm body deltas and any zero-substitution reason are included in
-the diagnostic snapshot. The `delta_preview` server path requires this validity
-bit; a missing bracket is therefore visible and fail-closed instead of silently
-presented to the controller as a trustworthy zero velocity.
-
 Chunk overlay schema `robotics_lab.chunk_overlay.v3` also carries the policy
 observation step and activation step. Warm inference drops
 `activation_step - observation_step` rows before activation, while cold start

@@ -187,33 +187,6 @@ class GripperConfig:
 
 
 @dataclass(frozen=True)
-class ForceRecoveryConfig:
-    """Policy-side recovery gate driven by server-owned force-contact telemetry."""
-
-    enable: bool = False
-    contact_behavior: str = "recover"
-    settle_time_sec: float = 0.12
-    max_linear_velocity_m_s: float = 0.002
-    max_angular_velocity_rad_s: float = 0.05
-    contact_timeout_sec: float = 5.0
-    settling_timeout_sec: float = 2.0
-
-    def __post_init__(self) -> None:
-        if self.contact_behavior not in {"recover", "continue"}:
-            raise ValueError("force_recovery.contact_behavior must be recover or continue")
-        if self.settle_time_sec < 0.0:
-            raise ValueError("force_recovery.settle_time_sec must be non-negative")
-        if self.max_linear_velocity_m_s < 0.0:
-            raise ValueError("force_recovery.max_linear_velocity_m_s must be non-negative")
-        if self.max_angular_velocity_rad_s < 0.0:
-            raise ValueError("force_recovery.max_angular_velocity_rad_s must be non-negative")
-        if self.contact_timeout_sec <= 0.0:
-            raise ValueError("force_recovery.contact_timeout_sec must be positive")
-        if self.settling_timeout_sec <= 0.0:
-            raise ValueError("force_recovery.settling_timeout_sec must be positive")
-
-
-@dataclass(frozen=True)
 class JointSineConfig:
     selected_arm: str = "both"
     amplitude_deg: tuple[float, ...] = (1.0, 1.0, 1.0, 0.5, 0.5, 0.5)
@@ -495,7 +468,6 @@ class PolicyRunnerConfig:
     arm_init_override: ArmInitOverrideConfig = field(default_factory=ArmInitOverrideConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     gripper: GripperConfig = field(default_factory=GripperConfig)
-    force_recovery: ForceRecoveryConfig = field(default_factory=ForceRecoveryConfig)
     robot_state: RobotStateConfig = field(default_factory=RobotStateConfig)
     servo_command: ServoCommandConfig = field(default_factory=ServoCommandConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
@@ -534,7 +506,6 @@ def config_from_mapping(raw: dict[str, Any]) -> PolicyRunnerConfig:
         arm_init_override=_arm_init_override_config(_section(raw, "arm_init_override")),
         camera=_camera_config(_section(raw, "camera")),
         gripper=_gripper_config(_section(raw, "gripper")),
-        force_recovery=_force_recovery_config(_section(raw, "force_recovery")),
         robot_state=RobotStateConfig(**_section(raw, "robot_state")),
         servo_command=_servo_command_config(_section(raw, "servo_command")),
         safety=_safety_config(_section(raw, "safety")),
@@ -559,7 +530,6 @@ def _validate_top_level_keys(raw: dict[str, Any]) -> None:
         "arm_init_override",
         "camera",
         "gripper",
-        "force_recovery",
         "robot_state",
         "servo_command",
         "safety",
@@ -662,35 +632,6 @@ def _gripper_config(raw: dict[str, Any]) -> GripperConfig:
         raw["startup_open"] = bool(raw["startup_open"])
     return GripperConfig(**raw)
 
-
-def _force_recovery_config(raw: dict[str, Any]) -> ForceRecoveryConfig:
-    legacy_timeout = raw.get("timeout_sec")
-    phase_fields = {"contact_timeout_sec", "settling_timeout_sec"}.intersection(raw)
-    if legacy_timeout is not None and phase_fields:
-        raise ValueError(
-            "force_recovery must not set deprecated timeout_sec together with "
-            "contact_timeout_sec or settling_timeout_sec"
-        )
-    if legacy_timeout is not None:
-        # Compatibility for older non-real profiles: the former single deadline
-        # is applied independently to each phase instead of spanning both phases.
-        timeout = float(raw.pop("timeout_sec"))
-        raw["contact_timeout_sec"] = timeout
-        raw["settling_timeout_sec"] = timeout
-    if "enable" in raw:
-        raw["enable"] = bool(raw["enable"])
-    if "contact_behavior" in raw:
-        raw["contact_behavior"] = str(raw["contact_behavior"])
-    for key in (
-        "settle_time_sec",
-        "max_linear_velocity_m_s",
-        "max_angular_velocity_rad_s",
-        "contact_timeout_sec",
-        "settling_timeout_sec",
-    ):
-        if key in raw:
-            raw[key] = float(raw[key])
-    return ForceRecoveryConfig(**raw)
 
 
 def _servo_command_config(raw: dict[str, Any]) -> ServoCommandConfig:

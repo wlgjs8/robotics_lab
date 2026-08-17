@@ -140,7 +140,6 @@ class RecordStatusPublisher:
         control_endpoint: str | None = None,
         status_endpoint: str | None = None,
         spacemouse: Mapping[str, Any] | None = None,
-        force_recovery: Mapping[str, Any] | None = None,
         camera_runtime: Mapping[str, Any] | None = None,
     ) -> None:
         payload = {
@@ -158,8 +157,6 @@ class RecordStatusPublisher:
             payload["arm_init"] = dict(arm_init)
         if spacemouse is not None:
             payload["spacemouse"] = dict(spacemouse)
-        if force_recovery is not None:
-            payload["force_recovery"] = dict(force_recovery)
         if camera_runtime is not None:
             payload["camera_runtime"] = dict(camera_runtime)
         try:
@@ -369,7 +366,6 @@ class RecordingSupervisor:
         action_source: str = "",
         command_client: Any | None = None,
         spacemouse: Mapping[str, Any] | None = None,
-        force_recovery: Mapping[str, Any] | None = None,
         camera_runtime: Mapping[str, Any] | None = None,
     ) -> None:
         status = self.status_block()
@@ -383,7 +379,6 @@ class RecordingSupervisor:
             "control_endpoint": self.control_server.bind if self.control_server is not None else None,
             "status_endpoint": self.config.recording.status_endpoint,
             "spacemouse": dict(spacemouse) if spacemouse is not None else None,
-            "force_recovery": dict(force_recovery) if force_recovery is not None else None,
             "camera_runtime": dict(camera_runtime) if camera_runtime is not None else None,
         }
         changed = combined_status != self._last_status
@@ -400,7 +395,6 @@ class RecordingSupervisor:
                 control_endpoint=combined_status["control_endpoint"],
                 status_endpoint=combined_status["status_endpoint"],
                 spacemouse=spacemouse,
-                force_recovery=force_recovery,
                 camera_runtime=camera_runtime,
             )
             self._last_status_publish = now_monotonic

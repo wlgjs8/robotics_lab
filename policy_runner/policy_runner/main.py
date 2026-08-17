@@ -50,7 +50,7 @@ from .action_sources.umi_dual_cartesian import MockUmiPoseReader, UdpUmiPoseRead
 STARTUP_TIMEOUT_EXIT_CODE = 2
 LEASE_READBACK_TIMEOUT_EXIT_CODE = 3
 FAULT_LATCH_EXIT_CODE = 4
-FORCE_RECOVERY_TIMEOUT_EXIT_CODE = 5
+TERMINAL_ABORT_EXIT_CODE = 5
 
 # Quiet period (no motion intents) after which the teleop loop voluntarily
 # releases the command-source lease so one-shot GUI commands can run between
@@ -310,16 +310,14 @@ def run(
             action_source=action_source_name,
             command_client=command_client,
             spacemouse=_spacemouse_status(source),
-            force_recovery=_force_recovery_status(source),
             camera_runtime=_camera_runtime_status(source),
         )
         if _prof.on:
             _prof.add("publish_status", monotonic_fn() - _t)
         abort_reason = _terminal_abort_reason(source)
         if abort_reason is not None:
-            label = "camera_abort" if abort_reason == "camera_stale_timeout" else "force_recovery_abort"
-            print(f"policy_runner {label}: {abort_reason}", file=stderr)
-            return FORCE_RECOVERY_TIMEOUT_EXIT_CODE
+            print(f"policy_runner camera_abort: {abort_reason}", file=stderr)
+            return TERMINAL_ABORT_EXIT_CODE
         completion_reason = _completion_reason(source)
         if completion_reason is not None:
             print(f"policy_runner completed: {completion_reason}", file=stderr)
@@ -828,15 +826,6 @@ def _spacemouse_status(source: object):
     return status() if callable(status) else None
 
 
-def _force_recovery_status(source: object) -> dict[str, object] | None:
-    status = getattr(source, "force_recovery_status", None)
-    if not callable(status):
-        return None
-    try:
-        return dict(status())
-    except Exception:
-        return None
-
 
 def _camera_runtime_status(source: object) -> dict[str, object] | None:
     status = getattr(source, "camera_runtime_status", None)
@@ -850,8 +839,6 @@ def _camera_runtime_status(source: object) -> dict[str, object] | None:
 
 def _terminal_abort_reason(source: object) -> str | None:
     value = getattr(source, "terminal_abort_reason", None)
-    if value is None:
-        value = getattr(source, "force_recovery_terminal_abort_reason", None)
     if value is None:
         return None
     resolved = str(value).strip()
@@ -2097,7 +2084,6 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     f"[flow-infer] rollout step telemetry={args.rollout_step_log}",
                     flush=True,
                 )
-            source.configure_force_recovery(config.force_recovery)
             configure_camera_runtime = getattr(source, "configure_camera_runtime", None)
             if callable(configure_camera_runtime):
                 configure_camera_runtime(config.camera)
