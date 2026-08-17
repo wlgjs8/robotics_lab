@@ -39,12 +39,18 @@ services:
     environment:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
       RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}
+      # DDS OFF THE ROBOT WIRE (upstream decision 0003 translated to Cyclone):
+      # loopback-only + no multicast, or SPDP bursts from every participant
+      # (incl. each `ros2 service call`) hit the control boxes' embedded
+      # stacks on enp16s0f1 — implicated in the 2026-08-17 LinkStale streak.
+      CYCLONEDDS_URI: file:///cm-dds/cyclonedds_local.xml
       CONTROL_MANAGER_ACTIVE_YAML: /cm-ws/src/controller-manager/platforms/monkey/active.yaml
     volumes:
       - chimp_ws:/cm-ws
       - ../../submodules/controller-manager:/cm-ws/src/controller-manager
       - ../../cm_bridge/config/follow.monkey.yaml:/cm-ws/src/controller-manager/platforms/monkey/params-tasks/follow.yaml:ro
       - ../../cm_bridge/config/tools.pika.yaml:/cm-ws/src/controller-manager/platforms/monkey/params-presets/tools/pika.yaml:ro
+      - ../../cm_bridge/config/cyclonedds_local.xml:/cm-dds/cyclonedds_local.xml:ro
       - ../../cm_bridge/src:/cm-bridge-src:ro
     working_dir: /cm-ws
     command: ["bash", "-lc", "exec ros2 run controller_manager plaif_chimpanzee"]
@@ -61,6 +67,7 @@ services:
     environment:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
       RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}
+      CYCLONEDDS_URI: file:///cm-dds/cyclonedds_local.xml
       CONTROL_MANAGER_SILS: "1"
       CONTROL_MANAGER_ACTIVE_YAML: /cm-ws/src/controller-manager/platforms/monkey/active.yaml
     volumes:
@@ -71,6 +78,8 @@ services:
       - ../../cm_bridge/config/follow.monkey.yaml:/cm-ws/src/controller-manager/platforms/monkey/params-tasks/follow.yaml:ro
       # PIKA tool preset (tools/ is tracked; see tools.pika.yaml header).
       - ../../cm_bridge/config/tools.pika.yaml:/cm-ws/src/controller-manager/platforms/monkey/params-presets/tools/pika.yaml:ro
+      # DDS loopback confinement (see monkey-real).
+      - ../../cm_bridge/config/cyclonedds_local.xml:/cm-dds/cyclonedds_local.xml:ro
       # Bridge sources (run separately via `docker exec` or a bridge service).
       - ../../cm_bridge/src:/cm-bridge-src:ro
     working_dir: /cm-ws

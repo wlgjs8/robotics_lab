@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- cyclonedds_local.xml — keep ALL DDS traffic off the robot wire.
+     CycloneDDS translation of controller-manager decision 0003
+     (platforms/<kind>/config/fastdds_shm_only.xml, "no DDS packet can enter or
+     leave this machine"): our container runs rmw_cyclonedds_cpp, and Cyclone's
+     DEFAULT picks a physical interface + multicast discovery, which sprays
+     SPDP/heartbeat bursts onto the robot subnet (enp16s0f1) where the control
+     boxes' embedded network stacks live. Every `ros2 service call` spawns a
+     participant = one more burst.
+     All our DDS participants (controller, cm_bridge, CLI calls) are on ONE
+     host, so loopback-only with localhost peers is sufficient and complete.
+     Mounted + pointed at by CYCLONEDDS_URI in cm-compose.override.yaml. -->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain Id="any">
+    <General>
+      <Interfaces>
+        <NetworkInterface name="lo"/>
+      </Interfaces>
+      <AllowMulticast>false</AllowMulticast>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>64</MaxAutoParticipantIndex>
+      <Peers>
+        <Peer address="localhost"/>
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>
