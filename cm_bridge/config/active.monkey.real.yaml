@@ -75,7 +75,13 @@ arms:
       - { joint: 4, theta_offset:   0.0, d: 344.00, a:   0.00, alpha: -90.0 }
       - { joint: 5, theta_offset:   0.0, d:   0.00, a:   0.00, alpha:  90.0 }
       - { joint: 6, theta_offset:   0.0, d: 100.00, a:   0.00, alpha:   0.0 }
-    # tool_calibrations:   # MEASURED per-(arm,tool) list - `ft identify` results are entered here
+    tool_calibrations:       # ft identify 2026-08-17 (14:08 capture, residual 0.62N/0.023Nm)
+      - tool: pika
+        mass: 0.7912
+        com: [-0.02, 3.24, 25.34]
+        bias:
+          force: [5.865, -8.784, 33.589]
+          torque: [-0.4954, 0.0860, -0.2181]
     # eft_correction:      # this sensor's measured axis correction on THIS arm (7-pose fit)
 
   right:
@@ -96,5 +102,11 @@ arms:
       - { joint: 4, theta_offset:   0.0, d: 344.00, a:   0.00, alpha: -90.0 }
       - { joint: 5, theta_offset:   0.0, d:   0.00, a:   0.00, alpha:  90.0 }
       - { joint: 6, theta_offset:   0.0, d: 100.00, a:   0.00, alpha:   0.0 }
-    # tool_calibrations:
+    tool_calibrations:       # ft identify 2026-08-17 (14:10 capture, residual 0.59N/0.013Nm)
+      - tool: pika
+        mass: 0.7822
+        com: [-1.24, 4.03, 26.56]
+        bias:
+          force: [-0.974, -7.580, 19.003]
+          torque: [-0.3698, 0.0016, -0.0401]
     # eft_correction:
