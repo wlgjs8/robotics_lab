@@ -210,6 +210,9 @@ class StateRepublisher:
             out["tcp_actual_stand"] = out["tcp_stand"]
         if self._tcp_cmd[side] is not None:
             out["tcp_command_stand"] = self._pose7(self._tcp_cmd[side])
+        g = getattr(self, "gripper", None)
+        if g is not None and g.position[side] is not None:
+            out["gripper"] = {"gripper_position": g.position[side]}
         return out
 
     def _publish(self):
@@ -237,6 +240,59 @@ class StateRepublisher:
                 self._sock.sendto(payload, (host, port))
             except OSError:
                 pass
+
+
+class GripperForwarder:
+    """Command-packet gripper_target -> gripper_server (robotics_lab.gripper_cmd.v1
+    on 50410), gripper_state.v1 feedback (50420) -> state fanout stamp.
+    Mirrors rb_servo_server's gripper_bridge forwarding role."""
+
+    def __init__(self, cmd_endpoint=("127.0.0.1", 50410), fb_bind=("127.0.0.1", 50421)):
+        # NOTE: gripper_server pushes state to 50420; the legacy consumer there is
+        # rb_servo_server. We bind 50421 unless free — actually the server sends
+        # to a configured endpoint (50420); we bind it directly since rb_servo_server
+        # is not running in the CM stack.
+        self._tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._cmd_endpoint = cmd_endpoint
+        self._seq = 0
+        self.position = {"left": None, "right": None}
+        self._last = {"left": None, "right": None}
+        try:
+            self._rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._rx.bind(("127.0.0.1", 50420))
+            self._rx.settimeout(0.5)
+            threading.Thread(target=self._fb_loop, daemon=True, name="gripper-fb").start()
+        except OSError:
+            self._rx = None
+
+    def _fb_loop(self):
+        while True:
+            try:
+                data, _ = self._rx.recvfrom(8192)
+                st = json.loads(data.decode("utf-8"))
+            except (socket.timeout, OSError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            for side in ("left", "right"):
+                arm = st.get(side) or {}
+                pos = arm.get("position_percent", arm.get("percent"))
+                if isinstance(pos, (int, float)):
+                    self.position[side] = float(pos)
+
+    def command(self, left=None, right=None):
+        if left is None and right is None:
+            return
+        if left is not None:
+            self._last["left"] = float(left)
+        if right is not None:
+            self._last["right"] = float(right)
+        self._seq += 1
+        msg = {"schema": "robotics_lab.gripper_cmd.v1", "seq": self._seq,
+               "deadman": True, "host_time_ns": time.time_ns()}
+        for side in ("left", "right"):
+            if self._last[side] is not None:
+                msg[side] = {"percent": self._last[side], "valid": True}
+        self._tx.sendto(json.dumps(msg).encode("utf-8"), self._cmd_endpoint)
 
 
 class ResetIngress:
@@ -287,6 +343,10 @@ class ResetIngress:
                 cmd = json.loads(data.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
+            gl = (cmd.get("left") or {}).get("gripper_target")
+            gr = (cmd.get("right") or {}).get("gripper_target")
+            if gl is not None or gr is not None:
+                self._node.gripper.command(left=gl, right=gr)
             if cmd.get("mode") != "JointTarget":
                 continue  # P1: everything else is FollowUnit's or out of scope
             for side in ("left", "right"):
@@ -358,6 +418,8 @@ class CmBridge(Node):
             host, port = ep.strip().rsplit(":", 1)
             endpoints.append((host, int(port)))
         self._state = StateRepublisher(self, args.platform, endpoints)
+        self.gripper = GripperForwarder()
+        self._state.gripper = self.gripper
         self._reset = ResetIngress(self, args)
         # P2 fail-closed latch: collision monitor trips via the control port;
         # a latched bridge drops all follow chunks and reports fault_latched

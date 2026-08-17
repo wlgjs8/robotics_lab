@@ -99,11 +99,14 @@ def main():
     ap.add_argument("--rate-hz", type=float, default=50.0)
     ap.add_argument("--once", action="store_true",
                     help="single check of the current state, print verdict, exit")
+    ap.add_argument("--intra-margin", type=float, default=D_HARD_INTRA,
+                    help="override intra-arm margin [m] (drill use: inflate to force a trip in free space)")
+    ap.add_argument("--inter-margin", type=float, default=D_HARD_INTER)
     args = ap.parse_args()
 
     model, cmodel, klass = build()
     data, cdata = model.createData(), cmodel.createData()
-    margins = np.array([D_HARD_INTRA if k == "intra" else D_HARD_INTER for k in klass])
+    margins = np.array([args.intra_margin if k == "intra" else args.inter_margin for k in klass])
 
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
