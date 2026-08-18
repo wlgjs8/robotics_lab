@@ -14,10 +14,13 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #include "rb_servo/core/clock.hpp"
 #include "rb_servo/core/shutdown.hpp"
+#include "rb_servo/robot/rback_fill.hpp"
+#include "rb_servo/robot/servo_j_command.hpp"
 
 #ifdef RB_SERVO_ENABLE_RBPODO
 #include <rbpodo/rbpodo.hpp>
@@ -770,6 +773,16 @@ std::string rbpodoPgModeLabel(int pg_mode) {
     if (pg_mode == 1) return "simulation";
     return "unknown(" + std::to_string(pg_mode) + ")";
 }
+
+// Scan a drained response batch for the box's RBACK[<n>] queue occupancy.
+// Parsing rules and the rationale for the observer live in rback_fill.hpp.
+RbackScan scanRbackFill(const rb::podo::ResponseCollector& drained) {
+    RbackScan scan;
+    for (const auto& response : drained) {
+        scanRbackFillLine(response.raw(), scan);
+    }
+    return scan;
+}
 #endif
 
 }  // namespace
@@ -1194,6 +1207,36 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
                                   << impl_->config.name
                                   << "; continuing — startup validation will report the state\n";
                     }
+                }
+            }
+        }
+        // Controller command-channel setup, pushed once per bring-up the way
+        // controller-manager does it (Arm::push_box_setup -> send_text on the same
+        // 5000 command channel; the argument values were taken verbatim from a
+        // captured vendor setup session). rb_servo_server historically sent
+        // neither, which is one of the reasons its earlier LPF-off attempt is not
+        // comparable to controller-manager's working one.
+        //
+        // No SDK API exists for these, so they go out as raw script through
+        // eval(). Failures are logged, not fatal: they tune the channel, they do
+        // not authorize motion, and a controller that rejects them still streams.
+        if (impl_->config.push_box_high_speed_comm) {
+            for (const char* script : {"system_manager_high_speed_comm(1)",
+                                       "system_manager_port_return_5000(2)"}) {
+                rb::podo::ResponseCollector responses;
+                const auto ret =
+                    impl_->robot->eval(responses, script, kInitializeCommandAckTimeoutSec);
+                if (impl_->config.disable_waiting_ack) {
+                    rb::podo::ResponseCollector drained;
+                    impl_->robot->flush(drained);
+                }
+                if (ret.is_success()) {
+                    std::cerr << "[INFO] RbpodoBackend box setup pushed for "
+                              << impl_->config.name << ": " << script << "\n";
+                } else {
+                    std::cerr << "[WARN] RbpodoBackend box setup NOT accepted for "
+                              << impl_->config.name << ": " << script
+                              << " — continuing (channel tuning only)\n";
                 }
             }
         }
@@ -1650,8 +1693,15 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
 #else
     const std::optional<RobotState> cached_state = recentStateCache(impl_->last_state_cache, nowSteadyNs());
     const char* cached_source = cached_state.has_value() ? "cache" : "none";
+    // Filled by the drain below. Paths that return before the drain leave it
+    // empty, which reports honestly as "no observation this cycle" rather than
+    // restating a stale one.
+    RbackScan rback_scan;
     const auto with_ack_metadata = [&](SendServoJResult result, bool ack_observed, double ack_wait_duration_us) {
         annotateRbpodoAckResult(&result, impl_->config, ack_wait_duration_us, ack_observed);
+        result.box_queue_fill = rback_scan.last_fill;
+        result.box_queue_fill_samples = rback_scan.samples;
+        result.box_queue_fill_unparsed = rback_scan.unparsed;
         return result;
     };
     if (!impl_->connected || !impl_->robot) {
@@ -1778,16 +1828,33 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
         }
         rb::podo::ResponseCollector responses;
         const uint64_t ack_start = nowSteadyNs();
-        const auto ret = impl_->robot->move_servo_j(
-            responses,
-            request.q_target_deg,
-            impl_->config.servo_t1_sec,
-            impl_->config.servo_t2_sec,
-            servo_gain_effective,
-            impl_->config.servo_alpha,
-            impl_->config.command_timeout_sec,
-            true
-        );
+        // servo_j_wire_decimals > 0 formats the command here instead of letting
+        // the SDK's 6-significant-digit stringstream quantize the angles; eval()
+        // is byte-equivalent to move_servo_j on the wire (see servo_j_command.hpp).
+        const auto ret = impl_->config.servo_j_wire_decimals > 0
+            ? impl_->robot->eval(
+                  responses,
+                  formatServoJCommand(
+                      request.q_target_deg,
+                      impl_->config.servo_t1_sec,
+                      impl_->config.servo_t2_sec,
+                      servo_gain_effective,
+                      impl_->config.servo_alpha,
+                      impl_->config.servo_j_wire_decimals
+                  ),
+                  impl_->config.command_timeout_sec,
+                  true
+              )
+            : impl_->robot->move_servo_j(
+                  responses,
+                  request.q_target_deg,
+                  impl_->config.servo_t1_sec,
+                  impl_->config.servo_t2_sec,
+                  servo_gain_effective,
+                  impl_->config.servo_alpha,
+                  impl_->config.command_timeout_sec,
+                  true
+              );
         const uint64_t ack_end = nowSteadyNs();
         // ACK-disabled streaming leak fix: the SDK's disable_waiting_ack only
         // flips a client-side flag (waiting_ack=false) — it does NOT tell the
@@ -1803,9 +1870,13 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
         // below is unchanged and the streamed command bytes are identical — safe
         // for the real path too. No-op when ACK waiting is enabled (move_servo_j
         // already drains via wait_until_ack_message).
+        //
+        // The drained bytes also carry the box's RBACK[<n>] queue occupancy, so
+        // we scan them on the way to the bin (see scanRbackFill). Observer only.
         if (impl_->config.disable_waiting_ack) {
             rb::podo::ResponseCollector drained;
             impl_->robot->flush(drained);
+            rback_scan = scanRbackFill(drained);
         }
         const double ack_wait_duration_us =
             impl_->config.disable_waiting_ack ? 0.0 : makeBackendTiming(ack_start, ack_end).duration_us;

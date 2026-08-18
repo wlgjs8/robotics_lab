@@ -425,6 +425,19 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertNotIn('python3 -m rb_servo_gui.app', run_stack_text)
         self.assertIn('policy_runner[spacemouse,gripper]', build_stack_text)
 
+    def test_camera_preview_uses_gui_opencv_without_headless_conflict(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        gui_pyproject = (repo_root / "rb_gui" / "pyproject.toml").read_text()
+        launcher = (repo_root / "tools" / "subscribe_camera.sh").read_text()
+
+        self.assertIn('"opencv-python>=4.8"', gui_pyproject)
+        self.assertNotIn("opencv-python-headless", gui_pyproject)
+        self.assertIn(
+            "pip uninstall -y opencv-python-headless opencv-python",
+            launcher,
+        )
+        self.assertIn("pip install --no-deps -e rb_gui", launcher)
+
     def test_real_gripper_startup_auto_pairs_and_fails_the_stack_closed(self):
         repo_root = Path(__file__).resolve().parents[2]
         run_stack_text = (repo_root / "tools/run_stack.sh").read_text()

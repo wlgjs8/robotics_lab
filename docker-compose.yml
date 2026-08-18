@@ -34,6 +34,7 @@ services:
       # capture PC (.40) and this inference PC share identical camera settings.
       # Empty value disables it (falls back to driver defaults).
       CAMERA_SERVER_REALSENSE_JSON: ${CAMERA_REALSENSE_JSON:-/app/config/realsense_d405_advanced.json}
+      # CAMERA_SERVER_REALSENSE_JSON: ${CAMERA_REALSENSE_JSON:-/app/config/realsense_d405_90fps.json}
       # 좌/우 독립 wrist 그룹 구독이 worker 기본값. 한쪽 손목 카메라가 죽어도 건강한
       # 쪽 클라우드는 계속 흐른다. 단일 토픽으로 되돌리려면 이 env를 명시.
       STEREO_WRIST_BUNDLE_TOPIC: ${STEREO_WRIST_BUNDLE_TOPIC:-}

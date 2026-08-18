@@ -14,7 +14,7 @@ dependencies = [
   "yourdfpy>=0.0.56",
   "plotly>=5.0",
   "pyzmq>=25.0",
-  "opencv-python-headless>=4.8",
+  "opencv-python>=4.8",
 ]
 
 [tool.setuptools.packages.find]

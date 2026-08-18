@@ -82,6 +82,7 @@ public:
 
     rb_servo::SendServoJResult sendServoJ(const rb_servo::SendServoJRequest& request) override {
         last_request_ = request;
+        ++send_count_;
         if (send_delay_.count() > 0) {
             std::this_thread::sleep_for(send_delay_);
         }
@@ -126,6 +127,9 @@ public:
     std::string name() const override { return "dispatch_test_backend"; }
 
     const rb_servo::SendServoJRequest& lastRequest() const { return last_request_; }
+    // Backend-level send tally. A withheld send must not reach the backend at
+    // all, so this counter -- not the returned result -- is what proves a skip.
+    int sendCount() const { return send_count_; }
 
 private:
     rb_servo::ArmId arm_id_;
@@ -133,6 +137,7 @@ private:
     std::chrono::microseconds send_delay_;
     rb_servo::RobotState state_;
     rb_servo::SendServoJRequest last_request_;
+    int send_count_ = 0;
 };
 
 class WorkerDispatchBackend final : public rb_servo::IRobotBackend {
@@ -504,6 +509,123 @@ bool testRbpodoAsyncDispatchDoesNotWaitForSlowAckWorker() {
     return true;
 }
 
+
+// A skip must reach exactly one box. This is the whole mechanism of the per-arm
+// queue level trim: the skipped arm's queue drops by one because we did not
+// append, and the other arm is untouched.
+bool testRbpodoAsyncSkipWithholdsOnlyTheSkippedArm() {
+    auto left_backend = std::make_unique<WorkerDispatchBackend>(rb_servo::ArmId::Left);
+    auto right_backend = std::make_unique<WorkerDispatchBackend>(rb_servo::ArmId::Right);
+    WorkerDispatchBackend* left_raw = left_backend.get();
+    WorkerDispatchBackend* right_raw = right_backend.get();
+    rb_servo::ArmWorker left(std::move(left_backend), asyncWorkerOptions());
+    rb_servo::ArmWorker right(std::move(right_backend), asyncWorkerOptions());
+    RB_CHECK(left.start());
+    RB_CHECK(right.start());
+    RB_CHECK(waitForWorkerState(left));
+    RB_CHECK(waitForWorkerState(right));
+
+    const uint64_t host_time_ns = rb_servo::nowSteadyNs();
+    rb_servo::ServoDispatchRequest request =
+        workerRequest(105, host_time_ns, host_time_ns + 500'000'000);
+    request.skip_right = true;
+    const rb_servo::DualSendResult result =
+        rb_servo::ServoDispatcher::dispatchRbpodoAsync(left, right, request);
+
+    RB_CHECK(left_raw->waitForSends(1, std::chrono::milliseconds(500)));
+    // Give the right worker the same wall-clock chance to send before asserting
+    // that it did not, so this cannot pass merely by being fast.
+    RB_CHECK(!right_raw->waitForSends(1, std::chrono::milliseconds(100)));
+    RB_CHECK(right_raw->sendCount() == 0);
+
+    // Reported accepted on purpose: nothing failed, we chose not to transmit.
+    // Marking it rejected would latch a send fault on a healthy arm.
+    RB_CHECK(result.right.result.accepted);
+    RB_CHECK(result.right.result.error.kind == rb_servo::BackendErrorKind::None);
+    RB_CHECK(result.right.result.acceptance_semantics == "skipped_queue_level");
+    RB_CHECK(result.right.arm_id == rb_servo::ArmId::Right);
+    // A command that was never sent gets no RBACK: the cadence controller has to
+    // see "not observed", never a stale depth.
+    RB_CHECK(!result.right.result.box_queue_fill.has_value());
+    RB_CHECK(result.right.result.box_queue_fill_samples == 0);
+
+    RB_CHECK(result.left.result.accepted);
+    RB_CHECK(result.left.result.acceptance_semantics == "async_enqueued");
+
+    left.stop();
+    right.stop();
+    return true;
+}
+
+// Default-constructed requests must never withhold anything: the skip is opt-in
+// from the cadence controller, not a state the dispatcher can fall into.
+bool testRbpodoAsyncSendsBothArmsWhenNoSkipRequested() {
+    auto left_backend = std::make_unique<WorkerDispatchBackend>(rb_servo::ArmId::Left);
+    auto right_backend = std::make_unique<WorkerDispatchBackend>(rb_servo::ArmId::Right);
+    WorkerDispatchBackend* left_raw = left_backend.get();
+    WorkerDispatchBackend* right_raw = right_backend.get();
+    rb_servo::ArmWorker left(std::move(left_backend), asyncWorkerOptions());
+    rb_servo::ArmWorker right(std::move(right_backend), asyncWorkerOptions());
+    RB_CHECK(left.start());
+    RB_CHECK(right.start());
+    RB_CHECK(waitForWorkerState(left));
+    RB_CHECK(waitForWorkerState(right));
+
+    const uint64_t host_time_ns = rb_servo::nowSteadyNs();
+    const rb_servo::ServoDispatchRequest request =
+        workerRequest(106, host_time_ns, host_time_ns + 500'000'000);
+    RB_CHECK(!request.skip_left);
+    RB_CHECK(!request.skip_right);
+    rb_servo::ServoDispatcher::dispatchRbpodoAsync(left, right, request);
+
+    RB_CHECK(left_raw->waitForSends(1, std::chrono::milliseconds(500)));
+    RB_CHECK(right_raw->waitForSends(1, std::chrono::milliseconds(500)));
+    left.stop();
+    right.stop();
+    return true;
+}
+
+
+// THE path that matters: stack_real.yaml runs io_model: direct, so this is where
+// a real skip actually withholds a servo_j. The async-only version of this
+// feature shipped once and did nothing on hardware -- 2791 counted skips, zero
+// withheld sends, 100% RBACK observation. Keep this test.
+bool testDirectSequentialSkipWithholdsOnlyTheSkippedArm() {
+    DispatchBackend left(rb_servo::ArmId::Left);
+    DispatchBackend right(rb_servo::ArmId::Right);
+
+    rb_servo::ServoDispatchRequest request;
+    request.seq = 200;
+    request.left.q_target_deg = joints(1.0);
+    request.right.q_target_deg = joints(2.0);
+    request.dispatch_start_ns = rb_servo::nowSteadyNs();
+    request.skip_right = true;
+
+    const rb_servo::DualSendResult result =
+        rb_servo::ServoDispatcher::dispatchDirectSequential(left, right, request);
+
+    RB_CHECK(left.sendCount() == 1);
+    RB_CHECK(right.sendCount() == 0);
+    RB_CHECK(result.right.result.accepted);
+    RB_CHECK(result.right.result.error.kind == rb_servo::BackendErrorKind::None);
+    RB_CHECK(result.right.result.acceptance_semantics == "skipped_queue_level");
+    RB_CHECK(!result.right.result.box_queue_fill.has_value());
+    RB_CHECK(result.right.arm_id == rb_servo::ArmId::Right);
+    RB_CHECK(result.left.result.accepted);
+    RB_CHECK(result.left.result.acceptance_semantics != "skipped_queue_level");
+
+    // The other arm's skip must be independent, not a shared flag.
+    DispatchBackend left2(rb_servo::ArmId::Left);
+    DispatchBackend right2(rb_servo::ArmId::Right);
+    rb_servo::ServoDispatchRequest left_skip = request;
+    left_skip.skip_right = false;
+    left_skip.skip_left = true;
+    rb_servo::ServoDispatcher::dispatchDirectSequential(left2, right2, left_skip);
+    RB_CHECK(left2.sendCount() == 0);
+    RB_CHECK(right2.sendCount() == 1);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -514,5 +636,8 @@ int main() {
     if (!testDirectSequentialDeadlineMissFlag()) return 1;
     if (!testRobotFaultHelper()) return 1;
     if (!testRbpodoAsyncDispatchDoesNotWaitForSlowAckWorker()) return 1;
+    if (!testRbpodoAsyncSkipWithholdsOnlyTheSkippedArm()) return 1;
+    if (!testRbpodoAsyncSendsBothArmsWhenNoSkipRequested()) return 1;
+    if (!testDirectSequentialSkipWithholdsOnlyTheSkippedArm()) return 1;
     return 0;
 }

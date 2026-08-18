@@ -16,13 +16,41 @@ left_robot:
   servo_t1_sec: 0.002
   servo_t2_sec: 0.021
   servo_gain: 1.0           # 0.5 caused ~5deg servo lag + right servo deactivation (pre-26071103 firmware)
-  # alpha: box scales by 0.1 internally; 10.0 = LPF OFF. Boxes run firmware 26071103
-  # (updated 2026-08-16). Baseline stays 1.0 (LPF on): the earlier "alpha 10 = jerk"
-  # observation predates this firmware AND was taken through the rbpodo SDK's default
-  # ~6-significant-digit command formatting (1e-3..1e-4 deg staircase at our angles;
-  # controller-manager needed %.7f for clean LPF-off). Re-attempt LPF-off only after
-  # raising the wire precision (rbpodo_src joint_to_string) — see cm_bridge/docs/design.md.
-  servo_alpha: 1.0
+  # alpha: box scales by 0.1 internally; 10.0 = LPF OFF. LPF is now OFF (2026-08-18).
+  #
+  # The earlier "alpha 10 = jerk" observation was confounded four ways; all four are
+  # resolved, so this flip is a genuine single-variable change:
+  #   1. firmware  — boxes were pre-26071103; both run 26071103 since 2026-08-16.
+  #   2. precision — the SDK's default ~6-significant-digit formatting left a
+  #                  1e-3..1e-4 deg staircase the box differentiated into the accel
+  #                  domain. servo_j_wire_decimals: 7 below matches controller-manager.
+  #   3. channel   — high_speed_comm(1)/port_return_5000(2) were never sent.
+  #                  push_box_high_speed_comm below sends them.
+  #   4. queue     — box command-queue fill was uncontrolled and drifted +0.65 tick/s.
+  #                  servo.box_queue_cadence now holds min-arm fill at 5 ticks.
+  # 1-4 were all live, with alpha still 1.0, in the clean baseline run
+  # logs/servo_log_20260818_183810.csv (left 34ms/fill 5.0, right 54ms/fill 14-15,
+  # r=1.00 throughout, 0 faults). Compare any LPF-off run against that log.
+  #
+  # ROLLBACK: set both arms back to 1.0. Nothing else needs to change.
+  servo_alpha: 10.0
+  # LPF-off prerequisites, staged 2026-08-18 and proven harmless while alpha was
+  # still 1.0 (see the baseline log named above) — they exist so the alpha
+  # 1.0 -> 10.0 flip is not confounded the way the previous attempt was.
+  #
+  # servo_j_wire_decimals: the SDK writes joint angles through a default-precision
+  # stringstream = 6 SIGNIFICANT digits. Measured 2026-08-18 on moving ticks
+  # (logs/servo_log_20260818_134558.csv): that leaves a 0.1-1 m-deg wire grid
+  # against 5-11 m-deg of per-tick motion on the coarse joints, i.e. only 5-11
+  # levels of resolution per tick. The box differentiates that staircase over
+  # servo_t2_sec, so it lands in the velocity/accel domain (+-1 grid ~ 250 deg/s^2)
+  # where the box LPF is currently hiding it. 7 = controller-manager's %.7f.
+  # Also removes a latent hazard: the stock path emits SCIENTIFIC NOTATION for
+  # angles near zero (jnt[1e-08, ...]), which the box parser has never been shown.
+  servo_j_wire_decimals: 7
+  # The channel-setup pair controller-manager pushes at cold init and this server
+  # historically never sent. Part of the same set that makes LPF-off viable.
+  push_box_high_speed_comm: true
   disable_waiting_ack: true    # ACK-off 500Hz streaming; config-driven, no RB_ALLOW_* env gate
 
 right_robot:
@@ -36,9 +64,20 @@ right_robot:
   servo_t1_sec: 0.002
   servo_t2_sec: 0.021
   servo_gain: 1.0                 # 0.5 caused ~5deg servo lag + right servo deactivation (pre-26071103 firmware)
-  # alpha 1.0 = LPF on (baseline). See the left arm block for the firmware-26071103 /
-  # wire-precision context before trying 10.0 (LPF off); keep both arms identical.
-  servo_alpha: 1.0
+  # alpha 10.0 = LPF OFF. See the left arm block for the four confounders this flip
+  # clears and for the baseline log to compare against; keep both arms identical.
+  #
+  # WATCH THIS ARM FIRST: the right box path has an unresolved physical defect
+  # (2026-08-17 pcap: 33.3 ms stream dropout before the NIC, left box normal at the
+  # same instant; cable/port swap still pending). The box LPF was masking those gaps.
+  # With it off, a dropout shows up directly as jerk — do not read right-arm jerk as
+  # evidence about LPF until that wiring is cleared. Right fill also sits at 14-15
+  # ticks vs left's 5 (cadence controller regulates min(arms) only).
+  servo_alpha: 10.0
+  # See the left arm block for the measurement and rationale; keep both arms
+  # identical or the LPF-off comparison is meaningless.
+  servo_j_wire_decimals: 7
+  push_box_high_speed_comm: true
   disable_waiting_ack: true    # ACK-off 500Hz streaming; config-driven, no RB_ALLOW_* env gate
 
 left_mount:
@@ -69,6 +108,64 @@ servo:
   filter_dt_max_ratio: 1.5
   servo_t1_rate_match_tolerance_ratio: 0.2
   allow_servo_t1_rate_mismatch: true   # servo param experiment: t1 != 2ms period accepted (was false)
+  # Hold the control box's command queue at a fixed depth by trimming this loop's
+  # send period, using the box's own RBACK[<n>] occupancy as the observer.
+  #
+  # WHY (measured, not assumed). This loop streams at exactly rate_hz off the host
+  # clock while the box consumes slightly slower, and nothing closed that loop, so
+  # the queue grew for as long as the stack stayed up -- and the plan-to-robot
+  # delay grew with it. logs/servo_log_20260818_113008.csv via
+  # tools/analyze_box_queue_lag.py:
+  #     fill  14.2 -> 45.5 ticks over 48 s  = +0.65 ticks/s
+  #     lag     64 -> 114 ms                = +1.30 ms/s   (0.65 x 2 ms == 1.30)
+  # on BOTH arms, with lag ~= fill x 2 ms + ~25 ms (the constant being servo_t2_sec
+  # plus mechanical response). The fill growth rate IS the lag drift rate.
+  #
+  # This is what latched `right delta_preview_actual_lead_fault` at t=69 s in the
+  # 10:45 run: preview_max_actual_lead_rad/_m are speed x delay budgets, so with
+  # the delay drifting the same rollout trips or does not trip purely on uptime.
+  # Note the budgets' own ~65 ms basis was already a drifted reading -- fill was
+  # 18 ticks (36 ms) by t=6 s. At target_fill 5 the delay should sit near 35 ms.
+  #
+  # Tunables below match controller-manager's qsync, which converged to
+  # +2.562 us/cycle on THESE boxes; our plant sim converges to ~2.45 us/cycle.
+  # trim_clamp_us is deliberately modest: the trim widens the spacing between
+  # q_ref writes, and the box interpolates against servo_t1_sec (2 ms), so a wide
+  # trim risks the box running dry BETWEEN commands (which reads as jerk).
+  # controller-manager can drain harder only because it drains during warmup
+  # before the task streams; we may converge while a policy is already driving.
+  box_queue_cadence:
+    enable: true
+    target_fill: 5           # ticks; 5 x 2 ms = 10 ms of queue, same as cm
+    protect_fill: 1          # at/below this the box is about to run dry
+    protect_trim_us: -80.0   # wake early hard; overrides the PI
+    lpf_alpha: 0.02          # ~0.1 s at 500 Hz
+    kp_above_us: 6.0         # drain gently (deep queue = latency)
+    kp_below_us: 18.0        # refill briskly (shallow queue = stall risk)
+    ki_us: 0.006             # learns the constant host-vs-box clock offset
+    integral_clamp_us: 25.0
+    trim_clamp_us: 120.0     # ~6% rate trim; drains the startup backlog in ~1.4 s
+    warmup_sec: 0.4          # observe before acting
+    stale_observation_ticks: 25
+    # Per-arm level trim. The trim above is a RATE lever and there is only one of
+    # it, so it holds the shallower arm at target and the other one keeps whatever
+    # offset it warmed up with: measured 10 ticks (20 ms) on 18:38 and 4 ticks
+    # (8 ms) on 18:52, with WHICH arm gets held flipping between sessions. This
+    # levels the deep arm by withholding one of its sends, which drops its queue
+    # by exactly one tick. Read box_queue_cadence.hpp before touching any of it --
+    # in particular why a skip must drop a waypoint instead of holding the
+    # trajectory back (holding it back cancels the gain exactly).
+    level:
+      enable: true
+      skip_margin_ticks: 0.5            # decide on the 0.1 s filtered depth, not the raw +-1 swing
+      skip_floor_offset_ticks: 1        # never skip an arm at or below target_fill
+      # The gate that makes a dropped waypoint cheap. At 1.0 deg/s the dropped
+      # step is 0.002 deg, vs a measured median per-tick motion of 0.0106 deg and
+      # a box encoder grid of 2e-4 deg. Measured opportunity at this threshold:
+      # 28-30% of ticks qualify, longest gap between them 9.8 s (left) / 16.9 s
+      # (right) -- against a need of roughly one skip every two minutes.
+      skip_max_joint_speed_deg_s: 1.0
+      skip_min_interval_ticks: 2        # a skipped send returns no RBACK; wait for the one that reflects it
   # REAL physical-motion opt-in: accept the vendor -2001 (op_stat_self_collision/robot_time
   # field-layout garbage) as unavailable instead of latching diagnostics_suspect. ONLY
   # these two fields are suppressed; everything else still faults. Fail-closed (needs

@@ -13,6 +13,7 @@
 
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/control/arm_worker.hpp"
+#include "rb_servo/control/box_queue_cadence.hpp"
 #include "rb_servo/control/cartesian_chunk_follower.hpp"
 #include "rb_servo/control/cartesian_servo_controller.hpp"
 #include "rb_servo/control/command_buffer.hpp"
@@ -346,6 +347,19 @@ private:
     uint64_t tick_ = 0;
     uint64_t last_loop_start_ns_ = 0;
     RealtimeTimingAccumulator realtime_timing_accumulator_;
+
+    // Holds the control box's command queue at a bounded depth by trimming this
+    // loop's send period; `box_queue_trim_ns_` is applied to the next tick's
+    // absolute deadline. Zero unless servo.box_queue_cadence.enable is set.
+    BoxQueueCadence box_queue_cadence_{BoxQueueCadenceConfig{}};
+    std::int64_t box_queue_trim_ns_ = 0;
+    // Previous tick's commanded joints, for the per-arm level trim's speed gate.
+    // Held here rather than derived from state because the gate is about how far
+    // the COMMAND would jump if we dropped this waypoint, which is a property of
+    // the command stream, not of where the arm happens to be.
+    JointArray prev_sent_q_left_deg_{};
+    JointArray prev_sent_q_right_deg_{};
+    bool prev_sent_q_valid_ = false;
 
     JointArray left_prev_sent_q_deg_{};
     JointArray right_prev_sent_q_deg_{};

@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include "rb_servo/control/box_queue_cadence.hpp"
 #include "rb_servo/core/types.hpp"
 
 namespace rb_servo {
@@ -31,6 +32,31 @@ struct BackendConfig {
     double servo_t2_sec = 0.05;
     double servo_gain = 1.0;
     double servo_alpha = 0.5;
+
+    // Decimal places used for the joint angles in the streamed move_servo_j
+    // command. 0 = keep the rbpodo SDK's own formatting (a plain stringstream at
+    // default precision, i.e. 6 SIGNIFICANT digits).
+    //
+    // Why this is a knob: at our joint magnitudes (26-240 deg) 6 significant
+    // digits puts the wire grid at 0.1-1 m-deg, while the measured per-tick
+    // motion is only 5-11 m-deg on the coarse joints (2026-08-18,
+    // logs/servo_log_20260818_134558.csv, moving ticks only). The box then
+    // DIFFERENTIATES that staircase across its servo_t2_sec lookahead, so the
+    // quantization lands in the velocity/acceleration domain, where +-1 grid step
+    // is ~250 deg/s^2. The box's own LPF currently hides it -- which is why the
+    // earlier "servo_alpha 10 = jerk" result is confounded and why raising this
+    // is a prerequisite for retrying LPF-off. controller-manager uses %.7f.
+    //
+    // Implemented by formatting the command ourselves and sending it through the
+    // SDK's public eval(); move_servo_j is byte-equivalent to eval() (both are
+    // sock_.send + wait_until_ack_message), so no SDK patch is involved.
+    int servo_j_wire_decimals = 0;
+
+    // Push the controller's high-speed command-channel settings at cold init, the
+    // way controller-manager does (Arm::push_box_setup, taken verbatim from a
+    // captured vendor setup session). rb_servo_server historically sent neither.
+    // No SDK API exists for these, so they go out as raw script via eval().
+    bool push_box_high_speed_comm = false;
 
     // Deprecated rbpodo aliases. Kept synchronized with canonical fields while
     // old configs migrate.
@@ -694,6 +720,10 @@ inline constexpr JointArray rbpodoDefaultSafetyJointMaxDeg() {
 
 struct ServoConfig {
     int rate_hz = 500;
+    // Closes the loop on the control box's command-queue depth by trimming this
+    // loop's send period. Fail-closed: disabled unless a config opts in. See
+    // control/box_queue_cadence.hpp for the measured defect and the design.
+    BoxQueueCadenceConfig box_queue_cadence;
     double command_timeout_sec = 0.2;
     ServoIoModel io_model = ServoIoModel::Direct;
     ControlMode startup_mode = ControlMode::Hold;

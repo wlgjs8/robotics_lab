@@ -1,6 +1,6 @@
 {
     "device": {
-        "fw version": "5.12.14.100",
+        "fw version": "5.17.0.10",
         "name": "Intel RealSense D405",
         "product line": "D400"
     },
@@ -22,8 +22,8 @@
         "aux-param-depthclampmin": "0",
         "aux-param-disparityshift": "0",
         "controls-autoexposure-auto": "True",
-        "controls-autoexposure-manual": "33000",
-        "controls-depth-gain": "16",
+        "controls-autoexposure-manual": "9900",
+        "controls-depth-gain": "64",
         "controls-depth-white-balance-auto": "True",
         "ignoreSAD": "0",
         "param-amplitude-factor": "0.08",
@@ -78,7 +78,7 @@
         "param-texturecountthresh": "0",
         "param-texturedifferencethresh": "2466",
         "param-usersm": "1",
-        "param-zunits": "10"
+        "param-zunits": "100"
     },
     "schema version": 1,
     "viewer": {

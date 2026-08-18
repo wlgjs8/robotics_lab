@@ -1,37 +1,51 @@
 #!/usr/bin/env bash
-# Kernel-level core isolation for the 500 Hz servo thread (AMD 5800X host).
+# Kernel-level core isolation for the 500 Hz servo thread.
 #
 #   tools/rt_core_isolation.sh --status   # read-only report (no sudo)
 #   sudo tools/rt_core_isolation.sh       # apply GRUB + systemd persist + immediate steps
 #
-# Goal: dedicate physical core 3 (cpu3 = servo.cpu_core in the stack configs;
-# its SMT sibling is cpu11) exclusively to the SCHED_FIFO servo thread:
-#   - hyper-threading OFF (cpu8-15 offline; cpu0-7 numbering unchanged)
+# HOST: AMD Ryzen 9 9950X — 16 PHYSICAL cores, SMT disabled in BIOS
+# (/sys/devices/system/cpu/smt/control reads "notsupported"), so cpu0-15 are all
+# real cores and there are no siblings to take offline. Retargeted 2026-08-18
+# from the previous 8-core 5800X host, where cpu8-15 were SMT siblings and
+# OTHER_CPUS was 0-2,4-7 — running that unchanged here would have confined every
+# systemd unit and every IRQ to half the machine.
+#
+# Goal: dedicate physical core 3 (cpu3 = servo.cpu_core in the stack configs)
+# exclusively to the SCHED_FIFO servo thread:
 #   - cpu3 removed from the scheduler domains (isolcpus): the OS never places
 #     a task there; only the servo thread lands on it via its own
 #     sched_setaffinity (servo.cpu_core: 3). Collision-monitor pinning was
 #     dropped to -1 (OS-scheduled) in the stack configs on this basis.
-#   - INHERITANCE HARDENING: PID1 CPUAffinity=0-2,4-7 in systemd system.conf,
-#     so every service/session starts with a default mask that EXCLUDES cpu3 —
-#     a child process can only reach cpu3 by explicitly calling
-#     sched_setaffinity itself (which is exactly and only what the servo
-#     thread does). Without this, a parent that widened its own mask could
-#     leak cpu3 to all of its children.
-#   - device IRQs / scheduler tick / RCU callbacks kept off cpu3
-#   - low-power stays disabled (C-states already off in BIOS — cpuidle driver
-#     "none"; boot params below only guard against that regressing)
+#   - INHERITANCE HARDENING: PID1 CPUAffinity in systemd system.conf, so every
+#     service/session starts with a default mask that EXCLUDES cpu3 — a child
+#     process can only reach cpu3 by explicitly calling sched_setaffinity itself
+#     (which is exactly and only what the servo thread does). Without this, a
+#     parent that widened its own mask could leak cpu3 to all of its children.
+#   - device IRQs / scheduler tick / RCU callbacks kept off cpu3. This matters
+#     concretely here: measured 2026-08-18, the robot NIC's four busiest queues
+#     (enp16s0f1-TxRx-0..3, IRQ 155-158, one of them with 143M interrupts) were
+#     pinned to "3-4", i.e. ON the servo core, along with an nvidia IRQ.
+#   - low-power / frequency scaling pinned down. NOT already handled by BIOS on
+#     this host: measured cpuidle driver "acpi_idle" and cpu3 governor
+#     "powersave", both of which add wake latency and clock variation to the
+#     tick. (The previous host had C-states off in BIOS; that comment was stale.)
 #
 # Kernel cmdline added (REBOOT REQUIRED for isolcpus/nohz_full/rcu_nocbs):
 #   nosmt isolcpus=domain,managed_irq,3 nohz_full=3 rcu_nocbs=3
-#   irqaffinity=0-2,4-7 cpufreq.default_governor=performance processor.max_cstate=1
+#   irqaffinity=0-2,4-15 cpufreq.default_governor=performance processor.max_cstate=1
 #
-# Immediate (already effective before the reboot): SMT off via sysfs, default
-# IRQ affinity mask off cpu3, existing IRQs migrated best-effort.
+# `nosmt` is a no-op while SMT is off in BIOS; it is kept as a guard so that
+# re-enabling SMT in BIOS cannot silently hand cpu3 a sibling that shares its
+# execution resources.
+#
+# Immediate (already effective before the reboot): default IRQ affinity mask off
+# cpu3, existing IRQs migrated best-effort, RT throttling disabled.
 set -euo pipefail
 
 ISOL_CPU=3
-OTHER_CPUS="0-2,4-7"          # post-nosmt online set minus the isolated cpu
-RUNTIME_IRQ_MASK="fff7"       # 16-thread hex mask with bit3 clear (pre-reboot)
+OTHER_CPUS="0-2,4-15"         # all 16 physical cores minus the isolated one
+RUNTIME_IRQ_MASK="fff7"       # 16-core hex mask with bit3 clear (pre-reboot)
 GRUB_FILE=/etc/default/grub
 SYSTEMD_CONF=/etc/systemd/system.conf
 PARAMS=(
@@ -144,6 +158,25 @@ for f in /proc/irq/[0-9]*/smp_affinity_list; do
 done
 echo "[isolation] IRQs migrated off cpu${ISOL_CPU}: ${moved} (rest immovable/already off)"
 
+# Report what is STILL on the isolated core. Silence here would read as success;
+# a device whose affinity refused to move is exactly the thing that keeps
+# injecting jitter into the tick, so name it.
+stuck=""
+for f in /proc/irq/[0-9]*/smp_affinity_list; do
+    if grep -qw "${ISOL_CPU}" "$f" 2>/dev/null; then
+        irq="${f#/proc/irq/}"; irq="${irq%/smp_affinity_list}"
+        name="$(sed -nE "s/^ *${irq}:.*[0-9]+ +(.*)$/\1/p" /proc/interrupts | head -1)"
+        stuck="${stuck}    IRQ ${irq}  $(cat "$f")  ${name}\n"
+    fi
+done
+if [ -n "$stuck" ]; then
+    echo "[isolation] STILL on cpu${ISOL_CPU} (immovable at runtime; the isolcpus=managed_irq"
+    echo "[isolation] boot param should take these after the reboot — re-check with --status):"
+    printf "%b" "$stuck"
+else
+    echo "[isolation] no IRQ remains on cpu${ISOL_CPU}"
+fi
+
 # ---- 4) Disable RT throttling (persist + immediate) -------------------------
 # The scheduler throttles SCHED_FIFO/RR to sched_rt_runtime_us per period
 # (default 950000/1000000 = 95%): an RT task running >950 ms in any 1 s window is
@@ -168,5 +201,6 @@ echo "[isolation] rt throttle now: sched_rt_runtime_us=$(cat /proc/sys/kernel/sc
 echo
 echo "[isolation] DONE — reboot required for isolcpus/nohz_full/rcu_nocbs/CPUAffinity."
 echo "[isolation] after reboot, verify with: tools/rt_core_isolation.sh --status"
-echo "[isolation]   expect: online 0-7, smt off, isolated '${ISOL_CPU}', nohz_full '${ISOL_CPU}',"
-echo "[isolation]           pid1 affinity ${OTHER_CPUS}"
+echo "[isolation]   expect: online 0-15, isolated '${ISOL_CPU}', nohz_full '${ISOL_CPU}',"
+echo "[isolation]           pid1 affinity ${OTHER_CPUS}, cpu${ISOL_CPU} governor performance,"
+echo "[isolation]           and no enp16s0f1-TxRx / nvidia IRQ left on cpu${ISOL_CPU}"

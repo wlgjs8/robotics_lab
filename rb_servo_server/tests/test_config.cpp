@@ -1464,6 +1464,88 @@ bool testSendAtTickStartAndPipelinedReadConfig() {
     return true;
 }
 
+// The box-queue cadence controller trims the servo send period, so a bad value
+// here perturbs the real command stream. Every bound must fail closed rather
+// than fall back to a default (AGENTS.md: no silent fallback defaults for
+// safety-relevant parameters).
+bool testBoxQueueCadenceConfig() {
+    const std::string defaults_path = writeTempConfig(
+        "box-queue-cadence-defaults",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+    );
+    const rb_servo::DualArmConfig defaults = rb_servo::loadConfigFromYaml(defaults_path);
+    ::unlink(defaults_path.c_str());
+    const auto& cadence = defaults.servo.box_queue_cadence;
+    // Off unless a config opts in: this must never switch itself on.
+    RB_CHECK(!cadence.enable);
+    RB_CHECK(cadence.target_fill == 5);
+    RB_CHECK(cadence.protect_fill == 1);
+    RB_CHECK(near(cadence.trim_clamp_us, 120.0));
+    RB_CHECK(near(cadence.protect_trim_us, -80.0));
+
+    const std::string parsed_path = writeTempConfig(
+        "box-queue-cadence-parsed",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "servo:\n"
+        "  box_queue_cadence:\n"
+        "    enable: true\n"
+        "    target_fill: 8\n"
+        "    trim_clamp_us: 200.0\n"
+        "    ki_us: 0.01\n"
+    );
+    const rb_servo::DualArmConfig parsed = rb_servo::loadConfigFromYaml(parsed_path);
+    ::unlink(parsed_path.c_str());
+    RB_CHECK(parsed.servo.box_queue_cadence.enable);
+    RB_CHECK(parsed.servo.box_queue_cadence.target_fill == 8);
+    RB_CHECK(near(parsed.servo.box_queue_cadence.trim_clamp_us, 200.0));
+    RB_CHECK(near(parsed.servo.box_queue_cadence.ki_us, 0.01));
+
+    struct Rejection {
+        const char* name;
+        const char* body;
+    };
+    const Rejection rejections[] = {
+        // Setpoint inside the underrun band: the controller would fight itself.
+        {"target-inside-protect",
+         "    target_fill: 1\n    protect_fill: 1\n"},
+        // A negative gain inverts the loop and drives the queue away unbounded.
+        {"negative-kp", "    kp_below_us: -1.0\n"},
+        {"negative-ki", "    ki_us: -0.001\n"},
+        // Underrun protection must wake EARLIER, never later.
+        {"positive-protect-trim", "    protect_trim_us: 40.0\n"},
+        // Past servo.filter_dt_max_ratio the follower under-advances and
+        // trajectory timing distorts.
+        {"trim-clamp-too-wide", "    trim_clamp_us: 1500.0\n"},
+        {"trim-clamp-zero", "    trim_clamp_us: 0.0\n"},
+        // An override bigger than the clamp escapes the bound it exists under.
+        {"protect-trim-exceeds-clamp",
+         "    trim_clamp_us: 50.0\n    protect_trim_us: -80.0\n"},
+        {"lpf-alpha-zero", "    lpf_alpha: 0.0\n"},
+        {"lpf-alpha-above-one", "    lpf_alpha: 1.5\n"},
+        // Unknown keys must not be silently ignored (a typo would leave the
+        // operator believing a bound was applied).
+        {"unknown-key", "    targetfill: 5\n"},
+    };
+    for (const auto& rejection : rejections) {
+        const std::string body =
+            std::string("schema: robotics_lab.rb_servo_server.v1\n"
+                        "servo:\n"
+                        "  box_queue_cadence:\n"
+                        "    enable: true\n") +
+            rejection.body;
+        const std::string path =
+            writeTempConfig(std::string("box-queue-cadence-") + rejection.name, body);
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        if (!rejected) {
+            std::cerr << "box_queue_cadence config was accepted but must fail closed: "
+                      << rejection.name << "\n";
+            return false;
+        }
+    }
+    return true;
+}
+
 bool testFollowerOutputSmdConfig() {
     const std::string defaults_path = writeTempConfig(
         "follower-output-smd-defaults",
@@ -1553,6 +1635,7 @@ int main() {
     if (!testRuckigFollowerFallbackPolicyConfig()) return 1;
     if (!testRuckigFollowerControllerConfig()) return 1;
     if (!testFollowerOutputSmdConfig()) return 1;
+    if (!testBoxQueueCadenceConfig()) return 1;
     if (!testSendAtTickStartAndPipelinedReadConfig()) return 1;
     return 0;
 }

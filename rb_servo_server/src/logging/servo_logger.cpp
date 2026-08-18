@@ -424,6 +424,9 @@ void ServoLogger::writeHeader() {
     file_ << ",fault_context_verdict,fault_context_domain,fault_context_arm,fault_context_backend_op,fault_context_backend_error_kind,fault_context_backend_error_name,fault_context_backend_error_code,fault_context_retryable,fault_context_recoverable,fault_context_robot_fault,fault_context_transport_fault,fault_context_state_after_source,fault_context_reason";
     file_ << ",left_send_start_ns,left_send_end_ns,right_send_start_ns,right_send_end_ns,send_skew_us,left_send_duration_us,right_send_duration_us";
     file_ << ",left_ack_policy,right_ack_policy,left_ack_observed,right_ack_observed,left_controller_acceptance_observed,right_controller_acceptance_observed,left_ack_wait_duration_us,right_ack_wait_duration_us,left_rbpodo_waiting_ack,right_rbpodo_waiting_ack,left_send_acceptance_semantics,right_send_acceptance_semantics";
+    file_ << ",left_box_queue_fill,right_box_queue_fill,left_box_queue_fill_samples,right_box_queue_fill_samples,left_box_queue_fill_unparsed,right_box_queue_fill_unparsed";
+    file_ << ",box_queue_phase,box_queue_controlled_fill,box_queue_fill_lpf,box_queue_trim_us,box_queue_integral_us";
+    file_ << ",left_box_queue_fill_lpf,right_box_queue_fill_lpf,left_send_skip_count,right_send_skip_count";
     file_ << ",left_state_age_us,right_state_age_us,left_send_result_age_us,right_send_result_age_us";
     file_ << ",left_send_within_period,right_send_within_period,left_send_period_overrun,right_send_period_overrun,left_send_command_deadline_missed,right_send_command_deadline_missed";
     file_ << ",left_send_deadline_hit,right_send_deadline_hit,dispatch_skew_us,left_worker_loop_read_duration_us,right_worker_loop_read_duration_us";
@@ -969,6 +972,21 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << sample.right_last_send.rbpodo_waiting_ack << ','
           << csvEscape(sample.left_last_send.acceptance_semantics) << ','
           << csvEscape(sample.right_last_send.acceptance_semantics) << ','
+          << sample.left_last_send.box_queue_fill << ','
+          << sample.right_last_send.box_queue_fill << ','
+          << sample.left_last_send.box_queue_fill_samples << ','
+          << sample.right_last_send.box_queue_fill_samples << ','
+          << sample.left_last_send.box_queue_fill_unparsed << ','
+          << sample.right_last_send.box_queue_fill_unparsed << ','
+          << csvEscape(sample.box_queue_phase) << ','
+          << sample.box_queue_controlled_fill << ','
+          << sample.box_queue_fill_lpf << ','
+          << sample.box_queue_trim_us << ','
+          << sample.box_queue_integral_us << ','
+          << sample.left_box_queue_fill_lpf << ','
+          << sample.right_box_queue_fill_lpf << ','
+          << sample.left_send_skip_count << ','
+          << sample.right_send_skip_count << ','
           << ageUs(sample.loop_end_time_ns, sample.left_state.host_time_ns) << ','
           << ageUs(sample.loop_end_time_ns, sample.right_state.host_time_ns) << ','
           << ageUs(sample.loop_end_time_ns, sample.left_send_end_ns) << ','

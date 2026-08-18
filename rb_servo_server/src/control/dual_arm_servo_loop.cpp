@@ -1255,6 +1255,9 @@ BackendCallSnapshot sendCallSnapshot(const SendServoJResult& result) {
     snapshot.ack_wait_duration_us = result.ack_wait_duration_us;
     snapshot.rbpodo_waiting_ack = result.rbpodo_waiting_ack;
     snapshot.acceptance_semantics = result.acceptance_semantics;
+    snapshot.box_queue_fill = result.box_queue_fill.value_or(-1);
+    snapshot.box_queue_fill_samples = result.box_queue_fill_samples;
+    snapshot.box_queue_fill_unparsed = result.box_queue_fill_unparsed;
     return snapshot;
 }
 
@@ -1856,7 +1859,8 @@ DualArmServoLoop::DualArmServoLoop(
     ServoLogger* logger,
     std::shared_ptr<IKinematics> kinematics,
     ScopePublisher* scope_publisher
-) : left_robot_(std::move(left_robot)),
+) : box_queue_cadence_(config.servo.box_queue_cadence),
+    left_robot_(std::move(left_robot)),
     right_robot_(std::move(right_robot)),
     config_(config),
     command_buffer_(command_buffer),
@@ -2374,7 +2378,12 @@ void DualArmServoLoop::loopMain() {
         const uint64_t sched_wake_ns = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 next_tick.time_since_epoch()).count());
-        next_tick += period;
+        // Trim from the PREVIOUS tick's cadence update. Adding it to the absolute
+        // deadline (rather than sleeping a relative amount) is what makes a
+        // sustained trim a RATE correction instead of a one-shot phase nudge.
+        // Zero whenever the cadence controller is disabled, warming up, or has
+        // lost sight of the box.
+        next_tick += period + std::chrono::nanoseconds(box_queue_trim_ns_);
         const uint64_t loop_start = nowSteadyNs();
         // Dispatch/result variables shared by both send modes. In
         // send_at_tick_start mode they are filled HERE (dispatching the target
@@ -3186,6 +3195,53 @@ void DualArmServoLoop::loopMain() {
         sample.right_last_read = readCallSnapshot(right_state_result, right_read_fault);
         sample.left_last_send = sendCallSnapshot(left_send_result);
         sample.right_last_send = sendCallSnapshot(right_send_result);
+        // Close the loop on the box command queue: the trim computed here shapes
+        // the NEXT tick's deadline (see `next_tick += period + trim` below), the
+        // same ordering controller-manager uses. -1 is the "not observed" sentinel
+        // the backend stamps; it must not be read as an empty queue.
+        {
+            const auto observed = [](int fill) -> std::optional<int> {
+                return fill >= 0 ? std::optional<int>(fill) : std::nullopt;
+            };
+            // Speed gate input for the per-arm level trim: the largest per-joint
+            // command step this tick, as deg/s. Max across joints, not norm --
+            // the skip drops a waypoint on every joint at once, so the worst
+            // joint is what sets the cost.
+            const auto commandedSpeedDegPerSec = [&](const JointArray& now,
+                                                     const JointArray& prev) {
+                if (!prev_sent_q_valid_ || !(filter_dt_sec > 0.0)) return 0.0;
+                double worst = 0.0;
+                for (std::size_t j = 0; j < now.size(); ++j) {
+                    const double step = std::abs(now[j] - prev[j]);
+                    if (std::isfinite(step)) worst = std::max(worst, step);
+                }
+                return worst / filter_dt_sec;
+            };
+
+            BoxQueueCadenceInput cadence_input;
+            cadence_input.left_fill = observed(sample.left_last_send.box_queue_fill);
+            cadence_input.right_fill = observed(sample.right_last_send.box_queue_fill);
+            cadence_input.left_joint_speed_deg_s =
+                commandedSpeedDegPerSec(sample.left_sent_q_deg, prev_sent_q_left_deg_);
+            cadence_input.right_joint_speed_deg_s =
+                commandedSpeedDegPerSec(sample.right_sent_q_deg, prev_sent_q_right_deg_);
+            cadence_input.dt_sec = filter_dt_sec;
+            box_queue_trim_ns_ = box_queue_cadence_.update(cadence_input);
+
+            prev_sent_q_left_deg_ = sample.left_sent_q_deg;
+            prev_sent_q_right_deg_ = sample.right_sent_q_deg;
+            prev_sent_q_valid_ = true;
+
+            sample.box_queue_trim_us = box_queue_cadence_.trimUs();
+            sample.box_queue_fill_lpf = box_queue_cadence_.fillLpf();
+            sample.box_queue_integral_us = box_queue_cadence_.integralUs();
+            sample.box_queue_controlled_fill = box_queue_cadence_.controlledFill();
+            sample.box_queue_phase = toString(box_queue_cadence_.phase());
+            sample.left_box_queue_fill_lpf = box_queue_cadence_.armFillLpf(ArmId::Left);
+            sample.right_box_queue_fill_lpf = box_queue_cadence_.armFillLpf(ArmId::Right);
+            sample.left_send_skip_count = box_queue_cadence_.skipCount(ArmId::Left);
+            sample.right_send_skip_count = box_queue_cadence_.skipCount(ArmId::Right);
+        }
         sample.left_cartesian_solve = left_last_cartesian_solve_;
         sample.right_cartesian_solve = right_last_cartesian_solve_;
         mergeAbcTelemetry(sample.left_cartesian_solve, left_abc_telemetry_,
@@ -6658,6 +6714,11 @@ DualSendResult DualArmServoLoop::sendTargets(
     dispatch_request.seq = command_seq;
     dispatch_request.dispatch_start_ns = dispatch_start_ns;
     dispatch_request.deadline_ns = deadline_ns;
+    // Per-arm queue level trim, decided on the previous tick (a skip has to be
+    // latched before the send it withholds). Only the rbpodo async streaming path
+    // reads these; every other path sends unconditionally.
+    dispatch_request.skip_left = box_queue_cadence_.skipNext(ArmId::Left);
+    dispatch_request.skip_right = box_queue_cadence_.skipNext(ArmId::Right);
 
     if (send_policy != "send_servo_j") {
         const uint64_t suppressed_time_ns = nowSteadyNs();

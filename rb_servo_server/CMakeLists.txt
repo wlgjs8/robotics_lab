@@ -25,6 +25,7 @@ add_library(rb_servo_core
     src/robot/mock_backend.cpp
     src/robot/rbpodo_backend.cpp
     src/robot/backend_factory.cpp
+    src/control/box_queue_cadence.cpp
     src/control/command_buffer.cpp
     src/control/trajectory_filter.cpp
     src/control/safety_filter.cpp
@@ -168,6 +169,22 @@ if(BUILD_TESTING)
     add_executable(test_config tests/test_config.cpp)
     target_link_libraries(test_config PRIVATE rb_servo_core)
     add_test(NAME config COMMAND test_config)
+
+    add_executable(test_box_queue_cadence tests/test_box_queue_cadence.cpp)
+    target_link_libraries(test_box_queue_cadence PRIVATE rb_servo_core)
+    add_test(NAME box_queue_cadence COMMAND test_box_queue_cadence)
+
+    add_executable(test_servo_j_command tests/test_servo_j_command.cpp)
+    target_link_libraries(test_servo_j_command PRIVATE rb_servo_core)
+    add_test(NAME servo_j_command COMMAND test_servo_j_command)
+
+    add_executable(test_rback_fill tests/test_rback_fill.cpp)
+    target_link_libraries(test_rback_fill PRIVATE rb_servo_core)
+    add_test(NAME rback_fill COMMAND test_rback_fill)
+
+    add_executable(test_servo_logger_csv tests/test_servo_logger_csv.cpp)
+    target_link_libraries(test_servo_logger_csv PRIVATE rb_servo_core)
+    add_test(NAME servo_logger_csv COMMAND test_servo_logger_csv)
 
     add_executable(test_gripper_bridge tests/test_gripper_bridge.cpp)
     target_link_libraries(test_gripper_bridge PRIVATE rb_servo_core)

@@ -85,7 +85,7 @@ def _warp(image: np.ndarray, dx: float, dy: float = 0.0) -> np.ndarray:
     )
 
 
-@unittest.skipIf(cv2 is None, "opencv-python-headless is not installed")
+@unittest.skipIf(cv2 is None, "opencv-python is not installed")
 class CameraQualityAnalyzerTest(unittest.TestCase):
     def test_blur_effect_increases_for_gaussian_blur(self) -> None:
         assert cv2 is not None

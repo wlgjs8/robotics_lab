@@ -153,6 +153,14 @@ RB_GUI_HEAD_PREVIEW_TOPIC=camera.bundle.stereo
 RB_GUI_HEAD_PREVIEW_STREAM=head.color
 ```
 
+## OpenCV Package
+
+The repo `.venv` is shared by `rb_gui` and the local OpenCV HighGUI camera
+preview (`tools/subscribe_camera.sh`), so its supported OpenCV distribution is
+`opencv-python`. Do not install `opencv-python-headless` alongside it: both
+packages own the same `cv2` files, and whichever wheel is installed last can
+silently determine whether preview windows are available.
+
 ## Running Tests
 
 ```bash

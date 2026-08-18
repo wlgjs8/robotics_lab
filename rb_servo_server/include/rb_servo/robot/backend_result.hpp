@@ -90,6 +90,14 @@ struct SendServoJResult {
     bool rbpodo_waiting_ack = false;
     std::string acceptance_semantics = "unknown";
     JointArray requested_q_deg{};
+    // Controller command-queue occupancy, parsed out of the RBACK[<n>] the box
+    // sends back for every streamed command. Observer only — nothing acts on it
+    // yet. nullopt when this cycle drained no well-formed RBACK (including every
+    // path that returns before the drain, and any backend that has no such
+    // concept). See RbackScan in rbpodo_backend.cpp for why we need it.
+    std::optional<int> box_queue_fill;
+    int box_queue_fill_samples = 0;    // RBACK tokens parsed this cycle (expect ~1)
+    int box_queue_fill_unparsed = 0;   // drained responses that held no RBACK token
 };
 
 struct ArmSendResult {

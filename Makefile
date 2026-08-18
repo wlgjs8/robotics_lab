@@ -5,7 +5,7 @@ POLICY_HDF5_AUDIT_SMOKE ?= $(CODEX_UPLOADED_HDF5_SMOKE)
 POLICY_HDF5_AUDIT_OUT ?= /tmp/robotics_lab_policy_hdf5_audit_smoke
 FLOW_INFER_ARGS ?=
 
-.PHONY: run flow-infer-real flow-infer-sim-offline flow-infer-training-replay build rebuild policy-hdf5-audit-smoke deps-hardware-free cam-up cam-up-wrists cam-status cam-down ik-infeasible
+.PHONY: run flow-infer-real flow-infer-sim-offline flow-infer-training-replay build rebuild policy-hdf5-audit-smoke deps-hardware-free cam-up cam-up-wrists cam-up-wrists-90 cam-status cam-down ik-infeasible
 
 # Full local teleop stack: rb_servo_server + viser GUI + policy_runner.
 # SpaceMouse + UMI teleop run side by side (teleop_mux: the first to engage
@@ -24,7 +24,7 @@ MODE ?= sim
 #                     path (P1) and the real-hardware device file (P3) are still
 #                     in progress, so MODE=real fails closed with guidance.
 #   CONTROLLER=legacy the pre-transition rb_servo_server stack (unchanged).
-CONTROLLER ?= cm
+CONTROLLER ?= legacy
 # P1 acceptance: SILS up -> arms OnTask(Idle) -> bridge -> 3-check gate.
 # Also the submodule pin-bump verification gate (cm_bridge/docs/design.md §8).
 cm-sils-gate:
@@ -129,6 +129,19 @@ cam-up:
 # wrist_left/right)과 손목 클라우드 발행은 그대로 동작한다.
 cam-up-wrists:
 	$(MAKE) cam-up CAMERA_CONFIG=/app/config/dual_realsense_d405.yaml
+
+# 90 fps 손목 전용 리그: yaml(스트림 640x480@90 + ring_slots 8 + bundle window)과
+# advanced-mode JSON을 짝으로 띄운다. 주의: load_json 은 JSON의 "viewer" 블록
+# (stream-fps 등)을 무시한다 — 실제 fps/해상도는 yaml 이 정한다. 그래서 두 JSON은
+# 현재 기능적으로 동일하고, 90fps JSON은 fps별 노출/게인 튜닝을 담을 자리로만 의미가
+# 있다. 30fps 타겟은 JSON 비활성(__no_advanced__)이 기본이므로, 30 vs 90 A/B를
+# 할 때는 한쪽만 JSON을 켜서 변수를 두 개 만들지 말 것:
+#   make cam-up-wrists-90 CAM_JSON_90=/app/config/__no_advanced__.json   # JSON 없이 fps만 비교
+#   make cam-up-wrists    STEREO_CAM_JSON=/app/config/realsense_d405_advanced.json  # 양쪽 다 JSON
+CAM_JSON_90 ?= /app/config/realsense_d405_90fps.json
+cam-up-wrists-90:
+	$(MAKE) cam-up CAMERA_CONFIG=/app/config/dual_realsense_d405_90fps.yaml \
+		STEREO_CAM_JSON=$(CAM_JSON_90)
 
 # `docker ps -a`(-a 필수: 죽은 컨테이너도 보여준다) + 카메라별 USB 링크 속도 + capture 상태.
 # USB3 미달 카메라 하나가 preflight에서 camera_server 전체를 죽이므로(required RealSense

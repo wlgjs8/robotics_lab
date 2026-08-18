@@ -137,6 +137,22 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(stack_real.right_robot.servo_t2_sec, 0.021));
         RB_CHECK(stack_real.left_robot.disable_waiting_ack);
         RB_CHECK(stack_real.right_robot.disable_waiting_ack);
+        // LPF off (box scales alpha by 0.1 internally, so 10.0 = weight 1.0).
+        // Both arms must match or the arms are not comparable; see stack_real.yaml.
+        RB_CHECK(near(stack_real.left_robot.servo_alpha, 10.0));
+        RB_CHECK(near(stack_real.right_robot.servo_alpha, 10.0));
+        RB_CHECK(stack_real.left_robot.servo_j_wire_decimals == 7);
+        RB_CHECK(stack_real.right_robot.servo_j_wire_decimals == 7);
+        // Box command queue: 5 ticks = 10 ms, on BOTH arms. The per-arm level trim
+        // is what makes the second half of that sentence true.
+        RB_CHECK(stack_real.servo.box_queue_cadence.enable);
+        RB_CHECK(stack_real.servo.box_queue_cadence.target_fill == 5);
+        // level.enable is deliberately NOT asserted either way: it is toggled during
+        // experiments (off for the alpha A/B). The bounds below are what must hold
+        // whenever it is on, so they are asserted unconditionally.
+        RB_CHECK(stack_real.servo.box_queue_cadence.level.skip_floor_offset_ticks >= 1);
+        RB_CHECK(stack_real.servo.box_queue_cadence.level.skip_min_interval_ticks >= 2);
+        RB_CHECK(stack_real.servo.box_queue_cadence.level.skip_max_joint_speed_deg_s > 0.0);
         RB_CHECK(near(stack_real.safety.q_min_deg[0], -360.0));
         // J3 (elbow) is clamped near the RB3-730E physical range, not +/-360.
         // Site-raised from the +/-150 catalog value to +/-160 (2026-07 stack
@@ -1176,6 +1192,48 @@ bool testSelfCollisionConfig() {
     return true;
 }
 
+
+// The per-arm level trim withholds a servo_j send. Each of these three bounds is
+// what keeps that from becoming an underrun generator or an open loop, so the
+// loader must refuse the config rather than clamp a bad value at runtime.
+bool testBoxQueueLevelFailsClosed() {
+    const std::filesystem::path config_dir =
+        std::filesystem::path(__FILE__).parent_path().parent_path() / "config";
+    const std::string base = readFile(config_dir / "stack_real.yaml");
+
+    {
+        // floor 0 would let a skip reach an arm sitting exactly at target_fill.
+        std::string text = base;
+        RB_CHECK(replaceOnce(&text, "skip_floor_offset_ticks: 1", "skip_floor_offset_ticks: 0"));
+        RB_CHECK(loadRejectsContaining(
+            writeTempConfig("queue-level-floor", text), "skip_floor_offset_ticks"));
+    }
+    {
+        // interval 1 means deciding again before the RBACK that reflects the skip.
+        std::string text = base;
+        RB_CHECK(replaceOnce(&text, "skip_min_interval_ticks: 2", "skip_min_interval_ticks: 1"));
+        RB_CHECK(loadRejectsContaining(
+            writeTempConfig("queue-level-interval", text), "skip_min_interval_ticks"));
+    }
+    {
+        // A negative speed gate would pass no tick, but it means the author thinks
+        // the gate is optional. It is the whole reason a dropped waypoint is cheap.
+        std::string text = base;
+        RB_CHECK(replaceOnce(&text, "skip_max_joint_speed_deg_s: 1.0",
+                             "skip_max_joint_speed_deg_s: -1.0"));
+        RB_CHECK(loadRejectsContaining(
+            writeTempConfig("queue-level-speed", text), "skip_max_joint_speed_deg_s"));
+    }
+    {
+        // An unknown key under level must not be silently ignored.
+        std::string text = base;
+        RB_CHECK(replaceOnce(&text, "      enable: true\n      skip_margin_ticks",
+                             "      enable: true\n      skip_evrything: true\n      skip_margin_ticks"));
+        RB_CHECK(loadRejects(writeTempConfig("queue-level-unknown-key", text)));
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -1191,5 +1249,6 @@ int main() {
     if (!testKinematicsSafetyLimitMismatchWarnsForRbpodo()) return 1;
     if (!testReadMissToleranceParsesAndIsControllerSimOnly()) return 1;
     if (!testSelfCollisionConfig()) return 1;
+    if (!testBoxQueueLevelFailsClosed()) return 1;
     return 0;
 }

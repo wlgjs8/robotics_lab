@@ -830,6 +830,153 @@ void applyDeprecatedDoubleAlias(
     }
 }
 
+void applyBoxQueueCadenceSection(
+    const YAML::Node& sec,
+    BoxQueueCadenceConfig* cfg,
+    const std::string& path
+) {
+    validateAllowedKeys(sec, {
+        "enable",
+        "target_fill",
+        "protect_fill",
+        "protect_trim_us",
+        "lpf_alpha",
+        "kp_above_us",
+        "kp_below_us",
+        "ki_us",
+        "integral_clamp_us",
+        "trim_clamp_us",
+        "warmup_sec",
+        "stale_observation_ticks",
+        "level",
+    }, path);
+
+    if (has(sec, "enable")) cfg->enable = asBool(sec["enable"], path + ".enable");
+    if (has(sec, "target_fill")) cfg->target_fill = asInt(sec["target_fill"], path + ".target_fill");
+    if (has(sec, "protect_fill")) cfg->protect_fill = asInt(sec["protect_fill"], path + ".protect_fill");
+    if (has(sec, "protect_trim_us")) {
+        cfg->protect_trim_us = asDouble(sec["protect_trim_us"], path + ".protect_trim_us");
+    }
+    if (has(sec, "lpf_alpha")) cfg->lpf_alpha = asDouble(sec["lpf_alpha"], path + ".lpf_alpha");
+    if (has(sec, "kp_above_us")) cfg->kp_above_us = asDouble(sec["kp_above_us"], path + ".kp_above_us");
+    if (has(sec, "kp_below_us")) cfg->kp_below_us = asDouble(sec["kp_below_us"], path + ".kp_below_us");
+    if (has(sec, "ki_us")) cfg->ki_us = asDouble(sec["ki_us"], path + ".ki_us");
+    if (has(sec, "integral_clamp_us")) {
+        cfg->integral_clamp_us = asDouble(sec["integral_clamp_us"], path + ".integral_clamp_us");
+    }
+    if (has(sec, "trim_clamp_us")) {
+        cfg->trim_clamp_us = asDouble(sec["trim_clamp_us"], path + ".trim_clamp_us");
+    }
+    if (has(sec, "warmup_sec")) cfg->warmup_sec = asDouble(sec["warmup_sec"], path + ".warmup_sec");
+    if (has(sec, "stale_observation_ticks")) {
+        cfg->stale_observation_ticks =
+            asInt(sec["stale_observation_ticks"], path + ".stale_observation_ticks");
+    }
+    if (has(sec, "level")) {
+        const YAML::Node& lvl = sec["level"];
+        const std::string lpath = path + ".level";
+        validateAllowedKeys(lvl, {
+            "enable",
+            "skip_margin_ticks",
+            "skip_floor_offset_ticks",
+            "skip_max_joint_speed_deg_s",
+            "skip_min_interval_ticks",
+        }, lpath);
+        if (has(lvl, "enable")) cfg->level.enable = asBool(lvl["enable"], lpath + ".enable");
+        if (has(lvl, "skip_margin_ticks")) {
+            cfg->level.skip_margin_ticks =
+                asDouble(lvl["skip_margin_ticks"], lpath + ".skip_margin_ticks");
+        }
+        if (has(lvl, "skip_floor_offset_ticks")) {
+            cfg->level.skip_floor_offset_ticks =
+                asInt(lvl["skip_floor_offset_ticks"], lpath + ".skip_floor_offset_ticks");
+        }
+        if (has(lvl, "skip_max_joint_speed_deg_s")) {
+            cfg->level.skip_max_joint_speed_deg_s =
+                asDouble(lvl["skip_max_joint_speed_deg_s"], lpath + ".skip_max_joint_speed_deg_s");
+        }
+        if (has(lvl, "skip_min_interval_ticks")) {
+            cfg->level.skip_min_interval_ticks =
+                asInt(lvl["skip_min_interval_ticks"], lpath + ".skip_min_interval_ticks");
+        }
+
+        // Same fail-closed rule as the rate loop: a level trim that can reach an
+        // arm at or below target is an underrun generator, so refuse the config
+        // rather than clamp it into range at runtime.
+        if (cfg->level.skip_floor_offset_ticks < 1) {
+            throw std::runtime_error(
+                lpath + ".skip_floor_offset_ticks must be >= 1 (a skip must never be "
+                "issued to an arm sitting at or below target_fill)"
+            );
+        }
+        if (cfg->level.skip_margin_ticks < 0.0) {
+            throw std::runtime_error(lpath + ".skip_margin_ticks must be >= 0");
+        }
+        if (cfg->level.skip_max_joint_speed_deg_s < 0.0) {
+            throw std::runtime_error(
+                lpath + ".skip_max_joint_speed_deg_s must be >= 0 (this gate is what "
+                "makes a dropped waypoint cheap; it cannot be disabled by sign)"
+            );
+        }
+        if (cfg->level.skip_min_interval_ticks < 2) {
+            throw std::runtime_error(
+                lpath + ".skip_min_interval_ticks must be >= 2 (a skipped send returns "
+                "no RBACK, so the next decision must wait for the observation that "
+                "reflects the previous skip)"
+            );
+        }
+    }
+
+    // Fail closed on values that would drive the servo cadence somewhere unsafe,
+    // rather than silently substituting a default (AGENTS.md: no silent fallback
+    // defaults for safety-relevant parameters).
+    if (cfg->target_fill <= cfg->protect_fill) {
+        throw std::runtime_error(
+            path + ".target_fill must be > protect_fill (the setpoint cannot sit "
+            "inside the underrun-protection band)"
+        );
+    }
+    if (cfg->protect_fill < 0) {
+        throw std::runtime_error(path + ".protect_fill must be >= 0");
+    }
+    if (!(cfg->lpf_alpha > 0.0 && cfg->lpf_alpha <= 1.0)) {
+        throw std::runtime_error(path + ".lpf_alpha must be in (0, 1]");
+    }
+    if (cfg->kp_above_us < 0.0 || cfg->kp_below_us < 0.0 || cfg->ki_us < 0.0) {
+        throw std::runtime_error(
+            path + ".kp_above_us/kp_below_us/ki_us must be >= 0 (a negative gain "
+            "inverts the loop and drives the queue away without bound)"
+        );
+    }
+    if (cfg->integral_clamp_us < 0.0) {
+        throw std::runtime_error(path + ".integral_clamp_us must be >= 0");
+    }
+    if (cfg->protect_trim_us > 0.0) {
+        throw std::runtime_error(
+            path + ".protect_trim_us must be <= 0 (underrun protection must wake "
+            "EARLIER, i.e. shorten the period)"
+        );
+    }
+    if (cfg->warmup_sec < 0.0) {
+        throw std::runtime_error(path + ".warmup_sec must be >= 0");
+    }
+    // The follower is advanced by the actual period clamped to
+    // servo.filter_dt_max_ratio (1.5x nominal = 3 ms at 500 Hz). A trim past that
+    // would make the follower under-advance and distort trajectory timing, and a
+    // trim much wider than servo_t1_sec risks the box running dry between
+    // commands. 1000 us is the ceiling both of those allow.
+    if (!(cfg->trim_clamp_us > 0.0 && cfg->trim_clamp_us <= 1000.0)) {
+        throw std::runtime_error(
+            path + ".trim_clamp_us must be in (0, 1000] us"
+        );
+    }
+    if (std::abs(cfg->protect_trim_us) > cfg->trim_clamp_us) {
+        throw std::runtime_error(
+            path + ".protect_trim_us magnitude must not exceed trim_clamp_us"
+        );
+    }
+}
+
 void applyRbpodoAsyncStreamingSection(
     const YAML::Node& sec,
     RbpodoAsyncStreamingConfig* cfg,
@@ -955,6 +1102,8 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
         "servo_gain",
         "servo_alpha",
         "servo_acc",
+        "servo_j_wire_decimals",
+        "push_box_high_speed_comm",
         "servo_soft_entry_enable",
         "servo_soft_entry_sec",
         "servo_soft_entry_gain_start_scale",
@@ -980,6 +1129,22 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
     applyDeprecatedDoubleAlias(sec, "servo_t2_sec", "servo_lookahead_sec", path, &cfg->servo_t2_sec);
     if (has(sec, "servo_gain")) cfg->servo_gain = asDouble(sec["servo_gain"], path + ".servo_gain");
     applyDeprecatedDoubleAlias(sec, "servo_alpha", "servo_acc", path, &cfg->servo_alpha);
+    if (has(sec, "servo_j_wire_decimals")) {
+        cfg->servo_j_wire_decimals =
+            asInt(sec["servo_j_wire_decimals"], path + ".servo_j_wire_decimals");
+        // Fail closed rather than silently truncating the command stream: 0 means
+        // "keep the SDK's own formatting", and anything past 15 exceeds what a
+        // double carries, so it would be a false claim of precision.
+        if (cfg->servo_j_wire_decimals < 0 || cfg->servo_j_wire_decimals > 15) {
+            throw std::runtime_error(
+                path + ".servo_j_wire_decimals must be 0 (SDK default formatting) or 1..15"
+            );
+        }
+    }
+    if (has(sec, "push_box_high_speed_comm")) {
+        cfg->push_box_high_speed_comm =
+            asBool(sec["push_box_high_speed_comm"], path + ".push_box_high_speed_comm");
+    }
     cfg->servo_time_sec = cfg->servo_t1_sec;
     cfg->servo_lookahead_sec = cfg->servo_t2_sec;
     cfg->servo_acc = cfg->servo_alpha;
@@ -2170,6 +2335,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "servo_t1_rate_match_tolerance_ratio",
             "allow_servo_t1_rate_mismatch",
             "rbpodo_async_streaming",
+            "box_queue_cadence",
         }, "servo");
         if (has(sec, "rate_hz")) cfg.servo.rate_hz = asInt(sec["rate_hz"], "servo.rate_hz");
         if (has(sec, "command_timeout_sec")) cfg.servo.command_timeout_sec = asDouble(sec["command_timeout_sec"], "servo.command_timeout_sec");
@@ -2281,6 +2447,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 sec["rbpodo_async_streaming"],
                 &cfg.servo.rbpodo_async_streaming,
                 "servo.rbpodo_async_streaming"
+            );
+        }
+        if (has(sec, "box_queue_cadence")) {
+            applyBoxQueueCadenceSection(
+                sec["box_queue_cadence"],
+                &cfg.servo.box_queue_cadence,
+                "servo.box_queue_cadence"
             );
         }
     }

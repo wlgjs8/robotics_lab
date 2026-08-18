@@ -697,6 +697,12 @@ struct BackendCallSnapshot {
     double ack_wait_duration_us = 0.0;
     bool rbpodo_waiting_ack = false;
     std::string acceptance_semantics = "unknown";
+    // Controller command-queue occupancy from RBACK[<n>]; -1 = not observed this
+    // cycle (backend has no such concept, drain was skipped, or no well-formed
+    // token arrived). Observer only.
+    int box_queue_fill = -1;
+    int box_queue_fill_samples = 0;
+    int box_queue_fill_unparsed = 0;
 };
 
 struct ArmWorkerTelemetry {
@@ -941,6 +947,24 @@ struct ServoSample {
     double period_ms = 0.0;
     double jitter_ms = 0.0;
     double filter_dt_ms = 0.0;
+
+    // Box command-queue cadence controller (servo.box_queue_cadence). The period
+    // trim is shared by both arms because one loop drives both boxes.
+    double box_queue_trim_us = 0.0;
+    double box_queue_fill_lpf = 0.0;
+    double box_queue_integral_us = 0.0;
+    int box_queue_controlled_fill = -1;
+    std::string box_queue_phase = "disabled";
+    // Per-arm level trim (servo.box_queue_cadence.level). The low-passed depth the
+    // level decision runs on, and the running skip tally. -1 lpf = not yet seeded.
+    // A single tick's skip shows up in <side>_send_acceptance_semantics as
+    // "skipped_queue_level"; these two make the trend legible without diffing
+    // strings. Watch the counts: ~40 during entry then ~1 per two minutes is
+    // healthy, a steadily climbing count means the speed gate or margin is wrong.
+    double left_box_queue_fill_lpf = -1.0;
+    double right_box_queue_fill_lpf = -1.0;
+    std::uint64_t left_send_skip_count = 0;
+    std::uint64_t right_send_skip_count = 0;
 
     SafetyVerdict safety_verdict = SafetyVerdict::Ok;
     ServerMotionState motion_state = ServerMotionState::Disconnected;
