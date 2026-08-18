@@ -1022,6 +1022,17 @@ def _main_with_subcommands(argv: list[str]) -> int:
         ),
     )
     flow_infer.add_argument(
+        "--observation-dump-dir",
+        default=None,
+        help=(
+            "Optional directory: record EXACTLY what each live OpenPI inference saw and answered "
+            "(lossless PNG wrist images, state vector, prompt, RTC inputs, returned chunk; "
+            "manifest.jsonl keyed by inference_seq + CLOCK_MONOTONIC). Feeds "
+            "cm_bridge/tools/reinfer.py (offline re-inference with a modified proprio) and joins "
+            "to the controller capture / bridge sidecar. Background writer, best-effort."
+        ),
+    )
+    flow_infer.add_argument(
         "--training-episode-hdf5",
         default=None,
         help=(
@@ -2079,6 +2090,13 @@ def _main_with_subcommands(argv: list[str]) -> int:
             source.runner_role = "flow_infer"
             source.name = "flow_infer"
             source.configure_rollout_step_log(args.rollout_step_log)
+            if getattr(args, "observation_dump_dir", None):
+                configure_dump = getattr(source, "configure_observation_dump", None)
+                if callable(configure_dump):
+                    configure_dump(args.observation_dump_dir)
+                else:
+                    print("[flow-infer] --observation-dump-dir ignored: this action source has no "
+                          "observation dump (OpenPI remote only)", flush=True)
             if args.rollout_step_log:
                 print(
                     f"[flow-infer] rollout step telemetry={args.rollout_step_log}",

@@ -14,7 +14,11 @@ CONFIG="${FLOW_INFER_CONFIG:-policy_runner/config/flow_real_realsense.yaml}"
 ROLLOUT_MODE="${FLOW_INFER_ROLLOUT_MODE:-real_policy}"
 ACTION_HORIZON="${FLOW_INFER_ACTION_HORIZON:-24}"
 CHUNK_EXECUTE_STEPS="${FLOW_INFER_CHUNK_EXECUTE_STEPS:-12}"
-CHUNK_OVERLAY_RUNWAY_STEPS="${FLOW_INFER_CHUNK_OVERLAY_RUNWAY_STEPS:-4}"
+# 2026-08-19: 4 -> 20. The cm_bridge commit pacer slices the NEXT chunk from the step the controller
+# reports, and continues the previous chunk when an inference is late - both need the packet to carry
+# ALL remaining rows (execute 4 + runway 20 = the 24-step chunk), not a 4-row runway. Harmless for the
+# legacy rb_servo_server follower (it reads consume/reserve rows only).
+CHUNK_OVERLAY_RUNWAY_STEPS="${FLOW_INFER_CHUNK_OVERLAY_RUNWAY_STEPS:-20}"
 SPEED_SCALE="${FLOW_INFER_SPEED_SCALE:-1.0}"
 CHUNK_CROSSFADE_STEPS="${FLOW_INFER_CHUNK_CROSSFADE_STEPS:-2}"
 TCP_REANCHOR_MODE="${FLOW_INFER_TCP_REANCHOR_MODE:-measured_blend}"
@@ -22,6 +26,13 @@ TCP_BLEND_STEPS="${FLOW_INFER_TCP_BLEND_STEPS:-2}"
 ROLLOUT_SUMMARY="${FLOW_INFER_ROLLOUT_SUMMARY:-outputs/rollout_summary.json}"
 VELPROPRIO_SOURCE="${FLOW_INFER_VELPROPRIO_SOURCE:-measured}"
 STEP_LOG="${FLOW_INFER_STEP_LOG:-}"
+# ABSOLUTE-mode close-snap (opening % after the close-bias; strictly below -> fully closed). The runner
+# default is 15, sized 2026-07-30 for checkpoints that floor their gripper at 2-12 %. The deployed
+# velgrip checkpoint HOVERS at raw 19-30 % while approaching and only goes to 6-10 % for a real grasp
+# (cm_bridge sidecar analysis 2026-08-19: 30 of 41 full closes were the snap firing on hover dips of
+# raw 10-19 % = "closes before it arrives"). 8 (= raw < 12 with bias 4) separates the two: every
+# grasp-like descent still snaps shut, 17 of 19 hover dips stay open. Override per run if needed.
+GRIPPER_CLOSE_SNAP="${FLOW_INFER_GRIPPER_CLOSE_SNAP:-8}"
 # Wall-clock duration of ONE action-chunk row. MUST equal the training converter's
 # --action-step-frames / dataset fps: 1/30 = 0.0334 for the legacy per-frame-delta checkpoints,
 # 3/30 = 0.1 for a K=3 decimated one. Getting it wrong is SILENT and severe -- the chunk is replayed
@@ -81,11 +92,18 @@ echo "[flow-infer] config=$CONFIG"
 echo "[flow-infer] rollout_mode=$ROLLOUT_MODE"
 echo "[flow-infer] rollout_summary=$ROLLOUT_SUMMARY"
 STEP_LOG_ARGS=()
+# Observation dump (what each inference saw + answered; lossless). Set FLOW_INFER_OBS_DUMP_DIR
+# to a directory to enable; flow_infer_sweep_run.sh sets it beside the step log by default.
+if [ -n "${FLOW_INFER_OBS_DUMP_DIR:-}" ]; then
+  STEP_LOG_ARGS+=(--observation-dump-dir "$FLOW_INFER_OBS_DUMP_DIR")
+  echo "[flow-infer] observation_dump_dir=$FLOW_INFER_OBS_DUMP_DIR"
+fi
 if [ -n "$STEP_LOG" ]; then
   STEP_LOG_ARGS+=(--rollout-step-log "$STEP_LOG")
   echo "[flow-infer] rollout_step_log=$STEP_LOG"
 fi
 echo "[flow-infer] speed_scale=$SPEED_SCALE chunk_execute_steps=$CHUNK_EXECUTE_STEPS overlay_runway_steps=$CHUNK_OVERLAY_RUNWAY_STEPS crossfade=$CHUNK_CROSSFADE_STEPS reanchor=$TCP_REANCHOR_MODE"
+echo "[flow-infer] gripper_close_snap_percent=$GRIPPER_CLOSE_SNAP (FLOW_INFER_GRIPPER_CLOSE_SNAP; runner default 15)"
 echo "[flow-infer] policy_dt_sec=${POLICY_DT:-<runner default 0.0334>} (must match the checkpoint's action-step-frames/fps)"
 echo "[flow-infer] include_depth=${INCLUDE_DEPTH} -> args:${DEPTH_ARGS[*]:-<none, RGB-only>} (must match the served checkpoint's training)"
 echo "[flow-infer] inherited env: OPENPI_REMOTE_SKIP_WARMUP=${OPENPI_REMOTE_SKIP_WARMUP-<unset>} RB_ALLOW_REAL_GRIPPER=${RB_ALLOW_REAL_GRIPPER-<unset>} DISPLAY=${DISPLAY-<unset>}"
@@ -218,6 +236,7 @@ exec "$PYTHON_BIN" -m policy_runner flow-infer \
   "${VELPROPRIO_ARGS[@]}" \
   "${DEPTH_ARGS[@]}" \
   --gripper-action-mode absolute \
+  --gripper-close-snap-percent "$GRIPPER_CLOSE_SNAP" \
   --rollout-summary "$ROLLOUT_SUMMARY" \
   "${STEP_LOG_ARGS[@]}" \
   "$@"

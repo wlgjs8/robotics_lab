@@ -18,17 +18,24 @@ FLOW_INFER_ARGS ?=
 #   make run GRIPPER_SERVER=0 -> skip the gripper server
 MODE ?= sim
 # Controller selection (2026-08-16, combined-stack transition):
-#   CONTROLLER=cm     (DEFAULT) controller-manager owns the servo_j loop + force
-#                     control via cm_bridge; rb_servo_server does NOT run.
-#                     Status: SILS bring-up validated; the cm_bridge command
-#                     path (P1) and the real-hardware device file (P3) are still
-#                     in progress, so MODE=real fails closed with guidance.
-#   CONTROLLER=legacy the pre-transition rb_servo_server stack (unchanged).
+#   CONTROLLER=cm     controller-manager owns the servo_j loop + force control
+#                     via cm_bridge; rb_servo_server does NOT run. Runs NATIVELY
+#                     (docker retired 2026-08-18). Status: SILS gate green and a
+#                     full real_policy rollout has run on hardware; MODE=real is
+#                     open, gated only by the operator ladder
+#                     (cm_bridge/docs/real_bringup.md).
+#   CONTROLLER=legacy (DEFAULT, unchanged) the pre-transition rb_servo_server
+#                     stack. Still the default so `make run` keeps its meaning;
+#                     switch explicitly with CONTROLLER=cm.
 CONTROLLER ?= legacy
 # P1 acceptance: SILS up -> arms OnTask(Idle) -> bridge -> 3-check gate.
 # Also the submodule pin-bump verification gate (cm_bridge/docs/design.md §8).
 cm-sils-gate:
 	./cm_bridge/run_cm_stack.sh gate
+# The RECORDER gate: controller-manager `func write` capture (schema 4) + bridge sidecar join.
+# Runs ISOLATED (own ROS domain / ports / no-affinity shim) so it is safe beside a live stack.
+cm-record-gate:
+	./cm_bridge/tests/record_gate.sh
 
 run:
 ifeq ($(CONTROLLER),cm)

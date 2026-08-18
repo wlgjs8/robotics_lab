@@ -5,8 +5,12 @@ Operator-supervised. Every step fail-closed; rollback at any point =
 
 ## 0. Preflight (once)
 
-- [ ] Fill both `serial_number` fields in `cm_bridge/config/active.monkey.real.yaml`
-      from the arm nameplates (`run real` refuses while blank).
+- [ ] `serial_number` in `cm_bridge/config/active.monkey.real.yaml` is COSMETIC and
+      gates nothing (corrected 2026-08-18): controller-manager reads the field and
+      never validates it (`Config.cpp:369`), and a boot with an empty serial passes
+      its own config gate. The launcher's serial refusal was removed. What DOES stop
+      a launch is an unfilled `ip` (fatal in CM) and a missing/empty tool preset —
+      the 0-byte `tools/pika.yaml` that earlier looked like a serial problem.
 - [ ] Boxes on firmware 26071103 (updated 2026-08-16; CM re-verifies at init and
       refuses otherwise).
 - [ ] rb_servo_server stopped (script refuses otherwise — verified live).
@@ -18,12 +22,17 @@ Operator-supervised. Every step fail-closed; rollback at any point =
 
 ## 1. Controller up, arms cold
 
-`make run MODE=real` (CONTROLLER=cm default) — installs the device file,
-starts CM (monkey-real), the bridge, and the collision monitor. Arms are NOT
-energized. Check:
+`./cm_bridge/run_cm_stack.sh real` (or `make run CONTROLLER=cm MODE=real`) —
+installs the device file into `cm_bridge/config/monkey/active.yaml`, verifies the
+params directory resolves, then starts CM **natively** (no docker since
+2026-08-18), the bridge, and the collision monitor. Arms are NOT energized.
+The launcher blocks until the `[TASKCFG]` banner appears and prints it. Check:
 
-- [ ] `docker logs monkey-real`: firmware/config gate passed, both arms
+- [ ] `logs/cm_controller_<stamp>.log`: firmware/config gate passed, both arms
       `Init -> Disabled`, `operation mode = REAL`.
+- [ ] the printed `[TASKCFG] … follow{…}` line reads `vmax=100mm/s wmax=20dps
+      a=707.1 T=33.4ms` — the banner is the ONLY ground truth for which params
+      file is live.
 - [ ] servo_state.v1 flowing (rb_gui or port 50378), q matches the pendant.
 
 ## 2. FK cross-check (before any motion)
@@ -31,11 +40,16 @@ energized. Check:
 - [ ] Read `left/right q` from the fanout; compute rb_servo_server FK TCP for
       the same q (offline) and compare with CM `cmd/pose` (`tcp_command_stand`).
       Must agree < 1 mm / < 0.1 deg. This validates the pika tool preset
-      (`tools.pika.yaml` z 202.642 from SRO) and the mount matrices
+      (`cm_bridge/config/monkey/params-presets/tools/pika.yaml`, z 202.642 from
+      the SRO; the boot banner prints the composed `TCP synced -> xyz=[0,0,247.6]mm`)
+      and the mount matrices
       (base_frame == stand). Mismatch -> STOP, reconcile before energizing.
 
 ## 3. Energize + idle (operator console)
 
+- [ ] Console = `source submodules/controller-manager/platforms/monkey/scripts/env.sh`
+      then `ros2 service call /monkey/cell/cmd/console cell_msgs/srv/Command
+      "{command: <cmd>}"` (was `docker exec monkey-real …` before the native move).
 - [ ] Canonical console sequence (LIVE-VERIFIED 2026-08-16; `disable` drops
       the box back to SIMULATION, and `reset` — param reload — only works in
       Disabled):
@@ -79,4 +93,13 @@ energized. Check:
 Known deltas vs legacy to watch: no floor-plane constraint yet (bridge gate
 only guards self/stand collision), gripper distal contact rides force control
 (step 6 gate), servo params live in CM (t1 2ms/t2 21ms/gain 1/alpha 10
-LPF-off on 26071103).
+LPF-off on 26071103). And, from the 2026-08-18 envelope decision:
+
+- **rotation is capped at 20 deg/s** (`max_rot_dps`, the 100 mm/s preset's
+  trans<->rot time-scale rule). The task's own yaw maneuvers were measured at
+  ~64 deg/s, so oversize rotation deltas WILL be cut — and FollowUnit's
+  `OVERSIZED` WARN fires only ONCE per episode (`cap_warned_`), so count it on
+  the bridge side rather than trusting the log.
+- **the force gate is armed at compiled defaults** (25 N / 3.5 Nm, close 0.1 s
+  / open 0.4 s — confirmed on the boot banner). Under contact the stream is
+  attenuated INTO the wrench direction only. legacy had no equivalent.

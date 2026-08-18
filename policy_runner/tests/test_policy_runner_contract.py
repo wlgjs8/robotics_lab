@@ -464,7 +464,10 @@ class PolicyRunnerContractTest(unittest.TestCase):
 
         self.assertIn('ACTION_HORIZON="${FLOW_INFER_ACTION_HORIZON:-24}"', wrapper)
         self.assertIn('CHUNK_EXECUTE_STEPS="${FLOW_INFER_CHUNK_EXECUTE_STEPS:-12}"', wrapper)
-        self.assertIn('CHUNK_OVERLAY_RUNWAY_STEPS="${FLOW_INFER_CHUNK_OVERLAY_RUNWAY_STEPS:-4}"', wrapper)
+        # 2026-08-19: 4 -> 20 so the chunk packet carries ALL remaining rows (execute 4 + runway 20 =
+        # the 24-step chunk); the cm_bridge commit pacer slices/continues from them. Harmless for the
+        # legacy rb_servo_server follower (consume/reserve rows only).
+        self.assertIn('CHUNK_OVERLAY_RUNWAY_STEPS="${FLOW_INFER_CHUNK_OVERLAY_RUNWAY_STEPS:-20}"', wrapper)
         self.assertIn('SPEED_SCALE="${FLOW_INFER_SPEED_SCALE:-1.0}"', wrapper)
         self.assertIn('CHUNK_CROSSFADE_STEPS="${FLOW_INFER_CHUNK_CROSSFADE_STEPS:-2}"', wrapper)
         self.assertIn('TCP_REANCHOR_MODE="${FLOW_INFER_TCP_REANCHOR_MODE:-measured_blend}"', wrapper)

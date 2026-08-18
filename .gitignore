@@ -64,3 +64,8 @@ venv/
 
 # Documents
 *.pdf
+# cm_bridge 네이티브 플랫폼 디렉터리의 작업용 디바이스 파일.
+# 추적 템플릿은 cm_bridge/config/active.monkey.real.yaml 이고, 런처가 여기로 설치한다.
+# controller-manager 가 박스에서 채택한 DH 를 이 파일에 되쓰므로 추적하지 않는다.
+cm_bridge/config/monkey/active.yaml
+cm_bridge/config/monkey-sils/active.yaml

@@ -49,7 +49,9 @@ CM FollowUnit 경로는 레거시 rb_servo_server Chunk Follower 대비 **틱 �
 
 1. 스택: `cm_bridge/run_cm_stack.sh real` + enable→mode real→task on→task idle,
    리셋 포즈 MOVJ (bridge 50256 JointTarget). follow 프로파일:
-   `cm_bridge/config/follow.monkey.yaml` (T=33.4 ms, vmax 150 mm/s, admittance ON — 단
+   `cm_bridge/config/monkey/params-tasks/follow.yaml` (당시 T=33.4 ms, vmax **150** mm/s,
+   admittance ON — 2026-08-18 부터 이 파일은 업스트림 100 mm/s 프리셋 인용본이라 vmax
+   100 / wmax 20 dps 이고, 위 표의 런들은 그 이전 설정이다. 단
    이번 런들에서 wrench는 deadzone 미만, 오버레이 개입 0).
 2. 롤아웃 (양 스택 동일):
    ```

@@ -39,8 +39,8 @@ configuration with `body.joints: []`).
 | # | Precondition | Status |
 |---|---|---|
 | 1 | RB control boxes on firmware build **26071103** (label 8.7.3). controller-manager refuses to init otherwise (`Arm.cpp:48-60`). | **Done** — operator updated both boxes 2026-08-16 evening, version confirmed by operator. Bridge still re-verifies via CM's own init gate at first bring-up. |
-| 2 | ROS 2 runtime for controller-manager (Jazzy native on 24.04, or the repo's Humble Docker path). Robot PC is Ubuntu 22.04 → start with the **Docker path** (`controller-manager/Makefile` + `docker-compose.yaml`), revisit native later. | Open |
-| 3 | A platform `active.yaml` for this rig under `controller-manager/platforms/` conventions (device file, gitignored there). Our copy lives in `cm_bridge/config/` and is installed/mounted at launch. | Open (P1) |
+| 2 | ROS 2 runtime for controller-manager. **RESOLVED 2026-08-18: NATIVE, Humble on this 22.04 host** (`tools/cm_local_setup.sh`; the docker path is retired — see D1). Deployment target stays Jazzy/24.04. | Done |
+| 3 | A platform `active.yaml` for this rig. **Done 2026-08-18**: `cm_bridge/config/monkey/` is our own platform directory (device file installed there from the tracked template `active.monkey.real.yaml`; params-tasks/params-presets resolve from it — D4). | Done |
 | 4 | GitHub access to `PLAIF-dev/controller-manager` from every clone of robotics_lab. | Done (submodule added) |
 
 ## 4. Architecture
@@ -153,6 +153,59 @@ The legacy `submodules/mo_forcecontroller` tree was removed on 2026-08-16;
 historical force-experiment code lives in git history, and controller-manager's
 Admittance path is the sole forward direction.
 
+## 7b. Observability: recorder schema 4 + sidecar + cm_replay (2026-08-18)
+
+For the follow-fidelity / gripper-timing analysis (§`docs/replay.md`): controller-manager's
+`func write` capture gained schema-4 columns (`mono_ns`, `fol_*` follow telemetry, `dev_*`,
+`ext0..7` external scalars — `cm_bridge/upstream/0001-*.patch`, PR pending), the bridge stamps
+`cmd/follow` with CLOCK_MONOTONIC and publishes gripper cmd/fb + chunk seq on
+`<side>/cmd/ext_scalars`, and keeps an always-on JSONL sidecar (chunk content + gripper events on
+the same clock). `cm_bridge/tools/cm_replay.py` replays both in 3D at 2 ms. Gate:
+`make cm-record-gate` (isolated beside a live stack).
+
+## 7c′. Time-stretch: no step is ever cut (2026-08-19, later the same day)
+
+**Decision (operator).** Chunk fidelity first: a policy step's delta must be executed whole, at
+no more than the envelope, taking as long as that needs — and its gripper target must fire at
+the position the step actually reached. FollowUnit's own rule (cut a delta above `max_vel*T`,
+play in one period) is therefore never allowed to bite: the bridge SUBDIVIDES every step into
+`n = max(ceil(|dt|/(v_max T)), ceil(|dr|/(w_max T)), 1)` equal sub-deltas (envelope read from the
+controller's own follow.yaml, fail-closed) and rides the step's gripper target only on the last
+sub-delta (aux1 = policy step index). Hand-over to the newest candidate happens only at a
+policy-step end that completes N=4 policy steps, sliced by the number of policy steps the
+controller STARTED since that candidate arrived (the runner anchored it at the arm's command
+pose) — the runner's own step counter is no longer used, so stretch, starvation and drift all
+fall out of the same count. The controller runs `commit_steps: 1` in this mode (adoption
+timing is the bridge's; it publishes only at hand-over points; a mid-step adoption is logged
+as an error = "commit_steps 1 not loaded"). A runner Hold with the stream stopped publishes
+one zero delta so the tail of the last chunk is not played out. Gate: `make cm-record-gate`
+(two speed phases, the second 2.4× above the envelope): 4 policy steps per adopted message,
+3 sub-deltas per fast step, gripper once per step arrival, **cmd chain moved 292.6 mm =
+planned 292.6 mm** (a cut would have lost ~58 % of the fast phase); late-inference drill PASS.
+
+## 7c. The commit structure: controller-paced N-step commit + gripper on the step (2026-08-19)
+
+**Decision (operator).** FollowUnit no longer REPLACEs a chunk mid-window: it plays exactly N
+deltas of an adopted chunk before it looks at the slot again (`follow.yaml commit_steps: 4`,
+upstream patch 0002), and it reports every period boundary on `<side>/act/follow_step`. The
+bridge (`FollowPacer`) keeps the newest runner chunk per arm and, one period before each commit
+boundary, publishes it SLICED so its first delta is the step the controller is about to play
+(`skip = S - chunk_metadata.activation_step_seq`); a late inference means the previous chunk is
+continued (`skip 4`) and the newest one is re-sliced at the next boundary. The runner keeps
+streaming inferences unchanged (RTC frozen prefix = N keeps consecutive plans continuous;
+`prefetch_at 0`, `execute_steps 4`); it now publishes ALL remaining rows (runway 20) and its
+per-step deltas (`left_delta`, delta 0 included) are what the bridge sends — the row-difference
+path that lost delta 0 is a warned fallback. The per-step gripper target rides the chunk
+(`cmd/follow_aux`, same stamp) and is applied when the controller reports THAT delta finished
+(`prev_aux` on the event) — non-blocking, the arm never waits for the gripper; the runner's own
+gripper dispatch on the command channel is ignored (`--gripper-source follow_step`).
+
+Why: with the runner and controller on unlocked clocks, every hand-over skipped or replayed one
+step (the row the policy meant was never landed on) and the gripper closed a step or two before
+the arm arrived. Verified in SILS (`make cm-record-gate`, incl. `RECORD_GATE_LATE_EVERY=5`):
+4 deltas per adopted chunk, adopted slices contiguous, gripper commands = step events.
+`--follow-mode replace` keeps the old behaviour for A/B.
+
 ## 8. Submodule update gate (SILS)
 
 ```
@@ -192,15 +245,22 @@ upstream, the gate fails here, not on the robot.
 - **Two controllers, one robot** — rb_servo_server and controller-manager must
   never stream simultaneously; the `make run` switch must be mutually
   exclusive by construction (single owner of the rbpodo sockets).
-- **ROS 2 runtime on the robot PC** — Docker path first; native Jazzy needs an
-  OS decision (24.04) that is out of scope here.
+- **ROS 2 runtime on the robot PC** — CLOSED 2026-08-18: native Humble on
+  22.04 (`tools/cm_local_setup.sh`). Native Jazzy still needs the 24.04 OS
+  decision, which stays out of scope here.
 
 ## 10. P1–P3 implementation plan toward `make run MODE=real` (2026-08-16)
 
 ### Decisions (settled)
 
-- **D1 Bridge runtime = Python (rclpy) inside the CM docker image** (host
-  network; UDP + DDS both reachable). 30 Hz × small messages needs no C++;
+- **D1 Bridge runtime = Python (rclpy), NATIVE alongside the controller**
+  (REVISED 2026-08-18; was "inside the CM docker image"). The docker path is
+  retired: the RT pins are hardcoded in the submodule (`src/arm/Arm.cpp`,
+  `Right ? 2 : 1`) and want the host's isolated cores directly, every override
+  rode a single-file bind mount whose inode a rename-on-save editor replaces
+  under the running container (the 2026-08-17 zero-compliance day), and the
+  container wrote root-owned artifacts into the submodule tree. Both processes
+  source the same `env.sh`, so they share one RMW (Fast DDS, shm-only profile). 30 Hz × small messages needs no C++;
   the collision gate runs pinocchio+hpp-fcl Python bindings at 30 Hz (33
   geom / 337 pairs is sub-ms). Port to C++ only if measured necessary.
 - **D2 Delta conversion is frame-independent.** A follow delta is the LOCAL
@@ -212,12 +272,32 @@ upstream, the gate fails here, not on the robot.
 - **D3 State republish needs the extrinsic.** `servo_state.v1` carries
   stand-frame absolutes -> map CM-root poses using robotics_lab calibration.
   Field set = audit of what policy_runner/rb_gui actually read.
-- **D4 follow tuning without editing CM**: `params-tasks/follow.yaml` is
-  TRACKED (read-only rule applies) -> ship
-  `cm_bridge/config/follow.monkey.yaml` (input_period_ms 33.3, rotation
-  envelope raised per task yaw ~64 deg/s, admittance_overlay OFF) and
-  bind-mount it over the container path in the compose overlay. Optional
-  later: upstream PR (owner's call).
+- **D4 follow tuning without editing CM — REVISED 2026-08-18, now a PLATFORM
+  DIRECTORY, not a mount.** `params-tasks/follow.yaml` is TRACKED in the
+  submodule (read-only rule applies), but CM resolves BOTH its task params and
+  its device presets relative to the LOADED active.yaml's own directory
+  (`TaskConfig.cpp:44-50` checks `<active.yaml dir>/params-tasks` FIRST via
+  `Arm.cpp:438`; `Config.cpp:496` sets `dir = cfg.parent_path()` for
+  `params-presets/{models,tools,efts}`), and `env.sh` honours a pre-set
+  `CONTROL_MANAGER_ACTIVE_YAML`. So `cm_bridge/config/monkey/` IS our platform
+  directory: our `follow.yaml` and our measured `tools/pika.yaml` are real
+  files, and everything we do not override is a SYMLINK to the submodule (no
+  copies -> no drift on pull; `run_cm_stack.sh` refuses to launch on a dangling
+  or empty one, because a missing task file only makes CM WARN and run
+  compiled defaults). **The directory must satisfy MORE than the controller's
+  own loader.** `core/Config.cpp` reads exactly three preset classes (models,
+  tools, efts), but the device file also carries `stand: "stands/<x>.yaml"`,
+  which the controller IGNORES and the COCKPIT's URDF composer resolves
+  (`compose_urdf.py resolve_descriptor`). Deriving the link set from
+  `Config.cpp` alone therefore shipped a directory that booted the controller
+  clean and left the cockpit with an empty 3D pane and
+  `composed.urdf is not valid XML`. `check_params_presets()` now also verifies
+  every PATH-STYLE (`*.yaml`) reference in the device file, by the composer's
+  own two-place rule. `cm_bridge/config/monkey-sils/` is the SILS twin,
+  sharing the same params by one link each. This replaced the single-file
+  bind mount, whose inode a rename-on-save editor silently replaced under the
+  running container (the 2026-08-17 zero-compliance day). Optional later:
+  upstream PR (owner's call).
 - **D5 P1 MVP scope**: policy chunk stream + episode reset (command JSON
   `JointTarget`/`init_motion` -> CM `Move` action MOVJ) + gripper (existing
   UDP path, unchanged) + state republish. SpaceMouse/UMI teleop deferred.
@@ -232,7 +312,8 @@ upstream, the gate fails here, not on the robot.
    conversion, `/monkey/<side>/cmd/follow` PoseArray chunks (~4 deltas,
    REPLACE cadence), command JSON 50256 subset (reset/init -> MOVJ), CM
    state audit + subscribe -> `servo_state.v1` UDP fanout re-publish.
-2. `cm_bridge/config/follow.monkey.yaml` + compose overlay mount (D4).
+2. `cm_bridge/config/monkey/` platform directory (D4) — our `follow.yaml`
+   + measured `tools/pika.yaml`, the rest symlinked to the submodule.
 3. `cm_bridge/tests/cm_sils_gate.py`: scripted 30 Hz stream — drop-one
    (stays in Follow), mid-tail REPLACE (re-anchors), silence exit timing,
    state-fanout field assertions. Wire as `make cm-sils-gate`.

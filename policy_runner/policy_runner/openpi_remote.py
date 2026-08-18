@@ -28,6 +28,7 @@ environment — e.g. run policy_runner inside the openpi .venv.
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 import threading
@@ -443,6 +444,10 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # main 500 Hz loop records measured poses. Guard history deque iteration
         # with a short snapshot lock; Python deque raises if mutated mid-iteration.
         self._velproprio_history_lock = threading.Lock()
+        # The inference seq of the request THIS thread is serving (set by the timed wrapper in
+        # flow_inference.py, read by the observation dump). Thread-local: the prefetch worker and
+        # an inline call must never see each other's seq.
+        self._infer_tls = threading.local()
         # Per-tick measured-pose history for history-based velproprio modes: (t_monotonic, pose7).
         self._pose_history: dict[str, deque] = {
             "left": deque(maxlen=_VELPROPRIO_HISTORY_MAXLEN),
@@ -1822,6 +1827,7 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             obs["execute_horizon"] = int(replan)
             obs["prefix_attention_schedule"] = self.rtc_prefix_attention_schedule
             obs["max_guidance_weight"] = float(self.rtc_max_guidance_weight)
+        dump_request_ns = time.monotonic_ns()
         try:
             result = self._client.infer(obs)
         except Exception as exc:  # noqa: BLE001 - remote failure must not crash the loop
@@ -1829,6 +1835,11 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             self._last_inference_camera_diagnostics["error_type"] = type(exc).__name__
             print(f"openpi remote inference failed: {type(exc).__name__}: {exc}", file=self.stderr, flush=True)
             return None
+        dumper = getattr(self, "_observation_dumper", None)
+        if dumper is not None and replay_sample is None:
+            # EXACTLY what was sent and what came back (the live path only; a training-episode
+            # replay already has its observations on disk). Best-effort, off the critical path.
+            self._dump_live_inference(obs, result, payload, dump_request_ns, time.monotonic_ns())
         chunk = np.asarray(result.get("actions"), dtype=np.float32)
         if chunk.ndim != 2 or chunk.shape[1] < 14:
             self._last_inference_camera_diagnostics["outcome"] = "invalid_action_shape"
@@ -1872,7 +1883,69 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # gripper_action_absolute (_integrate_gripper_targets / _dispatch_gripper_step).
         chunk[:, _GRIP_DIMS[0]] *= 100.0
         chunk[:, _GRIP_DIMS[1]] *= 100.0
+        dumper = getattr(self, "_observation_dumper", None)
+        if dumper is not None and replay_sample is None:
+            seq = getattr(self._infer_tls, "seq", None)
+            if seq is not None:
+                dumper.note_scaled_actions(int(seq), chunk)
         return chunk
+
+    # ---------------------------------------------------------------- observation dump --
+    def configure_observation_dump(self, directory: str | None) -> None:
+        """Attach the optional per-inference observation/answer dump (observation_dump.py)."""
+        previous = getattr(self, "_observation_dumper", None)
+        if previous is not None:
+            previous.close()
+        self._observation_dumper = None
+        if directory is None or not str(directory).strip():
+            return
+        try:
+            from .observation_dump import ObservationDumper
+            self._observation_dumper = ObservationDumper(str(directory), stderr=self.stderr)
+            print(f"[flow-infer] observation dump -> {directory}", file=self.stderr, flush=True)
+        except Exception as exc:  # noqa: BLE001 - the dump must never block a rollout
+            print(f"[flow-infer] observation dump DISABLED: {type(exc).__name__}: {exc}",
+                  file=self.stderr, flush=True)
+            self._observation_dumper = None
+
+    def _dump_live_inference(self, obs, result, payload, request_ns: int, ready_ns: int) -> None:
+        dumper = getattr(self, "_observation_dumper", None)
+        if dumper is None:
+            return
+        try:
+            seq = getattr(self._infer_tls, "seq", None)
+            if seq is None:
+                seq = int(getattr(self, "_observation_dump_fallback_seq", 0)) + 1
+                self._observation_dump_fallback_seq = seq
+            extra = {
+                "proprio_mode": str(self.proprio_mode),
+                "velproprio": copy.deepcopy(getattr(self, "_last_velproprio_diagnostics", None)),
+                "camera_bundle_seq": getattr(self, "_last_obs_camera_seq", None),
+                "camera": copy.deepcopy(getattr(self, "_last_inference_camera_diagnostics", None)),
+                "rtc_enabled": bool(self.rtc_enabled),
+                "action_horizon": int(self.action_horizon),
+                "chunk_execute_steps": int(getattr(self, "chunk_execute_steps", 0) or 0),
+                "checkpoint_id": str(getattr(self, "checkpoint_id", "unknown")),
+            }
+            # the servo state the proprio was derived from (both TCP sources + gripper), so a
+            # re-inference can re-derive alternative proprio from the same instant
+            poses = {}
+            for side in ("left", "right"):
+                for src in ("auto", "command"):
+                    try:
+                        poses[f"{side}_{src}"] = [float(v) for v in pose_from_state_payload(payload, side, source=src)]
+                    except Exception:
+                        poses[f"{side}_{src}"] = None
+                try:
+                    poses[f"{side}_gripper_pct"] = _gripper_value_from_payload(payload, side)
+                except Exception:
+                    poses[f"{side}_gripper_pct"] = None
+            extra["state_payload_poses"] = poses
+            extra["state_payload_seq"] = payload.get("seq") if isinstance(payload, dict) else None
+            dumper.record(inference_seq=int(seq), obs=obs, result=result,
+                          request_mono_ns=int(request_ns), ready_mono_ns=int(ready_ns), extra=extra)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[obs-dump] record skipped: {type(exc).__name__}: {exc}", file=self.stderr, flush=True)
 
     def _training_episode_completion_reason(self) -> str | None:
         provider = getattr(self, "episode_observation_provider", None)

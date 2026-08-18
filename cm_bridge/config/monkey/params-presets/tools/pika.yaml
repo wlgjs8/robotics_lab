@@ -1,6 +1,13 @@
 # cm_bridge tool preset — PIKA gripper on the robotics_lab dual RB3-730E rig.
-# Bind-mounted to submodules/controller-manager/platforms/monkey/params-presets/
-# tools/pika.yaml by cm-compose.override.yaml (tools/ is TRACKED = read-only rule).
+#
+# WHERE THIS IS READ FROM. controller-manager resolves tool presets relative to the LOADED
+# active.yaml's own directory (Config.cpp:496 dir = cfg.parent_path(), then
+# dir/params-presets/tools/<name>.yaml), and run_cm_stack.sh points
+# CONTROL_MANAGER_ACTIVE_YAML at cm_bridge/config/monkey/active.yaml — so THIS file is the
+# preset the arms boot with. No bind mount, no submodule edit (params-presets/tools/ is
+# TRACKED there = read-only rule). The submodule's own tools/pika.yaml is a 0-byte
+# placeholder and is never read on this path; run_cm_stack.sh refuses to launch if the
+# preset it resolves is missing OR empty, so that trap cannot come back silently.
 #
 # GEOMETRY (measured/URDF-derived, no guesses):
 #   robotics_lab TCP convention = pika fingertip-center plane at z=247.642 mm

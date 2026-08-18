@@ -16,7 +16,7 @@ sampled at the fanout rate). Three checks:
                STAY settled.
 
 Prereq: monkey-sils container up, arms at OnTask(Idle), bridge running
-(docker exec -d ... cm_bridge_node.py). See cm_bridge/run_cm_stack.sh.
+(natively, since 2026-08-18 — no docker). See cm_bridge/run_cm_stack.sh.
 """
 import json
 import socket

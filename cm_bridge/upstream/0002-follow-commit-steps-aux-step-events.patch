@@ -1,0 +1,761 @@
+diff --git a/src/arm/Arm.cpp b/src/arm/Arm.cpp
+index 2bfa0a5..dec69e5 100644
+--- a/src/arm/Arm.cpp
++++ b/src/arm/Arm.cpp
+@@ -6187,5 +6187,56 @@ void Arm::record_row() {
+         r.cmd_aux[c] = a.cmd_.aux[c];
+         r.aux_ref[c] = a.robot_.aux_ref[c];
+     }
++    // ---- schema 4 (2026-08-18): the stream follower, the overlay deviation, the external values.
++    // The monotonic cycle stamp is the SAME clock rt::now_ns gives every process on this host, so
++    // an external logger (the policy bridge) can join its own records to these rows by time; the
++    // recorder's own pc_time_s is relative to run_start_ns, which nobody outside knows.
++    r.mono_ns = static_cast<std::int64_t>(mon_.cycle_start_ns);
++    // FollowUnit::telemetry() reads private unit state; it is only MEANINGFUL while the unit is the
++    // active task (its members hold the last episode's values otherwise), so gate it on that.
++    if (a.active_task_ == &a.follow_unit_) {
++        r.fol_engaged = 1;
++        // gap_mm wants the EMITTED point in the unit's own working frame (arm base): FK(cmd_.q)
++        // through the arm's own chain (the root-frame tcp_c above carries the mount, so it is not
++        // the same point). One more 6-DoF FK per tick, microseconds, only while Follow is active.
++        Eigen::Matrix<double, 6, 1> qc;
++        for (int j = 0; j < 6; ++j) qc[j] = a.cmd_.q[j];
++        const Eigen::Vector3d emitted_arm = a.kine_.forward(qc).block<3, 1>(0, 3);
++        const FollowUnit::Telemetry ft = a.follow_unit_.telemetry(emitted_arm);
++        for (int c = 0; c < 3; ++c) {
++            r.fol_cmd_p[c] = ft.cmd_p_f[c];  r.fol_ref_p[c] = ft.ref_p_f[c];
++            r.fol_in_v[c]  = ft.in_v[c];     r.fol_in_w[c]  = ft.in_w[c];
++        }
++        {
++            const Eigen::Vector3d cz = ft.cmd_R_f.eulerAngles(2, 1, 0);   // Rz, Ry, Rx [rad]
++            const Eigen::Vector3d rz = ft.ref_R_f.eulerAngles(2, 1, 0);
++            r.fol_cmd_rpy[0] = cz[2] * R2D; r.fol_cmd_rpy[1] = cz[1] * R2D; r.fol_cmd_rpy[2] = cz[0] * R2D;
++            r.fol_ref_rpy[0] = rz[2] * R2D; r.fol_ref_rpy[1] = rz[1] * R2D; r.fol_ref_rpy[2] = rz[0] * R2D;
++        }
++        r.fol_v_cmd = ft.v_cmd;       r.fol_w_cmd = ft.w_cmd;
++        r.fol_lag_mm = ft.lag_mm;     r.fol_lag_deg = ft.lag_deg;   r.fol_gap_mm = ft.gap_mm;
++        r.fol_sigma_min = ft.sigma_min;
++        r.fol_gate_t = ft.gate_t;     r.fol_gate_r = ft.gate_r;
++        r.fol_chunk_stamp_ns = static_cast<std::int64_t>(ft.chunk_stamp_ns);
++        r.fol_chunk_idx = ft.chunk_idx;  r.fol_chunk_n = ft.chunk_n;
++        r.fol_playing = ft.period_playing ? 1 : 0;
++    }
++    r.follow_slot_seq = a.follow_chunk_.seq();
++    // The overlay's live deviation, arm base (m/rad inside -> mm/deg on the row like everything else).
++    {
++        const Eigen::Vector3d& dt = a.task_overlay_.dev_t();
++        const Eigen::Vector3d& dr = a.task_overlay_.dev_r();
++        for (int c = 0; c < 3; ++c) { r.dev_t[c] = dt[c] * 1e3; r.dev_r[c] = dr[c] * R2D; }
++        r.overlay_bounded = a.task_overlay_.bounded() ? 1 : 0;
++    }
++    // External process values: the level at this tick (never acted on - see ExtScalarSlot).
++    {
++        double ev[ExtScalarSlot::kMax]; int en = 0; std::uint64_t es = 0;
++        if (a.ext_slot_.read(ev, en, es)) {
++            for (int c = 0; c < ExtScalarSlot::kMax; ++c) r.ext[c] = ev[c];
++            r.ext_n = en; r.ext_stamp_ns = static_cast<std::int64_t>(es);
++        }
++        r.ext_seq = a.ext_slot_.count();
++    }
+     recorder_.push(r);
+ }
+diff --git a/src/arm/Arm.h b/src/arm/Arm.h
+index aaab131..d16a3de 100644
+--- a/src/arm/Arm.h
++++ b/src/arm/Arm.h
+@@ -1463,6 +1463,15 @@ public:
+     // advancing it without reading IS the deliberate discard (mutual exclusion / reset).
+     FollowChunkSlot follow_chunk_;
+     unsigned        follow_chunk_seen_ = 0;
++    // The chunk's per-delta AUX values (cmd/follow_aux; paired by stamp at adoption) and the
++    // unit's PERIOD-BOUNDARY EVENTS (act/follow_step) - see Channels.h (2026-08-19). Public for
++    // the same IPC-boundary reason as follow_chunk_.
++    FollowAuxSlot   follow_aux_;
++    FollowStepRing  follow_step_ring_;
++    // EXTERNAL PROCESS VALUES for the recorder (cmd/ext_scalars; 2026-08-18). Public for the same
++    // reason jog_slot_ is - the IPC boundary deposits into it. Read ONLY by record_row(); no
++    // control decision may branch on it (see ExtScalarSlot in Channels.h).
++    ExtScalarSlot   ext_slot_;
+     FtConfigSlot ft_config_slot_;      // latest FT comp params (cmd/ft_config); drained by apply_ft_config
+     unsigned     ft_config_seq_ = 0;   // this arm's cursor into ft_config_slot_
+ 
+diff --git a/src/arm/DataRecorder.h b/src/arm/DataRecorder.h
+index 125f2a1..9704b77 100644
+--- a/src/arm/DataRecorder.h
++++ b/src/arm/DataRecorder.h
+@@ -163,6 +163,43 @@ public:
+         // usable for identification too; this column is what lets that be tested.
+         double box_tcp_ref[3]{};     // box-reported REFERENCE TCP position [mm], ARM base
+         double box_tcp_ref_rpy[3]{}; // its orientation (Rx,Ry,Rz) [deg], ARM base
++        // ---- APPENDED 2026-08-18 (schema 4): the STREAM FOLLOWER's observability, the force
++        // overlay's deviation, and the EXTERNAL process values - so a 2 ms replay can put the
++        // policy's chunk INPUT, the follower's TARGET/REFERENCE, the emitted COMMAND, the ACTUAL,
++        // and the gripper on ONE timeline. Every field below is read, never computed anew here.
++        std::int64_t mono_ns = 0;   // CLOCK_MONOTONIC at cycle start [ns] - the SAME clock an
++                                    // external logger on this host uses (rt::now_ns); pc_time_s
++                                    // is this minus run_start, which no external process knows.
++        // FollowUnit::telemetry() (Tasks.h) - valid when fol_engaged == 1, zeros otherwise.
++        int    fol_engaged = 0;     // 1 = the Follow unit is the active task this tick
++        double fol_cmd_p[3]{};      // the delta-integral CHAIN = what the stream ASKED for [mm]
++        double fol_cmd_rpy[3]{};    //   its orientation, ZYX euler [deg]  (follow.yaml telemetry_frame)
++        double fol_ref_p[3]{};      // the two Ruckig channels' output = the IK TARGET [mm]
++        double fol_ref_rpy[3]{};    //   its orientation, ZYX euler [deg]  (same frame)
++        double fol_in_v[3]{};       // this period's commanded translation rate [mm/s] (same frame)
++        double fol_in_w[3]{};       // this period's commanded rotation rate [deg/s] (same frame)
++        double fol_v_cmd = 0.0;     // |in_v| [mm/s]
++        double fol_w_cmd = 0.0;     // |in_w| [deg/s]
++        double fol_lag_mm = 0.0;    // |cmd - ref| : the braking-distance lag (a design property)
++        double fol_lag_deg = 0.0;
++        double fol_gap_mm = 0.0;    // |cmd - EMITTED| : what the tool is actually behind the ask
++        double fol_sigma_min = 0.0; // Jacobian smallest singular value at the emitted pose
++        double fol_gate_t = 1.0;    // force gate, translation (1 open .. 0 closed)
++        double fol_gate_r = 1.0;    // force gate, rotation
++        std::int64_t fol_chunk_stamp_ns = 0;  // FollowChunk::stamp_ns of the ADOPTED chunk (0 = none)
++        int    fol_chunk_idx = 0;   // deltas of it consumed so far
++        int    fol_chunk_n   = 0;   // deltas it holds (0 = none adopted)
++        int    fol_playing   = 0;   // 1 = this period consumed a delta
++        std::uint32_t follow_slot_seq = 0;    // FollowChunkSlot::seq(): 2 x chunks DEPOSITED so far
++        // The force overlay's live deviation (AdmittanceOverlay dev_t/dev_r), arm base frame.
++        double dev_t[3]{};          // [mm]
++        double dev_r[3]{};          // [deg], rotation vector
++        int    overlay_bounded = 0; // the deviation fence is holding it
++        // EXTERNAL PROCESS VALUES (ExtScalarSlot, <side>/cmd/ext_scalars): the level at this tick.
++        double ext[8]{};
++        int    ext_n = 0;           // values the last deposit carried (0 = never published)
++        std::int64_t ext_stamp_ns = 0;   // the publisher's header.stamp [ns] of that deposit
++        std::uint32_t ext_seq = 0;  // deposits so far - "unchanged" vs "re-sent"
+     };
+ 
+     // Packed on-disk record (no padding). FIELD ORDER MUST MATCH SCHEMA_JSON exactly. state/task are
+@@ -207,6 +244,35 @@ public:
+         double box_tcp_rpy[3];
+         double box_tcp_ref[3];
+         double box_tcp_ref_rpy[3];
++        // ---- schema 4 (2026-08-18), APPENDED - keep old indices ----
++        std::int64_t mono_ns;
++        std::int32_t fol_engaged;
++        double fol_cmd_p[3];
++        double fol_cmd_rpy[3];
++        double fol_ref_p[3];
++        double fol_ref_rpy[3];
++        double fol_in_v[3];
++        double fol_in_w[3];
++        double fol_v_cmd;
++        double fol_w_cmd;
++        double fol_lag_mm;
++        double fol_lag_deg;
++        double fol_gap_mm;
++        double fol_sigma_min;
++        double fol_gate_t;
++        double fol_gate_r;
++        std::int64_t fol_chunk_stamp_ns;
++        std::int32_t fol_chunk_idx;
++        std::int32_t fol_chunk_n;
++        std::int32_t fol_playing;
++        std::uint32_t follow_slot_seq;
++        double dev_t[3];
++        double dev_r[3];
++        std::int32_t overlay_bounded;
++        double ext[8];
++        std::int32_t ext_n;
++        std::int64_t ext_stamp_ns;
++        std::uint32_t ext_seq;
+     };
+ #pragma pack(pop)
+ 
+@@ -237,7 +303,24 @@ public:
+         "[\"box_tcp_x\",\"<f8\"],[\"box_tcp_y\",\"<f8\"],[\"box_tcp_z\",\"<f8\"],"
+         "[\"box_tcp_Rx\",\"<f8\"],[\"box_tcp_Ry\",\"<f8\"],[\"box_tcp_Rz\",\"<f8\"],"
+         "[\"box_tcp_ref_x\",\"<f8\"],[\"box_tcp_ref_y\",\"<f8\"],[\"box_tcp_ref_z\",\"<f8\"],"
+-        "[\"box_tcp_ref_Rx\",\"<f8\"],[\"box_tcp_ref_Ry\",\"<f8\"],[\"box_tcp_ref_Rz\",\"<f8\"]]";
++        "[\"box_tcp_ref_Rx\",\"<f8\"],[\"box_tcp_ref_Ry\",\"<f8\"],[\"box_tcp_ref_Rz\",\"<f8\"],"
++        // ---- schema 4 (2026-08-18), APPENDED ----
++        "[\"mono_ns\",\"<i8\"],[\"fol_engaged\",\"<i4\"],"
++        "[\"fol_cmd_x\",\"<f8\"],[\"fol_cmd_y\",\"<f8\"],[\"fol_cmd_z\",\"<f8\"],"
++        "[\"fol_cmd_Rx\",\"<f8\"],[\"fol_cmd_Ry\",\"<f8\"],[\"fol_cmd_Rz\",\"<f8\"],"
++        "[\"fol_ref_x\",\"<f8\"],[\"fol_ref_y\",\"<f8\"],[\"fol_ref_z\",\"<f8\"],"
++        "[\"fol_ref_Rx\",\"<f8\"],[\"fol_ref_Ry\",\"<f8\"],[\"fol_ref_Rz\",\"<f8\"],"
++        "[\"fol_in_vx\",\"<f8\"],[\"fol_in_vy\",\"<f8\"],[\"fol_in_vz\",\"<f8\"],"
++        "[\"fol_in_wx\",\"<f8\"],[\"fol_in_wy\",\"<f8\"],[\"fol_in_wz\",\"<f8\"],"
++        "[\"fol_v_cmd\",\"<f8\"],[\"fol_w_cmd\",\"<f8\"],[\"fol_lag_mm\",\"<f8\"],[\"fol_lag_deg\",\"<f8\"],"
++        "[\"fol_gap_mm\",\"<f8\"],[\"fol_sigma_min\",\"<f8\"],[\"fol_gate_t\",\"<f8\"],[\"fol_gate_r\",\"<f8\"],"
++        "[\"fol_chunk_stamp_ns\",\"<i8\"],[\"fol_chunk_idx\",\"<i4\"],[\"fol_chunk_n\",\"<i4\"],[\"fol_playing\",\"<i4\"],"
++        "[\"follow_slot_seq\",\"<u4\"],"
++        "[\"dev_tx\",\"<f8\"],[\"dev_ty\",\"<f8\"],[\"dev_tz\",\"<f8\"],"
++        "[\"dev_rx\",\"<f8\"],[\"dev_ry\",\"<f8\"],[\"dev_rz\",\"<f8\"],[\"overlay_bounded\",\"<i4\"],"
++        "[\"ext0\",\"<f8\"],[\"ext1\",\"<f8\"],[\"ext2\",\"<f8\"],[\"ext3\",\"<f8\"],"
++        "[\"ext4\",\"<f8\"],[\"ext5\",\"<f8\"],[\"ext6\",\"<f8\"],[\"ext7\",\"<f8\"],"
++        "[\"ext_n\",\"<i4\"],[\"ext_stamp_ns\",\"<i8\"],[\"ext_seq\",\"<u4\"]]";
+ 
+     ~DataRecorder() { stop(); if (writer_.joinable()) writer_.join(); }   // COLD: safe to join here
+ 
+@@ -265,9 +348,10 @@ public:
+         // self-describing header line: magic \t version \t row_bytes \t dtype-json \n. `version` is
+         // informational only (neither reader gates on it - see below); bumped to 2 for the
+         // cmd_aux/aux_ref columns (2026-07-29) and to 3 for the WHOLE-BODY TCP completion -
+-        // tcp_*_rpy / tcp_act / body_* (2026-08-04) - so a header dump makes the schema generation
+-        // visible.
+-        out_ << "CHIMPBIN\t3\t" << sizeof(BinRow) << '\t' << SCHEMA_JSON
++        // tcp_*_rpy / tcp_act / body_* (2026-08-04), and to 4 for the stream-follower observability
++        // + overlay deviation + external process values (2026-08-18) - so a header dump makes the
++        // schema generation visible.
++        out_ << "CHIMPBIN\t4\t" << sizeof(BinRow) << '\t' << SCHEMA_JSON
+              << "\tsils=" << (sils ? 1 : 0) << '\n';
+         head_.store(0, std::memory_order_relaxed);
+         tail_.store(0, std::memory_order_relaxed);
+@@ -333,6 +417,25 @@ private:
+         std::memcpy(b.box_tcp_rpy,     r.box_tcp_rpy,     sizeof b.box_tcp_rpy);
+         std::memcpy(b.box_tcp_ref,     r.box_tcp_ref,     sizeof b.box_tcp_ref);
+         std::memcpy(b.box_tcp_ref_rpy, r.box_tcp_ref_rpy, sizeof b.box_tcp_ref_rpy);
++        // schema 4
++        b.mono_ns = r.mono_ns; b.fol_engaged = r.fol_engaged;
++        std::memcpy(b.fol_cmd_p,   r.fol_cmd_p,   sizeof b.fol_cmd_p);
++        std::memcpy(b.fol_cmd_rpy, r.fol_cmd_rpy, sizeof b.fol_cmd_rpy);
++        std::memcpy(b.fol_ref_p,   r.fol_ref_p,   sizeof b.fol_ref_p);
++        std::memcpy(b.fol_ref_rpy, r.fol_ref_rpy, sizeof b.fol_ref_rpy);
++        std::memcpy(b.fol_in_v,    r.fol_in_v,    sizeof b.fol_in_v);
++        std::memcpy(b.fol_in_w,    r.fol_in_w,    sizeof b.fol_in_w);
++        b.fol_v_cmd = r.fol_v_cmd; b.fol_w_cmd = r.fol_w_cmd;
++        b.fol_lag_mm = r.fol_lag_mm; b.fol_lag_deg = r.fol_lag_deg; b.fol_gap_mm = r.fol_gap_mm;
++        b.fol_sigma_min = r.fol_sigma_min; b.fol_gate_t = r.fol_gate_t; b.fol_gate_r = r.fol_gate_r;
++        b.fol_chunk_stamp_ns = r.fol_chunk_stamp_ns; b.fol_chunk_idx = r.fol_chunk_idx;
++        b.fol_chunk_n = r.fol_chunk_n; b.fol_playing = r.fol_playing;
++        b.follow_slot_seq = r.follow_slot_seq;
++        std::memcpy(b.dev_t, r.dev_t, sizeof b.dev_t);
++        std::memcpy(b.dev_r, r.dev_r, sizeof b.dev_r);
++        b.overlay_bounded = r.overlay_bounded;
++        std::memcpy(b.ext, r.ext, sizeof b.ext);
++        b.ext_n = r.ext_n; b.ext_stamp_ns = r.ext_stamp_ns; b.ext_seq = r.ext_seq;
+         std::memset(b.state, 0, STATELEN); std::memset(b.task, 0, STATELEN);
+         std::strncpy(b.state, r.state ? r.state : "", STATELEN - 1);
+         std::strncpy(b.task,  r.task  ? r.task  : "", STATELEN - 1);
+diff --git a/src/arm/tasks/TaskConfig.cpp b/src/arm/tasks/TaskConfig.cpp
+index ef052ee..83776be 100644
+--- a/src/arm/tasks/TaskConfig.cpp
++++ b/src/arm/tasks/TaskConfig.cpp
+@@ -608,6 +608,14 @@ TaskTuning load_task_tuning(const char* who, TaskCfgReport& rep,
+             note(rep, f, "max_chunk out of range");
+             t.follow.max_chunk = (t.follow.max_chunk < 1) ? 1 : FollowChunk::kMaxChunk;
+         }
++        if (n["commit_steps"])
++            t.follow.commit_steps = get_or(rep, n, f, "commit_steps", t.follow.commit_steps, who);
++        if (t.follow.commit_steps < 1 || t.follow.commit_steps > FollowChunk::kMaxChunk) {
++            LOG_ERROR("TASKCFG", "%s: follow.yaml commit_steps %d out of [1,%d]",
++                      who, t.follow.commit_steps, FollowChunk::kMaxChunk);
++            note(rep, f, "commit_steps out of range");
++            t.follow.commit_steps = 1;
++        }
+         if (n["admittance_overlay"])
+             t.follow.admittance_overlay =
+                 get_or(rep, n, f, "admittance_overlay", t.follow.admittance_overlay, who);
+@@ -748,7 +756,7 @@ TaskTuning load_task_tuning(const char* who, TaskCfgReport& rep,
+     LOG_INFO("TASKCFG", "%s: follow{T=%.3gms silence=%d vmax=%.4gmm/s wmax=%.4gdps "
+              "a=%.4g j=%.5g clik_tau=%.3gs tele=%s sing{%s} "
+              "dev_caps{%s vt=%g at=%g vr=%g ar=%g} "
+-             "waist_leash{tau=%.3gs %g-%gdeg} margin=%.2fT chunk<=%d "
++             "waist_leash{tau=%.3gs %g-%gdeg} margin=%.2fT chunk<=%d commit=%d "
+              "adm_overlay=%s}", who,
+              t.follow.input_period_ms, t.follow.silence_periods,
+              t.follow.max_vel_mms, t.follow.max_rot_dps,
+@@ -759,7 +767,7 @@ TaskTuning load_task_tuning(const char* who, TaskCfgReport& rep,
+              t.follow.adm.max_acc_t, t.follow.adm.max_vel_r, t.follow.adm.max_acc_r,
+              t.follow.leash_tau_s,
+              t.follow.leash_min_deg, t.follow.leash_max_deg,
+-             t.follow.playback_margin, t.follow.max_chunk,
++             t.follow.playback_margin, t.follow.max_chunk, t.follow.commit_steps,
+              t.follow.admittance_overlay ? "ON" : "off");
+     {   // THE FOLLOW FORCE LAW, one field per axis, so what is live is readable without opening
+         // the yaml - the TASKCFG banner is the only place a config-resolution failure shows up.
+diff --git a/src/arm/tasks/TaskConfig.h b/src/arm/tasks/TaskConfig.h
+index dd86283..cf279c4 100644
+--- a/src/arm/tasks/TaskConfig.h
++++ b/src/arm/tasks/TaskConfig.h
+@@ -380,6 +380,13 @@ struct FollowTuning {
+     // Chunk length ceiling (deltas per message). Longer messages are MALFORMED and refused whole
+     // at the IPC boundary - never truncated. Hard-capped by FollowChunk::kMaxChunk (64).
+     int    max_chunk         = 50;
++    // COMMIT STEPS (2026-08-19). A fresh chunk is adopted only when the current one has played a
++    // MULTIPLE of this many deltas since its adoption (or is exhausted / none is held). 1 = the
++    // original rule (adopt at every period boundary, REPLACE the unconsumed tail). N > 1 makes the
++    // unit the pacer of an N-step commit: a policy chunk is executed N steps to the letter before
++    // the newest one takes over, so a re-plan can never cut a committed step short - the publisher
++    // then slices the next chunk to continue from the step the unit reports (act/follow_step).
++    int    commit_steps      = 1;
+     bool   admittance_overlay = false; // the shared force overlay (0025 force section) on this unit
+ 
+     // ---- THE FORCE GATE: the delta's reflection ratio falls as the contact force rises --------
+diff --git a/src/arm/tasks/Tasks.cpp b/src/arm/tasks/Tasks.cpp
+index 2013eaa..ec6dc59 100644
+--- a/src/arm/tasks/Tasks.cpp
++++ b/src/arm/tasks/Tasks.cpp
+@@ -3074,6 +3074,9 @@ void FollowUnit::start(Arm& arm) {
+     // delta by it. Identity for every shipped tool, so this is the contract made structural.
+     R_tool_ = arm.kine_.forward_flange(q).block<3, 3>(0, 0).transpose() * T.block<3, 3>(0, 0);
+ 
++    // Step-event bookkeeping starts clean: nothing finished, nothing adopted yet.
++    adopted_now_ = false;  last_stamp_ = 0;  last_idx_ = -1;
++    for (int a = 0; a < FollowChunk::kAux; ++a) last_aux_[a] = std::nan("");
+     // The COMMANDED pose (the delta integral chain) and the REFERENCE pose (what the channels
+     // have produced) both start bumpless at the live reference.
+     cmd_p_ = T.block<3, 1>(0, 3);  cmd_R_ = T.block<3, 3>(0, 0);
+@@ -3240,13 +3243,35 @@ void FollowUnit::start(Arm& arm) {
+ // Pop the next delta at a period boundary: adopt a fresh chunk first (REPLACING the unconsumed
+ // tail - the switch happens exactly here, never mid-period), then play the local chunk onward.
+ bool FollowUnit::next_delta(Arm& arm, Eigen::Vector3d& dt_mm, Eigen::Vector3d& drot) {
+-    if (arm.follow_chunk_.fresh(arm.follow_chunk_seen_)) {
++    adopted_now_ = false;
++    // COMMIT RULE (follow.yaml commit_steps, 2026-08-19): a fresh chunk may replace the current one
++    // only at a commit boundary - none held, exhausted, or a multiple of commit_steps played since
++    // adoption. commit_steps == 1 is the original REPLACE-at-every-boundary behaviour. Between
++    // boundaries the slot keeps only the newest deposit (latest-value), so what gets adopted at the
++    // boundary is the freshest chunk anyway - nothing queues, nothing stale replays.
++    const int commit = std::max(1, arm.tuning_.follow.commit_steps);
++    const bool boundary = !have_chunk_ || chunk_idx_ >= chunk_.n || (chunk_idx_ % commit) == 0;
++    if (boundary && arm.follow_chunk_.fresh(arm.follow_chunk_seen_)) {
+         FollowChunk c;
+         if (arm.follow_chunk_.try_adopt(c, arm.follow_chunk_seen_) && c.n >= 1 &&
+             c.n <= arm.tuning_.follow.max_chunk) {
++            // Pair the per-delta aux by (stamp, n); a mismatch adopts with NaN aux, never wrong aux.
++            c.aux_n = 0;
++            for (int k = 0; k < FollowChunk::kMaxChunk; ++k)
++                for (int a = 0; a < FollowChunk::kAux; ++a) c.aux[k][a] = std::nan("");
++            {
++                std::uint64_t st = 0; int an = 0;
++                double vals[FollowChunk::kMaxChunk][FollowChunk::kAux];
++                if (arm.follow_aux_.read(st, an, vals) && st == c.stamp_ns && st != 0 && an == c.n) {
++                    for (int k = 0; k < an; ++k)
++                        for (int a = 0; a < FollowChunk::kAux; ++a) c.aux[k][a] = vals[k][a];
++                    c.aux_n = an;
++                }
++            }
+             chunk_ = c;                                    // REPLACE: the old tail is discarded
+             chunk_idx_ = 0;
+             have_chunk_ = true;
++            adopted_now_ = true;
+         }
+     }
+     if (!have_chunk_ || chunk_idx_ >= chunk_.n) return false;
+@@ -3256,6 +3281,32 @@ bool FollowUnit::next_delta(Arm& arm, Eigen::Vector3d& dt_mm, Eigen::Vector3d& d
+     return true;
+ }
+ 
++// One boundary event into the RT ring (drained + published by the IPC executor). `played` = a
++// delta started this period; prev_* is the delta that FINISHED here (whatever period started it),
++// which is the moment an aux rider (a gripper target) belongs to.
++void FollowUnit::emit_step_event(Arm& arm, int kind, bool played) {
++    FollowStepEvent ev;
++    ev.mono_ns  = rt::now_ns();
++    ev.kind     = kind;
++    ev.slot_seq = arm.follow_chunk_.seq();
++    ev.prev_stamp_ns = last_stamp_;  ev.prev_idx = last_idx_;
++    for (int a = 0; a < FollowChunk::kAux; ++a) ev.prev_aux[a] = last_aux_[a];
++    if (played) {
++        const int idx = chunk_idx_ - 1;                    // the delta that just started
++        ev.stamp_ns = chunk_.stamp_ns;  ev.idx = idx;  ev.n = chunk_.n;
++        for (int a = 0; a < FollowChunk::kAux; ++a) ev.aux[a] = chunk_.aux[idx][a];
++        last_stamp_ = chunk_.stamp_ns;  last_idx_ = idx;
++        for (int a = 0; a < FollowChunk::kAux; ++a) last_aux_[a] = chunk_.aux[idx][a];
++    } else {
++        ev.stamp_ns = have_chunk_ ? chunk_.stamp_ns : 0;  ev.idx = -1;  ev.n = have_chunk_ ? chunk_.n : 0;
++        for (int a = 0; a < FollowChunk::kAux; ++a) ev.aux[a] = std::nan("");
++        // a starved boundary still FINISHES the previously started delta - report it once
++        last_stamp_ = 0;  last_idx_ = -1;
++        for (int a = 0; a < FollowChunk::kAux; ++a) last_aux_[a] = std::nan("");
++    }
++    arm.follow_step_ring_.push(ev);
++}
++
+ void FollowUnit::step(Arm& arm) {
+     arm.task_status_ = TaskStatus::Running;  // CONTINUOUS unit: never Done except the silence exit
+     if (arm.intent_ != MotionIntent::Run) return;         // the runner brakes; hold() re-seeds
+@@ -3424,6 +3475,8 @@ void FollowUnit::step(Arm& arm) {
+             rot_.command(Eigen::Vector3d::Zero(), T);
+             v_cmd_ = 0.0;  w_cmd_ = 0.0;  in_v_.setZero();  in_w_.setZero();
+         }
++        // The boundary event: what started, what finished, whether a chunk was adopted here.
++        emit_step_event(arm, playing ? (adopted_now_ ? 2 : 1) : 0, playing);
+         period_playing_ = playing;                         // latch it for the rest of the period
+     } else {
+         playing = period_playing_;   // mid-period: whatever the boundary decided, NOT an
+@@ -3759,6 +3812,7 @@ void FollowUnit::end(Arm& arm, bool aborted) {
+     // No blocking client to reply to - the follower is stream-driven. The backlog is DISCARDED
+     // (cursor advanced): re-entry takes a FRESH chunk.
+     (void)aborted;
++    emit_step_event(arm, 3, false);   // the last started delta is finished by the exit
+     arm.follow_chunk_seen_ = arm.follow_chunk_.seq();
+     have_chunk_ = false;
+     chunk_idx_  = 0;
+diff --git a/src/arm/tasks/Tasks.h b/src/arm/tasks/Tasks.h
+index 2940d39..5d402db 100644
+--- a/src/arm/tasks/Tasks.h
++++ b/src/arm/tasks/Tasks.h
+@@ -851,6 +851,16 @@ public:
+         Eigen::Vector3d in_v;                 // commanded translation rate [mm/s]
+         Eigen::Vector3d in_w;                 // commanded rotation rate    [deg/s]
+         Eigen::Vector3d ref_p_f, cmd_p_f;     // the two poses, in that same frame [mm]
++        // APPENDED 2026-08-18 for the recorder (Arm::record_row): the ORIENTATION halves of the
++        // same two poses in the same frame, the force gate's two reflection ratios, and the chunk
++        // bookkeeping - which chunk (by the publisher's stamp) is being played, how far into it,
++        // and whether this period consumed a delta at all. Read-only, no cost.
++        Eigen::Matrix3d ref_R_f, cmd_R_f;
++        double gate_t, gate_r;                // 1 = open (free space), 0 = fully closed
++        std::uint64_t chunk_stamp_ns;         // FollowChunk::stamp_ns of the ADOPTED chunk (0 = none)
++        int    chunk_idx;                     // next delta to play (deltas consumed so far)
++        int    chunk_n;                       // deltas in the adopted chunk (0 = none adopted)
++        bool   period_playing;                // the current period consumed a delta
+     };
+     // TEST-ONLY: force the DLS kill line, so a probe can measure DAMPED-only against KILLED on
+     // the same pose and ray. Production sets it from clik::Params::derive and nothing else.
+@@ -874,6 +884,13 @@ public:
+         t.in_v = R_tele_ * in_v_;  t.in_w = R_tele_ * in_w_;
+         t.ref_p_f = R_tele_ * ref_p_ + p_tele_;
+         t.cmd_p_f = R_tele_ * cmd_p_ + p_tele_;
++        t.ref_R_f = R_tele_ * ref_R_;
++        t.cmd_R_f = R_tele_ * cmd_R_;
++        t.gate_t = gate_t_;  t.gate_r = gate_r_;
++        t.chunk_stamp_ns = have_chunk_ ? chunk_.stamp_ns : 0;
++        t.chunk_idx = have_chunk_ ? chunk_idx_ : 0;
++        t.chunk_n   = have_chunk_ ? chunk_.n : 0;
++        t.period_playing = period_playing_;
+         return t;
+     }
+ 
+@@ -908,6 +925,13 @@ private:
+     FollowChunk chunk_{};                               // the ADOPTED chunk (local copy)
+     int  chunk_idx_   = 0;                              // next delta to play
+     bool have_chunk_  = false;
++    // Step-event bookkeeping (act/follow_step, 2026-08-19): the delta that finished at the last
++    // boundary and whether this boundary adopted a fresh chunk. NaN aux = the chunk had none.
++    bool          adopted_now_ = false;
++    std::uint64_t last_stamp_  = 0;
++    int           last_idx_    = -1;
++    double        last_aux_[FollowChunk::kAux] = {};
++    void emit_step_event(Arm& arm, int kind, bool played);
+     int  margin_ticks_ = 0;                             // playback margin countdown (stream start)
+     int  period_tick_  = 0;                             // ticks since the last delta was consumed
+     // WHETHER THE CURRENT PERIOD IS PLAYING ANYTHING, LATCHED AT ITS BOUNDARY. It exists because
+diff --git a/src/control-server/Channels.h b/src/control-server/Channels.h
+index cd1fb94..8c3c414 100644
+--- a/src/control-server/Channels.h
++++ b/src/control-server/Channels.h
+@@ -618,6 +618,21 @@ struct FollowChunk {
+     static constexpr int kMaxChunk = 64;
+     int         n = 0;                                  // deltas in this chunk (1..kMaxChunk)
+     FollowDelta d[kMaxChunk]{};
++    // The message's header.stamp [ns] as the PUBLISHER set it (0 = unstamped). Carried, never
++    // interpreted: it is the OFFLINE join key between a recorder capture (which logs the stamp of
++    // the chunk being played, per tick) and the publisher's own log of what that chunk contained.
++    // A publisher that stamps with THIS host's CLOCK_MONOTONIC (rt::now_ns's clock) makes the
++    // join a plain time comparison; nothing in the RT path reads it.
++    std::uint64_t stamp_ns = 0;
++    // PER-DELTA AUX SCALARS (2026-08-19): opaque values the PUBLISHER attaches to each delta
++    // (a policy's gripper target for that step, for instance) through <side>/cmd/follow_aux, paired
++    // by stamp at ADOPTION (FollowUnit::next_delta). The unit never interprets them: it echoes
++    // the aux of every delta it starts/finishes on <side>/act/follow_step, so an external process
++    // can act on "the step that just completed" instead of on its own clock. aux_n == 0 means no
++    // aux was paired (nothing published, or a stamp mismatch) and every value is NaN.
++    static constexpr int kAux = 2;
++    int    aux_n = 0;
++    double aux[kMaxChunk][kAux]{};
+ };
+ 
+ class FollowChunkSlot {
+@@ -661,6 +676,146 @@ private:
+     std::atomic<unsigned> seq_{0};                      // even = stable, odd = writing
+ };
+ 
++// FollowAuxSlot - the per-delta AUX values that accompany a follow chunk (2026-08-19). Deposited
++// from <side>/cmd/follow_aux (sensor_msgs/JointState: header.stamp = the SAME stamp the paired
++// PoseArray carries, position[] = n*kAux values, delta-major). A separate latest-value slot rather
++// than a field of the PoseArray because that message has no room for it and its type is fixed by
++// the wire; the pairing rule makes the two atomic in effect: the publisher sends aux FIRST, then
++// the pose chunk with the same stamp, and the unit pairs at adoption by (stamp, n) - a mismatch
++// simply adopts the chunk with no aux (aux_n = 0), never a wrong pairing.
++class FollowAuxSlot {
++public:
++    void set(std::uint64_t stamp_ns, int n, const double* vals) {
++        if (n < 0) n = 0;
++        if (n > FollowChunk::kMaxChunk) n = FollowChunk::kMaxChunk;
++        const unsigned s = seq_.load(std::memory_order_relaxed);
++        seq_.store(s + 1, std::memory_order_release);
++        stamp_ns_ = stamp_ns; n_ = n;
++        for (int k = 0; k < n; ++k)
++            for (int a = 0; a < FollowChunk::kAux; ++a) aux_[k][a] = vals[k * FollowChunk::kAux + a];
++        seq_.store(s + 2, std::memory_order_release);
++    }
++    // Consumer (RT): copy the current level; false if never published.
++    bool read(std::uint64_t& stamp_ns, int& n, double (*out)[FollowChunk::kAux]) const {
++        unsigned s0, s1;
++        std::uint64_t st; int tn;
++        double tmp[FollowChunk::kMaxChunk][FollowChunk::kAux];
++        do {
++            s0 = seq_.load(std::memory_order_acquire);
++            st = stamp_ns_; tn = n_;
++            for (int k = 0; k < FollowChunk::kMaxChunk; ++k)
++                for (int a = 0; a < FollowChunk::kAux; ++a) tmp[k][a] = aux_[k][a];
++            s1 = seq_.load(std::memory_order_acquire);
++        } while (s0 != s1 || (s0 & 1u));
++        if (s0 == 0) return false;
++        stamp_ns = st; n = tn;
++        for (int k = 0; k < FollowChunk::kMaxChunk; ++k)
++            for (int a = 0; a < FollowChunk::kAux; ++a) out[k][a] = tmp[k][a];
++        return true;
++    }
++private:
++    std::uint64_t stamp_ns_ = 0;
++    int n_ = 0;
++    double aux_[FollowChunk::kMaxChunk][FollowChunk::kAux]{};
++    std::atomic<unsigned> seq_{0};
++};
++
++// FollowStepEvent / FollowStepRing - the stream follower's PERIOD-BOUNDARY events (2026-08-19),
++// written by the unit on the RT thread, drained by the IPC executor and published on
++// <side>/act/follow_step. One event per input period while the unit runs: which delta of which
++// chunk just STARTED (idx, stamp, its aux), which one just FINISHED (prev_*), whether a fresh
++// chunk was adopted at this boundary, and the CLOCK_MONOTONIC of the boundary. This is the
++// controller's STEP CLOCK made external: a publisher that must act "when step k is done" (a
++// gripper target riding the step) or must know "which step is the arm on" (to slice the next
++// chunk so it continues exactly from here) reads it instead of guessing from its own clock.
++struct FollowStepEvent {
++    std::uint64_t mono_ns = 0;        // boundary time (rt::now_ns)
++    std::uint32_t seq = 0;            // event counter (ring bookkeeping)
++    std::int32_t  kind = 0;           // 0 = no delta this period (starved) | 1 = delta started |
++                                      // 2 = delta started AND a fresh chunk was adopted here |
++                                      // 3 = unit exited (silence / stop) - prev_* is the last delta
++    std::uint64_t stamp_ns = 0;       // chunk being played (kind 1/2)
++    std::int32_t  idx = -1;           // delta index that just STARTED (0-based; -1 if none)
++    std::int32_t  n = 0;              // deltas in that chunk
++    double        aux[FollowChunk::kAux]{}; // that delta's aux (NaN if the chunk had none)
++    std::uint64_t prev_stamp_ns = 0;  // the delta that just FINISHED (0 = none)
++    std::int32_t  prev_idx = -1;
++    double        prev_aux[FollowChunk::kAux]{};
++    std::uint32_t slot_seq = 0;       // FollowChunkSlot::seq() at the boundary
++};
++
++class FollowStepRing {
++public:
++    static constexpr std::uint32_t CAP = 32;    // > 1 s of periods; the drain runs at 250 Hz
++    // RT producer.
++    void push(FollowStepEvent ev) {
++        const std::uint32_t c = count_.load(std::memory_order_relaxed);
++        ev.seq = c + 1;
++        ring_[c % CAP] = ev;
++        count_.store(c + 1, std::memory_order_release);
++    }
++    std::uint32_t count() const { return count_.load(std::memory_order_acquire); }
++    // Consumer: copy event #seq (1-based). False if it is gone (overwritten) or not yet written.
++    bool get(std::uint32_t seq, FollowStepEvent& out) const {
++        const std::uint32_t c = count_.load(std::memory_order_acquire);
++        if (seq == 0 || seq > c || c - seq >= CAP) return false;
++        out = ring_[(seq - 1) % CAP];
++        return out.seq == seq;             // torn by a wrap-around during the copy -> refused
++    }
++private:
++    FollowStepEvent ring_[CAP]{};
++    std::atomic<std::uint32_t> count_{0};
++};
++
++// ExtScalarSlot - EXTERNAL PROCESS VALUES for the recorder (2026-08-18). The cell has actuators
++// and inputs this controller does not own (a policy runner's gripper command, its feedback, the
++// runner's own sequence counters), and an offline 2 ms analysis needs them on THE SAME TICK
++// TIMELINE as cmd/act/ref - which only the recorder can provide. So: a latest-value slot of up to
++// kMax named-by-the-publisher doubles + the publisher's stamp, deposited from
++// <side>/cmd/ext_scalars (sensor_msgs/JointState: position[] = the values, header.stamp = when).
++// The RT loop NEVER acts on these; Arm::record_row copies the current level into the row. Level
++// semantics like JogSlot (a value stays until replaced); `count()` = deposits so far, so a reader
++// can tell "unchanged" from "re-sent". Meaning of each index is the PUBLISHER's contract, not
++// this tree's - it is documented where it is published.
++class ExtScalarSlot {
++public:
++    static constexpr int kMax = 8;
++    void set(const double* v, int n, std::uint64_t stamp_ns) {
++        if (n < 0) n = 0;
++        if (n > kMax) n = kMax;
++        const unsigned s = seq_.load(std::memory_order_relaxed);
++        seq_.store(s + 1, std::memory_order_release);   // odd: write in progress
++        for (int i = 0; i < kMax; ++i) val_[i] = (i < n) ? v[i] : 0.0;
++        n_ = n;
++        stamp_ns_ = stamp_ns;
++        seq_.store(s + 2, std::memory_order_release);   // even: write complete
++    }
++    // Consumer (RT): always the current level; false only if never published.
++    bool read(double out[kMax], int& n, std::uint64_t& stamp_ns) const {
++        unsigned s0, s1;
++        double tmp[kMax];
++        int tn;
++        std::uint64_t st;
++        do {
++            s0 = seq_.load(std::memory_order_acquire);
++            for (int i = 0; i < kMax; ++i) tmp[i] = val_[i];
++            tn = n_; st = stamp_ns_;
++            s1 = seq_.load(std::memory_order_acquire);
++        } while (s0 != s1 || (s0 & 1u));
++        if (s0 == 0) return false;
++        for (int i = 0; i < kMax; ++i) out[i] = tmp[i];
++        n = tn; stamp_ns = st;
++        return true;
++    }
++    unsigned count() const { return seq_.load(std::memory_order_acquire) / 2u; }   // deposits so far
++
++private:
++    double                val_[kMax]{};
++    int                   n_ = 0;
++    std::uint64_t         stamp_ns_ = 0;
++    std::atomic<unsigned> seq_{0};                      // even = stable, odd = writing
++};
++
+ // AuxChunkSlot - the WAIST's joint-delta stream channel (owner, 2026-08-02), the FollowChunkSlot
+ // contract on the aux lane: MESSAGE = CHUNK of per-period joint deltas, latest chunk REPLACES the
+ // unconsumed tail (receding horizon), one delta consumed per input period. Units are the AUX
+diff --git a/src/control-server/ControllerIpc.cpp b/src/control-server/ControllerIpc.cpp
+index 6829a55..b4d4d0f 100644
+--- a/src/control-server/ControllerIpc.cpp
++++ b/src/control-server/ControllerIpc.cpp
+@@ -174,6 +174,11 @@ struct ArmIpc {
+     rclcpp::Subscription<cmsg::DioCommand>::SharedPtr dio_sub;
+     rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr jog_sub;
+     rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr follow_sub;
++    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr ext_sub;   // <side>/cmd/ext_scalars
++    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr follow_aux_sub;   // <side>/cmd/follow_aux
++    rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr    follow_step_pub;  // <side>/act/follow_step
++    FollowStepRing* follow_step = nullptr;   // drained by publish_motion
++    std::uint32_t   follow_step_seen = 0;    // last event seq published
+     rclcpp::Service<csrv::Command>::SharedPtr       console_srv;
+     rclcpp_action::Server<MoveAction>::SharedPtr    move_action;       // /chimpanzee/<side>/cmd/move
+     GoalTracker  goals;                                                // the deferred-goal bookkeeping
+@@ -556,6 +561,9 @@ struct RtIpc::Impl {
+                 if (n < 1 || n > FollowChunk::kMaxChunk) return;   // malformed: ignored whole
+                 FollowChunk c;
+                 c.n = n;
++                // The publisher's stamp, carried for the offline join (FollowChunk::stamp_ns).
++                c.stamp_ns = static_cast<std::uint64_t>(m->header.stamp.sec) * 1000000000ull
++                           + static_cast<std::uint64_t>(m->header.stamp.nanosec);
+                 for (int k = 0; k < n; ++k) {
+                     const auto& pz = m->poses[k];
+                     c.d[k].t[0] = pz.position.x * 1e3;
+@@ -574,6 +582,51 @@ struct RtIpc::Impl {
+                 follow->set(c);
+             });
+ 
++        // EXTERNAL PROCESS VALUES for the recorder (2026-08-18): deposit-only into ExtScalarSlot,
++        // exactly like jog/ft_config/dio above. position[] = the values (up to ExtScalarSlot::kMax),
++        // header.stamp = the publisher's own timestamp, carried verbatim. name[] is documentation
++        // for humans and is NOT read here (a string per message has no place on this path); the
++        // index meaning is the PUBLISHER's contract. Nothing in the RT loop acts on these - they
++        // exist so Arm::record_row can put them on the same 2 ms row as cmd/act/ref.
++        if (ExtScalarSlot* ext = a.ext) {
++            ai->ext_sub = node->create_subscription<sensor_msgs::msg::JointState>(
++                ai->base + "/cmd/ext_scalars", latest_qos(),
++                [ext](const sensor_msgs::msg::JointState::SharedPtr m) {
++                    double v[ExtScalarSlot::kMax] = {};
++                    const int n = std::min<int>(static_cast<int>(m->position.size()),
++                                                ExtScalarSlot::kMax);
++                    for (int i = 0; i < n; ++i) v[i] = m->position[i];
++                    const std::uint64_t st =
++                        static_cast<std::uint64_t>(m->header.stamp.sec) * 1000000000ull
++                        + static_cast<std::uint64_t>(m->header.stamp.nanosec);
++                    ext->set(v, n, st);
++                });
++        }
++
++        // THE FOLLOW CHUNK'S PER-DELTA AUX (2026-08-19): deposit-only into FollowAuxSlot. The
++        // publisher sends this BEFORE the PoseArray with the SAME header.stamp; the unit pairs by
++        // (stamp, n) at adoption. position[] = n * FollowChunk::kAux values, delta-major.
++        if (FollowAuxSlot* aux = a.follow_aux) {
++            ai->follow_aux_sub = node->create_subscription<sensor_msgs::msg::JointState>(
++                ai->base + "/cmd/follow_aux", latest_qos(),
++                [aux](const sensor_msgs::msg::JointState::SharedPtr m) {
++                    const int n = std::min<int>(static_cast<int>(m->position.size()) / FollowChunk::kAux,
++                                                FollowChunk::kMaxChunk);
++                    const std::uint64_t st =
++                        static_cast<std::uint64_t>(m->header.stamp.sec) * 1000000000ull
++                        + static_cast<std::uint64_t>(m->header.stamp.nanosec);
++                    aux->set(st, n, m->position.data());
++                });
++        }
++        // THE UNIT'S STEP EVENTS (2026-08-19): published from publish_motion (executor), drained
++        // out of the RT-written ring. JointState so no new msg type is needed: name[] documents
++        // the slots, position[] carries them (int fields as doubles - exact below 2^53).
++        if (a.follow_step) {
++            ai->follow_step = a.follow_step;
++            ai->follow_step_pub = node->create_publisher<sensor_msgs::msg::JointState>(
++                ai->base + "/act/follow_step", rclcpp::QoS(rclcpp::KeepLast(64)).reliable());
++        }
++
+         // COMMAND CONSOLE: BLOCKS until the coordinator reports the command actually COMPLETED, so
+         // `accepted` is the real outcome and `message` is the reason (it used to answer "queued" the
+         // instant the text was deposited, which reported success for commands that never happened).
+@@ -806,6 +859,31 @@ struct RtIpc::Impl {
+             }
+             a.act_joint->publish(ja); a.cmd_joint->publish(jc);
+ 
++            // Follow step events: everything the RT ring holds since the last drain, in order.
++            if (a.follow_step && a.follow_step_pub) {
++                const std::uint32_t c = a.follow_step->count();
++                if (c - a.follow_step_seen > FollowStepRing::CAP) a.follow_step_seen = c - FollowStepRing::CAP;
++                for (std::uint32_t s = a.follow_step_seen + 1; s <= c; ++s) {
++                    FollowStepEvent ev;
++                    if (!a.follow_step->get(s, ev)) continue;
++                    sensor_msgs::msg::JointState m;
++                    m.header.stamp.sec = static_cast<std::int32_t>(ev.mono_ns / 1000000000ull);
++                    m.header.stamp.nanosec = static_cast<std::uint32_t>(ev.mono_ns % 1000000000ull);
++                    m.header.frame_id = "follow_step";
++                    m.name = {"kind", "stamp_ns", "idx", "n", "aux0", "aux1",
++                              "prev_stamp_ns", "prev_idx", "prev_aux0", "prev_aux1",
++                              "slot_seq", "event_seq"};
++                    m.position = {static_cast<double>(ev.kind), static_cast<double>(ev.stamp_ns),
++                                  static_cast<double>(ev.idx), static_cast<double>(ev.n),
++                                  ev.aux[0], ev.aux[1],
++                                  static_cast<double>(ev.prev_stamp_ns), static_cast<double>(ev.prev_idx),
++                                  ev.prev_aux[0], ev.prev_aux[1],
++                                  static_cast<double>(ev.slot_seq), static_cast<double>(ev.seq)};
++                    a.follow_step_pub->publish(m);
++                }
++                a.follow_step_seen = c;
++            }
++
+             geometry_msgs::msg::PoseStamped pa, pc;
+             pa.header.stamp = now; pa.header.frame_id = base_frame;
+             pc.header.stamp = now; pc.header.frame_id = base_frame;
+diff --git a/src/control-server/ControllerIpc.h b/src/control-server/ControllerIpc.h
+index fdfce3c..d9b8bb9 100644
+--- a/src/control-server/ControllerIpc.h
++++ b/src/control-server/ControllerIpc.h
+@@ -47,6 +47,9 @@
+ class CommandChannel;
+ class JogSlot;
+ class FollowChunkSlot;
++class ExtScalarSlot;
++class FollowAuxSlot;
++class FollowStepRing;
+ class AuxChunkSlot;
+ class ProgressQueue;   // the waist ACTION goal's Terminal events (0021 §7) - Controller-owned
+ class FtConfigSlot;
+@@ -90,6 +93,13 @@ struct ArmLink {
+     // memcpy'd every cycle), but the published JointState needs them so a viewer can bind each
+     // external axis to the matching URDF joint by name instead of by position.
+     std::array<std::string, 6> aux_names{};
++    // EXTERNAL PROCESS VALUES for the recorder (<side>/cmd/ext_scalars -> Arm::record_row); see
++    // ExtScalarSlot in Channels.h. Defaulted so an ArmLink built without it opens no endpoint.
++    ExtScalarSlot*   ext = nullptr;
++    // The follow chunk's per-delta aux (<side>/cmd/follow_aux) and the unit's step events
++    // (<side>/act/follow_step) - Channels.h, 2026-08-19. Defaulted: absent = endpoints not opened.
++    FollowAuxSlot*   follow_aux = nullptr;
++    FollowStepRing*  follow_step = nullptr;
+ };
+ 
+ // THE CELL's own move endpoint: /chimpanzee/cell/cmd/move. It registers a VIRTUAL ACTOR - a named
+diff --git a/src/core/Controller.cpp b/src/core/Controller.cpp
+index 73b6dfa..8e5a0de 100644
+--- a/src/core/Controller.cpp
++++ b/src/core/Controller.cpp
+@@ -384,6 +384,9 @@ void Controller::init(const char* config_path) {
+                                  &arms[i].cancel_reg_req_,
+                                  &arms[i].active_goal_pub_,
+                                  aux_names });
++        links.back().ext = &arms[i].ext_slot_;   // <side>/cmd/ext_scalars -> the recorder row
++        links.back().follow_aux  = &arms[i].follow_aux_;        // <side>/cmd/follow_aux
++        links.back().follow_step = &arms[i].follow_step_ring_;  // <side>/act/follow_step
+     }
+     // The CELL's own move endpoint (virtual actors) and the off-RT coordinated solver behind it.
+     // S6: hybrid_svc_.init() only REGISTERS with the shared pool as a source (like every arm's

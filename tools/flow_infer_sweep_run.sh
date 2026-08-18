@@ -40,4 +40,12 @@ echo "[sweep] step_log=$STEP_LOG"
 echo "[sweep] meta=$META"
 echo "[sweep] console=$CONSOLE_LOG"
 
+# Observation dump beside the step log (lossless PNG per inference, ~0.5-1 MB each at 7.5 Hz ->
+# a few hundred MB per rollout). Opt out with FLOW_INFER_OBS_DUMP=0.
+if [ "${FLOW_INFER_OBS_DUMP:-1}" != 0 ]; then
+  export FLOW_INFER_OBS_DUMP_DIR="${FLOW_INFER_OBS_DUMP_DIR:-outputs/obs_dump/${STAMP}_${TAG}}"
+  echo "[sweep] obs_dump=$FLOW_INFER_OBS_DUMP_DIR"
+  echo "obs_dump=$FLOW_INFER_OBS_DUMP_DIR" >> "$META"
+fi
+
 FLOW_INFER_STEP_LOG="$STEP_LOG" ./tools/flow_infer_real_policy.sh "$@" 2>&1 | tee "$CONSOLE_LOG"

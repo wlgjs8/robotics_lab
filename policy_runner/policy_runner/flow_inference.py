@@ -1148,6 +1148,7 @@ class FlowMatchingActionSource:
             execute_tail_index = max(0, min(int(execute_limit), int(overlay_rows.shape[0])) - 1)
             projected: dict[str, list[list[float]] | None] = {"left": None, "right": None}
             projected_delta: dict[str, list[list[float]] | None] = {"left": None, "right": None}
+            projected_grip_cmd: dict[str, list[float] | None] = {"left": None, "right": None}
             for arm, idx, sl in self._foh_arm_indices():
                 if len(self.arm_mask) <= idx or self.arm_mask[idx] <= 0.0:
                     continue
@@ -1202,6 +1203,23 @@ class FlowMatchingActionSource:
                     )
                 projected[arm] = arm_points
                 projected_delta[arm] = arm_delta_points
+                # The gripper command this runner WOULD dispatch for each row (same mapping as
+                # _dispatch_gripper_step: hold-open window, close-bias, close-snap; delta mode =
+                # raw), so a step-synchronised consumer actuates the runner's semantics at the
+                # controller's step time instead of the runner's clock.
+                try:
+                    if not getattr(self, "gripper_action_absolute", True):
+                        projected_grip_cmd[arm] = [float(overlay_rows[i][grip_index]) for i in range(int(overlay_rows.shape[0]))]
+                    elif bool(getattr(self, "_gripper_hold_open_now", False)):
+                        hv = float(self._gripper_hold_open_value())
+                        projected_grip_cmd[arm] = [hv for _ in range(int(overlay_rows.shape[0]))]
+                    else:
+                        projected_grip_cmd[arm] = [
+                            float(self._map_gripper_opening(float(overlay_rows[i][grip_index]), arm))
+                            for i in range(int(overlay_rows.shape[0]))
+                        ]
+                except Exception:
+                    projected_grip_cmd[arm] = None
                 if anchor_mode == "chain":
                     # Record this chunk's chain tail; promoted to the anchor when
                     # the NEXT chunk activates (re-publishing the same chunk is
@@ -1238,6 +1256,8 @@ class FlowMatchingActionSource:
                 right=projected["right"],
                 left_delta=projected_delta["left"],
                 right_delta=projected_delta["right"],
+                left_grip_cmd=projected_grip_cmd["left"],
+                right_grip_cmd=projected_grip_cmd["right"],
                 host_time_ns=time.time_ns(),
                 inference_timing=self._inference_timing_snapshot(),
                 camera_diagnostics=self._camera_diagnostics_snapshot(),
@@ -1393,6 +1413,9 @@ class FlowMatchingActionSource:
         worker_start_ns = self._inference_now_ns()
         observation_step_seq = int(getattr(self, "_stream_emitted_policy_steps", 0))
         chunk: np.ndarray | None = None
+        tls = getattr(self, "_infer_tls", None)
+        if tls is not None:
+            tls.seq = int(inference_seq)   # observation dump join key (openpi_remote)
         try:
             chunk = self._sample_and_align_chunk(payload)
             return chunk
@@ -2480,6 +2503,9 @@ class FlowMatchingActionSource:
         close_step_log = getattr(getattr(self, "_rollout_step_logger", None), "close", None)
         if callable(close_step_log):
             close_step_log()
+        close_dump = getattr(getattr(self, "_observation_dumper", None), "close", None)
+        if callable(close_dump):
+            close_dump()   # drains the encode queue (bounded wait) so the last inferences land
         close = getattr(self.camera_client, "close", None)
         if callable(close):
             close()

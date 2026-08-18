@@ -43,6 +43,8 @@ class ChunkOverlayPublisher:
         host_time_ns: int,
         left_delta: list[list[float]] | None = None,
         right_delta: list[list[float]] | None = None,
+        left_grip_cmd: list[float] | None = None,
+        right_grip_cmd: list[float] | None = None,
         inference_timing: dict[str, object] | None = None,
         camera_diagnostics: dict[str, object] | None = None,
         execute_steps: int | None = None,
@@ -65,6 +67,14 @@ class ChunkOverlayPublisher:
                 packet["left_delta"] = left_delta
             if right_delta is not None:
                 packet["right_delta"] = right_delta
+            # Per-row gripper COMMAND (the runner's mapping of the raw model opening: close-bias,
+            # close-snap, hold-open) - what a step-synchronised consumer (cm_bridge FollowPacer)
+            # should actuate when that row's step completes. The raw model value stays in
+            # column 7 of the rows/deltas for display and analysis.
+            if left_grip_cmd is not None:
+                packet["left_grip_cmd"] = left_grip_cmd
+            if right_grip_cmd is not None:
+                packet["right_grip_cmd"] = right_grip_cmd
             if inference_timing is not None:
                 packet["inference_timing"] = inference_timing
             if camera_diagnostics is not None:
