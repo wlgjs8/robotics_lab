@@ -154,6 +154,11 @@ JointArray TrajectoryFilter::computeJointTarget(
     return out;
 }
 
+void TrajectoryFilter::observeSentTarget(const JointArray& previous_sent_target) {
+    last_previous_sent_target_ = previous_sent_target;
+    has_last_previous_sent_target_ = true;
+}
+
 JointArray TrajectoryFilter::holdTarget(const JointArray& previous_sent_target) const {
     return previous_sent_target;
 }

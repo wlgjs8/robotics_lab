@@ -17,6 +17,15 @@ public:
         double dt_sec
     );
 
+    // Record this tick's previous_sent_target WITHOUT computing a joint target. The
+    // Cartesian branches of the servo loop bypass computeJointTarget entirely, so without
+    // this the joint-target SMD's velocity seed (dq0 = (prev - last_prev)/dt on activation)
+    // would be taken from whatever tick last ran computeJointTarget — possibly seconds old
+    // and degrees away — and the first JointTarget tick after a TcpPoseTarget streak (init
+    // brake-before-plan, jog handoff) would start from a garbage velocity. Call it on every
+    // tick whose mode does not reach computeJointTarget.
+    void observeSentTarget(const JointArray& previous_sent_target);
+
 private:
     JointArray holdTarget(const JointArray& previous_sent_target) const;
 

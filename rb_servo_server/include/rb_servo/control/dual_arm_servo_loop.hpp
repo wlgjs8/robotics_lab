@@ -38,6 +38,7 @@
 #include "rb_servo/logging/servo_logger.hpp"
 #include "rb_servo/robot/i_robot_backend.hpp"
 #include "rb_servo/sensor/ft_wrench_pipeline.hpp"
+#include "rb_servo/sensor/tare_settle_detector.hpp"
 
 namespace rb_servo {
 
@@ -330,7 +331,10 @@ private:
         std::string* fault_reason
     );
     void invalidatePostInitTare(ArmId arm_id, uint64_t command_seq);
-    void beginPostInitTare(ArmId arm_id, uint64_t now_ns);
+    // Init Motion for this arm just completed at `state` (measured joints/TCP): start the
+    // settle phase of the post-init software zero and, when the last accepted zero was
+    // captured at this pose recently enough (auto_tare_reuse_*), re-validate it right away.
+    void beginPostInitTare(ArmId arm_id, uint64_t now_ns, const RobotState& state);
     bool latchPayloadIdentificationInhibit(ArmId arm_id);
     void applyForceCorrection(ArmId arm_id, ArmCommand* command);
     void finishForceProposals(
@@ -424,6 +428,19 @@ private:
         uint64_t tare_not_before_ns = 0;
         uint64_t last_init_tare_command_seq = 0;
         uint64_t tare_generation = 0;
+        // Post-init tare arming latency (2026-08-19): ring-down detector that lets the
+        // window start as soon as the tool is quiet (auto_tare_settle_detect_enable),
+        // and the software-zero reuse capture (auto_tare_reuse_enable). tare_refresh is
+        // set while a REUSED zero is valid and a fresh window is being collected in the
+        // background to replace it: force control keeps running, and a spoiled window,
+        // the arm leaving the capture pose, or contact keeps the previous zero.
+        TareSettleDetector tare_settle;
+        uint64_t tare_settle_started_ns = 0;
+        bool tare_refresh = false;
+        bool tare_capture_valid = false;
+        JointArray tare_capture_q_deg{};
+        uint64_t tare_capture_ns = 0;
+        Wrench6D tare_capture_value;
         bool payload_identification_inhibit = false;
         // Per-tick compliance frame (TCP-local) for the follower's compliance-
         // aware actual-lead compensation; valid once the frame is resolved.
@@ -630,6 +647,18 @@ private:
         double best_dist_deg = 0.0;
         uint64_t last_progress_ns = 0;
         uint64_t last_exec_log_ns = 0;  // throttle for the streaming-progress diagnostic
+        // Brake-before-plan (safety.init_motion_planner.brake_before_plan): a fresh request
+        // arrived while a selected arm was still streaming. Status is Planning, but the
+        // planner job is NOT posted yet: the braking arm(s) are driven as JointTarget toward
+        // brake_goal_* (joint_target_smd, monotone stop from the last SENT velocity) and the
+        // measured re-anchor + launch happen only after the sent velocity has settled (or the
+        // brake timeout elapsed). Selected arms already at rest are held as before.
+        bool brake_pending = false;
+        bool brake_left = false;
+        bool brake_right = false;
+        uint64_t brake_start_ns = 0;
+        JointArray brake_goal_left{};
+        JointArray brake_goal_right{};
     };
     InitMotionExec left_init_motion_exec_;
     InitMotionExec right_init_motion_exec_;
@@ -963,5 +992,36 @@ bool initMotionRequestIsFresh(
     const JointArray& command_target_left,
     const JointArray& command_target_right,
     double tol_deg);
+
+// Brake-before-plan helpers (see InitMotionPlannerConfig::brake_before_plan). Stateless so
+// they are unit-testable in isolation (test_init_motion_pursuit).
+//
+// The last SENT joint velocity is (prev_sent - prevprev_sent) / dt: prev/prevprev are the
+// two most recent accepted servo targets, so this is exactly the velocity the control box
+// is currently being asked to realize (independent of encoder lag).
+double sentJointSpeedDegS(
+    const JointArray& prev_sent_deg,
+    const JointArray& prevprev_sent_deg,
+    double dt_sec);
+
+struct InitMotionBrakePlan {
+    bool needed = false;           // some joint's sent speed exceeded enter_deg_s
+    double max_speed_deg_s = 0.0;  // peak per-joint sent speed at request time
+    JointArray goal{};             // per-joint stop target (== prev_sent when !needed)
+};
+// Per-joint monotone stop target for a critically damped second-order tracker with
+// natural frequency wn = 2*pi*smd_natural_frequency_hz: starting at q with velocity dq, the
+// goal g = q + dq/wn is approached as g - (g-q)*exp(-wn t) — no reversal, no overshoot,
+// initial deceleration wn*|dq| (~14*30 = 420 deg/s^2 at the shipped 2.25 Hz profile,
+// well under the 1300 deg/s^2 SMD accel cap). The stopping distance |dq|/wn is capped by
+// max_travel_deg. A non-positive natural frequency (SMD profile disabled) degrades to
+// goal = q (rate-limited stop).
+InitMotionBrakePlan planInitMotionBrake(
+    const JointArray& prev_sent_deg,
+    const JointArray& prevprev_sent_deg,
+    double dt_sec,
+    double smd_natural_frequency_hz,
+    double enter_deg_s,
+    double max_travel_deg);
 
 }  // namespace rb_servo

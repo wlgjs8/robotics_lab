@@ -322,8 +322,88 @@ bool test_request_freshness() {
     return true;
 }
 
+// ---------------------------------------------------------------------------------
+// Brake-before-plan helpers (2026-08-19). Regression target: an InitMotion request that
+// arrives while the selected arm is still streaming used to snap the sent target to the
+// measured joints and Hold in one tick (0.2-0.7 deg backward step at 2 ms -> wrist F/T
+// 8-26 N, tool ringing). The sequencer now brakes from the last SENT velocity first; these
+// helpers decide when and toward what.
+// ---------------------------------------------------------------------------------
+bool test_brake_plan() {
+    const double dt = 0.002;      // 500 Hz servo
+    const double fn_hz = 2.25;    // shipped joint_target_smd natural frequency
+    const double wn = 2.0 * M_PI * fn_hz;
+    JointArray prev = q_of(10.0);
+    JointArray prevprev = q_of(10.0);
+
+    // At rest -> no brake, goal == prev_sent, speed 0.
+    {
+        RB_CHECK(std::abs(sentJointSpeedDegS(prev, prevprev, dt)) < 1e-12);
+        const InitMotionBrakePlan plan = planInitMotionBrake(prev, prevprev, dt, fn_hz, 1.0, 3.0);
+        RB_CHECK(!plan.needed);
+        for (int i = 0; i < kDof; ++i) RB_CHECK(plan.goal[i] == prev[i]);
+    }
+    // Streaming at 15 deg/s on joint 2 (0.03 deg per tick) -> brake; the stop goal leads
+    // the sent target by dq/wn along the direction of motion (monotone stop, no reversal),
+    // untouched joints keep goal == prev_sent.
+    {
+        prev = q_of(10.0);
+        prevprev = q_of(10.0);
+        prevprev[2] = 10.0 - 15.0 * dt;
+        RB_CHECK(std::abs(sentJointSpeedDegS(prev, prevprev, dt) - 15.0) < 1e-9);
+        const InitMotionBrakePlan plan = planInitMotionBrake(prev, prevprev, dt, fn_hz, 1.0, 3.0);
+        RB_CHECK(plan.needed);
+        RB_CHECK(std::abs(plan.max_speed_deg_s - 15.0) < 1e-9);
+        RB_CHECK(std::abs(plan.goal[2] - (10.0 + 15.0 / wn)) < 1e-9);
+        RB_CHECK(plan.goal[2] > prev[2]);  // ahead, along the motion
+        for (int i = 0; i < kDof; ++i) {
+            if (i != 2) RB_CHECK(plan.goal[i] == prev[i]);
+        }
+    }
+    // Negative direction keeps the sign; below the enter threshold does not brake.
+    {
+        prev = q_of(0.0);
+        prevprev = q_of(0.0);
+        prevprev[4] = +0.5 * dt;  // -0.5 deg/s
+        const InitMotionBrakePlan plan = planInitMotionBrake(prev, prevprev, dt, fn_hz, 1.0, 3.0);
+        RB_CHECK(!plan.needed);
+        prevprev[4] = +40.0 * dt;  // -40 deg/s
+        const InitMotionBrakePlan fast = planInitMotionBrake(prev, prevprev, dt, fn_hz, 1.0, 3.0);
+        RB_CHECK(fast.needed);
+        RB_CHECK(fast.goal[4] < 0.0);
+        RB_CHECK(std::abs(fast.goal[4] - (-40.0 / wn)) < 1e-9);
+    }
+    // The stopping distance is capped by max_travel_deg.
+    {
+        prev = q_of(0.0);
+        prevprev = q_of(0.0);
+        prevprev[0] = -100.0 * dt;  // +100 deg/s -> dq/wn = 7.07 deg > cap
+        const InitMotionBrakePlan plan = planInitMotionBrake(prev, prevprev, dt, fn_hz, 1.0, 3.0);
+        RB_CHECK(plan.needed);
+        RB_CHECK(std::abs(plan.goal[0] - 3.0) < 1e-9);
+    }
+    // SMD profile disabled (fn <= 0): still flagged, but the goal degrades to prev_sent
+    // (rate-limited stop) instead of a lookahead.
+    {
+        prev = q_of(5.0);
+        prevprev = q_of(5.0);
+        prevprev[1] = 5.0 - 20.0 * dt;
+        const InitMotionBrakePlan plan = planInitMotionBrake(prev, prevprev, dt, 0.0, 1.0, 3.0);
+        RB_CHECK(plan.needed);
+        for (int i = 0; i < kDof; ++i) RB_CHECK(plan.goal[i] == prev[i]);
+    }
+    // Degenerate dt never divides by zero.
+    {
+        const InitMotionBrakePlan plan = planInitMotionBrake(prev, prevprev, 0.0, fn_hz, 1.0, 3.0);
+        RB_CHECK(!plan.needed);
+        RB_CHECK(sentJointSpeedDegS(prev, prevprev, 0.0) == 0.0);
+    }
+    return true;
+}
+
 int main() {
     bool ok = true;
+    ok = test_brake_plan() && ok;
     ok = test_projection_advances_past_cut_corner() && ok;
     ok = test_corner_path_reaches_goal_without_stall() && ok;
     ok = test_escape_head_asymptotic_tracker_does_not_deadlock() && ok;

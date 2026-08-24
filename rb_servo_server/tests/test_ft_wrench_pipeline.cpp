@@ -3,6 +3,7 @@
 #include <limits>
 
 #include "rb_servo/sensor/ft_wrench_pipeline.hpp"
+#include "rb_servo/sensor/tare_settle_detector.hpp"
 
 namespace {
 
@@ -459,7 +460,71 @@ bool testResidualTareEligibilityAndFilterReset() {
 
 }  // namespace
 
+// TareSettleDetector (2026-08-19): the post-init tare starts its window as soon as the
+// rolling stddev of the pre-tare wrench is inside the tare limits instead of after a
+// fixed settle wait. Regression target: a ringing tool must not read as quiet, a quiet
+// tool must be detected once the window is full, and a glitch must reset the window.
+bool testTareSettleDetectorRingDown() {
+    rb_servo::TareSettleDetector det;
+    det.configure(50);
+    RB_CHECK(det.window() == 50);
+    RB_CHECK(!det.full());
+    RB_CHECK(!det.quiet(1.5, 0.15));
+    RB_CHECK(std::isnan(det.stddev()[0]));
+
+    // Ringing: +/-3 N square wave on fx -> stddev 3 N > 1.5 N limit, never quiet.
+    for (int i = 0; i < 120; ++i) {
+        const double fx = (i % 2 == 0) ? 3.0 : -3.0;
+        det.push({fx, 0.0, 0.0, 0.0, 0.0, 0.0});
+    }
+    RB_CHECK(det.full());
+    RB_CHECK(near(det.stddev()[0], 3.0, 1e-9));
+    RB_CHECK(!det.quiet(1.5, 0.15));
+    RB_CHECK(near(det.maxForceStddev(), 3.0, 1e-9));
+
+    // Ring-down: quiet samples (+/-0.3 N around a 5 N not-yet-tared bias) displace the
+    // ringing ones. While >= 10 ringing samples remain in the window the stddev is far
+    // above 1.5 N; the window turns quiet only in the last few samples (a lone +/-3 N
+    // outlier among 49 quiet ones is inside the 1.5 N limit, exactly as the tare window
+    // itself would judge it), and the constant bias must not matter.
+    int quiet_after = -1;
+    for (int i = 0; i < 80; ++i) {
+        const double fx = 5.0 + ((i % 2 == 0) ? 0.3 : -0.3);
+        det.push({fx, 5.0, -5.0, 0.05, -0.05, 0.05});
+        if (i < 40) RB_CHECK(!det.quiet(1.5, 0.15));
+        if (quiet_after < 0 && det.quiet(1.5, 0.15)) quiet_after = i + 1;
+    }
+    RB_CHECK(quiet_after >= 45 && quiet_after <= 50);
+    RB_CHECK(near(det.stddev()[0], 0.3, 1e-9));
+    RB_CHECK(near(det.stddev()[1], 0.0, 1e-6));  // incremental sums: sqrt of roundoff
+    RB_CHECK(near(det.maxTorqueStddev(), 0.0, 1e-6));
+
+    // Torque limit is enforced independently of force.
+    rb_servo::TareSettleDetector tdet;
+    tdet.configure(10);
+    for (int i = 0; i < 10; ++i) {
+        tdet.push({0.0, 0.0, 0.0, (i % 2 == 0) ? 0.5 : -0.5, 0.0, 0.0});
+    }
+    RB_CHECK(tdet.full());
+    RB_CHECK(!tdet.quiet(1.5, 0.15));
+    RB_CHECK(tdet.quiet(1.5, 0.6));
+
+    // A non-finite sample resets the window (a glitch cannot vouch for quiescence).
+    det.push({std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0, 0.0, 0.0, 0.0});
+    RB_CHECK(det.count() == 0);
+    RB_CHECK(!det.quiet(1.5, 0.15));
+
+    // configure() clamps the window into [2, kMaxWindow].
+    rb_servo::TareSettleDetector big;
+    big.configure(100000);
+    RB_CHECK(big.window() == rb_servo::TareSettleDetector::kMaxWindow);
+    big.configure(0);
+    RB_CHECK(big.window() == 2);
+    return true;
+}
+
 int main() {
+    if (!testTareSettleDetectorRingDown()) return 1;
     if (!testBiasThenTransformWithMomentArm()) return 1;
     if (!testAcceptedRbpodoEftForceAxisMapping()) return 1;
     if (!testRotationAndPayloadCompensation()) return 1;
