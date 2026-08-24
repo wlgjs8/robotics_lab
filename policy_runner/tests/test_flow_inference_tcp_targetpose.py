@@ -280,6 +280,37 @@ class FlowInferenceTcpPoseTargetTest(unittest.TestCase):
         )
         self.assertEqual(len(records[0]["arms"]["left"]["cmd_pose"]), 7)
 
+    def test_rollout_step_log_records_the_gripper_proprio_source(self) -> None:
+        # The A/B between --gripper-proprio-source arms is only readable after
+        # the fact if the log says which signal reached the policy.
+        assert torch is not None and np is not None
+        measured = _pose7([0.4, 0.0, 0.3], [0.0, 0.0, 0.0, 1.0])
+        chunk = _action_chunk(*([[0.0, 0.0, -0.002, 0.0, 0.0, 0.0, 25.0]] * 8))
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._streamed_source(tmp, "foh_se3")
+            source.gripper_proprio_source = "command"
+            source._gripper_last_sent_by_arm = {"left": 11.0, "right": 12.0}
+            log_path = Path(tmp) / "rollout_steps.jsonl"
+            source.configure_rollout_step_log(log_path)
+            try:
+                with mock.patch(
+                    "policy_runner.flow_inference.sample_action_chunks", return_value=chunk
+                ):
+                    state = _sample_state(left_pose=measured)
+                    source.next_intent(state, 0.0)
+                    source.next_intent(state, 0.02)
+            finally:
+                source.close()
+            records = [
+                json.loads(line)
+                for line in log_path.read_text(encoding="utf-8").splitlines()
+            ]
+
+        left = records[0]["arms"]["left"]
+        self.assertEqual(left["gripper_proprio_source"], "command")
+        self.assertAlmostEqual(left["gripper_proprio_pct"], 11.0)
+        self.assertEqual(records[0]["arms"]["right"]["gripper_proprio_source"], "command")
+
 
 def _sample_state(*, left_pose: np.ndarray) -> StateSnapshot:
     right_pose = _pose7([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0])

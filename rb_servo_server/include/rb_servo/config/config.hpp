@@ -668,6 +668,24 @@ struct InitMotionPlannerConfig {
     // false: single-arm InitMotion preserves the non-selected arm command so
     // flow-infer can keep controlling it; true: hold/rewrite the other arm too.
     bool single_arm_freeze_other_arm = false;
+    // Brake-before-plan (2026-08-19). InitMotion used to snap the SENT target to the
+    // MEASURED joints and Hold the instant a request arrived (reanchor_selected_to_measured
+    // + hold_selected while planning). While the arm is still streaming under the policy
+    // (or under an earlier init move — the a->c double press replans both arms), the sent
+    // target leads the encoders by the tracking lag, so that snap is a 0.2-0.7 deg
+    // BACKWARD step inside one 2 ms tick (100-350 deg/s sent-velocity spike, 8-26 N on the
+    // wrist F/T, tool ringing at ~9.5 Hz; servo_log_20260819_085404 t=130.94 / 152.28).
+    // With brake_before_plan the selected arm(s) instead decelerate along the
+    // joint_target_smd profile FROM THE LAST SENT TARGET (monotone stop, goal = q + dq/wn,
+    // no reversal) and only once every selected joint's sent velocity is below
+    // brake_exit_deg_s (or brake_timeout_sec elapsed) does the sequencer re-anchor to
+    // measured — now within the encoder noise of the sent target — and launch the
+    // collision-free plan from rest. Arms already at rest take the old path unchanged.
+    bool brake_before_plan = true;
+    double brake_enter_deg_s = 1.0;     // any selected joint moving faster (sent) => brake first
+    double brake_exit_deg_s = 0.5;      // braked when every selected joint is slower than this
+    double brake_timeout_sec = 0.75;    // upper bound on the brake phase, then plan anyway
+    double brake_max_travel_deg = 3.0;  // cap on the per-joint dq/wn stopping distance
 };
 
 struct SafetyConfig {
@@ -842,7 +860,31 @@ struct FtWrenchPipelineConfig {
     double max_tcp_speed_m_s = 0.0;
     double max_tcp_accel_m_s2 = 0.0;
     bool auto_tare_after_init_motion = false;
+    // MAXIMUM settle wait after Init Motion completes before the tare window is
+    // collected. With auto_tare_settle_detect_enable (2026-08-19) collection starts
+    // earlier, as soon as the tool has stopped ringing: the rolling per-axis stddev of
+    // the pre-tare wrench over the last auto_tare_settle_window_samples fresh samples is
+    // inside the residual_tare stddev limits, the arm's sent joint speed is below
+    // auto_tare_settle_max_joint_speed_deg_s and at least auto_tare_settle_min_sec have
+    // elapsed. A spoiled/never-quiet window still starts at the maximum (old behaviour).
     double auto_tare_settle_sec = 0.5;
+    bool auto_tare_settle_detect_enable = true;
+    double auto_tare_settle_min_sec = 0.5;
+    int auto_tare_settle_window_samples = 150;
+    double auto_tare_settle_max_joint_speed_deg_s = 1.0;
+    // Software-zero reuse (2026-08-19). Every Init Motion invalidates the zero, so the arm
+    // stayed unarmed for settle+collect (~4 s) after each press — long enough that
+    // rollouts started unarmed and the acceptance (with its motion_epoch bump, since
+    // removed) landed mid-motion. When the new Init Motion ends within
+    // auto_tare_reuse_pose_tol_deg (per joint, measured) of where the last accepted zero
+    // was captured and that zero is younger than auto_tare_reuse_max_age_sec, the
+    // previous zero is re-validated at Init Motion completion (armed immediately) and a
+    // fresh window is collected in the background to refresh it: the delta is logged, a
+    // spoiled window / arm leaving the pose / contact keeps the previous zero. Payload
+    // identification and freedrive still discard the capture.
+    bool auto_tare_reuse_enable = true;
+    double auto_tare_reuse_pose_tol_deg = 2.0;
+    double auto_tare_reuse_max_age_sec = 600.0;
     int residual_tare_min_samples = 50;
     double residual_tare_max_force_stddev_n = 0.1;
     double residual_tare_max_torque_stddev_nm = 0.01;

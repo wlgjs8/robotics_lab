@@ -1964,6 +1964,11 @@ void DualArmServoLoop::invalidatePostInitTare(ArmId arm_id, uint64_t command_seq
     runtime.tare_collecting = false;
     runtime.tare_not_before_ns = 0;
     runtime.tare_retry_count = 0;
+    // The last accepted capture (tare_capture_*) is deliberately KEPT: beginPostInitTare
+    // may re-validate it if this Init Motion ends at the same pose (auto_tare_reuse_*).
+    runtime.tare_refresh = false;
+    runtime.tare_settle_started_ns = 0;
+    runtime.tare_settle.reset();
     runtime.ft.tare_state = "awaiting_init_completion";
     runtime.ft.tare_sample_count = 0;
     runtime.ft.tare_reason = "init motion requested; previous software zero invalidated";
@@ -2046,6 +2051,10 @@ bool DualArmServoLoop::latchPayloadIdentificationInhibit(ArmId arm_id) {
     runtime.tare_collecting = false;
     runtime.tare_not_before_ns = 0;
     runtime.tare_retry_count = 0;
+    // A payload change makes the captured zero unusable for reuse.
+    runtime.tare_refresh = false;
+    runtime.tare_capture_valid = false;
+    runtime.tare_settle.reset();
     runtime.ft.payload_identification_inhibit = true;
     runtime.ft.tare_valid = false;
     runtime.ft.tare_state = "awaiting_init_motion";
@@ -2112,9 +2121,11 @@ bool DualArmServoLoop::latchPayloadIdentificationInhibit(ArmId arm_id) {
     return true;
 }
 
-void DualArmServoLoop::beginPostInitTare(ArmId arm_id, uint64_t now_ns) {
+void DualArmServoLoop::beginPostInitTare(ArmId arm_id, uint64_t now_ns, const RobotState& state) {
     ForceArmRuntime& runtime =
         arm_id == ArmId::Left ? left_force_runtime_ : right_force_runtime_;
+    ForceController& cartesian_controller = arm_id == ArmId::Left
+        ? left_cartesian_force_controller_ : right_cartesian_force_controller_;
     const FtWrenchPipelineConfig& config = arm_id == ArmId::Left
         ? config_.force_torque.left : config_.force_torque.right;
     if (!config.enable || !config.auto_tare_after_init_motion ||
@@ -2126,14 +2137,69 @@ void DualArmServoLoop::beginPostInitTare(ArmId arm_id, uint64_t now_ns) {
     runtime.tare_collecting = false;
     runtime.tare_not_before_ns = now_ns + static_cast<uint64_t>(
         config.auto_tare_settle_sec * 1'000'000'000.0);
+    runtime.tare_settle_started_ns = now_ns;
+    runtime.tare_settle.configure(config.auto_tare_settle_window_samples);
+    runtime.tare_refresh = false;
     ++runtime.tare_generation;
     runtime.ft.tare_generation = runtime.tare_generation;
     runtime.ft.tare_state = "settling";
     runtime.ft.tare_sample_count = 0;
     runtime.ft.tare_reason = "init motion complete; waiting for mechanical settling";
+
+    // Software-zero reuse: the previous accepted zero is pose-local, so if this Init
+    // Motion ended at (within tolerance of) the joints where it was captured and it is
+    // recent, it is still the right zero. Re-validate it now — the arm arms at "done"
+    // instead of after settle+collect — and let the fresh window refresh it in the
+    // background (update_tare handles the accepted/rejected outcomes for tare_refresh).
+    if (config.auto_tare_reuse_enable && runtime.tare_capture_valid &&
+        !runtime.payload_identification_inhibit &&
+        state.q_actual_valid && finiteJointArray(state.q_actual_deg)) {
+        const double age_sec = now_ns >= runtime.tare_capture_ns
+            ? static_cast<double>(now_ns - runtime.tare_capture_ns) * 1e-9
+            : std::numeric_limits<double>::infinity();
+        double pose_delta_deg = 0.0;
+        for (int i = 0; i < kDof; ++i) {
+            pose_delta_deg = std::max(
+                pose_delta_deg,
+                std::abs(state.q_actual_deg[i] - runtime.tare_capture_q_deg[i]));
+        }
+        const bool same_pose = pose_delta_deg <= config.auto_tare_reuse_pose_tol_deg;
+        const bool fresh = age_sec <= config.auto_tare_reuse_max_age_sec;
+        if (same_pose && fresh) {
+            runtime.tare_valid = true;
+            runtime.ft.tare_valid = true;
+            runtime.tare_refresh = true;
+            runtime.previous_actual_pose_ns = 0;
+            if (config_.force_control.operating_mode == "cartesian_admittance" &&
+                state.tcp_actual_valid && state.tcp_actual_stand.has_value()) {
+                cartesian_controller.engage();
+                runtime.rolling_compliance_target = *state.tcp_actual_stand;
+                runtime.previous_raw_compliance_target = *state.tcp_actual_stand;
+                runtime.rolling_compliance_target_valid = true;
+                runtime.rolling_compliance_target_source = "hold_anchor";
+                runtime.control.compliance_equilibrium_stand =
+                    runtime.rolling_compliance_target;
+                runtime.control.compliance_equilibrium_source = "hold_anchor";
+            }
+            char detail[160];
+            std::snprintf(detail, sizeof(detail),
+                          "previous software zero reused (age %.1f s, pose delta %.2f deg); "
+                          "refreshing in background", age_sec, pose_delta_deg);
+            runtime.ft.tare_reason = detail;
+            std::cerr << "[INFO] FT " << toString(arm_id) << " post-init software zero: "
+                      << detail << "\n";
+        } else {
+            std::cerr << "[INFO] FT " << toString(arm_id)
+                      << " post-init software zero: previous zero NOT reused ("
+                      << (same_pose ? "" : "pose delta ") << (same_pose ? "" : std::to_string(pose_delta_deg) + " deg ")
+                      << (fresh ? "" : "age ") << (fresh ? "" : std::to_string(age_sec) + " s ")
+                      << "beyond reuse limits); re-taring\n";
+        }
+    }
     std::cerr << "[INFO] FT " << toString(arm_id)
-              << " post-init software zero: settling for "
-              << config.auto_tare_settle_sec << " s\n";
+              << " post-init software zero: settling (ring-down detect "
+              << (config.auto_tare_settle_detect_enable ? "on" : "off")
+              << ", max " << config.auto_tare_settle_sec << " s)\n";
 }
 
 bool DualArmServoLoop::updateForceRuntime(
@@ -2420,9 +2486,15 @@ bool DualArmServoLoop::updateForceRuntime(
         if (update.state == FtTareState::Collecting) {
             runtime.ft.tare_state = "collecting";
         } else if (update.state == FtTareState::Accepted) {
+            // A background refresh replaces the value of an already-valid (reused) zero:
+            // the controller is engaged and possibly streaming, so do NOT re-engage or
+            // re-anchor it — only the zero moves (by the logged delta).
+            const bool refresh = runtime.tare_refresh;
+            const Wrench6D previous_zero = runtime.tare_capture_value;
             runtime.tare_collecting = false;
             runtime.tare_valid = true;
             runtime.tare_retry_count = 0;
+            runtime.tare_refresh = false;
             const bool payload_identification_inhibit_was_latched =
                 runtime.payload_identification_inhibit;
             runtime.payload_identification_inhibit = false;
@@ -2431,7 +2503,7 @@ bool DualArmServoLoop::updateForceRuntime(
             runtime.ft.tare_state = "accepted";
             runtime.ft.residual_tare_tcp = pipeline.residualTareTcp();
             runtime.previous_actual_pose_ns = 0;
-            if (config_.force_control.operating_mode == "cartesian_admittance") {
+            if (!refresh && config_.force_control.operating_mode == "cartesian_admittance") {
                 cartesian_controller.engage();
                 runtime.rolling_compliance_target = *state.tcp_actual_stand;
                 runtime.previous_raw_compliance_target = *state.tcp_actual_stand;
@@ -2441,11 +2513,40 @@ bool DualArmServoLoop::updateForceRuntime(
                     runtime.rolling_compliance_target;
                 runtime.control.compliance_equilibrium_source = "hold_anchor";
             }
-            ++motion_epoch_;
-            runtime.control.motion_epoch = motion_epoch_;
-            std::cerr << "[INFO] FT " << toString(arm_id)
-                      << " post-init software zero accepted (samples="
-                      << update.sample_count << ")\n";
+            // 2026-08-19: NO motion_epoch bump here. Accepting a zero moves nothing — the
+            // epoch contract is "force ownership enters/exits or an external-force fault"
+            // — and the client reacted to it by discarding its plan and going silent for
+            // an inference (~100 ms > 50 ms watchdog -> stale Hold, arm lurch;
+            // servo_log_20260819_084737 t=17.39). ft.tare_generation already reports
+            // the change.
+            // Remember where/when this zero was captured so a later Init Motion that ends
+            // at the same pose can reuse it (auto_tare_reuse_*).
+            runtime.tare_capture_valid =
+                state.q_actual_valid && finiteJointArray(state.q_actual_deg);
+            if (runtime.tare_capture_valid) {
+                runtime.tare_capture_q_deg = state.q_actual_deg;
+            }
+            runtime.tare_capture_ns = now_ns;
+            runtime.tare_capture_value = pipeline.residualTareTcp();
+            if (refresh) {
+                const Wrench6D& z = runtime.tare_capture_value;
+                const double df = std::sqrt(
+                    (z.fx - previous_zero.fx) * (z.fx - previous_zero.fx) +
+                    (z.fy - previous_zero.fy) * (z.fy - previous_zero.fy) +
+                    (z.fz - previous_zero.fz) * (z.fz - previous_zero.fz));
+                const double dtq = std::sqrt(
+                    (z.tx - previous_zero.tx) * (z.tx - previous_zero.tx) +
+                    (z.ty - previous_zero.ty) * (z.ty - previous_zero.ty) +
+                    (z.tz - previous_zero.tz) * (z.tz - previous_zero.tz));
+                std::cerr << "[INFO] FT " << toString(arm_id)
+                          << " post-init software zero refreshed in background (samples="
+                          << update.sample_count << ", delta |F|=" << df
+                          << " N |T|=" << dtq << " Nm)\n";
+            } else {
+                std::cerr << "[INFO] FT " << toString(arm_id)
+                          << " post-init software zero accepted (samples="
+                          << update.sample_count << ")\n";
+            }
             if (payload_identification_inhibit_was_latched) {
                 std::cerr << "[INFO] FT " << toString(arm_id)
                           << " payload-identification force-motion inhibit cleared "
@@ -2453,8 +2554,11 @@ bool DualArmServoLoop::updateForceRuntime(
             }
         } else if (update.state == FtTareState::Rejected) {
             runtime.tare_collecting = false;
-            runtime.tare_valid = false;
-            runtime.ft.tare_valid = false;
+            // A spoiled background-refresh window keeps the (reused) previous zero valid.
+            if (!runtime.tare_refresh) {
+                runtime.tare_valid = false;
+                runtime.ft.tare_valid = false;
+            }
             // Intermittent disturbances (gripper servo twitch, wrist-camera
             // cable sway) can spoil a single window: 2026-07-23 20:33 rejected
             // fx stddev 1.571 N on a run whose 12 s-earlier twin accepted.
@@ -2466,6 +2570,8 @@ bool DualArmServoLoop::updateForceRuntime(
                 ++runtime.tare_retry_count;
                 runtime.tare_not_before_ns = now_ns + static_cast<uint64_t>(
                     ft_config.auto_tare_settle_sec * 1e9);
+                runtime.tare_settle_started_ns = now_ns;
+                runtime.tare_settle.reset();
                 runtime.ft.tare_state = "settling";
                 runtime.ft.tare_reason = update.reason + " -- retrying (" +
                     std::to_string(runtime.tare_retry_count) + "/" +
@@ -2473,7 +2579,19 @@ bool DualArmServoLoop::updateForceRuntime(
                 std::cerr << "[WARN] FT " << toString(arm_id)
                           << " post-init software zero rejected: " << update.reason
                           << " -- retry " << runtime.tare_retry_count << "/"
-                          << kResidualTareMaxRetries << "\n";
+                          << kResidualTareMaxRetries
+                          << (runtime.tare_refresh ? " (background refresh; previous zero kept)" : "")
+                          << "\n";
+            } else if (runtime.tare_refresh) {
+                runtime.tare_refresh = false;
+                runtime.ft.tare_state = "accepted";
+                runtime.ft.tare_reason = "background refresh rejected after " +
+                    std::to_string(kResidualTareMaxRetries) +
+                    " retries; previous software zero kept";
+                std::cerr << "[WARN] FT " << toString(arm_id)
+                          << " post-init software zero refresh rejected after "
+                          << kResidualTareMaxRetries << " retries: " << update.reason
+                          << " -- previous zero kept\n";
             } else {
                 runtime.ft.tare_state = "rejected";
                 std::cerr << "[WARN] FT " << toString(arm_id)
@@ -2490,23 +2608,100 @@ bool DualArmServoLoop::updateForceRuntime(
             runtime.control.state = "awaiting_init_tare";
             return false;
         }
-        if (runtime.tare_not_before_ns != 0) {
-            if (now_ns < runtime.tare_not_before_ns) {
-                runtime.ft.tare_state = "settling";
-                runtime.control.state = "zeroing";
-                return false;
+        // Sent joint speed of this arm (prev/prevprev sent targets, servo period): the
+        // stationarity gate for the ring-down detector and the background refresh.
+        const double sent_speed_deg_s = sentJointSpeedDegS(
+            arm_id == ArmId::Left ? left_prev_sent_q_deg_ : right_prev_sent_q_deg_,
+            arm_id == ArmId::Left ? left_prevprev_sent_q_deg_ : right_prevprev_sent_q_deg_,
+            1.0 / static_cast<double>(std::max(1, config_.servo.rate_hz)));
+        // Background refresh of a REUSED zero is only meaningful while the arm rests,
+        // contact-free, at the capture pose. Otherwise drop the refresh (not the zero).
+        if (runtime.tare_refresh &&
+            (runtime.tare_not_before_ns != 0 || runtime.tare_collecting)) {
+            const bool moving =
+                sent_speed_deg_s > ft_config.auto_tare_settle_max_joint_speed_deg_s;
+            double pose_delta_deg = 0.0;
+            if (runtime.tare_capture_valid && state.q_actual_valid) {
+                for (int i = 0; i < kDof; ++i) {
+                    pose_delta_deg = std::max(
+                        pose_delta_deg,
+                        std::abs(state.q_actual_deg[i] - runtime.tare_capture_q_deg[i]));
+                }
             }
-            runtime.tare_not_before_ns = 0;
-            pipeline.beginResidualTare();
-            runtime.tare_collecting = true;
-            runtime.ft.tare_state = "collecting";
-            runtime.ft.tare_reason = "collecting fresh post-init samples";
+            const bool left_pose = pose_delta_deg > ft_config.auto_tare_reuse_pose_tol_deg;
+            const bool in_contact = runtime.normal_contact_active ||
+                runtime.transverse_contact_active || runtime.rotational_contact_active ||
+                runtime.control.contact_active;
+            if (moving || left_pose || in_contact) {
+                pipeline.cancelResidualTare();
+                runtime.tare_collecting = false;
+                runtime.tare_not_before_ns = 0;
+                runtime.tare_refresh = false;
+                runtime.tare_settle.reset();
+                runtime.ft.tare_state = "accepted";
+                runtime.ft.tare_reason = std::string("background refresh skipped (") +
+                    (moving ? "arm moving" : left_pose ? "arm left the tare pose" : "contact") +
+                    "); previous software zero kept";
+                std::cerr << "[INFO] FT " << toString(arm_id)
+                          << " post-init software zero: " << runtime.ft.tare_reason << "\n";
+            }
+        }
+        if (runtime.tare_not_before_ns != 0) {
+            // Ring-down detector: feed every fresh healthy pre-tare sample; start the
+            // window as soon as it is quiet (or at the maximum settle wait).
+            if (output.healthy && output.freshness_advanced) {
+                const Wrench6D& w = output.pre_tare_external_wrench_tcp;
+                runtime.tare_settle.push({w.fx, w.fy, w.fz, w.tx, w.ty, w.tz});
+            }
+            const double settle_age_sec = runtime.tare_settle_started_ns != 0 &&
+                    now_ns >= runtime.tare_settle_started_ns
+                ? static_cast<double>(now_ns - runtime.tare_settle_started_ns) * 1e-9
+                : 0.0;
+            const bool stationary =
+                sent_speed_deg_s <= ft_config.auto_tare_settle_max_joint_speed_deg_s;
+            const bool detected = ft_config.auto_tare_settle_detect_enable &&
+                settle_age_sec >= ft_config.auto_tare_settle_min_sec && stationary &&
+                runtime.tare_settle.quiet(ft_config.residual_tare_max_force_stddev_n,
+                                          ft_config.residual_tare_max_torque_stddev_nm);
+            const bool max_elapsed = now_ns >= runtime.tare_not_before_ns;
+            if (!detected && !max_elapsed) {
+                runtime.ft.tare_state = "settling";
+                if (runtime.tare_settle.full()) {
+                    char detail[160];
+                    std::snprintf(detail, sizeof(detail),
+                                  "settling: ring-down window stddev F %.2f N / T %.3f Nm%s",
+                                  runtime.tare_settle.maxForceStddev(),
+                                  runtime.tare_settle.maxTorqueStddev(),
+                                  stationary ? "" : " (arm moving)");
+                    runtime.ft.tare_reason = detail;
+                }
+                if (!runtime.tare_valid) {
+                    runtime.control.state = "zeroing";
+                    return false;
+                }
+                // Reused zero: keep force control live while the refresh settles.
+            } else {
+                runtime.tare_not_before_ns = 0;
+                pipeline.beginResidualTare();
+                runtime.tare_collecting = true;
+                runtime.ft.tare_state = "collecting";
+                runtime.ft.tare_reason = "collecting fresh post-init samples";
+                std::cerr << "[INFO] FT " << toString(arm_id)
+                          << " post-init software zero: settled after " << settle_age_sec
+                          << " s (" << (detected ? "ring-down detected" : "maximum settle wait")
+                          << "); collecting" << (runtime.tare_refresh ? " (background refresh)" : "")
+                          << "\n";
+            }
         }
         if (runtime.tare_collecting) {
             update_tare();
-            runtime.control.state = runtime.tare_valid ? "zeroed" :
-                (runtime.ft.tare_state == "rejected" ? "tare_rejected" : "zeroing");
-            return false;
+            if (!runtime.tare_valid) {
+                runtime.control.state =
+                    runtime.ft.tare_state == "rejected" ? "tare_rejected" : "zeroing";
+                return false;
+            }
+            // Either freshly accepted this tick, or a reused zero refreshing in the
+            // background: fall through to force control.
         }
         if (!runtime.tare_valid) {
             runtime.control.state = runtime.payload_identification_inhibit
@@ -7718,6 +7913,17 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             ? right_servo_state.state.q_actual_deg
             : right_prev_sent_q_deg_;
 
+        // The Cartesian branches below bypass TrajectoryFilter::computeJointTarget, so the
+        // joint-target SMD would otherwise seed its activation velocity from a stale sample
+        // the next time a JointTarget takes over (init brake-before-plan, jog handoff).
+        // Record this tick's sent target for the arm(s) that go the Cartesian way.
+        if (isCartesianMode(effective_command.left.mode)) {
+            left_traj_filter_.observeSentTarget(left_prev_sent_q_deg_);
+        }
+        if (isCartesianMode(effective_command.right.mode)) {
+            right_traj_filter_.observeSentTarget(right_prev_sent_q_deg_);
+        }
+
         const CartesianArmTargetResult left_cartesian_result =
             effective_command.left.mode == ControlMode::TcpLinearMove
             ? cartesian_servo.computeLinearMoveTarget(
@@ -9235,6 +9441,11 @@ void DualArmServoLoop::resyncArmAfterFreedrive(ArmId arm_id, const RobotState& s
         force_runtime.control.compliance_equilibrium_source = "unavailable";
     }
 
+    // Hands were on the arm: the captured software zero may no longer describe the
+    // tool (payload/cabling), so a later Init Motion must re-tare instead of reusing it.
+    force_runtime.tare_capture_valid = false;
+    force_runtime.tare_refresh = false;
+
     // The servo stream was globally suppressed while teaching. A policy/follower
     // residual assembled before or during that interval must not execute from the
     // new physical pose. Publish a new epoch and require a fresh source anchor.
@@ -9606,6 +9817,21 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             c.right.has_joint_target = false;
         }
     };
+    // Brake-before-plan: the braking arm(s) are streamed as a plain JointTarget toward
+    // their monotone stop goal (joint_target_smd continues from the last SENT velocity —
+    // see TrajectoryFilter::observeSentTarget); every other selected/frozen arm holds at
+    // its last sent target exactly as hold_selected does.
+    const auto brake_selected = [&](DualArmCommand& c, const InitMotionExec& ex) {
+        hold_selected(c, ex);
+        if (ex.brake_left) {
+            set_joint_target(c.left, ex.brake_goal_left);
+            c.left.has_arrival_stop = false;
+        }
+        if (ex.brake_right) {
+            set_joint_target(c.right, ex.brake_goal_right);
+            c.right.has_arrival_stop = false;
+        }
+    };
     const auto sequence_active = [](const InitMotionExec& e) {
         return e.status == InitMotionStatus::Planning ||
                e.status == InitMotionStatus::Executing;
@@ -9784,19 +10010,94 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         ex.start_ns = nowSteadyNs();
     };
 
+    // Brake-before-plan (safety.init_motion_planner.brake_before_plan): decided from the
+    // last SENT joint velocity of the selected arm(s). The servo period is the sample
+    // spacing of prev/prevprev sent, and the joint_target_smd natural frequency shapes
+    // the monotone stop goal (see planInitMotionBrake).
+    const auto& brake_cfg = config_.safety.init_motion_planner;
+    const double brake_dt_sec = 1.0 / static_cast<double>(std::max(1, config_.servo.rate_hz));
+    const double brake_smd_fn_hz = config_.safety.joint_target_smd.enable
+        ? config_.safety.joint_target_smd.natural_frequency_hz
+        : 0.0;
+    const auto begin_brake = [&](InitMotionExec& ex, bool request_left, bool request_right,
+                                 const JointArray& target_left,
+                                 const JointArray& target_right) -> bool {
+        if (!brake_cfg.brake_before_plan) return false;
+        InitMotionBrakePlan brake_left;
+        InitMotionBrakePlan brake_right;
+        if (request_left || freeze_other_arm) {
+            brake_left = planInitMotionBrake(
+                left_prev_sent_q_deg_, left_prevprev_sent_q_deg_, brake_dt_sec,
+                brake_smd_fn_hz, brake_cfg.brake_enter_deg_s, brake_cfg.brake_max_travel_deg);
+        }
+        if (request_right || freeze_other_arm) {
+            brake_right = planInitMotionBrake(
+                right_prev_sent_q_deg_, right_prevprev_sent_q_deg_, brake_dt_sec,
+                brake_smd_fn_hz, brake_cfg.brake_enter_deg_s, brake_cfg.brake_max_travel_deg);
+        }
+        if (!brake_left.needed && !brake_right.needed) return false;
+        // Commit the request (targets/arms) but do NOT re-anchor and do NOT post the planner
+        // job yet: the plan is launched from the settled measured pose once the sent
+        // velocity has decayed (or the brake timeout elapsed).
+        ex.target_left = target_left;
+        ex.target_right = target_right;
+        ex.left_active = request_left;
+        ex.right_active = request_right;
+        ex.has_target = true;
+        ex.waypoints.clear();
+        ex.index = 0;
+        ex.escape_waypoints = 0;
+        ex.plan_generation = 0;
+        ex.status = InitMotionStatus::Planning;
+        ex.message = "braking";
+        ex.fail_mode = InitMotionPlanResult::FailMode::None;
+        ex.exec_timeout = false;
+        ex.exec_stalled = false;
+        ex.start_ns = nowSteadyNs();
+        ex.brake_pending = true;
+        ex.brake_left = brake_left.needed;
+        ex.brake_right = brake_right.needed;
+        ex.brake_start_ns = ex.start_ns;
+        ex.brake_goal_left = brake_left.goal;
+        ex.brake_goal_right = brake_right.goal;
+        std::cerr << "[INFO] JointTarget init_motion: brake-before-plan: selected arm still "
+                     "streaming (sent speed left=" << brake_left.max_speed_deg_s
+                  << " right=" << brake_right.max_speed_deg_s
+                  << " deg/s); decelerating from the last sent target before planning\n";
+        return true;
+    };
+    const auto brake_settled = [&](const InitMotionExec& ex) {
+        double speed = 0.0;
+        if (ex.brake_left) {
+            speed = std::max(speed, sentJointSpeedDegS(
+                left_prev_sent_q_deg_, left_prevprev_sent_q_deg_, brake_dt_sec));
+        }
+        if (ex.brake_right) {
+            speed = std::max(speed, sentJointSpeedDegS(
+                right_prev_sent_q_deg_, right_prevprev_sent_q_deg_, brake_dt_sec));
+        }
+        return speed <= std::max(0.0, brake_cfg.brake_exit_deg_s);
+    };
+    const auto clear_brake = [](InitMotionExec& ex) {
+        ex.brake_pending = false;
+        ex.brake_left = false;
+        ex.brake_right = false;
+    };
+
     const auto process_exec = [&](InitMotionExec& ex, PlannerRequester requester,
                                   bool request_left, bool request_right, bool fresh_request) {
         // Launch a new one-shot request from the MEASURED joint pose
         // when it is available. For single-arm init, freeze the non-selected arm in the
         // planner at its measured pose; do not use last-sent references because SMD/flow
         // can intentionally lead the physical robot by a small amount.
-        if (fresh_request && (request_left || request_right)) {
-            ex.request_seen = true;
-            ex.request_seq = command.seq;
-            const JointArray target_left =
-                request_left ? command.left.q_target_deg : current_left_q;
-            const JointArray target_right =
-                request_right ? command.right.q_target_deg : current_right_q;
+        //
+        // No-op-or-launch for a committed request. Called on the request tick when the
+        // selected arm(s) are at rest, or after the brake phase settled. Returns true when
+        // it completed as a measured no-op (command already rewritten to Hold).
+        const auto launch_or_noop = [&](InitMotionExec& ex, bool request_left, bool request_right,
+                                        const JointArray& target_left,
+                                        const JointArray& target_right) -> bool {
+            clear_brake(ex);
             const double noop_tol_deg = std::max(
                 0.0,
                 std::max(config_.safety.init_motion_planner.noop_tol_deg,
@@ -9812,10 +10113,10 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                     ex, request_left, request_right, target_left, target_right,
                     "already_at_goal_measured_noop");
                 const uint64_t tare_start_ns = nowSteadyNs();
-                if (request_left) beginPostInitTare(ArmId::Left, tare_start_ns);
-                if (request_right) beginPostInitTare(ArmId::Right, tare_start_ns);
+                if (request_left) beginPostInitTare(ArmId::Left, tare_start_ns, left_state);
+                if (request_right) beginPostInitTare(ArmId::Right, tare_start_ns, right_state);
                 hold_selected(command, ex);
-                return;
+                return true;
             }
             const auto launch_plan = [&]() {
                 reanchor_selected_to_measured(request_left, request_right);
@@ -9870,6 +10171,41 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             // even when the endpoint matches the previous request: the robot may
             // have been moved since completion and the new press must remain usable.
             launch_plan();
+            return false;
+        };
+
+        if (fresh_request && (request_left || request_right)) {
+            ex.request_seen = true;
+            ex.request_seq = command.seq;
+            const JointArray target_left =
+                request_left ? command.left.q_target_deg : current_left_q;
+            const JointArray target_right =
+                request_right ? command.right.q_target_deg : current_right_q;
+            // A selected arm that is still streaming (policy motion, or an earlier init
+            // move being re-targeted by a second press) brakes from its last SENT target
+            // first; the measured re-anchor + plan follow once it has settled. Arms at rest
+            // take the immediate no-op/launch path exactly as before.
+            if (!begin_brake(ex, request_left, request_right, target_left, target_right)) {
+                if (launch_or_noop(ex, request_left, request_right, target_left, target_right)) {
+                    return;
+                }
+            }
+        } else if (ex.brake_pending && ex.status == InitMotionStatus::Planning) {
+            const uint64_t now_ns = nowSteadyNs();
+            const double brake_age_s = ex.brake_start_ns != 0
+                ? static_cast<double>(now_ns - ex.brake_start_ns) * 1e-9
+                : 0.0;
+            const bool settled = brake_settled(ex);
+            const bool timed_out = brake_age_s >= brake_cfg.brake_timeout_sec;
+            if (settled || timed_out) {
+                std::cerr << "[INFO] JointTarget init_motion: brake-before-plan "
+                          << (settled ? "settled" : "TIMED OUT (planning anyway)")
+                          << " after " << brake_age_s << " s; planning from measured pose\n";
+                if (launch_or_noop(ex, ex.left_active, ex.right_active,
+                                   ex.target_left, ex.target_right)) {
+                    return;
+                }
+            }
         }
 
         // Runaway bound (progress-aware): a committed sequence gives up (Failed -> hold) so a
@@ -10012,8 +10348,8 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                     ex.status = InitMotionStatus::Done;
                     ex.message = "done";
                     const uint64_t tare_start_ns = nowSteadyNs();
-                    if (ex.left_active) beginPostInitTare(ArmId::Left, tare_start_ns);
-                    if (ex.right_active) beginPostInitTare(ArmId::Right, tare_start_ns);
+                    if (ex.left_active) beginPostInitTare(ArmId::Left, tare_start_ns, left_state);
+                    if (ex.right_active) beginPostInitTare(ArmId::Right, tare_start_ns, right_state);
                     std::cerr << "[INFO] JointTarget init_motion: reached init pose\n";
                 }
                 rewrite_selected(command, ex, wp.first, wp.second);
@@ -10034,6 +10370,12 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
             case InitMotionStatus::Planning:
             case InitMotionStatus::Failed:
             default:
+                if (ex.status == InitMotionStatus::Planning && ex.brake_pending) {
+                    // Brake-before-plan: decelerate the streaming arm(s) from the last sent
+                    // target; the plan launches once they have settled.
+                    brake_selected(command, ex);
+                    break;
+                }
                 // Hold in place: while planning, or fail-closed after a planning failure.
                 hold_selected(command, ex);
                 break;
@@ -10138,6 +10480,46 @@ bool initMotionRequestIsFresh(
         }
     }
     return false;
+}
+
+double sentJointSpeedDegS(
+    const JointArray& prev_sent_deg,
+    const JointArray& prevprev_sent_deg,
+    double dt_sec) {
+    if (!(dt_sec > 0.0) || !std::isfinite(dt_sec)) return 0.0;
+    double speed = 0.0;
+    for (int i = 0; i < kDof; ++i) {
+        const double d = prev_sent_deg[i] - prevprev_sent_deg[i];
+        if (!std::isfinite(d)) continue;
+        speed = std::max(speed, std::abs(d) / dt_sec);
+    }
+    return speed;
+}
+
+InitMotionBrakePlan planInitMotionBrake(
+    const JointArray& prev_sent_deg,
+    const JointArray& prevprev_sent_deg,
+    double dt_sec,
+    double smd_natural_frequency_hz,
+    double enter_deg_s,
+    double max_travel_deg) {
+    InitMotionBrakePlan plan;
+    plan.goal = prev_sent_deg;
+    if (!(dt_sec > 0.0) || !std::isfinite(dt_sec)) return plan;
+    plan.max_speed_deg_s = sentJointSpeedDegS(prev_sent_deg, prevprev_sent_deg, dt_sec);
+    plan.needed = plan.max_speed_deg_s > std::max(0.0, enter_deg_s);
+    if (!plan.needed) return plan;
+    const double wn = smd_natural_frequency_hz > 0.0 && std::isfinite(smd_natural_frequency_hz)
+        ? 2.0 * M_PI * smd_natural_frequency_hz
+        : 0.0;
+    const double travel_cap = std::isfinite(max_travel_deg) ? std::max(0.0, max_travel_deg) : 0.0;
+    for (int i = 0; i < kDof; ++i) {
+        const double d = prev_sent_deg[i] - prevprev_sent_deg[i];
+        if (!std::isfinite(d) || wn <= 0.0) continue;  // rate-limited stop at prev_sent
+        const double dq = d / dt_sec;
+        plan.goal[i] = prev_sent_deg[i] + std::clamp(dq / wn, -travel_cap, travel_cap);
+    }
+    return plan;
 }
 
 PursuitStep pursueWaypointsStep(

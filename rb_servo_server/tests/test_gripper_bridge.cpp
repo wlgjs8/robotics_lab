@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -108,7 +109,10 @@ bool testFeedbackCachedAndGoesStale() {
 
     json state;
     state["schema"] = "robotics_lab.gripper_state.v1";
-    state["left"] = {{"percent", 55.0}, {"target_percent", 60.0}, {"moving", true}, {"ok", true}, {"fault", nullptr}};
+    state["left"] = {{"percent", 55.0}, {"target_percent", 60.0}, {"moving", true}, {"ok", true},
+                     {"fault", nullptr}, {"sample_age_ms", 27.0}};
+    // right carries no sample_age_ms: an older gripper_server must leave the age
+    // UNKNOWN (NaN -> null downstream), not report a fresh-looking 0.
     sendTo(fb_port, state.dump());
 
     // wait for the receive thread to cache it
@@ -123,9 +127,11 @@ bool testFeedbackCachedAndGoesStale() {
     RB_CHECK(left.target_percent == 60.0);
     RB_CHECK(left.moving);
     RB_CHECK(left.ok);
+    RB_CHECK(left.sample_age_ms == 27.0);
 
     // right never sent -> not valid
     RB_CHECK(!bridge.latest(rb_servo::ArmId::Right).valid);
+    RB_CHECK(std::isnan(bridge.latest(rb_servo::ArmId::Right).sample_age_ms));
 
     // after the stale timeout the cache reads invalid again
     std::this_thread::sleep_for(std::chrono::milliseconds(90));

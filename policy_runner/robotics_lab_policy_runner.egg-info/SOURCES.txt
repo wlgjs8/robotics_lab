@@ -79,6 +79,7 @@ tests/test_flow_training.py
 tests/test_force_recovery.py
 tests/test_force_recovery_main.py
 tests/test_geometry_safety.py
+tests/test_gripper_proprio_source.py
 tests/test_gripper_runtime.py
 tests/test_gripper_server.py
 tests/test_gripper_startup_open_config.py

@@ -328,6 +328,17 @@ safety:
     max_segment_deg: 3.0
     execution_lookahead_deg: 6.0    # smaller = smoother/slower InitMotion streaming; done uses measured joints
     execution_timeout_sec: 45.0     # once started, drive to completion across command staleness (one click); give up after this
+    # 2026-08-19 brake-before-plan: 정책 스트리밍 중(또는 a→c 연타로 실행 중인 init을 재계획할 때)
+    # InitMotion이 들어오면 예전엔 송신 목표를 즉시 측정 관절로 스냅+Hold했다 → 추종 지연만큼
+    # 0.2~0.7°를 한 틱(2ms)에 역행(송신속도 100~350°/s 스파이크, 손목 F/T 8~26N, 툴 9.5Hz 링잉;
+    # servo_log_20260819_085404 t=130.94/152.28). 이제 선택된 팔이 움직이는 중이면 마지막 송신 목표에서
+    # joint_target_smd 프로파일로 단조 감속(goal=q+dq/wn, 역행 없음)한 뒤 정지 상태에서 측정 재앵커+계획.
+    # 정지 상태에서 누른 경우는 기존 경로 그대로. 끄려면 brake_before_plan: false.
+    brake_before_plan: true
+    brake_enter_deg_s: 1.0          # 선택 팔 중 한 관절이라도 송신속도가 이보다 크면 감속 먼저
+    brake_exit_deg_s: 0.5           # 모든 선택 관절 송신속도가 이 아래면 감속 완료 → 계획
+    brake_timeout_sec: 0.75         # 감속 상한(그래도 안 멈추면 그냥 계획; 정상은 ~0.2~0.3s)
+    brake_max_travel_deg: 3.0       # 관절당 dq/wn 정지거리 상한
 
 network:
   command_bind: "udp://127.0.0.1:50256"

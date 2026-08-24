@@ -6,7 +6,13 @@ safety) behind a tiny UDP service:
 
   * IN  ``robotics_lab.gripper_cmd.v1``   {seq,left{percent,valid},right{...},deadman}
   * OUT ``robotics_lab.gripper_state.v1`` {host_time_ns,left{percent,target_percent,
-                                            moving,ok,fault},right{...}}
+                                            moving,ok,fault,sample_age_ms},right{...}}
+
+``sample_age_ms`` is how old the pika telemetry frame behind ``percent`` already
+was when this loop read it (null when the SDK shape cannot be stamped). The jaw
+telemetry lands at ~18.5 Hz while this server publishes at 50 Hz, so the value is
+typically 27 ms and at worst ~54 ms old -- an age the downstream
+``feedback_age_ms`` (publish->receive only, ~0.05 ms) does not cover.
 
 This removes the current serial contention (policy backend + umi_gripper_follow
 both opening the ports) and produces a single gripper-state source. Runs
@@ -449,8 +455,24 @@ class GripperServer:
                 "moving": bool(moving),
                 "ok": actual is not None,
                 "fault": None,
+                # How old `percent` already was when we read it: the pika telemetry
+                # arrives at ~18.5 Hz while this loop publishes at 50 Hz, so the
+                # value is 27 ms old on average. Consumers previously saw only the
+                # message's publish->receive time (~0.05 ms) and read the feedback
+                # as instant. null when unstamped -- never a fabricated 0.
+                "sample_age_ms": self._sample_age_ms(arm),
             }
         return msg
+
+    def _sample_age_ms(self, arm: str) -> float | None:
+        reader = getattr(self._backend, "sample_age_sec", None)
+        if not callable(reader):
+            return None
+        try:
+            age = reader(arm)
+        except Exception:  # noqa: BLE001 - telemetry must never break publishing
+            return None
+        return None if age is None else round(float(age) * 1000.0, 3)
 
     def _drain_commands(self, now: float) -> int:
         n = 0

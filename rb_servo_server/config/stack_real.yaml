@@ -422,6 +422,17 @@ safety:
     max_segment_deg: 3.0
     execution_lookahead_deg: 6.0    # smaller = smoother/slower InitMotion streaming; done uses measured joints
     execution_timeout_sec: 45.0     # once started, drive to completion across command staleness (one click); give up after this
+    # 2026-08-19 brake-before-plan: 정책 스트리밍 중(또는 a→c 연타로 실행 중인 init을 재계획할 때)
+    # InitMotion이 들어오면 예전엔 송신 목표를 즉시 측정 관절로 스냅+Hold했다 → 추종 지연만큼
+    # 0.2~0.7°를 한 틱(2ms)에 역행(송신속도 100~350°/s 스파이크, 손목 F/T 8~26N, 툴 9.5Hz 링잉;
+    # servo_log_20260819_085404 t=130.94/152.28). 이제 선택된 팔이 움직이는 중이면 마지막 송신 목표에서
+    # joint_target_smd 프로파일로 단조 감속(goal=q+dq/wn, 역행 없음)한 뒤 정지 상태에서 측정 재앵커+계획.
+    # 정지 상태에서 누른 경우는 기존 경로 그대로. 끄려면 brake_before_plan: false.
+    brake_before_plan: true
+    brake_enter_deg_s: 1.0          # 선택 팔 중 한 관절이라도 송신속도가 이보다 크면 감속 먼저
+    brake_exit_deg_s: 0.5           # 모든 선택 관절 송신속도가 이 아래면 감속 완료 → 계획
+    brake_timeout_sec: 0.75         # 감속 상한(그래도 안 멈추면 그냥 계획; 정상은 ~0.2~0.3s)
+    brake_max_travel_deg: 3.0       # 관절당 dq/wn 정지거리 상한
 
 network:
   command_bind: "udp://127.0.0.1:50256"
@@ -540,7 +551,19 @@ force_torque:
     # under 1.5 N. 3.0 s settle puts the first window past the ring-down so
     # the tare normally accepts in one window; the bounded auto-retry remains
     # the bad-day safety net.
-    auto_tare_settle_sec: 3.0
+    auto_tare_settle_sec: 3.0       # 2026-08-19: 이제 최대 대기(링다운 감지가 먼저 끝나면 그 시점에 수집 시작)
+    # 2026-08-19 arming 지연 단축: (a) 링다운 감지 — pre-tare wrench의 최근 150샘플(0.3s) 축별 stddev가
+    # residual_tare 한계 이내 & 송신 관절속도 ≤1°/s & 최소 0.5s 경과면 즉시 수집(안 조용하면 3.0s 최대).
+    # (b) zero 재사용 — Init 종료 자세가 마지막 수락 zero의 캡처 자세와 2° 이내이고 age ≤600s면 done 즉시
+    # 재검증(armed) 후 백그라운드로 새 창을 수집해 갱신(델타 로그; 팔이 움직이거나 접촉이면 이전 zero 유지).
+    # tare 수락 시 motion_epoch 증가는 제거됨(정책 콜드 재시작→stale hold 저크의 원인이었음).
+    auto_tare_settle_detect_enable: true
+    auto_tare_settle_min_sec: 0.5
+    auto_tare_settle_window_samples: 150
+    auto_tare_settle_max_joint_speed_deg_s: 1.0
+    auto_tare_reuse_enable: true
+    auto_tare_reuse_pose_tol_deg: 2.0
+    auto_tare_reuse_max_age_sec: 600.0
     residual_tare_min_samples: 500
     # Latest physical no-contact data: ~0.29..0.46 N and ~0.06..0.09 Nm
     # per-axis stddev. These bounds reject motion/contact transients while
@@ -600,7 +623,19 @@ force_torque:
     # under 1.5 N. 3.0 s settle puts the first window past the ring-down so
     # the tare normally accepts in one window; the bounded auto-retry remains
     # the bad-day safety net.
-    auto_tare_settle_sec: 3.0
+    auto_tare_settle_sec: 3.0       # 2026-08-19: 이제 최대 대기(링다운 감지가 먼저 끝나면 그 시점에 수집 시작)
+    # 2026-08-19 arming 지연 단축: (a) 링다운 감지 — pre-tare wrench의 최근 150샘플(0.3s) 축별 stddev가
+    # residual_tare 한계 이내 & 송신 관절속도 ≤1°/s & 최소 0.5s 경과면 즉시 수집(안 조용하면 3.0s 최대).
+    # (b) zero 재사용 — Init 종료 자세가 마지막 수락 zero의 캡처 자세와 2° 이내이고 age ≤600s면 done 즉시
+    # 재검증(armed) 후 백그라운드로 새 창을 수집해 갱신(델타 로그; 팔이 움직이거나 접촉이면 이전 zero 유지).
+    # tare 수락 시 motion_epoch 증가는 제거됨(정책 콜드 재시작→stale hold 저크의 원인이었음).
+    auto_tare_settle_detect_enable: true
+    auto_tare_settle_min_sec: 0.5
+    auto_tare_settle_window_samples: 150
+    auto_tare_settle_max_joint_speed_deg_s: 1.0
+    auto_tare_reuse_enable: true
+    auto_tare_reuse_pose_tol_deg: 2.0
+    auto_tare_reuse_max_age_sec: 600.0
     residual_tare_min_samples: 500
     # 2026-07-23 20:43 evidence: ring-down tail sits ~1.5 N on fx while the
     # quiet-floor left arm stays under 0.75. 1.5 N still rejects contact-scale

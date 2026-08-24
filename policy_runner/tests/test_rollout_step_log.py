@@ -163,6 +163,51 @@ class RolloutStepLoggerTest(unittest.TestCase):
         # send the latency split the wrong way.
         self.assertIsNone(record["arms"]["right"]["gripper_feedback_age_ms"])
 
+    def test_gripper_sample_age_is_recorded_separately_from_transport(self) -> None:
+        # feedback_age_ms covers publish->receive only (~0.05 ms in practice) and
+        # made the jaw feedback look instant. The pika SAMPLE age is the dominant
+        # term and is logged as its own field.
+        payload = _state_payload()
+        payload["left"]["gripper"]["feedback_age_ms"] = 0.05
+        payload["left"]["gripper"]["sample_age_ms"] = 27.0
+        record = build_rollout_step_record(
+            state_payload=payload, command_intent=None, conditioned_targets=None,
+            raw_delta_ee_local=None, gripper_cmd_pct=None, chunk_id=1,
+            chunk_step_index=0, stall=False, hold=False, inference_latency_ms=None,
+            t_mono=1.0, t_wall=2.0,
+        )
+        self.assertAlmostEqual(record["arms"]["left"]["gripper_sample_age_ms"], 27.0)
+        # Publisher too old to stamp it -> None, never a fabricated 0.
+        self.assertIsNone(record["arms"]["right"]["gripper_sample_age_ms"])
+
+    def test_gripper_proprio_value_and_source_are_recorded(self) -> None:
+        # Which signal reached the policy is otherwise unrecoverable from the
+        # log: measured and commanded are both present, the choice was not.
+        record = build_rollout_step_record(
+            state_payload=_state_payload(), command_intent=None,
+            conditioned_targets=None, raw_delta_ee_local=None, gripper_cmd_pct=None,
+            chunk_id=1, chunk_step_index=0, stall=False, hold=False,
+            inference_latency_ms=None, t_mono=1.0, t_wall=2.0,
+            gripper_proprio={
+                "left": {"pct": 12.0, "source": "actual"},
+                "right": {"pct": 0.0, "source": "hybrid_free"},
+            },
+        )
+        self.assertAlmostEqual(record["arms"]["left"]["gripper_proprio_pct"], 12.0)
+        self.assertEqual(record["arms"]["left"]["gripper_proprio_source"], "actual")
+        self.assertAlmostEqual(record["arms"]["right"]["gripper_proprio_pct"], 0.0)
+        self.assertEqual(record["arms"]["right"]["gripper_proprio_source"], "hybrid_free")
+
+    def test_gripper_proprio_absent_records_null_not_a_guess(self) -> None:
+        record = build_rollout_step_record(
+            state_payload=_state_payload(), command_intent=None,
+            conditioned_targets=None, raw_delta_ee_local=None, gripper_cmd_pct=None,
+            chunk_id=1, chunk_step_index=0, stall=False, hold=False,
+            inference_latency_ms=None, t_mono=1.0, t_wall=2.0,
+        )
+        self.assertIsNone(record["arms"]["left"]["gripper_proprio_pct"])
+        self.assertIsNone(record["arms"]["left"]["gripper_proprio_source"])
+
     def test_force_control_state_is_recorded_per_arm(self) -> None:
         # An unprotected rollout (FT zero never ran because no Init Motion
         # preceded it) must be visible in the log, not inferable.

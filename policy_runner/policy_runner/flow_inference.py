@@ -410,6 +410,34 @@ class FlowMatchingActionSource:
         self._chunk_knot_filter_taps: np.ndarray | None = None
         self._chunk_knot_filter_context: np.ndarray | None = None
         self._gripper_last_sent_by_arm: dict[str, float | None] = {"left": None, "right": None}
+        # WHICH gripper signal feeds the model's proprio channel (velocity_grip /
+        # velocity_grav / the 14-D pose state all carry an absolute opening):
+        #   actual  (default, and what every run before 2026-08-19 did) -- the
+        #           MEASURED jaw percent. Matches training: the pika UMI converter
+        #           takes gripper col0 (measured), not col1 (commanded).
+        #   command -- the opening percent this runner last SENT (post bias /
+        #           snap / deadband). Removes the measured channel's ~27-54 ms
+        #           sample staleness (the jaw telemetry updates at ~18.5 Hz, below
+        #           the 30 Hz policy grid) at the cost of the contact signal: a jaw
+        #           jammed on a bolt reads "fully closed" instead of "stalled at
+        #           the bolt width".
+        #   hybrid  -- command while the jaw is free, MEASURED once it stalls
+        #           against something. Keeps the responsiveness of `command` for
+        #           the free-travel phase and the contact information of `actual`.
+        # Set from `--gripper-proprio-source` in main.py.
+        self.gripper_proprio_source = "actual"
+        # hybrid jam detector: the jaw counts as jammed when it sits more than
+        # `jam_gap` percent away from the commanded opening AND has not moved more
+        # than `jam_move_eps` percent over the last `jam_stall_steps` samples.
+        self.gripper_proprio_jam_gap_percent = 3.0
+        self.gripper_proprio_jam_stall_steps = 3
+        self.gripper_proprio_jam_move_eps_percent = 0.5
+        # Rolling measured-percent history per arm (appended once per executed
+        # policy step by _integrate_gripper_targets) backing the jam detector.
+        self._gripper_actual_history: dict[str, list[float]] = {"left": [], "right": []}
+        # Last value/source actually handed to the policy, for the step log.
+        self._gripper_proprio_last: dict[str, float | None] = {"left": None, "right": None}
+        self._gripper_proprio_last_source: dict[str, str | None] = {"left": None, "right": None}
         # ROTATION-AXIS MASK: per-axis gate over the policy's per-arm rotation
         # action (rx, ry, rz at action indices 3/4/5 and 10/11/12). Each entry
         # True keeps that axis, False zeros it before the action is applied so the
@@ -1627,6 +1655,7 @@ class FlowMatchingActionSource:
                 hold=hold,
                 inference_latency_ms=latency,
                 rtc=self._rtc_delay_telemetry(),
+                gripper_proprio=self._gripper_proprio_telemetry(),
                 t_mono=now_monotonic,
             )
         except Exception:  # noqa: BLE001 - telemetry must never affect control.
@@ -3170,6 +3199,13 @@ class FlowMatchingActionSource:
         self._gripper_integrate_count = step_idx + 1
         hold_open = step_idx < open_hold_steps
         self._gripper_hold_open_now = hold_open
+        # Sampled here (once per EXECUTED policy step, ~30 Hz) rather than at
+        # inference time (~10 Hz): the hybrid jam detector needs consecutive
+        # measured samples to tell a stalled jaw from a travelling one. Kept
+        # ABOVE the motion-packet gate so the history exists in every rollout
+        # mode, not only the ones that fold gripper targets into the packet.
+        for arm in ("left", "right"):
+            self._note_gripper_actual(arm, self._measured_gripper_percent(payload, arm))
         if not self._allow_gripper_targets_in_motion_packet():
             return targets
         hold_value = self._gripper_hold_open_value()
@@ -3287,6 +3323,139 @@ class FlowMatchingActionSource:
         if callable(close):
             close()
 
+    def _measured_gripper_percent(
+        self, payload: dict[str, Any] | None, arm: str
+    ) -> float | None:
+        """The MEASURED jaw opening percent, never a commanded target.
+
+        Deliberately does NOT go through _gripper_value_from_payload: that helper
+        searches "target_percent" BEFORE "percent", so it returns the gripper
+        server's setpoint whenever the bridge publishes one. Today the runner's
+        payload resolves to the measured percent (verified 2026-08-19 against an
+        observation dump: |proprio - gripper_meas_pct| = 0.00 pp over 1040 joined
+        samples), but that is key ORDER, not intent -- one publisher change would
+        silently flip the proprio channel from measured to commanded. The
+        proprio source is a deliberate choice now (`--gripper-proprio-source`), so
+        read the measured field explicitly and leave nothing to key order."""
+        arm_payload = (payload or {}).get(arm)
+        if isinstance(arm_payload, dict):
+            for container_name in ("gripper", "gripper_state"):
+                container = arm_payload.get(container_name)
+                if not isinstance(container, dict):
+                    continue
+                if container.get("valid") is False or container.get("stale") is True:
+                    continue
+                for key in ("percent", "gripper_position", "position"):
+                    value = _positive_or_zero_float(container.get(key))
+                    if value is not None:
+                        return value
+            # Flat per-arm keys, kept from _gripper_value_from_payload's search so
+            # this differs from it ONLY in dropping the target_percent preference.
+            for key in ("gripper_position", "gripper", "gripper_value"):
+                value = _positive_or_zero_float(arm_payload.get(key))
+                if value is not None:
+                    return value
+        return self._live_gripper_percent(arm)
+
+    def _commanded_gripper_percent(self, arm: str) -> float | None:
+        """The opening percent this runner last SENT for `arm` (post close-bias,
+        close-snap and command deadband), i.e. what the jaw is being driven to."""
+        sent = getattr(self, "_gripper_last_sent_by_arm", None)
+        if isinstance(sent, dict):
+            value = sent.get(arm)
+            if value is not None:
+                return float(value)
+        integrated = getattr(self, "_gripper_targets_by_arm", {}).get(arm)
+        return None if integrated is None else float(integrated)
+
+    def _gripper_proprio_state(self, name: str) -> dict[str, Any]:
+        """Lazily-created per-arm dict for the proprio-source bookkeeping.
+
+        Sources are also built by tests (and by callers that bypass __init__),
+        so every consumer reaches its state through here rather than assuming
+        the attribute exists."""
+        state = getattr(self, name, None)
+        if not isinstance(state, dict):
+            state = {"left": None, "right": None} if name != "_gripper_actual_history" else {}
+            setattr(self, name, state)
+        return state
+
+    def _note_gripper_actual(self, arm: str, percent: float | None) -> None:
+        """Append one measured sample to the jam detector's rolling history."""
+        if percent is None:
+            return
+        history = self._gripper_proprio_state("_gripper_actual_history").setdefault(arm, [])
+        history.append(float(percent))
+        keep = max(2, int(getattr(self, "gripper_proprio_jam_stall_steps", 3) or 3) + 1)
+        if len(history) > keep:
+            del history[:-keep]
+
+    def _gripper_jammed(self, arm: str, actual: float, commanded: float) -> bool:
+        """True when the jaw is being held away from its setpoint by an object.
+
+        Travel is NOT a jam: a jaw still moving toward the setpoint fails the
+        stall test even though the gap is large. Requires a full stall window of
+        samples -- with fewer, `hybrid` prefers the command (the free-travel
+        assumption), which is what it does during normal motion anyway."""
+        gap = float(getattr(self, "gripper_proprio_jam_gap_percent", 3.0) or 0.0)
+        if abs(actual - commanded) <= gap:
+            return False
+        window = int(getattr(self, "gripper_proprio_jam_stall_steps", 3) or 0)
+        if window <= 0:
+            return True
+        history = self._gripper_proprio_state("_gripper_actual_history").get(arm) or []
+        if len(history) < window + 1:
+            return False
+        recent = history[-(window + 1):]
+        eps = float(getattr(self, "gripper_proprio_jam_move_eps_percent", 0.5) or 0.0)
+        return (max(recent) - min(recent)) <= eps
+
+    def _proprio_gripper_percent(
+        self, payload: dict[str, Any] | None, arm: str
+    ) -> float | None:
+        """The absolute gripper opening percent handed to the policy as proprio,
+        resolved per `gripper_proprio_source`. Records the value and the source
+        that produced it for the rollout step log."""
+        mode = str(getattr(self, "gripper_proprio_source", "actual") or "actual").lower()
+        actual = self._measured_gripper_percent(payload, arm)
+        if mode == "actual":
+            resolved, source = actual, "actual"
+        else:
+            commanded = self._commanded_gripper_percent(arm)
+            if commanded is None:
+                # Nothing commanded yet (rollout start): the measured jaw is the
+                # only truthful value, and reporting `command` here would hide
+                # that the mode never engaged.
+                resolved, source = actual, "actual_no_command"
+            elif mode == "command":
+                resolved, source = commanded, "command"
+            elif mode == "hybrid":
+                if actual is not None and self._gripper_jammed(arm, actual, commanded):
+                    resolved, source = actual, "hybrid_jam"
+                else:
+                    resolved, source = commanded, "hybrid_free"
+            else:
+                raise ValueError(f"unknown gripper_proprio_source: {mode!r}")
+        self._gripper_proprio_state("_gripper_proprio_last")[arm] = (
+            None if resolved is None else float(resolved)
+        )
+        self._gripper_proprio_state("_gripper_proprio_last_source")[arm] = source
+        return resolved
+
+    def _gripper_proprio_telemetry(self) -> dict[str, dict[str, Any]]:
+        """Per-arm {pct, source} last handed to the policy, for the step log.
+
+        Held from the last INFERENCE, not recomputed per step: the step log runs
+        at ~30 Hz while proprio is built once per chunk, so recomputing here would
+        log a value the policy never saw (and would advance the jam detector's
+        view off the inference cadence)."""
+        values = self._gripper_proprio_state("_gripper_proprio_last")
+        sources = self._gripper_proprio_state("_gripper_proprio_last_source")
+        return {
+            arm: {"pct": values.get(arm), "source": sources.get(arm)}
+            for arm in ("left", "right")
+        }
+
     def _live_gripper_percent(self, arm: str) -> float | None:
         """Best-known gripper percent for proprio: physical motor first, then
         the integrated policy target. The servo state carries no gripper, so
@@ -3314,11 +3483,22 @@ class FlowMatchingActionSource:
             arm_mask=self.arm_mask,
             action_frame=self.action_frame,
         )
+        proprio_source = str(
+            getattr(self, "gripper_proprio_source", "actual") or "actual"
+        ).lower()
         for arm, index in (("left", 6), ("right", 13)):
-            if proprio.shape[0] > index and _gripper_value_from_payload(payload, arm) is None:
+            if proprio.shape[0] <= index:
+                continue
+            if proprio_source != "actual":
+                # command / hybrid: the resolved value REPLACES whatever
+                # runtime_proprio_from_state read out of the payload.
+                value = self._proprio_gripper_percent(payload, arm)
+            elif _gripper_value_from_payload(payload, arm) is None:
                 value = self._live_gripper_percent(arm)
-                if value is not None:
-                    proprio[index] = float(value)
+            else:
+                continue
+            if value is not None:
+                proprio[index] = float(value)
         if self.ee_local_r_align is not None:
             # Runtime body deltas are in the RB TCP frame; the checkpoint was
             # trained in the EE (pika tip) frame: v_tip = R_align . v_tcp.

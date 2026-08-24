@@ -1292,6 +1292,10 @@ nlohmann::json gripperFeedbackJson(const GripperArmFeedback& fb) {
         // consumer can tell a slow JAW from late-reported feedback. null when the
         // payload carried no usable stamp (never a fabricated 0).
         {"feedback_age_ms", finiteDoubleJson(fb.feedback_age_ms)},
+        // Age of the jaw SAMPLE inside that message (sample -> publish), which
+        // feedback_age_ms does not cover. Consumers add the two for the real age
+        // of `percent`. null when the gripper server did not stamp it.
+        {"sample_age_ms", finiteDoubleJson(fb.sample_age_ms)},
     };
 }
 

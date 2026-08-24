@@ -36,6 +36,14 @@ struct GripperArmFeedback {
     // by shifting the gripper channel forward is guesswork: over-shifting closes
     // the jaw before contact and pushes the object away.
     double feedback_age_ms = std::numeric_limits<double>::quiet_NaN();
+    // Age of the pika telemetry SAMPLE inside that message, stamped by the
+    // gripper server from the SDK's serial reader callback: (server publish) -
+    // (frame arrival). feedback_age_ms above covers only publish->receive and
+    // reads ~0.05 ms, which made the feedback look instant; the sample is the
+    // dominant term (jaw telemetry lands at ~18.5 Hz against a 30 Hz policy
+    // grid, so the measured percent is 27 ms old on average, ~54 ms at worst).
+    // NaN when the publisher is too old to stamp it -- never a fabricated 0.
+    double sample_age_ms = std::numeric_limits<double>::quiet_NaN();
 };
 
 // Bridge to the out-of-process gripper_server (docs/plans/gripper_server_design.md).

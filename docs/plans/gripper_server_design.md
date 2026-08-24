@@ -136,17 +136,24 @@ Add an optional gripper sub-field to each arm in the command JSON:
 ### 4.3 gripper_server → server (new, feedback UDP)
 ```json
 { "schema": "robotics_lab.gripper_state.v1", "host_time_ns": ...,
-  "left":  { "percent": <actual>, "target_percent": <cmd>, "moving": bool, "ok": bool, "fault": null|str },
+  "left":  { "percent": <actual>, "target_percent": <cmd>, "moving": bool, "ok": bool,
+             "fault": null|str, "sample_age_ms": <float|null> },
   "right": { ... } }
 ```
 - `percent` from `PikaSerialGripperBackend.current_percent()` (live motor angle).
 - Published at the serial read rate (~30–60 Hz).
+- `sample_age_ms` = (publish time) − (arrival of the pika telemetry frame behind
+  `percent`), stamped from the SDK's own serial reader callback. Measured
+  2026-08-19: the frames land at ~18.5 Hz, so `percent` is ~27 ms old on average
+  and ~54 ms at worst. `null` when unstamped (sim backend / unrecognised SDK) —
+  never 0, which would read as "the jaw feedback is instant".
 
 ### 4.4 Server state JSON (extend per-arm block)
 Add to each arm in `servo_state` (schema bump or additive field):
 ```json
 "gripper": { "percent": <actual>, "target_percent": <cmd>,
-             "moving": bool, "ok": bool, "fault": null|str, "stale": bool }
+             "moving": bool, "ok": bool, "fault": null|str, "stale": bool,
+             "feedback_age_ms": <float|null>, "sample_age_ms": <float|null> }
 ```
 - Stamped from the latest cached feedback; `stale: true` if no feedback within a
   timeout. Additive → old GUIs ignore it; bump `servo_state` minor if needed.

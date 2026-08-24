@@ -1364,6 +1364,19 @@ void validateConfig(const DualArmConfig& cfg) {
                                   "safety.init_motion_planner.escape_max_time_sec");
         validateNonNegativeFinite(ip.escape_perturb_deg,
                                   "safety.init_motion_planner.escape_perturb_deg");
+        validateNonNegativeFinite(ip.brake_enter_deg_s,
+                                  "safety.init_motion_planner.brake_enter_deg_s");
+        validateNonNegativeFinite(ip.brake_exit_deg_s,
+                                  "safety.init_motion_planner.brake_exit_deg_s");
+        validatePositiveFinite(ip.brake_timeout_sec,
+                               "safety.init_motion_planner.brake_timeout_sec");
+        validateNonNegativeFinite(ip.brake_max_travel_deg,
+                                  "safety.init_motion_planner.brake_max_travel_deg");
+        if (ip.brake_exit_deg_s > ip.brake_enter_deg_s) {
+            throw std::runtime_error(
+                "safety.init_motion_planner.brake_exit_deg_s must be <= brake_enter_deg_s "
+                "(the brake phase must be able to finish)");
+        }
     }
     if (cfg.safety.floor_constraint.enable) {
         const auto& fc = cfg.safety.floor_constraint;
@@ -2221,6 +2234,22 @@ void validateConfig(const DualArmConfig& cfg) {
         validateNonNegativeFinite(ft.max_tcp_speed_m_s, path + ".max_tcp_speed_m_s");
         validateNonNegativeFinite(ft.max_tcp_accel_m_s2, path + ".max_tcp_accel_m_s2");
         validateNonNegativeFinite(ft.auto_tare_settle_sec, path + ".auto_tare_settle_sec");
+        validateNonNegativeFinite(ft.auto_tare_settle_min_sec, path + ".auto_tare_settle_min_sec");
+        if (ft.auto_tare_settle_min_sec > ft.auto_tare_settle_sec) {
+            throw std::runtime_error(
+                path + ".auto_tare_settle_min_sec must be <= auto_tare_settle_sec "
+                "(auto_tare_settle_sec is the maximum settle wait)");
+        }
+        if (ft.auto_tare_settle_window_samples < 2 ||
+            ft.auto_tare_settle_window_samples > 512) {
+            throw std::runtime_error(
+                path + ".auto_tare_settle_window_samples must be in [2, 512]");
+        }
+        validateNonNegativeFinite(
+            ft.auto_tare_settle_max_joint_speed_deg_s,
+            path + ".auto_tare_settle_max_joint_speed_deg_s");
+        validateNonNegativeFinite(ft.auto_tare_reuse_pose_tol_deg, path + ".auto_tare_reuse_pose_tol_deg");
+        validateNonNegativeFinite(ft.auto_tare_reuse_max_age_sec, path + ".auto_tare_reuse_max_age_sec");
         if (ft.residual_tare_min_samples < 2) {
             throw std::runtime_error(path + ".residual_tare_min_samples must be >= 2");
         }
@@ -3715,6 +3744,11 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "execution_lookahead_deg",
                 "execution_timeout_sec",
                 "single_arm_freeze_other_arm",
+                "brake_before_plan",
+                "brake_enter_deg_s",
+                "brake_exit_deg_s",
+                "brake_timeout_sec",
+                "brake_max_travel_deg",
             }, "safety.init_motion_planner");
             auto& ipc = cfg.safety.init_motion_planner;
             if (has(ip, "enable")) ipc.enable = asBool(ip["enable"], "safety.init_motion_planner.enable");
@@ -3744,6 +3778,11 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ip, "execution_lookahead_deg")) ipc.execution_lookahead_deg = asDouble(ip["execution_lookahead_deg"], "safety.init_motion_planner.execution_lookahead_deg");
             if (has(ip, "execution_timeout_sec")) ipc.execution_timeout_sec = asDouble(ip["execution_timeout_sec"], "safety.init_motion_planner.execution_timeout_sec");
             if (has(ip, "single_arm_freeze_other_arm")) ipc.single_arm_freeze_other_arm = asBool(ip["single_arm_freeze_other_arm"], "safety.init_motion_planner.single_arm_freeze_other_arm");
+            if (has(ip, "brake_before_plan")) ipc.brake_before_plan = asBool(ip["brake_before_plan"], "safety.init_motion_planner.brake_before_plan");
+            if (has(ip, "brake_enter_deg_s")) ipc.brake_enter_deg_s = asDouble(ip["brake_enter_deg_s"], "safety.init_motion_planner.brake_enter_deg_s");
+            if (has(ip, "brake_exit_deg_s")) ipc.brake_exit_deg_s = asDouble(ip["brake_exit_deg_s"], "safety.init_motion_planner.brake_exit_deg_s");
+            if (has(ip, "brake_timeout_sec")) ipc.brake_timeout_sec = asDouble(ip["brake_timeout_sec"], "safety.init_motion_planner.brake_timeout_sec");
+            if (has(ip, "brake_max_travel_deg")) ipc.brake_max_travel_deg = asDouble(ip["brake_max_travel_deg"], "safety.init_motion_planner.brake_max_travel_deg");
         }
     }
 
@@ -4123,6 +4162,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "max_tcp_accel_m_s2",
                 "auto_tare_after_init_motion",
                 "auto_tare_settle_sec",
+                "auto_tare_settle_detect_enable",
+                "auto_tare_settle_min_sec",
+                "auto_tare_settle_window_samples",
+                "auto_tare_settle_max_joint_speed_deg_s",
+                "auto_tare_reuse_enable",
+                "auto_tare_reuse_pose_tol_deg",
+                "auto_tare_reuse_max_age_sec",
                 "residual_tare_min_samples",
                 "residual_tare_max_force_stddev_n",
                 "residual_tare_max_torque_stddev_nm",
@@ -4151,6 +4197,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ft, "max_tcp_accel_m_s2")) out.max_tcp_accel_m_s2 = asDouble(ft["max_tcp_accel_m_s2"], path + ".max_tcp_accel_m_s2");
             if (has(ft, "auto_tare_after_init_motion")) out.auto_tare_after_init_motion = asBool(ft["auto_tare_after_init_motion"], path + ".auto_tare_after_init_motion");
             if (has(ft, "auto_tare_settle_sec")) out.auto_tare_settle_sec = asDouble(ft["auto_tare_settle_sec"], path + ".auto_tare_settle_sec");
+            if (has(ft, "auto_tare_settle_detect_enable")) out.auto_tare_settle_detect_enable = asBool(ft["auto_tare_settle_detect_enable"], path + ".auto_tare_settle_detect_enable");
+            if (has(ft, "auto_tare_settle_min_sec")) out.auto_tare_settle_min_sec = asDouble(ft["auto_tare_settle_min_sec"], path + ".auto_tare_settle_min_sec");
+            if (has(ft, "auto_tare_settle_window_samples")) out.auto_tare_settle_window_samples = asInt(ft["auto_tare_settle_window_samples"], path + ".auto_tare_settle_window_samples");
+            if (has(ft, "auto_tare_settle_max_joint_speed_deg_s")) out.auto_tare_settle_max_joint_speed_deg_s = asDouble(ft["auto_tare_settle_max_joint_speed_deg_s"], path + ".auto_tare_settle_max_joint_speed_deg_s");
+            if (has(ft, "auto_tare_reuse_enable")) out.auto_tare_reuse_enable = asBool(ft["auto_tare_reuse_enable"], path + ".auto_tare_reuse_enable");
+            if (has(ft, "auto_tare_reuse_pose_tol_deg")) out.auto_tare_reuse_pose_tol_deg = asDouble(ft["auto_tare_reuse_pose_tol_deg"], path + ".auto_tare_reuse_pose_tol_deg");
+            if (has(ft, "auto_tare_reuse_max_age_sec")) out.auto_tare_reuse_max_age_sec = asDouble(ft["auto_tare_reuse_max_age_sec"], path + ".auto_tare_reuse_max_age_sec");
             if (has(ft, "residual_tare_min_samples")) out.residual_tare_min_samples = asInt(ft["residual_tare_min_samples"], path + ".residual_tare_min_samples");
             if (has(ft, "residual_tare_max_force_stddev_n")) out.residual_tare_max_force_stddev_n = asDouble(ft["residual_tare_max_force_stddev_n"], path + ".residual_tare_max_force_stddev_n");
             if (has(ft, "residual_tare_max_torque_stddev_nm")) out.residual_tare_max_torque_stddev_nm = asDouble(ft["residual_tare_max_torque_stddev_nm"], path + ".residual_tare_max_torque_stddev_nm");

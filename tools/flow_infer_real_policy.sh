@@ -21,6 +21,10 @@ TCP_REANCHOR_MODE="${FLOW_INFER_TCP_REANCHOR_MODE:-measured_blend}"
 TCP_BLEND_STEPS="${FLOW_INFER_TCP_BLEND_STEPS:-2}"
 ROLLOUT_SUMMARY="${FLOW_INFER_ROLLOUT_SUMMARY:-outputs/rollout_summary.json}"
 VELPROPRIO_SOURCE="${FLOW_INFER_VELPROPRIO_SOURCE:-measured}"
+# Which gripper signal the model's proprio channel carries: actual (DEFAULT, the
+# measured jaw = pre-2026-08-19 behaviour) | command | hybrid. Sweep it with
+# FLOW_INFER_GRIPPER_PROPRIO_SOURCE so the .meta sidecar records which arm ran.
+GRIPPER_PROPRIO_SOURCE="${FLOW_INFER_GRIPPER_PROPRIO_SOURCE:-actual}"
 STEP_LOG="${FLOW_INFER_STEP_LOG:-}"
 # Wall-clock duration of ONE action-chunk row. MUST equal the training converter's
 # --action-step-frames / dataset fps: 1/30 = 0.0334 for the legacy per-frame-delta checkpoints,
@@ -96,8 +100,23 @@ if [ "${FLOW_INFER_RTC:-0}" = "1" ]; then
   # RTC replan overlap: kick the next inference at PREFETCH_AT consumed steps;
   # the remaining (EXECUTE - PREFETCH_AT) steps run on the OLD plan while the
   # server freezes exactly that prefix of the new chunk and inpaints the rest.
-  # Default: half-window kick (e.g. 16 executed -> kick at 8, freeze 8).
-  RTC_PREFETCH_AT="${FLOW_INFER_PREFETCH_AT:-$((CHUNK_EXECUTE_STEPS / 2))}"
+  # The inference must FINISH inside (EXECUTE - PREFETCH_AT) * policy_dt or every
+  # chunk boundary stalls: with execute=4 the half-window default (kick at 2)
+  # leaves 2*33.4 = 66.8 ms, but the pi05 8001 server measures 88-91 ms p50/p90
+  # with RTC guidance on (60 ms with RTC off), so 79% of boundaries stalled,
+  # chunks arrived every 159 ms instead of 133.6 (19% time dilation) and the
+  # runner logged "inference_delay mismatch: realized=1 vs configured 2"
+  # (servo_log_20260819_085727 / sweep 085739_LEC0_e4). Default therefore:
+  # kick at 1 for execute<=4 (100 ms budget, frozen prefix 3 = 100 ms structural
+  # delay), half-window otherwise (e.g. 16 executed -> kick at 8, freeze 8).
+  # Override with FLOW_INFER_PREFETCH_AT (0 = infer at the boundary, freeze all).
+  if [ -n "${FLOW_INFER_PREFETCH_AT:-}" ]; then
+    RTC_PREFETCH_AT="$FLOW_INFER_PREFETCH_AT"
+  elif [ "$CHUNK_EXECUTE_STEPS" -le 4 ]; then
+    RTC_PREFETCH_AT=1
+  else
+    RTC_PREFETCH_AT=$((CHUNK_EXECUTE_STEPS / 2))
+  fi
   RTC_DELAY="${FLOW_INFER_RTC_DELAY:-$((CHUNK_EXECUTE_STEPS - RTC_PREFETCH_AT))}"
   # Old->new overlap mixing shape over the soft window [d .. H-execute):
   #   exp (paper default) = convex ramp, linear = plain 1->0 lerp of the
@@ -218,6 +237,7 @@ exec "$PYTHON_BIN" -m policy_runner flow-infer \
   "${VELPROPRIO_ARGS[@]}" \
   "${DEPTH_ARGS[@]}" \
   --gripper-action-mode absolute \
+  --gripper-proprio-source "$GRIPPER_PROPRIO_SOURCE" \
   --rollout-summary "$ROLLOUT_SUMMARY" \
   "${STEP_LOG_ARGS[@]}" \
   "$@"

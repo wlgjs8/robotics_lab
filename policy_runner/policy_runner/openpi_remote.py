@@ -773,10 +773,10 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             # target. Absolute percent, NOT reset-relative (matches training).
             # Without this the channel reads 0 (= fully closed) and the policy
             # drives the gripper command away monotonically (right-arm runaway).
-            grip = _gripper_value_from_payload(payload, side)
+            # `--gripper-proprio-source` picks measured / commanded / hybrid.
+            grip = self._proprio_gripper_percent(payload, side)
             if grip is None:
-                live = self._live_gripper_percent(side)
-                grip = live if live is not None else _gripper_from_arm_payload(payload.get(side, {}))
+                grip = _gripper_from_arm_payload(payload.get(side, {}))
             features.append(np.concatenate([pos_rel, rot_rel, [float(grip) / 100.0]]))
         state = np.concatenate(features).astype(np.float32)
         if self.ee_local_r_align is not None:
@@ -1551,10 +1551,10 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                 parts.append(grav)
             if include_grip:
                 # ABSOLUTE gripper opening (matches the converter's _state_velocity_grip / _arm_velocity_grav).
-                grip = _gripper_value_from_payload(payload, side)
+                # Source (measured / commanded / hybrid) per --gripper-proprio-source.
+                grip = self._proprio_gripper_percent(payload, side)
                 if grip is None:
-                    live = self._live_gripper_percent(side)
-                    grip = live if live is not None else _gripper_from_arm_payload(payload.get(side, {}))
+                    grip = _gripper_from_arm_payload(payload.get(side, {}))
                 parts.append(np.array([float(grip) / 100.0]))
             features.append(np.concatenate(parts))
         if getattr(self, "_print_velproprio_enabled", False):

@@ -133,6 +133,28 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(!stack_real.servo.allow_controller_simulation_motion);
         RB_CHECK(near(stack_real.left_robot.servo_t1_sec, 0.002));
         RB_CHECK(near(stack_real.right_robot.servo_t1_sec, 0.002));
+        // 2026-08-19 brake-before-plan ships ON for the real stack (InitMotion while the
+        // policy is streaming brakes from the last sent target instead of snapping to the
+        // measured joints); the exit threshold must sit at or below the enter threshold.
+        RB_CHECK(stack_real.safety.init_motion_planner.brake_before_plan);
+        RB_CHECK(near(stack_real.safety.init_motion_planner.brake_enter_deg_s, 1.0));
+        RB_CHECK(near(stack_real.safety.init_motion_planner.brake_exit_deg_s, 0.5));
+        RB_CHECK(near(stack_real.safety.init_motion_planner.brake_timeout_sec, 0.75));
+        RB_CHECK(near(stack_real.safety.init_motion_planner.brake_max_travel_deg, 3.0));
+        // 2026-08-19 post-init tare arming: ring-down detection (fixed 3 s settle is now
+        // the maximum) and software-zero reuse ship ON for both arms of the real stack.
+        for (const rb_servo::FtWrenchPipelineConfig* ft :
+             {&stack_real.force_torque.left, &stack_real.force_torque.right}) {
+            RB_CHECK(ft->auto_tare_after_init_motion);
+            RB_CHECK(near(ft->auto_tare_settle_sec, 3.0));
+            RB_CHECK(ft->auto_tare_settle_detect_enable);
+            RB_CHECK(near(ft->auto_tare_settle_min_sec, 0.5));
+            RB_CHECK(ft->auto_tare_settle_window_samples == 150);
+            RB_CHECK(near(ft->auto_tare_settle_max_joint_speed_deg_s, 1.0));
+            RB_CHECK(ft->auto_tare_reuse_enable);
+            RB_CHECK(near(ft->auto_tare_reuse_pose_tol_deg, 2.0));
+            RB_CHECK(near(ft->auto_tare_reuse_max_age_sec, 600.0));
+        }
         RB_CHECK(near(stack_real.left_robot.servo_t2_sec, 0.021));
         RB_CHECK(near(stack_real.right_robot.servo_t2_sec, 0.021));
         RB_CHECK(stack_real.left_robot.disable_waiting_ack);
@@ -2300,8 +2322,82 @@ bool testSelfCollisionConfig() {
 
 }  // namespace
 
+bool testAutoTareSettleConfigValidation() {
+    const std::filesystem::path stack_real_path =
+        servoRoot() / "config" / "stack_real.yaml";
+    {
+        std::string body = readFile(stack_real_path);
+        RB_CHECK(replaceOnce(
+            &body,
+            "    auto_tare_settle_min_sec: 0.5",
+            "    auto_tare_settle_min_sec: 5.0"
+        ));
+        const std::string path = writeTempConfig("tare-settle-min-above-max", body);
+        const bool rejected = loadRejectsContaining(
+            path,
+            "auto_tare_settle_min_sec must be <= auto_tare_settle_sec"
+        );
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+    {
+        std::string body = readFile(stack_real_path);
+        RB_CHECK(replaceOnce(
+            &body,
+            "    auto_tare_settle_window_samples: 150",
+            "    auto_tare_settle_window_samples: 1"
+        ));
+        const std::string path = writeTempConfig("tare-settle-window-too-small", body);
+        const bool rejected = loadRejectsContaining(
+            path,
+            "auto_tare_settle_window_samples must be in [2, 512]"
+        );
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+    return true;
+}
+
+bool testInitMotionBrakeConfigValidation() {
+    const std::filesystem::path stack_real_path =
+        servoRoot() / "config" / "stack_real.yaml";
+    {
+        std::string body = readFile(stack_real_path);
+        RB_CHECK(replaceOnce(
+            &body,
+            "    brake_exit_deg_s: 0.5",
+            "    brake_exit_deg_s: 2.0"
+        ));
+        const std::string path = writeTempConfig("init-brake-exit-above-enter", body);
+        const bool rejected = loadRejectsContaining(
+            path,
+            "brake_exit_deg_s must be <= brake_enter_deg_s"
+        );
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+    {
+        std::string body = readFile(stack_real_path);
+        RB_CHECK(replaceOnce(
+            &body,
+            "    brake_timeout_sec: 0.75",
+            "    brake_timeout_sec: 0.0"
+        ));
+        const std::string path = writeTempConfig("init-brake-timeout-zero", body);
+        const bool rejected = loadRejectsContaining(
+            path,
+            "safety.init_motion_planner.brake_timeout_sec"
+        );
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+    return true;
+}
+
 int main() {
     if (!testRepositoryConfigsParse()) return 1;
+    if (!testInitMotionBrakeConfigValidation()) return 1;
+    if (!testAutoTareSettleConfigValidation()) return 1;
     if (!testGuardedAdmittanceReleaseProfileValidation()) return 1;
     if (!testServoIoModelParsesAndValidates()) return 1;
     if (!testUnknownKeysAndSchemaFail()) return 1;
