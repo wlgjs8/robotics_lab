@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import gc
 import os
 import sys
 import time
@@ -375,7 +376,10 @@ def run(
     # than caught up: the achieved rate silently settles at whatever the tick can sustain.
     # This names the phase responsible instead of guessing.
     class _TickProfile:
-        __slots__ = ("on", "t_prev", "acc", "n", "last_report", "worst", "cur", "spike_sec")
+        __slots__ = (
+            "on", "t_prev", "acc", "n", "last_report", "worst", "cur", "spike_sec",
+            "gc_tick_sec", "gc_tick_gen", "gc_start", "gc_total_sec", "gc_count",
+        )
 
         def __init__(self) -> None:
             self.on = os.environ.get("FLOW_INFER_TICK_PROFILE", "0") == "1"
@@ -395,6 +399,34 @@ def run(
             # slipped a policy step and cost a hold tick, sitting just under the
             # original 80 ms threshold.
             self.spike_sec = float(os.environ.get("FLOW_INFER_TICK_SPIKE_MS", "50")) / 1000.0
+            # Cyclic-GC accounting (2026-08-19). The 20260819_085739 run had six
+            # 58-74 ms spikes, ~35 s apart, ALL of it in OTHER (no named phase >2 ms)
+            # and every one on the tick right after a [tick-profile] report — i.e.
+            # either the report print blocked (stderr -> tee pipe) or a gen-2
+            # collection landed there. gc.callbacks fires on every collection in
+            # whichever thread triggers it (the inference worker included: it holds
+            # the GIL, so it freezes this loop just the same), so a spike line can
+            # now say how much of the tick was GC and which generation, and the
+            # report print is timed as its own phase (`report_print`).
+            self.gc_tick_sec = 0.0
+            self.gc_tick_gen = -1
+            self.gc_start = 0.0
+            self.gc_total_sec = 0.0
+            self.gc_count = 0
+            if self.on:
+                gc.callbacks.append(self._gc_callback)
+
+        def _gc_callback(self, phase: str, info: dict) -> None:
+            if phase == "start":
+                self.gc_start = time.monotonic()
+            elif phase == "stop":
+                dt = time.monotonic() - self.gc_start
+                self.gc_tick_sec += dt
+                self.gc_total_sec += dt
+                self.gc_count += 1
+                gen = int(info.get("generation", -1))
+                if gen > self.gc_tick_gen:
+                    self.gc_tick_gen = gen
 
         def tick(self, t: float) -> None:
             if not self.on:
@@ -410,13 +442,19 @@ def run(
                         for k, v in sorted(self.cur.items(), key=lambda kv: -kv[1])
                         if k != "TOTAL"
                     )
+                    # t_mono is CLOCK_MONOTONIC (same clock as the servo CSV's
+                    # loop_start_time_ns), so the spike can be lined up with the
+                    # server's stale_latest_hold tick directly.
                     print(
-                        f"[tick-spike] dt={total * 1000:.0f}ms {parts} "
+                        f"[tick-spike] t_mono={self.t_prev:.3f} dt={total * 1000:.0f}ms "
+                        f"gc={self.gc_tick_sec * 1000:.1f}ms(gen{self.gc_tick_gen}) {parts} "
                         f"OTHER={(total - named) * 1000:.1f}",
                         file=stderr,
                         flush=True,
                     )
             self.cur = {}
+            self.gc_tick_sec = 0.0
+            self.gc_tick_gen = -1
             self.t_prev = t
             if self.last_report is None:
                 self.last_report = t
@@ -430,15 +468,27 @@ def run(
                     for k in sorted(self.acc, key=lambda k: -self.acc[k])
                 )
                 other = (total - named) / self.n * 1000
+                gc_counts = gc.get_count()
+                _tp = time.monotonic()
                 print(
-                    f"[tick-profile] n={self.n} mean/max ms  {parts} OTHER={other:.2f}",
+                    f"[tick-profile] n={self.n} mean/max ms  {parts} OTHER={other:.2f} "
+                    f"gc_total={self.gc_total_sec * 1000:.1f}ms/{self.gc_count} "
+                    f"gc_count={gc_counts[0]}/{gc_counts[1]}/{gc_counts[2]}",
                     file=stderr,
                     flush=True,
                 )
+                _tp = time.monotonic() - _tp
                 self.acc.clear()
                 self.worst.clear()
                 self.n = 0
+                self.gc_total_sec = 0.0
+                self.gc_count = 0
                 self.last_report = t
+                # The print itself is part of the tick that has just begun: time it
+                # so a blocking stderr write shows up as report_print in the
+                # following spike line (and the next aggregate) instead of hiding
+                # in OTHER.
+                self.add("report_print", _tp)
 
         def add(self, key: str, dt: float) -> None:
             if not self.on:
@@ -537,10 +587,13 @@ def run(
             decision = safety_gate.evaluate(snapshot, intent, requirements, now)
             if _prof.on:
                 _prof.add("safety_gate", monotonic_fn() - _t0)
+                _t0 = monotonic_fn()
             _capture.log(now, source, intent, decision.allowed, phase="pre")
             if rollout_recorder is not None:
                 rollout_recorder.record_decision(decision)
                 rollout_recorder.record_source(source)
+            if _prof.on:
+                _prof.add("record_pre", monotonic_fn() - _t0)
             if teleop_debug:
                 if intent is None:
                     debug_no_intent += 1
@@ -699,6 +752,7 @@ def run(
                 seq = command_client.send(intent)
                 if _prof.on:
                     _prof.add("cmd_send", monotonic_fn() - _t0)
+                    _t0 = monotonic_fn()
                 _remember_sent_intent(intent, seq)
                 _log_final_and_capture(
                     intent,
@@ -714,6 +768,8 @@ def run(
                     debug_sent += 1
                 if rollout_recorder is not None:
                     rollout_recorder.record_sent(intent)
+                if _prof.on:
+                    _prof.add("post_send", monotonic_fn() - _t0)
             elif intent is not None:
                 if rollout_recorder is not None:
                     rollout_recorder.record_dropped(decision.reason, intent)
