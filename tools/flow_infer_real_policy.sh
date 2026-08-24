@@ -100,8 +100,23 @@ if [ "${FLOW_INFER_RTC:-0}" = "1" ]; then
   # RTC replan overlap: kick the next inference at PREFETCH_AT consumed steps;
   # the remaining (EXECUTE - PREFETCH_AT) steps run on the OLD plan while the
   # server freezes exactly that prefix of the new chunk and inpaints the rest.
-  # Default: half-window kick (e.g. 16 executed -> kick at 8, freeze 8).
-  RTC_PREFETCH_AT="${FLOW_INFER_PREFETCH_AT:-$((CHUNK_EXECUTE_STEPS / 2))}"
+  # The inference must FINISH inside (EXECUTE - PREFETCH_AT) * policy_dt or every
+  # chunk boundary stalls: with execute=4 the half-window default (kick at 2)
+  # leaves 2*33.4 = 66.8 ms, but the pi05 8001 server measures 88-91 ms p50/p90
+  # with RTC guidance on (60 ms with RTC off), so 79% of boundaries stalled,
+  # chunks arrived every 159 ms instead of 133.6 (19% time dilation) and the
+  # runner logged "inference_delay mismatch: realized=1 vs configured 2"
+  # (servo_log_20260819_085727 / sweep 085739_LEC0_e4). Default therefore:
+  # kick at 1 for execute<=4 (100 ms budget, frozen prefix 3 = 100 ms structural
+  # delay), half-window otherwise (e.g. 16 executed -> kick at 8, freeze 8).
+  # Override with FLOW_INFER_PREFETCH_AT (0 = infer at the boundary, freeze all).
+  if [ -n "${FLOW_INFER_PREFETCH_AT:-}" ]; then
+    RTC_PREFETCH_AT="$FLOW_INFER_PREFETCH_AT"
+  elif [ "$CHUNK_EXECUTE_STEPS" -le 4 ]; then
+    RTC_PREFETCH_AT=1
+  else
+    RTC_PREFETCH_AT=$((CHUNK_EXECUTE_STEPS / 2))
+  fi
   RTC_DELAY="${FLOW_INFER_RTC_DELAY:-$((CHUNK_EXECUTE_STEPS - RTC_PREFETCH_AT))}"
   # Old->new overlap mixing shape over the soft window [d .. H-execute):
   #   exp (paper default) = convex ramp, linear = plain 1->0 lerp of the
