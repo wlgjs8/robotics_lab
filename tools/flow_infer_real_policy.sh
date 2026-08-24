@@ -21,6 +21,10 @@ TCP_REANCHOR_MODE="${FLOW_INFER_TCP_REANCHOR_MODE:-measured_blend}"
 TCP_BLEND_STEPS="${FLOW_INFER_TCP_BLEND_STEPS:-2}"
 ROLLOUT_SUMMARY="${FLOW_INFER_ROLLOUT_SUMMARY:-outputs/rollout_summary.json}"
 VELPROPRIO_SOURCE="${FLOW_INFER_VELPROPRIO_SOURCE:-measured}"
+# Which gripper signal the model's proprio channel carries: actual (DEFAULT, the
+# measured jaw = pre-2026-08-19 behaviour) | command | hybrid. Sweep it with
+# FLOW_INFER_GRIPPER_PROPRIO_SOURCE so the .meta sidecar records which arm ran.
+GRIPPER_PROPRIO_SOURCE="${FLOW_INFER_GRIPPER_PROPRIO_SOURCE:-actual}"
 STEP_LOG="${FLOW_INFER_STEP_LOG:-}"
 # Wall-clock duration of ONE action-chunk row. MUST equal the training converter's
 # --action-step-frames / dataset fps: 1/30 = 0.0334 for the legacy per-frame-delta checkpoints,
@@ -218,6 +222,7 @@ exec "$PYTHON_BIN" -m policy_runner flow-infer \
   "${VELPROPRIO_ARGS[@]}" \
   "${DEPTH_ARGS[@]}" \
   --gripper-action-mode absolute \
+  --gripper-proprio-source "$GRIPPER_PROPRIO_SOURCE" \
   --rollout-summary "$ROLLOUT_SUMMARY" \
   "${STEP_LOG_ARGS[@]}" \
   "$@"

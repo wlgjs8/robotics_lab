@@ -118,6 +118,31 @@ class StatePacketTest(unittest.TestCase):
         self.assertFalse(last["left"]["moving"])             # settled
         self.assertIsNone(last["right"]["target_percent"])   # never commanded
 
+    def test_sample_age_is_published_and_null_when_unstamped(self):
+        # The sim backend has no serial reader thread to stamp frames, so the
+        # field must be present and NULL rather than a fabricated 0 -- a 0 would
+        # read as "the jaw feedback is instant", the exact mistake
+        # feedback_age_ms already invited.
+        cfg = GripperServerConfig(backend="sim", home_on_connect=False)
+        srv = GripperServer(cfg, clock=lambda: 0.0)
+        srv._backend.connect()
+
+        state = srv.step(host_time_ns=1)
+
+        self.assertIn("sample_age_ms", state["left"])
+        self.assertIsNone(state["left"]["sample_age_ms"])
+
+    def test_sample_age_reports_the_backend_stamp_in_milliseconds(self):
+        cfg = GripperServerConfig(backend="sim", home_on_connect=False)
+        srv = GripperServer(cfg, clock=lambda: 0.0)
+        srv._backend.connect()
+        srv._backend.sample_age_sec = lambda arm: 0.027 if arm == "left" else None
+
+        state = srv.step(host_time_ns=1)
+
+        self.assertAlmostEqual(state["left"]["sample_age_ms"], 27.0)
+        self.assertIsNone(state["right"]["sample_age_ms"])
+
 
 class GripperServerStatsTest(unittest.TestCase):
     def test_idle_without_command_does_not_send_to_backend(self):

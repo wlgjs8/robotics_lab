@@ -56,6 +56,8 @@ void parseArmFeedback(const json& msg, const char* arm, GripperArmFeedback* out,
     }
     const json tgt = block.value("target_percent", json(nullptr));
     if (tgt.is_number()) out->target_percent = tgt.get<double>();
+    const json sample_age = block.value("sample_age_ms", json(nullptr));
+    if (sample_age.is_number()) out->sample_age_ms = sample_age.get<double>();
     out->moving = block.value("moving", false);
     out->ok = block.value("ok", out->valid);
     const json fault = block.value("fault", json(nullptr));

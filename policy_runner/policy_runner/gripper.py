@@ -172,6 +172,9 @@ class PikaSerialGripperBackend:
         self._grippers: dict[str, Any] = {}
         self._targets: dict[str, float] = {}
         self._last_sent: dict[str, tuple[float, float]] = {}
+        # Arrival time of the most recent pika telemetry frame per arm, stamped
+        # by _install_sample_clock so consumers can report a real sensor age.
+        self._sample_time: dict[str, float] = {}
 
     def connect(self) -> "PikaSerialGripperBackend":
         if self.suppress_sdk_logs:
@@ -197,9 +200,58 @@ class PikaSerialGripperBackend:
                 raise RuntimeError(f"pika gripper {arm} enable failed on {port}")
             self._grippers[arm] = gripper
             self._targets[arm] = self._seed_target(gripper)
+            self._install_sample_clock(arm, gripper)
         if self.home_on_connect and self._grippers:
             self._home_all_concurrent()
         return self
+
+    def _install_sample_clock(self, arm: str, gripper: Any) -> bool:
+        """Stamp the arrival time of each pika telemetry frame for `arm`.
+
+        get_motor_position() is a lock+dict read off the SDK's reader thread, so
+        the caller cannot tell a fresh sample from one the device sent 50 ms ago.
+        Measured 2026-08-19 from rollout logs: while the jaw is actually moving,
+        35% of consecutive 30 Hz reads repeat the previous value -- the telemetry
+        lands at ~18.5 Hz, so the "measured" percent handed to the policy (and
+        logged as gripper_meas_pct) is 27 ms old on average and ~54 ms at worst.
+        That age was previously invisible: the only age in the log is the
+        message's publish->receive time, which is ~0.05 ms and reads as instant.
+
+        Wraps the SDK's own serial callback rather than polling, so the stamp is
+        the frame's arrival, not our observation of it. Only 'motor' frames carry
+        Position, so only those advance the clock. Returns False (age stays
+        unavailable, never fabricated) when the SDK shape does not match.
+        """
+        comm = getattr(gripper, "serial_comm", None)
+        inner = getattr(comm, "callback", None)
+        if comm is None or not callable(inner):
+            return False
+        clock = self._clock
+        stamps = self._sample_time
+
+        def _stamped(data: Any, _inner: Any = inner, _arm: str = arm) -> Any:
+            result = _inner(data)
+            try:
+                if isinstance(data, Mapping) and "motor" in data:
+                    stamps[_arm] = clock()
+            except Exception:  # noqa: BLE001 - never break the SDK reader thread
+                pass
+            return result
+
+        comm.callback = _stamped
+        return True
+
+    def sample_age_sec(self, arm: str) -> float | None:
+        """Seconds since the pika telemetry frame backing current_percent(arm).
+
+        None when no frame has been stamped (SDK shape unrecognised, sim backend,
+        or nothing received yet) -- the consumers log null rather than 0 so a
+        missing measurement never masquerades as a fresh one."""
+        stamp = self._sample_time.get(arm)
+        if stamp is None:
+            return None
+        age = float(self._clock()) - float(stamp)
+        return age if age >= 0.0 else 0.0
 
     def _home_all_concurrent(self) -> None:
         """Reference every gripper to its CLOSED mechanical stop and re-zero there,

@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import statistics
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -116,6 +117,9 @@ def arm_samples(records: Iterable[dict[str, Any]], arm: str) -> list[dict[str, A
                 ),
                 "gripper_cmd_pct": _number(arm_data.get("gripper_cmd_pct")),
                 "gripper_meas_pct": _number(arm_data.get("gripper_meas_pct")),
+                "gripper_proprio_pct": _number(arm_data.get("gripper_proprio_pct")),
+                "gripper_proprio_source": arm_data.get("gripper_proprio_source"),
+                "gripper_sample_age_ms": _number(arm_data.get("gripper_sample_age_ms")),
             }
         )
     return samples
@@ -269,6 +273,32 @@ def print_summary(
             )
         if max_points > 0 and len(samples) > max_points:
             print(f"    ... {len(samples) - max_points} trace rows omitted")
+
+        # Which signal the policy's proprio gripper channel actually carried
+        # (--gripper-proprio-source) and how stale the jaw telemetry behind it
+        # was. Both are null for logs written before those fields existed.
+        sources = [
+            sample["gripper_proprio_source"]
+            for sample in samples
+            if sample["gripper_proprio_source"]
+        ]
+        if sources:
+            counts = Counter(sources)
+            mix = ", ".join(f"{name} {count}" for name, count in counts.most_common())
+            print(f"  gripper proprio source: {mix}")
+        ages = [
+            sample["gripper_sample_age_ms"]
+            for sample in samples
+            if sample["gripper_sample_age_ms"] is not None
+        ]
+        if ages:
+            ordered = sorted(ages)
+            print(
+                f"  gripper feedback sample age: median "
+                f"{ordered[len(ordered) // 2]:.1f} ms, p90 "
+                f"{ordered[int(0.9 * (len(ordered) - 1))]:.1f} ms "
+                f"(n={len(ages)})"
+            )
 
         toggles = gripper_toggles(samples, threshold_pct=gripper_threshold_pct)
         print(

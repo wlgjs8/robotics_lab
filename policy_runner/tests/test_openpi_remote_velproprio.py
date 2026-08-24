@@ -52,6 +52,30 @@ class VelocityProprioTest(unittest.TestCase):
         src._live_gripper_percent = lambda side: None  # force the gripper fallback (-> 0.0)
         return src
 
+    def test_velocity_grip_carries_the_measured_jaw_by_default(self) -> None:
+        # DEFAULT (actual): the gripper dim is the MEASURED percent /100, even
+        # though the payload block also carries target_percent (the legacy
+        # payload search order preferred the target, which would have fed the
+        # policy a command without anyone choosing that).
+        src = self._make_source(proprio_mode="velocity_grip")
+        payload = _payload(_IDENT, _IDENT)
+        payload["right"]["gripper"] = {
+            "valid": True, "stale": False, "percent": 17.5, "target_percent": 99.0,
+        }
+        out = src._proprio_state(payload)
+        self.assertAlmostEqual(float(out[13]), 0.175, places=6)
+
+    def test_velocity_grip_can_carry_the_commanded_opening(self) -> None:
+        src = self._make_source(proprio_mode="velocity_grip")
+        src.gripper_proprio_source = "command"
+        src._gripper_last_sent_by_arm = {"left": None, "right": 0.0}
+        payload = _payload(_IDENT, _IDENT)
+        payload["right"]["gripper"] = {
+            "valid": True, "stale": False, "percent": 17.5, "target_percent": 99.0,
+        }
+        out = src._proprio_state(payload)
+        self.assertAlmostEqual(float(out[13]), 0.0, places=6)
+
     def test_state_dims(self) -> None:
         for mode, dim in (("velocity", 12), ("velocity_grip", 14), ("velocity_grav", 20)):
             src = self._make_source(proprio_mode=mode)

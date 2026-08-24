@@ -145,6 +145,7 @@ class RolloutStepLogger:
         hold: bool = False,
         inference_latency_ms: float | None = None,
         rtc: Mapping[str, Any] | None = None,
+        gripper_proprio: Mapping[str, Any] | None = None,
         t_mono: float | None = None,
         t_wall: float | None = None,
     ) -> bool:
@@ -163,6 +164,7 @@ class RolloutStepLogger:
                 hold=hold,
                 inference_latency_ms=inference_latency_ms,
                 rtc=rtc,
+                gripper_proprio=gripper_proprio,
                 t_mono=time.monotonic() if t_mono is None else t_mono,
                 t_wall=time.time() if t_wall is None else t_wall,
             )
@@ -210,6 +212,7 @@ def build_rollout_step_record(
     t_mono: float,
     t_wall: float,
     rtc: Mapping[str, Any] | None = None,
+    gripper_proprio: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     mono = _required_finite_float(t_mono, "t_mono")
     wall = _required_finite_float(t_wall, "t_wall")
@@ -286,13 +289,35 @@ def build_rollout_step_record(
             "raw_delta_ee_local": _finite_vector(raw_delta, 6),
             "gripper_cmd_pct": _finite_float(gripper_cmd),
             "gripper_meas_pct": _measured_gripper_pct(payload, arm),
-            # Publish->receive age of the gripper_state.v1 message `gripper_meas_pct`
-            # came from. Measured 2026-07-31: commanding a full close took 104-139 ms
-            # to show ANY jaw motion and 278-347 ms to settle, by which point the arm
-            # had already lifted 47-65 mm -- the "closes on the way up" failure. That
-            # total is the sum of a slow jaw and late-reported feedback, and the two
-            # need opposite fixes, so log the reported-late part separately.
+            # TRANSPORT age only: publish->receive of the gripper_state.v1 message
+            # `gripper_meas_pct` came from. It reads ~0.05 ms in every run, which
+            # invites the conclusion that the gripper feedback is instant -- it is
+            # not. This number does NOT include the age of the pika telemetry
+            # SAMPLE inside that message, which is the dominant term
+            # (`gripper_sample_age_ms` below).
             "gripper_feedback_age_ms": _gripper_feedback_age_ms(payload, arm),
+            # SENSOR age: pika serial sample -> gripper_server publish, stamped in
+            # the gripper server from the SDK's own reader-thread callback. The jaw
+            # telemetry arrives at ~18.5 Hz against a 30 Hz policy grid, so the
+            # measured percent the policy sees is typically 27 ms and at worst
+            # ~54 ms old. null when the publisher is too old to stamp it -- never a
+            # fabricated 0, which would repeat the mistake above.
+            "gripper_sample_age_ms": _gripper_sample_age_ms(payload, arm),
+            # What the model ACTUALLY received on its proprio gripper channel, and
+            # which signal produced it (--gripper-proprio-source: actual / command /
+            # hybrid_free / hybrid_jam / actual_no_command). Without this the A/B is
+            # unreadable after the fact: `gripper_meas_pct` and `gripper_cmd_pct`
+            # are both logged, but which one reached the policy was not.
+            "gripper_proprio_pct": _finite_float(
+                (gripper_proprio or {}).get(arm, {}).get("pct")
+                if isinstance((gripper_proprio or {}).get(arm), Mapping)
+                else None
+            ),
+            "gripper_proprio_source": (
+                (gripper_proprio or {}).get(arm, {}).get("source")
+                if isinstance((gripper_proprio or {}).get(arm), Mapping)
+                else None
+            ),
             # Force-control arming state. The FT software zero only runs after an
             # Init Motion (auto_tare_after_init_motion), so a rollout started
             # without one sits in awaiting_init_tare for its whole duration with
@@ -468,6 +493,30 @@ def _gripper_feedback_age_ms(payload: Mapping[str, Any], arm: str) -> float | No
         if container.get("valid") is False or container.get("stale") is True:
             continue
         value = _finite_float(container.get("feedback_age_ms"))
+        if value is not None:
+            return value
+    return None
+
+
+def _gripper_sample_age_ms(payload: Mapping[str, Any], arm: str) -> float | None:
+    """Age of the pika telemetry SAMPLE backing this step's measured percent.
+
+    Distinct from _gripper_feedback_age_ms, which only covers publish->receive of
+    the message. This is sample->publish: how stale the jaw reading already was
+    when the gripper server serialised it. The two add up to the real age of
+    `gripper_meas_pct`; logging only the transport half is what made the feedback
+    look instant (~0.05 ms) while the sample itself was 27-54 ms old.
+
+    None when the publisher did not stamp it (older gripper_server / bridge).
+    """
+    arm_payload = _arm_mapping(payload, arm)
+    for container_name in ("gripper", "gripper_state"):
+        container = arm_payload.get(container_name)
+        if not isinstance(container, Mapping):
+            continue
+        if container.get("valid") is False or container.get("stale") is True:
+            continue
+        value = _finite_float(container.get("sample_age_ms"))
         if value is not None:
             return value
     return None

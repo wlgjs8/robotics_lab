@@ -255,6 +255,74 @@ class PikaSerialGripperBackendTest(unittest.TestCase):
         self.assertEqual(held.reason, "gripper_deadband_hold")
         self.assertEqual(len(backend._grippers["left"].sent_angles), 1)
 
+    def test_sample_age_is_none_without_a_stampable_sdk(self) -> None:
+        # FakePikaGripper has no serial_comm: the age is UNKNOWN, and reporting
+        # 0 there would claim the jaw reading is fresh when nothing measured it.
+        backend = _pika_backend()
+
+        self.assertIsNone(backend.sample_age_sec("left"))
+
+    def test_sample_age_tracks_the_sdk_reader_callback(self) -> None:
+        class _Comm:
+            def __init__(self) -> None:
+                self.callback = lambda data: None
+
+        class _StampableGripper(FakePikaGripper):
+            def __init__(self, port: str) -> None:
+                super().__init__(port)
+                self.serial_comm = _Comm()
+
+        clock = {"now": 0.0}
+        backend = PikaSerialGripperBackend(
+            ports={"left": "/dev/ttyFAKE0"},
+            gripper_cls=_StampableGripper,
+            clock=lambda: clock["now"],
+            home_on_connect=False,
+        ).connect()
+
+        # Nothing received yet -> unknown, not 0.
+        self.assertIsNone(backend.sample_age_sec("left"))
+
+        comm = backend._grippers["left"].serial_comm
+        comm.callback({"motor": {"Position": 0.5, "Speed": 0.0, "Current": 0}})
+        clock["now"] = 0.027
+        self.assertAlmostEqual(backend.sample_age_sec("left"), 0.027)
+
+        # A non-motor frame carries no Position, so it must not refresh the age.
+        comm.callback({"motorstatus": {"Voltage": 24.0}})
+        clock["now"] = 0.054
+        self.assertAlmostEqual(backend.sample_age_sec("left"), 0.054)
+
+        # The next motor frame does.
+        comm.callback({"motor": {"Position": 0.6, "Speed": 0.1, "Current": 0}})
+        self.assertAlmostEqual(backend.sample_age_sec("left"), 0.0)
+
+    def test_sample_clock_keeps_the_sdk_callback_running(self) -> None:
+        seen: list[dict] = []
+
+        class _Comm:
+            def __init__(self) -> None:
+                self.callback = seen.append
+
+        class _StampableGripper(FakePikaGripper):
+            def __init__(self, port: str) -> None:
+                super().__init__(port)
+                self.serial_comm = _Comm()
+
+        backend = PikaSerialGripperBackend(
+            ports={"left": "/dev/ttyFAKE0"},
+            gripper_cls=_StampableGripper,
+            clock=lambda: 0.0,
+            home_on_connect=False,
+        ).connect()
+
+        frame = {"motor": {"Position": 0.5}}
+        backend._grippers["left"].serial_comm.callback(frame)
+
+        # The SDK's own parser still receives every frame: the wrapper must not
+        # swallow the data the motor_data dict is built from.
+        self.assertEqual(seen, [frame])
+
     def test_current_percent_reads_live_motor(self) -> None:
         backend = _pika_backend(min_rad=0.0, max_rad=1.75)
         backend._grippers["left"].position = 0.875

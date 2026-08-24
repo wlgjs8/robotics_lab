@@ -1625,6 +1625,48 @@ def _main_with_subcommands(argv: list[str]) -> int:
              "0 = off (DEFAULT). Absolute and binary modes both honour it.",
     )
     flow_infer.add_argument(
+        "--gripper-proprio-source",
+        choices=("actual", "command", "hybrid"),
+        default="actual",
+        help="WHICH gripper signal feeds the model's proprio channel (proprio modes that carry an "
+             "absolute opening: velocity_grip / velocity_grav / the 14-D pose state). "
+             "actual (DEFAULT, and what every run before 2026-08-19 did) = the MEASURED jaw "
+             "percent; matches training, where the pika UMI converter takes gripper col0 "
+             "(measured) and not col1 (commanded). "
+             "command = the opening percent this runner last SENT (post close-bias / close-snap / "
+             "deadband): removes the measured channel's sample staleness (the jaw telemetry "
+             "updates at ~18.5 Hz against the 30 Hz policy grid, so proprio is 27-54 ms old) but "
+             "DELETES the contact signal -- a jaw jammed on a bolt reads 'fully closed' instead of "
+             "'stalled at the bolt width', and the channel becomes a pure function of the model's "
+             "own last action (no physical anchor). "
+             "hybrid = command while the jaw travels freely, measured once it stalls against "
+             "something (see --gripper-proprio-jam-gap-percent).",
+    )
+    flow_infer.add_argument(
+        "--gripper-proprio-jam-gap-percent",
+        type=float,
+        default=3.0,
+        help="hybrid jam detector: the jaw counts as jammed only when it sits MORE than this many "
+             "opening percent away from the commanded value (DEFAULT 3.0) AND has stopped moving "
+             "(--gripper-proprio-jam-stall-steps). Only used by --gripper-proprio-source hybrid.",
+    )
+    flow_infer.add_argument(
+        "--gripper-proprio-jam-stall-steps",
+        type=int,
+        default=3,
+        help="hybrid jam detector: how many consecutive executed policy steps (~33 ms each) the "
+             "measured opening must stay within --gripper-proprio-jam-move-eps-percent before the "
+             "jaw counts as stalled rather than travelling (DEFAULT 3 = ~100 ms, just over the "
+             "measured 105 ms command->first-motion dead time). 0 = treat any gap as a jam.",
+    )
+    flow_infer.add_argument(
+        "--gripper-proprio-jam-move-eps-percent",
+        type=float,
+        default=0.5,
+        help="hybrid jam detector: peak-to-peak measured opening (percent) allowed inside the stall "
+             "window and still count as 'not moving' (DEFAULT 0.5).",
+    )
+    flow_infer.add_argument(
         "--chunk-knot-filter-hz",
         type=float,
         default=0.0,
@@ -2776,6 +2818,21 @@ def _main_with_subcommands(argv: list[str]) -> int:
             source.gripper_command_deadband_percent = float(
                 getattr(args, "gripper_command_deadband_percent", 0.0) or 0.0
             )
+            # Which gripper signal the model's proprio channel carries. DEFAULT
+            # "actual" = the measured jaw, i.e. the behaviour of every run before
+            # this flag existed; "command" / "hybrid" are the A/B arms.
+            source.gripper_proprio_source = str(
+                getattr(args, "gripper_proprio_source", "actual") or "actual"
+            )
+            source.gripper_proprio_jam_gap_percent = float(
+                getattr(args, "gripper_proprio_jam_gap_percent", 3.0) or 0.0
+            )
+            source.gripper_proprio_jam_stall_steps = int(
+                getattr(args, "gripper_proprio_jam_stall_steps", 3) or 0
+            )
+            source.gripper_proprio_jam_move_eps_percent = float(
+                getattr(args, "gripper_proprio_jam_move_eps_percent", 0.5) or 0.0
+            )
             _knot_hz = float(getattr(args, "chunk_knot_filter_hz", 0.0) or 0.0)
             if _knot_hz > 0.0:
                 from scipy.signal import firwin
@@ -2832,6 +2889,26 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 detail = ""
             print(
                 f"[flow-infer] gripper action mode = {gripper_mode}{detail}",
+                flush=True,
+            )
+            # Always announced (both arms of the A/B look identical in a log
+            # otherwise, and this channel changes what the policy SEES).
+            _proprio_src = str(getattr(source, "gripper_proprio_source", "actual"))
+            _proprio_detail = (
+                " (MEASURED jaw; matches training col0)"
+                if _proprio_src == "actual"
+                else (
+                    " (last SENT command; no contact/jam signal)"
+                    if _proprio_src == "command"
+                    else (
+                        f" (command while free, measured when stalled: gap>"
+                        f"{float(getattr(source, 'gripper_proprio_jam_gap_percent', 3.0)):g}% for "
+                        f"{int(getattr(source, 'gripper_proprio_jam_stall_steps', 3))} steps)"
+                    )
+                )
+            )
+            print(
+                f"[flow-infer] gripper proprio source = {_proprio_src}{_proprio_detail}",
                 flush=True,
             )
             geometry_status = _load_runtime_geometry_status(config)
