@@ -129,7 +129,9 @@ QueueSyncDecision QueueSyncController::step(const Observation& obs) {
             // silencing that one with no way to earn evidence would be worse than
             // the backlog. One probe every warmup_probe_interval keeps the
             // evidence path alive and caps the growth at 1/N of the send rate.
-            ++warmup_sends_;
+            // SENDS, not ticks: a held tick did not put anything in the box's
+            // queue, so it is no evidence either way about whether the box consumes.
+            if (obs.sent) ++warmup_sends_;
             if (last_fill_ > 0) warmup_fill_evidenced_ = true;
             if (!warmup_fill_evidenced_ &&
                 warmup_sends_ >= config_.warmup_unevidenced_sends) {

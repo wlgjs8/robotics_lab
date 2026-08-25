@@ -303,20 +303,44 @@ struct HoldRun {
     rb_servo::QueueSyncDecision last;
 };
 
+// MODELS THE REAL CALLER (ArmWorker), not an idealised one. Two things it must
+// reproduce or the test proves nothing about the deployed loop:
+//
+//   * the law is stepped on EVERY cadence tick, held or not — it is a state machine
+//     over ticks, and the warmup probe countdown drains on the held ones;
+//   * a HELD tick carries no fresh RBACK (nothing was sent) and does not count as a
+//     send, so `fill_valid` and `sent` are both false there.
+//
+// The version of this helper that stepped every tick with `fill_valid = true` is why
+// the 2026-08-26 deadlock got past these tests: the law was right and the caller was
+// not, and nothing here modelled the caller.
 HoldRun runReportedFill(rb_servo::QueueSyncController& ctrl, int ticks,
                         const std::vector<int>& reported) {
     HoldRun r;
     uint64_t now_ns = 0;
     uint64_t seq = 0;
+    bool hold_next = false;
     for (int i = 0; i < ticks; ++i) {
         rb_servo::QueueSyncController::Observation obs;
         obs.streaming = true;
-        obs.fill_valid = true;
-        obs.fill = reported[static_cast<std::size_t>(i) % reported.size()];
-        obs.rback_sequence = ++seq;
         obs.now_ns = now_ns;
+        if (hold_next) {
+            obs.fill_valid = false;
+            obs.fill = -1;
+            obs.rback_sequence = 0;
+            obs.sent = false;
+        } else {
+            obs.fill_valid = true;
+            obs.fill = reported[static_cast<std::size_t>(i) % reported.size()];
+            obs.rback_sequence = ++seq;
+            obs.sent = true;
+        }
         const rb_servo::QueueSyncDecision d = ctrl.step(obs);
+        // Count the DECISION, matching warmup_holds_total's own bookkeeping; the
+        // observation above is built from the PREVIOUS decision, because that is the
+        // one the caller already acted on.
         if (d.hold_send) ++r.holds; else ++r.sends;
+        hold_next = d.hold_send;
         now_ns += static_cast<uint64_t>((kNominalPeriodUs + d.period_trim_us) * 1000.0);
         r.last = d;
     }
@@ -375,8 +399,53 @@ bool testWarmupHoldClearsOnFirstEvidence() {
     return true;
 }
 
+// *** THE STREAM MUST NEVER STOP FOR GOOD. ***
+//
+// Measured on hardware 2026-08-26: a box that reported fill 0 on its first ten sends
+// put the law into its warmup back-off, the caller took the hold branch, and because
+// the caller stepped the law ONLY on ticks that sent, the law was never asked again.
+// `hold_send` stayed latched for 42 s: 11 sends total, the arm never moved, and the
+// force overlay — which had no idea its command was not reaching the wire — wound the
+// command 54 deg away until the tracking latch fired.
+//
+// The back-off itself is correct and stays: a box pinned at 0 must not have commands
+// buried in a queue nobody can see. What must hold is that it keeps PROBING.
+bool testWarmupBackoffKeepsProbingAndNeverStopsTheStream() {
+    rb_servo::QueueSyncConfig cfg = testConfig();
+    rb_servo::QueueSyncController ctrl(cfg);
+
+    // A box that never reports depth — the exact hardware case.
+    const HoldRun r = runReportedFill(ctrl, 2000, {0});
+
+    // The stream survives: sends keep going out at the probe duty cycle.
+    RB_CHECK(r.sends > 0);
+    RB_CHECK(r.holds > 0);
+    // ...and not merely the handful before the first hold. Under the deadlock this
+    // was exactly 11 for any number of ticks.
+    RB_CHECK(r.sends > 50);
+    return true;
+}
+
+// A HELD tick is not a send, so it must not spend the unevidenced-send budget. If it
+// did, the budget would drain while nothing was on the wire and the back-off would
+// mean something different from what it says.
+bool testHeldTicksDoNotCountAsSends() {
+    rb_servo::QueueSyncConfig cfg = testConfig();
+    rb_servo::QueueSyncController ctrl(cfg);
+    const HoldRun r = runReportedFill(ctrl, 400, {0});
+    // The first `warmup_unevidenced_sends` ticks all send (nothing is held yet),
+    // then the duty cycle starts. If holds counted as sends the ratio would be far
+    // more hold-heavy than one probe per interval.
+    RB_CHECK(r.sends >= cfg.warmup_unevidenced_sends);
+    const double duty = static_cast<double>(r.sends) / static_cast<double>(r.sends + r.holds);
+    RB_CHECK(duty > 1.0 / (cfg.warmup_probe_interval + 1));
+    return true;
+}
+
 int main() {
     const std::vector<NamedTest> tests = {
+        {"warmup back-off keeps probing", testWarmupBackoffKeepsProbingAndNeverStopsTheStream},
+        {"held ticks are not sends", testHeldTicksDoNotCountAsSends},
         {"locks measured drift to target", testLocksMeasuredDriftToTarget},
         {"unregulated queue grows without bound", testUnregulatedQueueGrowsWithoutBound},
         {"drains large backlog quickly", testDrainsLargeBacklogQuickly},

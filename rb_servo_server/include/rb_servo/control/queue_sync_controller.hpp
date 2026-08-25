@@ -60,6 +60,17 @@ public:
         int fill = -1;
         uint64_t rback_sequence = 0;   // increments per parsed RBACK (freshness)
         uint64_t now_ns = 0;
+        // Did a servo_j actually reach the wire on this tick? A HELD tick is still a
+        // tick the law must see — that is what drains the warmup probe countdown and
+        // what advances the warmup timeout — but it is not a SEND, so it must not
+        // count toward the unevidenced-send budget.
+        //
+        // *** THE LAW MUST BE STEPPED EVERY CADENCE TICK, HELD OR NOT. *** Calling it
+        // only on ticks that sent is a deadlock: `hold_send` latches, the caller then
+        // takes the hold branch, the law is never stepped again, and the decision can
+        // never change. Measured on hardware 2026-08-26 — 11 steps, then the stream
+        // stopped for 42 s while the arm sat still and the command ran 54 deg away.
+        bool sent = false;
     };
 
     explicit QueueSyncController(QueueSyncConfig config);

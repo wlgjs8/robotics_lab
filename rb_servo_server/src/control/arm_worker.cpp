@@ -637,6 +637,24 @@ void ArmWorker::run() {
                     makeBackendTiming(now, now)
                 );
                 storeSendResult(*command, result, makeBackendTiming(now, now));
+                // STEP THE LAW ON A HELD TICK TOO. It is a state machine over ticks,
+                // not over sends: the warmup probe countdown drains here and the
+                // warmup timeout advances here. Stepping it only when a send happened
+                // deadlocks it — `hold_send` latches, this branch is taken forever,
+                // and the law is never asked again (measured 2026-08-26: 11 steps,
+                // then 42 s of silence with the arm still and the command 54 deg out).
+                if (owns_cadence) {
+                    QueueSyncController::Observation obs;
+                    obs.streaming = true;
+                    obs.fill_valid = false;   // nothing was sent, so no fresh RBACK
+                    obs.fill = -1;
+                    obs.rback_sequence = 0;
+                    obs.now_ns = now;
+                    obs.sent = false;
+                    const QueueSyncDecision decision = queue_sync_.step(obs);
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    queue_sync_decision_ = decision;
+                }
             } else {
                 const uint64_t send_start_ns = nowSteadyNs();
                 SendServoJResult result = backend_->sendServoJ(*command);
@@ -656,6 +674,7 @@ void ArmWorker::run() {
                     obs.fill = result.queue_ack.fill;
                     obs.rback_sequence = result.queue_ack.sequence;
                     obs.now_ns = send_end_ns;
+                    obs.sent = true;
                     const QueueSyncDecision decision = queue_sync_.step(obs);
                     std::lock_guard<std::mutex> lock(mutex_);
                     queue_sync_decision_ = decision;
