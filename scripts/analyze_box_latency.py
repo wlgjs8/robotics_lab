@@ -314,6 +314,12 @@ def analyze(path: Path, arms: list[str], start_sec: float, duration_sec: float,
             f"{arm}_rback_observed", f"{arm}_rback_fill", f"{arm}_rback_fill_min",
             f"{arm}_rback_fill_max", f"{arm}_rback_seq", f"{arm}_rback_parsed_total",
             f"{arm}_rback_drained_total", f"{arm}_rback_malformed_total",
+            f"{arm}_qsync_enabled", f"{arm}_qsync_trim_us", f"{arm}_qsync_fill_lpf",
+            f"{arm}_qsync_integral_us", f"{arm}_qsync_phase", f"{arm}_qsync_locked",
+            f"{arm}_qsync_underrun_events", f"{arm}_qsync_stall_events",
+            f"{arm}_qsync_highwater_events", f"{arm}_qsync_redrain_events",
+            f"{arm}_qsync_no_consumption_events", f"{arm}_state_source",
+            f"{arm}_init_state_info", f"{arm}_servo_enabled",
             f"{arm}_q_ref_valid", f"{arm}_q_actual_valid",
             f"{arm}_state_age_us", f"{arm}_send_start_ns", f"{arm}_send_end_ns",
             f"{arm}_reqdata_exchange_sequence", f"{arm}_reqdata_call_duration_us",
@@ -424,8 +430,24 @@ def analyze(path: Path, arms: list[str], start_sec: float, duration_sec: float,
                 if int(np.count_nonzero(reported)) > 100:
                     tt = t[reported]
                     ff = fill[reported]
-                    # Skip the startup charge-up so it cannot bias the slope.
-                    warm = tt >= tt[0] + 0.2
+                    # Skip the startup charge-up so it cannot bias the slope. The
+                    # fixed 0.2 s guess was far too short -- a measured convergence
+                    # took ~6 s, so the fit swallowed the warmup ramp and reported
+                    # DRIFTING on a queue that was simply still settling. When the
+                    # regulator logs its phase, use the real thing: fit from the
+                    # first tick it reached Track. Everything after that is kept,
+                    # including a later fall OUT of Track, because dropping those
+                    # ticks would hide exactly the failure worth seeing.
+                    warm_from = tt[0] + 0.2
+                    phase = cols.get(f"{arm}_qsync_phase")
+                    if isinstance(phase, np.ndarray) and phase.dtype == object:
+                        track = np.flatnonzero(phase[reported] == "track")
+                        if track.size:
+                            warm_from = tt[track[0]]
+                            qa["drift_fit_from_sec"] = float(warm_from)
+                            qa["drift_fit_gate"] = "qsync phase reached track"
+                    warm = tt >= warm_from
+                    qa["drift_fit_skipped_ticks"] = int(np.count_nonzero(~warm))
                     if int(np.count_nonzero(warm)) > 100:
                         slope, intercept = np.polyfit(tt[warm], ff[warm], 1)
                         resid = ff[warm] - (slope * tt[warm] + intercept)
@@ -443,6 +465,118 @@ def analyze(path: Path, arms: list[str], start_sec: float, duration_sec: float,
             if qa.get("parsed_total") and qa.get("drained_total"):
                 qa["parsed_fraction_of_drained"] = qa["parsed_total"] / qa["drained_total"]
             arm_report["rback_queue"] = qa
+
+        # The regulator beside the plant. Reported separately because a fill that
+        # looks wrong and a controller that IS wrong are different findings: the
+        # trim is the actuator, so a trim pinned at its clamp is saturation, not
+        # a tuning opinion.
+        enabled = cols.get(f"{arm}_qsync_enabled")
+        if isinstance(enabled, np.ndarray) and np.any(np.isfinite(enabled)) and np.any(enabled > 0):
+            on = np.isfinite(enabled) & (enabled > 0)
+            qs: dict = {"enabled_ticks": int(np.count_nonzero(on))}
+            trim = cols.get(f"{arm}_qsync_trim_us")
+            if isinstance(trim, np.ndarray):
+                v = trim[on]
+                v = v[np.isfinite(v)]
+                if v.size:
+                    qs["trim_us"] = {
+                        "median": float(np.median(v)), "p5": float(np.percentile(v, 5)),
+                        "p95": float(np.percentile(v, 95)),
+                        "min": float(v.min()), "max": float(v.max()),
+                    }
+            for key, name in (("fill_lpf", "fill_lpf"), ("integral_us", "integral_us")):
+                series = cols.get(f"{arm}_qsync_{key}")
+                if isinstance(series, np.ndarray):
+                    v = series[on]
+                    v = v[np.isfinite(v)]
+                    if v.size:
+                        qs[name] = {"median": float(np.median(v)),
+                                    "last": float(v[-1]), "max_abs": float(np.abs(v).max())}
+            locked = cols.get(f"{arm}_qsync_locked")
+            if isinstance(locked, np.ndarray):
+                v = locked[on]
+                v = v[np.isfinite(v)]
+                if v.size:
+                    qs["locked_fraction"] = float(np.count_nonzero(v > 0) / v.size)
+            phase = cols.get(f"{arm}_qsync_phase")
+            if isinstance(phase, np.ndarray) and phase.dtype == object:
+                names, counts = np.unique(phase[on], return_counts=True)
+                total = int(counts.sum())
+                qs["phase_fractions"] = {str(n): int(c) / total for n, c in zip(names, counts)}
+                qs["phase_last"] = str(phase[on][-1])
+            events = {}
+            for key in ("underrun", "stall", "highwater", "redrain", "no_consumption"):
+                series = cols.get(f"{arm}_qsync_{key}_events")
+                if isinstance(series, np.ndarray):
+                    v = series[np.isfinite(series)]
+                    if v.size:
+                        events[key] = int(v.max())
+            if events:
+                qs["events_total"] = events
+            arm_report["queue_sync"] = qs
+
+        # WHICH read path served each tick, and how often it had to hold. This is
+        # the number that decides whether the pipelined (non-blocking) state read is
+        # usable on real hardware; `state_age_us` cannot show it, because a held
+        # state keeps its original stamp and so reports an honest -- but
+        # indistinguishable -- age.
+        src = cols.get(f"{arm}_state_source")
+        if isinstance(src, np.ndarray) and src.dtype == object:
+            names, counts = np.unique(src, return_counts=True)
+            total = int(counts.sum())
+            if total:
+                dist = {str(n): int(c) for n, c in zip(names, counts)}
+                held = sum(c for n, c in dist.items() if "held" in n or "hold" in n)
+                runs = []
+                is_held = np.array(["held" in str(x) or "hold" in str(x) for x in src])
+                run = 0
+                for v in is_held:
+                    if v:
+                        run += 1
+                    elif run:
+                        runs.append(run)
+                        run = 0
+                if run:
+                    runs.append(run)
+                arm_report["state_source"] = {
+                    "distribution": dist,
+                    "held_fraction": held / total,
+                    "held_ticks": int(held),
+                    "longest_held_run_ticks": int(max(runs)) if runs else 0,
+                    "held_runs": len(runs),
+                }
+
+        # The box's own activation stage (init_state_info; 6 = servo on). This
+        # exists to answer whether the startup queue backlog is streamed into a
+        # box that has not finished activating -- if so, gating the stream on
+        # activation removes it at the source; if the box was already at 6, that
+        # gate is a no-op and the cause is elsewhere.
+        stage = cols.get(f"{arm}_init_state_info")
+        enabled = cols.get(f"{arm}_servo_enabled")
+        if isinstance(stage, np.ndarray) and np.any(np.isfinite(stage)):
+            act: dict = {}
+            fin = stage[np.isfinite(stage)]
+            if fin.size:
+                names, counts = np.unique(fin, return_counts=True)
+                act["stage_histogram"] = {int(n): int(c) for n, c in zip(names, counts)}
+            if isinstance(enabled, np.ndarray) and np.any(np.isfinite(enabled)):
+                on = np.isfinite(enabled) & (enabled > 0)
+                act["enabled_fraction"] = float(np.count_nonzero(on) / on.size)
+                if np.any(on) and not on[0]:
+                    first = int(np.flatnonzero(on)[0])
+                    act["enabled_first_tick"] = first
+                    act["enabled_first_sec"] = float(t[first])
+                elif np.all(on):
+                    act["enabled_from_first_tick"] = True
+            # Was the queue already growing before the box was enabled?
+            fill_col = cols.get(f"{arm}_rback_fill")
+            if (isinstance(fill_col, np.ndarray) and isinstance(enabled, np.ndarray)
+                    and "enabled_first_tick" in act):
+                pre = fill_col[: act["enabled_first_tick"]]
+                pre = pre[np.isfinite(pre) & (pre >= 0)]
+                if pre.size:
+                    act["fill_max_before_enabled"] = int(pre.max())
+            arm_report["box_activation"] = act
 
         seq = cols.get(f"{arm}_reqdata_exchange_sequence")
         if isinstance(seq, np.ndarray) and np.any(np.isfinite(seq)):
@@ -644,6 +778,62 @@ def format_report(report: dict) -> str:
                     lines.append(
                         f"                 parsed {qa['parsed_total']} RBACK of {qa['drained_total']} drained "
                         f"({qa['parsed_fraction_of_drained'] * 100:.1f} %)")
+                if "drift_fit_from_sec" in qa:
+                    lines.append(
+                        f"                 drift fit from t={qa['drift_fit_from_sec']:.2f}s "
+                        f"({qa['drift_fit_gate']}); skipped {qa.get('drift_fit_skipped_ticks', 0)} warmup tick(s)")
+
+        ss = r.get("state_source")
+        if ss:
+            shown = "  ".join(f"{n}:{c}" for n, c in sorted(
+                ss["distribution"].items(), key=lambda kv: -kv[1]))
+            lines.append(f"  state source   {shown}")
+            lines.append(
+                f"                 held {ss['held_ticks']} tick(s) "
+                f"({ss['held_fraction'] * 100:.2f} %) in {ss['held_runs']} run(s), "
+                f"longest {ss['longest_held_run_ticks']} tick(s)")
+
+        act = r.get("box_activation")
+        if act:
+            hist = act.get("stage_histogram", {})
+            shown = "  ".join(f"{k}:{v}" for k, v in sorted(hist.items()))
+            lines.append(f"  box activation  init_state_info  {shown}   (6 = servo on)")
+            if "enabled_first_sec" in act:
+                lines.append(
+                    f"                 servo_enabled first true at t={act['enabled_first_sec']:.3f}s "
+                    f"(tick {act['enabled_first_tick']})"
+                    + (f"; RBACK fill reached {act['fill_max_before_enabled']} BEFORE that"
+                       if "fill_max_before_enabled" in act else ""))
+            elif act.get("enabled_from_first_tick"):
+                lines.append("                 servo_enabled was already true on the first logged tick "
+                             "-- an activation gate would not have changed this run")
+
+        qs = r.get("queue_sync")
+        if qs:
+            trim = qs.get("trim_us", {})
+            if trim:
+                lines.append(
+                    f"  qsync trim     median={trim['median']:+.1f} us  "
+                    f"p5..p95={trim['p5']:+.1f}..{trim['p95']:+.1f}  "
+                    f"min/max={trim['min']:+.1f}/{trim['max']:+.1f}")
+            integ = qs.get("integral_us", {})
+            if integ:
+                lines.append(
+                    f"                 integral last={integ['last']:+.2f} us "
+                    f"(median {integ['median']:+.2f}, |max| {integ['max_abs']:.2f}) "
+                    f"-- this is the learned clock mismatch")
+            if "phase_fractions" in qs:
+                shown = "  ".join(f"{n}:{f * 100:.1f}%" for n, f in sorted(
+                    qs["phase_fractions"].items(), key=lambda kv: -kv[1]))
+                lines.append(f"                 phase: {shown}  (last={qs.get('phase_last', '?')})")
+            if "locked_fraction" in qs:
+                lines.append(f"                 locked {qs['locked_fraction'] * 100:.1f} % of regulated ticks")
+            ev = qs.get("events_total", {})
+            if ev:
+                hot = {k: v for k, v in ev.items() if v}
+                lines.append(
+                    "                 events: " + ("  ".join(f"{k}={v}" for k, v in ev.items()))
+                    + ("" if not hot else "   <-- nonzero: " + ", ".join(hot)))
 
         if "read_call_advance_fraction" in r:
             lines.append(f"  read calls    advanced on {r['read_call_advance_fraction'] * 100:.1f} % of ticks")

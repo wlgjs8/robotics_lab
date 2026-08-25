@@ -77,8 +77,6 @@ tests/test_flow_inference_gripper_mode.py
 tests/test_flow_inference_tcp_targetpose.py
 tests/test_flow_matching.py
 tests/test_flow_training.py
-tests/test_force_recovery.py
-tests/test_force_recovery_main.py
 tests/test_geometry_safety.py
 tests/test_gripper_proprio_source.py
 tests/test_gripper_runtime.py

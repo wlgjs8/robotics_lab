@@ -182,16 +182,28 @@ deprecated입니다. 지원되는 robot-control profile은 500 Hz이며
 `docs/runbooks/rbpodo_servo_acceptance.md`와
 `docs/runbooks/real_robot_readonly.md`를 봅니다.
 
-지원되는 500 Hz Servo J profile은 `t1=0.002`, `t2=0.021`, `gain=1.0`을
-고정합니다. 컨트롤러가 `gain`/`alpha`를 내부에서 `0.1` 스케일하므로
-script값 `alpha=10.0`은 실효 `1.0`, 즉 컨트롤러 내부 LPF off입니다. 하지만
-physical real robot에서는 LPF-off profile이 jerk/jitter를 키우므로 tracked
-real stack은 script-level `servo_alpha: 1.0`(실효 약 `0.1`)을 사용해
-컨트롤러 LPF를 남겨 둡니다. Controller-simulation diagnostic transparency가
-필요할 때만 `servo_alpha: 10.0` profile을 씁니다. 반응성·부드러움·정확성의
-1차 튜닝 표면은 여전히 서버 측 제어루프(`TcpPoseTarget` →
-`cartesian_control.pose_track_smd`)입니다. 자세한 내용은
-`docs/servo_backend_contract.md`의 "Servo J Streaming Profiles"를 봅니다.
+지원되는 500 Hz Servo J profile은 `t1=0.002`, `t2=0.021`, `gain=1.0`,
+`alpha=10.0`을 **전부 고정**하는 transparent-executor profile입니다. 컨트롤러가
+`gain`/`alpha`를 내부에서 `0.1` 스케일하므로 script값 `alpha=10.0`은 실효 `1.0`,
+즉 **컨트롤러 내부 LPF off**이며, controller-simulation과 physical real 양쪽 다
+이 값을 씁니다(`config/stack_real.yaml`, `config/stack_sim.yaml`, 양팔).
+이전 문서는 "LPF-off가 hardware에서 jerk/jitter를 키운다"는 이유로 real stack에
+`servo_alpha: 1.0`을 명시했는데, 그 관측 자체는 사실이었으나 원인은 filter가
+아니라 상류 pure-pursuit 명령 리플이었습니다(9.5 Hz, 속도 ~23 %). 리플을 고친
+뒤 LPF는 계속 off입니다 — 자세한 경위는 `docs/servo_backend_contract.md`의
+"Servo J Streaming Profiles"를 봅니다. 컨트롤러 LPF를 끄면 반응성·부드러움·
+정확성의 소유권이 전부 서버 측 제어루프(`TcpPoseTarget` →
+`cartesian_control.pose_track_smd`)로 넘어오며, profile을 고정하는 이유가
+바로 그것입니다.
+
+제어박스 firmware **v8.7.3**은 이 스트림을 FIFO로 소비하고 그 큐 점유량이 곧
+box-side 지연이므로, 서버가 큐 깊이를 직접 제어합니다. `stack_real.yaml`이
+이것을 켭니다: `queue_sync.enable: true`, `target_fill: 5`, `servo.io_model:
+worker`(트림이 팔별이라 공유 loop period로는 불가능). **`stack_sim.yaml`은
+켜지 않습니다** — `io_model: direct`에 `queue_sync` 섹션이 없어 controller-
+simulation lane은 무규제로 스트리밍하며, 그 지연은 real lane과 비교 대상이
+아닙니다. `docs/servo_backend_contract.md`의 "Control-Box Command Queue
+(firmware v8.7.3)"와 `docs/runbooks/box_latency_offline.md`를 봅니다.
 
 `rbpodo` joint state와 command는 raw controller degree 값을 보존합니다.
 tracked real rbpodo template의 supported safety range는 명시적 per-joint

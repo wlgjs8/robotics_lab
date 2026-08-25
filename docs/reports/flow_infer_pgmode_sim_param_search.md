@@ -7,6 +7,14 @@
 
 > 최종 경로는 `make run MODE=sim`에서 추적되는 `stack_sim.yaml`만 사용한다.
 
+> **갱신 (2026-08-26).** 이 리포트는 2026-07-13 시점 스냅샷이며 그대로 보존한다.
+> 아래 `servo_alpha` 표의 "real 1.0"은 이후 뒤집혔다: tracked real stack은
+> 2026-08-25부터 `servo_alpha: 10.0`(컨트롤러 LPF off)이고, 당시 근거였던
+> jerk/jitter의 원인은 filter가 아니라 상류 pure-pursuit 명령 리플로 밝혀졌다.
+> 또한 제어박스 firmware가 v8.7.3(FIFO)으로 올라가 box 지연이 큐 점유량과
+> 같아졌으므로 여기의 지연 관련 수치는 재측정 대상이다. 현재 profile은
+> `docs/servo_backend_contract.md`의 "Servo J Streaming Profiles"를 본다.
+
 ## 결론
 
 오프라인 서치와 실제 제어박스 pgmode simulation은 같은 방향을 가리켰다.

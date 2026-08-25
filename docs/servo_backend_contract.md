@@ -131,6 +131,34 @@ Worker mode is a supported real-mode path (the mock-only refusal was retired). I
 the path control-box queue sync requires: each arm owns its own send cadence so the
 per-arm period trim can lock that arm's stream to its box's clock.
 
+**A cadence-owning worker is a real-time thread and must be scheduled like one.**
+When `queue_sync` is on, the worker no longer just does blocking I/O whenever it
+can — it owns its arm's 500 Hz send instant. It was nonetheless created as a plain
+`SCHED_OTHER` thread with no affinity while only the servo loop got
+`SCHED_FIFO`/`cpu_core`. Measured on the real stack 2026-08-26: worker-cached
+state age sat at ~1 ms median — exactly half the 2 ms read period, which is the
+healthy inter-thread phase offset — with a tail to 7.6 ms against the 8 ms
+`worker_state_max_age_periods` budget. That tail correlated with neither
+`reqdata` duration nor a lengthened send period, so it was not the box and not
+the trim: the thread was simply not scheduled.
+
+`servo.worker_realtime_priority` and `servo.worker_cpu_core_left` / `_right`
+apply `SCHED_FIFO` + affinity at worker thread entry, mirroring
+controller-manager's `Arm::run` (`set_affinity(cpu)` + `set_fifo(80)`). Both
+default off, so this is opt-in per config. Validation is fail-closed on every way
+of getting a config that LOOKS isolated but is not: a priority outside `[1, 99]`,
+a worker core equal to `servo.cpu_core` (contending with the loop it feeds), both
+arms on one core, or cores pinned with no FIFO priority (a dedicated core that
+still yields to any CFS thread landing on it). Failures to apply are logged
+loudly and are not fatal — a refused `SCHED_FIFO` leaves a worker that still
+sends on time most of the time, so the fallback looks healthy and hides exactly
+the regression the setting exists to remove.
+
+Core placement is a host-level decision, not a free parameter: the tracked real
+config uses cpu1/cpu2 (isolated by `isolcpus=domain,managed_irq,1-3`, carrying
+only kernel threads) with the loop on cpu3. controller-manager hard-pins its own
+arms to cpu1/cpu2, so the two stacks must not drive those cores at once.
+
 ## ArmWorker Command Policy
 
 Streaming servo requests are latest-wins. If a pending command is overwritten before dispatch, the worker must expose drop/overwrite telemetry. This is intentional for servo targets but must not be silent.
@@ -143,6 +171,15 @@ The internal telemetry field for overwritten commands is
 object.
 
 Lifecycle commands such as reset/stop should not be silently overwritten by streaming servo targets. They should use a separate lane or explicit policy.
+
+With `queue_sync.enable: true` the worker owns its arm's send cadence and must
+send on EVERY cadence tick, repeating the last setpoint when the mailbox is
+empty. An empty mailbox is the normal case, not an idle one: two ~500 Hz sources
+at arbitrary phase leave about half the ticks drained, and treating that as
+"nothing to send" measured **231 Hz of real sends against a 500 Hz loop**, which
+starves the box queue instead of regulating it. A servo stream repeats its last
+value by definition, so the repeat is the correct behaviour and the short
+latency that starvation produces is not a success signal.
 
 ## RbpodoBackend Semantics
 
@@ -508,13 +545,14 @@ vendor-recommended range are accepted with a WARN, not refused
   scales `gain`/`alpha` by `0.1` internally (vendor-confirmed), so the script
   value we send is 10x the effective value. The effective vendor range
   `0 < alpha <= 1` therefore maps to script-level `0 < servo_alpha <= 10`, and
-  `servo_alpha: 10.0` means "effective 1.0 = inner LPF OFF". The tracked real
-  robot profile intentionally uses `servo_alpha: 1.0` (effective roughly `0.1`)
-  to retain controller-side filtering after LPF-off motion showed jerk/jitter on
-  hardware. The range check is in script-level units so both the real profile
-  (`1.0`) and the diagnostic LPF-off profile (`10.0`) are valid. (Earlier docs
-  using a sub-unit script-level alpha range were mixing effective and
-  script-level units and are superseded by this range.)
+  `servo_alpha: 10.0` means "effective 1.0 = inner LPF OFF". **The tracked real
+  robot profile uses `servo_alpha: 10.0` — the controller LPF is off on physical
+  hardware** (`config/stack_real.yaml`, both arms, since 2026-08-25). The range
+  check is in script-level units so both that profile and a filtered `1.0` are
+  valid input. (Earlier docs using a sub-unit script-level alpha range were
+  mixing effective and script-level units and are superseded by this range.
+  Earlier docs naming `1.0` as the tracked real profile are superseded by the
+  Servo J Streaming Profiles section below.)
 
 Deprecated aliases remain accepted with warnings while configs migrate:
 
@@ -536,27 +574,37 @@ aliases only.
 
 ### Servo J Streaming Profiles
 
-The supported 500 Hz `move_servo_j` profiles keep `t1`, `t2`, and `gain` fixed
-and vary only the script-level `alpha` according to target environment:
+The supported 500 Hz `move_servo_j` profile is a **fixed transparent executor**:
+all four fields are pinned, in every environment, and none of them is a tuning
+knob.
 
 ```yaml
 servo_t1_sec: 0.002   # == 1 / servo.rate_hz at 500 Hz (command arrival/period)
 servo_t2_sec: 0.021   # controller hold time, just above the 0.02 vendor floor
-servo_gain:   1.0      # unity, no command scaling
+servo_gain:   1.0     # unity, no command scaling
+servo_alpha: 10.0     # script-level; effective 1.0 => controller inner LPF OFF
 ```
 
-Profile-specific alpha:
+`stack_real.yaml` and `stack_sim.yaml` both pin this profile on both arms. The
+point of `alpha=10.0` is ownership: with the controller LPF off, ALL smoothing
+belongs to the `rb_servo_server` control loop, which is the only place it can be
+measured, bounded, and tested.
 
-- Physical real robot: `servo_alpha: 1.0` (effective roughly `0.1`). This keeps
-  Rainbow's inner LPF active enough to reduce jerk/jitter observed with LPF off.
-- Controller-simulation / diagnostic transparency: `servo_alpha: 10.0`
-  (effective `1.0`). This disables Rainbow's inner LPF and is useful when
-  controller-side smoothing must be removed from acceptance evidence.
+**On the superseded "LPF off produces jerk/jitter" note.** That observation was
+reproducible, and it is why earlier revisions of this document named
+`servo_alpha: 1.0` as the real profile. The cause was not the LPF decision: with
+the filter off, a ~23 % velocity ripple at 9.5 Hz became visible in the
+InitMotion command stream, identical on all six joints of an arm. It came from
+the pure-pursuit carrot snapping to discrete waypoints, so the carrot distance
+sawtoothed. Sliding the carrot along the segment removed it (5-20 Hz command
+energy -71 %/-95 %) and made the same motion 24 % faster. The controller LPF's
+tau of 9.5 ticks is a ~8.4 Hz corner, sitting directly on that ripple — it was
+masking an upstream command defect, not fixing one.
 
-Do not treat `servo_t1_sec`, `servo_t2_sec`, or `servo_gain` as casual tuning
-knobs in supported 500 Hz profiles. `servo_alpha` is deliberately profile-owned:
-use `1.0` for the tracked real stack unless a supervised acceptance task
-explicitly asks for the LPF-off diagnostic profile.
+Do not "fix" `servo_alpha: 10.0` back down. Re-enabling the controller LPF would
+re-mask that class of defect and, on firmware v8.7.3, costs about 10 ticks
+(20 ms) of added latency for it — see the measured `sent -> ref` minus queue-fill
+split in `docs/runbooks/box_latency_offline.md`.
 
 Responsiveness, smoothness, and accuracy are still primarily owned by the
 `rb_servo_server` control loop. For Cartesian setpoint streaming
@@ -580,11 +628,61 @@ Responsiveness, smoothness, and accuracy are still primarily owned by the
 Trade-off across the two regimes: for large/fast UMI teleop moves raise
 `pose_track_smd.natural_frequency_*` (and the velocity/accel caps); for
 wrist-camera-stable imitation rollout keep damping critical (`1.0`) and the
-velocity/accel caps bounded so the camera view does not shake. Keep the real
-Servo J profile at `servo_alpha: 1.0` unless the task is specifically collecting
-LPF-off diagnostic evidence. Tracked example configs that predate this profile
-may still carry legacy `servo_t2_sec` / `servo_alpha` values (e.g. `0.05` /
-`0.5`); new and migrated physical-real configs use the `1.0` real profile above.
+velocity/accel caps bounded so the camera view does not shake. The Servo J
+profile stays fixed across both regimes — that is the whole point of pinning it.
+Tracked example configs that predate this profile may still carry legacy
+`servo_t2_sec` / `servo_alpha` values (e.g. `0.05` / `0.5`); new and migrated
+configs use the transparent-executor profile above.
+
+### Control-Box Command Queue (firmware v8.7.3)
+
+Control-box firmware v8.7.3 replaced v8.6.1's latest-queue with a **FIFO**. The
+box now reports its command-queue occupancy in the Servo J ACK text (`RBACK`),
+and the box-side delay is exactly that occupancy:
+
+```
+box delay = RBACK queue fill + 1 tick     (both arms, every joint)
+```
+
+The fill is a pure integrator (`dfill/dt = f_send - f_box`) and the host and box
+clocks do not match (measured drain 499.34 Hz against a 500.006 Hz send), so an
+unregulated stream grows it without bound: +0.67 tk/s, i.e. +1.33 ms/s, forever.
+Queue depth is therefore a **control variable**, not an implementation detail.
+
+`queue_sync` regulates it with an asymmetric PI law on the low-passed fill
+(warmup / drain / track phases) whose actuator is a per-arm **send-period trim**.
+The gains are controller-manager's `Arm::qsync_step` used as-is, because the
+actuator is the same; retuning one side without the other is a mistake.
+
+Contract points:
+
+- `queue_sync` takes effect only with `servo.io_model: worker`. A single loop has
+  one period for two boxes running two different clocks (measured drift: left
+  +0.665, right +0.670 tk/s — they diverge), so the trim must be per-arm.
+- It is enabled in `stack_real.yaml` only. `stack_sim.yaml` still runs
+  `servo.io_model: direct` with no `queue_sync` section (the default is
+  `enable: false`), so the controller-simulation lane streams unregulated. Treat
+  sim latency as non-comparable to real until that is either brought into parity
+  or the pgmode boxes are confirmed to be on a firmware without the FIFO.
+- Config validation is fail-closed: `target_fill >= 1` (0 starves the box),
+  `protect_fill` in `[0, target_fill)`, `lpf_alpha` in `(0, 1]`, non-negative
+  gains, `protect_adj_us <= 0`, `0 < drain_adj_us <= drain_max_us`,
+  `highwater_fill > target_fill`, and trim bounds that cannot drive the control
+  period to `<= 0` at `servo.rate_hz` (`config.cpp`).
+- The RBACK reading used by the controller and the servo CSV comes from a
+  dedicated accessor (`latestQueueAck()`), separate from `lastSendResult()`,
+  which the enqueue path overwrites every tick.
+- **A FIFO queues a software stop behind the backlog.** The hardware E-stop is
+  unaffected, but the server's fault latch and tracking-error response inherit
+  the queue depth: 58 ms at 29 ticks, over 400 ms after five unregulated minutes.
+  This is a real-motion safety property of the firmware, and the reason
+  `queue_sync` is enabled in the tracked real config rather than being optional
+  tuning.
+
+Measured end to end: 26.2 ms (v8.6.1) -> 70-80 ms (v8.7.3 unregulated) ->
+20.0-20.9 ms (v8.7.3 + `queue_sync(5)` + LPF off). Measurement procedure is
+`docs/runbooks/box_latency_offline.md`; the full characterisation is
+`omx_wiki/rainbow-control-box-servo-j-latency-fw-v8-7-3.md`.
 
 ### Rbpodo Real Acceptance Sequence
 

@@ -35,11 +35,13 @@ The config mapping is:
 by 0.1 INSIDE the controller, so the script-level value we send via
 `move_servo_j` is 10x the effective value. Therefore `servo_alpha: 10` →
 effective `1.0` = **LPF off** (Rainbow's internal low-pass disabled so the
-`rb_servo_server` SMD owns all smoothing). Physical real motion no longer uses
-that LPF-off profile by default: `servo_alpha: 1.0` is valid script-level input,
-maps to an effective alpha of roughly `0.1`, and is the tracked real profile
-because LPF-off motion produced jerk/jitter on hardware. The same 10x convention
-applies to `servo_gain`.
+`rb_servo_server` SMD owns all smoothing). **That is the tracked profile for
+physical real motion**, not just a diagnostic one: `config/stack_real.yaml` pins
+`servo_alpha: 10.0` on both arms. A script-level `1.0` (effective roughly `0.1`)
+remains valid input but is not the supported profile — earlier revisions of this
+runbook named it the real profile on the strength of a jerk/jitter observation
+whose cause turned out to be an upstream command ripple, not the filter. The
+same 10x convention applies to `servo_gain`.
 
 Official validation ranges (effective vendor range in parentheses; config /
 script-level values use the 10x convention for gain/alpha):
@@ -48,8 +50,8 @@ script-level values use the 10x convention for gain/alpha):
 - `0.02 < servo_t2_sec < 0.2`
 - `servo_gain > 0` (script-level; effective = `servo_gain * 0.1`)
 - `0 < servo_alpha <= 10` (script-level; effective `0 < alpha <= 1`, so
-  `servo_alpha: 1.0` = effective roughly `0.1` real profile, while
-  `servo_alpha: 10.0` = effective `1.0` = LPF off diagnostic profile)
+  `servo_alpha: 10.0` = effective `1.0` = LPF off = the tracked profile, while
+  `servo_alpha: 1.0` = effective roughly `0.1` and leaves the controller LPF on)
 
 Do not use `servo_acc`; use `servo_alpha`. Do not use
 `servo_lookahead_sec`; use `servo_t2_sec`. Old aliases are deprecated and
@@ -88,8 +90,10 @@ observed.
 Motion is config-driven, not env-gated — the legacy `RB_ALLOW_REAL_*` /
 `RB_ALLOW_RBPODO_CONTROLLER_SIM_MOTION` / `RB_RBPODO_PGMODE_SIMULATION_CONFIRMED`
 / `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION` env gates were removed from the server
-runtime. Real motion is enabled solely by the site-local config under
-`rb_servo_server/config/local/` plus the mode-independent safety layers,
+runtime. Real motion is enabled by the tracked
+`rb_servo_server/config/stack_real.yaml` itself (`operation_mode: real`,
+`servo.allow_real_motion_with_suspect_diagnostics: true`,
+`cartesian_control.allow_in_real: true`) plus the mode-independent safety layers,
 operator supervision, and the hardware E-stop:
 
 - Read-only real connection: keep `servo.send_servo_commands: false`.
@@ -134,20 +138,26 @@ Real Cartesian/TCP motion is out of scope for this runbook; keep
 
 ## Config Handling
 
-Create a site-local acceptance config under `rb_servo_server/config/local/`.
-Start from the tracked stack config that matches the target (`stack_real.yaml`
-for physical controllers, `stack_sim.yaml` for controller `pgmode`
-simulation), review the local values, and keep `servo.send_servo_commands:
-false` for read-only acceptance.
-The `config/local` directory is user-owned; tracked local YAML samples are not
-production configuration.
+There are exactly two stack configs and acceptance uses them directly:
+`stack_real.yaml` for physical controllers, `stack_sim.yaml` for controller
+`pgmode` simulation. **Do not copy either into a `config/local` variant**
+(`AGENTS.md`, `CLAUDE.md`): a config one directory deeper silently mis-resolves
+every relative path (`kinematics.urdf`, `unified_urdf`, `package_dirs`), and the
+effective runtime profile stops being visible in the diff.
 
-Example copy commands:
+For read-only acceptance, change the one setting in the tracked config, run, and
+revert it:
 
 ```bash
-cp rb_servo_server/config/stack_real.yaml \
-  rb_servo_server/config/local/stack_real_readonly_500hz_ack.yaml
+# in rb_servo_server/config/stack_real.yaml
+#   servo.send_servo_commands: false      <- read-only acceptance
+git diff rb_servo_server/config/stack_real.yaml   # the profile under test, reviewable
+# ... run the acceptance ...
+git checkout rb_servo_server/config/stack_real.yaml
 ```
+
+Record the diff alongside the acceptance artifacts: the diff IS the statement of
+what was under test.
 
 For controller bring-up diagnostics, the ACK-on read-only examples enable:
 
@@ -236,11 +246,12 @@ its diagnostics with the server startup validation.
 
 ## Read-Only Example
 
-Use a local copy under `rb_servo_server/config/local/`, not a tracked template.
+Run against the tracked config with `servo.send_servo_commands: false` set for
+the duration of the acceptance, then revert it (see Config Handling above).
 
 ```bash
 python3 scripts/rbpodo_servo_acceptance.py \
-  --config rb_servo_server/config/local/stack_real_readonly_500hz_ack.yaml \
+  --config rb_servo_server/config/stack_real.yaml \
   --arm left \
   --mode read_only \
   --profile 500hz_ack \

@@ -55,6 +55,16 @@ servo: { allow_real_motion_with_suspect_diagnostics: true }   # accepts the -200
 
 ## Config (key values — TUNED-1, anti-tremble)
 
+> **Profile note (2026-08-26).** This block records the TUNED-1 acceptance run as
+> it was performed. It predates both the fixed transparent-executor profile
+> (`servo_alpha: 10.0`, controller LPF off) and control-box firmware **v8.7.3**,
+> whose FIFO makes box latency equal to queue depth. The tracked stack today runs
+> `servo_alpha: 10.0`, `servo.io_model: worker`, and `queue_sync.enable: true`.
+> Re-running this acceptance on the current profile is a re-measurement, not a
+> copy: the ~1.42 deg result below is not transferable across that change. See
+> `docs/servo_backend_contract.md` → "Servo J Streaming Profiles" and
+> "Control-Box Command Queue (firmware v8.7.3)".
+
 ```yaml
 left_robot / right_robot:
   operation_mode: real

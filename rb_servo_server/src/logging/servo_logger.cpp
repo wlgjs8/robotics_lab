@@ -522,6 +522,21 @@ void ServoLogger::writeHeader() {
     // state keeps its ORIGINAL host_time_ns, so age is honest, but a fresh frame
     // and a held one are otherwise indistinguishable in the log.
     file_ << ",left_state_source,right_state_source";
+    // The control box's OWN activation stage, straight off the data frame.
+    // `init_state_info == 6` is "activation done / servo on" -- the same field and
+    // the same test controller-manager gates its servo_j stream on
+    // (RobotLink.cpp: status.init_state = s.init_state_info, servo_on() == 6).
+    // `servo_enabled` is rbpodo_backend.cpp's precomputed form of exactly that.
+    //
+    // Logged to answer one open question: on 2026-08-26 the box accepted ~131
+    // commands over 264 ms while reporting RBACK fill 0, then reported the whole
+    // backlog at once. If it was below stage 6 for that window, gating the stream
+    // on activation removes the backlog at the source. If it was already 6, that
+    // gate would change nothing and the cause is elsewhere -- so this column is
+    // what decides between those two, before any gate is written.
+    // -1 = the backend published no diagnostics this tick, which is NOT stage 0.
+    file_ << ",left_init_state_info,right_init_state_info"
+          << ",left_servo_enabled,right_servo_enabled";
     // Rainbow control-box command-queue occupancy from the RBACK ACK stream
     // (firmware v8.7.3+ reports a meaningful fill). -1 means no RBACK has been
     // parsed on this connection -- distinct from a genuine empty-queue 0.
@@ -1196,6 +1211,15 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << ',' << sample.right_state.q_actual_valid;
     file_ << ',' << csvEscape(sample.left_state.rbpodo_sdk_state_source)
           << ',' << csvEscape(sample.right_state.rbpodo_sdk_state_source);
+    const auto init_stage = [](const RobotState& st) {
+        return st.rbpodo_diagnostics.has_value()
+            ? st.rbpodo_diagnostics->raw.init_state_info
+            : -1;
+    };
+    file_ << ',' << init_stage(sample.left_state)
+          << ',' << init_stage(sample.right_state)
+          << ',' << sample.left_state.servo_enabled
+          << ',' << sample.right_state.servo_enabled;
     for (const RbpodoQueueAckTelemetry* q : {&sample.left_queue_ack, &sample.right_queue_ack}) {
         file_ << ',' << q->observed
               << ',' << q->fill

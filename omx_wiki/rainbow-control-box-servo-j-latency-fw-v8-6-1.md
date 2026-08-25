@@ -2,9 +2,9 @@
 title: "Rainbow Control Box Servo J Latency (firmware v8.6.1)"
 tags: ["rainbow-control-box", "firmware-v8.6.1", "servo-j", "latency", "servo-alpha", "latest-queue", "rb3-730e"]
 created: 2026-08-25T10:02:21.788Z
-updated: 2026-08-25T10:02:21.788Z
+updated: 2026-08-25T16:55:17.000Z
 sources: ["logs/servo_log_20260825_171603.csv", "docs/runbooks/box_latency_offline.md", "scripts/analyze_box_latency.py"]
-links: ["flow-infer-delta-preview-controller-contract.md"]
+links: ["rainbow-control-box-servo-j-latency-fw-v8-7-3.md", "flow-infer-delta-preview-controller-contract.md"]
 category: reference
 confidence: high
 schemaVersion: 1
@@ -16,7 +16,10 @@ Measured latency of the `servo_j` command path on the RB3-730E control boxes.
 **Every number here is paired to control-box firmware v8.6.1 and must be
 re-measured after any firmware change** — the box-side scheduling model is the
 thing being characterised, so a firmware upgrade invalidates the page rather
-than amending it. The v8.7.3 successor belongs in its own sibling page.
+than amending it. The successor is
+[[rainbow-control-box-servo-j-latency-fw-v8-7-3]], and the boxes now run v8.7.3 —
+**nothing on this page describes the deployed system.** It is kept as the
+baseline the upgrade is measured against.
 
 ## Operating Point
 
@@ -127,24 +130,36 @@ already recorded in the config validator
 
 So the script-level `servo_alpha: 1.0` is an effective alpha of 0.1, which is
 exactly the measured filter coefficient. `servo_alpha: 10` is effective 1.0 —
-pass-through, i.e. the documented LPF-off diagnostic value.
+pass-through, i.e. LPF off — which is the tracked profile on both stacks as of
+2026-08-25, not merely a diagnostic setting.
 
 The measurement and the vendor scaling agree independently, which also rules out
 `servo_t2_sec` as the source: t1/t2 = 2/21 = 0.0952 against a measured 0.1000.
 
-## Successor: v8.7.3 (fixed 5-tick delay)
+## Successor: v8.7.3 — measured, and the prediction was wrong
 
-v8.7.3 is reported to hold a constant 5-tick delay. If that is a fixed-depth
-pipeline rather than a latest queue, the same measurement should show:
+The predictions scored below were written before v8.7.3 was measured, on the
+report that it "holds a constant 5-tick delay". It was measured on 2026-08-25,
+and **the box does not hold anything**: v8.7.3 is a FIFO, not a fixed-depth
+pipeline, and its delay is whatever depth the host lets the queue reach.
+Unregulated it was 19-28 ticks and rising at +0.67 tk/s without bound, i.e.
+**worse than this page's v8.6.1 by 3x**. The constant 5 exists only because the host now holds it there
+(`queue_sync`, `target_fill: 5`).
 
-- stage (a) dead time **5 ticks**, filter `a` ~ 1.0, tau ~ 0
-- stage (a) steady-state lag ~ **5 tk (10 ms)**, down from 10.06 tk (20.1 ms)
-- end to end ~ **8 ticks**, down from 13
-- no exponential tail after the command stops — the free-decay pole should come
-  back unusable or with a poor r2 instead of a clean 0.9
+Scoring the original predictions:
 
-Those are the discriminating checks; record them on the v8.7.3 page rather than
-editing this one.
+| prediction | outcome |
+|---|---|
+| stage (a) dead time 5 tk, `a` ~ 1.0, tau ~ 0 | **shape right, value wrong** — pure dead time with no filter (LPF off), but the value is the queue fill, not 5 |
+| stage (a) ~5 tk (10 ms), down from 10.06 tk | **only under regulation** — 7.05/7.46 tk regulated (fill 5 + 1 transport + ~1.1 mailbox hop); 20-38 tk unregulated |
+| end to end ~8 tk, down from 13 | **10.0/10.4 tk regulated**; 35-40 tk unregulated |
+| free-decay pole unusable / poor r2 | **correct, and for the stated reason** — the tail is the FIFO draining, so the pole is meaningless on v8.7.3 |
+
+The lesson worth carrying: a reported "fixed delay" described the box's *intent*,
+not a closed loop. Nothing holds a queue at a depth unless something is
+regulating it. Full numbers, the `sent -> ref` minus queue-fill LPF test, and
+the new FIFO stop-latency hazard are on
+[[rainbow-control-box-servo-j-latency-fw-v8-7-3]].
 
 ## Reproducing
 

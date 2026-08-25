@@ -326,6 +326,44 @@ bool testRealtimeTimingAccumulatorAndSerialization() {
     return true;
 }
 
+bool testStatePublisherKeepsForceTelemetryInsideTheArmObjects() {
+    // A REGRESSION GUARD ON ASSIGNMENT ORDER, not on the wrench numbers.
+    // `message["left"]["force_torque"] = ...` followed by `message["left"] = armStateJson(...)`
+    // REPLACES the arm object, so the F/T block is silently dropped: the pipeline runs,
+    // the tare is accepted, the servo log carries the wrench, and every consumer of the
+    // state stream still sees no `force_torque` key at all. Nothing else in this file
+    // reaches into `json["left"]` after the arm object is built, so nothing else caught it.
+    rb_servo::ServoSnapshot snapshot = snapshotWithTick(7);
+    snapshot.left_ft.enabled = true;
+    snapshot.left_ft.connected = true;
+    snapshot.left_ft.bias_valid = true;
+    snapshot.left_ft.comp_stand = rb_servo::Wrench6D{1.0, 2.0, 3.0, 0.1, 0.2, 0.3};
+    snapshot.right_ft.enabled = true;
+    snapshot.right_ft.connected = true;
+    snapshot.right_force_control.enabled = true;
+    snapshot.left_force_control.enabled = true;
+    snapshot.left_force_control.covered = true;
+
+    rb_servo::DualArmConfig cfg;
+    rb_servo::StatePublisher publisher(cfg);
+    const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(snapshot));
+
+    for (const char* arm : {"left", "right"}) {
+        RB_CHECK(json.at(arm).contains("force_torque"));
+        RB_CHECK(json.at(arm).contains("force_control"));
+        RB_CHECK(json.at(arm).at("force_torque").at("enabled").get<bool>());
+        // The arm object itself must survive too — the fix must not have traded one
+        // wholesale overwrite for the other.
+        RB_CHECK(json.at(arm).contains("q_actual_deg"));
+    }
+    const nlohmann::json& w = json.at("left").at("force_torque").at("comp_stand_axes_at_tcp");
+    RB_CHECK(w.size() == 6);
+    RB_CHECK(w.at(0).get<double>() == 1.0);
+    RB_CHECK(w.at(5).get<double>() == 0.3);
+    RB_CHECK(json.at("left").at("force_control").at("covered").get<bool>());
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -333,6 +371,7 @@ int main() {
     if (!testStatePublisherLegacySingleEndpointStillWorks()) return 1;
     if (!testStatePublisherSerializesJointReferenceFields()) return 1;
     if (!testStatePublisherSerializesAsyncStreamingFields()) return 1;
+    if (!testStatePublisherKeepsForceTelemetryInsideTheArmObjects()) return 1;
     if (!testRealtimeTimingAccumulatorAndSerialization()) return 1;
     return 0;
 }

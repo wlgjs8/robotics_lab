@@ -341,17 +341,29 @@ are not supported profiles. ACK-off rbpodo settings are not a real baseline
 until the supervised acceptance sequence passes with state-age, ACK, error-code,
 and q_ref/q_actual evidence.
 
-Supported 500 Hz Servo J configs pin `servo_t1_sec: 0.002`,
-`servo_t2_sec: 0.021`, and `servo_gain: 1.0`. `servo_alpha` remains
-script-level and is scaled by `0.1` inside the Rainbow controller:
-`servo_alpha: 10.0` disables the controller LPF, while `servo_alpha: 1.0`
-leaves an effective alpha of roughly `0.1`. The tracked physical-real stack uses
-`servo_alpha: 1.0` because the LPF-off setting produced jerk/jitter on hardware;
-controller-simulation diagnostics may still use `10.0` for a transparent
-controller profile. The primary responsiveness/smoothness/accuracy tuning
-surface is the server-side control loop (`TcpPoseTarget` →
-`cartesian_control.pose_track_smd`) — see `docs/servo_backend_contract.md` →
-"Servo J Streaming Profiles".
+Supported 500 Hz Servo J configs pin the whole transparent-executor profile:
+`servo_t1_sec: 0.002`, `servo_t2_sec: 0.021`, `servo_gain: 1.0`, and
+`servo_alpha: 10.0`. `servo_alpha` is script-level and is scaled by `0.1` inside
+the Rainbow controller, so `10.0` means effective `1.0` — the **controller LPF is
+off**, in controller simulation and on physical hardware alike
+(`config/stack_real.yaml` and `config/stack_sim.yaml`, both arms). An earlier
+revision named `servo_alpha: 1.0` as the real profile because LPF-off motion
+showed jerk/jitter; that observation was real but its cause was an upstream
+pure-pursuit command ripple, not the filter setting — see
+`docs/servo_backend_contract.md` → "Servo J Streaming Profiles". With the
+controller LPF off, all responsiveness/smoothness/accuracy is owned by the
+server-side control loop (`TcpPoseTarget` → `cartesian_control.pose_track_smd`),
+which is the point of pinning the profile.
+
+Control-box firmware **v8.7.3** consumes that stream through a FIFO whose
+occupancy IS the box-side delay, so the server regulates the queue depth.
+`stack_real.yaml` enables it: `queue_sync.enable: true`, `target_fill: 5`, with
+`servo.io_model: worker` (the trim is per-arm, so it cannot run on the shared
+loop period). **`stack_sim.yaml` does not**: it runs `servo.io_model: direct`
+with no `queue_sync` section, so the controller-simulation lane streams
+unregulated and its latency is not comparable to the real lane's. See
+`docs/servo_backend_contract.md` → "Control-Box Command Queue (firmware v8.7.3)"
+and `docs/runbooks/box_latency_offline.md`.
 
 Deprecated simulator config names are archived under `docs/archive/configs/`
 for historical reference only. They are not runnable source-of-truth profiles

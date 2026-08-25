@@ -1537,10 +1537,6 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         rbpodoAsyncQueuePolicyString(config_.servo.rbpodo_async_streaming.queue_policy);
     message["cartesian_control_snapshot"] = cartesianControlSnapshotJson(config_.cartesian_control);
     message["kinematics_snapshot"] = kinematicsSnapshotJson(config_.kinematics);
-    message["left"]["force_torque"] = ftJson(snapshot.left_ft);
-    message["right"]["force_torque"] = ftJson(snapshot.right_ft);
-    message["left"]["force_control"] = forceControlJson(snapshot.left_force_control);
-    message["right"]["force_control"] = forceControlJson(snapshot.right_force_control);
     message["startup_validation"] = startupValidationJson(snapshot.startup_validation);
     const bool worker_enabled =
         config_.servo.io_model == ServoIoModel::Worker ||
@@ -1612,6 +1608,15 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         snapshot.startup_validation.right,
         gripper_bridge_ ? gripper_bridge_->latest(ArmId::Right) : GripperArmFeedback{}
     );
+    // AFTER the two armStateJson assignments, NEVER before. `message["left"] = ...`
+    // REPLACES the whole object, so any key written into it earlier is dropped on the
+    // floor — which is exactly what happened to the F/T block: the pipeline ran, the
+    // tare was accepted, the servo log carried the wrench, and the GUI still said
+    // "not in state stream" because these four keys never left the process.
+    message["left"]["force_torque"] = ftJson(snapshot.left_ft);
+    message["right"]["force_torque"] = ftJson(snapshot.right_ft);
+    message["left"]["force_control"] = forceControlJson(snapshot.left_force_control);
+    message["right"]["force_control"] = forceControlJson(snapshot.right_force_control);
     message["last_cartesian_solve"] = {
         {"left", cartesianSolveJson(snapshot.left_cartesian_solve)},
         {"right", cartesianSolveJson(snapshot.right_cartesian_solve)},

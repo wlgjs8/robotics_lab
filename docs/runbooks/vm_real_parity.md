@@ -21,10 +21,12 @@ The mock backend remains a hardware-free surface for deterministic backend
 tests, but it does not exercise rbpodo SDK, Rainbow controller protocol,
 firmware state decoding, or Servo J ACK semantics.
 
-## Local Config Pattern
+## Config Pattern
 
-Keep tracked templates generic and put runnable site configs under
-`rb_servo_server/config/local/`.
+There are exactly two stack configs (`rb_servo_server/config/stack_real.yaml`,
+`stack_sim.yaml`) and no `config/local` variants (`AGENTS.md`, `CLAUDE.md`).
+Change one reviewed setting at a time in the tracked config so the effective
+runtime profile stays visible in the diff, and revert it afterwards.
 
 For VM parity configs, prefer env-indirected IPs:
 
