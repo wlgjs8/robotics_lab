@@ -290,6 +290,31 @@ CollisionProjectionResult solveVelocityProjection(
     JointArray& left_target_deg, JointArray& right_target_deg,
     double dt_sec, int iterations, const JointArray& max_joint_vel_deg_s);
 
+// Per-arm entry point for per-arm control threads.
+//
+// Runs the SAME coupled 12-DOF solve and writes back only `arm`'s half. That is
+// deliberate and is not a decoupled approximation: both arms see one shared
+// collision verdict, hence the same constraint set, and the same inputs apart
+// from one tick of peer-candidate staleness -- so they agree on the solution and
+// each simply keeps its own part of it.
+//
+// The naive alternative (each arm solving as if the peer will not yield) is safe
+// but DOUBLE-corrects, because both yield for a correction only one of them
+// needed: near-contact approach speed halves for no safety gain. Solving the
+// coupled system on both sides avoids that.
+//
+// Peer staleness is handled where every other latency already is -- the caller
+// folds it into the collision verdict age that buildCollisionConstraints()
+// extrapolates the clearance with (`d_now = d - closing * age`). At the command
+// ceiling one tick is ~0.6 mm of closing, against an existing 50 ms staleness
+// budget, so this adds no new margin term.
+CollisionProjectionResult solveVelocityProjectionForArm(
+    std::vector<VelocityConstraint>& cons,
+    ArmId arm,
+    const JointArray& left_prev_deg, const JointArray& right_prev_deg,
+    JointArray& left_target_deg, JointArray& right_target_deg,
+    double dt_sec, int iterations, const JointArray& max_joint_vel_deg_s);
+
 // Directional velocity-damper projection (Stage 2) — the chatter-free, fast-safe
 // replacement for the scalar collisionVelocityScale. For each near pair within
 // d_slow it removes ONLY the closing component of the commanded joint velocity

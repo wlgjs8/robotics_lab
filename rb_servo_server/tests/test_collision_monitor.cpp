@@ -329,6 +329,66 @@ static bool run() {
         RB_CHECK(std::abs(dd_pred - dd_fd) < 5e-4);  // <0.5 mm agreement over the step
     }
 
+    // (5b) Per-arm projection must reconstruct the coupled solution exactly.
+    //
+    // Each arm runs the same coupled solve and keeps only its own half; together
+    // that must equal the one-shot coupled result. The naive alternative -- each
+    // arm solving as if the peer stays put -- double-corrects, because both yield
+    // for a correction only one of them needed.
+    //
+    // The constraint is built BY HAND rather than taken from the monitor: this
+    // needs one whose Jacobian genuinely spans both arms (a left<->right pair).
+    // Constraints picked out of a real verdict are usually arm<->stand, where the
+    // peer half is ~0 and the comparison cannot tell the two implementations
+    // apart -- an earlier version of this test passed for both because of exactly
+    // that.
+    {
+        const JointArray base = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+        VelocityConstraint c;
+        for (int i = 0; i < kDof; ++i) {
+            c.J[i] = (i % 2 == 0) ? 0.30 : -0.20;          // left half
+            c.J[kDof + i] = (i % 2 == 0) ? -0.25 : 0.35;   // right half, comparable size
+        }
+        c.xi = 0.05;      // small allowance -> the barrier binds
+        c.d_now = 0.010;
+        const std::vector<VelocityConstraint> seed{c};
+
+        const double dt = 0.002;
+        const double rad2deg = 180.0 / 3.14159265358979323846;
+        // qdot = -J * k gives ddot = -k|J|^2; k = 2*xi/|J|^2 makes ddot = -2*xi.
+        const double k = 2.0 * c.xi / c.J.squaredNorm();
+        JointArray lp = base, rp = base, lt = base, rt = base;
+        for (int i = 0; i < kDof; ++i) {
+            lt[i] = base[i] - c.J[i] * k * dt * rad2deg;
+            rt[i] = base[i] - c.J[kDof + i] * k * dt * rad2deg;
+        }
+        const JointArray vmax = {1e6, 1e6, 1e6, 1e6, 1e6, 1e6};  // isolate the barrier
+
+        std::vector<VelocityConstraint> cons_ref = seed;
+        JointArray l_ref = lt, r_ref = rt;
+        solveVelocityProjection(cons_ref, lp, rp, l_ref, r_ref, dt, 3, vmax);
+        double deflect = 0.0;
+        for (int i = 0; i < kDof; ++i) {
+            deflect += std::abs(l_ref[i] - lt[i]) + std::abs(r_ref[i] - rt[i]);
+        }
+        RB_CHECK(deflect > 1e-6);   // the barrier must actually have bound
+
+        std::vector<VelocityConstraint> cons_l = seed;
+        JointArray l_arm = lt, r_peer = rt;
+        solveVelocityProjectionForArm(cons_l, ArmId::Left, lp, rp, l_arm, r_peer, dt, 3, vmax);
+        std::vector<VelocityConstraint> cons_r = seed;
+        JointArray l_peer = lt, r_arm = rt;
+        solveVelocityProjectionForArm(cons_r, ArmId::Right, lp, rp, l_peer, r_arm, dt, 3, vmax);
+
+        for (int i = 0; i < kDof; ++i) {
+            RB_CHECK(std::abs(l_arm[i] - l_ref[i]) < 1e-12);
+            RB_CHECK(std::abs(r_arm[i] - r_ref[i]) < 1e-12);
+            // The half an arm does not own must come back untouched.
+            RB_CHECK(std::abs(r_peer[i] - rt[i]) < 1e-12);
+            RB_CHECK(std::abs(l_peer[i] - lt[i]) < 1e-12);
+        }
+    }
+
     // (6) threaded publish/consume: start, submit, see a fresh verdict.
     //
     // Submitted PER ARM, the way per-arm control threads do it: neither thread

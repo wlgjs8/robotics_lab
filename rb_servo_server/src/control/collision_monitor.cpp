@@ -218,6 +218,28 @@ void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitor
     }
 }
 
+CollisionProjectionResult solveVelocityProjectionForArm(
+    std::vector<VelocityConstraint>& cons,
+    ArmId arm,
+    const JointArray& left_prev_deg, const JointArray& right_prev_deg,
+    JointArray& left_target_deg, JointArray& right_target_deg,
+    double dt_sec, int iterations, const JointArray& max_joint_vel_deg_s) {
+    // Solve the full coupled system, then discard the peer's half. Both arms run
+    // this and keep opposite halves, which reconstructs the coupled solution
+    // without either arm double-correcting for the other.
+    JointArray left_solved = left_target_deg;
+    JointArray right_solved = right_target_deg;
+    const CollisionProjectionResult out = solveVelocityProjection(
+        cons, left_prev_deg, right_prev_deg, left_solved, right_solved,
+        dt_sec, iterations, max_joint_vel_deg_s);
+    if (arm == ArmId::Left) {
+        left_target_deg = left_solved;
+    } else {
+        right_target_deg = right_solved;
+    }
+    return out;
+}
+
 CollisionProjectionResult solveVelocityProjection(
     std::vector<VelocityConstraint>& cons,
     const JointArray& left_prev_deg, const JointArray& right_prev_deg,
