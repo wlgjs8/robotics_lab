@@ -509,6 +509,15 @@ def analyze(path: Path, arms: list[str], start_sec: float, duration_sec: float,
                 floor_deg=decay_floor_deg,
             )
             decay["joint"] = best_joint
+            # A free decay is only a FILTER measurement when the stage has no
+            # meaningful dead time. With a command queue the tail after the
+            # command stops is the queue DRAINING -- dead time, not an
+            # exponential -- and fitting a pole to it reports a filter that is
+            # not there. Flag it rather than letting the number stand.
+            dead = model.get("delay_ticks") if model.get("usable") else None
+            if dead is not None and dead >= 3:
+                decay["confounded_by_dead_time"] = True
+                decay["dead_time_ticks"] = int(dead)
 
             usable = [f for f in per_joint if f.get("usable")]
             summary = {}
@@ -686,6 +695,11 @@ def format_report(report: dict) -> str:
                 f"pole={d['pole']:.4f}/tick  a={d['a']:.4f}  tau={d['tau_ticks']:.2f} tk  "
                 f"r2={d['r2']:.4f}  n={d['samples']}"
             )
+            if d.get("confounded_by_dead_time"):
+                lines.append(
+                    f"      !! NOT a filter measurement: this stage has {d['dead_time_ticks']} ticks "
+                    f"of dead time, so the tail is the queue draining, not an exponential."
+                )
             ms_per_tick = 1000.0 / report["tick_rate_hz"]
             lines.append("      error settles to: " + "  ".join(
                 f"{lbl} in {n:.1f} tk ({n * ms_per_tick:.0f} ms)" for lbl, n in st.items()))

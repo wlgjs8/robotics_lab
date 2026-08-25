@@ -183,7 +183,9 @@ CommandBuffer
 
 The servo loop owns command freshness, lifecycle, target generation, FK/IK, Cartesian planning, safety filtering, fault classification, and dual-arm aggregation. Blocking backend I/O should live behind backend/worker boundaries and must produce structured result telemetry.
 
-`servo.io_model: worker` is hardware-free/mock-only unless a future real-hardware acceptance task explicitly opens it.
+`servo.io_model: worker` is a supported real-mode path. The mock-only refusal was
+retired: control-box queue sync needs each arm to own its own send cadence, and a
+single loop has one period for two boxes running two different clocks.
 
 ## Calibration And Frames
 

@@ -113,17 +113,24 @@ followed by a first-order approach to the newest command — the box is always
 chasing the latest value, which is what a latest-queue scheme does. Nothing in
 the data suggests an accumulating queue.
 
-## Open: `a = servo_alpha / 10`
+## Confirmed: `a = servo_alpha / 10`
 
-`a` measured exactly 0.100 at `servo_alpha: 1.0`, and the tracked config records
-that "script-level 10.0 disables controller LPF". Both facts fit
-**`a = servo_alpha / 10`** (alpha 10 -> a = 1.0 -> pass-through). This is inferred
-from a single operating point and is **not confirmed**. `servo_t2_sec` is the
-other candidate but fits worse: t1/t2 = 2/21 = 0.0952 against a measured 0.1000.
+`a` measured exactly 0.100 at `servo_alpha: 1.0`. That is not a coincidence and
+it does not need an A/B run to settle — the scaling is vendor-confirmed and
+already recorded in the config validator
+(`rb_servo_server/src/config/config.cpp`, the rbpodo backend servo-param block):
 
-To settle it, run once at `servo_alpha: 2.0` and check for `a = 0.2`
-(pole 0.800). **Do this before the v8.7.3 upgrade** — if the successor firmware
-schedules on a fixed delay instead, the alpha law may no longer be observable.
+> Rainbow scales move_servo_j gain/alpha by 0.1 INSIDE the controller
+> (vendor-confirmed): the script-level value we send is 10x the effective value.
+> So the effective vendor range 0 < alpha <= 1 maps to a script-level range
+> 0 < servo_alpha <= 10.
+
+So the script-level `servo_alpha: 1.0` is an effective alpha of 0.1, which is
+exactly the measured filter coefficient. `servo_alpha: 10` is effective 1.0 —
+pass-through, i.e. the documented LPF-off diagnostic value.
+
+The measurement and the vendor scaling agree independently, which also rules out
+`servo_t2_sec` as the source: t1/t2 = 2/21 = 0.0952 against a measured 0.1000.
 
 ## Successor: v8.7.3 (fixed 5-tick delay)
 

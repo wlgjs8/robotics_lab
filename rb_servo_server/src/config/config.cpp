@@ -1537,6 +1537,51 @@ void validateConfig(const DualArmConfig& cfg) {
         "servo.rbpodo_async_streaming.reference_supervision.tcp_ref_target_fault_after_ms"
     );
     validatePositiveFinite(static_cast<double>(cfg.network.state_pub_rate_hz), "network.state_pub_rate_hz");
+    if (cfg.queue_sync.enable) {
+        const QueueSyncConfig& q = cfg.queue_sync;
+        // The trim is added to the control period, so a trim that could drive
+        // the period to zero or negative would desynchronise the loop from its
+        // own cadence. Bound it against the configured rate, fail-closed.
+        const double period_us = cfg.servo.rate_hz > 0 ? 1e6 / cfg.servo.rate_hz : 0.0;
+        if (period_us <= 0.0) {
+            throw std::runtime_error("queue_sync.enable requires a positive servo.rate_hz");
+        }
+        if (q.target_fill < 1) {
+            throw std::runtime_error("queue_sync.target_fill must be >= 1 (0 starves the box)");
+        }
+        if (q.protect_fill < 0 || q.protect_fill >= q.target_fill) {
+            throw std::runtime_error("queue_sync.protect_fill must be in [0, target_fill)");
+        }
+        if (!(q.lpf_alpha > 0.0 && q.lpf_alpha <= 1.0)) {
+            throw std::runtime_error("queue_sync.lpf_alpha must be in (0, 1]");
+        }
+        if (q.kp_above_us < 0.0 || q.kp_below_us < 0.0 || q.ki_us < 0.0) {
+            throw std::runtime_error("queue_sync gains must be non-negative (sign is applied by the law)");
+        }
+        if (q.protect_adj_us > 0.0) {
+            throw std::runtime_error("queue_sync.protect_adj_us must be <= 0 (it shortens the period)");
+        }
+        if (q.drain_adj_us <= 0.0 || q.drain_max_us < q.drain_adj_us) {
+            throw std::runtime_error("queue_sync requires 0 < drain_adj_us <= drain_max_us");
+        }
+        const double most_negative = std::min(q.protect_adj_us, -q.adj_clamp_us);
+        if (period_us + most_negative <= 0.0) {
+            throw std::runtime_error(
+                "queue_sync trim bounds can drive the control period to <= 0 at servo.rate_hz");
+        }
+        if (q.stall_cycles < 1 || q.redrain_fill_margin < 1 || q.highwater_fill <= q.target_fill) {
+            throw std::runtime_error("queue_sync stall_cycles/redrain_fill_margin/highwater_fill are out of range");
+        }
+    }
+    // Below ~2 periods a worker-cached read is stale by construction (its age is
+    // the inter-thread phase offset); above ~10 a dead link goes unnoticed for
+    // 20 ms at 500 Hz. Fail closed outside that band rather than silently
+    // accepting a value that disables the staleness check.
+    if (!(cfg.servo.worker_state_max_age_periods >= 2.0 &&
+          cfg.servo.worker_state_max_age_periods <= 10.0)) {
+        throw std::runtime_error(
+            "servo.worker_state_max_age_periods must be in [2, 10] control periods");
+    }
     validatePositiveFinite(static_cast<double>(cfg.scope.publish_rate_hz), "scope.publish_rate_hz");
     if (cfg.scope.max_samples_per_batch == 0 || cfg.scope.max_samples_per_batch > 1024) {
         throw std::runtime_error("scope.max_samples_per_batch must be in [1, 1024]");
@@ -2799,9 +2844,10 @@ void validateConfig(const DualArmConfig& cfg) {
     validate_rbpodo_backend(cfg.right_robot, "right_robot");
 
     if (anyReal(cfg)) {
-        if (cfg.servo.io_model == ServoIoModel::Worker) {
-            throw std::runtime_error("Refusing servo.io_model=worker in real mode until worker I/O has real-hardware acceptance.");
-        }
+        // The servo.io_model=worker real-mode refusal was retired: per-arm worker
+        // I/O is the supported path for control-box queue sync, which requires
+        // each arm to own its own send cadence (one loop has a single period for
+        // two boxes running two different clocks).
         // Real/sim env gates retired: real mode/motion no longer require
         // RB_ALLOW_REAL_ROBOT/RB_ALLOW_REAL_MOTION.
         if (!cfg.servo.enable_realtime_priority) {
@@ -2871,6 +2917,7 @@ void validateRootKeys(const YAML::Node& root) {
         "command_source",
         "logging",
         "scope",
+        "queue_sync",
         "force_torque",
         "force_control",
         "cartesian_control",
@@ -2958,6 +3005,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "cpu_core",
             "spin_slack_us",
             "worker_read_period_sec",
+            "worker_state_max_age_periods",
             "worker_read_rate_hz",
             "filter_dt_min_ratio",
             "filter_dt_max_ratio",
@@ -3050,6 +3098,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "spin_slack_us")) cfg.servo.spin_slack_us = asInt(sec["spin_slack_us"], "servo.spin_slack_us");
         if (has(sec, "worker_read_period_sec") && has(sec, "worker_read_rate_hz")) {
             fail("servo cannot set both worker_read_period_sec and worker_read_rate_hz", sec["worker_read_rate_hz"]);
+        }
+        if (has(sec, "worker_state_max_age_periods")) {
+            cfg.servo.worker_state_max_age_periods =
+                asDouble(sec["worker_state_max_age_periods"], "servo.worker_state_max_age_periods");
         }
         if (has(sec, "worker_read_period_sec")) {
             cfg.servo.worker_read_period_sec = asDouble(sec["worker_read_period_sec"], "servo.worker_read_period_sec");
@@ -3922,6 +3974,39 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             }
             cfg.scope.max_samples_per_batch = static_cast<size_t>(max_samples);
         }
+    }
+
+    if (has(root, "queue_sync")) {
+        const YAML::Node sec = root["queue_sync"];
+        validateAllowedKeys(sec, {
+            "enable", "target_fill", "protect_fill", "lpf_alpha",
+            "kp_above_us", "kp_below_us", "ki_us", "integral_clamp_us",
+            "adj_clamp_us", "protect_adj_us", "drain_adj_us", "drain_max_us",
+            "drain_per_fill_us", "redrain_fill_margin", "highwater_fill",
+            "warmup_min_sec", "warmup_max_sec", "drain_timeout_sec",
+            "stall_cycles", "no_consumption_rise_per_sec",
+        }, "queue_sync");
+        QueueSyncConfig& q = cfg.queue_sync;
+        if (has(sec, "enable")) q.enable = asBool(sec["enable"], "queue_sync.enable");
+        if (has(sec, "target_fill")) q.target_fill = asInt(sec["target_fill"], "queue_sync.target_fill");
+        if (has(sec, "protect_fill")) q.protect_fill = asInt(sec["protect_fill"], "queue_sync.protect_fill");
+        if (has(sec, "lpf_alpha")) q.lpf_alpha = asDouble(sec["lpf_alpha"], "queue_sync.lpf_alpha");
+        if (has(sec, "kp_above_us")) q.kp_above_us = asDouble(sec["kp_above_us"], "queue_sync.kp_above_us");
+        if (has(sec, "kp_below_us")) q.kp_below_us = asDouble(sec["kp_below_us"], "queue_sync.kp_below_us");
+        if (has(sec, "ki_us")) q.ki_us = asDouble(sec["ki_us"], "queue_sync.ki_us");
+        if (has(sec, "integral_clamp_us")) q.integral_clamp_us = asDouble(sec["integral_clamp_us"], "queue_sync.integral_clamp_us");
+        if (has(sec, "adj_clamp_us")) q.adj_clamp_us = asDouble(sec["adj_clamp_us"], "queue_sync.adj_clamp_us");
+        if (has(sec, "protect_adj_us")) q.protect_adj_us = asDouble(sec["protect_adj_us"], "queue_sync.protect_adj_us");
+        if (has(sec, "drain_adj_us")) q.drain_adj_us = asDouble(sec["drain_adj_us"], "queue_sync.drain_adj_us");
+        if (has(sec, "drain_max_us")) q.drain_max_us = asDouble(sec["drain_max_us"], "queue_sync.drain_max_us");
+        if (has(sec, "drain_per_fill_us")) q.drain_per_fill_us = asDouble(sec["drain_per_fill_us"], "queue_sync.drain_per_fill_us");
+        if (has(sec, "redrain_fill_margin")) q.redrain_fill_margin = asInt(sec["redrain_fill_margin"], "queue_sync.redrain_fill_margin");
+        if (has(sec, "highwater_fill")) q.highwater_fill = asInt(sec["highwater_fill"], "queue_sync.highwater_fill");
+        if (has(sec, "warmup_min_sec")) q.warmup_min_sec = asDouble(sec["warmup_min_sec"], "queue_sync.warmup_min_sec");
+        if (has(sec, "warmup_max_sec")) q.warmup_max_sec = asDouble(sec["warmup_max_sec"], "queue_sync.warmup_max_sec");
+        if (has(sec, "drain_timeout_sec")) q.drain_timeout_sec = asDouble(sec["drain_timeout_sec"], "queue_sync.drain_timeout_sec");
+        if (has(sec, "stall_cycles")) q.stall_cycles = asInt(sec["stall_cycles"], "queue_sync.stall_cycles");
+        if (has(sec, "no_consumption_rise_per_sec")) q.no_consumption_rise_per_sec = asInt(sec["no_consumption_rise_per_sec"], "queue_sync.no_consumption_rise_per_sec");
     }
 
     if (has(root, "force_control")) {

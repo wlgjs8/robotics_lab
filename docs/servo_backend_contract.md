@@ -128,7 +128,9 @@ The servo loop calls per-arm backend operations directly. This is simple and rem
 
 Each `ArmWorker` owns one backend and one thread. The servo loop reads cached state and dispatches bounded send requests through worker interfaces. Worker mode allows left/right endpoint I/O to proceed independently.
 
-Worker mode is hardware-free/mock-only until separately accepted on hardware.
+Worker mode is a supported real-mode path (the mock-only refusal was retired). It is
+the path control-box queue sync requires: each arm owns its own send cadence so the
+per-arm period trim can lock that arm's stream to its box's clock.
 
 ## ArmWorker Command Policy
 

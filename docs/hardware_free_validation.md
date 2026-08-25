@@ -91,7 +91,7 @@ Direct mode and worker mode are both hardware-free (mock) validation targets.
 
 Direct mode validates the straightforward servo loop/backends path.
 
-Worker mode validates the long-term architecture where each arm worker owns blocking backend I/O. Worker mode is still hardware-free/mock-only unless a future real-hardware acceptance explicitly opens it.
+Worker mode validates the architecture where each arm worker owns blocking backend I/O and its own send cadence. Worker mode is no longer mock-only — it is a supported real-mode path — so hardware-free coverage here is a regression baseline, not the boundary of where worker mode may run.
 
 ## Expected State Telemetry
 

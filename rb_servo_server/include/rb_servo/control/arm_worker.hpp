@@ -11,12 +11,24 @@
 #include <thread>
 
 #include "rb_servo/config/config.hpp"
+#include "rb_servo/control/queue_sync_controller.hpp"
 #include "rb_servo/robot/i_robot_backend.hpp"
 
 namespace rb_servo {
 
 struct ArmWorkerOptions {
     uint64_t read_period_ns = 10'000'000;
+    // Cadence ownership. 0 (default) keeps the legacy event-driven behaviour:
+    // the worker dispatches whatever the servo loop enqueued as soon as it can,
+    // and the loop owns the send rhythm.
+    //
+    // Non-zero makes THIS worker own its arm's send cadence: it sends once per
+    // send_period_ns (plus the queue-sync trim) from the latest-wins mailbox the
+    // servo loop keeps refreshing. That is what queue sync requires -- holding a
+    // control box's queue at a fixed depth means matching that box's clock, and
+    // a single loop has one period for two boxes running two different clocks.
+    uint64_t send_period_ns = 0;
+    QueueSyncConfig queue_sync;
     std::size_t lifecycle_queue_capacity = 4;
     bool rbpodo_async_streaming_enabled = false;
     RbpodoAsyncStreamingMode rbpodo_async_streaming_mode =
@@ -98,6 +110,16 @@ public:
     ArmWorkerTelemetry telemetry() const;
     ArmWorkerStartupTelemetry startupTelemetry() const;
     RbpodoAsyncStreamingTelemetry asyncStreamingTelemetry() const;
+    // Latest queue-sync decision for this arm. Meaningful only when this worker
+    // owns its cadence (options.send_period_ns > 0) and queue_sync.enable is on;
+    // otherwise it stays at its neutral default so a consumer cannot mistake an
+    // inactive controller for a locked one.
+    QueueSyncDecision queueSyncDecision() const;
+    // Control-box queue occupancy from the last REAL send. Kept separate from
+    // lastSendResult(): in cadence mode the loop enqueues every tick and the
+    // enqueue path overwrites last_send_result_, so reading queue_ack from there
+    // returns a default (fill = -1) almost always.
+    RbpodoQueueAckTelemetry latestQueueAck() const;
     std::optional<BackendTransportTelemetry> transportTelemetry() const;
 
     ArmId armId() const;
@@ -186,6 +208,20 @@ private:
     ArmWorkerOptions options_;
     ArmId arm_id_;
     std::string name_;
+
+    // Cadence + queue sync. Touched only on the worker thread except for the
+    // decision snapshot, which is published under mutex_ for telemetry readers.
+    QueueSyncController queue_sync_;
+    QueueSyncDecision queue_sync_decision_;
+    RbpodoQueueAckTelemetry latest_queue_ack_;
+    // Last setpoint actually handed to the box. In cadence mode the worker must
+    // put a command on the wire EVERY tick: the box drains its FIFO on its own
+    // clock, so a skipped send is a queue entry it never receives. Repeating the
+    // previous setpoint is a hold, which is what a 500 Hz servo stream does
+    // anyway; skipping starves the queue instead (measured: 231 Hz of actual
+    // sends against a 500 Hz loop, and the fill drained to the protect floor).
+    std::optional<SendServoJRequest> last_servo_j_;
+    uint64_t repeated_sends_total_ = 0;
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;

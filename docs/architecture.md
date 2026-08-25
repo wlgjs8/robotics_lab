@@ -490,7 +490,7 @@ CommandBuffer
 orientation interpolation, frame conversion, and nontrivial SO(3)/SE(3)
 operations must use Eigen/Pinocchio instead of local fallback math.
 
-`ArmWorker` owns blocking per-arm backend I/O in worker mode. Worker mode is hardware-free/mock-only until separate real-hardware acceptance exists.
+`ArmWorker` owns blocking per-arm backend I/O in worker mode. Worker mode is a supported real-mode path: it is what control-box queue sync runs on, since holding each box's command queue at a fixed depth requires per-arm cadence ownership.
 
 ## Backend Architecture
 

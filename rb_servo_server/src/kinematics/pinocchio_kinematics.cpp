@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <unordered_map>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -98,11 +99,27 @@ void populateBranchJumpDetails(
 }  // namespace
 
 struct PinocchioKinematics::Impl {
-    explicit Impl(pinocchio::Model model_in)
-        : model(std::move(model_in)), data(model) {}
+    explicit Impl(pinocchio::Model model_in) : model(std::move(model_in)) {}
+
+    // pinocchio::Data is per-call SCRATCH: forwardKinematics/computeJointJacobians
+    // write into it and the results are then read back out of oMf/oMi/J. Sharing
+    // one Data across threads is a data race that does NOT crash -- it silently
+    // returns another thread's pose. This object is a single shared_ptr used by
+    // the servo loop and, once each arm owns its own thread, by both arms.
+    //
+    // Give every calling thread its own Data instead. The model is const after
+    // construction so it stays shared; only the scratch is duplicated (once per
+    // thread, on first use).
+    pinocchio::Data& threadData() const {
+        thread_local std::unordered_map<const Impl*, pinocchio::Data> per_impl;
+        auto it = per_impl.find(this);
+        if (it == per_impl.end()) {
+            it = per_impl.emplace(this, pinocchio::Data(model)).first;
+        }
+        return it->second;
+    }
 
     pinocchio::Model model;
-    pinocchio::Data data;
     pinocchio::FrameIndex base_frame = 0;
     pinocchio::FrameIndex tip_frame = 0;
     std::array<pinocchio::JointIndex, kDof> joints{};
@@ -282,11 +299,11 @@ Pose6D PinocchioKinematics::computeTcpBase(const JointArray& q_deg) const {
         throw std::runtime_error("Pinocchio kinematics is not initialized");
     }
     Eigen::VectorXd q = toPinocchioQ(q_deg, impl_->model, impl_->joints);
-    pinocchio::forwardKinematics(impl_->model, impl_->data, q);
-    pinocchio::updateFramePlacements(impl_->model, impl_->data);
+    pinocchio::forwardKinematics(impl_->model, impl_->threadData(), q);
+    pinocchio::updateFramePlacements(impl_->model, impl_->threadData());
 
-    const pinocchio::SE3& world_base = impl_->data.oMf[impl_->base_frame];
-    const pinocchio::SE3& world_tip = impl_->data.oMf[impl_->tip_frame];
+    const pinocchio::SE3& world_base = impl_->threadData().oMf[impl_->base_frame];
+    const pinocchio::SE3& world_tip = impl_->threadData().oMf[impl_->tip_frame];
     Pose6D pose = math::poseFromSe3(world_base.inverse() * world_tip);
     if (!finitePose(pose)) {
         throw std::runtime_error("Pinocchio FK produced a non-finite TCP pose");
@@ -314,10 +331,10 @@ std::vector<std::array<double, 3>> PinocchioKinematics::linkCollisionPointsInSta
         throw std::runtime_error("Pinocchio kinematics is not initialized");
     }
     Eigen::VectorXd q = toPinocchioQ(q_deg, impl_->model, impl_->joints);
-    pinocchio::forwardKinematics(impl_->model, impl_->data, q);
-    pinocchio::updateFramePlacements(impl_->model, impl_->data);
+    pinocchio::forwardKinematics(impl_->model, impl_->threadData(), q);
+    pinocchio::updateFramePlacements(impl_->model, impl_->threadData());
 
-    const pinocchio::SE3& world_base = impl_->data.oMf[impl_->base_frame];
+    const pinocchio::SE3& world_base = impl_->threadData().oMf[impl_->base_frame];
     const pinocchio::SE3 stand_T_world =
         math::se3FromPose(mount.base_pose_in_stand) * world_base.inverse();
 
@@ -326,9 +343,9 @@ std::vector<std::array<double, 3>> PinocchioKinematics::linkCollisionPointsInSta
     world_points.reserve(impl_->joints.size() + 2);
     world_points.push_back(world_base.translation());
     for (std::size_t i = 0; i < impl_->joints.size(); ++i) {
-        world_points.push_back(impl_->data.oMi[impl_->joints[i]].translation());
+        world_points.push_back(impl_->threadData().oMi[impl_->joints[i]].translation());
     }
-    world_points.push_back(impl_->data.oMf[impl_->tip_frame].translation());
+    world_points.push_back(impl_->threadData().oMf[impl_->tip_frame].translation());
 
     std::vector<std::array<double, 3>> stand_points;
     stand_points.reserve(world_points.size());
@@ -387,15 +404,15 @@ bool PinocchioKinematics::computeStandDirectionJacobian(
     if (!dir.allFinite() || dir.squaredNorm() < 1e-18) return false;
 
     const Eigen::VectorXd q = toPinocchioQ(q_deg, impl_->model, impl_->joints);
-    pinocchio::forwardKinematics(impl_->model, impl_->data, q);
-    pinocchio::computeJointJacobians(impl_->model, impl_->data, q);
-    pinocchio::updateFramePlacements(impl_->model, impl_->data);
+    pinocchio::forwardKinematics(impl_->model, impl_->threadData(), q);
+    pinocchio::computeJointJacobians(impl_->model, impl_->threadData(), q);
+    pinocchio::updateFramePlacements(impl_->model, impl_->threadData());
 
     // Tip-frame spatial Jacobian in world axes (linear = tip-origin velocity, angular
     // = angular velocity), sliced to the arm's 6 joint columns.
     Eigen::Matrix<double, 6, Eigen::Dynamic> Jf(6, impl_->model.nv);
     Jf.setZero();
-    pinocchio::getFrameJacobian(impl_->model, impl_->data, impl_->tip_frame,
+    pinocchio::getFrameJacobian(impl_->model, impl_->threadData(), impl_->tip_frame,
                                 pinocchio::LOCAL_WORLD_ALIGNED, Jf);
     Eigen::Matrix<double, 6, 6> J;
     J.setZero();
@@ -403,8 +420,8 @@ bool PinocchioKinematics::computeStandDirectionJacobian(
         J.col(static_cast<Eigen::Index>(i)) = Jf.col(impl_->model.idx_vs[impl_->joints[i]]);
     }
 
-    const pinocchio::SE3& world_base = impl_->data.oMf[impl_->base_frame];
-    const pinocchio::SE3& world_tip = impl_->data.oMf[impl_->tip_frame];
+    const pinocchio::SE3& world_base = impl_->threadData().oMf[impl_->base_frame];
+    const pinocchio::SE3& world_tip = impl_->threadData().oMf[impl_->tip_frame];
     // Offset point velocity in world axes: p = tip_origin + r, r = R_tip * offset.
     // pdot = Jv qdot + omega x r = [Jv - skew(r) Jw] qdot.
     const Eigen::Vector3d offset(tcp_offset_m[0], tcp_offset_m[1], tcp_offset_m[2]);
@@ -487,12 +504,12 @@ IkResult PinocchioKinematics::solveIkDamped(
             );
         }
 
-        pinocchio::forwardKinematics(impl_->model, impl_->data, q);
-        pinocchio::computeJointJacobians(impl_->model, impl_->data, q);
-        pinocchio::updateFramePlacements(impl_->model, impl_->data);
+        pinocchio::forwardKinematics(impl_->model, impl_->threadData(), q);
+        pinocchio::computeJointJacobians(impl_->model, impl_->threadData(), q);
+        pinocchio::updateFramePlacements(impl_->model, impl_->threadData());
 
-        const pinocchio::SE3& world_base = impl_->data.oMf[impl_->base_frame];
-        const pinocchio::SE3& world_tip = impl_->data.oMf[impl_->tip_frame];
+        const pinocchio::SE3& world_base = impl_->threadData().oMf[impl_->base_frame];
+        const pinocchio::SE3& world_tip = impl_->threadData().oMf[impl_->tip_frame];
         const pinocchio::SE3 current_base = world_base.inverse() * world_tip;
         const pinocchio::SE3 current_to_target = current_base.actInv(target_base);
         const Eigen::Matrix<double, 6, 1> error = math::log6Local(current_base, target_base);
@@ -538,7 +555,7 @@ IkResult PinocchioKinematics::solveIkDamped(
         jacobian.setZero();
         pinocchio::getFrameJacobian(
             impl_->model,
-            impl_->data,
+            impl_->threadData(),
             impl_->tip_frame,
             pinocchio::LOCAL,
             jacobian

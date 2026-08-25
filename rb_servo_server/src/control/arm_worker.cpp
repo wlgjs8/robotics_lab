@@ -134,7 +134,7 @@ void updateMax(double value, double* target) {
 }  // namespace
 
 ArmWorker::ArmWorker(std::unique_ptr<IRobotBackend> backend, ArmWorkerOptions options)
-    : backend_(std::move(backend)), options_(options) {
+    : backend_(std::move(backend)), options_(options), queue_sync_(options.queue_sync) {
     if (!backend_) {
         throw std::invalid_argument("ArmWorker requires a backend");
     }
@@ -508,6 +508,12 @@ void ArmWorker::run() {
     }
 
     updateStartupPhase("read_loop_entered");
+    // Cadence ownership (options_.send_period_ns > 0). next_send_ns is advanced by
+    // period + queue-sync trim, so this arm's stream tracks ITS box's clock rather
+    // than the host's nominal rate. Seeded on the first pass so the startup
+    // transient is not charged to the first period.
+    const bool owns_cadence = options_.send_period_ns > 0;
+    uint64_t next_send_ns = 0;
     while (true) {
         std::optional<SendServoJRequest> command;
         std::optional<ArmWorkerCommand> lifecycle_command;
@@ -528,10 +534,22 @@ void ArmWorker::run() {
                 command = pending_servo_j_;
                 telemetry_.worker_last_dispatched_seq = command->command_seq;
                 pending_servo_j_.reset();
+                last_servo_j_ = command;
                 if (asyncStreamingEnabled()) {
                     async_telemetry_.worker_backlog = 0;
                     async_telemetry_.last_sent_seq = command->command_seq;
                 }
+            } else if (owns_cadence && last_servo_j_.has_value()) {
+                // Cadence tick with an empty mailbox. The loop and this worker run
+                // at nearly the same rate but at an arbitrary phase, so roughly
+                // half of these ticks would otherwise find nothing to send -- and
+                // a skipped send is a FIFO entry the box never receives, which
+                // starves the queue rather than regulating it. Repeat the last
+                // setpoint: a hold on the wire, which is what a 500 Hz servo
+                // stream sends anyway.
+                command = last_servo_j_;
+                command->deadline_ns = 0;  // a repeat must not inherit a stale deadline
+                ++repeated_sends_total_;
             }
         }
 
@@ -584,6 +602,21 @@ void ArmWorker::run() {
                     result = deadlineMissedResult(*command, dispatch_timing);
                 }
                 storeSendResult(*command, result, dispatch_timing);
+                if (owns_cadence) {
+                    // Feed this send's RBACK observation to the queue-sync law and
+                    // publish the decision. The trim it returns is applied when the
+                    // NEXT send instant is scheduled, below.
+                    QueueSyncController::Observation obs;
+                    obs.streaming = true;
+                    obs.fill_valid = result.queue_ack.observed;
+                    obs.fill = result.queue_ack.fill;
+                    obs.rback_sequence = result.queue_ack.sequence;
+                    obs.now_ns = send_end_ns;
+                    const QueueSyncDecision decision = queue_sync_.step(obs);
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    queue_sync_decision_ = decision;
+                    latest_queue_ack_ = result.queue_ack;
+                }
             }
         }
 
@@ -601,10 +634,55 @@ void ArmWorker::run() {
             stopBackendBeforeExit(backend_ready);
             return;
         }
-        cv_.wait_for(lock, readPeriod(options_), [this] {
-            return stop_requested_ || !lifecycle_queue_.empty() || pending_servo_j_.has_value();
-        });
+        if (!owns_cadence) {
+            cv_.wait_for(lock, readPeriod(options_), [this] {
+                return stop_requested_ || !lifecycle_queue_.empty() || pending_servo_j_.has_value();
+            });
+            continue;
+        }
+
+        // Sleep to this arm's own next send instant. A lifecycle command or stop
+        // still wakes us early -- cadence must never delay a fault reset or a
+        // shutdown -- but a fresh servo_j does NOT: the mailbox is latest-wins,
+        // so the newest setpoint is simply what the next cadence tick picks up.
+        const uint64_t now_ns = nowSteadyNs();
+        if (next_send_ns == 0) {
+            next_send_ns = now_ns + options_.send_period_ns;
+        }
+        if (next_send_ns > now_ns) {
+            cv_.wait_for(lock, std::chrono::nanoseconds(next_send_ns - now_ns), [this] {
+                return stop_requested_ || !lifecycle_queue_.empty();
+            });
+        }
+        const uint64_t after_ns = nowSteadyNs();
+        if (after_ns >= next_send_ns) {
+            const double trim_us = queue_sync_decision_.period_trim_us;
+            const double period_ns =
+                static_cast<double>(options_.send_period_ns) + trim_us * 1000.0;
+            // A trim can never invert or zero the period; the config validator
+            // bounds the gains, and this is the last-resort clamp.
+            const uint64_t step_ns = period_ns > 1000.0
+                ? static_cast<uint64_t>(period_ns)
+                : options_.send_period_ns;
+            next_send_ns += step_ns;
+            // Never chase a missed deadline with a burst: if we fell behind (a
+            // long lifecycle command, a scheduling stall), re-phase to now rather
+            // than firing back-to-back sends into the box queue.
+            if (next_send_ns <= after_ns) {
+                next_send_ns = after_ns + step_ns;
+            }
+        }
     }
+}
+
+QueueSyncDecision ArmWorker::queueSyncDecision() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return queue_sync_decision_;
+}
+
+RbpodoQueueAckTelemetry ArmWorker::latestQueueAck() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return latest_queue_ack_;
 }
 
 void ArmWorker::storeReadResult(const BackendResult<RobotState>& result, uint64_t observed_ns) {

@@ -16,8 +16,12 @@ left_robot:
   servo_t1_sec: 0.002
   servo_t2_sec: 0.021
   servo_gain: 1.0           # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
-  # script-level 10.0 disables controller LPF but produced jerk/jitter on hardware.
-  servo_alpha: 1.0
+  # Vendor scales gain/alpha by 0.1 inside the controller, so script-level 10.0 =
+  # effective 1.0 = LPF OFF. Measured on fw v8.6.1: script 1.0 gave exactly the
+  # first-order pole 0.900/tick (tau 9.5 ticks / 19 ms) that this turns off.
+  # An earlier LPF-off attempt produced jerk/jitter on hardware; being retried now
+  # that the box queue is regulated (queue_sync below) instead of free-running.
+  servo_alpha: 10.0
   disable_waiting_ack: true    # ACK-off 500Hz streaming; config-driven, no RB_ALLOW_* env gate
 
 right_robot:
@@ -31,8 +35,12 @@ right_robot:
   servo_t1_sec: 0.002
   servo_t2_sec: 0.021
   servo_gain: 1.0                 # reverted: 0.5 caused excessive servo lag (5deg) + right servo deactivation
-  # script-level 10.0 disables controller LPF but produced jerk/jitter on hardware.
-  servo_alpha: 1.0
+  # Vendor scales gain/alpha by 0.1 inside the controller, so script-level 10.0 =
+  # effective 1.0 = LPF OFF. Measured on fw v8.6.1: script 1.0 gave exactly the
+  # first-order pole 0.900/tick (tau 9.5 ticks / 19 ms) that this turns off.
+  # An earlier LPF-off attempt produced jerk/jitter on hardware; being retried now
+  # that the box queue is regulated (queue_sync below) instead of free-running.
+  servo_alpha: 10.0
   disable_waiting_ack: true    # ACK-off 500Hz streaming; config-driven, no RB_ALLOW_* env gate
 
 left_mount:
@@ -44,7 +52,18 @@ right_mount:
 servo:
   rate_hz: 500
   command_timeout_sec: 0.2
-  io_model: direct
+  # Per-arm worker I/O. Required for queue_sync: each arm's worker owns its own
+  # send cadence so the period trim can lock that arm's stream to ITS box clock.
+  # A single loop has one period for two boxes running two different clocks
+  # (measured drift: left +0.665, right +0.670 ticks/s -- they diverge).
+  io_model: worker
+  worker_read_period_sec: 0.002
+  # A worker-cached read crosses a thread boundary: measured MEDIAN age 1567 us
+  # at a 2 ms period (direct I/O is 25-125 us). The former hardcoded 2-period
+  # budget left under one period of margin, and a single tick over it returned a
+  # jointless state that latched an unrecoverable force-control fault
+  # (2026-08-25). 4 periods = 8 ms gives real margin against that phase offset.
+  worker_state_max_age_periods: 4.0
   startup_mode: Hold
   send_servo_commands: true
   enable_realtime_priority: true
@@ -481,6 +500,20 @@ gripper:
 command_source:
   enforce_lease: true
   lease_timeout_sec: 60.0
+
+# Rainbow control-box command-queue regulation (fw v8.7.3 schedules streamed
+# servo_j from a FIFO, so box dead time == queue fill; measured dead time =
+# RBACK fill + 1 tick). Unregulated, the queue grew +0.67 ticks/s (+1.33 ms/s)
+# without bound: 19 -> 29 ticks in 15 s, ~217 ticks extrapolated at 5 min.
+# Holding the fill at target_fill is what makes the box delay a constant.
+# Gains are controller-manager's Arm::qsync_step, used as-is (same actuator).
+queue_sync:
+  # Takes effect only with servo.io_model=worker (the loop cannot trim a per-arm
+  # period). Measured 2026-08-25 with the LPF off: box delay == RBACK fill + 1
+  # tick exactly, and the fill drifts +0.65 tk/s unregulated. Holding it at
+  # target_fill is what makes the box delay a constant: 5 + 1 = 6 ticks (12 ms).
+  enable: true
+  target_fill: 5
 
 logging:
   enable: true

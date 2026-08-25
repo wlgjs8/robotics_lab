@@ -323,6 +323,10 @@ struct CollisionMonitor::Impl {
     JointArray left_deg{};
     JointArray right_deg{};
     bool has_targets = false;
+    // Tracked separately so per-arm submission only arms the evaluator once BOTH
+    // arms have reported; a default-constructed counterpart is not a real pose.
+    bool has_left = false;
+    bool has_right = false;
 
     // runtime-controlled "ground_plane" whole-arm floor (ground_plane.follow_safety_floors).
     // gp_index_ is the geometry index of the injected box (SIZE_MAX if absent);
@@ -1266,7 +1270,28 @@ void CollisionMonitor::submitTargets(const JointArray& left_deg, const JointArra
     std::lock_guard<std::mutex> lk(impl_->in_mtx);
     impl_->left_deg = left_deg;
     impl_->right_deg = right_deg;
+    impl_->has_left = true;
+    impl_->has_right = true;
     impl_->has_targets = true;
+}
+
+void CollisionMonitor::submitArmTarget(ArmId arm, const JointArray& q_deg) {
+    // Per-arm submission for per-arm control threads, which never hold both
+    // candidates at one instant. The monitor pairs the latest of each -- they can
+    // be up to one tick apart, on top of the async evaluation lag this guard
+    // already tolerates through its staleness bound.
+    //
+    // A pair is only evaluated once BOTH arms have submitted: checking one arm
+    // against a default-constructed other would test a pose the robot is not in.
+    std::lock_guard<std::mutex> lk(impl_->in_mtx);
+    if (arm == ArmId::Left) {
+        impl_->left_deg = q_deg;
+        impl_->has_left = true;
+    } else {
+        impl_->right_deg = q_deg;
+        impl_->has_right = true;
+    }
+    impl_->has_targets = impl_->has_left && impl_->has_right;
 }
 
 CollisionVerdict CollisionMonitor::latest() const { return impl_->load(); }

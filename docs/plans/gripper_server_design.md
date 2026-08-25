@@ -304,8 +304,10 @@ Each phase is independently testable; viz can come online at the end of Phase 1
   dropped); feedback caching + state JSON stamping; stale flag.
 - Python: gripper_server protocol round-trip (mock backend, no serial);
   `ArmSnapshot.gripper` parse; GUI viz update (markers track percent; grey on stale).
-- Hardware-free: full path with a mock gripper backend (no real serial), mirroring
-  the existing mock-only posture for worker I/O.
+- Hardware-free: full path with a mock gripper backend (no real serial). (This
+  bullet used to cite worker I/O's mock-only posture as the model; that refusal
+  has since been retired, so the analogy no longer holds — the requirement here
+  is just hardware-free coverage before serial hardware.)
 
 ## 13. Open decisions
 - Phase scope to start (Phase 1 recommended).

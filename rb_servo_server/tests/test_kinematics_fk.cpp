@@ -1,5 +1,6 @@
 #include <cmath>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -379,6 +380,61 @@ bool testPinocchioFk() {
     return true;
 }
 
+// Per-arm control threads call FK/IK concurrently through the SAME shared
+// IKinematics. pinocchio::Data is per-call scratch, so a single shared Data
+// would silently return another thread's pose -- no crash, no log, just a wrong
+// TCP. Prove concurrent results equal the serial ones exactly.
+bool testKinematicsIsThreadSafe() {
+    rb_servo::KinematicsConfig cfg;
+    cfg.enable = true;
+    cfg.provider = "pinocchio";
+    cfg.urdf = rb3Urdf().string();
+    cfg.base_link = "world";
+    cfg.tip_link = "tcp";
+    cfg.joint_names = {
+        "base_joint", "shoulder_joint", "elbow_joint",
+        "wrist1_joint", "wrist2_joint", "wrist3_joint",
+    };
+    cfg.q_units = "deg";
+    cfg.publish_tcp = true;
+    const auto kin = std::make_shared<rb_servo::PinocchioKinematics>(cfg);
+
+    // Two well-separated configurations, so a leaked pose from the other thread
+    // is far outside any tolerance rather than a rounding difference.
+    const auto configuration = [](double base) {
+        rb_servo::JointArray q{};
+        for (int i = 0; i < rb_servo::kDof; ++i) q[i] = base + 7.0 * i;
+        return q;
+    };
+    const rb_servo::JointArray qa = configuration(-40.0);
+    const rb_servo::JointArray qb = configuration(35.0);
+    const rb_servo::Pose6D expect_a = kin->computeTcpBase(qa);
+    const rb_servo::Pose6D expect_b = kin->computeTcpBase(qb);
+    RB_CHECK(finitePose(expect_a) && finitePose(expect_b));
+    // The two references must actually differ, or the test proves nothing.
+    RB_CHECK(std::abs(expect_a.x - expect_b.x) + std::abs(expect_a.y - expect_b.y) +
+             std::abs(expect_a.z - expect_b.z) > 1e-3);
+
+    constexpr int kIterations = 400;
+    std::atomic<bool> mismatch{false};
+    const auto hammer = [&](const rb_servo::JointArray& q, const rb_servo::Pose6D& expected) {
+        for (int i = 0; i < kIterations && !mismatch.load(); ++i) {
+            const rb_servo::Pose6D got = kin->computeTcpBase(q);
+            if (std::abs(got.x - expected.x) > 1e-9 ||
+                std::abs(got.y - expected.y) > 1e-9 ||
+                std::abs(got.z - expected.z) > 1e-9) {
+                mismatch.store(true);
+            }
+        }
+    };
+    std::thread ta(hammer, qa, expect_a);
+    std::thread tb(hammer, qb, expect_b);
+    ta.join();
+    tb.join();
+    RB_CHECK(!mismatch.load());
+    return true;
+}
+
 bool testLinkCollisionPointsInStand() {
     rb_servo::KinematicsConfig cfg;
     cfg.enable = true;
@@ -708,6 +764,7 @@ int main() {
     if (!testIkRemainsUnavailable()) return 1;
     if (!testConfiguredMountNormals()) return 1;
     if (!testPinocchioFk()) return 1;
+    if (!testKinematicsIsThreadSafe()) return 1;
     if (!testLinkCollisionPointsInStand()) return 1;
     if (!testStatePublisherSerializesTcpPoseValidity()) return 1;
     if (!testStatePublisherKeepsTcpDeferredWhenFkDisabled()) return 1;

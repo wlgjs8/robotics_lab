@@ -757,9 +757,96 @@ bool testServoIoModelParsesAndValidates() {
         "  stop_both_arms_on_single_arm_error: true\n"
         "  latch_fault_on_robot_state_error: true\n"
     );
-    const bool real_worker_rejected = loadRejects(real_worker_path);
+    // servo.io_model=worker is ACCEPTED in real mode: the old refusal was retired
+    // because control-box queue sync needs per-arm cadence ownership, which only
+    // worker I/O provides.
+    bool real_worker_accepted = false;
+    try {
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(real_worker_path);
+        real_worker_accepted = cfg.servo.io_model == rb_servo::ServoIoModel::Worker;
+    } catch (const std::exception&) {
+        real_worker_accepted = false;
+    }
     ::unlink(real_worker_path.c_str());
-    RB_CHECK(real_worker_rejected);
+    RB_CHECK(real_worker_accepted);
+    return true;
+}
+
+bool testQueueSyncConfigValidation() {
+    const std::string header =
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  backend_type: mock\n"
+        "  run_mode: mock\n"
+        "right_robot:\n"
+        "  backend_type: mock\n"
+        "  run_mode: mock\n";
+
+    // Accepted: defaults plus an explicit enable.
+    const std::string ok_path = writeTempConfig(
+        "queue-sync-ok", header + "queue_sync:\n  enable: true\n  target_fill: 5\n");
+    bool ok_loaded = false;
+    try {
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(ok_path);
+        ok_loaded = cfg.queue_sync.enable && cfg.queue_sync.target_fill == 5;
+    } catch (const std::exception&) {
+        ok_loaded = false;
+    }
+    ::unlink(ok_path.c_str());
+    RB_CHECK(ok_loaded);
+
+    // Disabled by default: absence of the block must not enable regulation.
+    const std::string absent_path = writeTempConfig("queue-sync-absent", header);
+    bool absent_default_off = false;
+    try {
+        absent_default_off = !rb_servo::loadConfigFromYaml(absent_path).queue_sync.enable;
+    } catch (const std::exception&) {
+        absent_default_off = false;
+    }
+    ::unlink(absent_path.c_str());
+    RB_CHECK(absent_default_off);
+
+    // Worker state staleness budget: in band accepted, outside band rejected.
+    const std::string age_ok_path = writeTempConfig(
+        "worker-state-age-ok", header + "servo:\n  worker_state_max_age_periods: 4.0\n");
+    bool age_ok = false;
+    try {
+        age_ok = rb_servo::loadConfigFromYaml(age_ok_path)
+                     .servo.worker_state_max_age_periods == 4.0;
+    } catch (const std::exception&) {
+        age_ok = false;
+    }
+    ::unlink(age_ok_path.c_str());
+    RB_CHECK(age_ok);
+
+    for (const char* bad : {"1.5", "0.0", "12.0"}) {
+        const std::string path = writeTempConfig(
+            std::string("worker-state-age-bad-") + bad,
+            header + "servo:\n  worker_state_max_age_periods: " + bad + "\n");
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+
+    // Fail-closed rejections. target_fill 0 starves the box; protect_fill at or
+    // above the target makes protection permanent; an unknown key is a typo.
+    const std::pair<const char*, const char*> bad_cases[] = {
+        {"queue-sync-target-zero", "queue_sync:\n  enable: true\n  target_fill: 0\n"},
+        {"queue-sync-protect-ge-target",
+         "queue_sync:\n  enable: true\n  target_fill: 5\n  protect_fill: 5\n"},
+        {"queue-sync-bad-lpf", "queue_sync:\n  enable: true\n  lpf_alpha: 0.0\n"},
+        {"queue-sync-positive-protect-adj",
+         "queue_sync:\n  enable: true\n  protect_adj_us: 10.0\n"},
+        {"queue-sync-drain-order",
+         "queue_sync:\n  enable: true\n  drain_adj_us: 500.0\n  drain_max_us: 100.0\n"},
+        {"queue-sync-unknown-key", "queue_sync:\n  enable: true\n  kp_above: 6.0\n"},
+    };
+    for (const auto& [name, body] : bad_cases) {
+        const std::string path = writeTempConfig(name, header + body);
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
     return true;
 }
 
@@ -2400,6 +2487,7 @@ int main() {
     if (!testAutoTareSettleConfigValidation()) return 1;
     if (!testGuardedAdmittanceReleaseProfileValidation()) return 1;
     if (!testServoIoModelParsesAndValidates()) return 1;
+    if (!testQueueSyncConfigValidation()) return 1;
     if (!testUnknownKeysAndSchemaFail()) return 1;
     if (!testStatePublisherEndpointsParseAndValidate()) return 1;
     if (!testForceControlSchemaAndActivation()) return 1;

@@ -1461,6 +1461,15 @@ ArmWorkerOptions workerOptions(const DualArmConfig& config) {
         config.servo.rbpodo_async_streaming.ack_supervision;
     options.rbpodo_async_reference_supervision =
         config.servo.rbpodo_async_streaming.reference_supervision;
+    // Cadence ownership only makes sense in worker I/O: it is the worker thread
+    // that would own the period. In direct I/O the servo loop still owns the
+    // rhythm, so leave send_period_ns at 0 (event-driven) rather than handing the
+    // worker a cadence it is not running.
+    if (config.servo.io_model == ServoIoModel::Worker && config.queue_sync.enable) {
+        const int rate_hz = config.servo.rate_hz > 0 ? config.servo.rate_hz : 500;
+        options.send_period_ns = static_cast<uint64_t>(1'000'000'000LL / rate_hz);
+        options.queue_sync = config.queue_sync;
+    }
     return options;
 }
 
@@ -4563,7 +4572,12 @@ void DualArmServoLoop::loopMain() {
         const double filter_dt_sec = computeFilterDtSec(actual_period_ns, nominal_period_ns);
         last_loop_start_ns_ = loop_start;
 
-        uint64_t worker_state_max_age_ns = std::max<uint64_t>(2 * nominal_period_ns, 1'000'000);
+        const double state_age_periods = config_.servo.worker_state_max_age_periods > 0.0
+            ? config_.servo.worker_state_max_age_periods
+            : 2.0;
+        uint64_t worker_state_max_age_ns = std::max<uint64_t>(
+            static_cast<uint64_t>(state_age_periods * static_cast<double>(nominal_period_ns)),
+            1'000'000);
         if (rbpodoAsyncIoMode()) {
             const double async_state_age_ns =
                 config_.servo.rbpodo_async_streaming.ack_supervision.expected_ack_timeout_ms *
@@ -5429,8 +5443,21 @@ void DualArmServoLoop::loopMain() {
         sample.right_last_read = readCallSnapshot(right_state_result, right_read_fault);
         sample.left_last_send = sendCallSnapshot(left_send_result);
         sample.right_last_send = sendCallSnapshot(right_send_result);
+        // When the worker owns the cadence the loop only ENQUEUES; the actual
+        // send (and with it the RBACK the box answered) happens later on the
+        // worker thread. Taking queue_ack off the enqueue result would log an
+        // empty observation forever, so pull the worker's latest SEND result
+        // instead. Direct/blocking modes already return the real send here.
         sample.left_queue_ack = left_send_result.queue_ack;
         sample.right_queue_ack = right_send_result.queue_ack;
+        if (workerOwnsSendCadence()) {
+            // lastSendResult() is NOT usable here: the enqueue path overwrites it
+            // every tick, so it reports a default queue_ack almost always
+            // (measured: 1 real observation in 7408 ticks). latestQueueAck() is
+            // written only on a real send, from the worker thread.
+            if (left_worker_) sample.left_queue_ack = left_worker_->latestQueueAck();
+            if (right_worker_) sample.right_queue_ack = right_worker_->latestQueueAck();
+        }
         sample.left_cartesian_solve = left_last_cartesian_solve_;
         sample.right_cartesian_solve = right_last_cartesian_solve_;
         mergeAbcTelemetry(sample.left_cartesian_solve, left_abc_telemetry_,
@@ -6571,6 +6598,38 @@ bool DualArmServoLoop::latchChunkFollowerFaultRequests(
 }
 
 ArmCommand DualArmServoLoop::applyChunkFollowerStage(
+    ArmControlContext& ctx,
+    const ArmCommand& command,
+    const TcpPoseTargetProfileConfig& profile,
+    const Pose6D& actual_feedback_pose,
+    double dt_sec
+) {
+    return applyChunkFollowerStage(
+        ctx.arm, command, profile,
+        &ctx.chunk_follower, &ctx.chunk_follower_built,
+        &ctx.chunk_submitted_wire_seq, &ctx.chunk_submitted_recv_seq,
+        &ctx.pose_track_smd, &ctx.follower_output_smd,
+        ctx.mount, ctx.prev_sent_q_deg, actual_feedback_pose, dt_sec);
+}
+
+ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
+    ArmControlContext& ctx,
+    const ArmCommand& command,
+    const TcpPoseTargetProfileConfig& profile,
+    const Pose6D& actual_feedback_pose,
+    const Pose6D& execution_feedback_pose,
+    double dt_sec
+) {
+    return applyDeltaTwistFollowerStage(
+        ctx.arm, command, profile,
+        &ctx.delta_twist_follower, &ctx.chunk_follower_built,
+        &ctx.chunk_submitted_wire_seq, &ctx.chunk_submitted_recv_seq,
+        &ctx.pose_track_smd,
+        ctx.mount, ctx.prev_sent_q_deg,
+        actual_feedback_pose, execution_feedback_pose, dt_sec);
+}
+
+ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     ArmId arm_id,
     const ArmCommand& command,
     const TcpPoseTargetProfileConfig& profile,
@@ -7353,6 +7412,27 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     return with_stage_telemetry(smoothed);
 }
 
+namespace {
+// Stamp one arm's Cartesian solve telemetry and refresh a running TcpLinearMove's
+// lease. Per-arm by construction: reads only this arm's result/selection.
+template <typename Ctx, typename Result, typename Selection, typename Command>
+void stampCartesianSolve(Ctx& ctx, const Result& result, const Selection& selection,
+                         const Command& command) {
+    ctx.last_cartesian_solve = result.telemetry;
+    ctx.last_cartesian_solve.cartesian_servo_state_source =
+        selection.context.servo_state_source;
+    ctx.last_cartesian_solve.cartesian_divergence_source =
+        selection.context.divergence_source;
+    ctx.last_cartesian_solve.q_reference_for_servo_valid =
+        selection.context.q_reference_for_servo_valid;
+    const ArmCommand& arm_cmd = ctx.arm == ArmId::Left ? command.left : command.right;
+    if (arm_cmd.mode == ControlMode::TcpLinearMove && ctx.cartesian_servo_path.active) {
+        ctx.cartesian_servo_path.lease_enforced = command.lease.enforce_lease;
+        ctx.cartesian_servo_path.lease_expires_time_ns = command.lease.expires_time_ns;
+    }
+}
+}  // namespace
+
 ServoTarget DualArmServoLoop::computeServoTarget(
     const RobotState& left_state,
     const RobotState& right_state,
@@ -7375,19 +7455,20 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     }
     ServoTarget target;
     const bool synthetic_hold = isSyntheticHoldCommand(command);
-    const auto clear_left_linear_path = [&]() {
-        left_cartesian_servo_path_ = CartesianServoPathState{};
-        left_last_cartesian_solve_ = CartesianSolveTelemetry{};
+    // Per-arm state reached through ArmControlContext, so this block no longer
+    // names an arm: it is already in the shape a per-arm control thread needs.
+    ArmControlContext arm_ctx[2] = {armContext(ArmId::Left), armContext(ArmId::Right)};
+    const RobotState* arm_state[2] = {&left_state, &right_state};
+    const auto clear_linear_path = [](ArmControlContext& ctx) {
+        ctx.cartesian_servo_path = CartesianServoPathState{};
+        ctx.last_cartesian_solve = CartesianSolveTelemetry{};
     };
-    const auto clear_right_linear_path = [&]() {
-        right_cartesian_servo_path_ = CartesianServoPathState{};
-        right_last_cartesian_solve_ = CartesianSolveTelemetry{};
-    };
-    if (left_cartesian_servo_path_.active && !isValidJointState(left_state)) {
-        clear_left_linear_path();
-    }
-    if (right_cartesian_servo_path_.active && !isValidJointState(right_state)) {
-        clear_right_linear_path();
+    const auto clear_left_linear_path = [&]() { clear_linear_path(arm_ctx[0]); };
+    const auto clear_right_linear_path = [&]() { clear_linear_path(arm_ctx[1]); };
+    for (int i = 0; i < 2; ++i) {
+        if (arm_ctx[i].cartesian_servo_path.active && !isValidJointState(*arm_state[i])) {
+            clear_linear_path(arm_ctx[i]);
+        }
     }
     // TcpLinearMove is a FINITE, bounded path (duration_sec <= linear_move.max_duration_sec).
     // Once it is running, let it drive to completion even if the (one-shot) command's
@@ -7395,13 +7476,11 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     // applies once the path is DONE (cleared below), and an explicit command-mode change,
     // a fault, or an invalid joint state still abort it immediately above/below; E-stop
     // latches regardless. So only a FINISHED path is torn down on lease expiry.
-    if (left_cartesian_servo_path_.done &&
-        linearPathLeaseExpired(left_cartesian_servo_path_, command.host_time_ns)) {
-        clear_left_linear_path();
-    }
-    if (right_cartesian_servo_path_.done &&
-        linearPathLeaseExpired(right_cartesian_servo_path_, command.host_time_ns)) {
-        clear_right_linear_path();
+    for (int i = 0; i < 2; ++i) {
+        if (arm_ctx[i].cartesian_servo_path.done &&
+            linearPathLeaseExpired(arm_ctx[i].cartesian_servo_path, command.host_time_ns)) {
+            clear_linear_path(arm_ctx[i]);
+        }
     }
     if (!synthetic_hold) {
         if (command.left.mode != ControlMode::TcpLinearMove) {
@@ -7412,38 +7491,35 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         }
     }
 
-    const CartesianSolveTelemetry previous_left_cartesian_solve = left_last_cartesian_solve_;
-    const CartesianSolveTelemetry previous_right_cartesian_solve = right_last_cartesian_solve_;
-    left_last_cartesian_solve_ = retainCompletedPathTelemetry(
-        left_cartesian_servo_path_,
-        previous_left_cartesian_solve
-    ) ? previous_left_cartesian_solve : CartesianSolveTelemetry{};
-    right_last_cartesian_solve_ = retainCompletedPathTelemetry(
-        right_cartesian_servo_path_,
-        previous_right_cartesian_solve
-    ) ? previous_right_cartesian_solve : CartesianSolveTelemetry{};
+    for (ArmControlContext& ctx : arm_ctx) {
+        const CartesianSolveTelemetry previous = ctx.last_cartesian_solve;
+        ctx.last_cartesian_solve =
+            retainCompletedPathTelemetry(ctx.cartesian_servo_path, previous)
+                ? previous
+                : CartesianSolveTelemetry{};
+    }
 
     if (isCommandModeMissingPayload(command.left) || isCommandModeMissingPayload(command.right)) {
         if (command_verdict) *command_verdict = SafetyVerdict::InvalidCommand;
-        left_follower_output_smd_.deactivate();
-        right_follower_output_smd_.deactivate();
-        target.left_q_target_deg = left_prev_sent_q_deg_;
-        target.right_q_target_deg = right_prev_sent_q_deg_;
+        for (ArmControlContext& ctx : arm_ctx) ctx.follower_output_smd.deactivate();
+        target.left_q_target_deg = arm_ctx[0].prev_sent_q_deg;
+        target.right_q_target_deg = arm_ctx[1].prev_sent_q_deg;
         return target;
     }
 
-    const bool continue_left_linear = synthetic_hold &&
-        left_cartesian_servo_path_.active &&
-        !left_cartesian_servo_path_.done;
-    const bool continue_right_linear = synthetic_hold &&
-        right_cartesian_servo_path_.active &&
-        !right_cartesian_servo_path_.done;
+    const auto continue_linear = [&](const ArmControlContext& ctx) {
+        return synthetic_hold && ctx.cartesian_servo_path.active && !ctx.cartesian_servo_path.done;
+    };
+    const bool continue_left_linear = continue_linear(arm_ctx[0]);
+    const bool continue_right_linear = continue_linear(arm_ctx[1]);
     DualArmCommand effective_command = command;
     if (continue_left_linear) {
-        effective_command.left = linearMoveContinuationCommand(command.left, left_cartesian_servo_path_);
+        effective_command.left =
+            linearMoveContinuationCommand(command.left, arm_ctx[0].cartesian_servo_path);
     }
     if (continue_right_linear) {
-        effective_command.right = linearMoveContinuationCommand(command.right, right_cartesian_servo_path_);
+        effective_command.right =
+            linearMoveContinuationCommand(command.right, arm_ctx[1].cartesian_servo_path);
     }
 
     const auto invalidate_non_cartesian_equilibrium = [this](
@@ -7457,8 +7533,10 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             runtime.control.compliance_equilibrium_source = "unavailable";
         }
     };
-    invalidate_non_cartesian_equilibrium(left_force_runtime_, command.left.mode);
-    invalidate_non_cartesian_equilibrium(right_force_runtime_, command.right.mode);
+    const ControlMode arm_raw_mode[2] = {command.left.mode, command.right.mode};
+    for (int i = 0; i < 2; ++i) {
+        invalidate_non_cartesian_equilibrium(arm_ctx[i].force_runtime, arm_raw_mode[i]);
+    }
 
     // A payload-identification packet is an exclusive joint-space operation.
     // Suppress Cartesian force-Hold promotion on BOTH arms for this packet: the
@@ -7475,8 +7553,10 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     // A Cartesian-admittance Hold is an active fixed equilibrium, not a fresh
     // measured-pose target each tick. This prevents the compliance offset from
     // ratcheting the command in the direction of motion.
+    // Takes the arm's context instead of an ArmId, so the per-arm member lookups
+    // that used to be `arm_id == Left ? left_x_ : right_x_` ternaries disappear.
     const auto promote_force_hold = [this, &command, payload_identification_command](
-        ArmId arm_id,
+        ArmControlContext& ctx,
         const RobotState& state,
         ControlMode raw_command_mode,
         ArmCommand* arm_command
@@ -7487,8 +7567,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         if (payload_identification_command) {
             return false;
         }
-        ForceArmRuntime& runtime = arm_id == ArmId::Left
-            ? left_force_runtime_ : right_force_runtime_;
+        const ArmId arm_id = ctx.arm;
+        ForceArmRuntime& runtime = ctx.force_runtime;
         if (runtime.payload_identification_inhibit) {
             return false;
         }
@@ -7507,9 +7587,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             // re-inferred in a loop (2026-07-18 15:13 run). A stale
             // TcpPoseTarget stream still cannot clear the latch: the recorded
             // sequence only advances on genuinely new frames.
-            const std::uint64_t release_submitted_seq = arm_id == ArmId::Left
-                ? left_chunk_submitted_recv_seq_
-                : right_chunk_submitted_recv_seq_;
+            const std::uint64_t release_submitted_seq = ctx.chunk_submitted_recv_seq;
             const bool arm_frame_present = arm_id == ArmId::Left
                 ? chunk_frame_cache_.has_left
                 : chunk_frame_cache_.has_right;
@@ -7551,17 +7629,23 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         return true;
     };
     const bool left_force_hold = promote_force_hold(
-        ArmId::Left, left_state, command.left.mode, &effective_command.left);
+        arm_ctx[0], left_state, command.left.mode, &effective_command.left);
     const bool right_force_hold = promote_force_hold(
-        ArmId::Right, right_state, command.right.mode, &effective_command.right);
+        arm_ctx[1], right_state, command.right.mode, &effective_command.right);
+    // effective_command is final here (promote_force_hold is its last writer).
+    const ControlMode arm_effective_mode[2] =
+        {effective_command.left.mode, effective_command.right.mode};
 
+    // Already arm-agnostic in shape; taking the context makes it so by type, so
+    // a per-arm thread can call it with its own arm and nothing else.
     const auto pause_chunk_follower_for_hold = [this](
-        ArmId arm_id,
-        ControlMode raw_mode,
-        control::CartesianChunkFollower& follower,
-        control::FollowerOutputSmd& output_smd,
-        const RuckigFollowerConfig& built_config
+        ArmControlContext& ctx,
+        ControlMode raw_mode
     ) {
+        const ArmId arm_id = ctx.arm;
+        control::CartesianChunkFollower& follower = ctx.chunk_follower;
+        control::FollowerOutputSmd& output_smd = ctx.follower_output_smd;
+        const RuckigFollowerConfig& built_config = ctx.chunk_follower_built;
         // Hold/mode-exit owns the sent target. A later warm resume may preserve
         // follower p/v/a, but the output conditioner must re-seed from that new
         // last-sent target rather than continue from a stale pose.
@@ -7606,25 +7690,23 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             }
         }
         if (!cartesian_available) {
+            // CROSS-ARM: Cartesian being unavailable is a whole-command condition
+            // (missing kinematics / config), so it holds BOTH arms. The per-arm
+            // telemetry below still names only the arm it describes.
             if (command_verdict) *command_verdict = SafetyVerdict::CartesianUnavailable;
-            left_follower_output_smd_.deactivate();
-            right_follower_output_smd_.deactivate();
-            if (isCartesianMode(effective_command.left.mode)) {
-                left_last_cartesian_solve_ = cartesianUnavailableTelemetry(
-                    left_state,
+            const std::string* arm_unavailable_reason[2] =
+                {&left_unavailable_reason, &right_unavailable_reason};
+            for (int i = 0; i < 2; ++i) {
+                arm_ctx[i].follower_output_smd.deactivate();
+                if (!isCartesianMode(arm_effective_mode[i])) continue;
+                arm_ctx[i].last_cartesian_solve = cartesianUnavailableTelemetry(
+                    *arm_state[i],
                     config_.cartesian_control,
-                    left_unavailable_reason
+                    *arm_unavailable_reason[i]
                 );
             }
-            if (isCartesianMode(effective_command.right.mode)) {
-                right_last_cartesian_solve_ = cartesianUnavailableTelemetry(
-                    right_state,
-                    config_.cartesian_control,
-                    right_unavailable_reason
-                );
-            }
-            target.left_q_target_deg = left_prev_sent_q_deg_;
-            target.right_q_target_deg = right_prev_sent_q_deg_;
+            target.left_q_target_deg = arm_ctx[0].prev_sent_q_deg;
+            target.right_q_target_deg = arm_ctx[1].prev_sent_q_deg;
             return target;
         }
 
@@ -7675,48 +7757,40 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         const CartesianServoStateSelection right_servo_state =
             selectCartesianServoStateForArm(config_, effective_command.right, right_state);
         if (!left_servo_state.ok || !right_servo_state.ok) {
+            // CROSS-ARM: either arm losing its Cartesian servo state holds BOTH.
+            // Kept as-is deliberately -- with per-arm threads this becomes shared
+            // state each arm publishes and reads, not a local decision. Only the
+            // per-arm telemetry below is context-driven.
             if (command_verdict) *command_verdict = SafetyVerdict::CartesianUnavailable;
-            left_follower_output_smd_.deactivate();
-            right_follower_output_smd_.deactivate();
-            if (!left_servo_state.ok) {
-                left_last_cartesian_solve_ = cartesianUnavailableTelemetry(
-                    left_state,
+            const CartesianServoStateSelection* selection[2] =
+                {&left_servo_state, &right_servo_state};
+            for (int i = 0; i < 2; ++i) {
+                arm_ctx[i].follower_output_smd.deactivate();
+                if (selection[i]->ok) continue;
+                arm_ctx[i].last_cartesian_solve = cartesianUnavailableTelemetry(
+                    *arm_state[i],
                     config_.cartesian_control,
-                    left_servo_state.reason
+                    selection[i]->reason
                 );
-                left_last_cartesian_solve_.cartesian_servo_state_source =
-                    left_servo_state.context.servo_state_source;
-                left_last_cartesian_solve_.cartesian_divergence_source =
-                    left_servo_state.context.divergence_source;
-                left_last_cartesian_solve_.q_reference_for_servo_valid =
-                    left_servo_state.context.q_reference_for_servo_valid;
+                arm_ctx[i].last_cartesian_solve.cartesian_servo_state_source =
+                    selection[i]->context.servo_state_source;
+                arm_ctx[i].last_cartesian_solve.cartesian_divergence_source =
+                    selection[i]->context.divergence_source;
+                arm_ctx[i].last_cartesian_solve.q_reference_for_servo_valid =
+                    selection[i]->context.q_reference_for_servo_valid;
             }
-            if (!right_servo_state.ok) {
-                right_last_cartesian_solve_ = cartesianUnavailableTelemetry(
-                    right_state,
-                    config_.cartesian_control,
-                    right_servo_state.reason
-                );
-                right_last_cartesian_solve_.cartesian_servo_state_source =
-                    right_servo_state.context.servo_state_source;
-                right_last_cartesian_solve_.cartesian_divergence_source =
-                    right_servo_state.context.divergence_source;
-                right_last_cartesian_solve_.q_reference_for_servo_valid =
-                    right_servo_state.context.q_reference_for_servo_valid;
-            }
-            target.left_q_target_deg = left_prev_sent_q_deg_;
-            target.right_q_target_deg = right_prev_sent_q_deg_;
+            target.left_q_target_deg = arm_ctx[0].prev_sent_q_deg;
+            target.right_q_target_deg = arm_ctx[1].prev_sent_q_deg;
             return target;
         }
-        if (effective_command.left.mode == ControlMode::TcpPoseTarget &&
-            left_pose_track_profile_name_ != left_tcp_profile.name) {
-            left_pose_track_smd_ = SmdPoseTracker(left_tcp_profile.pose_track_smd);
-            left_pose_track_profile_name_ = left_tcp_profile.name;
-        }
-        if (effective_command.right.mode == ControlMode::TcpPoseTarget &&
-            right_pose_track_profile_name_ != right_tcp_profile.name) {
-            right_pose_track_smd_ = SmdPoseTracker(right_tcp_profile.pose_track_smd);
-            right_pose_track_profile_name_ = right_tcp_profile.name;
+        const TcpPoseTargetProfileConfig* arm_tcp_profile[2] =
+            {&left_tcp_profile, &right_tcp_profile};
+        for (int i = 0; i < 2; ++i) {
+            if (arm_effective_mode[i] == ControlMode::TcpPoseTarget &&
+                arm_ctx[i].pose_track_profile_name != arm_tcp_profile[i]->name) {
+                arm_ctx[i].pose_track_smd = SmdPoseTracker(arm_tcp_profile[i]->pose_track_smd);
+                arm_ctx[i].pose_track_profile_name = arm_tcp_profile[i]->name;
+            }
         }
         // Manipulability guard: feed the previous tick's IK min singular value into each
         // SMD so step() scales tracking velocity down near a singularity (config
@@ -7734,130 +7808,63 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         pollChunkFrames();
         const auto servo_feedback_pose_for_arm = [this](
             const RobotState& state,
-            ArmId arm_id,
-            const ArmMountConfig& mount,
-            const JointArray& previous_sent_q_deg
+            const ArmControlContext& ctx
         ) {
             if (state.has_valid_tcp_pose && state.tcp_stand.has_value()) {
                 return *state.tcp_stand;
             }
             if (kinematics_) {
-                return kinematics_->computeTcpStand(arm_id, previous_sent_q_deg, mount);
+                return kinematics_->computeTcpStand(ctx.arm, ctx.prev_sent_q_deg, ctx.mount);
             }
             return Pose6D{};
         };
-        const auto execution_feedback_pose_for_arm = [this](
-            ArmId arm_id,
-            const ArmMountConfig& mount,
-            const JointArray& previous_sent_q_deg
-        ) {
+        const auto execution_feedback_pose_for_arm = [this](const ArmControlContext& ctx) {
             if (kinematics_) {
-                return kinematics_->computeTcpStand(arm_id, previous_sent_q_deg, mount);
+                return kinematics_->computeTcpStand(ctx.arm, ctx.prev_sent_q_deg, ctx.mount);
             }
             return Pose6D{};
         };
-        const Pose6D left_delta_twist_actual_feedback = servo_feedback_pose_for_arm(
-            left_servo_state.state, ArmId::Left, config_.left_mount, left_prev_sent_q_deg_);
-        const Pose6D right_delta_twist_actual_feedback = servo_feedback_pose_for_arm(
-            right_servo_state.state, ArmId::Right, config_.right_mount, right_prev_sent_q_deg_);
-        const Pose6D left_delta_twist_execution_feedback = execution_feedback_pose_for_arm(
-            ArmId::Left, config_.left_mount, left_prev_sent_q_deg_);
-        const Pose6D right_delta_twist_execution_feedback = execution_feedback_pose_for_arm(
-            ArmId::Right, config_.right_mount, right_prev_sent_q_deg_);
-        ArmCommand left_pose_track_command;
-        if (left_force_hold) {
-            pause_chunk_follower_for_hold(
-                ArmId::Left,
-                command.left.mode,
-                left_chunk_follower_,
-                left_follower_output_smd_,
-                left_chunk_follower_built_);
-            left_delta_twist_follower_.deactivate();
-            left_pose_track_smd_.deactivate();
-            left_pose_track_command = effective_command.left;
-        } else if (left_tcp_profile.ruckig_follower.controller == RuckigFollowerController::DeltaTwist) {
-            left_chunk_follower_.deactivate();
-            left_follower_output_smd_.deactivate();
-            left_pose_track_command = applyDeltaTwistFollowerStage(
-                ArmId::Left,
-                effective_command.left,
-                left_tcp_profile,
-                &left_delta_twist_follower_,
-                &left_chunk_follower_built_,
-                &left_chunk_submitted_wire_seq_,
-                &left_chunk_submitted_recv_seq_,
-                &left_pose_track_smd_,
-                config_.left_mount,
-                left_prev_sent_q_deg_,
-                left_delta_twist_actual_feedback,
-                left_delta_twist_execution_feedback,
-                dt_sec
-            );
-        } else {
-            left_delta_twist_follower_.deactivate();
-            left_pose_track_command = applyChunkFollowerStage(
-                ArmId::Left,
-                effective_command.left,
-                left_tcp_profile,
-                &left_chunk_follower_,
-                &left_chunk_follower_built_,
-                &left_chunk_submitted_wire_seq_,
-                &left_chunk_submitted_recv_seq_,
-                &left_pose_track_smd_,
-                &left_follower_output_smd_,
-                config_.left_mount,
-                left_prev_sent_q_deg_,
-                left_delta_twist_actual_feedback,
-                dt_sec
-            );
+        const Pose6D left_delta_twist_actual_feedback =
+            servo_feedback_pose_for_arm(left_servo_state.state, arm_ctx[0]);
+        const Pose6D right_delta_twist_actual_feedback =
+            servo_feedback_pose_for_arm(right_servo_state.state, arm_ctx[1]);
+        const Pose6D left_delta_twist_execution_feedback =
+            execution_feedback_pose_for_arm(arm_ctx[0]);
+        const Pose6D right_delta_twist_execution_feedback =
+            execution_feedback_pose_for_arm(arm_ctx[1]);
+        // Symmetric per-arm dispatch, folded into one body: the follower choice
+        // depends only on this arm's force-hold flag and its own profile.
+        const bool arm_force_hold[2] = {left_force_hold, right_force_hold};
+        const ArmCommand* arm_effective_cmd[2] =
+            {&effective_command.left, &effective_command.right};
+        const Pose6D* arm_actual_fb[2] =
+            {&left_delta_twist_actual_feedback, &right_delta_twist_actual_feedback};
+        const Pose6D* arm_exec_fb[2] =
+            {&left_delta_twist_execution_feedback, &right_delta_twist_execution_feedback};
+        ArmCommand arm_pose_track_command[2];
+        for (int i = 0; i < 2; ++i) {
+            ArmControlContext& ctx = arm_ctx[i];
+            if (arm_force_hold[i]) {
+                pause_chunk_follower_for_hold(ctx, arm_raw_mode[i]);
+                ctx.delta_twist_follower.deactivate();
+                ctx.pose_track_smd.deactivate();
+                arm_pose_track_command[i] = *arm_effective_cmd[i];
+            } else if (arm_tcp_profile[i]->ruckig_follower.controller ==
+                       RuckigFollowerController::DeltaTwist) {
+                ctx.chunk_follower.deactivate();
+                ctx.follower_output_smd.deactivate();
+                arm_pose_track_command[i] = applyDeltaTwistFollowerStage(
+                    ctx, *arm_effective_cmd[i], *arm_tcp_profile[i],
+                    *arm_actual_fb[i], *arm_exec_fb[i], dt_sec);
+            } else {
+                ctx.delta_twist_follower.deactivate();
+                arm_pose_track_command[i] = applyChunkFollowerStage(
+                    ctx, *arm_effective_cmd[i], *arm_tcp_profile[i],
+                    *arm_actual_fb[i], dt_sec);
+            }
         }
-        ArmCommand right_pose_track_command;
-        if (right_force_hold) {
-            pause_chunk_follower_for_hold(
-                ArmId::Right,
-                command.right.mode,
-                right_chunk_follower_,
-                right_follower_output_smd_,
-                right_chunk_follower_built_);
-            right_delta_twist_follower_.deactivate();
-            right_pose_track_smd_.deactivate();
-            right_pose_track_command = effective_command.right;
-        } else if (right_tcp_profile.ruckig_follower.controller == RuckigFollowerController::DeltaTwist) {
-            right_chunk_follower_.deactivate();
-            right_follower_output_smd_.deactivate();
-            right_pose_track_command = applyDeltaTwistFollowerStage(
-                ArmId::Right,
-                effective_command.right,
-                right_tcp_profile,
-                &right_delta_twist_follower_,
-                &right_chunk_follower_built_,
-                &right_chunk_submitted_wire_seq_,
-                &right_chunk_submitted_recv_seq_,
-                &right_pose_track_smd_,
-                config_.right_mount,
-                right_prev_sent_q_deg_,
-                right_delta_twist_actual_feedback,
-                right_delta_twist_execution_feedback,
-                dt_sec
-            );
-        } else {
-            right_delta_twist_follower_.deactivate();
-            right_pose_track_command = applyChunkFollowerStage(
-                ArmId::Right,
-                effective_command.right,
-                right_tcp_profile,
-                &right_chunk_follower_,
-                &right_chunk_follower_built_,
-                &right_chunk_submitted_wire_seq_,
-                &right_chunk_submitted_recv_seq_,
-                &right_pose_track_smd_,
-                &right_follower_output_smd_,
-                config_.right_mount,
-                right_prev_sent_q_deg_,
-                right_delta_twist_actual_feedback,
-                dt_sec
-            );
-        }
+        ArmCommand& left_pose_track_command = arm_pose_track_command[0];
+        ArmCommand& right_pose_track_command = arm_pose_track_command[1];
         applyForceCorrection(ArmId::Left, &left_pose_track_command);
         applyForceCorrection(ArmId::Right, &right_pose_track_command);
         if (latchChunkFollowerFaultRequests(left_state, right_state) && command_verdict) {
@@ -7909,98 +7916,68 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         const JointArray& left_cartesian_ik_seed_q_deg =
             left_servo_state.context.servo_state_source == "reference"
             ? left_servo_state.state.q_actual_deg
-            : left_prev_sent_q_deg_;
+            : arm_ctx[0].prev_sent_q_deg;
         const JointArray& right_cartesian_ik_seed_q_deg =
             right_servo_state.context.servo_state_source == "reference"
             ? right_servo_state.state.q_actual_deg
-            : right_prev_sent_q_deg_;
+            : arm_ctx[1].prev_sent_q_deg;
 
         // The Cartesian branches below bypass TrajectoryFilter::computeJointTarget, so the
         // joint-target SMD would otherwise seed its activation velocity from a stale sample
         // the next time a JointTarget takes over (init brake-before-plan, jog handoff).
         // Record this tick's sent target for the arm(s) that go the Cartesian way.
-        if (isCartesianMode(effective_command.left.mode)) {
-            left_traj_filter_.observeSentTarget(left_prev_sent_q_deg_);
-        }
-        if (isCartesianMode(effective_command.right.mode)) {
-            right_traj_filter_.observeSentTarget(right_prev_sent_q_deg_);
-        }
-
-        const CartesianArmTargetResult left_cartesian_result =
-            effective_command.left.mode == ControlMode::TcpLinearMove
-            ? cartesian_servo.computeLinearMoveTarget(
-                effective_command.left,
-                left_servo_state.state,
-                left_cartesian_ik_seed_q_deg,
-                left_cartesian_compute_run_mode,
-                dt_sec,
-                continue_left_linear ? 0 : command.seq,
-                &left_cartesian_servo_path_,
-                &left_servo_state.context
-            )
-            : isCartesianMode(effective_command.left.mode)
-            ? cartesian.computeArmJointTarget(
-                left_pose_track_command,
-                left_servo_state.state,
-                left_cartesian_ik_seed_q_deg,
-                left_cartesian_compute_run_mode
-            )
-            : CartesianArmTargetResult{
-                SafetyVerdict::Ok,
-                left_traj_filter_.computeJointTarget(command.left, left_state, left_prev_sent_q_deg_, dt_sec),
-                "",
-                CartesianSolveTelemetry{}
-            };
-        target.left_q_target_deg = left_cartesian_result.q_target_deg;
-        left_last_cartesian_solve_ = left_cartesian_result.telemetry;
-        left_last_cartesian_solve_.cartesian_servo_state_source =
-            left_servo_state.context.servo_state_source;
-        left_last_cartesian_solve_.cartesian_divergence_source =
-            left_servo_state.context.divergence_source;
-        left_last_cartesian_solve_.q_reference_for_servo_valid =
-            left_servo_state.context.q_reference_for_servo_valid;
-        if (command.left.mode == ControlMode::TcpLinearMove && left_cartesian_servo_path_.active) {
-            left_cartesian_servo_path_.lease_enforced = command.lease.enforce_lease;
-            left_cartesian_servo_path_.lease_expires_time_ns = command.lease.expires_time_ns;
+        for (int i = 0; i < 2; ++i) {
+            if (isCartesianMode(arm_effective_mode[i])) {
+                arm_ctx[i].traj_filter.observeSentTarget(arm_ctx[i].prev_sent_q_deg);
+            }
         }
 
-        const CartesianArmTargetResult right_cartesian_result =
-            effective_command.right.mode == ControlMode::TcpLinearMove
-            ? cartesian_servo.computeLinearMoveTarget(
-                effective_command.right,
-                right_servo_state.state,
-                right_cartesian_ik_seed_q_deg,
-                right_cartesian_compute_run_mode,
-                dt_sec,
-                continue_right_linear ? 0 : command.seq,
-                &right_cartesian_servo_path_,
-                &right_servo_state.context
-            )
-            : isCartesianMode(effective_command.right.mode)
-            ? cartesian.computeArmJointTarget(
-                right_pose_track_command,
-                right_servo_state.state,
-                right_cartesian_ik_seed_q_deg,
-                right_cartesian_compute_run_mode
-            )
-            : CartesianArmTargetResult{
-                SafetyVerdict::Ok,
-                right_traj_filter_.computeJointTarget(command.right, right_state, right_prev_sent_q_deg_, dt_sec),
-                "",
-                CartesianSolveTelemetry{}
-            };
-        target.right_q_target_deg = right_cartesian_result.q_target_deg;
-        right_last_cartesian_solve_ = right_cartesian_result.telemetry;
-        right_last_cartesian_solve_.cartesian_servo_state_source =
-            right_servo_state.context.servo_state_source;
-        right_last_cartesian_solve_.cartesian_divergence_source =
-            right_servo_state.context.divergence_source;
-        right_last_cartesian_solve_.q_reference_for_servo_valid =
-            right_servo_state.context.q_reference_for_servo_valid;
-        if (command.right.mode == ControlMode::TcpLinearMove && right_cartesian_servo_path_.active) {
-            right_cartesian_servo_path_.lease_enforced = command.lease.enforce_lease;
-            right_cartesian_servo_path_.lease_expires_time_ns = command.lease.expires_time_ns;
+        // One body for both arms: the solve reads only this arm's command, servo
+        // state, IK seed and run mode. Nothing crosses.
+        const CartesianServoStateSelection* arm_selection[2] =
+            {&left_servo_state, &right_servo_state};
+        const JointArray* arm_ik_seed[2] =
+            {&left_cartesian_ik_seed_q_deg, &right_cartesian_ik_seed_q_deg};
+        const RunMode arm_run_mode[2] =
+            {left_cartesian_compute_run_mode, right_cartesian_compute_run_mode};
+        const bool arm_continue_linear[2] = {continue_left_linear, continue_right_linear};
+        JointArray* arm_target_out[2] =
+            {&target.left_q_target_deg, &target.right_q_target_deg};
+        const ArmCommand* arm_cmd_raw[2] = {&command.left, &command.right};
+        CartesianArmTargetResult arm_cartesian_result[2];
+        for (int i = 0; i < 2; ++i) {
+            ArmControlContext& ctx = arm_ctx[i];
+            arm_cartesian_result[i] =
+                arm_effective_mode[i] == ControlMode::TcpLinearMove
+                ? cartesian_servo.computeLinearMoveTarget(
+                    *arm_effective_cmd[i],
+                    arm_selection[i]->state,
+                    *arm_ik_seed[i],
+                    arm_run_mode[i],
+                    dt_sec,
+                    arm_continue_linear[i] ? 0 : command.seq,
+                    &ctx.cartesian_servo_path,
+                    &arm_selection[i]->context
+                )
+                : isCartesianMode(arm_effective_mode[i])
+                ? cartesian.computeArmJointTarget(
+                    arm_pose_track_command[i],
+                    arm_selection[i]->state,
+                    *arm_ik_seed[i],
+                    arm_run_mode[i]
+                )
+                : CartesianArmTargetResult{
+                    SafetyVerdict::Ok,
+                    ctx.traj_filter.computeJointTarget(
+                        *arm_cmd_raw[i], *arm_state[i], ctx.prev_sent_q_deg, dt_sec),
+                    "",
+                    CartesianSolveTelemetry{}
+                };
+            *arm_target_out[i] = arm_cartesian_result[i].q_target_deg;
+            stampCartesianSolve(ctx, arm_cartesian_result[i], *arm_selection[i], command);
         }
+        const CartesianArmTargetResult& left_cartesian_result = arm_cartesian_result[0];
+        const CartesianArmTargetResult& right_cartesian_result = arm_cartesian_result[1];
 
         if (left_cartesian_result.verdict != SafetyVerdict::Ok ||
             right_cartesian_result.verdict != SafetyVerdict::Ok) {
@@ -8018,13 +7995,16 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             if (command_verdict && *command_verdict != SafetyVerdict::ChunkFollowerFault) {
                 *command_verdict = verdict;
             }
-            if (left_cartesian_result.verdict != SafetyVerdict::Ok) {
-                target.left_q_target_deg = left_prev_sent_q_deg_;
-                left_follower_output_smd_.deactivate();
-            }
-            if (right_cartesian_result.verdict != SafetyVerdict::Ok) {
-                target.right_q_target_deg = right_prev_sent_q_deg_;
-                right_follower_output_smd_.deactivate();
+            // Per-arm hold: only the arm whose solve failed is held. (The verdict
+            // above is a whole-command aggregate, but the target is not.)
+            const CartesianArmTargetResult* arm_result[2] =
+                {&left_cartesian_result, &right_cartesian_result};
+            JointArray* arm_target[2] =
+                {&target.left_q_target_deg, &target.right_q_target_deg};
+            for (int i = 0; i < 2; ++i) {
+                if (arm_result[i]->verdict == SafetyVerdict::Ok) continue;
+                *arm_target[i] = arm_ctx[i].prev_sent_q_deg;
+                arm_ctx[i].follower_output_smd.deactivate();
             }
         }
         return target;
@@ -8036,27 +8016,18 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     // above was the second unconditional path seen in the 2026-07-18 12:44
     // bounce evidence. Preserve a bounded, frozen chunk only for raw Hold;
     // every other mode switch still drops the streaming state immediately.
-    pause_chunk_follower_for_hold(
-        ArmId::Left, command.left.mode, left_chunk_follower_,
-        left_follower_output_smd_, left_chunk_follower_built_);
-    pause_chunk_follower_for_hold(
-        ArmId::Right, command.right.mode, right_chunk_follower_,
-        right_follower_output_smd_, right_chunk_follower_built_);
-    left_delta_twist_follower_.deactivate();
-    right_delta_twist_follower_.deactivate();
-
-    target.left_q_target_deg = left_traj_filter_.computeJointTarget(
-        command.left,
-        left_state,
-        left_prev_sent_q_deg_,
-        dt_sec
-    );
-    target.right_q_target_deg = right_traj_filter_.computeJointTarget(
-        command.right,
-        right_state,
-        right_prev_sent_q_deg_,
-        dt_sec
-    );
+    for (int i = 0; i < 2; ++i) {
+        pause_chunk_follower_for_hold(arm_ctx[i], arm_raw_mode[i]);
+    }
+    // Joint-mode fallback: each arm's target comes only from its own filter,
+    // state and command -- no cross-arm term.
+    const ArmCommand* arm_cmd[2] = {&command.left, &command.right};
+    JointArray* arm_out[2] = {&target.left_q_target_deg, &target.right_q_target_deg};
+    for (int i = 0; i < 2; ++i) {
+        arm_ctx[i].delta_twist_follower.deactivate();
+        *arm_out[i] = arm_ctx[i].traj_filter.computeJointTarget(
+            *arm_cmd[i], *arm_state[i], arm_ctx[i].prev_sent_q_deg, dt_sec);
+    }
     return target;
 }
 
@@ -8728,7 +8699,13 @@ ServoTarget DualArmServoLoop::applySafety(
                 collision_monitor_->setGripperOpenPercent(
                     ArmId::Right, effectiveGripperPercent(ArmId::Right));
             }
-            collision_monitor_->submitTargets(out.left_q_target_deg, out.right_q_target_deg);
+            // Submitted per arm even while one thread still drives both: this is
+            // the call shape per-arm control threads need (neither ever holds both
+            // candidates), so the seam is already in place when applySafety is
+            // split. Behaviourally identical here -- both arms submit in the same
+            // tick, and the monitor only evaluates once both have reported.
+            collision_monitor_->submitArmTarget(ArmId::Left, out.left_q_target_deg);
+            collision_monitor_->submitArmTarget(ArmId::Right, out.right_q_target_deg);
             const CollisionVerdict v = collision_monitor_->latest();
             last_collision_verdict_ = v;
             // Ground-truth diagnostic (opt-in via RB_SELF_COLLISION_LOG=1): print the
@@ -9183,6 +9160,16 @@ DualSendResult DualArmServoLoop::sendTargets(
     if (workerIoMode()) {
         dispatch_request.left.host_time_ns = command_host_time_ns;
         dispatch_request.right.host_time_ns = command_host_time_ns;
+        if (workerOwnsSendCadence()) {
+            // Non-blocking hand-off into each worker's latest-wins mailbox; the
+            // worker sends it on its own cadence. Same enqueue path the rbpodo
+            // async mode uses, so the result is "enqueued", not "sent".
+            return ServoDispatcher::dispatchRbpodoAsync(
+                *left_worker_,
+                *right_worker_,
+                dispatch_request
+            );
+        }
         return ServoDispatcher::dispatchWorker(*left_worker_, *right_worker_, dispatch_request);
     }
 
@@ -10605,6 +10592,35 @@ PursuitStep pursueWaypointsStep(
     }
     out.left = waypoints[tgt].first;
     out.right = waypoints[tgt].second;
+    // Slide the carrot ALONG the segment past `tgt` so it sits at (about) the
+    // lookahead distance, instead of snapping to the node.
+    //
+    // Snapping makes the carrot distance a sawtooth: it grows toward the
+    // lookahead, then drops the instant `tgt` advances. The downstream servo
+    // speed follows that distance, so the commanded speed sawtooths at the
+    // waypoint advance rate -- measured on hardware as a ~23 % velocity ripple
+    // at 9.5 Hz against a 9.19 Hz node rate, identical on all six joints of an
+    // arm because it is the scalar distance that modulates. The control-box LPF
+    // used to mask it; with servo_alpha at the LPF-off value it reaches the arm
+    // as a visible tremor.
+    //
+    // Interpolating in chord distance keeps that distance ~constant, which is
+    // what pure pursuit is supposed to do. Untouched when there is no next
+    // segment (converge on the final waypoint) or in the escape head, where
+    // lookahead 0 must aim exactly at the node.
+    if (lookahead_eff > 0.0 && tgt + 1 < n) {
+        const double d0 = chord(waypoints[tgt]);
+        const double d1 = chord(waypoints[tgt + 1]);
+        if (d1 > d0 + 1e-9 && d0 < lookahead_eff) {
+            const double frac = std::clamp((lookahead_eff - d0) / (d1 - d0), 0.0, 1.0);
+            for (int i = 0; i < kDof; ++i) {
+                out.left[i] = waypoints[tgt].first[i] +
+                    frac * (waypoints[tgt + 1].first[i] - waypoints[tgt].first[i]);
+                out.right[i] = waypoints[tgt].second[i] +
+                    frac * (waypoints[tgt + 1].second[i] - waypoints[tgt].second[i]);
+            }
+        }
+    }
     // Finished only when the current sent pose has actually settled at the final
     // waypoint (within tol on every joint), independent of the progress pointer.
     out.done = reached(cur_left, waypoints.back().first) &&
@@ -10836,6 +10852,105 @@ bool DualArmServoLoop::rbpodoAsyncIoMode() const {
 
 bool DualArmServoLoop::workerBackedIoMode() const {
     return workerIoMode() || rbpodoAsyncIoMode();
+}
+
+DualArmServoLoop::ArmControlContext DualArmServoLoop::armContext(ArmId arm) {
+    if (arm == ArmId::Left) {
+        return ArmControlContext{
+            ArmId::Left,
+            config_.left_mount,
+            config_.left_robot,
+            left_abc_telemetry_,
+            left_cartesian_force_controller_,
+            left_cartesian_servo_path_,
+            left_chunk_engage_waiting_,
+            left_chunk_engage_wait_start_sec_,
+            left_chunk_follower_,
+            left_chunk_follower_built_,
+            left_chunk_follower_fault_request_,
+            left_chunk_follower_reanchor_count_,
+            left_chunk_follower_reanchor_log_ns_,
+            left_chunk_follower_warm_resume_count_,
+            left_chunk_submitted_recv_seq_,
+            left_chunk_submitted_wire_seq_,
+            left_controller_sim_physical_baseline_q_deg_,
+            left_delta_twist_follower_,
+            left_fault_hold_q_deg_,
+            left_follower_output_smd_,
+            left_force_runtime_,
+            left_freedrive_deadline_ns_,
+            left_freedrive_stage_,
+            left_freedrive_stage_entered_ns_,
+            left_ft_pipeline_,
+            left_init_motion_exec_,
+            left_last_cartesian_solve_,
+            left_latched_cartesian_target_,
+            left_latched_fault_context_,
+            left_normal_force_controller_,
+            left_output_ma_,
+            left_pose_track_profile_name_,
+            left_pose_track_smd_,
+            left_prevprev_sent_q_deg_,
+            left_prev_sent_q_deg_,
+            left_robot_,
+            left_safety_intervention_last_ns_,
+            left_safety_tracking_,
+            left_traj_filter_,
+            left_worker_
+        };
+    }
+    return ArmControlContext{
+        ArmId::Right,
+        config_.right_mount,
+        config_.right_robot,
+            right_abc_telemetry_,
+            right_cartesian_force_controller_,
+            right_cartesian_servo_path_,
+            right_chunk_engage_waiting_,
+            right_chunk_engage_wait_start_sec_,
+            right_chunk_follower_,
+            right_chunk_follower_built_,
+            right_chunk_follower_fault_request_,
+            right_chunk_follower_reanchor_count_,
+            right_chunk_follower_reanchor_log_ns_,
+            right_chunk_follower_warm_resume_count_,
+            right_chunk_submitted_recv_seq_,
+            right_chunk_submitted_wire_seq_,
+            right_controller_sim_physical_baseline_q_deg_,
+            right_delta_twist_follower_,
+            right_fault_hold_q_deg_,
+            right_follower_output_smd_,
+            right_force_runtime_,
+            right_freedrive_deadline_ns_,
+            right_freedrive_stage_,
+            right_freedrive_stage_entered_ns_,
+            right_ft_pipeline_,
+            right_init_motion_exec_,
+            right_last_cartesian_solve_,
+            right_latched_cartesian_target_,
+            right_latched_fault_context_,
+            right_normal_force_controller_,
+            right_output_ma_,
+            right_pose_track_profile_name_,
+            right_pose_track_smd_,
+            right_prevprev_sent_q_deg_,
+            right_prev_sent_q_deg_,
+            right_robot_,
+            right_safety_intervention_last_ns_,
+            right_safety_tracking_,
+            right_traj_filter_,
+            right_worker_
+    };
+}
+
+bool DualArmServoLoop::workerOwnsSendCadence() const {
+    // When queue sync is on, each worker sends on its OWN trimmed period. The
+    // loop must then hand the setpoint over and move on: blocking on
+    // waitForSendResult would re-couple the loop to the worker and, with two
+    // workers on two different box clocks, drag the loop to the slower of them
+    // every tick -- which is exactly the coupling per-arm cadence exists to
+    // remove.
+    return workerIoMode() && config_.queue_sync.enable;
 }
 
 bool DualArmServoLoop::motionAllowed() const {

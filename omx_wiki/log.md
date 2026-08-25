@@ -40,3 +40,15 @@
 - **Pages:** rainbow-control-box-servo-j-latency-fw-v8-6-1.md
 - **Summary:** Lint: 0 issues (0 orphan, 0 stale, 0 broken, 0 contradictions)
 
+## [2026-08-25T12:41:26.355Z] ingest
+- **Pages:** rainbow-control-box-servo-j-latency-fw-v8-7-3.md
+- **Summary:** Created new page "Rainbow Control Box Servo J Latency (firmware v8.7.3)"
+
+## [2026-08-25T12:41:26.355Z] add
+- **Pages:** rainbow-control-box-servo-j-latency-fw-v8-7-3.md
+- **Summary:** Created wiki page rainbow-control-box-servo-j-latency-fw-v8-7-3.md
+
+## [2026-08-25T12:41:26.355Z] lint
+- **Pages:** rainbow-control-box-servo-j-latency-fw-v8-7-3.md
+- **Summary:** Lint: 0 issues (0 orphan, 0 stale, 0 broken, 0 contradictions)
+

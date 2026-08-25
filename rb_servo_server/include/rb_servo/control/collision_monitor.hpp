@@ -348,6 +348,10 @@ public:
     // Feed the latest targets (command order). Cheap atomic store; the thread
     // picks them up on its next iteration. Safe to call from servo_j.
     void submitTargets(const JointArray& left_deg, const JointArray& right_deg);
+    // Per-arm variant for per-arm control threads (they never hold both
+    // candidates at one instant). Evaluation starts once both arms have
+    // submitted at least once.
+    void submitArmTarget(ArmId arm, const JointArray& q_deg);
 
     // Latest published verdict (atomic load, no blocking, no compute).
     CollisionVerdict latest() const;

@@ -191,6 +191,67 @@ static bool test_escape_head_asymptotic_tracker_does_not_deadlock() {
 
 // A degenerate path with a zero-length (duplicate) segment must not divide-by-zero or
 // stall: the projection treats it as already passed.
+// The carrot must sit at a roughly CONSTANT lookahead distance while streaming a
+// densified path, not snap to each node.
+//
+// Snapping makes the carrot distance a sawtooth -- it grows toward the lookahead
+// then drops the instant the target node advances. The downstream servo speed
+// follows that distance, so the COMMAND acquires a velocity ripple at the node
+// rate. Measured on hardware: ~23 % ripple at 9.5 Hz against a 9.19 Hz node
+// rate, identical on all six joints because it is the scalar distance that
+// modulates. The control-box LPF used to hide it; at the LPF-off servo_alpha it
+// reaches the arm as a visible tremor.
+static bool test_carrot_distance_is_smooth_while_streaming() {
+    std::vector<WP> w;
+    // The tracked real profile's regime: init_motion_planner densifies to
+    // max_segment_deg 3.0 with execution_lookahead_deg 6.0 -- only TWO nodes per
+    // lookahead, so snapping swings the carrot distance between 6 and 3 deg.
+    for (int i = 0; i <= 60; ++i) w.push_back(lwp(i * 3.0, 0.0));
+
+    const double tol = 1.5;
+    const double lookahead = 6.0;
+    JointArray cur_l = w.front().first;
+    JointArray cur_r = w.front().second;
+    std::size_t index = 0;
+
+    std::vector<double> steps;
+    for (int tick = 0; tick < 4000; ++tick) {
+        const PursuitStep s = pursueWaypointsStep(w, cur_l, cur_r, index, tol, lookahead);
+        if (s.done) break;
+        double step = 0.0;
+        for (int i = 0; i < kDof; ++i) {
+            const double dl = 0.03 * (s.left[i] - cur_l[i]);
+            const double dr = 0.03 * (s.right[i] - cur_r[i]);
+            cur_l[i] += dl;
+            cur_r[i] += dr;
+            step = std::max(step, std::max(std::abs(dl), std::abs(dr)));
+        }
+        steps.push_back(step);
+    }
+    RB_CHECK(steps.size() > 200);
+
+    const std::size_t lo = steps.size() / 4;
+    const std::size_t hi = steps.size() * 3 / 4;
+    double sum = 0.0;
+    for (std::size_t i = lo; i < hi; ++i) sum += steps[i];
+    const double mean = sum / static_cast<double>(hi - lo);
+    RB_CHECK(mean > 1e-6);
+    double var = 0.0;
+    double peak = 0.0;
+    for (std::size_t i = lo; i < hi; ++i) {
+        const double d = steps[i] - mean;
+        var += d * d;
+        peak = std::max(peak, std::abs(d));
+    }
+    const double cv = std::sqrt(var / static_cast<double>(hi - lo)) / mean;
+    const double ripple = peak / mean;
+    std::cout << "carrot streaming ripple: cv=" << cv * 100.0 << " %  peak="
+              << ripple * 100.0 << " % of mean speed\n";
+    RB_CHECK(cv < 0.05);
+    RB_CHECK(ripple < 0.15);
+    return true;
+}
+
 static bool test_degenerate_segment_is_passed() {
     const std::vector<WP> w = {lwp(0.0, 0.0), lwp(0.0, 0.0), lwp(10.0, 0.0)};
     JointArray cur_l = w.front().first;
@@ -407,6 +468,7 @@ int main() {
     ok = test_projection_advances_past_cut_corner() && ok;
     ok = test_corner_path_reaches_goal_without_stall() && ok;
     ok = test_escape_head_asymptotic_tracker_does_not_deadlock() && ok;
+    ok = test_carrot_distance_is_smooth_while_streaming() && ok;
     ok = test_degenerate_segment_is_passed() && ok;
     ok = test_escape_head_followed_precisely() && ok;
     ok = test_request_freshness() && ok;

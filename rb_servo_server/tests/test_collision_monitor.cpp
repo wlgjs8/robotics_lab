@@ -330,8 +330,21 @@ static bool run() {
     }
 
     // (6) threaded publish/consume: start, submit, see a fresh verdict.
+    //
+    // Submitted PER ARM, the way per-arm control threads do it: neither thread
+    // ever holds both candidates, so the monitor pairs the latest of each. One
+    // arm alone must NOT arm the evaluator -- pairing a real pose with a
+    // default-constructed counterpart would check a pose the robot is not in.
     mon.start();
-    mon.submitTargets(init, init);
+    // latest() keeps the previous verdict, so the evidence that a lone arm does
+    // not arm the evaluator is that the verdict SEQUENCE does not advance.
+    const std::uint64_t seq_before = mon.latest().seq;
+    mon.submitArmTarget(ArmId::Left, init);
+    for (int i = 0; i < 25; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    RB_CHECK(mon.latest().seq == seq_before);
+    mon.submitArmTarget(ArmId::Right, init);
     CollisionVerdict t{};
     for (int i = 0; i < 200 && !t.valid; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));

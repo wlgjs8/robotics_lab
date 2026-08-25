@@ -291,6 +291,7 @@ private:
     bool workerIoMode() const;
     bool rbpodoAsyncIoMode() const;
     bool workerBackedIoMode() const;
+    bool workerOwnsSendCadence() const;
     bool motionAllowed() const;
     bool isRealMode() const;
     std::string currentSendPolicy() const;
@@ -932,6 +933,81 @@ private:
         std::uint32_t delta_twist_clamp_mask = 0;
         Vec6 delta_twist_accel_cmd{};
     };
+
+    // One arm's slice of the control loop's state, gathered behind references.
+    //
+    // The per-arm pipeline (computeServoTarget / applySafety) is written as
+    // interleaved `left_x_` / `right_x_` statement pairs -- 37 member pairs and 312
+    // references in computeServoTarget alone. Once each arm runs on its own thread
+    // that shape cannot survive: a thread must touch ONLY its own arm's state.
+    //
+    // This context is the seam. Code rewritten to go through it stops naming an arm
+    // and works for whichever arm it was handed, so the eventual split is a change
+    // of caller rather than a rewrite of the body. Holding references (not copies)
+    // keeps the members owned by the loop, so this is inert until callers adopt it.
+    struct ArmControlContext {
+        ArmId arm;
+        const ArmMountConfig& mount;
+        const BackendConfig& backend;
+        AbcTelemetry& abc_telemetry;
+        ForceController& cartesian_force_controller;
+        CartesianServoPathState& cartesian_servo_path;
+        bool& chunk_engage_waiting;
+        double& chunk_engage_wait_start_sec;
+        control::CartesianChunkFollower& chunk_follower;
+        RuckigFollowerConfig& chunk_follower_built;
+        ChunkFollowerFaultRequest& chunk_follower_fault_request;
+        std::uint64_t& chunk_follower_reanchor_count;
+        uint64_t& chunk_follower_reanchor_log_ns;
+        std::uint64_t& chunk_follower_warm_resume_count;
+        std::uint64_t& chunk_submitted_recv_seq;
+        std::uint64_t& chunk_submitted_wire_seq;
+        JointArray& controller_sim_physical_baseline_q_deg;
+        control::DeltaTwistFollower& delta_twist_follower;
+        JointArray& fault_hold_q_deg;
+        control::FollowerOutputSmd& follower_output_smd;
+        ForceArmRuntime& force_runtime;
+        uint64_t& freedrive_deadline_ns;
+        std::atomic<FreedriveStage>& freedrive_stage;
+        uint64_t& freedrive_stage_entered_ns;
+        FtWrenchPipeline& ft_pipeline;
+        InitMotionExec& init_motion_exec;
+        CartesianSolveTelemetry& last_cartesian_solve;
+        LatchedCartesianTarget& latched_cartesian_target;
+        std::optional<FaultContext>& latched_fault_context;
+        NormalForceController& normal_force_controller;
+        JointMovingAverage& output_ma;
+        std::string& pose_track_profile_name;
+        SmdPoseTracker& pose_track_smd;
+        JointArray& prevprev_sent_q_deg;
+        JointArray& prev_sent_q_deg;
+        std::unique_ptr<IRobotBackend>& robot;
+        uint64_t& safety_intervention_last_ns;
+        SafetyTrackingTelemetry& safety_tracking;
+        TrajectoryFilter& traj_filter;
+        std::unique_ptr<ArmWorker>& worker;
+    };
+    // Gather one arm's state behind ArmControlContext. The returned references
+    // stay owned by this loop; the context is a view, not a copy.
+    ArmControlContext armContext(ArmId arm);
+    // Context overloads: the caller hands over one arm and stops naming it. The
+    // long-parameter forms above keep the implementation, so adopting these is a
+    // call-site change with no behaviour change.
+    ArmCommand applyChunkFollowerStage(
+        ArmControlContext& ctx,
+        const ArmCommand& command,
+        const TcpPoseTargetProfileConfig& profile,
+        const Pose6D& actual_feedback_pose,
+        double dt_sec
+    );
+    ArmCommand applyDeltaTwistFollowerStage(
+        ArmControlContext& ctx,
+        const ArmCommand& command,
+        const TcpPoseTargetProfileConfig& profile,
+        const Pose6D& actual_feedback_pose,
+        const Pose6D& execution_feedback_pose,
+        double dt_sec
+    );
     AbcTelemetry left_abc_telemetry_;
     AbcTelemetry right_abc_telemetry_;
     static void mergeAbcTelemetry(CartesianSolveTelemetry& solve, const AbcTelemetry& abc,

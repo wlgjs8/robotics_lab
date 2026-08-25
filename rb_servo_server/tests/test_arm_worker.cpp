@@ -345,6 +345,23 @@ rb_servo::SendServoJRequest request(uint64_t seq, const rb_servo::JointArray& q,
     return out;
 }
 
+// WorkerTestBackend bumps its send counter on ENTRY to sendServoJ, but the worker
+// stores the ArmSendResult only after the backend RETURNS. waitForSends() can
+// therefore observe the send while lastSendResult() is still empty -- a race in
+// the test, not in the worker. Poll for the stored result instead.
+std::optional<rb_servo::ArmSendResult> awaitStoredSendResult(
+    const rb_servo::ArmWorker& worker,
+    std::chrono::milliseconds timeout = std::chrono::milliseconds(500)
+) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::optional<rb_servo::ArmSendResult> stored = worker.lastSendResult();
+        if (stored.has_value()) return stored;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return worker.lastSendResult();
+}
+
 rb_servo::ArmWorkerOptions asyncWorkerOptions(rb_servo::RbpodoAsyncStreamingMode mode) {
     rb_servo::ArmWorkerOptions options;
     options.read_period_ns = 1'000'000;
@@ -498,7 +515,7 @@ bool testSendRequestAccepted() {
     worker.enqueueServoJ(request(42, target, rb_servo::nowSteadyNs() + 1'000'000'000));
     RB_CHECK(raw_backend->waitForSends(1, std::chrono::milliseconds(200)));
 
-    const std::optional<rb_servo::ArmSendResult> last = worker.lastSendResult();
+    const std::optional<rb_servo::ArmSendResult> last = awaitStoredSendResult(worker);
     RB_CHECK(last.has_value());
     RB_CHECK(last->arm_id == rb_servo::ArmId::Right);
     RB_CHECK(last->request.command_seq == 42);
@@ -522,13 +539,75 @@ bool testExpiredCommandDropped() {
     RB_CHECK(raw_backend->waitForReads(1, std::chrono::milliseconds(200)));
 
     worker.enqueueServoJ(request(7, joints(3.0), rb_servo::nowSteadyNs() - 1));
-    const std::optional<rb_servo::ArmSendResult> last = worker.lastSendResult();
+    const std::optional<rb_servo::ArmSendResult> last = awaitStoredSendResult(worker);
     RB_CHECK(last.has_value());
     RB_CHECK(last->request.command_seq == 7);
     RB_CHECK(!last->result.accepted);
     RB_CHECK(last->result.error.kind == rb_servo::BackendErrorKind::CommandTimeout);
     RB_CHECK(last->result.error.name == "arm_worker_command_expired");
     RB_CHECK(raw_backend->sendCount() == 0);
+    worker.stop();
+    return true;
+}
+
+// Cadence mode must put a command on the wire EVERY tick. The loop and the
+// worker run at nearly the same rate but at an arbitrary phase, so about half of
+// the cadence ticks find the latest-wins mailbox already drained. Skipping those
+// is not a no-op: the box drains its FIFO on its own clock, so a skipped send is
+// an entry it never receives. Measured on hardware before the fix: 231 Hz of
+// actual sends against a 500 Hz loop, and the queue fill fell to the protect
+// floor. The worker must repeat the last setpoint instead.
+bool testCadenceRepeatsLastSetpointWhenMailboxIsEmpty() {
+    auto backend = std::make_unique<WorkerTestBackend>(
+        rb_servo::ArmId::Left,
+        rb_servo::BackendErrorKind::None
+    );
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorkerOptions options;
+    options.send_period_ns = 2'000'000;          // 500 Hz
+    rb_servo::ArmWorker worker(std::move(backend), options);
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForReads(1, std::chrono::milliseconds(500)));
+
+    // Exactly ONE enqueue, then leave the mailbox empty on purpose.
+    worker.enqueueServoJ(request(41, joints(7.0), 0));
+
+    // Over ~60 ms a 500 Hz cadence should emit on the order of 30 sends. Assert
+    // well clear of both "only the one enqueued command" and the old behaviour
+    // (~46 % of ticks), while staying loose enough for a loaded CI box.
+    RB_CHECK(raw_backend->waitForSends(10, std::chrono::milliseconds(500)));
+    const int sends = raw_backend->sendCount();
+    RB_CHECK(sends >= 10);
+
+    const std::optional<rb_servo::ArmSendResult> last = awaitStoredSendResult(worker);
+    RB_CHECK(last.has_value());
+    RB_CHECK(last->result.accepted);
+    // Every repeat carries the same setpoint that was enqueued.
+    for (int i = 0; i < rb_servo::kDof; ++i) {
+        RB_CHECK(last->request.q_target_deg[i] == joints(7.0)[i]);
+    }
+    worker.stop();
+    return true;
+}
+
+// Without cadence ownership the legacy behaviour must be untouched: one enqueue
+// produces one send, and an empty mailbox produces nothing.
+bool testEventDrivenModeDoesNotRepeat() {
+    auto backend = std::make_unique<WorkerTestBackend>(
+        rb_servo::ArmId::Left,
+        rb_servo::BackendErrorKind::None
+    );
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorker worker(std::move(backend));   // send_period_ns == 0
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForReads(1, std::chrono::milliseconds(500)));
+
+    worker.enqueueServoJ(request(42, joints(8.0), 0));
+    RB_CHECK(raw_backend->waitForSends(1, std::chrono::milliseconds(500)));
+    RB_CHECK(awaitStoredSendResult(worker).has_value());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    RB_CHECK(raw_backend->sendCount() == 1);
     worker.stop();
     return true;
 }
@@ -546,7 +625,7 @@ bool testBackendSendFailurePreserved() {
     worker.enqueueServoJ(request(8, joints(4.0), rb_servo::nowSteadyNs() + 1'000'000'000));
     RB_CHECK(raw_backend->waitForSends(1, std::chrono::milliseconds(200)));
 
-    const std::optional<rb_servo::ArmSendResult> last = worker.lastSendResult();
+    const std::optional<rb_servo::ArmSendResult> last = awaitStoredSendResult(worker);
     RB_CHECK(last.has_value());
     RB_CHECK(last->request.command_seq == 8);
     RB_CHECK(!last->result.accepted);
@@ -589,7 +668,7 @@ bool testLatestQueuedCommandWins() {
     raw_backend->releaseFirstRead();
 
     RB_CHECK(raw_backend->waitForSends(1, std::chrono::milliseconds(200)));
-    const std::optional<rb_servo::ArmSendResult> last = worker.lastSendResult();
+    const std::optional<rb_servo::ArmSendResult> last = awaitStoredSendResult(worker);
     RB_CHECK(last.has_value());
     RB_CHECK(last->request.command_seq == 12);
     RB_CHECK(last->result.accepted);
@@ -757,7 +836,7 @@ bool testStopJoinsThreadAndRejectsNewCommand() {
     worker.stop();
 
     worker.enqueueServoJ(request(9, joints(5.0), rb_servo::nowSteadyNs() + 1'000'000'000));
-    const std::optional<rb_servo::ArmSendResult> last = worker.lastSendResult();
+    const std::optional<rb_servo::ArmSendResult> last = awaitStoredSendResult(worker);
     RB_CHECK(last.has_value());
     RB_CHECK(last->request.command_seq == 9);
     RB_CHECK(!last->result.accepted);
@@ -1030,6 +1109,8 @@ int main() {
     if (!testLatestStateReportsStaleSample()) return 1;
     if (!testSendRequestAccepted()) return 1;
     if (!testExpiredCommandDropped()) return 1;
+    if (!testCadenceRepeatsLastSetpointWhenMailboxIsEmpty()) return 1;
+    if (!testEventDrivenModeDoesNotRepeat()) return 1;
     if (!testBackendSendFailurePreserved()) return 1;
     if (!testLatestQueuedCommandWins()) return 1;
     if (!testNoDropCountedAfterImmediateDispatch()) return 1;
