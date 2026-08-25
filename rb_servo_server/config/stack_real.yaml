@@ -681,78 +681,84 @@ force_control:
   enable: true
 
   # *** TWO CONSUMERS, TWO LAWS — AND RIGHT NOW THEY CARRY THE SAME NUMBERS. ***
-  # That is a DECISION (operator, 2026-08-26), not a copy-paste: the hand-push law
-  # was measured on the cell and behaved the way the operator wants, so streaming
-  # adopts it. The split stays because the two problems are still different and the
-  # numbers may diverge again — see the note under `stream:` for what changes if
-  # they do.
+  # That is a DECISION (operator, 2026-08-26), not duplication: the stiffer
+  # controller-manager admittance law felt heavy, so BOTH consumers run the softer
+  # follow-derived law below. The split stays because the two problems are still
+  # different and the numbers may diverge again.
   #
-  # The structure exists because applying one to the other once already went wrong:
-  # the follow law was used for a hand-push and the arm turned ~9 deg where
-  # controller-manager turns ~0.3 deg, the two differing by five times in the ratio
-  # k_r/k_t that decides how much of a push becomes rotation.
+  # The structure exists because applying one law to the other consumer already went
+  # wrong once: the follow law ran on a hand-push and the arm turned ~9 deg where CM
+  # turns ~0.3 deg, the two differing by five times in the ratio k_r/k_t that decides
+  # how much of a push becomes rotation rather than translation.
+  #
+  # SO READ THE HOLD BLOCK'S WARNING BEFORE HAND-PUSHING AGAIN: with these numbers a
+  # hand push turns the tool the way it did on 2026-08-26, and that is now a chosen
+  # trade rather than a defect.
 
   # ---- the STREAM law: a plan the server is driving into contact ---------------
-  # controller-manager's admittance.yaml numbers (see `hold:` below for the
-  # derivation), adopted here rather than CM's follow row.
+  # controller-manager's follow.yaml 10 N row, which is ONE SOLVE - k, b and the gate
+  # threshold are not independent, and mixing a b from one row with a k from another
+  # is not a tuning, it is a different system.
   #
-  # WHY NOT CM'S FOLLOW ROW (m 15 / b 434.7 / k 400): that row is solved for a 25 mm
-  # converged deviation, which puts the 40 mm fence only 1.6x away — the spring
-  # saturates at k*0.040 = 16 N and above that the arm goes rigid. This cell streams
-  # at 0.45 m/s (the VLA policy is velocity-based and the speed is not negotiable),
-  # where a floor contact passes 16 N in the first few milliseconds. At k = 2499 the
-  # fence is not reached until 100 N, which is the headroom that speed needs.
+  #   k = max_force_n / d_max          10 N / 25 mm = 400 N/m
+  #   b = 2*zeta*sqrt(m*(k + k_env))   zeta = 0.25, k_env = 5e4 (hard plastic)
+  #   m = 15 kg                        CM owner constraint 10..15
   #
-  # CONTACT STABILITY IS PRESERVED, which is the thing a stiffness change could have
-  # broken: the effective damping ratio against a hard contact is
-  #     zeta = b / (2*sqrt(m*(k + k_env))) = 379.4 / (2*sqrt(10*(2499 + 5e4))) = 0.262
-  # against CM's designed 0.25 — the same regime, not a lucky miss.
+  # THE FORCE IT SETTLES AT IS THE GATE'S, NOT THIS SPRING'S. k decides the DEVIATION
+  # at that force (10 N / 400 = 25 mm), which is why the 40 mm fence is only 1.6x
+  # away: the spring saturates at k*0.040 = 16 N and above that the arm is rigid.
   #
-  # WHAT THE GATE STILL OWNS: the CONVERGED contact force is set by
-  # force_gate.max_force_n, not by k. Raising k did not raise the force the arm
-  # settles at; it lowered the deviation it settles at (10 N / 2499 = 4 mm).
+  # WHY zeta = 0.25 AND NOT 1.0: critical damping is WORSE here, measured by CM. A
+  # large b physically RESISTS the offset's retreat at impact and raises the peak
+  # (65.4 N at zeta 1.0 against 47.2 N at zeta 0.25), while the gate already
+  # stabilises the loop.
+  #
+  # THE IMPACT PEAK IS NOT max_force_n, and no stiffness here changes that: the
+  # impact resolves in 30-50 ms while the gate needs its own close time to arrive.
+  # The peak is v * sqrt(k_env * m). At this cell's 0.45 m/s streaming speed that is
+  # hundreds of newtons, and the parameter that governs it is
+  # force_gate.close_tau_s, not k.
   stream:
     translation:
-      - {m: 10.0, b: 379.4, k: 2499.1}  # x
-      - {m: 10.0, b: 379.4, k: 2499.1}  # y
-      - {m: 10.0, b: 379.4, k: 2499.1}  # z
+      - {m: 15.0, b: 434.7, k: 400.0}   # x
+      - {m: 15.0, b: 434.7, k: 400.0}   # y
+      - {m: 15.0, b: 434.7, k: 400.0}   # z
+    # ROTATION IS DERIVED UNDER A STATED ASSUMPTION AND WANTS HARDWARE TUNING. The
+    # rotational environment stiffness is k_env * L^2 for a contact at lever L, and L
+    # is not known. CM's numbers use L = 140 mm (the RB5/steam lever) and are KNOWN
+    # STALE on this cell: the pika's lever is 202.642 mm, so the torque limit is ~31 %
+    # tighter than the "10 N * L" intent it states. Carried over unchanged
+    # deliberately - re-basing it RAISES a force limit, which is an operator decision.
     rotation:
-      - {m: 1.0, b: 37.94, k: 249.91}   # rx
-      - {m: 1.0, b: 37.94, k: 249.91}   # ry
-      - {m: 1.0, b: 37.94, k: 249.91}   # rz
+      - {m: 1.0, b: 15.72, k: 8.0}      # rx
+      - {m: 1.0, b: 15.72, k: 8.0}      # ry
+      - {m: 1.0, b: 15.72, k: 8.0}      # rz
 
   # ---- the HOLD law: an operator pushing the arm by hand -----------------------
-  # controller-manager's admittance.yaml, which is what CM actually runs when a human
-  # pushes the arm - NOT its follow law. Isotropic scalar there, written per-axis here
-  # so both consumers share one shape:
+  # THE SAME NUMBERS AS `stream` ABOVE, by operator decision - the stiffer CM
+  # admittance law (k_t 2499 / k_r 250) felt heavy and was dropped.
   #
-  #     wn = 2*pi*fn = 2*pi*2.516 = 15.809 rad/s
-  #     k_t = mass    * wn^2 = 10.0 * 249.9 = 2499 N/m
-  #     b_t = 2*zeta*mass   *wn = 2*1.2*10.0*15.809 = 379.4 N*s/m
-  #     k_r = inertia * wn^2 =  1.0 * 249.9 =  250 Nm/rad
-  #     b_r = 2*zeta*inertia*wn = 2*1.2* 1.0*15.809 =  37.9 Nm*s/rad
+  # *** WHAT THIS COSTS, MEASURED ON THIS CELL, SO IT IS NOT REDISCOVERED. ***
+  # At k_r = 8 Nm/rad a hand push that lands off the fingertip turns the tool:
+  # servo_log_20260826_030631 recorded 4.1 deg at 13 N / 1.34 Nm and 8.3 deg at
+  # 17 N / 3.4 Nm, against 0.3 deg for the same push under the stiff law. That is
+  # correct behaviour for this law, not a frame error - the wrench is referenced at
+  # the TCP either way (the same run's moment arm read 190-198 mm when the SENSOR was
+  # pushed, which is the TCP-to-sensor distance).
   #
-  # zeta = 1.2 is OVERDAMPED, deliberately (CM owner 2026-08-03): a hand push should
-  # settle without overshoot, because the operator's hand IS the disturbance and an
-  # underdamped arm pushes back into it.
-  #
-  # MEASURED ON THIS CELL (servo_log_20260826_040941, 16 pushes): rotation stayed
-  # under 1.85 deg at 55 N / 8.4 Nm, the deviation tracked F/k to within 3 % on
-  # steady pushes, the 40 mm fence was never reached, and the at-rest residual was
-  # 0.67 N.
-  #
-  # THE GATE DOES NOT ACT HERE. A compliant Hold has no plan advance to attenuate, so
-  # these stiffnesses are the ONLY bound on how far a hand can take the arm - which
-  # is why the loader refuses hold_compliance with every hold k at 0.
+  # AND THE GATE DOES NOT ACT HERE. A compliant Hold has no plan advance to
+  # attenuate, so k*0.040 = 16 N is the whole bound on a hand push before the fence
+  # takes over and the arm goes rigid. The loader refuses hold_compliance with every
+  # hold k at 0 for that reason.
   hold:
     translation:
-      - {m: 10.0, b: 379.4, k: 2499.1}  # x   10 N -> 4.0 mm
-      - {m: 10.0, b: 379.4, k: 2499.1}  # y
-      - {m: 10.0, b: 379.4, k: 2499.1}  # z
+      - {m: 15.0, b: 434.7, k: 400.0}   # x   10 N -> 25 mm
+      - {m: 15.0, b: 434.7, k: 400.0}   # y
+      - {m: 15.0, b: 434.7, k: 400.0}   # z
     rotation:
-      - {m: 1.0, b: 37.94, k: 249.91}   # rx  1 Nm -> 0.23 deg
-      - {m: 1.0, b: 37.94, k: 249.91}   # ry
-      - {m: 1.0, b: 37.94, k: 249.91}   # rz
+      - {m: 1.0, b: 15.72, k: 8.0}      # rx  1 Nm -> 7.2 deg
+      - {m: 1.0, b: 15.72, k: 8.0}      # ry
+      - {m: 1.0, b: 15.72, k: 8.0}      # rz
 
   # THE GATE AND THE SPRING SHIP TOGETHER OR NOT AT ALL — the loader refuses either
   # half alone. Measured by CM on hardware: k > 0 with no gate ramps the contact force
