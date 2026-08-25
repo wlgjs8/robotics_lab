@@ -2,7 +2,7 @@
 title: "Rainbow Control Box Servo J Latency (firmware v8.7.3)"
 tags: ["rainbow-control-box", "firmware-v8.7.3", "servo-j", "latency", "queue-sync", "rback", "servo-alpha", "rb3-730e"]
 created: 2026-08-25T12:41:26.355Z
-updated: 2026-08-25T12:41:26.355Z
+updated: 2026-08-25T13:55:00.000Z
 sources: ["logs/servo_log_20260825_211851.csv", "logs/servo_log_20260825_195125.csv", "logs/servo_log_20260825_210330.csv", "docs/runbooks/box_latency_offline.md", "scripts/analyze_box_latency.py"]
 links: ["rainbow-control-box-servo-j-latency-fw-v8-6-1.md", "flow-infer-delta-preview-controller-contract.md"]
 category: reference
@@ -29,15 +29,35 @@ Nothing else. No filter, once the LPF is off. So the box delay is whatever the
 host lets the queue fill become, and the fill is a pure integrator:
 `dfill/dt = f_send - f_box`.
 
-| configuration | queue fill | sent -> ref | end to end |
-|---|---|---|---|
-| v8.6.1 latest-queue, LPF on | n/a | 10.1 tk | **13.1 tk (26.2 ms)** |
-| v8.7.3 unregulated, LPF on | 22-28, rising | 33-38 tk | 35-40 tk (70-80 ms) |
-| v8.7.3 unregulated, LPF off | 19, rising | 20 tk | 23 tk (46 ms) |
-| v8.7.3 + queue_sync(5), LPF off | **5.0, locked** | 7.1 tk | **10.3 tk (20.5 ms)** |
+| configuration | queue fill | drift | sent -> ref | end to end |
+|---|---|---|---|---|
+| v8.6.1 latest-queue, LPF on | n/a | — | 10.1 tk (20 ms) | **13.1 tk (26.2 ms)** |
+| v8.7.3 unregulated, LPF on | 22-28, rising | +0.67 tk/s | 32.6-38.0 tk (65-76 ms) | 35-40 tk (70-80 ms) |
+| v8.7.3 unregulated, LPF off | 19, rising | +0.65 tk/s | 20 tk (40 ms) | 23 tk (46 ms) |
+| v8.7.3 + queue_sync(5), LPF off | **5.0, locked** | -0.11/-0.19 tk/s | **7.05 / 7.46 tk (14.1 / 14.9 ms)** | **10.00 / 10.44 tk (20.0 / 20.9 ms)** |
 
 **Upgrading the firmware alone made latency 3x worse.** The FIFO only pays off
 with queue regulation.
+
+The last row was re-measured 2026-08-25 on a later build and reproduced: fill
+median 5.0 with 84.6 % / 74.3 % of ticks at exactly 5, and `sent -> ref`
+identical across all six joints of an arm (7.05 x6 left, 7.46 x6 right, residual
+0.0007-0.032 deg) -- the box does not treat joints differently.
+
+### `sent -> ref` minus queue fill is the LPF test
+
+Because the box delay IS the fill, whatever is left over after subtracting it is
+everything else in the path. That difference is a direct, single-number readout
+of whether the controller LPF is on:
+
+```
+v8.7.3 unregulated, LPF on    difference  +10.0 / +11.0 ticks
+v8.7.3 + queue_sync, LPF off  difference   +2.0 /  +2.0 ticks
+```
+
+The remaining +2.0 is 1 tick of transport plus ~1 tick of loop -> worker mailbox
+hop (see Open). Use this rather than the free-decay pole, which the queue drain
+makes meaningless here.
 
 ## Unregulated, the Queue Grows Without Bound
 
@@ -133,6 +153,12 @@ Worth recording because each was silent and each produced plausible-looking data
   Answering it needs a different observable, not this column.
 - Left-arm numbers in the LPF-off run are weak (0.47 deg excitation); the right
   arm carried that measurement.
+- **Worker-cached state age is creeping up**: median 1182 / 1300 us in the
+  2026-08-25 re-measurement against 924 / 968 us earlier, peaking at 5.5 ms
+  against the 8 ms budget (69 %). No fault yet, and the refactor between the two
+  runs was behaviour-neutral, so this is load or trajectory shape rather than a
+  known regression -- but it is the margin that latched an unrecoverable fault
+  once already, so it is worth watching as a trend.
 
 ## Reproducing
 
