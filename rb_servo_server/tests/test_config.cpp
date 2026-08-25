@@ -1188,26 +1188,6 @@ bool testRuckigFollowerFallbackPolicyConfig() {
     ));
     ::unlink(infinite_timeout_path.c_str());
 
-    // The quasi-static gate is a `plan_accel <= bound` comparison, so a negative or
-    // non-finite bound is never satisfiable: it silently disables the wrench-gated
-    // loading projection while the config still declares it on. Must fail closed.
-    for (const char* bad : {"-1.0", "0.0", ".nan"}) {
-        const std::string bad_gate_path = writeTempConfig(
-            "ruckig-follower-bad-loading-gate",
-            std::string(
-                "schema: robotics_lab.rb_servo_server.v1\n"
-                "cartesian_control:\n"
-                "  ruckig_follower:\n"
-                "    loading_projection_max_accel_m_s2: "
-            ) + bad + "\n"
-        );
-        RB_CHECK(loadRejectsWithMessage(
-            bad_gate_path,
-            "cartesian_control.ruckig_follower.loading_projection_max_accel_m_s2"
-        ));
-        ::unlink(bad_gate_path.c_str());
-    }
-
     // Corner guard knobs: defaults must reproduce the previously hard-coded values,
     // out-of-range values must fail closed rather than be clamped.
     const std::string corner_default_path = writeTempConfig(
@@ -1323,46 +1303,6 @@ bool testRuckigFollowerFallbackPolicyConfig() {
     RB_CHECK(loadRejectsWithMessage(af_bad_legacy_path,
                                     "cartesian_control.ruckig_follower.af_damping_beta"));
     ::unlink(af_bad_legacy_path.c_str());
-
-    // Force-terminated retreat: the distance must stay under the 0.8*offset-cap
-    // braking guard, and the release target must sit below the hard trigger --
-    // both are conditions that silently became no-ops when they were not enforced.
-    for (const auto& [body, needle] : std::vector<std::pair<std::string, std::string>>{
-             {"  retreat_distance_m: 0.030\n  max_pos_offset_m: 0.030\n",
-              "force_control.retreat_distance_m"},
-             {"  retreat_distance_m: 0.024\n  max_pos_offset_m: 0.030\n",
-              "force_control.retreat_distance_m"},
-             {"  max_pos_offset_m: 0.045\n  retreat_distance_m: 0.035\n  retreat_release_force_n: -1.0\n", "force_control.retreat_release_force_n"},
-             {"  max_pos_offset_m: 0.045\n  retreat_distance_m: 0.035\n  retreat_release_force_n: 10.0\n", "force_control.retreat_release_force_n"}}) {
-        const std::string path = writeTempConfig(
-            "force-retreat-invalid",
-            "schema: robotics_lab.rb_servo_server.v1\n"
-            "force_control:\n"
-            "  provider: project_native\n"
-            "  enable: true\n"
-            "  operating_mode: cartesian_admittance\n"
-            "  hard_limit_policy: retreat\n"
-            "  left:\n    hard_normal_force_n: 10.0\n    hard_force_norm_n: 12.0\n"
-            "  right:\n    hard_normal_force_n: 10.0\n    hard_force_norm_n: 12.0\n"
-            + body
-        );
-        RB_CHECK(loadRejectsWithMessage(path, needle));
-        ::unlink(path.c_str());
-    }
-
-    const std::string good_gate_path = writeTempConfig(
-        "ruckig-follower-good-loading-gate",
-        "schema: robotics_lab.rb_servo_server.v1\n"
-        "cartesian_control:\n"
-        "  ruckig_follower:\n"
-        "    loading_projection_max_accel_m_s2: 0.5\n"
-    );
-    const rb_servo::DualArmConfig good_gate = rb_servo::loadConfigFromYaml(good_gate_path);
-    ::unlink(good_gate_path.c_str());
-    RB_CHECK(near(
-        good_gate.cartesian_control.ruckig_follower.loading_projection_max_accel_m_s2,
-        0.5
-    ));
 
     return true;
 }

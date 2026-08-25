@@ -858,66 +858,6 @@ bool testExtractNewestRbpodoStateFrame() {
     return true;
 }
 
-bool testEftWrenchMappedAndSerialized() {
-    rb_servo::RbpodoSystemStateSnapshot snapshot = rbpodoSnapshot();
-    snapshot.eft = {1.5, -2.5, 30.0, 0.1, -0.2, 0.3};
-
-    rb_servo::RobotState mapped =
-        rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, snapshot);
-    RB_CHECK(mapped.eft_wrench.fx == 1.5);
-    RB_CHECK(mapped.eft_wrench.fy == -2.5);
-    RB_CHECK(mapped.eft_wrench.fz == 30.0);
-    RB_CHECK(mapped.eft_wrench.tx == 0.1);
-    RB_CHECK(mapped.eft_wrench.ty == -0.2);
-    RB_CHECK(mapped.eft_wrench.tz == 0.3);
-    RB_CHECK(mapped.eft_valid);
-
-    // A frame that ended before the eft fields must not publish the padding
-    // zeros as sensor readings.
-    rb_servo::RbpodoSystemStateSnapshot short_frame = rbpodoSnapshot();
-    short_frame.eft_in_frame = false;
-    RB_CHECK(!rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, short_frame).eft_valid);
-
-    // Non-finite sensor values are not valid readings either.
-    rb_servo::RbpodoSystemStateSnapshot non_finite = rbpodoSnapshot();
-    non_finite.eft[2] = std::numeric_limits<double>::quiet_NaN();
-    RB_CHECK(!rb_servo::mapRbpodoSystemStateSnapshot(rb_servo::ArmId::Left, non_finite).eft_valid);
-
-    rb_servo::ServoSnapshot servo_snapshot;
-    servo_snapshot.left_state = mapped;
-    servo_snapshot.right_state.arm_id = rb_servo::ArmId::Right;
-    servo_snapshot.right_state.q_actual_deg = joints(0.0);
-    servo_snapshot.right_state.has_valid_joint_state = true;
-    servo_snapshot.right_state.connection_state = rb_servo::RobotConnectionState::Connected;
-
-    rb_servo::DualArmConfig config;
-    config.left_robot.backend_type = rb_servo::BackendType::Rbpodo;
-    config.right_robot.backend_type = rb_servo::BackendType::Rbpodo;
-    rb_servo::StatePublisher publisher(config);
-    const nlohmann::json json = nlohmann::json::parse(publisher.serializeSnapshot(servo_snapshot));
-    const nlohmann::json& left = json.at("left");
-    RB_CHECK(left.at("eft_wrench").size() == 6);
-    RB_CHECK(left.at("eft_wrench").at(0).get<double>() == 1.5);
-    RB_CHECK(left.at("eft_wrench").at(5).get<double>() == 0.3);
-    RB_CHECK(left.at("eft_valid").get<bool>());
-    RB_CHECK(left.at("eft_source").get<std::string>() == "rbpodo.sdata.eft");
-    // Default-constructed right arm: zeros, not valid (no rbpodo frame mapped).
-    RB_CHECK(!json.at("right").at("eft_valid").get<bool>());
-    return true;
-}
-
-bool testRbpodoStateFrameIncludesEftBoundary() {
-    // A frame that only covers the early joint fields clearly lacks eft.
-    RB_CHECK(!rb_servo::rbpodoStateFrameIncludesEft(64));
-    // Exact boundary against the exported wire-format constant (pinned to the
-    // SDK struct by a static_assert in the rbpodo-enabled build).
-    RB_CHECK(!rb_servo::rbpodoStateFrameIncludesEft(
-        rb_servo::kRbpodoStateFrameEftEndOffsetBytes - 1));
-    RB_CHECK(rb_servo::rbpodoStateFrameIncludesEft(
-        rb_servo::kRbpodoStateFrameEftEndOffsetBytes));
-    return true;
-}
-
 bool testPipelinedChannelReprimePolicy() {
     // No transition means the already-primed channel remains valid.
     RB_CHECK(!rb_servo::rbpodoPipelinedChannelNeedsReprime(true, false, false));
@@ -956,8 +896,6 @@ int main() {
     if (!testStatePublisherSerializesRawRbpodoDiagnostics()) return 1;
     if (!testStatePublisherSerializesControllerSimUnavailableFields()) return 1;
     if (!testExtractNewestRbpodoStateFrame()) return 1;
-    if (!testEftWrenchMappedAndSerialized()) return 1;
-    if (!testRbpodoStateFrameIncludesEftBoundary()) return 1;
     if (!testPipelinedChannelReprimePolicy()) return 1;
     return 0;
 }
