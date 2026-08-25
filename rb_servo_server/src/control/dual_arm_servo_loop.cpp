@@ -3421,6 +3421,8 @@ void DualArmServoLoop::loopMain() {
                 t.highwater_events = d.highwater_events;
                 t.redrain_events = d.redrain_events;
                 t.no_consumption_events = d.no_consumption_events;
+                t.hold_send = d.hold_send;
+                t.warmup_holds_total = d.warmup_holds_total;
                 return t;
             };
             if (left_worker_) {

@@ -614,6 +614,29 @@ void ArmWorker::run() {
                     makeBackendTiming(now, now)
                 );
                 storeSendResult(*command, result, makeBackendTiming(now, now));
+            // Unlocked read is safe: this worker thread is the ONLY writer of
+            // queue_sync_decision_ (it writes it under the mutex a few lines below,
+            // from this same thread); the servo loop only ever reads it, under the
+            // mutex, via queueSyncDecision().
+            } else if (owns_cadence && queue_sync_decision_.hold_send) {
+                // Warmup back-pressure: the box has produced no evidence it is
+                // consuming, so this tick's setpoint stays OFF the wire instead of
+                // being buried in a queue we cannot see. The mailbox is
+                // latest-wins, so nothing is lost -- the next tick that does send
+                // carries the newest setpoint. Recorded as a suppression rather
+                // than dropped silently, because a servo stream that is not on the
+                // wire must never be invisible.
+                const SendServoJResult result = rejectedSend(
+                    *command,
+                    backendError(
+                        BackendErrorKind::SuppressedByPolicy,
+                        "servo_j held: queue sync has no evidence the box is consuming",
+                        "",
+                        "queue_sync_warmup_hold"
+                    ),
+                    makeBackendTiming(now, now)
+                );
+                storeSendResult(*command, result, makeBackendTiming(now, now));
             } else {
                 const uint64_t send_start_ns = nowSteadyNs();
                 SendServoJResult result = backend_->sendServoJ(*command);

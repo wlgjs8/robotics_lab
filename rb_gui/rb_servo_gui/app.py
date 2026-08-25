@@ -11,7 +11,7 @@ import threading
 import time
 from html import escape
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, NamedTuple
 
 import numpy as np
 
@@ -228,6 +228,11 @@ _OPERATOR_MONITOR_GAP_EM = 1.0
 # begin in both columns. Sized to clear the Joint and FT content above them.
 # Override with RB_GUI_MONITOR_SPLIT_EM.
 _OPERATOR_MONITOR_SPLIT_EM = 35.5
+# The RIGHT column splits LOWER than the left. Camera Quality is seven fixed lines,
+# while the FT card is a table that GROWS under a push (lever + the three force-law
+# rows appear only then). Sharing the left column's split left the FT card 9-27 px
+# short of its own worst case, depending on viewport — measured, and it scrolled.
+_OPERATOR_MONITOR_SPLIT_FT_EM = 46.0
 _CAMERA_QUALITY_MONITOR_STALE_SEC = 0.5
 
 
@@ -1855,15 +1860,21 @@ def _build_camera_quality_monitor(
                 )
 
 
-def _operator_monitor_layout() -> tuple[float, float, float]:
+def _operator_monitor_layout() -> tuple[float, float, float, float]:
     return (
         _env_positive_float("RB_GUI_MONITOR_WIDTH_EM", _OPERATOR_MONITOR_WIDTH_EM),
         _env_positive_float("RB_GUI_MONITOR_GAP_EM", _OPERATOR_MONITOR_GAP_EM),
         _env_positive_float("RB_GUI_MONITOR_SPLIT_EM", _OPERATOR_MONITOR_SPLIT_EM),
+        _env_positive_float("RB_GUI_MONITOR_SPLIT_FT_EM", _OPERATOR_MONITOR_SPLIT_FT_EM),
     )
 
 
-def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_em: float) -> str:
+def _operator_monitor_static_html(
+    monitor_width_em: float,
+    gap_em: float,
+    split_em: float,
+    split_ft_em: float,
+) -> str:
     return f"""
 <style>
   :root {{
@@ -1876,6 +1887,11 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
     /* Lower monitor cards stack below the upper cards at this common vertical
        anchor (em, in card font size), clamped for short viewports. */
     --rb-monitor-split: min({split_em:.3f}em, 60vh);
+    /* The FT/Camera column's own anchor — see _OPERATOR_MONITOR_SPLIT_FT_EM. Bounded
+       by what Camera Quality actually needs (it is seven fixed lines, ~21em with its
+       header) rather than by a fraction of the viewport, so the FT table gets every
+       pixel the column can spare before it has to scroll. */
+    --rb-monitor-split-ft: min({split_ft_em:.3f}em, max(26em, calc(100vh - 21em)));
   }}
   .rb-monitor-card {{
     position: fixed;
@@ -1917,9 +1933,9 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
   .rb-monitor-joint-card.rb-monitor-body-card {{ max-height: calc(var(--rb-monitor-split) - 5.95em); }}
   .rb-monitor-stand-card.rb-monitor-header-card {{ top: var(--rb-monitor-split); }}
   .rb-monitor-stand-card.rb-monitor-body-card {{ top: calc(var(--rb-monitor-split) + 4.95em); max-height: calc(100vh - var(--rb-monitor-split) - 5.95em); }}
-  .rb-monitor-ft-card.rb-monitor-body-card {{ max-height: calc(var(--rb-monitor-split) - 5.95em); }}
-  .rb-monitor-camera-card.rb-monitor-header-card {{ top: var(--rb-monitor-split); }}
-  .rb-monitor-camera-card.rb-monitor-body-card {{ top: calc(var(--rb-monitor-split) + 4.95em); max-height: calc(100vh - var(--rb-monitor-split) - 5.95em); }}
+  .rb-monitor-ft-card.rb-monitor-body-card {{ max-height: calc(var(--rb-monitor-split-ft) - 5.95em); }}
+  .rb-monitor-camera-card.rb-monitor-header-card {{ top: var(--rb-monitor-split-ft); }}
+  .rb-monitor-camera-card.rb-monitor-body-card {{ top: calc(var(--rb-monitor-split-ft) + 4.95em); max-height: calc(100vh - var(--rb-monitor-split-ft) - 5.95em); }}
   .rb-monitor-title {{
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-weight: 650;
@@ -1971,6 +1987,44 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
      value is right-aligned, so the angle (incl. a leading "-" sign) is always visible. */
   .rb-monitor-row > span:first-child {{ overflow: hidden; text-overflow: ellipsis; min-width: 0; }}
   .rb-monitor-row > span:last-child {{ text-align: right; font-variant-numeric: tabular-nums; }}
+  /* THE FT CARD IS A TABLE, NOT TWO STACKS. The operator's question is "which arm
+     is feeling what", and that is a comparison — a per-arm stack forced them to
+     scroll between the two halves of one answer. One row per channel, one column
+     per arm, and both arms land in the same glance. */
+  .rb-monitor-row3 {{
+    /* The label takes what it needs and THE TWO ARMS SPLIT THE REST EVENLY. Sizing
+       the arm columns to their content instead let a wide cell in one arm eat the
+       other's gap, and the two values ran together. */
+    grid-template-columns: auto 1fr 1fr;
+    column-gap: 0.5em;
+    /* Slightly tighter than the two-column cards: this one is a TABLE, it reads
+       better dense, and the ~19 px it saves is what keeps the worst-case card
+       (push + covering law) inside its box on a remote-desktop-sized viewport. */
+    line-height: 1.45;
+  }}
+  .rb-monitor-row3 > span {{ text-align: right; font-variant-numeric: tabular-nums; }}
+  .rb-monitor-row3 > span:first-child {{ text-align: left; }}
+  .rb-monitor-row-head {{
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-weight: 600;
+    font-size: 11px;
+    border-bottom: 1px solid rgba(15, 23, 42, 0.12);
+    margin-bottom: 0.15em;
+  }}
+  /* Force and torque are different units; the blank line is the unit boundary. */
+  .rb-monitor-row-gap {{ margin-top: 0.4em; }}
+  .rb-monitor-dim {{ color: #9aa5b1; }}
+  .rb-monitor-warn {{ color: #8a6410; font-weight: 600; }}
+  .rb-monitor-bad {{ color: #b34646; font-weight: 600; }}
+  .rb-monitor-ok {{ color: #148a4e; }}
+  /* A failure needs a SENTENCE, and a sentence does not fit an arm column. It gets
+     its own full-width line so the columns stay narrow enough to read as a table. */
+  .rb-monitor-note {{
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 11px;
+    line-height: 1.35;
+    margin-top: 0.15em;
+  }}
   .rb-rad {{ display: none; }}
   body:has(#rb-joint-unit-rad:checked) .rb-monitor-joint-card .rb-deg {{ display: none; }}
   body:has(#rb-joint-unit-rad:checked) .rb-monitor-joint-card .rb-rad {{ display: inline; }}
@@ -1991,6 +2045,13 @@ def _operator_monitor_static_html(monitor_width_em: float, gap_em: float, split_
     .rb-monitor-row {{
       grid-template-columns: minmax(5.6em, 1fr) auto;
       column-gap: 0.45em;
+    }}
+    /* Re-state the 3-column template: the `.rb-monitor-row` rule above resets it to
+       two columns at the same specificity and later in the sheet, and the third cell
+       would silently wrap onto a second line instead of failing loudly. */
+    .rb-monitor-row3 {{
+      grid-template-columns: auto 1fr 1fr;
+      column-gap: 0.35em;
     }}
   }}
 </style>
@@ -2027,6 +2088,23 @@ def _operator_monitor_invalid_pair() -> str:
 
 def _operator_monitor_row(label: str, value_html: str) -> str:
     return f'<div class="rb-monitor-row"><span>{escape(label)}</span><span>{value_html}</span></div>'
+
+
+def _operator_monitor_row3(
+    label: str,
+    left_html: str,
+    right_html: str,
+    *,
+    row_class: str = "",
+) -> str:
+    """One `label | left | right` line. The value cells are HTML, the label is text."""
+    classes = "rb-monitor-row rb-monitor-row3"
+    if row_class:
+        classes += " " + row_class
+    return (
+        f'<div class="{classes}"><span>{escape(label)}</span>'
+        f"<span>{left_html}</span><span>{right_html}</span></div>"
+    )
 
 
 def _camera_quality_monitor_status(store: CameraQualityStore | None) -> str:
@@ -2234,8 +2312,187 @@ def _render_stand_world_monitor_rows(
     return "".join(parts)
 
 
+# The server's per-axis dead-band on the compensated channels
+# (`force_torque.<arm>.deadzone_force_n` / `deadzone_torque_nm`). Repeated here ONLY
+# to caption the card: a resting arm reads 0.00 and so does the first ~2 N of a push,
+# and an operator who does not know that reads a working sensor as a dead one.
+_FT_DEADZONE_N = 2.0
+_FT_DEADZONE_NM = 0.5
+# Below this the deadzoned wrench is mostly the band's own residue, so the
+# moment-arm ratio is a ratio of two near-zero numbers.
+_FT_LEVER_MIN_FORCE_N = 3.0
+
+
+def _ft_dim(text: str) -> str:
+    return f'<span class="rb-monitor-dim">{escape(text)}</span>'
+
+
+class _FtArmReading(NamedTuple):
+    """One arm's F/T read.
+
+    `token` is what fits an arm COLUMN (two or three characters); `note` is the
+    sentence that does not, and gets its own full-width line under the table.
+    `values` of None means there is NOTHING TO READ and the card prints "--"; a list
+    of zeros means a REAL ZERO — not the same thing, and the whole reason the two are
+    kept apart here instead of both collapsing to 0.00.
+    """
+
+    token: str
+    css_class: str
+    note: str
+    values: list[float] | None
+    ft: Mapping[str, Any] | None
+
+
+def _ft_arm_reading(arm: Any) -> _FtArmReading:
+    ft = getattr(arm, "force_torque", None)
+    if not isinstance(ft, Mapping):
+        # ABSENT is not OFF. An absent block means the server is not publishing
+        # force_torque at all (old binary, or a GUI started before it did) — a config
+        # choice and a missing stream must not share a message.
+        return _FtArmReading(
+            "--", "rb-monitor-bad", "no force_torque in the state stream", None, None)
+    if not ft.get("enabled"):
+        return _FtArmReading(
+            "off", "rb-monitor-dim", "disabled in config (force_torque.<arm>.enable)",
+            None, ft)
+    if not ft.get("connected"):
+        # Every compensated channel is pinned to exact zero upstream, so a printed
+        # 0.00 here would read as "no force" when it means "no sensor".
+        reason = str(ft.get("connect_reason") or "sensor stream is flat")
+        return _FtArmReading("--", "rb-monitor-bad", f"NOT CONNECTED - {reason}", None, ft)
+
+    wrench = ft.get("comp_stand_axes_at_tcp")
+    values: list[float] = []
+    if isinstance(wrench, (list, tuple)) and len(wrench) >= 6:
+        for raw_value in wrench[:6]:
+            try:
+                parsed = float(raw_value)
+            except (TypeError, ValueError):
+                values = []
+                break
+            if not math.isfinite(parsed):
+                values = []
+                break
+            values.append(parsed)
+    if len(values) != 6:
+        return _FtArmReading(
+            "--", "rb-monitor-bad", "the published wrench is not six finite numbers",
+            None, ft)
+
+    if not ft.get("bias_valid"):
+        # NOT ZEROED READS AS A TRUE ZERO, ON PURPOSE. Without a tare the compensated
+        # wrench still carries the sensor's own offset (~20-40 N on this cell), and the
+        # server refuses to let any law cover an untared arm ("F/T has no bias yet"),
+        # so nothing whatsoever is acting on those numbers. Zero is the honest reading
+        # of "no measured change from a zero you have not set yet".
+        return _FtArmReading(
+            "필요", "rb-monitor-warn", "영점 조절 전 - F/T 영점 버튼을 누르세요",
+            [0.0] * 6, ft)
+    return _FtArmReading("OK", "rb-monitor-ok", "", values, ft)
+
+
+def _ft_value_cells(
+    left_values: list[float] | None,
+    right_values: list[float] | None,
+    index: int,
+    digits: int,
+) -> tuple[str, str]:
+    def cell(values: list[float] | None) -> str:
+        if values is None:
+            return _ft_dim("--")
+        text = f"{values[index]:.{digits}f}"
+        # A channel that ROUNDS to zero prints "0.00", never "-0.00": the sign of a
+        # value the deadzone already flattened is noise, and a minus in front of a
+        # zero reads as a direction nobody is pushing in.
+        if float(text) == 0.0:
+            text = f"{0.0:.{digits}f}"
+        return escape(text)
+
+    return cell(left_values), cell(right_values)
+
+
+def _ft_magnitude_cells(
+    left_values: list[float] | None,
+    right_values: list[float] | None,
+    offset: int,
+    digits: int,
+) -> tuple[str, str]:
+    def cell(values: list[float] | None) -> str:
+        if values is None:
+            return _ft_dim("--")
+        trio = values[offset:offset + 3]
+        return escape(f"{math.sqrt(sum(v * v for v in trio)):.{digits}f}")
+
+    return cell(left_values), cell(right_values)
+
+
+def _ft_force_magnitude(values: list[float] | None) -> float:
+    if values is None:
+        return 0.0
+    return math.sqrt(sum(v * v for v in values[0:3]))
+
+
+def _ft_lever_cell(values: list[float] | None) -> str:
+    f_mag = _ft_force_magnitude(values)
+    if values is None or f_mag <= _FT_LEVER_MIN_FORCE_N:
+        return _ft_dim("--")
+    t_mag = math.sqrt(sum(v * v for v in values[3:6]))
+    return escape(f"{t_mag / f_mag * 1e3:.0f}")
+
+
+def _ft_load_cell(ft: Mapping[str, Any] | None, values: list[float] | None) -> str:
+    """The tool-load estimate is the one channel that ESCAPES the deadzone (a heavy
+    low-pass on the pre-deadzone force), so it reads the ~200 g the 2 N band flattens
+    to zero. It is meaningless without a bias, so it follows the same gate."""
+    if ft is None or values is None or not ft.get("bias_valid"):
+        return _ft_dim("--")
+    try:
+        load = float(ft.get("load_mass_kg"))
+    except (TypeError, ValueError):
+        return _ft_dim("--")
+    if not math.isfinite(load):
+        return _ft_dim("--")
+    text = f"{load:.3f}"
+    return escape(text) if ft.get("load_settled") else _ft_dim(text + "~")
+
+
+def _ft_fc_cell(fc: Mapping[str, Any] | None, key: str, scale: float, digits: int) -> str:
+    if not isinstance(fc, Mapping) or not fc.get("covered"):
+        return _ft_dim("--")
+    try:
+        value = float(fc.get(key, 0.0)) * scale
+    except (TypeError, ValueError):
+        return _ft_dim("--")
+    if not math.isfinite(value):
+        return _ft_dim("--")
+    return escape(f"{value:.{digits}f}")
+
+
+def _ft_law_cell(fc: Mapping[str, Any] | None) -> str:
+    """WHICH LAW. The stream law and the hold law differ by 5x in the ratio that
+    decides how much of a push turns the tool rather than moving it, so a deviation
+    cannot be judged without knowing which one produced it."""
+    if not isinstance(fc, Mapping):
+        return _ft_dim("--")
+    if not fc.get("enabled"):
+        return _ft_dim("off")
+    if not fc.get("covered"):
+        return _ft_dim("idle")
+    # Past the fence the law HOLDS the bound instead of tracking, so the arm feels
+    # stiff for no visible reason unless the card says so.
+    if fc.get("bounded"):
+        return '<span class="rb-monitor-warn">fence</span>'
+    law = fc.get("law")
+    return escape(str(law)) if law else escape("on")
+
+
 def _render_ft_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> str:
-    """The FT Monitor card: what the arm is feeling RIGHT NOW, relative to its zero.
+    """The FT Monitor card: what each arm is feeling RIGHT NOW, relative to its zero.
+
+    ONE TABLE, BOTH ARMS, NO SCROLL. Every row is a channel and every column is an
+    arm, because the question this card answers is a comparison and the previous
+    per-arm stack put the two halves of that answer a scroll apart.
 
     THE NUMBERS ARE THE COMPENSATED, DEADZONED WRENCH AT THE TCP IN STAND AXES —
     `force_torque.comp_stand_axes_at_tcp`, the same surface the force law consumes.
@@ -2244,140 +2501,120 @@ def _render_ft_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> str
 
         raw  -  bias(tare)  -  tool gravity  ->  2 N / 0.5 Nm deadzone
 
-    So a resting arm reads 0.0, and the first ~2 N of any push reads 0.0 as well:
+    So a resting arm reads 0.00, and the first ~2 N of any push reads 0.00 as well:
     the deadzone is not a display choice, it is what the controller acts on, and a
     monitor that showed the pre-deadzone value would disagree with the arm.
 
     STAND AXES, NOT TOOL AXES: this card is read by a human standing at the cell,
     and stand X/Y/Z are the directions they can point at. The law integrates in the
     same frame.
+
+    "--" AND "0.00" ARE DIFFERENT ANSWERS. "--" is "there is nothing to read here";
+    0.00 is a measurement. Before a tare the channels are a true zero (see
+    `_ft_arm_reading`); with no sensor, no stream or a bad wrench they are "--".
     """
     if latest is None:
         status = "No state stream"
     else:
-        status = f"{'stale' if stale else 'live'}, deadband 2 N / 0.5 Nm"
+        status = (
+            ("stale" if stale else "live")
+            + " · stand axes @TCP · deadband "
+            + f"{_FT_DEADZONE_N:g} N / {_FT_DEADZONE_NM:g} Nm"
+        )
     rows: list[str] = [f'<div class="rb-monitor-status">{escape(status)}</div>']
     if latest is None or stale:
         return "".join(rows)
 
-    for arm_name, arm in (("left", latest.left), ("right", latest.right)):
-        ft = getattr(arm, "force_torque", None)
-        rows.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">'
-                    f'{escape(arm_name)}</div>')
-        if not isinstance(ft, Mapping):
-            # ABSENT is not OFF. Reporting both as "disabled" is what made the first
-            # look at this card useless: the operator could not tell a config choice
-            # from a server that is not publishing the block at all.
-            rows.append(_operator_monitor_row("F/T", escape("not in state stream")))
-            rows.append(_operator_monitor_row("", escape("old server, or restart the GUI")))
-            rows.append("</div>")
-            continue
-        if not ft.get("enabled"):
-            rows.append(_operator_monitor_row("F/T", escape("disabled in config")))
-            rows.append("</div>")
-            continue
-        if not ft.get("connected"):
-            # Every compensated channel is pinned to exact zero here, so showing
-            # numbers would be showing zeros that mean "no sensor", not "no force".
-            rows.append(_operator_monitor_row("F/T", escape("NOT CONNECTED")))
-            rows.append("</div>")
-            continue
-        if not ft.get("bias_valid"):
-            # Without a tare the "change from zero" has no zero to be from: the
-            # numbers below would be the sensor's own offset, ~20 N on this cell.
-            rows.append(_operator_monitor_row("F/T", escape("NOT ZEROED - tare first")))
-            rows.append("</div>")
-            continue
+    left_read = _ft_arm_reading(latest.left)
+    right_read = _ft_arm_reading(latest.right)
+    left_values, right_values = left_read.values, right_read.values
+    left_ft, right_ft = left_read.ft, right_read.ft
+    left_fc = getattr(latest.left, "force_control", None)
+    right_fc = getattr(latest.right, "force_control", None)
 
-        wrench = ft.get("comp_stand_axes_at_tcp")
-        values: list[float] = []
-        if isinstance(wrench, (list, tuple)) and len(wrench) >= 6:
-            for raw_value in wrench[:6]:
-                try:
-                    values.append(float(raw_value))
-                except (TypeError, ValueError):
-                    values = []
-                    break
-        if len(values) != 6 or not all(math.isfinite(v) for v in values):
-            rows.append(_operator_monitor_row("F/T", escape("invalid")))
-            rows.append("</div>")
-            continue
+    rows.append(_operator_monitor_row3("", "LEFT", "RIGHT", row_class="rb-monitor-row-head"))
+    rows.append(_operator_monitor_row3(
+        "영점",
+        f'<span class="{left_read.css_class}">{escape(left_read.token)}</span>',
+        f'<span class="{right_read.css_class}">{escape(right_read.token)}</span>',
+    ))
 
-        fx, fy, fz, tx, ty, tz = values
-        f_mag = math.sqrt(fx * fx + fy * fy + fz * fz)
-        t_mag = math.sqrt(tx * tx + ty * ty + tz * tz)
-        rows.append(_operator_monitor_row("dFx [N]", escape(f"{fx:+.2f}")))
-        rows.append(_operator_monitor_row("dFy [N]", escape(f"{fy:+.2f}")))
-        rows.append(_operator_monitor_row("dFz [N]", escape(f"{fz:+.2f}")))
-        rows.append(_operator_monitor_row("|dF| [N]", escape(f"{f_mag:.2f}")))
-        rows.append(_operator_monitor_row("dTx [Nm]", escape(f"{tx:+.3f}")))
-        rows.append(_operator_monitor_row("dTy [Nm]", escape(f"{ty:+.3f}")))
-        rows.append(_operator_monitor_row("dTz [Nm]", escape(f"{tz:+.3f}")))
-        rows.append(_operator_monitor_row("|dT| [Nm]", escape(f"{t_mag:.3f}")))
-        # THE MOMENT ARM: |dT| / |dF|, the perpendicular distance from the reference
-        # point to the line of action of the measured force. This is the ONE number
-        # that settles "is the wrench really referenced at the fingertip":
-        #
-        #   push exactly ON the fingertip  -> lever ~ 0 mm     (reference is the TCP)
-        #   push exactly ON the fingertip  -> lever ~ 203 mm   (reference is still the
-        #                                                       sensor origin)
-        #
-        # Anywhere else on the tool it reads the real distance back from the fingertip
-        # to where the hand is, which is also worth knowing: it says how much of what
-        # you feel is torque rather than force.
-        # |M| / |F| is the MOMENT ARM: the perpendicular distance from the reference
-        # point to the force's line of action. It is frame-free — no assumption about
-        # which axis the tool points along — which is what makes it usable as a check.
-        # Below ~3 N the deadzoned wrench is mostly the band's residue and the ratio
-        # is noise, so it is not shown.
-        if f_mag > 3.0:
-            rows.append(_operator_monitor_row(
-                "lever [mm]", escape(f"{t_mag / f_mag * 1e3:.0f}")))
-        else:
-            rows.append(_operator_monitor_row("lever [mm]", escape("--")))
-        # The tool-load estimate is the one channel that ESCAPES the deadzone (a
-        # heavy low-pass on the pre-deadzone force), so it reads the ~200 g the
-        # 2 N band flattens to zero above.
-        try:
-            load = float(ft.get("load_mass_kg"))
-            settled = bool(ft.get("load_settled"))
-            rows.append(_operator_monitor_row(
-                "load [kg]", escape(f"{load:.3f}" + ("" if settled else " (settling)"))))
-        except (TypeError, ValueError):
-            pass
-        # What the law did with it, so the cause and the effect are read together.
-        fc = getattr(arm, "force_control", None)
-        if isinstance(fc, Mapping) and fc.get("covered"):
-            # WHICH LAW. The stream law and the hold law differ by 5x in the ratio
-            # that decides how much of a push turns the tool rather than moving it,
-            # so a deviation cannot be judged without knowing which one produced it.
-            law = fc.get("law")
-            if law:
-                rows.append(_operator_monitor_row("law", escape(str(law))))
-            try:
-                rows.append(_operator_monitor_row(
-                    "dev [mm]", escape(f"{float(fc.get('deviation_norm_m', 0.0)) * 1e3:.1f}")))
-            except (TypeError, ValueError):
-                pass
-            try:
-                rows.append(_operator_monitor_row(
-                    "dev [deg]",
-                    escape(f"{math.degrees(float(fc.get('deviation_norm_rad', 0.0))):.1f}")))
-            except (TypeError, ValueError):
-                pass
-            try:
-                rows.append(_operator_monitor_row(
-                    "gate", escape(f"{float(fc.get('gate_translation', 1.0)):.2f}")))
-            except (TypeError, ValueError):
-                pass
-            # WHY IT STOPPED YIELDING. Past the fence the law HOLDS the bound instead
-            # of tracking, so the arm feels stiff for no visible reason unless the
-            # card says so.
-            if fc.get("bounded"):
-                rows.append(_operator_monitor_row("", escape("AT FENCE - holding")))
-        elif isinstance(fc, Mapping) and fc.get("enabled"):
-            rows.append(_operator_monitor_row("law", escape("not covering")))
-        rows.append("</div>")
+    for label, index in (("Fx [N]", 0), ("Fy [N]", 1), ("Fz [N]", 2)):
+        left_cell, right_cell = _ft_value_cells(left_values, right_values, index, 2)
+        rows.append(_operator_monitor_row3(
+            label, left_cell, right_cell,
+            row_class="rb-monitor-row-gap" if index == 0 else "",
+        ))
+    left_cell, right_cell = _ft_magnitude_cells(left_values, right_values, 0, 2)
+    rows.append(_operator_monitor_row3("|F| [N]", left_cell, right_cell))
+
+    for label, index in (("Tx [Nm]", 3), ("Ty [Nm]", 4), ("Tz [Nm]", 5)):
+        left_cell, right_cell = _ft_value_cells(left_values, right_values, index, 3)
+        rows.append(_operator_monitor_row3(
+            label, left_cell, right_cell,
+            row_class="rb-monitor-row-gap" if index == 3 else "",
+        ))
+    left_cell, right_cell = _ft_magnitude_cells(left_values, right_values, 3, 3)
+    rows.append(_operator_monitor_row3("|T| [Nm]", left_cell, right_cell))
+
+    # THE MOMENT ARM, |dT| / |dF|: the perpendicular distance from the reference point
+    # to the line of action of the measured force. It is the ONE number that settles
+    # "is this wrench really referenced at the fingertip" — push exactly on the
+    # fingertip and it reads ~0 mm if the reference is the TCP, ~203 mm if it is still
+    # the sensor origin — and it is frame-free, assuming nothing about which axis the
+    # tool points along. Below ~3 N the deadzoned wrench is mostly the band's residue
+    # and the ratio of two near-zero numbers is noise, so the row only appears while
+    # somebody is actually pushing. That is also what keeps this card scroll-free.
+    if any(_ft_force_magnitude(v) > _FT_LEVER_MIN_FORCE_N for v in (left_values, right_values)):
+        rows.append(_operator_monitor_row3(
+            "lever [mm]", _ft_lever_cell(left_values), _ft_lever_cell(right_values)))
+
+    rows.append(_operator_monitor_row3(
+        "load [kg]",
+        _ft_load_cell(left_ft, left_values),
+        _ft_load_cell(right_ft, right_values),
+        row_class="rb-monitor-row-gap",
+    ))
+
+    # What the law did with it, so the cause and the effect are read together. The
+    # deviation rows only appear while a law is actually covering an arm — an idle
+    # cell would be three more rows of "--" on a card whose point is to stay short.
+    rows.append(_operator_monitor_row3(
+        "law", _ft_law_cell(left_fc), _ft_law_cell(right_fc)))
+    covering = any(
+        isinstance(fc, Mapping) and fc.get("covered") for fc in (left_fc, right_fc)
+    )
+    if covering:
+        rows.append(_operator_monitor_row3(
+            "dev [mm]",
+            _ft_fc_cell(left_fc, "deviation_norm_m", 1e3, 1),
+            _ft_fc_cell(right_fc, "deviation_norm_m", 1e3, 1),
+        ))
+        rows.append(_operator_monitor_row3(
+            "dev [deg]",
+            _ft_fc_cell(left_fc, "deviation_norm_rad", 180.0 / math.pi, 1),
+            _ft_fc_cell(right_fc, "deviation_norm_rad", 180.0 / math.pi, 1),
+        ))
+        rows.append(_operator_monitor_row3(
+            "gate",
+            _ft_fc_cell(left_fc, "gate_translation", 1.0, 2),
+            _ft_fc_cell(right_fc, "gate_translation", 1.0, 2),
+        ))
+
+    # A FAILURE NEEDS A SENTENCE, and a sentence does not fit an arm column. "--" in
+    # the table says an arm has nothing to read; this says why, once, in full width.
+    # Both arms usually fail the same way, so an identical note is printed once.
+    seen: list[str] = []
+    for arm_name, read in (("left", left_read), ("right", right_read)):
+        if not read.note or read.note in seen:
+            continue
+        seen.append(read.note)
+        both = left_read.note == right_read.note
+        who = "both arms" if both else arm_name
+        rows.append(
+            f'<div class="rb-monitor-note {read.css_class}">'
+            f"{escape(who)}: {escape(read.note)}</div>"
+        )
 
     return "".join(rows)
 
@@ -2459,10 +2696,10 @@ def _server_uptime_hms(handles: dict[str, Any], latest: StateSnapshot | None) ->
 def _build_operator_monitors(server: Any, handles: dict[str, Any]) -> None:
     add_html = getattr(server.gui, "add_html", None)
     if callable(add_html):
-        monitor_width_em, gap_em, split_em = _operator_monitor_layout()
+        monitor_width_em, gap_em, split_em, split_ft_em = _operator_monitor_layout()
         handles["operator_monitor_panel_mode"] = "fixed_html_overlay"
         handles["operator_monitor_style"] = add_html(
-            _operator_monitor_static_html(monitor_width_em, gap_em, split_em),
+            _operator_monitor_static_html(monitor_width_em, gap_em, split_em, split_ft_em),
             order=0.0,
         )
         camera_quality_store = handles.get("camera_quality_store")

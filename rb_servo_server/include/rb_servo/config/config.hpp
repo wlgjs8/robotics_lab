@@ -919,6 +919,23 @@ struct QueueSyncConfig {
     int highwater_fill = 500;               // absurd backlog -> event
     double warmup_min_sec = 0.4;            // let the box startup transient develop
     double warmup_max_sec = 1.2;
+    // Warmup back-pressure. Measured 2026-08-26 on fw v8.7.3: a box already at
+    // activation stage 6 (servo on) consumed NOTHING for ~254 ms while reporting
+    // RBACK fill 0, then revealed the whole ~128-command backlog at once, which
+    // then took 2.3 s to drain. Warmup used to stream at full rate through that
+    // window because its exit test waits for fill to RAMP, and a fill pinned at 0
+    // never trips it.
+    //
+    // fill == 0 alone cannot separate "not consuming" from "consuming at exactly
+    // our rate", so the trigger is the pair: this many sends made while fill has
+    // NEVER been observed above 0. Under that ambiguity the safe action is the
+    // same either way -- stop pushing until the queue proves it can hold.
+    int warmup_unevidenced_sends = 10;
+    // While throttled, still send one in every N cadence ticks. NOT a hard stop:
+    // a healthy box that happens to sit at fill 0 would otherwise be silenced
+    // with no way to earn evidence, and the probe both bounds the backlog to 1/N
+    // of the unthrottled rate and self-clears the moment fill goes above 0.
+    int warmup_probe_interval = 8;
     double drain_timeout_sec = 8.0;
     int stall_cycles = 25;                  // no fresh RBACK for this many ticks -> event
     int no_consumption_rise_per_sec = 100;  // fill rising this fast -> box stopped consuming

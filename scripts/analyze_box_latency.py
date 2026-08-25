@@ -318,7 +318,8 @@ def analyze(path: Path, arms: list[str], start_sec: float, duration_sec: float,
             f"{arm}_qsync_integral_us", f"{arm}_qsync_phase", f"{arm}_qsync_locked",
             f"{arm}_qsync_underrun_events", f"{arm}_qsync_stall_events",
             f"{arm}_qsync_highwater_events", f"{arm}_qsync_redrain_events",
-            f"{arm}_qsync_no_consumption_events", f"{arm}_state_source",
+            f"{arm}_qsync_no_consumption_events", f"{arm}_qsync_hold_send",
+            f"{arm}_qsync_warmup_holds_total", f"{arm}_state_source",
             f"{arm}_init_state_info", f"{arm}_servo_enabled",
             f"{arm}_q_ref_valid", f"{arm}_q_actual_valid",
             f"{arm}_state_age_us", f"{arm}_send_start_ns", f"{arm}_send_end_ns",
@@ -504,6 +505,14 @@ def analyze(path: Path, arms: list[str], start_sec: float, duration_sec: float,
                 total = int(counts.sum())
                 qs["phase_fractions"] = {str(n): int(c) / total for n, c in zip(names, counts)}
                 qs["phase_last"] = str(phase[on][-1])
+            holds = cols.get(f"{arm}_qsync_hold_send")
+            if isinstance(holds, np.ndarray) and np.any(np.isfinite(holds)):
+                h = holds[np.isfinite(holds)]
+                qs["warmup_held_ticks"] = int(np.count_nonzero(h > 0))
+                if np.any(h > 0):
+                    first = int(np.flatnonzero(h > 0)[0])
+                    last = int(np.flatnonzero(h > 0)[-1])
+                    qs["warmup_hold_window_sec"] = [float(t[first]), float(t[last])]
             events = {}
             for key in ("underrun", "stall", "highwater", "redrain", "no_consumption"):
                 series = cols.get(f"{arm}_qsync_{key}_events")
@@ -828,6 +837,15 @@ def format_report(report: dict) -> str:
                 lines.append(f"                 phase: {shown}  (last={qs.get('phase_last', '?')})")
             if "locked_fraction" in qs:
                 lines.append(f"                 locked {qs['locked_fraction'] * 100:.1f} % of regulated ticks")
+            if qs.get("warmup_held_ticks"):
+                win = qs.get("warmup_hold_window_sec")
+                where = f"  t={win[0]:.2f}..{win[1]:.2f}s" if win else ""
+                lines.append(
+                    f"                 warmup back-pressure: {qs['warmup_held_ticks']} send(s) held"
+                    f"{where}  -- the box showed no evidence it was consuming")
+            elif "warmup_held_ticks" in qs:
+                lines.append("                 warmup back-pressure: never engaged "
+                             "(the queue showed depth before the trigger)")
             ev = qs.get("events_total", {})
             if ev:
                 hot = {k: v for k, v in ev.items() if v}

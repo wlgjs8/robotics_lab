@@ -289,6 +289,92 @@ struct NamedTest {
 
 }  // namespace
 
+// ---- Warmup back-pressure ---------------------------------------------------
+// Measured on fw v8.7.3: a box already at activation stage 6 consumed nothing for
+// ~254 ms while reporting RBACK fill 0, so full-rate Warmup buried ~128 commands.
+// The trigger is evidence, not a level: sends made while fill has NEVER been seen
+// above 0.
+
+// Drive the controller with a FIXED reported fill, counting held sends. Returns
+// {holds, ticks_after_trigger, last decision}.
+struct HoldRun {
+    int holds = 0;
+    int sends = 0;
+    rb_servo::QueueSyncDecision last;
+};
+
+HoldRun runReportedFill(rb_servo::QueueSyncController& ctrl, int ticks,
+                        const std::vector<int>& reported) {
+    HoldRun r;
+    uint64_t now_ns = 0;
+    uint64_t seq = 0;
+    for (int i = 0; i < ticks; ++i) {
+        rb_servo::QueueSyncController::Observation obs;
+        obs.streaming = true;
+        obs.fill_valid = true;
+        obs.fill = reported[static_cast<std::size_t>(i) % reported.size()];
+        obs.rback_sequence = ++seq;
+        obs.now_ns = now_ns;
+        const rb_servo::QueueSyncDecision d = ctrl.step(obs);
+        if (d.hold_send) ++r.holds; else ++r.sends;
+        now_ns += static_cast<uint64_t>((kNominalPeriodUs + d.period_trim_us) * 1000.0);
+        r.last = d;
+    }
+    return r;
+}
+
+bool testWarmupHoldsWhenBoxNeverShowsEvidence() {
+    rb_servo::QueueSyncConfig cfg = testConfig();
+    cfg.warmup_max_sec = 1.0;              // stay in Warmup for the whole run
+    cfg.warmup_unevidenced_sends = 10;
+    cfg.warmup_probe_interval = 8;
+    rb_servo::QueueSyncController ctrl(cfg);
+
+    const HoldRun r = runReportedFill(ctrl, 100, {0});
+    // Nothing is held before the trigger, so the first 10 sends all go out.
+    RB_CHECK(r.sends >= 10);
+    RB_CHECK(r.holds > 0);
+    RB_CHECK(r.last.warmup_holds_total == static_cast<uint64_t>(r.holds));
+    // After the trigger the duty cycle is one probe in `warmup_probe_interval`,
+    // so the vast majority of ticks are held. Without this the box would have
+    // received all 100.
+    RB_CHECK(r.holds > 60);
+    return true;
+}
+
+bool testWarmupDoesNotHoldWhenQueueShowsDepth() {
+    rb_servo::QueueSyncConfig cfg = testConfig();
+    cfg.warmup_max_sec = 1.0;
+    cfg.warmup_unevidenced_sends = 10;
+    rb_servo::QueueSyncController ctrl(cfg);
+
+    // A queue that holds anything at all is evidence; one observation is enough.
+    const HoldRun r = runReportedFill(ctrl, 100, {2});
+    RB_CHECK(r.holds == 0);
+    RB_CHECK(r.last.warmup_holds_total == 0);
+    return true;
+}
+
+bool testWarmupHoldClearsOnFirstEvidence() {
+    rb_servo::QueueSyncConfig cfg = testConfig();
+    cfg.warmup_max_sec = 1.0;
+    cfg.warmup_unevidenced_sends = 5;
+    cfg.warmup_probe_interval = 4;
+    rb_servo::QueueSyncController ctrl(cfg);
+
+    // 30 ticks reporting 0 -> the back-pressure engages.
+    const HoldRun blind = runReportedFill(ctrl, 30, {0});
+    RB_CHECK(blind.holds > 0);
+    const uint64_t held_before = blind.last.warmup_holds_total;
+
+    // The queue finally reports depth. From that tick on nothing is held again,
+    // and the counter stops moving.
+    const HoldRun seen = runReportedFill(ctrl, 40, {3});
+    RB_CHECK(seen.holds == 0);
+    RB_CHECK(seen.last.warmup_holds_total == held_before);
+    return true;
+}
+
 int main() {
     const std::vector<NamedTest> tests = {
         {"locks measured drift to target", testLocksMeasuredDriftToTarget},
@@ -303,6 +389,9 @@ int main() {
         {"integral survives reset, level state does not", testIntegralSurvivesResetButLevelStateDoesNot},
         {"trim is bounded", testTrimIsBounded},
         {"both arms lock independently", testBothArmsLockIndependently},
+        {"warmup holds when box never shows evidence", testWarmupHoldsWhenBoxNeverShowsEvidence},
+        {"warmup does not hold when queue shows depth", testWarmupDoesNotHoldWhenQueueShowsDepth},
+        {"warmup hold clears on first evidence", testWarmupHoldClearsOnFirstEvidence},
     };
     int failed = 0;
     for (const NamedTest& t : tests) {

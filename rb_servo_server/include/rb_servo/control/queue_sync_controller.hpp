@@ -35,6 +35,9 @@ namespace rb_servo {
 // SIGN. Positive trim = longer period = slower sends = fill falls.
 struct QueueSyncDecision {
     double period_trim_us = 0.0;       // add to the nominal control period
+    // Warmup back-pressure: skip THIS cadence tick's wire send. Only ever set in
+    // Warmup, and only while the box has produced no evidence it is consuming.
+    bool hold_send = false;
     double fill_lpf = 0.0;
     double integral_us = 0.0;
     int last_fill = -1;                // -1 = no RBACK observed yet
@@ -46,6 +49,7 @@ struct QueueSyncDecision {
     uint64_t highwater_events = 0;     // absurd backlog; box likely stopped consuming
     uint64_t redrain_events = 0;       // queue rebase forced a re-drain
     uint64_t no_consumption_events = 0;// fill rising faster than a trim can correct
+    uint64_t warmup_holds_total = 0;   // sends skipped by the warmup back-pressure
 };
 
 class QueueSyncController {
@@ -84,6 +88,10 @@ private:
     int stale_cycles_ = 0;
     bool underrun_active_ = false;
     bool highwater_active_ = false;
+    // Warmup back-pressure state (see QueueSyncConfig::warmup_unevidenced_sends).
+    int warmup_sends_ = 0;
+    bool warmup_fill_evidenced_ = false;
+    int warmup_probe_countdown_ = 0;
     // Consumption watch: compare against a ~1 s-old reference so a box that has
     // stopped consuming is reported instead of being trimmed at forever.
     uint64_t consumption_ref_ns_ = 0;

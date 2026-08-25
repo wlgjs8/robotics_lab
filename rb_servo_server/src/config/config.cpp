@@ -1561,6 +1561,18 @@ void validateConfig(const DualArmConfig& cfg) {
         if (q.stall_cycles < 1 || q.redrain_fill_margin < 1 || q.highwater_fill <= q.target_fill) {
             throw std::runtime_error("queue_sync stall_cycles/redrain_fill_margin/highwater_fill are out of range");
         }
+        // Warmup back-pressure. 0 sends would throttle before a single command has
+        // gone out, i.e. before the box has had any chance to show evidence.
+        if (q.warmup_unevidenced_sends < 1) {
+            throw std::runtime_error(
+                "queue_sync.warmup_unevidenced_sends must be >= 1");
+        }
+        // A probe interval of 1 holds nothing (every tick is a probe) and 0/negative
+        // is meaningless. Refuse rather than silently disable the back-pressure.
+        if (q.warmup_probe_interval < 2) {
+            throw std::runtime_error(
+                "queue_sync.warmup_probe_interval must be >= 2 (1 would never hold a send)");
+        }
     }
     // Below ~2 periods a worker-cached read is stale by construction (its age is
     // the inter-thread phase offset); above ~10 a dead link goes unnoticed for
@@ -3441,6 +3453,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "adj_clamp_us", "protect_adj_us", "drain_adj_us", "drain_max_us",
             "drain_per_fill_us", "redrain_fill_margin", "highwater_fill",
             "warmup_min_sec", "warmup_max_sec", "drain_timeout_sec",
+            "warmup_unevidenced_sends", "warmup_probe_interval",
             "stall_cycles", "no_consumption_rise_per_sec",
         }, "queue_sync");
         QueueSyncConfig& q = cfg.queue_sync;
@@ -3461,6 +3474,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "highwater_fill")) q.highwater_fill = asInt(sec["highwater_fill"], "queue_sync.highwater_fill");
         if (has(sec, "warmup_min_sec")) q.warmup_min_sec = asDouble(sec["warmup_min_sec"], "queue_sync.warmup_min_sec");
         if (has(sec, "warmup_max_sec")) q.warmup_max_sec = asDouble(sec["warmup_max_sec"], "queue_sync.warmup_max_sec");
+        if (has(sec, "warmup_unevidenced_sends")) q.warmup_unevidenced_sends = asInt(sec["warmup_unevidenced_sends"], "queue_sync.warmup_unevidenced_sends");
+        if (has(sec, "warmup_probe_interval")) q.warmup_probe_interval = asInt(sec["warmup_probe_interval"], "queue_sync.warmup_probe_interval");
         if (has(sec, "drain_timeout_sec")) q.drain_timeout_sec = asDouble(sec["drain_timeout_sec"], "queue_sync.drain_timeout_sec");
         if (has(sec, "stall_cycles")) q.stall_cycles = asInt(sec["stall_cycles"], "queue_sync.stall_cycles");
         if (has(sec, "no_consumption_rise_per_sec")) q.no_consumption_rise_per_sec = asInt(sec["no_consumption_rise_per_sec"], "queue_sync.no_consumption_rise_per_sec");

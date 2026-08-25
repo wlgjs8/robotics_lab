@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import socket
 import sys
 import tempfile
@@ -3197,7 +3198,7 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn("#dc4646", bad)  # bad dot present
 
     def test_operator_monitor_static_html_stacks_pose_below_joint(self):
-        html = _operator_monitor_static_html(18.0, 1.0, 31.5)
+        html = _operator_monitor_static_html(18.0, 1.0, 31.5, 42.0)
         self.assertIn("--rb-monitor-gap: 1.000em;", html)
         self.assertIn("--rb-monitor-target-width: 18.000em;", html)
         self.assertIn("--rb-monitor-split: min(31.500em, 60vh);", html)
@@ -3208,7 +3209,9 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIn(".rb-monitor-stand-card.rb-monitor-header-card { top: var(--rb-monitor-split); }", html)
         self.assertIn(".rb-monitor-joint-card.rb-monitor-body-card { max-height: calc(var(--rb-monitor-split) - 5.95em); }", html)
         self.assertIn("Pose Monitor", html)
-        # FT and Camera Quality share the right column, stacked at the same split.
+        # FT and Camera Quality share the right column, stacked at their OWN split —
+        # lower than the left column's, because Camera Quality is seven fixed lines
+        # while the FT table grows under a push and would otherwise scroll.
         self.assertNotIn("Pose Monitor · FT", html)
         self.assertIn("FT Monitor", html)
         self.assertIn("Camera Quality Monitor", html)
@@ -3221,13 +3224,20 @@ class GuiContractsTest(unittest.TestCase):
             html,
         )
         self.assertIn(
-            ".rb-monitor-ft-card.rb-monitor-body-card { max-height: calc(var(--rb-monitor-split) - 5.95em); }",
+            "--rb-monitor-split-ft: min(42.000em, max(26em, calc(100vh - 21em)));", html
+        )
+        self.assertIn(
+            ".rb-monitor-ft-card.rb-monitor-body-card { max-height: calc(var(--rb-monitor-split-ft) - 5.95em); }",
             html,
         )
         self.assertIn(
-            ".rb-monitor-camera-card.rb-monitor-header-card { top: var(--rb-monitor-split); }",
+            ".rb-monitor-camera-card.rb-monitor-header-card { top: var(--rb-monitor-split-ft); }",
             html,
         )
+        # The 960px breakpoint re-declares .rb-monitor-row's columns at the SAME
+        # specificity and later in the sheet, so the three-column card must re-state
+        # its template there or its third cell silently wraps onto a second line.
+        self.assertEqual(2, html.count("grid-template-columns: auto 1fr 1fr;"))
         self.assertIn("rb-monitor-header-card rb-monitor-ft-card", html)
         self.assertIn("rb-monitor-header-card rb-monitor-camera-card", html)
         self.assertIn('id="rb-joint-unit-rad"', html)
@@ -6377,134 +6387,289 @@ class FtTareCommandTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("state stream", message)
 
-
 class FtMonitorRenderTest(unittest.TestCase):
-    """The FT Monitor card shows the wrench the force law CONSUMES, not a raw one.
+    """The FT Monitor card is ONE TABLE over BOTH ARMS, and it never scrolls.
 
-    That surface is already three subtractions deep — raw minus the tare bias minus
-    tool gravity, then the 2 N / 0.5 Nm deadband — so a resting arm reads 0.00 and
-    the first ~2 N of a push reads 0.00 as well. Showing the pre-deadzone value
-    instead would put a number on screen that the controller is not acting on.
+    Rows are channels, columns are arms. The card answers a comparison — "which arm
+    is feeling what" — and the per-arm stack it replaced put the two halves of that
+    answer a scroll apart.
+
+    The numbers are the compensated, deadzoned wrench at the TCP in stand axes: raw
+    minus the tare bias minus tool gravity, then the 2 N / 0.5 Nm deadband. So a
+    resting arm reads 0.00 and the first ~2 N of a push reads 0.00 as well. Showing
+    the pre-deadzone value instead would put a number on screen that the controller
+    is not acting on.
     """
 
     @staticmethod
-    def _state(ft_overrides: dict, *, fc: dict | None = None) -> StateSnapshot:
+    def _state(
+        left_ft: dict | None,
+        right_ft: dict | None = None,
+        *,
+        left_fc: dict | None = None,
+        right_fc: dict | None = None,
+    ) -> StateSnapshot:
         payload = sample_state()
-        for arm in ("left", "right"):
-            payload[arm]["force_torque"] = dict(ft_overrides)
-            if fc is not None:
-                payload[arm]["force_control"] = dict(fc)
+        if left_ft is not None:
+            payload["left"]["force_torque"] = dict(left_ft)
+        if right_ft is not None:
+            payload["right"]["force_torque"] = dict(right_ft)
+        if left_fc is not None:
+            payload["left"]["force_control"] = dict(left_fc)
+        if right_fc is not None:
+            payload["right"]["force_control"] = dict(right_fc)
         return StateSnapshot.parse(payload, received_monotonic=time.monotonic())
 
-    def test_shows_the_compensated_deadzoned_wrench(self):
-        state = self._state({
-            "enabled": True,
-            "connected": True,
-            "bias_valid": True,
-            # comp @ TCP in STAND axes: what the law integrates.
-            "comp_stand_axes_at_tcp": [1.5, -2.25, 8.0, 0.1, -0.2, 0.05],
-            "load_mass_kg": 0.204,
-            "load_settled": True,
-        })
-        html = _render_ft_monitor_rows(state, stale=False)
-        self.assertIn("+1.50", html)     # dFx
-        self.assertIn("-2.25", html)     # dFy
-        self.assertIn("+8.00", html)     # dFz
-        self.assertIn("8.44", html)      # |dF| = sqrt(1.5^2+2.25^2+8^2)
-        self.assertIn("-0.200", html)    # dTy
-        self.assertIn("0.204", html)     # the load estimate escapes the deadband
-        self.assertIn("deadband", html)  # and the header says the numbers are banded
+    @staticmethod
+    def _rows(html: str) -> list[list[str]]:
+        """The card as [label, left, right] triples, tags stripped."""
+        out: list[list[str]] = []
+        for row in re.findall(r'<div class="rb-monitor-row rb-monitor-row3[^"]*">(.*?)</div>', html):
+            cells = re.findall(r"<span[^>]*>(.*?)</span>", row)
+            out.append([re.sub(r"<[^>]+>", "", c) for c in cells])
+        return out
 
-    def test_an_unzeroed_sensor_shows_no_numbers(self):
-        """Without a tare there is no zero for a 'change from zero' to be from.
+    @staticmethod
+    def _notes(html: str) -> str:
+        """The full-width failure lines under the table, joined."""
+        return " | ".join(
+            re.sub(r"<[^>]+>", "", n)
+            for n in re.findall(r'<div class="rb-monitor-note[^"]*">(.*?)</div>', html)
+        )
 
-        The sensor's own offset is ~20 N on this cell, so printing it as a delta
-        would read as a 20 N push nobody is applying.
+    def _cells(self, html: str, label: str) -> tuple[str, str]:
+        for row in self._rows(html):
+            if row and row[0] == label:
+                self.assertEqual(len(row), 3, f"row {label!r} is not label|left|right")
+                return row[1], row[2]
+        self.fail(f"no {label!r} row in the card: {[r[0] for r in self._rows(html)]}")
+
+    _TARED = {
+        "enabled": True,
+        "connected": True,
+        "bias_valid": True,
+        "bias_source": "tare",
+        "bias_generation": 1,
+        "comp_stand_axes_at_tcp": [0.0] * 6,
+    }
+
+    def test_both_arms_are_columns_of_one_table(self):
+        """The point of the rewrite: one glance covers both arms."""
+        html = self._state(
+            dict(self._TARED, comp_stand_axes_at_tcp=[1.5, -2.25, 8.0, 0.1, -0.2, 0.05]),
+            dict(self._TARED, comp_stand_axes_at_tcp=[-3.0, 0.0, 0.0, 0.0, 0.4, 0.0]),
+        )
+        html = _render_ft_monitor_rows(html, stale=False)
+        self.assertEqual(("LEFT", "RIGHT"), self._cells(html, ""))
+        self.assertEqual(("1.50", "-3.00"), self._cells(html, "Fx [N]"))
+        self.assertEqual(("-2.25", "0.00"), self._cells(html, "Fy [N]"))
+        self.assertEqual(("8.00", "0.00"), self._cells(html, "Fz [N]"))
+        # |dF| = sqrt(1.5^2 + 2.25^2 + 8^2)
+        self.assertEqual(("8.44", "3.00"), self._cells(html, "|F| [N]"))
+        self.assertEqual(("-0.200", "0.400"), self._cells(html, "Ty [Nm]"))
+        self.assertIn("deadband", html)  # and the caption says the numbers are banded
+
+    def test_an_unzeroed_arm_reads_a_true_zero(self):
+        """Without a tare there is no zero for a "change from zero" to be from.
+
+        The compensated wrench still carries the sensor's own offset (~20 N on this
+        cell) and the server refuses to let any law cover an untared arm, so NOTHING
+        is acting on those numbers. The card prints the zero the operator is about to
+        set, and never the offset.
         """
-        state = self._state({
-            "enabled": True,
-            "connected": True,
-            "bias_valid": False,
-            "comp_stand_axes_at_tcp": [0.0, 0.0, 18.1, 0.0, 0.0, 0.0],
-        })
-        html = _render_ft_monitor_rows(state, stale=False)
-        self.assertIn("NOT ZEROED", html)
-        self.assertNotIn("18.1", html)
+        html = _render_ft_monitor_rows(
+            self._state(dict(
+                self._TARED,
+                bias_valid=False,
+                bias_source="none",
+                comp_stand_axes_at_tcp=[3.9, -18.1, 41.8, 0.4, -1.1, 0.05],
+                load_mass_kg=2.1,
+            )),
+            stale=False,
+        )
+        self.assertEqual(("0.00", "--"), self._cells(html, "Fz [N]"))
+        self.assertEqual(("0.000", "--"), self._cells(html, "Ty [Nm]"))
+        self.assertEqual(("0.00", "--"), self._cells(html, "|F| [N]"))
+        self.assertEqual("필요", self._cells(html, "영점")[0])
+        self.assertIn("F/T 영점", self._notes(html))
+        for leaked in ("18.1", "41.8", "-1.1", "2.1"):
+            self.assertNotIn(leaked, html)
 
-    def test_a_disconnected_sensor_shows_no_numbers(self):
-        """Its compensated channels are pinned to exact zero, and a printed 0.00
-        would read as 'no force' rather than 'no sensor'."""
-        state = self._state({
-            "enabled": True,
-            "connected": False,
-            "bias_valid": True,
-            "comp_stand_axes_at_tcp": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        })
-        html = _render_ft_monitor_rows(state, stale=False)
-        self.assertIn("NOT CONNECTED", html)
-        self.assertNotIn("dFz", html)
+    def test_nothing_to_read_is_a_dash_not_a_zero(self):
+        """"--" and "0.00" are different answers, and collapsing them is what makes a
+        monitor lie: a disconnected sensor has every compensated channel pinned to
+        exact zero upstream, and a printed 0.00 would read as "no force" rather than
+        "no sensor"."""
+        html = _render_ft_monitor_rows(
+            self._state(
+                dict(self._TARED, connected=False),
+                dict(self._TARED, enabled=False),
+            ),
+            stale=False,
+        )
+        self.assertEqual(("--", "--"), self._cells(html, "Fz [N]"))
+        self.assertEqual(("--", "--"), self._cells(html, "|T| [Nm]"))
+        self.assertEqual(("--", "off"), self._cells(html, "영점"))
+        notes = self._notes(html)
+        self.assertIn("left: NOT CONNECTED", notes)
+        self.assertIn("right: disabled in config", notes)
+
+    def test_a_wrench_that_is_not_six_finite_numbers_is_a_dash(self):
+        for bad in ([1.0, 2.0], [1.0, 2.0, 3.0, 4.0, 5.0, float("nan")], "nope", None):
+            html = _render_ft_monitor_rows(
+                self._state(dict(self._TARED, comp_stand_axes_at_tcp=bad)), stale=False
+            )
+            self.assertEqual("--", self._cells(html, "Fx [N]")[0], f"wrench {bad!r}")
+            self.assertEqual("--", self._cells(html, "영점")[0], f"wrench {bad!r}")
+            self.assertIn("not six finite numbers", self._notes(html))
+
+    def test_a_channel_that_rounds_to_zero_never_shows_a_minus(self):
+        """The sign of a value the deadzone already flattened is noise, and a minus in
+        front of a zero reads as a direction nobody is pushing in. The server publishes
+        literal -0.0 on these channels."""
+        html = _render_ft_monitor_rows(
+            self._state(dict(
+                self._TARED, comp_stand_axes_at_tcp=[-0.0, -0.004, 0.0, -0.0, -0.0004, 0.0]
+            )),
+            stale=False,
+        )
+        self.assertEqual("0.00", self._cells(html, "Fx [N]")[0])
+        self.assertEqual("0.00", self._cells(html, "Fy [N]")[0])
+        self.assertEqual("0.000", self._cells(html, "Ty [Nm]")[0])
+        self.assertNotIn("-0.00", html)
+
+    def test_the_load_estimate_escapes_the_deadband(self):
+        """The tool-load estimate is a heavy low-pass on the PRE-deadzone force, so it
+        reads the ~200 g the 2 N band flattens to zero above it. It still needs a
+        bias, so an untared arm shows nothing rather than the sensor's own weight."""
+        html = _render_ft_monitor_rows(
+            self._state(
+                dict(self._TARED, load_mass_kg=0.204, load_settled=True),
+                dict(self._TARED, bias_valid=False, load_mass_kg=0.204),
+            ),
+            stale=False,
+        )
+        self.assertEqual(("0.204", "--"), self._cells(html, "load [kg]"))
+
+    def test_an_unsettled_load_says_so(self):
+        html = _render_ft_monitor_rows(
+            self._state(dict(self._TARED, load_mass_kg=0.204, load_settled=False)),
+            stale=False,
+        )
+        self.assertEqual("0.204~", self._cells(html, "load [kg]")[0])
 
     def test_shows_what_the_law_did_with_it(self):
-        state = self._state(
-            {
-                "enabled": True,
-                "connected": True,
-                "bias_valid": True,
-                "comp_stand_axes_at_tcp": [0.0, 0.0, 10.0, 0.0, 0.0, 0.0],
-            },
-            fc={"enabled": True, "covered": True,
-                "deviation_norm_m": 0.025, "gate_translation": 0.31},
+        html = _render_ft_monitor_rows(
+            self._state(
+                dict(self._TARED, comp_stand_axes_at_tcp=[0.0, 0.0, 10.0, 0.0, 0.0, 0.0]),
+                left_fc={"enabled": True, "covered": True, "law": "stream",
+                         "deviation_norm_m": 0.025, "deviation_norm_rad": 0.0524,
+                         "gate_translation": 0.31},
+            ),
+            stale=False,
         )
-        html = _render_ft_monitor_rows(state, stale=False)
-        self.assertIn("25.0", html)   # 10 N / 400 N/m = 25 mm, the designed number
-        self.assertIn("0.31", html)
+        # WHICH LAW: the stream law and the hold law differ by 5x in the ratio that
+        # decides how much of a push turns the tool rather than moving it, so a
+        # deviation cannot be judged without knowing which one produced it.
+        self.assertEqual("stream", self._cells(html, "law")[0])
+        self.assertEqual("25.0", self._cells(html, "dev [mm]")[0])   # 10 N / 400 N/m
+        self.assertEqual("3.0", self._cells(html, "dev [deg]")[0])
+        self.assertEqual("0.31", self._cells(html, "gate")[0])
+
+    def test_the_fence_is_visible(self):
+        """Past the fence the law HOLDS the bound instead of tracking, so the arm
+        feels stiff for no visible reason unless the card says so."""
+        html = _render_ft_monitor_rows(
+            self._state(
+                dict(self._TARED, comp_stand_axes_at_tcp=[0.0, 0.0, 40.0, 0.0, 0.0, 0.0]),
+                left_fc={"enabled": True, "covered": True, "bounded": True, "law": "stream",
+                         "deviation_norm_m": 0.040, "deviation_norm_rad": 0.2618,
+                         "gate_translation": 1.0},
+            ),
+            stale=False,
+        )
+        self.assertEqual("fence", self._cells(html, "law")[0])
+        self.assertEqual("40.0", self._cells(html, "dev [mm]")[0])   # the 40 mm fence
+        self.assertEqual("15.0", self._cells(html, "dev [deg]")[0])  # the 15 deg fence
+
+    def test_a_law_that_is_on_but_not_covering_is_idle_not_absent(self):
+        html = _render_ft_monitor_rows(
+            self._state(
+                dict(self._TARED),
+                left_fc={"enabled": True, "covered": False,
+                         "coverage_reason": "a fault is latched"},
+                right_fc={"enabled": False},
+            ),
+            stale=False,
+        )
+        self.assertEqual(("idle", "off"), self._cells(html, "law"))
+        # The deviation rows belong to a law that is actually running. Three more rows
+        # of "--" is exactly the bloat this card was rewritten to lose.
+        labels = [row[0] for row in self._rows(html)]
+        self.assertNotIn("dev [mm]", labels)
 
     def test_moment_arm_is_the_reference_point_check(self):
         """|M| / |F| is the perpendicular distance from the REFERENCE POINT to the
-        force's line of action, and it is what settles an argument about which point
-        the wrench is referenced at: push on the fingertip and it reads ~0 mm if the
+        force's line of action, and it settles an argument about which point the
+        wrench is referenced at: push on the fingertip and it reads ~0 mm if the
         reference is the TCP, ~203 mm if it is still the sensor origin.
 
         Frame-free on purpose — it assumes nothing about which axis the tool points
         along, which a per-axis version would.
         """
         # 10 N along stand X with 2.03 Nm about stand Y: a point force 203 mm away.
-        state = self._state({
-            "enabled": True, "connected": True, "bias_valid": True,
-            "comp_stand_axes_at_tcp": [10.0, 0.0, 0.0, 0.0, 2.03, 0.0],
-        })
-        self.assertIn("203", _render_ft_monitor_rows(state, stale=False))
-
-        # The same force with no torque: the line of action passes through the
-        # reference point.
-        state = self._state({
-            "enabled": True, "connected": True, "bias_valid": True,
-            "comp_stand_axes_at_tcp": [10.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        })
-        html = _render_ft_monitor_rows(state, stale=False)
-        self.assertRegex(html, r"lever \[mm\]</span><span>0<")
+        html = _render_ft_monitor_rows(
+            self._state(
+                dict(self._TARED, comp_stand_axes_at_tcp=[10.0, 0.0, 0.0, 0.0, 2.03, 0.0]),
+                dict(self._TARED, comp_stand_axes_at_tcp=[10.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            ),
+            stale=False,
+        )
+        self.assertEqual(("203", "0"), self._cells(html, "lever [mm]"))
 
     def test_moment_arm_is_hidden_under_the_deadband_residue(self):
-        """Below a few N the deadzoned wrench is mostly the band's residue, and the
-        ratio of two near-zero numbers is noise, not a measurement."""
-        state = self._state({
-            "enabled": True, "connected": True, "bias_valid": True,
-            "comp_stand_axes_at_tcp": [0.4, 0.0, 0.0, 0.0, 0.05, 0.0],
-        })
-        self.assertIn("--", _render_ft_monitor_rows(state, stale=False))
-
-    def test_names_a_law_that_is_on_but_not_covering(self):
-        state = self._state(
-            {
-                "enabled": True,
-                "connected": True,
-                "bias_valid": True,
-                "comp_stand_axes_at_tcp": [0.0, 0.0, 3.0, 0.0, 0.0, 0.0],
-            },
-            fc={"enabled": True, "covered": False, "coverage_reason": "a fault is latched"},
+        """Below a few N the deadzoned wrench is mostly the band's residue and the
+        ratio of two near-zero numbers is noise, not a measurement. Hiding the row
+        rather than dashing it is also what keeps the resting card short."""
+        html = _render_ft_monitor_rows(
+            self._state(dict(
+                self._TARED, comp_stand_axes_at_tcp=[0.4, 0.0, 0.0, 0.0, 0.05, 0.0]
+            )),
+            stale=False,
         )
-        html = _render_ft_monitor_rows(state, stale=False)
-        self.assertIn("not covering", html)
+        self.assertNotIn("lever [mm]", [row[0] for row in self._rows(html)])
+
+    def test_the_card_stays_short_enough_not_to_scroll(self):
+        """THE CARD MUST FIT ITS BOX. The body card is capped at
+        `--rb-monitor-split - 5.95em` with `overflow: auto`, which is ~26 rows at the
+        12px card font; the per-arm stack this replaced ran past 30 and scrolled.
+        Worst case here is every optional row at once."""
+        html = _render_ft_monitor_rows(
+            self._state(
+                dict(self._TARED, comp_stand_axes_at_tcp=[10.0, 0.0, 0.0, 0.0, 2.0, 0.0],
+                     load_mass_kg=0.204, load_settled=True),
+                dict(self._TARED, comp_stand_axes_at_tcp=[10.0, 0.0, 0.0, 0.0, 2.0, 0.0],
+                     load_mass_kg=0.204, load_settled=True),
+                left_fc={"enabled": True, "covered": True, "law": "stream",
+                         "deviation_norm_m": 0.01, "deviation_norm_rad": 0.01,
+                         "gate_translation": 1.0},
+                right_fc={"enabled": True, "covered": True, "law": "hold",
+                          "deviation_norm_m": 0.01, "deviation_norm_rad": 0.01,
+                          "gate_translation": 1.0},
+            ),
+            stale=False,
+        )
+        self.assertLessEqual(len(self._rows(html)), 20, "the FT card grew back into a scroll")
+        # And every row really is three cells, or the columns do not line up.
+        for row in self._rows(html):
+            self.assertEqual(3, len(row), row)
+
+    def test_no_state_and_stale_state_say_so_without_numbers(self):
+        self.assertIn("No state stream", _render_ft_monitor_rows(None, stale=True))
+        self.assertEqual([], self._rows(_render_ft_monitor_rows(None, stale=True)))
+        stale = _render_ft_monitor_rows(self._state(dict(self._TARED)), stale=True)
+        self.assertIn("stale", stale)
+        self.assertEqual([], self._rows(stale))
 
 
 class FtTelemetryAbsentVsDisabledTest(unittest.TestCase):
@@ -6529,7 +6694,7 @@ class FtTelemetryAbsentVsDisabledTest(unittest.TestCase):
         self.assertNotIn("disabled in config", fc_line)
 
         html = _render_ft_monitor_rows(state, stale=False)
-        self.assertIn("not in state stream", html)
+        self.assertIn("no force_torque in the state stream", html)
         self.assertNotIn("disabled in config", html)
 
     def test_disabled_block_says_it_is_disabled(self):
@@ -6540,24 +6705,6 @@ class FtTelemetryAbsentVsDisabledTest(unittest.TestCase):
         state = StateSnapshot.parse(payload, received_monotonic=time.monotonic())
         self.assertIn("disabled in config", _format_ft_status(state, stale=False))
         self.assertIn("disabled in config", _format_force_control_status(state, stale=False))
-        self.assertIn("disabled in config", _render_ft_monitor_rows(state, stale=False))
-
-    def test_the_fence_is_visible(self):
-        """Past the fence the law HOLDS the bound instead of tracking, so the arm
-        feels stiff for no visible reason unless the card says so."""
-        payload = sample_state()
-        for arm in ("left", "right"):
-            payload[arm]["force_torque"] = {
-                "enabled": True, "connected": True, "bias_valid": True,
-                "comp_stand_axes_at_tcp": [0.0, 0.0, 40.0, 0.0, 0.0, 0.0],
-            }
-            payload[arm]["force_control"] = {
-                "enabled": True, "covered": True, "bounded": True,
-                "deviation_norm_m": 0.040, "deviation_norm_rad": 0.2618,
-                "gate_translation": 1.0,
-            }
-        state = StateSnapshot.parse(payload, received_monotonic=time.monotonic())
         html = _render_ft_monitor_rows(state, stale=False)
-        self.assertIn("AT FENCE", html)
-        self.assertIn("40.0", html)   # 40 mm, the translation fence
-        self.assertIn("15.0", html)   # 15 deg, the rotation fence
+        self.assertIn("disabled in config", html)
+        self.assertNotIn("no force_torque in the state stream", html)

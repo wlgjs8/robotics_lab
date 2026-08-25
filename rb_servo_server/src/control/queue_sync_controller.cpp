@@ -36,6 +36,11 @@ void QueueSyncController::reset() {
     highwater_active_ = false;
     consumption_ref_ns_ = 0;
     consumption_ref_fill_ = -1;
+    // The warmup evidence is about THIS stream entry: a box that was consuming
+    // before the gap says nothing about the one after it.
+    warmup_sends_ = 0;
+    warmup_fill_evidenced_ = false;
+    warmup_probe_countdown_ = 0;
     // integral_us_ deliberately SURVIVES a reset: it encodes the box-vs-host
     // clock drift, which is a property of the hardware pair and does not change
     // because the stream paused. Re-learning it from zero would re-run the whole
@@ -45,6 +50,7 @@ void QueueSyncController::reset() {
 QueueSyncDecision QueueSyncController::step(const Observation& obs) {
     QueueSyncDecision out = counters_;
     out.period_trim_us = 0.0;
+    out.hold_send = false;
 
     const bool fresh = obs.fill_valid && obs.rback_sequence != last_rback_sequence_;
     if (fresh) {
@@ -62,6 +68,9 @@ QueueSyncDecision QueueSyncController::step(const Observation& obs) {
             stale_cycles_ = 0;
             consumption_ref_ns_ = 0;
             consumption_ref_fill_ = -1;
+            warmup_sends_ = 0;
+            warmup_fill_evidenced_ = false;
+            warmup_probe_countdown_ = 0;
         }
         out.last_fill = last_fill_;
         out.fill_valid = last_fill_ >= 0;
@@ -105,8 +114,33 @@ QueueSyncDecision QueueSyncController::step(const Observation& obs) {
             break;
 
         case Phase::Warmup: {
-            // The box shows a startup transient (fill ramps up over ~0.5 s).
-            // Acting on it before it develops just fights the transient.
+            // The box MAY show a startup transient that ramps the fill up over
+            // ~0.5 s, and acting on that before it develops just fights it -- so
+            // the exit test below waits for the ramp. But a fill pinned at 0 never
+            // trips that test, and that is the case measured on fw v8.7.3: an
+            // already-activated box consumed nothing for ~254 ms while reporting
+            // 0, so full-rate streaming through Warmup buried ~128 commands in a
+            // queue that then took 2.3 s to drain.
+            //
+            // EVIDENCE, not a level: a single observation above 0 proves the queue
+            // can hold, and that is all we need. Until then, back off after a
+            // bounded number of sends. Deliberately NOT a hard stop -- fill 0 is
+            // also what a box consuming at exactly our rate looks like, and
+            // silencing that one with no way to earn evidence would be worse than
+            // the backlog. One probe every warmup_probe_interval keeps the
+            // evidence path alive and caps the growth at 1/N of the send rate.
+            ++warmup_sends_;
+            if (last_fill_ > 0) warmup_fill_evidenced_ = true;
+            if (!warmup_fill_evidenced_ &&
+                warmup_sends_ >= config_.warmup_unevidenced_sends) {
+                if (warmup_probe_countdown_ > 0) {
+                    --warmup_probe_countdown_;
+                    out.hold_send = true;
+                    out.warmup_holds_total += 1;
+                } else {
+                    warmup_probe_countdown_ = std::max(1, config_.warmup_probe_interval) - 1;
+                }
+            }
             const uint64_t dt = obs.now_ns - phase_start_ns_;
             const bool developed =
                 last_fill_ >= config_.target_fill + 3 && dt >= secToNs(config_.warmup_min_sec);

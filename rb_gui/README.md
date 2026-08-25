@@ -42,10 +42,51 @@ still makes the authoritative accept/reject decision.
 
 ## F/T Sensor Visualization
 
-Removed. The GUI had a sensor-CAD frame, a runtime compliance-frame triad with a
-force arrow, and an external-F/T monitor card. All three read state-JSON blocks
-that no longer exist, so they went with the server-side force stack on
-2026-08-26 rather than rendering permanent "invalid" cells.
+The `FT Monitor` card in the fixed operator overlay is back, reading the
+`force_torque` / `force_control` blocks the rebuilt server publishes per arm. The
+sensor-CAD frame and the runtime compliance-frame triad with a force arrow are
+still gone.
+
+The card is ONE TABLE over BOTH ARMS: rows are channels, columns are `LEFT` and
+`RIGHT`. The question it answers is a comparison — which arm is feeling what —
+and the per-arm stack it replaced put the two halves of that answer a scroll
+apart. It fits its box without scrolling; the optional rows (`lever [mm]`,
+`dev [mm]` / `dev [deg]` / `gate`) only appear while somebody is actually pushing
+or a law is actually covering.
+
+The numbers are `force_torque.comp_stand_axes_at_tcp` — the compensated wrench at
+the TCP in STAND axes, the same surface the force law consumes. Stand axes because
+this card is read by a human standing at the cell, and stand X/Y/Z are the
+directions they can point at. That surface is already three subtractions deep:
+
+```
+raw  -  bias(tare)  -  tool gravity  ->  2 N / 0.5 Nm deadzone
+```
+
+so a resting arm reads `0.00` and so does the first ~2 N of any push. The
+deadband is not a display choice — it is what the controller acts on, and a
+monitor showing the pre-deadzone value would disagree with the arm. `load [kg]`
+is the one channel that escapes it (a heavy low-pass on the pre-deadzone force),
+which is how the ~200 g the band flattens to zero stays readable; a trailing `~`
+means the estimate has not settled.
+
+`--` and `0.00` are DIFFERENT answers and the card never collapses them:
+
+| `zero` cell | channels | means |
+| --- | --- | --- |
+| `no stream` | `--` | the server is not publishing the block (old binary, or a GUI started before it did) |
+| `off` | `--` | `force_torque.<arm>.enable: false` |
+| `no sensor` | `--` | the liveness check found a flat stream; every compensated channel is pinned to zero upstream |
+| `invalid` | `--` | the wrench was not six finite numbers |
+| `영점 필요` | `0.00` | connected but never tared |
+| `영점 OK` | live | tared |
+
+Before a tare the channels read a TRUE zero rather than the sensor's own offset
+(~20-40 N on this cell). Nothing is acting on that offset: the server refuses to
+let any law cover an untared arm (`F/T has no bias yet - run a tare before
+enabling compliance`), so zero is the honest reading of "no measured change from
+a zero you have not set yet". Press `F/T 영점` in the safety panel to set it; the
+server averages 250 ticks (0.5 s).
 
 ## Gravity-Wrench / CoG Waypoint Calibration
 
@@ -55,8 +96,8 @@ mass from wrench samples and cannot work without a sensor. The server rejects
 `joint_target_profile: payload_identification` at parse, so the GUI no longer
 offers it.
 
-Both come back with the `controller-manager`-referenced rebuild. Archived v1
-design: `docs/archive/force_control_v1/`.
+It comes back with the `controller-manager`-referenced rebuild; the FT Monitor
+above already has. Archived v1 design: `docs/archive/force_control_v1/`.
 
 ## Realtime Timing Health
 
