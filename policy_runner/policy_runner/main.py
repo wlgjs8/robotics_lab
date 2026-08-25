@@ -1657,22 +1657,22 @@ def _main_with_subcommands(argv: list[str]) -> int:
              "per-arm flag (--gripper-close-bias-left / --gripper-close-bias-right) overrides it. "
              "E.g. 1.0 turns an 18%% command into 17%%. Clamped to [0,100]; no effect in "
              "--gripper-action-mode delta/binary. UNSET by default -> the per-arm defaults apply "
-             "(left 2.0, right 6.0).",
+             "(left 2.0, right 2.0).",
     )
     flow_infer.add_argument(
         "--gripper-close-bias-left",
         type=float,
-        default=4.0,
+        default=2.0,
         help="LEFT-arm ABSOLUTE close-bias override (opening percent). Wins over --gripper-close-bias. "
-             "When unset, falls back to --gripper-close-bias, then to the left default (4.0). "
+             "When unset, falls back to --gripper-close-bias, then to the left default (2.0). "
              "Clamped to [0,100]; no effect in delta/binary mode.",
     )
     flow_infer.add_argument(
         "--gripper-close-bias-right",
         type=float,
-        default=4.0,
+        default=2.0,
         help="RIGHT-arm ABSOLUTE close-bias override (opening percent). Wins over --gripper-close-bias. "
-             "When unset, falls back to --gripper-close-bias, then to the right default (4.0). "
+             "When unset, falls back to --gripper-close-bias, then to the right default (2.0). "
              "Clamped to [0,100]; no effect in delta/binary mode.",
     )
     flow_infer.add_argument(

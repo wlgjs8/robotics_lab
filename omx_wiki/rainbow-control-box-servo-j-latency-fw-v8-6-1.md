@@ -3,7 +3,7 @@ title: "Rainbow Control Box Servo J Latency (firmware v8.6.1)"
 tags: ["rainbow-control-box", "firmware-v8.6.1", "servo-j", "latency", "servo-alpha", "latest-queue", "rb3-730e"]
 created: 2026-08-25T10:02:21.788Z
 updated: 2026-08-25T16:55:17.000Z
-sources: ["logs/servo_log_20260825_171603.csv", "docs/runbooks/box_latency_offline.md", "scripts/analyze_box_latency.py"]
+sources: ["docs/runbooks/box_latency_offline.md", "scripts/analyze_box_latency.py"]
 links: ["rainbow-control-box-servo-j-latency-fw-v8-7-3.md", "flow-infer-delta-preview-controller-contract.md"]
 category: reference
 confidence: high
@@ -30,7 +30,7 @@ baseline the upgrade is measured against.
 | `servo_alpha` | 1.0 (controller LPF ON) |
 | `servo_t1_sec` / `servo_t2_sec` / `servo_gain` | 0.002 / 0.021 / 1.0 |
 | servo loop | 500 Hz, `io_model: direct`, 1 tick = 2 ms |
-| evidence | `logs/servo_log_20260825_171603.csv`, dual-arm InitMotion, 5587 ticks @ 500.0 Hz, 0 period overruns |
+| evidence | dual-arm InitMotion, 5587 ticks @ 500.0 Hz, 0 period overruns (source CSV has since rotated out of `logs/`, which is gitignored) |
 
 ## Result
 

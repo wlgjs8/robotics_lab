@@ -906,6 +906,74 @@ bool testIkMaxIterationsBestEffort() {
     return true;
 }
 
+
+// A pinned joint with a residual OUTSIDE the best-effort window must still be COMMANDED
+// (tracking whatever the limit leaves open) rather than refused, when
+// ik.joint_limit_track_feasible is on. Refusing does not shrink an irreducible residual;
+// it only discards the motion the other joints could make, and because a neighbouring
+// tick usually solves, the arm alternates hold/move at loop rate. Measured 2026-08-26
+// (servo_log_20260826_055758.csv, right arm ~05:59:20 KST): J3 at exactly -150.0 deg,
+// margin 0.000, on 720 of 800 ticks -> 436 refusals / 159 best-effort accepts and an
+// 18.3 Hz buzz the left arm's spectrum does not show.
+bool testIkJointLimitTracking() {
+    rb_servo::KinematicsConfig base = testKinematicsConfig();
+    base.ik.max_iterations = 60;
+    const rb_servo::ArmMountConfig mount = leftMount();
+    rb_servo::JointArray seed = seedJoints();
+    seed[2] = 149.0;
+    rb_servo::JointArray unreachable_q = seed;
+    unreachable_q[2] = 158.0;
+
+    rb_servo::PinocchioKinematics strict(base);
+    const rb_servo::Pose6D target =
+        strict.computeTcpStand(rb_servo::ArmId::Left, unreachable_q, mount);
+    const rb_servo::IkResult refused =
+        strict.solveIk(rb_servo::ArmId::Left, target, seed, mount);
+    RB_CHECK(!refused.success);
+    RB_CHECK(refused.reason == rb_servo::ik_solver::kReasonJointLimit);
+
+    // A best-effort window far TIGHTER than the residual, so only the tracking policy
+    // can accept this: it must be the tracking reason, not the best-effort one.
+    rb_servo::KinematicsConfig tracking = base;
+    tracking.ik.joint_limit_track_feasible = true;
+    tracking.ik.joint_limit_best_effort_position_tolerance_m = refused.position_error_m * 0.01;
+    tracking.ik.joint_limit_best_effort_orientation_tolerance_rad =
+        refused.orientation_error_rad * 0.01;
+    rb_servo::PinocchioKinematics tracker(tracking);
+    const rb_servo::IkResult tracked =
+        tracker.solveIk(rb_servo::ArmId::Left, target, seed, mount);
+    RB_CHECK(tracked.success);
+    RB_CHECK(tracked.reason == rb_servo::ik_solver::kReasonJointLimitTracking);
+    RB_CHECK(finiteJoints(tracked.q_solution_deg));
+    RB_CHECK(withinUrdfLimits(tracked.q_solution_deg));
+    RB_CHECK(tracked.joint_limit_worst_index == 2);
+    // The pinned axis stops at its bound; the residual is NOT hidden -- it is reported.
+    RB_CHECK(std::fabs(tracked.q_solution_deg[2]) <= 150.001);
+    RB_CHECK(tracked.position_error_m > tracking.ik.joint_limit_best_effort_position_tolerance_m);
+    // And it is the same clamped iterate the refusal already carried, i.e. tracking
+    // commands what the solver had all along instead of throwing the tick away.
+    for (std::size_t j = 0; j < rb_servo::kDof; ++j) {
+        RB_CHECK(std::fabs(tracked.q_solution_deg[j] - refused.q_solution_deg[j]) < 1e-9);
+    }
+
+    // Within the best-effort window the ORIGINAL reason still wins, so the two stay
+    // distinguishable in telemetry.
+    rb_servo::KinematicsConfig both = base;
+    both.ik.joint_limit_track_feasible = true;
+    both.ik.joint_limit_best_effort_position_tolerance_m = refused.position_error_m * 2.0 + 1e-6;
+    both.ik.joint_limit_best_effort_orientation_tolerance_rad =
+        refused.orientation_error_rad * 2.0 + 1e-6;
+    rb_servo::PinocchioKinematics forgiving(both);
+    const rb_servo::IkResult accepted =
+        forgiving.solveIk(rb_servo::ArmId::Left, target, seed, mount);
+    RB_CHECK(accepted.success);
+    RB_CHECK(accepted.reason == rb_servo::ik_solver::kReasonJointLimitBestEffort);
+
+    // Off by default.
+    RB_CHECK(!base.ik.joint_limit_track_feasible);
+    return true;
+}
+
 }  // namespace
 
 bool testFloorPointZJacobianFiniteDifference() {
@@ -1122,6 +1190,7 @@ int main() {
     if (!testIkSelectiveDampingDisabledByDefault()) return 1;
     if (!testIkJointLimitBestEffortAcceptsClampedSolve()) return 1;
     if (!testIkMaxIterationsBestEffort()) return 1;
+    if (!testIkJointLimitTracking()) return 1;
     if (!testCartesianLatencyBudgetTelemetry()) return 1;
     if (!testIkSeedUsesPreviousSentTargetNotActualState()) return 1;
     if (!testPinocchioIk()) return 1;

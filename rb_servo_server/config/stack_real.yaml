@@ -187,6 +187,36 @@ safety:
   # occurred on ~2.1% -- a threshold near zero would pin the window open and freeze the
   # plan permanently.
   throttle_intervention_deg_s: 50.0
+  # JOINT-LIMIT APPROACH BARRIER (2026-08-26). The hard q_min/q_max clamp stops the
+  # command AT the limit but says nothing about how fast it arrives, so a target driving
+  # a joint into its stop pins it at full commanded speed. Once pinned, IK cannot solve
+  # past the limit and the tick is refused -> the arm alternates hold/move at loop rate.
+  # MEASURED (servo_log_20260826_055758.csv, right arm ~05:59:20 KST): J3 sat at exactly
+  # -150.0 deg, margin 0.000, for 720 of 800 ticks -> 436 IK refusals / 159 best-effort
+  # accepts, and an 18.3 Hz buzz on J2/J6 that the left arm's spectrum does not show.
+  # This is the joint-space twin of the floor/ROI/self-collision dampers: inside
+  # d_slow_deg of a bound the CLOSING speed is capped at sqrt(2*a_brake*margin), so the
+  # joint coasts to a stop AT the bound. Retreating is never limited.
+  #
+  # NOTE the reach_constraint alternative was measured and REJECTED for this failure:
+  # every observed singularity/limit event happened at a TCP radius of 0.35-0.58 m while
+  # the whole task lives in 0.35-0.68 m, far inside any reach shell. These are INTERIOR
+  # joint limits, not workspace-boundary violations, so a radial shell never fires.
+  joint_limit_barrier:
+    enable: true
+    # Braced against the URDF IK limit (+/-150 on J3), NOT the controller range
+    # (+/-160 in safety.q_min_deg/q_max_deg above). The startup WARN names this exact
+    # mismatch: the arm can mechanically reach +/-160 but IK refuses outside +/-150, so
+    # braking against +/-160 would still let it pin itself inside an unusable 10 deg
+    # band. Every other joint is unlimited (+/-360) and the barrier is inert there.
+    q_min_deg: [-360, -360, -150, -360, -360, -360]
+    q_max_deg: [ 360,  360,  150,  360,  360,  360]
+    # d_slow must satisfy d_slow >= dq_max^2/(2*a_brake) or the barrier engages too late
+    # to stop before the bound (config load FAILS if it does not). With
+    # dq_max=[170,170,170,240,240,320] and the a_brake below the minimum bands are
+    # [9.6,9.6,9.6,12.5,12.5,17.1] deg; these carry ~25% margin on top.
+    d_slow_deg:     [12, 12, 12, 16, 16, 22]
+    a_brake_deg_s2: [1500, 1500, 1500, 2300, 2300, 3000]
   joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]
   # Keep wrist yaw cable-safe on JointTarget/InitMotion return: J6 must move to
   # the configured raw target, not the nearest +/-360 equivalent.
@@ -281,7 +311,7 @@ safety:
     # 스탠드 플로어와 같은 높이(z=0)라 플로어를 꺼도 테이블 접근 감속이 남던 것을
     # 제거 — 바닥 backstop은 FT 센서로 대체, x/y/상단 작업공간 제한은 유지.
     min_m: [-0.650, -0.900, -0.200]
-    max_m: [0.650, -0.150, 0.800]
+    max_m: [0.650, -0.200, 0.800]
     runtime_min_m: [-1.2, -1.6, -0.2]
     runtime_max_m: [1.2, 0.6, 1.6]
     fail_policy: clamp_hold
@@ -994,6 +1024,18 @@ kinematics:
     # follower lead budgets, so a best-effort tick can never masquerade as tracking.
     # Beyond this the solve still fails, the arm still holds, and the follower now
     # freezes its plan instead of running away (cartesian_solve_blocked_recent).
+    # 2026-08-26: track the feasible directions instead of refusing the whole tick when a
+    # joint is pinned and the residual is OUTSIDE the best-effort window below. The
+    # residual is irreducible there -- the joint cannot go further -- so refusing does
+    # not shrink it, it only discards the motion the other five joints could still make,
+    # and because a neighbouring tick usually solves, the arm alternates hold/move at
+    # loop rate (measured: 436 refusals / 159 accepts, 18.3 Hz buzz, J3 at -150.0 deg).
+    # The commanded pose is the clamped iterate; the part that cannot be followed stays
+    # visible as follower lead, the tick stamps the command-throttled window, and the
+    # divergence latch therefore RE-ANCHORS instead of raising ChunkFollowerFault.
+    # Reason stays distinct in telemetry: "joint_limit_tracking" vs
+    # "joint_limit_best_effort" vs a real convergence.
+    joint_limit_track_feasible: true
     joint_limit_best_effort_position_tolerance_m: 0.0005
     joint_limit_best_effort_orientation_tolerance_rad: 0.002
     # MAX-ITERATIONS BEST EFFORT (2026-08-26). Same idea, for the other way the loop

@@ -217,6 +217,19 @@ struct IkSolverConfig {
     // The solve was refused for being 14-200 micrometres short.
     // Accepting it keeps the arm tracking; the residual stays visible as follower lead
     // and is still bounded by the divergence latch. Both <= 0 disables (default off).
+    // JOINT-LIMIT TRACKING. When a joint is pinned and the residual is LARGER than the
+    // best-effort window above, the solve is refused and the arm holds at its previous
+    // joints. The residual is irreducible (the joint cannot go further), so holding does
+    // not reduce it -- and because a neighbouring tick usually solves, the arm alternates
+    // hold/move at loop rate. Measured 2026-08-26 on servo_log_20260826_055758.csv
+    // (right arm, 05:59:20-21 KST): J3 pinned at exactly -150.0 deg (the URDF IK limit,
+    // margin 0.000) on 720 of 800 ticks -> 436 refusals / 159 best-effort accepts, an
+    // 18.3 Hz buzz on J2/J6 that the left arm's spectrum does not show at all.
+    // With this on, the clamped iterate is COMMANDED instead: the arm keeps tracking
+    // every direction the pinned joint does not block, and the part it cannot follow
+    // stays visible as follower lead. The caller still stamps the command-throttled
+    // window, so the divergence latch re-anchors rather than faulting.
+    bool joint_limit_track_feasible = false;
     double max_iterations_best_effort_position_tolerance_m = 0.0;
     double max_iterations_best_effort_orientation_tolerance_rad = 0.0;
 };
@@ -757,6 +770,33 @@ struct InitMotionPlannerConfig {
     double brake_max_travel_deg = 3.0;  // cap on the per-joint dq/wn stopping distance
 };
 
+// Per-joint APPROACH barrier for the joint range. The hard clamp (q_min/q_max) stops a
+// command AT the limit but says nothing about how fast it may arrive, so a target that
+// drives a joint into its stop lands there at full commanded speed and pins it. Once
+// pinned, IK cannot solve past the limit and the tick is refused, which (before
+// ik.joint_limit_track_feasible) made the arm alternate hold/move at loop rate.
+// Measured 2026-08-26 on servo_log_20260826_055758.csv: the right J3 sat at exactly
+// -150.0 deg (margin 0.000) for 720 of 800 ticks with an 18.3 Hz buzz on J2/J6.
+//
+// This is the joint-space twin of the floor / ROI / self-collision velocity dampers:
+// inside `d_slow_deg` of a bound, the CLOSING joint speed is capped at
+// sqrt(2 * a_brake * margin) so the joint coasts to a stop AT the bound. Motion away
+// from the bound is never touched, so the arm is always free to back out.
+//
+// `q_min_deg`/`q_max_deg` default to safety.q_min_deg/q_max_deg. Override them when the
+// binding limit is not the controller range -- on RB3-730E the IK model limit for J3 is
+// +/-150 deg while the controller range is +/-160, and it is the IK limit that refuses
+// the solve, so braking against +/-160 would let the arm pin itself in a band it can
+// reach but cannot be commanded through.
+struct JointLimitBarrierConfig {
+    bool enable = false;
+    JointArray q_min_deg{};      // empty/zero => inherit safety.q_min_deg
+    JointArray q_max_deg{};      // empty/zero => inherit safety.q_max_deg
+    JointArray d_slow_deg{};     // engage band inside each bound
+    JointArray a_brake_deg_s2{}; // braking authority assumed by the barrier
+    bool inherit_bounds = true;
+};
+
 struct SafetyConfig {
     JointArray q_min_deg{};
     JointArray q_max_deg{};
@@ -798,6 +838,8 @@ struct SafetyConfig {
     // rollout latched ChunkFollowerFault on divergence the safety layer had itself
     // caused. <= 0 disables (legacy).
     double throttle_intervention_deg_s = 0.0;
+
+    JointLimitBarrierConfig joint_limit_barrier;
 
     // mock can use SnapToActual for fast iteration. real should use FaultLatch.
     TrackingErrorPolicy tracking_error_policy = TrackingErrorPolicy::FaultLatch;

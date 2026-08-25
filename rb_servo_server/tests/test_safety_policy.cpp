@@ -4188,7 +4188,15 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     sample.left_last_read.read_exchange_timing.request_data_call_return_steady_ns = 1'010'000;
     sample.left_last_read.read_exchange_timing.request_data_call_return_system_ns = 2'010'000;
     sample.left_last_read.read_exchange_timing.request_data_call_duration_us = 10.0;
-    logger.push(sample);
+    // push() takes the queue mutex with try_to_lock and DROPS the sample when the
+    // drain thread holds it (an RT trade: the servo tick must not stall to log itself,
+    // see ServoLogger::push). A single push therefore races, and when it loses no row is
+    // ever written no matter how long the wait -- the intermittent `wrote_row` failure
+    // seen repeatedly on 2026-08-26. Push a burst so the assertion tests the FORMAT, not
+    // the scheduler. The rows are identical, and the reader below only takes the first.
+    for (int push_attempt = 0; push_attempt < 32; ++push_attempt) {
+        logger.push(sample);
+    }
 
     const std::filesystem::path latest = std::filesystem::path(cfg.directory) / "servo_log.csv";
     std::string header_line;
@@ -4204,6 +4212,14 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
         return static_cast<bool>(std::getline(in, row_line));
     }, std::chrono::milliseconds(3000));
     logger.stop();
+    if (!wrote_row) {
+        // Make the residual flake self-diagnosing instead of a bare boolean: say whether
+        // the queue ate the sample (try_to_lock drop / ring eviction) or the writer
+        // simply never produced the file.
+        std::cerr << "  [logger] dropped_samples=" << logger.droppedSamples()
+                  << " file_exists=" << std::filesystem::exists(latest)
+                  << " dir_exists=" << std::filesystem::exists(cfg.directory) << "\n";
+    }
     RB_CHECK(wrote_row);
 
     const std::vector<std::string> header = splitCommaSeparated(header_line);
@@ -6076,6 +6092,13 @@ bool testSingleArmIkFailureDoesNotFreezeHealthyArm() {
 // neither safety_intervention_recent nor cartesian_solve_blocked_recent was set, the
 // 100 ms explain window lapsed 46 ms before divergence crossed the 0.1 rad latch, and
 // the rollout died on ChunkFollowerFault for divergence the safety layer itself caused.
+
+// A fault latch must not send an unclamped step. Every fault path assigns
+// currentFaultHoldTarget() after the safety filter has run, so before the ramp the latch
+// tick jumped straight to the captured hold pose: measured 2026-08-26 on
+// servo_log_20260826_063359.csv at the ChunkFollowerFault (t=63.84 s), a single-tick
+// step of 1.95 deg (right) / 1.13 deg (left) == 975 / 563 deg/s, against <= 0.20 deg on
+// every other tick of that run. That step is the bang heard on a latch.
 bool testCommandThrottleIsVisibleAsCommandRefusal() {
     struct Observation {
         bool throttled = false;

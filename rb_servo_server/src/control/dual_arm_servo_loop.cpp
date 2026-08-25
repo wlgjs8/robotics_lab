@@ -21,6 +21,7 @@
 #include "rb_servo/control/fault_classifier.hpp"
 #include "rb_servo/control/servo_dispatcher.hpp"
 #include "rb_servo/core/clock.hpp"
+#include "rb_servo/kinematics/ik_solver.hpp"
 #include "rb_servo/core/realtime.hpp"
 #include "rb_servo/kinematics/pinocchio_kinematics.hpp"
 #include "rb_servo/math/se3.hpp"
@@ -3134,6 +3135,34 @@ void DualArmServoLoop::loopMain() {
             }
         }
 
+        // FAULT-HOLD RAMP. Every fault path assigns currentFaultHoldTarget() straight
+        // into the target AFTER the safety filter has run, so the latch tick sends an
+        // unclamped step from wherever the command was to the captured hold pose.
+        // Measured 2026-08-26 on servo_log_20260826_063359.csv at the ChunkFollowerFault
+        // (t=63.84 s): a single-tick step of 1.95 deg on the right arm and 1.13 deg on
+        // the left -- 975 deg/s and 563 deg/s in one 2 ms tick, against a ddq ceiling
+        // that bounds every other tick in the run to <= 0.20 deg. That step is the bang
+        // the operator hears on a latch.
+        // Sending an unreachable step is NOT a faster stop -- the arm cannot follow it
+        // either way. Ramping at the (already widened) deceleration ceiling is the
+        // fastest stop the arm can actually execute, and it converges in a few ms.
+        // Applied here, at the single point every fault path funnels through, rather
+        // than at each of the ten currentFaultHoldTarget() call sites.
+        if (fault_latched_.load() && config_.safety.ddq_max_decel_ratio > 1.0) {
+            const SafetyClampTelemetry left_ramp = safety_filter_.clampMotionDetailed(
+                safe_target.left_q_target_deg,
+                left_prev_sent_q_deg_,
+                left_prevprev_sent_q_deg_,
+                filter_dt_sec);
+            const SafetyClampTelemetry right_ramp = safety_filter_.clampMotionDetailed(
+                safe_target.right_q_target_deg,
+                right_prev_sent_q_deg_,
+                right_prevprev_sent_q_deg_,
+                filter_dt_sec);
+            safe_target.left_q_target_deg = left_ramp.q_after_accel_limit_deg;
+            safe_target.right_q_target_deg = right_ramp.q_after_accel_limit_deg;
+        }
+
         // Final output stage: moving average over the last N safety-passed
         // targets (convex combination — joint limits and per-tick velocity
         // bounds preserved). prev_sent bookkeeping, logging, and tracking
@@ -5997,6 +6026,34 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         const CartesianArmTargetResult& left_cartesian_result = arm_cartesian_result[0];
         const CartesianArmTargetResult& right_cartesian_result = arm_cartesian_result[1];
 
+        // COMMAND-THROTTLE stamp. Runs for every arm on EVERY tick, deliberately OUTSIDE
+        // the solve-failure branch below: the two throttles it records both come from a
+        // SUCCEEDING solve, so scoping it under a failure meant it never fired at all.
+        // Measured 2026-08-26 on servo_log_20260826_063359.csv: joint_limit_tracking hit
+        // 3961 (left) / 1554 (right) ticks while command_throttled_recent stayed 0 on
+        // both arms, so the divergence excuse never applied and the run still died on
+        // ChunkFollowerFault at ang_err 0.101 rad.
+        //  - branch_jump_rate_limited: the rate limiter scaled the seed->solution delta
+        //    down to the per-tick ceiling.
+        //  - joint_limit_tracking: a joint is pinned, so the arm follows only the
+        //    directions the limit leaves open.
+        // Both report cart_status "ok" and neither stamps the solve-blocked window, yet
+        // in both the arm cannot follow its plan and the residual accumulates as follower
+        // lead. Stamping the THROTTLE window lets the plan keep advancing (the arm is
+        // still moving; freezing it would only add stop-go) while a divergence crossing
+        // the latch RE-ANCHORS instead of raising ChunkFollowerFault.
+        {
+            const uint64_t throttle_now_ns =
+                last_loop_start_ns_ != 0 ? last_loop_start_ns_ : nowSteadyNs();
+            for (int i = 0; i < 2; ++i) {
+                const CartesianSolveTelemetry& solve = arm_ctx[i].last_cartesian_solve;
+                if (solve.ik_branch_jump_rate_limited ||
+                    solve.reason == ik_solver::kReasonJointLimitTracking) {
+                    markCommandThrottled(arm_ctx[i].arm, throttle_now_ns);
+                }
+            }
+        }
+
         if (left_cartesian_result.verdict != SafetyVerdict::Ok ||
             right_cartesian_result.verdict != SafetyVerdict::Ok) {
             SafetyVerdict verdict = SafetyVerdict::CartesianUnavailable;
@@ -6022,16 +6079,6 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             const uint64_t solve_block_now_ns =
                 last_loop_start_ns_ != 0 ? last_loop_start_ns_ : nowSteadyNs();
             for (int i = 0; i < 2; ++i) {
-                // A SUCCEEDING solve can still refuse most of the commanded motion: the
-                // branch-jump rate limiter scales the whole seed->solution delta down to
-                // the per-tick ceiling and reports cart_status "ok" with reason
-                // "branch_jump_rate_limited". That is a throttle, not a block, so it gets
-                // the throttle window rather than the solve-blocked one -- but it must be
-                // recorded, because it is what silently built the divergence that latched
-                // the 2026-08-26 rollout.
-                if (arm_ctx[i].last_cartesian_solve.ik_branch_jump_rate_limited) {
-                    markCommandThrottled(arm_ctx[i].arm, solve_block_now_ns);
-                }
                 if (arm_result[i]->verdict == SafetyVerdict::Ok) continue;
                 *arm_target[i] = arm_ctx[i].prev_sent_q_deg;
                 arm_ctx[i].follower_output_smd.deactivate();

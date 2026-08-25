@@ -82,6 +82,16 @@ public:
 private:
     JointArray clampJointLimits(const JointArray& q, bool* clamped) const;
 
+    // Approach barrier for the joint range: inside d_slow of a bound, cap the CLOSING
+    // joint speed at sqrt(2*a_brake*margin) so the joint coasts to a stop AT the bound
+    // instead of arriving at full speed and pinning. Motion away from a bound is never
+    // touched. Inert when safety.joint_limit_barrier.enable is false.
+    JointArray applyJointLimitBarrier(
+        const JointArray& q,
+        const JointArray& q_prev,
+        double dt_sec
+    ) const;
+
     JointArray clampVelocity(
         const JointArray& q,
         const JointArray& q_prev,

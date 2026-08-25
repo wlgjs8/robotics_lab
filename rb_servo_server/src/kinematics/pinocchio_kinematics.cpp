@@ -674,14 +674,26 @@ IkResult PinocchioKinematics::solveIkDamped(
     // delta_preview_actual_lead_fault. Accept the clamped iterate while the residual is
     // small: the arm keeps tracking every direction the limit does not block, and the
     // residual it cannot follow stays visible as follower lead/divergence.
+    // JOINT-LIMIT TRACKING (config: ik.joint_limit_track_feasible) extends the same
+    // acceptance to residuals OUTSIDE the best-effort window. A pinned joint makes the
+    // residual irreducible, so refusing does not shrink it -- it only discards the motion
+    // the other joints could still have made, and since a neighbouring tick usually
+    // solves, the arm alternates hold/move at loop rate (measured 2026-08-26: J3 pinned
+    // at -150.0 deg, 436 refusals / 159 accepts, an 18.3 Hz buzz).
+    // Kept as a SEPARATE reason from best_effort so telemetry still distinguishes
+    // "converged close enough" from "tracking what it can while pinned".
     const double best_effort_pos_tol = config_.ik.joint_limit_best_effort_position_tolerance_m;
     const double best_effort_ang_tol = config_.ik.joint_limit_best_effort_orientation_tolerance_rad;
-    if (hit_joint_limit && best_effort_pos_tol > 0.0 && best_effort_ang_tol > 0.0 &&
+    const bool within_best_effort =
+        best_effort_pos_tol > 0.0 && best_effort_ang_tol > 0.0 &&
         position_error_m <= best_effort_pos_tol &&
-        orientation_error_rad <= best_effort_ang_tol) {
+        orientation_error_rad <= best_effort_ang_tol;
+    if (hit_joint_limit && (within_best_effort || config_.ik.joint_limit_track_feasible)) {
         IkResult best_effort;
         best_effort.success = true;
-        best_effort.reason = ik_solver::kReasonJointLimitBestEffort;
+        best_effort.reason = within_best_effort
+            ? ik_solver::kReasonJointLimitBestEffort
+            : ik_solver::kReasonJointLimitTracking;
         best_effort.q_solution_deg = fromPinocchioQ(q, impl_->model, impl_->joints);
         best_effort.position_error_m = position_error_m;
         best_effort.orientation_error_rad = orientation_error_rad;

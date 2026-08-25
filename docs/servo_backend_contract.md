@@ -646,6 +646,26 @@ Responsiveness, smoothness, and accuracy are still primarily owned by the
   latches on divergence the safety layer itself caused. Set it high enough that
   it stays rare; a near-zero threshold pins the window open and freezes the plan
   permanently.
+- `safety.joint_limit_barrier` — approach damper for the joint range: inside
+  `d_slow_deg` of a bound the CLOSING joint speed is capped at
+  `sqrt(2·a_brake·margin)`, so a joint coasts to a stop AT its bound instead of
+  arriving at full commanded speed and pinning. Retreating is never limited. The
+  joint-space twin of the floor / ROI / self-collision dampers. `q_min_deg` /
+  `q_max_deg` default to `safety.q_min_deg` / `q_max_deg` and may only TIGHTEN them;
+  brace against the IK model limit when it is stricter than the controller range (on
+  RB3-730E J3 is ±150 in the URDF vs ±160 in the controller, and it is the IK limit
+  that refuses the solve). Config load fails if `d_slow_deg < dq_max²/(2·a_brake)`,
+  i.e. if the band is too narrow to stop from full commanded speed.
+  Note `safety.reach_constraint` does NOT cover this: it is a radial shell about the
+  arm base, and interior joint limits are reached far inside it (measured: every
+  observed limit/singularity event sat at a TCP radius of 0.35–0.58 m).
+- `kinematics.ik.joint_limit_track_feasible` — command the clamped iterate while a
+  joint is pinned (reason `joint_limit_tracking`) instead of refusing the tick, for
+  residuals beyond `joint_limit_best_effort_*`. A pinned joint's residual is
+  irreducible, so refusing does not shrink it — it only discards the motion the other
+  joints could still make, and since a neighbouring tick usually solves, the arm
+  alternates hold/move at loop rate. The tick stamps the command-throttled window, so
+  the plan keeps advancing while divergence re-anchors instead of faulting.
 - `kinematics.ik.max_iterations_best_effort_*` — accept a non-converged iterate as a
   success when its residual is inside this window (reason
   `max_iterations_best_effort`), mirroring `joint_limit_best_effort_*`. Near a

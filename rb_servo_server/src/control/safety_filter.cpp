@@ -217,6 +217,14 @@ SafetyClampTelemetry SafetyFilter::clampMotionDetailed(
     telemetry.present = true;
     telemetry.q_before_safety_deg = desired_q_deg;
     telemetry.q_after_joint_limit_deg = clampJointLimits(desired_q_deg, nullptr);
+    // Approach barrier runs INSIDE the joint-limit stage: it shapes how the command
+    // reaches a bound, so its correction is reported as part of the joint-limit clamp
+    // rather than as a new stage (keeps the existing 3-stage telemetry contract).
+    telemetry.q_after_joint_limit_deg = applyJointLimitBarrier(
+        telemetry.q_after_joint_limit_deg,
+        previous_q_deg,
+        dt_sec
+    );
     telemetry.q_after_velocity_limit_deg = clampVelocity(
         telemetry.q_after_joint_limit_deg,
         previous_q_deg,
@@ -307,6 +315,40 @@ JointArray SafetyFilter::clampJointLimits(const JointArray& q, bool* clamped) co
         did_clamp = did_clamp || (out[i] != before);
     }
     if (clamped) *clamped = did_clamp;
+    return out;
+}
+
+JointArray SafetyFilter::applyJointLimitBarrier(
+    const JointArray& q,
+    const JointArray& q_prev,
+    double dt_sec
+) const {
+    JointArray out = q;
+    const JointLimitBarrierConfig& cfg = config_.joint_limit_barrier;
+    if (!cfg.enable || dt_sec <= 0.0) return out;
+    for (int i = 0; i < kDof; ++i) {
+        const double lo = cfg.inherit_bounds ? config_.q_min_deg[i] : cfg.q_min_deg[i];
+        const double hi = cfg.inherit_bounds ? config_.q_max_deg[i] : cfg.q_max_deg[i];
+        const double band = cfg.d_slow_deg[i];
+        const double a_brake = cfg.a_brake_deg_s2[i];
+        if (!(band > 0.0) || !(a_brake > 0.0) || !(hi > lo)) continue;
+        const double step = out[i] - q_prev[i];
+        if (step == 0.0) continue;
+        // Only the direction that CLOSES on a bound is limited; retreating is free, so
+        // the arm can always be commanded back out of the band.
+        const double margin = step > 0.0 ? hi - q_prev[i] : q_prev[i] - lo;
+        if (!(margin < band)) continue;              // outside the engage band
+        // The continuous braking law sqrt(2*a*margin) overshoots when discretised: the
+        // step it permits exceeds the remaining margin once margin < 2*a*dt^2 (0.012 deg
+        // at a=1500, dt=2 ms). Clamp to the margin itself so the joint asymptotes onto
+        // the bound instead of stepping across it.
+        const double allowed = margin > 0.0
+            ? std::min(margin, std::sqrt(2.0 * a_brake * margin) * dt_sec)
+            : 0.0;                                    // at/past the bound: no closing
+        const double closing = std::abs(step);
+        if (closing <= allowed) continue;
+        out[i] = q_prev[i] + (step > 0.0 ? allowed : -allowed);
+    }
     return out;
 }
 

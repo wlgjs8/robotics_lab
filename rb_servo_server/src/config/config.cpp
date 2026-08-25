@@ -1205,6 +1205,35 @@ void validateConfig(const DualArmConfig& cfg) {
         cfg.safety.decel_overshoot_budget_deg, "safety.decel_overshoot_budget_deg");
     validateNonNegativeFinite(
         cfg.safety.throttle_intervention_deg_s, "safety.throttle_intervention_deg_s");
+    if (cfg.safety.joint_limit_barrier.enable) {
+        const auto& jb = cfg.safety.joint_limit_barrier;
+        validateNonNegativeFiniteArray(jb.d_slow_deg, "safety.joint_limit_barrier.d_slow_deg");
+        validatePositiveFiniteArray(jb.a_brake_deg_s2, "safety.joint_limit_barrier.a_brake_deg_s2");
+        for (int i = 0; i < kDof; ++i) {
+            const double lo = jb.inherit_bounds ? cfg.safety.q_min_deg[i] : jb.q_min_deg[i];
+            const double hi = jb.inherit_bounds ? cfg.safety.q_max_deg[i] : jb.q_max_deg[i];
+            if (!(hi > lo)) {
+                throw std::runtime_error(
+                    "safety.joint_limit_barrier: q_max_deg must exceed q_min_deg on every joint");
+            }
+            // The band must be wide enough to bleed off the commanded ceiling, or the
+            // barrier engages too late to stop before the bound: d_slow >= dq_max^2/(2*a).
+            const double needed =
+                cfg.safety.dq_max_deg_s[i] * cfg.safety.dq_max_deg_s[i] / (2.0 * jb.a_brake_deg_s2[i]);
+            if (jb.d_slow_deg[i] > 0.0 && jb.d_slow_deg[i] < needed) {
+                throw std::runtime_error(
+                    "safety.joint_limit_barrier.d_slow_deg[" + std::to_string(i) +
+                    "] is too narrow to brake dq_max_deg_s from full speed: need >= " +
+                    std::to_string(needed) + " deg");
+            }
+            if (!jb.inherit_bounds &&
+                (jb.q_min_deg[i] < cfg.safety.q_min_deg[i] || jb.q_max_deg[i] > cfg.safety.q_max_deg[i])) {
+                throw std::runtime_error(
+                    "safety.joint_limit_barrier bounds must sit INSIDE safety.q_min_deg/"
+                    "q_max_deg (the barrier tightens the range, it never widens it)");
+            }
+        }
+    }
     validateNonNegativeFinite(
         cfg.safety.controller_simulation_physical_motion_threshold_deg,
         "safety.controller_simulation_physical_motion_threshold_deg"
@@ -2672,6 +2701,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "ddq_max_decel_ratio",
             "decel_overshoot_budget_deg",
             "throttle_intervention_deg_s",
+            "joint_limit_barrier",
             "stop_both_arms_on_single_arm_error",
             "tracking_error_policy",
             "latch_fault_on_robot_state_error",
@@ -2700,6 +2730,28 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "ddq_max_decel_ratio")) cfg.safety.ddq_max_decel_ratio = asDouble(sec["ddq_max_decel_ratio"], "safety.ddq_max_decel_ratio");
         if (has(sec, "decel_overshoot_budget_deg")) cfg.safety.decel_overshoot_budget_deg = asDouble(sec["decel_overshoot_budget_deg"], "safety.decel_overshoot_budget_deg");
         if (has(sec, "throttle_intervention_deg_s")) cfg.safety.throttle_intervention_deg_s = asDouble(sec["throttle_intervention_deg_s"], "safety.throttle_intervention_deg_s");
+        if (has(sec, "joint_limit_barrier")) {
+            const auto& jb = sec["joint_limit_barrier"];
+            validateAllowedKeys(jb, {
+                "enable", "q_min_deg", "q_max_deg", "d_slow_deg", "a_brake_deg_s2",
+            }, "safety.joint_limit_barrier");
+            auto& out = cfg.safety.joint_limit_barrier;
+            if (has(jb, "enable")) out.enable = asBool(jb["enable"], "safety.joint_limit_barrier.enable");
+            if (has(jb, "d_slow_deg")) out.d_slow_deg = parseJointArray(jb["d_slow_deg"], "safety.joint_limit_barrier.d_slow_deg");
+            if (has(jb, "a_brake_deg_s2")) out.a_brake_deg_s2 = parseJointArray(jb["a_brake_deg_s2"], "safety.joint_limit_barrier.a_brake_deg_s2");
+            const bool has_min = has(jb, "q_min_deg");
+            const bool has_max = has(jb, "q_max_deg");
+            if (has_min != has_max) {
+                throw std::runtime_error(
+                    "safety.joint_limit_barrier: q_min_deg and q_max_deg must be given "
+                    "together (or both omitted to inherit safety.q_min_deg/q_max_deg)");
+            }
+            if (has_min) {
+                out.q_min_deg = parseJointArray(jb["q_min_deg"], "safety.joint_limit_barrier.q_min_deg");
+                out.q_max_deg = parseJointArray(jb["q_max_deg"], "safety.joint_limit_barrier.q_max_deg");
+                out.inherit_bounds = false;
+            }
+        }
         if (has(sec, "stop_both_arms_on_single_arm_error")) cfg.safety.stop_both_arms_on_single_arm_error = asBool(sec["stop_both_arms_on_single_arm_error"], "safety.stop_both_arms_on_single_arm_error");
         if (has(sec, "tracking_error_policy")) cfg.safety.tracking_error_policy = trackingErrorPolicyFromString(asString(sec["tracking_error_policy"], "safety.tracking_error_policy"));
         if (has(sec, "latch_fault_on_robot_state_error")) cfg.safety.latch_fault_on_robot_state_error = asBool(sec["latch_fault_on_robot_state_error"], "safety.latch_fault_on_robot_state_error");
@@ -3946,6 +3998,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "singular_step_scale_min",
                 "joint_limit_best_effort_position_tolerance_m",
                 "joint_limit_best_effort_orientation_tolerance_rad",
+                "joint_limit_track_feasible",
                 "max_iterations_best_effort_position_tolerance_m",
                 "max_iterations_best_effort_orientation_tolerance_rad",
             }, "kinematics.ik");
@@ -3968,6 +4021,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ik, "singular_step_scale_min")) cfg.kinematics.ik.singular_step_scale_min = asDouble(ik["singular_step_scale_min"], "kinematics.ik.singular_step_scale_min");
             if (has(ik, "joint_limit_best_effort_position_tolerance_m")) cfg.kinematics.ik.joint_limit_best_effort_position_tolerance_m = asDouble(ik["joint_limit_best_effort_position_tolerance_m"], "kinematics.ik.joint_limit_best_effort_position_tolerance_m");
             if (has(ik, "joint_limit_best_effort_orientation_tolerance_rad")) cfg.kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad = asDouble(ik["joint_limit_best_effort_orientation_tolerance_rad"], "kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad");
+            if (has(ik, "joint_limit_track_feasible")) cfg.kinematics.ik.joint_limit_track_feasible = asBool(ik["joint_limit_track_feasible"], "kinematics.ik.joint_limit_track_feasible");
             if (has(ik, "max_iterations_best_effort_position_tolerance_m")) cfg.kinematics.ik.max_iterations_best_effort_position_tolerance_m = asDouble(ik["max_iterations_best_effort_position_tolerance_m"], "kinematics.ik.max_iterations_best_effort_position_tolerance_m");
             if (has(ik, "max_iterations_best_effort_orientation_tolerance_rad")) cfg.kinematics.ik.max_iterations_best_effort_orientation_tolerance_rad = asDouble(ik["max_iterations_best_effort_orientation_tolerance_rad"], "kinematics.ik.max_iterations_best_effort_orientation_tolerance_rad");
         }

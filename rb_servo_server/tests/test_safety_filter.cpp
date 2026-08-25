@@ -362,6 +362,92 @@ bool testSteadyStreamingIsUnaffected() {
     return true;
 }
 
+
+// ---- Joint-limit approach barrier (2026-08-26) -------------------------------
+
+rb_servo::SafetyConfig barrierConfig(double band_deg, double a_brake, double limit_deg) {
+    rb_servo::SafetyConfig config;
+    config.q_min_deg = joints(-360.0);
+    config.q_max_deg = joints(360.0);
+    config.dq_max_deg_s.fill(170.0);
+    config.ddq_max_deg_s2.fill(100000.0);   // accel stage inert: isolate the barrier
+    config.max_tracking_error_deg = 1000.0;
+    auto& jb = config.joint_limit_barrier;
+    jb.enable = true;
+    jb.inherit_bounds = false;
+    jb.q_min_deg = joints(-limit_deg);
+    jb.q_max_deg = joints(limit_deg);
+    jb.d_slow_deg.fill(band_deg);
+    jb.a_brake_deg_s2.fill(a_brake);
+    return config;
+}
+
+// Returns joint 0's realized step (deg) for a commanded step from q_prev.
+double barrierStepDeg(const rb_servo::SafetyConfig& config,
+                      double q_prev_deg,
+                      double commanded_step_deg,
+                      double dt_sec) {
+    const rb_servo::SafetyFilter filter(config);
+    rb_servo::JointArray prevprev = joints(0.0);
+    rb_servo::JointArray prev = joints(0.0);
+    prev[0] = q_prev_deg;
+    prevprev[0] = q_prev_deg;
+    rb_servo::JointArray desired = prev;
+    desired[0] = q_prev_deg + commanded_step_deg;
+    const rb_servo::SafetyClampTelemetry clamp =
+        filter.clampMotionDetailed(desired, prev, prevprev, dt_sec);
+    return clamp.q_after_accel_limit_deg[0] - q_prev_deg;
+}
+
+bool testJointLimitBarrierBrakesOnlyTheClosingDirection() {
+    const double dt = 0.002;
+    const double limit = 150.0;      // the RB3-730E J3 URDF IK limit
+    const double band = 12.0;
+    const double a = 1500.0;
+    const rb_servo::SafetyConfig config = barrierConfig(band, a, limit);
+    const double full_step = 170.0 * dt;   // dq_max*dt = 0.34 deg
+
+    // Far from the bound: untouched.
+    RB_CHECK(near(barrierStepDeg(config, 0.0, full_step, dt), full_step));
+    RB_CHECK(near(barrierStepDeg(config, limit - band - 1.0, full_step, dt), full_step));
+
+    // Inside the band and CLOSING: capped at sqrt(2*a*margin)*dt.
+    const double margin = 4.0;
+    const double allowed = std::sqrt(2.0 * a * margin) * dt;
+    RB_CHECK(allowed < full_step);
+    RB_CHECK(near(barrierStepDeg(config, limit - margin, full_step, dt), allowed));
+
+    // Same pose, RETREATING: never limited, so the arm can always be commanded out.
+    RB_CHECK(near(barrierStepDeg(config, limit - margin, -full_step, dt), -full_step));
+
+    // Symmetric on the lower bound.
+    RB_CHECK(near(barrierStepDeg(config, -(limit - margin), -full_step, dt), -allowed));
+    RB_CHECK(near(barrierStepDeg(config, -(limit - margin), full_step, dt), full_step));
+
+    // AT the bound: no further closing at all, but retreat is still free -- this is what
+    // replaces "pin at full speed, then chatter".
+    RB_CHECK(near(barrierStepDeg(config, limit, full_step, dt), 0.0));
+    RB_CHECK(near(barrierStepDeg(config, limit, -full_step, dt), -full_step));
+
+    // The braking profile really does stop AT the bound: integrating the cap from the
+    // band edge must never cross the limit.
+    double q = limit - band;
+    for (int k = 0; k < 20000; ++k) {
+        const double step = barrierStepDeg(config, q, full_step, dt);
+        q += step;
+        RB_CHECK(q <= limit + 1e-9);
+        if (step <= 1e-12) break;
+    }
+    RB_CHECK(q <= limit + 1e-9);
+    RB_CHECK(q > limit - band);   // it did advance, it did not deadlock at the edge
+
+    // Disabled by default: identical to the legacy filter.
+    rb_servo::SafetyConfig off = config;
+    off.joint_limit_barrier.enable = false;
+    RB_CHECK(near(barrierStepDeg(off, limit - margin, full_step, dt), full_step));
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -381,5 +467,6 @@ int main() {
     if (!testSignReversalUsesDecelerationBudget()) return 1;
     if (!testOvershootBudgetCapsCommandLead()) return 1;
     if (!testSteadyStreamingIsUnaffected()) return 1;
+    if (!testJointLimitBarrierBrakesOnlyTheClosingDirection()) return 1;
     return 0;
 }

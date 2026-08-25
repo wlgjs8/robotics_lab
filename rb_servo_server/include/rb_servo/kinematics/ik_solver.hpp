@@ -20,6 +20,12 @@ constexpr const char* kReasonJointLimitBestEffort = "joint_limit_best_effort";
 // out while the residual is already micrometres from the target, and refusing the
 // tick there is what makes the arm chatter.
 constexpr const char* kReasonMaxIterationsBestEffort = "max_iterations_best_effort";
+// A joint-limit-clamped iterate accepted as a success even though its residual is
+// OUTSIDE the best-effort window, because ik.joint_limit_track_feasible is on. The
+// residual is irreducible -- the joint physically cannot go further -- so refusing the
+// tick does not shrink it, it only throws away the motion the other five joints could
+// still have made, and makes the arm alternate hold/move at loop rate.
+constexpr const char* kReasonJointLimitTracking = "joint_limit_tracking";
 constexpr const char* kReasonInvalidTarget = "invalid_target";
 constexpr const char* kReasonKinematicsUnavailable = "kinematics_unavailable";
 
