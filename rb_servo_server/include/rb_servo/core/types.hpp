@@ -575,6 +575,11 @@ struct ForceControlTelemetry {
     bool enabled = false;              // force_control.enable
     bool covered = false;              // the overlay ran this tick
     std::string coverage_reason;       // why it did or did not
+    // WHICH LAW RAN. "stream" (a plan driven into contact, soft, gate-bounded) or
+    // "hold" (an operator pushing by hand, stiff, spring-bounded). They differ by 5x
+    // in the rotation/translation stiffness RATIO, so an unlabelled deviation cannot
+    // be judged against either.
+    std::string law;
     bool compose_applied = false;      // the deviation reached the commanded target
     // THE DEVIATION from the nominal (followed) pose, STAND frame. Translation [m],
     // rotation as a rotation vector [rad].

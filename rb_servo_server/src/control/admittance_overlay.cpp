@@ -27,6 +27,9 @@ double fade(double u) {
 
 void AdmittanceOverlay::configure(const ForceControlConfig& cfg, double control_period_sec) {
     cfg_ = cfg;
+    // Default to the STREAM law; whoever owns the tick selects the real one. A
+    // default of "nothing" would make an unset caller silently rigid.
+    law_ = cfg.stream;
     dt_ = control_period_sec > 0.0 ? control_period_sec : 0.002;
     reset();
 }
@@ -56,7 +59,7 @@ void AdmittanceOverlay::step(const math::Vector3& force_stand,
 
     for (int i = 0; i < 6; ++i) {
         const bool rot = i >= 3;
-        const ForceAxisConfig& ax = rot ? cfg_.rotation[i - 3] : cfg_.translation[i];
+        const ForceAxisConfig& ax = rot ? law_.rotation[i - 3] : law_.translation[i];
         double& d = rot ? er[i - 3] : dp[i];
         double& v = rot ? wv[i - 3] : vp[i];
         const double f = rot ? mw[i - 3] : fw[i];

@@ -545,6 +545,78 @@ bool testQueueSyncConfigValidation() {
     return true;
 }
 
+bool testWorkerRealtimeScheduling() {
+    const std::string header =
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "left_robot:\n"
+        "  backend_type: mock\n"
+        "  run_mode: mock\n"
+        "right_robot:\n"
+        "  backend_type: mock\n"
+        "  run_mode: mock\n";
+
+    // Accepted: FIFO priority plus one isolated core per arm, none of them the
+    // loop's own core.
+    const std::string ok_path = writeTempConfig(
+        "worker-rt-ok",
+        header +
+        "servo:\n  cpu_core: 3\n  worker_realtime_priority: 80\n"
+        "  worker_cpu_core_left: 1\n  worker_cpu_core_right: 2\n");
+    bool ok_loaded = false;
+    try {
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(ok_path);
+        ok_loaded = cfg.servo.worker_realtime_priority == 80 &&
+                    cfg.servo.worker_cpu_core_left == 1 &&
+                    cfg.servo.worker_cpu_core_right == 2;
+    } catch (const std::exception&) {
+        ok_loaded = false;
+    }
+    ::unlink(ok_path.c_str());
+    RB_CHECK(ok_loaded);
+
+    // Absent = off. A worker must not silently acquire RT scheduling.
+    const std::string absent_path = writeTempConfig("worker-rt-absent", header);
+    bool absent_default_off = false;
+    try {
+        const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(absent_path);
+        absent_default_off = cfg.servo.worker_realtime_priority == 0 &&
+                             cfg.servo.worker_cpu_core_left == -1 &&
+                             cfg.servo.worker_cpu_core_right == -1;
+    } catch (const std::exception&) {
+        absent_default_off = false;
+    }
+    ::unlink(absent_path.c_str());
+    RB_CHECK(absent_default_off);
+
+    // Fail-closed rejections, each one a way to get a config that LOOKS like it
+    // isolated the cadence owner but did not.
+    const std::pair<const char*, const char*> bad_cases[] = {
+        // Out of the SCHED_FIFO band.
+        {"worker-rt-priority-range",
+         "servo:\n  worker_realtime_priority: 100\n"},
+        // A worker on the loop's own core contends with what it feeds.
+        {"worker-rt-core-equals-loop",
+         "servo:\n  cpu_core: 3\n  worker_realtime_priority: 80\n"
+         "  worker_cpu_core_left: 3\n  worker_cpu_core_right: 2\n"},
+        // Both arms on one core reintroduces the contention pinning removes.
+        {"worker-rt-cores-equal",
+         "servo:\n  cpu_core: 3\n  worker_realtime_priority: 80\n"
+         "  worker_cpu_core_left: 1\n  worker_cpu_core_right: 1\n"},
+        // Pinned but still on CFS: a dedicated core that yields to any CFS
+        // thread landing on it is the exact trap this setting exists to avoid.
+        {"worker-rt-pinned-without-fifo",
+         "servo:\n  cpu_core: 3\n  worker_cpu_core_left: 1\n"
+         "  worker_cpu_core_right: 2\n"},
+    };
+    for (const auto& [name, body] : bad_cases) {
+        const std::string path = writeTempConfig(name, header + body);
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+    return true;
+}
+
 bool testUnknownKeysAndSchemaFail() {
     const std::string unknown_key_path = writeTempConfig(
         "unknown-key",
@@ -1444,6 +1516,7 @@ int main() {
     if (!testInitMotionBrakeConfigValidation()) return 1;
     if (!testServoIoModelParsesAndValidates()) return 1;
     if (!testQueueSyncConfigValidation()) return 1;
+    if (!testWorkerRealtimeScheduling()) return 1;
     if (!testUnknownKeysAndSchemaFail()) return 1;
     if (!testStatePublisherEndpointsParseAndValidate()) return 1;
     if (!testCommandSourceConfigParsesAndValidates()) return 1;

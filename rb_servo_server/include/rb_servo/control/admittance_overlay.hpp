@@ -51,9 +51,12 @@ public:
     // COLD: adopt the law and zero the state.
     void configure(const ForceControlConfig& cfg, double control_period_sec);
 
-    // Swap the law WITHOUT touching the integration state — resetting the deviation
-    // mid-motion would snap the emitted command off the pose it is holding.
-    void setConfig(const ForceControlConfig& cfg) { cfg_ = cfg; }
+    // Swap the LAW without touching the integration state — resetting the deviation
+    // mid-motion would snap the emitted command off the pose it is holding. Called
+    // PER TICK by whoever owns the tick, because the streaming law and the
+    // hand-push law are different laws for different problems (see ForceLawConfig).
+    void setLaw(const ForceLawConfig& law) { law_ = law; }
+    const ForceLawConfig& law() const { return law_; }
 
     // Per-episode. Clears the deviation, the velocity and the fence latch.
     void reset();
@@ -99,6 +102,7 @@ private:
     void applyFence();
 
     ForceControlConfig cfg_{};
+    ForceLawConfig law_{};
     double dt_ = 0.002;
     math::Matrix3 r_ws_ = math::Matrix3::Identity();
 

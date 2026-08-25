@@ -2348,6 +2348,12 @@ def _render_ft_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> str
         # What the law did with it, so the cause and the effect are read together.
         fc = getattr(arm, "force_control", None)
         if isinstance(fc, Mapping) and fc.get("covered"):
+            # WHICH LAW. The stream law and the hold law differ by 5x in the ratio
+            # that decides how much of a push turns the tool rather than moving it,
+            # so a deviation cannot be judged without knowing which one produced it.
+            law = fc.get("law")
+            if law:
+                rows.append(_operator_monitor_row("law", escape(str(law))))
             try:
                 rows.append(_operator_monitor_row(
                     "dev [mm]", escape(f"{float(fc.get('deviation_norm_m', 0.0)) * 1e3:.1f}")))

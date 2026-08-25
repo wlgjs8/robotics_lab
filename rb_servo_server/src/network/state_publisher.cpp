@@ -92,6 +92,7 @@ nlohmann::json forceControlJson(const ForceControlTelemetry& t) {
         {"enabled", t.enabled},
         {"covered", t.covered},
         {"coverage_reason", t.coverage_reason},
+        {"law", t.law},
         {"compose_applied", t.compose_applied},
         {"deviation_stand_m", t.deviation_m},
         {"deviation_stand_rad", t.deviation_rad},

@@ -1857,9 +1857,9 @@ void validateConfig(const DualArmConfig& cfg) {
             if (!cfg.kinematics.enable) {
                 throw std::runtime_error("force_control.enable requires kinematics.enable");
             }
-            bool any_spring = false;
+            bool stream_spring = false;
             const auto validate_axes = [&](const std::array<ForceAxisConfig, 3>& axes,
-                                           const std::string& path) {
+                                           const std::string& path, bool* spring) {
                 for (std::size_t i = 0; i < 3; ++i) {
                     const ForceAxisConfig& a = axes[i];
                     const std::string ap = path + "[" + std::to_string(i) + "]";
@@ -1879,11 +1879,30 @@ void validateConfig(const DualArmConfig& cfg) {
                             "stability limit m/dt = " + std::to_string(b_limit) +
                             " - the integrator oscillates every tick at this damping");
                     }
-                    if (a.k > 0.0) any_spring = true;
+                    if (a.k > 0.0 && spring != nullptr) *spring = true;
                 }
             };
-            validate_axes(fc.translation, "force_control.translation");
-            validate_axes(fc.rotation, "force_control.rotation");
+            validate_axes(fc.stream.translation, "force_control.stream.translation", &stream_spring);
+            validate_axes(fc.stream.rotation, "force_control.stream.rotation", &stream_spring);
+            // The HOLD law is checked for well-formedness but NOT for the gate
+            // pairing below: a compliant Hold has no advancing plan for a gate to
+            // hold back, so its stiffness IS the bound on the force and k > 0 with
+            // no gate is not only legal there, it is the only safe shape.
+            validate_axes(fc.hold.translation, "force_control.hold.translation", nullptr);
+            validate_axes(fc.hold.rotation, "force_control.hold.rotation", nullptr);
+            if (fc.hold_compliance) {
+                bool hold_spring = false;
+                for (int i = 0; i < 3; ++i) {
+                    if (fc.hold.translation[i].k > 0.0 || fc.hold.rotation[i].k > 0.0) hold_spring = true;
+                }
+                if (!hold_spring) {
+                    throw std::runtime_error(
+                        "force_control.hold_compliance is on but every force_control.hold "
+                        "stiffness is 0 - the gate does not act on a Hold (there is no plan "
+                        "advance to attenuate), so nothing would bound how far a hand can "
+                        "push the arm");
+                }
+            }
 
             // *** THE TWO HALVES MAY NOT SHIP APART. *** Measured by controller-manager
             // on this hardware:
@@ -1891,15 +1910,15 @@ void validateConfig(const DualArmConfig& cfg) {
             //   the gate with k = 0 -> the force is bounded but the deviation is not
             //                          (9.5 m of offset in 300 s)
             // Neither is a tuning mistake to be discovered on the robot.
-            if (any_spring && !fc.gate_enable) {
+            if (stream_spring && !fc.gate_enable) {
                 throw std::runtime_error(
-                    "force_control has a stiffness (k > 0) but force_gate.enable is false - the "
+                    "force_control.stream has a stiffness (k > 0) but force_gate.enable is false - the "
                     "spring ramps the contact force without bound (measured 961 N in 40 s). "
                     "Ship the gate with the spring, or set every k to 0");
             }
-            if (fc.gate_enable && !any_spring) {
+            if (fc.gate_enable && !stream_spring) {
                 throw std::runtime_error(
-                    "force_control.force_gate is enabled but every k is 0 - the gate bounds the "
+                    "force_control.force_gate is enabled but every force_control.stream k is 0 - the gate bounds the "
                     "force and nothing bounds the deviation (measured 9.5 m in 300 s). Give the "
                     "compliance axes a stiffness, or disable the gate");
             }
@@ -3506,7 +3525,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
     if (has(root, "force_control")) {
         const YAML::Node sec = root["force_control"];
         validateAllowedKeys(sec, {
-            "enable", "translation", "rotation", "force_gate",
+            "enable", "stream", "hold", "force_gate",
             "max_deviation_m", "max_deviation_rad",
             "max_velocity_m_s", "max_acceleration_m_s2",
             "max_velocity_rad_s", "max_acceleration_rad_s2",
@@ -3539,8 +3558,16 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 }
             }
         };
-        if (has(sec, "translation")) parse_axes(sec["translation"], fc.translation, "force_control.translation");
-        if (has(sec, "rotation")) parse_axes(sec["rotation"], fc.rotation, "force_control.rotation");
+        // TWO LAWS, NAMED FOR THEIR CONSUMER. A single unnamed block is what let the
+        // streaming law be applied to an operator hand-push.
+        const auto parse_law = [&](const YAML::Node& n, ForceLawConfig& out,
+                                   const std::string& path) {
+            validateAllowedKeys(n, {"translation", "rotation"}, path);
+            if (has(n, "translation")) parse_axes(n["translation"], out.translation, path + ".translation");
+            if (has(n, "rotation")) parse_axes(n["rotation"], out.rotation, path + ".rotation");
+        };
+        if (has(sec, "stream")) parse_law(sec["stream"], fc.stream, "force_control.stream");
+        if (has(sec, "hold")) parse_law(sec["hold"], fc.hold, "force_control.hold");
         if (has(sec, "force_gate")) {
             const YAML::Node g = sec["force_gate"];
             validateAllowedKeys(g, {"enable", "max_force_n", "max_torque_nm", "close_tau_s", "open_tau_s"},

@@ -1038,30 +1038,56 @@ struct ForceAxisConfig {
 
 // ---- force control ----------------------------------------------------------
 // The admittance overlay on the emitted Cartesian target, ported from
-// controller-manager's shared overlay (arm/motions/AdmittanceOverlay.h) and its
-// FOLLOW path's law, which is the consumer whose problem matches ours: a streamed
-// Cartesian plan that must yield to contact without abandoning the plan.
+// controller-manager's shared overlay (arm/motions/AdmittanceOverlay.h).
+//
+// *** TWO CONSUMERS, TWO LAWS, AND THEY ARE NOT INTERCHANGEABLE. *** This is the
+// mistake this file exists to prevent, and it was made once already: the streaming
+// law was applied to an operator hand-push and the arm rotated ~9 deg where CM
+// rotates ~0.3 deg for the same push. controller-manager keeps them apart too
+// (`Arm::overlay_apply` selects the surface per tick), and the numbers differ by a
+// factor of five in the RATIO that matters:
+//
+//                        k_t [N/m]   k_r [Nm/rad]   k_r/k_t [m^2]
+//   hold  (CM admittance)    2500          250          0.100
+//   stream(CM follow)         400            8          0.020
+//
+// The stream law is deliberately soft: it yields to a contact the PLAN is driving
+// into, and its force is bounded by the GATE holding the plan back. The hold law has
+// no advancing plan to gate, so its stiffness is the only thing bounding the force -
+// which is why it is stiff, and why "just use one law" is not available.
+struct ForceLawConfig {
+    // m*d'' + b*d' + k*d = wrench, per axis, in the TOOL frame (re-aimed every tick
+    // onto the command's tool axes). A steady force deflects F/k and b decides how it
+    // gets there.
+    std::array<ForceAxisConfig, 3> translation{};   // x y z  [kg] [N*s/m] [N/m]
+    std::array<ForceAxisConfig, 3> rotation{};      // rx ry rz [kg*m^2] [Nm*s/rad] [Nm/rad]
+};
+
 struct ForceControlConfig {
     bool enable = false;
 
-    // ---- the law -----------------------------------------------------------
-    // m*d'' + b*d' + k*d = wrench, per axis, in the TOOL frame (re-aimed every tick
-    // onto the command's tool axes). A steady force deflects F/k and b decides how
-    // it gets there.
-    std::array<ForceAxisConfig, 3> translation{};   // x y z  [kg] [N*s/m] [N/m]
-    std::array<ForceAxisConfig, 3> rotation{};      // rx ry rz [kg*m^2] [Nm*s/rad] [Nm/rad]
+    // The law for a plan the server is STREAMING into contact (chunk follower /
+    // TcpPoseTarget). Soft, because the gate below is what bounds the force.
+    ForceLawConfig stream{};
+    // The law for a compliant Hold - an operator pushing the arm by hand. Stiff,
+    // because there is no advancing plan for the gate to hold back and the spring is
+    // the only bound on the force.
+    ForceLawConfig hold{};
 
     // ---- the gate ----------------------------------------------------------
-    // The plan advance's reflection ratio falls as the contact force rises, applied
+    // The PLAN advance's reflection ratio falls as the contact force rises, applied
     // PROJECTIVELY: only the component driving INTO the measured wrench is
     // attenuated, so sliding along a contact and backing out of it keep full
-    // authority. `max_force_n` IS the force a sustained contact converges to.
+    // authority. `max_force_n` IS the force a sustained streamed contact converges to.
     //
-    // *** THE GATE AND k > 0 MAY NOT SHIP APART. *** Measured by CM on hardware:
-    //   k > 0 with no gate  -> the force ramps forever (961 N in 40 s)
-    //   the gate with k = 0 -> the force is bounded but the deviation is not
-    //                          (9.5 m of offset in 300 s)
-    // The loader REFUSES either half alone.
+    // IT ONLY ACTS ON THE STREAM LAW. A compliant Hold has no plan advance to
+    // attenuate, so the gate is structurally inert there — do not read a configured
+    // gate as a bound on what a hand can push the arm to.
+    //
+    // *** THE GATE AND A STREAM STIFFNESS MAY NOT SHIP APART. *** Measured by CM on
+    // hardware: k > 0 with no gate ramps the streamed contact force forever (961 N in
+    // 40 s); the gate with k = 0 bounds the force but not the deviation (9.5 m of
+    // offset in 300 s). The loader refuses either half.
     bool gate_enable = false;
     double gate_max_force_n = 0.0;
     double gate_max_torque_nm = 0.0;
@@ -1069,10 +1095,7 @@ struct ForceControlConfig {
     double gate_open_tau_s = 0.40;    // slow to open  - a fast re-open makes it a relay
 
     // ---- the fence ---------------------------------------------------------
-    // A DEAD BACKSTOP, not an operating limit: the design converges the deviation to
-    // max_force_n / k, so this is never reached in normal operation. It exists
-    // because that bound is created by the GATE, and the gate depends on the wrench
-    // being right. Non-positive = no fence on that part.
+    // A DEAD BACKSTOP, not an operating limit. Non-positive = no fence on that part.
     double max_deviation_m = 0.0;
     double max_deviation_rad = 0.0;
 
@@ -1085,12 +1108,13 @@ struct ForceControlConfig {
     double max_acceleration_rad_s2 = 20.0;
 
     // ---- coverage ----------------------------------------------------------
-    // A plain Hold has no Cartesian nominal to deviate from. With this set, the
-    // first covered Hold tick LATCHES the measured TCP and holds it as the nominal,
-    // which is what makes a hand-push test possible without running a policy.
+    // A plain Hold has no Cartesian nominal to deviate from. With this set, the first
+    // covered Hold tick LATCHES the measured TCP and holds it as the nominal, which
+    // is what makes a hand-push test possible without running a policy. It selects
+    // the `hold` law above.
     bool hold_compliance = false;
-    // Refuse to compose while the arm's own kinematics/state are not trustworthy.
-    // A deviation composed onto a stale nominal is a command nobody authored.
+    // Refuse to compose while the arm's own state is not trustworthy: a deviation
+    // composed onto a stale nominal is a command nobody authored.
     double max_state_age_sec = 0.05;
 };
 

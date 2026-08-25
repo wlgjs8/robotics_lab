@@ -154,6 +154,9 @@ def _arm_force_control_summary(arm: Any) -> str:
     if not fc.get("covered"):
         return f"NOT COVERED ({fc.get('coverage_reason') or 'unknown'})"
     bits = []
+    law = fc.get("law")
+    if law:
+        bits.append(str(law))
     try:
         bits.append(f"dev {float(fc.get('deviation_norm_m', 0.0)) * 1e3:.1f} mm")
     except (TypeError, ValueError):

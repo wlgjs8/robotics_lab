@@ -1368,9 +1368,16 @@ uint64_t workerReadPeriodNs(const ServoConfig& config) {
     return std::max<uint64_t>(1, static_cast<uint64_t>(std::llround(period_ns)));
 }
 
-ArmWorkerOptions workerOptions(const DualArmConfig& config) {
+ArmWorkerOptions workerOptions(const DualArmConfig& config, ArmId arm) {
     ArmWorkerOptions options;
     options.read_period_ns = workerReadPeriodNs(config.servo);
+    // RT scheduling for this arm's worker thread. Per-arm because the two arms'
+    // cadences are independent -- they track two boxes with two different clocks
+    // (measured drift: left +0.665, right +0.670 tk/s) -- so they must not share
+    // a core any more than they share a send period.
+    options.realtime_priority = config.servo.worker_realtime_priority;
+    options.cpu_core = arm == ArmId::Left ? config.servo.worker_cpu_core_left
+                                          : config.servo.worker_cpu_core_right;
     options.rbpodo_async_streaming_enabled = config.servo.rbpodo_async_streaming.enable;
     options.rbpodo_async_streaming_mode = config.servo.rbpodo_async_streaming.mode;
     options.rbpodo_async_max_pending_age_ms = config.servo.rbpodo_async_streaming.max_pending_age_ms;
@@ -1929,8 +1936,14 @@ DualArmServoLoop::DualArmServoLoop(
         std::cerr << "[INFO] force_control ENABLED\n";
         const char* tnames[3] = {"x ", "y ", "z "};
         const char* rnames[3] = {"rx", "ry", "rz"};
-        for (int i = 0; i < 3; ++i) axis_line(tnames[i], config.force_control.translation[i]);
-        for (int i = 0; i < 3; ++i) axis_line(rnames[i], config.force_control.rotation[i]);
+        // BOTH LAWS, LABELLED. They are different laws for different problems and the
+        // one that surprised an operator once was the one nobody printed.
+        std::cerr << "[INFO]   stream law (a plan driven into contact):\n";
+        for (int i = 0; i < 3; ++i) axis_line(tnames[i], config.force_control.stream.translation[i]);
+        for (int i = 0; i < 3; ++i) axis_line(rnames[i], config.force_control.stream.rotation[i]);
+        std::cerr << "[INFO]   hold law (an operator pushing by hand):\n";
+        for (int i = 0; i < 3; ++i) axis_line(tnames[i], config.force_control.hold.translation[i]);
+        for (int i = 0; i < 3; ++i) axis_line(rnames[i], config.force_control.hold.rotation[i]);
         std::cerr << "[INFO]   gate " << (config.force_control.gate_enable ? "ON" : "OFF")
                   << " converges to " << config.force_control.gate_max_force_n << " N / "
                   << config.force_control.gate_max_torque_nm << " Nm (close "
@@ -1942,10 +1955,19 @@ DualArmServoLoop::DualArmServoLoop(
                   << "\n";
         // The deviation a converged contact will settle at, printed because it is the
         // number an operator can check against the arm with a ruler.
-        const double k = config.force_control.translation[2].k;
+        const double k = config.force_control.stream.translation[2].k;
         if (k > 0.0 && config.force_control.gate_max_force_n > 0.0) {
-            std::cerr << "[INFO]   converged deviation = max_force_n / k = "
+            std::cerr << "[INFO]   streamed contact converges at max_force_n / k = "
                       << config.force_control.gate_max_force_n / k * 1e3 << " mm\n";
+        }
+        // What a hand push actually buys, since that is the number an operator checks
+        // against the arm with a ruler and the gate has nothing to do with it.
+        const double kh = config.force_control.hold.translation[2].k;
+        const double khr = config.force_control.hold.rotation[2].k;
+        if (config.force_control.hold_compliance && kh > 0.0 && khr > 0.0) {
+            std::cerr << "[INFO]   compliant Hold: 10 N -> " << 10.0 / kh * 1e3
+                      << " mm, 1 Nm -> " << 1.0 / khr * 180.0 / M_PI
+                      << " deg (the gate does NOT act here)\n";
         }
     }
     left_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
@@ -2312,14 +2334,14 @@ bool DualArmServoLoop::initializeWorkers() {
             std::cerr << "[ERROR] worker io requested but left backend is unavailable\n";
             return false;
         }
-        left_worker_ = std::make_unique<ArmWorker>(std::move(left_robot_), workerOptions(config_));
+        left_worker_ = std::make_unique<ArmWorker>(std::move(left_robot_), workerOptions(config_, ArmId::Left));
     }
     if (!right_worker_) {
         if (!right_robot_) {
             std::cerr << "[ERROR] worker io requested but right backend is unavailable\n";
             return false;
         }
-        right_worker_ = std::make_unique<ArmWorker>(std::move(right_robot_), workerOptions(config_));
+        right_worker_ = std::make_unique<ArmWorker>(std::move(right_robot_), workerOptions(config_, ArmId::Right));
     }
 
     const bool left_started = left_worker_->start();
@@ -5489,9 +5511,18 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             continue;
         }
         if (eff.mode != ControlMode::Hold) {
+            // A PLAN IS BEING STREAMED INTO CONTACT. Soft law: the GATE holding the
+            // plan back is what bounds the force, so the spring does not have to.
+            overlay.setLaw(config_.force_control.stream);
+            tel.law = "stream";
             hold_nominal.reset();
             continue;
         }
+        // AN OPERATOR IS PUSHING BY HAND. Stiff law: there is no advancing plan for
+        // the gate to hold back, so the spring is the ONLY bound on how far a push
+        // takes the arm - and on how much a torque about the TCP turns it.
+        overlay.setLaw(config_.force_control.hold);
+        tel.law = "hold";
         // A plain Hold has no Cartesian nominal to deviate FROM, so LATCH one on
         // entry. Re-reading the measured pose every tick would make the nominal
         // follow the deviation and leave the spring nothing to pull back to - the arm

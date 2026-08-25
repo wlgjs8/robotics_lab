@@ -23,6 +23,14 @@ left_robot:
   # that the box queue is regulated (queue_sync below) instead of free-running.
   servo_alpha: 10.0
   disable_waiting_ack: true    # ACK-off 500Hz streaming; config-driven, no RB_ALLOW_* env gate
+  # Non-blocking pipelined state read: tick N requests, tick N+1 consumes. Same
+  # design controller-manager uses to keep box I/O on its RT thread. Validated in
+  # MODE=sim against these same boxes (12,425 ticks, 0 held reads). Removes the
+  # blocking request_data() (measured median 126 us, max 3.8 ms) from the worker.
+  # NOTE: state_age_us stamps at frame-consume time, so it does NOT include the
+  # request->response transit. Judge added latency with `sent->ref` minus RBACK
+  # fill instead (see docs/runbooks/box_latency_offline.md), not with state age.
+  state_read_pipelined: true
 
 right_robot:
   backend_type: rbpodo
@@ -42,6 +50,14 @@ right_robot:
   # that the box queue is regulated (queue_sync below) instead of free-running.
   servo_alpha: 10.0
   disable_waiting_ack: true    # ACK-off 500Hz streaming; config-driven, no RB_ALLOW_* env gate
+  # Non-blocking pipelined state read: tick N requests, tick N+1 consumes. Same
+  # design controller-manager uses to keep box I/O on its RT thread. Validated in
+  # MODE=sim against these same boxes (12,425 ticks, 0 held reads). Removes the
+  # blocking request_data() (measured median 126 us, max 3.8 ms) from the worker.
+  # NOTE: state_age_us stamps at frame-consume time, so it does NOT include the
+  # request->response transit. Judge added latency with `sent->ref` minus RBACK
+  # fill instead (see docs/runbooks/box_latency_offline.md), not with state age.
+  state_read_pipelined: true
 
 left_mount:
   base_pose_in_stand: [0.15707, -0.17036, 0.58036, 2.186649, 0.523831, 2.526296]
@@ -69,6 +85,21 @@ servo:
   enable_realtime_priority: true
   realtime_priority: 80
   cpu_core: 3
+  # The ARM WORKERS' scheduling. With queue_sync on, each worker owns its arm's
+  # 500 Hz send cadence, so it is an RT thread by role -- but until 2026-08-26 it
+  # was a plain SCHED_OTHER thread with no affinity while only the loop above got
+  # FIFO + an isolated core. Measured symptom: worker-cached state age ~1 ms
+  # median (the healthy half-period phase offset) with a tail to 7.6 ms against
+  # the 8 ms budget, uncorrelated with reqdata duration or send period.
+  # cpu1/cpu2 are isolated (isolcpus=domain,managed_irq,1-3) and carry only
+  # kernel threads; the loop keeps cpu3. NOTE: controller-manager hard-pins its
+  # own arms to cpu1/cpu2 -- do not run both stacks against these cores at once.
+  # To bisect a regression, comment out all THREE lines together: config
+  # validation refuses cores pinned without a FIFO priority, because a dedicated
+  # core that still yields to any CFS thread is the trap this setting removes.
+  worker_realtime_priority: 80
+  worker_cpu_core_left: 1
+  worker_cpu_core_right: 2
   # Hybrid sleep-then-spin tail (us). 0 = plain sleep_until (default). Set e.g.
   # 50 to busy-spin the last 50us of each 2ms tick and remove C-state/scheduler
   # wake jitter on the dedicated isolated cpu_core. REQUIRES RT throttling off
@@ -649,24 +680,79 @@ force_torque:
 force_control:
   enable: true
 
-  # Per-axis m*d'' + b*d' + k*d = wrench, in the TOOL frame (re-aimed every tick onto
-  # the command's tool axes, so "soft along the approach" keeps meaning the approach).
-  # Isotropic as shipped — the structure is per-axis so a direction can be made stiff
-  # without touching the others.
-  translation:
-    - {m: 15.0, b: 434.7, k: 400.0}   # x
-    - {m: 15.0, b: 434.7, k: 400.0}   # y
-    - {m: 15.0, b: 434.7, k: 400.0}   # z
-  # ROTATION IS DERIVED UNDER A STATED ASSUMPTION AND WANTS HARDWARE TUNING. The
-  # rotational environment stiffness is k_env * L^2 for a contact at lever L, and L is
-  # not known. CM's numbers use L = 140 mm (the RB5/steam lever) and are KNOWN STALE
-  # on this cell: the pika's lever is 202.642 mm, so the torque limit is ~31 % tighter
-  # than the "10 N * L" intent it states. Carried over unchanged deliberately —
-  # re-basing it RAISES a force limit, which is an operator decision, not a port's.
-  rotation:
-    - {m: 1.0, b: 15.72, k: 8.0}      # rx
-    - {m: 1.0, b: 15.72, k: 8.0}      # ry
-    - {m: 1.0, b: 15.72, k: 8.0}      # rz
+  # *** TWO CONSUMERS, TWO LAWS. *** Applying one to the other is a mistake this
+  # cell has already made: the stream law was used for an operator hand-push and the
+  # arm turned ~9 deg where controller-manager turns ~0.3 deg for the same push,
+  # because the two differ by 5x in the RATIO that decides how much of a push becomes
+  # rotation:
+  #
+  #                          k_t [N/m]   k_r [Nm/rad]   k_r/k_t [m^2]
+  #     hold   (CM admittance)   2500          250          0.100
+  #     stream (CM follow)        400            8          0.020
+
+  # ---- the STREAM law: a plan the server is driving into contact ---------------
+  # controller-manager's follow.yaml 10 N row, which is ONE SOLVE - k, b and the gate
+  # threshold are not independent, and mixing a b from one row with a k from another
+  # is not a tuning, it is a different system.
+  #
+  #   k = max_force_n / d_max          10 N / 25 mm = 400 N/m
+  #   b = 2*zeta*sqrt(m*(k + k_env))   zeta = 0.25, k_env = 5e4 (hard plastic)
+  #   m = 15 kg                        owner constraint 10..15
+  #
+  # DELIBERATELY SOFT. It yields to a contact the plan is pushing into, and the force
+  # is bounded by the GATE holding the plan back - not by this spring.
+  #
+  # WHY zeta = 0.25 AND NOT 1.0: critical damping is WORSE here, measured. A large b
+  # physically RESISTS the offset's retreat at impact and raises the peak (65.4 N at
+  # zeta 1.0 against 47.2 N at zeta 0.25), while the gate already stabilises the loop.
+  #
+  # THE IMPACT PEAK IS NOT max_force_n. First contact at speed spikes far above it:
+  # the impact resolves in 30-50 ms while the gate needs ~70 ms to arrive. The gate
+  # regulates the SUSTAINED force. The two levers are approach speed and m.
+  stream:
+    translation:
+      - {m: 15.0, b: 434.7, k: 400.0}   # x
+      - {m: 15.0, b: 434.7, k: 400.0}   # y
+      - {m: 15.0, b: 434.7, k: 400.0}   # z
+    # ROTATION IS DERIVED UNDER A STATED ASSUMPTION AND WANTS HARDWARE TUNING. The
+    # rotational environment stiffness is k_env * L^2 for a contact at lever L, and L
+    # is not known. CM's numbers use L = 140 mm (the RB5/steam lever) and are KNOWN
+    # STALE on this cell: the pika's lever is 202.642 mm, so the torque limit is ~31 %
+    # tighter than the "10 N * L" intent it states. Carried over unchanged
+    # deliberately - re-basing it RAISES a force limit, which is an operator decision.
+    rotation:
+      - {m: 1.0, b: 15.72, k: 8.0}      # rx
+      - {m: 1.0, b: 15.72, k: 8.0}      # ry
+      - {m: 1.0, b: 15.72, k: 8.0}      # rz
+
+  # ---- the HOLD law: an operator pushing the arm by hand -----------------------
+  # controller-manager's admittance.yaml, which is what CM actually runs when a human
+  # pushes the arm - NOT its follow law. Isotropic scalar there, written per-axis here
+  # so both consumers share one shape:
+  #
+  #     wn = 2*pi*fn = 2*pi*2.516 = 15.809 rad/s
+  #     k_t = mass    * wn^2 = 10.0 * 249.9 = 2499 N/m
+  #     b_t = 2*zeta*mass   *wn = 2*1.2*10.0*15.809 = 379.4 N*s/m
+  #     k_r = inertia * wn^2 =  1.0 * 249.9 =  250 Nm/rad
+  #     b_r = 2*zeta*inertia*wn = 2*1.2* 1.0*15.809 =  37.9 Nm*s/rad
+  #
+  # zeta = 1.2 is OVERDAMPED, deliberately (CM owner 2026-08-03): a hand push should
+  # settle without overshoot, because the operator's hand IS the disturbance and an
+  # underdamped arm pushes back into it.
+  #
+  # THE GATE DOES NOT ACT HERE. A compliant Hold has no plan advance to attenuate, so
+  # these stiffnesses are the ONLY bound on how far a hand can take the arm. That is
+  # why they are 6x (translation) and 31x (rotation) the stream values, and why the
+  # loader refuses hold_compliance with every hold k at 0.
+  hold:
+    translation:
+      - {m: 10.0, b: 379.4, k: 2499.1}  # x   10 N -> 4.0 mm
+      - {m: 10.0, b: 379.4, k: 2499.1}  # y
+      - {m: 10.0, b: 379.4, k: 2499.1}  # z
+    rotation:
+      - {m: 1.0, b: 37.94, k: 249.91}   # rx  1 Nm -> 0.23 deg
+      - {m: 1.0, b: 37.94, k: 249.91}   # ry
+      - {m: 1.0, b: 37.94, k: 249.91}   # rz
 
   # THE GATE AND THE SPRING SHIP TOGETHER OR NOT AT ALL — the loader refuses either
   # half alone. Measured by CM on hardware: k > 0 with no gate ramps the contact force

@@ -211,12 +211,16 @@ bool testDeadzoneIsContinuous() {
 
 // ---------------------------------------------------------------------------
 
+// The shipped STREAM law (controller-manager's follow 10 N row).
 rb_servo::ForceControlConfig shippedLaw() {
     rb_servo::ForceControlConfig c;
     c.enable = true;
     for (int i = 0; i < 3; ++i) {
-        c.translation[i] = {rb_servo::ForceAxisMode::Compliance, 15.0, 434.7, 400.0, 0.0};
-        c.rotation[i] = {rb_servo::ForceAxisMode::Compliance, 1.0, 15.72, 8.0, 0.0};
+        c.stream.translation[i] = {rb_servo::ForceAxisMode::Compliance, 15.0, 434.7, 400.0, 0.0};
+        c.stream.rotation[i] = {rb_servo::ForceAxisMode::Compliance, 1.0, 15.72, 8.0, 0.0};
+        // The shipped HOLD law (controller-manager's admittance.yaml, per-axis).
+        c.hold.translation[i] = {rb_servo::ForceAxisMode::Compliance, 10.0, 379.4, 2499.1, 0.0};
+        c.hold.rotation[i] = {rb_servo::ForceAxisMode::Compliance, 1.0, 37.94, 249.91, 0.0};
     }
     c.gate_enable = true;
     c.gate_max_force_n = 10.0;
@@ -243,7 +247,7 @@ bool testSteadyForceConvergesToForceOverStiffness() {
 // `bounded()` latches for the caller to publish.
 bool testFenceClampsAndReportsSaturation() {
     rb_servo::ForceControlConfig cfg = shippedLaw();
-    for (int i = 0; i < 3; ++i) cfg.translation[i].k = 0.0;   // pure mass-damper: it walks
+    for (int i = 0; i < 3; ++i) cfg.stream.translation[i].k = 0.0;   // pure mass-damper: it walks
     cfg.gate_enable = false;
     rb_servo::control::AdmittanceOverlay overlay;
     overlay.configure(cfg, 0.002);
@@ -259,7 +263,7 @@ bool testFenceClampsAndReportsSaturation() {
 // client asking for the nominal path on one axis means.
 bool testRigidAxisDoesNotDeviate() {
     rb_servo::ForceControlConfig cfg = shippedLaw();
-    cfg.translation[0].mode = rb_servo::ForceAxisMode::Rigid;
+    cfg.stream.translation[0].mode = rb_servo::ForceAxisMode::Rigid;
     rb_servo::control::AdmittanceOverlay overlay;
     overlay.configure(cfg, 0.002);
     const rb_servo::math::Vector3 f(50.0, 50.0, 0.0);
@@ -365,6 +369,75 @@ bool testGateIsOpenInFreeSpace() {
     return true;
 }
 
+// *** THE TWO LAWS ARE NOT INTERCHANGEABLE, AND THE RATIO IS WHY. ***
+//
+// This is the regression for a real hardware finding (2026-08-26): the STREAM law
+// was applied to an operator hand-push and the arm turned ~9 deg where
+// controller-manager turns ~0.3 deg for the same push. Both laws are "correct" —
+// they are just answers to different problems. The stream law may be soft because
+// the GATE holding the plan back bounds the force; a compliant Hold has no plan
+// advance to gate, so its spring is the only bound there is.
+//
+// What separates them is not stiffness in the abstract but the RATIO k_r/k_t, which
+// decides how much of a push off the control point becomes rotation rather than
+// translation.
+bool testHoldLawTurnsFarLessThanTheStreamLawForTheSamePush() {
+    const rb_servo::ForceControlConfig cfg = shippedLaw();
+
+    const double kt_stream = cfg.stream.translation[0].k;
+    const double kr_stream = cfg.stream.rotation[0].k;
+    const double kt_hold = cfg.hold.translation[0].k;
+    const double kr_hold = cfg.hold.rotation[0].k;
+
+    // The hold law is stiffer on both, and far more so in rotation.
+    CHECK(kt_hold > kt_stream * 5.0);
+    CHECK(kr_hold > kr_stream * 25.0);
+    // THE RATIO: hold resists a torque ~5x more, relative to how it resists a force.
+    const double ratio_stream = kr_stream / kt_stream;
+    const double ratio_hold = kr_hold / kt_hold;
+    CHECK(ratio_hold > ratio_stream * 4.0);
+
+    // The measured push that started this: 13 N with 1.34 Nm about the TCP.
+    // Under the stream law that is ~9.6 deg; under the hold law ~0.31 deg.
+    const double deg_stream = 1.34 / kr_stream * 180.0 / M_PI;
+    const double deg_hold = 1.34 / kr_hold * 180.0 / M_PI;
+    CHECK(deg_stream > 9.0);
+    CHECK(deg_hold < 0.5);
+    return true;
+}
+
+// Selecting the law must NOT disturb the deviation. A Hold that becomes a stream (or
+// the reverse) mid-contact would otherwise snap the emitted command off the pose it
+// is holding — the same reason leaving service freezes rather than retires.
+bool testSwappingTheLawKeepsTheDeviation() {
+    const rb_servo::ForceControlConfig cfg = shippedLaw();
+    rb_servo::control::AdmittanceOverlay overlay;
+    overlay.configure(cfg, 0.002);
+    overlay.setLaw(cfg.hold);
+    const rb_servo::math::Vector3 f(0.0, 0.0, 25.0);
+    const rb_servo::math::Vector3 m = rb_servo::math::Vector3::Zero();
+    for (int i = 0; i < 4000; ++i) overlay.step(f, m);
+    const double held = overlay.deviation().z();
+    CHECK(held > 1e-4);
+    overlay.setLaw(cfg.stream);
+    CHECK(near(overlay.deviation().z(), held, 1e-12));
+    return true;
+}
+
+// The hold law's converged deflection is the number an operator checks with a ruler.
+bool testHoldLawDeflectsForceOverStiffness() {
+    const rb_servo::ForceControlConfig cfg = shippedLaw();
+    rb_servo::control::AdmittanceOverlay overlay;
+    overlay.configure(cfg, 0.002);
+    overlay.setLaw(cfg.hold);
+    const rb_servo::math::Vector3 f(0.0, 0.0, 10.0);
+    const rb_servo::math::Vector3 m = rb_servo::math::Vector3::Zero();
+    for (int i = 0; i < 20000; ++i) overlay.step(f, m);
+    // 10 N / 2499.1 N/m = 4.0 mm
+    CHECK(near(overlay.deviation().z(), 10.0 / cfg.hold.translation[2].k, 1e-5));
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -380,6 +453,9 @@ int main() {
     testGateAttenuatesOnlyIntoTheContact();
     testGateIsAsymmetric();
     testGateIsOpenInFreeSpace();
+    testHoldLawTurnsFarLessThanTheStreamLawForTheSamePush();
+    testSwappingTheLawKeepsTheDeviation();
+    testHoldLawDeflectsForceOverStiffness();
     if (g_failures == 0) std::printf("force control tests passed\n");
     return g_failures == 0 ? 0 : 1;
 }

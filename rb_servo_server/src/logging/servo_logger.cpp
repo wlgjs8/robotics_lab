@@ -331,6 +331,7 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_fc_enabled"
        << ',' << side << "_fc_covered"
        << ',' << side << "_fc_coverage_reason"
+       << ',' << side << "_fc_law"
        << ',' << side << "_fc_compose_applied"
        << ',' << side << "_fc_dev_x_m"
        << ',' << side << "_fc_dev_y_m"
@@ -641,6 +642,7 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << fc.enabled
        << ',' << fc.covered
        << ',' << csvEscape(fc.coverage_reason)
+       << ',' << csvEscape(fc.law)
        << ',' << fc.compose_applied
        << ',' << fc.deviation_m[0]
        << ',' << fc.deviation_m[1]
