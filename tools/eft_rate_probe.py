@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """Probe the rbpodo data channel for external F/T sensor (eft_*) update rate.
 
-Read-only bring-up diagnostic for the ft branch: connects to a controller's
+Standalone: this probe decodes the type-0x03 wire format itself and does not
+use rb_servo_server. That matters because the server stopped reading eft_* on
+2026-08-26 when the v1 force stack was removed, so this is currently the only
+thing in the repo that reads the sensor at all — keep it for the
+controller-manager-referenced rebuild, where the real eft update rate is one
+of the first things worth measuring.
+
+Read-only bring-up diagnostic: connects to a controller's
 CobotData port (TCP 5001), streams `reqdata` type-0x03 SystemState frames as
 fast as the round trip allows, and reports
 
