@@ -113,28 +113,17 @@ remains visible and auditable.
 
 ## Force Control
 
-Production force/admittance remains unaccepted. The tracked real stack currently
-exposes both F/T pipelines only as a read-only sign/frame monitor. Real force
-motion stays off until both-arm physical evidence is reviewed.
+There is no force control. The v1 stack was removed on 2026-08-26 and is being
+rebuilt against `controller-manager` as the reference, starting from sensor and
+tool setup.
 
-```yaml
-force_control:
-  provider: project_native
-  enable: true
-  operating_mode: monitor
-  allow_in_real: false
-  supervised_experimental_real: false
-  left:
-    enable: true
-    surface_source: none
-    compliance_frame: surface
-  right:
-    enable: true
-    surface_source: none
-    compliance_frame: surface
-```
-
-Do not integrate an external force-control library into an active motion path unless a future task explicitly approves it and defines a safety acceptance plan. Project-native force-control work must follow the same acceptance boundary.
+Until that rebuild lands: `force_torque:` and `force_control:` are not server
+config sections (a config carrying them fails to load), `RobotState` has no
+wrench field, the state JSON has no force blocks, and a command packet with a
+`force_control` object is refused at parse. Do not reintroduce any of them
+piecemeal, and do not integrate an external force-control library into an active
+motion path, unless a task explicitly says to. Archived v1 design and evidence:
+`docs/archive/force_control_v1/`.
 
 ## Motion Primitive Contract
 

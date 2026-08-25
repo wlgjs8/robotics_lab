@@ -25,8 +25,6 @@
 - `docs/camera_sync.md`  
   RealSense sync strategy; camera stays out of the servo process.
 
-- `docs/force_control.md`  
-  Optional force/admittance design and integration plan.
 
 - `docs/config_examples.md`  
   Config notes.
@@ -52,7 +50,6 @@
   Command receive and future state publishing.
 
 - `include/rb_servo/sensor/*` / `src/sensor/*`  
-  F/T sensor interfaces and mock sensor.
 
 - `include/rb_servo/logging/*` / `src/logging/*`  
   Async servo logger.

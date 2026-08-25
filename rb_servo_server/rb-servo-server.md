@@ -21,7 +21,6 @@ Later goals:
 - rbpodo controller-simulation support
 - real rbpodo backend
 - Cartesian TCP control
-- optional force/admittance control
 - Python VLA / imitation policy integration
 
 ## Non-goals for the first milestone
@@ -30,7 +29,7 @@ Do not implement these in Milestone 1:
 
 - full Cartesian IK
 - real robot rbpodo calls
-- force control in the active servo path
+- force control (v1 removed 2026-08-26; CM-referenced rebuild pending)
 - RealSense capture in this process
 - ROS2 integration
 - unsupported non-500 Hz robot-control profiles
@@ -55,21 +54,7 @@ IRobotBackend
   MockBackend / RbpodoBackend
 ```
 
-Force-control path:
-
-```text
-TcpPoseTarget + rbpodo EFT wrench
-        ↓
-DeltaTwist/chunk follower
-        ↓
-F/T pipeline + contact supervisor + NormalForceController
-        ↓
-IK
-        ↓
-TrajectoryFilter / SafetyFilter
-        ↓
-servo_j
-```
+Force control: none. The v1 path was removed 2026-08-26 (see below).
 
 ## Current rb_servo_server status
 
@@ -87,7 +72,6 @@ Already implemented:
 - send failure policy that records only successfully sent targets
 - real-mode startup/config checks for realtime setup, local command bind, and conservative safety policy
 - capped filter dt and acceleration-overshoot guard
-- default-off F/T monitor, guard, and normal-admittance runtime
 - thread-safe `ServoSnapshot` read surface for tests/debug/publisher integration
 - send timestamp/skew/duration logging for left/right servo commands
 
@@ -98,7 +82,7 @@ Still pending:
 - better command buffer for RT priority inversion
 - action chunk interpolation
 - Cartesian FK/IK
-- physical F/T characterization and staged force acceptance
+- force control rebuilt against controller-manager, from sensor/tool setup up
 
 
 ## v3 fail-safe requirements
@@ -242,48 +226,17 @@ Do not call Rainbow FK/IK inside the high-rate loop except for debugging. Use lo
 
 ## Milestone 5: force control integration
 
-Force control is integrated into `DualArmServoLoop` and disabled in tracked
-configs. Site-local profiles can select monitor, guard, or guarded normal
-admittance. Physical enforcement remains unaccepted until the F/T runbook
-evidence is complete.
+**Reset.** The v1 integration described here (ForceController,
+NormalForceController, FtWrenchPipeline, the mock F/T sensor, and the
+`force_control` / `force_torque` config sections) was removed from the tree on
+2026-08-26. Every file this section used to list is gone.
 
-Use files:
+The rebuild takes `controller-manager` as the reference and starts from sensor
+and tool setup rather than from this design. Do not restore the v1 files or
+their config sections piecemeal.
 
-- `include/rb_servo/control/force_controller.hpp`
-- `src/control/force_controller.cpp`
-- `include/rb_servo/control/normal_force_controller.hpp`
-- `src/control/normal_force_controller.cpp`
-- `include/rb_servo/sensor/ft_wrench_pipeline.hpp`
-- `src/sensor/ft_wrench_pipeline.cpp`
-- `include/rb_servo/sensor/i_force_torque_sensor.hpp`
-- `include/rb_servo/sensor/mock_force_torque_sensor.hpp`
-- `src/sensor/mock_force_torque_sensor.cpp`
-- `docs/force_control.md`
-
-Integration target:
-
-```text
-nominal TCP target
-  + force/admittance TCP compensation
-  → IK
-  → q_target
-  → servo_j
-```
-
-Do not apply force compensation directly to joint targets.
-
-Before physical promotion:
-
-- supply independent sensor presence/fault/overrange/freshness signals
-- verify `T_tcp_sensor`, sign, bias, tare, payload, and gravity compensation
-- validate monitor-only contact supervision and telemetry on the installed sensor
-- measure same-tick send suppression and flow-chunk epoch invalidation
-- validate DeltaTwist tangential ownership while projecting the contact normal
-- pass deterministic loop replay before supervised hardware acceptance
-
-The project-native `NormalForceController` uses the actual loop `dt_sec`,
-unilateral server hard caps, a passivity observer, and propose/commit state
-updates. See `docs/force_control.md` for the active schema and promotion gates.
+Archived v1 design and hardware-measured evidence, audit-only:
+`docs/archive/force_control_v1/`.
 
 ## Coding rules
 
@@ -304,6 +257,6 @@ A good next Codex task is:
 3. jitter columns exist and have meaningful values
 4. YAML changes are reflected at runtime
 5. no regression to real/controller-simulation placeholder build
-6. tracked force config stays disabled and force-control tests pass
+6. a config carrying `force_control:` / `force_torque:` fails to load
 7. invalid `JointTarget` without `q_target_deg` holds previous target and never moves to zeros
 8. `EmergencyStop` latches fault and ignores later motion commands until `ResetFault`

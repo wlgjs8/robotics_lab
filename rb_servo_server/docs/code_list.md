@@ -8,7 +8,7 @@
 ## Core
 
 - `include/rb_servo/core/types.hpp` / `src/core/types.cpp`  
-  Shared enums and data types: joint arrays, poses, wrench, robot state, commands, force-control commands, servo samples. `RobotState::has_valid_joint_state` gates startup and safe hold target selection.
+  Shared enums and data types: joint arrays, poses, robot state, commands, servo samples. `RobotState::has_valid_joint_state` gates startup and safe hold target selection.
 
 - `include/rb_servo/core/clock.hpp` / `src/core/clock.cpp`  
   Steady-clock timestamp helpers.
@@ -55,8 +55,6 @@
 - `include/rb_servo/control/cartesian_controller.hpp` / `src/control/cartesian_controller.cpp`  
   Future TCP/IK layer. Currently intentionally deferred.
 
-- `include/rb_servo/control/force_controller.hpp` / `src/control/force_controller.cpp`  
-  Optional force/admittance design scaffold. Disabled by default and not used by the joint-only milestone.
 
 - `include/rb_servo/control/dual_arm_servo_loop.hpp` / `src/control/dual_arm_servo_loop.cpp`  
   Main same-tick dual-arm servo loop.
@@ -71,11 +69,7 @@
 
 ## Sensors
 
-- `include/rb_servo/sensor/i_force_torque_sensor.hpp`  
-  Future F/T sensor interface.
 
-- `include/rb_servo/sensor/mock_force_torque_sensor.hpp` / `src/sensor/mock_force_torque_sensor.cpp`  
-  Mock wrench source for force-control integration tests.
 
 ## Logging
 

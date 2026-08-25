@@ -68,8 +68,8 @@ no physical teach-pendant button.
   divergence cannot latch a tracking error or trip the velocity clamp.
 - **Resync on exit (the key safety point).** When an arm exits free-drive the server
   snaps its held target (`*_prev_sent_q_deg_`, `prevprev`, fault-hold, output MA) to the
-  current **actual** joints, resets the force/admittance integrators and contact state,
-  and re-anchors the Cartesian compliance Hold equilibrium to the current **actual**
+  current **actual** joints, invalidates stale Cartesian followers, and advances
+  `motion_epoch` so a chunk assembled before teaching cannot resume from the new
   TCP. It also invalidates both arms' stale Cartesian followers and advances
   `motion_epoch`, so re-acquiring `servo_j` does **not** execute a pre-teaching policy
   residual or pull the taught arm back to the pre-teaching pose.

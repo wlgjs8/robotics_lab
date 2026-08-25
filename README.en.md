@@ -140,13 +140,9 @@ suspect diagnostics in real mode is a per-arm config opt-in
 EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error still latch
 regardless of config.
 
-Force control remains inactive:
-
-```yaml
-force_control:
-  provider: null
-  enable: false
-```
+Force control is absent: the v1 stack was removed on 2026-08-26 and
+`force_control:` is no longer a config section, so a config that still declares
+it fails to load. Archived v1 design: `docs/archive/force_control_v1/`.
 
 ## Motion Primitive Summary
 

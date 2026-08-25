@@ -62,11 +62,6 @@ acceptance.
 
 ## Force control
 
-Force control is present but disabled by default:
-
-```yaml
-force_control:
-  enable: false
-```
-
-Enable only after Cartesian FK/IK and F/T sensor handling are implemented and tested.
+There is no force control, and `force_control:` is not a config section. A
+config that still declares it fails to load. See
+`docs/archive/force_control_v1/` for the removed v1 design.

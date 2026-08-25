@@ -71,9 +71,6 @@ Every site-local stage config must keep:
 ```yaml
 servo:
   send_servo_commands: false
-force_control:
-  provider: null
-  enable: false
 cartesian_control:
   allow_in_real: false
 ```
@@ -85,8 +82,7 @@ rb_servo_server/config/local/
 ```
 
 The operator-owned local config must explicitly opt into the relevant stage.
-Tracked templates that set `servo.send_servo_commands: true`,
-`force_control.enable: true`, non-null `force_control.provider`, or
+Tracked templates that set `servo.send_servo_commands: true` or
 `cartesian_control.allow_in_real: true` are refused by the acceptance script.
 
 ## Required Gates
@@ -136,7 +132,7 @@ The acceptance script refuses non-dry-run stages when:
 - A Cartesian motion stage does not have site-local
   `cartesian_control.enable: true` and `cartesian_control.allow_in_real: true`.
 - Required confirmation flags are missing.
-- `force_control` is enabled or has a provider.
+- The config still carries a `force_control` section (removed from the schema).
 - P4 exceeds `--max-joint-delta-deg 0.05`.
 - P5 or later exceeds `--max-cartesian-step-m 0.005`.
 - P9 lacks explicit approval.

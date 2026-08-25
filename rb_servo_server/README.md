@@ -7,7 +7,7 @@ The server is designed for:
 1. fast mock-mode development without robots,
 2. Rainbow rbpodo real/controller-simulation backends through `IRobotBackend`,
 3. Python VLA / imitation policy integration through UDP commands,
-4. Cartesian TCP control and supervised experimental force/compliance control.
+4. Cartesian TCP control.
 
 ## Current status
 
@@ -32,13 +32,11 @@ Implemented in this server:
 - mandatory Pinocchio/Eigen FK, IK, and Cartesian math support
 - Cartesian command routing when kinematics and Cartesian config gates are
   enabled
-- F/T monitor, contact guard, unilateral normal admittance, and bounded 6D
-  Cartesian compliance; activation remains explicit per stack/arm
 - gripper command forwarding to the out-of-process `gripper_server`
 
 Still pending:
 
-- physical F/T characterization and force-control acceptance
+- force control (v1 removed 2026-08-26; CM-referenced rebuild pending)
 - measured camera/robot calibration
 - production promotion of worker I/O for real hardware
 
@@ -250,16 +248,17 @@ The C++ receive timestamp is used for timeout checks.
 
 ## Force-control status
 
-Force control is connected to the Cartesian servo path. The tracked real stack
-is currently at supervised Gate 3D: six-axis `cartesian_admittance`,
-`surface_source: none`, and `compliance_frame: tcp_origin`. The controller axes
-therefore follow the accepted rbpodo EFT/TCP orientation and corrections use the
-TCP endpoint. Translation and rotation each use block-coherent release
-recentering so sibling axes do not spring home independently and a common
-feasible jerk scale preserves the released 3D direction. Both geometric floor
-constraints are off by explicit operator decision, so this profile has no
-TCP/gripper-tip floor backstop. The simulation stack remains force-off. See
-`docs/force_control.md` and the acceptance runbook.
+**None.** The v1 project-native stack — F/T pipeline, contact guard, normal
+admittance, 6D Cartesian compliance, the `ExternalForceLimit` reflex, the rbpodo
+`sdata.eft_*` read, every force telemetry column, and the `force_torque:` /
+`force_control:` config sections — was removed on 2026-08-26. It is being
+rebuilt against `controller-manager` as the reference, starting from sensor and
+tool setup.
+
+A config that still carries `force_torque:` or `force_control:` now fails to
+load, and a command packet carrying `force_control` is refused at parse. The v1
+design pages and their measured evidence are audit-only under
+`docs/archive/force_control_v1/`.
 
 ## Viser operator GUI
 

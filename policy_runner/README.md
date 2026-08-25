@@ -195,23 +195,17 @@ metrics. Controller tracking remains visible in the normal action log, rollout
 summary, and pgmode state monitor. This path never authorizes physical-real
 motion and does not contact the live camera service.
 
-The tracked real flow profile enables `force_recovery` with
-`contact_behavior: continue` for the server-owned `cartesian_admittance` path.
-Soft contact remains visible in status, but it does not invalidate the active
-chunk, block inference, freeze the gripper, or emit a synthetic `Hold`; the
-server projects loading policy increments and applies bounded compliance. A
-hard force fault still increments the server `motion_epoch`, which invalidates
-cached/in-flight policy work through the normal epoch path.
+`force_recovery` was removed on 2026-08-26 with the server force stack it read
+(`force_control.contact_active` no longer exists in the state JSON). It is not a
+config section any more, so a profile that still declares it fails to load.
 
-`contact_behavior: recover` remains available for the legacy guarded path. In
-that mode either arm's `contact_active=true` invalidates cached/in-flight work,
-emits bimanual `Hold` with frozen gripper targets, and waits for contact clear,
-measured TCP settling, and a post-reset camera frame before one cold inference.
-Its contact and settling deadlines report `force_contact_timeout`,
-`force_settling_timeout`, or `camera_stale_timeout`. Live status and
-`rollout_summary.json` expose the selected behavior, blocker, phase timing,
-per-arm contact/force, TCP velocity, camera barrier, and worker generation.
-OpenPI velocity proprio remains measured `camera_frame` data in either mode.
+The server still increments `motion_epoch` on a free-drive exit resync, and that
+still invalidates cached/in-flight policy work through the normal epoch path.
+
+The camera-readiness guard survives on its own: it still reports
+`camera_stale_timeout` through `terminal_abort_reason`, and `rollout_summary.json`
+still exposes its blocker and phase timing. OpenPI velocity proprio remains
+measured `camera_frame` data.
 For velocity checkpoints, each inference now records whether both arms had a
 complete measured-pose bracket at `[camera_time - policy_dt, camera_time]`.
 The exact per-arm body deltas and any zero-substitution reason are included in
@@ -265,7 +259,7 @@ python3 scripts/analyze_rollout_step_log.py \
 Each `robotics_lab.policy_runner.rollout_step.v1` line carries the conditioned
 absolute stand-frame command pose, the state-selected measured/reference pose,
 the pre-FOH ee-local model delta, measured and commanded gripper openings, and
-available force-control/F/T telemetry for both arms. Missing telemetry is
+and gripper feedback age for both arms. Missing telemetry is
 recorded as `null`, never substituted with a guessed value. Without `--png`, or
 when matplotlib is unavailable, the analyzer still prints the text summary.
 

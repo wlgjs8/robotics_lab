@@ -71,7 +71,6 @@ pgmode-real(실제 RB3-730E 하드웨어)에서 구동/검증된 항목:
 - **정책 task 성공률** — rollout 모션은 부드럽지만 부정확(예: 좌완이 grasp 대신
   충돌). 런타임이 아니라 **모델 품질 / 데이터 커버리지 / appearance-domain gap**
   문제이며 init-pose 분포 매칭이 진행 중(`umi_init_from_grasp.py`)
-- default-off project-native F/T monitor/contact guard/normal admittance
 - 고속 물리 circle 단계 (15 cm / 16 s 이상, transition ladder P7–P9)
 - 실측 hand-eye / 카메라 calibration은 일반 geometry-의존 정책엔 여전히 미완이지만,
   **현재 배포된 pika Sense≡Gripper + ee_local + 이미지조건 정책에는 불필요**
@@ -201,37 +200,17 @@ tracked real rbpodo template의 supported safety range는 명시적 per-joint
 정규화는 control/safety/tracking/log source-of-truth에 쓰지 않습니다.
 자세한 내용은 `docs/joint_range_policy.md`를 봅니다.
 
-Project-native F/T monitor, contact guard, 법선방향 unilateral admittance,
-6D Cartesian compliance가 servo motion path에 통합되어 있습니다.
-`stack_real.yaml`의 force path는 현재 양팔 supervised Gate 3D 시험 프로파일인
-6축 Cartesian compliance입니다. `surface_source: none`과
-`compliance_frame: tcp_origin`을 사용하므로, URDF와 일치하는 +90도 FT
-sensor 축에서 순응 translation을 계산하고 TCP 끝점을 correction 원점으로
-사용합니다. GUI의 runtime FT control 기즈모가 시험 축의 기준이며 일반 TCP
-pose 기즈모는 X/Y force-axis 판정에 사용하지 않습니다.
-세 회전축 방향/복귀가 확인되어 Roll/Pitch/Yaw가 동일한 측정-noise 기반
-고감도 mass/damping/stiffness/deadband를 사용합니다. 명시적인 blockwise
-release recenter를 사용해 translation/rotation 내부의 일부 축만 먼저
-spring 복귀하지 않게 하고, 블록 전체 release 뒤에는 공통 feasible jerk scale로
-복귀 방향을 유지합니다. 어느 축이 hard motion-envelope recovery를 필요로 하면
-그 구간에는 축별 recovery jerk를 우선하고, 모든 축이 soft envelope로 돌아온 뒤
-공통 scale을 재개합니다. payload/COM 검증 전까지는 동일 시작 자세의 작은 각도
-Hold 시험으로 제한됩니다. 명시적인
-운영자 결정으로 stand/user geometric
-floor도 모두 꺼져 있어 TCP/gripper-tip floor velocity damper와 hard plane
-backstop이 없습니다. ROI, self-collision, tracking, lease/deadman, E-stop은
-유지되지만 wrist F/T는 upstream link 접촉을 모두 감지할 수 없습니다.
-상세 계약은 `rb_servo_server/docs/force_control.md`, 실센서 특성화와
-승격 evidence는 `docs/runbooks/ft_force_control_acceptance.md`에 기록합니다.
+Force control은 현재 **없습니다**. 2026-08-26에 v1 스택(F/T 파이프라인, contact
+guard, normal admittance, 6D Cartesian compliance, `eft_*` 하드웨어 읽기,
+설정/텔레메트리/GUI 연동)을 전부 제거했고, `controller-manager`를 레퍼런스로
+센서·툴 세팅부터 다시 포팅할 예정입니다. `force_control:` / `force_torque:`는
+더 이상 서버 설정 스키마에 없으므로, 해당 섹션이 남아 있는 config는 로드에
+실패합니다. v1의 실측 증거는 `docs/archive/force_control_v1/`에 audit 전용으로
+보관되어 있습니다.
 
-```yaml
-force_control:
-  provider: project_native
-  enable: true
-  operating_mode: cartesian_admittance
-  allow_in_real: true
-  supervised_experimental_real: true
-```
+geometric floor는 별개의 운영자 결정으로 stand/user 둘 다 꺼져 있어
+TCP/gripper-tip floor velocity damper와 hard plane backstop이 없습니다.
+ROI, self-collision, tracking, lease/deadman, E-stop은 유지됩니다.
 
 ## Motion Primitive 요약
 

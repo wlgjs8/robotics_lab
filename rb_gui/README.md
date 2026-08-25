@@ -42,65 +42,21 @@ still makes the authoritative accept/reject decision.
 
 ## F/T Sensor Visualization
 
-The scene deliberately separates two Robotous RFT64-6A01 frames. The small
-`ft_sensor_measurement` triad is loaded from the viewer URDF and represents the
-Pika/RFT sensor frame at the physical sensor origin, including its +90 degree
-yaw. Missing or invalid URDF data disables only this reference overlay instead
-of substituting a guessed transform.
-
-The larger runtime triad is driven exclusively by the server's resolved
-`force_control.compliance_frame_actual_stand` pose and its validity flag. The
-red force arrow is `control_wrench_compliance`, expressed under that same
-runtime frame; raw rbpodo EFT components are never drawn under the CAD axes.
-The runtime overlay fails closed on stale state, an invalid pose, or a disabled
-force controller. In the corrected real `tcp_origin` profile the small sensor
-triad and large runtime triad must be parallel and differ only in origin. The
-large runtime triad is the sole X/Y/Z reference for compliance testing; the
-generic TCP pose triad is not. Independent GUI checkboxes control the sensor
-and runtime overlays. All fields remain read-only; the GUI has no force-control
-enable or tuning control.
+Removed. The GUI had a sensor-CAD frame, a runtime compliance-frame triad with a
+force arrow, and an external-F/T monitor card. All three read state-JSON blocks
+that no longer exist, so they went with the server-side force stack on
+2026-08-26 rather than rendering permanent "invalid" cells.
 
 ## Gravity-Wrench / CoG Waypoint Calibration
 
-The `조작 -> CoG / Gravity model` tab identifies one of two server-selected models from saved
-joint waypoints. `rigid_payload` estimates physical payload mass and TCP-frame
-CoG. `controller_compensated_linear` estimates only the orientation-dependent
-residual left in controller-processed feedback; it is not a physical mass/CoG
-result. Create at least five safe, orientation-diverse WayPoints first (for
-example `joint1` through `joint10`), then choose the arm and matching prefix.
+Removed. The payload-identification session (lease acquire, per-pose target
+renew, disabled-reason gate, session end) identified tool mass and centre of
+mass from wrench samples and cannot work without a sensor. The server rejects
+`joint_target_profile: payload_identification` at parse, so the GUI no longer
+offers it.
 
-`Start` only freezes and validates the waypoint list and acquires the GUI lease;
-it sends no motion target. Robot motion is renewed only while the operator holds
-`Run/Continue`. The selected arm receives the ordinary leased/deadman
-`JointTarget` path with `joint_target_profile: payload_identification`; the other
-arm remains a stationary joint `Hold` and server-side force-Hold promotion is
-suppressed for both arms while each identification packet is active. Releasing
-the button lets the existing command timeout stop renewal. The operator-authored
-waypoint order is not collision-free planning, so the complete swept volume must
-be clear and an E-stop operator remains required.
-
-At each arrived/settled pose, the 100 Hz state callback collects unique fresh
-samples from one server state snapshot. Evidence schema v4 records
-`raw_sensor_wrench`, the effective `T_tcp_sensor`, `wrench_tcp`, `gravity_tcp`,
-actual joints, and the actual stand-frame TCP pose against the same freshness
-value. That profile must explicitly declare `observation_model`. A
-`rigid_payload` profile also requires `wrench_convention: payload_load |
-sensor_reaction`; the GUI never guesses the sign. A noisy pose is stopped for
-explicit Retry or Skip. For `controller_compensated_linear`, `Calculate` fits
-independent 3x3 force and torque maps in `wrench_tcp = A*gravity_tcp + bias`,
-reports held-out residuals, and emits a runtime-config candidate without the
-constant bias (the normal Init Motion tare owns that bias). `Save report`
-atomically publishes a successful
-provisional JSON/CSV evidence bundle under `logs/cog_calibration/<run_id>/`.
-If calculation or a fit bound rejects the capture, the GUI automatically saves
-the same raw samples with a `BLOCKED / NOT APPLIED` diagnostic report; rejected
-data is not lost merely because no payload estimate was accepted.
-
-Every result is labelled `PROVISIONAL / NOT APPLIED`. The GUI does not edit
-`stack_real.yaml`, `active_calibration.yaml`, or Rainbow controller payload
-settings. Entering the identification profile also leaves that arm's force
-motion inhibited after Stop/timeout; only a later successful Init Motion tare
-clears the inhibit and permits the normal Cartesian compliance path again.
+Both come back with the `controller-manager`-referenced rebuild. Archived v1
+design: `docs/archive/force_control_v1/`.
 
 ## Realtime Timing Health
 

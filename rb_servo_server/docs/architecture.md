@@ -66,7 +66,7 @@ sendServoJ
 ```text
 nominal TCP target
         ↓
-F/T pipeline + contact supervisor + NormalForceController
+(force control removed 2026-08-26; CM-referenced rebuild pending)
         ↓
 TCP compensation
         ↓

@@ -24,7 +24,7 @@ It does not prove:
 - real Cartesian/TCP readiness
 - RealSense readiness
 - gripper readiness
-- force/admittance/impedance readiness
+- force control of any kind (the v1 stack was removed 2026-08-26)
 - measured calibration validity
 
 ## Base Commands

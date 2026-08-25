@@ -74,7 +74,7 @@ Not yet production-ready:
 - policy task success — rollout motion is smooth but inaccurate (model quality /
   data coverage / appearance-domain gap, not runtime); init-pose distribution
   matching is in progress
-- force control
+- force control (v1 removed 2026-08-26; CM-referenced rebuild pending)
 - fast physical circle stages (15 cm / 16 s and above, transition ladder P7–P9)
 - measured camera/robot calibration remains `configured_estimate` and is still
   required for general geometry-dependent policy, but is not needed for the
@@ -357,59 +357,25 @@ Deprecated simulator config names are archived under `docs/archive/configs/`
 for historical reference only. They are not runnable source-of-truth profiles
 and must not be used for new smoke or acceptance evidence.
 
-Force control is integrated as a server-owned path: rbpodo EFT samples feed the
-compensated wrench pipeline, contact guard, unilateral surface-normal
-admittance, and bounded 6D Cartesian compliance before IK. In Cartesian
-compliance mode, soft contact preserves the active flow-infer chunk and gripper
-execution while loading translation/rotation increments are projected and a
-bounded SE(3) correction is composed around a fixed Hold or latest accepted
-policy-command equilibrium. Zero-wrench stiffness recenters all six offsets
-without absorbing measured motion into that equilibrium. The current real
-profile is a supervised six-axis Hold gate using `tcp_origin`: the
-controller follows the corrected +90 degree URDF/FT-axis orientation and
-applies the correction about the TCP endpoint. The runtime FT control gizmo,
-not the generic TCP pose gizmo, names the test axes. Gate 3C follows the
-roll/pitch/yaw direction/recenter capture and gives all three rotations one
-measured-noise-qualified sensitive profile. The common angular motion and
-hard-torque bounds are unchanged.
-The Cartesian controller selects jerk from a recursively viable braking
-envelope rather than integrating and clamping state. A same-direction wrench
-outside an axis deadband reserves a zero-velocity, zero-acceleration loaded
-hold without allowing the compliant offset to reverse toward zero; deadband
-release restores the nominal stiffness-driven recenter path. Recontact during
-that return is first jerk-bounded to a stop before the loaded-hold invariant
-takes ownership. If a noisy deadband transition makes no-reversal stopping
-temporarily unreachable, the ordinary jerk-safe envelope remains authoritative
-while the controller brakes toward a reachable loaded hold; this bounded
-transient no longer becomes an `ExternalForceLimit` fault. This preserves
-boundary braking, recontact, and release recentering authority without adding
-wrench averaging.
-The tracked real profile additionally couples release recentering within the
-three translation axes and within the three rotation axes. Sibling springs are
-deferred until their block is fully released, then one common feasible jerk
-scale preserves that block's return direction while every axis remains inside
-its recursively viable soft envelope. If any axis needs hard-envelope recovery,
-its per-axis recovery jerk remains authoritative; block coupling resumes after
-all axes re-enter the soft envelope. This removes the observed
-component-by-component zig-zag without allowing the direction preference to
-override a hard-limit recovery or mixing linear and angular units.
-Surface-normal and resultant hard-limit calculations remain in their existing
-TCP/stand path. Hard-limit faults retain the normal
-motion-epoch interruption path. Activation, telemetry, and promotion constraints are defined in
-`rb_servo_server/docs/force_control.md`. The path is not safety-rated;
-`stack_real.yaml` currently exposes a dual-arm supervised Gate 2 profile. Both
-geometric floor constraints are disabled by explicit operator decision, so the
-TCP/gripper-tip floor velocity damper and hard plane backstop are absent. This
-is a physical bring-up configuration, not production acceptance.
+Force control is **absent**. The v1 project-native stack (F/T pipeline, contact
+guard, unilateral surface-normal admittance, bounded 6D Cartesian compliance,
+the `ExternalForceLimit` reflex, and the rbpodo `sdata.eft_*` hardware read) was
+removed on 2026-08-26 to be rebuilt against `controller-manager` as the
+reference, starting from sensor and tool setup.
 
-```yaml
-force_control:
-  provider: project_native
-  enable: true
-  operating_mode: cartesian_admittance
-  allow_in_real: true
-  supervised_experimental_real: true
-```
+Nothing in the servo path reads or produces a wrench: `RobotState` has no
+wrench fields, the state JSON has no `force_torque` / `force_control` blocks,
+and `force_control:` / `force_torque:` are no longer server config sections — a
+config that still carries them fails to load rather than loading an inert block.
+A command packet carrying `force_control` is refused at parse for the same
+reason. The v1 design pages and their hardware-measured evidence are kept
+audit-only under `docs/archive/force_control_v1/`.
+
+Contact safety during the rebuild is therefore geometric and kinematic only:
+ROI box, self-collision velocity barrier, reach shell, tracking-error latch,
+lease/deadman, and the hardware E-stop. Both geometric floor constraints remain
+disabled by explicit operator decision, so there is no TCP/gripper-tip floor
+velocity damper or hard plane backstop either.
 
 ## Motion Primitive Contract
 
