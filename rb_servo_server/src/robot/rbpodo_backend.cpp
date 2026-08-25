@@ -1315,6 +1315,44 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
                       << " (this controller compensates the tool itself; the box's own "
                          "collision detection now sees the tool weight as external force)\n";
         }
+        // TELL THE BOX WHERE THE TCP IS. Our own motion does not depend on this — FK
+        // and IK are Pinocchio's and we stream joint targets — but the box's
+        // COLLISION DETECTION and every Cartesian number it reports do, and not
+        // sending it leaves the box believing whatever the pendant or
+        // controller-manager last set. Same argument as the zero payload above:
+        // stating it is a fact, leaving it is an unknown.
+        //
+        // The value is flange -> TCP = eft.offset + tool.xyz, which is the SAME
+        // composition controller-manager pushes (Arm::sync_tool_info) and the same
+        // 247.642 mm the URDF's tcp_joint places the pika fingertip plane at.
+        if (impl_->config.push_tcp) {
+            rb::podo::ResponseCollector responses;
+            const std::array<double, 6> tcp{
+                impl_->config.tcp_xyz_mm[0], impl_->config.tcp_xyz_mm[1],
+                impl_->config.tcp_xyz_mm[2], impl_->config.tcp_rpy_deg[0],
+                impl_->config.tcp_rpy_deg[1], impl_->config.tcp_rpy_deg[2]};
+            const auto ret = impl_->robot->set_tcp_info(
+                responses, tcp, kInitializeCommandAckTimeoutSec);
+            if (impl_->config.disable_waiting_ack) {
+                rb::podo::ResponseCollector drained;
+                impl_->robot->flush(drained);
+            }
+            if (!ret.is_success()) {
+                // NOT fatal, unlike the payload: a wrong box TCP does not corrupt our
+                // wrench (the F/T pipeline references the sensor origin and shifts it
+                // itself), it only leaves the box's own numbers disagreeing with ours.
+                // Warn loudly rather than refuse to start.
+                std::cerr << "[WARN] RbpodoBackend could not push the TCP to "
+                          << impl_->config.name
+                          << " - the box keeps whatever TCP it had, so its collision "
+                             "detection and Cartesian reports disagree with this server\n";
+            } else {
+                std::cerr << "[INFO] RbpodoBackend pushed box TCP for " << impl_->config.name
+                          << " = [" << tcp[0] << ", " << tcp[1] << ", " << tcp[2]
+                          << "] mm rpy [" << tcp[3] << ", " << tcp[4] << ", " << tcp[5]
+                          << "] deg (eft.offset + tool.xyz)\n";
+            }
+        }
         auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
         if (!state) {
             std::cerr << "[ERROR] RbpodoBackend initialize failed: no state from "

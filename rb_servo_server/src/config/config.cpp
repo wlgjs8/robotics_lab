@@ -1602,6 +1602,36 @@ void validateConfig(const DualArmConfig& cfg) {
     if (cfg.servo.realtime_priority < 1 || cfg.servo.realtime_priority > 99) {
         throw std::runtime_error("servo.realtime_priority must be in [1, 99]");
     }
+    // Worker RT scheduling. 0 = off; otherwise the same [1, 99] band as the loop.
+    if (cfg.servo.worker_realtime_priority != 0 &&
+        (cfg.servo.worker_realtime_priority < 1 || cfg.servo.worker_realtime_priority > 99)) {
+        throw std::runtime_error(
+            "servo.worker_realtime_priority must be 0 (off) or in [1, 99]");
+    }
+    // A worker pinned onto the loop's own core would contend with the thing it is
+    // supposed to feed, on a core chosen precisely so nothing else runs there.
+    // Refuse rather than let a plausible-looking config quietly serialise them.
+    for (const auto& [core, name] : {
+             std::pair<int, const char*>{cfg.servo.worker_cpu_core_left, "servo.worker_cpu_core_left"},
+             std::pair<int, const char*>{cfg.servo.worker_cpu_core_right, "servo.worker_cpu_core_right"}}) {
+        if (core >= 0 && cfg.servo.cpu_core >= 0 && core == cfg.servo.cpu_core) {
+            throw std::runtime_error(
+                std::string(name) + " must not equal servo.cpu_core (the loop's core)");
+        }
+    }
+    if (cfg.servo.worker_cpu_core_left >= 0 &&
+        cfg.servo.worker_cpu_core_left == cfg.servo.worker_cpu_core_right) {
+        throw std::runtime_error(
+            "servo.worker_cpu_core_left and _right must differ: the two arms' cadences "
+            "are independent and sharing a core reintroduces the contention pinning removes");
+    }
+    // Pinning without FIFO is the trap this setting exists to avoid: the worker
+    // gets a dedicated core but still yields to any CFS thread that lands there.
+    if ((cfg.servo.worker_cpu_core_left >= 0 || cfg.servo.worker_cpu_core_right >= 0) &&
+        cfg.servo.worker_realtime_priority == 0) {
+        throw std::runtime_error(
+            "servo.worker_cpu_core_* requires servo.worker_realtime_priority > 0");
+    }
     if (cfg.servo.spin_slack_us < 0) {
         throw std::runtime_error("servo.spin_slack_us must be >= 0");
     }
@@ -2405,6 +2435,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "enable_realtime_priority",
             "realtime_priority",
             "cpu_core",
+            "worker_realtime_priority",
+            "worker_cpu_core_left",
+            "worker_cpu_core_right",
             "spin_slack_us",
             "worker_read_period_sec",
             "worker_state_max_age_periods",
@@ -2496,6 +2529,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         }
         if (has(sec, "enable_realtime_priority")) cfg.servo.enable_realtime_priority = asBool(sec["enable_realtime_priority"], "servo.enable_realtime_priority");
         if (has(sec, "realtime_priority")) cfg.servo.realtime_priority = asInt(sec["realtime_priority"], "servo.realtime_priority");
+        if (has(sec, "worker_realtime_priority")) cfg.servo.worker_realtime_priority = asInt(sec["worker_realtime_priority"], "servo.worker_realtime_priority");
+        if (has(sec, "worker_cpu_core_left")) cfg.servo.worker_cpu_core_left = asInt(sec["worker_cpu_core_left"], "servo.worker_cpu_core_left");
+        if (has(sec, "worker_cpu_core_right")) cfg.servo.worker_cpu_core_right = asInt(sec["worker_cpu_core_right"], "servo.worker_cpu_core_right");
         if (has(sec, "cpu_core")) cfg.servo.cpu_core = asInt(sec["cpu_core"], "servo.cpu_core");
         if (has(sec, "spin_slack_us")) cfg.servo.spin_slack_us = asInt(sec["spin_slack_us"], "servo.spin_slack_us");
         if (has(sec, "worker_read_period_sec") && has(sec, "worker_read_rate_hz")) {
@@ -3528,6 +3564,21 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
     // ONE ANSWER, DECIDED IN ONE PLACE. The zero-payload push is a property of the
     // F/T setup, not of a backend, but the backend is what talks to the box - so it
     // is resolved here rather than branched at the use site.
+    // The box is told where the TCP is, for the same reason it is told the payload:
+    // not telling it leaves it believing whatever the pendant or controller-manager
+    // last set. Our own motion does not depend on it (FK/IK are Pinocchio's and we
+    // stream joint targets), but the box's collision detection and every Cartesian
+    // number it reports do.
+    const auto arm_tcp = [](const FtArmConfig& a, std::array<double, 3>* xyz,
+                            std::array<double, 3>* rpy) {
+        for (int i = 0; i < 3; ++i) (*xyz)[i] = a.sensor_offset_mm[i] + a.tool_xyz_mm[i];
+        *rpy = a.tool_rpy_deg;
+    };
+    arm_tcp(cfg.force_torque.left, &cfg.left_robot.tcp_xyz_mm, &cfg.left_robot.tcp_rpy_deg);
+    arm_tcp(cfg.force_torque.right, &cfg.right_robot.tcp_xyz_mm, &cfg.right_robot.tcp_rpy_deg);
+    cfg.left_robot.push_tcp = cfg.force_torque.enable && cfg.force_torque.left.enable;
+    cfg.right_robot.push_tcp = cfg.force_torque.enable && cfg.force_torque.right.enable;
+
     cfg.left_robot.push_zero_payload =
         cfg.force_torque.enable && cfg.force_torque.push_zero_payload_to_box &&
         cfg.force_torque.left.enable;

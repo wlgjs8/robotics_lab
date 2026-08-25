@@ -3,11 +3,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <utility>
 
 #include "rb_servo/core/clock.hpp"
+#include "rb_servo/core/realtime.hpp"
 
 namespace rb_servo {
 namespace {
@@ -483,6 +485,25 @@ std::string ArmWorker::name() const {
 }
 
 void ArmWorker::run() {
+    // This worker's RT setup, before any backend I/O. When queue_sync is on this
+    // thread owns its arm's 500 Hz send cadence, so it is an RT thread by role.
+    // Pin FIRST, then raise priority: a thread that is already FIFO can preempt
+    // whatever it lands on while the affinity call is still pending.
+    //
+    // Both failures are logged LOUDLY and neither is fatal. That asymmetry is
+    // deliberate: a refused SCHED_FIFO leaves a worker that still sends on time
+    // most of the time, so the fallback looks perfectly healthy and the tail
+    // regression it causes is exactly the one this setting exists to remove.
+    if (options_.cpu_core >= 0 && !pinCurrentThreadToCpu(options_.cpu_core)) {
+        std::cerr << "[WARN] ArmWorker: could not pin to cpu" << options_.cpu_core
+                  << "; the send cadence will share the housekeeping cores\n";
+    }
+    if (options_.realtime_priority > 0 &&
+        !setCurrentThreadRealtimePriority(options_.realtime_priority)) {
+        std::cerr << "[WARN] ArmWorker: could not set SCHED_FIFO priority "
+                  << options_.realtime_priority
+                  << "; the cadence owner is running on CFS\n";
+    }
     bool backend_ready = false;
 
     updateStartupPhase("connect_entered");

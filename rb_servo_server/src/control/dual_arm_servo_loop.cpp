@@ -1905,8 +1905,12 @@ DualArmServoLoop::DualArmServoLoop(
 
     // ---- force control ------------------------------------------------------
     const double control_period_sec = 1.0 / std::max(1, config.servo.rate_hz);
-    left_ft_pipeline_.configure(config.force_torque.left, control_period_sec);
-    right_ft_pipeline_.configure(config.force_torque.right, control_period_sec);
+    // config_, NOT the constructor's `config` parameter. FtPipeline keeps a POINTER
+    // to the arm config it is handed, and the parameter is the CALLER's object: a
+    // caller that passes a temporary would leave the force pipeline reading freed
+    // memory on the RT loop. config_ is this loop's own copy and outlives it.
+    left_ft_pipeline_.configure(config_.force_torque.left, control_period_sec);
+    right_ft_pipeline_.configure(config_.force_torque.right, control_period_sec);
     left_overlay_.configure(config.force_control, control_period_sec);
     right_overlay_.configure(config.force_control, control_period_sec);
     left_force_gate_.configure(config.force_control, control_period_sec);

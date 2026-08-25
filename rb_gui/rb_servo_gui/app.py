@@ -2314,6 +2314,27 @@ def _render_ft_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> str
         rows.append(_operator_monitor_row("dTy [Nm]", escape(f"{ty:+.3f}")))
         rows.append(_operator_monitor_row("dTz [Nm]", escape(f"{tz:+.3f}")))
         rows.append(_operator_monitor_row("|dT| [Nm]", escape(f"{t_mag:.3f}")))
+        # THE MOMENT ARM: |dT| / |dF|, the perpendicular distance from the reference
+        # point to the line of action of the measured force. This is the ONE number
+        # that settles "is the wrench really referenced at the fingertip":
+        #
+        #   push exactly ON the fingertip  -> lever ~ 0 mm     (reference is the TCP)
+        #   push exactly ON the fingertip  -> lever ~ 203 mm   (reference is still the
+        #                                                       sensor origin)
+        #
+        # Anywhere else on the tool it reads the real distance back from the fingertip
+        # to where the hand is, which is also worth knowing: it says how much of what
+        # you feel is torque rather than force.
+        # |M| / |F| is the MOMENT ARM: the perpendicular distance from the reference
+        # point to the force's line of action. It is frame-free — no assumption about
+        # which axis the tool points along — which is what makes it usable as a check.
+        # Below ~3 N the deadzoned wrench is mostly the band's residue and the ratio
+        # is noise, so it is not shown.
+        if f_mag > 3.0:
+            rows.append(_operator_monitor_row(
+                "lever [mm]", escape(f"{t_mag / f_mag * 1e3:.0f}")))
+        else:
+            rows.append(_operator_monitor_row("lever [mm]", escape("--")))
         # The tool-load estimate is the one channel that ESCAPES the deadzone (a
         # heavy low-pass on the pre-deadzone force), so it reads the ~200 g the
         # 2 N band flattens to zero above.

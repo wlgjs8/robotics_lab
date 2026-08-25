@@ -6459,6 +6459,40 @@ class FtMonitorRenderTest(unittest.TestCase):
         self.assertIn("25.0", html)   # 10 N / 400 N/m = 25 mm, the designed number
         self.assertIn("0.31", html)
 
+    def test_moment_arm_is_the_reference_point_check(self):
+        """|M| / |F| is the perpendicular distance from the REFERENCE POINT to the
+        force's line of action, and it is what settles an argument about which point
+        the wrench is referenced at: push on the fingertip and it reads ~0 mm if the
+        reference is the TCP, ~203 mm if it is still the sensor origin.
+
+        Frame-free on purpose — it assumes nothing about which axis the tool points
+        along, which a per-axis version would.
+        """
+        # 10 N along stand X with 2.03 Nm about stand Y: a point force 203 mm away.
+        state = self._state({
+            "enabled": True, "connected": True, "bias_valid": True,
+            "comp_stand_axes_at_tcp": [10.0, 0.0, 0.0, 0.0, 2.03, 0.0],
+        })
+        self.assertIn("203", _render_ft_monitor_rows(state, stale=False))
+
+        # The same force with no torque: the line of action passes through the
+        # reference point.
+        state = self._state({
+            "enabled": True, "connected": True, "bias_valid": True,
+            "comp_stand_axes_at_tcp": [10.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        })
+        html = _render_ft_monitor_rows(state, stale=False)
+        self.assertRegex(html, r"lever \[mm\]</span><span>0<")
+
+    def test_moment_arm_is_hidden_under_the_deadband_residue(self):
+        """Below a few N the deadzoned wrench is mostly the band's residue, and the
+        ratio of two near-zero numbers is noise, not a measurement."""
+        state = self._state({
+            "enabled": True, "connected": True, "bias_valid": True,
+            "comp_stand_axes_at_tcp": [0.4, 0.0, 0.0, 0.0, 0.05, 0.0],
+        })
+        self.assertIn("--", _render_ft_monitor_rows(state, stale=False))
+
     def test_names_a_law_that_is_on_but_not_covering(self):
         state = self._state(
             {

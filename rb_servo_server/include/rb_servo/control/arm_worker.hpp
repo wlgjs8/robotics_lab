@@ -29,6 +29,10 @@ struct ArmWorkerOptions {
     // a single loop has one period for two boxes running two different clocks.
     uint64_t send_period_ns = 0;
     QueueSyncConfig queue_sync;
+    // RT scheduling for THIS worker's thread, applied once at thread entry.
+    // 0 / -1 = leave it alone. See ServoConfig::worker_realtime_priority.
+    int realtime_priority = 0;
+    int cpu_core = -1;
     std::size_t lifecycle_queue_capacity = 4;
     bool rbpodo_async_streaming_enabled = false;
     RbpodoAsyncStreamingMode rbpodo_async_streaming_mode =

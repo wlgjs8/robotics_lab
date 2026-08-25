@@ -510,6 +510,17 @@ void ServoLogger::writeHeader() {
     for (int i = 0; i < kDof; ++i) file_ << ",left_q_ref_" << i;
     for (int i = 0; i < kDof; ++i) file_ << ",right_q_ref_" << i;
     file_ << ",left_q_ref_valid,right_q_ref_valid,left_q_actual_valid,right_q_actual_valid";
+    // WHICH read path produced this tick's state, and whether it was a fresh frame
+    // or a held cache. One of:
+    //   CobotData.request_data          blocking path, fresh
+    //   last_state_cache (read-miss hold)  blocking path, timed out -> held
+    //   CobotData.pipelined             pipelined path, fresh frame drained
+    //   CobotData.pipelined(held)       pipelined path, nothing arrived -> held
+    // The hold fraction is the number that decides whether the pipelined read is
+    // usable on real hardware, and `state_age_us` alone cannot show it: a held
+    // state keeps its ORIGINAL host_time_ns, so age is honest, but a fresh frame
+    // and a held one are otherwise indistinguishable in the log.
+    file_ << ",left_state_source,right_state_source";
     // Rainbow control-box command-queue occupancy from the RBACK ACK stream
     // (firmware v8.7.3+ reports a meaningful fill). -1 means no RBACK has been
     // parsed on this connection -- distinct from a genuine empty-queue 0.
@@ -1181,6 +1192,8 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << ',' << sample.right_state.q_ref_valid
           << ',' << sample.left_state.q_actual_valid
           << ',' << sample.right_state.q_actual_valid;
+    file_ << ',' << csvEscape(sample.left_state.rbpodo_sdk_state_source)
+          << ',' << csvEscape(sample.right_state.rbpodo_sdk_state_source);
     for (const RbpodoQueueAckTelemetry* q : {&sample.left_queue_ack, &sample.right_queue_ack}) {
         file_ << ',' << q->observed
               << ',' << q->fill

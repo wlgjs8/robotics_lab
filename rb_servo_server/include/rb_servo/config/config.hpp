@@ -70,6 +70,13 @@ struct BackendConfig {
     // the F/T output and this server owns the tool's gravity compensation. Set from
     // force_torque.push_zero_payload_to_box; never spelled per-arm in yaml.
     bool push_zero_payload = false;
+    // flange -> TCP [mm] and its rpy [deg], pushed to the control box at init so the
+    // box's own Cartesian functions and collision detection agree with ours about
+    // where the tool is. Derived from force_torque.<arm> (sensor_offset + tool_xyz);
+    // never spelled per-arm in yaml. push_tcp gates it.
+    bool push_tcp = false;
+    std::array<double, 3> tcp_xyz_mm{{0.0, 0.0, 0.0}};
+    std::array<double, 3> tcp_rpy_deg{{0.0, 0.0, 0.0}};
     bool state_read_pipelined = false;
     bool allow_controller_simulation_diagnostics_suspect = false;
     bool controller_simulation_treat_unreliable_status_fields_as_unavailable = false;
@@ -798,6 +805,20 @@ struct ServoConfig {
     bool enable_realtime_priority = true;
     int realtime_priority = 80;
     int cpu_core = -1;
+    // Per-arm WORKER real-time scheduling. Distinct from the loop's settings
+    // above. With queue_sync on, the worker OWNS its arm's 500 Hz send cadence,
+    // so it is a real-time thread by role -- but it was created as a plain
+    // SCHED_OTHER thread with no affinity while the loop got FIFO + a pinned
+    // isolated core. Measured 2026-08-26 on the real stack: worker-cached state
+    // age sits at ~1 ms median (exactly half the 2 ms read period -- the healthy
+    // inter-thread phase offset) with a tail to 7.6 ms against an 8 ms budget.
+    // That tail did NOT correlate with reqdata duration or with a lengthened send
+    // period, i.e. the thread simply was not scheduled. Mirrors
+    // controller-manager's Arm::run (set_affinity(cpu) + set_fifo(80)).
+    // 0 / -1 leave the thread untouched (default), so this is opt-in per config.
+    int worker_realtime_priority = 0;
+    int worker_cpu_core_left = -1;
+    int worker_cpu_core_right = -1;
     // Hybrid sleep-then-spin tail (microseconds). 0 = plain sleep_until (default,
     // unchanged). When > 0 the loop sleeps until `slack` before the tick, then
     // busy-spins the last `slack` so wake-up carries no C-state/scheduler jitter.
