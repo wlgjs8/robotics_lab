@@ -1,6 +1,6 @@
 # Wiki Index
 
-> 2 pages | Last updated: 2026-07-12T08:29:21.195Z
+> 3 pages | Last updated: 2026-08-25T10:03:33.438Z
 
 ## decision
 
@@ -9,3 +9,4 @@
 ## reference
 
 - [PIKA UMI Motion Distribution Baseline](pika-umi-motion-distribution-baseline.md) — # PIKA UMI Motion Distribution Baseline
+- [Rainbow Control Box Servo J Latency (firmware v8.6.1)](rainbow-control-box-servo-j-latency-fw-v8-6-1.md) — # Rainbow Control Box Servo J Latency (firmware v8.6.1)

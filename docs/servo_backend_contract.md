@@ -684,6 +684,25 @@ Required log and state fields for review include:
 - M561/M568/M569/M570 when available
 - `q_ref` and `q_actual`
 
+### Joint-Space Reference Readback in the Servo CSV
+
+The servo CSV carries all three joint-space signals at the servo tick rate
+(500 Hz on the rbpodo real stack), so control-box behaviour is reconstructable
+offline without a live UDP consumer:
+
+- `<arm>_q_sent_<0..5>` — the servo_j target handed to the control box
+- `<arm>_q_ref_<0..5>` — the controller's own reference readback
+  (`rbpodo sdata.jnt_ref`, the same vector published as `q_ref_deg` /
+  `q_target_deg` in the state JSON)
+- `<arm>_q_actual_<0..5>` — encoder position
+- `<arm>_q_ref_valid`, `<arm>_q_actual_valid` — per-tick validity, so a stale or
+  undecodable readback is distinguishable from a genuine hold
+
+`tcp_ref_stand` remains FK of `q_ref`, not an independent controller field.
+`scripts/analyze_box_latency.py` consumes these columns to decompose the
+sent -> ref -> actual delay; it fails closed on logs recorded before the q_ref
+columns existed rather than substituting q_sent for the readback.
+
 ### Direct `request_data()` Packet Timing
 
 The direct rbpodo state-read path records a `BackendReadExchangeTiming` for

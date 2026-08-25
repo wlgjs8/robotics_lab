@@ -954,6 +954,27 @@ struct BackendTransportTelemetry {
     std::string last_transport_error_kind;
 };
 
+// Rainbow control-box command-queue occupancy, parsed from the "RBACK[<n>]"
+// ACK the firmware returns on the COMMAND channel for every streamed command.
+// n is the box's queue fill at the moment it received that command -- the only
+// direct window into box-side scheduling depth. Firmware v8.7.3 reports a
+// meaningful occupancy here.
+//
+// fill stays -1 until a token is actually parsed: absence is reported, never
+// defaulted to 0, because 0 is itself a legal (empty-queue) reading.
+struct RbpodoQueueAckTelemetry {
+    bool observed = false;              // at least one RBACK parsed on this connection
+    int fill = -1;                      // latest occupancy; -1 = never observed
+    int fill_min = -1;
+    int fill_max = -1;
+    uint64_t sequence = 0;              // increments per parsed RBACK (freshness)
+    uint64_t parsed_total = 0;          // RBACK tokens parsed since connect
+    uint64_t drained_total = 0;         // responses drained since connect
+    uint64_t malformed_total = 0;       // drained text containing "RBACK" that did not parse
+    uint64_t drained_this_send = 0;     // responses drained by this send
+    uint64_t parsed_this_send = 0;      // RBACK tokens parsed by this send
+};
+
 struct LatchedFaultContextSnapshot {
     std::string verdict = "Ok";
     std::string domain = "None";
@@ -1092,6 +1113,9 @@ struct ServoSample {
 
     JointArray left_sent_q_deg{};
     JointArray right_sent_q_deg{};
+
+    RbpodoQueueAckTelemetry left_queue_ack;
+    RbpodoQueueAckTelemetry right_queue_ack;
 
     bool left_send_ok = false;
     bool right_send_ok = false;

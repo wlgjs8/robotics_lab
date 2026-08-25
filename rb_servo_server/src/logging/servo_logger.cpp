@@ -547,6 +547,28 @@ void ServoLogger::writeHeader() {
     for (int i = 0; i < kDof; ++i) file_ << ",right_q_actual_" << i;
     for (int i = 0; i < kDof; ++i) file_ << ",left_q_sent_" << i;
     for (int i = 0; i < kDof; ++i) file_ << ",right_q_sent_" << i;
+    // Rainbow controller reference readback (rbpodo sdata.jnt_ref, mirrored to
+    // the state JSON as q_ref_deg/q_target_deg). This is the only joint-space
+    // window into what the control box did with the servo_j stream, so offline
+    // box-latency analysis needs it at tick rate alongside q_sent/q_actual.
+    for (int i = 0; i < kDof; ++i) file_ << ",left_q_ref_" << i;
+    for (int i = 0; i < kDof; ++i) file_ << ",right_q_ref_" << i;
+    file_ << ",left_q_ref_valid,right_q_ref_valid,left_q_actual_valid,right_q_actual_valid";
+    // Rainbow control-box command-queue occupancy from the RBACK ACK stream
+    // (firmware v8.7.3+ reports a meaningful fill). -1 means no RBACK has been
+    // parsed on this connection -- distinct from a genuine empty-queue 0.
+    for (const char* side : {"left", "right"}) {
+        file_ << ',' << side << "_rback_observed"
+              << ',' << side << "_rback_fill"
+              << ',' << side << "_rback_fill_min"
+              << ',' << side << "_rback_fill_max"
+              << ',' << side << "_rback_seq"
+              << ',' << side << "_rback_parsed_total"
+              << ',' << side << "_rback_drained_total"
+              << ',' << side << "_rback_malformed_total"
+              << ',' << side << "_rback_drained_this_send"
+              << ',' << side << "_rback_parsed_this_send";
+    }
     file_ << ",left_error_code,right_error_code";
     writeCartesianSolveHeader(file_, "left");
     writeCartesianSolveHeader(file_, "right");
@@ -1258,6 +1280,24 @@ void ServoLogger::writeSample(const ServoSample& sample) {
     for (double v : sample.right_state.q_actual_deg) file_ << ',' << v;
     for (double v : sample.left_sent_q_deg) file_ << ',' << v;
     for (double v : sample.right_sent_q_deg) file_ << ',' << v;
+    for (double v : sample.left_state.q_target_deg) file_ << ',' << v;
+    for (double v : sample.right_state.q_target_deg) file_ << ',' << v;
+    file_ << ',' << sample.left_state.q_ref_valid
+          << ',' << sample.right_state.q_ref_valid
+          << ',' << sample.left_state.q_actual_valid
+          << ',' << sample.right_state.q_actual_valid;
+    for (const RbpodoQueueAckTelemetry* q : {&sample.left_queue_ack, &sample.right_queue_ack}) {
+        file_ << ',' << q->observed
+              << ',' << q->fill
+              << ',' << q->fill_min
+              << ',' << q->fill_max
+              << ',' << q->sequence
+              << ',' << q->parsed_total
+              << ',' << q->drained_total
+              << ',' << q->malformed_total
+              << ',' << q->drained_this_send
+              << ',' << q->parsed_this_send;
+    }
     file_ << ',' << sample.left_state.error_code << ',' << sample.right_state.error_code;
     writeCartesianSolveColumns(file_, sample.left_cartesian_solve);
     writeCartesianSolveColumns(file_, sample.right_cartesian_solve);

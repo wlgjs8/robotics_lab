@@ -5429,6 +5429,8 @@ void DualArmServoLoop::loopMain() {
         sample.right_last_read = readCallSnapshot(right_state_result, right_read_fault);
         sample.left_last_send = sendCallSnapshot(left_send_result);
         sample.right_last_send = sendCallSnapshot(right_send_result);
+        sample.left_queue_ack = left_send_result.queue_ack;
+        sample.right_queue_ack = right_send_result.queue_ack;
         sample.left_cartesian_solve = left_last_cartesian_solve_;
         sample.right_cartesian_solve = right_last_cartesian_solve_;
         mergeAbcTelemetry(sample.left_cartesian_solve, left_abc_telemetry_,

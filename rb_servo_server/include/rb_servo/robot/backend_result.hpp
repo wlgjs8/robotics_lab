@@ -90,6 +90,7 @@ struct SendServoJResult {
     bool rbpodo_waiting_ack = false;
     std::string acceptance_semantics = "unknown";
     JointArray requested_q_deg{};
+    RbpodoQueueAckTelemetry queue_ack;
 };
 
 struct ArmSendResult {

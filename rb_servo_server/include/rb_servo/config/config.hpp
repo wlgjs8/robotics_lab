@@ -836,6 +836,36 @@ struct LoggingConfig {
     size_t queue_capacity = 4096;
 };
 
+// Rainbow control-box command-queue regulation (see
+// rb_servo/control/queue_sync_controller.hpp for the plant, the actuator and
+// the provenance of every gain). Fail-closed: disabled by default, because
+// enabling it changes what reaches the box on a real-motion path.
+//
+// Gains are controller-manager's, converted from its period-trim actuator to
+// this server's send-skip actuator via f = adj_us / 2000. Do not retune one
+// side without re-deriving the other.
+struct QueueSyncConfig {
+    bool enable = false;
+    int target_fill = 5;                    // occupancy setpoint == box dead time in ticks
+    int protect_fill = 1;                   // at/below this, never skip (underrun protection)
+    double lpf_alpha = 0.02;                // fill low-pass; ~0.1 s at 500 Hz
+    double kp_above = 0.003;                // skip-fraction per fill above target (CM 6 us)
+    double kp_below = 0.009;                // per fill below target (CM 18 us)
+    double ki = 0.000003;                   // per fill per cycle (CM 0.006 us)
+    double integral_clamp = 0.0125;         // (CM 25 us)
+    double skip_fraction_max = 0.5;         // Track cap. 0.5 also guarantees no two
+                                            // consecutive skips, keeping the stream gap
+                                            // under servo_soft_entry_rearm_gap_sec.
+    double drain_skip_fraction = 0.1;       // Drain floor (CM 200 us)
+    double drain_skip_per_fill = 0.002;     // Drain proportional term (CM 4 us/fill)
+    int redrain_fill_margin = 15;           // Track -> Drain on a queue rebase
+    int highwater_fill = 500;               // absurd backlog -> event
+    double warmup_min_sec = 0.4;            // let the box startup transient develop
+    double warmup_max_sec = 1.2;
+    double drain_timeout_sec = 8.0;
+    int stall_cycles = 25;                  // no fresh RBACK for this many ticks -> event
+};
+
 struct ScopeConfig {
     bool enable = false;
     int publish_rate_hz = 100;
@@ -1388,6 +1418,7 @@ struct DualArmConfig {
     CommandSourceConfig command_source;
     LoggingConfig logging;
     ScopeConfig scope;
+    QueueSyncConfig queue_sync;
     ForceTorqueConfig force_torque;
     ForceControlConfig force_control;
     CartesianControlConfig cartesian_control;

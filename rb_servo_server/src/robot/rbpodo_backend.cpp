@@ -646,6 +646,53 @@ std::optional<RobotState> recentStateCache(
     return cached_state;
 }
 
+// Fold "RBACK[<n>]" tokens out of drained command-channel text into queue
+// telemetry. n is the control box's command-queue occupancy at receive time.
+//
+// The SDK hands back newline-split messages, so a token is normally whole. Text
+// that mentions RBACK but yields no complete token is COUNTED (malformed_total)
+// rather than dropped, so a firmware or wire-format change surfaces as a rising
+// counter instead of a silently frozen fill value.
+void foldRbackResponses(const rb::podo::ResponseCollector& drained,
+                        RbpodoQueueAckTelemetry* out) {
+    if (out == nullptr) return;
+    static constexpr char kToken[] = "RBACK[";
+    static constexpr std::size_t kTokenLen = sizeof(kToken) - 1;
+    for (const rb::podo::Response& response : drained) {
+        const std::string& raw = response.raw();
+        out->drained_total += 1;
+        out->drained_this_send += 1;
+        bool parsed_any = false;
+        std::size_t pos = raw.find(kToken);
+        while (pos != std::string::npos) {
+            std::size_t cursor = pos + kTokenLen;
+            int value = 0;
+            bool has_digit = false;
+            while (cursor < raw.size() && raw[cursor] >= '0' && raw[cursor] <= '9') {
+                value = value * 10 + (raw[cursor] - '0');
+                ++cursor;
+                has_digit = true;
+            }
+            if (has_digit && cursor < raw.size() && raw[cursor] == ']') {
+                out->observed = true;
+                out->fill = value;
+                out->fill_min = (out->fill_min < 0) ? value : std::min(out->fill_min, value);
+                out->fill_max = (out->fill_max < 0) ? value : std::max(out->fill_max, value);
+                out->sequence += 1;
+                out->parsed_total += 1;
+                out->parsed_this_send += 1;
+                parsed_any = true;
+                pos = raw.find(kToken, cursor);
+            } else {
+                pos = raw.find(kToken, pos + kTokenLen);
+            }
+        }
+        if (!parsed_any && raw.find("RBACK") != std::string::npos) {
+            out->malformed_total += 1;
+        }
+    }
+}
+
 std::string responseCollectorText(const rb::podo::ResponseCollector& responses) {
     std::ostringstream out;
     out << responses;
@@ -788,6 +835,10 @@ struct RbpodoBackend::Impl {
     // re-arms when the stream resumes after a gap (see sendServoJ()).
     uint64_t servo_engage_ramp_start_ns = 0;
     uint64_t last_servo_j_send_ns = 0;
+
+    // Control-box command-queue occupancy from the RBACK ACK stream. Reset on
+    // (re)initialize so a reconnect never reports a pre-reconnect fill.
+    RbpodoQueueAckTelemetry queue_ack;
 
 #ifdef RB_SERVO_ENABLE_RBPODO
     std::unique_ptr<rb::podo::Cobot<>> robot;
@@ -976,6 +1027,7 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
     // (re)initialize eases into the transparent gain instead of clunking.
     impl_->servo_engage_ramp_start_ns = 0;
     impl_->last_servo_j_send_ns = 0;
+    impl_->queue_ack = RbpodoQueueAckTelemetry{};
     try {
         bool operation_mode_switch_confirmed = false;
         bool activation_confirmed = false;
@@ -1650,8 +1702,11 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
 #else
     const std::optional<RobotState> cached_state = recentStateCache(impl_->last_state_cache, nowSteadyNs());
     const char* cached_source = cached_state.has_value() ? "cache" : "none";
+    impl_->queue_ack.drained_this_send = 0;
+    impl_->queue_ack.parsed_this_send = 0;
     const auto with_ack_metadata = [&](SendServoJResult result, bool ack_observed, double ack_wait_duration_us) {
         annotateRbpodoAckResult(&result, impl_->config, ack_wait_duration_us, ack_observed);
+        result.queue_ack = impl_->queue_ack;
         return result;
     };
     if (!impl_->connected || !impl_->robot) {
@@ -1806,6 +1861,11 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
         if (impl_->config.disable_waiting_ack) {
             rb::podo::ResponseCollector drained;
             impl_->robot->flush(drained);
+            // The drained text was previously discarded outright. It carries the
+            // firmware's RBACK[<n>] queue-occupancy ACKs, which are the only
+            // direct observation of box-side scheduling depth, so parse before
+            // dropping. Read-only: the bytes sent on the wire are unchanged.
+            foldRbackResponses(drained, &impl_->queue_ack);
         }
         const double ack_wait_duration_us =
             impl_->config.disable_waiting_ack ? 0.0 : makeBackendTiming(ack_start, ack_end).duration_us;
