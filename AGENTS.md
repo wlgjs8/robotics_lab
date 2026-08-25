@@ -113,16 +113,28 @@ remains visible and auditable.
 
 ## Force Control
 
-There is no force control. The v1 stack was removed on 2026-08-26 and is being
-rebuilt against `controller-manager` as the reference, starting from sensor and
-tool setup.
+The v1 stack was removed on 2026-08-26. A v2 was then rebuilt against
+`controller-manager` as the calibration and design authority, starting from
+sensor and tool setup, and is LIVE: `force_torque:` and `force_control:` are
+server config sections again, both are declared in `stack_real.yaml`, and the
+overlay has been validated on hardware (2026-08-26: deviation tracked F/k to
+0.97-0.99, rotation 1.85 deg at 55 N, zero fence hits).
 
-Until that rebuild lands: `force_torque:` and `force_control:` are not server
-config sections (a config carrying them fails to load), `RobotState` has no
-wrench field, the state JSON has no force blocks, and a command packet with a
-`force_control` object is refused at parse. Do not reintroduce any of them
-piecemeal, and do not integrate an external force-control library into an active
-motion path, unless a task explicitly says to. Archived v1 design and evidence:
+CM is the reference. Sensor axes, tool mass/COM and the TCP offset come from
+`submodules/controller-manager/platforms/monkey/params-presets/` and were
+calibrated by the operator; do not re-derive them from the URDF. The sensor basis
+on this cell is LEFT-HANDED (det = -1) -- that is measured, not a bug.
+
+Two invariants the hardware taught, both enforced by the loader:
+- THE GATE AND THE SPRING SHIP TOGETHER. `k > 0` with no gate ramps the contact
+  force without bound (961 N in 40 s); the gate with `k = 0` bounds force but not
+  deviation (9.5 m in 300 s).
+- THE WRENCH REFERENCE POINT AND THE COMPOSE PIVOT MOVE TOGETHER. Both are the
+  TCP. A torque referenced at one point driving rotation about another makes a
+  straight push twist the tool.
+
+Do not integrate an external force-control library into an active motion path
+unless a task explicitly says to. Archived v1 design and evidence:
 `docs/archive/force_control_v1/`.
 
 ## Motion Primitive Contract
