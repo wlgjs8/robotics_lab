@@ -646,6 +646,13 @@ Responsiveness, smoothness, and accuracy are still primarily owned by the
   latches on divergence the safety layer itself caused. Set it high enough that
   it stays rare; a near-zero threshold pins the window open and freezes the plan
   permanently.
+- `kinematics.ik.max_iterations_best_effort_*` — accept a non-converged iterate as a
+  success when its residual is inside this window (reason
+  `max_iterations_best_effort`), mirroring `joint_limit_best_effort_*`. Near a
+  singularity the DLS damping ramp shrinks the per-iteration step until the budget
+  runs out while the residual is already micrometres away; refusing that tick holds
+  the arm, the next tick converges, and the arm alternates hold/move at loop rate.
+  Must be `>= position_tolerance_m` or it can never accept anything. Off by default.
 - `kinematics.ik.singular_step_scale_*` — manipulability guard on the IK
   per-tick joint-step ceiling: scales `max_solution_jump_deg` down as the task
   Jacobian's smallest singular value drops. This is the guard that covers EVERY

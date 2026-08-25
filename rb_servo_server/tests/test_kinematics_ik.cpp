@@ -816,6 +816,96 @@ bool testIkSingularityStepScale() {
     return true;
 }
 
+
+// A solve that runs out of iterations WITHOUT pinning a joint must be acceptable as
+// best effort when its residual is small. Near a singularity the DLS damping ramp
+// shrinks the per-iteration step until the budget is spent while the residual is
+// already micrometres from the target; refusing that tick holds the arm, the next tick
+// converges, and the arm alternates hold/move at loop rate. Measured 2026-08-26
+// (servo_log_20260826_054303.csv, right arm 05:44:48.9-52.2 KST): 1448 refusals in 307
+// bursts (~93 Hz) at sigma_min 0.0114, every residual <= 0.221 mm / 6.6e-5 rad against a
+// 20 um position tolerance.
+bool testIkMaxIterationsBestEffort() {
+    rb_servo::KinematicsConfig base = testKinematicsConfig();
+    // Starve the loop so it cannot converge, without going anywhere near a joint limit.
+    base.ik.max_iterations = 2;
+    const rb_servo::ArmMountConfig mount = leftMount();
+    rb_servo::JointArray seed = seedJoints();
+    rb_servo::JointArray goal_q = seed;
+    goal_q[1] += 4.0;
+    goal_q[3] += 3.0;
+
+    rb_servo::PinocchioKinematics strict(base);
+    const rb_servo::Pose6D target =
+        strict.computeTcpStand(rb_servo::ArmId::Left, goal_q, mount);
+    const rb_servo::IkResult refused =
+        strict.solveIk(rb_servo::ArmId::Left, target, seed, mount);
+    RB_CHECK(!refused.success);
+    RB_CHECK(refused.reason == rb_servo::ik_solver::kReasonMaxIterations);
+    RB_CHECK(refused.position_error_m > base.ik.position_tolerance_m);
+    // No joint was pinned -- this is the iteration budget, not a range limit.
+    RB_CHECK(refused.joint_limit_worst_index < 0);
+
+    // A band wide enough for that residual accepts it, and names itself in the reason so
+    // a best-effort tick stays distinguishable from a real convergence in telemetry.
+    rb_servo::KinematicsConfig lenient = base;
+    lenient.ik.max_iterations_best_effort_position_tolerance_m =
+        refused.position_error_m * 2.0 + 1e-6;
+    lenient.ik.max_iterations_best_effort_orientation_tolerance_rad =
+        refused.orientation_error_rad * 2.0 + 1e-6;
+    rb_servo::PinocchioKinematics forgiving(lenient);
+    const rb_servo::IkResult accepted =
+        forgiving.solveIk(rb_servo::ArmId::Left, target, seed, mount);
+    RB_CHECK(accepted.success);
+    RB_CHECK(accepted.reason == rb_servo::ik_solver::kReasonMaxIterationsBestEffort);
+    RB_CHECK(finiteJoints(accepted.q_solution_deg));
+    RB_CHECK(withinUrdfLimits(accepted.q_solution_deg));
+    RB_CHECK(accepted.position_error_m <=
+             lenient.ik.max_iterations_best_effort_position_tolerance_m);
+    RB_CHECK(accepted.orientation_error_rad <=
+             lenient.ik.max_iterations_best_effort_orientation_tolerance_rad);
+    // It really advanced toward the goal rather than returning the seed.
+    RB_CHECK(std::fabs(accepted.q_solution_deg[1] - seed[1]) > 1e-6);
+
+    // A band narrower than the residual must still refuse: best effort bounds how much
+    // unrealized command it hides, it does not switch the guard off.
+    rb_servo::KinematicsConfig narrow = base;
+    narrow.ik.max_iterations_best_effort_position_tolerance_m =
+        refused.position_error_m * 0.5;
+    narrow.ik.max_iterations_best_effort_orientation_tolerance_rad =
+        refused.orientation_error_rad * 0.5 + 1e-9;
+    rb_servo::PinocchioKinematics picky(narrow);
+    const rb_servo::IkResult still_refused =
+        picky.solveIk(rb_servo::ArmId::Left, target, seed, mount);
+    RB_CHECK(!still_refused.success);
+    RB_CHECK(still_refused.reason == rb_servo::ik_solver::kReasonMaxIterations);
+
+    // Off by default: the same starved solve with no band configured still fails, so the
+    // acceptance is opt-in per tracked config.
+    RB_CHECK(base.ik.max_iterations_best_effort_position_tolerance_m == 0.0);
+    RB_CHECK(base.ik.max_iterations_best_effort_orientation_tolerance_rad == 0.0);
+
+    // A PINNED JOINT keeps the joint-limit reason even with the iteration band wide
+    // open: the two failure modes must stay distinguishable, and the joint-limit path
+    // owns its own (separately configured) window.
+    rb_servo::KinematicsConfig pinned = testKinematicsConfig();
+    pinned.ik.max_iterations = 60;
+    pinned.ik.max_iterations_best_effort_position_tolerance_m = 1.0;
+    pinned.ik.max_iterations_best_effort_orientation_tolerance_rad = 1.0;
+    rb_servo::JointArray limit_seed = seedJoints();
+    limit_seed[2] = 149.0;
+    rb_servo::JointArray unreachable_q = limit_seed;
+    unreachable_q[2] = 158.0;
+    rb_servo::PinocchioKinematics at_limit(pinned);
+    const rb_servo::Pose6D limit_target =
+        at_limit.computeTcpStand(rb_servo::ArmId::Left, unreachable_q, mount);
+    const rb_servo::IkResult limit_result =
+        at_limit.solveIk(rb_servo::ArmId::Left, limit_target, limit_seed, mount);
+    RB_CHECK(!limit_result.success);
+    RB_CHECK(limit_result.reason == rb_servo::ik_solver::kReasonJointLimit);
+    return true;
+}
+
 }  // namespace
 
 bool testFloorPointZJacobianFiniteDifference() {
@@ -1031,6 +1121,7 @@ int main() {
     if (!testIkSingularityStepScale()) return 1;
     if (!testIkSelectiveDampingDisabledByDefault()) return 1;
     if (!testIkJointLimitBestEffortAcceptsClampedSolve()) return 1;
+    if (!testIkMaxIterationsBestEffort()) return 1;
     if (!testCartesianLatencyBudgetTelemetry()) return 1;
     if (!testIkSeedUsesPreviousSentTargetNotActualState()) return 1;
     if (!testPinocchioIk()) return 1;
