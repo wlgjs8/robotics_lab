@@ -106,9 +106,12 @@ def _arm_ft_summary(arm: Any) -> str:
     """One arm's F/T line: is it live, is it zeroed, what is it reading now."""
     ft = getattr(arm, "force_torque", None)
     if not isinstance(ft, Mapping):
-        return "no telemetry"
+        # ABSENT is not the same as OFF, and saying "disabled" for both hides which.
+        # An absent block means the server is not publishing force_torque at all -
+        # an old server, or a GUI that has not been restarted since it started to.
+        return "no force_torque in the state stream (old server, or restart the GUI)"
     if not ft.get("enabled"):
-        return "disabled"
+        return "disabled in config (force_torque.<arm>.enable)"
     if not ft.get("connected"):
         # NOT an error state on its own — the arm runs without force sensing and
         # every compensated channel is pinned to zero. But nothing will comply.
@@ -145,9 +148,9 @@ def _arm_force_control_summary(arm: Any) -> str:
     arm that does not yield must be able to read why instead of guessing."""
     fc = getattr(arm, "force_control", None)
     if not isinstance(fc, Mapping):
-        return "no telemetry"
+        return "no force_control in the state stream (old server, or restart the GUI)"
     if not fc.get("enabled"):
-        return "disabled"
+        return "disabled in config (force_control.enable)"
     if not fc.get("covered"):
         return f"NOT COVERED ({fc.get('coverage_reason') or 'unknown'})"
     bits = []

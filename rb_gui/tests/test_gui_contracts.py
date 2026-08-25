@@ -184,6 +184,8 @@ from rb_servo_gui.scene import (
     update_user_floor_plane,
 )
 from rb_servo_gui.status_panel import (
+    _format_ft_status,
+    _format_force_control_status,
     _format_floor_constraint_status,
     _format_user_floor_constraint_status,
     _format_roi_box_status,
@@ -6469,3 +6471,59 @@ class FtMonitorRenderTest(unittest.TestCase):
         )
         html = _render_ft_monitor_rows(state, stale=False)
         self.assertIn("not covering", html)
+
+
+class FtTelemetryAbsentVsDisabledTest(unittest.TestCase):
+    """ABSENT and OFF are different failures and must not share a message.
+
+    Reporting both as "disabled" is what made the first read of this panel useless:
+    an operator seeing "disabled" next to a config that says enable: true has no way
+    to tell a config choice from a server that is not publishing the block — or from
+    a GUI that has not been restarted since the server started publishing it.
+    """
+
+    def test_absent_block_says_it_is_absent(self):
+        payload = sample_state()          # no force_torque / force_control anywhere
+        state = StateSnapshot.parse(payload, received_monotonic=time.monotonic())
+        ft_line = _format_ft_status(state, stale=False)
+        fc_line = _format_force_control_status(state, stale=False)
+        # Each surface words it its own way; what they must share is that they blame
+        # the STREAM, not the config.
+        self.assertIn("state stream", ft_line)
+        self.assertIn("state stream", fc_line)
+        self.assertNotIn("disabled in config", ft_line)
+        self.assertNotIn("disabled in config", fc_line)
+
+        html = _render_ft_monitor_rows(state, stale=False)
+        self.assertIn("not in state stream", html)
+        self.assertNotIn("disabled in config", html)
+
+    def test_disabled_block_says_it_is_disabled(self):
+        payload = sample_state()
+        for arm in ("left", "right"):
+            payload[arm]["force_torque"] = {"enabled": False}
+            payload[arm]["force_control"] = {"enabled": False}
+        state = StateSnapshot.parse(payload, received_monotonic=time.monotonic())
+        self.assertIn("disabled in config", _format_ft_status(state, stale=False))
+        self.assertIn("disabled in config", _format_force_control_status(state, stale=False))
+        self.assertIn("disabled in config", _render_ft_monitor_rows(state, stale=False))
+
+    def test_the_fence_is_visible(self):
+        """Past the fence the law HOLDS the bound instead of tracking, so the arm
+        feels stiff for no visible reason unless the card says so."""
+        payload = sample_state()
+        for arm in ("left", "right"):
+            payload[arm]["force_torque"] = {
+                "enabled": True, "connected": True, "bias_valid": True,
+                "comp_stand_axes_at_tcp": [0.0, 0.0, 40.0, 0.0, 0.0, 0.0],
+            }
+            payload[arm]["force_control"] = {
+                "enabled": True, "covered": True, "bounded": True,
+                "deviation_norm_m": 0.040, "deviation_norm_rad": 0.2618,
+                "gate_translation": 1.0,
+            }
+        state = StateSnapshot.parse(payload, received_monotonic=time.monotonic())
+        html = _render_ft_monitor_rows(state, stale=False)
+        self.assertIn("AT FENCE", html)
+        self.assertIn("40.0", html)   # 40 mm, the translation fence
+        self.assertIn("15.0", html)   # 15 deg, the rotation fence

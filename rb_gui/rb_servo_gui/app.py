@@ -2264,8 +2264,16 @@ def _render_ft_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> str
         ft = getattr(arm, "force_torque", None)
         rows.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">'
                     f'{escape(arm_name)}</div>')
-        if not isinstance(ft, Mapping) or not ft.get("enabled"):
-            rows.append(_operator_monitor_row("F/T", escape("disabled")))
+        if not isinstance(ft, Mapping):
+            # ABSENT is not OFF. Reporting both as "disabled" is what made the first
+            # look at this card useless: the operator could not tell a config choice
+            # from a server that is not publishing the block at all.
+            rows.append(_operator_monitor_row("F/T", escape("not in state stream")))
+            rows.append(_operator_monitor_row("", escape("old server, or restart the GUI")))
+            rows.append("</div>")
+            continue
+        if not ft.get("enabled"):
+            rows.append(_operator_monitor_row("F/T", escape("disabled in config")))
             rows.append("</div>")
             continue
         if not ft.get("connected"):
@@ -2326,9 +2334,20 @@ def _render_ft_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> str
                 pass
             try:
                 rows.append(_operator_monitor_row(
+                    "dev [deg]",
+                    escape(f"{math.degrees(float(fc.get('deviation_norm_rad', 0.0))):.1f}")))
+            except (TypeError, ValueError):
+                pass
+            try:
+                rows.append(_operator_monitor_row(
                     "gate", escape(f"{float(fc.get('gate_translation', 1.0)):.2f}")))
             except (TypeError, ValueError):
                 pass
+            # WHY IT STOPPED YIELDING. Past the fence the law HOLDS the bound instead
+            # of tracking, so the arm feels stiff for no visible reason unless the
+            # card says so.
+            if fc.get("bounded"):
+                rows.append(_operator_monitor_row("", escape("AT FENCE - holding")))
         elif isinstance(fc, Mapping) and fc.get("enabled"):
             rows.append(_operator_monitor_row("law", escape("not covering")))
         rows.append("</div>")
