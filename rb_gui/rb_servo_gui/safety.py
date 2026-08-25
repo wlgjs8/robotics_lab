@@ -247,7 +247,6 @@ class OperatorSafety:
         self.status_message = "; ".join(self.config_warnings) if self.config_warnings else "starting"
         self.recording_intent = False
         self.last_tcp_command = "none"
-        self._payload_identification_arm: Literal["left", "right"] | None = None
 
     def set_desired_mode(self, mode: Mode | str) -> None:
         normalized = normalize_observed_mode_backend(str(mode), None)
@@ -298,10 +297,6 @@ class OperatorSafety:
             return Readiness(configured=True, running=True, connected=connected, ready=False, fault=False, no_go_reason="joint state invalid", **cartesian_kwargs)
         return Readiness(configured=True, running=True, connected=connected, ready=connected, fault=False, **cartesian_kwargs)
 
-    @property
-    def payload_identification_active(self) -> bool:
-        return self._payload_identification_arm is not None
-
     def _state_blocked_reason(self, action: str) -> str | None:
         # State-derived, server-as-authority gate. Real/sim execution gating and
         # env readiness retired: mode mismatch never blocks; only a missing/stale
@@ -319,12 +314,6 @@ class OperatorSafety:
         return None
 
     def blocked_reason(self, action: str) -> str | None:
-        motion = action not in self._non_motion_actions
-        if motion and self.payload_identification_active:
-            return (
-                "payload-identification session owns the GUI motion lease; "
-                "use Run/Continue or Stop"
-            )
         return self._state_blocked_reason(action)
 
     @staticmethod
@@ -681,109 +670,6 @@ class OperatorSafety:
             self.command_client.build_joint_target(left, right, timeout_sec=self.command_timeout_sec)
         )
         return True, "sent JointTarget"
-
-    def send_payload_identification_target(
-        self,
-        *,
-        arm: Literal["left", "right"],
-        q_target_deg: tuple[float, ...] | None,
-    ) -> tuple[bool, str]:
-        """Renew one payload-identification target under an explicit GUI lease."""
-        reason = self._state_blocked_reason("JointTarget")
-        if reason:
-            return False, reason
-        if self.latest_valid() is None:
-            return False, "state stream missing or stale"
-        if not self.command_client.hold_lease:
-            return False, "payload identification requires the held GUI command lease"
-        if self._payload_identification_arm != arm:
-            return False, f"payload identification is not active for {arm}"
-        target = self._validated_joint6(q_target_deg)
-        if target is None:
-            return False, "payload identification requires a finite 6-DOF target"
-        self.command_client.send(
-            self.command_client.build_joint_target_arm(
-                arm,
-                target,
-                joint_target_profile="payload_identification",
-                timeout_sec=self.command_timeout_sec,
-            )
-        )
-        return True, f"sent {arm} payload-identification JointTarget; other arm Hold"
-
-    def payload_identification_disabled_reason(
-        self, arm: Literal["left", "right"]
-    ) -> str | None:
-        if arm not in {"left", "right"}:
-            return "payload identification arm must be left or right"
-        reason = self.blocked_reason("JointTarget")
-        if reason:
-            return reason
-        latest = self.latest_valid()
-        if latest is None:
-            return "state stream missing or stale"
-        arm_state = latest.left if arm == "left" else latest.right
-        ft = arm_state.force_torque
-        if ft is None or ft.enabled is not True:
-            return f"{arm} F/T pipeline is unavailable"
-        if ft.healthy is not True or ft.stale is not False:
-            return f"{arm} F/T sensor is unhealthy or stale"
-        if ft.auto_tare_enabled is not True:
-            return f"{arm} automatic post-InitMotion tare is unavailable"
-        if ft.wrench_tcp is None or ft.gravity_tcp is None or ft.freshness_value is None:
-            return f"{arm} payload-identification telemetry is incomplete"
-        owner = latest.command_source
-        active_source = owner.display_source_id
-        active_session = owner.display_session_id
-        if owner.active is True and (
-            active_source != self.command_client.source_id
-            or active_session != self.command_client.session_id
-        ):
-            return f"command lease is owned by {active_source or 'another source'}"
-        return None
-
-    def begin_payload_identification_session(
-        self, arm: Literal["left", "right"]
-    ) -> tuple[bool, str]:
-        """Acquire the GUI lease without issuing a motion target."""
-        if arm not in {"left", "right"}:
-            return False, "payload identification arm must be left or right"
-        if self.payload_identification_active:
-            return False, "a payload-identification session already owns the GUI motion lease"
-        reason = self.payload_identification_disabled_reason(arm)
-        if reason:
-            return False, reason
-        try:
-            self.command_client.acquire_lease()
-        except OSError as exc:
-            return False, f"failed to acquire payload-identification lease: {exc}"
-        self._payload_identification_arm = arm
-        return True, f"waiting for {arm} payload-identification lease confirmation"
-
-    def end_payload_identification_session(self) -> tuple[bool, str]:
-        """Issue Hold, then release the explicitly held calibration lease."""
-        messages: list[str] = []
-        ok = True
-        if self.command_client.hold_lease:
-            try:
-                self.command_client.send_lifecycle(
-                    "Hold", timeout_sec=self.command_timeout_sec
-                )
-                messages.append("sent Hold")
-            except OSError as exc:
-                ok = False
-                messages.append(f"Hold send failed: {exc}")
-            try:
-                self.command_client.release_lease()
-                messages.append("released GUI lease")
-            except OSError as exc:
-                ok = False
-                messages.append(f"lease release failed: {exc}")
-        else:
-            messages.append("GUI lease was not held")
-        if not self.command_client.hold_lease:
-            self._payload_identification_arm = None
-        return ok, "; ".join(messages)
 
     def tcp_jog_unavailable(self) -> tuple[bool, str]:
         return False, "TCP jog unavailable: FK/IK is deferred; no Cartesian motion command sent"

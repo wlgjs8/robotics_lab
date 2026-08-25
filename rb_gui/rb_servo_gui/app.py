@@ -127,7 +127,6 @@ from .scene import (
     update_chunk_overlay,
     update_circle_overlay,
     update_floor_check_points,
-    update_ft_sensor_overlay,
     update_floor_plane,
     update_floor_plane_preview,
     update_roi_box,
@@ -149,10 +148,8 @@ from .status_panel import (
     _format_arm_cartesian_solve,
     _format_cartesian_solve_status,
     _format_circle_overlay_status,
-    _eft_monitor_axis_values,
     _format_scene_asset_status,
     _format_fk_status,
-    _format_force_status,
     _format_init_motion_status,
     _format_joint_monitor_value,
     _format_joints,
@@ -1688,67 +1685,6 @@ def _set_waypoint_as_init(handles: dict[str, Any], safety: OperatorSafety) -> tu
     return True, f"init motion set to '{name}'; {suffix}"
 
 
-# --- Startup force auto-tare (Init Motion no-op path) -----------------------
-# Force zeroing (the software zero used as the F/T hard-limit reference) is
-# established by an Init Motion. When the server publishes tare_state
-# "awaiting_init_motion" it is waiting for that press. In the common case the arm
-# is ALREADY parked at the configured init pose when the stack starts, so the
-# server's Init Motion no-op path (measured joints within noop_tol_deg of the
-# goal) tares WITHOUT any motion. This auto-presses Init Motion once at startup
-# in exactly that no-motion case so the operator does not have to.
-#
-# SAFETY: the at-init tolerance MUST stay <= the server's EFFECTIVE Init Motion
-# no-op tolerance, which is max(init_motion_planner.noop_tol_deg,
-# waypoint_tol_deg) (NOT noop_tol_deg alone). That is the guarantee that a GUI
-# "already at init" verdict also makes the server take the no-op path; if the arm
-# is NOT at init, no auto-press is sent and the arm never moves on its own. The
-# tolerance is read from the server config so it tracks the site's real no-op
-# band (a parked arm typically drifts ~1 deg from the saved init pose via servo
-# settling / gravity sag, which a fixed sub-deg tolerance would never match).
-#
-# NO FALLBACK / fail-closed: if the server no-op tolerance cannot be read, the
-# feature does NOT fire — a guessed tolerance could let the GUI auto-press when
-# the server would actually plan a move. RB_GUI_STARTUP_INIT_TARE=0 disables it.
-_STARTUP_INIT_TARE_TOL_MARGIN_DEG = 0.1  # drift guard below the server no-op band
-_AWAITING_INIT_MOTION_TARE_STATE = "awaiting_init_motion"
-
-
-def _server_init_noop_tol_deg() -> float | None:
-    """The server's EFFECTIVE Init Motion no-op tolerance —
-    max(init_motion_planner.noop_tol_deg, waypoint_tol_deg) — read from the server
-    config at RB_GUI_SERVER_CONFIG_PATH. None when unavailable/unparseable (the
-    caller must fail closed; there is no assumed default)."""
-    path = os.environ.get("RB_GUI_SERVER_CONFIG_PATH", "").strip()
-    if not path:
-        return None
-    try:
-        import yaml  # local import: optional dependency used only here
-
-        with open(path, encoding="utf-8") as handle:
-            cfg = yaml.safe_load(handle)
-        ip = cfg["safety"]["init_motion_planner"]
-        tol = max(
-            float(ip.get("noop_tol_deg", 0.0)),
-            float(ip.get("waypoint_tol_deg", 0.0)),
-        )
-    except Exception:  # noqa: BLE001 - unreadable config -> fail closed (None)
-        return None
-    return tol if math.isfinite(tol) and tol > 0.0 else None
-
-
-def _joints_within_tol(
-    measured: tuple[float, ...] | None,
-    target: tuple[float, ...] | None,
-    tol_deg: float,
-) -> bool:
-    if not measured or not target or len(measured) != len(target):
-        return False
-    return all(
-        math.isfinite(m) and math.isfinite(t) and abs(m - t) <= tol_deg
-        for m, t in zip(measured, target)
-    )
-
-
 def _capture_waypoint(handles: dict[str, Any], store: StateStore, name: str) -> tuple[bool, str]:
     name = (name or "").strip()
     if not name:
@@ -1875,19 +1811,11 @@ def _build_stand_world_monitor(server: Any, handles: dict[str, Any], *, order: f
             disabled=True,
         )
         handles["stand_world_monitor_values"] = {"left": {}, "right": {}}
-        handles["eft_monitor_values"] = {"left": {}, "right": {}}
         for arm in ("left", "right"):
             with server.gui.add_folder(arm, expand_by_default=True):
                 for field in _STAND_WORLD_POSE_FIELDS:
                     handle = server.gui.add_text(f"{arm} {field}", initial_value="invalid", disabled=True)
                     handles["stand_world_monitor_values"][arm][field] = handle
-                # External F/T sensor (rbpodo eft_*, sensor frame).
-                for field, label in (
-                    ("force", "FT F [N]"),
-                    ("torque", "FT T [Nm]"),
-                ):
-                    handle = server.gui.add_text(f"{arm} {label}", initial_value="invalid", disabled=True)
-                    handles["eft_monitor_values"][arm][field] = handle
 
 
 def _build_camera_quality_monitor(
@@ -2715,11 +2643,6 @@ def build_gui(
             "User Safety floor", initial_value="user floor: no state", disabled=True
         )
         handles["fk_status"] = server.gui.add_text("FK/TCP", initial_value="FK: no state", disabled=True)
-        handles["force_status"] = server.gui.add_text(
-            "F/T + force controller",
-            initial_value="Force: no state",
-            disabled=True,
-        )
         handles["tcp_tracking"] = server.gui.add_text("TCP tracking", initial_value="TCP tracking: no state", disabled=True)
         handles["pgmode_status"] = server.gui.add_text("pgmode simulation", initial_value="pgmode_sim: no state", disabled=True)
         handles["circle_overlay"] = server.gui.add_text(
@@ -2735,8 +2658,6 @@ def build_gui(
         chunk_overlay_axes_stride = _gui_setting_int(_ov, "chunk_overlay_axes_stride", 2)
         chunk_overlay_history_count = _gui_setting_int(_ov, "chunk_overlay_history_count", 12)
         tcp_gizmo_visible = _gui_setting_bool(_ov, "tcp_gizmo_visible", True)
-        ft_sensor_gizmo_visible = _gui_setting_bool(_ov, "ft_sensor_gizmo_visible", True)
-        ft_control_gizmo_visible = _gui_setting_bool(_ov, "ft_control_gizmo_visible", True)
         tcp_trail_limit = _gui_setting_int(_ov, "tcp_trail_limit", 600)
         if chunk_overlay_axes_stride <= 0:
             chunk_overlay_axes_stride = 2
@@ -2884,37 +2805,6 @@ def build_gui(
                 _update_gui_setting("tcp_gizmo_visible", handles["tcp_gizmo_visible"])
                 if not handles["tcp_gizmo_visible"]:
                     _hide_tcp_gizmos(handles)
-
-            handles["ft_sensor_gizmo_toggle"] = server.gui.add_checkbox(
-                "F/T sensor frame(URDF/CAD, sensor origin) 표시",
-                initial_value=ft_sensor_gizmo_visible,
-            )
-
-            @handles["ft_sensor_gizmo_toggle"].on_update
-            def _(_: Any) -> None:
-                handles["ft_sensor_gizmo_visible"] = bool(
-                    handles["ft_sensor_gizmo_toggle"].value
-                )
-                _update_gui_setting(
-                    "ft_sensor_gizmo_visible", handles["ft_sensor_gizmo_visible"]
-                )
-
-            handles["ft_control_gizmo_toggle"] = server.gui.add_checkbox(
-                "F/T runtime control frame(TCP origin) 및 force 표시",
-                initial_value=ft_control_gizmo_visible,
-            )
-
-            @handles["ft_control_gizmo_toggle"].on_update
-            def _(_: Any) -> None:
-                handles["ft_control_gizmo_visible"] = bool(
-                    handles["ft_control_gizmo_toggle"].value
-                )
-                _update_gui_setting(
-                    "ft_control_gizmo_visible", handles["ft_control_gizmo_visible"]
-                )
-
-        handles["ft_sensor_gizmo_visible"] = ft_sensor_gizmo_visible
-        handles["ft_control_gizmo_visible"] = ft_control_gizmo_visible
 
         handles["ops"] = server.gui.add_text(
             "Container ops",
@@ -5491,16 +5381,6 @@ def update_gui(
     # focused, so a periodic repaint never clobbers a value the operator is typing).
     handles["_latest_state"] = latest
     handles["_state_stale"] = stale
-    # One no-motion Init Motion press at startup when already parked at the init
-    # pose, so force auto-tare (the software zero) is established without the
-    # operator pressing Init Motion. Strictly gated so it can never plan a move.
-    _maybe_auto_init_tare_on_startup(
-        handles,
-        safety,
-        latest,
-        stale,
-        init_motion_disabled=bool(disabled_states.get("init_motion", True)),
-    )
     if "tcp_ptp_axis_vec" in handles:
         _refresh_tcp_ptp_axis_fields(handles)
     readiness = safety.readiness()
@@ -5541,8 +5421,6 @@ def update_gui(
         update_user_floor_plane(handles.get("scene", {}), None)
         if "fk_status" in handles:
             handles["fk_status"].value = _format_fk_status(None, stale=True)
-        if "force_status" in handles:
-            handles["force_status"].value = _format_force_status(None, stale=True)
         if "tcp_tracking" in handles:
             handles["tcp_tracking"].value = _format_tcp_tracking_status(
                 None,
@@ -5683,8 +5561,6 @@ def update_gui(
                 handles["user_floor_set_status"].value = ("restoring... " if ok else "restore failed: ") + msg
     if "fk_status" in handles:
         handles["fk_status"].value = _format_fk_status(latest, stale=stale)
-    if "force_status" in handles:
-        handles["force_status"].value = _format_force_status(latest, stale=stale)
     if "tcp_tracking" in handles:
         handles["tcp_tracking"].value = _format_tcp_tracking_status(
             latest,
@@ -5713,13 +5589,6 @@ def update_gui(
         latest,
         tcp_display_mode=_tcp_display_mode(handles),
         show_tcp_gizmo=_tcp_gizmo_visible(handles),
-    )
-    update_ft_sensor_overlay(
-        handles.get("scene", {}),
-        latest,
-        stale=stale,
-        show=bool(handles.get("ft_sensor_gizmo_visible", True)),
-        show_control=bool(handles.get("ft_control_gizmo_visible", True)),
     )
     # After markers (TCP frames now posed): toggle the orange floor-check points,
     # which are parented under /stand/<arm>_tcp and ride those poses.

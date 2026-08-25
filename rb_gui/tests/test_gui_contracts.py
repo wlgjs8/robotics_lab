@@ -39,8 +39,6 @@ from rb_servo_gui.app import (
     _trigger_box_detect,
     _send_arm_init_override,
     _send_arm_init_cancel_resume,
-    _server_init_noop_tol_deg,
-    _joints_within_tol,
     _foot_pedal_action_map,
     _open_foot_pedal_device,
     _update_arm_init_panel,
@@ -70,7 +68,6 @@ from rb_servo_gui.app import (
     _format_cartesian_solve_status,
     _format_circle_overlay_status,
     _format_fk_status,
-    _format_force_status,
     _format_init_motion_status,
     _format_scene_asset_status,
     _format_joint_monitor_value,
@@ -167,7 +164,6 @@ from rb_servo_gui.scene import (
     _circle_overlay_points,
     _ensure_sc_world_frame,
     _finger_position_m,
-    _ft_sensor_pose_tcp_from_urdf,
     _interpolated_floor_check_points,
     _ik_infeasible_path,
     _reference_ghost_active,
@@ -177,7 +173,6 @@ from rb_servo_gui.scene import (
     set_ik_infeasible_region_visible,
     update_circle_overlay,
     update_floor_check_points,
-    update_ft_sensor_overlay,
     update_floor_plane,
     update_floor_plane_preview,
     update_roi_box,
@@ -3695,33 +3690,6 @@ class GuiContractsTest(unittest.TestCase):
             [],
         )
 
-    def test_scene_fallback_adds_separate_cad_and_control_frames(self):
-        scene = ShapeCheckingScene()
-        handles = _add_scene_fallback(RecordingServer(scene=scene))
-
-        frame_by_name = {name: (kwargs, handle) for name, kwargs, handle in scene.frames}
-        for arm in ("left", "right"):
-            kwargs, handle = frame_by_name[f"/stand/{arm}_tcp/ft_sensor_cad"]
-            np.testing.assert_allclose(kwargs["position"], (0.0, 0.0, -0.202642), atol=1e-9)
-            np.testing.assert_allclose(
-                kwargs["wxyz"], (math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5)), atol=1e-9
-            )
-            self.assertTrue(kwargs["show_axes"])
-            self.assertFalse(handle.visible)
-            control_kwargs, control_handle = frame_by_name[
-                f"/stand/{arm}_force_control_frame"
-            ]
-            np.testing.assert_allclose(control_kwargs["position"], (0.0, 0.0, 0.0))
-            np.testing.assert_allclose(control_kwargs["wxyz"], (1.0, 0.0, 0.0, 0.0))
-            self.assertFalse(control_handle.visible)
-            self.assertIn(f"{arm}_ft_force", handles)
-            self.assertIn("FT sensor frame", handles[f"{arm}_ft_sensor_label"].text)
-            self.assertIn("+90° yaw", handles[f"{arm}_ft_sensor_label"].text)
-            self.assertIn("sensor origin", handles[f"{arm}_ft_sensor_label"].text)
-        self.assertFalse(
-            any("ft_sensor" in name for name, _kwargs, _handle in scene.transform_controls)
-        )
-
     def test_scene_fallback_uses_viser_compatible_empty_geometry_arrays(self):
         scene = ShapeCheckingScene()
         server = RecordingServer(scene=scene)
@@ -4916,15 +4884,6 @@ class FloorConstraintGuiTest(unittest.TestCase):
                 self.assertEqual(handles["chunk_overlay_history_count"], 9)
                 self.assertFalse(handles["tcp_gizmo_visible"])
                 self.assertEqual(handles["scene"]["tcp_trail_limit"], 1250)
-                self.assertEqual(handles["force_status"].value, "Force: no state")
-                self.assertTrue(handles["force_status"].disabled)
-                self.assertEqual(handles["cog_arm"].value, "right")
-                self.assertTrue(
-                    any(
-                        label == "Active arm" and options == ("left", "right")
-                        for label, options, _kwargs, _handle in server.gui.dropdowns
-                    )
-                )
 
                 checkboxes = {label: handle.value for label, _kwargs, handle in server.gui.checkboxes}
                 self.assertFalse(checkboxes["예측 chunk 궤적 표시"])

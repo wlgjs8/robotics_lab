@@ -114,163 +114,6 @@ def _format_fk_status(latest: StateSnapshot | None, *, stale: bool) -> str:
     return f"FK: left {left}, right {right}"
 
 
-def _format_arm_force_status(arm: ArmSnapshot) -> str:
-    parts: list[str] = []
-    force_torque = arm.force_torque
-    if force_torque is not None:
-        if force_torque.enabled is not None:
-            parts.append(f"sensor_enabled={force_torque.enabled}")
-        if force_torque.source is not None:
-            parts.append(f"source={force_torque.source}")
-        if force_torque.source_assurance is not None:
-            parts.append(f"assurance={force_torque.source_assurance}")
-        if force_torque.sensor_health_verified is not None:
-            parts.append(f"health_verified={force_torque.sensor_health_verified}")
-        if force_torque.safety_rated is not None:
-            parts.append(f"safety_rated={force_torque.safety_rated}")
-        if force_torque.healthy is not None:
-            parts.append(f"healthy={force_torque.healthy}")
-        if force_torque.stale is not None:
-            parts.append(f"sensor_stale={force_torque.stale}")
-        if force_torque.freshness_value is not None:
-            parts.append(f"freshness={force_torque.freshness_value}")
-        if force_torque.reason is not None:
-            parts.append(f"sensor_reason={force_torque.reason}")
-        if force_torque.auto_tare_enabled:
-            tare = force_torque.tare_state or "unknown"
-            if force_torque.tare_sample_count is not None and tare == "collecting":
-                tare += f"({force_torque.tare_sample_count})"
-            parts.append(f"zero={tare}")
-            if force_torque.tare_valid is not None:
-                parts.append(f"zero_valid={force_torque.tare_valid}")
-            if force_torque.tare_reason:
-                parts.append(f"zero_reason={force_torque.tare_reason}")
-    force_control = arm.force_control
-    if force_control is not None:
-        if force_control.enabled is not None:
-            parts.append(f"controller_enabled={force_control.enabled}")
-        if force_control.operating_mode is not None:
-            parts.append(f"mode={force_control.operating_mode}")
-        if force_control.state is not None:
-            parts.append(f"controller={force_control.state}")
-        if force_control.compliance_frame is not None:
-            parts.append(f"compliance_frame={force_control.compliance_frame}")
-        if force_control.contact_active is not None:
-            parts.append(f"contact={force_control.contact_active}")
-        if force_control.normal_contact_active is not None:
-            parts.append(f"normal_contact={force_control.normal_contact_active}")
-        if force_control.transverse_contact_active is not None:
-            parts.append(
-                f"transverse_contact={force_control.transverse_contact_active}"
-            )
-        if force_control.rotational_contact_active is not None:
-            parts.append(
-                f"rotational_contact={force_control.rotational_contact_active}"
-            )
-        if force_control.compliance_active is not None:
-            parts.append(f"compliance={force_control.compliance_active}")
-        if force_control.normal_regulating is not None:
-            parts.append(f"normal_regulating={force_control.normal_regulating}")
-        if force_control.transverse_regulating is not None:
-            parts.append(
-                f"transverse_regulating={force_control.transverse_regulating}"
-            )
-        if force_control.rotational_regulating is not None:
-            parts.append(f"rotational_regulating={force_control.rotational_regulating}")
-        if force_control.loading_projection_active is not None:
-            parts.append(
-                f"loading_projection={force_control.loading_projection_active}"
-            )
-        if force_control.compliance_equilibrium_source is not None:
-            parts.append(
-                f"equilibrium_source={force_control.compliance_equilibrium_source}"
-            )
-        if force_control.compliance_equilibrium_stand is not None:
-            equilibrium = force_control.compliance_equilibrium_stand
-            parts.append(
-                "equilibrium_stand="
-                f"[{equilibrium.x:.4f},{equilibrium.y:.4f},{equilibrium.z:.4f},"
-                f"{equilibrium.rx:.3f},{equilibrium.ry:.3f},{equilibrium.rz:.3f}]"
-            )
-        if force_control.compliance_recenter_active is not None:
-            parts.append(f"recenter={force_control.compliance_recenter_active}")
-        vector_fields = (
-            ("control_wrench_surface", force_control.control_wrench_surface),
-            (
-                "control_wrench_compliance",
-                force_control.control_wrench_compliance,
-            ),
-            ("wrench_error_surface", force_control.wrench_error_surface),
-            ("wrench_error_compliance", force_control.wrench_error_compliance),
-            ("compliance_offset_surface", force_control.compliance_offset_surface),
-            ("compliance_velocity_surface", force_control.compliance_velocity_surface),
-            (
-                "compliance_acceleration_surface",
-                force_control.compliance_acceleration_surface,
-            ),
-            ("raw_policy_delta_surface", force_control.raw_policy_delta_surface),
-            (
-                "accepted_policy_delta_surface",
-                force_control.accepted_policy_delta_surface,
-            ),
-        )
-        for label, values in vector_fields:
-            if values is not None:
-                parts.append(f"{label}={_format_force_vec6(values)}")
-        if force_control.measured_force_n is not None:
-            parts.append(f"normal_force={force_control.measured_force_n:.3f}N")
-        if force_control.fast_normal_force_n is not None:
-            parts.append(f"fast_normal={force_control.fast_normal_force_n:.3f}N")
-        if force_control.fast_force_norm_n is not None:
-            parts.append(f"force_norm={force_control.fast_force_norm_n:.3f}N")
-        if force_control.fast_torque_norm_nm is not None:
-            parts.append(f"torque_norm={force_control.fast_torque_norm_nm:.3f}Nm")
-        if force_control.contact_threshold_exceeded is not None:
-            parts.append(f"contact_threshold={force_control.contact_threshold_exceeded}")
-        if force_control.hard_limit_threshold_exceeded is not None:
-            parts.append(
-                f"hard_threshold={force_control.hard_limit_threshold_exceeded}"
-            )
-        if force_control.hard_limit_sample_count is not None:
-            parts.append(f"hard_count={force_control.hard_limit_sample_count}")
-        if force_control.hard_limit_exceeded is not None:
-            parts.append(f"hard_limit={force_control.hard_limit_exceeded}")
-        if force_control.target_force_n is not None:
-            parts.append(f"target={force_control.target_force_n:.3f}N")
-        if force_control.correction_m is not None:
-            parts.append(f"unload={force_control.correction_m * 1000.0:.3f}mm")
-        if force_control.saturated is not None:
-            parts.append(f"saturated={force_control.saturated}")
-        if force_control.compliance_limit_axes is not None:
-            labels = ("x", "y", "z", "rx", "ry", "rz")
-            active = [
-                label for label, limited in zip(
-                    labels, force_control.compliance_limit_axes, strict=True
-                ) if limited
-            ]
-            parts.append(f"limit_axes={'+'.join(active) if active else 'none'}")
-        if force_control.compliance_limit_reason is not None:
-            parts.append(f"limit_reason={force_control.compliance_limit_reason}")
-        if force_control.motion_epoch is not None:
-            parts.append(f"controller_epoch={force_control.motion_epoch}")
-        if force_control.fault_reason is not None:
-            parts.append(f"fault={force_control.fault_reason}")
-    return ", ".join(parts) if parts else "telemetry unavailable"
-
-
-def _format_force_status(latest: StateSnapshot | None, *, stale: bool) -> str:
-    if latest is None:
-        return "Force: no state"
-    if stale:
-        return "State stream stale"
-    epoch = str(latest.motion_epoch) if latest.motion_epoch is not None else "unavailable"
-    return (
-        f"Force: motion_epoch={epoch}; "
-        f"left {_format_arm_force_status(latest.left)}; "
-        f"right {_format_arm_force_status(latest.right)}"
-    )
-
-
 def _tcp_display_mode(handles: dict[str, Any]) -> str:
     selector = handles.get("tcp_display_mode", "auto")
     mode = selector if isinstance(selector, str) else getattr(selector, "value", "auto")
@@ -957,48 +800,6 @@ def _update_joint_monitor(handles: dict[str, Any], latest: StateSnapshot | None,
             )
 
 
-def _eft_monitor_values(arm_state: Any, *, stale: bool) -> tuple[str, str]:
-    """Force and torque display strings for one arm's external F/T sensor
-    (rbpodo sdata.eft_*, sensor frame, N / Nm). 'invalid' when the feed is
-    stale, the server flags it invalid, or the fields are absent (mock)."""
-    eft = getattr(arm_state, "eft_wrench", None) if arm_state is not None else None
-    valid = bool(getattr(arm_state, "eft_valid", False)) and eft is not None and not stale
-    if not valid:
-        return ("invalid", "invalid")
-    force = " ".join(f"{v:+.1f}" for v in eft[:3])
-    torque = " ".join(f"{v:+.2f}" for v in eft[3:])
-    return (force, torque)
-
-
-def _eft_monitor_axis_values(
-    arm_state: Any,
-    *,
-    stale: bool,
-) -> tuple[str, str, str, str, str, str]:
-    """(fx, fy, fz, tx, ty, tz) display strings for one arm's external F/T
-    sensor, same validity gate as `_eft_monitor_values`. One number per cell so a
-    narrow monitor card renders each axis on its own row without a horizontal
-    scrollbar. 'invalid' per cell when the feed is stale/invalid/absent."""
-    eft = getattr(arm_state, "eft_wrench", None) if arm_state is not None else None
-    valid = bool(getattr(arm_state, "eft_valid", False)) and eft is not None and not stale
-    if not valid:
-        return ("invalid",) * 6
-    fx, fy, fz = (f"{v:+.1f}" for v in eft[:3])
-    tx, ty, tz = (f"{v:+.2f}" for v in eft[3:])
-    return (fx, fy, fz, tx, ty, tz)
-
-
-def _update_eft_monitor_handles(handles: dict[str, Any], arm: str, arm_state: Any, *, stale: bool) -> None:
-    eft_handles = handles.get("eft_monitor_values", {}).get(arm, {})
-    if not eft_handles:
-        return
-    force, torque = _eft_monitor_values(arm_state, stale=stale)
-    for field, value in (("force", force), ("torque", torque)):
-        handle = eft_handles.get(field)
-        if handle is not None:
-            handle.value = value
-
-
 def _update_stand_world_monitor(handles: dict[str, Any], latest: StateSnapshot | None, *, stale: bool) -> None:
     if "stand_world_monitor_status" not in handles:
         return
@@ -1010,7 +811,6 @@ def _update_stand_world_monitor(handles: dict[str, Any], latest: StateSnapshot |
         for arm in ("left", "right"):
             for handle in value_handles.get(arm, {}).values():
                 handle.value = "invalid"
-            _update_eft_monitor_handles(handles, arm, None, stale=True)
         return
     state = "stale" if stale else "live"
     handles["stand_world_monitor_status"].value = f"{state}, xyz=mm, rpy={unit}, tick={latest.tick}"
@@ -1018,7 +818,6 @@ def _update_stand_world_monitor(handles: dict[str, Any], latest: StateSnapshot |
         for arm in ("left", "right"):
             for handle in value_handles.get(arm, {}).values():
                 handle.value = "invalid"
-            _update_eft_monitor_handles(handles, arm, None, stale=True)
         return
     for arm, arm_state in (("left", latest.left), ("right", latest.right)):
         valid = bool(arm_state.has_valid_tcp_pose and arm_state.tcp_stand is not None and not arm_state.tcp_deferred)
@@ -1029,4 +828,3 @@ def _update_stand_world_monitor(handles: dict[str, Any], latest: StateSnapshot |
                 valid=valid,
                 unit=unit,
             )
-        _update_eft_monitor_handles(handles, arm, arm_state, stale=stale)

@@ -409,15 +409,6 @@ class ArmSnapshot:
     # (gripper_state.v1 feedback stamped by the bridge). None when no valid feed.
     gripper_percent: float | None = None
     gripper_moving: bool = False
-    # External F/T sensor wrench from the server's rbpodo decode
-    # (state JSON `eft_wrench`: [fx, fy, fz, tx, ty, tz], N / Nm, sensor frame).
-    # None when absent/non-finite; eft_valid mirrors the server's validity flag.
-    eft_wrench: tuple[float, ...] | None = None
-    eft_valid: bool = False
-    # Optional server-owned force pipeline telemetry. The GUI only observes these
-    # blocks; it never enables or configures force control.
-    force_torque: ForceTorqueSnapshot | None = None
-    force_control: ForceControlSnapshot | None = None
 
     @classmethod
     def parse(
@@ -523,10 +514,6 @@ class ArmSnapshot:
             cartesian_solve=CartesianSolveSnapshot.parse(data.get("cartesian_solve")),
             gripper_percent=gripper_percent,
             gripper_moving=gripper_moving,
-            eft_wrench=finite_joint_array(data.get("eft_wrench")),
-            eft_valid=bool(data.get("eft_valid", False)),
-            force_torque=ForceTorqueSnapshot.parse(data.get("force_torque")),
-            force_control=ForceControlSnapshot.parse(data.get("force_control")),
         )
 
     def selected_tcp_pose(self, mode: str = "auto") -> Pose6D | None:
@@ -752,7 +739,6 @@ class StateSnapshot:
     recording: Mapping[str, Any] | None
     arm_init: Mapping[str, Any] | None
     init_motion: Mapping[str, Any] | None
-    payload_identification: Mapping[str, Any] | None
     motion_epoch: int | None
     raw: Mapping[str, Any]
 
@@ -804,12 +790,6 @@ class StateSnapshot:
             recording=data.get("recording") if isinstance(data.get("recording"), Mapping) else None,
             arm_init=data.get("arm_init") if isinstance(data.get("arm_init"), Mapping) else None,
             init_motion=data.get("init_motion") if isinstance(data.get("init_motion"), Mapping) else None,
-            payload_identification=(
-                data["force_torque"].get("payload_identification")
-                if isinstance(data.get("force_torque"), Mapping)
-                and isinstance(data["force_torque"].get("payload_identification"), Mapping)
-                else None
-            ),
             motion_epoch=_optional_nonnegative_int(data.get("motion_epoch")),
             raw=data,
         )
