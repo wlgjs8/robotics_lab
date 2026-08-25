@@ -227,7 +227,7 @@ class ParsedConfig:
     left: ArmConfig
     right: ArmConfig
     servo: dict[str, Any]
-    force_control: dict[str, Any]
+    has_force_control_section: bool
     cartesian_control: dict[str, Any]
     network: dict[str, Any]
 
@@ -385,7 +385,7 @@ def load_config(path: Path, root: Path) -> ParsedConfig:
         left=arm_config(sections.get("left_robot", {})),
         right=arm_config(sections.get("right_robot", {})),
         servo=sections.get("servo", {}),
-        force_control=sections.get("force_control", {}),
+        has_force_control_section="force_control" in sections,
         cartesian_control=sections.get("cartesian_control", {}),
         network=sections.get("network", {}),
     )
@@ -474,24 +474,21 @@ def validate_config_policy(args: argparse.Namespace, stage: Stage, config: Parse
 
     blockers: list[str] = []
     send_servo_commands = as_bool(config.servo.get("send_servo_commands"), True)
-    force_provider = config.force_control.get("provider")
-    force_enable = as_bool(config.force_control.get("enable"), False)
     cartesian_allow_in_real = as_bool(config.cartesian_control.get("allow_in_real"), False)
 
     if is_tracked_example_config(config):
         if send_servo_commands:
             blockers.append("tracked example config must keep servo.send_servo_commands=false")
-        if force_provider is not None:
-            blockers.append("tracked example config must keep force_control.provider=null")
-        if force_enable:
-            blockers.append("tracked example config must keep force_control.enable=false")
         if cartesian_allow_in_real:
             blockers.append("tracked example config must keep cartesian_control.allow_in_real=false")
 
-    if force_provider is not None:
-        blockers.append("force_control.provider must be null")
-    if force_enable:
-        blockers.append("force_control.enable must be false")
+    # force_control was removed from the server config schema; a config that
+    # still carries the section will not load at all, so refuse it here with a
+    # message that says why rather than letting the server fail later.
+    if config.has_force_control_section:
+        blockers.append(
+            "force_control is no longer a server config section; remove it"
+        )
 
     if not args.dry_run:
         if not is_site_local_config(config):
@@ -591,8 +588,7 @@ def config_summary(config: ParsedConfig | None) -> dict[str, Any] | None:
         "is_tracked_example": is_tracked_example_config(config),
         "servo_send_servo_commands": as_bool(config.servo.get("send_servo_commands"), True),
         "servo_rate_hz": config.servo.get("rate_hz"),
-        "force_control_provider": config.force_control.get("provider"),
-        "force_control_enable": as_bool(config.force_control.get("enable"), False),
+        "has_force_control_section": config.has_force_control_section,
         "cartesian_allow_in_real": as_bool(config.cartesian_control.get("allow_in_real"), False),
         "cartesian_enable": as_bool(config.cartesian_control.get("enable"), False),
         "left": {

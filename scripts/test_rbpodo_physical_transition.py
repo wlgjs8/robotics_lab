@@ -37,9 +37,6 @@ right_robot:
 servo:
   rate_hz: 500
   send_servo_commands: {send_servo_commands}
-force_control:
-  provider: null
-  enable: false
 cartesian_control:
   enable: {cartesian_enable}
   allow_in_real: {allow_in_real}

@@ -70,16 +70,6 @@ servo_command:
   timeout_sec: 0.15
   acquire_lease: true
   lease_readback_timeout_sec: 2.0
-force_recovery:
-  enable: true
-  # Guarded admittance owns soft-contact unloading. Keep policy inference and
-  # gripper targets live; server hard faults still abort the rollout separately.
-  contact_behavior: continue
-  settle_time_sec: 0.12
-  max_linear_velocity_m_s: 0.002
-  max_angular_velocity_rad_s: 0.05
-  contact_timeout_sec: 5.0
-  settling_timeout_sec: 2.0
 # Live camera_server ZMQ bundle (Docker camera_server, 5600). The openpi source maps
 # bundle keys '<cam>.color' -> checkpoint names '<cam>_color' via resolve_frame.
 # This checkpoint (fe65) is fisheye-trained: wrist_source=fisheye routes the fisheye

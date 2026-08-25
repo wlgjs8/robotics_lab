@@ -157,24 +157,6 @@ class CameraRuntimeGateTest(unittest.TestCase):
         self.assertEqual(status["consecutive_fresh_complete_bundles"], 0)
         self.assertEqual(status["missing_streams"], ["left_realsense_color"])
 
-    def test_force_contact_precedes_blocked_camera_guard(self):
-        client = _CameraClient([])
-        source = _source(client)
-        source.configure_camera_runtime(
-            CameraConfig(enable=True, readiness_bundle_count=5, readiness_timeout_sec=1.0)
-        )
-        force_hold = CommandIntent.gripper_target(left=22.0, right=44.0)
-        snapshot = SimpleNamespace(payload={"left": {}, "right": {}})
-        source._force_recovery_gate = mock.Mock(return_value=(True, force_hold))
-        source._handle_server_motion_epoch = mock.Mock()
-
-        intent = source.next_intent(snapshot, 0.0)
-
-        self.assertIs(intent, force_hold)
-        source._force_recovery_gate.assert_called_once_with(snapshot, 0.0)
-        source._handle_server_motion_epoch.assert_not_called()
-        self.assertEqual(len(client._bundles), 0)
-
     def test_camera_guard_status_is_written_to_rollout_summary(self):
         source = _source(_CameraClient([]))
         source.configure_camera_runtime(

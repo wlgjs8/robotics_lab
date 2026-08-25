@@ -203,7 +203,6 @@ class TrainingEpisodeReplayTest(unittest.TestCase):
         source._last_chunk_overlay_publish_execute_steps = 3
         source._last_chunk_overlay_publish_policy_dt_sec = 0.1
         source.timeout_sec = 0.2
-        source._force_recovery_gate = lambda snapshot, now: (False, None)
         source._handle_server_motion_epoch = lambda snapshot: None
         source._camera_runtime_gate = lambda now: (False, None)
 

@@ -262,10 +262,6 @@ def build_rollout_step_record(
         if cmd_pose is None:
             cmd_pose = _command_pose_from_intent(command_intent, arm)
         meas_pose = _measured_pose(payload, arm)
-        force_control = _arm_mapping(payload, arm).get("force_control")
-        force_torque = _arm_mapping(payload, arm).get("force_torque")
-        force_control = force_control if isinstance(force_control, Mapping) else {}
-        force_torque = force_torque if isinstance(force_torque, Mapping) else {}
         raw_delta = (
             raw_delta_ee_local.get(arm)
             if isinstance(raw_delta_ee_local, Mapping)
@@ -317,27 +313,6 @@ def build_rollout_step_record(
                 (gripper_proprio or {}).get(arm, {}).get("source")
                 if isinstance((gripper_proprio or {}).get(arm), Mapping)
                 else None
-            ),
-            # Force-control arming state. The FT software zero only runs after an
-            # Init Motion (auto_tare_after_init_motion), so a rollout started
-            # without one sits in awaiting_init_tare for its whole duration with
-            # the contact reflex NEVER armed -- and with safety.floor_constraint
-            # disabled that leaves no floor backstop at all. Recording it per step
-            # makes an unprotected run visible in the log instead of inferable.
-            "force_control_state": (
-                str(force_control.get("state"))
-                if force_control.get("state") is not None
-                else None
-            ),
-            "compliance_offset_surface": _finite_vector(
-                force_control.get("compliance_offset_surface"),
-                6,
-            ),
-            "correction_m": _finite_float(force_control.get("correction_m")),
-            "wrench_tcp_fz": _vector_component(force_torque.get("wrench_tcp"), 2),
-            "control_external_wrench_fz": _vector_component(
-                force_torque.get("control_external_wrench"),
-                2,
             ),
         }
         record["arms"][arm] = arm_record
@@ -520,11 +495,6 @@ def _gripper_sample_age_ms(payload: Mapping[str, Any], arm: str) -> float | None
         if value is not None:
             return value
     return None
-
-
-def _vector_component(value: Any, index: int) -> float | None:
-    vector = _finite_vector(value, index + 1, allow_longer=True)
-    return None if vector is None else vector[index]
 
 
 def _finite_vector(

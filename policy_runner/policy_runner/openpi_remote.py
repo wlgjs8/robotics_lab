@@ -1057,12 +1057,6 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
 
     def next_intent(self, snapshot, now_monotonic):  # type: ignore[override]
         self._last_now_monotonic = now_monotonic
-        # Force ownership is server-driven and takes precedence over camera
-        # readiness. Process it before the camera guard so a simultaneous camera
-        # outage cannot delay contact invalidation or its frozen-gripper Hold.
-        force_blocked, force_intent = self._force_recovery_gate(snapshot, now_monotonic)
-        if force_blocked:
-            return force_intent
         self._handle_server_motion_epoch(snapshot)
         blocked, guard_intent = self._camera_runtime_gate(float(now_monotonic))
         if blocked:

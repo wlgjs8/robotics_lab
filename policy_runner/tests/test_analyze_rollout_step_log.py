@@ -58,17 +58,7 @@ class AnalyzeRolloutStepLogTest(unittest.TestCase):
                             "cmd_pose": [0.4, 0.0, cmd_z, 0.0, 0.0, 0.0, 1.0],
                             "meas_pose": [0.4, 0.0, meas_z, 0.0, 0.0, 0.0, 1.0],
                             "cmd_minus_meas_z_mm": (cmd_z - meas_z) * 1000.0,
-                            "compliance_offset_surface": [
-                                0.0,
-                                0.0,
-                                offset_z,
-                                0.0,
-                                0.0,
-                                0.0,
-                            ],
                             "correction_m": abs(offset_z),
-                            "wrench_tcp_fz": 3.0,
-                            "control_external_wrench_fz": 2.0,
                             "gripper_cmd_pct": gripper,
                             "gripper_meas_pct": gripper,
                         }
@@ -92,13 +82,12 @@ class AnalyzeRolloutStepLogTest(unittest.TestCase):
                     gripper_threshold_pct=50.0,
                     max_points=80,
                     blocked_follow_ratio=0.25,
-                    offset_growth_mm=0.5,
                 )
 
         output = stdout.getvalue()
         self.assertIn("descent_segments=1", output)
         self.assertIn("gripper toggles", output)
-        self.assertIn("force-control 차단 가능성", output)
+        self.assertIn("서보/기구 차단 가능성", output)
         self.assertIn("모델/인지 문제 가능성", output)
 
     @unittest.skipUnless(
