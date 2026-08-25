@@ -437,6 +437,7 @@ struct CartesianSolveTelemetry {
     uint64_t follower_warm_resume_count = 0;       // brief Hold resumes preserving chained p/v/a
     bool safety_intervention_recent = false;       // debounced signal seen by follower stage
     bool cartesian_solve_blocked_recent = false;   // debounced IK/Cartesian solve refusal seen by follower stage
+    bool command_throttled_recent = false;         // debounced safety-clamp / branch-jump-rate-limit throttle
     double delta_twist_pending_linear_norm_m = 0.0;
     double delta_twist_pending_angular_norm_rad = 0.0;
     Vec6 delta_twist_step_delta{};
@@ -621,6 +622,28 @@ struct SafetyTrackingTelemetry {
     std::string tracking_error_reason;
     double command_reference_tracking_error_deg = 0.0;
     double physical_command_actual_error_deg = 0.0;
+    // ---- TWO ERRORS, AND THEY BLAME DIFFERENT THINGS -------------------------
+    // The latch compares OUR COMMAND against the measured joints, which is
+    // controller-manager's `JointDeviation`. CM keeps a SECOND, separate check —
+    // its `TrackingError` — that compares the BOX's OWN reference (sdata.jnt_ref)
+    // against the measured joints, and its comment says why: that one is "a
+    // physical anomaly (collision / overload / servo fault), INDEPENDENT of our
+    // command".
+    //
+    // Reporting only the first is what made the 2026-08-26 fault unreadable: it
+    // said "tracking error" while the arm was tracking its own reference to
+    // 0.00 deg. The arm was perfect; the BOX was not taking our commands. Both
+    // numbers are published so the log names the right subsystem.
+    //
+    // command_vs_actual  large + reference_vs_actual small -> the LINK is broken:
+    //                    the box is not consuming what we send.
+    // reference_vs_actual large                            -> the ARM is in
+    //                    trouble: collision, overload, servo fault.
+    double command_vs_actual_deg = 0.0;      // our q_sent    vs measured
+    double reference_vs_actual_deg = 0.0;    // box's q_ref   vs measured
+    bool reference_valid = false;            // the box reported a usable q_ref
+    // Which of the two the latch fired on, empty when it has not fired.
+    std::string latch_cause;
     bool controller_simulation_physical_motion_detected = false;
 };
 

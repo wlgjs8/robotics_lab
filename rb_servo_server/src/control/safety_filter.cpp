@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "rb_servo/control/safety_filter.hpp"
 
 #include <algorithm>
@@ -36,6 +37,19 @@ SafetyTrackingTelemetry makeTrackingTelemetry(
     telemetry.command_reference_tracking_error_deg = tracking_state.override_tracking_q
         ? maxAbsJointError(previous_q_deg, tracking_state.tracking_q_deg)
         : telemetry.physical_command_actual_error_deg;
+
+    // THE TWO ERRORS, SEPARATED, because they blame different subsystems and the
+    // latch can only report one number. `q_target_deg` is the BOX's own reference
+    // (rbpodo sdata.jnt_ref) — comparing it against the measured joints is
+    // controller-manager's `TrackingError`, a physical-anomaly check independent of
+    // whatever we asked for. Comparing OUR command against the measured joints is
+    // CM's `JointDeviation`, and it also goes large when the box simply stops
+    // consuming what we send.
+    telemetry.command_vs_actual_deg = telemetry.physical_command_actual_error_deg;
+    telemetry.reference_valid = state.q_ref_valid;
+    telemetry.reference_vs_actual_deg = state.q_ref_valid
+        ? maxAbsJointError(state.q_target_deg, state.q_actual_deg)
+        : 0.0;
     return telemetry;
 }
 
@@ -114,9 +128,43 @@ SafetyCheckResult SafetyFilter::filterJointTarget(
             result.ok = false;
             result.verdict = SafetyVerdict::TrackingError;
             result.filtered_q_deg = previous_q_deg;
-            result.reason = tracking_state.override_tracking_q
-                ? "reference tracking error exceeded threshold"
-                : "tracking error exceeded threshold";
+            // NAME THE SUBSYSTEM, not just the symptom. The same threshold is
+            // crossed by two very different failures, and the one that fired on
+            // 2026-08-26 said "tracking error" while the arm was following its own
+            // reference to 0.00 deg — the arm was fine and the BOX had stopped
+            // taking our commands. Both numbers go in the message so the reader
+            // does not have to open a CSV to tell them apart.
+            const double cmd_err = result.tracking.command_vs_actual_deg;
+            const double ref_err = result.tracking.reference_vs_actual_deg;
+            const bool arm_is_following =
+                result.tracking.reference_valid &&
+                ref_err < config_.max_tracking_error_deg * 0.25;
+            char detail[224];
+            if (tracking_state.override_tracking_q) {
+                result.tracking.latch_cause = "reference";
+                std::snprintf(detail, sizeof(detail),
+                              "reference tracking error exceeded threshold "
+                              "(command-vs-actual %.2f deg, limit %.2f)",
+                              cmd_err, config_.max_tracking_error_deg);
+            } else if (arm_is_following) {
+                // The arm tracks its own reference but not our command: the
+                // COMMAND LINK is the problem, not the servo.
+                result.tracking.latch_cause = "command_not_executed";
+                std::snprintf(detail, sizeof(detail),
+                              "the controller is NOT executing our commands: "
+                              "command-vs-actual %.2f deg (limit %.2f) while the box's "
+                              "own reference tracks the arm to %.2f deg - check the "
+                              "servo stream (queue sync hold, send policy), not the arm",
+                              cmd_err, config_.max_tracking_error_deg, ref_err);
+            } else {
+                result.tracking.latch_cause = "arm_not_following";
+                std::snprintf(detail, sizeof(detail),
+                              "the ARM is not following its own controller reference: "
+                              "reference-vs-actual %.2f deg, command-vs-actual %.2f deg "
+                              "(limit %.2f) - collision, overload or servo fault",
+                              ref_err, cmd_err, config_.max_tracking_error_deg);
+            }
+            result.reason = detail;
             result.tracking.tracking_error_reason = result.reason;
             return result;
         }
@@ -284,18 +332,43 @@ JointArray SafetyFilter::clampAcceleration(
 ) const {
     JointArray out = q;
     if (dt_sec <= 0.0) return q_prev;
+    // Deceleration is allowed to be `ddq_max_decel_ratio` times harsher than
+    // acceleration; the anti-overshoot guard below then lets the command lead the
+    // target by at most `decel_overshoot_budget_deg` while that ramp runs.
+    //
+    // With ratio == 1.0 AND budget == 0.0 this is byte-identical to the legacy
+    // filter, which bounded acceleration but NOT deceleration: the guard clipped the
+    // accel-limited output straight back to the target, so a target that stopped hard
+    // was passed through at unbounded jerk (measured -68,000 deg/s^2 against a
+    // 3,000 deg/s^2 ceiling on 2026-08-26). Bounding deceleration necessarily costs
+    // some lead -- the budget is what caps it.
+    const double decel_ratio = std::max(1.0, config_.ddq_max_decel_ratio);
+    const double overshoot_budget = std::max(0.0, config_.decel_overshoot_budget_deg);
     for (int i = 0; i < kDof; ++i) {
         const double prev_vel = (q_prev[i] - q_prevprev[i]) / dt_sec;
         const double desired_vel = (q[i] - q_prev[i]) / dt_sec;
         const double max_dv = config_.ddq_max_deg_s2[i] * dt_sec;
-        const double vel = prev_vel + std::clamp(desired_vel - prev_vel, -max_dv, max_dv);
+        // Shedding speed (|desired| < |prev|, which also covers a sign reversal) is a
+        // deceleration and gets the wider budget; building speed keeps ddq_max.
+        const bool shedding_speed = std::abs(desired_vel) < std::abs(prev_vel);
+        const double dv_limit = shedding_speed ? max_dv * decel_ratio : max_dv;
+        const double vel = prev_vel + std::clamp(desired_vel - prev_vel, -dv_limit, dv_limit);
         out[i] = q_prev[i] + vel * dt_sec;
-        // Do not let acceleration limiting overshoot the already velocity-limited target.
-        // This prevents a late tick or direction change from pushing past the commanded pose.
-        if (q[i] >= q_prev[i]) {
-            out[i] = std::min(out[i], q[i]);
-        } else {
-            out[i] = std::max(out[i], q[i]);
+        // Bounded anti-overshoot. `dir` is the direction from the previous command to
+        // this tick's target; `lead` > 0 means the decel-limited output would land PAST
+        // the target. Legacy behaviour was lead <= 0 (clip straight back to the target,
+        // i.e. unbounded deceleration); the budget is how far past the target the
+        // bounded-deceleration ramp is allowed to sit.
+        //
+        // Scope, stated honestly: this caps the lead measured against the CURRENT
+        // target each tick. It does not cap the total excursion if the target stops dead
+        // and the command coasts past it -- that excursion is v^2 / (2 * decel_ratio *
+        // ddq_max), which is what bounding deceleration costs by construction. Size
+        // decel_ratio against the worst commanded speed with that formula.
+        const double dir = (q[i] >= q_prev[i]) ? 1.0 : -1.0;
+        const double lead = (out[i] - q[i]) * dir;
+        if (lead > overshoot_budget) {
+            out[i] = q[i] + dir * overshoot_budget;
         }
     }
     return out;

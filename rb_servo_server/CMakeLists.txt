@@ -164,6 +164,12 @@ if(BUILD_TESTING)
     target_link_libraries(test_safety_policy PRIVATE rb_servo_core)
     add_test(NAME safety_policy COMMAND test_safety_policy)
 
+    # tests/test_safety_filter.cpp existed but was never registered, so the joint
+    # clamp stack (joint-limit / velocity / acceleration) had no test in ctest.
+    add_executable(test_safety_filter tests/test_safety_filter.cpp)
+    target_link_libraries(test_safety_filter PRIVATE rb_servo_core)
+    add_test(NAME safety_filter COMMAND test_safety_filter)
+
     add_executable(test_config_loader tests/test_config_loader.cpp)
     target_link_libraries(test_config_loader PRIVATE rb_servo_core)
     add_test(NAME config_loader COMMAND test_config_loader)

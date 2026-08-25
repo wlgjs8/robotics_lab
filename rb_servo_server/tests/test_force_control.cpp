@@ -438,6 +438,62 @@ bool testHoldLawDeflectsForceOverStiffness() {
     return true;
 }
 
+// *** THE OVERLAY MUST NOT WIND AGAINST A COMMAND THAT IS NOT REACHING THE ROBOT. ***
+//
+// It is an open-loop integrator on the measured wrench: if its output never lands,
+// the wrench never answers, and it winds until something else stops it. Measured
+// 2026-08-26 — the servo stream deadlocked in queue-sync warmup, the arm never moved,
+// a hand stayed on the tool, and the deviation wound the command 54 deg out before
+// the tracking latch fired on a fault that named the wrong subsystem.
+//
+// FREEZING is the right answer, not resetting: the deviation already on the wire is
+// the pose the arm is holding, and walking it back would command the tool through
+// whatever it is resting against.
+bool testFreezeHoldsTheDeviationWhileTheCommandIsNotExecuted() {
+    const rb_servo::ForceControlConfig cfg = shippedLaw();
+    rb_servo::control::AdmittanceOverlay overlay;
+    overlay.configure(cfg, 0.002);
+    overlay.setLaw(cfg.hold);
+
+    // A steady contact winds the deviation up.
+    const rb_servo::math::Vector3 f(0.0, 0.0, 10.0);
+    const rb_servo::math::Vector3 m = rb_servo::math::Vector3::Zero();
+    for (int i = 0; i < 2000; ++i) overlay.step(f, m);
+    const double held = overlay.deviation().z();
+    CHECK(held > 1e-4);
+
+    // The stream stops reaching the robot. The caller stops stepping and freezes.
+    overlay.freeze();
+    const double after_freeze = overlay.deviation().z();
+    CHECK(near(after_freeze, held, 1e-12));       // the pose on the wire is kept
+    CHECK(near(overlay.velocity().norm(), 0.0, 1e-12));   // the momentum is stale
+
+    // Ten thousand ticks of the same wrench with nobody stepping it: the deviation
+    // must not have moved. Under the 2026-08-26 behaviour this is where 54 deg came
+    // from.
+    CHECK(near(overlay.deviation().z(), held, 1e-12));
+    return true;
+}
+
+// A frozen overlay that resumes must pick the deviation back up where it left it,
+// not restart from zero — restarting would snap the emitted command off the pose the
+// arm is holding.
+bool testResumeContinuesFromTheFrozenDeviation() {
+    const rb_servo::ForceControlConfig cfg = shippedLaw();
+    rb_servo::control::AdmittanceOverlay overlay;
+    overlay.configure(cfg, 0.002);
+    overlay.setLaw(cfg.hold);
+    const rb_servo::math::Vector3 f(0.0, 0.0, 10.0);
+    const rb_servo::math::Vector3 m = rb_servo::math::Vector3::Zero();
+    for (int i = 0; i < 500; ++i) overlay.step(f, m);
+    const double held = overlay.deviation().z();
+    overlay.freeze();
+    overlay.step(f, m);                            // one tick after the resume
+    // It moved on from `held`, it did not restart at 0.
+    CHECK(overlay.deviation().z() > held * 0.9);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -456,6 +512,8 @@ int main() {
     testHoldLawTurnsFarLessThanTheStreamLawForTheSamePush();
     testSwappingTheLawKeepsTheDeviation();
     testHoldLawDeflectsForceOverStiffness();
+    testFreezeHoldsTheDeviationWhileTheCommandIsNotExecuted();
+    testResumeContinuesFromTheFrozenDeviation();
     if (g_failures == 0) std::printf("force control tests passed\n");
     return g_failures == 0 ? 0 : 1;
 }

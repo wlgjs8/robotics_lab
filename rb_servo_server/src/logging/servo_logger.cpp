@@ -138,6 +138,7 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_follower_warm_resume_count"
        << ',' << side << "_safety_intervention_recent"
        << ',' << side << "_cartesian_solve_blocked_recent"
+       << ',' << side << "_command_throttled_recent"
        << ',' << side << "_delta_twist_pending_linear_norm_m"
        << ',' << side << "_delta_twist_pending_angular_norm_rad"
        << ',' << side << "_delta_twist_step_linear_norm_m"
@@ -352,7 +353,13 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_fc_gate_force_n"
        << ',' << side << "_fc_gate_torque_nm"
        << ',' << side << "_fc_gate_closed"
-       << ',' << side << "_fc_gate_removed_m";
+       << ',' << side << "_fc_gate_removed_m"
+       // The two tracking errors, beside the force columns because the force path is
+       // what makes them diverge: a compliant command deliberately leaves the arm.
+       << ',' << side << "_track_command_vs_actual_deg"
+       << ',' << side << "_track_reference_vs_actual_deg"
+       << ',' << side << "_track_reference_valid"
+       << ',' << side << "_track_latch_cause";
 }
 
 }  // namespace
@@ -635,7 +642,8 @@ void writeWrenchColumns(std::ostream& os, const Wrench6D& w) {
        << ',' << w.tx << ',' << w.ty << ',' << w.tz;
 }
 
-void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceControlTelemetry& fc) {
+void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceControlTelemetry& fc,
+                       const SafetyTrackingTelemetry& track) {
     os << ',' << ft.enabled
        << ',' << ft.connected
        << ',' << csvEscape(ft.connect_reason)
@@ -680,7 +688,11 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << fc.gate_force_n
        << ',' << fc.gate_torque_nm
        << ',' << fc.gate_closed
-       << ',' << fc.gate_removed_m;
+       << ',' << fc.gate_removed_m
+       << ',' << track.command_vs_actual_deg
+       << ',' << track.reference_vs_actual_deg
+       << ',' << track.reference_valid
+       << ',' << csvEscape(track.latch_cause);
 }
 
 void writeCartesianSolveColumns(std::ostream& os, const CartesianSolveTelemetry& t) {
@@ -828,6 +840,7 @@ void writeArmProfilingColumns(
        << ',' << telemetry.follower_warm_resume_count
        << ',' << telemetry.safety_intervention_recent
        << ',' << telemetry.cartesian_solve_blocked_recent
+       << ',' << telemetry.command_throttled_recent
        << ',' << telemetry.delta_twist_pending_linear_norm_m
        << ',' << telemetry.delta_twist_pending_angular_norm_rad
        << ',' << telemetry.delta_twist_step_linear_norm_m
@@ -1294,8 +1307,8 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << ',' << sleep_entry_margin_us
           << ',' << left_pre_send_us
           << ',' << right_pre_send_us;
-    writeForceColumns(file_, sample.left_ft, sample.left_force_control);
-    writeForceColumns(file_, sample.right_ft, sample.right_force_control);
+    writeForceColumns(file_, sample.left_ft, sample.left_force_control, sample.left_safety_tracking);
+    writeForceColumns(file_, sample.right_ft, sample.right_force_control, sample.right_safety_tracking);
     file_ << '\n';
 }
 

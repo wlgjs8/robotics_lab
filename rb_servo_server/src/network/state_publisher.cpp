@@ -1335,6 +1335,18 @@ nlohmann::json armStateJson(
         {"tracking_error_source", safety_tracking.tracking_error_source},
         {"tracking_error_source_valid", safety_tracking.tracking_error_source_valid},
         {"tracking_error_reason", optionalStringJson(safety_tracking.tracking_error_reason)},
+        // THE TWO ERRORS, SEPARATED — and grouped, because they are only meaningful
+        // as a PAIR. `command_vs_actual` large with `reference_vs_actual` small means
+        // the CONTROLLER is not executing what we send; `reference_vs_actual` large
+        // means the ARM is in trouble. One number could not tell them apart, and on
+        // 2026-08-26 it named the wrong one. The older flat tracking_error_* keys are
+        // left where they are; this block is additive.
+        {"safety_tracking", {
+            {"command_vs_actual_deg", safety_tracking.command_vs_actual_deg},
+            {"reference_vs_actual_deg", safety_tracking.reference_vs_actual_deg},
+            {"reference_valid", safety_tracking.reference_valid},
+            {"latch_cause", optionalStringJson(safety_tracking.latch_cause)},
+        }},
         {"command_reference_tracking_error_deg",
             safety_tracking.command_reference_tracking_error_deg},
         {"physical_command_actual_error_deg",

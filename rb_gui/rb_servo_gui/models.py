@@ -415,6 +415,9 @@ class ArmSnapshot:
     # keep in step with the server's schema.
     force_torque: Mapping[str, Any] | None = None
     force_control: Mapping[str, Any] | None = None
+    # The per-arm tracking block. Two errors live here and they blame different
+    # subsystems (see the FT Monitor's cmd-act / ref-act rows).
+    safety_tracking: Mapping[str, Any] | None = None
 
     @classmethod
     def parse(
@@ -524,6 +527,8 @@ class ArmSnapshot:
                           if isinstance(data.get("force_torque"), Mapping) else None),
             force_control=(data.get("force_control")
                            if isinstance(data.get("force_control"), Mapping) else None),
+            safety_tracking=(data.get("safety_tracking")
+                             if isinstance(data.get("safety_tracking"), Mapping) else None),
         )
 
     def selected_tcp_pose(self, mode: str = "auto") -> Pose6D | None:

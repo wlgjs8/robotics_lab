@@ -163,6 +163,30 @@ safety:
   # ddq_max_deg_s2: [300, 300, 300, 500, 500, 700]    # post-first-run
   # dq_max_deg_s: [30, 30, 30, 45, 45, 60]         # first-run halved
   # ddq_max_deg_s2: [150, 150, 150, 250, 250, 350]  # first-run halved
+  # 2026-08-26 SHAKE FIX (servo_log_20260826_042818.csv, 04:29:31 / 04:29:37 KST).
+  # The joint acceleration limiter bounded acceleration only: its anti-overshoot guard
+  # clipped the accel-limited output straight back to the target whenever the target
+  # decelerated, so a target that stopped hard reached the arm at unbounded jerk.
+  # Measured: right J6 ramped up ON the 3000 deg/s^2 ceiling to 196 deg/s and then fell
+  # to 60 deg/s in ONE 2 ms tick = -68,000 deg/s^2 (23x the ceiling), repeating at
+  # 4-6 Hz for ~0.7 s. ratio 4.0 caps deceleration at 4x ddq_max (6,000-12,000 deg/s^2),
+  # a 5.7x cut in that jerk spike.
+  # COST, sized deliberately: bounding deceleration means the command leads the target
+  # while the ramp runs. Worst-case coast past a dead-stopped target is
+  # v^2 / (2*ratio*ddq) = 196^2 / (2*4*3000) = 1.6 deg on J6 at the speed measured
+  # above; the per-tick lead against a still-moving target is capped at
+  # decel_overshoot_budget_deg. Raise the ratio to trade smoothness back for lead.
+  ddq_max_decel_ratio: 4.0
+  decel_overshoot_budget_deg: 0.5
+  # A tick where the joint clamps removed more than this much velocity counts as a
+  # COMMAND THROTTLE: it stamps the same "command was refused" window as a safety
+  # projection or a blocked Cartesian solve, so the chunk follower freezes its plan and
+  # a divergence the safety layer itself caused RE-ANCHORS instead of latching
+  # ChunkFollowerFault. 50 deg/s was chosen from the same rollout: >50 deg/s of removed
+  # velocity occurred on 0.32% (left) / 0.98% (right) of running ticks, while >2 deg/s
+  # occurred on ~2.1% -- a threshold near zero would pin the window open and freeze the
+  # plan permanently.
+  throttle_intervention_deg_s: 50.0
   joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]
   # Keep wrist yaw cable-safe on JointTarget/InitMotion return: J6 must move to
   # the configured raw target, not the nearest +/-360 equivalent.
@@ -345,9 +369,23 @@ safety:
       d_hard_m: 0.025   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
       # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
       # can brake a head-on approach at the command ceiling before the hard floor.
-      # v_max(max_linear_velocity)=0.32, a_brake=4.0 -> d_hard+0.0128=0.0278; 0.035
-      # leaves a ~20mm slow zone (stoppable up to ~0.4 m/s). (Stage 0c)
-      d_slow_m: 0.030    # wider slow zone: reduces boundary chatter by avoiding hard on/off braking
+      # 2026-08-26: THIS INVARIANT WAS BEING VIOLATED, and the comment below it had gone
+      # stale. It was written for d_slow 0.035 / a_brake 4.0 / v_max 0.32; the live
+      # values had since become d_slow 0.030 / a_brake 3.0, and the TcpPoseTarget profile
+      # flow-infer runs (flow_infer_smooth) commands max_linear_velocity_m_s 0.50. The
+      # requirement is therefore 0.025 + 0.50^2/(2*3.0) = 0.0667 m, so 0.030 was short by
+      # more than 2x: the barrier had a 5 mm slow zone and physically could not brake the
+      # commanded ceiling before the hard floor. Measured consequence on
+      # servo_log_20260826_042818.csv at 04:29:31 KST: the right arm went straight to
+      # 25.18 mm -- d_hard to three decimals -- and the directional projection only got to
+      # act on 24 of 801 ticks (3%), removing a mean of 5.9 deg/s, while the non-
+      # directional joint clamps did the work on 394 of 801 ticks (49%) at up to
+      # 1050 deg/s. Widening does NOT slow normal motion: the barrier's allowance is
+      # sqrt(2*a_brake*margin), which at the new outer edge is 0.50 m/s, i.e. exactly the
+      # command ceiling and thus inert until the arm is genuinely closing.
+      # 2026-06-19 rationale for the old value ("wider slow zone reduces boundary
+      # chatter") is unchanged and still argues for the wider zone, not the narrower one.
+      d_slow_m: 0.067
       a_brake_m_s2: 3.0  # softer braking ramp near collision boundary
       hyst_m: 0.010      # 2026-06-19 anti-chatter: 0.005→0.010 (break on/off limit-cycle toggle)
       latency_s: 0.003   # small cushion for verdict/telemetry jitter without aggressive chatter
@@ -362,7 +400,14 @@ safety:
       swept_samples: 2          # 1=endpoint only; >=2 swept-volume (catches tunneling)
       check_intra_arm: true     # arm folding onto itself (non-adjacent links)
       max_staleness_s: 0.050
-      max_near_pairs: 8
+      # 2026-08-26: 8 -> 16, required by the d_slow_m widening above. `near` is the K
+      # globally NEAREST pairs, chosen independently of d_slow, and only pairs in that
+      # set can produce a barrier constraint. With a 67 mm zone an arm<->stand pair at
+      # 50 mm now has to compete for a slot with the structural intra-arm pairs that sit
+      # around 27 mm all run (they are outside their own 15 mm intra-arm zone, so they
+      # consume slots without ever constraining anything). Cost is per-pair Jacobians in
+      # the ASYNC monitor thread, off the servo_j path.
+      max_near_pairs: 16
       # 2026-07-02: OS 배정(-1)으로 전환. 이전(2026-06-19)에는 전용 코어(4)에 핀했으나,
       # 이제 커널 isolcpus=3로 servo 코어가 스케줄러 도메인에서 제외되어 OS가 collision
       # 스레드를 cpu3에 올릴 수 없음 — tools/rt_core_isolation.sh 적용(재부팅) 후에만 -1이 안전.
@@ -862,7 +907,21 @@ kinematics:
     # Observability ON: flag a solve whose joint solution jumps > N deg from the
     # seed in one tick (branch-jump detector). Does not change motion; surfaces
     # the events to tune the damping above.
-    max_solution_jump_deg: 2.0
+    # 2026-08-26: 2.0 -> 1.0. NOTE what this does and does not buy (measured on
+    # servo_log_20260826_042818.csv): this is a PER-TICK per-joint step ceiling, and at
+    # 500 Hz the downstream dq_max clamp already caps every joint at
+    # dq_max*dt = [0.34,0.34,0.34,0.48,0.48,0.64] deg/tick. 2.0 (== 1000 deg/s) could
+    # therefore never bind before that clamp, and 1.0 (== 500 deg/s) still cannot, so
+    # UMI teleop reach/speed is UNAFFECTED -- teleop is limited by dq_max, not by this.
+    # What 1.0 does buy is a smaller residue for the per-joint clamp to cut: the rate
+    # limiter scales all six joints UNIFORMLY (preserving the joint-space direction)
+    # while dq_max clamps each joint independently (rotating it). Over the 58 s rollout
+    # the raw jump exceeded 2.0 on 56 ticks and 1.0 on 130 ticks (right arm), so this
+    # hands ~74 more ticks/58 s to the direction-preserving limiter.
+    # If you later want this to be the real smoothness knob rather than a backstop, it
+    # has to go at or below the per-tick dq_max budget above -- that is a separate,
+    # speed-affecting decision.
+    max_solution_jump_deg: 1.0
     # Branch-jump CLAMP (acts, not just observes). When a converged solve still
     # jumps > max_solution_jump_deg from the seed: re-solve the SAME tick at
     # branch_jump_damping_scale x damping (escalating per retry) to pull it back
@@ -882,6 +941,27 @@ kinematics:
     # max_solution_jump_deg above is now the SMOOTHNESS/LAG knob: smaller =
     # smoother but more lag through high-gain (wrist) regions; larger = snappier.
     branch_jump_rate_limit: true
+    # MANIPULABILITY step guard (2026-08-26). Scales max_solution_jump_deg down as the
+    # task Jacobian's smallest singular value drops, so a poorly conditioned pose is
+    # traversed slowly instead of at the full ceiling.
+    # WHY HERE: the pose_track_smd manipulability guard (singularity_scale_* in the
+    # TcpPoseTarget profiles below) only runs on the legacy pose-track SMD. flow-infer's
+    # chunk follower (controller delta_preview) bypasses that SMD entirely -- smd_active
+    # was 0 for the whole 2026-08-26 rollout -- so that guard was dead code on the path
+    # that needed it. Every Cartesian path goes through IK, so the IK step ceiling is the
+    # one choke point covering pose-track, delta_twist, delta_preview and teleop.
+    # THRESHOLDS from the measured band, NOT guessed: over that rollout sigma_min ran
+    # 0.104-0.191 (median 0.180) and never went below 0.10 -- there was no true
+    # singularity. The two shake events sat at the BOTTOM of that band (0.118-0.152 and
+    # 0.104-0.123), where the empirical |dq|/|dp| gain was 1.8-2.6x its baseline. So the
+    # ramp is placed across the real operating band: full speed at sigma >= 0.17 (above
+    # the median), floor at sigma <= 0.11 (the observed bottom), and 0.30 min so a
+    # 1.0 deg/tick ceiling becomes 0.30 deg/tick there -- below the tightest dq_max
+    # budget (0.34), i.e. tight enough to actually bind, and never zero so the arm can
+    # always be commanded back out.
+    singular_step_scale_full_sigma: 0.17
+    singular_step_scale_floor_sigma: 0.11
+    singular_step_scale_min: 0.30
     # JOINT-LIMIT BEST EFFORT. Without this, a joint pinned at its range makes the
     # residual irreducible, the iteration budget runs out, the tick is REFUSED, and
     # the arm holds — losing the feasible part of the motion as well. Measured

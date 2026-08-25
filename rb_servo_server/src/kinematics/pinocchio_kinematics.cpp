@@ -56,6 +56,26 @@ JointArray jointDelta(const JointArray& q, const JointArray& seed) {
     return out;
 }
 
+// Manipulability step guard: scale the per-tick joint-step ceiling down as the task
+// Jacobian's smallest singular value drops, so a poorly conditioned pose is traversed
+// slowly instead of at the full ceiling. Linear ramp: 1.0 at sigma >= full_sigma down
+// to scale_min at sigma <= floor_sigma.
+//
+// sigma_min <= 0 means "not measured this solve" (an early-out solve leaves it zero),
+// NOT "singular" -- measured 2026-08-26, 12% of left-arm ticks carry a zero placeholder
+// on an otherwise healthy solve. Scaling on that placeholder would throttle the arm on
+// telemetry noise, so an unmeasured sigma leaves the ceiling untouched; genuine
+// conditioning loss is measured and does scale.
+double singularityStepScale(double sigma_min, double full_sigma, double floor_sigma,
+                            double scale_min) {
+    if (full_sigma <= 0.0) return 1.0;
+    if (!(sigma_min > 0.0)) return 1.0;
+    if (!(full_sigma > floor_sigma)) return 1.0;
+    const double t =
+        std::clamp((sigma_min - floor_sigma) / (full_sigma - floor_sigma), 0.0, 1.0);
+    return scale_min + (1.0 - scale_min) * t;
+}
+
 double maxAbsJointDelta(const JointArray& q, const JointArray& seed) {
     double max_abs = 0.0;
     for (std::size_t i = 0; i < kDof; ++i) {
@@ -748,7 +768,15 @@ IkResult PinocchioKinematics::solveIk(
     const ArmMountConfig& mount
 ) const {
     IkResult result = solveIkDamped(arm, target_tcp_stand, seed_q_deg, mount, 1.0);
-    const double thresh = config_.ik.max_solution_jump_deg;
+    // Per-tick joint-step ceiling, tightened by the manipulability guard. Every
+    // Cartesian path (pose-track SMD, delta_twist, delta_preview, teleop) goes through
+    // IK, so this is the one choke point that covers all of them -- unlike the
+    // pose_track_smd singularity_scale_*, which the chunk follower bypasses.
+    const double thresh = config_.ik.max_solution_jump_deg *
+        singularityStepScale(result.min_singular_value,
+                             config_.ik.singular_step_scale_full_sigma,
+                             config_.ik.singular_step_scale_floor_sigma,
+                             config_.ik.singular_step_scale_min);
     // Feature off, solve failed, or no branch jump -> observability path unchanged.
     if (thresh <= 0.0 || !result.success || result.solution_jump_deg <= thresh) {
         return result;

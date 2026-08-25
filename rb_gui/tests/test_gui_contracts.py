@@ -6708,3 +6708,47 @@ class FtTelemetryAbsentVsDisabledTest(unittest.TestCase):
         html = _render_ft_monitor_rows(state, stale=False)
         self.assertIn("disabled in config", html)
         self.assertNotIn("no force_torque in the state stream", html)
+
+
+class FtMonitorTrackingErrorsTest(unittest.TestCase):
+    """The card shows BOTH tracking errors, because one number blames the wrong thing.
+
+    On 2026-08-26 the latch fired saying "tracking error" while each arm was
+    following its OWN controller reference to 0.00 deg. The arm was fine; the box had
+    stopped taking commands. cmd-vs-act large with ref-vs-act small is the signature
+    of a dead command link, and it is unreadable unless both are on screen.
+    """
+
+    @staticmethod
+    def _state(track: dict) -> StateSnapshot:
+        payload = sample_state()
+        for arm in ("left", "right"):
+            payload[arm]["force_torque"] = {
+                "enabled": True, "connected": True, "bias_valid": True,
+                "comp_stand_axes_at_tcp": [0.0, 0.0, 5.0, 0.0, 0.0, 0.0],
+            }
+            payload[arm]["safety_tracking"] = dict(track)
+        return StateSnapshot.parse(payload, received_monotonic=time.monotonic())
+
+    def test_both_errors_are_shown(self):
+        state = self._state({
+            "command_vs_actual_deg": 30.02,
+            "reference_vs_actual_deg": 0.00,
+            "reference_valid": True,
+        })
+        html = _render_ft_monitor_rows(state, stale=False)
+        self.assertIn("cmd-act", html)
+        self.assertIn("30.02", html)
+        self.assertIn("ref-act", html)
+
+    def test_a_missing_controller_reference_reads_as_nothing_not_zero(self):
+        """0.00 would claim the arm is tracking perfectly; it claims nothing."""
+        state = self._state({
+            "command_vs_actual_deg": 1.5,
+            "reference_vs_actual_deg": 0.0,
+            "reference_valid": False,
+        })
+        html = _render_ft_monitor_rows(state, stale=False)
+        self.assertIn("1.50", html)      # the command error is still real
+        # the reference row is present but empty rather than a fabricated 0.00
+        self.assertIn("ref-act", html)

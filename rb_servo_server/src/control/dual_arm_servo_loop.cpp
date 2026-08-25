@@ -4401,6 +4401,7 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.follower_warm_resume_count = abc.follower_warm_resume_count;
     solve.safety_intervention_recent = abc.safety_intervention_recent;
     solve.cartesian_solve_blocked_recent = abc.cartesian_solve_blocked_recent;
+    solve.command_throttled_recent = abc.command_throttled_recent;
     solve.delta_twist_pending_linear_norm_m = abc.delta_twist_pending_linear_norm_m;
     solve.delta_twist_pending_angular_norm_rad = abc.delta_twist_pending_angular_norm_rad;
     solve.delta_twist_step_delta = abc.delta_twist_step_delta;
@@ -4481,6 +4482,20 @@ void DualArmServoLoop::markSafetyIntervention(ArmId arm_id, uint64_t now_ns) {
 bool DualArmServoLoop::safetyInterventionRecent(ArmId arm_id, uint64_t now_ns) const {
     const uint64_t stamp = arm_id == ArmId::Left ? left_safety_intervention_last_ns_
                                                  : right_safety_intervention_last_ns_;
+    if (stamp == 0) return false;
+    if (now_ns < stamp) return true;
+    return now_ns - stamp <= kFollowerDivergenceExplainWindowNs;
+}
+
+void DualArmServoLoop::markCommandThrottled(ArmId arm_id, uint64_t now_ns) {
+    uint64_t& stamp = arm_id == ArmId::Left ? left_command_throttled_last_ns_
+                                            : right_command_throttled_last_ns_;
+    stamp = now_ns;
+}
+
+bool DualArmServoLoop::commandThrottledRecent(ArmId arm_id, uint64_t now_ns) const {
+    const uint64_t stamp = arm_id == ArmId::Left ? left_command_throttled_last_ns_
+                                                 : right_command_throttled_last_ns_;
     if (stamp == 0) return false;
     if (now_ns < stamp) return true;
     return now_ns - stamp <= kFollowerDivergenceExplainWindowNs;
@@ -4683,7 +4698,16 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     // ended in delta_preview_actual_lead_fault. safety_intervention_recent was 0
     // throughout, so the ROI/floor plan-freeze below never fired.
     const bool solve_blocked_recent = cartesianSolveBlockedRecent(arm_id, now_ns);
-    const bool command_refused_recent = intervention_recent || solve_blocked_recent;
+    // A THROTTLED command (safety velocity/accel clamp or the IK branch-jump rate
+    // limiter actually removing velocity) refuses the plan just as much as a projection
+    // or a blocked solve does -- the arm cannot follow. Measured 2026-08-26: the right
+    // arm was branch-jump rate limited for ~500 ms with cart_status "ok", so neither of
+    // the two windows above was stamped, the 100 ms explain window lapsed 46 ms before
+    // divergence crossed 0.1 rad, and the rollout latched ChunkFollowerFault on
+    // divergence the safety layer had itself caused.
+    const bool throttled_recent = commandThrottledRecent(arm_id, now_ns);
+    const bool command_refused_recent =
+        intervention_recent || solve_blocked_recent || throttled_recent;
     std::uint64_t& reanchor_count = arm_id == ArmId::Left
         ? left_chunk_follower_reanchor_count_
         : right_chunk_follower_reanchor_count_;
@@ -4694,6 +4718,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.follower_warm_resume_count = warm_resume_count;
     abc.safety_intervention_recent = intervention_recent;
     abc.cartesian_solve_blocked_recent = solve_blocked_recent;
+    abc.command_throttled_recent = throttled_recent;
     const bool fault_policy = rf.fallback_policy == RuckigFollowerFallbackPolicy::Fault;
     const bool was_active = follower->active();
     std::string transition_reason;
@@ -4789,7 +4814,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         output_smd->deactivate();
         follower->expireHoldPause(safety_hold_now_sec, rf.hold_bounce_resume_sec);
         transition_reason = intervention_recent ? "safety intervention hold"
-                                                : "cartesian solve blocked hold";
+                          : solve_blocked_recent ? "cartesian solve blocked hold"
+                                                 : "command throttled hold";
     } else if (follower->holdPaused()) {
         // Warm resume always re-seeds the output stage from the latest sent pose;
         // the preserved p/v/a belongs only to the pre-filter follower.
@@ -4859,7 +4885,9 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                         std::cout << "[chunk_follower] " << toString(arm_id)
                                   << (intervention_recent
                                           ? " divergence re-anchor (safety intervention)"
-                                          : " divergence re-anchor (cartesian solve blocked)")
+                                      : solve_blocked_recent
+                                          ? " divergence re-anchor (cartesian solve blocked)"
+                                          : " divergence re-anchor (command throttled)")
                                   << " pos_err=" << pos_err
                                   << " ang_err=" << ang_err
                                   << " wire_seq=" << active_diag.seg_wire_seq
@@ -5110,13 +5138,23 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     // ended in delta_preview_actual_lead_fault. safety_intervention_recent was 0
     // throughout, so the ROI/floor plan-freeze below never fired.
     const bool solve_blocked_recent = cartesianSolveBlockedRecent(arm_id, now_ns);
-    const bool command_refused_recent = intervention_recent || solve_blocked_recent;
+    // A THROTTLED command (safety velocity/accel clamp or the IK branch-jump rate
+    // limiter actually removing velocity) refuses the plan just as much as a projection
+    // or a blocked solve does -- the arm cannot follow. Measured 2026-08-26: the right
+    // arm was branch-jump rate limited for ~500 ms with cart_status "ok", so neither of
+    // the two windows above was stamped, the 100 ms explain window lapsed 46 ms before
+    // divergence crossed 0.1 rad, and the rollout latched ChunkFollowerFault on
+    // divergence the safety layer had itself caused.
+    const bool throttled_recent = commandThrottledRecent(arm_id, now_ns);
+    const bool command_refused_recent =
+        intervention_recent || solve_blocked_recent || throttled_recent;
     std::uint64_t& reanchor_count = arm_id == ArmId::Left
         ? left_chunk_follower_reanchor_count_
         : right_chunk_follower_reanchor_count_;
     abc.follower_reanchor_count = reanchor_count;
     abc.safety_intervention_recent = intervention_recent;
     abc.cartesian_solve_blocked_recent = solve_blocked_recent;
+    abc.command_throttled_recent = throttled_recent;
     const bool fault_policy = rf.fallback_policy == RuckigFollowerFallbackPolicy::Fault;
     const bool was_active = follower->active();
     std::string transition_reason;
@@ -5207,7 +5245,9 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
                         std::cout << "[chunk_follower] " << toString(arm_id)
                                   << (intervention_recent
                                           ? " delta_twist divergence re-anchor (safety intervention)"
-                                          : " delta_twist divergence re-anchor (cartesian solve blocked)")
+                                      : solve_blocked_recent
+                                          ? " delta_twist divergence re-anchor (cartesian solve blocked)"
+                                          : " delta_twist divergence re-anchor (command throttled)")
                                   << " pos_err=" << pos_err
                                   << " ang_err=" << ang_err
                                   << " wire_seq=" << active_diag.seg_wire_seq
@@ -5954,6 +5994,16 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             const uint64_t solve_block_now_ns =
                 last_loop_start_ns_ != 0 ? last_loop_start_ns_ : nowSteadyNs();
             for (int i = 0; i < 2; ++i) {
+                // A SUCCEEDING solve can still refuse most of the commanded motion: the
+                // branch-jump rate limiter scales the whole seed->solution delta down to
+                // the per-tick ceiling and reports cart_status "ok" with reason
+                // "branch_jump_rate_limited". That is a throttle, not a block, so it gets
+                // the throttle window rather than the solve-blocked one -- but it must be
+                // recorded, because it is what silently built the divergence that latched
+                // the 2026-08-26 rollout.
+                if (arm_ctx[i].last_cartesian_solve.ik_branch_jump_rate_limited) {
+                    markCommandThrottled(arm_ctx[i].arm, solve_block_now_ns);
+                }
                 if (arm_result[i]->verdict == SafetyVerdict::Ok) continue;
                 *arm_target[i] = arm_ctx[i].prev_sent_q_deg;
                 arm_ctx[i].follower_output_smd.deactivate();
@@ -6172,6 +6222,33 @@ ServoTarget DualArmServoLoop::applySafety(
     const auto mark_intervention = [&](ArmId arm) {
         markSafetyIntervention(arm, safety_now_ns);
     };
+
+    // ---- Joint-clamp THROTTLE stamp ----
+    // The joint limit / velocity / accel clamps above already ran (filterJointTarget).
+    // They are not a "projection" and they leave cart_status "ok", so nothing used to
+    // record that the command had been cut -- yet the arm cannot follow the plan when
+    // they bite hard, exactly as it cannot when a projection or a blocked solve bites.
+    // Stamp the throttle window when the cut is bigger than the configured threshold so
+    // the chunk follower freezes its plan and re-anchors instead of latching. The
+    // threshold keeps this rare: measured 2026-08-26 over a 58 s rollout, >50 deg/s of
+    // removed velocity occurred on 0.32% (left) / 0.98% (right) of ticks, while >2 deg/s
+    // occurred on ~2.1% -- a threshold near zero would pin the window permanently open
+    // and freeze the plan for good.
+    if (config_.safety.throttle_intervention_deg_s > 0.0 && dt_sec > 0.0) {
+        const double throttle_deg = config_.safety.throttle_intervention_deg_s * dt_sec;
+        const auto clamp_cut_deg = [](const SafetyClampTelemetry& c) {
+            return std::max({c.joint_limit_clamp_max_delta_deg,
+                             c.velocity_clamp_max_delta_deg,
+                             c.accel_clamp_max_delta_deg});
+        };
+        for (int i = 0; i < 2; ++i) {
+            const SafetyClampTelemetry& clamp = safety_ctx[i].abc_telemetry.safety_clamp;
+            if (safety_ctx[i].abc_telemetry.safety_clamp_present &&
+                clamp_cut_deg(clamp) > throttle_deg) {
+                markCommandThrottled(safety_ctx[i].arm, safety_now_ns);
+            }
+        }
+    }
 
     // ---- Floor plane: synchronous FK + per-point z-velocity Jacobian ----
     if (floorConstraintActive()) {
@@ -7442,6 +7519,47 @@ bool DualArmServoLoop::forceControlCovered(
     const FreedriveStage stage =
         (left ? left_freedrive_stage_ : right_freedrive_stage_).load();
     if (stage != FreedriveStage::Off) return no("free-drive owns this arm");
+
+    // *** IS THE COMMAND ACTUALLY REACHING THE ROBOT? ***
+    // The overlay is an open-loop integrator on the measured wrench. If its output
+    // never lands, the wrench never answers, and it winds until something else stops
+    // it. On 2026-08-26 the servo stream deadlocked in queue-sync warmup: the arm
+    // never moved, the wrench stayed (a hand was on the tool), and the deviation wound
+    // the command 54 deg out before the tracking latch fired.
+    //
+    // The box's OWN reference is the evidence. `q_target_deg` is rbpodo's sdata.jnt_ref
+    // — what the controller is actually chasing. If it is not following what we sent,
+    // the box is not taking our commands and there is nothing for compliance to do but
+    // hold what it has.
+    if (config_.force_control.max_command_lag_deg > 0.0) {
+        if (!state.q_ref_valid) {
+            return no("the controller is not reporting its own joint reference, so "
+                      "there is no evidence our commands are being executed");
+        }
+        const JointArray& sent = left ? left_prev_sent_q_deg_ : right_prev_sent_q_deg_;
+        double lag = 0.0;
+        for (int i = 0; i < kDof; ++i) {
+            if (!std::isfinite(sent[i]) || !std::isfinite(state.q_target_deg[i])) {
+                return no("joint command or controller reference is non-finite");
+            }
+            lag = std::max(lag, std::abs(sent[i] - state.q_target_deg[i]));
+        }
+        if (lag > config_.force_control.max_command_lag_deg) {
+            // FREEZE, not reset: the deviation already on the wire is the pose the
+            // arm is holding, and walking it back would command the tool through
+            // whatever it is resting against.
+            if (reason != nullptr) {
+                char detail[192];
+                std::snprintf(detail, sizeof(detail),
+                              "the controller is not executing our commands (its own "
+                              "reference trails the last sent joints by %.2f deg, limit "
+                              "%.2f) - compliance is FROZEN until the servo stream "
+                              "recovers", lag, config_.force_control.max_command_lag_deg);
+                *reason = detail;
+            }
+            return false;
+        }
+    }
 
     switch (command.mode) {
         case ControlMode::TcpPoseTarget:

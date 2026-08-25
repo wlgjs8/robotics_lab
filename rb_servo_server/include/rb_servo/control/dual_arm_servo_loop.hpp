@@ -338,6 +338,13 @@ private:
     // ticks later by the follower stage through the same debounce window.
     void markCartesianSolveBlocked(ArmId arm_id, uint64_t now_ns);
     bool cartesianSolveBlockedRecent(ArmId arm_id, uint64_t now_ns) const;
+    // A tick where the safety clamps or the IK branch-jump rate limiter actually
+    // removed command velocity. Stamped into the same "the command was refused"
+    // window as a safety projection or a blocked Cartesian solve, because it has the
+    // same consequence: the arm cannot follow the plan, so the plan must not run away
+    // and divergence caused by it must re-anchor rather than latch.
+    void markCommandThrottled(ArmId arm_id, uint64_t now_ns);
+    bool commandThrottledRecent(ArmId arm_id, uint64_t now_ns) const;
 
 private:
     std::unique_ptr<IRobotBackend> left_robot_;
@@ -649,6 +656,8 @@ private:
     // follower divergence reads the previous safety tick through a short debounce.
     uint64_t left_safety_intervention_last_ns_ = 0;
     uint64_t right_safety_intervention_last_ns_ = 0;
+    uint64_t left_command_throttled_last_ns_ = 0;
+    uint64_t right_command_throttled_last_ns_ = 0;
     // Last tick when the Cartesian stage refused each arm's target and held it at
     // prev_sent_q_deg (IkFailed / CartesianUnavailable). Same read-one-tick-late
     // contract as the safety-intervention stamps above.
@@ -835,6 +844,7 @@ private:
         std::uint64_t follower_reanchor_count = 0;
         std::uint64_t follower_warm_resume_count = 0;
         bool safety_intervention_recent = false;
+        bool command_throttled_recent = false;
         bool cartesian_solve_blocked_recent = false;
         double delta_twist_pending_linear_norm_m = 0.0;
         double delta_twist_pending_angular_norm_rad = 0.0;

@@ -1195,6 +1195,16 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.servo.command_timeout_sec, "servo.command_timeout_sec");
     validatePositiveFinite(cfg.safety.command_timeout_sec, "safety.command_timeout_sec");
     validatePositiveFinite(cfg.safety.max_tracking_error_deg, "safety.max_tracking_error_deg");
+    validatePositiveFinite(cfg.safety.ddq_max_decel_ratio, "safety.ddq_max_decel_ratio");
+    if (cfg.safety.ddq_max_decel_ratio < 1.0) {
+        throw std::runtime_error(
+            "safety.ddq_max_decel_ratio must be >= 1.0 (deceleration may not be limited "
+            "harder than acceleration; 1.0 == symmetric)");
+    }
+    validateNonNegativeFinite(
+        cfg.safety.decel_overshoot_budget_deg, "safety.decel_overshoot_budget_deg");
+    validateNonNegativeFinite(
+        cfg.safety.throttle_intervention_deg_s, "safety.throttle_intervention_deg_s");
     validateNonNegativeFinite(
         cfg.safety.controller_simulation_physical_motion_threshold_deg,
         "safety.controller_simulation_physical_motion_threshold_deg"
@@ -2224,6 +2234,31 @@ void validateConfig(const DualArmConfig& cfg) {
     validateNonNegativeFinite(cfg.kinematics.ik.damping_max, "kinematics.ik.damping_max");
     validateNonNegativeFinite(cfg.kinematics.ik.max_solution_jump_deg, "kinematics.ik.max_solution_jump_deg");
     validateNonNegativeFinite(cfg.kinematics.ik.branch_jump_damping_scale, "kinematics.ik.branch_jump_damping_scale");
+    validateNonNegativeFinite(
+        cfg.kinematics.ik.singular_step_scale_full_sigma,
+        "kinematics.ik.singular_step_scale_full_sigma");
+    validateNonNegativeFinite(
+        cfg.kinematics.ik.singular_step_scale_floor_sigma,
+        "kinematics.ik.singular_step_scale_floor_sigma");
+    if (cfg.kinematics.ik.singular_step_scale_full_sigma > 0.0) {
+        if (!(cfg.kinematics.ik.singular_step_scale_floor_sigma <
+              cfg.kinematics.ik.singular_step_scale_full_sigma)) {
+            throw std::runtime_error(
+                "kinematics.ik.singular_step_scale_floor_sigma must be < "
+                "singular_step_scale_full_sigma");
+        }
+        if (!(cfg.kinematics.ik.singular_step_scale_min > 0.0 &&
+              cfg.kinematics.ik.singular_step_scale_min <= 1.0)) {
+            throw std::runtime_error(
+                "kinematics.ik.singular_step_scale_min must be in (0, 1] "
+                "(0 would freeze the arm inside the singular region)");
+        }
+        if (!(cfg.kinematics.ik.max_solution_jump_deg > 0.0)) {
+            throw std::runtime_error(
+                "kinematics.ik.singular_step_scale_full_sigma > 0 requires "
+                "max_solution_jump_deg > 0 (there is no step ceiling to scale)");
+        }
+    }
     if (cfg.kinematics.ik.branch_jump_max_retries < 0) {
         throw std::runtime_error("kinematics.ik.branch_jump_max_retries must be >= 0");
     }
@@ -2632,6 +2667,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "joint_target_literal_axes",
             "command_timeout_sec",
             "max_tracking_error_deg",
+            "ddq_max_decel_ratio",
+            "decel_overshoot_budget_deg",
+            "throttle_intervention_deg_s",
             "stop_both_arms_on_single_arm_error",
             "tracking_error_policy",
             "latch_fault_on_robot_state_error",
@@ -2657,6 +2695,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "joint_target_literal_axes")) cfg.safety.joint_target_literal_axes = parseJointBoolArray(sec["joint_target_literal_axes"], "safety.joint_target_literal_axes");
         if (has(sec, "command_timeout_sec")) cfg.safety.command_timeout_sec = asDouble(sec["command_timeout_sec"], "safety.command_timeout_sec");
         if (has(sec, "max_tracking_error_deg")) cfg.safety.max_tracking_error_deg = asDouble(sec["max_tracking_error_deg"], "safety.max_tracking_error_deg");
+        if (has(sec, "ddq_max_decel_ratio")) cfg.safety.ddq_max_decel_ratio = asDouble(sec["ddq_max_decel_ratio"], "safety.ddq_max_decel_ratio");
+        if (has(sec, "decel_overshoot_budget_deg")) cfg.safety.decel_overshoot_budget_deg = asDouble(sec["decel_overshoot_budget_deg"], "safety.decel_overshoot_budget_deg");
+        if (has(sec, "throttle_intervention_deg_s")) cfg.safety.throttle_intervention_deg_s = asDouble(sec["throttle_intervention_deg_s"], "safety.throttle_intervention_deg_s");
         if (has(sec, "stop_both_arms_on_single_arm_error")) cfg.safety.stop_both_arms_on_single_arm_error = asBool(sec["stop_both_arms_on_single_arm_error"], "safety.stop_both_arms_on_single_arm_error");
         if (has(sec, "tracking_error_policy")) cfg.safety.tracking_error_policy = trackingErrorPolicyFromString(asString(sec["tracking_error_policy"], "safety.tracking_error_policy"));
         if (has(sec, "latch_fault_on_robot_state_error")) cfg.safety.latch_fault_on_robot_state_error = asBool(sec["latch_fault_on_robot_state_error"], "safety.latch_fault_on_robot_state_error");
@@ -3544,7 +3585,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "max_deviation_m", "max_deviation_rad",
             "max_velocity_m_s", "max_acceleration_m_s2",
             "max_velocity_rad_s", "max_acceleration_rad_s2",
-            "hold_compliance", "max_state_age_sec",
+            "hold_compliance", "max_state_age_sec", "max_command_lag_deg",
         }, "force_control");
         ForceControlConfig& fc = cfg.force_control;
         if (has(sec, "enable")) fc.enable = asBool(sec["enable"], "force_control.enable");
@@ -3601,6 +3642,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "max_acceleration_rad_s2")) fc.max_acceleration_rad_s2 = asDouble(sec["max_acceleration_rad_s2"], "force_control.max_acceleration_rad_s2");
         if (has(sec, "hold_compliance")) fc.hold_compliance = asBool(sec["hold_compliance"], "force_control.hold_compliance");
         if (has(sec, "max_state_age_sec")) fc.max_state_age_sec = asDouble(sec["max_state_age_sec"], "force_control.max_state_age_sec");
+        if (has(sec, "max_command_lag_deg")) fc.max_command_lag_deg = asDouble(sec["max_command_lag_deg"], "force_control.max_command_lag_deg");
     }
 
     // ONE ANSWER, DECIDED IN ONE PLACE. The zero-payload push is a property of the
@@ -3896,6 +3938,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "branch_jump_max_retries",
                 "branch_jump_clamp_to_seed",
                 "branch_jump_rate_limit",
+                "singular_step_scale_full_sigma",
+                "singular_step_scale_floor_sigma",
+                "singular_step_scale_min",
                 "joint_limit_best_effort_position_tolerance_m",
                 "joint_limit_best_effort_orientation_tolerance_rad",
             }, "kinematics.ik");
@@ -3913,6 +3958,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ik, "branch_jump_max_retries")) cfg.kinematics.ik.branch_jump_max_retries = asInt(ik["branch_jump_max_retries"], "kinematics.ik.branch_jump_max_retries");
             if (has(ik, "branch_jump_clamp_to_seed")) cfg.kinematics.ik.branch_jump_clamp_to_seed = asBool(ik["branch_jump_clamp_to_seed"], "kinematics.ik.branch_jump_clamp_to_seed");
             if (has(ik, "branch_jump_rate_limit")) cfg.kinematics.ik.branch_jump_rate_limit = asBool(ik["branch_jump_rate_limit"], "kinematics.ik.branch_jump_rate_limit");
+            if (has(ik, "singular_step_scale_full_sigma")) cfg.kinematics.ik.singular_step_scale_full_sigma = asDouble(ik["singular_step_scale_full_sigma"], "kinematics.ik.singular_step_scale_full_sigma");
+            if (has(ik, "singular_step_scale_floor_sigma")) cfg.kinematics.ik.singular_step_scale_floor_sigma = asDouble(ik["singular_step_scale_floor_sigma"], "kinematics.ik.singular_step_scale_floor_sigma");
+            if (has(ik, "singular_step_scale_min")) cfg.kinematics.ik.singular_step_scale_min = asDouble(ik["singular_step_scale_min"], "kinematics.ik.singular_step_scale_min");
             if (has(ik, "joint_limit_best_effort_position_tolerance_m")) cfg.kinematics.ik.joint_limit_best_effort_position_tolerance_m = asDouble(ik["joint_limit_best_effort_position_tolerance_m"], "kinematics.ik.joint_limit_best_effort_position_tolerance_m");
             if (has(ik, "joint_limit_best_effort_orientation_tolerance_rad")) cfg.kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad = asDouble(ik["joint_limit_best_effort_orientation_tolerance_rad"], "kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad");
         }

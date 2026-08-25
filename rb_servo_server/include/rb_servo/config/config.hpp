@@ -166,6 +166,30 @@ struct IkSolverConfig {
     int branch_jump_max_retries = 0;
     bool branch_jump_clamp_to_seed = false;
     bool branch_jump_rate_limit = false;
+    // MANIPULABILITY step guard. Scales max_solution_jump_deg (and therefore the
+    // branch-jump rate limiter's per-tick joint-step ceiling) down as the task
+    // Jacobian's smallest singular value drops, so a poorly conditioned pose is
+    // traversed slowly instead of at the full ceiling. scale = 1 at
+    // sigma >= singular_step_scale_full_sigma, ramps linearly to
+    // singular_step_scale_min at sigma <= singular_step_scale_floor_sigma. The
+    // minimum is kept > 0 so the arm never freezes and can always be commanded back
+    // out of the region.
+    //
+    // Why here and not on the SMD: the existing pose_track_smd manipulability guard
+    // (JointTargetSmd/TcpPoseTargetProfile singularity_scale_*) only runs on the
+    // legacy pose-track SMD path. flow-infer's chunk follower (controller
+    // delta_preview) bypasses that SMD entirely -- smd_active was 0 for the whole
+    // 2026-08-26 rollout -- so the guard was dead code on the path that actually
+    // needed it. Every Cartesian path goes through IK, so scaling the IK step
+    // ceiling covers pose-track, delta_twist, delta_preview and teleop alike.
+    //
+    // The scale is direction-PRESERVING (a uniform scale on the seed->solution
+    // delta), unlike the downstream per-joint dq_max clamp which rescales each joint
+    // independently and so rotates the joint-space step.
+    // full_sigma <= 0 disables (default off).
+    double singular_step_scale_full_sigma = 0.0;
+    double singular_step_scale_floor_sigma = 0.0;
+    double singular_step_scale_min = 1.0;
     // JOINT-LIMIT BEST EFFORT. When the DLS iteration clamps a joint to its range
     // the solve returns kReasonJointLimit and the whole tick is refused, so the arm
     // holds — including the components of the requested motion that were perfectly
@@ -730,6 +754,35 @@ struct SafetyConfig {
     double command_timeout_sec = 0.2;
     double max_tracking_error_deg = 10.0;
 
+    // Deceleration allowance for the joint acceleration limiter, as a MULTIPLE of
+    // ddq_max_deg_s2. The limiter used to bound acceleration only: its anti-overshoot
+    // guard ("never pass the commanded pose") clipped the accel-limited output back to
+    // the target whenever the target decelerated, so a target that stopped hard reached
+    // the arm at unbounded jerk. Measured 2026-08-26 on servo_log_20260826_042818.csv:
+    // right J6 ramped up ON the 3000 deg/s^2 ceiling to 196 deg/s and then dropped to
+    // 60 deg/s in ONE 2 ms tick == -68,000 deg/s^2, 23x the configured ceiling, at
+    // 4-6 Hz for ~0.7 s (the "violent shake" the operator reported).
+    // ratio <= 1.0 with decel_overshoot_budget_deg == 0 reproduces the legacy behaviour
+    // EXACTLY, so this is opt-in per tracked config.
+    // The trade is explicit: bounding deceleration means the command must lead the
+    // (decelerating) target while the ramp runs. decel_overshoot_budget_deg caps that
+    // lead in joint space; past the budget the target wins again, so a stopped target is
+    // never overshot by more than the budget. Required lead ~= dv^2 / (2 * ratio * ddq).
+    double ddq_max_decel_ratio = 1.0;
+    double decel_overshoot_budget_deg = 0.0;
+
+    // How much velocity the joint safety clamps must remove before the tick counts as a
+    // COMMAND THROTTLE (deg/s, per joint, max over the joint-limit/velocity/accel
+    // stages). A throttled tick stamps the same "the command was refused" window that a
+    // safety projection or a blocked Cartesian solve does, so the chunk follower freezes
+    // its plan and, if divergence crosses the latch, RE-ANCHORS instead of faulting.
+    // Why: on 2026-08-26 the right arm was throttled by the IK branch-jump rate limiter
+    // for ~500 ms; that throttle stamped neither window (cart_status stayed "ok"), the
+    // 100 ms explain window lapsed 46 ms before divergence crossed 0.1 rad, and the
+    // rollout latched ChunkFollowerFault on divergence the safety layer had itself
+    // caused. <= 0 disables (legacy).
+    double throttle_intervention_deg_s = 0.0;
+
     // mock can use SnapToActual for fast iteration. real should use FaultLatch.
     TrackingErrorPolicy tracking_error_policy = TrackingErrorPolicy::FaultLatch;
 
@@ -1133,6 +1186,21 @@ struct ForceControlConfig {
     // Refuse to compose while the arm's own state is not trustworthy: a deviation
     // composed onto a stale nominal is a command nobody authored.
     double max_state_age_sec = 0.05;
+    // *** THE OVERLAY MAY NOT INTEGRATE AGAINST A COMMAND THAT IS NOT REACHING THE
+    // ROBOT. *** It is an open-loop integrator on the measured wrench: if its output
+    // never lands, the wrench never changes, and it winds until something else stops
+    // it. Measured 2026-08-26 — the servo stream deadlocked in queue-sync warmup, the
+    // arm never moved, and the deviation wound the command 54 deg out before the
+    // tracking latch fired on a fault that named the wrong subsystem.
+    //
+    // The evidence is the BOX'S OWN REFERENCE (rbpodo sdata.jnt_ref): if it is not
+    // following what we sent, the box is not taking our commands. Past this bound the
+    // overlay FREEZES (holds its deviation, drops its momentum) instead of winding.
+    //
+    // Sized above the honest lag — the queue holds queue_sync.target_fill ticks, so at
+    // a fast joint rate the reference legitimately trails the command by a few
+    // degrees. Non-positive disables the guard.
+    double max_command_lag_deg = 8.0;
 };
 
 struct LinearMoveConfig {

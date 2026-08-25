@@ -257,6 +257,111 @@ bool testStatePublisherSerializesWrapDiagnostics() {
     return true;
 }
 
+
+// ---- Deceleration limiting (2026-08-26 shake fix) ----------------------------
+
+rb_servo::SafetyConfig decelTestSafetyConfig(double ratio, double budget_deg) {
+    rb_servo::SafetyConfig config;
+    config.q_min_deg = joints(-360.0);
+    config.q_max_deg = joints(360.0);
+    config.dq_max_deg_s.fill(100000.0);   // velocity clamp inert: isolate the accel stage
+    config.ddq_max_deg_s2.fill(3000.0);
+    config.max_tracking_error_deg = 1000.0;
+    config.ddq_max_decel_ratio = ratio;
+    config.decel_overshoot_budget_deg = budget_deg;
+    return config;
+}
+
+// Drive one joint: q_prevprev -> q_prev at `prev_vel`, then ask for `desired_vel`.
+// Returns the realized velocity of joint 0 after the clamp stack.
+double realizedVelDegS(const rb_servo::SafetyConfig& config,
+                       double prev_vel_deg_s,
+                       double desired_vel_deg_s,
+                       double dt_sec) {
+    const rb_servo::SafetyFilter filter(config);
+    rb_servo::JointArray prevprev = joints(0.0);
+    rb_servo::JointArray prev = joints(0.0);
+    prev[0] = prev_vel_deg_s * dt_sec;
+    rb_servo::JointArray desired = prev;
+    desired[0] = prev[0] + desired_vel_deg_s * dt_sec;
+    const rb_servo::SafetyClampTelemetry clamp =
+        filter.clampMotionDetailed(desired, prev, prevprev, dt_sec);
+    return (clamp.q_after_accel_limit_deg[0] - prev[0]) / dt_sec;
+}
+
+// ratio 1.0 + budget 0.0 must reproduce the legacy filter exactly: acceleration is
+// bounded by ddq_max, deceleration is not bounded at all.
+bool testLegacyDecelBehaviorPreservedAtRatioOne() {
+    const double dt = 0.002;
+    const rb_servo::SafetyConfig config = decelTestSafetyConfig(1.0, 0.0);
+    // Acceleration is clamped to ddq_max*dt = 6 deg/s per tick.
+    RB_CHECK(near(realizedVelDegS(config, 0.0, 500.0, dt), 6.0));
+    // Deceleration passes through untouched -- this is the legacy behavior the fix
+    // makes configurable, kept as the default so nothing changes without opting in.
+    RB_CHECK(near(realizedVelDegS(config, 196.0, 60.0, dt), 60.0));
+    RB_CHECK(near(realizedVelDegS(config, 196.0, 0.0, dt), 0.0));
+    return true;
+}
+
+// With a ratio > 1 the same hard stop is spread over the deceleration ceiling instead
+// of landing in one tick. Reproduces the measured servo_log_20260826_042818.csv event:
+// right J6 at 196 deg/s with the stream demanding 60 deg/s the next tick.
+bool testDecelerationIsBoundedByRatio() {
+    const double dt = 0.002;
+    const rb_servo::SafetyConfig config = decelTestSafetyConfig(4.0, 1000.0);
+    const double vel = realizedVelDegS(config, 196.0, 60.0, dt);
+    // ddq_max*ratio*dt = 3000*4*0.002 = 24 deg/s of shed speed per tick.
+    RB_CHECK(near(vel, 196.0 - 24.0));
+    const double realized_decel = (vel - 196.0) / dt;
+    RB_CHECK(realized_decel > -(3000.0 * 4.0) - kEpsilon);
+    // The legacy filter would have realized -68,000 deg/s^2 here.
+    RB_CHECK(realized_decel > -13000.0);
+    // Acceleration is NOT widened by the ratio: still ddq_max.
+    RB_CHECK(near(realizedVelDegS(config, 0.0, 500.0, dt), 6.0));
+    return true;
+}
+
+// A sign reversal counts as shedding speed (it must decelerate through zero first),
+// so it gets the deceleration budget rather than the acceleration one.
+bool testSignReversalUsesDecelerationBudget() {
+    const double dt = 0.002;
+    const rb_servo::SafetyConfig config = decelTestSafetyConfig(4.0, 1000.0);
+    RB_CHECK(near(realizedVelDegS(config, 100.0, -100.0, dt), 100.0 - 24.0));
+    return true;
+}
+
+// The overshoot budget caps how far past the target the deceleration ramp may sit.
+bool testOvershootBudgetCapsCommandLead() {
+    const double dt = 0.002;
+    const double budget = 0.05;
+    const rb_servo::SafetyConfig config = decelTestSafetyConfig(4.0, budget);
+    const rb_servo::SafetyFilter filter(config);
+    rb_servo::JointArray prevprev = joints(0.0);
+    rb_servo::JointArray prev = joints(0.0);
+    prev[0] = 196.0 * dt;
+    rb_servo::JointArray desired = prev;
+    desired[0] = prev[0] + 0.0;   // target stops dead
+    const rb_servo::SafetyClampTelemetry clamp =
+        filter.clampMotionDetailed(desired, prev, prevprev, dt);
+    const double lead = clamp.q_after_accel_limit_deg[0] - desired[0];
+    RB_CHECK(lead > 0.0);                    // bounded decel means the command leads
+    RB_CHECK(near(lead, budget));            // and the lead is capped at the budget
+    // Zero budget collapses back to the legacy "never pass the target" clip.
+    const rb_servo::SafetyFilter strict(decelTestSafetyConfig(4.0, 0.0));
+    const rb_servo::SafetyClampTelemetry strict_clamp =
+        strict.clampMotionDetailed(desired, prev, prevprev, dt);
+    RB_CHECK(near(strict_clamp.q_after_accel_limit_deg[0], desired[0]));
+    return true;
+}
+
+// Steady streaming must be untouched by either knob -- no lag, no lead.
+bool testSteadyStreamingIsUnaffected() {
+    const double dt = 0.002;
+    const rb_servo::SafetyConfig config = decelTestSafetyConfig(4.0, 0.5);
+    RB_CHECK(near(realizedVelDegS(config, 120.0, 120.0, dt), 120.0));
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -271,5 +376,10 @@ int main() {
     if (!testTrackingPreservesRawControllerValuesInsideConfiguredRange()) return 1;
     if (!testCommandTargetClampingUsesConfiguredRawRangeWithoutWrap()) return 1;
     if (!testStatePublisherSerializesWrapDiagnostics()) return 1;
+    if (!testLegacyDecelBehaviorPreservedAtRatioOne()) return 1;
+    if (!testDecelerationIsBoundedByRatio()) return 1;
+    if (!testSignReversalUsesDecelerationBudget()) return 1;
+    if (!testOvershootBudgetCapsCommandLead()) return 1;
+    if (!testSteadyStreamingIsUnaffected()) return 1;
     return 0;
 }

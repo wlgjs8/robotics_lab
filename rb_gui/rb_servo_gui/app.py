@@ -2487,6 +2487,27 @@ def _ft_law_cell(fc: Mapping[str, Any] | None) -> str:
     return escape(str(law)) if law else escape("on")
 
 
+def _ft_safety_tracking(arm: Any) -> Mapping[str, Any] | None:
+    """The per-arm safety_tracking block from the raw state, or None."""
+    block = getattr(arm, "safety_tracking", None)
+    return block if isinstance(block, Mapping) else None
+
+
+def _ft_track_cell(track: Mapping[str, Any] | None, key: str, *,
+                   need_reference: bool = False) -> str:
+    """One tracking-error cell. "--" means there is nothing to read, which is a
+    different answer from 0.00 — and for the reference error it is the honest one
+    when the controller is not reporting a joint reference at all."""
+    if not isinstance(track, Mapping):
+        return _ft_dim("--")
+    if need_reference and not track.get("reference_valid"):
+        return _ft_dim("--")
+    try:
+        return escape(f"{float(track.get(key)):.2f}")
+    except (TypeError, ValueError):
+        return _ft_dim("--")
+
+
 def _render_ft_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> str:
     """The FT Monitor card: what each arm is feeling RIGHT NOW, relative to its zero.
 
@@ -2599,6 +2620,33 @@ def _render_ft_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> str
             "gate",
             _ft_fc_cell(left_fc, "gate_translation", 1.0, 2),
             _ft_fc_cell(right_fc, "gate_translation", 1.0, 2),
+        ))
+
+    # THE TWO TRACKING ERRORS, and they blame different subsystems. The latch can
+    # only report one number, and on 2026-08-26 it reported the wrong one: it said
+    # "tracking error" while each arm was following its OWN controller reference to
+    # 0.00 deg. The arm was fine; the box had stopped taking our commands.
+    #
+    #   cmd-act large, ref-act small -> the CONTROLLER is not executing what we send
+    #   ref-act large                -> the ARM is in trouble (collision, overload)
+    #
+    # Shown on this card rather than a safety one because force control is what makes
+    # them diverge: a compliant command deliberately leaves the arm behind, so a
+    # reader here needs to know how much of the gap is the compliance and how much is
+    # a link that has stopped.
+    left_track = _ft_safety_tracking(latest.left)
+    right_track = _ft_safety_tracking(latest.right)
+    if left_track is not None or right_track is not None:
+        rows.append(_operator_monitor_row3(
+            "cmd-act [deg]",
+            _ft_track_cell(left_track, "command_vs_actual_deg"),
+            _ft_track_cell(right_track, "command_vs_actual_deg"),
+            row_class="rb-monitor-row-gap",
+        ))
+        rows.append(_operator_monitor_row3(
+            "ref-act [deg]",
+            _ft_track_cell(left_track, "reference_vs_actual_deg", need_reference=True),
+            _ft_track_cell(right_track, "reference_vs_actual_deg", need_reference=True),
         ))
 
     # A FAILURE NEEDS A SENTENCE, and a sentence does not fit an arm column. "--" in
