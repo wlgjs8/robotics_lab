@@ -634,6 +634,51 @@ IkResult PinocchioKinematics::solveIkDamped(
         hit_joint_limit = clampJointLimits(&q, impl_->model, impl_->joints) || hit_joint_limit;
     }
 
+    // JOINT-LIMIT BEST EFFORT (config: ik.joint_limit_best_effort_*). A joint pinned at
+    // its range makes the residual irreducible, so the iteration always runs out and the
+    // whole tick is refused — the arm then holds, losing the feasible part of the motion
+    // too. Measured 2026-08-25 on five pi0.5 rollouts: J3 pinned at +/-150 deg left a
+    // 34 um / 9e-5 rad residual against a 20 um position tolerance, i.e. the solve failed
+    // by 14 um, the arm froze for 1-5 s and the chunk follower's plan ran away into
+    // delta_preview_actual_lead_fault. Accept the clamped iterate while the residual is
+    // small: the arm keeps tracking every direction the limit does not block, and the
+    // residual it cannot follow stays visible as follower lead/divergence.
+    const double best_effort_pos_tol = config_.ik.joint_limit_best_effort_position_tolerance_m;
+    const double best_effort_ang_tol = config_.ik.joint_limit_best_effort_orientation_tolerance_rad;
+    if (hit_joint_limit && best_effort_pos_tol > 0.0 && best_effort_ang_tol > 0.0 &&
+        position_error_m <= best_effort_pos_tol &&
+        orientation_error_rad <= best_effort_ang_tol) {
+        IkResult best_effort;
+        best_effort.success = true;
+        best_effort.reason = ik_solver::kReasonJointLimitBestEffort;
+        best_effort.q_solution_deg = fromPinocchioQ(q, impl_->model, impl_->joints);
+        best_effort.position_error_m = position_error_m;
+        best_effort.orientation_error_rad = orientation_error_rad;
+        best_effort.duration_us = elapsedUs();
+        best_effort.iterations = iterations;
+        best_effort.min_singular_value = last_min_singular_value;
+        best_effort.applied_damping = last_applied_damping;
+        best_effort.solution_jump_deg =
+            maxAbsJointDelta(best_effort.q_solution_deg, seed_q_deg);
+        best_effort.branch_jump_suspected =
+            config_.ik.max_solution_jump_deg > 0.0 &&
+            best_effort.solution_jump_deg > config_.ik.max_solution_jump_deg;
+        populateBranchJumpDetails(
+            best_effort,
+            seed_q_deg,
+            config_.ik.max_solution_jump_deg,
+            0
+        );
+        worstJointLimit(
+            q,
+            impl_->model,
+            impl_->joints,
+            &best_effort.joint_limit_worst_index,
+            &best_effort.joint_limit_worst_margin_deg
+        );
+        return best_effort;
+    }
+
     IkResult result = ik_solver::failureResult(
         hit_joint_limit ? ik_solver::kReasonJointLimit : ik_solver::kReasonMaxIterations,
         fromPinocchioQ(q, impl_->model, impl_->joints),

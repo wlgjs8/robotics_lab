@@ -155,6 +155,19 @@ struct IkSolverConfig {
     int branch_jump_max_retries = 0;
     bool branch_jump_clamp_to_seed = false;
     bool branch_jump_rate_limit = false;
+    // JOINT-LIMIT BEST EFFORT. When the DLS iteration clamps a joint to its range
+    // the solve returns kReasonJointLimit and the whole tick is refused, so the arm
+    // holds — including the components of the requested motion that were perfectly
+    // feasible. Measured 2026-08-25 (pi0.5 rollouts, J3 pinned at +/-150 deg): the
+    // clamped iterate sat 34 um / 9e-5 rad from the target while position_tolerance_m
+    // is 20 um, so the solve failed by 14 um and the arm froze for seconds.
+    // When these are > 0 and the clamped iterate is within them, accept it as a
+    // success (telemetry reason "joint_limit_best_effort") so the arm keeps tracking
+    // every direction the limit does not block. Keep them small: the residual IS
+    // unrealized command, and it is what the follower lead/divergence guards measure.
+    // Both <= 0 disables (hard failure, previous behavior).
+    double joint_limit_best_effort_position_tolerance_m = 0.0;
+    double joint_limit_best_effort_orientation_tolerance_rad = 0.0;
 };
 
 struct KinematicsConfig {

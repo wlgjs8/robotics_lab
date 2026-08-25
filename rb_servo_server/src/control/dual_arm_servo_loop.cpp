@@ -6454,6 +6454,7 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.follower_reanchor_count = abc.follower_reanchor_count;
     solve.follower_warm_resume_count = abc.follower_warm_resume_count;
     solve.safety_intervention_recent = abc.safety_intervention_recent;
+    solve.cartesian_solve_blocked_recent = abc.cartesian_solve_blocked_recent;
     solve.delta_twist_pending_linear_norm_m = abc.delta_twist_pending_linear_norm_m;
     solve.delta_twist_pending_angular_norm_rad = abc.delta_twist_pending_angular_norm_rad;
     solve.delta_twist_step_delta = abc.delta_twist_step_delta;
@@ -6534,6 +6535,20 @@ void DualArmServoLoop::markSafetyIntervention(ArmId arm_id, uint64_t now_ns) {
 bool DualArmServoLoop::safetyInterventionRecent(ArmId arm_id, uint64_t now_ns) const {
     const uint64_t stamp = arm_id == ArmId::Left ? left_safety_intervention_last_ns_
                                                  : right_safety_intervention_last_ns_;
+    if (stamp == 0) return false;
+    if (now_ns < stamp) return true;
+    return now_ns - stamp <= kFollowerDivergenceExplainWindowNs;
+}
+
+void DualArmServoLoop::markCartesianSolveBlocked(ArmId arm_id, uint64_t now_ns) {
+    uint64_t& stamp = arm_id == ArmId::Left ? left_cartesian_solve_blocked_last_ns_
+                                            : right_cartesian_solve_blocked_last_ns_;
+    stamp = now_ns;
+}
+
+bool DualArmServoLoop::cartesianSolveBlockedRecent(ArmId arm_id, uint64_t now_ns) const {
+    const uint64_t stamp = arm_id == ArmId::Left ? left_cartesian_solve_blocked_last_ns_
+                                                 : right_cartesian_solve_blocked_last_ns_;
     if (stamp == 0) return false;
     if (now_ns < stamp) return true;
     return now_ns - stamp <= kFollowerDivergenceExplainWindowNs;
@@ -6713,6 +6728,16 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.delta_twist_accel_cmd = Vec6{};
     const uint64_t now_ns = last_loop_start_ns_ != 0 ? last_loop_start_ns_ : nowSteadyNs();
     const bool intervention_recent = safetyInterventionRecent(arm_id, now_ns);
+    // A refused Cartesian solve holds this arm at its previous sent joints exactly as a
+    // safety clamp does, but it is stamped by the Cartesian stage, not by applySafety.
+    // The follower has to freeze its plan for BOTH, or it keeps integrating deltas
+    // against a stationary robot. Measured 2026-08-25 on five pi0.5 rollouts: J3 pinned
+    // at its +/-150 deg elbow limit -> IkFailed/ArmedHold on ~85% of ticks (the arm stops
+    // dead) -> actual_lead grew 1 mm -> 15-23 mm / 4.1-4.4 deg in 1-5 s and every run
+    // ended in delta_preview_actual_lead_fault. safety_intervention_recent was 0
+    // throughout, so the ROI/floor plan-freeze below never fired.
+    const bool solve_blocked_recent = cartesianSolveBlockedRecent(arm_id, now_ns);
+    const bool command_refused_recent = intervention_recent || solve_blocked_recent;
     std::uint64_t& reanchor_count = arm_id == ArmId::Left
         ? left_chunk_follower_reanchor_count_
         : right_chunk_follower_reanchor_count_;
@@ -6722,6 +6747,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.follower_reanchor_count = reanchor_count;
     abc.follower_warm_resume_count = warm_resume_count;
     abc.safety_intervention_recent = intervention_recent;
+    abc.cartesian_solve_blocked_recent = solve_blocked_recent;
     const bool fault_policy = rf.fallback_policy == RuckigFollowerFallbackPolicy::Fault;
     const bool was_active = follower->active();
     std::string transition_reason;
@@ -6833,12 +6859,13 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     // earlier -- the safety layer already stopped it -- it only stops the plan from running away
     // while it is stopped. Same pause/expire pair the Hold path uses, so the bounded-grace
     // deactivation policy is unchanged (and prevents a deadlock if the block never clears).
-    if (intervention_recent && follower->active()) {
+    if (command_refused_recent && follower->active()) {
         const double safety_hold_now_sec = ChunkFrameReceiver::steadyNowSec();
         follower->pauseForHold(safety_hold_now_sec);
         output_smd->deactivate();
         follower->expireHoldPause(safety_hold_now_sec, rf.hold_bounce_resume_sec);
-        transition_reason = "safety intervention hold";
+        transition_reason = intervention_recent ? "safety intervention hold"
+                                                : "cartesian solve blocked hold";
     } else if (follower->holdPaused()) {
         // Warm resume always re-seeds the output stage from the latest sent pose;
         // the preserved p/v/a belongs only to the pre-filter follower.
@@ -6895,7 +6922,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                 // strict fault mode, only an active recent safety intervention can
                 // explain it; then reseed the chained state but keep the active window.
                 // Otherwise keep the legacy drop/fault or SMD re-anchor behavior.
-                if (fault_policy && intervention_recent) {
+                if (fault_policy && command_refused_recent) {
                     follower->reanchor(reference);
                     output_smd->deactivate();
                     ++reanchor_count;
@@ -6906,7 +6933,9 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                     if (last_log_ns == 0 || now_ns < last_log_ns ||
                         now_ns - last_log_ns >= kFollowerDivergenceReanchorLogPeriodNs) {
                         std::cout << "[chunk_follower] " << toString(arm_id)
-                                  << " divergence re-anchor (safety intervention)"
+                                  << (intervention_recent
+                                          ? " divergence re-anchor (safety intervention)"
+                                          : " divergence re-anchor (cartesian solve blocked)")
                                   << " pos_err=" << pos_err
                                   << " ang_err=" << ang_err
                                   << " wire_seq=" << active_diag.seg_wire_seq
@@ -7179,11 +7208,22 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     abc.delta_twist_xi_cmd_clamped_norm = false;
     const uint64_t now_ns = last_loop_start_ns_ != 0 ? last_loop_start_ns_ : nowSteadyNs();
     const bool intervention_recent = safetyInterventionRecent(arm_id, now_ns);
+    // A refused Cartesian solve holds this arm at its previous sent joints exactly as a
+    // safety clamp does, but it is stamped by the Cartesian stage, not by applySafety.
+    // The follower has to freeze its plan for BOTH, or it keeps integrating deltas
+    // against a stationary robot. Measured 2026-08-25 on five pi0.5 rollouts: J3 pinned
+    // at its +/-150 deg elbow limit -> IkFailed/ArmedHold on ~85% of ticks (the arm stops
+    // dead) -> actual_lead grew 1 mm -> 15-23 mm / 4.1-4.4 deg in 1-5 s and every run
+    // ended in delta_preview_actual_lead_fault. safety_intervention_recent was 0
+    // throughout, so the ROI/floor plan-freeze below never fired.
+    const bool solve_blocked_recent = cartesianSolveBlockedRecent(arm_id, now_ns);
+    const bool command_refused_recent = intervention_recent || solve_blocked_recent;
     std::uint64_t& reanchor_count = arm_id == ArmId::Left
         ? left_chunk_follower_reanchor_count_
         : right_chunk_follower_reanchor_count_;
     abc.follower_reanchor_count = reanchor_count;
     abc.safety_intervention_recent = intervention_recent;
+    abc.cartesian_solve_blocked_recent = solve_blocked_recent;
     const bool fault_policy = rf.fallback_policy == RuckigFollowerFallbackPolicy::Fault;
     const bool was_active = follower->active();
     std::string transition_reason;
@@ -7262,7 +7302,7 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
             }
         } else {
             if (pos_err > kPoseTrackReanchorPosTolM || ang_err > kPoseTrackReanchorAngTolRad) {
-                if (fault_policy && intervention_recent) {
+                if (fault_policy && command_refused_recent) {
                     follower->reanchor(reference);
                     ++reanchor_count;
                     abc.follower_reanchor_count = reanchor_count;
@@ -7272,7 +7312,9 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
                     if (last_log_ns == 0 || now_ns < last_log_ns ||
                         now_ns - last_log_ns >= kFollowerDivergenceReanchorLogPeriodNs) {
                         std::cout << "[chunk_follower] " << toString(arm_id)
-                                  << " delta_twist divergence re-anchor (safety intervention)"
+                                  << (intervention_recent
+                                          ? " delta_twist divergence re-anchor (safety intervention)"
+                                          : " delta_twist divergence re-anchor (cartesian solve blocked)")
                                   << " pos_err=" << pos_err
                                   << " ang_err=" << ang_err
                                   << " wire_seq=" << active_diag.seg_wire_seq
@@ -8013,10 +8055,17 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 {&left_cartesian_result, &right_cartesian_result};
             JointArray* arm_target[2] =
                 {&target.left_q_target_deg, &target.right_q_target_deg};
+            const uint64_t solve_block_now_ns =
+                last_loop_start_ns_ != 0 ? last_loop_start_ns_ : nowSteadyNs();
             for (int i = 0; i < 2; ++i) {
                 if (arm_result[i]->verdict == SafetyVerdict::Ok) continue;
                 *arm_target[i] = arm_ctx[i].prev_sent_q_deg;
                 arm_ctx[i].follower_output_smd.deactivate();
+                // The arm is now held at its previous joints, so the plan the follower
+                // is streaming will NOT be executed this tick. Stamp it here (not in the
+                // solver) so the follower stage freezes its plan on the next tick instead
+                // of running away from a stationary robot.
+                markCartesianSolveBlocked(arm_ctx[i].arm, solve_block_now_ns);
             }
         }
         return target;

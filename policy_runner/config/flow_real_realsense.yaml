@@ -56,7 +56,18 @@ robot_state:
   stale_timeout_sec: 0.5
 servo_command:
   endpoint: "udp://127.0.0.1:50256"
-  timeout_sec: 0.05
+  # Per-command validity: rb_servo stamps the servo_j deadline at
+  # command_host_time + this, and a send that reaches the arm worker after the
+  # deadline is a hard SendFailure latch (real mode has no advisory). At 0.05 a
+  # single ~70-80 ms interpreter stall in this runner was enough: measured
+  # 2026-08-26, two rollouts latched with arm_worker_command_expired at exactly
+  # age = 50.0 ms, on the tick after a `gc=68-70ms(gen2)` spike. 0.15 gives ~2x
+  # margin over the worst observed stall while staying under the server-side
+  # freshness gates (servo/safety command_timeout_sec 0.2), so a genuinely dead
+  # producer still degrades to the stale-command hold rather than living longer.
+  # The GC tuning in the runner (FLOW_INFER_GC_TUNE) removes the stalls; this is
+  # the margin for the ones it does not.
+  timeout_sec: 0.15
   acquire_lease: true
   lease_readback_timeout_sec: 2.0
 force_recovery:

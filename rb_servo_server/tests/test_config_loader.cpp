@@ -228,8 +228,13 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(flow_profile->ruckig_follower.preview_projection_fault_policy ==
                  rb_servo::RuckigProjectionFaultPolicy::Warn);
         RB_CHECK(near(flow_profile->ruckig_follower.preview_max_actual_lead_m, 0.035));
+        // 2026-08-26: angular budget 4.0 -> 5.0 deg (five pi0.5 rollouts latched at
+        // 4.07-4.38 deg with positional lead still inside its 35 mm budget). Must stay
+        // under the 0.10 rad follower-divergence latch or that coarser fault wins.
         RB_CHECK(near(flow_profile->ruckig_follower.preview_max_actual_lead_rad,
-                      0.06981317008));
+                      0.08726646259));
+        RB_CHECK(flow_profile->ruckig_follower.preview_max_actual_lead_rad <
+                 0.10);
         RB_CHECK(stack_real.force_torque.source == "rbpodo_eft");
         RB_CHECK(stack_real.force_torque.left.enable);
         RB_CHECK(stack_real.force_torque.right.enable);
@@ -504,6 +509,21 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(normal_force.max_normal_jerk_m_s3, 0.8));
         RB_CHECK(stack_real.kinematics.enable);
         RB_CHECK(stack_real.kinematics.provider == "pinocchio");
+        // 2026-08-26 joint-limit best effort: a clamped iterate this close to the
+        // target is accepted as a success so a pinned joint (J3 at +/-150 deg) no
+        // longer refuses the whole tick and freezes the arm. Both must stay above
+        // the convergence tolerances and far below the follower lead budgets.
+        RB_CHECK(near(
+            stack_real.kinematics.ik.joint_limit_best_effort_position_tolerance_m,
+            0.0005));
+        RB_CHECK(near(
+            stack_real.kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad,
+            0.002));
+        RB_CHECK(stack_real.kinematics.ik.joint_limit_best_effort_position_tolerance_m >
+                 stack_real.kinematics.ik.position_tolerance_m);
+        RB_CHECK(
+            stack_real.kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad >
+            stack_real.kinematics.ik.orientation_tolerance_rad);
         const auto& real_mesh = stack_real.safety.self_collision.mesh;
         RB_CHECK(near(real_mesh.intra_arm.d_hard_m, 0.005));
         RB_CHECK(near(real_mesh.intra_arm.d_slow_m, 0.015));

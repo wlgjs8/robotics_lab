@@ -1099,6 +1099,21 @@ kinematics:
     # max_solution_jump_deg above is now the SMOOTHNESS/LAG knob: smaller =
     # smoother but more lag through high-gain (wrist) regions; larger = snappier.
     branch_jump_rate_limit: true
+    # JOINT-LIMIT BEST EFFORT. Without this, a joint pinned at its range makes the
+    # residual irreducible, the iteration budget runs out, the tick is REFUSED, and
+    # the arm holds — losing the feasible part of the motion as well. Measured
+    # 2026-08-26 on five pi0.5 rollouts: J3 pinned at its +/-150 deg elbow limit left
+    # a 34 um / 9e-5 rad residual against position_tolerance_m 20 um, i.e. the solve
+    # missed by 14 um, the arm froze for 1-5 s, and the chunk follower's plan ran away
+    # into delta_preview_actual_lead_fault. Accept the clamped iterate while its
+    # residual stays inside these: the arm keeps tracking every direction the pinned
+    # joint does not block, and the residual it truly cannot follow is bounded here.
+    # 0.5 mm / 0.11 deg = 25x/10x the convergence tolerances, but ~70x/~44x below the
+    # follower lead budgets, so a best-effort tick can never masquerade as tracking.
+    # Beyond this the solve still fails, the arm still holds, and the follower now
+    # freezes its plan instead of running away (cartesian_solve_blocked_recent).
+    joint_limit_best_effort_position_tolerance_m: 0.0005
+    joint_limit_best_effort_orientation_tolerance_rad: 0.002
 
 cartesian_control:
   # goal lead the measured TCP by more than this (position m / orientation rad).
@@ -1495,7 +1510,16 @@ cartesian_control:
         # speed raises — honest full-speed rotational lag is ~0.9 rad/s x
         # ~65 ms ~= 3.3 deg, so a fast wrist reorientation latched on angle
         # while positional lead sat at ~5 mm. 4 deg = pairing + margin.
-        preview_max_actual_lead_rad: 0.06981317008       # 4.0 deg
+        # 2026-08-26: 4.0 -> 5.0 deg. Five pi0.5 rollouts latched here at
+        # 4.07-4.38 deg while positional lead sat at 15-23 mm of the 35 mm
+        # budget, i.e. the angular gate was firing alone. The lead itself was
+        # real (J3 pinned at its elbow limit, arm held), but the plan-freeze on
+        # a blocked Cartesian solve now owns that case; this is the honest
+        # rotational-lag budget with margin. Do NOT raise past the 0.10 rad
+        # (5.73 deg) follower divergence latch (kPoseTrackReanchorAngTolRad):
+        # above it the coarser chunk_follower_divergence fault fires first and
+        # the lead diagnostic is lost.
+        preview_max_actual_lead_rad: 0.08726646259       # 5.0 deg
         preview_max_consecutive_actual_lead_errors: 3
         # Quasi-static gate for the contact-aware loading projection. The
         # 2026-07-18 12:13 place-transit run showed fast-transit inertial

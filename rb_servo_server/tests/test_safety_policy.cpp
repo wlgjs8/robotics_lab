@@ -7495,6 +7495,81 @@ bool testSingleArmIkFailureDoesNotFreezeHealthyArm() {
     return true;
 }
 
+// Regression: a refused Cartesian solve must be visible to the follower stage as a
+// command refusal, exactly like a safety clamp is. The arm is held at prev_sent while
+// IK fails, so a chunk follower that keeps integrating deltas runs away from a
+// stationary robot: measured 2026-08-26, five pi0.5 rollouts pinned J3 at its
+// +/-150 deg elbow limit and ended in delta_preview_actual_lead_fault with
+// safety_intervention_recent == 0 for the whole episode (the ROI/floor plan-freeze
+// never saw it). cartesian_solve_blocked_recent is the signal that closes that gap.
+bool testCartesianSolveRefusalIsVisibleAsCommandRefusal() {
+    rb_servo::CommandBuffer buffer;
+    rb_servo::DualArmConfig cfg = testConfig();
+    cfg.left_robot.run_mode = rb_servo::RunMode::Simulation;
+    cfg.right_robot.run_mode = rb_servo::RunMode::Simulation;
+    cfg.kinematics.enable = true;
+    cfg.kinematics.ik.enable = true;
+    cfg.kinematics.publish_tcp = true;
+    const rb_servo::JointArray initial = joints(0.0);
+    auto kinematics = std::make_shared<FakeCartesianKinematics>();
+    rb_servo::DualArmServoLoop loop(
+        std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+        std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+        cfg,
+        &buffer,
+        nullptr,
+        kinematics
+    );
+
+    RB_CHECK(loop.start());
+    buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+    sleepTicks();
+
+    rb_servo::DualArmCommand healthy = command(rb_servo::ControlMode::TcpPoseTarget);
+    healthy.seq = 61;
+    healthy.host_time_ns = rb_servo::nowSteadyNs();
+    healthy.left.mode = rb_servo::ControlMode::TcpPoseTarget;
+    healthy.left.has_tcp_target = true;
+    healthy.left.tcp_target_stand = {0.5, 0.0, 0.0, 0.0, 0.0, 0.0};
+    healthy.right.mode = rb_servo::ControlMode::TcpPoseTarget;
+    healthy.right.has_tcp_target = true;
+    healthy.right.tcp_target_stand = {0.5, 0.0, 0.0, 0.0, 0.0, 0.0};
+    buffer.setCommand(healthy);
+    // A solving arm is never flagged as refused (the flag is a debounce, so wait for
+    // it to read clear while the solve is healthy rather than sampling one tick).
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        return snapshot.command.seq == healthy.seq &&
+               snapshot.left_cartesian_solve.status == "ok" &&
+               !snapshot.left_cartesian_solve.cartesian_solve_blocked_recent;
+    }, std::chrono::milliseconds(1500)));
+
+    kinematics->setFail(true);
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        return snapshot.left_cartesian_solve.status == "failed" &&
+               snapshot.left_cartesian_solve.cartesian_solve_blocked_recent;
+    }, std::chrono::milliseconds(1500)));
+
+    const rb_servo::ServoSnapshot blocked = loop.latestSnapshot();
+    // The arm is held at its previous target -- the plan must be told, and the
+    // safety stage is NOT the one that held it, so its own flag stays clear.
+    RB_CHECK(sameJointArray(blocked.left_sent_q_deg, initial));
+    RB_CHECK(blocked.left_cartesian_solve.cartesian_solve_blocked_recent);
+    RB_CHECK(!blocked.left_cartesian_solve.safety_intervention_recent);
+
+    // The debounce is short: once the solve recovers, the flag clears and the plan
+    // is free to advance again (no permanent freeze).
+    kinematics->setFail(false);
+    RB_CHECK(waitUntil([&] {
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        return snapshot.left_cartesian_solve.status == "ok" &&
+               !snapshot.left_cartesian_solve.cartesian_solve_blocked_recent;
+    }, std::chrono::milliseconds(1500)));
+    loop.stop();
+    return true;
+}
+
 bool testCartesianIkDurationBudgetFailureIsSimulatorOnly() {
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = testConfig();
@@ -8217,6 +8292,7 @@ int main() {
     if (!testControllerSimulationTickStartSendHistoryStaysBounded()) return 1;
     if (!testCartesianIkFailureHoldsPreviousSafeTarget()) return 1;
     if (!testSingleArmIkFailureDoesNotFreezeHealthyArm()) return 1;
+    if (!testCartesianSolveRefusalIsVisibleAsCommandRefusal()) return 1;
     if (!testCartesianIkDurationBudgetFailureIsSimulatorOnly()) return 1;
     if (!testCartesianRealModeBlockedByDefault()) return 1;
     if (!testInvalidMotionCommandDoesNotReportRunning()) return 1;

@@ -334,6 +334,12 @@ private:
     bool latchChunkFollowerFaultRequests(const RobotState& left_state, const RobotState& right_state);
     void markSafetyIntervention(ArmId arm_id, uint64_t now_ns);
     bool safetyInterventionRecent(ArmId arm_id, uint64_t now_ns) const;
+    // A Cartesian solve that refused this arm's target (IK failure / kinematics
+    // unavailable) holds the arm at its previous sent joints, exactly like a safety
+    // clamp does. Stamped in computeServoTarget's per-arm hold, read one or more
+    // ticks later by the follower stage through the same debounce window.
+    void markCartesianSolveBlocked(ArmId arm_id, uint64_t now_ns);
+    bool cartesianSolveBlockedRecent(ArmId arm_id, uint64_t now_ns) const;
     bool updateForceRuntime(
         ArmId arm_id,
         const RobotState& state,
@@ -789,6 +795,11 @@ private:
     // follower divergence reads the previous safety tick through a short debounce.
     uint64_t left_safety_intervention_last_ns_ = 0;
     uint64_t right_safety_intervention_last_ns_ = 0;
+    // Last tick when the Cartesian stage refused each arm's target and held it at
+    // prev_sent_q_deg (IkFailed / CartesianUnavailable). Same read-one-tick-late
+    // contract as the safety-intervention stamps above.
+    uint64_t left_cartesian_solve_blocked_last_ns_ = 0;
+    uint64_t right_cartesian_solve_blocked_last_ns_ = 0;
     // Controller-sim tracking-error advisory (safety.controller_simulation_tracking_error_nonlatching).
     // Reset each tick in loopMain; set in applySafety when a reference/actual tracking
     // divergence is suppressed (not latched). Surfaced as published telemetry
@@ -931,6 +942,7 @@ private:
         std::uint64_t follower_reanchor_count = 0;
         std::uint64_t follower_warm_resume_count = 0;
         bool safety_intervention_recent = false;
+        bool cartesian_solve_blocked_recent = false;
         double delta_twist_pending_linear_norm_m = 0.0;
         double delta_twist_pending_angular_norm_rad = 0.0;
         Vec6 delta_twist_step_delta{};

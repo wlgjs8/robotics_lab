@@ -206,6 +206,51 @@ def main(argv: list[str] | None = None) -> int:
     return _main_with_subcommands(argv)
 
 
+def _tune_gc_for_realtime(stderr: TextIO) -> Callable[[], None]:
+    """Keep cyclic GC out of the command loop and return a restore callable.
+
+    A gen-2 collection freezes the loop for as long as it takes to walk every
+    tracked object, and this process has imported numpy/torch/openpi client
+    state, so that is tens of milliseconds. Measured 2026-08-26: two rollouts
+    died with `SendFailure ... CommandTimeout (arm_worker_command_expired)`
+    on the tick right after a `[tick-spike] dt=77-79ms gc=68-70ms(gen2)` line
+    -- the loop emitted no command for ~77 ms, the last one aged past its
+    servo_command.timeout_sec, and rb_servo rejected the servo_j at exactly
+    age = timeout and latched (real mode has no advisory for a send failure).
+
+    gc.freeze() moves everything already allocated (module state, the policy
+    wrapper, config) into the permanent generation, which a full collection
+    never walks again; the raised gen-1/gen-2 thresholds then push automatic
+    full collections out of a normal rollout. Reference counting is untouched,
+    so per-tick arrays are still freed immediately -- only *cycles* accumulate,
+    and a rollout is short enough for that to stay bounded.
+
+    FLOW_INFER_GC_TUNE=0 restores the interpreter default (for A/B).
+    """
+    if os.environ.get("FLOW_INFER_GC_TUNE", "1") == "0":
+        return lambda: None
+    previous_thresholds = gc.get_threshold()
+    gen0 = previous_thresholds[0]
+    gen1 = int(os.environ.get("FLOW_INFER_GC_GEN1_THRESHOLD", "100"))
+    gen2 = int(os.environ.get("FLOW_INFER_GC_GEN2_THRESHOLD", "100000"))
+    gc.collect()
+    gc.freeze()
+    gc.set_threshold(gen0, gen1, gen2)
+    print(
+        f"[flow-infer] gc tuned for the command loop: frozen={gc.get_freeze_count()} objects, "
+        f"thresholds {previous_thresholds} -> {(gen0, gen1, gen2)} "
+        "(gen-2 pauses were expiring the servo command; FLOW_INFER_GC_TUNE=0 to disable)",
+        file=stderr,
+        flush=True,
+    )
+
+    def _restore() -> None:
+        gc.set_threshold(*previous_thresholds)
+        gc.unfreeze()
+
+    return _restore
+
+
 def run(
     config: PolicyRunnerConfig,
     *,
@@ -503,6 +548,8 @@ def run(
     if _prof.on:
         print("[tick-profile] enabled (mean/max ms per phase, every 5 s)", file=stderr, flush=True)
 
+    _restore_gc = _tune_gc_for_realtime(stderr)
+
     try:
         while True:
             _tick_t0 = monotonic_fn() if _prof.on else 0.0
@@ -788,6 +835,7 @@ def run(
     except KeyboardInterrupt:
         return 0
     finally:
+        _restore_gc()
         _capture.close()
         recording_supervisor.close()
         _close_if_supported(source)

@@ -901,6 +901,84 @@ bool testStandDirectionJacobianFiniteDifference() {
     return true;
 }
 
+// A joint pinned at its range makes the residual irreducible, so the DLS iteration
+// always runs out and (without best effort) the WHOLE tick is refused -- the arm then
+// holds, losing the feasible part of the motion too. Measured 2026-08-26 on five pi0.5
+// rollouts: J3 pinned at its +/-150 deg elbow limit left a 34 um residual against a
+// 20 um position tolerance, the arm froze for 1-5 s, and the chunk follower's plan ran
+// away into delta_preview_actual_lead_fault. Best effort accepts the clamped iterate
+// while the residual is inside the configured band -- and only then.
+bool testIkJointLimitBestEffortAcceptsClampedSolve() {
+    rb_servo::KinematicsConfig base = testKinematicsConfig();
+    base.ik.max_iterations = 60;
+    const rb_servo::ArmMountConfig mount = leftMount();
+
+    // Seed just inside the elbow limit; target the pose of an elbow angle the URDF
+    // cannot reach, so the solver clamps J3 at +150 deg with a residual it cannot close.
+    rb_servo::JointArray seed = seedJoints();
+    seed[2] = 149.0;
+    rb_servo::JointArray unreachable_q = seed;
+    unreachable_q[2] = 158.0;
+
+    rb_servo::PinocchioKinematics strict(base);
+    const rb_servo::Pose6D target =
+        strict.computeTcpStand(rb_servo::ArmId::Left, unreachable_q, mount);
+    const rb_servo::IkResult refused =
+        strict.solveIk(rb_servo::ArmId::Left, target, seed, mount);
+    RB_CHECK(!refused.success);
+    RB_CHECK(refused.reason == rb_servo::ik_solver::kReasonJointLimit);
+    RB_CHECK(refused.joint_limit_worst_index == 2);
+    RB_CHECK(refused.position_error_m > base.ik.position_tolerance_m);
+    RB_CHECK(std::fabs(refused.q_solution_deg[2]) <= 150.001);
+
+    // Band wide enough for this residual: accept, and say so in the reason.
+    rb_servo::KinematicsConfig lenient = base;
+    lenient.ik.joint_limit_best_effort_position_tolerance_m =
+        refused.position_error_m * 2.0 + 1e-6;
+    lenient.ik.joint_limit_best_effort_orientation_tolerance_rad =
+        refused.orientation_error_rad * 2.0 + 1e-6;
+    rb_servo::PinocchioKinematics forgiving(lenient);
+    const rb_servo::IkResult accepted =
+        forgiving.solveIk(rb_servo::ArmId::Left, target, seed, mount);
+    RB_CHECK(accepted.success);
+    RB_CHECK(accepted.reason == rb_servo::ik_solver::kReasonJointLimitBestEffort);
+    RB_CHECK(finiteJoints(accepted.q_solution_deg));
+    RB_CHECK(withinUrdfLimits(accepted.q_solution_deg));
+    RB_CHECK(accepted.joint_limit_worst_index == 2);
+    RB_CHECK(accepted.position_error_m <=
+             lenient.ik.joint_limit_best_effort_position_tolerance_m);
+    RB_CHECK(accepted.orientation_error_rad <=
+             lenient.ik.joint_limit_best_effort_orientation_tolerance_rad);
+    // The pinned axis is the one that could not follow; the rest still moved.
+    RB_CHECK(std::fabs(accepted.q_solution_deg[2]) >= 149.0);
+
+    // A band narrower than the residual must still refuse: best effort bounds how much
+    // unrealized command it will hide, it does not switch the guard off.
+    rb_servo::KinematicsConfig narrow = base;
+    narrow.ik.joint_limit_best_effort_position_tolerance_m =
+        refused.position_error_m * 0.1;
+    narrow.ik.joint_limit_best_effort_orientation_tolerance_rad =
+        refused.orientation_error_rad * 0.1 + 1e-9;
+    rb_servo::PinocchioKinematics bounded(narrow);
+    const rb_servo::IkResult still_refused =
+        bounded.solveIk(rb_servo::ArmId::Left, target, seed, mount);
+    RB_CHECK(!still_refused.success);
+    RB_CHECK(still_refused.reason == rb_servo::ik_solver::kReasonJointLimit);
+
+    // A reachable target near the same pose is unaffected: best effort never
+    // substitutes for convergence.
+    rb_servo::JointArray reachable_q = seed;
+    reachable_q[2] = 149.5;
+    const rb_servo::Pose6D reachable_target =
+        forgiving.computeTcpStand(rb_servo::ArmId::Left, reachable_q, mount);
+    const rb_servo::IkResult converged =
+        forgiving.solveIk(rb_servo::ArmId::Left, reachable_target, seed, mount);
+    RB_CHECK(converged.success);
+    RB_CHECK(converged.reason != rb_servo::ik_solver::kReasonJointLimitBestEffort);
+    RB_CHECK(converged.position_error_m <= base.ik.position_tolerance_m);
+    return true;
+}
+
 int main() {
     if (!testFloorPointZJacobianFiniteDifference()) return 1;
     if (!testStandAxisJacobianFiniteDifference()) return 1;
@@ -912,6 +990,7 @@ int main() {
     if (!testIkBranchJumpClampDefaultOffLeavesSolutionUnchanged()) return 1;
     if (!testIkBranchJumpRateLimitBoundsStepTowardSolution()) return 1;
     if (!testIkSelectiveDampingDisabledByDefault()) return 1;
+    if (!testIkJointLimitBestEffortAcceptsClampedSolve()) return 1;
     if (!testCartesianLatencyBudgetTelemetry()) return 1;
     if (!testIkSeedUsesPreviousSentTargetNotActualState()) return 1;
     if (!testPinocchioIk()) return 1;

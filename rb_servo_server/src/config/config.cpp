@@ -2786,6 +2786,28 @@ void validateConfig(const DualArmConfig& cfg) {
     if (cfg.kinematics.ik.branch_jump_max_retries < 0) {
         throw std::runtime_error("kinematics.ik.branch_jump_max_retries must be >= 0");
     }
+    validateNonNegativeFinite(
+        cfg.kinematics.ik.joint_limit_best_effort_position_tolerance_m,
+        "kinematics.ik.joint_limit_best_effort_position_tolerance_m");
+    validateNonNegativeFinite(
+        cfg.kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad,
+        "kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad");
+    // The best-effort residual is unrealized command: never let it exceed the tolerance
+    // the solver would have had to hit anyway, or a "success" could hide a real miss.
+    if (cfg.kinematics.ik.joint_limit_best_effort_position_tolerance_m > 0.0 &&
+        cfg.kinematics.ik.joint_limit_best_effort_position_tolerance_m <
+            cfg.kinematics.ik.position_tolerance_m) {
+        throw std::runtime_error(
+            "kinematics.ik.joint_limit_best_effort_position_tolerance_m must be >= "
+            "kinematics.ik.position_tolerance_m");
+    }
+    if (cfg.kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad > 0.0 &&
+        cfg.kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad <
+            cfg.kinematics.ik.orientation_tolerance_rad) {
+        throw std::runtime_error(
+            "kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad must be >= "
+            "kinematics.ik.orientation_tolerance_rad");
+    }
 
     const auto validate_rbpodo_backend = [&cfg](const BackendConfig& backend, const std::string& label) {
         if (backend.backend_type != BackendType::Rbpodo) return;
@@ -4578,6 +4600,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "branch_jump_max_retries",
                 "branch_jump_clamp_to_seed",
                 "branch_jump_rate_limit",
+                "joint_limit_best_effort_position_tolerance_m",
+                "joint_limit_best_effort_orientation_tolerance_rad",
             }, "kinematics.ik");
             if (has(ik, "enable")) cfg.kinematics.ik.enable = asBool(ik["enable"], "kinematics.ik.enable");
             if (has(ik, "max_iterations")) cfg.kinematics.ik.max_iterations = asInt(ik["max_iterations"], "kinematics.ik.max_iterations");
@@ -4593,6 +4617,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ik, "branch_jump_max_retries")) cfg.kinematics.ik.branch_jump_max_retries = asInt(ik["branch_jump_max_retries"], "kinematics.ik.branch_jump_max_retries");
             if (has(ik, "branch_jump_clamp_to_seed")) cfg.kinematics.ik.branch_jump_clamp_to_seed = asBool(ik["branch_jump_clamp_to_seed"], "kinematics.ik.branch_jump_clamp_to_seed");
             if (has(ik, "branch_jump_rate_limit")) cfg.kinematics.ik.branch_jump_rate_limit = asBool(ik["branch_jump_rate_limit"], "kinematics.ik.branch_jump_rate_limit");
+            if (has(ik, "joint_limit_best_effort_position_tolerance_m")) cfg.kinematics.ik.joint_limit_best_effort_position_tolerance_m = asDouble(ik["joint_limit_best_effort_position_tolerance_m"], "kinematics.ik.joint_limit_best_effort_position_tolerance_m");
+            if (has(ik, "joint_limit_best_effort_orientation_tolerance_rad")) cfg.kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad = asDouble(ik["joint_limit_best_effort_orientation_tolerance_rad"], "kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad");
         }
     }
 

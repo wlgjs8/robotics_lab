@@ -10,6 +10,10 @@ constexpr const char* kReasonMaxIterations = "max_iterations";
 constexpr const char* kReasonTimeout = "timeout";
 constexpr const char* kReasonSingularOrIllConditioned = "singular_or_ill_conditioned";
 constexpr const char* kReasonJointLimit = "joint_limit";
+// A joint-limit-clamped iterate accepted as a success because its residual was
+// inside ik.joint_limit_best_effort_* (see config.hpp). Success, not failure:
+// the arm keeps tracking every direction the pinned joint does not block.
+constexpr const char* kReasonJointLimitBestEffort = "joint_limit_best_effort";
 constexpr const char* kReasonInvalidTarget = "invalid_target";
 constexpr const char* kReasonKinematicsUnavailable = "kinematics_unavailable";
 

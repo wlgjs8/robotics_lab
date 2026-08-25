@@ -477,6 +477,7 @@ struct CartesianSolveTelemetry {
     uint64_t follower_reanchor_count = 0;          // explained strict-divergence reanchors
     uint64_t follower_warm_resume_count = 0;       // brief Hold resumes preserving chained p/v/a
     bool safety_intervention_recent = false;       // debounced signal seen by follower stage
+    bool cartesian_solve_blocked_recent = false;   // debounced IK/Cartesian solve refusal seen by follower stage
     double delta_twist_pending_linear_norm_m = 0.0;
     double delta_twist_pending_angular_norm_rad = 0.0;
     Vec6 delta_twist_step_delta{};
