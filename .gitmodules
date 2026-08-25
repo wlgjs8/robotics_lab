@@ -1,6 +1,3 @@
-[submodule "submodules/Fast-FoundationStereo"]
-	path = submodules/Fast-FoundationStereo
-	url = https://github.com/wlgjs8/Fast-FoundationStereo.git
 [submodule "submodules/controller-manager"]
 	path = submodules/controller-manager
 	url = https://github.com/PLAIF-dev/controller-manager

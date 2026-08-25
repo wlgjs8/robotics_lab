@@ -231,7 +231,7 @@ udp://127.0.0.1:50256
 
 The stack state fanout uses `50356` (joint scope dashboard), `50366` (viser
 GUI), `50376` (stack policy_runner/teleop_mux), `50378` (external flow-infer
-readback), and `50386` (camera_server stereo_worker wrist-fusion). Gripper
+readback). Gripper
 command/feedback uses `50410`/`50420`.
 
 Minimal command:

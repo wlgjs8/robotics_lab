@@ -159,7 +159,7 @@ class CameraBundleClient:
         self._health_topic = str(health_topic)
         self._max_age_ms = float(max_age_ms)
         self._include_depth = bool(include_depth)  # opt-in z16 decode (collection only)
-        self._include_ir = bool(include_ir)  # opt-in y8 IR decode (stereo worker)
+        self._include_ir = bool(include_ir)  # opt-in y8 IR decode
         self._shm_cache = _ShmCache()
         self._latest: CameraBundle | None = None
         self._latest_health: dict[str, Any] | None = None

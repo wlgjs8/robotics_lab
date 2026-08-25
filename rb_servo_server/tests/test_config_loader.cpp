@@ -153,7 +153,7 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(stack_real.safety.q_max_deg[2], 160.0));
         RB_CHECK(stack_real.network.command_bind == "udp://127.0.0.1:50256");
         RB_CHECK(stack_real.network.state_pub_endpoint == "udp://127.0.0.1:50356");
-        RB_CHECK(stack_real.network.state_pub_endpoints.size() == 5);
+        RB_CHECK(stack_real.network.state_pub_endpoints.size() == 4);
         RB_CHECK(stack_real.command_source.enforce_lease);
         RB_CHECK(stack_real.network.command_source_enforce_lease);
         RB_CHECK(near(stack_real.command_source.lease_timeout_sec, 60.0));
@@ -327,7 +327,7 @@ bool testRepositoryConfigsParse() {
                  rb_servo::ControllerSimulationPhysicalMotionPolicy::FaultLatch);
         RB_CHECK(stack_sim.network.command_bind == "udp://127.0.0.1:50256");
         RB_CHECK(stack_sim.network.state_pub_endpoint == "udp://127.0.0.1:50356");
-        RB_CHECK(stack_sim.network.state_pub_endpoints.size() == 5);
+        RB_CHECK(stack_sim.network.state_pub_endpoints.size() == 4);
         RB_CHECK(stack_sim.network.state_pub_endpoints[1] == "udp://127.0.0.1:50366");
         RB_CHECK(stack_sim.network.state_pub_endpoints[2] == "udp://127.0.0.1:50376");
         RB_CHECK(stack_sim.command_source.enforce_lease);

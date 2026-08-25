@@ -2,13 +2,8 @@
 #
 # head_wrists.yaml(640x480 IR) 대체본. 변경점:
 #  - head IR_left/IR_right 640x480 -> 1280x720 (고해상도 disparity). color는 동일 1280x720.
-#  - head.controls: 학습형 스테레오(FoundationStereo)에 맞춰 IR projector(emitter) OFF +
-#    IR 노출 제어. emitter 도트 패턴은 매칭을 해치고 광택면 정반사 disparity 편향을 유발.
-#  - dump_intrinsics_path: 기동 시 디바이스가 보고하는 1280x720 IR intrinsics+baseline을
-#    FoundationStereo K.txt 포맷으로 자동 기록(손-K.txt 취약성 제거).
-#
-# 주의: 1280x720은 720이 32의 배수가 아니므로 stereo_worker가 736으로 패딩해 추론한다.
-# TRT 엔진을 736x1280로 재빌드해야 한다(make cam-engine-rebuild).
+#  - head.controls: IR projector(emitter) OFF + IR 노출 제어. emitter 도트 패턴은
+#    매칭을 해치고 광택면 정반사 disparity 편향을 유발.
 server:
   name: camera_server
   mode: capture_only
@@ -61,7 +56,7 @@ bundle_groups:
     max_bundle_time_diff_ms: 33.0
     publish_incomplete_bundles: false
   # Per-side wrist groups: one dead wrist camera must not suppress the healthy
-  # side's RGB-D flow (stereo_worker wrist clouds / rb_gui). The joint `policy`
+  # side's RGB-D flow (rb_gui). The joint `policy`
   # group above stays all-or-nothing on purpose — the real_policy runtime gate
   # requires both wrists and fail-closes on an incomplete pair.
   wrist_left:
@@ -113,9 +108,6 @@ cameras:
       # 수동 노출 비교 시: auto_exposure: 0 후 ir_exposure_us / ir_gain 지정.
       # ir_exposure_us: 8500
       # ir_gain: 16
-      # /app/config 는 read-only 마운트 -> 쓰기 가능한 stereo_worker(host rw)로 덤프.
-      # 호스트에선 camera_server/stereo_worker/d435_ir_1280x720_K.txt 로 나타남.
-      dump_intrinsics_path: "/app/stereo_worker/d435_ir_1280x720_K.txt"
   left_realsense:
     # 2026-07-23: wrist cameras physically swapped between arms; serial follows the unit.
     serial: "412622272078"

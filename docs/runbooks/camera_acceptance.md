@@ -9,11 +9,9 @@ Canonical stack profile (`make cam-up`, default
 `CAMERA_CONFIG=/app/config/d435_head_1280x720.yaml`):
 
 - head: Intel RealSense D435, color 1280x720@30 plus IR left/right
-  1280x720@30 for the stereo worker
+  1280x720@30
 - left wrist: Intel RealSense D405, color 640x480@30 plus depth 640x480@30
 - right wrist: Intel RealSense D405, color 640x480@30 plus depth 640x480@30
-- stereo worker: launched in the same `camera_server` container by
-  `camera_server/stereo_worker/run_all.sh`
 
 Supported explicit variants:
 

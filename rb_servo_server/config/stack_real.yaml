@@ -466,7 +466,6 @@ network:
     - "udp://127.0.0.1:50366"  # viser GUI
     - "udp://127.0.0.1:50376"  # make run teleop_mux policy_runner
     - "udp://127.0.0.1:50378"  # external flow-infer readback alongside make run
-    - "udp://127.0.0.1:50386"  # camera_server stereo_worker wrist-fusion (box detect)
   state_pub_rate_hz: 100   # default publish rate for gui/scope/policy/flow/camera consumers. Temporarily raise to 500 only for PlotJuggler 500 Hz command-stream debugging (watch send_period_overrun / send_deadline_hit).
   command_source_allowlist: ["127.0.0.1/32"]
 

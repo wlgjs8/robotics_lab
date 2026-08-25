@@ -44,7 +44,7 @@ sync:
 # head/stereo groups: `policy` feeds the real_policy runtime gate (both wrists,
 # all-or-nothing on purpose), `wrist_left`/`wrist_right` keep each side's RGB-D
 # flowing independently so one dead camera cannot hide the healthy side
-# (stereo_worker wrist clouds / rb_gui). `legacy` keeps camera.bundle for
+# (rb_gui). `legacy` keeps camera.bundle for
 # recorders/diagnostics that subscribe to the full-rig topic.
 bundle_groups:
   legacy:

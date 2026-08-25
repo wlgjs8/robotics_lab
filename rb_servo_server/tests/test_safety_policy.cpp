@@ -955,7 +955,7 @@ rb_servo::DualArmCommand externalBoxesCommand(uint64_t seq, uint64_t host_time_n
     rb_servo::DualArmCommand cmd = command(rb_servo::ControlMode::SetExternalBoxes);
     cmd.seq = seq;
     cmd.host_time_ns = host_time_ns;
-    cmd.source.source_id = "stereo_worker";
+    cmd.source.source_id = "external_box_source";
     cmd.source.session_id = "camera-session";
     cmd.has_external_boxes = true;
     rb_servo::ExternalBoxCommand box;
@@ -1053,7 +1053,7 @@ bool testParsedExternalBoxesDoNotDisplaceMotionLatest() {
     buffer.setCommand(target);
 
     RB_CHECK(server.parseMessage(
-        R"({"seq":31,"mode":"set_external_boxes","source_id":"stereo_worker","session_id":"camera-session","boxes":[{"label":"green","T":[1,0,0,0.31,0,1,0,0.22,0,0,1,0.33,0,0,0,1]}]})",
+        R"({"seq":31,"mode":"set_external_boxes","source_id":"external_box_source","session_id":"camera-session","boxes":[{"label":"green","T":[1,0,0,0.31,0,1,0,0.22,0,0,1,0.33,0,0,0,1]}]})",
         now + 1,
         &parsed_boxes
     ));
