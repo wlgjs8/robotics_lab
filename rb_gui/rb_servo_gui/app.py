@@ -2234,6 +2234,108 @@ def _render_stand_world_monitor_rows(
     return "".join(parts)
 
 
+def _render_ft_monitor_rows(latest: StateSnapshot | None, *, stale: bool) -> str:
+    """The FT Monitor card: what the arm is feeling RIGHT NOW, relative to its zero.
+
+    THE NUMBERS ARE THE COMPENSATED, DEADZONED WRENCH AT THE TCP IN STAND AXES —
+    `force_torque.comp_stand_axes_at_tcp`, the same surface the force law consumes.
+    That is what "change from the zero" means here and it is already three
+    subtractions deep:
+
+        raw  -  bias(tare)  -  tool gravity  ->  2 N / 0.5 Nm deadzone
+
+    So a resting arm reads 0.0, and the first ~2 N of any push reads 0.0 as well:
+    the deadzone is not a display choice, it is what the controller acts on, and a
+    monitor that showed the pre-deadzone value would disagree with the arm.
+
+    STAND AXES, NOT TOOL AXES: this card is read by a human standing at the cell,
+    and stand X/Y/Z are the directions they can point at. The law integrates in the
+    same frame.
+    """
+    if latest is None:
+        status = "No state stream"
+    else:
+        status = f"{'stale' if stale else 'live'}, deadband 2 N / 0.5 Nm"
+    rows: list[str] = [f'<div class="rb-monitor-status">{escape(status)}</div>']
+    if latest is None or stale:
+        return "".join(rows)
+
+    for arm_name, arm in (("left", latest.left), ("right", latest.right)):
+        ft = getattr(arm, "force_torque", None)
+        rows.append(f'<div class="rb-monitor-arm"><div class="rb-monitor-arm-title">'
+                    f'{escape(arm_name)}</div>')
+        if not isinstance(ft, Mapping) or not ft.get("enabled"):
+            rows.append(_operator_monitor_row("F/T", escape("disabled")))
+            rows.append("</div>")
+            continue
+        if not ft.get("connected"):
+            # Every compensated channel is pinned to exact zero here, so showing
+            # numbers would be showing zeros that mean "no sensor", not "no force".
+            rows.append(_operator_monitor_row("F/T", escape("NOT CONNECTED")))
+            rows.append("</div>")
+            continue
+        if not ft.get("bias_valid"):
+            # Without a tare the "change from zero" has no zero to be from: the
+            # numbers below would be the sensor's own offset, ~20 N on this cell.
+            rows.append(_operator_monitor_row("F/T", escape("NOT ZEROED - tare first")))
+            rows.append("</div>")
+            continue
+
+        wrench = ft.get("comp_stand_axes_at_tcp")
+        values: list[float] = []
+        if isinstance(wrench, (list, tuple)) and len(wrench) >= 6:
+            for raw_value in wrench[:6]:
+                try:
+                    values.append(float(raw_value))
+                except (TypeError, ValueError):
+                    values = []
+                    break
+        if len(values) != 6 or not all(math.isfinite(v) for v in values):
+            rows.append(_operator_monitor_row("F/T", escape("invalid")))
+            rows.append("</div>")
+            continue
+
+        fx, fy, fz, tx, ty, tz = values
+        f_mag = math.sqrt(fx * fx + fy * fy + fz * fz)
+        t_mag = math.sqrt(tx * tx + ty * ty + tz * tz)
+        rows.append(_operator_monitor_row("dFx [N]", escape(f"{fx:+.2f}")))
+        rows.append(_operator_monitor_row("dFy [N]", escape(f"{fy:+.2f}")))
+        rows.append(_operator_monitor_row("dFz [N]", escape(f"{fz:+.2f}")))
+        rows.append(_operator_monitor_row("|dF| [N]", escape(f"{f_mag:.2f}")))
+        rows.append(_operator_monitor_row("dTx [Nm]", escape(f"{tx:+.3f}")))
+        rows.append(_operator_monitor_row("dTy [Nm]", escape(f"{ty:+.3f}")))
+        rows.append(_operator_monitor_row("dTz [Nm]", escape(f"{tz:+.3f}")))
+        rows.append(_operator_monitor_row("|dT| [Nm]", escape(f"{t_mag:.3f}")))
+        # The tool-load estimate is the one channel that ESCAPES the deadzone (a
+        # heavy low-pass on the pre-deadzone force), so it reads the ~200 g the
+        # 2 N band flattens to zero above.
+        try:
+            load = float(ft.get("load_mass_kg"))
+            settled = bool(ft.get("load_settled"))
+            rows.append(_operator_monitor_row(
+                "load [kg]", escape(f"{load:.3f}" + ("" if settled else " (settling)"))))
+        except (TypeError, ValueError):
+            pass
+        # What the law did with it, so the cause and the effect are read together.
+        fc = getattr(arm, "force_control", None)
+        if isinstance(fc, Mapping) and fc.get("covered"):
+            try:
+                rows.append(_operator_monitor_row(
+                    "dev [mm]", escape(f"{float(fc.get('deviation_norm_m', 0.0)) * 1e3:.1f}")))
+            except (TypeError, ValueError):
+                pass
+            try:
+                rows.append(_operator_monitor_row(
+                    "gate", escape(f"{float(fc.get('gate_translation', 1.0)):.2f}")))
+            except (TypeError, ValueError):
+                pass
+        elif isinstance(fc, Mapping) and fc.get("enabled"):
+            rows.append(_operator_monitor_row("law", escape("not covering")))
+        rows.append("</div>")
+
+    return "".join(rows)
+
+
 def _operator_monitor_dynamic_html(
     latest: StateSnapshot | None,
     *,
@@ -2250,6 +2352,7 @@ def _operator_monitor_dynamic_html(
         + _render_stand_world_monitor_rows(latest, stale=stale, uptime=uptime)
         + "</div>"
         + '<div class="rb-monitor-card rb-monitor-body-card rb-monitor-ft-card">'
+        + _render_ft_monitor_rows(latest, stale=stale)
         + "</div>"
         + '<div class="rb-monitor-card rb-monitor-body-card rb-monitor-camera-card">'
         + _render_camera_quality_monitor_rows(camera_quality_store, now=now)

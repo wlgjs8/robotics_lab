@@ -55,12 +55,15 @@ def main() -> int:
         "timeout_sec": 0.5,
         "source_id": "ft_tare",
         "session_id": f"ft_tare_{seq}",
-        # Per-arm selector. Both false would mean "both" to the server, but saying it
-        # explicitly keeps the packet readable in a capture.
+        # Per-arm selector, top-level. Both false would mean "both" to the server, but
+        # saying it explicitly keeps the packet readable in a capture.
         "tare_left": args.arm in ("left", "both"),
         "tare_right": args.arm in ("right", "both"),
-        "left": {"mode": "Hold"},
-        "right": {"mode": "Hold"},
+        # EMPTY ARM OBJECTS ON PURPOSE: a per-arm "mode" OVERRIDES the top-level one,
+        # so naming a mode here would turn this into that mode and the tare would be
+        # dropped without a word.
+        "left": {},
+        "right": {},
     }
 
     payload = json.dumps(packet).encode("utf-8")

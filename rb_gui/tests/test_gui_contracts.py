@@ -68,6 +68,7 @@ from rb_servo_gui.app import (
     _format_cartesian_solve_status,
     _format_circle_overlay_status,
     _format_fk_status,
+    _render_ft_monitor_rows,
     _format_init_motion_status,
     _format_scene_asset_status,
     _format_joint_monitor_value,
@@ -6330,3 +6331,141 @@ class IkInfeasibleRegionTest(unittest.TestCase):
             self.assertEqual(str(_ik_infeasible_path()), "/tmp/custom_ik.npz")
 
 
+
+
+class FtTareCommandTest(unittest.TestCase):
+    """The tare packet's shape, pinned because getting it wrong is SILENT.
+
+    A per-arm `mode` OVERRIDES the top-level one on the server
+    (command_server.cpp parseArmObject), so a tare packet that spells a mode inside
+    `left`/`right` stops being a tare and becomes that mode instead — accepted,
+    logged as nothing, and indistinguishable from a tare that worked. That is
+    exactly what happened on the 2026-08-26 02:40 hardware run: the operator
+    pressed the button, the server never saw a tare, and force control kept
+    refusing to make the arm compliant with no way to tell why from the packet.
+    """
+
+    def test_arm_objects_are_empty_so_the_top_level_mode_survives(self):
+        client = CommandClient("127.0.0.1", 50256, source_id="test")
+        packet = client.build_ft_tare(left=True, right=True)
+        self.assertEqual(packet["mode"], "TareForceSensor")
+        # The whole point: naming a mode here would replace TareForceSensor.
+        self.assertEqual(packet["left"], {})
+        self.assertEqual(packet["right"], {})
+        self.assertNotIn("mode", packet["left"])
+        self.assertNotIn("mode", packet["right"])
+
+    def test_per_arm_selection_is_top_level(self):
+        client = CommandClient("127.0.0.1", 50256, source_id="test")
+        right_only = client.build_ft_tare(left=False, right=True)
+        self.assertFalse(right_only["tare_left"])
+        self.assertTrue(right_only["tare_right"])
+        # ...and still not inside the arm objects, where the server does not read it.
+        self.assertEqual(right_only["left"], {})
+
+    def test_tare_is_refused_without_a_state_stream(self):
+        """A tare sent into nothing looks exactly like one that worked.
+
+        The first CLI attempt went to a server that had already been stopped and
+        printed the same success text it prints when it works.
+        """
+        store = StateStore()          # no state ever ingested
+        safety = OperatorSafety(store, RecordingClient())
+        ok, message = safety.send_ft_tare(left=True, right=True)
+        self.assertFalse(ok)
+        self.assertIn("state stream", message)
+
+
+class FtMonitorRenderTest(unittest.TestCase):
+    """The FT Monitor card shows the wrench the force law CONSUMES, not a raw one.
+
+    That surface is already three subtractions deep — raw minus the tare bias minus
+    tool gravity, then the 2 N / 0.5 Nm deadband — so a resting arm reads 0.00 and
+    the first ~2 N of a push reads 0.00 as well. Showing the pre-deadzone value
+    instead would put a number on screen that the controller is not acting on.
+    """
+
+    @staticmethod
+    def _state(ft_overrides: dict, *, fc: dict | None = None) -> StateSnapshot:
+        payload = sample_state()
+        for arm in ("left", "right"):
+            payload[arm]["force_torque"] = dict(ft_overrides)
+            if fc is not None:
+                payload[arm]["force_control"] = dict(fc)
+        return StateSnapshot.parse(payload, received_monotonic=time.monotonic())
+
+    def test_shows_the_compensated_deadzoned_wrench(self):
+        state = self._state({
+            "enabled": True,
+            "connected": True,
+            "bias_valid": True,
+            # comp @ TCP in STAND axes: what the law integrates.
+            "comp_stand_axes_at_tcp": [1.5, -2.25, 8.0, 0.1, -0.2, 0.05],
+            "load_mass_kg": 0.204,
+            "load_settled": True,
+        })
+        html = _render_ft_monitor_rows(state, stale=False)
+        self.assertIn("+1.50", html)     # dFx
+        self.assertIn("-2.25", html)     # dFy
+        self.assertIn("+8.00", html)     # dFz
+        self.assertIn("8.44", html)      # |dF| = sqrt(1.5^2+2.25^2+8^2)
+        self.assertIn("-0.200", html)    # dTy
+        self.assertIn("0.204", html)     # the load estimate escapes the deadband
+        self.assertIn("deadband", html)  # and the header says the numbers are banded
+
+    def test_an_unzeroed_sensor_shows_no_numbers(self):
+        """Without a tare there is no zero for a 'change from zero' to be from.
+
+        The sensor's own offset is ~20 N on this cell, so printing it as a delta
+        would read as a 20 N push nobody is applying.
+        """
+        state = self._state({
+            "enabled": True,
+            "connected": True,
+            "bias_valid": False,
+            "comp_stand_axes_at_tcp": [0.0, 0.0, 18.1, 0.0, 0.0, 0.0],
+        })
+        html = _render_ft_monitor_rows(state, stale=False)
+        self.assertIn("NOT ZEROED", html)
+        self.assertNotIn("18.1", html)
+
+    def test_a_disconnected_sensor_shows_no_numbers(self):
+        """Its compensated channels are pinned to exact zero, and a printed 0.00
+        would read as 'no force' rather than 'no sensor'."""
+        state = self._state({
+            "enabled": True,
+            "connected": False,
+            "bias_valid": True,
+            "comp_stand_axes_at_tcp": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        })
+        html = _render_ft_monitor_rows(state, stale=False)
+        self.assertIn("NOT CONNECTED", html)
+        self.assertNotIn("dFz", html)
+
+    def test_shows_what_the_law_did_with_it(self):
+        state = self._state(
+            {
+                "enabled": True,
+                "connected": True,
+                "bias_valid": True,
+                "comp_stand_axes_at_tcp": [0.0, 0.0, 10.0, 0.0, 0.0, 0.0],
+            },
+            fc={"enabled": True, "covered": True,
+                "deviation_norm_m": 0.025, "gate_translation": 0.31},
+        )
+        html = _render_ft_monitor_rows(state, stale=False)
+        self.assertIn("25.0", html)   # 10 N / 400 N/m = 25 mm, the designed number
+        self.assertIn("0.31", html)
+
+    def test_names_a_law_that_is_on_but_not_covering(self):
+        state = self._state(
+            {
+                "enabled": True,
+                "connected": True,
+                "bias_valid": True,
+                "comp_stand_axes_at_tcp": [0.0, 0.0, 3.0, 0.0, 0.0, 0.0],
+            },
+            fc={"enabled": True, "covered": False, "coverage_reason": "a fault is latched"},
+        )
+        html = _render_ft_monitor_rows(state, stale=False)
+        self.assertIn("not covering", html)

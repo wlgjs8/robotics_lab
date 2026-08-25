@@ -116,8 +116,12 @@ class CommandClient:
             "timeout_sec": timeout_sec,
             "tare_left": bool(left),
             "tare_right": bool(right),
-            "left": {"mode": "Hold"},
-            "right": {"mode": "Hold"},
+            # EMPTY ARM OBJECTS ON PURPOSE. A per-arm `mode` OVERRIDES the top-level
+            # one (command_server.cpp parseArmObject), so spelling "Hold" here would
+            # turn this packet into a plain Hold and the tare would never be seen —
+            # which is exactly what happened on the 02:40 run.
+            "left": {},
+            "right": {},
         })
 
     def build_joint_target(
