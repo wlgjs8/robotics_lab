@@ -95,6 +95,10 @@ enum class ControlMode {
     EmergencyStop,
     ResetFault,
     SetSafetyFloorZ,
+    // Leaseless, non-motion: average the F/T sensor's zero for the selected arm(s).
+    // A tare is what makes any absolute force claim meaningful, and force control
+    // REFUSES to cover an arm whose bias has never been established.
+    TareForceSensor,
     // Leaseless runtime enable/disable of the stand-frame floor plane
     // (safety.floor_constraint). Only effective when the floor is opted in at config
     // (floor_constraint.enable=true); it toggles whether that floor is enforced.
@@ -201,6 +205,17 @@ struct Pose6D {
 };
 
 
+// A 6-DOF wrench. Force [N], torque [Nm]. The FRAME AND THE REFERENCE POINT ARE
+// NOT IN THIS TYPE — every field that holds one names both (see FtTelemetry).
+struct Wrench6D {
+    double fx = 0.0;
+    double fy = 0.0;
+    double fz = 0.0;
+    double tx = 0.0;
+    double ty = 0.0;
+    double tz = 0.0;
+};
+
 struct RbpodoRawDiagnostics {
     double time_sec = 0.0;
     int real_vs_simulation_mode = 0;
@@ -261,6 +276,14 @@ struct RobotState {
     bool tcp_ref_valid = false;
     bool tcp_deferred = true;
     double fk_duration_us = 0.0;
+    // The controller's external F/T sensor reading, decoded from the rbpodo state
+    // frame (sdata.eft_fx..eft_mz). N / Nm, IN THE SENSOR'S OWN AXES — orthogonal
+    // but NOT right-handed on this unit, so this is NOT a TCP wrench and cannot be
+    // turned into one by a rotation. FtPipeline applies the MEASURED basis
+    // (force_torque.<arm>.axes) to map it. Zeros when no sensor is selected on the
+    // controller or the state frame ended before these fields; eft_valid says which.
+    Wrench6D eft_wrench;
+    bool eft_valid = false;
 
     RobotConnectionState connection_state = RobotConnectionState::Disconnected;
 
@@ -489,6 +512,104 @@ struct ChunkFrameTelemetry {
     double camera_right_focus_score = 0.0;
 };
 
+// ---- F/T pipeline telemetry -------------------------------------------------
+// One arm's wrench at every stage the pipeline produces, so a wrong number can be
+// traced to the stage that made it wrong instead of being argued about. EVERY
+// wrench field below names its FRAME and its REFERENCE POINT, because a wrench
+// without both is not a measurement (controller-manager wiki/decisions/0027).
+struct FtTelemetry {
+    bool enabled = false;              // force_torque.<arm>.enable
+    // The COLD sensor-presence verdict. A live RFT always jitters above its noise
+    // floor, so a stream that never varies is an unplugged sensor. NOT fatal: the
+    // arm runs without force sensing and every compensated channel below is pinned
+    // to EXACT ZERO, so bias and tool-gravity subtraction cannot fabricate a force
+    // nobody measured.
+    bool connected = false;
+    std::string connect_reason;        // why `connected` reads the way it does
+    double liveness_force_pp_n = 0.0;  // peak-to-peak seen during the check [N]
+    double liveness_torque_pp_nm = 0.0;
+    // (1) RAW, axis-mapped only. SENSOR frame (flange-aligned after the basis map),
+    //     torque about the SENSING REFERENCE ORIGIN. No bias, no gravity, no deadzone.
+    Wrench6D raw_sensor;
+    // The tool-gravity term this tick, SENSOR frame @SRO. Published because the TARE
+    // MUST NOT DOUBLE-SUBTRACT IT: the box is told a zero payload, so `raw_sensor`
+    // still CONTAINS gravity and a tare that averaged raw would fold the tare pose's
+    // gravity into the bias. The tare averages `raw_sensor - gravity` instead.
+    Wrench6D gravity_sensor;
+    // (2) COMPENSATED (-bias -gravity), SENSOR frame @SRO, BEFORE the deadzone.
+    Wrench6D comp_sensor_nodz;
+    // (2') the same after the deadzone.
+    Wrench6D comp_sensor;
+    // (3) COMPENSATED, TCP reference point, TOOL axes, after the deadzone. THIS IS
+    //     THE SURFACE THE FORCE LAW CONSUMES. The order is load-bearing:
+    //     gravity/bias -> reference-point shift -> rotate into tool axes -> deadzone.
+    Wrench6D comp_tcp;
+    // (4) the same wrench rotated into STAND axes (torque still about the TCP). The
+    //     frame the overlay integrates in and the frame an operator reads.
+    Wrench6D comp_stand;
+    // The bias in force at this instant, SENSOR frame — what the last tare stored.
+    Wrench6D bias;
+    bool bias_valid = false;           // a tare has run since the last invalidation
+    std::string bias_source;           // "config" | "tare" | "none"
+    std::uint64_t bias_generation = 0; // increments on every accepted tare
+    std::string tare_state;            // "none" | "settling" | "accepted" | "rejected"
+    std::string tare_reason;
+    int tare_samples = 0;
+    // The heavily low-passed STAND-frame force magnitude, as a mass. Exists to escape
+    // the deadzone: the shipped 2 N/axis flattens ~204 g to exactly zero on every
+    // compensated channel, and this is the range an operator wants to read.
+    double load_force_n = 0.0;
+    double load_mass_kg = 0.0;
+    bool load_settled = false;
+    // The effective configuration this arm ran with, echoed so a log can be read
+    // without the yaml beside it.
+    double tool_mass_kg = 0.0;
+    std::array<double, 3> tool_com_mm{};
+    std::array<double, 3> sensor_offset_mm{};
+    std::array<double, 3> tcp_from_sro_mm{};
+    double axes_determinant = 0.0;     // -1 on this unit: LEFT-HANDED, and correct
+};
+
+// ---- force-control (admittance overlay) telemetry ---------------------------
+struct ForceControlTelemetry {
+    bool enabled = false;              // force_control.enable
+    bool covered = false;              // the overlay ran this tick
+    std::string coverage_reason;       // why it did or did not
+    bool compose_applied = false;      // the deviation reached the commanded target
+    // THE DEVIATION from the nominal (followed) pose, STAND frame. Translation [m],
+    // rotation as a rotation vector [rad].
+    std::array<double, 3> deviation_m{};
+    std::array<double, 3> deviation_rad{};
+    double deviation_norm_m = 0.0;
+    double deviation_norm_rad = 0.0;
+    std::array<double, 3> velocity_m_s{};
+    std::array<double, 3> velocity_rad_s{};
+    // THE FENCE. `bounded` is latched while pinned: a silent saturation is a lie
+    // about where the arm is being asked to go.
+    bool bounded = false;
+    double fence_m = 0.0;
+    double fence_rad = 0.0;
+    // THE GATE: the fraction of the plan advance that survives along the direction
+    // pushing INTO the measured wrench. 1 = free space, 0 = fully held.
+    double gate_translation = 1.0;
+    double gate_rotation = 1.0;
+    double gate_force_n = 0.0;         // |F| the gate saw, stand frame
+    double gate_torque_nm = 0.0;
+    bool gate_closed = false;          // < 0.02 on either channel
+    // How much plan advance the gate actually removed this tick [m] / [rad].
+    double gate_removed_m = 0.0;
+    double gate_removed_rad = 0.0;
+    // The wrench that drove the law, STAND frame @TCP — the same numbers as
+    // FtTelemetry::comp_stand, repeated here so one row explains one decision.
+    Wrench6D wrench_stand;
+    // IK on the deviated pose. A refusal HOLDS the last emitted pose (bounded by
+    // construction) rather than letting the nominal stand, which would step by the
+    // whole deviation.
+    bool ik_refused = false;
+    std::uint64_t ik_refused_total = 0;
+    std::uint32_t ik_refused_streak = 0;
+};
+
 struct SafetyTrackingTelemetry {
     std::string tracking_error_source = "actual";
     bool tracking_error_source_valid = true;
@@ -593,6 +714,10 @@ struct DualArmCommand {
     std::string action_source;
     std::string source_conditioning_mode;
 
+    // TareForceSensor payload: which arm(s) to tare. Both false = both arms, which
+    // is what an operator pressing one button means.
+    bool tare_left = false;
+    bool tare_right = false;
     // SetSafetyFloorZ payload: requested stand-frame floor plane height (meters).
     double floor_z_m = 0.0;
     bool has_floor_z = false;
@@ -806,6 +931,31 @@ struct RbpodoQueueAckTelemetry {
     uint64_t parsed_this_send = 0;      // RBACK tokens parsed by this send
 };
 
+// The queue-sync CONTROLLER's own state, paired with RbpodoQueueAckTelemetry
+// above: that one is the plant (what the box reported), this one is the loop
+// closed around it. Without this the fill can be watched misbehaving with no way
+// to tell whether the trim saturated, the integral wound up, or the law fell back
+// to a non-tracking phase.
+//
+// This is a plain telemetry mirror of control/QueueSyncDecision. It is duplicated
+// rather than reused because queue_sync_controller.hpp includes config.hpp, which
+// includes THIS header -- taking the type directly would be a cycle.
+struct QueueSyncTelemetry {
+    bool enabled = false;               // queue_sync ran for this arm this tick
+    double period_trim_us = 0.0;        // THE ACTUATOR: added to the send period
+    double fill_lpf = 0.0;              // low-passed fill the law acts on
+    double integral_us = 0.0;           // learns the host/box clock mismatch
+    int last_fill = -1;                 // -1 = no RBACK observed yet
+    bool fill_valid = false;
+    std::string phase = "idle";         // idle | warmup | drain | track
+    bool locked = false;                // Track phase and fill within tolerance
+    uint64_t underrun_events = 0;       // fill fell to <= protect_fill
+    uint64_t stall_events = 0;          // no fresh RBACK for stall_cycles
+    uint64_t highwater_events = 0;      // absurd backlog; box likely not consuming
+    uint64_t redrain_events = 0;        // queue rebase forced a re-drain
+    uint64_t no_consumption_events = 0; // fill rising faster than a trim can correct
+};
+
 struct LatchedFaultContextSnapshot {
     std::string verdict = "Ok";
     std::string domain = "None";
@@ -943,6 +1093,8 @@ struct ServoSample {
 
     RbpodoQueueAckTelemetry left_queue_ack;
     RbpodoQueueAckTelemetry right_queue_ack;
+    QueueSyncTelemetry left_queue_sync;
+    QueueSyncTelemetry right_queue_sync;
 
     bool left_send_ok = false;
     bool right_send_ok = false;
@@ -960,6 +1112,10 @@ struct ServoSample {
     std::string right_send_error_message;
     CartesianSolveTelemetry left_cartesian_solve;
     CartesianSolveTelemetry right_cartesian_solve;
+    FtTelemetry left_ft;
+    FtTelemetry right_ft;
+    ForceControlTelemetry left_force_control;
+    ForceControlTelemetry right_force_control;
     SafetyTrackingTelemetry left_safety_tracking;
     SafetyTrackingTelemetry right_safety_tracking;
     bool send_suppressed = false;
@@ -1213,6 +1369,10 @@ struct ServoSnapshot {
     std::string right_send_error_message;
     CartesianSolveTelemetry left_cartesian_solve;
     CartesianSolveTelemetry right_cartesian_solve;
+    FtTelemetry left_ft;
+    FtTelemetry right_ft;
+    ForceControlTelemetry left_force_control;
+    ForceControlTelemetry right_force_control;
     SafetyTrackingTelemetry left_safety_tracking;
     SafetyTrackingTelemetry right_safety_tracking;
     bool send_suppressed = false;

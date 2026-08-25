@@ -286,6 +286,74 @@ void writeInitMotionHeader(std::ostream& os) {
        << ",self_collision_pair";
 }
 
+
+// One arm's F/T + force-control columns. EVERY wrench column names its FRAME and its
+// REFERENCE POINT in the column name itself, because a wrench column called
+// "<side>_fz" is unreadable six months later: three different surfaces in this
+// pipeline all have an fz and they disagree by the tool's weight and a lever arm.
+void writeWrenchHeader(std::ostream& os, const char* side, const char* name) {
+    os << ',' << side << '_' << name << "_fx_n"
+       << ',' << side << '_' << name << "_fy_n"
+       << ',' << side << '_' << name << "_fz_n"
+       << ',' << side << '_' << name << "_tx_nm"
+       << ',' << side << '_' << name << "_ty_nm"
+       << ',' << side << '_' << name << "_tz_nm";
+}
+
+void writeForceHeader(std::ostream& os, const char* side) {
+    os << ',' << side << "_ft_enabled"
+       << ',' << side << "_ft_connected"
+       << ',' << side << "_ft_connect_reason"
+       << ',' << side << "_ft_axes_det";
+    // (1) raw, sensor axes @SRO - what the wire carried, mapped only.
+    writeWrenchHeader(os, side, "ft_raw_sensor");
+    // the tool-gravity term subtracted this tick, sensor frame @SRO.
+    writeWrenchHeader(os, side, "ft_gravity_sensor");
+    // (2) compensated @SRO, pre- and post-deadzone.
+    writeWrenchHeader(os, side, "ft_comp_sensor_nodz");
+    writeWrenchHeader(os, side, "ft_comp_sensor");
+    // (3) compensated @TCP in TOOL axes - THE SURFACE THE FORCE LAW CONSUMES.
+    writeWrenchHeader(os, side, "ft_comp_tcp");
+    // (4) the same wrench in STAND axes - the frame the overlay integrates in.
+    writeWrenchHeader(os, side, "ft_comp_stand");
+    // the bias in force right now, and where it came from.
+    writeWrenchHeader(os, side, "ft_bias");
+    os << ',' << side << "_ft_bias_valid"
+       << ',' << side << "_ft_bias_source"
+       << ',' << side << "_ft_bias_generation"
+       << ',' << side << "_ft_tare_state"
+       << ',' << side << "_ft_tare_samples"
+       << ',' << side << "_ft_load_force_n"
+       << ',' << side << "_ft_load_mass_kg"
+       << ',' << side << "_ft_load_settled"
+       << ',' << side << "_ft_tool_mass_kg"
+       // ---- the force law ----
+       << ',' << side << "_fc_enabled"
+       << ',' << side << "_fc_covered"
+       << ',' << side << "_fc_coverage_reason"
+       << ',' << side << "_fc_compose_applied"
+       << ',' << side << "_fc_dev_x_m"
+       << ',' << side << "_fc_dev_y_m"
+       << ',' << side << "_fc_dev_z_m"
+       << ',' << side << "_fc_dev_norm_m"
+       << ',' << side << "_fc_dev_rx_rad"
+       << ',' << side << "_fc_dev_ry_rad"
+       << ',' << side << "_fc_dev_rz_rad"
+       << ',' << side << "_fc_dev_norm_rad"
+       << ',' << side << "_fc_vel_x_m_s"
+       << ',' << side << "_fc_vel_y_m_s"
+       << ',' << side << "_fc_vel_z_m_s"
+       << ',' << side << "_fc_bounded"
+       << ',' << side << "_fc_fence_m"
+       << ',' << side << "_fc_fence_rad"
+       << ',' << side << "_fc_gate_translation"
+       << ',' << side << "_fc_gate_rotation"
+       << ',' << side << "_fc_gate_force_n"
+       << ',' << side << "_fc_gate_torque_nm"
+       << ',' << side << "_fc_gate_closed"
+       << ',' << side << "_fc_gate_removed_m";
+}
+
 }  // namespace
 
 ServoLogger::ServoLogger(const LoggingConfig& config) : config_(config) {}
@@ -457,6 +525,26 @@ void ServoLogger::writeHeader() {
               << ',' << side << "_rback_drained_this_send"
               << ',' << side << "_rback_parsed_this_send";
     }
+    // The queue-sync CONTROLLER beside the plant it regulates. `qsync_trim_us` is
+    // the actuator, so a fill that misbehaves can be attributed: trim pinned at
+    // adj_clamp_us is saturation, a wound-up integral is a clock mismatch the law
+    // cannot absorb, and a phase that is not `track` means it is not regulating at
+    // all. The event counters are cumulative, so they are read as steps.
+    for (const char* side : {"left", "right"}) {
+        file_ << ',' << side << "_qsync_enabled"
+              << ',' << side << "_qsync_trim_us"
+              << ',' << side << "_qsync_fill_lpf"
+              << ',' << side << "_qsync_integral_us"
+              << ',' << side << "_qsync_last_fill"
+              << ',' << side << "_qsync_fill_valid"
+              << ',' << side << "_qsync_phase"
+              << ',' << side << "_qsync_locked"
+              << ',' << side << "_qsync_underrun_events"
+              << ',' << side << "_qsync_stall_events"
+              << ',' << side << "_qsync_highwater_events"
+              << ',' << side << "_qsync_redrain_events"
+              << ',' << side << "_qsync_no_consumption_events";
+    }
     file_ << ",left_error_code,right_error_code";
     writeCartesianSolveHeader(file_, "left");
     writeCartesianSolveHeader(file_, "right");
@@ -468,6 +556,8 @@ void ServoLogger::writeHeader() {
     file_ << ",sched_wake_time_ns,prev_sleep_enter_time_ns"
              ",wake_latency_us,sleep_entry_margin_us"
              ",left_pre_send_us,right_pre_send_us";
+    writeForceHeader(file_, "left");
+    writeForceHeader(file_, "right");
     file_ << '\n';
 }
 
@@ -509,6 +599,58 @@ std::string csvEscape(const std::string& value) {
     }
     out += '"';
     return out;
+}
+
+void writeWrenchColumns(std::ostream& os, const Wrench6D& w) {
+    os << ',' << w.fx << ',' << w.fy << ',' << w.fz
+       << ',' << w.tx << ',' << w.ty << ',' << w.tz;
+}
+
+void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceControlTelemetry& fc) {
+    os << ',' << ft.enabled
+       << ',' << ft.connected
+       << ',' << csvEscape(ft.connect_reason)
+       << ',' << ft.axes_determinant;
+    writeWrenchColumns(os, ft.raw_sensor);
+    writeWrenchColumns(os, ft.gravity_sensor);
+    writeWrenchColumns(os, ft.comp_sensor_nodz);
+    writeWrenchColumns(os, ft.comp_sensor);
+    writeWrenchColumns(os, ft.comp_tcp);
+    writeWrenchColumns(os, ft.comp_stand);
+    writeWrenchColumns(os, ft.bias);
+    os << ',' << ft.bias_valid
+       << ',' << csvEscape(ft.bias_source)
+       << ',' << ft.bias_generation
+       << ',' << csvEscape(ft.tare_state)
+       << ',' << ft.tare_samples
+       << ',' << ft.load_force_n
+       << ',' << ft.load_mass_kg
+       << ',' << ft.load_settled
+       << ',' << ft.tool_mass_kg
+       << ',' << fc.enabled
+       << ',' << fc.covered
+       << ',' << csvEscape(fc.coverage_reason)
+       << ',' << fc.compose_applied
+       << ',' << fc.deviation_m[0]
+       << ',' << fc.deviation_m[1]
+       << ',' << fc.deviation_m[2]
+       << ',' << fc.deviation_norm_m
+       << ',' << fc.deviation_rad[0]
+       << ',' << fc.deviation_rad[1]
+       << ',' << fc.deviation_rad[2]
+       << ',' << fc.deviation_norm_rad
+       << ',' << fc.velocity_m_s[0]
+       << ',' << fc.velocity_m_s[1]
+       << ',' << fc.velocity_m_s[2]
+       << ',' << fc.bounded
+       << ',' << fc.fence_m
+       << ',' << fc.fence_rad
+       << ',' << fc.gate_translation
+       << ',' << fc.gate_rotation
+       << ',' << fc.gate_force_n
+       << ',' << fc.gate_torque_nm
+       << ',' << fc.gate_closed
+       << ',' << fc.gate_removed_m;
 }
 
 void writeCartesianSolveColumns(std::ostream& os, const CartesianSolveTelemetry& t) {
@@ -1051,6 +1193,21 @@ void ServoLogger::writeSample(const ServoSample& sample) {
               << ',' << q->drained_this_send
               << ',' << q->parsed_this_send;
     }
+    for (const QueueSyncTelemetry* qs : {&sample.left_queue_sync, &sample.right_queue_sync}) {
+        file_ << ',' << qs->enabled
+              << ',' << qs->period_trim_us
+              << ',' << qs->fill_lpf
+              << ',' << qs->integral_us
+              << ',' << qs->last_fill
+              << ',' << qs->fill_valid
+              << ',' << csvEscape(qs->phase)
+              << ',' << qs->locked
+              << ',' << qs->underrun_events
+              << ',' << qs->stall_events
+              << ',' << qs->highwater_events
+              << ',' << qs->redrain_events
+              << ',' << qs->no_consumption_events;
+    }
     file_ << ',' << sample.left_state.error_code << ',' << sample.right_state.error_code;
     writeCartesianSolveColumns(file_, sample.left_cartesian_solve);
     writeCartesianSolveColumns(file_, sample.right_cartesian_solve);
@@ -1094,6 +1251,8 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << ',' << sleep_entry_margin_us
           << ',' << left_pre_send_us
           << ',' << right_pre_send_us;
+    writeForceColumns(file_, sample.left_ft, sample.left_force_control);
+    writeForceColumns(file_, sample.right_ft, sample.right_force_control);
     file_ << '\n';
 }
 

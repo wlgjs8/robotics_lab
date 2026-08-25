@@ -22,6 +22,12 @@ public:
         const JointArray& q_deg,
         const ArmMountConfig& mount
     ) const override;
+
+    std::optional<Pose6D> computeFlangeStand(
+        ArmId arm,
+        const JointArray& q_deg,
+        const ArmMountConfig& mount
+    ) const override;
     IkResult solveIk(
         ArmId arm,
         const Pose6D& target_tcp_stand,

@@ -23,6 +23,7 @@
 #include "rb_servo/control/smd_pose_tracker.hpp"
 #include "rb_servo/network/chunk_frame_receiver.hpp"
 #include "rb_servo/control/self_collision.hpp"
+#include "rb_servo/control/admittance_overlay.hpp"
 #include "rb_servo/control/collision_monitor.hpp"
 #include "rb_servo/control/init_motion_planner.hpp"
 #include "rb_servo/control/floor_constraint.hpp"
@@ -32,6 +33,7 @@
 #include "rb_servo/control/fault_classifier.hpp"
 #include "rb_servo/control/safety_filter.hpp"
 #include "rb_servo/control/trajectory_filter.hpp"
+#include "rb_servo/sensor/ft_pipeline.hpp"
 #include "rb_servo/kinematics/i_kinematics.hpp"
 #include "rb_servo/logging/servo_logger.hpp"
 #include "rb_servo/robot/i_robot_backend.hpp"
@@ -673,6 +675,43 @@ private:
     // path; delta_twist consumes local action deltas through a separate state.
     control::CartesianChunkFollower left_chunk_follower_{control::CartesianChunkFollowerConfig{}};
     control::CartesianChunkFollower right_chunk_follower_{control::CartesianChunkFollowerConfig{}};
+    // ---- force control ----------------------------------------------------
+    // The F/T compensation pipeline and the admittance law, per arm. The pipeline
+    // turns one raw sensor reading into the TCP-referenced, tool-axes wrench the law
+    // consumes; the overlay integrates the deviation that wrench asks for; the gate
+    // throttles the plan advance that drives INTO it. All three are per-arm because
+    // the sensor, the tool calibration and the contact are.
+    sensor::FtPipeline left_ft_pipeline_;
+    sensor::FtPipeline right_ft_pipeline_;
+    control::AdmittanceOverlay left_overlay_;
+    control::AdmittanceOverlay right_overlay_;
+    control::ForceGate left_force_gate_;
+    control::ForceGate right_force_gate_;
+    FtTelemetry left_ft_telemetry_{};
+    FtTelemetry right_ft_telemetry_{};
+    ForceControlTelemetry left_force_control_telemetry_{};
+    ForceControlTelemetry right_force_control_telemetry_{};
+    // The pose the overlay deviates FROM while a plain Hold is being made compliant.
+    // Latched once on entry: re-reading the measured pose every tick would make the
+    // nominal follow the deviation, and the spring would have nothing to pull back to.
+    std::optional<Pose6D> left_hold_compliance_nominal_;
+    std::optional<Pose6D> right_hold_compliance_nominal_;
+    // The COLD sensor-presence window: liveness samples are folded until this many
+    // ticks have passed, then the verdict latches for the run.
+    std::uint32_t left_ft_liveness_ticks_ = 0;
+    std::uint32_t right_ft_liveness_ticks_ = 0;
+    bool left_overlay_bounded_prev_ = false;
+    bool right_overlay_bounded_prev_ = false;
+    bool left_gate_closed_prev_ = false;
+    bool right_gate_closed_prev_ = false;
+    bool left_ft_liveness_decided_ = false;
+    bool right_ft_liveness_decided_ = false;
+    // Operator-requested tare, drained on the RT loop.
+    std::atomic<bool> left_tare_request_{false};
+    std::atomic<bool> right_tare_request_{false};
+    std::uint32_t left_tare_ticks_ = 0;
+    std::uint32_t right_tare_ticks_ = 0;
+
     control::FollowerOutputSmd left_follower_output_smd_{FollowerOutputSmdConfig{}};
     control::FollowerOutputSmd right_follower_output_smd_{FollowerOutputSmdConfig{}};
     control::DeltaTwistFollower left_delta_twist_follower_{control::DeltaTwistFollowerConfig{}};
@@ -885,6 +924,25 @@ private:
     // Gather one arm's state behind ArmControlContext. The returned references
     // stay owned by this loop; the context is a view, not a copy.
     ArmControlContext armContext(ArmId arm);
+
+    // ---- force control ------------------------------------------------------
+    // Run one arm's F/T pipeline for this tick. Folds the COLD liveness window and
+    // any pending tare. Returns true when a trustworthy compensated wrench exists.
+    bool stepFtPipeline(ArmId arm, const RobotState& state);
+    // Decide whether the overlay covers this arm this tick, and say why in the
+    // telemetry. Coverage is never silent: an operator asking "why did it not
+    // comply" must be able to read the answer instead of inferring it.
+    bool forceControlCovered(ArmId arm, const ArmCommand& command, const RobotState& state,
+                             std::string* reason);
+    // Step the law and compose its deviation onto `target` (a stand-frame TCP pose),
+    // in place. `nominal` is the pose the deviation is measured FROM. Returns true
+    // when the composed pose differs from the nominal.
+    bool applyForceOverlay(ArmId arm, const RobotState& state, Pose6D* target);
+    // Attenuate one plan advance along the direction pushing INTO the measured
+    // wrench. Tangential and retreating components pass at full authority.
+    math::Vector3 gatePlanAdvance(ArmId arm, const math::Vector3& advance_stand);
+    // An operator/GUI tare request. Thread-safe deposit; drained on the RT loop.
+    void requestFtTare(ArmId arm);
     // Context overloads: the caller hands over one arm and stops naming it. The
     // long-parameter forms above keep the implementation, so adopting these is a
     // call-site change with no behaviour change.

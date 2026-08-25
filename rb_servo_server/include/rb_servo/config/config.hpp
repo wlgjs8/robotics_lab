@@ -66,6 +66,10 @@ struct BackendConfig {
     // request, so the RT loop never blocks on the controller round trip. State
     // is therefore one tick (~2 ms at 500 Hz) old. Fail-closed: no frame newer
     // than the blocking path's response timeout (0.2 s) fails the read.
+    // Push a ZERO payload to the control box at init so it subtracts nothing from
+    // the F/T output and this server owns the tool's gravity compensation. Set from
+    // force_torque.push_zero_payload_to_box; never spelled per-arm in yaml.
+    bool push_zero_payload = false;
     bool state_read_pipelined = false;
     bool allow_controller_simulation_diagnostics_suspect = false;
     bool controller_simulation_treat_unreliable_status_fields_as_unavailable = false;
@@ -176,6 +180,11 @@ struct KinematicsConfig {
     std::string urdf = "descriptions/urdf/rb3_730e.urdf";
     std::string base_link = "world";
     std::string tip_link = "tcp";
+    // The FLANGE frame — the tool mounting face. The F/T sensor's axis basis
+    // (force_torque.<arm>.axes) is expressed in THIS frame, so the force pipeline
+    // needs it separately from the tip: substituting the TCP is only correct while
+    // the tool is flange-aligned, and would break silently otherwise.
+    std::string flange_link = "attachment_site";
     std::vector<std::string> joint_names{
         "base_joint",
         "shoulder_joint",
@@ -900,6 +909,170 @@ struct ScopeConfig {
     size_t max_samples_per_batch = 64;
 };
 
+// ---- F/T sensor + tool ------------------------------------------------------
+// PORTED FROM controller-manager, WHICH IS THE CALIBRATION AUTHORITY. Every number
+// in the shipped block is a value the operator measured through CM's own procedure
+// (`platforms/monkey/params-presets/efts/RFT64-6A01-A.yaml` and `tools/pika.yaml`).
+// Re-derive rather than invent: a value that silently disagrees with CM's is worse
+// than no value, because both stacks drive the same physical arm.
+struct FtArmConfig {
+    bool enable = false;
+
+    // ---- the sensor (CM efts/<name>.yaml) ----------------------------------
+    std::string sensor_name;              // echoed into telemetry; not matched on
+    // flange -> SENSING REFERENCE ORIGIN [mm]. This ONLY relates the sensor origin
+    // to the flange. It is NOT applied to the raw reading: the pipeline references
+    // its torque AT the SRO and never shifts the origin.
+    std::array<double, 3> sensor_offset_mm{{0.0, 0.0, 0.0}};
+    // THE SENSOR AXES, AS BASIS COLUMNS IN THE FLANGE FRAME. Each row is one sensor
+    // axis expressed in flange coordinates, so [fx|fy|fz] maps a sensor reading into
+    // flange-aligned axes.
+    //
+    // *** THIS IS NOT A ROTATION AND MAY NOT BE SPELLED AS ONE. *** The RFT64 unit on
+    // this cell reports in a LEFT-HANDED axis set — CM's measured triad has
+    // determinant -1 (fx [0,-1,0] / fy [1,0,0] / fz [0,0,-1], converged on the cell
+    // 2026-08-16 over two hand-push rounds). No rpy and no rotation matrix can
+    // express that, which is why this is three vectors and not a pose. Do not
+    // "fix" the determinant, and do NOT derive these from the URDF's
+    // `ft_sensor_base_joint` rpy: that yaw is the NOMINAL MECHANICAL placement
+    // (det +1) and disagrees with the measured electrical relabel by a sign flip.
+    std::array<double, 3> axis_fx{{1.0, 0.0, 0.0}};
+    std::array<double, 3> axis_fy{{0.0, 1.0, 0.0}};
+    std::array<double, 3> axis_fz{{0.0, 0.0, 1.0}};
+    // The sensor's OWN mass, below which nothing is measured. Informational here:
+    // the box gravity-compensates the sensor stack, so this is not subtracted.
+    double sensor_mass_kg = 0.0;
+    std::array<double, 3> sensor_com_mm{{0.0, 0.0, 0.0}};
+    // SOFT per-axis dead-band on the COMPENSATED outputs only; the raw channel is
+    // left untouched. |v| <= d -> 0, else v shifted toward zero by d (continuous).
+    // Zero = off. Per-axis in the mapped sensor axes.
+    std::array<double, 3> deadzone_force_n{{0.0, 0.0, 0.0}};
+    std::array<double, 3> deadzone_torque_nm{{0.0, 0.0, 0.0}};
+    // Time constant of the heavy low-pass behind the published tool-load estimate.
+    double tool_load_tau_s = 1.0;
+
+    // ---- the tool (CM tools/<name>.yaml) -----------------------------------
+    std::string tool_name;
+    // SRO -> TCP [mm], flange-aligned axes. NOT flange-relative: the sensor stack
+    // already contributes `sensor_offset_mm`, so flange -> TCP is the SUM of the two.
+    // Stating a flange-relative number here puts the TCP one sensor-length too far out.
+    std::array<double, 3> tool_xyz_mm{{0.0, 0.0, 0.0}};
+    std::array<double, 3> tool_rpy_deg{{0.0, 0.0, 0.0}};
+    // MEASURED payload, per arm. CM's `ft identify` on 2026-08-17 measured
+    // left 0.7912 kg / right 0.7822 kg, CoM within 1.5 mm of each other.
+    double tool_mass_kg = 0.0;
+    std::array<double, 3> tool_com_mm{{0.0, 0.0, 0.0}};   // SENSOR frame, from the SRO
+    // The point the OUTPUT torque is referenced to for the applied-force surface:
+    // M' = M - r_af x F. A two-finger gripper applies its force at the fingertips.
+    // Zero is NOT the neutral choice — it hinges the tool AT THE SENSOR.
+    std::array<double, 3> applied_force_mm{{0.0, 0.0, 0.0}};
+
+    // ---- runtime bias ------------------------------------------------------
+    // The sensor's constant offset, SENSOR frame, subtracted before anything
+    // rotates. Normally established by a TARE at runtime; a config value is the
+    // starting point when one is known. `bias_from_config` records which.
+    std::array<double, 3> bias_force_n{{0.0, 0.0, 0.0}};
+    std::array<double, 3> bias_torque_nm{{0.0, 0.0, 0.0}};
+    bool bias_from_config = false;
+
+    // ---- sensor-presence check --------------------------------------------
+    // COLD liveness: a live RFT jitters above its noise floor, so a stream flat
+    // across the window is an unplugged sensor. Not fatal — every compensated
+    // channel is pinned to EXACT ZERO instead, so nothing downstream can read a
+    // fabricated force.
+    double liveness_window_sec = 1.0;
+    double liveness_min_force_pp_n = 0.02;
+    double liveness_min_torque_pp_nm = 0.002;
+};
+
+struct FtConfig {
+    bool enable = false;
+    // The box is told a ZERO payload at init so it subtracts NOTHING, and this
+    // controller owns the tool's gravity compensation. Sending zero is a FACT;
+    // not sending leaves the box holding whatever it had, which is a box whose
+    // compensation nobody knows.
+    //
+    // THE COST, ACCEPTED (the same one CM accepted 2026-08-04): the box's own
+    // COLLISION DETECTION runs on this payload, so with zero it sees the tool's
+    // weight as an external force.
+    bool push_zero_payload_to_box = true;
+    FtArmConfig left;
+    FtArmConfig right;
+};
+
+// One axis of the per-axis hybrid law.
+enum class ForceAxisMode {
+    Compliance,   // m*dd + b*d' + k*d = w      springs back to the nominal
+    Force,        // m*dd + b*d'       = w - f  walks until the wrench matches f
+    Rigid,        // does not deviate at all
+};
+
+struct ForceAxisConfig {
+    ForceAxisMode mode = ForceAxisMode::Compliance;
+    double m = 0.0;        // <= 0 -> RIGID
+    double b = 0.0;        // <  0 -> RIGID
+    double k = 0.0;
+    double ref_force = 0.0;   // FORCE mode only [N] or [Nm]
+};
+
+// ---- force control ----------------------------------------------------------
+// The admittance overlay on the emitted Cartesian target, ported from
+// controller-manager's shared overlay (arm/motions/AdmittanceOverlay.h) and its
+// FOLLOW path's law, which is the consumer whose problem matches ours: a streamed
+// Cartesian plan that must yield to contact without abandoning the plan.
+struct ForceControlConfig {
+    bool enable = false;
+
+    // ---- the law -----------------------------------------------------------
+    // m*d'' + b*d' + k*d = wrench, per axis, in the TOOL frame (re-aimed every tick
+    // onto the command's tool axes). A steady force deflects F/k and b decides how
+    // it gets there.
+    std::array<ForceAxisConfig, 3> translation{};   // x y z  [kg] [N*s/m] [N/m]
+    std::array<ForceAxisConfig, 3> rotation{};      // rx ry rz [kg*m^2] [Nm*s/rad] [Nm/rad]
+
+    // ---- the gate ----------------------------------------------------------
+    // The plan advance's reflection ratio falls as the contact force rises, applied
+    // PROJECTIVELY: only the component driving INTO the measured wrench is
+    // attenuated, so sliding along a contact and backing out of it keep full
+    // authority. `max_force_n` IS the force a sustained contact converges to.
+    //
+    // *** THE GATE AND k > 0 MAY NOT SHIP APART. *** Measured by CM on hardware:
+    //   k > 0 with no gate  -> the force ramps forever (961 N in 40 s)
+    //   the gate with k = 0 -> the force is bounded but the deviation is not
+    //                          (9.5 m of offset in 300 s)
+    // The loader REFUSES either half alone.
+    bool gate_enable = false;
+    double gate_max_force_n = 0.0;
+    double gate_max_torque_nm = 0.0;
+    double gate_close_tau_s = 0.10;   // fast to close - protective
+    double gate_open_tau_s = 0.40;    // slow to open  - a fast re-open makes it a relay
+
+    // ---- the fence ---------------------------------------------------------
+    // A DEAD BACKSTOP, not an operating limit: the design converges the deviation to
+    // max_force_n / k, so this is never reached in normal operation. It exists
+    // because that bound is created by the GATE, and the gate depends on the wrench
+    // being right. Non-positive = no fence on that part.
+    double max_deviation_m = 0.0;
+    double max_deviation_rad = 0.0;
+
+    // ---- deviation-dynamics rate caps --------------------------------------
+    // How FAST the deviation may grow. NOT the fence: deleting these is not "no
+    // limit", it is an unbounded per-tick jump.
+    double max_velocity_m_s = 0.5;
+    double max_acceleration_m_s2 = 5.0;
+    double max_velocity_rad_s = 2.0;
+    double max_acceleration_rad_s2 = 20.0;
+
+    // ---- coverage ----------------------------------------------------------
+    // A plain Hold has no Cartesian nominal to deviate from. With this set, the
+    // first covered Hold tick LATCHES the measured TCP and holds it as the nominal,
+    // which is what makes a hand-push test possible without running a policy.
+    bool hold_compliance = false;
+    // Refuse to compose while the arm's own kinematics/state are not trustworthy.
+    // A deviation composed onto a stale nominal is a command nobody authored.
+    double max_state_age_sec = 0.05;
+};
+
 struct LinearMoveConfig {
     double min_duration_sec = 0.05;
     double max_duration_sec = 10.0;
@@ -1179,6 +1352,8 @@ struct DualArmConfig {
     LoggingConfig logging;
     ScopeConfig scope;
     QueueSyncConfig queue_sync;
+    FtConfig force_torque;
+    ForceControlConfig force_control;
     CartesianControlConfig cartesian_control;
     KinematicsConfig kinematics;
     GripperConfig gripper;

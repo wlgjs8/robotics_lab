@@ -519,6 +519,190 @@ logging:
   flush_period_ms: 100
   queue_capacity: 4096
 
+# =============================================================================
+# F/T SENSOR + TOOL
+#
+# EVERY NUMBER HERE WAS MEASURED THROUGH controller-manager ON THIS CELL. Do not
+# hand-edit one: re-run CM's own procedure and copy the whole result. The source
+# files are
+#     submodules/controller-manager/platforms/monkey/params-presets/efts/RFT64-6A01-A.yaml
+#     submodules/controller-manager/platforms/monkey/params-presets/tools/pika.yaml
+# and CM is the authority for them, because both stacks drive the SAME arm and a
+# value that silently disagrees is worse than no value at all.
+# =============================================================================
+force_torque:
+  enable: true
+  # Tell the control box the payload is ZERO so it subtracts NOTHING from the F/T
+  # output, and compensate the tool here instead. Not sending leaves the box holding
+  # whatever the pendant or CM last set — a compensation of unknown size that ours
+  # would then run on top of. CM measured that double-compensation as ~20 N.
+  #
+  # THE COST, ACCEPTED: the box's own collision detection runs on this payload, so
+  # with zero it sees the tool's weight as an external force.
+  push_zero_payload_to_box: true
+
+  left:
+    enable: true
+    sensor_name: "RFT64-6A01-A"
+    tool_name: "pika"
+
+    # flange -> SENSING REFERENCE ORIGIN. Only relates the sensor origin to the
+    # flange; it is NOT applied to the reading (the torque is referenced AT the SRO).
+    # Matches the URDF ft chain: attachment_site +15 mm (ft_sensor_base) +30 mm
+    # (ft_sensor_measurement) = 45 mm.
+    sensor_offset_mm: [0.0, 0.0, 45.0]
+
+    # *** THE MEASURED SENSOR AXES, AS BASIS COLUMNS IN THE FLANGE FRAME. ***
+    # CM converged these on the cell (left arm, 2026-08-16, two hand-push rounds on
+    # the raw wrench): round 1 pinned the permutation, round 2 caught the remaining
+    # sign. det = -1 — the unit reports in a LEFT-HANDED axis set, and that is
+    # CORRECT. Do not "fix" it, and do NOT copy the URDF's ft_sensor_base_joint yaw
+    # (+90 deg, det +1): that is the nominal MECHANICAL placement and disagrees with
+    # this measured electrical relabel by a sign flip.
+    axes:
+      fx: [ 0.0, -1.0,  0.0]
+      fy: [ 1.0,  0.0,  0.0]
+      fz: [ 0.0,  0.0, -1.0]
+
+    # The sensor's own weight. Informational: the box compensates the sensor stack.
+    sensor_mass_kg: 0.175
+    sensor_com_mm: [0.0, 0.0, 21.5]
+
+    # SOFT per-axis dead-band on the COMPENSATED outputs only. 2 N is ~204 g, which
+    # is why the tool-load estimate exists to read below it.
+    deadzone_force_n:  [2.0, 2.0, 2.0]
+    deadzone_torque_nm: [0.5, 0.5, 0.5]
+    tool_load_tau_s: 1.0
+
+    # SRO -> TCP. NOT flange-relative: the sensor stack already contributes its
+    # 45 mm, so flange -> TCP = 45 + 202.642 = 247.642 mm — which is exactly the
+    # URDF's tcp_joint origin (0.247642 m, rpy 0). The TCP is the pika FINGERTIP
+    # CENTRE PLANE. Stating a flange-relative number here would put the TCP 45 mm
+    # too far out, i.e. reaching past the workpiece, with nothing on screen to say why.
+    tool_xyz_mm: [0.0, 0.0, 202.642]
+    tool_rpy_deg: [0.0, 0.0, 0.0]      # flange-aligned; jaw axis = TCP +/-x
+
+    # MEASURED, not CAD-nominal. CM `ft identify` 2026-08-17 14:08, residual 0.62 N.
+    # The pika CAD's own +90 deg yaw is baked into the exported meshes, not the TCP
+    # frame, so it does not appear here.
+    tool_mass_kg: 0.7912
+    tool_com_mm: [-0.02, 3.24, 25.34]   # SENSOR frame, from the SRO
+
+    # The point the applied-force torque is referenced to. A two-finger gripper
+    # applies its force AT THE FINGERTIPS. It lands on the same 202.642 as the TCP
+    # because robotics_lab DEFINES the TCP at the contact plane — it does not follow
+    # the TCP, and would not move with it.
+    applied_force_mm: [0.0, 0.0, 202.642]
+
+    # No bias on file: the bias is a SENSOR ZERO and belongs to a tare, not to a
+    # config. Force control REFUSES to cover an arm that has never been tared, so
+    # send TareForceSensor with the arm still and carrying nothing but the tool.
+
+  right:
+    enable: true
+    sensor_name: "RFT64-6A01-A"
+    tool_name: "pika"
+    sensor_offset_mm: [0.0, 0.0, 45.0]
+    # The SAME product on the same flange design. The triad was converged on the LEFT
+    # arm; if this arm's own 7-pose fit ever disagrees, that fit wins for this arm.
+    axes:
+      fx: [ 0.0, -1.0,  0.0]
+      fy: [ 1.0,  0.0,  0.0]
+      fz: [ 0.0,  0.0, -1.0]
+    sensor_mass_kg: 0.175
+    sensor_com_mm: [0.0, 0.0, 21.5]
+    deadzone_force_n:  [2.0, 2.0, 2.0]
+    deadzone_torque_nm: [0.5, 0.5, 0.5]
+    tool_load_tau_s: 1.0
+    tool_xyz_mm: [0.0, 0.0, 202.642]
+    tool_rpy_deg: [0.0, 0.0, 0.0]
+    # CM `ft identify` 2026-08-17 14:10, residual 0.59 N. 1.1 % from the left arm's
+    # mass and under 1.5 mm in CoM — two units of one product, measured separately
+    # and kept separately, because each arm compensates with its OWN sensor.
+    tool_mass_kg: 0.7822
+    tool_com_mm: [-1.24, 4.03, 26.56]
+    applied_force_mm: [0.0, 0.0, 202.642]
+
+# =============================================================================
+# FORCE CONTROL — the admittance overlay on the emitted Cartesian target.
+#
+# THE LAW IS controller-manager's FOLLOW path, ported: that is the consumer whose
+# problem matches ours (a streamed Cartesian plan that must yield to contact without
+# abandoning the plan). The numbers are CM's shipped 10 N row, which is ONE SOLVE —
+# k, b and the gate threshold are not independent, and mixing a b from one row with a
+# k from another is not a tuning, it is a different system.
+#
+#   k = max_force_n / d_max          10 N / 25 mm = 400 N/m
+#   b = 2*zeta*sqrt(m*(k + k_env))   zeta = 0.25, k_env = 5e4 (hard plastic)
+#   m = 15 kg                        owner constraint 10..15
+#
+# WHY zeta = 0.25 AND NOT 1.0: critical damping is WORSE here, measured. A large b
+# physically RESISTS the offset's retreat at the moment of impact and raises the peak
+# (65.4 N at zeta 1.0 against 47.2 N at zeta 0.25), while the gate already stabilises
+# the loop.
+#
+# THE IMPACT PEAK IS NOT max_force_n. First contact at speed spikes far above it
+# because the impact resolves in 30-50 ms while the gate needs ~70 ms to arrive. The
+# gate regulates the SUSTAINED force; it cannot catch the transient. The two levers
+# are approach speed and m — not this threshold.
+# =============================================================================
+force_control:
+  enable: true
+
+  # Per-axis m*d'' + b*d' + k*d = wrench, in the TOOL frame (re-aimed every tick onto
+  # the command's tool axes, so "soft along the approach" keeps meaning the approach).
+  # Isotropic as shipped — the structure is per-axis so a direction can be made stiff
+  # without touching the others.
+  translation:
+    - {m: 15.0, b: 434.7, k: 400.0}   # x
+    - {m: 15.0, b: 434.7, k: 400.0}   # y
+    - {m: 15.0, b: 434.7, k: 400.0}   # z
+  # ROTATION IS DERIVED UNDER A STATED ASSUMPTION AND WANTS HARDWARE TUNING. The
+  # rotational environment stiffness is k_env * L^2 for a contact at lever L, and L is
+  # not known. CM's numbers use L = 140 mm (the RB5/steam lever) and are KNOWN STALE
+  # on this cell: the pika's lever is 202.642 mm, so the torque limit is ~31 % tighter
+  # than the "10 N * L" intent it states. Carried over unchanged deliberately —
+  # re-basing it RAISES a force limit, which is an operator decision, not a port's.
+  rotation:
+    - {m: 1.0, b: 15.72, k: 8.0}      # rx
+    - {m: 1.0, b: 15.72, k: 8.0}      # ry
+    - {m: 1.0, b: 15.72, k: 8.0}      # rz
+
+  # THE GATE AND THE SPRING SHIP TOGETHER OR NOT AT ALL — the loader refuses either
+  # half alone. Measured by CM on hardware: k > 0 with no gate ramps the contact force
+  # forever (961 N in 40 s); the gate with k = 0 bounds the force but not the
+  # deviation (9.5 m of offset in 300 s).
+  force_gate:
+    enable: true
+    max_force_n: 10.0        # the force a sustained contact CONVERGES to
+    max_torque_nm: 1.4       # = 10 N * 0.140 m, the same stale-L assumption as k_r
+    close_tau_s: 0.10        # fast to close  - protective
+    open_tau_s:  0.40        # slow to open   - a fast re-open makes the gate a relay
+
+  # A DEAD BACKSTOP, not an operating limit. The design converges the deviation to
+  # max_force_n / k = 25 mm, so 40 mm is never reached in normal operation. It exists
+  # because that 25 mm bound is created by the GATE, and the gate depends on the
+  # wrench being right — which a fresh port has not yet earned the right to assume.
+  max_deviation_m: 0.040
+  max_deviation_rad: 0.2617993878     # 15 deg
+
+  # How FAST the deviation may grow. NOT the fence: deleting these would not be "no
+  # limit", it would be an unbounded per-tick jump.
+  max_velocity_m_s: 0.50
+  max_acceleration_m_s2: 5.0
+  max_velocity_rad_s: 2.00
+  max_acceleration_rad_s2: 20.0
+
+  # Make a plain Hold compliant by latching its measured TCP as the nominal. This is
+  # what lets an operator push the arm by hand and watch it yield and spring back
+  # without a policy running. Turn it OFF once a policy owns the arm: a compliant Hold
+  # is an arm that moves when something leans on it.
+  hold_compliance: true
+
+  # Refuse to compose onto a nominal older than this — a deviation composed onto a
+  # stale pose is a command nobody authored.
+  max_state_age_sec: 0.05
+
 kinematics:
   enable: true
   provider: pinocchio

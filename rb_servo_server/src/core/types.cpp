@@ -30,6 +30,7 @@ std::string toString(ControlMode mode) {
         case ControlMode::EmergencyStop: return "EmergencyStop";
         case ControlMode::ResetFault: return "ResetFault";
         case ControlMode::SetSafetyFloorZ: return "SetSafetyFloorZ";
+        case ControlMode::TareForceSensor: return "TareForceSensor";
         case ControlMode::SetSafetyFloorEnabled: return "SetSafetyFloorEnabled";
         case ControlMode::SetSafetyRoiBounds: return "SetSafetyRoiBounds";
         case ControlMode::SetExternalBoxes: return "SetExternalBoxes";
@@ -124,6 +125,9 @@ ControlMode controlModeFromString(const std::string& mode) {
     if (m == "emergencystop" || m == "emergency_stop" || m == "estop") return ControlMode::EmergencyStop;
     if (m == "resetfault" || m == "reset_fault" || m == "reset") return ControlMode::ResetFault;
     if (m == "setsafetyfloorz" || m == "set_safety_floor_z") return ControlMode::SetSafetyFloorZ;
+    if (m == "tareforcesensor" || m == "tare_force_sensor" || m == "tare") {
+        return ControlMode::TareForceSensor;
+    }
     if (m == "setsafetyfloorenabled" || m == "set_safety_floor_enabled") {
         return ControlMode::SetSafetyFloorEnabled;
     }

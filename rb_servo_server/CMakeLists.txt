@@ -33,6 +33,8 @@ add_library(rb_servo_core
     src/control/arm_worker.cpp
     src/control/cartesian_controller.cpp
     src/control/queue_sync_controller.cpp
+    src/control/admittance_overlay.cpp
+    src/sensor/ft_pipeline.cpp
     src/control/cartesian_servo_controller.cpp
     src/control/cartesian_trajectory_planner.cpp
     src/control/smd_pose_tracker.cpp
@@ -281,6 +283,10 @@ if(BUILD_TESTING)
     add_executable(test_queue_sync_controller tests/test_queue_sync_controller.cpp)
     target_link_libraries(test_queue_sync_controller PRIVATE rb_servo_core)
     add_test(NAME queue_sync_controller COMMAND test_queue_sync_controller)
+
+    add_executable(test_force_control tests/test_force_control.cpp)
+    target_link_libraries(test_force_control PRIVATE rb_servo_core)
+    add_test(NAME force_control COMMAND test_force_control)
 
     set(RB_GUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../rb_gui")
     find_package(Python3 COMPONENTS Interpreter)

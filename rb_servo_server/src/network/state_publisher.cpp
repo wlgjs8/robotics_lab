@@ -49,6 +49,71 @@ nlohmann::json jointArrayJson(const JointArray& joints) {
     return out;
 }
 
+nlohmann::json wrenchJson(const Wrench6D& w) {
+    // ARRAY ORDER IS [fx, fy, fz, tx, ty, tz], N / Nm. The frame and the reference
+    // point are named by the KEY this array is published under, never by this helper.
+    return nlohmann::json::array({w.fx, w.fy, w.fz, w.tx, w.ty, w.tz});
+}
+
+nlohmann::json ftJson(const FtTelemetry& t) {
+    return {
+        {"enabled", t.enabled},
+        {"connected", t.connected},
+        {"connect_reason", t.connect_reason},
+        {"axes_determinant", t.axes_determinant},
+        // Every surface names its frame and its reference point.
+        {"raw_sensor_axes_at_sro", wrenchJson(t.raw_sensor)},
+        {"gravity_sensor_at_sro", wrenchJson(t.gravity_sensor)},
+        {"comp_sensor_at_sro_nodeadzone", wrenchJson(t.comp_sensor_nodz)},
+        {"comp_sensor_at_sro", wrenchJson(t.comp_sensor)},
+        {"comp_tool_axes_at_tcp", wrenchJson(t.comp_tcp)},
+        {"comp_stand_axes_at_tcp", wrenchJson(t.comp_stand)},
+        {"bias_sensor", wrenchJson(t.bias)},
+        {"bias_valid", t.bias_valid},
+        {"bias_source", t.bias_source},
+        {"bias_generation", t.bias_generation},
+        {"tare_state", t.tare_state},
+        {"tare_reason", t.tare_reason},
+        {"tare_samples", t.tare_samples},
+        {"load_force_n", t.load_force_n},
+        {"load_mass_kg", t.load_mass_kg},
+        {"load_settled", t.load_settled},
+        {"tool_mass_kg", t.tool_mass_kg},
+        {"tool_com_mm", t.tool_com_mm},
+        {"sensor_offset_mm", t.sensor_offset_mm},
+        {"tcp_from_sro_mm", t.tcp_from_sro_mm},
+        {"liveness_force_pp_n", t.liveness_force_pp_n},
+        {"liveness_torque_pp_nm", t.liveness_torque_pp_nm},
+    };
+}
+
+nlohmann::json forceControlJson(const ForceControlTelemetry& t) {
+    return {
+        {"enabled", t.enabled},
+        {"covered", t.covered},
+        {"coverage_reason", t.coverage_reason},
+        {"compose_applied", t.compose_applied},
+        {"deviation_stand_m", t.deviation_m},
+        {"deviation_stand_rad", t.deviation_rad},
+        {"deviation_norm_m", t.deviation_norm_m},
+        {"deviation_norm_rad", t.deviation_norm_rad},
+        {"velocity_stand_m_s", t.velocity_m_s},
+        {"velocity_stand_rad_s", t.velocity_rad_s},
+        {"bounded", t.bounded},
+        {"fence_m", t.fence_m},
+        {"fence_rad", t.fence_rad},
+        {"gate_translation", t.gate_translation},
+        {"gate_rotation", t.gate_rotation},
+        {"gate_force_n", t.gate_force_n},
+        {"gate_torque_nm", t.gate_torque_nm},
+        {"gate_closed", t.gate_closed},
+        {"gate_removed_m", t.gate_removed_m},
+        {"wrench_stand_axes_at_tcp", wrenchJson(t.wrench_stand)},
+        {"ik_refused", t.ik_refused},
+        {"ik_refused_total", t.ik_refused_total},
+    };
+}
+
 nlohmann::json vec6Json(const Vec6& value) {
     return nlohmann::json::array({
         value.x, value.y, value.z, value.rx, value.ry, value.rz
@@ -1471,6 +1536,10 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         rbpodoAsyncQueuePolicyString(config_.servo.rbpodo_async_streaming.queue_policy);
     message["cartesian_control_snapshot"] = cartesianControlSnapshotJson(config_.cartesian_control);
     message["kinematics_snapshot"] = kinematicsSnapshotJson(config_.kinematics);
+    message["left"]["force_torque"] = ftJson(snapshot.left_ft);
+    message["right"]["force_torque"] = ftJson(snapshot.right_ft);
+    message["left"]["force_control"] = forceControlJson(snapshot.left_force_control);
+    message["right"]["force_control"] = forceControlJson(snapshot.right_force_control);
     message["startup_validation"] = startupValidationJson(snapshot.startup_validation);
     const bool worker_enabled =
         config_.servo.io_model == ServoIoModel::Worker ||

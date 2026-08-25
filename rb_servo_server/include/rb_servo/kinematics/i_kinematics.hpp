@@ -62,6 +62,23 @@ public:
         const ArmMountConfig& mount
     ) const = 0;
 
+    // The FLANGE pose in the stand frame — the frame the F/T sensor's axis basis is
+    // expressed in. It is NOT the TCP: the TCP carries the tool transform, and
+    // substituting one for the other is only correct while the tool happens to be
+    // flange-aligned. That is true of the pika today and would break SILENTLY the
+    // day a tool with a real rpy is fitted, in a way that shows up as a plausible
+    // wrench pointing the wrong way.
+    //
+    // `std::nullopt` = this implementation does not model a flange frame. Consumers
+    // must FAIL CLOSED on that, never fall back to the tip.
+    virtual std::optional<Pose6D> computeFlangeStand(
+        ArmId /*arm*/,
+        const JointArray& /*q_deg*/,
+        const ArmMountConfig& /*mount*/
+    ) const {
+        return std::nullopt;
+    }
+
     virtual IkResult solveIk(
         ArmId arm,
         const Pose6D& target_tcp_stand,

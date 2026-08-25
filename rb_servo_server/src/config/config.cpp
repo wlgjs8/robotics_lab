@@ -1766,6 +1766,136 @@ void validateConfig(const DualArmConfig& cfg) {
         );
     }
 
+    // ---- F/T + force control ------------------------------------------------
+    {
+        const auto validate_ft_arm = [](const FtArmConfig& a, const std::string& path) {
+            if (!a.enable) return;
+            // THE AXIS TRIAD MUST BE A BASIS. A degenerate triad silently collapses
+            // one measured direction onto another, which reads as a plausible wrench
+            // that is missing an axis - the worst failure shape there is.
+            Eigen::Matrix3d m;
+            m.col(0) = Eigen::Vector3d(a.axis_fx[0], a.axis_fx[1], a.axis_fx[2]);
+            m.col(1) = Eigen::Vector3d(a.axis_fy[0], a.axis_fy[1], a.axis_fy[2]);
+            m.col(2) = Eigen::Vector3d(a.axis_fz[0], a.axis_fz[1], a.axis_fz[2]);
+            const double det = m.determinant();
+            if (!std::isfinite(det) || std::abs(det) < 0.5) {
+                throw std::runtime_error(
+                    path + ".axes is degenerate (|det| = " + std::to_string(std::abs(det)) +
+                    ") - the three rows must be orthonormal sensor axes in flange coordinates");
+            }
+            // det < 0 is NOT an error. The RFT64 on this cell reports in a LEFT-HANDED
+            // axis set and its measured triad has det = -1; refusing that would refuse
+            // the calibration.
+            for (int i = 0; i < 3; ++i) {
+                validateNonNegativeFinite(a.deadzone_force_n[i], path + ".deadzone_force_n");
+                validateNonNegativeFinite(a.deadzone_torque_nm[i], path + ".deadzone_torque_nm");
+            }
+            validatePositiveFinite(a.tool_load_tau_s, path + ".tool_load_tau_s");
+            validateNonNegativeFinite(a.tool_mass_kg, path + ".tool_mass_kg");
+            validatePositiveFinite(a.liveness_window_sec, path + ".liveness_window_sec");
+            validateNonNegativeFinite(a.liveness_min_force_pp_n, path + ".liveness_min_force_pp_n");
+            validateNonNegativeFinite(a.liveness_min_torque_pp_nm, path + ".liveness_min_torque_pp_nm");
+            // A tool with mass but no CoM is a torque error the force law cannot see.
+            // Zero CoM with zero mass is fine (no tool); zero CoM with a real mass is
+            // a value nobody entered.
+            if (a.tool_mass_kg > 1e-6) {
+                const double com = std::abs(a.tool_com_mm[0]) + std::abs(a.tool_com_mm[1]) +
+                                   std::abs(a.tool_com_mm[2]);
+                if (com < 1e-9) {
+                    throw std::runtime_error(
+                        path + ".tool_com_mm is zero with a non-zero tool_mass_kg - enter the "
+                               "measured centre of mass (controller-manager's `ft identify` "
+                               "result) or set the mass to zero");
+                }
+            }
+        };
+        validate_ft_arm(cfg.force_torque.left, "force_torque.left");
+        validate_ft_arm(cfg.force_torque.right, "force_torque.right");
+
+        const ForceControlConfig& fc = cfg.force_control;
+        if (fc.enable) {
+            // Force control without a wrench is a law reading zeros, which converges
+            // to "no contact anywhere" and never says so.
+            if (!cfg.force_torque.enable ||
+                !(cfg.force_torque.left.enable || cfg.force_torque.right.enable)) {
+                throw std::runtime_error(
+                    "force_control.enable requires force_torque.enable and at least one arm's "
+                    "force_torque.<arm>.enable - a force law with no sensor reads zeros forever");
+            }
+            // The overlay composes a Cartesian deviation, so it needs the Cartesian
+            // path to exist at all.
+            if (!cfg.kinematics.enable) {
+                throw std::runtime_error("force_control.enable requires kinematics.enable");
+            }
+            bool any_spring = false;
+            const auto validate_axes = [&](const std::array<ForceAxisConfig, 3>& axes,
+                                           const std::string& path) {
+                for (std::size_t i = 0; i < 3; ++i) {
+                    const ForceAxisConfig& a = axes[i];
+                    const std::string ap = path + "[" + std::to_string(i) + "]";
+                    if (a.mode == ForceAxisMode::Rigid) continue;
+                    if (!(a.m > 0.0)) continue;   // m <= 0 IS the rigid spelling
+                    validatePositiveFinite(a.m, ap + ".m");
+                    validateNonNegativeFinite(a.b, ap + ".b");
+                    validateNonNegativeFinite(a.k, ap + ".k");
+                    validateNonNegativeFinite(std::abs(a.ref_force), ap + ".ref_force");
+                    // SEMI-IMPLICIT EULER: b < m/dt is the no-per-tick-oscillation
+                    // limit and b < 2m/dt diverges outright. Refuse rather than let a
+                    // retune walk into an oscillation that looks like contact chatter.
+                    const double b_limit = a.m / 0.002;
+                    if (a.b >= b_limit) {
+                        throw std::runtime_error(
+                            ap + ".b (" + std::to_string(a.b) + ") is at or above the discrete "
+                            "stability limit m/dt = " + std::to_string(b_limit) +
+                            " - the integrator oscillates every tick at this damping");
+                    }
+                    if (a.k > 0.0) any_spring = true;
+                }
+            };
+            validate_axes(fc.translation, "force_control.translation");
+            validate_axes(fc.rotation, "force_control.rotation");
+
+            // *** THE TWO HALVES MAY NOT SHIP APART. *** Measured by controller-manager
+            // on this hardware:
+            //   k > 0 with no gate  -> the contact force ramps forever (961 N in 40 s)
+            //   the gate with k = 0 -> the force is bounded but the deviation is not
+            //                          (9.5 m of offset in 300 s)
+            // Neither is a tuning mistake to be discovered on the robot.
+            if (any_spring && !fc.gate_enable) {
+                throw std::runtime_error(
+                    "force_control has a stiffness (k > 0) but force_gate.enable is false - the "
+                    "spring ramps the contact force without bound (measured 961 N in 40 s). "
+                    "Ship the gate with the spring, or set every k to 0");
+            }
+            if (fc.gate_enable && !any_spring) {
+                throw std::runtime_error(
+                    "force_control.force_gate is enabled but every k is 0 - the gate bounds the "
+                    "force and nothing bounds the deviation (measured 9.5 m in 300 s). Give the "
+                    "compliance axes a stiffness, or disable the gate");
+            }
+            if (fc.gate_enable) {
+                validatePositiveFinite(fc.gate_max_force_n, "force_control.force_gate.max_force_n");
+                validatePositiveFinite(fc.gate_max_torque_nm, "force_control.force_gate.max_torque_nm");
+                validatePositiveFinite(fc.gate_close_tau_s, "force_control.force_gate.close_tau_s");
+                validatePositiveFinite(fc.gate_open_tau_s, "force_control.force_gate.open_tau_s");
+                // FAST TO CLOSE, SLOW TO OPEN. Reversing them makes the gate a relay
+                // against the contact and sustains a limit cycle.
+                if (fc.gate_close_tau_s > fc.gate_open_tau_s) {
+                    throw std::runtime_error(
+                        "force_control.force_gate.close_tau_s must be <= open_tau_s - a gate that "
+                        "re-opens faster than it closes is a relay against the contact");
+                }
+            }
+            validatePositiveFinite(fc.max_velocity_m_s, "force_control.max_velocity_m_s");
+            validatePositiveFinite(fc.max_acceleration_m_s2, "force_control.max_acceleration_m_s2");
+            validatePositiveFinite(fc.max_velocity_rad_s, "force_control.max_velocity_rad_s");
+            validatePositiveFinite(fc.max_acceleration_rad_s2, "force_control.max_acceleration_rad_s2");
+            validatePositiveFinite(fc.max_state_age_sec, "force_control.max_state_age_sec");
+            validateNonNegativeFinite(fc.max_deviation_m, "force_control.max_deviation_m");
+            validateNonNegativeFinite(fc.max_deviation_rad, "force_control.max_deviation_rad");
+        }
+    }
+
     // Real/sim env gates retired: real Cartesian control no longer requires
     // RB_ALLOW_REAL_CARTESIAN.
     if (anyReal(cfg) && cfg.cartesian_control.allow_in_controller_simulation) {
@@ -2190,6 +2320,8 @@ void validateRootKeys(const YAML::Node& root) {
         "logging",
         "scope",
         "queue_sync",
+        "force_torque",
+        "force_control",
         "cartesian_control",
         "kinematics",
         "gripper",
@@ -3279,6 +3411,130 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "no_consumption_rise_per_sec")) q.no_consumption_rise_per_sec = asInt(sec["no_consumption_rise_per_sec"], "queue_sync.no_consumption_rise_per_sec");
     }
 
+    if (has(root, "force_torque")) {
+        const YAML::Node sec = root["force_torque"];
+        validateAllowedKeys(sec, {"enable", "push_zero_payload_to_box", "left", "right"},
+                            "force_torque");
+        FtConfig& ft = cfg.force_torque;
+        if (has(sec, "enable")) ft.enable = asBool(sec["enable"], "force_torque.enable");
+        if (has(sec, "push_zero_payload_to_box")) {
+            ft.push_zero_payload_to_box =
+                asBool(sec["push_zero_payload_to_box"], "force_torque.push_zero_payload_to_box");
+        }
+        const auto parse_arm = [&](const YAML::Node& n, FtArmConfig& out, const std::string& path) {
+            validateAllowedKeys(n, {
+                "enable", "sensor_name", "sensor_offset_mm", "axes", "sensor_mass_kg",
+                "sensor_com_mm", "deadzone_force_n", "deadzone_torque_nm", "tool_load_tau_s",
+                "tool_name", "tool_xyz_mm", "tool_rpy_deg", "tool_mass_kg", "tool_com_mm",
+                "applied_force_mm", "bias_force_n", "bias_torque_nm",
+                "liveness_window_sec", "liveness_min_force_pp_n", "liveness_min_torque_pp_nm",
+            }, path);
+            if (has(n, "enable")) out.enable = asBool(n["enable"], path + ".enable");
+            if (has(n, "sensor_name")) out.sensor_name = asString(n["sensor_name"], path + ".sensor_name");
+            if (has(n, "sensor_offset_mm")) out.sensor_offset_mm = parseVec3(n["sensor_offset_mm"], path + ".sensor_offset_mm");
+            if (has(n, "axes")) {
+                const YAML::Node ax = n["axes"];
+                validateAllowedKeys(ax, {"fx", "fy", "fz"}, path + ".axes");
+                // ALL THREE OR NONE. A half-declared triad is a different sensor
+                // orientation than the one the operator measured, and the two
+                // missing rows would silently keep the identity default.
+                if (!has(ax, "fx") || !has(ax, "fy") || !has(ax, "fz")) {
+                    throw std::runtime_error(path + ".axes must declare fx, fy AND fz - "
+                                             "a partial triad is a different sensor orientation");
+                }
+                out.axis_fx = parseVec3(ax["fx"], path + ".axes.fx");
+                out.axis_fy = parseVec3(ax["fy"], path + ".axes.fy");
+                out.axis_fz = parseVec3(ax["fz"], path + ".axes.fz");
+            }
+            if (has(n, "sensor_mass_kg")) out.sensor_mass_kg = asDouble(n["sensor_mass_kg"], path + ".sensor_mass_kg");
+            if (has(n, "sensor_com_mm")) out.sensor_com_mm = parseVec3(n["sensor_com_mm"], path + ".sensor_com_mm");
+            if (has(n, "deadzone_force_n")) out.deadzone_force_n = parseVec3(n["deadzone_force_n"], path + ".deadzone_force_n");
+            if (has(n, "deadzone_torque_nm")) out.deadzone_torque_nm = parseVec3(n["deadzone_torque_nm"], path + ".deadzone_torque_nm");
+            if (has(n, "tool_load_tau_s")) out.tool_load_tau_s = asDouble(n["tool_load_tau_s"], path + ".tool_load_tau_s");
+            if (has(n, "tool_name")) out.tool_name = asString(n["tool_name"], path + ".tool_name");
+            if (has(n, "tool_xyz_mm")) out.tool_xyz_mm = parseVec3(n["tool_xyz_mm"], path + ".tool_xyz_mm");
+            if (has(n, "tool_rpy_deg")) out.tool_rpy_deg = parseVec3(n["tool_rpy_deg"], path + ".tool_rpy_deg");
+            if (has(n, "tool_mass_kg")) out.tool_mass_kg = asDouble(n["tool_mass_kg"], path + ".tool_mass_kg");
+            if (has(n, "tool_com_mm")) out.tool_com_mm = parseVec3(n["tool_com_mm"], path + ".tool_com_mm");
+            if (has(n, "applied_force_mm")) out.applied_force_mm = parseVec3(n["applied_force_mm"], path + ".applied_force_mm");
+            if (has(n, "bias_force_n")) { out.bias_force_n = parseVec3(n["bias_force_n"], path + ".bias_force_n"); out.bias_from_config = true; }
+            if (has(n, "bias_torque_nm")) { out.bias_torque_nm = parseVec3(n["bias_torque_nm"], path + ".bias_torque_nm"); out.bias_from_config = true; }
+            if (has(n, "liveness_window_sec")) out.liveness_window_sec = asDouble(n["liveness_window_sec"], path + ".liveness_window_sec");
+            if (has(n, "liveness_min_force_pp_n")) out.liveness_min_force_pp_n = asDouble(n["liveness_min_force_pp_n"], path + ".liveness_min_force_pp_n");
+            if (has(n, "liveness_min_torque_pp_nm")) out.liveness_min_torque_pp_nm = asDouble(n["liveness_min_torque_pp_nm"], path + ".liveness_min_torque_pp_nm");
+        };
+        if (has(sec, "left")) parse_arm(sec["left"], ft.left, "force_torque.left");
+        if (has(sec, "right")) parse_arm(sec["right"], ft.right, "force_torque.right");
+    }
+
+    if (has(root, "force_control")) {
+        const YAML::Node sec = root["force_control"];
+        validateAllowedKeys(sec, {
+            "enable", "translation", "rotation", "force_gate",
+            "max_deviation_m", "max_deviation_rad",
+            "max_velocity_m_s", "max_acceleration_m_s2",
+            "max_velocity_rad_s", "max_acceleration_rad_s2",
+            "hold_compliance", "max_state_age_sec",
+        }, "force_control");
+        ForceControlConfig& fc = cfg.force_control;
+        if (has(sec, "enable")) fc.enable = asBool(sec["enable"], "force_control.enable");
+        const auto parse_axes = [&](const YAML::Node& n, std::array<ForceAxisConfig, 3>& out,
+                                    const std::string& path) {
+            if (!n.IsSequence() || n.size() != 3) {
+                // ALL THREE ROWS OR NONE: a half-declared law is a different law
+                // than the one the author thinks they wrote.
+                fail(path + " must be a sequence of exactly 3 axis rows", n);
+            }
+            for (std::size_t i = 0; i < 3; ++i) {
+                const std::string ap = path + "[" + std::to_string(i) + "]";
+                const YAML::Node row = n[i];
+                validateAllowedKeys(row, {"m", "b", "k", "mode", "ref_force"}, ap);
+                ForceAxisConfig& a = out[i];
+                if (has(row, "m")) a.m = asDouble(row["m"], ap + ".m");
+                if (has(row, "b")) a.b = asDouble(row["b"], ap + ".b");
+                if (has(row, "k")) a.k = asDouble(row["k"], ap + ".k");
+                if (has(row, "ref_force")) a.ref_force = asDouble(row["ref_force"], ap + ".ref_force");
+                if (has(row, "mode")) {
+                    const std::string m = lower(asString(row["mode"], ap + ".mode"));
+                    if (m == "compliance") a.mode = ForceAxisMode::Compliance;
+                    else if (m == "force") a.mode = ForceAxisMode::Force;
+                    else if (m == "rigid") a.mode = ForceAxisMode::Rigid;
+                    else throw std::runtime_error(ap + ".mode must be compliance, force or rigid");
+                }
+            }
+        };
+        if (has(sec, "translation")) parse_axes(sec["translation"], fc.translation, "force_control.translation");
+        if (has(sec, "rotation")) parse_axes(sec["rotation"], fc.rotation, "force_control.rotation");
+        if (has(sec, "force_gate")) {
+            const YAML::Node g = sec["force_gate"];
+            validateAllowedKeys(g, {"enable", "max_force_n", "max_torque_nm", "close_tau_s", "open_tau_s"},
+                                "force_control.force_gate");
+            if (has(g, "enable")) fc.gate_enable = asBool(g["enable"], "force_control.force_gate.enable");
+            if (has(g, "max_force_n")) fc.gate_max_force_n = asDouble(g["max_force_n"], "force_control.force_gate.max_force_n");
+            if (has(g, "max_torque_nm")) fc.gate_max_torque_nm = asDouble(g["max_torque_nm"], "force_control.force_gate.max_torque_nm");
+            if (has(g, "close_tau_s")) fc.gate_close_tau_s = asDouble(g["close_tau_s"], "force_control.force_gate.close_tau_s");
+            if (has(g, "open_tau_s")) fc.gate_open_tau_s = asDouble(g["open_tau_s"], "force_control.force_gate.open_tau_s");
+        }
+        if (has(sec, "max_deviation_m")) fc.max_deviation_m = asDouble(sec["max_deviation_m"], "force_control.max_deviation_m");
+        if (has(sec, "max_deviation_rad")) fc.max_deviation_rad = asDouble(sec["max_deviation_rad"], "force_control.max_deviation_rad");
+        if (has(sec, "max_velocity_m_s")) fc.max_velocity_m_s = asDouble(sec["max_velocity_m_s"], "force_control.max_velocity_m_s");
+        if (has(sec, "max_acceleration_m_s2")) fc.max_acceleration_m_s2 = asDouble(sec["max_acceleration_m_s2"], "force_control.max_acceleration_m_s2");
+        if (has(sec, "max_velocity_rad_s")) fc.max_velocity_rad_s = asDouble(sec["max_velocity_rad_s"], "force_control.max_velocity_rad_s");
+        if (has(sec, "max_acceleration_rad_s2")) fc.max_acceleration_rad_s2 = asDouble(sec["max_acceleration_rad_s2"], "force_control.max_acceleration_rad_s2");
+        if (has(sec, "hold_compliance")) fc.hold_compliance = asBool(sec["hold_compliance"], "force_control.hold_compliance");
+        if (has(sec, "max_state_age_sec")) fc.max_state_age_sec = asDouble(sec["max_state_age_sec"], "force_control.max_state_age_sec");
+    }
+
+    // ONE ANSWER, DECIDED IN ONE PLACE. The zero-payload push is a property of the
+    // F/T setup, not of a backend, but the backend is what talks to the box - so it
+    // is resolved here rather than branched at the use site.
+    cfg.left_robot.push_zero_payload =
+        cfg.force_torque.enable && cfg.force_torque.push_zero_payload_to_box &&
+        cfg.force_torque.left.enable;
+    cfg.right_robot.push_zero_payload =
+        cfg.force_torque.enable && cfg.force_torque.push_zero_payload_to_box &&
+        cfg.force_torque.right.enable;
+
     if (has(root, "cartesian_control")) {
         const YAML::Node sec = root["cartesian_control"];
         validateAllowedKeys(sec, {
@@ -3511,6 +3767,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "urdf",
             "base_link",
             "tip_link",
+            "flange_link",
             "joint_names",
             "q_units",
             "publish_tcp",
@@ -3525,6 +3782,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         }
         if (has(sec, "base_link")) cfg.kinematics.base_link = asString(sec["base_link"], "kinematics.base_link");
         if (has(sec, "tip_link")) cfg.kinematics.tip_link = asString(sec["tip_link"], "kinematics.tip_link");
+        if (has(sec, "flange_link")) cfg.kinematics.flange_link = asString(sec["flange_link"], "kinematics.flange_link");
         if (has(sec, "joint_names")) cfg.kinematics.joint_names = asStringArray(sec["joint_names"], "kinematics.joint_names");
         if (has(sec, "q_units")) cfg.kinematics.q_units = lower(asString(sec["q_units"], "kinematics.q_units"));
         if (has(sec, "publish_tcp")) cfg.kinematics.publish_tcp = asBool(sec["publish_tcp"], "kinematics.publish_tcp");

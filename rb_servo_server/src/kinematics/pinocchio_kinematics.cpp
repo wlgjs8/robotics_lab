@@ -122,6 +122,10 @@ struct PinocchioKinematics::Impl {
     pinocchio::Model model;
     pinocchio::FrameIndex base_frame = 0;
     pinocchio::FrameIndex tip_frame = 0;
+    // Optional: absent when the URDF has no such link. The force path FAILS CLOSED
+    // on that rather than substituting the tip.
+    pinocchio::FrameIndex flange_frame = 0;
+    bool has_flange = false;
     std::array<pinocchio::JointIndex, kDof> joints{};
 };
 
@@ -282,6 +286,10 @@ PinocchioKinematics::PinocchioKinematics(KinematicsConfig config)
     impl_ = std::make_unique<Impl>(std::move(model));
     impl_->base_frame = requireFrame(impl_->model, config_.base_link, "base_link");
     impl_->tip_frame = requireFrame(impl_->model, config_.tip_link, "tip_link");
+    if (!config_.flange_link.empty() && impl_->model.existFrame(config_.flange_link)) {
+        impl_->flange_frame = impl_->model.getFrameId(config_.flange_link);
+        impl_->has_flange = true;
+    }
     if (config_.joint_names.size() != kDof) {
         throw std::runtime_error("kinematics.joint_names must contain exactly 6 names");
     }
@@ -319,6 +327,29 @@ Pose6D PinocchioKinematics::computeTcpStand(
     (void)arm;
     const Pose6D tcp_base = computeTcpBase(q_deg);
     return math::poseFromSe3(math::se3FromPose(mount.base_pose_in_stand) * math::se3FromPose(tcp_base));
+}
+
+std::optional<Pose6D> PinocchioKinematics::computeFlangeStand(
+    ArmId arm,
+    const JointArray& q_deg,
+    const ArmMountConfig& mount
+) const {
+    (void)arm;
+    if (!impl_ || !impl_->has_flange) {
+        // NOT a fallback to the tip: the caller must fail closed. A flange rotation
+        // taken from the TCP is only right for a flange-aligned tool, and a wrong
+        // one produces a plausible wrench pointing somewhere the sensor never looked.
+        return std::nullopt;
+    }
+    Eigen::VectorXd q = toPinocchioQ(q_deg, impl_->model, impl_->joints);
+    pinocchio::forwardKinematics(impl_->model, impl_->threadData(), q);
+    pinocchio::updateFramePlacements(impl_->model, impl_->threadData());
+    const pinocchio::SE3& world_base = impl_->threadData().oMf[impl_->base_frame];
+    const pinocchio::SE3& world_flange = impl_->threadData().oMf[impl_->flange_frame];
+    const Pose6D flange_base = math::poseFromSe3(world_base.inverse() * world_flange);
+    if (!finitePose(flange_base)) return std::nullopt;
+    return math::poseFromSe3(math::se3FromPose(mount.base_pose_in_stand) *
+                             math::se3FromPose(flange_base));
 }
 
 std::vector<std::array<double, 3>> PinocchioKinematics::linkCollisionPointsInStand(

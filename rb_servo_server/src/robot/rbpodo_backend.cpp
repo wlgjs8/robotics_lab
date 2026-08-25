@@ -449,6 +449,19 @@ RobotState mapRbpodoSystemStateSnapshot(
     out_state.q_ref_valid = finiteJointArray(out_state.q_target_deg);
     out_state.q_ref_source = "rbpodo.sdata.jnt_ref";
     out_state.rbpodo_sdk_state_source = "CobotData.request_data";
+    // The external F/T reading, carried through UNINTERPRETED. These are the sensor's
+    // own axes (see RbpodoSystemStateSnapshot::eft) - the axis basis that turns them
+    // into a flange-aligned wrench lives in config and is applied by FtPipeline, not
+    // here, because it is a per-machine MEASUREMENT and this decode is wire format.
+    out_state.eft_wrench.fx = snapshot.eft[0];
+    out_state.eft_wrench.fy = snapshot.eft[1];
+    out_state.eft_wrench.fz = snapshot.eft[2];
+    out_state.eft_wrench.tx = snapshot.eft[3];
+    out_state.eft_wrench.ty = snapshot.eft[4];
+    out_state.eft_wrench.tz = snapshot.eft[5];
+    out_state.eft_valid = snapshot.eft_in_frame &&
+        std::all_of(snapshot.eft.begin(), snapshot.eft.end(),
+                    [](double v) { return std::isfinite(v); });
     out_state.rbpodo_state_decode_policy =
         decode_options.real_motion_suspect_diagnostics_accepted
             ? "real_motion_suspect_diagnostics_accepted"
@@ -609,8 +622,23 @@ RbpodoSystemStateSnapshot snapshotFromSystemState(const rb::podo::SystemState& r
         snapshot.q_actual_deg[static_cast<std::size_t>(i)] = rb_state.sdata.jnt_ang[i];
         snapshot.q_target_deg[static_cast<std::size_t>(i)] = rb_state.sdata.jnt_ref[i];
     }
+    snapshot.eft[0] = static_cast<double>(rb_state.sdata.eft_fx);
+    snapshot.eft[1] = static_cast<double>(rb_state.sdata.eft_fy);
+    snapshot.eft[2] = static_cast<double>(rb_state.sdata.eft_fz);
+    snapshot.eft[3] = static_cast<double>(rb_state.sdata.eft_mx);
+    snapshot.eft[4] = static_cast<double>(rb_state.sdata.eft_my);
+    snapshot.eft[5] = static_cast<double>(rb_state.sdata.eft_mz);
     return snapshot;
 }
+
+// Pin the exported wire-format constant to the SDK struct layout: the type-0x03
+// frame IS the SystemState.sdata image (header included), so the eft fields are
+// present iff the frame covers the last one (eft_mz). If the SDK layout ever moves,
+// this fails at COMPILE time rather than silently publishing padding as a reading.
+static_assert(
+    kRbpodoStateFrameEftEndOffsetBytes ==
+        offsetof(rb::podo::SystemState, sdata.eft_mz) + sizeof(rb::podo::SystemState{}.sdata.eft_mz),
+    "kRbpodoStateFrameEftEndOffsetBytes is out of sync with the rbpodo SystemState layout");
 
 std::optional<RobotState> recentStateCache(
     const std::optional<RobotState>& cached_state,
@@ -1249,6 +1277,44 @@ BackendResult<RobotState> RbpodoBackend::initialize() {
             std::cerr << "[INFO] RbpodoBackend applied speed_bar=" << impl_->config.speed_bar
                       << " for " << impl_->config.name << "\n";
         }
+        // TELL THE BOX THE PAYLOAD IS ZERO, so it subtracts NOTHING from the F/T
+        // output and this controller owns the tool's gravity compensation outright.
+        //
+        // ZERO IS PUSHED RATHER THAN THE PUSH BEING OMITTED: not sending leaves the
+        // box holding whatever the pendant or another controller last set, which is a
+        // box whose compensation nobody knows - and our own compensation would then
+        // run on top of an unknown one. Sending zero is a FACT. (Ported from
+        // controller-manager's Arm::sync_tool_info, owner decision 2026-08-04, taken
+        // from hardware after a config payload double-compensated by ~20 N.)
+        //
+        // THE COST, ACCEPTED: the box's own COLLISION DETECTION runs on this payload,
+        // so with zero it sees the tool's weight as an external force.
+        //
+        // COLD INIT ONLY. This is a request/response on the COMMAND channel, which is
+        // the same channel that carries the 2 ms move_servo_j stream once running.
+        if (impl_->config.push_zero_payload) {
+            rb::podo::ResponseCollector responses;
+            const auto ret = impl_->robot->set_payload_info(
+                responses, 0.0, 0.0, 0.0, 0.0, kInitializeCommandAckTimeoutSec);
+            if (impl_->config.disable_waiting_ack) {
+                rb::podo::ResponseCollector drained;
+                impl_->robot->flush(drained);
+            }
+            if (!ret.is_success()) {
+                // FAIL CLOSED. Continuing would run our gravity compensation on top of
+                // a box compensation of unknown size, which shows up as a plausible
+                // wrench that is wrong by the tool's weight.
+                return failedResult<RobotState>(
+                    BackendOp::Initialize,
+                    commandReturnError("set_payload_info", ret, responses),
+                    makeBackendTiming(start, nowSteadyNs())
+                );
+            }
+            std::cerr << "[INFO] RbpodoBackend pushed box payload = ZERO for "
+                      << impl_->config.name
+                      << " (this controller compensates the tool itself; the box's own "
+                         "collision detection now sees the tool weight as external force)\n";
+        }
         auto state = impl_->data_channel->request_data(kDefaultStateTimeoutSec);
         if (!state) {
             std::cerr << "[ERROR] RbpodoBackend initialize failed: no state from "
@@ -1401,6 +1467,13 @@ std::optional<std::string> extractNewestRbpodoStateFrame(std::string& buf) {
     }
     buf.erase(0, pos);
     return newest;
+}
+
+bool rbpodoStateFrameIncludesEft(std::size_t frame_bytes) {
+    // kRbpodoStateFrameEftEndOffsetBytes is a wire-format constant (frame ==
+    // SystemState.sdata image, header included) pinned to the SDK struct by the
+    // static_assert beside snapshotFromSystemState() in the rbpodo-enabled build.
+    return frame_bytes >= kRbpodoStateFrameEftEndOffsetBytes;
 }
 
 bool rbpodoPipelinedChannelNeedsReprime(
@@ -1612,6 +1685,9 @@ BackendResult<RobotState> RbpodoBackend::readStatePipelined(uint64_t start_ns) {
         );
         impl_->consecutive_read_misses = 0;
         RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(state);
+        // The zero-initialized decode pads short (old-firmware) frames, so only
+        // publish eft as a reading when the frame actually covered those fields.
+        snapshot.eft_in_frame = rbpodoStateFrameIncludesEft(frame->size());
         RobotState out_state = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
         out_state.acquisition_sequence = ++impl_->state_acquisition_sequence;
         out_state.rbpodo_sdk_state_source = "CobotData.pipelined";

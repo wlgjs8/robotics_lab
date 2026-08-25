@@ -94,6 +94,11 @@ HoldResumeResult CartesianChunkFollower::resumeFromHold(
   return HoldResumeResult::WarmResumed;
 }
 
+void CartesianChunkFollower::setAdvanceGate(double gate, const Eigen::Vector3d& dir) {
+  advance_gate_ = gate < 0.0 ? 0.0 : (gate > 1.0 ? 1.0 : gate);
+  into_contact_dir_ = dir;
+}
+
 void CartesianChunkFollower::reanchor(const Pose6D& reference) {
   hold_paused_ = false;
   hold_pause_start_sec_ = 0.0;
@@ -119,6 +124,7 @@ void CartesianChunkFollower::submitFrame(const ChunkFrame& frame,
     R0_ref_ = Eigen::Quaterniond(math::rotationFromPose(current_pose)).normalized();
     std::array<double, 6> p0{current_pose.x, current_pose.y, current_pose.z, 0, 0, 0};
     core_.seed(p0);            // v0 = a0 = 0
+    plan_shift_.setZero();     // fresh anchor: no accumulated hold-back
     have_segment_ = false;     // force a solve on the next tick
     t_in_seg_ = 0.0;
     last_pose_ = current_pose;
@@ -161,6 +167,9 @@ void CartesianChunkFollower::submitDeltaFrame(const ChunkFrame& frame,
     cursor = math::composeDeltaLocal(cursor, delta);
     integrated.pose.push_back(cursor);
   }
+  // The new knots were integrated from the EMITTED pose, which already sits where
+  // the gate left it, so the hold-back is baked into the fresh plan: clear the debt.
+  plan_shift_.setZero();
   submitFrame(integrated, current_pose);
 }
 
@@ -214,6 +223,29 @@ void CartesianChunkFollower::stepToNextSegment() {
   if (window_.active() && window_.hasTailStep()) {
     const std::size_t k = window_.index();
     current_grip_ = window_.gripAt(k);       // gripper phase-locked to consumed step
+    // THE GATE, AT THE SEGMENT BOUNDARY. This is our input-period equivalent of the
+    // controller-manager follow path's per-delta gate: one knot is consumed per
+    // segment, so this is where an advance exists to attenuate.
+    if (advance_gate_ < 1.0 && into_contact_dir_.squaredNorm() > 1e-18) {
+      const auto& p0 = core_.p0();
+      const Eigen::Vector3d advance = positionOf(window_.poseAt(k)) + plan_shift_ -
+                                      Eigen::Vector3d(p0[0], p0[1], p0[2]);
+      const double proj = advance.dot(into_contact_dir_);
+      // proj < 0 means the advance drives AGAINST the reported force, i.e. deeper
+      // into the contact. Tangential and retreating advances are left alone.
+      if (proj < 0.0) {
+        Eigen::Vector3d removal = (1.0 - advance_gate_) * proj * into_contact_dir_;
+        // Bound the per-segment hold-back to one segment of travel at the linear
+        // velocity limit: the plan cannot have been advancing faster than that, so a
+        // larger removal encodes stale lag rather than fresh contact.
+        const double max_step = cfg_.lin.v_max * seg_dt_;
+        const double removal_norm = removal.norm();
+        if (removal_norm > max_step && removal_norm > 1e-12) {
+          removal *= max_step / removal_norm;
+        }
+        plan_shift_ -= removal;
+      }
+    }
     const BoundarySample<6> sample = buildSample(k);
     diag_.last_solve = core_.solve(sample);
     const auto& realized = core_.p0();
@@ -274,9 +306,12 @@ BoundarySample<6> CartesianChunkFollower::buildSample(std::size_t k) const {
   const Eigen::Vector3d posm1 = positionOf(pm1), posk = positionOf(pk), posp1 = positionOf(pp1);
   const Eigen::Vector3d rm1 = rotvec(pm1), rk = rotvec(pk), rp1 = rotvec(pp1);
   for (int d = 0; d < 3; ++d) {
-    vm1[d] = posm1[d];
-    vk[d] = posk[d];
-    vp1[d] = posp1[d];
+    // Positions carry the accumulated gate hold-back. A CONSTANT shift leaves the
+    // finite-difference velocity/accel targets unchanged, so holding the plan back
+    // does not also distort the dynamics it is solved against.
+    vm1[d] = posm1[d] + plan_shift_[d];
+    vk[d] = posk[d] + plan_shift_[d];
+    vp1[d] = posp1[d] + plan_shift_[d];
     vm1[d + 3] = rm1[d]; vk[d + 3] = rk[d]; vp1[d + 3] = rp1[d];
   }
 

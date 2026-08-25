@@ -84,7 +84,28 @@ class CartesianChunkFollower {
   void submitDeltaFrame(const ChunkFrame& frame, const Pose6D& current_pose);
   void updateActualLead(const Pose6D& actual_pose);
 
-  bool active() const { return active_; }
+  // THE FORCE GATE ON THE PLAN ADVANCE (ported from controller-manager's follow
+  // path). As the contact force rises, the fraction of each segment's advance that
+  // survives ALONG THE DIRECTION PUSHING INTO THE WRENCH falls toward zero; the
+  // tangential and retreating components pass at FULL authority, so sliding along a
+  // contact and backing out of it are never throttled.
+  //
+  // *** THIS IS WHAT BOUNDS THE CONTACT FORCE UNDER A STREAMING PLAN. *** A spring
+  // (k > 0) alone does not: |d| <= F/k holds only at a true static equilibrium, and
+  // while the plan keeps advancing into a surface there is no equilibrium at all —
+  // the nominal walks into the workpiece and the deviation, and the force, grow
+  // without bound. controller-manager measured that as 961 N in 40 s.
+  //
+  // The removal accumulates as a PLAN SHIFT applied to every knot in the window, so
+  // the chained core state stays continuous, the plan is not rewritten, and contact
+  // release causes no snap-back. `gate` outside [0,1] is clamped; gate >= 1 with any
+  // direction is a strict no-op.
+  void setAdvanceGate(double gate, const Eigen::Vector3d& into_contact_dir_stand);
+
+  // The accumulated plan shift [m] — how far the gate has held this plan back.
+  double planShift() const { return plan_shift_.norm(); }
+
+    bool active() const { return active_; }
   bool holdPaused() const { return hold_paused_; }
   void deactivate();
 
@@ -151,6 +172,11 @@ class CartesianChunkFollower {
   Pose6D last_pose_{};
   FollowerDiag diag_{};
   int actual_lead_checked_segment_{-1};
+
+  // The force gate on the plan advance (see setAdvanceGate).
+  double advance_gate_{1.0};
+  Eigen::Vector3d into_contact_dir_{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d plan_shift_{Eigen::Vector3d::Zero()};
 };
 
 }  // namespace rb_servo::control

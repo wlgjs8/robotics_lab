@@ -331,7 +331,11 @@ bool isReleaseLeaseModeString(const std::string& mode) {
 }
 
 // EmergencyStop, SetSafetyFloorZ, SetSafetyFloorEnabled, SetSafetyRoiBounds,
-// SetExternalBoxes and SetUserSafetyFloorPlane are intentionally leaseless: an
+// SetExternalBoxes, SetUserSafetyFloorPlane and TareForceSensor are intentionally
+// leaseless: a tare is a non-motion sensor operation an operator must be able to run
+// while a policy holds the lease — and force control refuses to cover an untared arm,
+// so requiring the lease would make the safety precondition harder to satisfy than
+// the thing it guards. Otherwise: an
 // operator/perception worker must be able to stop motion or adjust the safety
 // floor / ROI box / external boxes / user floor plane while another client (e.g.
 // policy_runner) holds the command lease. SetSafetyFloorZ is bounded server-side
@@ -680,6 +684,14 @@ bool CommandServer::parseMessage(
     if (timeout_sec <= 0.0 || !std::isfinite(timeout_sec)) return false;
 
     // SetSafetyFloorZ payload (top-level: the floor plane is global, not per-arm).
+    // TareForceSensor payload (top-level, per-arm selector). Absent = both arms,
+    // which is what an operator pressing one button means.
+    if (root.contains("tare_left")) {
+        if (!readOptionalBool(root, "tare_left", &cmd.tare_left)) return false;
+    }
+    if (root.contains("tare_right")) {
+        if (!readOptionalBool(root, "tare_right", &cmd.tare_right)) return false;
+    }
     if (root.contains("floor_z_m")) {
         if (!readOptionalNumber(root, "floor_z_m", &cmd.floor_z_m)) return false;
         cmd.has_floor_z = true;
