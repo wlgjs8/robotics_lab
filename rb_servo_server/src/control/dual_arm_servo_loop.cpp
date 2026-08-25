@@ -7442,23 +7442,25 @@ ServoTarget DualArmServoLoop::computeServoTarget(
 ) {
     if (command_verdict) *command_verdict = SafetyVerdict::Ok;
     clearChunkFollowerFaultRequests();
+    // Per-arm state reached through ArmControlContext for the whole function, so
+    // the body no longer names an arm: it is already in the shape a per-arm
+    // control thread needs (one context instead of an array of two).
+    ArmControlContext arm_ctx[2] = {armContext(ArmId::Left), armContext(ArmId::Right)};
+    const RobotState* arm_state[2] = {&left_state, &right_state};
+    ++cross_arm_tick_;
     // Per-tick provenance: applyChunkFollowerStage sets these when the chunk
     // follower produces the Cartesian target this tick; every other dispatch
     // shape leaves them false so the equilibrium keeps its own projection.
-    left_force_runtime_.chunk_follower_drove_this_tick = false;
-    right_force_runtime_.chunk_follower_drove_this_tick = false;
-    for (AbcTelemetry* abc : {&left_abc_telemetry_, &right_abc_telemetry_}) {
-        abc->follower_output_smd_active = false;
-        abc->follower_output_smd_lag_m = 0.0;
-        abc->follower_output_smd_lag_rad = 0.0;
-        abc->follower_prefilter_stand.reset();
+    for (ArmControlContext& ctx : arm_ctx) {
+        ctx.force_runtime.chunk_follower_drove_this_tick = false;
+        AbcTelemetry& abc = ctx.abc_telemetry;
+        abc.follower_output_smd_active = false;
+        abc.follower_output_smd_lag_m = 0.0;
+        abc.follower_output_smd_lag_rad = 0.0;
+        abc.follower_prefilter_stand.reset();
     }
     ServoTarget target;
     const bool synthetic_hold = isSyntheticHoldCommand(command);
-    // Per-arm state reached through ArmControlContext, so this block no longer
-    // names an arm: it is already in the shape a per-arm control thread needs.
-    ArmControlContext arm_ctx[2] = {armContext(ArmId::Left), armContext(ArmId::Right)};
-    const RobotState* arm_state[2] = {&left_state, &right_state};
     const auto clear_linear_path = [](ArmControlContext& ctx) {
         ctx.cartesian_servo_path = CartesianServoPathState{};
         ctx.last_cartesian_solve = CartesianSolveTelemetry{};
@@ -7756,11 +7758,17 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             selectCartesianServoStateForArm(config_, effective_command.left, left_state);
         const CartesianServoStateSelection right_servo_state =
             selectCartesianServoStateForArm(config_, effective_command.right, right_state);
-        if (!left_servo_state.ok || !right_servo_state.ok) {
-            // CROSS-ARM: either arm losing its Cartesian servo state holds BOTH.
-            // Kept as-is deliberately -- with per-arm threads this becomes shared
-            // state each arm publishes and reads, not a local decision. Only the
-            // per-arm telemetry below is context-driven.
+        // CROSS-ARM: either arm losing its Cartesian servo state holds BOTH.
+        // Routed through the published cross-arm status rather than the two local
+        // values, so the decision keeps its meaning once each arm runs on its own
+        // thread and can only see its own selection directly.
+        publishCrossArmStatus(ArmId::Left, left_servo_state.ok);
+        publishCrossArmStatus(ArmId::Right, right_servo_state.ok);
+        const bool cartesian_state_ok[2] = {
+            left_servo_state.ok && peerCartesianServoOk(ArmId::Left),
+            right_servo_state.ok && peerCartesianServoOk(ArmId::Right),
+        };
+        if (!cartesian_state_ok[0] || !cartesian_state_ok[1]) {
             if (command_verdict) *command_verdict = SafetyVerdict::CartesianUnavailable;
             const CartesianServoStateSelection* selection[2] =
                 {&left_servo_state, &right_servo_state};
@@ -7795,8 +7803,9 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         // Manipulability guard: feed the previous tick's IK min singular value into each
         // SMD so step() scales tracking velocity down near a singularity (config
         // singularity_scale_*). Velocity-only — cannot stall the IK.
-        left_pose_track_smd_.setMinSingular(left_last_cartesian_solve_.ik_min_singular_value);
-        right_pose_track_smd_.setMinSingular(right_last_cartesian_solve_.ik_min_singular_value);
+        for (ArmControlContext& ctx : arm_ctx) {
+            ctx.pose_track_smd.setMinSingular(ctx.last_cartesian_solve.ik_min_singular_value);
+        }
         // Chunk-follower stage: pull the newest chunk frame once per tick, then
         // run the selected follower (absolute-waypoint Ruckig or local-delta
         // delta_twist) or the legacy SMD path.
@@ -7897,8 +7906,11 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 abc.smd_step_info = SmdStepInfo{};
             }
         };
-        capture_smd_abc(left_pose_track_smd_, left_tcp_profile, left_profile_found, left_abc_telemetry_);
-        capture_smd_abc(right_pose_track_smd_, right_tcp_profile, right_profile_found, right_abc_telemetry_);
+        const bool arm_profile_found[2] = {left_profile_found, right_profile_found};
+        for (int i = 0; i < 2; ++i) {
+            capture_smd_abc(arm_ctx[i].pose_track_smd, *arm_tcp_profile[i],
+                            arm_profile_found[i], arm_ctx[i].abc_telemetry);
+        }
 
         const RunMode left_cartesian_compute_run_mode =
             cartesianComputationRunModeForArm(config_, effective_command.left);
@@ -8041,6 +8053,9 @@ ServoTarget DualArmServoLoop::applySafety(
     SafetyVerdict* verdict
 ) {
     ServoTarget out;
+    // Same per-arm seam as computeServoTarget: the safety stage reads and writes
+    // only these five per-arm members, all of which the context already carries.
+    ArmControlContext safety_ctx[2] = {armContext(ArmId::Left), armContext(ArmId::Right)};
     RobotState left_filter_state = left_state;
     RobotState right_filter_state = right_state;
     if (controllerSimulationDiagnosticStateAllowed(config_, left_filter_state)) {
@@ -8055,13 +8070,13 @@ ServoTarget DualArmServoLoop::applySafety(
         config_,
         ArmId::Left,
         left_filter_state,
-        left_controller_sim_physical_baseline_q_deg_
+        safety_ctx[0].controller_sim_physical_baseline_q_deg
     );
     const SafetyTrackingState right_tracking_state = trackingStateForArm(
         config_,
         ArmId::Right,
         right_filter_state,
-        right_controller_sim_physical_baseline_q_deg_
+        safety_ctx[1].controller_sim_physical_baseline_q_deg
     );
     // pgmode controller-sim tracking-error advisory gate. Fail-closed in real mode
     // (controllerSimulationMotionGateOpen is false there). The physical-motion guard
@@ -8076,26 +8091,26 @@ ServoTarget DualArmServoLoop::applySafety(
         right_tracking_state.controller_simulation_physical_motion_fault;
     const SafetyCheckResult left_result = safety_filter_.filterJointTarget(
         desired.left_q_target_deg,
-        left_prev_sent_q_deg_,
-        left_prevprev_sent_q_deg_,
+        safety_ctx[0].prev_sent_q_deg,
+        safety_ctx[0].prevprev_sent_q_deg,
         left_filter_state,
         dt_sec,
         left_tracking_state
     );
     const SafetyCheckResult right_result = safety_filter_.filterJointTarget(
         desired.right_q_target_deg,
-        right_prev_sent_q_deg_,
-        right_prevprev_sent_q_deg_,
+        safety_ctx[1].prev_sent_q_deg,
+        safety_ctx[1].prevprev_sent_q_deg,
         right_filter_state,
         dt_sec,
         right_tracking_state
     );
-    left_safety_tracking_ = left_result.tracking;
-    right_safety_tracking_ = right_result.tracking;
-    left_abc_telemetry_.safety_clamp_present = left_result.clamp.present;
-    left_abc_telemetry_.safety_clamp = left_result.clamp;
-    right_abc_telemetry_.safety_clamp_present = right_result.clamp.present;
-    right_abc_telemetry_.safety_clamp = right_result.clamp;
+    safety_ctx[0].safety_tracking = left_result.tracking;
+    safety_ctx[1].safety_tracking = right_result.tracking;
+    safety_ctx[0].abc_telemetry.safety_clamp_present = left_result.clamp.present;
+    safety_ctx[0].abc_telemetry.safety_clamp = left_result.clamp;
+    safety_ctx[1].abc_telemetry.safety_clamp_present = right_result.clamp.present;
+    safety_ctx[1].abc_telemetry.safety_clamp = right_result.clamp;
 
     out.left_q_target_deg = left_result.filtered_q_deg;
     out.right_q_target_deg = right_result.filtered_q_deg;
@@ -8123,22 +8138,22 @@ ServoTarget DualArmServoLoop::applySafety(
             // the latch (gate closed above).
             const SafetyClampTelemetry left_clamp = safety_filter_.clampMotionDetailed(
                 desired.left_q_target_deg,
-                left_prev_sent_q_deg_,
-                left_prevprev_sent_q_deg_,
+                safety_ctx[0].prev_sent_q_deg,
+                safety_ctx[0].prevprev_sent_q_deg,
                 dt_sec
             );
             const SafetyClampTelemetry right_clamp = safety_filter_.clampMotionDetailed(
                 desired.right_q_target_deg,
-                right_prev_sent_q_deg_,
-                right_prevprev_sent_q_deg_,
+                safety_ctx[1].prev_sent_q_deg,
+                safety_ctx[1].prevprev_sent_q_deg,
                 dt_sec
             );
             out.left_q_target_deg = left_clamp.q_after_accel_limit_deg;
             out.right_q_target_deg = right_clamp.q_after_accel_limit_deg;
-            left_abc_telemetry_.safety_clamp_present = left_clamp.present;
-            left_abc_telemetry_.safety_clamp = left_clamp;
-            right_abc_telemetry_.safety_clamp_present = right_clamp.present;
-            right_abc_telemetry_.safety_clamp = right_clamp;
+            safety_ctx[0].abc_telemetry.safety_clamp_present = left_clamp.present;
+            safety_ctx[0].abc_telemetry.safety_clamp = left_clamp;
+            safety_ctx[1].abc_telemetry.safety_clamp_present = right_clamp.present;
+            safety_ctx[1].abc_telemetry.safety_clamp = right_clamp;
             tracking_error_degraded_this_tick_ = true;
             const std::string reason = combined_reason.empty()
                 ? "tracking error exceeded threshold"
@@ -8181,8 +8196,8 @@ ServoTarget DualArmServoLoop::applySafety(
             out = currentFaultHoldTarget();
             combined = SafetyVerdict::FaultLatched;
         } else {
-            out.left_q_target_deg = left_prev_sent_q_deg_;
-            out.right_q_target_deg = right_prev_sent_q_deg_;
+            out.left_q_target_deg = safety_ctx[0].prev_sent_q_deg;
+            out.right_q_target_deg = safety_ctx[1].prev_sent_q_deg;
         }
     }
 
@@ -8306,9 +8321,9 @@ ServoTarget DualArmServoLoop::applySafety(
                 return false;
             };
             if (!build_floor_arm(ArmId::Left, left_mode, left_state, left_eval,
-                                 out.left_q_target_deg, left_prev_sent_q_deg_)) {
+                                 out.left_q_target_deg, safety_ctx[0].prev_sent_q_deg)) {
                 build_floor_arm(ArmId::Right, right_mode, right_state, right_eval,
-                                out.right_q_target_deg, right_prev_sent_q_deg_);
+                                out.right_q_target_deg, safety_ctx[1].prev_sent_q_deg);
             }
         }
     }
@@ -8419,9 +8434,9 @@ ServoTarget DualArmServoLoop::applySafety(
                 return false;
             };
             if (!build_roi_arm(ArmId::Left, left_mode, left_state, left_eval,
-                               out.left_q_target_deg, left_prev_sent_q_deg_)) {
+                               out.left_q_target_deg, safety_ctx[0].prev_sent_q_deg)) {
                 build_roi_arm(ArmId::Right, right_mode, right_state, right_eval,
-                              out.right_q_target_deg, right_prev_sent_q_deg_);
+                              out.right_q_target_deg, safety_ctx[1].prev_sent_q_deg);
             }
         }
     }
@@ -8532,9 +8547,9 @@ ServoTarget DualArmServoLoop::applySafety(
                 return false;
             };
             if (!build_reach_arm(ArmId::Left, left_mode, left_state, left_eval,
-                                 out.left_q_target_deg, left_prev_sent_q_deg_)) {
+                                 out.left_q_target_deg, safety_ctx[0].prev_sent_q_deg)) {
                 build_reach_arm(ArmId::Right, right_mode, right_state, right_eval,
-                                out.right_q_target_deg, right_prev_sent_q_deg_);
+                                out.right_q_target_deg, safety_ctx[1].prev_sent_q_deg);
             }
         }
     }
@@ -8637,9 +8652,9 @@ ServoTarget DualArmServoLoop::applySafety(
                 return false;
             };
             if (!build_user_floor_arm(ArmId::Left, left_mode, left_state, left_eval,
-                                      out.left_q_target_deg, left_prev_sent_q_deg_)) {
+                                      out.left_q_target_deg, safety_ctx[0].prev_sent_q_deg)) {
                 build_user_floor_arm(ArmId::Right, right_mode, right_state, right_eval,
-                                     out.right_q_target_deg, right_prev_sent_q_deg_);
+                                     out.right_q_target_deg, safety_ctx[1].prev_sent_q_deg);
             }
         }
     }
@@ -8768,8 +8783,8 @@ ServoTarget DualArmServoLoop::applySafety(
                     // Fail-closed: no fresh verdict -> hold at the previous sent pose
                     // (qdot = 0) and reanchor so nothing winds up while we wait. Auto-
                     // recovers once fresh verdicts resume (never latches on staleness).
-                    out.left_q_target_deg = left_prev_sent_q_deg_;
-                    out.right_q_target_deg = right_prev_sent_q_deg_;
+                    out.left_q_target_deg = safety_ctx[0].prev_sent_q_deg;
+                    out.right_q_target_deg = safety_ctx[1].prev_sent_q_deg;
                     // Staleness is a dual-arm aggregate verdict with no reliable
                     // per-arm attribution; stamp both arms as conservatively intervened.
                     mark_intervention(ArmId::Left);
@@ -8802,7 +8817,7 @@ ServoTarget DualArmServoLoop::applySafety(
             iters = std::max(iters, collision_monitor_cfg_.projection_iterations);
         }
         const CollisionProjectionResult proj = solveVelocityProjection(
-            safety_cons, left_prev_sent_q_deg_, right_prev_sent_q_deg_,
+            safety_cons, safety_ctx[0].prev_sent_q_deg, safety_ctx[1].prev_sent_q_deg,
             out.left_q_target_deg, out.right_q_target_deg, dt_sec, iters,
             config_.safety.joint_target_smd.max_velocity_deg_s);
         // "Meaningfully blocked" (vs merely slowed while sliding) gates the windup
@@ -10941,6 +10956,31 @@ DualArmServoLoop::ArmControlContext DualArmServoLoop::armContext(ArmId arm) {
             right_traj_filter_,
             right_worker_
     };
+}
+
+bool crossArmPeerUsable(std::uint64_t published_tick, std::uint64_t now_tick,
+                        std::uint64_t max_age_ticks) {
+    if (published_tick == 0) return true;
+    if (now_tick <= published_tick) return true;
+    return now_tick - published_tick <= max_age_ticks;
+}
+
+void DualArmServoLoop::publishCrossArmStatus(ArmId arm, bool cartesian_servo_ok) {
+    CrossArmStatus& slot = cross_arm_status_[arm == ArmId::Left ? 0 : 1];
+    slot.cartesian_servo_ok.store(cartesian_servo_ok, std::memory_order_relaxed);
+    // Store the tick LAST so a reader that sees a fresh tick is guaranteed to see
+    // the value that went with it.
+    slot.published_tick.store(cross_arm_tick_, std::memory_order_release);
+}
+
+bool DualArmServoLoop::peerCartesianServoOk(ArmId arm) const {
+    const CrossArmStatus& peer = cross_arm_status_[arm == ArmId::Left ? 1 : 0];
+    const std::uint64_t published = peer.published_tick.load(std::memory_order_acquire);
+    if (!crossArmPeerUsable(published, cross_arm_tick_, cross_arm_max_age_ticks_)) {
+        return false;  // fail-closed: a stale peer is not evidence of health
+    }
+    if (published == 0) return true;  // nothing published yet (startup)
+    return peer.cartesian_servo_ok.load(std::memory_order_relaxed);
 }
 
 bool DualArmServoLoop::workerOwnsSendCadence() const {

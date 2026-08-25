@@ -61,6 +61,16 @@ enum class FreedriveStage {
 
 const char* toString(FreedriveStage stage);
 
+// Is a peer's cross-arm entry usable, given when it was published and the tick
+// asking? Pure so the fail-closed boundary is testable on its own.
+//
+// published_tick == 0 means "never published" (startup): usable, because the peer
+// has not claimed a failure and holding both arms before either reports would
+// block bring-up. Anything older than max_age is NOT usable -- a stale entry is
+// not evidence of health.
+bool crossArmPeerUsable(std::uint64_t published_tick, std::uint64_t now_tick,
+                        std::uint64_t max_age_ticks);
+
 class DualArmServoLoop {
 public:
     DualArmServoLoop(
@@ -525,6 +535,33 @@ private:
     // by state_mutex_ on publish.
     std::string freedrive_note_;
     mutable std::mutex state_mutex_;
+    // Cross-arm status: the small set of per-arm facts the OTHER arm's decision
+    // depends on. computeServoTarget contains exactly one such decision -- either
+    // arm losing its Cartesian servo state holds BOTH -- and that decision cannot
+    // survive a per-arm thread split as a local `left.ok || right.ok`, because
+    // neither thread would see the peer's value.
+    //
+    // Publishing it makes the dependency explicit and bounded. Today one thread
+    // fills both entries in the same tick, so this is behaviour-identical; with
+    // per-arm threads each arm publishes its own and reads the peer's, which may
+    // then be up to one tick old.
+    //
+    // FAIL-CLOSED on staleness: a peer entry older than cross_arm_max_age_ticks_
+    // reads as NOT ok. A silent stale "ok" would let one arm keep streaming
+    // Cartesian motion while the other has already lost its servo state.
+    struct CrossArmStatus {
+        std::atomic<bool> cartesian_servo_ok{true};
+        std::atomic<std::uint64_t> published_tick{0};
+    };
+    CrossArmStatus cross_arm_status_[2];
+    std::uint64_t cross_arm_tick_ = 0;
+    static constexpr std::uint64_t cross_arm_max_age_ticks_ = 2;
+
+    // Publish this arm's cross-arm facts for the current tick.
+    void publishCrossArmStatus(ArmId arm, bool cartesian_servo_ok);
+    // Read the peer's, fail-closed if it is stale.
+    bool peerCartesianServoOk(ArmId arm) const;
+
     std::atomic<bool> fault_latched_{false};
     std::atomic<SafetyVerdict> fault_verdict_{SafetyVerdict::Ok};
     std::atomic<SafetyVerdict> latched_fault_reason_{SafetyVerdict::Ok};

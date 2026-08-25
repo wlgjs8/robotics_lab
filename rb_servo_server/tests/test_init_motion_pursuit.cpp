@@ -252,6 +252,29 @@ static bool test_carrot_distance_is_smooth_while_streaming() {
     return true;
 }
 
+// Cross-arm status staleness must FAIL CLOSED. The decision it guards is "either
+// arm losing its Cartesian servo state holds BOTH"; once each arm runs on its own
+// thread neither can read the peer's value directly, so it is published. Reading a
+// stale entry as "ok" would let one arm keep streaming Cartesian motion after the
+// other has already lost its servo state.
+static bool test_cross_arm_peer_staleness_fails_closed() {
+    const std::uint64_t max_age = 2;
+    // Never published (startup): usable, or bring-up would deadlock before either
+    // arm has reported anything.
+    RB_CHECK(crossArmPeerUsable(0, 0, max_age));
+    RB_CHECK(crossArmPeerUsable(0, 12345, max_age));
+    // Same tick and within the budget: usable.
+    RB_CHECK(crossArmPeerUsable(100, 100, max_age));
+    RB_CHECK(crossArmPeerUsable(100, 101, max_age));
+    RB_CHECK(crossArmPeerUsable(100, 102, max_age));
+    // Past the budget: NOT usable.
+    RB_CHECK(!crossArmPeerUsable(100, 103, max_age));
+    RB_CHECK(!crossArmPeerUsable(100, 500, max_age));
+    // A peer that somehow published ahead of us is not stale.
+    RB_CHECK(crossArmPeerUsable(105, 100, max_age));
+    return true;
+}
+
 static bool test_degenerate_segment_is_passed() {
     const std::vector<WP> w = {lwp(0.0, 0.0), lwp(0.0, 0.0), lwp(10.0, 0.0)};
     JointArray cur_l = w.front().first;
@@ -469,6 +492,7 @@ int main() {
     ok = test_corner_path_reaches_goal_without_stall() && ok;
     ok = test_escape_head_asymptotic_tracker_does_not_deadlock() && ok;
     ok = test_carrot_distance_is_smooth_while_streaming() && ok;
+    ok = test_cross_arm_peer_staleness_fails_closed() && ok;
     ok = test_degenerate_segment_is_passed() && ok;
     ok = test_escape_head_followed_precisely() && ok;
     ok = test_request_freshness() && ok;
