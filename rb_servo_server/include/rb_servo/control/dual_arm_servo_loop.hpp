@@ -35,7 +35,6 @@
 #include "rb_servo/kinematics/i_kinematics.hpp"
 #include "rb_servo/logging/servo_logger.hpp"
 #include "rb_servo/robot/i_robot_backend.hpp"
-#include "rb_servo/sensor/tare_settle_detector.hpp"
 
 namespace rb_servo {
 
@@ -790,8 +789,6 @@ private:
         double follower_actual_lead_m = 0.0;
         double follower_actual_lead_rad = 0.0;
         int follower_actual_lead_error_count = 0;
-        bool follower_loading_projection_active = false;
-        double follower_contact_shift_m = 0.0;
         std::uint64_t follower_reanchor_count = 0;
         std::uint64_t follower_warm_resume_count = 0;
         bool safety_intervention_recent = false;

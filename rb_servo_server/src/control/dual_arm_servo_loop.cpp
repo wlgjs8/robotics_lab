@@ -15,7 +15,6 @@
 #include <vector>
 
 #include <Eigen/Geometry>
-#include <pinocchio/spatial/force.hpp>
 #include <pinocchio/spatial/motion.hpp>
 
 #include "rb_servo/control/cartesian_controller.hpp"
@@ -30,68 +29,6 @@
 namespace rb_servo {
 namespace {
 
-math::Matrix3 surfaceFrameFromNormal(const math::Vector3& normal_input) {
-    const math::Vector3 normal = normal_input.normalized();
-    math::Vector3 tangent_x = math::Vector3::UnitX() - normal * normal.x();
-    if (tangent_x.squaredNorm() < 1e-8) {
-        tangent_x = math::Vector3::UnitY() - normal * normal.y();
-    }
-    tangent_x.normalize();
-    const math::Vector3 tangent_y = normal.cross(tangent_x).normalized();
-    math::Matrix3 frame;
-    frame.col(0) = tangent_x;
-    frame.col(1) = tangent_y;
-    frame.col(2) = normal;
-    return frame;
-}
-
-Wrench6D transformWrenchFrame(
-    const pinocchio::SE3& t_target_source,
-    const Wrench6D& source
-) {
-    pinocchio::Force source_force;
-    source_force.linear() = math::Vector3(source.fx, source.fy, source.fz);
-    source_force.angular() = math::Vector3(source.tx, source.ty, source.tz);
-    const pinocchio::Force target_force = t_target_source.act(source_force);
-    return {
-        target_force.linear().x(), target_force.linear().y(), target_force.linear().z(),
-        target_force.angular().x(), target_force.angular().y(), target_force.angular().z(),
-    };
-}
-
-Vec6 transformTwistFrame(
-    const pinocchio::SE3& t_target_source,
-    const Vec6& source
-) {
-    pinocchio::Motion source_motion;
-    source_motion.linear() = math::Vector3(source.x, source.y, source.z);
-    source_motion.angular() = math::Vector3(source.rx, source.ry, source.rz);
-    const pinocchio::Motion target_motion = t_target_source.act(source_motion);
-    return {
-        target_motion.linear().x(), target_motion.linear().y(), target_motion.linear().z(),
-        target_motion.angular().x(), target_motion.angular().y(), target_motion.angular().z(),
-    };
-}
-
-pinocchio::SE3 complianceFrameTcp(
-    const ForceControlArmConfig& arm_config,
-    const FtWrenchPipelineConfig& ft_config,
-    const Pose6D& tcp_stand,
-    const math::Matrix3& r_stand_surface
-) {
-    const pinocchio::SE3 t_tcp_sensor = math::se3FromPose(ft_config.t_tcp_sensor);
-    if (arm_config.compliance_frame == "sensor_origin") {
-        return t_tcp_sensor;
-    }
-    if (arm_config.compliance_frame == "tcp_origin") {
-        return pinocchio::SE3(t_tcp_sensor.rotation(), math::Vector3::Zero());
-    }
-    const math::Matrix3 r_stand_tcp = math::rotationFromPose(tcp_stand);
-    return pinocchio::SE3(
-        r_stand_tcp.transpose() * r_stand_surface,
-        math::Vector3::Zero()
-    );
-}
 
 // Spin-hint for the hybrid sleep-then-spin tail: keeps the core in C0 and yields
 // the pipeline without descheduling. No-op on unknown ISAs (spin still works,
@@ -374,7 +311,6 @@ bool ruckigFollowerConfigChanged(const RuckigFollowerConfig& a, const RuckigFoll
         a.preview_max_actual_lead_m != b.preview_max_actual_lead_m ||
         a.preview_max_actual_lead_rad != b.preview_max_actual_lead_rad ||
         a.preview_max_consecutive_actual_lead_errors != b.preview_max_consecutive_actual_lead_errors ||
-        a.loading_projection_max_accel_m_s2 != b.loading_projection_max_accel_m_s2 ||
         a.hold_bounce_resume_sec != b.hold_bounce_resume_sec ||
         a.preview_projection_fault_policy != b.preview_projection_fault_policy ||
         a.chunk_feed_timeout_sec != b.chunk_feed_timeout_sec;
@@ -399,7 +335,6 @@ control::CartesianChunkFollowerConfig makeChunkFollowerConfig(const RuckigFollow
     cfg.max_actual_lead_m = rf.preview_max_actual_lead_m;
     cfg.max_actual_lead_rad = rf.preview_max_actual_lead_rad;
     cfg.max_consecutive_actual_lead_errors = rf.preview_max_consecutive_actual_lead_errors;
-    cfg.loading_projection_max_accel_m_s2 = rf.loading_projection_max_accel_m_s2;
     return cfg;
 }
 
@@ -2726,10 +2661,6 @@ void DualArmServoLoop::loopMain() {
             hold.right.gripper_target = source_command.right.gripper_target;
             return hold;
         };
-        const auto is_payload_identification_arm = [](const ArmCommand& arm) {
-            return arm.joint_target_profile ==
-                JointTargetProfile::PayloadIdentification;
-        };
         const auto is_plain_hold_arm = [](const ArmCommand& arm) {
             return arm.mode == ControlMode::Hold &&
                 arm.joint_target_profile == JointTargetProfile::Direct &&
@@ -2738,35 +2669,8 @@ void DualArmServoLoop::loopMain() {
                 !arm.has_linear_move_linear_speed &&
                 !arm.has_linear_move_angular_speed &&
                 !arm.has_linear_move_orientation_mode &&
-                !arm.has_gripper && !arm.has_freedrive &&
-                arm.force_control.mode == ForceControlMode::Off;
+                !arm.has_gripper && !arm.has_freedrive;
         };
-        const auto is_payload_identification_target = [
-            &is_payload_identification_arm
-        ](const ArmCommand& arm) {
-            return is_payload_identification_arm(arm) &&
-                arm.mode == ControlMode::JointTarget && arm.has_joint_target &&
-                finiteJointArray(arm.q_target_deg) && !arm.has_arrival_stop &&
-                !arm.has_tcp_target && !arm.has_linear_move_duration &&
-                !arm.has_linear_move_linear_speed &&
-                !arm.has_linear_move_angular_speed &&
-                !arm.has_linear_move_orientation_mode &&
-                !arm.has_gripper && !arm.has_freedrive &&
-                arm.force_control.mode == ForceControlMode::Off;
-        };
-        const bool left_payload_identification =
-            is_payload_identification_arm(command.left);
-        const bool right_payload_identification =
-            is_payload_identification_arm(command.right);
-        const bool payload_identification_profile_present =
-            left_payload_identification || right_payload_identification;
-        const bool payload_identification_shape_valid =
-            left_payload_identification != right_payload_identification &&
-            ((is_payload_identification_target(command.left) &&
-              is_plain_hold_arm(command.right)) ||
-             (is_payload_identification_target(command.right) &&
-              is_plain_hold_arm(command.left)));
-        bool payload_identification_shape_rejected = false;
         if (isSyntheticHoldCommand(command)) {
             command = metadata_hold(command);
         }
@@ -2945,27 +2849,6 @@ void DualArmServoLoop::loopMain() {
             clearLatchedCartesianTargets();
             setMotionState(ServerMotionState::ConnectedHold);
             command = metadata_hold(command);
-        } else if (payload_identification_profile_present &&
-                   !payload_identification_shape_valid) {
-            // Payload identification is an exclusive one-arm calibration
-            // operation. Reject the entire packet before Freedrive or any
-            // motion primitive can consume a malformed peer command. Preserve
-            // the profile only for rejection telemetry and to suppress
-            // Cartesian force-Hold promotion on this packet.
-            DualArmCommand rejected = makeHoldCommand(
-                left_state, right_state, loop_start);
-            rejected.seq = command.seq;
-            rejected.host_time_ns = command.host_time_ns;
-            rejected.source = command.source;
-            rejected.lease = command.lease;
-            rejected.left.timeout_sec = command.left.timeout_sec;
-            rejected.right.timeout_sec = command.right.timeout_sec;
-            rejected.left.joint_target_profile =
-                command.left.joint_target_profile;
-            rejected.right.joint_target_profile =
-                command.right.joint_target_profile;
-            command = rejected;
-            payload_identification_shape_rejected = true;
         } else if (isExplicitDualHoldCommand(command)) {
             if (!fault_latched_.load() &&
                 motion_state_.load() == ServerMotionState::Running) {
@@ -3012,8 +2895,6 @@ void DualArmServoLoop::loopMain() {
         std::string init_profile_after_left = init_profile_before_left;
         std::string init_profile_after_right = init_profile_before_right;
         std::string init_non_init_arm_preserved_mode;
-        bool payload_identification_profile_rejected =
-            payload_identification_shape_rejected;
         if (!fault_latched_.load()) {
             left_safety_tracking_ = SafetyTrackingTelemetry{};
             right_safety_tracking_ = SafetyTrackingTelemetry{};
@@ -3059,28 +2940,6 @@ void DualArmServoLoop::loopMain() {
             safety_verdict = SafetyVerdict::Ok;
         } else {
             SafetyVerdict command_verdict = SafetyVerdict::Ok;
-            const auto apply_payload_identification_profile = [this](
-                ArmId arm_id,
-                ArmCommand* arm_command
-            ) {
-                if (!arm_command || arm_command->mode != ControlMode::JointTarget ||
-                    arm_command->joint_target_profile !=
-                        JointTargetProfile::PayloadIdentification) {
-                    return true;
-                }
-                // The payload-identification profile needed the F/T stack, which
-                // has been removed; refuse it outright rather than pretend.
-                arm_command->mode = ControlMode::Hold;
-                arm_command->has_joint_target = false;
-                return false;
-            };
-            const bool left_payload_profile_ok =
-                apply_payload_identification_profile(ArmId::Left, &command.left);
-            const bool right_payload_profile_ok =
-                apply_payload_identification_profile(ArmId::Right, &command.right);
-            payload_identification_profile_rejected =
-                payload_identification_profile_rejected ||
-                !left_payload_profile_ok || !right_payload_profile_ok;
             // Collision-free TcpLinearMove: decide Straight (pass through to the exact
             // MoveL) vs Detour (rewrite to a streamed JointTarget collision-free path).
             command = applyCollisionFreeLinearMove(command, left_state, right_state);
@@ -3117,10 +2976,6 @@ void DualArmServoLoop::loopMain() {
             const bool motion_requested = commandRequestsMotion(command);
             const ServoTarget desired =
                 computeServoTarget(left_state, right_state, command, filter_dt_sec, &command_verdict);
-            if (payload_identification_profile_rejected) {
-                command_verdict = SafetyVerdict::InvalidCommand;
-            }
-
             // computeServoTarget already encodes the correct PER-ARM result in `desired`:
             // an arm whose Cartesian/IK solve failed is held at its prev_sent target, while
             // a healthy arm keeps its freshly computed target (and a whole-command failure
@@ -3536,28 +3391,6 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.loop_end_time_ns = loop_end;
             latest_snapshot_.left_state = left_state;
             latest_snapshot_.right_state = right_state;
-            const auto& payload_id = config_.force_torque.payload_identification;
-            latest_snapshot_.payload_identification_config.enable = payload_id.enable;
-            latest_snapshot_.payload_identification_config.observation_model =
-                payload_id.observation_model;
-            latest_snapshot_.payload_identification_config.wrench_convention =
-                payload_id.wrench_convention;
-            latest_snapshot_.payload_identification_config.min_poses = payload_id.min_poses;
-            latest_snapshot_.payload_identification_config.arrival_tolerance_deg =
-                payload_id.arrival_tolerance_deg;
-            latest_snapshot_.payload_identification_config.settle_sec = payload_id.settle_sec;
-            latest_snapshot_.payload_identification_config.samples_per_pose =
-                payload_id.samples_per_pose;
-            latest_snapshot_.payload_identification_config.max_force_stddev_n =
-                payload_id.max_force_stddev_n;
-            latest_snapshot_.payload_identification_config.max_torque_stddev_nm =
-                payload_id.max_torque_stddev_nm;
-            latest_snapshot_.payload_identification_config.max_force_fit_rms_n =
-                payload_id.max_force_fit_rms_n;
-            latest_snapshot_.payload_identification_config.max_torque_fit_rms_nm =
-                payload_id.max_torque_fit_rms_nm;
-            latest_snapshot_.payload_identification_config.max_design_condition_number =
-                payload_id.max_design_condition_number;
             latest_snapshot_.motion_epoch = motion_epoch_;
             latest_snapshot_.command = command;
             latest_snapshot_.left_sent_q_deg = sent_target.left_q_target_deg;
@@ -4418,8 +4251,6 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.follower_actual_lead_m = abc.follower_actual_lead_m;
     solve.follower_actual_lead_rad = abc.follower_actual_lead_rad;
     solve.follower_actual_lead_error_count = abc.follower_actual_lead_error_count;
-    solve.follower_loading_projection_active = abc.follower_loading_projection_active;
-    solve.follower_contact_shift_m = abc.follower_contact_shift_m;
     solve.follower_reanchor_count = abc.follower_reanchor_count;
     solve.follower_warm_resume_count = abc.follower_warm_resume_count;
     solve.safety_intervention_recent = abc.safety_intervention_recent;
@@ -4752,11 +4583,9 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     };
     if (rf.enable && chunk_frame_receiver_ && command.mode == ControlMode::Hold &&
         follower->active()) {
-        // The 2026-07-18 12:44 stream reached this path through two dispatch
-        // shapes: a raw dual Hold bypassed the Cartesian branch entirely, while
-        // Cartesian admittance promoted a raw Hold and took the force-hold branch.
-        // Both used to call deactivate(), even though their 10--360 ms gaps were
-        // far shorter than chunk_feed_timeout_sec. Freeze segment/window time;
+        // The 2026-07-18 12:44 stream reached this path with 10--360 ms Hold
+        // gaps, far shorter than chunk_feed_timeout_sec, and used to call
+        // deactivate() on each of them. Freeze segment/window time;
         // the Hold path owns the robot until a bounded warm resume or expiry.
         const double now_sec = ChunkFrameReceiver::steadyNowSec();
         follower->pauseForHold(now_sec);
@@ -4788,16 +4617,9 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         *submitted_recv_seq = 0;
     }
     // Live reference = FK of the previously SENT joints (same anchor discipline
-    // as the SMD path). The sent joints already CONTAIN the committed compliance
-    // offset, and applyForceCorrection re-applies that offset downstream every
-    // tick — so strip it here. Without this the engage-wait hold is not a fixed
-    // point: hold target = FK(sent) + offset ratchets by one offset per tick and
-    // crawls at the velocity clamp along the offset direction (2026-07-18 12:28
-    // run: a chunk-feed gap deactivated the follower mid-transit with an
-    // 10.7 mm persistent K=0 offset and the arm took off at ~0.5 m/s until the
-    // inertial spike latched ExternalForceLimit). A cold-start re-engage
-    // likewise anchors at the stripped pose so anchor + offset reproduces the
-    // previous sent pose exactly (no double-counted offset jump).
+    // as the SMD path), so the engage-wait hold is a fixed point: hold target ==
+    // last sent pose. Nothing is added to this target downstream, so it needs no
+    // correction term.
     Pose6D reference = kinematics_->computeTcpStand(arm_id, previous_sent_q_deg, mount);
     const auto hold_at_reference = [&]() {
         output_smd->deactivate();
@@ -4989,9 +4811,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     const Vec6 follower_velocity = follower->currentVelocity().value_or(Vec6{});
     if (rf.output_smd.enable) {
         if (!output_smd->active()) {
-            // `reference` is FK of the previous sent target with the committed
-            // compliance offset removed, i.e. the last sent pose in this stage's
-            // pre-compliance domain. Never cold-seed from an older filter state.
+            // `reference` is FK of the previous sent target, i.e. the last pose
+            // this stage emitted. Never cold-seed from an older filter state.
             output_smd->reset(reference, follower_velocity);
         }
         smoothed.tcp_target_stand =
@@ -5003,11 +4824,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         output_smd->deactivate();
         smoothed.tcp_target_stand = pre_filter;
     }
-    // Ordering constraint: force/compliance composes downstream on this target;
-    // the contact reflex must never be low-passed by the follower output SMD.
     if (delta_preview) {
-        // The measured pose is used as-is: there is no admittance offset to strip
-        // now that the force stack is gone.
         follower->updateActualLead(actual_feedback_pose);
     }
     const control::FollowerDiag& diag = follower->diag();
@@ -5017,8 +4834,6 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.follower_actual_lead_m = diag.actual_lead_m;
     abc.follower_actual_lead_rad = diag.actual_lead_rad;
     abc.follower_actual_lead_error_count = diag.consecutive_actual_lead_errors;
-    abc.follower_loading_projection_active = diag.loading_projection_active;
-    abc.follower_contact_shift_m = diag.contact_shift_m;
     // The projection gate is a plan-FIDELITY alarm (Ruckig cannot reach the
     // requested knots), not a runaway guard: lead, the 50 mm divergence latch,
     // ROI, self-collision, and the FT hard limits own safety. With
@@ -5496,12 +5311,6 @@ ServoTarget DualArmServoLoop::computeServoTarget(
 
     const ControlMode arm_raw_mode[2] = {command.left.mode, command.right.mode};
 
-    // A payload-identification packet is an exclusive joint-space operation.
-    // Suppress Cartesian force-Hold promotion on BOTH arms for this packet: the
-    // selected arm must stay on its JointTarget path, and the peer's explicit
-    // Hold must remain a stationary joint hold. Checking the raw profile also
-    // covers fail-closed admission, where the selected command was rewritten
-    // to Hold because the profile was unavailable.
     // effective_command is final here.
     const ControlMode arm_effective_mode[2] =
         {effective_command.left.mode, effective_command.right.mode};
@@ -5890,11 +5699,11 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     }
 
     // No arm is in Cartesian mode, so applyChunkFollowerStage() did not run.
-    // A raw dual Hold reaches this dispatch path directly. Before warm-resume,
-    // it unconditionally deactivated both followers; the force-Hold promotion
-    // above was the second unconditional path seen in the 2026-07-18 12:44
-    // bounce evidence. Preserve a bounded, frozen chunk only for raw Hold;
-    // every other mode switch still drops the streaming state immediately.
+    // A raw dual Hold reaches this dispatch path directly, and before warm-resume
+    // it unconditionally deactivated both followers -- one of the unconditional
+    // paths seen in the 2026-07-18 12:44 bounce evidence. Preserve a bounded,
+    // frozen chunk only for raw Hold; every other mode switch still drops the
+    // streaming state immediately.
     for (int i = 0; i < 2; ++i) {
         pause_chunk_follower_for_hold(arm_ctx[i], arm_raw_mode[i]);
     }

@@ -449,15 +449,6 @@ RobotState mapRbpodoSystemStateSnapshot(
     out_state.q_ref_valid = finiteJointArray(out_state.q_target_deg);
     out_state.q_ref_source = "rbpodo.sdata.jnt_ref";
     out_state.rbpodo_sdk_state_source = "CobotData.request_data";
-    out_state.eft_wrench.fx = snapshot.eft[0];
-    out_state.eft_wrench.fy = snapshot.eft[1];
-    out_state.eft_wrench.fz = snapshot.eft[2];
-    out_state.eft_wrench.tx = snapshot.eft[3];
-    out_state.eft_wrench.ty = snapshot.eft[4];
-    out_state.eft_wrench.tz = snapshot.eft[5];
-    out_state.eft_valid = snapshot.eft_in_frame &&
-        std::all_of(snapshot.eft.begin(), snapshot.eft.end(),
-                    [](double v) { return std::isfinite(v); });
     out_state.rbpodo_state_decode_policy =
         decode_options.real_motion_suspect_diagnostics_accepted
             ? "real_motion_suspect_diagnostics_accepted"
@@ -618,22 +609,8 @@ RbpodoSystemStateSnapshot snapshotFromSystemState(const rb::podo::SystemState& r
         snapshot.q_actual_deg[static_cast<std::size_t>(i)] = rb_state.sdata.jnt_ang[i];
         snapshot.q_target_deg[static_cast<std::size_t>(i)] = rb_state.sdata.jnt_ref[i];
     }
-    snapshot.eft[0] = static_cast<double>(rb_state.sdata.eft_fx);
-    snapshot.eft[1] = static_cast<double>(rb_state.sdata.eft_fy);
-    snapshot.eft[2] = static_cast<double>(rb_state.sdata.eft_fz);
-    snapshot.eft[3] = static_cast<double>(rb_state.sdata.eft_mx);
-    snapshot.eft[4] = static_cast<double>(rb_state.sdata.eft_my);
-    snapshot.eft[5] = static_cast<double>(rb_state.sdata.eft_mz);
     return snapshot;
 }
-
-// Pin the exported wire-format constant to the SDK struct layout: the type-0x03
-// frame IS the SystemState.sdata layout (header included), so the eft fields
-// are present iff the frame covers the last one (eft_mz).
-static_assert(
-    kRbpodoStateFrameEftEndOffsetBytes ==
-        offsetof(rb::podo::SystemState, sdata.eft_mz) + sizeof(rb::podo::SystemState{}.sdata.eft_mz),
-    "kRbpodoStateFrameEftEndOffsetBytes is out of sync with the rbpodo SystemState layout");
 
 std::optional<RobotState> recentStateCache(
     const std::optional<RobotState>& cached_state,
@@ -1426,13 +1403,6 @@ std::optional<std::string> extractNewestRbpodoStateFrame(std::string& buf) {
     return newest;
 }
 
-bool rbpodoStateFrameIncludesEft(std::size_t frame_bytes) {
-    // kRbpodoStateFrameEftEndOffsetBytes is a wire-format constant (frame ==
-    // SystemState.sdata image, header included) pinned to the SDK struct by a
-    // static_assert next to snapshotFromSystemState() in the rbpodo-enabled build.
-    return frame_bytes >= kRbpodoStateFrameEftEndOffsetBytes;
-}
-
 bool rbpodoPipelinedChannelNeedsReprime(
     bool state_read_pipelined,
     bool operation_mode_switch_confirmed,
@@ -1642,9 +1612,6 @@ BackendResult<RobotState> RbpodoBackend::readStatePipelined(uint64_t start_ns) {
         );
         impl_->consecutive_read_misses = 0;
         RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(state);
-        // The zero-initialized decode pads short (old-firmware) frames; only
-        // publish eft as sensor readings when the frame actually covered them.
-        snapshot.eft_in_frame = rbpodoStateFrameIncludesEft(frame->size());
         RobotState out_state = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
         out_state.acquisition_sequence = ++impl_->state_acquisition_sequence;
         out_state.rbpodo_sdk_state_source = "CobotData.pipelined";

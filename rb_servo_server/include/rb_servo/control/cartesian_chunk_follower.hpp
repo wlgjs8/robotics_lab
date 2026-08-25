@@ -35,9 +35,6 @@ struct CartesianChunkFollowerConfig {
   double max_actual_lead_m{0.0};
   double max_actual_lead_rad{0.0};
   int max_consecutive_actual_lead_errors{0};
-  // Quasi-static gate: loading projection only runs while the plan's linear
-  // acceleration is below this (fast-transit inertial wrench is not contact).
-  double loading_projection_max_accel_m_s2{0.5};
 };
 
 struct FollowerDiag {
@@ -59,12 +56,6 @@ struct FollowerDiag {
   int consecutive_actual_lead_errors{0};
   bool infeasible_fault{false};
   bool actual_lead_fault{false};
-  // Wrench-gated loading projection (contact-aware following): true when the
-  // last segment boundary removed a loading component from the plan advance;
-  // contact_shift_m is the accumulated plan shift magnitude (resets per delta
-  // frame because delta frames re-anchor their knots at the emitted pose).
-  bool loading_projection_active{false};
-  double contact_shift_m{0.0};
 };
 
 enum class HoldResumeResult {
@@ -92,20 +83,6 @@ class CartesianChunkFollower {
   // knots to the same Ruckig receding-horizon follower.
   void submitDeltaFrame(const ChunkFrame& frame, const Pose6D& current_pose);
   void updateActualLead(const Pose6D& actual_pose);
-
-  // Wrench-gated loading projection (contact-aware following). Pass the
-  // deadband-filtered LOADING direction in the stand frame — the same
-  // convention as the servo loop's policy-delta projection: the negation of
-  // the measured external force error, i.e. the direction that presses INTO
-  // the contact. While valid, each segment boundary removes the component of
-  // the plan advance along this direction (accumulated as a plan shift), so
-  // the follower never integrates into a loaded contact; tangential motion
-  // passes through and contact release causes no snap-back. Invalid (the
-  // default) is a strict no-op: behavior is identical to the pre-projection
-  // follower, so an unhealthy wrench pipeline degrades safely.
-  void setExternalReaction(const Eigen::Vector3d& loading_dir_stand,
-                           bool valid,
-                           bool contact_normal_owned = false);
 
   bool active() const { return active_; }
   bool holdPaused() const { return hold_paused_; }
@@ -174,14 +151,6 @@ class CartesianChunkFollower {
   Pose6D last_pose_{};
   FollowerDiag diag_{};
   int actual_lead_checked_segment_{-1};
-
-  // Loading-projection state (see setExternalReaction).
-  Eigen::Vector3d loading_dir_stand_{Eigen::Vector3d::Zero()};
-  bool loading_dir_valid_{false};
-  bool contact_normal_owned_{false};
-  Eigen::Vector3d contact_shift_{Eigen::Vector3d::Zero()};
-  Eigen::Vector3d prev_loading_dir_{Eigen::Vector3d::Zero()};
-  bool prev_loading_dir_valid_{false};
 };
 
 }  // namespace rb_servo::control

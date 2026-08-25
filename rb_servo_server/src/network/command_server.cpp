@@ -196,15 +196,11 @@ bool readOptionalPose6D(const json& object, const char* key, Pose6D* out, bool* 
     return true;
 }
 
-bool parseForceControlObject(const json& object, ForceControlCommand* cmd) {
-    const auto force_it = object.find("force_control");
-    if (force_it == object.end()) return true;
-    // V1 force authority is server-owned YAML configuration. Per-command
-    // force_control used to parse successfully and then be ignored by the
-    // servo loop, which was an unsafe silent no-op. Reject it explicitly until
-    // a separately accepted task-level command contract exists.
-    (void)cmd;
-    return false;
+bool rejectForceControlObject(const json& object) {
+    // The server has no force-control stack. A client that still sends a
+    // force_control block believes the server will act on it, so the packet is
+    // rejected rather than silently ignored.
+    return object.find("force_control") == object.end();
 }
 
 bool parseLinearMoveOrientationMode(const std::string& value, LinearMoveOrientationMode* out) {
@@ -453,7 +449,7 @@ bool parseArmObject(
             out->has_tcp_target = true;
         }
         if (!readOptionalLinearMoveFields(object, out)) return false;
-        if (!parseForceControlObject(object, &out->force_control)) return false;
+        if (!rejectForceControlObject(object)) return false;
     }
     if (out->timeout_sec <= 0.0 || !std::isfinite(out->timeout_sec)) return false;
     return true;

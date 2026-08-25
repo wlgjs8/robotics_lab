@@ -43,7 +43,6 @@ std::string toString(JointTargetProfile profile) {
     switch (profile) {
         case JointTargetProfile::Direct: return "direct";
         case JointTargetProfile::InitMotion: return "init_motion";
-        case JointTargetProfile::PayloadIdentification: return "payload_identification";
     }
     return "unknown";
 }
@@ -60,15 +59,6 @@ std::string toString(ServerMotionState state) {
     return "Unknown";
 }
 
-std::string toString(ForceControlMode mode) {
-    switch (mode) {
-        case ForceControlMode::Off: return "Off";
-        case ForceControlMode::Admittance: return "Admittance";
-        case ForceControlMode::Impedance: return "Impedance";
-        case ForceControlMode::ExternalForceSafety: return "ExternalForceSafety";
-    }
-    return "Unknown";
-}
 
 std::string toString(BackendAckPolicy policy) {
     switch (policy) {
@@ -152,22 +142,9 @@ JointTargetProfile jointTargetProfileFromString(const std::string& value) {
     const std::string v = lower(value);
     if (v == "direct") return JointTargetProfile::Direct;
     if (v == "init_motion") return JointTargetProfile::InitMotion;
-    if (v == "payload_identification") {
-        return JointTargetProfile::PayloadIdentification;
-    }
     throw std::invalid_argument("Unknown joint_target_profile string: " + value);
 }
 
-ForceControlMode forceControlModeFromString(const std::string& mode) {
-    const std::string m = lower(mode);
-    if (m == "off") return ForceControlMode::Off;
-    if (m == "admittance") return ForceControlMode::Admittance;
-    if (m == "impedance") return ForceControlMode::Impedance;
-    if (m == "externalforcesafety" || m == "external_force_safety" || m == "safety") {
-        return ForceControlMode::ExternalForceSafety;
-    }
-    throw std::invalid_argument("Unknown ForceControlMode string: " + mode);
-}
 
 TrackingErrorPolicy trackingErrorPolicyFromString(const std::string& value) {
     const std::string v = lower(value);

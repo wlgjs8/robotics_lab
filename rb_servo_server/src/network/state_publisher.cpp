@@ -49,12 +49,6 @@ nlohmann::json jointArrayJson(const JointArray& joints) {
     return out;
 }
 
-nlohmann::json wrenchJson(const Wrench6D& wrench) {
-    return nlohmann::json::array({
-        wrench.fx, wrench.fy, wrench.fz, wrench.tx, wrench.ty, wrench.tz
-    });
-}
-
 nlohmann::json vec6Json(const Vec6& value) {
     return nlohmann::json::array({
         value.x, value.y, value.z, value.rx, value.ry, value.rz
@@ -113,154 +107,6 @@ nlohmann::json realtimeTimingJson(const RealtimeTimingTelemetry& value) {
             {"left", feedbackRealtimeTimingJson(value.left_feedback)},
             {"right", feedbackRealtimeTimingJson(value.right_feedback)},
         }},
-    };
-}
-
-nlohmann::json forceTorqueJson(const ForceTorqueTelemetry& value) {
-    return {
-        {"enabled", value.enabled},
-        {"source", value.source},
-        {"source_assurance", value.source_assurance},
-        {"sensor_health_verified", value.sensor_health_verified},
-        {"safety_rated", value.safety_rated},
-        {"raw_sensor_wrench", wrenchJson(value.raw_sensor_wrench)},
-        {"t_tcp_sensor", {
-            value.t_tcp_sensor.x,
-            value.t_tcp_sensor.y,
-            value.t_tcp_sensor.z,
-            value.t_tcp_sensor.rx,
-            value.t_tcp_sensor.ry,
-            value.t_tcp_sensor.rz,
-        }},
-        {"wrench_tcp", wrenchJson(value.wrench_tcp)},
-        {"gravity_tcp", value.gravity_tcp},
-        {"gravity_compensation_model", value.gravity_compensation_model},
-        {"gravity_compensation_calibration_id",
-         value.gravity_compensation_calibration_id},
-        {"modeled_gravity_wrench", wrenchJson(value.modeled_gravity_wrench)},
-        {"fast_external_wrench", wrenchJson(value.fast_external_wrench)},
-        {"control_external_wrench", wrenchJson(value.control_external_wrench)},
-        {"healthy", value.healthy},
-        {"stale", value.stale},
-        {"freshness_value", value.freshness_value},
-        {"freshness_advanced", value.freshness_advanced},
-        {"reason", value.reason},
-        {"auto_tare_enabled", value.auto_tare_enabled},
-        {"tare_valid", value.tare_valid},
-        {"tare_state", value.tare_state},
-        {"tare_sample_count", value.tare_sample_count},
-        {"tare_generation", value.tare_generation},
-        {"tare_reason", value.tare_reason},
-        {"residual_tare_tcp", wrenchJson(value.residual_tare_tcp)},
-        {"payload_identification_inhibit", value.payload_identification_inhibit},
-        {"joint_target_profile", value.joint_target_profile},
-    };
-}
-
-nlohmann::json payloadIdentificationConfigJson(
-    const PayloadIdentificationConfigTelemetry& value
-) {
-    return {
-        {"enable", value.enable},
-        {"observation_model", value.observation_model},
-        {"wrench_convention", value.wrench_convention},
-        {"min_poses", value.min_poses},
-        {"arrival_tolerance_deg", value.arrival_tolerance_deg},
-        {"settle_sec", value.settle_sec},
-        {"samples_per_pose", value.samples_per_pose},
-        {"max_force_stddev_n", value.max_force_stddev_n},
-        {"max_torque_stddev_nm", value.max_torque_stddev_nm},
-        {"max_force_fit_rms_n", value.max_force_fit_rms_n},
-        {"max_torque_fit_rms_nm", value.max_torque_fit_rms_nm},
-        {"max_design_condition_number", value.max_design_condition_number},
-    };
-}
-
-nlohmann::json forceControlJson(const ForceControlTelemetry& value) {
-    return {
-        {"enabled", value.enabled},
-        {"operating_mode", value.operating_mode},
-        {"state", value.state},
-        {"surface_source", value.surface_source},
-        {"compliance_frame", value.compliance_frame},
-        {"compliance_frame_pose_valid", value.compliance_frame_pose_valid},
-        {"compliance_frame_actual_stand", nlohmann::json::array({
-            value.compliance_frame_actual_stand.x,
-            value.compliance_frame_actual_stand.y,
-            value.compliance_frame_actual_stand.z,
-            value.compliance_frame_actual_stand.rx,
-            value.compliance_frame_actual_stand.ry,
-            value.compliance_frame_actual_stand.rz,
-        })},
-        {"normal_stand", value.normal_stand},
-        {"contact_active", value.contact_active},
-        {"normal_contact_active", value.normal_contact_active},
-        {"transverse_contact_active", value.transverse_contact_active},
-        {"rotational_contact_active", value.rotational_contact_active},
-        {"compliance_active", value.compliance_active},
-        {"normal_regulating", value.normal_regulating},
-        {"transverse_regulating", value.transverse_regulating},
-        {"rotational_regulating", value.rotational_regulating},
-        {"loading_projection_active", value.loading_projection_active},
-        {"control_wrench_surface", wrenchJson(value.control_wrench_surface)},
-        {"control_wrench_compliance", wrenchJson(value.control_wrench_compliance)},
-        {"wrench_error_surface", wrenchJson(value.wrench_error_surface)},
-        {"wrench_error_compliance", wrenchJson(value.wrench_error_compliance)},
-        {"compliance_offset_surface", nlohmann::json::array({
-            value.compliance_offset_surface.x,
-            value.compliance_offset_surface.y,
-            value.compliance_offset_surface.z,
-            value.compliance_offset_surface.rx,
-            value.compliance_offset_surface.ry,
-            value.compliance_offset_surface.rz,
-        })},
-        {"compliance_velocity_surface", vec6Json(value.compliance_velocity_surface)},
-        {"compliance_acceleration_surface", vec6Json(value.compliance_acceleration_surface)},
-        {"raw_policy_delta_surface", vec6Json(value.raw_policy_delta_surface)},
-        {"accepted_policy_delta_surface", vec6Json(value.accepted_policy_delta_surface)},
-        {"compliance_equilibrium_stand", nlohmann::json::array({
-            value.compliance_equilibrium_stand.x,
-            value.compliance_equilibrium_stand.y,
-            value.compliance_equilibrium_stand.z,
-            value.compliance_equilibrium_stand.rx,
-            value.compliance_equilibrium_stand.ry,
-            value.compliance_equilibrium_stand.rz,
-        })},
-        {"compliance_equilibrium_source", value.compliance_equilibrium_source},
-        {"compliance_recenter_active", value.compliance_recenter_active},
-        {"compliance_translation_recenter_coupled",
-            value.compliance_translation_recenter_coupled},
-        {"compliance_rotation_recenter_coupled",
-            value.compliance_rotation_recenter_coupled},
-        {"compliance_translation_recenter_deferred",
-            value.compliance_translation_recenter_deferred},
-        {"compliance_rotation_recenter_deferred",
-            value.compliance_rotation_recenter_deferred},
-        {"compliance_limit_axes", value.compliance_limit_axes},
-        {"compliance_limit_reason", value.compliance_limit_reason.empty()
-            ? nlohmann::json(nullptr)
-            : nlohmann::json(value.compliance_limit_reason)},
-        {"measured_force_n", value.measured_force_n},
-        {"fast_normal_force_n", value.fast_normal_force_n},
-        {"fast_force_norm_n", value.fast_force_norm_n},
-        {"fast_force_rate_n_per_ms", value.fast_force_rate_n_per_ms},
-        {"fast_torque_norm_nm", value.fast_torque_norm_nm},
-        {"contact_threshold_exceeded", value.contact_threshold_exceeded},
-        {"hard_limit_threshold_exceeded", value.hard_limit_threshold_exceeded},
-        {"hard_limit_sample_count", value.hard_limit_sample_count},
-        {"hard_limit_exceeded", value.hard_limit_exceeded},
-        {"target_force_n", value.target_force_n},
-        {"correction_m", value.correction_m},
-        {"velocity_m_s", value.velocity_m_s},
-        {"acceleration_m_s2", value.acceleration_m_s2},
-        {"energy_j", value.energy_j},
-        {"saturated", value.saturated},
-        {"proposal_valid", value.proposal_valid},
-        {"proposal_committed", value.proposal_committed},
-        {"fault_reason", value.fault_reason.empty()
-            ? nlohmann::json(nullptr)
-            : nlohmann::json(value.fault_reason)},
-        {"motion_epoch", value.motion_epoch},
     };
 }
 
@@ -1408,13 +1254,6 @@ nlohmann::json armStateJson(
         {"host_time_ns", state.host_time_ns},
         {"acquisition_sequence", state.acquisition_sequence},
         {"error_code", state.error_code},
-        // External F/T sensor wrench from the rbpodo state frame (sdata.eft_*):
-        // [fx, fy, fz, tx, ty, tz] in N / Nm, controller-reported external-sensor
-        // frame (tool-flange mounted). Zeros when no sensor is selected on the
-        // controller; eft_valid=false when the frame lacked the fields.
-        {"eft_wrench", wrenchJson(state.eft_wrench)},
-        {"eft_valid", state.eft_valid},
-        {"eft_source", "rbpodo.sdata.eft"},
         {"tcp_stand", optionalPoseJson(tcp.actual_stand)},
         {"tcp_base", optionalPoseJson(tcp.actual_base)},
         {"tcp_actual_stand", optionalPoseJson(tcp.actual_stand)},
@@ -1632,10 +1471,6 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         rbpodoAsyncQueuePolicyString(config_.servo.rbpodo_async_streaming.queue_policy);
     message["cartesian_control_snapshot"] = cartesianControlSnapshotJson(config_.cartesian_control);
     message["kinematics_snapshot"] = kinematicsSnapshotJson(config_.kinematics);
-    message["force_torque"] = {
-        {"payload_identification", payloadIdentificationConfigJson(
-            snapshot.payload_identification_config)},
-    };
     message["startup_validation"] = startupValidationJson(snapshot.startup_validation);
     const bool worker_enabled =
         config_.servo.io_model == ServoIoModel::Worker ||
@@ -1707,10 +1542,6 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         snapshot.startup_validation.right,
         gripper_bridge_ ? gripper_bridge_->latest(ArmId::Right) : GripperArmFeedback{}
     );
-    message["left"]["force_torque"] = forceTorqueJson(snapshot.left_force_torque);
-    message["right"]["force_torque"] = forceTorqueJson(snapshot.right_force_torque);
-    message["left"]["force_control"] = forceControlJson(snapshot.left_force_control);
-    message["right"]["force_control"] = forceControlJson(snapshot.right_force_control);
     message["last_cartesian_solve"] = {
         {"left", cartesianSolveJson(snapshot.left_cartesian_solve)},
         {"right", cartesianSolveJson(snapshot.right_cartesian_solve)},

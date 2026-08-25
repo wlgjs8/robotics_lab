@@ -7552,11 +7552,15 @@ bool testCartesianSolveRefusalIsVisibleAsCommandRefusal() {
     }, std::chrono::milliseconds(1500)));
 
     const rb_servo::ServoSnapshot blocked = loop.latestSnapshot();
-    // The arm is held at its previous target -- the plan must be told, and the
-    // safety stage is NOT the one that held it, so its own flag stays clear.
-    RB_CHECK(sameJointArray(blocked.left_sent_q_deg, initial));
+    // The plan must be told, and the safety stage is NOT the one that held this
+    // arm, so its own flag stays clear.
     RB_CHECK(blocked.left_cartesian_solve.cartesian_solve_blocked_recent);
     RB_CHECK(!blocked.left_cartesian_solve.safety_intervention_recent);
+    // The arm really is held while the solve is refused: it advanced under the
+    // healthy command above, and now its sent joints stop moving entirely.
+    const rb_servo::JointArray held = blocked.left_sent_q_deg;
+    sleepTicks();
+    RB_CHECK(sameJointArray(loop.latestSnapshot().left_sent_q_deg, held));
 
     // The debounce is short: once the solve recovers, the flag clears and the plan
     // is free to advance again (no permanent freeze).
