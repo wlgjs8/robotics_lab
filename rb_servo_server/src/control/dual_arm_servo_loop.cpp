@@ -34,6 +34,11 @@ namespace {
 // operator holding the arm still cannot drift far during it.
 constexpr std::uint32_t kFtTareSamples = 250;
 
+// How often a standing force-control coverage refusal is repeated on the console.
+// Once per state change, then this, so a long unprotected run keeps saying so
+// without flooding the terminal.
+constexpr uint64_t kForceCoverageLogPeriodNs = 5'000'000'000ULL;
+
 
 
 // Spin-hint for the hybrid sleep-then-spin tail: keeps the core in C0 and yields
@@ -5424,6 +5429,81 @@ ServoTarget DualArmServoLoop::computeServoTarget(
 
     const ControlMode arm_raw_mode[2] = {command.left.mode, command.right.mode};
 
+    // ---- FORCE-CONTROL COVERAGE, AND THE COMPLIANT HOLD --------------------
+    // DECIDED HERE, BEFORE the Cartesian branch below, because a plain Hold never
+    // enters that branch: the follower stage only runs when some arm is already in a
+    // Cartesian mode. A Hold made compliant must therefore be PROMOTED to a
+    // TcpPoseTarget at its latched pose *first*, or force control silently covers
+    // nothing while the config says it is on.
+    //
+    // The coverage verdict is recorded for BOTH arms whether or not they are covered,
+    // so "why did this arm not comply" is a value an operator reads rather than a
+    // thing they have to infer.
+    for (int i = 0; i < 2; ++i) {
+        const ArmId fc_arm = i == 0 ? ArmId::Left : ArmId::Right;
+        const bool fc_left = i == 0;
+        ArmCommand& eff = fc_left ? effective_command.left : effective_command.right;
+        const RobotState& fc_state = fc_left ? left_state : right_state;
+        ForceControlTelemetry& tel =
+            fc_left ? left_force_control_telemetry_ : right_force_control_telemetry_;
+        control::AdmittanceOverlay& overlay = fc_left ? left_overlay_ : right_overlay_;
+        std::optional<Pose6D>& hold_nominal =
+            fc_left ? left_hold_compliance_nominal_ : right_hold_compliance_nominal_;
+
+        tel = ForceControlTelemetry{};
+        tel.enabled = config_.force_control.enable;
+
+        std::string reason;
+        const bool covered = forceControlCovered(fc_arm, eff, fc_state, &reason);
+        tel.coverage_reason = covered ? "covered" : reason;
+        // FORCE CONTROL THAT IS ON AND COVERING NOTHING MAY NOT BE SILENT. The config
+        // says the arm is compliant; if it is not, the operator pushes it, nothing
+        // happens, and there is no way to tell a refusal from a bug. Edge-logged, then
+        // repeated at a low rate so a long unprotected run keeps saying so.
+        if (config_.force_control.enable) {
+            std::string& last = fc_left ? left_fc_reason_logged_ : right_fc_reason_logged_;
+            uint64_t& at = fc_left ? left_fc_reason_logged_ns_ : right_fc_reason_logged_ns_;
+            const uint64_t now_ns = nowSteadyNs();
+            if (tel.coverage_reason != last ||
+                (!covered && now_ns - at > kForceCoverageLogPeriodNs)) {
+                last = tel.coverage_reason;
+                at = now_ns;
+                if (covered) {
+                    std::cerr << "[INFO] force control " << toString(fc_arm) << ": COVERED\n";
+                } else {
+                    std::cerr << "[WARN] force control " << toString(fc_arm)
+                              << " is NOT covering this arm: " << reason << "\n";
+                }
+            }
+        }
+        if (!covered) {
+            // LEAVING SERVICE FREEZES THE DEVIATION AND DROPS THE MOMENTUM - it does
+            // NOT walk it back. Under contact the nominal is inside the workpiece, so
+            // retiring would command the tool the whole deviation deeper.
+            overlay.freeze();
+            hold_nominal.reset();
+            continue;
+        }
+        if (eff.mode != ControlMode::Hold) {
+            hold_nominal.reset();
+            continue;
+        }
+        // A plain Hold has no Cartesian nominal to deviate FROM, so LATCH one on
+        // entry. Re-reading the measured pose every tick would make the nominal
+        // follow the deviation and leave the spring nothing to pull back to - the arm
+        // would simply stay wherever it was pushed.
+        if (!hold_nominal.has_value()) {
+            hold_nominal = *fc_state.tcp_actual_stand;
+            std::cerr << "[INFO] force overlay " << toString(fc_arm)
+                      << ": Hold made compliant, nominal latched at the measured TCP ["
+                      << hold_nominal->x << ", " << hold_nominal->y << ", "
+                      << hold_nominal->z << "] m\n";
+        }
+        eff.mode = ControlMode::TcpPoseTarget;
+        eff.tcp_target_stand = *hold_nominal;
+        eff.has_tcp_target = true;
+    }
+
     // effective_command is final here.
     const ControlMode arm_effective_mode[2] =
         {effective_command.left.mode, effective_command.right.mode};
@@ -5659,82 +5739,40 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         ArmCommand& left_pose_track_command = arm_pose_track_command[0];
         ArmCommand& right_pose_track_command = arm_pose_track_command[1];
 
-        // ---- THE FORCE OVERLAY ------------------------------------------------
+        // ---- THE FORCE OVERLAY: COMPOSE ---------------------------------------
         // Here, and not earlier or later, for one reason: this is the last point at
         // which the target is a CARTESIAN pose and the first at which it is final.
         // Composing before the follower would have the follower plan around a
-        // deviation that the contact is still changing; composing after the IK would
-        // mean deviating joints, which is not what a wrench in the tool frame asks
-        // for. The deviation is composed onto the followed pose and the ORDINARY
-        // Cartesian solve + safety stages run on the result, so IK refusal, the
-        // joint clamps, ROI, self-collision and the floor all still own their veto.
+        // deviation the contact is still changing; composing after the IK would mean
+        // deviating joints, which is not what a wrench in the tool frame asks for.
+        // The ORDINARY Cartesian solve + safety stages then run on the result, so IK
+        // refusal, the joint clamps, ROI, self-collision and the floor all keep their
+        // veto. Coverage and the compliant-Hold promotion were decided above.
         for (int i = 0; i < 2; ++i) {
             const ArmId arm_id = i == 0 ? ArmId::Left : ArmId::Right;
             const bool left_arm = i == 0;
-            ArmCommand& track = arm_pose_track_command[i];
-            const RobotState& arm_state = left_arm ? left_state : right_state;
             ForceControlTelemetry& tel =
                 left_arm ? left_force_control_telemetry_ : right_force_control_telemetry_;
-            control::AdmittanceOverlay& overlay = left_arm ? left_overlay_ : right_overlay_;
-            std::optional<Pose6D>& hold_nominal =
-                left_arm ? left_hold_compliance_nominal_ : right_hold_compliance_nominal_;
-
-            const ForceControlTelemetry blank{};
-            tel = blank;
-            tel.enabled = config_.force_control.enable;
-
-            std::string reason;
-            const bool covered = forceControlCovered(arm_id, track, arm_state, &reason);
-            tel.coverage_reason = covered ? "covered" : reason;
-            if (!covered) {
-                // LEAVING SERVICE FREEZES THE DEVIATION AND DROPS THE MOMENTUM - it
-                // does NOT walk the deviation back. Under contact the followed pose is
-                // INSIDE the workpiece (the deviation is what was holding the command
-                // at the surface), so retiring would command the tool the whole
-                // deviation DEEPER. A stop must come to rest at the pose the arm
-                // ACHIEVED, which is the composition already on the wire.
-                overlay.freeze();
-                hold_nominal.reset();
-                continue;
-            }
-
-            // A plain Hold has no Cartesian nominal, so LATCH one on entry. Re-reading
-            // the measured pose every tick would make the nominal follow the deviation
-            // and leave the spring nothing to pull back to - the arm would simply walk
-            // wherever it was pushed and stay there.
-            if (track.mode == ControlMode::Hold) {
-                if (!hold_nominal.has_value()) {
-                    hold_nominal = *arm_state.tcp_actual_stand;
-                    std::cerr << "[INFO] force overlay " << toString(arm_id)
-                              << ": Hold made compliant, nominal latched at the measured TCP ["
-                              << hold_nominal->x << ", " << hold_nominal->y << ", "
-                              << hold_nominal->z << "] m\n";
-                }
-                track.mode = ControlMode::TcpPoseTarget;
-                track.tcp_target_stand = *hold_nominal;
-                track.has_tcp_target = true;
-            } else {
-                hold_nominal.reset();
-            }
+            if (tel.coverage_reason != "covered") continue;
+            ArmCommand& track = arm_pose_track_command[i];
             if (!track.has_tcp_target) {
                 tel.coverage_reason = "no Cartesian target on this tick";
-                overlay.freeze();
+                (left_arm ? left_overlay_ : right_overlay_).freeze();
                 continue;
             }
+            const RobotState& arm_state = left_arm ? left_state : right_state;
             Pose6D target = track.tcp_target_stand;
             if (applyForceOverlay(arm_id, arm_state, &target)) {
                 track.tcp_target_stand = target;
             }
             // FEED THE GATE TO THE PLAN, not just to the law. The overlay makes the
             // arm YIELD; only the gate stops the PLAN from walking further into what
-            // it is yielding to. Without this the spring's deviation grows for as
-            // long as the stream keeps advancing, and the contact force with it.
+            // it is yielding to. Without this the spring's deviation grows for as long
+            // as the stream keeps advancing, and the contact force with it.
             control::ForceGate& gate = left_arm ? left_force_gate_ : right_force_gate_;
             const Wrench6D& gw = tel.wrench_stand;
             const math::Vector3 f_stand(gw.fx, gw.fy, gw.fz);
             const double fn = f_stand.norm();
-            // The direction pushing INTO the contact is the NEGATION of the measured
-            // reaction: the sensor reports what the environment does to the tool.
             arm_ctx[i].chunk_follower.setAdvanceGate(
                 gate.translation(),
                 fn > 1e-9 ? math::Vector3(f_stand / fn) : math::Vector3::Zero());

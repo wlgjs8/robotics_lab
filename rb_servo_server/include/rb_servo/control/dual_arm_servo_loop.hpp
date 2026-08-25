@@ -700,6 +700,10 @@ private:
     // ticks have passed, then the verdict latches for the run.
     std::uint32_t left_ft_liveness_ticks_ = 0;
     std::uint32_t right_ft_liveness_ticks_ = 0;
+    std::string left_fc_reason_logged_;
+    std::string right_fc_reason_logged_;
+    uint64_t left_fc_reason_logged_ns_ = 0;
+    uint64_t right_fc_reason_logged_ns_ = 0;
     bool left_overlay_bounded_prev_ = false;
     bool right_overlay_bounded_prev_ = false;
     bool left_gate_closed_prev_ = false;
