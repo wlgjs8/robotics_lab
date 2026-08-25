@@ -565,6 +565,15 @@ struct FtTelemetry {
     std::string tare_state;            // "none" | "settling" | "accepted" | "rejected"
     std::string tare_reason;
     int tare_samples = 0;
+    // Automatic-tare-on-InitMotion stage (force_torque.auto_tare_after_init_motion).
+    //   "off"           - not configured for this arm
+    //   "idle"          - configured, nothing pending
+    //   "awaiting_init" - InitMotion requested; the zero is dropped and the tare waits
+    //                     for the arm to reach the init pose
+    //   "settling"      - init pose reached; waiting out settle_sec at rest
+    // The collection itself then shows up in `tare_state` exactly like a manual tare.
+    std::string auto_tare_stage = "off";
+    std::string auto_tare_reason;      // why it last armed, fired or was dropped
     // The heavily low-passed STAND-frame force magnitude, as a mass. Exists to escape
     // the deadzone: the shipped 2 N/axis flattens ~204 g to exactly zero on every
     // compensated channel, and this is the range an operator wants to read.

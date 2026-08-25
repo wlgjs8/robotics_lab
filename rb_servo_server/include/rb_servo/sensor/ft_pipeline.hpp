@@ -108,6 +108,13 @@ public:
     // Commit the averaged samples as the bias. Refuses (returns false, `reason`
     // filled) below `min_samples`.
     bool tareCommit(int min_samples, std::string* reason);
+    // Drop the bias and say it is gone. Used when a new zero has been REQUESTED but
+    // not yet taken (auto-tare on InitMotion): from here forceControlCovered refuses
+    // this arm until a tare is accepted, which is the point - the alternative is a
+    // law regulating against a zero whose provenance nobody can state. Zeroes the
+    // bias value too, so the compensated surface is `raw - gravity` and not
+    // `raw - gravity - (a bias we just declared invalid)`.
+    void invalidateBias();
 
     // ---- the sensor-presence verdict ----------------------------------------
     // Feed one liveness sample during the COLD window. A live RFT always jitters

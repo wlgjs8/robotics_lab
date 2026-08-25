@@ -4194,8 +4194,15 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     // ever written no matter how long the wait -- the intermittent `wrote_row` failure
     // seen repeatedly on 2026-08-26. Push a burst so the assertion tests the FORMAT, not
     // the scheduler. The rows are identical, and the reader below only takes the first.
+    // SPACED, not bursted. push() takes the queue mutex with try_to_lock and DROPS the
+    // sample when the drain thread holds it (an RT trade: the servo tick must not stall
+    // to log itself). A tight burst can land entirely inside one drain window and be lost
+    // in full -- observed exactly that on 2026-08-26, with the diagnostic below reporting
+    // dropped_samples=32 while the file existed but carried no row. 2 ms spacing is wider
+    // than the 1 ms flush period, so the pushes cannot all collide with one drain.
     for (int push_attempt = 0; push_attempt < 32; ++push_attempt) {
         logger.push(sample);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
     const std::filesystem::path latest = std::filesystem::path(cfg.directory) / "servo_log.csv";

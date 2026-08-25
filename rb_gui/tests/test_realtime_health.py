@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from rb_servo_gui.realtime_health import RealtimeTimingHistory, realtime_health_html
+from rb_servo_gui.realtime_health import realtime_health_html
 
 
 class RealtimeHealthTest(unittest.TestCase):
@@ -99,43 +99,6 @@ class RealtimeHealthTest(unittest.TestCase):
         self.assertIn("period p95 420.00 ms", html)
         self.assertIn("jitter p95 12.00 ms", html)
         self.assertIn("stall 2", html)
-
-    def test_recent_history_throttles_and_builds_phase_correlation_plot(self) -> None:
-        history = RealtimeTimingHistory(duration_sec=30.0, sample_period_sec=0.5)
-        state = {
-            "realtime_timing": {
-                "servo": {
-                    "target_rate_hz": 500.0,
-                    "observed_rate_hz": 499.0,
-                    "jitter_ms": {"p95": 0.08},
-                    "send_duration_us": {"p95": 240.0},
-                    "deadline_miss_count": 1,
-                },
-                "feedback": {
-                    "left": {"frame_rate_hz": 500.0, "age_us": {"p95": 700.0}, "phase_us": {"p95": 600.0}},
-                    "right": {"frame_rate_hz": 499.0, "age_us": {"p95": 900.0}, "phase_us": {"p95": 1300.0}},
-                },
-            }
-        }
-        inference = {
-            "inference_timing": {
-                "inference_period_ms": 400.0,
-                "rolling": {"inference_latency_ms": {"p95_ms": 150.0}},
-                "inference_period_jitter": {"p95_ms": 11.0},
-            }
-        }
-
-        self.assertTrue(history.add(state, inference, now=10.0))
-        self.assertFalse(history.add(state, inference, now=10.1))
-        self.assertTrue(history.add(state, inference, now=10.5))
-        figure = history.figure()
-        names = {trace.name for trace in figure.data}
-
-        self.assertIn("servo Hz", names)
-        self.assertIn("feedback R Hz", names)
-        self.assertIn("deadline misses / window", names)
-        self.assertIn("inference latency p95 ms", names)
-        self.assertEqual(list(next(trace for trace in figure.data if trace.name == "servo Hz").y), [499.0, 499.0])
 
 
 if __name__ == "__main__":

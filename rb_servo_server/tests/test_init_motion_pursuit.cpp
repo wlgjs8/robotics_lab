@@ -485,6 +485,100 @@ bool test_brake_plan() {
     return true;
 }
 
+// ---- automatic tare on InitMotion -------------------------------------------
+// The claim under test is the one the hardware pays for: the zero is NEVER averaged
+// while the arm is moving, and an InitMotion that does not reach the init pose leaves
+// no tare behind.
+bool test_auto_tare_after_init() {
+    const auto tick = [](AutoTareStage stage, AutoTareInitPhase phase, double speed,
+                         double settled, bool fault = false) {
+        AutoTareTickInput in;
+        in.stage = stage;
+        in.init_phase = phase;
+        in.sent_speed_deg_s = speed;
+        in.settled_sec = settled;
+        in.fault_latched = fault;
+        in.settle_sec = 0.5;
+        in.max_sent_speed_deg_s = 0.5;
+        return stepAutoTareDecision(in);
+    };
+
+    // Not armed -> nothing ever happens, whatever the sequencer says.
+    {
+        const AutoTareTickResult r = tick(AutoTareStage::Idle, AutoTareInitPhase::Reached, 0.0, 10.0);
+        RB_CHECK(r.stage == AutoTareStage::Idle);
+        RB_CHECK(!r.fire_tare);
+        RB_CHECK(!r.dropped);
+    }
+    // Armed and the move is running: WAIT. This is the whole point — sampling here
+    // would average the arm's own acceleration and the tool's swing as force.
+    {
+        const AutoTareTickResult r =
+            tick(AutoTareStage::AwaitingInit, AutoTareInitPhase::InFlight, 40.0, 99.0);
+        RB_CHECK(r.stage == AutoTareStage::AwaitingInit);
+        RB_CHECK(!r.fire_tare);
+    }
+    // The init pose is reached -> settle, and the window starts NOW (not when the
+    // request was made).
+    {
+        const AutoTareTickResult r =
+            tick(AutoTareStage::AwaitingInit, AutoTareInitPhase::Reached, 0.0, 99.0);
+        RB_CHECK(r.stage == AutoTareStage::Settling);
+        RB_CHECK(r.restart_settle_timer);
+        RB_CHECK(!r.fire_tare);
+    }
+    // Settling but the command is still moving (arrival taper, or a new command took
+    // the arm away): RESTART the window rather than sample through it.
+    {
+        const AutoTareTickResult r = tick(AutoTareStage::Settling, AutoTareInitPhase::Reached, 5.0, 99.0);
+        RB_CHECK(r.stage == AutoTareStage::Settling);
+        RB_CHECK(r.restart_settle_timer);
+        RB_CHECK(!r.fire_tare);
+    }
+    // Still, but the settle window has not elapsed: wait, do not restart.
+    {
+        const AutoTareTickResult r = tick(AutoTareStage::Settling, AutoTareInitPhase::Reached, 0.0, 0.4);
+        RB_CHECK(r.stage == AutoTareStage::Settling);
+        RB_CHECK(!r.restart_settle_timer);
+        RB_CHECK(!r.fire_tare);
+    }
+    // Still AND settled -> fire exactly once, then disarm (no repeat next tick).
+    {
+        const AutoTareTickResult r = tick(AutoTareStage::Settling, AutoTareInitPhase::Reached, 0.5, 0.5);
+        RB_CHECK(r.fire_tare);
+        RB_CHECK(r.stage == AutoTareStage::Idle);
+        RB_CHECK(!r.dropped);
+        const AutoTareTickResult again = tick(r.stage, AutoTareInitPhase::Reached, 0.0, 10.0);
+        RB_CHECK(!again.fire_tare);
+    }
+    // A failed InitMotion has no init pose to tare at: drop, never fire.
+    {
+        const AutoTareTickResult r =
+            tick(AutoTareStage::AwaitingInit, AutoTareInitPhase::Failed, 0.0, 99.0);
+        RB_CHECK(r.dropped);
+        RB_CHECK(!r.fire_tare);
+        RB_CHECK(r.stage == AutoTareStage::Idle);
+    }
+    // Cancelled / reset mid-flight (no exec claims this arm any more): same.
+    {
+        const AutoTareTickResult r =
+            tick(AutoTareStage::AwaitingInit, AutoTareInitPhase::None, 0.0, 99.0);
+        RB_CHECK(r.dropped);
+        RB_CHECK(!r.fire_tare);
+    }
+    // A latched fault freezes the sequencer, so a waiting tare must give up rather
+    // than wait on a status that can no longer change. True from either stage.
+    {
+        const AutoTareTickResult a =
+            tick(AutoTareStage::AwaitingInit, AutoTareInitPhase::InFlight, 0.0, 99.0, true);
+        RB_CHECK(a.dropped && !a.fire_tare);
+        const AutoTareTickResult b =
+            tick(AutoTareStage::Settling, AutoTareInitPhase::Reached, 0.0, 99.0, true);
+        RB_CHECK(b.dropped && !b.fire_tare);
+    }
+    return true;
+}
+
 int main() {
     bool ok = true;
     ok = test_brake_plan() && ok;
@@ -496,6 +590,7 @@ int main() {
     ok = test_degenerate_segment_is_passed() && ok;
     ok = test_escape_head_followed_precisely() && ok;
     ok = test_request_freshness() && ok;
+    ok = test_auto_tare_after_init() && ok;
     if (!ok) {
         std::cerr << "test_init_motion_pursuit: FAILED\n";
         return 1;

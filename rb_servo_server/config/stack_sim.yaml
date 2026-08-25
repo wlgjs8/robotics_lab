@@ -95,8 +95,12 @@ safety:
   # reach +/-360. Clamped here so JointTarget/InitMotion PTP (which bypass IK) and
   # shortest-path goal selection never command an unreachable J3. Mirrors the IK URDF
   # limit (rb3_730e.urdf: elbow +/-2.618 rad); see docs/joint_range_policy.md.
-  q_min_deg: [-360, -360, -160, -360, -360, -360]
-  q_max_deg: [360, 360, 160, 360, 360, 360]
+  # 2026-08-26: J3 back to the catalog +/-150 (was +/-160), mirroring stack_real.yaml.
+  # The IK URDF is model-limited to +/-150, so the extra 10 deg was only reachable by
+  # JointTarget/InitMotion PTP -- a band Cartesian control could never command out of.
+  # See stack_real.yaml and docs/joint_range_policy.md for the measurement.
+  q_min_deg: [-360, -360, -150, -360, -360, -360]
+  q_max_deg: [360, 360, 150, 360, 360, 360]
   # Halved vs the sim profile for the first physical run.
   # dq_max_deg_s: [60, 60, 60, 90, 90, 120]      # was halved [30,30,30,45,45,60] for first run
   dq_max_deg_s: [170, 170, 170, 240, 240, 320]      # 2026-06-28 3rd raise (user: much faster); was [140,140,140,200,200,280]

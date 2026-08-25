@@ -185,6 +185,7 @@ from rb_servo_gui.scene import (
     update_user_floor_plane,
 )
 from rb_servo_gui.status_panel import (
+    _arm_ft_summary,
     _format_ft_status,
     _format_force_control_status,
     _format_floor_constraint_status,
@@ -6494,6 +6495,51 @@ class FtMonitorRenderTest(unittest.TestCase):
         self.assertIn("F/T 영점", self._notes(html))
         for leaked in ("18.1", "41.8", "-1.1", "2.1"):
             self.assertNotIn(leaked, html)
+
+    def test_auto_tare_pending_says_wait_not_press(self):
+        """While the SERVER's auto-tare is armed, telling the operator to press the
+        button is wrong advice, not just noise.
+
+        force_torque.auto_tare_after_init_motion drops the zero at the InitMotion
+        REQUEST and retakes it once the arm is parked and still. For that whole window
+        bias_valid is false but nothing needs pressing.
+        """
+        for stage, expect in (("awaiting_init", "init 자세"), ("settling", "안정화")):
+            html = _render_ft_monitor_rows(
+                self._state(dict(
+                    self._TARED,
+                    bias_valid=False,
+                    bias_source="none",
+                    auto_tare_stage=stage,
+                )),
+                stale=False,
+            )
+            self.assertEqual("대기", self._cells(html, "영점")[0], stage)
+            self.assertIn(expect, self._notes(html), stage)
+            self.assertNotIn("버튼을 누르세요", self._notes(html), stage)
+        # ... and with auto-tare off/idle the instruction is the button again.
+        html = _render_ft_monitor_rows(
+            self._state(dict(
+                self._TARED, bias_valid=False, bias_source="none", auto_tare_stage="idle",
+            )),
+            stale=False,
+        )
+        self.assertEqual("필요", self._cells(html, "영점")[0])
+        self.assertIn("F/T 영점", self._notes(html))
+
+    def test_status_line_also_distinguishes_armed_auto_tare_from_untared(self):
+        """The one-line status bar carries the same distinction as the card."""
+        base = dict(self._TARED, bias_valid=False, bias_source="none")
+        arm = self._state(dict(base, auto_tare_stage="awaiting_init")).left
+        self.assertIn("auto-tare armed", _arm_ft_summary(arm))
+        arm = self._state(dict(base, auto_tare_stage="settling")).left
+        self.assertIn("auto-tare settling", _arm_ft_summary(arm))
+        arm = self._state(dict(base, auto_tare_stage="off")).left
+        self.assertIn("press F/T 영점", _arm_ft_summary(arm))
+        # A valid zero never mentions the auto-tare at all.
+        arm = self._state(dict(self._TARED, auto_tare_stage="idle")).left
+        self.assertIn("zeroed", _arm_ft_summary(arm))
+        self.assertNotIn("auto-tare", _arm_ft_summary(arm))
 
     def test_nothing_to_read_is_a_dash_not_a_zero(self):
         """"--" and "0.00" are different answers, and collapsing them is what makes a

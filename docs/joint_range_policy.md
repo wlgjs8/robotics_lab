@@ -25,18 +25,32 @@ scope is represented as explicit per-joint raw limits:
 
 ```yaml
 safety:
-  q_min_deg: [-360, -360, -160, -360, -360, -360]
-  q_max_deg: [360, 360, 160, 360, 360, 360]
+  q_min_deg: [-360, -360, -150, -360, -360, -360]
+  q_max_deg: [360, 360, 150, 360, 360, 360]
 ```
 
 J3 (elbow) is **not** `+/-360`: the RB3-730E elbow physical range is `+/-150 deg`
-(catalog). The tracked stack configs currently use a narrow site margin of
-`+/-160 deg` so JointTarget/InitMotion PTP and shortest-path goal selection stay
-near the true hardware range while leaving a small operational margin around the
-catalog value. The IK URDF model still uses the physical `+/-150 deg` limit, so
-Cartesian IK may hold before the final raw safety clamp (see "Kinematics
-Alignment" below).
+(catalog), and the tracked stack configs clamp to exactly that. The IK URDF model
+uses the same `+/-150 deg` limit, so the raw safety clamp and the kinematic model
+agree and there is no band where one permits what the other refuses.
 The other joints stay at the broad `+/-360` raw controller range.
+
+**History (2026-08-26): the `+/-160 deg` site margin was REVERTED.** From 2026-07
+these arrays carried `+/-160` on J3 as an "operational margin" around the catalog
+value. That margin was not usable range — it was a trap. `JointTarget` /
+`InitMotion` PTP bypass IK and pass only this clamp, so they could park the elbow
+inside the `150..160 deg` band; every subsequent Cartesian tick was then refused
+by IK, which is model-limited to `+/-150` and (per the URDF comment) must stay
+there so the solver never selects an elbow branch the controller would
+reject/clamp. Measured on real pi0.5 rollouts, the left elbow sat pinned at
+exactly `150.000 deg` for 7 s (`servo_log_20260826_063359.csv`) and 4.5 s
+(`servo_log_20260826_075010.csv`). Narrowing back to `+/-150` is the safe
+direction: it removes the band and silences the startup
+`safety q_min/q_max differs from ... URDF IK limit` WARN.
+
+A pose that needs `|J3| > 150 deg` is genuinely unreachable on this hardware.
+Widening either limit to "fix" it only defers the failure to the controller as a
+silent branch jump — do not do it. Move the commanded pose instead.
 
 Tracked rbpodo stack configs (`rb_servo_server/config/stack_real.yaml` and
 `rb_servo_server/config/stack_sim.yaml`) must carry these arrays explicitly.

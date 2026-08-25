@@ -146,11 +146,14 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(stack_real.left_robot.disable_waiting_ack);
         RB_CHECK(stack_real.right_robot.disable_waiting_ack);
         RB_CHECK(near(stack_real.safety.q_min_deg[0], -360.0));
-        // J3 (elbow) is clamped near the RB3-730E physical range, not +/-360.
-        // Site-raised from the +/-150 catalog value to +/-160 (2026-07 stack
-        // config safety-margin adjustment).
-        RB_CHECK(near(stack_real.safety.q_min_deg[2], -160.0));
-        RB_CHECK(near(stack_real.safety.q_max_deg[2], 160.0));
+        // J3 (elbow) is clamped to the RB3-730E physical range, not +/-360, and it must
+        // MATCH the IK URDF limit. The 2026-07 +/-160 "site margin" was reverted on
+        // 2026-08-26: PTP bypasses IK and passes only this clamp, so the extra 10 deg let
+        // the elbow be parked in a band Cartesian control could never command out of
+        // (measured: pinned at exactly 150.000 deg for 7 s / 4.5 s on real rollouts).
+        // See docs/joint_range_policy.md.
+        RB_CHECK(near(stack_real.safety.q_min_deg[2], -150.0));
+        RB_CHECK(near(stack_real.safety.q_max_deg[2], 150.0));
         RB_CHECK(stack_real.network.command_bind == "udp://127.0.0.1:50256");
         RB_CHECK(stack_real.network.state_pub_endpoint == "udp://127.0.0.1:50356");
         RB_CHECK(stack_real.network.state_pub_endpoints.size() == 4);
@@ -316,10 +319,10 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(!stack_sim.servo.rbpodo_async_streaming.enable);
         RB_CHECK(near(stack_sim.safety.q_min_deg[0], -360.0));
         // J3 (elbow) is clamped near the RB3-730E physical range, not +/-360.
-        // Site-raised from the +/-150 catalog value to +/-160 (2026-07 stack
-        // config safety-margin adjustment).
-        RB_CHECK(near(stack_sim.safety.q_min_deg[2], -160.0));
-        RB_CHECK(near(stack_sim.safety.q_max_deg[2], 160.0));
+        // Matches stack_real.yaml and the IK URDF; the 2026-07 +/-160 margin was
+        // reverted 2026-08-26 (docs/joint_range_policy.md).
+        RB_CHECK(near(stack_sim.safety.q_min_deg[2], -150.0));
+        RB_CHECK(near(stack_sim.safety.q_max_deg[2], 150.0));
         RB_CHECK(stack_sim.safety.controller_simulation_tracking_error_source ==
                  rb_servo::ControllerSimulationTrackingErrorSource::Reference);
         RB_CHECK(stack_sim.safety.controller_simulation_tracking_error_nonlatching);
@@ -1511,9 +1514,70 @@ bool testInitMotionBrakeConfigValidation() {
     return true;
 }
 
+bool testAutoTareAfterInitMotionConfigValidation() {
+    const std::filesystem::path stack_real_path =
+        servoRoot() / "config" / "stack_real.yaml";
+    // The tracked real stack ships it ON, with both numbers stated.
+    {
+        const rb_servo::DualArmConfig cfg =
+            rb_servo::loadConfigFromYaml(stack_real_path.string());
+        const rb_servo::FtAutoTareConfig& at =
+            cfg.force_torque.auto_tare_after_init_motion;
+        RB_CHECK(at.enable);
+        RB_CHECK(at.settle_sec > 0.0);
+        RB_CHECK(at.max_sent_speed_deg_s > 0.0);
+        RB_CHECK(at.invalidate_on_request);
+    }
+    // NO SILENT DEFAULT for the settle: a zero would average the arrival transient.
+    {
+        std::string body = readFile(stack_real_path);
+        RB_CHECK(replaceOnce(&body, "    settle_sec: 0.5", "    settle_sec: 0.0"));
+        const std::string path = writeTempConfig("auto-tare-settle-zero", body);
+        const bool rejected = loadRejectsContaining(
+            path, "auto_tare_after_init_motion.enable requires a positive settle_sec");
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+    // ... nor for the stillness gate.
+    {
+        std::string body = readFile(stack_real_path);
+        RB_CHECK(replaceOnce(&body, "    max_sent_speed_deg_s: 0.5",
+                             "    max_sent_speed_deg_s: 0.0"));
+        const std::string path = writeTempConfig("auto-tare-speed-zero", body);
+        const bool rejected = loadRejectsContaining(
+            path, "auto_tare_after_init_motion.enable requires a positive max_sent_speed_deg_s");
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+    // With the InitMotion planner off there is no completion event, so the tare would
+    // never fire. Refuse rather than be silently inert.
+    {
+        std::string body = readFile(stack_real_path);
+        RB_CHECK(replaceOnce(&body, "  init_motion_planner:\n    enable: true",
+                             "  init_motion_planner:\n    enable: false"));
+        const std::string path = writeTempConfig("auto-tare-no-planner", body);
+        const bool rejected = loadRejectsContaining(
+            path, "requires safety.init_motion_planner.enable");
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+    // Unknown keys inside the block fail closed like every other section.
+    {
+        std::string body = readFile(stack_real_path);
+        RB_CHECK(replaceOnce(&body, "    settle_sec: 0.5",
+                             "    settle_sec: 0.5\n    tare_immediately: true"));
+        const std::string path = writeTempConfig("auto-tare-unknown-key", body);
+        const bool rejected = loadRejects(path);
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+    return true;
+}
+
 int main() {
     if (!testRepositoryConfigsParse()) return 1;
     if (!testInitMotionBrakeConfigValidation()) return 1;
+    if (!testAutoTareAfterInitMotionConfigValidation()) return 1;
     if (!testServoIoModelParsesAndValidates()) return 1;
     if (!testQueueSyncConfigValidation()) return 1;
     if (!testWorkerRealtimeScheduling()) return 1;

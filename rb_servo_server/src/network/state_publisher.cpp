@@ -75,6 +75,8 @@ nlohmann::json ftJson(const FtTelemetry& t) {
         {"tare_state", t.tare_state},
         {"tare_reason", t.tare_reason},
         {"tare_samples", t.tare_samples},
+        {"auto_tare_stage", t.auto_tare_stage},
+        {"auto_tare_reason", t.auto_tare_reason},
         {"load_force_n", t.load_force_n},
         {"load_mass_kg", t.load_mass_kg},
         {"load_settled", t.load_settled},

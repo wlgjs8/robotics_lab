@@ -97,7 +97,7 @@ from .recording_control import (
     normalize_recording_status,
     parse_udp_endpoint,
 )
-from .realtime_health import RealtimeTimingHistory, realtime_health_html
+from .realtime_health import realtime_health_html
 from .safety import (
     OperatorSafety,
     normalize_observed_mode_backend,
@@ -2386,6 +2386,22 @@ def _ft_arm_reading(arm: Any) -> _FtArmReading:
         # server refuses to let any law cover an untared arm ("F/T has no bias yet"),
         # so nothing whatsoever is acting on those numbers. Zero is the honest reading
         # of "no measured change from a zero you have not set yet".
+        #
+        # Naming the BUTTON is wrong while the server's own auto-tare is armed
+        # (force_torque.auto_tare_after_init_motion): it drops the zero at the
+        # InitMotion request and retakes it once the arm is parked, so for that window
+        # the honest instruction is "wait", not "press".
+        auto_stage = str(ft.get("auto_tare_stage") or "off")
+        if auto_stage == "awaiting_init":
+            return _FtArmReading(
+                "대기", "rb-monitor-warn",
+                "InitMotion 자동 영점 대기 중 - init 자세 도달 후 자동으로 잡힙니다",
+                [0.0] * 6, ft)
+        if auto_stage == "settling":
+            return _FtArmReading(
+                "대기", "rb-monitor-warn",
+                "InitMotion 자동 영점 - init 자세에서 안정화 중",
+                [0.0] * 6, ft)
         return _FtArmReading(
             "필요", "rb-monitor-warn", "영점 조절 전 - F/T 영점 버튼을 누르세요",
             [0.0] * 6, ft)
@@ -2861,17 +2877,6 @@ def _update_realtime_health(
                 handle.value = "Realtime timing telemetry unavailable"
             except Exception:
                 pass
-    history = handles.get("realtime_history")
-    if isinstance(history, RealtimeTimingHistory) and history.add(
-        latest.raw if latest is not None and not stale else None,
-        chunk.raw if chunk_current else None,
-    ):
-        plot = handles.get("realtime_plot")
-        if plot is not None:
-            try:
-                plot.figure = history.figure()
-            except Exception:
-                pass
 
 
 def _tab_theme_html(dark: bool = True) -> str:
@@ -3032,17 +3037,6 @@ def build_gui(
             handles["realtime_health"] = _add_status_html(
                 realtime_health_html(None, None, stale=True)
             )
-        handles["realtime_history"] = RealtimeTimingHistory()
-        _add_plotly = getattr(server.gui, "add_plotly", None)
-        if callable(_add_plotly):
-            try:
-                with server.gui.add_folder("Realtime timing · 최근 30초", expand_by_default=True):
-                    handles["realtime_plot"] = _add_plotly(
-                        handles["realtime_history"].figure(),
-                        aspect=1.35,
-                    )
-            except Exception:
-                pass
         handles["connection"] = server.gui.add_text("Connection", initial_value="disconnected", disabled=True)
         handles["mode"] = server.gui.add_text("Observed mode/backend", initial_value=f"{safety.observed_server_mode}/{safety.observed_backend}", disabled=True)
         handles["readiness"] = server.gui.add_text("Readiness", initial_value="No-Go: no state", disabled=True)

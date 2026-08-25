@@ -70,6 +70,51 @@ const char* toString(FreedriveStage stage);
 bool crossArmPeerUsable(std::uint64_t published_tick, std::uint64_t now_tick,
                         std::uint64_t max_age_ticks);
 
+// ---- automatic tare on InitMotion -------------------------------------------
+// force_torque.auto_tare_after_init_motion. The InitMotion request ARMS the tare and
+// the samples are taken only once the arm has reached the init pose and stood still:
+// a tare averages `raw - gravity` over 250 consecutive ticks, and an arm that is still
+// moving folds its own acceleration and the tool's swing into that average.
+enum class AutoTareStage {
+    Idle,           // nothing pending
+    AwaitingInit,   // InitMotion in flight; waiting for it to reach the init pose
+    Settling,       // init pose reached; waiting out settle_sec at rest
+};
+
+// What the InitMotion sequencer says about the arm being waited on. The caller maps
+// its exec status onto this, so the decision below does not need the sequencer's own
+// (private) status enum.
+enum class AutoTareInitPhase {
+    None,       // no exec claims this arm: cancelled, reset, or never launched
+    InFlight,   // Planning or Executing
+    Reached,    // Done - the arm is at the init pose
+    Failed,     // planning failed, stalled, or timed out
+};
+
+struct AutoTareTickInput {
+    AutoTareStage stage = AutoTareStage::Idle;
+    bool fault_latched = false;
+    AutoTareInitPhase init_phase = AutoTareInitPhase::None;
+    // Last SENT joint velocity (sentJointSpeedDegS). The measured joints keep
+    // jittering at rest; the command does not.
+    double sent_speed_deg_s = 0.0;
+    double settled_sec = 0.0;          // time since the settle window last (re)started
+    double settle_sec = 0.0;           // config
+    double max_sent_speed_deg_s = 0.0; // config
+};
+
+struct AutoTareTickResult {
+    AutoTareStage stage = AutoTareStage::Idle;
+    bool restart_settle_timer = false;  // enter Settling, or the arm moved again
+    bool fire_tare = false;             // request the 250-tick average NOW
+    bool dropped = false;               // armed, then abandoned without a tare
+    const char* reason = "";            // "" when nothing notable happened
+};
+
+// One tick of the auto-tare machine. Stateless, so it is unit-testable in isolation
+// (see test_init_motion_pursuit).
+AutoTareTickResult stepAutoTareDecision(const AutoTareTickInput& in);
+
 class DualArmServoLoop {
 public:
     DualArmServoLoop(
@@ -778,6 +823,17 @@ private:
     std::uint32_t left_tare_ticks_ = 0;
     std::uint32_t right_tare_ticks_ = 0;
 
+    // ---- automatic tare on InitMotion (force_torque.auto_tare_after_init_motion) --
+    // The InitMotion REQUEST arms this; the samples are taken only once that arm has
+    // reached the init pose and stood still, because a tare averaged while the arm is
+    // moving records the move, not the sensor's zero. All of it lives on the servo
+    // thread (armAutoTareAfterInit is called from applyInitMotionSequencer). The
+    // per-tick decision itself is the stateless stepAutoTareDecision() below.
+    AutoTareStage left_auto_tare_stage_ = AutoTareStage::Idle;
+    AutoTareStage right_auto_tare_stage_ = AutoTareStage::Idle;
+    std::uint64_t left_auto_tare_settle_start_ns_ = 0;
+    std::uint64_t right_auto_tare_settle_start_ns_ = 0;
+
     control::FollowerOutputSmd left_follower_output_smd_{FollowerOutputSmdConfig{}};
     control::FollowerOutputSmd right_follower_output_smd_{FollowerOutputSmdConfig{}};
     control::DeltaTwistFollower left_delta_twist_follower_{control::DeltaTwistFollowerConfig{}};
@@ -1016,6 +1072,17 @@ private:
     math::Vector3 gatePlanAdvance(ArmId arm, const math::Vector3& advance_stand);
     // An operator/GUI tare request. Thread-safe deposit; drained on the RT loop.
     void requestFtTare(ArmId arm);
+    // ---- automatic tare on InitMotion --------------------------------------
+    // Arm it. Called from applyInitMotionSequencer on the tick an InitMotion request
+    // is accepted for this arm, i.e. when the move STARTS. It does not sample: it
+    // drops the previous zero (config invalidate_on_request) and waits.
+    void armAutoTareAfterInit(ArmId arm);
+    // Advance it. Called once per tick BEFORE applyInitMotionSequencer, so the
+    // Done status the sequencer set on the previous tick is still visible (the next
+    // non-init command resets the exec to Idle). Fires requestFtTare once the arm has
+    // reached the init pose, waited settle_sec, and its SENT joint velocity is below
+    // max_sent_speed_deg_s.
+    void stepAutoTareAfterInit(ArmId arm);
     // Context overloads: the caller hands over one arm and stops naming it. The
     // long-parameter forms above keep the implementation, so adopting these is a
     // call-site change with no behaviour change.

@@ -181,6 +181,13 @@ void FtPipeline::tareSample() {
     ++tare_count_;
 }
 
+void FtPipeline::invalidateBias() {
+    bias_ = Wrench6D{};
+    bias_valid_ = false;
+    bias_source_ = "none";
+    tareReset();
+}
+
 void FtPipeline::tareReset() {
     tare_force_sum_.setZero();
     tare_torque_sum_.setZero();

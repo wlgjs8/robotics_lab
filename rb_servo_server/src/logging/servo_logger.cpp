@@ -327,6 +327,7 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_ft_bias_generation"
        << ',' << side << "_ft_tare_state"
        << ',' << side << "_ft_tare_samples"
+       << ',' << side << "_ft_auto_tare_stage"
        << ',' << side << "_ft_load_force_n"
        << ',' << side << "_ft_load_mass_kg"
        << ',' << side << "_ft_load_settled"
@@ -661,6 +662,7 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << ft.bias_generation
        << ',' << csvEscape(ft.tare_state)
        << ',' << ft.tare_samples
+       << ',' << csvEscape(ft.auto_tare_stage)
        << ',' << ft.load_force_n
        << ',' << ft.load_mass_kg
        << ',' << ft.load_settled

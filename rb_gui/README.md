@@ -111,12 +111,6 @@ feedback frames, and each arm's feedback receipt phase relative to the 2 ms
 scheduled servo tick. Controller-time freshness is labeled unverified when the
 source timestamp is not trustworthy.
 
-An optional Plotly panel keeps the most recent 30 seconds at 2 Hz display
-sampling. Its aligned rows compare servo/feedback rates, p95 dispatch/jitter/
-feedback age, left/right feedback phase plus deadline-miss count, and inference
-latency/jitter. This history is for visual correlation; the numeric p95/max
-values still come from the producer-side aggregates.
-
 Inference timing is read from the optional `inference_timing` block on the
 policy chunk overlay. Missing blocks remain backward compatible and are shown
 as unavailable. These displays are diagnostic telemetry only; they do not

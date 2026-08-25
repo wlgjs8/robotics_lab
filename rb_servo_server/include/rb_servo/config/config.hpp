@@ -783,11 +783,12 @@ struct InitMotionPlannerConfig {
 // sqrt(2 * a_brake * margin) so the joint coasts to a stop AT the bound. Motion away
 // from the bound is never touched, so the arm is always free to back out.
 //
-// `q_min_deg`/`q_max_deg` default to safety.q_min_deg/q_max_deg. Override them when the
-// binding limit is not the controller range -- on RB3-730E the IK model limit for J3 is
-// +/-150 deg while the controller range is +/-160, and it is the IK limit that refuses
-// the solve, so braking against +/-160 would let the arm pin itself in a band it can
-// reach but cannot be commanded through.
+// `q_min_deg`/`q_max_deg` default to safety.q_min_deg/q_max_deg. Set them explicitly to
+// pin WHICH limit the barrier brakes against: on RB3-730E the binding limit is the IK
+// model's J3 = +/-150 deg, and safety.q_min_deg/q_max_deg now carries the same value
+// (its +/-160 site margin was reverted 2026-08-26 because PTP could park the elbow in
+// that band while IK could never command out of it). Stating it here means a future
+// widening of the safety clamp cannot silently move the braking point.
 struct JointLimitBarrierConfig {
     bool enable = false;
     JointArray q_min_deg{};      // empty/zero => inherit safety.q_min_deg

@@ -2677,6 +2677,13 @@ void DualArmServoLoop::loopMain() {
         updateCommandExecutionRates(ArmId::Left, left_state);
         updateCommandExecutionRates(ArmId::Right, right_state);
 
+        // Automatic tare on InitMotion, BEFORE the pipeline (so a tare it fires is
+        // drained on this same tick) and before applyInitMotionSequencer further down
+        // (so the Done status the sequencer set last tick is still readable - the next
+        // non-init command resets the exec to Idle).
+        stepAutoTareAfterInit(ArmId::Left);
+        stepAutoTareAfterInit(ArmId::Right);
+
         stepFtPipeline(ArmId::Left, left_state);
         stepFtPipeline(ArmId::Right, right_state);
 
@@ -7590,6 +7597,194 @@ void DualArmServoLoop::requestFtTare(ArmId arm) {
     (arm == ArmId::Left ? left_tare_request_ : right_tare_request_).store(true);
 }
 
+// ---- automatic tare on InitMotion ------------------------------------------
+// WHY THE ZERO IS NOT TAKEN WHEN THE MOVE STARTS. A tare averages `raw - gravity`
+// over 250 consecutive ticks (0.5 s). During an InitMotion the arm is accelerating
+// and the tool is swinging, and the sensor cannot tell that apart from an external
+// load: the average would record the move. So the REQUEST arms this, and the samples
+// are collected once the arm is parked at the init pose and standing still.
+
+void DualArmServoLoop::armAutoTareAfterInit(ArmId arm) {
+    const FtAutoTareConfig& cfg = config_.force_torque.auto_tare_after_init_motion;
+    if (!cfg.enable || !config_.force_torque.enable) return;
+    const bool left = arm == ArmId::Left;
+    const FtArmConfig& ft_cfg = left ? config_.force_torque.left : config_.force_torque.right;
+    if (!ft_cfg.enable) return;
+
+    AutoTareStage& stage = left ? left_auto_tare_stage_ : right_auto_tare_stage_;
+    FtTelemetry& tel = left ? left_ft_telemetry_ : right_ft_telemetry_;
+    sensor::FtPipeline& pipe = left ? left_ft_pipeline_ : right_ft_pipeline_;
+
+    // A tare that was already collecting belongs to the pose the arm is LEAVING.
+    (left ? left_tare_request_ : right_tare_request_).store(false);
+    (left ? left_tare_ticks_ : right_tare_ticks_) = 0;
+    pipe.tareReset();
+
+    if (cfg.invalidate_on_request) {
+        // FAIL-CLOSED across the whole move: from here until a new zero is accepted
+        // this arm has NO bias, so forceControlCovered refuses it. An InitMotion that
+        // fails, stalls or is cancelled therefore cannot leave a zero standing that
+        // the operator believes was just refreshed.
+        pipe.invalidateBias();
+        tel.tare_state = "none";
+        tel.tare_reason = "zero dropped: auto-tare armed by InitMotion";
+    }
+    stage = AutoTareStage::AwaitingInit;
+    (left ? left_auto_tare_settle_start_ns_ : right_auto_tare_settle_start_ns_) = 0;
+    tel.auto_tare_stage = "awaiting_init";
+    tel.auto_tare_reason = "InitMotion requested; the zero is taken once the arm is parked";
+    std::cerr << "[INFO] F/T " << toString(arm)
+              << " auto-tare ARMED by InitMotion"
+              << (cfg.invalidate_on_request ? " (previous zero dropped)" : "")
+              << "; sampling starts after the init pose is reached and held "
+              << cfg.settle_sec << " s\n";
+}
+
+void DualArmServoLoop::stepAutoTareAfterInit(ArmId arm) {
+    const FtAutoTareConfig& cfg = config_.force_torque.auto_tare_after_init_motion;
+    const bool left = arm == ArmId::Left;
+    AutoTareStage& stage = left ? left_auto_tare_stage_ : right_auto_tare_stage_;
+    FtTelemetry& tel = left ? left_ft_telemetry_ : right_ft_telemetry_;
+    const FtArmConfig& ft_cfg = left ? config_.force_torque.left : config_.force_torque.right;
+
+    if (!cfg.enable || !config_.force_torque.enable || !ft_cfg.enable) {
+        stage = AutoTareStage::Idle;
+        tel.auto_tare_stage = "off";
+        return;
+    }
+    if (stage == AutoTareStage::Idle) {
+        tel.auto_tare_stage = "idle";
+        return;
+    }
+
+    std::uint64_t& settle_start_ns =
+        left ? left_auto_tare_settle_start_ns_ : right_auto_tare_settle_start_ns_;
+
+    // WHICH exec drives this arm. A both-arm InitMotion runs on the LEFT exec for both
+    // arms; a single-arm one runs on its own. Nothing claiming this arm means the
+    // sequence was cancelled or reset — which is why this runs BEFORE
+    // applyInitMotionSequencer: the Done status set on the previous tick is still
+    // readable, and the next non-init command is what resets the exec to Idle.
+    AutoTareInitPhase phase = AutoTareInitPhase::None;
+    for (const InitMotionExec* ex : {&left_init_motion_exec_, &right_init_motion_exec_}) {
+        const bool drives = left ? ex->left_active : ex->right_active;
+        if (!drives) continue;
+        switch (ex->status) {
+            case InitMotionStatus::Planning:
+            case InitMotionStatus::Executing: phase = AutoTareInitPhase::InFlight; break;
+            case InitMotionStatus::Done:      phase = AutoTareInitPhase::Reached; break;
+            case InitMotionStatus::Failed:    phase = AutoTareInitPhase::Failed; break;
+            case InitMotionStatus::Idle:
+            default:                          continue;
+        }
+        break;
+    }
+
+    const double dt_sec = 1.0 / static_cast<double>(std::max(1, config_.servo.rate_hz));
+    const std::uint64_t now_ns = nowSteadyNs();
+
+    AutoTareTickInput in;
+    in.stage = stage;
+    in.fault_latched = fault_latched_.load();
+    in.init_phase = phase;
+    in.sent_speed_deg_s = left
+        ? sentJointSpeedDegS(left_prev_sent_q_deg_, left_prevprev_sent_q_deg_, dt_sec)
+        : sentJointSpeedDegS(right_prev_sent_q_deg_, right_prevprev_sent_q_deg_, dt_sec);
+    in.settled_sec = settle_start_ns != 0
+        ? static_cast<double>(now_ns - settle_start_ns) * 1e-9
+        : 0.0;
+    in.settle_sec = cfg.settle_sec;
+    in.max_sent_speed_deg_s = cfg.max_sent_speed_deg_s;
+
+    const AutoTareTickResult out = stepAutoTareDecision(in);
+    stage = out.stage;
+    if (out.restart_settle_timer) settle_start_ns = now_ns;
+    if (stage == AutoTareStage::Idle) settle_start_ns = 0;
+    switch (stage) {
+        case AutoTareStage::AwaitingInit: tel.auto_tare_stage = "awaiting_init"; break;
+        case AutoTareStage::Settling:     tel.auto_tare_stage = "settling"; break;
+        case AutoTareStage::Idle:
+        default:                          tel.auto_tare_stage = "idle"; break;
+    }
+    if (out.reason[0] != '\0') tel.auto_tare_reason = out.reason;
+
+    if (out.dropped) {
+        std::cerr << "[WARN] F/T " << toString(arm) << " auto-tare DROPPED: " << out.reason
+                  << (cfg.invalidate_on_request
+                          ? " - this arm has no zero; run a tare before force control"
+                          : "")
+                  << "\n";
+        return;
+    }
+    if (out.fire_tare) {
+        requestFtTare(arm);
+        // THE SAME WARNING A MANUAL TARE CARRIES, AND IT IS NOT WEAKER HERE: whatever is
+        // hanging on the tool at the init pose becomes the new zero. Automatic only means
+        // nobody had to press the button, not that anybody checked the gripper is empty.
+        std::cerr << "[INFO] F/T " << toString(arm)
+                  << " auto-tare FIRING after InitMotion (settled " << in.settled_sec
+                  << " s, sent speed " << in.sent_speed_deg_s << " deg/s) - averaging "
+                  << kFtTareSamples
+                  << " ticks. Whatever load stands at the init pose becomes the new zero\n";
+    }
+}
+
+AutoTareTickResult stepAutoTareDecision(const AutoTareTickInput& in) {
+    AutoTareTickResult out;
+    out.stage = in.stage;
+    if (in.stage == AutoTareStage::Idle) return out;
+
+    const auto drop = [&](const char* why) {
+        out.stage = AutoTareStage::Idle;
+        out.dropped = true;
+        out.reason = why;
+        return out;
+    };
+
+    // A latched fault stops applyInitMotionSequencer being run at all, so the exec
+    // status would freeze wherever it was and the tare would wait forever.
+    if (in.fault_latched) {
+        return drop(in.stage == AutoTareStage::AwaitingInit
+                        ? "a fault latched before the init pose was reached"
+                        : "a fault latched while settling at the init pose");
+    }
+
+    if (in.stage == AutoTareStage::AwaitingInit) {
+        switch (in.init_phase) {
+            case AutoTareInitPhase::InFlight:
+                out.reason = "InitMotion in flight; the zero is taken once the arm is parked";
+                return out;
+            case AutoTareInitPhase::Reached:
+                out.stage = AutoTareStage::Settling;
+                out.restart_settle_timer = true;
+                out.reason = "init pose reached; settling before the zero is taken";
+                return out;
+            case AutoTareInitPhase::Failed:
+                return drop("the InitMotion failed, so there is no init pose to tare at");
+            case AutoTareInitPhase::None:
+            default:
+                return drop("the InitMotion sequence was cancelled or reset before completing");
+        }
+    }
+
+    // ---- Settling: the arm is parked; wait out the mechanical settle AND stillness --
+    if (in.sent_speed_deg_s > in.max_sent_speed_deg_s) {
+        // Still moving: an arrival taper that has not finished, or a new command that
+        // took the arm away again. RESTART the window rather than sample through it.
+        out.restart_settle_timer = true;
+        out.reason = "waiting for the arm to stand still";
+        return out;
+    }
+    if (in.settled_sec < in.settle_sec) {
+        out.reason = "settling at the init pose";
+        return out;
+    }
+    out.stage = AutoTareStage::Idle;
+    out.fire_tare = true;
+    out.reason = "tare requested after InitMotion";
+    return out;
+}
+
 bool DualArmServoLoop::stepFtPipeline(ArmId arm, const RobotState& state) {
     const bool left = arm == ArmId::Left;
     sensor::FtPipeline& pipe = left ? left_ft_pipeline_ : right_ft_pipeline_;
@@ -8662,6 +8857,11 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         if (fresh_request && (request_left || request_right)) {
             ex.request_seen = true;
             ex.request_seq = command.seq;
+            // THIS IS "INIT MOTION STARTS" for the automatic F/T tare
+            // (force_torque.auto_tare_after_init_motion). It only ARMS here - see
+            // armAutoTareAfterInit for why the samples cannot be taken yet.
+            if (request_left) armAutoTareAfterInit(ArmId::Left);
+            if (request_right) armAutoTareAfterInit(ArmId::Right);
             const JointArray target_left =
                 request_left ? command.left.q_target_deg : current_left_q;
             const JointArray target_right =

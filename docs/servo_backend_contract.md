@@ -652,9 +652,11 @@ Responsiveness, smoothness, and accuracy are still primarily owned by the
   arriving at full commanded speed and pinning. Retreating is never limited. The
   joint-space twin of the floor / ROI / self-collision dampers. `q_min_deg` /
   `q_max_deg` default to `safety.q_min_deg` / `q_max_deg` and may only TIGHTEN them;
-  brace against the IK model limit when it is stricter than the controller range (on
-  RB3-730E J3 is ±150 in the URDF vs ±160 in the controller, and it is the IK limit
-  that refuses the solve). Config load fails if `d_slow_deg < dq_max²/(2·a_brake)`,
+  brace against the IK model limit. On RB3-730E that is J3 = ±150, which
+  `safety.q_min_deg`/`q_max_deg` now also carries (the ±160 site margin was reverted
+  2026-08-26 — see `docs/joint_range_policy.md`); keep the block explicit rather than
+  inheriting, so a future widening of the safety clamp cannot silently move the
+  braking point. Config load fails if `d_slow_deg < dq_max²/(2·a_brake)`,
   i.e. if the band is too narrow to stop from full commanded speed.
   Note `safety.reach_constraint` does NOT cover this: it is a radial shell about the
   arm base, and interior joint limits are reached far inside it (measured: every

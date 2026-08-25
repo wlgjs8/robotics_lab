@@ -117,8 +117,18 @@ def _arm_ft_summary(arm: Any) -> str:
         # every compensated channel is pinned to zero. But nothing will comply.
         return f"NOT CONNECTED ({ft.get('connect_reason') or 'unknown'})"
     parts: list[str] = []
+    auto_stage = str(ft.get("auto_tare_stage") or "off")
     if not ft.get("bias_valid"):
-        parts.append("NOT ZEROED - press F/T 영점")
+        # DO NOT SEND THE OPERATOR TO THE BUTTON WHEN THE SERVER IS ABOUT TO DO IT.
+        # With force_torque.auto_tare_after_init_motion armed, the zero is dropped at
+        # the InitMotion REQUEST and retaken once the arm is parked and still, so
+        # "NOT ZEROED - press the button" would be wrong for that whole window.
+        if auto_stage == "awaiting_init":
+            parts.append("NOT ZEROED - auto-tare armed, waiting for the init pose")
+        elif auto_stage == "settling":
+            parts.append("NOT ZEROED - auto-tare settling at the init pose")
+        else:
+            parts.append("NOT ZEROED - press F/T 영점")
     else:
         parts.append(f"zeroed ({ft.get('bias_source')}, gen {ft.get('bias_generation')})")
     # The wrench the force law actually consumes, at the TCP in stand axes.

@@ -133,6 +133,42 @@ Two invariants the hardware taught, both enforced by the loader:
   TCP. A torque referenced at one point driving rotation about another makes a
   straight push twist the tool.
 
+### The zero (tare)
+
+Force control REFUSES to cover an arm with no bias (`forceControlCovered`), so the
+tare is a precondition, not a nicety. Two ways in, one mechanism: the leaseless
+`TareForceSensor` command (the GUI button), and
+`force_torque.auto_tare_after_init_motion`. Both end in the same RT path — 250
+consecutive ticks of `raw - gravity` averaged by `FtPipeline::tareSample/tareCommit`.
+It averages `raw - gravity`, NEVER `raw`: the box is told a zero payload, so raw
+still carries the tool's weight and averaging it would subtract gravity twice.
+
+**Automatic tare on InitMotion does not sample when the move starts — it ARMS when
+the move starts.** A tare averaged while the arm is accelerating records the arm's
+own acceleration and the tool's swing as force, and nothing downstream can tell that
+apart from a real bias. So the request tick arms it (`armAutoTareAfterInit`, called
+from `applyInitMotionSequencer`'s fresh-request branch) and the samples are collected
+only after that arm's sequencer reaches `Done`, has stood `settle_sec` at the init
+pose, and its last SENT joint velocity is under `max_sent_speed_deg_s`
+(`stepAutoTareAfterInit`, whose per-tick decision is the stateless
+`stepAutoTareDecision` — unit-tested in `test_init_motion_pursuit`). It runs BEFORE
+`applyInitMotionSequencer` in the tick so the `Done` set on the previous tick is still
+readable; the next non-init command resets the exec to `Idle`.
+
+Fail-closed, all of it: `invalidate_on_request` drops the existing zero the instant
+InitMotion is requested, so an InitMotion that fails, stalls, is cancelled, or is
+overtaken by a latched fault leaves the arm with NO zero and force control refuses it,
+rather than leaving a stale zero the operator believes was just refreshed. The loader
+refuses `enable: true` without a positive `settle_sec` and `max_sent_speed_deg_s`, and
+refuses it with `safety.init_motion_planner.enable: false` (InitMotion then degrades
+to a plain JointTarget with no completion event, so the tare would silently never
+fire). Stage is published as `force_torque.<arm>.auto_tare_stage` and logged as
+`<side>_ft_auto_tare_stage`.
+
+THE OPERATOR'S CHECK IS UNCHANGED AND IS NOT WEAKER BECAUSE IT IS AUTOMATIC: whatever
+load stands at the init pose becomes the new zero. Neither the GUI nor the server can
+see a part in the gripper or a hand on the wrist.
+
 Do not integrate an external force-control library into an active motion path
 unless a task explicitly says to. Archived v1 design and evidence:
 `docs/archive/force_control_v1/`.

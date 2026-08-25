@@ -139,10 +139,22 @@ safety:
   # only pass this final safety clamp) and shortest-path goal selection never command an
   # unreachable J3 the controller would reject/clamp. J3 also mirrors the IK URDF limit
   # (rb3_730e.urdf: elbow +/-2.618 rad); see docs/joint_range_policy.md.
-  # q_min_deg: [-360, -360, -150, -360, -360, -360]
-  # q_max_deg: [360, 360, 150, 360, 360, 360]
-  q_min_deg: [-360, -360, -160, -360, -360, -360]
-  q_max_deg: [360, 360, 160, 360, 360, 360]
+  # 2026-08-26: J3 back to the catalog +/-150 (was a +/-160 site margin). The extra
+  # 10 deg was not usable range -- it was a TRAP. IK is model-limited to +/-150
+  # (dual_rb3_730e_ver5.urdf elbow_joint, +/-2.618 rad) and the URDF says explicitly not
+  # to widen it, because a solver that picks an elbow branch the controller would
+  # reject/clamp is exactly what surfaces as a TCP branch-flip / lurch. So +/-160 here
+  # only let JointTarget/InitMotion PTP (which bypass IK and pass ONLY this clamp) park
+  # the elbow in a 10 deg band that Cartesian control can then never command out of:
+  # the next TcpPoseTarget tick is refused on the spot.
+  # Measured on real rollouts: the left elbow sat pinned at exactly 150.000 deg for 7 s
+  # (servo_log_20260826_063359.csv) and 4.5 s (servo_log_20260826_075010.csv). Narrowing
+  # is the safe direction -- the clamp now agrees with the IK model, and the startup WARN
+  # about the safety-vs-URDF mismatch goes away.
+  # safety.joint_limit_barrier below already braced against +/-150, so its behaviour is
+  # unchanged; this only removes the band PTP could still reach.
+  q_min_deg: [-360, -360, -150, -360, -360, -360]
+  q_max_deg: [360, 360, 150, 360, 360, 360]
   # 2026-06-28: raised for UMI teleop responsiveness. The global outer clamp was
   # the binding limit on UMI Cartesian tracking (left arm velocity-clamped 34%,
   # accel-clamped 47% -> "robot follows too slowly"). Accel raised more (it was the
@@ -204,11 +216,12 @@ safety:
   # joint limits, not workspace-boundary violations, so a radial shell never fires.
   joint_limit_barrier:
     enable: true
-    # Braced against the URDF IK limit (+/-150 on J3), NOT the controller range
-    # (+/-160 in safety.q_min_deg/q_max_deg above). The startup WARN names this exact
-    # mismatch: the arm can mechanically reach +/-160 but IK refuses outside +/-150, so
-    # braking against +/-160 would still let it pin itself inside an unusable 10 deg
-    # band. Every other joint is unlimited (+/-360) and the barrier is inert there.
+    # Braced against the URDF IK limit (+/-150 on J3). safety.q_min_deg/q_max_deg above
+    # now agrees (it was +/-160 until 2026-08-26, which left a 10 deg band the arm could
+    # be parked in by PTP but never commanded out of by IK). Keeping this block explicit
+    # rather than inheriting documents WHICH limit the barrier brakes against, so a
+    # future widening of the safety clamp cannot silently move the braking point.
+    # Every other joint is unlimited (+/-360) and the barrier is inert there.
     q_min_deg: [-360, -360, -150, -360, -360, -360]
     q_max_deg: [ 360,  360,  150,  360,  360,  360]
     # d_slow must satisfy d_slow >= dq_max^2/(2*a_brake) or the barrier engages too late
@@ -646,6 +659,36 @@ force_torque:
   # THE COST, ACCEPTED: the box's own collision detection runs on this payload, so
   # with zero it sees the tool's weight as an external force.
   push_zero_payload_to_box: true
+
+  # ---- AUTOMATIC TARE ON InitMotion -----------------------------------------
+  # Pressing InitMotion re-zeros that arm's sensor. The operator no longer has to
+  # remember a separate tare, which is the failure that leaves force control refusing
+  # to cover an arm (or worse, regulating against yesterday's zero).
+  #
+  # *** IT DOES NOT SAMPLE WHEN THE MOVE STARTS. *** A tare averages `raw - gravity`
+  # over 250 ticks (0.5 s), and during the move the arm's own acceleration and the
+  # tool's swing land in that average as force. The REQUEST arms it; the samples are
+  # taken after the arm reaches the init pose and stands still. In the common case the
+  # arm is already parked at the init pose, so the server's no-op path completes
+  # instantly and the zero lands ~settle_sec later without any motion at all.
+  #
+  # THE OPERATOR'S CHECK IS UNCHANGED: whatever load stands at the init pose becomes
+  # the new zero. Automatic means nobody pressed the button, not that anybody looked
+  # in the gripper.
+  auto_tare_after_init_motion:
+    enable: true
+    # Mechanical settle at the init pose before the first sample. The arrival taper
+    # ends with the tool still ringing; 0.5 s is one full tare window of quiet ahead
+    # of the tare itself.
+    settle_sec: 0.5
+    # ... and the command must actually be stopped. Read off the last SENT joint
+    # velocity (the surface brake-before-plan uses), not the measured joints, which
+    # keep jittering at rest. Same order as init_motion_planner.brake_exit_deg_s.
+    max_sent_speed_deg_s: 0.5
+    # Drop the old zero the instant InitMotion is requested, so an InitMotion that
+    # fails or is cancelled leaves the arm with NO zero and force control refuses it,
+    # rather than silently keeping a zero the operator believes was just refreshed.
+    invalidate_on_request: true
 
   left:
     enable: true
