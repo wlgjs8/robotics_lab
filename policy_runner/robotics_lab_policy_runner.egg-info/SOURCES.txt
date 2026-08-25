@@ -58,6 +58,7 @@ robotics_lab_policy_runner.egg-info/entry_points.txt
 robotics_lab_policy_runner.egg-info/requires.txt
 robotics_lab_policy_runner.egg-info/top_level.txt
 tests/test_analyze_rollout_step_log.py
+tests/test_anchored_action_mode.py
 tests/test_camera_bundle_client.py
 tests/test_camera_diagnostics.py
 tests/test_camera_preview.py

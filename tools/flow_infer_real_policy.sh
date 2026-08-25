@@ -149,6 +149,23 @@ fi
 #           integrated tail (no robot-state re-anchor at all). Shortfall carries
 #           over (lag, never loss). Also switches the per-tick command path to
 #           reanchor_mode=last_emitted_continuous unless explicitly overridden.
+# Action encoding of the served checkpoint (FLOW_INFER_ACTION_MODE):
+#   delta    (default): rows are per-step ee_local deltas, chained downstream.
+#   anchored : rows are chunk-start(t0)-anchored transforms (UMI PD2.1 -- the
+#              *_anchored_* checkpoints). Converted to per-step deltas at reception;
+#              the RTC freeze is re-anchored to the executed boundary.
+ACTION_MODE="${FLOW_INFER_ACTION_MODE:-delta}"
+if [ "$ACTION_MODE" != "delta" ]; then
+  SEQ_ARGS+=(--action-mode "$ACTION_MODE")
+  echo "[flow-infer] action_mode=$ACTION_MODE (anchored rows -> per-step deltas at reception)"
+  # anchored + RTC needs the checkpoint's action norm stats for the prev-chunk re-anchor
+  # (FLOW_INFER_RTC_NORM_STATS=path/to/norm_stats.json); without it RTC degrades to vanilla.
+  if [ -n "${FLOW_INFER_RTC_NORM_STATS:-}" ]; then
+    SEQ_ARGS+=(--rtc-norm-stats "$FLOW_INFER_RTC_NORM_STATS")
+    echo "[flow-infer] rtc_norm_stats=$FLOW_INFER_RTC_NORM_STATS"
+  fi
+fi
+
 CHUNK_ANCHOR="${FLOW_INFER_CHUNK_ANCHOR:-actual}"
 if [ "$CHUNK_ANCHOR" != "actual" ]; then
   SEQ_ARGS+=(--chunk-anchor-source "$CHUNK_ANCHOR")

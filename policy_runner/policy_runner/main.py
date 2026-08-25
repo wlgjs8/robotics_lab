@@ -1795,6 +1795,25 @@ def _main_with_subcommands(argv: list[str]) -> int:
              "cost/benefit knee; 11 @3 Hz reached 5-10 Hz 10.0%% at p95 4.8 mm deviation.",
     )
     flow_infer.add_argument(
+        "--action-mode",
+        choices=("delta", "anchored"),
+        default="delta",
+        help="Action encoding of the served checkpoint. delta (default): rows are per-step "
+             "ee_local deltas, chained. anchored: rows are chunk-start(t0)-anchored transforms "
+             "(UMI PD2.1, e.g. the *_anchored_* openpi configs); converted to per-step deltas at "
+             "reception so the whole downstream pipeline (anchor source, crossfade, clamps, "
+             "velocity proprio) is unchanged, and the RTC freeze is re-anchored to the executed "
+             "boundary (T'_k = T_s^-1 T_{k+s}). Openpi remote source only.",
+    )
+    flow_infer.add_argument(
+        "--rtc-norm-stats",
+        default=None,
+        help="Path to the served checkpoint's norm_stats.json (openpi assets). REQUIRED for "
+             "--action-mode anchored with --rtc: rtc_raw_actions is normalized model space, and "
+             "the anchored prev-chunk re-anchor must unnormalize -> SE(3) shift -> renormalize. "
+             "Without it, anchored+RTC degrades to vanilla sampling (loud warning).",
+    )
+    flow_infer.add_argument(
         "--rtc",
         action="store_true",
         help="Enable Real-Time Chunking (RTC) for the openpi remote source: the server freezes the "
@@ -2723,6 +2742,8 @@ def _main_with_subcommands(argv: list[str]) -> int:
                     depth_z_near_mm=float(args.depth_z_near_mm),
                     depth_z_far_mm=float(args.depth_z_far_mm),
                     depth_units_m=float(args.depth_units_m),
+                    action_mode=str(getattr(args, "action_mode", "delta")),
+                    rtc_norm_stats=getattr(args, "rtc_norm_stats", None),
                     rtc_enabled=bool(getattr(args, "rtc", False)),
                     rtc_inference_delay=int(getattr(args, "rtc_inference_delay", 2)),
                     rtc_prefix_attention_schedule=str(getattr(args, "rtc_schedule", "exp")),

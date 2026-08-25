@@ -248,7 +248,7 @@ def _gripper_from_arm_payload(value: Any) -> float:
     return 0.0
 
 
-def rtc_shift_prev_chunk(raw_chunk, execute_steps):
+def rtc_shift_prev_chunk(raw_chunk, execute_steps, action_mode="delta", norm_q=None):
     """Advance the cached raw chunk by the steps that will have EXECUTED when the
     next chunk takes over (paper/Kinetix caller-side roll, missing from the port).
 
@@ -265,7 +265,129 @@ def rtc_shift_prev_chunk(raw_chunk, execute_steps):
     if steps == 0:
         return raw
     pad = _np.zeros((steps, raw.shape[1]), dtype=raw.dtype)
+    if action_mode == "anchored":
+        # Anchored rows are transforms rel the OLD chunk anchor; the freeze must pin
+        # rows re-expressed rel the row that becomes the NEW anchor state:
+        # T'_k = T_s^-1 T_{k+s} per arm. raw_chunk is MODEL-SPACE (normalized), and
+        # SE(3) algebra on normalized values is garbage (real-robot 20260825 run:
+        # 30-50 mm boundary jumps, systematic base-ward drift). Unnormalize with the
+        # checkpoint's action q01/q99, transform, renormalize.
+        if norm_q is None:
+            raise ValueError(
+                "anchored RTC shift requires action norm stats (q01/q99); "
+                "pass rtc_norm_stats (FLOW_INFER_RTC_NORM_STATS) or disable RTC")
+        q01, q99 = norm_q
+        un = _unnorm(raw[:, :14], q01, q99)
+        shifted_un = un[steps:].copy()
+        for b in _ANCHORED_ARM_BLOCKS:
+            ps = un[steps - 1, b:b + 3]
+            Rs = _rotvec_to_mat(un[steps - 1, b + 3:b + 6])
+            for k in range(shifted_un.shape[0]):
+                pk = un[steps + k, b:b + 3]
+                Rk = _rotvec_to_mat(un[steps + k, b + 3:b + 6])
+                shifted_un[k, b:b + 3] = Rs.T @ (pk - ps)
+                shifted_un[k, b + 3:b + 6] = _mat_to_rotvec(Rs.T @ Rk)
+        shifted = raw[steps:].copy()
+        shifted[:, :14] = _renorm(shifted_un, q01, q99)
+        return _np.concatenate([shifted, pad], axis=0)
     return _np.concatenate([raw[steps:], pad], axis=0)
+
+
+def _rotvec_to_mat(r):
+    import numpy as _np
+    r = _np.asarray(r, dtype=_np.float64)
+    th = float(_np.linalg.norm(r))
+    if th < 1e-12:
+        return _np.eye(3)
+    k = r / th
+    K = _np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return _np.eye(3) + _np.sin(th) * K + (1.0 - _np.cos(th)) * (K @ K)
+
+
+def _mat_to_rotvec(R):
+    # Quaternion extraction: stable at all angles incl. near pi (the sin-division
+    # form emitted |r|>pi near tool-down attitudes; same fix as the sim rig).
+    import numpy as _np
+    R = _np.asarray(R, dtype=_np.float64)
+    t = _np.trace(R)
+    if t > 0:
+        s = _np.sqrt(t + 1.0) * 2.0
+        w = 0.25 * s
+        x, y, z = (R[2, 1] - R[1, 2]) / s, (R[0, 2] - R[2, 0]) / s, (R[1, 0] - R[0, 1]) / s
+    else:
+        i = int(_np.argmax([R[0, 0], R[1, 1], R[2, 2]]))
+        if i == 0:
+            s = _np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2.0
+            w, x, y, z = (R[2, 1] - R[1, 2]) / s, 0.25 * s, (R[0, 1] + R[1, 0]) / s, (R[0, 2] + R[2, 0]) / s
+        elif i == 1:
+            s = _np.sqrt(1.0 - R[0, 0] + R[1, 1] - R[2, 2]) * 2.0
+            w, x, y, z = (R[0, 2] - R[2, 0]) / s, (R[0, 1] + R[1, 0]) / s, 0.25 * s, (R[1, 2] + R[2, 1]) / s
+        else:
+            s = _np.sqrt(1.0 - R[0, 0] - R[1, 1] + R[2, 2]) * 2.0
+            w, x, y, z = (R[1, 0] - R[0, 1]) / s, (R[0, 2] + R[2, 0]) / s, (R[1, 2] + R[2, 1]) / s, 0.25 * s
+    q = _np.array([w, x, y, z])
+    q = q / _np.linalg.norm(q)
+    if q[0] < 0:
+        q = -q
+    ang = 2.0 * _np.arccos(_np.clip(q[0], -1.0, 1.0))
+    sv = _np.linalg.norm(q[1:])
+    if sv < 1e-12:
+        return _np.zeros(3)
+    return q[1:] / sv * ang
+
+
+_ANCHORED_ARM_BLOCKS = (0, 7)   # [left 0:6 pose | 6 grip | right 7:13 pose | 13 grip]
+
+
+def load_action_norm_stats(path):
+    """(q01, q99) of the served checkpoint's ACTION norm stats (openpi norm_stats.json).
+
+    Needed because `rtc_raw_actions` is MODEL-SPACE (pre output-transform, i.e. quantile
+    normalized): SE(3) re-anchoring is only valid on unnormalized rows, so the anchored
+    RTC shift must unnormalize -> transform -> renormalize (openpi transforms.py:
+    n = (x-q01)/(q99-q01+1e-6)*2-1)."""
+    import json as _json
+    import numpy as _np
+    d = _json.load(open(path))
+    a = d["norm_stats"]["actions"]
+    return _np.asarray(a["q01"], dtype=_np.float64), _np.asarray(a["q99"], dtype=_np.float64)
+
+
+def _unnorm(n, q01, q99):
+    import numpy as _np
+    k = n.shape[-1]
+    return (n.astype(_np.float64) + 1.0) / 2.0 * (q99[:k] - q01[:k] + 1e-6) + q01[:k]
+
+
+def _renorm(x, q01, q99):
+    import numpy as _np
+    k = x.shape[-1]
+    return ((x - q01[:k]) / (q99[:k] - q01[:k] + 1e-6) * 2.0 - 1.0).astype(_np.float32)
+
+
+def anchored_chunk_to_deltas(chunk):
+    """UMI t0-anchored rows -> per-step ee_local deltas (exact, frame-free).
+
+    Row k of an anchored chunk is the pose at t0+k+1 expressed in the chunk-start
+    frame: p_k = p0 + R0 a_k, R_k = R0 A_k. The per-step delta the runner's
+    integrator expects is d_k = T_{k-1}^-1 T_k, which reduces to pure row algebra
+    (R0 cancels): d_0 = row_0; d_k = (A_{k-1}^T (a_k - a_{k-1}), rotvec(A_{k-1}^T A_k)).
+    Composing the emitted deltas with pose_compose_local therefore reproduces the
+    anchored waypoints exactly. Gripper columns pass through untouched.
+    """
+    import numpy as _np
+    ch = _np.asarray(chunk, dtype=_np.float32)
+    out = ch.copy()
+    for b in _ANCHORED_ARM_BLOCKS:
+        prev_a = _np.zeros(3)
+        prev_A = _np.eye(3)
+        for k in range(ch.shape[0]):
+            a_k = ch[k, b:b + 3].astype(_np.float64)
+            A_k = _rotvec_to_mat(ch[k, b + 3:b + 6])
+            out[k, b:b + 3] = (prev_A.T @ (a_k - prev_a)).astype(_np.float32)
+            out[k, b + 3:b + 6] = _mat_to_rotvec(prev_A.T @ A_k).astype(_np.float32)
+            prev_a, prev_A = a_k, A_k
+    return out
 
 
 # Fixed-rate velocity-proprio pose history: one (t, pose7) per control tick per arm.
@@ -316,6 +438,8 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         blank_depth: bool = False,
         sample_steps: int = 1,  # accepted for CLI symmetry; unused remotely
         device: str = "remote",  # accepted for CLI symmetry; inference is server-side
+        action_mode: str = "delta",
+        rtc_norm_stats: str | None = None,
         rtc_enabled: bool = False,
         rtc_inference_delay: int = 2,
         rtc_prefix_attention_schedule: str = "exp",
@@ -580,6 +704,27 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         # MODEL-SPACE output (`rtc_raw_actions`), round-tripped untouched (NOT the
         # gripper-rescaled / r_aligned `actions`). RTC stays OFF by default. See
         # robotics_lab/docs/rtc_design.md and openpi models_pytorch/rtc.py.
+        if str(action_mode) not in ("delta", "anchored"):
+            raise ValueError(f"action_mode must be 'delta' or 'anchored', got {action_mode!r}")
+        self.action_mode = str(action_mode)
+        if self.action_mode == "anchored":
+            print(
+                "[flow-infer] action_mode=anchored: chunk rows are t0-anchored transforms "
+                "(UMI PD2.1); converted to per-step deltas at reception, RTC freeze re-anchored.",
+                file=stderr, flush=True,
+            )
+        self._rtc_norm_q = None
+        if rtc_norm_stats:
+            self._rtc_norm_q = load_action_norm_stats(rtc_norm_stats)
+            print(f"[flow-infer] anchored RTC norm stats loaded: {rtc_norm_stats}",
+                  file=stderr, flush=True)
+        if self.action_mode == "anchored" and bool(rtc_enabled) and self._rtc_norm_q is None:
+            print(
+                "[flow-infer] WARNING: action_mode=anchored + RTC without rtc_norm_stats -> "
+                "prev-chunk conditioning DISABLED (vanilla sampling). Set "
+                "FLOW_INFER_RTC_NORM_STATS to the checkpoint's norm_stats.json for full RTC.",
+                file=stderr, flush=True,
+            )
         self.rtc_enabled = bool(rtc_enabled)
         self.rtc_inference_delay = int(rtc_inference_delay)
         self.rtc_prefix_attention_schedule = str(rtc_prefix_attention_schedule)
@@ -1722,6 +1867,33 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             self._clear_last_obs_camera_bundle()
         return images, decode_count, 0
 
+    def _dynamic_rtc_params(self, replan: int) -> tuple[int, int]:
+        """(shift_steps, inference_delay) for the anchored RTC path, from MEASURED
+        bookkeeping instead of static assumptions.
+
+        shift = policy steps emitted between the previous inference's observation and
+        this one (obs-to-obs spacing). Statically this equals the replan period, but a
+        boundary stall stretches it -- and for anchored chunks a wrong shift re-bases
+        the ENTIRE chunk on the wrong prev row (delta chunks self-correct; anchored
+        ones drift, 20260825 real runs). delay stays the configured static value.
+
+        NOTE 20260825: even with correct shift+delay, RTC freeze is structurally
+        hostile to anchored rows -- it pins ABSOLUTE waypoints, so the per-chunk
+        anchor gap (measured obs pose vs the prev plan's waypoint) freezes in as a
+        positional bias and accumulates (smooth wrong-direction drift). Anchored
+        real deployments should run RTC OFF until an anchor-gap-compensated freeze
+        exists. Delta chunks pin MOTION, so the same gap does not accumulate.
+        """
+        cur = int(getattr(self, "_stream_emitted_policy_steps", 0) or 0)
+        last = getattr(self, "_rtc_last_obs_step_seq", None)
+        self._rtc_last_obs_step_seq = cur
+        shift = replan if last is None else int(np.clip(cur - int(last), 1, 4 * max(1, replan)))
+        # Freeze depth stays STATIC (configured): the safety condition is d >= realized
+        # (over-freeze is geometrically safe; UNDER-freeze breaks plan continuity -- the
+        # 20260825 #3/#4 sawtooth came from sending d=last-realized, i.e. 0-2 < next r).
+        delay = int(np.clip(self.rtc_inference_delay, 0, replan))
+        return shift, delay
+
     def reset_rtc(self) -> None:
         """Drop the cached previous chunk so the next infer cold-starts (vanilla).
 
@@ -1823,8 +1995,18 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             # Kinetix reference): the freeze must pin to the previous plan's
             # UNEXECUTED tail, not its already-executed head.
             replan = int(getattr(self, "rtc_replan_period", 0) or self.chunk_execute_steps)
-            obs["prev_action_chunk"] = rtc_shift_prev_chunk(self._rtc_prev_raw_chunk, replan)
-            obs["inference_delay"] = int(np.clip(self.rtc_inference_delay, 0, replan))
+            _am = getattr(self, "action_mode", "delta")
+            _nq = getattr(self, "_rtc_norm_q", None)
+            if _am == "anchored":
+                _shift, _delay = self._dynamic_rtc_params(replan)
+            else:
+                _shift, _delay = replan, int(np.clip(self.rtc_inference_delay, 0, replan))
+            if _am == "anchored" and _nq is None:
+                pass  # no valid re-anchor possible: stay vanilla rather than corrupt the freeze
+            else:
+                obs["prev_action_chunk"] = rtc_shift_prev_chunk(
+                    self._rtc_prev_raw_chunk, _shift, action_mode=_am, norm_q=_nq)
+            obs["inference_delay"] = int(_delay)
             obs["execute_horizon"] = int(replan)
             obs["prefix_attention_schedule"] = self.rtc_prefix_attention_schedule
             obs["max_guidance_weight"] = float(self.rtc_max_guidance_weight)
@@ -1871,6 +2053,11 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
                     flush=True,
                 )
                 self._rtc_warned_no_raw = True
+        if getattr(self, "action_mode", "delta") == "anchored":
+            # Convert AFTER the RTC cache (prev_action_chunk must stay in the model's
+            # native anchored format) and AFTER replay record (model-space compare),
+            # BEFORE grip scaling (grip columns pass through the conversion).
+            chunk = anchored_chunk_to_deltas(chunk)
         # The server emits the gripper dim in /100 units (opening fraction) for BOTH
         # the legacy delta convention `(target-current)/100` and the absolute
         # `--gripper-mode absolute` convention `grip/100`. Scale to percent here; the
