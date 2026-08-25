@@ -559,6 +559,27 @@ void sleepTicks() {
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
 }
 
+// Open the servo_j stream the way a real session does.
+//
+// Since 2026-08-26 the server sends NOTHING on the wire until the first MOTION
+// command (JointTarget / TcpPoseTarget / TcpLinearMove); before that the control box
+// simply holds its last reference. That is deliberate -- streaming into a box that
+// has not started consuming buries commands in its queue -- but it means a test that
+// merely starts a loop has no send path at all, and any wait on send behaviour times
+// out against a server that is working correctly.
+//
+// Commands the pose the arms are ALREADY at, so nothing moves and the only thing the
+// caller ends up exercising is the send.
+void armServoStream(rb_servo::CommandBuffer& buffer, const rb_servo::JointArray& at) {
+    rb_servo::DualArmCommand arming = command(rb_servo::ControlMode::JointTarget);
+    arming.left.q_target_deg = at;
+    arming.right.q_target_deg = at;
+    arming.left.has_joint_target = true;
+    arming.right.has_joint_target = true;
+    buffer.setCommand(arming);
+    sleepTicks();
+}
+
 template <typename Predicate>
 bool waitUntil(Predicate predicate, std::chrono::milliseconds timeout = std::chrono::milliseconds(500)) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -1928,6 +1949,7 @@ bool testLatestSnapshotContainsSendTimingAndPreviousTargets() {
     );
 
     RB_CHECK(loop.start());
+    armServoStream(buffer, initial);
     buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
     sleepTicks();
 
@@ -2062,6 +2084,7 @@ bool testWorkerIoModeDispatchesThroughArmWorkers() {
     );
 
     RB_CHECK(loop.start());
+    armServoStream(buffer, initial);
     buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
     RB_CHECK(waitUntil([&] { return loop.motionState() == rb_servo::ServerMotionState::ArmedHold; }));
 
@@ -2114,6 +2137,7 @@ bool testWorkerIoModeTimesOutMissingSendResultByDeadline() {
     );
 
     RB_CHECK(loop.start());
+    armServoStream(buffer, initial);
     left_backend->setSendSleepMs(800);
     right_backend->setSendSleepMs(800);
     rb_servo::DualArmCommand arm_motion = command(rb_servo::ControlMode::ArmMotion);
@@ -2174,6 +2198,7 @@ bool testWorkerIoModeReportsMixedTimeoutAndAcceptedArm() {
     );
 
     RB_CHECK(loop.start());
+    armServoStream(buffer, initial);
     left_backend->setSendSleepMs(800);
     rb_servo::DualArmCommand arm_motion = command(rb_servo::ControlMode::ArmMotion);
     arm_motion.left.timeout_sec = 2.0;
@@ -2302,6 +2327,7 @@ bool testRbpodoAsyncServoLoopDoesNotBlockOnSlowAckWorker() {
     );
 
     RB_CHECK(loop.start());
+    armServoStream(buffer, initial);
     left_backend->setSendSleepMs(80);
     right_backend->setSendSleepMs(80);
     rb_servo::DualArmCommand arm_motion = command(rb_servo::ControlMode::ArmMotion);
@@ -2373,6 +2399,7 @@ bool testRbpodoAsyncSupervisionFaultLatchesServoLoop() {
     );
 
     RB_CHECK(loop.start());
+    armServoStream(buffer, initial);
 
     std::optional<rb_servo::ServoSnapshot> fault_snapshot;
     RB_CHECK(waitUntil([&] {
@@ -2420,6 +2447,8 @@ bool testRbpodoAsyncSupervisionFaultIsAdvisoryInControllerSimulationWhenFlagEnab
     rb_servo::DualArmServoLoop loop(std::move(left), std::move(right), cfg, &buffer, nullptr);
 
     RB_CHECK(loop.start());
+    armServoStream(buffer, initial);
+
 
     std::optional<rb_servo::ServoSnapshot> degraded_snapshot;
     RB_CHECK(waitUntil([&] {
@@ -2472,6 +2501,7 @@ bool testRbpodoAsyncSupervisionFlagDoesNotBypassPhysicalRealLatch() {
     );
 
     RB_CHECK(loop.start());
+    armServoStream(buffer, initial);
 
     std::optional<rb_servo::ServoSnapshot> fault_snapshot;
     RB_CHECK(waitUntil([&] {
@@ -2509,6 +2539,7 @@ bool testRbpodoAsyncHoldStreamsServoJWithoutLatch() {
     );
 
     RB_CHECK(loop.start());
+    armServoStream(buffer, initial);
     std::optional<rb_servo::ServoSnapshot> hold_snapshot;
     RB_CHECK(waitUntil([&] {
         const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
@@ -3051,6 +3082,7 @@ bool testRbpodoAsyncReferenceSupervisionQRefStopsFaultsSocketSend() {
     right->setAdvanceRobotTimeOnRead(false);
     rb_servo::DualArmServoLoop loop(std::move(left), std::move(right), cfg, &buffer, nullptr);
     RB_CHECK(loop.start());
+    armServoStream(buffer, initial);
 
     std::optional<rb_servo::ServoSnapshot> fault_snapshot;
     RB_CHECK(waitUntil([&] {
@@ -3289,6 +3321,7 @@ bool testRbpodoAsyncReferenceSupervisionInvalidQRefFaults() {
     right->setQRefValid(false);
     rb_servo::DualArmServoLoop loop(std::move(left), std::move(right), cfg, &buffer, nullptr);
     RB_CHECK(loop.start());
+    armServoStream(buffer, initial);
 
     std::optional<rb_servo::ServoSnapshot> fault_snapshot;
     RB_CHECK(waitUntil([&] {
@@ -4160,12 +4193,16 @@ bool testServoLoggerAppendsTcpPoseTargetDebugColumns() {
     const std::filesystem::path latest = std::filesystem::path(cfg.directory) / "servo_log.csv";
     std::string header_line;
     std::string row_line;
+    // 3 s, not 1 s: this waits on the ASYNC servo-logger thread to flush, and a 1 s
+    // budget made the test fail intermittently whenever the box was busy (observed
+    // repeatedly on 2026-08-26 while a build/analysis was running alongside). The
+    // assertion is unchanged -- only the patience is.
     const bool wrote_row = waitUntil([&] {
         std::ifstream in(latest);
         if (!in) return false;
         if (!std::getline(in, header_line)) return false;
         return static_cast<bool>(std::getline(in, row_line));
-    }, std::chrono::milliseconds(1000));
+    }, std::chrono::milliseconds(3000));
     logger.stop();
     RB_CHECK(wrote_row);
 
@@ -4449,6 +4486,7 @@ bool testRbpodoControllerSimulationDiagnosticOverrideIsNarrow() {
         nullptr
     );
     RB_CHECK(loop.start());
+    armServoStream(buffer, initial);
     RB_CHECK(waitUntil([&] { return loop.latestSnapshot().loop_end_time_ns > 0; }));
     RB_CHECK(left_raw->sendCount() > 0);
     const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
@@ -4518,6 +4556,7 @@ bool testRbpodoControllerSimulationNotActivatedDiagnosticOverrideRequiresGate() 
         nullptr
     );
     RB_CHECK(loop.start());
+    armServoStream(buffer, initial);
     RB_CHECK(waitUntil([&] { return loop.latestSnapshot().loop_end_time_ns > 0; }));
     RB_CHECK(left_raw->sendCount() > 0);
     RB_CHECK(right_raw->sendCount() > 0);
@@ -4718,6 +4757,7 @@ bool testRbpodoControllerSimulationInitErrorOverrideIsNarrow() {
         nullptr
     );
     RB_CHECK(loop.start());
+    armServoStream(buffer, initial);
     RB_CHECK(waitUntil([&] { return loop.latestSnapshot().loop_end_time_ns > 0; }));
     RB_CHECK(left_raw->sendCount() > 0);
 
@@ -5623,6 +5663,19 @@ bool testRbpodoControllerSimulationStartupReferenceSource() {
         nullptr
     );
     RB_CHECK(physical_motion_loop.start());
+
+    // Arm the stream. The physical arm only moves because the loop STREAMS its
+    // startup reference at it (this backend applies each send to q_actual), and since
+    // 2026-08-26 nothing is streamed until a motion command arrives. Commands exactly
+    // what the loop already holds -- left at the controller's reference, right at
+    // measured, the split the first block above asserts -- so this asks for no motion
+    // of its own and the 20 deg the safety layer then sees is the loop's own doing.
+    rb_servo::DualArmCommand hold_startup = command(rb_servo::ControlMode::JointTarget);
+    hold_startup.left.q_target_deg = reference;
+    hold_startup.right.q_target_deg = actual;
+    hold_startup.left.has_joint_target = true;
+    hold_startup.right.has_joint_target = true;
+    physical_motion_buffer.setCommand(hold_startup);
     RB_CHECK(waitUntil([&] {
         snapshot = physical_motion_loop.latestSnapshot();
         return snapshot.fault_latched &&
@@ -6013,6 +6066,90 @@ bool testSingleArmIkFailureDoesNotFreezeHealthyArm() {
     return true;
 }
 
+
+// Regression: a THROTTLED command must be visible to the follower stage as a command
+// refusal, exactly like a refused solve is. The joint clamps (joint-limit / velocity /
+// acceleration) and the IK branch-jump rate limiter cut the command WITHOUT failing the
+// solve -- cart_status stays "ok" -- so before this signal existed nothing recorded that
+// the arm could not follow its plan. Measured 2026-08-26 on
+// servo_log_20260826_042818.csv: the right arm was branch-jump rate limited for ~500 ms,
+// neither safety_intervention_recent nor cartesian_solve_blocked_recent was set, the
+// 100 ms explain window lapsed 46 ms before divergence crossed the 0.1 rad latch, and
+// the rollout died on ChunkFollowerFault for divergence the safety layer itself caused.
+bool testCommandThrottleIsVisibleAsCommandRefusal() {
+    struct Observation {
+        bool throttled = false;
+        std::string status_when_observed;
+        bool solve_blocked = false;
+        bool safety_intervention = false;
+    };
+    const auto run = [](double throttle_deg_s,
+                        std::chrono::milliseconds window,
+                        Observation* obs) -> bool {
+        rb_servo::CommandBuffer buffer;
+        rb_servo::DualArmConfig cfg = testConfig();
+        cfg.left_robot.run_mode = rb_servo::RunMode::Simulation;
+        cfg.right_robot.run_mode = rb_servo::RunMode::Simulation;
+        cfg.kinematics.enable = true;
+        cfg.kinematics.ik.enable = true;
+        cfg.kinematics.publish_tcp = true;
+        // Tight velocity ceiling so the clamp stage has to cut most of the commanded
+        // step; the fake IK maps tcp x=0.5 m onto joint 0 = 50 deg in one tick.
+        cfg.safety.dq_max_deg_s = joints(10.0);
+        cfg.safety.throttle_intervention_deg_s = throttle_deg_s;
+        const rb_servo::JointArray initial = joints(0.0);
+        auto kinematics = std::make_shared<FakeCartesianKinematics>();
+        rb_servo::DualArmServoLoop loop(
+            std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false),
+            std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+            cfg,
+            &buffer,
+            nullptr,
+            kinematics
+        );
+        RB_CHECK(loop.start());
+        buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
+        sleepTicks();
+
+        rb_servo::DualArmCommand far = command(rb_servo::ControlMode::TcpPoseTarget);
+        far.seq = 71;
+        far.host_time_ns = rb_servo::nowSteadyNs();
+        far.left.mode = rb_servo::ControlMode::TcpPoseTarget;
+        far.left.has_tcp_target = true;
+        far.left.tcp_target_stand = {0.5, 0.0, 0.0, 0.0, 0.0, 0.0};
+        far.right.mode = rb_servo::ControlMode::TcpPoseTarget;
+        far.right.has_tcp_target = true;
+        far.right.tcp_target_stand = {0.5, 0.0, 0.0, 0.0, 0.0, 0.0};
+        buffer.setCommand(far);
+
+        obs->throttled = waitUntil([&] {
+            const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+            if (!snapshot.left_cartesian_solve.command_throttled_recent) return false;
+            obs->status_when_observed = snapshot.left_cartesian_solve.status;
+            obs->solve_blocked = snapshot.left_cartesian_solve.cartesian_solve_blocked_recent;
+            obs->safety_intervention = snapshot.left_cartesian_solve.safety_intervention_recent;
+            return true;
+        }, window);
+        return true;
+    };
+
+    Observation enabled;
+    RB_CHECK(run(50.0, std::chrono::milliseconds(800), &enabled));
+    RB_CHECK(enabled.throttled);
+    // The whole point: the solve SUCCEEDED, so neither pre-existing refusal signal saw
+    // this. Only the new throttle window does.
+    RB_CHECK(enabled.status_when_observed == "ok");
+    RB_CHECK(!enabled.solve_blocked);
+    RB_CHECK(!enabled.safety_intervention);
+
+    // Control: the same over-fast command with the feature disabled must NOT stamp the
+    // window, so the flag above is the new threshold firing and not something else.
+    Observation disabled;
+    RB_CHECK(run(0.0, std::chrono::milliseconds(250), &disabled));
+    RB_CHECK(!disabled.throttled);
+    return true;
+}
+
 // Regression: a refused Cartesian solve must be visible to the follower stage as a
 // command refusal, exactly like a safety clamp is. The arm is held at prev_sent while
 // IK fails, so a chunk follower that keeps integrating deltas runs away from a
@@ -6342,6 +6479,7 @@ bool testRobotFaultSendClassifiesAsRobotStateFault() {
     );
 
     RB_CHECK(loop.start());
+    armServoStream(buffer, initial);
     buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
     sleepTicks();
 
@@ -6477,6 +6615,7 @@ bool testSuppressedByPolicySendDoesNotLatchFault() {
     );
 
     RB_CHECK(loop.start());
+    armServoStream(buffer, initial);
     buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
     sleepTicks();
 
@@ -6569,6 +6708,7 @@ bool testFreedriveTeachOnFailureAbortsAndReleases() {
     rb_servo::DualArmServoLoop loop(
         std::move(left_backend), std::move(right_backend), cfg, &buffer, nullptr);
     RB_CHECK(loop.start());
+    armServoStream(buffer, initial);
     buffer.setCommand(command(rb_servo::ControlMode::ArmMotion));
     sleepTicks();
 
@@ -6688,5 +6828,8 @@ int main() {
     if (!testRobotFaultSendClassifiesAsRobotStateFault()) return 1;
     if (!testDualArmSendFaultLatchPreservesPerArmContexts()) return 1;
     if (!testSuppressedByPolicySendDoesNotLatchFault()) return 1;
+    // Runs last: it spins two extra 500 Hz loops.
+    if (!testCommandThrottleIsVisibleAsCommandRefusal()) return 1;
+
     return 0;
 }

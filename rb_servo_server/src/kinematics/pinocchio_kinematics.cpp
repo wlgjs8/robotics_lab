@@ -56,26 +56,6 @@ JointArray jointDelta(const JointArray& q, const JointArray& seed) {
     return out;
 }
 
-// Manipulability step guard: scale the per-tick joint-step ceiling down as the task
-// Jacobian's smallest singular value drops, so a poorly conditioned pose is traversed
-// slowly instead of at the full ceiling. Linear ramp: 1.0 at sigma >= full_sigma down
-// to scale_min at sigma <= floor_sigma.
-//
-// sigma_min <= 0 means "not measured this solve" (an early-out solve leaves it zero),
-// NOT "singular" -- measured 2026-08-26, 12% of left-arm ticks carry a zero placeholder
-// on an otherwise healthy solve. Scaling on that placeholder would throttle the arm on
-// telemetry noise, so an unmeasured sigma leaves the ceiling untouched; genuine
-// conditioning loss is measured and does scale.
-double singularityStepScale(double sigma_min, double full_sigma, double floor_sigma,
-                            double scale_min) {
-    if (full_sigma <= 0.0) return 1.0;
-    if (!(sigma_min > 0.0)) return 1.0;
-    if (!(full_sigma > floor_sigma)) return 1.0;
-    const double t =
-        std::clamp((sigma_min - floor_sigma) / (full_sigma - floor_sigma), 0.0, 1.0);
-    return scale_min + (1.0 - scale_min) * t;
-}
-
 double maxAbsJointDelta(const JointArray& q, const JointArray& seed) {
     double max_abs = 0.0;
     for (std::size_t i = 0; i < kDof; ++i) {
@@ -730,6 +710,56 @@ IkResult PinocchioKinematics::solveIkDamped(
         return best_effort;
     }
 
+    // MAX-ITERATIONS BEST EFFORT (config: ik.max_iterations_best_effort_*). The other
+    // way the loop runs out: near a singularity the selective DLS damping ramps up, the
+    // per-iteration step shrinks, and the budget is exhausted while the residual is
+    // already micrometres from the target. Refusing the tick holds the arm at its
+    // previous joints -- and since the next tick usually converges, the arm alternates
+    // hold/move at loop rate, which is the violent buzz.
+    // Measured 2026-08-26 (servo_log_20260826_054303.csv, right arm 05:44:48.9-52.2
+    // KST): 1448 max_iterations refusals in 307 alternating bursts (~93 Hz) at
+    // sigma_min 0.0114, EVERY one of them with residual <= 0.221 mm / 6.6e-5 rad against
+    // a 20 um position_tolerance_m. Gated on !hit_joint_limit so the joint-limit case
+    // above stays the one that owns a pinned joint and the two reasons stay
+    // distinguishable in telemetry.
+    const double iter_best_effort_pos_tol =
+        config_.ik.max_iterations_best_effort_position_tolerance_m;
+    const double iter_best_effort_ang_tol =
+        config_.ik.max_iterations_best_effort_orientation_tolerance_rad;
+    if (!hit_joint_limit && iter_best_effort_pos_tol > 0.0 && iter_best_effort_ang_tol > 0.0 &&
+        position_error_m <= iter_best_effort_pos_tol &&
+        orientation_error_rad <= iter_best_effort_ang_tol) {
+        IkResult best_effort;
+        best_effort.success = true;
+        best_effort.reason = ik_solver::kReasonMaxIterationsBestEffort;
+        best_effort.q_solution_deg = fromPinocchioQ(q, impl_->model, impl_->joints);
+        best_effort.position_error_m = position_error_m;
+        best_effort.orientation_error_rad = orientation_error_rad;
+        best_effort.duration_us = elapsedUs();
+        best_effort.iterations = iterations;
+        best_effort.min_singular_value = last_min_singular_value;
+        best_effort.applied_damping = last_applied_damping;
+        best_effort.solution_jump_deg =
+            maxAbsJointDelta(best_effort.q_solution_deg, seed_q_deg);
+        best_effort.branch_jump_suspected =
+            config_.ik.max_solution_jump_deg > 0.0 &&
+            best_effort.solution_jump_deg > config_.ik.max_solution_jump_deg;
+        populateBranchJumpDetails(
+            best_effort,
+            seed_q_deg,
+            config_.ik.max_solution_jump_deg,
+            0
+        );
+        worstJointLimit(
+            q,
+            impl_->model,
+            impl_->joints,
+            &best_effort.joint_limit_worst_index,
+            &best_effort.joint_limit_worst_margin_deg
+        );
+        return best_effort;
+    }
+
     IkResult result = ik_solver::failureResult(
         hit_joint_limit ? ik_solver::kReasonJointLimit : ik_solver::kReasonMaxIterations,
         fromPinocchioQ(q, impl_->model, impl_->joints),
@@ -773,10 +803,10 @@ IkResult PinocchioKinematics::solveIk(
     // IK, so this is the one choke point that covers all of them -- unlike the
     // pose_track_smd singularity_scale_*, which the chunk follower bypasses.
     const double thresh = config_.ik.max_solution_jump_deg *
-        singularityStepScale(result.min_singular_value,
-                             config_.ik.singular_step_scale_full_sigma,
-                             config_.ik.singular_step_scale_floor_sigma,
-                             config_.ik.singular_step_scale_min);
+        ikSingularityStepScale(result.min_singular_value,
+                               config_.ik.singular_step_scale_full_sigma,
+                               config_.ik.singular_step_scale_floor_sigma,
+                               config_.ik.singular_step_scale_min);
     // Feature off, solve failed, or no branch jump -> observability path unchanged.
     if (thresh <= 0.0 || !result.success || result.solution_jump_deg <= thresh) {
         return result;

@@ -9,6 +9,28 @@
 
 namespace rb_servo {
 
+// Manipulability step guard: scale a per-tick joint-step ceiling down as the task
+// Jacobian's smallest singular value drops, so a poorly conditioned pose is traversed
+// slowly instead of at the full ceiling. Linear ramp: 1.0 at sigma >= full_sigma down
+// to scale_min at sigma <= floor_sigma. Disabled (returns 1.0) when full_sigma <= 0 or
+// the band is degenerate.
+//
+// sigma_min <= 0 means "not measured this solve" (an early-out solve leaves it zero),
+// NOT "singular" -- measured 2026-08-26, 12% of left-arm ticks carry a zero placeholder
+// on an otherwise healthy solve. Scaling on that placeholder would throttle the arm on
+// telemetry noise, so an unmeasured sigma leaves the ceiling untouched; genuine
+// conditioning loss is measured and does scale.
+inline double ikSingularityStepScale(double sigma_min, double full_sigma,
+                                     double floor_sigma, double scale_min) {
+    if (full_sigma <= 0.0) return 1.0;
+    if (!(sigma_min > 0.0)) return 1.0;
+    if (!(full_sigma > floor_sigma)) return 1.0;
+    double t = (sigma_min - floor_sigma) / (full_sigma - floor_sigma);
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+    return scale_min + (1.0 - scale_min) * t;
+}
+
 struct IkResult {
     bool success = false;
     JointArray q_solution_deg{};

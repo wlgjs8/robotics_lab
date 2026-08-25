@@ -624,6 +624,35 @@ Responsiveness, smoothness, and accuracy are still primarily owned by the
 - `safety.dq_max_deg_s` / `safety.ddq_max_deg_s2` — the outer per-joint
   velocity/accel ceiling, plus optional `servo.output_moving_average_window`
   for final-stage boxcar smoothing.
+- `safety.ddq_max_decel_ratio` / `safety.decel_overshoot_budget_deg` — the
+  acceleration limiter is ASYMMETRIC by default: `ddq_max_deg_s2` bounds
+  acceleration, while the anti-overshoot guard ("never pass the commanded pose")
+  clips the limited output back to the target on deceleration, so a target that
+  stops hard reaches the arm at unbounded jerk. `ddq_max_decel_ratio > 1` bounds
+  deceleration at `ratio · ddq_max` instead; the cost is that the command must
+  lead the decelerating target, capped per tick by `decel_overshoot_budget_deg`,
+  with a worst-case coast past a dead-stopped target of `v²/(2·ratio·ddq_max)`.
+  `ratio = 1.0` + `budget = 0.0` is the legacy behavior exactly.
+- `safety.throttle_intervention_deg_s` — how much velocity the joint clamps must
+  remove before the tick counts as a command THROTTLE. A throttled tick stamps
+  the same "command was refused" window as a safety projection
+  (`safety_intervention_recent`) or a refused solve
+  (`cartesian_solve_blocked_recent`), surfaced as
+  `*_command_throttled_recent`. Consequence: the chunk follower freezes its plan
+  while throttled, and a divergence that crosses the latch RE-ANCHORS instead of
+  raising `ChunkFollowerFault`. Without it, a command cut by the joint clamps or
+  by the IK branch-jump rate limiter is invisible — `cart_status` stays `ok` —
+  so the follower keeps integrating against an arm that cannot follow and then
+  latches on divergence the safety layer itself caused. Set it high enough that
+  it stays rare; a near-zero threshold pins the window open and freezes the plan
+  permanently.
+- `kinematics.ik.singular_step_scale_*` — manipulability guard on the IK
+  per-tick joint-step ceiling: scales `max_solution_jump_deg` down as the task
+  Jacobian's smallest singular value drops. This is the guard that covers EVERY
+  Cartesian path; the `pose_track_smd` `singularity_scale_*` knobs only apply to
+  the legacy pose-track SMD, which the `delta_preview` / `delta_twist` chunk
+  followers bypass. The scale is direction-preserving (uniform on the
+  seed→solution delta), unlike the downstream per-joint `dq_max` clamp.
 
 Trade-off across the two regimes: for large/fast UMI teleop moves raise
 `pose_track_smd.natural_frequency_*` (and the velocity/accel caps); for

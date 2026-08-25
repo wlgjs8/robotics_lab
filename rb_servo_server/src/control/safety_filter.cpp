@@ -348,9 +348,12 @@ JointArray SafetyFilter::clampAcceleration(
         const double prev_vel = (q_prev[i] - q_prevprev[i]) / dt_sec;
         const double desired_vel = (q[i] - q_prev[i]) / dt_sec;
         const double max_dv = config_.ddq_max_deg_s2[i] * dt_sec;
-        // Shedding speed (|desired| < |prev|, which also covers a sign reversal) is a
-        // deceleration and gets the wider budget; building speed keeps ddq_max.
-        const bool shedding_speed = std::abs(desired_vel) < std::abs(prev_vel);
+        // Shedding speed is a deceleration and gets the wider budget; building speed
+        // keeps ddq_max. A sign reversal counts even at equal magnitude (+100 -> -100
+        // still has to decelerate through zero first), which |desired| < |prev| alone
+        // would miss. Starting from rest (prev_vel == 0) is acceleration, not shedding.
+        const bool shedding_speed = std::abs(desired_vel) < std::abs(prev_vel) ||
+                                    desired_vel * prev_vel < 0.0;
         const double dv_limit = shedding_speed ? max_dv * decel_ratio : max_dv;
         const double vel = prev_vel + std::clamp(desired_vel - prev_vel, -dv_limit, dv_limit);
         out[i] = q_prev[i] + vel * dt_sec;

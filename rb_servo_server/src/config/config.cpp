@@ -1571,18 +1571,6 @@ void validateConfig(const DualArmConfig& cfg) {
         if (q.stall_cycles < 1 || q.redrain_fill_margin < 1 || q.highwater_fill <= q.target_fill) {
             throw std::runtime_error("queue_sync stall_cycles/redrain_fill_margin/highwater_fill are out of range");
         }
-        // Warmup back-pressure. 0 sends would throttle before a single command has
-        // gone out, i.e. before the box has had any chance to show evidence.
-        if (q.warmup_unevidenced_sends < 1) {
-            throw std::runtime_error(
-                "queue_sync.warmup_unevidenced_sends must be >= 1");
-        }
-        // A probe interval of 1 holds nothing (every tick is a probe) and 0/negative
-        // is meaningless. Refuse rather than silently disable the back-pressure.
-        if (q.warmup_probe_interval < 2) {
-            throw std::runtime_error(
-                "queue_sync.warmup_probe_interval must be >= 2 (1 would never hold a send)");
-        }
     }
     // Below ~2 periods a worker-cached read is stale by construction (its age is
     // the inter-thread phase offset); above ~10 a dead link goes unnoticed for
@@ -2265,6 +2253,20 @@ void validateConfig(const DualArmConfig& cfg) {
     validateNonNegativeFinite(
         cfg.kinematics.ik.joint_limit_best_effort_position_tolerance_m,
         "kinematics.ik.joint_limit_best_effort_position_tolerance_m");
+    validateNonNegativeFinite(
+        cfg.kinematics.ik.max_iterations_best_effort_position_tolerance_m,
+        "kinematics.ik.max_iterations_best_effort_position_tolerance_m");
+    validateNonNegativeFinite(
+        cfg.kinematics.ik.max_iterations_best_effort_orientation_tolerance_rad,
+        "kinematics.ik.max_iterations_best_effort_orientation_tolerance_rad");
+    if (cfg.kinematics.ik.max_iterations_best_effort_position_tolerance_m > 0.0 &&
+        cfg.kinematics.ik.max_iterations_best_effort_position_tolerance_m <
+            cfg.kinematics.ik.position_tolerance_m) {
+        throw std::runtime_error(
+            "kinematics.ik.max_iterations_best_effort_position_tolerance_m must be >= "
+            "position_tolerance_m (a best-effort window tighter than convergence itself "
+            "can never accept anything)");
+    }
     validateNonNegativeFinite(
         cfg.kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad,
         "kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad");
@@ -3494,7 +3496,6 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "adj_clamp_us", "protect_adj_us", "drain_adj_us", "drain_max_us",
             "drain_per_fill_us", "redrain_fill_margin", "highwater_fill",
             "warmup_min_sec", "warmup_max_sec", "drain_timeout_sec",
-            "warmup_unevidenced_sends", "warmup_probe_interval",
             "stall_cycles", "no_consumption_rise_per_sec",
         }, "queue_sync");
         QueueSyncConfig& q = cfg.queue_sync;
@@ -3515,8 +3516,6 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "highwater_fill")) q.highwater_fill = asInt(sec["highwater_fill"], "queue_sync.highwater_fill");
         if (has(sec, "warmup_min_sec")) q.warmup_min_sec = asDouble(sec["warmup_min_sec"], "queue_sync.warmup_min_sec");
         if (has(sec, "warmup_max_sec")) q.warmup_max_sec = asDouble(sec["warmup_max_sec"], "queue_sync.warmup_max_sec");
-        if (has(sec, "warmup_unevidenced_sends")) q.warmup_unevidenced_sends = asInt(sec["warmup_unevidenced_sends"], "queue_sync.warmup_unevidenced_sends");
-        if (has(sec, "warmup_probe_interval")) q.warmup_probe_interval = asInt(sec["warmup_probe_interval"], "queue_sync.warmup_probe_interval");
         if (has(sec, "drain_timeout_sec")) q.drain_timeout_sec = asDouble(sec["drain_timeout_sec"], "queue_sync.drain_timeout_sec");
         if (has(sec, "stall_cycles")) q.stall_cycles = asInt(sec["stall_cycles"], "queue_sync.stall_cycles");
         if (has(sec, "no_consumption_rise_per_sec")) q.no_consumption_rise_per_sec = asInt(sec["no_consumption_rise_per_sec"], "queue_sync.no_consumption_rise_per_sec");
@@ -3585,7 +3584,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "max_deviation_m", "max_deviation_rad",
             "max_velocity_m_s", "max_acceleration_m_s2",
             "max_velocity_rad_s", "max_acceleration_rad_s2",
-            "hold_compliance", "max_state_age_sec", "max_command_lag_deg",
+            "hold_compliance", "max_state_age_sec",
+            "command_execution_tau_sec", "command_execution_min_rate_dps",
+            "command_execution_min_ratio",
         }, "force_control");
         ForceControlConfig& fc = cfg.force_control;
         if (has(sec, "enable")) fc.enable = asBool(sec["enable"], "force_control.enable");
@@ -3642,7 +3643,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "max_acceleration_rad_s2")) fc.max_acceleration_rad_s2 = asDouble(sec["max_acceleration_rad_s2"], "force_control.max_acceleration_rad_s2");
         if (has(sec, "hold_compliance")) fc.hold_compliance = asBool(sec["hold_compliance"], "force_control.hold_compliance");
         if (has(sec, "max_state_age_sec")) fc.max_state_age_sec = asDouble(sec["max_state_age_sec"], "force_control.max_state_age_sec");
-        if (has(sec, "max_command_lag_deg")) fc.max_command_lag_deg = asDouble(sec["max_command_lag_deg"], "force_control.max_command_lag_deg");
+        if (has(sec, "command_execution_tau_sec")) fc.command_execution_tau_sec = asDouble(sec["command_execution_tau_sec"], "force_control.command_execution_tau_sec");
+        if (has(sec, "command_execution_min_rate_dps")) fc.command_execution_min_rate_dps = asDouble(sec["command_execution_min_rate_dps"], "force_control.command_execution_min_rate_dps");
+        if (has(sec, "command_execution_min_ratio")) fc.command_execution_min_ratio = asDouble(sec["command_execution_min_ratio"], "force_control.command_execution_min_ratio");
     }
 
     // ONE ANSWER, DECIDED IN ONE PLACE. The zero-payload push is a property of the
@@ -3943,6 +3946,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "singular_step_scale_min",
                 "joint_limit_best_effort_position_tolerance_m",
                 "joint_limit_best_effort_orientation_tolerance_rad",
+                "max_iterations_best_effort_position_tolerance_m",
+                "max_iterations_best_effort_orientation_tolerance_rad",
             }, "kinematics.ik");
             if (has(ik, "enable")) cfg.kinematics.ik.enable = asBool(ik["enable"], "kinematics.ik.enable");
             if (has(ik, "max_iterations")) cfg.kinematics.ik.max_iterations = asInt(ik["max_iterations"], "kinematics.ik.max_iterations");
@@ -3963,6 +3968,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ik, "singular_step_scale_min")) cfg.kinematics.ik.singular_step_scale_min = asDouble(ik["singular_step_scale_min"], "kinematics.ik.singular_step_scale_min");
             if (has(ik, "joint_limit_best_effort_position_tolerance_m")) cfg.kinematics.ik.joint_limit_best_effort_position_tolerance_m = asDouble(ik["joint_limit_best_effort_position_tolerance_m"], "kinematics.ik.joint_limit_best_effort_position_tolerance_m");
             if (has(ik, "joint_limit_best_effort_orientation_tolerance_rad")) cfg.kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad = asDouble(ik["joint_limit_best_effort_orientation_tolerance_rad"], "kinematics.ik.joint_limit_best_effort_orientation_tolerance_rad");
+            if (has(ik, "max_iterations_best_effort_position_tolerance_m")) cfg.kinematics.ik.max_iterations_best_effort_position_tolerance_m = asDouble(ik["max_iterations_best_effort_position_tolerance_m"], "kinematics.ik.max_iterations_best_effort_position_tolerance_m");
+            if (has(ik, "max_iterations_best_effort_orientation_tolerance_rad")) cfg.kinematics.ik.max_iterations_best_effort_orientation_tolerance_rad = asDouble(ik["max_iterations_best_effort_orientation_tolerance_rad"], "kinematics.ik.max_iterations_best_effort_orientation_tolerance_rad");
         }
     }
 

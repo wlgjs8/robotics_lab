@@ -777,6 +777,45 @@ bool testIkSelectiveDampingDisabledByDefault() {
     return true;
 }
 
+
+// ---- Manipulability step guard (2026-08-26) ---------------------------------
+// Pure ramp function; the thresholds below are the ones stack_real.yaml ships, chosen
+// from the sigma band measured on servo_log_20260826_042818.csv (0.104-0.191, median
+// 0.180 -- there was no true singularity, only the bottom of the operating band).
+bool testIkSingularityStepScale() {
+    const double full = 0.17;
+    const double flr = 0.11;
+    const double smin = 0.30;
+    const auto scale = [&](double sigma) {
+        return rb_servo::ikSingularityStepScale(sigma, full, flr, smin);
+    };
+    // Off -> ceiling untouched.
+    RB_CHECK(std::abs(rb_servo::ikSingularityStepScale(0.12, 0.0, 0.05, 0.3) - 1.0) < 1e-12);
+    // An unmeasured sigma (the 0 placeholder an early-out solve leaves) must NOT throttle.
+    RB_CHECK(std::abs(scale(0.0) - 1.0) < 1e-12);
+    RB_CHECK(std::abs(scale(-1.0) - 1.0) < 1e-12);
+    // Well conditioned (at/above the run's median) -> full ceiling.
+    RB_CHECK(std::abs(scale(0.18) - 1.0) < 1e-12);
+    RB_CHECK(std::abs(scale(0.17) - 1.0) < 1e-12);
+    // At/below the observed floor -> the minimum, and never zero: the arm must always be
+    // commandable back out of the region.
+    RB_CHECK(std::abs(scale(0.11) - smin) < 1e-12);
+    RB_CHECK(std::abs(scale(0.05) - smin) < 1e-12);
+    RB_CHECK(scale(0.05) > 0.0);
+    // Monotone, and both measured shake events land strictly inside the ramp
+    // (event A right sigma ~0.132, event B right sigma ~0.105).
+    RB_CHECK(scale(0.132) > smin && scale(0.132) < 1.0);
+    RB_CHECK(scale(0.105) < scale(0.132));
+    RB_CHECK(scale(0.132) < scale(0.16));
+    // Event B must pull the 1.0 deg/tick ceiling below the tightest per-tick dq_max
+    // budget (170 deg/s * 0.002 s = 0.34 deg) so the direction-PRESERVING uniform scale
+    // binds ahead of the direction-destroying per-joint velocity clamp.
+    RB_CHECK(1.0 * scale(0.105) < 0.34);
+    // A degenerate band (floor >= full) is inert rather than dividing by zero.
+    RB_CHECK(std::abs(rb_servo::ikSingularityStepScale(0.12, 0.10, 0.10, 0.3) - 1.0) < 1e-12);
+    return true;
+}
+
 }  // namespace
 
 bool testFloorPointZJacobianFiniteDifference() {
@@ -989,6 +1028,7 @@ int main() {
     if (!testIkBranchJumpClampHoldsSeed()) return 1;
     if (!testIkBranchJumpClampDefaultOffLeavesSolutionUnchanged()) return 1;
     if (!testIkBranchJumpRateLimitBoundsStepTowardSolution()) return 1;
+    if (!testIkSingularityStepScale()) return 1;
     if (!testIkSelectiveDampingDisabledByDefault()) return 1;
     if (!testIkJointLimitBestEffortAcceptsClampedSolve()) return 1;
     if (!testCartesianLatencyBudgetTelemetry()) return 1;

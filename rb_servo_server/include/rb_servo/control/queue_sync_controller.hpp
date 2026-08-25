@@ -35,9 +35,6 @@ namespace rb_servo {
 // SIGN. Positive trim = longer period = slower sends = fill falls.
 struct QueueSyncDecision {
     double period_trim_us = 0.0;       // add to the nominal control period
-    // Warmup back-pressure: skip THIS cadence tick's wire send. Only ever set in
-    // Warmup, and only while the box has produced no evidence it is consuming.
-    bool hold_send = false;
     double fill_lpf = 0.0;
     double integral_us = 0.0;
     int last_fill = -1;                // -1 = no RBACK observed yet
@@ -49,7 +46,6 @@ struct QueueSyncDecision {
     uint64_t highwater_events = 0;     // absurd backlog; box likely stopped consuming
     uint64_t redrain_events = 0;       // queue rebase forced a re-drain
     uint64_t no_consumption_events = 0;// fill rising faster than a trim can correct
-    uint64_t warmup_holds_total = 0;   // sends skipped by the warmup back-pressure
 };
 
 class QueueSyncController {
@@ -60,17 +56,12 @@ public:
         int fill = -1;
         uint64_t rback_sequence = 0;   // increments per parsed RBACK (freshness)
         uint64_t now_ns = 0;
-        // Did a servo_j actually reach the wire on this tick? A HELD tick is still a
-        // tick the law must see — that is what drains the warmup probe countdown and
-        // what advances the warmup timeout — but it is not a SEND, so it must not
-        // count toward the unevidenced-send budget.
-        //
-        // *** THE LAW MUST BE STEPPED EVERY CADENCE TICK, HELD OR NOT. *** Calling it
-        // only on ticks that sent is a deadlock: `hold_send` latches, the caller then
-        // takes the hold branch, the law is never stepped again, and the decision can
-        // never change. Measured on hardware 2026-08-26 — 11 steps, then the stream
-        // stopped for 42 s while the arm sat still and the command ran 54 deg away.
-        bool sent = false;
+
+        // *** STEP THE LAW EVERY CADENCE TICK. *** Every phase exit here is timed off
+        // `now_ns`, which only advances when the caller steps. A caller that steps
+        // only on some ticks does not slow the law down, it STOPS it: measured
+        // 2026-08-26, a caller that skipped held ticks left Warmup latched forever
+        // (13 RBACKs parsed against 26691 ticks) and the arm never took a command.
     };
 
     explicit QueueSyncController(QueueSyncConfig config);
@@ -99,10 +90,6 @@ private:
     int stale_cycles_ = 0;
     bool underrun_active_ = false;
     bool highwater_active_ = false;
-    // Warmup back-pressure state (see QueueSyncConfig::warmup_unevidenced_sends).
-    int warmup_sends_ = 0;
-    bool warmup_fill_evidenced_ = false;
-    int warmup_probe_countdown_ = 0;
     // Consumption watch: compare against a ~1 s-old reference so a box that has
     // stopped consuming is reported instead of being trimmed at forever.
     uint64_t consumption_ref_ns_ = 0;

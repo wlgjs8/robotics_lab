@@ -836,6 +836,25 @@ force_control:
   # is an arm that moves when something leans on it.
   hold_compliance: true
 
+  # *** IS THE COMMAND ACTUALLY REACHING THE ROBOT? ***
+  # The overlay is an open-loop integrator on the measured wrench: if its output never
+  # lands, the wrench never answers and it winds until something else stops it. On
+  # 2026-08-26 a queue-sync deadlock put the command 54 deg out this way.
+  #
+  # THE TEST IS RATE, NOT DISTANCE, and that is the whole point. Comparing how far the
+  # box's own reference TRAILS the last sent joints froze compliance on a healthy link:
+  # at 334 deg/s it legitimately trails 8.6 deg (the queue alone is 5 ticks) while the
+  # same run's median was 0.02 deg. No fixed distance separates "behind" from
+  # "stopped". A rate does, because a fast move drags the box's reference along with it
+  # and a dead link leaves it exactly where it was.
+  #
+  # THE RATIO IS MEASURED, NOT PICKED. Across the six runs of 2026-08-26 the healthy
+  # minimum was 0.156 and every dead-link run read 0.000, so 0.05 sits three times
+  # below the healthy floor and far above the dead one.
+  command_execution_tau_sec: 0.20         # the comparison window (rate low-pass)
+  command_execution_min_rate_dps: 5.0     # below this we are not moving; say nothing
+  command_execution_min_ratio: 0.05       # ref rate must be >= this x our rate
+
   # Refuse to compose onto a nominal older than this — a deviation composed onto a
   # stale pose is a command nobody authored.
   max_state_age_sec: 0.05
@@ -977,6 +996,26 @@ kinematics:
     # freezes its plan instead of running away (cartesian_solve_blocked_recent).
     joint_limit_best_effort_position_tolerance_m: 0.0005
     joint_limit_best_effort_orientation_tolerance_rad: 0.002
+    # MAX-ITERATIONS BEST EFFORT (2026-08-26). Same idea, for the other way the loop
+    # runs out: near a singularity the selective DLS damping ramps up, the per-iteration
+    # step shrinks, and the 100-iteration budget is spent while the residual is already
+    # micrometres from the target. The tick is then refused, the arm holds at its
+    # previous joints, the NEXT tick converges, and the arm alternates hold/move at loop
+    # rate.
+    # EVIDENCE (servo_log_20260826_054303.csv, right arm 05:44:48.9 -> 05:44:52.2 KST):
+    # sigma_min fell to 0.0114 and IK hit the cap on 1448 ticks in 307 alternating
+    # bursts (~93 Hz). Measured residual on ALL 1448 of them: position <= 0.221 mm
+    # (median 0.034 mm), orientation <= 6.6e-5 rad (median 1.0e-5). position_tolerance_m
+    # is 20 um -- so the arm was frozen and shaken for 3.3 s because the solve came up
+    # 14-200 MICROMETRES short. The measured joint motion in that window was 137 deg at
+    # J3 and 219 deg/s.
+    # Values mirror the joint-limit pair above (0.5 mm / 0.11 deg), which covers 100% of
+    # those 1448 ticks with ~2x margin over the worst residual, and still sits ~70x/~44x
+    # under the follower lead budgets so a best-effort tick can never pass as tracking.
+    # Past this window the solve still fails, the arm still holds, and the follower
+    # freezes its plan (cartesian_solve_blocked_recent) instead of running away.
+    max_iterations_best_effort_position_tolerance_m: 0.0005
+    max_iterations_best_effort_orientation_tolerance_rad: 0.002
 
 cartesian_control:
   # goal lead the measured TCP by more than this (position m / orientation rad).

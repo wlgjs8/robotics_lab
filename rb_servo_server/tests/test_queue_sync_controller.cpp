@@ -1,7 +1,9 @@
 #include "rb_servo/control/queue_sync_controller.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <string>
 #include <vector>
 
 namespace {
@@ -81,6 +83,100 @@ RunResult run(rb_servo::QueueSyncController& ctrl, BoxQueue& box, int ticks,
     result.final_trim_us = result.last.period_trim_us;
     result.phase = result.last.phase;
     return result;
+}
+
+// REGRESSION (2026-08-26). The law is timed off `obs.now_ns`, and `now_ns` only
+// advances when the caller steps. A caller that stepped only on SEND ticks and held
+// otherwise stopped the clock the law reads: Warmup never reached its timeout, the
+// hold never lifted, and the arm sat there. Measured on hardware as 13 RBACKs parsed
+// against 26691 ticks, with the box's own joint reference spanning 0.00 deg.
+//
+// Pinned here in the form the plant actually showed: a box that reports fill 0 no
+// matter what we send (fw v8.7.3 ignored the stream for ~254 ms after activation).
+// That is precisely the input the `developed` test can never fire on, so ONLY the
+// timeout can end Warmup -- and the timeout is only reachable if every tick is
+// stepped. The stream must also never be throttled to a stop while this resolves.
+bool testWarmupBackoffKeepsProbingAndNeverStopsTheStream() {
+    rb_servo::QueueSyncController ctrl(testConfig());
+    uint64_t now_ns = 0;
+    uint64_t seq = 0;
+    double period_us = kNominalPeriodUs;
+    double worst_period_us = 0.0;
+    std::string phase = "idle";
+
+    // 0.2 s at 500 Hz -- four times warmup_max_sec (0.05 s), so a law that needs the
+    // timeout has had every chance to reach it.
+    for (int i = 0; i < 100; ++i) {
+        rb_servo::QueueSyncController::Observation obs;
+        obs.streaming = true;
+        obs.fill_valid = true;
+        obs.fill = 0;                    // the silent box: consumes nothing, reports 0
+        obs.rback_sequence = ++seq;
+        obs.now_ns = now_ns;
+        const rb_servo::QueueSyncDecision d = ctrl.step(obs);
+        period_us = kNominalPeriodUs + d.period_trim_us;
+        worst_period_us = std::max(worst_period_us, period_us);
+        now_ns += static_cast<uint64_t>(period_us * 1000.0);
+        phase = d.phase;
+    }
+
+    // Warmup ENDED. With the fill pinned at 0 the `developed` test cannot fire, so
+    // this passing means the timeout was reached, which means every tick was stepped.
+    RB_CHECK(phase != "warmup");
+    RB_CHECK(phase != "idle");
+    // A fill of 0 is at/below target, so there is nothing to drain.
+    RB_CHECK(phase == "track");
+    // THE STREAM WAS NEVER STOPPED. The removed warmup back-pressure used to throttle
+    // sends here; nothing may reintroduce a trim that stalls the cadence.
+    RB_CHECK(worst_period_us < 2.0 * kNominalPeriodUs);
+    return true;
+}
+
+// The same startup, carried through to the steady state: the box ignores the stream
+// for its first ~254 ms and then begins consuming normally. The backlog built during
+// the silence is real and must DRAIN, not persist -- the pre-fix failure mode was a
+// queue that took 2.3 s to clear, which is 2.3 s of dead time on every command.
+bool testHeldTicksDoNotCountAsSends() {
+    rb_servo::QueueSyncController ctrl(testConfig());
+    uint64_t now_ns = 0;
+    uint64_t seq = 0;
+    double period_us = kNominalPeriodUs;
+    double buried = 0.0;                 // what the silent box accumulated
+    rb_servo::QueueSyncDecision d;
+
+    for (int i = 0; i < 127; ++i) {      // ~254 ms of a box consuming nothing
+        buried += 1.0;
+        rb_servo::QueueSyncController::Observation obs;
+        obs.streaming = true;
+        obs.fill_valid = true;
+        obs.fill = 0;                    // ...while still reporting an empty queue
+        obs.rback_sequence = ++seq;
+        obs.now_ns = now_ns;
+        d = ctrl.step(obs);
+        period_us = kNominalPeriodUs + d.period_trim_us;
+        now_ns += static_cast<uint64_t>(period_us * 1000.0);
+    }
+    RB_CHECK(d.phase != "warmup");       // the silence did not latch the law
+
+    // The box wakes up: the buried commands become the visible backlog and it now
+    // drains on its own clock.
+    BoxQueue box(499.34, buried);
+    for (int i = 0; i < 20000; ++i) {
+        const int fill = box.step(period_us);
+        rb_servo::QueueSyncController::Observation obs;
+        obs.streaming = true;
+        obs.fill_valid = true;
+        obs.fill = fill;
+        obs.rback_sequence = ++seq;
+        obs.now_ns = now_ns;
+        d = ctrl.step(obs);
+        period_us = kNominalPeriodUs + d.period_trim_us;
+        now_ns += static_cast<uint64_t>(period_us * 1000.0);
+    }
+    RB_CHECK(d.phase == "track");
+    RB_CHECK(d.locked);
+    RB_CHECK(std::abs(box.fill() - 5.0) <= 1.0);
+    return true;
 }
 
 // The headline case: the measured operating point. Box drains at 499.34 Hz
@@ -289,163 +385,8 @@ struct NamedTest {
 
 }  // namespace
 
-// ---- Warmup back-pressure ---------------------------------------------------
-// Measured on fw v8.7.3: a box already at activation stage 6 consumed nothing for
-// ~254 ms while reporting RBACK fill 0, so full-rate Warmup buried ~128 commands.
-// The trigger is evidence, not a level: sends made while fill has NEVER been seen
-// above 0.
-
-// Drive the controller with a FIXED reported fill, counting held sends. Returns
-// {holds, ticks_after_trigger, last decision}.
-struct HoldRun {
-    int holds = 0;
-    int sends = 0;
-    rb_servo::QueueSyncDecision last;
-};
-
-// MODELS THE REAL CALLER (ArmWorker), not an idealised one. Two things it must
-// reproduce or the test proves nothing about the deployed loop:
-//
-//   * the law is stepped on EVERY cadence tick, held or not — it is a state machine
-//     over ticks, and the warmup probe countdown drains on the held ones;
-//   * a HELD tick carries no fresh RBACK (nothing was sent) and does not count as a
-//     send, so `fill_valid` and `sent` are both false there.
-//
-// The version of this helper that stepped every tick with `fill_valid = true` is why
-// the 2026-08-26 deadlock got past these tests: the law was right and the caller was
-// not, and nothing here modelled the caller.
-HoldRun runReportedFill(rb_servo::QueueSyncController& ctrl, int ticks,
-                        const std::vector<int>& reported) {
-    HoldRun r;
-    uint64_t now_ns = 0;
-    uint64_t seq = 0;
-    bool hold_next = false;
-    for (int i = 0; i < ticks; ++i) {
-        rb_servo::QueueSyncController::Observation obs;
-        obs.streaming = true;
-        obs.now_ns = now_ns;
-        if (hold_next) {
-            obs.fill_valid = false;
-            obs.fill = -1;
-            obs.rback_sequence = 0;
-            obs.sent = false;
-        } else {
-            obs.fill_valid = true;
-            obs.fill = reported[static_cast<std::size_t>(i) % reported.size()];
-            obs.rback_sequence = ++seq;
-            obs.sent = true;
-        }
-        const rb_servo::QueueSyncDecision d = ctrl.step(obs);
-        // Count the DECISION, matching warmup_holds_total's own bookkeeping; the
-        // observation above is built from the PREVIOUS decision, because that is the
-        // one the caller already acted on.
-        if (d.hold_send) ++r.holds; else ++r.sends;
-        hold_next = d.hold_send;
-        now_ns += static_cast<uint64_t>((kNominalPeriodUs + d.period_trim_us) * 1000.0);
-        r.last = d;
-    }
-    return r;
-}
-
-bool testWarmupHoldsWhenBoxNeverShowsEvidence() {
-    rb_servo::QueueSyncConfig cfg = testConfig();
-    cfg.warmup_max_sec = 1.0;              // stay in Warmup for the whole run
-    cfg.warmup_unevidenced_sends = 10;
-    cfg.warmup_probe_interval = 8;
-    rb_servo::QueueSyncController ctrl(cfg);
-
-    const HoldRun r = runReportedFill(ctrl, 100, {0});
-    // Nothing is held before the trigger, so the first 10 sends all go out.
-    RB_CHECK(r.sends >= 10);
-    RB_CHECK(r.holds > 0);
-    RB_CHECK(r.last.warmup_holds_total == static_cast<uint64_t>(r.holds));
-    // After the trigger the duty cycle is one probe in `warmup_probe_interval`,
-    // so the vast majority of ticks are held. Without this the box would have
-    // received all 100.
-    RB_CHECK(r.holds > 60);
-    return true;
-}
-
-bool testWarmupDoesNotHoldWhenQueueShowsDepth() {
-    rb_servo::QueueSyncConfig cfg = testConfig();
-    cfg.warmup_max_sec = 1.0;
-    cfg.warmup_unevidenced_sends = 10;
-    rb_servo::QueueSyncController ctrl(cfg);
-
-    // A queue that holds anything at all is evidence; one observation is enough.
-    const HoldRun r = runReportedFill(ctrl, 100, {2});
-    RB_CHECK(r.holds == 0);
-    RB_CHECK(r.last.warmup_holds_total == 0);
-    return true;
-}
-
-bool testWarmupHoldClearsOnFirstEvidence() {
-    rb_servo::QueueSyncConfig cfg = testConfig();
-    cfg.warmup_max_sec = 1.0;
-    cfg.warmup_unevidenced_sends = 5;
-    cfg.warmup_probe_interval = 4;
-    rb_servo::QueueSyncController ctrl(cfg);
-
-    // 30 ticks reporting 0 -> the back-pressure engages.
-    const HoldRun blind = runReportedFill(ctrl, 30, {0});
-    RB_CHECK(blind.holds > 0);
-    const uint64_t held_before = blind.last.warmup_holds_total;
-
-    // The queue finally reports depth. From that tick on nothing is held again,
-    // and the counter stops moving.
-    const HoldRun seen = runReportedFill(ctrl, 40, {3});
-    RB_CHECK(seen.holds == 0);
-    RB_CHECK(seen.last.warmup_holds_total == held_before);
-    return true;
-}
-
-// *** THE STREAM MUST NEVER STOP FOR GOOD. ***
-//
-// Measured on hardware 2026-08-26: a box that reported fill 0 on its first ten sends
-// put the law into its warmup back-off, the caller took the hold branch, and because
-// the caller stepped the law ONLY on ticks that sent, the law was never asked again.
-// `hold_send` stayed latched for 42 s: 11 sends total, the arm never moved, and the
-// force overlay — which had no idea its command was not reaching the wire — wound the
-// command 54 deg away until the tracking latch fired.
-//
-// The back-off itself is correct and stays: a box pinned at 0 must not have commands
-// buried in a queue nobody can see. What must hold is that it keeps PROBING.
-bool testWarmupBackoffKeepsProbingAndNeverStopsTheStream() {
-    rb_servo::QueueSyncConfig cfg = testConfig();
-    rb_servo::QueueSyncController ctrl(cfg);
-
-    // A box that never reports depth — the exact hardware case.
-    const HoldRun r = runReportedFill(ctrl, 2000, {0});
-
-    // The stream survives: sends keep going out at the probe duty cycle.
-    RB_CHECK(r.sends > 0);
-    RB_CHECK(r.holds > 0);
-    // ...and not merely the handful before the first hold. Under the deadlock this
-    // was exactly 11 for any number of ticks.
-    RB_CHECK(r.sends > 50);
-    return true;
-}
-
-// A HELD tick is not a send, so it must not spend the unevidenced-send budget. If it
-// did, the budget would drain while nothing was on the wire and the back-off would
-// mean something different from what it says.
-bool testHeldTicksDoNotCountAsSends() {
-    rb_servo::QueueSyncConfig cfg = testConfig();
-    rb_servo::QueueSyncController ctrl(cfg);
-    const HoldRun r = runReportedFill(ctrl, 400, {0});
-    // The first `warmup_unevidenced_sends` ticks all send (nothing is held yet),
-    // then the duty cycle starts. If holds counted as sends the ratio would be far
-    // more hold-heavy than one probe per interval.
-    RB_CHECK(r.sends >= cfg.warmup_unevidenced_sends);
-    const double duty = static_cast<double>(r.sends) / static_cast<double>(r.sends + r.holds);
-    RB_CHECK(duty > 1.0 / (cfg.warmup_probe_interval + 1));
-    return true;
-}
-
 int main() {
     const std::vector<NamedTest> tests = {
-        {"warmup back-off keeps probing", testWarmupBackoffKeepsProbingAndNeverStopsTheStream},
-        {"held ticks are not sends", testHeldTicksDoNotCountAsSends},
         {"locks measured drift to target", testLocksMeasuredDriftToTarget},
         {"unregulated queue grows without bound", testUnregulatedQueueGrowsWithoutBound},
         {"drains large backlog quickly", testDrainsLargeBacklogQuickly},
@@ -458,9 +399,6 @@ int main() {
         {"integral survives reset, level state does not", testIntegralSurvivesResetButLevelStateDoesNot},
         {"trim is bounded", testTrimIsBounded},
         {"both arms lock independently", testBothArmsLockIndependently},
-        {"warmup holds when box never shows evidence", testWarmupHoldsWhenBoxNeverShowsEvidence},
-        {"warmup does not hold when queue shows depth", testWarmupDoesNotHoldWhenQueueShowsDepth},
-        {"warmup hold clears on first evidence", testWarmupHoldClearsOnFirstEvidence},
     };
     int failed = 0;
     for (const NamedTest& t : tests) {

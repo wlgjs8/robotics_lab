@@ -2669,6 +2669,13 @@ void DualArmServoLoop::loopMain() {
         // reads a wrench. Running it per consumer would let two consumers of one tick
         // see two different wrenches, which is the class of frame slip that makes a
         // force number impossible to argue about.
+        // The command-execution rates the force guard reads. Updated here, beside the
+        // F/T pipeline, so both see the same tick: OUR command's joint rate and the
+        // BOX'S OWN reference rate, each low-passed over
+        // force_control.command_execution_tau_sec.
+        updateCommandExecutionRates(ArmId::Left, left_state);
+        updateCommandExecutionRates(ArmId::Right, right_state);
+
         stepFtPipeline(ArmId::Left, left_state);
         stepFtPipeline(ArmId::Right, right_state);
 
@@ -3081,6 +3088,13 @@ void DualArmServoLoop::loopMain() {
                     left_init_before_sequencer ? toString(command.right.mode) : toString(command.left.mode);
             }
             const bool motion_requested = commandRequestsMotion(command);
+            // Arm the servo_j stream on the first motion command and keep it armed
+            // (see servo_stream_armed_). Before this the stack holds by NOT
+            // streaming: the box keeps its last reference, which is the same
+            // mechanism the freedrive suppression already relies on.
+            if (motion_requested) {
+                servo_stream_armed_.store(true, std::memory_order_relaxed);
+            }
             const ServoTarget desired =
                 computeServoTarget(left_state, right_state, command, filter_dt_sec, &command_verdict);
             // computeServoTarget already encodes the correct PER-ARM result in `desired`:
@@ -3421,8 +3435,6 @@ void DualArmServoLoop::loopMain() {
                 t.highwater_events = d.highwater_events;
                 t.redrain_events = d.redrain_events;
                 t.no_consumption_events = d.no_consumption_events;
-                t.hold_send = d.hold_send;
-                t.warmup_holds_total = d.warmup_holds_total;
                 return t;
             };
             if (left_worker_) {
@@ -4706,8 +4718,16 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     // divergence crossed 0.1 rad, and the rollout latched ChunkFollowerFault on
     // divergence the safety layer had itself caused.
     const bool throttled_recent = commandThrottledRecent(arm_id, now_ns);
-    const bool command_refused_recent =
-        intervention_recent || solve_blocked_recent || throttled_recent;
+    // NOTE the deliberate asymmetry (2026-08-26, second pass, measured on
+    // servo_log_20260826_053428.csv): a throttle explains divergence but must NOT
+    // freeze the plan. Folding it into the plan-freeze made the right arm stutter --
+    // the throttle window read 100% of ticks while the arm chased a far target at the
+    // velocity ceiling, so the plan froze continuously and the command went
+    // 34 -> 10 -> 0 deg/s for 7+ ticks at a time. A HELD arm (projection / refused
+    // solve) must freeze the plan; a SLOWED arm must not, because it is still making
+    // progress and freezing it is what creates the stop-go.
+    const bool command_refused_recent = intervention_recent || solve_blocked_recent;
+    const bool divergence_explained_recent = command_refused_recent || throttled_recent;
     std::uint64_t& reanchor_count = arm_id == ArmId::Left
         ? left_chunk_follower_reanchor_count_
         : right_chunk_follower_reanchor_count_;
@@ -4872,7 +4892,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                 // strict fault mode, only an active recent safety intervention can
                 // explain it; then reseed the chained state but keep the active window.
                 // Otherwise keep the legacy drop/fault or SMD re-anchor behavior.
-                if (fault_policy && command_refused_recent) {
+                if (fault_policy && divergence_explained_recent) {
                     follower->reanchor(reference);
                     output_smd->deactivate();
                     ++reanchor_count;
@@ -5146,8 +5166,16 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     // divergence crossed 0.1 rad, and the rollout latched ChunkFollowerFault on
     // divergence the safety layer had itself caused.
     const bool throttled_recent = commandThrottledRecent(arm_id, now_ns);
-    const bool command_refused_recent =
-        intervention_recent || solve_blocked_recent || throttled_recent;
+    // NOTE the deliberate asymmetry (2026-08-26, second pass, measured on
+    // servo_log_20260826_053428.csv): a throttle explains divergence but must NOT
+    // freeze the plan. Folding it into the plan-freeze made the right arm stutter --
+    // the throttle window read 100% of ticks while the arm chased a far target at the
+    // velocity ceiling, so the plan froze continuously and the command went
+    // 34 -> 10 -> 0 deg/s for 7+ ticks at a time. A HELD arm (projection / refused
+    // solve) must freeze the plan; a SLOWED arm must not, because it is still making
+    // progress and freezing it is what creates the stop-go.
+    const bool command_refused_recent = intervention_recent || solve_blocked_recent;
+    const bool divergence_explained_recent = command_refused_recent || throttled_recent;
     std::uint64_t& reanchor_count = arm_id == ArmId::Left
         ? left_chunk_follower_reanchor_count_
         : right_chunk_follower_reanchor_count_;
@@ -5233,7 +5261,7 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
             }
         } else {
             if (pos_err > kPoseTrackReanchorPosTolM || ang_err > kPoseTrackReanchorAngTolRad) {
-                if (fault_policy && command_refused_recent) {
+                if (fault_policy && divergence_explained_recent) {
                     follower->reanchor(reference);
                     ++reanchor_count;
                     abc.follower_reanchor_count = reanchor_count;
@@ -7480,6 +7508,52 @@ bool DualArmServoLoop::stepFtPipeline(ArmId arm, const RobotState& state) {
     return ok;
 }
 
+
+void DualArmServoLoop::updateCommandExecutionRates(ArmId arm, const RobotState& state) {
+    const bool left = arm == ArmId::Left;
+    const double dt = 1.0 / std::max(1, config_.servo.rate_hz);
+    const double tau = config_.force_control.command_execution_tau_sec > 0.0
+                           ? config_.force_control.command_execution_tau_sec
+                           : 0.2;
+    const double a = dt / (tau + dt);
+
+    const JointArray& cmd = left ? left_prev_sent_q_deg_ : right_prev_sent_q_deg_;
+    const JointArray& ref = state.q_target_deg;
+    JointArray& cmd_prev = left ? left_cmd_rate_prev_ : right_cmd_rate_prev_;
+    JointArray& ref_prev = left ? left_ref_rate_prev_ : right_ref_rate_prev_;
+    bool& seeded = left ? left_rate_seeded_ : right_rate_seeded_;
+    double& cmd_rate = left ? left_cmd_rate_dps_ : right_cmd_rate_dps_;
+    double& ref_rate = left ? left_ref_rate_dps_ : right_ref_rate_dps_;
+
+    if (!seeded || !state.q_ref_valid) {
+        // SEED, never ramp from zero: a rate that starts at 0 would read as "the
+        // command is not moving" for the first tau and make the guard say nothing
+        // exactly when a fresh stream is most likely to be broken.
+        cmd_prev = cmd;
+        ref_prev = ref;
+        cmd_rate = 0.0;
+        ref_rate = 0.0;
+        seeded = state.q_ref_valid;
+        return;
+    }
+
+    double cmd_step = 0.0;
+    double ref_step = 0.0;
+    for (int i = 0; i < kDof; ++i) {
+        if (!std::isfinite(cmd[i]) || !std::isfinite(ref[i]) ||
+            !std::isfinite(cmd_prev[i]) || !std::isfinite(ref_prev[i])) {
+            seeded = false;
+            return;
+        }
+        cmd_step = std::max(cmd_step, std::abs(cmd[i] - cmd_prev[i]));
+        ref_step = std::max(ref_step, std::abs(ref[i] - ref_prev[i]));
+    }
+    cmd_prev = cmd;
+    ref_prev = ref;
+    cmd_rate += a * (cmd_step / dt - cmd_rate);
+    ref_rate += a * (ref_step / dt - ref_rate);
+}
+
 bool DualArmServoLoop::forceControlCovered(
     ArmId arm,
     const ArmCommand& command,
@@ -7523,41 +7597,38 @@ bool DualArmServoLoop::forceControlCovered(
     // *** IS THE COMMAND ACTUALLY REACHING THE ROBOT? ***
     // The overlay is an open-loop integrator on the measured wrench. If its output
     // never lands, the wrench never answers, and it winds until something else stops
-    // it. On 2026-08-26 the servo stream deadlocked in queue-sync warmup: the arm
-    // never moved, the wrench stayed (a hand was on the tool), and the deviation wound
-    // the command 54 deg out before the tracking latch fired.
+    // it (2026-08-26: a queue-sync deadlock became a command 54 deg out).
     //
-    // The box's OWN reference is the evidence. `q_target_deg` is rbpodo's sdata.jnt_ref
-    // — what the controller is actually chasing. If it is not following what we sent,
-    // the box is not taking our commands and there is nothing for compliance to do but
-    // hold what it has.
-    if (config_.force_control.max_command_lag_deg > 0.0) {
-        if (!state.q_ref_valid) {
-            return no("the controller is not reporting its own joint reference, so "
-                      "there is no evidence our commands are being executed");
-        }
-        const JointArray& sent = left ? left_prev_sent_q_deg_ : right_prev_sent_q_deg_;
-        double lag = 0.0;
-        for (int i = 0; i < kDof; ++i) {
-            if (!std::isfinite(sent[i]) || !std::isfinite(state.q_target_deg[i])) {
-                return no("joint command or controller reference is non-finite");
+    // THE TEST IS RATE, NOT DISTANCE. A first attempt compared how far the box's own
+    // reference trailed the last sent joints and froze compliance on a HEALTHY link:
+    // at 334 deg/s the reference legitimately trails by 8.6 deg (the queue alone is
+    // 5 ticks) while the same run's median lag was 0.02 deg. Distance cannot separate
+    // "the box is behind" from "the box has stopped"; rate can, because a fast move
+    // advances the reference too and a dead link does not.
+    {
+        const ForceControlConfig& fc = config_.force_control;
+        if (fc.command_execution_min_rate_dps > 0.0) {
+            if (!state.q_ref_valid) {
+                return no("the controller is not reporting its own joint reference, so "
+                          "there is no evidence our commands are being executed");
             }
-            lag = std::max(lag, std::abs(sent[i] - state.q_target_deg[i]));
-        }
-        if (lag > config_.force_control.max_command_lag_deg) {
-            // FREEZE, not reset: the deviation already on the wire is the pose the
-            // arm is holding, and walking it back would command the tool through
-            // whatever it is resting against.
-            if (reason != nullptr) {
-                char detail[192];
-                std::snprintf(detail, sizeof(detail),
-                              "the controller is not executing our commands (its own "
-                              "reference trails the last sent joints by %.2f deg, limit "
-                              "%.2f) - compliance is FROZEN until the servo stream "
-                              "recovers", lag, config_.force_control.max_command_lag_deg);
-                *reason = detail;
+            const double cmd_rate = left ? left_cmd_rate_dps_ : right_cmd_rate_dps_;
+            const double ref_rate = left ? left_ref_rate_dps_ : right_ref_rate_dps_;
+            // Below the floor the command is not really moving, so a stationary
+            // reference proves nothing and the guard stays quiet.
+            if (cmd_rate > fc.command_execution_min_rate_dps &&
+                ref_rate < cmd_rate * fc.command_execution_min_ratio) {
+                if (reason != nullptr) {
+                    char detail[224];
+                    std::snprintf(detail, sizeof(detail),
+                                  "the controller is not executing our commands (we are "
+                                  "moving at %.1f deg/s, its own reference at %.1f) - "
+                                  "compliance is FROZEN until the servo stream recovers",
+                                  cmd_rate, ref_rate);
+                    *reason = detail;
+                }
+                return false;
             }
-            return false;
         }
     }
 
@@ -9246,6 +9317,19 @@ std::string DualArmServoLoop::currentSendPolicy() const {
         // settle to idle before freedrive_teach_on (else M151). The freedrive arm
         // is hand-guided; the other holds at its last reference. Recoverable.
         return "freedrive";
+    }
+    if (!servo_stream_armed_.load(std::memory_order_relaxed)) {
+        // Startup posture: nothing on the wire until the first motion command.
+        // The arm stays stiff -- the box holds its last reference exactly as it
+        // does under the freedrive suppression above. Recoverable by definition:
+        // the next motion command arms the stream.
+        //
+        // ORDERED AFTER FREEDRIVE ON PURPOSE. Both suppress every send, so whichever
+        // is tested first is the only one the operator ever sees. Freedrive is the
+        // specific, operator-requested reason and its arming state machine is staged
+        // off this label; the startup posture is the default. Putting the default
+        // first hid freedrive entirely (caught by test_safety_policy 2026-08-26).
+        return "awaiting_first_motion_command";
     }
     if (controllerSimulationMotionRequired(config_) &&
         !controllerSimulationMotionGateOpen(config_)) {

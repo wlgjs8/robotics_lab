@@ -14,6 +14,12 @@ constexpr const char* kReasonJointLimit = "joint_limit";
 // inside ik.joint_limit_best_effort_* (see config.hpp). Success, not failure:
 // the arm keeps tracking every direction the pinned joint does not block.
 constexpr const char* kReasonJointLimitBestEffort = "joint_limit_best_effort";
+// A non-converged iterate accepted as a success because its residual was inside
+// ik.max_iterations_best_effort_* (see config.hpp). Success, not failure: near a
+// singularity the DLS damping ramp shrinks the step until the iteration budget runs
+// out while the residual is already micrometres from the target, and refusing the
+// tick there is what makes the arm chatter.
+constexpr const char* kReasonMaxIterationsBestEffort = "max_iterations_best_effort";
 constexpr const char* kReasonInvalidTarget = "invalid_target";
 constexpr const char* kReasonKinematicsUnavailable = "kinematics_unavailable";
 

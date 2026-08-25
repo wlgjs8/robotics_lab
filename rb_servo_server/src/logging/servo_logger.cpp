@@ -577,9 +577,7 @@ void ServoLogger::writeHeader() {
               << ',' << side << "_qsync_stall_events"
               << ',' << side << "_qsync_highwater_events"
               << ',' << side << "_qsync_redrain_events"
-              << ',' << side << "_qsync_no_consumption_events"
-              << ',' << side << "_qsync_hold_send"
-              << ',' << side << "_qsync_warmup_holds_total";
+              << ',' << side << "_qsync_no_consumption_events";
     }
     file_ << ",left_error_code,right_error_code";
     writeCartesianSolveHeader(file_, "left");
@@ -1260,9 +1258,7 @@ void ServoLogger::writeSample(const ServoSample& sample) {
               << ',' << qs->stall_events
               << ',' << qs->highwater_events
               << ',' << qs->redrain_events
-              << ',' << qs->no_consumption_events
-              << ',' << qs->hold_send
-              << ',' << qs->warmup_holds_total;
+              << ',' << qs->no_consumption_events;
     }
     file_ << ',' << sample.left_state.error_code << ',' << sample.right_state.error_code;
     writeCartesianSolveColumns(file_, sample.left_cartesian_solve);

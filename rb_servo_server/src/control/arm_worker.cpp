@@ -614,47 +614,6 @@ void ArmWorker::run() {
                     makeBackendTiming(now, now)
                 );
                 storeSendResult(*command, result, makeBackendTiming(now, now));
-            // Unlocked read is safe: this worker thread is the ONLY writer of
-            // queue_sync_decision_ (it writes it under the mutex a few lines below,
-            // from this same thread); the servo loop only ever reads it, under the
-            // mutex, via queueSyncDecision().
-            } else if (owns_cadence && queue_sync_decision_.hold_send) {
-                // Warmup back-pressure: the box has produced no evidence it is
-                // consuming, so this tick's setpoint stays OFF the wire instead of
-                // being buried in a queue we cannot see. The mailbox is
-                // latest-wins, so nothing is lost -- the next tick that does send
-                // carries the newest setpoint. Recorded as a suppression rather
-                // than dropped silently, because a servo stream that is not on the
-                // wire must never be invisible.
-                const SendServoJResult result = rejectedSend(
-                    *command,
-                    backendError(
-                        BackendErrorKind::SuppressedByPolicy,
-                        "servo_j held: queue sync has no evidence the box is consuming",
-                        "",
-                        "queue_sync_warmup_hold"
-                    ),
-                    makeBackendTiming(now, now)
-                );
-                storeSendResult(*command, result, makeBackendTiming(now, now));
-                // STEP THE LAW ON A HELD TICK TOO. It is a state machine over ticks,
-                // not over sends: the warmup probe countdown drains here and the
-                // warmup timeout advances here. Stepping it only when a send happened
-                // deadlocks it — `hold_send` latches, this branch is taken forever,
-                // and the law is never asked again (measured 2026-08-26: 11 steps,
-                // then 42 s of silence with the arm still and the command 54 deg out).
-                if (owns_cadence) {
-                    QueueSyncController::Observation obs;
-                    obs.streaming = true;
-                    obs.fill_valid = false;   // nothing was sent, so no fresh RBACK
-                    obs.fill = -1;
-                    obs.rback_sequence = 0;
-                    obs.now_ns = now;
-                    obs.sent = false;
-                    const QueueSyncDecision decision = queue_sync_.step(obs);
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    queue_sync_decision_ = decision;
-                }
             } else {
                 const uint64_t send_start_ns = nowSteadyNs();
                 SendServoJResult result = backend_->sendServoJ(*command);
@@ -674,7 +633,6 @@ void ArmWorker::run() {
                     obs.fill = result.queue_ack.fill;
                     obs.rback_sequence = result.queue_ack.sequence;
                     obs.now_ns = send_end_ns;
-                    obs.sent = true;
                     const QueueSyncDecision decision = queue_sync_.step(obs);
                     std::lock_guard<std::mutex> lock(mutex_);
                     queue_sync_decision_ = decision;

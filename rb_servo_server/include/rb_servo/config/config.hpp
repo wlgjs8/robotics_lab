@@ -203,6 +203,22 @@ struct IkSolverConfig {
     // Both <= 0 disables (hard failure, previous behavior).
     double joint_limit_best_effort_position_tolerance_m = 0.0;
     double joint_limit_best_effort_orientation_tolerance_rad = 0.0;
+    // MAX-ITERATIONS BEST EFFORT. Same shape as the joint-limit case above, for the
+    // other way the iteration runs out: near a singularity the selective DLS damping
+    // ramps up, the per-iteration step shrinks, and the loop hits max_iterations while
+    // the residual is already far inside any physically meaningful tolerance. The tick
+    // is then refused and the arm holds at its previous joints -- and because the next
+    // tick often converges, the arm alternates hold/move at loop rate.
+    // Measured 2026-08-26 on servo_log_20260826_054303.csv (right arm, 05:44:48.9 ->
+    // 05:44:52.2 KST): sigma_min fell to 0.0114, IK hit the 100-iteration cap on 1448
+    // ticks in 307 alternating bursts (~93 Hz), and the arm swung 137 deg at J3 with
+    // 219 deg/s of measured joint speed. The residual on EVERY ONE of those 1448 ticks
+    // was <= 0.221 mm / 6.6e-5 rad, against a configured position_tolerance_m of 20 um.
+    // The solve was refused for being 14-200 micrometres short.
+    // Accepting it keeps the arm tracking; the residual stays visible as follower lead
+    // and is still bounded by the divergence latch. Both <= 0 disables (default off).
+    double max_iterations_best_effort_position_tolerance_m = 0.0;
+    double max_iterations_best_effort_orientation_tolerance_rad = 0.0;
 };
 
 struct KinematicsConfig {
@@ -972,23 +988,6 @@ struct QueueSyncConfig {
     int highwater_fill = 500;               // absurd backlog -> event
     double warmup_min_sec = 0.4;            // let the box startup transient develop
     double warmup_max_sec = 1.2;
-    // Warmup back-pressure. Measured 2026-08-26 on fw v8.7.3: a box already at
-    // activation stage 6 (servo on) consumed NOTHING for ~254 ms while reporting
-    // RBACK fill 0, then revealed the whole ~128-command backlog at once, which
-    // then took 2.3 s to drain. Warmup used to stream at full rate through that
-    // window because its exit test waits for fill to RAMP, and a fill pinned at 0
-    // never trips it.
-    //
-    // fill == 0 alone cannot separate "not consuming" from "consuming at exactly
-    // our rate", so the trigger is the pair: this many sends made while fill has
-    // NEVER been observed above 0. Under that ambiguity the safe action is the
-    // same either way -- stop pushing until the queue proves it can hold.
-    int warmup_unevidenced_sends = 10;
-    // While throttled, still send one in every N cadence ticks. NOT a hard stop:
-    // a healthy box that happens to sit at fill 0 would otherwise be silenced
-    // with no way to earn evidence, and the probe both bounds the backlog to 1/N
-    // of the unthrottled rate and self-clears the moment fill goes above 0.
-    int warmup_probe_interval = 8;
     double drain_timeout_sec = 8.0;
     int stall_cycles = 25;                  // no fresh RBACK for this many ticks -> event
     int no_consumption_rise_per_sec = 100;  // fill rising this fast -> box stopped consuming
@@ -1190,17 +1189,28 @@ struct ForceControlConfig {
     // ROBOT. *** It is an open-loop integrator on the measured wrench: if its output
     // never lands, the wrench never changes, and it winds until something else stops
     // it. Measured 2026-08-26 — the servo stream deadlocked in queue-sync warmup, the
-    // arm never moved, and the deviation wound the command 54 deg out before the
-    // tracking latch fired on a fault that named the wrong subsystem.
+    // arm never moved, and the deviation wound the command 54 deg out.
     //
-    // The evidence is the BOX'S OWN REFERENCE (rbpodo sdata.jnt_ref): if it is not
-    // following what we sent, the box is not taking our commands. Past this bound the
-    // overlay FREEZES (holds its deviation, drops its momentum) instead of winding.
+    // THE TEST IS "IS THE BOX'S REFERENCE ADVANCING", NOT "HOW FAR BEHIND IS IT".
+    // A distance threshold cannot separate the two cases and was measured doing
+    // exactly that: at 334 deg/s the box's reference legitimately trailed the command
+    // by 8.6 deg (the queue alone is 5 ticks ~= 3.4 deg at that rate) and froze
+    // compliance on a healthy link, while the median lag in the same run was 0.02 deg.
+    // Any constant tight enough to catch a dead link during a slow move fires during
+    // every fast one.
     //
-    // Sized above the honest lag — the queue holds queue_sync.target_fill ticks, so at
-    // a fast joint rate the reference legitimately trails the command by a few
-    // degrees. Non-positive disables the guard.
-    double max_command_lag_deg = 8.0;
+    // A dead link and a fast move differ in RATE, not distance: under a fast move the
+    // box's reference moves too, trailing proportionally; under a dead link it does
+    // not move at all. So both rates are low-passed and compared. The guard only
+    // speaks while the command is genuinely moving — below min_rate_dps there is
+    // nothing to conclude from a stationary reference.
+    double command_execution_tau_sec = 0.20;      // rate low-pass; the comparison window
+    double command_execution_min_rate_dps = 5.0;  // below this the test says nothing
+    // Ratio, not a tuned constant: measured across six runs on this cell the healthy
+    // minimum was 0.156 (a fast move, where the reference trails but still moves) and
+    // every dead-link run read 0.000. 0.05 sits three times below the healthy floor
+    // and far above the dead one, so it separates them without sitting on either.
+    double command_execution_min_ratio = 0.05;    // ref rate must be >= this x cmd rate
 };
 
 struct LinearMoveConfig {

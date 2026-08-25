@@ -430,6 +430,25 @@ private:
     bool peerCartesianServoOk(ArmId arm) const;
 
     std::atomic<bool> fault_latched_{false};
+    // servo_j STREAM ARMING. Latched by the first motion command and never cleared.
+    //
+    // WHY: control-box firmware v8.7.3 does not consume the servo_j stream for the
+    // first ~254 ms after a connection, while reporting RBACK queue fill 0 the
+    // whole time (measured 2026-08-26 with the box already at activation stage 6,
+    // so this is NOT an activation gap). Streaming a Hold from connect buried ~128
+    // commands in that window; the box then revealed the whole backlog at once and
+    // it took ~2.3 s to drain, during which the box-side delay was ~260 ms and --
+    // this being a FIFO -- a software stop would have queued behind it.
+    //
+    // controller-manager does not have this problem BY CONSTRUCTION: it streams
+    // only in State::OnTask and is silent in Enabled, so it never writes into that
+    // window (confirmed with its author, 2026-08-26). This latch is that rule.
+    //
+    // NEVER CLEARED once set, deliberately. Going silent again between motions
+    // would drop the queue lock and force a re-drain at the next command --
+    // controller-manager keeps a stiff-hold Task::Idle streaming between tasks for
+    // exactly that reason. Silence is the STARTUP posture, not the idle one.
+    std::atomic<bool> servo_stream_armed_{false};
     std::atomic<SafetyVerdict> fault_verdict_{SafetyVerdict::Ok};
     std::atomic<SafetyVerdict> latched_fault_reason_{SafetyVerdict::Ok};
     std::string fault_reason_;
@@ -709,6 +728,19 @@ private:
     // ticks have passed, then the verdict latches for the run.
     std::uint32_t left_ft_liveness_ticks_ = 0;
     std::uint32_t right_ft_liveness_ticks_ = 0;
+    // Low-passed joint rates for the command-execution guard: how fast OUR command
+    // is moving vs how fast the BOX'S OWN reference is. A dead link shows as the
+    // first advancing while the second does not; a fast move advances both.
+    double left_cmd_rate_dps_ = 0.0;
+    double right_cmd_rate_dps_ = 0.0;
+    double left_ref_rate_dps_ = 0.0;
+    double right_ref_rate_dps_ = 0.0;
+    JointArray left_cmd_rate_prev_{};
+    JointArray right_cmd_rate_prev_{};
+    JointArray left_ref_rate_prev_{};
+    JointArray right_ref_rate_prev_{};
+    bool left_rate_seeded_ = false;
+    bool right_rate_seeded_ = false;
     std::string left_fc_reason_logged_;
     std::string right_fc_reason_logged_;
     uint64_t left_fc_reason_logged_ns_ = 0;
@@ -943,6 +975,9 @@ private:
     // Run one arm's F/T pipeline for this tick. Folds the COLD liveness window and
     // any pending tare. Returns true when a trustworthy compensated wrench exists.
     bool stepFtPipeline(ArmId arm, const RobotState& state);
+    // Low-pass this arm's command rate and the box's own reference rate, which the
+    // force guard compares. Rates, not distances: see forceControlCovered.
+    void updateCommandExecutionRates(ArmId arm, const RobotState& state);
     // Decide whether the overlay covers this arm this tick, and say why in the
     // telemetry. Coverage is never silent: an operator asking "why did it not
     // comply" must be able to read the answer instead of inferring it.

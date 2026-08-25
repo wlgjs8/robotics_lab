@@ -982,10 +982,6 @@ struct QueueSyncTelemetry {
     uint64_t highwater_events = 0;      // absurd backlog; box likely not consuming
     uint64_t redrain_events = 0;        // queue rebase forced a re-drain
     uint64_t no_consumption_events = 0; // fill rising faster than a trim can correct
-    // Warmup back-pressure: this tick's send was held off the wire because the box
-    // had produced no evidence it consumes. Cumulative count beside it.
-    bool hold_send = false;
-    uint64_t warmup_holds_total = 0;
 };
 
 struct LatchedFaultContextSnapshot {
