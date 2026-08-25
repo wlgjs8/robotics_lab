@@ -150,6 +150,8 @@ from .status_panel import (
     _format_circle_overlay_status,
     _format_scene_asset_status,
     _format_fk_status,
+    _format_ft_status,
+    _format_force_control_status,
     _format_init_motion_status,
     _format_joint_monitor_value,
     _format_joints,
@@ -2885,6 +2887,48 @@ def build_gui(
                     ok, message = safety.send_lifecycle(mode)
                     handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
 
+            # ---- F/T sensor + force control ---------------------------------
+            # An operator surface for the ONE precondition force control has: a
+            # sensor zero. Without a tare the server refuses to make any arm
+            # compliant, and before this panel existed the only way to send one was
+            # a second terminal — which is how the first hardware attempt ended up
+            # taring a server that had already been stopped.
+            with server.gui.add_folder("Force / F/T", expand_by_default=True):
+                handles["ft_status"] = server.gui.add_text(
+                    "F/T", initial_value="F/T: no state", disabled=True
+                )
+                handles["fc_status"] = server.gui.add_text(
+                    "Force control", initial_value="force: no state", disabled=True
+                )
+
+                def _tare(left: bool, right: bool) -> None:
+                    ok, message = safety.send_ft_tare(left=left, right=right)
+                    handles["last_action"].value = ("OK: " if ok else "BLOCKED: ") + message
+
+                tare_both = server.gui.add_button("F/T 영점 (양팔)")
+                tare_left_btn = server.gui.add_button("F/T 영점 (왼팔)")
+                tare_right_btn = server.gui.add_button("F/T 영점 (오른팔)")
+
+                @tare_both.on_click
+                def _(_: Any) -> None:
+                    _tare(True, True)
+
+                @tare_left_btn.on_click
+                def _(_: Any) -> None:
+                    _tare(True, False)
+
+                @tare_right_btn.on_click
+                def _(_: Any) -> None:
+                    _tare(False, True)
+
+                # The one thing neither the GUI nor the server can check, stated where
+                # the button is rather than in a doc nobody has open.
+                server.gui.add_text(
+                    "영점 주의",
+                    initial_value="정지 + 툴 외 무부하 상태에서. 지금 걸린 하중이 새 0이 됩니다",
+                    disabled=True,
+                )
+
             # Per-arm direct teaching (free-drive). Releases servo_j authority on
             # the chosen arm's controller so it can be hand-guided, then re-acquires
             # it with a target resync — without tearing down `make run`. Requires
@@ -5421,6 +5465,10 @@ def update_gui(
         update_user_floor_plane(handles.get("scene", {}), None)
         if "fk_status" in handles:
             handles["fk_status"].value = _format_fk_status(None, stale=True)
+        if "ft_status" in handles:
+            handles["ft_status"].value = _format_ft_status(None, stale=True)
+        if "fc_status" in handles:
+            handles["fc_status"].value = _format_force_control_status(None, stale=True)
         if "tcp_tracking" in handles:
             handles["tcp_tracking"].value = _format_tcp_tracking_status(
                 None,
@@ -5561,6 +5609,10 @@ def update_gui(
                 handles["user_floor_set_status"].value = ("restoring... " if ok else "restore failed: ") + msg
     if "fk_status" in handles:
         handles["fk_status"].value = _format_fk_status(latest, stale=stale)
+    if "ft_status" in handles:
+        handles["ft_status"].value = _format_ft_status(latest, stale=stale)
+    if "fc_status" in handles:
+        handles["fc_status"].value = _format_force_control_status(latest, stale=stale)
     if "tcp_tracking" in handles:
         handles["tcp_tracking"].value = _format_tcp_tracking_status(
             latest,

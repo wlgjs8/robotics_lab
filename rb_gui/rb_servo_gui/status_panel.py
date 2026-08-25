@@ -102,6 +102,79 @@ def _arm_fk_status(arm: ArmSnapshot) -> str:
     return "available"
 
 
+def _arm_ft_summary(arm: Any) -> str:
+    """One arm's F/T line: is it live, is it zeroed, what is it reading now."""
+    ft = getattr(arm, "force_torque", None)
+    if not isinstance(ft, Mapping):
+        return "no telemetry"
+    if not ft.get("enabled"):
+        return "disabled"
+    if not ft.get("connected"):
+        # NOT an error state on its own — the arm runs without force sensing and
+        # every compensated channel is pinned to zero. But nothing will comply.
+        return f"NOT CONNECTED ({ft.get('connect_reason') or 'unknown'})"
+    parts: list[str] = []
+    if not ft.get("bias_valid"):
+        parts.append("NOT ZEROED - press F/T 영점")
+    else:
+        parts.append(f"zeroed ({ft.get('bias_source')}, gen {ft.get('bias_generation')})")
+    # The wrench the force law actually consumes, at the TCP in stand axes.
+    w = ft.get("comp_stand_axes_at_tcp")
+    if isinstance(w, (list, tuple)) and len(w) >= 3:
+        try:
+            mag = math.sqrt(sum(float(v) ** 2 for v in w[:3]))
+            parts.append(f"|F| {mag:.1f} N")
+        except (TypeError, ValueError):
+            pass
+    tare = ft.get("tare_state")
+    if tare and tare != "none":
+        parts.append(f"tare={tare}")
+    return ", ".join(parts)
+
+
+def _format_ft_status(latest: StateSnapshot | None, *, stale: bool) -> str:
+    if latest is None:
+        return "F/T: no state"
+    if stale:
+        return "F/T: state stream stale"
+    return f"F/T: left {_arm_ft_summary(latest.left)}; right {_arm_ft_summary(latest.right)}"
+
+
+def _arm_force_control_summary(arm: Any) -> str:
+    """One arm's force-control line. A refusal names ITSELF: an operator pushing an
+    arm that does not yield must be able to read why instead of guessing."""
+    fc = getattr(arm, "force_control", None)
+    if not isinstance(fc, Mapping):
+        return "no telemetry"
+    if not fc.get("enabled"):
+        return "disabled"
+    if not fc.get("covered"):
+        return f"NOT COVERED ({fc.get('coverage_reason') or 'unknown'})"
+    bits = []
+    try:
+        bits.append(f"dev {float(fc.get('deviation_norm_m', 0.0)) * 1e3:.1f} mm")
+    except (TypeError, ValueError):
+        pass
+    try:
+        bits.append(f"gate {float(fc.get('gate_translation', 1.0)):.2f}")
+    except (TypeError, ValueError):
+        pass
+    if fc.get("bounded"):
+        bits.append("AT FENCE")
+    if fc.get("gate_closed"):
+        bits.append("gate closed")
+    return "compliant, " + ", ".join(bits) if bits else "compliant"
+
+
+def _format_force_control_status(latest: StateSnapshot | None, *, stale: bool) -> str:
+    if latest is None:
+        return "force: no state"
+    if stale:
+        return "force: state stream stale"
+    return (f"force: left {_arm_force_control_summary(latest.left)}; "
+            f"right {_arm_force_control_summary(latest.right)}")
+
+
 def _format_fk_status(latest: StateSnapshot | None, *, stale: bool) -> str:
     if latest is None:
         return "FK: no state"

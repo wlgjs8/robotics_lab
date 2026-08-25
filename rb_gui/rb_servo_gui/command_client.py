@@ -102,6 +102,24 @@ class CommandClient:
     def build_lifecycle(self, mode: str, *, timeout_sec: float = 0.2) -> dict[str, Any]:
         return self._with_source({"seq": self.next_seq(), "mode": mode, "timeout_sec": timeout_sec, "left": {}, "right": {}})
 
+    def build_ft_tare(self, *, left: bool = True, right: bool = True,
+                      timeout_sec: float = 0.5) -> dict[str, Any]:
+        """Leaseless F/T tare: record the sensor's zero for the selected arm(s).
+
+        Leaseless on purpose — force control refuses to cover an untared arm, so
+        requiring the lease would make the precondition harder to satisfy than the
+        thing it guards.
+        """
+        return self._with_source({
+            "seq": self.next_seq(),
+            "mode": "TareForceSensor",
+            "timeout_sec": timeout_sec,
+            "tare_left": bool(left),
+            "tare_right": bool(right),
+            "left": {"mode": "Hold"},
+            "right": {"mode": "Hold"},
+        })
+
     def build_joint_target(
         self,
         left_q: tuple[float, ...],

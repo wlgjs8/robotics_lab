@@ -406,6 +406,32 @@ class OperatorSafety:
         self.command_client.send_lifecycle(mode, timeout_sec=self.command_timeout_sec)
         return True, f"sent {mode}"
 
+    def send_ft_tare(self, *, left: bool = True, right: bool = True) -> tuple[bool, str]:
+        """Record the F/T sensor zero. Non-motion and leaseless, like the floor edits.
+
+        *** WHATEVER LOAD STANDS RIGHT NOW BECOMES THE NEW ZERO. *** Neither the GUI
+        nor the server can check that the arm is still and carrying nothing but the
+        tool: a part in the gripper, or a hand resting on the wrist, is mass the arm
+        will from then on believe weighs nothing. That check is the operator's.
+
+        A live state stream is still required, so a tare cannot be sent into a
+        server that is not there — which is exactly the mistake the CLI allows.
+        """
+        if self.latest_valid() is None:
+            return False, "state stream missing or stale - is the server running?"
+        if not left and not right:
+            return False, "select at least one arm"
+        try:
+            self.command_client.send(
+                self.command_client.build_ft_tare(
+                    left=left, right=right, timeout_sec=self.command_timeout_sec
+                )
+            )
+        except OSError as exc:
+            return False, f"tare send failed: {exc}"
+        arms = "both arms" if left and right else ("left" if left else "right")
+        return True, f"sent F/T tare ({arms}); the server averages 250 ticks (0.5 s)"
+
     def send_set_floor_z(self, floor_z_m: float) -> tuple[bool, str]:
         # Non-motion, leaseless safety adjustment: no motion-block check, but
         # require a live state stream reporting the constraint enabled so the

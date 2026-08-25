@@ -409,6 +409,12 @@ class ArmSnapshot:
     # (gripper_state.v1 feedback stamped by the bridge). None when no valid feed.
     gripper_percent: float | None = None
     gripper_moving: bool = False
+    # Server-owned F/T + force-control telemetry. The GUI only OBSERVES these; it
+    # never configures the law. Kept as raw mappings rather than typed fields: the
+    # panel reads a handful of keys, and a typed mirror would be one more place to
+    # keep in step with the server's schema.
+    force_torque: Mapping[str, Any] | None = None
+    force_control: Mapping[str, Any] | None = None
 
     @classmethod
     def parse(
@@ -514,6 +520,10 @@ class ArmSnapshot:
             cartesian_solve=CartesianSolveSnapshot.parse(data.get("cartesian_solve")),
             gripper_percent=gripper_percent,
             gripper_moving=gripper_moving,
+            force_torque=(data.get("force_torque")
+                          if isinstance(data.get("force_torque"), Mapping) else None),
+            force_control=(data.get("force_control")
+                           if isinstance(data.get("force_control"), Mapping) else None),
         )
 
     def selected_tcp_pose(self, mode: str = "auto") -> Pose6D | None:
