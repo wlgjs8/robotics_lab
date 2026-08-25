@@ -13,6 +13,8 @@
 // applyPoseTrackSmd: submitFrame() ~ reset/updateGoal, tick() ~ step().
 
 #pragma once
+#include <cstddef>
+#include <cstdint>
 
 #include "rb_servo/control/chunk_follower_core.hpp"
 #include "rb_servo/control/chunk_window.hpp"
@@ -23,6 +25,25 @@
 #include <optional>
 
 namespace rb_servo::control {
+
+// Sliding-window rate budget over a caller-owned ring of timestamps. Records `now_ns`
+// and reports whether MORE than `max_in_window` stamps now fall inside `window_sec`.
+//
+// Used by the chunk follower's actual-lead gate: a lead breach RE-ANCHORS the plan
+// (removing the lead, and with it the catch-up lunge) and only latches once re-anchoring
+// has demonstrably stopped helping. It is a RATE limit, not a lifetime count, so a long
+// healthy run never accumulates its way into a latch.
+//
+// window_sec <= 0 or max_in_window <= 0 disables the budget: every call reports spent,
+// i.e. the legacy latch-on-first-breach behavior.
+bool recordAndCheckRateBudget(
+    std::uint64_t* ring,
+    std::size_t capacity,
+    std::size_t& head,
+    std::uint64_t now_ns,
+    double window_sec,
+    int max_in_window);
+
 
 struct CartesianChunkFollowerConfig {
   AxisLimit lin{1.0, 6.0, 30.0};   // linear per-axis limits (m, m/s, m/s^2, m/s^3)

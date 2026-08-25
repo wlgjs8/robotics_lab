@@ -1462,6 +1462,26 @@ cartesian_control:
         # the lead diagnostic is lost.
         preview_max_actual_lead_rad: 0.08726646259       # 5.0 deg
         preview_max_consecutive_actual_lead_errors: 3
+        # LEAD RE-ANCHOR BUDGET (2026-08-26). A lead breach used to latch outright.
+        # It now RE-ANCHORS the plan to the reference (which removes the lead, and with
+        # it the catch-up lunge that used to follow), and only latches once re-anchoring
+        # has demonstrably stopped helping: more than 5 UNEXPLAINED re-anchors inside 2 s.
+        # A breach that is explained (safety projection / blocked solve / throttled
+        # command) is free -- its cause is known and already handled by the layer that
+        # caused it, so a pinned joint recovers indefinitely rather than killing the run.
+        #
+        # WHY A BUDGET AND NOT A BIGGER THRESHOLD: measured over the 122 s rollout in
+        # servo_log_20260826_070506.csv, BOTH lead budgets are already saturated --
+        # right-arm angular lead p99.9 = 0.0855 rad against the 0.0873 limit above (98%),
+        # and left-arm POSITIONAL lead peaked at 0.0354 m against its 0.035 limit (101%).
+        # Raising the angular limit past 0.10 rad only hands the latch to the coarser
+        # chunk_follower_divergence gate and loses the lead diagnostic (see the note on
+        # preview_max_actual_lead_rad above). Threshold-chasing does not converge here.
+        # SIZING: that same run produced exactly ONE legitimate re-anchor in 122 s, so
+        # 5-in-2-s only ever fires when the plan is genuinely undeliverable, not when the
+        # arm is momentarily behind.
+        preview_lead_reanchor_window_sec: 2.0
+        preview_max_lead_reanchors_in_window: 5
         # 2026-07-18 12:44: eight synchronized 10--360 ms Hold bounces in
         # 32 s repeatedly cold-seeded the follower at v=0 while the arms were
         # moving. Preserve the frozen chained position/velocity for a bounded

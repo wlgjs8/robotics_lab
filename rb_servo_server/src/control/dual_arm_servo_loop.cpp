@@ -4439,6 +4439,9 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.follower_actual_lead_rad = abc.follower_actual_lead_rad;
     solve.follower_actual_lead_error_count = abc.follower_actual_lead_error_count;
     solve.follower_reanchor_count = abc.follower_reanchor_count;
+    solve.follower_divergence_reanchor_count = abc.follower_divergence_reanchor_count;
+    solve.follower_lead_reanchor_explained_count = abc.follower_lead_reanchor_explained_count;
+    solve.follower_lead_reanchor_unexplained_count = abc.follower_lead_reanchor_unexplained_count;
     solve.follower_warm_resume_count = abc.follower_warm_resume_count;
     solve.safety_intervention_recent = abc.safety_intervention_recent;
     solve.cartesian_solve_blocked_recent = abc.cartesian_solve_blocked_recent;
@@ -4540,6 +4543,14 @@ bool DualArmServoLoop::commandThrottledRecent(ArmId arm_id, uint64_t now_ns) con
     if (stamp == 0) return false;
     if (now_ns < stamp) return true;
     return now_ns - stamp <= kFollowerDivergenceExplainWindowNs;
+}
+
+bool DualArmServoLoop::recordLeadReanchorAndCheckExhausted(
+    ArmId arm_id, uint64_t now_ns, double window_sec, int max_in_window) {
+    auto& ring = arm_id == ArmId::Left ? left_lead_reanchor_ns_ : right_lead_reanchor_ns_;
+    auto& head = arm_id == ArmId::Left ? left_lead_reanchor_head_ : right_lead_reanchor_head_;
+    return control::recordAndCheckRateBudget(
+        ring.data(), ring.size(), head, now_ns, window_sec, max_in_window);
 }
 
 void DualArmServoLoop::markCartesianSolveBlocked(ArmId arm_id, uint64_t now_ns) {
@@ -4739,31 +4750,55 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     // ended in delta_preview_actual_lead_fault. safety_intervention_recent was 0
     // throughout, so the ROI/floor plan-freeze below never fired.
     const bool solve_blocked_recent = cartesianSolveBlockedRecent(arm_id, now_ns);
-    // A THROTTLED command (safety velocity/accel clamp or the IK branch-jump rate
-    // limiter actually removing velocity) refuses the plan just as much as a projection
-    // or a blocked solve does -- the arm cannot follow. Measured 2026-08-26: the right
-    // arm was branch-jump rate limited for ~500 ms with cart_status "ok", so neither of
-    // the two windows above was stamped, the 100 ms explain window lapsed 46 ms before
-    // divergence crossed 0.1 rad, and the rollout latched ChunkFollowerFault on
-    // divergence the safety layer had itself caused.
     const bool throttled_recent = commandThrottledRecent(arm_id, now_ns);
-    // NOTE the deliberate asymmetry (2026-08-26, second pass, measured on
-    // servo_log_20260826_053428.csv): a throttle explains divergence but must NOT
-    // freeze the plan. Folding it into the plan-freeze made the right arm stutter --
-    // the throttle window read 100% of ticks while the arm chased a far target at the
-    // velocity ceiling, so the plan froze continuously and the command went
-    // 34 -> 10 -> 0 deg/s for 7+ ticks at a time. A HELD arm (projection / refused
-    // solve) must freeze the plan; a SLOWED arm must not, because it is still making
-    // progress and freezing it is what creates the stop-go.
-    const bool command_refused_recent = intervention_recent || solve_blocked_recent;
-    const bool divergence_explained_recent = command_refused_recent || throttled_recent;
+    // HELD vs SLOWED -- the distinction the whole freeze/excuse split turns on.
+    //
+    // Only an arm that is actually HELD freezes the plan. That is `solve_blocked_recent`
+    // (a refused Cartesian solve, or a stale collision verdict) where the target is
+    // literally reassigned to prev_sent, so a plan that kept integrating would run away
+    // from a stationary robot.
+    //
+    // An arm that is merely SLOWED must NOT freeze the plan, because it is still making
+    // progress and freezing it is what creates stop-go. Two sources are slowed, not held:
+    //  - `throttled_recent`: clamps / branch-jump rate limit / joint-limit tracking.
+    //    Measured 2026-08-26 (servo_log_20260826_053428.csv): folding this into the
+    //    freeze pinned the window at 100% of ticks and the right arm's command went
+    //    34 -> 10 -> 0 deg/s for 7+ ticks at a time.
+    //  - `intervention_recent`: the floor / ROI / reach / self-collision velocity-damper
+    //    projection. By construction it removes ONLY the closing component and leaves
+    //    tangential and separating motion untouched -- the barrier's own contract says
+    //    "the boundary never toggles and escape is always free" -- so the arm keeps
+    //    moving and there is nothing to run away from. Measured 2026-08-26
+    //    (servo_log_20260826_065624.csv, left arm 51.8-53.6 s): the projection acted on
+    //    just 108 of 900 ticks at a median of 3.5 deg/s, yet the 100 ms debounce froze
+    //    and warm-resumed the plan SIX times plus three re-anchors -- nine plan
+    //    discontinuities in 1.8 s, i.e. ~5 Hz, matching the 4.4-5.6 Hz shake peaks and
+    //    30-150x the healthy >30 Hz command energy. Raising the stamp threshold does not
+    //    help: 95 of those 108 ticks already exceed the 2 deg/s "meaningfully blocked"
+    //    bar. The freeze itself is the defect.
+    //
+    // Both still EXPLAIN divergence/lead, so the 2026-07-29 runaway this freeze was
+    // originally added for is now caught by the re-anchor instead of by the freeze --
+    // which also removes the catch-up lunge that used to follow every unfreeze.
+    const bool command_refused_recent = solve_blocked_recent;
+    const bool divergence_explained_recent =
+        command_refused_recent || intervention_recent || throttled_recent;
     std::uint64_t& reanchor_count = arm_id == ArmId::Left
         ? left_chunk_follower_reanchor_count_
         : right_chunk_follower_reanchor_count_;
+    std::uint64_t& divergence_reanchors = arm_id == ArmId::Left
+        ? left_divergence_reanchor_count_ : right_divergence_reanchor_count_;
+    std::uint64_t& lead_reanchors_explained = arm_id == ArmId::Left
+        ? left_lead_reanchor_explained_count_ : right_lead_reanchor_explained_count_;
+    std::uint64_t& lead_reanchors_unexplained = arm_id == ArmId::Left
+        ? left_lead_reanchor_unexplained_count_ : right_lead_reanchor_unexplained_count_;
     std::uint64_t& warm_resume_count = arm_id == ArmId::Left
         ? left_chunk_follower_warm_resume_count_
         : right_chunk_follower_warm_resume_count_;
     abc.follower_reanchor_count = reanchor_count;
+    abc.follower_divergence_reanchor_count = divergence_reanchors;
+    abc.follower_lead_reanchor_explained_count = lead_reanchors_explained;
+    abc.follower_lead_reanchor_unexplained_count = lead_reanchors_unexplained;
     abc.follower_warm_resume_count = warm_resume_count;
     abc.safety_intervention_recent = intervention_recent;
     abc.cartesian_solve_blocked_recent = solve_blocked_recent;
@@ -4862,9 +4897,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         follower->pauseForHold(safety_hold_now_sec);
         output_smd->deactivate();
         follower->expireHoldPause(safety_hold_now_sec, rf.hold_bounce_resume_sec);
-        transition_reason = intervention_recent ? "safety intervention hold"
-                          : solve_blocked_recent ? "cartesian solve blocked hold"
-                                                 : "command throttled hold";
+        // Only a held arm reaches here now, so the reason is always the blocked solve.
+        transition_reason = "cartesian solve blocked hold";
     } else if (follower->holdPaused()) {
         // Warm resume always re-seeds the output stage from the latest sent pose;
         // the preserved p/v/a belongs only to the pre-filter follower.
@@ -4925,7 +4959,12 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                     follower->reanchor(reference);
                     output_smd->deactivate();
                     ++reanchor_count;
+                    ++divergence_reanchors;
                     abc.follower_reanchor_count = reanchor_count;
+                    abc.follower_divergence_reanchor_count = divergence_reanchors;
+    abc.follower_divergence_reanchor_count = divergence_reanchors;
+    abc.follower_lead_reanchor_explained_count = lead_reanchors_explained;
+    abc.follower_lead_reanchor_unexplained_count = lead_reanchors_unexplained;
                     uint64_t& last_log_ns = arm_id == ArmId::Left
                         ? left_chunk_follower_reanchor_log_ns_
                         : right_chunk_follower_reanchor_log_ns_;
@@ -5078,7 +5117,67 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                       << " count=" << diag.consecutive_projection_errors << "\n";
         }
     }
-    if (delta_preview &&
+    // A LEAD fault measures the robot diverging from the plan -- but not every lead is a
+    // runaway. When the command was demonstrably refused or throttled this tick (safety
+    // projection, blocked solve, branch-jump rate limit, or a pinned joint tracking only
+    // the directions the limit leaves open), the arm CANNOT follow and the lead is the
+    // expected, bounded consequence of our own limiting. Re-anchor the plan to the
+    // reference instead of latching, exactly as the divergence branch above already does.
+    // Measured 2026-08-26 on servo_log_20260826_064407.csv: the right arm was in
+    // joint_limit_tracking for 415 ticks with the throttle window stamped on 528, and the
+    // run died on delta_preview_actual_lead_fault at actual_lead_rad=0.0880 (limit
+    // 0.0873) while the POSITIONAL lead sat at 25 mm of its 35 mm budget -- the angular
+    // gate firing alone, below the 0.10 rad divergence latch that the excuse guarded, so
+    // the excuse never got a chance.
+    // Scope: only the LEAD gate is excused. A projection infeasibility fault still
+    // latches, because that is the plan being undeliverable rather than the arm being
+    // held back.
+    // Budget: an EXPLAINED breach is free (its cause is known and already handled by the
+    // layer that caused it, so a pinned or throttled arm recovers indefinitely). An
+    // UNEXPLAINED one spends budget, and the latch only fires once the budget is gone --
+    // i.e. once re-anchoring has demonstrably stopped helping.
+    const bool lead_breach = delta_preview && diag.actual_lead_fault && !diag.infeasible_fault;
+    const bool lead_budget_spent =
+        lead_breach && !divergence_explained_recent &&
+        recordLeadReanchorAndCheckExhausted(
+            arm_id, now_ns,
+            rf.preview_lead_reanchor_window_sec,
+            rf.preview_max_lead_reanchors_in_window);
+    if (lead_breach && !lead_budget_spent) {
+        follower->reanchor(reference);
+        output_smd->deactivate();
+        ++reanchor_count;
+        // The distinction that matters: an EXPLAINED lead is the bounded, expected
+        // consequence of the safety layer deliberately slowing this arm, while an
+        // UNEXPLAINED one is a genuine tracking failure that re-anchoring HIDES by
+        // skipping trajectory content. Only the latter spends budget, and only the split
+        // counters can tell them apart after the fact -- the aggregate cannot.
+        if (divergence_explained_recent) ++lead_reanchors_explained;
+        else ++lead_reanchors_unexplained;
+        abc.follower_reanchor_count = reanchor_count;
+        abc.follower_lead_reanchor_explained_count = lead_reanchors_explained;
+        abc.follower_lead_reanchor_unexplained_count = lead_reanchors_unexplained;
+    abc.follower_divergence_reanchor_count = divergence_reanchors;
+    abc.follower_lead_reanchor_explained_count = lead_reanchors_explained;
+    abc.follower_lead_reanchor_unexplained_count = lead_reanchors_unexplained;
+        uint64_t& lead_log_ns = arm_id == ArmId::Left
+            ? left_chunk_follower_reanchor_log_ns_
+            : right_chunk_follower_reanchor_log_ns_;
+        if (lead_log_ns == 0 || now_ns < lead_log_ns ||
+            now_ns - lead_log_ns >= kFollowerDivergenceReanchorLogPeriodNs) {
+            std::cout << "[chunk_follower] " << toString(arm_id)
+                      << " actual-lead re-anchor ("
+                      << (intervention_recent ? "safety intervention"
+                          : solve_blocked_recent ? "cartesian solve blocked"
+                          : throttled_recent ? "command throttled"
+                                             : "unexplained, within budget")
+                      << ") actual_lead_m=" << diag.actual_lead_m
+                      << " actual_lead_rad=" << diag.actual_lead_rad
+                      << " count=" << diag.consecutive_actual_lead_errors
+                      << " " << diag_seq_labels(diag) << "\n";
+            lead_log_ns = now_ns;
+        }
+    } else if (delta_preview &&
         ((diag.infeasible_fault && projection_latches) || diag.actual_lead_fault)) {
         std::ostringstream reason;
         reason << toString(arm_id)
@@ -5187,28 +5286,52 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     // ended in delta_preview_actual_lead_fault. safety_intervention_recent was 0
     // throughout, so the ROI/floor plan-freeze below never fired.
     const bool solve_blocked_recent = cartesianSolveBlockedRecent(arm_id, now_ns);
-    // A THROTTLED command (safety velocity/accel clamp or the IK branch-jump rate
-    // limiter actually removing velocity) refuses the plan just as much as a projection
-    // or a blocked solve does -- the arm cannot follow. Measured 2026-08-26: the right
-    // arm was branch-jump rate limited for ~500 ms with cart_status "ok", so neither of
-    // the two windows above was stamped, the 100 ms explain window lapsed 46 ms before
-    // divergence crossed 0.1 rad, and the rollout latched ChunkFollowerFault on
-    // divergence the safety layer had itself caused.
     const bool throttled_recent = commandThrottledRecent(arm_id, now_ns);
-    // NOTE the deliberate asymmetry (2026-08-26, second pass, measured on
-    // servo_log_20260826_053428.csv): a throttle explains divergence but must NOT
-    // freeze the plan. Folding it into the plan-freeze made the right arm stutter --
-    // the throttle window read 100% of ticks while the arm chased a far target at the
-    // velocity ceiling, so the plan froze continuously and the command went
-    // 34 -> 10 -> 0 deg/s for 7+ ticks at a time. A HELD arm (projection / refused
-    // solve) must freeze the plan; a SLOWED arm must not, because it is still making
-    // progress and freezing it is what creates the stop-go.
-    const bool command_refused_recent = intervention_recent || solve_blocked_recent;
-    const bool divergence_explained_recent = command_refused_recent || throttled_recent;
+    // HELD vs SLOWED -- the distinction the whole freeze/excuse split turns on.
+    //
+    // Only an arm that is actually HELD freezes the plan. That is `solve_blocked_recent`
+    // (a refused Cartesian solve, or a stale collision verdict) where the target is
+    // literally reassigned to prev_sent, so a plan that kept integrating would run away
+    // from a stationary robot.
+    //
+    // An arm that is merely SLOWED must NOT freeze the plan, because it is still making
+    // progress and freezing it is what creates stop-go. Two sources are slowed, not held:
+    //  - `throttled_recent`: clamps / branch-jump rate limit / joint-limit tracking.
+    //    Measured 2026-08-26 (servo_log_20260826_053428.csv): folding this into the
+    //    freeze pinned the window at 100% of ticks and the right arm's command went
+    //    34 -> 10 -> 0 deg/s for 7+ ticks at a time.
+    //  - `intervention_recent`: the floor / ROI / reach / self-collision velocity-damper
+    //    projection. By construction it removes ONLY the closing component and leaves
+    //    tangential and separating motion untouched -- the barrier's own contract says
+    //    "the boundary never toggles and escape is always free" -- so the arm keeps
+    //    moving and there is nothing to run away from. Measured 2026-08-26
+    //    (servo_log_20260826_065624.csv, left arm 51.8-53.6 s): the projection acted on
+    //    just 108 of 900 ticks at a median of 3.5 deg/s, yet the 100 ms debounce froze
+    //    and warm-resumed the plan SIX times plus three re-anchors -- nine plan
+    //    discontinuities in 1.8 s, i.e. ~5 Hz, matching the 4.4-5.6 Hz shake peaks and
+    //    30-150x the healthy >30 Hz command energy. Raising the stamp threshold does not
+    //    help: 95 of those 108 ticks already exceed the 2 deg/s "meaningfully blocked"
+    //    bar. The freeze itself is the defect.
+    //
+    // Both still EXPLAIN divergence/lead, so the 2026-07-29 runaway this freeze was
+    // originally added for is now caught by the re-anchor instead of by the freeze --
+    // which also removes the catch-up lunge that used to follow every unfreeze.
+    const bool command_refused_recent = solve_blocked_recent;
+    const bool divergence_explained_recent =
+        command_refused_recent || intervention_recent || throttled_recent;
     std::uint64_t& reanchor_count = arm_id == ArmId::Left
         ? left_chunk_follower_reanchor_count_
         : right_chunk_follower_reanchor_count_;
+    std::uint64_t& divergence_reanchors = arm_id == ArmId::Left
+        ? left_divergence_reanchor_count_ : right_divergence_reanchor_count_;
+    std::uint64_t& lead_reanchors_explained = arm_id == ArmId::Left
+        ? left_lead_reanchor_explained_count_ : right_lead_reanchor_explained_count_;
+    std::uint64_t& lead_reanchors_unexplained = arm_id == ArmId::Left
+        ? left_lead_reanchor_unexplained_count_ : right_lead_reanchor_unexplained_count_;
     abc.follower_reanchor_count = reanchor_count;
+    abc.follower_divergence_reanchor_count = divergence_reanchors;
+    abc.follower_lead_reanchor_explained_count = lead_reanchors_explained;
+    abc.follower_lead_reanchor_unexplained_count = lead_reanchors_unexplained;
     abc.safety_intervention_recent = intervention_recent;
     abc.cartesian_solve_blocked_recent = solve_blocked_recent;
     abc.command_throttled_recent = throttled_recent;
@@ -5293,7 +5416,12 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
                 if (fault_policy && divergence_explained_recent) {
                     follower->reanchor(reference);
                     ++reanchor_count;
+                    ++divergence_reanchors;
                     abc.follower_reanchor_count = reanchor_count;
+                    abc.follower_divergence_reanchor_count = divergence_reanchors;
+    abc.follower_divergence_reanchor_count = divergence_reanchors;
+    abc.follower_lead_reanchor_explained_count = lead_reanchors_explained;
+    abc.follower_lead_reanchor_unexplained_count = lead_reanchors_unexplained;
                     uint64_t& last_log_ns = arm_id == ArmId::Left
                         ? left_chunk_follower_reanchor_log_ns_
                         : right_chunk_follower_reanchor_log_ns_;
@@ -6886,6 +7014,12 @@ ServoTarget DualArmServoLoop::applySafety(
                     // per-arm attribution; stamp both arms as conservatively intervened.
                     mark_intervention(ArmId::Left);
                     mark_intervention(ArmId::Right);
+                    // This branch really does HOLD both arms (targets reassigned to
+                    // prev_sent above), so it must stamp the blocked window, not just the
+                    // intervention one -- the intervention window no longer freezes the
+                    // plan, and a held arm's plan must still freeze.
+                    markCartesianSolveBlocked(ArmId::Left, safety_now_ns);
+                    markCartesianSolveBlocked(ArmId::Right, safety_now_ns);
                     self_collision_hold = true;  // skip the combined solve (qdot already 0)
                     if (combined == SafetyVerdict::Ok ||
                         combined == SafetyVerdict::JointLimitClamped) {

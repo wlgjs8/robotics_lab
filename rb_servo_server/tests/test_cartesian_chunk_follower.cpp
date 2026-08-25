@@ -524,9 +524,72 @@ int main() {
   // that was standing still. Measured on servo_log_20260729_165037.csv: eight RoiViolation
   // episodes (right gripper tip crossing roi_box y=-0.150) grew actual_lead from 1.3 mm to
   // 40.7 mm / 4.5 deg and ended the rollout in delta_preview_actual_lead_fault -- and each time
-  // the verdict flipped back to Ok the arm lunged to close that gap. dual_arm_servo_loop now
-  // calls pauseForHold() whenever safetyInterventionRecent() is set; this locks the invariant
+  // the verdict flipped back to Ok the arm lunged to close that gap. This locks the invariant
   // that the pause actually bounds the divergence.
+  // NOTE (2026-08-26): the CALLER changed. dual_arm_servo_loop used to pause on
+  // safetyInterventionRecent(), i.e. on any velocity-damper projection. That froze and
+  // warm-resumed the plan six times in 1.8 s on a barrier that was merely SLOWING the arm
+  // (servo_log_20260826_065624.csv, left arm), and the resulting ~5 Hz plan discontinuity
+  // was itself the shake. The pause is now driven only by cartesianSolveBlockedRecent(),
+  // i.e. an arm actually HELD at prev_sent; a damped-but-moving arm keeps its plan and its
+  // lead is bounded by the re-anchor instead. The follower-level invariant tested here is
+  // unchanged -- only who calls it.
+
+  // -- Test: a held robot must not be outrun by the plan. --------------------
+  // The floor/ROI/self-collision stage clamps an arm to its previous sent joints, but it runs
+  // AFTER command generation, so the follower used to keep integrating deltas against a robot
+  // that was standing still. Measured on servo_log_20260729_165037.csv: eight RoiViolation
+  // episodes (right gripper tip crossing roi_box y=-0.150) grew actual_lead from 1.3 mm to
+  // 40.7 mm / 4.5 deg and ended the rollout in delta_preview_actual_lead_fault -- and each time
+  // the verdict flipped back to Ok the arm lunged to close that gap. This locks the invariant
+  // that the pause actually bounds the divergence.
+  // NOTE (2026-08-26): the CALLER changed. dual_arm_servo_loop used to pause on
+  // safetyInterventionRecent(), i.e. on any velocity-damper projection. That froze and
+  // warm-resumed the plan six times in 1.8 s on a barrier that was merely SLOWING the arm
+  // (servo_log_20260826_065624.csv, left arm), and the resulting ~5 Hz plan discontinuity
+  // was itself the shake. The pause is now driven only by cartesianSolveBlockedRecent(),
+  // i.e. an arm actually HELD at prev_sent; a damped-but-moving arm keeps its plan and its
+  // lead is bounded by the re-anchor instead. The follower-level invariant tested here is
+  // unchanged -- only who calls it.
+
+  // -- Test: lead re-anchor rate budget ---------------------------------------
+  // A lead breach RE-ANCHORS the plan (which removes the lead, and with it the catch-up
+  // lunge that used to follow) and only latches once re-anchoring has demonstrably
+  // stopped helping. Measured 2026-08-26 on servo_log_20260826_070506.csv: BOTH lead
+  // budgets are already saturated -- right-arm angular lead p99.9 = 0.0855 rad of a
+  // 0.0873 limit (98%), left-arm positional peak 0.0354 m of 0.035 (101%) -- so raising a
+  // threshold only moves the latch to the next gate. Recovering, and giving up only on
+  // repetition, is what converges. That same run produced ONE legitimate re-anchor in
+  // 122 s, which is how 5-in-2-s was sized.
+  std::printf("Test: lead re-anchor rate budget\n");
+  {
+    constexpr std::size_t CAP = 32;
+    std::uint64_t ring[CAP] = {};
+    std::size_t head = 0;
+    const std::uint64_t SEC = 1000000000ULL;
+    const std::uint64_t t0 = 1000 * SEC;
+    const double window = 2.0;
+    const int budget = 5;
+    // `budget` recoveries inside the window are allowed; the next one spends it.
+    for (int n = 1; n <= budget; ++n) {
+          check(!rb_servo::control::recordAndCheckRateBudget(ring, CAP, head, t0 + n * SEC / 10, window, budget), "lead re-anchor budget");
+    }
+        check(rb_servo::control::recordAndCheckRateBudget(ring, CAP, head, t0 + 6 * SEC / 10, window, budget), "lead re-anchor budget");
+    // RATE limit, not a lifetime count: once the window has passed the budget is back, so
+    // a long healthy run never accumulates its way into a latch.
+        check(!rb_servo::control::recordAndCheckRateBudget(ring, CAP, head, t0 + 60 * SEC, window, budget), "lead re-anchor budget");
+    // A separate ring is a separate budget -- one arm's trouble must not latch the other.
+    std::uint64_t other[CAP] = {};
+    std::size_t other_head = 0;
+        check(!rb_servo::control::recordAndCheckRateBudget(other, CAP, other_head, t0 + 6 * SEC / 10, window, budget), "lead re-anchor budget");
+    // Disabled either way => legacy latch-on-first-breach.
+    std::uint64_t off[CAP] = {};
+    std::size_t off_head = 0;
+        check(rb_servo::control::recordAndCheckRateBudget(off, CAP, off_head, t0, 0.0, budget), "lead re-anchor budget");
+        check(rb_servo::control::recordAndCheckRateBudget(off, CAP, off_head, t0, window, 0), "lead re-anchor budget");
+        check(rb_servo::control::recordAndCheckRateBudget(nullptr, 0, off_head, t0, window, budget), "lead re-anchor budget");
+  }
+
   std::printf("Test: safety-hold pause bounds plan-vs-actual divergence\n");
   {
     CartesianChunkFollowerConfig hcfg;

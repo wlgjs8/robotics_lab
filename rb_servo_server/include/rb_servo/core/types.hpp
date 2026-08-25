@@ -433,7 +433,16 @@ struct CartesianSolveTelemetry {
     double follower_actual_lead_m = 0.0;
     double follower_actual_lead_rad = 0.0;
     int follower_actual_lead_error_count = 0;
-    uint64_t follower_reanchor_count = 0;          // explained strict-divergence reanchors
+    uint64_t follower_reanchor_count = 0;          // TOTAL re-anchors (all causes below)
+    // Split by CAUSE, because the total cannot answer the question that matters:
+    // was the plan re-anchored because the safety layer deliberately slowed the arm
+    // (INTENDED -- the constraint is doing its job and the lead is its bounded, expected
+    // consequence), or because the arm simply failed to track (UNINTENDED -- a genuine
+    // fidelity loss that re-anchoring HIDES by skipping trajectory content)?
+    // Only the unexplained kind consumes the lead re-anchor rate budget.
+    uint64_t follower_divergence_reanchor_count = 0;        // sent target drifted from the plan
+    uint64_t follower_lead_reanchor_explained_count = 0;    // lead while throttled/blocked/projected
+    uint64_t follower_lead_reanchor_unexplained_count = 0;  // lead with no safety cause -> real
     uint64_t follower_warm_resume_count = 0;       // brief Hold resumes preserving chained p/v/a
     bool safety_intervention_recent = false;       // debounced signal seen by follower stage
     bool cartesian_solve_blocked_recent = false;   // debounced IK/Cartesian solve refusal seen by follower stage

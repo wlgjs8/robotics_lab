@@ -135,6 +135,9 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_follower_actual_lead_rad"
        << ',' << side << "_follower_actual_lead_error_count"
        << ',' << side << "_follower_reanchor_count"
+       << ',' << side << "_follower_divergence_reanchor_count"
+       << ',' << side << "_follower_lead_reanchor_explained_count"
+       << ',' << side << "_follower_lead_reanchor_unexplained_count"
        << ',' << side << "_follower_warm_resume_count"
        << ',' << side << "_safety_intervention_recent"
        << ',' << side << "_cartesian_solve_blocked_recent"
@@ -835,6 +838,9 @@ void writeArmProfilingColumns(
        << ',' << telemetry.follower_actual_lead_rad
        << ',' << telemetry.follower_actual_lead_error_count
        << ',' << telemetry.follower_reanchor_count
+       << ',' << telemetry.follower_divergence_reanchor_count
+       << ',' << telemetry.follower_lead_reanchor_explained_count
+       << ',' << telemetry.follower_lead_reanchor_unexplained_count
        << ',' << telemetry.follower_warm_resume_count
        << ',' << telemetry.safety_intervention_recent
        << ',' << telemetry.cartesian_solve_blocked_recent

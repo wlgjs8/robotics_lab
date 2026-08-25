@@ -8,6 +8,32 @@
 
 namespace rb_servo::control {
 
+bool recordAndCheckRateBudget(
+    std::uint64_t* ring,
+    std::size_t capacity,
+    std::size_t& head,
+    std::uint64_t now_ns,
+    double window_sec,
+    int max_in_window) {
+    if (ring == nullptr || capacity == 0) return true;
+    if (!(window_sec > 0.0) || max_in_window <= 0) return true;
+    ring[head] = now_ns;
+    head = (head + 1) % capacity;
+    const std::uint64_t window_ns = static_cast<std::uint64_t>(window_sec * 1e9);
+    int in_window = 0;
+    for (std::size_t k = 0; k < capacity; ++k) {
+        const std::uint64_t stamp = ring[k];
+        if (stamp == 0) continue;
+        // A backwards clock counts as inside the window rather than silently expiring
+        // the history, which would hand back budget that was never earned.
+        if (now_ns < stamp || now_ns - stamp <= window_ns) ++in_window;
+    }
+    // The stamp just recorded is included, so `max_in_window` recoveries are allowed and
+    // the next one reports the budget spent.
+    return in_window > max_in_window;
+}
+
+
 namespace {
 
 std::array<AxisLimit, 6> makeLimits(const CartesianChunkFollowerConfig& cfg) {

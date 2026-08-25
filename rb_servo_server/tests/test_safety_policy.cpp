@@ -6099,6 +6099,7 @@ bool testSingleArmIkFailureDoesNotFreezeHealthyArm() {
 // servo_log_20260826_063359.csv at the ChunkFollowerFault (t=63.84 s), a single-tick
 // step of 1.95 deg (right) / 1.13 deg (left) == 975 / 563 deg/s, against <= 0.20 deg on
 // every other tick of that run. That step is the bang heard on a latch.
+
 bool testCommandThrottleIsVisibleAsCommandRefusal() {
     struct Observation {
         bool throttled = false;

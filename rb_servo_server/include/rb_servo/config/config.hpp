@@ -1117,6 +1117,33 @@ struct FtArmConfig {
     double liveness_min_torque_pp_nm = 0.002;
 };
 
+// Automatic tare driven by the InitMotion profile. See DualArmServoLoop::
+// armAutoTareAfterInit / stepAutoTareAfterInit.
+//
+// *** IT DOES NOT TARE WHEN THE MOVE STARTS - IT ARMS THEN. *** A tare averages
+// `raw - gravity` over 250 consecutive ticks, and a moving arm folds its own
+// acceleration and the tool's swing into that average. The zero is therefore
+// collected AFTER the arm has reached the init pose and stood still for
+// `settle_sec`; the request tick only arms it (and drops the previous zero, so a
+// failed or cancelled InitMotion cannot leave a stale one behind).
+struct FtAutoTareConfig {
+    bool enable = false;
+    // How long the arm must stand at the init pose before the first sample. It is a
+    // MECHANICAL settle, not a scheduling delay: the tool rings after the arrival
+    // taper and the sensor sees that ringing as force.
+    double settle_sec = 0.0;
+    // ... and it must actually be still. The gate is the last SENT joint velocity
+    // (the same surface brake-before-plan reads), because the measured joints keep
+    // jittering at rest while the command does not.
+    double max_sent_speed_deg_s = 0.0;
+    // Drop the existing zero the moment InitMotion is requested. FAIL-CLOSED: an
+    // InitMotion that fails, stalls, or is cancelled then leaves the arm with NO
+    // bias, so force control refuses to cover it (forceControlCovered) instead of
+    // regulating against a zero whose provenance nobody can state. Set false to keep
+    // the previous zero until a new one is accepted.
+    bool invalidate_on_request = true;
+};
+
 struct FtConfig {
     bool enable = false;
     // The box is told a ZERO payload at init so it subtracts NOTHING, and this
@@ -1128,6 +1155,8 @@ struct FtConfig {
     // COLLISION DETECTION runs on this payload, so with zero it sees the tool's
     // weight as an external force.
     bool push_zero_payload_to_box = true;
+    // Tare on InitMotion, collected once the arm is parked and still.
+    FtAutoTareConfig auto_tare_after_init_motion;
     FtArmConfig left;
     FtArmConfig right;
 };
@@ -1444,6 +1473,29 @@ struct RuckigFollowerConfig {
     double preview_max_actual_lead_m = 0.0;
     double preview_max_actual_lead_rad = 0.0;
     int preview_max_consecutive_actual_lead_errors = 0;
+    // LEAD RE-ANCHOR BUDGET. A lead breach used to latch outright. It now RE-ANCHORS the
+    // plan to the reference -- which removes the lead and, with it, the catch-up lunge
+    // that used to follow every unfreeze -- and only latches if re-anchoring keeps
+    // failing to help: more than `preview_max_lead_reanchors_in_window` of them inside
+    // `preview_lead_reanchor_window_sec`. That is the honest test of "the plan is
+    // undeliverable" rather than "the arm was momentarily behind".
+    //
+    // Why a budget instead of a bigger threshold: measured 2026-08-26 on
+    // servo_log_20260826_070506.csv (122 s of rollout), BOTH lead budgets are already
+    // saturated -- right-arm angular lead p99.9 = 0.0855 rad against a 0.0873 limit
+    // (98%), and left-arm POSITIONAL lead peaked at 0.0354 m against a 0.035 limit
+    // (101%). Raising the angular limit past 0.10 rad just hands the latch to the
+    // coarser chunk_follower_divergence gate and loses the lead diagnostic (see the
+    // stack_real.yaml note on preview_max_actual_lead_rad). Threshold-chasing does not
+    // converge here; recovering and only giving up on repetition does.
+    //
+    // A breach that is EXPLAINED (safety projection, blocked solve, or a throttled
+    // command) does not consume budget: its cause is known, bounded, and already being
+    // handled by the layer that caused it, so a permanently pinned joint re-anchors
+    // indefinitely rather than latching. Only UNEXPLAINED breaches count.
+    // <= 0 on either field keeps the legacy "latch on the first breach" behavior.
+    double preview_lead_reanchor_window_sec = 0.0;
+    int preview_max_lead_reanchors_in_window = 0;
     RuckigProjectionFaultPolicy preview_projection_fault_policy =
         RuckigProjectionFaultPolicy::Fault;
     // Brief upstream Hold interleaves may preserve the active chunk and its

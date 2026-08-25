@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <limits>
@@ -345,6 +346,11 @@ private:
     // and divergence caused by it must re-anchor rather than latch.
     void markCommandThrottled(ArmId arm_id, uint64_t now_ns);
     bool commandThrottledRecent(ArmId arm_id, uint64_t now_ns) const;
+    // Record an UNEXPLAINED lead re-anchor and report whether the arm has now spent its
+    // budget (more than max_in_window inside window_sec). Explained breaches never call
+    // this, so a pinned or throttled arm re-anchors indefinitely instead of latching.
+    bool recordLeadReanchorAndCheckExhausted(
+        ArmId arm_id, uint64_t now_ns, double window_sec, int max_in_window);
 
 private:
     std::unique_ptr<IRobotBackend> left_robot_;
@@ -677,6 +683,21 @@ private:
     uint64_t right_safety_intervention_last_ns_ = 0;
     uint64_t left_command_throttled_last_ns_ = 0;
     uint64_t right_command_throttled_last_ns_ = 0;
+    // Ring of recent UNEXPLAINED lead re-anchor stamps, per arm. Fixed capacity: the
+    // budget is a small integer by construction (a large one would mean the plan is
+    // undeliverable for seconds, which is what the latch is for).
+    static constexpr std::size_t kLeadReanchorHistory = 32;
+    std::array<uint64_t, kLeadReanchorHistory> left_lead_reanchor_ns_{};
+    std::array<uint64_t, kLeadReanchorHistory> right_lead_reanchor_ns_{};
+    std::size_t left_lead_reanchor_head_ = 0;
+    std::size_t right_lead_reanchor_head_ = 0;
+    // Per-cause re-anchor tallies (the aggregate stays in *_chunk_follower_reanchor_count_).
+    std::uint64_t left_divergence_reanchor_count_ = 0;
+    std::uint64_t right_divergence_reanchor_count_ = 0;
+    std::uint64_t left_lead_reanchor_explained_count_ = 0;
+    std::uint64_t right_lead_reanchor_explained_count_ = 0;
+    std::uint64_t left_lead_reanchor_unexplained_count_ = 0;
+    std::uint64_t right_lead_reanchor_unexplained_count_ = 0;
     // Last tick when the Cartesian stage refused each arm's target and held it at
     // prev_sent_q_deg (IkFailed / CartesianUnavailable). Same read-one-tick-late
     // contract as the safety-intervention stamps above.
@@ -874,6 +895,9 @@ private:
         double follower_actual_lead_rad = 0.0;
         int follower_actual_lead_error_count = 0;
         std::uint64_t follower_reanchor_count = 0;
+        std::uint64_t follower_divergence_reanchor_count = 0;
+        std::uint64_t follower_lead_reanchor_explained_count = 0;
+        std::uint64_t follower_lead_reanchor_unexplained_count = 0;
         std::uint64_t follower_warm_resume_count = 0;
         bool safety_intervention_recent = false;
         bool command_throttled_recent = false;

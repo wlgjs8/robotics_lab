@@ -281,6 +281,8 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         "preview_max_actual_lead_m",
         "preview_max_actual_lead_rad",
         "preview_max_consecutive_actual_lead_errors",
+                "preview_lead_reanchor_window_sec",
+                "preview_max_lead_reanchors_in_window",
         "preview_projection_fault_policy",
         "corner_deadband_lin_m",
         "corner_deadband_ang_rad",
@@ -455,6 +457,8 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
         }
     }
     if (has(node, "preview_max_consecutive_actual_lead_errors")) {
+    if (has(node, "preview_lead_reanchor_window_sec")) out->preview_lead_reanchor_window_sec = asDouble(node["preview_lead_reanchor_window_sec"], path + ".preview_lead_reanchor_window_sec");
+    if (has(node, "preview_max_lead_reanchors_in_window")) out->preview_max_lead_reanchors_in_window = asInt(node["preview_max_lead_reanchors_in_window"], path + ".preview_max_lead_reanchors_in_window");
         out->preview_max_consecutive_actual_lead_errors = asInt(
             node["preview_max_consecutive_actual_lead_errors"],
             path + ".preview_max_consecutive_actual_lead_errors");
@@ -1205,6 +1209,26 @@ void validateConfig(const DualArmConfig& cfg) {
         cfg.safety.decel_overshoot_budget_deg, "safety.decel_overshoot_budget_deg");
     validateNonNegativeFinite(
         cfg.safety.throttle_intervention_deg_s, "safety.throttle_intervention_deg_s");
+    for (const TcpPoseTargetProfileConfig& profile : cfg.cartesian_control.tcp_pose_target_profiles) {
+        const RuckigFollowerConfig& rf = profile.ruckig_follower;
+        validateNonNegativeFinite(
+            rf.preview_lead_reanchor_window_sec,
+            "cartesian_control.tcp_pose_target_profiles." + profile.name +
+                ".ruckig_follower.preview_lead_reanchor_window_sec");
+        if (rf.preview_max_lead_reanchors_in_window < 0) {
+            throw std::runtime_error(
+                "cartesian_control.tcp_pose_target_profiles." + profile.name +
+                ".ruckig_follower.preview_max_lead_reanchors_in_window must be >= 0");
+        }
+        if ((rf.preview_lead_reanchor_window_sec > 0.0) !=
+            (rf.preview_max_lead_reanchors_in_window > 0)) {
+            throw std::runtime_error(
+                "cartesian_control.tcp_pose_target_profiles." + profile.name +
+                ".ruckig_follower: preview_lead_reanchor_window_sec and "
+                "preview_max_lead_reanchors_in_window must be set together (both > 0 to "
+                "enable the budget, both 0 to keep latch-on-first-breach)");
+        }
+    }
     if (cfg.safety.joint_limit_barrier.enable) {
         const auto& jb = cfg.safety.joint_limit_barrier;
         validateNonNegativeFiniteArray(jb.d_slow_deg, "safety.joint_limit_barrier.d_slow_deg");
@@ -1880,6 +1904,41 @@ void validateConfig(const DualArmConfig& cfg) {
         };
         validate_ft_arm(cfg.force_torque.left, "force_torque.left");
         validate_ft_arm(cfg.force_torque.right, "force_torque.right");
+
+        const FtAutoTareConfig& at = cfg.force_torque.auto_tare_after_init_motion;
+        if (at.enable) {
+            // NO SILENT DEFAULTS FOR THE TWO NUMBERS THAT DECIDE WHEN THE ZERO IS
+            // TAKEN. A guessed settle or speed gate is a zero averaged over the
+            // arrival transient, and nothing downstream can tell that apart from a
+            // real bias.
+            if (!(at.settle_sec > 0.0) || !std::isfinite(at.settle_sec)) {
+                throw std::runtime_error(
+                    "force_torque.auto_tare_after_init_motion.enable requires a positive "
+                    "settle_sec - the tool rings after the arrival taper and a zero averaged "
+                    "through that ringing is not a bias");
+            }
+            if (!(at.max_sent_speed_deg_s > 0.0) || !std::isfinite(at.max_sent_speed_deg_s)) {
+                throw std::runtime_error(
+                    "force_torque.auto_tare_after_init_motion.enable requires a positive "
+                    "max_sent_speed_deg_s - without a stillness gate the settle timer alone "
+                    "would let a still-moving arm be tared");
+            }
+            if (!cfg.force_torque.enable) {
+                throw std::runtime_error(
+                    "force_torque.auto_tare_after_init_motion.enable requires "
+                    "force_torque.enable");
+            }
+            // The automatic tare is triggered by the InitMotion SEQUENCER's completion.
+            // With the planner disabled, InitMotion degrades to a direct JointTarget that
+            // has no completion event at all, so the tare would simply never fire - and
+            // would do it silently.
+            if (!cfg.safety.init_motion_planner.enable) {
+                throw std::runtime_error(
+                    "force_torque.auto_tare_after_init_motion.enable requires "
+                    "safety.init_motion_planner.enable - with the planner off InitMotion is a "
+                    "plain JointTarget with no completion event, so the tare would never fire");
+            }
+        }
 
         const ForceControlConfig& fc = cfg.force_control;
         if (fc.enable) {
@@ -3575,13 +3634,33 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
 
     if (has(root, "force_torque")) {
         const YAML::Node sec = root["force_torque"];
-        validateAllowedKeys(sec, {"enable", "push_zero_payload_to_box", "left", "right"},
+        validateAllowedKeys(sec, {"enable", "push_zero_payload_to_box",
+                                  "auto_tare_after_init_motion", "left", "right"},
                             "force_torque");
         FtConfig& ft = cfg.force_torque;
         if (has(sec, "enable")) ft.enable = asBool(sec["enable"], "force_torque.enable");
         if (has(sec, "push_zero_payload_to_box")) {
             ft.push_zero_payload_to_box =
                 asBool(sec["push_zero_payload_to_box"], "force_torque.push_zero_payload_to_box");
+        }
+        if (has(sec, "auto_tare_after_init_motion")) {
+            const YAML::Node at = sec["auto_tare_after_init_motion"];
+            const std::string at_path = "force_torque.auto_tare_after_init_motion";
+            validateAllowedKeys(at, {"enable", "settle_sec", "max_sent_speed_deg_s",
+                                     "invalidate_on_request"}, at_path);
+            FtAutoTareConfig& a = ft.auto_tare_after_init_motion;
+            if (has(at, "enable")) a.enable = asBool(at["enable"], at_path + ".enable");
+            if (has(at, "settle_sec")) {
+                a.settle_sec = asDouble(at["settle_sec"], at_path + ".settle_sec");
+            }
+            if (has(at, "max_sent_speed_deg_s")) {
+                a.max_sent_speed_deg_s =
+                    asDouble(at["max_sent_speed_deg_s"], at_path + ".max_sent_speed_deg_s");
+            }
+            if (has(at, "invalidate_on_request")) {
+                a.invalidate_on_request =
+                    asBool(at["invalidate_on_request"], at_path + ".invalidate_on_request");
+            }
         }
         const auto parse_arm = [&](const YAML::Node& n, FtArmConfig& out, const std::string& path) {
             validateAllowedKeys(n, {
