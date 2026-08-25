@@ -680,50 +680,46 @@ force_torque:
 force_control:
   enable: true
 
-  # *** TWO CONSUMERS, TWO LAWS. *** Applying one to the other is a mistake this
-  # cell has already made: the stream law was used for an operator hand-push and the
-  # arm turned ~9 deg where controller-manager turns ~0.3 deg for the same push,
-  # because the two differ by 5x in the RATIO that decides how much of a push becomes
-  # rotation:
+  # *** TWO CONSUMERS, TWO LAWS — AND RIGHT NOW THEY CARRY THE SAME NUMBERS. ***
+  # That is a DECISION (operator, 2026-08-26), not a copy-paste: the hand-push law
+  # was measured on the cell and behaved the way the operator wants, so streaming
+  # adopts it. The split stays because the two problems are still different and the
+  # numbers may diverge again — see the note under `stream:` for what changes if
+  # they do.
   #
-  #                          k_t [N/m]   k_r [Nm/rad]   k_r/k_t [m^2]
-  #     hold   (CM admittance)   2500          250          0.100
-  #     stream (CM follow)        400            8          0.020
+  # The structure exists because applying one to the other once already went wrong:
+  # the follow law was used for a hand-push and the arm turned ~9 deg where
+  # controller-manager turns ~0.3 deg, the two differing by five times in the ratio
+  # k_r/k_t that decides how much of a push becomes rotation.
 
   # ---- the STREAM law: a plan the server is driving into contact ---------------
-  # controller-manager's follow.yaml 10 N row, which is ONE SOLVE - k, b and the gate
-  # threshold are not independent, and mixing a b from one row with a k from another
-  # is not a tuning, it is a different system.
+  # controller-manager's admittance.yaml numbers (see `hold:` below for the
+  # derivation), adopted here rather than CM's follow row.
   #
-  #   k = max_force_n / d_max          10 N / 25 mm = 400 N/m
-  #   b = 2*zeta*sqrt(m*(k + k_env))   zeta = 0.25, k_env = 5e4 (hard plastic)
-  #   m = 15 kg                        owner constraint 10..15
+  # WHY NOT CM'S FOLLOW ROW (m 15 / b 434.7 / k 400): that row is solved for a 25 mm
+  # converged deviation, which puts the 40 mm fence only 1.6x away — the spring
+  # saturates at k*0.040 = 16 N and above that the arm goes rigid. This cell streams
+  # at 0.45 m/s (the VLA policy is velocity-based and the speed is not negotiable),
+  # where a floor contact passes 16 N in the first few milliseconds. At k = 2499 the
+  # fence is not reached until 100 N, which is the headroom that speed needs.
   #
-  # DELIBERATELY SOFT. It yields to a contact the plan is pushing into, and the force
-  # is bounded by the GATE holding the plan back - not by this spring.
+  # CONTACT STABILITY IS PRESERVED, which is the thing a stiffness change could have
+  # broken: the effective damping ratio against a hard contact is
+  #     zeta = b / (2*sqrt(m*(k + k_env))) = 379.4 / (2*sqrt(10*(2499 + 5e4))) = 0.262
+  # against CM's designed 0.25 — the same regime, not a lucky miss.
   #
-  # WHY zeta = 0.25 AND NOT 1.0: critical damping is WORSE here, measured. A large b
-  # physically RESISTS the offset's retreat at impact and raises the peak (65.4 N at
-  # zeta 1.0 against 47.2 N at zeta 0.25), while the gate already stabilises the loop.
-  #
-  # THE IMPACT PEAK IS NOT max_force_n. First contact at speed spikes far above it:
-  # the impact resolves in 30-50 ms while the gate needs ~70 ms to arrive. The gate
-  # regulates the SUSTAINED force. The two levers are approach speed and m.
+  # WHAT THE GATE STILL OWNS: the CONVERGED contact force is set by
+  # force_gate.max_force_n, not by k. Raising k did not raise the force the arm
+  # settles at; it lowered the deviation it settles at (10 N / 2499 = 4 mm).
   stream:
     translation:
-      - {m: 15.0, b: 434.7, k: 400.0}   # x
-      - {m: 15.0, b: 434.7, k: 400.0}   # y
-      - {m: 15.0, b: 434.7, k: 400.0}   # z
-    # ROTATION IS DERIVED UNDER A STATED ASSUMPTION AND WANTS HARDWARE TUNING. The
-    # rotational environment stiffness is k_env * L^2 for a contact at lever L, and L
-    # is not known. CM's numbers use L = 140 mm (the RB5/steam lever) and are KNOWN
-    # STALE on this cell: the pika's lever is 202.642 mm, so the torque limit is ~31 %
-    # tighter than the "10 N * L" intent it states. Carried over unchanged
-    # deliberately - re-basing it RAISES a force limit, which is an operator decision.
+      - {m: 10.0, b: 379.4, k: 2499.1}  # x
+      - {m: 10.0, b: 379.4, k: 2499.1}  # y
+      - {m: 10.0, b: 379.4, k: 2499.1}  # z
     rotation:
-      - {m: 1.0, b: 15.72, k: 8.0}      # rx
-      - {m: 1.0, b: 15.72, k: 8.0}      # ry
-      - {m: 1.0, b: 15.72, k: 8.0}      # rz
+      - {m: 1.0, b: 37.94, k: 249.91}   # rx
+      - {m: 1.0, b: 37.94, k: 249.91}   # ry
+      - {m: 1.0, b: 37.94, k: 249.91}   # rz
 
   # ---- the HOLD law: an operator pushing the arm by hand -----------------------
   # controller-manager's admittance.yaml, which is what CM actually runs when a human
@@ -740,10 +736,14 @@ force_control:
   # settle without overshoot, because the operator's hand IS the disturbance and an
   # underdamped arm pushes back into it.
   #
+  # MEASURED ON THIS CELL (servo_log_20260826_040941, 16 pushes): rotation stayed
+  # under 1.85 deg at 55 N / 8.4 Nm, the deviation tracked F/k to within 3 % on
+  # steady pushes, the 40 mm fence was never reached, and the at-rest residual was
+  # 0.67 N.
+  #
   # THE GATE DOES NOT ACT HERE. A compliant Hold has no plan advance to attenuate, so
-  # these stiffnesses are the ONLY bound on how far a hand can take the arm. That is
-  # why they are 6x (translation) and 31x (rotation) the stream values, and why the
-  # loader refuses hold_compliance with every hold k at 0.
+  # these stiffnesses are the ONLY bound on how far a hand can take the arm - which
+  # is why the loader refuses hold_compliance with every hold k at 0.
   hold:
     translation:
       - {m: 10.0, b: 379.4, k: 2499.1}  # x   10 N -> 4.0 mm
