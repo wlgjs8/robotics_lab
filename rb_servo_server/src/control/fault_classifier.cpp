@@ -142,6 +142,27 @@ FaultContext classifyBackendError(
 
     if (error.kind == BackendErrorKind::ControllerRejected ||
         error.kind == BackendErrorKind::CommandTimeout) {
+        // A servo_j request that expired between the loop's freshness gate and
+        // the worker dispatch is NOT a backend failure: it is the same event
+        // as the client command aging out one tick later, which the loop
+        // already handles as a graceful stale-hold (hold targets keep
+        // streaming; no operator reset). Latching here turned a 1-tick
+        // boundary race into a hard fault: measured 2026-08-26, four runs
+        // ended by CommandTimeout latches at command age 149.7-149.9 ms
+        // against a 150 ms timeout, each fired on a stressed tick whose
+        // in-tick compute latency (0.45-1.6 ms) pushed the deadline check
+        // past the limit the loop-side gate had just passed. The box holds
+        // its last reference for the skipped send; real stream death is still
+        // covered by the client deadman, tracking latch, and state staleness.
+        // Lifecycle expiry (arm_worker_lifecycle_command_expired) still
+        // latches -- a lost lifecycle command is not a per-tick race.
+        if (op == BackendOp::SendServoJ &&
+            error.name == "arm_worker_command_expired") {
+            context.verdict = SafetyVerdict::Ok;
+            context.domain = FaultDomain::Backend;
+            context.reason.clear();
+            return context;
+        }
         context.verdict = op == BackendOp::SendServoJ
             ? SafetyVerdict::SendFailure
             : SafetyVerdict::RobotStateError;

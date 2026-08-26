@@ -30,6 +30,7 @@ void signalHandler(int) {
 
 int main(int argc, char** argv) {
     std::string config_path;
+    bool check_config_only = false;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--config" && i + 1 < argc) {
@@ -37,13 +38,18 @@ int main(int argc, char** argv) {
         } else if (arg == "--config") {
             std::cerr << "--config requires a path\n";
             return 2;
+        } else if (arg == "--check-config") {
+            // Dry run: load + validate the config (the same strict fail-closed
+            // loader the server uses), then exit without touching any backend.
+            // For pre-flighting a tracked-config edit without the hardware.
+            check_config_only = true;
         } else if (arg == "--help" || arg == "-h") {
-            std::cout << "usage: rb_servo_server --config <path>\n";
+            std::cout << "usage: rb_servo_server --config <path> [--check-config]\n";
             return 0;
         }
     }
     if (config_path.empty()) {
-        std::cerr << "usage: rb_servo_server --config <path>\n";
+        std::cerr << "usage: rb_servo_server --config <path> [--check-config]\n";
         return 2;
     }
 
@@ -52,6 +58,10 @@ int main(int argc, char** argv) {
 
     try {
         auto config = rb_servo::loadConfigFromYaml(config_path);
+        if (check_config_only) {
+            std::cout << "config OK: " << config_path << "\n";
+            return 0;
+        }
 
         auto left_robot = rb_servo::BackendFactory::create(
             rb_servo::ArmId::Left,

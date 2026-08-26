@@ -238,6 +238,9 @@ safety:
   # every observed singularity/limit event happened at a TCP radius of 0.35-0.58 m while
   # the whole task lives in 0.35-0.68 m, far inside any reach shell. These are INTERIOR
   # joint limits, not workspace-boundary violations, so a radial shell never fires.
+  # (2026-08-26 update: the shell IS now enabled below — not for this failure, which
+  # the barrier + IK pinned-final refinement own, but as the workspace-boundary
+  # backstop that was missing entirely; see reach_constraint.)
   joint_limit_barrier:
     enable: true
     # Braced against the URDF IK limit (+/-150 on J3). safety.q_min_deg/q_max_deg above
@@ -365,6 +368,28 @@ safety:
     # floor_constraint와 동일한 PIKA 그리퍼 팁 4점. offset_closed_m으로 그리퍼
     # 개폐를 실측 개방률 선형 보간(floor_constraint 주석 참조). 박스 6면 체크는
     # 팔당 5점(TCP+팁 4)을 사용하며, 각 면은 보간된 점들 중 가장 노출된 점에 binds.
+    tcp_offset_points:
+      - { name: gripper_tip_a_yp, offset_m: [ 0.058,  0.012, 0.0 ], offset_closed_m: [ 0.010,  0.012, 0.0 ] }
+      - { name: gripper_tip_a_yn, offset_m: [ 0.058, -0.012, 0.0 ], offset_closed_m: [ 0.010, -0.012, 0.0 ] }
+      - { name: gripper_tip_b_yp, offset_m: [-0.058,  0.012, 0.0 ], offset_closed_m: [-0.010,  0.012, 0.0 ] }
+      - { name: gripper_tip_b_yn, offset_m: [-0.058, -0.012, 0.0 ], offset_closed_m: [-0.010, -0.012, 0.0 ] }
+  # REACH SHELL (2026-08-26, enabled as the workspace-boundary BACKSTOP). No layer
+  # bounded an out-of-reach Cartesian command: the ROI box corners sit ~1.0 m from
+  # the mount, beyond the measured raw tcp-frame envelope (~1.088 m), so a policy
+  # commanding past reach walked the arm into full extension with IK saturating at
+  # the boundary. The interior joint-limit failures stay owned by the barrier + IK
+  # pinned-final acceptance (see the NOTE above); this shell only brakes the RADIAL
+  # closing speed to zero at r_max (sqrt(2*a_brake*margin)), slides tangentially,
+  # and never limits retreat. r_max/r_min are the measured envelope minus margin
+  # (tools/reach_envelope.py; defaults documented in config.hpp).
+  reach_constraint:
+    enable: true
+    r_max_m: 1.050
+    r_min_m: 0.130
+    fail_policy: clamp_hold
+    monitor_only: false
+    a_brake_m_s2: 3.0     # match roi_box real tuning (softer than the sim 4.0)
+    d_slow_m: 0.06
     tcp_offset_points:
       - { name: gripper_tip_a_yp, offset_m: [ 0.058,  0.012, 0.0 ], offset_closed_m: [ 0.010,  0.012, 0.0 ] }
       - { name: gripper_tip_a_yn, offset_m: [ 0.058, -0.012, 0.0 ], offset_closed_m: [ 0.010, -0.012, 0.0 ] }
@@ -1108,8 +1133,20 @@ kinematics:
     # Reason stays distinct in telemetry: "joint_limit_tracking" vs
     # "joint_limit_best_effort" vs a real convergence.
     joint_limit_track_feasible: true
+    # 2026-08-26 refinement: the residual-UNBOUNDED tracking acceptance now
+    # requires the FINAL solution to be pinned ON a limit. The sticky hit flag
+    # alone (a mid-solve iterate grazing a limit, or a clamped seed) no longer
+    # authorizes accepting arbitrary residuals -- that path let an out-of-reach
+    # target walk the arm toward a limit posture one "successful" tick at a time.
     joint_limit_best_effort_position_tolerance_m: 0.0005
     joint_limit_best_effort_orientation_tolerance_rad: 0.002
+    # Orientation task weighting (default 1.0 = legacy unweighted; NOT enabled
+    # yet -- flip in its own supervised session). The log6 task mixes m and rad;
+    # with the 0.3476 m flange->TCP lever, 1 rad of orientation error moves the
+    # tip ~0.35 m, so the unweighted solve treats orientation ~3.5x looser at
+    # the tip than position. orientation_error_weight: 0.3476 expresses both
+    # halves in tip-equivalent meters. Tolerances stay on the unweighted errors.
+    # orientation_error_weight: 0.3476
     # MAX-ITERATIONS BEST EFFORT (2026-08-26). Same idea, for the other way the loop
     # runs out: near a singularity the selective DLS damping ramps up, the per-iteration
     # step shrinks, and the 100-iteration budget is spent while the residual is already

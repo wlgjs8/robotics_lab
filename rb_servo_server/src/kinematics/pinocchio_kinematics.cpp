@@ -197,6 +197,26 @@ bool clampJointLimits(
     return clamped;
 }
 
+// True when any joint of the (already clamped) solution RESTS on a finite
+// position limit. Distinct from the sticky hit_joint_limit flag, which also
+// fires when an intermediate iterate merely grazed a limit and was pulled back
+// inside (routine with 2-4 deg per-iteration steps).
+bool anyJointAtLimit(
+    const Eigen::VectorXd& q,
+    const pinocchio::Model& model,
+    const std::array<pinocchio::JointIndex, kDof>& joints
+) {
+    constexpr double kEps = 1e-9;
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+        const Eigen::DenseIndex q_index = model.idx_qs[joints[i]];
+        const double lower = model.lowerPositionLimit[q_index];
+        const double upper = model.upperPositionLimit[q_index];
+        if (std::isfinite(lower) && q[q_index] <= lower + kEps) return true;
+        if (std::isfinite(upper) && q[q_index] >= upper - kEps) return true;
+    }
+    return false;
+}
+
 // Identify which joint's solution sits closest to (or pinned at) a position limit,
 // for diagnosing a joint_limit IK failure. Fills the 0-based joint index and its signed
 // margin to the nearer limit in degrees (<= ~0 == saturated). index = -1 if no joints.
@@ -595,7 +615,17 @@ IkResult PinocchioKinematics::solveIkDamped(
             pinocchio::Jlog6(current_to_target.inverse());
         // Pinocchio CLIK convention: body-frame log residual with LOCAL frame
         // Jacobian requires the Jlog6 correction before the DLS update.
-        const Eigen::MatrixXd task_jacobian = -jlog * jacobian;
+        Eigen::MatrixXd task_jacobian = -jlog * jacobian;
+        // Orientation task weighting (ik.orientation_error_weight; 1.0 = legacy,
+        // byte-identical). The log6 task mixes meters and radians; scaling the
+        // rotation rows of BOTH the residual and the Jacobian expresses them in
+        // tip-equivalent units (weight = flange->TCP lever length). Convergence
+        // tolerances above stay on the UNWEIGHTED errors. The weighted residual
+        // used by the DLS step is built below at the solve.
+        const double ori_weight = config_.ik.orientation_error_weight;
+        if (ori_weight != 1.0) {
+            task_jacobian.bottomRows(3) *= ori_weight;
+        }
         if (!task_jacobian.array().isFinite().all()) {
             return ik_solver::failureResult(
                 ik_solver::kReasonSingularOrIllConditioned,
@@ -647,9 +677,13 @@ IkResult PinocchioKinematics::solveIkDamped(
         }
         last_applied_damping = std::sqrt(max_lambda_sq);
 
+        Eigen::Matrix<double, 6, 1> weighted_error = error;
+        if (ori_weight != 1.0) {
+            weighted_error.tail<3>() *= ori_weight;
+        }
         const Eigen::VectorXd dq_full =
             -svd.matrixV() * (inv_factors.asDiagonal() *
-                              (svd.matrixU().transpose() * error));
+                              (svd.matrixU().transpose() * weighted_error));
         if (!dq_full.array().isFinite().all()) {
             return ik_solver::failureResult(
                 ik_solver::kReasonSingularOrIllConditioned,
@@ -688,7 +722,18 @@ IkResult PinocchioKinematics::solveIkDamped(
         best_effort_pos_tol > 0.0 && best_effort_ang_tol > 0.0 &&
         position_error_m <= best_effort_pos_tol &&
         orientation_error_rad <= best_effort_ang_tol;
-    if (hit_joint_limit && (within_best_effort || config_.ik.joint_limit_track_feasible)) {
+    // "Pinned" = the FINAL solution rests on a limit. The residual-UNBOUNDED
+    // tracking acceptance is gated on this, not on the sticky flag alone: with
+    // only the sticky flag, a solve whose intermediate iterate grazed a limit
+    // (or whose SEED arrived clamped) was accepted at any residual, so an
+    // out-of-reach target could keep walking the arm toward a limit posture at
+    // the branch-jump rate limit, one "successful" tick at a time. The
+    // residual-BOUNDED best-effort acceptance keeps the wider sticky trigger.
+    const bool limit_pinned =
+        hit_joint_limit && anyJointAtLimit(q, impl_->model, impl_->joints);
+    if (hit_joint_limit &&
+        (within_best_effort ||
+         (config_.ik.joint_limit_track_feasible && limit_pinned))) {
         IkResult best_effort;
         best_effort.success = true;
         best_effort.reason = within_best_effort
@@ -738,7 +783,11 @@ IkResult PinocchioKinematics::solveIkDamped(
         config_.ik.max_iterations_best_effort_position_tolerance_m;
     const double iter_best_effort_ang_tol =
         config_.ik.max_iterations_best_effort_orientation_tolerance_rad;
-    if (!hit_joint_limit && iter_best_effort_pos_tol > 0.0 && iter_best_effort_ang_tol > 0.0 &&
+    // Gated on !limit_pinned (was !hit_joint_limit): a solve whose iterate
+    // grazed a limit but whose final solution is interior is an ordinary
+    // near-converged solve, and refusing it re-created the hold/move buzz this
+    // acceptance exists to prevent.
+    if (!limit_pinned && iter_best_effort_pos_tol > 0.0 && iter_best_effort_ang_tol > 0.0 &&
         position_error_m <= iter_best_effort_pos_tol &&
         orientation_error_rad <= iter_best_effort_ang_tol) {
         IkResult best_effort;
@@ -773,7 +822,7 @@ IkResult PinocchioKinematics::solveIkDamped(
     }
 
     IkResult result = ik_solver::failureResult(
-        hit_joint_limit ? ik_solver::kReasonJointLimit : ik_solver::kReasonMaxIterations,
+        limit_pinned ? ik_solver::kReasonJointLimit : ik_solver::kReasonMaxIterations,
         fromPinocchioQ(q, impl_->model, impl_->joints),
         position_error_m,
         orientation_error_rad,
@@ -798,7 +847,7 @@ IkResult PinocchioKinematics::solveIkDamped(
             &result.joint_limit_worst_index,
             &result.joint_limit_worst_margin_deg
         );
-        logJointLimitThrottled(arm, result);
+        if (limit_pinned) logJointLimitThrottled(arm, result);
     }
     return result;
 }

@@ -290,8 +290,50 @@ bool testCommandAndIkClassifiers() {
 
 }  // namespace
 
+// A servo_j request that expired before the worker dispatch is the client
+// command aging out mid-tick -- the loop's own freshness gate produces a
+// graceful stale-hold for the same event one tick later, so the classifier
+// must NOT latch it (measured 2026-08-26: four runs ended by this 1-tick race
+// at command age 149.7-149.9 / 150 ms). Every other CommandTimeout, and the
+// lifecycle expiry, still fails.
+bool testWorkerExpiredServoJIsNotAFault() {
+    const rb_servo::SendServoJResult expired = rb_servo::rejectedSend(
+        request(),
+        rb_servo::backendError(
+            rb_servo::BackendErrorKind::CommandTimeout,
+            "servo_j request expired before arm worker dispatch",
+            "",
+            "arm_worker_command_expired"
+        ),
+        {},
+        std::nullopt,
+        "none"
+    );
+    const rb_servo::FaultContext graceful =
+        rb_servo::classifySendServoJResult(expired, rb_servo::ArmId::Left);
+    RB_CHECK(graceful.verdict == rb_servo::SafetyVerdict::Ok);
+
+    const rb_servo::SendServoJResult other_timeout = rb_servo::rejectedSend(
+        request(),
+        rb_servo::backendError(
+            rb_servo::BackendErrorKind::CommandTimeout,
+            "controller ack timed out",
+            "",
+            "rbpodo_ack_timeout"
+        ),
+        {},
+        std::nullopt,
+        "none"
+    );
+    const rb_servo::FaultContext still_fails =
+        rb_servo::classifySendServoJResult(other_timeout, rb_servo::ArmId::Left);
+    RB_CHECK(still_fails.verdict == rb_servo::SafetyVerdict::SendFailure);
+    return true;
+}
+
 int main() {
     if (!testFaultDomainToString()) return 1;
+    if (!testWorkerExpiredServoJIsNotAFault()) return 1;
     if (!testRobotFaultSendIsRobotStateFault()) return 1;
     if (!testRobotFaultReadIsRobotStateFault()) return 1;
     if (!testTransportSendFailureStaysSendFailure()) return 1;

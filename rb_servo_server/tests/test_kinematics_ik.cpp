@@ -974,6 +974,60 @@ bool testIkJointLimitTracking() {
     return true;
 }
 
+// The residual-unbounded tracking acceptance requires the FINAL solution to be
+// PINNED on a limit -- the sticky hit flag alone (a seed that arrived clamped,
+// or an intermediate iterate that grazed a limit and was pulled back inside)
+// must NOT authorize accepting an arbitrarily large residual. Before this
+// refinement, an out-of-reach target could keep walking the arm toward a limit
+// posture one "successful" tracking tick at a time.
+bool testIkJointLimitTrackingRequiresPinnedFinal() {
+    rb_servo::KinematicsConfig cfg = testKinematicsConfig();
+    cfg.ik.max_iterations = 3;   // exhaust the budget far from the target
+    cfg.ik.joint_limit_track_feasible = true;
+    const rb_servo::ArmMountConfig mount = leftMount();
+
+    rb_servo::JointArray seed = seedJoints();
+    seed[2] = 151.0;  // outside the +/-150 model limit -> the SEED clamp sets the sticky flag
+
+    rb_servo::JointArray far_interior_q = seedJoints();
+    far_interior_q[0] += 40.0;
+    far_interior_q[2] = 60.0;  // fully interior, reachable -- just far from the seed
+
+    rb_servo::PinocchioKinematics kin(cfg);
+    const rb_servo::Pose6D target =
+        kin.computeTcpStand(rb_servo::ArmId::Left, far_interior_q, mount);
+    const rb_servo::IkResult r =
+        kin.solveIk(rb_servo::ArmId::Left, target, seed, mount);
+    // Three iterations cannot reach the target; the final iterate has been
+    // pulled inside the limits, so the seed-clamp graze must not convert this
+    // into a residual-unbounded tracking success.
+    RB_CHECK(!r.success);
+    RB_CHECK(r.reason == rb_servo::ik_solver::kReasonMaxIterations);
+    return true;
+}
+
+// ik.orientation_error_weight scales the rotation half of the DLS task (error
+// rows + Jacobian rows) so both halves read in tip-equivalent meters with a
+// long flange->TCP lever. Weighted solves must still converge to the same
+// UNWEIGHTED tolerances (which are checked on the raw errors by design).
+bool testIkOrientationWeightConverges() {
+    rb_servo::KinematicsConfig cfg = testKinematicsConfig();
+    cfg.ik.orientation_error_weight = 0.3476;  // this arm's flange->TCP lever [m]
+    const rb_servo::ArmMountConfig mount = leftMount();
+    rb_servo::JointArray goal = seedJoints();
+    goal[0] += 15.0;
+    goal[4] += 20.0;
+    rb_servo::PinocchioKinematics kin(cfg);
+    const rb_servo::Pose6D target =
+        kin.computeTcpStand(rb_servo::ArmId::Left, goal, mount);
+    const rb_servo::IkResult r =
+        kin.solveIk(rb_servo::ArmId::Left, target, seedJoints(), mount);
+    RB_CHECK(r.success);
+    RB_CHECK(r.position_error_m <= cfg.ik.position_tolerance_m);
+    RB_CHECK(r.orientation_error_rad <= cfg.ik.orientation_tolerance_rad);
+    return true;
+}
+
 }  // namespace
 
 bool testFloorPointZJacobianFiniteDifference() {
@@ -1191,6 +1245,8 @@ int main() {
     if (!testIkJointLimitBestEffortAcceptsClampedSolve()) return 1;
     if (!testIkMaxIterationsBestEffort()) return 1;
     if (!testIkJointLimitTracking()) return 1;
+    if (!testIkJointLimitTrackingRequiresPinnedFinal()) return 1;
+    if (!testIkOrientationWeightConverges()) return 1;
     if (!testCartesianLatencyBudgetTelemetry()) return 1;
     if (!testIkSeedUsesPreviousSentTargetNotActualState()) return 1;
     if (!testPinocchioIk()) return 1;

@@ -244,6 +244,16 @@ struct IkSolverConfig {
     bool joint_limit_track_feasible = false;
     double max_iterations_best_effort_position_tolerance_m = 0.0;
     double max_iterations_best_effort_orientation_tolerance_rad = 0.0;
+    // Weight on the ORIENTATION half of the DLS task (error rows 3..5 and the
+    // matching Jacobian rows are scaled by this before the SVD). The log6 task
+    // mixes meters and radians unweighted, and with a long flange->TCP lever
+    // (0.3476 m on this arm) 1 rad of orientation error moves the tip ~0.35 m:
+    // the default tolerances make orientation ~3.5x LOOSER at the tip than
+    // position. Setting this to the lever length expresses both halves in
+    // tip-equivalent meters. 1.0 = legacy unweighted behaviour (byte-identical
+    // solve). Convergence TOLERANCES are checked on the unweighted errors
+    // either way, so success criteria do not move with the weight.
+    double orientation_error_weight = 1.0;
 };
 
 struct KinematicsConfig {

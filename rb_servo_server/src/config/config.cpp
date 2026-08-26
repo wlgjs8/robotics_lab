@@ -2325,6 +2325,8 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFiniteArray(cfg.kinematics.ik.max_step_deg, "kinematics.ik.max_step_deg");
     validateNonNegativeFinite(cfg.kinematics.ik.singular_region_eps, "kinematics.ik.singular_region_eps");
     validateNonNegativeFinite(cfg.kinematics.ik.damping_max, "kinematics.ik.damping_max");
+    validatePositiveFinite(cfg.kinematics.ik.orientation_error_weight,
+                           "kinematics.ik.orientation_error_weight");
     validateNonNegativeFinite(cfg.kinematics.ik.max_solution_jump_deg, "kinematics.ik.max_solution_jump_deg");
     validateNonNegativeFinite(cfg.kinematics.ik.branch_jump_damping_scale, "kinematics.ik.branch_jump_damping_scale");
     validateNonNegativeFinite(
@@ -4132,6 +4134,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "joint_limit_track_feasible",
                 "max_iterations_best_effort_position_tolerance_m",
                 "max_iterations_best_effort_orientation_tolerance_rad",
+                "orientation_error_weight",
             }, "kinematics.ik");
             if (has(ik, "enable")) cfg.kinematics.ik.enable = asBool(ik["enable"], "kinematics.ik.enable");
             if (has(ik, "max_iterations")) cfg.kinematics.ik.max_iterations = asInt(ik["max_iterations"], "kinematics.ik.max_iterations");
@@ -4155,6 +4158,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ik, "joint_limit_track_feasible")) cfg.kinematics.ik.joint_limit_track_feasible = asBool(ik["joint_limit_track_feasible"], "kinematics.ik.joint_limit_track_feasible");
             if (has(ik, "max_iterations_best_effort_position_tolerance_m")) cfg.kinematics.ik.max_iterations_best_effort_position_tolerance_m = asDouble(ik["max_iterations_best_effort_position_tolerance_m"], "kinematics.ik.max_iterations_best_effort_position_tolerance_m");
             if (has(ik, "max_iterations_best_effort_orientation_tolerance_rad")) cfg.kinematics.ik.max_iterations_best_effort_orientation_tolerance_rad = asDouble(ik["max_iterations_best_effort_orientation_tolerance_rad"], "kinematics.ik.max_iterations_best_effort_orientation_tolerance_rad");
+            if (has(ik, "orientation_error_weight")) cfg.kinematics.ik.orientation_error_weight = asDouble(ik["orientation_error_weight"], "kinematics.ik.orientation_error_weight");
         }
     }
 
