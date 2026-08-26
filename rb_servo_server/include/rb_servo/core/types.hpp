@@ -901,6 +901,13 @@ struct ArmWorkerTelemetry {
     uint64_t worker_wire_dispatches_total = 0;
     uint64_t worker_last_wire_send_start_ns = 0;
     uint64_t worker_last_wire_send_end_ns = 0;
+    // Setpoint rate conversion (servo.worker_setpoint_interpolation).
+    // delay_setpoints is the interpolation latency in setpoints (~1 = +2 ms);
+    // rebase/hold count the clamp events (see setpoint_interpolator.hpp).
+    bool worker_interp_active = false;
+    double worker_interp_delay_setpoints = 0.0;
+    uint64_t worker_interp_rebase_total = 0;
+    uint64_t worker_interp_hold_total = 0;
     std::string worker_queue_policy = "latest_wins";
 };
 

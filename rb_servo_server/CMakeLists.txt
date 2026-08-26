@@ -294,6 +294,10 @@ if(BUILD_TESTING)
     target_link_libraries(test_queue_sync_controller PRIVATE rb_servo_core)
     add_test(NAME queue_sync_controller COMMAND test_queue_sync_controller)
 
+    add_executable(test_setpoint_interpolator tests/test_setpoint_interpolator.cpp)
+    target_link_libraries(test_setpoint_interpolator PRIVATE rb_servo_core)
+    add_test(NAME setpoint_interpolator COMMAND test_setpoint_interpolator)
+
     add_executable(test_force_control tests/test_force_control.cpp)
     target_link_libraries(test_force_control PRIVATE rb_servo_core)
     add_test(NAME force_control COMMAND test_force_control)

@@ -12,6 +12,7 @@
 
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/control/queue_sync_controller.hpp"
+#include "rb_servo/control/setpoint_interpolator.hpp"
 #include "rb_servo/robot/i_robot_backend.hpp"
 
 namespace rb_servo {
@@ -29,6 +30,10 @@ struct ArmWorkerOptions {
     // a single loop has one period for two boxes running two different clocks.
     uint64_t send_period_ns = 0;
     QueueSyncConfig queue_sync;
+    // Rate-convert the loop's setpoint stream to this worker's cadence instead
+    // of taking latest-wins from the mailbox (see setpoint_interpolator.hpp).
+    // Only meaningful with cadence ownership (send_period_ns > 0).
+    bool interpolate_setpoints = false;
     // RT scheduling for THIS worker's thread, applied once at thread entry.
     // 0 / -1 = leave it alone. See ServoConfig::worker_realtime_priority.
     int realtime_priority = 0;
@@ -218,6 +223,9 @@ private:
     QueueSyncController queue_sync_;
     QueueSyncDecision queue_sync_decision_;
     RbpodoQueueAckTelemetry latest_queue_ack_;
+    // Setpoint rate conversion (options_.interpolate_setpoints). push() runs on
+    // the enqueue path and sample() on the worker pickup, both under mutex_.
+    SetpointInterpolator setpoint_interp_;
     // Last setpoint actually handed to the box. In cadence mode the worker must
     // put a command on the wire EVERY tick: the box drains its FIFO on its own
     // clock, so a skipped send is a queue entry it never receives. Repeating the

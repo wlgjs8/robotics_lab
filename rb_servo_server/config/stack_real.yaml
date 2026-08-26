@@ -83,6 +83,17 @@ servo:
   # A single loop has one period for two boxes running two different clocks
   # (measured drift: left +0.665, right +0.670 ticks/s -- they diverge).
   io_model: worker
+  # Worker-side setpoint RATE CONVERSION (2026-08-26, default OFF for the A/B).
+  # The loop produces at ~500.006 Hz (host clock) while the worker sends at the
+  # box-locked ~499.35 Hz; the ~0.65/s difference was silently overwritten in
+  # the latest-wins mailbox and the box FIFO played a DOUBLE reference step per
+  # skip (review_request_2026-08-26/README.md §3, confirmed real by the
+  # position-conservation test). true = the worker linearly interpolates the
+  # setpoint stream at its own cadence: the mismatch becomes a uniform 0.13 %
+  # time dilation, doubled steps vanish, cost +1 setpoint (~2 ms) latency.
+  # Flip to true as its OWN on-robot A/B stage (after the wire-precision A/B) —
+  # judge with worker_interp_* columns + scripts/analyze_smoothness.py.
+  worker_setpoint_interpolation: false
   worker_read_period_sec: 0.002
   # A worker-cached read crosses a thread boundary: measured MEDIAN age 1567 us
   # at a 2 ms period (direct I/O is 25-125 us). The former hardcoded 2-period
@@ -684,6 +695,14 @@ queue_sync:
   # tick exactly, and the fill drifts +0.65 tk/s unregulated. Holding it at
   # target_fill is what makes the box delay a constant: 5 + 1 = 6 ticks (12 ms).
   enable: true
+  # Hold each arm's motion (decel-ramped at prev_sent, plan frozen) while its
+  # qsync phase is warmup/drain, releasing on track. Measured 2026-08-26
+  # (review_request_2026-08-26/README.md §4): the stream arms on the FIRST
+  # motion command, so warmup 0.4 s + drain 0.2 s (trim 200 us = 8.85 % of
+  # setpoints dropped = ~44 doubled-step impulses/s) overlapped real motion at
+  # every stream start. Cost: the first commanded motion of a run starts ~0.6 s
+  # late (bounded by warmup_max + drain_timeout in the worst case).
+  hold_motion_until_track: true
   target_fill: 5
 
 logging:

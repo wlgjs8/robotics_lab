@@ -991,6 +991,19 @@ struct ServoConfig {
     // Must be < the tick period. Only worthwhile on a dedicated isolated cpu_core.
     int spin_slack_us = 0;
     double worker_read_period_sec = 0.002;
+    // Worker-side setpoint RATE CONVERSION (see setpoint_interpolator.hpp).
+    // The loop produces on the host clock (~500.006 Hz) while the cadence-owning
+    // worker sends on the box-locked period (~499.35 Hz); the ~0.65/s difference
+    // was silently overwritten in the latest-wins mailbox and the box FIFO
+    // played a DOUBLE step where each setpoint was skipped (measured 2026-08-26,
+    // review_request_2026-08-26/README.md §3 + position-conservation
+    // verification). With this on, the worker linearly interpolates the
+    // setpoint stream at its own cadence: the mismatch becomes a uniform
+    // 0.13 % time dilation and the doubled steps vanish, at the cost of one
+    // setpoint (~2 ms) of added latency. Only meaningful with io_model: worker
+    // + queue_sync (cadence ownership); inert otherwise. Default off — enabling
+    // changes wire content on a real-motion path, so the tracked config opts in.
+    bool worker_setpoint_interpolation = false;
     // Staleness budget for a worker-cached state read, in control periods.
     //
     // In direct I/O the loop reads the backend itself and the state is ~25-125 us
@@ -1066,6 +1079,15 @@ struct LoggingConfig {
 // directly. Retuning one side without the other is a mistake.
 struct QueueSyncConfig {
     bool enable = false;
+    // Hold each arm's MOTION at prev_sent (decel-ramped, plan frozen) while its
+    // queue-sync phase is warmup or drain, releasing on track. Measured
+    // 2026-08-26 (review_request_2026-08-26/README.md §4): the stream arms on
+    // the first motion command, so warmup (0.4 s) + drain (0.2 s, trim 200 us =
+    // 8.85 % setpoint drops = ~44 impulses/s) overlapped REAL motion at every
+    // stream start. The stream itself keeps flowing during the hold (hold
+    // setpoints), which is what advances warmup — mirrors controller-manager's
+    // Idle stiff-hold streaming. Worst-case hold = warmup_max + drain_timeout.
+    bool hold_motion_until_track = false;
     int target_fill = 5;                    // occupancy setpoint == box dead time in ticks
     int protect_fill = 1;                   // at/below this, wake early hard (underrun)
     double lpf_alpha = 0.02;                // fill low-pass; ~0.1 s at 500 Hz

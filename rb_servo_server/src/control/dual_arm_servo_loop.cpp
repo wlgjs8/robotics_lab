@@ -1396,6 +1396,7 @@ ArmWorkerOptions workerOptions(const DualArmConfig& config, ArmId arm) {
         const int rate_hz = config.servo.rate_hz > 0 ? config.servo.rate_hz : 500;
         options.send_period_ns = static_cast<uint64_t>(1'000'000'000LL / rate_hz);
         options.queue_sync = config.queue_sync;
+        options.interpolate_setpoints = config.servo.worker_setpoint_interpolation;
     }
     return options;
 }
@@ -3140,6 +3141,39 @@ void DualArmServoLoop::loopMain() {
                     setMotionState(ServerMotionState::ArmedHold);
                 }
             }
+        }
+
+        // QSYNC SETTLING HOLD (queue_sync.hold_motion_until_track). The stream
+        // arms on the first motion command, so warmup (trim 0, backlog exposed)
+        // and drain (trim 200 us -> ~9 % of setpoints dropped, ~44 impulses/s)
+        // previously overlapped REAL motion at every stream start (measured
+        // 2026-08-26, review_request_2026-08-26/README.md §4). Hold each arm at
+        // prev_sent (decel-ramped) while its queue-sync phase is warmup/drain;
+        // the hold setpoints keep the stream flowing, which is what advances
+        // warmup, and the plan freezes so no lead accumulates. Releases on
+        // track (bounded by warmup_max + drain_timeout).
+        if (config_.queue_sync.hold_motion_until_track && workerOwnsSendCadence()) {
+            const auto hold_until_track = [&](
+                ArmWorker* worker,
+                JointArray& target_q,
+                const JointArray& prev_sent,
+                const JointArray& prevprev_sent,
+                ArmId arm
+            ) {
+                if (!worker) return;
+                const std::string& phase = worker->queueSyncDecision().phase;
+                if (phase != "warmup" && phase != "drain") return;
+                const SafetyClampTelemetry ramp = safety_filter_.clampMotionDetailed(
+                    prev_sent, prev_sent, prevprev_sent, filter_dt_sec);
+                target_q = ramp.q_after_accel_limit_deg;
+                markCartesianSolveBlocked(arm, loop_start);
+            };
+            hold_until_track(left_worker_.get(), safe_target.left_q_target_deg,
+                             left_prev_sent_q_deg_, left_prevprev_sent_q_deg_,
+                             ArmId::Left);
+            hold_until_track(right_worker_.get(), safe_target.right_q_target_deg,
+                             right_prev_sent_q_deg_, right_prevprev_sent_q_deg_,
+                             ArmId::Right);
         }
 
         // FAULT-HOLD RAMP. Every fault path assigns currentFaultHoldTarget() straight

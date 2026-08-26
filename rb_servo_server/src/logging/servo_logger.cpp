@@ -603,8 +603,17 @@ void ServoLogger::writeHeader() {
               << ',' << side << "_worker_repeated_sends_total"
               << ',' << side << "_worker_wire_dispatches_total"
               << ',' << side << "_worker_wire_send_start_ns"
-              << ',' << side << "_worker_wire_send_end_ns";
+              << ',' << side << "_worker_wire_send_end_ns"
+              << ',' << side << "_worker_interp_active"
+              << ',' << side << "_worker_interp_delay_setpoints"
+              << ',' << side << "_worker_interp_rebase_total"
+              << ',' << side << "_worker_interp_hold_total";
     }
+    // The cached state frame's own stamp: consecutive ticks with the SAME value
+    // are a readback SAMPLING REPEAT (measured 2026-08-26: ~5 % of moving ticks;
+    // its 0-then-2x catch-up pair in q_ref mimics a wire double-step and
+    // contaminated the lag-8 event set ~40 %). Filter q_ref analyses on this.
+    file_ << ",left_state_host_time_ns,right_state_host_time_ns";
     // Combined geometric velocity projection (ROI/floor/reach/self-collision
     // rows + the trailing global per-joint ceiling): the actuator side of the
     // geometric safety layers. `projection_ceiling_clamped` marks the 1-tick
@@ -1306,8 +1315,14 @@ void ServoLogger::writeSample(const ServoSample& sample) {
               << ',' << wt->worker_repeated_sends_total
               << ',' << wt->worker_wire_dispatches_total
               << ',' << wt->worker_last_wire_send_start_ns
-              << ',' << wt->worker_last_wire_send_end_ns;
+              << ',' << wt->worker_last_wire_send_end_ns
+              << ',' << wt->worker_interp_active
+              << ',' << wt->worker_interp_delay_setpoints
+              << ',' << wt->worker_interp_rebase_total
+              << ',' << wt->worker_interp_hold_total;
     }
+    file_ << ',' << sample.left_state.host_time_ns
+          << ',' << sample.right_state.host_time_ns;
     file_ << ',' << sample.safety_projection.active
           << ',' << sample.safety_projection.constraint_count
           << ',' << sample.safety_projection.left_correction_deg_s

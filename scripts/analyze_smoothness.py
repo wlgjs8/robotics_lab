@@ -210,6 +210,7 @@ def analyze(path, start_sec=0.0, duration_sec=None, top=5):
             }
             for a in ARMS
         }
+        state_stamp = {a: find(f"{a}_state_host_time_ns") for a in ARMS}
         i_proj_active = find("projection_active")
         i_proj_count = find("projection_constraint_count")
         i_proj_ceiling = find("projection_ceiling_clamped")
@@ -237,6 +238,12 @@ def analyze(path, start_sec=0.0, duration_sec=None, top=5):
 
         fault_prev = 0
         fault_onsets = []
+        # Readback sampling repeats: consecutive ticks whose cached state frame
+        # carries the SAME host stamp. Their 0-then-2x catch-up pair in q_ref
+        # mimics a wire doubled step (2026-08-26: contaminated the lag-8 event
+        # set ~40%); q_ref analyses must be filtered on this.
+        state_dup = {a: 0 for a in ARMS}
+        state_prev = {a: None for a in ARMS}
         presend = {"ok": [0.0, 0], "stressed": [0.0, 0], "max": 0.0}
         wire_prev = {a: None for a in ARMS}
         wire_periods = {a: TailStatsLike() for a in ARMS}
@@ -296,6 +303,15 @@ def analyze(path, start_sec=0.0, duration_sec=None, top=5):
                 reanchor_pending[a] = [p for p in reanchor_pending[a] if p[0] > 0]
                 for p in done:
                     reanchor_events[a].append((p[2], p[1]))
+
+                # readback sampling repeats (new column)
+                st = state_stamp[a]
+                if st is not None:
+                    stamp = _f(row, st)
+                    if stamp > 0:
+                        if state_prev[a] is not None and stamp == state_prev[a]:
+                            state_dup[a] += 1
+                        state_prev[a] = stamp
 
                 # true wire cadence (new columns)
                 w = wire_start[a]
@@ -434,6 +450,12 @@ def analyze(path, start_sec=0.0, duration_sec=None, top=5):
                 "effective_hz": (stats.n / span_sec) if span_sec > 0 else 0.0,
             }
         out["wire"] = wire
+        out["state_readback_dups_per_sec"] = {
+            a: (state_dup[a] / duration if duration > 0 else 0.0)
+            if state_stamp[a] is not None
+            else "n/a"
+            for a in ARMS
+        }
         out["projection"] = proj if i_proj_active is not None else "n/a"
         out["csv_min_abs_delta_left_q0_deg"] = min_abs_dq0
         return out
@@ -489,7 +511,9 @@ def wire_counter_totals(path):
         for a in ARMS:
             for key in ("worker_pending_overwrites_total",
                         "worker_repeated_sends_total",
-                        "worker_wire_dispatches_total"):
+                        "worker_wire_dispatches_total",
+                        "worker_interp_rebase_total",
+                        "worker_interp_hold_total"):
                 name = f"{a}_{key}"
                 if name in col and col[name] < len(last):
                     try:
@@ -585,6 +609,15 @@ def main(argv=None):
     totals = result.get("wire_counter_totals") or {}
     if totals:
         print("wire counters (cumulative): " + "  ".join(f"{k}={v}" for k, v in sorted(totals.items())))
+    dups = result.get("state_readback_dups_per_sec")
+    if dups and not all(v == "n/a" for v in dups.values()):
+        print(
+            "state readback dups: "
+            + "  ".join(
+                f"{a}={v:.2f}/s" if v != "n/a" else f"{a}=n/a" for a, v in dups.items()
+            )
+            + "  (filter q_ref analyses on these ticks)"
+        )
     if result["csv_min_abs_delta_left_q0_deg"] is not None:
         print(
             f"csv min |dq| left j0: {result['csv_min_abs_delta_left_q0_deg']:.7f} deg "

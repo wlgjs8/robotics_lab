@@ -235,11 +235,17 @@ void ArmWorker::enqueueServoJ(SendServoJRequest request) {
 
     if (pending_servo_j_.has_value() &&
         pending_servo_j_->command_seq != request.command_seq) {
+        // With interpolation on, an overwrite no longer LOSES wire content (the
+        // interpolator walks through every pushed setpoint); the counter then
+        // reads as "beat crossings", not "dropped setpoints".
         ++telemetry_.worker_command_drops_total;
         ++telemetry_.worker_pending_overwrites_total;
         telemetry_.worker_last_dropped_seq = pending_servo_j_->command_seq;
     }
     telemetry_.worker_last_enqueued_seq = request.command_seq;
+    if (options_.interpolate_setpoints && options_.send_period_ns > 0) {
+        setpoint_interp_.push(request);
+    }
     pending_servo_j_ = std::move(request);
     cv_.notify_one();
 }
@@ -551,6 +557,35 @@ void ArmWorker::run() {
             if (!lifecycle_queue_.empty()) {
                 lifecycle_command = lifecycle_queue_.front();
                 lifecycle_queue_.pop_front();
+            } else if (owns_cadence && options_.interpolate_setpoints &&
+                       setpoint_interp_.hasSetpoint()) {
+                // Rate conversion: sample the pushed setpoint stream at THIS
+                // arm's cadence instead of taking latest-wins. Every enqueued
+                // setpoint contributes to the wire; the 0.13 % clock mismatch
+                // becomes a uniform time dilation instead of a 2x step per beat
+                // (see setpoint_interpolator.hpp).
+                if (pending_servo_j_.has_value()) {
+                    telemetry_.worker_last_dispatched_seq =
+                        pending_servo_j_->command_seq;
+                    pending_servo_j_.reset();
+                }
+                const double nominal_ns =
+                    static_cast<double>(options_.send_period_ns);
+                const double ratio =
+                    (nominal_ns + queue_sync_decision_.period_trim_us * 1000.0) /
+                    nominal_ns;
+                command = setpoint_interp_.sample(ratio);
+                if (command.has_value()) {
+                    // Freshness was gated at enqueue; a resampled point must not
+                    // expire at dispatch (it blends two accepted setpoints).
+                    command->deadline_ns = 0;
+                    last_servo_j_ = command;
+                    const auto& it = setpoint_interp_.telemetry();
+                    telemetry_.worker_interp_active = it.active;
+                    telemetry_.worker_interp_delay_setpoints = it.delay_setpoints;
+                    telemetry_.worker_interp_rebase_total = it.rebase_total;
+                    telemetry_.worker_interp_hold_total = it.hold_total;
+                }
             } else if (pending_servo_j_.has_value()) {
                 command = pending_servo_j_;
                 telemetry_.worker_last_dispatched_seq = command->command_seq;

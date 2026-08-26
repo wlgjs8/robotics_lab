@@ -2621,6 +2621,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "worker_cpu_core_right",
             "spin_slack_us",
             "worker_read_period_sec",
+            "worker_setpoint_interpolation",
             "worker_state_max_age_periods",
             "worker_read_rate_hz",
             "filter_dt_min_ratio",
@@ -2715,6 +2716,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "worker_cpu_core_right")) cfg.servo.worker_cpu_core_right = asInt(sec["worker_cpu_core_right"], "servo.worker_cpu_core_right");
         if (has(sec, "cpu_core")) cfg.servo.cpu_core = asInt(sec["cpu_core"], "servo.cpu_core");
         if (has(sec, "spin_slack_us")) cfg.servo.spin_slack_us = asInt(sec["spin_slack_us"], "servo.spin_slack_us");
+        if (has(sec, "worker_setpoint_interpolation")) {
+            cfg.servo.worker_setpoint_interpolation =
+                asBool(sec["worker_setpoint_interpolation"], "servo.worker_setpoint_interpolation");
+        }
         if (has(sec, "worker_read_period_sec") && has(sec, "worker_read_rate_hz")) {
             fail("servo cannot set both worker_read_period_sec and worker_read_rate_hz", sec["worker_read_rate_hz"]);
         }
@@ -3656,7 +3661,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
     if (has(root, "queue_sync")) {
         const YAML::Node sec = root["queue_sync"];
         validateAllowedKeys(sec, {
-            "enable", "target_fill", "protect_fill", "lpf_alpha",
+            "enable", "hold_motion_until_track", "target_fill", "protect_fill", "lpf_alpha",
             "kp_above_us", "kp_below_us", "ki_us", "integral_clamp_us",
             "adj_clamp_us", "protect_adj_us", "drain_adj_us", "drain_max_us",
             "drain_per_fill_us", "redrain_fill_margin", "highwater_fill",
@@ -3665,6 +3670,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         }, "queue_sync");
         QueueSyncConfig& q = cfg.queue_sync;
         if (has(sec, "enable")) q.enable = asBool(sec["enable"], "queue_sync.enable");
+        if (has(sec, "hold_motion_until_track")) {
+            q.hold_motion_until_track =
+                asBool(sec["hold_motion_until_track"], "queue_sync.hold_motion_until_track");
+        }
         if (has(sec, "target_fill")) q.target_fill = asInt(sec["target_fill"], "queue_sync.target_fill");
         if (has(sec, "protect_fill")) q.protect_fill = asInt(sec["protect_fill"], "queue_sync.protect_fill");
         if (has(sec, "lpf_alpha")) q.lpf_alpha = asDouble(sec["lpf_alpha"], "queue_sync.lpf_alpha");
