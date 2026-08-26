@@ -3530,6 +3530,7 @@ void DualArmServoLoop::loopMain() {
             ? actual_period_ns - nominal_period_ns
             : nominal_period_ns - actual_period_ns);
         sample.safety_verdict = safety_verdict;
+        sample.safety_projection = safety_projection_telemetry_;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             sample.fault_latched = fault_latched_.load();
@@ -6414,6 +6415,8 @@ ServoTarget DualArmServoLoop::applySafety(
     // free). This replaces the floor binary Hold-revert and the self-collision
     // scalar barrier. Latch / FK-fail-closed / monitor_only semantics are preserved.
     std::vector<VelocityConstraint> safety_cons;
+    // Reset the per-tick projection observability; filled below when rows engage.
+    safety_projection_telemetry_ = SafetyProjectionTelemetry{};
     bool floor_engaged = false;       // a floor row is within its engage band
     bool roi_engaged = false;          // a ROI-box face row is within its engage band
     bool reach_engaged = false;        // a reach-shell row is within its engage band
@@ -7041,6 +7044,8 @@ ServoTarget DualArmServoLoop::applySafety(
                                               safety_cons);
                     if (safety_cons.size() > before_collision_cons) {
                         collision_constraints_engaged = true;
+                        safety_projection_telemetry_.selfcol_verdict_age_ms =
+                            (now_s - v.stamp_s) * 1000.0;
                     }
                 }
             }
@@ -7058,6 +7063,17 @@ ServoTarget DualArmServoLoop::applySafety(
             safety_cons, safety_ctx[0].prev_sent_q_deg, safety_ctx[1].prev_sent_q_deg,
             out.left_q_target_deg, out.right_q_target_deg, dt_sec, iters,
             config_.safety.joint_target_smd.max_velocity_deg_s);
+        safety_projection_telemetry_.active = proj.active;
+        safety_projection_telemetry_.constraint_count = static_cast<int>(safety_cons.size());
+        safety_projection_telemetry_.left_correction_deg_s = proj.left_correction_deg_s;
+        safety_projection_telemetry_.right_correction_deg_s = proj.right_correction_deg_s;
+        safety_projection_telemetry_.ceiling_clamped = proj.ceiling_clamped;
+        for (const auto& c : safety_cons) {
+            if (safety_projection_telemetry_.min_margin_m < 0.0 ||
+                c.d_now < safety_projection_telemetry_.min_margin_m) {
+                safety_projection_telemetry_.min_margin_m = c.d_now;
+            }
+        }
         // "Meaningfully blocked" (vs merely slowed while sliding) gates the windup
         // reanchor AND the safety verdict, so tangential motion stays Running and is
         // never frozen.

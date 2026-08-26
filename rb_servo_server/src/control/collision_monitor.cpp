@@ -281,8 +281,13 @@ CollisionProjectionResult solveVelocityProjection(
     for (int i = 0; i < kDof; ++i) {
         const double lim = max_joint_vel_deg_s[i] * kDeg2Rad;
         if (lim > 0.0) {
+            const double before_left = qdot[i];
+            const double before_right = qdot[kDof + i];
             qdot[i] = std::clamp(qdot[i], -lim, lim);
             qdot[kDof + i] = std::clamp(qdot[kDof + i], -lim, lim);
+            if (qdot[i] != before_left || qdot[kDof + i] != before_right) {
+                out.ceiling_clamped = true;
+            }
         }
     }
 

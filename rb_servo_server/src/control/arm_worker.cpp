@@ -570,7 +570,7 @@ void ArmWorker::run() {
                 // stream sends anyway.
                 command = last_servo_j_;
                 command->deadline_ns = 0;  // a repeat must not inherit a stale deadline
-                ++repeated_sends_total_;
+                ++telemetry_.worker_repeated_sends_total;
             }
         }
 
@@ -623,6 +623,15 @@ void ArmWorker::run() {
                     result = deadlineMissedResult(*command, dispatch_timing);
                 }
                 storeSendResult(*command, result, dispatch_timing);
+                {
+                    // Wire-side dispatch accounting. left/right_send_start_ns in
+                    // the CSV is the LOOP-side enqueue stamp; these are the only
+                    // record of when the setpoint actually left for the box.
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    ++telemetry_.worker_wire_dispatches_total;
+                    telemetry_.worker_last_wire_send_start_ns = send_start_ns;
+                    telemetry_.worker_last_wire_send_end_ns = send_end_ns;
+                }
                 if (owns_cadence) {
                     // Feed this send's RBACK observation to the queue-sync law and
                     // publish the decision. The trim it returns is applied when the

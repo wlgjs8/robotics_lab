@@ -225,7 +225,6 @@ private:
     // anyway; skipping starves the queue instead (measured: 231 Hz of actual
     // sends against a 500 Hz loop, and the fill drained to the protect floor).
     std::optional<SendServoJRequest> last_servo_j_;
-    uint64_t repeated_sends_total_ = 0;
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;

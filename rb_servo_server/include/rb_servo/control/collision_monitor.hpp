@@ -263,6 +263,11 @@ struct CollisionProjectionResult {
     double max_correction_deg_s = 0.0; // ||qdot - qdot_desired|| (both arms), deg/s
     double left_correction_deg_s = 0.0;
     double right_correction_deg_s = 0.0;
+    // The trailing global per-joint velocity ceiling actually bound this tick.
+    // That ceiling is a 1-tick step (it is NOT accel-limited downstream), so
+    // when it engages it must be visible in the log, not only in the summed
+    // correction magnitude.
+    bool ceiling_clamped = false;
 };
 
 // One linear inequality on the commanded joint velocity (Stage 3, unified solver):

@@ -4,6 +4,7 @@
 #include <array>
 #include <cctype>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
@@ -1914,16 +1915,46 @@ SendServoJResult RbpodoBackend::sendServoJ(const SendServoJRequest& request) {
         }
         rb::podo::ResponseCollector responses;
         const uint64_t ack_start = nowSteadyNs();
-        const auto ret = impl_->robot->move_servo_j(
-            responses,
-            request.q_target_deg,
-            impl_->config.servo_t1_sec,
-            impl_->config.servo_t2_sec,
-            servo_gain_effective,
-            impl_->config.servo_alpha,
-            impl_->config.command_timeout_sec,
-            true
-        );
+        // servo_j_text_precision > 0: format the wire text locally with fixed
+        // decimals instead of the SDK's joint_to_string (default stream
+        // precision = 6 SIGNIFICANT digits, i.e. 0.001 deg staircase once
+        // |q| >= 100 deg; the box's t2 lookahead amplifies that staircase into
+        // jnt_ref jerk — measured by controller-manager, which pins %.7f).
+        // Cobot::eval() sends the same bytes on the same command channel with
+        // identical ack semantics to move_servo_j.
+        const auto ret = [&]() {
+            const int precision = impl_->config.servo_j_text_precision;
+            if (precision > 0) {
+                const auto& q = request.q_target_deg;
+                char script[352];
+                std::snprintf(
+                    script, sizeof(script),
+                    "move_servo_j(jnt[%.*f, %.*f, %.*f, %.*f, %.*f, %.*f],%.9g,%.9g,%.9g,%.9g)",
+                    precision, q[0], precision, q[1], precision, q[2],
+                    precision, q[3], precision, q[4], precision, q[5],
+                    impl_->config.servo_t1_sec,
+                    impl_->config.servo_t2_sec,
+                    servo_gain_effective,
+                    impl_->config.servo_alpha
+                );
+                return impl_->robot->eval(
+                    responses,
+                    script,
+                    impl_->config.command_timeout_sec,
+                    true
+                );
+            }
+            return impl_->robot->move_servo_j(
+                responses,
+                request.q_target_deg,
+                impl_->config.servo_t1_sec,
+                impl_->config.servo_t2_sec,
+                servo_gain_effective,
+                impl_->config.servo_alpha,
+                impl_->config.command_timeout_sec,
+                true
+            );
+        }();
         const uint64_t ack_end = nowSteadyNs();
         // ACK-disabled streaming leak fix: the SDK's disable_waiting_ack only
         // flips a client-side flag (waiting_ack=false) — it does NOT tell the

@@ -38,6 +38,18 @@ struct BackendConfig {
     double servo_lookahead_sec = 0.05;
     double servo_acc = 0.5;
 
+    // rbpodo-only. Fixed-decimal precision for the streamed move_servo_j joint
+    // values on the wire. 0 = legacy vendor-SDK text formatting
+    // (std::stringstream default = 6 SIGNIFICANT digits, which quantizes the
+    // wire command at 0.001 deg once |q| >= 100 deg — J1 lives at 209-278 deg).
+    // 5..9 = format the command text locally with this many fixed decimals and
+    // send it via Cobot::eval() on the same command channel; the bytes are
+    // otherwise identical to the SDK's move_servo_j. controller-manager
+    // measured coarse wire quantization as a staircase that the box's t2
+    // lookahead amplifies into jnt_ref jerk, and pins %.7f
+    // (submodules/controller-manager/src/arm/RobotLink.cpp).
+    int servo_j_text_precision = 0;
+
     // Soft-entry gain ramp for move_servo_j RT-servo (re)engagement.
     // On every server (re)start the controller transitions from soft
     // position-hold into stiff real-time servo_j streaming. With servo_gain=1.0

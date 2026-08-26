@@ -890,7 +890,33 @@ struct ArmWorkerTelemetry {
     uint64_t worker_last_enqueued_seq = 0;
     uint64_t worker_last_dispatched_seq = 0;
     uint64_t worker_last_completed_seq = 0;
+    // Wire-side accounting. The loop enqueues at its own 500 Hz clock while the
+    // worker dispatches at the box-locked cadence (~499.35 Hz under queue sync),
+    // so `pending_overwrites` above counts setpoints that never reached the wire
+    // and `repeated_sends` counts wire holds on an empty-mailbox cadence tick.
+    // `last_wire_send_*_ns` bracket the worker's actual backend->sendServoJ()
+    // call — distinct from the loop-side enqueue stamp the CSV logs as
+    // left/right_send_start_ns.
+    uint64_t worker_repeated_sends_total = 0;
+    uint64_t worker_wire_dispatches_total = 0;
+    uint64_t worker_last_wire_send_start_ns = 0;
+    uint64_t worker_last_wire_send_end_ns = 0;
     std::string worker_queue_policy = "latest_wins";
+};
+
+// Per-tick observability for the combined geometric velocity projection
+// (ROI/floor/reach/self-collision rows + the global per-joint ceiling inside
+// solveVelocityProjection). Previously the only output was a 5 Hz stderr line
+// behind RB_SELF_COLLISION_LOG; boundary chatter and release lunges could not
+// be attributed from the CSV.
+struct SafetyProjectionTelemetry {
+    bool active = false;                   // any constraint row engaged this tick
+    int constraint_count = 0;              // rows handed to the Gauss-Seidel solve
+    double left_correction_deg_s = 0.0;    // max joint-speed removed, per arm
+    double right_correction_deg_s = 0.0;
+    bool ceiling_clamped = false;          // global per-joint velocity ceiling bound
+    double min_margin_m = -1.0;            // min d_now across engaged rows; -1 = none
+    double selfcol_verdict_age_ms = -1.0;  // age of the collision verdict used; -1 = none
 };
 
 struct RbpodoAsyncStreamingTelemetry {
@@ -1164,6 +1190,7 @@ struct ServoSample {
     ForceControlTelemetry right_force_control;
     SafetyTrackingTelemetry left_safety_tracking;
     SafetyTrackingTelemetry right_safety_tracking;
+    SafetyProjectionTelemetry safety_projection;
     bool send_suppressed = false;
     std::string send_policy = "send_servo_j";
     uint64_t left_send_start_ns = 0;

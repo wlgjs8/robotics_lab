@@ -692,6 +692,10 @@ private:
     std::atomic<bool> runtime_floor_enabled_{false};
     FloorArmEvaluation last_floor_left_{};
     FloorArmEvaluation last_floor_right_{};
+    // Per-tick observability of the combined geometric velocity projection
+    // (constraint rows + global ceiling). Written by applySafety on the loop
+    // thread, copied into the ServoSample the same tick; no cross-thread access.
+    SafetyProjectionTelemetry safety_projection_telemetry_{};
     uint64_t floor_clamp_count_ = 0;
     std::string floor_last_set_reject_reason_;
     // ROI box constraint (safety.roi_box): runtime-adjustable stand-frame bounds

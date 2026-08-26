@@ -590,6 +590,21 @@ point of `alpha=10.0` is ownership: with the controller LPF off, ALL smoothing
 belongs to the `rb_servo_server` control loop, which is the only place it can be
 measured, bounded, and tested.
 
+**Wire text precision (`servo_j_text_precision`, 2026-08-26).** The vendor SDK
+formats `move_servo_j` joint values with default stream precision — 6
+SIGNIFICANT digits, so a joint living at 209–278 deg (J1 does, always) goes on
+the wire quantized at 0.001 deg. With the controller LPF off, the box's
+`t2` lookahead differentiates that staircase into `jnt_ref` jerk —
+controller-manager measured exactly this class of defect and pins `%.7f`
+(`submodules/controller-manager/src/arm/RobotLink.cpp`). `stack_real.yaml` sets
+`servo_j_text_precision: 7` per arm: the backend formats the command text
+locally with 7 fixed decimals and sends it via `Cobot::eval()` on the same
+command channel (identical bytes otherwise, identical ack semantics). Set `0`
+to fall back to the legacy SDK formatting for an on-robot A/B. The servo CSV is
+written at 9 significant digits for the same reason: at the default 6, the
+logged `q_*` columns share the 0.001 deg floor and cannot show whether the wire
+fix worked.
+
 **On the superseded "LPF off produces jerk/jitter" note.** That observation was
 reproducible, and it is why earlier revisions of this document named
 `servo_alpha: 1.0` as the real profile. The cause was not the LPF decision: with
@@ -730,6 +745,16 @@ Contract points:
 - The RBACK reading used by the controller and the servo CSV comes from a
   dedicated accessor (`latestQueueAck()`), separate from `lastSendResult()`,
   which the enqueue path overwrites every tick.
+- Wire-side accounting is logged per tick (2026-08-26):
+  `*_worker_pending_overwrites_total` (loop setpoints overwritten in the
+  mailbox before dispatch — each one is a setpoint the box never received, and
+  the FIFO plays a 2-tick step where it was skipped),
+  `*_worker_repeated_sends_total` (wire holds on an empty-mailbox cadence
+  tick), `*_worker_wire_dispatches_total`, and
+  `*_worker_wire_send_start/end_ns` (the worker's actual dispatch instants —
+  the CSV's `left/right_send_start_ns` are LOOP-side enqueue stamps, not wire
+  instants). `scripts/analyze_smoothness.py` turns these plus the geometric
+  `projection_*` columns into a run-to-run smoothness regression report.
 - **A FIFO queues a software stop behind the backlog.** The hardware E-stop is
   unaffected, but the server's fault latch and tracking-error response inherit
   the queue depth: 58 ms at 29 ticks, over 400 ms after five unregulated minutes.

@@ -286,6 +286,10 @@ if(BUILD_TESTING)
     target_link_libraries(test_joint_moving_average PRIVATE rb_servo_core)
     add_test(NAME joint_moving_average COMMAND test_joint_moving_average)
 
+    add_executable(test_servo_logger_columns tests/test_servo_logger_columns.cpp)
+    target_link_libraries(test_servo_logger_columns PRIVATE rb_servo_core)
+    add_test(NAME servo_logger_columns COMMAND test_servo_logger_columns)
+
     add_executable(test_queue_sync_controller tests/test_queue_sync_controller.cpp)
     target_link_libraries(test_queue_sync_controller PRIVATE rb_servo_core)
     add_test(NAME queue_sync_controller COMMAND test_queue_sync_controller)

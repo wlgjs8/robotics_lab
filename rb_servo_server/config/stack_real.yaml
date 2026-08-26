@@ -22,6 +22,14 @@ left_robot:
   # An earlier LPF-off attempt produced jerk/jitter on hardware; being retried now
   # that the box queue is regulated (queue_sync below) instead of free-running.
   servo_alpha: 10.0
+  # Wire text precision for streamed move_servo_j joint values. The vendor SDK
+  # formats with default stream precision (6 SIGNIFICANT digits): at J1's
+  # working range (209-278 deg) that is a 0.001 deg staircase on the wire,
+  # which the box's t2 lookahead amplifies into jnt_ref jerk (measured by
+  # controller-manager, which pins %.7f — RobotLink.cpp). 7 = seven fixed
+  # decimals via Cobot::eval() on the same channel; 0 = legacy SDK formatting
+  # (flip back to 0 for on-robot A/B).
+  servo_j_text_precision: 7
   disable_waiting_ack: true    # ACK-off 500Hz streaming; config-driven, no RB_ALLOW_* env gate
   # Non-blocking pipelined state read: tick N requests, tick N+1 consumes. Same
   # design controller-manager uses to keep box I/O on its RT thread. Validated in
@@ -49,6 +57,8 @@ right_robot:
   # An earlier LPF-off attempt produced jerk/jitter on hardware; being retried now
   # that the box queue is regulated (queue_sync below) instead of free-running.
   servo_alpha: 10.0
+  # See left_robot.servo_j_text_precision (same rationale; 0 = legacy SDK A/B).
+  servo_j_text_precision: 7
   disable_waiting_ack: true    # ACK-off 500Hz streaming; config-driven, no RB_ALLOW_* env gate
   # Non-blocking pipelined state read: tick N requests, tick N+1 consumes. Same
   # design controller-manager uses to keep box I/O on its RT thread. Validated in

@@ -958,6 +958,7 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
         "servo_soft_entry_sec",
         "servo_soft_entry_gain_start_scale",
         "servo_soft_entry_rearm_gap_sec",
+        "servo_j_text_precision",
         "disable_waiting_ack",
         "state_read_pipelined",
         "max_consecutive_read_misses",
@@ -986,6 +987,7 @@ void applyBackendSection(const YAML::Node& sec, BackendConfig* cfg, const std::s
     if (has(sec, "servo_soft_entry_sec")) cfg->servo_soft_entry_sec = asDouble(sec["servo_soft_entry_sec"], path + ".servo_soft_entry_sec");
     if (has(sec, "servo_soft_entry_gain_start_scale")) cfg->servo_soft_entry_gain_start_scale = asDouble(sec["servo_soft_entry_gain_start_scale"], path + ".servo_soft_entry_gain_start_scale");
     if (has(sec, "servo_soft_entry_rearm_gap_sec")) cfg->servo_soft_entry_rearm_gap_sec = asDouble(sec["servo_soft_entry_rearm_gap_sec"], path + ".servo_soft_entry_rearm_gap_sec");
+    if (has(sec, "servo_j_text_precision")) cfg->servo_j_text_precision = asInt(sec["servo_j_text_precision"], path + ".servo_j_text_precision");
     if (has(sec, "disable_waiting_ack")) cfg->disable_waiting_ack = asBool(sec["disable_waiting_ack"], path + ".disable_waiting_ack");
     if (has(sec, "state_read_pipelined")) cfg->state_read_pipelined = asBool(sec["state_read_pipelined"], path + ".state_read_pipelined");
     if (has(sec, "max_consecutive_read_misses")) cfg->max_consecutive_read_misses = asInt(sec["max_consecutive_read_misses"], path + ".max_consecutive_read_misses");
@@ -2427,6 +2429,12 @@ void validateConfig(const DualArmConfig& cfg) {
         }
         // Real/sim env gates retired: disable_waiting_ack no longer requires
         // RB_ALLOW_RBPODO_ACK_DISABLED_MOTION (ACK-off acceptance is config-driven).
+        if (backend.servo_j_text_precision != 0 &&
+            (backend.servo_j_text_precision < 5 || backend.servo_j_text_precision > 9)) {
+            throw std::runtime_error(
+                label + ".servo_j_text_precision must be 0 (legacy SDK formatting) or in [5, 9]"
+            );
+        }
     };
     validate_rbpodo_backend(cfg.left_robot, "left_robot");
     validate_rbpodo_backend(cfg.right_robot, "right_robot");

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <ctime>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -399,6 +400,12 @@ bool ServoLogger::start() {
         std::cerr << "[ERROR] failed to open servo log file\n";
         return false;
     }
+    // 9 significant digits for every double column. The default (6) quantizes a
+    // joint logged at 226 deg to 0.001 deg -- exactly the floor that made the
+    // LPF-off q_actual jerk question undecidable offline and that hides the
+    // wire-precision staircase (servo_j_text_precision) in q_ref. ~15-25% larger
+    // files, accepted for offline smoothness analysis.
+    file_ << std::setprecision(9);
     const std::filesystem::path latest = std::filesystem::path(config_.directory) / "servo_log.csv";
     std::error_code ec;
     std::filesystem::remove(latest, ec);  // clear any prior file/symlink
@@ -583,6 +590,30 @@ void ServoLogger::writeHeader() {
               << ',' << side << "_qsync_redrain_events"
               << ',' << side << "_qsync_no_consumption_events";
     }
+    // Worker mailbox/wire accounting. The loop enqueues at its own 500 Hz clock
+    // while the worker dispatches at the box-locked cadence (~499.35 Hz under
+    // queue sync), so `pending_overwrites_total` counts setpoints that never
+    // reached the wire (skips: the box FIFO plays a 2-tick step) and
+    // `repeated_sends_total` counts wire holds on an empty-mailbox cadence
+    // tick. `wire_send_start/end_ns` bracket the worker's actual
+    // backend->sendServoJ() call -- left/right_send_start_ns above is the
+    // LOOP-side enqueue stamp, NOT the wire instant.
+    for (const char* side : {"left", "right"}) {
+        file_ << ',' << side << "_worker_pending_overwrites_total"
+              << ',' << side << "_worker_repeated_sends_total"
+              << ',' << side << "_worker_wire_dispatches_total"
+              << ',' << side << "_worker_wire_send_start_ns"
+              << ',' << side << "_worker_wire_send_end_ns";
+    }
+    // Combined geometric velocity projection (ROI/floor/reach/self-collision
+    // rows + the trailing global per-joint ceiling): the actuator side of the
+    // geometric safety layers. `projection_ceiling_clamped` marks the 1-tick
+    // velocity-ceiling step; `projection_min_margin_m` is the closest engaged
+    // row's d_now (-1 = no row engaged); `selfcol_verdict_age_ms` is the age of
+    // the collision verdict the rows were extrapolated with (-1 = none).
+    file_ << ",projection_active,projection_constraint_count"
+             ",left_projection_correction_deg_s,right_projection_correction_deg_s"
+             ",projection_ceiling_clamped,projection_min_margin_m,selfcol_verdict_age_ms";
     file_ << ",left_error_code,right_error_code";
     writeCartesianSolveHeader(file_, "left");
     writeCartesianSolveHeader(file_, "right");
@@ -1268,6 +1299,21 @@ void ServoLogger::writeSample(const ServoSample& sample) {
               << ',' << qs->redrain_events
               << ',' << qs->no_consumption_events;
     }
+    for (const ArmWorkerTelemetry* wt :
+         {&sample.left_worker_telemetry, &sample.right_worker_telemetry}) {
+        file_ << ',' << wt->worker_pending_overwrites_total
+              << ',' << wt->worker_repeated_sends_total
+              << ',' << wt->worker_wire_dispatches_total
+              << ',' << wt->worker_last_wire_send_start_ns
+              << ',' << wt->worker_last_wire_send_end_ns;
+    }
+    file_ << ',' << sample.safety_projection.active
+          << ',' << sample.safety_projection.constraint_count
+          << ',' << sample.safety_projection.left_correction_deg_s
+          << ',' << sample.safety_projection.right_correction_deg_s
+          << ',' << sample.safety_projection.ceiling_clamped
+          << ',' << sample.safety_projection.min_margin_m
+          << ',' << sample.safety_projection.selfcol_verdict_age_ms;
     file_ << ',' << sample.left_state.error_code << ',' << sample.right_state.error_code;
     writeCartesianSolveColumns(file_, sample.left_cartesian_solve);
     writeCartesianSolveColumns(file_, sample.right_cartesian_solve);
