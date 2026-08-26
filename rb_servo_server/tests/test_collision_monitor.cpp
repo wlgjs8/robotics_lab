@@ -468,6 +468,45 @@ static CollisionVerdict makePairVerdict(double d_m, double rate,
     return v;
 }
 
+// Engage/release hysteresis on the constraint rows (buildCollisionConstraints with
+// a caller-persisted engaged set): engage below d_slow, release only above
+// d_slow + hyst_m, so margin noise at the band edge cannot flap the row on/off.
+static bool runConstraintHysteresis() {
+    CollisionMonitorConfig cfg;
+    cfg.d_hard_m = 0.010;
+    cfg.d_slow_m = 0.030;
+    cfg.a_brake_m_s2 = 3.0;
+    cfg.hyst_m = 0.010;
+    std::array<double, kDof> jl{};
+    jl[0] = 1.0;
+    std::array<double, kDof> jr{};
+    std::unordered_set<std::uint64_t> engaged;
+    std::vector<VelocityConstraint> cons;
+
+    // Fresh pair just OUTSIDE d_slow: no row, no engagement.
+    buildCollisionConstraints(makePairVerdict(0.032, 0.0, jl, jr), cfg, 0.0, cons, &engaged);
+    RB_CHECK(cons.empty() && engaged.empty());
+    // Inside d_slow: row appears, pair engages.
+    cons.clear();
+    buildCollisionConstraints(makePairVerdict(0.028, 0.0, jl, jr), cfg, 0.0, cons, &engaged);
+    RB_CHECK(cons.size() == 1 && engaged.size() == 1);
+    // Back to 0.032 (inside the hysteresis band): the row PERSISTS -- this is
+    // the flap the dead hyst_m config comment promised to break.
+    cons.clear();
+    buildCollisionConstraints(makePairVerdict(0.032, 0.0, jl, jr), cfg, 0.0, cons, &engaged);
+    RB_CHECK(cons.size() == 1 && engaged.size() == 1);
+    // Above d_slow + hyst_m: released.
+    cons.clear();
+    buildCollisionConstraints(makePairVerdict(0.041, 0.0, jl, jr), cfg, 0.0, cons, &engaged);
+    RB_CHECK(cons.empty() && engaged.empty());
+    // Stateless call (no engaged set) keeps the legacy edge behavior.
+    cons.clear();
+    buildCollisionConstraints(makePairVerdict(0.032, 0.0, jl, jr), cfg, 0.0, cons);
+    RB_CHECK(cons.empty());
+    std::cout << "constraint hysteresis: engage<d_slow, release>=d_slow+hyst OK\n";
+    return true;
+}
+
 // Stage 2: directional velocity-damper projection (pure function; analytic checks).
 static bool runProjection() {
     CollisionMonitorConfig pc;
@@ -936,6 +975,10 @@ int main() {
     }
     if (!runPairPatternMatching()) {
         std::cerr << "test_collision_monitor (pair pattern matching) FAILED\n";
+        return 1;
+    }
+    if (!runConstraintHysteresis()) {
+        std::cout << "FAIL: runConstraintHysteresis\n";
         return 1;
     }
     if (!runProjection()) {

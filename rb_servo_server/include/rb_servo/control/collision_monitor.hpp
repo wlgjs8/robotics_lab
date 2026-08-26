@@ -22,6 +22,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include <Eigen/Core>
@@ -283,8 +284,16 @@ struct VelocityConstraint {
 
 // Build the self-collision velocity constraints from a verdict (per near pair within
 // d_slow, age-extrapolated). Appends to `out` (so floor rows can be added too).
+//
+// `engaged_pairs` (optional, caller-persisted across ticks, keyed by
+// geom_a<<32|geom_b) makes the per-category `hyst_m` release hysteresis live: a
+// pair engages at d_now < d_slow and releases only at d_now >= d_slow + hyst.
+// Without it (nullptr, and in older builds) the row set flapped on/off at the
+// band edge with verdict-age noise — the on/off limit cycle the hyst_m config
+// comment promised to break but never did.
 void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
-                               double verdict_age_s, std::vector<VelocityConstraint>& out);
+                               double verdict_age_s, std::vector<VelocityConstraint>& out,
+                               std::unordered_set<std::uint64_t>* engaged_pairs = nullptr);
 
 // Solve a set of velocity constraints by Gauss-Seidel projection (closest first),
 // modifying the joint targets (degrees) in place. Pure; shared by self-collision and

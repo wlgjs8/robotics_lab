@@ -175,7 +175,8 @@ double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorC
 }
 
 void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
-                               double verdict_age_s, std::vector<VelocityConstraint>& out) {
+                               double verdict_age_s, std::vector<VelocityConstraint>& out,
+                               std::unordered_set<std::uint64_t>* engaged_pairs) {
     if (!v.valid) return;
     const double age = std::max(0.0, verdict_age_s);
     for (const auto& p : v.near) {
@@ -201,9 +202,26 @@ void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitor
                              : p.external     ? cfg.external_recover_speed_m_s
                              : p.intra_arm    ? cfg.intra_arm_recover_speed_m_s
                                               : cfg.recover_speed_m_s;
+        const double hyst = p.external_box ? cfg.external_box_hyst_m
+                          : p.external     ? cfg.external_hyst_m
+                          : p.intra_arm    ? cfg.intra_arm_hyst_m
+                                           : cfg.hyst_m;
         const double closing = p.rate_m_s < 0.0 ? -p.rate_m_s : 0.0;
         const double d_now = p.d_m - closing * age;  // age-extrapolated clearance
-        if (d_now >= d_slow) continue;
+        // Engage/release hysteresis (caller-persisted): engage below d_slow,
+        // release only above d_slow + hyst. In the hysteresis band the row
+        // exists but xi is large, so it rarely binds — the point is that it
+        // does not flap with margin noise.
+        const std::uint64_t pair_key =
+            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(p.geom_a)) << 32) |
+            static_cast<std::uint32_t>(p.geom_b);
+        const bool was_engaged = engaged_pairs && engaged_pairs->count(pair_key) > 0;
+        const double engage_at = was_engaged ? d_slow + hyst : d_slow;
+        if (d_now >= engage_at) {
+            if (was_engaged) engaged_pairs->erase(pair_key);
+            continue;
+        }
+        if (engaged_pairs) engaged_pairs->insert(pair_key);
         VelocityConstraint c;
         for (int i = 0; i < kDof; ++i) {
             c.J[i] = p.Jn_left[i];

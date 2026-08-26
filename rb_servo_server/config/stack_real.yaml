@@ -209,6 +209,20 @@ safety:
   # occurred on ~2.1% -- a threshold near zero would pin the window open and freeze the
   # plan permanently.
   throttle_intervention_deg_s: 50.0
+  # SAFETY PLAN GATE (2026-08-26). The geometric layers slow the ARM but nothing
+  # slowed the PLAN: the chunk follower kept integrating at up to 0.45 m/s while a
+  # barrier held the arm, and the accumulated lead discharged either as a release
+  # lunge (measured 10,050 deg/s^2 command accel at a clamp exit; 40.7 mm of lead
+  # across eight RoiViolation episodes) or as re-anchor stop-go (~5 Hz shake class).
+  # This gate advances the plan clock at the realized/requested joint-step ratio
+  # from the safety filter + projection, so the reference cannot outrun the arm.
+  # Attack is instantaneous; release recovers ~63% in 100 ms (release_alpha 0.02
+  # @ 500 Hz). Same principle as the force advance gate, generalized to geometry.
+  plan_gate:
+    enable: true
+    release_alpha: 0.02
+    deadband_deg: 0.05
+    min_gate: 0.0
   # JOINT-LIMIT APPROACH BARRIER (2026-08-26). The hard q_min/q_max clamp stops the
   # command AT the limit but says nothing about how fast it arrives, so a target driving
   # a joint into its stop pins it at full commanded speed. Once pinned, IK cannot solve
@@ -343,6 +357,11 @@ safety:
     # 면 접근 시 √(2·a_brake·margin)로 감속 — a_brake↓ + 밴드↑ = 가장자리 jerk↓.
     a_brake_m_s2: 3.0
     d_slow_m: 0.06
+    # Engage/release hysteresis on the face rows: engage < d_slow, release only
+    # >= d_slow + hyst. 2026-08-26: measured 6 RoiViolation entries in 0.6 s
+    # (~10 Hz on/off toggling at the band edge) — this is the knob that breaks
+    # that limit cycle, now actually read by the row builder.
+    hyst_m: 0.010
     # floor_constraint와 동일한 PIKA 그리퍼 팁 4점. offset_closed_m으로 그리퍼
     # 개폐를 실측 개방률 선형 보간(floor_constraint 주석 참조). 박스 6면 체크는
     # 팔당 5점(TCP+팁 4)을 사용하며, 각 면은 보간된 점들 중 가장 노출된 점에 binds.

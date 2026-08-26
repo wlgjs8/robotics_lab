@@ -613,7 +613,8 @@ void ServoLogger::writeHeader() {
     // the collision verdict the rows were extrapolated with (-1 = none).
     file_ << ",projection_active,projection_constraint_count"
              ",left_projection_correction_deg_s,right_projection_correction_deg_s"
-             ",projection_ceiling_clamped,projection_min_margin_m,selfcol_verdict_age_ms";
+             ",projection_ceiling_clamped,projection_min_margin_m,selfcol_verdict_age_ms"
+             ",left_plan_gate,right_plan_gate";
     file_ << ",left_error_code,right_error_code";
     writeCartesianSolveHeader(file_, "left");
     writeCartesianSolveHeader(file_, "right");
@@ -1313,7 +1314,9 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << ',' << sample.safety_projection.right_correction_deg_s
           << ',' << sample.safety_projection.ceiling_clamped
           << ',' << sample.safety_projection.min_margin_m
-          << ',' << sample.safety_projection.selfcol_verdict_age_ms;
+          << ',' << sample.safety_projection.selfcol_verdict_age_ms
+          << ',' << sample.safety_projection.left_plan_gate
+          << ',' << sample.safety_projection.right_plan_gate;
     file_ << ',' << sample.left_state.error_code << ',' << sample.right_state.error_code;
     writeCartesianSolveColumns(file_, sample.left_cartesian_solve);
     writeCartesianSolveColumns(file_, sample.right_cartesian_solve);

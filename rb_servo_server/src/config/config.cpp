@@ -1448,6 +1448,18 @@ void validateConfig(const DualArmConfig& cfg) {
         }
         validateTcpOffsetPoints(fc.tcp_offset_points, "safety.floor_constraint.tcp_offset_points");
     }
+    if (cfg.safety.plan_gate.enable) {
+        const auto& pg = cfg.safety.plan_gate;
+        if (!std::isfinite(pg.release_alpha) || pg.release_alpha <= 0.0 || pg.release_alpha > 1.0) {
+            throw std::runtime_error("safety.plan_gate.release_alpha must be finite and in (0, 1]");
+        }
+        if (!std::isfinite(pg.deadband_deg) || pg.deadband_deg < 0.0) {
+            throw std::runtime_error("safety.plan_gate.deadband_deg must be finite and non-negative");
+        }
+        if (!std::isfinite(pg.min_gate) || pg.min_gate < 0.0 || pg.min_gate > 1.0) {
+            throw std::runtime_error("safety.plan_gate.min_gate must be finite and in [0, 1]");
+        }
+    }
     if (cfg.safety.roi_box.enable) {
         const auto& rb = cfg.safety.roi_box;
         for (int k = 0; k < 3; ++k) {
@@ -1467,6 +1479,9 @@ void validateConfig(const DualArmConfig& cfg) {
         }
         if (!std::isfinite(rb.d_slow_m) || rb.d_slow_m < 0.0) {
             throw std::runtime_error("safety.roi_box.d_slow_m must be finite and non-negative");
+        }
+        if (!std::isfinite(rb.hyst_m) || rb.hyst_m < 0.0) {
+            throw std::runtime_error("safety.roi_box.hyst_m must be finite and non-negative");
         }
         if (!cfg.kinematics.enable) {
             throw std::runtime_error(
@@ -2785,7 +2800,32 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "user_floor_constraint",
             "joint_target_smd",
             "init_motion_planner",
+            "plan_gate",
         }, "safety");
+        if (has(sec, "plan_gate")) {
+            const YAML::Node pg = sec["plan_gate"];
+            validateAllowedKeys(pg, {
+                "enable",
+                "release_alpha",
+                "deadband_deg",
+                "min_gate",
+            }, "safety.plan_gate");
+            if (has(pg, "enable")) {
+                cfg.safety.plan_gate.enable = asBool(pg["enable"], "safety.plan_gate.enable");
+            }
+            if (has(pg, "release_alpha")) {
+                cfg.safety.plan_gate.release_alpha =
+                    asDouble(pg["release_alpha"], "safety.plan_gate.release_alpha");
+            }
+            if (has(pg, "deadband_deg")) {
+                cfg.safety.plan_gate.deadband_deg =
+                    asDouble(pg["deadband_deg"], "safety.plan_gate.deadband_deg");
+            }
+            if (has(pg, "min_gate")) {
+                cfg.safety.plan_gate.min_gate =
+                    asDouble(pg["min_gate"], "safety.plan_gate.min_gate");
+            }
+        }
         if (has(sec, "q_min_deg")) cfg.safety.q_min_deg = parseJointArray(sec["q_min_deg"], "safety.q_min_deg");
         if (has(sec, "q_max_deg")) cfg.safety.q_max_deg = parseJointArray(sec["q_max_deg"], "safety.q_max_deg");
         if (has(sec, "dq_max_deg_s")) cfg.safety.dq_max_deg_s = parseJointArray(sec["dq_max_deg_s"], "safety.dq_max_deg_s");
@@ -3187,6 +3227,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "tcp_offset_points",
                 "a_brake_m_s2",
                 "d_slow_m",
+                "hyst_m",
             }, "safety.roi_box");
             const auto parseVec3 = [&](const YAML::Node& node, const std::string& path,
                                        std::array<double, 3>& out) {
@@ -3222,6 +3263,9 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             }
             if (has(rb, "d_slow_m")) {
                 cfg.safety.roi_box.d_slow_m = asDouble(rb["d_slow_m"], "safety.roi_box.d_slow_m");
+            }
+            if (has(rb, "hyst_m")) {
+                cfg.safety.roi_box.hyst_m = asDouble(rb["hyst_m"], "safety.roi_box.hyst_m");
             }
             if (has(rb, "tcp_offset_points")) {
                 cfg.safety.roi_box.tcp_offset_points = parseTcpOffsetPoints(

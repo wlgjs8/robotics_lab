@@ -126,6 +126,15 @@ class CartesianChunkFollower {
   // The accumulated plan shift [m] — how far the gate has held this plan back.
   double planShift() const { return plan_shift_.norm(); }
 
+  // SAFETY PLAN GATE (geometric layers): scales the plan-clock advance in
+  // tick(). 1.0 = ungated (byte-identical to legacy); 0.0 = plan frozen. Set
+  // each tick from the realized/requested joint-step ratio after the safety
+  // filter + projection, so the reference cannot outrun a safety-slowed arm
+  // (the run-ahead that discharged as release lunges / re-anchor stop-go).
+  // Clamped to [0, 1].
+  void setPlanRateGate(double gate);
+  double planRateGate() const { return plan_rate_gate_; }
+
     bool active() const { return active_; }
   bool holdPaused() const { return hold_paused_; }
   void deactivate();
@@ -198,6 +207,8 @@ class CartesianChunkFollower {
   double advance_gate_{1.0};
   Eigen::Vector3d into_contact_dir_{Eigen::Vector3d::Zero()};
   Eigen::Vector3d plan_shift_{Eigen::Vector3d::Zero()};
+  // The geometric-safety gate on the plan clock (see setPlanRateGate).
+  double plan_rate_gate_{1.0};
 };
 
 }  // namespace rb_servo::control

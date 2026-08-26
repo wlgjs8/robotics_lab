@@ -917,6 +917,10 @@ struct SafetyProjectionTelemetry {
     bool ceiling_clamped = false;          // global per-joint velocity ceiling bound
     double min_margin_m = -1.0;            // min d_now across engaged rows; -1 = none
     double selfcol_verdict_age_ms = -1.0;  // age of the collision verdict used; -1 = none
+    // Safety plan gate (safety.plan_gate): the rate at which each arm's chunk
+    // follower plan clock is currently allowed to advance. 1.0 = ungated.
+    double left_plan_gate = 1.0;
+    double right_plan_gate = 1.0;
 };
 
 struct RbpodoAsyncStreamingTelemetry {

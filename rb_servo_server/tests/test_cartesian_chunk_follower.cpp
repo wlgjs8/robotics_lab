@@ -718,6 +718,74 @@ int main() {
           "synthetic difficulty is uniform across rows, unlike hardware");
   }
 
+  // -- Safety plan gate: the plan clock advances at the gated rate. ----------
+  std::printf("Plan gate: gated clock, freeze, and ungated identity\n");
+  {
+    CartesianChunkFollower ungated(cfg);
+    CartesianChunkFollower gated(cfg);
+    const ChunkFrame frame = makeRef(16);
+    const Pose6D anchor = frame.pose[static_cast<std::size_t>(cfg.window.discard_head_L)];
+    ungated.submitFrame(frame, anchor);
+    gated.submitFrame(frame, anchor);
+    gated.setPlanRateGate(0.5);
+    // Same plan-time: the gated plan must land where the ungated plan is at
+    // HALF the elapsed wall time (the clock is scaled, nothing else). The
+    // first tick of each is the segment bring-up (plan-time 0), so align
+    // 1 + 2N gated ticks against 1 + N ungated ticks.
+    const int kAdvances = 118;
+    for (int t = 0; t < 1 + kAdvances; ++t) gated.tick(TICK);
+    for (int t = 0; t < 1 + kAdvances / 2; ++t) ungated.tick(TICK);
+    check(poseNear(gated.lastPose(), ungated.lastPose(), 1e-6, 1e-6),
+          "gate 0.5 over 2N ticks == gate 1.0 over N ticks");
+    // Gate 0 freezes the plan entirely.
+    const Pose6D frozen_before = gated.lastPose();
+    gated.setPlanRateGate(0.0);
+    for (int t = 0; t < 50; ++t) gated.tick(TICK);
+    check(poseNear(gated.lastPose(), frozen_before, 1e-9, 1e-9), "gate 0 freezes the plan");
+    // Out-of-range values clamp.
+    gated.setPlanRateGate(3.0);
+    check(gated.planRateGate() == 1.0, "gate clamps above at 1");
+    gated.setPlanRateGate(-1.0);
+    check(gated.planRateGate() == 0.0, "gate clamps below at 0");
+  }
+
+  // -- Re-anchor velocity inheritance: no stop-go step. ----------------------
+  std::printf("Re-anchor: velocity carries through the re-base\n");
+  {
+    CartesianChunkFollower f(cfg);
+    const ChunkFrame frame = makeRef(16, /*vx=*/0.06);
+    f.submitFrame(frame, frame.pose[static_cast<std::size_t>(cfg.window.discard_head_L)]);
+    // Run into steady motion, then measure the per-tick step before/after a
+    // re-anchor to a nearby reference.
+    Pose6D prev = f.lastPose();
+    double step_before = 0.0;
+    for (int t = 0; t < 150; ++t) {
+      prev = f.lastPose();
+      f.tick(TICK);
+      step_before = rb_servo::math::positionDistance(f.lastPose(), prev);
+    }
+    check(step_before > 1e-6, "follower is moving before the re-anchor");
+    const auto vel_before = f.currentVelocity();
+    check(vel_before.has_value() && std::fabs(vel_before->x) > 1e-4,
+          "currentVelocity is live before the re-anchor");
+    Pose6D re = f.lastPose();
+    re.x += 0.002;  // typical divergence-scale re-base (2 mm)
+    f.reanchor(re);
+    const auto vel_after = f.currentVelocity();
+    check(vel_after.has_value() && std::fabs(vel_after->x) > 1e-4,
+          "currentVelocity survives the re-anchor (SMD reseed inherits it)");
+    // The ticks after the re-anchor keep moving at a comparable rate instead of
+    // restarting from rest (legacy: v0 = 0 -> a jerk-limited crawl from zero).
+    // The first tick is the fresh segment's bring-up (samples plan-time 0), so
+    // measure the second.
+    f.tick(TICK);
+    prev = f.lastPose();
+    f.tick(TICK);
+    const double step_after = rb_servo::math::positionDistance(f.lastPose(), prev);
+    check(step_after > 0.25 * step_before,
+          "post-re-anchor motion is not a restart from rest");
+  }
+
   std::printf("\n=== %s (%d failure%s) ===\n",
               g_failures == 0 ? "ALL TESTS PASSED" : "TEST FAILURES",
               g_failures, g_failures == 1 ? "" : "s");

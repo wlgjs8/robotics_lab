@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -705,6 +706,14 @@ private:
     std::array<std::atomic<double>, 3> runtime_roi_max_m_{};
     RoiArmEvaluation last_roi_left_{};
     RoiArmEvaluation last_roi_right_{};
+    // Engage/release hysteresis state for the geometric constraint rows (loop
+    // thread only). ROI faces: [arm(2)][axis(3)][side(2)] flattened; collision
+    // pairs keyed by geom_a<<32|geom_b (see buildCollisionConstraints).
+    std::array<bool, 12> roi_face_engaged_{};
+    std::unordered_set<std::uint64_t> collision_engaged_pairs_;
+    // Safety plan gate state (per arm, [left, right]): written by applySafety,
+    // read by applyChunkFollowerStage next tick. Loop thread only.
+    std::array<double, 2> plan_gate_state_{1.0, 1.0};
     uint64_t roi_clamp_count_ = 0;
     std::string roi_last_set_reject_reason_;
     // Reachable-shell constraint (safety.reach_constraint): per-arm telemetry of the

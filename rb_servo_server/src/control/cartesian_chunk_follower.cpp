@@ -128,10 +128,26 @@ void CartesianChunkFollower::setAdvanceGate(double gate, const Eigen::Vector3d& 
 void CartesianChunkFollower::reanchor(const Pose6D& reference) {
   hold_paused_ = false;
   hold_pause_start_sec_ = 0.0;
+  // Carry the plan's current velocity/acceleration through the re-base. The
+  // previous seed(p0) zeroed both, which made every re-anchor a hard velocity
+  // step to zero in the 500 Hz Cartesian reference followed by a re-accel from
+  // rest — measured 2026-08-26 as 2,300-9,200 deg/s^2 command-accel peaks
+  // within 10 ticks of each re-anchor (the stop-go shake). The POSITION is
+  // re-based to the live reference (that is the point of the re-anchor); the
+  // velocity state is continuous, so the next BVP decelerates/redirects within
+  // jerk limits instead of restarting. Rotation tangent components transfer
+  // small-angle (a re-anchor happens at <= ~5 deg of orientation lead, same
+  // regime relinearizeAndReseed already assumes).
+  std::array<double, 6> v0{};
+  std::array<double, 6> a0{};
+  if (have_segment_ && core_.hasState()) {
+    v0 = core_.v0();
+    a0 = core_.a0();
+  }
   R0_ref_ = Eigen::Quaterniond(math::rotationFromPose(reference)).normalized();
   std::array<double, 6> p0{reference.x, reference.y, reference.z, 0.0, 0.0, 0.0};
-  core_.seed(p0);        // zero velocity/acceleration; keep the active window untouched
-  have_segment_ = false; // force a fresh BVP solve from the new anchor on the next tick
+  core_.seed(p0, v0, a0);  // keep the active window untouched
+  have_segment_ = false;   // force a fresh BVP solve from the new anchor on the next tick
   t_in_seg_ = 0.0;
   last_pose_ = reference;
   active_ = true;
@@ -217,7 +233,16 @@ void CartesianChunkFollower::updateActualLead(const Pose6D& actual_pose) {
 Pose6D CartesianChunkFollower::tick(double dt_tick) {
   if (!active_ || hold_paused_) return last_pose_;
 
-  t_in_seg_ += dt_tick;
+  // SAFETY PLAN GATE: advance the plan clock at the rate the arm actually
+  // realized last tick. When a geometric layer (joint-limit barrier, ROI face,
+  // self-collision row) removed X% of the commanded step, the plan advances X%
+  // slower, so the reference cannot outrun the arm and accumulate the lead
+  // that previously discharged as a release lunge or a re-anchor. 1.0 (the
+  // default, and the value whenever safety is not intervening) is byte-
+  // identical to the ungated behaviour. This is the geometric-layer
+  // counterpart of the force advance gate (setAdvanceGate), which stays
+  // directional and per-segment.
+  t_in_seg_ += dt_tick * plan_rate_gate_;
   if (!have_segment_ || t_in_seg_ >= seg_dt_) {
     t_in_seg_ = have_segment_ ? std::max(0.0, t_in_seg_ - seg_dt_) : 0.0;
     stepToNextSegment();
@@ -226,8 +251,16 @@ Pose6D CartesianChunkFollower::tick(double dt_tick) {
   return last_pose_;
 }
 
+void CartesianChunkFollower::setPlanRateGate(double gate) {
+  plan_rate_gate_ = gate < 0.0 ? 0.0 : (gate > 1.0 ? 1.0 : gate);
+}
+
 std::optional<Vec6> CartesianChunkFollower::currentVelocity() const {
-  if (!active_ || hold_paused_ || !have_segment_ || !core_.hasState()) {
+  // Deliberately NOT gated on have_segment_: right after a reanchor() the
+  // segment is dropped (fresh BVP next tick) but the seeded state carries the
+  // inherited velocity, and the output SMD reseed must inherit it too — a zero
+  // here reintroduced the very stop-go step reanchor() now avoids.
+  if (!active_ || hold_paused_ || !core_.hasState()) {
     return std::nullopt;
   }
   const auto& v = core_.v0();

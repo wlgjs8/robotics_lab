@@ -602,6 +602,11 @@ struct RoiBoxConfig {
     std::vector<FloorCheckPointConfig> tcp_offset_points;
     double a_brake_m_s2 = 4.0;
     double d_slow_m = 0.05;  // engage band inside each face (0 => always active)
+    // Engage/release hysteresis on the face rows: a face engages at
+    // margin < d_slow_m and releases only at margin >= d_slow_m + hyst_m, so
+    // margin noise at the band edge cannot flap the constraint on/off (2026-08-26:
+    // measured 6 RoiViolation entries in 0.6 s = ~10 Hz toggling). 0 = off.
+    double hyst_m = 0.0;
 };
 
 // Per-arm reachable-workspace shell limit. The TCP (and each configured
@@ -810,6 +815,29 @@ struct JointLimitBarrierConfig {
     bool inherit_bounds = true;
 };
 
+// SAFETY PLAN GATE: feed the realized/requested joint-step ratio (after the
+// safety filter + geometric projection) back into the chunk follower's plan
+// clock, so the Cartesian reference advances only as fast as the arm is
+// actually allowed to move. Without it the plan keeps integrating at full
+// speed while a barrier slows the arm; the accumulated lead then discharges as
+// a release lunge (measured 10,050 deg/s^2 command accel at a clamp exit,
+// 40.7 mm of lead across eight RoiViolation episodes) or as re-anchor stop-go.
+// Fail-closed: disabled by default because it changes reference timing on a
+// real-motion path; the tracked real config opts in.
+struct SafetyPlanGateConfig {
+    bool enable = false;
+    // Per-tick first-order recovery toward gate = 1 once the intervention
+    // clears (attack is instantaneous: gate = min(gate, realized/requested)).
+    // 0.02 at 500 Hz ~= 100 ms to recover 63% of the way.
+    double release_alpha = 0.02;
+    // Requested steps below this are noise; the ratio is not evaluated there
+    // (gate only recovers). Keeps idle/hold ticks from driving the gate.
+    double deadband_deg = 0.05;
+    // Floor on the instantaneous gate; 0 allows a full plan freeze while the
+    // arm is fully blocked.
+    double min_gate = 0.0;
+};
+
 struct SafetyConfig {
     JointArray q_min_deg{};
     JointArray q_max_deg{};
@@ -881,6 +909,7 @@ struct SafetyConfig {
     UserFloorConstraintConfig user_floor_constraint;
     JointTargetSmdConfig joint_target_smd;
     InitMotionPlannerConfig init_motion_planner;
+    SafetyPlanGateConfig plan_gate;
 };
 
 inline constexpr JointArray rbpodoDefaultSafetyJointMinDeg() {

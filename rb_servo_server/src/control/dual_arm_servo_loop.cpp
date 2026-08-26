@@ -5074,6 +5074,13 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     log_transition();
     smd_tracker->deactivate();
     ArmCommand smoothed = command;
+    // SAFETY PLAN GATE: last tick's realized/requested step ratio (applySafety)
+    // paces this tick's plan-clock advance. 1.0 whenever the gate is disabled
+    // or safety is not intervening.
+    follower->setPlanRateGate(
+        config_.safety.plan_gate.enable
+            ? plan_gate_state_[arm_id == ArmId::Left ? 0 : 1]
+            : 1.0);
     // Contact-aware following is gone with the F/T stack: no external reaction
     // is supplied, which is the follower's own blind-mode behaviour.
     const Pose6D pre_filter = follower->tick(dt_sec);
@@ -6638,7 +6645,20 @@ ServoTarget DualArmServoLoop::applySafety(
                 for (int axis = 0; axis < 3; ++axis) {
                     for (int side = 0; side < 2; ++side) {
                         const double margin = eval.faces[axis][side].margin_m;
-                        if (!std::isfinite(margin) || margin >= rb.d_slow_m) continue;
+                        // Engage/release hysteresis (roi_box.hyst_m): engage
+                        // below d_slow, release only above d_slow + hyst, so
+                        // margin noise at the band edge cannot flap the face
+                        // row on/off (measured ~10 Hz RoiViolation toggling).
+                        const int face_idx =
+                            (arm == ArmId::Left ? 0 : 6) + axis * 2 + side;
+                        const bool was_engaged = roi_face_engaged_[face_idx];
+                        const double engage_at =
+                            was_engaged ? rb.d_slow_m + rb.hyst_m : rb.d_slow_m;
+                        if (!std::isfinite(margin) || margin >= engage_at) {
+                            roi_face_engaged_[face_idx] = false;
+                            continue;
+                        }
+                        roi_face_engaged_[face_idx] = true;
                         const math::Vector3& off = eval.faces[axis][side].offset_tcp;
                         const std::array<double, 3> offset{off.x(), off.y(), off.z()};
                         JointArray Jaxis{};
@@ -7041,7 +7061,7 @@ ServoTarget DualArmServoLoop::applySafety(
                     // below removes only the closing component of the command.
                     const std::size_t before_collision_cons = safety_cons.size();
                     buildCollisionConstraints(v, collision_monitor_cfg_, now_s - v.stamp_s,
-                                              safety_cons);
+                                              safety_cons, &collision_engaged_pairs_);
                     if (safety_cons.size() > before_collision_cons) {
                         collision_constraints_engaged = true;
                         safety_projection_telemetry_.selfcol_verdict_age_ms =
@@ -7059,10 +7079,17 @@ ServoTarget DualArmServoLoop::applySafety(
         if (config_.safety.self_collision.enable) {
             iters = std::max(iters, collision_monitor_cfg_.projection_iterations);
         }
+        // The trailing per-joint ceiling must be the STREAMING limit (dq_max),
+        // not the InitMotion/jog SMD profile: passing joint_target_smd's
+        // [60..100] deg/s here clamped every joint of BOTH arms to jog speed in
+        // a single 2 ms tick the moment any constraint row engaged (a -55k to
+        // -110k deg/s2 step, downstream of the accel clamp, cross-arm). dq_max
+        // is what the per-joint velocity clamp upstream already enforces, so
+        // the ceiling only bounds projection-injected velocity.
         const CollisionProjectionResult proj = solveVelocityProjection(
             safety_cons, safety_ctx[0].prev_sent_q_deg, safety_ctx[1].prev_sent_q_deg,
             out.left_q_target_deg, out.right_q_target_deg, dt_sec, iters,
-            config_.safety.joint_target_smd.max_velocity_deg_s);
+            config_.safety.dq_max_deg_s);
         safety_projection_telemetry_.active = proj.active;
         safety_projection_telemetry_.constraint_count = static_cast<int>(safety_cons.size());
         safety_projection_telemetry_.left_correction_deg_s = proj.left_correction_deg_s;
@@ -7125,6 +7152,36 @@ ServoTarget DualArmServoLoop::applySafety(
             }
         }
     }
+
+    // SAFETY PLAN GATE input: how much of the requested step survived the
+    // filter + projection. Attack instantaneous, release first-order, per arm.
+    // Consumed by applyChunkFollowerStage on the NEXT tick (one-tick delay).
+    if (config_.safety.plan_gate.enable) {
+        const auto update_gate = [&](int i, const JointArray& requested_q,
+                                     const JointArray& final_q) {
+            const JointArray& prev = safety_ctx[i].prev_sent_q_deg;
+            double requested = 0.0;
+            double realized = 0.0;
+            for (int j = 0; j < kDof; ++j) {
+                requested = std::max(requested, std::abs(requested_q[j] - prev[j]));
+                realized = std::max(realized, std::abs(final_q[j] - prev[j]));
+            }
+            double& g = plan_gate_state_[i];
+            g += config_.safety.plan_gate.release_alpha * (1.0 - g);
+            if (requested > config_.safety.plan_gate.deadband_deg) {
+                const double instant = std::clamp(
+                    realized / requested, config_.safety.plan_gate.min_gate, 1.0);
+                if (instant < g) g = instant;
+            }
+        };
+        update_gate(0, desired.left_q_target_deg, out.left_q_target_deg);
+        update_gate(1, desired.right_q_target_deg, out.right_q_target_deg);
+    } else {
+        plan_gate_state_[0] = 1.0;
+        plan_gate_state_[1] = 1.0;
+    }
+    safety_projection_telemetry_.left_plan_gate = plan_gate_state_[0];
+    safety_projection_telemetry_.right_plan_gate = plan_gate_state_[1];
 
     if (verdict) *verdict = combined;
     return out;

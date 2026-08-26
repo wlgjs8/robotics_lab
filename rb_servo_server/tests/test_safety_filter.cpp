@@ -330,27 +330,47 @@ bool testSignReversalUsesDecelerationBudget() {
     return true;
 }
 
-// The overshoot budget caps how far past the target the deceleration ramp may sit.
-bool testOvershootBudgetCapsCommandLead() {
+// Anti-overshoot with bounded jerk (2026-08-26 rev 2). The original budget clip
+// was an ASSIGNMENT (`out = q +/- budget`): it capped the per-tick lead exactly
+// but could move the command up to `budget` deg in one 2 ms tick (~125,000
+// deg/s^2 at budget 0.5) and produced a +/-budget square wave on a hovering
+// target. The clip is now rate-limited by the same decel dv budget as the ramp:
+// per-tick velocity change NEVER exceeds ratio*ddq_max*dt, the excursion past a
+// dead-stopped target is bounded by the physics coast v^2/(2*ratio*ddq), and
+// the command then returns to the target. The budget knob shapes the transient
+// but no longer authorizes a teleport.
+bool testOvershootClipIsRateLimited() {
     const double dt = 0.002;
     const double budget = 0.05;
     const rb_servo::SafetyConfig config = decelTestSafetyConfig(4.0, budget);
     const rb_servo::SafetyFilter filter(config);
+    const double dv_limit = 3000.0 * 4.0 * dt;  // 24 deg/s per tick
+    const double v0 = 196.0;
+    const double coast_bound = v0 * v0 / (2.0 * 3000.0 * 4.0);  // 1.6 deg
+
     rb_servo::JointArray prevprev = joints(0.0);
     rb_servo::JointArray prev = joints(0.0);
-    prev[0] = 196.0 * dt;
-    rb_servo::JointArray desired = prev;
-    desired[0] = prev[0] + 0.0;   // target stops dead
-    const rb_servo::SafetyClampTelemetry clamp =
-        filter.clampMotionDetailed(desired, prev, prevprev, dt);
-    const double lead = clamp.q_after_accel_limit_deg[0] - desired[0];
-    RB_CHECK(lead > 0.0);                    // bounded decel means the command leads
-    RB_CHECK(near(lead, budget));            // and the lead is capped at the budget
-    // Zero budget collapses back to the legacy "never pass the target" clip.
-    const rb_servo::SafetyFilter strict(decelTestSafetyConfig(4.0, 0.0));
-    const rb_servo::SafetyClampTelemetry strict_clamp =
-        strict.clampMotionDetailed(desired, prev, prevprev, dt);
-    RB_CHECK(near(strict_clamp.q_after_accel_limit_deg[0], desired[0]));
+    prev[0] = v0 * dt;
+    rb_servo::JointArray desired = prev;   // target stops dead at prev
+    double max_excursion = 0.0;
+    double out0 = prev[0];
+    for (int tick = 0; tick < 400; ++tick) {
+        const rb_servo::SafetyClampTelemetry clamp =
+            filter.clampMotionDetailed(desired, prev, prevprev, dt);
+        const double out = clamp.q_after_accel_limit_deg[0];
+        const double vel = (out - prev[0]) / dt;
+        const double prev_vel = (prev[0] - prevprev[0]) / dt;
+        // The whole point: no tick may change velocity faster than the decel
+        // ceiling -- the legacy clip teleported here.
+        RB_CHECK(std::abs(vel - prev_vel) <= dv_limit + kEpsilon);
+        max_excursion = std::max(max_excursion, out - desired[0]);
+        prevprev = prev;
+        prev[0] = out;
+        out0 = out;
+    }
+    RB_CHECK(max_excursion > 0.0);                      // bounded decel must lead
+    RB_CHECK(max_excursion <= coast_bound + 0.05);      // but only by the coast
+    RB_CHECK(std::abs(out0 - desired[0]) <= budget + kEpsilon);  // and it returns
     return true;
 }
 
@@ -465,7 +485,7 @@ int main() {
     if (!testLegacyDecelBehaviorPreservedAtRatioOne()) return 1;
     if (!testDecelerationIsBoundedByRatio()) return 1;
     if (!testSignReversalUsesDecelerationBudget()) return 1;
-    if (!testOvershootBudgetCapsCommandLead()) return 1;
+    if (!testOvershootClipIsRateLimited()) return 1;
     if (!testSteadyStreamingIsUnaffected()) return 1;
     if (!testJointLimitBarrierBrakesOnlyTheClosingDirection()) return 1;
     return 0;

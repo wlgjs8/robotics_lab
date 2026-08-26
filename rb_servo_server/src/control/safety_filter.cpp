@@ -413,7 +413,43 @@ JointArray SafetyFilter::clampAcceleration(
         const double dir = (q[i] >= q_prev[i]) ? 1.0 : -1.0;
         const double lead = (out[i] - q[i]) * dir;
         if (lead > overshoot_budget) {
-            out[i] = q[i] + dir * overshoot_budget;
+            if (decel_ratio <= 1.0 && overshoot_budget <= 0.0) {
+                // Legacy contract (ratio 1.0 + budget 0.0 == byte-identical old
+                // filter): clip straight back to the target, i.e. deceleration
+                // is unbounded. Kept so configs that never opted into bounded
+                // deceleration are unchanged.
+                out[i] = q[i];
+            } else {
+                // Rate-limited clip, NOT an assignment. The previous assignment
+                // (`out = q +/- budget`) was a teleport: up to `budget` deg in
+                // one 2 ms tick (0.5 deg = ~125,000 deg/s^2), bypassing every
+                // ceiling above, and on a hovering target `dir` flips sign
+                // tick-to-tick so the clip anchor alternated between q+budget
+                // and q-budget -- a loop-rate square wave exactly when a
+                // barrier had pinned the arm. Move TOWARD the budget boundary
+                // at no more than the decel dv budget instead: the overshoot
+                // cap is reached over a few ticks (jerk stays bounded) and the
+                // hovering-target chatter amplitude collapses from +/-budget
+                // to +/-dv_limit*dt.
+                const double clip_target = q[i] + dir * overshoot_budget;
+                const double clip_vel = (clip_target - q_prev[i]) / dt_sec;
+                const double bounded_vel =
+                    prev_vel + std::clamp(clip_vel - prev_vel, -dv_limit, dv_limit);
+                // Never let the "clip" move the output FURTHER past the target
+                // than the unclipped decel ramp already did.
+                const double candidate = q_prev[i] + bounded_vel * dt_sec;
+                if ((candidate - q[i]) * dir < lead) {
+                    out[i] = candidate;
+                }
+            }
+        }
+        // A decel-bounded coast past a target sitting at a joint limit must not
+        // carry the COMMAND past the hard limit (the legacy assignment clip
+        // could, by up to the budget; clampJointLimits ran before this stage
+        // and is not re-applied). Guarded on a non-degenerate range so callers
+        // with a default-constructed config (all-zero limits) are unaffected.
+        if (config_.q_min_deg[i] < config_.q_max_deg[i]) {
+            out[i] = std::clamp(out[i], config_.q_min_deg[i], config_.q_max_deg[i]);
         }
     }
     return out;
