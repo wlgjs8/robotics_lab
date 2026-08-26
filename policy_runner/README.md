@@ -195,9 +195,12 @@ metrics. Controller tracking remains visible in the normal action log, rollout
 summary, and pgmode state monitor. This path never authorizes physical-real
 motion and does not contact the live camera service.
 
-`force_recovery` was removed on 2026-08-26 with the server force stack it read
-(`force_control.contact_active` no longer exists in the state JSON). It is not a
-config section any more, so a profile that still declares it fails to load.
+The policy-side `force_recovery` action-source option remains removed. This is
+separate from server force-control v2, which is live and publishes per-arm
+`force_torque`/`force_control` state blocks. Force laws and recovery behavior
+are server-config-owned; `policy_runner` does not reintroduce a client-side
+force override or parse the removed v1 `force_control.contact_active` field. A
+runner profile that still declares `force_recovery` fails to load.
 
 The server still increments `motion_epoch` on a free-drive exit resync, and that
 still invalidates cached/in-flight policy work through the normal epoch path.

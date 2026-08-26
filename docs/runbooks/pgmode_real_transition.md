@@ -1,234 +1,114 @@
 # rbpodo pgmode Simulation To Physical Real Transition
 
-This runbook defines the conservative ladder from rbpodo controller
-`pgmode` simulation evidence to physical `operation_mode: real` evidence.
-It creates artifacts and refuses unsafe promotion paths; it is not approval to
-run hardware by itself.
+This runbook defines the evidence ladder from rbpodo controller `pgmode`
+simulation to physical `operation_mode: real`. It is not permission to move
+hardware. Every physical stage requires a clear workspace, an operator at the
+cell, and an immediately available hardware E-stop.
 
-Do not use `tcp_ref_stand` as physical tracking evidence. Physical pass
-evidence must use `tcp_actual_stand`.
+Physical pass evidence uses `tcp_actual_stand`. `tcp_ref_stand` is controller
+reference evidence only and must not be reported as physical tracking.
 
-## Ladder
+## Ladder and current state
 
-| Stage | Name | Purpose |
+| Stage | Purpose | Current status |
 | --- | --- | --- |
-| P0 | `controller_sim_repeatability_done` | Reviewed controller `pgmode` repeatability artifact. |
-| P1 | `real_readonly_diagnostics_parity` | Read-only physical diagnostics with no Servo J sends. |
-| P2 | `stop_resetFault_or_operator_stop_policy_verified` | Verified stop/resetFault behavior or unresolved operator-stop policy recorded. |
-| P3 | `real_hold_no_motion` | Hold/no-motion physical run; no motion expected or detected. |
-| P4 | `tiny_joint_noop_or_tiny_joint_motion` | Tiny joint no-op or explicitly tiny supervised joint motion. |
-| P5 | `tiny_cartesian_delta` | Tiny Cartesian delta with actual TCP state. |
-| P6 | `slow_physical_circle_5cm_10s` | First slow physical circle. |
-| P7 | `stable_physical_circle_15cm_16s` | Stable 15 cm / 16 s physical circle. |
-| P8 | `medium_physical_circle_15cm_8s` | Medium 15 cm / 8 s physical circle. |
-| P9 | `fast_physical_circle_15cm_4s_only_after_explicit_approval` | Fast 15 cm / 4 s only after explicit approval. |
+| P0 | Reviewed controller-`pgmode` repeatability | regression baseline |
+| P1 | Physical read-only diagnostics parity | exercised |
+| P2 | Stop/reset/operator-stop procedure | operator procedure required |
+| P3 | Physical hold/no-motion | exercised during bring-up |
+| P4 | Tiny supervised joint motion | passed in the realized bring-up lane |
+| P5 | Tiny physical Cartesian delta | passed |
+| P6 | Slow 5 cm / 10 s physical circle | physical circle evidence exists |
+| P7 | Stable 15 cm / 16 s circle | not production-ready |
+| P8 | 15 cm / 8 s circle | pending P7 |
+| P9 | 15 cm / 4 s fast circle | explicit future approval only |
 
-P9 is not a default or automatic promotion target.
+The recorded TUNED-1 circle predates the current LPF-off, firmware-v8.7.3
+queue-sync, and later P0/P1/P3 safety changes. It proves that the physical lane
+was opened; it is not acceptance of the current high-speed profile.
 
-## Tools
+## Config policy
 
-Dry-run commands do not require environment gates and do not start hardware:
-
-```bash
-python3 scripts/rbpodo_physical_transition_acceptance.py --help
-
-python3 scripts/rbpodo_physical_transition_acceptance.py \
-  --stage read_only \
-  --dry-run \
-  --artifact-dir artifacts/rbpodo_physical_transition/dry_run_read_only
-
-python3 scripts/rbpodo_physical_transition_acceptance.py \
-  --stage tiny_joint \
-  --dry-run \
-  --artifact-dir artifacts/rbpodo_physical_transition/dry_run_tiny_joint
-
-python3 scripts/rbpodo_physical_transition_acceptance.py \
-  --stage tiny_cartesian \
-  --dry-run \
-  --artifact-dir artifacts/rbpodo_physical_transition/dry_run_tiny_cartesian
-
-python3 scripts/generate_rbpodo_physical_transition_report.py \
-  --artifact-dir artifacts/rbpodo_physical_transition
-```
-
-The acceptance script defaults to dry-run. `--execute` validates live gates and
-writes a supervised preflight artifact, but the script itself does not launch
-the servo server or send motion commands.
-
-## Config Policy
-
-Physical transition configs are site-local stage configs, not tracked
-`dual_real*.example.yaml` templates. Start from the current stack config that
-matches the target and copy it under `rb_servo_server/config/local/`:
+Only these launch configs exist:
 
 ```text
+rb_servo_server/config/stack_sim.yaml
 rb_servo_server/config/stack_real.yaml
-rb_servo_server/config/local/<stage-specific-real-config>.yaml
 ```
 
-Every site-local stage config must keep:
+Do not create a stage-specific or `config/local` copy. For an acceptance stage:
 
-```yaml
-servo:
-  send_servo_commands: false
-cartesian_control:
-  allow_in_real: false
-```
+1. Stop the stack.
+2. Change exactly one reviewed setting in the relevant tracked config.
+3. Record `git diff -- <config>` with the artifact.
+4. Run `rb_servo_server --check-config` against that file.
+5. Have the operator review the complete effective diff and physical stage.
+6. Run only the approved stage under supervision.
+7. Restore the reviewed tracked value explicitly and verify the final diff.
 
-Non-dry-run stages require a site-local config under:
+Never use a simulator test or a hidden local YAML as authority for real motion.
 
-```text
-rb_servo_server/config/local/
-```
+## Fixed safety/profile contracts
 
-The operator-owned local config must explicitly opt into the relevant stage.
-Tracked templates that set `servo.send_servo_commands: true` or
-`cartesian_control.allow_in_real: true` are refused by the acceptance script.
-
-## Required Gates
-
-Motion is config-driven, not env-gated — the legacy `RB_ALLOW_REAL_*` /
-`RB_ALLOW_RBPODO_ACK_DISABLED_MOTION` env gates were removed from the server
-runtime. Each stage is enabled by the site-local config under
-`rb_servo_server/config/local/`:
-
-- Read-only physical diagnostics: keep `servo.send_servo_commands: false`,
-  `cartesian_control.allow_in_real: false`.
-- Real joint motion stages: `servo.send_servo_commands: true`.
-- ACK-off motion (site-local rbpodo config disables controller ACK waiting):
-  the config opts into the rbpodo `disable_waiting_ack` arm option.
-- Real Cartesian stages: `cartesian_control.enable: true` +
-  `cartesian_control.allow_in_real: true`.
-
-Motion stages also require:
-
-```text
---i-understand-this-may-move-the-physical-robot
---i-have-clear-workspace
---i-have-estop-in-hand
---i-reviewed-local-config
---i-confirm-operator-supervision
-```
-
-P9 additionally requires:
-
-```text
---i-have-explicit-p9-approval
-```
-
-Dry-run prints the exact gates and flags that would be required, but does not
-require them.
-
-## Refusal Cases
-
-The acceptance script refuses non-dry-run stages when:
-
-- `--config` is missing.
-- The config is not under `rb_servo_server/config/local/`.
-- Any arm is not `backend_type: rbpodo`, `run_mode: real`, and
+- `backend_type: rbpodo`; physical operation uses `run_mode: real` and
   `operation_mode: real`.
-- A read-only/no-motion stage has `servo.send_servo_commands: true`.
-- A motion stage has `servo.send_servo_commands: false`.
-- A Cartesian motion stage does not have site-local
-  `cartesian_control.enable: true` and `cartesian_control.allow_in_real: true`.
-- Required confirmation flags are missing.
-- The config still carries a `force_control` section (removed from the schema).
-- P4 exceeds `--max-joint-delta-deg 0.05`.
-- P5 or later exceeds `--max-cartesian-step-m 0.005`.
-- P9 lacks explicit approval.
+- J3 is `[-150 deg, +150 deg]` in safety, the joint-limit barrier, and IK.
+- The Servo J executor is 500 Hz with `t1=0.002`, `t2=0.021`, `gain=1.0`, and
+  script-level `alpha=10.0` (controller LPF off).
+- Physical real uses worker I/O, per-arm RT scheduling, and queue sync at fill
+  5. `hold_motion_until_track` prevents warmup/drain from overlapping motion.
+- Worker setpoint interpolation is not part of the accepted real profile while
+  the tracked value is `false`; enabling it requires its own hardware A/B.
+- Async URDF-mesh `CollisionMonitor`, ROI, reach, tracking-error latch,
+  lease/deadman, and E-stop remain active. The controller `-2001` carve-out does
+  not replace server collision monitoring.
+- Force-control v2 is live in the tracked real config. Do not remove or retune
+  its measured sensor/tool calibration, gate/spring, TCP pivot/reference, or
+  fences as part of a circle/latency acceptance stage.
+- An untared arm is not force-control-covered. Automatic tare after InitMotion
+  does not remove the operator's empty/unloaded check.
 
-These checks are necessary but not sufficient for physical acceptance.
+## Stage gates
 
-## Measurement Semantics
+### Read-only
 
-Physical real reports must use actual physical state:
+Temporarily set `servo.send_servo_commands: false` in `stack_real.yaml`. Do not
+change the tracked Cartesian or ACK policies for this stage: the server-wide
+send gate is closed, so no Servo J send may occur and neither policy is being
+accepted by the read-only result.
+Verify valid raw joints, J3 inside ±150°, state age, controller mode,
+diagnostics interpretation, and zero Servo J sends.
 
-```yaml
-physical_tracking_result:
-  status: pass|fail|not_run
-  tracking_source: tcp_actual_stand
-controller_reference_result:
-  status: informational_only
-  tracking_source: tcp_ref_stand
-```
+### Joint motion
 
-If an artifact claims `physical_tracking_result.status: pass` with
-`tracking_source: tcp_ref_stand`, the report generator rejects it.
+Requires successful read-only evidence, verified stop procedure, valid state,
+no latch, `servo.send_servo_commands: true`, and an operator-approved bounded
+delta. The target must remain within every joint limit; J3 is never granted an
+acceptance margin beyond ±150°.
 
-Reports must carry:
+### Cartesian motion
 
-- state age and jitter
-- `q_actual` and `q_ref` update rates
-- fault latch status
-- Cartesian availability
-- stop/reset behavior result or unresolved status
-- actual TCP tracking RMS, p95, and max error where applicable
-- physical motion expected and detected fields
-- calibration status, including whether it is measured or configured estimate
+Additionally requires kinematics, current actual TCP, the real Cartesian config
+gate, valid mesh collision verdict, workspace constraints, and a bounded target.
+Every report must record desired versus `tcp_actual_stand`; reference tracking
+may be recorded separately as informational.
 
-## Parameter Policy
+### Fast circle
 
-Any controller-simulation profile is only a seed record. It must not be copied
-directly into physical motion.
+P7–P9 require reviewed artifacts from every earlier stage. P9 is never an
+automatic promotion target and requires separate explicit approval.
 
-Physical defaults remain conservative until accepted:
+## Required artifact fields
 
-- `rate_hz`: use the accepted real Servo J rate, not automatically 500 Hz.
-- `speed_bar`: use a conservative local value.
-- Cartesian max step: tiny and stage-specific.
-- First circle: 5 cm diameter / 10 s period.
+- config path and exact diff;
+- source commit and server build identity;
+- controller firmware/mode and arm endpoint;
+- J3/safety range used;
+- state age, loop/worker/wire timing, ACK semantics, qsync phase/fill;
+- `q_sent`, `q_ref`, and `q_actual` validity;
+- `tcp_actual_stand` tracking metrics for physical Cartesian stages;
+- fault, tracking, workspace, collision, force coverage/tare, and stop results;
+- whether physical motion was expected and observed; and
+- explicit operator/supervision/E-stop confirmation.
 
-The report may compare controller-simulation best parameters with physical
-candidate parameters. It must not mark them promoted until the corresponding
-physical ladder stage passes with `tcp_actual_stand`.
-
-## Artifact Schema
-
-The acceptance script writes `summary.json` with schema
-`robotics_lab.rbpodo_physical_transition.stage.v1`.
-
-Key fields:
-
-```yaml
-stage:
-  id: P0|P1|P2|P3|P4|P5|P6|P7|P8|P9
-  ladder_name: string
-result:
-  status: dry_run|blocked|preflight_pass|pass|fail
-  dry_run: true|false
-  hardware_process_started: false
-  motion_command_sent: false
-  blockers: []
-gates:
-  required_env: []
-  missing_env: []
-  required_confirmation_flags: []
-  missing_confirmation_flags: []
-physical_tracking_result:
-  status: pass|fail|not_run
-  tracking_source: tcp_actual_stand
-  rms_error_m: null
-  p95_error_m: null
-  max_error_m: null
-controller_reference_result:
-  status: informational_only
-  tracking_source: tcp_ref_stand
-telemetry_requirements:
-  state_age_us: {}
-  state_jitter_us: {}
-  q_actual_update_rate_hz: null
-  q_ref_update_rate_hz: null
-  fault_latch_status: not_checked|unresolved|pass|fail
-  cartesian_availability: not_checked|unresolved|available|unavailable
-  stop_reset_behavior_result: not_applicable|unresolved|pass|fail
-  physical_motion_expected: true|false
-  physical_motion_detected: true|false|null
-calibration:
-  status: configured_estimate|measured|unknown
-  measured: true|false
-```
-
-The report generator emits schema
-`robotics_lab.rbpodo_physical_transition.report.v1` and keeps
-`physical_readiness.status=blocked` until P0-P8 have artifact references and
-the source semantics are valid.
+Any missing safety-relevant value is a blocked stage, never a guessed default.

@@ -1,93 +1,60 @@
 # Real Robot Read-Only Runbook
 
-This runbook is the first real-controller stage. It allows state acquisition
-only. It does not approve Servo J motion, Cartesian motion, `rt_script`, force
-control, or collision-threshold changes.
+This is the first physical-controller evidence stage. It connects to the real
+rbpodo endpoints and publishes state, but it must not send Servo J, Cartesian,
+gripper, or force-motion commands. It is not motion readiness by itself.
 
-**Controller `pgmode` simulation PASS is controller-reference lower-bound evidence, not physical TCP tracking.**
+## Config preparation
 
-Read-only evidence is required after controller `pgmode` simulation and before
-tiny physical acceptance. It must not be interpreted as motion readiness by
-itself.
+Use `rb_servo_server/config/stack_real.yaml` directly. Do not make a
+`config/local` copy.
 
-Transition ladder:
+With the stack stopped, change only:
 
-1. Controller pgmode simulation repeatability
-2. Right arm
-3. Dual arm
-4. P0 diagnostics root cause
-5. Real controller read-only
-6. Tiny physical acceptance
-7. Slow physical circle
-8. Fast physical circle only after approval
-
-## Scope
-
-Use this before any rbpodo motion acceptance:
-
-1. Copy a tracked real template to `rb_servo_server/config/local/`.
-2. Keep `servo.send_servo_commands: false`.
-3. Confirm both arms use `backend_type: rbpodo` and `run_mode: real`.
-4. Keep the site-local config read-only: `servo.send_servo_commands: false`,
-   `cartesian_control.allow_in_real: false`.
-5. Verify valid state, low state age, no fault latch, and expected backend.
-
-Real motion is config-driven, not env-gated (the legacy `RB_ALLOW_REAL_*` /
-`RB_ALLOW_RBPODO_ACK_DISABLED_MOTION` env gates were removed from the server
-runtime). Do not opt into any motion config field for this stage — keep
-`servo.send_servo_commands: false`, `cartesian_control.allow_in_real: false`,
-and ACK waiting enabled. Servo J transmission, real Cartesian, and ACK-off
-motion belong to later supervised acceptance stages, not read-only.
-
-## Config Rules
-
-Create a site-local read-only config from the current stack real config and
-keep local real variants under:
-
-```text
-rb_servo_server/config/local/
+```yaml
+servo:
+  send_servo_commands: false
 ```
 
-For rbpodo Servo J parameters, use canonical fields only:
+Leave the tracked Cartesian and ACK settings unchanged: the server-wide send
+gate is closed, so neither setting is exercised or accepted by this result.
+Retain the canonical Servo J fields, and do not change force calibration/law
+values. Record the config diff with the artifact.
 
-- `servo_t1_sec` -> Rainbow `move_servo_j` `t1`
-- `servo_t2_sec` -> Rainbow `move_servo_j` `t2`
-- `servo_gain` -> `gain`
-- `servo_alpha` -> `alpha`
+J3 must remain exactly `[-150 deg, +150 deg]`:
 
-Do not use deprecated aliases in new configs:
+```yaml
+safety:
+  q_min_deg: [-360, -360, -150, -360, -360, -360]
+  q_max_deg: [360, 360, 150, 360, 360, 360]
+```
 
-- `servo_time_sec`
-- `servo_lookahead_sec`
-- `servo_acc`
+Preflight without opening controller sockets:
 
-Servo J range checks in config validation (see
-`docs/servo_backend_contract.md` → "Rbpodo Servo J Parameters"):
+```bash
+rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --check-config --config rb_servo_server/config/stack_real.yaml
+```
 
-- `servo_t1_sec >= 0.002` (refused otherwise; real motion must match `1 / servo.rate_hz`)
-- `0.02 < servo_t2_sec < 0.2` (vendor-recommended; outside → WARN only)
-- `servo_gain > 0`
-- `0 < servo_alpha <= 10` — **script-level** units. The controller scales
-  `gain`/`alpha` by `0.1` internally, so effective `0 < alpha <= 1` maps to
-  script-level `0 < servo_alpha <= 10`. The tracked profile is
-  `servo_alpha: 10.0` (effective `1.0` = controller LPF off) in controller
-  simulation and on physical hardware alike; a filtered `1.0` is still valid
-  input but is not the profile. Earlier revisions of this runbook named `1.0` as
-  the physical-real setting — superseded, see
-  `docs/servo_backend_contract.md` → "Servo J Streaming Profiles".
+Use the freshly built binary path when it differs.
 
-For later motion configs, `servo_t1_sec` must match the supported command
-period:
+## Operator preflight
 
-- 500 Hz -> `servo_t1_sec: 0.002`
+- Both endpoint/IP assignments match the cell.
+- Physical controllers and pendant state are known.
+- Workspace is clear and the E-stop is immediately available even though no
+  motion is expected.
+- `servo.send_servo_commands` is visibly `false` in the recorded diff.
+- No gripper/policy process with independent hardware authority is started.
 
-## Read-Only Command
+## Collection
 
-Example for the left arm 500 Hz ACK-on profile:
+The supervised acceptance helper may start the server against the tracked
+config after its normal real-controller confirmation:
 
 ```bash
 python3 scripts/rbpodo_servo_acceptance.py \
-  --config rb_servo_server/config/local/stack_real_readonly_500hz_ack.yaml \
+  --config rb_servo_server/config/stack_real.yaml \
   --arm left \
   --mode read_only \
   --profile 500hz_ack \
@@ -96,19 +63,25 @@ python3 scripts/rbpodo_servo_acceptance.py \
   --i-understand-this-connects-to-real-controller
 ```
 
-## Evidence To Review
+Repeat the reviewed stage for the other arm and then both arms as required by
+the acceptance plan. Do not convert the same run into motion by editing the
+config while the server is live.
 
-Record these fields before moving to any no-op or motion stage:
+## Pass evidence
 
-- `observed_backend`
-- `state_valid_ratio`
-- `state_age_us`
-- `fault_latched`
-- `error_code`
-- `q_actual`
-- M561/M568/M569/M570 if available
-- absence of Servo J send attempts
+- `observed_backend` is rbpodo and operation mode is physical real.
+- `q_actual_deg`/`q_ref_deg` are finite and raw; J3 stays within ±150°.
+- State age and update rate satisfy the reviewed budget.
+- Startup/fault/diagnostic interpretation is explicit, including the accepted
+  `-2001` unavailable-field policy where configured.
+- `send_policy` is read-only and no Servo J send attempt occurred.
+- No physical or gripper motion occurred.
+- F/T telemetry may be observed, but an untared or read-only arm is not evidence
+  of accepted force motion.
 
-ACK-off profiles may be inspected in read-only mode, but ACK-off motion is not
-approved here. ACK-off success means socket/API send evidence only; controller
-acceptance is not observed unless ACK waiting is enabled.
+ACK-off success is never controller-ACK evidence. Do not change ACK policy in a
+read-only stage.
+
+After collection, stop the server, restore the reviewed tracked setting
+explicitly, and verify the final `git diff`. Do not use a broad checkout/reset
+operation that could discard unrelated user work.

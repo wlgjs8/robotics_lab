@@ -24,7 +24,8 @@ It does not prove:
 - real Cartesian/TCP readiness
 - RealSense readiness
 - gripper readiness
-- force control of any kind (the v1 stack was removed 2026-08-26)
+- physical force-control acceptance, sensor axes/signs, tare quality, contact
+  response, or force/deviation fences
 - measured calibration validity
 
 ## Base Commands
@@ -117,7 +118,7 @@ A hardware-free validation run is useful only when:
 - skipped checks are clearly reported with the missing dependency
 - no real robot IPs are used in mock configs
 - no real robot env gates are required
-- no force control is enabled
+- no physical F/T device or force-motion path is enabled by a mock smoke
 - mock-mode motion primitives stay hardware-free
 
 ## Not A Hardware Acceptance

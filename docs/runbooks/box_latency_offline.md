@@ -31,13 +31,19 @@ What that changes about this procedure:
   minutes.
 - The tracked real profile regulates it. `rb_servo_server/config/stack_real.yaml`
   pins `servo.io_model: worker`, `queue_sync.enable: true`, `target_fill: 5`, and
-  `servo_alpha: 10.0` (controller LPF off, so the server SMD owns all smoothing).
+  `queue_sync.hold_motion_until_track: true`, plus `servo_alpha: 10.0`
+  (controller LPF off, so the server SMD owns all smoothing).
   Measured on that profile: fill locked at 5, stage (a) 7.05 / 7.46 tk, end to
   end **20.0 / 20.9 ms**. The controller-simulation stack (`stack_sim.yaml`)
   does **not** regulate: `io_model: direct`, no `queue_sync`. If those boxes also
   run v8.7.3, MODE=sim latency drifts the same way and is not comparable to
   MODE=real — confirm the VM/box firmware before reading a sim log as a real
   proxy.
+- `servo.worker_setpoint_interpolation` remains `false` in the tracked real
+  stack. The host-loop/box-clock mismatch can therefore overwrite mailbox
+  setpoints; interpolation has implementation and unit-test evidence, but its
+  separate on-robot A/B has not been accepted. Record the worker counters below
+  and do not describe interpolation as active or physically validated.
 - **Safety.** A FIFO means a software stop command queues BEHIND the backlog, so
   the server's fault latch and tracking-error response inherit the queue depth
   (58 ms at 29 ticks; >400 ms after five unregulated minutes). The hardware
@@ -82,6 +88,23 @@ parsed from the drained Servo J ACK text:
 On v8.7.3 that is not context, it is the measurement: stage (a) equals
 `rback_fill + 1`. Logs recorded before these columns existed still analyze, but
 they cannot separate queueing from anything else.
+
+The current CSV also records the worker/mailbox boundary:
+
+```text
+<arm>_worker_pending_overwrites_total
+<arm>_worker_repeated_sends_total
+<arm>_worker_wire_dispatches_total
+<arm>_worker_wire_send_start_ns / _end_ns
+<arm>_worker_interp_active / _delay_setpoints / _rebase_total / _hold_total
+<arm>_state_host_time_ns
+```
+
+Equal consecutive `state_host_time_ns` values are duplicated readback samples,
+not two fresh controller measurements. Their apparent 0-then-2x `q_ref` step
+must not be labeled a physical reference impulse. Use
+`scripts/analyze_smoothness.py` with these counters when comparing mailbox or
+interpolation A/B runs.
 
 Delay is fitted as the tick shift minimising residual RMSE over contiguous
 moving segments, refined to sub-tick resolution by parabolic interpolation.
@@ -257,6 +280,10 @@ one rather than asserted.
 - The `<arm>_rback_*` columns are optional: a log without them still fits lags,
   but on v8.7.3 it cannot separate queueing from transport, which is most of
   what stage (a) is. Prefer re-recording over interpreting such a log.
+- A log without worker accounting and `state_host_time_ns` can still support
+  the basic latency fit, but it cannot attribute skipped setpoints or separate
+  duplicated state readback from a controller impulse. Do not use it to accept
+  worker interpolation.
 - Per-joint fits are reported and only joints with real excitation are used; a
   joint that barely moved is marked unusable rather than fitted.
 - The CSV writes doubles at the stream default of 6 significant digits, so a

@@ -32,7 +32,7 @@ Each side binds its own port; the publisher sends the same combined packet to
 both ports and each reader extracts its side. The JSON packet carries `t`,
 `left`, and `right` blocks with `pose`, `gripper`, and `deadman` fields.
 
-Controller-simulation safety remains config-driven. The server-side local config
+Controller-simulation safety remains config-driven. The tracked server config
 must keep the controller in `operation_mode: simulation`, expose
 `physical_motion_expected=false`, and keep physical real Cartesian disabled with
 `cartesian_control.allow_in_real: false`. This runbook is not physical real

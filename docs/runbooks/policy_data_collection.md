@@ -51,8 +51,9 @@ run writes `rollout_summary`, including decode/missing-camera counts, safety
 decision counts, command send/drop counts, and backend/run_mode/operation_mode
 observed in state.
 
-Physical `real_policy` must remain blocked by default. The exact required gate
-list is:
+The physical `real_policy` lane is open for accepted/validated configurations,
+but no run receives authority from the lane name alone. Every physical rollout
+must satisfy this exact gate list:
 
 - `mode: real`
 - `safety.allow_real_motion: true`
@@ -69,6 +70,7 @@ list is:
 - `measured_gripper_available: true`
 - for nonzero checkpoint gripper channels, `allow_real_gripper_motion: true`
   and `RB_ALLOW_REAL_GRIPPER=1`
+- the server's exact J3 safety range remains `[-150, +150]` degrees
 
 Flow actions are 14D, with per-arm Cartesian channels and separate gripper
 delta channels. The Cartesian action contract is per-step ee_local body-frame

@@ -53,17 +53,29 @@ T_left_tcp_left_ft_sensor
 T_right_tcp_right_ft_sensor
 ```
 
-The F/T sensor frame is still declared in the URDF (`left_ft_sensor` /
-`right_ft_sensor` above) because the hardware is still mounted, but **no server
-code consumes it**. The v1 force stack owned the `T_tcp_sensor` wrench
-transform, the measured `T_tcp_rbpodo_eft` capture, and the runtime
-compliance-frame publication; all three were removed on 2026-08-26.
+The F/T sensor frames are live inputs to force-control v2, but their calibrated
+runtime transform does not come from a fresh interpretation of the URDF. The
+authority is controller-manager's operator-calibrated sensor/tool presets under
+`submodules/controller-manager/platforms/monkey/params-presets/`, copied as one
+reviewed set into `stack_real.yaml`.
 
-The measured capture and the reasoning behind it are preserved audit-only in
-`docs/archive/force_control_v1/force_control.md`. Treat those numbers as v1
-evidence, not as a contract: the `controller-manager`-referenced rebuild starts
-from its own sensor/tool frame definitions, and re-deriving is safer than
-porting a value whose provenance no longer matches the code.
+For each arm the server distinguishes:
+
+- the sensor reference origin (SRO), reached from the flange by
+  `sensor_offset_mm`;
+- the measured sensor basis, whose columns map raw controller channels into the
+  flange-aligned sensor frame;
+- the TCP/contact plane, reached from the SRO by `tool_xyz_mm`; and
+- `applied_force_mm`, the point to which the applied-force wrench is shifted.
+
+On this cell the measured sensor basis is **left-handed** (`det=-1`). That is a
+measured electrical axis mapping, not a rotation-matrix bug. The applied-force
+reference point and force-control compose pivot are both the TCP; moving only
+one creates spurious rotation under a straight push.
+
+The old v1 frame capture is preserved audit-only under
+`docs/archive/force_control_v1/`. It is not a substitute for the current CM
+presets.
 
 ## Mount Orientation Convention
 
@@ -93,6 +105,11 @@ geometry_valid_for_real_policy: false
 ```
 
 `configured_estimate` may be used for visualization and simulator work. It is not measured calibration and must not be used to justify real geometry-dependent policy.
+
+This status describes the general robot/camera/stand registry. It does not
+downgrade the separately operator-measured F/T sensor basis, tool mass/COM, and
+TCP offset used by force-control v2. Conversely, measured force/tool parameters
+do not make camera hand-eye calibration measured.
 
 ## Runtime Source Of Truth
 

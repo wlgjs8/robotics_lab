@@ -159,6 +159,61 @@ config uses cpu1/cpu2 (isolated by `isolcpus=domain,managed_irq,1-3`, carrying
 only kernel threads) with the loop on cpu3. controller-manager hard-pins its own
 arms to cpu1/cpu2, so the two stacks must not drive those cores at once.
 
+## Force/Torque And Force-Control V2
+
+Force-control v2 is live and enabled in the tracked real stack. It was rebuilt
+from controller-manager's calibration and design contracts after v1 was
+removed. The hardware validation on 2026-08-26 measured deviation/F/k ratios
+of 0.97–0.99, 1.85 deg rotation at 55 N, and zero deviation-fence events.
+
+Two loader-enforced invariants are indivisible:
+
+- **Gate and spring ship together.** A nonzero stiffness without the gate can
+  ramp contact force without bound; a gate with zero stiffness bounds force but
+  not deviation.
+- **Wrench reference and compose pivot move together.** Both are the TCP. A
+  wrench shifted to one point must not drive rotation about another.
+
+The force pipeline exposes, per arm, raw sensor axes at the sensing reference
+origin, gravity, compensated sensor/TCP/stand wrenches, bias status, sensor
+liveness, load estimate, tare status, and automatic-tare stage. The force law
+consumes the compensated stand-axis wrench at the TCP. `force_control`
+telemetry exposes coverage and refusal reason, selected `stream`/`hold` law,
+deviation/velocity, gate state, fence saturation, and IK refusal counters.
+
+### Tare contract
+
+An arm without a valid bias is never force-control-covered. Manual GUI tare and
+automatic InitMotion tare share one RT mechanism:
+
+```text
+250 consecutive samples of raw_sensor - tool_gravity -> bias
+```
+
+Never average raw sensor values directly: the box is deliberately configured
+with a zero payload, so raw readings still contain tool gravity and a raw tare
+would subtract gravity twice.
+
+`TareForceSensor` is a leaseless non-motion command. It may select left, right,
+or both arms; omitted selectors mean both. Automatic tare follows this order:
+
+1. A fresh InitMotion request arms the tare and, when
+   `invalidate_on_request: true`, immediately invalidates the old bias.
+2. No samples are collected while the arm is moving.
+3. Sampling becomes eligible only after that arm's init sequencer reports
+   `Done`, the configured `settle_sec` has elapsed, and last-sent joint speed is
+   at or below `max_sent_speed_deg_s`.
+4. The same 250-sample RT tare commits the new bias.
+
+If InitMotion fails, stalls, is cancelled, or is overtaken by a fault, the arm
+remains untared and force control refuses coverage. Config load refuses
+automatic tare without positive settle/speed bounds or without the InitMotion
+planner. State JSON publishes `force_torque.<arm>.auto_tare_stage` and reason;
+the CSV publishes `<side>_ft_auto_tare_stage`.
+
+Automatic tare does not verify that the gripper is empty or that no person is
+touching the wrist. That remains an operator check.
+
 ## ArmWorker Command Policy
 
 Streaming servo requests are latest-wins. If a pending command is overwritten before dispatch, the worker must expose drop/overwrite telemetry. This is intentional for servo targets but must not be silent.
@@ -180,6 +235,15 @@ at arbitrary phase leave about half the ticks drained, and treating that as
 starves the box queue instead of regulating it. A servo stream repeats its last
 value by definition, so the repeat is the correct behaviour and the short
 latency that starvation produces is not a success signal.
+
+`servo.worker_setpoint_interpolation` is the optional worker-side rate
+conversion for the remaining host-loop/box-clock mismatch. When enabled, the
+worker walks a continuous cursor through adjacent loop setpoints using the
+actual queue-sync-adjusted send period. This converts the ~0.13% mismatch into
+uniform time dilation instead of a periodic skipped/double step, at the cost of
+about one setpoint (~2 ms) latency. It is implemented and unit-tested but is
+`false` in `stack_real.yaml` pending its own supervised hardware A/B; do not
+describe it as an accepted real profile.
 
 ## RbpodoBackend Semantics
 
@@ -206,24 +270,31 @@ The backend preserves the raw values in per-arm state JSON under
 `op_stat_soft_estop_occur`, `op_stat_collision_occur`, and
 `op_stat_self_collision`.
 
-The backend does **not** read the controller's external F/T sensor. The v1
-decode of `sdata.eft_fx..eft_mz` into `RobotState.eft_wrench` / `eft_valid`, the
-`eft_wrench` / `eft_valid` / `eft_source` state-JSON fields, the frame-length
-probe (`rbpodoStateFrameIncludesEft`) and the whole `FtWrenchPipeline` were
-removed on 2026-08-26 along with the rest of the force stack; the rebuild starts
-from `controller-manager`'s sensor and tool setup. `RobotState` carries no wrench
-field, so there is nothing for a consumer to read as a stale zero.
+The backend reads the controller's external F/T fields into
+`RobotState.eft_wrench` and marks them with `eft_valid`. Those six values are
+raw controller channels, not yet a canonical wrench. `FtPipeline` applies the
+measured per-arm basis, subtracts tare bias and tool gravity, shifts the wrench
+reference from the sensor reference origin to the TCP, applies the deadzone,
+and rotates the final value into tool/stand axes. Every published wrench key
+names both its axes and reference point.
 
-The `payload_identification` `JointTarget` profile went with it: it identified
-tool mass and centre of mass from wrench samples and cannot work without a
-sensor. `jointTargetProfileFromString` now throws on that string, so a client
-still sending it has its packet rejected at parse rather than silently
-downgraded to a plain `JointTarget`. A command carrying a `force_control` block
-is refused for the same reason.
+The v2 calibration and law authority is `controller-manager`, specifically the
+operator-calibrated sensor/tool presets under
+`submodules/controller-manager/platforms/monkey/params-presets/`. Do not
+re-derive the sensor axes, tool mass/COM, or TCP offset from the URDF. The
+measured sensor basis on this cell is left-handed (`det=-1`); that is an
+accepted measurement rather than an orientation error.
 
-The archived v1 contract, including the gravity-wrench evidence schema and the
-`T_tcp_sensor` transform discussion, is audit-only under
-`docs/archive/force_control_v1/`.
+The old `payload_identification` `JointTarget` profile remains removed. Tool
+mass and COM are calibrated through controller-manager, so sending that profile
+is rejected rather than downgraded. A client command carrying a
+`force_control` object is also rejected, but for a different reason:
+force-control law authority is tracked server config, not a per-command
+override. `force_torque:` and `force_control:` are valid server config sections.
+
+The archived v1 contract is audit-only under
+`docs/archive/force_control_v1/`. It does not override the v2 measured presets,
+frames, config, or telemetry described here.
 
 For rbpodo controller `pgmode` simulation only, configs may opt into
 `servo.controller_simulation_treat_unreliable_status_fields_as_unavailable: true`.
@@ -253,8 +324,8 @@ sets `rbpodo_state_decode_policy` to `real_motion_suspect_diagnostics_accepted`
 unambiguous). It suppresses ONLY those two fields; SOS, EMS, soft-estop,
 `collision_occur`, unknown `real_vs_simulation_mode`, init error, and the explicit
 `op_stat_self_collision == 1` self-collision path all still latch. Because it does
-not trust the controller's self-collision status, operators should pair it with
-the server-side `safety.self_collision` capsule guard.
+not trust the controller's self-collision status, operators must pair it with
+the server-side async URDF-mesh `CollisionMonitor`.
 
 Rainbow Virtual ControlBox controller-simulation targets may permanently
 report `init_error != 0` and `init_state_info != 6` even while accepting
@@ -300,13 +371,14 @@ source of truth. Preserve controller degrees in `q_actual_deg`, `q_target_deg`,
 `q_ref_deg`, `q_sent_deg`, state JSON, and servo logs. Control, safety,
 tracking, and q-ref comparisons must not normalize raw values to `[-180, 180]`.
 The tracked rbpodo real templates use explicit per-joint raw safety arrays
-matching the current controller soft-limit configuration:
-`q_min_deg: [-360, -360, -160, -360, -360, -360]` and
-`q_max_deg: [360, 360, 160, 360, 360, 360]`. The J3 value stays near the
-RB3-730E elbow's catalog `+/-150 deg` range while leaving the current
-site-configured margin. Narrow ranges such as `[-180, 180]` are allowed only for
-intentional tests or site-owned conservative overrides, not as production
-defaults.
+matching the Rainbow controller and URDF limits:
+`q_min_deg: [-360, -360, -150, -360, -360, -360]` and
+`q_max_deg: [360, 360, 150, 360, 360, 360]`. J3 is exactly
+`[-150 deg, +150 deg]` across safety, the joint-limit barrier, PTP, and IK.
+The retired wider margin and a widened J3 are not supported ways to
+handle an unreachable Cartesian target. Narrower ranges may appear only in
+intentional tests or separately reviewed conservative fixtures, not as the
+supported stack profile.
 
 The startup-validation wrapping policy remains diagnostic only. State JSON must
 keep raw `q_actual_deg`, publish any `q_range_wrapped` entries, and may publish
@@ -668,7 +740,7 @@ Responsiveness, smoothness, and accuracy are still primarily owned by the
   joint-space twin of the floor / ROI / self-collision dampers. `q_min_deg` /
   `q_max_deg` default to `safety.q_min_deg` / `q_max_deg` and may only TIGHTEN them;
   brace against the IK model limit. On RB3-730E that is J3 = ±150, which
-  `safety.q_min_deg`/`q_max_deg` now also carries (the ±160 site margin was reverted
+  `safety.q_min_deg`/`q_max_deg` now also carries (the wider site margin was retired
   2026-08-26 — see `docs/joint_range_policy.md`); keep the block explicit rather than
   inheriting, so a future widening of the safety clamp cannot silently move the
   braking point. Config load fails if `d_slow_deg < dq_max²/(2·a_brake)`,
@@ -737,6 +809,10 @@ Contract points:
   `enable: false`), so the controller-simulation lane streams unregulated. Treat
   sim latency as non-comparable to real until that is either brought into parity
   or the pgmode boxes are confirmed to be on a firmware without the FIFO.
+- `queue_sync.hold_motion_until_track: true` in the tracked real stack keeps
+  each arm deceleration-held at its previous sent target and freezes follower
+  plan advance while that arm is in warmup/drain. Hold setpoints continue to
+  flow so qsync can reach track; commanded motion releases only at track.
 - Config validation is fail-closed: `target_fill >= 1` (0 starves the box),
   `protect_fill` in `[0, target_fill)`, `lpf_alpha` in `(0, 1]`, non-negative
   gains, `protect_adj_us <= 0`, `0 < drain_adj_us <= drain_max_us`,
@@ -753,8 +829,13 @@ Contract points:
   tick), `*_worker_wire_dispatches_total`, and
   `*_worker_wire_send_start/end_ns` (the worker's actual dispatch instants —
   the CSV's `left/right_send_start_ns` are LOOP-side enqueue stamps, not wire
-  instants). `scripts/analyze_smoothness.py` turns these plus the geometric
-  `projection_*` columns into a run-to-run smoothness regression report.
+  instants). Interpolation diagnostics add `*_worker_interp_active`,
+  `*_worker_interp_delay_setpoints`, `*_worker_interp_rebase_total`, and
+  `*_worker_interp_hold_total`. `left/right_state_host_time_ns` identifies
+  duplicated state samples whose 0-then-2x `q_ref` readback can resemble a
+  physical reference impulse. `scripts/analyze_smoothness.py` turns these plus
+  the geometric `projection_*` columns into a run-to-run smoothness regression
+  report.
 - **A FIFO queues a software stop behind the backlog.** The hardware E-stop is
   unaffected, but the server's fault latch and tracking-error response inherit
   the queue depth: 58 ms at 29 ticks, over 400 ms after five unregulated minutes.

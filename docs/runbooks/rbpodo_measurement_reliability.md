@@ -45,8 +45,10 @@ sampled fields. It does not prove the raw diagnostic fields are semantically
 valid. If both sides decode a huge invalid status value the result is
 `suspect_but_consistent`, and diagnostics still require investigation.
 
-Physical real motion must not proceed while `diagnostics_suspect` remains
-unresolved.
+Suspect fields must remain visible and explained. The current physical-real
+lane accepts the known `-2001` layout through an explicit tracked-config
+policy; that acceptance is not proof that the raw fields are healthy and does
+not suppress the independent EMS/SOS/soft-E-stop/collision checks.
 
 ## Controller-Simulation Unavailable-Field Policy
 
@@ -58,7 +60,7 @@ servo:
 ```
 
 The option defaults to `false` and is active only when the rbpodo
-controller-simulation motion carve-out is open in the site-local config:
+controller-simulation motion carve-out is open in the tracked `stack_sim.yaml`:
 `run_mode: real`, `backend_type: rbpodo`, `operation_mode: simulation`,
 `servo.allow_controller_simulation_motion: true` (config-driven, no env gate).
 It is not a physical-real decode policy.
@@ -417,8 +419,9 @@ Important caveats:
 - `gene_15cm_4s` stress rows are labeled `IL_data_not_recommended` by default.
   Use stable, clean-timing profiles for imitation-learning data candidates.
 
-Physical real blockers remain until explicitly closed by future acceptance
-work:
+The following blocker names are retained because older reliability artifacts
+used them. They describe that point-in-time report schema, not the current
+project status:
 
 - `diagnostics_suspect_unresolved`
 - `stop_resetFault_unverified`
@@ -426,7 +429,7 @@ work:
 - `camera_tcp_calibration_unresolved`
 - `no_tiny_physical_acceptance`
 
-Required report boundary fields:
+Historical report boundary fields:
 
 ```yaml
 physical_readiness:
@@ -451,7 +454,8 @@ physical_tracking_result:
   status: not_measured
 ```
 
-Transition ladder:
+Historical transition ladder (now completed through the supervised slow
+physical circle; it remains the order for a fresh cell/firmware requalification):
 
 1. Controller pgmode simulation repeatability
 2. Right arm
@@ -469,21 +473,19 @@ Read-only server-start mode:
 ```bash
 python3 scripts/rbpodo_state_parity_check.py \
   --server rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
-  --server-config rb_servo_server/config/local/stack_sim_readonly_measurement.yaml \
+  --server-config rb_servo_server/config/stack_sim.yaml \
   --ips 172.28.60.200 172.28.60.201 \
   --duration-sec 5 \
-  --state-endpoint udp://127.0.0.1:50171 \
+  --state-endpoint udp://127.0.0.1:50356 \
   --artifact-dir artifacts/rbpodo_measurement/state_parity \
   --i-understand-this-connects-to-real-controller
 ```
 
-Create the local config from `rb_servo_server/config/stack_sim.yaml` and keep
-the copy under `rb_servo_server/config/local/`. The local copy uses
-`operation_mode: simulation`, `servo.send_servo_commands: false`, read-only
-unsafe-startup allowances, and measurement-only state fanout on
-`udp://127.0.0.1:50171`. The parity checker refuses any supplied server config
-that does not explicitly set
-`servo.send_servo_commands: false`.
+Do not create a local copy. For server-start parity, change only
+`servo.send_servo_commands` to `false` in the tracked `stack_sim.yaml`, review
+and record the diff, run `--check-config`, collect the parity evidence, then
+restore the reviewed value. The parity checker refuses a supplied server config
+that does not explicitly set `servo.send_servo_commands: false`.
 
 Already-running server mode:
 
@@ -492,7 +494,7 @@ python3 scripts/rbpodo_state_parity_check.py \
   --use-running-server \
   --ips 172.28.60.200 172.28.60.201 \
   --duration-sec 5 \
-  --state-endpoint udp://127.0.0.1:50171 \
+  --state-endpoint udp://127.0.0.1:50356 \
   --artifact-dir artifacts/rbpodo_measurement/state_parity \
   --i-understand-this-connects-to-real-controller
 ```
@@ -520,8 +522,9 @@ Interpretation:
 
 - `passed`: Python and C++ samples agree and diagnostics are not suspect.
 - `suspect_but_consistent`: Python and C++ agree, but the decoded values remain
-  suspect and block motion interpretation. The summary caveats include
-  `diagnostics_suspect_unresolved`.
+  suspect. The summary caveats include `diagnostics_suspect_unresolved`; only a
+  separate, explicit tracked-config acceptance may permit the known unavailable
+  fields, and this parity result alone never does.
 - `failed_transport`: no state packets or Python rbpodo samples could be read.
 - `failed_server_exit`: `rb_servo_server` exited before publishing state; the
   summary includes `server_log_tail`.

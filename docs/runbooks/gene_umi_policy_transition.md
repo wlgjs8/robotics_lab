@@ -2,9 +2,11 @@
 
 This runbook tracks the transition from offline UMI/GENE-style flow-policy
 training to supervised simulator, rbpodo controller `pgmode` simulation, and
-explicitly gated physical `real_policy` rollout. It is not blanket physical
-robot approval: every physical send still requires the `real_policy` gate,
-site-local server motion config, operator supervision, and the hardware E-stop.
+explicitly gated physical `real_policy` rollout. The rollout-mode validation has
+passed for accepted configurations and the lane is open, but this is not blanket
+physical-robot approval: every physical send still requires the `real_policy`
+validation, tracked server motion config, operator supervision, and hardware
+E-stop.
 
 ## Scope And Non-Goals
 
@@ -19,9 +21,10 @@ Scope:
 Non-goals:
 
 - no implicit real RB3-730 motion
-- no force-control promotion
+- no policy-side force-control promotion or change to the server's calibrated
+  force-control v2 profile
 - no gripper or camera-driven physical promotion outside the explicit
-  `real_policy` gate and site-local config
+  `real_policy` validation and tracked real config
 - no replacement of controller-simulation or hardware-free regression evidence
 
 ## Why Controller-Sim Is Not Physical Real Robot Performance
@@ -103,9 +106,9 @@ PYTHONPATH=policy_runner python3 -m policy_runner flow-infer \
 For `controller_sim`, policy dt must come from `--policy-dt-sec` or checkpoint
 `dataset_stats.dt_mean_sec`. For non-offline simulator or read-only modes,
 omitting both means `1 / command_rate_hz`; this fallback is for dry-run and
-summary convenience only. Physical `real_policy` is blocked by default but can
-send when rollout-mode validation, accepted/validated safety attestations,
-gripper gates, and the site-local real server config are all satisfied.
+summary convenience only. Physical `real_policy` can send only when
+rollout-mode validation, accepted/validated safety attestations, gripper gates,
+and the tracked real server config are all satisfied.
 
 ## SpaceMouse -> policy_runner -> rbpodo pgmode simulation -> viser path
 
@@ -155,8 +158,9 @@ silently omit them when reviewing promotion readiness.
 
 ## Physical Promotion Criteria
 
-`real_policy` is blocked by default. A physical rollout may send motion only
-after all of these gates are satisfied:
+The accepted `real_policy` lane is open for configurations that satisfy every
+gate below. A physical rollout may send motion only while all of them remain
+satisfied:
 
 - `mode: real` and `safety.allow_real_motion: true`
 - measured/accepted geometry with `geometry_valid_for_real_policy: true`, or
@@ -173,7 +177,8 @@ after all of these gates are satisfied:
 - measured gripper integration with `measured_gripper_available: true`
 - physical gripper block remains active unless
   `allow_real_gripper_motion: true` and `RB_ALLOW_REAL_GRIPPER=1`
-- the site-local real stack config enables the required server motion paths
+- the tracked real stack config enables the required server motion paths
+- J3 remains within the exact Rainbow/URDF safety range `[-150, +150]` degrees
 
 Flow checkpoints are 14D: each arm has six Cartesian channels plus one gripper
 channel. In `controller_sim`, gripper commands may be forwarded to the sim

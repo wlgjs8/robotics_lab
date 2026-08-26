@@ -15,7 +15,7 @@ The supported rbpodo profile is:
 
 | Profile | Template | Rate | `servo_t1_sec` | ACK policy | Command/state endpoints | Default motion |
 | --- | --- | ---: | ---: | --- | --- | --- |
-| `500hz_ack` | site-local copy derived from `rb_servo_server/config/stack_real.yaml` or `stack_sim.yaml` | 500 Hz | 0.002 s | ACK-on | site-local | disabled for read-only stages |
+| `500hz_ack` | the applicable tracked stack with ACK waiting explicitly restored for the send stage | 500 Hz | 0.002 s | ACK-on | tracked config | disabled only during an explicit read-only stage |
 
 `servo_t1_sec` must match the supported command period: 0.002 s at 500 Hz.
 
@@ -76,7 +76,7 @@ log must be interpreted using:
 - `send_acceptance_semantics`
 - `ack_wait_duration_us`
 
-ACK-off real motion is config-driven (the site-local config must opt into
+ACK-off real motion is config-driven (the tracked real stack must opt into
 disabling controller ACK waiting via the rbpodo `disable_waiting_ack` arm
 option); the legacy `RB_ALLOW_RBPODO_ACK_DISABLED_MOTION` env gate was removed
 from the server runtime.
@@ -84,6 +84,12 @@ from the server runtime.
 ACK-off settings are not a real baseline until ACK-off acceptance passes.
 They require stronger monitoring because immediate controller rejection is not
 observed.
+
+Both tracked stacks currently declare `disable_waiting_ack: true`. That makes
+their send result socket/API evidence only; the presence of the setting is not
+ACK-off motion acceptance. Any ACK-on command-sending stage must change the
+applicable tracked arm settings to `false` as its own reviewed config change,
+preflight the result, collect evidence, and restore the prior value.
 
 ## Config Gates
 
@@ -102,7 +108,7 @@ operator supervision, and the hardware E-stop:
   + `servo.allow_controller_simulation_motion: true`; the acceptance tool
   confirms the controller `pgmode` simulation state for the same run via
   `--set-pgmode-simulation`/`--verify-pgmode-simulation` rather than an env var.
-- ACK-off real joint Servo J motion: the site-local config opts into the rbpodo
+- ACK-off real joint Servo J motion: the tracked real stack opts into the rbpodo
   `disable_waiting_ack` arm option.
 
 The temporary diagnostics-suspect bridge for controller simulation requires the
@@ -116,8 +122,13 @@ simulation`, known rbpodo suspicious status layouts, finite joint state, no
 range violation, no explicit E-stop/SOS/soft E-stop/collision fault, and a
 confirmed controller `pgmode` simulation run.
 
-Real Cartesian/TCP motion is out of scope for this runbook; keep
-`cartesian_control.allow_in_real: false` in the site-local config.
+Real Cartesian/TCP motion is out of scope for this runbook. Do not infer
+Cartesian acceptance from a Servo J result and do not change the tracked
+Cartesian setting as part of this procedure.
+
+The tracked safety range is exact for J3: `q_min_deg[2]: -150` and
+`q_max_deg[2]: 150`. This Rainbow/URDF limit applies to startup validation,
+targets, and future acceptance profiles; do not widen it for bring-up.
 
 ## Required Staging
 
@@ -145,21 +156,22 @@ There are exactly two stack configs and acceptance uses them directly:
 every relative path (`kinematics.urdf`, `unified_urdf`, `package_dirs`), and the
 effective runtime profile stops being visible in the diff.
 
-For read-only acceptance, change the one setting in the tracked config, run, and
-revert it:
+For read-only acceptance, change only `servo.send_servo_commands` in the
+tracked config, review the diff, run, and restore that line to its reviewed
+value immediately afterwards:
 
 ```bash
 # in rb_servo_server/config/stack_real.yaml
 #   servo.send_servo_commands: false      <- read-only acceptance
 git diff rb_servo_server/config/stack_real.yaml   # the profile under test, reviewable
 # ... run the acceptance ...
-git checkout rb_servo_server/config/stack_real.yaml
+# restore servo.send_servo_commands to its pre-run value, then review the diff again
 ```
 
 Record the diff alongside the acceptance artifacts: the diff IS the statement of
 what was under test.
 
-For controller bring-up diagnostics, the ACK-on read-only examples enable:
+For controller bring-up diagnostics, the read-only examples enable:
 
 ```yaml
 servo:
@@ -186,11 +198,10 @@ near `-317 deg` with range `[-190, 190]` and period `360` is equivalent to about
 `43 deg` for startup range diagnostics. Motion target wrapping remains disabled
 to avoid discontinuities.
 
-Controller-simulation no-op acceptance is separate from the read-only template.
-Use an artifact-local or site-local 500 Hz controller-simulation config only
-after controller `pgmode` simulation has been verified by the acceptance tool
-and the site-local config explicitly opts into controller-simulation motion. The
-local copy must explicitly set:
+Controller-simulation no-op acceptance is separate from the read-only stage.
+Use the tracked 500 Hz `stack_sim.yaml` only after controller `pgmode`
+simulation has been verified by the acceptance tool. The tracked config must
+explicitly set:
 
 ```yaml
 servo:
@@ -199,7 +210,7 @@ servo:
 ```
 
 Set `allow_controller_simulation_diagnostics_suspect: true` only for the
-temporary diagnostics-suspect bridge described above. These files intentionally
+temporary diagnostics-suspect bridge described above. These settings intentionally
 send Servo J to the controller box, but they are still not physical motion
 acceptance configs and do not approve ACK-off or Cartesian motion.
 
@@ -224,8 +235,8 @@ read-only rbpodo dump:
 ```bash
 python3 scripts/rbpodo_state_dump.py \
   --ips 172.28.60.200 172.28.60.201 \
-  --q-min=-170,-120,-170,-190,-120,-360 \
-  --q-max=170,120,170,190,120,360 \
+  --q-min=-360,-360,-150,-360,-360,-360 \
+  --q-max=360,360,150,360,360,360 \
   --wrap-period-deg=0,0,0,360,0,360 \
   --output artifacts/rbpodo_acceptance/state_dump.json \
   --pretty \
@@ -260,7 +271,7 @@ python3 scripts/rbpodo_servo_acceptance.py \
   --i-understand-this-connects-to-real-controller
 ```
 
-The local config must remain 500 Hz with `servo_t1_sec: 0.002` on both arms.
+The tracked config must remain 500 Hz with `servo_t1_sec: 0.002` on both arms.
 
 ## Artifacts
 
@@ -299,8 +310,9 @@ For read-only promotion, require:
 `op_stat_collision_occur`, and `op_stat_self_collision`. If a status flag that
 is expected to be boolean appears as a large value, or if controller `time` is
 non-finite/implausibly tiny, the state should show
-`diagnostics_suspect: true`. That is useful bring-up evidence, not a
-motion-ready condition.
+`diagnostics_suspect: true`. That remains visible evidence. Physical motion may
+proceed only under the tracked, explicitly reviewed suspect-diagnostics
+acceptance policy; the status must never be silently treated as healthy.
 
 For ACK-on send tests, `controller_acceptance_observed_count` is the key count.
 For ACK-off send tests, `send_success_count` must be treated as socket/API send
@@ -324,5 +336,8 @@ Record and compare at least:
 ## Safety Policy
 
 Do not run real motion unattended. Do not use `rt_script`. Do not change
-collision thresholds or undocumented controller settings. Keep
-`cartesian_control.allow_in_real: false` for this runbook.
+collision thresholds, J3 limits, force-control calibration, or undocumented
+controller settings. The tracked real stack currently uses per-arm workers,
+`queue_sync`, and `hold_motion_until_track`; preserve that profile. Worker-side
+setpoint interpolation remains disabled pending its separate on-robot A/B and
+must not be promoted by this runbook.

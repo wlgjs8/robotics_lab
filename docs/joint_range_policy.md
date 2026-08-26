@@ -35,9 +35,9 @@ uses the same `+/-150 deg` limit, so the raw safety clamp and the kinematic mode
 agree and there is no band where one permits what the other refuses.
 The other joints stay at the broad `+/-360` raw controller range.
 
-**History (2026-08-26): the `+/-160 deg` site margin was REVERTED.** From 2026-07
-these arrays carried `+/-160` on J3 as an "operational margin" around the catalog
-value. That margin was not usable range — it was a trap. `JointTarget` /
+**History (2026-08-26): the wider site margin was retired.** For part of 2026-07
+these arrays carried a J3 margin outside the catalog value. That margin was not
+usable range — it was a trap. `JointTarget` /
 `InitMotion` PTP bypass IK and pass only this clamp, so they could park the elbow
 inside the `150..160 deg` band; every subsequent Cartesian tick was then refused
 by IK, which is model-limited to `+/-150` and (per the URDF comment) must stay
@@ -54,8 +54,17 @@ silent branch jump — do not do it. Move the commanded pose instead.
 
 Tracked rbpodo stack configs (`rb_servo_server/config/stack_real.yaml` and
 `rb_servo_server/config/stack_sim.yaml`) must carry these arrays explicitly.
-The tracked stack values may be changed only after confirming the active
-controller soft limits and the physical setup.
+The tracked J3 values are fixed to the Rainbow/URDF `+/-150 deg` range. Do not
+widen them through a site profile or acceptance-stage edit. Changes to other
+joint limits still require confirmation of controller soft limits and the
+physical setup.
+
+The checked-out `controller-manager` submodule currently carries a separate
+RB3 model value of `+/-155 deg`. That value is not an accepted J3 source for
+`robotics_lab` and must not be copied into its stack, safety, IK, tests, or
+runbooks. Aligning the submodule itself requires a separately reviewed
+controller-manager config change; until then the robotics_lab boundary remains
+the narrower Rainbow/URDF `+/-150 deg` value.
 
 `[-180, 180]` is not a supported production rbpodo default. It may appear only
 in tests or diagnostic fixtures that intentionally prove range-violation

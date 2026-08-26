@@ -1,66 +1,51 @@
 # Testing
 
-Build and run the safety policy tests:
+The repository-wide hardware-free contract is
+[../../docs/hardware_free_validation.md](../../docs/hardware_free_validation.md).
+
+## C++ gate
 
 ```bash
-cmake -S . -B build
-cmake --build build -j
-ctest --test-dir build --output-on-failure
+cmake -S rb_servo_server -B rb_servo_server/build
+cmake --build rb_servo_server/build -j
+ctest --test-dir rb_servo_server/build --output-on-failure
 ```
 
-Mock smoke test, when a site-local mock config exists:
+Eigen3 and Pinocchio are mandatory. A missing dependency or skipped C++ build
+is not acceptance evidence.
+
+## Config preflight
+
+The server can validate a tracked config without connecting to hardware:
 
 ```bash
-./build/rb_servo_server --config config/local/<mock-config>.yaml
-python3 tools/send_dual_joint_sine.py --rate 30 --amp-deg 2 --freq 0.2
+rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --check-config --config rb_servo_server/config/stack_real.yaml
+
+rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --check-config --config rb_servo_server/config/stack_sim.yaml
 ```
 
-The sine tool sends `ArmMotion` before its first `JointTarget` and waits briefly by default so a one-slot command receiver cannot lose the arm transition. The C++ `CommandBuffer` also preserves lifecycle commands separately from latest motion targets.
+Use whichever freshly built server path the repository build produced. A
+preflight validates schema and fail-closed relationships; it does not validate
+controllers, sensors, scheduling, force response, or physical motion.
 
-The smoke is meaningful only if `logs/servo_log.csv` shows `JointTarget`, `Running`, and non-trivial sent joint motion. After `EmergencyStop` and `ResetFault`, send `ArmMotion` again before motion targets.
+## Mock smoke
 
-The CSV should also contain send timing columns:
+No third tracked launch config exists. If a mock smoke is required, create an
+explicit temporary YAML outside the repository (prefer a `mktemp -d` path), run
+the server against it, and record the state/CSV artifact. Do not place mock or
+real variants under `config/local`.
 
-- `left_send_start_ns`, `left_send_end_ns`
-- `right_send_start_ns`, `right_send_end_ns`
-- `send_skew_us`
-- `left_send_duration_us`, `right_send_duration_us`
+The smoke must preserve the supported J3 range `[-150 deg, +150 deg]`, must not
+use real controller IPs, and must not enable a physical F/T or real-motion path.
 
-Use these columns as measurement evidence before changing the sender
-architecture or attempting simulator/real bring-up.
+## Evidence boundary
 
-Full milestone budget checks use the stdlib analyzer:
+Hardware-free tests can exercise force-pipeline/law logic and automatic-tare
+state machines, but cannot validate the measured sensor basis, tare quality,
+contact response, or fences. Worker interpolation is unit-tested but remains a
+separate supervised hardware A/B before it can become the tracked real profile.
 
-```bash
-python3 tools/analyze_servo_log.py --profile mock200 logs/servo_log.csv
-```
-
-`mock200` expects a 60 s, 200 Hz mock run. The analyzer
-fails closed on missing send/timing/joint columns, malformed send timestamps,
-dropped samples, send failures, bad duration/rate/jitter/skew/send-duration
-budgets, and tracking error above 2 deg.
-
-The mock analyzer profile validates only the hardware-free mock +
-rb_servo_server loopback logs. It does not prove Rainbow external simulator
-timing, network/host scheduling readiness, or real robot timing acceptance;
-those remain separate human-gated hardware tasks.
-
-## Hardware-free path
-
-Hardware-free testing uses C++/Python unit tests plus an explicit local mock
-config when mock-mode smoke is needed. Cartesian behavior is validated against
-Pinocchio-backed C++ tests and active-stack smoke. Controller-level simulation
-uses the rbpodo controller `pgmode` simulation (`make run MODE=sim`) or the
-Rainbow virtual control-box VMs. The old software-simulator-oriented Cartesian
-acceptance runner is no longer part of this validation surface.
-
-This path does not validate Rainbow Robotics external simulator/OVA, real robot
-motion, realtime scheduling acceptance, privileged Docker, broad network
-exposure, or credentialed operations.
-
-## Out-of-scope hardware gates
-
-Real-mode startup, Rainbow Robotics external simulator/OVA validation,
-`rbpodo` validation, privileged Docker, host networking, broad network
-exposure, and hardware-facing sender tools are intentionally outside this
-hardware-free test phase. Keep those under separate human-gated runbooks.
+Real/controller-simulation acceptance uses the supervised runbooks. Passing
+this page's checks is never permission to move hardware.

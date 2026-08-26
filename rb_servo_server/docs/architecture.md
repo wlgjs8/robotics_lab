@@ -1,97 +1,52 @@
-# Architecture
+# rb_servo_server Architecture
 
-`rb_servo_server` is a low-level dual-arm command server.
+The normative system architecture is [../../docs/architecture.md](../../docs/architecture.md),
+and the detailed control/backend contract is
+[../../docs/servo_backend_contract.md](../../docs/servo_backend_contract.md).
+This page keeps only the server-local ownership summary.
 
-It is not the VLA model, not the RealSense recorder, and not the high-level bimanual planner. Its job is to receive the latest command and push safe joint targets to two Rainbow arms at a stable servo rate.
-
-## Main process
-
-```text
-Python policy / teleop
-  500 Hz UDP JSON command stream
-        ↓
-CommandServer
-        ↓
-CommandBuffer
-        ↓
-DualArmServoLoop
-  500 Hz supported robot-control loop
-        ↓
-IRobotBackend
-  MockBackend / RbpodoBackend
-```
-
-## Backend abstraction
-
-`IRobotBackend` keeps real/simulation/mock separated from the servo loop.
+## Runtime ownership
 
 ```text
-IRobotBackend
-  ├── MockBackend for backend_type=mock
-  └── RbpodoBackend for backend_type=rbpodo
+CommandServer / CommandBuffer
+  -> DualArmServoLoop
+       -> left ArmWorker  -> left IRobotBackend
+       -> right ArmWorker -> right IRobotBackend
 ```
 
-The policy process should not know whether the backend is mock or real.
+`DualArmServoLoop` owns command freshness and lease interpretation, lifecycle,
+followers, FK/IK, safety planning/filtering, force overlay, fault aggregation,
+logging samples, and state snapshots. `ArmWorker` owns blocking per-arm backend
+I/O; in the tracked real profile it also owns that arm's queue-synchronized send
+cadence on an isolated RT CPU.
 
-## Current active command path
+The supported high-rate profile is 500 Hz. `stack_real.yaml` uses worker I/O,
+per-arm `SCHED_FIFO` scheduling, and firmware-v8.7.3 queue regulation.
+`stack_sim.yaml` uses direct I/O and no queue regulation. Optional worker
+setpoint interpolation is implemented but remains disabled in the tracked real
+profile pending a supervised hardware A/B.
+
+## Motion and force paths
 
 ```text
-JointTarget / Hold
-        ↓
-TrajectoryFilter
-        ↓
-SafetyFilter
-        ↓
-sendServoJ
+JointTarget / TcpPoseTarget / TcpLinearMove
+  -> nominal joint/TCP target and follower plan
+  -> server-owned force gate + admittance deviation, when the arm is covered
+  -> Pinocchio IK, when Cartesian
+  -> mode-independent joint/workspace/collision safety
+  -> per-arm backend send
 ```
 
-## Future Cartesian path
+Force-control v2 is live. It reads raw controller F/T channels, applies the
+controller-manager-derived sensor/tool calibration and tare/gravity
+compensation, and publishes per-arm `force_torque`/`force_control` telemetry.
+An arm without a valid tare bias is not covered.
 
-```text
-TcpPoseTarget / TcpLinearMove
-        ↓
-CartesianController
-        ↓
-IK
-        ↓
-TrajectoryFilter
-        ↓
-SafetyFilter
-        ↓
-sendServoJ
-```
+J3 is fixed to the Rainbow/URDF range `[-150 deg, +150 deg]` in safety, the
+joint-limit barrier, and IK.
 
-## Default-off force-control path
+## Process boundaries
 
-```text
-nominal TCP target
-        ↓
-(force control removed 2026-08-26; CM-referenced rebuild pending)
-        ↓
-TCP compensation
-        ↓
-IK
-        ↓
-sendServoJ
-```
-
-Force control is disabled in tracked configs. Site-local activation follows the
-staged sensor/frame/sign/threshold acceptance runbook and remains subordinate to
-the final joint safety gate.
-
-## Camera architecture
-
-RealSense capture remains outside this process.
-
-```text
-camera_recorder process
-  head RealSense
-  left wrist RealSense
-  right wrist RealSense
-        ↓
-image timestamps + metadata
-        ↓
-dataset_builder merges with servo_log.csv
-```
-
-This prevents USB/camera blocking from affecting servo-loop jitter.
+Camera capture, image transport, policy inference, and the browser UI remain in
+their own processes. They consume server state or send public commands; they do
+not read backends directly or own the real-motion safety decision.

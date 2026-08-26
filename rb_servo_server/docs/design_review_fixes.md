@@ -1,5 +1,10 @@
 # Design Review Fixes Applied in v3
 
+> Historical implementation record. Its milestone/pending statements are not
+> current runtime guidance. Use `rb_servo_server/README.md`,
+> `docs/architecture.md`, `docs/control_loop.md`, and
+> `docs/fail_safe_policy.md`; force-control v2 is now live.
+
 This document records concrete fixes after the v1/v2 design reviews.
 
 ## v2 fixes retained

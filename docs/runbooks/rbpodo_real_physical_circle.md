@@ -1,170 +1,122 @@
-# Runbook: dual RB3-730E physical real Cartesian circle (pgmode-real)
+# Dual RB3-730E Physical Cartesian Circle
 
-> ⚠️ **PHYSICAL MOTION.** `operation_mode: real` means the arms physically move. A person
-> must hold the E-stop, the workspace must be clear, and both controllers must be set to
-> **real** on the teach pendant. This runbook deliberately runs with the **policy-side
-> real-motion safety gates removed** (PR #13) and the **controller `-2001` diagnostics
-> accepted** (PR #12) — `rb_servo_server` is the **sole** real-motion safety layer.
+This page preserves the accepted slow dual-arm physical-circle evidence and
+states the requirements for a current rerun. It is not a standalone motion
+authorization or a copy-and-paste launch recipe.
 
-## What this runs
+> **Physical motion:** a rerun requires an operator holding the E-stop, a clear
+> workspace, both controllers deliberately placed in `pgmode real`, and the
+> tracked real stack reviewed immediately before launch. Simulator acceptance
+> is never permission to move hardware.
 
-A slow Cartesian circle traced by both arms:
+## Status
 
-```
-synthetic UMI sender ─UDP→ policy_runner (umi_dual_cartesian, relative-init)
-  ─TcpPoseTarget→ rb_servo_server (real rbpodo) ─servo_j 500Hz→ physical RB3-730E arms
-                                  └─state→ viser (live viewer)
-```
+The slow circle has run successfully on both physical RB3-730E arms under
+operator supervision. That result established the real Cartesian bring-up
+milestone; it does not transfer automatically to a changed firmware, Servo J
+profile, collision model, force profile, or command source.
 
-## Safety architecture (which real-motion gates were removed, and what remains)
+The accepted data path was:
 
-- **Server (PR #12)** — `servo.allow_real_motion_with_suspect_diagnostics: true` accepts the
-  vendor `-2001` (`op_stat_self_collision` / `robot_time` field-layout garbage) in real mode.
-  EMS / SOS / soft-estop / `collision_occur` / unknown-mode / init-error still latch.
-- **Policy (PR #13)** — the `SafetyGate` no longer blocks real Cartesian motion.
-  Readiness checks still reject stale state, faults, missing camera/kinematics,
-  and invalid TCP state where required. Controller-simulation safety is unchanged.
-- **Server decision layer**: `cartesian_control.allow_in_real: true` (site-local config),
-  `speed`/`step` clamps, `max_tracking_error_deg=10` **fault-latch**, `dq`/`ddq` limits, and the
-  **URDF-capsule self-collision guard** (`clamp_to_hold`). The controller's own self-collision
-  status is NOT trusted (see Known issues).
-
-## Prerequisites
-
-1. Controllers `.200` (left) / `.201` (right) set to **real** on the teach pendant; EMS/SOS/
-   soft-estop clear; servo on; brakes released.
-2. Workspace clear; **E-stop in hand**.
-3. Build present: `rb_servo_server/build/rbpodo_real_gate/rb_servo_server` (configured with
-   `RB_SERVO_ENABLE_RBPODO:BOOL=ON`).
-4. Local config: `rb_servo_server/config/local/stack_real_PHYSICAL_circle_lowspeed.yaml`
-   (gitignored, site-local; key values in **Config** below).
-
-## Required config (server is run as root for RT priority)
-
-Real motion is **config-driven, not env-gated** — the legacy `RB_ALLOW_REAL_*` /
-`RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION` env gates were removed from the server runtime.
-The site-local config below enables it explicitly:
-
-```yaml
-cartesian_control: { allow_in_real: true }
-servo: { allow_real_motion_with_suspect_diagnostics: true }   # accepts the -2001 suspect diagnostics in real
+```text
+UMI-style Cartesian source
+  -> policy_runner (`TcpPoseTarget`, ee-local delta composed to absolute pose)
+  -> rb_servo_server
+  -> rbpodo Servo J at 500 Hz
+  -> physical left/right RB3-730E
 ```
 
-(The controller-simulation carve-out `cartesian_control.allow_in_controller_simulation` /
-`servo.allow_controller_simulation_motion` is **not** used here.)
+The point-in-time tuning result was approximately 1.42 deg median joint
+tracking error with a slow 5 cm-radius, 25 s/revolution target. That run used an
+older TUNED-1 profile (`servo_alpha: 0.8`, direct synchronous sending) before
+the current firmware-v8.7.3 worker/queue synchronization profile. Treat the
+number only as historical evidence; do not copy the old parameters into the
+current stack.
 
-## Config (key values — TUNED-1, anti-tremble)
+## Current Source of Truth
 
-> **Profile note (2026-08-26).** This block records the TUNED-1 acceptance run as
-> it was performed. It predates both the fixed transparent-executor profile
-> (`servo_alpha: 10.0`, controller LPF off) and control-box firmware **v8.7.3**,
-> whose FIFO makes box latency equal to queue depth. The tracked stack today runs
-> `servo_alpha: 10.0`, `servo.io_model: worker`, and `queue_sync.enable: true`.
-> Re-running this acceptance on the current profile is a re-measurement, not a
-> copy: the ~1.42 deg result below is not transferable across that change. See
-> `docs/servo_backend_contract.md` → "Servo J Streaming Profiles" and
-> "Control-Box Command Queue (firmware v8.7.3)".
+Use only:
 
-```yaml
-left_robot / right_robot:
-  operation_mode: real
-  servo_gain: 1.0          # do NOT lower — 0.5 caused ~5deg following lag + a right-servo deactivation latch
-  servo_alpha: 0.8
-  servo_t1_sec: 0.002
-  speed_bar: 0.05          # NOTE: inert for servo_j (see Known issues); not a real speed cap
-servo:
-  allow_real_motion_with_suspect_diagnostics: true
-  rbpodo_async_streaming.enable: false   # async streaming is controller-sim only; real uses synchronous direct send
-safety:
-  tracking_error_policy: fault_latch
-  max_tracking_error_deg: 10.0
-  dq_max_deg_s: [30,30,30,45,45,60]      # halved vs sim profile
-  self_collision: { enable: true, margin_m: 0.05, fail_policy: clamp_to_hold }
-cartesian_control:
-  allow_in_real: true
-  allow_in_controller_simulation: false
-  path_kp_pos: 3.0                       # anti-tremble (was 6.0)
-  path_kp_ori: 3.0                       # anti-tremble
-  velocity_damping: 0.04                 # anti-tremble (was 0.01) — biggest lever
-  max_cartesian_step_m: 0.001
-```
+- `rb_servo_server/config/stack_real.yaml`
+- `policy_runner/config/stack_real.yaml`
+- [pgmode-real transition ladder](pgmode_real_transition.md)
+- [Servo/backend contract](../servo_backend_contract.md)
+- [Joint-range policy](../joint_range_policy.md)
 
-## Launch (staged — verify each step before the next)
+Do not create `config/local` variants. A current physical-circle rerun is a new
+acceptance run against the reviewed tracked files, with its own artifacts.
 
-### 1. viser (state viewer; loads the rb3_730e URDF incl. the Pika gripper)
+## Current Safety Boundary
 
-```bash
-cd robotics_lab
-PYTHONPATH=rb_gui RB_GUI_DESCRIPTIONS_DIR="$PWD/rb_servo_server/descriptions" \
-  RB_GUI_STATE_BIND=0.0.0.0 RB_GUI_STATE_PORT=50366 RB_GUI_CIRCLE_OVERLAY_BIND=none \
-  python3 -m rb_servo_gui.app
-# → open http://<host>:8080
-```
+`rb_servo_server` owns the final allow/deny decision. The policy-side blanket
+real-Cartesian block was retired; readiness checks still reject stale or
+faulted state, and the server continues to enforce command-source lease,
+deadman/freshness where applicable, finite/range checks, velocity and
+acceleration filtering, tracking-error fault latching, stand-floor safety, and
+the asynchronous URDF-mesh `CollisionMonitor`.
 
-### 2. server (root, real env) — Hold first, no motion yet
+The controller `-2001` suspect fields remain visible and are accepted only by
+the explicit tracked real-config policy. They are not silently reclassified as
+healthy. EMS, SOS, soft E-stop, collision, unknown controller mode, invalid
+state, and initialization errors remain stop conditions.
 
-```bash
-cd robotics_lab
-SUDO_ASKPASS=/path/to/askpass sudo -A env \
-	  rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
-	  --config rb_servo_server/config/local/stack_real_PHYSICAL_circle_lowspeed.yaml
-```
+J3 is exactly `[-150, +150]` degrees for both arms. The value matches the
+Rainbow/URDF contract and applies to all future safety, planning, and
+acceptance use; never widen it to recover a trajectory.
 
-Wait for `CommandServer listening on udp://127.0.0.1:50256`, then **verify (still no motion):**
-`controller_mode=real`, `motion_state=ConnectedHold`, `fault_latched=false`, per-arm
-`rbpodo_state_decode_policy=real_motion_suspect_diagnostics_accepted`, and
-`cartesian_gate.operation_mode=real`. The arm should hold rock-stable (q_actual unchanged).
+The tracked real stack also includes the calibrated force-control v2 sections.
+Their calibration is owned by controller-manager. A Cartesian-circle run is
+not force acceptance: do not retune the sensor basis, tool mass/COM, TCP pivot,
+gate/spring pair, or tare policy, and do not enter a force-motion mode as part
+of this runbook.
 
-### 3. policy (existing pgmode config works in real after PR #13)
+## Current Servo Profile
 
-```bash
-cd robotics_lab
-PYTHONPATH=policy_runner \
-  python3 -u -m policy_runner --config policy_runner/config/stack_real.yaml \
-    --action-source umi_dual_cartesian
-```
+Review the effective tracked values rather than transcribing them here. At the
+time of this update the important boundaries are:
 
-### 4. motion source — the slow circle (or the real UMI publisher)
+- 500 Hz with `servo_t1_sec: 0.002`
+- per-arm worker I/O and real-time scheduling
+- firmware-v8.7.3 `queue_sync` enabled with motion held until tracking
+- controller LPF off under the tracked `servo_alpha` profile
+- worker-side setpoint interpolation disabled pending a separate on-robot A/B
 
-```bash
-python3 /tmp/umi_synth_sender_slow.py   # 5cm radius, 25s/rev, 120 Hz, deadman held, 600s
-```
+The queue synchronization and mailbox/interpolation changes have unit-test and
+offline evidence, but the pending interpolation A/B must not be described as
+physical acceptance.
 
-(For real UMI hardware, run the `.40` SteamVR publisher → `:50380/:50381` instead of the synthetic sender.)
+## Rerun Sequence
 
-## Monitor (in viser + state on udp://127.0.0.1:50356)
+1. Review the clean diff and both tracked stack configs. Validate the real
+   config with the rbpodo-enabled server binary's `--check-config` mode.
+2. Complete the read-only and Hold stages in
+   [pgmode-real transition](pgmode_real_transition.md). Confirm both controller
+   identities, real/simulation mode, finite joint state, J3 range, force/tare
+   telemetry, collision-monitor health, and no latched fault.
+3. Confirm the intended command source exclusively owns the lease. Verify the
+   policy configuration and any camera/gripper gates independently.
+4. Run a no-op or tiny supervised Cartesian target before the circle. Stop on
+   any unexpected motion, tracking growth, queue-sync loss, stale state,
+   collision-monitor fault, or force-control coverage change.
+5. Run the slow circle only after the smaller stages pass in the same session.
+   Preserve the exact config diff, logs, state stream, controller/firmware
+   identity, and operator notes.
+6. Stop the command source first, then the policy and server according to the
+   supervised stack procedure. Verify the arms hold and no new fault is hidden.
 
-- `fault_latched` stays **false**; `motion_state=Running`; `command_source.source_id=policy_runner`.
-- `q_actual` follows `q_sent` within ~1.5–2° (well under the 10° tracking-error latch).
-- A latch is a **safe stop** (arms hold). Read the reason; to resume, restart the server (its
-  initialize re-activates the servo). If the right servo stays off, re-enable it on the pendant.
+## Evidence to Record
 
-## Stop
+- commit and full tracked-config diff
+- controller IP, identity, firmware, and `pgmode`
+- `q_sent`, `q_ref`, `q_actual`, tracking-error maxima, and fault timeline
+- RBACK fill and per-arm queue-sync phase/lock evidence
+- worker mailbox/interpolation counters, including duplicated-readback evidence
+- Cartesian target/actual traces and collision-monitor status
+- force-control coverage, tare stage/validity, and confirmation that no
+  force-motion mode was entered
+- stop reason and operator/E-stop notes
 
-Stop the synth → policy → server (SIGTERM, graceful → arms hold under the controller brake).
-Keep viser running.
-
-## Tuning notes (trembling)
-
-| Profile | path_kp / damping / synth | wrist q_actual HF | tracking (median) | result |
-|---|---|---|---|---|
-| Baseline | 6.0 / 0.01 / 50 Hz | ~0.02° | 1.69° | trembles |
-| **TUNED-1** | **3.0 / 0.04 / 120 Hz** | **~0.01°** | **1.42°** | **keeper** |
-| servo_gain 0.5 | (servo_gain only) | not improved | **5.19°** | **lag + servo-off latch — reverted** |
-
-Lowering the cartesian path gain + raising `velocity_damping` + a smoother (120 Hz) reference
-stream halved the wrist trembling. Lowering the controller `servo_gain` is a dead end: it adds
-following lag and tripped a right-servo deactivation. Keep `servo_gain: 1.0`.
-
-## Known issues
-
-- **`speed_bar` is INERT for `servo_j`** — it is parsed and validated but never sent to the
-  controller. The teach-pendant speed bar (≈80%) is the controller's own setting, independent of
-  the config. Real-speed limiting comes from the Cartesian step/velocity limits + `dq_max` + the
-  slow target, **not** `speed_bar`.
-- **`-2001` diagnostics_suspect** — `op_stat_self_collision` / `robot_time` decode as garbage
-  (vendor SDK↔firmware field-layout mismatch). Accepted in real via PR #12; the controller's
-  self-collision status is therefore untrusted — rely on the server's URDF-capsule guard.
-- **`ServoDisabled` (activation stage 0)** — the controller deactivated its servo (e.g. excessive
-  following error, or an external deactivation). The server latches `RobotStateError` (correct).
-  Restart to re-activate; check the pendant if it persists.
+The detailed offline queue analysis is in
+[box latency](box_latency_offline.md). A result is current acceptance only when
+the artifact records the current tracked profile; the historical TUNED-1 result
+above remains audit context.

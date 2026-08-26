@@ -54,7 +54,7 @@ summary reports each path's independent value-change count, peak axis, and last
 released axes. This script opens HID readers only; it does not create a robot
 command client or send servo commands.
 
-Controller-simulation safety remains config-driven. The server-side local config
+Controller-simulation safety remains config-driven. The tracked server config
 must keep the controller in `operation_mode: simulation`, expose
 `physical_motion_expected=false`, and keep physical real Cartesian disabled with
 `cartesian_control.allow_in_real: false`. This runbook is not physical real
@@ -71,5 +71,5 @@ policy_runner:       udp://0.0.0.0:50376
 The viewer should use the controller reference TCP source in controller
 simulation (`tcp_ref_stand` when the state stream recommends it). If the state
 line does not report `backend=rbpodo`, `operation_mode=simulation`, and
-`physical_motion_expected=false`, stop and inspect the local stack config before
+`physical_motion_expected=false`, stop and inspect the tracked stack config before
 sending teleop commands.

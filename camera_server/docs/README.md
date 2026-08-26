@@ -19,7 +19,7 @@ fisheye 카메라도 함께 publish한다.
 ```text
 rb_servo_server
   - Rainbow robot 2대 제어
-  - servo_j 100~200 Hz
+  - supported servo_j control profile 500 Hz
   - command/state/safety/fault handling
   - image 처리 없음
 
@@ -37,7 +37,10 @@ policy_runner
   - rb_servo_server로 action command send
 ```
 
-이 문서 세트는 Codex agent가 `camera_server`를 구현하기 위한 작업 명세로 사용한다.
+이 문서 세트의 현재 구현 계약은 `architecture.md`, `config_schema.md`,
+`metadata_protocol.md`, `shared_memory_ring_buffer.md`, 그리고 루트
+`docs/runbooks/camera_acceptance.md`를 따른다. 과거 implementation/review 문서는
+역사 자료이며 현재 운영 상태를 대체하지 않는다.
 
 권장 구현 언어는 C++17 이상이다. Python prototype은 가능하지만, 최종 capture server는 C++를 권장한다.
 

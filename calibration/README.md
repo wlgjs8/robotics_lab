@@ -22,6 +22,12 @@ Measured and accepted calibration is a later milestone. Future calibration
 artifacts should replace or supersede this file with measured stand mounts,
 camera intrinsics, head-camera extrinsics, and wrist-camera hand-eye transforms.
 
+This general camera/stand status is separate from the F/T and tool parameters
+used by force-control v2. Sensor axes, tool mass/COM, and TCP offset were
+operator-calibrated through controller-manager and are declared in the tracked
+real stack. Those measurements are valid for their force/tool purpose only;
+they do not promote this hand-eye registry from `configured_estimate`.
+
 Policy and teleop dataset metadata should record the active calibration status.
 For the current file, use `calibration_status: configured_estimate` and keep
 `geometry_valid_for_real_policy: false` visible in dataset review. Do not label

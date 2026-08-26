@@ -20,7 +20,7 @@ No failure path may output [0, 0, 0, 0, 0, 0] unless that was a validated user c
 | invalid timeout already inside command buffer | Hold; do not substitute a default motion timeout |
 | lifecycle command immediately followed by a motion command | Process lifecycle command first; then the latest motion command |
 | unsupported Cartesian command | Hold previous safe target |
-| future IK failure | Hold previous safe target or fault latch |
+| IK/follower refusal | Hold/decelerate from the previous safe target and publish the structured reason |
 | joint command outside limits | clamp to configured limits |
 | one late servo tick | filter dt is capped |
 | invalid or missing robot joint state | Startup fails; runtime latches/holds last safe pose according to policy |
@@ -33,6 +33,8 @@ No failure path may output [0, 0, 0, 0, 0, 0] unless that was a validated user c
 | motion command in read-only mode | reject and hold previous safe target |
 | sendServoJ failure in mock/simulator | failed arm target is not recorded; optional stop-both latch |
 | sendServoJ failure in real | fault latch |
+| force control requested without a live valid tare bias | nominal motion continues without force coverage; publish the refusal reason |
+| automatic tare armed but InitMotion fails/cancels/faults | old bias remains invalid; force coverage stays refused |
 
 ## Motion state
 
@@ -76,15 +78,14 @@ After reset succeeds, the server re-baselines previous targets to the freshly re
 Real mode is config-driven, not env-gated (the legacy `RB_ALLOW_REAL_*` execution
 gates were removed from the server runtime). Real mode requires:
 
-- a site-local real config (`rb_servo_server/config/local/`) explicitly enabling
-  real motion: `servo.send_servo_commands: true` (and
-  `cartesian_control.allow_in_real: true` for real Cartesian/TCP)
+- the tracked `rb_servo_server/config/stack_real.yaml` explicitly enabling the
+  intended motion path
 - `servo.enable_realtime_priority=true`
 - successful realtime setup in the servo loop
 - `safety.tracking_error_policy=fault_latch`
 - `safety.stop_both_arms_on_single_arm_error=true`
 - `safety.latch_fault_on_robot_state_error=true`
-- loopback `network.command_bind` and `network.state_pub_endpoint`, unless `RB_ALLOW_NETWORK_EXPOSURE=1` is explicitly set
+- the configured safety, lease/deadman, and backend-readiness checks
 
 ## Robot State Validity
 
@@ -93,13 +94,13 @@ Startup requires both backends to return a connected, error-free, finite joint s
 `RbpodoBackend` must report valid state only after reading real joint data from
 a trusted rbpodo controller path. Compiling with `RB_SERVO_ENABLE_RBPODO=ON`
 does not bypass the config-driven real-motion gating: real connection and
-`servo_j` transmission still require a site-local real config that explicitly
-enables them (`servo.send_servo_commands: true`), plus the mode-independent
+`servo_j` transmission still require the tracked real stack to explicitly
+enable them (`servo.send_servo_commands: true`), plus the mode-independent
 safety layers.
 
-## Future Cartesian/IK rule
+## Cartesian/IK rule
 
-When `CartesianController` is implemented, its API should return an explicit result:
+Cartesian solving returns an explicit result and structured telemetry:
 
 ```cpp
 struct CartesianSolveResult {
@@ -110,3 +111,17 @@ struct CartesianSolveResult {
 ```
 
 Never return a default-constructed `JointArray` on IK failure. Return `ok=false`, and let `DualArmServoLoop` hold or latch according to config.
+
+J3 is never widened as an IK fallback. Its supported safety/model envelope is
+exactly `[-150 deg, +150 deg]`; a pose outside that envelope is unreachable.
+
+## Force-control fail-closed rules
+
+Force-law parameters are tracked server config, not command payload. A client
+`force_control` object is rejected. `TareForceSensor` is the only public force
+lifecycle command and is leaseless because a valid bias is a coverage
+precondition.
+
+Automatic tare invalidates the old bias on InitMotion request, waits until the
+arm is parked and settled, then uses the same RT `raw - gravity` average as
+manual tare. Failure to complete produces no guessed/default bias.

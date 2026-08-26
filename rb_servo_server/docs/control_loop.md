@@ -1,124 +1,57 @@
 # Control Loop
 
-`DualArmServoLoop` is the only high-rate control thread.
+The normative behavior is in
+[../../docs/servo_backend_contract.md](../../docs/servo_backend_contract.md).
+The supported servo period is 2 ms (500 Hz).
 
-Supported servo target:
+## Ownership and tick flow
 
-```text
-500 Hz -> 2 ms period
-```
+The supervisory `DualArmServoLoop` owns command/lifecycle state, target
+generation, Cartesian followers, force overlay, safety/fault aggregation, and
+logging/state snapshots. In direct I/O it performs backend reads/sends itself.
+In worker I/O each `ArmWorker` owns blocking backend I/O and, with queue sync,
+that arm's send cadence.
 
-## Per-tick flow
-
-```text
-1. measure loop_start_time_ns
-2. compute actual period
-3. compute capped filter_dt
-4. read left/right robot state and validate joint state
-5. read pending lifecycle command or latest motion command from CommandBuffer
-6. stale command → Hold
-7. ResetFault command → clear latched fault if present, return to ConnectedHold, and Hold
-8. EmergencyStop command → latch fault hold pose
-9. validate payloads; missing payload → Hold/InvalidCommand
-10. Cartesian commands resolve through the configured Pinocchio/Eigen path:
-    `TcpPoseTarget` targets a final TCP pose, and `TcpLinearMove` runs a finite
-    MoveL-like path. Missing kinematics/config/state → Hold/CartesianUnavailable
-11. TrajectoryFilter computes left/right joint target
-12. SafetyFilter clamps target and checks robot/tracking/floor/collision state
-13. safety failure policy:
-    - snap_to_actual for mock/simulator tracking error
-    - fault_latch for real tracking error
-    - robot state error can latch fault
-14. send left/right target through IRobotBackend and record send timestamps
-15. publish latest `ServoSnapshot` for debug/publisher/test readers, including
-    command seq/modes, sent targets, period/jitter/filter dt, send timing, and
-    logger drop count
-16. push ServoSample to async logger
-17. sleep_until(next_tick)
-```
-
-## Timing columns
-
-The logger records:
-
-- `period_ms`: actual delta between loop starts
-- `jitter_ms`: absolute deviation from nominal period
-- `filter_dt_ms`: capped dt used by trajectory/safety math
-- `loop_start_time_ns`
-- `loop_end_time_ns`
-- `logger_dropped_samples`: total samples dropped by the bounded logging queue
-- `left_send_start_ns`, `left_send_end_ns`, `right_send_start_ns`, `right_send_end_ns`
-- `send_skew_us`, `left_send_duration_us`, `right_send_duration_us`
-
-These are used to decide whether the 500 Hz loop is stable enough before
-external simulator or real hardware work.
-
-## Snapshot ownership
-
-`DualArmServoLoop` owns robot state reads. Other components must observe servo state through the latest `ServoSnapshot`, not by reading robot backends directly. This keeps the mock plant from advancing twice when the state publisher is enabled and gives tests/debug tools one thread-safe read surface for command seq/modes, motion state, fault state, actual/sent/previous-sent targets, timing, logger health, and send timing.
-
-## Hold behavior
-
-Hold uses the previous sent target, not the current actual q every tick.
-
-Reason:
-
-- chasing `q_actual` can create micro target drift
-- previous sent target is a stable hold latch
-
-On a latched fault, the server holds a dedicated `fault_hold_q` captured from current actual q if available, otherwise from the last safe target.
-
-## Command timeout
-
-The C++ receive timestamp is authoritative. If the latest command becomes stale, both arms hold by default. If an invalid timeout somehow reaches `CommandBuffer`, the command is converted to Hold; the safety path does not silently substitute a hard-coded timeout.
-
-Lifecycle commands (`ArmMotion`, `DisarmMotion`, `EmergencyStop`, `ResetFault`) are queued separately from the latest motion target. This prevents an immediate `JointTarget` packet from overwriting `ArmMotion` before the servo loop observes it.
-
-## Safety behavior
-
-The active safety checks include:
-
-- robot connected
-- no robot error state
-- joint position clamp
-- joint velocity clamp
-- joint acceleration clamp
-- tracking error threshold
-- missing payload guard
-- Cartesian solve/config/state unavailable guard
-- stand-frame floor plane guard when configured
-- self-collision verdict guard when configured
-- emergency-stop fault latch
-
-The tracking guard checks:
+The control path is conceptually:
 
 ```text
-abs(previous_sent_q - q_actual) <= max_tracking_error_deg
+fresh leased command or lifecycle event
+  -> Hold / JointTarget / Cartesian follower
+  -> force-control gate and deviation when covered
+  -> Pinocchio IK when Cartesian
+  -> safety plan gate and joint/workspace/collision projection
+  -> final joint position/velocity/acceleration limits
+  -> direct or worker backend send
+  -> fault aggregation, telemetry, CSV sample
 ```
 
-Recommended policy:
+Invalid, stale, expired, or refused commands never synthesize a zero target.
+They hold or deceleration-ramp from the last safe/sent target according to the
+specific fault contract. A stale streaming Servo J request is a hold condition,
+not a backend fault; lifecycle expiry and real backend failures still latch.
 
-```yaml
-# mock/simulator
-tracking_error_policy: snap_to_actual
+## Real worker cadence
 
-# real
-tracking_error_policy: fault_latch
-```
+The tracked real profile uses two RT workers on cpu1/cpu2 and the supervisory
+loop on cpu3. Queue sync regulates each firmware-v8.7.3 FIFO independently.
+Motion and follower-plan advance remain held through qsync warmup/drain and
+release at track.
 
-## Fail-safe invariant
+The optional worker setpoint interpolator converts the host-loop/box-clock rate
+mismatch into uniform time dilation. It is implemented and unit-tested but is
+disabled in the tracked real config pending a supervised hardware A/B.
 
-The server should never generate a zero joint target merely because something failed.
+The authoritative wire timestamps/counters are the `worker_wire_*` CSV fields;
+legacy `left/right_send_start_ns` are loop enqueue timestamps in worker mode.
+`left/right_state_host_time_ns` must be used to identify repeated readback
+samples before interpreting a 0-then-2x `q_ref` step as physical motion.
 
-```text
-invalid command → previous safe target
-Cartesian unavailable / IK failure → previous safe target or fault latch
-tracking error with fault_latch → latched current/last-safe target
-robot state error → latched current/last-safe target
-EmergencyStop → latched current/last-safe target
-```
+## Force and joint limits
 
-## Still pending
+Force-control coverage requires a live, valid, tared F/T pipeline. Manual and
+automatic tare share the 250-tick `raw - gravity` average. Gate/spring and the
+TCP wrench-reference/compose-pivot pairing are loader-enforced invariants.
 
-- optional Ruckig or jerk-limited interpolation beyond the current filters
-- lock-free/latest command buffer experiments, if future 500 Hz profiling needs them
+J3 is bounded to `[-150 deg, +150 deg]` at the supported safety, barrier, and IK
+layers. A Cartesian request that needs more elbow range is unreachable and must
+hold/refuse rather than widen the model.

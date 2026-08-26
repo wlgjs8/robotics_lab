@@ -28,17 +28,20 @@ Implemented in this server:
 - capped filter dt so one late tick does not create a large motion step
 - servo period/jitter/filter-dt/safety logging
 - structured backend result taxonomy for mock and rbpodo paths
-- direct and worker backend I/O models for hardware-free/mock validation
+- direct I/O plus worker I/O as the supported real queue-sync path, with
+  per-arm RT scheduling
 - mandatory Pinocchio/Eigen FK, IK, and Cartesian math support
 - Cartesian command routing when kinematics and Cartesian config gates are
   enabled
 - gripper command forwarding to the out-of-process `gripper_server`
+- controller-manager-referenced F/T pipeline, manual/automatic tare,
+  stream/hold force laws, force gate, and bounded deviation overlay
 
 Still pending:
 
-- force control (v1 removed 2026-08-26; CM-referenced rebuild pending)
 - measured camera/robot calibration
-- production promotion of worker I/O for real hardware
+- supervised hardware A/B for optional worker setpoint interpolation
+- fast physical circle promotion and policy task success
 
 The active real-mode safety source of truth is the root `README.md`,
 `AGENTS.md`, and `docs/servo_backend_contract.md`. Historical rbpodo planning
@@ -219,6 +222,10 @@ Rbpodo joint states and commands preserve raw controller degrees. The tracked
 stack configs use explicit raw-degree ranges; see
 `../docs/joint_range_policy.md`.
 
+J3/elbow is fixed to `[-150 deg, +150 deg]` in the tracked safety limits,
+joint-limit barrier, and URDF/Pinocchio IK model. Do not widen it to make an
+unreachable Cartesian pose appear solvable.
+
 ## Command channel
 
 Current stack command endpoint:
@@ -248,17 +255,26 @@ The C++ receive timestamp is used for timeout checks.
 
 ## Force-control status
 
-**None.** The v1 project-native stack — F/T pipeline, contact guard, normal
-admittance, 6D Cartesian compliance, the `ExternalForceLimit` reflex, the rbpodo
-`sdata.eft_*` read, every force telemetry column, and the `force_torque:` /
-`force_control:` config sections — was removed on 2026-08-26. It is being
-rebuilt against `controller-manager` as the reference, starting from sensor and
-tool setup.
+Force-control v2 is live. V1 was removed on 2026-08-26 and archived, then v2
+was rebuilt from controller-manager's operator-calibrated sensor/tool presets.
+The tracked real stack enables both `force_torque:` and `force_control:` and
+the overlay has been exercised on hardware.
 
-A config that still carries `force_torque:` or `force_control:` now fails to
-load, and a command packet carrying `force_control` is refused at parse. The v1
-design pages and their measured evidence are audit-only under
-`docs/archive/force_control_v1/`.
+The measured sensor basis on this cell is left-handed (`det=-1`). Gate and
+spring are an indivisible loader contract, and the wrench reference point and
+compose pivot are both the TCP. Per-arm state JSON publishes
+`force_torque`/`force_control` blocks with raw/compensated wrench, bias/tare,
+coverage, selected law, gate, deviation, fence, and refusal telemetry.
+
+An untared arm is never covered. The GUI's leaseless `TareForceSensor` and
+`force_torque.auto_tare_after_init_motion` use the same 250-tick
+`raw - gravity` average. Automatic tare invalidates the previous bias at the
+InitMotion request, then waits for arrival, settle time, and a low sent-speed
+condition before sampling.
+
+A command packet carrying a `force_control` object is still rejected because
+the law is owned by tracked server config, not the client payload. Archived v1
+design and evidence remain under `docs/archive/force_control_v1/`.
 
 ## Viser operator GUI
 

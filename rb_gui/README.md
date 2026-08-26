@@ -88,6 +88,15 @@ enabling compliance`), so zero is the honest reading of "no measured change from
 a zero you have not set yet". Press `F/T 영점` in the safety panel to set it; the
 server averages 250 ticks (0.5 s).
 
+The tracked real stack also enables automatic tare after InitMotion. Pressing
+InitMotion invalidates that arm's old bias immediately, but sampling does not
+start during the move. The server waits for the init sequencer to finish, the
+configured settle interval to pass, and last-sent joint speed to fall below the
+configured threshold; it then runs the same 250-tick tare. The FT card exposes
+the automatic-tare stage and reason so `awaiting_init`, `settling`, collection,
+and an untared refusal remain distinguishable. Automatic tare cannot see a part
+in the gripper or a hand on the wrist; the operator check is unchanged.
+
 ## Gravity-Wrench / CoG Waypoint Calibration
 
 Removed. The payload-identification session (lease acquire, per-pose target
@@ -96,8 +105,10 @@ mass from wrench samples and cannot work without a sensor. The server rejects
 `joint_target_profile: payload_identification` at parse, so the GUI no longer
 offers it.
 
-It comes back with the `controller-manager`-referenced rebuild; the FT Monitor
-above already has. Archived v1 design: `docs/archive/force_control_v1/`.
+Payload identification remains removed even though the controller-manager-
+referenced force pipeline and FT Monitor are live. Tool mass/COM calibration is
+owned by controller-manager rather than this GUI session. Archived v1 design:
+`docs/archive/force_control_v1/`.
 
 ## Realtime Timing Health
 

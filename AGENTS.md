@@ -13,7 +13,7 @@ The mock / rbpodo controller-simulation (pgmode) stack remains the regression ba
 - GUI and policy-runner safety gates
 - command-source lease/arbitration
 
-Real motion is now an active bring-up lane: read-only diagnostics parity, a slow dual-arm physical Cartesian circle, UMI teleop/replay, and a full `flow-infer` `real_policy` closed-loop rollout (pi0.5/openpi, `TcpPoseTarget` + real gripper) have all run on hardware under operator supervision (`docs/runbooks/rbpodo_real_physical_circle.md`, ladder `docs/runbooks/pgmode_real_transition.md`). `flow-infer` composes ee_local deltas into absolute `TcpPoseTarget` setpoints. The `real_policy` rollout-mode validation was satisfied via accepted/validated config — the lane is open, not blocked; runtime is validated and task success is the remaining model-side gap. Real-motion execution authority is config-driven and server-owned: tracked stack config plus the mode-independent safety layers decide whether motion is sent. Operator supervision and an E-stop remain physical operation procedure, and passing simulator tests is never permission to move hardware. For real Cartesian motion the policy-side block was retired (PR #13), so `rb_servo_server` makes the final allow/deny decision (plus the async URDF-mesh `CollisionMonitor`). Project-native force control is currently locked to a dual-arm read-only sign/frame monitor; real force-motion and production force acceptance remain blocked. Measured hand-eye calibration is unneeded for the deployed pika ee_local image-conditioned policy but still required for general geometry-dependent policy.
+Real motion is now an active bring-up lane: read-only diagnostics parity, a slow dual-arm physical Cartesian circle, UMI teleop/replay, and a full `flow-infer` `real_policy` closed-loop rollout (pi0.5/openpi, `TcpPoseTarget` + real gripper) have all run on hardware under operator supervision (`docs/runbooks/rbpodo_real_physical_circle.md`, ladder `docs/runbooks/pgmode_real_transition.md`). `flow-infer` composes ee_local deltas into absolute `TcpPoseTarget` setpoints. The `real_policy` rollout-mode validation was satisfied via accepted/validated config — the lane is open, not blocked; runtime is validated and task success is the remaining model-side gap. Real-motion execution authority is config-driven and server-owned: tracked stack config plus the mode-independent safety layers decide whether motion is sent. Operator supervision and an E-stop remain physical operation procedure, and passing simulator tests is never permission to move hardware. For real Cartesian motion the policy-side block was retired (PR #13), so `rb_servo_server` makes the final allow/deny decision (plus the async URDF-mesh `CollisionMonitor`). Project-native force control v2 is live and hardware-validated against `controller-manager`; its measured configuration, coverage/tare preconditions, gate, spring, and deviation fences remain load-bearing safety contracts. Measured hand-eye calibration is unneeded for the deployed pika ee_local image-conditioned policy but still required for general geometry-dependent policy.
 
 ## Required Reading
 
@@ -48,6 +48,12 @@ Supported real-controller scope is rbpodo only. The `MockBackend` remains for
 hardware-free validation; the retired software-simulator backend and raw script
 TCP comparison backends are no longer part of the active code, config, gate, or
 runbook surface.
+
+The supported J3/elbow range is exactly `[-150 deg, +150 deg]`, matching the
+Rainbow RB3-730E documentation and the Pinocchio URDF. Tracked safety limits,
+joint-limit barriers, IK, examples, and runbooks must use that same range. Do
+not restore the retired `+/-160 deg` margin or widen J3 to hide an unreachable
+Cartesian target.
 
 ## Target Topology
 
@@ -241,7 +247,7 @@ Use `docs/frame_contract.md` and `calibration/active_calibration.yaml` as the fr
 - Do not create production fallback math paths that bypass mandatory Eigen/Pinocchio Cartesian math.
 - No silent fallback defaults for safety-relevant parameters. A value that bounds motion, contact, a tolerance, a geometry/frame, or any other safety-affecting decision MUST come from its authoritative source (server config / contract / measured evidence). If that source is missing or unreadable, FAIL CLOSED — do not fire, do not move, surface the reason — instead of substituting a guessed/hard-coded default. A guessed value can be wrong in the unsafe direction (e.g. a tolerance that lets the server plan a move when the caller assumed a no-op). Prefer `None`/error + a logged reason over a plausible constant. This applies to every component (C++, GUI, policy_runner), not just Cartesian math.
 - Do not weaken command-source lease, deadman, stale-state, fault, or real-mode checks. Real Cartesian motion now relies on `rb_servo_server` for the final allow/deny decision (safety filter, tracking-error latch, self-collision guard, lease, deadman) — treat these as load-bearing, not optional.
-- Real motion is explicit and operator-supervised — never enable it incidentally as part of simulator/benchmark work, and keep force control off until separately validated. Gripper motion remains separately gated by `allow_real_gripper_motion`, measured gripper availability, and `RB_ALLOW_REAL_GRIPPER=1`.
+- Real motion is explicit and operator-supervised — never enable or retune it incidentally as part of simulator/benchmark work. Force control is live only through its tracked, hardware-validated v2 configuration and must not be disabled, enabled, or retuned as an unrelated change. Gripper motion remains separately gated by `allow_real_gripper_motion`, measured gripper availability, and `RB_ALLOW_REAL_GRIPPER=1`.
 
 ## Expected Validation
 

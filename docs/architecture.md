@@ -74,7 +74,9 @@ Not yet production-ready:
 - policy task success — rollout motion is smooth but inaccurate (model quality /
   data coverage / appearance-domain gap, not runtime); init-pose distribution
   matching is in progress
-- force control (v1 removed 2026-08-26; CM-referenced rebuild pending)
+- force-control v2 is live and hardware-validated against controller-manager;
+  automatic tare and later queue/safety changes retain their own validation
+  boundaries
 - fast physical circle stages (15 cm / 16 s and above, transition ladder P7–P9)
 - measured camera/robot calibration remains `configured_estimate` and is still
   required for general geometry-dependent policy, but is not needed for the
@@ -96,6 +98,12 @@ Supported real-controller scope is rbpodo only. The `MockBackend` is the
 hardware-free validation surface; the old software-simulator backend and
 unsupported raw script TCP comparison paths are removed and must not be
 presented as runnable backends.
+
+The supported RB3-730E J3/elbow range is exactly `[-150 deg, +150 deg]`.
+Tracked safety limits, the joint-limit barrier, URDF/Pinocchio IK, examples,
+and runbooks must agree with the Rainbow range. The retired `+/-160 deg`
+margin is not a supported operating profile, and widening J3 must not be used
+to conceal an unreachable Cartesian target.
 
 ### Simulation flavors (name them precisely)
 
@@ -365,29 +373,48 @@ unregulated and its latency is not comparable to the real lane's. See
 `docs/servo_backend_contract.md` → "Control-Box Command Queue (firmware v8.7.3)"
 and `docs/runbooks/box_latency_offline.md`.
 
+The tracked real profile schedules the two cadence-owning workers as
+`SCHED_FIFO 80` on cpu1/cpu2 and keeps the supervisory loop on cpu3.
+`queue_sync.hold_motion_until_track: true` holds motion and freezes the plan
+during warmup/drain, releasing at track. Worker-side setpoint interpolation is
+implemented and unit-tested, but `servo.worker_setpoint_interpolation` remains
+`false` in the tracked real profile pending its own supervised hardware A/B.
+
 Deprecated simulator config names are archived under `docs/archive/configs/`
 for historical reference only. They are not runnable source-of-truth profiles
 and must not be used for new smoke or acceptance evidence.
 
-Force control is **absent**. The v1 project-native stack (F/T pipeline, contact
-guard, unilateral surface-normal admittance, bounded 6D Cartesian compliance,
-the `ExternalForceLimit` reflex, and the rbpodo `sdata.eft_*` hardware read) was
-removed on 2026-08-26 to be rebuilt against `controller-manager` as the
-reference, starting from sensor and tool setup.
+Force-control v2 is **live**. The v1 implementation was removed on 2026-08-26,
+then rebuilt from `controller-manager`'s calibrated sensor/tool presets.
+`force_torque:` and `force_control:` are server config sections and are enabled
+in `stack_real.yaml`. The v2 overlay has run on hardware: deviation tracked
+F/k at 0.97–0.99, rotation was 1.85 deg at 55 N, and no deviation fence fired.
 
-Nothing in the servo path reads or produces a wrench: `RobotState` has no
-wrench fields, the state JSON has no `force_torque` / `force_control` blocks,
-and `force_control:` / `force_torque:` are no longer server config sections — a
-config that still carries them fails to load rather than loading an inert block.
-A command packet carrying `force_control` is refused at parse for the same
-reason. The v1 design pages and their hardware-measured evidence are kept
-audit-only under `docs/archive/force_control_v1/`.
+The force configuration has two non-separable invariants enforced by the
+loader: a spring (`k > 0`) ships with the force gate, and the wrench reference
+point moves with the compose pivot. Both reference the TCP. Sensor axes, tool
+mass/COM, and TCP offset come from controller-manager presets and operator
+calibration, not a fresh derivation from the URDF. The measured sensor basis on
+this cell is left-handed (`det=-1`).
 
-Contact safety during the rebuild is therefore geometric and kinematic only:
-ROI box, self-collision velocity barrier, reach shell, tracking-error latch,
-lease/deadman, and the hardware E-stop. Both geometric floor constraints remain
-disabled by explicit operator decision, so there is no TCP/gripper-tip floor
-velocity damper or hard plane backstop either.
+An arm without a valid bias is not covered. The leaseless `TareForceSensor`
+command and `force_torque.auto_tare_after_init_motion` use the same RT tare:
+250 consecutive samples of `raw - gravity`. Automatic tare invalidates the
+old bias when InitMotion is requested, waits for the init sequencer to finish,
+then requires the configured settle time and maximum sent speed before
+sampling. State JSON publishes per-arm `force_torque` and `force_control`
+blocks, including tare/coverage/gate/deviation telemetry.
+
+A client command object carrying `force_control` is still rejected. That does
+not mean the subsystem is absent: force-law authority belongs to tracked server
+config, while the command surface exposes only the tare lifecycle command.
+The removed v1 design and evidence remain audit-only under
+`docs/archive/force_control_v1/`.
+
+Force control is additive to, not a replacement for, ROI, async mesh
+self-collision, reach, tracking, lease/deadman, and E-stop safety. Both
+geometric floor constraints remain disabled by explicit operator decision, so
+there is currently no TCP/gripper-tip floor damper or hard plane backstop.
 
 ## Motion Primitive Contract
 

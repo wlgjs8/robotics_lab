@@ -28,7 +28,7 @@ mock / rbpodo 컨트롤러 시뮬레이션(pgmode) 측에서 반복 검증되어
 - 카메라 readiness contract
 
 실제 물리 로봇에서 추가로 검증된 항목은 아래 "현재 성숙도"를 참고합니다. 실제
-모션 권한은 site-local config와 서버 안전 계층이 결정하며, 운영자 감독과
+모션 권한은 tracked stack config와 서버 안전 계층이 결정하며, 운영자 감독과
 E-stop은 물리 운용 절차입니다. simulator acceptance 통과가 곧 하드웨어 구동
 허가는 아닙니다.
 
@@ -61,6 +61,8 @@ pgmode-real(실제 RB3-730E 하드웨어)에서 구동/검증된 항목:
   `measured_gripper_available` 게이트
 - 서버측 자가충돌 가드 — async URDF-mesh `CollisionMonitor`(33 geom / 337 pair),
   real에서 enforce(velocity barrier), stale/hard-breach는 fail-closed
+- `controller-manager` 기준으로 재구축한 force-control v2 — 측정 sensor/tool
+  설정, gate + spring, TCP 기준 wrench/compose, deviation fence를 실기 검증
 - policy측 real-Cartesian 안전 게이트 완화(PR #13) → `rb_servo_server`가 단일
   real-motion 안전 계층
 - 컨트롤러 `-2001`(suspect diagnostics) 실모드 수용(PR #12); EMS/SOS/soft-estop/
@@ -108,6 +110,11 @@ hardware-free 검증용으로 유지하며, `run_mode: simulation`은 이제 rbp
 시뮬레이터 backend와 unsupported raw script TCP 비교 경로는 active
 code/config/gate/runbook surface에 없습니다.
 
+현재 추적 `stack_sim.yaml`은 실제 controller endpoint에 연결한다는 기존
+telemetry 계약 때문에 `run_mode: real`, `operation_mode: simulation`을
+사용합니다. 즉 `run_mode: simulation`을 다른 simulator backend 이름으로
+재사용할 수 없다는 용어 규칙과, 현재 스택의 실제 표기는 구분해야 합니다.
+
 ## 실제 및 컨트롤러 시뮬레이션 토폴로지
 
 실제 시스템:
@@ -139,7 +146,7 @@ rbpodo 컨트롤러 `pgmode` 시뮬레이션은 위와 같은 팔별 rbpodo endp
 
 - safety filter (joint clamp, stand-frame floor plane)
 - tracking-error latch
-- URDF-캡슐 async self-collision 가드 (`CollisionMonitor`)
+- async URDF-mesh self-collision 가드 (`CollisionMonitor`)
 - command-source lease / arbitration
 - client deadman
 - 운영자 감독 + 하드웨어 E-stop은 물리 운용 절차로 유지
@@ -205,20 +212,36 @@ simulation lane은 무규제로 스트리밍하며, 그 지연은 real lane과 �
 아닙니다. `docs/servo_backend_contract.md`의 "Control-Box Command Queue
 (firmware v8.7.3)"와 `docs/runbooks/box_latency_offline.md`를 봅니다.
 
-`rbpodo` joint state와 command는 raw controller degree 값을 보존합니다.
-tracked real rbpodo template의 supported safety range는 명시적 per-joint
-`q_min_deg: [-360, -360, -160, -360, -360, -360]` /
-`q_max_deg: [360, 360, 160, 360, 360, 360]`입니다. `[-180, 180]`
-정규화는 control/safety/tracking/log source-of-truth에 쓰지 않습니다.
-자세한 내용은 `docs/joint_range_policy.md`를 봅니다.
+현재 real profile은 worker를 `SCHED_FIFO 80`으로 cpu1/cpu2에 고정하고,
+`queue_sync.hold_motion_until_track: true`로 warmup/drain 동안 plan과 motion을
+hold한 뒤 track에서 release합니다. Worker-side rate conversion
+(`servo.worker_setpoint_interpolation`)은 구현·단위시험됐지만 tracked real
+config에서는 아직 `false`이며, 별도 supervised on-robot A/B 전에는 활성
+profile로 간주하지 않습니다.
 
-Force control은 현재 **없습니다**. 2026-08-26에 v1 스택(F/T 파이프라인, contact
-guard, normal admittance, 6D Cartesian compliance, `eft_*` 하드웨어 읽기,
-설정/텔레메트리/GUI 연동)을 전부 제거했고, `controller-manager`를 레퍼런스로
-센서·툴 세팅부터 다시 포팅할 예정입니다. `force_control:` / `force_torque:`는
-더 이상 서버 설정 스키마에 없으므로, 해당 섹션이 남아 있는 config는 로드에
-실패합니다. v1의 실측 증거는 `docs/archive/force_control_v1/`에 audit 전용으로
-보관되어 있습니다.
+`rbpodo` joint state와 command는 raw controller degree 값을 보존합니다.
+tracked rbpodo stack의 supported safety range는 명시적 per-joint
+`q_min_deg: [-360, -360, -150, -360, -360, -360]` /
+`q_max_deg: [360, 360, 150, 360, 360, 360]`입니다. J3 `+/-150 deg`는
+Rainbow RB3-730E 공식 범위이자 URDF/Pinocchio IK 범위입니다. 폐기된
+`+/-160 deg` margin이나 J3 `+/-360 deg`를 운영 범위로 다시 사용하지 않습니다.
+`[-180, 180]` 정규화는 control/safety/tracking/log source-of-truth에 쓰지
+않습니다. 자세한 내용은 `docs/joint_range_policy.md`를 봅니다.
+
+Force control v2는 **LIVE**입니다. v1은 2026-08-26에 제거됐지만 같은 날
+`controller-manager`를 calibration/design authority로 삼아 sensor/tool setup부터
+재구축됐습니다. `force_torque:`와 `force_control:`은 현재 서버 설정 섹션이며
+둘 다 `stack_real.yaml`에 선언돼 있습니다. 측정 sensor basis는 left-handed
+(`det=-1`)이고, gate와 spring은 함께 사용하며 wrench reference point와 compose
+pivot은 모두 TCP입니다. 이 조합은 실기에서 force/deviation 추종과 fence를
+검증했습니다.
+
+Force law는 bias가 없는 팔을 절대 cover하지 않습니다. GUI의 leaseless
+`TareForceSensor`와 `force_torque.auto_tare_after_init_motion`은 같은 RT tare
+경로를 쓰며 `raw - gravity`를 250 tick 평균합니다. 자동 tare는 InitMotion
+요청 시 즉시 샘플링하지 않고, init pose 도착 후 settle 및 sent-speed 조건을
+만족한 뒤 수행합니다. v1 설계와 증거는 `docs/archive/force_control_v1/`에
+audit 전용으로 보관돼 있습니다.
 
 geometric floor는 별개의 운영자 결정으로 stand/user 둘 다 꺼져 있어
 TCP/gripper-tip floor velocity damper와 hard plane backstop이 없습니다.

@@ -21,8 +21,10 @@ motion, `rb_servo_server` makes the final allow/deny decision. A full `flow-infe
 the Pika Gripper Backend) and the async URDF-mesh `CollisionMonitor` have run on the
 physical robot; the `real_policy` rollout-mode gate stays fully enforced and was
 satisfied via accepted/validated config. Remaining gaps: policy task success
-(model-side, not runtime) and force control (still `provider: null`,
-`enable: false`). Measured hand-eye calibration is unneeded for the deployed pika
+(model-side, not runtime), fast physical circle stages, and general measured
+hand-eye calibration. Force-control v2 is live and hardware-validated against
+controller-manager; `force_torque:` and `force_control:` are enabled in the
+tracked real stack. Measured hand-eye calibration is unneeded for the deployed pika
 ee_local image-conditioned policy but still required for general geometry-dependent
 policy.
 
@@ -36,14 +38,23 @@ Supported tracked rbpodo real templates preserve raw controller joint degrees
 and use explicit per-joint safety limits for the current controller soft-limit
 configuration:
 
-- `q_min_deg: [-360, -360, -160, -360, -360, -360]`
-- `q_max_deg: [360, 360, 160, 360, 360, 360]`
+- `q_min_deg: [-360, -360, -150, -360, -360, -360]`
+- `q_max_deg: [360, 360, 150, 360, 360, 360]`
+
+J3 is fixed to the Rainbow/URDF range `[-150 deg, +150 deg]` in every
+supported profile. Do not widen it to create an apparent solution for an
+unreachable Cartesian pose.
 
 Do not normalize raw control, safety, tracking, q-ref, state JSON, or log values
 to `[-180, 180]`. See `docs/joint_range_policy.md`.
 
 Manual non-500 YAML overrides may remain parseable for compatibility, but they
 are not supported profiles and must not be documented as runnable defaults.
+
+The tracked real profile uses worker I/O with per-arm RT scheduling,
+`queue_sync.enable: true`, `target_fill: 5`, and
+`hold_motion_until_track: true`. Worker setpoint interpolation exists but
+remains `false` pending a separate supervised hardware A/B.
 
 Unsupported raw script TCP comparison paths were removed from the active code,
 config, gate, test, and runbook surface. Do not reintroduce direct raw script

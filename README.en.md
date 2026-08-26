@@ -1,108 +1,59 @@
 # robotics_lab
 
-`robotics_lab` is the integration workspace for a dual-arm RB3-730 system with servo control, the rbpodo backend (real robot + controller `pgmode` simulation), camera capture, policy_runner, and an operator GUI.
+English operational summary. The Korean [README.md](README.md) is the primary
+public overview; normative details live in the contracts linked below.
 
-## Current Phase
+`robotics_lab` integrates two Rainbow RB3-730E arms, the C++ servo server,
+rbpodo real/controller-`pgmode` backends, cameras, the operator GUI, grippers,
+and `policy_runner`.
 
-The project is currently in **rbpodo pgmode-real physical robot bring-up**.
-Simulator-first Cartesian acceptance hardening is largely complete; validation
-now proceeds on the physical RB3-730E hardware.
+## Current phase and maturity
 
-Mock / rbpodo controller-simulation (pgmode) behavior that is repeatedly validated and stabilized:
+The milestone is **rbpodo pgmode-real physical robot bring-up**. Mock and
+rbpodo controller `pgmode` simulation remain the regression baseline. Physical
+hardware has run, under operator supervision:
 
-- structured backend result and fault telemetry
-- `JointTarget`
-- `TcpPoseTarget`
-- `TcpLinearMove`
-- GUI operator controls
-- policy_runner SpaceMouse path
-- command-source lease/arbitration
-- camera readiness contracts
+- read-only diagnostics parity;
+- a slow dual-arm Cartesian circle;
+- UMI Cartesian teleop and replay;
+- a full pi0.5/openpi `flow-infer` `real_policy` rollout using absolute
+  `TcpPoseTarget` setpoints and real grippers;
+- the async URDF-mesh `CollisionMonitor` safety path; and
+- the controller-manager-referenced force-control v2 overlay.
 
-What has additionally been validated on the physical robot is listed under
-"Current Maturity" below. Real-motion authority is decided by site-local config
-and the server safety layers; operator supervision and an E-stop remain physical
-operation procedure. Passing simulator acceptance is not permission to move
-hardware.
+Runtime integration is validated; policy task success remains model/data
+limited. Fast circle stages and general measured hand-eye calibration remain
+open. The deployed pika ee-local image-conditioned policy has an accepted
+policy-specific calibration carve-out; that does not make the configured
+estimate valid for arbitrary geometry-dependent policy.
 
-## Current Maturity
+Passing simulation is never permission to move physical hardware.
 
-Supported for mock / controller-simulation:
+## Sources of truth
 
-- mock dual-arm servo control
-- direct and worker I/O modes (mock / hardware-free)
-- FK/TCP state publication with quaternion fields
-- TCP PTP and Linear commands
-- mock camera server
-- GUI viewer/operator console for mock/simulation
-- policy_runner joint and Cartesian action sources
-- mandatory Eigen3/Pinocchio C++ Cartesian math path for `rb_servo_server`
+- `AGENTS.md`: repository rules and safety invariants
+- `docs/architecture.md`: topology, public terminology, safety ownership
+- `docs/servo_backend_contract.md`: backend, worker I/O, queue, force, and
+  telemetry contracts
+- `docs/frame_contract.md`: frame/calibration contract
+- `docs/joint_range_policy.md`: raw joint representation and limits
+- `docs/hardware_free_validation.md`: hardware-free boundary
+- `rb_servo_server/config/stack_real.yaml` and `stack_sim.yaml`: the only
+  runnable stack configurations
 
-Run / validated on pgmode-real (physical RB3-730E hardware):
+Historical plans, archived force-control v1 material, and point-in-time reports
+are evidence only. They do not override the sources above.
 
-- read-only physical diagnostics parity (controllers `.200`/`.201`, `tcp_actual_stand`)
-- dual-arm physical Cartesian circle tracking — slow, TUNED-1 profile, median
-  tracking ~1.42° (`docs/runbooks/rbpodo_real_physical_circle.md`)
-- UMI dual-arm Cartesian teleop (relative-init) driving `TcpPoseTarget` on the real
-  robot; UMI `data_tcp` replay verified on hardware (ee_local + r_align)
-- **pi0.5 (openpi) `flow-infer` `real_policy` full closed-loop rollout on the real
-  robot** — `TcpPoseTarget` + gripper commands. Runtime/engineering
-  validated: motion is smooth and in-distribution (async chunking removes the 500 Hz
-  loop vibration; the absolute-proprio frame gap is fixed by reset-relative retrain).
-  **Task success is still model-limited** (see below)
-- real gripper motion — Pika Gripper Backend, `RB_ALLOW_REAL_GRIPPER` +
-  `measured_gripper_available` gate
-- server-side self-collision guard — async URDF-mesh `CollisionMonitor` (33 geoms /
-  337 pairs), enforced in real (velocity barrier), stale/hard-breach fail-closed
-- policy-side real-Cartesian safety gate relaxation (PR #13) → `rb_servo_server`
-  is the sole real-motion safety layer
-- controller `-2001` (suspect diagnostics) accepted in real mode (PR #12);
-  EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error still latch
-
-Not yet production-ready:
-
-- **policy task success** — rollout motion is smooth but inaccurate (e.g. the left
-  arm reaches into a collision instead of grasping). This is a model-quality /
-  data-coverage / appearance-domain-gap problem, not a runtime one; init-pose
-  distribution matching is in progress (`umi_init_from_grasp.py`)
-- force control (`provider: null`, `enable: false`)
-- fast physical circle stages (15 cm / 16 s and above, transition ladder P7–P9)
-- measured hand-eye / camera calibration is still pending for general
-  geometry-dependent policy, but is **not needed** for the currently deployed pika
-  Sense≡Gripper + ee_local + image-conditioned policy (reset-relative cancels the
-  steamvr→stand R; the tool offset is a known constant) — so it is not a blocker for
-  the current policy
-
-## Source Of Truth
-
-Start here:
-
-- `AGENTS.md`: instructions for Codex/Claude/other agents
-- `REVIEW.md`: current review baseline and open items
-- `docs/current_review.md`: short redirect to `REVIEW.md`; do not duplicate review content there
-- `docs/architecture.md`: system topology, terminology, motion primitive contract, safety boundaries
-- `docs/code_architecture_map.md`: code-verified component map, ports/wire-formats, and a doc-vs-code drift list
-- `docs/servo_backend_contract.md`: backend result, fault, worker I/O, and state telemetry contract
-- `docs/frame_contract.md`: shared frames and calibration status
-- `docs/hardware_free_validation.md`: hardware-free validation boundary
-- `docs/runbooks/camera_acceptance.md`: real three-camera acceptance
-- `calibration/active_calibration.yaml`: configured-estimate robot/camera/stand setup registry
-
-Historical prompt/planning files are audit context. When they conflict with the files above, the files above win.
-
-## Canonical Terms
+## Canonical terminology and topology
 
 ```yaml
 run_mode: mock | simulation | real
 backend_type: mock | rbpodo
 ```
 
-`run_mode: simulation` now refers only to the rbpodo controller `pgmode`
-simulation flavor; the old software-simulator backend was removed.
-
-## Real And Controller-Simulation Topology
-
-Physical system:
+Rbpodo is the only supported real-controller backend. `MockBackend` is the
+hardware-free surface. The retired software-simulator and raw-script comparison
+backends are not supported.
 
 ```text
 rb_servo_server
@@ -110,111 +61,122 @@ rb_servo_server
   right_robot backend_type=rbpodo -> 172.28.60.201
 ```
 
-The rbpodo controller `pgmode` simulation reuses this per-arm rbpodo endpoint
-shape, targeting either a Virtual ControlBox VM or a physical box held in
-`pgmode`. Site/VM configs live under gitignored
-`rb_servo_server/config/local/`.
+Controller `pgmode` simulation uses the same rbpodo endpoint shape with
+`operation_mode: simulation` and `physical_motion_expected: false`. The tracked
+`stack_sim.yaml` retains `run_mode: real` because it connects to an actual
+controller endpoint; `run_mode: simulation` must not be reused for a retired
+software-simulator backend.
 
-## Safety
+## Safety and execution authority
 
-Real robot connection and motion are **no longer gated on env vars.** The legacy
-`RB_ALLOW_REAL_ROBOT` / `RB_ALLOW_REAL_MOTION` / `RB_ALLOW_REAL_CARTESIAN` /
-`RB_ALLOW_RBPODO_SUSPECT_DIAGNOSTICS_REAL_MOTION` (and the other `RB_ALLOW_*`)
-execution gates were removed from the server runtime. `run_mode`/`operation_mode`
-are telemetry labels only and do not decide whether motion is allowed.
+The legacy `RB_ALLOW_REAL_*` server execution gates were removed. Real motion
+is authorized by the reviewed tracked stack config plus mode-independent server
+safety layers:
 
-Real-motion execution authority is owned by **site-local config
-(`rb_servo_server/config/local/`) + the mode-independent safety layer**: real
-motion requires the site config to enable it explicitly
-(`cartesian_control.allow_in_real: true`). Operator supervision remains physical
-operation procedure.
-Through this config-driven path a dual-arm physical Cartesian circle has already
-run under supervision (`docs/runbooks/rbpodo_real_physical_circle.md`).
-The policy-side `SafetyGate` real-Cartesian block was retired in PR #13; stale
-state, fault, camera, and kinematics readiness checks remain. For real Cartesian
-motion, `rb_servo_server` makes the final allow/deny decision (safety filter,
-tracking-error latch, async URDF-mesh self-collision guard (`CollisionMonitor`), lease, deadman).
-Controller-simulation safety is unchanged. Accepting the controller `-2001`
-suspect diagnostics in real mode is a per-arm config opt-in
-(`allow_real_motion_with_suspect_diagnostics: true`, no env).
-EMS/SOS/soft-estop/`collision_occur`/unknown-mode/init-error still latch
-regardless of config.
+- joint/rate/acceleration and workspace safety filtering;
+- tracking-error latching;
+- async URDF-mesh self-collision monitoring;
+- reach, ROI, and configured floor constraints;
+- command-source lease/arbitration and client deadman; and
+- operator supervision with a hardware E-stop.
 
-Force control is absent: the v1 stack was removed on 2026-08-26 and
-`force_control:` is no longer a config section, so a config that still declares
-it fails to load. Archived v1 design: `docs/archive/force_control_v1/`.
+`run_mode` and `operation_mode` are telemetry labels, not motion gates. The
+policy-side real-Cartesian block is retired; `rb_servo_server` makes the final
+allow/deny decision. Real gripper motion remains separately gated by
+`allow_real_gripper_motion`, measured availability, and
+`RB_ALLOW_REAL_GRIPPER=1`.
 
-## Motion Primitive Summary
+Do not create `config/local` launch variants. Change one reviewed setting at a
+time in the appropriate tracked stack config so the effective runtime profile
+remains visible and auditable.
 
-- `JointTarget`: absolute joint-space point-to-point target.
-- `TcpPoseTarget`: PTP / MoveJ-like Cartesian final-pose target; path not guaranteed. Real mode opens via site-local config and has been validated on hardware.
-- `TcpLinearMove`: MoveL-like Cartesian path primitive with `constant` / `slerp` orientation modes.
+## Joint range contract
 
-## Common Commands
+Rbpodo state, commands, safety, tracking, and logs preserve raw controller
+degrees. They are not normalized to `[-180, 180]`.
 
-Python checks:
+```yaml
+safety:
+  q_min_deg: [-360, -360, -150, -360, -360, -360]
+  q_max_deg: [360, 360, 150, 360, 360, 360]
+```
+
+J3 is exactly `[-150 deg, +150 deg]`, matching Rainbow's RB3-730E range and the
+URDF/Pinocchio model. The retired `+/-160 deg` margin and a widened J3 must not
+be used to mask an unreachable Cartesian target.
+
+## Servo J and control-box queue
+
+Both tracked profiles pin the 500 Hz transparent-executor parameters:
+
+```yaml
+servo_t1_sec: 0.002
+servo_t2_sec: 0.021
+servo_gain: 1.0
+servo_alpha: 10.0
+```
+
+Rainbow scales gain/alpha by `0.1`, so script-level `alpha=10.0` is effective
+`1.0`: controller LPF off. Smoothing and bounds belong to the server loop.
+
+Firmware v8.7.3 consumes Servo J through a FIFO. `stack_real.yaml` therefore
+uses worker I/O, per-arm RT scheduling, and `queue_sync` at target fill 5.
+Motion and the follower plan are held during qsync warmup/drain and released in
+track. Worker-side setpoint interpolation exists and is unit-tested, but the
+tracked real profile keeps it `false` pending a separate supervised hardware
+A/B. `stack_sim.yaml` uses direct I/O without queue regulation, so its latency
+is not comparable to physical real.
+
+## Force-control v2
+
+Force-control v1 was removed on 2026-08-26 and archived. V2 was rebuilt from
+controller-manager's calibrated sensor/tool presets and is live:
+
+- `force_torque:` and `force_control:` are server config sections;
+- both are present and enabled in `stack_real.yaml`;
+- the measured sensor basis on this cell is left-handed (`det=-1`);
+- gate and spring ship together; and
+- wrench reference point and compose pivot are both the TCP.
+
+An arm without a valid bias is never covered. The GUI's leaseless
+`TareForceSensor` command and `force_torque.auto_tare_after_init_motion` share
+the same RT tare path: 250 samples of `raw - gravity`. Automatic tare arms when
+InitMotion is requested but samples only after arrival, settling, and a low
+sent-speed check. A client-supplied `force_control` command object is still
+rejected: force-law authority is server config, not an action payload.
+
+## Public motion surface
+
+1. `JointTarget`: absolute joint-space PTP.
+2. `TcpPoseTarget`: Cartesian final-pose PTP; intermediate TCP path is not
+   guaranteed linear.
+3. `TcpLinearMove`: finite MoveL-like path with `constant` or `slerp`
+   orientation behavior.
+
+`SetSafetyFloorZ` and `TareForceSensor` are leaseless non-motion commands, not
+motion primitives.
+
+## Build, test, and launch
 
 ```bash
 python3 -m unittest discover rb_gui/tests
 python3 -m unittest discover policy_runner/tests
-```
+python3 -m compileall -q rb_gui/rb_servo_gui policy_runner/policy_runner scripts
 
-Hardware-free C++ checks:
-
-```bash
 cmake -S rb_servo_server -B rb_servo_server/build
 cmake --build rb_servo_server/build -j
 ctest --test-dir rb_servo_server/build --output-on-failure
 ```
 
-`rb_servo_server` C++ builds require Eigen3 and Pinocchio. Cartesian FK/IK,
-orientation interpolation, frame conversion, and SE(3) delta math delegate to
-Eigen/Pinocchio. Missing Pinocchio is a missing C++ dependency, not a fallback
-runtime mode.
-
-Cartesian math rebaseline is part of the Pinocchio-backed C++ test suite:
+Eigen3 and Pinocchio are mandatory for the C++ Cartesian path. Missing
+dependencies are not a fallback mode.
 
 ```bash
-ctest --test-dir rb_servo_server/build --output-on-failure
+make build
+make run            # physical real stack; operator supervision required
+make run MODE=sim   # rbpodo controller pgmode simulation
 ```
 
-Cartesian behavior is covered by the Pinocchio-backed C++ tests above, then
-exercised on the active stack: mock smoke when a local mock config is available,
-rbpodo controller `pgmode` simulation / VM, and real hardware only through the
-separate supervised runbooks. The old software-simulator-oriented Cartesian
-acceptance runner was removed with the retired simulator-first Cartesian
-acceptance lane.
-
-Start the integrated operator stack (native, not Docker). `make run` brings up
-`rb_servo_server` + the viser GUI + `policy_runner` (SpaceMouse + UMI teleop):
-
-```bash
-make run            # pgmode real (+ gripper_server)
-make run MODE=sim   # pgmode controller-simulation
-```
-
-After editing source, build/install the stack first with `make build`.
-For hardware-free controller-simulation, boot the two Rainbow virtual
-control-box VMs with `make vm-up` and then run `make run MODE=sim`.
-
-Open:
-
-```text
-http://127.0.0.1:8080
-```
-
-## Canonical Configs
-
-Tracked stack configs:
-
-- `rb_servo_server/config/stack_sim.yaml` — rbpodo controller-simulation (`make run MODE=sim`)
-- `rb_servo_server/config/stack_real.yaml` — physical real stack (`make run`, operator-supervised)
-
-Site-local mock / real / controller-simulation (VM·onbox) configs (gitignored):
-
-- `rb_servo_server/config/local/*.yaml`
-- e.g. `rb_servo_server/config/local/stack_real_readonly.yaml`
-- e.g. `rb_servo_server/config/local/stack_real_motion.yaml`
-
-No tracked runnable real robot config should be added. `README.md` is the
-canonical root README; this English README is a best-effort translation.
+The GUI is served at `http://127.0.0.1:8080`. Camera services are managed
+separately with the `make cam-*` targets. Follow the supervised runbooks for
+any physical operation.

@@ -136,6 +136,7 @@ Supported non-motion command modes:
 - `SetSafetyFloorEnabled`
 - `SetSafetyRoiBounds`
 - `SetUserSafetyFloorPlane`
+- `TareForceSensor`
 - `Freedrive`
 - `AcquireLease`
 - `ReleaseLease`
@@ -145,8 +146,39 @@ Supported non-motion command modes:
 `SetSafetyRoiBounds` and `SetUserSafetyFloorPlane` carry their documented safety
 payloads and are bounded by server config.
 
+`TareForceSensor` is leaseless and uses top-level selectors. Omitting both
+selectors means both arms:
+
+```json
+{
+  "schema_version": 1,
+  "seq": 42,
+  "mode": "TareForceSensor",
+  "timeout_sec": 0.5,
+  "tare_left": true,
+  "tare_right": false,
+  "left": {},
+  "right": {}
+}
+```
+
+Keep the arm objects empty. A per-arm `mode` overrides the top-level lifecycle
+mode and can accidentally turn a tare packet into a Hold. Clients may not send
+a `force_control` object; force laws belong to tracked server config.
+
 ## State Highlights
 
 State packets use schema `robotics_lab.servo_state.v1` and publish per-arm joint
 state, TCP actual/reference poses, Cartesian solve telemetry, safety verdicts,
 lease state, floor/ROI/self-collision status, and backend timing/fault context.
+
+Each arm also publishes:
+
+- `force_torque`: raw/gravity/compensated wrench surfaces with named
+  axes/reference points, liveness, bias/tare and automatic-tare state, tool
+  parameters, and load estimate;
+- `force_control`: coverage/refusal reason, selected law, composed deviation,
+  gate, fence, wrench, and IK-refusal telemetry.
+
+J3 state remains raw controller degrees; supported commands and safety limits
+bound it to `[-150 deg, +150 deg]`.

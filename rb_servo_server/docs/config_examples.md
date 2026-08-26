@@ -1,67 +1,63 @@
-# Config Examples
+# Config Policy And Examples
 
-The current config parser supports the simple YAML shape used in `config/*.yaml`:
+The parser is strict YAML (`yaml-cpp`) with known-key allowlists. Config struct,
+parser, validation, and loader tests must change together for any future schema
+work.
 
-```yaml
-section:
-  key: value
-  array_key: [1, 2, 3]
+## Runnable configurations
+
+There are exactly two tracked launch configs:
+
+```text
+config/stack_real.yaml  # physical real
+config/stack_sim.yaml   # rbpodo controller pgmode simulation
 ```
 
-The parser is implemented with `yaml-cpp` and validates known keys strictly.
-When adding nested structures, update the parser allowlists, validation, and
-config-loader tests together.
+Do not create `config/local` launch variants. Relative URDF/package paths can
+resolve differently one directory deeper, the effective real-motion profile
+disappears from review, and a local file carrying real enables can be committed
+accidentally.
 
-## Mock
+For a reviewed acceptance stage, edit one setting in the appropriate tracked
+config, record the diff with the artifact, preflight it without hardware, run
+the supervised procedure, and restore that setting explicitly:
 
 ```bash
-./build/rb_servo_server --config config/local/<mock-config>.yaml
+rb_servo_server/build/rbpodo_real_gate/rb_servo_server \
+  --check-config --config rb_servo_server/config/stack_real.yaml
+
+git diff -- rb_servo_server/config/stack_real.yaml
 ```
 
-Mock mode uses `MockBackend` for both arms. No tracked runnable mock config is
-kept; use a site-local YAML under `config/local/`. Controller-level simulation
-uses the rbpodo `pgmode` simulation flavor (`make run MODE=sim`).
+The simulation equivalent uses `stack_sim.yaml`. A hardware-free mock smoke may
+use an explicit temporary YAML outside the repository, such as a `mktemp -d`
+path; it is not a third launch profile.
 
-## Real robot
-
-`config/stack_real.yaml` is the tracked real-stack reference template. Actual
-site-specific real robot YAML files belong under `config/local/`, and local
-`*.yaml` files there are gitignored. Use a local copy such as
-`config/local/stack_real_readonly.yaml` for read-only bring-up and a separate
-local copy such as `config/local/stack_real_motion.yaml` only for approved motion
-procedures.
-
-The real stack uses the assigned controller IPs:
+## Stable public values
 
 ```yaml
-left_robot:
-  backend_type: rbpodo
-  run_mode: real
-  ip: "172.28.60.200"
-
-right_robot:
-  backend_type: rbpodo
-  run_mode: real
-  ip: "172.28.60.201"
-
-servo:
-  send_servo_commands: false
+run_mode: mock | simulation | real
+backend_type: mock | rbpodo
 ```
 
-Real robot behavior remains gated outside the hardware-free workflow, but it is
-config-driven, not env-gated (the legacy `RB_ALLOW_REAL_*` env gates were removed
-from the server runtime). Read-only real connection keeps
-`servo.send_servo_commands: false`; real `servo_j` motion requires
-`servo.send_servo_commands: true` in a site-local real config; real Cartesian/TCP
-motion additionally requires `cartesian_control.allow_in_real: true`. Together
-with the mode-independent safety layers, operator supervision, and the hardware
-E-stop, the site-local config is the sole decider. The rbpodo `disable_waiting_ack` arm option is
-wired to the SDK ACK-wait toggle and defaults to `false` in the tracked stack
-template; only change it in site-local motion configs after command-path
-acceptance.
+Supported rbpodo Servo J fields are `servo_t1_sec`, `servo_t2_sec`,
+`servo_gain`, and `servo_alpha`. The supported 500 Hz profile uses
+`0.002`, `0.021`, `1.0`, and `10.0` respectively.
 
-## Force control
+The raw joint envelope is:
 
-There is no force control, and `force_control:` is not a config section. A
-config that still declares it fails to load. See
-`docs/archive/force_control_v1/` for the removed v1 design.
+```yaml
+safety:
+  q_min_deg: [-360, -360, -150, -360, -360, -360]
+  q_max_deg: [360, 360, 150, 360, 360, 360]
+```
+
+J3 must remain exactly `[-150 deg, +150 deg]`, matching Rainbow and the URDF.
+
+## Force-control ownership
+
+`force_torque:` and `force_control:` are live server config sections in the
+tracked real profile. Their measured sensor/tool parameters and coupled
+gate/spring/fence values must be reviewed as one safety-relevant unit. A client
+command may request `TareForceSensor`; it may not override the force law with a
+`force_control` payload.
