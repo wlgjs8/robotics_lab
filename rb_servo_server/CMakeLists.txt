@@ -238,6 +238,10 @@ if(BUILD_TESTING)
     target_link_libraries(test_plan_gate PRIVATE rb_servo_core)
     add_test(NAME plan_gate COMMAND test_plan_gate)
 
+    add_executable(test_projection_release tests/test_projection_release.cpp)
+    target_link_libraries(test_projection_release PRIVATE rb_servo_core)
+    add_test(NAME projection_release COMMAND test_projection_release)
+
     add_executable(test_user_floor_constraint tests/test_user_floor_constraint.cpp)
     target_link_libraries(test_user_floor_constraint PRIVATE rb_servo_core)
     add_test(NAME user_floor_constraint COMMAND test_user_floor_constraint)

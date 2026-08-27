@@ -938,6 +938,12 @@ struct SafetyProjectionTelemetry {
     int constraint_count = 0;              // rows handed to the Gauss-Seidel solve
     double left_correction_deg_s = 0.0;    // max joint-speed removed, per arm
     double right_correction_deg_s = 0.0;
+    // What actually reached the wire after the release slew shaped it. The two
+    // above are the SOLVER's answer and are unchanged by the slew, so they cannot
+    // show whether the release was ramped -- these can. Equal to the solver value
+    // whenever the correction is growing (the slew only bounds shrinking).
+    double left_applied_correction_deg_s = 0.0;
+    double right_applied_correction_deg_s = 0.0;
     bool ceiling_clamped = false;          // global per-joint velocity ceiling bound
     double min_margin_m = -1.0;            // min d_now across engaged rows; -1 = none
     // WHICH pair is actually near ITS OWN floor, and by how much. min_margin_m is a

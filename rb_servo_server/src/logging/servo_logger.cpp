@@ -645,6 +645,8 @@ void ServoLogger::writeHeader() {
     // `projection_min_headroom_class` / `_d_hard_m` say which floor applied.
     file_ << ",projection_active,projection_constraint_count"
              ",left_projection_correction_deg_s,right_projection_correction_deg_s"
+             ",left_projection_applied_correction_deg_s"
+             ",right_projection_applied_correction_deg_s"
              ",projection_ceiling_clamped,projection_min_margin_m,selfcol_verdict_age_ms"
              ",projection_min_headroom_m,projection_min_headroom_d_hard_m"
              ",projection_min_headroom_class,projection_min_headroom_pair"
@@ -1361,6 +1363,8 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << ',' << sample.safety_projection.constraint_count
           << ',' << sample.safety_projection.left_correction_deg_s
           << ',' << sample.safety_projection.right_correction_deg_s
+          << ',' << sample.safety_projection.left_applied_correction_deg_s
+          << ',' << sample.safety_projection.right_applied_correction_deg_s
           << ',' << sample.safety_projection.ceiling_clamped
           << ',' << sample.safety_projection.min_margin_m
           << ',' << sample.safety_projection.selfcol_verdict_age_ms

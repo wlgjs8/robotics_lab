@@ -260,6 +260,31 @@ safety:
   # occurred on ~2.1% -- a threshold near zero would pin the window open and freeze the
   # plan permanently.
   throttle_intervention_deg_s: 50.0
+  # PROJECTION RELEASE SLEW (2026-08-28), in deg/s^2 of correction velocity.
+  # The geometric projection re-solves from scratch every tick, so its correction
+  # was free to collapse in one tick. Engaging fast is the point of a damper;
+  # dis-engaging fast is where the vibration came from.
+  # MEASURED, servo_log_20260828_004539.csv, the left-arm <-> stand event at
+  # t=223.37-224.01 s. The barrier itself was correct: it pinned the clearance at
+  # 24.86-25.01 mm against its own 25 mm floor for 0.58 s while the arm kept moving
+  # tangentially (J1 held ~-40 deg/s, J5 swept +1.7 -> +31 deg/s). What was not
+  # correct was how the correction CHANGED:
+  #   - 40 single-tick dropouts on the left arm (25 on the right): the correction
+  #     read 12.28 -> 3.93 -> 12.36 and 12.36 -> 3.94 -> 12.09, each ~4,280 deg/s^2.
+  #     |dcorr|/tick was p50 0.197 but p95 8.42 deg/s -- a split distribution.
+  #   - a step release: 12.09 -> 0.00 in one tick, immediately followed by J1
+  #     -53.8 -> -83.6 deg/s and 5,946 deg/s^2. Seven more on the right arm.
+  #   - net 8-60 Hz command vibration of 2.88 in that window vs a run median of
+  #     0.248 (12x).
+  # A d_hard standoff does NOT address this: it changes WHERE the barrier holds,
+  # and the defect is in HOW the correction changes. 400 deg/s^2 turns the measured
+  # 12.09 deg/s release into a ~30 ms ramp and the 8.4 deg/s dropouts into ~21 ms,
+  # while staying at 13-27% of ddq_max_deg_s2 (1500-3000) so the release itself can
+  # never be the dominant jerk. Growing the correction stays instantaneous, so the
+  # safety response is never delayed; only shrinking is bounded, which is always the
+  # conservative side. 0 restores the legacy one-tick release.
+  projection_release_slew_deg_s2: 400.0
+
   # SAFETY PLAN GATE (2026-08-26). The geometric layers slow the ARM but nothing
   # slowed the PLAN: the chunk follower kept integrating at up to 0.45 m/s while a
   # barrier held the arm, and the accumulated lead discharged either as a release

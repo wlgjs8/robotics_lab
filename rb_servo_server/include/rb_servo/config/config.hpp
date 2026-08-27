@@ -1018,6 +1018,12 @@ struct SafetyConfig {
     JointTargetSmdConfig joint_target_smd;
     InitMotionPlannerConfig init_motion_planner;
     SafetyPlanGateConfig plan_gate;
+    // How fast the geometric projection's correction may RELEASE, in deg/s^2 of
+    // correction velocity. Growing it stays instantaneous; only shrinking is bounded.
+    // 0 disables (legacy: the correction is free to drop to zero in one tick, which
+    // is what produced the measured 12.09 deg/s -> 0 release and the 8.4 deg/s
+    // single-tick dropouts -- see control/projection_release.hpp).
+    double projection_release_slew_deg_s2 = 0.0;
 };
 
 inline constexpr JointArray rbpodoDefaultSafetyJointMinDeg() {

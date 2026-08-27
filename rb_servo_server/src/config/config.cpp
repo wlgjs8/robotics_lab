@@ -1484,6 +1484,11 @@ void validateConfig(const DualArmConfig& cfg) {
         }
         validateTcpOffsetPoints(fc.tcp_offset_points, "safety.floor_constraint.tcp_offset_points");
     }
+    if (!std::isfinite(cfg.safety.projection_release_slew_deg_s2) ||
+        cfg.safety.projection_release_slew_deg_s2 < 0.0) {
+        throw std::runtime_error(
+            "safety.projection_release_slew_deg_s2 must be finite and non-negative");
+    }
     if (cfg.safety.plan_gate.enable) {
         const auto& pg = cfg.safety.plan_gate;
         if (!std::isfinite(pg.release_alpha) || pg.release_alpha <= 0.0 || pg.release_alpha > 1.0) {
@@ -2884,7 +2889,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "joint_target_smd",
             "init_motion_planner",
             "plan_gate",
+            "projection_release_slew_deg_s2",
         }, "safety");
+        if (has(sec, "projection_release_slew_deg_s2")) {
+            cfg.safety.projection_release_slew_deg_s2 = asDouble(
+                sec["projection_release_slew_deg_s2"],
+                "safety.projection_release_slew_deg_s2");
+        }
         if (has(sec, "plan_gate")) {
             const YAML::Node pg = sec["plan_gate"];
             validateAllowedKeys(pg, {

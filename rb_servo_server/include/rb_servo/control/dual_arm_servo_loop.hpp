@@ -726,6 +726,9 @@ private:
     // Safety plan gate state (per arm, [left, right]): written by applySafety,
     // read by applyChunkFollowerStage next tick. Loop thread only.
     std::array<double, 2> plan_gate_state_{1.0, 1.0};
+    // Last tick's per-joint projection correction (degrees), [0]=left [1]=right.
+    // Carried so the release can be rate-limited; see control/projection_release.hpp.
+    std::array<JointArray, 2> projection_correction_prev_{};
     uint64_t roi_clamp_count_ = 0;
     std::string roi_last_set_reject_reason_;
     // Reachable-shell constraint (safety.reach_constraint): per-arm telemetry of the

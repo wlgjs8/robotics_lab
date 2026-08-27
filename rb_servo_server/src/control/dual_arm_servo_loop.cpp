@@ -20,6 +20,7 @@
 #include "rb_servo/control/cartesian_controller.hpp"
 #include "rb_servo/control/fault_classifier.hpp"
 #include "rb_servo/control/plan_gate.hpp"
+#include "rb_servo/control/projection_release.hpp"
 #include "rb_servo/control/servo_dispatcher.hpp"
 #include "rb_servo/core/clock.hpp"
 #include "rb_servo/kinematics/ik_solver.hpp"
@@ -7414,6 +7415,33 @@ ServoTarget DualArmServoLoop::applySafety(
                           << ((left_blocked || right_blocked) ? "  BLOCKED" : "") << "\n";
             }
         }
+    }
+
+    // PROJECTION RELEASE SLEW. Runs on EVERY tick, deliberately outside the solve
+    // block above: the step release happens exactly on the tick the constraint rows
+    // disengage and the solve is skipped, so gating this on `!safety_cons.empty()`
+    // would leave the one case it exists to fix. Growing the correction is still
+    // instantaneous; only shrinking is bounded. See control/projection_release.hpp
+    // for the measured 12.09 deg/s -> 0 release and the 40 single-tick dropouts.
+    //
+    // Placed AFTER the verdict/intervention bookkeeping above so the reported
+    // correction and the blocked/intervened decisions stay the solver's own answer:
+    // this shapes what reaches the wire, not what the safety layer concluded.
+    control::projectionReleaseStep(
+        plan_gate_requested[0], out.left_q_target_deg, projection_correction_prev_[0],
+        dt_sec, config_.safety.projection_release_slew_deg_s2);
+    control::projectionReleaseStep(
+        plan_gate_requested[1], out.right_q_target_deg, projection_correction_prev_[1],
+        dt_sec, config_.safety.projection_release_slew_deg_s2);
+    if (dt_sec > 0.0) {
+        double la = 0.0;
+        double ra = 0.0;
+        for (int j = 0; j < kDof; ++j) {
+            la = std::max(la, std::abs(projection_correction_prev_[0][j]) / dt_sec);
+            ra = std::max(ra, std::abs(projection_correction_prev_[1][j]) / dt_sec);
+        }
+        safety_projection_telemetry_.left_applied_correction_deg_s = la;
+        safety_projection_telemetry_.right_applied_correction_deg_s = ra;
     }
 
     // SAFETY PLAN GATE input: how much of the step an OBSTRUCTION removed. Both
