@@ -563,7 +563,109 @@ bool testOscillationGuardTripsFreezesAndReleases() {
     return true;
 }
 
+// THE CONTACT-SHOCK LOW-PASS TAKES THE BURST, NOT THE CONTACT.
+// A real contact arrives as a burst: measured 2026-08-27 the compensated |F|
+// swung 0 -> 98.6 N and back every few ticks (53.8 N inside one 2 ms tick), and
+// the overlay followed it into 1,501 deg/s^2 of commanded acceleration. The
+// filter has to flatten that while leaving the STEADY force the law regulates
+// against exactly where it was -- otherwise it would change the contact the
+// operator tuned k against. Modelled here on the deviation the law produces,
+// which is what actually reaches the robot.
+bool testWrenchFilterFlattensShockAndKeepsSteadyForce() {
+    const double dt = 0.002;
+    const double hz = 25.0;
+    const double alpha = dt / (1.0 / (2.0 * M_PI * hz) + dt);
+    const auto lowpass = [&](double state, double x) { return state + alpha * (x - state); };
+
+    // 1) STEADY force is untouched: 10 N through the filter still settles at F/k.
+    {
+        rb_servo::control::AdmittanceOverlay overlay;
+        overlay.configure(shippedLaw(), dt);
+        double s = 0.0;
+        const rb_servo::math::Vector3 m = rb_servo::math::Vector3::Zero();
+        for (int i = 0; i < 20000; ++i) {
+            s = lowpass(s, 10.0);
+            overlay.step(rb_servo::math::Vector3(0.0, 0.0, s), m);
+        }
+        CHECK(near(overlay.deviation().z(), 10.0 / 400.0, 1e-4));
+    }
+
+    // 2) THE SHOCK ITSELF. The incident's signature was the per-tick jump:
+    //    53.8 N inside one 2 ms tick. That is what the filter has to take out,
+    //    and it is measured on the wrench, not through the law -- at the
+    //    incident's 98.6 N the deviation is pinned on the 40 mm fence (98.6/400
+    //    = 246 mm of spring travel), so anything measured downstream of it is
+    //    reading the fence's velocity zeroing, not the filter.
+    {
+        double s = 0.0;
+        double raw_jump = 0.0;
+        double filt_jump = 0.0;
+        double prev_raw = 0.0;
+        double prev_s = 0.0;
+        for (int i = 0; i < 4000; ++i) {
+            const double raw = ((i / 3) % 2 == 0) ? 98.6 : 0.0;
+            s = lowpass(s, raw);
+            if (i > 100) {
+                raw_jump = std::max(raw_jump, std::abs(raw - prev_raw));
+                filt_jump = std::max(filt_jump, std::abs(s - prev_s));
+            }
+            prev_raw = raw;
+            prev_s = s;
+        }
+        std::printf("  shock: max |dF| per tick raw=%.1f N filtered=%.1f N (%.1fx)\n",
+                    raw_jump, filt_jump, raw_jump / std::max(filt_jump, 1e-9));
+        CHECK(raw_jump > 50.0);              // the incident's 53.8 N/tick
+        CHECK(filt_jump < 0.25 * raw_jump);  // and the law no longer sees it
+    }
+
+    // 3) Through the LAW, below the fence, the burst reaches the deviation
+    //    smaller. 12 N peaks settle at 30 mm, inside the 40 mm fence, so this
+    //    measures the filter and not the clamp.
+    const auto peak_deviation_rate = [&](bool filtered) {
+        rb_servo::ForceControlConfig cfg = shippedLaw();
+        cfg.gate_enable = false;          // isolate the law from the gate
+        rb_servo::control::AdmittanceOverlay overlay;
+        overlay.configure(cfg, dt);
+        const rb_servo::math::Vector3 m = rb_servo::math::Vector3::Zero();
+        double s = 0.0;
+        double worst = 0.0;
+        double prev_v = 0.0;
+        for (int i = 0; i < 4000; ++i) {
+            const double raw = ((i / 3) % 2 == 0) ? 12.0 : 0.0;
+            s = lowpass(s, raw);
+            overlay.step(rb_servo::math::Vector3(0.0, 0.0, filtered ? s : raw), m);
+            CHECK(!overlay.bounded());    // never on the fence: this is the law, not the clamp
+            const double v = overlay.velocity().z();
+            if (i > 100) worst = std::max(worst, std::abs(v - prev_v) / dt);  // m/s^2
+            prev_v = v;
+        }
+        return worst;
+    };
+    const double raw_peak = peak_deviation_rate(false);
+    const double filt_peak = peak_deviation_rate(true);
+    std::printf("  law: deviation accel peak raw=%.3f filtered=%.3f m/s^2 (%.1fx)\n",
+                raw_peak, filt_peak, raw_peak / std::max(filt_peak, 1e-9));
+    CHECK(filt_peak < raw_peak * 0.5);   // the burst is at least halved
+
+    // 3) The filter is a LAW input, not a motion filter: at 0 Hz the caller feeds
+    //    the raw wrench and the behaviour is bit-identical to before.
+    {
+        rb_servo::control::AdmittanceOverlay a, b;
+        a.configure(shippedLaw(), dt);
+        b.configure(shippedLaw(), dt);
+        const rb_servo::math::Vector3 m = rb_servo::math::Vector3::Zero();
+        for (int i = 0; i < 500; ++i) {
+            const rb_servo::math::Vector3 f(0.0, 0.0, (i % 7) * 3.0);
+            a.step(f, m);
+            b.step(f, m);
+        }
+        CHECK(near(a.deviation().z(), b.deviation().z()));
+    }
+    return true;
+}
+
 int main() {
+    testWrenchFilterFlattensShockAndKeepsSteadyForce();
     testOscillationGuardTripsFreezesAndReleases();
     testAxisMapIsTheMeasuredLeftHandedBasis();
     testFullToolGravityIsSubtracted();

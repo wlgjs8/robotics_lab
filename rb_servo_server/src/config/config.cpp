@@ -2108,6 +2108,17 @@ void validateConfig(const DualArmConfig& cfg) {
                 validatePositiveFinite(fc.oscillation_release_torque_nm, "force_control.oscillation_release_torque_nm");
                 validatePositiveFinite(fc.oscillation_release_quiet_sec, "force_control.oscillation_release_quiet_sec");
             }
+            validateNonNegativeFinite(fc.wrench_filter_hz, "force_control.wrench_filter_hz");
+            // Below the Nyquist of the control rate the filter is not a filter, it
+            // is a delay line; above ~1/4 of it there is nothing left to remove.
+            if (fc.wrench_filter_hz > 0.0) {
+                const double nyquist = 0.5 * static_cast<double>(cfg.servo.rate_hz);
+                if (fc.wrench_filter_hz >= nyquist) {
+                    throw std::runtime_error(
+                        "force_control.wrench_filter_hz must stay below the control "
+                        "rate's Nyquist frequency");
+                }
+            }
             validateNonNegativeFinite(fc.coverage_recover_sec, "force_control.coverage_recover_sec");
             validateNonNegativeFinite(fc.hold_relatch_max_force_n, "force_control.hold_relatch_max_force_n");
         }
@@ -3856,6 +3867,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "hold_compliance", "max_state_age_sec",
             "command_execution_tau_sec", "command_execution_min_rate_dps",
             "command_execution_min_ratio",
+            "wrench_filter_hz",
             "oscillation_guard_enable", "oscillation_min_reversals",
             "oscillation_window_sec", "oscillation_min_velocity_frac",
             "oscillation_release_force_n", "oscillation_release_torque_nm",
@@ -3920,6 +3932,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "command_execution_tau_sec")) fc.command_execution_tau_sec = asDouble(sec["command_execution_tau_sec"], "force_control.command_execution_tau_sec");
         if (has(sec, "command_execution_min_rate_dps")) fc.command_execution_min_rate_dps = asDouble(sec["command_execution_min_rate_dps"], "force_control.command_execution_min_rate_dps");
         if (has(sec, "command_execution_min_ratio")) fc.command_execution_min_ratio = asDouble(sec["command_execution_min_ratio"], "force_control.command_execution_min_ratio");
+        if (has(sec, "wrench_filter_hz")) fc.wrench_filter_hz = asDouble(sec["wrench_filter_hz"], "force_control.wrench_filter_hz");
         if (has(sec, "oscillation_guard_enable")) fc.oscillation_guard_enable = asBool(sec["oscillation_guard_enable"], "force_control.oscillation_guard_enable");
         if (has(sec, "oscillation_min_reversals")) fc.oscillation_min_reversals = asInt(sec["oscillation_min_reversals"], "force_control.oscillation_min_reversals");
         if (has(sec, "oscillation_window_sec")) fc.oscillation_window_sec = asDouble(sec["oscillation_window_sec"], "force_control.oscillation_window_sec");

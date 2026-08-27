@@ -85,6 +85,7 @@ tests/test_gripper_startup_open_config.py
 tests/test_hdf5_audit.py
 tests/test_hdf5_recording.py
 tests/test_hdf5_viewer.py
+tests/test_joint_limit_stall_abort.py
 tests/test_openpi_remote_blank_depth.py
 tests/test_openpi_remote_fisheye.py
 tests/test_openpi_remote_rtc.py

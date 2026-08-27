@@ -5864,6 +5864,9 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             // retiring would command the tool the whole deviation deeper.
             overlay.freeze();
             hold_nominal.reset();
+            // Unprime the contact-shock filter: a law that resumes minutes later
+            // must seed from the live wrench, not ring down from a stale one.
+            (fc_left ? left_wrench_filter_primed_ : right_wrench_filter_primed_) = false;
             continue;
         }
         if (eff.mode != ControlMode::Hold) {
@@ -8267,9 +8270,54 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
     // The wrench source and the compose pivot are BOTH the TCP, which is what keeps
     // a straight push from twisting the tool.
     const Wrench6D& w = pipe.compStand();
-    const math::Vector3 f_stand(w.fx, w.fy, w.fz);
-    const math::Vector3 m_stand(w.tx, w.ty, w.tz);
+    // TELEMETRY KEEPS THE RAW MEASUREMENT. The filter below shapes only what the
+    // LAW consumes, so the published/logged wrench still answers "what did the
+    // sensor say", which is the question an operator asks of it.
     tel.wrench_stand = w;
+    math::Vector3 f_stand(w.fx, w.fy, w.fz);
+    math::Vector3 m_stand(w.tx, w.ty, w.tz);
+    // CONTACT-SHOCK LOW-PASS (force_control.wrench_filter_hz), on the FORCE path
+    // only -- the servo command path keeps its filters off by design. A contact
+    // arrives as a burst, not a step: measured 2026-08-27 the compensated |F|
+    // swung 0 -> 98.6 N and back every few ticks (53.8 N in one 2 ms tick) and
+    // the overlay followed it into 1,501 deg/s^2 of commanded acceleration. One
+    // pole at this corner takes the burst out and leaves the steady contact
+    // force the law regulates against.
+    {
+        const double hz = config_.force_control.wrench_filter_hz;
+        // Nominal period, like AdmittanceOverlay/ForceGate already use: the law's
+        // own dt is fixed, so its input filter must not breathe with loop jitter.
+        const double dt = config_.servo.rate_hz > 0
+            ? 1.0 / static_cast<double>(config_.servo.rate_hz)
+            : 0.002;
+        Wrench6D& state = left ? left_wrench_filter_ : right_wrench_filter_;
+        bool& primed = left ? left_wrench_filter_primed_ : right_wrench_filter_primed_;
+        if (hz > 0.0 && dt > 0.0) {
+            // Seed on the first covered tick (and after any gap) so the law does
+            // not start by ramping up from a stale zero.
+            if (!primed) {
+                state = w;
+                primed = true;
+            } else {
+                const double tau = 1.0 / (2.0 * M_PI * hz);
+                const double a = std::min(1.0, dt / (tau + dt));
+                state.fx += a * (w.fx - state.fx);
+                state.fy += a * (w.fy - state.fy);
+                state.fz += a * (w.fz - state.fz);
+                state.tx += a * (w.tx - state.tx);
+                state.ty += a * (w.ty - state.ty);
+                state.tz += a * (w.tz - state.tz);
+            }
+            f_stand = math::Vector3(state.fx, state.fy, state.fz);
+            m_stand = math::Vector3(state.tx, state.ty, state.tz);
+            tel.wrench_filtered_stand = state;
+            tel.wrench_filter_hz = hz;
+        } else {
+            primed = false;
+            tel.wrench_filtered_stand = w;
+            tel.wrench_filter_hz = 0.0;
+        }
+    }
 
     // ---- the workspace frame, re-aimed every tick ---------------------------
     // The per-axis law is only meaningful in a frame the task reasons in, and for a

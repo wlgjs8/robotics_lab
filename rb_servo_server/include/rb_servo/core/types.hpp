@@ -622,6 +622,12 @@ struct ForceControlTelemetry {
     // the edge-logger print a WARN every tick.
     int coverage_recover_streak = 0;
     int coverage_recover_needed = 0;
+    // The wrench the LAW actually consumed, after the contact-shock low-pass
+    // (force_control.wrench_filter_hz; 0 = filter off, equals wrench_stand).
+    // wrench_stand above stays the RAW measurement, so the pair shows exactly
+    // what the filter removed.
+    Wrench6D wrench_filtered_stand{};
+    double wrench_filter_hz = 0.0;
     double fence_m = 0.0;
     double fence_rad = 0.0;
     // THE GATE: the fraction of the plan advance that survives along the direction

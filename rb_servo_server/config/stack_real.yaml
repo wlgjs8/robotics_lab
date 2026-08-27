@@ -1004,6 +1004,25 @@ force_control:
   max_velocity_rad_s: 2.00
   max_acceleration_rad_s2: 20.0
 
+  # CONTACT-SHOCK LOW-PASS ON THE WRENCH THE LAW SEES (2026-08-27).
+  # *** THIS FILTERS FORCE, NOT MOTION. *** It sits between the F/T pipeline and
+  # the admittance law + force gate. The servo command path keeps its own filters
+  # OFF on purpose (servo_alpha 10.0, output_moving_average_window 1) and is not
+  # touched, and the logged/published wrench stays the RAW measurement -- the
+  # filtered value is logged separately as *_fc_wrench_filt_* so the pair shows
+  # what was removed.
+  # MEASURED (servo_log_20260827_164625.csv, right arm, t=410.1 s): on contact the
+  # compensated |F| swung 0 -> 98.6 N and back every few ticks -- 53.8 N inside a
+  # single 2 ms tick, 26,900 N/s -- and the overlay followed it faithfully. Median
+  # commanded acceleration during contact was 1,501 deg/s^2 (the accel clamp's own
+  # ceiling, engaged on half those ticks) against 57 deg/s^2 streaming free. That
+  # is the jerk felt at contact. The deviation moved one way throughout, so it is
+  # shock-following, not the limit cycle the oscillation guard catches.
+  # 25 Hz: one pole, ~6 ms of lag against the box's own 12 ms pipeline, well above
+  # the 0.8 Hz admittance corner so the steady contact force is untouched. Set 0
+  # to feed the law the raw wrench (pre-2026-08-27 behaviour) for an A/B.
+  wrench_filter_hz: 25.0
+
   # OSCILLATION GUARD (2026-08-27 incident, servo_log_20260827_101144.csv). A hand
   # push pinned the 40 mm translation fence, then a ~5.3 Hz coupled oscillation
   # (F/T dynamic feedback through the ~12 ms pipeline delay) grew INSIDE the

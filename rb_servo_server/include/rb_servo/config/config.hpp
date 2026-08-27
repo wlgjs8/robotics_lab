@@ -1416,6 +1416,28 @@ struct ForceControlConfig {
     // and far above the dead one, so it separates them without sitting on either.
     double command_execution_min_ratio = 0.05;    // ref rate must be >= this x cmd rate
 
+    // ---- contact-shock low-pass on the wrench the LAW sees (2026-08-27) -----
+    // *** THIS FILTERS FORCE, NOT MOTION. *** It sits between the F/T pipeline
+    // and the admittance law + force gate, and nothing else reads through it:
+    // the servo command path keeps its filters OFF on purpose (servo_alpha 10.0,
+    // output_moving_average_window 1), and the logged/published wrench stays the
+    // raw measurement so telemetry still shows what the sensor actually said.
+    //
+    // Why: a real contact does not arrive as a step, it arrives as a burst.
+    // Measured 2026-08-27 (servo_log_20260827_164625.csv, right arm, t=410.1 s):
+    // the compensated |F| swung 0 -> 98.6 N and back every few ticks, up to
+    // 53.8 N in ONE 2 ms tick (26,900 N/s), and the overlay followed it
+    // faithfully -- median commanded acceleration during contact was 1,501
+    // deg/s^2 (the accel clamp's own ceiling, engaged on half the ticks) against
+    // 57 deg/s^2 while streaming free. That is the jerk the operator felt. The
+    // deviation moved one way throughout, so this is shock-following, not the
+    // limit cycle the oscillation guard catches.
+    //
+    // A first-order low-pass at this corner removes the burst without touching
+    // the steady contact force the law regulates against. 0 = off (raw wrench,
+    // the pre-2026-08-27 behaviour).
+    double wrench_filter_hz = 0.0;
+
     // ---- oscillation guard (2026-08-27) ------------------------------------
     // The deviation dynamics obey the per-part velocity/acceleration caps and the
     // fence, and STILL went unstable: a hand push on 2026-08-27 pinned the 40 mm

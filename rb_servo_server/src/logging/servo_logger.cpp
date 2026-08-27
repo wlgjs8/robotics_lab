@@ -363,6 +363,13 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_fc_gate_torque_nm"
        << ',' << side << "_fc_gate_closed"
        << ',' << side << "_fc_gate_removed_m"
+       // The wrench the LAW consumed, after the contact-shock low-pass, beside
+       // the RAW one in the ft_ block above: the pair is what shows how much
+       // shock the filter took out (0 Hz => filter off, the two are equal).
+       << ',' << side << "_fc_wrench_filter_hz"
+       << ',' << side << "_fc_wrench_filt_fx_n"
+       << ',' << side << "_fc_wrench_filt_fy_n"
+       << ',' << side << "_fc_wrench_filt_fz_n"
        // The two tracking errors, beside the force columns because the force path is
        // what makes them diverge: a compliant command deliberately leaves the arm.
        << ',' << side << "_track_command_vs_actual_deg"
@@ -741,6 +748,10 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << fc.gate_torque_nm
        << ',' << fc.gate_closed
        << ',' << fc.gate_removed_m
+       << ',' << fc.wrench_filter_hz
+       << ',' << fc.wrench_filtered_stand.fx
+       << ',' << fc.wrench_filtered_stand.fy
+       << ',' << fc.wrench_filtered_stand.fz
        << ',' << track.command_vs_actual_deg
        << ',' << track.reference_vs_actual_deg
        << ',' << track.reference_valid

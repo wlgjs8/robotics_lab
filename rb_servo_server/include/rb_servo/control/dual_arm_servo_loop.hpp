@@ -833,6 +833,14 @@ private:
     // Oscillation-guard WARN edge detection (telemetry resets per tick).
     uint64_t left_osc_trips_logged_ = 0;
     uint64_t right_osc_trips_logged_ = 0;
+    // Contact-shock low-pass state for the wrench the FORCE LAW consumes
+    // (force_control.wrench_filter_hz). Not on the servo command path. Unprimed
+    // while the arm is uncovered, so a resumed law seeds from the live wrench
+    // instead of ramping up from a stale one.
+    Wrench6D left_wrench_filter_{};
+    Wrench6D right_wrench_filter_{};
+    bool left_wrench_filter_primed_ = false;
+    bool right_wrench_filter_primed_ = false;
     // Deactivated-box gate debounce (loop thread only).
     int left_box_deactivated_ticks_ = 0;
     int right_box_deactivated_ticks_ = 0;
