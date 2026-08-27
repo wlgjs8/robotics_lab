@@ -118,9 +118,14 @@ cam-up:
 
 # head D435 없이 손목 D405 두 대만으로 기동(잦은 head/허브 USB 장애 격리용).
 # 손목 RGB-D 번들(camera.bundle.policy + wrist_left/right)은 그대로 동작한다.
+# 포인트 클라우드 워커까지 같이 띄운다 — 손목 리그에서 rb_gui가 클라우드를 보여주는
+# 것이 기본 기대값이므로 별도 타겟을 기억하게 하지 않는다. 워커만 따로 껐다 켜려면
+# make cloud-up / cloud-down, 카메라만 원하면 CLOUD=0.
+CLOUD ?= 1
 cam-up-wrists:
-	$(MAKE) cam-up CAMERA_CONFIG=/app/config/dual_realsense_d405.yaml
-	@echo "손목 포인트 클라우드를 rb_gui에서 보려면: make cloud-up"
+	@$(MAKE) --no-print-directory cam-up CAMERA_CONFIG=/app/config/dual_realsense_d405.yaml
+	@if [ "$(CLOUD)" != "0" ]; then $(MAKE) --no-print-directory cloud-up; \
+	else echo "cloud worker skipped (CLOUD=0) — 필요하면 make cloud-up"; fi
 
 # 손목(D405) 포인트 클라우드 publisher — rb_gui viser 씬의 `stereo.wrist` 소스.
 # 호스트에서 돈다(컨테이너 아님): camera_server의 ZMQ 5600 + /dev/shm 링을 읽고
@@ -196,7 +201,10 @@ cam-status:
 	esac; \
 	exit $$rc
 
+# 클라우드 워커를 먼저 내린다: camera_server 가 사라진 뒤 남은 워커는 5600 에서
+# 아무것도 못 받고 계속 도는 좀비가 된다.
 cam-down:
+	@$(MAKE) --no-print-directory cloud-down
 	-docker stop camera_server
 	-docker rm camera_server
 
