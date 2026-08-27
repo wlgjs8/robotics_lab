@@ -19,6 +19,7 @@
 
 #include "rb_servo/control/cartesian_controller.hpp"
 #include "rb_servo/control/fault_classifier.hpp"
+#include "rb_servo/control/plan_gate.hpp"
 #include "rb_servo/control/servo_dispatcher.hpp"
 #include "rb_servo/core/clock.hpp"
 #include "rb_servo/kinematics/ik_solver.hpp"
@@ -7251,6 +7252,12 @@ ServoTarget DualArmServoLoop::applySafety(
         }
     }
 
+    // PLAN GATE reference (consumed by the gate block at the end of this function).
+    // Snapshot the targets as they stand AFTER the clamp stages and BEFORE the
+    // obstruction projection rewrites them, so the gate sees only motion that an
+    // obstruction removed. See the gate block for why the clamps must not count.
+    const JointArray plan_gate_requested[2] = {out.left_q_target_deg, out.right_q_target_deg};
+
     // ---- Combined Gauss-Seidel solve (floor + self-collision together) ----
     if (!safety_cons.empty() && !self_collision_hold &&
         combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
@@ -7332,29 +7339,42 @@ ServoTarget DualArmServoLoop::applySafety(
         }
     }
 
-    // SAFETY PLAN GATE input: how much of the requested step survived the
-    // filter + projection. Attack instantaneous, release first-order, per arm.
-    // Consumed by applyChunkFollowerStage on the NEXT tick (one-tick delay).
+    // SAFETY PLAN GATE input: how much of the step an OBSTRUCTION removed. Both
+    // attack and release are first-order, per arm. Consumed by
+    // applyChunkFollowerStage on the NEXT tick (one-tick delay).
+    //
+    // The input is `plan_gate_requested` (post-clamp, pre-projection) vs the final
+    // target, NOT `desired` vs final. The difference is the whole fix. Measured on
+    // servo_log_20260827_213651.csv, where the gate ran off `desired`:
+    //
+    //   - 77.6% of the LEFT arm's gated ticks co-occurred with the joint-limit
+    //     clamp and only 5.5% with the self-collision projection. Of 11.07 s of
+    //     plan time the gate threw away (6.5% of a 169 s run, ~53 chunks of lag),
+    //     9.42 s sat on the J3 approach barrier and 0.72 s on the projection.
+    //   - The barrier is not an obstruction: its JOB is to park one joint at the
+    //     149.90 deg standoff and hold it there, so `realized < requested` on that
+    //     joint is permanently true while it works correctly. Feeding that to the
+    //     gate let a barrier designed to stop ONE joint smoothly stop the plan
+    //     clock of ALL SIX abruptly.
+    //   - The acceleration clamp is not an obstruction either (28.5% of the RIGHT
+    //     arm's gated ticks): it is a smoothing stage that passes the motion
+    //     through on the following ticks, so there is nothing for the plan to wait
+    //     for.
+    //   - Net effect was a ~4.8 Hz ripple -- exactly the 208 ms chunk arrival rate
+    //     -- coherent across all six joints, 2.1-2.8x the baseline 5-25 Hz command
+    //     tremble in gate-dip windows after matching for speed.
+    //
+    // The clamps are still bounded elsewhere: velocity/accel by their own limits,
+    // the barrier by its sqrt(2*a*margin) closing cap, and a genuine HOLD (stale
+    // verdict, IK refusal, fault) freezes the plan through markCartesianSolveBlocked
+    // rather than through this gate.
     if (config_.safety.plan_gate.enable) {
-        const auto update_gate = [&](int i, const JointArray& requested_q,
-                                     const JointArray& final_q) {
-            const JointArray& prev = safety_ctx[i].prev_sent_q_deg;
-            double requested = 0.0;
-            double realized = 0.0;
-            for (int j = 0; j < kDof; ++j) {
-                requested = std::max(requested, std::abs(requested_q[j] - prev[j]));
-                realized = std::max(realized, std::abs(final_q[j] - prev[j]));
-            }
-            double& g = plan_gate_state_[i];
-            g += config_.safety.plan_gate.release_alpha * (1.0 - g);
-            if (requested > config_.safety.plan_gate.deadband_deg) {
-                const double instant = std::clamp(
-                    realized / requested, config_.safety.plan_gate.min_gate, 1.0);
-                if (instant < g) g = instant;
-            }
-        };
-        update_gate(0, desired.left_q_target_deg, out.left_q_target_deg);
-        update_gate(1, desired.right_q_target_deg, out.right_q_target_deg);
+        plan_gate_state_[0] = control::planGateStep(
+            plan_gate_state_[0], plan_gate_requested[0], out.left_q_target_deg,
+            safety_ctx[0].prev_sent_q_deg, config_.safety.plan_gate);
+        plan_gate_state_[1] = control::planGateStep(
+            plan_gate_state_[1], plan_gate_requested[1], out.right_q_target_deg,
+            safety_ctx[1].prev_sent_q_deg, config_.safety.plan_gate);
     } else {
         plan_gate_state_[0] = 1.0;
         plan_gate_state_[1] = 1.0;

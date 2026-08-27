@@ -869,14 +869,29 @@ struct JointLimitBarrierConfig {
 struct SafetyPlanGateConfig {
     bool enable = false;
     // Per-tick first-order recovery toward gate = 1 once the intervention
-    // clears (attack is instantaneous: gate = min(gate, realized/requested)).
-    // 0.02 at 500 Hz ~= 100 ms to recover 63% of the way.
+    // clears. 0.02 at 500 Hz ~= 100 ms to recover 63% of the way.
     double release_alpha = 0.02;
+    // Per-tick first-order ATTACK toward a lower gate. The gate is NOT a safety
+    // mechanism -- the obstruction projection already removed the closing velocity
+    // in the same tick -- so it only has to stop the plan winding up, and it may
+    // take a few ms to get there. It used to be instantaneous
+    // (`if (instant < g) g = instant`), which meant one tick could cut the plan
+    // clock of all six joints by 88% (measured max |dgate|/tick = 0.88,
+    // servo_log_20260827_213651.csv): the layer added to remove abrupt motion was
+    // injecting one, at the chunk rate. 0.1 at 500 Hz ~= 20 ms to 63%, 60 ms to 95%.
+    double attack_alpha = 0.1;
     // Requested steps below this are noise; the ratio is not evaluated there
     // (gate only recovers). Keeps idle/hold ticks from driving the gate.
+    // Compared against the EUCLIDEAN norm of the 6-joint step, matching the
+    // directional ratio the gate now computes. (It used to be compared against the
+    // per-joint max, which is up to sqrt(6) smaller for the same step, so the gate
+    // engages a little more readily than before at equal deadband -- intended, now
+    // that only real obstructions reach it.)
     double deadband_deg = 0.05;
     // Floor on the instantaneous gate; 0 allows a full plan freeze while the
-    // arm is fully blocked.
+    // arm is fully blocked. With the obstruction-only input (see the gate block
+    // in applySafety) gate 0 now means the projection zeroed the whole step,
+    // which really is a full block, so a freeze is the correct response there.
     double min_gate = 0.0;
 };
 

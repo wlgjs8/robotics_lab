@@ -1489,6 +1489,9 @@ void validateConfig(const DualArmConfig& cfg) {
         if (!std::isfinite(pg.release_alpha) || pg.release_alpha <= 0.0 || pg.release_alpha > 1.0) {
             throw std::runtime_error("safety.plan_gate.release_alpha must be finite and in (0, 1]");
         }
+        if (!std::isfinite(pg.attack_alpha) || pg.attack_alpha <= 0.0 || pg.attack_alpha > 1.0) {
+            throw std::runtime_error("safety.plan_gate.attack_alpha must be finite and in (0, 1]");
+        }
         if (!std::isfinite(pg.deadband_deg) || pg.deadband_deg < 0.0) {
             throw std::runtime_error("safety.plan_gate.deadband_deg must be finite and non-negative");
         }
@@ -2880,6 +2883,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             validateAllowedKeys(pg, {
                 "enable",
                 "release_alpha",
+                "attack_alpha",
                 "deadband_deg",
                 "min_gate",
             }, "safety.plan_gate");
@@ -2889,6 +2893,10 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(pg, "release_alpha")) {
                 cfg.safety.plan_gate.release_alpha =
                     asDouble(pg["release_alpha"], "safety.plan_gate.release_alpha");
+            }
+            if (has(pg, "attack_alpha")) {
+                cfg.safety.plan_gate.attack_alpha =
+                    asDouble(pg["attack_alpha"], "safety.plan_gate.attack_alpha");
             }
             if (has(pg, "deadband_deg")) {
                 cfg.safety.plan_gate.deadband_deg =

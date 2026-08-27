@@ -217,6 +217,10 @@ def analyze(path, start_sec=0.0, duration_sec=None, top=5):
         i_proj_margin = find("projection_min_margin_m")
         i_proj_age = find("selfcol_verdict_age_ms")
         proj_corr = {a: find(f"{a}_projection_correction_deg_s") for a in ARMS}
+        plan_gate = {a: find(f"{a}_plan_gate") for a in ARMS}
+        jl_clamp = {a: find(f"{a}_safety_joint_limit_clamped") for a in ARMS}
+        ac_clamp = {a: find(f"{a}_safety_accel_clamped") for a in ARMS}
+        gate_prev = {a: None for a in ARMS}
 
         reanchor_cols = {a: [] for a in ARMS}
         for a in ARMS:
@@ -256,6 +260,24 @@ def analyze(path, start_sec=0.0, duration_sec=None, top=5):
             "min_margin_m": None,
             "max_verdict_age_ms": 0.0,
             "max_correction_deg_s": {a: 0.0 for a in ARMS},
+        }
+        # PLAN GATE attribution. The gate must close only on an OBSTRUCTION; if
+        # `lost_sec` is dominated by joint_limit or accel co-occurrence the gate is
+        # reading a clamp as a block again (the 2026-08-27 defect: 9.42 of the left
+        # arm's 11.07 lost seconds sat on the J3 approach barrier, surfacing as a
+        # 4.8 Hz chunk-rate command ripple). max_attack_per_tick catches a
+        # regression to the old instantaneous attack, which stepped 0.88 in one tick.
+        gate = {
+            a: {
+                "lost_sec": 0.0,
+                "ticks_below_0_9": 0,
+                "min_gate": 1.0,
+                "max_attack_per_tick": 0.0,
+                "lost_sec_with_projection": 0.0,
+                "lost_sec_with_joint_limit": 0.0,
+                "lost_sec_with_accel_clamp_only": 0.0,
+            }
+            for a in ARMS
         }
         min_abs_dq0 = None
         prev_q0 = None
@@ -384,6 +406,35 @@ def analyze(path, start_sec=0.0, duration_sec=None, top=5):
                             proj["max_correction_deg_s"][a], _f(row, proj_corr[a])
                         )
 
+            # plan-gate block: how much plan time the gate threw away, and on what
+            for a in ARMS:
+                if plan_gate[a] is None:
+                    continue
+                g = _f(row, plan_gate[a], default=1.0)
+                gs = gate[a]
+                lost = max(0.0, 1.0 - g) * TICK_SEC
+                gs["lost_sec"] += lost
+                gs["min_gate"] = min(gs["min_gate"], g)
+                if g < 0.9:
+                    gs["ticks_below_0_9"] += 1
+                if gate_prev[a] is not None and g < gate_prev[a]:
+                    gs["max_attack_per_tick"] = max(
+                        gs["max_attack_per_tick"], gate_prev[a] - g
+                    )
+                gate_prev[a] = g
+                if lost > 0.0:
+                    corr = (
+                        _f(row, proj_corr[a]) if proj_corr[a] is not None else 0.0
+                    )
+                    jl = _f(row, jl_clamp[a]) if jl_clamp[a] is not None else 0.0
+                    ac = _f(row, ac_clamp[a]) if ac_clamp[a] is not None else 0.0
+                    if abs(corr) > 1e-9:
+                        gs["lost_sec_with_projection"] += lost
+                    if jl > 0:
+                        gs["lost_sec_with_joint_limit"] += lost
+                    if ac > 0 and jl == 0 and abs(corr) <= 1e-9:
+                        gs["lost_sec_with_accel_clamp_only"] += lost
+
             # CSV/wire quantization indicator on left j0
             if sent_acc["left"].idx[0] is not None:
                 q0 = _f(row, sent_acc["left"].idx[0])
@@ -457,6 +508,9 @@ def analyze(path, start_sec=0.0, duration_sec=None, top=5):
             for a in ARMS
         }
         out["projection"] = proj if i_proj_active is not None else "n/a"
+        out["plan_gate"] = (
+            gate if any(plan_gate[a] is not None for a in ARMS) else "n/a"
+        )
         out["csv_min_abs_delta_left_q0_deg"] = min_abs_dq0
         return out
 
@@ -596,6 +650,27 @@ def main(argv=None):
             f"projection: active={pj['ticks_active']} ticks, ceiling_clamped={ceiling}{flag}, "
             f"min_margin={pj['min_margin_m']}, max_verdict_age={pj['max_verdict_age_ms']:.1f}ms"
         )
+    if result["plan_gate"] != "n/a":
+        for a in ARMS:
+            g = result["plan_gate"][a]
+            # The gate may only close on an obstruction. Clamp-dominated loss means
+            # it is reading the J3 barrier or the accel limiter as a block again.
+            clamp_lost = (
+                g["lost_sec_with_joint_limit"] + g["lost_sec_with_accel_clamp_only"]
+            )
+            flag = ""
+            if g["lost_sec"] > 0.5 and clamp_lost > g["lost_sec_with_projection"]:
+                flag = "  << CLAMP-DOMINATED, GATE INPUT REGRESSED"
+            elif g["max_attack_per_tick"] > 0.25:
+                flag = "  << ATTACK NOT RATE-LIMITED"
+            print(
+                f"[{a}] plan_gate: lost={g['lost_sec']:.2f}s "
+                f"(proj {g['lost_sec_with_projection']:.2f}s / "
+                f"joint_limit {g['lost_sec_with_joint_limit']:.2f}s / "
+                f"accel-only {g['lost_sec_with_accel_clamp_only']:.2f}s), "
+                f"min={g['min_gate']:.3f}, "
+                f"max_attack/tick={g['max_attack_per_tick']:.3f}{flag}"
+            )
     for a in ARMS:
         w = result["wire"][a]
         if isinstance(w, str):

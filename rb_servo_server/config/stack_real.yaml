@@ -240,13 +240,41 @@ safety:
   # barrier held the arm, and the accumulated lead discharged either as a release
   # lunge (measured 10,050 deg/s^2 command accel at a clamp exit; 40.7 mm of lead
   # across eight RoiViolation episodes) or as re-anchor stop-go (~5 Hz shake class).
-  # This gate advances the plan clock at the realized/requested joint-step ratio
-  # from the safety filter + projection, so the reference cannot outrun the arm.
-  # Attack is instantaneous; release recovers ~63% in 100 ms (release_alpha 0.02
-  # @ 500 Hz). Same principle as the force advance gate, generalized to geometry.
+  # This gate advances the plan clock at the realized/requested joint-step ratio,
+  # so the reference cannot outrun the arm. Same principle as the force advance
+  # gate, generalized to geometry.
+  #
+  # CORRECTED 2026-08-27 (servo_log_20260827_213651.csv, 169 s rollout). As first
+  # shipped the gate measured `desired` vs final, i.e. everything the safety filter
+  # did, and the CLAMPS dominated it:
+  #   - 77.6% of the left arm's gated ticks co-occurred with the J3 approach barrier
+  #     and only 5.5% with the self-collision projection; the right arm split
+  #     30% barrier / 30% projection / 28.5% acceleration clamp.
+  #   - The barrier holding J3 at its 149.90 deg standoff is the barrier WORKING, and
+  #     it makes realized < requested on that joint forever, so the gate throttled the
+  #     plan clock of all six joints for as long as one joint was parked.
+  #   - Cost: 11.07 s of plan time discarded on the left arm (6.5% of the run, ~53
+  #     chunks of lag) of which 9.42 s sat on the barrier and 0.72 s on the projection;
+  #     1.97 s on the right. That lag is the "offset" the operator felt after every
+  #     self-collision slowdown.
+  #   - Symptom: a ~4.8 Hz command ripple, exactly the 208 ms chunk arrival rate and
+  #     coherent across all six joints, at 2.1-2.8x the baseline 5-25 Hz tremble in
+  #     gate-dip windows after matching for speed.
+  # The gate input is now post-clamp vs post-projection, so only an obstruction
+  # (self-collision, floor, ROI, reach) can close it, and the ratio is the realized
+  # step projected onto the requested direction rather than a ratio of two
+  # independent per-joint maxima.
   plan_gate:
     enable: true
     release_alpha: 0.02
+    # Attack was instantaneous, which let ONE tick cut the plan clock by 88%
+    # (measured max |dgate|/tick = 0.88) -- an abrupt motion injected by the layer
+    # meant to remove them. The gate is not the safety mechanism (the projection
+    # already removed the closing velocity in the same tick), so it can afford a
+    # short ramp: 0.1 @ 500 Hz = 63% in 20 ms, 95% in 60 ms.
+    attack_alpha: 0.1
+    # Compared against the Euclidean norm of the 6-joint step (the directional
+    # ratio's own scale), not the per-joint max as before.
     deadband_deg: 0.05
     min_gate: 0.0
   # JOINT-LIMIT APPROACH BARRIER (2026-08-26). The hard q_min/q_max clamp stops the
@@ -730,6 +758,14 @@ queue_sync:
   # setpoints dropped = ~44 doubled-step impulses/s) overlapped real motion at
   # every stream start. Cost: the first commanded motion of a run starts ~0.6 s
   # late (bounded by warmup_max + drain_timeout in the worst case).
+  # The hold pins the OUTPUT, so every plan that is paced by the realized step
+  # (chunk follower, via plan_gate) or re-planned from prev_sent each tick (the
+  # joint-space TrajectoryFilter) freezes with it. TcpLinearMove's quintic clock
+  # is open-loop time and did NOT: it integrated the whole hold and discharged the
+  # lead as a release lunge (measured 2026-08-27, servo_log_20260827_211340.csv,
+  # left arm: 532 ms pinned, 1.09 deg of accrued IK lead, +/-60 deg/s in 40 ms and
+  # 7,920 deg/s^2 command accel on release). computeServoTarget now hands that
+  # stage dt_sec = 0 for a held arm, so its clock stops with the output.
   hold_motion_until_track: true
   target_fill: 5
 
