@@ -41,8 +41,13 @@ def snapshot(
             "cartesian_solve": {
                 "safety_joint_limit_clamped": clamped,
                 "safety_joint_limit_limited_joint": joint_index,
-                "pos_err_m": pos_err_m,
-                "ori_err_rad": ori_err_rad,
+                # These are the SERVER's field names (cartesianSolveJson in
+                # state_publisher.cpp). This helper used to invent pos_err_m /
+                # ori_err_rad, which happened to match what the reader was
+                # looking for -- so the test passed while the live reader saw
+                # None for both on every real snapshot.
+                "position_error_m": pos_err_m,
+                "orientation_error_rad": ori_err_rad,
             },
         }
 
@@ -141,6 +146,70 @@ class TrackerTest(unittest.TestCase):
         self.assertIsNone(tracker.update(wrist, 3.9))      # new joint, new clock
         self.assertIsNone(tracker.update(wrist, 7.0))      # 3.1 s on the wrist
         self.assertIsNotNone(tracker.update(wrist, 8.1))
+
+    def test_riding_a_bound_while_tracking_is_not_a_stall(self):
+        """THE 2026-08-27 FALSE POSITIVE (servo_log_20260827_230413.csv).
+
+        A saturated posture can still be feasible: the solve puts J3 on the
+        149.90 deg standoff and reaches the commanded pose anyway, with the
+        other five joints doing the work. Measured over the aborted 7.8 s
+        window, J3 stayed inside a 0.167 deg band while J1/J4/J6 swept
+        10.5/13.0/12.1 deg, the TCP travelled 28/36/38 mm, IK refused zero
+        ticks, and the residual FELL 16.25 -> 7.88 -> 0.01 mm. The abort fired
+        at the 4 s mark, just as the residual reached 0.01 mm.
+        """
+        tracker = JointLimitStallTracker(4.0)
+        converged = joint_limit_stall_from_snapshot(
+            snapshot(left_clamped=True, pos_err_m=0.00001, ori_err_rad=0.0001)
+        )
+        t = 0.0
+        tracker.update(converged, t)
+        # Well past the 4 s hold, and past it many times over.
+        for _ in range(400):
+            t += 0.1
+            self.assertIsNone(tracker.update(converged, t), f"fired at t={t:.1f}")
+
+    def test_a_brief_convergence_does_not_excuse_a_real_standoff(self):
+        """The residual dips to ~0.01 mm even inside a genuine standoff -- min
+        0.01 mm in all three measured episodes -- so a single converged tick
+        must not restart the clock. What separates them is DURATION: the
+        longest continuous sub-1 mm run was 0.02-0.03 s in the real standoff
+        against 3.60 s while riding the bound."""
+        tracker = JointLimitStallTracker(4.0)
+        wedged = joint_limit_stall_from_snapshot(snapshot(left_clamped=True))
+        blip = joint_limit_stall_from_snapshot(
+            snapshot(left_clamped=True, pos_err_m=0.00001, ori_err_rad=0.0001)
+        )
+        t = 0.0
+        tracker.update(wedged, t)
+        # A 30 ms dip every second, the shape the real standoff actually has.
+        for _ in range(4):
+            t += 0.97
+            tracker.update(wedged, t)
+            t += 0.03
+            tracker.update(blip, t)
+        self.assertIsNotNone(tracker.update(wedged, t + 0.2))
+
+    def test_convergence_cannot_be_judged_without_a_residual(self):
+        """A server that does not publish the residual leaves it None; the
+        tracker then behaves exactly as it did before the convergence gate."""
+        tracker = JointLimitStallTracker(4.0)
+        snap = StateSnapshot(
+            payload={
+                "left": {
+                    "q_actual_deg": [0.0, 0.0, 149.9, 0.0, 0.0, 0.0],
+                    "cartesian_solve": {
+                        "safety_joint_limit_clamped": True,
+                        "safety_joint_limit_limited_joint": 2,
+                    },
+                }
+            },
+            received_monotonic=0.0,
+        )
+        rb = joint_limit_stall_from_snapshot(snap)
+        self.assertIsNone(rb.pos_err_m)
+        tracker.update(rb, 0.0)
+        self.assertIsNotNone(tracker.update(rb, 4.1))
 
     def test_reports_once_per_episode(self):
         tracker = JointLimitStallTracker(4.0)

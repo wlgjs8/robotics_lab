@@ -49,8 +49,11 @@ class SafetyConfig:
     # 2026-08-27: both elbows on their bound for the last 6.4 s of a rollout,
     # Cartesian error stuck at 32 mm / 0.081 rad, IK asking to close 2912 times
     # and to retreat zero times. Only the clamp staying CONTINUOUSLY active on
-    # one joint counts, so brushing a bound in passing is not a stall.
-    # 0 disables. Teleop is never affected (policy rollouts only).
+    # one joint counts, so brushing a bound in passing is not a stall -- and
+    # neither is RIDING one: if the solve holds the commanded pose for 0.5 s
+    # while clamped, the clock restarts (2026-08-27 false positive, see
+    # JointLimitStallTracker). 0 disables. Teleop is never affected (policy
+    # rollouts only).
     joint_limit_stall_abort_sec: float = 4.0
     kinematics_available: bool = False
     camera_available: bool = False

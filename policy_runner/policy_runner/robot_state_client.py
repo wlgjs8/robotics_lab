@@ -175,8 +175,20 @@ def joint_limit_stall_from_snapshot(snapshot: StateSnapshot) -> JointLimitStallR
             arm=arm,
             joint_index=joint_index if isinstance(joint_index, int) else None,
             q_actual_deg=q_actual,
-            pos_err_m=_optional_float(solve.get("pos_err_m")),
-            ori_err_rad=_optional_float(solve.get("ori_err_rad")),
+            # The server publishes the residual as position_error_m /
+            # orientation_error_rad (CartesianSolveTelemetry, the same fields the
+            # servo log writes as <arm>_cart_pos_err_m / _cart_ori_err_rad).
+            # These were read under the wrong names until 2026-08-27, so both
+            # were silently always None: the abort line printed no residual and
+            # JointLimitStallTracker could not tell a wedged arm from one that
+            # was riding a bound and tracking. Keep the old names as a fallback
+            # so a server that ever published them still reports.
+            pos_err_m=_optional_float(
+                solve.get("position_error_m", solve.get("pos_err_m"))
+            ),
+            ori_err_rad=_optional_float(
+                solve.get("orientation_error_rad", solve.get("ori_err_rad"))
+            ),
         )
     return JointLimitStallReadback(
         blocked=False,
@@ -319,12 +331,60 @@ class JointLimitStallTracker:
     the clamp stays continuously active on the SAME joint, and any tick that
     clears the clamp (or moves to a different joint) restarts the clock --
     which is exactly what a policy successfully steering away looks like.
+
+    A joint RIDING its bound is not a standoff. A posture can be saturated and
+    still perfectly feasible: the solve puts the elbow on the limit and reaches
+    the commanded pose anyway, with the other five joints doing the work. The
+    clamp is then continuously active and the arm is tracking, which is the one
+    case the rule above gets wrong -- it aborted a healthy rollout on
+    2026-08-27 (servo_log_20260827_230413.csv, left arm): J3 sat inside a
+    0.167 deg band at the 149.90 deg standoff for 7.8 s while J1/J4/J6 swept
+    10.5/13.0/12.1 deg, the TCP travelled 28/36/38 mm in x/y/z, IK refused zero
+    ticks, and the Cartesian residual FELL 16.25 -> 7.88 -> 0.01 mm. The abort
+    fired at the 4 s mark -- just as the residual reached 0.01 mm.
+
+    So convergence of the solve residual also restarts the clock. The separator
+    is the CONTINUOUS time the residual stays converged, and it is not close:
+
+        real standoff  (servo_log_20260827_213651.csv, 3 episodes)
+            residual p50 8.4 / 18.9 / 29.5 mm, flat or growing across the
+            episode, longest continuous sub-1 mm run 0.02-0.03 s
+        riding the bound (servo_log_20260827_230413.csv)
+            residual p50 6.1 mm falling to 0.01 mm, longest continuous
+            sub-1 mm run 3.60 s
+
+    A 0.5 s converged hold sits two orders of magnitude away from either side.
+    Orientation is gated too; it costs nothing (in both logs the position and
+    orientation residuals converge together, giving identical durations) and it
+    keeps the test honest about reaching the commanded POSE, not just a point.
+
+    If the server does not publish the residual the readback carries None, and
+    convergence cannot be judged -- the clock then behaves exactly as before.
     """
 
-    def __init__(self, hold_sec: float) -> None:
+    def __init__(
+        self,
+        hold_sec: float,
+        converged_pos_err_m: float = 0.001,
+        converged_ori_err_rad: float = 0.008727,  # 0.5 deg
+        converged_hold_sec: float = 0.5,
+    ) -> None:
         self._hold_sec = float(hold_sec)
+        self._converged_pos_err_m = float(converged_pos_err_m)
+        self._converged_ori_err_rad = float(converged_ori_err_rad)
+        self._converged_hold_sec = float(converged_hold_sec)
         self._since: float | None = None
         self._key: tuple[str | None, int | None] | None = None
+        self._converged_since: float | None = None
+
+    def _converged(self, readback: JointLimitStallReadback) -> bool:
+        """True when the solve reached the commanded pose this tick."""
+        if readback.pos_err_m is None or readback.ori_err_rad is None:
+            return False
+        return (
+            readback.pos_err_m < self._converged_pos_err_m
+            and readback.ori_err_rad < self._converged_ori_err_rad
+        )
 
     @property
     def enabled(self) -> bool:
@@ -346,26 +406,42 @@ class JointLimitStallTracker:
         if not self.enabled or not readback.blocked:
             self._since = None
             self._key = None
+            self._converged_since = None
             return None
         key = (readback.arm, readback.joint_index)
         if self._key != key:
             self._key = key
             self._since = now_monotonic
+            self._converged_since = None
             return None
         if self._since is None:
             self._since = now_monotonic
+            self._converged_since = None
             return None
+        # The arm is clamped but tracking: once it has held the commanded pose
+        # for converged_hold_sec, the bound is being ridden, not fought.
+        if self._converged(readback):
+            if self._converged_since is None:
+                self._converged_since = now_monotonic
+            elif now_monotonic - self._converged_since >= self._converged_hold_sec:
+                self._since = now_monotonic
+                self._converged_since = None
+                return None
+        else:
+            self._converged_since = None
         held = now_monotonic - self._since
         if held < self._hold_sec:
             return None
         # Latch this episode so the caller is told once, not every tick.
         self._since = None
         self._key = None
+        self._converged_since = None
         return held
 
     def reset(self) -> None:
         self._since = None
         self._key = None
+        self._converged_since = None
 
 
 def _optional_float(value: Any) -> float | None:
