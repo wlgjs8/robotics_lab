@@ -362,6 +362,40 @@ std::optional<rb_servo::ArmSendResult> awaitStoredSendResult(
     return worker.lastSendResult();
 }
 
+// waitForSends(N) returns when the backend's sendServoJ has been ENTERED, but
+// `worker_last_completed_seq` is only published after that send returns and the
+// result is stored. Reading telemetry straight after waitForSends therefore
+// races the worker thread -- reproduced under `ctest -j 16` at roughly 1 run in
+// 30 (2026-08-27), passing every time on an idle machine. Wait for the counter
+// the assertion is actually about.
+bool awaitCompletedSeq(
+    const rb_servo::ArmWorker& worker,
+    uint64_t seq,
+    std::chrono::milliseconds timeout = std::chrono::milliseconds(500)
+) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (worker.telemetry().worker_last_completed_seq == seq) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return worker.telemetry().worker_last_completed_seq == seq;
+}
+
+// Same race on the async counters: `commands_sent_total` is published after the
+// send returns, not when it is entered. Reproduced standalone at ~1 run in 60.
+bool awaitAsyncSent(
+    const rb_servo::ArmWorker& worker,
+    uint64_t sent_total,
+    std::chrono::milliseconds timeout = std::chrono::milliseconds(500)
+) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (worker.asyncStreamingTelemetry().commands_sent_total >= sent_total) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return worker.asyncStreamingTelemetry().commands_sent_total >= sent_total;
+}
+
 rb_servo::ArmWorkerOptions asyncWorkerOptions(rb_servo::RbpodoAsyncStreamingMode mode) {
     rb_servo::ArmWorkerOptions options;
     options.read_period_ns = 1'000'000;
@@ -693,6 +727,7 @@ bool testNoDropCountedAfterImmediateDispatch() {
 
     worker.enqueueServoJ(request(20, joints(20.0), rb_servo::nowSteadyNs() + 1'000'000'000));
     RB_CHECK(raw_backend->waitForSends(1, std::chrono::milliseconds(200)));
+    RB_CHECK(awaitCompletedSeq(worker, 20));
     rb_servo::ArmWorkerTelemetry telemetry = worker.telemetry();
     RB_CHECK(telemetry.worker_command_drops_total == 0);
     RB_CHECK(telemetry.worker_pending_overwrites_total == 0);
@@ -702,6 +737,7 @@ bool testNoDropCountedAfterImmediateDispatch() {
 
     worker.enqueueServoJ(request(21, joints(21.0), rb_servo::nowSteadyNs() + 1'000'000'000));
     RB_CHECK(raw_backend->waitForSends(2, std::chrono::milliseconds(200)));
+    RB_CHECK(awaitCompletedSeq(worker, 21));
     telemetry = worker.telemetry();
     RB_CHECK(telemetry.worker_command_drops_total == 0);
     RB_CHECK(telemetry.worker_pending_overwrites_total == 0);
@@ -954,6 +990,7 @@ bool testAsyncSdkAckWorkerRecordsAckObservedResults() {
     RB_CHECK(enqueue.result.accepted);
     RB_CHECK(enqueue.result.controller_acceptance_observed == false);
     RB_CHECK(raw_backend->waitForSends(1, std::chrono::milliseconds(200)));
+    RB_CHECK(awaitAsyncSent(worker, 1));
 
     rb_servo::RbpodoAsyncStreamingTelemetry async = worker.asyncStreamingTelemetry();
     worker.stop();
@@ -1085,6 +1122,7 @@ bool testAsyncSocketSendSupervisedRecordsSocketSendOnly() {
     RB_CHECK(enqueue.result.accepted);
     RB_CHECK(enqueue.result.ack_policy == rb_servo::BackendAckPolicy::Disabled);
     RB_CHECK(raw_backend->waitForSends(1, std::chrono::milliseconds(200)));
+    RB_CHECK(awaitAsyncSent(worker, 1));
 
     const rb_servo::RbpodoAsyncStreamingTelemetry async = worker.asyncStreamingTelemetry();
     worker.stop();
