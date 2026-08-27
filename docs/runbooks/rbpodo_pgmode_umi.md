@@ -86,7 +86,7 @@ none for the other, so by-id silently follows plug order and cannot reach the se
 | pedal | by-path | consumer |
 |---|---|---|
 | 3-switch | `pci-0000:13:00.0-usb-0:9:1.0-event-kbd` | rb_gui: `a`/`c` InitMotion left/right, `b` record toggle |
-| 1-switch | `pci-0000:11:00.0-usb-0:4:1.0-event-kbd` | pika UMI teleop clutch (`~/workspace/pika`) |
+| 1-switch | `pci-0000:79:00.4-usb-0:1.1:1.0-event-kbd` | pika UMI teleop clutch (`~/workspace/pika`) |
 
 rb_gui **grabs its pedal exclusively** (EVIOCGRAB), so a wrong pick both fires
 InitMotion from the teleop pedal and silently kills the teleop clutch. `run_stack.sh`

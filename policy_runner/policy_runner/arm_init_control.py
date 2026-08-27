@@ -46,6 +46,9 @@ class ArmInitCommand:
     action: str = "toggle"
     left_q_deg: tuple[float, ...] | None = None
     right_q_deg: tuple[float, ...] | None = None
+    # action == "config" only: flip the ROI auto-recover toggle. None leaves it
+    # alone, so a config packet that only refreshes the init pose is expressible.
+    auto_roi_recover: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -93,13 +96,17 @@ def parse_arm_init_command(data: bytes | dict[str, Any]) -> ArmInitCommand:
     if arms not in {"both", "left", "right"}:
         raise ValueError("arm init command arms must be both, left, or right")
     action = payload.get("action", "toggle")
-    if action not in {"start", "cancel", "toggle"}:
-        raise ValueError("arm init command action must be start, cancel, or toggle")
+    if action not in {"start", "cancel", "toggle", "config"}:
+        raise ValueError("arm init command action must be start, cancel, toggle, or config")
+    auto_roi_recover = payload.get("auto_roi_recover")
+    if auto_roi_recover is not None and not isinstance(auto_roi_recover, bool):
+        raise ValueError("arm init command auto_roi_recover must be a bool")
     return ArmInitCommand(
         arms=str(arms),
         action=str(action),
         left_q_deg=_optional_joint6(payload.get("left_q_deg"), "left_q_deg"),
         right_q_deg=_optional_joint6(payload.get("right_q_deg"), "right_q_deg"),
+        auto_roi_recover=auto_roi_recover,
     )
 
 
@@ -128,6 +135,12 @@ class ArmInitOverrideController:
         self.reset_flow_source_on_resume = bool(reset_flow_source_on_resume)
         self._left = _ArmRuntime()
         self._right = _ArmRuntime()
+        # ROI AUTO-RECOVER toggle, owned here rather than in run() so the GUI
+        # checkbox reads its own truth back out of arm_init_state: the operator
+        # must see the state of the policy_runner that is actually driving, not
+        # the state of whichever GUI session last clicked. Off until the operator
+        # turns it on -- an autonomous move nobody asked for is not a default.
+        self.auto_roi_recover = False
         self.last_command = ""
         self.error = ""
         self.changed = False
@@ -167,6 +180,18 @@ class ArmInitOverrideController:
 
         arms = _arms_for_selector(command.arms)
         action = command.action
+        if action == "config":
+            # Settings-only packet: it must never start or cancel a move. The init
+            # pose it carries was already stored above, which is the point -- the
+            # GUI re-sends it whenever the operator edits the pose, so the auto
+            # recovery cannot park an arm at a stale target.
+            if command.auto_roi_recover is None:
+                return False
+            changed = bool(self.auto_roi_recover) != bool(command.auto_roi_recover)
+            self.auto_roi_recover = bool(command.auto_roi_recover)
+            self.changed = changed
+            _dbg(f"config auto_roi_recover={self.auto_roi_recover} changed={changed}")
+            return changed
         if action == "toggle":
             failed = any(self._runtime(arm).fail for arm in arms)
             action = "start" if failed and not self.allow_manual_cancel_after_failed else (
@@ -366,6 +391,7 @@ class ArmInitOverrideController:
             "resume_flow_on_done": self.resume_flow_on_done,
             "resume_flow_on_failed": self.resume_flow_on_failed,
             "allow_manual_cancel_after_failed": self.allow_manual_cancel_after_failed,
+            "auto_roi_recover": bool(self.auto_roi_recover),
         }
 
     def source_mask_for(self, base_mask: Any) -> Any:

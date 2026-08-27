@@ -906,6 +906,48 @@ def _apply_arm_init_result(
     return ok, message
 
 
+def _send_arm_init_auto_roi(
+    safety: OperatorSafety,
+    handles: dict[str, Any],
+    enabled: bool,
+) -> tuple[bool, str]:
+    """Push the ROI auto-recover toggle to the policy_runner that is driving.
+
+    The toggle lives in policy_runner (it owns the watchdog, the per-arm latch and
+    the flow re-anchor), so this is a settings packet on the same arm_init channel
+    the InitMotion buttons use. The init pose rides along on every send: policy_runner
+    parks a recovered arm at the LAST pose it was told, so re-sending here is what
+    keeps an edited init pose from going stale while the toggle is on.
+    """
+    if safety.init_left_joint_deg is None or safety.init_right_joint_deg is None:
+        return False, "init motion target not configured"
+    latest = handles.get("_latest_state")
+    route_label, route_client, route_detail = _arm_init_control_route(
+        handles,
+        latest if isinstance(latest, StateSnapshot) else None,
+    )
+    client = route_client or handles.get("recording_cmd_client")
+    send_arm_init = getattr(client, "send_arm_init", None)
+    if not callable(send_arm_init):
+        return False, "no policy_runner arm_init control endpoint available"
+    try:
+        result = send_arm_init(
+            "both",
+            action="config",
+            auto_roi_recover=bool(enabled),
+            left_q_deg=safety.init_left_joint_deg,
+            right_q_deg=safety.init_right_joint_deg,
+        )
+    except OSError as exc:
+        result = ArmInitCommandResult(False, f"arm init config send failed: {exc}")
+    ok = bool(getattr(result, "ok", False))
+    message = str(getattr(result, "message", "") or "")
+    if ok:
+        state = "ON" if enabled else "OFF"
+        message = f"ROI 이탈 시 자동 InitMotion {state}; routed to {route_label} {route_detail}".strip()
+    return ok, message
+
+
 def _send_arm_init_override(
     safety: OperatorSafety,
     scene_handles: dict[str, Any],
@@ -1047,6 +1089,52 @@ def _arm_init_failure_detail(status: Mapping[str, Any], side: str) -> str:
     return str(status.get(f"{side}_fail_mode", "") or "")
 
 
+ARM_INIT_AUTO_ROI_SETTING_KEY = "arm_init_auto_roi_recover"
+# How long to wait before re-pushing the toggle to a runner that has not reported it
+# back yet. update_gui runs at ~10 Hz; a lost datagram or a runner still starting up
+# must not turn this into a packet-per-tick stream at the control endpoint.
+_ARM_INIT_AUTO_ROI_PUSH_INTERVAL_SEC = 2.0
+
+
+def _arm_init_auto_roi_desired(handles: dict[str, Any]) -> bool:
+    toggle = handles.get("arm_init_auto_roi_toggle")
+    if toggle is None:
+        return False
+    return bool(getattr(toggle, "value", False))
+
+
+def _reconcile_arm_init_auto_roi(
+    handles: dict[str, Any],
+    status: Mapping[str, Any],
+    *,
+    policy_active: bool,
+) -> str:
+    """Push the persisted toggle onto whichever policy_runner is driving.
+
+    Every policy_runner process starts with auto-recover off, and it restarts on its
+    own schedule (a rollout is its own `flow-infer` run). Persisting the checkbox is
+    therefore only half the job: the setting has to be re-applied to each new runner,
+    or `make run` would come back with the box ticked and the feature not actually on.
+
+    Returns the display suffix, which distinguishes intent from effect: a ticked box
+    whose runner has not confirmed reads as 대기, never as if it were already armed.
+    """
+    safety = handles.get("_operator_safety")
+    desired = _arm_init_auto_roi_desired(handles)
+    reported = bool(status.get("auto_roi_recover", False))
+    if not policy_active:
+        return " / auto_roi=ON(policy_runner 없음)" if desired else ""
+    if reported == desired:
+        handles["_arm_init_auto_roi_last_push"] = None
+        return " / auto_roi=ON" if desired else ""
+    now = time.monotonic()
+    last = handles.get("_arm_init_auto_roi_last_push")
+    if safety is not None and (last is None or now - float(last) >= _ARM_INIT_AUTO_ROI_PUSH_INTERVAL_SEC):
+        handles["_arm_init_auto_roi_last_push"] = now
+        _send_arm_init_auto_roi(safety, handles, desired)
+    return " / auto_roi=ON(적용 대기)" if desired else " / auto_roi=OFF(적용 대기)"
+
+
 def _update_arm_init_panel(
     handles: dict[str, Any],
     latest: StateSnapshot | None,
@@ -1076,6 +1164,7 @@ def _update_arm_init_panel(
         suffix += f" / route={route_label}"
         if route_detail:
             suffix += f" ({route_detail})"
+    suffix += _reconcile_arm_init_auto_roi(handles, status, policy_active=policy_active)
     error = str(status.get("error", "") or "")
     if error:
         suffix += f" / error={error}"
@@ -2988,6 +3077,9 @@ def build_gui(
     head_preview_store: HeadPreviewStore | None = None,
 ) -> dict[str, Any]:
     handles: dict[str, Any] = {}
+    # Kept so module-level panel updates can re-send operator settings (the ROI
+    # auto-recover toggle) without threading `safety` through every call site.
+    handles["_operator_safety"] = safety
     handles["circle_overlay_enabled"] = overlay_store is not None
     handles["chunk_overlay_enabled"] = chunk_overlay_store is not None
     handles["recording_status_store"] = recording_status_store
@@ -3429,6 +3521,36 @@ def build_gui(
             init_left_button = server.gui.add_button("InitMotion (왼팔) [a]")
             init_right_button = server.gui.add_button("InitMotion (오른팔) [c]")
             init_cancel_button = server.gui.add_button("Cancel Init Override / Resume Flow")
+            # The checkbox is OPERATOR INTENT, persisted in settings.json, not a
+            # mirror of the running policy_runner. policy_runner starts every process
+            # with the toggle off and restarts independently of this GUI, so mirroring
+            # it would silently drop the setting on every rollout restart -- exactly
+            # the thing the operator set it to avoid. The intent is re-pushed onto
+            # whichever runner shows up (see _reconcile_arm_init_auto_roi).
+            auto_roi_toggle = server.gui.add_checkbox(
+                "ROI 이탈 시 자동 InitMotion",
+                initial_value=_gui_setting_bool(
+                    _load_gui_settings(), ARM_INIT_AUTO_ROI_SETTING_KEY, False
+                ),
+            )
+            handles["arm_init_auto_roi_toggle"] = auto_roi_toggle
+
+            @auto_roi_toggle.on_update
+            def _(_: Any) -> None:
+                desired = bool(auto_roi_toggle.value)
+                _update_gui_setting(ARM_INIT_AUTO_ROI_SETTING_KEY, desired)
+                handles["_arm_init_auto_roi_last_push"] = None
+                ok, message = _send_arm_init_auto_roi(safety, handles, desired)
+                if ok:
+                    handles["last_action"].value = "OK: " + message
+                else:
+                    # Saved either way: a runner that is not up yet is not a refusal,
+                    # and the reconcile below applies it the moment one appears.
+                    state = "ON" if desired else "OFF"
+                    handles["last_action"].value = (
+                        f"OK: ROI 이탈 시 자동 InitMotion {state} 저장됨 "
+                        f"(policy_runner 연결되면 적용) -- {message}"
+                    )
             handles["init_motion_button"] = init_both_button
             handles["init_motion_buttons"] = {
                 "both": init_both_button,

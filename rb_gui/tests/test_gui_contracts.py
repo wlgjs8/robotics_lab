@@ -38,6 +38,7 @@ from rb_servo_gui.app import (
     _send_spacemouse_assignment,
     _send_spacemouse_swap,
     _trigger_box_detect,
+    _reconcile_arm_init_auto_roi,
     _send_arm_init_override,
     _send_arm_init_cancel_resume,
     _foot_pedal_action_map,
@@ -149,6 +150,7 @@ from rb_servo_gui.recording_control import (
     RecordingStatusStore,
     SPACEMOUSE_ASSIGNMENT_COMMAND_SCHEMA,
     SpaceMouseCommandResult,
+    normalize_arm_init_status,
 )
 from rb_servo_gui.safety import (
     OperatorSafety,
@@ -317,16 +319,25 @@ class RecordingCommandFake:
         self.calls.append({"command": command, "task": task, "operator": operator})
         return True
 
-    def send_arm_init(self, arms, *, left_q_deg=None, right_q_deg=None, action="toggle"):
+    def send_arm_init(
+        self,
+        arms,
+        *,
+        left_q_deg=None,
+        right_q_deg=None,
+        action="toggle",
+        auto_roi_recover=None,
+    ):
         self.arm_init_calls.append(
             {
                 "arms": arms,
                 "action": action,
                 "left_q_deg": left_q_deg,
                 "right_q_deg": right_q_deg,
+                "auto_roi_recover": auto_roi_recover,
             }
         )
-        return ArmInitCommandResult(True, f"arm init {arms} toggle sent")
+        return ArmInitCommandResult(True, f"arm init {arms} {action} sent")
 
 
 class RecordingSceneHandle:
@@ -1802,6 +1813,50 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(payload["action"], "toggle")
         self.assertEqual(payload["left_q_deg"], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 
+    def test_arm_init_config_packet_carries_toggle_and_init_pose(self):
+        class _Sock:
+            def __init__(self):
+                self.sent = []
+
+            def sendto(self, data, endpoint):
+                self.sent.append((json.loads(data.decode()), endpoint))
+                return len(data)
+
+            def close(self):
+                pass
+
+        sock = _Sock()
+        client = RecordingCommandClient(
+            "127.0.0.1",
+            50441,
+            socket_factory=lambda *_args: sock,
+        )
+        result = client.send_arm_init(
+            "both",
+            action="config",
+            auto_roi_recover=True,
+            left_q_deg=(1, 2, 3, 4, 5, 6),
+            right_q_deg=(-1, -2, -3, -4, -5, -6),
+        )
+        self.assertTrue(result.ok, result.message)
+        payload, _endpoint = sock.sent[0]
+        self.assertEqual(payload["action"], "config")
+        self.assertIs(payload["auto_roi_recover"], True)
+        # The init pose rides along on every config send: policy_runner parks a
+        # recovered arm at the LAST pose it was told, so an edited pose that is
+        # never re-sent would silently keep sending arms to the old one.
+        self.assertEqual(payload["left_q_deg"], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+        self.assertEqual(payload["right_q_deg"], [-1.0, -2.0, -3.0, -4.0, -5.0, -6.0])
+
+        bad = client.send_arm_init("both", action="config", auto_roi_recover="yes")
+        self.assertFalse(bad.ok)
+
+    def test_arm_init_status_normalizes_auto_roi_recover(self):
+        self.assertFalse(normalize_arm_init_status(None)["auto_roi_recover"])
+        self.assertTrue(
+            normalize_arm_init_status({"auto_roi_recover": True})["auto_roi_recover"]
+        )
+
     def test_box_detect_command_client_emits_control_schema(self):
         class _Sock:
             def __init__(self, *_args):
@@ -1932,6 +1987,76 @@ class GuiContractsTest(unittest.TestCase):
         self.assertEqual(stack["control_endpoint"], "udp://127.0.0.1:50441")
         self.assertEqual(flow["control_endpoint"], "udp://127.0.0.1:50443")
         self.assertEqual(store.latest_for_role("flow_infer", now=11.2)["command_session_id"], "flow-session")
+
+    def _auto_roi_handles(self, safety, command_client, *, desired, recording=True):
+        status_store = RecordingStatusStore()
+        status_store.update({"recording": recording}, received_monotonic=time.monotonic())
+
+        class _Toggle:
+            def __init__(self, value):
+                self.value = value
+
+        return {
+            "recording_status_store": status_store,
+            "recording_cmd_client": command_client,
+            "arm_init_status": RecordingText(""),
+            "arm_init_auto_roi_toggle": _Toggle(desired),
+            "_operator_safety": safety,
+            "_state_stale": False,
+        }
+
+    def test_auto_roi_toggle_is_reapplied_to_each_new_policy_runner(self):
+        # policy_runner starts every process with auto-recover off and restarts on its
+        # own schedule, so a persisted checkbox that is never re-pushed would come back
+        # ticked with the feature not actually armed.
+        _state, _client, safety = self.make_safety(
+            sample_state(motion_state="Running"),
+            init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
+            init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
+        )
+        command_client = RecordingCommandFake()
+        handles = self._auto_roi_handles(safety, command_client, desired=True)
+
+        suffix = _reconcile_arm_init_auto_roi(
+            handles, {"auto_roi_recover": False}, policy_active=True
+        )
+        self.assertIn("대기", suffix)
+        self.assertEqual(len(command_client.arm_init_calls), 1)
+        call = command_client.arm_init_calls[0]
+        self.assertEqual(call["action"], "config")
+        self.assertIs(call["auto_roi_recover"], True)
+        self.assertEqual(call["left_q_deg"], _DEFAULT_INIT_LEFT_JOINTS_DEG)
+
+        # Rate limited: update_gui runs at ~10 Hz and a runner that has not confirmed
+        # yet must not turn this into a packet per tick.
+        _reconcile_arm_init_auto_roi(handles, {"auto_roi_recover": False}, policy_active=True)
+        self.assertEqual(len(command_client.arm_init_calls), 1)
+
+        # Confirmed -> nothing more to push, and the suffix stops saying 대기.
+        suffix = _reconcile_arm_init_auto_roi(
+            handles, {"auto_roi_recover": True}, policy_active=True
+        )
+        self.assertEqual(len(command_client.arm_init_calls), 1)
+        self.assertIn("auto_roi=ON", suffix)
+        self.assertNotIn("대기", suffix)
+
+    def test_auto_roi_toggle_holds_intent_while_no_policy_runner(self):
+        # No runner to push to is not a refusal: the setting stays on and says so,
+        # rather than silently reverting the way a mirror of the runner would.
+        _state, _client, safety = self.make_safety(
+            sample_state(motion_state="Running"),
+            init_left_joint_deg=_DEFAULT_INIT_LEFT_JOINTS_DEG,
+            init_right_joint_deg=_DEFAULT_INIT_RIGHT_JOINTS_DEG,
+        )
+        command_client = RecordingCommandFake()
+        handles = self._auto_roi_handles(safety, command_client, desired=True, recording=False)
+
+        suffix = _reconcile_arm_init_auto_roi(
+            handles, {"auto_roi_recover": False}, policy_active=False
+        )
+        self.assertEqual(command_client.arm_init_calls, [])
+        self.assertIn("policy_runner 없음", suffix)
+        self.assertTrue(handles["arm_init_auto_roi_toggle"].value)
 
     def test_arm_init_override_uses_policy_control_when_recording_active(self):
         # policy_runner ACTIVELY controlling (recording in progress) -> route the

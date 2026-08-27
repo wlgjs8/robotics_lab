@@ -126,6 +126,30 @@ struct ArmMountConfig {
 struct IkSolverConfig {
     bool enable = true;
     int max_iterations = 50;
+    // MINIMUM SOLVER STEPS before the tolerance check may accept (2026-08-28).
+    // The convergence test sits at the TOP of the iteration, so with 0 the solver
+    // returns the SEED whenever the new target is already within
+    // position_tolerance_m of the pose the previous sent joints reach -- a dead
+    // zone the width of the tolerance. Streaming Cartesian control walks the
+    // reference by less than that on every slow tick, so the joint command came
+    // out as a staircase: hold N ticks, then one lump step, and that step always
+    // leaves from a standstill so it trips the acceleration limiter.
+    // MEASURED (servo_log_20260827_234302.csv, 34 s of pi0.5 rollout): 4.3% of the
+    // right arm's ticks returned 0 iterations, and on those the commanded second
+    // difference was 13x the rest of the run (7554 vs 570 mm/s^2) -- essentially
+    // all of that arm's command roughness came from 4% of its ticks. The left arm
+    // spent 23.3% of ticks with a sub-tolerance reference step.
+    // The dead zone was NOT filtering noise: over 3864 (left) / 655 (right)
+    // consecutive sub-20 um reference steps, the cosine between one step and the
+    // next was +1.00 on 100% of them. The reference moves smoothly below the
+    // tolerance; the dead zone was quantizing a smooth signal, not rejecting a
+    // rough one.
+    // 1 = always take one damped-least-squares step, then test. The step is
+    // proportional to the residual (gain <= 1/(2*damping), so a 20 um residual
+    // moves a joint <= 0.03 deg) and max_step_deg bounds it again, so this cannot
+    // run away. 0 restores the dead zone for an action source whose reference is
+    // rough enough to want it -- measured on the chunk-follower path only.
+    int min_iterations = 1;
     double timeout_ms = 2.0;
     double damping = 0.001;
     double position_tolerance_m = 0.001;

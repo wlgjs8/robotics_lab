@@ -1230,6 +1230,85 @@ bool testIkJointLimitBestEffortAcceptsClampedSolve() {
     return true;
 }
 
+bool testIkMinIterationsRemovesTheToleranceDeadZone() {
+    // STREAMING DEAD ZONE. The tolerance test is at the TOP of the iteration, so
+    // with min_iterations = 0 the solver hands back the SEED whenever the new
+    // target is already within position_tolerance_m of it. Streaming Cartesian
+    // control asks for less than the tolerance on every slow tick, so the joint
+    // command came out as a staircase -- hold, hold, then one lump step that
+    // always leaves from a standstill and trips the acceleration limiter.
+    rb_servo::KinematicsConfig cfg = testKinematicsConfig();
+    cfg.ik.position_tolerance_m = 2e-5;   // the deployed 20 um
+    cfg.ik.orientation_tolerance_rad = 2e-4;
+    const rb_servo::ArmMountConfig mount = leftMount();
+    const rb_servo::JointArray seed = seedJoints();
+
+    // A target one slow tick away: 10 um, i.e. HALF the tolerance. This is the
+    // ordinary case, not a corner one -- 23.3% of one arm's ticks were measured
+    // below the tolerance on 2026-08-27.
+    rb_servo::PinocchioKinematics probe(cfg);
+    rb_servo::Pose6D target = probe.computeTcpStand(rb_servo::ArmId::Left, seed, mount);
+    target.x += 1.0e-5;
+
+    {   // Old behaviour: no step at all. The command does not move, and the
+        // reference walks away until the accumulated error clears the tolerance.
+        rb_servo::KinematicsConfig dead = cfg;
+        dead.ik.min_iterations = 0;
+        rb_servo::PinocchioKinematics kin(dead);
+        const rb_servo::IkResult r = kin.solveIk(rb_servo::ArmId::Left, target, seed, mount);
+        RB_CHECK(r.success);
+        RB_CHECK(r.iterations == 0);
+        RB_CHECK(closeJoints(r.q_solution_deg, seed, 1e-12));  // bit-identical: no motion
+    }
+
+    {   // New behaviour: one damped step, so the command tracks the sub-tolerance
+        // reference instead of quantizing it.
+        rb_servo::PinocchioKinematics kin(cfg);   // min_iterations defaults to 1
+        RB_CHECK(cfg.ik.min_iterations == 1);
+        const rb_servo::IkResult r = kin.solveIk(rb_servo::ArmId::Left, target, seed, mount);
+        RB_CHECK(r.success);
+        RB_CHECK(r.iterations >= 1);
+        RB_CHECK(!closeJoints(r.q_solution_deg, seed, 1e-12));  // it moved
+        // Toward the target, and by an amount proportional to a 10 um residual --
+        // the step cannot run away, which is what makes forcing it safe.
+        const rb_servo::Pose6D reached =
+            probe.computeTcpStand(rb_servo::ArmId::Left, r.q_solution_deg, mount);
+        RB_CHECK(positionDistance(reached, target) < 1.0e-5);
+        RB_CHECK(!closeJoints(r.q_solution_deg, seed, 1e-12));
+        RB_CHECK(closeJoints(r.q_solution_deg, seed, 0.05));
+    }
+
+    {   // An EXACTLY reachable target still returns the seed: the step is
+        // proportional to the residual, and a zero residual moves nothing. The
+        // floor costs a solve, never a motion.
+        rb_servo::PinocchioKinematics kin(cfg);
+        const rb_servo::Pose6D exact =
+            probe.computeTcpStand(rb_servo::ArmId::Left, seed, mount);
+        const rb_servo::IkResult r = kin.solveIk(rb_servo::ArmId::Left, exact, seed, mount);
+        RB_CHECK(r.success);
+        RB_CHECK(closeJoints(r.q_solution_deg, seed, 1e-9));
+    }
+    return true;
+}
+
+bool testIkMinIterationsConfigBounds() {
+    // A floor above the iteration budget would make every solve report
+    // max_iterations, i.e. turn the smoothing knob into a total refusal.
+    const auto body = [](const std::string& ik_lines) {
+        return "schema: robotics_lab.rb_servo_server.v1\n"
+               "kinematics:\n"
+               "  enable: true\n"
+               "  provider: pinocchio\n"
+               "  urdf: \"" + rb3Urdf().string() + "\"\n"
+               "  ik:\n" + ik_lines;
+    };
+    RB_CHECK(loadRejects(writeTempConfig(
+        "min-iter-too-big", body("    max_iterations: 100\n    min_iterations: 200\n"))));
+    RB_CHECK(loadRejects(writeTempConfig(
+        "min-iter-negative", body("    min_iterations: -1\n"))));
+    return true;
+}
+
 int main() {
     if (!testFloorPointZJacobianFiniteDifference()) return 1;
     if (!testStandAxisJacobianFiniteDifference()) return 1;
@@ -1251,5 +1330,7 @@ int main() {
     if (!testIkSeedUsesPreviousSentTargetNotActualState()) return 1;
     if (!testPinocchioIk()) return 1;
     if (!testInvalidTargetDoesNotThrow()) return 1;
+    if (!testIkMinIterationsRemovesTheToleranceDeadZone()) return 1;
+    if (!testIkMinIterationsConfigBounds()) return 1;
     return 0;
 }

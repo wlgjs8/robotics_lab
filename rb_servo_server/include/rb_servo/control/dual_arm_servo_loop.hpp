@@ -712,6 +712,12 @@ private:
     std::array<std::atomic<double>, 3> runtime_roi_max_m_{};
     RoiArmEvaluation last_roi_left_{};
     RoiArmEvaluation last_roi_right_{};
+    // Measured-pose twin of the two above. Observation only: it is published and
+    // logged, and never feeds a constraint row. Driving the box off the measured
+    // pose would put encoder noise back into the command loop, which is the same
+    // reason the IK is seeded from the previous SENT target and not from q_actual.
+    RoiArmEvaluation last_roi_measured_left_{};
+    RoiArmEvaluation last_roi_measured_right_{};
     // Engage/release hysteresis state for the geometric constraint rows (loop
     // thread only). ROI faces: [arm(2)][axis(3)][side(2)] flattened; collision
     // pairs keyed by geom_a<<32|geom_b (see buildCollisionConstraints).

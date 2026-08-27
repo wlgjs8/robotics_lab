@@ -97,11 +97,14 @@ class RecordingCommandClient:
         action: str = "toggle",
         left_q_deg: tuple[float, ...] | list[float] | None = None,
         right_q_deg: tuple[float, ...] | list[float] | None = None,
+        auto_roi_recover: bool | None = None,
     ) -> ArmInitCommandResult:
         if arms not in {"both", "left", "right"}:
             return ArmInitCommandResult(False, f"invalid arm init arms: {arms}")
-        if action not in {"start", "cancel", "toggle"}:
+        if action not in {"start", "cancel", "toggle", "config"}:
             return ArmInitCommandResult(False, f"invalid arm init action: {action}")
+        if auto_roi_recover is not None and not isinstance(auto_roi_recover, bool):
+            return ArmInitCommandResult(False, "auto_roi_recover must be a bool")
         try:
             left = _finite_joint6(left_q_deg, "left_q_deg")
             right = _finite_joint6(right_q_deg, "right_q_deg")
@@ -118,6 +121,8 @@ class RecordingCommandClient:
             payload["left_q_deg"] = left
         if right is not None:
             payload["right_q_deg"] = right
+        if auto_roi_recover is not None:
+            payload["auto_roi_recover"] = bool(auto_roi_recover)
         try:
             self._socket.sendto(json.dumps(payload, separators=(",", ":")).encode("utf-8"), self.endpoint)
         except OSError as exc:
@@ -228,6 +233,7 @@ def normalize_arm_init_status(block: Mapping[str, Any] | None) -> dict[str, Any]
         "right_message": str(block.get("right_message", "") or ""),
         "last_command": last_command,
         "error": error,
+        "auto_roi_recover": bool(block.get("auto_roi_recover", False)),
     }
     for side in ("left", "right"):
         for suffix in (

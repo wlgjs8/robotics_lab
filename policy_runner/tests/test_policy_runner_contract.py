@@ -26,9 +26,11 @@ from policy_runner.record_control import RecordCommand, RecordingSupervisor, par
 from policy_runner.recording import _hash_canonical_json
 from policy_runner.robot_state_client import (
     RobotStateClient,
+    RoiExitTracker,
     StateSnapshot,
     StateStreamLeaseReadback,
     command_source_lease_from_snapshot,
+    roi_exit_from_snapshot,
 )
 from policy_runner.safety import ActionRequirements, SafetyConfig, SafetyGate
 from policy_runner.servo_command_client import CommandIntent, ServoCommandClient
@@ -554,6 +556,117 @@ class PolicyRunnerContractTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             parse_arm_init_command({"schema": ARM_INIT_COMMAND_SCHEMA, "arms": "middle"})
+
+    # ---- ROI auto-recover ------------------------------------------------
+    @staticmethod
+    def _roi_snapshot(left_outside, right_outside, *, enabled=True, left_measured=True):
+        def arm(outside):
+            return {
+                "checked": True,
+                "violated": False,  # command-side verdict; the watchdog must ignore it
+                "min_margin_m": 0.05,
+                "closest_face": "y_max",
+                "measured": {
+                    "checked": True,
+                    "violated": bool(outside),
+                    "min_margin_m": -0.006 if outside else 0.05,
+                    "closest_face": "y_max",
+                },
+            }
+
+        left = arm(left_outside)
+        if not left_measured:
+            left.pop("measured")
+        return StateSnapshot(
+            payload={"roi_box": {"enabled": enabled, "left": left, "right": arm(right_outside)}},
+            received_monotonic=0.0,
+        )
+
+    def test_roi_exit_readback_is_per_arm_and_uses_the_measured_block(self):
+        # Left outside, right inside: each arm is answered on its own, because each
+        # is recovered on its own. And the command-side `violated` (False here on
+        # both) must not be what decides -- the damper's job is to keep that false.
+        out = roi_exit_from_snapshot(self._roi_snapshot(True, False))
+        self.assertTrue(out["left"].outside)
+        self.assertEqual(out["left"].closest_face, "y_max")
+        self.assertLess(out["left"].min_margin_m, 0.0)
+        self.assertFalse(out["right"].outside)
+
+    def test_roi_exit_readback_unknown_is_not_outside(self):
+        # ROI disabled, or a server too old to publish the measured block, must read
+        # as unknown (None) -- never as "outside", which would move an arm on the
+        # strength of a message that could not be read.
+        disabled = roi_exit_from_snapshot(self._roi_snapshot(True, False, enabled=False))
+        self.assertIsNone(disabled["left"].outside)
+        missing = roi_exit_from_snapshot(self._roi_snapshot(True, False, left_measured=False))
+        self.assertIsNone(missing["left"].outside)
+        self.assertIs(missing["right"].outside, False)
+
+    def test_roi_exit_tracker_fires_once_per_departure(self):
+        tracker = RoiExitTracker()
+        inside = roi_exit_from_snapshot(self._roi_snapshot(False, False))["left"]
+        outside = roi_exit_from_snapshot(self._roi_snapshot(True, False))["left"]
+        unknown = roi_exit_from_snapshot(self._roi_snapshot(True, False, enabled=False))["left"]
+
+        self.assertFalse(tracker.update(inside))
+        # One outside sample is not enough: a single stray datagram must not send
+        # an arm home.
+        self.assertFalse(tracker.update(outside))
+        self.assertTrue(tracker.update(outside))
+        # Level condition, single event: staying outside does not re-fire.
+        self.assertFalse(tracker.update(outside))
+        self.assertFalse(tracker.update(outside))
+        # Unknown holds state rather than clearing it.
+        self.assertFalse(tracker.update(unknown))
+        self.assertFalse(tracker.update(outside))
+        # Back inside re-arms; a second departure fires again. This is what makes
+        # the recovery repeatable with no timer: parking the arm at the init pose
+        # (inside) is itself the re-arm.
+        self.assertFalse(tracker.update(inside))
+        self.assertFalse(tracker.update(outside))
+        self.assertTrue(tracker.update(outside))
+
+    def test_roi_exit_tracker_debounce_needs_consecutive_samples(self):
+        tracker = RoiExitTracker()
+        inside = roi_exit_from_snapshot(self._roi_snapshot(False, False))["left"]
+        outside = roi_exit_from_snapshot(self._roi_snapshot(True, False))["left"]
+        for _ in range(5):
+            self.assertFalse(tracker.update(outside))
+            self.assertFalse(tracker.update(inside))
+        self.assertFalse(tracker.outside)
+
+    def test_arm_init_config_action_toggles_auto_roi_without_moving(self):
+        controller = ArmInitOverrideController()
+        self.assertFalse(controller.status_block()["auto_roi_recover"])
+        command = parse_arm_init_command(
+            {
+                "schema": ARM_INIT_COMMAND_SCHEMA,
+                "arms": "both",
+                "action": "config",
+                "auto_roi_recover": True,
+                "left_q_deg": [1, 2, 3, 4, 5, 6],
+                "right_q_deg": [1, 2, 3, 4, 5, 6],
+            }
+        )
+        self.assertTrue(controller.handle_command(command))
+        self.assertTrue(controller.status_block()["auto_roi_recover"])
+        # A settings packet must never start a move...
+        self.assertFalse(controller.status_block()["init_override_left"])
+        self.assertFalse(controller.status_block()["init_override_right"])
+        # ...but the init pose it carried is stored, so a later auto-triggered
+        # start has a target without the operator pressing anything.
+        self.assertEqual(controller.left_q_deg, (1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
+        # Idempotent: re-sending the same value reports no change.
+        self.assertFalse(controller.handle_command(command))
+        with self.assertRaises(ValueError):
+            parse_arm_init_command(
+                {
+                    "schema": ARM_INIT_COMMAND_SCHEMA,
+                    "arms": "both",
+                    "action": "config",
+                    "auto_roi_recover": "yes",
+                }
+            )
 
     def test_arm_init_start_cancel_and_auto_clear_done(self):
         controller = ArmInitOverrideController()
@@ -1330,6 +1443,205 @@ class PolicyRunnerContractTest(unittest.TestCase):
         self.assertEqual(action_seq, 2)
         self.assertEqual(seen_states[0].payload["recording"]["state"], "recording")
         self.assertEqual(recorder.drain_calls[0][1], "joint_sine")
+
+    def test_run_auto_roi_recover_inits_only_the_arm_that_left_the_box(self):
+        # End to end: the toggle arrives as a config packet, the left arm's MEASURED
+        # TCP is outside the ROI box, and the result is an init_motion command for the
+        # left arm only -- the right arm keeps running the policy, which is the whole
+        # point of doing this per arm.
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "geometry": {"path": ""},
+                "runtime": {"startup_timeout_sec": 0.1},
+                "recording": {"rate_hz": 30.0},
+            }
+        )
+
+        class DualTcpSource:
+            requirements = ActionRequirements(requires_valid_joint_state=True)
+            name = "dual_tcp"
+
+            def next_intent(self, snapshot, now_monotonic):
+                _ = snapshot, now_monotonic
+                return tcp_pose_target_stand_intent(
+                    left=(0.1, 0.2, 0.3, 0, 0, 0),
+                    right=(0.4, 0.5, 0.6, 0, 0, 0),
+                )
+
+            def close(self):
+                pass
+
+        roi_state = sample_state(
+            roi_box={
+                "enabled": True,
+                "left": {
+                    "checked": True,
+                    "violated": False,
+                    "measured": {
+                        "checked": True,
+                        "violated": True,  # the ARM is out, not just the request
+                        "min_margin_m": -0.006,
+                        "closest_face": "y_max",
+                    },
+                },
+                "right": {
+                    "checked": True,
+                    "violated": False,
+                    "measured": {
+                        "checked": True,
+                        "violated": False,
+                        "min_margin_m": 0.05,
+                        "closest_face": "y_max",
+                    },
+                },
+            },
+        )
+
+        command_client = FakeCommandClient()
+        recorder = FakeArmInitControlSupervisor(
+            [
+                {
+                    "schema": ARM_INIT_COMMAND_SCHEMA,
+                    "arms": "both",
+                    "action": "config",
+                    "auto_roi_recover": True,
+                    "left_q_deg": [1, 2, 3, 4, 5, 6],
+                    "right_q_deg": [-1, -2, -3, -4, -5, -6],
+                }
+            ]
+        )
+
+        ticks = {"n": 0}
+
+        def sleep_fn(_period):
+            ticks["n"] += 1
+            if ticks["n"] >= 3:
+                raise KeyboardInterrupt()
+
+        result = run(
+            cfg,
+            state_client=FakeStateClient([roi_state]),
+            command_client=command_client,
+            source=DualTcpSource(),
+            sleep_fn=sleep_fn,
+            recording_supervisor=recorder,
+        )
+
+        self.assertEqual(result, 0)
+        mixed = command_client.sent[-1]
+        self.assertEqual(mixed.left["mode"], "JointTarget")
+        self.assertEqual(mixed.left["joint_target_profile"], "init_motion")
+        self.assertEqual(mixed.left["q_target_deg"], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+        self.assertEqual(mixed.right["mode"], "TcpPoseTarget")
+        # Debounce: the first tick sees the arm outside but must not act on a single
+        # reading, so the first command out is still pure policy.
+        self.assertEqual(command_client.sent[1].left["mode"], "TcpPoseTarget")
+
+    def test_auto_roi_recover_does_not_retry_an_arm_whose_init_failed(self):
+        # The planner refusing an init is a fact a human was told about. Re-running
+        # that move automatically would re-issue a refused command with nobody
+        # watching, so a failed arm is skipped until the operator clears it.
+        controller = ArmInitOverrideController()
+        controller.handle_command(
+            parse_arm_init_command(
+                {
+                    "schema": ARM_INIT_COMMAND_SCHEMA,
+                    "arms": "left",
+                    "action": "start",
+                    "left_q_deg": [1, 2, 3, 4, 5, 6],
+                    "right_q_deg": [1, 2, 3, 4, 5, 6],
+                }
+            )
+        )
+        controller.update_from_snapshot(
+            StateSnapshot(
+                payload={
+                    "init_motion": {
+                        "left": {"status": "failed", "fail_mode": "goal_not_clear", "message": "x"}
+                    }
+                },
+                received_monotonic=0.0,
+            )
+        )
+        status = controller.status_block()
+        self.assertIn("failed", status["left_state"])
+        # Both guards the loop uses must hold for a failed arm.
+        self.assertTrue(
+            status["init_override_left"] or "failed" in str(status.get("left_state", ""))
+        )
+
+    def test_run_auto_roi_recover_off_by_default_leaves_policy_alone(self):
+        # No config packet -> the toggle is off -> an arm outside the box is reported
+        # by nothing and moved by nothing. An autonomous move nobody asked for is not
+        # a default.
+        cfg = config_from_mapping(
+            {
+                "schema": "robotics_lab.policy_runner.v1",
+                "geometry": {"path": ""},
+                "runtime": {"startup_timeout_sec": 0.1},
+                "recording": {"rate_hz": 30.0},
+            }
+        )
+
+        class DualTcpSource:
+            requirements = ActionRequirements(requires_valid_joint_state=True)
+            name = "dual_tcp"
+
+            def next_intent(self, snapshot, now_monotonic):
+                _ = snapshot, now_monotonic
+                return tcp_pose_target_stand_intent(
+                    left=(0.1, 0.2, 0.3, 0, 0, 0),
+                    right=(0.4, 0.5, 0.6, 0, 0, 0),
+                )
+
+            def close(self):
+                pass
+
+        roi_state = sample_state(
+            roi_box={
+                "enabled": True,
+                "left": {
+                    "checked": True,
+                    "violated": False,
+                    "measured": {
+                        "checked": True,
+                        "violated": True,  # the ARM is out, not just the request
+                        "min_margin_m": -0.006,
+                        "closest_face": "y_max",
+                    },
+                },
+                "right": {
+                    "checked": True,
+                    "violated": False,
+                    "measured": {
+                        "checked": True,
+                        "violated": False,
+                        "min_margin_m": 0.05,
+                        "closest_face": "y_max",
+                    },
+                },
+            },
+        )
+        command_client = FakeCommandClient()
+        ticks = {"n": 0}
+
+        def sleep_fn(_period):
+            ticks["n"] += 1
+            if ticks["n"] >= 3:
+                raise KeyboardInterrupt()
+
+        result = run(
+            cfg,
+            state_client=FakeStateClient([roi_state]),
+            command_client=command_client,
+            source=DualTcpSource(),
+            sleep_fn=sleep_fn,
+        )
+        self.assertEqual(result, 0)
+        for intent in command_client.sent[1:]:
+            self.assertEqual(intent.left["mode"], "TcpPoseTarget")
+            self.assertEqual(intent.right["mode"], "TcpPoseTarget")
 
     def test_run_applies_arm_init_override_before_safety_and_send(self):
         cfg = config_from_mapping(

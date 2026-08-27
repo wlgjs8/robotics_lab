@@ -200,6 +200,116 @@ def joint_limit_stall_from_snapshot(snapshot: StateSnapshot) -> JointLimitStallR
     )
 
 
+@dataclass(frozen=True)
+class RoiExitReadback:
+    """One tick's answer to "has this arm actually left the safety ROI box".
+
+    Reads the server's own MEASURED-pose evaluation (roi_box.<arm>.measured), not a
+    reimplementation here. The box is checked against the TCP *and* the four gripper
+    tip points, interpolated to the live jaw opening, against the effective runtime
+    bounds -- reproducing that in Python would be a second copy of the geometry free
+    to disagree with the layer that is actually stopping the arm.
+
+    It disagreed, measured 2026-08-27 (servo_log_20260827_232728.csv, right arm,
+    t=72.6-77.1 s): the server raised RoiViolation 13 times and the damper fought the
+    boundary for 4.5 s, with the tip envelope up to 6.2 mm outside the operator's box
+    on 1949 of 2701 ticks -- while the TCP point alone never came closer than 8.7 mm
+    INSIDE it. A TCP-only test would have reported that arm as inside for the whole
+    event.
+
+    Sibling key roi_box.<arm>.violated is the COMMANDED-pose verdict, which is what
+    the damper acts on; this is the measured twin, i.e. where the arm went, not what
+    was asked of it.
+
+    `outside` is None when the answer is unknown (ROI disabled, the server too old to
+    publish the measured block, FK unavailable). Unknown is not "outside": nothing
+    moves an arm on the strength of a state message it could not read.
+    """
+
+    outside: bool | None
+    min_margin_m: float | None
+    closest_face: str | None
+
+
+def roi_exit_from_snapshot(snapshot: StateSnapshot) -> dict[str, RoiExitReadback]:
+    """Per-arm measured-pose ROI readback for one state message.
+
+    Per ARM and independent: both arms can be outside at once and each is recovered
+    on its own, unlike joint_limit_stall_from_snapshot which reports only the first
+    blocked arm because the caller there aborts the whole rollout either way.
+    """
+
+    roi = snapshot.payload.get("roi_box")
+    enabled = isinstance(roi, dict) and roi.get("enabled") is True
+    result: dict[str, RoiExitReadback] = {}
+    for arm in ("left", "right"):
+        arm_block = roi.get(arm) if isinstance(roi, dict) else None
+        measured = arm_block.get("measured") if isinstance(arm_block, dict) else None
+        if (
+            not enabled
+            or not isinstance(measured, dict)
+            or measured.get("checked") is not True
+            or not isinstance(measured.get("violated"), bool)
+        ):
+            result[arm] = RoiExitReadback(None, None, None)
+            continue
+        face = measured.get("closest_face")
+        result[arm] = RoiExitReadback(
+            outside=bool(measured["violated"]),
+            min_margin_m=_optional_float(measured.get("min_margin_m")),
+            closest_face=face if isinstance(face, str) else None,
+        )
+    return result
+
+
+class RoiExitTracker:
+    """Edge-detects "this arm's measured TCP left the ROI box" for one arm.
+
+    Fires ONCE on the inside->outside edge and stays quiet until the arm is read
+    back inside, so a level condition ("still outside") becomes the single event
+    the recovery needs. Re-arming on the way back in is what makes a second trip
+    possible without any timer: the recovery parks the arm at the init pose, which
+    is inside, so the tracker re-arms as a side effect of the recovery working.
+
+    The only debounce is _CONFIRM_SAMPLES consecutive outside readings. This is not
+    a tuning knob and is deliberately not configurable -- it exists so that ONE
+    malformed or reordered UDP state datagram cannot send an arm home, and at the
+    command-loop rate it costs single-digit milliseconds. An unknown reading
+    (outside is None) neither confirms nor clears: the tracker holds its state.
+    """
+
+    _CONFIRM_SAMPLES = 2
+
+    def __init__(self) -> None:
+        self._outside = False
+        self._streak = 0
+
+    @property
+    def outside(self) -> bool:
+        return self._outside
+
+    def update(self, readback: RoiExitReadback) -> bool:
+        """Returns True on the tick the arm is confirmed to have left the box."""
+        if readback.outside is None:
+            return False
+        if not readback.outside:
+            self._outside = False
+            self._streak = 0
+            return False
+        if self._outside:
+            return False
+        self._streak += 1
+        if self._streak < self._CONFIRM_SAMPLES:
+            return False
+        self._outside = True
+        self._streak = 0
+        return True
+
+    def reset(self) -> None:
+        self._outside = False
+        self._streak = 0
+
+
 class StateStreamLeaseReadback:
     """Waits for command-source lease confirmation on the UDP state stream."""
 

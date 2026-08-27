@@ -3904,6 +3904,14 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.roi_box_right_violated = last_roi_right_.violated;
             latest_snapshot_.roi_box_right_min_margin_m = last_roi_right_.min_margin_m;
             latest_snapshot_.roi_box_right_closest_face = last_roi_right_.closest_face;
+            latest_snapshot_.roi_box_left_measured_checked = last_roi_measured_left_.checked;
+            latest_snapshot_.roi_box_left_measured_violated = last_roi_measured_left_.violated;
+            latest_snapshot_.roi_box_left_measured_min_margin_m = last_roi_measured_left_.min_margin_m;
+            latest_snapshot_.roi_box_left_measured_closest_face = last_roi_measured_left_.closest_face;
+            latest_snapshot_.roi_box_right_measured_checked = last_roi_measured_right_.checked;
+            latest_snapshot_.roi_box_right_measured_violated = last_roi_measured_right_.violated;
+            latest_snapshot_.roi_box_right_measured_min_margin_m = last_roi_measured_right_.min_margin_m;
+            latest_snapshot_.roi_box_right_measured_closest_face = last_roi_measured_right_.closest_face;
             latest_snapshot_.roi_box_clamp_count = roi_clamp_count_;
             latest_snapshot_.roi_box_last_set_reject_reason = roi_last_set_reject_reason_;
             {
@@ -6784,6 +6792,16 @@ ServoTarget DualArmServoLoop::applySafety(
         const RoiArmEvaluation right_eval = evaluateRoiArm(ArmId::Right, out.right_q_target_deg);
         last_roi_left_ = left_eval;    // telemetry, even when already faulted
         last_roi_right_ = right_eval;
+        // Measured-pose evaluation, observation only (never a constraint row). The
+        // enforcing pair above runs on the COMMANDED target, so it reports what the
+        // policy asked for; the damper exists to stop that from reaching the arm.
+        // A supervisor asking "did this arm leave the box" needs the arm's own pose,
+        // and it needs the SAME points -- measured 2026-08-27 on
+        // servo_log_20260827_232728.csv (right arm, t=72.6-77.1 s): the gripper tips
+        // sat up to 6.2 mm outside the operator's box for 1949 of 2701 ticks while
+        // the TCP alone never came closer than 8.7 mm inside it.
+        last_roi_measured_left_ = evaluateRoiArm(ArmId::Left, left_state.q_actual_deg);
+        last_roi_measured_right_ = evaluateRoiArm(ArmId::Right, right_state.q_actual_deg);
         if (!config_.safety.roi_box.monitor_only &&
             combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
             const auto& rb = config_.safety.roi_box;

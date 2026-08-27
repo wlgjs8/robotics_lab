@@ -1912,6 +1912,17 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         roi["right"] = arm_json(
             snapshot.roi_box_right_checked, snapshot.roi_box_right_violated,
             snapshot.roi_box_right_min_margin_m, snapshot.roi_box_right_closest_face);
+        // Nested rather than a sibling key so a consumer cannot pick up the measured
+        // answer while believing it read the enforcing one: <arm>.violated stays the
+        // command-side verdict every existing reader already means by that name.
+        roi["left"]["measured"] = arm_json(
+            snapshot.roi_box_left_measured_checked, snapshot.roi_box_left_measured_violated,
+            snapshot.roi_box_left_measured_min_margin_m,
+            snapshot.roi_box_left_measured_closest_face);
+        roi["right"]["measured"] = arm_json(
+            snapshot.roi_box_right_measured_checked, snapshot.roi_box_right_measured_violated,
+            snapshot.roi_box_right_measured_min_margin_m,
+            snapshot.roi_box_right_measured_closest_face);
         roi["clamp_count"] = snapshot.roi_box_clamp_count;
         if (snapshot.roi_box_last_set_reject_reason.empty()) {
             roi["last_set_reject_reason"] = nullptr;

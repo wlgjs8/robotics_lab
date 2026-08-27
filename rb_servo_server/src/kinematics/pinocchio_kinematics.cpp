@@ -577,7 +577,17 @@ IkResult PinocchioKinematics::solveIkDamped(
                 elapsedUs()
             );
         }
-        if (position_error_m <= config_.ik.position_tolerance_m &&
+        // ik.min_iterations: the tolerance test is at the TOP of the iteration, so
+        // without this floor the solver accepts the SEED whenever the new target is
+        // already within tolerance of the previous sent pose -- and streaming
+        // Cartesian control asks for less than the tolerance on every slow tick.
+        // The result was a staircase command (see config.hpp for the measurement).
+        // Taking one step first costs ~5.2 us on the ticks that used to return here
+        // (measured: 1.02 us at 0 iterations vs 6.16 us at 1) and cannot move far:
+        // the step is proportional to the residual, and the residual is what just
+        // passed the tolerance test.
+        if (iterations >= config_.ik.min_iterations &&
+            position_error_m <= config_.ik.position_tolerance_m &&
             orientation_error_rad <= config_.ik.orientation_tolerance_rad) {
             IkResult result;
             result.success = true;

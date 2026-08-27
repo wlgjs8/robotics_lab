@@ -2388,6 +2388,13 @@ void validateConfig(const DualArmConfig& cfg) {
     validatePositiveFinite(cfg.kinematics.ik.timeout_ms, "kinematics.ik.timeout_ms");
     validatePositiveFinite(cfg.kinematics.ik.damping, "kinematics.ik.damping");
     validatePositiveFinite(cfg.kinematics.ik.position_tolerance_m, "kinematics.ik.position_tolerance_m");
+    if (cfg.kinematics.ik.min_iterations < 0 ||
+        cfg.kinematics.ik.min_iterations > cfg.kinematics.ik.max_iterations) {
+        throw std::runtime_error(
+            "kinematics.ik.min_iterations must be in [0, kinematics.ik.max_iterations] "
+            "(it is a floor on the solver steps taken before the tolerance test, not a "
+            "second iteration budget)");
+    }
     validatePositiveFinite(cfg.kinematics.ik.orientation_tolerance_rad, "kinematics.ik.orientation_tolerance_rad");
     validatePositiveFiniteArray(cfg.kinematics.ik.max_step_deg, "kinematics.ik.max_step_deg");
     validateNonNegativeFinite(cfg.kinematics.ik.singular_region_eps, "kinematics.ik.singular_region_eps");
@@ -4233,6 +4240,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             validateAllowedKeys(ik, {
                 "enable",
                 "max_iterations",
+                "min_iterations",
                 "timeout_ms",
                 "damping",
                 "position_tolerance_m",
@@ -4257,6 +4265,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             }, "kinematics.ik");
             if (has(ik, "enable")) cfg.kinematics.ik.enable = asBool(ik["enable"], "kinematics.ik.enable");
             if (has(ik, "max_iterations")) cfg.kinematics.ik.max_iterations = asInt(ik["max_iterations"], "kinematics.ik.max_iterations");
+            if (has(ik, "min_iterations")) cfg.kinematics.ik.min_iterations = asInt(ik["min_iterations"], "kinematics.ik.min_iterations");
             if (has(ik, "timeout_ms")) cfg.kinematics.ik.timeout_ms = asDouble(ik["timeout_ms"], "kinematics.ik.timeout_ms");
             if (has(ik, "damping")) cfg.kinematics.ik.damping = asDouble(ik["damping"], "kinematics.ik.damping");
             if (has(ik, "position_tolerance_m")) cfg.kinematics.ik.position_tolerance_m = asDouble(ik["position_tolerance_m"], "kinematics.ik.position_tolerance_m");

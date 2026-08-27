@@ -22,11 +22,13 @@ from .geometry import GeometryStatus, load_geometry_status
 from .robot_state_client import (
     JointLimitStallTracker,
     RobotStateClient,
+    RoiExitTracker,
     StateSnapshot,
     StateStreamLeaseReadback,
     command_source_lease_from_snapshot,
     fault_latch_from_snapshot,
     joint_limit_stall_from_snapshot,
+    roi_exit_from_snapshot,
 )
 from .rollout_modes import (
     ReadOnlyActionSource,
@@ -39,6 +41,7 @@ from .rollout_modes import (
 from .safety import SafetyGate
 from .servo_command_client import CommandIntent, ServoCommandClient
 from .arm_init_control import (
+    ArmInitCommand,
     ArmInitOverrideController,
     apply_source_override_transitions,
     apply_source_arm_mask,
@@ -323,6 +326,10 @@ def run(
         reset_flow_source_on_start=config.arm_init_override.reset_flow_source_on_start,
         reset_flow_source_on_resume=config.arm_init_override.reset_flow_source_on_resume,
     )
+    # ROI auto-recover: one edge detector per arm, so both arms are judged and
+    # recovered independently (the other arm keeps running the policy).
+    roi_exit_trackers = {"left": RoiExitTracker(), "right": RoiExitTracker()}
+    roi_recover_counts = {"left": 0, "right": 0}
     source_base_arm_mask = source_arm_mask_copy(source)
     last_record_packet: dict[str, object] | None = None
     last_record_packet_time_ns = 0
@@ -630,6 +637,57 @@ def run(
             else:
                 recording_supervisor.drain_commands(snapshot, action_source=action_source_name)
             arm_init_override.update_from_snapshot(snapshot)
+            # ROI AUTO-RECOVER. An arm whose MEASURED TCP has left the safety ROI box
+            # is sent home on the same per-arm InitMotion latch the operator's button
+            # drives, and the other arm keeps running the policy -- the server rewrites
+            # only the selected arm (applyInitMotionSequencer) and the resume path
+            # re-anchors only that arm (on_arm_init_override_done).
+            #
+            # Placed AFTER update_from_snapshot so a latch this tick is composed into
+            # this tick's intent, and BEFORE consume_transitions so the started event
+            # masks the arm and invalidates its chunks without a tick of delay.
+            #
+            # No timer and no margin: the tracker fires on the inside->outside edge and
+            # re-arms when the arm reads back inside, which the recovery itself causes
+            # by parking it at the init pose. A second trip therefore needs a second
+            # departure, so nothing has to be tuned to prevent a loop. What it cannot
+            # prevent is a policy that keeps driving out: that shows up as a recovery
+            # COUNT in the rollout log, which is the signal to turn the toggle off.
+            if arm_init_override.auto_roi_recover:
+                roi_exits = roi_exit_from_snapshot(snapshot)
+                arm_init_status = arm_init_override.status_block()
+                for arm, tracker in roi_exit_trackers.items():
+                    if not tracker.update(roi_exits[arm]):
+                        continue
+                    if arm_init_status[f"init_override_{arm}"]:
+                        continue  # already recovering this arm
+                    if "failed" in str(arm_init_status.get(f"{arm}_state", "")):
+                        # The planner already refused this arm's init once. Retrying it
+                        # on our own would re-run a move a human was told about and has
+                        # not cleared; the operator's Cancel button is the way out.
+                        continue
+                    readback = roi_exits[arm]
+                    roi_recover_counts[arm] += 1
+                    arm_init_override.handle_command(
+                        ArmInitCommand(
+                            arms=arm,
+                            action="start",
+                            left_q_deg=None,
+                            right_q_deg=None,
+                        )
+                    )
+                    margin_mm = (
+                        "?" if readback.min_margin_m is None
+                        else f"{readback.min_margin_m * 1000.0:.1f}"
+                    )
+                    print(
+                        f"policy_runner roi_auto_recover: arm={arm} "
+                        f"face={readback.closest_face or '?'} margin={margin_mm}mm "
+                        f"count={roi_recover_counts[arm]}"
+                        + (f" -- {arm_init_override.error}" if arm_init_override.error else ""),
+                        file=stderr,
+                        flush=True,
+                    )
             transitions = arm_init_override.consume_transitions()
             apply_source_override_transitions(
                 source,

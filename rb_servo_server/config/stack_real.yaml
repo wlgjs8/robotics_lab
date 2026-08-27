@@ -442,8 +442,8 @@ safety:
     # 2026-07-09 (ft branch): z 하한만 0.000 → -0.200 (runtime_min과 동일). 바닥면이
     # 스탠드 플로어와 같은 높이(z=0)라 플로어를 꺼도 테이블 접근 감속이 남던 것을
     # 제거 — 바닥 backstop은 FT 센서로 대체, x/y/상단 작업공간 제한은 유지.
-    min_m: [-0.650, -0.900, -0.200]
-    max_m: [0.650, -0.200, 0.800]
+    min_m: [-0.350, -0.900, -0.100]
+    max_m: [0.350, -0.250, 0.590]
     runtime_min_m: [-1.2, -1.6, -0.2]
     runtime_max_m: [1.2, 0.6, 1.6]
     fail_policy: clamp_hold
@@ -1154,6 +1154,27 @@ kinematics:
   q_units: deg
   publish_tcp: true
   ik:
+    # MINIMUM SOLVER STEPS before the tolerance test may accept (2026-08-28). The
+    # test sits at the TOP of the iteration, so 0 lets the solver return the SEED
+    # whenever the new target is already inside position_tolerance_m of the pose the
+    # previous sent joints reach. Streaming Cartesian control asks for less than that
+    # on every slow tick, so the joint command came out as a staircase -- hold N
+    # ticks, then one lump step, and that step always leaves from a standstill so it
+    # trips the acceleration limiter at ddq_max*dt.
+    # MEASURED (servo_log_20260827_234302.csv, 34 s of pi0.5 rollout): 4.3% of the
+    # RIGHT arm's ticks returned 0 iterations, and on those the commanded second
+    # difference was 13x the rest of the run (7554 vs 570 mm/s^2). Essentially all of
+    # that arm's command roughness came from 4% of its ticks. The LEFT arm spent
+    # 23.3% of ticks with a sub-tolerance reference step.
+    # The dead zone was not filtering noise: across 3864 (left) / 655 (right)
+    # consecutive sub-20 um reference steps, the cosine between one step and the next
+    # was +1.00 on 100% of them -- the reference moves smoothly below the tolerance,
+    # so the dead zone was quantizing a smooth signal rather than rejecting a rough
+    # one. Cost of the extra step: 1.02 us -> 6.16 us on the affected ticks, against
+    # a worst-case loop margin of 405 us in 2000 us.
+    # Set 0 to restore the dead zone. The no-noise measurement above covers the chunk
+    # follower path only; SpaceMouse / UMI teleop references were not re-measured.
+    min_iterations: 1
     enable: true
     max_iterations: 100
     timeout_ms: 20.0

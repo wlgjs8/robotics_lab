@@ -1428,6 +1428,21 @@ struct ServoSnapshot {
     bool roi_box_right_violated = false;
     double roi_box_right_min_margin_m = 0.0;
     std::string roi_box_right_closest_face;
+    // The same ROI evaluation run on the MEASURED joints instead of the commanded
+    // target. The enforcing evaluation above answers "is the pose the policy asked
+    // for outside the box"; the damper's whole job is to keep that from becoming
+    // true of the arm, so a supervisor that wants to know where the ARM actually is
+    // has to be told separately. Same offset points, same gripper-open
+    // interpolation, same effective bounds -- so it can never disagree with the
+    // layer that is doing the stopping.
+    bool roi_box_left_measured_checked = false;
+    bool roi_box_left_measured_violated = false;
+    double roi_box_left_measured_min_margin_m = 0.0;
+    std::string roi_box_left_measured_closest_face;
+    bool roi_box_right_measured_checked = false;
+    bool roi_box_right_measured_violated = false;
+    double roi_box_right_measured_min_margin_m = 0.0;
+    std::string roi_box_right_measured_closest_face;
     uint64_t roi_box_clamp_count = 0;
     std::string roi_box_last_set_reject_reason;
 
