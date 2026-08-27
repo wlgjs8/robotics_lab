@@ -52,6 +52,32 @@ class FaultLatchReadback:
     reason: str | None
 
 
+@dataclass(frozen=True)
+class JointLimitStallReadback:
+    """One tick's answer to "is an arm wedged against a joint bound".
+
+    A policy can ask for a pose the arm cannot reach, and when the blocking
+    joint is at its bound the result is a standoff nobody breaks: the arm
+    cannot get closer, so the scene barely changes, so the policy asks for the
+    same pose again. Measured 2026-08-27 (servo_log_20260827_141433.csv): both
+    elbows sat at their bound for the last 6.4 s of a rollout with the
+    Cartesian error stuck at 32 mm / 0.081 rad, while the IK asked to close on
+    the bound 2912 times and to retreat ZERO times. The controller is behaving
+    correctly there -- the barrier only refuses the closing direction, retreat
+    stays free -- so nothing downstream can end it.
+
+    `blocked` means the clamp is active on this arm right now. It says nothing
+    about duration; the caller decides how long is too long.
+    """
+
+    blocked: bool
+    arm: str | None
+    joint_index: int | None
+    q_actual_deg: float | None
+    pos_err_m: float | None
+    ori_err_rad: float | None
+
+
 def parse_udp_endpoint(endpoint: str) -> UdpEndpoint:
     prefix = "udp://"
     if not endpoint.startswith(prefix):
@@ -111,6 +137,54 @@ def fault_latch_from_snapshot(snapshot: StateSnapshot) -> FaultLatchReadback:
         motion_state=motion_state,
         latched_fault_reason=latched_fault_reason,
         reason=reason,
+    )
+
+
+def joint_limit_stall_from_snapshot(snapshot: StateSnapshot) -> JointLimitStallReadback:
+    """Read the per-arm joint-limit clamp out of one state message.
+
+    The server already publishes everything needed, per arm, under
+    <arm>.cartesian_solve: safety_joint_limit_clamped (did the clamp bind this
+    tick), safety_joint_limit_limited_joint (which axis), and the Cartesian
+    residual the solve could not remove. Reports the FIRST blocked arm; when
+    both are blocked, which one is named does not change the decision.
+    """
+
+    payload = snapshot.payload
+    for arm in ("left", "right"):
+        arm_payload = payload.get(arm)
+        if not isinstance(arm_payload, dict):
+            continue
+        solve = arm_payload.get("cartesian_solve")
+        if not isinstance(solve, dict):
+            continue
+        if _optional_bool(solve.get("safety_joint_limit_clamped")) is not True:
+            continue
+        joint_index = solve.get("safety_joint_limit_limited_joint")
+        q_actual = None
+        joints = arm_payload.get("q_actual_deg")
+        if (
+            isinstance(joint_index, int)
+            and isinstance(joints, list)
+            and 0 <= joint_index < len(joints)
+            and isinstance(joints[joint_index], (int, float))
+        ):
+            q_actual = float(joints[joint_index])
+        return JointLimitStallReadback(
+            blocked=True,
+            arm=arm,
+            joint_index=joint_index if isinstance(joint_index, int) else None,
+            q_actual_deg=q_actual,
+            pos_err_m=_optional_float(solve.get("pos_err_m")),
+            ori_err_rad=_optional_float(solve.get("ori_err_rad")),
+        )
+    return JointLimitStallReadback(
+        blocked=False,
+        arm=None,
+        joint_index=None,
+        q_actual_deg=None,
+        pos_err_m=None,
+        ori_err_rad=None,
     )
 
 
@@ -233,6 +307,71 @@ def _optional_str(value: Any) -> str | None:
 
 def _optional_bool(value: Any) -> bool | None:
     return value if isinstance(value, bool) else None
+
+
+class JointLimitStallTracker:
+    """Turns per-tick "blocked" readbacks into "blocked for too long".
+
+    The stall that matters is a STANDOFF, not a clamp: brushing a bound while
+    passing through it is ordinary, and the barrier exists to make that smooth.
+    What nothing downstream can break is the arm sitting on the bound while the
+    policy keeps asking for the pose behind it. So this only counts time while
+    the clamp stays continuously active on the SAME joint, and any tick that
+    clears the clamp (or moves to a different joint) restarts the clock --
+    which is exactly what a policy successfully steering away looks like.
+    """
+
+    def __init__(self, hold_sec: float) -> None:
+        self._hold_sec = float(hold_sec)
+        self._since: float | None = None
+        self._key: tuple[str | None, int | None] | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self._hold_sec > 0.0
+
+    def held_for(self, now_monotonic: float) -> float:
+        if self._since is None:
+            return 0.0
+        return now_monotonic - self._since
+
+    def update(
+        self, readback: JointLimitStallReadback, now_monotonic: float
+    ) -> float | None:
+        """Returns the stall duration once it exceeds hold_sec, else None.
+
+        Reports once per episode: the caller acts, and a repeat only comes
+        after the clamp clears and the arm wedges again.
+        """
+        if not self.enabled or not readback.blocked:
+            self._since = None
+            self._key = None
+            return None
+        key = (readback.arm, readback.joint_index)
+        if self._key != key:
+            self._key = key
+            self._since = now_monotonic
+            return None
+        if self._since is None:
+            self._since = now_monotonic
+            return None
+        held = now_monotonic - self._since
+        if held < self._hold_sec:
+            return None
+        # Latch this episode so the caller is told once, not every tick.
+        self._since = None
+        self._key = None
+        return held
+
+    def reset(self) -> None:
+        self._since = None
+        self._key = None
+
+
+def _optional_float(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 def _lease_timeout_message(

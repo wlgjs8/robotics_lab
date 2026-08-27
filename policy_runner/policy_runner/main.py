@@ -20,11 +20,13 @@ from .teleop_capture import TeleopCaptureLogger
 from .dataset_manifest import parse_camera_names
 from .geometry import GeometryStatus, load_geometry_status
 from .robot_state_client import (
+    JointLimitStallTracker,
     RobotStateClient,
     StateSnapshot,
     StateStreamLeaseReadback,
     command_source_lease_from_snapshot,
     fault_latch_from_snapshot,
+    joint_limit_stall_from_snapshot,
 )
 from .rollout_modes import (
     ReadOnlyActionSource,
@@ -53,6 +55,7 @@ STARTUP_TIMEOUT_EXIT_CODE = 2
 LEASE_READBACK_TIMEOUT_EXIT_CODE = 3
 FAULT_LATCH_EXIT_CODE = 4
 TERMINAL_ABORT_EXIT_CODE = 5
+JOINT_LIMIT_STALL_EXIT_CODE = 6
 
 # Quiet period (no motion intents) after which the teleop loop voluntarily
 # releases the command-source lease so one-shot GUI commands can run between
@@ -276,6 +279,16 @@ def run(
     abort_on_fault_latch = (
         _runner_role(config, source, str(getattr(source, "name", config.action_source)))
         == "flow_infer"
+    )
+    # JOINT-LIMIT STALL. A policy can ask for a pose whose blocking joint is at
+    # its bound; the arm then cannot get closer, the scene barely changes, and
+    # the policy asks again -- a standoff nothing downstream breaks. Measured
+    # 2026-08-27: both elbows sat on their bound for the last 6.4 s of a rollout
+    # (Cartesian error stuck at 32 mm / 0.081 rad, IK asking to close 2912 times
+    # and to retreat zero times). Same scope as the fault-latch abort: policy
+    # rollouts only, so teleop is untouched.
+    joint_limit_stall = JointLimitStallTracker(
+        config.safety.joint_limit_stall_abort_sec if abort_on_fault_latch else 0.0
     )
     safety_gate = SafetyGate(
         config.mode,
@@ -580,6 +593,31 @@ def run(
                     suffix = f" {' '.join(fields)}" if fields else ""
                     print(f"policy_runner fault_latch_abort:{suffix}", file=stderr)
                     return FAULT_LATCH_EXIT_CODE
+            if joint_limit_stall.enabled:
+                stall = joint_limit_stall_from_snapshot(snapshot)
+                held = joint_limit_stall.update(stall, now)
+                if held is not None:
+                    fields = [f"held={held:.1f}s"]
+                    if stall.arm is not None:
+                        joint = "?" if stall.joint_index is None else f"J{stall.joint_index + 1}"
+                        fields.append(f"arm={stall.arm} joint={joint}")
+                    if stall.q_actual_deg is not None:
+                        fields.append(f"q_actual={stall.q_actual_deg:.3f}deg")
+                    if stall.pos_err_m is not None:
+                        fields.append(f"pos_err={stall.pos_err_m * 1000.0:.1f}mm")
+                    if stall.ori_err_rad is not None:
+                        fields.append(f"ori_err={stall.ori_err_rad:.4f}rad")
+                    print(
+                        "policy_runner joint_limit_stall_abort: "
+                        + " ".join(fields)
+                        + " -- the arm is against a joint bound and the policy keeps "
+                        "asking for the pose behind it; the controller cannot break "
+                        "this standoff (retreat is allowed, the policy is not asking "
+                        "for it). Reposition the task or the reset pose so the joint "
+                        "has travel.",
+                        file=stderr,
+                    )
+                    return JOINT_LIMIT_STALL_EXIT_CODE
             _t0 = monotonic_fn() if _prof.on else 0.0
             action_source_name = str(getattr(source, "name", config.action_source))
             drain_payloads = getattr(recording_supervisor, "drain_control_payloads", None)

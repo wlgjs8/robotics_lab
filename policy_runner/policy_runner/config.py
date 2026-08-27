@@ -41,6 +41,17 @@ class SafetyConfig:
     measured_gripper_available: bool = False
     allow_selected_arm_checkpoint_mismatch_readonly: bool = False
     require_valid_joint_state: bool = True
+    # End a POLICY rollout that has wedged an arm against a joint bound for this
+    # long. The controller is behaving correctly in that state -- the barrier
+    # refuses only the closing direction and retreat stays free -- but the policy
+    # keeps asking for the pose behind the bound, so the arm cannot get closer,
+    # the scene barely changes, and the same request comes back. Measured
+    # 2026-08-27: both elbows on their bound for the last 6.4 s of a rollout,
+    # Cartesian error stuck at 32 mm / 0.081 rad, IK asking to close 2912 times
+    # and to retreat zero times. Only the clamp staying CONTINUOUSLY active on
+    # one joint counts, so brushing a bound in passing is not a stall.
+    # 0 disables. Teleop is never affected (policy rollouts only).
+    joint_limit_stall_abort_sec: float = 4.0
     kinematics_available: bool = False
     camera_available: bool = False
     camera_stale: bool = False
