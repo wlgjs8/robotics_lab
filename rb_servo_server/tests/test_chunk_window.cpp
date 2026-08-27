@@ -36,6 +36,36 @@ static ChunkFrame makeFrame(int n, double step = 0.01) {
 }
 
 int main() {
+  // -- Test 0: the shipped consume ceiling covers BOTH execute settings. ------
+  // policy_runner publishes n = min(EXECUTE_STEPS + RUNWAY_STEPS, horizon), and
+  // activate() clamps consume to what the frame can supply:
+  // c_eff = min(consume_steps, n - L - R). stack_real ships consume 8 /
+  // reserve 4 / discard_head 0, so one value serves EXECUTE_STEPS 4 and 8 and
+  // an A/B needs no config edit. At the previous consume 5 an 8-step execution
+  // window was silently capped at 5 -- measured 2026-08-27, where the policy
+  // predicted 24 steps, only rows 0-3 ever ran, and the right arm's per-step
+  // motion GREW across that window (4.58 -> 5.19 mm): the depth was in the rows
+  // being cut off.
+  std::printf("Test 0: shipped consume ceiling vs EXECUTE_STEPS\n");
+  {
+    const ChunkWindowConfig shipped{/*L*/ 0, /*C*/ 8, /*R*/ 4, /*smooth*/ 1};
+    ChunkWindow four(shipped);
+    check(four.activate(makeFrame(4 + 4)), "EXECUTE_STEPS=4 -> n=8 activates");
+    check(four.consumeBudget() == 4, "n=8, R=4 -> consume clamped to 4");
+
+    ChunkWindow eight(shipped);
+    check(eight.activate(makeFrame(8 + 4)), "EXECUTE_STEPS=8 -> n=12 activates");
+    check(eight.consumeBudget() == 8, "n=12, R=4 -> the full 8 is consumed");
+    int steps = 0;
+    while (eight.hasStep()) { eight.advance(); ++steps; }
+    check(steps == 8, "all 8 execution rows really are consumed");
+
+    // The old ceiling is what capped the 8-step window.
+    ChunkWindow old(ChunkWindowConfig{/*L*/ 0, /*C*/ 5, /*R*/ 4, /*smooth*/ 1});
+    check(old.activate(makeFrame(8 + 4)), "n=12 activates at the old ceiling too");
+    check(old.consumeBudget() == 5, "consume 5 caps an 8-step execution window");
+  }
+
   // -- Test 1: nominal window, head discard, consume budget, exhaustion. ------
   std::printf("Test 1: nominal L/C/R\n");
   {

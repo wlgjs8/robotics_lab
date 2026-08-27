@@ -1513,7 +1513,19 @@ cartesian_control:
         # the STALE chunk at full speed; consume 6 + reserve 4 instead follows
         # only the fresh window and decelerates ~178 ms into the runway tail
         # when the next chunk is late.
-        consume_steps: 5
+        # 2026-08-27: 5 -> 8 to let EXECUTE_STEPS=8 actually be consumed.
+        # THIS IS A CEILING, NOT A DEMAND. ChunkWindow::activate clamps it to
+        # what the frame can supply: c_eff = min(consume_steps, n - L - R), and
+        # policy_runner publishes n = min(EXECUTE_STEPS + RUNWAY_STEPS, horizon).
+        # So with reserve 4 and discard_head 0 this one value covers both
+        # settings -- EXECUTE_STEPS=4 gives n=8 -> c_eff=4, EXECUTE_STEPS=8
+        # gives n=12 -> c_eff=8 -- and an A/B needs no config change. At 5 it
+        # silently capped an 8-step window at 5.
+        # (Measured 2026-08-27, servo_log_20260827_210705.csv: the policy
+        # predicts 24 steps and only rows 0-3 were ever executed, while the
+        # right arm's per-step motion GREW across that window, 4.58 -> 5.19 mm
+        # -- the depth was being left in the rows we cut off.)
+        consume_steps: 8
         reserve_steps: 4 #2
         smoothing_window: 1
         # Continuous server-side conditioning of the follower's 500 Hz emitted
