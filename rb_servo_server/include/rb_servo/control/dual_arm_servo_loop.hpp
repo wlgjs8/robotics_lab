@@ -347,6 +347,12 @@ private:
     bool rbpodoAsyncIoMode() const;
     bool workerBackedIoMode() const;
     bool workerOwnsSendCadence() const;
+    // True while the QSYNC SETTLING HOLD (queue_sync.hold_motion_until_track)
+    // pins this arm at prev_sent because its queue-sync phase is warmup/drain.
+    // Evaluated in computeServoTarget (to stop the TcpLinearMove path clock) and
+    // again where the hold is applied later in the same tick, so the plan and
+    // the output can never disagree about whether the arm is held.
+    bool qsyncSettlingHoldActive(ArmId arm) const;
     bool motionAllowed() const;
     bool isRealMode() const;
     std::string currentSendPolicy() const;

@@ -3190,26 +3190,25 @@ void DualArmServoLoop::loopMain() {
         // the hold setpoints keep the stream flowing, which is what advances
         // warmup, and the plan freezes so no lead accumulates. Releases on
         // track (bounded by warmup_max + drain_timeout).
-        if (config_.queue_sync.hold_motion_until_track && workerOwnsSendCadence()) {
+        // The warmup/drain test lives in qsyncSettlingHoldActive() so computeServoTarget
+        // stops the TcpLinearMove path clock for exactly the arms pinned here.
+        {
             const auto hold_until_track = [&](
-                ArmWorker* worker,
                 JointArray& target_q,
                 const JointArray& prev_sent,
                 const JointArray& prevprev_sent,
                 ArmId arm
             ) {
-                if (!worker) return;
-                const std::string& phase = worker->queueSyncDecision().phase;
-                if (phase != "warmup" && phase != "drain") return;
+                if (!qsyncSettlingHoldActive(arm)) return;
                 const SafetyClampTelemetry ramp = safety_filter_.clampMotionDetailed(
                     prev_sent, prev_sent, prevprev_sent, filter_dt_sec);
                 target_q = ramp.q_after_accel_limit_deg;
                 markCartesianSolveBlocked(arm, loop_start);
             };
-            hold_until_track(left_worker_.get(), safe_target.left_q_target_deg,
+            hold_until_track(safe_target.left_q_target_deg,
                              left_prev_sent_q_deg_, left_prevprev_sent_q_deg_,
                              ArmId::Left);
-            hold_until_track(right_worker_.get(), safe_target.right_q_target_deg,
+            hold_until_track(safe_target.right_q_target_deg,
                              right_prev_sent_q_deg_, right_prevprev_sent_q_deg_,
                              ArmId::Right);
         }
@@ -6269,6 +6268,29 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         const RunMode arm_run_mode[2] =
             {left_cartesian_compute_run_mode, right_cartesian_compute_run_mode};
         const bool arm_continue_linear[2] = {continue_left_linear, continue_right_linear};
+        // QSYNC SETTLING HOLD, plan side. The hold later in this tick pins the arm at
+        // prev_sent while queue sync is in warmup/drain, and it freezes the CHUNK
+        // FOLLOWER's plan through markCartesianSolveBlocked -> plan_gate. TcpLinearMove
+        // has no such coupling: its reference is an open-loop clock
+        // (path_state->elapsed_sec += dt_sec), so it kept integrating the quintic profile
+        // while the output was pinned, and the whole accrued lead discharged as a release
+        // lunge the instant the hold lifted.
+        // MEASURED (servo_log_20260827_211340.csv, left arm, GUI TcpLinear 60.4 mm):
+        // warmup+drain pinned q_sent bit-exactly for 532 ms (tick 8688-8954) while
+        // cart_sol_jump_deg walked 0 -> 1.09 deg (pinned at the branch-jump rate limit of
+        // 1.0 deg from tick 8945). On release at tick 8955 that lead discharged at the
+        // ddq ceiling: J2/J3 counter-rotated 0 -> +/-60 deg/s in 40 ms, 7,920 deg/s^2
+        // command accel, then reversed inside 8 ms; command-vs-actual peaked at 1.18 deg.
+        // Stopping the clock keeps the reference AT the pinned pose, so the hold releases
+        // into a path that still starts at s = 0 from where the arm actually is.
+        // Joint-space primitives need no equivalent: TrajectoryFilter re-plans from
+        // prev_sent every tick, so a pinned output already freezes its plan (measured on
+        // servo_log_20260827_210705.csv: the JointTarget under the same hold released at
+        // tick 4924 with a clean 1,500 deg/s^2 ramp and no lunge).
+        const double arm_linear_move_dt_sec[2] = {
+            qsyncSettlingHoldActive(ArmId::Left) ? 0.0 : dt_sec,
+            qsyncSettlingHoldActive(ArmId::Right) ? 0.0 : dt_sec,
+        };
         JointArray* arm_target_out[2] =
             {&target.left_q_target_deg, &target.right_q_target_deg};
         const ArmCommand* arm_cmd_raw[2] = {&command.left, &command.right};
@@ -6282,7 +6304,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                     arm_selection[i]->state,
                     *arm_ik_seed[i],
                     arm_run_mode[i],
-                    dt_sec,
+                    arm_linear_move_dt_sec[i],
                     arm_continue_linear[i] ? 0 : command.seq,
                     &ctx.cartesian_servo_path,
                     &arm_selection[i]->context
@@ -9973,6 +9995,15 @@ bool DualArmServoLoop::workerOwnsSendCadence() const {
     // every tick -- which is exactly the coupling per-arm cadence exists to
     // remove.
     return workerIoMode() && config_.queue_sync.enable;
+}
+
+bool DualArmServoLoop::qsyncSettlingHoldActive(ArmId arm) const {
+    if (!config_.queue_sync.hold_motion_until_track || !workerOwnsSendCadence()) return false;
+    const ArmWorker* worker =
+        arm == ArmId::Left ? left_worker_.get() : right_worker_.get();
+    if (!worker) return false;
+    const std::string phase = worker->queueSyncDecision().phase;
+    return phase == "warmup" || phase == "drain";
 }
 
 bool DualArmServoLoop::motionAllowed() const {

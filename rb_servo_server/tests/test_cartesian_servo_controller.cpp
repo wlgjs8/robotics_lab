@@ -447,6 +447,85 @@ bool testLinearMoveConstantOrientationNearPiStaysFinite() {
     return true;
 }
 
+// QSYNC SETTLING HOLD, plan side. While queue sync is in warmup/drain the loop pins the
+// arm at prev_sent and hands this stage dt_sec = 0, so the path clock must not advance:
+// the reference has to stay AT the pinned pose and the trajectory after release must be
+// tick-for-tick identical to one that was never held. Before this, the quintic clock kept
+// running under the pin and the accrued lead discharged as a release lunge (measured
+// 2026-08-27 on the left arm: 532 ms pinned, 1.09 deg of accrued IK lead, 7,920 deg/s^2
+// command accel on release).
+bool testLinearMovePathClockFreezesWhileHeld() {
+    auto kinematics = std::make_shared<LinearFakeKinematics>();
+    rb_servo::ArmMountConfig left_mount;
+    left_mount.arm_id = rb_servo::ArmId::Left;
+    rb_servo::ArmMountConfig right_mount;
+    right_mount.arm_id = rb_servo::ArmId::Right;
+    rb_servo::CartesianControlConfig config;
+    config.max_linear_move_speed_m_s = 1.0;
+    config.max_angular_move_speed_rad_s = 1.0;
+    rb_servo::CartesianServoController controller(left_mount, right_mount, config, kinematics);
+
+    rb_servo::ArmCommand command;
+    command.arm_id = rb_servo::ArmId::Left;
+    command.mode = rb_servo::ControlMode::TcpLinearMove;
+    command.has_tcp_target = true;
+    command.timeout_sec = 0.2;
+    command.linear_move_duration_sec = 0.2;
+    command.has_linear_move_duration = true;
+    command.tcp_target_stand = {0.05, 0.0, 0.0, 0.0, 0.0, 0.0};
+    command.tcp_target_stand.quaternion_xyzw = std::array<double, 4>{0.0, 0.0, 0.0, 1.0};
+
+    constexpr double kDt = 0.005;
+    constexpr int kHeldTicks = 50;  // 250 ms of warmup/drain, the measured order
+    const rb_servo::JointArray start = zeroJoints();
+
+    // Reference run: never held.
+    std::vector<rb_servo::JointArray> free_run;
+    {
+        rb_servo::CartesianServoPathState path;
+        rb_servo::JointArray q = start;
+        for (int tick = 0; tick < 40; ++tick) {
+            const rb_servo::CartesianArmTargetResult result = controller.computeLinearMoveTarget(
+                command, stateFromJoints(*kinematics, q, left_mount), q,
+                rb_servo::RunMode::Simulation, kDt, 42, &path);
+            RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+            q = result.q_target_deg;
+            free_run.push_back(q);
+        }
+    }
+
+    // Held run: kHeldTicks at dt = 0 (the loop pins the output at prev_sent), then release.
+    rb_servo::CartesianServoPathState path;
+    rb_servo::JointArray q = start;
+    for (int tick = 0; tick < kHeldTicks; ++tick) {
+        const rb_servo::CartesianArmTargetResult result = controller.computeLinearMoveTarget(
+            command, stateFromJoints(*kinematics, q, left_mount), q,
+            rb_servo::RunMode::Simulation, 0.0, 42, &path);
+        RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+        // No lead accrues: the reference stays at s = 0 and the solve asks for no motion.
+        RB_CHECK(result.telemetry.path_s < kEpsilon);
+        RB_CHECK(result.telemetry.linear_move_elapsed_sec < kEpsilon);
+        for (std::size_t j = 0; j < rb_servo::kDof; ++j) {
+            RB_CHECK(std::abs(result.q_target_deg[j] - start[j]) < 1e-9);
+        }
+        q = result.q_target_deg;
+    }
+
+    // After release the path runs exactly as if it had never been held.
+    for (int tick = 0; tick < 40; ++tick) {
+        const rb_servo::CartesianArmTargetResult result = controller.computeLinearMoveTarget(
+            command, stateFromJoints(*kinematics, q, left_mount), q,
+            rb_servo::RunMode::Simulation, kDt, 42, &path);
+        RB_CHECK(result.verdict == rb_servo::SafetyVerdict::Ok);
+        q = result.q_target_deg;
+        for (std::size_t j = 0; j < rb_servo::kDof; ++j) {
+            RB_CHECK(std::abs(q[j] - free_run[static_cast<std::size_t>(tick)][j]) < 1e-9);
+        }
+    }
+    RB_CHECK(std::abs(q[0] / 100.0 - 0.05) < 0.002);
+    return true;
+}
+
 bool testScalarFirstOrderPlantShowsMeasuredActualAttenuation() {
     constexpr double dt = 0.01;
     constexpr double tau = 0.04;
@@ -478,6 +557,7 @@ int main() {
     if (!testLinearMoveConstantOrientationToleranceIsConfigurable()) return 1;
     if (!testQuaternionAndRpyYawFrameConversionMatch()) return 1;
     if (!testLinearMoveConstantOrientationNearPiStaysFinite()) return 1;
+    if (!testLinearMovePathClockFreezesWhileHeld()) return 1;
     if (!testScalarFirstOrderPlantShowsMeasuredActualAttenuation()) return 1;
     return 0;
 }
