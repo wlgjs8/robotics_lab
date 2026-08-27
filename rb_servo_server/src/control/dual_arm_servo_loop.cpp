@@ -5815,13 +5815,16 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                     pending = false;
                 } else {
                     covered = false;
-                    char buf[112];
-                    std::snprintf(buf, sizeof(buf),
-                                  "recovering: raw verdict healthy %d/%d ticks "
-                                  "before compliance re-covers",
-                                  streak, need);
-                    reason = buf;
+                    // A CONSTANT string on purpose: the coverage logger edge-logs
+                    // on reason CHANGE, so embedding the tick counter here made
+                    // every tick a new reason and printed a WARN per tick
+                    // (measured 2026-08-27: 1743 lines in one run). The progress
+                    // is a number, so it belongs in telemetry, not in an edge log.
+                    reason = "recovering: waiting for the raw verdict to hold "
+                             "steady before compliance re-covers";
                 }
+                tel.coverage_recover_streak = streak;
+                tel.coverage_recover_needed = need;
             }
         }
         tel.coverage_reason = covered ? "covered" : reason;

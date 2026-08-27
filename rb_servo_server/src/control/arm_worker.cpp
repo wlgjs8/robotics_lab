@@ -233,14 +233,23 @@ void ArmWorker::enqueueServoJ(SendServoJRequest request) {
         return;
     }
 
-    if (pending_servo_j_.has_value() &&
-        pending_servo_j_->command_seq != request.command_seq) {
-        // With interpolation on, an overwrite no longer LOSES wire content (the
-        // interpolator walks through every pushed setpoint); the counter then
-        // reads as "beat crossings", not "dropped setpoints".
-        ++telemetry_.worker_command_drops_total;
+    if (pending_servo_j_.has_value()) {
+        // ANY overwrite is a setpoint that never reached the wire. It must be
+        // counted whether or not the CLIENT sequence changed: the loop generates
+        // a fresh setpoint every tick (filters, IK, safety all move it) while a
+        // client command seq can span many ticks, so gating this on
+        // `command_seq != request.command_seq` counted ZERO while 81 setpoints
+        // were actually dropped in 124 s (measured 2026-08-27: loop 500.000 Hz vs
+        // wire 499.347 Hz). With interpolation on, an overwrite no longer LOSES
+        // wire content -- the interpolator walks through every pushed setpoint --
+        // so the counter then reads as "beat crossings" rather than "drops".
         ++telemetry_.worker_pending_overwrites_total;
-        telemetry_.worker_last_dropped_seq = pending_servo_j_->command_seq;
+        if (pending_servo_j_->command_seq != request.command_seq) {
+            // A distinct CLIENT command that never reached the wire: a different
+            // (and rarer) event than a per-tick setpoint overwrite.
+            ++telemetry_.worker_command_drops_total;
+            telemetry_.worker_last_dropped_seq = pending_servo_j_->command_seq;
+        }
     }
     telemetry_.worker_last_enqueued_seq = request.command_seq;
     if (options_.interpolate_setpoints && options_.send_period_ns > 0) {
@@ -282,11 +291,16 @@ ArmSendResult ArmWorker::enqueueAsyncServoJ(SendServoJRequest request) {
         return *last_send_result_;
     }
 
-    const bool overwrite = pending_servo_j_.has_value() &&
+    // Same accounting split as enqueueServoJ: ANY overwrite is a setpoint that
+    // never reached the wire; only a distinct client seq is a dropped COMMAND.
+    const bool overwrite = pending_servo_j_.has_value();
+    const bool command_dropped = overwrite &&
         pending_servo_j_->command_seq != request.command_seq;
     if (overwrite) {
-        ++telemetry_.worker_command_drops_total;
         ++telemetry_.worker_pending_overwrites_total;
+    }
+    if (command_dropped) {
+        ++telemetry_.worker_command_drops_total;
         telemetry_.worker_last_dropped_seq = pending_servo_j_->command_seq;
     }
 
@@ -294,7 +308,9 @@ ArmSendResult ArmWorker::enqueueAsyncServoJ(SendServoJRequest request) {
         ++async_telemetry_.commands_enqueued_total;
         async_telemetry_.last_command_seq = request.command_seq;
         async_telemetry_.worker_backlog = 1;
-        if (overwrite) {
+        if (command_dropped) {
+            // COMMAND-level counters: a per-tick setpoint overwrite within the
+            // same client command is not a dropped command.
             ++async_telemetry_.commands_overwritten_total;
             ++async_telemetry_.commands_dropped_total;
             async_telemetry_.last_failure = "async_latest_wins_overwrite";

@@ -616,6 +616,12 @@ struct ForceControlTelemetry {
     // a limit cycle, not a push. trips is cumulative (read as steps).
     bool oscillation_frozen = false;
     uint64_t oscillation_trips = 0;
+    // Coverage recovery progress (force_control.coverage_recover_sec): consecutive
+    // healthy raw verdicts / ticks required. 0/0 when not recovering. This is the
+    // number that used to be spliced into the coverage reason string, which made
+    // the edge-logger print a WARN every tick.
+    int coverage_recover_streak = 0;
+    int coverage_recover_needed = 0;
     double fence_m = 0.0;
     double fence_rad = 0.0;
     // THE GATE: the fraction of the plan advance that survives along the direction
