@@ -1356,6 +1356,39 @@ struct ForceControlConfig {
     // every dead-link run read 0.000. 0.05 sits three times below the healthy floor
     // and far above the dead one, so it separates them without sitting on either.
     double command_execution_min_ratio = 0.05;    // ref rate must be >= this x cmd rate
+
+    // ---- oscillation guard (2026-08-27) ------------------------------------
+    // The deviation dynamics obey the per-part velocity/acceleration caps and the
+    // fence, and STILL went unstable: a hand push on 2026-08-27 pinned the 40 mm
+    // translation fence, then a ~5.3 Hz coupled oscillation (F/T dynamic feedback
+    // through the pipeline delay) grew inside the 2 rad/s rotation cap until wrist
+    // IK amplification saturated every joint at dq_max (321 deg/s on J6, 283 deg/s
+    // measured on the arm, 318 N on the sensor) and the operator hit E-stop. Caps
+    // bound AMPLITUDE per tick; they cannot see a limit cycle. This guard can: a
+    // sustained run of velocity-direction reversals at meaningful amplitude is an
+    // oscillation, never an operator's push. Tripping FREEZES compliance (the
+    // deviation holds, momentum drops — same posture as a coverage freeze) until
+    // the wrench has been quiet for release_quiet_sec.
+    bool oscillation_guard_enable = true;
+    int oscillation_min_reversals = 4;            // reversals within the window -> trip
+    double oscillation_window_sec = 0.75;
+    double oscillation_min_velocity_frac = 0.35;  // of that part's velocity cap
+    double oscillation_release_force_n = 5.0;     // wrench quiet thresholds for release
+    double oscillation_release_torque_nm = 0.5;
+    double oscillation_release_quiet_sec = 0.5;
+
+    // ---- coverage flap hysteresis (2026-08-27) -----------------------------
+    // A coverage freeze decays the command rate, which un-trips the very check
+    // that froze it: measured 226 freeze<->covered transitions in 10 s (~23 Hz)
+    // against E-stopped boxes, re-latching the Hold nominal at the pushed pose on
+    // every re-entry. Re-covering after ANY uncovered tick now requires the raw
+    // verdict to hold for this long first.
+    double coverage_recover_sec = 0.5;
+    // A Hold nominal latched while a hand is still pushing anchors the spring at
+    // the pushed pose (no restoring force, and under the flap above the anchor
+    // FOLLOWED the hand). Refuse to latch while the measured force exceeds this;
+    // the Hold stays rigid until the hand releases.
+    double hold_relatch_max_force_n = 5.0;
 };
 
 struct LinearMoveConfig {

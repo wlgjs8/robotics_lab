@@ -496,7 +496,75 @@ bool testResumeContinuesFromTheFrozenDeviation() {
 
 }  // namespace
 
+// THE OSCILLATION GUARD TRIPS ON A LIMIT CYCLE AND NOT ON A PUSH (2026-08-27).
+// Amplitude caps bound the per-tick motion but cannot see a sustained oscillation;
+// the guard counts velocity-direction reversals at amplitude. A steady push has
+// zero reversals; an alternating drive at the incident's scale must freeze
+// compliance within the window, hold the deviation, and release only after the
+// wrench has been quiet for the release window.
+bool testOscillationGuardTripsFreezesAndReleases() {
+    rb_servo::ForceControlConfig cfg = shippedLaw();
+    cfg.gate_enable = false;
+    rb_servo::control::AdmittanceOverlay overlay;
+    overlay.configure(cfg, 0.002);
+    const rb_servo::math::Vector3 zero = rb_servo::math::Vector3::Zero();
+
+    // A steady 25 Nm twist: large, ONE direction (walks into the rotation fence,
+    // where the anti-windup zeroes the outward rate). Never trips.
+    for (int i = 0; i < 1500; ++i) {
+        overlay.step(zero, rb_servo::math::Vector3(0.0, 0.0, 25.0));
+    }
+    CHECK(overlay.oscillationTrips() == 0);
+    CHECK(!overlay.oscillationFrozen());
+    overlay.reset();
+
+    // The incident's shape: an alternating torque (the 2026-08-27 blowup ran at
+    // ~5.3 Hz on the wrist axes — high velocity, small deviation, far inside the
+    // fence). +/-25 Nm at 100-tick period: the rotation rate swings past the
+    // amplitude floor in BOTH directions (a shorter period never develops the
+    // reverse swing above the floor) while the deviation stays ~0.15 rad, under
+    // the 0.26 rad fence. Must trip inside the window and freeze.
+    int tripped_at = -1;
+    for (int i = 0; i < 2000; ++i) {
+        const double sign = ((i / 50) % 2 == 0) ? 1.0 : -1.0;
+        overlay.step(zero, rb_servo::math::Vector3(0.0, 0.0, sign * 25.0));
+        if (overlay.oscillationFrozen()) {
+            tripped_at = i;
+            break;
+        }
+    }
+    CHECK(tripped_at >= 0);
+    CHECK(overlay.oscillationTrips() == 1);
+    CHECK(near(overlay.velocityRot().norm(), 0.0));
+    const double frozen_dev = overlay.deviationRot().z();
+
+    // While frozen and still under load, the deviation must NOT move (no
+    // integration) and the guard must NOT release (the wrench is not quiet).
+    for (int i = 0; i < 500; ++i) {
+        overlay.step(zero, rb_servo::math::Vector3(0.0, 0.0, 25.0));
+    }
+    CHECK(overlay.oscillationFrozen());
+    CHECK(near(overlay.deviationRot().z(), frozen_dev));
+
+    // Quiet wrench for the release window: compliance rejoins and a steady
+    // torque integrates again toward tau/k.
+    const int release_ticks =
+        static_cast<int>(cfg.oscillation_release_quiet_sec / 0.002) + 10;
+    for (int i = 0; i < release_ticks; ++i) {
+        overlay.step(zero, zero);
+    }
+    CHECK(!overlay.oscillationFrozen());
+    overlay.reset();
+    for (int i = 0; i < 4000; ++i) {
+        overlay.step(zero, rb_servo::math::Vector3(0.0, 0.0, 0.5));
+    }
+    CHECK(overlay.deviationRot().z() > 0.03);  // 0.5 Nm / 8 = 0.0625 rad target
+    CHECK(overlay.oscillationTrips() == 1);    // and not re-tripped
+    return true;
+}
+
 int main() {
+    testOscillationGuardTripsFreezesAndReleases();
     testAxisMapIsTheMeasuredLeftHandedBasis();
     testFullToolGravityIsSubtracted();
     testTareDoesNotDoubleSubtractGravity();

@@ -42,7 +42,8 @@ REQUIRED_MBPS = 5000
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-RE_CONFIG = re.compile(r"starting camera_server --config (\S+)")
+# main.cpp 가 기동 시 stderr 로 찍는 줄: "[CAM] config=/app/config/x.yaml mode=... simulate=0".
+RE_CONFIG = re.compile(r"\[CAM\] config=(\S+)")
 RE_DEVICE = re.compile(r"\[CAM\] device (\S+) serial=(\S+).* usb=(\S+) port=(\S+)")
 RE_NOT_USB3 = re.compile(r"not on USB3: (\S+) serial=(\S+) usb_type=(\S+)")
 RE_USB_NODE = re.compile(r"\d+-\d+(\.\d+)*$")

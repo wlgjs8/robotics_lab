@@ -40,11 +40,38 @@ void AdmittanceOverlay::reset() {
     er_.setZero();
     w_.setZero();
     bounded_ = false;
+    osc_frozen_ = false;
+    osc_quiet_ticks_ = 0;
+    osc_prev_v_ = {math::Vector3::Zero(), math::Vector3::Zero()};
+    osc_reversal_ticks_ = {};
+    osc_reversal_head_ = {0, 0};
 }
 
 void AdmittanceOverlay::step(const math::Vector3& force_stand,
                              const math::Vector3& torque_stand,
                              double gate) {
+    ++osc_tick_;
+    if (osc_frozen_) {
+        // Latched by the oscillation guard: hold the deviation, drop momentum,
+        // and only rejoin after the wrench has been QUIET for the release
+        // window — releasing into a still-pushing hand would re-enter the same
+        // loop that tripped the guard.
+        vp_.setZero();
+        w_.setZero();
+        const bool quiet =
+            force_stand.norm() < cfg_.oscillation_release_force_n &&
+            torque_stand.norm() < cfg_.oscillation_release_torque_nm;
+        osc_quiet_ticks_ = quiet ? osc_quiet_ticks_ + 1 : 0;
+        const uint64_t need =
+            static_cast<uint64_t>(cfg_.oscillation_release_quiet_sec / dt_);
+        if (osc_quiet_ticks_ >= need) {
+            osc_frozen_ = false;
+            osc_quiet_ticks_ = 0;
+            osc_prev_v_ = {math::Vector3::Zero(), math::Vector3::Zero()};
+            osc_reversal_ticks_ = {};
+        }
+        return;
+    }
     // Rotate the state INTO the workspace frame, integrate per axis there, rotate
     // back. The state itself stays in the stand frame — see the header for why a
     // deviation stored in a rotating frame would sweep as the tool turns.
@@ -93,6 +120,52 @@ void AdmittanceOverlay::step(const math::Vector3& force_stand,
     er_ = rw * er;
     w_ = rw * wv;
     applyFence();
+    if (cfg_.oscillation_guard_enable) {
+        stepOscillationGuard(force_stand, torque_stand);
+    }
+}
+
+void AdmittanceOverlay::stepOscillationGuard(const math::Vector3& force_stand,
+                                             const math::Vector3& torque_stand) {
+    (void)force_stand;
+    (void)torque_stand;
+    // A reversal = the part's velocity, while ABOVE the amplitude floor, pointing
+    // against the LAST above-floor direction. The direction is latched only at
+    // amplitude, because a continuous oscillation passes THROUGH zero at every
+    // flip — a naive tick-to-tick sign test never sees amplitude on both sides
+    // of the crossing. The dot product makes the test direction-agnostic (the
+    // 2026-08-27 incident oscillated on the wrist axes, not a config axis); the
+    // floor keeps noise flips out; a push-then-pull by an operator is ONE
+    // reversal and stays far below min_reversals.
+    const uint64_t window_ticks =
+        static_cast<uint64_t>(cfg_.oscillation_window_sec / dt_);
+    for (int part = 0; part < 2; ++part) {
+        const math::Vector3& v = part == 0 ? vp_ : w_;
+        const double cap =
+            part == 0 ? cfg_.max_velocity_m_s : cfg_.max_velocity_rad_s;
+        const double floor_v = cfg_.oscillation_min_velocity_frac * cap;
+        if (v.norm() <= floor_v) continue;   // only speak at amplitude
+        math::Vector3& last_dir = osc_prev_v_[part];  // last above-floor direction
+        const bool have_dir = last_dir.squaredNorm() > 0.5;
+        const bool reversal = have_dir && v.dot(last_dir) < 0.0;
+        last_dir = v.normalized();
+        if (!reversal) continue;
+        auto& ring = osc_reversal_ticks_[part];
+        int& head = osc_reversal_head_[part];
+        ring[head % kOscRingSize] = osc_tick_;
+        head = (head + 1) % kOscRingSize;
+        int recent = 0;
+        for (uint64_t stamp : ring) {
+            if (stamp != 0 && osc_tick_ - stamp <= window_ticks) ++recent;
+        }
+        if (recent >= cfg_.oscillation_min_reversals) {
+            osc_frozen_ = true;
+            ++osc_trips_;
+            osc_quiet_ticks_ = 0;
+            freeze();
+            return;
+        }
+    }
 }
 
 void AdmittanceOverlay::applyFence() {

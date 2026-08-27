@@ -3007,6 +3007,44 @@ void DualArmServoLoop::loopMain() {
         // function") fix: real-time servo control must stop before direct teaching.
         advanceFreedrive(left_state, right_state);
 
+        // DEACTIVATED-BOX GATE (2026-08-27). An E-stop de-energizes the box
+        // (init_state_info leaves 6, servo_enabled false) WITHOUT an error code
+        // on the state stream — measured: E-stop at t=19.8 s, and the server
+        // kept streaming servo_j into both dead boxes for 20 s with verdict Ok
+        // while force-control coverage flapped at ~23 Hz. A box that stopped
+        // being a servo mid-stream is a latching fault: streaming into it is a
+        // lie in the logs, and if the box buffers the stream, clearing the
+        // protective stop could replay the backlog. Debounced (100 ms) against
+        // single-tick diagnostics dropouts; inert for backends that publish no
+        // rbpodo diagnostics (mock) and while sends are already suppressed
+        // (freedrive / fault / pre-arming).
+        if (state_ok && servo_stream_armed_ && !fault_latched_.load() &&
+            !anyFreedriveActive()) {
+            constexpr int kBoxDeactivatedLatchTicks = 50;
+            const auto update_deactivated = [&](
+                const RobotState& st, int& ticks, const char* arm_name) {
+                const bool deactivated =
+                    st.rbpodo_diagnostics.has_value() && !st.servo_enabled;
+                if (!deactivated) {
+                    ticks = 0;
+                    return;
+                }
+                if (++ticks == kBoxDeactivatedLatchTicks) {
+                    latchFault(
+                        SafetyVerdict::RobotStateError,
+                        std::string(arm_name) +
+                            " control box deactivated mid-stream (init_state != 6, "
+                            "servo off - E-stop or protective stop); streaming stopped",
+                        left_state, right_state);
+                }
+            };
+            update_deactivated(left_state, left_box_deactivated_ticks_, "left");
+            update_deactivated(right_state, right_box_deactivated_ticks_, "right");
+        } else {
+            left_box_deactivated_ticks_ = 0;
+            right_box_deactivated_ticks_ = 0;
+        }
+
         ServoTarget safe_target;
         SafetyVerdict safety_verdict = SafetyVerdict::Ok;
         std::string init_mode_before_left = toString(command.left.mode);
@@ -5756,7 +5794,36 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         tel.enabled = config_.force_control.enable;
 
         std::string reason;
-        const bool covered = forceControlCovered(fc_arm, eff, fc_state, &reason);
+        bool covered = forceControlCovered(fc_arm, eff, fc_state, &reason);
+        // COVERAGE FLAP HYSTERESIS (2026-08-27). A freeze decays the command
+        // rate, which un-trips the very rate check that froze it: measured 226
+        // freeze<->covered transitions in 10 s (~23 Hz) against E-stopped boxes,
+        // re-latching the Hold nominal at the pushed pose on every re-entry.
+        // After ANY uncovered tick, the raw verdict must hold continuously for
+        // coverage_recover_sec before compliance actually re-covers.
+        {
+            int& streak = fc_left ? left_fc_recover_streak_ : right_fc_recover_streak_;
+            bool& pending = fc_left ? left_fc_recover_pending_ : right_fc_recover_pending_;
+            const int need = static_cast<int>(
+                config_.force_control.coverage_recover_sec *
+                static_cast<double>(config_.servo.rate_hz));
+            if (!covered) {
+                pending = true;
+                streak = 0;
+            } else if (pending && need > 0) {
+                if (++streak >= need) {
+                    pending = false;
+                } else {
+                    covered = false;
+                    char buf[112];
+                    std::snprintf(buf, sizeof(buf),
+                                  "recovering: raw verdict healthy %d/%d ticks "
+                                  "before compliance re-covers",
+                                  streak, need);
+                    reason = buf;
+                }
+            }
+        }
         tel.coverage_reason = covered ? "covered" : reason;
         // FORCE CONTROL THAT IS ON AND COVERING NOTHING MAY NOT BE SILENT. The config
         // says the arm is compliant; if it is not, the operator pushes it, nothing
@@ -5804,6 +5871,27 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         // follow the deviation and leave the spring nothing to pull back to - the arm
         // would simply stay wherever it was pushed.
         if (!hold_nominal.has_value()) {
+            // NEVER LATCH THE NOMINAL UNDER LOAD (2026-08-27). A nominal latched
+            // while a hand is still pushing anchors the spring at the pushed
+            // pose: no restoring force, and under a coverage flap the anchor
+            // FOLLOWED the hand. Until the measured force drops below the
+            // relatch limit, the Hold stays RIGID (plain joint hold) — which is
+            // also the correct posture against a push with no reference.
+            const sensor::FtPipeline& relatch_pipe =
+                fc_left ? left_ft_pipeline_ : right_ft_pipeline_;
+            const Wrench6D& rw = relatch_pipe.compStand();
+            const double f_now =
+                std::sqrt(rw.fx * rw.fx + rw.fy * rw.fy + rw.fz * rw.fz);
+            if (f_now > config_.force_control.hold_relatch_max_force_n) {
+                overlay.freeze();
+                char buf[128];
+                std::snprintf(buf, sizeof(buf),
+                              "covered, but Hold stays RIGID until the hand releases "
+                              "(|F|=%.1f N > relatch limit %.1f N)",
+                              f_now, config_.force_control.hold_relatch_max_force_n);
+                tel.coverage_reason = buf;
+                continue;
+            }
             hold_nominal = *fc_state.tcp_actual_stand;
             std::cerr << "[INFO] force overlay " << toString(fc_arm)
                       << ": Hold made compliant, nominal latched at the measured TCP ["
@@ -8198,6 +8286,20 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
     tel.bounded = overlay.bounded();
     tel.fence_m = config_.force_control.max_deviation_m;
     tel.fence_rad = config_.force_control.max_deviation_rad;
+    tel.oscillation_frozen = overlay.oscillationFrozen();
+    tel.oscillation_trips = overlay.oscillationTrips();
+    {
+        // Edge-detect on the cumulative trip counter (tel is reset every tick,
+        // so it cannot carry the edge itself).
+        uint64_t& logged = left ? left_osc_trips_logged_ : right_osc_trips_logged_;
+        if (tel.oscillation_trips > logged) {
+            logged = tel.oscillation_trips;
+            std::cerr << "[WARN] force overlay " << toString(arm)
+                      << ": OSCILLATION GUARD tripped (trip #" << tel.oscillation_trips
+                      << ") - compliance frozen; releases after the wrench is quiet for "
+                      << config_.force_control.oscillation_release_quiet_sec << " s\n";
+        }
+    }
     tel.gate_translation = gate.translation();
     tel.gate_rotation = gate.rotation();
     tel.gate_force_n = gate.forceN();

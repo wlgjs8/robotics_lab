@@ -351,6 +351,8 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_fc_vel_y_m_s"
        << ',' << side << "_fc_vel_z_m_s"
        << ',' << side << "_fc_bounded"
+       << ',' << side << "_fc_osc_frozen"
+       << ',' << side << "_fc_osc_trips"
        << ',' << side << "_fc_fence_m"
        << ',' << side << "_fc_fence_rad"
        << ',' << side << "_fc_gate_translation"
@@ -725,6 +727,8 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << fc.velocity_m_s[1]
        << ',' << fc.velocity_m_s[2]
        << ',' << fc.bounded
+       << ',' << fc.oscillation_frozen
+       << ',' << fc.oscillation_trips
        << ',' << fc.fence_m
        << ',' << fc.fence_rad
        << ',' << fc.gate_translation

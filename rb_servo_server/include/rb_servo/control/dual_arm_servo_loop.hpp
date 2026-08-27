@@ -824,6 +824,18 @@ private:
     std::string right_fc_reason_logged_;
     uint64_t left_fc_reason_logged_ns_ = 0;
     uint64_t right_fc_reason_logged_ns_ = 0;
+    // Coverage flap hysteresis (force_control.coverage_recover_sec): after any
+    // uncovered tick the raw verdict must hold this long before re-covering.
+    int left_fc_recover_streak_ = 0;
+    int right_fc_recover_streak_ = 0;
+    bool left_fc_recover_pending_ = false;
+    bool right_fc_recover_pending_ = false;
+    // Oscillation-guard WARN edge detection (telemetry resets per tick).
+    uint64_t left_osc_trips_logged_ = 0;
+    uint64_t right_osc_trips_logged_ = 0;
+    // Deactivated-box gate debounce (loop thread only).
+    int left_box_deactivated_ticks_ = 0;
+    int right_box_deactivated_ticks_ = 0;
     bool left_overlay_bounded_prev_ = false;
     bool right_overlay_bounded_prev_ = false;
     bool left_gate_closed_prev_ = false;

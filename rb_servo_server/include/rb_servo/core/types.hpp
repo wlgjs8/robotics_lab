@@ -611,6 +611,11 @@ struct ForceControlTelemetry {
     // THE FENCE. `bounded` is latched while pinned: a silent saturation is a lie
     // about where the arm is being asked to go.
     bool bounded = false;
+    // THE OSCILLATION GUARD (force_control.oscillation_*): compliance is frozen
+    // because the deviation velocity reversed direction repeatedly at amplitude —
+    // a limit cycle, not a push. trips is cumulative (read as steps).
+    bool oscillation_frozen = false;
+    uint64_t oscillation_trips = 0;
     double fence_m = 0.0;
     double fence_rad = 0.0;
     // THE GATE: the fraction of the plan advance that survives along the direction

@@ -98,8 +98,20 @@ public:
     const math::Vector3& velocity() const { return vp_; }         // [m/s], stand
     const math::Vector3& velocityRot() const { return w_; }       // [rad/s], stand
 
+    // Oscillation guard (cfg.oscillation_*): a sustained run of velocity-direction
+    // reversals at meaningful amplitude is a limit cycle, never an operator's push.
+    // While latched, step() holds the deviation frozen (momentum dropped) and only
+    // releases after the wrench has stayed below the release thresholds for
+    // release_quiet_sec. The per-part caps bound amplitude per tick; this bounds
+    // the thing they cannot see (measured 2026-08-27: a ~5.3 Hz coupled oscillation
+    // grew INSIDE the caps until wrist IK amplification saturated every joint).
+    bool oscillationFrozen() const { return osc_frozen_; }
+    uint64_t oscillationTrips() const { return osc_trips_; }
+
 private:
     void applyFence();
+    void stepOscillationGuard(const math::Vector3& force_stand,
+                              const math::Vector3& torque_stand);
 
     ForceControlConfig cfg_{};
     ForceLawConfig law_{};
@@ -111,6 +123,17 @@ private:
     math::Vector3 er_ = math::Vector3::Zero();   // rotation deviation [rad] rotvec
     math::Vector3 w_ = math::Vector3::Zero();    // its rate [rad/s]
     bool bounded_ = false;
+
+    // Oscillation guard state (see oscillationFrozen()).
+    static constexpr int kOscRingSize = 16;
+    uint64_t osc_tick_ = 0;
+    bool osc_frozen_ = false;
+    uint64_t osc_trips_ = 0;
+    uint64_t osc_quiet_ticks_ = 0;
+    std::array<math::Vector3, 2> osc_prev_v_{math::Vector3::Zero(),
+                                             math::Vector3::Zero()};
+    std::array<std::array<uint64_t, kOscRingSize>, 2> osc_reversal_ticks_{};
+    std::array<int, 2> osc_reversal_head_{0, 0};
 };
 
 // The FORCE GATE. The plan advance's reflection ratio falls as the contact force

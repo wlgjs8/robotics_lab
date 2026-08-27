@@ -26,8 +26,13 @@ services:
     # USB-IRQ용, 3은 서보 RT isolcpus 격리). live 조정은
     # `docker update --cpuset-cpus=... camera_server`.
     cpuset: "4,5,6"
+    # 이미지 CMD 는 triple_realsense.yaml 을 하드코딩하고, main.cpp 는 --config(argv)를
+    # CAMERA_SERVER_CONFIG(env)보다 우선한다. command 를 여기서 덮어쓰지 않으면
+    # CAMERA_CONFIG 를 아무리 바꿔도 항상 triple 리그가 로드된다(head 자리표시자 serial 로 즉사).
+    command: ["--config", "${CAMERA_CONFIG:-/app/config/triple_realsense.yaml}"]
     environment:
       # Container path; override with CAMERA_CONFIG (see Makefile cam-up).
+      # command 와 같은 값이어야 한다(bare `docker run` 용 fallback).
       CAMERA_SERVER_CONFIG: ${CAMERA_CONFIG:-/app/config/triple_realsense.yaml}
       # rs400 advanced-mode JSON applied per device before streaming, so the
       # capture PC (.40) and this inference PC share identical camera settings.

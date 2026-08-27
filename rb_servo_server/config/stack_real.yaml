@@ -976,6 +976,31 @@ force_control:
   max_velocity_rad_s: 2.00
   max_acceleration_rad_s2: 20.0
 
+  # OSCILLATION GUARD (2026-08-27 incident, servo_log_20260827_101144.csv). A hand
+  # push pinned the 40 mm translation fence, then a ~5.3 Hz coupled oscillation
+  # (F/T dynamic feedback through the ~12 ms pipeline delay) grew INSIDE the
+  # 2 rad/s rotation cap until wrist IK amplification saturated every joint at
+  # dq_max (321 deg/s commanded on J6, 283 deg/s measured, 318 N on the sensor)
+  # and the operator hit E-stop. The rate caps bound amplitude per tick; they
+  # cannot see a limit cycle. This can: >= min_reversals velocity-direction flips
+  # at >= min_velocity_frac of the cap within window_sec freezes compliance until
+  # the wrench stays below the release thresholds for release_quiet_sec.
+  oscillation_guard_enable: true
+  oscillation_min_reversals: 4
+  oscillation_window_sec: 0.75
+  oscillation_min_velocity_frac: 0.35
+  oscillation_release_force_n: 5.0
+  oscillation_release_torque_nm: 0.5
+  oscillation_release_quiet_sec: 0.5
+  # Same incident, phase 6: a coverage freeze decays the command rate, which
+  # un-trips the rate check that froze it - 226 freeze<->covered transitions in
+  # 10 s (~23 Hz), re-latching the Hold nominal at the pushed pose each time. The
+  # raw verdict must now hold for coverage_recover_sec before re-covering, and a
+  # Hold nominal is never latched while |F| > hold_relatch_max_force_n (the Hold
+  # stays rigid until the hand releases).
+  coverage_recover_sec: 0.5
+  hold_relatch_max_force_n: 5.0
+
   # Make a plain Hold compliant by latching its measured TCP as the nominal. This is
   # what lets an operator push the arm by hand and watch it yield and spring back
   # without a policy running. Turn it OFF once a policy owns the arm: a compliant Hold

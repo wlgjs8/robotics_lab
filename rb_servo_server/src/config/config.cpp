@@ -2057,6 +2057,23 @@ void validateConfig(const DualArmConfig& cfg) {
             validatePositiveFinite(fc.max_state_age_sec, "force_control.max_state_age_sec");
             validateNonNegativeFinite(fc.max_deviation_m, "force_control.max_deviation_m");
             validateNonNegativeFinite(fc.max_deviation_rad, "force_control.max_deviation_rad");
+            if (fc.oscillation_guard_enable) {
+                if (fc.oscillation_min_reversals < 2) {
+                    throw std::runtime_error(
+                        "force_control.oscillation_min_reversals must be >= 2 - a single "
+                        "reversal is a push, not an oscillation");
+                }
+                validatePositiveFinite(fc.oscillation_window_sec, "force_control.oscillation_window_sec");
+                if (!(fc.oscillation_min_velocity_frac > 0.0 && fc.oscillation_min_velocity_frac <= 1.0)) {
+                    throw std::runtime_error(
+                        "force_control.oscillation_min_velocity_frac must be in (0, 1]");
+                }
+                validatePositiveFinite(fc.oscillation_release_force_n, "force_control.oscillation_release_force_n");
+                validatePositiveFinite(fc.oscillation_release_torque_nm, "force_control.oscillation_release_torque_nm");
+                validatePositiveFinite(fc.oscillation_release_quiet_sec, "force_control.oscillation_release_quiet_sec");
+            }
+            validateNonNegativeFinite(fc.coverage_recover_sec, "force_control.coverage_recover_sec");
+            validateNonNegativeFinite(fc.hold_relatch_max_force_n, "force_control.hold_relatch_max_force_n");
         }
     }
 
@@ -3781,6 +3798,11 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "hold_compliance", "max_state_age_sec",
             "command_execution_tau_sec", "command_execution_min_rate_dps",
             "command_execution_min_ratio",
+            "oscillation_guard_enable", "oscillation_min_reversals",
+            "oscillation_window_sec", "oscillation_min_velocity_frac",
+            "oscillation_release_force_n", "oscillation_release_torque_nm",
+            "oscillation_release_quiet_sec",
+            "coverage_recover_sec", "hold_relatch_max_force_n",
         }, "force_control");
         ForceControlConfig& fc = cfg.force_control;
         if (has(sec, "enable")) fc.enable = asBool(sec["enable"], "force_control.enable");
@@ -3840,6 +3862,15 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "command_execution_tau_sec")) fc.command_execution_tau_sec = asDouble(sec["command_execution_tau_sec"], "force_control.command_execution_tau_sec");
         if (has(sec, "command_execution_min_rate_dps")) fc.command_execution_min_rate_dps = asDouble(sec["command_execution_min_rate_dps"], "force_control.command_execution_min_rate_dps");
         if (has(sec, "command_execution_min_ratio")) fc.command_execution_min_ratio = asDouble(sec["command_execution_min_ratio"], "force_control.command_execution_min_ratio");
+        if (has(sec, "oscillation_guard_enable")) fc.oscillation_guard_enable = asBool(sec["oscillation_guard_enable"], "force_control.oscillation_guard_enable");
+        if (has(sec, "oscillation_min_reversals")) fc.oscillation_min_reversals = asInt(sec["oscillation_min_reversals"], "force_control.oscillation_min_reversals");
+        if (has(sec, "oscillation_window_sec")) fc.oscillation_window_sec = asDouble(sec["oscillation_window_sec"], "force_control.oscillation_window_sec");
+        if (has(sec, "oscillation_min_velocity_frac")) fc.oscillation_min_velocity_frac = asDouble(sec["oscillation_min_velocity_frac"], "force_control.oscillation_min_velocity_frac");
+        if (has(sec, "oscillation_release_force_n")) fc.oscillation_release_force_n = asDouble(sec["oscillation_release_force_n"], "force_control.oscillation_release_force_n");
+        if (has(sec, "oscillation_release_torque_nm")) fc.oscillation_release_torque_nm = asDouble(sec["oscillation_release_torque_nm"], "force_control.oscillation_release_torque_nm");
+        if (has(sec, "oscillation_release_quiet_sec")) fc.oscillation_release_quiet_sec = asDouble(sec["oscillation_release_quiet_sec"], "force_control.oscillation_release_quiet_sec");
+        if (has(sec, "coverage_recover_sec")) fc.coverage_recover_sec = asDouble(sec["coverage_recover_sec"], "force_control.coverage_recover_sec");
+        if (has(sec, "hold_relatch_max_force_n")) fc.hold_relatch_max_force_n = asDouble(sec["hold_relatch_max_force_n"], "force_control.hold_relatch_max_force_n");
     }
 
     // ONE ANSWER, DECIDED IN ONE PLACE. The zero-payload push is a property of the

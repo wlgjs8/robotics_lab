@@ -51,6 +51,7 @@ RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
 
 ENV CAMERA_SERVER_CONFIG=/app/config/triple_realsense.yaml
 
-# 진입점은 C++ 캡처 서버.
+# 진입점은 C++ 캡처 서버. CMD 로 --config 를 굽지 않는다: argv 가 env 보다 우선이라
+# 하드코딩하면 CAMERA_SERVER_CONFIG/CAMERA_CONFIG 오버라이드가 전부 무시된다.
+# (compose 는 docker-compose.yml 의 command 로 리그를 명시한다.)
 ENTRYPOINT ["/app/build/camera_server"]
-CMD ["--config", "/app/config/triple_realsense.yaml"]
