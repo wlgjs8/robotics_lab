@@ -751,6 +751,24 @@ struct InitMotionPlannerConfig {
     // inside the planner's clearance-margin band from first executing an unnecessary
     // gradient-escape wiggle and then returning to the same pose.
     double noop_tol_deg = 0.75;
+    // *** WHOSE POSE COUNTS AS "WHERE THE ARM IS" DURING EXECUTION. ***
+    // Default false: the MEASURED joints, which is the only correct answer on real
+    // hardware — init must not complete because the sent target reached the goal
+    // while the physical arm is still lagging behind the servo filters.
+    //
+    // In rbpodo pgmode controller-simulation there IS no physical arm: the box runs
+    // the motion internally and the encoders never move, so q_actual is frozen
+    // forever. Measured 2026-08-27 (servo_log_20260827_111803.csv): q_ref tracked
+    // q_sent exactly while q_actual moved 0.000 deg, so actual_dist_to_goal stayed
+    // at 26.2885 deg, the pursuit carrot never advanced past its lookahead, and
+    // init_motion stalled out after 6 s on every attempt. With this true, execution
+    // tracks the box's own reference (q_ref) instead — the same substitution
+    // stack_sim.yaml already makes for tracking error, servo state, and divergence.
+    //
+    // Gated on the arm actually being an rbpodo controller-simulation backend with
+    // the controller-sim motion gate open, so it is structurally inert in real mode
+    // even if a config sets it.
+    bool controller_simulation_progress_uses_reference = false;
     double max_segment_deg = 5.0;         // densify so no segment exceeds this per joint
     double escape_max_time_sec = 0.75;     // escape-only budget before RRT budget starts
     int escape_max_steps = 40;             // gradient escape iteration cap
@@ -904,6 +922,12 @@ struct SafetyConfig {
     ControllerSimulationPhysicalMotionPolicy controller_simulation_physical_motion_policy =
         ControllerSimulationPhysicalMotionPolicy::FaultLatch;
     double controller_simulation_physical_motion_threshold_deg = 0.05;
+    // How long the excursion must PERSIST before it latches. The raw test is a
+    // single-sample threshold, and 0.05 deg sits inside the encoder noise band:
+    // measured 2026-08-27 an arm wandered 0.001-0.036 deg with no direction and
+    // clipped 0.051 deg exactly once, ending the run on a 1-LSB excursion. Real
+    // physical motion is sustained, so this costs the guard nothing.
+    double controller_simulation_physical_motion_debounce_sec = 0.1;
     // pgmode controller-sim only (opt-in, default false). When the controller-sim
     // motion gate is open, the reference/actual tracking-error divergence is treated
     // as ADVISORY (degraded telemetry + throttled WARN) instead of latching

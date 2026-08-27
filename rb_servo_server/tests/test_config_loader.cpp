@@ -1574,8 +1574,46 @@ bool testAutoTareAfterInitMotionConfigValidation() {
     return true;
 }
 
+// pgmode controller-simulation substitutes the box's REFERENCE for the encoders,
+// because in that mode there is no physical arm to measure: q_actual is frozen
+// forever, which pinned init_motion's progress test and stalled every attempt
+// (2026-08-27). The tracked SIM config opts in; the tracked REAL config must NOT,
+// and the real lane must keep the encoder-based progress test that stops init from
+// completing while the physical arm lags. The physical-motion guard debounce is
+// checked the same way: present in sim, defaulted (but harmless) in real.
+bool testControllerSimProgressSourceIsSimOnly() {
+    const std::filesystem::path config_dir =
+        std::filesystem::path(__FILE__).parent_path().parent_path() / "config";
+    const rb_servo::DualArmConfig sim =
+        rb_servo::loadConfigFromYaml((config_dir / "stack_sim.yaml").string());
+    const rb_servo::DualArmConfig real =
+        rb_servo::loadConfigFromYaml((config_dir / "stack_real.yaml").string());
+
+    RB_CHECK(sim.safety.init_motion_planner.controller_simulation_progress_uses_reference);
+    RB_CHECK(!real.safety.init_motion_planner.controller_simulation_progress_uses_reference);
+    // The default is the safe one, so a config that never mentions the key keeps
+    // measuring the encoders.
+    RB_CHECK(!rb_servo::InitMotionPlannerConfig{}.controller_simulation_progress_uses_reference);
+
+    // Debounce: sim pins it explicitly; both are non-negative and finite.
+    RB_CHECK(sim.safety.controller_simulation_physical_motion_debounce_sec > 0.0);
+    RB_CHECK(real.safety.controller_simulation_physical_motion_debounce_sec >= 0.0);
+
+    // The sim lane now carries the SHIPPED force laws, so a sim run exercises the
+    // same gains as real rather than a second set nobody tunes.
+    RB_CHECK(sim.force_torque.enable);
+    RB_CHECK(sim.force_control.enable);
+    RB_CHECK(sim.force_control.oscillation_guard_enable ==
+             real.force_control.oscillation_guard_enable);
+    RB_CHECK(near(sim.force_control.max_deviation_m, real.force_control.max_deviation_m));
+    RB_CHECK(near(sim.force_control.hold.translation[0].k,
+                  real.force_control.hold.translation[0].k));
+    return true;
+}
+
 int main() {
     if (!testRepositoryConfigsParse()) return 1;
+    if (!testControllerSimProgressSourceIsSimOnly()) return 1;
     if (!testInitMotionBrakeConfigValidation()) return 1;
     if (!testAutoTareAfterInitMotionConfigValidation()) return 1;
     if (!testServoIoModelParsesAndValidates()) return 1;

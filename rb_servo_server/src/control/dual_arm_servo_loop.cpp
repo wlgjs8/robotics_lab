@@ -6421,9 +6421,28 @@ ServoTarget DualArmServoLoop::applySafety(
         controllerSimulationMotionRequired(config_) &&
         controllerSimulationMotionGateOpen(config_) &&
         config_.safety.controller_simulation_tracking_error_nonlatching;
+    // PHYSICAL-MOTION GUARD DEBOUNCE. The raw test is a single-sample threshold on
+    // |q_actual - baseline|, and at 0.05 deg it sits INSIDE the encoder noise band:
+    // measured 2026-08-27 the right arm wandered 0.001-0.036 deg with no direction
+    // and clipped 0.051 deg exactly once, ending the run on a 1-LSB (0.001 deg)
+    // excursion. Real physical motion is sustained, so requiring the excursion to
+    // persist costs the guard nothing and removes the noise trip. The threshold
+    // itself is unchanged - this only refuses to latch on a single sample.
+    const int physical_motion_need = std::max(
+        1,
+        static_cast<int>(config_.safety.controller_simulation_physical_motion_debounce_sec *
+                         static_cast<double>(config_.servo.rate_hz)));
+    left_physical_motion_ticks_ =
+        left_tracking_state.controller_simulation_physical_motion_fault
+            ? left_physical_motion_ticks_ + 1
+            : 0;
+    right_physical_motion_ticks_ =
+        right_tracking_state.controller_simulation_physical_motion_fault
+            ? right_physical_motion_ticks_ + 1
+            : 0;
     const bool tracking_error_physical_motion_fault =
-        left_tracking_state.controller_simulation_physical_motion_fault ||
-        right_tracking_state.controller_simulation_physical_motion_fault;
+        left_physical_motion_ticks_ >= physical_motion_need ||
+        right_physical_motion_ticks_ >= physical_motion_need;
     const SafetyCheckResult left_result = safety_filter_.filterJointTarget(
         desired.left_q_target_deg,
         safety_ctx[0].prev_sent_q_deg,
@@ -8809,13 +8828,36 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         return command;
     }
 
-    const auto measured_or_sent = [](const RobotState& state, const JointArray& fallback) -> JointArray {
+    // WHERE THE ARM IS, for pursuit and for progress. Measured joints on real
+    // hardware — init must not complete because the SENT target arrived while the
+    // physical arm still lags. In rbpodo pgmode controller-simulation there is no
+    // physical arm to lag: the box runs the motion internally and the encoders
+    // never move, so q_actual is frozen and every progress test fails forever
+    // (measured 2026-08-27: actual_dist_to_goal pinned at 26.2885 deg, carrot stuck
+    // at its lookahead, stall after 6 s). There, the box's own reference IS the
+    // simulated truth. Opt-in per config AND gated on the arm really being a
+    // controller-sim backend with the motion gate open, so real is untouched.
+    const auto progress_uses_reference = [this](ArmId arm) {
+        if (!config_.safety.init_motion_planner.controller_simulation_progress_uses_reference) {
+            return false;
+        }
+        return isRbpodoControllerSimulationBackend(backendConfigForArm(config_, arm)) &&
+               controllerSimulationMotionGateOpen(config_);
+    };
+    const auto measured_or_sent = [](const RobotState& state,
+                                     const JointArray& fallback,
+                                     bool use_reference) -> JointArray {
+        if (use_reference && state.q_ref_valid && finiteJointArray(state.q_target_deg)) {
+            return state.q_target_deg;
+        }
         return (state.q_actual_valid && finiteJointArray(state.q_actual_deg))
             ? state.q_actual_deg
             : fallback;
     };
-    const JointArray current_left_q = measured_or_sent(left_state, left_prev_sent_q_deg_);
-    const JointArray current_right_q = measured_or_sent(right_state, right_prev_sent_q_deg_);
+    const JointArray current_left_q =
+        measured_or_sent(left_state, left_prev_sent_q_deg_, progress_uses_reference(ArmId::Left));
+    const JointArray current_right_q =
+        measured_or_sent(right_state, right_prev_sent_q_deg_, progress_uses_reference(ArmId::Right));
     const auto active_goal_dist = [&](const InitMotionExec& ex,
                                       const std::pair<JointArray, JointArray>& goal_wp) {
         double dist = 0.0;

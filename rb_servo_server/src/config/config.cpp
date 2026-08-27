@@ -1264,6 +1264,10 @@ void validateConfig(const DualArmConfig& cfg) {
         cfg.safety.controller_simulation_physical_motion_threshold_deg,
         "safety.controller_simulation_physical_motion_threshold_deg"
     );
+    validateNonNegativeFinite(
+        cfg.safety.controller_simulation_physical_motion_debounce_sec,
+        "safety.controller_simulation_physical_motion_debounce_sec"
+    );
     validateNonNegativeFiniteArray(cfg.safety.joint_wrap_period_deg, "safety.joint_wrap_period_deg");
     if (cfg.safety.self_collision.enable) {
         // The only implementation is the async URDF-mesh CollisionMonitor, so the
@@ -2816,6 +2820,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "controller_simulation_tracking_error_source",
             "controller_simulation_physical_motion_policy",
             "controller_simulation_physical_motion_threshold_deg",
+            "controller_simulation_physical_motion_debounce_sec",
             "controller_simulation_tracking_error_nonlatching",
             "self_collision",
             "floor_constraint",
@@ -2906,6 +2911,12 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             cfg.safety.controller_simulation_physical_motion_threshold_deg = asDouble(
                 sec["controller_simulation_physical_motion_threshold_deg"],
                 "safety.controller_simulation_physical_motion_threshold_deg"
+            );
+        }
+        if (has(sec, "controller_simulation_physical_motion_debounce_sec")) {
+            cfg.safety.controller_simulation_physical_motion_debounce_sec = asDouble(
+                sec["controller_simulation_physical_motion_debounce_sec"],
+                "safety.controller_simulation_physical_motion_debounce_sec"
             );
         }
         if (has(sec, "controller_simulation_tracking_error_nonlatching")) {
@@ -3486,6 +3497,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "seed",
                 "waypoint_tol_deg",
                 "noop_tol_deg",
+                "controller_simulation_progress_uses_reference",
                 "max_segment_deg",
                 "escape_max_time_sec",
                 "escape_max_steps",
@@ -3520,6 +3532,11 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ip, "seed")) ipc.seed = static_cast<unsigned int>(asInt(ip["seed"], "safety.init_motion_planner.seed"));
             if (has(ip, "waypoint_tol_deg")) ipc.waypoint_tol_deg = asDouble(ip["waypoint_tol_deg"], "safety.init_motion_planner.waypoint_tol_deg");
             if (has(ip, "noop_tol_deg")) ipc.noop_tol_deg = asDouble(ip["noop_tol_deg"], "safety.init_motion_planner.noop_tol_deg");
+            if (has(ip, "controller_simulation_progress_uses_reference")) {
+                ipc.controller_simulation_progress_uses_reference =
+                    asBool(ip["controller_simulation_progress_uses_reference"],
+                           "safety.init_motion_planner.controller_simulation_progress_uses_reference");
+            }
             if (has(ip, "max_segment_deg")) ipc.max_segment_deg = asDouble(ip["max_segment_deg"], "safety.init_motion_planner.max_segment_deg");
             if (has(ip, "escape_max_time_sec")) ipc.escape_max_time_sec = asDouble(ip["escape_max_time_sec"], "safety.init_motion_planner.escape_max_time_sec");
             if (has(ip, "escape_max_steps")) ipc.escape_max_steps = asInt(ip["escape_max_steps"], "safety.init_motion_planner.escape_max_steps");

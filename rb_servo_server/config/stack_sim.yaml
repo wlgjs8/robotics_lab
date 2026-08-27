@@ -122,6 +122,13 @@ safety:
   # needs a future explicit topology contract before it can use this profile.
   controller_simulation_physical_motion_policy: fault_latch
   controller_simulation_physical_motion_threshold_deg: 0.05
+  # The threshold above sits INSIDE the encoder noise band, and the raw test is a
+  # single sample. Measured 2026-08-27 (servo_log_20260827_111803.csv): the right
+  # arm wandered 0.001-0.036 deg with no direction and clipped 0.051 deg exactly
+  # once at t=39.75 s - a 1-LSB (0.001 deg) excursion that latched TrackingError and
+  # ended the run. Real physical motion in a no-motion mode is SUSTAINED, so
+  # requiring the excursion to persist 0.1 s costs the guard nothing.
+  controller_simulation_physical_motion_debounce_sec: 0.1
   latch_fault_on_robot_state_error: true
   stop_both_arms_on_single_arm_error: true
   # Server-side dual-arm capsule self-collision guard — independent of the controller's
@@ -315,6 +322,17 @@ safety:
   # paths allowed). Fail-closed: planning failure holds. Disabled -> direct JointTarget.
   init_motion_planner:
     enable: true
+    # *** THE BOX'S REFERENCE IS THE SIMULATED TRUTH HERE, NOT THE ENCODERS. ***
+    # In pgmode the box runs the motion internally and the physical arm never
+    # moves, so q_actual is frozen for the whole run. Execution tracks measured
+    # joints by default (correct on real hardware: init must not complete while
+    # the arm lags), and that made init_motion UNRUNNABLE in sim - measured
+    # 2026-08-27: q_ref followed q_sent exactly while q_actual moved 0.000 deg,
+    # actual_dist_to_goal stayed pinned at 26.2885 deg, the pursuit carrot never
+    # advanced past its lookahead, and every attempt stalled out after 6 s.
+    # This is the same actual->reference substitution this file already makes for
+    # tracking error, servo state, and divergence. Structurally inert in real mode.
+    controller_simulation_progress_uses_reference: true
     max_planning_time_sec: 5.0
     max_iterations: 20000
     step_size_rad: 0.20
@@ -575,3 +593,334 @@ cartesian_control:
     # the IK'd target. One click always reaches the target; reactive barrier is the net.
     collision_free: true
     collision_check_samples: 40
+
+# =============================================================================
+# FORCE / TORQUE + FORCE CONTROL (pgmode controller-simulation)
+# =============================================================================
+# Copied from stack_real.yaml so the LAWS AND GAINS UNDER TEST ARE THE SHIPPED
+# ONES. The F/T reading itself is REAL: the wrench arrives on the box's `eft`
+# channel (RobotState::eft_wrench) from the physical sensor, and pgmode does not
+# simulate it away.
+#
+# *** WHAT THIS LANE CAN AND CANNOT PROVE (read before trusting a green run). ***
+# In pgmode the box runs the motion internally and the arm does NOT move, so the
+# force loop's feedback path is OPEN: push by hand and the sensor answers, the
+# overlay builds a deviation and the COMMAND moves, but the arm never moves, so
+# the sensor never answers the arm's own motion. The 2026-08-27 runaway closed
+# exactly that loop (command -> arm accelerates -> F/T reads the inertial
+# reaction -> overlay -> command), so it is NOT reproducible here.
+#
+#   Provable here: the overlay math, coverage/refusal reasons, the flap
+#     hysteresis, the load-aware Hold nominal refusal, the deactivated-box latch,
+#     and what the COMMAND does under a real wrench.
+#   NOT provable here: that the oscillation guard suppresses a real runaway.
+#     That needs hardware, at low speed, with the guard armed.
+
+force_torque:
+  enable: true
+  # Tell the control box the payload is ZERO so it subtracts NOTHING from the F/T
+  # output, and compensate the tool here instead. Not sending leaves the box holding
+  # whatever the pendant or CM last set — a compensation of unknown size that ours
+  # would then run on top of. CM measured that double-compensation as ~20 N.
+  #
+  # THE COST, ACCEPTED: the box's own collision detection runs on this payload, so
+  # with zero it sees the tool's weight as an external force.
+  push_zero_payload_to_box: true
+
+  # ---- AUTOMATIC TARE ON InitMotion -----------------------------------------
+  # Pressing InitMotion re-zeros that arm's sensor. The operator no longer has to
+  # remember a separate tare, which is the failure that leaves force control refusing
+  # to cover an arm (or worse, regulating against yesterday's zero).
+  #
+  # *** IT DOES NOT SAMPLE WHEN THE MOVE STARTS. *** A tare averages `raw - gravity`
+  # over 250 ticks (0.5 s), and during the move the arm's own acceleration and the
+  # tool's swing land in that average as force. The REQUEST arms it; the samples are
+  # taken after the arm reaches the init pose and stands still. In the common case the
+  # arm is already parked at the init pose, so the server's no-op path completes
+  # instantly and the zero lands ~settle_sec later without any motion at all.
+  #
+  # THE OPERATOR'S CHECK IS UNCHANGED: whatever load stands at the init pose becomes
+  # the new zero. Automatic means nobody pressed the button, not that anybody looked
+  # in the gripper.
+  auto_tare_after_init_motion:
+    enable: true
+    # Mechanical settle at the init pose before the first sample. The arrival taper
+    # ends with the tool still ringing; 0.5 s is one full tare window of quiet ahead
+    # of the tare itself.
+    settle_sec: 0.5
+    # ... and the command must actually be stopped. Read off the last SENT joint
+    # velocity (the surface brake-before-plan uses), not the measured joints, which
+    # keep jittering at rest. Same order as init_motion_planner.brake_exit_deg_s.
+    max_sent_speed_deg_s: 0.5
+    # Drop the old zero the instant InitMotion is requested, so an InitMotion that
+    # fails or is cancelled leaves the arm with NO zero and force control refuses it,
+    # rather than silently keeping a zero the operator believes was just refreshed.
+    invalidate_on_request: true
+
+  left:
+    enable: true
+    sensor_name: "RFT64-6A01-A"
+    tool_name: "pika"
+
+    # flange -> SENSING REFERENCE ORIGIN. Only relates the sensor origin to the
+    # flange; it is NOT applied to the reading (the torque is referenced AT the SRO).
+    # Matches the URDF ft chain: attachment_site +15 mm (ft_sensor_base) +30 mm
+    # (ft_sensor_measurement) = 45 mm.
+    sensor_offset_mm: [0.0, 0.0, 45.0]
+
+    # *** THE MEASURED SENSOR AXES, AS BASIS COLUMNS IN THE FLANGE FRAME. ***
+    # CM converged these on the cell (left arm, 2026-08-16, two hand-push rounds on
+    # the raw wrench): round 1 pinned the permutation, round 2 caught the remaining
+    # sign. det = -1 — the unit reports in a LEFT-HANDED axis set, and that is
+    # CORRECT. Do not "fix" it, and do NOT copy the URDF's ft_sensor_base_joint yaw
+    # (+90 deg, det +1): that is the nominal MECHANICAL placement and disagrees with
+    # this measured electrical relabel by a sign flip.
+    axes:
+      fx: [ 0.0, -1.0,  0.0]
+      fy: [ 1.0,  0.0,  0.0]
+      fz: [ 0.0,  0.0, -1.0]
+
+    # The sensor's own weight. Informational: the box compensates the sensor stack.
+    sensor_mass_kg: 0.175
+    sensor_com_mm: [0.0, 0.0, 21.5]
+
+    # SOFT per-axis dead-band on the COMPENSATED outputs only. 2 N is ~204 g, which
+    # is why the tool-load estimate exists to read below it.
+    deadzone_force_n:  [2.0, 2.0, 2.0]
+    deadzone_torque_nm: [0.5, 0.5, 0.5]
+    tool_load_tau_s: 1.0
+
+    # SRO -> TCP. NOT flange-relative: the sensor stack already contributes its
+    # 45 mm, so flange -> TCP = 45 + 202.642 = 247.642 mm — which is exactly the
+    # URDF's tcp_joint origin (0.247642 m, rpy 0). The TCP is the pika FINGERTIP
+    # CENTRE PLANE. Stating a flange-relative number here would put the TCP 45 mm
+    # too far out, i.e. reaching past the workpiece, with nothing on screen to say why.
+    tool_xyz_mm: [0.0, 0.0, 202.642]
+    tool_rpy_deg: [0.0, 0.0, 0.0]      # flange-aligned; jaw axis = TCP +/-x
+
+    # MEASURED, not CAD-nominal. CM `ft identify` 2026-08-17 14:08, residual 0.62 N.
+    # The pika CAD's own +90 deg yaw is baked into the exported meshes, not the TCP
+    # frame, so it does not appear here.
+    tool_mass_kg: 0.7912
+    tool_com_mm: [-0.02, 3.24, 25.34]   # SENSOR frame, from the SRO
+
+    # The point the applied-force torque is referenced to. A two-finger gripper
+    # applies its force AT THE FINGERTIPS. It lands on the same 202.642 as the TCP
+    # because robotics_lab DEFINES the TCP at the contact plane — it does not follow
+    # the TCP, and would not move with it.
+    applied_force_mm: [0.0, 0.0, 202.642]
+
+    # No bias on file: the bias is a SENSOR ZERO and belongs to a tare, not to a
+    # config. Force control REFUSES to cover an arm that has never been tared, so
+    # send TareForceSensor with the arm still and carrying nothing but the tool.
+
+  right:
+    enable: true
+    sensor_name: "RFT64-6A01-A"
+    tool_name: "pika"
+    sensor_offset_mm: [0.0, 0.0, 45.0]
+    # The SAME product on the same flange design. The triad was converged on the LEFT
+    # arm; if this arm's own 7-pose fit ever disagrees, that fit wins for this arm.
+    axes:
+      fx: [ 0.0, -1.0,  0.0]
+      fy: [ 1.0,  0.0,  0.0]
+      fz: [ 0.0,  0.0, -1.0]
+    sensor_mass_kg: 0.175
+    sensor_com_mm: [0.0, 0.0, 21.5]
+    deadzone_force_n:  [2.0, 2.0, 2.0]
+    deadzone_torque_nm: [0.5, 0.5, 0.5]
+    tool_load_tau_s: 1.0
+    tool_xyz_mm: [0.0, 0.0, 202.642]
+    tool_rpy_deg: [0.0, 0.0, 0.0]
+    # CM `ft identify` 2026-08-17 14:10, residual 0.59 N. 1.1 % from the left arm's
+    # mass and under 1.5 mm in CoM — two units of one product, measured separately
+    # and kept separately, because each arm compensates with its OWN sensor.
+    tool_mass_kg: 0.7822
+    tool_com_mm: [-1.24, 4.03, 26.56]
+    applied_force_mm: [0.0, 0.0, 202.642]
+
+# =============================================================================
+# FORCE CONTROL — the admittance overlay on the emitted Cartesian target.
+#
+# THE LAW IS controller-manager's FOLLOW path, ported: that is the consumer whose
+# problem matches ours (a streamed Cartesian plan that must yield to contact without
+# abandoning the plan). The numbers are CM's shipped 10 N row, which is ONE SOLVE —
+# k, b and the gate threshold are not independent, and mixing a b from one row with a
+# k from another is not a tuning, it is a different system.
+#
+#   k = max_force_n / d_max          10 N / 25 mm = 400 N/m
+#   b = 2*zeta*sqrt(m*(k + k_env))   zeta = 0.25, k_env = 5e4 (hard plastic)
+#   m = 15 kg                        owner constraint 10..15
+#
+# WHY zeta = 0.25 AND NOT 1.0: critical damping is WORSE here, measured. A large b
+# physically RESISTS the offset's retreat at the moment of impact and raises the peak
+# (65.4 N at zeta 1.0 against 47.2 N at zeta 0.25), while the gate already stabilises
+# the loop.
+#
+# THE IMPACT PEAK IS NOT max_force_n. First contact at speed spikes far above it
+# because the impact resolves in 30-50 ms while the gate needs ~70 ms to arrive. The
+# gate regulates the SUSTAINED force; it cannot catch the transient. The two levers
+# are approach speed and m — not this threshold.
+# =============================================================================
+
+force_control:
+  enable: true
+
+  # *** TWO CONSUMERS, TWO LAWS — AND RIGHT NOW THEY CARRY THE SAME NUMBERS. ***
+  # That is a DECISION (operator, 2026-08-26), not duplication: the stiffer
+  # controller-manager admittance law felt heavy, so BOTH consumers run the softer
+  # follow-derived law below. The split stays because the two problems are still
+  # different and the numbers may diverge again.
+  #
+  # The structure exists because applying one law to the other consumer already went
+  # wrong once: the follow law ran on a hand-push and the arm turned ~9 deg where CM
+  # turns ~0.3 deg, the two differing by five times in the ratio k_r/k_t that decides
+  # how much of a push becomes rotation rather than translation.
+  #
+  # SO READ THE HOLD BLOCK'S WARNING BEFORE HAND-PUSHING AGAIN: with these numbers a
+  # hand push turns the tool the way it did on 2026-08-26, and that is now a chosen
+  # trade rather than a defect.
+
+  # ---- the STREAM law: a plan the server is driving into contact ---------------
+  # controller-manager's follow.yaml 10 N row, which is ONE SOLVE - k, b and the gate
+  # threshold are not independent, and mixing a b from one row with a k from another
+  # is not a tuning, it is a different system.
+  #
+  #   k = max_force_n / d_max          10 N / 25 mm = 400 N/m
+  #   b = 2*zeta*sqrt(m*(k + k_env))   zeta = 0.25, k_env = 5e4 (hard plastic)
+  #   m = 15 kg                        CM owner constraint 10..15
+  #
+  # THE FORCE IT SETTLES AT IS THE GATE'S, NOT THIS SPRING'S. k decides the DEVIATION
+  # at that force (10 N / 400 = 25 mm), which is why the 40 mm fence is only 1.6x
+  # away: the spring saturates at k*0.040 = 16 N and above that the arm is rigid.
+  #
+  # WHY zeta = 0.25 AND NOT 1.0: critical damping is WORSE here, measured by CM. A
+  # large b physically RESISTS the offset's retreat at impact and raises the peak
+  # (65.4 N at zeta 1.0 against 47.2 N at zeta 0.25), while the gate already
+  # stabilises the loop.
+  #
+  # THE IMPACT PEAK IS NOT max_force_n, and no stiffness here changes that: the
+  # impact resolves in 30-50 ms while the gate needs its own close time to arrive.
+  # The peak is v * sqrt(k_env * m). At this cell's 0.45 m/s streaming speed that is
+  # hundreds of newtons, and the parameter that governs it is
+  # force_gate.close_tau_s, not k.
+  stream:
+    translation:
+      - {m: 15.0, b: 434.7, k: 400.0}   # x
+      - {m: 15.0, b: 434.7, k: 400.0}   # y
+      - {m: 15.0, b: 434.7, k: 400.0}   # z
+    # ROTATION IS DERIVED UNDER A STATED ASSUMPTION AND WANTS HARDWARE TUNING. The
+    # rotational environment stiffness is k_env * L^2 for a contact at lever L, and L
+    # is not known. CM's numbers use L = 140 mm (the RB5/steam lever) and are KNOWN
+    # STALE on this cell: the pika's lever is 202.642 mm, so the torque limit is ~31 %
+    # tighter than the "10 N * L" intent it states. Carried over unchanged
+    # deliberately - re-basing it RAISES a force limit, which is an operator decision.
+    rotation:
+      - {m: 1.0, b: 15.72, k: 8.0}      # rx
+      - {m: 1.0, b: 15.72, k: 8.0}      # ry
+      - {m: 1.0, b: 15.72, k: 8.0}      # rz
+
+  # ---- the HOLD law: an operator pushing the arm by hand -----------------------
+  # THE SAME NUMBERS AS `stream` ABOVE, by operator decision - the stiffer CM
+  # admittance law (k_t 2499 / k_r 250) felt heavy and was dropped.
+  #
+  # *** WHAT THIS COSTS, MEASURED ON THIS CELL, SO IT IS NOT REDISCOVERED. ***
+  # At k_r = 8 Nm/rad a hand push that lands off the fingertip turns the tool:
+  # servo_log_20260826_030631 recorded 4.1 deg at 13 N / 1.34 Nm and 8.3 deg at
+  # 17 N / 3.4 Nm, against 0.3 deg for the same push under the stiff law. That is
+  # correct behaviour for this law, not a frame error - the wrench is referenced at
+  # the TCP either way (the same run's moment arm read 190-198 mm when the SENSOR was
+  # pushed, which is the TCP-to-sensor distance).
+  #
+  # AND THE GATE DOES NOT ACT HERE. A compliant Hold has no plan advance to
+  # attenuate, so k*0.040 = 16 N is the whole bound on a hand push before the fence
+  # takes over and the arm goes rigid. The loader refuses hold_compliance with every
+  # hold k at 0 for that reason.
+  hold:
+    translation:
+      - {m: 15.0, b: 434.7, k: 400.0}   # x   10 N -> 25 mm
+      - {m: 15.0, b: 434.7, k: 400.0}   # y
+      - {m: 15.0, b: 434.7, k: 400.0}   # z
+    rotation:
+      - {m: 1.0, b: 15.72, k: 8.0}      # rx  1 Nm -> 7.2 deg
+      - {m: 1.0, b: 15.72, k: 8.0}      # ry
+      - {m: 1.0, b: 15.72, k: 8.0}      # rz
+
+  # THE GATE AND THE SPRING SHIP TOGETHER OR NOT AT ALL — the loader refuses either
+  # half alone. Measured by CM on hardware: k > 0 with no gate ramps the contact force
+  # forever (961 N in 40 s); the gate with k = 0 bounds the force but not the
+  # deviation (9.5 m of offset in 300 s).
+  force_gate:
+    enable: true
+    max_force_n: 10.0        # the force a sustained contact CONVERGES to
+    max_torque_nm: 1.4       # = 10 N * 0.140 m, the same stale-L assumption as k_r
+    close_tau_s: 0.10        # fast to close  - protective
+    open_tau_s:  0.40        # slow to open   - a fast re-open makes the gate a relay
+
+  # A DEAD BACKSTOP, not an operating limit. The design converges the deviation to
+  # max_force_n / k = 25 mm, so 40 mm is never reached in normal operation. It exists
+  # because that 25 mm bound is created by the GATE, and the gate depends on the
+  # wrench being right — which a fresh port has not yet earned the right to assume.
+  max_deviation_m: 0.040
+  max_deviation_rad: 0.2617993878     # 15 deg
+
+  # How FAST the deviation may grow. NOT the fence: deleting these would not be "no
+  # limit", it would be an unbounded per-tick jump.
+  max_velocity_m_s: 0.50
+  max_acceleration_m_s2: 5.0
+  max_velocity_rad_s: 2.00
+  max_acceleration_rad_s2: 20.0
+
+  # OSCILLATION GUARD (2026-08-27 incident, servo_log_20260827_101144.csv). A hand
+  # push pinned the 40 mm translation fence, then a ~5.3 Hz coupled oscillation
+  # (F/T dynamic feedback through the ~12 ms pipeline delay) grew INSIDE the
+  # 2 rad/s rotation cap until wrist IK amplification saturated every joint at
+  # dq_max (321 deg/s commanded on J6, 283 deg/s measured, 318 N on the sensor)
+  # and the operator hit E-stop. The rate caps bound amplitude per tick; they
+  # cannot see a limit cycle. This can: >= min_reversals velocity-direction flips
+  # at >= min_velocity_frac of the cap within window_sec freezes compliance until
+  # the wrench stays below the release thresholds for release_quiet_sec.
+  oscillation_guard_enable: true
+  oscillation_min_reversals: 4
+  oscillation_window_sec: 0.75
+  oscillation_min_velocity_frac: 0.35
+  oscillation_release_force_n: 5.0
+  oscillation_release_torque_nm: 0.5
+  oscillation_release_quiet_sec: 0.5
+  # Same incident, phase 6: a coverage freeze decays the command rate, which
+  # un-trips the rate check that froze it - 226 freeze<->covered transitions in
+  # 10 s (~23 Hz), re-latching the Hold nominal at the pushed pose each time. The
+  # raw verdict must now hold for coverage_recover_sec before re-covering, and a
+  # Hold nominal is never latched while |F| > hold_relatch_max_force_n (the Hold
+  # stays rigid until the hand releases).
+  coverage_recover_sec: 0.5
+  hold_relatch_max_force_n: 5.0
+
+  # Make a plain Hold compliant by latching its measured TCP as the nominal. This is
+  # what lets an operator push the arm by hand and watch it yield and spring back
+  # without a policy running. Turn it OFF once a policy owns the arm: a compliant Hold
+  # is an arm that moves when something leans on it.
+  hold_compliance: true
+
+  # *** IS THE COMMAND ACTUALLY REACHING THE ROBOT? ***
+  # The overlay is an open-loop integrator on the measured wrench: if its output never
+  # lands, the wrench never answers and it winds until something else stops it. On
+  # 2026-08-26 a queue-sync deadlock put the command 54 deg out this way.
+  #
+  # THE TEST IS RATE, NOT DISTANCE, and that is the whole point. Comparing how far the
+  # box's own reference TRAILS the last sent joints froze compliance on a healthy link:
+  # at 334 deg/s it legitimately trails 8.6 deg (the queue alone is 5 ticks) while the
+  # same run's median was 0.02 deg. No fixed distance separates "behind" from
+  # "stopped". A rate does, because a fast move drags the box's reference along with it
+  # and a dead link leaves it exactly where it was.
+  #
+  # THE RATIO IS MEASURED, NOT PICKED. Across the six runs of 2026-08-26 the healthy
+  # minimum was 0.156 and every dead-link run read 0.000, so 0.05 sits three times
+  # below the healthy floor and far above the dead one.
+  command_execution_tau_sec: 0.20         # the comparison window (rate low-pass)
+  command_execution_min_rate_dps: 5.0     # below this we are not moving; say nothing
+  command_execution_min_ratio: 0.05       # ref rate must be >= this x our rate
+
+  # Refuse to compose onto a nominal older than this — a deviation composed onto a
+  # stale pose is a command nobody authored.
+  max_state_age_sec: 0.05

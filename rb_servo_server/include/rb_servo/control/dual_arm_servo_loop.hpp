@@ -836,6 +836,10 @@ private:
     // Deactivated-box gate debounce (loop thread only).
     int left_box_deactivated_ticks_ = 0;
     int right_box_deactivated_ticks_ = 0;
+    // pgmode physical-motion guard debounce: consecutive ticks over the threshold
+    // (safety.controller_simulation_physical_motion_debounce_sec). Loop thread only.
+    int left_physical_motion_ticks_ = 0;
+    int right_physical_motion_ticks_ = 0;
     bool left_overlay_bounded_prev_ = false;
     bool right_overlay_bounded_prev_ = false;
     bool left_gate_closed_prev_ = false;
