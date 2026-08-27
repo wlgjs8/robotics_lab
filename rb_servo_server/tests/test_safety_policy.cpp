@@ -1934,6 +1934,56 @@ bool testRobotStateErrorRealPolicyLatchesFault() {
     return true;
 }
 
+// A SERVO THAT LANDS ON A CLAMPED BOUND OVERSHOOTS IT A LITTLE, AND THAT IS NOT A
+// BROKEN ROBOT. isValidJointState judges the MEASURED pose, so it uses the command
+// bounds widened by safety.joint_state_validity_margin_deg. Reproduces the
+// 2026-08-27 abort: the left elbow was commanded to exactly its 150 deg bound (the
+// clamp working) and measured 150.008 deg, which latched RobotStateError and ended
+// a policy rollout. Inside the margin the run must continue; far outside it must
+// still latch, because that is a genuinely wrong pose.
+bool testJointStateValidityMarginAbsorbsServoOvershoot() {
+    const auto run_with_actual = [](double elbow_actual_deg, double margin_deg) {
+        rb_servo::CommandBuffer buffer;
+        rb_servo::DualArmConfig cfg = testConfig();
+        cfg.left_robot.run_mode = rb_servo::RunMode::Real;
+        cfg.safety.q_min_deg[2] = -150.0;
+        cfg.safety.q_max_deg[2] = 150.0;
+        cfg.safety.joint_state_validity_margin_deg = margin_deg;
+        rb_servo::JointArray initial = joints(0.0);
+        initial[2] = 149.0;   // parked just inside the bound
+        auto left = std::make_unique<TestBackend>(rb_servo::ArmId::Left, initial, false);
+        TestBackend* left_raw = left.get();
+        rb_servo::DualArmServoLoop loop(
+            std::move(left),
+            std::make_unique<TestBackend>(rb_servo::ArmId::Right, initial, false),
+            cfg,
+            &buffer,
+            nullptr
+        );
+        if (!loop.start()) return true;   // treated as "latched" -> fails the checks below
+        rb_servo::JointArray overshot = initial;
+        overshot[2] = elbow_actual_deg;
+        left_raw->setActualJoints(overshot);
+        sleepTicks();
+        const rb_servo::ServoSnapshot snapshot = loop.latestSnapshot();
+        loop.stop();
+        return snapshot.fault_latched;
+    };
+
+    // The measured incident: 8/1000 of a degree past the bound. With the shipped
+    // 2 deg margin this must NOT end the run.
+    RB_CHECK(!run_with_actual(150.008, 2.0));
+    // The worst overshoot seen in that run, and a full degree, are still fine.
+    RB_CHECK(!run_with_actual(150.045, 2.0));
+    RB_CHECK(!run_with_actual(151.0, 2.0));
+    // Past the margin the pose is not plausible any more and must latch.
+    RB_CHECK(run_with_actual(153.0, 2.0));
+    // Margin 0 reproduces the old behaviour exactly, so the regression stays
+    // visible if anyone zeroes it.
+    RB_CHECK(run_with_actual(150.008, 0.0));
+    return true;
+}
+
 bool testLatestSnapshotContainsSendTimingAndPreviousTargets() {
     rb_servo::CommandBuffer buffer;
     rb_servo::DualArmConfig cfg = testConfig();
@@ -6790,6 +6840,7 @@ int main() {
     if (!testSafetyFilterVelocityClampMaxStep()) return 1;
     if (!testSafetyFilterAccelerationClampDoesNotOvershoot()) return 1;
     if (!testRobotStateErrorRealPolicyLatchesFault()) return 1;
+    if (!testJointStateValidityMarginAbsorbsServoOvershoot()) return 1;
     if (!testLatestSnapshotContainsSendTimingAndPreviousTargets()) return 1;
     if (!testReadOnlyModeSuppressesSendsAndBlocksMotionCommands()) return 1;
     if (!testWorkerIoModeDispatchesThroughArmWorkers()) return 1;

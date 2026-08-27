@@ -14,33 +14,17 @@ else
   PYTHON_BIN="python3"
 fi
 
-if ! OPENCV_PREFLIGHT=$("$PYTHON_BIN" - <<'PY' 2>&1
-import cv2
-import numpy  # noqa: F401
-import zmq  # noqa: F401
+export PYTHONPATH="$PWD/policy_runner${PYTHONPATH:+:$PYTHONPATH}"
 
-gui_line = next(
-    (line.strip() for line in cv2.getBuildInformation().splitlines()
-     if line.strip().startswith("GUI:")),
-    "GUI: unknown",
-)
-if gui_line.upper() in {"GUI: NONE", "GUI: UNKNOWN"}:
-    raise RuntimeError(
-        f"OpenCV HighGUI is unavailable ({gui_line}); "
-        "opencv-python-headless cannot open a preview window"
-    )
-PY
+if ! OPENCV_PREFLIGHT=$(
+  "$PYTHON_BIN" -m policy_runner.camera_preview --check-gui 2>&1
 ); then
   echo "camera preview requires GUI-enabled OpenCV, numpy, and pyzmq for: $PYTHON_BIN" >&2
   echo "$OPENCV_PREFLIGHT" >&2
-  echo "Replace the headless wheel with:" >&2
-  echo "  $PYTHON_BIN -m pip uninstall -y opencv-python-headless" >&2
-  echo "  $PYTHON_BIN -m pip install --upgrade opencv-python numpy pyzmq" >&2
   exit 2
 fi
 
-export PYTHONPATH="$PWD/policy_runner${PYTHONPATH:+:$PYTHONPATH}"
-
+echo "[camera-preview] $OPENCV_PREFLIGHT"
 echo "[camera-preview] topic=camera.bundle.policy cameras=left_realsense_color,right_realsense_color"
 echo "[camera-preview] press q/ESC or close the window to exit"
 

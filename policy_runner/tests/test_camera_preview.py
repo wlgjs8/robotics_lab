@@ -1,6 +1,15 @@
+import contextlib
+import io
+import os
 import unittest
+from unittest import mock
 
-from policy_runner.camera_preview import _image_window_size, _resize_window_to_image
+from policy_runner.camera_preview import (
+    _image_window_size,
+    _opencv_gui_backend,
+    _opencv_gui_error,
+    _resize_window_to_image,
+)
 
 
 class _Image:
@@ -14,6 +23,33 @@ class _Cv2:
 
     def resizeWindow(self, title, width, height):  # noqa: N802 - mirrors cv2 API
         self.resize_calls.append((title, width, height))
+
+
+class _Cv2WithCurrentUi:
+    def __init__(self, backend, build_gui="QT5"):
+        self.backend = backend
+        self.build_gui = build_gui
+
+    def currentUIFramework(self):  # noqa: N802 - mirrors cv2 API
+        return self.backend
+
+    def getBuildInformation(self):  # noqa: N802 - mirrors cv2 API
+        return f"General configuration\n  GUI: {self.build_gui}\n"
+
+
+class _Cv2NamedWindowFailure(_Cv2WithCurrentUi):
+    WINDOW_NORMAL = 0
+
+    def namedWindow(self, _title, _flags):  # noqa: N802 - mirrors cv2 API
+        raise RuntimeError("window backend initialization failed")
+
+
+class _LegacyCv2:
+    def __init__(self, build_gui):
+        self.build_gui = build_gui
+
+    def getBuildInformation(self):  # noqa: N802 - mirrors cv2 API
+        return f"General configuration\n  GUI: {self.build_gui}\n"
 
 
 class CameraPreviewSizingTest(unittest.TestCase):
@@ -65,6 +101,89 @@ class CameraPreviewArgsTest(unittest.TestCase):
         from policy_runner.camera_preview import _parse_args
 
         self.assertFalse(_parse_args([]).include_depth)
+
+    def test_check_gui_flag(self):
+        from policy_runner.camera_preview import _parse_args
+
+        self.assertTrue(_parse_args(["--check-gui"]).check_gui)
+
+
+class CameraPreviewGuiPreflightTest(unittest.TestCase):
+    def test_opencv5_empty_runtime_backend_is_authoritative(self):
+        cv2 = _Cv2WithCurrentUi("", build_gui="QT5")
+
+        self.assertIsNone(_opencv_gui_backend(cv2))
+
+    def test_legacy_build_info_rejects_space_padded_none(self):
+        cv2 = _LegacyCv2("                           NONE")
+
+        self.assertIsNone(_opencv_gui_backend(cv2))
+
+    def test_legacy_build_info_accepts_gui_backend(self):
+        self.assertEqual(_opencv_gui_backend(_LegacyCv2("GTK3")), "GTK3")
+
+    def test_linux_gui_backend_requires_display(self):
+        backend, error = _opencv_gui_error(
+            _Cv2WithCurrentUi("QT"), environ={}, platform="linux"
+        )
+
+        self.assertEqual(backend, "QT")
+        self.assertIn("DISPLAY", error)
+
+    def test_linux_gui_backend_accepts_x11_display(self):
+        backend, error = _opencv_gui_error(
+            _Cv2WithCurrentUi("QT"), environ={"DISPLAY": ":1"}, platform="linux"
+        )
+
+        self.assertEqual(backend, "QT")
+        self.assertIsNone(error)
+
+    def test_check_gui_cli_succeeds_without_opening_window(self):
+        from policy_runner.camera_preview import main
+
+        fake_cv2 = _Cv2WithCurrentUi("QT")
+        stdout = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"DISPLAY": ":1"}),
+            mock.patch.dict("sys.modules", {"cv2": fake_cv2}),
+            contextlib.redirect_stdout(stdout),
+        ):
+            result = main(["--check-gui"])
+
+        self.assertEqual(result, 0)
+        self.assertIn("backend=QT", stdout.getvalue())
+
+    def test_check_gui_cli_rejects_headless_wheel(self):
+        from policy_runner.camera_preview import main
+
+        fake_cv2 = _Cv2WithCurrentUi("")
+        stderr = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"DISPLAY": ":1"}),
+            mock.patch.dict("sys.modules", {"cv2": fake_cv2}),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = main(["--check-gui"])
+
+        self.assertEqual(result, 2)
+        self.assertIn("opencv-python-headless", stderr.getvalue())
+        self.assertIn("HighGUI backend: none", stderr.getvalue())
+
+    def test_named_window_failure_returns_actionable_error(self):
+        from policy_runner.camera_preview import main
+
+        fake_cv2 = _Cv2NamedWindowFailure("QT")
+        stderr = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"DISPLAY": ":1"}),
+            mock.patch.dict("sys.modules", {"cv2": fake_cv2}),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = main([])
+
+        self.assertEqual(result, 2)
+        self.assertIn("namedWindow failed", stderr.getvalue())
+        self.assertIn("window backend initialization failed", stderr.getvalue())
 
 
 class CameraPreviewDepthRenderTest(unittest.TestCase):

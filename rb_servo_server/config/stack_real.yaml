@@ -176,6 +176,21 @@ safety:
   # unchanged; this only removes the band PTP could still reach.
   q_min_deg: [-360, -360, -150, -360, -360, -360]
   q_max_deg: [360, 360, 150, 360, 360, 360]
+  # The bounds above are a POLICY about what we COMMAND. The MEASURED pose is a
+  # separate question ("is the robot somewhere physically plausible"), and judging
+  # it with the command bound makes driving to the limit self-defeating: a servo
+  # that lands on a target clamped exactly to the bound always overshoots a little.
+  # MEASURED 2026-08-27 (servo_log_20260827_121630.csv, t=55.290 s): left elbow
+  # commanded to exactly 150.000 deg -- the clamp doing its job -- and measured at
+  # 150.008 deg. That 8/1000 of a degree (~0.05 mm at the TCP) failed
+  # isValidJointState and latched RobotStateError, ending a policy rollout mid-run.
+  # Worst overshoot in that run: 0.045 deg. The conflict appeared on 2026-08-26,
+  # when J3's command bound was narrowed 160 -> 150 and the two limits collapsed
+  # onto the same number.
+  # 2.0 deg swallows servo overshoot, encoder noise and gravity sag while leaving a
+  # genuinely wrong pose (bad encoder, wrong frame) latching as before -- the
+  # tracking-error latch next door is 30 deg for scale.
+  joint_state_validity_margin_deg: 2.0
   # 2026-06-28: raised for UMI teleop responsiveness. The global outer clamp was
   # the binding limit on UMI Cartesian tracking (left arm velocity-clamped 34%,
   # accel-clamped 47% -> "robot follows too slowly"). Accel raised more (it was the

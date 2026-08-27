@@ -1268,6 +1268,19 @@ void validateConfig(const DualArmConfig& cfg) {
         cfg.safety.controller_simulation_physical_motion_debounce_sec,
         "safety.controller_simulation_physical_motion_debounce_sec"
     );
+    validateNonNegativeFinite(
+        cfg.safety.joint_state_validity_margin_deg,
+        "safety.joint_state_validity_margin_deg"
+    );
+    // A margin wide enough to swallow the tracking-error latch would let a pose
+    // that is degrees wrong read as valid; the two guards must not overlap.
+    if (cfg.safety.joint_state_validity_margin_deg >= cfg.safety.max_tracking_error_deg) {
+        throw std::runtime_error(
+            "safety.joint_state_validity_margin_deg must stay below "
+            "safety.max_tracking_error_deg - it absorbs servo overshoot at a clamped "
+            "bound, not a genuinely wrong pose"
+        );
+    }
     validateNonNegativeFiniteArray(cfg.safety.joint_wrap_period_deg, "safety.joint_wrap_period_deg");
     if (cfg.safety.self_collision.enable) {
         // The only implementation is the async URDF-mesh CollisionMonitor, so the
@@ -2819,6 +2832,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "joint_wrap_for_motion_safety",
             "controller_simulation_tracking_error_source",
             "controller_simulation_physical_motion_policy",
+            "joint_state_validity_margin_deg",
             "controller_simulation_physical_motion_threshold_deg",
             "controller_simulation_physical_motion_debounce_sec",
             "controller_simulation_tracking_error_nonlatching",
@@ -2911,6 +2925,12 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             cfg.safety.controller_simulation_physical_motion_threshold_deg = asDouble(
                 sec["controller_simulation_physical_motion_threshold_deg"],
                 "safety.controller_simulation_physical_motion_threshold_deg"
+            );
+        }
+        if (has(sec, "joint_state_validity_margin_deg")) {
+            cfg.safety.joint_state_validity_margin_deg = asDouble(
+                sec["joint_state_validity_margin_deg"],
+                "safety.joint_state_validity_margin_deg"
             );
         }
         if (has(sec, "controller_simulation_physical_motion_debounce_sec")) {

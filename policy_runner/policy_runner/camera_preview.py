@@ -14,8 +14,10 @@ or let flow-infer spawn/terminate it with --camera-preview.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
+from collections.abc import Mapping
 
 from .camera_bundle_client import CameraBundleClient, resolve_frame
 
@@ -44,6 +46,11 @@ def _depth_to_image(
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check-gui",
+        action="store_true",
+        help="Validate OpenCV HighGUI and the desktop display, then exit",
+    )
     parser.add_argument("--zmq-endpoint", default="tcp://127.0.0.1:5600")
     parser.add_argument("--topic", default="camera.bundle")
     parser.add_argument(
@@ -69,6 +76,80 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _opencv_gui_backend(cv2_module) -> str | None:
+    """Return the usable HighGUI backend name, or None for a headless build."""
+
+    current_ui_framework = getattr(cv2_module, "currentUIFramework", None)
+    if callable(current_ui_framework):
+        try:
+            backend = str(current_ui_framework() or "").strip()
+        except Exception:  # pragma: no cover - defensive for unusual cv2 builds
+            backend = ""
+        # OpenCV 5 exposes currentUIFramework() for both GUI and headless
+        # wheels. An empty result is authoritative and must not fall back to a
+        # less precise, compile-time build-info string.
+        return backend or None
+
+    try:
+        build_info = str(cv2_module.getBuildInformation())
+    except Exception:  # pragma: no cover - defensive for unusual cv2 builds
+        return None
+    for raw_line in build_info.splitlines():
+        key, separator, value = raw_line.strip().partition(":")
+        if separator and key.upper() == "GUI":
+            backend = value.strip()
+            if backend.upper() in {"", "NONE", "NO", "UNKNOWN"}:
+                return None
+            return backend
+    return None
+
+
+def _opencv_gui_error(
+    cv2_module,
+    *,
+    environ: Mapping[str, str] | None = None,
+    platform: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Return (backend, error) without attempting to create a window."""
+
+    backend = _opencv_gui_backend(cv2_module)
+    if backend is None:
+        return None, (
+            "OpenCV HighGUI is unavailable (no UI backend). "
+            "Install exactly one GUI-enabled opencv-python wheel; "
+            "opencv-python-headless cannot create preview windows."
+        )
+
+    runtime_platform = sys.platform if platform is None else platform
+    runtime_environ = os.environ if environ is None else environ
+    if runtime_platform.startswith("linux") and not (
+        runtime_environ.get("DISPLAY") or runtime_environ.get("WAYLAND_DISPLAY")
+    ):
+        return backend, (
+            f"OpenCV HighGUI backend {backend!r} is installed, but neither "
+            "DISPLAY nor WAYLAND_DISPLAY is set."
+        )
+    return backend, None
+
+
+def _print_gui_error(reason: str, *, cv2_module=None) -> None:
+    backend = _opencv_gui_backend(cv2_module) if cv2_module is not None else None
+    backend_label = backend or ("none" if cv2_module is not None else "not checked")
+    print(f"camera_preview cannot open an OpenCV window: {reason}", file=sys.stderr)
+    print(f"Python: {sys.executable}", file=sys.stderr)
+    print(f"HighGUI backend: {backend_label}", file=sys.stderr)
+    print("Repair this Python environment with exactly one OpenCV wheel:", file=sys.stderr)
+    print(
+        f"  {sys.executable} -m pip uninstall -y opencv-python "
+        "opencv-python-headless opencv-contrib-python opencv-contrib-python-headless",
+        file=sys.stderr,
+    )
+    print(
+        f"  {sys.executable} -m pip install opencv-python numpy pyzmq",
+        file=sys.stderr,
+    )
+
+
 def _image_window_size(image) -> tuple[int, int]:
     """Return OpenCV resizeWindow width/height for an HWC image."""
 
@@ -92,22 +173,38 @@ def main(argv: list[str] | None = None) -> int:
     try:
         import cv2
         import numpy as np
+        import zmq  # noqa: F401 - runtime dependency preflight
     except ImportError as exc:  # pragma: no cover - environment guard
-        print(f"camera_preview requires cv2/numpy: {exc}", file=sys.stderr)
+        _print_gui_error(f"missing runtime dependency: {exc}")
         return 2
 
+    backend, gui_error = _opencv_gui_error(cv2)
+    if gui_error is not None:
+        _print_gui_error(gui_error, cv2_module=cv2)
+        return 2
+    if args.check_gui:
+        print(f"OpenCV HighGUI backend={backend}")
+        return 0
+
     cameras = [name.strip() for name in str(args.cameras).split(",") if name.strip()]
-    client = CameraBundleClient(
-        args.zmq_endpoint,
-        topic=args.topic,
-        max_age_ms=args.max_age_ms,
-        include_depth=bool(args.include_depth),
-    )
     period = 1.0 / max(float(args.refresh_hz), 1.0)
     placeholder_shape = (DEFAULT_PANEL_SIZE[1], DEFAULT_PANEL_SIZE[0], 3)
     last_window_size: tuple[int, int] | None = None
-    cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_NORMAL)
+    client = None
+    window_created = False
     try:
+        try:
+            cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_NORMAL)
+            window_created = True
+        except Exception as exc:  # cv2.error varies across OpenCV wheel versions
+            _print_gui_error(f"namedWindow failed: {exc}", cv2_module=cv2)
+            return 2
+        client = CameraBundleClient(
+            args.zmq_endpoint,
+            topic=args.topic,
+            max_age_ms=args.max_age_ms,
+            include_depth=bool(args.include_depth),
+        )
         while True:
             loop_start = time.monotonic()
             bundle = client.poll(timeout_ms=int(period * 1000)) or client.latest()
@@ -170,11 +267,13 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 0
     finally:
-        client.close()
-        try:
-            cv2.destroyAllWindows()
-        except Exception:
-            pass
+        if client is not None:
+            client.close()
+        if window_created:
+            try:
+                cv2.destroyAllWindows()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

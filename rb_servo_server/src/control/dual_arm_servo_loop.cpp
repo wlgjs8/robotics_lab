@@ -4433,10 +4433,20 @@ bool DualArmServoLoop::isValidJointState(const RobotState& state) const {
     if (state.has_error && !controllerSimulationDiagnosticStateAllowed(config_, state)) {
         return false;
     }
+    // The MEASURED pose is judged against the command bounds WIDENED by
+    // joint_state_validity_margin_deg. A servo that lands on a target clamped
+    // exactly to the bound always sits a little past it, so testing the
+    // measurement with the command bound turns "drive to the limit" into
+    // "fault" (measured 2026-08-27: commanded 150.000 deg, measured 150.008,
+    // RobotStateError, rollout over). See the config comment for the full note.
+    const double margin = std::max(0.0, config_.safety.joint_state_validity_margin_deg);
     for (int i = 0; i < kDof; ++i) {
         const double q = state.q_actual_deg[i];
         if (!std::isfinite(q)) return false;
-        if (q < config_.safety.q_min_deg[i] || q > config_.safety.q_max_deg[i]) return false;
+        if (q < config_.safety.q_min_deg[i] - margin ||
+            q > config_.safety.q_max_deg[i] + margin) {
+            return false;
+        }
     }
     return true;
 }

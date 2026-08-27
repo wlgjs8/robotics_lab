@@ -3,4 +3,4 @@ numpy>=1.26
 trimesh>=4.0
 yourdfpy>=0.0.56
 pyzmq>=25.0
-opencv-python-headless>=4.8
+opencv-python>=4.8

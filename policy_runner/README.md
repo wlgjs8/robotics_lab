@@ -128,6 +128,37 @@ Explicit `--left-port` / `--right-port` remain available for isolated
 diagnostics but cannot be combined with auto-pairing. `MODE=sim` and an
 explicit `GRIPPER_SERVER=0` remain camera-independent.
 
+## Live Wrist-Camera Preview
+
+With `camera_server` running, open the exact two RGB frames consumed by the
+policy in a side-by-side OpenCV window:
+
+```bash
+./tools/subscribe_camera.sh
+```
+
+The preview subscribes read-only to `camera.bundle.policy` and its shared-memory
+ring; it does not publish robot commands or interfere with policy inference.
+Press `q`, Escape, or close the window to exit. Check the selected Python and
+HighGUI backend without opening a window with:
+
+```bash
+PYTHONPATH=policy_runner .venv/bin/python -m policy_runner.camera_preview --check-gui
+```
+
+The repository `.venv` must contain exactly one OpenCV wheel. The native
+operator stack uses GUI-enabled `opencv-python`; do not install
+`opencv-python-headless` alongside it because both distributions own the same
+`cv2` files. To repair an environment containing both variants:
+
+```bash
+.venv/bin/python -m pip uninstall -y \
+  opencv-python opencv-python-headless \
+  opencv-contrib-python opencv-contrib-python-headless
+.venv/bin/python -m pip install -e rb_gui
+.venv/bin/python -m pip check
+```
+
 ## Flow/OpenPI Rollout
 
 `flow-infer` and OpenPI remote rollout always compose ee_local policy deltas into

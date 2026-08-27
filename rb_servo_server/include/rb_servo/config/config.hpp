@@ -921,6 +921,27 @@ struct SafetyConfig {
         ControllerSimulationTrackingErrorSource::Actual;
     ControllerSimulationPhysicalMotionPolicy controller_simulation_physical_motion_policy =
         ControllerSimulationPhysicalMotionPolicy::FaultLatch;
+    // *** COMMAND LIMITS AND STATE-VALIDITY LIMITS ARE NOT THE SAME QUESTION. ***
+    // q_min_deg/q_max_deg are a POLICY about what we are willing to command. This
+    // margin widens them for the separate FACT question isValidJointState asks:
+    // "is the robot in a physically plausible pose". Judging the measurement with
+    // the command bound makes "drive to the limit" mean "fault", because a servo
+    // that lands exactly on its clamped target always overshoots it a little.
+    //
+    // Measured 2026-08-27 (servo_log_20260827_121630.csv, t=55.290 s): the left
+    // elbow was commanded to exactly 150.000 deg (the clamp working correctly)
+    // and measured 150.008 deg -- 8/1000 of a degree, ~0.05 mm at the TCP -- which
+    // failed the validity test and latched RobotStateError, ending the rollout.
+    // Worst overshoot in that run was 0.045 deg. The regression dates to
+    // 2026-08-26, when J3's command bound was narrowed 160 -> 150 deg and the two
+    // limits became the same number; before that the 10 deg gap hid the conflict.
+    //
+    // This does NOT let the arm be commanded past the bound: the clamp, the
+    // approach barrier and the projection all still work off q_min/q_max. It only
+    // stops a sub-degree servo overshoot from being read as a broken robot. A real
+    // fault (bad encoder, wrong frame) leaves the pose degrees out and still
+    // latches -- for scale, max_tracking_error_deg is 30.
+    double joint_state_validity_margin_deg = 2.0;
     double controller_simulation_physical_motion_threshold_deg = 0.05;
     // How long the excursion must PERSIST before it latches. The raw test is a
     // single-sample threshold, and 0.05 deg sits inside the encoder noise band:
