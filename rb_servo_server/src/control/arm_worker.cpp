@@ -322,6 +322,18 @@ ArmSendResult ArmWorker::enqueueAsyncServoJ(SendServoJRequest request) {
     }
 
     telemetry_.worker_last_enqueued_seq = request.command_seq;
+    // Feed the rate converter here too. THIS is the path a cadence-owning worker
+    // is fed on: dual_arm_servo_loop routes workerOwnsSendCadence() through
+    // ServoDispatcher::dispatchRbpodoAsync -> enqueueAsyncServoJ, while
+    // enqueueServoJ is the blocking path used when the worker does NOT own the
+    // cadence -- exactly where interpolation is inert by design. Wiring the push
+    // into enqueueServoJ alone meant the interpolator could never be fed in the
+    // one mode it exists for: measured 2026-08-27, servo.worker_setpoint_
+    // interpolation read back "on" at startup while worker_interp_active stayed 0
+    // for a whole run and worker_repeated_sends_total kept climbing.
+    if (options_.interpolate_setpoints && options_.send_period_ns > 0) {
+        setpoint_interp_.push(request);
+    }
     pending_servo_j_ = request;
 
     BackendTiming timing = makeBackendTiming(now, nowSteadyNs());

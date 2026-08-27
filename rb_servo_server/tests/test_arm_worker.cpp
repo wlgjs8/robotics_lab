@@ -646,16 +646,24 @@ bool testInterpolationDrivesTheWireInsteadOfRepeating() {
     RB_CHECK(worker.start());
     RB_CHECK(raw_backend->waitForReads(1, std::chrono::milliseconds(500)));
 
+    // enqueueAsyncServoJ, NOT enqueueServoJ: this is the path a cadence-owning
+    // worker is actually fed on (dual_arm_servo_loop routes
+    // workerOwnsSendCadence() through ServoDispatcher::dispatchRbpodoAsync).
+    // The push used to be wired only into enqueueServoJ -- the blocking path
+    // used when the worker does NOT own the cadence, where interpolation is
+    // inert by design -- so the interpolator could never be fed in the one mode
+    // it exists for. Testing the wrong entry point is what hid that.
+    //
     // One enqueue is enough to establish the stream: from then on the cursor
     // always has a setpoint, so the mailbox being empty must never produce a
     // repeat -- which is exactly the beat the conversion exists to remove.
-    worker.enqueueServoJ(request(51, joints(3.0), 0));
+    worker.enqueueAsyncServoJ(request(51, joints(3.0), 0));
     RB_CHECK(raw_backend->waitForSends(10, std::chrono::milliseconds(500)));
     RB_CHECK(worker.telemetry().worker_repeated_sends_total == 0);
 
     // Two bracketing setpoints establish the one-setpoint delay and mark the
     // interpolator active, which is what the run telemetry reads back.
-    worker.enqueueServoJ(request(52, joints(4.0), 0));
+    worker.enqueueAsyncServoJ(request(52, joints(4.0), 0));
     const int before = raw_backend->sendCount();
     RB_CHECK(raw_backend->waitForSends(before + 10, std::chrono::milliseconds(500)));
     RB_CHECK(worker.telemetry().worker_interp_active);
