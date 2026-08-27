@@ -121,9 +121,41 @@ cam-up:
 # 포인트 클라우드 워커까지 같이 띄운다 — 손목 리그에서 rb_gui가 클라우드를 보여주는
 # 것이 기본 기대값이므로 별도 타겟을 기억하게 하지 않는다. 워커만 따로 껐다 켜려면
 # make cloud-up / cloud-down, 카메라만 원하면 CLOUD=0.
+# 손목 D405 는 rs400 advanced-mode 프리셋을 그대로 적용한다
+# (camera_server/config/realsense_d405_advanced.json — 노출/게인/zunits 등 파일의 모든
+# 값). cam-up 의 기본값은 __no_advanced__.json(프리셋 없음)이라 여기서 덮어써야 한다.
+# 이 리그 YAML 에는 controls: 블록을 두지 않는다 — apply_controls() 가 프리셋 로드보다
+# 나중에 돌아서 프리셋을 조용히 덮어쓰기 때문. 프리셋이 단일 소유자다.
+WRIST_CAM_JSON ?= /app/config/realsense_d405_advanced.json
 CLOUD ?= 1
+# 프리셋은 FAIL CLOSED 다: 지정한 파일이 없거나 두 카메라에 실제로 적용되지 않으면
+# 이 타겟이 실패한다. "프리셋을 편집했는데 사실은 안 실리고 있었다"를 한 세션 뒤가
+# 아니라 이 명령에서 알아채기 위한 것. 프리셋 없이 띄우려면 명시적으로
+# STEREO_CAM_JSON=/app/config/__no_advanced__.json 을 준다.
 cam-up-wrists:
-	@$(MAKE) --no-print-directory cam-up CAMERA_CONFIG=/app/config/dual_realsense_d405.yaml
+	@set -e; \
+	host_json="camera_server/config/$$(basename '$(WRIST_CAM_JSON)')"; \
+	case '$(WRIST_CAM_JSON)' in \
+	  *__no_advanced__*) echo "[cam] advanced preset disabled by request" ;; \
+	  *) [ -f "$$host_json" ] || { echo "[cam] advanced preset not found: $$host_json" >&2; exit 1; } ;; \
+	esac; \
+	$(MAKE) --no-print-directory cam-up CAMERA_CONFIG=/app/config/dual_realsense_d405.yaml STEREO_CAM_JSON=$(WRIST_CAM_JSON); \
+	case '$(WRIST_CAM_JSON)' in *__no_advanced__*) ;; *) \
+	  echo "[cam] waiting for the advanced preset to apply on both wrists..."; \
+	  ok=0; \
+	  for i in $$(seq 1 40); do \
+	    n=$$(docker logs camera_server 2>&1 | grep -c 'advanced json applied for' || true); \
+	    if [ "$$n" -ge 2 ]; then ok=1; break; fi; \
+	    if docker logs camera_server 2>&1 | grep -q 'advanced json requested but not applied'; then break; fi; \
+	    sleep 1; \
+	  done; \
+	  if [ "$$ok" != "1" ]; then \
+	    echo "[cam] advanced preset was NOT applied to both wrist cameras:" >&2; \
+	    docker logs camera_server 2>&1 | grep -E 'advanced json|pipeline start failed' | tail -5 >&2; \
+	    exit 1; \
+	  fi; \
+	  echo "[cam] advanced preset applied: $(WRIST_CAM_JSON)" ;; \
+	esac
 	@if [ "$(CLOUD)" != "0" ]; then $(MAKE) --no-print-directory cloud-up; \
 	else echo "cloud worker skipped (CLOUD=0) — 필요하면 make cloud-up"; fi
 

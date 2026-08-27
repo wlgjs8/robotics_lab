@@ -101,6 +101,12 @@ cameras:
         height: 480
         fps: 30
         format: z16
+    # NO `controls:` block here on purpose. This rig's sensor settings come from
+    # the rs400 advanced-mode preset (camera_server/config/realsense_d405_advanced.json,
+    # wired in by `make cam-up-wrists`), and a controls block would silently win over
+    # it: maybe_load_advanced_json() runs BEFORE pipeline start, apply_controls()
+    # AFTER. Adding exposure/gain here again means editing the preset stops having
+    # any effect, with nothing in the log to say so. One owner: the preset.
   right_realsense:
     serial: "260322278348"
     required: true
@@ -117,6 +123,9 @@ cameras:
         height: 480
         fps: 30
         format: z16
+    # Same as the left unit: settings come from the advanced-mode preset, which is
+    # loaded per device, so both wrists get the identical exposure/gain. A
+    # brightness split between them would be a training-distribution split.
 
 recording:
   enabled: false

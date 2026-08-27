@@ -329,25 +329,41 @@ class RealSenseDevice final : public ICameraDevice {
   }
 
   // 수집(.40)과 동일한 rs400 advanced-mode JSON을 pipeline start 전에 적용한다.
-  // 경로는 env CAMERA_SERVER_REALSENSE_JSON. 실패해도 캡처는 계속(드라이버 기본값).
+  // 경로는 env CAMERA_SERVER_REALSENSE_JSON.
   // JSON에 controls-autoexposure-auto=True가 있으면 노출은 그대로 auto 유지.
+  //
+  // FAIL CLOSED. 프리셋을 "지정했는데 못 실었다"는 곧 카메라가 어떤 노출/게인/zunits
+  // 로 도는지 아무도 모르는 상태다 -- 그대로 스트리밍하면 그 이미지로 학습분포가
+  // 갈리고, 로그 한 줄 말고는 아무도 눈치채지 못한다(2026-08-28: 손목 리그가
+  // __no_advanced__ 로 떠 있는 줄 모른 채 프리셋을 편집하며 한 세션을 썼다).
+  // 그래서 지정된 프리셋이 없거나/비었거나/적용 실패하면 던진다.
+  // 프리셋을 쓰지 않겠다는 의사는 sentinel 경로(__no_advanced__)로만 표현한다.
   void maybe_load_advanced_json() {
     const char* env = std::getenv("CAMERA_SERVER_REALSENSE_JSON");
     if (env == nullptr || env[0] == '\0') return;
     const std::string path(env);
+    const bool opted_out = path.find("__no_advanced__") != std::string::npos;
+    const auto fail = [&](const std::string& why) {
+      if (opted_out) {
+        std::cerr << "[CAM] advanced json disabled (" << path << "), skipping\n";
+        return;
+      }
+      throw std::runtime_error("advanced json requested but not applied for " +
+                               cfg_.name + " (" + path + "): " + why);
+    };
     std::ifstream f(path);
     if (!f) {
-      std::cerr << "[CAM] advanced json not found, skipping: " << path << '\n';
+      fail("file not found");
       return;
     }
     std::stringstream ss;
     ss << f.rdbuf();
     const std::string json_str = ss.str();
     if (json_str.empty()) {
-      std::cerr << "[CAM] advanced json empty, skipping: " << path << '\n';
+      fail("file is empty");
       return;
     }
-    try {
+    {
       rs2::context ctx;
       rs2::device dev;
       bool found = false;
@@ -359,12 +375,12 @@ class RealSenseDevice final : public ICameraDevice {
         }
       }
       if (!found) {
-        std::cerr << "[CAM] advanced json: device serial=" << cfg_.serial << " not found, skipping\n";
+        fail("device serial=" + cfg_.serial + " not found");
         return;
       }
       auto adv = dev.as<rs400::advanced_mode>();
       if (!adv) {
-        std::cerr << "[CAM] advanced json: " << cfg_.name << " does not support advanced mode, skipping\n";
+        fail("device does not support advanced mode");
         return;
       }
       int tries = 0;
@@ -381,12 +397,15 @@ class RealSenseDevice final : public ICameraDevice {
         adv = dev.as<rs400::advanced_mode>();
         ++tries;
       }
-      adv.load_json(json_str);
+      try {
+        adv.load_json(json_str);
+      } catch (const std::exception& e) {
+        fail(std::string("load_json failed: ") + e.what());
+        return;
+      }
       std::cerr << "[CAM] advanced json applied for " << cfg_.name << " serial=" << cfg_.serial
                 << ": " << path << '\n';
       enforce_depth_units(dev, json_str);
-    } catch (const std::exception& e) {
-      std::cerr << "[CAM] advanced json apply failed for " << cfg_.name << ": " << e.what() << '\n';
     }
   }
 
@@ -431,14 +450,26 @@ class RealSenseDevice final : public ICameraDevice {
   }
 
   // pipeline start 직후: 센서 단위 제어(emitter/노출/게인) 적용 + IR intrinsics 덤프.
-  // emitter/노출은 스테레오 모듈 센서(=EMITTER_ENABLED 지원 센서)에만 적용해 color
-  // 센서 노출과 분리한다. 미설정(-1/빈문자열) 필드는 건드리지 않는다.
+  // emitter/노출은 스테레오 모듈 센서에만 적용해 별도 color 센서(D435 등) 노출과
+  // 분리한다. 미설정(-1/빈문자열) 필드는 건드리지 않는다.
+  //
+  // 스테레오 모듈 판별은 depth_sensor 타입으로 한다. 예전에는
+  // EMITTER_ENABLED 지원 여부로 골랐는데, D405에는 IR 프로젝터가 없어서 그 옵션을
+  // 지원하는 센서가 하나도 없다 -> 루프가 전부 continue 되어 controls 블록 전체가
+  // 아무 메시지 없이 무시됐다(2026-08-28 실측: 손목 D405 리그에서 auto_exposure/
+  // ir_exposure_us 를 넣어도 로그 한 줄 없이 무시). emitter/laser 는 아래 set() 이
+  // 옵션별로 supports() 를 확인하므로 D405 에서는 "unsupported, skip" 으로 빠진다.
   void apply_controls(const rs2::pipeline_profile& profile) {
     const auto& ctrl = cfg_.controls;
+    const bool wants_controls =
+        ctrl.emitter_enabled >= 0 || ctrl.laser_power >= 0.0f ||
+        ctrl.auto_exposure >= 0 || ctrl.ir_exposure_us >= 0 || ctrl.ir_gain >= 0;
+    bool applied_to_sensor = false;
     try {
       auto dev = profile.get_device();
       for (auto&& s : dev.query_sensors()) {
-        if (!s.supports(RS2_OPTION_EMITTER_ENABLED)) continue;  // stereo module only
+        if (!s.is<rs2::depth_sensor>()) continue;  // stereo module only
+        applied_to_sensor = true;
         auto set = [&](rs2_option opt, float v, const char* nm) {
           if (!s.supports(opt)) {
             std::cerr << "[CAM] " << cfg_.name << ": option " << nm << " unsupported, skip\n";
@@ -458,6 +489,12 @@ class RealSenseDevice final : public ICameraDevice {
         if (ctrl.ir_exposure_us >= 0) set(RS2_OPTION_EXPOSURE, static_cast<float>(ctrl.ir_exposure_us), "ir_exposure_us");
         if (ctrl.ir_gain >= 0) set(RS2_OPTION_GAIN, static_cast<float>(ctrl.ir_gain), "ir_gain");
         break;
+      }
+      // A controls block that reaches no sensor is the failure that hid for a
+      // whole session: it looks configured and behaves as if it were not.
+      if (wants_controls && !applied_to_sensor) {
+        std::cerr << "[CAM] " << cfg_.name
+                  << ": controls block set but NO depth sensor found -- nothing applied\n";
       }
     } catch (const std::exception& e) {
       std::cerr << "[CAM] controls apply failed for " << cfg_.name << ": " << e.what() << '\n';
