@@ -624,6 +624,47 @@ bool testCadenceRepeatsLastSetpointWhenMailboxIsEmpty() {
     return true;
 }
 
+// SETPOINT RATE CONVERSION, end to end through the worker
+// (servo.worker_setpoint_interpolation). test_setpoint_interpolator covers the
+// cursor arithmetic; this covers the part that actually failed on hardware --
+// whether the option reaches the dispatch at all. On 2026-08-27 the flag was
+// turned on in stack_real.yaml and the run came back with
+// worker_interp_active = 0 on all 63,312 rows while worker_repeated_sends_total
+// kept climbing, i.e. a config flag that silently did nothing. The repeat branch
+// is the tell: it is only reachable when interpolation is NOT driving the wire,
+// so "repeats stay 0" is the honest end-to-end assertion.
+bool testInterpolationDrivesTheWireInsteadOfRepeating() {
+    auto backend = std::make_unique<WorkerTestBackend>(
+        rb_servo::ArmId::Left,
+        rb_servo::BackendErrorKind::None
+    );
+    WorkerTestBackend* raw_backend = backend.get();
+    rb_servo::ArmWorkerOptions options;
+    options.send_period_ns = 2'000'000;          // 500 Hz, worker owns cadence
+    options.interpolate_setpoints = true;
+    rb_servo::ArmWorker worker(std::move(backend), options);
+    RB_CHECK(worker.start());
+    RB_CHECK(raw_backend->waitForReads(1, std::chrono::milliseconds(500)));
+
+    // One enqueue is enough to establish the stream: from then on the cursor
+    // always has a setpoint, so the mailbox being empty must never produce a
+    // repeat -- which is exactly the beat the conversion exists to remove.
+    worker.enqueueServoJ(request(51, joints(3.0), 0));
+    RB_CHECK(raw_backend->waitForSends(10, std::chrono::milliseconds(500)));
+    RB_CHECK(worker.telemetry().worker_repeated_sends_total == 0);
+
+    // Two bracketing setpoints establish the one-setpoint delay and mark the
+    // interpolator active, which is what the run telemetry reads back.
+    worker.enqueueServoJ(request(52, joints(4.0), 0));
+    const int before = raw_backend->sendCount();
+    RB_CHECK(raw_backend->waitForSends(before + 10, std::chrono::milliseconds(500)));
+    RB_CHECK(worker.telemetry().worker_interp_active);
+    RB_CHECK(worker.telemetry().worker_repeated_sends_total == 0);
+
+    worker.stop();
+    return true;
+}
+
 // Without cadence ownership the legacy behaviour must be untouched: one enqueue
 // produces one send, and an empty mailbox produces nothing.
 bool testEventDrivenModeDoesNotRepeat() {
@@ -1148,6 +1189,7 @@ int main() {
     if (!testSendRequestAccepted()) return 1;
     if (!testExpiredCommandDropped()) return 1;
     if (!testCadenceRepeatsLastSetpointWhenMailboxIsEmpty()) return 1;
+    if (!testInterpolationDrivesTheWireInsteadOfRepeating()) return 1;
     if (!testEventDrivenModeDoesNotRepeat()) return 1;
     if (!testBackendSendFailurePreserved()) return 1;
     if (!testLatestQueuedCommandWins()) return 1;

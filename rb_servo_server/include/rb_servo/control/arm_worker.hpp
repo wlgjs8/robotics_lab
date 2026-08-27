@@ -117,6 +117,11 @@ public:
         uint64_t wait_until_ns
     );
     ArmWorkerTelemetry telemetry() const;
+    // The options this worker was CONSTRUCTED with. Immutable after construction,
+    // so no lock. Exists so startup can report the effective cadence/interpolation
+    // state rather than what the config asked for -- the two diverge silently when
+    // a knob needs cadence ownership it was not given.
+    const ArmWorkerOptions& options() const { return options_; }
     ArmWorkerStartupTelemetry startupTelemetry() const;
     RbpodoAsyncStreamingTelemetry asyncStreamingTelemetry() const;
     // Latest queue-sync decision for this arm. Meaningful only when this worker

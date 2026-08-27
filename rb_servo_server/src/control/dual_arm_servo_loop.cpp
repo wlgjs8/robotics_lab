@@ -2387,6 +2387,28 @@ bool DualArmServoLoop::initializeWorkers() {
                 std::cerr << "[INFO] servo io_model: worker; ServoLoop reads cached "
                           << "ArmWorker state and enqueues sends\n";
             }
+            // EFFECTIVE cadence/rate-conversion state, read back from the options
+            // the workers were actually constructed with -- not from the config.
+            // servo.worker_setpoint_interpolation is inert unless the worker also
+            // owns the send cadence (io_model: worker AND queue_sync.enable), and
+            // on 2026-08-27 it was turned on in stack_real.yaml and the run came
+            // back with worker_interp_active = 0 on all 63,312 rows while
+            // worker_repeated_sends_total kept climbing. A flag that silently does
+            // nothing costs a whole run to notice; this makes it one line at boot.
+            for (const auto& [label, worker] :
+                 {std::pair<const char*, ArmWorker*>{"left", left_worker_.get()},
+                  std::pair<const char*, ArmWorker*>{"right", right_worker_.get()}}) {
+                if (!worker) continue;
+                const ArmWorkerOptions& o = worker->options();
+                std::cerr << "[INFO] " << label << " worker cadence: send_period_ns="
+                          << o.send_period_ns
+                          << " setpoint_interpolation="
+                          << (o.interpolate_setpoints ? "on" : "off")
+                          << (o.interpolate_setpoints && o.send_period_ns == 0
+                                  ? "  (INERT: worker does not own the cadence)"
+                                  : "")
+                          << "\n";
+            }
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
