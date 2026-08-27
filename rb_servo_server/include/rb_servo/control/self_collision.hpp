@@ -20,6 +20,13 @@ struct SelfCollisionResult {
     // Which checked pair produced min_clearance_m:
     // "left_right" | "left_stand" | "right_stand" | "" (not evaluated).
     std::string pair;
+    // The two GEOM names behind min_clearance_m. `pair` above is only a side
+    // category and collapses every same-side pair to "all" -- measured 2026-08-28
+    // it read "all" on 115118 of 115439 rows, so it named nothing at all for the
+    // case that matters (an arm folding onto itself). These carry the actual mesh
+    // names, which is what a curation/tuning decision needs.
+    std::string closest_geom_a;
+    std::string closest_geom_b;
     std::string stand_capsule;  // nearest stand capsule name (arm-stand pairs only)
     // Closest bone-AXIS points of the min-clearance pair (stand frame): the
     // closest points on each member's capsule core segment, so they lie on the

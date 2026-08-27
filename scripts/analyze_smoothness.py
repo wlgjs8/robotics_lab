@@ -215,6 +215,11 @@ def analyze(path, start_sec=0.0, duration_sec=None, top=5):
         i_proj_count = find("projection_constraint_count")
         i_proj_ceiling = find("projection_ceiling_clamped")
         i_proj_margin = find("projection_min_margin_m")
+        i_head = find("projection_min_headroom_m")
+        i_head_hard = find("projection_min_headroom_d_hard_m")
+        i_head_class = find("projection_min_headroom_class")
+        i_head_pair = find("projection_min_headroom_pair")
+        i_close_pair = find("self_collision_closest_pair")
         i_proj_age = find("selfcol_verdict_age_ms")
         proj_corr = {a: find(f"{a}_projection_correction_deg_s") for a in ARMS}
         plan_gate = {a: find(f"{a}_plan_gate") for a in ARMS}
@@ -255,6 +260,11 @@ def analyze(path, start_sec=0.0, duration_sec=None, top=5):
         wire_periods = {a: TailStatsLike() for a in ARMS}
         wire_first = {a: None for a in ARMS}
         wire_last = {a: None for a in ARMS}
+        # Per-pair collision headroom. A raw min-clearance cannot say whether a row
+        # is breaching: floors differ 5x by class (arm<->arm 25 mm, intra-arm 5 mm).
+        # headroom = d_now - that row's own floor, so 0 means "at its floor" for all
+        # classes, and the pair name says which geometry to look at.
+        pair_worst = {}   # pair -> [min_headroom, class, d_hard, ticks_below_zero, ticks]
         proj = {
             "ticks_active": 0,
             "ceiling_clamped_ticks": 0,
@@ -412,6 +422,22 @@ def analyze(path, start_sec=0.0, duration_sec=None, top=5):
                             proj["max_correction_deg_s"][a], _f(row, proj_corr[a])
                         )
 
+            # collision headroom per pair
+            if i_head is not None:
+                h = _f(row, i_head, default=-1.0)
+                pair = row[i_head_pair] if i_head_pair is not None else ""
+                if h > -1.0 and pair:
+                    klass = row[i_head_class] if i_head_class is not None else ""
+                    hard = _f(row, i_head_hard, default=0.0)
+                    e = pair_worst.setdefault(pair, [h, klass, hard, 0, 0])
+                    if h < e[0]:
+                        e[0] = h
+                    e[1] = klass
+                    e[2] = hard
+                    if h < 0.0:
+                        e[3] += 1
+                    e[4] += 1
+
             # setpoint-interpolation block
             for a in ARMS:
                 if interp_active[a] is None:
@@ -524,6 +550,18 @@ def analyze(path, start_sec=0.0, duration_sec=None, top=5):
             for a in ARMS
         }
         out["projection"] = proj if i_proj_active is not None else "n/a"
+        out["collision_pairs"] = (
+            sorted(
+                (
+                    {"pair": k, "min_headroom_m": v[0], "class": v[1],
+                     "d_hard_m": v[2], "ticks_below_floor": v[3], "ticks": v[4]}
+                    for k, v in pair_worst.items()
+                ),
+                key=lambda d: d["min_headroom_m"],
+            )
+            if i_head is not None
+            else "n/a"
+        )
         out["plan_gate"] = (
             gate if any(plan_gate[a] is not None for a in ARMS) else "n/a"
         )
@@ -681,6 +719,21 @@ def main(argv=None):
             f"projection: active={pj['ticks_active']} ticks, ceiling_clamped={ceiling}{flag}, "
             f"min_margin={pj['min_margin_m']}, max_verdict_age={pj['max_verdict_age_ms']:.1f}ms"
         )
+    cp = result.get("collision_pairs", "n/a")
+    if cp != "n/a":
+        if not cp:
+            print("collision pairs: none engaged (nothing inside its d_slow)")
+        else:
+            print("collision pairs (engaged rows, worst headroom first — "
+                  "headroom = clearance MINUS that pair's own floor):")
+            for e in cp[:8]:
+                flag = "  << BELOW ITS FLOOR" if e["ticks_below_floor"] else ""
+                print(
+                    f"  [{e['class']:<12s}] floor={e['d_hard_m']*1000:5.1f}mm "
+                    f"min_headroom={e['min_headroom_m']*1000:+7.2f}mm "
+                    f"below={e['ticks_below_floor']*0.002:6.2f}s "
+                    f"engaged={e['ticks']*0.002:7.2f}s  {e['pair']}{flag}"
+                )
     if result.get("interp", "n/a") != "n/a":
         for a in ARMS:
             it = result["interp"][a]

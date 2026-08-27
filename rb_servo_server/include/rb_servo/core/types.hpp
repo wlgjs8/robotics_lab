@@ -940,6 +940,16 @@ struct SafetyProjectionTelemetry {
     double right_correction_deg_s = 0.0;
     bool ceiling_clamped = false;          // global per-joint velocity ceiling bound
     double min_margin_m = -1.0;            // min d_now across engaged rows; -1 = none
+    // WHICH pair is actually near ITS OWN floor, and by how much. min_margin_m is a
+    // raw clearance minimised across rows whose floors differ by 5x (arm<->arm 25 mm
+    // vs intra-arm 5 mm), so it cannot answer that on its own: a run can read
+    // "30 s below 25 mm" and be entirely normal intra-arm geometry. Headroom is
+    // d_now - that row's own d_hard, so 0 means "at its floor" for every class, and
+    // the pair name says which geometry to look at before tuning anything.
+    double min_headroom_m = -1.0;          // min (d_now - d_hard) across collision rows
+    double min_headroom_d_hard_m = -1.0;   // that row's own floor
+    std::string min_headroom_pair;         // "geom_a <-> geom_b" of that row
+    std::string min_headroom_class;        // self | intra_arm | external | external_box
     double selfcol_verdict_age_ms = -1.0;  // age of the collision verdict used; -1 = none
     // Safety plan gate (safety.plan_gate): the rate at which each arm's chunk
     // follower plan clock is currently allowed to advance. 1.0 = ungated.
@@ -1268,6 +1278,10 @@ struct ServoSample {
     // arm pair; firmware false-positive -> clearance stays comfortably positive).
     double self_collision_min_clearance_m = 0.0;
     std::string self_collision_pair;
+    // "geom_a <-> geom_b" for min_clearance_m. self_collision_pair above is only a
+    // side category ("left_right"/"left_stand"/"right_stand"/"all") and reads "all"
+    // for every same-side pair, so it cannot name an arm folding onto itself.
+    std::string self_collision_closest_pair;
 };
 
 struct RealtimeTimingRange {

@@ -232,6 +232,12 @@ void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitor
         c.xi = margin > 0.0 ? std::sqrt(2.0 * a_brake * margin)
                             : -recover;  // below floor: block (or push out)
         c.d_now = d_now;
+        c.d_hard = d_hard;
+        c.pair_key = pair_key;
+        c.klass = p.external_box ? ConstraintClass::ExternalBox
+                : p.external     ? ConstraintClass::External
+                : p.intra_arm    ? ConstraintClass::IntraArm
+                                 : ConstraintClass::Self;
         out.push_back(std::move(c));
     }
 }

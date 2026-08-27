@@ -507,6 +507,57 @@ static bool runConstraintHysteresis() {
     return true;
 }
 
+// Each row must carry the floor it was built against, so a raw clearance can be
+// turned into a comparable "how close to breaching" number.
+//
+// This is what the servo log could not answer on 2026-08-28: the CSV had one
+// min-clearance minimised across rows whose floors differ 5x (arm<->arm 25 mm vs
+// intra-arm 5 mm), and a pair column that only carried a SIDE category and read
+// "all" on 115118 of 115439 rows. A run showing "30 s below 25 mm" was therefore
+// indistinguishable between an arm<->arm breach and ordinary intra-arm geometry,
+// and tuning the barrier on it would have traded workspace for nothing.
+static bool runConstraintClassAndFloor() {
+    CollisionMonitorConfig cfg;
+    cfg.d_hard_m = 0.025;          // arm<->arm / arm<->stand
+    cfg.d_slow_m = 0.067;
+    cfg.a_brake_m_s2 = 3.0;
+    cfg.intra_arm_d_hard_m = 0.005;
+    cfg.intra_arm_d_slow_m = 0.015;
+    cfg.intra_arm_a_brake_m_s2 = 3.0;
+    std::array<double, kDof> jl{};
+    jl[0] = 1.0;
+    std::array<double, kDof> jr{};
+
+    // Same 12 mm clearance, two classes: a BREACH for arm<->arm, comfortably
+    // inside its floor for intra-arm. The raw d_now cannot tell them apart.
+    std::vector<VelocityConstraint> self_rows;
+    buildCollisionConstraints(makePairVerdict(0.012, 0.0, jl, jr), cfg, 0.0, self_rows);
+    RB_CHECK(self_rows.size() == 1);
+    RB_CHECK(self_rows[0].klass == ConstraintClass::Self);
+    RB_CHECK(std::abs(self_rows[0].d_hard - 0.025) < 1e-12);
+    RB_CHECK(self_rows[0].d_now - self_rows[0].d_hard < 0.0);   // below ITS floor
+
+    CollisionVerdict intra = makePairVerdict(0.012, 0.0, jl, jr);
+    intra.near[0].intra_arm = true;
+    std::vector<VelocityConstraint> intra_rows;
+    buildCollisionConstraints(intra, cfg, 0.0, intra_rows);
+    RB_CHECK(intra_rows.size() == 1);
+    RB_CHECK(intra_rows[0].klass == ConstraintClass::IntraArm);
+    RB_CHECK(std::abs(intra_rows[0].d_hard - 0.005) < 1e-12);
+    RB_CHECK(intra_rows[0].d_now - intra_rows[0].d_hard > 0.0);  // above ITS floor
+
+    // Identical raw clearance, opposite verdicts once the floor is carried.
+    RB_CHECK(std::abs(self_rows[0].d_now - intra_rows[0].d_now) < 1e-12);
+
+    // The key identifies the geom pair, so the caller can name it out of the verdict.
+    RB_CHECK(self_rows[0].pair_key ==
+             ((static_cast<std::uint64_t>(
+                   static_cast<std::uint32_t>(intra.near[0].geom_a)) << 32) |
+              static_cast<std::uint32_t>(intra.near[0].geom_b)));
+    std::cout << "constraint class/floor: 12mm reads breach for self, clear for intra_arm OK\n";
+    return true;
+}
+
 // Stage 2: directional velocity-damper projection (pure function; analytic checks).
 static bool runProjection() {
     CollisionMonitorConfig pc;
@@ -979,6 +1030,10 @@ int main() {
     }
     if (!runConstraintHysteresis()) {
         std::cout << "FAIL: runConstraintHysteresis\n";
+        return 1;
+    }
+    if (!runConstraintClassAndFloor()) {
+        std::cout << "FAIL: runConstraintClassAndFloor\n";
         return 1;
     }
     if (!runProjection()) {

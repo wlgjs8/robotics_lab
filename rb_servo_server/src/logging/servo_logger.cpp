@@ -288,7 +288,8 @@ void writeInitMotionHeader(std::ostream& os) {
        << ",init_motion_aggregate_goal_threshold_m"
        << ",init_motion_aggregate_goal_margin_deficit_m"
        << ",self_collision_min_clearance_m"
-       << ",self_collision_pair";
+       << ",self_collision_pair"
+       << ",self_collision_closest_pair";
 }
 
 
@@ -631,9 +632,22 @@ void ServoLogger::writeHeader() {
     // velocity-ceiling step; `projection_min_margin_m` is the closest engaged
     // row's d_now (-1 = no row engaged); `selfcol_verdict_age_ms` is the age of
     // the collision verdict the rows were extrapolated with (-1 = none).
+    //
+    // `projection_min_margin_m` alone cannot tell a breach from normal geometry:
+    // it minimises a RAW clearance across rows whose floors differ 5x (arm<->arm
+    // 25 mm, intra-arm 5 mm), and the pre-existing `self_collision_pair` column
+    // only carries a side CATEGORY -- measured 2026-08-28 it read "all" on 115118
+    // of 115439 rows, i.e. "the nearest pair was inside one arm", naming nothing.
+    // So a run reading "30 s below 25 mm" could be entirely ordinary intra-arm
+    // geometry. The headroom columns close that: `projection_min_headroom_m` is
+    // d_now MINUS that row's own d_hard, so 0 means "at its floor" for every
+    // class, `projection_min_headroom_pair` names the two geoms, and
+    // `projection_min_headroom_class` / `_d_hard_m` say which floor applied.
     file_ << ",projection_active,projection_constraint_count"
              ",left_projection_correction_deg_s,right_projection_correction_deg_s"
              ",projection_ceiling_clamped,projection_min_margin_m,selfcol_verdict_age_ms"
+             ",projection_min_headroom_m,projection_min_headroom_d_hard_m"
+             ",projection_min_headroom_class,projection_min_headroom_pair"
              ",left_plan_gate,right_plan_gate";
     file_ << ",left_error_code,right_error_code";
     writeCartesianSolveHeader(file_, "left");
@@ -1056,7 +1070,8 @@ void writeInitMotionColumns(std::ostream& os, const ServoSample& sample) {
     write_goal_columns(sample.init_motion_right);
     write_goal_columns(sample.init_motion);
     os << ',' << sample.self_collision_min_clearance_m
-       << ',' << csvEscape(sample.self_collision_pair);
+       << ',' << csvEscape(sample.self_collision_pair)
+       << ',' << csvEscape(sample.self_collision_closest_pair);
 }
 }  // namespace
 
@@ -1349,6 +1364,10 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << ',' << sample.safety_projection.ceiling_clamped
           << ',' << sample.safety_projection.min_margin_m
           << ',' << sample.safety_projection.selfcol_verdict_age_ms
+          << ',' << sample.safety_projection.min_headroom_m
+          << ',' << sample.safety_projection.min_headroom_d_hard_m
+          << ',' << csvEscape(sample.safety_projection.min_headroom_class)
+          << ',' << csvEscape(sample.safety_projection.min_headroom_pair)
           << ',' << sample.safety_projection.left_plan_gate
           << ',' << sample.safety_projection.right_plan_gate;
     file_ << ',' << sample.left_state.error_code << ',' << sample.right_state.error_code;

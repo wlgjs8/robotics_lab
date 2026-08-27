@@ -1539,6 +1539,8 @@ SelfCollisionResult selfCollisionResultFromVerdict(
         sc.has_closest_points = true;
         sc.closest_point_a_m = {p.p_a.x(), p.p_a.y(), p.p_a.z()};
         sc.closest_point_b_m = {p.p_b.x(), p.p_b.y(), p.p_b.z()};
+        sc.closest_geom_a = p.name_a;
+        sc.closest_geom_b = p.name_b;
         const auto side = [](const std::string& n) {
             if (n.find("left") != std::string::npos) return 0;
             if (n.find("right") != std::string::npos) return 1;
@@ -3708,6 +3710,14 @@ void DualArmServoLoop::loopMain() {
             // controller op_stat_self_collision (1005) latch is cross-checkable post-hoc.
             sample.self_collision_min_clearance_m = last_self_collision_.min_clearance_m;
             sample.self_collision_pair = last_self_collision_.pair;
+            // The geom names behind min_clearance_m. Needed when NO row is engaged
+            // (nothing is inside its d_slow) and the projection headroom columns are
+            // therefore empty, which is most of a healthy run.
+            sample.self_collision_closest_pair =
+                last_self_collision_.closest_geom_a.empty()
+                    ? std::string()
+                    : last_self_collision_.closest_geom_a + " <-> " +
+                          last_self_collision_.closest_geom_b;
             latest_snapshot_.self_collision_stand_capsule = last_self_collision_.stand_capsule;
             latest_snapshot_.self_collision_has_closest_points = last_self_collision_.has_closest_points;
             latest_snapshot_.self_collision_closest_point_a_m = last_self_collision_.closest_point_a_m;
@@ -7321,10 +7331,37 @@ ServoTarget DualArmServoLoop::applySafety(
         safety_projection_telemetry_.left_correction_deg_s = proj.left_correction_deg_s;
         safety_projection_telemetry_.right_correction_deg_s = proj.right_correction_deg_s;
         safety_projection_telemetry_.ceiling_clamped = proj.ceiling_clamped;
+        const VelocityConstraint* tightest = nullptr;
         for (const auto& c : safety_cons) {
             if (safety_projection_telemetry_.min_margin_m < 0.0 ||
                 c.d_now < safety_projection_telemetry_.min_margin_m) {
                 safety_projection_telemetry_.min_margin_m = c.d_now;
+            }
+            // Headroom, not raw clearance: each class has its own floor, so this is
+            // the only cross-class comparable "how close to breaching" number.
+            if (c.klass == ConstraintClass::Other) continue;
+            if (tightest == nullptr || (c.d_now - c.d_hard) < (tightest->d_now - tightest->d_hard)) {
+                tightest = &c;
+            }
+        }
+        if (tightest != nullptr) {
+            safety_projection_telemetry_.min_headroom_m = tightest->d_now - tightest->d_hard;
+            safety_projection_telemetry_.min_headroom_d_hard_m = tightest->d_hard;
+            safety_projection_telemetry_.min_headroom_class =
+                tightest->klass == ConstraintClass::Self         ? "self"
+                : tightest->klass == ConstraintClass::IntraArm   ? "intra_arm"
+                : tightest->klass == ConstraintClass::External   ? "external"
+                                                                 : "external_box";
+            // Name it out of the verdict the rows were built from. One linear scan of
+            // at most max_near_pairs entries, for the single tightest row.
+            for (const auto& p : last_collision_verdict_.near) {
+                const std::uint64_t key =
+                    (static_cast<std::uint64_t>(static_cast<std::uint32_t>(p.geom_a)) << 32) |
+                    static_cast<std::uint32_t>(p.geom_b);
+                if (key == tightest->pair_key) {
+                    safety_projection_telemetry_.min_headroom_pair = p.name_a + " <-> " + p.name_b;
+                    break;
+                }
             }
         }
         // "Meaningfully blocked" (vs merely slowed while sliding) gates the windup

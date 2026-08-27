@@ -276,10 +276,23 @@ struct CollisionProjectionResult {
 // rad/s. Self-collision near pairs and floor-plane points are both expressed this
 // way and solved together so they cannot fight. d_now is only a sort key (closest
 // constraint relaxed first in Gauss-Seidel).
+// Which barrier parameter set a row was built from. Each class has its OWN
+// d_hard, so a raw clearance is not comparable across classes: 20 mm is a breach
+// for an arm<->arm pair (floor 25 mm) and normal for an intra-arm pair (floor
+// 5 mm). Rows that are not collision pairs (floor plane, ROI, reach) keep Other.
+enum class ConstraintClass : std::uint8_t { Other = 0, Self, IntraArm, External, ExternalBox };
+
 struct VelocityConstraint {
     Eigen::Matrix<double, 2 * kDof, 1> J = Eigen::Matrix<double, 2 * kDof, 1>::Zero();
     double xi = 0.0;
     double d_now = 0.0;
+    // Diagnosis fields. `d_now - d_hard` is the headroom that actually decides
+    // whether this row is near its floor; `pair_key` identifies the geom pair so
+    // the caller can name it out of the verdict's near list. Reported, never used
+    // by the solve.
+    double d_hard = 0.0;
+    std::uint64_t pair_key = 0;   // geom_a<<32 | geom_b, same key as engaged_pairs
+    ConstraintClass klass = ConstraintClass::Other;
 };
 
 // Build the self-collision velocity constraints from a verdict (per near pair within
