@@ -283,6 +283,19 @@ safety:
     # [9.6,9.6,9.6,12.5,12.5,17.1] deg; these carry ~25% margin on top.
     d_slow_deg:     [12, 12, 12, 16, 16, 22]
     a_brake_deg_s2: [1500, 1500, 1500, 2300, 2300, 3000]
+    # COME TO REST JUST SHORT OF THE BOUND, NOT ON IT. The barrier asymptotes the
+    # command exactly onto the bound, and a joint parked exactly on its bound has
+    # its servo holding against the stop. MEASURED 2026-08-27
+    # (servo_log_20260827_135610.csv): the left elbow sat at 150.000 deg for 8.0 s
+    # while the ENCODER rang at 17 Hz -- 47% of its 5-50 Hz band energy against
+    # 1.9% when free -- and that ring is what the operator heard. The command
+    # stream itself was clean in band (0.0%, 0.05 deg/s), so this is the servo at
+    # its stop, not our stream. In the same run, once the command settled 0.057 deg
+    # inside the bound the 17 Hz peak was gone (peak back to 0.5 Hz, ordinary
+    # motion). 0.10 deg buys margin over that measured 0.057 while costing a tenth
+    # of a degree of travel. The bound itself is UNCHANGED and still owned by the
+    # hard clamp; retreating out of the band is still never limited.
+    standoff_deg:   [0.10, 0.10, 0.10, 0.10, 0.10, 0.10]
   joint_wrap_period_deg: [0, 0, 0, 360, 0, 360]
   # Keep wrist yaw cable-safe on JointTarget/InitMotion return: J6 must move to
   # the configured raw target, not the nearest +/-360 equivalent.

@@ -841,6 +841,20 @@ struct JointLimitBarrierConfig {
     JointArray d_slow_deg{};     // engage band inside each bound
     JointArray a_brake_deg_s2{}; // braking authority assumed by the barrier
     bool inherit_bounds = true;
+    // *** STOP JUST SHORT OF THE BOUND, NOT ON IT. ***
+    // The barrier asymptotes the command exactly onto the bound, and a joint held
+    // exactly on its bound is a joint whose servo is fighting gravity at its stop:
+    // measured 2026-08-27 (servo_log_20260827_135610.csv) the left elbow sat at
+    // 150.000 deg for 8.0 s while the ENCODER rang at 17 Hz -- 47% of its 5-50 Hz
+    // band energy, against 1.9% when free. That ring is the noise the operator
+    // hears; the command stream itself was clean (0.0% in band, 0.05 deg/s).
+    //
+    // In the same run, once the command settled 0.057 deg inside the bound the
+    // 17 Hz peak was GONE (peak back to 0.5 Hz, i.e. ordinary trajectory motion).
+    // So the fix is to brake onto (bound - standoff) instead of onto the bound.
+    // The hard clamp still owns the bound itself, retreating is still never
+    // limited, and the joint gives up only this much travel.
+    JointArray standoff_deg{};   // 0 => brake onto the bound exactly (legacy)
 };
 
 // SAFETY PLAN GATE: feed the realized/requested joint-step ratio (after the

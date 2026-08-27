@@ -334,9 +334,20 @@ JointArray SafetyFilter::applyJointLimitBarrier(
         if (!(band > 0.0) || !(a_brake > 0.0) || !(hi > lo)) continue;
         const double step = out[i] - q_prev[i];
         if (step == 0.0) continue;
+        // Brake onto (bound - standoff), not onto the bound. A joint parked exactly
+        // on its bound has its servo holding against the stop, and that rings: the
+        // left elbow sat at 150.000 deg for 8 s while the encoder oscillated at
+        // 17 Hz (2026-08-27). 0.057 deg of clearance was enough to remove the peak
+        // entirely. The hard clamp still owns the bound; this only decides where the
+        // barrier brings the command to rest.
+        const double standoff = std::max(0.0, cfg.standoff_deg[i]);
+        const double hi_eff = hi - standoff;
+        const double lo_eff = lo + standoff;
+        if (!(hi_eff > lo_eff)) continue;   // standoff wider than the range: inert
         // Only the direction that CLOSES on a bound is limited; retreating is free, so
-        // the arm can always be commanded back out of the band.
-        const double margin = step > 0.0 ? hi - q_prev[i] : q_prev[i] - lo;
+        // the arm can always be commanded back out of the band -- including from
+        // inside the standoff, where the closing margin below goes negative.
+        const double margin = step > 0.0 ? hi_eff - q_prev[i] : q_prev[i] - lo_eff;
         if (!(margin < band)) continue;              // outside the engage band
         // The continuous braking law sqrt(2*a*margin) overshoots when discretised: the
         // step it permits exceeds the remaining margin once margin < 2*a*dt^2 (0.012 deg

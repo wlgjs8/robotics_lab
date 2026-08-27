@@ -1235,6 +1235,7 @@ void validateConfig(const DualArmConfig& cfg) {
         const auto& jb = cfg.safety.joint_limit_barrier;
         validateNonNegativeFiniteArray(jb.d_slow_deg, "safety.joint_limit_barrier.d_slow_deg");
         validatePositiveFiniteArray(jb.a_brake_deg_s2, "safety.joint_limit_barrier.a_brake_deg_s2");
+        validateNonNegativeFiniteArray(jb.standoff_deg, "safety.joint_limit_barrier.standoff_deg");
         for (int i = 0; i < kDof; ++i) {
             const double lo = jb.inherit_bounds ? cfg.safety.q_min_deg[i] : jb.q_min_deg[i];
             const double hi = jb.inherit_bounds ? cfg.safety.q_max_deg[i] : jb.q_max_deg[i];
@@ -1251,6 +1252,24 @@ void validateConfig(const DualArmConfig& cfg) {
                     "safety.joint_limit_barrier.d_slow_deg[" + std::to_string(i) +
                     "] is too narrow to brake dq_max_deg_s from full speed: need >= " +
                     std::to_string(needed) + " deg");
+            }
+            // The standoff moves the resting point INSIDE the engage band, so a
+            // standoff at or beyond the band would leave the barrier braking from
+            // outside its own band -- and one wider than the range disables the
+            // joint outright.
+            if (jb.standoff_deg[i] > 0.0) {
+                if (jb.d_slow_deg[i] > 0.0 && jb.standoff_deg[i] >= jb.d_slow_deg[i]) {
+                    throw std::runtime_error(
+                        "safety.joint_limit_barrier.standoff_deg[" + std::to_string(i) +
+                        "] must stay inside d_slow_deg[" + std::to_string(i) +
+                        "] - the standoff is where the barrier comes to rest, and it "
+                        "has to rest inside the band it brakes in");
+                }
+                if (2.0 * jb.standoff_deg[i] >= hi - lo) {
+                    throw std::runtime_error(
+                        "safety.joint_limit_barrier.standoff_deg[" + std::to_string(i) +
+                        "] is wider than the joint's own range");
+                }
             }
             if (!jb.inherit_bounds &&
                 (jb.q_min_deg[i] < cfg.safety.q_min_deg[i] || jb.q_max_deg[i] > cfg.safety.q_max_deg[i])) {
@@ -2884,11 +2903,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             const auto& jb = sec["joint_limit_barrier"];
             validateAllowedKeys(jb, {
                 "enable", "q_min_deg", "q_max_deg", "d_slow_deg", "a_brake_deg_s2",
+                "standoff_deg",
             }, "safety.joint_limit_barrier");
             auto& out = cfg.safety.joint_limit_barrier;
             if (has(jb, "enable")) out.enable = asBool(jb["enable"], "safety.joint_limit_barrier.enable");
             if (has(jb, "d_slow_deg")) out.d_slow_deg = parseJointArray(jb["d_slow_deg"], "safety.joint_limit_barrier.d_slow_deg");
             if (has(jb, "a_brake_deg_s2")) out.a_brake_deg_s2 = parseJointArray(jb["a_brake_deg_s2"], "safety.joint_limit_barrier.a_brake_deg_s2");
+            if (has(jb, "standoff_deg")) out.standoff_deg = parseJointArray(jb["standoff_deg"], "safety.joint_limit_barrier.standoff_deg");
             const bool has_min = has(jb, "q_min_deg");
             const bool has_max = has(jb, "q_max_deg");
             if (has_min != has_max) {

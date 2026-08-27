@@ -419,6 +419,66 @@ double barrierStepDeg(const rb_servo::SafetyConfig& config,
     return clamp.q_after_accel_limit_deg[0] - q_prev_deg;
 }
 
+// THE BARRIER COMES TO REST INSIDE THE BOUND, AND RETREAT STAYS FREE.
+// A joint parked exactly on its bound holds its servo against the stop: measured
+// 2026-08-27 the left elbow sat at 150.000 deg for 8 s while the encoder rang at
+// 17 Hz (47% of its 5-50 Hz band energy vs 1.9% free), which is the noise the
+// operator heard. 0.057 deg of clearance removed the peak entirely, so the
+// barrier now brakes onto (bound - standoff). The bound itself is unchanged.
+bool testJointLimitBarrierStandoffRestsShortOfTheBound() {
+    const double dt = 0.002;
+    const double limit = 150.0;
+    const double band = 12.0;
+    const double a = 1500.0;
+    const double standoff = 0.10;
+    rb_servo::SafetyConfig config = barrierConfig(band, a, limit);
+    config.joint_limit_barrier.standoff_deg.fill(standoff);
+    const double full_step = 170.0 * dt;
+
+    // Integrating a full-speed closing command from the band edge must come to
+    // rest at the standoff, NOT on the bound.
+    double q = limit - band;
+    for (int k = 0; k < 20000; ++k) {
+        const double step = barrierStepDeg(config, q, full_step, dt);
+        q += step;
+        RB_CHECK(q <= limit - standoff + 1e-9);   // never reaches the bound itself
+        if (step <= 1e-12) break;
+    }
+    RB_CHECK(q > limit - band);                    // it advanced
+    RB_CHECK(std::abs(q - (limit - standoff)) < 0.02);   // and settled at the standoff
+
+    // Sitting AT the standoff: no further closing, retreat unrestricted.
+    RB_CHECK(near(barrierStepDeg(config, limit - standoff, full_step, dt), 0.0));
+    RB_CHECK(near(barrierStepDeg(config, limit - standoff, -full_step, dt), -full_step));
+
+    // Already INSIDE the standoff (e.g. parked there by PTP, or pushed there before
+    // the standoff was configured): closing is refused, and -- the property that
+    // matters for getting out -- retreat is still at full commanded speed.
+    RB_CHECK(near(barrierStepDeg(config, limit - 0.5 * standoff, full_step, dt), 0.0));
+    RB_CHECK(near(barrierStepDeg(config, limit - 0.5 * standoff, -full_step, dt), -full_step));
+    RB_CHECK(near(barrierStepDeg(config, limit, -full_step, dt), -full_step));
+    RB_CHECK(near(barrierStepDeg(config, limit + 0.2, -full_step, dt), -full_step));
+
+    // Symmetric at the lower bound.
+    RB_CHECK(near(barrierStepDeg(config, -(limit - standoff), -full_step, dt), 0.0));
+    RB_CHECK(near(barrierStepDeg(config, -(limit - standoff), full_step, dt), full_step));
+
+    // Far from the bound nothing changes.
+    RB_CHECK(near(barrierStepDeg(config, 0.0, full_step, dt), full_step));
+
+    // standoff 0 reproduces the previous behaviour exactly (rest ON the bound).
+    rb_servo::SafetyConfig legacy = barrierConfig(band, a, limit);
+    legacy.joint_limit_barrier.standoff_deg.fill(0.0);
+    double ql = limit - band;
+    for (int k = 0; k < 20000; ++k) {
+        const double step = barrierStepDeg(legacy, ql, full_step, dt);
+        ql += step;
+        if (step <= 1e-12) break;
+    }
+    RB_CHECK(std::abs(ql - limit) < 0.02);
+    return true;
+}
+
 bool testJointLimitBarrierBrakesOnlyTheClosingDirection() {
     const double dt = 0.002;
     const double limit = 150.0;      // the RB3-730E J3 URDF IK limit
@@ -488,5 +548,6 @@ int main() {
     if (!testOvershootClipIsRateLimited()) return 1;
     if (!testSteadyStreamingIsUnaffected()) return 1;
     if (!testJointLimitBarrierBrakesOnlyTheClosingDirection()) return 1;
+    if (!testJointLimitBarrierStandoffRestsShortOfTheBound()) return 1;
     return 0;
 }
