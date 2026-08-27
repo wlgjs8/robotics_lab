@@ -83,17 +83,42 @@ servo:
   # A single loop has one period for two boxes running two different clocks
   # (measured drift: left +0.665, right +0.670 ticks/s -- they diverge).
   io_model: worker
-  # Worker-side setpoint RATE CONVERSION (2026-08-26, default OFF for the A/B).
-  # The loop produces at ~500.006 Hz (host clock) while the worker sends at the
-  # box-locked ~499.35 Hz; the ~0.65/s difference was silently overwritten in
-  # the latest-wins mailbox and the box FIFO played a DOUBLE reference step per
-  # skip (review_request_2026-08-26/README.md §3, confirmed real by the
+  # Worker-side setpoint RATE CONVERSION. The loop produces at ~500.006 Hz (host
+  # clock) while the worker sends at the box-locked ~499.35 Hz; the ~0.65/s
+  # difference was silently overwritten in the latest-wins mailbox and the box
+  # FIFO played a DOUBLE reference step per skip
+  # (review_request_2026-08-26/README.md §3, confirmed real by the
   # position-conservation test). true = the worker linearly interpolates the
   # setpoint stream at its own cadence: the mismatch becomes a uniform 0.13 %
   # time dilation, doubled steps vanish, cost +1 setpoint (~2 ms) latency.
-  # Flip to true as its OWN on-robot A/B stage (after the wire-precision A/B) —
-  # judge with worker_interp_* columns + scripts/analyze_smoothness.py.
-  worker_setpoint_interpolation: false
+  #
+  # ON since 2026-08-27. Once the wire-precision staircase and the plan-gate
+  # chunk-rate ripple were gone this was the ONLY residual "phase mismatch"
+  # sound left, and the operator still heard it on both arms.
+  # MEASURED (servo_log_20260827_222006.csv, 252 s, both arms):
+  #   - The loop is exact (500.000 Hz, ONE tick >2.5 ms in the whole run) and
+  #     queue sync is locked (fill p05=p50=p95=5, track 98.6 %, trim 2.65 us,
+  #     zero underrun/stall/highwater/redrain). The defect is between them.
+  #   - Worker dispatched 499.33 Hz against the loop's 500.000: a 0.67-0.69/s
+  #     surplus, absorbed one setpoint at a time as 1.6 overwrites/s (dropped ->
+  #     next wire step covers 2 ticks = DOUBLE velocity) and 0.9 repeats/s
+  #     (mailbox empty -> wire holds one tick = ZERO velocity).
+  #   - Every observed cadence gap was exactly 2x the period (4005-4016 us) with
+  #     no catch-up (zero periods <1900 us), and gaps recurred at p50 1490 ms --
+  #     the 1/0.67 Hz beat, to within measurement noise.
+  #   - Per event, one tick of velocity discontinuity on the wire: 18,400 deg/s^2
+  #     at the left arm's p90 command speed (36.9 deg/s), 13,200 at the right's.
+  #   - Per-arm and independent (only 23 of 228 left-arm gaps fell within 2 ms of
+  #     a right-arm gap), which is why it is audible on both arms separately.
+  # Judge with worker_interp_* columns + scripts/analyze_smoothness.py:
+  # worker_repeated_sends_total -> ~0 (with a setpoint always available the
+  # repeat-last branch is unreachable), interp_active = 1, delay_setpoints ~= 1,
+  # and hold/rebase ~0 (nonzero = the producer really stalled or burst).
+  # worker_pending_overwrites_total does NOT go to zero and should not: the
+  # mailbox is still overwritten at each beat crossing, but the interpolator
+  # walks through every pushed setpoint, so an overwrite no longer loses wire
+  # content. Revert by flipping this one line.
+  worker_setpoint_interpolation: true
   worker_read_period_sec: 0.002
   # A worker-cached read crosses a thread boundary: measured MEDIAN age 1567 us
   # at a 2 ms period (direct I/O is 25-125 us). The former hardcoded 2-period

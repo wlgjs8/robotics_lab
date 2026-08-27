@@ -218,6 +218,8 @@ def analyze(path, start_sec=0.0, duration_sec=None, top=5):
         i_proj_age = find("selfcol_verdict_age_ms")
         proj_corr = {a: find(f"{a}_projection_correction_deg_s") for a in ARMS}
         plan_gate = {a: find(f"{a}_plan_gate") for a in ARMS}
+        interp_active = {a: find(f"{a}_worker_interp_active") for a in ARMS}
+        interp_delay = {a: find(f"{a}_worker_interp_delay_setpoints") for a in ARMS}
         jl_clamp = {a: find(f"{a}_safety_joint_limit_clamped") for a in ARMS}
         ac_clamp = {a: find(f"{a}_safety_accel_clamped") for a in ARMS}
         gate_prev = {a: None for a in ARMS}
@@ -267,6 +269,10 @@ def analyze(path, start_sec=0.0, duration_sec=None, top=5):
         # arm's 11.07 lost seconds sat on the J3 approach barrier, surfacing as a
         # 4.8 Hz chunk-rate command ripple). max_attack_per_tick catches a
         # regression to the old instantaneous attack, which stepped 0.88 in one tick.
+        # Worker-side setpoint RATE CONVERSION (servo.worker_setpoint_interpolation).
+        # active should be ~100% and delay ~1.0 setpoint once the stream is up; a
+        # delay drifting above ~2 means the cursor is falling behind the producer.
+        interp = {a: {"active_ticks": 0, "ticks": 0, "delay": []} for a in ARMS}
         gate = {
             a: {
                 "lost_sec": 0.0,
@@ -406,6 +412,16 @@ def analyze(path, start_sec=0.0, duration_sec=None, top=5):
                             proj["max_correction_deg_s"][a], _f(row, proj_corr[a])
                         )
 
+            # setpoint-interpolation block
+            for a in ARMS:
+                if interp_active[a] is None:
+                    continue
+                interp[a]["ticks"] += 1
+                if _f(row, interp_active[a]) > 0:
+                    interp[a]["active_ticks"] += 1
+                    if interp_delay[a] is not None:
+                        interp[a]["delay"].append(_f(row, interp_delay[a]))
+
             # plan-gate block: how much plan time the gate threw away, and on what
             for a in ARMS:
                 if plan_gate[a] is None:
@@ -510,6 +526,21 @@ def analyze(path, start_sec=0.0, duration_sec=None, top=5):
         out["projection"] = proj if i_proj_active is not None else "n/a"
         out["plan_gate"] = (
             gate if any(plan_gate[a] is not None for a in ARMS) else "n/a"
+        )
+        interp_out = {}
+        for a in ARMS:
+            d = sorted(interp[a]["delay"])
+            interp_out[a] = {
+                "active_pct": (
+                    100.0 * interp[a]["active_ticks"] / interp[a]["ticks"]
+                    if interp[a]["ticks"]
+                    else 0.0
+                ),
+                "delay_p50": d[len(d) // 2] if d else None,
+                "delay_p99": d[int(len(d) * 0.99)] if d else None,
+            }
+        out["interp"] = (
+            interp_out if any(interp_active[a] is not None for a in ARMS) else "n/a"
         )
         out["csv_min_abs_delta_left_q0_deg"] = min_abs_dq0
         return out
@@ -650,6 +681,24 @@ def main(argv=None):
             f"projection: active={pj['ticks_active']} ticks, ceiling_clamped={ceiling}{flag}, "
             f"min_margin={pj['min_margin_m']}, max_verdict_age={pj['max_verdict_age_ms']:.1f}ms"
         )
+    if result.get("interp", "n/a") != "n/a":
+        for a in ARMS:
+            it = result["interp"][a]
+            if it["active_pct"] <= 0.0:
+                print(f"[{a}] setpoint interp: OFF")
+                continue
+            # delay drifting past ~2 setpoints means the cursor is losing the
+            # producer; that is what rebase_total counts when it gives up.
+            flag = (
+                "  << DELAY DRIFTING"
+                if it["delay_p99"] is not None and it["delay_p99"] > 2.0
+                else ""
+            )
+            print(
+                f"[{a}] setpoint interp: active={it['active_pct']:.1f}% "
+                f"delay p50={it['delay_p50']:.2f} p99={it['delay_p99']:.2f} "
+                f"setpoints{flag}"
+            )
     if result["plan_gate"] != "n/a":
         for a in ARMS:
             g = result["plan_gate"][a]
