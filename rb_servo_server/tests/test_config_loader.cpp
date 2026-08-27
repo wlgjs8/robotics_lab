@@ -206,7 +206,11 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(near(flow_profile->max_smd_goal_lead_m, 0.080));
         RB_CHECK(near(flow_profile->max_smd_goal_lead_rad, 0.35));
         // 2026-07-24 operator tuning during bolt-pick iterations: 12 -> 5.
-        RB_CHECK(flow_profile->ruckig_follower.consume_steps == 5);
+        // 2026-08-27: 5 -> 8. This is a CEILING, clamped by activate() to
+        // min(consume_steps, n - L - R) where n = min(EXECUTE + RUNWAY, horizon),
+        // so 8 serves EXECUTE_STEPS=4 (n=8 -> 4) and EXECUTE_STEPS=8 (n=12 -> 8)
+        // alike; at 5 an 8-step execution window was silently capped at 5.
+        RB_CHECK(flow_profile->ruckig_follower.consume_steps == 8);
         // 2026-07-23 operator tuning: reserve 2 -> 4 during the bolt-pick
         // rollout iterations.
         RB_CHECK(flow_profile->ruckig_follower.reserve_steps == 4);
