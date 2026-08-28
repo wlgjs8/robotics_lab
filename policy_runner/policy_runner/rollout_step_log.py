@@ -17,6 +17,7 @@ from typing import Any, Callable, Mapping
 
 
 ROLLOUT_STEP_LOG_SCHEMA = "robotics_lab.policy_runner.rollout_step.v1"
+CHUNK_ROW_LOG_SCHEMA = "robotics_lab.policy_runner.chunk_rows.v1"
 _ARMS = ("left", "right")
 _STOP = object()
 
@@ -99,6 +100,108 @@ class _AsyncJsonlWriter:
             self.disable(f"writer_error:{type(exc).__name__}")
         finally:
             self._closed.set()
+
+
+class ChunkRowLogger:
+    """Non-blocking JSONL logger for the rows of every published policy chunk.
+
+    Exists to close a gap that cost a whole investigation: a rollout on
+    2026-08-28 vibrated at 11-13 Hz, and the control chain was cleared stage by
+    stage from the servo log -- chunk follower 0.80x, output SMD 0.73x, IK
+    residual 0.8 um, force control 0.16 mm rms at 1.1 Hz -- leaving the policy's
+    own predicted trajectory as the only remaining source. That could not be
+    CONFIRMED, because the chunk rows are published to the servo and drawn in
+    the GUI but never written anywhere. The servo log keeps only chunk metadata
+    (seq/age/horizon) and the rollout step log only ids and flags.
+
+    Always on, and deliberately not configurable: a spectrum of the model's own
+    output is not something anyone thinks to enable BEFORE the run that needs
+    it. Cost is one record per chunk (~5 Hz), encoded and written on the
+    existing daemon writer thread, so the command loop only does a queue put.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        writer_factory: Callable[[str | Path], Any] = _AsyncJsonlWriter,
+    ) -> None:
+        self.path = str(path)
+        self._enabled = True
+        self._disabled_reason: str | None = None
+        self._writer: Any | None = None
+        try:
+            self._writer = writer_factory(path)
+        except Exception as exc:  # noqa: BLE001 - logging must never break a rollout.
+            self._enabled = False
+            self._disabled_reason = f"writer_start_error:{type(exc).__name__}"
+
+    @property
+    def enabled(self) -> bool:
+        if not self._enabled or self._writer is None:
+            return False
+        return bool(getattr(self._writer, "enabled", True))
+
+    @property
+    def disabled_reason(self) -> str | None:
+        if self._disabled_reason:
+            return self._disabled_reason
+        return getattr(self._writer, "disabled_reason", None)
+
+    def log_chunk(
+        self,
+        *,
+        seq: int,
+        t_mono: float,
+        t_wall: float,
+        policy_dt_sec: float | None,
+        execute_limit: int,
+        runway_steps: int,
+        anchor_mode: str,
+        stitch_mode: str,
+        speed_scale: float | None,
+        projected: Mapping[str, Any],
+        projected_delta: Mapping[str, Any],
+    ) -> bool:
+        """One record per published chunk. `projected` rows are ABSOLUTE stand-frame
+        poses (x,y,z,qx,qy,qz,qw,grip); `projected_delta` are the per-step deltas
+        they were integrated from. Both are exactly what the servo receives."""
+        if not self.enabled:
+            return False
+        record: dict[str, Any] = {
+            "schema": CHUNK_ROW_LOG_SCHEMA,
+            "seq": int(seq),
+            "t_mono": _finite_float(t_mono),
+            "t_wall": _finite_float(t_wall),
+            "policy_dt_sec": _finite_float(policy_dt_sec),
+            "execute_limit": int(execute_limit),
+            "runway_steps": int(runway_steps),
+            "anchor_mode": str(anchor_mode),
+            "stitch_mode": str(stitch_mode),
+            "speed_scale": _finite_float(speed_scale),
+        }
+        for arm in _ARMS:
+            record[arm] = projected.get(arm)
+            record[f"{arm}_delta"] = projected_delta.get(arm)
+        try:
+            return bool(self._writer.submit(record))
+        except Exception:  # noqa: BLE001
+            self._enabled = False
+            self._disabled_reason = "submit_error"
+            return False
+
+    def close(self) -> None:
+        writer = self._writer
+        self._writer = None
+        self._enabled = False
+        if writer is None:
+            return
+        close = getattr(writer, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 class RolloutStepLogger:

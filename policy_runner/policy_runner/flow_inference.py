@@ -46,7 +46,7 @@ from .tcp_target_pose_conditioner import (
 )
 from .gripper import REAL_GRIPPER_ENV, GripperRuntime, gripper_commands_from_flow_step
 from .robot_state_client import StateSnapshot
-from .rollout_step_log import RolloutStepLogger
+from .rollout_step_log import ChunkRowLogger, RolloutStepLogger
 from .rollout_modes import RolloutMode, RolloutModeValidationError, parse_rollout_mode
 from .servo_command_client import CommandIntent
 
@@ -594,6 +594,11 @@ class FlowMatchingActionSource:
         self._action_log_seq = 0
         self._action_log = _open_action_log(self.stderr)
         self._rollout_step_logger: RolloutStepLogger | None = None
+        # Chunk-row log. Created lazily on the first published chunk so it lands
+        # next to whatever rollout log the run configured; ALWAYS on -- see
+        # ChunkRowLogger for why this is not a toggle.
+        self._chunk_row_logger: ChunkRowLogger | None = None
+        self._chunk_row_logger_started = False
         self._rollout_step_chunk_seq = 0
         self._rollout_step_active_chunk_id: int | None = None
 
@@ -1486,6 +1491,62 @@ class FlowMatchingActionSource:
         except Exception:
             return
 
+    def _chunk_row_log_path(self) -> Path:
+        """Sit next to the rollout step log when there is one, else logs/.
+
+        A sweep keeps its files together (<stem>.chunks.jsonl beside
+        <stem>.jsonl); an ad-hoc run still gets a timestamped file rather than
+        silently logging nothing.
+        """
+        step_logger = getattr(self, "_rollout_step_logger", None)
+        step_path = getattr(step_logger, "path", None)
+        if step_path:
+            p = Path(str(step_path))
+            return p.with_name(p.stem + ".chunks.jsonl")
+        return Path("logs") / f"chunk_rows_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
+
+    def _log_chunk_rows(
+        self,
+        *,
+        seq: int,
+        now_monotonic: float,
+        execute_limit: int,
+        runway_steps: int,
+        anchor_mode: str,
+        projected: dict,
+        projected_delta: dict,
+    ) -> None:
+        """Persist the rows this chunk publishes. Best effort: never raises."""
+        try:
+            if not self._chunk_row_logger_started:
+                self._chunk_row_logger_started = True
+                path = self._chunk_row_log_path()
+                self._chunk_row_logger = ChunkRowLogger(path)
+                reason = self._chunk_row_logger.disabled_reason
+                print(
+                    f"[flow-infer] chunk rows -> {path}"
+                    + (f" (DISABLED: {reason})" if reason else ""),
+                    flush=True,
+                )
+            logger = self._chunk_row_logger
+            if logger is None or not logger.enabled:
+                return
+            logger.log_chunk(
+                seq=seq,
+                t_mono=now_monotonic,
+                t_wall=time.time(),
+                policy_dt_sec=getattr(self, "policy_dt_sec", None),
+                execute_limit=execute_limit,
+                runway_steps=runway_steps,
+                anchor_mode=anchor_mode,
+                stitch_mode=str(getattr(self, "chunk_stitch_mode", "")),
+                speed_scale=getattr(self, "speed_scale", None),
+                projected=projected,
+                projected_delta=projected_delta,
+            )
+        except Exception:  # noqa: BLE001 - telemetry must never break a rollout.
+            self._chunk_row_logger = None
+
     def _publish_chunk_overlay(self, now_monotonic: float) -> None:
         publisher = getattr(self, "_chunk_overlay_publisher", None)
         chunk = getattr(self, "_chunk", None)
@@ -1600,6 +1661,15 @@ class FlowMatchingActionSource:
             if projected["left"] is None and projected["right"] is None:
                 return
             self._chunk_overlay_seq = int(getattr(self, "_chunk_overlay_seq", 0)) + 1
+            self._log_chunk_rows(
+                seq=self._chunk_overlay_seq,
+                now_monotonic=now_monotonic,
+                execute_limit=execute_limit,
+                runway_steps=runway_steps,
+                anchor_mode=anchor_mode,
+                projected=projected,
+                projected_delta=projected_delta,
+            )
             self._print_delta_overlay_summary(self._chunk_overlay_seq, execute_limit, projected_delta)
             publisher.publish(
                 seq=self._chunk_overlay_seq,
@@ -2857,6 +2927,12 @@ class FlowMatchingActionSource:
         close_step_log = getattr(getattr(self, "_rollout_step_logger", None), "close", None)
         if callable(close_step_log):
             close_step_log()
+        close_chunk_log = getattr(getattr(self, "_chunk_row_logger", None), "close", None)
+        if callable(close_chunk_log):
+            try:
+                close_chunk_log()
+            except Exception:  # noqa: BLE001
+                pass
         close = getattr(self.camera_client, "close", None)
         if callable(close):
             close()
