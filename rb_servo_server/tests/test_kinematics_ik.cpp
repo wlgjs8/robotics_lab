@@ -1309,6 +1309,309 @@ bool testIkMinIterationsConfigBounds() {
     return true;
 }
 
+
+// ---------------------------------------------------------------------------
+// JOINT-LIMIT RELIEF (ik.limit_relief_* / limit_avoidance_*), 2026-08-28.
+//
+// The failure these exist for: a 6-axis arm running a 6-DOF task has no redundancy,
+// so the tick a joint saturates the task is INFEASIBLE and the DLS spends its whole
+// budget on an irreducible residual, re-drawing the null space every tick. Measured on
+// two pi0.5 rollouts (servo_log_20260828_102032.csv 4.0% of ticks, _111241.csv 6.3%),
+// left elbow pinned at the +150 deg URDF bound while returning to pick past the
+// near-base box: IK-reported residual 10.0 / 18.3 mm median against 0.0005 mm normally,
+// IK cost 5.8 -> 462 us, and the >5 Hz command residual tripled on every joint EXCEPT
+// the pinned one.
+//
+// The seed below IS the measured pinned posture (t=333.450 of the first log).
+rb_servo::JointArray measuredPinnedPosture() {
+    return {260.610382, -13.836401, 149.900000, -37.238958, -64.521455, -104.373341};
+}
+
+rb_servo::ArmMountConfig stackRealLeftMount() {
+    rb_servo::ArmMountConfig mount;
+    mount.arm_id = rb_servo::ArmId::Left;
+    mount.base_pose_in_stand = {0.15707, -0.17036, 0.58036, 2.186649, 0.523831, 2.526296};
+    return mount;
+}
+
+// The live stack_real.yaml kinematics.ik block, so these tests exercise the solver the
+// hardware actually runs — the tight 20 um tolerance and the active selective damping
+// are both load-bearing for whether this failure reproduces at all.
+rb_servo::KinematicsConfig stackRealIkConfig() {
+    rb_servo::KinematicsConfig c = testKinematicsConfig();
+    c.ik.min_iterations = 1;
+    c.ik.max_iterations = 100;
+    c.ik.timeout_ms = 20.0;
+    c.ik.damping = 0.02;
+    c.ik.position_tolerance_m = 0.00002;
+    c.ik.orientation_tolerance_rad = 0.0002;
+    c.ik.max_step_deg = {2, 2, 2, 3, 3, 4};
+    c.ik.singular_region_eps = 0.10;
+    c.ik.damping_max = 0.08;
+    c.ik.max_solution_jump_deg = 1.0;
+    c.ik.branch_jump_damping_scale = 10.0;
+    c.ik.branch_jump_max_retries = 2;
+    c.ik.branch_jump_rate_limit = true;
+    c.ik.singular_step_scale_full_sigma = 0.17;
+    c.ik.singular_step_scale_floor_sigma = 0.11;
+    c.ik.singular_step_scale_min = 0.30;
+    c.ik.joint_limit_track_feasible = true;
+    c.ik.joint_limit_best_effort_position_tolerance_m = 0.0005;
+    c.ik.joint_limit_best_effort_orientation_tolerance_rad = 0.002;
+    c.ik.max_iterations_best_effort_position_tolerance_m = 0.0005;
+    c.ik.max_iterations_best_effort_orientation_tolerance_rad = 0.002;
+    return c;
+}
+
+void applyShippedRelief(rb_servo::KinematicsConfig* c) {
+    c->ik.limit_relief_band_deg = 8.0;
+    c->ik.limit_relief_min_orientation_weight = 0.05;
+    c->ik.limit_relief_max_orientation_error_rad = 0.35;
+    c->ik.limit_avoidance_band_deg = 8.0;
+    c->ik.limit_avoidance_gain = 0.05;
+    c->ik.limit_avoidance_max_step_deg = 1.0;
+}
+
+// (A) Relief buys POSITION accuracy with ORIENTATION, and only near a bound.
+bool testIkLimitReliefTradesOrientationForPosition() {
+    const rb_servo::ArmMountConfig mount = stackRealLeftMount();
+    const rb_servo::JointArray seed = measuredPinnedPosture();
+    rb_servo::JointArray beyond = seed;
+    beyond[2] = 158.0;  // past the +/-150 bound: the pose the policy asks for
+
+    const rb_servo::KinematicsConfig strict_cfg = stackRealIkConfig();
+    rb_servo::PinocchioKinematics strict(strict_cfg);
+    const rb_servo::Pose6D target =
+        strict.computeTcpStand(rb_servo::ArmId::Left, beyond, mount);
+
+    const rb_servo::IkResult before =
+        strict.solveIk(rb_servo::ArmId::Left, target, seed, mount);
+    // The measured failure, reproduced: pinned, budget exhausted, centimetre residual.
+    RB_CHECK(before.joint_limit_pinned);
+    RB_CHECK(before.iterations >= strict_cfg.ik.max_iterations);
+    RB_CHECK(before.position_error_m > 0.03);
+    RB_CHECK(before.limit_relief_weight == 1.0);       // off by default
+    RB_CHECK(before.limit_avoidance_step_deg == 0.0);
+
+    rb_servo::KinematicsConfig relief_cfg = stackRealIkConfig();
+    applyShippedRelief(&relief_cfg);
+    rb_servo::PinocchioKinematics relieved(relief_cfg);
+    const rb_servo::IkResult after =
+        relieved.solveIk(rb_servo::ArmId::Left, target, seed, mount);
+    // Position is what the relief buys. Measured 76.9 -> 6.9 mm on this exact case.
+    // Position is what the relief buys. Measured 76.9 -> 12.1 mm on this exact case.
+    RB_CHECK(after.position_error_m < before.position_error_m * 0.5);
+    RB_CHECK(after.limit_relief_weight < 1.0);
+    // Orientation is the CURRENCY, not necessarily the casualty: the baseline solve was
+    // stuck in a bad corner, and on this case relief lands 6.4x better in position
+    // WITHOUT spending orientation (7.96 -> 7.49 deg). Asserting "orientation must get
+    // worse" was wrong -- what must hold is that the spend is BOUNDED.
+    // The budget is a real bound, not decoration.
+    RB_CHECK(after.orientation_error_rad <= relief_cfg.ik.limit_relief_max_orientation_error_rad);
+    // The bound itself is never crossed: relief re-weights the task, it does not widen
+    // the joint range.
+    RB_CHECK(withinUrdfLimits(after.q_solution_deg));
+    RB_CHECK(std::fabs(after.q_solution_deg[2]) <= 150.001);
+
+    // FAR from any bound the law is inert, so ordinary motion is untouched.
+    rb_servo::JointArray interior = seed;
+    interior[2] = 60.0;
+    const rb_servo::Pose6D reachable =
+        strict.computeTcpStand(rb_servo::ArmId::Left, interior, mount);
+    const rb_servo::IkResult a =
+        strict.solveIk(rb_servo::ArmId::Left, reachable, interior, mount);
+    const rb_servo::IkResult b =
+        relieved.solveIk(rb_servo::ArmId::Left, reachable, interior, mount);
+    RB_CHECK(b.limit_relief_weight == 1.0);
+    for (std::size_t j = 0; j < rb_servo::kDof; ++j) {
+        RB_CHECK(std::fabs(a.q_solution_deg[j] - b.q_solution_deg[j]) < 1e-12);
+    }
+    return true;
+}
+
+// (B) Avoidance walks the arm OFF the bound, and cannot do it without (A).
+//
+// This is the behaviour the whole change is for. Held at a target it can already make,
+// today's solver leaves the elbow parked on its bound FOREVER — which is what "blocking
+// the joint and nothing else" buys. Measured on hardware: once the policy moved away the
+// elbow crawled 149.7 -> 142.0 deg over ~18 s, 0.43 deg/s.
+bool testIkLimitAvoidanceEscapesTheBound() {
+    const rb_servo::ArmMountConfig mount = stackRealLeftMount();
+    const rb_servo::JointArray pinned = measuredPinnedPosture();
+
+    rb_servo::PinocchioKinematics strict(stackRealIkConfig());
+    // A target the arm ALREADY satisfies: nothing about the task asks the elbow to move.
+    const rb_servo::Pose6D hold =
+        strict.computeTcpStand(rb_servo::ArmId::Left, pinned, mount);
+
+    const auto settle = [&](const rb_servo::KinematicsConfig& cfg,
+                            double* max_pos_drift_m,
+                            double* max_ori_drift_rad) {
+        rb_servo::PinocchioKinematics kin(cfg);
+        rb_servo::JointArray q = pinned;
+        *max_pos_drift_m = 0.0;
+        *max_ori_drift_rad = 0.0;
+        for (int i = 0; i < 1000; ++i) {  // 2 s of 500 Hz ticks
+            const rb_servo::IkResult r = kin.solveIk(rb_servo::ArmId::Left, hold, q, mount);
+            q = r.q_solution_deg;
+            *max_pos_drift_m = std::max(*max_pos_drift_m, r.position_error_m);
+            *max_ori_drift_rad = std::max(*max_ori_drift_rad, r.orientation_error_rad);
+        }
+        return q;
+    };
+
+    double pos_drift = 0.0, ori_drift = 0.0;
+    const rb_servo::JointArray stuck = settle(stackRealIkConfig(), &pos_drift, &ori_drift);
+    RB_CHECK(std::fabs(stuck[2] - pinned[2]) < 1e-3);   // today: parked, forever
+
+    rb_servo::KinematicsConfig full = stackRealIkConfig();
+    applyShippedRelief(&full);
+    const rb_servo::JointArray escaped = settle(full, &pos_drift, &ori_drift);
+    // It DOES walk off the bound, but only just: -0.163 deg in 2 s, for 0.64 mm / 3.0 deg
+    // of pose drift. This is a KNOWN REGRESSION from the 2026-08-28 stability fixes -- the
+    // first version escaped -0.545 deg for 0.45 mm / 0.71 deg, but it did so with relief
+    // re-derived from the live iterate, which is the intra-solve feedback path that
+    // limit-cycled on hardware. Escape speed was traded for a solve that is a pure
+    // function of its inputs. That trade is why relief ships DISABLED in
+    // stack_real.yaml: at this rate it does not yet earn the orientation it spends.
+    RB_CHECK(escaped[2] < pinned[2] - 0.05);
+    // It escapes THROUGH the null space, so the pose it was asked to hold barely moves.
+    RB_CHECK(pos_drift < 0.002);
+    RB_CHECK(ori_drift < 0.10);
+
+    // Avoidance WITHOUT relief is near-inert: on a 6-DOF task the damped null-space
+    // projector is nearly empty, so there is nowhere to push. This is not a bug, it is
+    // why the two are one mechanism — and asserting it keeps a future reader from
+    // "simplifying" the pair apart.
+    rb_servo::KinematicsConfig avoidance_only = stackRealIkConfig();
+    avoidance_only.ik.limit_avoidance_band_deg = 8.0;
+    avoidance_only.ik.limit_avoidance_gain = 0.05;
+    avoidance_only.ik.limit_avoidance_max_step_deg = 1.0;
+    const rb_servo::JointArray barely = settle(avoidance_only, &pos_drift, &ori_drift);
+    RB_CHECK(std::fabs(barely[2] - pinned[2]) < 0.1);
+    RB_CHECK(std::fabs(escaped[2] - pinned[2]) > 5.0 * std::fabs(barely[2] - pinned[2]));
+    return true;
+}
+
+// The config layer refuses every half-configured relief, including the one the bench
+// showed is actively harmful (relief without the loop's low-pass).
+bool testIkLimitReliefConfigBounds() {
+    const auto cfg = [](const std::string& ik_lines) {
+        return "schema: robotics_lab.rb_servo_server.v1\n"
+               "kinematics:\n"
+               "  enable: true\n"
+               "  provider: pinocchio\n"
+               "  urdf: \"" + rb3Urdf().string() + "\"\n"
+               "  ik:\n" + ik_lines;
+    };
+    RB_CHECK(loadRejects(writeTempConfig(
+        "relief-band-without-weight",
+        cfg("    limit_relief_band_deg: 8.0\n"))));
+    RB_CHECK(loadRejects(writeTempConfig(
+        "relief-weight-without-band",
+        cfg("    limit_relief_min_orientation_weight: 0.05\n"))));
+    RB_CHECK(loadRejects(writeTempConfig(
+        "relief-without-budget",
+        cfg("    limit_relief_band_deg: 8.0\n"
+                   "    limit_relief_min_orientation_weight: 0.05\n"))));
+    RB_CHECK(loadRejects(writeTempConfig(
+        "relief-weight-above-one",
+        cfg("    limit_relief_band_deg: 8.0\n"
+                   "    limit_relief_min_orientation_weight: 1.5\n"
+                   "    limit_relief_max_orientation_error_rad: 0.35\n"))));
+    RB_CHECK(loadRejects(writeTempConfig(
+        "avoidance-gain-without-band",
+        cfg("    limit_avoidance_gain: 0.05\n"))));
+    RB_CHECK(loadRejects(writeTempConfig(
+        "avoidance-without-cap",
+        cfg("    limit_avoidance_band_deg: 8.0\n"
+                   "    limit_avoidance_gain: 0.05\n"))));
+    // THE IMPORTANT ONE: relief without the low-pass measured 2.1-2.3x WORSE than
+    // shipping nothing at all.
+    RB_CHECK(loadRejects(writeTempConfig(
+        "relief-without-lowpass",
+        cfg("    limit_relief_band_deg: 8.0\n"
+                   "    limit_relief_min_orientation_weight: 0.05\n"
+                   "    limit_relief_max_orientation_error_rad: 0.35\n"))));
+    return true;
+}
+
+
+// The 2026-08-28 11:43 SHIPPED FAILURE, as a test.
+//
+// Relief + avoidance were enabled on hardware and the left arm shook badly enough that
+// the operator stopped the run. The offline bench that cleared them could not have seen
+// it: it held an UNREACHABLE target, so the elbow pinned permanently, relief never
+// varied, and the loop's low-pass was always armed. The hardware failure is the OPPOSITE
+// regime -- a REACHABLE target held just inside the relief band, where the elbow never
+// rests and relief varies every tick.
+//
+// Three defects met there (servo_log_20260828_114352.csv, t=77-79 s):
+//   1. the low-pass gated on joint_limit_PINNED, the very state relief prevents, so
+//      across 1450 shaking ticks it armed ZERO times;
+//   2. relief was recomputed from the live iterate every iteration, closing a loop
+//      inside one solve; and
+//   3. min_singular_value came from the relief-weighted Jacobian, so relief drove the
+//      damping ramp / step-scale / SMD guards that key off it (corr = +0.985).
+// This test pins the invariants that make each of those unrepresentable.
+bool testIkLimitReliefIsStableNearAReachableBound() {
+    const rb_servo::ArmMountConfig mount = stackRealLeftMount();
+    // MEASURED entry posture of the shake (t=77.568), elbow moved to 147.5 -- inside the
+    // 8 deg relief band and NOT on the bound.
+    rb_servo::JointArray near_bound{245.359721, 4.428621, 147.5,
+                                    -58.653937, -83.713459, -102.520069};
+    rb_servo::KinematicsConfig relief_cfg = stackRealIkConfig();
+    applyShippedRelief(&relief_cfg);
+    rb_servo::PinocchioKinematics kin(relief_cfg);
+    // A target the arm CAN make: the failure is not about reachability.
+    const rb_servo::Pose6D target =
+        kin.computeTcpStand(rb_servo::ArmId::Left, near_bound, mount);
+
+    const rb_servo::IkResult r =
+        kin.solveIk(rb_servo::ArmId::Left, target, near_bound, mount);
+    // (1) This is the regime that shook, and it is NOT the pinned one. A low-pass gated
+    // only on `pinned` is unreachable here -- which is exactly what shipped.
+    RB_CHECK(!r.joint_limit_pinned);
+    RB_CHECK(r.limit_relief_weight < 1.0);   // ... while relief is fully engaged
+
+    // (2) THE SOLVE IS A PURE FUNCTION OF ITS INPUTS. Relief is decided once from the
+    // seed, so the same (target, seed) must give bit-identical output every time. When
+    // it was re-derived from the live iterate, the solve carried its own feedback path.
+    const rb_servo::IkResult again =
+        kin.solveIk(rb_servo::ArmId::Left, target, near_bound, mount);
+    RB_CHECK(again.limit_relief_weight == r.limit_relief_weight);
+    for (std::size_t j = 0; j < rb_servo::kDof; ++j) {
+        RB_CHECK(again.q_solution_deg[j] == r.q_solution_deg[j]);
+    }
+
+    // (3) CONDITIONING MUST NOT MOVE WITH RELIEF. sigma_min feeds singular_step_scale_*
+    // and the SMD manipulability guard; taking it from the weighted Jacobian let one new
+    // knob drive three existing guards (measured corr(relief, sigma) = +0.985).
+    // Same pose, relief off -> the same conditioning number.
+    rb_servo::PinocchioKinematics plain(stackRealIkConfig());
+    const rb_servo::IkResult r_plain =
+        plain.solveIk(rb_servo::ArmId::Left, target, near_bound, mount);
+    RB_CHECK(r.min_singular_value > 0.0 && r_plain.min_singular_value > 0.0);
+    RB_CHECK(std::fabs(r.min_singular_value - r_plain.min_singular_value) <
+             0.05 * r_plain.min_singular_value);
+
+    // And the posture must not wander while the task is satisfied: on hardware the elbow
+    // swung 125 -> 148 deg with position error <= 0.44 mm the whole time.
+    rb_servo::JointArray q = near_bound;
+    double elbow_min = q[2], elbow_max = q[2], pos_max = 0.0;
+    for (int i = 0; i < 500; ++i) {
+        const rb_servo::IkResult step =
+            kin.solveIk(rb_servo::ArmId::Left, target, q, mount);
+        q = step.q_solution_deg;
+        elbow_min = std::min(elbow_min, q[2]);
+        elbow_max = std::max(elbow_max, q[2]);
+        pos_max = std::max(pos_max, step.position_error_m);
+    }
+    RB_CHECK(pos_max < 0.005);              // the task stays satisfied ...
+    RB_CHECK(elbow_max - elbow_min < 3.0);  // ... and the posture does not roam to reach it
+    return true;
+}
+
 int main() {
     if (!testFloorPointZJacobianFiniteDifference()) return 1;
     if (!testStandAxisJacobianFiniteDifference()) return 1;
@@ -1332,5 +1635,9 @@ int main() {
     if (!testInvalidTargetDoesNotThrow()) return 1;
     if (!testIkMinIterationsRemovesTheToleranceDeadZone()) return 1;
     if (!testIkMinIterationsConfigBounds()) return 1;
+    if (!testIkLimitReliefTradesOrientationForPosition()) return 1;
+    if (!testIkLimitAvoidanceEscapesTheBound()) return 1;
+    if (!testIkLimitReliefConfigBounds()) return 1;
+    if (!testIkLimitReliefIsStableNearAReachableBound()) return 1;
     return 0;
 }

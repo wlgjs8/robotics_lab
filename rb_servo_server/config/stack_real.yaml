@@ -1378,6 +1378,99 @@ kinematics:
     # freezes its plan (cartesian_solve_blocked_recent) instead of running away.
     max_iterations_best_effort_position_tolerance_m: 0.0005
     max_iterations_best_effort_orientation_tolerance_rad: 0.002
+    # ===================== JOINT-LIMIT RELIEF (2026-08-28) =====================
+    # WHAT THIS FIXES. Blocking J3 at +/-150 (the RB3-730E range) is necessary, but it
+    # was the WHOLE policy: nothing said what the 6-DOF task should give up once the
+    # joint was gone. So the solver asked five joints for six DOF, burned all 100
+    # iterations on a residual it cannot close, and re-drew the null space every tick.
+    # MEASURED on two pi0.5 rollouts (servo_log_20260828_102032.csv / _111241.csv), left
+    # arm returning to pick past the near-base box at stand (0.25, -0.33, 0.07):
+    #   - elbow pinned at 149.90 (the barrier standoff) on 4.0% / 6.3% of rollout ticks
+    #   - on 99.5% / 100% of IK max-iteration ticks the limit clamp was on that joint
+    #   - IK-reported residual 10.0 / 18.3 mm median (0.0005 mm on normal ticks)
+    #   - IK cost 5.8 -> 462 us
+    #   - >5 Hz command residual x2.9-3.8 on EVERY joint except the pinned one, which
+    #     sat at exactly 0. The pinned joint is quiet; the others are improvising.
+    #
+    # WHY ORIENTATION IS WHAT GIVES. Same logs, 7,682 ticks within 30 mm of the failing
+    # position: corr(orientation deviation, elbow angle) = -0.897. Held within 5 deg of
+    # the commanded orientation the elbow never leaves 145-150; give it 15-20 deg and it
+    # returns to 128-138. The POSITION is reachable throughout. (Also measured and ruled
+    # out: no alternative IK branch to switch to — in 7,310 ticks within 30 mm / 11 deg
+    # the elbow was NEVER below 145 — and the reach shell cannot fire at r = 0.531 m.)
+    #
+    # THE THREE MUST SHIP TOGETHER. Offline solver bench on the measured pinned posture
+    # with the measured target noise, one paired noise realisation, >5 Hz joint-command
+    # residual / mean position residual:
+    #     baseline    91.8 mdeg / 37.8 mm
+    #     A alone    188.3 mdeg /  3.6 mm   <- 2.1x WORSE shake
+    #     A+B        215.5 mdeg /  6.6 mm   <- 2.3x WORSE shake
+    #     D alone     39.6 mdeg / 38.4 mm
+    #     A+B+D        5.8 mdeg /  2.3 mm   <- -94% shake, 16x better tracking
+    # Relief buys tracking, but the null space it opens also gives target noise room to
+    # move the arm. The low-pass is what converts the better tracking into a quiet
+    # command. The config loader REFUSES relief without the low-pass for this reason.
+    #
+    # COST, accepted deliberately: up to ~8 deg of commanded orientation is traded away
+    # while a joint is pinned (budget below caps it at 0.35 rad = 20 deg and ramps the
+    # relief back out over the top 30%). The band means this can only happen within
+    # 8 deg of a bound — during the measured rollouts the elbow was there 12.8% of the
+    # time and inside 5 deg of the bound 7.1%; ordinary manipulation sits at 85-130 deg
+    # where the law is exactly inert. SUPERVISED VALIDATION REQUIRED on the next run:
+    # the policy is closed-loop on proprio, so letting orientation drift changes what it
+    # sees, and whether it follows or fights that is not answerable offline.
+    # (A) and (B) are DISABLED pending a fix — see the 2026-08-28 11:43 run below.
+    #
+    # THEY WORKED ON THEIR OWN AXES (servo_log_20260828_114352.csv vs _111241.csv,
+    # left arm): IK saturation 6.3% -> 3.1%, time with the elbow at >= 149.5 deg
+    # 6.3% -> 0.0%, and the residual on a saturated solve 18.26 mm -> 0.138 mm (132x).
+    # The elbow stopped parking on its bound entirely.
+    # THEY ALSO SHOOK THE ARM, and the run was stopped by the operator at t=79 s.
+    # Three defects, all in this change:
+    #  1. The loop's low-pass (D) gates on joint_limit_PINNED, i.e. on the solution
+    #     RESTING on the bound -- which is the exact state (A)+(B) exist to prevent. The
+    #     moment they worked, D became unreachable: 0 pinned ticks and 0 low-pass ticks
+    #     across the whole 1450-tick shake. The config coupling below enforced shipping
+    #     them together; the RUNTIME gate made one of the three dead.
+    #  2. relief -> sigma_min -> (damping ramp, step-scale guard, null-space projector)
+    #     -> avoidance -> joint margin -> relief is a closed loop with no damping.
+    #     Measured corr(relief, sigma) = +0.985, corr(sigma, avoidance) = -0.948,
+    #     corr(relief, avoidance) = -0.884. It limit-cycled at 3.0 Hz, swinging the elbow
+    #     125 -> 148 deg and reversing J1/J2/J4 at +/-60 deg/s -- ENTIRELY in the null
+    #     space, with position error <= 0.44 mm and orientation error <= 0.12 deg the
+    #     whole time. The arm shook while tracking its target perfectly.
+    #  3. sigma_min is computed from the RELIEF-WEIGHTED Jacobian, so relief makes a pose
+    #     look singular to every guard keyed on it (singular_region_eps 0.10,
+    #     singular_step_scale floor 0.11, and the SMD manipulability guard). Median sigma
+    #     0.168 -> 0.120 with relief on, and 0.062 inside the shake: under all of them.
+    #
+    # ALL THREE ARE NOW FIXED IN CODE (the low-pass gates on the relief REGIME, relief is
+    # frozen per solve from the seed, sigma is reported unweighted), and a bench that can
+    # actually see this failure exists -- tests/test_kinematics_ik.cpp
+    # testIkLimitReliefIsStableNearAReachableBound. On that bench the fixes take the shake
+    # in this regime from 161 -> 39 mdeg (-76%) and the elbow swing from 0.83 -> 0.22 deg.
+    #
+    # THEY STAY OFF ANYWAY, because on the same bench relief still loses where it used to
+    # win: in the ORIGINAL pinned regime it is 19.5 -> 50.5 mdeg (2.6x WORSE), and the
+    # escape it exists to provide is down to -0.163 deg / 2 s for 0.64 mm / 3.0 deg of
+    # pose drift (was -0.545 deg for 0.45 mm / 0.71 deg before the stability fixes --
+    # escape speed was the price of making the solve a pure function of its inputs).
+    # Re-enabling is a hardware decision, and the numbers do not justify it yet.
+    #
+    # D IS LEFT ON. With (A)/(B) off the elbow pins again, so D's gate arms and it does
+    # the job it was measured to do (-57% on the offline bench, on the pinned shake that
+    # servo_log_20260828_102032.csv and _111241.csv actually show).
+    limit_relief_band_deg: 0.0
+    limit_relief_min_orientation_weight: 1.0
+    limit_relief_max_orientation_error_rad: 0.0
+    limit_avoidance_band_deg: 0.0
+    limit_avoidance_gain: 0.0
+    limit_avoidance_max_step_deg: 0.0
+    # (D) pinned-unconverged low-pass, applied by the servo loop. 8 Hz passes the real
+    # motion and stops the per-tick null-space redraw. A low-pass and NOT a hold: holding
+    # re-creates the loop-rate hold/move alternation joint_limit_track_feasible exists to
+    # prevent, and releases with a step.
+    pinned_unconverged_lowpass_hz: 8.0
 
 cartesian_control:
   # goal lead the measured TCP by more than this (position m / orientation rad).

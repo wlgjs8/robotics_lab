@@ -278,6 +278,67 @@ struct IkSolverConfig {
     // solve). Convergence TOLERANCES are checked on the unweighted errors
     // either way, so success criteria do not move with the weight.
     double orientation_error_weight = 1.0;
+
+    // ===================== JOINT-LIMIT RELIEF (2026-08-28) =====================
+    // THE PROBLEM THESE THREE SOLVE. A 6-axis arm running a 6-DOF task has zero
+    // redundancy: the tick a joint saturates, five joints are asked for six DOF and
+    // the task becomes INFEASIBLE. The layers already in place decide how the arm
+    // ARRIVES at a bound (joint_limit_barrier), how it RESTS there (barrier standoff)
+    // and that it must keep moving rather than refuse (joint_limit_track_feasible) --
+    // but nothing decides WHAT THE TASK GIVES UP once the joint is gone. So the DLS
+    // burns every iteration on an irreducible residual and the free joints wander the
+    // null space, differently on every tick.
+    // MEASURED (servo_log_20260828_102032.csv + _111241.csv, pi0.5 rollouts, left arm
+    // returning to pick past the near-base box at stand (0.25, -0.33, 0.07)): the elbow
+    // pinned at the +150 deg URDF limit on 4.0% / 6.3% of rollout ticks; on 99.5% /
+    // 100% of the IK max-iteration ticks the limit clamp was active on that same joint;
+    // IK cost went 5.8 -> 462 us (80x); and the >5 Hz command residual TRIPLED on every
+    // joint EXCEPT the pinned one (J0/J1/J3/J4/J5 x2.9-3.8, elbow itself exactly 0).
+    // The pinned joint is quiet; the arm shakes because the others are improvising.
+    //
+    // THE ESCAPE IS IN ORIENTATION, NOT POSITION. Same log, 7,682 ticks within 30 mm of
+    // the failing position: corr(orientation deviation, elbow angle) = -0.897. Held to
+    // within 5 deg of the commanded orientation the elbow never leaves 145-150 deg; give
+    // it 15-20 deg and the elbow comes back to 128-138 deg. The POSITION is reachable
+    // throughout -- it is the commanded orientation that pushes the elbow into the stop.
+    // (Ruled out by the same data: no alternative IK branch exists to switch to -- in
+    // 7,310 ticks within 30 mm / 11 deg of the failing pose the elbow was NEVER below
+    // 145 deg -- and the reach shell cannot fire at r = 0.531 m inside [0.130, 1.050].)
+
+    // (A) ORIENTATION RELIEF. Inside `limit_relief_band_deg` of a position limit, scale
+    // the orientation rows of the DLS task down toward
+    // `limit_relief_min_orientation_weight` (0 = pure position task, 3 DOF of null space
+    // even with one joint pinned). This is a PRIORITY statement, not a loosening: the
+    // solver is told to spend the joints it has left on position first and orientation
+    // with whatever is over. `limit_relief_max_orientation_error_rad` is the budget --
+    // relief ramps back out over the top 30% of it, so the sacrificed orientation is
+    // bounded and the ramp cannot chatter at the cap. band <= 0 disables (default).
+    double limit_relief_band_deg = 0.0;
+    double limit_relief_min_orientation_weight = 1.0;
+    double limit_relief_max_orientation_error_rad = 0.0;
+
+    // (B) NULL-SPACE LIMIT AVOIDANCE. Relief (A) opens a null space; this walks the arm
+    // OUT of the bound through it. Inside `limit_avoidance_band_deg` a joint gets a
+    // repulsive velocity away from its limit, projected through the damped null-space
+    // projector (I - J# J) so it cannot disturb the task the solver just satisfied, and
+    // capped per iteration by `limit_avoidance_max_step_deg`. Without (A) the projector
+    // is near-empty on a 6-DOF task and this does almost nothing -- they are designed to
+    // run together. gain <= 0 or band <= 0 disables (default).
+    double limit_avoidance_band_deg = 0.0;
+    double limit_avoidance_gain = 0.0;
+    double limit_avoidance_max_step_deg = 0.0;
+
+    // (D) PINNED-UNCONVERGED LOW-PASS. Applied by the SERVO LOOP, not here (it needs the
+    // per-arm previous target). When a solve comes back pinned at a limit AND having
+    // burned its whole iteration budget, the residual is irreducible: re-solving it from
+    // scratch every tick only re-draws the null space, which is the measured 3x jitter.
+    // Low-pass the accepted joint solution at this corner frequency for exactly those
+    // ticks -- the slow component (real motion) passes, the per-tick redraw does not.
+    // A low-pass, not a hold: holding re-creates the loop-rate hold/move alternation
+    // that joint_limit_track_feasible exists to prevent, and releases with a step.
+    // This does NOT improve reachability by one millimetre; it makes the unreachable
+    // case quiet and honest. <= 0 disables (default).
+    double pinned_unconverged_lowpass_hz = 0.0;
 };
 
 struct KinematicsConfig {

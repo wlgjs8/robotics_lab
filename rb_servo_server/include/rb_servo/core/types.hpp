@@ -348,6 +348,16 @@ struct CartesianSolveTelemetry {
     // saturated). worst_index is -1 when the solve was not joint-limited.
     int ik_joint_limit_worst_index = -1;
     double ik_joint_limit_worst_margin_deg = 0.0;
+    // Joint-limit relief (ik.limit_relief_* / limit_avoidance_* / pinned_unconverged_*).
+    // pinned = the returned solution RESTS on a limit; relief_weight < 1 = orientation
+    // was traded for position; avoidance_step_deg = null-space push away from the bound;
+    // lowpass_active = the loop damped this tick's solution because it was pinned AND
+    // out of iterations. Together these say "the arm is at a bound, here is what it gave
+    // up to keep moving" — the thing the log could not previously answer.
+    bool ik_joint_limit_pinned = false;
+    double ik_limit_relief_weight = 1.0;
+    double ik_limit_avoidance_step_deg = 0.0;
+    bool ik_pinned_lowpass_active = false;
     JointArray q_ik_seed_deg{};
     JointArray q_ik_raw_solution_deg{};
     JointArray q_ik_solution_deg{};

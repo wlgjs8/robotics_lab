@@ -217,6 +217,78 @@ bool anyJointAtLimit(
     return false;
 }
 
+// Signed distance from each joint to its NEARER position limit, in radians, plus the
+// direction (+1/-1) that moves it away from that limit. A joint with no finite limit
+// gets +inf and direction 0, so every relief/avoidance law below is inert on it.
+// Written into the caller's arrays indexed by the 0..kDof-1 joint order.
+void jointLimitMargins(
+    const Eigen::VectorXd& q,
+    const pinocchio::Model& model,
+    const std::array<pinocchio::JointIndex, kDof>& joints,
+    std::array<double, kDof>* margin_rad,
+    std::array<double, kDof>* away_direction
+) {
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+        const Eigen::DenseIndex q_index = model.idx_qs[joints[i]];
+        const double value = q[q_index];
+        const double lower = model.lowerPositionLimit[q_index];
+        const double upper = model.upperPositionLimit[q_index];
+        const double to_lower =
+            std::isfinite(lower) ? value - lower : std::numeric_limits<double>::infinity();
+        const double to_upper =
+            std::isfinite(upper) ? upper - value : std::numeric_limits<double>::infinity();
+        if (!std::isfinite(to_lower) && !std::isfinite(to_upper)) {
+            (*margin_rad)[i] = std::numeric_limits<double>::infinity();
+            (*away_direction)[i] = 0.0;
+            continue;
+        }
+        // The nearer limit is the one that constrains; move away from IT.
+        if (to_lower <= to_upper) {
+            (*margin_rad)[i] = to_lower;
+            (*away_direction)[i] = +1.0;   // increase q to leave the lower bound
+        } else {
+            (*margin_rad)[i] = to_upper;
+            (*away_direction)[i] = -1.0;   // decrease q to leave the upper bound
+        }
+    }
+}
+
+// (A) ORIENTATION RELIEF WEIGHT. 1.0 (no relief) while every joint is at least
+// `band_rad` from its limit, ramping linearly to `min_weight` as the closest joint
+// reaches its bound. See IkSolverConfig for why orientation and not position is the
+// thing given up.
+//
+// The `spent`/`budget` pair ramps the relief back OUT as the orientation error consumes
+// its budget, over the top 30% of it. A hard cutoff at the budget would flip the task
+// between relaxed and strict on adjacent ticks and chatter exactly where the arm is
+// already least well conditioned; a ramp cannot.
+double limitReliefWeight(
+    double min_margin_rad,
+    double band_rad,
+    double min_weight,
+    double orientation_error_rad,
+    double budget_rad
+) {
+    if (!(band_rad > 0.0)) return 1.0;
+    if (!std::isfinite(min_margin_rad)) return 1.0;
+    double t = min_margin_rad / band_rad;      // 1 at the band edge, 0 at the bound
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+    double weight = min_weight + (1.0 - min_weight) * t;
+    if (budget_rad > 0.0) {
+        constexpr double kRampStart = 0.7;
+        const double spent = orientation_error_rad / budget_rad;
+        if (spent > kRampStart) {
+            double back = (spent - kRampStart) / (1.0 - kRampStart);
+            if (back > 1.0) back = 1.0;
+            weight += (1.0 - weight) * back;   // -> 1.0 (strict) once the budget is gone
+        }
+    }
+    if (weight < 0.0) weight = 0.0;
+    if (weight > 1.0) weight = 1.0;
+    return weight;
+}
+
 // Identify which joint's solution sits closest to (or pinned at) a position limit,
 // for diagnosing a joint_limit IK failure. Fills the 0-based joint index and its signed
 // margin to the nearer limit in degrees (<= ~0 == saturated). index = -1 if no joints.
@@ -538,6 +610,29 @@ IkResult PinocchioKinematics::solveIkDamped(
     // convergence return, where the step itself is not recomputed).
     double last_min_singular_value = 0.0;
     double last_applied_damping = eff_damping;
+    // Joint-limit relief diagnostics from the most recent DLS step (see IkSolverConfig).
+    double last_limit_relief_weight = 1.0;
+    double last_limit_avoidance_step = 0.0;
+    // (A) The orientation-relief weight, decided ONCE from the seed and held for the
+    // whole solve. See the measurement at its use below for why it is not re-derived
+    // per iteration. Computed from the seed's joint margins; the orientation-error term
+    // is the seed's too (zero here, so the budget ramp engages only via the caller's
+    // next tick -- the budget still bounds the trade because the weight is re-derived
+    // every tick from the pose the arm actually reached).
+    double seed_relief = 1.0;
+    {
+        std::array<double, kDof> seed_margin{};
+        std::array<double, kDof> seed_away{};
+        jointLimitMargins(q, impl_->model, impl_->joints, &seed_margin, &seed_away);
+        seed_relief = limitReliefWeight(
+            *std::min_element(seed_margin.begin(), seed_margin.end()),
+            degToRad(config_.ik.limit_relief_band_deg),
+            config_.ik.limit_relief_min_orientation_weight,
+            0.0,
+            config_.ik.limit_relief_max_orientation_error_rad
+        );
+    }
+
 
     for (; iterations <= config_.ik.max_iterations; ++iterations) {
         const auto now = std::chrono::steady_clock::now();
@@ -598,6 +693,8 @@ IkResult PinocchioKinematics::solveIkDamped(
             result.iterations = iterations;
             result.min_singular_value = last_min_singular_value;
             result.applied_damping = last_applied_damping;
+            result.limit_relief_weight = last_limit_relief_weight;
+            result.limit_avoidance_step_deg = last_limit_avoidance_step;
             result.solution_jump_deg = maxAbsJointDelta(result.q_solution_deg, seed_q_deg);
             result.branch_jump_suspected =
                 config_.ik.max_solution_jump_deg > 0.0 &&
@@ -632,7 +729,48 @@ IkResult PinocchioKinematics::solveIkDamped(
         // tip-equivalent units (weight = flange->TCP lever length). Convergence
         // tolerances above stay on the UNWEIGHTED errors. The weighted residual
         // used by the DLS step is built below at the solve.
-        const double ori_weight = config_.ik.orientation_error_weight;
+        // (A) JOINT-LIMIT ORIENTATION RELIEF. Scales the orientation half of the task
+        // down as the closest joint approaches its bound, so the five joints still free
+        // are spent on POSITION first. Multiplies on top of orientation_error_weight
+        // (which is a unit conversion); relief == 1.0 leaves the solve byte-identical.
+        //
+        // THE WEIGHT IS FROZEN FOR THE WHOLE SOLVE, computed once from the SEED margin
+        // (see seed_relief above). It used to be recomputed from the live iterate every
+        // iteration, which closed a feedback loop INSIDE one solve: relief -> null-space
+        // size -> avoidance push -> joint margin -> relief. On hardware
+        // (servo_log_20260828_114352.csv, t=77-79 s) that loop limit-cycled at 3.0 Hz,
+        // swinging the left elbow 125 -> 148 deg and reversing J1/J2/J4 at +/-60 deg/s
+        // -- entirely in the null space, with position error <= 0.44 mm the whole time.
+        // The arm shook while tracking its target perfectly, and the operator stopped the
+        // run. A weight fixed per solve makes the solve a pure function of its inputs
+        // again; the remaining tick-rate loop is damped by the caller's low-pass.
+        const double relief = seed_relief;
+        last_limit_relief_weight = relief;
+
+        // Margins for the (B) push are still read from the LIVE iterate: the push must
+        // know where the joint is NOW, and it is bounded per solve below.
+        std::array<double, kDof> margin_rad{};
+        std::array<double, kDof> away_direction{};
+        jointLimitMargins(q, impl_->model, impl_->joints, &margin_rad, &away_direction);
+
+        // (3) CONDITIONING IS REPORTED FROM THE UNWEIGHTED TASK. min_singular_value
+        // feeds guards that ask "how well conditioned is this POSE" -- the branch-jump
+        // step scale (singular_step_scale_*) and the SMD manipulability guard via
+        // setMinSingular. Taking it from the relief-weighted Jacobian made relief itself
+        // move that number: measured 2026-08-28 corr(relief, sigma) = +0.985, median
+        // sigma 0.168 -> 0.120 with relief on and 0.062 inside the shake, i.e. under
+        // singular_region_eps (0.10) and under singular_step_scale_floor (0.11). One new
+        // knob was silently driving three existing guards into their most aggressive
+        // regime, and closing a loop through them. Singular values only (no U/V) so the
+        // extra decomposition is cheap, and only when relief is actually biting.
+        double unweighted_min_singular = -1.0;
+        if (relief != 1.0) {
+            Eigen::JacobiSVD<Eigen::MatrixXd> sv(task_jacobian);
+            if (sv.singularValues().size() > 0 && sv.singularValues().array().isFinite().all()) {
+                unweighted_min_singular = sv.singularValues().minCoeff();
+            }
+        }
+        const double ori_weight = config_.ik.orientation_error_weight * relief;
         if (ori_weight != 1.0) {
             task_jacobian.bottomRows(3) *= ori_weight;
         }
@@ -672,7 +810,9 @@ IkResult PinocchioKinematics::solveIkDamped(
         const double base_lambda_sq = eff_damping * eff_damping;
         const double eps = config_.ik.singular_region_eps;
         const double extra_lambda_sq_max = eff_damping_max * eff_damping_max;
-        last_min_singular_value = singular_values.minCoeff();
+        last_min_singular_value = unweighted_min_singular > 0.0
+            ? unweighted_min_singular
+            : singular_values.minCoeff();
         double max_lambda_sq = base_lambda_sq;
         Eigen::VectorXd inv_factors(singular_values.size());
         for (Eigen::Index i = 0; i < singular_values.size(); ++i) {
@@ -691,9 +831,56 @@ IkResult PinocchioKinematics::solveIkDamped(
         if (ori_weight != 1.0) {
             weighted_error.tail<3>() *= ori_weight;
         }
-        const Eigen::VectorXd dq_full =
+        Eigen::VectorXd dq_full =
             -svd.matrixV() * (inv_factors.asDiagonal() *
                               (svd.matrixU().transpose() * weighted_error));
+
+        // (B) NULL-SPACE JOINT-LIMIT AVOIDANCE. Push each joint inside the avoidance
+        // band away from its bound, through the DAMPED null-space projector
+        //     N = I - V diag(sigma^2 / (sigma^2 + lambda^2)) V^T,
+        // built from the SVD already computed above. N is the exact complement of the
+        // step the DLS just took, so this cannot disturb the task the solver satisfied:
+        // on a well-conditioned 6-DOF task N is ~empty and the term self-cancels. It
+        // only has room once (A) has relaxed the orientation rows -- which is the point,
+        // and why the two are documented as one mechanism.
+        last_limit_avoidance_step = 0.0;
+        const double avoid_band_rad = degToRad(config_.ik.limit_avoidance_band_deg);
+        if (config_.ik.limit_avoidance_gain > 0.0 && avoid_band_rad > 0.0) {
+            Eigen::VectorXd z = Eigen::VectorXd::Zero(impl_->model.nv);
+            bool any = false;
+            for (std::size_t i = 0; i < impl_->joints.size(); ++i) {
+                if (!std::isfinite(margin_rad[i]) || margin_rad[i] >= avoid_band_rad) continue;
+                const Eigen::DenseIndex v_index = impl_->model.idx_vs[impl_->joints[i]];
+                if (v_index < 0 || v_index >= z.size()) continue;
+                // Linear in penetration: zero at the band edge, full gain at the bound.
+                const double depth = (avoid_band_rad - std::max(margin_rad[i], 0.0)) / avoid_band_rad;
+                z[v_index] = away_direction[i] * config_.ik.limit_avoidance_gain * depth;
+                any = true;
+            }
+            if (any) {
+                // N * z without forming N: z - V diag(w) V^T z, with
+                // w_i = sigma_i^2 / (sigma_i^2 + lambda_i^2) == sigma_i * inv_factors_i
+                // exactly, so the per-direction damping already chosen above (including
+                // the singularity ramp) carries into the projector for free.
+                Eigen::VectorXd wv(singular_values.size());
+                for (Eigen::Index i = 0; i < singular_values.size(); ++i) {
+                    wv[i] = singular_values[i] * inv_factors[i];
+                }
+                const Eigen::VectorXd dq_ns =
+                    z - svd.matrixV() * (wv.asDiagonal() * (svd.matrixV().transpose() * z));
+                if (dq_ns.array().isFinite().all()) {
+                    Eigen::VectorXd capped = dq_ns;
+                    const double cap = degToRad(config_.ik.limit_avoidance_max_step_deg);
+                    if (cap > 0.0) {
+                        const double peak = capped.cwiseAbs().maxCoeff();
+                        if (peak > cap) capped *= cap / peak;
+                    }
+                    dq_full += capped;
+                    last_limit_avoidance_step =
+                        std::max(last_limit_avoidance_step, radToDeg(capped.cwiseAbs().maxCoeff()));
+                }
+            }
+        }
         if (!dq_full.array().isFinite().all()) {
             return ik_solver::failureResult(
                 ik_solver::kReasonSingularOrIllConditioned,
@@ -756,6 +943,9 @@ IkResult PinocchioKinematics::solveIkDamped(
         best_effort.iterations = iterations;
         best_effort.min_singular_value = last_min_singular_value;
         best_effort.applied_damping = last_applied_damping;
+        best_effort.joint_limit_pinned = limit_pinned;
+        best_effort.limit_relief_weight = last_limit_relief_weight;
+        best_effort.limit_avoidance_step_deg = last_limit_avoidance_step;
         best_effort.solution_jump_deg =
             maxAbsJointDelta(best_effort.q_solution_deg, seed_q_deg);
         best_effort.branch_jump_suspected =
@@ -810,6 +1000,9 @@ IkResult PinocchioKinematics::solveIkDamped(
         best_effort.iterations = iterations;
         best_effort.min_singular_value = last_min_singular_value;
         best_effort.applied_damping = last_applied_damping;
+        best_effort.joint_limit_pinned = limit_pinned;
+        best_effort.limit_relief_weight = last_limit_relief_weight;
+        best_effort.limit_avoidance_step_deg = last_limit_avoidance_step;
         best_effort.solution_jump_deg =
             maxAbsJointDelta(best_effort.q_solution_deg, seed_q_deg);
         best_effort.branch_jump_suspected =
@@ -847,6 +1040,9 @@ IkResult PinocchioKinematics::solveIkDamped(
     // config/stack_real.yaml singular_region_eps/damping_max notes.
     result.min_singular_value = last_min_singular_value;
     result.applied_damping = last_applied_damping;
+    result.limit_relief_weight = last_limit_relief_weight;
+    result.limit_avoidance_step_deg = last_limit_avoidance_step;
+    result.joint_limit_pinned = limit_pinned;
     if (hit_joint_limit) {
         // Name the offending joint so a joint_limit failure is actionable (which axis
         // pinned, and how far inside its limit) instead of just "joint_limit".

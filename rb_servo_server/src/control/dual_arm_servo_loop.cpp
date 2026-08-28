@@ -6397,6 +6397,57 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                     "",
                     CartesianSolveTelemetry{}
                 };
+            // (D) PINNED-UNCONVERGED LOW-PASS (ik.pinned_unconverged_lowpass_hz).
+            // A solve that came back RESTING on a position limit having spent its whole
+            // iteration budget did not fail to converge by bad luck: with a joint gone,
+            // five remain for a six-DOF task and the residual is IRREDUCIBLE. Re-solving
+            // it from scratch each tick only re-draws which null-space configuration
+            // absorbs the leftover, and that redraw IS the tremble -- measured
+            // 2026-08-28 (servo_log_20260828_102032.csv / _111241.csv, left arm at the
+            // +150 deg elbow bound): the >5 Hz command residual tripled on every joint
+            // EXCEPT the pinned one, which sat at exactly 0.
+            // Low-pass those ticks so the slow component (the motion the arm can still
+            // make) passes and the per-tick redraw does not. Deliberately NOT a hold:
+            // holding re-creates the loop-rate hold/move alternation that
+            // ik.joint_limit_track_feasible exists to prevent, and releases with a step.
+            // The filter TRACKS (state := solution) whenever it is not damping, so
+            // engaging and releasing are both continuous, and it is bypassed entirely
+            // unless the solve was accepted -- a refused tick has its own hold path.
+            {
+                const double lp_hz = config_.kinematics.ik.pinned_unconverged_lowpass_hz;
+                const CartesianSolveTelemetry& solve = arm_cartesian_result[i].telemetry;
+                // GATE ON THE LIMIT-RELIEF REGIME, NOT ON "RESTING ON THE BOUND".
+                // The first version keyed only on ik_joint_limit_pinned, which is the
+                // exact state ik.limit_relief_*/limit_avoidance_* exist to PREVENT: the
+                // tick they worked, this filter became unreachable. Measured
+                // 2026-08-28 (servo_log_20260828_114352.csv, t=77-79 s): across the
+                // whole 1450-tick shake that ended the run, pinned ticks = 0 and
+                // low-pass ticks = 0, while relief was active on every one of them.
+                // Relief opens a null space on purpose; whenever it is open the solution
+                // is free to be re-drawn tick to tick, and that is what needs damping --
+                // converged or not. The pinned+exhausted case stays, because it is the
+                // regime that exists when relief is switched off.
+                const bool relief_active = solve.ik_limit_relief_weight < 1.0;
+                const bool pinned_unconverged =
+                    solve.attempted && solve.success &&
+                    (relief_active ||
+                     (solve.ik_joint_limit_pinned &&
+                      solve.ik_iterations >= config_.kinematics.ik.max_iterations));
+                if (lp_hz > 0.0 && pinned_unconverged && ctx.ik_pinned_lowpass_valid &&
+                    dt_sec > 0.0) {
+                    constexpr double kTwoPi = 6.283185307179586476925286766559;
+                    const double alpha = 1.0 - std::exp(-kTwoPi * lp_hz * dt_sec);
+                    JointArray& state = ctx.ik_pinned_lowpass_q_deg;
+                    for (int j = 0; j < kDof; ++j) {
+                        state[j] += alpha * (arm_cartesian_result[i].q_target_deg[j] - state[j]);
+                    }
+                    arm_cartesian_result[i].q_target_deg = state;
+                    arm_cartesian_result[i].telemetry.ik_pinned_lowpass_active = true;
+                } else {
+                    ctx.ik_pinned_lowpass_q_deg = arm_cartesian_result[i].q_target_deg;
+                    ctx.ik_pinned_lowpass_valid = solve.attempted && solve.success;
+                }
+            }
             *arm_target_out[i] = arm_cartesian_result[i].q_target_deg;
             stampCartesianSolve(ctx, arm_cartesian_result[i], *arm_selection[i], command);
         }
@@ -10063,6 +10114,8 @@ DualArmServoLoop::ArmControlContext DualArmServoLoop::armContext(ArmId arm) {
             left_freedrive_deadline_ns_,
             left_freedrive_stage_,
             left_freedrive_stage_entered_ns_,
+            left_ik_pinned_lowpass_q_deg_,
+            left_ik_pinned_lowpass_valid_,
             left_init_motion_exec_,
             left_last_cartesian_solve_,
             left_latched_cartesian_target_,
@@ -10102,6 +10155,8 @@ DualArmServoLoop::ArmControlContext DualArmServoLoop::armContext(ArmId arm) {
             right_freedrive_deadline_ns_,
             right_freedrive_stage_,
             right_freedrive_stage_entered_ns_,
+            right_ik_pinned_lowpass_q_deg_,
+            right_ik_pinned_lowpass_valid_,
             right_init_motion_exec_,
             right_last_cartesian_solve_,
             right_latched_cartesian_target_,

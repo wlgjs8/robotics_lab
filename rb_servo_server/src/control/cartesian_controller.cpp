@@ -161,6 +161,9 @@ CartesianArmTargetResult solveIkArmTargetFromTcpStand(
     result.telemetry.ik_branch_jump_retry_count = ik.branch_jump_retry_count;
     result.telemetry.ik_joint_limit_worst_index = ik.joint_limit_worst_index;
     result.telemetry.ik_joint_limit_worst_margin_deg = ik.joint_limit_worst_margin_deg;
+    result.telemetry.ik_joint_limit_pinned = ik.joint_limit_pinned;
+    result.telemetry.ik_limit_relief_weight = ik.limit_relief_weight;
+    result.telemetry.ik_limit_avoidance_step_deg = ik.limit_avoidance_step_deg;
     result.telemetry.q_ik_seed_deg = ik.branch_jump_details_valid ? ik.q_seed_deg : seed_q_deg;
     result.telemetry.q_ik_raw_solution_deg =
         ik.branch_jump_details_valid ? ik.q_raw_solution_deg : ik.q_solution_deg;

@@ -47,6 +47,16 @@ struct IkResult {
     // offending axis (e.g. an elbow driven to its model limit) instead of just a reason.
     int joint_limit_worst_index = -1;
     double joint_limit_worst_margin_deg = 0.0;
+    // True when the RETURNED solution rests on a finite position limit (not merely
+    // grazed one mid-iteration). This is the condition the joint-limit relief layers
+    // key off, and the loop's pinned-unconverged low-pass gates on it together with
+    // iterations == max_iterations.
+    bool joint_limit_pinned = false;
+    // Joint-limit relief diagnostics (ik.limit_relief_* / ik.limit_avoidance_*), from
+    // the last DLS step. relief_weight 1.0 = orientation at full weight (no relief);
+    // avoidance_step_deg is the null-space repulsion actually applied that step.
+    double limit_relief_weight = 1.0;
+    double limit_avoidance_step_deg = 0.0;
     // Conditioning / singularity-robust-damping diagnostics (last DLS step).
     double min_singular_value = 0.0;     // smallest task-Jacobian singular value
     double applied_damping = 0.0;        // effective lambda used on the singular dir

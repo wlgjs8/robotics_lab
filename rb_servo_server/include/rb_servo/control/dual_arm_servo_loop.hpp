@@ -438,6 +438,15 @@ private:
 
     JointArray left_prevprev_sent_q_deg_{};
     JointArray right_prevprev_sent_q_deg_{};
+    // (D) PINNED-UNCONVERGED LOW-PASS state (ik.pinned_unconverged_lowpass_hz). Holds
+    // the filtered joint solution while a solve is pinned at a limit AND out of
+    // iterations. `valid` is false whenever the filter is not carrying state, so the
+    // first active tick starts from this tick's own solution and the release is
+    // continuous — the filter tracks exactly when it is not damping.
+    JointArray left_ik_pinned_lowpass_q_deg_{};
+    JointArray right_ik_pinned_lowpass_q_deg_{};
+    bool left_ik_pinned_lowpass_valid_ = false;
+    bool right_ik_pinned_lowpass_valid_ = false;
     JointArray left_controller_sim_physical_baseline_q_deg_{};
     JointArray right_controller_sim_physical_baseline_q_deg_{};
 
@@ -1084,6 +1093,8 @@ private:
         uint64_t& freedrive_deadline_ns;
         std::atomic<FreedriveStage>& freedrive_stage;
         uint64_t& freedrive_stage_entered_ns;
+        JointArray& ik_pinned_lowpass_q_deg;
+        bool& ik_pinned_lowpass_valid;
         InitMotionExec& init_motion_exec;
         CartesianSolveTelemetry& last_cartesian_solve;
         LatchedCartesianTarget& latched_cartesian_target;

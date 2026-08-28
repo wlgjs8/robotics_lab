@@ -2406,6 +2406,83 @@ void validateConfig(const DualArmConfig& cfg) {
     validateNonNegativeFinite(cfg.kinematics.ik.damping_max, "kinematics.ik.damping_max");
     validatePositiveFinite(cfg.kinematics.ik.orientation_error_weight,
                            "kinematics.ik.orientation_error_weight");
+    // JOINT-LIMIT RELIEF (A/B/D). Each is default-off, but a HALF-CONFIGURED relief is
+    // worse than none: a band with no weight floor relaxes nothing while paying for the
+    // margin computation, and a weight floor with no band silently never fires. Both
+    // failure modes look like "the fix did not work" on hardware, which is the most
+    // expensive kind of misconfiguration to debug. Refuse them at load instead.
+    validateNonNegativeFinite(cfg.kinematics.ik.limit_relief_band_deg,
+                              "kinematics.ik.limit_relief_band_deg");
+    validateNonNegativeFinite(cfg.kinematics.ik.limit_relief_max_orientation_error_rad,
+                              "kinematics.ik.limit_relief_max_orientation_error_rad");
+    if (!(cfg.kinematics.ik.limit_relief_min_orientation_weight >= 0.0 &&
+          cfg.kinematics.ik.limit_relief_min_orientation_weight <= 1.0)) {
+        throw std::runtime_error(
+            "kinematics.ik.limit_relief_min_orientation_weight must be in [0, 1] "
+            "(it is a FRACTION of the orientation task kept at the bound; > 1 would "
+            "amplify orientation exactly where the arm cannot afford it)");
+    }
+    if ((cfg.kinematics.ik.limit_relief_band_deg > 0.0) !=
+        (cfg.kinematics.ik.limit_relief_min_orientation_weight < 1.0)) {
+        throw std::runtime_error(
+            "kinematics.ik.limit_relief_band_deg and limit_relief_min_orientation_weight "
+            "must be set together: a band with weight 1.0 relieves nothing, and a weight "
+            "< 1.0 with no band never fires. Set both, or neither.");
+    }
+    if (cfg.kinematics.ik.limit_relief_band_deg > 0.0 &&
+        !(cfg.kinematics.ik.limit_relief_max_orientation_error_rad > 0.0)) {
+        throw std::runtime_error(
+            "kinematics.ik.limit_relief_band_deg requires a positive "
+            "limit_relief_max_orientation_error_rad - the budget is what BOUNDS the "
+            "orientation this trades away. Without it the arm may give up unlimited "
+            "orientation to hold position, including during a grasp.");
+    }
+    validateNonNegativeFinite(cfg.kinematics.ik.limit_avoidance_band_deg,
+                              "kinematics.ik.limit_avoidance_band_deg");
+    validateNonNegativeFinite(cfg.kinematics.ik.limit_avoidance_gain,
+                              "kinematics.ik.limit_avoidance_gain");
+    validateNonNegativeFinite(cfg.kinematics.ik.limit_avoidance_max_step_deg,
+                              "kinematics.ik.limit_avoidance_max_step_deg");
+    if ((cfg.kinematics.ik.limit_avoidance_gain > 0.0) !=
+        (cfg.kinematics.ik.limit_avoidance_band_deg > 0.0)) {
+        throw std::runtime_error(
+            "kinematics.ik.limit_avoidance_gain and limit_avoidance_band_deg must be set "
+            "together: a gain with no band never fires, and a band with no gain pushes "
+            "nothing. Set both, or neither.");
+    }
+    if (cfg.kinematics.ik.limit_avoidance_gain > 0.0 &&
+        !(cfg.kinematics.ik.limit_avoidance_max_step_deg > 0.0)) {
+        throw std::runtime_error(
+            "kinematics.ik.limit_avoidance_gain requires a positive "
+            "limit_avoidance_max_step_deg - the null-space push runs INSIDE the solver "
+            "iteration, so an uncapped one can walk the solution off its branch between "
+            "two ticks with no downstream clamp having seen a Cartesian reason for it.");
+    }
+    validateNonNegativeFinite(cfg.kinematics.ik.pinned_unconverged_lowpass_hz,
+                              "kinematics.ik.pinned_unconverged_lowpass_hz");
+    // RELIEF REQUIRES THE LOW-PASS. Measured 2026-08-28 on the offline solver bench
+    // (the measured pinned posture + the measured target noise, one paired noise
+    // realisation, >5 Hz joint-command residual):
+    //     baseline           91.8 mdeg, position residual 37.8 mm
+    //     A alone           188.3 mdeg (2.1x WORSE),        3.6 mm
+    //     A+B               215.5 mdeg (2.3x WORSE),        6.6 mm
+    //     D alone            39.6 mdeg (-57%),             38.4 mm
+    //     A+B+D               5.8 mdeg (-94%),              2.3 mm
+    // Relief is what lets the arm TRACK while a joint is gone, and it works: position
+    // residual falls 16x. But opening a null space also gives target noise somewhere to
+    // go, so on its own it makes the shake WORSE, not better. The low-pass is what turns
+    // the improved tracking into a quiet command. Shipping A or B without D would look
+    // like the fix made the exact symptom it targets worse -- refuse it at load.
+    if ((cfg.kinematics.ik.limit_relief_band_deg > 0.0 ||
+         cfg.kinematics.ik.limit_avoidance_gain > 0.0) &&
+        !(cfg.kinematics.ik.pinned_unconverged_lowpass_hz > 0.0)) {
+        throw std::runtime_error(
+            "kinematics.ik.limit_relief_* / limit_avoidance_* require a positive "
+            "pinned_unconverged_lowpass_hz. Measured 2026-08-28: relief alone raises the "
+            ">5 Hz joint-command residual 2.1-2.3x (91.8 -> 188/216 mdeg) because the "
+            "null space it opens gives target noise room to move the arm; only with the "
+            "low-pass does the pair land at 5.8 mdeg (-94%). Enable all three together.");
+    }
     validateNonNegativeFinite(cfg.kinematics.ik.max_solution_jump_deg, "kinematics.ik.max_solution_jump_deg");
     validateNonNegativeFinite(cfg.kinematics.ik.branch_jump_damping_scale, "kinematics.ik.branch_jump_damping_scale");
     validateNonNegativeFinite(
@@ -4273,6 +4350,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "max_iterations_best_effort_position_tolerance_m",
                 "max_iterations_best_effort_orientation_tolerance_rad",
                 "orientation_error_weight",
+                "limit_relief_band_deg",
+                "limit_relief_min_orientation_weight",
+                "limit_relief_max_orientation_error_rad",
+                "limit_avoidance_band_deg",
+                "limit_avoidance_gain",
+                "limit_avoidance_max_step_deg",
+                "pinned_unconverged_lowpass_hz",
             }, "kinematics.ik");
             if (has(ik, "enable")) cfg.kinematics.ik.enable = asBool(ik["enable"], "kinematics.ik.enable");
             if (has(ik, "max_iterations")) cfg.kinematics.ik.max_iterations = asInt(ik["max_iterations"], "kinematics.ik.max_iterations");
@@ -4298,6 +4382,13 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ik, "max_iterations_best_effort_position_tolerance_m")) cfg.kinematics.ik.max_iterations_best_effort_position_tolerance_m = asDouble(ik["max_iterations_best_effort_position_tolerance_m"], "kinematics.ik.max_iterations_best_effort_position_tolerance_m");
             if (has(ik, "max_iterations_best_effort_orientation_tolerance_rad")) cfg.kinematics.ik.max_iterations_best_effort_orientation_tolerance_rad = asDouble(ik["max_iterations_best_effort_orientation_tolerance_rad"], "kinematics.ik.max_iterations_best_effort_orientation_tolerance_rad");
             if (has(ik, "orientation_error_weight")) cfg.kinematics.ik.orientation_error_weight = asDouble(ik["orientation_error_weight"], "kinematics.ik.orientation_error_weight");
+            if (has(ik, "limit_relief_band_deg")) cfg.kinematics.ik.limit_relief_band_deg = asDouble(ik["limit_relief_band_deg"], "kinematics.ik.limit_relief_band_deg");
+            if (has(ik, "limit_relief_min_orientation_weight")) cfg.kinematics.ik.limit_relief_min_orientation_weight = asDouble(ik["limit_relief_min_orientation_weight"], "kinematics.ik.limit_relief_min_orientation_weight");
+            if (has(ik, "limit_relief_max_orientation_error_rad")) cfg.kinematics.ik.limit_relief_max_orientation_error_rad = asDouble(ik["limit_relief_max_orientation_error_rad"], "kinematics.ik.limit_relief_max_orientation_error_rad");
+            if (has(ik, "limit_avoidance_band_deg")) cfg.kinematics.ik.limit_avoidance_band_deg = asDouble(ik["limit_avoidance_band_deg"], "kinematics.ik.limit_avoidance_band_deg");
+            if (has(ik, "limit_avoidance_gain")) cfg.kinematics.ik.limit_avoidance_gain = asDouble(ik["limit_avoidance_gain"], "kinematics.ik.limit_avoidance_gain");
+            if (has(ik, "limit_avoidance_max_step_deg")) cfg.kinematics.ik.limit_avoidance_max_step_deg = asDouble(ik["limit_avoidance_max_step_deg"], "kinematics.ik.limit_avoidance_max_step_deg");
+            if (has(ik, "pinned_unconverged_lowpass_hz")) cfg.kinematics.ik.pinned_unconverged_lowpass_hz = asDouble(ik["pinned_unconverged_lowpass_hz"], "kinematics.ik.pinned_unconverged_lowpass_hz");
         }
     }
 

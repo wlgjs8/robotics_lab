@@ -46,7 +46,11 @@ void writeCartesianSolveHeader(std::ostream& os, const char* side) {
        << ',' << side << "_cart_path_done"
        << ',' << side << "_cart_reason"
        << ',' << side << "_cart_ik_joint_limit_index"
-       << ',' << side << "_cart_ik_joint_limit_margin_deg";
+       << ',' << side << "_cart_ik_joint_limit_margin_deg"
+       << ',' << side << "_cart_ik_joint_limit_pinned"
+       << ',' << side << "_cart_ik_limit_relief_weight"
+       << ',' << side << "_cart_ik_limit_avoidance_step_deg"
+       << ',' << side << "_cart_ik_pinned_lowpass_active";
 }
 
 void writePoseHeader(std::ostream& os, const char* side, const char* name) {
@@ -794,7 +798,11 @@ void writeCartesianSolveColumns(std::ostream& os, const CartesianSolveTelemetry&
        << ',' << t.path_done
        << ',' << csvEscape(t.reason)
        << ',' << t.ik_joint_limit_worst_index
-       << ',' << t.ik_joint_limit_worst_margin_deg;
+       << ',' << t.ik_joint_limit_worst_margin_deg
+       << ',' << (t.ik_joint_limit_pinned ? 1 : 0)
+       << ',' << t.ik_limit_relief_weight
+       << ',' << t.ik_limit_avoidance_step_deg
+       << ',' << (t.ik_pinned_lowpass_active ? 1 : 0);
 }
 
 struct ArmJointDerivatives {
