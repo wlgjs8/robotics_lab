@@ -19,6 +19,17 @@ namespace {
         }                                                                    \
     } while (false)
 
+// RB_CHECK inside a lambda that returns a value: bail out with a sentinel the
+// caller checks, since the macro's `return false` cannot be used there.
+#define RB_CHECK_VALUE(cond, sentinel)                                       \
+    do {                                                                     \
+        if (!(cond)) {                                                       \
+            std::cerr << "CHECK failed at " << __FILE__ << ":" << __LINE__  \
+                      << ": " #cond << "\n";                                 \
+            return (sentinel);                                               \
+        }                                                                    \
+    } while (false)
+
 constexpr double kDt = 0.002;  // 500 Hz servo tick
 
 rb_servo::PoseTrackSmdConfig defaultConfig() {
@@ -407,6 +418,113 @@ bool testUnmeasuredSigmaDoesNotReleaseTheSingularityGuard() {
     return true;
 }
 
+
+// QSYNC SETTLING HOLD (queue_sync.hold_motion_until_track), teleop side.
+//
+// While the hold pins the OUTPUT at prev_sent, a streamed TcpPoseTarget keeps
+// arriving: its reference is the operator's hand, not a server clock, so it cannot
+// be stopped the way computeServoTarget stops TcpLinearMove's quintic clock. Left
+// running, the goal integrator accrues the whole hold and the SMD state chases it
+// against a pinned output, and the lead discharges as a lunge on release.
+// MEASURED 2026-08-28 (servo_log_20260828_100832.csv): 0.69 s of hold, 6.06 mm of
+// right-arm lead, released at 99.7 deg/s / 6,068 deg/s^2 on J1 with two reversals.
+//
+// holdAt() every held tick is the fix: it pins state AND goal at the reference with
+// zero velocity, so the release starts from where the arm actually is.
+bool testSettlingHoldPinsTrackerAndKillsTheReleaseLunge() {
+    // umi_large_smooth's tracking dynamics, so the numbers below are the ones the
+    // teleop profile actually produces.
+    rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
+    cfg.natural_frequency_linear_hz = 2.0;
+    cfg.natural_frequency_angular_hz = 1.5;
+    cfg.velocity_feedforward = true;
+    cfg.max_linear_velocity_m_s = 0.30;
+    cfg.max_linear_accel_m_s2 = 2.50;
+
+    constexpr int kHoldTicks = 345;            // 0.69 s at 500 Hz: warmup 0.402 + drain 0.288
+    constexpr double kHandSpeedMS = 0.05;      // operator keeps moving at 50 mm/s
+    const rb_servo::Pose6D anchor{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    // The commanded pose the source streams at tick i (absolute, as UMI teleop sends).
+    const auto command_at = [&](int tick) {
+        return rb_servo::Pose6D{kHandSpeedMS * kDt * tick, 0.0, 0.0, 0.0, 0.0, 0.0};
+    };
+    // Peak per-tick output step over `ticks` after the hold releases, plus the very
+    // first post-release displacement away from the pinned pose.
+    const auto release_profile = [&](bool pin_during_hold, double* first_jump_m) {
+        rb_servo::SmdPoseTracker tracker(cfg);
+        tracker.reset(anchor);
+        const std::uint64_t reanchors_before = tracker.reanchorCount();
+        for (int i = 0; i < kHoldTicks; ++i) {
+            if (pin_during_hold) {
+                // FIXED PATH: the stage returns the reference and never feeds the
+                // goal integrator or steps the filter while the output is pinned.
+                tracker.holdAt(anchor);
+            } else {
+                // BUG PATH: the stage kept smoothing against a pinned output.
+                tracker.updateGoalFromCommand(command_at(i));
+                tracker.step(kDt);
+            }
+        }
+        if (pin_during_hold) {
+            // A hold is not a re-anchor: smd_reanchor_count must not count its ticks.
+            RB_CHECK_VALUE(tracker.reanchorCount() == reanchors_before, -1.0);
+        }
+        const double at_release = tracker.currentPose().x;
+        *first_jump_m = std::abs(at_release - anchor.x);
+        double peak_step = 0.0;
+        double previous = at_release;
+        for (int i = kHoldTicks; i < kHoldTicks + 250; ++i) {  // 0.5 s of release
+            tracker.updateGoalFromCommand(command_at(i));
+            const double x = tracker.step(kDt).x;
+            peak_step = std::max(peak_step, std::abs(x - previous));
+            previous = x;
+        }
+        return peak_step;
+    };
+
+    double bug_jump = 0.0;
+    const double bug_peak_step = release_profile(false, &bug_jump);
+    double fixed_jump = 0.0;
+    const double fixed_peak_step = release_profile(true, &fixed_jump);
+    RB_CHECK(fixed_peak_step >= 0.0 && bug_peak_step >= 0.0);  // -1 sentinel = reanchor leak
+
+    // The bug path leaves the tracker tens of mm past the pinned arm (34.5 mm here:
+    // with feedforward on it tracks the hand almost exactly). THAT OFFSET IS THE
+    // LUNGE — the joint target steps from prev_sent to this pose on the release tick,
+    // so the whole thing has to be closed at the clamp ceilings.
+    RB_CHECK(bug_jump > 0.010);
+    // The fix leaves it exactly at the reference, so the release injects nothing.
+    RB_CHECK(fixed_jump < 1e-12);
+
+    // Where the discharge is NOT: the SMD's own per-tick step is the same either way
+    // (~0.1 mm, the commanded hand speed), because a stepped-but-pinned tracker is in
+    // steady state, not sprinting. Asserting on that would test nothing. The defect
+    // lives entirely in the accumulated OFFSET above, which the output layer sees as a
+    // single-tick step: bug_jump / kDt = 17 m/s of implied catch-up against a 0.05 m/s
+    // hand, versus exactly zero after the fix.
+    RB_CHECK(fixed_peak_step < 1.5 * kHandSpeedMS * kDt);
+    RB_CHECK(std::abs(bug_peak_step - fixed_peak_step) < 0.2 * kHandSpeedMS * kDt);
+    RB_CHECK(bug_jump / kDt > 100.0 * kHandSpeedMS);
+
+    // The tracker must resume normally afterwards: no dead filter, no latched hold.
+    rb_servo::SmdPoseTracker resumed(cfg);
+    resumed.reset(anchor);
+    for (int i = 0; i < kHoldTicks; ++i) resumed.holdAt(anchor);
+    RB_CHECK(resumed.active());
+    for (int i = kHoldTicks; i < kHoldTicks + 1000; ++i) {
+        resumed.updateGoalFromCommand(command_at(i));
+        resumed.step(kDt);
+    }
+    // Steady-state tracking of a 50 mm/s ramp, resumed from the pinned pose. The goal
+    // integrator restarts at the reference, so the output trails the ABSOLUTE command
+    // by the whole hold offset by design — what matters is that it moves at the
+    // commanded speed with the feedforward lag removed, not that it recovers the lead.
+    const double travelled = resumed.currentPose().x;
+    const double commanded_since_release = kHandSpeedMS * kDt * 1000;
+    RB_CHECK(std::abs(travelled - commanded_since_release) < 0.002);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -422,6 +540,7 @@ int main() {
     if (!testReengageRelatchRejectsStaleJump()) return 1;
     if (!testSingularityVelocityScaling()) return 1;
     if (!testUnmeasuredSigmaDoesNotReleaseTheSingularityGuard()) return 1;
+    if (!testSettlingHoldPinsTrackerAndKillsTheReleaseLunge()) return 1;
     std::cout << "smd_pose_tracker tests passed\n";
     return 0;
 }

@@ -467,8 +467,8 @@ safety:
     # 2026-07-09 (ft branch): z 하한만 0.000 → -0.200 (runtime_min과 동일). 바닥면이
     # 스탠드 플로어와 같은 높이(z=0)라 플로어를 꺼도 테이블 접근 감속이 남던 것을
     # 제거 — 바닥 backstop은 FT 센서로 대체, x/y/상단 작업공간 제한은 유지.
-    min_m: [-0.350, -0.900, -0.100]
-    max_m: [0.350, -0.250, 0.590]
+    min_m: [-0.400, -0.900, -0.100]
+    max_m: [0.400, -0.250, 0.590]
     runtime_min_m: [-1.2, -1.6, -0.2]
     runtime_max_m: [1.2, 0.6, 1.6]
     fail_policy: clamp_hold
@@ -810,12 +810,25 @@ queue_sync:
   # late (bounded by warmup_max + drain_timeout in the worst case).
   # The hold pins the OUTPUT, so every plan that is paced by the realized step
   # (chunk follower, via plan_gate) or re-planned from prev_sent each tick (the
-  # joint-space TrajectoryFilter) freezes with it. TcpLinearMove's quintic clock
-  # is open-loop time and did NOT: it integrated the whole hold and discharged the
-  # lead as a release lunge (measured 2026-08-27, servo_log_20260827_211340.csv,
-  # left arm: 532 ms pinned, 1.09 deg of accrued IK lead, +/-60 deg/s in 40 ms and
-  # 7,920 deg/s^2 command accel on release). computeServoTarget now hands that
-  # stage dt_sec = 0 for a held arm, so its clock stops with the output.
+  # joint-space TrajectoryFilter) freezes with it. The two open-loop stages did
+  # NOT, and each had to be stopped explicitly:
+  #  - TcpLinearMove's quintic clock is open-loop time. It integrated the whole
+  #    hold and discharged the lead as a release lunge (2026-08-27,
+  #    servo_log_20260827_211340.csv, left arm: 532 ms pinned, 1.09 deg of accrued
+  #    IK lead, +/-60 deg/s in 40 ms, 7,920 deg/s^2 command accel on release).
+  #    computeServoTarget now hands that stage dt_sec = 0 for a held arm.
+  #  - A streamed TcpPoseTarget (UMI teleop, flow-infer) has no clock to stop at
+  #    all: its reference is the operator's hand. The SMD goal integrator accrued
+  #    the hold and the filter chased it against the pinned output (2026-08-28,
+  #    servo_log_20260828_100832.csv, UMI pedal press: 0.69 s pinned, 6.06 mm of
+  #    right-arm lead, released at 99.7 deg/s / 6,068 deg/s^2 on J1 with two
+  #    velocity reversals; the left arm's 0.4 mm fired a 34.5 deg/s pulse that
+  #    collapsed in 6 ms. BOTH arms release on the same tick, so the operator
+  #    feels one two-armed bang). applyPoseTrackSmd now pins the tracker at the
+  #    live reference (SmdPoseTracker::holdAt) every held tick, so the release
+  #    starts from where the arm is, with zero velocity and an empty goal.
+  # NOTE the deliberate asymmetry: teleop lead is DISCARDED, not deferred. There
+  # is no safe way to replay 0.69 s of hand motion the arm never made.
   hold_motion_until_track: true
   target_fill: 5
 

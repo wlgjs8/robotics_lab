@@ -59,6 +59,7 @@ robotics_lab_policy_runner.egg-info/requires.txt
 robotics_lab_policy_runner.egg-info/top_level.txt
 tests/test_analyze_rollout_step_log.py
 tests/test_anchored_action_mode.py
+tests/test_arm_init_chunk_invalidation.py
 tests/test_camera_bundle_client.py
 tests/test_camera_diagnostics.py
 tests/test_camera_preview.py
@@ -68,6 +69,7 @@ tests/test_chunk_crossfade.py
 tests/test_chunk_ensemble.py
 tests/test_chunk_overlay_projection.py
 tests/test_chunk_overlay_publisher.py
+tests/test_chunk_row_log.py
 tests/test_dual_arm_policy_gate.py
 tests/test_dual_spacemouse_policy_integration.py
 tests/test_fault_latch_abort.py

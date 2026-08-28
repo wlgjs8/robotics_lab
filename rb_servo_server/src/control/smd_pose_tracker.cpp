@@ -38,6 +38,12 @@ SmdPoseTracker::SmdPoseTracker(const PoseTrackSmdConfig& config) : config_(confi
 
 void SmdPoseTracker::reset(const Pose6D& pose) {
     if (active_) ++reanchor_count_;  // reset() while active == a genuine re-anchor
+    // A re-anchor is a new pose context; the retained sigma described the old one.
+    last_min_singular_ = -1.0;
+    holdAt(pose);
+}
+
+void SmdPoseTracker::holdAt(const Pose6D& pose) {
     position_ = positionOf(pose);
     velocity_.setZero();
     rotation_ = rotationOf(pose);
@@ -47,8 +53,6 @@ void SmdPoseTracker::reset(const Pose6D& pose) {
     previous_goal_position_ = position_;
     previous_goal_rotation_ = rotation_;
     previous_command_.reset();
-    // A re-anchor is a new pose context; the retained sigma described the old one.
-    last_min_singular_ = -1.0;
     active_ = true;
 }
 

@@ -246,7 +246,8 @@ ArmCommand applyPoseTrackSmd(
     const std::shared_ptr<IKinematics>& kinematics,
     const ArmMountConfig& mount,
     const JointArray& previous_sent_q_deg,
-    double dt_sec
+    double dt_sec,
+    bool qsync_settling_hold
 ) {
     if (!tracker) return command;
     if (!config.enable || command.mode != ControlMode::TcpPoseTarget || !command.has_tcp_target) {
@@ -258,8 +259,11 @@ ArmCommand applyPoseTrackSmd(
         tracker->deactivate();
         return command;
     }
+    // FK of the last sent joints: where the robot has actually been commanded to.
+    const Pose6D reference =
+        kinematics->computeTcpStand(command.arm_id, previous_sent_q_deg, mount);
     if (!tracker->active()) {
-        tracker->reset(kinematics->computeTcpStand(command.arm_id, previous_sent_q_deg, mount));
+        tracker->reset(reference);
     } else {
         // Re-anchor if the live reference (FK of the last sent joints) has drifted far from
         // the tracker's held pose. The command buffer holds the previous episode's last
@@ -270,11 +274,35 @@ ArmCommand applyPoseTrackSmd(
         // IS the sent command, so currentPose ~= FK(prev_sent_q) within IK/safety residual and
         // the generous tolerances below never trip. Re-anchoring only ever starts the tracker
         // from where the robot actually is; it cannot inject motion.
-        const Pose6D reference =
-            kinematics->computeTcpStand(command.arm_id, previous_sent_q_deg, mount);
         if (tracker->driftedFrom(reference, kPoseTrackReanchorPosTolM, kPoseTrackReanchorAngTolRad)) {
             tracker->reset(reference);
         }
+    }
+    if (qsync_settling_hold) {
+        // QSYNC SETTLING HOLD, teleop side (queue_sync.hold_motion_until_track).
+        // The hold pins the OUTPUT at prev_sent while queue sync warms up and drains.
+        // Every plan paced by the realized step freezes with it, and TcpLinearMove's
+        // open-loop clock is stopped explicitly in computeServoTarget. A STREAMED
+        // TcpPoseTarget has neither: its reference is the operator's hand (or a policy's
+        // absolute setpoint), which no server-side clock can stop, so the goal integrator
+        // kept accruing the whole hold and the SMD state kept chasing it against a pinned
+        // output. The lead discharged the instant the hold lifted.
+        // MEASURED (servo_log_20260828_100832.csv, UMI pedal press at 10:08:45.037):
+        // warmup 0.402 s + drain 0.278/0.288 s pinned BOTH arms for 0.69 s while the
+        // right arm's target ran 6.06 mm ahead. On release the command discharged it on
+        // the clamp ceilings — right J1 99.7 deg/s at 6,068 deg/s^2 (the 4x ddq decel
+        // ceiling) with two velocity reversals, right J2/J4 the same shape, and even the
+        // left arm (0.4 mm of lead) fired a 34.5 deg/s / 7,485 deg/s^2 pulse that
+        // collapsed to zero in 6 ms. Every velocity/accel clamp hit of that 4.8 s teleop
+        // session landed in the 200 ms after release; the rest of the session was clean.
+        // Pinning the tracker at the reference EVERY held tick is what makes the release
+        // start from where the arm actually is, with zero SMD velocity and nothing accrued
+        // in the goal — the same guarantee the other three plan types already get.
+        // holdAt() (not reset()) so the hold does not inflate smd_reanchor_count.
+        tracker->holdAt(reference);
+        ArmCommand held = command;
+        held.tcp_target_stand = reference;
+        return held;
     }
     tracker->updateGoalFromCommand(command.tcp_target_stand);
     ArmCommand smoothed = command;
@@ -4965,7 +4993,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         log_transition();
         return with_stage_telemetry(applyPoseTrackSmd(
             command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
-            previous_sent_q_deg, dt_sec));
+            previous_sent_q_deg, dt_sec, qsyncSettlingHoldActive(arm_id)));
     };
     if (rf.enable && chunk_frame_receiver_ && command.mode == ControlMode::Hold &&
         follower->active()) {
@@ -5501,7 +5529,7 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
         log_transition();
         return with_stage_telemetry(applyPoseTrackSmd(
             command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
-            previous_sent_q_deg, dt_sec));
+            previous_sent_q_deg, dt_sec, qsyncSettlingHoldActive(arm_id)));
     };
     if (!rf.enable || !chunk_frame_receiver_ || command.mode != ControlMode::TcpPoseTarget ||
         !command.has_tcp_target || !kinematics_) {
@@ -6329,6 +6357,10 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         // prev_sent every tick, so a pinned output already freezes its plan (measured on
         // servo_log_20260827_210705.csv: the JointTarget under the same hold released at
         // tick 4924 with a clean 1,500 deg/s^2 ramp and no lunge).
+        // The fourth case, a STREAMED TcpPoseTarget, is not fixable here: it has no
+        // server-side clock to stop, because its reference is the operator's hand. It is
+        // pinned inside applyPoseTrackSmd instead (SmdPoseTracker::holdAt) — see the
+        // measurement there and in stack_real.yaml's queue_sync block.
         const double arm_linear_move_dt_sec[2] = {
             qsyncSettlingHoldActive(ArmId::Left) ? 0.0 : dt_sec,
             qsyncSettlingHoldActive(ArmId::Right) ? 0.0 : dt_sec,

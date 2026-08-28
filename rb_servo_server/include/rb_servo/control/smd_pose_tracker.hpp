@@ -56,6 +56,18 @@ public:
     // command reference (no jump), deltas integrate from there.
     void reset(const Pose6D& pose);
 
+    // Pin the filter state AND the goal integrator at `pose` with zero velocity,
+    // re-latching the command reference so the next updateGoalFromCommand()
+    // integrates nothing. Same end state as reset(), with two differences that
+    // matter to a caller that pins EVERY tick for as long as some other stage
+    // holds the output:
+    //   - it does not count a re-anchor (reanchorCount() stays a count of
+    //     genuine ones, not of hold ticks), and
+    //   - it keeps the retained min-singular sample, because a hold does not
+    //     move the arm and so does not invalidate the pose context.
+    // Use reset() for a real re-anchor and this for a held output.
+    void holdAt(const Pose6D& pose);
+
     void deactivate();
 
     // Feed one received command pose into the goal delta integrator.
