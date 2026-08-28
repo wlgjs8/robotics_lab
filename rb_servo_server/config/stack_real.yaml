@@ -1667,9 +1667,57 @@ cartesian_control:
         # deviation p50 0.42 / p95 3.5 / max 9.4 mm, z_min and z_range preserved
         # (downward-travel delta is removed jitter, not lost descent). FF OFF was
         # REJECTED: stronger attenuation but deviation p95 21 mm. -> enabled.
+        # OUTPUT SMD. Second-order critically-damped tracker with velocity
+        # feedforward; the last shaping stage before IK.
+        #
+        # WHAT IT ACTUALLY DOES (transfer function, not intuition). With the FF
+        # low-pass tied to nf and zeta 1 the response is
+        #     H(s) = wn^2 (3s + wn) / (s + wn)^3
+        # so the error is  1 - H = s^2 (s + 3 wn) / (s + wn)^3 : the velocity
+        # feedforward CANCELS first-order lag outright (near-DC group delay
+        # 0.07 ms), and what remains is acceleration-driven,
+        #     lag = a (1/wn^2 + 2 zeta / (wf wn)) = 3a/wn^2 when wf = wn.
+        # It is therefore NOT a plain low-pass: it passes 0.5-3 Hz at 1.06-1.30x
+        # (peak 1.30x at 2.0 Hz) and only starts attenuating above ~4.3 Hz.
+        #
+        # 2026-08-28: 3.5 -> 3.0 linear. Measured on
+        # servo_log_20260828_112134.csv, an 87 s left-arm rollout that vibrated in
+        # several places (worst t=84 s, 8-40 Hz command-velocity rms 7.57 against a
+        # 0.34 run median). Every other layer was cleared: at matched speed the
+        # high-vibration windows showed follower converged 100%, stall 0%, alpha
+        # 1.000, velocity/accel clamps 0.0%, plan_gate 1.000, IK residual 0.0017 mm
+        # at 1 iteration -- nothing saturates. The chunk-row log (added the same
+        # day, so the model's own trajectory could finally be measured rather than
+        # inferred) REFUTED the policy-zigzag hypothesis: correlation between
+        # vibration and the plan's 2nd-difference/step ratio is -0.147, and the
+        # worst-vibration chunks are SMOOTHER than the quiet ones (direction cos
+        # 0.98 vs 0.65). What separates them is speed -- their steps are 4.6x
+        # larger (3027 vs 656 um). So a fast, smooth command excites an
+        # 11-13 Hz structural mode the arm amplifies 1.2-2.8x (J3 worst), and the
+        # only control-side lever left is to hand it less of that band.
+        #
+        # THE TRADE, at 12.5 Hz and in acceleration lag (measured shipped lag was
+        # 0.84 mm quiet / 1.22 mm in the vibrating windows):
+        #     nf 3.5  |H|=0.211  1.00x   lag 1.00x   0.84 / 1.22 mm   (was)
+        #     nf 3.2  |H|=0.179  0.85x   lag 1.20x   1.00 / 1.46 mm
+        #     nf 3.0  |H|=0.159  0.76x   lag 1.36x   1.14 / 1.66 mm   (now)
+        #     nf 2.8  |H|=0.140  0.66x   lag 1.56x   1.31 / 1.91 mm
+        #     nf 2.5  |H|=0.113  0.54x   lag 1.96x   1.65 / 2.39 mm
+        # 3.0 is deliberately the small step: 24% less of the offending band for
+        # +0.3 mm of lag. Revert to 3.5 if chunk-following depth regresses -- that
+        # cost is exactly what this knob buys the smoothness with.
+        #
+        # TWO ALTERNATIVES WERE COMPUTED AND REJECTED, both worse per unit lag:
+        #   velocity_ff_lpf_hz 2.0 (keeping nf 3.5) gives |H|=0.154 (0.73x) for
+        #     1.50x lag -- same attenuation as nf 3.0 at more cost, because
+        #     slowing the FF re-introduces the first-order lag nf does not.
+        #   damping_ratio 1.4 makes 12.5 Hz WORSE, 1.13x, while flattening the
+        #     2 Hz peak; 2.0 is worse still at 1.24x. Damping is the wrong knob.
+        # nf_angular_hz is untouched: the vibration measured here is translational,
+        # and this repo changes one reviewed setting at a time.
         output_smd:
           enable: true
-          nf_linear_hz: 3.5
+          nf_linear_hz: 3.0
           nf_angular_hz: 2.5
           damping_ratio: 1.0
           velocity_ff: true
