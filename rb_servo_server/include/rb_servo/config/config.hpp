@@ -339,6 +339,28 @@ struct IkSolverConfig {
     // This does NOT improve reachability by one millimetre; it makes the unreachable
     // case quiet and honest. <= 0 disables (default).
     double pinned_unconverged_lowpass_hz = 0.0;
+    // WIDEN THAT LOW-PASS TO A BAND AROUND THE BOUND. Gating only on "pinned" covers
+    // the innermost degree and nothing else, and that is not where the shake lives.
+    // MEASURED 2026-08-28 (servo_log_20260828_122527.csv, the run whose left-then-right
+    // return-to-pick shake this fixes), >5 Hz content vs the elbow's margin to its bound:
+    //          margin      policy target      q_sent        low-pass
+    //        20-200 deg      0.508 mm x1.0    77.8 mdeg        0%
+    //          8-20 deg      0.933 mm x1.8   137.7 mdeg        0%
+    //           3-8 deg      1.543 mm x3.0   196.9 mdeg        0%   <- unprotected
+    //           1-3 deg      1.815 mm x3.6   275.1 mdeg        0%   <- unprotected, worst
+    //           0-1 deg      1.505 mm x3.0   123.0 mdeg       86%   <- pinned, covered
+    // The POLICY's own command roughens 3.6x as the elbow closes on its stop (its
+    // tracking error goes 1.0 -> 4.5 mm there, and pi0.5 is closed-loop on proprio, so
+    // it reacts to a state it did not ask for). The servo transfers 64-80% of that
+    // through -- except where the low-pass runs, which cuts the transfer to 39%. Both
+    // arms' worst ticks of that run sat in the 1-8 deg band, one of them converging in a
+    // SINGLE iteration: nothing about them is an IK failure, so no pinned/iteration test
+    // can reach them. This is the band gate. <= 0 keeps the pinned-only behaviour.
+    //
+    // IT IS SYMPTOMATIC, deliberately: the arm shakes because the policy's command
+    // shakes, and this bounds how much of that reaches the joints. It does not stop the
+    // policy from shaking.
+    double pinned_lowpass_margin_deg = 0.0;
 };
 
 struct KinematicsConfig {

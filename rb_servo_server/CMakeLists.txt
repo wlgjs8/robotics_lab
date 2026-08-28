@@ -342,3 +342,7 @@ if(BUILD_TESTING)
         message(WARNING "Python3 interpreter not found; rb_servo Python unittests will not be registered")
     endif()
 endif()
+
+# TEMPORARY scratch probe (removed before commit)
+add_executable(probe_release_scratch tools/probe_release_scratch.cpp)
+target_link_libraries(probe_release_scratch PRIVATE rb_servo_core)

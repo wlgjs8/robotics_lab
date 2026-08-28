@@ -2460,6 +2460,15 @@ void validateConfig(const DualArmConfig& cfg) {
     }
     validateNonNegativeFinite(cfg.kinematics.ik.pinned_unconverged_lowpass_hz,
                               "kinematics.ik.pinned_unconverged_lowpass_hz");
+    validateNonNegativeFinite(cfg.kinematics.ik.pinned_lowpass_margin_deg,
+                              "kinematics.ik.pinned_lowpass_margin_deg");
+    if (cfg.kinematics.ik.pinned_lowpass_margin_deg > 0.0 &&
+        !(cfg.kinematics.ik.pinned_unconverged_lowpass_hz > 0.0)) {
+        throw std::runtime_error(
+            "kinematics.ik.pinned_lowpass_margin_deg widens the band the low-pass covers, "
+            "so it needs a positive pinned_unconverged_lowpass_hz to widen. Set both, or "
+            "neither.");
+    }
     // RELIEF REQUIRES THE LOW-PASS. Measured 2026-08-28 on the offline solver bench
     // (the measured pinned posture + the measured target noise, one paired noise
     // realisation, >5 Hz joint-command residual):
@@ -4357,6 +4366,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "limit_avoidance_gain",
                 "limit_avoidance_max_step_deg",
                 "pinned_unconverged_lowpass_hz",
+                "pinned_lowpass_margin_deg",
             }, "kinematics.ik");
             if (has(ik, "enable")) cfg.kinematics.ik.enable = asBool(ik["enable"], "kinematics.ik.enable");
             if (has(ik, "max_iterations")) cfg.kinematics.ik.max_iterations = asInt(ik["max_iterations"], "kinematics.ik.max_iterations");
@@ -4389,6 +4399,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ik, "limit_avoidance_gain")) cfg.kinematics.ik.limit_avoidance_gain = asDouble(ik["limit_avoidance_gain"], "kinematics.ik.limit_avoidance_gain");
             if (has(ik, "limit_avoidance_max_step_deg")) cfg.kinematics.ik.limit_avoidance_max_step_deg = asDouble(ik["limit_avoidance_max_step_deg"], "kinematics.ik.limit_avoidance_max_step_deg");
             if (has(ik, "pinned_unconverged_lowpass_hz")) cfg.kinematics.ik.pinned_unconverged_lowpass_hz = asDouble(ik["pinned_unconverged_lowpass_hz"], "kinematics.ik.pinned_unconverged_lowpass_hz");
+            if (has(ik, "pinned_lowpass_margin_deg")) cfg.kinematics.ik.pinned_lowpass_margin_deg = asDouble(ik["pinned_lowpass_margin_deg"], "kinematics.ik.pinned_lowpass_margin_deg");
         }
     }
 

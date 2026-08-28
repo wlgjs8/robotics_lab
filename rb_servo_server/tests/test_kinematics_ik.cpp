@@ -843,8 +843,13 @@ bool testIkMaxIterationsBestEffort() {
     RB_CHECK(!refused.success);
     RB_CHECK(refused.reason == rb_servo::ik_solver::kReasonMaxIterations);
     RB_CHECK(refused.position_error_m > base.ik.position_tolerance_m);
-    // No joint was pinned -- this is the iteration budget, not a range limit.
-    RB_CHECK(refused.joint_limit_worst_index < 0);
+    // No joint was pinned -- this is the iteration budget, not a range limit. The
+    // distinguishing field is joint_limit_PINNED; the margin is now reported on every
+    // solve (2026-08-28) precisely so a caller can ask "how close to a bound is this?"
+    // without the answer being reserved for failures, so index >= 0 here is expected and
+    // says nothing about why the solve was refused.
+    RB_CHECK(!refused.joint_limit_pinned);
+    RB_CHECK(refused.joint_limit_worst_margin_deg > 1.0);   // genuinely far from any bound
 
     // A band wide enough for that residual accepts it, and names itself in the reason so
     // a best-effort tick stays distinguishable from a real convergence in telemetry.
@@ -1612,6 +1617,89 @@ bool testIkLimitReliefIsStableNearAReachableBound() {
     return true;
 }
 
+
+// The joint-limit margin must be reported on EVERY solve, not only on the ones that
+// failed at a limit. 2026-08-28: it was filled only inside the joint-limit branches, so
+// a healthy solve came back index -1 / margin 0. That silence is why a margin-gated
+// filter measured as doing nothing the first time it was tried -- the gate could never
+// see how close the pose was to a bound.
+//
+// It also matters because of WHERE the shake is. Measured on
+// servo_log_20260828_122527.csv (the left-then-right return-to-pick shake): both arms'
+// worst ticks of the run were 1-8 deg OFF their elbow bound, and the right arm's single
+// worst tick CONVERGED IN ONE ITERATION and was not pinned. Nothing about it is an IK
+// failure, so every pinned/exhausted test is blind to it; only the margin sees it.
+bool testIkJointLimitMarginIsAlwaysReported() {
+    const rb_servo::ArmMountConfig mount = stackRealLeftMount();
+    rb_servo::PinocchioKinematics kin(stackRealIkConfig());
+
+    // A pose comfortably inside every bound: still must name the closest one.
+    rb_servo::JointArray interior = measuredPinnedPosture();
+    interior[2] = 60.0;
+    const rb_servo::Pose6D interior_target =
+        kin.computeTcpStand(rb_servo::ArmId::Left, interior, mount);
+    const rb_servo::IkResult far =
+        kin.solveIk(rb_servo::ArmId::Left, interior_target, interior, mount);
+    RB_CHECK(far.success);
+    RB_CHECK(!far.joint_limit_pinned);
+    RB_CHECK(far.joint_limit_worst_index == 2);              // the elbow is the only bounded joint
+    RB_CHECK(std::fabs(far.joint_limit_worst_margin_deg - 90.0) < 1.0);   // 150 - 60
+
+    // THE BAND THAT WAS UNPROTECTED: a few degrees off the bound, converging normally.
+    // This is the regime that shook, and every field a pinned-only gate reads is benign
+    // here -- which is the whole point.
+    for (double elbow : {142.0, 147.0, 149.0}) {
+        rb_servo::JointArray near = measuredPinnedPosture();
+        near[2] = elbow;
+        const rb_servo::Pose6D t =
+            kin.computeTcpStand(rb_servo::ArmId::Left, near, mount);
+        const rb_servo::IkResult r = kin.solveIk(rb_servo::ArmId::Left, t, near, mount);
+        RB_CHECK(r.success);
+        RB_CHECK(!r.joint_limit_pinned);                                  // benign ...
+        RB_CHECK(r.iterations < stackRealIkConfig().ik.max_iterations);   // ... and converged
+        RB_CHECK(r.joint_limit_worst_index == 2);                         // but the margin SEES it
+        RB_CHECK(std::fabs(r.joint_limit_worst_margin_deg - (150.0 - elbow)) < 0.5);
+        // A 5 deg band (the shipped value) must cover 147 and 149 and leave 142 alone.
+        const bool in_band = r.joint_limit_worst_margin_deg < 5.0;
+        RB_CHECK(in_band == (elbow > 145.0));
+    }
+
+    // The RIGHT arm folds to the OPPOSITE bound (-150), and the margin must be the same
+    // unsigned distance there -- the 2026-08-28 run shook at BOTH, left at +150.03 and
+    // right at -149.98.
+    rb_servo::ArmMountConfig right_mount = rightMount();
+    rb_servo::JointArray right_near = measuredPinnedPosture();
+    right_near[0] = -240.0;
+    right_near[2] = -147.0;
+    rb_servo::PinocchioKinematics rkin(stackRealIkConfig());
+    const rb_servo::Pose6D rt =
+        rkin.computeTcpStand(rb_servo::ArmId::Right, right_near, right_mount);
+    const rb_servo::IkResult rr =
+        rkin.solveIk(rb_servo::ArmId::Right, rt, right_near, right_mount);
+    RB_CHECK(rr.joint_limit_worst_index == 2);
+    RB_CHECK(std::fabs(rr.joint_limit_worst_margin_deg - 3.0) < 0.5);
+    return true;
+}
+
+// The band knob is meaningless without the filter it widens.
+bool testIkPinnedLowpassMarginConfigBounds() {
+    const auto cfg = [](const std::string& ik_lines) {
+        return "schema: robotics_lab.rb_servo_server.v1\n"
+               "kinematics:\n"
+               "  enable: true\n"
+               "  provider: pinocchio\n"
+               "  urdf: \"" + rb3Urdf().string() + "\"\n"
+               "  ik:\n" + ik_lines;
+    };
+    RB_CHECK(loadRejects(writeTempConfig(
+        "band-without-lowpass", cfg("    pinned_lowpass_margin_deg: 5.0\n"))));
+    RB_CHECK(loadRejects(writeTempConfig(
+        "band-negative",
+        cfg("    pinned_unconverged_lowpass_hz: 8.0\n"
+            "    pinned_lowpass_margin_deg: -1.0\n"))));
+    return true;
+}
+
 int main() {
     if (!testFloorPointZJacobianFiniteDifference()) return 1;
     if (!testStandAxisJacobianFiniteDifference()) return 1;
@@ -1639,5 +1727,7 @@ int main() {
     if (!testIkLimitAvoidanceEscapesTheBound()) return 1;
     if (!testIkLimitReliefConfigBounds()) return 1;
     if (!testIkLimitReliefIsStableNearAReachableBound()) return 1;
+    if (!testIkJointLimitMarginIsAlwaysReported()) return 1;
+    if (!testIkPinnedLowpassMarginConfigBounds()) return 1;
     return 0;
 }

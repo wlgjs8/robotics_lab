@@ -6428,9 +6428,20 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 // converged or not. The pinned+exhausted case stays, because it is the
                 // regime that exists when relief is switched off.
                 const bool relief_active = solve.ik_limit_relief_weight < 1.0;
+                // MARGIN BAND (ik.pinned_lowpass_margin_deg). The pinned test covers the
+                // innermost degree of travel and nothing else; measured 2026-08-28 on
+                // servo_log_20260828_122527.csv, both arms' worst ticks of the run sat
+                // 1-8 deg OFF the bound, where the policy's own command is 3.0-3.6x
+                // rougher than in free space and one of them converged in a SINGLE
+                // iteration. No pinned-or-exhausted test can see those. See config.hpp
+                // for the full margin table.
+                const double margin_band = config_.kinematics.ik.pinned_lowpass_margin_deg;
+                const bool near_a_bound =
+                    margin_band > 0.0 && solve.ik_joint_limit_worst_index >= 0 &&
+                    solve.ik_joint_limit_worst_margin_deg < margin_band;
                 const bool pinned_unconverged =
                     solve.attempted && solve.success &&
-                    (relief_active ||
+                    (relief_active || near_a_bound ||
                      (solve.ik_joint_limit_pinned &&
                       solve.ik_iterations >= config_.kinematics.ik.max_iterations));
                 if (lp_hz > 0.0 && pinned_unconverged && ctx.ik_pinned_lowpass_valid &&

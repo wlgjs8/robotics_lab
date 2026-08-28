@@ -691,6 +691,20 @@ IkResult PinocchioKinematics::solveIkDamped(
             result.orientation_error_rad = orientation_error_rad;
             result.duration_us = elapsedUs();
             result.iterations = iterations;
+            // ALWAYS name the closest joint limit, converged or not. This used to be
+            // filled only on the joint-limit branches, so a healthy solve reported
+            // index -1 / margin 0 and no caller could ask "how close is this pose to a
+            // bound?". Measured 2026-08-28 (servo_log_20260828_122527.csv): the roughest
+            // ticks of the whole run sit 1-8 deg OFF the elbow bound, converging in ONE
+            // iteration -- invisible to every pinned-only test, and the reason a
+            // margin-gated filter looked like it did nothing when it was first tried.
+            worstJointLimit(
+                q,
+                impl_->model,
+                impl_->joints,
+                &result.joint_limit_worst_index,
+                &result.joint_limit_worst_margin_deg
+            );
             result.min_singular_value = last_min_singular_value;
             result.applied_damping = last_applied_damping;
             result.limit_relief_weight = last_limit_relief_weight;
@@ -1043,18 +1057,16 @@ IkResult PinocchioKinematics::solveIkDamped(
     result.limit_relief_weight = last_limit_relief_weight;
     result.limit_avoidance_step_deg = last_limit_avoidance_step;
     result.joint_limit_pinned = limit_pinned;
-    if (hit_joint_limit) {
-        // Name the offending joint so a joint_limit failure is actionable (which axis
-        // pinned, and how far inside its limit) instead of just "joint_limit".
-        worstJointLimit(
-            q,
-            impl_->model,
-            impl_->joints,
-            &result.joint_limit_worst_index,
-            &result.joint_limit_worst_margin_deg
-        );
-        if (limit_pinned) logJointLimitThrottled(arm, result);
-    }
+    // Unconditional: see the note on the convergence return above. The margin is a
+    // property of the POSE, not of a failure, and callers gate on it.
+    worstJointLimit(
+        q,
+        impl_->model,
+        impl_->joints,
+        &result.joint_limit_worst_index,
+        &result.joint_limit_worst_margin_deg
+    );
+    if (hit_joint_limit && limit_pinned) logJointLimitThrottled(arm, result);
     return result;
 }
 

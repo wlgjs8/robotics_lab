@@ -468,7 +468,7 @@ safety:
     # 스탠드 플로어와 같은 높이(z=0)라 플로어를 꺼도 테이블 접근 감속이 남던 것을
     # 제거 — 바닥 backstop은 FT 센서로 대체, x/y/상단 작업공간 제한은 유지.
     min_m: [-0.400, -0.900, -0.100]
-    max_m: [0.400, -0.250, 0.590]
+    max_m: [0.400, -0.300, 0.590]
     runtime_min_m: [-1.2, -1.6, -0.2]
     runtime_max_m: [1.2, 0.6, 1.6]
     fail_policy: clamp_hold
@@ -1471,6 +1471,28 @@ kinematics:
     # re-creates the loop-rate hold/move alternation joint_limit_track_feasible exists to
     # prevent, and releases with a step.
     pinned_unconverged_lowpass_hz: 8.0
+    # BAND AROUND THE BOUND, not just ON it (2026-08-28, servo_log_20260828_122527.csv --
+    # the run whose left-then-right return-to-pick shake this addresses).
+    # Both arms' worst ticks of that run were at their elbow's OPPOSITE bounds -- left
+    # +150.03 deg at t=96 (1090 mdeg), right -149.98 deg at t=114 (1236 mdeg), the two
+    # highest of the whole run -- and the roughness peaks 1-8 deg OFF the stop, not on it:
+    #   margin 20-200 deg  policy target 0.508 mm   q_sent  77.8 mdeg
+    #   margin   8-20 deg                0.933 mm          137.7 mdeg
+    #   margin    3-8 deg                1.543 mm          196.9 mdeg
+    #   margin    1-3 deg                1.815 mm          275.1 mdeg   <- worst
+    #   margin    0-1 deg                1.505 mm          123.0 mdeg   <- only this was covered
+    # The right arm's single worst tick converged in ONE IK iteration and was not pinned,
+    # so no pinned/iteration-exhausted test can reach it. What is actually happening is
+    # upstream: the POLICY's own command roughens 3.0-3.6x as the elbow closes on its
+    # stop (its tracking error goes 1.0 -> 4.5 mm there and pi0.5 is closed-loop on
+    # proprio), and the servo passes 64-80% of that through -- except where this low-pass
+    # runs, which cuts the transfer to 39%.
+    # SIZED, not guessed: against that run's own ticks, pinned-only covers 6.1% of the
+    # roughest 1%; a 5 deg band covers 25.7% of them while filtering just 1.5% of all
+    # ticks. 8 deg and 12 deg cover no more rough ticks and filter 2x / 4.6x as many.
+    # NOTE the remaining 74%: most rough ticks are NOT near a bound. This fixes the
+    # joint-limit shake specifically, and nothing else.
+    pinned_lowpass_margin_deg: 5.0
 
 cartesian_control:
   # goal lead the measured TCP by more than this (position m / orientation rad).
