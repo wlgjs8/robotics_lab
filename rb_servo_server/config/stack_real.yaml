@@ -21,7 +21,7 @@ left_robot:
   # first-order pole 0.900/tick (tau 9.5 ticks / 19 ms) that this turns off.
   # An earlier LPF-off attempt produced jerk/jitter on hardware; being retried now
   # that the box queue is regulated (queue_sync below) instead of free-running.
-  servo_alpha: 10.0
+  servo_alpha: 1.0
   # Wire text precision for streamed move_servo_j joint values. The vendor SDK
   # formats with default stream precision (6 SIGNIFICANT digits): at J1's
   # working range (209-278 deg) that is a 0.001 deg staircase on the wire,
@@ -56,7 +56,7 @@ right_robot:
   # first-order pole 0.900/tick (tau 9.5 ticks / 19 ms) that this turns off.
   # An earlier LPF-off attempt produced jerk/jitter on hardware; being retried now
   # that the box queue is regulated (queue_sync below) instead of free-running.
-  servo_alpha: 10.0
+  servo_alpha: 1.0
   # See left_robot.servo_j_text_precision (same rationale; 0 = legacy SDK A/B).
   servo_j_text_precision: 7
   disable_waiting_ack: true    # ACK-off 500Hz streaming; config-driven, no RB_ALLOW_* env gate
