@@ -581,6 +581,42 @@ def apply_source_override_transitions(
             reset_source_after_override_change(source, arms=arms)
 
 
+def should_invalidate_chunks_for_override(
+    arm_mask: Any,
+    overridden_arms: Iterable[str],
+    arm_indices: Iterable[tuple[str, int]] = (("left", 0), ("right", 1)),
+) -> bool:
+    """Should an arm-init override throw the SHARED policy chunk away?
+
+    Only when it leaves no arm behind. The overridden arm is masked out the
+    moment the override starts and every consumer of the chunk skips a masked
+    arm, so its stale slice is never read; a peer arm's slice is still valid
+    because that arm did not move.
+
+    Discarding regardless is what broke: the chunk-overlay publisher returns
+    early on a null chunk, for BOTH arms, so one arm's recovery blanked the
+    whole stream. MEASURED on servo_log_20260828_004539.csv -- 7 right-arm
+    roi_auto_recover events (all y_max) each cost the LEFT arm its chunk
+    follower for the entire override (0.9-2.1 s, 5-11 chunk frames skipped),
+    ending in a 12,113 deg/s^2 re-engage burst, the largest command
+    acceleration in that run. The left arm never moved.
+
+    `arm_mask` is the PRE-override mask: the caller runs before
+    apply_source_arm_mask() installs the new one, so the arms about to be
+    masked are subtracted here instead.
+    """
+    overridden = set(overridden_arms)
+    for arm, idx in arm_indices:
+        if arm in overridden:
+            continue
+        try:
+            if idx < len(arm_mask) and float(arm_mask[idx]) > 0.0:
+                return False  # a peer is still driving: keep the chunk
+        except (TypeError, ValueError, IndexError):
+            continue
+    return True
+
+
 def reset_source_after_override_change(source: object, *, arms: Iterable[str] | None = None) -> None:
     for name in ("_clear_target_pose_state", "reset_engagement"):
         hook = getattr(source, name, None)

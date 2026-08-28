@@ -34,6 +34,7 @@ from .flow_dataset import (
     pose_from_state_payload,
     runtime_proprio_from_state,
 )
+from .arm_init_control import should_invalidate_chunks_for_override
 from .camera_bundle_client import resolve_frame
 from .chunk_overlay_publisher import ChunkOverlayPublisher
 from .flow_model import FlowMatchingPolicy, sample_action_chunks
@@ -605,14 +606,42 @@ class FlowMatchingActionSource:
             if idx < len(after_mask):
                 after_mask[idx] = 0.0
         self._clear_target_pose_state(arms)
-        self._invalidate_policy_chunks(reason="arm_init_start")
+        # Do NOT throw the shared chunk away when a PEER arm is still driving.
+        #
+        # The overridden arm is masked out immediately (after_mask above), and every
+        # consumer of the chunk skips a masked arm -- _foh_begin_chunk,
+        # _foh_tick_intent, _remember_emitted_deltas_for_step and
+        # _publish_chunk_overlay all `continue` on arm_mask[idx] <= 0. So its stale
+        # slice is never read and costs nothing. The peer's slice is still valid:
+        # that arm did not move.
+        #
+        # Invalidating anyway blanked the whole stream, because
+        # _publish_chunk_overlay returns early on `chunk is None` -- for BOTH arms.
+        # MEASURED on servo_log_20260828_004539.csv, where 7 right-arm
+        # roi_auto_recover events (all y_max) each cost the LEFT arm its chunk
+        # follower: mode dropped to Hold, the server logged
+        # "disengaged (mode/enable)", and the arm ran on the SMD fallback for the
+        # whole override -- 0.9-2.1 s, 5-11 chunk frames skipped -- before
+        # re-engaging with a 12,113 deg/s^2 burst, the largest command
+        # acceleration in the run. The left arm never moved and never needed to
+        # stop.
+        #
+        # When the override covers every driven arm there is nothing left to
+        # protect, so the old global behaviour still applies.
+        chunk_invalidated = should_invalidate_chunks_for_override(
+            self.arm_mask,
+            arms,
+            arm_indices=tuple((arm, idx) for arm, idx, _sl in self._foh_arm_indices()),
+        )
+        if chunk_invalidated:
+            self._invalidate_policy_chunks(reason="arm_init_start")
         self._log_arm_init_event(
             "arm_init_override_start",
             arms,
             snapshot,
             before_mask=before_mask,
             after_mask=after_mask,
-            chunk_invalidated=True,
+            chunk_invalidated=chunk_invalidated,
         )
 
     def on_arm_init_override_done(self, arms: tuple[str, ...], snapshot: StateSnapshot) -> None:
