@@ -1620,10 +1620,31 @@ cartesian_control:
         # reflexes appear, this accel raise (not the reflex threshold) is the
         # first suspect. SPEED_SCALE stays 1.0 by operator decision.
         max_linear_accel_m_s2: 12.0     # 6.0 -> 12.0 (2026-08-14, binding; see above)
-        max_linear_jerk_m_s3: 4000.0    # 2000.0 -> 4000.0 (2026-08-14 paired raise)
+        # 2026-08-28: 4000.0 -> 2000.0 (and ang 8000 -> 4000), operator request, to
+        # soften the acceleration transients that excite the arm's 11-13 Hz mode.
+        # At dt 2 ms, 4000 m/s^3 lets acceleration swing 8 m/s^2 in ONE tick, so the
+        # 12 m/s^2 ceiling is reachable in ~3 ms -- near-step acceleration, which is
+        # broadband and hits that mode directly. Measured on
+        # servo_log_20260828_112134/114352: the Ruckig output used only 58% of the
+        # jerk limit at p50 (91% max) while acceleration ran at 45% p50 and touched
+        # the 12 m/s^2 ceiling, and vibration correlated with acceleration (+0.61)
+        # more than with jerk (+0.42).
+        # THE 2026-08-14 CONCERN WAS CHECKED, NOT ASSUMED. That entry doubled the
+        # jerks specifically to "keep the accel headroom reachable within dt", so
+        # halving them risks the segment infeasibility it fixed. follower_replay on
+        # THIS run's own knot stream (extracted from the chunk-row log) says the
+        # cost is small, because the accel raise to 12/40 stays:
+        #     left   4000/8000  >1.5 1.3%  conv 93.1%  projP95 0.25mm
+        #     left   2000/4000  >1.5 2.1%  conv 90.0%  projP95 0.71mm
+        #     right  4000/8000  >1.5 1.7%  conv 95.4%  projP95 0.00mm
+        #     right  2000/4000  >1.5 2.0%  conv 92.7%  projP95 0.25mm
+        # against the 2026-08-14 problem state of >1.5 13.9% / conv 74.6%. Nowhere
+        # near it. Revert this pair (not the accels) if trembling or micro-pauses
+        # of the infeasibility kind reappear -- judge with tools/follower_feasibility.py.
+        max_linear_jerk_m_s3: 2000.0    # 4000.0 -> 2000.0 (2026-08-28, see above)
         max_angular_velocity_rad_s: 0.90
         max_angular_accel_rad_s2: 40.0   # 20.0 -> 40.0 (2026-08-14, binding; see above)
-        max_angular_jerk_rad_s3: 8000.0  # 4000.0 -> 8000.0 (2026-08-14 paired raise)
+        max_angular_jerk_rad_s3: 4000.0  # 8000.0 -> 4000.0 (2026-08-28, paired with the linear halving above)
         discard_head_steps: 0     # v3 producer already removes rows emitted since observation
         # Match FLOW_INFER_CHUNK_EXECUTE_STEPS: consume exactly the policy
         # execution window at normal pace before decelerating into reserve rows
@@ -1704,8 +1725,26 @@ cartesian_control:
         #     nf 2.8  |H|=0.140  0.66x   lag 1.56x   1.31 / 1.91 mm
         #     nf 2.5  |H|=0.113  0.54x   lag 1.96x   1.65 / 2.39 mm
         # 3.0 is deliberately the small step: 24% less of the offending band for
-        # +0.3 mm of lag. Revert to 3.5 if chunk-following depth regresses -- that
-        # cost is exactly what this knob buys the smoothness with.
+        # +0.3 mm of lag.
+        #
+        # TRIED AND REVERTED, 2026-08-28 (servo_log_20260828_114352.csv against
+        # servo_log_20260828_112134.csv). The change took effect exactly as
+        # computed -- outSMD lag went 1.44x (p50) / 1.46x (p90) / 1.42x
+        # (speed-matched) against a predicted 1.36x, and the MEDIAN 8-40 Hz
+        # command-velocity rms fell 0.79x against a predicted 0.76x. The physics
+        # was right and it did not help: p90 was 1.00x and the speed-matched p90
+        # 1.01x, i.e. the worst windows -- the ones the operator actually sees --
+        # did not improve at all, and the actual/command amplification stayed
+        # 1.18-1.47x, unchanged. The tail is fast TRANSIENTS, not steady band
+        # content, and uniform band attenuation does not touch them. Paying +42%
+        # lag (which lands directly on chunk-following depth) for a 21% cut in
+        # the quiet band was the wrong trade, so nf is back at 3.5.
+        # (The comparison is not a controlled A/B -- different run, different
+        # trajectory, and the AFTER run was faster: worst-window peak speed
+        # 96-124 deg/s vs 62 deg/s. The lag ratio is trustworthy because it is a
+        # filter property nearly independent of trajectory; the vibration ratio
+        # is not, which is why the reverted verdict rests on p90 being flat
+        # rather than on the max going up.)
         #
         # TWO ALTERNATIVES WERE COMPUTED AND REJECTED, both worse per unit lag:
         #   velocity_ff_lpf_hz 2.0 (keeping nf 3.5) gives |H|=0.154 (0.73x) for
@@ -1717,7 +1756,7 @@ cartesian_control:
         # and this repo changes one reviewed setting at a time.
         output_smd:
           enable: true
-          nf_linear_hz: 3.0
+          nf_linear_hz: 3.5
           nf_angular_hz: 2.5
           damping_ratio: 1.0
           velocity_ff: true
