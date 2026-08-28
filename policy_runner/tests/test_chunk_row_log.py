@@ -119,5 +119,63 @@ class ChunkRowLoggingTest(unittest.TestCase):
             self.assertFalse(log.enabled)
 
 
+try:
+    from policy_runner.flow_inference import FlowMatchingActionSource as _F
+except Exception as _exc:  # torch and friends are optional in this environment
+    _F = None
+    _F_REASON = f"{type(_exc).__name__}: {_exc}"
+else:
+    _F_REASON = ""
+
+
+@unittest.skipIf(_F is None, f"flow_inference unavailable ({_F_REASON})")
+class SurvivesSkippedBaseInitTest(unittest.TestCase):
+    """OpenpiRemoteActionSource deliberately skips FlowMatchingActionSource.__init__
+    and mirrors the state it needs by hand (openpi_remote.py). The first version of
+    the chunk-row hook read self._chunk_row_logger_started directly, so on the
+    openpi path it raised AttributeError on every chunk and the bare except
+    swallowed it: 285 chunks published on 2026-08-28 and not one row logged, with
+    nothing in the console to say why.
+
+    So the hook must work on an instance that never ran that __init__, and it must
+    say something when it cannot.
+    """
+
+    def test_logs_without_base_init(self):
+        F = _F
+        class Skipped:  # never runs FlowMatchingActionSource.__init__
+            _chunk_row_log_path = F._chunk_row_log_path
+            _log_chunk_rows = F._log_chunk_rows
+            policy_dt_sec = 1.0 / 30.0
+            chunk_stitch_mode = "boundary"
+            speed_scale = 1.0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            obj = Skipped()
+            obj._rollout_step_logger = type("L", (), {"path": str(Path(tmp) / "run.jsonl")})()
+            rows = _sample_rows()
+            obj._log_chunk_rows(
+                seq=1, now_monotonic=0.0, execute_limit=6, runway_steps=4,
+                anchor_mode="command",
+                projected={"left": rows, "right": rows},
+                projected_delta={"left": rows, "right": rows},
+            )
+            out = Path(tmp) / "run.chunks.jsonl"
+            text = ""
+            for _ in range(300):          # writer thread is async
+                if out.exists():
+                    text = out.read_text().strip()
+                    if text:
+                        break
+                time.sleep(0.01)
+            self.assertTrue(text, "no chunk row reached the file without base __init__")
+            rec = json.loads(text.splitlines()[0])
+            self.assertEqual(rec["seq"], 1)
+            self.assertEqual(len(rec["left"]), 6)
+            close = getattr(getattr(obj, "_chunk_row_logger", None), "close", None)
+            if callable(close):
+                close()
+
+
 if __name__ == "__main__":
     unittest.main()

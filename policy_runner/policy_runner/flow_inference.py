@@ -1518,7 +1518,13 @@ class FlowMatchingActionSource:
     ) -> None:
         """Persist the rows this chunk publishes. Best effort: never raises."""
         try:
-            if not self._chunk_row_logger_started:
+            # getattr defaults, NOT plain attribute reads: OpenpiRemoteActionSource
+            # deliberately skips this class's __init__ and mirrors the state it
+            # needs by hand (openpi_remote.py). Depending on __init__ here meant
+            # the openpi path raised AttributeError on every chunk -- measured
+            # 2026-08-28, 285 chunks published and not one row logged. Anything
+            # this method needs must survive an instance that never ran __init__.
+            if not getattr(self, "_chunk_row_logger_started", False):
                 self._chunk_row_logger_started = True
                 path = self._chunk_row_log_path()
                 self._chunk_row_logger = ChunkRowLogger(path)
@@ -1528,7 +1534,7 @@ class FlowMatchingActionSource:
                     + (f" (DISABLED: {reason})" if reason else ""),
                     flush=True,
                 )
-            logger = self._chunk_row_logger
+            logger = getattr(self, "_chunk_row_logger", None)
             if logger is None or not logger.enabled:
                 return
             logger.log_chunk(
@@ -1544,7 +1550,17 @@ class FlowMatchingActionSource:
                 projected=projected,
                 projected_delta=projected_delta,
             )
-        except Exception:  # noqa: BLE001 - telemetry must never break a rollout.
+        except Exception as exc:  # noqa: BLE001 - telemetry must never break a rollout.
+            # SAY SO. The first version of this swallowed silently, and when the
+            # log then failed to appear after a run there was nothing to go on --
+            # exactly the silent-inert-feature failure this logger exists to end.
+            # Printed once; the rollout continues either way.
+            if not getattr(self, "_chunk_row_log_error_reported", False):
+                self._chunk_row_log_error_reported = True
+                print(
+                    f"[flow-infer] chunk-row log DISABLED: {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
             self._chunk_row_logger = None
 
     def _publish_chunk_overlay(self, now_monotonic: float) -> None:

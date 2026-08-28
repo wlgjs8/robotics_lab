@@ -23,10 +23,21 @@ _STOP = object()
 
 
 class _AsyncJsonlWriter:
-    def __init__(self, path: str | Path, *, queue_capacity: int = 2048) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        queue_capacity: int = 2048,
+        flush_each: bool = False,
+    ) -> None:
         if queue_capacity <= 0:
             raise ValueError("queue_capacity must be positive")
         self.path = Path(path).expanduser()
+        # Default False keeps the existing step-log behaviour (64 KB buffer,
+        # flushed on close). True is for logs whose whole point is to survive a
+        # run that gets interrupted -- a rollout killed with Ctrl-C mid-buffer
+        # otherwise loses the records the investigation needed.
+        self._flush_each = bool(flush_each)
         self._queue: queue.Queue[object] = queue.Queue(maxsize=int(queue_capacity))
         self._accepting = True
         self._failed = threading.Event()
@@ -95,6 +106,8 @@ class _AsyncJsonlWriter:
                         )
                         + "\n"
                     )
+                    if self._flush_each:
+                        handle.flush()
                 handle.flush()
         except Exception as exc:  # noqa: BLE001 - telemetry must never affect control.
             self.disable(f"writer_error:{type(exc).__name__}")
@@ -131,7 +144,11 @@ class ChunkRowLogger:
         self._disabled_reason: str | None = None
         self._writer: Any | None = None
         try:
-            self._writer = writer_factory(path)
+            try:
+                self._writer = writer_factory(path, flush_each=True)
+            except TypeError:
+                # A test double or an older writer without the keyword.
+                self._writer = writer_factory(path)
         except Exception as exc:  # noqa: BLE001 - logging must never break a rollout.
             self._enabled = False
             self._disabled_reason = f"writer_start_error:{type(exc).__name__}"
