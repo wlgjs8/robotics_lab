@@ -87,5 +87,51 @@ inline double planGateStep(
     return gate + cfg.release_alpha * (1.0 - gate);
 }
 
+
+// IK-THROTTLE PLAN PACING. One first-order gate carrying how much of the requested
+// joint step the IK branch-jump rate limiter actually let through, engaged only after
+// the throttle has PERSISTED. `run` is the count of consecutive throttled ticks
+// (caller-maintained, reset to 0 on any un-throttled tick).
+//
+// The persistence condition is the whole design. Feeding transient clamps (the
+// joint-limit barrier, the acceleration clamp) into the plan gate was measured and
+// REVERTED -- the barrier's job is to hold ONE joint at its standoff, so realized <
+// requested is permanently true there while it works correctly, and letting that stop
+// the plan clock of all six joints produced a 4.8 Hz ripple at 2.1-2.8x the baseline
+// tremble. A sustained IK throttle is different in kind: measured 2026-08-28
+// (servo_log_20260828_135443.csv) it held for 150 consecutive ticks with IK wanting
+// 4.233 deg/tick against a 0.350 ceiling, and the plan advancing through it wound the
+// follower divergence to 50.05 mm -- grazing the 50 mm re-anchor latch -- whose
+// catch-up was that run's two worst seconds.
+//
+// Never returns below cfg.min_gate: the plan SLOWS to the rate the arm is achieving,
+// it never stops, so this cannot produce the stop-go the freeze alternative would.
+inline double ikThrottlePlanGateStep(
+    double gate,
+    int run,
+    bool throttled,
+    double achieved_ratio,
+    const SafetyPlanGateConfig& cfg
+) {
+    const bool sustained =
+        cfg.ik_throttle_min_ticks > 0 && throttled && run >= cfg.ik_throttle_min_ticks;
+    const double target =
+        sustained ? std::clamp(achieved_ratio, cfg.min_gate, 1.0) : 1.0;
+    const double alpha = target < gate ? cfg.attack_alpha : cfg.release_alpha;
+    return gate + alpha * (target - gate);
+}
+
+// RAMPED ENGAGEMENT of the pinned/throttled joint low-pass. Attacks in one tick and
+// decays with `release_sec`, so no gate transition can step the transfer function. The
+// instant release it replaces put a median 4,482 deg/s^2 into the command against 83
+// elsewhere (2026-08-28, 54x, peak 184,224 = 122x ddq_max), reversing a joint between
+// two 2 ms samples. release_sec <= 0 reproduces that instant release.
+inline double lowpassEngagementStep(double engage, bool gate_on,
+                                    double release_sec, double dt_sec) {
+    if (gate_on) return 1.0;
+    if (!(release_sec > 0.0) || !(dt_sec > 0.0)) return 0.0;
+    return engage * std::exp(-dt_sec / release_sec);
+}
+
 }  // namespace control
 }  // namespace rb_servo

@@ -1503,6 +1503,13 @@ void validateConfig(const DualArmConfig& cfg) {
         if (!std::isfinite(pg.min_gate) || pg.min_gate < 0.0 || pg.min_gate > 1.0) {
             throw std::runtime_error("safety.plan_gate.min_gate must be finite and in [0, 1]");
         }
+        if (pg.ik_throttle_min_ticks < 0) {
+            throw std::runtime_error(
+                "safety.plan_gate.ik_throttle_min_ticks must be >= 0 (it is the number of "
+                "CONSECUTIVE throttled ticks before the plan is paced, which is what "
+                "separates a sustained IK throttle from the transient clamps that a "
+                "previous attempt at this was reverted for)");
+        }
     }
     if (cfg.safety.roi_box.enable) {
         const auto& rb = cfg.safety.roi_box;
@@ -2462,6 +2469,14 @@ void validateConfig(const DualArmConfig& cfg) {
                               "kinematics.ik.pinned_unconverged_lowpass_hz");
     validateNonNegativeFinite(cfg.kinematics.ik.pinned_lowpass_margin_deg,
                               "kinematics.ik.pinned_lowpass_margin_deg");
+    validateNonNegativeFinite(cfg.kinematics.ik.pinned_lowpass_release_sec,
+                              "kinematics.ik.pinned_lowpass_release_sec");
+    if (cfg.kinematics.ik.pinned_lowpass_release_sec > 0.0 &&
+        !(cfg.kinematics.ik.pinned_unconverged_lowpass_hz > 0.0)) {
+        throw std::runtime_error(
+            "kinematics.ik.pinned_lowpass_release_sec ramps the release of the low-pass, "
+            "so it needs a positive pinned_unconverged_lowpass_hz to ramp.");
+    }
     if (cfg.kinematics.ik.pinned_lowpass_margin_deg > 0.0 &&
         !(cfg.kinematics.ik.pinned_unconverged_lowpass_hz > 0.0)) {
         throw std::runtime_error(
@@ -2990,9 +3005,14 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "attack_alpha",
                 "deadband_deg",
                 "min_gate",
+                "ik_throttle_min_ticks",
             }, "safety.plan_gate");
             if (has(pg, "enable")) {
                 cfg.safety.plan_gate.enable = asBool(pg["enable"], "safety.plan_gate.enable");
+            }
+            if (has(pg, "ik_throttle_min_ticks")) {
+                cfg.safety.plan_gate.ik_throttle_min_ticks =
+                    asInt(pg["ik_throttle_min_ticks"], "safety.plan_gate.ik_throttle_min_ticks");
             }
             if (has(pg, "release_alpha")) {
                 cfg.safety.plan_gate.release_alpha =
@@ -4367,6 +4387,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "limit_avoidance_max_step_deg",
                 "pinned_unconverged_lowpass_hz",
                 "pinned_lowpass_margin_deg",
+                "pinned_lowpass_release_sec",
             }, "kinematics.ik");
             if (has(ik, "enable")) cfg.kinematics.ik.enable = asBool(ik["enable"], "kinematics.ik.enable");
             if (has(ik, "max_iterations")) cfg.kinematics.ik.max_iterations = asInt(ik["max_iterations"], "kinematics.ik.max_iterations");
@@ -4400,6 +4421,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ik, "limit_avoidance_max_step_deg")) cfg.kinematics.ik.limit_avoidance_max_step_deg = asDouble(ik["limit_avoidance_max_step_deg"], "kinematics.ik.limit_avoidance_max_step_deg");
             if (has(ik, "pinned_unconverged_lowpass_hz")) cfg.kinematics.ik.pinned_unconverged_lowpass_hz = asDouble(ik["pinned_unconverged_lowpass_hz"], "kinematics.ik.pinned_unconverged_lowpass_hz");
             if (has(ik, "pinned_lowpass_margin_deg")) cfg.kinematics.ik.pinned_lowpass_margin_deg = asDouble(ik["pinned_lowpass_margin_deg"], "kinematics.ik.pinned_lowpass_margin_deg");
+            if (has(ik, "pinned_lowpass_release_sec")) cfg.kinematics.ik.pinned_lowpass_release_sec = asDouble(ik["pinned_lowpass_release_sec"], "kinematics.ik.pinned_lowpass_release_sec");
         }
     }
 

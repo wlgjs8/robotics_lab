@@ -10,6 +10,9 @@
 using rb_servo::JointArray;
 using rb_servo::SafetyPlanGateConfig;
 using rb_servo::control::planGateStep;
+using rb_servo::control::ikThrottlePlanGateStep;
+using rb_servo::control::lowpassEngagementStep;
+using rb_servo::SafetyPlanGateConfig;
 
 static int g_failures = 0;
 static void check(bool ok, const char* name) {
@@ -170,8 +173,85 @@ int main() {
     check(g > 0.2499 && g < 0.2501, "a fully blocked step settles at min_gate");
   }
 
+
+  // -- IK-THROTTLE PACING: only a SUSTAINED throttle paces the plan ------------
+  //
+  // The persistence condition is the design. Feeding transient clamps (the joint-limit
+  // barrier, the acceleration clamp) into this gate was measured and reverted: it
+  // produced a 4.8 Hz ripple at 2.1-2.8x the baseline tremble. A short throttle must
+  // therefore leave the plan alone.
+  std::printf("Test: IK-throttle pacing needs persistence\n");
+  {
+    SafetyPlanGateConfig c = shipped();
+    c.ik_throttle_min_ticks = 25;   // 50 ms at 500 Hz
+
+    // A 10-tick throttle: shorter than the threshold, so the gate must stay open.
+    double g = 1.0;
+    for (int i = 1; i <= 10; ++i) g = ikThrottlePlanGateStep(g, i, true, 0.14, c);
+    check(g > 0.999, "a throttle shorter than min_ticks does not pace the plan");
+
+    // Sustained: the gate walks down toward the achieved ratio.
+    g = 1.0;
+    for (int i = 1; i <= 300; ++i) g = ikThrottlePlanGateStep(g, i, true, 0.14, c);
+    check(g < 0.20, "a sustained throttle paces the plan toward the achieved ratio");
+    check(g >= c.min_gate, "and never below min_gate");
+
+    // NEVER ZERO. The whole point of pacing rather than freezing is that the plan keeps
+    // moving; a zero gate is the stop-go the freeze alternative was rejected for.
+    SafetyPlanGateConfig floored = c;
+    floored.min_gate = 0.05;
+    double gz = 1.0;
+    for (int i = 1; i <= 5000; ++i) gz = ikThrottlePlanGateStep(gz, i, true, 0.0, floored);
+    check(gz >= floored.min_gate - 1e-12, "a zero achieved ratio still floors at min_gate");
+
+    // Release: once the throttle clears, the gate recovers to 1.
+    double gr = 0.14;
+    for (int i = 0; i < 1000; ++i) gr = ikThrottlePlanGateStep(gr, 0, false, 1.0, c);
+    check(gr > 0.99, "the gate reopens once the throttle clears");
+
+    // Off by default: min_ticks 0 means the law is inert no matter what is fed to it.
+    SafetyPlanGateConfig off = shipped();
+    double go = 1.0;
+    for (int i = 1; i <= 500; ++i) go = ikThrottlePlanGateStep(go, i, true, 0.01, off);
+    check(off.ik_throttle_min_ticks == 0 && go > 0.999, "default-off leaves the plan unpaced");
+  }
+
+  // -- LOW-PASS ENGAGEMENT: the release is a ramp, not a step -----------------
+  //
+  // The instant release put a median 4,482 deg/s^2 into the command against 83
+  // elsewhere (2026-08-28, 54x, peak 184,224 = 122x ddq_max) by reversing a joint
+  // between two 2 ms samples.
+  std::printf("Test: low-pass engagement ramps out\n");
+  {
+    const double dt = 0.002;
+    // Attack is immediate: the tick the gate closes, the filter is fully engaged.
+    check(lowpassEngagementStep(0.0, true, 0.060, dt) == 1.0, "engagement attacks in one tick");
+
+    // Release decays with the configured constant: one tau (60 ms = 30 ticks) leaves
+    // e^-1, two tau leaves e^-2.
+    double e = 1.0;
+    for (int i = 0; i < 30; ++i) e = lowpassEngagementStep(e, false, 0.060, dt);
+    check(e > 0.35 && e < 0.39, "one tau of release is ~37% engaged");
+    for (int i = 0; i < 30; ++i) e = lowpassEngagementStep(e, false, 0.060, dt);
+    check(e > 0.12 && e < 0.15, "two tau of release is ~14% engaged");
+    // Monotone, never negative, and it does not resurrect itself.
+    bool monotone = true;
+    double prev = e;
+    for (int i = 0; i < 500; ++i) {
+      e = lowpassEngagementStep(e, false, 0.060, dt);
+      monotone = monotone && e <= prev + 1e-15 && e >= 0.0;
+      prev = e;
+    }
+    check(monotone, "release is monotone, bounded, and does not resurrect");
+
+    // release_sec <= 0 reproduces the instant release this replaces, so the old
+    // behaviour stays reachable and the knob is a real A/B.
+    check(lowpassEngagementStep(1.0, false, 0.0, dt) == 0.0, "release_sec 0 = instant release");
+  }
+
   std::printf("\n=== %s (%d failure%s) ===\n",
               g_failures == 0 ? "ALL TESTS PASSED" : "TEST FAILURES",
               g_failures, g_failures == 1 ? "" : "s");
+
   return g_failures == 0 ? 0 : 1;
 }

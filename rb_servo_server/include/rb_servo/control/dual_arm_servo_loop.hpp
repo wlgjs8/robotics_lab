@@ -447,6 +447,18 @@ private:
     JointArray right_ik_pinned_lowpass_q_deg_{};
     bool left_ik_pinned_lowpass_valid_ = false;
     bool right_ik_pinned_lowpass_valid_ = false;
+    // Ramped engagement of that low-pass, in [0, 1]. Attacks in one tick when the gate
+    // is on, decays with ik.pinned_lowpass_release_sec when it is off, so a gate
+    // transition can never step the transfer function. See config.hpp for the 54x
+    // acceleration jump that instant release produced on hardware.
+    double left_ik_pinned_lowpass_engage_ = 0.0;
+    double right_ik_pinned_lowpass_engage_ = 0.0;
+    // IK-THROTTLE PLAN PACING (safety.plan_gate.ik_throttle_min_ticks). Consecutive
+    // branch-jump-rate-limited ticks per arm, and the first-order gate derived from the
+    // throttle ratio once that run is long enough to be a real obstruction rather than a
+    // transient clamp. See SafetyPlanGateConfig for why the distinction is duration.
+    int ik_throttle_run_[2] = {0, 0};
+    double ik_throttle_gate_[2] = {1.0, 1.0};
     JointArray left_controller_sim_physical_baseline_q_deg_{};
     JointArray right_controller_sim_physical_baseline_q_deg_{};
 
@@ -1095,6 +1107,7 @@ private:
         uint64_t& freedrive_stage_entered_ns;
         JointArray& ik_pinned_lowpass_q_deg;
         bool& ik_pinned_lowpass_valid;
+        double& ik_pinned_lowpass_engage;
         InitMotionExec& init_motion_exec;
         CartesianSolveTelemetry& last_cartesian_solve;
         LatchedCartesianTarget& latched_cartesian_target;

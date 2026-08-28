@@ -6439,15 +6439,32 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 const bool near_a_bound =
                     margin_band > 0.0 && solve.ik_joint_limit_worst_index >= 0 &&
                     solve.ik_joint_limit_worst_margin_deg < margin_band;
-                const bool pinned_unconverged =
+                // THE IK THROTTLE COUNTS TOO. The branch-jump rate limiter is stateless,
+                // so it switches off in ONE tick; measured 2026-08-28 the command
+                // acceleration at such a release is 54x its value elsewhere (4,482 vs 83
+                // deg/s^2, peaking at 184,224 = 122x ddq_max) and the joint reverses
+                // between two samples. While it throttles, the solution is being dragged
+                // along a direction it cannot finish -- exactly the thing to damp.
+                const bool ik_throttled = solve.ik_branch_jump_rate_limited;
+                const bool gate_on =
                     solve.attempted && solve.success &&
-                    (relief_active || near_a_bound ||
+                    (relief_active || near_a_bound || ik_throttled ||
                      (solve.ik_joint_limit_pinned &&
                       solve.ik_iterations >= config_.kinematics.ik.max_iterations));
-                if (lp_hz > 0.0 && pinned_unconverged && ctx.ik_pinned_lowpass_valid &&
+                // RAMPED ENGAGEMENT. Attack in one tick, release over
+                // pinned_lowpass_release_sec. With a hard release the gate itself puts a
+                // step into the command on the tick it clears, which is the defect above;
+                // with the ramp the filter fades out and the transfer function is
+                // continuous through every transition. release_sec <= 0 = legacy.
+                double& engage = ctx.ik_pinned_lowpass_engage;
+                engage = control::lowpassEngagementStep(
+                    engage, gate_on, config_.kinematics.ik.pinned_lowpass_release_sec, dt_sec);
+                if (lp_hz > 0.0 && engage > 1e-3 && ctx.ik_pinned_lowpass_valid &&
                     dt_sec > 0.0) {
                     constexpr double kTwoPi = 6.283185307179586476925286766559;
-                    const double alpha = 1.0 - std::exp(-kTwoPi * lp_hz * dt_sec);
+                    const double alpha_lp = 1.0 - std::exp(-kTwoPi * lp_hz * dt_sec);
+                    // engage 0 -> alpha 1 -> transparent, so fading out cannot step.
+                    const double alpha = 1.0 - engage * (1.0 - alpha_lp);
                     JointArray& state = ctx.ik_pinned_lowpass_q_deg;
                     for (int j = 0; j < kDof; ++j) {
                         state[j] += alpha * (arm_cartesian_result[i].q_target_deg[j] - state[j]);
@@ -7574,9 +7591,35 @@ ServoTarget DualArmServoLoop::applySafety(
         plan_gate_state_[1] = control::planGateStep(
             plan_gate_state_[1], plan_gate_requested[1], out.right_q_target_deg,
             safety_ctx[1].prev_sent_q_deg, config_.safety.plan_gate);
+
+        // IK-THROTTLE PACING. The gate above reads only the obstruction projection, on
+        // purpose (the barrier/accel-clamp version of this was measured and reverted --
+        // see the note above). A SUSTAINED branch-jump rate limit is the case that note
+        // does not cover: the arm genuinely cannot follow for the whole run, so a plan
+        // that keeps advancing is winding up lead nothing will spend.
+        // MEASURED 2026-08-28 (servo_log_20260828_135443.csv, left arm, t=52-53): a
+        // 150-tick throttle with IK wanting 4.233 deg/tick against a 0.350 ceiling let
+        // the follower divergence reach 50.05 mm -- grazing, not crossing, the 50 mm
+        // re-anchor latch -- and the catch-up was the run's two worst seconds.
+        // Only after `ik_throttle_min_ticks` CONSECUTIVE throttled ticks, and never
+        // below min_gate: the plan slows to the rate the arm is actually achieving,
+        // it does not stop, so this cannot produce stop-go.
+        for (int i = 0; i < 2; ++i) {
+            const CartesianSolveTelemetry& solve =
+                i == 0 ? left_last_cartesian_solve_ : right_last_cartesian_solve_;
+            const bool throttled = solve.attempted && solve.ik_branch_jump_rate_limited;
+            ik_throttle_run_[i] = throttled ? ik_throttle_run_[i] + 1 : 0;
+            // The throttle ratio IS the fraction of the requested step the arm got.
+            ik_throttle_gate_[i] = control::ikThrottlePlanGateStep(
+                ik_throttle_gate_[i], ik_throttle_run_[i], throttled,
+                solve.ik_branch_jump_scale, config_.safety.plan_gate);
+            plan_gate_state_[i] *= ik_throttle_gate_[i];
+        }
     } else {
         plan_gate_state_[0] = 1.0;
         plan_gate_state_[1] = 1.0;
+        ik_throttle_run_[0] = ik_throttle_run_[1] = 0;
+        ik_throttle_gate_[0] = ik_throttle_gate_[1] = 1.0;
     }
     safety_projection_telemetry_.left_plan_gate = plan_gate_state_[0];
     safety_projection_telemetry_.right_plan_gate = plan_gate_state_[1];
@@ -10127,6 +10170,7 @@ DualArmServoLoop::ArmControlContext DualArmServoLoop::armContext(ArmId arm) {
             left_freedrive_stage_entered_ns_,
             left_ik_pinned_lowpass_q_deg_,
             left_ik_pinned_lowpass_valid_,
+            left_ik_pinned_lowpass_engage_,
             left_init_motion_exec_,
             left_last_cartesian_solve_,
             left_latched_cartesian_target_,
@@ -10168,6 +10212,7 @@ DualArmServoLoop::ArmControlContext DualArmServoLoop::armContext(ArmId arm) {
             right_freedrive_stage_entered_ns_,
             right_ik_pinned_lowpass_q_deg_,
             right_ik_pinned_lowpass_valid_,
+            right_ik_pinned_lowpass_engage_,
             right_init_motion_exec_,
             right_last_cartesian_solve_,
             right_latched_cartesian_target_,

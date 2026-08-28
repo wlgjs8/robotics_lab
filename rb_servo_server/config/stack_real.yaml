@@ -327,6 +327,21 @@ safety:
     # ratio's own scale), not the per-joint max as before.
     deadband_deg: 0.05
     min_gate: 0.0
+    # PACE THE PLAN BY A SUSTAINED IK THROTTLE (2026-08-28). The gate above reads only
+    # the obstruction projection, on purpose -- feeding it the joint-limit barrier and
+    # the acceleration clamp was tried and REVERTED (a 4.8 Hz ripple at 2.1-2.8x the
+    # baseline tremble; see the note at the planGateStep call site). A sustained IK
+    # branch-jump rate limit is the case that note does not cover, and the distinction
+    # is DURATION: the accel clamp passes its motion through on the next tick, while the
+    # rate limiter through an ill-conditioned pose held for 150 CONSECUTIVE ticks
+    # (0.3 s) with IK wanting 4.233 deg/tick against a 0.350 ceiling. The follower plan
+    # advancing through that wound the divergence to 50.05 mm -- grazing, not crossing,
+    # the 50 mm re-anchor latch -- and the catch-up was that run's two worst seconds
+    # (3,830 mdeg of >5 Hz command content, 4 follower re-anchors inside 0.6 s).
+    # 25 ticks = 50 ms: long enough that no transient clamp reaches it, short enough to
+    # act well before divergence accumulates. The gate never goes below min_gate, so the
+    # plan SLOWS to the rate the arm is achieving and never stops -- no stop-go.
+    ik_throttle_min_ticks: 25
   # JOINT-LIMIT APPROACH BARRIER (2026-08-26). The hard q_min/q_max clamp stops the
   # command AT the limit but says nothing about how fast it arrives, so a target driving
   # a joint into its stop pins it at full commanded speed. Once pinned, IK cannot solve
@@ -1493,6 +1508,22 @@ kinematics:
     # NOTE the remaining 74%: most rough ticks are NOT near a bound. This fixes the
     # joint-limit shake specifically, and nothing else.
     pinned_lowpass_margin_deg: 5.0
+    # RAMPED RELEASE + the IK throttle in the gate (2026-08-28,
+    # servo_log_20260828_135443.csv). The branch-jump rate limiter is STATELESS, so it
+    # switches off in one tick and the transfer function steps with it: at a release the
+    # commanded acceleration is a median 4,482 deg/s^2 against 83 elsewhere (54x),
+    # peaking at 184,224 = 122x ddq_max, with the joint reversing between two 2 ms
+    # samples. 16% of the 51 ticks that exceeded even the 4x decel ceiling sit exactly on
+    # such a release.
+    # A/B on the recorded command stream replayed through the real solver and clamp chain
+    # (36 s; this is the bench that finally matched hardware -- 24.3x against a measured
+    # 23.4x -- after three synthetic ones did not):
+    #     today                      21 release events, 9,125 deg/s^2 median at release
+    #     + throttle in the gate      6 events,          3,000
+    #     + 120 ms ramped release     6 events,          1,120
+    # The ramp is what makes EVERY gate transition (pinned, relief, margin band,
+    # throttle) continuous, not just this one.
+    pinned_lowpass_release_sec: 0.12
 
 cartesian_control:
   # goal lead the measured TCP by more than this (position m / orientation rad).

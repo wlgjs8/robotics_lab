@@ -361,6 +361,28 @@ struct IkSolverConfig {
     // shakes, and this bounds how much of that reaches the joints. It does not stop the
     // policy from shaking.
     double pinned_lowpass_margin_deg = 0.0;
+    // AND COVER THE IK THROTTLE, WITH A RAMPED RELEASE. The branch-jump rate limiter is
+    // STATELESS: every tick it independently decides whether the seed->solution step
+    // exceeds the ceiling, so it switches off in ONE tick and the transfer function
+    // steps with it. MEASURED 2026-08-28 (servo_log_20260828_135443.csv, left arm):
+    // at a limiter release the commanded acceleration jumps to a median 4,482 deg/s^2
+    // against 83 elsewhere -- 54x -- peaking at 184,224 deg/s^2, which is 122x ddq_max,
+    // and the joint reverses direction between two 2 ms samples. Of the 51 ticks that
+    // exceeded even the 4x decel ceiling, 16% land exactly on such a release.
+    // Two parts, both needed:
+    //   - `branch_jump_rate_limited` joins the low-pass gate, so the throttled run is
+    //     damped while it lasts, and
+    //   - the gate RELEASES over `pinned_lowpass_release_sec` instead of instantly, so
+    //     no gate transition (pinned, relief, margin band or throttle) can put a step
+    //     into the command. Engagement attacks in one tick and decays with this time
+    //     constant; at zero engagement the filter is transparent and tracks exactly.
+    // A/B on the recorded stream replayed through the real solver and clamp chain
+    // (36 s, the bench that finally matched hardware at 24.3x against a measured 23.4x):
+    //     today                        21 release events, 9,125 deg/s^2 median at release
+    //     + throttle in the gate        6 events,          3,000
+    //     + 120 ms ramped release       6 events,          1,120
+    // <= 0 keeps the instant release.
+    double pinned_lowpass_release_sec = 0.0;
 };
 
 struct KinematicsConfig {
@@ -987,6 +1009,28 @@ struct SafetyPlanGateConfig {
     // servo_log_20260827_213651.csv): the layer added to remove abrupt motion was
     // injecting one, at the chunk rate. 0.1 at 500 Hz ~= 20 ms to 63%, 60 ms to 95%.
     double attack_alpha = 0.1;
+    // IK-THROTTLE PACING (2026-08-28). The gate above deliberately reads only the
+    // obstruction PROJECTION, because feeding it the joint-limit barrier and the
+    // acceleration clamp was tried and REVERTED: the barrier's job is to park one joint
+    // at its standoff, so `realized < requested` is permanently true there while it works
+    // correctly, and letting that stop the plan clock of all six joints produced a 4.8 Hz
+    // ripple at 2.1-2.8x the baseline tremble (see the note at the planGateStep call).
+    //
+    // The IK branch-jump rate limiter is a DIFFERENT case, and the distinction is
+    // duration. The accel clamp passes its motion through on the next tick, so there is
+    // nothing for the plan to wait for. The rate limiter, when the pose is
+    // ill-conditioned, holds for hundreds of consecutive ticks: MEASURED 2026-08-28
+    // (servo_log_20260828_135443.csv) a 150-tick run (0.3 s) in which IK wanted
+    // 4.233 deg/tick and was allowed 0.350, while the follower plan kept advancing --
+    // the divergence reached 50.05 mm against a 50 mm re-anchor latch it only grazed,
+    // and the catch-up produced the run's two worst seconds (3,830 mdeg of >5 Hz
+    // command content, 4 follower re-anchors inside 0.6 s).
+    //
+    // So: pace the plan by the throttle ratio, but ONLY once the throttle has persisted
+    // for `ik_throttle_min_ticks`. That is what separates a real obstruction from the
+    // transient clamps the revert above was about. 0 disables (default), and the gate
+    // is never driven below min_gate, so the plan slows but never stops -- no stop-go.
+    int ik_throttle_min_ticks = 0;
     // Requested steps below this are noise; the ratio is not evaluated there
     // (gate only recovers). Keeps idle/hold ticks from driving the gate.
     // Compared against the EUCLIDEAN norm of the 6-joint step, matching the
