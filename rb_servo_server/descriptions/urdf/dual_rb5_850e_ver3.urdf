@@ -34,7 +34,13 @@
   <link name="base_site">
     </link>
   <link name="stand">
-    </link>
+    <visual>
+      <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+      <geometry>
+        <mesh filename="../meshes/stands/dual_rb5_850e/dual_rb5_850e_stand_ver2.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </visual>
+  </link>
   <link name="stand_base_col">
     <collision>
       <origin xyz="0.0 0.0 -0.0075" rpy="0.0 0.0 0.0" />

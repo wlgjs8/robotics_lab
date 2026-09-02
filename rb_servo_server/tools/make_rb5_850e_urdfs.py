@@ -146,6 +146,12 @@ ARM_COLLISION = {                      # link -> our collision mesh(es), URDF-re
     "link5": ["../meshes/robots/rb5_850e/collision/link5_hull.stl"],
     "link6": ["../meshes/robots/rb5_850e/collision/link6_hull.stl"],
 }
+# Stand display mesh, vendored here so rb_gui needs nothing outside this repo. Origin
+# is upstream ver2's stand visual origin verbatim -- identity, unlike RB3 ver5 whose
+# stand visual carried rpy [0,0,-1.5708] to undo its own base->stand +90 deg joint.
+STAND_VISUAL_MESH = "../meshes/stands/dual_rb5_850e/dual_rb5_850e_stand_ver2.stl"
+STAND_VISUAL_XYZ = "0.0 0.0 0.0"
+STAND_VISUAL_RPY = "0.0 0.0 0.0"
 STAND_HULLS = [f"../meshes/stands/dual_rb5_850e/collision_ver2/stand_hull_{i:03d}.stl"
                for i in range(20)]
 
@@ -162,10 +168,22 @@ def build(src: Path) -> ET.ElementTree:
     tree = ET.parse(src)
     root = tree.getroot()
 
-    # (4) visuals are never read by buildGeom(..., COLLISION, ...)
+    # (4) ARM visuals are never read by buildGeom(..., COLLISION, ...); dropping them
+    # keeps this file resolvable inside robotics_lab (upstream's RB5 visual meshes are
+    # 67 MB of .obj). The STAND visual is the exception and is re-added below: rb_gui
+    # renders the stand from it, and hardcoding that pose in the GUI instead is exactly
+    # how the 90 deg stand misalignment happened on the RB3 -> RB5 swap (the GUI
+    # carried RB3's stand visual origin, rpy [0,0,-1.5708], as a constant).
     for link in root.findall("link"):
         for vis in link.findall("visual"):
             link.remove(vis)
+    stand_link = root.find("link[@name='stand']")
+    if stand_link is None:
+        raise SystemExit("dual: no stand link to attach the display mesh to")
+    vis = ET.SubElement(stand_link, "visual")
+    ET.SubElement(vis, "origin", {"xyz": STAND_VISUAL_XYZ, "rpy": STAND_VISUAL_RPY})
+    geo = ET.SubElement(vis, "geometry")
+    ET.SubElement(geo, "mesh", {"filename": STAND_VISUAL_MESH, "scale": "0.001 0.001 0.001"})
 
     # (1) arm collision shells -> precomputed convex hulls
     replaced = 0

@@ -26,8 +26,15 @@ _ROBOT_JOINT_NAMES = (
     "wrist3_joint",
 )
 # Rotation values are canonical URDF/ROS RPY converted from MJCF euler xyz.
-_DEFAULT_LEFT_POSE = (0.15707, -0.17036, 0.58036, 2.186649, 0.523831, 2.526296)
-_DEFAULT_RIGHT_POSE = (-0.15707, -0.17036, 0.58036, 2.186649, -0.523831, -2.526296)
+# Startup fallbacks only: the live mounts arrive in the server's state manifest and
+# _mount_pose_from_mounts() prefers those. Kept in step with stack_real.yaml so the
+# first frames before state arrives are not visibly wrong. RB5-850E as of 2026-09-02
+# -- note the arms mirror in Y now, where RB3 mirrored in X.
+_DEFAULT_LEFT_POSE = (0.17036, 0.19707, 0.57036, 2.185914, 0.523132, -2.186649)
+_DEFAULT_RIGHT_POSE = (0.17036, -0.19707, 0.57036, 2.185914, -0.523132, -0.954944)
+# LAST-RESORT fallback only; the live value comes from the unified URDF's stand
+# visual origin via _stand_mesh_pose(). This is dual_rb3_730e_ver5's value, kept so a
+# missing/unparsable URDF still renders something rather than nothing.
 _DEFAULT_STAND_MESH_POSE = (0.0, 0.0, 0.001, 0.0, 0.0, -1.57078)
 _TCP_DISPLAY_MODES = ("auto", "actual", "reference", "both")
 _TCP_TRAIL_LIMIT = 600
@@ -204,8 +211,119 @@ def _robot_urdf_path() -> Path:
     return _descriptions_dir() / "urdf/rb3_730e.urdf"
 
 
+def _unified_urdf_path() -> Path:
+    """The stand+both-arms URDF the servo server enforces collisions against.
+
+    rb_gui renders the stand from the SAME file so the two cannot disagree. The server
+    also publishes this path in its state manifest; this is the startup default, used
+    before any state has arrived.
+    """
+    return _asset_path("RB_GUI_UNIFIED_URDF", "urdf/dual_rb5_850e_ver3.urdf")
+
+
+def _stand_visual_from_urdf(urdf_path: Path) -> tuple[Path, tuple] | None:
+    """Read the stand link's display mesh and its origin out of the unified URDF.
+
+    Both used to be constants in this module, copied from dual_rb3_730e_ver5: the mesh
+    filename, and _DEFAULT_STAND_MESH_POSE = (0, 0, 0.001, 0, 0, -1.57078), which is
+    that URDF's stand visual origin verbatim. RB3 needed the -90 deg because its own
+    base->stand joint is +90 deg; RB5's base->stand is identity and so is its stand
+    visual origin. Carrying the RB3 constant across the swap therefore rotated the
+    rendered stand 90 deg away from the arms -- reported from hardware 2026-09-02.
+    Reading it makes the next swap a no-op here.
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.parse(urdf_path).getroot()
+    except Exception:
+        return None
+    for link in root.findall("link"):
+        if link.get("name") != "stand":
+            continue
+        for visual in link.findall("visual"):
+            mesh = visual.find("geometry/mesh")
+            if mesh is None or not mesh.get("filename"):
+                continue
+            origin = visual.find("origin")
+            xyz = [float(v) for v in (origin.get("xyz") if origin is not None else "0 0 0").split()]
+            rpy = [float(v) for v in (origin.get("rpy") if origin is not None else "0 0 0").split()]
+            return (urdf_path.parent / mesh.get("filename")).resolve(), (*xyz, *rpy)
+    return None
+
+
 def _stand_mesh_path() -> Path:
-    return _asset_path("RB_GUI_STAND_MESH", "meshes/stands/dual_rb3_730e/dual_rb3_730e_stand_ver2_clean.stl")
+    configured = os.environ.get("RB_GUI_STAND_MESH")
+    if configured:
+        return Path(configured)
+    found = _stand_visual_from_urdf(_unified_urdf_path())
+    if found is not None:
+        return found[0]
+    return _descriptions_dir() / "meshes/stands/dual_rb5_850e/dual_rb5_850e_stand_ver2.stl"
+
+
+def _stand_mesh_pose() -> tuple:
+    found = _stand_visual_from_urdf(_unified_urdf_path())
+    return found[1] if found is not None else _DEFAULT_STAND_MESH_POSE
+
+
+def _urdf_stand_to_world_pose(urdf_path: Path) -> tuple:
+    """Pose of the URDF's ROOT frame expressed in its `stand` frame.
+
+    The async monitor publishes witness points in the pinocchio WORLD frame, while
+    every scene node hangs off /stand, so the overlay needs world-in-stand. This was
+    the constant -90 deg about Z, which is only correct for dual_rb3_730e_ver5 (whose
+    base->stand joint is +90 deg). RB5's is identity, so the constant rotated the whole
+    collision overlay away from the arms. Composing the fixed-joint chain from `stand`
+    up to the root and inverting it works for either.
+    """
+    import xml.etree.ElementTree as ET
+
+    import numpy as np
+
+    def rpy_matrix(rx: float, ry: float, rz: float):
+        cx, sx, cy, sy, cz, sz = (
+            math.cos(rx), math.sin(rx), math.cos(ry),
+            math.sin(ry), math.cos(rz), math.sin(rz))
+        return (np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]])
+                @ np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]])
+                @ np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]]))
+
+    try:
+        root = ET.parse(urdf_path).getroot()
+        parent_of: dict[str, tuple] = {}
+        for joint in root.findall("joint"):
+            child = joint.find("child")
+            parent = joint.find("parent")
+            if child is None or parent is None:
+                continue
+            origin = joint.find("origin")
+            xyz = [float(v) for v in (origin.get("xyz") if origin is not None else "0 0 0").split()]
+            rpy = [float(v) for v in (origin.get("rpy") if origin is not None else "0 0 0").split()]
+            parent_of[child.get("link")] = (parent.get("link"), xyz, rpy)
+
+        # Compose root <- stand by walking up, so `t` ends as root_T_stand.
+        rot = np.eye(3)
+        pos = np.zeros(3)
+        link = "stand"
+        for _ in range(64):
+            step = parent_of.get(link)
+            if step is None:
+                break
+            parent, xyz, rpy = step
+            r = rpy_matrix(*rpy)
+            pos = np.asarray(xyz) + r @ pos
+            rot = r @ rot
+            link = parent
+        # Invert: stand_T_root
+        inv_rot = rot.T
+        inv_pos = -inv_rot @ pos
+        ry = math.asin(max(-1.0, min(1.0, -inv_rot[2, 0])))
+        rz = math.atan2(inv_rot[1, 0], inv_rot[0, 0])
+        rx = math.atan2(inv_rot[2, 1], inv_rot[2, 2])
+        return (float(inv_pos[0]), float(inv_pos[1]), float(inv_pos[2]), rx, ry, rz)
+    except Exception:
+        return (0.0, 0.0, 0.0, 0.0, 0.0, -math.pi / 2.0)
 
 
 def _module_available(module_name: str) -> bool:
@@ -1421,10 +1539,11 @@ def _ensure_sc_world_frame(scene_handles: dict[str, Any]) -> str:
     if server is None or scene_handles.get("_sc_world_frame_made"):
         return _SC_WORLD_FRAME
     try:
+        pose = _urdf_stand_to_world_pose(_unified_urdf_path())
         server.scene.add_frame(
             _SC_WORLD_FRAME,
-            wxyz=_pose_wxyz((0.0, 0.0, 0.0, 0.0, 0.0, -math.pi / 2.0)),
-            position=(0.0, 0.0, 0.0),
+            wxyz=_pose_wxyz(pose),
+            position=_pose_position(pose),
             show_axes=False,
         )
         scene_handles["_sc_world_frame_made"] = True
@@ -1935,8 +2054,8 @@ def _add_stand_mesh(server: Any, handles: dict[str, Any]) -> None:
         handles["stand_mesh"] = server.scene.add_mesh_trimesh(
             "/stand/mesh",
             mesh=mesh,
-            position=_pose_position(_DEFAULT_STAND_MESH_POSE),
-            wxyz=_pose_wxyz(_DEFAULT_STAND_MESH_POSE),
+            position=_pose_position(_stand_mesh_pose()),
+            wxyz=_pose_wxyz(_stand_mesh_pose()),
         )
         # Translucent-red duplicate for the self-collision overlay (hidden until
         # violated). add_mesh_simple (not add_mesh_trimesh): trimesh face-color
@@ -1948,8 +2067,8 @@ def _add_stand_mesh(server: Any, handles: dict[str, Any]) -> None:
                 faces=mesh.faces,
                 color=_SELF_COLLISION_STAND_RGB,
                 opacity=_SELF_COLLISION_STAND_OPACITY,
-                position=_pose_position(_DEFAULT_STAND_MESH_POSE),
-                wxyz=_pose_wxyz(_DEFAULT_STAND_MESH_POSE),
+                position=_pose_position(_stand_mesh_pose()),
+                wxyz=_pose_wxyz(_stand_mesh_pose()),
                 visible=False,
             )
         except Exception as exc:

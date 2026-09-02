@@ -3474,15 +3474,36 @@ class GuiContractsTest(unittest.TestCase):
         self.assertIsNone(_server_uptime_hms({}, None))
         self.assertEqual(_format_hms(90_061), "25:01:01")
 
-    def test_default_mount_normals_match_stand_shoulder_faces(self):
-        left_matrix = _quat_to_matrix(_pose_orientation_wxyz(_DEFAULT_LEFT_POSE))
-        right_matrix = _quat_to_matrix(_pose_orientation_wxyz(_DEFAULT_RIGHT_POSE))
-        left_normal = tuple(-left_matrix[row][2] for row in range(3))
-        right_normal = tuple(right_matrix[row][2] for row in range(3))
-        for actual, expected in zip(left_normal, (-0.709, -0.500, 0.498)):
-            self.assertAlmostEqual(actual, expected, delta=0.01)
-        for actual, expected in zip(right_normal, (-0.708, 0.499, -0.500)):
-            self.assertAlmostEqual(actual, expected, delta=0.01)
+    def test_default_mounts_match_the_tracked_unified_urdf(self):
+        """The startup fallbacks must agree with the URDF the server enforces.
+
+        These used to be asserted as literal normal vectors, which pinned RB3's mount
+        convention into the test: when the arms became RB5-850E (mirrored in Y, not X)
+        the numbers were simply wrong, and a hand-updated set of magic numbers would
+        have gone stale again at the next swap. Compare against the file instead --
+        base_pose_in_stand IS the stand_<side>_arm_base_fixed joint origin.
+        """
+        import xml.etree.ElementTree as ET
+
+        from rb_servo_gui.scene import _unified_urdf_path
+
+        urdf = _unified_urdf_path()
+        self.assertTrue(urdf.exists(), f"unified URDF missing: {urdf}")
+        root = ET.parse(urdf).getroot()
+        origins = {}
+        for joint in root.findall("joint"):
+            name = joint.get("name", "")
+            if not name.startswith("stand_") or not name.endswith("_arm_base_fixed"):
+                continue
+            side = name[len("stand_"):-len("_arm_base_fixed")]
+            origin = joint.find("origin")
+            origins[side] = tuple(
+                float(v) for v in origin.get("xyz").split()
+            ) + tuple(float(v) for v in origin.get("rpy").split())
+        self.assertEqual(set(origins), {"left", "right"})
+        for side, default in (("left", _DEFAULT_LEFT_POSE), ("right", _DEFAULT_RIGHT_POSE)):
+            for actual, expected in zip(default, origins[side]):
+                self.assertAlmostEqual(actual, expected, places=5, msg=f"{side} mount")
 
     def test_mount_parsing_preserves_future_quaternion_orientation(self):
         mounts = {
@@ -6037,7 +6058,7 @@ class SelfCollisionCheckGeomOverlayTest(unittest.TestCase):
         self.assertTrue(any(n.endswith("dual_rb3_730e_right_attachment_site/pika_gripper") for n in names))
         self.assertEqual(len(handles["checkgeom_gripper"]), 2)
 
-    def test_sc_world_frame_rotates_minus_90_about_z(self):
+    def test_sc_world_frame_inverts_the_urdf_world_to_stand_transform(self):
         # The unified URDF's world->stand fixed joint is +90deg about Z and the scene
         # /stand frame is the URDF `stand` frame, so the overlay/witness frame must be
         # -90deg about Z. Quaternion (w,x,y,z) for Rz(-90deg) = (cos45, 0, 0, -sin45).
@@ -6058,9 +6079,18 @@ class SelfCollisionCheckGeomOverlayTest(unittest.TestCase):
         path = _ensure_sc_world_frame(handles)
         self.assertEqual(path, "/stand/sc_urdf_world")
         wxyz, position = server.scene.frames[path]
-        self.assertAlmostEqual(wxyz[0], math.cos(math.pi / 4), places=5)
-        self.assertAlmostEqual(wxyz[3], -math.sin(math.pi / 4), places=5)
-        self.assertEqual(tuple(position), (0.0, 0.0, 0.0))
+        # This frame carries the monitor's URDF-WORLD-frame witness points onto /stand,
+        # so it must be the INVERSE of the URDF's own world->stand transform -- not the
+        # constant -90 deg about Z this test used to assert. That constant is only
+        # correct for dual_rb3_730e_ver5 (base->stand +90 deg); RB5's is identity, so
+        # pinning it here would have re-frozen the very bug that rotated the rendered
+        # stand 90 deg off the arms.
+        from rb_servo_gui.scene import _pose_wxyz, _unified_urdf_path, _urdf_stand_to_world_pose
+
+        expected_pose = _urdf_stand_to_world_pose(_unified_urdf_path())
+        for actual, expected in zip(wxyz, _pose_wxyz(expected_pose)):
+            self.assertAlmostEqual(actual, expected, places=5)
+        self.assertEqual(tuple(position), tuple(expected_pose[:3]))
         # Idempotent: a second call does not recreate the frame.
         _ensure_sc_world_frame(handles)
         self.assertEqual(len(server.scene.frames), 1)
