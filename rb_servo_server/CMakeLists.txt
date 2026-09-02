@@ -142,6 +142,22 @@ target_link_libraries(ik_feasibility_grid PRIVATE rb_servo_core)
 add_executable(follower_replay tools/follower_replay.cpp)
 target_link_libraries(follower_replay PRIVATE rb_servo_core)
 
+if(RB_SERVO_ENABLE_RBPODO)
+    # READ-ONLY controller state reader, for hand-parked geometry checks (stand and
+    # mount verification) performed with a person inside the workspace.
+    #
+    # Links rbpodo::rbpodo ONLY -- deliberately NOT rb_servo_core. The rbpodo SDK keeps
+    # every command entry point on rb::podo::Cobot and the data port on
+    # rb::podo::CobotData; this target names only the latter, and by leaving the servo
+    # core out of the link line the backend/dispatcher are not in the binary either. The
+    # property is checkable:
+    #     nm -C rbpodo_read_state | grep -E 'move_j|servo_j|Cobot<'   # must be empty
+    # Do not link rb_servo_core here and do not add motion helpers to this target;
+    # scripts/send_*.py is where anything that moves belongs.
+    add_executable(rbpodo_read_state tools/rbpodo_read_state.cpp)
+    target_link_libraries(rbpodo_read_state PRIVATE rbpodo::rbpodo)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(test_backend_result tests/test_backend_result.cpp)
