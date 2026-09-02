@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Derive dual_rb5_850e_ver3.urdf (our self-collision model) from upstream ver2.
+
+WHY A GENERATOR AND NOT A HAND-EDITED FILE
+==========================================
+The unified URDF is the geometry the async CollisionMonitor enforces, so the one
+property that must never break is that ver3's KINEMATICS are bit-identical to
+ver2's -- only the collision shells and the elbow bound change. A 44 KB hand edit
+cannot demonstrate that; a transform plus an FK regression can, and this script is
+re-runnable when upstream ships a new ver.
+
+WHAT IT CHANGES, AND WHY
+========================
+1. Convex collision shells. Upstream ver2 points link0/1/4/5/6 at raw *.stl that
+   are NOT convex (measured mesh/hull volume ratio: link0 0.634, link6 0.917,
+   link1/4/5 ~0.961). collision_monitor.cpp:672 tests convexity and keeps a
+   non-convex mesh as a BVH -- distances stay CORRECT, but the per-eval servo
+   reaction budget documented there only holds when non_convex_mesh_count_ == 0,
+   and RB5 would have shipped 10 such geoms (5 links x 2 arms). We swap in
+   precomputed hulls (link2/link3 keep upstream's CoACD sets).
+
+2. Elbow bound +/-165 deg, not upstream's +/-179.9. The catalog value for RB5-850
+   is +/-165 (Rainbow RB Series catalog p7). Shipping a wider URDF bound recreates
+   exactly the trap docs/joint_range_policy.md records for RB3: JointTarget and
+   InitMotion bypass IK and clear only the safety clamp, so they can park the elbow
+   in the band the URDF allows but the controller refuses, and every subsequent
+   Cartesian tick is then rejected. safety.q_min_deg/q_max_deg must agree.
+
+3. A stand_collision link carrying CoACD hulls of the real stand, added ALONGSIDE
+   upstream's primitive boxes (dual_rb3_730e_ver5 does the same). The boxes alone
+   cover only 77.0% of the true stand surface with a 36.9 mm max gap (60k surface
+   samples) -- i.e. a fifth of the stand is invisible to the guard. The 20 hulls
+   cover 100.0%.
+
+4. Visual elements are dropped. The sole consumer is
+   buildGeom(model, urdf, pinocchio::COLLISION, ...), so visuals are never read,
+   and dropping them makes this file self-contained inside robotics_lab instead of
+   depending on mesh paths in the sibling mo_robot_descriptions checkout.
+
+Usage:
+  rb_servo_server/tools/make_dual_rb5_850e_ver3.py [--check]
+  --check re-derives into a temp file and diffs, so CI/reviewers can prove the
+  committed URDF is what this script produces.
+"""
+from __future__ import annotations
+
+import argparse
+import math
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+UPSTREAM = (REPO.parent / "mo_robot_descriptions/mo_robot_descriptions/robots/urdf"
+            "/dual_rb5_850e/dual_rb5_850e_ver2.urdf")
+OUT = REPO / "rb_servo_server/descriptions/urdf/dual_rb5_850e_ver3.urdf"
+
+# Rainbow RB Series catalog p7: RB5-850 J3 working range +/-165 deg.
+ELBOW_LIMIT_DEG = 165.0
+
+ARM_COLLISION = {                      # link -> our collision mesh(es), URDF-relative
+    "link0": ["../meshes/robots/rb5_850e/collision/link0_hull.stl"],
+    "link1": ["../meshes/robots/rb5_850e/collision/link1_hull.stl"],
+    "link2": [f"../meshes/robots/rb5_850e/collision/link2/link2_hull_{i:03d}.stl" for i in range(3)],
+    "link3": [f"../meshes/robots/rb5_850e/collision/link3/link3_hull_{i:03d}.stl" for i in range(3)],
+    "link4": ["../meshes/robots/rb5_850e/collision/link4_hull.stl"],
+    "link5": ["../meshes/robots/rb5_850e/collision/link5_hull.stl"],
+    "link6": ["../meshes/robots/rb5_850e/collision/link6_hull.stl"],
+}
+STAND_HULLS = [f"../meshes/stands/dual_rb5_850e/collision_ver2/stand_hull_{i:03d}.stl"
+               for i in range(20)]
+
+
+def _mesh_collision(path: str, scale: str) -> ET.Element:
+    col = ET.Element("collision")
+    ET.SubElement(col, "origin", {"xyz": "0.0 0.0 0.0", "rpy": "0.0 0.0 0.0"})
+    geo = ET.SubElement(col, "geometry")
+    ET.SubElement(geo, "mesh", {"filename": path, "scale": scale})
+    return col
+
+
+def build(src: Path) -> ET.ElementTree:
+    tree = ET.parse(src)
+    root = tree.getroot()
+
+    # (4) visuals are never read by buildGeom(..., COLLISION, ...)
+    for link in root.findall("link"):
+        for vis in link.findall("visual"):
+            link.remove(vis)
+
+    # (1) arm collision shells -> precomputed convex hulls
+    replaced = 0
+    for link in root.findall("link"):
+        name = link.get("name", "")
+        suffix = name.rsplit("_", 1)[-1]
+        if not (("_left_" in name or "_right_" in name) and suffix in ARM_COLLISION):
+            continue
+        for col in link.findall("collision"):
+            link.remove(col)
+        for path in ARM_COLLISION[suffix]:
+            link.append(_mesh_collision(path, "1.0 1.0 1.0"))
+            replaced += 1
+
+    # (2) elbow bound
+    lo, hi = -math.radians(ELBOW_LIMIT_DEG), math.radians(ELBOW_LIMIT_DEG)
+    elbows = 0
+    for joint in root.findall("joint"):
+        if not joint.get("name", "").endswith("elbow_joint"):
+            continue
+        limit = joint.find("limit")
+        if limit is None:
+            raise SystemExit(f"{joint.get('name')} has no <limit>")
+        limit.set("lower", f"{lo:.6f}")
+        limit.set("upper", f"{hi:.6f}")
+        elbows += 1
+
+    # (3) stand hulls alongside the upstream boxes
+    if root.find("link[@name='stand_collision']") is not None:
+        raise SystemExit("upstream already defines stand_collision; rework this step")
+    stand = ET.SubElement(root, "link", {"name": "stand_collision"})
+    for path in STAND_HULLS:
+        stand.append(_mesh_collision(path, "0.001 0.001 0.001"))
+    joint = ET.SubElement(root, "joint",
+                          {"name": "stand_collision_fixed", "type": "fixed"})
+    ET.SubElement(joint, "parent", {"link": "stand"})
+    ET.SubElement(joint, "child", {"link": "stand_collision"})
+    ET.SubElement(joint, "origin", {"xyz": "0.0 0.0 0.0", "rpy": "0.0 0.0 0.0"})
+
+    if replaced != 2 * sum(len(v) for v in ARM_COLLISION.values()):
+        raise SystemExit(f"expected both arms' collision shells, replaced {replaced}")
+    if elbows != 2:
+        raise SystemExit(f"expected 2 elbow joints, found {elbows}")
+
+    ET.indent(tree, space="  ")
+    return tree
+
+
+def write(tree: ET.ElementTree, dst: Path) -> None:
+    header = (
+        "<?xml version=\"1.0\"?>\n"
+        "<!-- GENERATED by rb_servo_server/tools/make_dual_rb5_850e_ver3.py from\n"
+        "     mo_robot_descriptions dual_rb5_850e_ver2.urdf. DO NOT HAND-EDIT: rerun the\n"
+        "     generator, which carries the rationale and the invariants it enforces.\n"
+        f"     Elbow bound is the RB5-850 catalog value +/-{ELBOW_LIMIT_DEG:.0f} deg and must stay\n"
+        "     equal to safety.q_min_deg/q_max_deg[2] in the stack config. -->\n"
+    )
+    body = ET.tostring(tree.getroot(), encoding="unicode")
+    dst.write_text(header + body + "\n")
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--check", action="store_true",
+                    help="verify the committed URDF matches what this script produces")
+    args = ap.parse_args(argv)
+    if not UPSTREAM.exists():
+        print(f"upstream URDF not found: {UPSTREAM}", file=sys.stderr)
+        return 1
+    tree = build(UPSTREAM)
+    if args.check:
+        with tempfile.NamedTemporaryFile(suffix=".urdf", delete=False) as fh:
+            tmp = Path(fh.name)
+        write(tree, tmp)
+        same = OUT.exists() and OUT.read_text() == tmp.read_text()
+        tmp.unlink()
+        print("MATCH" if same else "DRIFT: committed URDF differs from the generator")
+        return 0 if same else 1
+    write(tree, OUT)
+    print(f"wrote {OUT.relative_to(REPO)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

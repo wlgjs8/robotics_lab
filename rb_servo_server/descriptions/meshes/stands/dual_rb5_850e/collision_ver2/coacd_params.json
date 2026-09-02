@@ -1,0 +1,20 @@
+{
+  "num_convex_hulls": 20,
+  "threshold": 0.08,
+  "max_convex_hull": 20,
+  "source": "dual_rb5_850e_stand_ver2.stl",
+  "units": "mm (URDF applies scale 0.001, same as dual_rb3_730e)",
+  "timestamp": "2026-09-02T21:00:30.979320",
+  "coacd_parameters": {
+    "threshold": 0.08,
+    "max_convex_hull": 20,
+    "preprocess_mode": "auto",
+    "preprocess_resolution": 50,
+    "resolution": 1000,
+    "mcts_nodes": 10,
+    "mcts_iterations": 60,
+    "mcts_max_depth": 3,
+    "pca": false,
+    "merge": true
+  }
+}

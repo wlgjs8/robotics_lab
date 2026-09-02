@@ -1,0 +1,33 @@
+{
+  "mesh_name": "link3",
+  "input_file": "mo_robot_descriptions/meshes/robots/rb5_850e/collision/link3.stl",
+  "timestamp": "2025-10-22T15:16:25.911617",
+  "coacd_version": "1.0.0+",
+  "decomposition_info": {
+    "num_convex_hulls": 3
+  },
+  "coacd_parameters": {
+    "threshold": 0.1,
+    "max_convex_hull": 32,
+    "preprocess_mode": "auto",
+    "preprocess_resolution": 50,
+    "resolution": 1000,
+    "mcts_nodes": 10,
+    "mcts_iterations": 60,
+    "mcts_max_depth": 3,
+    "pca": false,
+    "merge": true
+  },
+  "description": {
+    "threshold": "Concavity threshold (0.01-1.0). Lower = more hulls, higher quality",
+    "max_convex_hull": "Maximum number of convex hulls (-1 for unlimited)",
+    "preprocess_mode": "Preprocessing mode: auto (detect manifold), on (force), off (disable)",
+    "preprocess_resolution": "Voxel resolution for preprocessing (20-100)",
+    "resolution": "CoACD resolution, higher = better quality but slower (1000-4000)",
+    "mcts_nodes": "MCTS tree nodes, higher = better but slower (10-40)",
+    "mcts_iterations": "MCTS iterations per node (60-200)",
+    "mcts_max_depth": "Maximum search depth (2-4)",
+    "pca": "Enable PCA pre-processing for better alignment",
+    "merge": "Merge convex hulls in post-processing"
+  }
+}
