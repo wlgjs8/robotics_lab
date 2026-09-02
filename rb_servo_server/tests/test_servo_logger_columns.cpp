@@ -95,7 +95,16 @@ int main() {
         sample.safety_projection.constraint_count = 2;
         sample.safety_projection.ceiling_clamped = true;
         sample.safety_projection.min_margin_m = 0.004;
-        logger.push(sample);
+        // Push REPEATEDLY, not once. ServoLogger::push() takes the ring mutex with
+        // try_to_lock and DROPS the sample if the writer thread holds it -- deliberate,
+        // documented RT behaviour, since a servo tick must never stall to log itself.
+        // A single push that loses that race leaves nothing to read back, which is what
+        // made this test fail about 4 runs in 10 (measured 2026-09-03, under the load of
+        // the full suite). The rows are identical, and only the first data row is read.
+        for (int i = 0; i < 32; ++i) {
+            logger.push(sample);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         logger.stop();
     }

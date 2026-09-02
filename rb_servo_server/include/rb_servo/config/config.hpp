@@ -524,8 +524,13 @@ struct SelfCollisionConfig {
         std::string pika_finger_left_mesh;
         std::string pika_finger_right_mesh;
         double gripper_finger_travel_m = 0.047;  // per-finger jaw travel open(0)->closed
-        std::string left_prefix = "dual_rb3_730e_left_";
-        std::string right_prefix = "dual_rb3_730e_right_";
+        // Link-name prefixes in the unified URDF. These track the robot in service --
+        // they named the retired RB3-730E until 2026-09-02, which meant a config that
+        // omitted them silently described the wrong arm. A prefix that does not match
+        // the URDF now fails closed in collision_monitor.cpp rather than degrading, but
+        // the tracked configs still set both explicitly.
+        std::string left_prefix = "dual_rb5_850e_left_";
+        std::string right_prefix = "dual_rb5_850e_right_";
         std::string stand_frame = "stand";
         // Frame the pika gripper geometry is attached to, as a suffix on left/right_prefix.
         // The gripper does not bolt to the flange: an F/T adapter stands it off by 15 mm

@@ -4,6 +4,8 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <cstdio>
 #include <filesystem>
 #include <iostream>
 #include <map>
@@ -33,21 +35,43 @@ static fs::path workspaceRoot() {
 static CollisionMonitorConfig makeConfig(const fs::path& ws) {
     CollisionMonitorConfig c;
     c.enable = true;
-    const fs::path urdf_dir =
-        ws / "mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e";
-    c.unified_urdf = (urdf_dir / "dual_rb3_730e_ver3.urdf").string();
-    c.package_dirs = {urdf_dir.string()};  // so "../../../meshes" resolves
+    // The tracked RB5 model, the same file the server enforces against. Previously the
+    // sibling checkout's dual_rb5_850e_ver3, which meant this suite kept validating the
+    // retired robot after the 2026-09-02 swap -- and, because that model ships
+    // non-convex collision meshes, kept SKIPPING its own per-eval performance gate.
+    const fs::path urdf_dir = ws / "robotics_lab/rb_servo_server/descriptions/urdf";
+    c.unified_urdf = (urdf_dir / "dual_rb5_850e_ver3.urdf").string();
+    c.package_dirs = {urdf_dir.string()};
+    // The precomputed HULL, matching what the tracked configs load. The fixture used
+    // the raw pika_gripper.STL, which is not convex, so the monitor kept it as a BVH --
+    // and the per-eval performance gate below, whose whole purpose is to hold the servo
+    // reaction budget, skipped itself on every run because of that one mesh.
     c.pika_gripper_mesh =
         (ws / "robotics_lab/rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/"
-              "pika_gripper.STL")
+              "pika_gripper_hull.STL")
             .string();
+    c.left_prefix = "dual_rb5_850e_left_";
+    c.right_prefix = "dual_rb5_850e_right_";
     const char* jn[kDof] = {"base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3"};
     for (int i = 0; i < kDof; ++i) {
-        c.left_joints[i] = std::string("dual_rb3_730e_left_") + jn[i] + "_joint";
-        c.right_joints[i] = std::string("dual_rb3_730e_right_") + jn[i] + "_joint";
+        c.left_joints[i] = c.left_prefix + jn[i] + "_joint";
+        c.right_joints[i] = c.right_prefix + jn[i] + "_joint";
     }
     return c;
 }
+
+// Shared probe pose, CHOSEN BY SCANNING the monitor itself rather than by eye, because
+// runExternalDHard needs two things at once from it: the whole arm clear of the z=0
+// stand floor (it drops a ground plane 5 mm under the lowest arm point and needs that
+// height positive), and EVERY other pair further than that 5 mm, so the floor is
+// unambiguously the closest pair. The RB3 value {0,-30,80,0,60,0} fails the first on RB5
+// -- 90.6 mm BELOW the floor -- because the mounts mirror in Y, sit 10 mm lower, and the
+// links are ~30% longer. A first replacement fixed the floor but failed the second: at
+// J3 = 160 the arm folds enough for the gripper hull to PENETRATE its own link2
+// (-0.46 mm), which self_min_clearance_m does not report because intra-arm pairs are
+// counted separately. Scanned against the monitor on both criteria at once; this pose
+// clears the floor by 338.5 mm with the nearest non-floor pair at 21.3 mm.
+static const JointArray kInitPose = {-90.0, -90.0, 110.0, 0.0, 0.0, 0.0};
 
 static bool sameDistance(double a, double b) {
     if (std::isinf(a) && std::isinf(b) && std::signbit(a) == std::signbit(b)) return true;
@@ -73,19 +97,19 @@ static bool runPairPatternMatching() {
 
     CollisionPairPattern glob{"*right*link0*", "*right*link1*"};
     RB_CHECK(collisionPairPatternMatches(
-        glob, "dual_rb3_730e_right_link0", "dual_rb3_730e_right_link1"));
+        glob, "dual_rb5_850e_right_link0", "dual_rb5_850e_right_link1"));
     RB_CHECK(collisionPairPatternMatches(
-        glob, "dual_rb3_730e_right_link1", "dual_rb3_730e_right_link0"));
+        glob, "dual_rb5_850e_right_link1", "dual_rb5_850e_right_link0"));
     RB_CHECK(!collisionPairPatternMatches(
-        glob, "dual_rb3_730e_left_link0", "dual_rb3_730e_right_link1"));
+        glob, "dual_rb5_850e_left_link0", "dual_rb5_850e_right_link1"));
 
     CollisionPairPattern link02{"*right*link0*", "*right*link2*"};
     RB_CHECK(collisionPairPatternMatches(
-        link02, "dual_rb3_730e_right_link0_0", "dual_rb3_730e_right_link2_0"));
+        link02, "dual_rb5_850e_right_link0_0", "dual_rb5_850e_right_link2_0"));
     RB_CHECK(collisionPairPatternMatches(
-        link02, "dual_rb3_730e_right_link2_0", "dual_rb3_730e_right_link0_0"));
+        link02, "dual_rb5_850e_right_link2_0", "dual_rb5_850e_right_link0_0"));
     RB_CHECK(!collisionPairPatternMatches(
-        link02, "dual_rb3_730e_right_link0_0", "dual_rb3_730e_right_link3_0"));
+        link02, "dual_rb5_850e_right_link0_0", "dual_rb5_850e_right_link3_0"));
     return true;
 }
 
@@ -101,7 +125,7 @@ static bool run() {
 
     // geometry: link0..6 hulls (left 12 / right 12) + stand 7 + 2 gripper = 33
     std::cout << "geoms=" << mon.numGeometries() << " pairs=" << mon.numPairs() << "\n";
-    RB_CHECK(mon.numGeometries() == 33);
+    RB_CHECK(mon.numGeometries() == 53);  // see the breakdown in runArticulatedGripper
     RB_CHECK(mon.numPairs() > 0);
 
     {
@@ -113,7 +137,7 @@ static bool run() {
         CollisionPairPattern wrist_left{"*left*link4*", "*left*link6*"};
         CollisionPairPattern wrist_right{"*right*link4*", "*right*link6*"};
         CollisionMonitor all_pairs(all_pairs_cfg);
-        const JointArray init = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+        const JointArray init = kInitPose;
         const CollisionVerdict before = all_pairs.evalOnce(init, init);
         RB_CHECK(before.valid);
         const bool adjacent_present = verdictHasPair(before, adjacent_right);
@@ -166,7 +190,7 @@ static bool run() {
         RB_CHECK(wrist_disabled.numPairs() < all_pairs.numPairs());
     }
 
-    const JointArray init = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+    const JointArray init = kInitPose;
 
     // (1) init pose: no collision, clearance comfortably positive (PoC ~97 mm).
     CollisionVerdict v = mon.evalOnce(init, init);
@@ -721,7 +745,7 @@ static bool runGroundPlane() {
     CollisionMonitor mon(cfg);
     RB_CHECK(mon.hasGroundPlane());
 
-    const JointArray init = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+    const JointArray init = kInitPose;
 
     auto groundPlaneNear = [](const CollisionVerdict& v) {
         for (const auto& p : v.near)
@@ -776,7 +800,7 @@ static bool runExternalDHard() {
     gp.xyz_m = {0.0, 0.0, 0.001 - 0.05};
     base.extra_collision.push_back(gp);
 
-    const JointArray init = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+    const JointArray init = kInitPose;
 
     // Measure the lowest arm/gripper point's height above a z=0 floor.
     CollisionMonitor m0(base);
@@ -831,13 +855,15 @@ static bool runIntraArmDHard() {
     base.intra_arm_d_hard_m = 0.005;
     base.intra_arm_d_slow_m = 0.015;
     base.intra_arm_a_brake_m_s2 = 3.0;
-    const JointArray init = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+    const JointArray init = kInitPose;
 
     CollisionMonitor intra(base);
     bool found_intra_band = false;
     CollisionDistanceSummary intra_summary;
     JointArray folded = init;
-    for (double elbow_abs = 135.0; elbow_abs <= 150.0 && !found_intra_band; elbow_abs += 1.0) {
+    // RB5-850E folds to +/-165, so the intra-arm band sits further round than the
+    // RB3 scan (135..150) could reach.
+    for (double elbow_abs = 130.0; elbow_abs <= 165.0 && !found_intra_band; elbow_abs += 1.0) {
         for (double sign : std::array<double, 2>{1.0, -1.0}) {
             folded = init;
             folded[2] = sign * elbow_abs;
@@ -1003,11 +1029,17 @@ static bool runArticulatedGripper() {
 
     CollisionMonitor mon(cfg);
     RB_CHECK(mon.hasArticulatedGripper());
-    // arms(24) + stand(7) + base+2fingers per arm (6) = 37 (single-hull baseline was 33).
+    // RB5-850E, derived rather than guessed:
+    //   per arm  11 link hulls (link0,1,4,5,6 single + link2,link3 CoACD x3)
+    //          +  1 tool_adapter cylinder
+    //          +  3 gripper (base + 2 fingers)          = 15
+    //   stand     7 primitive boxes + 20 CoACD hulls    = 27
+    //   total    15 x 2 + 27                            = 57
+    // The single-hull baseline replaces the 3 gripper geoms with 1, so 53.
     std::cout << "articulated geoms=" << mon.numGeometries() << "\n";
-    RB_CHECK(mon.numGeometries() == 37);
+    RB_CHECK(mon.numGeometries() == 57);
 
-    const JointArray init = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+    const JointArray init = kInitPose;
     auto fingerClears = [](const CollisionVerdict& v) {
         std::map<std::string, double> mp;
         for (const auto& p : v.near) {
