@@ -32,7 +32,7 @@ namespace pin = pinocchio;
 
 static const std::string WS = "/home/plaif/workspace";
 static const std::string UNIFIED =
-    WS + "/mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e/dual_rb3_730e_ver3.urdf";
+    WS + "/robotics_lab/rb_servo_server/descriptions/urdf/dual_rb5_850e_ver3.urdf";
 static const std::string PIKA =
     WS + "/robotics_lab/rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_gripper.STL";
 
@@ -83,12 +83,12 @@ int main() {
   pin::urdf::buildModel(UNIFIED, model);
   pin::Data data(model);
 
-  const char* L[6]={"dual_rb3_730e_left_base_joint","dual_rb3_730e_left_shoulder_joint",
-    "dual_rb3_730e_left_elbow_joint","dual_rb3_730e_left_wrist1_joint",
-    "dual_rb3_730e_left_wrist2_joint","dual_rb3_730e_left_wrist3_joint"};
-  const char* R[6]={"dual_rb3_730e_right_base_joint","dual_rb3_730e_right_shoulder_joint",
-    "dual_rb3_730e_right_elbow_joint","dual_rb3_730e_right_wrist1_joint",
-    "dual_rb3_730e_right_wrist2_joint","dual_rb3_730e_right_wrist3_joint"};
+  const char* L[6]={"dual_rb5_850e_left_base_joint","dual_rb5_850e_left_shoulder_joint",
+    "dual_rb5_850e_left_elbow_joint","dual_rb5_850e_left_wrist1_joint",
+    "dual_rb5_850e_left_wrist2_joint","dual_rb5_850e_left_wrist3_joint"};
+  const char* R[6]={"dual_rb5_850e_right_base_joint","dual_rb5_850e_right_shoulder_joint",
+    "dual_rb5_850e_right_elbow_joint","dual_rb5_850e_right_wrist1_joint",
+    "dual_rb5_850e_right_wrist2_joint","dual_rb5_850e_right_wrist3_joint"};
   Eigen::VectorXd q = pin::neutral(model);
   const double D=M_PI/180.0;
   double init[6]={0,-30,80,0,60,0};
@@ -100,8 +100,8 @@ int main() {
   // precompute endpoint lists + frame ids
   struct WC{ Vector3 a,b; double r; };
   std::vector<pin::FrameIndex> lf(arm.size()), rf(arm.size()), sf(st.size());
-  for(size_t i=0;i<arm.size();++i){ lf[i]=model.getFrameId("dual_rb3_730e_left_"+arm[i].frame);
-                                    rf[i]=model.getFrameId("dual_rb3_730e_right_"+arm[i].frame); }
+  for(size_t i=0;i<arm.size();++i){ lf[i]=model.getFrameId("dual_rb5_850e_left_"+arm[i].frame);
+                                    rf[i]=model.getFrameId("dual_rb5_850e_right_"+arm[i].frame); }
   for(size_t i=0;i<st.size();++i) sf[i]=model.getFrameId(st[i].frame);
   std::vector<int> ignore={0}; // stack_sim.yaml stand_ignore_bones
 
@@ -127,7 +127,7 @@ int main() {
   // ---------------- MESH path (coal convex + gripper) ---------------------
   pin::GeometryModel gm;
   pin::urdf::buildGeom(model, UNIFIED, pin::COLLISION, gm, std::vector<std::string>{
-      WS+"/mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e"});
+      WS+"/robotics_lab/rb_servo_server/descriptions/urdf"});
   for(auto& go: gm.geometryObjects){
     auto bvh=std::dynamic_pointer_cast<coal::BVHModelBase>(go.geometry);
     if(bvh){ bvh->buildConvexRepresentation(false); if(bvh->convex) go.geometry=bvh->convex; }
@@ -139,7 +139,7 @@ int main() {
   auto phull=pbvh->convex;
   Eigen::AngleAxisd rz(M_PI/2,Eigen::Vector3d::UnitZ());
   for(const std::string side: {std::string("left"),std::string("right")}){
-    auto fid=model.getFrameId("dual_rb3_730e_"+side+"_attachment_site");
+    auto fid=model.getFrameId("dual_rb5_850e_"+side+"_attachment_site");
     const auto& fr=model.frames[fid];
     pin::SE3 place = fr.placement * pin::SE3(rz.toRotationMatrix(), Eigen::Vector3d::Zero());
     gm.addGeometryObject(pin::GeometryObject(side+"_pika",fr.parentJoint,fr.parentFrame,place,phull));

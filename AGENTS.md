@@ -2,7 +2,7 @@
 
 ## Current Project Phase
 
-`robotics_lab` is a dual-arm RB3-730 integration workspace. The current milestone is **rbpodo pgmode-real physical robot bring-up**. Simulator-first Cartesian acceptance hardening is largely complete and is now the regression baseline.
+`robotics_lab` is a dual-arm RB5-850 integration workspace (RB3-730 until 2026-09-02). The current milestone is **rbpodo pgmode-real physical robot bring-up**. Simulator-first Cartesian acceptance hardening is largely complete and is now the regression baseline.
 
 The mock / rbpodo controller-simulation (pgmode) stack remains the regression baseline (it must keep passing before any physical work):
 
@@ -49,11 +49,12 @@ hardware-free validation; the retired software-simulator backend and raw script
 TCP comparison backends are no longer part of the active code, config, gate, or
 runbook surface.
 
-The supported J3/elbow range is exactly `[-150 deg, +150 deg]`, matching the
-Rainbow RB3-730E documentation and the Pinocchio URDF. Tracked safety limits,
-joint-limit barriers, IK, examples, and runbooks must use that same range. Do
-not restore the retired `+/-160 deg` margin or widen J3 to hide an unreachable
-Cartesian target.
+The supported J3/elbow range is the fitted arm's catalog range: exactly
+`[-165 deg, +165 deg]` on the RB5-850E in service since 2026-09-02 (`[-150, +150]`
+on the RB3-730E it replaced), matching the Rainbow documentation and the Pinocchio
+URDF. Tracked safety limits, joint-limit barriers, IK, examples, and runbooks must
+use that same range. Do not restore the retired `+/-160 deg` margin or widen J3 to
+hide an unreachable Cartesian target.
 
 ## Target Topology
 

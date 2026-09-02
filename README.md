@@ -8,13 +8,13 @@
 > `docs/code_architecture_map.md`에 있습니다. `policy_runner/GOAL.md`는 별도
 > policy-training 메모입니다.
 
-`robotics_lab`는 dual-arm RB3-730 시스템을 통합하기 위한 작업 공간입니다. 서보 제어, rbpodo 백엔드(실로봇 + 컨트롤러 `pgmode` 시뮬레이션), 카메라 캡처, `policy_runner`, 운영자 GUI를 함께 다룹니다.
+`robotics_lab`는 dual-arm RB5-850 시스템을 통합하기 위한 작업 공간입니다(2026-09-02까지는 RB3-730). 서보 제어, rbpodo 백엔드(실로봇 + 컨트롤러 `pgmode` 시뮬레이션), 카메라 캡처, `policy_runner`, 운영자 GUI를 함께 다룹니다.
 
 ## 현재 단계
 
 현재 프로젝트 단계는 **rbpodo pgmode-real 물리 로봇 브링업**입니다.
 시뮬레이터 우선 Cartesian acceptance hardening은 대부분 마무리됐고, 이제
-실제 RB3-730E 하드웨어에서 검증을 진행합니다.
+실제 RB5-850E 하드웨어에서 검증을 진행합니다.
 
 mock / rbpodo 컨트롤러 시뮬레이션(pgmode) 측에서 반복 검증되어 안정화된 항목:
 
@@ -45,7 +45,7 @@ mock / 컨트롤러 시뮬레이션에서 지원되는 항목:
 - `policy_runner` joint 및 Cartesian action source
 - mandatory Eigen3/Pinocchio C++ Cartesian math path for `rb_servo_server`
 
-pgmode-real(실제 RB3-730E 하드웨어)에서 구동/검증된 항목:
+pgmode-real(실제 하드웨어; 2026-09-02까지 RB3-730E, 이후 RB5-850E)에서 구동/검증된 항목:
 
 - read-only 물리 diagnostics parity (컨트롤러 `.200`/`.201`, `tcp_actual_stand` 기준)
 - 양팔 실제 Cartesian circle 추종 — 저속, TUNED-1 프로파일, tracking 중앙값 ~1.42°
@@ -223,7 +223,7 @@ profile로 간주하지 않습니다.
 tracked rbpodo stack의 supported safety range는 명시적 per-joint
 `q_min_deg: [-360, -360, -150, -360, -360, -360]` /
 `q_max_deg: [360, 360, 150, 360, 360, 360]`입니다. J3 `+/-150 deg`는
-Rainbow RB3-730E 공식 범위이자 URDF/Pinocchio IK 범위입니다. 폐기된
+Rainbow RB5-850E 공식 범위이자 URDF/Pinocchio IK 범위입니다. 폐기된
 `+/-160 deg` margin이나 J3 `+/-360 deg`를 운영 범위로 다시 사용하지 않습니다.
 `[-180, 180]` 정규화는 control/safety/tracking/log source-of-truth에 쓰지
 않습니다. 자세한 내용은 `docs/joint_range_policy.md`를 봅니다.

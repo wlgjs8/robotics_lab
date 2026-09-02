@@ -7,7 +7,7 @@ This document is the current source of truth for the system architecture. Compon
 The repository is currently in **rbpodo pgmode-real physical robot bring-up**.
 Simulator-first Cartesian acceptance hardening is largely complete and now serves
 as the regression baseline; active validation has moved onto the physical
-RB3-730E hardware.
+RB5-850E hardware (RB3-730E until 2026-09-02).
 
 The mock / rbpodo controller-simulation (pgmode) stack remains the regression baseline for:
 
@@ -39,7 +39,7 @@ Supported for mock / controller-simulation work:
 - GUI viewer/operator console for mock/simulation
 - Python policy_runner with joint and Cartesian action sources
 
-Run / validated on pgmode-real (physical RB3-730E hardware):
+Run / validated on pgmode-real (physical hardware; RB3-730E through 2026-09-02, RB5-850E since):
 
 - read-only physical diagnostics parity against controllers `.200`/`.201`
   using `tcp_actual_stand` (not `tcp_ref_stand`)
@@ -99,7 +99,9 @@ hardware-free validation surface; the old software-simulator backend and
 unsupported raw script TCP comparison paths are removed and must not be
 presented as runnable backends.
 
-The supported RB3-730E J3/elbow range is exactly `[-150 deg, +150 deg]`.
+The supported J3/elbow range is the fitted arm's catalog range: `[-165 deg, +165 deg]`
+on the RB5-850E in service, `[-150, +150]` on the retired RB3-730E. See
+`docs/joint_range_policy.md`.
 Tracked safety limits, the joint-limit barrier, URDF/Pinocchio IK, examples,
 and runbooks must agree with the Rainbow range. The retired `+/-160 deg`
 margin is not a supported operating profile, and widening J3 must not be used
@@ -315,7 +317,7 @@ reachable z-range. The cylinder is identical
 in both arms' base frames (the singularity is mount-independent there), so one mesh
 serves both; each `/stand/<side>_base` node applies the mount tilt. Built by
 `tools/ik_infeasible_region.py` (pure Python, no C++ grid) into
-`descriptions/ik_infeasible_rb3_730e.npz`. Static, precomputed viewer aid only (no
+`descriptions/ik_infeasible_rb5_850e.npz`. Static, precomputed viewer aid only (no
 safety enforcement — a matching inner-cylinder velocity-damper guard is a possible
 follow-up) — regenerate with `make ik-infeasible` (tunable `IK_CYL_SPEED` /
 `IK_CYL_DQMAX` / `IK_CYL_RADIUS`) if the URDF, mount geometry, or speed cap changes.

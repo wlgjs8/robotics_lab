@@ -427,7 +427,10 @@ double barrierStepDeg(const rb_servo::SafetyConfig& config,
 // barrier now brakes onto (bound - standoff). The bound itself is unchanged.
 bool testJointLimitBarrierStandoffRestsShortOfTheBound() {
     const double dt = 0.002;
-    const double limit = 150.0;
+    // The 2026-08-27 measurement above was taken on the RB3-730E at its +/-150 bound;
+    // the mechanism under test is the standoff, not the number, so this tracks the
+    // robot in service (RB5-850E, +/-165).
+    const double limit = 165.0;
     const double band = 12.0;
     const double a = 1500.0;
     const double standoff = 0.10;
@@ -481,7 +484,7 @@ bool testJointLimitBarrierStandoffRestsShortOfTheBound() {
 
 bool testJointLimitBarrierBrakesOnlyTheClosingDirection() {
     const double dt = 0.002;
-    const double limit = 150.0;      // the RB3-730E J3 URDF IK limit
+    const double limit = 165.0;      // the RB5-850E J3 URDF IK limit
     const double band = 12.0;
     const double a = 1500.0;
     const rb_servo::SafetyConfig config = barrierConfig(band, a, limit);

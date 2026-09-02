@@ -3,7 +3,7 @@
 English operational summary. The Korean [README.md](README.md) is the primary
 public overview; normative details live in the contracts linked below.
 
-`robotics_lab` integrates two Rainbow RB3-730E arms, the C++ servo server,
+`robotics_lab` integrates two Rainbow RB5-850E arms (RB3-730E until 2026-09-02), the C++ servo server,
 rbpodo real/controller-`pgmode` backends, cameras, the operator GUI, grippers,
 and `policy_runner`.
 
@@ -101,7 +101,7 @@ safety:
   q_max_deg: [360, 360, 150, 360, 360, 360]
 ```
 
-J3 is exactly `[-150 deg, +150 deg]`, matching Rainbow's RB3-730E range and the
+J3 is exactly `[-165 deg, +165 deg]`, matching Rainbow's RB5-850E range and the
 URDF/Pinocchio model. The retired `+/-160 deg` margin and a widened J3 must not
 be used to mask an unreachable Cartesian target.
 

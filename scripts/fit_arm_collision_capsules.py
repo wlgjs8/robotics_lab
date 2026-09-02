@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fit one collision capsule per RB3-730e collision hull, in each link's local
+"""Fit one collision capsule per RB5-850E collision hull, in each link's local
 frame, for the dual-arm self-collision guard.
 
 The current self-collision model approximates each arm as 7 straight capsules on
@@ -26,7 +26,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import trimesh
 
-URDF = "rb_servo_server/descriptions/urdf/rb3_730e.urdf"
+URDF = "rb_servo_server/descriptions/urdf/rb5_850e.urdf"
 # Gripper visual mesh (no collision mesh exists); attached under attachment_site
 # via tool_joint (rpy z=+90deg), STL in millimeters.
 GRIPPER_MESH_REL = "../meshes/robots/rb5_850e/visual/tool/pika_gripper.STL"

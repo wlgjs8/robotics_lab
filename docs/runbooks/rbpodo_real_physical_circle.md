@@ -1,4 +1,7 @@
-# Dual RB3-730E Physical Cartesian Circle
+# Dual-Arm Physical Cartesian Circle
+
+> Robot: RB5-850E since 2026-09-02. The runs recorded below were taken on the
+> RB3-730E this rig previously carried; re-run before treating them as current.
 
 This page preserves the accepted slow dual-arm physical-circle evidence and
 states the requirements for a current rerun. It is not a standalone motion

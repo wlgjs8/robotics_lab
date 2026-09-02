@@ -1,6 +1,6 @@
 # rb_servo_server
 
-C++ control server for synchronizing two Rainbow RB3-730 arms through a shared `servo_j`-style control loop.
+C++ control server for synchronizing two Rainbow RB5-850 arms through a shared `servo_j`-style control loop.
 
 The server is designed for:
 

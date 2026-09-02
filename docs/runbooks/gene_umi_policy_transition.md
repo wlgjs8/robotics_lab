@@ -20,7 +20,7 @@ Scope:
 
 Non-goals:
 
-- no implicit real RB3-730 motion
+- no implicit real robot motion
 - no policy-side force-control promotion or change to the server's calibrated
   force-control v2 profile
 - no gripper or camera-driven physical promotion outside the explicit

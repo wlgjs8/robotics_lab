@@ -399,7 +399,8 @@ configured raw yaw target instead of a closer equivalent that could wind the
 Pika gripper cable.
 
 When kinematics is enabled, the server warns if the configured rbpodo safety
-range differs from the known `rb3_730e.urdf` model limits. This is diagnostic:
+range differs from the fitted arm's known model limits (`kKnownArmRanges` in
+`config.cpp`; an unrecognised URDF is reported rather than skipped). This is diagnostic:
 raw controller state and commands remain governed by configured safety limits,
 while IK may still be limited by the URDF/Pinocchio model.
 
@@ -739,7 +740,7 @@ Responsiveness, smoothness, and accuracy are still primarily owned by the
   arriving at full commanded speed and pinning. Retreating is never limited. The
   joint-space twin of the floor / ROI / self-collision dampers. `q_min_deg` /
   `q_max_deg` default to `safety.q_min_deg` / `q_max_deg` and may only TIGHTEN them;
-  brace against the IK model limit. On RB3-730E that is J3 = ±150, which
+  brace against the IK model limit. On the RB5-850E that is J3 = ±165 (RB3-730E was ±150), which
   `safety.q_min_deg`/`q_max_deg` now also carries (the wider site margin was retired
   2026-08-26 — see `docs/joint_range_policy.md`); keep the block explicit rather than
   inheriting, so a future widening of the safety clamp cannot silently move the

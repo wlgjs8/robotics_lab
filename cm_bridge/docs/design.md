@@ -14,7 +14,7 @@ times.
 
 **Non-goals.** No reimplementation of controller-manager internals in this
 repo; no edits inside the submodule; no waist/body axis support in the first
-iteration (robotics_lab is a dual RB3-730 rig — the "monkey"-like
+iteration (robotics_lab is a dual RB5-850 rig — the "monkey"-like
 configuration with `body.joints: []`).
 
 ## 2. Decision record

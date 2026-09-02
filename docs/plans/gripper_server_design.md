@@ -29,10 +29,10 @@ Earlier (GUI-only viz):
 - **B2a articulated-gripper visualization.** `pika_gripper.STL` split into
   `pika_gripper_base.STL` + `pika_finger_left/right.STL` (fingers separated as the
   two STL components reaching the fingertip plane; +90° Z baked in). GUI-only
-  `rb3_730e_pika_articulated.urdf` (base + two prismatic finger joints). `scene.py`
+  `rb5_850e_pika_articulated.urdf` (base + two prismatic finger joints). `scene.py`
   drives the fingers from a gripper open-% (continuous → partial close); `app.py`
   adds gripper display/control surfaces. The C++ Pinocchio URDF
-  (`rb3_730e.urdf`) is untouched.
+  (`rb5_850e.urdf`) is untouched.
 
 Goal: make the gripper a first-class, single-owner subsystem like `camera_server`,
 unify its command path through `rb_servo_server` (so it inherits lease /
@@ -214,12 +214,12 @@ once `ArmSnapshot.gripper.percent` exists either is a GUI-only change):
   gripper into a fingerless base + two finger meshes (from the STEP, §9) and drive
   one finger DOF from `gripper.percent` (continuous → any partial-close pose).
 
-  **Hard constraint:** the C++ Pinocchio FK/IK loads the SAME `rb3_730e.urdf`
+  **Hard constraint:** the C++ Pinocchio FK/IK loads the SAME `rb5_850e.urdf`
   (`kinematics.urdf` in every stack config). Adding an actuated finger joint there
   changes the server's DOF/FK/IK model — **do NOT edit the shared URDF.** The
   articulation must be **GUI-isolated**. Two GUI-only ways:
   - **B2a (recommended) — GUI-private articulated URDF.** Author a viewer-only URDF
-    (`rb3_730e_pika_articulated.urdf`, selected via `RB_GUI_ROBOT_URDF`/`_robot_urdf_path`):
+    (`rb5_850e_pika_articulated.urdf`, selected via `RB_GUI_ROBOT_URDF`/`_robot_urdf_path`):
     same arm chain, but the `tool` link uses a **fingerless base mesh** and two
     `finger_left`/`finger_right` links are added with ONE actuated jaw joint
     (`finger_right` `mimic`s `finger_left`). `ViserUrdf.get_actuated_joint_names()`

@@ -18,12 +18,12 @@ import pinocchio as pin
 import coal
 
 WS = "/home/plaif/workspace"
-UNIFIED = f"{WS}/mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e/dual_rb3_730e_ver3.urdf"
+UNIFIED = f"{WS}/robotics_lab/rb_servo_server/descriptions/urdf/dual_rb5_850e_ver3.urdf"
 PIKA_STL = f"{WS}/robotics_lab/rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_gripper.STL"
 DEG = np.pi / 180.0
 
-LJ = [f"dual_rb3_730e_left_{n}_joint" for n in ["base","shoulder","elbow","wrist1","wrist2","wrist3"]]
-RJ = [f"dual_rb3_730e_right_{n}_joint" for n in ["base","shoulder","elbow","wrist1","wrist2","wrist3"]]
+LJ = [f"dual_rb5_850e_left_{n}_joint" for n in ["base","shoulder","elbow","wrist1","wrist2","wrist3"]]
+RJ = [f"dual_rb5_850e_right_{n}_joint" for n in ["base","shoulder","elbow","wrist1","wrist2","wrist3"]]
 
 # --- current hand-fit capsule definitions (config.hpp defaultRb3ArmCapsules) ---
 ARM_CAPS = [
@@ -99,7 +99,7 @@ pika_bvh.buildConvexRepresentation(False)
 pika_hull=pika_bvh.convex
 Rz90=pin.SE3(pin.utils.rotate('z',np.pi/2),np.zeros(3))
 for side in ("left","right"):
-    fid=model.getFrameId(f"dual_rb3_730e_{side}_attachment_site")
+    fid=model.getFrameId(f"dual_rb5_850e_{side}_attachment_site")
     fr=model.frames[fid]
     placement=fr.placement*Rz90
     go=pin.GeometryObject(f"{side}_pika_gripper",fr.parentJoint,fr.parentFrame,placement,pika_hull)
@@ -133,7 +133,7 @@ def build_capsule_geom(ignore_set):
         locT,L=cap_local(p0,p1)
         go=pin.GeometryObject(name,fr.parentJoint,fr.parentFrame,fr.placement*locT,coal.Capsule(r,L))
         return g.addGeometryObject(go)
-    for side,prefix in (("left","dual_rb3_730e_left_"),("right","dual_rb3_730e_right_")):
+    for side,prefix in (("left","dual_rb5_850e_left_"),("right","dual_rb5_850e_right_")):
         for k,(frame,p0,p1,r) in enumerate(ARM_CAPS):
             idxmap[side].append((k,add_cap(f"{side}_arm{k}_{frame}",prefix+frame,p0,p1,r)))
     for k,(name,p0,p1,r) in enumerate(STAND_CAPS):
@@ -174,7 +174,7 @@ for n in range(4): POSES[f"random#{n}"]=(rng.uniform(-80,80,6),rng.uniform(-80,8
 
 banner("ACCURACY: min self-collision clearance (mm)  CAPSULE vs MESH(+gripper)")
 def short(nm):
-    return nm.replace("dual_rb3_730e_","").replace("stand_","s.").replace("_arm","")
+    return nm.replace("dual_rb5_850e_","").replace("stand_","s.").replace("_arm","")
 print("caps[0]=deployed ignore_bones, caps[012]=memory-recommended, mesh=URDF+gripper")
 print(f"{'pose':24s} {'caps[0]':>8s} {'caps[012]':>9s} {'mesh':>8s}   mesh min-pair")
 for label,(ql,qr) in POSES.items():

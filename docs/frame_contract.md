@@ -157,8 +157,8 @@ Two distinct URDF assets feed the server, and only one is tracked here:
 
 | Use | Config key | Path | Tracked in this repo? |
 |---|---|---|---|
-| FK/IK kinematics (per arm) | `kinematics.urdf` | `rb_servo_server/descriptions/urdf/rb3_730e.urdf` (single arm) | **yes** |
-| Self-collision guard (`CollisionMonitor`) | `safety.self_collision.mesh.unified_urdf` | `mo_robot_descriptions/.../robots/urdf/dual_rb3_730e/dual_rb3_730e_ver3.urdf` (stand + both arms) | **no** |
+| FK/IK kinematics (per arm) | `kinematics.urdf` | `rb_servo_server/descriptions/urdf/rb5_850e.urdf` (single arm) | **yes** |
+| Self-collision guard (`CollisionMonitor`) | `safety.self_collision.mesh.unified_urdf` | `rb_servo_server/descriptions/urdf/dual_rb5_850e_ver3.urdf` (stand + both arms) | **yes** (since 2026-09-02) |
 
 The **unified** (stand + both-arms) URDF is the most important geometry input to
 the self-collision guard — `CollisionMonitor` builds its Pinocchio model and
@@ -174,11 +174,11 @@ from this repo's side** — this is a known gap. When onboarding or reproducing 
 collision model, treat the following as required-but-unspecified and pin them
 explicitly in the site setup notes:
 
-- which `mo_robot_descriptions` commit/tag the `dual_rb3_730e_ver*` URDF came from
+- which `mo_robot_descriptions` commit/tag the upstream `dual_rb5_850e_ver*` URDF came from
 - how the dual URDF is generated from the single-arm description + stand mount
   geometry (which `_ver` is current, and what changed between `ver2`/`ver3`)
 - that link/mesh names stay consistent with the server's
-  `stand_ignore_arm_substrings` (`dual_rb3_730e_left_` / `dual_rb3_730e_right_`)
+  `stand_ignore_arm_substrings` (`dual_rb5_850e_left_` / `dual_rb5_850e_right_`)
   so arm-vs-stand pairing stays correct
 
 Until that is captured, a fresh clone cannot rebuild the collision model without

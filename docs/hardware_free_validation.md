@@ -20,7 +20,7 @@ Hardware-free validation may exercise:
 
 It does not prove:
 
-- real RB3-730 readiness
+- real RB5-850 readiness
 - real Cartesian/TCP readiness
 - RealSense readiness
 - gripper readiness

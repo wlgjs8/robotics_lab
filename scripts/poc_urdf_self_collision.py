@@ -16,18 +16,18 @@ import numpy as np
 import pinocchio as pin
 
 WS = "/home/plaif/workspace"
-UNIFIED_URDF = f"{WS}/mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e/dual_rb3_730e_ver3.urdf"
+UNIFIED_URDF = f"{WS}/robotics_lab/rb_servo_server/descriptions/urdf/dual_rb5_850e_ver3.urdf"
 MESH_ROOT = f"{WS}/mo_robot_descriptions/mo_robot_descriptions/meshes"
 MESH_PKG_DIR = f"{WS}/mo_robot_descriptions/mo_robot_descriptions"  # so '../../../meshes' resolves
-SINGLE_URDF = f"{WS}/robotics_lab/rb_servo_server/descriptions/urdf/rb3_730e.urdf"
+SINGLE_URDF = f"{WS}/robotics_lab/rb_servo_server/descriptions/urdf/rb5_850e.urdf"
 SINGLE_MESH_DIR = f"{WS}/robotics_lab/rb_servo_server/descriptions"
 
 DEG = np.pi / 180.0
 INIT_POSE_DEG = np.array([0.0, -30.0, 80.0, 0.0, 60.0, 0.0])
 
-LEFT_JOINTS = [f"dual_rb3_730e_left_{n}_joint" for n in
+LEFT_JOINTS = [f"dual_rb5_850e_left_{n}_joint" for n in
                ["base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3"]]
-RIGHT_JOINTS = [f"dual_rb3_730e_right_{n}_joint" for n in
+RIGHT_JOINTS = [f"dual_rb5_850e_right_{n}_joint" for n in
                 ["base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3"]]
 
 LEFT_MOUNT = [0.1601, -0.1725, 0.5825, 2.186649, 0.523831, 2.526296]
@@ -122,7 +122,7 @@ def unified_flange_in_stand(qdeg_left, qdeg_right, side):
     pin.forwardKinematics(model, data, q)
     pin.updateFramePlacements(model, data)
     stand_M = data.oMf[model.getFrameId("stand")]
-    flange_M = data.oMf[model.getFrameId(f"dual_rb3_730e_{side}_link6")]
+    flange_M = data.oMf[model.getFrameId(f"dual_rb5_850e_{side}_link6")]
     return stand_M.inverse() * flange_M
 single_tcp_in_stand = single_flange_in_stand
 unified_tcp_in_stand = unified_flange_in_stand
