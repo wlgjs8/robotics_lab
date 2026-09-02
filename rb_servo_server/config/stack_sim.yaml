@@ -184,10 +184,16 @@ safety:
   # 실제 차단(면 슬라이드/홀드)을 보려면 monitor_only=false로 전환.
   roi_box:
     enable: true
-    min_m: [-1.200, -1.600, -0.200]
-    max_m: [1.200, 0.600, 1.600]
-    runtime_min_m: [-1.2, -1.6, -0.2]
-    runtime_max_m: [1.2, 0.6, 1.6]
+    # 2026-09-02: ROTATED Rz(+90 deg) into the RB5 stand frame, same reason as
+    # stack_real.yaml -- these bounds are stand-frame and that frame's convention
+    # changed with the robot (base->stand was +90 deg on dual_rb3_730e_ver5, identity
+    # on dual_rb5_850e_ver3). This profile's box is the permissive observation range,
+    # so the rotation matters less than in real, but an unrotated box would still put
+    # the margin/closest_face readouts on the wrong faces.
+    min_m: [-0.600, -1.200, -0.200]
+    max_m: [1.600, 1.200, 1.600]
+    runtime_min_m: [-0.6, -1.2, -0.2]
+    runtime_max_m: [1.6, 1.2, 1.6]
     fail_policy: clamp_hold
     monitor_only: true   # 관찰 시작; 강제하려면 false
     a_brake_m_s2: 3.0

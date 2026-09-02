@@ -4,13 +4,11 @@
 WHY A GENERATOR AND NOT A HAND-EDITED FILE
 ==========================================
 The unified URDF is the geometry the async CollisionMonitor enforces, so the
-property that must never break silently is that ver3's ARM KINEMATICS are
-bit-identical to ver2's: the joints, the links and their placements are upstream's,
-and the only frame that moves is attachment_site, deliberately and by a measured
-amount (see ATTACHMENT_SITE_SHIFT_M). A 44 KB hand edit cannot demonstrate that; a
-transform plus an FK regression can, and this script is re-runnable when upstream
-ships a new ver. The regression is: over 500 random configurations every shared
-frame except attachment_site deviates by 0, and attachment_site by exactly 15.230 mm.
+property that must never break silently is that ver3's KINEMATICS are bit-identical
+to ver2's: the joints, the links and their placements are upstream's, and nothing is
+moved. A 44 KB hand edit cannot demonstrate that; a transform plus an FK regression
+can, and this script is re-runnable when upstream ships a new ver. The regression is:
+over 500 random configurations every shared frame deviates by 0.
 
 WHAT IT CHANGES, AND WHY
 ========================
@@ -70,10 +68,10 @@ ELBOW_LIMIT_DEG = 165.0
 # unchanged across the RB3->RB5 swap (operator, 2026-09-02: same adapter, bolted
 # straight to the RB5 flange), so the offsets carry over.
 #
-# MEASURED ON THE ROBOT, 2026-09-02, not inherited. RB3's value was 247.642 mm --
-# the pika_gripper.STL tip plane measured from RB3's attachment_site. Transplanting
-# it to RB5 assumed the two vendors' attachment_site frames sit on the same physical
-# plane; they do not, by about 15 mm.
+# MEASURED ON THE ROBOT, 2026-09-02, not inherited. RB3's value was 247.642 mm -- the
+# pika_gripper.STL tip plane measured from RB3's attachment_site -- and the hardware
+# disagrees with it by about 15 mm. Where that 15 mm actually lives is worked out at
+# the end of this comment; the measurement itself is below.
 #
 # Two hand-parked contact poses, read back with tools/rbpodo_read_state:
 #   A  both TCPs touching the stand   tool axes [-0.77,-0.58,-0.27] / [-0.87,0.37,-0.34]
@@ -91,52 +89,29 @@ ELBOW_LIMIT_DEG = 165.0
 # hand, so treat the 262.87 mm as +/- ~3 mm. Re-derive it with the two poses above
 # if the gripper or its adapter is ever changed.
 #
-# WHERE THE 15 mm BELONGS. The contact fit alone cannot say whether the tool is
-# longer or attachment_site is misplaced -- both move tcp identically. The gripper
-# meshes settle it: pika_gripper_hull.STL spans z [0, 247.642] mm, i.e. it is
-# modelled from the gripper's own MOUNTING FACE and its tip plane is 247.642 mm out.
-# The gripper is physically unchanged, so mounting-face -> tip really is 247.642 mm,
-# and the missing 15.23 mm therefore sits between RB5's attachment_site and that
-# mounting face: upstream's attachment_site is NOT on the tool mounting plane.
+# WHERE THE 15 mm IS -- corrected 2026-09-02 after rendering it. The first attempt
+# blamed attachment_site and pushed it 15.23 mm out. That is measurably wrong, and it
+# showed immediately in rb_gui as the gripper floating off the flange:
 #
-# So the correction is applied to attachment_site, not to tcp. That matters beyond
-# tcp, and in the unsafe direction if left alone:
-#   - collision_monitor.cpp attaches the pika hulls AT attachment_site with identity,
-#     so an attachment_site 15 mm inboard makes the guard miss the outermost 15 mm of
-#     the real gripper -- precisely the fingertips.
-#   - kinematics flange_link is attachment_site, and the force path uses that pose,
-#     so the F/T moment arm was short by the same 15 mm.
-#   - the ft_sensor chain below measures from it.
-# Moving the frame fixes all four at once and needs no code change.
-ATTACHMENT_SITE_SHIFT_M = 0.01523  # attachment_site -> true tool mounting plane
+#   link6's visual mesh ends 96.57 mm from its origin; upstream puts attachment_site
+#   at 96.70 mm. Upstream's attachment_site IS the flange face. RB3 is the SAME
+#   convention -- its link6 ends at exactly 100.00 mm, where its attachment_site sits.
+#
+# So both robots measure the tool from the flange, and both should give the same
+# number for the same gripper. RB3's was 247.642 mm, the z-max of pika_gripper.STL;
+# the hardware says 262.87 mm. Same convention, same adapter, same CAD file, so what
+# is left is that the PHYSICAL tip is ~15 mm beyond that CAD -- consistent with the
+# finger redesign this gripper has been through (PLA spine + TPU blade, v7 -> v9),
+# which the STL predates.
+#
+# tcp is therefore the MEASURED distance and attachment_site stays where upstream put
+# it. NOT FIXED, and it runs the unsafe way: the finger collision hulls are that same
+# old CAD and stop at 247.642 mm, so the self-collision guard misses the outermost
+# ~15 mm of the real fingertips -- the part that actually touches things. Closing that
+# needs the current finger geometry, not a guess.
 FT_BASE_OFFSET_M = 0.015          # attachment_site -> ft_sensor_base
 FT_MEASUREMENT_OFFSET_M = 0.030   # ft_sensor_base  -> ft_sensor_measurement
-PIKA_TIP_OFFSET_M = 0.247642      # attachment_site -> tcp (pika_gripper_hull.STL tip plane)
-
-
-def shift_attachment_site(root) -> int:
-    """Push every attachment_site onto the real tool mounting plane.
-
-    Upstream places it at link6 + 96.7 mm along the tool axis, which in this URDF's
-    link6 frame is -Y (the frame is then rotated so its own +Z is the tool axis), so
-    the correction is applied to that -Y component.
-    """
-    moved = 0
-    for joint in root.findall("joint"):
-        if not joint.get("name", "").endswith("attachment_site_joint"):
-            continue
-        origin = joint.find("origin")
-        xyz = [float(v) for v in origin.get("xyz").split()]
-        if abs(xyz[1]) < 1e-9 or abs(xyz[0]) > 1e-9 or abs(xyz[2]) > 1e-9:
-            raise SystemExit(f"{joint.get('name')} origin {xyz} is not the expected "
-                             "pure -Y tool-axis offset; re-derive the correction")
-        # OUTWARD along the tool axis means further from zero, and this component is
-        # negative -- subtracting here moved the frame INTO the wrist and doubled the
-        # contact residuals (measured while writing this).
-        xyz[1] += math.copysign(ATTACHMENT_SITE_SHIFT_M, xyz[1])
-        origin.set("xyz", " ".join(f"{v:.6f}" for v in xyz))
-        moved += 1
-    return moved
+PIKA_TIP_OFFSET_M = 0.26287       # attachment_site (flange) -> tcp, MEASURED on hardware
 
 ARM_COLLISION = {                      # link -> our collision mesh(es), URDF-relative
     "link0": ["../meshes/robots/rb5_850e/collision/link0_hull.stl"],
@@ -225,9 +200,6 @@ def build(src: Path) -> ET.ElementTree:
         limit.set("upper", f"{hi:.6f}")
         elbows += 1
 
-    if shift_attachment_site(root) != 2:
-        raise SystemExit("dual: expected two attachment_site joints")
-
     # (3) stand hulls alongside the upstream boxes
     if root.find("link[@name='stand_collision']") is not None:
         raise SystemExit("upstream already defines stand_collision; rework this step")
@@ -296,9 +268,6 @@ def build_single(src: Path) -> ET.ElementTree:
         raise SystemExit("single-arm: elbow_joint has no <limit>")
     elbow.set("lower", f"{lo:.6f}")
     elbow.set("upper", f"{hi:.6f}")
-
-    if shift_attachment_site(root) != 1:
-        raise SystemExit("single-arm: expected one attachment_site joint")
 
     # Upstream's tcp sits on top of attachment_site; ours is the pika tip.
     tcp_joint = root.find("joint[@name='tcp_joint']")

@@ -334,7 +334,7 @@
   <joint name="dual_rb5_850e_left_attachment_site_joint" type="fixed">
     <parent link="dual_rb5_850e_left_link6" />
     <child link="dual_rb5_850e_left_attachment_site" />
-    <origin xyz="0.000000 -0.111930 0.000000" rpy="1.57 0.0 0.0" />
+    <origin xyz="0.0 -0.0967 0.0" rpy="1.57 0.0 0.0" />
   </joint>
   <joint name="dual_rb5_850e_right_tcp_joint" type="fixed">
     <parent link="dual_rb5_850e_right_link6" />
@@ -344,7 +344,7 @@
   <joint name="dual_rb5_850e_right_attachment_site_joint" type="fixed">
     <parent link="dual_rb5_850e_right_link6" />
     <child link="dual_rb5_850e_right_attachment_site" />
-    <origin xyz="0.000000 -0.111930 0.000000" rpy="1.57 0.0 0.0" />
+    <origin xyz="0.0 -0.0967 0.0" rpy="1.57 0.0 0.0" />
   </joint>
   <joint name="base_fixed" type="fixed">
     <parent link="world" />
