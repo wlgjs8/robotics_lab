@@ -1375,7 +1375,7 @@ def _add_roi_box(server: Any, handles: dict[str, Any]) -> None:
     any occluding face. Hidden (placeholder geometry) until update_roi_box /
     update_roi_box_preview move/resize/show it."""
     dims = (1.0, 1.0, 1.0)
-    center = (0.0, -0.5, 0.5)
+    center = (0.5, 0.0, 0.5)
     seg, corners = _roi_box_outline(dims, center)
     # (edges handle, verts handle, scene-node prefix, color) for the applied
     # region (blue) and the pending-slider preview (yellow).
@@ -2182,11 +2182,14 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
         # Mount frames for the translucent-red self-collision overlay robots.
         handles["left_base_collision"] = server.scene.add_frame("/stand/left_base_collision", wxyz=_pose_wxyz(_DEFAULT_LEFT_POSE), position=_pose_position(_DEFAULT_LEFT_POSE), show_axes=False, visible=False)
         handles["right_base_collision"] = server.scene.add_frame("/stand/right_base_collision", wxyz=_pose_wxyz(_DEFAULT_RIGHT_POSE), position=_pose_position(_DEFAULT_RIGHT_POSE), show_axes=False, visible=False)
+        # Startup placeholders for the TCP gizmos, overwritten as soon as state
+        # arrives. Rotated Rz(+90 deg) with everything else stand-frame on the
+        # 2026-09-02 RB3 -> RB5 swap, so the first frames are not visibly wrong.
         has_transform_controls = hasattr(server.scene, "add_transform_controls")
-        handles["left_tcp"] = server.scene.add_frame("/stand/left_tcp", show_axes=not has_transform_controls, axes_length=0.08, axes_radius=0.003, position=(0.1601, -0.1725, 0.78))
-        handles["right_tcp"] = server.scene.add_frame("/stand/right_tcp", show_axes=not has_transform_controls, axes_length=0.08, axes_radius=0.003, position=(-0.1601, -0.1725, 0.78))
-        handles["left_tcp_ref"] = server.scene.add_frame("/stand/left_tcp_ref", show_axes=True, axes_length=0.055, axes_radius=0.002, position=(0.1601, -0.1725, 0.78))
-        handles["right_tcp_ref"] = server.scene.add_frame("/stand/right_tcp_ref", show_axes=True, axes_length=0.055, axes_radius=0.002, position=(-0.1601, -0.1725, 0.78))
+        handles["left_tcp"] = server.scene.add_frame("/stand/left_tcp", show_axes=not has_transform_controls, axes_length=0.08, axes_radius=0.003, position=(0.1725, 0.1601, 0.78))
+        handles["right_tcp"] = server.scene.add_frame("/stand/right_tcp", show_axes=not has_transform_controls, axes_length=0.08, axes_radius=0.003, position=(0.1725, -0.1601, 0.78))
+        handles["left_tcp_ref"] = server.scene.add_frame("/stand/left_tcp_ref", show_axes=True, axes_length=0.055, axes_radius=0.002, position=(0.1725, 0.1601, 0.78))
+        handles["right_tcp_ref"] = server.scene.add_frame("/stand/right_tcp_ref", show_axes=True, axes_length=0.055, axes_radius=0.002, position=(0.1725, -0.1601, 0.78))
         if hasattr(server.scene, "add_label"):
             # No label on the actual-TCP gizmo: it is the frame the operator reads
             # continuously in every run mode, so a permanent floating caption is
@@ -2194,8 +2197,8 @@ def _add_scene_fallback(server: Any) -> dict[str, Any]:
             # only appears in the controller-sim reference display, where naming
             # which TCP source is drawn is what disambiguates the two gizmos.
             for arm, position in (
-                ("left", (0.1601, -0.1725, 0.78)),
-                ("right", (-0.1601, -0.1725, 0.78)),
+                ("left", (0.1725, 0.1601, 0.78)),
+                ("right", (0.1725, -0.1601, 0.78)),
             ):
                 handles[f"{arm}_tcp_ref_label"] = server.scene.add_label(
                     f"/stand/{arm}_tcp_ref_label",

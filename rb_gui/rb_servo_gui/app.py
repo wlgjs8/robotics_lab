@@ -210,8 +210,13 @@ _TCP_LINEAR_ORIENTATION_MODES = ("constant", "slerp")
 # desired zoomed-in framing on the grippers/TCP (2026-06-15). Override per launch
 # with RB_GUI_CAMERA_POSITION / RB_GUI_CAMERA_LOOK_AT / RB_GUI_CAMERA_UP
 # ("x,y,z" in meters).
-_DEFAULT_CAMERA_POSITION = (-0.0128, -1.3823, 0.3985)
-_DEFAULT_CAMERA_LOOK_AT = (-0.0128, -0.1381, 0.2257)
+# 2026-09-02, RB3-730E -> RB5-850E: ROTATED Rz(+90 deg), like roi_box. These are
+# STAND-FRAME points and that frame turned 90 deg with the robot (base->stand was
+# +90 deg on dual_rb3_730e_ver5, identity on dual_rb5_850e_ver3), so the old values
+# framed the robot from its side instead of its front. The workspace is now out
+# along +x, which is where the camera sits.
+_DEFAULT_CAMERA_POSITION = (1.3823, -0.0128, 0.3985)
+_DEFAULT_CAMERA_LOOK_AT = (0.1381, -0.0128, 0.2257)
 _DEFAULT_CAMERA_UP = (0.0, 0.0, 1.0)
 # TcpPoseTarget replay/profiling init-motion anchor (2026-06-21): GRIPPER-DOWN (tool z ~ stand
 # -z), max single-rest coverage. Left = controller-consistent rest; right = rest + 10deg about
