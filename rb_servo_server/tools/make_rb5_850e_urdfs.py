@@ -66,18 +66,29 @@ ELBOW_LIMIT_DEG = 165.0
 # unchanged across the RB3->RB5 swap (operator, 2026-09-02: same adapter, bolted
 # straight to the RB5 flange), so the offsets carry over.
 #
-# UNRESOLVED, 14.6 mm. Touching both TCPs to the stand and solving for the tool
-# length that puts the tip on the surface gave 267.1 mm (left) / 263.3 mm (right)
-# from attachment_site, against the 247.642 mm here. The two arms agree to 0.95 mm
-# at a COMMON length, so this is not a left/right mount error -- it is common-mode,
-# and a single contact surface cannot tell "the RB5 pika stack is ~15 mm longer"
-# from "both mounts sit ~15 mm off the drawing". 247.642 mm is kept because it is
-# the measured pika_gripper.STL tip plane, i.e. the value with provenance; do not
-# fold the 14.6 mm in here until a tape measure says the tool really is longer,
-# because if it is a mount offset this would bake in the error AND hide it.
+# MEASURED ON THE ROBOT, 2026-09-02, not inherited. RB3's value was 247.642 mm --
+# the pika_gripper.STL tip plane measured from RB3's attachment_site. Transplanting
+# it to RB5 assumed the two vendors' attachment_site frames sit on the same physical
+# plane; they do not, by about 15 mm.
+#
+# Two hand-parked contact poses, read back with tools/rbpodo_read_state:
+#   A  both TCPs touching the stand   tool axes [-0.77,-0.58,-0.27] / [-0.87,0.37,-0.34]
+#   B  the two TCPs touching EACH OTHER (stand geometry not involved at all)
+#                                     tool axes [ 0.14,-0.98,-0.13] / [-0.06,0.99, 0.10]
+# At 247.642 mm, pose A left both tips 14.97 / 14.00 mm clear of the surface and pose
+# B left the two tips 29.88 mm apart -- 14.94 mm per arm. The agreement is what
+# identifies the cause: the two poses' tool axes are nearly ORTHOGONAL, and a mount
+# position error cannot show up as the same along-the-tool-axis shortfall in both,
+# whereas a tool-length error does so by construction. A combined fit over all three
+# contact residuals gives 262.87 mm, and at that value pose A's clearances fall to
+# 3.27 / 0.38 mm. The stand model, which the first pose alone had implicated, is fine.
+#
+# Residuals of a few mm are the precision of parking an arm against a surface by
+# hand, so treat this as 262.9 +/- ~3 mm. Re-derive it with the two poses above if
+# the gripper or its adapter is ever changed.
 FT_BASE_OFFSET_M = 0.015          # attachment_site -> ft_sensor_base
 FT_MEASUREMENT_OFFSET_M = 0.030   # ft_sensor_base  -> ft_sensor_measurement
-PIKA_TIP_OFFSET_M = 0.247642      # attachment_site -> tcp (pika fingertip plane)
+PIKA_TIP_OFFSET_M = 0.26287       # attachment_site -> tcp (pika fingertip plane)
 
 ARM_COLLISION = {                      # link -> our collision mesh(es), URDF-relative
     "link0": ["../meshes/robots/rb5_850e/collision/link0_hull.stl"],
