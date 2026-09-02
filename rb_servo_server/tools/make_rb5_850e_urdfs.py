@@ -55,9 +55,29 @@ REPO = Path(__file__).resolve().parents[2]
 UPSTREAM = (REPO.parent / "mo_robot_descriptions/mo_robot_descriptions/robots/urdf"
             "/dual_rb5_850e/dual_rb5_850e_ver2.urdf")
 OUT = REPO / "rb_servo_server/descriptions/urdf/dual_rb5_850e_ver3.urdf"
+UPSTREAM_SINGLE = (REPO.parent / "mo_robot_descriptions/mo_robot_descriptions/robots/urdf"
+                   "/rb5_850e/rb5_850e.urdf")
+OUT_SINGLE = REPO / "rb_servo_server/descriptions/urdf/rb5_850e.urdf"
 
 # Rainbow RB Series catalog p7: RB5-850 J3 working range +/-165 deg.
 ELBOW_LIMIT_DEG = 165.0
+
+# Tool chain below attachment_site, mirroring rb3_730e.urdf. The pika adapter is
+# unchanged across the RB3->RB5 swap (operator, 2026-09-02: same adapter, bolted
+# straight to the RB5 flange), so the offsets carry over.
+#
+# UNRESOLVED, 14.6 mm. Touching both TCPs to the stand and solving for the tool
+# length that puts the tip on the surface gave 267.1 mm (left) / 263.3 mm (right)
+# from attachment_site, against the 247.642 mm here. The two arms agree to 0.95 mm
+# at a COMMON length, so this is not a left/right mount error -- it is common-mode,
+# and a single contact surface cannot tell "the RB5 pika stack is ~15 mm longer"
+# from "both mounts sit ~15 mm off the drawing". 247.642 mm is kept because it is
+# the measured pika_gripper.STL tip plane, i.e. the value with provenance; do not
+# fold the 14.6 mm in here until a tape measure says the tool really is longer,
+# because if it is a mount offset this would bake in the error AND hide it.
+FT_BASE_OFFSET_M = 0.015          # attachment_site -> ft_sensor_base
+FT_MEASUREMENT_OFFSET_M = 0.030   # ft_sensor_base  -> ft_sensor_measurement
+PIKA_TIP_OFFSET_M = 0.247642      # attachment_site -> tcp (pika fingertip plane)
 
 ARM_COLLISION = {                      # link -> our collision mesh(es), URDF-relative
     "link0": ["../meshes/robots/rb5_850e/collision/link0_hull.stl"],
@@ -136,11 +156,83 @@ def build(src: Path) -> ET.ElementTree:
     return tree
 
 
-def write(tree: ET.ElementTree, dst: Path) -> None:
+def _fixed_joint(name: str, parent: str, child: str, xyz: str, rpy: str) -> ET.Element:
+    j = ET.Element("joint", {"name": name, "type": "fixed"})
+    ET.SubElement(j, "parent", {"link": parent})
+    ET.SubElement(j, "child", {"link": child})
+    ET.SubElement(j, "origin", {"xyz": xyz, "rpy": rpy})
+    return j
+
+
+def build_single(src: Path) -> ET.ElementTree:
+    """Single-arm model for kinematics.urdf (C++ Pinocchio FK/IK).
+
+    That loader calls buildModel() only -- no geometry -- and needs exactly
+    base_link "world", flange_link "attachment_site", tip_link "tcp" and the six
+    named joints. Upstream supplies all of those, but puts tcp AT attachment_site
+    (no tool), so tcp is re-parented onto the pika tip the way rb3_730e.urdf does,
+    and the F/T chain rb3_730e.urdf carries is reproduced so the URDF still
+    documents the physical stack the force-control config describes.
+
+    Visuals are dropped: unused by the C++ loader, and vendoring them would mean
+    92 MB of RB5 meshes in git. rb_gui therefore has no RB5 display model yet.
+    """
+    tree = ET.parse(src)
+    root = tree.getroot()
+
+    for link in root.findall("link"):
+        for vis in link.findall("visual"):
+            link.remove(vis)
+
+    replaced = 0
+    for link in root.findall("link"):
+        name = link.get("name", "")
+        if name not in ARM_COLLISION:
+            continue
+        for col in link.findall("collision"):
+            link.remove(col)
+        for path in ARM_COLLISION[name]:
+            link.append(_mesh_collision(path, "1.0 1.0 1.0"))
+            replaced += 1
+    if replaced != sum(len(v) for v in ARM_COLLISION.values()):
+        raise SystemExit(f"single-arm: replaced {replaced} collision shells")
+
+    lo, hi = -math.radians(ELBOW_LIMIT_DEG), math.radians(ELBOW_LIMIT_DEG)
+    elbow = root.find("joint[@name='elbow_joint']/limit")
+    if elbow is None:
+        raise SystemExit("single-arm: elbow_joint has no <limit>")
+    elbow.set("lower", f"{lo:.6f}")
+    elbow.set("upper", f"{hi:.6f}")
+
+    # Upstream's tcp sits on top of attachment_site; ours is the pika tip.
+    tcp_joint = root.find("joint[@name='tcp_joint']")
+    if tcp_joint is None:
+        raise SystemExit("single-arm: no tcp_joint")
+    tcp_joint.find("parent").set("link", "attachment_site")
+    tcp_joint.find("origin").set("xyz", f"0.0 0.0 {PIKA_TIP_OFFSET_M}")
+    tcp_joint.find("origin").set("rpy", "0.0 0.0 0.0")
+
+    for name in ("ft_sensor_base", "ft_sensor_measurement", "tool"):
+        if root.find(f"link[@name='{name}']") is not None:
+            raise SystemExit(f"single-arm: upstream already defines {name}")
+        ET.SubElement(root, "link", {"name": name})
+    root.append(_fixed_joint("ft_sensor_base_joint", "attachment_site", "ft_sensor_base",
+                             f"0.0 0.0 {FT_BASE_OFFSET_M}", f"0.0 0.0 {math.pi / 2:.16f}"))
+    root.append(_fixed_joint("ft_sensor_measurement_joint", "ft_sensor_base",
+                             "ft_sensor_measurement", f"0.0 0.0 {FT_MEASUREMENT_OFFSET_M}",
+                             "0.0 0.0 0.0"))
+    root.append(_fixed_joint("tool_joint", "attachment_site", "tool", "0.0 0.0 0.0",
+                             "0.0 0.0 0.0"))
+
+    ET.indent(tree, space="  ")
+    return tree
+
+
+def write(tree: ET.ElementTree, dst: Path, source: str) -> None:
     header = (
         "<?xml version=\"1.0\"?>\n"
-        "<!-- GENERATED by rb_servo_server/tools/make_dual_rb5_850e_ver3.py from\n"
-        "     mo_robot_descriptions dual_rb5_850e_ver2.urdf. DO NOT HAND-EDIT: rerun the\n"
+        "<!-- GENERATED by rb_servo_server/tools/make_rb5_850e_urdfs.py from\n"
+        f"     mo_robot_descriptions {source}. DO NOT HAND-EDIT: rerun the\n"
         "     generator, which carries the rationale and the invariants it enforces.\n"
         f"     Elbow bound is the RB5-850 catalog value +/-{ELBOW_LIMIT_DEG:.0f} deg and must stay\n"
         "     equal to safety.q_min_deg/q_max_deg[2] in the stack config. -->\n"
@@ -152,23 +244,31 @@ def write(tree: ET.ElementTree, dst: Path) -> None:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true",
-                    help="verify the committed URDF matches what this script produces")
+                    help="verify the committed URDFs match what this script produces")
     args = ap.parse_args(argv)
-    if not UPSTREAM.exists():
-        print(f"upstream URDF not found: {UPSTREAM}", file=sys.stderr)
-        return 1
-    tree = build(UPSTREAM)
-    if args.check:
-        with tempfile.NamedTemporaryFile(suffix=".urdf", delete=False) as fh:
-            tmp = Path(fh.name)
-        write(tree, tmp)
-        same = OUT.exists() and OUT.read_text() == tmp.read_text()
-        tmp.unlink()
-        print("MATCH" if same else "DRIFT: committed URDF differs from the generator")
-        return 0 if same else 1
-    write(tree, OUT)
-    print(f"wrote {OUT.relative_to(REPO)}")
-    return 0
+
+    targets = [(UPSTREAM, OUT, build, "dual_rb5_850e_ver2.urdf"),
+               (UPSTREAM_SINGLE, OUT_SINGLE, build_single, "rb5_850e.urdf")]
+    for src, _dst, _fn, _label in targets:
+        if not src.exists():
+            print(f"upstream URDF not found: {src}", file=sys.stderr)
+            return 1
+
+    rc = 0
+    for src, dst, fn, label in targets:
+        tree = fn(src)
+        if args.check:
+            with tempfile.NamedTemporaryFile(suffix=".urdf", delete=False) as fh:
+                tmp = Path(fh.name)
+            write(tree, tmp, label)
+            same = dst.exists() and dst.read_text() == tmp.read_text()
+            tmp.unlink()
+            print(f"{'MATCH' if same else 'DRIFT'}  {dst.relative_to(REPO)}")
+            rc |= 0 if same else 1
+        else:
+            write(tree, dst, label)
+            print(f"wrote {dst.relative_to(REPO)}")
+    return rc
 
 
 if __name__ == "__main__":
