@@ -34,7 +34,7 @@ static const std::string WS = "/home/plaif/workspace";
 static const std::string UNIFIED =
     WS + "/mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e/dual_rb3_730e_ver3.urdf";
 static const std::string PIKA =
-    WS + "/robotics_lab/rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper.STL";
+    WS + "/robotics_lab/rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_gripper.STL";
 
 struct Cap { std::string frame; Vector3 p0, p1; double r; };
 

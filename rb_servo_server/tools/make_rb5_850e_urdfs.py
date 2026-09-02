@@ -61,6 +61,7 @@ OUT = REPO / "rb_servo_server/descriptions/urdf/dual_rb5_850e_ver3.urdf"
 UPSTREAM_SINGLE = (REPO.parent / "mo_robot_descriptions/mo_robot_descriptions/robots/urdf"
                    "/rb5_850e/rb5_850e.urdf")
 OUT_SINGLE = REPO / "rb_servo_server/descriptions/urdf/rb5_850e.urdf"
+OUT_DISPLAY = REPO / "rb_servo_server/descriptions/urdf/rb5_850e_pika_articulated.urdf"
 
 # Rainbow RB Series catalog p7: RB5-850 J3 working range +/-165 deg.
 ELBOW_LIMIT_DEG = 165.0
@@ -150,6 +151,19 @@ ARM_COLLISION = {                      # link -> our collision mesh(es), URDF-re
 # is upstream ver2's stand visual origin verbatim -- identity, unlike RB3 ver5 whose
 # stand visual carried rpy [0,0,-1.5708] to undo its own base->stand +90 deg joint.
 STAND_VISUAL_MESH = "../meshes/stands/dual_rb5_850e/dual_rb5_850e_stand_ver2.stl"
+
+# Display meshes for rb5_850e_pika_articulated.urdf (rb_gui only; the C++ FK/IK never
+# reads it). Vendored .dae rather than upstream's per-material .obj: the two are the
+# same object -- extents agree to 0.0002 mm -- and the .dae deviates from the finer
+# .obj surface by p50 0.0000 mm, p99 <= 0.063 mm, max 0.271 mm, an order below the
+# 1-2 mm the operator needs to judge on screen, for 26 MB instead of 69 MB.
+ARM_VISUAL = {f"link{i}": f"../meshes/robots/rb5_850e/visual/link{i}.dae" for i in range(7)}
+TOOL_VISUAL = {
+    "tool": "../meshes/robots/rb5_850e/visual/tool/pika_gripper_base.STL",
+    "finger_left": "../meshes/robots/rb5_850e/visual/tool/pika_finger_left.STL",
+    "finger_right": "../meshes/robots/rb5_850e/visual/tool/pika_finger_right.STL",
+}
+FINGER_TRAVEL_M = 0.05
 STAND_VISUAL_XYZ = "0.0 0.0 0.0"
 STAND_VISUAL_RPY = "0.0 0.0 0.0"
 STAND_HULLS = [f"../meshes/stands/dual_rb5_850e/collision_ver2/stand_hull_{i:03d}.stl"
@@ -310,6 +324,55 @@ def build_single(src: Path) -> ET.ElementTree:
     return tree
 
 
+def build_display(src: Path) -> ET.ElementTree:
+    """rb_gui's display model: the IK arm plus visuals and an articulated gripper.
+
+    Mirrors rb3_730e_pika_articulated.urdf. The C++ FK/IK must NEVER load this -- the
+    two prismatic finger joints would change its DOF -- which is why it is a separate
+    file from rb5_850e.urdf and why kinematics.urdf points at that one.
+
+    Accuracy matters here: the operator judges 1-2 mm clearances off this render, so
+    the arm carries the vendored .dae surfaces (max 0.271 mm from upstream's finer
+    .obj) rather than the collision hulls, which are inflated 3.9-57.8% by convexity
+    and would misstate exactly the gap being judged.
+    """
+    tree = build_single(src)
+    root = tree.getroot()
+
+    for link in root.findall("link"):
+        mesh = ARM_VISUAL.get(link.get("name", ""))
+        if mesh is None:
+            continue
+        vis = ET.SubElement(link, "visual")
+        ET.SubElement(vis, "origin", {"xyz": "0.0 0.0 0.0", "rpy": "0.0 0.0 0.0"})
+        geo = ET.SubElement(vis, "geometry")
+        ET.SubElement(geo, "mesh", {"filename": mesh, "scale": "1.0 1.0 1.0"})
+
+    # build_single() already created an empty `tool` link on attachment_site; give it
+    # the gripper body, and add the two fingers as prismatic siblings so the viewer can
+    # animate the live jaw percent.
+    for name, mesh in TOOL_VISUAL.items():
+        link = root.find(f"link[@name='{name}']")
+        if link is None:
+            link = ET.SubElement(root, "link", {"name": name})
+        vis = ET.SubElement(link, "visual")
+        ET.SubElement(vis, "origin", {"xyz": "0.0 0.0 0.0", "rpy": "0.0 0.0 0.0"})
+        geo = ET.SubElement(vis, "geometry")
+        ET.SubElement(geo, "mesh", {"filename": mesh, "scale": "0.001 0.001 0.001"})
+    for name, lower, upper in (("finger_left", 0.0, FINGER_TRAVEL_M),
+                               ("finger_right", -FINGER_TRAVEL_M, 0.0)):
+        joint = ET.SubElement(root, "joint",
+                              {"name": f"{name}_joint", "type": "prismatic"})
+        ET.SubElement(joint, "parent", {"link": "attachment_site"})
+        ET.SubElement(joint, "child", {"link": name})
+        ET.SubElement(joint, "origin", {"xyz": "0.0 0.0 0.0", "rpy": "0.0 0.0 0.0"})
+        ET.SubElement(joint, "axis", {"xyz": "1.0 0.0 0.0"})
+        ET.SubElement(joint, "limit", {"lower": f"{lower}", "upper": f"{upper}",
+                                       "effort": "20.0", "velocity": "0.5"})
+    ET.indent(tree, space="  ")
+    return tree
+
+
 def write(tree: ET.ElementTree, dst: Path, source: str) -> None:
     header = (
         "<?xml version=\"1.0\"?>\n"
@@ -330,7 +393,8 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     targets = [(UPSTREAM, OUT, build, "dual_rb5_850e_ver2.urdf"),
-               (UPSTREAM_SINGLE, OUT_SINGLE, build_single, "rb5_850e.urdf")]
+               (UPSTREAM_SINGLE, OUT_SINGLE, build_single, "rb5_850e.urdf"),
+               (UPSTREAM_SINGLE, OUT_DISPLAY, build_display, "rb5_850e.urdf")]
     for src, _dst, _fn, _label in targets:
         if not src.exists():
             print(f"upstream URDF not found: {src}", file=sys.stderr)

@@ -1,0 +1,12 @@
+{
+  "region": "base_axis_singularity_cylinder",
+  "radius_m": 0.23873241463784303,
+  "radius_source": "v_ref/dq_max = 0.25 / 60.0deg_s",
+  "z_lo_m": -1.0146375476200258,
+  "z_hi_m": 1.3584948872760452,
+  "extent_source": "FK-measured (200000 samples, in-reach)",
+  "v_ref_mps": 0.25,
+  "dqmax_deg": 60.0,
+  "sections": 48,
+  "note": "R = v_ref/dq_max (vendor A-region velocity singularity); grows with speed"
+}

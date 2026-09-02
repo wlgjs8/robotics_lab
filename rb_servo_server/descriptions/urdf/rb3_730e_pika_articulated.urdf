@@ -466,7 +466,7 @@
     <visual>
       <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0"/>
       <geometry>
-        <mesh filename="../meshes/robots/rb3_730e/visual/tool/pika_gripper_base.STL" scale="0.001 0.001 0.001"/>
+        <mesh filename="../meshes/robots/rb5_850e/visual/tool/pika_gripper_base.STL" scale="0.001 0.001 0.001"/>
       </geometry>
       <material name="gray_30"/>
     </visual>
@@ -475,7 +475,7 @@
     <visual>
       <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0"/>
       <geometry>
-        <mesh filename="../meshes/robots/rb3_730e/visual/tool/pika_finger_left.STL" scale="0.001 0.001 0.001"/>
+        <mesh filename="../meshes/robots/rb5_850e/visual/tool/pika_finger_left.STL" scale="0.001 0.001 0.001"/>
       </geometry>
       <material name="gray_30"/>
     </visual>
@@ -484,7 +484,7 @@
     <visual>
       <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0"/>
       <geometry>
-        <mesh filename="../meshes/robots/rb3_730e/visual/tool/pika_finger_right.STL" scale="0.001 0.001 0.001"/>
+        <mesh filename="../meshes/robots/rb5_850e/visual/tool/pika_finger_right.STL" scale="0.001 0.001 0.001"/>
       </geometry>
       <material name="gray_30"/>
     </visual>

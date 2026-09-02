@@ -15,7 +15,7 @@ from viser.extras import ViserUrdf
 ROOT = Path("/home/plaif/workspace/mo_robot_descriptions/mo_robot_descriptions")
 URDF = ROOT / "robots/urdf/dual_rb3_730e/dual_rb3_730e_ver5.urdf"
 GRIPPER_STL = Path("/home/plaif/workspace/robotics_lab/rb_servo_server/descriptions/"
-                   "meshes/robots/rb3_730e/visual/tool/pika_gripper.STL")
+                   "meshes/robots/rb5_850e/visual/tool/pika_gripper.STL")
 
 LEFT  = dict(base=281.28, shoulder=63.57, elbow=110.14, wrist1=-21.33, wrist2=-96.49, wrist3=-133.82)
 RIGHT = dict(base=-293.04, shoulder=-62.93, elbow=-113.52, wrist1=-0.77, wrist2=97.96, wrist3=135.29)

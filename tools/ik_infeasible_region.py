@@ -59,11 +59,11 @@ def _repo_root() -> Path:
 
 
 def _default_urdf() -> Path:
-    return _repo_root() / "rb_servo_server" / "descriptions" / "urdf" / "rb3_730e.urdf"
+    return _repo_root() / "rb_servo_server" / "descriptions" / "urdf" / "rb5_850e.urdf"
 
 
 def _default_out() -> Path:
-    return _repo_root() / "rb_servo_server" / "descriptions" / "ik_infeasible_rb3_730e.npz"
+    return _repo_root() / "rb_servo_server" / "descriptions" / "ik_infeasible_rb5_850e.npz"
 
 
 def cylinder_mesh(radius: float, z_lo: float, z_hi: float, sections: int) -> tuple:
@@ -181,7 +181,7 @@ def main() -> int:
         "note": "R = v_ref/dq_max (vendor A-region velocity singularity); grows with speed",
     }, indent=2))
 
-    print("RB3-730E A 영역 (base-axis singularity cylinder) — arm-base frame, both arms identical")
+    print("A 영역 (base-axis singularity cylinder) — arm-base frame, both arms identical")
     print(f"  radius          : {radius*1000:.0f} mm  ({radius_src})")
     print(f"  axial extent z  : [{z_lo:.3f}, {z_hi:.3f}] m  ({extent_src})")
     print(f"  mesh            : {len(verts)} verts, {len(faces)} faces (sections={args.sections})")

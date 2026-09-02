@@ -37,7 +37,7 @@ static CollisionMonitorConfig makeConfig(const fs::path& ws) {
     c.unified_urdf = (urdf_dir / "dual_rb3_730e_ver3.urdf").string();
     c.package_dirs = {urdf_dir.string()};
     c.pika_gripper_mesh =
-        (ws / "robotics_lab/rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/"
+        (ws / "robotics_lab/rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/"
               "pika_gripper.STL")
             .string();
     const char* jn[kDof] = {"base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3"};

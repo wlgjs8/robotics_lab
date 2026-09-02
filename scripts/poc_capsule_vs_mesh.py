@@ -19,7 +19,7 @@ import coal
 
 WS = "/home/plaif/workspace"
 UNIFIED = f"{WS}/mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e/dual_rb3_730e_ver3.urdf"
-PIKA_STL = f"{WS}/robotics_lab/rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper.STL"
+PIKA_STL = f"{WS}/robotics_lab/rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_gripper.STL"
 DEG = np.pi / 180.0
 
 LJ = [f"dual_rb3_730e_left_{n}_joint" for n in ["base","shoulder","elbow","wrist1","wrist2","wrist3"]]

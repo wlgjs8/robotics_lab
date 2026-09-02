@@ -29,7 +29,7 @@ import trimesh
 URDF = "rb_servo_server/descriptions/urdf/rb3_730e.urdf"
 # Gripper visual mesh (no collision mesh exists); attached under attachment_site
 # via tool_joint (rpy z=+90deg), STL in millimeters.
-GRIPPER_MESH_REL = "../meshes/robots/rb3_730e/visual/tool/pika_gripper.STL"
+GRIPPER_MESH_REL = "../meshes/robots/rb5_850e/visual/tool/pika_gripper.STL"
 GRIPPER_PARENT = "attachment_site"
 GRIPPER_SCALE = 0.001
 GRIPPER_RPY = (0.0, 0.0, math.pi / 2.0)

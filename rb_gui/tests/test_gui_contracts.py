@@ -2502,7 +2502,7 @@ class GuiContractsTest(unittest.TestCase):
             # Default prefers the GUI-only articulated-gripper URDF when present
             # (falls back to the plain rb3_730e.urdf otherwise).
             self.assertEqual(
-                _robot_urdf_path(), descriptions_dir / "urdf" / "rb3_730e_pika_articulated.urdf"
+                _robot_urdf_path(), descriptions_dir / "urdf" / "rb5_850e_pika_articulated.urdf"
             )
             self.assertTrue(_robot_urdf_path().exists())
         finally:

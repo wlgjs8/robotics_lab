@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Mapping
 
 from .models import ArmSnapshot, CircleOverlaySnapshot, Pose6D, StateSnapshot
@@ -405,7 +406,9 @@ def _short_geom(name: Any) -> str:
     'dual_rb3_730e_left_link4_2' -> 'left_link4_2', 'stand_body_shoulder_0' -> 'shoulder_0'."""
     if not isinstance(name, str) or not name:
         return "?"
-    return name.replace("dual_rb3_730e_", "").replace("stand_body_", "").replace("stand_", "")
+    # The arm prefix is per-robot (dual_rb3_730e_ -> dual_rb5_850e_ on 2026-09-02), so
+    # strip whatever "dual_<model>_" the unified URDF uses rather than one literal.
+    return re.sub(r"^dual_[a-z0-9]+_", "", name).replace("stand_body_", "").replace("stand_", "")
 
 
 def _closest_pair_text(sc: Mapping[str, Any]) -> str:

@@ -73,9 +73,9 @@ struct Args {
     std::cerr <<
         "usage: " << argv0 << " [options]\n"
         "  --config PATH        server yaml to source the kinematics block from\n"
-        "  --urdf PATH          URDF override (default: descriptions/urdf/rb3_730e.urdf)\n"
+        "  --urdf PATH          URDF override (default: descriptions/urdf/rb5_850e.urdf)\n"
         "  --reach-json PATH    reach envelope sidecar for r_min/r_max\n"
-        "                       (default: descriptions/reach_envelope_rb3_730e.json)\n"
+        "                       (default: descriptions/reach_envelope_rb5_850e.json)\n"
         "  --out PATH           output grid JSON (default: /tmp/ik_feasibility_grid.json)\n"
         "  --spacing-m F        grid spacing (default 0.05)\n"
         "  --orientations N     approach directions for the reachability test (default 18)\n"
@@ -112,9 +112,9 @@ Args parseArgs(int argc, char** argv) {
         else usage(argv[0], "unknown argument: " + k);
     }
     if (a.urdf.empty())
-        a.urdf = (servoRoot() / "descriptions" / "urdf" / "rb3_730e.urdf").string();
+        a.urdf = (servoRoot() / "descriptions" / "urdf" / "rb5_850e.urdf").string();
     if (a.reach_json.empty())
-        a.reach_json = (servoRoot() / "descriptions" / "reach_envelope_rb3_730e.json").string();
+        a.reach_json = (servoRoot() / "descriptions" / "reach_envelope_rb5_850e.json").string();
     if (a.out.empty()) a.out = "/tmp/ik_feasibility_grid.json";
     if (a.spacing_m <= 0.0) usage(argv[0], "--spacing-m must be > 0");
     if (a.orientations < 1) usage(argv[0], "--orientations must be >= 1");
