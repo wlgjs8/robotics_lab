@@ -513,6 +513,17 @@ void ServoLogger::threadMain() {
         }
         if (file_) file_.flush();
     }
+    // FINAL DRAIN. `while (running_)` is evaluated before the wait, so stop() can clear
+    // the flag in the window between one iteration finishing and the next condition
+    // check, and the thread then exits with whatever was pushed since the last drain
+    // still in the ring -- silently dropping the tail of every log, and making
+    // test_servo_logger_columns fail about one run in five (measured 2026-09-02).
+    // push() already refuses samples once running_ is false, so one pass is enough.
+    drainInto(drain_buffer_);
+    for (const ServoSample& sample : drain_buffer_) {
+        writeSample(sample);
+    }
+    if (file_) file_.flush();
 }
 
 void ServoLogger::writeHeader() {
