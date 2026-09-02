@@ -15,12 +15,20 @@ int main(int argc, char** argv) {
         WS + "/mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e";
     c.unified_urdf = urdf_dir + "/dual_rb3_730e_ver5.urdf";
     c.package_dirs = {urdf_dir};
-    const std::string tool =
-        WS + "/robotics_lab/rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/";
+    // The convex HULLS moved to the rb5_850e tree on 2026-09-02 (they are what the
+    // server config depends on); the RAW meshes stayed with the rb3_730e assets that
+    // still use them -- rb3_730e_pika_articulated.urdf, test_collision_monitor.cpp and
+    // the capsule scripts. This tool needs both, because its raw mode exists precisely
+    // to drive a non-convex mesh through the guard.
+    const std::string mesh_root =
+        WS + "/robotics_lab/rb_servo_server/descriptions/meshes/robots/";
+    const std::string hull_dir = mesh_root + "rb5_850e/visual/tool/";
+    const std::string raw_dir = mesh_root + "rb3_730e/visual/tool/";
+    const std::string tool = raw ? raw_dir : hull_dir;
     const std::string sfx = raw ? ".STL" : "_hull.STL";  // _hull = the new fix
     printf("=== mesh variant: %s ===\n", raw ? "RAW (non-convex, tests step-2 guard)"
                                              : "HULL (production fix)");
-    c.pika_gripper_mesh = tool + "pika_gripper_hull.STL";
+    c.pika_gripper_mesh = hull_dir + "pika_gripper_hull.STL";
     c.pika_gripper_base_mesh = tool + "pika_gripper_base" + sfx;
     c.pika_finger_left_mesh = tool + "pika_finger_left" + sfx;
     c.pika_finger_right_mesh = tool + "pika_finger_right" + sfx;

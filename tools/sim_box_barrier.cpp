@@ -23,7 +23,7 @@ static CollisionMonitorConfig baseCfg() {
     const std::string ud = WS + "/mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e";
     c.unified_urdf = ud + "/dual_rb3_730e_ver5.urdf";
     c.package_dirs = {ud};
-    const std::string tool = WS + "/robotics_lab/rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/";
+    const std::string tool = WS + "/robotics_lab/rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/";
     c.pika_gripper_base_mesh = tool + "pika_gripper_base_hull.STL";
     c.pika_finger_left_mesh = tool + "pika_finger_left_hull.STL";
     c.pika_finger_right_mesh = tool + "pika_finger_right_hull.STL";

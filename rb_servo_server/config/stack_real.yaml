@@ -628,7 +628,7 @@ safety:
       # vector in the gripper attach. Both now fail closed in collision_monitor.cpp.
       left_prefix: "dual_rb5_850e_left_"
       right_prefix: "dual_rb5_850e_right_"
-      pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_hull.STL"
+      pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_gripper_hull.STL"
       # 2026-06-26: ARTICULATED gripper collision — static base hull + two movable finger
       # hulls (convex hulls of the visual STLs) attached at attachment_site (identity, no
       # +90° Z), the fingers tracking the live jaw open percent via setGripperOpenPercent
@@ -641,9 +641,9 @@ safety:
       # read 125 mm at a pose where the true clearance was ~21 mm), silently disabling the
       # gripper<->gripper self-collision guard. The arm/stand link*_hull/stand_hull meshes
       # are already convex; only the gripper meshes were raw. (See selfcollision memory.)
-      pika_gripper_base_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_base_hull.STL"
-      pika_finger_left_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_finger_left_hull.STL"
-      pika_finger_right_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_finger_right_hull.STL"
+      pika_gripper_base_mesh: "rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_gripper_base_hull.STL"
+      pika_finger_left_mesh: "rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_finger_left_hull.STL"
+      pika_finger_right_mesh: "rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_finger_right_hull.STL"
       gripper_finger_travel_m: 0.047
       stand_ignore_arm_substrings: ["link0"]
       debug_pair_curation: true

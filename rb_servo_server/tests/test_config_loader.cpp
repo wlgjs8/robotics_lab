@@ -151,8 +151,7 @@ bool testRepositoryConfigsParse() {
         // band where the clamp is WIDER than the URDF is one the elbow can be parked in
         // and never commanded out of (measured on RB3: pinned at exactly 150.000 deg for
         // 7 s / 4.5 s on real rollouts, which is why the 2026-07 +/-160 "site margin" was
-        // reverted). stack_real is RB5-850E as of 2026-09-02, whose catalog elbow range
-        // is +/-165; stack_sim is still RB3-730E at +/-150 below.
+        // reverted). Both profiles are RB5-850E as of 2026-09-02, catalog elbow +/-165.
         // See docs/joint_range_policy.md.
         RB_CHECK(near(stack_real.safety.q_min_deg[2], -165.0));
         RB_CHECK(near(stack_real.safety.q_max_deg[2], 165.0));
@@ -327,8 +326,10 @@ bool testRepositoryConfigsParse() {
         // J3 (elbow) is clamped near the RB3-730E physical range, not +/-360.
         // Matches stack_real.yaml and the IK URDF; the 2026-07 +/-160 margin was
         // reverted 2026-08-26 (docs/joint_range_policy.md).
-        RB_CHECK(near(stack_sim.safety.q_min_deg[2], -150.0));
-        RB_CHECK(near(stack_sim.safety.q_max_deg[2], 150.0));
+        // stack_sim drives the SAME control boxes in pgmode, so it tracks the physical
+        // arm: RB5-850E as of 2026-09-02, catalog elbow +/-165.
+        RB_CHECK(near(stack_sim.safety.q_min_deg[2], -165.0));
+        RB_CHECK(near(stack_sim.safety.q_max_deg[2], 165.0));
         RB_CHECK(stack_sim.safety.controller_simulation_tracking_error_source ==
                  rb_servo::ControllerSimulationTrackingErrorSource::Reference);
         RB_CHECK(stack_sim.safety.controller_simulation_tracking_error_nonlatching);
