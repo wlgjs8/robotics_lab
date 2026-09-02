@@ -107,10 +107,23 @@ bool dataPortReachable(const std::string& ip, double timeout_sec, std::string* w
     return ok;
 }
 
+// Documented valid bits, mirroring kRbpodo*Mask in src/robot/rbpodo_backend.cpp.
+constexpr int kCollisionOccurMask = 0b11;
+constexpr int kSelfCollisionMask = 0b11;
+constexpr int kStatusCodeMask = 0b111111;
+
 struct Sample {
     double jnt_ang[kJoints];
     double jnt_ref[kJoints];
     double tcp_pos[kJoints];
+    int init_state_info;   // 0..6; 6 = activation done
+    int init_error;
+    int robot_state;
+    int sos;
+    int ems;
+    int soft_estop;
+    int collision_occur;
+    int self_collision;
 };
 
 // A hand-parked arm must read identically across samples. Report the spread so the
@@ -135,6 +148,28 @@ Stability stabilityOf(const std::vector<Sample>& s) {
         out.max_sample_spread_deg = std::max(out.max_sample_spread_deg, hi - lo);
     }
     return out;
+}
+
+// A steady readback is NOT enough to trust the numbers. After the v8.9.1 firmware
+// flash on 2026-09-02 the left box returned all-zero joints with tcp_pos at the
+// fully-extended zero pose, perfectly stable across samples -- an UNACTIVATED
+// controller reporting its default, which the old spread-only test called PARKED.
+// Geometry work needs an activated, fault-free, actually-still arm, so check all
+// three, and treat an exactly-zero joint vector as the default-state tell it is.
+std::string verdict(const Sample& s, const Stability& st) {
+    if (s.init_state_info != 6)
+        return "NOT ACTIVATED (init_state " + std::to_string(s.init_state_info) +
+               "/6) -- these are default values, not a pose";
+    bool all_zero = true;
+    for (int j = 0; j < kJoints; ++j)
+        if (s.jnt_ang[j] != 0.0) { all_zero = false; break; }
+    if (all_zero) return "ALL-ZERO joints -- almost certainly a default readback, not a pose";
+    if (s.init_error) return "INIT ERROR " + std::to_string(s.init_error);
+    if (s.sos || s.ems || s.soft_estop || s.collision_occur || s.self_collision)
+        return "CONTROLLER FAULT LATCHED -- clear it before trusting these numbers";
+    if (st.max_sample_spread_deg >= 0.01 || st.max_ref_error_deg >= 0.01)
+        return "NOT SETTLED -- do not use these numbers for geometry";
+    return "PARKED (activated, fault-free, still: safe to use for geometry checks)";
 }
 
 void printJointArray(const char* label, const double* v, const char* unit) {
@@ -224,6 +259,14 @@ int main(int argc, char** argv) {
                     smp.jnt_ref[j] = st->sdata.jnt_ref[j];
                     smp.tcp_pos[j] = st->sdata.tcp_pos[j];
                 }
+                smp.init_state_info = st->sdata.init_state_info;
+                smp.init_error = st->sdata.init_error;
+                smp.robot_state = st->sdata.robot_state;
+                smp.sos = st->sdata.op_stat_sos_flag & kStatusCodeMask;
+                smp.ems = st->sdata.op_stat_ems_flag & kStatusCodeMask;
+                smp.soft_estop = st->sdata.op_stat_soft_estop_occur & kStatusCodeMask;
+                smp.collision_occur = st->sdata.op_stat_collision_occur & kCollisionOccurMask;
+                smp.self_collision = st->sdata.op_stat_self_collision & kSelfCollisionMask;
                 got.push_back(smp);
             }
         } catch (const std::exception& e) {
@@ -256,12 +299,17 @@ int main(int argc, char** argv) {
                 printJointArray("jnt_ang", got.back().jnt_ang, "deg");
                 printJointArray("jnt_ref", got.back().jnt_ref, "deg");
                 printJointArray("tcp_pos", got.back().tcp_pos, "mm,deg (arm base frame)");
-                std::printf(
-                    "    %d samples: joint spread %.4f deg, |jnt_ang-jnt_ref| %.4f deg -> %s\n",
-                    static_cast<int>(got.size()), st.max_sample_spread_deg, st.max_ref_error_deg,
-                    (st.max_sample_spread_deg < 0.01 && st.max_ref_error_deg < 0.01)
-                        ? "PARKED (safe to use for geometry checks)"
-                        : "NOT SETTLED -- do not use these numbers for geometry");
+                const Sample& last = got.back();
+                std::printf("    init_state %d/6%s  robot_state %d  sos %d  ems %d  soft_estop %d"
+                            "  collision %d  self_collision %d\n",
+                            last.init_state_info,
+                            last.init_state_info == 6 ? " (activation done)" : " (NOT ACTIVATED)",
+                            last.robot_state, last.sos, last.ems, last.soft_estop,
+                            last.collision_occur, last.self_collision);
+                std::printf("    %d samples: joint spread %.4f deg, |jnt_ang-jnt_ref| %.4f deg\n",
+                            static_cast<int>(got.size()), st.max_sample_spread_deg,
+                            st.max_ref_error_deg);
+                std::printf("    -> %s\n", verdict(last, st).c_str());
             }
         }
     }
