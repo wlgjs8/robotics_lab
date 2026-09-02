@@ -108,6 +108,14 @@ bool dataPortReachable(const std::string& ip, double timeout_sec, std::string* w
 }
 
 // Documented valid bits, mirroring kRbpodo*Mask in src/robot/rbpodo_backend.cpp.
+// Stillness bound, chosen by what it costs where it is used. This tool exists to
+// certify hand-parked poses for geometry work whose own precision is a few mm, and
+// an ACTIVATED arm never reads perfectly constant -- it dithers as the servo holds
+// it. 0.05 deg is about 0.9 mm at the TCP of a 1 m arm, an order below that
+// precision, while still an order above the ~0.01 deg dither measured on both arms
+// once activated (2026-09-02).
+constexpr double kStillSpreadDeg = 0.05;
+
 constexpr int kCollisionOccurMask = 0b11;
 constexpr int kSelfCollisionMask = 0b11;
 constexpr int kStatusCodeMask = 0b111111;
@@ -167,8 +175,20 @@ std::string verdict(const Sample& s, const Stability& st) {
     if (s.init_error) return "INIT ERROR " + std::to_string(s.init_error);
     if (s.sos || s.ems || s.soft_estop || s.collision_occur || s.self_collision)
         return "CONTROLLER FAULT LATCHED -- clear it before trusting these numbers";
-    if (st.max_sample_spread_deg >= 0.01 || st.max_ref_error_deg >= 0.01)
-        return "NOT SETTLED -- do not use these numbers for geometry";
+    // STILLNESS is the sample spread, not the reference error. jnt_ang is the measured
+    // encoder angle, which is what geometry consumes, and |jnt_ang - jnt_ref| is the
+    // servo's static droop while it holds the arm up -- real, but it does not make the
+    // measurement wrong. Gating on it was an artifact of first using this tool on arms
+    // that were hand-posed with the brakes holding, where ref == ang exactly; once both
+    // arms were activated on 2026-09-02 the right one held at 0.0117 deg and got called
+    // NOT SETTLED while sitting still to 0.0004 deg. The loose bound below still catches
+    // an arm that is actually being driven somewhere.
+    if (st.max_sample_spread_deg >= kStillSpreadDeg)
+        return "MOVING (" + std::to_string(st.max_sample_spread_deg) +
+               " deg across samples) -- do not use these numbers for geometry";
+    if (st.max_ref_error_deg >= 0.5)
+        return "TRACKING A COMMAND (|jnt_ang-jnt_ref| " +
+               std::to_string(st.max_ref_error_deg) + " deg) -- not a parked pose";
     return "PARKED (activated, fault-free, still: safe to use for geometry checks)";
 }
 
