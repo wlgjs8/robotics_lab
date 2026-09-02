@@ -436,6 +436,9 @@ struct CollisionMonitor::Impl {
     // the root). setGroundPlanePose() takes the floor plane in STAND frame (matching
     // the servo loop's floor_constraint / user_floor), so we map it through this.
     pinocchio::SE3 o_M_stand_ = pinocchio::SE3::Identity();
+    // Resolved once in buildModel(), which refuses to continue if stand_frame is not
+    // in the URDF -- see the FAIL CLOSED note there.
+    pinocchio::FrameIndex stand_fid_ = 0;
     bool gp_controlled_ = false;   // guarded by in_mtx
     bool gp_enabled_ = false;      // guarded by in_mtx
     Eigen::Vector3d gp_point_ = Eigen::Vector3d::Zero();    // guarded by in_mtx
@@ -490,7 +493,7 @@ struct CollisionMonitor::Impl {
         if (model.existFrame(cfg.stand_frame)) {
             pinocchio::forwardKinematics(model, data, pinocchio::neutral(model));
             pinocchio::updateFramePlacements(model, data);
-            o_M_stand_ = data.oMf[model.getFrameId(cfg.stand_frame)];
+            o_M_stand_ = data.oMf[stand_fid_];
         }
         // start with a neutral verdict (invalid -> fail closed until first eval)
         std::atomic_store(&published, std::make_shared<const CollisionVerdict>());
@@ -609,8 +612,16 @@ struct CollisionMonitor::Impl {
         data = pinocchio::Data(model);
         q = pinocchio::neutral(model);
         for (int i = 0; i < kDof; ++i) {
-            const auto lj = model.getJointId(cfg.left_joints[i]);
-            const auto rj = model.getJointId(cfg.right_joints[i]);
+            // Same fail-closed reasoning as requireModelFrame below: these names are
+            // built as left_prefix + kinematics.joint_names, and getJointId returns
+            // njoints for an unknown name, so a prefix/URDF mismatch would index past
+            // the end of model.joints.
+            const auto lj = requireModelJoint(cfg.left_joints[i],
+                                              "safety.self_collision.mesh.left_prefix"
+                                              " + kinematics.joint_names");
+            const auto rj = requireModelJoint(cfg.right_joints[i],
+                                              "safety.self_collision.mesh.right_prefix"
+                                              " + kinematics.joint_names");
             left_jids[i] = lj;
             right_jids[i] = rj;
             left_qidx[i] = model.joints[lj].idx_q();
@@ -619,15 +630,49 @@ struct CollisionMonitor::Impl {
             right_vidx[i] = model.joints[rj].idx_v();
         }
         // Arm root frames for ancestry-based classification (default "<prefix>world").
+        //
+        // FAIL CLOSED on a prefix that does not match the URDF. left_prefix/right_prefix
+        // default to a specific robot's link naming, so pointing unified_urdf at a
+        // DIFFERENT robot without also setting the prefixes used to degrade silently in
+        // two places, both of them bad: the ancestry lookup below just cleared
+        // have_arm_roots -- and that flag is what separates arm<->arm from intra-arm
+        // pairs, which carry different d_hard_m floors -- while the gripper attach in
+        // buildGeometry() indexed model.frames[getFrameId(...)] with no existence test at
+        // all, and Pinocchio returns nframes for an unknown name, so it read off the end
+        // of the vector. Caught during the RB3-730E -> RB5-850E swap, where every frame
+        // is renamed at once. A wrong prefix is a configuration error; say so and stop.
         const std::string lr = cfg.left_arm_root_frame.empty() ? (cfg.left_prefix + "world")
                                                                : cfg.left_arm_root_frame;
         const std::string rr = cfg.right_arm_root_frame.empty() ? (cfg.right_prefix + "world")
                                                                 : cfg.right_arm_root_frame;
-        if (model.existFrame(lr) && model.existFrame(rr)) {
-            left_root_fid = model.getFrameId(lr);
-            right_root_fid = model.getFrameId(rr);
-            have_arm_roots = true;
+        requireModelFrame(lr, "safety.self_collision.mesh.left_prefix / left_arm_root_frame");
+        requireModelFrame(rr, "safety.self_collision.mesh.right_prefix / right_arm_root_frame");
+        left_root_fid = model.getFrameId(lr);
+        right_root_fid = model.getFrameId(rr);
+        have_arm_roots = true;
+        stand_fid_ = requireModelFrame(cfg.stand_frame,
+                                       "safety.self_collision.mesh.stand_frame");
+    }
+
+    pinocchio::JointIndex requireModelJoint(const std::string& name,
+                                           const std::string& config_key) const {
+        if (!model.existJointName(name)) {
+            throw std::runtime_error(
+                "collision monitor: joint '" + name + "' is not in " + cfg.unified_urdf +
+                " (set " + config_key + " to match that URDF's joint naming)");
         }
+        return model.getJointId(name);
+    }
+
+    // Resolve a frame the configuration promised, or refuse to build the monitor.
+    pinocchio::FrameIndex requireModelFrame(const std::string& name,
+                                            const std::string& config_key) const {
+        if (!model.existFrame(name)) {
+            throw std::runtime_error(
+                "collision monitor: frame '" + name + "' is not in " + cfg.unified_urdf +
+                " (set " + config_key + " to match that URDF's link naming)");
+        }
+        return model.getFrameId(name);
     }
 
     // True if `start` frame has `root` on its parent-frame chain (kinematic ancestry).
@@ -736,7 +781,9 @@ struct CollisionMonitor::Impl {
             const std::array<std::pair<std::string, ArmId>, 2> arms = {{
                 {cfg.left_prefix, ArmId::Left}, {cfg.right_prefix, ArmId::Right}}};
             for (const auto& [prefix, aid] : arms) {
-                const auto fid = model.getFrameId(prefix + "attachment_site");
+                const auto fid = requireModelFrame(
+                    prefix + "attachment_site",
+                    "safety.self_collision.mesh.left_prefix/right_prefix");
                 const auto& fr = model.frames[fid];
                 const pinocchio::SE3 place = fr.placement;  // identity local (URDF mirror)
                 geom.addGeometryObject(pinocchio::GeometryObject(
@@ -758,7 +805,9 @@ struct CollisionMonitor::Impl {
             const Eigen::Matrix3d rz =
                 Eigen::AngleAxisd(M_PI / 2.0, Eigen::Vector3d::UnitZ()).toRotationMatrix();
             for (const std::string prefix : {cfg.left_prefix, cfg.right_prefix}) {
-                const auto fid = model.getFrameId(prefix + "attachment_site");
+                const auto fid = requireModelFrame(
+                    prefix + "attachment_site",
+                    "safety.self_collision.mesh.left_prefix/right_prefix");
                 const auto& fr = model.frames[fid];
                 const pinocchio::SE3 place =
                     fr.placement * pinocchio::SE3(rz, Eigen::Vector3d::Zero());
@@ -775,7 +824,8 @@ struct CollisionMonitor::Impl {
                                          "' parent_frame not found: " + e.parent_frame);
             }
             std::shared_ptr<coal::CollisionGeometry> shape = makeExtraShape(e);
-            const auto fid = model.getFrameId(e.parent_frame);
+            const auto fid = requireModelFrame(
+                e.parent_frame, "safety.self_collision.mesh.extra_collision[].parent_frame");
             const auto& fr = model.frames[fid];
             const Eigen::Matrix3d rot = pinocchio::rpy::rpyToMatrix(e.rpy[0], e.rpy[1], e.rpy[2]);
             const pinocchio::SE3 local(rot, Eigen::Vector3d(e.xyz_m[0], e.xyz_m[1], e.xyz_m[2]));
@@ -790,7 +840,8 @@ struct CollisionMonitor::Impl {
                 throw std::runtime_error("collision_monitor: external_boxes stand_frame not found: " +
                                          cfg.stand_frame);
             }
-            const auto fid = model.getFrameId(cfg.stand_frame);
+            const auto fid = requireModelFrame(
+                cfg.stand_frame, "safety.self_collision.mesh.stand_frame");
             const auto& fr = model.frames[fid];
             std::array<double, 3> dims{};
             for (int i = 0; i < 3; ++i) {

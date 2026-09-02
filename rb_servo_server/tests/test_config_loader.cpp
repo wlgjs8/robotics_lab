@@ -146,14 +146,16 @@ bool testRepositoryConfigsParse() {
         RB_CHECK(stack_real.left_robot.disable_waiting_ack);
         RB_CHECK(stack_real.right_robot.disable_waiting_ack);
         RB_CHECK(near(stack_real.safety.q_min_deg[0], -360.0));
-        // J3 (elbow) is clamped to the RB3-730E physical range, not +/-360, and it must
-        // MATCH the IK URDF limit. The 2026-07 +/-160 "site margin" was reverted on
-        // 2026-08-26: PTP bypasses IK and passes only this clamp, so the extra 10 deg let
-        // the elbow be parked in a band Cartesian control could never command out of
-        // (measured: pinned at exactly 150.000 deg for 7 s / 4.5 s on real rollouts).
+        // J3 (elbow) is clamped to the arm's physical range, not +/-360, and it must
+        // MATCH the IK URDF limit. PTP bypasses IK and passes only this clamp, so any
+        // band where the clamp is WIDER than the URDF is one the elbow can be parked in
+        // and never commanded out of (measured on RB3: pinned at exactly 150.000 deg for
+        // 7 s / 4.5 s on real rollouts, which is why the 2026-07 +/-160 "site margin" was
+        // reverted). stack_real is RB5-850E as of 2026-09-02, whose catalog elbow range
+        // is +/-165; stack_sim is still RB3-730E at +/-150 below.
         // See docs/joint_range_policy.md.
-        RB_CHECK(near(stack_real.safety.q_min_deg[2], -150.0));
-        RB_CHECK(near(stack_real.safety.q_max_deg[2], 150.0));
+        RB_CHECK(near(stack_real.safety.q_min_deg[2], -165.0));
+        RB_CHECK(near(stack_real.safety.q_max_deg[2], 165.0));
         RB_CHECK(stack_real.network.command_bind == "udp://127.0.0.1:50256");
         RB_CHECK(stack_real.network.state_pub_endpoint == "udp://127.0.0.1:50356");
         RB_CHECK(stack_real.network.state_pub_endpoints.size() == 4);
@@ -1171,7 +1173,7 @@ bool testKinematicsSafetyLimitMismatchWarnsForRbpodo() {
     ::unlink(path.c_str());
     RB_CHECK(cfg.kinematics.enable);
     RB_CHECK(near(cfg.safety.q_min_deg[2], -360.0));
-    RB_CHECK(warnings.str().find("differs from rb3_730e URDF IK limit") != std::string::npos);
+    RB_CHECK(warnings.str().find("differs from rb3_730e.urdf URDF IK limit") != std::string::npos);
     RB_CHECK(warnings.str().find("elbow_joint") != std::string::npos);
     return true;
 }

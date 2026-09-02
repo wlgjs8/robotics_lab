@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compute the reachable-workspace envelope of one RB3-730E arm by FK Monte-Carlo.
+"""Compute the reachable-workspace envelope of one arm by FK Monte-Carlo.
 
 Samples the 6 joint angles uniformly inside the URDF limits, runs forward
 kinematics to the ``tcp`` frame (in the URDF root / arm-base frame), and records
@@ -109,11 +109,11 @@ def _default_urdf() -> Path:
     env = os.environ.get("RB_GUI_ROBOT_URDF")
     if env:
         return Path(env)
-    return _repo_root() / "rb_servo_server" / "descriptions" / "urdf" / "rb3_730e.urdf"
+    return _repo_root() / "rb_servo_server" / "descriptions" / "urdf" / "rb5_850e.urdf"
 
 
 def _default_out() -> Path:
-    return _repo_root() / "rb_servo_server" / "descriptions" / "reach_envelope_rb3_730e.npz"
+    return _repo_root() / "rb_servo_server" / "descriptions" / "reach_envelope_rb5_850e.npz"
 
 
 def compute_envelope(
@@ -225,7 +225,7 @@ def main() -> int:
         "samples": env["samples"],
     }, indent=2))
 
-    print(f"RB3-730E reach envelope ({env['samples']} FK samples)")
+    print(f"reach envelope of {args.urdf.name} ({env['samples']} FK samples)")
     print(f"  raw radius      : [{env['r_min_raw_m']:.4f}, {env['r_max_raw_m']:.4f}] m "
           f"(abs [{env['r_min_abs_m']:.4f}, {env['r_max_abs_m']:.4f}])")
     print(f"  recommended cfg : r_min_m={r_min_cfg}  r_max_m={r_max_cfg}  "

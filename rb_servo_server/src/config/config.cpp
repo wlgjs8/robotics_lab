@@ -1062,12 +1062,41 @@ std::optional<std::pair<double, double>> readUrdfJointLimitDeg(
     return std::make_pair(*lower * kRadToDeg, *upper * kRadToDeg);
 }
 
+// Catalog elbow range per supported arm, keyed by the tracked single-arm IK URDF.
+// J3 is the only joint that is not +/-360 on these arms, and it is the one that bites:
+// see docs/joint_range_policy.md. Rainbow RB Series catalog p6-p7.
+struct KnownArmRange {
+    const char* urdf_filename;
+    double elbow_deg;
+};
+constexpr KnownArmRange kKnownArmRanges[] = {
+    {"rb3_730e.urdf", 150.0},
+    {"rb5_850e.urdf", 165.0},
+};
+
 void warnIfRbpodoSafetyRangeDiffersFromKnownUrdf(const DualArmConfig& cfg) {
     if (!cfg.kinematics.enable || !anyRbpodo(cfg)) return;
-    if (std::filesystem::path(cfg.kinematics.urdf).filename().string() != "rb3_730e.urdf") return;
 
-    const JointArray urdf_min_deg{-360.0, -360.0, -150.0, -360.0, -360.0, -360.0};
-    const JointArray urdf_max_deg{360.0, 360.0, 150.0, 360.0, 360.0, 360.0};
+    // This guard used to be gated on the filename being exactly "rb3_730e.urdf", so
+    // pointing kinematics.urdf at any other arm turned OFF the check that exists to
+    // catch elbow-limit drift -- silently, and precisely when swapping robots is what
+    // makes drift likely. Caught on 2026-09-02 during the RB3-730E -> RB5-850E move.
+    // An unrecognised URDF is now reported rather than waved through.
+    const std::string urdf_name =
+        std::filesystem::path(cfg.kinematics.urdf).filename().string();
+    const KnownArmRange* arm = nullptr;
+    for (const auto& candidate : kKnownArmRanges) {
+        if (urdf_name == candidate.urdf_filename) { arm = &candidate; break; }
+    }
+    if (arm == nullptr) {
+        warn("kinematics.urdf '" + urdf_name + "' is not a known arm, so its joint ranges "
+             "cannot be checked against the catalog. Add it to kKnownArmRanges in "
+             "config.cpp with the catalog elbow limit (see docs/joint_range_policy.md).");
+        return;
+    }
+
+    const JointArray urdf_min_deg{-360.0, -360.0, -arm->elbow_deg, -360.0, -360.0, -360.0};
+    const JointArray urdf_max_deg{360.0, 360.0, arm->elbow_deg, 360.0, 360.0, 360.0};
     constexpr double kToleranceDeg = 0.5;
 
     // Guard against the actual URDF file silently drifting from the expected physical
@@ -1080,13 +1109,13 @@ void warnIfRbpodoSafetyRangeDiffersFromKnownUrdf(const DualArmConfig& cfg) {
         if (std::abs(elbow_deg->first - urdf_min_deg[2]) > kToleranceDeg ||
             std::abs(elbow_deg->second - urdf_max_deg[2]) > kToleranceDeg) {
             warn(
-                "rb3_730e URDF elbow_joint (J3) limit=[" +
+                urdf_name + " elbow_joint (J3) limit=[" +
                 std::to_string(elbow_deg->first) + ", " + std::to_string(elbow_deg->second) +
-                "] deg does NOT match the RB3-730E physical range [" +
+                "] deg does NOT match this arm's catalog physical range [" +
                 std::to_string(urdf_min_deg[2]) + ", " + std::to_string(urdf_max_deg[2]) +
                 "] deg. The elbow cannot reach +/-360; a widened URDF makes IK select an "
                 "unreachable elbow branch the controller rejects (TCP branch-flip / lurch). "
-                "Restore elbow to +/-2.618 rad. See docs/joint_range_policy.md."
+                "Restore the elbow bound to the catalog value. See docs/joint_range_policy.md."
             );
         }
     }
@@ -1099,7 +1128,7 @@ void warnIfRbpodoSafetyRangeDiffersFromKnownUrdf(const DualArmConfig& cfg) {
             ? cfg.kinematics.joint_names[static_cast<std::size_t>(i)]
             : ("joint_" + std::to_string(i + 1));
         warn(
-            "rbpodo safety q_min/q_max differs from rb3_730e URDF IK limit for " +
+            "rbpodo safety q_min/q_max differs from " + urdf_name + " URDF IK limit for " +
             joint_name + ": safety=[" + std::to_string(cfg.safety.q_min_deg[i]) +
             ", " + std::to_string(cfg.safety.q_max_deg[i]) + "], urdf=[" +
             std::to_string(urdf_min_deg[i]) + ", " + std::to_string(urdf_max_deg[i]) +

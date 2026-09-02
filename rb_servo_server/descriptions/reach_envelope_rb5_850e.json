@@ -1,0 +1,18 @@
+{
+  "joint_names": [
+    "base_joint",
+    "shoulder_joint",
+    "elbow_joint",
+    "wrist1_joint",
+    "wrist2_joint",
+    "wrist3_joint"
+  ],
+  "r_min_abs_m": 0.008207386878288503,
+  "r_max_abs_m": 1.3657749237304788,
+  "r_min_raw_m": 0.14060285558658447,
+  "r_max_raw_m": 1.2825781459461887,
+  "r_min_recommended_m": 0.1706,
+  "r_max_recommended_m": 1.2526,
+  "margin_m": 0.03,
+  "samples": 300000
+}

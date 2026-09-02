@@ -21,7 +21,13 @@ left_robot:
   # first-order pole 0.900/tick (tau 9.5 ticks / 19 ms) that this turns off.
   # An earlier LPF-off attempt produced jerk/jitter on hardware; being retried now
   # that the box queue is regulated (queue_sync below) instead of free-running.
-  servo_alpha: 1.0
+  # 2026-09-02: back to 10.0 (LPF OFF) for the RB5-850E bring-up, on the operator's
+  # call. It had been dropped to 1.0 in a8bb854 to chase jerk, which reverses the
+  # LPF-off decision that was reached after untangling four confounded variables --
+  # and that decision was taken on RB3 inertia and fw v8.7.3, both of which have now
+  # changed (RB5 is 2x the mass; the boxes are on v8.9.1). Neither value is carried
+  # over on evidence, so start from the documented one and re-measure.
+  servo_alpha: 10.0
   # Wire text precision for streamed move_servo_j joint values. The vendor SDK
   # formats with default stream precision (6 SIGNIFICANT digits): at J1's
   # working range (209-278 deg) that is a 0.001 deg staircase on the wire,
@@ -56,7 +62,13 @@ right_robot:
   # first-order pole 0.900/tick (tau 9.5 ticks / 19 ms) that this turns off.
   # An earlier LPF-off attempt produced jerk/jitter on hardware; being retried now
   # that the box queue is regulated (queue_sync below) instead of free-running.
-  servo_alpha: 1.0
+  # 2026-09-02: back to 10.0 (LPF OFF) for the RB5-850E bring-up, on the operator's
+  # call. It had been dropped to 1.0 in a8bb854 to chase jerk, which reverses the
+  # LPF-off decision that was reached after untangling four confounded variables --
+  # and that decision was taken on RB3 inertia and fw v8.7.3, both of which have now
+  # changed (RB5 is 2x the mass; the boxes are on v8.9.1). Neither value is carried
+  # over on evidence, so start from the documented one and re-measure.
+  servo_alpha: 10.0
   # See left_robot.servo_j_text_precision (same rationale; 0 = legacy SDK A/B).
   servo_j_text_precision: 7
   disable_waiting_ack: true    # ACK-off 500Hz streaming; config-driven, no RB_ALLOW_* env gate
@@ -69,11 +81,24 @@ right_robot:
   # fill instead (see docs/runbooks/box_latency_offline.md), not with state age.
   state_read_pipelined: true
 
+# 2026-09-02, RB3-730E -> RB5-850E. Derived from the tracked
+# descriptions/urdf/dual_rb5_850e_ver3.urdf stand->stand_<side>_arm_base transform,
+# in the [x y z rx ry rz] convention math::rotationFromPose uses (R = Rz*Ry*Rx, i.e.
+# URDF rpy). The derivation was validated by reproducing the RB3 pair it replaces
+# from dual_rb3_730e_ver5.urdf to 0.0000 mm / 0.000027 deg before being applied here.
+#
+# The frame convention CHANGED with the robot -- RB3 mirrored the arms in X and put
+# the stand frame 90 deg round; RB5 mirrors in Y. Do not pattern-match the old values.
+#
+# VERIFIED ON HARDWARE, not just derived: with both arms hand-parked in two contact
+# poses (TCPs on the stand, and the two TCPs touching each other) these mounts put
+# the left and right TCPs within 0.95 mm of a common tool length. See
+# tools/make_rb5_850e_urdfs.py for the poses and the joint angles.
 left_mount:
-  base_pose_in_stand: [0.15707, -0.17036, 0.58036, 2.186649, 0.523831, 2.526296]
+  base_pose_in_stand: [0.17036, 0.19707, 0.57036, 2.185914, 0.523132, -2.186649]
 
 right_mount:
-  base_pose_in_stand: [-0.15707, -0.17036, 0.58036, 2.186649, -0.523831, -2.526296]
+  base_pose_in_stand: [0.17036, -0.19707, 0.57036, 2.185914, -0.523132, -0.954944]
 
 servo:
   rate_hz: 500
@@ -199,8 +224,14 @@ safety:
   # about the safety-vs-URDF mismatch goes away.
   # safety.joint_limit_barrier below already braced against +/-150, so its behaviour is
   # unchanged; this only removes the band PTP could still reach.
-  q_min_deg: [-360, -360, -150, -360, -360, -360]
-  q_max_deg: [360, 360, 150, 360, 360, 360]
+  # 2026-09-02, RB3-730E -> RB5-850E: J3 is +/-165 on this arm (Rainbow RB Series
+  # catalog p7), not +/-150. This MUST equal the elbow bound in kinematics.urdf and
+  # in the unified collision URDF -- both are generated at +/-165 by
+  # rb_servo_server/tools/make_rb5_850e_urdfs.py. A clamp WIDER than the URDF is the
+  # trap described above (PTP parks the elbow where IK will not command it out of);
+  # a clamp NARROWER wastes 15 deg of the reach the swap was made to get.
+  q_min_deg: [-360, -360, -165, -360, -360, -360]
+  q_max_deg: [360, 360, 165, 360, 360, 360]
   # The bounds above are a POLICY about what we COMMAND. The MEASURED pose is a
   # separate question ("is the robot somewhere physically plausible"), and judging
   # it with the command bound makes driving to the limit self-defeating: a servo
@@ -228,7 +259,21 @@ safety:
   # the proximal joints are likeliest to hit the controller's own hardware speed cap,
   # which would reject/clamp). SAFETY: noticeably fast/aggressive — test in clear space,
   # E-stop ready; if a move faults or the tracking-error latch trips, lower ddq then dq.
-  dq_max_deg_s: [170, 170, 170, 240, 240, 320]      # 2026-06-28 3rd raise (user: much faster); was [140,140,140,200,200,280]
+  # 2026-09-02, RB3-730E -> RB5-850E. The RB3 pair [170,170,170,240,240,320] was
+  # tuned against RB3's rating, where J5/J6 are +/-360 deg/s. RB5-850 is +/-180 deg/s
+  # on ALL SIX joints (Rainbow RB Series catalog p7), so J4/J5/J6 were above the
+  # rating of the arm now attached. Capped at 170 across the board -- the same ~94%
+  # of rating J1-J3 already ran at.
+  # This costs nothing on this task: across the last RB3 rollouts J5/J6 peaked at
+  # 109 and 104 deg/s with p99 of 38-45, i.e. never within 2x of even the new cap.
+  dq_max_deg_s: [170, 170, 170, 170, 170, 170]
+  # ddq is a BACKSTOP, not a target -- the Cartesian accel/jerk limits in the chunk
+  # follower set the real demand, and this clamp binding is itself a known source of
+  # roughness (see the accel-clamp measurements in the follower notes). It is left at
+  # the RB3 values deliberately rather than scaled by the 2x mass, because lowering a
+  # rarely-binding backstop trades a speculative gain for a measured failure mode.
+  # RE-MEASURE on RB5 before trusting it: watch the accel-clamp percentage in the
+  # servo log, and lower ddq before dq if the tracking-error latch trips.
   ddq_max_deg_s2: [1500, 1500, 1500, 2300, 2300, 3000]  # was [1100,1100,1100,1700,1700,2300]
   # dq_max_deg_s: [80, 80, 80, 110, 110, 140]        # prior (1st raise)
   # ddq_max_deg_s2: [500, 500, 500, 800, 800, 1100]   # prior (1st raise)
@@ -362,14 +407,14 @@ safety:
   # backstop that was missing entirely; see reach_constraint.)
   joint_limit_barrier:
     enable: true
-    # Braced against the URDF IK limit (+/-150 on J3). safety.q_min_deg/q_max_deg above
+    # Braced against the URDF IK limit (+/-165 on J3, RB5-850E). safety.q_min_deg/q_max_deg above
     # now agrees (it was +/-160 until 2026-08-26, which left a 10 deg band the arm could
     # be parked in by PTP but never commanded out of by IK). Keeping this block explicit
     # rather than inheriting documents WHICH limit the barrier brakes against, so a
     # future widening of the safety clamp cannot silently move the braking point.
     # Every other joint is unlimited (+/-360) and the barrier is inert there.
-    q_min_deg: [-360, -360, -150, -360, -360, -360]
-    q_max_deg: [ 360,  360,  150,  360,  360,  360]
+    q_min_deg: [-360, -360, -165, -360, -360, -360]
+    q_max_deg: [ 360,  360,  165,  360,  360,  360]
     # d_slow must satisfy d_slow >= dq_max^2/(2*a_brake) or the barrier engages too late
     # to stop before the bound (config load FAILS if it does not). With
     # dq_max=[170,170,170,240,240,320] and the a_brake below the minimum bands are
@@ -516,8 +561,12 @@ safety:
   # (tools/reach_envelope.py; defaults documented in config.hpp).
   reach_constraint:
     enable: true
-    r_max_m: 1.050
-    r_min_m: 0.130
+    # 2026-09-02 remeasured for RB5-850E with tools/reach_envelope.py on the tracked
+    # rb5_850e.urdf (300k FK samples): raw radius [0.1406, 1.2826] m, recommended
+    # r_min 0.1706 / r_max 1.2526 at the 0.03 m margin. Rounded the conservative way.
+    # The RB3 pair was 1.050 / 0.130 against a ~1.088 m raw envelope.
+    r_max_m: 1.250
+    r_min_m: 0.175
     fail_policy: clamp_hold
     monitor_only: false
     a_brake_m_s2: 3.0     # match roi_box real tuning (softer than the sim 4.0)
@@ -560,9 +609,25 @@ safety:
     # barrier. enable=true면 아래 캡슐 필드는 평가하지 않음(폴백용 보존). 파라미터는
     # closing speed로 자동 적응. d_hard 미만 hard breach 또는 verdict stale -> fault_latch.
     mesh:
-      unified_urdf: "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e/dual_rb3_730e_ver5.urdf"
+      # 2026-09-02, RB3-730E -> RB5-850E. Now a TRACKED asset in this repo, not the
+      # sibling mo_robot_descriptions checkout: it is generated from upstream's ver2 by
+      # rb_servo_server/tools/make_rb5_850e_urdfs.py, which enforces the three things
+      # upstream does not (convex collision shells, the +/-165 deg elbow bound, and
+      # 100%-coverage stand hulls in place of boxes that covered 77%). Keeping the file
+      # here means those safety-relevant edits are visible in this repo's diff and the
+      # server does not depend on a sibling checkout's branch state.
+      # NOTE for docs/code_architecture_map.md item 7, which still says the unified URDF
+      # is an untracked external asset -- that is now false for RB5.
+      unified_urdf: "descriptions/urdf/dual_rb5_850e_ver3.urdf"
       package_dirs:
-        - "../mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e"
+        - "rb_servo_server/descriptions/urdf"
+      # Link-name prefixes in the unified URDF. MUST be set explicitly: config.hpp
+      # defaults them to dual_rb3_730e_*, and with an RB5 URDF that mismatch used to
+      # degrade silently (ancestry classification off, which is what picks the
+      # arm<->arm vs intra-arm d_hard_m floors) or read past the end of the frame
+      # vector in the gripper attach. Both now fail closed in collision_monitor.cpp.
+      left_prefix: "dual_rb5_850e_left_"
+      right_prefix: "dual_rb5_850e_right_"
       pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb3_730e/visual/tool/pika_gripper_hull.STL"
       # 2026-06-26: ARTICULATED gripper collision — static base hull + two movable finger
       # hulls (convex hulls of the visual STLs) attached at attachment_site (identity, no
@@ -1194,7 +1259,7 @@ force_control:
 kinematics:
   enable: true
   provider: pinocchio
-  urdf: "descriptions/urdf/rb3_730e.urdf"
+  urdf: "descriptions/urdf/rb5_850e.urdf"
   base_link: "world"
   tip_link: "tcp"
   joint_names:
