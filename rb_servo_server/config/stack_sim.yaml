@@ -233,6 +233,11 @@ safety:
       # RB5 URDF now fails closed in collision_monitor.cpp instead of silently degrading.
       left_prefix: "dual_rb5_850e_left_"
       right_prefix: "dual_rb5_850e_right_"
+      # The pika gripper stands off the flange by the F/T adapter, so its hulls attach
+      # at gripper_mount, not at attachment_site. Without this the whole gripper sits
+      # 15 mm too close to the wrist and the guard misses the outermost 15 mm of the
+      # fingertips. See the derivation in tools/make_rb5_850e_urdfs.py.
+      gripper_attach_frame: "gripper_mount"
       pika_gripper_mesh: "rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_gripper_hull.STL"
       pika_gripper_base_mesh: "rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_gripper_base_hull.STL"
       pika_finger_left_mesh: "rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_finger_left_hull.STL"

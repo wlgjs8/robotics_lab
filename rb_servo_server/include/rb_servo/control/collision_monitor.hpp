@@ -68,6 +68,7 @@ struct CollisionMonitorConfig {
     std::string left_prefix = "dual_rb3_730e_left_";   // attachment_site prefix
     std::string right_prefix = "dual_rb3_730e_right_";
     // Unified-model joint names for the 6+6 actuated joints, command order.
+    std::string gripper_attach_frame = "attachment_site";
     std::array<std::string, kDof> left_joints{};
     std::array<std::string, kDof> right_joints{};
 
@@ -476,6 +477,10 @@ public:
     void stop();    // join the monitor thread
 
     std::size_t numGeometries() const;
+    // World-frame origin of an arm's pika gripper collision geometry, for tests and
+    // bring-up checks: it is what gripper_attach_frame moves, and getting it wrong
+    // mislocates the whole gripper (see runGripperAttachFrame).
+    Eigen::Vector3d gripperGeometryOrigin(ArmId arm) const;
     std::size_t numPairs() const;
     // Number of collision meshes that were NOT convex and were kept as a (correct but
     // slow) BVH rather than convexified. 0 = the fast convex path everywhere (the

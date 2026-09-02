@@ -904,6 +904,82 @@ static bool runIntraArmDHard() {
     return true;
 }
 
+// The pika gripper does NOT bolt to the flange: an F/T adapter stands it off by 15 mm
+// (RFT64-6A01-A preset offset 45 mm minus its 30 mm sensor body, confirmed to 0.228 mm
+// by touching both TCPs to known surfaces on 2026-09-02). Attaching the hulls at
+// attachment_site therefore put the entire gripper 15 mm nearer the wrist, so the guard
+// missed the outermost 15 mm of the fingertips -- the part that reaches things -- while
+// covering 15 mm of empty air behind them. gripper_attach_frame moves them onto the
+// URDF's gripper_mount frame; this pins that it is honoured, and that the default is
+// still attachment_site for models without such a frame.
+static bool runGripperAttachFrame() {
+    const fs::path ws = workspaceRoot();
+    CollisionMonitorConfig cfg = makeConfig(ws);
+    RB_CHECK(cfg.gripper_attach_frame == "attachment_site");  // conservative default
+
+    // The rest of this file exercises the RB3 model it was written against; the
+    // standoff and its gripper_mount frame only exist in the RB5 models, so point
+    // this one case at those.
+    const fs::path rb5 =
+        ws / "robotics_lab/rb_servo_server/descriptions/urdf/dual_rb5_850e_ver3.urdf";
+    if (!fs::is_regular_file(rb5)) {
+        std::cout << "SKIP: RB5 unified URDF not found (gripper attach frame test)\n";
+        return true;
+    }
+    cfg.unified_urdf = rb5.string();
+    cfg.package_dirs = {(ws / "robotics_lab/rb_servo_server/descriptions/urdf").string()};
+    cfg.left_prefix = "dual_rb5_850e_left_";
+    cfg.right_prefix = "dual_rb5_850e_right_";
+    cfg.left_arm_root_frame.clear();
+    cfg.right_arm_root_frame.clear();
+    const char* jn[kDof] = {"base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3"};
+    for (int i = 0; i < kDof; ++i) {
+        cfg.left_joints[i] = cfg.left_prefix + jn[i] + "_joint";
+        cfg.right_joints[i] = cfg.right_prefix + jn[i] + "_joint";
+    }
+
+    const fs::path tool =
+        ws / "robotics_lab/rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool";
+    cfg.pika_gripper_base_mesh = (tool / "pika_gripper_base.STL").string();
+    cfg.pika_finger_left_mesh = (tool / "pika_finger_left.STL").string();
+    cfg.pika_finger_right_mesh = (tool / "pika_finger_right.STL").string();
+    if (!fs::is_regular_file(cfg.pika_finger_left_mesh)) {
+        std::cout << "SKIP: finger meshes not found (gripper attach frame test)\n";
+        return true;
+    }
+
+    // An attach frame the URDF does not carry must FAIL CLOSED, not fall back.
+    {
+        CollisionMonitorConfig bad = cfg;
+        bad.gripper_attach_frame = "no_such_frame";
+        bool threw = false;
+        try {
+            CollisionMonitor probe(bad);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        RB_CHECK(threw);
+    }
+
+    // The RB5 models carry gripper_mount 15 mm out along the tool axis. Measure the
+    // shift the monitor actually applies, by comparing the gripper geometry placement
+    // between the two attach frames at the same configuration.
+    const JointArray q = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
+    auto tipOf = [&](const std::string& frame) {
+        CollisionMonitorConfig c = cfg;
+        c.gripper_attach_frame = frame;
+        CollisionMonitor mon(c);
+        (void)mon.evalOnce(q, q);
+        return mon.gripperGeometryOrigin(ArmId::Left);
+    };
+    const Eigen::Vector3d at_flange = tipOf("attachment_site");
+    const Eigen::Vector3d at_mount = tipOf("gripper_mount");
+    const double shift_mm = (at_mount - at_flange).norm() * 1000.0;
+    std::cout << "gripper attach shift = " << shift_mm << " mm\n";
+    RB_CHECK(std::fabs(shift_mm - 15.0) < 0.05);
+    return true;
+}
+
 // Articulated gripper: the two finger hulls reposition along the jaw axis with the live
 // open percent, so finger<->other-geometry clearances change between OPEN and CLOSED.
 static bool runArticulatedGripper() {
@@ -1038,6 +1114,10 @@ int main() {
     }
     if (!runProjection()) {
         std::cerr << "test_collision_monitor (projection) FAILED\n";
+        return 1;
+    }
+    if (!runGripperAttachFrame()) {
+        std::cerr << "gripper attach frame test failed\n";
         return 1;
     }
     if (!runArticulatedGripper()) {

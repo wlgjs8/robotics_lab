@@ -2031,6 +2031,7 @@ DualArmServoLoop::DualArmServoLoop(
         const auto& m = config_.safety.self_collision.mesh;
         collision_monitor_cfg_.enable = true;
         collision_monitor_cfg_.unified_urdf = m.unified_urdf;
+        collision_monitor_cfg_.gripper_attach_frame = m.gripper_attach_frame;
         collision_monitor_cfg_.package_dirs = m.package_dirs;
         collision_monitor_cfg_.pika_gripper_mesh = m.pika_gripper_mesh;
         collision_monitor_cfg_.pika_gripper_base_mesh = m.pika_gripper_base_mesh;

@@ -3170,6 +3170,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "left_prefix",
                     "right_prefix",
                     "stand_frame",
+                    "gripper_attach_frame",
                     "stand_ignore_arm_substrings",
                     "left_arm_root_frame",
                     "right_arm_root_frame",
@@ -3233,6 +3234,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 if (has(m, "left_prefix")) mc.left_prefix = asString(m["left_prefix"], "safety.self_collision.mesh.left_prefix");
                 if (has(m, "right_prefix")) mc.right_prefix = asString(m["right_prefix"], "safety.self_collision.mesh.right_prefix");
                 if (has(m, "stand_frame")) mc.stand_frame = asString(m["stand_frame"], "safety.self_collision.mesh.stand_frame");
+                if (has(m, "gripper_attach_frame")) mc.gripper_attach_frame = asString(m["gripper_attach_frame"], "safety.self_collision.mesh.gripper_attach_frame");
                 if (has(m, "stand_ignore_arm_substrings")) {
                     const YAML::Node subs = m["stand_ignore_arm_substrings"];
                     if (!subs.IsSequence()) {

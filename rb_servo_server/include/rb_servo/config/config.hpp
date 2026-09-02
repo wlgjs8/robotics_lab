@@ -527,6 +527,16 @@ struct SelfCollisionConfig {
         std::string left_prefix = "dual_rb3_730e_left_";
         std::string right_prefix = "dual_rb3_730e_right_";
         std::string stand_frame = "stand";
+        // Frame the pika gripper geometry is attached to, as a suffix on left/right_prefix.
+        // The gripper does not bolt to the flange: an F/T adapter stands it off by 15 mm
+        // (RFT64-6A01-A preset offset 45 mm minus the 30 mm sensor body; confirmed to
+        // 0.228 mm by touching both TCPs to known surfaces on 2026-09-02). Attaching the
+        // hulls at "attachment_site" therefore placed the whole gripper 15 mm too close to
+        // the wrist -- missing the outermost 15 mm of the fingertips, which is the part
+        // that reaches things. The RB5 URDFs carry a "gripper_mount" frame at the correct
+        // standoff. Default stays "attachment_site" so any model without that frame is
+        // unaffected.
+        std::string gripper_attach_frame = "attachment_site";
         // arm geometry whose name contains any of these is NOT paired vs the stand
         std::vector<std::string> stand_ignore_arm_substrings{"link0"};
         // Left/right classification by kinematic-tree ancestry (robust to mesh/link
