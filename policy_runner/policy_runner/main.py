@@ -1084,6 +1084,7 @@ def _make_umi_dual_cartesian_source(config: PolicyRunnerConfig) -> UmiDualCartes
         deadman_release_grace_sec=umi.deadman_release_grace_sec,
         tcp_pose_target_conditioning=umi.tcp_pose_target_conditioning,
         target_lead_clamp=umi.target_lead_clamp,
+        motion_gate=umi.motion_gate,
     )
 
 

@@ -401,6 +401,57 @@ class UmiTargetLeadClampConfig:
 
 
 @dataclass(frozen=True)
+class UmiMotionGateConfig:
+    """Per-arm activity gate for UMI teleop.
+
+    WHY THIS EXISTS: one foot switch clutches BOTH arms (the pika publisher's
+    pedal returns {"left": on, "right": on}), so the arm the operator is not
+    working is still live. Measured on the 2026-09-03 22:22 run: while one hand
+    teleops, the OTHER hand's unavoidable postural motion put 11-14 mm of net
+    displacement per 30 s onto the idle arm, against 0.4-1.0 mm per 45 s when
+    both hands were still. Zero-lag correlation between the two hands' speeds
+    (+0.68 at a 1 s window) says that is the operator's body, not the tracker
+    and not a software leak, so the fix has to be a gate.
+
+    THE MEASURE IS WINDOWED DISPLACEMENT, |x(t) - x(t-window_sec)|, and the two
+    obvious alternatives were tried against the recorded run and rejected:
+
+      * distance from a latched anchor: USELESS. The idle drift is monotonic, so
+        it pays the release radius once and then leaks everything (14.3 -> 14.3 mm
+        at any radius from 1 to 5 mm).
+      * per-sample magnitude (a speed test): works, but it cannot be made
+        aggressive without eating real motion -- at 0.15 mm/sample it already
+        dropped 7 % of the active hand's commanded path.
+
+    Windowed displacement separates the two populations by 6-25x at p50 (active
+    4.2-17.9 mm vs idle 0.30-0.73 mm over 0.3 s) and keeps 99-101 % of real
+    motion at release_m 1.2 mm.
+
+    WHAT IT COSTS, AND WHAT IT CANNOT DO. The gate is a low-pass on intent: a
+    hand moving slower than release_m/window_sec (1 mm / 0.3 s = 3.3 mm/s at the
+    tracked values) does not open it, and on the recorded fine-manipulation
+    stretch that delayed motion onset by up to ~1.3 s. Lowering release_m trades
+    that back for less rejection. And the leak never reaches zero: the idle hand
+    genuinely moves up to 10.9 mm in 0.3 s, which no threshold can call "not
+    motion" without also blocking deliberate slow work. Expect roughly a
+    50-65 % reduction at 1.0-1.2 mm, not elimination.
+    """
+
+    enable: bool = False
+    window_sec: float = 0.3
+    release_m: float = 0.001
+    dwell_sec: float = 0.5
+
+    def __post_init__(self) -> None:
+        if self.window_sec <= 0.0:
+            raise ValueError("umi_dual_cartesian.motion_gate.window_sec must be positive")
+        if self.release_m < 0.0:
+            raise ValueError("umi_dual_cartesian.motion_gate.release_m must be non-negative")
+        if self.dwell_sec < 0.0:
+            raise ValueError("umi_dual_cartesian.motion_gate.dwell_sec must be non-negative")
+
+
+@dataclass(frozen=True)
 class UmiDualCartesianConfig:
     left: UmiPoseReaderConfig = field(
         default_factory=lambda: UmiPoseReaderConfig(mock_script="pgmode_umi_smoke")
@@ -431,6 +482,7 @@ class UmiDualCartesianConfig:
         default_factory=UmiTcpPoseTargetConditioningConfig
     )
     target_lead_clamp: UmiTargetLeadClampConfig = field(default_factory=UmiTargetLeadClampConfig)
+    motion_gate: UmiMotionGateConfig = field(default_factory=UmiMotionGateConfig)
 
     def __post_init__(self) -> None:
         if self.max_linear_step_m < 0.0:
@@ -784,10 +836,12 @@ def _umi_dual_cartesian_config(raw: dict[str, Any]) -> UmiDualCartesianConfig:
     right = _umi_reader_config(_section(raw, "right"))
     conditioning = _umi_conditioning_config(_section(raw, "tcp_pose_target_conditioning"))
     target_lead_clamp = _umi_target_lead_clamp_config(_section(raw, "target_lead_clamp"))
+    motion_gate = _umi_motion_gate_config(_section(raw, "motion_gate"))
     top_level = {
         key: value
         for key, value in raw.items()
-        if key not in {"left", "right", "tcp_pose_target_conditioning", "target_lead_clamp"}
+        if key not in {"left", "right", "tcp_pose_target_conditioning", "target_lead_clamp",
+                       "motion_gate"}
     }
     if "max_linear_step_m" in top_level:
         top_level["max_linear_step_m"] = float(top_level["max_linear_step_m"])
@@ -824,6 +878,7 @@ def _umi_dual_cartesian_config(raw: dict[str, Any]) -> UmiDualCartesianConfig:
         right=right,
         tcp_pose_target_conditioning=conditioning,
         target_lead_clamp=target_lead_clamp,
+        motion_gate=motion_gate,
         **top_level,
     )
 
@@ -856,6 +911,15 @@ def _umi_target_lead_clamp_config(raw: dict[str, Any]) -> UmiTargetLeadClampConf
     if "rebase_conditioner_on_clamp" in raw:
         raw["rebase_conditioner_on_clamp"] = bool(raw["rebase_conditioner_on_clamp"])
     return UmiTargetLeadClampConfig(**raw)
+
+
+def _umi_motion_gate_config(raw: dict[str, Any]) -> UmiMotionGateConfig:
+    if "enable" in raw:
+        raw["enable"] = bool(raw["enable"])
+    for key in ("window_sec", "release_m", "dwell_sec"):
+        if key in raw:
+            raw[key] = float(raw[key])
+    return UmiMotionGateConfig(**raw)
 
 
 def _umi_reader_config(raw: dict[str, Any]) -> UmiPoseReaderConfig:

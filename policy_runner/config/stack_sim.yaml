@@ -116,6 +116,13 @@ umi_dual_cartesian:
   max_angular_step_rad: 0.04
   deadband_linear_m: 0.0015
   deadband_angular_rad: 0.012
+  # Per-arm activity gate: OFF here on purpose. It exists for the real two-hand
+  # problem (one pedal clutching both arms while the operator's idle hand
+  # wanders); the sim source is a mock script with no second hand, so enabling it
+  # would only change sim behaviour without testing anything. Kept visible so the
+  # knob is not a surprise. See policy_runner/config/stack_real.yaml.
+  motion_gate:
+    enable: false
   # Pose-frame geometry: paired with pika publisher --pose-frame tip (official
   # tracker→gripper-tip transform on the wire; see stack_real.yaml for details).
   gripper_offset: [0.0, 0.0, 0.0]

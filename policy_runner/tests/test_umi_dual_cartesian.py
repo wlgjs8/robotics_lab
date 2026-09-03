@@ -17,6 +17,7 @@ from policy_runner.action_sources.umi_dual_cartesian import (  # noqa: E402
     UmiSample,
 )
 from policy_runner.config import (  # noqa: E402
+    UmiMotionGateConfig,
     UmiTargetLeadClampConfig,
     UmiTcpPoseTargetConditioningConfig,
     config_from_mapping,
@@ -492,6 +493,98 @@ class UmiDualCartesianTest(unittest.TestCase):
         # mean of [0, 0.04] = 0.02 both times (held sample not re-counted)
         self.assertAlmostEqual(second.left["tcp_target_stand"][0], 1.02, places=9)
         self.assertAlmostEqual(held.left["tcp_target_stand"][0], 1.02, places=9)
+
+    def test_motion_gate_holds_idle_arm_and_passes_real_motion(self):
+        """The idle hand's slow drift must not reach the arm; real motion must.
+
+        One foot switch clutches both arms, so the arm the operator is not working
+        is still live and follows their other hand. Drift below release_m per
+        window_sec is held; a genuine move opens the gate on the tick it happens.
+        """
+        drift = [
+            {"pose": [0.00002 * i, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.01 * i}
+            for i in range(40)
+        ]
+        moved = dict(drift[-1])
+        moved["pose"] = [drift[-1]["pose"][0] + 0.005, 0, 0, 0, 0, 0, 1]
+        moved["monotonic"] = 0.01 * 40
+        source = UmiDualCartesianActionSource(
+            MockUmiPoseReader(drift + [moved]),
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            motion_gate=UmiMotionGateConfig(
+                enable=True, window_sec=0.3, release_m=0.001, dwell_sec=0.5),
+        )
+
+        held = None
+        for i in range(40):
+            held = source.next_intent(sample_state(), 0.01 * i)
+        assert held is not None
+        # 0.02 mm/sample over a 0.3 s window is 0.6 mm, under the 1 mm release.
+        self.assertEqual(held.left["tcp_target_stand"], [1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
+
+        opened = source.next_intent(sample_state(), 0.01 * 40)
+        assert opened is not None
+        self.assertAlmostEqual(opened.left["tcp_target_stand"][0], 1.005, places=6)
+
+    def test_motion_gate_discards_held_drift_instead_of_replaying_it(self):
+        """Reopening must not jump the arm by everything the gate rejected.
+
+        The target is arm_init composed with (pika_init^-1 . pika_now), so simply
+        freezing the output would leave the whole held drift latched in that delta
+        and dump it the instant the gate reopened. The hold re-anchors both, which
+        is what this pins: 0.8 mm of held drift then a 5 mm move must command 5 mm,
+        not 5.8 mm.
+        """
+        drift = [
+            {"pose": [0.00002 * i, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.01 * i}
+            for i in range(40)
+        ]
+        moved = {"pose": [drift[-1]["pose"][0] + 0.005, 0, 0, 0, 0, 0, 1],
+                 "deadman": True, "monotonic": 0.4}
+        gated = UmiDualCartesianActionSource(
+            MockUmiPoseReader(drift + [moved]),
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+            motion_gate=UmiMotionGateConfig(
+                enable=True, window_sec=0.3, release_m=0.001, dwell_sec=0.5),
+        )
+        ungated = UmiDualCartesianActionSource(
+            MockUmiPoseReader(drift + [moved]),
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+        )
+        for i in range(40):
+            gated.next_intent(sample_state(), 0.01 * i)
+            ungated.next_intent(sample_state(), 0.01 * i)
+        g = gated.next_intent(sample_state(), 0.4)
+        u = ungated.next_intent(sample_state(), 0.4)
+        assert g is not None and u is not None
+        drift_m = drift[-1]["pose"][0]
+        self.assertAlmostEqual(u.left["tcp_target_stand"][0], 1.0 + drift_m + 0.005, places=6)
+        self.assertAlmostEqual(g.left["tcp_target_stand"][0], 1.0 + 0.005, places=6)
+
+    def test_motion_gate_defaults_off(self):
+        """Absent config, behaviour is exactly the pre-gate one."""
+        samples = [
+            {"pose": [0.0002 * i, 0, 0, 0, 0, 0, 1], "deadman": True, "monotonic": 0.01 * i}
+            for i in range(3)
+        ]
+        source = UmiDualCartesianActionSource(
+            MockUmiPoseReader(samples),
+            MockUmiPoseReader([]),
+            gripper_offset=(0.0, 0.0, 0.0),
+            max_linear_step_m=1.0,
+        )
+        self.assertFalse(source.motion_gate.enable)
+        last = None
+        for i in range(3):
+            last = source.next_intent(sample_state(), 0.01 * i)
+        assert last is not None
+        self.assertAlmostEqual(last.left["tcp_target_stand"][0], 1.0 + 0.0004, places=6)
 
     def test_deadband_freezes_micro_jitter_and_passes_real_motion(self):
         reader = MockUmiPoseReader(

@@ -8,7 +8,7 @@ import socket
 import time
 from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -20,6 +20,7 @@ from policy_runner.action_sources.tcp_pose_target import (
 from policy_runner.robot_state_client import StateSnapshot, parse_udp_endpoint
 from policy_runner.servo_command_client import CommandIntent
 from policy_runner.config import (
+    UmiMotionGateConfig,
     UmiTargetLeadClampConfig,
     UmiTcpPoseTargetConditioningConfig,
 )
@@ -50,6 +51,11 @@ def _legacy_conditioning_config() -> UmiTcpPoseTargetConditioningConfig:
 
 def _legacy_lead_clamp_config() -> UmiTargetLeadClampConfig:
     return UmiTargetLeadClampConfig(enable=False)
+
+
+def _legacy_motion_gate_config() -> UmiMotionGateConfig:
+    """Gate OFF when no config is supplied, i.e. the pre-2026-09-04 behaviour."""
+    return UmiMotionGateConfig(enable=False)
 
 
 @dataclass(frozen=True)
@@ -103,6 +109,15 @@ class _ArmTeleopState:
     schedule_end_time_ns: int | None = None
     last_fresh_sample_time_ns: int | None = None
     last_fresh_seq: int = 0
+    # --- per-arm motion gate (UmiMotionGateConfig) ---------------------------
+    # Trailing (monotonic, device xyz) samples spanning motion_gate.window_sec,
+    # the open/closed latch, and the last time the window measured motion.
+    gate_history: deque[tuple[float, tuple[float, float, float]]] = field(default_factory=deque)
+    gate_open: bool = False
+    gate_last_hot: float | None = None
+    # The transform the gate re-anchors onto while it is closed, so the drift it
+    # rejected is discarded rather than replayed as a jump when it reopens.
+    gate_hold_transform: _Transform | None = None
 
 
 class _PoseMovingAverage:
@@ -191,6 +206,7 @@ class _TeleopStepLogger:
             "age_ms=<수신지연>  dt_ms=<직전 fresh 샘플간격>  "
             "has=<reader가 샘플 반환?>  fresh=<신규 packet?>  seq=<수신 packet 카운터>  "
             "raw_mm/raw_deg=<클램프전 요구 변위>  app_mm/app_deg=<적용 변위>  "
+            "gate=<팔별 활동게이트 열림>  gate_win_mm=<창내 변위>  "
             "clamp=<xyz|rpy 포화축>  db=<deadband동결>  "
             "profile cond cond_active cond_alpha cond_horizon_ms cond_elapsed_ms "
             "fresh_packet reuse_tick emitted_delta raw_to_emitted lead_clamp "
@@ -306,6 +322,8 @@ class _TeleopStepLogger:
             f"stale_stop={int(bool(conditioner.get('stale_stop', False)))}  "
             f"raw_sgn_mm=({raw_sx:+.1f},{raw_sy:+.1f},{raw_sz:+.1f}) raw_sgn_deg=({raw_sr:+.2f},{raw_sp:+.2f},{raw_syaw:+.2f})  "
             f"app_sgn_mm=({app_sx:+.1f},{app_sy:+.1f},{app_sz:+.1f}) app_sgn_deg=({app_sr:+.2f},{app_sp:+.2f},{app_syaw:+.2f})  "
+            f"gate={int(bool(conditioner.get('gate_open', True)))} "
+            f"gate_win_mm={float(conditioner.get('gate_window_m', -0.001)) * 1000:6.2f}  "
             f"clamp={clamp}  db={int(db_hit)}{tokens}\n"
         )
 
@@ -352,6 +370,7 @@ class UmiDualCartesianActionSource:
         deadman_release_grace_sec: float = 0.2,
         tcp_pose_target_conditioning: UmiTcpPoseTargetConditioningConfig | None = None,
         target_lead_clamp: UmiTargetLeadClampConfig | None = None,
+        motion_gate: UmiMotionGateConfig | None = None,
         reanchor_on_external_move: bool = True,
         reanchor_linear_m: float = 0.02,
         reanchor_angular_rad: float = 0.05,
@@ -400,6 +419,7 @@ class UmiDualCartesianActionSource:
             tcp_pose_target_conditioning if tcp_pose_target_conditioning is not None else _legacy_conditioning_config()
         )
         self.target_lead_clamp = target_lead_clamp if target_lead_clamp is not None else _legacy_lead_clamp_config()
+        self.motion_gate = motion_gate if motion_gate is not None else _legacy_motion_gate_config()
         self.reanchor_on_external_move = bool(reanchor_on_external_move)
         self.reanchor_linear_m = float(reanchor_linear_m)
         self.reanchor_angular_rad = float(reanchor_angular_rad)
@@ -603,10 +623,21 @@ class UmiDualCartesianActionSource:
                         _reset_conditioner(state, state.previous_target, now_monotonic)
                     diag["reanchor_external"] = True
 
+        if not self._update_motion_gate(state, pika_now, now_monotonic, diag):
+            # This arm is not being commanded. Re-anchor onto the pose the gate is
+            # holding: delta collapses to identity, so the target stays put AND the
+            # drift the gate rejected is discarded rather than replayed as a jump the
+            # moment the gate reopens.
+            hold = state.gate_hold_transform if state.gate_hold_transform is not None else state.arm_init
+            if hold is not None:
+                state.arm_init = hold
+                state.pika_init = pika_now
+
         assert state.arm_init is not None
         assert state.pika_init is not None
         delta = self._apply_axis_signs(_compose(_inverse(state.pika_init), pika_now))
         target = _compose(state.arm_init, delta)
+        state.gate_hold_transform = target
         raw_pose6 = _clamp_workspace(_transform_to_pose6(target), self.workspace_bounds)
         # 진단: deadband/클램프 전후를 모두 잡기 위해 prev 상태를 미리 보관
         prev_target = state.previous_target
@@ -652,6 +683,53 @@ class UmiDualCartesianActionSource:
         state.previous_target = pose6
         state.last_emitted_target_stand = pose6
         return pose6, _gripper_percent(sample.gripper), True, diag
+
+    def _update_motion_gate(
+        self,
+        state: _ArmTeleopState,
+        pika_now: _Transform,
+        now_monotonic: float,
+        diag: dict[str, Any],
+    ) -> bool:
+        """Windowed-displacement activity gate. True when this arm may move.
+
+        The measure is |x(t) - x(t - window_sec)| on the DEVICE pose, which is what
+        makes it immune to the re-anchoring the hold performs: the anchor moves, the
+        device history does not. Opening is instantaneous; closing needs dwell_sec of
+        sub-threshold motion, so a pause mid-gesture does not drop the arm out.
+
+        See UmiMotionGateConfig for the measurements behind the choice of measure and
+        for what this can and cannot remove.
+        """
+        cfg = self.motion_gate
+        if not cfg.enable:
+            diag["gate_open"] = True
+            diag["gate_window_m"] = -1.0
+            return True
+        history = state.gate_history
+        history.append((now_monotonic, pika_now.translation))
+        cutoff = now_monotonic - cfg.window_sec
+        while len(history) > 1 and history[0][0] < cutoff:
+            history.popleft()
+        oldest = history[0][1]
+        here = pika_now.translation
+        window_m = math.sqrt(
+            (here[0] - oldest[0]) ** 2
+            + (here[1] - oldest[1]) ** 2
+            + (here[2] - oldest[2]) ** 2
+        )
+        if window_m > cfg.release_m:
+            state.gate_open = True
+            state.gate_last_hot = now_monotonic
+        elif (
+            state.gate_open
+            and state.gate_last_hot is not None
+            and now_monotonic - state.gate_last_hot >= cfg.dwell_sec
+        ):
+            state.gate_open = False
+        diag["gate_open"] = state.gate_open
+        diag["gate_window_m"] = window_m
+        return state.gate_open
 
     def _apply_axis_signs(self, delta: _Transform) -> _Transform:
         """Mirror the latched relative delta per axis.
@@ -964,6 +1042,10 @@ def _clear_latches(state: _ArmTeleopState) -> None:
     state.was_armed = False
     state.deadband_target = None
     state.deadman_drop_mono = None
+    state.gate_history.clear()
+    state.gate_open = False
+    state.gate_last_hot = None
+    state.gate_hold_transform = None
     _reset_conditioner(state, None, 0.0)
 
 

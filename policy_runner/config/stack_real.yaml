@@ -126,9 +126,40 @@ umi_dual_cartesian:
   # 2026-06-16: 1.5mm/0.69° deadband가 빠른 텔레옵을 1.5mm 격자로 양자화 → 계단식
   # 뚝뚝(수신로그 db=1 88%, app=0). 0.3mm/0.17°로 낮춰 계단 제거(미세 떨림만 억제).
   # 떨림 재발 시 hard deadband 대신 input_moving_average_window 상향 권장.
-  deadband_linear_m: 0.0000
-  deadband_angular_rad: 0.000
+  # 2026-09-04: 0 -> 0.0003 / 0.003 rad, back to the value the 06-16 note above
+  # already validated as step-free (1.5 mm was the one that quantized visibly).
+  # WHAT THIS IS FOR, AND WHAT IT IS NOT: measured on the 09-03 22:22 run, the
+  # deadband removes 45-70 % of the IDLE arm's path (246 -> ~145 mm and 127 ->
+  # ~42 mm per 30 s) at essentially zero cost to real motion (active net 110.9 ->
+  # 110.8 mm). That is the arm's QUIVER. It does NOT touch the drift: idle net
+  # displacement stays 14.3 / 11.3 mm, because a hysteresis deadband quantizes a
+  # sustained bias, it does not reject it. motion_gate below is what addresses
+  # the drift; these two are not substitutes for each other.
+  deadband_linear_m: 0.0003
+  deadband_angular_rad: 0.003
   input_moving_average_window: 8
+
+  # PER-ARM ACTIVITY GATE. One foot switch clutches BOTH arms (the pika
+  # publisher's pedal returns {"left": on, "right": on}, and the wire log shows
+  # only L1R1 / L0R0, never a mixed state), so the arm the operator is not
+  # working is still live and follows whatever their other hand does. Measured
+  # 2026-09-03 22:22: 11-14 mm of net displacement onto the idle arm per 30 s of
+  # the other arm's work, against 0.4-1.0 mm per 45 s with both hands still.
+  # It is the operator's body, not the tracker (tracking_result 200 on all 87124
+  # sender entries, zero idle samples above 1 mm, and the two hands' speeds
+  # correlate at ZERO LAG, +0.68 at a 1 s window).
+  #
+  # release_m 0.001 is the STARTING POINT, to be tuned by feel. Replayed against
+  # that run: 1.2 mm cut the leak to 7.0 / 3.7 mm keeping 99-101 % of real
+  # motion, 0.5 mm barely helped (12.6 / 9.1). The cost of raising it is onset
+  # delay on deliberately slow work (up to ~1.3 s at 1.2 mm), which is why this
+  # is a config knob and not a constant. See UmiMotionGateConfig for why the
+  # measure is windowed displacement and not a speed test or an anchor distance.
+  motion_gate:
+    enable: true
+    window_sec: 0.3
+    release_m: 0.001
+    dwell_sec: 0.5
   tcp_pose_target_conditioning:
     enable: false
     mode: foh_se3
