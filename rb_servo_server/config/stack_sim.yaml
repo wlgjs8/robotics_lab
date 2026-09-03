@@ -162,12 +162,23 @@ safety:
     arrival_decel_deg_s2: 25.0     # sim: 더 완만하게(느린 wn과 조합) 관찰용
     arrival_min_speed_deg_s: 3.0
   floor_constraint:
-    enable: true
+    # DISABLED TO MATCH stack_real.yaml (operator, 2026-09-03). Real has run with the
+    # stand floor off since the ft branch: the box's own bottom face sits at the stand
+    # floor (z = 0), so with the floor plane ALSO on, every table approach carried a
+    # second, redundant deceleration. Real replaced that backstop with the F/T sensor
+    # and kept x/y/upper limits on the ROI box. Sim was still enforcing the floor, so a
+    # motion that is clean on real would decelerate here -- the opposite of what a
+    # rehearsal profile is for.
+    #
+    # The pgmode note stands on its own: this profile commands a box in simulation, so
+    # nothing here can reach the floor physically. The reason to match real is fidelity,
+    # not safety relief.
+    enable: false
     z_min_m: 0.0000
     runtime_min_z_m: -0.2
     runtime_max_z_m: 0.5
     fail_policy: clamp_hold
-    monitor_only: true   # TEMP (replay reposition): floor monitors only, no clamp/hold
+    monitor_only: false   # moot while enable is false; kept equal to real
     # PIKA 그리퍼 팁 2점 (TCP 프레임 오프셋, 줄자 실측 tip-to-tip 118mm:
     # tcp 프레임 = 팁 평면(z 247.642mm @attachment_site), 팁 양끝은
     # tool visual의 z+90° 회전 반영 시 TCP x축 방향 ±59.0mm). TCP가 회전했을 때
@@ -187,11 +198,26 @@ safety:
     # 2026-09-02: ROTATED Rz(+90 deg) into the RB5 stand frame, same reason as
     # stack_real.yaml -- these bounds are stand-frame and that frame's convention
     # changed with the robot (base->stand was +90 deg on dual_rb3_730e_ver5, identity
-    # on dual_rb5_850e_ver3). This profile's box is the permissive observation range,
-    # so the rotation matters less than in real, but an unrotated box would still put
-    # the margin/closest_face readouts on the wrong faces.
-    min_m: [-0.600, -1.200, -0.200]
-    max_m: [1.600, 1.200, 1.600]
+    # on dual_rb5_850e_ver3). An unrotated box puts the margin/closest_face readouts
+    # on the wrong faces.
+    #
+    # 2026-09-03: BOUNDS NOW COPIED FROM stack_real.yaml (operator). This used to be a
+    # permissive OBSERVATION range equal to runtime_min_m/runtime_max_m below -- i.e.
+    # the box was the whole envelope the operator may drag it within, which is not a
+    # workspace limit at all and made every margin/closest_face readout meaningless
+    # (nothing is ever near a face that far out). A rehearsal profile that reports
+    # different faces, different margins and different violations than real is not a
+    # rehearsal. Verified before the change: both TCPs sit INSIDE this box at the
+    # current parked pose (left [0.514, 0.292, -0.037], right [0.477, -0.258, -0.013]),
+    # the tightest margin being the left arm's +y face at 108 mm -- outside the 60 mm
+    # d_slow band, so the tighter box does not engage the damper where the arms stand.
+    #
+    # KEEP THESE TWO FILES IN STEP. real's own comment warns the far faces still need
+    # confirming against the physical table (the stand changed with the robot: arm
+    # spacing +/-0.157 -> +/-0.197 m, height 0.580 -> 0.570). When that measurement
+    # happens it lands in BOTH files or the rehearsal silently drifts again.
+    min_m: [0.300, -0.400, -0.350]
+    max_m: [1.100, 0.400, 0.590]
     # runtime_* is the envelope a RUNTIME SetRoiBounds may move the box within, and it
     # is what rb_gui derives its slider limits from. z_min was -0.2 m, so the GUI could
     # not be dragged below -200 mm while laying the box out. Widened to -1.0 m
@@ -209,13 +235,23 @@ safety:
       - { name: gripper_tip_b_yp, offset_m: [-0.058,  0.013, 0.0 ], offset_closed_m: [-0.010,  0.013, 0.0 ] }
       - { name: gripper_tip_b_yn, offset_m: [-0.058, -0.013, 0.0 ], offset_closed_m: [-0.010, -0.013, 0.0 ] }
   user_floor_constraint:
-    enable: true
+    # DISABLED TO MATCH stack_real.yaml (operator, 2026-09-03), together with the stand
+    # floor above. This is the viser-fitted TILTED plane; it is independent of and
+    # ADDITIVE to the stand floor, so leaving it on would put back exactly the layer the
+    # block above just removed -- and it is the stricter of the two wherever a captured
+    # plane is tilted toward the arm.
+    #
+    # NOTE what this also switches off: with enable false the server reports the
+    # constraint disabled, and rb_gui's "User Safety Floor" Send is refused
+    # (safety.send_set_floor_z checks the reported `enabled`). Capturing/fitting a
+    # plane in sim needs this back at true.
+    enable: false
     max_tilt_deg: 35.0
     runtime_min_point_z_m: -0.2
     runtime_max_point_z_m: 0.5
     max_margin_m: 0.2
     fail_policy: clamp_hold
-    monitor_only: true
+    monitor_only: false   # moot while enable is false; kept equal to real
     a_brake_m_s2: 3.0
     d_slow_m: 0.06
   self_collision:
