@@ -11,6 +11,7 @@
 
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/control/admittance_overlay.hpp"
+#include "rb_servo/control/smd_pose_tracker.hpp"
 #include "rb_servo/sensor/ft_pipeline.hpp"
 
 namespace {
@@ -763,9 +764,12 @@ struct WallLoop {
     double k_env = 30663.0;
     double v_cmd = 0.050;
     double lpf_hz = 25.0;
+    double deadzone_n = 0.0;        // soft per-axis deadzone on what the LAW sees
+    bool gate_on_physical = false;  // judge the gate on |F| before the deadzone
     std::vector<double> delay;
     std::size_t head = 0;
     double f_filt = 0.0;
+    double f_phys_filt = 0.0;
     bool primed = false;
     double plan_z = 0.0;
     double emitted_z = 0.0;
@@ -784,19 +788,24 @@ struct WallLoop {
         delay[head] = pen > 0.0 ? -k_env * pen : 0.0;
         head = (head + 1) % delay.size();
         const double f_raw = delay[head];
+        const double f_dz = std::abs(f_raw) <= deadzone_n
+            ? 0.0 : (f_raw < 0.0 ? f_raw + deadzone_n : f_raw - deadzone_n);
         if (lpf_hz > 0.0) {
-            if (!primed) { f_filt = f_raw; primed = true; }
+            if (!primed) { f_filt = f_dz; f_phys_filt = std::abs(f_raw); primed = true; }
             else {
                 const double tau = 1.0 / (2.0 * M_PI * lpf_hz);
-                f_filt += std::min(1.0, dt / (tau + dt)) * (f_raw - f_filt);
+                const double a = std::min(1.0, dt / (tau + dt));
+                f_filt += a * (f_dz - f_filt);
+                f_phys_filt += a * (std::abs(f_raw) - f_phys_filt);
             }
         } else {
-            f_filt = f_raw;
+            f_filt = f_dz;
+            f_phys_filt = std::abs(f_raw);
         }
-        force_seen = f_filt;
+        force_seen = f_raw;   // the TRUE contact force (what the wall feels)
         const rb_servo::math::Vector3 f(0.0, 0.0, f_filt);
         const rb_servo::math::Vector3 m = rb_servo::math::Vector3::Zero();
-        gate.update(f, m);
+        gate.update(f, m, gate_on_physical ? f_phys_filt : -1.0, -1.0);
         // The plan advance into the wall, projectively gated (the chunk follower's
         // setAdvanceGate does this per segment; per tick is the same law).
         double removed = 0.0;
@@ -911,7 +920,148 @@ bool testHoldEngageLatchHysteresis() {
     return true;
 }
 
+// A SPRING UNDER THE GATE HOLDS THE CONFIGURED FORCE AT ANY SPEED (CM 0028, the
+// 2026-09-04 stream law: k 400 / m 6 / b 500, gate 10 N judged on the PHYSICAL force
+// through a 3 N deadzone). The pure-damper law settles wherever gate creep and damper
+// retreat balance - a by-product of speed - and limit-cycles at the policy's 100+ mm/s.
+bool testSpringUnderTheGateHoldsTheConfiguredForce() {
+    auto sustained = [](double k, bool physical, double v_cmd, double* ripple) {
+        rb_servo::ForceControlConfig cfg = springlessLaw();
+        for (int i = 0; i < 3; ++i) cfg.stream.translation[i] = {rb_servo::ForceAxisMode::Compliance, 6.0, 500.0, k, 0.0};
+        cfg.gate_max_force_n = 10.0;
+        WallLoop w(cfg, k == 0.0, 13);      // 26 ms of delay; fold only on the pure damper
+        w.k_env = 15000.0;
+        w.v_cmd = v_cmd;
+        w.deadzone_n = 3.0;
+        w.gate_on_physical = physical;
+        double fmin = 1e9, fmax = -1e9, fsum = 0.0;
+        for (int i = 0; i < 6000; ++i) {
+            w.tick();
+            if (i >= 5000) { fmin = std::min(fmin, -w.force_seen); fmax = std::max(fmax, -w.force_seen); fsum += -w.force_seen; }
+        }
+        *ripple = fmax - fmin;
+        return fsum / 1000.0;
+    };
+    double r = 0.0;
+    std::printf("  sustained contact force, gate 10 N (true force):\n");
+    for (double v : {0.02, 0.05, 0.135}) {
+        const double f_spring = sustained(400.0, true, v, &r);
+        double r0 = 0.0;
+        const double f_damper = sustained(0.0, false, v, &r0);
+        std::printf("    v=%3.0f mm/s: spring+gate %.1f N (p-p %.2f) | pure damper %.1f N (p-p %.2f)\n",
+                    v * 1e3, f_spring, r, f_damper, r0);
+        CHECK(f_spring > 9.0 && f_spring < 12.0);   // the configured 10 N, +/- the deadzone's bite
+        CHECK(r < 1.0);                              // and it HOLDS there
+    }
+    // Judged on the deadzoned wrench the same law settles ~3 N high.
+    const double f_dz = sustained(400.0, false, 0.05, &r);
+    std::printf("    v= 50 mm/s judged on the deadzoned wrench: %.1f N\n", f_dz);
+    CHECK(f_dz > 12.0);
+    // The pure damper at the policy's speed limit-cycles.
+    double r_lc = 0.0;
+    sustained(0.0, false, 0.135, &r_lc);
+    CHECK(r_lc > 4.0);
+    return true;
+}
+
+// strip() IS THE INVERSE OF compose(), position and rotation, so a plan-side stage
+// reading FK of the sent joints gets the nominal back exactly.
+bool testStripInvertsCompose() {
+    rb_servo::control::AdmittanceOverlay overlay;
+    rb_servo::ForceControlConfig cfg = shippedLaw();
+    for (int i = 0; i < 3; ++i) cfg.stream.rotation[i] = {rb_servo::ForceAxisMode::Compliance, 1.0, 15.72, 8.0, 0.0};
+    overlay.configure(cfg, 0.002);
+    const rb_servo::math::Vector3 f(3.0, -7.0, 10.0);
+    const rb_servo::math::Vector3 m(0.4, 0.2, -0.3);
+    for (int i = 0; i < 500; ++i) overlay.step(f, m);
+    CHECK(overlay.hasDeviation());
+    rb_servo::Pose6D nominal;
+    nominal.x = 0.5; nominal.y = -0.2; nominal.z = 0.1;
+    nominal.rx = 3.0; nominal.ry = -0.1; nominal.rz = 1.5;
+    const rb_servo::Pose6D emitted = overlay.compose(nominal);
+    const rb_servo::Pose6D back = overlay.strip(emitted);
+    CHECK(near(back.x, nominal.x, 1e-12) && near(back.y, nominal.y, 1e-12) && near(back.z, nominal.z, 1e-12));
+    const rb_servo::math::Matrix3 r_err =
+        rb_servo::math::rotationFromPose(back).transpose() * rb_servo::math::rotationFromPose(nominal);
+    CHECK(near(r_err.trace(), 3.0, 1e-9));
+    rb_servo::control::AdmittanceOverlay quiet;
+    quiet.configure(cfg, 0.002);
+    CHECK(!quiet.hasDeviation());
+    return true;
+}
+
+// THE GATE'S MAGNITUDE OVERRIDE: the fade is judged on the number handed in, the
+// direction still on the vector.
+bool testGateMagnitudeOverride() {
+    rb_servo::ForceControlConfig cfg = shippedLaw();
+    cfg.gate_close_tau_s = 0.002;   // one tick
+    rb_servo::control::ForceGate gate;
+    gate.configure(cfg, 0.002);
+    const rb_servo::math::Vector3 small(0.0, 0.0, 1.0);   // the deadzoned wrench: 1 N
+    gate.update(small, rb_servo::math::Vector3::Zero(), 12.0, 0.0);   // physical: 12 N
+    CHECK(near(gate.forceN(), 12.0));
+    CHECK(gate.translation() < 0.01);                    // closed on the physical magnitude
+    const rb_servo::math::Vector3 adv(0.0, 0.0, -0.001);  // into the +z force
+    double removed = 0.0;
+    gate.applyTranslation(adv, &removed);
+    CHECK(removed > 0.00099);                           // and it cuts along the vector's direction
+    gate.update(small, rb_servo::math::Vector3::Zero());  // no override: the vector's own 1 N
+    CHECK(near(gate.forceN(), 1.0));
+    return true;
+}
+
+// THE GATE ON THE ABSOLUTE-TARGET PATH holds the tracker's STATE, not its goal: the
+// advance into the contact is cut, the inward momentum dropped, sliding untouched, and
+// the goal still where the source put it - so a released contact leaves no offset.
+bool testPoseTrackGateHoldsStateNotGoal() {
+    rb_servo::PoseTrackSmdConfig cfg;
+    cfg.enable = true;
+    cfg.natural_frequency_linear_hz = 2.0;
+    cfg.natural_frequency_angular_hz = 2.0;
+    rb_servo::SmdPoseTracker tracker(cfg);
+    rb_servo::Pose6D start;
+    start.z = 0.100;
+    tracker.reset(start);
+    rb_servo::Pose6D goal = start;
+    tracker.updateGoalFromCommand(goal);      // latches the reference
+    goal.z = 0.050;                           // 50 mm DOWN, through a surface at z = 0.09
+    goal.x = 0.020;                           // and 20 mm sideways (sliding)
+    tracker.updateGoalFromCommand(goal);
+    rb_servo::control::ForceGate gate;
+    rb_servo::ForceControlConfig fc = shippedLaw();
+    fc.gate_close_tau_s = 0.002;
+    gate.configure(fc, 0.002);
+    gate.update(rb_servo::math::Vector3(0.0, 0.0, 12.0), rb_servo::math::Vector3::Zero());   // wall pushes +z
+    CHECK(gate.translation() < 0.01);
+    double z_min = 1.0, x_last = 0.0;
+    for (int i = 0; i < 500; ++i) {
+        const rb_servo::Pose6D before = tracker.currentPose();
+        rb_servo::Pose6D out = tracker.step(0.002);
+        const rb_servo::math::Vector3 p0(before.x, before.y, before.z), p1(out.x, out.y, out.z);
+        double removed = 0.0;
+        const rb_servo::math::Vector3 kept = gate.applyTranslation(p1 - p0, &removed);
+        if (removed > 0.0) tracker.constrainTranslation(p0 + kept, gate.forceDirection());
+        const rb_servo::Pose6D now = tracker.currentPose();
+        z_min = std::min(z_min, now.z);
+        x_last = now.x;
+    }
+    CHECK(z_min > 0.100 - 1e-6);              // never advanced into the +z force
+    CHECK(x_last > 0.015);                    // but slid sideways toward the goal
+    CHECK(near(tracker.goalPose().z, 0.050, 1e-9));   // the goal is untouched
+    // Release: the gate opens, the tracker resumes toward the goal from rest, no jump.
+    gate.update(rb_servo::math::Vector3::Zero(), rb_servo::math::Vector3::Zero());
+    for (int i = 0; i < 20; ++i) gate.update(rb_servo::math::Vector3::Zero(), rb_servo::math::Vector3::Zero());
+    const rb_servo::Pose6D a = tracker.step(0.002);
+    const rb_servo::Pose6D b = tracker.step(0.002);
+    CHECK(std::abs(b.z - a.z) < 1e-4);        // one tick of ordinary SMD motion, not a lunge
+    return true;
+}
+
 int main() {
+    testPoseTrackGateHoldsStateNotGoal();
+    testSpringUnderTheGateHoldsTheConfiguredForce();
+    testStripInvertsCompose();
+    testGateMagnitudeOverride();
     testHoldEngageLatchHysteresis();
     testPureDamperPredicate();
     testDropDeviationKeepsTheVelocity();

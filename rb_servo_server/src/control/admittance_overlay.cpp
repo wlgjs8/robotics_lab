@@ -225,6 +225,27 @@ Pose6D AdmittanceOverlay::compose(const Pose6D& nominal_stand) const {
     return out;
 }
 
+Pose6D AdmittanceOverlay::strip(const Pose6D& emitted_stand) const {
+    Pose6D out = emitted_stand;
+    out.x -= dp_.x();
+    out.y -= dp_.y();
+    out.z -= dp_.z();
+    const double ang = er_.norm();
+    if (ang >= 1e-9) {
+        const math::Matrix3 d_r = math::exp3(er_);
+        const math::Matrix3 r_out = d_r.transpose() * math::rotationFromPose(emitted_stand);
+        const math::Vector3 rpy = r_out.eulerAngles(2, 1, 0);
+        out.rz = rpy[0];
+        out.ry = rpy[1];
+        out.rx = rpy[2];
+        if (emitted_stand.quaternion_xyzw.has_value()) {
+            const Eigen::Quaterniond q(r_out);
+            out.quaternion_xyzw = std::array<double, 4>{q.x(), q.y(), q.z(), q.w()};
+        }
+    }
+    return out;
+}
+
 bool AdmittanceOverlay::quiescent(double eps_m) const {
     return dp_.norm() < eps_m && er_.norm() < 1e-9 && vp_.norm() < 1e-9 && w_.norm() < 1e-9;
 }
@@ -284,12 +305,14 @@ void ForceGate::reset() {
     torque_nm_ = 0.0;
 }
 
-void ForceGate::update(const math::Vector3& force_stand, const math::Vector3& torque_stand) {
-    force_n_ = force_stand.norm();
-    torque_nm_ = torque_stand.norm();
-    force_dir_ = force_n_ > 1e-9 ? math::Vector3(force_stand / force_n_) : math::Vector3::Zero();
-    torque_dir_ =
-        torque_nm_ > 1e-9 ? math::Vector3(torque_stand / torque_nm_) : math::Vector3::Zero();
+void ForceGate::update(const math::Vector3& force_stand, const math::Vector3& torque_stand,
+                       double force_magnitude_n, double torque_magnitude_nm) {
+    const double fv = force_stand.norm();
+    const double mv = torque_stand.norm();
+    force_n_ = force_magnitude_n >= 0.0 ? force_magnitude_n : fv;
+    torque_nm_ = torque_magnitude_nm >= 0.0 ? torque_magnitude_nm : mv;
+    force_dir_ = fv > 1e-9 ? math::Vector3(force_stand / fv) : math::Vector3::Zero();
+    torque_dir_ = mv > 1e-9 ? math::Vector3(torque_stand / mv) : math::Vector3::Zero();
 
     if (!cfg_.gate_enable) {
         gate_t_ = 1.0;

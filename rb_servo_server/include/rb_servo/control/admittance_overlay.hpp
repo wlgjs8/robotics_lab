@@ -91,6 +91,21 @@ public:
     // makes a straight push twist the tool.
     Pose6D compose(const Pose6D& nominal_stand) const;
 
+    // THE INVERSE OF compose(): the nominal an emitted pose was composed from, given
+    // the deviation standing NOW. Every plan-side stage that anchors on "where the
+    // robot was last commanded" (the chunk follower's cold seed / re-anchor / lead
+    // guard, the pose-track SMD's reseed) reads FK of the sent joints - which is
+    // nominal + deviation. With the fold (k = 0) the deviation is ~0 and it does not
+    // matter; with a SPRING (k > 0, the fold declines) it stands at up to F/k, and an
+    // unstripped anchor would be read as plan lead and, on a re-anchor, composed onto
+    // AGAIN. This is the two-chains problem CM solved for k = 0 with the fold, solved
+    // here for k > 0 by bookkeeping: strip before the plan reads, compose after it
+    // writes.
+    Pose6D strip(const Pose6D& emitted_stand) const;
+    bool hasDeviation(double eps_m = 1e-9, double eps_rad = 1e-9) const {
+        return dp_.norm() >= eps_m || er_.norm() >= eps_rad;
+    }
+
     bool quiescent(double eps_m = 1e-6) const;
     bool bounded() const { return bounded_; }
 
@@ -196,7 +211,13 @@ public:
     // free space costs nothing and the advance can actually reach a full stop (which
     // is what creates the equilibrium that bounds the deviation at F/k). A knee
     // would double the gate's loop gain, which is why one is refused at load.
-    void update(const math::Vector3& force_stand, const math::Vector3& torque_stand);
+    // `force_magnitude_n` / `torque_magnitude_nm` >= 0 override the magnitude the fade
+    // is judged on while the DIRECTION still comes from the vectors. The servo loop
+    // passes the PHYSICAL (pre-deadzone, filtered) magnitudes: judged on the deadzoned
+    // wrench the gate closed 3 N late and a "10 N" contact settled at 13 N (measured
+    // in the closed-loop model, 2026-09-04).
+    void update(const math::Vector3& force_stand, const math::Vector3& torque_stand,
+                double force_magnitude_n = -1.0, double torque_magnitude_nm = -1.0);
 
     // Attenuate one plan advance. Returns the surviving advance; `removed` reports
     // the magnitude taken out, so a log can say how much the gate actually did.
@@ -207,6 +228,9 @@ public:
     double rotation() const { return gate_r_; }
     double forceN() const { return force_n_; }
     double torqueNm() const { return torque_nm_; }
+    // Unit direction of the measured force (the wall's push on the tool), stand
+    // frame; zero when no force stands.
+    const math::Vector3& forceDirection() const { return force_dir_; }
     bool closed() const { return gate_t_ < 0.02 || gate_r_ < 0.02; }
 
 private:

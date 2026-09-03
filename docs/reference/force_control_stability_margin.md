@@ -209,3 +209,44 @@ damper's retreat, `b·v_cmd·g(F/F_max) = F` — ~7.6 N for 50 mm/s at b = 1000 
 the 10 N gate, a **by-product of the stream speed, not a designed number** (CM 0028 §2
 measured the same). A designed converged force needs a `ref_force` (CM 0039's one law);
 that is the next step, not this one.
+
+### 2026-09-03 evening — m 6 / b 500, and what actually bounds the press
+
+The operator's purpose for this law is to keep a pick-and-place tool from being pressed
+into the table, so the row went to **m 6 / b 500** on both laws (hand cost 15 N at
+30 mm/s). Two facts decided it, both from the closed-loop model with the gate, the 3 N
+deadzone and the delay in it (`WallLoop` in `test_force_control.cpp`):
+
+* **The sustained press force is the gate's, not b's.** For every row the loop settles
+  at 8–10 N (`force_gate.max_force_n` 10 with the deadzone offset); b·v is only the
+  force for the ~0.1 s before the gate closes. b sets how fast the arm yields (F/b) and
+  trims the first-contact transient 15–20 %. Lower b is the right direction for this
+  purpose; a *designed* press force needs `max_force_n` or a `ref_force` law.
+* **The margin is decided by the contact stiffness, not the approach speed.** m 6 / b 500
+  is +4.9 / +2.6 dB (18 / 26 ms) against 15 kN/m and −1.3 / −3.6 dB against 30.7 kN/m.
+  The pika tips are TPU 95A, so the cell's contacts are expected under 15 kN/m — not yet
+  measured. A 5–8 Hz ring on `*_fc_gate_force_n` during a press is the tell; the step
+  back is m 8 / b 600 (+0.1 dB at 30.7 kN/m, 18 ms).
+
+Rotation is RIGID on both laws and the hold law carries the 5 N / 2 N engagement latch
+(see `stack_real.yaml`); neither changes the translation margins above.
+
+### 2026-09-04 — the stream law holds the configured force: a spring under the gate
+
+Requirement (operator): once pressed, the contact holds at the configured N (10 N);
+first-contact peaks are accepted. With `k = 0` the sustained force is the balance of the
+gate's creep against the damper's retreat — a by-product of speed and b — and at the
+policy's 100–135 mm/s it limit-cycles. CM 0028's shape converges. Closed-loop model
+(15 kN/m, T_d 26 ms, 3 N deadzone), reproduced by `test_force_control.cpp`:
+
+| stream law | 20 mm/s | 50 mm/s | 135 mm/s |
+|---|---|---|---|
+| k = 0, m 6 / b 500 (until 09-04) | 8.0 N | 9.6 N | 9.6 ± 7.6 N (limit cycle) |
+| **k = 400, m 6 / b 500, gate on physical |F|** | **9.4 N** | **9.7 N** | **11.4 N**, p-p < 0.15 |
+| same, gate on the deadzoned wrench | 12.3 | 12.7 | — |
+
+Two consequences, both implemented: the gate is judged on the physical (pre-deadzone)
+magnitude, and since the fold declines for a spring law, every plan-side anchor
+(chunk-follower seed / re-anchor / lead guard, pose-track SMD reseed) strips the standing
+deviation (`nominalOfEmitted`). The delay margin is unchanged by k
+(`tools/force_loop_margin.py --k 400`). The hold law keeps k = 0 + fold.

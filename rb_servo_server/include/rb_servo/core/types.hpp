@@ -644,7 +644,7 @@ struct ForceControlTelemetry {
     // pushing INTO the measured wrench. 1 = free space, 0 = fully held.
     double gate_translation = 1.0;
     double gate_rotation = 1.0;
-    double gate_force_n = 0.0;         // |F| the gate saw, stand frame
+    double gate_force_n = 0.0;         // |F| the gate judged: PHYSICAL (pre-deadzone), filtered (2026-09-04)
     double gate_torque_nm = 0.0;
     bool gate_closed = false;          // < 0.02 on either channel
     // How much plan advance the gate actually removed this tick [m] / [rad].

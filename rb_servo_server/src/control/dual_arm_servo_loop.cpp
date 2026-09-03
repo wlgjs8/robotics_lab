@@ -247,7 +247,10 @@ ArmCommand applyPoseTrackSmd(
     const ArmMountConfig& mount,
     const JointArray& previous_sent_q_deg,
     double dt_sec,
-    bool qsync_settling_hold
+    bool qsync_settling_hold,
+    const control::AdmittanceOverlay* overlay = nullptr,
+    const control::ForceGate* gate = nullptr,
+    double* gate_removed_m = nullptr
 ) {
     if (!tracker) return command;
     if (!config.enable || command.mode != ControlMode::TcpPoseTarget || !command.has_tcp_target) {
@@ -259,9 +262,12 @@ ArmCommand applyPoseTrackSmd(
         tracker->deactivate();
         return command;
     }
-    // FK of the last sent joints: where the robot has actually been commanded to.
-    const Pose6D reference =
+    // FK of the last sent joints: where the robot has actually been commanded to -
+    // MINUS the force overlay's standing deviation, which is composed onto whatever
+    // this stage emits and must not be anchored on twice (AdmittanceOverlay::strip).
+    Pose6D reference =
         kinematics->computeTcpStand(command.arm_id, previous_sent_q_deg, mount);
+    if (overlay != nullptr && overlay->hasDeviation()) reference = overlay->strip(reference);
     if (!tracker->active()) {
         tracker->reset(reference);
     } else {
@@ -306,7 +312,30 @@ ArmCommand applyPoseTrackSmd(
     }
     tracker->updateGoalFromCommand(command.tcp_target_stand);
     ArmCommand smoothed = command;
+    const Pose6D before = tracker->currentPose();
     smoothed.tcp_target_stand = tracker->step(dt_sec);
+    // THE FORCE GATE ON THE ABSOLUTE-TARGET PATH (2026-09-04). Until now only the
+    // chunk follower's plan advance was gated; a TcpPoseTarget aimed under a surface
+    // drove this tracker into it, the spring stretched to the 40 mm fence, and the arm
+    // went rigid - a spring without its gate, the exact pairing the loader refuses.
+    // Same projective rule as the follower's (only the component pushing INTO the
+    // measured force is cut); the difference is where the cut is booked: the
+    // tracker's STATE is held here (constrainTranslation), the goal is left alone.
+    if (gate != nullptr && gate->translation() < 1.0 && gate->forceN() > 1e-9) {
+        const math::Vector3 p0(before.x, before.y, before.z);
+        const math::Vector3 p1(smoothed.tcp_target_stand.x, smoothed.tcp_target_stand.y,
+                               smoothed.tcp_target_stand.z);
+        double removed = 0.0;
+        const math::Vector3 kept = gate->applyTranslation(p1 - p0, &removed);
+        if (removed > 0.0) {
+            const math::Vector3 held = p0 + kept;
+            tracker->constrainTranslation(held, gate->forceDirection());
+            smoothed.tcp_target_stand.x = held.x();
+            smoothed.tcp_target_stand.y = held.y();
+            smoothed.tcp_target_stand.z = held.z();
+        }
+        if (gate_removed_m != nullptr) *gate_removed_m = removed;
+    }
     return smoothed;
 }
 
@@ -4937,11 +4966,14 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     control::FollowerOutputSmd* output_smd,
     const ArmMountConfig& mount,
     const JointArray& previous_sent_q_deg,
-    const Pose6D& actual_feedback_pose,
+    const Pose6D& actual_feedback_pose_emitted,
     double dt_sec
 ) {
     const RuckigFollowerConfig& rf = profile.ruckig_follower;
     const bool delta_preview = rf.controller == RuckigFollowerController::DeltaPreview;
+    // The measured TCP carries the force overlay's standing deviation physically; the
+    // plan does not. Compare plan against measured on the PLAN's side of the overlay.
+    const Pose6D actual_feedback_pose = nominalOfEmitted(arm_id, actual_feedback_pose_emitted);
     AbcTelemetry& abc = arm_id == ArmId::Left ? left_abc_telemetry_ : right_abc_telemetry_;
     // Reset follower telemetry each tick; re-filled below when the follower drives.
     abc.follower_controller = delta_preview ? "delta_preview" : "ruckig_waypoint";
@@ -5102,7 +5134,11 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         log_transition();
         return with_stage_telemetry(applyPoseTrackSmd(
             command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
-            previous_sent_q_deg, dt_sec, qsyncSettlingHoldActive(arm_id)));
+            previous_sent_q_deg, dt_sec, qsyncSettlingHoldActive(arm_id),
+            arm_id == ArmId::Left ? &left_overlay_ : &right_overlay_,
+            arm_id == ArmId::Left ? &left_force_gate_ : &right_force_gate_,
+            &(arm_id == ArmId::Left ? left_force_control_telemetry_
+                                    : right_force_control_telemetry_).gate_removed_m));
     };
     if (rf.enable && chunk_frame_receiver_ && command.mode == ControlMode::Hold &&
         follower->active()) {
@@ -5141,9 +5177,13 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     }
     // Live reference = FK of the previously SENT joints (same anchor discipline
     // as the SMD path), so the engage-wait hold is a fixed point: hold target ==
-    // last sent pose. Nothing is added to this target downstream, so it needs no
-    // correction term.
-    Pose6D reference = kinematics_->computeTcpStand(arm_id, previous_sent_q_deg, mount);
+    // last sent pose. ONE thing IS added downstream - the force overlay composes its
+    // standing deviation onto whatever this stage emits - so that deviation is
+    // stripped here first (2026-09-04, the stream law grew a spring): otherwise a
+    // 25 mm contact deflection reads as 25 mm of plan lead, and a re-anchor onto the
+    // unstripped pose would be composed onto a second time.
+    Pose6D reference = nominalOfEmitted(
+        arm_id, kinematics_->computeTcpStand(arm_id, previous_sent_q_deg, mount));
     const auto hold_at_reference = [&]() {
         output_smd->deactivate();
         ArmCommand smoothed = command;
@@ -5638,7 +5678,11 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
         log_transition();
         return with_stage_telemetry(applyPoseTrackSmd(
             command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
-            previous_sent_q_deg, dt_sec, qsyncSettlingHoldActive(arm_id)));
+            previous_sent_q_deg, dt_sec, qsyncSettlingHoldActive(arm_id),
+            arm_id == ArmId::Left ? &left_overlay_ : &right_overlay_,
+            arm_id == ArmId::Left ? &left_force_gate_ : &right_force_gate_,
+            &(arm_id == ArmId::Left ? left_force_control_telemetry_
+                                    : right_force_control_telemetry_).gate_removed_m));
     };
     if (!rf.enable || !chunk_frame_receiver_ || command.mode != ControlMode::TcpPoseTarget ||
         !command.has_tcp_target || !kinematics_) {
@@ -5654,7 +5698,7 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
         *submitted_recv_seq = 0;
     }
 
-    const Pose6D reference = actual_feedback_pose;
+    const Pose6D reference = nominalOfEmitted(arm_id, actual_feedback_pose);
     const auto hold_at_reference = [&]() {
         ArmCommand smoothed = command;
         smoothed.tcp_target_stand = reference;
@@ -6046,6 +6090,8 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             // Unprime the contact-shock filter: a law that resumes minutes later
             // must seed from the live wrench, not ring down from a stale one.
             (fc_left ? left_wrench_filter_primed_ : right_wrench_filter_primed_) = false;
+            (fc_left ? left_gate_force_filt_n_ : right_gate_force_filt_n_) = 0.0;
+            (fc_left ? left_gate_torque_filt_nm_ : right_gate_torque_filt_nm_) = 0.0;
             continue;
         }
         if (eff.mode != ControlMode::Hold) {
@@ -8693,6 +8739,11 @@ bool DualArmServoLoop::forceControlCovered(
     return false;
 }
 
+Pose6D DualArmServoLoop::nominalOfEmitted(ArmId arm, const Pose6D& emitted_stand) const {
+    const control::AdmittanceOverlay& overlay = arm == ArmId::Left ? left_overlay_ : right_overlay_;
+    return overlay.hasDeviation() ? overlay.strip(emitted_stand) : emitted_stand;
+}
+
 bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pose6D* target) {
     if (target == nullptr) return false;
     const bool left = arm == ArmId::Left;
@@ -8777,7 +8828,36 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
         }
     }
 
-    gate.update(f_stand, m_stand);
+    // ---- the PHYSICAL magnitudes (compensated, BEFORE the deadzone) --------
+    // The gate is judged on these, low-passed with the wrench filter's corner. Judged
+    // on the deadzoned wrench it closed 3 N late: with force_gate.max_force_n 10 the
+    // closed-loop model settled a contact at 13 N (2026-09-04). The LAW still consumes
+    // the deadzoned, filtered vector - the deadzone is what keeps noise out of the
+    // integrator - so the direction comes from f_stand and only the fade's magnitude
+    // is physical.
+    const Wrench6D& nodz = pipe.compSensorNoDeadzone();
+    const double f_phys_raw = std::sqrt(nodz.fx * nodz.fx + nodz.fy * nodz.fy + nodz.fz * nodz.fz);
+    const double m_phys_raw = std::sqrt(nodz.tx * nodz.tx + nodz.ty * nodz.ty + nodz.tz * nodz.tz);
+    double& f_phys_filt = left ? left_gate_force_filt_n_ : right_gate_force_filt_n_;
+    double& m_phys_filt = left ? left_gate_torque_filt_nm_ : right_gate_torque_filt_nm_;
+    {
+        const double hz = config_.force_control.wrench_filter_hz;
+        const double dt = config_.servo.rate_hz > 0
+            ? 1.0 / static_cast<double>(config_.servo.rate_hz)
+            : 0.002;
+        if (hz > 0.0 && dt > 0.0 && tel.wrench_filter_hz > 0.0 &&
+            (f_phys_filt > 0.0 || m_phys_filt > 0.0)) {
+            const double tau = 1.0 / (2.0 * M_PI * hz);
+            const double a = std::min(1.0, dt / (tau + dt));
+            f_phys_filt += a * (f_phys_raw - f_phys_filt);
+            m_phys_filt += a * (m_phys_raw - m_phys_filt);
+        } else {
+            // Filter off, or the first covered tick: seed from the live magnitude.
+            f_phys_filt = f_phys_raw;
+            m_phys_filt = m_phys_raw;
+        }
+    }
+    gate.update(f_stand, m_stand, f_phys_filt, m_phys_filt);
 
     // ---- the hand-guide engagement latch (HOLD law only) ---------------------
     // Judged on the PHYSICAL force magnitude (compensated, before the deadzone), so
@@ -8786,8 +8866,7 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
     bool engaged = true;
     if (tel.law == "hold") {
         control::HoldEngageLatch& latch = left ? left_hold_engage_ : right_hold_engage_;
-        const Wrench6D& nodz = pipe.compSensorNoDeadzone();
-        const double f_phys = std::sqrt(nodz.fx * nodz.fx + nodz.fy * nodz.fy + nodz.fz * nodz.fz);
+        const double f_phys = f_phys_raw;
         const bool was = latch.engaged();
         engaged = latch.update(f_phys);
         tel.hold_force_n = f_phys;
@@ -8961,16 +9040,6 @@ void DualArmServoLoop::foldForceDeviation(ArmId arm,
     tel.absorbed_m = {absorbed.x(), absorbed.y(), absorbed.z()};
     tel.absorbed_norm_m = absorbed.norm();
     tel.absorbed_norm_rad = Eigen::AngleAxisd(absorbed_r).angle();
-}
-
-math::Vector3 DualArmServoLoop::gatePlanAdvance(ArmId arm, const math::Vector3& advance_stand) {
-    const bool left = arm == ArmId::Left;
-    control::ForceGate& gate = left ? left_force_gate_ : right_force_gate_;
-    ForceControlTelemetry& tel = left ? left_force_control_telemetry_ : right_force_control_telemetry_;
-    double removed = 0.0;
-    const math::Vector3 out = gate.applyTranslation(advance_stand, &removed);
-    tel.gate_removed_m = removed;
-    return out;
 }
 
 void DualArmServoLoop::resyncArmAfterFreedrive(ArmId arm_id, const RobotState& state) {

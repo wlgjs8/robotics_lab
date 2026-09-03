@@ -112,6 +112,18 @@ public:
     // The SMD's currently-tracked (published) pose.
     Pose6D currentPose() const;
 
+    // THE FORCE GATE ON THIS PATH (2026-09-04). Overwrite the published translation
+    // with `position_stand` (the caller has already cut the advance INTO the contact
+    // out of this tick's step) and drop the velocity component that still points
+    // into it, so the next step does not carry that momentum back in. The goal is
+    // NOT touched: this is a hold of the STATE, not a shift of the goal, which is
+    // what an absolute-target source (UMI teleop, a policy's absolute setpoints)
+    // needs - a shifted goal would leave the arm permanently offset from the source
+    // after the contact is released. Tangential motion (sliding along the contact)
+    // and the retreating component pass untouched.
+    void constrainTranslation(const Eigen::Vector3d& position_stand,
+                              const Eigen::Vector3d& outward_normal_stand);
+
     // True if the tracker's held pose has drifted from `reference` beyond either
     // tolerance. Used to detect that another control path (JointTarget, fault hold,
     // command gap) moved the robot while the tracker stayed active with stale state,

@@ -1632,7 +1632,9 @@ bool testSpringlessLawRequiresTheFold() {
         RB_CHECK(cfg.force_control.gate_enable);
         RB_CHECK(cfg.force_control.hold_compliance);
         for (int i = 0; i < 3; ++i) {
-            RB_CHECK(cfg.force_control.stream.translation[i].k == 0.0);
+            // 2026-09-04: the stream law holds the configured force with a spring under the
+            // gate (CM 0028); the hold law stays a pure-damper hand-guide with the fold.
+            RB_CHECK(cfg.force_control.stream.translation[i].k == 400.0);
             RB_CHECK(cfg.force_control.stream.rotation[i].k == 0.0);
             RB_CHECK(cfg.force_control.hold.translation[i].k == 0.0);
             RB_CHECK(cfg.force_control.hold.rotation[i].k == 0.0);
@@ -1666,11 +1668,17 @@ bool testSpringlessLawRequiresTheFold() {
         ::unlink(path.c_str());
         RB_CHECK(rejected);
     }
-    // Fold off, Hold not compliant: the gate with k = 0 bounds force, not deviation.
+    // Fold off, Hold not compliant, and the stream spring removed: the gate with k = 0
+    // bounds force, not deviation. (With the tracked k = 400 that pairing is legal -
+    // CM 0028's spring under the gate - so the spring has to go for this refusal.)
     {
         std::string body = readFile(stack_real_path);
         RB_CHECK(replaceOnce(&body, "  fold_deviation: true", "  fold_deviation: false"));
         RB_CHECK(replaceOnce(&body, "  hold_compliance: true", "  hold_compliance: false"));
+        RB_CHECK(replaceOnce(&body, "      - {m: 6.0, b: 500.0, k: 400.0}    # x   10 N / 25 mm, CM's 10 N row on the operator's m/b",
+                             "      - {m: 6.0, b: 500.0, k: 0.0}    # x"));
+        RB_CHECK(replaceOnce(&body, "      - {m: 6.0, b: 500.0, k: 400.0}    # y", "      - {m: 6.0, b: 500.0, k: 0.0}    # y"));
+        RB_CHECK(replaceOnce(&body, "      - {m: 6.0, b: 500.0, k: 400.0}    # z", "      - {m: 6.0, b: 500.0, k: 0.0}    # z"));
         const std::string path = writeTempConfig("fold-off-gate", body);
         const bool rejected = loadRejectsContaining(
             path, "enable force_control.fold_deviation");

@@ -1198,7 +1198,7 @@ force_control:
   #     m      b   | T_d 12 ms        | T_d 18 ms        | T_d 26 ms
   #    15  434.7   |  -1.3  / -4.5    |  -3.7  / -6.9    |  -6.0  / -9.2   <- the OLD row at k=0: rings
   #    12    700   |  +3.5  / +0.3    |  +1.2  / -2.1    |  -1.1  / -4.4
-  #    12   1000   |  +7.1  / +3.9    |  +4.7  / +1.5    |  +2.4  / -0.8   <- LIVE (CM's pick)
+  #    12   1000   |  +7.1  / +3.9    |  +4.7  / +1.5    |  +2.4  / -0.8   <- CM's pick (LIVE until the evening of 09-03; see the m 6 / b 500 block below)
   #    12   1500   | +11.1  / +7.9    |  +8.7  / +5.5    |  +6.3  / +3.1      (CM ran it; "sluggish")
   #
   # THE LINEAR MARGIN IS NECESSARY, NOT SUFFICIENT: the gate is a second loop and a
@@ -1234,11 +1234,54 @@ force_control:
   # resolves in 30-50 ms while the gate needs its own close time to arrive. The
   # peak is v * sqrt(k_env * m); the parameter that governs it is
   # force_gate.close_tau_s and the approach speed, not the law.
+  # ---- m 6 / b 500 (2026-09-03 evening, operator) -----------------------------------
+  # The task is dual-arm pick & place and this law exists to keep the tool from being
+  # pressed into the table, not to survive fast rigid impacts. With k = 0 the SUSTAINED
+  # contact force is set by force_gate.max_force_n (the closed-loop model, gate + 3 N
+  # deadzone + delay, settles at 8-10 N for EVERY b), so b only decides how fast the
+  # arm yields (F/b: 10 N -> 20 mm/s here, was 10 mm/s) and the first-contact
+  # transient (15-20 % lower than at m 12 / b 1000). Both favour a lower b for this
+  # purpose. What a lower b costs is delay margin, and that is decided by the CONTACT
+  # STIFFNESS, not by the approach speed (tools/force_loop_margin.py, 25 Hz filter):
+  #
+  #     m / b    | k_env  5 kN/m | 10 kN/m | 15 kN/m | 30.7 kN/m      (T_d 18 ms / 26 ms)
+  #     6 / 500  | +14.4 / +12.1 | +8.4/+6.1 | +4.9/+2.6 | -1.3 / -3.6   <- LIVE
+  #     8 / 600  | +15.9 / +13.6 | +9.9/+7.5 | +6.3/+4.0 | +0.1 / -2.2      fallback
+  #    12 / 1000 | +20.4 / +18.1 |+14.4/+12.1|+10.9/+8.6 | +4.7 / +2.4      CM's row
+  #
+  # The pika fingertips are TPU 95A, so the contact this cell makes is expected well
+  # under 15 kN/m (stable by 2.6 dB or more), and the tip's own give absorbs part of
+  # the 0.5-2 mm the model shows the tool yielding. NOT MEASURED YET: if a press shows
+  # a 5-8 Hz ring on *_fc_gate_force_n, that contact is ~30 kN/m and the row to step
+  # back to is 8 / 600. The oscillation guard stays as the backstop either way.
+  # Hand cost (hold law shares these numbers): 15 N at 30 mm/s, was 30 N.
+  # ---- 2026-09-04: THE STREAM LAW GETS ITS SPRING BACK - k = 400 = 10 N / 25 mm ----------
+  # The operator's requirement is "hold the contact at the configured N once pressed"
+  # (first-contact peaks are accepted). With k = 0 that is not what happens: the
+  # sustained force is the balance between the gate's creep and the damper's retreat,
+  # a by-product of speed and b, and at the policy's 100-135 mm/s it limit-cycles
+  # (closed-loop model, 15 kN/m, 26 ms: 8.6 +/- 5.9 N at 100 mm/s, 9.6 +/- 7.6 at 135).
+  # CM 0028's shape - a spring UNDER the gate - is what converges: F -> max_force_n
+  # exactly, d -> max_force_n / k, at every speed (CM measured 14.95-14.99 N for a 15 N
+  # threshold from 10 to 50 mm/s). Same model, this row, gate 10 N judged on the
+  # PHYSICAL force (see force_gate below), 15 kN/m, T_d 26 ms:
+  #     v 20 mm/s 9.4 N | 50 mm/s 9.7 | 100 mm/s 9.9 | 135 mm/s 11.4   (k 600 drifts to 14.7)
+  # and the contact still releases within ~50 ms when the plan lifts. k = 400 is CM's
+  # 10 N row (10 N / 25 mm); the 40 mm fence is 1.6x away, as it was in August.
+  #
+  # WHAT THIS COSTS AND WHERE IT IS PAID: with k > 0 the FOLD DECLINES for this law
+  # (AdmittanceOverlay::pureDamperTranslation is false), so the deflection stands in the
+  # overlay - up to 25 mm at 10 N - and springs back. Every plan-side anchor (the chunk
+  # follower's seed / re-anchor / lead guard, the pose-track SMD's reseed) now strips
+  # it first (DualArmServoLoop::nominalOfEmitted), otherwise a contact would read as
+  # 25 mm of plan lead against the 35 mm budget and a re-anchor would compose it twice.
+  # The hold law keeps k = 0 + fold (a hand-guide has no force to converge to).
+  # Delay margin is unchanged by k (tools/force_loop_margin.py --k 400).
   stream:
     translation:
-      - {m: 12.0, b: 1000.0, k: 0.0}    # x   CM follow.yaml row, verbatim
-      - {m: 12.0, b: 1000.0, k: 0.0}    # y
-      - {m: 12.0, b: 1000.0, k: 0.0}    # z
+      - {m: 6.0, b: 500.0, k: 400.0}    # x   10 N / 25 mm, CM's 10 N row on the operator's m/b
+      - {m: 6.0, b: 500.0, k: 400.0}    # y
+      - {m: 6.0, b: 500.0, k: 400.0}    # z
     # ROTATION: CM ships m 0.3 / b 10 / k 0 (derived for its 140 mm lever). On the
     # pika's 202.642 mm lever the rotational environment stiffness is k_env * L^2 =
     # 2.1x CM's, and CM's row reads -6.2 dB at T_d 12 ms / -8.6 dB at 18 ms against
@@ -1280,9 +1323,9 @@ force_control:
   # the rate caps are what stop it drifting when nobody is pushing.
   hold:
     translation:
-      - {m: 12.0, b: 1000.0, k: 0.0}    # x   10 N -> 10 mm/s
-      - {m: 12.0, b: 1000.0, k: 0.0}    # y
-      - {m: 12.0, b: 1000.0, k: 0.0}    # z
+      - {m: 6.0, b: 500.0, k: 0.0}      # x   10 N -> 20 mm/s (same row as stream)
+      - {m: 6.0, b: 500.0, k: 0.0}      # y
+      - {m: 6.0, b: 500.0, k: 0.0}      # z
     # RIGID, same reason as the stream law above: the hand-guide is a TRANSLATION
     # stage. Push anywhere on the tool and the TCP translates along the force; nothing
     # you do by hand turns it. (Orientation changes are a TcpLinearMove / policy job.)
@@ -1299,6 +1342,13 @@ force_control:
   # the pure 10 N reflex decision); CM's follow ships 30 N.
   force_gate:
     enable: true
+    # JUDGED ON THE PHYSICAL |F| (compensated, BEFORE the 3 N deadzone) since
+    # 2026-09-04. Judged on the deadzoned wrench the gate closed 3 N late and a
+    # "10 N" contact settled at 13 N. This IS the force a pressed contact holds.
+    # ACTS ON BOTH STREAMING PATHS since 2026-09-04: the chunk follower's plan
+    # advance (as a plan shift) AND the absolute-target pose-track SMD's per-tick
+    # advance (as a hold of the tracker's state, goal untouched). Before that a
+    # TcpPoseTarget aimed under a surface drove the SMD path into it ungated.
     max_force_n: 10.0        # the plan advance into the contact is fully held here
     max_torque_nm: 1.4       # = 10 N * 0.140 m, CM's stale-L assumption, carried over
     close_tau_s: 0.10        # fast to close  - protective

@@ -56,6 +56,17 @@ void SmdPoseTracker::holdAt(const Pose6D& pose) {
     active_ = true;
 }
 
+void SmdPoseTracker::constrainTranslation(const Eigen::Vector3d& position_stand,
+                                          const Eigen::Vector3d& outward_normal_stand) {
+    if (!active_) return;
+    position_ = position_stand;
+    const double n = outward_normal_stand.norm();
+    if (n < 1e-12) return;
+    const Eigen::Vector3d u = outward_normal_stand / n;
+    const double into = velocity_.dot(u);
+    if (into < 0.0) velocity_ -= into * u;   // only the component driving INTO the contact
+}
+
 void SmdPoseTracker::deactivate() {
     active_ = false;
     previous_command_.reset();

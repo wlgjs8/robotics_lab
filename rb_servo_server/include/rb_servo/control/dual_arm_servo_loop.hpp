@@ -888,6 +888,12 @@ private:
     Wrench6D right_wrench_filter_{};
     bool left_wrench_filter_primed_ = false;
     bool right_wrench_filter_primed_ = false;
+    // The PHYSICAL (pre-deadzone) |F| / |M| the gate is judged on, low-passed with
+    // the same corner as the wrench filter. Primed together with it.
+    double left_gate_force_filt_n_ = 0.0;
+    double right_gate_force_filt_n_ = 0.0;
+    double left_gate_torque_filt_nm_ = 0.0;
+    double right_gate_torque_filt_nm_ = 0.0;
     // Deactivated-box gate debounce (loop thread only).
     int left_box_deactivated_ticks_ = 0;
     int right_box_deactivated_ticks_ = 0;
@@ -1162,6 +1168,10 @@ private:
     // in place. `nominal` is the pose the deviation is measured FROM. Returns true
     // when the composed pose differs from the nominal.
     bool applyForceOverlay(ArmId arm, const RobotState& state, Pose6D* target);
+    // The nominal an EMITTED pose (FK of sent joints, or the measured TCP) was composed
+    // from, given this arm's standing overlay deviation. Identity when nothing stands
+    // (the k = 0 fold path). See AdmittanceOverlay::strip.
+    Pose6D nominalOfEmitted(ArmId arm, const Pose6D& emitted_stand) const;
     // THE FOLD (force_control.fold_deviation): hand this tick's overlay deviation to
     // the plan that produced the nominal, then drop the overlay's copy. Runs AFTER
     // applyForceOverlay composed the target, so the emitted pose is unchanged -
@@ -1172,7 +1182,6 @@ private:
                             ForceControlTelemetry& tel);
     // Attenuate one plan advance along the direction pushing INTO the measured
     // wrench. Tangential and retreating components pass at full authority.
-    math::Vector3 gatePlanAdvance(ArmId arm, const math::Vector3& advance_stand);
     // An operator/GUI tare request. Thread-safe deposit; drained on the RT loop.
     void requestFtTare(ArmId arm);
     // ---- automatic tare on InitMotion --------------------------------------

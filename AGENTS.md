@@ -154,6 +154,17 @@ Two invariants the hardware taught, both enforced by the loader:
   never from fingertip pushes, and the arm crawled 38 times in 228 s of hand-off time
   on forces just past the 2 N deadzone. The frame is the TCP; what changed since the
   CM-era law is the rotational stiffness (250 -> 8 -> 0).
+  2026-09-04: the STREAM law got its spring back (k 400 = 10 N / 25 mm, CM 0028's
+  spring under the gate) because the operator's requirement is "hold the contact at
+  the configured N"; k = 0 settles at a speed-dependent by-product and limit-cycles
+  at the policy's 100+ mm/s (closed-loop model + `test_force_control.cpp`). The gate
+  is judged on the PHYSICAL pre-deadzone |F| (else it closes 3 N late). The fold
+  declines for the spring law, so every plan-side anchor strips the standing
+  deviation first (`DualArmServoLoop::nominalOfEmitted` / `AdmittanceOverlay::strip`).
+  The hold law stays k = 0 + fold (hand-guide). The gate acts on BOTH streaming
+  paths: the chunk follower (plan shift) and the absolute-target pose-track SMD
+  (`SmdPoseTracker::constrainTranslation`: the tracker's state is held, its goal
+  is not, so a released contact leaves no offset).
   Stability with `k = 0` is a DELAY margin and `b` is the only knob:
   `rb_servo_server/tools/force_loop_margin.py` and the WallLoop test in
   `test_force_control.cpp` are the evidence; `docs/reference/
