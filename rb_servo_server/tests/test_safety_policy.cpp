@@ -2723,12 +2723,17 @@ bool testCompletedInitMotionCachedPacketDoesNotReanchorHoldToActual() {
     cfg.safety.self_collision.monitor_only = true;
     const std::filesystem::path repo_root =
         std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
+    // The tracked RB5 model, matching the robot in service. This fixture used the
+    // sibling checkout's dual_rb3_730e_ver5, whose link names stopped matching the
+    // left/right_prefix defaults when those moved to the RB5 on 2026-09-03 -- the
+    // monitor then (correctly) refused to build.
     const std::filesystem::path unified_urdf_dir =
-        repo_root.parent_path() /
-        "mo_robot_descriptions/mo_robot_descriptions/robots/urdf/dual_rb3_730e";
+        std::filesystem::path(__FILE__).parent_path().parent_path() / "descriptions/urdf";
     cfg.safety.self_collision.mesh.unified_urdf =
-        (unified_urdf_dir / "dual_rb3_730e_ver5.urdf").string();
+        (unified_urdf_dir / "dual_rb5_850e_ver3.urdf").string();
     cfg.safety.self_collision.mesh.package_dirs = {unified_urdf_dir.string()};
+    cfg.safety.self_collision.mesh.left_prefix = "dual_rb5_850e_left_";
+    cfg.safety.self_collision.mesh.right_prefix = "dual_rb5_850e_right_";
     if (!std::filesystem::is_regular_file(
             cfg.safety.self_collision.mesh.unified_urdf)) {
         std::cout << "SKIP: cached Init Motion Hold regression requires unified URDF ("

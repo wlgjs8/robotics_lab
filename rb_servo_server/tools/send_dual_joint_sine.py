@@ -11,7 +11,13 @@ import time
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=50010)
+    # The tracked configs bind commands on 50256 (network.command_bind in both
+    # stack_real.yaml and stack_sim.yaml). 50010 was the legacy simulator default and
+    # survives only in docs/archive; a tool left pointing there sends into nothing --
+    # silently, because UDP. That already cost a run once
+    # (docs/reports/flow_infer_pgmode_sim_param_search.md: a reset went to 50010 and
+    # never arrived), and send_emergency_stop.py carried the same default.
+    parser.add_argument("--port", type=int, default=50256)
     parser.add_argument("--rate", type=float, default=20.0)
     parser.add_argument("--amp-deg", type=float, default=3.0)
     parser.add_argument("--freq", type=float, default=0.1)

@@ -125,7 +125,7 @@ static bool run() {
 
     // geometry: link0..6 hulls (left 12 / right 12) + stand 7 + 2 gripper = 33
     std::cout << "geoms=" << mon.numGeometries() << " pairs=" << mon.numPairs() << "\n";
-    RB_CHECK(mon.numGeometries() == 53);  // see the breakdown in runArticulatedGripper
+    RB_CHECK(mon.numGeometries() == 51);  // see the breakdown in runArticulatedGripper
     RB_CHECK(mon.numPairs() > 0);
 
     {
@@ -930,79 +930,32 @@ static bool runIntraArmDHard() {
     return true;
 }
 
-// The pika gripper does NOT bolt to the flange: an F/T adapter stands it off by 15 mm
-// (RFT64-6A01-A preset offset 45 mm minus its 30 mm sensor body, confirmed to 0.228 mm
-// by touching both TCPs to known surfaces on 2026-09-02). Attaching the hulls at
-// attachment_site therefore put the entire gripper 15 mm nearer the wrist, so the guard
-// missed the outermost 15 mm of the fingertips -- the part that reaches things -- while
-// covering 15 mm of empty air behind them. gripper_attach_frame moves them onto the
-// URDF's gripper_mount frame; this pins that it is honoured, and that the default is
-// still attachment_site for models without such a frame.
-static bool runGripperAttachFrame() {
+// A prefix that does not match the URDF must FAIL CLOSED. left_prefix/right_prefix
+// default to one robot's link naming, so pointing unified_urdf at a different robot
+// without setting them used to degrade silently in two ways -- the ancestry lookup
+// just cleared have_arm_roots, and that flag is what separates arm<->arm from
+// intra-arm pairs and therefore which d_hard_m floor applies, while the gripper attach
+// indexed model.frames[getFrameId(...)] with no existence test at all, reading off the
+// end of the vector because Pinocchio returns nframes for an unknown name. Caught
+// during the RB3-730E -> RB5-850E swap, where every frame is renamed at once.
+static bool runPrefixMismatchFailsClosed() {
     const fs::path ws = workspaceRoot();
     CollisionMonitorConfig cfg = makeConfig(ws);
-    RB_CHECK(cfg.gripper_attach_frame == "attachment_site");  // conservative default
-
-    // The rest of this file exercises the RB3 model it was written against; the
-    // standoff and its gripper_mount frame only exist in the RB5 models, so point
-    // this one case at those.
-    const fs::path rb5 =
-        ws / "robotics_lab/rb_servo_server/descriptions/urdf/dual_rb5_850e_ver3.urdf";
-    if (!fs::is_regular_file(rb5)) {
-        std::cout << "SKIP: RB5 unified URDF not found (gripper attach frame test)\n";
+    if (!fs::is_regular_file(cfg.unified_urdf)) {
+        std::cout << "SKIP: unified URDF not found (prefix mismatch test)\n";
         return true;
     }
-    cfg.unified_urdf = rb5.string();
-    cfg.package_dirs = {(ws / "robotics_lab/rb_servo_server/descriptions/urdf").string()};
-    cfg.left_prefix = "dual_rb5_850e_left_";
-    cfg.right_prefix = "dual_rb5_850e_right_";
-    cfg.left_arm_root_frame.clear();
-    cfg.right_arm_root_frame.clear();
-    const char* jn[kDof] = {"base", "shoulder", "elbow", "wrist1", "wrist2", "wrist3"};
-    for (int i = 0; i < kDof; ++i) {
-        cfg.left_joints[i] = cfg.left_prefix + jn[i] + "_joint";
-        cfg.right_joints[i] = cfg.right_prefix + jn[i] + "_joint";
+    CollisionMonitorConfig bad = cfg;
+    bad.left_prefix = "no_such_robot_left_";
+    for (int i = 0; i < kDof; ++i) bad.left_joints[i] = bad.left_prefix + "base_joint";
+    bool threw = false;
+    try {
+        CollisionMonitor probe(bad);
+    } catch (const std::exception& e) {
+        threw = true;
+        std::cout << "prefix mismatch refused: " << e.what() << "\n";
     }
-
-    const fs::path tool =
-        ws / "robotics_lab/rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool";
-    cfg.pika_gripper_base_mesh = (tool / "pika_gripper_base.STL").string();
-    cfg.pika_finger_left_mesh = (tool / "pika_finger_left.STL").string();
-    cfg.pika_finger_right_mesh = (tool / "pika_finger_right.STL").string();
-    if (!fs::is_regular_file(cfg.pika_finger_left_mesh)) {
-        std::cout << "SKIP: finger meshes not found (gripper attach frame test)\n";
-        return true;
-    }
-
-    // An attach frame the URDF does not carry must FAIL CLOSED, not fall back.
-    {
-        CollisionMonitorConfig bad = cfg;
-        bad.gripper_attach_frame = "no_such_frame";
-        bool threw = false;
-        try {
-            CollisionMonitor probe(bad);
-        } catch (const std::exception&) {
-            threw = true;
-        }
-        RB_CHECK(threw);
-    }
-
-    // The RB5 models carry gripper_mount 15 mm out along the tool axis. Measure the
-    // shift the monitor actually applies, by comparing the gripper geometry placement
-    // between the two attach frames at the same configuration.
-    const JointArray q = {0.0, -30.0, 80.0, 0.0, 60.0, 0.0};
-    auto tipOf = [&](const std::string& frame) {
-        CollisionMonitorConfig c = cfg;
-        c.gripper_attach_frame = frame;
-        CollisionMonitor mon(c);
-        (void)mon.evalOnce(q, q);
-        return mon.gripperGeometryOrigin(ArmId::Left);
-    };
-    const Eigen::Vector3d at_flange = tipOf("attachment_site");
-    const Eigen::Vector3d at_mount = tipOf("gripper_mount");
-    const double shift_mm = (at_mount - at_flange).norm() * 1000.0;
-    std::cout << "gripper attach shift = " << shift_mm << " mm\n";
-    RB_CHECK(std::fabs(shift_mm - 15.0) < 0.05);
+    RB_CHECK(threw);
     return true;
 }
 
@@ -1031,13 +984,14 @@ static bool runArticulatedGripper() {
     RB_CHECK(mon.hasArticulatedGripper());
     // RB5-850E, derived rather than guessed:
     //   per arm  11 link hulls (link0,1,4,5,6 single + link2,link3 CoACD x3)
-    //          +  1 tool_adapter cylinder
-    //          +  3 gripper (base + 2 fingers)          = 15
+    //          +  3 gripper (base + 2 fingers)          = 14
     //   stand     7 primitive boxes + 20 CoACD hulls    = 27
-    //   total    15 x 2 + 27                            = 57
-    // The single-hull baseline replaces the 3 gripper geoms with 1, so 53.
+    //   total    14 x 2 + 27                            = 55
+    // The single-hull baseline replaces the 3 gripper geoms with 1, so 51.
+    // The gripper bolts straight to the flange -- the F/T sensor is inside
+    // pika_gripper.STL, not a separate body (docs/reference/pika_tool_geometry.md).
     std::cout << "articulated geoms=" << mon.numGeometries() << "\n";
-    RB_CHECK(mon.numGeometries() == 57);
+    RB_CHECK(mon.numGeometries() == 55);
 
     const JointArray init = kInitPose;
     auto fingerClears = [](const CollisionVerdict& v) {
@@ -1148,8 +1102,8 @@ int main() {
         std::cerr << "test_collision_monitor (projection) FAILED\n";
         return 1;
     }
-    if (!runGripperAttachFrame()) {
-        std::cerr << "gripper attach frame test failed\n";
+    if (!runPrefixMismatchFailsClosed()) {
+        std::cerr << "prefix mismatch fail-closed test failed\n";
         return 1;
     }
     if (!runArticulatedGripper()) {

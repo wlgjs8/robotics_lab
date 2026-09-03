@@ -64,62 +64,32 @@ OUT_DISPLAY = REPO / "rb_servo_server/descriptions/urdf/rb5_850e_pika_articulate
 # Rainbow RB Series catalog p7: RB5-850 J3 working range +/-165 deg.
 ELBOW_LIMIT_DEG = 165.0
 
-# Tool chain below attachment_site, mirroring rb3_730e.urdf. The pika adapter is
-# unchanged across the RB3->RB5 swap (operator, 2026-09-02: same adapter, bolted
-# straight to the RB5 flange), so the offsets carry over.
+# Tool chain below attachment_site, mirroring rb3_730e.urdf.
 #
-# MEASURED ON THE ROBOT, 2026-09-02, not inherited. RB3's value was 247.642 mm -- the
-# pika_gripper.STL tip plane measured from RB3's attachment_site -- and the hardware
-# disagrees with it by about 15 mm. Where that 15 mm actually lives is worked out at
-# the end of this comment; the measurement itself is below.
+# attachment_site IS THE FLANGE FACE on both robots -- link6's visual mesh ends at
+# 96.57 mm and upstream puts the frame at 96.70 mm (RB3: mesh ends at 100.00, frame at
+# 100.00). And pika_gripper.STL is measured FROM THAT FACE: sectioning it (see
+# docs/reference/pika_gripper_sections.png) shows its first ~45 mm is the RFT64 F/T
+# SENSOR -- a Ø64 body inside a Ø70 base, on a bolt circle, with the cable connector
+# bulging to r=60 at z=20..25, exactly as the controller-manager RFT64-6A01-A part
+# describes it. The gripper body starts around z=50 and the fingertip plane is at
+# 247.642 mm.
 #
-# Two hand-parked contact poses, read back with tools/rbpodo_read_state:
-#   A  both TCPs touching the stand   tool axes [-0.77,-0.58,-0.27] / [-0.87,0.37,-0.34]
-#   B  the two TCPs touching EACH OTHER (stand geometry not involved at all)
-#                                     tool axes [ 0.14,-0.98,-0.13] / [-0.06,0.99, 0.10]
-# At 247.642 mm, pose A left both tips 14.97 / 14.00 mm clear of the surface and pose
-# B left the two tips 29.88 mm apart -- 14.94 mm per arm. The agreement is what
-# identifies the cause: the two poses' tool axes are nearly ORTHOGONAL, and a mount
-# position error cannot show up as the same along-the-tool-axis shortfall in both,
-# whereas a tool-length error does so by construction. A combined fit over all three
-# contact residuals gives 262.87 mm, and at that value pose A's clearances fall to
-# 3.27 / 0.38 mm. The stand model, which the first pose alone had implicated, is fine.
+# So flange -> tip = 247.642 mm, and the force-control config agrees with it by a
+# different route: sensor_offset_mm 45 (flange -> sensing origin) + tool_xyz_mm 202.642
+# (sensing origin -> tip) = 247.642.
 #
-# Residuals of a few mm are the precision of parking an arm against a surface by
-# hand, so treat the 262.87 mm as +/- ~3 mm. Re-derive it with the two poses above
-# if the gripper or its adapter is ever changed.
-#
-# WHERE THE 15 mm IS -- corrected twice. The first attempt blamed attachment_site and
-# pushed it 15.23 mm out; rb_gui showed the gripper floating off the flange, and the
-# meshes agree it was wrong: link6's visual ends 96.57 mm from its origin and upstream
-# puts attachment_site at 96.70 mm, so upstream's attachment_site IS the flange face --
-# and RB3 is the same convention, its link6 ending at exactly 100.00 mm. The second
-# attempt guessed the physical fingers were longer than pika_gripper.STL; the operator
-# says they are the CAD fingers. The actual answer is below, and it needed no guess.
+# A CONTACT MEASUREMENT ON 2026-09-02 SAID 262.87 mm AND WAS WRONG, by 15 mm. Two
+# hand-parked poses -- both TCPs on the stand, then the two TCPs touching each other --
+# each came out ~15 mm long, and the agreement between them was read as confirmation.
+# It was not: the two poses' tool axes are 60-67 deg apart, not the "nearly orthogonal"
+# claimed at the time, and nothing verified that the FINGERTIP PLANE was the part
+# making contact. Anything on the gripper touching first biases the fit long, the same
+# way in both. Sectioning the STL is what settled it, and it needed no robot at all.
+# Re-derive from the CAD, not from contact, if the tool changes.
 FT_BASE_OFFSET_M = 0.015          # attachment_site -> ft_sensor_base
 FT_MEASUREMENT_OFFSET_M = 0.030   # ft_sensor_base  -> ft_sensor_measurement
-# THE 15 mm, RESOLVED. It is the F/T sensor's flange adapter, and both terms below
-# have provenance -- this is no longer a fitted number:
-#
-#   flange -> gripper CAD origin = 45.0 - 30.0 = 15.000 mm
-#     45.0 mm is offset.xyz in the controller-manager RFT64-6A01-A preset (flange ->
-#     sensing reference origin); 30.0 mm is the sensor body. NOTE that preset's own
-#     comment says "adapter 13mm + sensor 30mm = 43mm", disagreeing with its VALUE by
-#     2 mm. The hardware settles it: 13 mm would put the tip at 260.642 mm, which the
-#     contact measurement misses by 2.23 mm, outside its ~2 mm spread. 15 mm is right,
-#     and it is what robotics_lab's own FT chain has always carried (FT_BASE_OFFSET_M).
-#   gripper CAD origin -> tip    = 247.642 mm (pika_gripper.STL z-max)
-#
-# Sum 262.642 mm against the measured 262.870 mm: they agree to 0.228 mm.
-TOOL_STANDOFF_M = 0.015           # flange -> gripper mounting face (the F/T adapter)
-# The adapter is REAL HARDWARE that nothing modelled: link6's hull stops at the flange
-# and the gripper hulls start at the gripper origin, so [0, 15] mm was a hole in the
-# collision model. Radius 35 mm = the gripper base's own mounting-face radius, which
-# bounds it from above (an adapter wider than the part it carries would be unusual) and
-# sits entirely inside link6's 82 x 87 mm silhouette -- so it cannot raise a false
-# positive that link6 does not already raise.
-TOOL_ADAPTER_RADIUS_M = 0.035
-PIKA_TIP_OFFSET_M = TOOL_STANDOFF_M + 0.247642   # attachment_site (flange) -> tcp
+PIKA_TIP_OFFSET_M = 0.247642      # attachment_site (flange) -> tcp = pika_gripper.STL z-max
 
 ARM_COLLISION = {                      # link -> our collision mesh(es), URDF-relative
     "link0": ["../meshes/robots/rb5_850e/collision/link0_hull.stl"],
@@ -153,38 +123,6 @@ STAND_HULLS = [f"../meshes/stands/dual_rb5_850e/collision_ver2/stand_hull_{i:03d
                for i in range(20)]
 
 
-
-def add_tool_standoff(root, prefix: str = "") -> None:
-    """Insert the F/T adapter between attachment_site and where the gripper mounts.
-
-    Adds `<prefix>tool_adapter` (a collision cylinder spanning the standoff) and
-    `<prefix>gripper_mount`, the frame the gripper's own geometry hangs off. The
-    collision monitor attaches the pika hulls by frame NAME, so pointing it at
-    gripper_mount instead of attachment_site is what moves them the 15 mm out --
-    see safety.self_collision.mesh.gripper_attach_frame.
-    """
-    adapter = ET.SubElement(root, "link", {"name": f"{prefix}tool_adapter"})
-    col = ET.SubElement(adapter, "collision")
-    # URDF cylinders are drawn along local Z, and attachment_site's +Z IS the tool
-    # axis, so the cylinder needs no rotation -- only centring on the standoff.
-    ET.SubElement(col, "origin",
-                  {"xyz": f"0.0 0.0 {TOOL_STANDOFF_M / 2.0}", "rpy": "0.0 0.0 0.0"})
-    geo = ET.SubElement(col, "geometry")
-    ET.SubElement(geo, "cylinder",
-                  {"radius": f"{TOOL_ADAPTER_RADIUS_M}", "length": f"{TOOL_STANDOFF_M}"})
-    joint = ET.SubElement(root, "joint",
-                          {"name": f"{prefix}tool_adapter_joint", "type": "fixed"})
-    ET.SubElement(joint, "parent", {"link": f"{prefix}attachment_site"})
-    ET.SubElement(joint, "child", {"link": f"{prefix}tool_adapter"})
-    ET.SubElement(joint, "origin", {"xyz": "0.0 0.0 0.0", "rpy": "0.0 0.0 0.0"})
-
-    ET.SubElement(root, "link", {"name": f"{prefix}gripper_mount"})
-    joint = ET.SubElement(root, "joint",
-                          {"name": f"{prefix}gripper_mount_joint", "type": "fixed"})
-    ET.SubElement(joint, "parent", {"link": f"{prefix}attachment_site"})
-    ET.SubElement(joint, "child", {"link": f"{prefix}gripper_mount"})
-    ET.SubElement(joint, "origin",
-                  {"xyz": f"0.0 0.0 {TOOL_STANDOFF_M}", "rpy": "0.0 0.0 0.0"})
 
 
 def _mesh_collision(path: str, scale: str) -> ET.Element:
@@ -243,9 +181,6 @@ def build(src: Path) -> ET.ElementTree:
         elbows += 1
 
     # (3) stand hulls alongside the upstream boxes
-    for prefix in ("dual_rb5_850e_left_", "dual_rb5_850e_right_"):
-        add_tool_standoff(root, prefix)
-
     if root.find("link[@name='stand_collision']") is not None:
         raise SystemExit("upstream already defines stand_collision; rework this step")
     stand = ET.SubElement(root, "link", {"name": "stand_collision"})
@@ -322,8 +257,6 @@ def build_single(src: Path) -> ET.ElementTree:
     tcp_joint.find("origin").set("xyz", f"0.0 0.0 {PIKA_TIP_OFFSET_M}")
     tcp_joint.find("origin").set("rpy", "0.0 0.0 0.0")
 
-    add_tool_standoff(root)
-
     for name in ("ft_sensor_base", "ft_sensor_measurement", "tool"):
         if root.find(f"link[@name='{name}']") is not None:
             raise SystemExit(f"single-arm: upstream already defines {name}")
@@ -333,8 +266,7 @@ def build_single(src: Path) -> ET.ElementTree:
     root.append(_fixed_joint("ft_sensor_measurement_joint", "ft_sensor_base",
                              "ft_sensor_measurement", f"0.0 0.0 {FT_MEASUREMENT_OFFSET_M}",
                              "0.0 0.0 0.0"))
-    # `tool` carries the gripper body in the display model, so it hangs off the mount.
-    root.append(_fixed_joint("tool_joint", "gripper_mount", "tool", "0.0 0.0 0.0",
+    root.append(_fixed_joint("tool_joint", "attachment_site", "tool", "0.0 0.0 0.0",
                              "0.0 0.0 0.0"))
 
     ET.indent(tree, space="  ")
@@ -373,8 +305,6 @@ def build_display(src: Path) -> ET.ElementTree:
         if link is None:
             link = ET.SubElement(root, "link", {"name": name})
         vis = ET.SubElement(link, "visual")
-        # Identity: these links hang off gripper_mount, which already carries the
-        # standoff. Putting it here as well would apply it twice.
         ET.SubElement(vis, "origin", {"xyz": "0.0 0.0 0.0", "rpy": "0.0 0.0 0.0"})
         geo = ET.SubElement(vis, "geometry")
         ET.SubElement(geo, "mesh", {"filename": mesh, "scale": "0.001 0.001 0.001"})
@@ -382,7 +312,7 @@ def build_display(src: Path) -> ET.ElementTree:
                                ("finger_right", -FINGER_TRAVEL_M, 0.0)):
         joint = ET.SubElement(root, "joint",
                               {"name": f"{name}_joint", "type": "prismatic"})
-        ET.SubElement(joint, "parent", {"link": "gripper_mount"})
+        ET.SubElement(joint, "parent", {"link": "attachment_site"})
         ET.SubElement(joint, "child", {"link": name})
         ET.SubElement(joint, "origin", {"xyz": "0.0 0.0 0.0", "rpy": "0.0 0.0 0.0"})
         ET.SubElement(joint, "axis", {"xyz": "1.0 0.0 0.0"})

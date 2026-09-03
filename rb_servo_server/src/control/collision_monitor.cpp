@@ -782,8 +782,8 @@ struct CollisionMonitor::Impl {
                 {cfg.left_prefix, ArmId::Left}, {cfg.right_prefix, ArmId::Right}}};
             for (const auto& [prefix, aid] : arms) {
                 const auto fid = requireModelFrame(
-                    prefix + cfg.gripper_attach_frame,
-                    "safety.self_collision.mesh.gripper_attach_frame");
+                    prefix + "attachment_site",
+                    "safety.self_collision.mesh.left_prefix/right_prefix");
                 const auto& fr = model.frames[fid];
                 const pinocchio::SE3 place = fr.placement;  // identity local (URDF mirror)
                 geom.addGeometryObject(pinocchio::GeometryObject(
@@ -806,8 +806,8 @@ struct CollisionMonitor::Impl {
                 Eigen::AngleAxisd(M_PI / 2.0, Eigen::Vector3d::UnitZ()).toRotationMatrix();
             for (const std::string prefix : {cfg.left_prefix, cfg.right_prefix}) {
                 const auto fid = requireModelFrame(
-                    prefix + cfg.gripper_attach_frame,
-                    "safety.self_collision.mesh.gripper_attach_frame");
+                    prefix + "attachment_site",
+                    "safety.self_collision.mesh.left_prefix/right_prefix");
                 const auto& fr = model.frames[fid];
                 const pinocchio::SE3 place =
                     fr.placement * pinocchio::SE3(rz, Eigen::Vector3d::Zero());
@@ -1482,17 +1482,6 @@ void CollisionMonitor::stop() {
 }
 
 std::size_t CollisionMonitor::numGeometries() const { return impl_->geom.geometryObjects.size(); }
-
-Eigen::Vector3d CollisionMonitor::gripperGeometryOrigin(ArmId arm) const {
-    const std::string name =
-        (arm == ArmId::Left ? impl_->cfg.left_prefix : impl_->cfg.right_prefix) +
-        "pika_gripper_base";
-    for (std::size_t i = 0; i < impl_->geom.geometryObjects.size(); ++i) {
-        if (impl_->geom.geometryObjects[i].name != name) continue;
-        return impl_->gdata.oMg[i].translation();
-    }
-    return Eigen::Vector3d::Zero();
-}
 std::size_t CollisionMonitor::numPairs() const { return impl_->geom.collisionPairs.size(); }
 std::size_t CollisionMonitor::numNonConvexMeshes() const { return impl_->non_convex_mesh_count_; }
 
