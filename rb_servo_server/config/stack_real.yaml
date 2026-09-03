@@ -930,6 +930,28 @@ queue_sync:
   hold_motion_until_track: true
   target_fill: 5
 
+  # ---- THE DIAGNOSTIC BAND (2026-09-03) ---------------------------------------
+  # Between "regulating normally" and protect_fill (1, near-empty) there was NOTHING
+  # watching, so a queue sagging to 2-4 for seconds was invisible. These two numbers
+  # close that, and both are DELIBERATELY SPELLED OUT rather than left to the code
+  # default, because the band is the thing an operator reads a run against.
+  #
+  # *** warn_fill IS NOT DERIVED FROM target_fill, ON PURPOSE. *** controller-manager
+  # tied its dip line to the setpoint, then raised the setpoint, and the detector
+  # moved onto the regulator's OWN RIPPLE TROUGH and fired forever. A diagnostic must
+  # not be tied to the thing it watches. The loader refuses warn_fill >= target_fill
+  # for exactly that reason.
+  #
+  # 4 is one below our measured ripple floor: across 1.5M fresh observations on
+  # v8.9.1 (2026-09-03) the fill held 5, with 10 samples at 4 and none below. So this
+  # line is silent today and speaks only when something changes.
+  warn_fill: 4
+  # Consecutive FRESH observations at/below protect_fill before an underrun counts.
+  # One sample of an integer scraped out of a TCP stream is not evidence -- CM had
+  # exactly one bad sample de-energize a healthy cell. We only count, so what this
+  # buys is that the count can be CITED. See docs/reference/queue_sync_review.md.
+  underrun_confirm: 3
+
 logging:
   enable: true
   directory: "./logs"

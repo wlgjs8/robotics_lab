@@ -1701,6 +1701,19 @@ void validateConfig(const DualArmConfig& cfg) {
         if (q.protect_fill < 0 || q.protect_fill >= q.target_fill) {
             throw std::runtime_error("queue_sync.protect_fill must be in [0, target_fill)");
         }
+        // THE WARN LINE MUST SIT STRICTLY BELOW THE SETPOINT. At or above it the
+        // regulator's own ripple trough lands in the band and every trough opens an
+        // episode -- the diagnostic then reports the controller working, forever.
+        // It must also sit at or above protect_fill so the bands nest rather than
+        // cross (a confirmed underrun is always inside an open dip episode).
+        if (q.warn_fill >= q.target_fill || q.warn_fill < q.protect_fill) {
+            throw std::runtime_error(
+                "queue_sync.warn_fill must be in [protect_fill, target_fill) - at or above the "
+                "setpoint it fires on the regulator's own ripple");
+        }
+        if (q.underrun_confirm < 1) {
+            throw std::runtime_error("queue_sync.underrun_confirm must be >= 1 (fresh observations)");
+        }
         if (!(q.lpf_alpha > 0.0 && q.lpf_alpha <= 1.0)) {
             throw std::runtime_error("queue_sync.lpf_alpha must be in (0, 1]");
         }
@@ -3908,7 +3921,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
     if (has(root, "queue_sync")) {
         const YAML::Node sec = root["queue_sync"];
         validateAllowedKeys(sec, {
-            "enable", "hold_motion_until_track", "target_fill", "protect_fill", "lpf_alpha",
+            "enable", "hold_motion_until_track", "target_fill", "protect_fill",
+            "warn_fill", "underrun_confirm", "lpf_alpha",
             "kp_above_us", "kp_below_us", "ki_us", "integral_clamp_us",
             "adj_clamp_us", "protect_adj_us", "drain_adj_us", "drain_max_us",
             "drain_per_fill_us", "redrain_fill_margin", "highwater_fill",
@@ -3923,6 +3937,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         }
         if (has(sec, "target_fill")) q.target_fill = asInt(sec["target_fill"], "queue_sync.target_fill");
         if (has(sec, "protect_fill")) q.protect_fill = asInt(sec["protect_fill"], "queue_sync.protect_fill");
+        if (has(sec, "warn_fill")) q.warn_fill = asInt(sec["warn_fill"], "queue_sync.warn_fill");
+        if (has(sec, "underrun_confirm")) q.underrun_confirm = asInt(sec["underrun_confirm"], "queue_sync.underrun_confirm");
         if (has(sec, "lpf_alpha")) q.lpf_alpha = asDouble(sec["lpf_alpha"], "queue_sync.lpf_alpha");
         if (has(sec, "kp_above_us")) q.kp_above_us = asDouble(sec["kp_above_us"], "queue_sync.kp_above_us");
         if (has(sec, "kp_below_us")) q.kp_below_us = asDouble(sec["kp_below_us"], "queue_sync.kp_below_us");

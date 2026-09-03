@@ -3633,18 +3633,46 @@ void DualArmServoLoop::loopMain() {
                 t.fill_valid = d.fill_valid;
                 t.phase = d.phase;
                 t.locked = d.locked;
+                t.stale_cycles = d.stale_cycles;
                 t.underrun_events = d.underrun_events;
+                t.warn_events = d.warn_events;
+                t.dip_events = d.dip_events;
+                t.dip_last_min = d.dip_last_min;
+                t.dip_last_ms = d.dip_last_ms;
                 t.stall_events = d.stall_events;
                 t.highwater_events = d.highwater_events;
                 t.redrain_events = d.redrain_events;
                 t.no_consumption_events = d.no_consumption_events;
                 return t;
             };
+            // ONE LINE PER DIP EPISODE, WITH ITS APPROACH. The band counters say a dip
+            // happened; only the trace says how the queue got there, and whether the
+            // fill RAMPED down (a real drain) or vanished in one observation and came
+            // straight back (a reporting glitch -- a queue fed one command per tick
+            // cannot climb to the setpoint in a single observation). CM read 51 deep
+            // dips one by one to learn that distinction; this prints it.
+            const auto dip_report = [this](const char* side, const QueueSyncDecision& d,
+                                           uint64_t& logged) {
+                if (d.dip_events <= logged) return;
+                logged = d.dip_events;
+                std::cerr << "[WARN] queue_sync " << side << ": DIP episode #" << d.dip_events
+                          << " min fill " << d.dip_last_min << " for " << d.dip_last_ms
+                          << " ms (warn band <= " << config_.queue_sync.warn_fill
+                          << ", target " << config_.queue_sync.target_fill << ") approach [";
+                for (int i = 0; i < d.fill_trace_n; ++i) {
+                    std::cerr << (i ? " " : "") << d.fill_trace[i];
+                }
+                std::cerr << "]\n";
+            };
             if (left_worker_) {
-                sample.left_queue_sync = qsync_snapshot(left_worker_->queueSyncDecision());
+                const QueueSyncDecision& d = left_worker_->queueSyncDecision();
+                sample.left_queue_sync = qsync_snapshot(d);
+                dip_report("left", d, left_qsync_dips_logged_);
             }
             if (right_worker_) {
-                sample.right_queue_sync = qsync_snapshot(right_worker_->queueSyncDecision());
+                const QueueSyncDecision& d = right_worker_->queueSyncDecision();
+                sample.right_queue_sync = qsync_snapshot(d);
+                dip_report("right", d, right_qsync_dips_logged_);
             }
         }
         sample.left_cartesian_solve = left_last_cartesian_solve_;

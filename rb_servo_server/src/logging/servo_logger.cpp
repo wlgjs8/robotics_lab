@@ -611,7 +611,12 @@ void ServoLogger::writeHeader() {
               << ',' << side << "_qsync_fill_valid"
               << ',' << side << "_qsync_phase"
               << ',' << side << "_qsync_locked"
+              << ',' << side << "_qsync_stale_cycles"
               << ',' << side << "_qsync_underrun_events"
+              << ',' << side << "_qsync_warn_events"
+              << ',' << side << "_qsync_dip_events"
+              << ',' << side << "_qsync_dip_last_min"
+              << ',' << side << "_qsync_dip_last_ms"
               << ',' << side << "_qsync_stall_events"
               << ',' << side << "_qsync_highwater_events"
               << ',' << side << "_qsync_redrain_events"
@@ -1358,7 +1363,12 @@ void ServoLogger::writeSample(const ServoSample& sample) {
               << ',' << qs->fill_valid
               << ',' << csvEscape(qs->phase)
               << ',' << qs->locked
+              << ',' << qs->stale_cycles
               << ',' << qs->underrun_events
+              << ',' << qs->warn_events
+              << ',' << qs->dip_events
+              << ',' << qs->dip_last_min
+              << ',' << qs->dip_last_ms
               << ',' << qs->stall_events
               << ',' << qs->highwater_events
               << ',' << qs->redrain_events

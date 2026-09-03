@@ -34,6 +34,12 @@ void QueueSyncController::reset() {
     stale_cycles_ = 0;
     underrun_active_ = false;
     highwater_active_ = false;
+    warn_active_ = false;
+    dip_active_ = false;
+    dip_start_ns_ = 0;
+    dip_min_ = 0;
+    underrun_run_ = 0;
+    fill_trace_n_ = 0;
     consumption_ref_ns_ = 0;
     consumption_ref_fill_ = -1;
     // integral_us_ deliberately SURVIVES a reset: it encodes the box-vs-host
@@ -62,6 +68,14 @@ QueueSyncDecision QueueSyncController::step(const Observation& obs) {
             stale_cycles_ = 0;
             consumption_ref_ns_ = 0;
             consumption_ref_fill_ = -1;
+            // An episode cannot span a stream gap: the queue it was about is gone.
+            // A dip still open when the stream ends is dropped rather than reported,
+            // because its duration would be the gap and not the dip.
+            warn_active_ = false;
+            dip_active_ = false;
+            underrun_active_ = false;
+            underrun_run_ = 0;
+            fill_trace_n_ = 0;
         }
         out.last_fill = last_fill_;
         out.fill_valid = last_fill_ >= 0;
@@ -69,6 +83,7 @@ QueueSyncDecision QueueSyncController::step(const Observation& obs) {
         out.integral_us = integral_us_;
         out.phase = phaseName(0);
         out.locked = false;
+        out.stale_cycles = 0;
         counters_ = out;
         counters_.period_trim_us = 0.0;
         return out;
@@ -158,13 +173,63 @@ QueueSyncDecision QueueSyncController::step(const Observation& obs) {
                 trim_us = config_.drain_adj_us;
                 break;
             }
-            const bool low = last_fill_ >= 0 && last_fill_ <= config_.protect_fill;
-            if (low && !underrun_active_) {
-                underrun_active_ = true;
-                out.underrun_events += 1;
-            } else if (!low) {
-                underrun_active_ = false;
+            // ---- THE BAND, ON FRESH OBSERVATIONS ONLY -----------------------------
+            // `last_fill_` PERSISTS between RBACKs, so counting off it every cycle
+            // counts one reading many times -- and the case where that matters is the
+            // dangerous one: a stalled ACK flow freezes the value at whatever it last
+            // was, which may be in the band while the queue itself has since refilled.
+            // `fresh` is the only thing that says the number describes NOW.
+            if (fresh && last_fill_ >= 0) {
+                if (fill_trace_n_ < kQueueSyncFillTraceN) {
+                    fill_trace_[fill_trace_n_++] = last_fill_;
+                } else {
+                    for (int i = 1; i < kQueueSyncFillTraceN; ++i) fill_trace_[i - 1] = fill_trace_[i];
+                    fill_trace_[kQueueSyncFillTraceN - 1] = last_fill_;
+                }
+                const bool in_band = last_fill_ <= config_.warn_fill;
+                // A BAND TEST, NOT AN EQUALITY TEST. `== warn_fill` asks the sample to
+                // land exactly on the number, so a drop that steps 5 -> 2 between two
+                // observations skips it and reports nothing at all.
+                if (in_band && !warn_active_) {
+                    warn_active_ = true;
+                    out.warn_events += 1;
+                }
+                if (in_band) {
+                    if (!dip_active_) {
+                        dip_active_ = true;
+                        dip_start_ns_ = obs.now_ns;
+                        dip_min_ = last_fill_;
+                    } else if (last_fill_ < dip_min_) {
+                        dip_min_ = last_fill_;
+                    }
+                }
+                // CONFIRMED underrun. Counted in CONSECUTIVE fresh observations so a
+                // single mis-scraped integer cannot create the event on its own.
+                if (last_fill_ <= config_.protect_fill) {
+                    if (++underrun_run_ >= config_.underrun_confirm && !underrun_active_) {
+                        underrun_active_ = true;
+                        out.underrun_events += 1;
+                    }
+                } else {
+                    underrun_run_ = 0;
+                }
+                // RE-ARM ON RECOVERY TO **TARGET**, NOT MERELY OFF THE BAND EDGE, and
+                // that is what makes these per-EPISODE. Re-arming at the edge turns a
+                // queue hovering there (3,4,3,4,...) into an event every other
+                // observation. Recovery to the setpoint is the honest end of an episode.
+                if (last_fill_ >= config_.target_fill) {
+                    if (dip_active_) {
+                        dip_active_ = false;
+                        dip_last_min_ = dip_min_;
+                        dip_last_ms_ = static_cast<double>(obs.now_ns - dip_start_ns_) / 1.0e6;
+                        out.dip_events += 1;
+                    }
+                    warn_active_ = false;
+                    underrun_active_ = false;
+                    underrun_run_ = 0;
+                }
             }
+            const bool low = last_fill_ >= 0 && last_fill_ <= config_.protect_fill;
             stale_cycles_ = fresh ? 0 : stale_cycles_ + 1;
             if (stale_cycles_ == config_.stall_cycles) {
                 out.stall_events += 1;  // edge: one report per stall
@@ -194,7 +259,21 @@ QueueSyncDecision QueueSyncController::step(const Observation& obs) {
     out.last_fill = last_fill_;
     out.fill_valid = last_fill_ >= 0;
     out.phase = phaseName(static_cast<int>(phase_));
-    out.locked = phase_ == Phase::Track && last_fill_ >= 0 &&
+    out.stale_cycles = stale_cycles_;
+    out.dip_last_min = dip_last_min_;
+    out.dip_last_ms = dip_last_ms_;
+    for (int i = 0; i < fill_trace_n_; ++i) out.fill_trace[i] = fill_trace_[i];
+    out.fill_trace_n = fill_trace_n_;
+    // *** LOCKED REQUIRES THE FEEDBACK TO BE RECENT. *** Without this term `locked`
+    // is computed from `last_fill_`, which persists forever, so a frozen reading that
+    // happens to sit near the setpoint reports a phase lock indefinitely. That is not
+    // hypothetical: on 2026-09-02 the left arm's RBACK flow died 2 % into a run and
+    // this flag stayed 1 for all 77,130 remaining ticks (~154 s) with the loop fully
+    // open (servo_log_20260902_230031). A health indicator that cannot go false when
+    // the measurement stops is not an indicator. `stall_cycles` is the same threshold
+    // that reports the stall, so the two agree by construction rather than by tuning.
+    const bool feedback_recent = stale_cycles_ < config_.stall_cycles;
+    out.locked = phase_ == Phase::Track && last_fill_ >= 0 && feedback_recent &&
                  std::abs(last_fill_ - config_.target_fill) <= 1;
     counters_ = out;
     return out;

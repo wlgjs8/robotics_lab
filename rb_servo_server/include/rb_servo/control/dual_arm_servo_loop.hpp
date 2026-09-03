@@ -869,6 +869,10 @@ private:
     // Oscillation-guard WARN edge detection (telemetry resets per tick).
     uint64_t left_osc_trips_logged_ = 0;
     uint64_t right_osc_trips_logged_ = 0;
+    // Edge cursors for the queue-sync dip report. The trace only lives in the
+    // decision struct, so a dip that is never printed is a dip nobody can read.
+    uint64_t left_qsync_dips_logged_ = 0;
+    uint64_t right_qsync_dips_logged_ = 0;
     // Contact-shock low-pass state for the wrench the FORCE LAW consumes
     // (force_control.wrench_filter_hz). Not on the servo command path. Unprimed
     // while the arm is uncovered, so a resumed law seeds from the live wrench

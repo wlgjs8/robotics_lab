@@ -1074,8 +1074,13 @@ struct QueueSyncTelemetry {
     int last_fill = -1;                 // -1 = no RBACK observed yet
     bool fill_valid = false;
     std::string phase = "idle";         // idle | warmup | drain | track
-    bool locked = false;                // Track phase and fill within tolerance
-    uint64_t underrun_events = 0;       // fill fell to <= protect_fill
+    bool locked = false;                // Track, fill in tolerance, AND feedback recent
+    int stale_cycles = 0;               // age of last_fill in cycles (0 = fresh this tick)
+    uint64_t underrun_events = 0;       // CONFIRMED fill <= protect_fill
+    uint64_t warn_events = 0;           // fill entered the warn band (once per episode)
+    uint64_t dip_events = 0;            // a dip episode ended
+    int dip_last_min = 0;               // last episode: minimum fill reached
+    double dip_last_ms = 0.0;           // last episode: duration
     uint64_t stall_events = 0;          // no fresh RBACK for stall_cycles
     uint64_t highwater_events = 0;      // absurd backlog; box likely not consuming
     uint64_t redrain_events = 0;        // queue rebase forced a re-drain

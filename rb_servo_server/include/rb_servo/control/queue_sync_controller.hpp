@@ -33,6 +33,11 @@ namespace rb_servo {
 // per-arm actuation is required for a long-running session, not a refinement.
 //
 // SIGN. Positive trim = longer period = slower sends = fill falls.
+// How many fills of approach history are kept so a dip report can show how the
+// queue GOT there. CM's first underrun guard reported the word "QueueUnderrun" and
+// not one number; they now keep 20 and so do we.
+inline constexpr int kQueueSyncFillTraceN = 20;
+
 struct QueueSyncDecision {
     double period_trim_us = 0.0;       // add to the nominal control period
     double fill_lpf = 0.0;
@@ -40,12 +45,34 @@ struct QueueSyncDecision {
     int last_fill = -1;                // -1 = no RBACK observed yet
     bool fill_valid = false;
     std::string phase = "idle";        // idle | warmup | drain | track
-    bool locked = false;               // Track phase and fill within tolerance of target
-    uint64_t underrun_events = 0;      // fill fell to <= protect_fill
+    // Track phase, fill within tolerance of target, AND THE FEEDBACK IS RECENT.
+    // The freshness term is not decoration -- see the comment on `stale_cycles`.
+    bool locked = false;
+    // CONSECUTIVE CYCLES WITH NO FRESH RBACK, i.e. THE AGE OF `last_fill`. Published
+    // because `last_fill` persists between RBACKs and nothing else says whether the
+    // number describes NOW. MEASURED (servo_log_20260902_230031): the left arm's
+    // RBACK flow stopped 2 % into the run and never resumed -- 299 parsed against the
+    // right arm's 77,321 -- and the regulator then ran OPEN LOOP for 77,130 ticks
+    // (~154 s) on one frozen reading. It was harmless only because the frozen value
+    // happened to equal the setpoint, so the error was 0 and the PI did nothing; had
+    // it frozen at 3 the integral would have wound to its clamp against a queue
+    // nobody was measuring. The only signal at the time was ONE stall_events edge,
+    // 154 s in the past. This field makes the condition visible for its whole
+    // duration instead of as a single edge.
+    int stale_cycles = 0;
+    uint64_t underrun_events = 0;      // CONFIRMED fill <= protect_fill (see underrun_confirm)
+    uint64_t warn_events = 0;          // fill entered the warn band (once per episode)
+    uint64_t dip_events = 0;           // a dip episode ENDED; depth/duration below
+    int dip_last_min = 0;              // last completed episode: minimum fill reached
+    double dip_last_ms = 0.0;          // last completed episode: duration
     uint64_t stall_events = 0;         // no fresh RBACK for stall_cycles
     uint64_t highwater_events = 0;     // absurd backlog; box likely stopped consuming
     uint64_t redrain_events = 0;       // queue rebase forced a re-drain
     uint64_t no_consumption_events = 0;// fill rising faster than a trim can correct
+    // The approach, newest last, so a dip report can print how the queue got there.
+    // Only fresh observations are recorded -- a stale repeat is not an observation.
+    int fill_trace[kQueueSyncFillTraceN] = {};
+    int fill_trace_n = 0;              // populated slots (<= kQueueSyncFillTraceN)
 };
 
 class QueueSyncController {
@@ -90,6 +117,21 @@ private:
     int stale_cycles_ = 0;
     bool underrun_active_ = false;
     bool highwater_active_ = false;
+    // Episode state for the warn/dip band. Both re-arm on recovery to TARGET rather
+    // than merely off the band edge: a queue hovering at the line reports 3,4,3,4...
+    // and re-arming at the edge makes every return a fresh event, i.e. a per-SAMPLE
+    // test wearing per-EPISODE clothes. CM hit exactly that and fixed it the same way.
+    bool warn_active_ = false;
+    bool dip_active_ = false;
+    uint64_t dip_start_ns_ = 0;
+    int dip_min_ = 0;
+    int dip_last_min_ = 0;             // last COMPLETED episode, held for the report
+    double dip_last_ms_ = 0.0;
+    // Consecutive FRESH observations at/below protect_fill; reset by any observation
+    // above it. See QueueSyncConfig::underrun_confirm for why one sample is not enough.
+    int underrun_run_ = 0;
+    int fill_trace_[kQueueSyncFillTraceN] = {};
+    int fill_trace_n_ = 0;
     // Consumption watch: compare against a ~1 s-old reference so a box that has
     // stopped consuming is reported instead of being trimmed at forever.
     uint64_t consumption_ref_ns_ = 0;

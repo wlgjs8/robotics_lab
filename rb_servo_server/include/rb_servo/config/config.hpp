@@ -1328,6 +1328,26 @@ struct QueueSyncConfig {
     bool hold_motion_until_track = false;
     int target_fill = 5;                    // occupancy setpoint == box dead time in ticks
     int protect_fill = 1;                   // at/below this, wake early hard (underrun)
+    // THE WARN / DIP BAND. Its own number, DELIBERATELY NOT DERIVED FROM target_fill.
+    // controller-manager paid for that lesson: their dip detector tested
+    // `fill < TARGET`, so raising the setpoint moved the detector with it and it
+    // began firing on the regulator's OWN RIPPLE TROUGH, once per episode, forever
+    // ("QSYNC WARN과 ERROR 상한선을 원복하라고 말했는데, 왜 아직도 안되었지?"). A
+    // diagnostic must not be tied to the thing it watches: the setpoint is a tuning
+    // knob and will move again, but the question "did the box come near starving?"
+    // does not move with it. 4 sits one below our measured ripple floor -- across
+    // 1.5M fresh observations on v8.9.1 the fill held 5 with 10 samples at 4 and
+    // none below (2026-09-03), so this line is quiet until something is wrong.
+    int warn_fill = 4;                      // at/below: warn + open a dip episode
+    // CONSECUTIVE FRESH observations at/below protect_fill before an underrun counts.
+    // `last_fill` is an integer scraped out of a TCP byte stream across chunk
+    // boundaries with a carry, and CM had a SINGLE bad sample of exactly that
+    // quantity de-energize a healthy cell whose queue read 5 in 13,000+ samples.
+    // We only count (no fault), so this is about the number being EVIDENCE: an
+    // underrun_events that fires on one sample cannot be cited. The queue drains one
+    // per cycle, so three fresh observations is ~6 ms and still lands while the
+    // queue holds commands -- confirmation, not patience.
+    int underrun_confirm = 3;
     double lpf_alpha = 0.02;                // fill low-pass; ~0.1 s at 500 Hz
     double kp_above_us = 6.0;               // us of period trim per fill above target
     double kp_below_us = 18.0;              // per fill below target (underrun costs more)
