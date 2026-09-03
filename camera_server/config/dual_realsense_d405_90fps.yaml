@@ -133,7 +133,12 @@ health:
   publish_rate_hz: 1
   warn_if_frame_age_ms_gt: 100
   warn_if_drop_count_increases: true
-  warn_if_bundle_skew_ms_gt: 11
+  # 13: the legacy (color+depth) bundle carries a STRUCTURAL one-frame color<->depth stamp
+  # offset at 90 fps (11.11 ms, measured constant 11.11-11.14 live 2026-09-02, drop=0,
+  # complete==total). 11 sat under that and made the rig permanently "degraded", which would
+  # bury any real skew regression. 13 clears the structural offset and stays under the 15 ms
+  # bundle window; the color-only policy bundle runs at 0.75 ms p50 regardless.
+  warn_if_bundle_skew_ms_gt: 13
 
 reconnect:
   enabled: true

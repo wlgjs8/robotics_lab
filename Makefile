@@ -126,7 +126,15 @@ cam-up:
 # 값). cam-up 의 기본값은 __no_advanced__.json(프리셋 없음)이라 여기서 덮어써야 한다.
 # 이 리그 YAML 에는 controls: 블록을 두지 않는다 — apply_controls() 가 프리셋 로드보다
 # 나중에 돌아서 프리셋을 조용히 덮어쓰기 때문. 프리셋이 단일 소유자다.
-WRIST_CAM_JSON ?= /app/config/realsense_d405_advanced.json
+# 2026-09-02: 손목 리그 기본이 90 fps 로 전환됐다(수집·추론 공간/조명 통일, AE 양쪽 활성).
+# 프리셋 realsense_d405_90fps.json 은 advanced.json 과 단 두 값만 다르다
+# (AE manual seed 30000->10000: AE 가 꺼져도 90fps 프레임 예산 11.1ms 를 넘지 않게,
+# viewer fps 표기). 수집(pika run_collect_fast.sh)도 같은 파일을 직접 참조한다 — 사본 없음.
+# 30 fps 로 되돌리려면:
+#   make cam-up-wrists WRIST_CAM_CONFIG=/app/config/dual_realsense_d405.yaml \
+#                      WRIST_CAM_JSON=/app/config/realsense_d405_advanced.json
+WRIST_CAM_CONFIG ?= /app/config/dual_realsense_d405_90fps.yaml
+WRIST_CAM_JSON ?= /app/config/realsense_d405_90fps.json
 CLOUD ?= 1
 # 프리셋은 FAIL CLOSED 다: 지정한 파일이 없거나 두 카메라에 실제로 적용되지 않으면
 # 이 타겟이 실패한다. "프리셋을 편집했는데 사실은 안 실리고 있었다"를 한 세션 뒤가
@@ -139,7 +147,7 @@ cam-up-wrists:
 	  *__no_advanced__*) echo "[cam] advanced preset disabled by request" ;; \
 	  *) [ -f "$$host_json" ] || { echo "[cam] advanced preset not found: $$host_json" >&2; exit 1; } ;; \
 	esac; \
-	$(MAKE) --no-print-directory cam-up CAMERA_CONFIG=/app/config/dual_realsense_d405.yaml STEREO_CAM_JSON=$(WRIST_CAM_JSON); \
+	$(MAKE) --no-print-directory cam-up CAMERA_CONFIG=$(WRIST_CAM_CONFIG) STEREO_CAM_JSON=$(WRIST_CAM_JSON); \
 	case '$(WRIST_CAM_JSON)' in *__no_advanced__*) ;; *) \
 	  echo "[cam] waiting for the advanced preset to apply on both wrists..."; \
 	  ok=0; \
