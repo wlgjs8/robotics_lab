@@ -407,7 +407,14 @@ def _joint_cfg_radians(q_values: tuple[float, ...] | None) -> tuple[float, ...]:
 # Each finger travels up to _GRIPPER_FINGER_TRAVEL_M from the open (STL) pose to
 # closed; finger_left moves +X, finger_right -X (jaw axis = X in the baked mesh
 # frame). gripper percent: 100 = open (travel 0), 0 = closed (full travel).
-_GRIPPER_FINGER_TRAVEL_M = 0.047
+# 0.049 is MEASURED (2026-09-04): the full-open gap between the TPU tip faces is
+# 98.0 mm and the jaws close to contact, so each finger runs half of it. The meshes
+# are baked AT that open stop, so travel 0 is genuinely 100 % open. The previous
+# 0.047 came from assuming the vendor CAD drew the fingers at the open stop; it does
+# not (rb_servo_server/tools/make_pika_tool_meshes.py). Keep this equal to
+# FINGER_TRAVEL_M in the URDF generator and to safety.self_collision.mesh
+# .gripper_finger_travel_m in the stack configs.
+_GRIPPER_FINGER_TRAVEL_M = 0.049
 _GRIPPER_FINGER_JOINT_SIGN = {"finger_left_joint": 1.0, "finger_right_joint": -1.0}
 
 

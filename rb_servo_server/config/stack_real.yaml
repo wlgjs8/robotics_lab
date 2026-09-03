@@ -662,7 +662,13 @@ safety:
       pika_gripper_base_mesh: "rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_gripper_base_hull.STL"
       pika_finger_left_mesh: "rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_finger_left_hull.STL"
       pika_finger_right_mesh: "rb_servo_server/descriptions/meshes/robots/rb5_850e/visual/tool/pika_finger_right_hull.STL"
-      gripper_finger_travel_m: 0.047
+      # 2026-09-04: 0.047 -> 0.049, MEASURED. The full-open gap between the two TPU tip
+      # faces is 98.0 mm by caliper and the jaws close to contact, so each finger runs
+      # 49.0 mm. 0.047 was never measured -- it was picked so the vendor CAD's finger
+      # pose would close to zero gap, and that pose is 3.8 mm/side inboard of the real
+      # open stop. The finger hulls above are now baked AT the open stop to match, so
+      # both ends of the travel are right rather than only the closed one.
+      gripper_finger_travel_m: 0.049
       stand_ignore_arm_substrings: ["link0"]
       debug_pair_curation: true
       disabled_collision_pairs:

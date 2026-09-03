@@ -1302,11 +1302,11 @@ class GuiContractsTest(unittest.TestCase):
 
     def test_finger_position_maps_gripper_percent_to_travel(self):
         self.assertAlmostEqual(_finger_position_m(100.0), 0.0)        # open
-        self.assertAlmostEqual(_finger_position_m(0.0), 0.047)        # closed (full travel)
-        self.assertAlmostEqual(_finger_position_m(50.0), 0.0235)      # half
+        self.assertAlmostEqual(_finger_position_m(0.0), 0.049)        # closed (full travel)
+        self.assertAlmostEqual(_finger_position_m(50.0), 0.0245)      # half
         self.assertAlmostEqual(_finger_position_m(None), 0.0)         # unknown -> open
         self.assertAlmostEqual(_finger_position_m(150.0), 0.0)        # clamp high -> open
-        self.assertAlmostEqual(_finger_position_m(-10.0), 0.047)      # clamp low -> closed
+        self.assertAlmostEqual(_finger_position_m(-10.0), 0.049)      # clamp low -> closed
 
     def test_update_urdf_config_drives_finger_joints_only_when_present(self):
         class FakeUrdf:
@@ -1327,8 +1327,8 @@ class GuiContractsTest(unittest.TestCase):
         _update_urdf_config(art, arm, gripper_percent=0.0)  # closed
         self.assertEqual(len(art.last), 8)
         self.assertEqual(art.last[:6], list(arm))
-        self.assertAlmostEqual(art.last[6], +0.047)   # finger_left +X
-        self.assertAlmostEqual(art.last[7], -0.047)   # finger_right -X
+        self.assertAlmostEqual(art.last[6], +0.049)   # finger_left +X (measured stroke)
+        self.assertAlmostEqual(art.last[7], -0.049)   # finger_right -X (measured stroke)
         _update_urdf_config(art, arm, gripper_percent=100.0)  # open
         self.assertAlmostEqual(art.last[6], 0.0)
         self.assertAlmostEqual(art.last[7], 0.0)

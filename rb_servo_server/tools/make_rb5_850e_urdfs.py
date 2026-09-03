@@ -111,12 +111,65 @@ STAND_VISUAL_MESH = "../meshes/stands/dual_rb5_850e/dual_rb5_850e_stand_ver2.stl
 # .obj surface by p50 0.0000 mm, p99 <= 0.063 mm, max 0.271 mm, an order below the
 # 1-2 mm the operator needs to judge on screen, for 26 MB instead of 69 MB.
 ARM_VISUAL = {f"link{i}": f"../meshes/robots/rb5_850e/visual/link{i}.dae" for i in range(7)}
+# The fingers carry TWO visuals each, one per printed material, so the operator can
+# see which part of the tip is the rigid spine and which is the compliant blade. The
+# factory one-piece finger was replaced on 2026-09-04 by the printed v15 tip: a black
+# PLA spine plus a #F3E600 95A TPU blade. Both meshes and their placement come from
+# rb_servo_server/tools/make_pika_tool_meshes.py, which carries the mounting-datum
+# derivation and the 1.99 mm seating shift that goes with it.
+#
+# Multiple visuals per link is fine here and was verified, not assumed: yourdfpy 0.0.60
+# gives each one its own scene node (geometry_0, geometry_1) parented to the link with
+# the right transform, and viser 1.0.30's ViserUrdf renders them through
+# add_mesh_trimesh, so the per-visual <material> colour survives.
+# The `tool` link's three visuals are pika_gripper_base.STL partitioned by part (see
+# make_pika_tool_meshes.py): the flange-side mount adapters keep the flat grey the whole
+# tool used to render in, the RFT64 F/T sensor goes brighter, and the gripper itself goes
+# black. pika_gripper_base.STL is unchanged and is still the collision/hull source.
 TOOL_VISUAL = {
-    "tool": "../meshes/robots/rb5_850e/visual/tool/pika_gripper_base.STL",
-    "finger_left": "../meshes/robots/rb5_850e/visual/tool/pika_finger_left.STL",
-    "finger_right": "../meshes/robots/rb5_850e/visual/tool/pika_finger_right.STL",
+    "tool": [
+        ("../meshes/robots/rb5_850e/visual/tool/pika_gripper_mount.STL", "mount_grey"),
+        ("../meshes/robots/rb5_850e/visual/tool/pika_gripper_ft_sensor.STL", "ft_sensor_grey"),
+        ("../meshes/robots/rb5_850e/visual/tool/pika_gripper_body.STL", "gripper_black"),
+    ],
+    "finger_left": [
+        ("../meshes/robots/rb5_850e/visual/tool/pika_finger_left_pla.STL", "pla_black"),
+        ("../meshes/robots/rb5_850e/visual/tool/pika_finger_left_tpu.STL", "tpu_95a_yellow"),
+    ],
+    "finger_right": [
+        ("../meshes/robots/rb5_850e/visual/tool/pika_finger_right_pla.STL", "pla_black"),
+        ("../meshes/robots/rb5_850e/visual/tool/pika_finger_right_tpu.STL", "tpu_95a_yellow"),
+    ],
 }
-FINGER_TRAVEL_M = 0.05
+# The print materials, chosen so the RENDER lands on the target, not so the fraction
+# looks tidy: trimesh's float32 round-trip floors, so the filament's #F3E600 =
+# (243, 230, 0) needs G 0.902 -- the exact fraction 0.90196078 renders as 229.
+# Verified by loading the generated URDF through yourdfpy.
+#
+# pla_black is lifted off 0.0 on purpose: the spine IS black filament, but at 0.0 it
+# renders as an unshaded silhouette against the dark scene and the operator cannot read
+# its form next to the yellow blade. Lower it if you want it truer to the part than to
+# the screen.
+# A single value ramp down the tool, so the four parts separate at a glance without any
+# of them fighting the yellow blade for attention:
+#   ft_sensor_grey  183  the RFT64's machined-aluminium look, the brightest thing here
+#   mount_grey       76  the flange-side adapters, clearly darker than the sensor
+#   gripper_black    43  the housing: black, but off 0 so its curvature still shades
+#   pla_black        33  the printed spine, a shade under the housing it sits on
+TOOL_MATERIALS = {
+    "mount_grey": (0.30, 0.30, 0.30, 1.0),
+    "ft_sensor_grey": (0.72, 0.72, 0.72, 1.0),
+    "gripper_black": (0.17, 0.17, 0.17, 1.0),
+    "pla_black": (0.13, 0.13, 0.13, 1.0),
+    "tpu_95a_yellow": (0.95294118, 0.902, 0.0, 1.0),
+}
+# The CARRIAGE's stroke, MEASURED: the full-open gap is 98.0 mm and the jaws close to
+# contact, so each finger travels half of it. The old 0.05/0.047 pair was never measured
+# -- it was picked so the vendor CAD's finger pose would close to zero gap, which
+# assumed that pose was the open stop. It is 3.8 mm/side short of it
+# (make_pika_tool_meshes.py). Keep this equal to rb_gui's _GRIPPER_FINGER_TRAVEL_M and
+# the config's gripper_finger_travel_m.
+FINGER_TRAVEL_M = 0.049
 STAND_VISUAL_XYZ = "0.0 0.0 0.0"
 STAND_VISUAL_RPY = "0.0 0.0 0.0"
 STAND_HULLS = [f"../meshes/stands/dual_rb5_850e/collision_ver2/stand_hull_{i:03d}.stl"
@@ -300,14 +353,22 @@ def build_display(src: Path) -> ET.ElementTree:
     # build_single() already created an empty `tool` link on attachment_site; give it
     # the gripper body, and add the two fingers as prismatic siblings so the viewer can
     # animate the live jaw percent.
-    for name, mesh in TOOL_VISUAL.items():
+    for mat_name, rgba in TOOL_MATERIALS.items():
+        if root.find(f"material[@name='{mat_name}']") is not None:
+            raise SystemExit(f"display: upstream already defines material {mat_name}")
+        mat = ET.SubElement(root, "material", {"name": mat_name})
+        ET.SubElement(mat, "color", {"rgba": " ".join(f"{c}" for c in rgba)})
+    for name, visuals in TOOL_VISUAL.items():
         link = root.find(f"link[@name='{name}']")
         if link is None:
             link = ET.SubElement(root, "link", {"name": name})
-        vis = ET.SubElement(link, "visual")
-        ET.SubElement(vis, "origin", {"xyz": "0.0 0.0 0.0", "rpy": "0.0 0.0 0.0"})
-        geo = ET.SubElement(vis, "geometry")
-        ET.SubElement(geo, "mesh", {"filename": mesh, "scale": "0.001 0.001 0.001"})
+        for mesh, mat_name in visuals:
+            vis = ET.SubElement(link, "visual")
+            ET.SubElement(vis, "origin", {"xyz": "0.0 0.0 0.0", "rpy": "0.0 0.0 0.0"})
+            geo = ET.SubElement(vis, "geometry")
+            ET.SubElement(geo, "mesh", {"filename": mesh, "scale": "0.001 0.001 0.001"})
+            if mat_name is not None:
+                ET.SubElement(vis, "material", {"name": mat_name})
     for name, lower, upper in (("finger_left", 0.0, FINGER_TRAVEL_M),
                                ("finger_right", -FINGER_TRAVEL_M, 0.0)):
         joint = ET.SubElement(root, "joint",
