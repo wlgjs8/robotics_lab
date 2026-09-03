@@ -999,13 +999,30 @@ force_torque:
     # (ft_sensor_measurement) = 45 mm.
     sensor_offset_mm: [0.0, 0.0, 45.0]
 
-    # *** THE MEASURED SENSOR AXES, AS BASIS COLUMNS IN THE FLANGE FRAME. ***
-    # CM converged these on the cell (left arm, 2026-08-16, two hand-push rounds on
-    # the raw wrench): round 1 pinned the permutation, round 2 caught the remaining
-    # sign. det = -1 — the unit reports in a LEFT-HANDED axis set, and that is
-    # CORRECT. Do not "fix" it, and do NOT copy the URDF's ft_sensor_base_joint yaw
-    # (+90 deg, det +1): that is the nominal MECHANICAL placement and disagrees with
-    # this measured electrical relabel by a sign flip.
+    # *** THE SENSOR AXES, AS BASIS COLUMNS IN THE FLANGE FRAME. ***
+    # det = -1 — the unit reports in a LEFT-HANDED axis set, and that is CORRECT. Do
+    # not "fix" it, and do NOT copy the URDF's ft_sensor_base_joint yaw (+90 deg,
+    # det +1): that is the nominal MECHANICAL placement and disagrees with this
+    # electrical relabel by a sign flip.
+    #
+    # *** PROVENANCE — READ THIS BEFORE CITING IT AS MEASURED ON OUR ARMS. ***
+    # It is not. This value is DERIVED, by two routes that agree:
+    #   1. CM's chimpanzee (RB5-850E — our arm) preset carries fx[0,0,-1] / fy[1,0,0]
+    #      / fz[0,1,0] in ITS flange frame, from the 2026-07-07 7-pose gravity
+    #      calibration (2.055 kg, 0.16 N residual) and the 2026-08-06 tool
+    #      identification (0.373 / 0.491 N). Our `attachment_site` is CM's link6
+    #      rotated Rx+90 deg, and re-expressing their triad through that gives
+    #      exactly the three vectors below.
+    #   2. CM's monkey (RB3-730ES) cell converged on these SAME numbers by hand-push
+    #      on 2026-08-16 — because the RB3 flange relates to the RB5 flange by the
+    #      same Rx(-90 deg) map. That agreement is a useful cross-check and NOTHING
+    #      MORE: it is a different robot, and an earlier version of this comment
+    #      cited it as if it were our arms.
+    # CM's own record lists the push test on BOTH chimpanzee arms as still OWED
+    # (findings/the-rft64-sensor-is-left-handed.md, 2026-09-02). The procedure is
+    # two minutes: tare, then push the tool along flange +X/+Y/+Z by hand and check
+    # each push reads on the same axis with the same sign. Until that is done on
+    # THESE arms, this triad is a well-founded derivation, not a measurement.
     axes:
       fx: [ 0.0, -1.0,  0.0]
       fy: [ 1.0,  0.0,  0.0]
@@ -1119,6 +1136,23 @@ force_control:
   #   k = max_force_n / d_max          10 N / 25 mm = 400 N/m
   #   b = 2*zeta*sqrt(m*(k + k_env))   zeta = 0.25, k_env = 5e4 (hard plastic)
   #   m = 15 kg                        CM owner constraint 10..15
+  #
+  # *** AND THAT SOLVE CARRIES A SPEED: v_max = 50 mm/s. *** CM's own generator
+  # reproduces this block exactly (`follow_force_params.py --check 10 15` gives
+  # k 400.0, b 434.7413, k_r 8.0214, b_r 15.7164, M_thr 1.4) at its DEFAULT
+  # --v-max 50. This cell streams at 0.45 m/s -- nine times that. The gate's loop
+  # gain K = 1.5*v_max/d_max goes 3.0/s -> 27.0/s with it, and K*T_d lands at 0.32
+  # (12 ms) to 0.70 (26 ms) against CM's bands of <0.3 comfortable / <0.6 watch it.
+  # Not changed here: lowering the streaming speed is an operator decision and
+  # raising d_max raises a force limit. Recorded so the pairing stays visible.
+  #
+  # *** ZETA IS NOT A STABILITY CRITERION. *** It is a sound way to pick b, but the
+  # loop closes through the environment with delay in it, and the binding constraint
+  # is phase margin. These numbers are stable against a hand (+28 dB) and unstable
+  # against a rigid surface (0 dB at k_env ~26 kN/m; the 5e4 assumed just above is
+  # already past it). Rotation goes first, at ~22 kN/m on the pika's real lever --
+  # which is what saturated J6 in the 2026-08-27 incident below.
+  # FULL ANALYSIS AND THE NUMBERS: docs/reference/force_control_stability_margin.md
   #
   # THE FORCE IT SETTLES AT IS THE GATE'S, NOT THIS SPRING'S. k decides the DEVIATION
   # at that force (10 N / 400 = 25 mm), which is why the 40 mm fence is only 1.6x

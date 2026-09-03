@@ -1956,6 +1956,48 @@ DualArmServoLoop::DualArmServoLoop(
     right_overlay_.configure(config.force_control, control_period_sec);
     left_force_gate_.configure(config.force_control, control_period_sec);
     right_force_gate_.configure(config.force_control, control_period_sec);
+    // PRINT THE AXIS TRIAD AT BOOT. The loader already refuses a DEGENERATE triad, but a
+    // well-formed WRONG one is silent -- and that is the failure that actually happens.
+    // controller-manager ran its RB5 cell on the datasheet nominal for 18 days
+    // (2026-08-15 to 09-02) with flange X and Y interchanged for force AND torque; it
+    // surfaced only when an operator hand-pushed the admittance and said "force 축과
+    // motion 축이 안 맞는데?". Their post-mortem names the missing line specifically:
+    // "Nothing printed the triad." CM's answer was log_eft_axes(); this is its port, so
+    // the first lines of our run log say which basis the wrench was mapped through.
+    // (wiki/findings/the-rft64-sensor-is-left-handed.md)
+    {
+        const auto ft_line = [](const char* side, const FtArmConfig& a) {
+            if (!a.enable) {
+                std::cerr << "[INFO] ft " << side << ": DISABLED\n";
+                return;
+            }
+            const auto& x = a.axis_fx;
+            const auto& y = a.axis_fy;
+            const auto& z = a.axis_fz;
+            const double det = x[0] * (y[1] * z[2] - y[2] * z[1])
+                             - y[0] * (x[1] * z[2] - x[2] * z[1])
+                             + z[0] * (x[1] * y[2] - x[2] * y[1]);
+            std::cerr << "[INFO] ft " << side << " '" << a.sensor_name << "' axes (basis columns"
+                      << " in the flange frame): fx[" << x[0] << ',' << x[1] << ',' << x[2]
+                      << "] fy[" << y[0] << ',' << y[1] << ',' << y[2]
+                      << "] fz[" << z[0] << ',' << z[1] << ',' << z[2]
+                      << "] det=" << det << "\n";
+            // det = -1 is CORRECT for the RFT64: the unit reports in a LEFT-HANDED axis
+            // set and the triad is the change of basis that carries it right-handed. A
+            // det of +1 on this part number is the DATASHEET NOMINAL, i.e. exactly the
+            // value CM's 18-day outage ran on -- so that, not det < 0, is what warns.
+            if (a.sensor_name == "RFT64-6A01-A" && det > 0.0) {
+                std::cerr << "[WARN] ft " << side << ": det = +1 on an RFT64-6A01-A. That is the"
+                          << " DATASHEET NOMINAL, not a calibrated triad -- the measured unit is"
+                          << " LEFT-handed (det = -1). This is the exact shape of the"
+                          << " controller-manager 2026-08-15..09-02 defect (flange X/Y"
+                          << " interchanged for force and torque). Verify with a hand push"
+                          << " before running force control.\n";
+            }
+        };
+        ft_line("left ", config.force_torque.left);
+        ft_line("right", config.force_torque.right);
+    }
     if (config.force_control.enable) {
         // Print the LIVE law at boot. A force law that only exists in a yaml nobody
         // opened is a law nobody can check against what the arm actually did.

@@ -1373,9 +1373,10 @@ struct FtArmConfig {
     // flange-aligned axes.
     //
     // *** THIS IS NOT A ROTATION AND MAY NOT BE SPELLED AS ONE. *** The RFT64 unit on
-    // this cell reports in a LEFT-HANDED axis set — CM's measured triad has
-    // determinant -1 (fx [0,-1,0] / fy [1,0,0] / fz [0,0,-1], converged on the cell
-    // 2026-08-16 over two hand-push rounds). No rpy and no rotation matrix can
+    // this cell reports in a LEFT-HANDED axis set — the triad has determinant -1
+    // (fx [0,-1,0] / fy [1,0,0] / fz [0,0,-1]; DERIVED from CM's chimpanzee RB5
+    // calibration, not yet push-tested on our arms — see stack_real.yaml for the
+    // provenance and the two-minute check that would close it). No rpy and no rotation matrix can
     // express that, which is why this is three vectors and not a pose. Do not
     // "fix" the determinant, and do NOT derive these from the URDF's
     // `ft_sensor_base_joint` rpy: that yaw is the NOMINAL MECHANICAL placement
