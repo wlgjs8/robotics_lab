@@ -124,6 +124,7 @@ struct Sample {
     double jnt_ang[kJoints];
     double jnt_ref[kJoints];
     double tcp_pos[kJoints];
+    double eft[kJoints];   // external F/T, IN THE SENSOR'S OWN AXES (see below)
     int init_state_info;   // 0..6; 6 = activation done
     int init_error;
     int robot_state;
@@ -279,6 +280,9 @@ int main(int argc, char** argv) {
                     smp.jnt_ref[j] = st->sdata.jnt_ref[j];
                     smp.tcp_pos[j] = st->sdata.tcp_pos[j];
                 }
+                smp.eft[0] = st->sdata.eft_fx; smp.eft[1] = st->sdata.eft_fy;
+                smp.eft[2] = st->sdata.eft_fz; smp.eft[3] = st->sdata.eft_mx;
+                smp.eft[4] = st->sdata.eft_my; smp.eft[5] = st->sdata.eft_mz;
                 smp.init_state_info = st->sdata.init_state_info;
                 smp.init_error = st->sdata.init_error;
                 smp.robot_state = st->sdata.robot_state;
@@ -306,6 +310,7 @@ int main(int argc, char** argv) {
                 printJson("jnt_ang_deg", got.back().jnt_ang, false);
                 printJson("jnt_ref_deg", got.back().jnt_ref, false);
                 printJson("tcp_pos", got.back().tcp_pos, false);
+                printJson("eft_raw", got.back().eft, false);
                 std::printf("      \"samples\": %d,\n", static_cast<int>(got.size()));
                 std::printf("      \"max_sample_spread_deg\": %.6f,\n", st.max_sample_spread_deg);
                 std::printf("      \"max_ref_error_deg\": %.6f\n", st.max_ref_error_deg);
@@ -319,6 +324,12 @@ int main(int argc, char** argv) {
                 printJointArray("jnt_ang", got.back().jnt_ang, "deg");
                 printJointArray("jnt_ref", got.back().jnt_ref, "deg");
                 printJointArray("tcp_pos", got.back().tcp_pos, "mm,deg (arm base frame)");
+                // UNINTERPRETED, exactly as rbpodo_backend carries it: these are the
+                // SENSOR's own axes, not flange- or tool-aligned. Turning them into a
+                // wrench needs force_torque.<arm>.axes from the config, which is a
+                // per-machine measurement. Printed raw so a direction check does not
+                // depend on that mapping being right -- which is the thing being checked.
+                printJointArray("eft(raw)", got.back().eft, "N,Nm  SENSOR AXES, biased");
                 const Sample& last = got.back();
                 std::printf("    init_state %d/6%s  robot_state %d  sos %d  ems %d  soft_estop %d"
                             "  collision %d  self_collision %d\n",

@@ -540,7 +540,7 @@ safety:
     # ASSUMES the table sits the same way relative to the stand. The stand itself
     # changed (arm spacing +/-0.157 -> +/-0.197 m, height 0.580 -> 0.570), so re-confirm
     # the extents against the real table before trusting the far faces.
-    min_m: [0.300, -0.400, -0.200]
+    min_m: [0.300, -0.400, -0.350]
     max_m: [1.100, 0.400, 0.590]
     # runtime_* is the envelope a RUNTIME SetRoiBounds may move the box within, and it
     # is what rb_gui derives its slider limits from. z_min was -0.2 m, so the GUI could
