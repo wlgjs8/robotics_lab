@@ -147,6 +147,24 @@ class ChunkFollowerSegment {
   }
 
   bool hasState() const { return have_state_; }
+
+  // TRANSLATE THE CHAINED STATE AND THE IN-FLIGHT SEGMENT BY `delta`, keeping the
+  // velocity/acceleration state untouched. This is the force overlay's FOLD landing
+  // in the plan: the displacement the admittance law grew this tick is moved out of
+  // the overlay and into the reference chain, so the next solve starts from the pose
+  // the arm was actually commanded to, and the samples still to be consumed from
+  // the current segment are shifted with it (a Ruckig trajectory is translation-
+  // invariant, so shifting both endpoints shifts every sample). `p0_` is the END
+  // state of the last solve; the sample offset carries the same delta into
+  // sample() until the next solve, which starts from the shifted p0_ and therefore
+  // needs no offset of its own.
+  void shiftPosition(const std::array<double, N>& delta) {
+    if (!have_state_) return;
+    for (std::size_t d = 0; d < N; ++d) {
+      p0_[d] += delta[d];
+      sample_offset_[d] += delta[d];
+    }
+  }
   // Update the segment period (policy_dt may vary per chunk frame). Cheap; does
   // not re-prewarm (allocation already done at construction).
   void setDt(double dt) { dt_ = dt; }
@@ -205,6 +223,7 @@ class ChunkFollowerSegment {
     p0_ = p; v0_ = v; a0_ = a;
     last_traj_ = traj;
     have_traj_ = true;
+    sample_offset_ = {};   // the new trajectory was solved FROM the shifted p0_
     return out;
   }
 
@@ -213,6 +232,7 @@ class ChunkFollowerSegment {
               std::array<double, N>& a) const {
     if (!have_traj_) return false;
     last_traj_.at_time(t, p, v, a);
+    for (std::size_t d = 0; d < N; ++d) p[d] += sample_offset_[d];
     return true;
   }
 
@@ -301,6 +321,8 @@ class ChunkFollowerSegment {
   bool have_traj_{false};
 
   std::array<double, N> p0_{}, v0_{}, a0_{};
+  // Accumulated shiftPosition() since the last solve (see shiftPosition).
+  std::array<double, N> sample_offset_{};
   bool have_state_{false};
 };
 

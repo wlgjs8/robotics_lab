@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <vector>
+#include <algorithm>
 
 #include "rb_servo/config/config.hpp"
 #include "rb_servo/control/admittance_overlay.hpp"
@@ -664,7 +666,229 @@ bool testWrenchFilterFlattensShockAndKeepsSteadyForce() {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// THE k = 0 LAW AND THE FOLD (2026-09-03, controller-manager's live configuration)
+// ---------------------------------------------------------------------------
+
+// CM's live follow row, as shipped in stack_real.yaml since 2026-09-03.
+rb_servo::ForceControlConfig springlessLaw() {
+    rb_servo::ForceControlConfig c = shippedLaw();
+    for (int i = 0; i < 3; ++i) {
+        c.stream.translation[i] = {rb_servo::ForceAxisMode::Compliance, 12.0, 1000.0, 0.0, 0.0};
+        c.stream.rotation[i] = {rb_servo::ForceAxisMode::Compliance, 0.3, 30.0, 0.0, 0.0};
+        c.hold.translation[i] = c.stream.translation[i];
+        c.hold.rotation[i] = c.stream.rotation[i];
+    }
+    c.fold_deviation = true;
+    c.wrench_filter_hz = 25.0;
+    c.gate_close_tau_s = 0.10;
+    c.gate_open_tau_s = 1.0;     // 0.40 -> 1.0 with k = 0: a fast re-open feeds the ring
+    return c;
+}
+
+// THE PURE-DAMPER PREDICATE IS THE WHOLE GATE ON THE FOLD. k == 0 with no force
+// target, per triad; a rigid axis neither helps nor hinders; any spring or any
+// FORCE-mode axis refuses.
+bool testPureDamperPredicate() {
+    rb_servo::control::AdmittanceOverlay overlay;
+    overlay.configure(shippedLaw(), 0.002);                 // k = 400: a spring
+    CHECK(!overlay.pureDamperTranslation());
+    CHECK(!overlay.pureDamperRotation());
+    rb_servo::ForceControlConfig k0 = springlessLaw();
+    overlay.setLaw(k0.stream);
+    CHECK(overlay.pureDamperTranslation());
+    CHECK(overlay.pureDamperRotation());
+    // A rigid axis is admitted (it holds d = 0 by construction).
+    rb_servo::ForceLawConfig law = k0.stream;
+    law.translation[0].mode = rb_servo::ForceAxisMode::Rigid;
+    overlay.setLaw(law);
+    CHECK(overlay.pureDamperTranslation());
+    // A FORCE-mode axis walks by design and must keep its designed stop (the fence).
+    law = k0.stream;
+    law.translation[2].mode = rb_servo::ForceAxisMode::Force;
+    law.translation[2].ref_force = -10.0;
+    overlay.setLaw(law);
+    CHECK(!overlay.pureDamperTranslation());
+    CHECK(overlay.pureDamperRotation());                    // triads answer independently
+    // A spring on one rotation axis refuses the rotation triad only.
+    law = k0.stream;
+    law.rotation[1].k = 8.0;
+    overlay.setLaw(law);
+    CHECK(overlay.pureDamperTranslation());
+    CHECK(!overlay.pureDamperRotation());
+    return true;
+}
+
+// dropDeviation() DROPS THE DISPLACEMENT AND KEEPS THE MOMENTUM - the opposite half
+// of freeze(). The next tick continues from the live velocity, so a k = 0 law that is
+// folded every tick still yields at F/b instead of restarting from rest each tick
+// (CM's failed "stateless k = 0": 0.04 mm/tick at 10 N, i.e. no compliance).
+bool testDropDeviationKeepsTheVelocity() {
+    rb_servo::ForceControlConfig cfg = springlessLaw();
+    rb_servo::control::AdmittanceOverlay overlay;
+    overlay.configure(cfg, 0.002);
+    const rb_servo::math::Vector3 f(0.0, 0.0, 10.0);
+    const rb_servo::math::Vector3 m = rb_servo::math::Vector3::Zero();
+    for (int i = 0; i < 2000; ++i) overlay.step(f, m);      // 4 s: v -> F/b = 10 mm/s
+    const double v = overlay.velocity().z();
+    CHECK(near(v, 10.0 / 1000.0, 2e-4));
+    CHECK(overlay.deviation().z() > 0.01);
+    overlay.dropDeviation();
+    CHECK(near(overlay.deviation().norm(), 0.0, 1e-15));
+    CHECK(near(overlay.velocity().z(), v, 1e-15));
+    overlay.step(f, m);
+    CHECK(near(overlay.deviation().z(), v * 0.002, 1e-6));  // one tick at the live speed
+    // Folding EVERY tick keeps yielding at F/b: 500 ticks of (step, drop) walk 10 mm.
+    double walked = 0.0;
+    for (int i = 0; i < 500; ++i) {
+        overlay.step(f, m);
+        walked += overlay.deviation().z();
+        overlay.dropDeviation();
+    }
+    CHECK(near(walked, 0.010, 5e-4));
+    return true;
+}
+
+// A one-axis plant: a plan streamed at v_cmd into a wall of stiffness k_env, the
+// wrench it reports delayed by `delay_ticks` and low-passed like the servo loop does,
+// the gate on the plan advance, the overlay on the emitted pose. `fold` books the
+// deviation into the plan every tick (the servo loop's foldForceDeviation); without it
+// the plan walks into the wall forever and the overlay carries the difference.
+struct WallLoop {
+    rb_servo::control::AdmittanceOverlay overlay;
+    rb_servo::control::ForceGate gate;
+    bool fold = false;
+    double dt = 0.002;
+    double wall_z = 0.010;
+    double k_env = 30663.0;
+    double v_cmd = 0.050;
+    double lpf_hz = 25.0;
+    std::vector<double> delay;
+    std::size_t head = 0;
+    double f_filt = 0.0;
+    bool primed = false;
+    double plan_z = 0.0;
+    double emitted_z = 0.0;
+    double absorbed_z = 0.0;
+    double force_seen = 0.0;
+
+    WallLoop(const rb_servo::ForceControlConfig& cfg, bool fold_on, int delay_ticks)
+        : fold(fold_on), delay(static_cast<std::size_t>(std::max(1, delay_ticks)), 0.0) {
+        overlay.configure(cfg, dt);
+        gate.configure(cfg, dt);
+        lpf_hz = cfg.wrench_filter_hz;
+    }
+    void tick() {
+        // The sensor reports the contact of `delay` ticks ago.
+        const double pen = emitted_z - wall_z;
+        delay[head] = pen > 0.0 ? -k_env * pen : 0.0;
+        head = (head + 1) % delay.size();
+        const double f_raw = delay[head];
+        if (lpf_hz > 0.0) {
+            if (!primed) { f_filt = f_raw; primed = true; }
+            else {
+                const double tau = 1.0 / (2.0 * M_PI * lpf_hz);
+                f_filt += std::min(1.0, dt / (tau + dt)) * (f_raw - f_filt);
+            }
+        } else {
+            f_filt = f_raw;
+        }
+        force_seen = f_filt;
+        const rb_servo::math::Vector3 f(0.0, 0.0, f_filt);
+        const rb_servo::math::Vector3 m = rb_servo::math::Vector3::Zero();
+        gate.update(f, m);
+        // The plan advance into the wall, projectively gated (the chunk follower's
+        // setAdvanceGate does this per segment; per tick is the same law).
+        double removed = 0.0;
+        const rb_servo::math::Vector3 adv =
+            gate.applyTranslation(rb_servo::math::Vector3(0.0, 0.0, v_cmd * dt), &removed);
+        plan_z += adv.z();
+        overlay.step(f, m, gate.translation());
+        emitted_z = plan_z + overlay.deviation().z();
+        if (fold) {
+            const double d = overlay.deviation().z();
+            plan_z += d;
+            absorbed_z += d;
+            overlay.dropDeviation();
+        }
+    }
+};
+
+// THE FOLD IS A GAUGE CHANGE, CLOSED THROUGH A WALL: with and without it the emitted
+// pose is identical on every tick, while the deviation that walks without bound in the
+// overlay is, with the fold, exactly the displacement booked into the plan.
+bool testFoldIsInvisibleToTheContact() {
+    rb_servo::ForceControlConfig cfg = springlessLaw();
+    cfg.max_deviation_m = 0.0;     // no fence: the unfolded walk must not be clipped
+    WallLoop a(cfg, false, 9), b(cfg, true, 9);
+    double max_err = 0.0;
+    for (int i = 0; i < 2500; ++i) {
+        a.tick();
+        b.tick();
+        max_err = std::max(max_err, std::abs(a.emitted_z - b.emitted_z));
+    }
+    std::printf("  fold invariance: max emitted error %.3e m over 5 s; unfolded deviation "
+                "%.1f mm, folded plan shift %.1f mm\n",
+                max_err, a.overlay.deviation().z() * 1e3, b.absorbed_z * 1e3);
+    CHECK(max_err < 1e-9);
+    CHECK(near(b.overlay.deviation().z(), 0.0, 1e-15));        // nothing standing
+    CHECK(near(a.overlay.deviation().z(), b.absorbed_z, 1e-9)); // ... it moved here
+    CHECK(a.overlay.deviation().z() < -0.010);                  // and it IS a walk
+    return true;
+}
+
+// WITH k = 0 THE CONTACT FORCE IS A BY-PRODUCT, NOT A DESIGNED NUMBER (CM 0028 SS2):
+// the plan creeps in at g(F)*v_cmd while the damper retreats at F/b, so a streamed
+// contact rests where b*v_cmd*g(F/F_max) = F - here ~7.6 N for 50 mm/s at b = 1000,
+// below the 10 N gate and well above zero. And the loop's stability against a rigid
+// surface is a DELAY margin (docs/reference/force_control_stability_margin.md):
+// b = 1000 at 18 ms of delay is +4.7 dB against 30.7 kN/m and settles; the old
+// b = 434.7 / m = 15 row is -3.7 dB there and rings.
+bool testSpringlessContactSettlesAtTheDamperFixedPointAndTheOldRowRings() {
+    auto run = [](const rb_servo::ForceControlConfig& cfg, double* p2p_last_s, double* f_mean) {
+        WallLoop w(cfg, true, 9);           // 18 ms of delay
+        double fmin = 1e9, fmax = -1e9, fsum = 0.0;
+        for (int i = 0; i < 3000; ++i) {    // 6 s
+            w.tick();
+            if (i >= 2500) {                // the last second
+                fmin = std::min(fmin, w.force_seen);
+                fmax = std::max(fmax, w.force_seen);
+                fsum += w.force_seen;
+            }
+        }
+        *p2p_last_s = fmax - fmin;
+        *f_mean = -fsum / 500.0;
+    };
+    double p2p_live = 0.0, f_live = 0.0, p2p_old = 0.0, f_old = 0.0;
+    run(springlessLaw(), &p2p_live, &f_live);
+    rb_servo::ForceControlConfig old = springlessLaw();
+    for (int i = 0; i < 3; ++i) {
+        old.stream.translation[i].m = 15.0;
+        old.stream.translation[i].b = 434.7;
+    }
+    run(old, &p2p_old, &f_old);
+    std::printf("  b=1000/m=12: last-second force %.2f N mean, %.3f N p-p | b=434.7/m=15: "
+                "%.2f N mean, %.3f N p-p\n", f_live, p2p_live, f_old, p2p_old);
+    // Fixed point b*v_cmd*g(F/10) = F for b*v_cmd = 50 N is F = 7.6 N.
+    CHECK(f_live > 6.5 && f_live < 8.7);
+    CHECK(p2p_live < 0.5);                  // settled flat (0.00 N p-p in the model)
+    CHECK(p2p_old > 4.0);                   // the old row rings (16 N p-p in the model)
+    // The same live law with the OLD gate re-open (0.40 s) rings 9 N p-p: the gate is a
+    // second loop, and its re-open speed is what feeds the damper ring at this delay.
+    rb_servo::ForceControlConfig fast_gate = springlessLaw();
+    fast_gate.gate_open_tau_s = 0.40;
+    double p2p_fast = 0.0, f_fast = 0.0;
+    run(fast_gate, &p2p_fast, &f_fast);
+    std::printf("  b=1000 with gate open_tau 0.40: %.2f N mean, %.3f N p-p\n", f_fast, p2p_fast);
+    CHECK(p2p_fast > 4.0);
+    return true;
+}
+
 int main() {
+    testPureDamperPredicate();
+    testDropDeviationKeepsTheVelocity();
+    testFoldIsInvisibleToTheContact();
+    testSpringlessContactSettlesAtTheDamperFixedPointAndTheOldRowRings();
     testWrenchFilterFlattensShockAndKeepsSteadyForce();
     testOscillationGuardTripsFreezesAndReleases();
     testAxisMapIsTheMeasuredLeftHandedBasis();

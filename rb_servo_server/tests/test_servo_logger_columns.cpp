@@ -142,6 +142,12 @@ int main() {
         "projection_ceiling_clamped",
         "projection_min_margin_m",
         "selfcol_verdict_age_ms",
+        // the force fold (force_control.fold_deviation)
+        "left_fc_folded",
+        "left_fc_fold_sink",
+        "right_fc_fold_z_m",
+        "right_fc_absorbed_norm_m",
+        "left_fc_absorbed_norm_rad",
     };
     for (const char* name : required) {
         if (!contains(header_fields, name)) {

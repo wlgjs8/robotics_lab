@@ -375,6 +375,18 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_fc_wrench_filt_fx_n"
        << ',' << side << "_fc_wrench_filt_fy_n"
        << ',' << side << "_fc_wrench_filt_fz_n"
+       // THE FOLD (force_control.fold_deviation): what moved into the plan this
+       // tick, where it went, and the running total for the run.
+       << ',' << side << "_fc_folded"
+       << ',' << side << "_fc_fold_sink"
+       << ',' << side << "_fc_fold_x_m"
+       << ',' << side << "_fc_fold_y_m"
+       << ',' << side << "_fc_fold_z_m"
+       << ',' << side << "_fc_absorbed_x_m"
+       << ',' << side << "_fc_absorbed_y_m"
+       << ',' << side << "_fc_absorbed_z_m"
+       << ',' << side << "_fc_absorbed_norm_m"
+       << ',' << side << "_fc_absorbed_norm_rad"
        // The two tracking errors, beside the force columns because the force path is
        // what makes them diverge: a compliant command deliberately leaves the arm.
        << ',' << side << "_track_command_vs_actual_deg"
@@ -788,6 +800,16 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << fc.wrench_filtered_stand.fx
        << ',' << fc.wrench_filtered_stand.fy
        << ',' << fc.wrench_filtered_stand.fz
+       << ',' << fc.folded
+       << ',' << csvEscape(fc.fold_sink)
+       << ',' << fc.fold_m[0]
+       << ',' << fc.fold_m[1]
+       << ',' << fc.fold_m[2]
+       << ',' << fc.absorbed_m[0]
+       << ',' << fc.absorbed_m[1]
+       << ',' << fc.absorbed_m[2]
+       << ',' << fc.absorbed_norm_m
+       << ',' << fc.absorbed_norm_rad
        << ',' << track.command_vs_actual_deg
        << ',' << track.reference_vs_actual_deg
        << ',' << track.reference_valid

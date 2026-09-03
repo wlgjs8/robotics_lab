@@ -1580,6 +1580,35 @@ struct ForceControlConfig {
     double max_velocity_rad_s = 2.0;
     double max_acceleration_rad_s2 = 20.0;
 
+    // ---- the fold (2026-09-03, controller-manager's k = 0 hand-off) --------
+    // With k = 0 the deviation is a bare integrator with no equilibrium but w == 0:
+    // a standing wrench walks it without bound, the nominal chain separates from the
+    // pose the arm is in (CM measured 9.5 m of offset in 300 s, and on 2026-08-26 a
+    // singularity guard stopped both arms on a nominal chain ~97 mm from a healthy
+    // emitted pose). The fold removes that class of failure: every tick, on a law
+    // whose axes are all pure mass-dampers (k == 0, no ref_force -
+    // AdmittanceOverlay::pureDamperTranslation/Rotation), the deviation is handed
+    // to the plan that produced the nominal (the chunk follower's chained state and
+    // knots, or the compliant Hold's latched nominal) and the overlay drops its copy
+    // while KEEPING its velocity. The emitted pose is unchanged by the transfer - it
+    // is a change of variables, not a correction - so the plan and the command are
+    // ONE chain again and nothing can drift between them.
+    //
+    // WHAT IT COSTS, STATED PLAINLY: on a fold path the deviation fence is
+    // unreachable, so free-space drift under a standing wrench (a bad tare, a load in
+    // the gripper) is bounded only by the F/T deadzone, the deviation RATE caps, and
+    // the ROI / collision / joint layers downstream. Re-tare before trusting it.
+    //
+    // A producer that re-issues an ABSOLUTE target every tick (UMI teleop / a policy
+    // sending absolute TcpPoseTarget setpoints through the pose-track SMD) DECLINES
+    // the fold - folding into a reference the source overwrites next tick is a
+    // square wave, not a transfer - and keeps its deviation in the overlay, fenced.
+    //
+    // The loader ties this to the gate rule: `force_gate.enable` with every stream
+    // k = 0 is legal ONLY with the fold on, and a compliant Hold with every hold k = 0
+    // (a hand-guide, the arm stays where it is pushed) likewise.
+    bool fold_deviation = false;
+
     // ---- coverage ----------------------------------------------------------
     // A plain Hold has no Cartesian nominal to deviate from. With this set, the first
     // covered Hold tick LATCHES the measured TCP and holds it as the nominal, which

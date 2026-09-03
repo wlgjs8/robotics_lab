@@ -229,6 +229,22 @@ bool AdmittanceOverlay::quiescent(double eps_m) const {
     return dp_.norm() < eps_m && er_.norm() < 1e-9 && vp_.norm() < 1e-9 && w_.norm() < 1e-9;
 }
 
+bool AdmittanceOverlay::pureDamperTriad(const std::array<ForceAxisConfig, 3>& axes) {
+    for (const ForceAxisConfig& ax : axes) {
+        // RIGID holds d = 0 by construction - it neither helps nor hinders the transfer.
+        if (ax.mode == ForceAxisMode::Rigid || !(ax.m > 0.0) || ax.b < 0.0) continue;
+        if (ax.mode != ForceAxisMode::Compliance) return false;   // FORCE walks by design
+        if (ax.k != 0.0 || ax.ref_force != 0.0) return false;
+    }
+    return true;
+}
+
+void AdmittanceOverlay::dropDeviation() {
+    dp_.setZero();
+    er_.setZero();
+    bounded_ = false;   // there is nothing left to be pinned against the fence
+}
+
 // ---------------------------------------------------------------------------
 // ForceGate
 // ---------------------------------------------------------------------------

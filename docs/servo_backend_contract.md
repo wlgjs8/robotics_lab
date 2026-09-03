@@ -168,9 +168,13 @@ of 0.97–0.99, 1.85 deg rotation at 55 N, and zero deviation-fence events.
 
 Two loader-enforced invariants are indivisible:
 
-- **Gate and spring ship together.** A nonzero stiffness without the gate can
-  ramp contact force without bound; a gate with zero stiffness bounds force but
-  not deviation.
+- **Gate and spring ship together — or the fold does.** A nonzero stiffness
+  without the gate can ramp contact force without bound; a gate with zero
+  stiffness bounds force but not deviation, so `k = 0` under the gate requires
+  `force_control.fold_deviation`, which hands the deviation to the plan every
+  tick (the tracked configuration since 2026-09-03). Telemetry: `force_control.
+  folded / fold_sink / absorbed_*` per arm, logged as `<side>_fc_folded`,
+  `<side>_fc_fold_sink`, `<side>_fc_fold_{x,y,z}_m`, `<side>_fc_absorbed_*`.
 - **Wrench reference and compose pivot move together.** Both are the TCP. A
   wrench shifted to one point must not drive rotation about another.
 

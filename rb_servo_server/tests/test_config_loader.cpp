@@ -1618,8 +1618,53 @@ bool testControllerSimProgressSourceIsSimOnly() {
     return true;
 }
 
+// k = 0 + gate is CM's live configuration and is legal ONLY with the fold: without
+// it nothing bounds the deviation (9.5 m in 300 s). A spring-less compliant Hold
+// likewise. The tracked real stack ships exactly that pairing.
+bool testSpringlessLawRequiresTheFold() {
+    const std::filesystem::path stack_real_path =
+        servoRoot() / "config" / "stack_real.yaml";
+    {
+        const rb_servo::DualArmConfig cfg =
+            rb_servo::loadConfigFromYaml(stack_real_path.string());
+        RB_CHECK(cfg.force_control.enable);
+        RB_CHECK(cfg.force_control.fold_deviation);
+        RB_CHECK(cfg.force_control.gate_enable);
+        RB_CHECK(cfg.force_control.hold_compliance);
+        for (int i = 0; i < 3; ++i) {
+            RB_CHECK(cfg.force_control.stream.translation[i].k == 0.0);
+            RB_CHECK(cfg.force_control.stream.rotation[i].k == 0.0);
+            RB_CHECK(cfg.force_control.hold.translation[i].k == 0.0);
+            RB_CHECK(cfg.force_control.hold.rotation[i].k == 0.0);
+        }
+    }
+    // Fold off + spring-less Hold: the hand-guide has nothing to move its nominal.
+    {
+        std::string body = readFile(stack_real_path);
+        RB_CHECK(replaceOnce(&body, "  fold_deviation: true", "  fold_deviation: false"));
+        const std::string path = writeTempConfig("fold-off-hold", body);
+        const bool rejected = loadRejectsContaining(
+            path, "force_control.hold_compliance is on but every force_control.hold");
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+    // Fold off, Hold not compliant: the gate with k = 0 bounds force, not deviation.
+    {
+        std::string body = readFile(stack_real_path);
+        RB_CHECK(replaceOnce(&body, "  fold_deviation: true", "  fold_deviation: false"));
+        RB_CHECK(replaceOnce(&body, "  hold_compliance: true", "  hold_compliance: false"));
+        const std::string path = writeTempConfig("fold-off-gate", body);
+        const bool rejected = loadRejectsContaining(
+            path, "enable force_control.fold_deviation");
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
+    }
+    return true;
+}
+
 int main() {
     if (!testRepositoryConfigsParse()) return 1;
+    if (!testSpringlessLawRequiresTheFold()) return 1;
     if (!testControllerSimProgressSourceIsSimOnly()) return 1;
     if (!testInitMotionBrakeConfigValidation()) return 1;
     if (!testAutoTareAfterInitMotionConfigValidation()) return 1;

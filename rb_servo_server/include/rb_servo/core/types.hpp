@@ -659,6 +659,18 @@ struct ForceControlTelemetry {
     bool ik_refused = false;
     std::uint64_t ik_refused_total = 0;
     std::uint32_t ik_refused_streak = 0;
+    // THE FOLD (force_control.fold_deviation). `folded` = this tick's deviation was
+    // handed to the plan; `fold_sink` names where ("chunk_follower", "hold_nominal")
+    // or why not ("declined: ..."); `fold_m/rad` is what moved THIS tick and
+    // `absorbed_*` the running total for the run, i.e. how far force has moved the
+    // plan away from where the source asked it to be.
+    bool folded = false;
+    std::string fold_sink;
+    std::array<double, 3> fold_m{};
+    std::array<double, 3> fold_rad{};
+    std::array<double, 3> absorbed_m{};
+    double absorbed_norm_m = 0.0;
+    double absorbed_norm_rad = 0.0;
 };
 
 struct SafetyTrackingTelemetry {

@@ -144,3 +144,68 @@ Do **not** use `np.angle` for the phase — it wraps, and the root-find silently
 * `submodules/controller-manager/wiki/decisions/0039-the-one-force-law.md` — the law is
   `{m, b, k, f_ref}`; the `mode` field we still print at boot was retired upstream
 * `docs/reference/pika_tool_geometry.md` — where the 202.642 mm lever comes from
+
+## 2026-09-03 — spring 0 (k = 0), like controller-manager
+
+The tracked stacks now run CM's live follow shape: `k = 0` on every axis with
+`force_control.fold_deviation: true` (the deviation is booked into the plan every
+tick — see `AGENTS.md` § Force Control). With no spring the loop is
+`L(s) = k_env / (s·(m·s + b)) · 1/(1 + s/ω_f) · e^(−T_d·s)` and **b is the only knob**.
+`rb_servo_server/tools/force_loop_margin.py` generates every number below.
+
+**Translation, k = 0, 25 Hz filter — gain margin [dB] at k_env 30.7 kN/m / 44.4 kN/m:**
+
+| m | b | T_d 12 ms | T_d 18 ms | T_d 26 ms | hand at 30 mm/s |
+|---|---|---|---|---|---|
+| 15 | 434.7 (the old row, k removed) | −1.3 / −4.5 | −3.7 / −6.9 | −6.0 / −9.2 | 13 N |
+| 12 | 700 | +3.5 / +0.3 | +1.2 / −2.1 | −1.1 / −4.4 | 21 N |
+| **12** | **1000 (live, CM's pick)** | **+7.1 / +3.9** | **+4.7 / +1.5** | **+2.4 / −0.8** | **30 N** |
+| 12 | 1500 | +11.1 / +7.9 | +8.7 / +5.5 | +6.3 / +3.1 | 45 N |
+
+**Rotation, k = 0, on the pika's 202.6 mm lever (k_env·L²):**
+
+| m | b | T_d 12 ms | T_d 18 ms | T_d 26 ms |
+|---|---|---|---|---|
+| 0.3 | 10 (CM's row, derived for 140 mm) | −6.2 / −9.4 | −8.6 / −11.8 | −10.9 / −14.1 |
+| 0.3 | 20 | +0.5 / −2.7 | −1.8 / −5.0 | −4.1 / −7.3 |
+| **0.3** | **30 (live)** | **+4.6 / +1.4** | **+2.2 / −1.0** | **−0.1 / −3.4** |
+| 0.3 | 40 | +7.5 / +4.3 | +5.0 / +1.8 | +2.7 / −0.6 |
+
+Which T_d column applies is **not settled**: 12 ms is what the RB3 / fw 8.7.3 ring
+implied; CM measured the command→reference echo at 18 ms on fw 8.9.1, and this
+cell's own end-to-end command→motion was measured at 22.3 ms on 8.7.3. Read the
+18–26 ms columns until it is re-measured on the RB5 boxes.
+
+### The gate is a second loop, and a nonlinear one
+
+The linear margin is necessary, not sufficient. Closing the loop offline through a
+rigid wall with the gate in it (`test_force_control.cpp`, `WallLoop`: a plan streamed
+at 50 mm/s into a wall, the wrench delayed and low-passed as the servo loop does it,
+the projective gate on the plan advance, the overlay on the emitted pose):
+
+| b | gate open τ | 18 ms / 30.7 kN/m | 18 ms / 44 kN/m | 26 ms / 30.7 kN/m |
+|---|---|---|---|---|
+| 1000 | 0.40 s (old) | 9.2 N p-p ring | 19 N | 19 N |
+| 1000 | **1.0 s (live)** | **settles flat** | 12 N | 12 N |
+| 1500 | 1.0 s | flat | 6 N | 7 N |
+
+A hand (1 kN/m) and wood (15 kN/m) are quiet at every delay with either b. Two
+things follow:
+
+* **`force_gate.open_tau_s` went 0.40 → 1.0.** A fast re-open makes the gate a relay,
+  and with no spring the relay feeds the damper ring directly. CM had this exact
+  change "on the table" and held it pending a re-measure; the model that predicted
+  both cells' rings says take it. Cost: after a contact releases, the plan's authority
+  *into* the last contact direction recovers over ~1 s instead of ~0.4 s (retreat and
+  sliding are never gated).
+* **Against a rigid surface at this cell's delay, b = 1000 is marginal** — the same
+  verdict CM reached on its jig (+0.6 dB). The lever that buys margin is the delay;
+  b = 1500 is the fallback if a ring shows up on hardware, at 45 N per 30 mm/s by hand.
+
+### What k = 0 converges to
+
+With no spring a streamed contact rests where the plan's gated creep equals the
+damper's retreat, `b·v_cmd·g(F/F_max) = F` — ~7.6 N for 50 mm/s at b = 1000 against
+the 10 N gate, a **by-product of the stream speed, not a designed number** (CM 0028 §2
+measured the same). A designed converged force needs a `ref_force` (CM 0039's one law);
+that is the next step, not this one.

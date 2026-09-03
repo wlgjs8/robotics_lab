@@ -2035,7 +2035,26 @@ DualArmServoLoop::DualArmServoLoop(
         if (k > 0.0 && config.force_control.gate_max_force_n > 0.0) {
             std::cerr << "[INFO]   streamed contact converges at max_force_n / k = "
                       << config.force_control.gate_max_force_n / k * 1e3 << " mm\n";
+        } else if (k == 0.0) {
+            // No spring: the gate stops the plan, the damper retreats until the
+            // wrench is inside the deadzone. The deviation is what the fold books
+            // into the plan every tick, so there is no F/k to print.
+            std::cerr << "[INFO]   stream law is a pure mass-damper (k = 0): the gate stops "
+                         "the plan at " << config.force_control.gate_max_force_n
+                      << " N, the damper yields at F/b = "
+                      << (config.force_control.stream.translation[2].b > 0.0
+                              ? 10.0 / config.force_control.stream.translation[2].b * 1e3
+                              : 0.0)
+                      << " mm/s per 10 N; fold "
+                      << (config.force_control.fold_deviation ? "ON" : "OFF") << "\n";
         }
+        std::cerr << "[INFO]   fold_deviation "
+                  << (config.force_control.fold_deviation ? "ON" : "OFF")
+                  << (config.force_control.fold_deviation
+                          ? " (k = 0 hand-off: the deviation is booked into the plan every tick; "
+                            "the fence is a dead backstop on fold paths)"
+                          : "")
+                  << "\n";
         // What a hand push actually buys, since that is the number an operator checks
         // against the arm with a ruler and the gate has nothing to do with it.
         const double kh = config.force_control.hold.translation[2].k;
@@ -2044,6 +2063,11 @@ DualArmServoLoop::DualArmServoLoop(
             std::cerr << "[INFO]   compliant Hold: 10 N -> " << 10.0 / kh * 1e3
                       << " mm, 1 Nm -> " << 1.0 / khr * 180.0 / M_PI
                       << " deg (the gate does NOT act here)\n";
+        } else if (config.force_control.hold_compliance) {
+            const double bh = config.force_control.hold.translation[2].b;
+            std::cerr << "[INFO]   compliant Hold is a HAND-GUIDE (k = 0): 10 N moves the arm at "
+                      << (bh > 0.0 ? 10.0 / bh * 1e3 : 0.0)
+                      << " mm/s and it STAYS where it is pushed (no spring-back)\n";
         }
     }
     left_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
@@ -6052,6 +6076,21 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                       << ": Hold made compliant, nominal latched at the measured TCP ["
                       << hold_nominal->x << ", " << hold_nominal->y << ", "
                       << hold_nominal->z << "] m\n";
+            // A COMPLIANT HOLD IS A MOTION COMMAND THE SERVER AUTHORED, so it arms the
+            // servo_j stream exactly as a client's motion command does. Without this
+            // the startup posture ("awaiting_first_motion_command") pins the wire while
+            // the overlay keeps integrating the hand's wrench: measured 2026-09-03 in
+            // MODE=sim after a no-op InitMotion (arm already at the init pose, so
+            // nothing ever armed the stream) - the hold nominal walked 194 mm / 75 deg
+            // under pushes that NOTHING executed, which would have been a lunge the
+            // moment any later command armed the wire.
+            if (!servo_stream_armed_.load(std::memory_order_relaxed)) {
+                servo_stream_armed_.store(true, std::memory_order_relaxed);
+                std::cerr << "[INFO] servo stream ARMED by the compliant Hold on "
+                          << toString(fc_arm)
+                          << " (force control composes onto the wire; a pinned wire "
+                             "would wind the overlay open-loop)\n";
+            }
         }
         eff.mode = ControlMode::TcpPoseTarget;
         eff.tcp_target_stand = *hold_nominal;
@@ -6314,11 +6353,37 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 (left_arm ? left_overlay_ : right_overlay_).freeze();
                 continue;
             }
+            // *** THE COMPOSED COMMAND MUST BE ABLE TO REACH THE ROBOT. *** The
+            // overlay is an open-loop integrator on the measured wrench; while the
+            // wire is pinned (startup posture before the first motion command, or the
+            // queue-sync settling hold) nothing it composes lands, the wrench never
+            // answers, and the deviation - or, with the fold, the plan itself - winds
+            // away from the arm. The rate-based execution guard in
+            // forceControlCovered cannot see this case (a pinned command has no rate),
+            // so it is refused here by name. Freeze, do not integrate.
+            if (!servo_stream_armed_.load(std::memory_order_relaxed)) {
+                tel.coverage_reason =
+                    "servo stream is not armed (no motion command yet) - the composed "
+                    "command would not reach the robot";
+                (left_arm ? left_overlay_ : right_overlay_).freeze();
+                continue;
+            }
+            if (qsyncSettlingHoldActive(arm_id)) {
+                tel.coverage_reason =
+                    "queue-sync settling hold pins this arm's output - compliance resumes "
+                    "on track";
+                (left_arm ? left_overlay_ : right_overlay_).freeze();
+                continue;
+            }
             const RobotState& arm_state = left_arm ? left_state : right_state;
             Pose6D target = track.tcp_target_stand;
             if (applyForceOverlay(arm_id, arm_state, &target)) {
                 track.tcp_target_stand = target;
             }
+            // THE FOLD: the composed target above is final for this tick; what moves
+            // here is only where the deviation is BOOKED for the next one.
+            foldForceDeviation(arm_id, arm_ctx[i].chunk_follower, arm_ctx[i].follower_output_smd,
+                               arm_ctx[i].abc_telemetry.follower_active, tel);
             // FEED THE GATE TO THE PLAN, not just to the law. The overlay makes the
             // arm YIELD; only the gate stops the PLAN from walking further into what
             // it is yielding to. Without this the spring's deviation grows for as long
@@ -8765,6 +8830,90 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
     }
     gate_prev = tel.gate_closed;
     return tel.compose_applied;
+}
+
+void DualArmServoLoop::foldForceDeviation(ArmId arm,
+                                          control::CartesianChunkFollower& follower,
+                                          control::FollowerOutputSmd& output_smd,
+                                          bool follower_drove,
+                                          ForceControlTelemetry& tel) {
+    const bool left = arm == ArmId::Left;
+    control::AdmittanceOverlay& overlay = left ? left_overlay_ : right_overlay_;
+    std::optional<Pose6D>& hold_nominal =
+        left ? left_hold_compliance_nominal_ : right_hold_compliance_nominal_;
+    math::Vector3& absorbed = left ? left_fc_absorbed_m_ : right_fc_absorbed_m_;
+    Eigen::Quaterniond& absorbed_r = left ? left_fc_absorbed_r_ : right_fc_absorbed_r_;
+
+    tel.folded = false;
+    tel.fold_m = {};
+    tel.fold_rad = {};
+    tel.absorbed_m = {absorbed.x(), absorbed.y(), absorbed.z()};
+    tel.absorbed_norm_m = absorbed.norm();
+    tel.absorbed_norm_rad = Eigen::AngleAxisd(absorbed_r).angle();
+
+    if (!config_.force_control.fold_deviation) {
+        tel.fold_sink = "off";
+        return;
+    }
+    // THE GATE ON THE TRANSFER: only a law whose every axis is a pure mass-damper
+    // (k == 0, no force target) makes the hand-off a change of variables. Any
+    // spring would follow the transfer and turn it into CM's origin-walk leash.
+    if (!overlay.pureDamperTranslation() || !overlay.pureDamperRotation()) {
+        tel.fold_sink = "declined: law has a spring or a force target";
+        return;
+    }
+    // WHO TAKES IT. The sink must be a chain that carries a displacement forward on
+    // its own; a producer that re-issues an absolute target every tick would
+    // overwrite the fold and the command would square-wave by one tick's travel.
+    const char* sink = nullptr;
+    if (tel.law == "hold") {
+        if (!hold_nominal.has_value()) {
+            tel.fold_sink = "declined: Hold has no latched nominal";
+            return;
+        }
+        sink = "hold_nominal";
+    } else if (follower_drove) {
+        if (!follower.active() || follower.holdPaused()) {
+            tel.fold_sink = "declined: chunk follower paused";
+            return;
+        }
+        sink = "chunk_follower";
+    } else {
+        tel.fold_sink = "declined: absolute TcpPoseTarget (the source re-issues the target)";
+        return;
+    }
+    tel.fold_sink = sink;
+
+    const math::Vector3 dp = overlay.deviation();
+    const math::Vector3 er = overlay.deviationRot();
+    const double ang = er.norm();
+    if (dp.norm() < 1e-12 && ang < 1e-12) return;   // nothing standing to move
+    const Eigen::Quaterniond dR = ang >= 1e-12
+        ? Eigen::Quaterniond(math::exp3(er)).normalized()
+        : Eigen::Quaterniond::Identity();
+
+    if (tel.law == "hold") {
+        // The latched nominal becomes the composed pose: same pivot (the TCP),
+        // same displacement, so next tick's nominal IS this tick's command.
+        *hold_nominal = overlay.compose(*hold_nominal);
+    } else {
+        if (!follower.absorbOffset(dp, dR)) {
+            tel.fold_sink = "declined: chunk follower refused";
+            return;
+        }
+        // The output SMD sits between the follower and the overlay; its state must
+        // move with the plan or it would chase the fold as a step.
+        output_smd.shift(dp, dR);
+    }
+    overlay.dropDeviation();   // the DISPLACEMENT only - the velocity state stays
+    absorbed += dp;
+    absorbed_r = (dR * absorbed_r).normalized();
+    tel.folded = true;
+    tel.fold_m = {dp.x(), dp.y(), dp.z()};
+    tel.fold_rad = {er.x(), er.y(), er.z()};
+    tel.absorbed_m = {absorbed.x(), absorbed.y(), absorbed.z()};
+    tel.absorbed_norm_m = absorbed.norm();
+    tel.absorbed_norm_rad = Eigen::AngleAxisd(absorbed_r).angle();
 }
 
 math::Vector3 DualArmServoLoop::gatePlanAdvance(ArmId arm, const math::Vector3& advance_stand) {

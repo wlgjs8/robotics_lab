@@ -100,7 +100,73 @@ static bool firstSegmentCorner(const CartesianChunkFollowerConfig& cfg,
   return f.diag().last_solve.corner;
 }
 
+// THE FOLD IS A GAUGE CHANGE. Two followers get the same frame. A carries an
+// external overlay deviation D(t) composed onto its output (what the servo loop does
+// with k > 0: the deviation lives in the overlay); B is handed the SAME per-tick
+// increment through absorbOffset() and composes only that tick's increment (the k = 0
+// fold path). The emitted poses must agree to numerical precision on every tick,
+// across segment boundaries and a mid-stream preempt - translation AND rotation.
+static void testFoldIsGaugeInvariant() {
+  std::printf("Test F: absorbOffset is a gauge change (emitted pose invariant)\n");
+  CartesianChunkFollowerConfig cfg;
+  cfg.window = {/*L*/ 2, /*C*/ 10, /*R*/ 2, /*smooth*/ 3};
+  CartesianChunkFollower a(cfg), b(cfg);
+  ChunkFrame frame = makeRef(16);
+  const Pose6D start = frame.pose[cfg.window.discard_head_L];
+  a.submitFrame(frame, start);
+  b.submitFrame(frame, start);
+  // Per-tick increment: 0.02 mm along +y and 0.01 deg about z (a slow damper walk).
+  const Eigen::Vector3d dp_inc(0.0, 2e-5, 0.0);
+  const Eigen::Quaterniond dR_inc(Eigen::AngleAxisd(0.01 * M_PI / 180.0, Eigen::Vector3d::UnitZ()));
+  Eigen::Vector3d D = Eigen::Vector3d::Zero();
+  Eigen::Quaterniond DR = Eigen::Quaterniond::Identity();
+  double max_pos_err = 0.0, max_ang_err = 0.0;
+  bool all_folded = true;
+  for (int i = 0; i < 400; ++i) {
+    if (i == 200) {   // preempt mid-stream with a fresh (absolute) frame
+      ChunkFrame f2 = makeRef(16, 0.02, -0.1);
+      f2.wire_seq = 56; f2.recv_seq = 21;
+      a.submitFrame(f2, a.lastPose());
+      b.submitFrame(f2, b.lastPose());
+    }
+    // A: overlay keeps the whole deviation.
+    const Pose6D na = a.tick(TICK);
+    D += dp_inc;
+    DR = (dR_inc * DR).normalized();
+    Pose6D ea = na;
+    ea.x += D.x(); ea.y += D.y(); ea.z += D.z();
+    {
+      const Eigen::Matrix3d R = DR.toRotationMatrix() * rb_servo::math::rotationFromPose(na);
+      ea = rb_servo::math::poseFromSe3(pinocchio::SE3(R, Eigen::Vector3d(ea.x, ea.y, ea.z)));
+    }
+    // B: overlay holds only this tick's increment, then folds it into the plan.
+    const Pose6D nb = b.tick(TICK);
+    Pose6D eb = nb;
+    eb.x += dp_inc.x(); eb.y += dp_inc.y(); eb.z += dp_inc.z();
+    {
+      const Eigen::Matrix3d R = dR_inc.toRotationMatrix() * rb_servo::math::rotationFromPose(nb);
+      eb = rb_servo::math::poseFromSe3(pinocchio::SE3(R, Eigen::Vector3d(eb.x, eb.y, eb.z)));
+    }
+    all_folded &= b.absorbOffset(dp_inc, dR_inc);
+    max_pos_err = std::max(max_pos_err, rb_servo::math::positionDistance(ea, eb));
+    max_ang_err = std::max(max_ang_err, rb_servo::math::orientationDistanceRad(ea, eb));
+  }
+  check(all_folded, "every fold accepted while active");
+  std::printf("    max emitted pose error: %.3e m / %.3e rad\n", max_pos_err, max_ang_err);
+  check(max_pos_err < 1e-9, "emitted position invariant under the fold (< 1 nm)");
+  check(max_ang_err < 1e-9, "emitted orientation invariant under the fold (< 1 nrad)");
+  // An ABSOLUTE-frame preempt keeps the fold shift (the source's knots are still in
+  // the unfolded frame, exactly like the gate's plan_shift_); only a cold start or a
+  // delta frame (integrated from the folded chain) clears it. 400 ticks absorbed.
+  check(std::fabs(b.foldShift().y() - 400 * 2e-5) < 1e-12,
+        "foldShift reports the displacement absorbed across an absolute preempt");
+  // Paused for a Hold: the fold must be refused, not silently dropped.
+  b.pauseForHold(0.0);
+  check(!b.absorbOffset(dp_inc, dR_inc), "absorbOffset declines while paused for a Hold");
+}
+
 int main() {
+  testFoldIsGaugeInvariant();
   CartesianChunkFollowerConfig cfg;
   cfg.window = {/*L*/ 2, /*C*/ 10, /*R*/ 2, /*smooth*/ 3};
 

@@ -93,6 +93,44 @@ public:
 
     bool quiescent(double eps_m = 1e-6) const;
     bool bounded() const { return bounded_; }
+
+    // THE PURE MASS-DAMPER PREDICATE - the exact condition under which the deviation
+    // may be HANDED OFF to the plan that produced the nominal (the FOLD, ported from
+    // controller-manager's `AdmittanceOverlay::pure_damper_t/r` + `Arm::absorb_overlay_offset`).
+    //
+    // *** WHY k == 0 IS AN ALGEBRAIC BOUNDARY AND NOT A TASTE JUDGEMENT. *** step()'s
+    // acceleration is (f - b*v - k*d)/m. At k == 0 the d term VANISHES IDENTICALLY: d
+    // stops being a state of the law and becomes a bare integrator of v that nothing
+    // reads back. Moving a displacement out of d and into the plan's own reference is
+    // then a GAUGE CHANGE - (nominal, d) -> (nominal + delta, d - delta) leaves the
+    // ODE's future, the emitted pose and the plan's tracking error all invariant. At
+    // ANY k != 0 the -k*d term revives, the spring's origin follows the transfer, and
+    // the identical edit becomes CM's 2026-08-04 force-ceiling leash (the ORIGIN WALK
+    // reverted on hardware the same day).
+    //
+    // A FORCE-mode axis (ref_force != 0) is EXCLUDED DELIBERATELY, not for want of an
+    // argument about its k: such an axis is DESIGNED to walk until it meets the fence
+    // when nothing presses back, and handing that walk to the plan would delete the
+    // designed stop. RIGID axes are admitted: they hold d = 0 by construction and
+    // contribute nothing to the transfer either way.
+    //
+    // Translation and rotation answer INDEPENDENTLY; the caller folds only when BOTH
+    // say yes, because the plan is shifted as one SE(3) displacement.
+    bool pureDamperTranslation() const { return pureDamperTriad(law_.translation); }
+    bool pureDamperRotation() const { return pureDamperTriad(law_.rotation); }
+
+    // RT: THE DISPLACEMENT HAS BEEN TAKEN OVER BY THE PLAN - drop our copy of it.
+    //
+    // *** ONLY A CALLER THAT HAS ALREADY APPLIED THE SAME DISPLACEMENT TO THE PLAN MAY
+    // CALL THIS. *** Zeroing without transferring does not remove an offset, it STRIPS
+    // one: the emitted command loses the whole deviation in a single tick.
+    //
+    // THE MOMENTUM IS KEPT, and that is the whole difference from freeze(). vp_/w_ are
+    // the live dynamics: m*dd + b*d' = w is a first-order law in the VELOCITY, so
+    // dropping it would restart the wrench response from rest every tick and flatten
+    // the axis to a rigid one (CM's failed 2026-08-25 "stateless k=0" attempt: 0.04 mm
+    // per tick at 10 N, i.e. no force control at all).
+    void dropDeviation();
     const math::Vector3& deviation() const { return dp_; }        // [m], stand
     const math::Vector3& deviationRot() const { return er_; }     // [rad] rotvec, stand
     const math::Vector3& velocity() const { return vp_; }         // [m/s], stand
@@ -112,6 +150,7 @@ private:
     void applyFence();
     void stepOscillationGuard(const math::Vector3& force_stand,
                               const math::Vector3& torque_stand);
+    static bool pureDamperTriad(const std::array<ForceAxisConfig, 3>& axes);
 
     ForceControlConfig cfg_{};
     ForceLawConfig law_{};

@@ -133,9 +133,23 @@ calibrated by the operator; do not re-derive them from the URDF. The sensor basi
 on this cell is LEFT-HANDED (det = -1) -- that is measured, not a bug.
 
 Two invariants the hardware taught, both enforced by the loader:
-- THE GATE AND THE SPRING SHIP TOGETHER. `k > 0` with no gate ramps the contact
-  force without bound (961 N in 40 s); the gate with `k = 0` bounds force but not
-  deviation (9.5 m in 300 s).
+- THE GATE, THE SPRING AND THE FOLD. `k > 0` with no gate ramps the contact force
+  without bound (961 N in 40 s); the gate with `k = 0` bounds force but not
+  deviation (9.5 m in 300 s) — UNLESS the fold is on. Since 2026-09-03 the tracked
+  stacks run CM's live shape: `k = 0` on every axis (m 12 / b 1000 translation,
+  m 0.3 / b 30 rotation), the 10 N gate, and `force_control.fold_deviation: true`,
+  which hands the deviation to the plan every tick (chunk follower chained state +
+  knots, or the compliant Hold's latched nominal) and drops the overlay's copy
+  while keeping its velocity — a gauge change, legal precisely because `k = 0`
+  (`AdmittanceOverlay::pureDamperTranslation/Rotation`, `DualArmServoLoop::
+  foldForceDeviation`). An absolute-`TcpPoseTarget` source (UMI teleop) declines
+  the fold and keeps its deviation fenced. With `k = 0` the contact force is a
+  by-product (`b * v * g(F)`, ~7.6 N for 50 mm/s at b 1000), not a designed number;
+  a designed force needs a `ref_force` (CM 0039), which is the next step.
+  Stability with `k = 0` is a DELAY margin and `b` is the only knob:
+  `rb_servo_server/tools/force_loop_margin.py` and the WallLoop test in
+  `test_force_control.cpp` are the evidence; `docs/reference/
+  force_control_stability_margin.md` has the tables.
 - THE WRENCH REFERENCE POINT AND THE COMPOSE PIVOT MOVE TOGETHER. Both are the
   TCP. A torque referenced at one point driving rotation about another makes a
   straight push twist the tool.

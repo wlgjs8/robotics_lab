@@ -125,6 +125,25 @@ void CartesianChunkFollower::setAdvanceGate(double gate, const Eigen::Vector3d& 
   into_contact_dir_ = dir;
 }
 
+bool CartesianChunkFollower::absorbOffset(const Eigen::Vector3d& dp_stand,
+                                          const Eigen::Quaterniond& dR_stand) {
+  if (!active_ || hold_paused_ || !core_.hasState()) return false;
+  // Translation: the chained state, the in-flight samples and the knots.
+  core_.shiftPosition({dp_stand.x(), dp_stand.y(), dp_stand.z(), 0.0, 0.0, 0.0});
+  fold_shift_ += dp_stand;
+  // Rotation: the emitted orientation is R0_ref * exp(theta); left-composing dR onto
+  // the tangent anchor moves it by exactly dR while theta (the rotational velocity
+  // state) is untouched. The knots get the same left-composition through fold_rot_,
+  // so buildSample's log3(R0_ref^T * R_k) is unchanged by the fold.
+  R0_ref_ = (dR_stand * R0_ref_).normalized();
+  fold_rot_ = (dR_stand * fold_rot_).normalized();
+  // What tick() reports between boundaries is last_pose_; move it with the plan so
+  // a paused/held read-back never lags the fold by one tick.
+  last_pose_ = have_segment_ ? sampleAt(std::min(t_in_seg_, seg_dt_))
+                             : tangentPose(core_.p0());
+  return true;
+}
+
 void CartesianChunkFollower::reanchor(const Pose6D& reference) {
   hold_paused_ = false;
   hold_pause_start_sec_ = 0.0;
@@ -167,6 +186,8 @@ void CartesianChunkFollower::submitFrame(const ChunkFrame& frame,
     std::array<double, 6> p0{current_pose.x, current_pose.y, current_pose.z, 0, 0, 0};
     core_.seed(p0);            // v0 = a0 = 0
     plan_shift_.setZero();     // fresh anchor: no accumulated hold-back
+    fold_shift_.setZero();     // ... and no accumulated force fold
+    fold_rot_.setIdentity();
     have_segment_ = false;     // force a solve on the next tick
     t_in_seg_ = 0.0;
     last_pose_ = current_pose;
@@ -211,7 +232,11 @@ void CartesianChunkFollower::submitDeltaFrame(const ChunkFrame& frame,
   }
   // The new knots were integrated from the EMITTED pose, which already sits where
   // the gate left it, so the hold-back is baked into the fresh plan: clear the debt.
+  // The same holds for the force fold: the cursor above IS the folded chained state,
+  // so the fresh knots already carry every displacement absorbed so far.
   plan_shift_.setZero();
+  fold_shift_.setZero();
+  fold_rot_.setIdentity();
   submitFrame(integrated, current_pose);
 }
 
@@ -287,8 +312,8 @@ void CartesianChunkFollower::stepToNextSegment() {
     // segment, so this is where an advance exists to attenuate.
     if (advance_gate_ < 1.0 && into_contact_dir_.squaredNorm() > 1e-18) {
       const auto& p0 = core_.p0();
-      const Eigen::Vector3d advance = positionOf(window_.poseAt(k)) + plan_shift_ -
-                                      Eigen::Vector3d(p0[0], p0[1], p0[2]);
+      const Eigen::Vector3d advance = positionOf(window_.poseAt(k)) + plan_shift_ +
+                                      fold_shift_ - Eigen::Vector3d(p0[0], p0[1], p0[2]);
       const double proj = advance.dot(into_contact_dir_);
       // proj < 0 means the advance drives AGAINST the reported force, i.e. deeper
       // into the contact. Tangential and retreating advances are left alone.
@@ -357,7 +382,9 @@ BoundarySample<6> CartesianChunkFollower::buildSample(std::size_t k) const {
   const Pose6D pp1 = window_.poseAt(flankIndex(k, +1, n));
 
   // Per-axis values: 0-2 stand position, 3-5 rotation-vector about R0_ref_.
-  const Eigen::Matrix3d Rt = R0_ref_.conjugate().toRotationMatrix();
+  // The knots carry the force fold (fold_rot_ left-composed, fold_shift_ added
+  // below), exactly like they carry the gate's hold-back in plan_shift_.
+  const Eigen::Matrix3d Rt = (R0_ref_.conjugate() * fold_rot_).toRotationMatrix();
   auto rotvec = [&](const Pose6D& p) {
     return math::log3(Rt * math::rotationFromPose(p));
   };
@@ -368,9 +395,9 @@ BoundarySample<6> CartesianChunkFollower::buildSample(std::size_t k) const {
     // Positions carry the accumulated gate hold-back. A CONSTANT shift leaves the
     // finite-difference velocity/accel targets unchanged, so holding the plan back
     // does not also distort the dynamics it is solved against.
-    vm1[d] = posm1[d] + plan_shift_[d];
-    vk[d] = posk[d] + plan_shift_[d];
-    vp1[d] = posp1[d] + plan_shift_[d];
+    vm1[d] = posm1[d] + plan_shift_[d] + fold_shift_[d];
+    vk[d] = posk[d] + plan_shift_[d] + fold_shift_[d];
+    vp1[d] = posp1[d] + plan_shift_[d] + fold_shift_[d];
     vm1[d + 3] = rm1[d]; vk[d + 3] = rk[d]; vp1[d + 3] = rp1[d];
   }
 

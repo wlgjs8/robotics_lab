@@ -110,6 +110,13 @@ Pose6D FollowerOutputSmd::step(
     return out;
 }
 
+void FollowerOutputSmd::shift(const Eigen::Vector3d& dp_stand,
+                              const Eigen::Quaterniond& dR_stand) {
+    if (!active_) return;
+    position_ += dp_stand;
+    rotation_ = (dR_stand * rotation_).normalized();
+}
+
 Pose6D FollowerOutputSmd::currentPose() const {
     return math::poseFromSe3(pinocchio::SE3(rotation_.toRotationMatrix(), position_));
 }

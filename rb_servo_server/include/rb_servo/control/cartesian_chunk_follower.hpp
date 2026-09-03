@@ -126,6 +126,26 @@ class CartesianChunkFollower {
   // The accumulated plan shift [m] — how far the gate has held this plan back.
   double planShift() const { return plan_shift_.norm(); }
 
+  // THE FORCE OVERLAY'S FOLD (ported from controller-manager's
+  // `ITask::absorb_force_offset` / `Arm::absorb_overlay_offset`). Take the
+  // displacement the admittance law grew this tick INTO this plan, so that the
+  // nominal the overlay composes onto is the pose the arm was really commanded
+  // to, and the overlay can drop its copy. Three things move as one:
+  //   * the chained core state and the in-flight segment samples (translation),
+  //   * the orientation tangent anchor R0_ref (rotation, left-composed in stand),
+  //   * every knot still to be consumed from the window (both), so the plan does
+  //     not drive the displacement back out on the next boundary.
+  // The emitted pose is therefore INVARIANT across the call - (nominal, d) becomes
+  // (nominal + d, 0) - which is exactly the gauge change that makes the transfer
+  // legal at k = 0 (see AdmittanceOverlay::pureDamperTranslation). Returns false
+  // (and does nothing) while the follower is inactive or paused for a Hold: a
+  // paused plan re-emits its latched pose, so a fold would be overwritten next
+  // tick and the command would square-wave by one tick's travel.
+  bool absorbOffset(const Eigen::Vector3d& dp_stand, const Eigen::Quaterniond& dR_stand);
+  // The displacement absorbed so far since the last cold start / delta frame
+  // [m] - how far force has moved this plan. Telemetry only.
+  const Eigen::Vector3d& foldShift() const { return fold_shift_; }
+
   // SAFETY PLAN GATE (geometric layers): scales the plan-clock advance in
   // tick(). 1.0 = ungated (byte-identical to legacy); 0.0 = plan frozen. Set
   // each tick from the realized/requested joint-step ratio after the safety
@@ -207,6 +227,12 @@ class CartesianChunkFollower {
   double advance_gate_{1.0};
   Eigen::Vector3d into_contact_dir_{Eigen::Vector3d::Zero()};
   Eigen::Vector3d plan_shift_{Eigen::Vector3d::Zero()};
+  // The force overlay's fold on the window knots (see absorbOffset): translation
+  // added to every knot position, rotation left-composed onto every knot
+  // orientation. Cleared with plan_shift_ - a fresh anchor / delta frame is
+  // already expressed in the emitted (folded) frame.
+  Eigen::Vector3d fold_shift_{Eigen::Vector3d::Zero()};
+  Eigen::Quaterniond fold_rot_{Eigen::Quaterniond::Identity()};
   // The geometric-safety gate on the plan clock (see setPlanRateGate).
   double plan_rate_gate_{1.0};
 };

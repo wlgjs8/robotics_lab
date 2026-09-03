@@ -37,6 +37,14 @@ public:
 
     Pose6D step(const Pose6D& reference, const Vec6& xi_ref, double dt_sec);
 
+    // THE FORCE OVERLAY'S FOLD, on this stage's own state: translate the filtered
+    // position and left-compose the filtered orientation by the displacement the
+    // follower just absorbed (CartesianChunkFollower::absorbOffset), velocities
+    // untouched. Reference and state move together, so the step() that follows
+    // sees the same error and the same velocity it would have without the fold -
+    // the emitted pose shifts by exactly the displacement and nothing else changes.
+    void shift(const Eigen::Vector3d& dp_stand, const Eigen::Quaterniond& dR_stand);
+
     bool active() const { return active_; }
     void deactivate() { active_ = false; }
 

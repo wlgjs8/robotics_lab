@@ -509,7 +509,9 @@ private:
     bool peerCartesianServoOk(ArmId arm) const;
 
     std::atomic<bool> fault_latched_{false};
-    // servo_j STREAM ARMING. Latched by the first motion command and never cleared.
+    // servo_j STREAM ARMING. Latched by the first motion command - a client's, or the
+    // server's own compliant Hold (force control composes onto the wire, so the wire
+    // must be live; 2026-09-03) - and never cleared.
     //
     // WHY: control-box firmware v8.7.3 does not consume the servo_j stream for the
     // first ~254 ms after a connection, while reporting RBACK queue fill 0 the
@@ -892,6 +894,14 @@ private:
     bool right_overlay_bounded_prev_ = false;
     bool left_gate_closed_prev_ = false;
     bool right_gate_closed_prev_ = false;
+    // The FOLD's running total (force_control.fold_deviation): how far force has
+    // moved each arm's plan this run, stand frame. Telemetry only - the overlay's
+    // own deviation is ~0 on a fold path, so this is the number that says what the
+    // contact actually did to the command.
+    math::Vector3 left_fc_absorbed_m_ = math::Vector3::Zero();
+    math::Vector3 right_fc_absorbed_m_ = math::Vector3::Zero();
+    Eigen::Quaterniond left_fc_absorbed_r_ = Eigen::Quaterniond::Identity();
+    Eigen::Quaterniond right_fc_absorbed_r_ = Eigen::Quaterniond::Identity();
     bool left_ft_liveness_decided_ = false;
     bool right_ft_liveness_decided_ = false;
     // Operator-requested tare, drained on the RT loop.
@@ -1147,6 +1157,14 @@ private:
     // in place. `nominal` is the pose the deviation is measured FROM. Returns true
     // when the composed pose differs from the nominal.
     bool applyForceOverlay(ArmId arm, const RobotState& state, Pose6D* target);
+    // THE FOLD (force_control.fold_deviation): hand this tick's overlay deviation to
+    // the plan that produced the nominal, then drop the overlay's copy. Runs AFTER
+    // applyForceOverlay composed the target, so the emitted pose is unchanged -
+    // only where the displacement is BOOKED changes. `follower_drove` = the chunk
+    // follower produced this tick's nominal (the pose-track SMD path declines).
+    void foldForceDeviation(ArmId arm, control::CartesianChunkFollower& follower,
+                            control::FollowerOutputSmd& output_smd, bool follower_drove,
+                            ForceControlTelemetry& tel);
     // Attenuate one plan advance along the direction pushing INTO the measured
     // wrench. Tangential and retreating components pass at full authority.
     math::Vector3 gatePlanAdvance(ArmId arm, const math::Vector3& advance_stand);

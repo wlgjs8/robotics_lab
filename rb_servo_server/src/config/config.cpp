@@ -2103,12 +2103,19 @@ void validateConfig(const DualArmConfig& cfg) {
                 for (int i = 0; i < 3; ++i) {
                     if (fc.hold.translation[i].k > 0.0 || fc.hold.rotation[i].k > 0.0) hold_spring = true;
                 }
-                if (!hold_spring) {
+                // A spring-less compliant Hold is a HAND-GUIDE: the arm goes where it is
+                // pushed and stays. That is only coherent with the fold, which moves the
+                // latched nominal along; without it the deviation pins the fence and the
+                // arm turns rigid at 40 mm (CM measured exactly that, 2657 SATURATED
+                // events in one run).
+                if (!hold_spring && !fc.fold_deviation) {
                     throw std::runtime_error(
                         "force_control.hold_compliance is on but every force_control.hold "
                         "stiffness is 0 - the gate does not act on a Hold (there is no plan "
                         "advance to attenuate), so nothing would bound how far a hand can "
-                        "push the arm");
+                        "push the arm. Give the hold law a stiffness, or enable "
+                        "force_control.fold_deviation (a hand-guide: the arm stays where it "
+                        "is pushed)");
                 }
             }
 
@@ -2124,11 +2131,15 @@ void validateConfig(const DualArmConfig& cfg) {
                     "spring ramps the contact force without bound (measured 961 N in 40 s). "
                     "Ship the gate with the spring, or set every k to 0");
             }
-            if (fc.gate_enable && !stream_spring) {
+            // ... unless the FOLD is on: then the deviation is handed to the plan every
+            // tick and there is no standing offset for the fence to have to bound. This
+            // is controller-manager's live configuration (k = 0 + gate + fold).
+            if (fc.gate_enable && !stream_spring && !fc.fold_deviation) {
                 throw std::runtime_error(
                     "force_control.force_gate is enabled but every force_control.stream k is 0 - the gate bounds the "
                     "force and nothing bounds the deviation (measured 9.5 m in 300 s). Give the "
-                    "compliance axes a stiffness, or disable the gate");
+                    "compliance axes a stiffness, enable force_control.fold_deviation (the "
+                    "controller-manager k = 0 hand-off), or disable the gate");
             }
             if (fc.gate_enable) {
                 validatePositiveFinite(fc.gate_max_force_n, "force_control.force_gate.max_force_n");
@@ -4050,6 +4061,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "oscillation_release_force_n", "oscillation_release_torque_nm",
             "oscillation_release_quiet_sec",
             "coverage_recover_sec", "hold_relatch_max_force_n",
+            "fold_deviation",
         }, "force_control");
         ForceControlConfig& fc = cfg.force_control;
         if (has(sec, "enable")) fc.enable = asBool(sec["enable"], "force_control.enable");
@@ -4105,6 +4117,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "max_velocity_rad_s")) fc.max_velocity_rad_s = asDouble(sec["max_velocity_rad_s"], "force_control.max_velocity_rad_s");
         if (has(sec, "max_acceleration_rad_s2")) fc.max_acceleration_rad_s2 = asDouble(sec["max_acceleration_rad_s2"], "force_control.max_acceleration_rad_s2");
         if (has(sec, "hold_compliance")) fc.hold_compliance = asBool(sec["hold_compliance"], "force_control.hold_compliance");
+        if (has(sec, "fold_deviation")) fc.fold_deviation = asBool(sec["fold_deviation"], "force_control.fold_deviation");
         if (has(sec, "max_state_age_sec")) fc.max_state_age_sec = asDouble(sec["max_state_age_sec"], "force_control.max_state_age_sec");
         if (has(sec, "command_execution_tau_sec")) fc.command_execution_tau_sec = asDouble(sec["command_execution_tau_sec"], "force_control.command_execution_tau_sec");
         if (has(sec, "command_execution_min_rate_dps")) fc.command_execution_min_rate_dps = asDouble(sec["command_execution_min_rate_dps"], "force_control.command_execution_min_rate_dps");
