@@ -220,5 +220,37 @@ private:
     double torque_nm_ = 0.0;
 };
 
+// THE HAND-GUIDE ENGAGEMENT LATCH (2026-09-03). A Schmitt trigger on the physical
+// (pre-deadzone) force magnitude that decides whether the HOLD law integrates at all.
+//
+// WHY: with k = 0 the hold law has no restoring force, so the only thing between a
+// parasitic wrist force and motion is the F/T deadzone. Measured on the RB5 right arm
+// (servo_log_20260903_205241, 228 s with the hand OFF): the compensated force sat
+// above the 2 N deadzone on 7.6 % of ticks and the arm crawled 38 times on its own
+// (0.2-2.1 mm each, up to 2.3 mm/s), once for 18 s along a steady 1-3 N pull at the
+// F/T housing that also turned the tool 7.4 deg. A hand that MEANS to guide the arm
+// pushes far harder than that. So: nothing moves until |F| reaches engage_n, and
+// once moving it keeps yielding down to release_n, below which the overlay freezes
+// (momentum dropped - the damper's own tau is m/b = 12 ms anyway).
+//
+// engage_n <= 0 disables the latch (always engaged: the pre-2026-09-03 behaviour).
+// RT-safe, state = one bool.
+class HoldEngageLatch {
+public:
+    void configure(double engage_n, double release_n);
+    void reset() { engaged_ = false; }
+    // Fold this tick's physical |F| in and return whether the hold law may integrate.
+    bool update(double force_magnitude_n);
+    bool engaged() const { return !enabled() || engaged_; }
+    bool enabled() const { return engage_n_ > 0.0; }
+    double engageN() const { return engage_n_; }
+    double releaseN() const { return release_n_; }
+
+private:
+    double engage_n_ = 0.0;
+    double release_n_ = 0.0;
+    bool engaged_ = false;
+};
+
 }  // namespace control
 }  // namespace rb_servo

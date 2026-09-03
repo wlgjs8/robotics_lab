@@ -1699,6 +1699,18 @@ struct ForceControlConfig {
     // FOLLOWED the hand). Refuse to latch while the measured force exceeds this;
     // the Hold stays rigid until the hand releases.
     double hold_relatch_max_force_n = 5.0;
+
+    // ---- hand-guide engagement (2026-09-03) ---------------------------------
+    // A Schmitt trigger on the PHYSICAL (pre-deadzone) force magnitude for the HOLD
+    // law: the hand-guide starts yielding only once |F| >= hold_engage_force_n and
+    // keeps yielding until |F| <= hold_release_force_n, below which the overlay is
+    // frozen. With k = 0 nothing else stops a parasitic wrist force (a cable, a
+    // resting hand, the gravity model's residual) from walking the arm: measured
+    // 2026-09-03, 38 unprompted crawls in 228 s of hand-off time, one of them 18 s
+    // long along a 1-3 N cable pull that also turned the tool 7 deg. 0 = off
+    // (always engaged). See control::HoldEngageLatch.
+    double hold_engage_force_n = 0.0;
+    double hold_release_force_n = 0.0;
 };
 
 struct LinearMoveConfig {

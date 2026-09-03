@@ -2189,6 +2189,20 @@ void validateConfig(const DualArmConfig& cfg) {
             }
             validateNonNegativeFinite(fc.coverage_recover_sec, "force_control.coverage_recover_sec");
             validateNonNegativeFinite(fc.hold_relatch_max_force_n, "force_control.hold_relatch_max_force_n");
+            // The hand-guide latch: a release at or above the engage level is not a
+            // hysteresis, it is a relay that flips every tick around one number.
+            validateNonNegativeFinite(fc.hold_engage_force_n, "force_control.hold_engage_force_n");
+            validateNonNegativeFinite(fc.hold_release_force_n, "force_control.hold_release_force_n");
+            if (fc.hold_engage_force_n > 0.0 && fc.hold_release_force_n >= fc.hold_engage_force_n) {
+                throw std::runtime_error(
+                    "force_control.hold_release_force_n must be below hold_engage_force_n - "
+                    "equal or higher makes the hand-guide latch a relay, not a hysteresis");
+            }
+            if (fc.hold_engage_force_n <= 0.0 && fc.hold_release_force_n > 0.0) {
+                throw std::runtime_error(
+                    "force_control.hold_release_force_n is set but hold_engage_force_n is 0 "
+                    "(the latch is off) - set both or neither");
+            }
         }
     }
 
@@ -4062,6 +4076,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "oscillation_release_quiet_sec",
             "coverage_recover_sec", "hold_relatch_max_force_n",
             "fold_deviation",
+            "hold_engage_force_n", "hold_release_force_n",
         }, "force_control");
         ForceControlConfig& fc = cfg.force_control;
         if (has(sec, "enable")) fc.enable = asBool(sec["enable"], "force_control.enable");
@@ -4118,6 +4133,8 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "max_acceleration_rad_s2")) fc.max_acceleration_rad_s2 = asDouble(sec["max_acceleration_rad_s2"], "force_control.max_acceleration_rad_s2");
         if (has(sec, "hold_compliance")) fc.hold_compliance = asBool(sec["hold_compliance"], "force_control.hold_compliance");
         if (has(sec, "fold_deviation")) fc.fold_deviation = asBool(sec["fold_deviation"], "force_control.fold_deviation");
+        if (has(sec, "hold_engage_force_n")) fc.hold_engage_force_n = asDouble(sec["hold_engage_force_n"], "force_control.hold_engage_force_n");
+        if (has(sec, "hold_release_force_n")) fc.hold_release_force_n = asDouble(sec["hold_release_force_n"], "force_control.hold_release_force_n");
         if (has(sec, "max_state_age_sec")) fc.max_state_age_sec = asDouble(sec["max_state_age_sec"], "force_control.max_state_age_sec");
         if (has(sec, "command_execution_tau_sec")) fc.command_execution_tau_sec = asDouble(sec["command_execution_tau_sec"], "force_control.command_execution_tau_sec");
         if (has(sec, "command_execution_min_rate_dps")) fc.command_execution_min_rate_dps = asDouble(sec["command_execution_min_rate_dps"], "force_control.command_execution_min_rate_dps");

@@ -117,6 +117,8 @@ nlohmann::json forceControlJson(const ForceControlTelemetry& t) {
         {"absorbed_stand_m", t.absorbed_m},
         {"absorbed_norm_m", t.absorbed_norm_m},
         {"absorbed_norm_rad", t.absorbed_norm_rad},
+        {"hold_engaged", t.hold_engaged},
+        {"hold_force_n", t.hold_force_n},
         {"wrench_stand_axes_at_tcp", wrenchJson(t.wrench_stand)},
         {"ik_refused", t.ik_refused},
         {"ik_refused_total", t.ik_refused_total},

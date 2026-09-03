@@ -246,6 +246,26 @@ void AdmittanceOverlay::dropDeviation() {
 }
 
 // ---------------------------------------------------------------------------
+// HoldEngageLatch
+// ---------------------------------------------------------------------------
+
+void HoldEngageLatch::configure(double engage_n, double release_n) {
+    engage_n_ = engage_n;
+    release_n_ = release_n;
+    engaged_ = false;
+}
+
+bool HoldEngageLatch::update(double force_magnitude_n) {
+    if (!enabled()) return true;
+    if (engaged_) {
+        if (force_magnitude_n <= release_n_) engaged_ = false;
+    } else if (force_magnitude_n >= engage_n_) {
+        engaged_ = true;
+    }
+    return engaged_;
+}
+
+// ---------------------------------------------------------------------------
 // ForceGate
 // ---------------------------------------------------------------------------
 

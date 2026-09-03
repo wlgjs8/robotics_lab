@@ -671,6 +671,10 @@ struct ForceControlTelemetry {
     std::array<double, 3> absorbed_m{};
     double absorbed_norm_m = 0.0;
     double absorbed_norm_rad = 0.0;
+    // THE HAND-GUIDE LATCH (force_control.hold_engage_force_n): whether the hold law
+    // integrated this tick, and the physical (pre-deadzone) |F| it judged.
+    bool hold_engaged = true;
+    double hold_force_n = 0.0;
 };
 
 struct SafetyTrackingTelemetry {

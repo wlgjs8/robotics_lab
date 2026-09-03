@@ -1636,7 +1636,25 @@ bool testSpringlessLawRequiresTheFold() {
             RB_CHECK(cfg.force_control.stream.rotation[i].k == 0.0);
             RB_CHECK(cfg.force_control.hold.translation[i].k == 0.0);
             RB_CHECK(cfg.force_control.hold.rotation[i].k == 0.0);
+            // Rotation is RIGID on both laws (2026-09-03): the wrist lever turns any
+            // parasitic force into a torque, and with k_r = 0 that torque never stops.
+            RB_CHECK(cfg.force_control.stream.rotation[i].mode == rb_servo::ForceAxisMode::Rigid);
+            RB_CHECK(cfg.force_control.hold.rotation[i].mode == rb_servo::ForceAxisMode::Rigid);
         }
+        // The hand-guide latch ships ON with a real hysteresis band.
+        RB_CHECK(cfg.force_control.hold_engage_force_n == 5.0);
+        RB_CHECK(cfg.force_control.hold_release_force_n == 2.0);
+        RB_CHECK(cfg.force_torque.right.deadzone_force_n[0] == 3.0);
+    }
+    // A release at/above the engage level is a relay, not a hysteresis.
+    {
+        std::string body = readFile(stack_real_path);
+        RB_CHECK(replaceOnce(&body, "  hold_release_force_n: 2.0", "  hold_release_force_n: 6.0"));
+        const std::string path = writeTempConfig("latch-relay", body);
+        const bool rejected = loadRejectsContaining(
+            path, "hold_release_force_n must be below hold_engage_force_n");
+        ::unlink(path.c_str());
+        RB_CHECK(rejected);
     }
     // Fold off + spring-less Hold: the hand-guide has nothing to move its nominal.
     {

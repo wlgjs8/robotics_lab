@@ -387,6 +387,8 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_fc_absorbed_z_m"
        << ',' << side << "_fc_absorbed_norm_m"
        << ',' << side << "_fc_absorbed_norm_rad"
+       << ',' << side << "_fc_hold_engaged"
+       << ',' << side << "_fc_hold_force_n"
        // The two tracking errors, beside the force columns because the force path is
        // what makes them diverge: a compliant command deliberately leaves the arm.
        << ',' << side << "_track_command_vs_actual_deg"
@@ -810,6 +812,8 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << fc.absorbed_m[2]
        << ',' << fc.absorbed_norm_m
        << ',' << fc.absorbed_norm_rad
+       << ',' << fc.hold_engaged
+       << ',' << fc.hold_force_n
        << ',' << track.command_vs_actual_deg
        << ',' << track.reference_vs_actual_deg
        << ',' << track.reference_valid

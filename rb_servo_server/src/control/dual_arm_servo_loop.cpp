@@ -1956,6 +1956,10 @@ DualArmServoLoop::DualArmServoLoop(
     right_overlay_.configure(config.force_control, control_period_sec);
     left_force_gate_.configure(config.force_control, control_period_sec);
     right_force_gate_.configure(config.force_control, control_period_sec);
+    left_hold_engage_.configure(config.force_control.hold_engage_force_n,
+                                config.force_control.hold_release_force_n);
+    right_hold_engage_.configure(config.force_control.hold_engage_force_n,
+                                 config.force_control.hold_release_force_n);
     // PRINT THE AXIS TRIAD AT BOOT. The loader already refuses a DEGENERATE triad, but a
     // well-formed WRONG one is silent -- and that is the failure that actually happens.
     // controller-manager ran its RB5 cell on the datasheet nominal for 18 days
@@ -2065,9 +2069,20 @@ DualArmServoLoop::DualArmServoLoop(
                       << " deg (the gate does NOT act here)\n";
         } else if (config.force_control.hold_compliance) {
             const double bh = config.force_control.hold.translation[2].b;
+            const ForceAxisConfig& hr = config.force_control.hold.rotation[2];
+            const bool hr_rigid = hr.mode == ForceAxisMode::Rigid || !(hr.m > 0.0);
             std::cerr << "[INFO]   compliant Hold is a HAND-GUIDE (k = 0): 10 N moves the arm at "
                       << (bh > 0.0 ? 10.0 / bh * 1e3 : 0.0)
-                      << " mm/s and it STAYS where it is pushed (no spring-back)\n";
+                      << " mm/s and it STAYS where it is pushed (no spring-back); rotation "
+                      << (hr_rigid ? "RIGID" : "compliant") << "\n";
+            if (config.force_control.hold_engage_force_n > 0.0) {
+                std::cerr << "[INFO]   hand-guide latch: engages at |F| >= "
+                          << config.force_control.hold_engage_force_n << " N, releases at <= "
+                          << config.force_control.hold_release_force_n
+                          << " N (physical, pre-deadzone); frozen in between\n";
+            } else {
+                std::cerr << "[INFO]   hand-guide latch OFF: any force past the deadzone moves the arm\n";
+            }
         }
     }
     left_output_ma_ = JointMovingAverage(config.servo.output_moving_average_window);
@@ -6027,6 +6042,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             // retiring would command the tool the whole deviation deeper.
             overlay.freeze();
             hold_nominal.reset();
+            (fc_left ? left_hold_engage_ : right_hold_engage_).reset();
             // Unprime the contact-shock filter: a law that resumes minutes later
             // must seed from the live wrench, not ring down from a stale one.
             (fc_left ? left_wrench_filter_primed_ : right_wrench_filter_primed_) = false;
@@ -6038,6 +6054,7 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             overlay.setLaw(config_.force_control.stream);
             tel.law = "stream";
             hold_nominal.reset();
+            (fc_left ? left_hold_engage_ : right_hold_engage_).reset();
             continue;
         }
         // AN OPERATOR IS PUSHING BY HAND. Stiff law: there is no advancing plan for
@@ -8761,9 +8778,39 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
     }
 
     gate.update(f_stand, m_stand);
+
+    // ---- the hand-guide engagement latch (HOLD law only) ---------------------
+    // Judged on the PHYSICAL force magnitude (compensated, before the deadzone), so
+    // the numbers an operator sets are the push they feel. While disengaged the
+    // overlay is frozen: no integration, momentum dropped, deviation untouched.
+    bool engaged = true;
+    if (tel.law == "hold") {
+        control::HoldEngageLatch& latch = left ? left_hold_engage_ : right_hold_engage_;
+        const Wrench6D& nodz = pipe.compSensorNoDeadzone();
+        const double f_phys = std::sqrt(nodz.fx * nodz.fx + nodz.fy * nodz.fy + nodz.fz * nodz.fz);
+        const bool was = latch.engaged();
+        engaged = latch.update(f_phys);
+        tel.hold_force_n = f_phys;
+        if (latch.enabled() && engaged != was) {
+            uint64_t& log_ns = left ? left_hold_engage_log_ns_ : right_hold_engage_log_ns_;
+            const uint64_t now_ns = nowSteadyNs();
+            if (log_ns == 0 || now_ns - log_ns > 1'000'000'000ULL) {
+                log_ns = now_ns;
+                std::cerr << "[INFO] hand-guide " << toString(arm)
+                          << (engaged ? ": ENGAGED (|F| " : ": released (|F| ")
+                          << f_phys << " N vs engage " << latch.engageN()
+                          << " / release " << latch.releaseN() << ")\n";
+            }
+        }
+    }
+    tel.hold_engaged = engaged;
     // The gate throttles the FORCE-mode walk; compliance keeps yielding regardless.
     // A gated axis stops WALKING, it does not stop being soft.
-    overlay.step(f_stand, m_stand, gate.translation());
+    if (engaged) {
+        overlay.step(f_stand, m_stand, gate.translation());
+    } else {
+        overlay.freeze();
+    }
 
     const Pose6D nominal = *target;
     const Pose6D composed = overlay.compose(nominal);

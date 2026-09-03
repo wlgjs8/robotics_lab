@@ -146,6 +146,14 @@ Two invariants the hardware taught, both enforced by the loader:
   the fold and keeps its deviation fenced. With `k = 0` the contact force is a
   by-product (`b * v * g(F)`, ~7.6 N for 50 mm/s at b 1000), not a designed number;
   a designed force needs a `ref_force` (CM 0039), which is the next step.
+  Since the evening of 2026-09-03 rotation is RIGID on both laws and the hold law
+  carries a hand-guide ENGAGEMENT LATCH (`hold_engage_force_n` 5 / `hold_release_force_n`
+  2, judged on the physical pre-deadzone |F|; `control::HoldEngageLatch`), with the
+  F/T deadzone at 3 N: measured on the RB5 right arm, every degree of unwanted
+  rotation came from 1-5 N at the F/T housing (0.18 m lever, cable/resting contact),
+  never from fingertip pushes, and the arm crawled 38 times in 228 s of hand-off time
+  on forces just past the 2 N deadzone. The frame is the TCP; what changed since the
+  CM-era law is the rotational stiffness (250 -> 8 -> 0).
   Stability with `k = 0` is a DELAY margin and `b` is the only knob:
   `rb_servo_server/tools/force_loop_margin.py` and the WallLoop test in
   `test_force_control.cpp` are the evidence; `docs/reference/

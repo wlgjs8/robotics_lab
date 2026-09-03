@@ -776,7 +776,11 @@ force_torque:
 
     # SOFT per-axis dead-band on the COMPENSATED outputs only. 2 N is ~204 g, which
     # is why the tool-load estimate exists to read below it.
-    deadzone_force_n:  [2.0, 2.0, 2.0]
+    # 2.0 -> 3.0 N (2026-09-03): the raw stream's own p-p is 2.9 N (liveness check at
+    # boot), so a 2 N band let noise through on 7.6 % of hand-off ticks (measured
+    # above). 3 N is one full noise p-p; the tool-load estimate reads below it. The
+    # torque band stays at 0.5 Nm - rotation is rigid on both laws now.
+    deadzone_force_n:  [3.0, 3.0, 3.0]
     deadzone_torque_nm: [0.5, 0.5, 0.5]
     tool_load_tau_s: 1.0
 
@@ -817,7 +821,11 @@ force_torque:
       fz: [ 0.0,  0.0, -1.0]
     sensor_mass_kg: 0.175
     sensor_com_mm: [0.0, 0.0, 21.5]
-    deadzone_force_n:  [2.0, 2.0, 2.0]
+    # 2.0 -> 3.0 N (2026-09-03): the raw stream's own p-p is 2.9 N (liveness check at
+    # boot), so a 2 N band let noise through on 7.6 % of hand-off ticks (measured
+    # above). 3 N is one full noise p-p; the tool-load estimate reads below it. The
+    # torque band stays at 0.5 Nm - rotation is rigid on both laws now.
+    deadzone_force_n:  [3.0, 3.0, 3.0]
     deadzone_torque_nm: [0.5, 0.5, 0.5]
     tool_load_tau_s: 1.0
     tool_xyz_mm: [0.0, 0.0, 202.642]
@@ -958,10 +966,25 @@ force_control:
     #   0.3     30   | +4.6 / +1.4    | +2.2 / -1.0    |  -0.1 / -3.4    <- LIVE
     # b_r = 30 is the smallest round number on the right side of unity at 18 ms. A
     # hand turning the tool at 0.2 rad/s (~11 deg/s) feels b_r*w = 6 Nm.
+    # ROTATION IS RIGID (2026-09-03, operator). With k_r = 0 every torque about the TCP
+    # turns the tool at M/b_r for as long as it stands, and on this cell the torques
+    # that stand are NOT the task's: the F/T housing sits 202.6 mm behind the TCP, so
+    # any force at the wrist - a cable pull, a hand resting on the gripper body, the
+    # gravity model's residual - arrives with a 0.18 m lever. Measured
+    # (servo_log_20260903_205241, right arm): the 14 fingertip pushes (4-16 N along the
+    # tool axis) carried ZERO torque and turned nothing; all 11.7 deg of that run's
+    # rotation came from 1-5 N at the housing, 7.4 deg of it in 18 s with the hand off.
+    # The same 0.9 Nm was 0.2 deg under CM's k_r 250, 6.4 deg under the 08-26 k_r 8,
+    # and unbounded here - which is the "rotation since last week" timeline exactly.
+    # The frame is the TCP and the torque transfer is right; the stiffness is what
+    # changed. A rotational compliance worth having needs a ref_force design (CM 0039);
+    # until then the tool holds its orientation. The rotation GATE still throttles a
+    # plan's rotational advance into a torque; that is a different mechanism.
+    # To restore: {m: 0.3, b: 30.0, k: 0.0} per axis (the 2026-09-03 morning row).
     rotation:
-      - {m: 0.3, b: 30.0, k: 0.0}       # rx
-      - {m: 0.3, b: 30.0, k: 0.0}       # ry
-      - {m: 0.3, b: 30.0, k: 0.0}       # rz
+      - {m: 0.0, b: 0.0, k: 0.0, mode: rigid}   # rx  RIGID
+      - {m: 0.0, b: 0.0, k: 0.0, mode: rigid}   # ry
+      - {m: 0.0, b: 0.0, k: 0.0, mode: rigid}   # rz
 
   # ---- the HOLD law: an operator pushing the arm by hand -----------------------
   # THE SAME NUMBERS AS `stream` ABOVE, by operator decision. With k = 0 and the fold
@@ -975,10 +998,13 @@ force_control:
       - {m: 12.0, b: 1000.0, k: 0.0}    # x   10 N -> 10 mm/s
       - {m: 12.0, b: 1000.0, k: 0.0}    # y
       - {m: 12.0, b: 1000.0, k: 0.0}    # z
+    # RIGID, same reason as the stream law above: the hand-guide is a TRANSLATION
+    # stage. Push anywhere on the tool and the TCP translates along the force; nothing
+    # you do by hand turns it. (Orientation changes are a TcpLinearMove / policy job.)
     rotation:
-      - {m: 0.3, b: 30.0, k: 0.0}       # rx  1 Nm -> 1.9 deg/s
-      - {m: 0.3, b: 30.0, k: 0.0}       # ry
-      - {m: 0.3, b: 30.0, k: 0.0}       # rz
+      - {m: 0.0, b: 0.0, k: 0.0, mode: rigid}   # rx  RIGID
+      - {m: 0.0, b: 0.0, k: 0.0, mode: rigid}   # ry
+      - {m: 0.0, b: 0.0, k: 0.0, mode: rigid}   # rz
 
   # THE GATE. With k = 0 it is the ONLY thing that stops a streamed plan from
   # driving into a contact (the damper yields, it does not hold the plan back), so
@@ -1047,6 +1073,20 @@ force_control:
   # stays rigid until the hand releases).
   coverage_recover_sec: 0.5
   hold_relatch_max_force_n: 5.0
+
+  # ---- THE HAND-GUIDE ENGAGEMENT LATCH (2026-09-03) -------------------------------
+  # A Schmitt trigger on the PHYSICAL |F| (compensated, BEFORE the deadzone - the push
+  # the operator feels) for the hold law: the arm starts yielding only at >= engage,
+  # keeps yielding down to <= release, and is FROZEN in between. With k = 0 there is
+  # no other stop for a parasitic wrist force. MEASURED (servo_log_20260903_205241,
+  # right arm, 228 s with the hand off): the compensated force cleared the 2 N
+  # deadzone on 7.6 % of ticks and the arm crawled 38 times on its own - 0.2-2.1 mm
+  # per event, up to 2.3 mm/s, one 18 s crawl of 7 mm along a steady 1-3 N pull at the
+  # F/T housing (a cable or a resting hand; the teleop mux was idle, no gripper command,
+  # no mode change). That is what "vibration without pushing" was. A hand that means it
+  # pushes past 5 N without noticing; at b = 1000 the arm answers at 5 mm/s from there.
+  hold_engage_force_n: 5.0
+  hold_release_force_n: 2.0
 
   # Make a plain Hold compliant by latching its measured TCP as the nominal. This is
   # what lets an operator push the arm by hand and watch it yield and spring back

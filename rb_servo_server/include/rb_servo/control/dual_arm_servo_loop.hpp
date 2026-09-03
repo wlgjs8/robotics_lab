@@ -841,6 +841,11 @@ private:
     // nominal follow the deviation, and the spring would have nothing to pull back to.
     std::optional<Pose6D> left_hold_compliance_nominal_;
     std::optional<Pose6D> right_hold_compliance_nominal_;
+    // The hand-guide engagement latch (force_control.hold_engage_force_n), hold law only.
+    control::HoldEngageLatch left_hold_engage_;
+    control::HoldEngageLatch right_hold_engage_;
+    uint64_t left_hold_engage_log_ns_ = 0;
+    uint64_t right_hold_engage_log_ns_ = 0;
     // The COLD sensor-presence window: liveness samples are folded until this many
     // ticks have passed, then the verdict latches for the run.
     std::uint32_t left_ft_liveness_ticks_ = 0;

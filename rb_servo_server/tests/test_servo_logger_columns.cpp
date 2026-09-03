@@ -148,6 +148,8 @@ int main() {
         "right_fc_fold_z_m",
         "right_fc_absorbed_norm_m",
         "left_fc_absorbed_norm_rad",
+        "right_fc_hold_engaged",
+        "left_fc_hold_force_n",
     };
     for (const char* name : required) {
         if (!contains(header_fields, name)) {

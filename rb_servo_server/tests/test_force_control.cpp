@@ -884,7 +884,35 @@ bool testSpringlessContactSettlesAtTheDamperFixedPointAndTheOldRowRings() {
     return true;
 }
 
+// THE HAND-GUIDE LATCH IS A HYSTERESIS, NOT A THRESHOLD: nothing moves below engage,
+// once moving it keeps yielding down to release, and it never toggles inside the band.
+// Disabled (engage 0) it is always engaged - the pre-2026-09-03 behaviour.
+bool testHoldEngageLatchHysteresis() {
+    rb_servo::control::HoldEngageLatch latch;
+    latch.configure(5.0, 2.0);
+    CHECK(latch.enabled());
+    CHECK(!latch.engaged());                 // starts frozen
+    CHECK(!latch.update(3.0));               // inside the band from below: still frozen
+    CHECK(!latch.update(4.99));
+    CHECK(latch.update(5.0));                // reaches engage
+    CHECK(latch.update(3.0));                // inside the band from above: keeps yielding
+    CHECK(latch.update(2.01));
+    CHECK(!latch.update(2.0));               // reaches release
+    CHECK(!latch.update(4.0));               // and stays frozen until engage again
+    latch.update(6.0);
+    CHECK(latch.engaged());
+    latch.reset();
+    CHECK(!latch.engaged());
+    rb_servo::control::HoldEngageLatch off;
+    off.configure(0.0, 0.0);
+    CHECK(!off.enabled());
+    CHECK(off.engaged());
+    CHECK(off.update(0.0));
+    return true;
+}
+
 int main() {
+    testHoldEngageLatchHysteresis();
     testPureDamperPredicate();
     testDropDeviationKeepsTheVelocity();
     testFoldIsInvisibleToTheContact();
