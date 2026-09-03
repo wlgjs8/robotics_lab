@@ -192,7 +192,12 @@ safety:
     # the margin/closest_face readouts on the wrong faces.
     min_m: [-0.600, -1.200, -0.200]
     max_m: [1.600, 1.200, 1.600]
-    runtime_min_m: [-0.6, -1.2, -0.2]
+    # runtime_* is the envelope a RUNTIME SetRoiBounds may move the box within, and it
+    # is what rb_gui derives its slider limits from. z_min was -0.2 m, so the GUI could
+    # not be dragged below -200 mm while laying the box out. Widened to -1.0 m
+    # (operator, 2026-09-03). This does NOT move the enforced box -- min_m/max_m above
+    # are unchanged; it only widens where the operator is allowed to put it.
+    runtime_min_m: [-0.6, -1.2, -1.0]
     runtime_max_m: [1.6, 1.2, 1.6]
     fail_policy: clamp_hold
     monitor_only: true   # 관찰 시작; 강제하려면 false

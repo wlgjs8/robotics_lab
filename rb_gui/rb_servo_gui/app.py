@@ -3961,6 +3961,8 @@ def build_gui(
                     )
                 roi_send = server.gui.add_button("Send ROI box")
                 handles["roi_send_button"] = roi_send
+                roi_cancel = server.gui.add_button("Cancel (revert to applied)")
+                handles["roi_cancel_button"] = roi_cancel
                 handles["roi_set_status"] = server.gui.add_text(
                     "ROI set status", initial_value="idle", disabled=True
                 )
@@ -3984,6 +3986,33 @@ def build_gui(
                     ok, message = safety.send_set_roi_bounds(lo, hi)
                     handles["roi_set_status"].value = ("OK: " if ok else "BLOCKED: ") + message
                     _persist_roi_settings(handles)   # perception/viz 클립 영역도 함께 적용
+
+                @roi_cancel.on_click
+                def _(_: Any) -> None:
+                    # Put the six inputs back on the bounds the server is enforcing, drop
+                    # the yellow preview, and re-persist so the perception/cloud clip
+                    # follows. Nothing is sent to the server: the enforced box never
+                    # changed, only the pending edit is discarded.
+                    applied = handles.get("roi_applied_bounds")
+                    if not applied:
+                        handles["roi_set_status"].value = (
+                            "CANCEL: no applied bounds seen yet (waiting for server state)")
+                        return
+                    lo_m, hi_m = applied
+                    for k, a in enumerate(("x", "y", "z")):
+                        for suffix, src in (("min", lo_m), ("max", hi_m)):
+                            h = handles[f"roi_{a}_{suffix}"]
+                            try:
+                                h.value = max(float(h.min),
+                                              min(float(h.max), src[k] * 1000.0))
+                            except Exception:
+                                pass
+                    update_roi_box_preview(handles.get("scene", {}), None, None)
+                    _persist_roi_settings(handles)
+                    handles["roi_set_status"].value = (
+                        "CANCEL: reverted to the applied box "
+                        f"[{lo_m[0]*1000:.0f},{lo_m[1]*1000:.0f},{lo_m[2]*1000:.0f}] .. "
+                        f"[{hi_m[0]*1000:.0f},{hi_m[1]*1000:.0f},{hi_m[2]*1000:.0f}] mm")
 
                 def _roi_preview(_: Any) -> None:
                     # Live yellow preview box while dragging any bound slider.
@@ -5321,6 +5350,12 @@ def _update_roi_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> 
     applied_max = _roi_bounds_floats(roi.get("max_m")) if isinstance(roi, Mapping) else None
     runtime_min = _roi_bounds_floats(roi.get("runtime_min_m")) if isinstance(roi, Mapping) else None
     runtime_max = _roi_bounds_floats(roi.get("runtime_max_m")) if isinstance(roi, Mapping) else None
+    # Remember what the server is actually enforcing, so "Cancel" has something
+    # authoritative to snap back to. Dragging the inputs changes the preview AND the
+    # persisted perception clip immediately, so without this an exploratory drag could
+    # only be undone by hand.
+    if applied_min is not None and applied_max is not None:
+        handles["roi_applied_bounds"] = (applied_min, applied_max)
     # Sync number-input soft range to the server's per-axis runtime envelope first.
     if have_sliders and runtime_min is not None and runtime_max is not None:
         for k, a in enumerate(axes):

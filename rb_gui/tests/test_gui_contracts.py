@@ -5541,6 +5541,66 @@ class RoiBoxGuiTest(unittest.TestCase):
         _update_roi_panel(handles, state)
         self.assertAlmostEqual(handles["roi_x_min"].value, -250.0)
 
+    def test_update_roi_panel_records_the_applied_bounds_for_cancel(self):
+        """Cancel needs the ENFORCED box to snap back to, not the last slider value.
+
+        Dragging an ROI input changes the preview and the persisted perception clip
+        immediately, so an exploratory drag had no undo. The panel therefore stashes the
+        server-applied bounds on every update, and the Cancel handler restores from
+        those -- without sending anything, since the enforced box never moved.
+        """
+        from rb_servo_gui.models import StateSnapshot
+
+        class FakeSlider:
+            def __init__(self):
+                self.min = -1500.0
+                self.max = 1500.0
+                self.value = 0.0
+
+        handles = {f"roi_{a}_{s}": FakeSlider() for a in ("x", "y", "z") for s in ("min", "max")}
+        state = StateSnapshot.parse(sample_state(roi_box=self._roi_block()))
+        _update_roi_panel(handles, state)
+        applied = handles.get("roi_applied_bounds")
+        self.assertIsNotNone(applied, "panel did not record the applied bounds")
+        lo_m, hi_m = applied
+        self.assertAlmostEqual(lo_m[0] * 1000.0, handles["roi_x_min"].value)
+        self.assertAlmostEqual(hi_m[2] * 1000.0, handles["roi_z_max"].value)
+
+        # An operator drag moves away from the applied box, within the server's runtime
+        # envelope (this fixture allows z down to -200 mm)...
+        handles["roi_z_min"].value = -150.0
+        _update_roi_panel(handles, state)
+        self.assertAlmostEqual(handles["roi_z_min"].value, -150.0)
+        # ...and the recorded bounds still describe what the SERVER holds, so reverting
+        # to them restores the enforced box rather than the drag.
+        lo_m, hi_m = handles["roi_applied_bounds"]
+        self.assertAlmostEqual(lo_m[2] * 1000.0, 0.0)
+        self.assertNotAlmostEqual(lo_m[2] * 1000.0, -150.0)
+
+    def test_roi_slider_range_follows_the_servers_runtime_envelope(self):
+        """The z input stopped at -200 mm because the SERVER said so, not the GUI.
+
+        The slider's soft range is synced from roi_box.runtime_min_m/runtime_max_m, so
+        laying the box out lower needed the config widened (2026-09-03: real and sim
+        runtime z_min -0.2 -> -1.0 m), not a GUI constant. Pinning that here so the
+        coupling is not rediscovered by dragging.
+        """
+        from rb_servo_gui.models import StateSnapshot
+
+        class FakeSlider:
+            def __init__(self):
+                self.min = -1500.0
+                self.max = 1500.0
+                self.value = 0.0
+
+        for envelope_z_min, expected in ((-0.2, -200.0), (-1.0, -1000.0)):
+            handles = {f"roi_{a}_{s}": FakeSlider()
+                       for a in ("x", "y", "z") for s in ("min", "max")}
+            block = self._roi_block(runtime_min_m=[-1.0, -1.5, envelope_z_min])
+            _update_roi_panel(handles, StateSnapshot.parse(sample_state(roi_box=block)))
+            self.assertAlmostEqual(handles["roi_z_min"].min, expected)
+            self.assertAlmostEqual(handles["roi_z_max"].min, expected)
+
     def test_update_roi_panel_safely_shrinks_stale_bootstrap_range(self):
         from rb_servo_gui.models import StateSnapshot
 

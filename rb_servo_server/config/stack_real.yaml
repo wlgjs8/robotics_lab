@@ -540,9 +540,14 @@ safety:
     # ASSUMES the table sits the same way relative to the stand. The stand itself
     # changed (arm spacing +/-0.157 -> +/-0.197 m, height 0.580 -> 0.570), so re-confirm
     # the extents against the real table before trusting the far faces.
-    min_m: [0.300, -0.400, -0.100]
-    max_m: [0.900, 0.400, 0.590]
-    runtime_min_m: [-0.6, -1.2, -0.2]
+    min_m: [0.300, -0.400, -0.200]
+    max_m: [1.100, 0.400, 0.590]
+    # runtime_* is the envelope a RUNTIME SetRoiBounds may move the box within, and it
+    # is what rb_gui derives its slider limits from. z_min was -0.2 m, so the GUI could
+    # not be dragged below -200 mm while laying the box out. Widened to -1.0 m
+    # (operator, 2026-09-03). This does NOT move the enforced box -- min_m/max_m above
+    # are unchanged; it only widens where the operator is allowed to put it.
+    runtime_min_m: [-0.6, -1.2, -1.0]
     runtime_max_m: [1.6, 1.2, 1.6]
     fail_policy: clamp_hold
     monitor_only: false   # real enforce: 박스 면에서 velocity-damper 감속/홀드
