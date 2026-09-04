@@ -67,12 +67,55 @@ IDLE_LEASE_RELEASE_SEC = 1.0
 LEASE_RETRY_BACKOFF_SEC = 2.0
 
 # Per-arm ABSOLUTE gripper close-bias fallbacks (opening percent subtracted from
-# the model's opening target so a marginal grasp clamps). The two pika grippers
-# clamp differently, so left/right default to independent values; these apply when
-# neither the per-arm flag (--gripper-close-bias-left/right) nor the shared
+# the model's opening target so a marginal grasp clamps). These apply when neither
+# the per-arm flag (--gripper-close-bias-left/right) nor the shared
 # --gripper-close-bias is given. Mirrored in the flow-infer arg help text below.
-DEFAULT_GRIPPER_CLOSE_BIAS_LEFT = 2.0
-DEFAULT_GRIPPER_CLOSE_BIAS_RIGHT = 6.0
+#
+# BOTH ARE 0 ON PURPOSE (2026-09-05). They were 2.0/6.0, then 4.0/4.0, to clamp a
+# marginal grasp that the boltv2 retrain has since fixed on its own. Two reasons not
+# to carry a standing bias now that the model grasps correctly:
+#   - It is a hardware fudge that the POLICY then perceives. With
+#     --gripper-proprio-source command (what the boltv2 sweeps run), the fed-back
+#     proprio is the post-bias value, so every inference re-injects the offset into
+#     the observation the next action is conditioned on -- the channel is already
+#     "a pure function of the model's own last action" (see that flag's help), and a
+#     bias tilts it. Measured on outputs/sweep/20260904_235947: the applied bias is
+#     +0.000% over 2,918 samples, i.e. this is the configuration that produced the
+#     good runs.
+#   - The values above were unreachable anyway: the per-arm argparse defaults were
+#     0.0 rather than None, so the `is None` fallback below never ran and the SHARED
+#     --gripper-close-bias was silently ignored too. Fixed with these; keep the
+#     defaults None-able so the precedence chain stays live.
+DEFAULT_GRIPPER_CLOSE_BIAS_LEFT = 0.0
+DEFAULT_GRIPPER_CLOSE_BIAS_RIGHT = 0.0
+
+
+def resolve_gripper_close_bias(args: object) -> tuple[float, float, float]:
+    """(shared, left, right) ABSOLUTE gripper close-bias in opening percent.
+
+    Precedence, per arm: ``--gripper-close-bias-<arm>`` > ``--gripper-close-bias``
+    > ``DEFAULT_GRIPPER_CLOSE_BIAS_<ARM>`` (0.0). All three arms of that chain are
+    live only because the per-arm argparse defaults are None -- when they were 0.0
+    the `is None` tests below never fired, which made the module defaults dead AND
+    silently dropped the shared flag (``--gripper-close-bias 3`` biased nothing).
+
+    The returned `shared` value is the shared flag itself (0.0 when unset). It is
+    the base `_gripper_close_bias(arm=None)` falls back to and what the startup
+    banner reports; the per-arm values are what actually bias a command.
+    """
+    shared = getattr(args, "gripper_close_bias", None)
+    left = getattr(args, "gripper_close_bias_left", None)
+    right = getattr(args, "gripper_close_bias_right", None)
+    if left is None:
+        left = shared if shared is not None else DEFAULT_GRIPPER_CLOSE_BIAS_LEFT
+    if right is None:
+        right = shared if shared is not None else DEFAULT_GRIPPER_CLOSE_BIAS_RIGHT
+    clamp = lambda value: float(min(100.0, max(0.0, float(value))))  # noqa: E731
+    return (
+        float(shared) if shared is not None else 0.0,
+        clamp(left),
+        clamp(right),
+    )
 
 
 def _intent_record_packet(
@@ -257,6 +300,63 @@ def _tune_gc_for_realtime(stderr: TextIO) -> Callable[[], None]:
     return _restore
 
 
+class _TickPacer:
+    """Absolute-deadline pacing for the command loop.
+
+    ``sleep_fn(period)`` sleeps for a period AFTER the tick's work has already run,
+    so the achieved period is ``work + period`` and the configured rate is never
+    reached. MEASURED 2026-09-04 (FLOW_INFER_TICK_PROFILE, 129 reports over a 649.7 s
+    rollout): ``command_rate_hz: 500`` (2.00 ms) ran at 2.78 ms = ~360 Hz, of which
+    2.09 ms was the sleep and ~0.7 ms the tick itself.
+
+    That 0.78 ms is not just a slower stream. The policy step deadline is noticed on
+    a tick, so half a tick period of lateness is booked into every policy step
+    (``flow_inference._next_step_deadline``): 34.85 ms steps against a 33.4 ms
+    ``policy_dt``, a 139.3 ms chunk cycle against a 133.6 ms knot span, and the
+    difference was spent with the target frozen at the interpolator's last knot --
+    a dead stop and a surge at the 7.18 Hz chunk rate, on every chunk.
+
+    So sleep until the next ABSOLUTE deadline instead. Lateness is then corrected on
+    the following tick rather than accumulated, and the loop holds the configured
+    rate as long as the work fits inside the period.
+
+    Two deliberate properties, both required by the loop that calls this:
+      * ``sleep_fn`` is called EXACTLY once per ``wait()``, even when the tick ran
+        long (with 0.0, which is a yield). The loop's callers count sleeps.
+      * The pacing clock is separate from the loop's injected ``monotonic_fn``.
+        That one is scripted with finite, exactly-sized sequences in tests ("startup
+        deadline, then one per tick"), so pacing must not read it. Injectable here
+        so the pacer itself stays testable.
+    """
+
+    __slots__ = ("_period", "_sleep", "_monotonic", "_next")
+
+    def __init__(self, period: float, sleep_fn, monotonic_fn=time.monotonic) -> None:
+        self._period = max(float(period), 0.0)
+        self._sleep = sleep_fn
+        self._monotonic = monotonic_fn
+        self._next: float | None = None
+
+    def wait(self) -> None:
+        if self._period <= 0.0:
+            self._sleep(0.0)
+            return
+        now = self._monotonic()
+        deadline = self._next
+        if deadline is None:
+            deadline = now + self._period  # the first slot establishes the grid
+        remaining = deadline - now
+        if remaining > 0.0:
+            self._next = deadline + self._period
+            self._sleep(remaining)
+            return
+        # Overran the slot: skip the deadlines already missed so the grid phase
+        # survives, and yield without sleeping. Never queue catch-up ticks.
+        missed = int((now - deadline) // self._period) + 1
+        self._next = deadline + missed * self._period
+        self._sleep(0.0)
+
+
 def run(
     config: PolicyRunnerConfig,
     *,
@@ -305,6 +405,7 @@ def run(
     lease_retry_after = float("-inf")
     last_motion_intent_time: float | None = None
     period = 1.0 / max(config.command_rate_hz, 1.0)
+    _pacer = _TickPacer(period, sleep_fn)
     startup_deadline = monotonic_fn() + max(config.runtime.startup_timeout_sec, 0.0)
     # POLICY_RUNNER_TELEOP_DEBUG=1: 1 Hz loop stats (sent/dropped/no-intent + last drop reason).
     teleop_debug = os.environ.get("POLICY_RUNNER_TELEOP_DEBUG", "") == "1"
@@ -391,7 +492,7 @@ def run(
             print(f"policy_runner completed: {completion_reason}", file=stderr)
             return 0
         _ts = monotonic_fn() if _prof.on else 0.0
-        sleep_fn(period)
+        _pacer.wait()
         if _prof.on:
             _prof.add("sleep", monotonic_fn() - _ts)
         return None
@@ -586,7 +687,7 @@ def run(
                         file=stderr,
                     )
                     return STARTUP_TIMEOUT_EXIT_CODE
-                sleep_fn(period)
+                _pacer.wait()
                 continue
             if abort_on_fault_latch:
                 fault_latch = fault_latch_from_snapshot(snapshot)
@@ -1760,7 +1861,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--gripper-close-bias-left",
         type=float,
-        default=0.0,
+        default=None,
         help="LEFT-arm ABSOLUTE close-bias override (opening percent). Wins over --gripper-close-bias. "
              "When unset, falls back to --gripper-close-bias, then to the left default (0.0). "
              "Clamped to [0,100]; no effect in delta/binary mode.",
@@ -1768,7 +1869,7 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--gripper-close-bias-right",
         type=float,
-        default=0.0,
+        default=None,
         help="RIGHT-arm ABSOLUTE close-bias override (opening percent). Wins over --gripper-close-bias. "
              "When unset, falls back to --gripper-close-bias, then to the right default (0.0). "
              "Clamped to [0,100]; no effect in delta/binary mode.",
@@ -2998,26 +3099,11 @@ def _main_with_subcommands(argv: list[str]) -> int:
             # --gripper-close-bias-<arm> wins; else the shared --gripper-close-bias;
             # else the per-arm default (left 2.0 / right 6.0). The shared base is
             # kept for the startup log + tests that set `gripper_close_bias` directly.
-            _shared_bias = getattr(args, "gripper_close_bias", None)
-            _left_bias = getattr(args, "gripper_close_bias_left", None)
-            _right_bias = getattr(args, "gripper_close_bias_right", None)
-            if _left_bias is None:
-                _left_bias = (
-                    _shared_bias
-                    if _shared_bias is not None
-                    else DEFAULT_GRIPPER_CLOSE_BIAS_LEFT
-                )
-            if _right_bias is None:
-                _right_bias = (
-                    _shared_bias
-                    if _shared_bias is not None
-                    else DEFAULT_GRIPPER_CLOSE_BIAS_RIGHT
-                )
-            source.gripper_close_bias = (
-                float(_shared_bias) if _shared_bias is not None else 0.0
-            )
-            source.gripper_close_bias_left = float(min(100.0, max(0.0, _left_bias)))
-            source.gripper_close_bias_right = float(min(100.0, max(0.0, _right_bias)))
+            (
+                source.gripper_close_bias,
+                source.gripper_close_bias_left,
+                source.gripper_close_bias_right,
+            ) = resolve_gripper_close_bias(args)
             # Close-snap deadzone: collapse a near-closed absolute opening to fully
             # closed (0%) so small jitter doesn't leave the jaw cracked open.
             source.gripper_close_snap_percent = float(

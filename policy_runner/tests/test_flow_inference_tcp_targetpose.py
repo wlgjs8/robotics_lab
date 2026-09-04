@@ -162,7 +162,14 @@ class FlowInferenceTcpPoseTargetTest(unittest.TestCase):
         self.assertEqual(record["command_session_id"], "sess")
 
     # ------------------------------------------------ Patch 3: foh_se3 conditioning --
-    def _streamed_source(self, tmp: str, conditioning: str, reanchor: str = "measured_legacy"):
+    def _streamed_source(
+        self,
+        tmp: str,
+        conditioning: str,
+        reanchor: str = "measured_legacy",
+        *,
+        chunk_execute_steps: int = 8,
+    ):
         checkpoint = Path(tmp) / "flow_policy.pt"
         _write_flow_checkpoint(checkpoint, action_horizon=8)
         source = FlowMatchingActionSource(
@@ -171,7 +178,7 @@ class FlowInferenceTcpPoseTargetTest(unittest.TestCase):
             policy_dt_sec=0.02,
             max_linear_velocity_m_s=1.0,
             max_angular_velocity_rad_s=1.0,
-            chunk_execute_steps=8,
+            chunk_execute_steps=chunk_execute_steps,
             tcp_target_pose_conditioning=conditioning,
             tcp_target_pose_reanchor_mode=reanchor,
         )
@@ -245,6 +252,106 @@ class FlowInferenceTcpPoseTargetTest(unittest.TestCase):
         x = _pose_from_target_payload(at_boundary.left["tcp_target_stand"])[0]
         # S_0 = measured.x + one clamped step (0.01 m, within the 1.0 m/s * 0.02 s cap)
         self.assertAlmostEqual(x, 0.4 + 0.01, places=4)
+
+    def test_foh_keeps_moving_past_the_execute_window_instead_of_freezing(self) -> None:
+        """The knots must outlast the chunk CYCLE, not just the execute window.
+
+        `_step_deadline` is reset from the current tick, so a cycle takes slightly
+        longer in wall time than `limit * policy_dt` and the interpolator used to
+        clamp at its last knot -- a dead hold at the chunk rate on every chunk
+        (measured 5.67 ms p50 at 7.18 Hz on 20260904_220036). One runway knot keeps
+        the target advancing at plan speed through that overshoot.
+        """
+        assert torch is not None and np is not None
+        measured = _pose7([0.4, 0.0, 0.3], [0.0, 0.0, 0.0, 1.0])
+        chunk = _action_chunk(*([[0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]] * 8))
+        with tempfile.TemporaryDirectory() as tmp:
+            # horizon 8, execute 4 -> 4 runway rows the FOH may borrow one from
+            source = self._streamed_source(tmp, "foh_se3", chunk_execute_steps=4)
+            try:
+                with mock.patch(
+                    "policy_runner.flow_inference.sample_action_chunks", return_value=chunk
+                ):
+                    state = _sample_state(left_pose=measured)
+                    source.next_intent(state, 0.0)  # activate + install knots at t0=0
+                    # last EXECUTED knot S_3 sits at t = 4*policy_dt = 0.08
+                    at_last = source._foh_tick_intent(0.08, stall=False)
+                    # ...and the cycle overruns it; the old code froze here
+                    past_last = source._foh_tick_intent(0.09, stall=False)
+            finally:
+                source.close()
+        x_last = _pose_from_target_payload(at_last.left["tcp_target_stand"])[0]
+        x_past = _pose_from_target_payload(past_last.left["tcp_target_stand"])[0]
+        self.assertAlmostEqual(x_last, 0.4 + 4 * 0.01, places=4)
+        # half a policy step into the runway knot -> half a step of extra travel
+        self.assertAlmostEqual(x_past, x_last + 0.005, places=4)
+
+    def test_step_deadlines_stay_on_the_grid_when_ticks_arrive_late(self) -> None:
+        """A late tick must not push every later step out with it.
+
+        The deadline is noticed on a command-loop tick, so `now` is already late by
+        up to one tick. Re-basing on it booked that lateness in permanently and
+        compounded it (measured 34.85 ms steps against a 33.4 ms policy_dt).
+        """
+        assert torch is not None and np is not None
+        measured = _pose7([0.4, 0.0, 0.3], [0.0, 0.0, 0.0, 1.0])
+        chunk = _action_chunk(*([[0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]] * 8))
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._streamed_source(tmp, "foh_se3", chunk_execute_steps=4)
+            try:
+                with mock.patch(
+                    "policy_runner.flow_inference.sample_action_chunks", return_value=chunk
+                ):
+                    state = _sample_state(left_pose=measured)
+                    source.next_intent(state, 0.0)  # activate -> deadline 0.02
+                    self.assertAlmostEqual(source._step_deadline, 0.02, places=9)
+                    # every tick notices the deadline 1 ms late
+                    source.next_intent(state, 0.021)
+                    self.assertAlmostEqual(source._step_deadline, 0.04, places=9)
+                    source.next_intent(state, 0.041)
+                    self.assertAlmostEqual(source._step_deadline, 0.06, places=9)
+            finally:
+                source.close()
+
+    def test_step_deadline_rephases_instead_of_bursting_after_a_long_gap(self) -> None:
+        """More than a whole policy_dt behind (a stall, a GC pause) -> re-phase.
+
+        Catching up would fire a burst of policy steps back to back, which is the
+        motion the grid exists to prevent.
+        """
+        assert torch is not None and np is not None
+        measured = _pose7([0.4, 0.0, 0.3], [0.0, 0.0, 0.0, 1.0])
+        chunk = _action_chunk(*([[0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]] * 8))
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._streamed_source(tmp, "foh_se3", chunk_execute_steps=4)
+            try:
+                with mock.patch(
+                    "policy_runner.flow_inference.sample_action_chunks", return_value=chunk
+                ):
+                    state = _sample_state(left_pose=measured)
+                    source.next_intent(state, 0.0)  # deadline 0.02
+                    source.next_intent(state, 0.5)  # 24 policy_dt late
+            finally:
+                source.close()
+        # 0.5 + policy_dt, not 0.04 (which would be due immediately)
+        self.assertAlmostEqual(source._step_deadline, 0.52, places=9)
+
+    def test_foh_knot_count_falls_back_when_the_chunk_has_no_runway(self) -> None:
+        """An ensemble window is exactly the execute window: no spare row to borrow."""
+        assert torch is not None and np is not None
+        measured = _pose7([0.4, 0.0, 0.3], [0.0, 0.0, 0.0, 1.0])
+        chunk = _action_chunk(*([[0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]] * 8))
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._streamed_source(tmp, "foh_se3", chunk_execute_steps=8)
+            try:
+                with mock.patch(
+                    "policy_runner.flow_inference.sample_action_chunks", return_value=chunk
+                ):
+                    source.next_intent(_sample_state(left_pose=measured), 0.0)
+                    self.assertEqual(source._current_chunk_execute_limit(), 8)
+                    self.assertEqual(source._foh_knot_count(), 8)
+            finally:
+                source.close()
 
     def test_foh_rollout_step_log_records_policy_ticks_not_servo_ticks(self) -> None:
         assert torch is not None and np is not None

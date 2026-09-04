@@ -21,7 +21,16 @@ from policy_runner.arm_init_control import (
     parse_arm_init_command,
 )
 from policy_runner.config import config_from_mapping, load_config
-from policy_runner.main import LEASE_READBACK_TIMEOUT_EXIT_CODE, STARTUP_TIMEOUT_EXIT_CODE, make_action_source, run
+from policy_runner.main import (
+    DEFAULT_GRIPPER_CLOSE_BIAS_LEFT,
+    DEFAULT_GRIPPER_CLOSE_BIAS_RIGHT,
+    LEASE_READBACK_TIMEOUT_EXIT_CODE,
+    STARTUP_TIMEOUT_EXIT_CODE,
+    _TickPacer,
+    make_action_source,
+    resolve_gripper_close_bias,
+    run,
+)
 from policy_runner.record_control import RecordCommand, RecordingSupervisor, parse_record_command
 from policy_runner.recording import _hash_canonical_json
 from policy_runner.robot_state_client import (
@@ -360,6 +369,99 @@ robot:
     xyz_rpy: [-0.1, 0.2, 0.3, 0.0, 0.0, 0.0]
     status: configured_estimate
 """
+
+
+class TickPacerTest(unittest.TestCase):
+    """The command loop must hold command_rate_hz, not command_rate_hz minus its work."""
+
+    def _pacer(self, period, clock, sleeps):
+        def sleep_fn(duration):
+            sleeps.append(duration)
+            clock[0] += duration  # a real sleep advances the clock it is measured on
+
+        return _TickPacer(period, sleep_fn, monotonic_fn=lambda: clock[0])
+
+    def test_sleep_absorbs_the_work_done_before_it(self):
+        # 2 ms period, 0.7 ms of tick work. Sleeping a full period after the work
+        # makes the achieved period 2.7 ms -- the measured 500 Hz -> ~360 Hz defect.
+        clock = [100.0]
+        sleeps: list[float] = []
+        pacer = self._pacer(0.002, clock, sleeps)
+        pacer.wait()  # the first slot has no grid yet -> a full period
+        for _ in range(4):
+            clock[0] += 0.0007  # the tick's work
+            pacer.wait()
+        self.assertAlmostEqual(sleeps[0], 0.002, places=9)
+        for value in sleeps[1:]:
+            self.assertAlmostEqual(value, 0.0013, places=9)  # period - work
+        # 5 slots at exactly the configured period, work included.
+        self.assertAlmostEqual(clock[0] - 100.0, 5 * 0.002, places=9)
+
+    def test_late_tick_skips_its_slots_without_bursting(self):
+        clock = [50.0]
+        sleeps: list[float] = []
+        pacer = self._pacer(0.002, clock, sleeps)
+        pacer.wait()  # slots are now 50.004, 50.006, ...
+        clock[0] += 0.0051  # one tick took 5.1 ms: it blew through two of them
+        pacer.wait()
+        self.assertEqual(sleeps[-1], 0.0)  # yields; never sleeps a negative
+        # The grid phase survives: the next deadline is a whole number of periods
+        # past the missed one (50.008), not "now + period".
+        clock[0] += 0.0001
+        pacer.wait()
+        self.assertAlmostEqual(sleeps[-1], 0.0008, places=9)
+
+    def test_sleep_is_called_exactly_once_per_wait(self):
+        # The loop's callers count sleeps (some tests end the run from inside
+        # sleep_fn), so a skipped slot must still cost exactly one call.
+        clock = [0.0]
+        sleeps: list[float] = []
+        pacer = self._pacer(0.002, clock, sleeps)
+        for _ in range(3):
+            pacer.wait()
+            clock[0] += 0.010  # always late
+        self.assertEqual(len(sleeps), 3)
+
+
+class GripperCloseBiasResolutionTest(unittest.TestCase):
+    """Per-arm flag > shared flag > module default, and the default is 0."""
+
+    @staticmethod
+    def _args(shared=None, left=None, right=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            gripper_close_bias=shared,
+            gripper_close_bias_left=left,
+            gripper_close_bias_right=right,
+        )
+
+    def test_unset_is_no_bias_on_either_arm(self):
+        # 0/0 is the shipped posture: the boltv2 retrain grasps without a fudge,
+        # and with --gripper-proprio-source command a bias would be fed back into
+        # the observation the next action is conditioned on.
+        self.assertEqual(DEFAULT_GRIPPER_CLOSE_BIAS_LEFT, 0.0)
+        self.assertEqual(DEFAULT_GRIPPER_CLOSE_BIAS_RIGHT, 0.0)
+        self.assertEqual(resolve_gripper_close_bias(self._args()), (0.0, 0.0, 0.0))
+
+    def test_shared_flag_reaches_both_arms(self):
+        # REGRESSION: the per-arm argparse defaults used to be 0.0 instead of None,
+        # so the `is None` fallback never ran and --gripper-close-bias was silently
+        # dropped -- it resolved to (3.0, 0.0, 0.0) and biased nothing.
+        self.assertEqual(resolve_gripper_close_bias(self._args(shared=3.0)), (3.0, 3.0, 3.0))
+
+    def test_per_arm_flag_wins_over_shared(self):
+        self.assertEqual(
+            resolve_gripper_close_bias(self._args(shared=3.0, left=1.0)), (3.0, 1.0, 3.0)
+        )
+        self.assertEqual(
+            resolve_gripper_close_bias(self._args(left=1.0, right=9.0)), (0.0, 1.0, 9.0)
+        )
+
+    def test_per_arm_values_clamp_to_the_opening_range(self):
+        self.assertEqual(
+            resolve_gripper_close_bias(self._args(left=-5.0, right=250.0)), (0.0, 0.0, 100.0)
+        )
 
 
 class PolicyRunnerContractTest(unittest.TestCase):

@@ -52,6 +52,15 @@ class FlowInferenceCliTest(unittest.TestCase):
         self.assertEqual(FlowMatchingActionSource._stream_prefetch_at(dummy), 24)
         dummy.sequential_stream_inference = False
         self.assertLessEqual(FlowMatchingActionSource._stream_prefetch_at(dummy), 2)
+        # A SHORT execute window kicks at 1, not 2: with limit=4 a kick at 2 leaves
+        # 2*33.4 = 66.8 ms for an inference measured at p90 67.2 ms, and 20.3% of
+        # boundaries stalled. Kicking at 1 leaves 3 steps / 100 ms.
+        for limit, expected in ((4, 1), (3, 1), (2, 1), (1, 0)):
+            dummy._current_chunk_execute_limit = (lambda n: (lambda: n))(limit)
+            self.assertEqual(
+                FlowMatchingActionSource._stream_prefetch_at(dummy), expected, f"limit={limit}"
+            )
+        dummy._current_chunk_execute_limit = lambda: 24
         # explicit kick point (RTC pairing): kicks at the requested index, clamped
         dummy.stream_prefetch_at = 8
         self.assertEqual(FlowMatchingActionSource._stream_prefetch_at(dummy), 8)

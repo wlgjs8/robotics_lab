@@ -890,7 +890,7 @@ class FlowMatchingActionSource:
             next_index = self._chunk_index + 1
             if next_index < self._current_chunk_execute_limit():
                 self._chunk_index = next_index
-                self._step_deadline = now_monotonic + float(self.policy_dt_sec)
+                self._step_deadline = self._next_step_deadline(now_monotonic)
                 advanced = True
             else:
                 swapped = self._take_prefetched()
@@ -1273,6 +1273,32 @@ class FlowMatchingActionSource:
             if tail is not None:
                 prev[arm] = tail
         self._overlay_chain_pending = {"left": None, "right": None}
+
+    def _next_step_deadline(self, now_monotonic: float) -> float:
+        """The next policy step's deadline, advanced ON THE GRID from the previous one.
+
+        WHY NOT ``now + policy_dt`` (2026-09-04, measured on
+        outputs/sweep/20260904_220036_boltv2_plain_30k.jsonl, 18,833 steps):
+        the deadline is noticed on a command-loop tick, so ``now`` is already up to
+        one tick LATE. Re-basing the next deadline on it books that lateness in
+        permanently, and it compounds every step: measured step period 34.85 ms
+        against a 33.4 ms ``policy_dt`` (+1.45 ms = half a tick at the loop's
+        measured ~360 Hz), so a 4-step chunk cycle took 139.3 ms instead of 133.6.
+        The plan therefore played at 95.9% of the rate it was trained at, and the
+        5.7 ms of slack per cycle is what the FOH interpolator used to spend frozen
+        at its last knot (see ``_foh_knot_count``).
+
+        Advancing from the previous deadline keeps the step grid anchored to the
+        chunk activation, so lateness is corrected on the NEXT step instead of
+        accumulating. Falling more than one ``policy_dt`` behind (a stall, a long GC
+        pause) re-phases from ``now`` rather than firing a burst of catch-up steps:
+        the grid is worth keeping, a backlog is not.
+        """
+        dt = float(self.policy_dt_sec)
+        deadline = float(getattr(self, "_step_deadline", 0.0)) + dt
+        if deadline <= now_monotonic:
+            return now_monotonic + dt
+        return deadline
 
     def _activate_chunk(self, chunk: np.ndarray, now_monotonic: float) -> None:
         self._record_inference_activation(now_monotonic)
@@ -1803,6 +1829,19 @@ class FlowMatchingActionSource:
         # could not finish in that window and stalled every chunk. Trade-off: the next chunk is
         # inferred from a slightly older frame (~quarter-chunk), but it re-anchors to the current
         # pose at its boundary, so only the IMAGE is marginally staler.
+        #
+        # A SHORT execute window cannot afford even that. With limit=4 the kick at 2
+        # leaves 2 steps, and the step grid is honest now (`_next_step_deadline`), so
+        # that is 2 * 33.4 = 66.8 ms against an 8001 pi05 server measuring p50 62.9 /
+        # p90 67.2 ms: MEASURED 2026-09-04 on outputs/sweep/20260904_235947, budget
+        # p50 66.0 ms, P(latency > budget) 15.9%, and 20.3% of boundaries stalled --
+        # against 7.2% before the grid fix, when 5.7 ms per cycle of deadline drift
+        # was silently padding the same budget. Kicking at 1 restores a 3-step,
+        # 100 ms budget: P(miss) 0.00% on that same latency distribution. The RTC
+        # branch of tools/flow_infer_real_policy.sh already made this call for the
+        # same reason (see its kick_at note); this is the non-RTC half of it.
+        if limit <= 4:
+            return max(0, min(1, limit - 1))
         return max(0, min(2, limit - 1))
 
     def _stream_hold_intent(self) -> CommandIntent | None:
@@ -2670,10 +2709,48 @@ class FlowMatchingActionSource:
     def _foh_arm_indices(self) -> tuple[tuple[str, int, slice], ...]:
         return (("left", 0, slice(0, 6)), ("right", 1, slice(7, 13)))
 
+    def _foh_knot_count(self) -> int:
+        """How many chunk rows to lay down as FOH knots: the execute window plus ONE
+        runway row when the chunk has one.
+
+        WHY THE EXTRA ROW (2026-09-04, measured on
+        outputs/sweep/20260904_220036_boltv2_plain_30k.*, 649.7 s / 4,633 chunks):
+        the knots are laid at exact ``policy_dt`` spacing, so ``limit`` rows span
+        ``limit * policy_dt`` = 133.6 ms -- but a chunk cycle takes 139.3 ms of WALL
+        time, because ``_step_deadline`` is reset from the current tick (``now +
+        policy_dt``) and absorbs the tick quantization (+1.45 ms per step at the
+        loop's measured ~360 Hz). ``sample()`` clamps at ``times[-1]``, so the last
+        5.67 ms (p50; p90 9.6 ms) of EVERY cycle emitted a frozen target.
+
+        Measured cost of that clamp, phase-averaged over 276 chunk activations in
+        the servo's received-target stream (normalized to each epoch's mean speed):
+        0.74 at -10..-5 ms, 0.19 at -5..0 ms, 0.00 AT the boundary, then 1.22 at
+        +5..+10 ms and a 1.44 peak -- a dead stop and a surge at 7.18 Hz, on every
+        chunk. In the policy log the same thing reads as a +-22% step-length ripple
+        locked to the chunk phase (0.83 / 1.33 / 1.24 / 0.99 mm on the left arm)
+        while the model's OWN rows are uniform (1.05 mm at every horizon index), and
+        as a 2x command-acceleration spike at the seam.
+
+        One extra knot buys 33.4 ms of runway past the execute window, which covers
+        99.0% of the measured cycle overshoots. The remaining 1% (boundary stalls)
+        still clamp exactly as before -- no new behavior there. The extra row is
+        never *executed* as a policy step; it only gives the interpolator somewhere
+        to keep going at plan speed until the next chunk re-anchors, so the runway
+        the model already published is used for what it is for.
+
+        Falls back to ``limit`` when there is no spare row (ensemble windows are
+        exactly the execute window).
+        """
+        chunk = self._chunk
+        limit = self._current_chunk_execute_limit()
+        if chunk is None or limit <= 0:
+            return 0
+        return min(limit + 1, int(chunk.shape[0]))
+
     def _foh_begin_chunk(self, payload: dict[str, Any], now_monotonic: float) -> None:
         """Install the freshly activated chunk's per-step absolute targets as FOH knots."""
         conds = self._ensure_tcp_tp_conditioners()
-        limit = self._current_chunk_execute_limit()
+        limit = self._foh_knot_count()
         chunk = self._chunk
         if chunk is None or limit <= 0:
             return

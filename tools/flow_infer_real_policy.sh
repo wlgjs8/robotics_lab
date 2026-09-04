@@ -94,6 +94,17 @@ echo "[flow-infer] policy_dt_sec=${POLICY_DT:-<runner default 0.0334>} (must mat
 echo "[flow-infer] include_depth=${INCLUDE_DEPTH} -> args:${DEPTH_ARGS[*]:-<none, RGB-only>} (must match the served checkpoint's training)"
 echo "[flow-infer] inherited env: OPENPI_REMOTE_SKIP_WARMUP=${OPENPI_REMOTE_SKIP_WARMUP-<unset>} RB_ALLOW_REAL_GRIPPER=${RB_ALLOW_REAL_GRIPPER-<unset>} DISPLAY=${DISPLAY-<unset>}"
 
+# Next-chunk inference kick point, in consumed steps of the execute window.
+# FLOW_INFER_PREFETCH_AT applies with OR without RTC: the budget it buys
+# (EXECUTE - kick_at) * policy_dt is what decides whether a boundary stalls, and
+# that arithmetic does not care about RTC. Unset -> the runner's own default
+# (kick at 1 for execute<=4, else early at 2); see _stream_prefetch_at.
+PREFETCH_ARGS=()
+if [ -n "${FLOW_INFER_PREFETCH_AT:-}" ] && [ "${FLOW_INFER_RTC:-0}" != "1" ]; then
+  PREFETCH_ARGS+=(--stream-prefetch-at "$FLOW_INFER_PREFETCH_AT")
+  echo "[flow-infer] prefetch kick_at=$FLOW_INFER_PREFETCH_AT (budget $((CHUNK_EXECUTE_STEPS - FLOW_INFER_PREFETCH_AT)) steps before the boundary)"
+fi
+
 RTC_ARGS=()
 if [ "${FLOW_INFER_RTC:-0}" = "1" ]; then
   RTC_ARGS+=(--rtc)
@@ -250,6 +261,7 @@ exec "$PYTHON_BIN" -m policy_runner flow-infer \
   --tcp-target-pose-reanchor-mode "$TCP_REANCHOR_MODE" \
   --tcp-target-pose-blend-steps "$TCP_BLEND_STEPS" \
   "${RTC_ARGS[@]}" \
+  "${PREFETCH_ARGS[@]}" \
   "${SEQ_ARGS[@]}" \
   "${VELPROPRIO_ARGS[@]}" \
   "${DEPTH_ARGS[@]}" \

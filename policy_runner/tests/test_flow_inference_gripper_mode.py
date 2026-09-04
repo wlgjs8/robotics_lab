@@ -121,6 +121,33 @@ class GripperActionModeTest(unittest.TestCase):
         values = [r.command.value for r in source.gripper_runtime.results]
         self.assertEqual(values, [17.0, 87.0])
 
+    def test_close_bias_is_applied_once_per_step_and_never_compounds(self) -> None:
+        """The bias must NOT ratchet inside the runner.
+
+        `step` is a VIEW into the live chunk (`self._chunk[self._chunk_index]`),
+        and dispatch assigns to `step[6]` / `step[13]`. Without the defensive copy
+        in _dispatch_gripper_step, the mapped value would be written back into the
+        chunk, and every consumer that re-read that row would subtract the bias
+        again -- a per-re-read ratchet toward closed, which is exactly what a
+        biased grasp would look like if it drifted shut on its own.
+        """
+        source = _make_source(absolute=True)
+        source.gripper_close_bias = 1.0
+        chunk = np.zeros((4, 14), dtype=np.float32)
+        chunk[:, 6] = 40.0
+        chunk[:, 13] = 60.0
+        row = chunk[0]  # exactly what the runner hands to integrate + dispatch
+        targets = source._integrate_gripper_targets(row, payload={})
+        source._dispatch_gripper_step(row)
+        self.assertAlmostEqual(targets["left"], 39.0)
+        self.assertAlmostEqual(targets["right"], 59.0)
+        # the model's raw action survives untouched in the chunk
+        self.assertAlmostEqual(float(chunk[0, 6]), 40.0)
+        self.assertAlmostEqual(float(chunk[0, 13]), 60.0)
+        # and both sinks agreed on ONE bias application
+        values = [r.command.value for r in source.gripper_runtime.results]
+        self.assertEqual(values, [39.0, 59.0])
+
     def test_close_snap_collapses_near_closed_absolute_target(self) -> None:
         # close-snap=10: a mapped opening strictly below 10% snaps to 0 (fully
         # closed); values at/above the threshold pass through unchanged.
