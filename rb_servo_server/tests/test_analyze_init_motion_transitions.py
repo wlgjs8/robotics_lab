@@ -63,7 +63,7 @@ class Sim:
         return r
 
 
-def both_arm_episode(kick: bool, snap: bool, recover_force: bool):
+def both_arm_episode(kick: bool, snap: bool, recover_force: bool, fast_arrival: bool = False):
     """500 ticks streaming, 300 ticks init on both arms, 500 ticks streaming."""
     sim = Sim()
     rows = []
@@ -82,7 +82,8 @@ def both_arm_episode(kick: bool, snap: bool, recover_force: bool):
             sim.reason[arm] = "F/T has no bias yet - run a tare before enabling compliance"
             if k == 60 and snap:
                 sim.q[arm][2] += 0.03  # measured re-anchor snap at the hold entry
-            sim.q[arm][1] += 0.004
+            # 2 deg/s approach, or 10 deg/s when the episode arrives too fast
+            sim.q[arm][1] += 0.02 if fast_arrival else 0.004
         rows.append(sim.row(i)); i += 1
     for arm in ("left", "right"):
         sim.init[arm] = "done"
@@ -151,6 +152,8 @@ class AnalyzeInitMotionTransitionsTest(unittest.TestCase):
         self.assertEqual([e["arm"] for e in report["episodes"]], ["left", "right"])
         for ep in report["episodes"]:
             self.assertTrue(ep["onset"]["pass"], ep["onset"])
+            self.assertTrue(ep["arrival"]["pass"], ep["arrival"])
+            self.assertAlmostEqual(ep["arrival"]["sent_speed_deg_s"], 2.0, places=6)
             self.assertTrue(ep["resume"]["pass"], ep["resume"])
             self.assertAlmostEqual(ep["resume"]["max_velocity_clamp_deg"], 0.0)
             self.assertAlmostEqual(ep["resume"]["follower_engage_sec"], 0.2, places=3)
@@ -162,9 +165,13 @@ class AnalyzeInitMotionTransitionsTest(unittest.TestCase):
         self.assertIn("force   PASS", text)
 
     def test_resume_kick_hold_snap_and_missing_tare_fail(self):
-        report = amt.analyze(self.write(both_arm_episode(kick=True, snap=True, recover_force=False)))
+        report = amt.analyze(self.write(both_arm_episode(kick=True, snap=True, recover_force=False,
+                                                         fast_arrival=True)))
         for ep in report["episodes"]:
             self.assertFalse(ep["onset"]["pass"])
+            self.assertFalse(ep["arrival"]["pass"], ep["arrival"])
+            self.assertAlmostEqual(ep["arrival"]["sent_speed_deg_s"], 10.0, places=6)
+            self.assertGreater(ep["arrival"]["max_accel_deg_s2"], amt.ONSET_ACCEL_MAX_DEG_S2)
             self.assertGreaterEqual(ep["onset"]["max_step_deg"], 0.03 - 1e-9)
             self.assertGreater(ep["onset"]["max_accel_deg_s2"], amt.ONSET_ACCEL_MAX_DEG_S2)
             self.assertFalse(ep["resume"]["pass"])
@@ -175,6 +182,7 @@ class AnalyzeInitMotionTransitionsTest(unittest.TestCase):
             self.assertIsNone(ep["force"]["covered_after_sec"])
         text = amt.render(report)
         self.assertIn("onset   FAIL", text)
+        self.assertIn("arrival FAIL", text)
         self.assertIn("resume  FAIL", text)
         self.assertIn("force   FAIL", text)
 

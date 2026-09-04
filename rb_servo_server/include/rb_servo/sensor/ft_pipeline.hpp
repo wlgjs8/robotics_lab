@@ -83,6 +83,10 @@ public:
     const Wrench6D& compTcp() const { return comp_tcp_; }
     // (4) the same wrench rotated into STAND axes, torque still about the TCP.
     const Wrench6D& compStand() const { return comp_stand_; }
+    // (4') the STAND-axes wrench BEFORE the deadzone, torque about the TCP. For a
+    //      consumer that filters the vector itself (the force gate's stream channel):
+    //      a deadzone clips exactly the small values a slow filter is meant to keep.
+    const Wrench6D& compStandNoDeadzone() const { return comp_stand_nodz_; }
 
     // The heavily low-passed STAND-frame force, as a magnitude and as a mass. Exists
     // to escape the deadzone, which flattens ~204 g to exactly zero at the shipped
@@ -151,6 +155,7 @@ private:
     Wrench6D comp_tcp_{};
     Wrench6D comp_stand_{};
 
+    Wrench6D comp_stand_nodz_{};
     Wrench6D bias_{};
     bool bias_valid_ = false;
     std::string bias_source_ = "none";

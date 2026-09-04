@@ -108,7 +108,13 @@ void writeArmProfilingHeader(std::ostream& os, const char* side) {
        << ',' << side << "_smd_goal_angular_velocity_ff_clipped"
        << ',' << side << "_smd_goal_linear_velocity_norm_m_s"
        << ',' << side << "_smd_goal_angular_velocity_norm_rad_s"
-       << ',' << side << "_smd_reanchor_count";
+       << ',' << side << "_smd_reanchor_count"
+       << ',' << side << "_smd_release_braking"
+       << ',' << side << "_smd_wall_engaged"
+       << ',' << side << "_smd_wall_name"
+       << ',' << side << "_smd_wall_margin_m"
+       << ',' << side << "_smd_wall_cap_m_s"
+       << ',' << side << "_smd_wall_clamp_m";
     // Ruckig chunk-follower stage: the active segment's chunk-step target pose
     // (pf), final stage output pose handed to IK, explicit producer/receiver
     // sequence ids, and divergence-guard inputs.
@@ -368,6 +374,9 @@ void writeForceHeader(std::ostream& os, const char* side) {
        << ',' << side << "_fc_gate_torque_nm"
        << ',' << side << "_fc_gate_closed"
        << ',' << side << "_fc_gate_removed_m"
+       << ',' << side << "_fc_gate_stream_translation"
+       << ',' << side << "_fc_gate_stream_force_n"
+       << ',' << side << "_fc_gate_stream_armed"
        // The wrench the LAW consumed, after the contact-shock low-pass, beside
        // the RAW one in the ft_ block above: the pair is what shows how much
        // shock the filter took out (0 Hz => filter off, the two are equal).
@@ -694,6 +703,15 @@ void ServoLogger::writeHeader() {
              ",selfcol_gripper_min_clearance_m,selfcol_gripper_excluded,selfcol_stale"
              ",projection_sweeps,projection_converged,projection_tightest_dir_change_deg"
              ",self_collision_clamp_count";
+    // REACH SHELL (safety.reach_constraint), 2026-09-04. This layer had no column
+    // here at all while its verdict aliased to RoiViolation, so a run where a sphere
+    // centered on the shoulder refused 31-81 mm of commanded descent read as an ROI
+    // problem and had to be reconstructed offline from left_mount.base_pose_in_stand
+    // plus the TCP columns. `_r_far_m` is the radius of the most-exposed checked point
+    // (TCP + gripper tips) -- the one the shell binds, up to 58 mm past the TCP.
+    file_ << ",left_reach_engaged,left_reach_margin_m,left_reach_r_far_m,left_reach_shell"
+             ",right_reach_engaged,right_reach_margin_m,right_reach_r_far_m,right_reach_shell"
+             ",reach_clamp_count";
     // The control box's own TCP (its calibrated DH + its tool), raw, for the
     // URDF-vs-box kinematics comparison; see RobotState::box_tcp_pos.
     for (const char* side : {"left", "right"}) {
@@ -818,6 +836,9 @@ void writeForceColumns(std::ostream& os, const FtTelemetry& ft, const ForceContr
        << ',' << fc.gate_torque_nm
        << ',' << fc.gate_closed
        << ',' << fc.gate_removed_m
+       << ',' << fc.gate_stream_translation
+       << ',' << fc.gate_stream_force_n
+       << ',' << (fc.gate_stream_armed ? 1 : 0)
        << ',' << fc.wrench_filter_hz
        << ',' << fc.wrench_filtered_stand.fx
        << ',' << fc.wrench_filtered_stand.fy
@@ -953,7 +974,13 @@ void writeArmProfilingColumns(
        << ',' << telemetry.smd_goal_angular_velocity_ff_clipped
        << ',' << telemetry.smd_goal_linear_velocity_norm_m_s
        << ',' << telemetry.smd_goal_angular_velocity_norm_rad_s
-       << ',' << telemetry.smd_reanchor_count;
+       << ',' << telemetry.smd_reanchor_count
+       << ',' << telemetry.smd_release_braking
+       << ',' << telemetry.smd_wall_engaged
+       << ',' << telemetry.smd_wall_name
+       << ',' << telemetry.smd_wall_margin_m
+       << ',' << telemetry.smd_wall_cap_m_s
+       << ',' << telemetry.smd_wall_clamp_m;
     writePoseColumns(os, telemetry.follower_pf_stand);
     writePoseColumns(os, telemetry.stage_tcp_target_stand);
     os << ',' << telemetry.follower_active
@@ -1461,6 +1488,15 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << ',' << sample.safety_projection.converged
           << ',' << sample.safety_projection.tightest_dir_change_deg
           << ',' << sample.safety_projection.self_collision_clamp_count;
+    file_ << ',' << sample.safety_projection.left_reach_engaged
+          << ',' << sample.safety_projection.left_reach_margin_m
+          << ',' << sample.safety_projection.left_reach_r_far_m
+          << ',' << sample.safety_projection.left_reach_shell
+          << ',' << sample.safety_projection.right_reach_engaged
+          << ',' << sample.safety_projection.right_reach_margin_m
+          << ',' << sample.safety_projection.right_reach_r_far_m
+          << ',' << sample.safety_projection.right_reach_shell
+          << ',' << sample.safety_projection.reach_clamp_count;
     for (const RobotState* st : {&sample.left_state, &sample.right_state}) {
         for (double v : st->box_tcp_pos) file_ << ',' << v;
         for (double v : st->box_tcp_ref) file_ << ',' << v;

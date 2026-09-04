@@ -233,7 +233,46 @@ public:
     const math::Vector3& forceDirection() const { return force_dir_; }
     bool closed() const { return gate_t_ < 0.02 || gate_r_ < 0.02; }
 
+    // ---- THE STREAM CHANNEL (2026-09-04) -----------------------------------
+    // The gate as applied to the ABSOLUTE-TARGET path (UMI / TcpPoseTarget through
+    // the pose-track SMD). It is judged on a SUSTAINED contact, not on the tick:
+    //
+    //   * the physical force VECTOR (stand frame, before the deadzone) is low-
+    //     passed at `gate_stream_judge_lpf_hz` (a contact band, ~2 Hz) and BOTH the
+    //     judged magnitude and the cut direction come from that filtered vector.
+    //     The vector, not the magnitude: a zero-mean vibration averages to nothing
+    //     in the vector, whereas its magnitude rectifies into a DC level (replayed
+    //     on the day's logs: a 3 Hz filter on |F| still armed 10-47 % of the
+    //     moving time; the same filter on the vector, 0-2 %);
+    //   * the channel ARMS only after the slow |F| has stood above
+    //     `gate_stream_arm_force_n` for `gate_stream_arm_dwell_sec`, and disarms
+    //     below `gate_stream_release_force_n` (a Schmitt trigger). A pressed
+    //     contact of 15 N arms it in ~180 ms; a vibration cycle never does.
+    //
+    // WHY A SECOND CHANNEL: the tick-judged gate (above) is right for the chunk
+    // follower, which is validated on hardware, but on the streamed path it turned
+    // the tool's own motion-excited vibration into the command. Measured on the
+    // UMI teleop logs of 2026-09-04: the compensated force while MOVING in free
+    // space was 3-5 N RMS in 8-30 Hz against 0.3 N below 2 Hz, its excursions over
+    // the 10 N fade point lasted 12-33 ms (one vibration cycle), the gate stood
+    // below 0.9 for 45-74 % of the moving time and cut the advance on 13-26 % of
+    // the moving ticks with a direction that flipped sign - an incoherent 6-30 Hz
+    // injection the operator felt as shaking. With the gate off the same runs were
+    // an ideal 2 Hz tracker replay. Tool-inertia compensation was ruled out (fitted
+    // 0.02-0.2 kg, 0 % of the variance explained), so the fix is the JUDGEMENT,
+    // not the model.
+    // `force_stand_nodz`: the compensated force, stand frame, BEFORE the deadzone.
+    void updateStream(const math::Vector3& force_stand_nodz);
+    math::Vector3 applyStreamTranslation(const math::Vector3& advance_stand, double* removed) const;
+    double streamTranslation() const { return stream_t_; }
+    double streamForceN() const { return stream_force_n_; }   // |slow force vector|
+    bool streamArmed() const { return stream_armed_; }
+    double streamOverSec() const { return stream_over_sec_; }
+    // Unit direction of the slow force vector (stand frame); zero until one stands.
+    const math::Vector3& streamForceDirection() const { return stream_dir_; }
+
 private:
+    static double snapOpen(double g);   // 1 - 1e-6 < g  ->  exactly 1.0
     ForceControlConfig cfg_{};
     double dt_ = 0.002;
     double gate_t_ = 1.0;
@@ -242,6 +281,14 @@ private:
     math::Vector3 torque_dir_ = math::Vector3::Zero();
     double force_n_ = 0.0;
     double torque_nm_ = 0.0;
+    // stream channel
+    double stream_t_ = 1.0;
+    double stream_force_n_ = 0.0;
+    bool stream_force_primed_ = false;
+    bool stream_armed_ = false;
+    double stream_over_sec_ = 0.0;
+    math::Vector3 stream_force_filt_ = math::Vector3::Zero();   // the slow force vector
+    math::Vector3 stream_dir_ = math::Vector3::Zero();          // unit, or zero
 };
 
 // THE HAND-GUIDE ENGAGEMENT LATCH (2026-09-03). A Schmitt trigger on the physical

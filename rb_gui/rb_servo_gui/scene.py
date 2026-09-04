@@ -576,11 +576,28 @@ def _interpolated_floor_check_points(gripper_percent: float | None) -> "np.ndarr
 
 # Reachable-workspace OUTER-SHELL surface (tools/reach_envelope.py output): only
 # the farthest reachable points, triangulated into a closed surface and rendered
-# translucent + double-sided so the robot and stand stay visible through it. The
-# shell's outer face is the reach boundary the safety.reach_constraint damper
-# enforces.
+# translucent + double-sided so the robot and stand stay visible through it.
+#
+# THIS IS THE ARM'S GEOMETRY, NOT THE ENFORCED LIMIT. The comment here used to say
+# the shell's outer face "is the reach boundary the safety.reach_constraint damper
+# enforces" — it never was. This asset is a static FK measurement baked at
+# r_max_recommended 1.2526 m; the damper enforces safety.reach_constraint.r_max_m,
+# which is config and changed twice on 2026-09-04 (1.250 -> 0.980 -> 1.050). On the
+# evening of 2026-09-04 an operator turned this overlay on while the server was
+# enforcing 0.980 and saw a surface 273 mm too generous, which is exactly no help.
+# The ENFORCED sphere is drawn separately from published state — see
+# update_reach_shell() below — and that is the one to trust.
 _REACH_ENVELOPE_GREEN = (90, 200, 150)
 _REACH_ENVELOPE_OPACITY = 0.22
+
+# The ENFORCED reach shell: a true sphere of radius safety.reach_constraint.r_max_m
+# centred on the arm mount, read from the server's published reach_shell block. Amber
+# so it never reads as the green "what the arm can physically reach" envelope, and
+# turns red while that arm is reported violated. Back-sided like the envelope so the
+# near hemisphere is culled and the robot inside stays visible.
+_REACH_SHELL_AMBER = (240, 170, 60)
+_REACH_SHELL_RED = (255, 70, 70)
+_REACH_SHELL_OPACITY = 0.16
 
 
 def _reach_envelope_path() -> Path:
@@ -622,6 +639,7 @@ def _add_reachability_cloud(server: Any, handles: dict[str, Any]) -> None:
     no mesh support. Static geometry — visibility is toggled from the GUI."""
     if not hasattr(server.scene, "add_mesh_simple"):
         return
+    handles["_server"] = server   # update_reach_shell builds its sphere from state
     path = _reach_envelope_path()
     if not path.exists():
         handles["reach_envelope_error"] = (
@@ -670,8 +688,79 @@ def set_reach_envelope_visible(scene_handles: dict[str, Any], visible: bool) -> 
     """Show/hide both arms' reachable-workspace clouds (GUI toggle)."""
     if not isinstance(scene_handles, dict):
         return
+    scene_handles["reach_envelope_visible"] = bool(visible)
     for arm in ("left", "right"):
         _set_visible(scene_handles.get(f"{arm}_reach_envelope"), visible)
+        _set_visible(scene_handles.get(f"{arm}_reach_shell"), visible)
+
+
+def update_reach_shell(
+    scene_handles: dict[str, Any],
+    reach: Mapping[str, Any] | None,
+    *,
+    visible: bool = True,
+) -> None:
+    """Draw the ENFORCED reach shell from the server's published radii.
+
+    The radius is server state (safety.reach_constraint.r_max_m), so the sphere is
+    (re)built whenever it changes rather than baked at startup like the measured
+    envelope asset. Centred on the arm mount, which the server publishes as
+    base_stand_m — the sphere is attached under /stand/<side>_base, whose transform
+    already carries that mount, so the sphere sits at the node origin.
+
+    Drawn only while the constraint is ENABLED: a disabled shell bounds nothing and
+    a surface drawn for it would be the same class of lie this replaced. Red while
+    the arm is reported violated, amber otherwise."""
+    if not isinstance(scene_handles, dict):
+        return
+    server = scene_handles.get("_server")
+    enabled = isinstance(reach, Mapping) and bool(reach.get("enabled", False))
+    r_max = _finite_or(reach.get("r_max_m"), 0.0) if isinstance(reach, Mapping) else 0.0
+    if not visible or not enabled or r_max <= 0.0:
+        for arm in ("left", "right"):
+            _set_visible(scene_handles.get(f"{arm}_reach_shell"), False)
+        return
+    if server is None or not hasattr(server.scene, "add_icosphere"):
+        return
+    violated = {
+        arm: isinstance(reach.get(arm), Mapping) and bool(reach[arm].get("violated", False))
+        for arm in ("left", "right")
+    }
+    for arm in ("left", "right"):
+        key = f"{arm}_reach_shell"
+        color = _REACH_SHELL_RED if violated[arm] else _REACH_SHELL_AMBER
+        prev = scene_handles.get(f"{key}_spec")
+        spec = (round(r_max, 6), color)
+        if prev == spec and scene_handles.get(key) is not None:
+            _set_visible(scene_handles.get(key), True)
+            continue
+        handle = scene_handles.pop(key, None)
+        if handle is not None:
+            try:
+                handle.remove()
+            except Exception:  # noqa: BLE001 - a stale handle must not kill the frame
+                pass
+        try:
+            scene_handles[key] = server.scene.add_icosphere(
+                f"/stand/{arm}_base/reach_shell_enforced",
+                radius=float(r_max),
+                color=color,
+                opacity=_REACH_SHELL_OPACITY,
+                position=(0.0, 0.0, 0.0),
+                visible=True,
+            )
+        except TypeError:  # older viser without opacity
+            scene_handles[key] = server.scene.add_icosphere(
+                f"/stand/{arm}_base/reach_shell_enforced",
+                radius=float(r_max),
+                color=color,
+                position=(0.0, 0.0, 0.0),
+                visible=True,
+            )
+        except Exception:  # noqa: BLE001 - never let the overlay break the viewer
+            scene_handles[f"{key}_spec"] = None
+            continue
+        scene_handles[f"{key}_spec"] = spec
 
 
 # "A 영역" base-axis singularity cylinder: the column along each arm's J1 axis

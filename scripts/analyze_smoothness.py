@@ -45,6 +45,9 @@ CLAMP_VERDICTS = {
     "JointLimitClamped",
     "SelfCollision",
     "RoiViolation",
+    # Split out of RoiViolation 2026-09-04; logs written before that date carry
+    # reach-shell ticks under "RoiViolation" instead.
+    "ReachViolation",
     "FloorViolation",
 }
 TRANSITION_WINDOW = 4     # ticks on each side of a verdict transition

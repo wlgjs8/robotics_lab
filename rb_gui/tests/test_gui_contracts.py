@@ -180,6 +180,7 @@ from rb_servo_gui.scene import (
     update_floor_plane,
     update_floor_plane_preview,
     update_roi_box,
+    update_reach_shell,
     update_roi_box_preview,
     update_self_collision_check_geom,
     update_self_collision_near_pairs,
@@ -5712,6 +5713,106 @@ class RoiBoxGuiTest(unittest.TestCase):
         disabled = StateSnapshot.parse(sample_state(roi_box=self._roi_block(enabled=False)))
         _update_roi_panel(handles, disabled)
         self.assertTrue(edges.visible and verts.visible)
+
+
+class ReachShellGuiTest(unittest.TestCase):
+    """The ENFORCED reach shell must come from published state, never the asset.
+
+    Regression for 2026-09-04: the GUI drew only the static reach_envelope asset
+    (r_max_recommended 1.2526 m) and labelled it the enforced limit, while the
+    server was enforcing safety.reach_constraint.r_max_m = 0.980. The operator
+    turned the overlay on, saw a surface 273 mm too generous, and spent the evening
+    looking at the ROI box instead."""
+
+    ASSET_R_MAX = 1.2526   # what the static envelope asset bakes in
+
+    @staticmethod
+    def _reach_block(**overrides):
+        block = {
+            "enabled": True,
+            "monitor_only": False,
+            "r_max_m": 0.98,
+            "r_min_m": 0.175,
+            "d_slow_m": 0.06,
+            "left": {"checked": True, "violated": False, "min_margin_m": 0.03,
+                     "r_far_m": 0.95, "closest_shell": "r_max",
+                     "base_stand_m": [0.17036, 0.19707, 0.57036]},
+            "right": {"checked": True, "violated": False, "min_margin_m": 0.21,
+                      "r_far_m": 0.77, "closest_shell": "r_max",
+                      "base_stand_m": [0.17036, -0.19707, 0.57036]},
+            "clamp_count": 0,
+        }
+        block.update(overrides)
+        return block
+
+    def test_state_snapshot_parses_reach_shell(self):
+        from rb_servo_gui.models import StateSnapshot
+
+        snapshot = StateSnapshot.parse(sample_state(reach_shell=self._reach_block()))
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.reach_shell["r_max_m"], 0.98)
+        # A server that does not publish the block leaves it None rather than
+        # letting a reader substitute the asset radius.
+        self.assertIsNone(StateSnapshot.parse(sample_state()).reach_shell)
+
+    def _handles(self):
+        server = RecordingServer(scene=ShapeCheckingScene())
+        return server, {"_server": server}
+
+    def test_enforced_sphere_uses_published_radius_not_the_asset(self):
+        server, handles = self._handles()
+        update_reach_shell(handles, self._reach_block())
+        radii = [kw["radius"] for _n, kw, _h in server.scene.icospheres]
+        self.assertEqual(len(radii), 2)                  # one per arm
+        for r in radii:
+            self.assertAlmostEqual(r, 0.98)
+            self.assertNotAlmostEqual(r, self.ASSET_R_MAX)
+        names = [n for n, _kw, _h in server.scene.icospheres]
+        self.assertEqual(
+            sorted(names),
+            ["/stand/left_base/reach_shell_enforced",
+             "/stand/right_base/reach_shell_enforced"],
+        )
+
+    def test_radius_change_rebuilds_the_sphere(self):
+        # r_max is config and moved twice in one day; a sphere baked once would go
+        # on lying exactly like the asset did.
+        server, handles = self._handles()
+        update_reach_shell(handles, self._reach_block(r_max_m=0.98))
+        update_reach_shell(handles, self._reach_block(r_max_m=1.05))
+        radii = [kw["radius"] for _n, kw, _h in server.scene.icospheres]
+        self.assertAlmostEqual(radii[-1], 1.05)
+        self.assertIn(0.98, [round(r, 6) for r in radii])
+
+    def test_unchanged_state_does_not_rebuild(self):
+        server, handles = self._handles()
+        update_reach_shell(handles, self._reach_block())
+        first = len(server.scene.icospheres)
+        update_reach_shell(handles, self._reach_block())
+        self.assertEqual(len(server.scene.icospheres), first)
+
+    def test_disabled_or_hidden_draws_nothing(self):
+        server, handles = self._handles()
+        update_reach_shell(handles, self._reach_block(enabled=False))
+        self.assertEqual(server.scene.icospheres, [])
+        update_reach_shell(handles, self._reach_block(), visible=False)
+        self.assertEqual(server.scene.icospheres, [])
+        update_reach_shell(handles, None)
+        self.assertEqual(server.scene.icospheres, [])
+        update_reach_shell({}, self._reach_block())      # no handles is a no-op
+
+    def test_violation_recolors(self):
+        server, handles = self._handles()
+        update_reach_shell(handles, self._reach_block())
+        calm = server.scene.icospheres[0][1]["color"]
+        update_reach_shell(handles, self._reach_block(
+            left={"checked": True, "violated": True, "min_margin_m": -0.001,
+                  "r_far_m": 0.981, "closest_shell": "r_max",
+                  "base_stand_m": [0.17036, 0.19707, 0.57036]},
+        ))
+        left = [kw for n, kw, _h in server.scene.icospheres
+                if n == "/stand/left_base/reach_shell_enforced"][-1]
+        self.assertNotEqual(left["color"], calm)
 
 
 class LeaseBracketTest(unittest.TestCase):

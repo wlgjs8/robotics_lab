@@ -130,6 +130,7 @@ from .scene import (
     update_floor_plane,
     update_floor_plane_preview,
     update_roi_box,
+    update_reach_shell,
     update_roi_box_preview,
     update_user_floor_plane,
     update_user_floor_capture_points,
@@ -4025,20 +4026,21 @@ def build_gui(
                     handles[f"roi_{_axis}_max"].on_update(_roi_preview)
 
             with server.gui.add_folder("도달영역(reach)"):
-                # Show/hide the per-arm reachable-workspace cloud (FK envelope from
-                # tools/reach_envelope.py). Static geometry — purely a viewer aid for
-                # seeing where each arm can actually go (the outer shell is the reach
-                # limit the safety.reach_constraint damper enforces). Default OFF
-                # (the cloud is dense); toggling is instant.
-                reach_status = "no asset"
+                # TWO DIFFERENT SURFACES, and conflating them cost an operator an
+                # evening on 2026-09-04:
+                #  - GREEN envelope: what the arm can PHYSICALLY reach. A static FK
+                #    measurement (tools/reach_envelope.py), baked at r 1.2526 m.
+                #  - AMBER sphere: what the server ENFORCES right now
+                #    (safety.reach_constraint.r_max_m, from published state). This is
+                #    the surface the arm actually stops against.
+                # They were 273 mm apart that evening (enforced 0.980 vs asset
+                # 1.2526) and only the green one was drawn, labelled as if it were the
+                # limit. The status line below now reports the ENFORCED radii, live,
+                # and says "no state" rather than guessing when the server is silent.
+                # One toggle drives both; default OFF (the envelope mesh is dense).
+                reach_status = "no state"
                 scene = handles.get("scene", {})
-                if isinstance(scene, dict) and (
-                    "left_reach_envelope" in scene or "right_reach_envelope" in scene
-                ):
-                    r_max = scene.get("reach_envelope_r_max_m")
-                    r_min = scene.get("reach_envelope_r_min_m")
-                    reach_status = f"shell r=[{r_min:.3f}, {r_max:.3f}] m"
-                elif isinstance(scene, dict) and scene.get("reach_envelope_error"):
+                if isinstance(scene, dict) and scene.get("reach_envelope_error"):
                     reach_status = str(scene["reach_envelope_error"])
                 if hasattr(server.gui, "add_checkbox"):
                     reach_toggle = server.gui.add_checkbox("도달영역 표시", initial_value=False)
@@ -4051,7 +4053,10 @@ def build_gui(
 
                     reach_toggle.on_update(_reach_toggle)
                 handles["reach_envelope_status"] = server.gui.add_text(
-                    "Reach envelope", initial_value=reach_status, disabled=True
+                    "Reach (enforced)", initial_value=reach_status, disabled=True
+                )
+                handles["reach_margin_status"] = server.gui.add_text(
+                    "Reach margin", initial_value="-", disabled=True
                 )
 
             with server.gui.add_folder("IK 불가 영역 (특이점 원통)"):
@@ -5335,6 +5340,63 @@ def _set_slider_server_range(handle: Any, minimum: float, maximum: float) -> Non
     handle.max = maximum
 
 
+def _update_reach_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> None:
+    """Draw the ENFORCED reach shell and report its radii + live margin.
+
+    Shares the "도달영역 표시" toggle with the measured envelope mesh. Everything here
+    comes from the server's reach_shell block; when the server is silent the panel
+    says so instead of falling back to the static asset's radii, which is the
+    substitution that hid a 273 mm gap on 2026-09-04."""
+    reach = latest.reach_shell if latest is not None else None
+    toggle = handles.get("reach_envelope_visible_toggle")
+    visible = bool(getattr(toggle, "value", False))
+    update_reach_shell(handles.get("scene", {}), reach, visible=visible)
+    status = handles.get("reach_envelope_status")
+    margin_status = handles.get("reach_margin_status")
+    if status is None and margin_status is None:
+        return
+    if not isinstance(reach, Mapping):
+        if status is not None:
+            status.value = "no state"
+        if margin_status is not None:
+            margin_status.value = "-"
+        return
+    r_max = reach.get("r_max_m")
+    r_min = reach.get("r_min_m")
+    if status is not None:
+        if isinstance(r_max, (int, float)) and isinstance(r_min, (int, float)):
+            posture = (
+                "enforced" if reach.get("enabled") and not reach.get("monitor_only")
+                else "monitor" if reach.get("enabled") else "off"
+            )
+            d_slow = reach.get("d_slow_m")
+            band = (
+                f", brakes from {float(r_max) - float(d_slow):.3f}"
+                if isinstance(d_slow, (int, float)) and float(d_slow) > 0.0
+                else ""
+            )
+            status.value = f"r=[{float(r_min):.3f}, {float(r_max):.3f}] m ({posture}{band})"
+        else:
+            status.value = "no state"
+    if margin_status is not None:
+        parts: list[str] = []
+        for arm, label in (("left", "L"), ("right", "R")):
+            entry = reach.get(arm)
+            if not isinstance(entry, Mapping) or not entry.get("checked"):
+                parts.append(f"{label} -")
+                continue
+            margin = entry.get("min_margin_m")
+            r_far = entry.get("r_far_m")
+            shell = entry.get("closest_shell") or "?"
+            if not isinstance(margin, (int, float)):
+                parts.append(f"{label} -")
+                continue
+            flag = "!" if entry.get("violated") else ""
+            radius = f" r={float(r_far):.3f}" if isinstance(r_far, (int, float)) else ""
+            parts.append(f"{label} {float(margin) * 1000.0:+.0f}mm({shell}){radius}{flag}")
+        margin_status.value = "  ".join(parts)
+
+
 def _update_roi_panel(handles: dict[str, Any], latest: StateSnapshot | None) -> None:
     roi = latest.roi_box if latest is not None else None
     # The "ROI 영역 표시" checkbox (default ON) controls scene visibility,
@@ -6050,6 +6112,7 @@ def update_gui(
         if "roi_box" in handles:
             handles["roi_box"].value = _format_roi_box_status(None, stale=True)
         _update_roi_panel(handles, None)
+        _update_reach_panel(handles, None)
         if "user_floor_constraint" in handles:
             handles["user_floor_constraint"].value = _format_user_floor_constraint_status(None, stale=True)
         update_user_floor_plane(handles.get("scene", {}), None)
@@ -6153,6 +6216,7 @@ def update_gui(
     if "roi_box" in handles:
         handles["roi_box"].value = _format_roi_box_status(latest, stale=stale)
     _update_roi_panel(handles, latest)
+    _update_reach_panel(handles, latest)
     if "user_floor_constraint" in handles:
         handles["user_floor_constraint"].value = _format_user_floor_constraint_status(latest, stale=stale)
     update_user_floor_plane(handles.get("scene", {}), latest.user_floor_constraint)

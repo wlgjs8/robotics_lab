@@ -156,7 +156,11 @@ umi_dual_cartesian:
   # is a config knob and not a constant. See UmiMotionGateConfig for why the
   # measure is windowed displacement and not a speed test or an anchor distance.
   motion_gate:
-    enable: true
+    # 2026-09-04 진단용으로 임시 OFF. 텔레옵에서 관절이 2.0~2.6Hz 로 떨리는데
+    # 입력(발행 포즈)은 0.55Hz 이고 지령 타깃도 app_mm p95 0.45mm 로 작다 — 즉 입력에
+    # 없던 주파수가 하류에서 생겼다. dwell_sec 0.5 = 2Hz 라 이 게이트가 1순위 용의자다.
+    # 꺼서 떨림이 사라지면 게이트가 원인, 그대로면 무죄.
+    enable: false
     window_sec: 0.3
     release_m: 0.001
     dwell_sec: 0.5

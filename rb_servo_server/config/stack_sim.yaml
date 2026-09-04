@@ -234,6 +234,21 @@ safety:
       - { name: gripper_tip_a_yn, offset_m: [ 0.058, -0.013, 0.0 ], offset_closed_m: [ 0.010, -0.013, 0.0 ] }
       - { name: gripper_tip_b_yp, offset_m: [-0.058,  0.013, 0.0 ], offset_closed_m: [-0.010,  0.013, 0.0 ] }
       - { name: gripper_tip_b_yn, offset_m: [-0.058, -0.013, 0.0 ], offset_closed_m: [-0.010, -0.013, 0.0 ] }
+  # THE WALL BRAKE ON THE POSE-TRACK PATH (2026-09-04 pm). A streamed absolute
+  # target (UMI teleop) through the pose-track SMD does not know about the reach
+  # shells, the ROI box or the floors: measured on servo_log_20260904_225810.csv
+  # (9 episodes), the tracker kept integrating past the shell while the joint-space
+  # row held the joints, the reference ran 48 mm ahead, the 50 mm re-anchor snapped
+  # it back, and the row's first cut of the un-braked command was a 7.9-9.6k
+  # deg/s^2 kick. Here the tracker itself caps its approach speed at
+  # sqrt(2 a_brake d) against every enabled wall (each wall's own a_brake_m_s2 /
+  # d_slow_m) and holds its state standoff_m inside the wall - the same law the
+  # rows enforce, applied one stage earlier, so the rows never have to cut and no
+  # re-anchor trips. The rows stay as the backstop. The chunk follower has its own
+  # fold (roi_fold, 2026-09-04 am); this is the absolute-target path's equivalent.
+  pose_track_wall_fold:
+    enable: true
+    standoff_m: 0.002
   user_floor_constraint:
     # DISABLED TO MATCH stack_real.yaml (operator, 2026-09-03), together with the stand
     # floor above. This is the viser-fitted TILTED plane; it is independent of and
@@ -442,6 +457,11 @@ safety:
     collision_margin_m: 0.005
     seed: 12345
     waypoint_tol_deg: 1.5
+    # 2026-09-04: "done" waits for the SENT stream to settle to this speed inside the
+    # tolerance. The arrival taper floor is 3 deg/s (joint_target_smd.arrival_min_speed_deg_s),
+    # so 3.5 = "the taper reached its floor": the stop that remains is 3 deg/s at ddq_max
+    # instead of the 10-11 deg/s one-tick stop measured on every InitMotion (5,150 deg/s^2).
+    done_max_speed_deg_s: 3.5
     noop_tol_deg: 0.75              # 이미 init 자세 근처면 불필요한 escape wiggle 없이 no-op 완료
     max_segment_deg: 3.0
     execution_lookahead_deg: 6.0    # smaller = smoother/slower InitMotion streaming; done uses measured joints
@@ -625,6 +645,14 @@ cartesian_control:
     umi_large_smooth:
       pose_track_smd:
         enable: true
+        # THE RELEASE BRAKE (2026-09-04 pm): on a deadman release (TcpPoseTarget ->
+        # Hold) ramp the tracker's velocity to zero at max_linear/angular_accel
+        # instead of dropping it for a one-tick stop (measured 9,283 deg/s^2 on the
+        # right arm, servo_log_20260904_225810.csv 79.756 s). From 150 mm/s at
+        # 2.5 m/s^2 that is 60 ms and 4.5 mm; the goal follows the state so the
+        # next press integrates from where the arm stopped.
+        release_brake_enable: true
+        release_brake_timeout_sec: 0.5
         damping_ratio_linear: 1.0
         damping_ratio_angular: 1.0
         natural_frequency_linear_hz: 2.0
@@ -1116,6 +1144,29 @@ force_control:
     # ~1 s instead of ~0.4 s. Retreat and sliding are never gated, so a grasp-and-
     # lift pays nothing; only a re-approach does.
     open_tau_s:  1.0         # slow to open   - see above
+    # THE STREAM CHANNEL (2026-09-04 pm): how the gate is judged on the ABSOLUTE-
+    # TARGET path (UMI / TcpPoseTarget through the pose-track SMD). The chunk
+    # follower keeps the tick-judged gate above. MEASURED on the day's UMI teleop
+    # logs: while MOVING in free space the compensated |F| was 3-5 N RMS in 8-30 Hz
+    # (tool vibration excited by the motion) against 0.3 N below 2 Hz; its
+    # excursions over the 10 N fade point lasted 12-33 ms; the tick-judged gate
+    # stood below 0.9 for 45-74 % of the moving time and cut the tracker on 13-26 %
+    # of the moving ticks with a sign-flipping direction - the shaking the
+    # operator felt, absent with force control off. Tool inertia was ruled out
+    # (fitted 0.02-0.2 kg, 0 % explained). So this channel is judged on a
+    # SUSTAINED contact: the force VECTOR (stand frame, before the deadzone)
+    # low-passed at stream_judge_lpf_hz - magnitude and cut direction both from
+    # that filtered vector - armed once |slow F| has stood over stream_arm_force_n
+    # for stream_arm_dwell_sec, released below stream_release_force_n. THE VECTOR,
+    # NOT |F|: replayed on the same logs, a 3 Hz filter on |F| still armed 10-47 %
+    # of the moving time (a zero-mean vibration rectifies into a DC level); the
+    # filter on the vector with these values armed 0 % on 7 of 10 arm-runs and
+    # <= 2 % on the rest (real light contacts are not excluded there). A 15 N
+    # press arms it in ~180 ms and half-closes it at ~250 ms; then it fades as before.
+    stream_judge_lpf_hz:     2.0    # contact band; 8-30 Hz vibration is 20-200x down
+    stream_arm_force_n:      5.0    # = hold_engage_force_n: one notion of "contact"
+    stream_release_force_n:  2.0    # = hold_release_force_n
+    stream_arm_dwell_sec:    0.10   # 3-5 vibration cycles (12-33 ms each measured)
 
   # A DEAD BACKSTOP, not an operating limit. On a fold path the deviation is booked
   # into the plan every tick and never accumulates here; on a declined path (an
@@ -1161,6 +1212,12 @@ force_control:
   # stays rigid until the hand releases).
   coverage_recover_sec: 0.5
   hold_relatch_max_force_n: 5.0
+  # 2026-09-04: the compliant Hold's nominal is latched at the last COMMANDED TCP
+  # (FK of the previous sent joints, overlay deviation stripped) instead of the
+  # measured TCP, which trails the stream by the box's ~22 ms and re-targeted the arm
+  # backwards on every pedal release (5-11k deg/s^2 kicks, every UMI release, four
+  # runs). Above this command/measured gap the measured pose is latched instead.
+  hold_latch_max_command_gap_m: 0.020
 
   # ---- THE HAND-GUIDE ENGAGEMENT LATCH (2026-09-03) -------------------------------
   # A Schmitt trigger on the PHYSICAL |F| (compensated, BEFORE the deadzone - the push

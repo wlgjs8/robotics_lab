@@ -270,6 +270,25 @@ private:
     // Tier-2 usability clamp: pull a Cartesian target's stand position inside the
     // ROI box (no-op when the constraint is disabled or monitor_only).
     Pose6D clampPoseToRoi(const Pose6D& pose) const;
+    // THE WALL BRAKE ON THE POSE-TRACK PATH (2026-09-04 pm): cap the tracker's approach
+    // speed against every enabled wall (reach shells, ROI faces, floors) at
+    // sqrt(2 a_brake d) and hold its state on the standoff. See
+    // SmdPoseTracker::brakeAgainstWall and safety.pose_track_wall_fold.
+    struct PoseTrackWallState {
+        bool engaged = false;
+        std::string name;
+        double margin_m = std::numeric_limits<double>::quiet_NaN();
+        double cap_m_s = -1.0;
+        double clamp_m = 0.0;
+        double max_clamp_m = 0.0;
+        std::uint64_t started_ns = 0;
+        std::uint64_t last_action_ns = 0;
+        std::uint64_t last_log_ns = 0;
+        std::uint64_t count = 0;
+    };
+    PoseTrackWallState left_pose_track_wall_;
+    PoseTrackWallState right_pose_track_wall_;
+    void applyPoseTrackWallFold(ArmId arm, SmdPoseTracker* tracker, double dt_sec, ArmCommand* out);
 
     // Stand-frame user-defined tilted floor plane (safety.user_floor_constraint):
     // FK the arm's TCP for a candidate joint target and evaluate its signed distance
@@ -1071,6 +1090,12 @@ private:
         std::optional<Pose6D> smd_goal_stand;
         SmdStepInfo smd_step_info;
         std::uint64_t smd_reanchor_count = 0;
+        bool smd_release_braking = false;
+        bool smd_wall_engaged = false;
+        std::string smd_wall_name;
+        double smd_wall_margin_m = std::numeric_limits<double>::quiet_NaN();
+        double smd_wall_cap_m_s = -1.0;
+        double smd_wall_clamp_m = 0.0;
         std::string tcp_target_profile;
         bool tcp_target_profile_found = false;
         PoseTrackSmdConfig smd_profile;

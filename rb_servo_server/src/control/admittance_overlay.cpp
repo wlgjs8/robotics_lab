@@ -303,6 +303,13 @@ void ForceGate::reset() {
     torque_dir_.setZero();
     force_n_ = 0.0;
     torque_nm_ = 0.0;
+    stream_t_ = 1.0;
+    stream_force_n_ = 0.0;
+    stream_force_primed_ = false;
+    stream_armed_ = false;
+    stream_over_sec_ = 0.0;
+    stream_force_filt_.setZero();
+    stream_dir_.setZero();
 }
 
 void ForceGate::update(const math::Vector3& force_stand, const math::Vector3& torque_stand,
@@ -329,10 +336,22 @@ void ForceGate::update(const math::Vector3& force_stand, const math::Vector3& to
     const auto slew = [&](double g, double target) {
         const double tau = (target < g) ? cfg_.gate_close_tau_s : cfg_.gate_open_tau_s;
         const double a = tau > 1e-6 ? (dt_ / tau) : 1.0;
-        return g + (target - g) * std::min(a, 1.0);
+        return snapOpen(g + (target - g) * std::min(a, 1.0));
     };
     gate_t_ = slew(gate_t_, t_raw);
     gate_r_ = slew(gate_r_, r_raw);
+}
+
+// A FIRST-ORDER SLEW ONLY EVER APPROACHES 1.0. Left alone, a gate that closed once
+// stays at 0.9999... forever, every `>= 1.0` guard downstream stays false, and the
+// "cut" it books is nanometres - which would be harmless if the tracker's hold
+// were proportional, but its velocity drop was all-or-nothing. Measured on the UMI
+// run of 2026-09-04 22:32: one 0.7 s press on the right arm's stream channel left
+// it at 1 - 1e-7 for the next 22 s, and 17,351 moving ticks then had their
+// velocity INTO the slow-force direction dropped over a 6 nm cut; the left arm,
+// never armed, was clean. Snap to exactly 1.0 within 1e-6.
+double ForceGate::snapOpen(double g) {
+    return g > 1.0 - 1e-6 ? 1.0 : g;
 }
 
 math::Vector3 ForceGate::applyTranslation(const math::Vector3& advance_stand,
@@ -345,6 +364,65 @@ math::Vector3 ForceGate::applyTranslation(const math::Vector3& advance_stand,
     const double proj = advance_stand.dot(force_dir_);
     if (proj >= 0.0) return advance_stand;
     const math::Vector3 cut = (1.0 - gate_t_) * proj * force_dir_;
+    if (removed != nullptr) *removed = cut.norm();
+    return advance_stand - cut;
+}
+
+void ForceGate::updateStream(const math::Vector3& force_stand_nodz) {
+    // The slow force VECTOR the channel is judged on. Seeded on the first tick after
+    // a reset so it does not ramp up from a stale zero into a contact already
+    // standing. Filtering the vector (not |F|) is what makes a zero-mean vibration
+    // average out instead of rectifying into a DC level.
+    if (!stream_force_primed_) {
+        stream_force_filt_ = force_stand_nodz;
+        stream_force_primed_ = true;
+    } else {
+        const double hz = cfg_.gate_stream_judge_lpf_hz;
+        double a = 1.0;
+        if (hz > 0.0) {
+            const double tau = 1.0 / (2.0 * M_PI * hz);
+            a = std::min(1.0, dt_ / (tau + dt_));
+        }
+        stream_force_filt_ += a * (force_stand_nodz - stream_force_filt_);
+    }
+    stream_force_n_ = stream_force_filt_.norm();
+    stream_dir_ = stream_force_n_ > 1e-6 ? math::Vector3(stream_force_filt_ / stream_force_n_)
+                                          : math::Vector3::Zero();
+    if (!cfg_.gate_enable) {
+        stream_t_ = 1.0;
+        stream_armed_ = false;
+        stream_over_sec_ = 0.0;
+        return;
+    }
+    // ARMING: a Schmitt trigger with a dwell on the slow |F|. A spike that is over
+    // the arm level for less than the dwell never arms the channel.
+    if (!stream_armed_) {
+        if (stream_force_n_ >= cfg_.gate_stream_arm_force_n) {
+            stream_over_sec_ += dt_;
+            if (stream_over_sec_ + 1e-9 >= cfg_.gate_stream_arm_dwell_sec) stream_armed_ = true;
+        } else {
+            stream_over_sec_ = 0.0;
+        }
+    } else if (stream_force_n_ < cfg_.gate_stream_release_force_n) {
+        stream_armed_ = false;
+        stream_over_sec_ = 0.0;
+    }
+    const double t_raw = (stream_armed_ && cfg_.gate_max_force_n > 0.0)
+        ? fade(stream_force_n_ / cfg_.gate_max_force_n)
+        : 1.0;
+    // The same asymmetric slew as the tick channel: fast to close, slow to open.
+    const double tau = (t_raw < stream_t_) ? cfg_.gate_close_tau_s : cfg_.gate_open_tau_s;
+    const double a = tau > 1e-6 ? std::min(dt_ / tau, 1.0) : 1.0;
+    stream_t_ = snapOpen(stream_t_ + (t_raw - stream_t_) * a);
+}
+
+math::Vector3 ForceGate::applyStreamTranslation(const math::Vector3& advance_stand,
+                                                double* removed) const {
+    if (removed != nullptr) *removed = 0.0;
+    if (stream_t_ >= 1.0 || stream_dir_.squaredNorm() < 0.5) return advance_stand;
+    const double proj = advance_stand.dot(stream_dir_);
+    if (proj >= 0.0) return advance_stand;
+    const math::Vector3 cut = (1.0 - stream_t_) * proj * stream_dir_;
     if (removed != nullptr) *removed = cut.norm();
     return advance_stand - cut;
 }

@@ -372,6 +372,151 @@ bool testGateIsOpenInFreeSpace() {
     return true;
 }
 
+// THE STREAM CHANNEL IGNORES A VIBRATION AND HOLDS ON A SUSTAINED CONTACT
+// (2026-09-04). A zero-mean 15 Hz force of 20 N amplitude (the tool's motion-
+// excited vibration, measured 3-5 N RMS with 12-33 ms excursions over 10 N) closes
+// the tick channel; the stream channel, judged on the low-passed VECTOR, must not
+// arm. Pressed steadily it must arm after the dwell and cut only INTO the contact.
+bool testGateStreamChannelIgnoresVibrationAndHoldsSustainedContact() {
+    rb_servo::ForceControlConfig cfg = shippedLaw();
+    cfg.gate_stream_judge_lpf_hz = 2.0;
+    cfg.gate_stream_arm_force_n = 5.0;
+    cfg.gate_stream_release_force_n = 2.0;
+    cfg.gate_stream_arm_dwell_sec = 0.10;
+    rb_servo::control::ForceGate gate;
+    gate.configure(cfg, 0.002);
+    const rb_servo::math::Vector3 zero = rb_servo::math::Vector3::Zero();
+    const rb_servo::math::Vector3 into(0.0, 0.0, -0.001);
+    double min_tick = 1.0;
+    double max_stream_removed = 0.0;
+    double max_slow = 0.0;
+    for (int i = 0; i < 2000; ++i) {
+        // Ring-up over 0.2 s like a real resonance: a full-amplitude vibration that
+        // starts abruptly has a one-sided first half-cycle (a 5 N transient in the
+        // slow filter) that no physical tool produces.
+        const double ring_up = std::min(1.0, i / 100.0);
+        const double f = ring_up * 20.0 * std::sin(2.0 * M_PI * 15.0 * i * 0.002);
+        const rb_servo::math::Vector3 vib(0.0, 0.0, f);
+        gate.update(vib, zero, std::abs(f));
+        gate.updateStream(vib);
+        min_tick = std::min(min_tick, gate.translation());
+        max_slow = std::max(max_slow, gate.streamForceN());
+        double removed = 0.0;
+        gate.applyStreamTranslation(into, &removed);
+        max_stream_removed = std::max(max_stream_removed, removed);
+        CHECK(!gate.streamArmed());
+    }
+    CHECK(min_tick < 0.5);                       // the tick channel did react
+    CHECK(max_slow < 4.0);                       // 20 N at 15 Hz is ~2.6 N after the 2 Hz vector LPF
+    CHECK(near(gate.streamTranslation(), 1.0, 1e-9));
+    CHECK(near(max_stream_removed, 0.0));        // the stream channel did nothing
+    // A sustained 20 N push (+Z reaction): arms after the dwell, closes, cuts INTO only.
+    const rb_servo::math::Vector3 push(0.0, 0.0, 20.0);
+    int armed_at = -1;
+    for (int i = 0; i < 1000; ++i) {
+        gate.update(push, zero, 20.0);
+        gate.updateStream(push);
+        if (armed_at < 0 && gate.streamArmed()) armed_at = i;
+    }
+    CHECK(armed_at >= 50);                       // not before the 100 ms dwell
+    CHECK(armed_at < 250);                       // and not long after the 2 Hz LPF crosses 5 N
+    CHECK(gate.streamTranslation() < 0.02);
+    double removed = 0.0;
+    const auto held = gate.applyStreamTranslation(into, &removed);
+    CHECK(std::abs(held.z()) < 1e-4);
+    CHECK(removed > 0.0);
+    const auto tang = gate.applyStreamTranslation(rb_servo::math::Vector3(0.001, 0.0, 0.0), &removed);
+    CHECK(near(tang.x(), 0.001, 1e-12));
+    CHECK(near(removed, 0.0));
+    const auto out = gate.applyStreamTranslation(rb_servo::math::Vector3(0.0, 0.0, 0.001), &removed);
+    CHECK(near(out.z(), 0.001, 1e-12));
+    CHECK(near(removed, 0.0));
+    // Release: the force goes away, the channel disarms below 2 N and re-opens slowly.
+    int disarmed_at = -1;
+    for (int i = 0; i < 2000; ++i) {
+        gate.update(zero, zero, 0.0);
+        gate.updateStream(zero);
+        if (disarmed_at < 0 && !gate.streamArmed()) disarmed_at = i;
+    }
+    CHECK(disarmed_at > 0);
+    CHECK(disarmed_at < 500);
+    CHECK(gate.streamTranslation() > 0.9);
+    return true;
+}
+
+// A RELEASED GATE RE-OPENS TO EXACTLY 1.0 - on both channels. A first-order slew
+// only approaches 1; without the snap a gate that closed once stayed at 0.9999...
+// and its nanometre "cuts" kept invoking the tracker's hold (2026-09-04 22:32).
+bool testGateReopensToExactlyOneAfterRelease() {
+    rb_servo::ForceControlConfig cfg = shippedLaw();
+    cfg.gate_open_tau_s = 1.0;
+    rb_servo::control::ForceGate gate;
+    gate.configure(cfg, 0.002);
+    const rb_servo::math::Vector3 zero = rb_servo::math::Vector3::Zero();
+    const rb_servo::math::Vector3 push(0.0, 0.0, 20.0);
+    for (int i = 0; i < 500; ++i) {
+        gate.update(push, zero, 20.0);
+        gate.updateStream(push);
+    }
+    CHECK(gate.translation() < 0.02);
+    CHECK(gate.streamTranslation() < 0.02);
+    // Release and wait 15 tau: the exponential alone would sit at 1 - 3e-7.
+    for (int i = 0; i < 7500; ++i) {
+        gate.update(zero, zero, 0.0);
+        gate.updateStream(zero);
+    }
+    CHECK(gate.translation() == 1.0);
+    CHECK(gate.streamTranslation() == 1.0);
+    // The slow force direction has decayed too; even a stale one must cut nothing.
+    double removed = 1.0;
+    gate.applyStreamTranslation(rb_servo::math::Vector3(0.0, 0.0, -0.001), &removed);
+    CHECK(removed == 0.0);
+    gate.applyTranslation(rb_servo::math::Vector3(0.0, 0.0, -0.001), &removed);
+    CHECK(removed == 0.0);
+    return true;
+}
+
+// A SIGN-FLIPPING DIRECTION CUTS NOTHING. With the tick channel, a 20 N force that
+// alternates +Z / -Z each tick cut the tracker on every other tick (the chopping
+// measured on 2026-09-04); judged on the low-passed VECTOR it is no force at all.
+bool testGateStreamChannelAveragesOutAFlippingDirection() {
+    rb_servo::ForceControlConfig cfg = shippedLaw();
+    cfg.gate_stream_judge_lpf_hz = 2.0;
+    cfg.gate_stream_arm_force_n = 5.0;
+    cfg.gate_stream_release_force_n = 2.0;
+    cfg.gate_stream_arm_dwell_sec = 0.10;
+    rb_servo::control::ForceGate gate;
+    gate.configure(cfg, 0.002);
+    const rb_servo::math::Vector3 zero = rb_servo::math::Vector3::Zero();
+    const rb_servo::math::Vector3 up(0.0, 0.0, 20.0);
+    const rb_servo::math::Vector3 down(0.0, 0.0, -20.0);
+    // Prime in free space first: the slow filter seeds on its first sample (so a
+    // contact already standing at enable is not ramped into from a stale zero), and
+    // this test is about the steady state, not the seed.
+    for (int i = 0; i < 200; ++i) {
+        gate.update(zero, zero, 0.0);
+        gate.updateStream(zero);
+    }
+    double tick_removed_total = 0.0;
+    double stream_removed_total = 0.0;
+    for (int i = 0; i < 1000; ++i) {
+        const auto& f = (i % 2 == 0) ? up : down;
+        gate.update(f, zero, 20.0);
+        gate.updateStream(f);
+        double r = 0.0;
+        gate.applyTranslation(rb_servo::math::Vector3(0.0, 0.0, -0.001), &r);
+        tick_removed_total += r;
+        gate.applyStreamTranslation(rb_servo::math::Vector3(0.0, 0.0, -0.001), &r);
+        stream_removed_total += r;
+    }
+    CHECK(!gate.streamArmed());
+    CHECK(gate.streamForceN() < 1.0);
+    CHECK(near(gate.streamTranslation(), 1.0, 1e-9));
+    CHECK(tick_removed_total > 0.1);             // the tick channel chopped
+    CHECK(near(stream_removed_total, 0.0));      // the stream channel did not
+    return true;
+}
+
 // *** THE TWO LAWS ARE NOT INTERCHANGEABLE, AND THE RATIO IS WHY. ***
 //
 // This is the regression for a real hardware finding (2026-08-26): the STREAM law
@@ -1031,16 +1176,28 @@ bool testPoseTrackGateHoldsStateNotGoal() {
     rb_servo::ForceControlConfig fc = shippedLaw();
     fc.gate_close_tau_s = 0.002;
     gate.configure(fc, 0.002);
-    gate.update(rb_servo::math::Vector3(0.0, 0.0, 12.0), rb_servo::math::Vector3::Zero());   // wall pushes +z
-    CHECK(gate.translation() < 0.01);
+    // THE SHIPPED PATH USES THE STREAM CHANNEL (2026-09-04 pm): judged on the slow
+    // force vector with a dwell, so a wall pushing +z at 12 N arms it after ~150 ms.
+    const rb_servo::math::Vector3 wall(0.0, 0.0, 12.0);   // wall pushes +z
+    for (int i = 0; i < 200; ++i) {
+        gate.update(wall, rb_servo::math::Vector3::Zero());
+        gate.updateStream(wall);
+    }
+    CHECK(gate.streamArmed());
+    CHECK(gate.streamTranslation() < 0.01);
     double z_min = 1.0, x_last = 0.0;
     for (int i = 0; i < 500; ++i) {
+        gate.update(wall, rb_servo::math::Vector3::Zero());
+        gate.updateStream(wall);
         const rb_servo::Pose6D before = tracker.currentPose();
         rb_servo::Pose6D out = tracker.step(0.002);
         const rb_servo::math::Vector3 p0(before.x, before.y, before.z), p1(out.x, out.y, out.z);
         double removed = 0.0;
-        const rb_servo::math::Vector3 kept = gate.applyTranslation(p1 - p0, &removed);
-        if (removed > 0.0) tracker.constrainTranslation(p0 + kept, gate.forceDirection());
+        const rb_servo::math::Vector3 kept = gate.applyStreamTranslation(p1 - p0, &removed);
+        if (removed > 0.0) {
+            tracker.constrainTranslation(p0 + kept, gate.streamForceDirection(),
+                                         1.0 - gate.streamTranslation());
+        }
         const rb_servo::Pose6D now = tracker.currentPose();
         z_min = std::min(z_min, now.z);
         x_last = now.x;
@@ -1049,8 +1206,10 @@ bool testPoseTrackGateHoldsStateNotGoal() {
     CHECK(x_last > 0.015);                    // but slid sideways toward the goal
     CHECK(near(tracker.goalPose().z, 0.050, 1e-9));   // the goal is untouched
     // Release: the gate opens, the tracker resumes toward the goal from rest, no jump.
-    gate.update(rb_servo::math::Vector3::Zero(), rb_servo::math::Vector3::Zero());
-    for (int i = 0; i < 20; ++i) gate.update(rb_servo::math::Vector3::Zero(), rb_servo::math::Vector3::Zero());
+    for (int i = 0; i < 21; ++i) {
+        gate.update(rb_servo::math::Vector3::Zero(), rb_servo::math::Vector3::Zero());
+        gate.updateStream(rb_servo::math::Vector3::Zero());
+    }
     const rb_servo::Pose6D a = tracker.step(0.002);
     const rb_servo::Pose6D b = tracker.step(0.002);
     CHECK(std::abs(b.z - a.z) < 1e-4);        // one tick of ordinary SMD motion, not a lunge
@@ -1081,6 +1240,9 @@ int main() {
     testGateAttenuatesOnlyIntoTheContact();
     testGateIsAsymmetric();
     testGateIsOpenInFreeSpace();
+    testGateStreamChannelIgnoresVibrationAndHoldsSustainedContact();
+    testGateStreamChannelAveragesOutAFlippingDirection();
+    testGateReopensToExactlyOneAfterRelease();
     testHoldLawTurnsFarLessThanTheStreamLawForTheSamePush();
     testSwappingTheLawKeepsTheDeviation();
     testHoldLawDeflectsForceOverStiffness();

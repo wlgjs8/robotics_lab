@@ -111,6 +111,9 @@ nlohmann::json forceControlJson(const ForceControlTelemetry& t) {
         {"gate_torque_nm", t.gate_torque_nm},
         {"gate_closed", t.gate_closed},
         {"gate_removed_m", t.gate_removed_m},
+        {"gate_stream_translation", t.gate_stream_translation},
+        {"gate_stream_force_n", t.gate_stream_force_n},
+        {"gate_stream_armed", t.gate_stream_armed},
         {"folded", t.folded},
         {"fold_sink", t.fold_sink},
         {"fold_stand_m", t.fold_m},
@@ -1959,6 +1962,48 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
             roi["last_set_reject_reason"] = snapshot.roi_box_last_set_reject_reason;
         }
         message["roi_box"] = roi;
+    }
+    {
+        // REACH SHELL. Published so the viewer can draw the ENFORCED sphere; before
+        // this the GUI only had the static reach_envelope asset (r 1.2526) and no way
+        // to know the server was enforcing something else entirely.
+        nlohmann::json reach;
+        reach["enabled"] = snapshot.reach_shell_enabled;
+        reach["monitor_only"] = snapshot.reach_shell_monitor_only;
+        reach["r_max_m"] = snapshot.reach_shell_r_max_m;
+        reach["r_min_m"] = snapshot.reach_shell_r_min_m;
+        reach["d_slow_m"] = snapshot.reach_shell_d_slow_m;
+        const auto vec3 = [](const std::array<double, 3>& v) {
+            return nlohmann::json::array({v[0], v[1], v[2]});
+        };
+        const auto arm_json = [&vec3](bool checked, bool violated, double min_margin_m,
+                                      double r_far_m, const std::string& closest_shell,
+                                      const std::array<double, 3>& base_stand) {
+            nlohmann::json arm;
+            arm["checked"] = checked;
+            arm["violated"] = violated;
+            arm["base_stand_m"] = vec3(base_stand);   // the shell centre
+            if (checked && std::isfinite(min_margin_m)) {
+                arm["min_margin_m"] = min_margin_m;
+                arm["closest_shell"] = closest_shell.empty() ? "?" : closest_shell;
+            } else {
+                arm["min_margin_m"] = nullptr;
+                arm["closest_shell"] = nullptr;
+            }
+            arm["r_far_m"] = (checked && std::isfinite(r_far_m))
+                                 ? nlohmann::json(r_far_m) : nlohmann::json(nullptr);
+            return arm;
+        };
+        reach["left"] = arm_json(
+            snapshot.reach_shell_left_checked, snapshot.reach_shell_left_violated,
+            snapshot.reach_shell_left_min_margin_m, snapshot.reach_shell_left_r_far_m,
+            snapshot.reach_shell_left_closest_shell, snapshot.reach_shell_left_base_stand_m);
+        reach["right"] = arm_json(
+            snapshot.reach_shell_right_checked, snapshot.reach_shell_right_violated,
+            snapshot.reach_shell_right_min_margin_m, snapshot.reach_shell_right_r_far_m,
+            snapshot.reach_shell_right_closest_shell, snapshot.reach_shell_right_base_stand_m);
+        reach["clamp_count"] = snapshot.reach_shell_clamp_count;
+        message["reach_shell"] = reach;
     }
     {
         nlohmann::json uf;

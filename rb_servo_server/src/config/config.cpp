@@ -152,9 +152,22 @@ void parsePoseTrackSmdConfig(const YAML::Node& smd, const std::string& path, Pos
         "singularity_scale_full_sigma",
         "singularity_scale_floor_sigma",
         "singularity_scale_min",
+        "release_brake_enable",
+        "release_brake_timeout_sec",
     }, path);
     if (has(smd, "enable")) {
         out->enable = asBool(smd["enable"], path + ".enable");
+    }
+    if (has(smd, "release_brake_enable")) {
+        out->release_brake_enable = asBool(smd["release_brake_enable"], path + ".release_brake_enable");
+    }
+    if (has(smd, "release_brake_timeout_sec")) {
+        out->release_brake_timeout_sec =
+            asDouble(smd["release_brake_timeout_sec"], path + ".release_brake_timeout_sec");
+        if (!std::isfinite(out->release_brake_timeout_sec) || out->release_brake_timeout_sec <= 0.0) {
+            throw std::runtime_error(path + ".release_brake_timeout_sec must be > 0 - a brake with "
+                                     "no deadline could hold a released arm in motion forever");
+        }
     }
     if (has(smd, "damping_ratio_linear")) {
         out->damping_ratio_linear = asDouble(smd["damping_ratio_linear"], path + ".damping_ratio_linear");
@@ -1537,6 +1550,7 @@ void validateConfig(const DualArmConfig& cfg) {
         validatePositiveFinite(ip.step_size_rad, "safety.init_motion_planner.step_size_rad");
         validatePositiveFinite(ip.edge_resolution_rad, "safety.init_motion_planner.edge_resolution_rad");
         validatePositiveFinite(ip.waypoint_tol_deg, "safety.init_motion_planner.waypoint_tol_deg");
+        validatePositiveFinite(ip.done_max_speed_deg_s, "safety.init_motion_planner.done_max_speed_deg_s");
         validateNonNegativeFinite(ip.noop_tol_deg, "safety.init_motion_planner.noop_tol_deg");
         validatePositiveFinite(ip.max_segment_deg, "safety.init_motion_planner.max_segment_deg");
         if (ip.max_iterations <= 0) {
@@ -2252,6 +2266,24 @@ void validateConfig(const DualArmConfig& cfg) {
                         "force_control.force_gate.close_tau_s must be <= open_tau_s - a gate that "
                         "re-opens faster than it closes is a relay against the contact");
                 }
+                // THE STREAM CHANNEL. Judged on a sustained contact: a positive contact-band
+                // corner, an arm level with a dwell, a release level strictly below the arm
+                // level (a Schmitt trigger with no hysteresis is a relay on the noise).
+                validatePositiveFinite(fc.gate_stream_judge_lpf_hz, "force_control.force_gate.stream_judge_lpf_hz");
+                validatePositiveFinite(fc.gate_stream_arm_force_n, "force_control.force_gate.stream_arm_force_n");
+                validatePositiveFinite(fc.gate_stream_release_force_n, "force_control.force_gate.stream_release_force_n");
+                validateNonNegativeFinite(fc.gate_stream_arm_dwell_sec, "force_control.force_gate.stream_arm_dwell_sec");
+                if (fc.gate_stream_release_force_n >= fc.gate_stream_arm_force_n) {
+                    throw std::runtime_error(
+                        "force_control.force_gate.stream_release_force_n must be < stream_arm_force_n - "
+                        "the stream channel is a Schmitt trigger and needs hysteresis");
+                }
+                if (fc.gate_stream_arm_force_n > fc.gate_max_force_n) {
+                    throw std::runtime_error(
+                        "force_control.force_gate.stream_arm_force_n must be <= max_force_n - arming "
+                        "above the point where the fade is already fully closed makes the stream "
+                        "channel a step, not a fade");
+                }
             }
             validatePositiveFinite(fc.max_velocity_m_s, "force_control.max_velocity_m_s");
             validatePositiveFinite(fc.max_acceleration_m_s2, "force_control.max_acceleration_m_s2");
@@ -2288,6 +2320,7 @@ void validateConfig(const DualArmConfig& cfg) {
             }
             validateNonNegativeFinite(fc.coverage_recover_sec, "force_control.coverage_recover_sec");
             validateNonNegativeFinite(fc.hold_relatch_max_force_n, "force_control.hold_relatch_max_force_n");
+            validatePositiveFinite(fc.hold_latch_max_command_gap_m, "force_control.hold_latch_max_command_gap_m");
             // The hand-guide latch: a release at or above the engage level is not a
             // hysteresis, it is a relay that flips every tick around one number.
             validateNonNegativeFinite(fc.hold_engage_force_n, "force_control.hold_engage_force_n");
@@ -3153,6 +3186,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "floor_constraint",
             "roi_box",
             "reach_constraint",
+            "pose_track_wall_fold",
             "user_floor_constraint",
             "joint_target_smd",
             "init_motion_planner",
@@ -3686,6 +3720,23 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     rb["tcp_offset_points"], "safety.roi_box.tcp_offset_points");
             }
         }
+        if (has(sec, "pose_track_wall_fold")) {
+            const YAML::Node wf = sec["pose_track_wall_fold"];
+            validateAllowedKeys(wf, {"enable", "standoff_m"}, "safety.pose_track_wall_fold");
+            if (has(wf, "enable")) {
+                cfg.safety.pose_track_wall_fold.enable = asBool(wf["enable"], "safety.pose_track_wall_fold.enable");
+            }
+            if (has(wf, "standoff_m")) {
+                cfg.safety.pose_track_wall_fold.standoff_m =
+                    asDouble(wf["standoff_m"], "safety.pose_track_wall_fold.standoff_m");
+            }
+            const double so = cfg.safety.pose_track_wall_fold.standoff_m;
+            if (!std::isfinite(so) || so < 0.0 || so > 0.05) {
+                throw std::runtime_error(
+                    "safety.pose_track_wall_fold.standoff_m must be in [0, 0.05] m - it is the "
+                    "distance the tracker stops short of a wall, not a working margin");
+            }
+        }
         if (has(sec, "reach_constraint")) {
             const YAML::Node rc = sec["reach_constraint"];
             validateAllowedKeys(rc, {
@@ -3875,6 +3926,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "collision_margin_m",
                 "seed",
                 "waypoint_tol_deg",
+                "done_max_speed_deg_s",
                 "noop_tol_deg",
                 "controller_simulation_progress_uses_reference",
                 "max_segment_deg",
@@ -3911,6 +3963,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ip, "collision_margin_m")) ipc.collision_margin_m = asDouble(ip["collision_margin_m"], "safety.init_motion_planner.collision_margin_m");
             if (has(ip, "seed")) ipc.seed = static_cast<unsigned int>(asInt(ip["seed"], "safety.init_motion_planner.seed"));
             if (has(ip, "waypoint_tol_deg")) ipc.waypoint_tol_deg = asDouble(ip["waypoint_tol_deg"], "safety.init_motion_planner.waypoint_tol_deg");
+            if (has(ip, "done_max_speed_deg_s")) ipc.done_max_speed_deg_s = asDouble(ip["done_max_speed_deg_s"], "safety.init_motion_planner.done_max_speed_deg_s");
             if (has(ip, "noop_tol_deg")) ipc.noop_tol_deg = asDouble(ip["noop_tol_deg"], "safety.init_motion_planner.noop_tol_deg");
             if (has(ip, "controller_simulation_progress_uses_reference")) {
                 ipc.controller_simulation_progress_uses_reference =
@@ -4204,7 +4257,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "oscillation_window_sec", "oscillation_min_velocity_frac",
             "oscillation_release_force_n", "oscillation_release_torque_nm",
             "oscillation_release_quiet_sec",
-            "coverage_recover_sec", "hold_relatch_max_force_n",
+            "coverage_recover_sec", "hold_relatch_max_force_n", "hold_latch_max_command_gap_m",
             "fold_deviation",
             "hold_engage_force_n", "hold_release_force_n",
         }, "force_control");
@@ -4247,13 +4300,19 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "hold")) parse_law(sec["hold"], fc.hold, "force_control.hold");
         if (has(sec, "force_gate")) {
             const YAML::Node g = sec["force_gate"];
-            validateAllowedKeys(g, {"enable", "max_force_n", "max_torque_nm", "close_tau_s", "open_tau_s"},
+            validateAllowedKeys(g, {"enable", "max_force_n", "max_torque_nm", "close_tau_s", "open_tau_s",
+                                    "stream_judge_lpf_hz", "stream_arm_force_n", "stream_release_force_n",
+                                    "stream_arm_dwell_sec"},
                                 "force_control.force_gate");
             if (has(g, "enable")) fc.gate_enable = asBool(g["enable"], "force_control.force_gate.enable");
             if (has(g, "max_force_n")) fc.gate_max_force_n = asDouble(g["max_force_n"], "force_control.force_gate.max_force_n");
             if (has(g, "max_torque_nm")) fc.gate_max_torque_nm = asDouble(g["max_torque_nm"], "force_control.force_gate.max_torque_nm");
             if (has(g, "close_tau_s")) fc.gate_close_tau_s = asDouble(g["close_tau_s"], "force_control.force_gate.close_tau_s");
             if (has(g, "open_tau_s")) fc.gate_open_tau_s = asDouble(g["open_tau_s"], "force_control.force_gate.open_tau_s");
+            if (has(g, "stream_judge_lpf_hz")) fc.gate_stream_judge_lpf_hz = asDouble(g["stream_judge_lpf_hz"], "force_control.force_gate.stream_judge_lpf_hz");
+            if (has(g, "stream_arm_force_n")) fc.gate_stream_arm_force_n = asDouble(g["stream_arm_force_n"], "force_control.force_gate.stream_arm_force_n");
+            if (has(g, "stream_release_force_n")) fc.gate_stream_release_force_n = asDouble(g["stream_release_force_n"], "force_control.force_gate.stream_release_force_n");
+            if (has(g, "stream_arm_dwell_sec")) fc.gate_stream_arm_dwell_sec = asDouble(g["stream_arm_dwell_sec"], "force_control.force_gate.stream_arm_dwell_sec");
         }
         if (has(sec, "max_deviation_m")) fc.max_deviation_m = asDouble(sec["max_deviation_m"], "force_control.max_deviation_m");
         if (has(sec, "max_deviation_rad")) fc.max_deviation_rad = asDouble(sec["max_deviation_rad"], "force_control.max_deviation_rad");
@@ -4279,6 +4338,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
         if (has(sec, "oscillation_release_quiet_sec")) fc.oscillation_release_quiet_sec = asDouble(sec["oscillation_release_quiet_sec"], "force_control.oscillation_release_quiet_sec");
         if (has(sec, "coverage_recover_sec")) fc.coverage_recover_sec = asDouble(sec["coverage_recover_sec"], "force_control.coverage_recover_sec");
         if (has(sec, "hold_relatch_max_force_n")) fc.hold_relatch_max_force_n = asDouble(sec["hold_relatch_max_force_n"], "force_control.hold_relatch_max_force_n");
+        if (has(sec, "hold_latch_max_command_gap_m")) fc.hold_latch_max_command_gap_m = asDouble(sec["hold_latch_max_command_gap_m"], "force_control.hold_latch_max_command_gap_m");
     }
 
     // ONE ANSWER, DECIDED IN ONE PLACE. The zero-payload push is a property of the

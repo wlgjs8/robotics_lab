@@ -81,6 +81,7 @@ bool FtPipeline::step(const FtPipelineInput& in) {
         comp_sensor_ = Wrench6D{};
         comp_tcp_ = Wrench6D{};
         comp_stand_ = Wrench6D{};
+        comp_stand_nodz_ = Wrench6D{};
         gravity_sensor_ = Wrench6D{};
         load_force_n_ = 0.0;
         load_mass_kg_ = 0.0;
@@ -143,8 +144,7 @@ bool FtPipeline::step(const FtPipelineInput& in) {
     // rotated: deadzoning in stand axes would clip a different set of directions
     // than the law's, and the two would disagree about when contact began.
     comp_stand_ = wrench(r_stand_tool * force(comp_tcp_), r_stand_tool * torque(comp_tcp_));
-    (void)f_stand;
-    (void)m_stand;
+    comp_stand_nodz_ = wrench(f_stand, m_stand);
 
     // ---- the tool-load estimate --------------------------------------------
     // Taken from the PRE-deadzone stand force, because this channel exists precisely

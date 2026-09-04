@@ -123,15 +123,61 @@ public:
 
     // THE FORCE GATE ON THIS PATH (2026-09-04). Overwrite the published translation
     // with `position_stand` (the caller has already cut the advance INTO the contact
-    // out of this tick's step) and drop the velocity component that still points
-    // into it, so the next step does not carry that momentum back in. The goal is
-    // NOT touched: this is a hold of the STATE, not a shift of the goal, which is
-    // what an absolute-target source (UMI teleop, a policy's absolute setpoints)
-    // needs - a shifted goal would leave the arm permanently offset from the source
-    // after the contact is released. Tangential motion (sliding along the contact)
-    // and the retreating component pass untouched.
+    // out of this tick's step) and drop `fraction` of the velocity component that
+    // still points into it, so the next step does not carry that momentum back in.
+    // `fraction` is the gate's closure (1 - gate): the SAME fraction the caller cut
+    // from the advance. It must be proportional - an all-or-nothing drop on a
+    // nanometre cut was the right arm's shaking on 2026-09-04 22:32 (a gate at
+    // 1 - 1e-7 zeroed the tracker's into-velocity on 17,351 moving ticks, a 500 Hz
+    // sawtooth at the tracker's full acceleration). The goal is NOT touched: this is
+    // a hold of the STATE, not a shift of the goal, which is what an absolute-target
+    // source (UMI teleop, a policy's absolute setpoints) needs - a shifted goal would
+    // leave the arm permanently offset from the source after the contact is
+    // released. Tangential motion (sliding along the contact) and the retreating
+    // component pass untouched.
     void constrainTranslation(const Eigen::Vector3d& position_stand,
-                              const Eigen::Vector3d& outward_normal_stand);
+                              const Eigen::Vector3d& outward_normal_stand,
+                              double fraction = 1.0);
+
+    // ---- THE RELEASE BRAKE (2026-09-04 pm) ----------------------------------
+    // On a deadman release (TcpPoseTarget -> Hold) this tracker used to be dropped
+    // and the Hold pinned prev_sent, so the joint velocity went from 19 deg/s to 0
+    // in ONE tick (right arm, servo_log_20260904_225810.csv 79.756 s: 9,283
+    // deg/s^2; the left arm's ten releases a median 2,400). beginReleaseBrake()
+    // keeps the state and ramps its velocity to zero at the profile's max
+    // accelerations; the goal FOLLOWS the state, so a re-engage integrates from
+    // where the arm actually stopped. step() advances the brake and reports the
+    // stop through releaseBrakeDone(); updateGoalFromCommand() cancels the brake
+    // (the operator pressed again) and re-latches the command reference, so
+    // nothing jumps either way.
+    void beginReleaseBrake();
+    bool releaseBraking() const { return release_braking_; }
+    bool releaseBrakeDone() const { return release_braking_ && release_brake_done_; }
+    double releaseBrakeElapsedSec() const { return release_brake_elapsed_sec_; }
+    double releaseBrakeDistanceM() const { return release_brake_distance_m_; }
+    double linearSpeed() const { return velocity_.norm(); }
+    double angularSpeed() const { return angular_velocity_.norm(); }
+
+    // ---- THE WALL BRAKE (2026-09-04 pm) -------------------------------------
+    // A Cartesian wall (reach shell, ROI face, floor) seen from this tracker's side.
+    // `n_free` is the unit normal pointing from the wall INTO free space (the same
+    // convention as the force gate's measured-force direction); `margin_m` is the
+    // signed distance of the closest checked point to the wall (>= 0 inside).
+    // Called after step(): caps the velocity component INTO the wall at
+    // sqrt(2 a_brake d), d = margin - standoff - the very law the joint-space
+    // projection row enforces downstream, so that row never has to cut - and at
+    // d <= 0 pushes the state back onto the standoff and drops the inward
+    // velocity. The goal is NOT touched (hold of the STATE, like the force gate).
+    // WHY HERE AND NOT ONLY IN THE ROW: with the row alone the tracker kept
+    // integrating toward a goal beyond the shell while the row held the joints
+    // (ref-actual 48 mm in 0.4 s), the 50 mm re-anchor tolerance tripped and the
+    // reference snapped; the row's first cut of an un-braked command was a
+    // 7.9-9.6k deg/s^2 kick (servo_log_20260904_225810.csv, 9 episodes).
+    // Returns the position correction applied [m]; `capped_to_m_s` reports the
+    // cap when the velocity was touched (< 0 when nothing was done).
+    double brakeAgainstWall(const Eigen::Vector3d& n_free, double margin_m,
+                            double a_brake_m_s2, double standoff_m, double dt_sec,
+                            double* capped_to_m_s);
 
     // True if the tracker's held pose has drifted from `reference` beyond either
     // tolerance. Used to detect that another control path (JointTarget, fault hold,
@@ -157,6 +203,13 @@ private:
     SmdStepInfo last_step_info_;
     std::uint64_t reanchor_count_ = 0;
     double last_min_singular_ = -1.0;  // < 0 = unknown -> no singularity velocity scaling
+    // release brake
+    bool release_braking_ = false;
+    bool release_brake_done_ = false;
+    double release_brake_elapsed_sec_ = 0.0;
+    double release_brake_distance_m_ = 0.0;
+    void stepReleaseBrake(double dt);
+    void clearReleaseBrake();
 };
 
 }  // namespace rb_servo

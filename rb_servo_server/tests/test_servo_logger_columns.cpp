@@ -150,6 +150,14 @@ int main() {
         "left_fc_absorbed_norm_rad",
         "right_fc_hold_engaged",
         "left_fc_hold_force_n",
+        // the reach shell (safety.reach_constraint) — no column at all until 2026-09-04
+        "left_reach_engaged",
+        "left_reach_margin_m",
+        "left_reach_r_far_m",
+        "left_reach_shell",
+        "right_reach_margin_m",
+        "right_reach_r_far_m",
+        "reach_clamp_count",
     };
     for (const char* name : required) {
         if (!contains(header_fields, name)) {

@@ -42,6 +42,7 @@ INIT_ACTIVE = {"planning", "executing"}
 
 # Acceptance thresholds (measured defects were 10-1000x these).
 RESUME_VELOCITY_CLAMP_MAX_DEG = 0.01   # frozen-state blend showed 58.95 deg
+ARRIVAL_SPEED_MAX_DEG_S = 3.5             # the taper floor is 3 deg/s; "done" must not fire faster
 RESUME_ACCEL_MAX_DEG_S2 = 6000.0       # 2x the largest ddq_max; the kick was 12,021
 ONSET_ACCEL_MAX_DEG_S2 = 3000.0        # the measured-reanchor snap was 4.4-6.9k; a brake
                                        # hand-off from streaming stays under ~1.3k
@@ -201,6 +202,25 @@ def analyze_episode(cols, rows, t, arm, start, end, resume_window_sec, force_cov
     else:
         out["onset"] = {"pass": None}
 
+    # ---- arrival: the tick "done" first appears; the sent stream must be at rest ----
+    st_key = cols.init_status[arm]
+    done_i = None
+    if st_key is not None:
+        for i in range(start, min(n, end + 50)):
+            if str(rows[i].get(st_key)) == "done":
+                done_i = i
+                break
+    if done_i is not None and done_i >= 3:
+        q = _joint_series(cols, rows, arm, done_i - 3, done_i + 25)
+        # approach speed on the last executing tick (q[2] = done-1, q[1] = done-2):
+        # what the stream was doing when the hand-off stopped it
+        speed = max(abs(q[2][j] - q[1][j]) for j in range(6)) / TICK_SEC if q and len(q) > 3 else float("nan")
+        step, accel = _max_step_and_accel(q) if q else (float("nan"), float("nan"))
+        out["arrival"] = {"t_done": t[done_i], "sent_speed_deg_s": speed, "max_accel_deg_s2": accel,
+                          "pass": speed <= ARRIVAL_SPEED_MAX_DEG_S and accel <= ONSET_ACCEL_MAX_DEG_S2}
+    else:
+        out["arrival"] = {"pass": None}
+
     # ---- peer arm during a single-arm episode ----
     peer = OTHER[arm]
     peer_mode = cols.mode[peer]
@@ -319,6 +339,9 @@ def render(report):
         o = ep["onset"]
         if o.get("pass") is not None:
             lines.append(f"    onset   {_verdict(o)}  step {o['max_step_deg']:.3f} deg  accel {o['max_accel_deg_s2']:.0f} deg/s^2")
+        a = ep.get("arrival", {})
+        if a.get("pass") is not None:
+            lines.append(f"    arrival {_verdict(a)}  done @{a['t_done']:.2f} s  sent speed {a['sent_speed_deg_s']:.1f} deg/s  accel {a['max_accel_deg_s2']:.0f} deg/s^2")
         r = ep["resume"]
         if r.get("pass") is not None:
             eng = "-" if r["follower_engage_sec"] is None else f"{r['follower_engage_sec']*1000:.0f} ms"
@@ -340,8 +363,8 @@ def render(report):
             lines.append(f"    force   {_verdict(f)}  re-covered after {cov}  ({f['reason_at_window_end']})")
     counts = {}
     for ep in report["episodes"]:
-        for block in ("onset", "resume", "peer", "force"):
-            v = _verdict(ep[block])
+        for block in ("onset", "arrival", "resume", "peer", "force"):
+            v = _verdict(ep.get(block, {}))
             if v != "n/a":
                 counts.setdefault(block, {"PASS": 0, "FAIL": 0})[v] += 1
     lines.append("summary: " + "  ".join(f"{b} {c['PASS']}/{c['PASS'] + c['FAIL']} pass" for b, c in counts.items()))

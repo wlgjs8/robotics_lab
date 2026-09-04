@@ -600,6 +600,173 @@ bool testSeededResetCarriesVelocityIntoTheFirstSteps() {
 
 }  // namespace
 
+// THE GATE'S HOLD DROPS A FRACTION OF THE INTO-VELOCITY, NOT ALL OF IT. The
+// fraction is the gate's closure, the same fraction the caller cut from the advance.
+// All-or-nothing on a nanometre cut was the right arm's shaking on 2026-09-04 22:32.
+bool testConstrainTranslationDropsInwardVelocityProportionally() {
+    rb_servo::PoseTrackSmdConfig cfg;
+    cfg.enable = true;
+    cfg.natural_frequency_linear_hz = 2.0;
+    cfg.natural_frequency_angular_hz = 2.0;
+    const Eigen::Vector3d down(0.0, 0.0, 1.0);   // the surface pushes UP: +z is the outward normal
+    auto build = [&]() {
+        rb_servo::SmdPoseTracker tracker(cfg);
+        rb_servo::Pose6D start;
+        start.z = 0.100;
+        tracker.reset(start);
+        rb_servo::Pose6D goal = start;
+        tracker.updateGoalFromCommand(goal);   // latches the reference
+        goal.z = 0.000;                        // 100 mm DOWN: builds inward velocity
+        tracker.updateGoalFromCommand(goal);
+        for (int i = 0; i < 50; ++i) tracker.step(0.002);
+        return tracker;
+    };
+    // Reference: the velocity the tracker carries after 100 ms, as the next step's dz.
+    rb_servo::SmdPoseTracker free = build();
+    const double z0 = free.currentPose().z;
+    const double dz_free = free.step(0.002).z - z0;
+    RB_CHECK(dz_free < -1e-5);   // it is moving down
+    auto dz_after = [&](double fraction) {
+        rb_servo::SmdPoseTracker t = build();
+        const rb_servo::Pose6D now = t.currentPose();
+        t.constrainTranslation(Eigen::Vector3d(now.x, now.y, now.z), down, fraction);
+        return t.step(0.002).z - now.z;
+    };
+    const double dz_full = dz_after(1.0);
+    const double dz_half = dz_after(0.5);
+    const double dz_none = dz_after(0.0);
+    RB_CHECK(std::abs(dz_none - dz_free) < 1e-12);          // fraction 0: untouched
+    RB_CHECK(dz_full > dz_free * 0.5);                      // fraction 1: the inward momentum is gone
+    RB_CHECK(dz_half > dz_free && dz_half < dz_full);       // fraction 0.5: in between
+    // The retreating component is never touched, whatever the fraction.
+    rb_servo::SmdPoseTracker up_t(cfg);
+    rb_servo::Pose6D s2;
+    s2.z = 0.100;
+    up_t.reset(s2);
+    rb_servo::Pose6D g2 = s2;
+    up_t.updateGoalFromCommand(g2);
+    g2.z = 0.200;
+    up_t.updateGoalFromCommand(g2);
+    for (int i = 0; i < 50; ++i) up_t.step(0.002);
+    const rb_servo::Pose6D n2 = up_t.currentPose();
+    rb_servo::SmdPoseTracker up_ref = up_t;
+    up_t.constrainTranslation(Eigen::Vector3d(n2.x, n2.y, n2.z), down, 1.0);
+    RB_CHECK(std::abs(up_t.step(0.002).z - up_ref.step(0.002).z) < 1e-12);
+    return true;
+}
+
+// THE RELEASE BRAKE ramps the tracker to rest at the profile's max acceleration -
+// no one-tick stop, no reversal - and leaves the goal ON the stop so the next
+// press integrates from there without a jump.
+bool testReleaseBrakeRampsToRestAtMaxAccel() {
+    rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
+    cfg.natural_frequency_linear_hz = 2.0;
+    cfg.natural_frequency_angular_hz = 1.5;
+    cfg.max_linear_velocity_m_s = 0.30;
+    cfg.max_linear_accel_m_s2 = 2.50;
+    cfg.max_angular_velocity_rad_s = 1.0;
+    cfg.max_angular_accel_rad_s2 = 3.0;
+    rb_servo::SmdPoseTracker tracker(cfg);
+    tracker.reset(rb_servo::Pose6D{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    // The operator streams +x at 150 mm/s for 0.4 s.
+    for (int i = 0; i < 200; ++i) {
+        tracker.updateGoalFromCommand(rb_servo::Pose6D{0.15 * kDt * i, 0.0, 0.0, 0.0, 0.0, 0.0});
+        tracker.step(kDt);
+    }
+    const double v0 = tracker.linearSpeed();
+    RB_CHECK(v0 > 0.10);
+    const double x0 = tracker.currentPose().x;
+    tracker.beginReleaseBrake();
+    RB_CHECK(tracker.releaseBraking());
+    double prev = v0;
+    int ticks = 0;
+    double max_dv = 0.0;
+    while (!tracker.releaseBrakeDone() && ticks < 1000) {
+        const rb_servo::Pose6D p = tracker.step(kDt);
+        (void)p;
+        const double v = tracker.linearSpeed();
+        RB_CHECK(v <= prev + 1e-12);                       // monotonic
+        max_dv = std::max(max_dv, prev - v);
+        prev = v;
+        ++ticks;
+    }
+    RB_CHECK(tracker.releaseBrakeDone());
+    RB_CHECK(max_dv <= cfg.max_linear_accel_m_s2 * kDt + 1e-9);   // never more than a_max per tick
+    const int expected_ticks = static_cast<int>(std::ceil(v0 / (cfg.max_linear_accel_m_s2 * kDt)));
+    RB_CHECK(std::abs(ticks - expected_ticks) <= 2);
+    RB_CHECK(tracker.linearSpeed() == 0.0);
+    const double dist = tracker.currentPose().x - x0;
+    const double expected_dist = v0 * v0 / (2.0 * cfg.max_linear_accel_m_s2);
+    RB_CHECK(std::abs(dist - expected_dist) < 0.1 * expected_dist + 1e-4);
+    RB_CHECK(std::abs(tracker.goalPose().x - tracker.currentPose().x) < 1e-12);   // goal on the stop
+    // A re-press: the first command only re-latches, the state does not move.
+    const double x_stop = tracker.currentPose().x;
+    tracker.updateGoalFromCommand(rb_servo::Pose6D{1.234, 0.0, 0.0, 0.0, 0.0, 0.0});
+    RB_CHECK(!tracker.releaseBraking());
+    tracker.step(kDt);
+    RB_CHECK(std::abs(tracker.currentPose().x - x_stop) < 1e-9);
+    // ...and deltas integrate from there.
+    tracker.updateGoalFromCommand(rb_servo::Pose6D{1.244, 0.0, 0.0, 0.0, 0.0, 0.0});
+    for (int i = 0; i < 500; ++i) tracker.step(kDt);
+    RB_CHECK(std::abs(tracker.currentPose().x - (x_stop + 0.010)) < 1e-4);
+    return true;
+}
+
+// THE WALL BRAKE caps the approach speed at sqrt(2 a d) - a smooth, constant-
+// deceleration approach, never a step - and holds the state on the standoff with
+// the goal left beyond the wall; backing the goal off releases it without a kick.
+bool testWallBrakeCapsApproachAndHoldsOnStandoff() {
+    rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
+    cfg.natural_frequency_linear_hz = 2.0;
+    cfg.natural_frequency_angular_hz = 1.5;
+    cfg.max_linear_velocity_m_s = 0.30;
+    cfg.max_linear_accel_m_s2 = 2.50;
+    rb_servo::SmdPoseTracker tracker(cfg);
+    tracker.reset(rb_servo::Pose6D{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    tracker.updateGoalFromCommand(rb_servo::Pose6D{0.0, 0.0, 0.0, 0.0, 0.0, 0.0});    // latch
+    tracker.updateGoalFromCommand(rb_servo::Pose6D{0.200, 0.0, 0.0, 0.0, 0.0, 0.0});  // 200 mm +x
+    const double wall_x = 0.100;                       // free space is x < wall_x
+    const Eigen::Vector3d n_free(-1.0, 0.0, 0.0);
+    const double a_brake = 0.5, standoff = 0.002;
+    double max_x = -1.0, prev_into = 0.0, max_dv = 0.0, max_cap_excess = 0.0;
+    bool acted = false;
+    for (int i = 0; i < 1500; ++i) {
+        tracker.step(kDt);
+        const double margin = wall_x - tracker.currentPose().x;
+        double cap = -1.0;
+        tracker.brakeAgainstWall(n_free, margin, a_brake, standoff, kDt, &cap);
+        const double x = tracker.currentPose().x;
+        max_x = std::max(max_x, x);
+        const double into = tracker.linearSpeed();   // motion is along +x only
+        const double d = wall_x - x - standoff;
+        if (cap >= 0.0) {
+            acted = true;
+            max_cap_excess = std::max(max_cap_excess, into - std::sqrt(2.0 * a_brake * std::max(d, 0.0)));
+        }
+        max_dv = std::max(max_dv, std::abs(into - prev_into));
+        prev_into = into;
+    }
+    RB_CHECK(acted);
+    RB_CHECK(max_x <= wall_x - standoff + 1e-6);                          // never past the standoff
+    RB_CHECK(max_cap_excess < 1e-6);                                      // the cap held
+    RB_CHECK(max_dv <= (cfg.max_linear_accel_m_s2 + a_brake) * kDt + 1e-6);   // no step, ever
+    RB_CHECK(std::abs(tracker.currentPose().x - (wall_x - standoff)) < 1e-4);  // at rest on the standoff
+    RB_CHECK(tracker.linearSpeed() < 1e-6);
+    RB_CHECK(std::abs(tracker.goalPose().x - 0.200) < 1e-12);            // the goal is untouched
+    // Back the goal off by 150 mm: the tracker leaves the wall, the brake does nothing.
+    tracker.updateGoalFromCommand(rb_servo::Pose6D{0.050, 0.0, 0.0, 0.0, 0.0, 0.0});
+    for (int i = 0; i < 500; ++i) {
+        tracker.step(kDt);
+        double cap = -1.0;
+        const double moved = tracker.brakeAgainstWall(n_free, wall_x - tracker.currentPose().x,
+                                                      a_brake, standoff, kDt, &cap);
+        RB_CHECK(cap < 0.0);
+        RB_CHECK(moved == 0.0);
+    }
+    RB_CHECK(tracker.currentPose().x < 0.060);
+    return true;
+}
+
 int main() {
     if (!testCriticallyDampedStepHasNoOvershootAndConverges()) return 1;
     if (!testFirstCommandLatchesWithoutJump()) return 1;
@@ -615,6 +782,9 @@ int main() {
     if (!testUnmeasuredSigmaDoesNotReleaseTheSingularityGuard()) return 1;
     if (!testSettlingHoldPinsTrackerAndKillsTheReleaseLunge()) return 1;
     if (!testSeededResetCarriesVelocityIntoTheFirstSteps()) return 1;
+    if (!testConstrainTranslationDropsInwardVelocityProportionally()) return 1;
+    if (!testReleaseBrakeRampsToRestAtMaxAccel()) return 1;
+    if (!testWallBrakeCapsApproachAndHoldsOnStandoff()) return 1;
     std::cout << "smd_pose_tracker tests passed\n";
     return 0;
 }

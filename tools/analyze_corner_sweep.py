@@ -107,7 +107,10 @@ def summarize(path: Path) -> dict[str, float]:
         "lead_p95_mm": float(np.nanpercentile(lead, 95)) * 1000.0 if lead.size else float("nan"),
         "tremble_pct": _tremble_share(vel_active, dt),
         "roi": float((verdict == "RoiViolation").sum()),
-        "faults": float((~np.isin(verdict, ["Ok", "RoiViolation"])).sum()),
+        # The reach shell got its own verdict on 2026-09-04 (it aliased to
+        # RoiViolation before). It is a damper like the ROI faces, not a fault.
+        "reach": float((verdict == "ReachViolation").sum()),
+        "faults": float((~np.isin(verdict, ["Ok", "RoiViolation", "ReachViolation"])).sum()),
     }
 
 
@@ -120,7 +123,7 @@ def main() -> int:
     print(
         f"{'tag':<9} {'db_ang(deg)':>11} {'vscale':>7} {'ticks':>7} {'act%':>6} "
         f"{'corner%':>8} {'conv%':>7} {'projP95':>9} {'proj>1mm':>9} {'leadP95':>9} "
-        f"{'tremble%':>9} {'ROI':>5}"
+        f"{'tremble%':>9} {'ROI':>5} {'reach':>6}"
     )
     for row in rows:
         servo = Path(row["servo_log"])
@@ -137,7 +140,7 @@ def main() -> int:
             f"{row['tag']:<9} {deg:11.3f} {float(row['vel_scale']):7.2f} {s['ticks']:7.0f} "
             f"{s['active_pct']:6.1f} {s['corner_pct']:8.1f} {s['conv_pct']:7.1f} "
             f"{s['proj_p95_mm']:8.2f}mm {s['proj_over_pct']:8.1f}% {s['lead_p95_mm']:8.2f}mm "
-            f"{s['tremble_pct']:9.2f} {s['roi']:5.0f}"
+            f"{s['tremble_pct']:9.2f} {s['roi']:5.0f} {s['reach']:6.0f}"
         )
     return 0
 

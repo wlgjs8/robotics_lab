@@ -257,6 +257,42 @@ ArmCommand applyPoseTrackSmd(
 ) {
     if (!tracker) return command;
     if (!config.enable || command.mode != ControlMode::TcpPoseTarget || !command.has_tcp_target) {
+        // THE RELEASE BRAKE (2026-09-04 pm). A Hold arriving while this tracker is
+        // still moving is a deadman release. Dropping the tracker here let the Hold
+        // pin prev_sent, i.e. the joint velocity went to zero in ONE tick (measured
+        // 9,283 deg/s^2, right arm, servo_log_20260904_225810.csv 79.756 s). Instead
+        // keep emitting the tracker's pose while it ramps its velocity down at the
+        // profile's max accelerations; the Hold that follows latches the pose it
+        // stopped at (hold_latch_max_command_gap_m), so nothing snaps.
+        if (config.enable && config.release_brake_enable && command.mode == ControlMode::Hold &&
+            tracker->active() && kinematics && !qsync_settling_hold) {
+            if (!tracker->releaseBraking()) {
+                if (tracker->linearSpeed() <= 0.0 && tracker->angularSpeed() <= 0.0) {
+                    tracker->deactivate();
+                    return command;
+                }
+                std::cerr << "[INFO] pose_track " << toString(command.arm_id)
+                          << " release brake: v=" << tracker->linearSpeed() * 1000.0
+                          << " mm/s w=" << tracker->angularSpeed() * 180.0 / M_PI
+                          << " deg/s ramping to rest at " << config.max_linear_accel_m_s2
+                          << " m/s^2 / " << config.max_angular_accel_rad_s2 << " rad/s^2\n";
+                tracker->beginReleaseBrake();
+            }
+            ArmCommand out = command;
+            out.mode = ControlMode::TcpPoseTarget;
+            out.has_tcp_target = true;
+            out.tcp_target_stand = tracker->step(dt_sec);
+            const bool timed_out = tracker->releaseBrakeElapsedSec() >= config.release_brake_timeout_sec;
+            if (tracker->releaseBrakeDone() || timed_out) {
+                std::cerr << "[INFO] pose_track " << toString(command.arm_id)
+                          << (timed_out ? " release brake TIMED OUT after "
+                                        : " release brake stopped in ")
+                          << tracker->releaseBrakeElapsedSec() * 1000.0 << " ms over "
+                          << tracker->releaseBrakeDistanceM() * 1000.0 << " mm\n";
+                tracker->deactivate();
+            }
+            return out;
+        }
         tracker->deactivate();
         return command;
     }
@@ -328,15 +364,25 @@ ArmCommand applyPoseTrackSmd(
     // Same projective rule as the follower's (only the component pushing INTO the
     // measured force is cut); the difference is where the cut is booked: the
     // tracker's STATE is held here (constrainTranslation), the goal is left alone.
-    if (gate != nullptr && gate->translation() < 1.0 && gate->forceN() > 1e-9) {
+    //
+    // JUDGED ON THE GATE'S STREAM CHANNEL, NOT ITS TICK CHANNEL (2026-09-04 pm). The
+    // tick-judged gate fed the tool's own 8-30 Hz motion vibration (3-5 N RMS while
+    // moving, 12-33 ms excursions over 10 N) back into this tracker as a sign-
+    // flipping cut - the shaking the operator felt in every UMI run of the day, and
+    // absent with force control off. The stream channel arms only on a SUSTAINED
+    // contact and cuts along a low-passed direction; see ForceGate::updateStream.
+    if (gate != nullptr && gate->streamTranslation() < 1.0 &&
+        gate->streamForceDirection().squaredNorm() > 0.5) {
         const math::Vector3 p0(before.x, before.y, before.z);
         const math::Vector3 p1(smoothed.tcp_target_stand.x, smoothed.tcp_target_stand.y,
                                smoothed.tcp_target_stand.z);
         double removed = 0.0;
-        const math::Vector3 kept = gate->applyTranslation(p1 - p0, &removed);
+        const math::Vector3 kept = gate->applyStreamTranslation(p1 - p0, &removed);
         if (removed > 0.0) {
             const math::Vector3 held = p0 + kept;
-            tracker->constrainTranslation(held, gate->forceDirection());
+            // The velocity drop is PROPORTIONAL to the closure, like the cut.
+            tracker->constrainTranslation(held, gate->streamForceDirection(),
+                                          1.0 - gate->streamTranslation());
             smoothed.tcp_target_stand.x = held.x();
             smoothed.tcp_target_stand.y = held.y();
             smoothed.tcp_target_stand.z = held.z();
@@ -4128,6 +4174,35 @@ void DualArmServoLoop::loopMain() {
             latest_snapshot_.roi_box_clamp_count = roi_clamp_count_;
             latest_snapshot_.roi_box_last_set_reject_reason = roi_last_set_reject_reason_;
             {
+                // Reach shell: the ENFORCED radii + where the shell is centered, so the
+                // viewer draws the surface the arm actually stops against instead of a
+                // static envelope asset. See SafetyPublishSnapshot's reach_shell_* note.
+                const auto& rc = config_.safety.reach_constraint;
+                latest_snapshot_.reach_shell_enabled = rc.enable;
+                latest_snapshot_.reach_shell_monitor_only = rc.monitor_only;
+                latest_snapshot_.reach_shell_r_max_m = rc.r_max_m;
+                latest_snapshot_.reach_shell_r_min_m = rc.r_min_m;
+                latest_snapshot_.reach_shell_d_slow_m = rc.d_slow_m;
+                const auto base_of = [](const ArmMountConfig& m) {
+                    return std::array<double, 3>{m.base_pose_in_stand.x,
+                                                 m.base_pose_in_stand.y,
+                                                 m.base_pose_in_stand.z};
+                };
+                latest_snapshot_.reach_shell_left_base_stand_m = base_of(config_.left_mount);
+                latest_snapshot_.reach_shell_right_base_stand_m = base_of(config_.right_mount);
+                latest_snapshot_.reach_shell_left_checked = last_reach_left_.checked;
+                latest_snapshot_.reach_shell_left_violated = last_reach_left_.violated;
+                latest_snapshot_.reach_shell_left_min_margin_m = last_reach_left_.min_margin_m;
+                latest_snapshot_.reach_shell_left_r_far_m = last_reach_left_.r_far_m;
+                latest_snapshot_.reach_shell_left_closest_shell = last_reach_left_.closest_shell;
+                latest_snapshot_.reach_shell_right_checked = last_reach_right_.checked;
+                latest_snapshot_.reach_shell_right_violated = last_reach_right_.violated;
+                latest_snapshot_.reach_shell_right_min_margin_m = last_reach_right_.min_margin_m;
+                latest_snapshot_.reach_shell_right_r_far_m = last_reach_right_.r_far_m;
+                latest_snapshot_.reach_shell_right_closest_shell = last_reach_right_.closest_shell;
+                latest_snapshot_.reach_shell_clamp_count = reach_clamp_count_;
+            }
+            {
                 const math::Vector3 uf_point = effectiveUserFloorPoint();
                 const math::Vector3 uf_normal = effectiveUserFloorNormal();
                 latest_snapshot_.user_floor_constraint_enabled = userFloorActive();
@@ -4766,6 +4841,12 @@ void DualArmServoLoop::mergeAbcTelemetry(
     solve.smd_goal_linear_velocity_norm_m_s = info.goal_linear_velocity.norm();
     solve.smd_goal_angular_velocity_norm_rad_s = info.goal_angular_velocity.norm();
     solve.smd_reanchor_count = abc.smd_reanchor_count;
+    solve.smd_release_braking = abc.smd_release_braking;
+    solve.smd_wall_engaged = abc.smd_wall_engaged;
+    solve.smd_wall_name = abc.smd_wall_name;
+    solve.smd_wall_margin_m = abc.smd_wall_margin_m;
+    solve.smd_wall_cap_m_s = abc.smd_wall_cap_m_s;
+    solve.smd_wall_clamp_m = abc.smd_wall_clamp_m;
     solve.follower_controller = abc.follower_controller;
     solve.follower_active = abc.follower_active;
     solve.follower_wire_seq = abc.follower_wire_seq;
@@ -5246,14 +5327,16 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     const auto smd_fallback = [&]() {
         output_smd->deactivate();
         log_transition();
-        return with_stage_telemetry(applyPoseTrackSmd(
+        ArmCommand out = applyPoseTrackSmd(
             command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
             previous_sent_q_deg, dt_sec, qsyncSettlingHoldActive(arm_id),
             arm_id == ArmId::Left ? &left_overlay_ : &right_overlay_,
             arm_id == ArmId::Left ? &left_force_gate_ : &right_force_gate_,
             &(arm_id == ArmId::Left ? left_force_control_telemetry_
                                     : right_force_control_telemetry_).gate_removed_m,
-            handoff_velocity ? &*handoff_velocity : nullptr));
+            handoff_velocity ? &*handoff_velocity : nullptr);
+        applyPoseTrackWallFold(arm_id, smd_tracker, dt_sec, &out);
+        return with_stage_telemetry(out);
     };
     if (rf.enable && chunk_frame_receiver_ && command.mode == ControlMode::Hold &&
         follower->active()) {
@@ -5812,13 +5895,15 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     };
     const auto smd_fallback = [&]() {
         log_transition();
-        return with_stage_telemetry(applyPoseTrackSmd(
+        ArmCommand out = applyPoseTrackSmd(
             command, profile.pose_track_smd, smd_tracker, kinematics_, mount,
             previous_sent_q_deg, dt_sec, qsyncSettlingHoldActive(arm_id),
             arm_id == ArmId::Left ? &left_overlay_ : &right_overlay_,
             arm_id == ArmId::Left ? &left_force_gate_ : &right_force_gate_,
             &(arm_id == ArmId::Left ? left_force_control_telemetry_
-                                    : right_force_control_telemetry_).gate_removed_m));
+                                    : right_force_control_telemetry_).gate_removed_m);
+        applyPoseTrackWallFold(arm_id, smd_tracker, dt_sec, &out);
+        return with_stage_telemetry(out);
     };
     if (!rf.enable || !chunk_frame_receiver_ || command.mode != ControlMode::TcpPoseTarget ||
         !command.has_tcp_target || !kinematics_) {
@@ -6278,9 +6363,47 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 tel.coverage_reason = buf;
                 continue;
             }
-            hold_nominal = *fc_state.tcp_actual_stand;
+            // LATCH AT THE COMMAND, NOT THE MEASUREMENT (2026-09-04). The measured
+            // TCP trails the streamed command by the box's delay, so latching it
+            // re-targeted the arm backwards by that lag on every pedal release
+            // (0.2-2 mm, 0.05-0.2 deg: a 1x accel ramp and a 4x brake, 5-11k deg/s^2,
+            // on every UMI release of four runs). FK of the last SENT joints with
+            // the overlay's standing deviation stripped is the pose the arm is
+            // already commanded to be at, so the first compliant tick composes to
+            // exactly the previous command: no step. The measured pose is kept only
+            // as the fail-closed fallback when the two disagree by more than
+            // hold_latch_max_command_gap_m (a tracking failure, not lag).
+            const Pose6D measured = *fc_state.tcp_actual_stand;
+            Pose6D latched = measured;
+            const char* latched_from = "measured TCP";
+            if (kinematics_) {
+                const JointArray& prev_q = fc_left ? left_prev_sent_q_deg_ : right_prev_sent_q_deg_;
+                const ArmMountConfig& mount = fc_left ? config_.left_mount : config_.right_mount;
+                if (finiteJointArray(prev_q)) {
+                    try {
+                        const Pose6D commanded = overlay.strip(
+                            kinematics_->computeTcpStand(fc_arm, prev_q, mount));
+                        const double gap = std::sqrt(
+                            (commanded.x - measured.x) * (commanded.x - measured.x) +
+                            (commanded.y - measured.y) * (commanded.y - measured.y) +
+                            (commanded.z - measured.z) * (commanded.z - measured.z));
+                        if (gap <= config_.force_control.hold_latch_max_command_gap_m) {
+                            latched = commanded;
+                            latched_from = "commanded TCP";
+                        } else {
+                            std::cerr << "[WARN] force overlay " << toString(fc_arm)
+                                      << ": commanded and measured TCP disagree by " << gap * 1000.0
+                                      << " mm (> hold_latch_max_command_gap_m); latching the "
+                                         "measured pose\n";
+                        }
+                    } catch (const std::exception&) {
+                        // FK refused: the measured pose stands.
+                    }
+                }
+            }
+            hold_nominal = latched;
             std::cerr << "[INFO] force overlay " << toString(fc_arm)
-                      << ": Hold made compliant, nominal latched at the measured TCP ["
+                      << ": Hold made compliant, nominal latched at the " << latched_from << " ["
                       << hold_nominal->x << ", " << hold_nominal->y << ", "
                       << hold_nominal->z << "] m\n";
             // A COMPLIANT HOLD IS A MOTION COMMAND THE SERVER AUTHORED, so it arms the
@@ -6776,11 +6899,19 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 abc.smd_goal_stand.reset();
                 abc.smd_step_info = SmdStepInfo{};
             }
+            abc.smd_release_braking = tracker.active() && tracker.releaseBraking();
         };
         const bool arm_profile_found[2] = {left_profile_found, right_profile_found};
         for (int i = 0; i < 2; ++i) {
             capture_smd_abc(arm_ctx[i].pose_track_smd, *arm_tcp_profile[i],
                             arm_profile_found[i], arm_ctx[i].abc_telemetry);
+            const PoseTrackWallState& ws = i == 0 ? left_pose_track_wall_ : right_pose_track_wall_;
+            AbcTelemetry& abc = arm_ctx[i].abc_telemetry;
+            abc.smd_wall_engaged = ws.engaged;
+            abc.smd_wall_name = ws.engaged ? ws.name : std::string();
+            abc.smd_wall_margin_m = ws.margin_m;
+            abc.smd_wall_cap_m_s = ws.cap_m_s;
+            abc.smd_wall_clamp_m = ws.clamp_m;
         }
 
         const RunMode left_cartesian_compute_run_mode =
@@ -7584,7 +7715,7 @@ ServoTarget DualArmServoLoop::applySafety(
                     target_q = prev_sent_q;  // hold this arm
                     mark_intervention(arm);
                     if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
-                        combined = SafetyVerdict::RoiViolation;
+                        combined = SafetyVerdict::ReachViolation;
                     }
                 };
                 if (!eval.checked) {
@@ -7592,7 +7723,7 @@ ServoTarget DualArmServoLoop::applySafety(
                     const std::string reason = "reach shell: " + arm_name + " TCP FK unavailable";
                     if (rc.fail_policy == FloorConstraintFailPolicy::FaultLatch) {
                         mark_intervention(arm);
-                        latchFault(SafetyVerdict::RoiViolation, reason, left_state, right_state);
+                        latchFault(SafetyVerdict::ReachViolation, reason, left_state, right_state);
                         out = currentFaultHoldTarget();
                         combined = SafetyVerdict::FaultLatched;
                         return true;
@@ -7613,7 +7744,7 @@ ServoTarget DualArmServoLoop::applySafety(
                         const std::string reason = "reach shell: " + arm_name + " outside shell (closest " +
                             eval.closest_shell + ", margin " + std::to_string(eval.min_margin_m) + " m)";
                         mark_intervention(arm);
-                        latchFault(SafetyVerdict::RoiViolation, reason, left_state, right_state);
+                        latchFault(SafetyVerdict::ReachViolation, reason, left_state, right_state);
                         out = currentFaultHoldTarget();
                         combined = SafetyVerdict::FaultLatched;
                         return true;
@@ -8083,7 +8214,7 @@ ServoTarget DualArmServoLoop::applySafety(
                 combined = floor_engaged      ? SafetyVerdict::FloorViolation
                          : user_floor_engaged ? SafetyVerdict::FloorViolation
                          : roi_engaged         ? SafetyVerdict::RoiViolation
-                         : reach_engaged       ? SafetyVerdict::RoiViolation
+                         : reach_engaged       ? SafetyVerdict::ReachViolation
                                                : SafetyVerdict::SelfCollision;
             }
         }
@@ -8097,6 +8228,7 @@ ServoTarget DualArmServoLoop::applySafety(
             const bool projection_verdict =
                 combined == SafetyVerdict::FloorViolation ||
                 combined == SafetyVerdict::RoiViolation ||
+                combined == SafetyVerdict::ReachViolation ||
                 combined == SafetyVerdict::SelfCollision;
             if (projection_verdict) {
                 held_projection_verdict_ = combined;
@@ -8154,6 +8286,35 @@ ServoTarget DualArmServoLoop::applySafety(
         safety_projection_telemetry_.right_applied_correction_deg_s = ra;
     }
     safety_projection_telemetry_.self_collision_clamp_count = self_collision_clamp_count_;
+
+    // REACH SHELL observability (2026-09-04). Published EVERY tick the evaluation is
+    // valid, not only on engaged ticks: the question this answers -- "how close is the
+    // arm to the shell, and is the shell what is holding it" -- has to be answerable
+    // from the row BEFORE the block, otherwise it is another offline reconstruction.
+    // last_reach_* is written by the reach block above whenever the constraint is
+    // enabled, and stays default (unchecked / NaN) when it is not.
+    {
+        const auto fill = [](const ReachArmEvaluation& eval, bool engaged,
+                             bool* out_engaged, double* out_margin, double* out_r_far,
+                             std::string* out_shell) {
+            *out_engaged = engaged;
+            if (!eval.checked) return;   // leave NaN / empty
+            *out_margin = eval.min_margin_m;
+            *out_r_far = eval.r_far_m;
+            *out_shell = eval.closest_shell;
+        };
+        fill(last_reach_left_, left_reach_engaged,
+             &safety_projection_telemetry_.left_reach_engaged,
+             &safety_projection_telemetry_.left_reach_margin_m,
+             &safety_projection_telemetry_.left_reach_r_far_m,
+             &safety_projection_telemetry_.left_reach_shell);
+        fill(last_reach_right_, right_reach_engaged,
+             &safety_projection_telemetry_.right_reach_engaged,
+             &safety_projection_telemetry_.right_reach_margin_m,
+             &safety_projection_telemetry_.right_reach_r_far_m,
+             &safety_projection_telemetry_.right_reach_shell);
+        safety_projection_telemetry_.reach_clamp_count = reach_clamp_count_;
+    }
 
     // COLLISION YIELD FOLD, booking half. What the collision rows took out of each
     // arm's step this tick, as a stand-frame pose delta between the pre-projection
@@ -8428,6 +8589,173 @@ UserFloorArmEvaluation DualArmServoLoop::evaluateUserFloorArm(ArmId arm, const J
         return UserFloorArmEvaluation{};  // checked=false -> caller fails closed
     }
     return eval;
+}
+
+void DualArmServoLoop::applyPoseTrackWallFold(ArmId arm, SmdPoseTracker* tracker, double dt_sec,
+                                              ArmCommand* out) {
+    PoseTrackWallState& ws = arm == ArmId::Left ? left_pose_track_wall_ : right_pose_track_wall_;
+    const bool was_engaged = ws.engaged;
+    ws.margin_m = std::numeric_limits<double>::quiet_NaN();
+    ws.cap_m_s = -1.0;
+    ws.clamp_m = 0.0;
+    const auto& wf = config_.safety.pose_track_wall_fold;
+    const uint64_t now_ns = nowSteadyNs();
+    constexpr uint64_t kReleaseGraceNs = 500'000'000ULL;   // 0.5 s without an action = released
+    const auto release = [&]() {
+        if (!was_engaged) return;
+        if (now_ns - ws.last_action_ns < kReleaseGraceNs && tracker != nullptr && tracker->active()) {
+            return;   // still at the wall, just not pushing this tick
+        }
+        ws.engaged = false;
+        std::cerr << "[INFO] pose_track_wall " << toString(arm) << " released after "
+                  << (now_ns - ws.started_ns) * 1e-9 << " s at " << ws.name << "; max clamp "
+                  << ws.max_clamp_m * 1000.0 << " mm\n";
+    };
+    if (!wf.enable || tracker == nullptr || !tracker->active() || out == nullptr ||
+        out->mode != ControlMode::TcpPoseTarget || !out->has_tcp_target ||
+        tracker->releaseBraking()) {
+        release();
+        return;
+    }
+    const Pose6D pose = tracker->currentPose();
+    struct Wall {
+        math::Vector3 n_free = math::Vector3::Zero();
+        double margin_m = 0.0;
+        double a_brake = 0.0;
+        const char* name = "";
+    };
+    std::array<Wall, 12> walls{};
+    int n = 0;
+    // NO BAND CUTOFF: the cap sqrt(2 a d) exceeds the profile's v_max far from the
+    // wall and does nothing there; starting it only inside d_slow would step the
+    // velocity down at the band edge for an approach faster than sqrt(2 a d_slow).
+    const auto push = [&](const math::Vector3& n_free, double margin, double /*d_slow*/,
+                          double a_brake, const char* name) {
+        if (n >= static_cast<int>(walls.size()) || !std::isfinite(margin)) return;
+        walls[n++] = Wall{n_free, margin, a_brake, name};
+    };
+    const ArmMountConfig& mount = arm == ArmId::Left ? config_.left_mount : config_.right_mount;
+    {
+        const auto& rc = config_.safety.reach_constraint;
+        if (rc.enable && !rc.monitor_only) {
+            std::vector<FloorCheckPointConfig>& offsets =
+                arm == ArmId::Left ? reach_offset_scratch_left_ : reach_offset_scratch_right_;
+            interpolateOffsetPoints(rc.tcp_offset_points, effectiveGripperPercent(arm), offsets);
+            const std::array<double, 3> base_stand{mount.base_pose_in_stand.x,
+                                                   mount.base_pose_in_stand.y,
+                                                   mount.base_pose_in_stand.z};
+            ReachArmEvaluation ev;
+            if (reachEvaluateShell(pose, base_stand, offsets, rc.r_min_m, rc.r_max_m, &ev) &&
+                ev.checked) {
+                for (int s = 0; s < 2; ++s) {
+                    const ReachShellEval& sh = ev.shells[s];
+                    const math::Vector3 dir(sh.dir_stand[0], sh.dir_stand[1], sh.dir_stand[2]);
+                    // Outer shell: free space is radially INWARD; inner shell: outward.
+                    push(s == 1 ? math::Vector3(-dir) : dir, sh.margin_m, rc.d_slow_m,
+                         rc.a_brake_m_s2, s == 1 ? "reach_r_max" : "reach_r_min");
+                }
+            }
+        }
+    }
+    {
+        const auto& rb = config_.safety.roi_box;
+        if (rb.enable && !rb.monitor_only) {
+            std::vector<FloorCheckPointConfig>& offsets =
+                arm == ArmId::Left ? roi_offset_scratch_left_ : roi_offset_scratch_right_;
+            interpolateOffsetPoints(rb.tcp_offset_points, effectiveGripperPercent(arm), offsets);
+            RoiArmEvaluation ev;
+            if (roiEvaluateBox(pose, offsets, effectiveRoiMin(), effectiveRoiMax(), &ev) &&
+                ev.checked) {
+                for (int axis = 0; axis < 3; ++axis) {
+                    for (int side = 0; side < 2; ++side) {
+                        math::Vector3 n_free = math::Vector3::Zero();
+                        n_free[axis] = side == 0 ? 1.0 : -1.0;   // min face: free is +axis
+                        push(n_free, ev.faces[axis][side].margin_m, rb.d_slow_m, rb.a_brake_m_s2,
+                             roiFaceName(axis, side));
+                    }
+                }
+            }
+        }
+    }
+    {
+        const auto& fcfg = config_.safety.floor_constraint;
+        if (floorConstraintActive() && !fcfg.monitor_only) {
+            std::vector<FloorCheckPointConfig>& offsets =
+                arm == ArmId::Left ? floor_offset_scratch_left_ : floor_offset_scratch_right_;
+            interpolateOffsetPoints(fcfg.tcp_offset_points, effectiveGripperPercent(arm), offsets);
+            std::string lowest;
+            const double z = floorLowestZWithOffsets(pose, offsets, &lowest);
+            if (std::isfinite(z)) {
+                push(math::Vector3(0.0, 0.0, 1.0), z - effectiveFloorZ(), fcfg.d_slow_m,
+                     fcfg.a_brake_m_s2, "floor");
+            }
+        }
+    }
+    {
+        const auto& uf = config_.safety.user_floor_constraint;
+        if (userFloorActive() && !uf.monitor_only) {
+            std::vector<FloorCheckPointConfig>& offsets =
+                arm == ArmId::Left ? user_floor_offset_scratch_left_ : user_floor_offset_scratch_right_;
+            interpolateOffsetPoints(uf.tcp_offset_points, effectiveGripperPercent(arm), offsets);
+            const math::Vector3 normal = effectiveUserFloorNormal();
+            UserFloorArmEvaluation ev;
+            if (userFloorEvaluatePlane(pose, offsets, effectiveUserFloorPoint(), normal, uf.margin_m,
+                                       &ev) && ev.checked) {
+                push(normal, ev.signed_dist_m, uf.d_slow_m, uf.a_brake_m_s2, "user_floor");
+            }
+        }
+    }
+    if (n == 0) {
+        release();
+        return;
+    }
+    double min_margin = std::numeric_limits<double>::infinity();
+    const char* closest = "";
+    double cap_acted = -1.0;
+    double clamp_total = 0.0;
+    bool acted = false;
+    for (int i = 0; i < n; ++i) {
+        const Wall& w = walls[i];
+        double cap = -1.0;
+        const double moved = tracker->brakeAgainstWall(w.n_free, w.margin_m, w.a_brake,
+                                                       wf.standoff_m, dt_sec, &cap);
+        if (w.margin_m < min_margin) {
+            min_margin = w.margin_m;
+            closest = w.name;
+        }
+        if (cap >= 0.0) {
+            acted = true;
+            cap_acted = cap_acted < 0.0 ? cap : std::min(cap_acted, cap);
+        }
+        clamp_total += moved;
+    }
+    ws.margin_m = min_margin;
+    if (acted) {
+        ws.cap_m_s = cap_acted;
+        ws.clamp_m = clamp_total;
+        ws.last_action_ns = now_ns;
+        ws.name = closest;
+        if (!was_engaged) {
+            ws.engaged = true;
+            ws.started_ns = now_ns;
+            ws.last_log_ns = now_ns;
+            ws.max_clamp_m = 0.0;
+            ++ws.count;
+            std::cerr << "[INFO] pose_track_wall " << toString(arm) << " ENGAGED at " << closest
+                      << ": margin " << min_margin * 1000.0 << " mm, approach capped at "
+                      << cap_acted * 1000.0 << " mm/s (#" << ws.count << ")\n";
+        } else if (now_ns - ws.last_log_ns > 1'000'000'000ULL) {
+            ws.last_log_ns = now_ns;
+            std::cerr << "[INFO] pose_track_wall " << toString(arm) << " holding at " << ws.name
+                      << ": " << (now_ns - ws.started_ns) * 1e-9 << " s, margin "
+                      << min_margin * 1000.0 << " mm\n";
+        }
+        ws.max_clamp_m = std::max(ws.max_clamp_m, clamp_total);
+        // The tracker's state moved: the emitted pose must be what it now holds.
+        out->tcp_target_stand = tracker->currentPose();
+    } else {
+        release();
+    }
 }
 
 Pose6D DualArmServoLoop::clampPoseToRoi(const Pose6D& pose) const {
@@ -9290,6 +9618,13 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
         }
     }
     gate.update(f_stand, m_stand, f_phys_filt, m_phys_filt);
+    // The STREAM channel (absolute-target path) is judged on the PRE-deadzone
+    // stand-frame force VECTOR, low-passed inside the gate into a contact band with
+    // a dwell (the same vector-then-norm rule FtPipeline::loadForceN follows).
+    {
+        const Wrench6D& nodz_stand = pipe.compStandNoDeadzone();
+        gate.updateStream(math::Vector3(nodz_stand.fx, nodz_stand.fy, nodz_stand.fz));
+    }
 
     // ---- the hand-guide engagement latch (HOLD law only) ---------------------
     // Judged on the PHYSICAL force magnitude (compensated, before the deadzone), so
@@ -9360,6 +9695,9 @@ bool DualArmServoLoop::applyForceOverlay(ArmId arm, const RobotState& state, Pos
     tel.gate_translation = gate.translation();
     tel.gate_rotation = gate.rotation();
     tel.gate_force_n = gate.forceN();
+    tel.gate_stream_translation = gate.streamTranslation();
+    tel.gate_stream_force_n = gate.streamForceN();
+    tel.gate_stream_armed = gate.streamArmed();
     tel.gate_torque_nm = gate.torqueNm();
     tel.gate_closed = gate.closed();
 
@@ -10385,11 +10723,45 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
                 bool done = false;
                 if (!ex.waypoints.empty()) {
                     const auto& goal_wp = ex.waypoints.back();
-                    done = active_goal_reached(
+                    const bool at_goal = active_goal_reached(
                         ex,
                         goal_wp,
                         config_.safety.init_motion_planner.waypoint_tol_deg
                     );
+                    // ARRIVAL SETTLE (2026-09-04): inside the tolerance is not "done"
+                    // while the SENT stream is still moving. The taper arrives at the
+                    // 1.5 deg tolerance at ~11 deg/s and the hand-off to Hold stopped
+                    // it in one tick (5,150 deg/s^2 on both arms, every InitMotion).
+                    // Wait until every active arm's sent speed is at or below
+                    // done_max_speed_deg_s (the taper's floor): the remaining stop is
+                    // then the floor speed at ddq_max.
+                    const double dt_s = config_.servo.rate_hz > 0.0 ? 1.0 / config_.servo.rate_hz : 0.002;
+                    const auto sent_speed = [&](const JointArray& a, const JointArray& b) {
+                        double m = 0.0;
+                        for (int i = 0; i < kDof; ++i) m = std::max(m, std::abs(a[i] - b[i]) / dt_s);
+                        return m;
+                    };
+                    double moving = 0.0;
+                    if (ex.left_active) {
+                        moving = std::max(moving, sent_speed(left_prev_sent_q_deg_, left_prevprev_sent_q_deg_));
+                    }
+                    if (ex.right_active) {
+                        moving = std::max(moving, sent_speed(right_prev_sent_q_deg_, right_prevprev_sent_q_deg_));
+                    }
+                    const bool settled =
+                        moving <= config_.safety.init_motion_planner.done_max_speed_deg_s;
+                    done = at_goal && settled;
+                    if (at_goal && !settled) {
+                        const uint64_t settle_now_ns = nowSteadyNs();
+                        if (ex.last_exec_log_ns == 0 ||
+                            (settle_now_ns - ex.last_exec_log_ns) > 1000000000ULL) {
+                            ex.last_exec_log_ns = settle_now_ns;
+                            std::cerr << "[INFO] JointTarget init_motion: inside tolerance, settling "
+                                         "(sent speed " << moving << " deg/s > "
+                                      << config_.safety.init_motion_planner.done_max_speed_deg_s
+                                      << ")\n";
+                        }
+                    }
                     // Progress = max-joint distance from the current MEASURED pose to the final
                     // waypoint. Closing on it (by > a noise floor) refreshes the stall timer.
                     const double dist = active_goal_dist(ex, goal_wp);

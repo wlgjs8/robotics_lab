@@ -59,7 +59,87 @@ void SmdPoseTracker::reset(const Pose6D& pose, const Vec6& stand_twist) {
     angular_velocity_ = w_body;
 }
 
+void SmdPoseTracker::clearReleaseBrake() {
+    release_braking_ = false;
+    release_brake_done_ = false;
+    release_brake_elapsed_sec_ = 0.0;
+    release_brake_distance_m_ = 0.0;
+}
+
+void SmdPoseTracker::beginReleaseBrake() {
+    if (!active_ || release_braking_) return;
+    clearReleaseBrake();
+    release_braking_ = true;
+    release_brake_done_ = velocity_.isZero() && angular_velocity_.isZero();
+    // The goal follows the state from here; the next command re-latches.
+    goal_position_ = position_;
+    goal_rotation_ = rotation_;
+    previous_goal_position_ = position_;
+    previous_goal_rotation_ = rotation_;
+    previous_command_.reset();
+}
+
+void SmdPoseTracker::stepReleaseBrake(double dt) {
+    // Ramp both velocities to zero at the profile's max accelerations. A profile
+    // without a cap (<= 0) stops at once - that is the pre-brake behaviour, not a
+    // new one.
+    const double a_lin = config_.max_linear_accel_m_s2;
+    const double v = velocity_.norm();
+    if (a_lin > 0.0 && v > a_lin * dt) {
+        velocity_ *= (v - a_lin * dt) / v;
+    } else {
+        velocity_.setZero();
+    }
+    const double a_ang = config_.max_angular_accel_rad_s2;
+    const double w = angular_velocity_.norm();
+    if (a_ang > 0.0 && w > a_ang * dt) {
+        angular_velocity_ *= (w - a_ang * dt) / w;
+    } else {
+        angular_velocity_.setZero();
+    }
+    const Eigen::Vector3d dp = velocity_ * dt;
+    position_ += dp;
+    release_brake_distance_m_ += dp.norm();
+    rotation_ = (rotation_ * Eigen::Quaterniond(math::exp3(angular_velocity_ * dt))).normalized();
+    goal_position_ = position_;
+    goal_rotation_ = rotation_;
+    previous_goal_position_ = position_;
+    previous_goal_rotation_ = rotation_;
+    release_brake_elapsed_sec_ += dt;
+    release_brake_done_ = velocity_.isZero() && angular_velocity_.isZero();
+    last_step_info_ = SmdStepInfo{};
+}
+
+double SmdPoseTracker::brakeAgainstWall(const Eigen::Vector3d& n_free, double margin_m,
+                                        double a_brake_m_s2, double standoff_m, double dt_sec,
+                                        double* capped_to_m_s) {
+    if (capped_to_m_s != nullptr) *capped_to_m_s = -1.0;
+    if (!active_ || !std::isfinite(margin_m)) return 0.0;
+    const double nn = n_free.norm();
+    if (nn < 1e-9) return 0.0;
+    const Eigen::Vector3d u = n_free / nn;
+    const double d = margin_m - std::max(standoff_m, 0.0);
+    const double into = -velocity_.dot(u);
+    if (d <= 0.0) {
+        // On or past the standoff: back onto it, and drop the inward velocity.
+        position_ += (-d) * u;
+        if (into > 0.0) velocity_ += into * u;
+        if (capped_to_m_s != nullptr) *capped_to_m_s = 0.0;
+        return -d;
+    }
+    const double cap = a_brake_m_s2 > 0.0 ? std::sqrt(2.0 * a_brake_m_s2 * d) : 0.0;
+    if (into <= cap) return 0.0;
+    const double excess = into - cap;
+    velocity_ += excess * u;
+    // Undo the part of this tick's advance that the cap would not have allowed.
+    const double pull = excess * std::max(dt_sec, 0.0);
+    position_ += pull * u;
+    if (capped_to_m_s != nullptr) *capped_to_m_s = cap;
+    return pull;
+}
+
 void SmdPoseTracker::holdAt(const Pose6D& pose) {
+    clearReleaseBrake();
     position_ = positionOf(pose);
     velocity_.setZero();
     rotation_ = rotationOf(pose);
@@ -73,24 +153,32 @@ void SmdPoseTracker::holdAt(const Pose6D& pose) {
 }
 
 void SmdPoseTracker::constrainTranslation(const Eigen::Vector3d& position_stand,
-                                          const Eigen::Vector3d& outward_normal_stand) {
+                                          const Eigen::Vector3d& outward_normal_stand,
+                                          double fraction) {
     if (!active_) return;
     position_ = position_stand;
     const double n = outward_normal_stand.norm();
     if (n < 1e-12) return;
+    const double k = std::min(std::max(fraction, 0.0), 1.0);
+    if (k <= 0.0) return;
     const Eigen::Vector3d u = outward_normal_stand / n;
     const double into = velocity_.dot(u);
-    if (into < 0.0) velocity_ -= into * u;   // only the component driving INTO the contact
+    if (into < 0.0) velocity_ -= k * into * u;   // only the component driving INTO the contact
 }
 
 void SmdPoseTracker::deactivate() {
     active_ = false;
+    clearReleaseBrake();
     previous_command_.reset();
     last_min_singular_ = -1.0;
 }
 
 void SmdPoseTracker::updateGoalFromCommand(const Pose6D& command_pose) {
     if (!active_) return;
+    // A command during the release brake is the operator pressing again: resume
+    // tracking from the braked state. previous_command_ was cleared at the brake
+    // start, so this first command only re-latches the reference (no jump).
+    if (release_braking_) clearReleaseBrake();
     if (!previous_command_.has_value()) {
         // First command after (re)activation only latches the reference so an
         // engagement offset between the commanded pose and the current state
@@ -130,6 +218,10 @@ void SmdPoseTracker::updateGoalFromCommand(const Pose6D& command_pose) {
 Pose6D SmdPoseTracker::step(double dt_sec) {
     const double dt = std::max(0.0, dt_sec);
     if (!active_ || dt <= 0.0) {
+        return poseFrom(position_, rotation_);
+    }
+    if (release_braking_) {
+        stepReleaseBrake(dt);
         return poseFrom(position_, rotation_);
     }
 

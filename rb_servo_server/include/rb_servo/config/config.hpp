@@ -810,6 +810,21 @@ struct ReachConstraintConfig {
     double d_slow_m = 0.05;  // engage band inside each shell (0 => always active)
 };
 
+// THE WALL BRAKE ON THE POSE-TRACK PATH (2026-09-04 pm). The reach shells, the ROI
+// box and the floors are enforced downstream as joint-space velocity-damper rows.
+// A streamed absolute target (UMI teleop) does not know about them: the pose-track
+// SMD kept integrating toward a goal beyond the shell while the row held the
+// joints, the reference ran 48 mm ahead, the 50 mm re-anchor snapped it back, and
+// the row's first cut of the un-braked command was a 7.9-9.6k deg/s^2 kick
+// (servo_log_20260904_225810.csv, 9 episodes). With this enabled the tracker's
+// own approach speed is capped at sqrt(2 a_brake d) against every enabled wall,
+// using that wall's a_brake_m_s2 / d_slow_m, and its state is held `standoff_m`
+// inside the wall. The rows stay as the backstop.
+struct PoseTrackWallFoldConfig {
+    bool enable = false;
+    double standoff_m = 0.002;
+};
+
 // Stand-frame USER-defined tilted floor plane (half-space): the TCP of either arm
 // — and each configured TCP-frame offset point — must satisfy
 // n . (p_stand - point_m) >= margin_m, where n is a unit normal pointing into the
@@ -903,6 +918,14 @@ struct InitMotionPlannerConfig {
     double collision_margin_m = 0.005;    // oracle clearance threshold (extra over d_hard)
     unsigned int seed = 12345;            // RNG seed (reproducible plans/tests)
     double waypoint_tol_deg = 1.5;        // arrival tolerance at the FINAL waypoint
+    // ARRIVAL SETTLE (2026-09-04): "done" (and the hand-off to Hold) waits until the
+    // SENT stream of every active arm is at or below this speed as well as inside
+    // waypoint_tol_deg. The arrival taper's floor (joint_target_smd.arrival_min_speed_deg_s,
+    // 3 deg/s) means the tail arrives at ~sqrt(2 a d) = 11 deg/s at the 1.5 deg
+    // tolerance, and declaring done there stopped the stream in one tick (measured
+    // 5,150 deg/s^2 on both arms, servo_log_20260904_183447). Just above the floor
+    // lets the taper finish; the remaining stop is the floor speed at ddq_max.
+    double done_max_speed_deg_s = 3.5;
     // If the selected active arm(s) are already at the target within this tolerance,
     // InitMotion completes as a no-op. This prevents a start==goal pose that is merely
     // inside the planner's clearance-margin band from first executing an unnecessary
@@ -1179,6 +1202,7 @@ struct SafetyConfig {
     FloorConstraintConfig floor_constraint;
     RoiBoxConfig roi_box;
     ReachConstraintConfig reach_constraint;
+    PoseTrackWallFoldConfig pose_track_wall_fold;
     UserFloorConstraintConfig user_floor_constraint;
     JointTargetSmdConfig joint_target_smd;
     InitMotionPlannerConfig init_motion_planner;
@@ -1189,8 +1213,8 @@ struct SafetyConfig {
     // is what produced the measured 12.09 deg/s -> 0 release and the 8.4 deg/s
     // single-tick dropouts -- see control/projection_release.hpp).
     double projection_release_slew_deg_s2 = 0.0;
-    // How long a projection verdict (RoiViolation / FloorViolation / SelfCollision)
-    // stays reported after the projection last corrected the command. The verdict
+    // How long a projection verdict (RoiViolation / ReachViolation / FloorViolation /
+    // SelfCollision) stays reported after the projection last corrected the command. The verdict
     // is raised per tick on "the projection cut something this tick", so a plan
     // dithering on a face toggled it Ok <-> RoiViolation six times in 0.3 s
     // (2026-09-04). This is telemetry/GUI hysteresis only: the projection rows and
@@ -1604,6 +1628,16 @@ struct ForceControlConfig {
     double gate_max_torque_nm = 0.0;
     double gate_close_tau_s = 0.10;   // fast to close - protective
     double gate_open_tau_s = 0.40;    // slow to open  - a fast re-open makes it a relay
+    // THE STREAM CHANNEL (2026-09-04): how the gate is judged on the absolute-target
+    // path (UMI / TcpPoseTarget through the pose-track SMD). Sustained contact only:
+    // the physical force VECTOR low-passed into a contact band (magnitude AND cut
+    // direction from the filtered vector), an arm level held for a dwell, a release
+    // level below it. The chunk follower keeps the tick-judged gate. See
+    // ForceGate::updateStream for the measurement that forced the split.
+    double gate_stream_judge_lpf_hz = 2.0;
+    double gate_stream_arm_force_n = 5.0;
+    double gate_stream_release_force_n = 2.0;
+    double gate_stream_arm_dwell_sec = 0.10;
 
     // ---- the fence ---------------------------------------------------------
     // A DEAD BACKSTOP, not an operating limit. Non-positive = no fence on that part.
@@ -1737,6 +1771,15 @@ struct ForceControlConfig {
     // FOLLOWED the hand). Refuse to latch while the measured force exceeds this;
     // the Hold stays rigid until the hand releases.
     double hold_relatch_max_force_n = 5.0;
+    // The compliant Hold's nominal is latched at the last COMMANDED TCP (FK of the
+    // previous sent joints, the overlay's standing deviation stripped), not at the
+    // measured TCP: while a stream is running the measured pose trails the command
+    // by the box's ~22 ms, and latching the trailing pose re-targeted the arm
+    // backwards by 0.2-2 mm on every pedal release (measured 2026-09-04: 5-11k
+    // deg/s^2 on every UMI release, four runs). If the command and the measured
+    // pose disagree by more than this (a real tracking failure, not lag), the
+    // measured pose is latched instead, fail-closed, with a log line.
+    double hold_latch_max_command_gap_m = 0.020;
 
     // ---- hand-guide engagement (2026-09-03) ---------------------------------
     // A Schmitt trigger on the PHYSICAL (pre-deadzone) force magnitude for the HOLD
@@ -1776,6 +1819,12 @@ struct LinearMoveConfig {
 // rate. Translation and rotation are tunable independently.
 struct PoseTrackSmdConfig {
     bool enable = false;
+    // THE RELEASE BRAKE (2026-09-04 pm): on TcpPoseTarget -> Hold the tracker ramps
+    // its velocity to zero at the profile's max accelerations instead of being
+    // dropped for a one-tick stop (measured 9,283 deg/s^2 on a deadman release).
+    // The brake gives up and holds where it is after `release_brake_timeout_sec`.
+    bool release_brake_enable = true;
+    double release_brake_timeout_sec = 0.5;
     double damping_ratio_linear = 1.0;
     double natural_frequency_linear_hz = 0.5;
     double damping_ratio_angular = 1.0;

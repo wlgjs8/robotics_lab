@@ -167,6 +167,13 @@ enum class SafetyVerdict {
     SelfCollision,
     FloorViolation,
     RoiViolation,
+    // The reach shell (safety.reach_constraint) — its OWN verdict since 2026-09-04.
+    // It reported as RoiViolation until then, which cost an evening: the operator saw
+    // "RoiViolation", checked the ROI box in the GUI, found the TCP well inside it,
+    // and had no way left to see that a sphere centered on the shoulder was the thing
+    // refusing to let the arm descend. The two constraints are different shapes in
+    // different frames; they get different names.
+    ReachViolation,
     ChunkFollowerFault,
     ExternalForceLimit,
     UnknownError
@@ -428,6 +435,13 @@ struct CartesianSolveTelemetry {
     double smd_goal_linear_velocity_norm_m_s = 0.0;
     double smd_goal_angular_velocity_norm_rad_s = 0.0;
     uint64_t smd_reanchor_count = 0;
+    // THE RELEASE BRAKE / WALL BRAKE on the pose-track path (2026-09-04 pm).
+    bool smd_release_braking = false;
+    bool smd_wall_engaged = false;
+    std::string smd_wall_name;                 // closest wall in band this tick
+    double smd_wall_margin_m = std::numeric_limits<double>::quiet_NaN();
+    double smd_wall_cap_m_s = -1.0;            // approach cap that acted; < 0 = none
+    double smd_wall_clamp_m = 0.0;             // position correction this tick [m]
     // Chunk-follower stage (replaces the SMD step while active). One row per
     // tick: the active segment target / delta-follower state, window ids, and
     // flags — offline analysis joins these against command_tcp_target_stand
@@ -665,6 +679,11 @@ struct ForceControlTelemetry {
     // How much plan advance the gate actually removed this tick [m] / [rad].
     double gate_removed_m = 0.0;
     double gate_removed_rad = 0.0;
+    // THE STREAM CHANNEL (absolute-target path, 2026-09-04): the slow |F| it is
+    // judged on, whether the sustained-contact trigger is armed, and its fade.
+    double gate_stream_translation = 1.0;
+    double gate_stream_force_n = 0.0;
+    bool gate_stream_armed = false;
     // The wrench that drove the law, STAND frame @TCP — the same numbers as
     // FtTelemetry::comp_stand, repeated here so one row explains one decision.
     Wrench6D wrench_stand;
@@ -1013,6 +1032,25 @@ struct SafetyProjectionTelemetry {
     bool converged = false;                // and whether the last one changed nothing
     double tightest_dir_change_deg = 0.0;  // J direction jitter of the tightest collision row
     uint64_t self_collision_clamp_count = 0;  // ticks a collision row "blocked" an arm
+    // REACH SHELL (safety.reach_constraint), 2026-09-04. Until today this layer had
+    // no telemetry at all: not one of the 1255 servo-log columns, and nothing in the
+    // published state either, while its verdict aliased to RoiViolation. Diagnosing
+    // the 2026-09-04 blocked-descent runs meant recomputing the radius offline from
+    // left_mount.base_pose_in_stand and the TCP columns to find out that a sphere was
+    // holding the arm 81 mm above where the operator was pushing. These columns are
+    // that reconstruction, done in the loop that already knows the answer.
+    // margin = distance to the closest shell (>= 0 inside, < 0 outside); r_far =
+    // radius of the most-exposed checked point (TCP + gripper-tip offsets), which is
+    // the one the shell actually binds — it runs up to 58 mm past the TCP radius.
+    bool left_reach_engaged = false;       // a reach row entered this tick's solve
+    bool right_reach_engaged = false;
+    double left_reach_margin_m = std::numeric_limits<double>::quiet_NaN();
+    double right_reach_margin_m = std::numeric_limits<double>::quiet_NaN();
+    double left_reach_r_far_m = std::numeric_limits<double>::quiet_NaN();
+    double right_reach_r_far_m = std::numeric_limits<double>::quiet_NaN();
+    std::string left_reach_shell;          // r_min | r_max (closest), empty = unchecked
+    std::string right_reach_shell;
+    uint64_t reach_clamp_count = 0;        // ticks a reach row "blocked" an arm
     // Safety plan gate (safety.plan_gate): the rate at which each arm's chunk
     // follower plan clock is currently allowed to advance. 1.0 = ungated.
     double left_plan_gate = 1.0;
@@ -1534,6 +1572,33 @@ struct ServoSnapshot {
     std::string roi_box_right_measured_closest_face;
     uint64_t roi_box_clamp_count = 0;
     std::string roi_box_last_set_reject_reason;
+
+    // REACH SHELL (safety.reach_constraint), published 2026-09-04. The GUI drew this
+    // limit from a STATIC asset (reach_envelope_rb5_850e.npz, r_max_recommended
+    // 1.2526) while the server enforced whatever the config said — 0.980 that
+    // evening, a 273 mm lie — so the operator could turn the overlay on and still
+    // not see the surface the arm was actually stopping against. The enforced radii
+    // are server state, so the viewer has to read them from here.
+    // base_stand is the shell CENTER (the arm mount origin in the stand frame),
+    // without which a radius cannot be drawn in the right place.
+    bool reach_shell_enabled = false;
+    bool reach_shell_monitor_only = false;
+    double reach_shell_r_max_m = 0.0;
+    double reach_shell_r_min_m = 0.0;
+    double reach_shell_d_slow_m = 0.0;          // engage band: braking starts at r_max - d_slow
+    std::array<double, 3> reach_shell_left_base_stand_m{};
+    std::array<double, 3> reach_shell_right_base_stand_m{};
+    bool reach_shell_left_checked = false;
+    bool reach_shell_left_violated = false;
+    double reach_shell_left_min_margin_m = 0.0;  // closest shell margin (>=0 inside)
+    double reach_shell_left_r_far_m = 0.0;       // radius of the most-exposed checked point
+    std::string reach_shell_left_closest_shell;  // r_min | r_max
+    bool reach_shell_right_checked = false;
+    bool reach_shell_right_violated = false;
+    double reach_shell_right_min_margin_m = 0.0;
+    double reach_shell_right_r_far_m = 0.0;
+    std::string reach_shell_right_closest_shell;
+    uint64_t reach_shell_clamp_count = 0;
 
     // User-defined tilted floor plane (safety.user_floor_constraint).
     bool user_floor_constraint_enabled = false;

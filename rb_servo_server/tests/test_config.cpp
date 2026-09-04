@@ -129,6 +129,75 @@ std::string asyncControllerSimulationBody(
         "  tracking_error_policy: fault_latch\n";
 }
 
+// THE WALL BRAKE ON THE POSE-TRACK PATH: parses, and a standoff that is a working
+// margin rather than a stop distance is refused.
+bool testPoseTrackWallFoldConfigParses() {
+    const std::string path = writeTempConfig(
+        "pose-track-wall-fold",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "safety:\n"
+        "  pose_track_wall_fold:\n"
+        "    enable: true\n"
+        "    standoff_m: 0.003\n"
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+    ::unlink(path.c_str());
+    RB_CHECK(cfg.safety.pose_track_wall_fold.enable);
+    RB_CHECK(near(cfg.safety.pose_track_wall_fold.standoff_m, 0.003));
+    const std::string bad = writeTempConfig(
+        "pose-track-wall-fold-bad",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "safety:\n"
+        "  pose_track_wall_fold:\n"
+        "    enable: true\n"
+        "    standoff_m: 0.1\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(bad, "pose_track_wall_fold.standoff_m"));
+    ::unlink(bad.c_str());
+    return true;
+}
+
+// THE RELEASE BRAKE keys parse on a pose-track profile, and a brake without a
+// deadline is refused.
+bool testPoseTrackReleaseBrakeConfigParses() {
+    const std::string path = writeTempConfig(
+        "release-brake",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  tcp_pose_target_profile_default: brake_test\n"
+        "  tcp_pose_target_profiles:\n"
+        "    brake_test:\n"
+        "      pose_track_smd:\n"
+        "        enable: true\n"
+        "        release_brake_enable: false\n"
+        "        release_brake_timeout_sec: 0.25\n"
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+    ::unlink(path.c_str());
+    bool found = false;
+    for (const auto& profile : cfg.cartesian_control.tcp_pose_target_profiles) {
+        if (profile.name != "brake_test") continue;
+        found = true;
+        RB_CHECK(!profile.pose_track_smd.release_brake_enable);
+        RB_CHECK(near(profile.pose_track_smd.release_brake_timeout_sec, 0.25));
+    }
+    RB_CHECK(found);
+    const std::string bad = writeTempConfig(
+        "release-brake-bad",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  tcp_pose_target_profile_default: brake_test\n"
+        "  tcp_pose_target_profiles:\n"
+        "    brake_test:\n"
+        "      pose_track_smd:\n"
+        "        enable: true\n"
+        "        release_brake_timeout_sec: 0\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(bad, "release_brake_timeout_sec"));
+    ::unlink(bad.c_str());
+    return true;
+}
+
 bool testJointWrapConfigParses() {
     const std::string path = writeTempConfig(
         "valid",
@@ -1629,6 +1698,8 @@ bool testFollowerOutputSmdConfig() {
 }  // namespace
 
 int main() {
+    if (!testPoseTrackWallFoldConfigParses()) return 1;
+    if (!testPoseTrackReleaseBrakeConfigParses()) return 1;
     if (!testJointWrapConfigParses()) return 1;
     if (!testJointTargetLiteralAxesConfigParses()) return 1;
     if (!testInvalidJointWrapConfigRejects()) return 1;
