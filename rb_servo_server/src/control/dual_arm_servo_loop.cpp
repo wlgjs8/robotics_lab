@@ -250,7 +250,10 @@ ArmCommand applyPoseTrackSmd(
     bool qsync_settling_hold,
     const control::AdmittanceOverlay* overlay = nullptr,
     const control::ForceGate* gate = nullptr,
-    double* gate_removed_m = nullptr
+    double* gate_removed_m = nullptr,
+    // Stand-frame twist to seed the tracker with when THIS call activates it (the
+    // chunk follower's state velocity at a fallback). Null = seed at rest (legacy).
+    const Vec6* seed_stand_twist = nullptr
 ) {
     if (!tracker) return command;
     if (!config.enable || command.mode != ControlMode::TcpPoseTarget || !command.has_tcp_target) {
@@ -269,7 +272,11 @@ ArmCommand applyPoseTrackSmd(
         kinematics->computeTcpStand(command.arm_id, previous_sent_q_deg, mount);
     if (overlay != nullptr && overlay->hasDeviation()) reference = overlay->strip(reference);
     if (!tracker->active()) {
-        tracker->reset(reference);
+        if (seed_stand_twist != nullptr) {
+            tracker->reset(reference, *seed_stand_twist);
+        } else {
+            tracker->reset(reference);
+        }
     } else {
         // Re-anchor if the live reference (FK of the last sent joints) has drifted far from
         // the tracker's held pose. The command buffer holds the previous episode's last
@@ -4864,6 +4871,43 @@ bool DualArmServoLoop::cartesianSolveBlockedRecent(ArmId arm_id, uint64_t now_ns
     return now_ns - stamp <= kFollowerDivergenceExplainWindowNs;
 }
 
+void DualArmServoLoop::noteChunkFeedStall(ArmId arm_id, double age_sec, double timeout_sec) {
+    const bool left = arm_id == ArmId::Left;
+    bool& stalled = left ? left_chunk_feed_stalled_ : right_chunk_feed_stalled_;
+    if (stalled) return;
+    stalled = true;
+    (left ? left_chunk_feed_stall_start_sec_ : right_chunk_feed_stall_start_sec_) =
+        ChunkFrameReceiver::steadyNowSec();
+    const std::uint64_t count = ++(left ? left_chunk_feed_stall_count_ : right_chunk_feed_stall_count_);
+    std::cerr << "[WARN] chunk_follower " << toString(arm_id)
+              << " chunk feed stalled: no frame for " << age_sec << " s (timeout "
+              << timeout_sec << " s); holding at the reference until frames resume"
+              << " (fallback_policy=hold, stall #" << count << ")\n";
+}
+
+void DualArmServoLoop::noteChunkFeedResume(ArmId arm_id) {
+    const bool left = arm_id == ArmId::Left;
+    bool& stalled = left ? left_chunk_feed_stalled_ : right_chunk_feed_stalled_;
+    if (!stalled) return;
+    stalled = false;
+    const double start = left ? left_chunk_feed_stall_start_sec_ : right_chunk_feed_stall_start_sec_;
+    std::cerr << "[INFO] chunk_follower " << toString(arm_id)
+              << " chunk feed resumed after " << (ChunkFrameReceiver::steadyNowSec() - start)
+              << " s of stall hold\n";
+}
+
+void DualArmServoLoop::noteChunkEngageWait(ArmId arm_id, double elapsed_sec) {
+    // Under fallback_policy=hold the engage wait has no deadline; say so every 5 s.
+    const bool left = arm_id == ArmId::Left;
+    double& last = left ? left_chunk_engage_wait_last_log_sec_ : right_chunk_engage_wait_last_log_sec_;
+    const double now = ChunkFrameReceiver::steadyNowSec();
+    if (elapsed_sec < 5.0 || now - last < 5.0) return;
+    last = now;
+    std::cerr << "[WARN] chunk_follower " << toString(arm_id)
+              << " still waiting for a chunk frame after " << elapsed_sec
+              << " s (fallback_policy=hold: holding at the reference, no fault)\n";
+}
+
 void DualArmServoLoop::clearChunkFollowerFaultRequests() {
     left_chunk_follower_fault_request_ = ChunkFollowerFaultRequest{};
     left_chunk_follower_fault_request_.arm = ArmId::Left;
@@ -5104,7 +5148,28 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     abc.cartesian_solve_blocked_recent = solve_blocked_recent;
     abc.command_throttled_recent = throttled_recent;
     const bool fault_policy = rf.fallback_policy == RuckigFollowerFallbackPolicy::Fault;
+    // fallback_policy=hold (2026-09-04): the same strict shape as fault -- never chase a
+    // stale target through the SMD -- but a LIVENESS loss (no first frame, feed stall)
+    // holds at the reference and waits instead of latching. MEASURED the case that
+    // asked for it: servo_log_20260904_020517.csv 85.6-87.1 s, the policy server
+    // answered in ~800 ms with the GPU shared (3 openpi servers + 2 Isaac processes),
+    // the runner was already re-emitting its last target as an explicit hold (command
+    // age 1-2 ms the whole time), and the 1.5 s feed watchdog still latched
+    // ChunkFollowerFault, which aborted the rollout and demanded ResetFault + re-init
+    // + re-tare for a slow inference. A dead producer is the client deadman's case,
+    // not this watchdog's. Divergence keeps latching under hold: that is the robot
+    // leaving the plan, not the feed.
+    const bool hold_policy = rf.fallback_policy == RuckigFollowerFallbackPolicy::Hold;
+    const bool strict_policy = fault_policy || hold_policy;
     const bool was_active = follower->active();
+    // THE HAND-OFF VELOCITY. Every path below that drops the follower and falls back to
+    // the pose-track SMD used to seed that SMD at REST (SmdPoseTracker::reset zeroes the
+    // state velocity), so an arm streaming at 145 mm/s stopped in ONE tick (-11,171
+    // deg/s^2 on J5, servo_log_20260904_003600.csv 148.554 s) and then chased its
+    // target from zero. Capture the follower's state velocity while it is still the
+    // driver; the fallback seeds the SMD with it and decelerates on the SMD's own caps.
+    const std::optional<Vec6> handoff_velocity =
+        was_active ? follower->currentVelocity() : std::nullopt;
     std::string transition_reason;
     const auto seq_labels = [](std::uint64_t wire_seq, std::uint64_t recv_seq) {
         std::ostringstream os;
@@ -5138,7 +5203,8 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             arm_id == ArmId::Left ? &left_overlay_ : &right_overlay_,
             arm_id == ArmId::Left ? &left_force_gate_ : &right_force_gate_,
             &(arm_id == ArmId::Left ? left_force_control_telemetry_
-                                    : right_force_control_telemetry_).gate_removed_m));
+                                    : right_force_control_telemetry_).gate_removed_m,
+            handoff_velocity ? &*handoff_velocity : nullptr));
     };
     if (rf.enable && chunk_frame_receiver_ && command.mode == ControlMode::Hold &&
         follower->active()) {
@@ -5242,18 +5308,24 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
             // path (which re-anchors at the live reference) until frames resume.
             transition_reason = fault_policy
                 ? "feed timeout -> fault " + diag_seq_labels(active_diag)
+                : hold_policy
+                ? "feed timeout -> hold " + diag_seq_labels(active_diag)
                 : "feed timeout " + diag_seq_labels(active_diag);
             follower->deactivate();
             output_smd->deactivate();
-            if (fault_policy) {
+            if (strict_policy) {
                 smd_tracker->deactivate();
-                std::ostringstream reason;
-                reason << toString(arm_id)
-                       << " chunk_feed_timeout"
-                       << " age_sec=" << age
-                       << " timeout_sec=" << rf.chunk_feed_timeout_sec
-                       << " " << diag_seq_labels(active_diag);
-                recordChunkFollowerFaultRequest(arm_id, reason.str());
+                if (fault_policy) {
+                    std::ostringstream reason;
+                    reason << toString(arm_id)
+                           << " chunk_feed_timeout"
+                           << " age_sec=" << age
+                           << " timeout_sec=" << rf.chunk_feed_timeout_sec
+                           << " " << diag_seq_labels(active_diag);
+                    recordChunkFollowerFaultRequest(arm_id, reason.str());
+                } else {
+                    noteChunkFeedStall(arm_id, age, rf.chunk_feed_timeout_sec);
+                }
                 log_transition();
                 return with_stage_telemetry(hold_at_reference());
             }
@@ -5263,7 +5335,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                 // strict fault mode, only an active recent safety intervention can
                 // explain it; then reseed the chained state but keep the active window.
                 // Otherwise keep the legacy drop/fault or SMD re-anchor behavior.
-                if (fault_policy && divergence_explained_recent) {
+                if (strict_policy && divergence_explained_recent) {
                     follower->reanchor(reference);
                     output_smd->deactivate();
                     ++reanchor_count;
@@ -5296,7 +5368,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                         : "divergence re-anchor " + diag_seq_labels(active_diag);
                     follower->deactivate();
                     output_smd->deactivate();
-                    if (fault_policy) {
+                    if (strict_policy) {
                         smd_tracker->deactivate();
                         std::ostringstream reason;
                         reason << toString(arm_id)
@@ -5341,7 +5413,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
         *submitted_recv_seq = chunk_frame_cache_.receiver_seq;
     }
     if (!follower->active()) {
-        if (fault_policy) {
+        if (strict_policy) {
             smd_tracker->deactivate();
             const double now_sec = ChunkFrameReceiver::steadyNowSec();
             bool& waiting = arm_id == ArmId::Left ? left_chunk_engage_waiting_ : right_chunk_engage_waiting_;
@@ -5351,11 +5423,12 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
                 waiting = true;
                 wait_start_sec = now_sec;
                 std::cout << "[chunk_follower] " << toString(arm_id)
-                          << " waiting for first chunk frame (fallback_policy=fault "
+                          << " waiting for first chunk frame (fallback_policy=" << (fault_policy ? "fault" : "hold") << " "
                           << seq_labels(*submitted_wire_seq, *submitted_recv_seq) << ")\n";
             }
             const double elapsed_sec = now_sec - wait_start_sec;
-            if (elapsed_sec > rf.engage_timeout_sec) {
+            if (hold_policy) noteChunkEngageWait(arm_id, elapsed_sec);
+            if (fault_policy && elapsed_sec > rf.engage_timeout_sec) {
                 std::ostringstream reason;
                 reason << toString(arm_id)
                        << " chunk_follower_engage_timeout"
@@ -5371,6 +5444,7 @@ ArmCommand DualArmServoLoop::applyChunkFollowerStage(
     // The follower drives; keep the SMD inactive so telemetry reads honestly and
     // fallback re-entry re-anchors at the live pose.
     resetChunkFollowerEngageWait(arm_id);
+    noteChunkFeedResume(arm_id);
     log_transition();
     smd_tracker->deactivate();
     ArmCommand smoothed = command;
@@ -5651,6 +5725,19 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     abc.cartesian_solve_blocked_recent = solve_blocked_recent;
     abc.command_throttled_recent = throttled_recent;
     const bool fault_policy = rf.fallback_policy == RuckigFollowerFallbackPolicy::Fault;
+    // fallback_policy=hold (2026-09-04): the same strict shape as fault -- never chase a
+    // stale target through the SMD -- but a LIVENESS loss (no first frame, feed stall)
+    // holds at the reference and waits instead of latching. MEASURED the case that
+    // asked for it: servo_log_20260904_020517.csv 85.6-87.1 s, the policy server
+    // answered in ~800 ms with the GPU shared (3 openpi servers + 2 Isaac processes),
+    // the runner was already re-emitting its last target as an explicit hold (command
+    // age 1-2 ms the whole time), and the 1.5 s feed watchdog still latched
+    // ChunkFollowerFault, which aborted the rollout and demanded ResetFault + re-init
+    // + re-tare for a slow inference. A dead producer is the client deadman's case,
+    // not this watchdog's. Divergence keeps latching under hold: that is the robot
+    // leaving the plan, not the feed.
+    const bool hold_policy = rf.fallback_policy == RuckigFollowerFallbackPolicy::Hold;
+    const bool strict_policy = fault_policy || hold_policy;
     const bool was_active = follower->active();
     std::string transition_reason;
     const auto seq_labels = [](std::uint64_t wire_seq, std::uint64_t recv_seq) {
@@ -5716,23 +5803,29 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
         if (age > rf.chunk_feed_timeout_sec) {
             transition_reason = fault_policy
                 ? "feed timeout -> fault " + diag_seq_labels(active_diag)
+                : hold_policy
+                ? "feed timeout -> hold " + diag_seq_labels(active_diag)
                 : "feed timeout " + diag_seq_labels(active_diag);
             follower->deactivate();
-            if (fault_policy) {
+            if (strict_policy) {
                 smd_tracker->deactivate();
-                std::ostringstream reason;
-                reason << toString(arm_id)
-                       << " delta_twist_feed_timeout"
-                       << " age_sec=" << age
-                       << " timeout_sec=" << rf.chunk_feed_timeout_sec
-                       << " " << diag_seq_labels(active_diag);
-                recordChunkFollowerFaultRequest(arm_id, reason.str());
+                if (fault_policy) {
+                    std::ostringstream reason;
+                    reason << toString(arm_id)
+                           << " delta_twist_feed_timeout"
+                           << " age_sec=" << age
+                           << " timeout_sec=" << rf.chunk_feed_timeout_sec
+                           << " " << diag_seq_labels(active_diag);
+                    recordChunkFollowerFaultRequest(arm_id, reason.str());
+                } else {
+                    noteChunkFeedStall(arm_id, age, rf.chunk_feed_timeout_sec);
+                }
                 log_transition();
                 return with_stage_telemetry(hold_at_reference());
             }
         } else {
             if (pos_err > kPoseTrackReanchorPosTolM || ang_err > kPoseTrackReanchorAngTolRad) {
-                if (fault_policy && divergence_explained_recent) {
+                if (strict_policy && divergence_explained_recent) {
                     follower->reanchor(reference);
                     ++reanchor_count;
                     ++divergence_reanchors;
@@ -5763,7 +5856,7 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
                         ? "divergence -> fault " + diag_seq_labels(active_diag)
                         : "divergence re-anchor " + diag_seq_labels(active_diag);
                     follower->deactivate();
-                    if (fault_policy) {
+                    if (strict_policy) {
                         smd_tracker->deactivate();
                         std::ostringstream reason;
                         reason << toString(arm_id)
@@ -5801,7 +5894,7 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
         *submitted_recv_seq = chunk_frame_cache_.receiver_seq;
     }
     if (!follower->active()) {
-        if (fault_policy) {
+        if (strict_policy) {
             smd_tracker->deactivate();
             const double now_sec = ChunkFrameReceiver::steadyNowSec();
             bool& waiting = arm_id == ArmId::Left ? left_chunk_engage_waiting_ : right_chunk_engage_waiting_;
@@ -5811,11 +5904,12 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
                 waiting = true;
                 wait_start_sec = now_sec;
                 std::cout << "[chunk_follower] " << toString(arm_id)
-                          << " waiting for first delta chunk frame (fallback_policy=fault "
+                          << " waiting for first delta chunk frame (fallback_policy=" << (fault_policy ? "fault" : "hold") << " "
                           << seq_labels(*submitted_wire_seq, *submitted_recv_seq) << ")\n";
             }
             const double elapsed_sec = now_sec - wait_start_sec;
-            if (elapsed_sec > rf.engage_timeout_sec) {
+            if (hold_policy) noteChunkEngageWait(arm_id, elapsed_sec);
+            if (fault_policy && elapsed_sec > rf.engage_timeout_sec) {
                 std::ostringstream reason;
                 reason << toString(arm_id)
                        << " delta_twist_engage_timeout"
@@ -5830,6 +5924,7 @@ ArmCommand DualArmServoLoop::applyDeltaTwistFollowerStage(
     }
 
     resetChunkFollowerEngageWait(arm_id);
+    noteChunkFeedResume(arm_id);
     log_transition();
     smd_tracker->deactivate();
     ArmCommand smoothed = command;
@@ -6395,6 +6490,89 @@ ServoTarget DualArmServoLoop::computeServoTarget(
         ArmCommand& left_pose_track_command = arm_pose_track_command[0];
         ArmCommand& right_pose_track_command = arm_pose_track_command[1];
 
+        // ---- THE ROI / FLOOR FOLD ON THE FOLLOWER'S OWN TARGET (2026-09-04) ---------
+        // The Tier-2 clamp above only sees the CLIENT's TcpPoseTarget; the chunk
+        // follower then emits its own plan pose, which walked past the ROI face and
+        // was cut back every tick by the projection rows downstream. MEASURED
+        // (servo_log_20260904_005550.csv, right arm, 32.4-43.7 s at the y_min face):
+        // the IK solved an 8-11 mm unreachable target every tick (raw jump 0.8-2 deg,
+        // rate-limited to 0.3), the accel clamp passed ~0.006 deg of it, the projection
+        // pushed 7-13 deg/s back -- q_sent alternated sign on J0/J1 on 91/81 % of ticks
+        // (+/-0.004 deg, the loop's Nyquist rate) and the box q_ref carried it; the
+        // plan meanwhile ran 13-25 mm past the face, so when the policy turned around
+        // that lead discharged at 150-170 mm/s.
+        // Here the emitted pose is clamped to the box (tip points included), the
+        // clamp displacement is FOLDED into the plan the way the force fold books a
+        // contact deviation (absorbOffset + output-SMD shift), and the plan's advance
+        // INTO the face is gated (the same directional gate the force gate uses);
+        // sliding along the face and backing away pass at full authority. The IK
+        // target is therefore always reachable, no lead accumulates beyond the face,
+        // and an escape starts from where the arm is at the plan's own speed. The
+        // projection rows below stay as the backstop for everything else.
+        for (int i = 0; i < 2; ++i) {
+            ArmControlContext& ctx = arm_ctx[i];
+            ArmCommand& track = arm_pose_track_command[i];
+            const bool left_arm = i == 0;
+            bool& fold_active = left_arm ? left_roi_fold_active_ : right_roi_fold_active_;
+            const bool eligible =
+                track.has_tcp_target && track.mode == ControlMode::TcpPoseTarget &&
+                ctx.chunk_follower.active() && !ctx.chunk_follower.holdPaused();
+            if (!eligible) {
+                if (fold_active) {
+                    ctx.chunk_follower.setAdvanceGate(1.0, math::Vector3::Zero());
+                    fold_active = false;
+                }
+                continue;
+            }
+            const Pose6D emitted = track.tcp_target_stand;
+            const Pose6D clamped = clampPoseToRoi(clampPoseToFloor(emitted));
+            const math::Vector3 dp(clamped.x - emitted.x, clamped.y - emitted.y,
+                                   clamped.z - emitted.z);
+            const double dist = dp.norm();
+            constexpr double kRoiFoldEpsM = 1e-7;
+            const uint64_t now_ns = nowSteadyNs();
+            if (dist > kRoiFoldEpsM) {
+                const Eigen::Quaterniond identity = Eigen::Quaterniond::Identity();
+                if (ctx.chunk_follower.absorbOffset(dp, identity)) {
+                    ctx.follower_output_smd.shift(dp, identity);
+                }
+                track.tcp_target_stand = clamped;
+                // `dp` points from the face into the box: the free-space direction,
+                // the same convention as the reported contact force in the force gate.
+                ctx.chunk_follower.setAdvanceGate(0.0, math::Vector3(dp / dist));
+                uint64_t& count = left_arm ? left_roi_fold_count_ : right_roi_fold_count_;
+                double& total = left_arm ? left_roi_fold_total_m_ : right_roi_fold_total_m_;
+                uint64_t& started = left_arm ? left_roi_fold_started_ns_ : right_roi_fold_started_ns_;
+                uint64_t& last_log = left_arm ? left_roi_fold_last_log_ns_ : right_roi_fold_last_log_ns_;
+                if (!fold_active) {
+                    fold_active = true;
+                    started = now_ns;
+                    total = 0.0;
+                    ++count;
+                    std::cerr << "[INFO] roi_fold " << toString(ctx.arm)
+                              << " ENGAGED: follower target clamped " << dist * 1000.0
+                              << " mm into the box; plan advance into the face gated (#"
+                              << count << ")\n";
+                    last_log = now_ns;
+                }
+                total += dist;
+                if (now_ns - last_log > 1'000'000'000ULL) {
+                    last_log = now_ns;
+                    std::cerr << "[INFO] roi_fold " << toString(ctx.arm) << " holding: "
+                              << (now_ns - started) * 1e-9 << " s at the face, "
+                              << total * 1000.0 << " mm folded so far\n";
+                }
+            } else if (fold_active) {
+                fold_active = false;
+                ctx.chunk_follower.setAdvanceGate(1.0, math::Vector3::Zero());
+                const uint64_t started = left_arm ? left_roi_fold_started_ns_ : right_roi_fold_started_ns_;
+                const double total = left_arm ? left_roi_fold_total_m_ : right_roi_fold_total_m_;
+                std::cerr << "[INFO] roi_fold " << toString(ctx.arm) << " released after "
+                          << (now_ns - started) * 1e-9 << " s, " << total * 1000.0
+                          << " mm folded; plan advance restored\n";
+            }
+        }
+
         // ---- THE FORCE OVERLAY: COMPOSE ---------------------------------------
         // Here, and not earlier or later, for one reason: this is the last point at
         // which the target is a CARTESIAN pose and the first at which it is final.
@@ -6455,9 +6633,16 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             const Wrench6D& gw = tel.wrench_stand;
             const math::Vector3 f_stand(gw.fx, gw.fy, gw.fz);
             const double fn = f_stand.norm();
-            arm_ctx[i].chunk_follower.setAdvanceGate(
-                gate.translation(),
-                fn > 1e-9 ? math::Vector3(f_stand / fn) : math::Vector3::Zero());
+            // The advance gate is one (gate, direction) pair. While the ROI/floor fold
+            // above holds the plan off a face, that geometric gate (0 along the face
+            // normal) owns it; the overlay still yields to the contact through its law.
+            const bool roi_fold_owns_gate =
+                left_arm ? left_roi_fold_active_ : right_roi_fold_active_;
+            if (!roi_fold_owns_gate) {
+                arm_ctx[i].chunk_follower.setAdvanceGate(
+                    gate.translation(),
+                    fn > 1e-9 ? math::Vector3(f_stand / fn) : math::Vector3::Zero());
+            }
         }
         if (latchChunkFollowerFaultRequests(left_state, right_state) && command_verdict) {
             *command_verdict = SafetyVerdict::ChunkFollowerFault;
@@ -6655,10 +6840,29 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                 // with the ramp the filter fades out and the transfer function is
                 // continuous through every transition. release_sec <= 0 = legacy.
                 double& engage = ctx.ik_pinned_lowpass_engage;
+                // A JOINT-MODE TICK IS A DISCONTINUITY, NOT A RELEASE. The ramp above
+                // fades the filter out across a gate that clears; it must not bridge an
+                // interval in which this arm was not solved at all (InitMotion, Hold, a
+                // JointTarget jog). MEASURED 2026-09-04 servo_log_20260904_005550.csv,
+                // right arm, 47.122 s: both arms had been IK-throttled against the ROI
+                // face (engage 1.0) when a both-arm InitMotion took them 30-100 deg away
+                // for 3.4 s. The first Cartesian tick after the Hold blended the FROZEN
+                // filter state (the face pose) back in at alpha 0.41: q_before_safety
+                // J2 -65.8 deg against a solution of -125.05, the velocity clamp shed
+                // 58.95 deg, the accel clamp ran at its ceiling for 10 ticks and the
+                // brake landed at 12,021 deg/s^2 (= ddq_max x decel ratio) -- 5.5 mm at
+                // 450 mm/s on both arms, on every resume. The all-joint-mode dispatch
+                // below never reaches this block, so the state is also cleared there.
+                const bool cartesian_this_tick = isCartesianMode(arm_effective_mode[i]);
+                if (!cartesian_this_tick) {
+                    engage = 0.0;
+                    ctx.ik_pinned_lowpass_valid = false;
+                }
                 engage = control::lowpassEngagementStep(
-                    engage, gate_on, config_.kinematics.ik.pinned_lowpass_release_sec, dt_sec);
-                if (lp_hz > 0.0 && engage > 1e-3 && ctx.ik_pinned_lowpass_valid &&
-                    dt_sec > 0.0) {
+                    engage, gate_on && cartesian_this_tick,
+                    config_.kinematics.ik.pinned_lowpass_release_sec, dt_sec);
+                if (cartesian_this_tick && lp_hz > 0.0 && engage > 1e-3 &&
+                    ctx.ik_pinned_lowpass_valid && dt_sec > 0.0) {
                     constexpr double kTwoPi = 6.283185307179586476925286766559;
                     const double alpha_lp = 1.0 - std::exp(-kTwoPi * lp_hz * dt_sec);
                     // engage 0 -> alpha 1 -> transparent, so fading out cannot step.
@@ -6754,6 +6958,15 @@ ServoTarget DualArmServoLoop::computeServoTarget(
     // streaming state immediately.
     for (int i = 0; i < 2; ++i) {
         pause_chunk_follower_for_hold(arm_ctx[i], arm_raw_mode[i]);
+    }
+    // The pinned-unconverged IK low-pass lives in the Cartesian dispatch above and
+    // never runs here, so without this its engagement and filtered joints would
+    // FREEZE for the whole joint-mode interval and be blended into the first
+    // Cartesian tick afterwards (the 2026-09-04 InitMotion resume kick, see the
+    // block marked "A JOINT-MODE TICK IS A DISCONTINUITY").
+    for (int i = 0; i < 2; ++i) {
+        arm_ctx[i].ik_pinned_lowpass_engage = 0.0;
+        arm_ctx[i].ik_pinned_lowpass_valid = false;
     }
     // Joint-mode fallback: each arm's target comes only from its own filter,
     // state and command -- no cross-arm term.
@@ -7705,6 +7918,27 @@ ServoTarget DualArmServoLoop::applySafety(
                          : roi_engaged         ? SafetyVerdict::RoiViolation
                          : reach_engaged       ? SafetyVerdict::RoiViolation
                                                : SafetyVerdict::SelfCollision;
+            }
+        }
+        // VERDICT HYSTERESIS (safety.projection_verdict_hold_sec). The verdict above
+        // is "the projection cut something THIS tick"; a plan dithering on a face
+        // flips it every few ticks (six Ok <-> RoiViolation toggles in 0.3 s measured
+        // 2026-09-04). Hold the last projection verdict for a short window. Telemetry
+        // only: the rows, the counters and the intervention stamp are already final.
+        if (config_.safety.projection_verdict_hold_sec > 0.0) {
+            const uint64_t now_ns = nowSteadyNs();
+            const bool projection_verdict =
+                combined == SafetyVerdict::FloorViolation ||
+                combined == SafetyVerdict::RoiViolation ||
+                combined == SafetyVerdict::SelfCollision;
+            if (projection_verdict) {
+                held_projection_verdict_ = combined;
+                held_projection_verdict_until_ns_ =
+                    now_ns + static_cast<uint64_t>(config_.safety.projection_verdict_hold_sec * 1e9);
+            } else if ((combined == SafetyVerdict::Ok ||
+                        combined == SafetyVerdict::JointLimitClamped) &&
+                       now_ns < held_projection_verdict_until_ns_) {
+                combined = held_projection_verdict_;
             }
         }
         static const bool kProjLog = std::getenv("RB_SELF_COLLISION_LOG") != nullptr;
@@ -9586,13 +9820,33 @@ DualArmCommand DualArmServoLoop::applyInitMotionSequencer(
         // target that was leading q_actual can become the first InitMotion command and create
         // the observed initial jerk. Re-anchoring only on an explicit InitMotion start/no-op
         // avoids using measured pose as a continuous hold source during normal operation.
+        // ...but only when the gap is NOT a tracking residual. MEASURED 2026-09-04
+        // (servo_log_20260904_005550.csv 43.914 s, both arms; _020517.csv 4.84 s and
+        // 62.0 s): the brake had taken the arms to 0.2-0.5 deg/s, the command led the
+        // encoder by 0.009-0.027 deg per joint, and this snap stepped every joint by
+        // that residual in ONE tick - 4,683 (L J0) / 6,693 (R J4) deg/s^2 on the hold
+        // tick, the largest acceleration of the whole InitMotion. Below
+        // command_reanchor_deg the stream stays where it was and the joint-target SMD
+        // closes the residual on its way to the first waypoint (it starts from the
+        // last SENT velocity, see TrajectoryFilter::observeSentTarget). At or above it
+        // the gap is a real displacement and the snap is the safe choice.
+        const double reanchor_deg = config_.safety.init_motion_planner.command_reanchor_deg;
+        const auto gap_deg = [](const JointArray& a, const JointArray& b) {
+            double gap = 0.0;
+            for (int i = 0; i < kDof; ++i) gap = std::max(gap, std::abs(a[i] - b[i]));
+            return gap;
+        };
         std::lock_guard<std::mutex> lock(state_mutex_);
-        if ((request_left || freeze_other_arm) && finiteJointArray(current_left_q)) {
+        if ((request_left || freeze_other_arm) && finiteJointArray(current_left_q) &&
+            (reanchor_deg <= 0.0 || !finiteJointArray(left_prev_sent_q_deg_) ||
+             gap_deg(current_left_q, left_prev_sent_q_deg_) >= reanchor_deg)) {
             left_prevprev_sent_q_deg_ = current_left_q;
             left_prev_sent_q_deg_ = current_left_q;
             left_output_ma_.reset();
         }
-        if ((request_right || freeze_other_arm) && finiteJointArray(current_right_q)) {
+        if ((request_right || freeze_other_arm) && finiteJointArray(current_right_q) &&
+            (reanchor_deg <= 0.0 || !finiteJointArray(right_prev_sent_q_deg_) ||
+             gap_deg(current_right_q, right_prev_sent_q_deg_) >= reanchor_deg)) {
             right_prevprev_sent_q_deg_ = current_right_q;
             right_prev_sent_q_deg_ = current_right_q;
             right_output_ma_.reset();

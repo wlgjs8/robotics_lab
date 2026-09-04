@@ -408,7 +408,18 @@ JointArray SafetyFilter::clampAcceleration(
         const bool shedding_speed = std::abs(desired_vel) < std::abs(prev_vel) ||
                                     desired_vel * prev_vel < 0.0;
         const double dv_limit = shedding_speed ? max_dv * decel_ratio : max_dv;
-        const double vel = prev_vel + std::clamp(desired_vel - prev_vel, -dv_limit, dv_limit);
+        double vel = prev_vel + std::clamp(desired_vel - prev_vel, -dv_limit, dv_limit);
+        // THE REVERSAL RULE (2026-09-04). The wide budget is for SHEDDING speed. A
+        // reversal that crosses zero inside one tick used to keep the whole
+        // decel_ratio*max_dv step, so the part of it that BUILDS speed in the new
+        // direction was 4x what a start from rest is allowed. Every 9-12k deg/s^2
+        // kick measured on 2026-09-04 was exactly ddq_max x decel_ratio on a reversal
+        // tick (InitMotion resume 12,021 = 3000x4 on J6; ROI-face entry 9,385; the
+        // wrist-singularity branch crawl 9,222-11,498 = 2300x4 / 3000x4). Shed to
+        // zero at the wide budget, then build the opposite direction at ddq_max.
+        if (prev_vel != 0.0 && vel * prev_vel < 0.0) {
+            vel = std::copysign(std::min(std::abs(vel), max_dv), vel);
+        }
         out[i] = q_prev[i] + vel * dt_sec;
         // Bounded anti-overshoot. `dir` is the direction from the previous command to
         // this tick's target; `lead` > 0 means the decel-limited output would land PAST

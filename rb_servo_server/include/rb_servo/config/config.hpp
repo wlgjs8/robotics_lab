@@ -947,6 +947,14 @@ struct InitMotionPlannerConfig {
     double brake_exit_deg_s = 0.5;      // braked when every selected joint is slower than this
     double brake_timeout_sec = 0.75;    // upper bound on the brake phase, then plan anyway
     double brake_max_travel_deg = 3.0;  // cap on the per-joint dq/wn stopping distance
+    // When the sequencer plans from the MEASURED joints it used to re-anchor the
+    // command stream (prev_sent) to them unconditionally. That is a one-tick step of
+    // exactly the tracking error (0.02-0.03 deg at rest, 4.7-6.7k deg/s^2 on the hold
+    // tick, measured 2026-09-04). Below this gap the stream stays continuous and the
+    // joint-target SMD closes the difference on the first waypoint; at or above it the
+    // gap is not a tracking residual and the stream snaps to where the arm really is.
+    // 0 = always snap (legacy).
+    double command_reanchor_deg = 0.5;
 };
 
 // Per-joint APPROACH barrier for the joint range. The hard clamp (q_min/q_max) stops a
@@ -1158,6 +1166,13 @@ struct SafetyConfig {
     // is what produced the measured 12.09 deg/s -> 0 release and the 8.4 deg/s
     // single-tick dropouts -- see control/projection_release.hpp).
     double projection_release_slew_deg_s2 = 0.0;
+    // How long a projection verdict (RoiViolation / FloorViolation / SelfCollision)
+    // stays reported after the projection last corrected the command. The verdict
+    // is raised per tick on "the projection cut something this tick", so a plan
+    // dithering on a face toggled it Ok <-> RoiViolation six times in 0.3 s
+    // (2026-09-04). This is telemetry/GUI hysteresis only: the projection rows and
+    // the intervention stamp are untouched. 0 = per-tick (legacy).
+    double projection_verdict_hold_sec = 0.0;
 };
 
 inline constexpr JointArray rbpodoDefaultSafetyJointMinDeg() {
@@ -1787,8 +1802,12 @@ struct PoseTrackSmdConfig {
 };
 
 enum class RuckigFollowerFallbackPolicy {
-    Smd,
-    Fault
+    Smd,    // legacy: chase the client's TcpPoseTarget through the pose-track SMD
+    Fault,  // strict: cold start / feed loss hold at the reference and LATCH ChunkFollowerFault
+    // strict without the latch on LIVENESS: cold start and feed loss hold at the
+    // reference and wait for frames (the client deadman still owns a dead producer);
+    // divergence still latches because that is the robot, not the feed.
+    Hold
 };
 
 // What a sustained delta_preview projection-budget breach does. Fault latches

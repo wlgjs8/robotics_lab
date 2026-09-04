@@ -122,6 +122,12 @@ class ArmInitOverrideConfig:
     allow_manual_cancel_after_failed: bool = True
     reset_flow_source_on_start: bool = True
     reset_flow_source_on_resume: bool = True
+    # After the server reports an InitMotion done, keep the arm parked until its
+    # F/T auto-tare has fired and been accepted (the tare needs the arm held 0.5 s
+    # at zero sent speed; resuming the policy at once starved it, and the rest of
+    # the episode ran without force control -- 2026-09-04). Upper bound on that
+    # wait; 0 disables it. Arms whose F/T is disabled or disconnected do not wait.
+    ft_tare_wait_sec: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -660,6 +666,8 @@ def _arm_init_override_config(raw: dict[str, Any]) -> ArmInitOverrideConfig:
     ):
         if key in raw:
             raw[key] = bool(raw[key])
+    if "ft_tare_wait_sec" in raw:
+        raw["ft_tare_wait_sec"] = float(raw["ft_tare_wait_sec"])
     return ArmInitOverrideConfig(**raw)
 
 

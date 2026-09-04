@@ -56,6 +56,15 @@ public:
     // command reference (no jump), deltas integrate from there.
     void reset(const Pose6D& pose);
 
+    // reset() that carries a velocity: the filter state starts at `pose` MOVING with
+    // `stand_twist` (x/y/z m/s in the stand frame, rx/ry/rz rad/s in the stand
+    // frame, converted to the body-frame angular state here), clamped to the
+    // profile's velocity caps. For a hand-off from a driver that was mid-motion
+    // (chunk follower -> pose-track SMD): the SMD then decelerates on its own caps
+    // instead of stopping the arm in one tick. The goal integrator still latches at
+    // `pose`, so with a stationary command the state settles back onto it.
+    void reset(const Pose6D& pose, const Vec6& stand_twist);
+
     // Pin the filter state AND the goal integrator at `pose` with zero velocity,
     // re-latching the command reference so the next updateGoalFromCommand()
     // integrates nothing. Same end state as reset(), with two differences that

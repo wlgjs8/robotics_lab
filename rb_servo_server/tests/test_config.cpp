@@ -1149,12 +1149,24 @@ bool testRuckigFollowerFallbackPolicyConfig() {
         1.25
     ));
 
+    const std::string hold_path = writeTempConfig(
+        "ruckig-follower-fallback-hold",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "cartesian_control:\n"
+        "  ruckig_follower:\n"
+        "    fallback_policy: \"hold\"\n"
+    );
+    const rb_servo::DualArmConfig hold_cfg = rb_servo::loadConfigFromYaml(hold_path);
+    ::unlink(hold_path.c_str());
+    RB_CHECK(hold_cfg.cartesian_control.ruckig_follower.fallback_policy ==
+             rb_servo::RuckigFollowerFallbackPolicy::Hold);
+
     const std::string bad_policy_path = writeTempConfig(
         "ruckig-follower-bad-policy",
         "schema: robotics_lab.rb_servo_server.v1\n"
         "cartesian_control:\n"
         "  ruckig_follower:\n"
-        "    fallback_policy: \"hold\"\n"
+        "    fallback_policy: \"latch\"\n"
     );
     RB_CHECK(loadRejectsWithMessage(
         bad_policy_path,

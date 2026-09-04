@@ -78,6 +78,42 @@ class _ArmRuntime:
     goal_clearance_m: float | None = None
     goal_threshold_m: float | None = None
     goal_margin_deficit_m: float | None = None
+    # Monotonic time at which the arm reached "done" but its F/T auto-tare was still
+    # pending; None when not waiting.
+    tare_wait_started: float | None = None
+
+
+def _ft_tare_pending(payload: Any, arm: str) -> tuple[bool, str]:
+    """Is the server's post-InitMotion F/T auto-tare still in flight for `arm`?
+
+    Reads the state fanout's ``<arm>.force_torque`` block. Pending while the
+    auto-tare is armed or settling, or while the bias is invalid with a live
+    sensor. Not pending (no wait) when the sensor is disabled, disconnected, or
+    the block is absent -- there is nothing to wait for then."""
+    if not isinstance(payload, dict):
+        return False, "no payload"
+    arm_block = payload.get(arm)
+    if not isinstance(arm_block, dict):
+        return False, "no arm block"
+    ft = arm_block.get("force_torque")
+    if not isinstance(ft, dict):
+        return False, "no force_torque block"
+    if ft.get("enabled") is False or ft.get("connected") is False:
+        return False, "ft disabled or disconnected"
+    stage = str(ft.get("auto_tare_stage", "") or "").strip().lower()
+    if stage in {"awaiting_init", "settling"}:
+        return True, f"auto_tare_stage={stage}"
+    if ft.get("bias_valid") is False:
+        return True, "bias_valid=false"
+    return False, f"auto_tare_stage={stage or 'idle'} bias_valid={ft.get('bias_valid')}"
+
+
+def _snapshot_monotonic(snapshot: Any) -> float:
+    value = getattr(snapshot, "received_monotonic", None)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def parse_arm_init_command(data: bytes | dict[str, Any]) -> ArmInitCommand:
@@ -124,8 +160,15 @@ class ArmInitOverrideController:
         allow_manual_cancel_after_failed: bool = True,
         reset_flow_source_on_start: bool = True,
         reset_flow_source_on_resume: bool = True,
+        ft_tare_wait_sec: float = 2.0,
     ) -> None:
         self.timeout_sec = float(timeout_sec)
+        # See ArmInitOverrideConfig.ft_tare_wait_sec. MEASURED 2026-09-04
+        # (servo_log_20260904_005550.csv 47.04-47.12 s): the runner resumed the
+        # policy 80 ms after "done", the tare's 0.5 s settle never completed, and
+        # force control stayed uncovered ("F/T has no bias yet") for the rest of the
+        # episode (47-59 s); same in the 00:36 session (139-165 s).
+        self.ft_tare_wait_sec = max(0.0, float(ft_tare_wait_sec))
         self.auto_clear_on_done = bool(auto_clear_on_done)
         self.auto_clear_on_failed = bool(auto_clear_on_failed)
         self.resume_flow_on_done = bool(resume_flow_on_done)
@@ -286,12 +329,39 @@ class ArmInitOverrideController:
                     changed = True
                 continue
             if status in {"planning", "executing"}:
+                runtime.tare_wait_started = None
                 next_state = f"init {status}"
                 if runtime.state != next_state:
                     runtime.state = next_state
                     changed = True
                 continue
             if status == "done":
+                # F/T TARE GATE. The server arms an automatic tare on every InitMotion
+                # and fires it only after the arm has been parked 0.5 s at the init
+                # pose. Releasing the latch the moment the server says "done" put the
+                # policy's first TcpPoseTarget on the wire 80 ms later, the settle
+                # never completed, and the arm ran the rest of the episode with force
+                # control OFF. Keep the latch (the sequencer holds the arm at the init
+                # pose while it is re-emitted) until the tare has landed, bounded by
+                # ft_tare_wait_sec so a sensor that never settles cannot park the arm.
+                pending, why = _ft_tare_pending(payload, arm)
+                if pending and self.ft_tare_wait_sec > 0.0:
+                    now = _snapshot_monotonic(snapshot)
+                    if runtime.tare_wait_started is None:
+                        runtime.tare_wait_started = now
+                        _dbg(f"{arm} done; holding for the F/T auto-tare ({why})")
+                    waited = now - runtime.tare_wait_started
+                    if waited < self.ft_tare_wait_sec:
+                        if runtime.state != "init tare":
+                            runtime.state = "init tare"
+                            changed = True
+                        runtime.message = f"waiting for F/T tare ({why})"
+                        continue
+                    self.error = (
+                        f"{arm} F/T tare did not land within {self.ft_tare_wait_sec:.2f} s "
+                        f"({why}); resuming without it"
+                    )
+                runtime.tare_wait_started = None
                 self._mark_done(arm)
                 changed = True
                 continue
@@ -346,12 +416,24 @@ class ArmInitOverrideController:
                 return intent
             else:
                 right = _init_arm_payload(self.right_q_deg)
+        # Carry the top-level fields through. `tcp_target_profile` selects the
+        # server profile for BOTH arms' TcpPoseTarget; dropping it made the packet
+        # fall back to the server default (`umi_large_smooth`, no chunk follower),
+        # so a single-arm InitMotion pulled the PEER arm off its chunk follower on
+        # the override's first tick ("disengaged (mode/enable)") and left it on the
+        # pose-track SMD for the whole override. MEASURED 2026-09-04
+        # servo_log_20260904_003600.csv 148.554 s: left `tcp_target_profile`
+        # flow_infer_smooth -> umi_large_smooth on the tick the right init started,
+        # left J5 22.3 -> 0 deg/s in one tick (-11,171 deg/s^2), then a 250 mm/s SMD
+        # chase of a 22 mm lead; follower back only at 151.88 s with the profile.
         return CommandIntent(
             _mixed_top_mode(left, right),
             timeout_sec=timeout_sec,
             left=left,
             right=right,
             coupled_timeout=coupled_timeout,
+            tcp_target_profile=intent.tcp_target_profile if intent is not None else None,
+            metadata=copy.deepcopy(intent.metadata) if intent is not None and intent.metadata is not None else None,
         )
 
     def stamp_snapshot(self, snapshot: Any) -> None:

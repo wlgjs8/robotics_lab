@@ -325,6 +325,7 @@ def run(
         allow_manual_cancel_after_failed=config.arm_init_override.allow_manual_cancel_after_failed,
         reset_flow_source_on_start=config.arm_init_override.reset_flow_source_on_start,
         reset_flow_source_on_resume=config.arm_init_override.reset_flow_source_on_resume,
+        ft_tare_wait_sec=config.arm_init_override.ft_tare_wait_sec,
     )
     # ROI auto-recover: one edge detector per arm, so both arms are judged and
     # recovered independently (the other arm keeps running the policy).

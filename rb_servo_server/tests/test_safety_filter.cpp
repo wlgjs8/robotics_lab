@@ -531,6 +531,30 @@ bool testJointLimitBarrierBrakesOnlyTheClosingDirection() {
     return true;
 }
 
+// A reversal inside one tick sheds to zero at the wide budget but builds the new
+// direction at ddq_max, not at ddq_max x ratio. Reproduces the shape of every
+// 9-12k deg/s^2 kick measured on 2026-09-04.
+bool testReversalBuildsOppositeSpeedAtDdqMax() {
+    const double dt = 0.002;
+    const rb_servo::SafetyConfig config = decelTestSafetyConfig(4.0, 1000.0);
+    // max_dv = 3000*0.002 = 6 deg/s; decel budget = 24 deg/s.
+    // +10 -> -48 requested: legacy realized -14 (10 - 24); now -6 (crossed zero, then
+    // one tick of ddq_max in the new direction).
+    RB_CHECK(near(realizedVelDegS(config, 10.0, -48.0, dt), -6.0));
+    // Symmetric.
+    RB_CHECK(near(realizedVelDegS(config, -10.0, 48.0, dt), 6.0));
+    // A reversal that does NOT cross zero this tick is plain shedding: +48 -> -48
+    // realizes +24 (still positive), untouched by the rule.
+    RB_CHECK(near(realizedVelDegS(config, 48.0, -48.0, dt), 24.0));
+    // Shedding exactly to zero is not a reversal.
+    RB_CHECK(near(realizedVelDegS(config, 10.0, 0.0, dt), 0.0));
+    // A small reversal that fits inside ddq_max is passed through unchanged.
+    RB_CHECK(near(realizedVelDegS(config, 2.0, -3.0, dt), -3.0));
+    // Building from rest is unchanged (ddq_max).
+    RB_CHECK(near(realizedVelDegS(config, 0.0, 500.0, dt), 6.0));
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -547,6 +571,7 @@ int main() {
     if (!testStatePublisherSerializesWrapDiagnostics()) return 1;
     if (!testLegacyDecelBehaviorPreservedAtRatioOne()) return 1;
     if (!testDecelerationIsBoundedByRatio()) return 1;
+    if (!testReversalBuildsOppositeSpeedAtDdqMax()) return 1;
     if (!testSignReversalUsesDecelerationBudget()) return 1;
     if (!testOvershootClipIsRateLimited()) return 1;
     if (!testSteadyStreamingIsUnaffected()) return 1;

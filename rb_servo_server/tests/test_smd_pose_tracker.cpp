@@ -525,6 +525,79 @@ bool testSettlingHoldPinsTrackerAndKillsTheReleaseLunge() {
     return true;
 }
 
+bool testSeededResetCarriesVelocityIntoTheFirstSteps() {
+    // A hand-off from a driver that was moving: the tracker must start MOVING at the
+    // seeded velocity and shed it on its own critically damped dynamics, not stop in
+    // one tick. With the command parked on the anchor the state coasts out to the
+    // critically damped peak v0 / (wn e), then returns to the anchor without a
+    // second overshoot.
+    rb_servo::PoseTrackSmdConfig cfg = defaultConfig();
+    cfg.natural_frequency_linear_hz = 3.5;
+    cfg.natural_frequency_angular_hz = 2.5;
+    cfg.max_linear_velocity_m_s = 0.5;
+    cfg.max_angular_velocity_rad_s = 1.8;
+    const rb_servo::Pose6D anchor{};  // identity: zero rotation vector
+    const double v0 = 0.145;  // m/s along +x, the measured hand-off speed
+    rb_servo::Vec6 twist{v0, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+    rb_servo::SmdPoseTracker seeded(cfg);
+    seeded.reset(anchor, twist);
+    rb_servo::SmdPoseTracker cold(cfg);
+    cold.reset(anchor);
+    RB_CHECK(seeded.active() && cold.active());
+
+    const double wn = 2.0 * M_PI * cfg.natural_frequency_linear_hz;
+    double prev_x = 0.0;
+    double prev_step = v0 * kDt * 1.001;
+    double first_step = -1.0;
+    double peak_x = 0.0;
+    int peak_tick = -1;
+    double last_x = 0.0;
+    for (int i = 0; i < 1000; ++i) {
+        seeded.updateGoalFromCommand(anchor);  // stationary command
+        cold.updateGoalFromCommand(anchor);
+        const rb_servo::Pose6D p = seeded.step(kDt);
+        const rb_servo::Pose6D c = cold.step(kDt);
+        const double step = p.x - prev_x;
+        if (i == 0) first_step = step;
+        // Critically damped: the state never crosses back past the anchor.
+        RB_CHECK(p.x >= -1e-9);
+        // Before the peak the outbound step only ever shrinks (pure deceleration).
+        if (peak_tick < 0) {
+            RB_CHECK(step <= prev_step + 1e-12);
+            if (step <= 0.0) {
+                peak_tick = i;
+                peak_x = prev_x;
+            }
+        }
+        prev_step = step;
+        prev_x = p.x;
+        last_x = p.x;
+        RB_CHECK(std::abs(c.x) < 1e-12);  // the cold tracker never moves
+    }
+    // First tick: the seeded velocity minus one tick of critical damping
+    // (2 zeta wn v0 dt = 8.8 % at 3.5 Hz), never more than the seed itself.
+    RB_CHECK(first_step > 0.85 * v0 * kDt);
+    RB_CHECK(first_step <= v0 * kDt + 1e-12);
+    // The excursion is the critically damped peak v0 / (wn e) at t = 1 / wn:
+    // ~2.4 mm after ~45 ms, i.e. a coast, not a lunge and not a stop.
+    RB_CHECK(peak_tick > 0);
+    RB_CHECK(std::abs(peak_x - v0 / (wn * std::exp(1.0))) < 0.3e-3);
+    RB_CHECK(std::abs(peak_tick * kDt - 1.0 / wn) < 0.01);
+    // ...and it comes back to rest on the anchor.
+    RB_CHECK(last_x < 1e-5);
+    RB_CHECK(std::abs(prev_step) < 1e-7);
+
+    // The seed is clamped to the profile caps.
+    rb_servo::Vec6 fast{10.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    rb_servo::SmdPoseTracker capped(cfg);
+    capped.reset(anchor, fast);
+    capped.updateGoalFromCommand(anchor);
+    const rb_servo::Pose6D q = capped.step(kDt);
+    RB_CHECK(q.x <= cfg.max_linear_velocity_m_s * kDt + 1e-9);
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -541,6 +614,7 @@ int main() {
     if (!testSingularityVelocityScaling()) return 1;
     if (!testUnmeasuredSigmaDoesNotReleaseTheSingularityGuard()) return 1;
     if (!testSettlingHoldPinsTrackerAndKillsTheReleaseLunge()) return 1;
+    if (!testSeededResetCarriesVelocityIntoTheFirstSteps()) return 1;
     std::cout << "smd_pose_tracker tests passed\n";
     return 0;
 }

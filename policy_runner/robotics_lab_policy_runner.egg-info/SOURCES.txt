@@ -60,6 +60,8 @@ robotics_lab_policy_runner.egg-info/top_level.txt
 tests/test_analyze_rollout_step_log.py
 tests/test_anchored_action_mode.py
 tests/test_arm_init_chunk_invalidation.py
+tests/test_arm_init_override_profile.py
+tests/test_arm_init_tare_wait.py
 tests/test_camera_bundle_client.py
 tests/test_camera_diagnostics.py
 tests/test_camera_preview.py

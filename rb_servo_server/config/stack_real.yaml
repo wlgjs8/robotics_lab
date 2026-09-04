@@ -329,6 +329,12 @@ safety:
   # safety response is never delayed; only shrinking is bounded, which is always the
   # conservative side. 0 restores the legacy one-tick release.
   projection_release_slew_deg_s2: 400.0
+  # VERDICT HYSTERESIS (2026-09-04). RoiViolation/FloorViolation/SelfCollision are
+  # raised per tick on "the projection cut the command this tick"; a plan dithering
+  # on a face toggled Ok <-> RoiViolation six times in 0.3 s. Hold the last
+  # projection verdict 100 ms. Telemetry/GUI only -- rows, counters and the
+  # intervention stamp are untouched. 0 = per-tick (legacy).
+  projection_verdict_hold_sec: 0.1
 
   # SAFETY PLAN GATE (2026-08-26). The geometric layers slow the ARM but nothing
   # slowed the PLAN: the chunk follower kept integrating at up to 0.45 m/s while a
@@ -553,8 +559,14 @@ safety:
     monitor_only: false   # real enforce: 박스 면에서 velocity-damper 감속/홀드
     # real anti-chatter 튜닝 (floor_constraint real과 동일: 기본 sim 4.0/0.05).
     # 면 접근 시 √(2·a_brake·margin)로 감속 — a_brake↓ + 밴드↑ = 가장자리 jerk↓.
-    a_brake_m_s2: 3.0
-    d_slow_m: 0.06
+    # 2026-09-04: 3.0/0.06 → 0.5/0.08. 3.0에서는 제동 거리 v²/(2a)가 40 mm/s에 0.3 mm,
+    # 150 mm/s에 3.8 mm라 정책 속도에서 면은 사실상 벽이었다(진입 틱 3,000~9,385
+    # deg/s²). 0.5면 150 mm/s가 22 mm, 250 mm/s가 63 mm에 걸쳐 감속하고, 밴드 끝
+    # 80 mm에서의 상한은 283 mm/s라 밴드 밖 정상 동작은 건드리지 않는다. 면에서의
+    # 정지·탈출 자체는 팔로워 출력 fold(dual_arm_servo_loop.cpp "THE ROI / FLOOR
+    # FOLD")가 맡고, 이 행은 그 백스톱이다.
+    a_brake_m_s2: 0.5
+    d_slow_m: 0.08
     # Engage/release hysteresis on the face rows: engage < d_slow, release only
     # >= d_slow + hyst. 2026-08-26: measured 6 RoiViolation entries in 0.6 s
     # (~10 Hz on/off toggling at the band edge) — this is the knob that breaks
@@ -583,11 +595,21 @@ safety:
     # rb5_850e.urdf (300k FK samples): raw radius [0.1406, 1.2826] m, recommended
     # r_min 0.1706 / r_max 1.2526 at the 0.03 m margin. Rounded the conservative way.
     # The RB3 pair was 1.050 / 0.130 against a ~1.088 m raw envelope.
-    r_max_m: 1.250
+    # 2026-09-04: 1.250 -> 0.980. The geometric envelope is not where the arm stops
+    # being usable: on the RB5 the IK's min singular value falls below
+    # singular_region_eps (0.10) at ~0.95 m from the base (measured 0.108 @ 0.951,
+    # 0.093 @ 0.969, 0.075 @ 0.981, 0.054 @ 0.994 m, right arm, 2026-09-04) with the
+    # elbow at -19..-25 deg, and every "reach" tremor of the day was that region, not
+    # the shell (which never engaged: max radius reached 0.994 m vs engage 1.19 m).
+    # 0.98 with d_slow 0.06 brakes from 0.92 m so the elbow-straight singularity is
+    # approached slowly and left freely (radial closing speed only), while the
+    # policy's working radius (<= 0.96 m) is untouched. Wrist singularities happen at
+    # any radius (0.84 m measured) and are NOT covered by this shell.
+    r_max_m: 0.980
     r_min_m: 0.175
     fail_policy: clamp_hold
     monitor_only: false
-    a_brake_m_s2: 3.0     # match roi_box real tuning (softer than the sim 4.0)
+    a_brake_m_s2: 0.5     # 2026-09-04: with roi_box (was 3.0); 150 mm/s brakes over 22 mm
     d_slow_m: 0.06
     tcp_offset_points:
       - { name: gripper_tip_a_yp, offset_m: [ 0.058,  0.012, 0.0 ], offset_closed_m: [ 0.010,  0.012, 0.0 ] }
@@ -845,6 +867,11 @@ safety:
     brake_exit_deg_s: 0.5           # 모든 선택 관절 송신속도가 이 아래면 감속 완료 → 계획
     brake_timeout_sec: 0.75         # 감속 상한(그래도 안 멈추면 그냥 계획; 정상은 ~0.2~0.3s)
     brake_max_travel_deg: 3.0       # 관절당 dq/wn 정지거리 상한
+    # 2026-09-04: planning은 측정 관절에서 하되, 명령 스트림(prev_sent)은 측정과의
+    # 차이가 이 값 이상일 때만 측정 관절로 스냅한다. 그 아래면 추종 잔차(정지 시
+    # 0.02~0.03°)일 뿐이라 스트림을 잇고 joint_target SMD가 첫 웨이포인트로 가며
+    # 흡수한다. 실측: 스냅 한 틱에 4.7~6.7k deg/s² (InitMotion 전체 최대 가속). 0 = 항상 스냅.
+    command_reanchor_deg: 0.5
 
 network:
   command_bind: "udp://127.0.0.1:50256"
@@ -1810,6 +1837,11 @@ kinematics:
     # The ramp is what makes EVERY gate transition (pinned, relief, margin band,
     # throttle) continuous, not just this one.
     pinned_lowpass_release_sec: 0.12
+    # 2026-09-04: the release ramp is for a gate that CLEARS while the arm is still
+    # being solved. A joint-mode interval (InitMotion / Hold / JointTarget jog) now
+    # resets the engagement and the filtered joints outright; the frozen state was
+    # being blended into the first Cartesian tick after a both-arm InitMotion (5.5 mm
+    # lunge at 450 mm/s, 12,021 deg/s^2 brake, on every resume from an ROI-face stall).
 
 cartesian_control:
   # goal lead the measured TCP by more than this (position m / orientation rad).
@@ -1960,6 +1992,7 @@ cartesian_control:
       # Ruckig receding-horizon chunk-follower (replaces the SMD step above while
       # a chunk feed is live). fallback_policy=smd preserves legacy SMD fallback;
       # fallback_policy=fault holds on cold start and latches on feed loss/divergence.
+      # fallback_policy=hold holds on cold start AND on feed loss, latches on divergence only.
       # Consumes whole chunk frames from network.chunk_frame_bind.
       # 2026-07-03 first-hardware values: CONSERVATIVE on purpose — at 33 ms
       # segments the JERK cap is the convergence budget (|dv| <= j*dt^2/4
@@ -2339,7 +2372,13 @@ cartesian_control:
         # resume; longer gaps still discard the chunk and cold-start.
         hold_bounce_resume_sec: 0.5
         chunk_feed_timeout_sec: 1.5
-        fallback_policy: "fault"     # strict: no silent SMD fallback; cold start holds, loss latches ChunkFollowerFault (ResetFault to recover)
+        # 2026-09-04: fault -> hold. Same strictness (never chase a stale target through
+        # the SMD) but a feed stall or a late first frame HOLDS at the reference and waits;
+        # only divergence still latches. The 02:06 rollout died on chunk_feed_timeout
+        # while the runner was already holding the arm (policy server at ~800 ms on a
+        # shared GPU) -- a slow inference is a liveness condition, not a fault; a dead
+        # runner is the client deadman's job. engage_timeout_sec is ignored under hold.
+        fallback_policy: "hold"
         engage_timeout_sec: 3.0      # max wait for the first chunk frame before faulting (fault policy only)
       max_smd_goal_lead_m: 0.080
       max_smd_goal_lead_rad: 0.35

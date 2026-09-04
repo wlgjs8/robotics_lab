@@ -43,6 +43,22 @@ void SmdPoseTracker::reset(const Pose6D& pose) {
     holdAt(pose);
 }
 
+void SmdPoseTracker::reset(const Pose6D& pose, const Vec6& stand_twist) {
+    reset(pose);
+    Eigen::Vector3d v(stand_twist.x, stand_twist.y, stand_twist.z);
+    Eigen::Vector3d w_stand(stand_twist.rx, stand_twist.ry, stand_twist.rz);
+    if (!v.allFinite()) v.setZero();
+    if (!w_stand.allFinite()) w_stand.setZero();
+    const double vmax = config_.max_linear_velocity_m_s;
+    if (vmax > 0.0 && v.norm() > vmax) v *= vmax / v.norm();
+    // angular_velocity_ integrates in the body frame (rotation_ * exp3(w dt)).
+    Eigen::Vector3d w_body = rotation_.conjugate() * w_stand;
+    const double wmax = config_.max_angular_velocity_rad_s;
+    if (wmax > 0.0 && w_body.norm() > wmax) w_body *= wmax / w_body.norm();
+    velocity_ = v;
+    angular_velocity_ = w_body;
+}
+
 void SmdPoseTracker::holdAt(const Pose6D& pose) {
     position_ = positionOf(pose);
     velocity_.setZero();

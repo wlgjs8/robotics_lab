@@ -309,6 +309,8 @@ void parseRuckigFollowerConfig(const YAML::Node& node, const std::string& path, 
             out->fallback_policy = RuckigFollowerFallbackPolicy::Smd;
         } else if (value == "fault") {
             out->fallback_policy = RuckigFollowerFallbackPolicy::Fault;
+        } else if (value == "hold") {
+            out->fallback_policy = RuckigFollowerFallbackPolicy::Hold;
         } else {
             fail("Unknown " + path + ".fallback_policy: " + value, node["fallback_policy"]);
         }
@@ -1491,6 +1493,8 @@ void validateConfig(const DualArmConfig& cfg) {
                                "safety.init_motion_planner.brake_timeout_sec");
         validateNonNegativeFinite(ip.brake_max_travel_deg,
                                   "safety.init_motion_planner.brake_max_travel_deg");
+        validateNonNegativeFinite(ip.command_reanchor_deg,
+                                  "safety.init_motion_planner.command_reanchor_deg");
         if (ip.brake_exit_deg_s > ip.brake_enter_deg_s) {
             throw std::runtime_error(
                 "safety.init_motion_planner.brake_exit_deg_s must be <= brake_enter_deg_s "
@@ -1517,6 +1521,12 @@ void validateConfig(const DualArmConfig& cfg) {
         cfg.safety.projection_release_slew_deg_s2 < 0.0) {
         throw std::runtime_error(
             "safety.projection_release_slew_deg_s2 must be finite and non-negative");
+    }
+    if (!std::isfinite(cfg.safety.projection_verdict_hold_sec) ||
+        cfg.safety.projection_verdict_hold_sec < 0.0 ||
+        cfg.safety.projection_verdict_hold_sec > 1.0) {
+        throw std::runtime_error(
+            "safety.projection_verdict_hold_sec must be finite and within [0, 1]");
     }
     if (cfg.safety.plan_gate.enable) {
         const auto& pg = cfg.safety.plan_gate;
@@ -2378,9 +2388,10 @@ void validateConfig(const DualArmConfig& cfg) {
                 throw std::runtime_error(
                     path + ".preview_max_consecutive_actual_lead_errors must be >= 1");
             }
-            if (rf.fallback_policy != RuckigFollowerFallbackPolicy::Fault) {
+            if (rf.fallback_policy == RuckigFollowerFallbackPolicy::Smd) {
                 throw std::runtime_error(
-                    path + ".controller=delta_preview requires fallback_policy=fault");
+                    path + ".controller=delta_preview requires fallback_policy=fault or hold "
+                    "(no silent SMD chase of a stale target)");
             }
         }
         if (rf.enable && cfg.network.chunk_frame_bind.empty()) {
@@ -3058,11 +3069,17 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "init_motion_planner",
             "plan_gate",
             "projection_release_slew_deg_s2",
+            "projection_verdict_hold_sec",
         }, "safety");
         if (has(sec, "projection_release_slew_deg_s2")) {
             cfg.safety.projection_release_slew_deg_s2 = asDouble(
                 sec["projection_release_slew_deg_s2"],
                 "safety.projection_release_slew_deg_s2");
+        }
+        if (has(sec, "projection_verdict_hold_sec")) {
+            cfg.safety.projection_verdict_hold_sec = asDouble(
+                sec["projection_verdict_hold_sec"],
+                "safety.projection_verdict_hold_sec");
         }
         if (has(sec, "plan_gate")) {
             const YAML::Node pg = sec["plan_gate"];
@@ -3763,6 +3780,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 "brake_exit_deg_s",
                 "brake_timeout_sec",
                 "brake_max_travel_deg",
+                "command_reanchor_deg",
             }, "safety.init_motion_planner");
             auto& ipc = cfg.safety.init_motion_planner;
             if (has(ip, "enable")) ipc.enable = asBool(ip["enable"], "safety.init_motion_planner.enable");
@@ -3802,6 +3820,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             if (has(ip, "brake_exit_deg_s")) ipc.brake_exit_deg_s = asDouble(ip["brake_exit_deg_s"], "safety.init_motion_planner.brake_exit_deg_s");
             if (has(ip, "brake_timeout_sec")) ipc.brake_timeout_sec = asDouble(ip["brake_timeout_sec"], "safety.init_motion_planner.brake_timeout_sec");
             if (has(ip, "brake_max_travel_deg")) ipc.brake_max_travel_deg = asDouble(ip["brake_max_travel_deg"], "safety.init_motion_planner.brake_max_travel_deg");
+            if (has(ip, "command_reanchor_deg")) ipc.command_reanchor_deg = asDouble(ip["command_reanchor_deg"], "safety.init_motion_planner.command_reanchor_deg");
         }
     }
 

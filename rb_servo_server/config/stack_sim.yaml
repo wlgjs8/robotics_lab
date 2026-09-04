@@ -227,8 +227,8 @@ safety:
     runtime_max_m: [1.6, 1.2, 1.6]
     fail_policy: clamp_hold
     monitor_only: true   # 관찰 시작; 강제하려면 false
-    a_brake_m_s2: 3.0
-    d_slow_m: 0.06
+    a_brake_m_s2: 0.5    # 2026-09-04: parity with stack_real (soft face, see the real file)
+    d_slow_m: 0.08
     tcp_offset_points:
       - { name: gripper_tip_a_yp, offset_m: [ 0.058,  0.013, 0.0 ], offset_closed_m: [ 0.010,  0.013, 0.0 ] }
       - { name: gripper_tip_a_yn, offset_m: [ 0.058, -0.013, 0.0 ], offset_closed_m: [ 0.010, -0.013, 0.0 ] }
@@ -436,6 +436,11 @@ safety:
     brake_exit_deg_s: 0.5           # 모든 선택 관절 송신속도가 이 아래면 감속 완료 → 계획
     brake_timeout_sec: 0.75         # 감속 상한(그래도 안 멈추면 그냥 계획; 정상은 ~0.2~0.3s)
     brake_max_travel_deg: 3.0       # 관절당 dq/wn 정지거리 상한
+    # 2026-09-04: planning은 측정 관절에서 하되, 명령 스트림(prev_sent)은 측정과의
+    # 차이가 이 값 이상일 때만 측정 관절로 스냅한다. 그 아래면 추종 잔차(정지 시
+    # 0.02~0.03°)일 뿐이라 스트림을 잇고 joint_target SMD가 첫 웨이포인트로 가며
+    # 흡수한다. 실측: 스냅 한 틱에 4.7~6.7k deg/s² (InitMotion 전체 최대 가속). 0 = 항상 스냅.
+    command_reanchor_deg: 0.5
 
 network:
   command_bind: "udp://127.0.0.1:50256"
@@ -673,7 +678,13 @@ cartesian_control:
         preview_max_consecutive_actual_lead_errors: 3
         hold_bounce_resume_sec: 0.5
         chunk_feed_timeout_sec: 1.5
-        fallback_policy: "fault"
+        # 2026-09-04: fault -> hold. Same strictness (never chase a stale target through
+        # the SMD) but a feed stall or a late first frame HOLDS at the reference and waits;
+        # only divergence still latches. The 02:06 rollout died on chunk_feed_timeout
+        # while the runner was already holding the arm (policy server at ~800 ms on a
+        # shared GPU) -- a slow inference is a liveness condition, not a fault; a dead
+        # runner is the client deadman's job. engage_timeout_sec is ignored under hold.
+        fallback_policy: "hold"
         engage_timeout_sec: 3.0
       max_smd_goal_lead_m: 0.080
       max_smd_goal_lead_rad: 0.35

@@ -753,6 +753,23 @@ private:
     // Carried so the release can be rate-limited; see control/projection_release.hpp.
     std::array<JointArray, 2> projection_correction_prev_{};
     uint64_t roi_clamp_count_ = 0;
+    // THE ROI/FLOOR FOLD on the chunk follower's own target (2026-09-04): the
+    // follower's emitted pose is clamped to the box every tick, the clamp
+    // displacement is folded into the plan (absorbOffset + output-SMD shift), and the
+    // plan's advance into the face is gated while the fold is active.
+    bool left_roi_fold_active_ = false;
+    bool right_roi_fold_active_ = false;
+    uint64_t left_roi_fold_count_ = 0;
+    uint64_t right_roi_fold_count_ = 0;
+    double left_roi_fold_total_m_ = 0.0;
+    double right_roi_fold_total_m_ = 0.0;
+    uint64_t left_roi_fold_started_ns_ = 0;
+    uint64_t right_roi_fold_started_ns_ = 0;
+    uint64_t left_roi_fold_last_log_ns_ = 0;
+    uint64_t right_roi_fold_last_log_ns_ = 0;
+    // Projection verdict hysteresis (safety.projection_verdict_hold_sec).
+    SafetyVerdict held_projection_verdict_ = SafetyVerdict::Ok;
+    uint64_t held_projection_verdict_until_ns_ = 0;
     std::string roi_last_set_reject_reason_;
     // Reachable-shell constraint (safety.reach_constraint): per-arm telemetry of the
     // last evaluated candidate targets (radial distance from the arm base vs the
@@ -946,6 +963,18 @@ private:
     bool right_chunk_engage_waiting_ = false;
     double left_chunk_engage_wait_start_sec_ = 0.0;
     double right_chunk_engage_wait_start_sec_ = 0.0;
+    // fallback_policy=hold bookkeeping: a feed stall is a hold, not a fault.
+    bool left_chunk_feed_stalled_ = false;
+    bool right_chunk_feed_stalled_ = false;
+    double left_chunk_feed_stall_start_sec_ = 0.0;
+    double right_chunk_feed_stall_start_sec_ = 0.0;
+    std::uint64_t left_chunk_feed_stall_count_ = 0;
+    std::uint64_t right_chunk_feed_stall_count_ = 0;
+    double left_chunk_engage_wait_last_log_sec_ = 0.0;
+    double right_chunk_engage_wait_last_log_sec_ = 0.0;
+    void noteChunkFeedStall(ArmId arm_id, double age_sec, double timeout_sec);
+    void noteChunkFeedResume(ArmId arm_id);
+    void noteChunkEngageWait(ArmId arm_id, double elapsed_sec);
     std::uint64_t left_chunk_follower_reanchor_count_ = 0;
     std::uint64_t right_chunk_follower_reanchor_count_ = 0;
     std::uint64_t left_chunk_follower_warm_resume_count_ = 0;
