@@ -2174,7 +2174,10 @@ DualArmServoLoop::DualArmServoLoop(
         collision_monitor_cfg_.latency_s = m.latency_s;
         collision_monitor_cfg_.max_staleness_s = m.max_staleness_s;
         collision_monitor_cfg_.monitor_core = m.monitor_core;
+        collision_monitor_cfg_.monitor_realtime_priority = m.monitor_realtime_priority;
         collision_monitor_cfg_.max_near_pairs = m.max_near_pairs;
+        collision_monitor_cfg_.projection_max_sweeps = m.projection_max_sweeps;
+        collision_monitor_cfg_.projection_tol_rad_s = m.projection_tol_rad_s;
         // External-collision (arm<->floor) barrier set: separate d_hard so the floor
         // can be approached closer than the robot approaches itself.
         collision_monitor_cfg_.external_d_hard_m = m.external.d_hard_m;
@@ -2198,6 +2201,18 @@ DualArmServoLoop::DualArmServoLoop(
             inherit(m.intra_arm.recover_speed_m_s, m.recover_speed_m_s);
         collision_monitor_cfg_.intra_arm_latency_s =
             inherit(m.intra_arm.latency_s, m.latency_s);
+        // Gripper<->gripper class: unset values inherit the self set, so with the
+        // exclusion off the nine pairs behave exactly as they did inside left-right.
+        collision_monitor_cfg_.gripper_gripper_d_hard_m =
+            inherit(m.gripper_gripper.d_hard_m, m.d_hard_m);
+        collision_monitor_cfg_.gripper_gripper_d_slow_m =
+            inherit(m.gripper_gripper.d_slow_m, m.d_slow_m);
+        collision_monitor_cfg_.gripper_gripper_a_brake_m_s2 =
+            inherit(m.gripper_gripper.a_brake_m_s2, m.a_brake_m_s2);
+        collision_monitor_cfg_.gripper_gripper_hyst_m =
+            inherit(m.gripper_gripper.hyst_m, m.hyst_m);
+        collision_monitor_cfg_.gripper_gripper_recover_speed_m_s =
+            inherit(m.gripper_gripper.recover_speed_m_s, m.recover_speed_m_s);
         collision_monitor_cfg_.external_boxes.enable = m.external_boxes.enable;
         collision_monitor_cfg_.external_boxes.max_count = m.external_boxes.max_count;
         collision_monitor_cfg_.external_boxes.size_m = m.external_boxes.size_m;
@@ -3875,6 +3890,20 @@ void DualArmServoLoop::loopMain() {
                 last_collision_verdict_.external_box_min_clearance_m;
             latest_snapshot_.self_collision_external_box_clearance_m =
                 last_collision_verdict_.external_box_clearance_m;
+            latest_snapshot_.self_collision_verdict_age_ms =
+                safety_projection_telemetry_.selfcol_verdict_age_ms;
+            latest_snapshot_.self_collision_eval_ms = last_collision_verdict_.eval_ms;
+            latest_snapshot_.self_collision_near_count =
+                static_cast<int>(last_collision_verdict_.near.size());
+            latest_snapshot_.self_collision_self_min_clearance_m =
+                last_collision_verdict_.self_min_clearance_m;
+            latest_snapshot_.self_collision_intra_arm_min_clearance_m =
+                last_collision_verdict_.intra_arm_min_clearance_m;
+            latest_snapshot_.self_collision_gripper_min_clearance_m =
+                last_collision_verdict_.gripper_gripper_min_clearance_m;
+            latest_snapshot_.self_collision_gripper_excluded =
+                safety_projection_telemetry_.selfcol_gripper_excluded;
+            latest_snapshot_.self_collision_clamp_count = self_collision_clamp_count_;
             // Telemetry "margin" is the hard floor the mesh barrier defends.
             latest_snapshot_.self_collision_margin_m = config_.safety.self_collision.mesh.d_hard_m;
             latest_snapshot_.self_collision_left_bone = last_self_collision_.left_bone;
@@ -4241,6 +4270,26 @@ bool DualArmServoLoop::readRobotStates(RobotState& left, RobotState& right) {
         right = right_result.value;
         right.arm_id = ArmId::Right;
     }
+    // Box link parameters (logging only): fetched from the backends on the first
+    // tick and re-tried every 5 s while empty (a backend that connects later).
+    if ((box_link_param_ticks_++ % 2500) == 0) {
+        for (int i = 0; i < 2; ++i) {
+            if (box_link_param_count_[static_cast<std::size_t>(i)] > 0) continue;
+            const auto& robot = i == 0 ? left_robot_ : right_robot_;
+            if (!robot) continue;
+            const std::vector<double> v = robot->boxLinkParameter();
+            const int n = static_cast<int>(std::min<std::size_t>(v.size(), 16));
+            for (int k = 0; k < n; ++k) {
+                box_link_param_cache_[static_cast<std::size_t>(i)][static_cast<std::size_t>(k)] =
+                    v[static_cast<std::size_t>(k)];
+            }
+            box_link_param_count_[static_cast<std::size_t>(i)] = n;
+        }
+    }
+    left.box_link_parameter = box_link_param_cache_[0];
+    left.box_link_parameter_count = box_link_param_count_[0];
+    right.box_link_parameter = box_link_param_cache_[1];
+    right.box_link_parameter_count = box_link_param_count_[1];
     populateTcpPose(left, config_.left_mount);
     populateTcpPose(right, config_.right_mount);
     return left_result.ok && right_result.ok;
@@ -6573,6 +6622,60 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             }
         }
 
+        // THE COLLISION YIELD FOLD, applying half (booked by applySafety last tick).
+        // The self-collision rows split their correction over both arms by
+        // Jacobian leverage (the idle arm yields); without this the yielded arm's
+        // own plan pulled it straight back every tick and the blocked mover's plan
+        // wound up beyond the barrier, both of which discharged as a kick on
+        // release. The displacement is absorbed the way the force fold books a
+        // contact deviation; no advance gate here -- the safety plan gate already
+        // slows a plan the rows obstruct.
+        for (int i = 0; i < 2; ++i) {
+            PendingCollisionFold& pend = pending_collision_fold_[static_cast<std::size_t>(i)];
+            ArmControlContext& ctx = arm_ctx[i];
+            ArmCommand& track = arm_pose_track_command[i];
+            bool& fold_active = collision_fold_active_[static_cast<std::size_t>(i)];
+            const uint64_t now_ns = nowSteadyNs();
+            const bool eligible =
+                pend.valid && track.has_tcp_target && track.mode == ControlMode::TcpPoseTarget &&
+                ctx.chunk_follower.active() && !ctx.chunk_follower.holdPaused();
+            if (eligible && ctx.chunk_follower.absorbOffset(pend.dp, pend.dR)) {
+                ctx.follower_output_smd.shift(pend.dp, pend.dR);
+                // The pose emitted this tick came from the un-shifted plan: move it too.
+                pinocchio::SE3 T = math::se3FromPose(track.tcp_target_stand);
+                T.translation() += pend.dp;
+                T.rotation() = pend.dR.toRotationMatrix() * T.rotation();
+                track.tcp_target_stand = math::poseFromSe3(T);
+                const double dist = pend.dp.norm();
+                collision_fold_total_m_[static_cast<std::size_t>(i)] += dist;
+                if (!fold_active) {
+                    fold_active = true;
+                    collision_fold_started_ns_[static_cast<std::size_t>(i)] = now_ns;
+                    collision_fold_total_m_[static_cast<std::size_t>(i)] = dist;
+                    ++collision_fold_count_[static_cast<std::size_t>(i)];
+                    collision_fold_last_log_ns_[static_cast<std::size_t>(i)] = now_ns;
+                    std::cerr << "[INFO] collision_fold " << toString(ctx.arm)
+                              << " ENGAGED: booking the self-collision rows' correction into "
+                                 "the plan (#" << collision_fold_count_[static_cast<std::size_t>(i)]
+                              << ")\n";
+                } else if (now_ns - collision_fold_last_log_ns_[static_cast<std::size_t>(i)] >
+                           1'000'000'000ULL) {
+                    collision_fold_last_log_ns_[static_cast<std::size_t>(i)] = now_ns;
+                    std::cerr << "[INFO] collision_fold " << toString(ctx.arm) << " holding: "
+                              << (now_ns - collision_fold_started_ns_[static_cast<std::size_t>(i)]) * 1e-9
+                              << " s, " << collision_fold_total_m_[static_cast<std::size_t>(i)] * 1000.0
+                              << " mm folded so far\n";
+                }
+            } else if (fold_active && !pend.valid) {
+                fold_active = false;
+                std::cerr << "[INFO] collision_fold " << toString(ctx.arm) << " released after "
+                          << (now_ns - collision_fold_started_ns_[static_cast<std::size_t>(i)]) * 1e-9
+                          << " s, " << collision_fold_total_m_[static_cast<std::size_t>(i)] * 1000.0
+                          << " mm folded\n";
+            }
+            pend.valid = false;  // consumed (or declined): never re-applied
+        }
+
         // ---- THE FORCE OVERLAY: COMPOSE ---------------------------------------
         // Here, and not earlier or later, for one reason: this is the last point at
         // which the target is a CARTESIAN pose and the first at which it is final.
@@ -7763,10 +7866,41 @@ ServoTarget DualArmServoLoop::applySafety(
                 }
             }
             last_self_collision_ = selfCollisionResultFromVerdict(v, collision_monitor_cfg_);
+            // GRIPPER<->GRIPPER EXCLUSION (2026-09-04): when force control covers
+            // BOTH arms (F/T connected, bias valid, overlay running this tick), the
+            // contact between the two grippers is the sensor's to handle -- the
+            // handover needs the tips to touch -- so those nine pairs build no
+            // barrier row and do not count as a breach. Any arm losing coverage
+            // puts the class back on its configured (self-inherited) margins at
+            // once: fail closed, and while already inside the floor that means
+            // "no deeper, opening free", never a latch (fail_policy clamp_hold).
+            const bool gripper_excluded =
+                config_.safety.self_collision.mesh.gripper_gripper.exclude_when_force_covered &&
+                left_force_control_telemetry_.enabled && left_force_control_telemetry_.covered &&
+                right_force_control_telemetry_.enabled && right_force_control_telemetry_.covered;
+            const bool hard_breach =
+                gripper_excluded ? v.hard_violation_non_gripper : v.hard_violation;
+            if (gripper_excluded) last_self_collision_.violated = v.valid && hard_breach;
             const double now_s = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             const bool stale =
                 collisionVerdictStale(v, now_s, collision_monitor_cfg_.max_staleness_s);
+            if (v.valid) {
+                // Every tick, not only when a row engaged: the age is the monitor's
+                // liveness, and the class minima are what the global min could not
+                // say (it read the structural intra-arm 22.5 mm pair all run).
+                safety_projection_telemetry_.selfcol_verdict_age_ms = (now_s - v.stamp_s) * 1000.0;
+                safety_projection_telemetry_.selfcol_eval_ms = v.eval_ms;
+                safety_projection_telemetry_.selfcol_near_count = static_cast<int>(v.near.size());
+                safety_projection_telemetry_.selfcol_near_band_count = v.near_band_count;
+                safety_projection_telemetry_.selfcol_self_min_clearance_m = v.self_min_clearance_m;
+                safety_projection_telemetry_.selfcol_intra_arm_min_clearance_m =
+                    v.intra_arm_min_clearance_m;
+                safety_projection_telemetry_.selfcol_gripper_min_clearance_m =
+                    v.gripper_gripper_min_clearance_m;
+            }
+            safety_projection_telemetry_.selfcol_gripper_excluded = gripper_excluded;
+            safety_projection_telemetry_.selfcol_stale = stale;
             if (!config_.safety.self_collision.monitor_only &&
                 combined != SafetyVerdict::FaultLatched && !fault_latched_.load()) {
                 // Only a real GEOMETRIC breach (hard_violation) escalates to fault_latch.
@@ -7774,7 +7908,7 @@ ServoTarget DualArmServoLoop::applySafety(
                 // (scale 0) and auto-recover when fresh verdicts resume — never latch on it.
                 if (!stale &&
                     config_.safety.self_collision.fail_policy == SelfCollisionFailPolicy::FaultLatch &&
-                    v.hard_violation) {
+                    hard_breach) {
                     const std::string reason = "self-collision mesh breach (" +
                         (last_self_collision_.pair.empty() ? std::string("unknown")
                                                            : last_self_collision_.pair) +
@@ -7813,12 +7947,17 @@ ServoTarget DualArmServoLoop::applySafety(
                     // d_slow, age-extrapolated) into the shared list; the combined solve
                     // below removes only the closing component of the command.
                     const std::size_t before_collision_cons = safety_cons.size();
+                    ConstraintBuildOptions build_opts;
+                    build_opts.exclude_gripper_gripper = gripper_excluded;
+                    // Extrapolate each pair's clearance to the pose this tick's step
+                    // starts from (prev_sent) through its own Jacobian, instead of
+                    // rate * age (see ConstraintBuildOptions).
+                    build_opts.left_q_deg = &safety_ctx[0].prev_sent_q_deg;
+                    build_opts.right_q_deg = &safety_ctx[1].prev_sent_q_deg;
                     buildCollisionConstraints(v, collision_monitor_cfg_, now_s - v.stamp_s,
-                                              safety_cons, &collision_engaged_pairs_);
+                                              safety_cons, &collision_engaged_pairs_, build_opts);
                     if (safety_cons.size() > before_collision_cons) {
                         collision_constraints_engaged = true;
-                        safety_projection_telemetry_.selfcol_verdict_age_ms =
-                            (now_s - v.stamp_s) * 1000.0;
                     }
                 }
             }
@@ -7845,11 +7984,22 @@ ServoTarget DualArmServoLoop::applySafety(
         // -110k deg/s2 step, downstream of the accel clamp, cross-arm). dq_max
         // is what the per-joint velocity clamp upstream already enforces, so
         // the ceiling only bounds projection-injected velocity.
+        // Sweep to convergence (at least `iters`, at most projection_max_sweeps):
+        // three fixed sweeps over 6-10 non-orthogonal rows did not converge, so the
+        // answer depended on the (noisy) row order and jumped between ticks.
+        VelocityProjectionOptions proj_opts;
+        proj_opts.min_sweeps = iters;
+        proj_opts.max_sweeps = config_.safety.self_collision.enable
+            ? std::max(iters, collision_monitor_cfg_.projection_max_sweeps) : std::max(iters, 50);
+        proj_opts.tol_rad_s = config_.safety.self_collision.enable
+            ? collision_monitor_cfg_.projection_tol_rad_s : 1e-6;
         const CollisionProjectionResult proj = solveVelocityProjection(
             safety_cons, safety_ctx[0].prev_sent_q_deg, safety_ctx[1].prev_sent_q_deg,
-            out.left_q_target_deg, out.right_q_target_deg, dt_sec, iters,
+            out.left_q_target_deg, out.right_q_target_deg, dt_sec, proj_opts,
             config_.safety.dq_max_deg_s);
         safety_projection_telemetry_.active = proj.active;
+        safety_projection_telemetry_.sweeps = proj.sweeps_used;
+        safety_projection_telemetry_.converged = proj.converged;
         safety_projection_telemetry_.constraint_count = static_cast<int>(safety_cons.size());
         safety_projection_telemetry_.left_correction_deg_s = proj.left_correction_deg_s;
         safety_projection_telemetry_.right_correction_deg_s = proj.right_correction_deg_s;
@@ -7871,10 +8021,26 @@ ServoTarget DualArmServoLoop::applySafety(
             safety_projection_telemetry_.min_headroom_m = tightest->d_now - tightest->d_hard;
             safety_projection_telemetry_.min_headroom_d_hard_m = tightest->d_hard;
             safety_projection_telemetry_.min_headroom_class =
-                tightest->klass == ConstraintClass::Self         ? "self"
-                : tightest->klass == ConstraintClass::IntraArm   ? "intra_arm"
-                : tightest->klass == ConstraintClass::External   ? "external"
-                                                                 : "external_box";
+                tightest->klass == ConstraintClass::Self           ? "self"
+                : tightest->klass == ConstraintClass::IntraArm     ? "intra_arm"
+                : tightest->klass == ConstraintClass::External     ? "external"
+                : tightest->klass == ConstraintClass::GripperGripper ? "gripper_gripper"
+                                                                   : "external_box";
+            // Row-direction jitter: the angle between this tick's and last tick's
+            // clearance Jacobian of the same tightest pair. A convex-convex distance
+            // has a continuous gradient at d > 0, but the witness points are not
+            // unique on parallel faces and the rotational part of J_n follows them.
+            {
+                Eigen::Matrix<double, 12, 1> jn = tightest->J;
+                const double n0 = prev_tightest_J_.norm();
+                const double n1 = jn.norm();
+                if (prev_tightest_pair_key_ == tightest->pair_key && n0 > 1e-12 && n1 > 1e-12) {
+                    const double c = std::clamp(prev_tightest_J_.dot(jn) / (n0 * n1), -1.0, 1.0);
+                    safety_projection_telemetry_.tightest_dir_change_deg = std::acos(c) * 180.0 / M_PI;
+                }
+                prev_tightest_pair_key_ = tightest->pair_key;
+                prev_tightest_J_ = jn;
+            }
             // Name it out of the verdict the rows were built from. One linear scan of
             // at most max_near_pairs entries, for the single tightest row.
             for (const auto& p : last_collision_verdict_.near) {
@@ -7912,6 +8078,7 @@ ServoTarget DualArmServoLoop::applySafety(
             if (roi_engaged) ++roi_clamp_count_;
             if (reach_engaged) ++reach_clamp_count_;
             if (user_floor_engaged) ++user_floor_clamp_count_;
+            if (collision_constraints_engaged) ++self_collision_clamp_count_;
             if (combined == SafetyVerdict::Ok || combined == SafetyVerdict::JointLimitClamped) {
                 combined = floor_engaged      ? SafetyVerdict::FloorViolation
                          : user_floor_engaged ? SafetyVerdict::FloorViolation
@@ -7985,6 +8152,37 @@ ServoTarget DualArmServoLoop::applySafety(
         }
         safety_projection_telemetry_.left_applied_correction_deg_s = la;
         safety_projection_telemetry_.right_applied_correction_deg_s = ra;
+    }
+    safety_projection_telemetry_.self_collision_clamp_count = self_collision_clamp_count_;
+
+    // COLLISION YIELD FOLD, booking half. What the collision rows took out of each
+    // arm's step this tick, as a stand-frame pose delta between the pre-projection
+    // request and what reached the wire, is handed to the follower stage of the
+    // NEXT tick (see PendingCollisionFold). Only collision rows: the ROI/floor
+    // faces have their own fold, and a clamp-only tick has nothing to book.
+    for (int i = 0; i < 2; ++i) {
+        PendingCollisionFold& pend = pending_collision_fold_[static_cast<std::size_t>(i)];
+        pend.valid = false;
+        if (!collision_constraints_engaged || !kinematics_) continue;
+        const double applied = i == 0 ? safety_projection_telemetry_.left_applied_correction_deg_s
+                                      : safety_projection_telemetry_.right_applied_correction_deg_s;
+        if (applied <= kSafetyInterventionCorrectionEpsDegPerSec) continue;
+        const JointArray& q_final = i == 0 ? out.left_q_target_deg : out.right_q_target_deg;
+        const JointArray& q_req = plan_gate_requested[i];
+        const ArmId fold_arm = i == 0 ? ArmId::Left : ArmId::Right;
+        const ArmMountConfig& fold_mount = i == 0 ? config_.left_mount : config_.right_mount;
+        try {
+            const pinocchio::SE3 T_req =
+                math::se3FromPose(kinematics_->computeTcpStand(fold_arm, q_req, fold_mount));
+            const pinocchio::SE3 T_fin =
+                math::se3FromPose(kinematics_->computeTcpStand(fold_arm, q_final, fold_mount));
+            pend.dp = T_fin.translation() - T_req.translation();
+            pend.dR = Eigen::Quaterniond(T_fin.rotation() * T_req.rotation().transpose()).normalized();
+            pend.valid = pend.dp.norm() > 1e-9 ||
+                         std::abs(Eigen::AngleAxisd(pend.dR).angle()) > 1e-9;
+        } catch (const std::exception&) {
+            pend.valid = false;  // FK refused: nothing to book, the rows still hold
+        }
     }
 
     // SAFETY PLAN GATE input: how much of the step an OBSTRUCTION removed. Both

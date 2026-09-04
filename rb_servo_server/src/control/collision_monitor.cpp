@@ -10,6 +10,10 @@
 #include <sstream>
 #include <stdexcept>
 #include <utility>
+#include <condition_variable>
+#include <mutex>
+
+#include "rb_servo/core/realtime.hpp"
 
 #include <pinocchio/parsers/urdf.hpp>
 #include <pinocchio/math/rpy.hpp>
@@ -177,44 +181,87 @@ double collisionVelocityScale(const CollisionVerdict& v, const CollisionMonitorC
 void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
                                double verdict_age_s, std::vector<VelocityConstraint>& out,
                                std::unordered_set<std::uint64_t>* engaged_pairs) {
+    buildCollisionConstraints(v, cfg, verdict_age_s, out, engaged_pairs, ConstraintBuildOptions{});
+}
+
+void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
+                               double verdict_age_s, std::vector<VelocityConstraint>& out,
+                               std::unordered_set<std::uint64_t>* engaged_pairs,
+                               const ConstraintBuildOptions& opts) {
     if (!v.valid) return;
     const double age = std::max(0.0, verdict_age_s);
+    // Configuration-based extrapolation: the clearance at the pose the command
+    // starts from, first order through the pair's own clearance Jacobian. Exact
+    // to the same order the row itself is, and independent of when the monitor
+    // happened to evaluate. Falls back to rate * age when the caller has no pose
+    // or the verdict predates q_eval.
+    const bool extrapolate_by_q =
+        opts.left_q_deg != nullptr && opts.right_q_deg != nullptr && v.q_eval_valid;
+    Eigen::Matrix<double, 2 * kDof, 1> dq_rad = Eigen::Matrix<double, 2 * kDof, 1>::Zero();
+    if (extrapolate_by_q) {
+        for (int i = 0; i < kDof; ++i) {
+            dq_rad[i] = ((*opts.left_q_deg)[i] - v.q_eval_deg[static_cast<std::size_t>(i)]) * kDeg2Rad;
+            dq_rad[kDof + i] =
+                ((*opts.right_q_deg)[i] - v.q_eval_deg[static_cast<std::size_t>(kDof + i)]) * kDeg2Rad;
+        }
+    }
     for (const auto& p : v.near) {
         // Per-category barrier set. A keep-out BOX gets its own set (WIDE slow zone so a
         // fast teleop approach is braked before the hard floor — the floor's 5 mm slow
         // zone stops only ~0.12 m/s and let teleop overshoot ~40 mm into the box). The
-        // floor (ground_plane, `external`) keeps the tight external_* set; intra-arm and
-        // arm<->arm/stand keep their own. Monitor-only boxes are reported but not enforced.
+        // floor (ground_plane, `external`) keeps the tight external_* set; intra-arm,
+        // gripper<->gripper and arm<->arm/stand keep their own. Monitor-only boxes are
+        // reported but not enforced.
         if (p.external_box && cfg.external_boxes.monitor_only) continue;
+        const std::uint64_t pair_key =
+            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(p.geom_a)) << 32) |
+            static_cast<std::uint32_t>(p.geom_b);
+        const bool grip = p.gripper_gripper;
+        if (grip && opts.exclude_gripper_gripper) {
+            // Force control owns this contact: no row, and it is not "engaged".
+            if (engaged_pairs) engaged_pairs->erase(pair_key);
+            continue;
+        }
         const double d_hard = p.external_box ? cfg.external_box_d_hard_m
                             : p.external     ? cfg.external_d_hard_m
                             : p.intra_arm    ? cfg.intra_arm_d_hard_m
+                            : grip           ? cfg.gripper_gripper_d_hard_m
                                              : cfg.d_hard_m;
         const double d_slow = p.external_box ? cfg.external_box_d_slow_m
                             : p.external     ? cfg.external_d_slow_m
                             : p.intra_arm    ? cfg.intra_arm_d_slow_m
+                            : grip           ? cfg.gripper_gripper_d_slow_m
                                              : cfg.d_slow_m;
         const double a_brake = p.external_box ? cfg.external_box_a_brake_m_s2
                              : p.external     ? cfg.external_a_brake_m_s2
                              : p.intra_arm    ? cfg.intra_arm_a_brake_m_s2
+                             : grip           ? cfg.gripper_gripper_a_brake_m_s2
                                               : cfg.a_brake_m_s2;
         const double recover = p.external_box ? cfg.external_box_recover_speed_m_s
                              : p.external     ? cfg.external_recover_speed_m_s
                              : p.intra_arm    ? cfg.intra_arm_recover_speed_m_s
+                             : grip           ? cfg.gripper_gripper_recover_speed_m_s
                                               : cfg.recover_speed_m_s;
         const double hyst = p.external_box ? cfg.external_box_hyst_m
                           : p.external     ? cfg.external_hyst_m
                           : p.intra_arm    ? cfg.intra_arm_hyst_m
+                          : grip           ? cfg.gripper_gripper_hyst_m
                                            : cfg.hyst_m;
-        const double closing = p.rate_m_s < 0.0 ? -p.rate_m_s : 0.0;
-        const double d_now = p.d_m - closing * age;  // age-extrapolated clearance
+        double d_now;
+        if (extrapolate_by_q) {
+            double dd = 0.0;
+            for (int i = 0; i < kDof; ++i) {
+                dd += p.Jn_left[i] * dq_rad[i] + p.Jn_right[i] * dq_rad[kDof + i];
+            }
+            d_now = p.d_m + dd;
+        } else {
+            const double closing = p.rate_m_s < 0.0 ? -p.rate_m_s : 0.0;
+            d_now = p.d_m - closing * age;  // age-extrapolated clearance
+        }
         // Engage/release hysteresis (caller-persisted): engage below d_slow,
         // release only above d_slow + hyst. In the hysteresis band the row
         // exists but xi is large, so it rarely binds — the point is that it
         // does not flap with margin noise.
-        const std::uint64_t pair_key =
-            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(p.geom_a)) << 32) |
-            static_cast<std::uint32_t>(p.geom_b);
         const bool was_engaged = engaged_pairs && engaged_pairs->count(pair_key) > 0;
         const double engage_at = was_engaged ? d_slow + hyst : d_slow;
         if (d_now >= engage_at) {
@@ -237,6 +284,7 @@ void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitor
         c.klass = p.external_box ? ConstraintClass::ExternalBox
                 : p.external     ? ConstraintClass::External
                 : p.intra_arm    ? ConstraintClass::IntraArm
+                : grip           ? ConstraintClass::GripperGripper
                                  : ConstraintClass::Self;
         out.push_back(std::move(c));
     }
@@ -269,6 +317,21 @@ CollisionProjectionResult solveVelocityProjection(
     const JointArray& left_prev_deg, const JointArray& right_prev_deg,
     JointArray& left_target_deg, JointArray& right_target_deg,
     double dt_sec, int iterations, const JointArray& max_joint_vel_deg_s) {
+    // Fixed sweep count (legacy entry point): min == max, no tolerance stop.
+    VelocityProjectionOptions opts;
+    opts.min_sweeps = std::max(1, iterations);
+    opts.max_sweeps = opts.min_sweeps;
+    opts.tol_rad_s = 0.0;
+    return solveVelocityProjection(cons, left_prev_deg, right_prev_deg, left_target_deg,
+                                   right_target_deg, dt_sec, opts, max_joint_vel_deg_s);
+}
+
+CollisionProjectionResult solveVelocityProjection(
+    std::vector<VelocityConstraint>& cons,
+    const JointArray& left_prev_deg, const JointArray& right_prev_deg,
+    JointArray& left_target_deg, JointArray& right_target_deg,
+    double dt_sec, const VelocityProjectionOptions& opts,
+    const JointArray& max_joint_vel_deg_s) {
     CollisionProjectionResult out;
     if (dt_sec <= 1e-6 || cons.empty()) return out;
 
@@ -289,29 +352,42 @@ CollisionProjectionResult solveVelocityProjection(
               [](const VelocityConstraint& x, const VelocityConstraint& y) {
                   return x.d_now < y.d_now;
               });
-    const int M = std::max(1, iterations);
-    for (int s = 0; s < M; ++s) {
+    // Per-joint velocity ceiling, applied after EVERY sweep so a row the ceiling
+    // re-violates is revisited (a trailing clamp used to be able to leave a
+    // just-satisfied row broken). Same ceiling for both arms.
+    const auto clamp_ceiling = [&]() {
+        for (int i = 0; i < kDof; ++i) {
+            const double lim = max_joint_vel_deg_s[i] * kDeg2Rad;
+            if (lim > 0.0) {
+                const double before_left = qdot[i];
+                const double before_right = qdot[kDof + i];
+                qdot[i] = std::clamp(qdot[i], -lim, lim);
+                qdot[kDof + i] = std::clamp(qdot[kDof + i], -lim, lim);
+                if (qdot[i] != before_left || qdot[kDof + i] != before_right) {
+                    out.ceiling_clamped = true;
+                }
+            }
+        }
+    };
+    const int min_sweeps = std::max(1, opts.min_sweeps);
+    const int max_sweeps = std::max(min_sweeps, opts.max_sweeps);
+    const double tol = std::max(0.0, opts.tol_rad_s);
+    for (int s = 0; s < max_sweeps; ++s) {
+        double max_step = 0.0;  // largest |delta qdot| any row applied this sweep
         for (const auto& c : cons) {
             const double ddot = c.J.dot(qdot);
             if (ddot < -c.xi) {
-                const double alpha = (-c.xi - ddot) / std::max(c.J.squaredNorm(), 1e-9);
+                const double jn2 = std::max(c.J.squaredNorm(), 1e-9);
+                const double alpha = (-c.xi - ddot) / jn2;
                 qdot += alpha * c.J;  // alpha > 0: cancels only the excess closing
+                max_step = std::max(max_step, std::abs(alpha) * std::sqrt(jn2));
             }
         }
-    }
-
-    // Per-joint velocity clamp (approximate; the exact joint-limit-aware solve is
-    // Stage 4 QP). Same ceiling for both arms.
-    for (int i = 0; i < kDof; ++i) {
-        const double lim = max_joint_vel_deg_s[i] * kDeg2Rad;
-        if (lim > 0.0) {
-            const double before_left = qdot[i];
-            const double before_right = qdot[kDof + i];
-            qdot[i] = std::clamp(qdot[i], -lim, lim);
-            qdot[kDof + i] = std::clamp(qdot[kDof + i], -lim, lim);
-            if (qdot[i] != before_left || qdot[kDof + i] != before_right) {
-                out.ceiling_clamped = true;
-            }
+        clamp_ceiling();
+        out.sweeps_used = s + 1;
+        if (s + 1 >= min_sweeps && max_step <= tol) {
+            out.converged = true;
+            break;
         }
     }
 
@@ -403,6 +479,8 @@ struct CollisionMonitor::Impl {
     // planner can ignore pairs that involve only the stationary non-active arm.
     std::vector<char> pair_left_;
     std::vector<char> pair_right_;
+    // cross-arm gripper-hull pairs (gripper_gripper_* barrier class)
+    std::vector<char> pair_gripper_;
 
     // True if the pair at index k should be considered for the given active-arm set.
     // Both-included is the unmasked fast path; otherwise keep only pairs that touch an
@@ -459,6 +537,14 @@ struct CollisionMonitor::Impl {
 
     std::thread thread;
     std::atomic<bool> running{false};
+    // Event-driven evaluation (2026-09-04): the thread sleeps on in_cv and
+    // evaluates once per submission instead of spinning at 100% of a core
+    // re-evaluating the same pose (which also made the finite-difference
+    // clearance rate alternate between 0 and 1.33x). submit_seq advances on
+    // every target submission; consumed_seq trails it. Both guarded by in_mtx.
+    std::condition_variable in_cv;
+    std::uint64_t submit_seq = 0;
+    std::uint64_t consumed_seq = 0;
 
     explicit Impl(CollisionMonitorConfig c) : cfg(std::move(c)), data(), gdata() {
         buildModel();
@@ -877,7 +963,9 @@ struct CollisionMonitor::Impl {
     }
 
     void curatePairs() {
-        enum class PairCategory { LeftRight, ArmStand, IntraArm, External, ExternalBox };
+        enum class PairCategory {
+            LeftRight, ArmStand, IntraArm, External, ExternalBox, GripperGripper
+        };
         const auto sideString = [](Side side) {
             switch (side) {
                 case Side::Left: return "left";
@@ -893,8 +981,14 @@ struct CollisionMonitor::Impl {
                 case PairCategory::IntraArm: return "intra-arm";
                 case PairCategory::External: return "external";
                 case PairCategory::ExternalBox: return "external-box";
+                case PairCategory::GripperGripper: return "gripper-gripper";
             }
             return "unknown";
+        };
+        // The Pika hulls are attached by name (buildGeometry): "<prefix>pika_gripper_base",
+        // "<prefix>pika_finger_left/right", or the legacy single "<prefix>pika_gripper".
+        const auto isGripperGeometry = [&](std::size_t i) {
+            return geom.geometryObjects[i].name.find("pika_") != std::string::npos;
         };
         const auto isExternalGeometry = [&](std::size_t i) {
             // External barrier category is currently reserved for the injected
@@ -959,8 +1053,9 @@ struct CollisionMonitor::Impl {
         pair_category_.clear();
         pair_left_.clear();
         pair_right_.clear();
+        pair_gripper_.clear();
         std::size_t n_lr = 0, n_arm_stand = 0, n_intra = 0, n_external = 0;
-        std::size_t n_external_box = 0, n_disabled = 0;
+        std::size_t n_external_box = 0, n_disabled = 0, n_gripper = 0;
         const auto tryAddPair = [&](std::size_t a, std::size_t b, PairCategory category) {
             if (const CollisionPairPattern* rule = disabledRule(a, b)) {
                 ++n_disabled;
@@ -978,6 +1073,7 @@ struct CollisionMonitor::Impl {
             pair_external_.push_back(category == PairCategory::External ? 1 : 0);
             pair_external_box_.push_back(category == PairCategory::ExternalBox ? 1 : 0);
             pair_intra_.push_back(category == PairCategory::IntraArm ? 1 : 0);
+            pair_gripper_.push_back(category == PairCategory::GripperGripper ? 1 : 0);
             pair_category_.push_back(categoryString(category));
             const Side sa = classify(a);
             const Side sb = classify(b);
@@ -989,11 +1085,16 @@ struct CollisionMonitor::Impl {
                 case PairCategory::IntraArm: ++n_intra; break;
                 case PairCategory::External: ++n_external; break;
                 case PairCategory::ExternalBox: ++n_external_box; break;
+                case PairCategory::GripperGripper: ++n_gripper; break;
             }
         };
-        // left <-> right (whole arms)
+        // left <-> right (whole arms); the two grippers' hulls against each other
+        // are their own class (excludable for a covered handover contact)
         for (auto a : li)
-            for (auto b : ri) tryAddPair(a, b, PairCategory::LeftRight);
+            for (auto b : ri)
+                tryAddPair(a, b, (isGripperGeometry(a) && isGripperGeometry(b))
+                                     ? PairCategory::GripperGripper
+                                     : PairCategory::LeftRight);
         // arm <-> stand (skip the bolted-on mount neighbors)
         for (const auto& arm : {li, ri}) {
             for (auto a : arm) {
@@ -1030,7 +1131,8 @@ struct CollisionMonitor::Impl {
                   << (have_arm_roots ? ", classify=frame-ancestry" : ", classify=name-substring(FALLBACK)")
                   << ") pairs=" << geom.collisionPairs.size()
                   << " [left-right=" << n_lr << " arm-stand=" << n_arm_stand
-                  << " intra-arm=" << n_intra << " external=" << n_external
+                  << " intra-arm=" << n_intra << " gripper-gripper=" << n_gripper
+                  << " external=" << n_external
                   << " external-box=" << n_external_box
                   << " disabled=" << n_disabled << "]"
                   << " disabled_collision_pairs=" << cfg.disabled_collision_pairs.size()
@@ -1071,9 +1173,15 @@ struct CollisionMonitor::Impl {
         double intra_min = std::numeric_limits<double>::infinity();
         double ext_min = std::numeric_limits<double>::infinity();
         double ext_box_min = std::numeric_limits<double>::infinity();
+        double grip_min = std::numeric_limits<double>::infinity();
         std::vector<double> ext_box_clearance(
             external_box_indices_.size(), std::numeric_limits<double>::infinity());
         bool hard = false;
+        bool hard_non_gripper = false;
+        bool hard_gripper = false;
+        // In-band flag per pair (d < its class's d_slow + hyst): these are always
+        // reported so an engaged row cannot drop out of the near list.
+        std::vector<char> in_band(np, 0);
         const bool enforce_external_boxes = !cfg.external_boxes.monitor_only;
         for (std::size_t k = 0; k < np; ++k) {
             const double d = gdata.distanceResults[k].min_distance;
@@ -1081,6 +1189,7 @@ struct CollisionMonitor::Impl {
             const bool ext = k < pair_external_.size() && pair_external_[k];
             const bool ext_box = k < pair_external_box_.size() && pair_external_box_[k];
             const bool intra = k < pair_intra_.size() && pair_intra_[k];
+            const bool grip = k < pair_gripper_.size() && pair_gripper_[k];
             if (ext_box) {
                 if (d < ext_box_min) ext_box_min = d;
                 const auto& cp = geom.collisionPairs[k];
@@ -1105,15 +1214,23 @@ struct CollisionMonitor::Impl {
             if (d < dmin) { dmin = d; kmin = k; }
             if (ext) {
                 if (d < ext_min) ext_min = d;
-                if (d < cfg.external_d_hard_m) hard = true;
+                if (d < cfg.external_d_hard_m) { hard = true; hard_non_gripper = true; }
+                in_band[k] = d < cfg.external_d_slow_m + cfg.external_hyst_m;
             } else if (ext_box) {
-                if (d < cfg.external_box_d_hard_m) hard = true;
+                if (d < cfg.external_box_d_hard_m) { hard = true; hard_non_gripper = true; }
+                in_band[k] = d < cfg.external_box_d_slow_m + cfg.external_box_hyst_m;
             } else if (intra) {
                 if (d < intra_min) intra_min = d;
-                if (d < cfg.intra_arm_d_hard_m) hard = true;
+                if (d < cfg.intra_arm_d_hard_m) { hard = true; hard_non_gripper = true; }
+                in_band[k] = d < cfg.intra_arm_d_slow_m + cfg.intra_arm_hyst_m;
+            } else if (grip) {
+                if (d < grip_min) grip_min = d;
+                if (d < cfg.gripper_gripper_d_hard_m) { hard = true; hard_gripper = true; }
+                in_band[k] = d < cfg.gripper_gripper_d_slow_m + cfg.gripper_gripper_hyst_m;
             } else {
                 if (d < self_min) self_min = d;
-                if (d < cfg.d_hard_m) hard = true;
+                if (d < cfg.d_hard_m) { hard = true; hard_non_gripper = true; }
+                in_band[k] = d < cfg.d_slow_m + cfg.hyst_m;
             }
         }
         v.min_clearance_m = dmin;
@@ -1121,11 +1238,29 @@ struct CollisionMonitor::Impl {
         v.intra_arm_min_clearance_m = intra_min;
         v.external_min_clearance_m = ext_min;
         v.external_box_min_clearance_m = ext_box_min;
+        v.gripper_gripper_min_clearance_m = grip_min;
         v.external_box_clearance_m = std::move(ext_box_clearance);
         v.hard_violation = hard;
-        const std::size_t K = std::min<std::size_t>(cfg.max_near_pairs, ds.size());
-        std::partial_sort(ds.begin(), ds.begin() + K, ds.end(),
-                          [](const auto& a, const auto& b) { return a.first < b.first; });
+        v.hard_violation_non_gripper = hard_non_gripper;
+        v.gripper_gripper_hard_violation = hard_gripper;
+        // Near list = every in-band pair + the K globally nearest, ascending.
+        std::sort(ds.begin(), ds.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        std::vector<std::size_t> sel;
+        sel.reserve(std::min<std::size_t>(ds.size(), static_cast<std::size_t>(std::max(0, cfg.max_near_pairs)) + 32));
+        {
+            std::size_t nearest_taken = 0;
+            const std::size_t K_nearest = static_cast<std::size_t>(std::max(0, cfg.max_near_pairs));
+            for (const auto& dk : ds) {
+                const std::size_t k = dk.second;
+                const bool band = in_band[k] != 0;
+                if (!band && nearest_taken >= K_nearest) continue;
+                sel.push_back(k);
+                if (band) ++v.near_band_count;
+                if (nearest_taken < K_nearest) ++nearest_taken;
+            }
+        }
+        const std::size_t K = sel.size();
 
         // Per-pair clearance Jacobian (Stage 1). computeDistances leaves data.oMi at
         // q_eval but does NOT compute joint Jacobians; do it once here for the K near
@@ -1147,9 +1282,14 @@ struct CollisionMonitor::Impl {
             return Jp;
         };
 
+        for (int c = 0; c < kDof; ++c) {
+            v.q_eval_deg[static_cast<std::size_t>(c)] = q_eval[left_qidx[c]] / kDeg2Rad;
+            v.q_eval_deg[static_cast<std::size_t>(kDof + c)] = q_eval[right_qidx[c]] / kDeg2Rad;
+        }
+        v.q_eval_valid = true;
         v.near.reserve(K);
         for (std::size_t i = 0; i < K; ++i) {
-            const std::size_t k = ds[i].second;
+            const std::size_t k = sel[i];
             const auto& cp = geom.collisionPairs[k];
             const auto& res = gdata.distanceResults[k];
             CollisionNearPair p;
@@ -1165,6 +1305,7 @@ struct CollisionMonitor::Impl {
             p.external = k < pair_external_.size() && pair_external_[k];
             p.external_box = k < pair_external_box_.size() && pair_external_box_[k];
             p.intra_arm = k < pair_intra_.size() && pair_intra_[k];
+            p.gripper_gripper = k < pair_gripper_.size() && pair_gripper_[k];
             // d_dot = n^T (v_b - v_a) = J_n * qdot. Slice into command left/right cols.
             const pinocchio::JointIndex ja = geom.geometryObjects[cp.first].parentJoint;
             const pinocchio::JointIndex jb = geom.geometryObjects[cp.second].parentJoint;
@@ -1336,30 +1477,39 @@ struct CollisionMonitor::Impl {
         pinThread();
         while (running.load(std::memory_order_relaxed)) {
             JointArray l, r;
-            bool ready;
             {
-                std::lock_guard<std::mutex> lk(in_mtx);
-                ready = has_targets;
+                std::unique_lock<std::mutex> lk(in_mtx);
+                // Wake on a new submission (or stop); the 2 ms bound only guards
+                // against a lost notification, it is not a polling cadence.
+                in_cv.wait_for(lk, std::chrono::milliseconds(2), [&] {
+                    return !running.load(std::memory_order_relaxed) ||
+                           (has_targets && submit_seq != consumed_seq);
+                });
+                if (!running.load(std::memory_order_relaxed)) break;
+                if (!(has_targets && submit_seq != consumed_seq)) continue;
+                consumed_seq = submit_seq;
                 l = left_deg;
                 r = right_deg;
             }
-            if (!ready) {
-                std::this_thread::sleep_for(std::chrono::microseconds(200));
-                continue;
-            }
-            publish(evalLocked(l, r));
+            const auto t0 = std::chrono::steady_clock::now();
+            CollisionVerdict v = evalLocked(l, r);
+            v.eval_ms = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - t0).count();
+            publish(std::move(v));
         }
     }
 
     void pinThread() {
-#if defined(__linux__)
-        if (cfg.monitor_core >= 0) {
-            cpu_set_t set;
-            CPU_ZERO(&set);
-            CPU_SET(cfg.monitor_core, &set);
-            pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+        if (cfg.monitor_core >= 0 && !pinCurrentThreadToCpu(cfg.monitor_core)) {
+            std::cerr << "[WARN] CollisionMonitor: could not pin the monitor thread to cpu"
+                      << cfg.monitor_core << " (verdict age will carry OS scheduling jitter)\n";
         }
-#endif
+        if (cfg.monitor_realtime_priority > 0 &&
+            !setCurrentThreadRealtimePriority(cfg.monitor_realtime_priority)) {
+            std::cerr << "[WARN] CollisionMonitor: could not set SCHED_FIFO priority "
+                      << cfg.monitor_realtime_priority
+                      << " (rtprio rlimit?); the monitor stays a CFS thread\n";
+        }
     }
 };
 
@@ -1375,6 +1525,8 @@ void CollisionMonitor::submitTargets(const JointArray& left_deg, const JointArra
     impl_->has_left = true;
     impl_->has_right = true;
     impl_->has_targets = true;
+    ++impl_->submit_seq;
+    impl_->in_cv.notify_one();
 }
 
 void CollisionMonitor::submitArmTarget(ArmId arm, const JointArray& q_deg) {
@@ -1394,6 +1546,10 @@ void CollisionMonitor::submitArmTarget(ArmId arm, const JointArray& q_deg) {
         impl_->has_right = true;
     }
     impl_->has_targets = impl_->has_left && impl_->has_right;
+    if (impl_->has_targets) {
+        ++impl_->submit_seq;
+        impl_->in_cv.notify_one();
+    }
 }
 
 CollisionVerdict CollisionMonitor::latest() const { return impl_->load(); }
@@ -1478,6 +1634,10 @@ void CollisionMonitor::start() {
 
 void CollisionMonitor::stop() {
     if (!impl_->running.exchange(false)) return;
+    {
+        std::lock_guard<std::mutex> lk(impl_->in_mtx);
+        impl_->in_cv.notify_all();
+    }
     if (impl_->thread.joinable()) impl_->thread.join();
 }
 

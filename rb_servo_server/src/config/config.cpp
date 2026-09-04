@@ -1416,6 +1416,95 @@ void validateConfig(const DualArmConfig& cfg) {
             throw std::runtime_error(
                 "safety.self_collision.mesh.d_slow_m must be >= d_hard_m");
         }
+        // THE BRAKING INVARIANT, checked instead of commented (2026-09-04). The
+        // barrier's allowance is sqrt(2 a (d - d_hard)), so a head-on approach at
+        // the fastest commanded TCP speed v can only be braked to zero at the hard
+        // floor if the slow zone is at least v^2 / (2 a) wide. This was violated
+        // silently for weeks (stack_real.yaml, 2026-08-26 note: 30 mm against a
+        // required 67 mm) and the measured consequence was the arm reaching d_hard
+        // to three decimals. v is the largest max_linear_velocity_m_s any
+        // TcpPoseTarget profile (SMD or Ruckig follower) can command.
+        {
+            // Only stages that are ENABLED can command a speed: a disabled follower's
+            // default ceiling is not a ceiling anything runs at.
+            double v_max = 0.0;
+            const auto consider = [&](const PoseTrackSmdConfig& smd, const RuckigFollowerConfig& rf) {
+                if (smd.enable) v_max = std::max(v_max, smd.max_linear_velocity_m_s);
+                if (rf.enable) v_max = std::max(v_max, rf.max_linear_velocity_m_s);
+            };
+            consider(cfg.cartesian_control.pose_track_smd, cfg.cartesian_control.ruckig_follower);
+            for (const auto& prof : cfg.cartesian_control.tcp_pose_target_profiles) {
+                consider(prof.pose_track_smd, prof.ruckig_follower);
+            }
+            const auto need = [&](double d_hard, double a) { return d_hard + v_max * v_max / (2.0 * a); };
+            const double self_need = need(m.d_hard_m, m.a_brake_m_s2);
+            if (v_max > 0.0 && m.d_slow_m + 1e-9 < self_need) {
+                throw std::runtime_error(
+                    "safety.self_collision.mesh.d_slow_m (" + std::to_string(m.d_slow_m) +
+                    ") cannot brake the commanded TCP ceiling " + std::to_string(v_max) +
+                    " m/s before d_hard_m: need >= d_hard_m + v^2/(2 a_brake) = " +
+                    std::to_string(self_need));
+            }
+            const double gg_hard = m.gripper_gripper.d_hard_m > 0.0 ? m.gripper_gripper.d_hard_m : m.d_hard_m;
+            const double gg_slow = m.gripper_gripper.d_slow_m > 0.0 ? m.gripper_gripper.d_slow_m : m.d_slow_m;
+            const double gg_a = m.gripper_gripper.a_brake_m_s2 > 0.0 ? m.gripper_gripper.a_brake_m_s2 : m.a_brake_m_s2;
+            if (gg_slow < gg_hard) {
+                throw std::runtime_error(
+                    "safety.self_collision.mesh.gripper_gripper.d_slow_m must be >= d_hard_m");
+            }
+            if (v_max > 0.0 && gg_slow + 1e-9 < need(gg_hard, gg_a)) {
+                throw std::runtime_error(
+                    "safety.self_collision.mesh.gripper_gripper.d_slow_m (" + std::to_string(gg_slow) +
+                    ") cannot brake the commanded TCP ceiling " + std::to_string(v_max) +
+                    " m/s before its d_hard_m: need >= " + std::to_string(need(gg_hard, gg_a)));
+            }
+            // Intra-arm keeps a deliberately tight zone (structural pairs sit at
+            // 22.5 mm all run); its closing speeds are joint-bounded, not TCP-bounded,
+            // so this is reported, not refused.
+            const double ia_hard = m.intra_arm.d_hard_m > 0.0 ? m.intra_arm.d_hard_m : m.d_hard_m;
+            const double ia_slow = m.intra_arm.d_slow_m > 0.0 ? m.intra_arm.d_slow_m : m.d_slow_m;
+            const double ia_a = m.intra_arm.a_brake_m_s2 > 0.0 ? m.intra_arm.a_brake_m_s2 : m.a_brake_m_s2;
+            if (v_max > 0.0 && ia_slow + 1e-9 < need(ia_hard, ia_a)) {
+                std::cerr << "[WARN] safety.self_collision.mesh.intra_arm.d_slow_m " << ia_slow
+                          << " m brakes at most " << std::sqrt(2.0 * ia_a * (ia_slow - ia_hard))
+                          << " m/s of closing speed (TCP ceiling " << v_max
+                          << " m/s); accepted because same-arm closing is joint-bounded\n";
+            }
+        }
+        for (const auto& [v, name] : {
+                 std::pair<double, const char*>{m.gripper_gripper.d_hard_m, "safety.self_collision.mesh.gripper_gripper.d_hard_m"},
+                 std::pair<double, const char*>{m.gripper_gripper.d_slow_m, "safety.self_collision.mesh.gripper_gripper.d_slow_m"},
+                 std::pair<double, const char*>{m.gripper_gripper.a_brake_m_s2, "safety.self_collision.mesh.gripper_gripper.a_brake_m_s2"},
+                 std::pair<double, const char*>{m.gripper_gripper.hyst_m, "safety.self_collision.mesh.gripper_gripper.hyst_m"},
+                 std::pair<double, const char*>{m.gripper_gripper.recover_speed_m_s, "safety.self_collision.mesh.gripper_gripper.recover_speed_m_s"}}) {
+            if (!std::isfinite(v)) throw std::runtime_error(std::string(name) + " must be finite");
+        }
+        if (m.monitor_realtime_priority < 0 || m.monitor_realtime_priority > 99) {
+            throw std::runtime_error(
+                "safety.self_collision.mesh.monitor_realtime_priority must be 0..99");
+        }
+        if (m.monitor_core >= 0 && m.monitor_realtime_priority == 0) {
+            throw std::runtime_error(
+                "safety.self_collision.mesh.monitor_core requires monitor_realtime_priority > 0 "
+                "(a pinned CFS thread still yields to anything that lands on its core)");
+        }
+        if (m.monitor_core >= 0) {
+            for (const auto& [core, name] : {
+                     std::pair<int, const char*>{cfg.servo.cpu_core, "servo.cpu_core"},
+                     std::pair<int, const char*>{cfg.servo.worker_cpu_core_left, "servo.worker_cpu_core_left"},
+                     std::pair<int, const char*>{cfg.servo.worker_cpu_core_right, "servo.worker_cpu_core_right"}}) {
+                if (core >= 0 && core == m.monitor_core) {
+                    throw std::runtime_error(
+                        std::string("safety.self_collision.mesh.monitor_core must not equal ") + name +
+                        " (the monitor evaluates for ~1.5 ms per tick and would starve it)");
+                }
+            }
+        }
+        if (m.projection_max_sweeps < std::max(1, m.projection_iterations)) {
+            throw std::runtime_error(
+                "safety.self_collision.mesh.projection_max_sweeps must be >= projection_iterations");
+        }
+        validateNonNegativeFinite(m.projection_tol_rad_s, "safety.self_collision.mesh.projection_tol_rad_s");
         for (const auto& rule : m.disabled_collision_pairs) {
             if (rule.pattern_a.empty() || rule.pattern_b.empty()) {
                 throw std::runtime_error(
@@ -3242,7 +3331,11 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                     "latency_s",
                     "max_staleness_s",
                     "monitor_core",
+                    "monitor_realtime_priority",
                     "max_near_pairs",
+                    "projection_max_sweeps",
+                    "projection_tol_rad_s",
+                    "gripper_gripper",
                     "viz_near_pairs_m",
                     "extra_collision",
                     "ground_plane",
@@ -3334,7 +3427,25 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 if (has(m, "latency_s")) mc.latency_s = asDouble(m["latency_s"], "safety.self_collision.mesh.latency_s");
                 if (has(m, "max_staleness_s")) mc.max_staleness_s = asDouble(m["max_staleness_s"], "safety.self_collision.mesh.max_staleness_s");
                 if (has(m, "monitor_core")) mc.monitor_core = asInt(m["monitor_core"], "safety.self_collision.mesh.monitor_core");
+                if (has(m, "monitor_realtime_priority")) mc.monitor_realtime_priority = asInt(m["monitor_realtime_priority"], "safety.self_collision.mesh.monitor_realtime_priority");
                 if (has(m, "max_near_pairs")) mc.max_near_pairs = asInt(m["max_near_pairs"], "safety.self_collision.mesh.max_near_pairs");
+                if (has(m, "projection_max_sweeps")) mc.projection_max_sweeps = asInt(m["projection_max_sweeps"], "safety.self_collision.mesh.projection_max_sweeps");
+                if (has(m, "projection_tol_rad_s")) mc.projection_tol_rad_s = asDouble(m["projection_tol_rad_s"], "safety.self_collision.mesh.projection_tol_rad_s");
+                if (has(m, "gripper_gripper")) {
+                    const YAML::Node g = m["gripper_gripper"];
+                    if (!g.IsMap()) fail("safety.self_collision.mesh.gripper_gripper must be a map", g);
+                    validateAllowedKeys(g, {
+                        "exclude_when_force_covered", "d_hard_m", "d_slow_m", "a_brake_m_s2",
+                        "hyst_m", "recover_speed_m_s",
+                    }, "safety.self_collision.mesh.gripper_gripper");
+                    auto& gg = mc.gripper_gripper;
+                    if (has(g, "exclude_when_force_covered")) gg.exclude_when_force_covered = asBool(g["exclude_when_force_covered"], "safety.self_collision.mesh.gripper_gripper.exclude_when_force_covered");
+                    if (has(g, "d_hard_m")) gg.d_hard_m = asDouble(g["d_hard_m"], "safety.self_collision.mesh.gripper_gripper.d_hard_m");
+                    if (has(g, "d_slow_m")) gg.d_slow_m = asDouble(g["d_slow_m"], "safety.self_collision.mesh.gripper_gripper.d_slow_m");
+                    if (has(g, "a_brake_m_s2")) gg.a_brake_m_s2 = asDouble(g["a_brake_m_s2"], "safety.self_collision.mesh.gripper_gripper.a_brake_m_s2");
+                    if (has(g, "hyst_m")) gg.hyst_m = asDouble(g["hyst_m"], "safety.self_collision.mesh.gripper_gripper.hyst_m");
+                    if (has(g, "recover_speed_m_s")) gg.recover_speed_m_s = asDouble(g["recover_speed_m_s"], "safety.self_collision.mesh.gripper_gripper.recover_speed_m_s");
+                }
                 if (has(m, "viz_near_pairs_m")) mc.viz_near_pairs_m = asDouble(m["viz_near_pairs_m"], "safety.self_collision.mesh.viz_near_pairs_m");
                 if (has(m, "extra_collision")) {
                     const YAML::Node arr = m["extra_collision"];

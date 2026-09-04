@@ -706,7 +706,7 @@ safety:
         # downstream collisions from link6/attachment_site.
         - ["*left*link4*", "*left*link6*"]
         - ["*right*link4*", "*right*link6*"]
-      d_hard_m: 0.025   # 2026-06-19: 5mm -> 15mm self-collision margin (hard floor)
+      d_hard_m: 0.025   # hard floor (25 mm since 2026-06-19; the old "5mm -> 15mm" note was stale)
       # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
       # can brake a head-on approach at the command ceiling before the hard floor.
       # 2026-08-26: THIS INVARIANT WAS BEING VIOLATED, and the comment below it had gone
@@ -751,7 +751,26 @@ safety:
       # 2026-07-02: OS 배정(-1)으로 전환. 이전(2026-06-19)에는 전용 코어(4)에 핀했으나,
       # 이제 커널 isolcpus=3로 servo 코어가 스케줄러 도메인에서 제외되어 OS가 collision
       # 스레드를 cpu3에 올릴 수 없음 — tools/rt_core_isolation.sh 적용(재부팅) 후에만 -1이 안전.
-      monitor_core: -1
+      # 2026-09-04: cpu4, SCHED_FIFO 50. The monitor was the only safety-critical
+      # thread with no core and no RT priority (CFS among the GUI, the runner and the
+      # policy servers, max_staleness_s absorbing the jitter); it is now event-driven
+      # (one evaluation per submitted target, ~1.5 ms) instead of a busy loop. cpu4
+      # is added to the kernel isolation set (tools/rt_core_isolation.sh: isolcpus
+      # 1-4; camera_server moved to 5-7). The loader refuses this core if it equals
+      # servo.cpu_core or a worker core, and refuses a pin without a priority.
+      monitor_core: 4
+      monitor_realtime_priority: 50
+      # Gauss-Seidel: sweep until converged (tol) rather than 3 fixed sweeps whose
+      # answer depended on the noisy row order.
+      projection_max_sweeps: 50
+      projection_tol_rad_s: 1.0e-6
+      # The nine cross-arm gripper-hull pairs as their own class. Margins inherit
+      # the self set (unset). exclude_when_force_covered: while force control
+      # covers BOTH arms the rows are not built (the handover contact belongs to
+      # the F/T sensor); any coverage loss restores the margins on that tick, and
+      # inside the floor that means no deeper, opening free -- never a latch.
+      gripper_gripper:
+        exclude_when_force_covered: true
       # 항목 6: URDF에 없는 collision geometry(손목 카메라/케이블/작업 테이블)를
       # 추가 검사. 팔 프레임에 붙이면 그 팔로 자동 분류(좌/우), stand/world면 정적
       # 장애물로 양팔과 페어링. shape: box|sphere|capsule|cylinder.

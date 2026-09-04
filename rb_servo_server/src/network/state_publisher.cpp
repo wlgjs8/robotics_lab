@@ -1273,6 +1273,13 @@ nlohmann::json armStateJson(
         {"mode", toString(command.mode)},
         {"gripper", gripperFeedbackJson(gripper_feedback)},
         {"q_actual_deg", jointArrayJson(state.q_actual_deg)},
+        {"box_tcp_pos", state.box_tcp_valid ? nlohmann::json(state.box_tcp_pos) : nlohmann::json(nullptr)},
+        {"box_tcp_ref", state.box_tcp_valid ? nlohmann::json(state.box_tcp_ref) : nlohmann::json(nullptr)},
+        {"box_link_parameter", state.box_link_parameter_count > 0
+            ? nlohmann::json(std::vector<double>(
+                  state.box_link_parameter.begin(),
+                  state.box_link_parameter.begin() + state.box_link_parameter_count))
+            : nlohmann::json(nullptr)},
         {"q_target_deg", jointArrayJson(state.q_target_deg)},
         {"q_ref_deg", jointArrayJson(state.q_target_deg)},
         {"q_actual_valid", qActualValidForPublication(state)},
@@ -1791,6 +1798,20 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
             }
             self_collision["external_box_clearance_m"] = std::move(arr);
         }
+        self_collision["verdict_age_ms"] = snapshot.self_collision_verdict_age_ms;
+        self_collision["eval_ms"] = snapshot.self_collision_eval_ms;
+        self_collision["near_count"] = snapshot.self_collision_near_count;
+        const auto finite_or_null = [](double v) {
+            return std::isfinite(v) ? nlohmann::json(v) : nlohmann::json(nullptr);
+        };
+        self_collision["self_min_clearance_m"] =
+            finite_or_null(snapshot.self_collision_self_min_clearance_m);
+        self_collision["intra_arm_min_clearance_m"] =
+            finite_or_null(snapshot.self_collision_intra_arm_min_clearance_m);
+        self_collision["gripper_min_clearance_m"] =
+            finite_or_null(snapshot.self_collision_gripper_min_clearance_m);
+        self_collision["gripper_excluded"] = snapshot.self_collision_gripper_excluded;
+        self_collision["clamp_count"] = snapshot.self_collision_clamp_count;
         self_collision["left_bone"] = snapshot.self_collision_left_bone;
         self_collision["right_bone"] = snapshot.self_collision_right_bone;
         self_collision["pair"] = snapshot.self_collision_pair.empty()

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 #include "rb_servo/core/types.hpp"
 #include "rb_servo/robot/backend_result.hpp"
 
@@ -35,6 +36,9 @@ public:
     virtual ArmId armId() const = 0;
     virtual std::string name() const = 0;
     virtual std::optional<BackendTransportTelemetry> transportTelemetry() const { return std::nullopt; }
+    // The controller's own link-parameter (calibrated DH) table if the backend
+    // read one at connect; empty for hardware-free backends. Logging only.
+    virtual std::vector<double> boxLinkParameter() const { return {}; }
 };
 
 }  // namespace rb_servo

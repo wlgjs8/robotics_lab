@@ -22,10 +22,10 @@ services:
       - /run/udev:/run/udev:ro
       - ./camera_server/config:/app/config:ro
       - ./camera_server/episodes:/data/episodes
-    # 호스트 데스크톱/입력 응답성 보호: 캡처를 코어 4/5/6에 격리(0/1/2/7은 GNOME/Xorg/
-    # USB-IRQ용, 3은 서보 RT isolcpus 격리). live 조정은
-    # `docker update --cpuset-cpus=... camera_server`.
-    cpuset: "4,5,6"
+    # 호스트 데스크톱/입력 응답성 보호: 캡처를 코어 5/6/7에 격리. 0 은 housekeeping,
+    # 1/2 는 팔 워커, 3 은 서보 루프, 4 는 self-collision 모니터(2026-09-04, 전부
+    # isolcpus 1-4). live 조정은 `docker update --cpuset-cpus=... camera_server`.
+    cpuset: "5,6,7"
     # 이미지 CMD 는 triple_realsense.yaml 을 하드코딩하고, main.cpp 는 --config(argv)를
     # CAMERA_SERVER_CONFIG(env)보다 우선한다. command 를 여기서 덮어쓰지 않으면
     # CAMERA_CONFIG 를 아무리 바꿔도 항상 triple 리그가 로드된다(head 자리표시자 serial 로 즉사).

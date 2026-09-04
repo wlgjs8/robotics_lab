@@ -1023,6 +1023,89 @@ bool testIntraArmSelfCollisionConfig() {
     return true;
 }
 
+
+bool testSelfCollisionMonitorThreadAndGripperConfig() {
+    // 2026-09-04: monitor core + FIFO priority, convergence bound, gripper class.
+    const std::string valid_path = writeTempConfig(
+        "self-collision-monitor-thread-valid",
+        selfCollisionMeshConfigBody(
+            "      monitor_core: 4\n"
+            "      monitor_realtime_priority: 50\n"
+            "      projection_max_sweeps: 40\n"
+            "      projection_tol_rad_s: 2.0e-6\n"
+            "      gripper_gripper:\n"
+            "        exclude_when_force_covered: true\n"
+            "        d_hard_m: 0.008\n"
+        )
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(valid_path);
+    ::unlink(valid_path.c_str());
+    const auto& mesh = cfg.safety.self_collision.mesh;
+    RB_CHECK(mesh.monitor_core == 4);
+    RB_CHECK(mesh.monitor_realtime_priority == 50);
+    RB_CHECK(mesh.projection_max_sweeps == 40);
+    RB_CHECK(near(mesh.projection_tol_rad_s, 2.0e-6));
+    RB_CHECK(mesh.gripper_gripper.exclude_when_force_covered);
+    RB_CHECK(near(mesh.gripper_gripper.d_hard_m, 0.008));
+    RB_CHECK(mesh.gripper_gripper.d_slow_m < 0.0);  // unset: inherits the self set at runtime
+
+    // A pinned monitor without an RT priority is the trap the worker cores refuse too.
+    const std::string pin_no_prio = writeTempConfig(
+        "self-collision-monitor-pin-no-priority",
+        selfCollisionMeshConfigBody("      monitor_core: 4\n"));
+    RB_CHECK(loadRejects(pin_no_prio));
+    ::unlink(pin_no_prio.c_str());
+
+    const std::string bad_prio = writeTempConfig(
+        "self-collision-monitor-bad-priority",
+        selfCollisionMeshConfigBody("      monitor_realtime_priority: 120\n"));
+    RB_CHECK(loadRejects(bad_prio));
+    ::unlink(bad_prio.c_str());
+
+    const std::string bad_sweeps = writeTempConfig(
+        "self-collision-monitor-bad-sweeps",
+        selfCollisionMeshConfigBody("      projection_iterations: 3\n      projection_max_sweeps: 2\n"));
+    RB_CHECK(loadRejects(bad_sweeps));
+    ::unlink(bad_sweeps.c_str());
+
+    const std::string bad_gripper_key = writeTempConfig(
+        "self-collision-gripper-unknown-key",
+        selfCollisionMeshConfigBody("      gripper_gripper:\n        margin_m: 0.01\n"));
+    RB_CHECK(loadRejects(bad_gripper_key));
+    ::unlink(bad_gripper_key.c_str());
+
+    const std::string gripper_slow_below_hard = writeTempConfig(
+        "self-collision-gripper-slow-below-hard",
+        selfCollisionMeshConfigBody("      gripper_gripper:\n        d_hard_m: 0.030\n        d_slow_m: 0.020\n"));
+    RB_CHECK(loadRejects(gripper_slow_below_hard));
+    ::unlink(gripper_slow_below_hard.c_str());
+    return true;
+}
+
+bool testSelfCollisionBrakingInvariantConfig() {
+    // d_slow >= d_hard + v_max^2 / (2 a_brake) is checked, not commented. The fixture
+    // has d_hard 0.010 / d_slow 0.035 / a_brake 4.0 (default): a 0.50 m/s SMD stage
+    // needs 0.041 (rejected), a 0.40 m/s one needs 0.030 (accepted). A DISABLED
+    // follower's ceiling does not count.
+    const auto with_follower = [](const std::string& enable, const std::string& v) {
+        return selfCollisionMeshConfigBody("") +
+               "cartesian_control:\n"
+               "  pose_track_smd:\n"
+               "    enable: " + enable + "\n"
+               "    max_linear_velocity_m_s: " + v + "\n";
+    };
+    const std::string too_fast = writeTempConfig("self-collision-brake-too-fast", with_follower("true", "0.50"));
+    RB_CHECK(loadRejects(too_fast));
+    ::unlink(too_fast.c_str());
+    const std::string ok = writeTempConfig("self-collision-brake-ok", with_follower("true", "0.40"));
+    (void)rb_servo::loadConfigFromYaml(ok);
+    ::unlink(ok.c_str());
+    const std::string disabled = writeTempConfig("self-collision-brake-disabled", with_follower("false", "0.50"));
+    (void)rb_servo::loadConfigFromYaml(disabled);
+    ::unlink(disabled.c_str());
+    return true;
+}
+
 bool testInitMotionPlannerConfigExt() {
     const std::string valid_path = writeTempConfig(
         "init-motion-valid",
@@ -1561,6 +1644,8 @@ int main() {
     if (!testRoiBoxInvalidConfigRejects()) return 1;
     if (!testDisabledCollisionPairsConfig()) return 1;
     if (!testIntraArmSelfCollisionConfig()) return 1;
+    if (!testSelfCollisionMonitorThreadAndGripperConfig()) return 1;
+    if (!testSelfCollisionBrakingInvariantConfig()) return 1;
     if (!testInitMotionPlannerConfigExt()) return 1;
     if (!testRuckigFollowerFallbackPolicyConfig()) return 1;
     if (!testRuckigFollowerControllerConfig()) return 1;

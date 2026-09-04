@@ -454,6 +454,16 @@ RobotState mapRbpodoSystemStateSnapshot(
     // own axes (see RbpodoSystemStateSnapshot::eft) - the axis basis that turns them
     // into a flange-aligned wrench lives in config and is applied by FtPipeline, not
     // here, because it is a per-machine MEASUREMENT and this decode is wire format.
+    // The box's own TCP kinematics, raw (see RobotState::box_tcp_pos). tcp_pos /
+    // tcp_ref precede the eft fields in the frame, so a frame that carries eft
+    // carries these; a short frame leaves them as padding like eft.
+    out_state.box_tcp_pos = snapshot.tcp_pos;
+    out_state.box_tcp_ref = snapshot.tcp_ref;
+    out_state.box_tcp_valid = snapshot.eft_in_frame &&
+        std::all_of(snapshot.tcp_pos.begin(), snapshot.tcp_pos.end(),
+                    [](double v) { return std::isfinite(v); }) &&
+        std::all_of(snapshot.tcp_ref.begin(), snapshot.tcp_ref.end(),
+                    [](double v) { return std::isfinite(v); });
     out_state.eft_wrench.fx = snapshot.eft[0];
     out_state.eft_wrench.fy = snapshot.eft[1];
     out_state.eft_wrench.fz = snapshot.eft[2];
@@ -622,6 +632,10 @@ RbpodoSystemStateSnapshot snapshotFromSystemState(const rb::podo::SystemState& r
     for (int i = 0; i < kDof; ++i) {
         snapshot.q_actual_deg[static_cast<std::size_t>(i)] = rb_state.sdata.jnt_ang[i];
         snapshot.q_target_deg[static_cast<std::size_t>(i)] = rb_state.sdata.jnt_ref[i];
+    }
+    for (int i = 0; i < 6; ++i) {
+        snapshot.tcp_pos[static_cast<std::size_t>(i)] = static_cast<double>(rb_state.sdata.tcp_pos[i]);
+        snapshot.tcp_ref[static_cast<std::size_t>(i)] = static_cast<double>(rb_state.sdata.tcp_ref[i]);
     }
     snapshot.eft[0] = static_cast<double>(rb_state.sdata.eft_fx);
     snapshot.eft[1] = static_cast<double>(rb_state.sdata.eft_fy);
@@ -845,6 +859,9 @@ struct RbpodoBackend::Impl {
     // Control-box command-queue occupancy from the RBACK ACK stream. Reset on
     // (re)initialize so a reconnect never reports a pre-reconnect fill.
     RbpodoQueueAckTelemetry queue_ack;
+    // The box's link-parameter (calibrated DH) answer, read once at connect.
+    // LOGGING ONLY: nothing in the server consumes it yet (2026-09-04).
+    std::vector<double> box_link_parameter;
 
 #ifdef RB_SERVO_ENABLE_RBPODO
     std::unique_ptr<rb::podo::Cobot<>> robot;
@@ -879,6 +896,86 @@ RbpodoBackend::RbpodoBackend(ArmId arm_id, const BackendConfig& config)
 }
 
 RbpodoBackend::~RbpodoBackend() = default;
+
+// THE BOX'S CALIBRATED DH, read the way controller-manager reads it (Arm::
+// sync_tool_info): the text command `get_link_parameter()` on the command
+// channel, answered as `link_parameter = [v0, v1, ...]`. On both RB5-850E boxes
+// (firmware 26071103, measured 2026-08-16 by controller-manager and again by this
+// log line) the answer is eight values, slots 0..5 = J2.alpha J3.alpha J1.d J2.a
+// J3.a J4.d (deg / mm), slots 6-7 reserved. The only cell that differs from the
+// URDF's nominal table is J1.d (165.5 vs 169.2 mm: a 3.7 mm shift of the whole
+// arm along its base z). LOGGING ONLY: the server keeps running its URDF; this
+// line plus the box_tcp_* columns are the evidence for deciding whether to adopt
+// it. Cold path (connect), never on a tick.
+void RbpodoBackend::queryBoxLinkParameter() {
+#ifdef RB_SERVO_ENABLE_RBPODO
+    impl_->box_link_parameter.clear();
+    if (!impl_->robot) return;
+    static constexpr const char* kKey = "link_parameter";
+    const auto has_key = [](const rb::podo::Response& r) {
+        return r.raw().find(kKey) != std::string::npos;
+    };
+    std::string payload;
+    try {
+        rb::podo::ResponseCollector responses;
+        const double timeout = std::max(0.2, impl_->config.command_timeout_sec);
+        impl_->robot->eval(responses, "get_link_parameter()", timeout, false);
+        // The value line is an Info response that may land before or after the ack;
+        // wait_until consumes the collector and keeps reading the socket for it.
+        rb::podo::ResponseCollector waited;
+        waited.swap_responses(responses);
+        waited.set_flag(rb::podo::ResponseCollector::EnableCheckOldResponses);
+        const auto ret = impl_->robot->wait_until(waited, has_key, 0.5, false);
+        (void)ret;
+        for (const auto& r : waited) {
+            if (has_key(r)) { payload = r.raw(); break; }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[WARN] RbpodoBackend " << impl_->config.name
+                  << ": get_link_parameter() failed (" << e.what() << "); box DH not logged\n";
+        return;
+    }
+    if (payload.empty()) {
+        std::cerr << "[WARN] RbpodoBackend " << impl_->config.name
+                  << ": no link_parameter reply within 0.5 s; box DH not logged\n";
+        return;
+    }
+    const std::size_t lb = payload.find('[');
+    const std::size_t rb = payload.find(']', lb == std::string::npos ? 0 : lb);
+    const std::string body = (lb != std::string::npos && rb != std::string::npos && rb > lb)
+        ? payload.substr(lb + 1, rb - lb - 1) : payload.substr(payload.find(kKey) + std::strlen(kKey));
+    const char* c = body.c_str();
+    while (*c) {
+        char* e = nullptr;
+        const double v = std::strtod(c, &e);
+        if (e == c) { ++c; continue; }
+        impl_->box_link_parameter.push_back(v);
+        c = e;
+    }
+    std::ostringstream line;
+    line << "[INFO] RbpodoBackend " << impl_->config.name << ": box link_parameter ("
+         << impl_->box_link_parameter.size() << " values):";
+    for (double v : impl_->box_link_parameter) line << ' ' << v;
+    if (impl_->box_link_parameter.size() == 8) {
+        // RB5-850E slot map (controller-manager platforms/chimpanzee/params-presets/models/rb5-850e.yaml).
+        static constexpr const char* kSlot[6] = {"J2.alpha_deg", "J3.alpha_deg", "J1.d_mm",
+                                                 "J2.a_mm", "J3.a_mm", "J4.d_mm"};
+        static constexpr double kUrdfNominal[6] = {0.0, 0.0, 169.20, 425.00, 392.00, -110.70};
+        line << "  | vs URDF nominal:";
+        for (int i = 0; i < 6; ++i) {
+            const double d = impl_->box_link_parameter[static_cast<std::size_t>(i)] - kUrdfNominal[i];
+            if (std::abs(d) > 1e-6) line << ' ' << kSlot[i] << ' ' << std::showpos << d << std::noshowpos;
+        }
+    } else {
+        line << "  | unknown slot layout (not the 8-value RB5-850E answer) -- values logged only";
+    }
+    std::cerr << line.str() << "\n";
+#endif
+}
+
+std::vector<double> RbpodoBackend::boxLinkParameter() const {
+    return impl_->box_link_parameter;
+}
 
 BackendResult<RobotState> RbpodoBackend::connect() {
     const uint64_t start = nowSteadyNs();
@@ -937,6 +1034,7 @@ BackendResult<RobotState> RbpodoBackend::connect() {
             );
         }
         impl_->connected = true;
+        queryBoxLinkParameter();
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
         RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
         mapped.acquisition_sequence = ++impl_->state_acquisition_sequence;

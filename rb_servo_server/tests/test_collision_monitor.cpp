@@ -1077,6 +1077,205 @@ static bool runExternalBoxBarrierRouting() {
     return true;
 }
 
+
+// 2026-09-04: gripper<->gripper class routing + exclusion, and configuration-based
+// clearance extrapolation (ConstraintBuildOptions).
+static bool runGripperClassAndExtrapolation() {
+    CollisionMonitorConfig cfg;
+    cfg.d_hard_m = 0.010;
+    cfg.d_slow_m = 0.030;
+    cfg.a_brake_m_s2 = 3.0;
+    cfg.hyst_m = 0.010;
+    cfg.gripper_gripper_d_hard_m = 0.010;
+    cfg.gripper_gripper_d_slow_m = 0.030;
+    cfg.gripper_gripper_a_brake_m_s2 = 3.0;
+    cfg.gripper_gripper_hyst_m = 0.010;
+    std::array<double, kDof> jl{};
+    jl[0] = -1.0;  // +q on left joint0 CLOSES the gap (1 m per rad)
+    std::array<double, kDof> jr{};
+    std::unordered_set<std::uint64_t> engaged;
+    std::vector<VelocityConstraint> cons;
+
+    // A gripper pair inside the band: a row of its own class, unless excluded.
+    CollisionVerdict grip = makePairVerdict(0.020, 0.0, jl, jr);
+    grip.near.front().gripper_gripper = true;
+    buildCollisionConstraints(grip, cfg, 0.0, cons, &engaged);
+    RB_CHECK(cons.size() == 1 && cons[0].klass == ConstraintClass::GripperGripper);
+    RB_CHECK(engaged.size() == 1);
+    cons.clear();
+    ConstraintBuildOptions excl;
+    excl.exclude_gripper_gripper = true;
+    buildCollisionConstraints(grip, cfg, 0.0, cons, &engaged, excl);
+    RB_CHECK(cons.empty() && engaged.empty());  // no row, and no longer "engaged"
+    // A non-gripper pair is untouched by the exclusion.
+    buildCollisionConstraints(makePairVerdict(0.020, 0.0, jl, jr), cfg, 0.0, cons, &engaged, excl);
+    RB_CHECK(cons.size() == 1 && cons[0].klass == ConstraintClass::Self);
+    cons.clear();
+    engaged.clear();
+
+    // Extrapolation by configuration: the verdict was evaluated at q_eval = 0; the
+    // command starts from q = +0.1 rad on the closing joint, so the clearance the
+    // row must use is d + Jn.dq = 0.050 - 0.100 = -0.050 (already through the
+    // floor), even though rate*age would have said 0.050 (no row).
+    CollisionVerdict far = makePairVerdict(0.050, 0.0, jl, jr);
+    far.q_eval_valid = true;
+    far.q_eval_deg.fill(0.0);
+    buildCollisionConstraints(far, cfg, 0.0, cons, &engaged);
+    RB_CHECK(cons.empty());
+    JointArray ql{};
+    ql[0] = 0.1 * 180.0 / 3.14159265358979323846;
+    JointArray qr{};
+    ConstraintBuildOptions by_q;
+    by_q.left_q_deg = &ql;
+    by_q.right_q_deg = &qr;
+    buildCollisionConstraints(far, cfg, 0.0, cons, &engaged, by_q);
+    RB_CHECK(cons.size() == 1);
+    RB_CHECK(std::abs(cons[0].d_now - (-0.050)) < 1e-9);
+    RB_CHECK(cons[0].xi == -cfg.recover_speed_m_s);  // below the floor: block deeper
+    // Without q_eval in the verdict the option falls back to rate * age.
+    cons.clear();
+    engaged.clear();
+    CollisionVerdict legacy = makePairVerdict(0.050, -1.0, jl, jr);  // closing 1 m/s
+    buildCollisionConstraints(legacy, cfg, 0.025, cons, &engaged, by_q);
+    RB_CHECK(cons.size() == 1 && std::abs(cons[0].d_now - 0.025) < 1e-9);
+    std::cout << "gripper class + exclusion + q-extrapolation OK\n";
+    return true;
+}
+
+// The solve sweeps to convergence. Two rows at 45 deg that each undo part of
+// the other's fix converge geometrically (ratio 1/2 per sweep): three fixed
+// sweeps leave a visible violation, the convergent solve does not, and it
+// reports how many sweeps it took.
+static bool runSolverConvergence() {
+    const double dt = 0.002;
+    const double rad2deg = 180.0 / 3.14159265358979323846;
+    const JointArray zero{0, 0, 0, 0, 0, 0};
+    const JointArray big{1e7, 1e7, 1e7, 1e7, 1e7, 1e7};
+    const auto make_rows = []() {
+        std::vector<VelocityConstraint> cons(2);
+        cons[0].J[0] = 1.0;                       // qdot0 >= 0
+        cons[0].xi = 0.0;
+        cons[0].d_now = 0.001;
+        const double c = std::cos(3.14159265358979323846 / 4.0);
+        cons[1].J[0] = -c;                        // -c qdot0 + c qdot1 >= 0
+        cons[1].J[1] = c;
+        cons[1].xi = 0.0;
+        cons[1].d_now = 0.002;
+        return cons;
+    };
+    // Desired: both joints closing at -1 rad/s.
+    const auto desired_target = [&]() {
+        JointArray t{};
+        t[0] = -1.0 * dt * rad2deg;
+        t[1] = -1.0 * dt * rad2deg;
+        return t;
+    };
+    const auto residual = [&](const std::vector<VelocityConstraint>& cons, const JointArray& lt) {
+        double worst = 0.0;
+        for (const auto& c : cons) {
+            double ddot = 0.0;
+            for (int i = 0; i < kDof; ++i) ddot += c.J[i] * (lt[i] / rad2deg / dt);
+            worst = std::max(worst, -c.xi - ddot);
+        }
+        return worst;
+    };
+    {
+        auto cons = make_rows();
+        JointArray lt = desired_target();
+        JointArray rt{};
+        const auto r = solveVelocityProjection(cons, zero, zero, lt, rt, dt, 3, big);
+        RB_CHECK(r.sweeps_used == 3);
+        RB_CHECK(residual(cons, lt) > 1e-3);  // three sweeps: row 2 still violated
+    }
+    {
+        auto cons = make_rows();
+        JointArray lt = desired_target();
+        JointArray rt{};
+        VelocityProjectionOptions o;
+        o.min_sweeps = 3;
+        o.max_sweeps = 50;
+        o.tol_rad_s = 1e-9;
+        const auto r = solveVelocityProjection(cons, zero, zero, lt, rt, dt, o, big);
+        RB_CHECK(r.converged);
+        RB_CHECK(r.sweeps_used > 3 && r.sweeps_used <= 50);
+        RB_CHECK(residual(cons, lt) < 1e-6);
+        // qdot0 -> 0, qdot1 -> 0: both closing components removed, nothing else.
+        RB_CHECK(std::abs(lt[0]) < 1e-6 && std::abs(lt[1]) < 1e-6);
+    }
+    {
+        // The ceiling is applied inside the loop: a row that needs more speed than
+        // the ceiling allows is left (honestly) unconverged, but never beyond it.
+        auto cons = make_rows();
+        cons[0].xi = 100.0;  // demands qdot0 >= -100 -> fine; make row 2 demand a lot
+        cons[1].xi = -50.0;  // -c qdot0 + c qdot1 >= 50 -> qdot1 >= ~70.7 rad/s
+        JointArray lt = desired_target();
+        JointArray rt{};
+        JointArray lim{};
+        lim.fill(10.0 * rad2deg);  // 10 rad/s per joint
+        VelocityProjectionOptions o;
+        o.max_sweeps = 20;
+        const auto r = solveVelocityProjection(cons, zero, zero, lt, rt, dt, o, lim);
+        RB_CHECK(r.ceiling_clamped);
+        RB_CHECK(!r.converged);
+        RB_CHECK(lt[1] / rad2deg / dt <= 10.0 + 1e-9);
+    }
+    std::cout << "solver convergence (sweeps to tolerance, in-loop ceiling) OK\n";
+    return true;
+}
+
+
+// The near list can no longer drop an engaged pair (2026-09-04): every pair inside
+// its class band is reported regardless of max_near_pairs. With a 1 m self band
+// and K = 1, the list must hold every arm<->arm / arm<->stand pair, not one.
+static bool runNearBandInclusion() {
+    const fs::path ws = workspaceRoot();
+    CollisionMonitorConfig cfg = makeConfig(ws);
+    if (!fs::is_regular_file(cfg.unified_urdf)) {
+        std::cout << "SKIP (near band): unified URDF not found\n";
+        return true;
+    }
+    cfg.swept_samples = 1;
+    cfg.max_near_pairs = 1;
+    cfg.d_slow_m = 10.0;  // every self pair is "in band"
+    cfg.hyst_m = 0.0;
+    cfg.intra_arm_d_slow_m = 0.001;  // intra-arm pairs stay out of band
+    cfg.intra_arm_hyst_m = 0.0;
+    cfg.gripper_gripper_d_slow_m = 10.0;
+    cfg.gripper_gripper_hyst_m = 0.0;
+    CollisionMonitor mon(cfg);
+    const CollisionVerdict v = mon.evalOnce(kInitPose, kInitPose);
+    RB_CHECK(v.valid);
+    RB_CHECK(v.q_eval_valid);
+    for (int i = 0; i < kDof; ++i) {
+        RB_CHECK(std::abs(v.q_eval_deg[static_cast<std::size_t>(i)] - kInitPose[i]) < 1e-9);
+        RB_CHECK(std::abs(v.q_eval_deg[static_cast<std::size_t>(kDof + i)] - kInitPose[i]) < 1e-9);
+    }
+    std::size_t self_pairs = 0, gripper_pairs = 0, intra_pairs = 0;
+    for (const auto& p : v.near) {
+        if (p.intra_arm) ++intra_pairs;
+        else if (p.gripper_gripper) ++gripper_pairs;
+        else if (!p.external && !p.external_box) ++self_pairs;
+    }
+    std::cout << "near band: near=" << v.near.size() << " band=" << v.near_band_count
+              << " self=" << self_pairs << " gripper=" << gripper_pairs
+              << " intra=" << intra_pairs << " eval_ms=" << v.eval_ms << "\n";
+    RB_CHECK(v.near.size() > 100);                 // far more than K = 1
+    RB_CHECK(v.near_band_count == static_cast<int>(self_pairs + gripper_pairs));
+    RB_CHECK(intra_pairs <= 1);                     // at most the single nearest slot
+    RB_CHECK(gripper_pairs == 1);                   // one hull per arm -> one cross pair
+    // Ascending order is preserved.
+    for (std::size_t i = 1; i < v.near.size(); ++i) RB_CHECK(v.near[i - 1].d_m <= v.near[i].d_m);
+    // And the K-nearest semantics are intact when nothing is in band.
+    cfg.d_slow_m = 0.001;
+    cfg.gripper_gripper_d_slow_m = 0.001;
+    cfg.max_near_pairs = 5;
+    CollisionMonitor mon5(cfg);
+    const CollisionVerdict v5 = mon5.evalOnce(kInitPose, kInitPose);
+    RB_CHECK(v5.valid && v5.near.size() == 5 && v5.near_band_count == 0);
+    std::cout << "near band inclusion OK\n";
+    return true;
+}
+
 int main() {
     if (!runExternalBoxFeedLiveness()) {
         std::cerr << "test_collision_monitor (external box feed liveness) FAILED\n";
@@ -1100,6 +1299,18 @@ int main() {
     }
     if (!runProjection()) {
         std::cerr << "test_collision_monitor (projection) FAILED\n";
+        return 1;
+    }
+    if (!runGripperClassAndExtrapolation()) {
+        std::cerr << "test_collision_monitor (gripper class / extrapolation) FAILED\n";
+        return 1;
+    }
+    if (!runSolverConvergence()) {
+        std::cerr << "test_collision_monitor (solver convergence) FAILED\n";
+        return 1;
+    }
+    if (!runNearBandInclusion()) {
+        std::cerr << "test_collision_monitor (near band inclusion) FAILED\n";
         return 1;
     }
     if (!runPrefixMismatchFailsClosed()) {

@@ -565,7 +565,15 @@ struct SelfCollisionConfig {
         // the monitor normally refreshes every ~1.5 ms.
         double max_staleness_s = 0.050;
         int monitor_core = -1;
+        // SCHED_FIFO priority for the monitor thread (0 = CFS). Required > 0
+        // whenever monitor_core pins it: a dedicated core that still yields to
+        // any CFS thread is the same trap the worker cores refuse.
+        int monitor_realtime_priority = 0;
         int max_near_pairs = 8;
+        // Gauss-Seidel convergence bound: sweep until no row moves more than
+        // projection_tol_rad_s, at most projection_max_sweeps (>= iterations).
+        int projection_max_sweeps = 50;
+        double projection_tol_rad_s = 1e-6;
         // VISUALIZATION ONLY (does not affect the barrier): publish near-pair witness
         // segments to the GUI for any checked pair within this clearance. Decoupled
         // from d_slow so close-call markers stay visible even when the barrier band
@@ -629,6 +637,21 @@ struct SelfCollisionConfig {
             double latency_s = -1.0;
         };
         IntraArmConfig intra_arm;
+
+        // Gripper<->gripper class (the nine cross-arm Pika hull pairs). Unset
+        // (negative) barrier values inherit the self set. With
+        // exclude_when_force_covered the servo loop builds no rows for these pairs
+        // while force control covers BOTH arms (the handover contact is the F/T
+        // sensor's); any coverage loss restores the margins at once.
+        struct GripperGripperConfig {
+            bool exclude_when_force_covered = false;
+            double d_hard_m = -1.0;
+            double d_slow_m = -1.0;
+            double a_brake_m_s2 = -1.0;
+            double hyst_m = -1.0;
+            double recover_speed_m_s = -1.0;
+        };
+        GripperGripperConfig gripper_gripper;
 
         // Preallocated external keep-out boxes updated at runtime by the leaseless
         // SetExternalBoxes command. Disabled by default; when enabled the monitor

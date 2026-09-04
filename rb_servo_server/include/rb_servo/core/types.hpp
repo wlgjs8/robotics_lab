@@ -284,6 +284,21 @@ struct RobotState {
     // controller or the state frame ended before these fields; eft_valid says which.
     Wrench6D eft_wrench;
     bool eft_valid = false;
+    // The control box's OWN TCP kinematics, carried through uninterpreted
+    // (rbpodo sdata.tcp_pos / tcp_ref: [x, y, z] mm + [rx, ry, rz] deg in the box's
+    // base frame, with whatever tool the box has set). LOGGING ONLY (2026-09-04):
+    // the box runs its calibrated DH (J1.d 165.5 mm on both RB5 boxes vs the
+    // URDF's 169.2), and comparing this against the server's URDF FK of the same
+    // joints is how it gets decided whether that 3.7 mm must be adopted.
+    std::array<double, 6> box_tcp_pos{};
+    std::array<double, 6> box_tcp_ref{};
+    bool box_tcp_valid = false;
+    // The box's link-parameter (calibrated DH) answer, read once at connect and
+    // repeated on every state frame (small, fixed size; no allocation). count 0 =
+    // not read / not answered. Slot meaning is vendor firmware per kind; the
+    // RB5-850E map is documented where it is logged (rbpodo_backend.cpp).
+    std::array<double, 16> box_link_parameter{};
+    int box_link_parameter_count = 0;
 
     RobotConnectionState connection_state = RobotConnectionState::Disconnected;
 
@@ -981,8 +996,23 @@ struct SafetyProjectionTelemetry {
     double min_headroom_m = -1.0;          // min (d_now - d_hard) across collision rows
     double min_headroom_d_hard_m = -1.0;   // that row's own floor
     std::string min_headroom_pair;         // "geom_a <-> geom_b" of that row
-    std::string min_headroom_class;        // self | intra_arm | external | external_box
-    double selfcol_verdict_age_ms = -1.0;  // age of the collision verdict used; -1 = none
+    std::string min_headroom_class;        // self | intra_arm | external | external_box | gripper_gripper
+    // Monitor liveness and class minima, EVERY tick the verdict is valid (2026-09-04;
+    // the age used to be reported only on ticks with an engaged row, and the global
+    // min clearance read the structural intra-arm pair all run). -1 / inf = none.
+    double selfcol_verdict_age_ms = -1.0;  // age of the collision verdict; -1 = none
+    double selfcol_eval_ms = -1.0;         // wall time of the monitor's last evaluation
+    int selfcol_near_count = 0;            // pairs in the verdict's near list
+    int selfcol_near_band_count = 0;       // of which inside their class engage band
+    double selfcol_self_min_clearance_m = std::numeric_limits<double>::infinity();
+    double selfcol_intra_arm_min_clearance_m = std::numeric_limits<double>::infinity();
+    double selfcol_gripper_min_clearance_m = std::numeric_limits<double>::infinity();
+    bool selfcol_gripper_excluded = false; // gripper<->gripper rows left to force control
+    bool selfcol_stale = false;            // verdict older than max_staleness_s (hold)
+    int sweeps = 0;                        // Gauss-Seidel sweeps the solve ran
+    bool converged = false;                // and whether the last one changed nothing
+    double tightest_dir_change_deg = 0.0;  // J direction jitter of the tightest collision row
+    uint64_t self_collision_clamp_count = 0;  // ticks a collision row "blocked" an arm
     // Safety plan gate (safety.plan_gate): the rate at which each arm's chunk
     // follower plan clock is currently allowed to advance. 1.0 = ungated.
     double left_plan_gate = 1.0;
@@ -1424,6 +1454,14 @@ struct ServoSnapshot {
     double self_collision_min_clearance_m = 0.0;
     double self_collision_external_box_min_clearance_m = std::numeric_limits<double>::infinity();
     std::vector<double> self_collision_external_box_clearance_m;
+    double self_collision_verdict_age_ms = -1.0;
+    double self_collision_eval_ms = -1.0;
+    int self_collision_near_count = 0;
+    double self_collision_self_min_clearance_m = std::numeric_limits<double>::infinity();
+    double self_collision_intra_arm_min_clearance_m = std::numeric_limits<double>::infinity();
+    double self_collision_gripper_min_clearance_m = std::numeric_limits<double>::infinity();
+    bool self_collision_gripper_excluded = false;
+    uint64_t self_collision_clamp_count = 0;
     double self_collision_margin_m = 0.0;
     int self_collision_left_bone = -1;
     std::string self_collision_pair;

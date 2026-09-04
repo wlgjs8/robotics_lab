@@ -118,6 +118,18 @@ struct CollisionMonitorConfig {
     // Thread placement (-1 = no affinity). Pin to an isolated core for stable
     // worst-case eval time.
     int monitor_core = -1;
+    // SCHED_FIFO priority of the monitor thread (0 = leave it SCHED_OTHER). The
+    // monitor was the only safety-critical thread with no RT priority and no
+    // core: CFS-scheduled among the GUI, the runner and the policy servers, with
+    // max_staleness_s the entire margin absorbing that (2026-09-04 review).
+    int monitor_realtime_priority = 0;
+    // Gauss-Seidel convergence bound (Stage 3.5, 2026-09-04): the solve sweeps
+    // until no row moved more than projection_tol_rad_s, at most this many
+    // times. projection_iterations below is the MINIMUM. Three fixed sweeps over
+    // 6-10 non-orthogonal rows sorted by a noisy d_now did not converge, so the
+    // solution depended on the row order and jumped between ticks.
+    int projection_max_sweeps = 50;
+    double projection_tol_rad_s = 1e-6;
 
     int max_near_pairs = 8;        // how many closest pairs to report in a verdict
     std::vector<ExtraCollisionShape> extra_collision;  // non-URDF geometry (camera/table/...)
@@ -144,6 +156,20 @@ struct CollisionMonitorConfig {
     double intra_arm_hyst_m = 0.005;
     double intra_arm_recover_speed_m_s = 0.0;
     double intra_arm_latency_s = 0.010;
+
+    // ---- GRIPPER<->GRIPPER velocity-barrier params (2026-09-04) ----
+    // The nine cross-arm pairs among the two Pika hulls (base, finger_left,
+    // finger_right x the same on the other arm). They used to sit inside the
+    // left-right set with the 25 mm self floor, which forbids the tip-to-tip
+    // handover the cell needs. Their own class keeps the arm<->gripper and
+    // arm<->arm pairs untouched, and lets the servo loop EXCLUDE these rows when
+    // force control covers both arms (the contact is then the F/T sensor's to
+    // handle). Defaults mirror the self set; the loop inherits unset values.
+    double gripper_gripper_d_hard_m = 0.005;
+    double gripper_gripper_d_slow_m = 0.025;
+    double gripper_gripper_a_brake_m_s2 = 4.0;
+    double gripper_gripper_hyst_m = 0.005;
+    double gripper_gripper_recover_speed_m_s = 0.0;
 
     // ---- EXTERNAL-BOX keep-out velocity-barrier params ----
     // Applied ONLY to arm<->runtime-external-box pairs (the detected NTC-321 keep-out
@@ -199,6 +225,9 @@ struct CollisionNearPair {
     // True for same-arm non-adjacent link pairs. These use intra_arm_* barrier
     // params instead of the arm<->arm / arm<->stand self set.
     bool intra_arm = false;
+    // True for a cross-arm pair of two gripper hulls (gripper_gripper_* params;
+    // excludable by the servo loop when force control covers both arms).
+    bool gripper_gripper = false;
     // Per-pair clearance Jacobian rows (Stage 1): d(clearance)/dt = J_n * qdot,
     // split into this command's actuated left/right joint columns (command order,
     // idx_v mapping). For an arm<->stand pair only the arm's row is non-zero, so the
@@ -223,6 +252,7 @@ struct CollisionVerdict {
     double intra_arm_min_clearance_m = std::numeric_limits<double>::infinity();
     double external_min_clearance_m = std::numeric_limits<double>::infinity();
     double external_box_min_clearance_m = std::numeric_limits<double>::infinity();
+    double gripper_gripper_min_clearance_m = std::numeric_limits<double>::infinity();
     // Per preallocated external box slot (slot 0=green, slot 1=gray).
     // +inf means no finite/active pair for that slot.
     std::vector<double> external_box_clearance_m;
@@ -232,7 +262,25 @@ struct CollisionVerdict {
     double clearance_rate_m_s = 0.0;
     double closing_speed_m_s = 0.0;         // max(0, -clearance_rate_m_s)
     bool hard_violation = false;            // any pair below its category d_hard
-    std::vector<CollisionNearPair> near;    // up to max_near_pairs, sorted ascending
+    // Split of hard_violation by whether the breaching pair is gripper<->gripper,
+    // so the loop can leave a covered handover contact out of the breach verdict
+    // without losing every other pair's floor.
+    bool hard_violation_non_gripper = false;
+    bool gripper_gripper_hard_violation = false;
+    // The near list: every pair inside its class's engage band (d < d_slow + hyst,
+    // so a row the loop has engaged can never fall out of the list -- the
+    // single-tick correction dropouts of 2026-08-28 were rows vanishing when a
+    // pair lost its slot among the K nearest) plus the K globally nearest pairs,
+    // sorted ascending by clearance.
+    std::vector<CollisionNearPair> near;
+    int near_band_count = 0;                // pairs of `near` inside their class band
+    // The configuration the near list, witness points and Jacobians were
+    // evaluated at (command order, degrees). Lets the consumer extrapolate each
+    // pair's clearance to the pose it is about to command from, first order and
+    // free of timing noise: d_now = d + Jn . (q - q_eval).
+    std::array<double, 2 * kDof> q_eval_deg{};
+    bool q_eval_valid = false;
+    double eval_ms = 0.0;                   // wall time of the evaluation
 };
 
 // True if the verdict is missing or too old to trust (caller should fail closed).
@@ -269,6 +317,14 @@ struct CollisionProjectionResult {
     // when it engages it must be visible in the log, not only in the summed
     // correction magnitude.
     bool ceiling_clamped = false;
+    int sweeps_used = 0;               // Gauss-Seidel sweeps actually run
+    bool converged = false;            // no row moved more than tol in the last sweep
+};
+
+struct VelocityProjectionOptions {
+    int min_sweeps = 3;
+    int max_sweeps = 50;
+    double tol_rad_s = 1e-6;
 };
 
 // One linear inequality on the commanded joint velocity (Stage 3, unified solver):
@@ -280,7 +336,9 @@ struct CollisionProjectionResult {
 // d_hard, so a raw clearance is not comparable across classes: 20 mm is a breach
 // for an arm<->arm pair (floor 25 mm) and normal for an intra-arm pair (floor
 // 5 mm). Rows that are not collision pairs (floor plane, ROI, reach) keep Other.
-enum class ConstraintClass : std::uint8_t { Other = 0, Self, IntraArm, External, ExternalBox };
+enum class ConstraintClass : std::uint8_t {
+    Other = 0, Self, IntraArm, External, ExternalBox, GripperGripper
+};
 
 struct VelocityConstraint {
     Eigen::Matrix<double, 2 * kDof, 1> J = Eigen::Matrix<double, 2 * kDof, 1>::Zero();
@@ -308,6 +366,26 @@ void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitor
                                double verdict_age_s, std::vector<VelocityConstraint>& out,
                                std::unordered_set<std::uint64_t>* engaged_pairs = nullptr);
 
+struct ConstraintBuildOptions {
+    // Leave the gripper<->gripper rows out (force control owns that contact).
+    // Pairs are still reported in the verdict; only the barrier rows are skipped,
+    // and an excluded pair is dropped from the engaged set.
+    bool exclude_gripper_gripper = false;
+    // When both are set and the verdict carries q_eval, d_now is extrapolated by
+    // Jn . (q - q_eval) -- the clearance at the pose the command starts from --
+    // instead of rate * age. The rate was a finite difference between
+    // evaluations that were not synchronised with the tick (it alternated
+    // between 0 and 1.33x the true closing speed), and near the floor that noise
+    // multiplied the sqrt barrier's infinite slope.
+    const JointArray* left_q_deg = nullptr;
+    const JointArray* right_q_deg = nullptr;
+};
+
+void buildCollisionConstraints(const CollisionVerdict& v, const CollisionMonitorConfig& cfg,
+                               double verdict_age_s, std::vector<VelocityConstraint>& out,
+                               std::unordered_set<std::uint64_t>* engaged_pairs,
+                               const ConstraintBuildOptions& opts);
+
 // Solve a set of velocity constraints by Gauss-Seidel projection (closest first),
 // modifying the joint targets (degrees) in place. Pure; shared by self-collision and
 // floor. `cons` is sorted in place. Returns per-arm correction magnitudes.
@@ -316,6 +394,18 @@ CollisionProjectionResult solveVelocityProjection(
     const JointArray& left_prev_deg, const JointArray& right_prev_deg,
     JointArray& left_target_deg, JointArray& right_target_deg,
     double dt_sec, int iterations, const JointArray& max_joint_vel_deg_s);
+
+// Same solve, sweeping until convergence: at least opts.min_sweeps, then until
+// no row changed qdot by more than opts.tol_rad_s, at most opts.max_sweeps. The
+// per-joint ceiling is applied after every sweep, inside the loop, so a row the
+// ceiling re-violated is revisited instead of being left broken by a trailing
+// clamp. The fixed-iteration entry point above is this with min == max.
+CollisionProjectionResult solveVelocityProjection(
+    std::vector<VelocityConstraint>& cons,
+    const JointArray& left_prev_deg, const JointArray& right_prev_deg,
+    JointArray& left_target_deg, JointArray& right_target_deg,
+    double dt_sec, const VelocityProjectionOptions& opts,
+    const JointArray& max_joint_vel_deg_s);
 
 // Per-arm entry point for per-arm control threads.
 //

@@ -407,6 +407,12 @@ private:
 private:
     std::unique_ptr<IRobotBackend> left_robot_;
     std::unique_ptr<IRobotBackend> right_robot_;
+    // The boxes' link-parameter answers, copied out of the backends once (and
+    // re-tried every few seconds while empty) so the per-tick state carries them
+    // without an allocation. [0]=left, [1]=right.
+    std::array<std::array<double, 16>, 2> box_link_param_cache_{};
+    std::array<int, 2> box_link_param_count_{};
+    uint64_t box_link_param_ticks_ = 0;
     std::unique_ptr<ArmWorker> left_worker_;
     std::unique_ptr<ArmWorker> right_worker_;
 
@@ -767,6 +773,31 @@ private:
     uint64_t right_roi_fold_started_ns_ = 0;
     uint64_t left_roi_fold_last_log_ns_ = 0;
     uint64_t right_roi_fold_last_log_ns_ = 0;
+    // THE COLLISION YIELD FOLD (2026-09-04): whatever the self-collision rows took
+    // out of an arm's step this tick (the blocked mover's approach, or the idle
+    // arm's yield) is booked into that arm's chunk-follower plan on the NEXT tick
+    // (absorbOffset + output-SMD shift, the ROI/force fold pattern), so the plan
+    // does not keep pulling the arm back into the row every tick and no lead winds
+    // up beyond the barrier. Written by applySafety, consumed at the follower
+    // stage. Loop thread only.
+    struct PendingCollisionFold {
+        Eigen::Vector3d dp = Eigen::Vector3d::Zero();
+        Eigen::Quaterniond dR = Eigen::Quaterniond::Identity();
+        bool valid = false;
+    };
+    std::array<PendingCollisionFold, 2> pending_collision_fold_{};
+    std::array<bool, 2> collision_fold_active_{};
+    std::array<uint64_t, 2> collision_fold_count_{};
+    std::array<double, 2> collision_fold_total_m_{};
+    std::array<uint64_t, 2> collision_fold_started_ns_{};
+    std::array<uint64_t, 2> collision_fold_last_log_ns_{};
+    // Self-collision "blocked" tick counter (the floor/ROI/reach rows had one, the
+    // collision rows did not).
+    uint64_t self_collision_clamp_count_ = 0;
+    // Direction jitter of the tightest collision row between consecutive ticks
+    // (telemetry: witness-point jumps on parallel hull faces show up here).
+    std::uint64_t prev_tightest_pair_key_ = 0;
+    Eigen::Matrix<double, 12, 1> prev_tightest_J_ = Eigen::Matrix<double, 12, 1>::Zero();
     // Projection verdict hysteresis (safety.projection_verdict_hold_sec).
     SafetyVerdict held_projection_verdict_ = SafetyVerdict::Ok;
     uint64_t held_projection_verdict_until_ns_ = 0;

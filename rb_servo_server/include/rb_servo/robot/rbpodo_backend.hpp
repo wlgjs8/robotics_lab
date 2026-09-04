@@ -38,6 +38,10 @@ struct RbpodoSystemStateSnapshot {
     // not be published as a measurement. The blocking SDK path cannot observe the
     // frame length and leaves this true.
     bool eft_in_frame = true;
+    // sdata.tcp_pos / tcp_ref: the box's own TCP kinematics ([x,y,z] mm, [rx,ry,rz]
+    // deg, box base frame, box tool). Logged uninterpreted (see RobotState).
+    std::array<double, 6> tcp_pos{};
+    std::array<double, 6> tcp_ref{};
     // sdata.is_freedrive_mode: 1 = free-drive (gravity-compensation) on, 0 = off.
     // The controller's ground-truth direct-teaching state (set_freedrive_mode only
     // ACKs receipt, so this is the only reliable confirmation that teach engaged).
@@ -118,6 +122,10 @@ public:
     ~RbpodoBackend() override;
 
     BackendResult<RobotState> connect() override;
+    // The box's link-parameter (calibrated DH) answer read at connect; empty when
+    // not answered. Logging only (see queryBoxLinkParameter in the .cpp).
+    std::vector<double> boxLinkParameter() const override;
+    void queryBoxLinkParameter();
     BackendResult<RobotState> initialize() override;
 
     BackendResult<RobotState> readState() override;

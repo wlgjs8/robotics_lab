@@ -685,6 +685,26 @@ void ServoLogger::writeHeader() {
              ",projection_min_headroom_m,projection_min_headroom_d_hard_m"
              ",projection_min_headroom_class,projection_min_headroom_pair"
              ",left_plan_gate,right_plan_gate";
+    // Monitor liveness + class minima every tick, solver convergence, the
+    // gripper<->gripper exclusion state and the collision "blocked" counter
+    // (2026-09-04). `selfcol_verdict_age_ms` above is now filled on every tick
+    // the verdict is valid, not only when a row engaged.
+    file_ << ",selfcol_eval_ms,selfcol_near_count,selfcol_near_band_count"
+             ",selfcol_self_min_clearance_m,selfcol_intra_arm_min_clearance_m"
+             ",selfcol_gripper_min_clearance_m,selfcol_gripper_excluded,selfcol_stale"
+             ",projection_sweeps,projection_converged,projection_tightest_dir_change_deg"
+             ",self_collision_clamp_count";
+    // The control box's own TCP (its calibrated DH + its tool), raw, for the
+    // URDF-vs-box kinematics comparison; see RobotState::box_tcp_pos.
+    for (const char* side : {"left", "right"}) {
+        for (const char* c : {"x_mm", "y_mm", "z_mm", "rx_deg", "ry_deg", "rz_deg"}) {
+            file_ << ',' << side << "_box_tcp_pos_" << c;
+        }
+        for (const char* c : {"x_mm", "y_mm", "z_mm", "rx_deg", "ry_deg", "rz_deg"}) {
+            file_ << ',' << side << "_box_tcp_ref_" << c;
+        }
+        file_ << ',' << side << "_box_tcp_valid";
+    }
     file_ << ",left_error_code,right_error_code";
     writeCartesianSolveHeader(file_, "left");
     writeCartesianSolveHeader(file_, "right");
@@ -1429,6 +1449,23 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << ',' << csvEscape(sample.safety_projection.min_headroom_pair)
           << ',' << sample.safety_projection.left_plan_gate
           << ',' << sample.safety_projection.right_plan_gate;
+    file_ << ',' << sample.safety_projection.selfcol_eval_ms
+          << ',' << sample.safety_projection.selfcol_near_count
+          << ',' << sample.safety_projection.selfcol_near_band_count
+          << ',' << sample.safety_projection.selfcol_self_min_clearance_m
+          << ',' << sample.safety_projection.selfcol_intra_arm_min_clearance_m
+          << ',' << sample.safety_projection.selfcol_gripper_min_clearance_m
+          << ',' << sample.safety_projection.selfcol_gripper_excluded
+          << ',' << sample.safety_projection.selfcol_stale
+          << ',' << sample.safety_projection.sweeps
+          << ',' << sample.safety_projection.converged
+          << ',' << sample.safety_projection.tightest_dir_change_deg
+          << ',' << sample.safety_projection.self_collision_clamp_count;
+    for (const RobotState* st : {&sample.left_state, &sample.right_state}) {
+        for (double v : st->box_tcp_pos) file_ << ',' << v;
+        for (double v : st->box_tcp_ref) file_ << ',' << v;
+        file_ << ',' << st->box_tcp_valid;
+    }
     file_ << ',' << sample.left_state.error_code << ',' << sample.right_state.error_code;
     writeCartesianSolveColumns(file_, sample.left_cartesian_solve);
     writeCartesianSolveColumns(file_, sample.right_cartesian_solve);
