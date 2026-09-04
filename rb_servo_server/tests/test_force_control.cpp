@@ -10,6 +10,7 @@
 #include <algorithm>
 
 #include "rb_servo/config/config.hpp"
+#include "rb_servo/control/hold_fold.hpp"
 #include "rb_servo/control/admittance_overlay.hpp"
 #include "rb_servo/control/smd_pose_tracker.hpp"
 #include "rb_servo/sensor/ft_pipeline.hpp"
@@ -473,6 +474,47 @@ bool testGateReopensToExactlyOneAfterRelease() {
     CHECK(removed == 0.0);
     gate.applyTranslation(rb_servo::math::Vector3(0.0, 0.0, -0.001), &removed);
     CHECK(removed == 0.0);
+    return true;
+}
+
+// THE HOLD FOLD DELTA: the whole plan-vs-sent shortfall, with a noise floor below
+// which nothing is booked and a snap cap above which the fold is declined.
+bool testHoldFoldDeltaFloorAndCap() {
+    rb_servo::control::HoldFoldLimits lim;
+    lim.min_step_m = 1e-5;
+    lim.min_step_rad = 1e-5;
+    lim.max_step_m = 0.03;
+    lim.max_step_rad = 0.2;
+    rb_servo::Pose6D emitted;
+    emitted.x = 0.5; emitted.y = -0.2; emitted.z = 0.1; emitted.rz = 0.3;
+    rb_servo::control::HoldFoldDelta d;
+    bool capped = true;
+    // Identical poses: nothing to book, not capped.
+    CHECK(!rb_servo::control::computeHoldFold(emitted, emitted, lim, &d, &capped));
+    CHECK(!capped);
+    // An IK residual of 2 um: below the floor.
+    rb_servo::Pose6D tiny = emitted;
+    tiny.x += 2e-6;
+    CHECK(!rb_servo::control::computeHoldFold(emitted, tiny, lim, &d, &capped));
+    // A 12 mm hold: booked as achieved - emitted.
+    rb_servo::Pose6D held = emitted;
+    held.x -= 0.012;
+    CHECK(rb_servo::control::computeHoldFold(emitted, held, lim, &d, &capped));
+    CHECK(near(d.dp.x(), -0.012, 1e-12));
+    CHECK(near(d.dist_m, 0.012, 1e-12));
+    CHECK(d.angle_rad < 1e-9);
+    // A rotation-only shortfall of 0.05 rad about z: dR left-composes emitted into achieved.
+    rb_servo::Pose6D turned = emitted;
+    turned.rz += 0.05;
+    CHECK(rb_servo::control::computeHoldFold(emitted, turned, lim, &d, &capped));
+    CHECK(near(d.angle_rad, 0.05, 1e-9));
+    const rb_servo::math::Matrix3 back = d.dR.toRotationMatrix() * rb_servo::math::rotationFromPose(emitted);
+    CHECK(near((back - rb_servo::math::rotationFromPose(turned)).norm(), 0.0, 1e-9));
+    // A 50 mm "shortfall" is a snap somewhere else: declined and flagged.
+    rb_servo::Pose6D snap = emitted;
+    snap.y += 0.05;
+    CHECK(!rb_servo::control::computeHoldFold(emitted, snap, lim, &d, &capped));
+    CHECK(capped);
     return true;
 }
 
@@ -1243,6 +1285,7 @@ int main() {
     testGateStreamChannelIgnoresVibrationAndHoldsSustainedContact();
     testGateStreamChannelAveragesOutAFlippingDirection();
     testGateReopensToExactlyOneAfterRelease();
+    testHoldFoldDeltaFloorAndCap();
     testHoldLawTurnsFarLessThanTheStreamLawForTheSamePush();
     testSwappingTheLawKeepsTheDeviation();
     testHoldLawDeflectsForceOverStiffness();

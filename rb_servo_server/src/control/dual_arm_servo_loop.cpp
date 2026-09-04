@@ -1,4 +1,5 @@
 #include "rb_servo/control/dual_arm_servo_loop.hpp"
+#include "rb_servo/control/hold_fold.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -264,7 +265,12 @@ ArmCommand applyPoseTrackSmd(
         // keep emitting the tracker's pose while it ramps its velocity down at the
         // profile's max accelerations; the Hold that follows latches the pose it
         // stopped at (hold_latch_max_command_gap_m), so nothing snaps.
-        if (config.enable && config.release_brake_enable && command.mode == ControlMode::Hold &&
+        // THE TRACKER'S OWN PROFILE DECIDES, NOT THE HOLD COMMAND'S. A Hold arrives
+        // with the default profile (the CSV logs it as no profile at all), whose
+        // pose_track_smd may be disabled - judged on `config` the brake never armed
+        // on any of the 2026-09-04 23:31-23:54 releases (0 episodes, kicks 3.3-7.4k).
+        const PoseTrackSmdConfig& own = tracker->config();
+        if (own.enable && own.release_brake_enable && command.mode == ControlMode::Hold &&
             tracker->active() && kinematics && !qsync_settling_hold) {
             if (!tracker->releaseBraking()) {
                 if (tracker->linearSpeed() <= 0.0 && tracker->angularSpeed() <= 0.0) {
@@ -274,15 +280,15 @@ ArmCommand applyPoseTrackSmd(
                 std::cerr << "[INFO] pose_track " << toString(command.arm_id)
                           << " release brake: v=" << tracker->linearSpeed() * 1000.0
                           << " mm/s w=" << tracker->angularSpeed() * 180.0 / M_PI
-                          << " deg/s ramping to rest at " << config.max_linear_accel_m_s2
-                          << " m/s^2 / " << config.max_angular_accel_rad_s2 << " rad/s^2\n";
+                          << " deg/s ramping to rest at " << own.max_linear_accel_m_s2
+                          << " m/s^2 / " << own.max_angular_accel_rad_s2 << " rad/s^2\n";
                 tracker->beginReleaseBrake();
             }
             ArmCommand out = command;
             out.mode = ControlMode::TcpPoseTarget;
             out.has_tcp_target = true;
             out.tcp_target_stand = tracker->step(dt_sec);
-            const bool timed_out = tracker->releaseBrakeElapsedSec() >= config.release_brake_timeout_sec;
+            const bool timed_out = tracker->releaseBrakeElapsedSec() >= own.release_brake_timeout_sec;
             if (tracker->releaseBrakeDone() || timed_out) {
                 std::cerr << "[INFO] pose_track " << toString(command.arm_id)
                           << (timed_out ? " release brake TIMED OUT after "
@@ -6777,21 +6783,20 @@ ServoTarget DualArmServoLoop::computeServoTarget(
                     collision_fold_total_m_[static_cast<std::size_t>(i)] = dist;
                     ++collision_fold_count_[static_cast<std::size_t>(i)];
                     collision_fold_last_log_ns_[static_cast<std::size_t>(i)] = now_ns;
-                    std::cerr << "[INFO] collision_fold " << toString(ctx.arm)
-                              << " ENGAGED: booking the self-collision rows' correction into "
-                                 "the plan (#" << collision_fold_count_[static_cast<std::size_t>(i)]
-                              << ")\n";
+                    std::cerr << "[INFO] hold_fold " << toString(ctx.arm)
+                              << " ENGAGED: booking the plan-vs-sent shortfall into the plan (#"
+                              << collision_fold_count_[static_cast<std::size_t>(i)] << ")\n";
                 } else if (now_ns - collision_fold_last_log_ns_[static_cast<std::size_t>(i)] >
                            1'000'000'000ULL) {
                     collision_fold_last_log_ns_[static_cast<std::size_t>(i)] = now_ns;
-                    std::cerr << "[INFO] collision_fold " << toString(ctx.arm) << " holding: "
+                    std::cerr << "[INFO] hold_fold " << toString(ctx.arm) << " holding: "
                               << (now_ns - collision_fold_started_ns_[static_cast<std::size_t>(i)]) * 1e-9
                               << " s, " << collision_fold_total_m_[static_cast<std::size_t>(i)] * 1000.0
                               << " mm folded so far\n";
                 }
             } else if (fold_active && !pend.valid) {
                 fold_active = false;
-                std::cerr << "[INFO] collision_fold " << toString(ctx.arm) << " released after "
+                std::cerr << "[INFO] hold_fold " << toString(ctx.arm) << " released after "
                           << (now_ns - collision_fold_started_ns_[static_cast<std::size_t>(i)]) * 1e-9
                           << " s, " << collision_fold_total_m_[static_cast<std::size_t>(i)] * 1000.0
                           << " mm folded\n";
@@ -6799,6 +6804,21 @@ ServoTarget DualArmServoLoop::computeServoTarget(
             pend.valid = false;  // consumed (or declined): never re-applied
         }
 
+        // THE HOLD FOLD, measuring half: remember the pose each follower plan
+        // emitted this tick (after the ROI/collision folds, BEFORE the force
+        // compose) so applySafety can book the whole plan-vs-sent shortfall.
+        for (int i = 0; i < 2; ++i) {
+            const ArmControlContext& ctx = arm_ctx[i];
+            const ArmCommand& track = arm_pose_track_command[i];
+            const bool eligible =
+                track.has_tcp_target && track.mode == ControlMode::TcpPoseTarget &&
+                ctx.chunk_follower.active() && !ctx.chunk_follower.holdPaused();
+            if (eligible) {
+                hold_fold_emitted_pose_[static_cast<std::size_t>(i)] = track.tcp_target_stand;
+            } else {
+                hold_fold_emitted_pose_[static_cast<std::size_t>(i)].reset();
+            }
+        }
         // ---- THE FORCE OVERLAY: COMPOSE ---------------------------------------
         // Here, and not earlier or later, for one reason: this is the last point at
         // which the target is a CARTESIAN pose and the first at which it is final.
@@ -8316,22 +8336,87 @@ ServoTarget DualArmServoLoop::applySafety(
         safety_projection_telemetry_.reach_clamp_count = reach_clamp_count_;
     }
 
-    // COLLISION YIELD FOLD, booking half. What the collision rows took out of each
-    // arm's step this tick, as a stand-frame pose delta between the pre-projection
-    // request and what reached the wire, is handed to the follower stage of the
-    // NEXT tick (see PendingCollisionFold). Only collision rows: the ROI/floor
-    // faces have their own fold, and a clamp-only tick has nothing to book.
+    // THE HOLD FOLD, booking half (2026-09-05). While a projection row or the IK
+    // branch-jump throttle holds an arm, the WHOLE shortfall between the pose the
+    // plan emitted this tick and the pose the arm was actually commanded to
+    // (overlay-stripped FK of the sent joints) is handed to the follower stage of
+    // the NEXT tick (PendingCollisionFold -> absorbOffset + output-SMD shift).
+    // MEASURED (servo_log_20260904_235421/234601.csv): the 2026-09-04 am booking of
+    // only what the collision ROWS removed left the velocity/acceleration clamps'
+    // share unbooked, the plan-minus-sent gap ran to 12-39 mm, and the IK's
+    // branch_jump_rate_limited tick on that runaway target was a 7.1-12.0k
+    // deg/s^2 kick in 11 of 11 such episodes. Disabled = the legacy booking.
+    safety_projection_telemetry_.left_hold_fold_m = 0.0;
+    safety_projection_telemetry_.right_hold_fold_m = 0.0;
+    safety_projection_telemetry_.left_hold_fold_capped = false;
+    safety_projection_telemetry_.right_hold_fold_capped = false;
     for (int i = 0; i < 2; ++i) {
         PendingCollisionFold& pend = pending_collision_fold_[static_cast<std::size_t>(i)];
         pend.valid = false;
-        if (!collision_constraints_engaged || !kinematics_) continue;
+        if (!kinematics_) continue;
         const double applied = i == 0 ? safety_projection_telemetry_.left_applied_correction_deg_s
                                       : safety_projection_telemetry_.right_applied_correction_deg_s;
-        if (applied <= kSafetyInterventionCorrectionEpsDegPerSec) continue;
+        const bool collision_hold =
+            collision_constraints_engaged && applied > kSafetyInterventionCorrectionEpsDegPerSec;
         const JointArray& q_final = i == 0 ? out.left_q_target_deg : out.right_q_target_deg;
-        const JointArray& q_req = plan_gate_requested[i];
         const ArmId fold_arm = i == 0 ? ArmId::Left : ArmId::Right;
         const ArmMountConfig& fold_mount = i == 0 ? config_.left_mount : config_.right_mount;
+        const HoldFoldConfig& hf = config_.safety.hold_fold;
+        if (hf.enable) {
+            const std::optional<Pose6D>& emitted = hold_fold_emitted_pose_[static_cast<std::size_t>(i)];
+            if (!emitted.has_value()) continue;
+            const bool rows_in_band = i == 0
+                ? (left_floor_engaged || left_roi_engaged || left_reach_engaged || left_user_floor_engaged)
+                : (right_floor_engaged || right_roi_engaged || right_reach_engaged || right_user_floor_engaged);
+            const CartesianSolveTelemetry& solve =
+                i == 0 ? left_last_cartesian_solve_ : right_last_cartesian_solve_;
+            const bool ik_throttled = hf.on_ik_throttle && solve.attempted && solve.ik_branch_jump_rate_limited;
+            // A ROW HOLD is a row that is both in band AND cutting this tick (the same
+            // test mark_intervention uses); a row merely in band with the IK tracking
+            // the plan books nothing but IK residual, and that stays below the floor.
+            const bool row_hold =
+                (rows_in_band || collision_constraints_engaged) &&
+                applied > kSafetyInterventionCorrectionEpsDegPerSec;
+            if (!(collision_hold || row_hold || ik_throttled)) continue;
+            try {
+                Pose6D achieved = kinematics_->computeTcpStand(fold_arm, q_final, fold_mount);
+                const control::AdmittanceOverlay& overlay = i == 0 ? left_overlay_ : right_overlay_;
+                if (overlay.hasDeviation()) achieved = overlay.strip(achieved);
+                control::HoldFoldLimits lim;
+                lim.min_step_m = hf.min_step_m;
+                lim.min_step_rad = hf.min_step_rad;
+                lim.max_step_m = hf.max_step_m;
+                lim.max_step_rad = hf.max_step_rad;
+                control::HoldFoldDelta d;
+                bool capped = false;
+                if (control::computeHoldFold(*emitted, achieved, lim, &d, &capped)) {
+                    pend.dp = d.dp;
+                    pend.dR = d.dR;
+                    pend.valid = true;
+                    (i == 0 ? safety_projection_telemetry_.left_hold_fold_m
+                            : safety_projection_telemetry_.right_hold_fold_m) = d.dist_m;
+                } else if (capped) {
+                    (i == 0 ? safety_projection_telemetry_.left_hold_fold_capped
+                            : safety_projection_telemetry_.right_hold_fold_capped) = true;
+                    uint64_t& last = hold_fold_capped_log_ns_[static_cast<std::size_t>(i)];
+                    const uint64_t now_ns = nowSteadyNs();
+                    if (last == 0 || now_ns - last > 1'000'000'000ULL) {
+                        last = now_ns;
+                        std::cerr << "[WARN] hold_fold " << toString(fold_arm)
+                                  << " declined: plan-vs-sent shortfall " << d.dist_m * 1000.0
+                                  << " mm / " << d.angle_rad << " rad exceeds the snap cap ("
+                                  << hf.max_step_m * 1000.0 << " mm / " << hf.max_step_rad
+                                  << " rad); the rows still hold\n";
+                    }
+                }
+            } catch (const std::exception&) {
+                pend.valid = false;  // FK refused: nothing to book, the rows still hold
+            }
+            continue;
+        }
+        // LEGACY (hold_fold disabled): book only what the collision rows removed.
+        if (!collision_hold) continue;
+        const JointArray& q_req = plan_gate_requested[i];
         try {
             const pinocchio::SE3 T_req =
                 math::se3FromPose(kinematics_->computeTcpStand(fold_arm, q_req, fold_mount));
@@ -8345,7 +8430,6 @@ ServoTarget DualArmServoLoop::applySafety(
             pend.valid = false;  // FK refused: nothing to book, the rows still hold
         }
     }
-
     // SAFETY PLAN GATE input: how much of the step an OBSTRUCTION removed. Both
     // attack and release are first-order, per arm. Consumed by
     // applyChunkFollowerStage on the NEXT tick (one-tick delay).

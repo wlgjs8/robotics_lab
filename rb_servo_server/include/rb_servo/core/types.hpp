@@ -1055,6 +1055,13 @@ struct SafetyProjectionTelemetry {
     // follower plan clock is currently allowed to advance. 1.0 = ungated.
     double left_plan_gate = 1.0;
     double right_plan_gate = 1.0;
+    // THE HOLD FOLD (2026-09-05): the shortfall booked into each arm's plan this
+    // tick [m] (0 = nothing booked), and whether a shortfall beyond the sanity
+    // cap was declined this tick.
+    double left_hold_fold_m = 0.0;
+    double right_hold_fold_m = 0.0;
+    bool left_hold_fold_capped = false;
+    bool right_hold_fold_capped = false;
 };
 
 struct RbpodoAsyncStreamingTelemetry {

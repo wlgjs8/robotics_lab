@@ -952,6 +952,15 @@ void RbpodoBackend::queryBoxLinkParameter() {
         impl_->box_link_parameter.push_back(v);
         c = e;
     }
+    if (impl_->box_link_parameter.empty()) {
+        // The key came back with no numbers (2026-09-04 23:54 session: "(0 values)" on
+        // both boxes). Print the raw reply so the next session can see what the box
+        // actually said instead of guessing at the slot layout.
+        std::string raw = payload;
+        for (char& ch : raw) if (ch == '\n' || ch == '\r') ch = ' ';
+        std::cerr << "[WARN] RbpodoBackend " << impl_->config.name
+                  << ": get_link_parameter() reply carried no numbers; raw: \"" << raw << "\"\n";
+    }
     std::ostringstream line;
     line << "[INFO] RbpodoBackend " << impl_->config.name << ": box link_parameter ("
          << impl_->box_link_parameter.size() << " values):";

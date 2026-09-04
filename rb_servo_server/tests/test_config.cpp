@@ -198,6 +198,38 @@ bool testPoseTrackReleaseBrakeConfigParses() {
     return true;
 }
 
+// THE HOLD FOLD keys parse, and a cap at or below the floor is refused.
+bool testHoldFoldConfigParses() {
+    const std::string path = writeTempConfig(
+        "hold-fold",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "safety:\n"
+        "  hold_fold:\n"
+        "    enable: true\n"
+        "    min_step_m: 2.0e-5\n"
+        "    max_step_m: 0.02\n"
+        "    on_ik_throttle: false\n"
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+    ::unlink(path.c_str());
+    RB_CHECK(cfg.safety.hold_fold.enable);
+    RB_CHECK(near(cfg.safety.hold_fold.min_step_m, 2.0e-5));
+    RB_CHECK(near(cfg.safety.hold_fold.max_step_m, 0.02));
+    RB_CHECK(!cfg.safety.hold_fold.on_ik_throttle);
+    const std::string bad = writeTempConfig(
+        "hold-fold-bad",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "safety:\n"
+        "  hold_fold:\n"
+        "    enable: true\n"
+        "    min_step_m: 0.05\n"
+        "    max_step_m: 0.03\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(bad, "hold_fold"));
+    ::unlink(bad.c_str());
+    return true;
+}
+
 bool testJointWrapConfigParses() {
     const std::string path = writeTempConfig(
         "valid",
@@ -1699,6 +1731,7 @@ bool testFollowerOutputSmdConfig() {
 
 int main() {
     if (!testPoseTrackWallFoldConfigParses()) return 1;
+    if (!testHoldFoldConfigParses()) return 1;
     if (!testPoseTrackReleaseBrakeConfigParses()) return 1;
     if (!testJointWrapConfigParses()) return 1;
     if (!testJointTargetLiteralAxesConfigParses()) return 1;

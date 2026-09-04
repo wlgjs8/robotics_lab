@@ -3187,6 +3187,7 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "roi_box",
             "reach_constraint",
             "pose_track_wall_fold",
+            "hold_fold",
             "user_floor_constraint",
             "joint_target_smd",
             "init_motion_planner",
@@ -3735,6 +3736,28 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
                 throw std::runtime_error(
                     "safety.pose_track_wall_fold.standoff_m must be in [0, 0.05] m - it is the "
                     "distance the tracker stops short of a wall, not a working margin");
+            }
+        }
+        if (has(sec, "hold_fold")) {
+            const YAML::Node hf = sec["hold_fold"];
+            validateAllowedKeys(hf, {"enable", "min_step_m", "min_step_rad", "max_step_m",
+                                     "max_step_rad", "on_ik_throttle"},
+                                "safety.hold_fold");
+            HoldFoldConfig& h = cfg.safety.hold_fold;
+            if (has(hf, "enable")) h.enable = asBool(hf["enable"], "safety.hold_fold.enable");
+            if (has(hf, "min_step_m")) h.min_step_m = asDouble(hf["min_step_m"], "safety.hold_fold.min_step_m");
+            if (has(hf, "min_step_rad")) h.min_step_rad = asDouble(hf["min_step_rad"], "safety.hold_fold.min_step_rad");
+            if (has(hf, "max_step_m")) h.max_step_m = asDouble(hf["max_step_m"], "safety.hold_fold.max_step_m");
+            if (has(hf, "max_step_rad")) h.max_step_rad = asDouble(hf["max_step_rad"], "safety.hold_fold.max_step_rad");
+            if (has(hf, "on_ik_throttle")) h.on_ik_throttle = asBool(hf["on_ik_throttle"], "safety.hold_fold.on_ik_throttle");
+            validateNonNegativeFinite(h.min_step_m, "safety.hold_fold.min_step_m");
+            validateNonNegativeFinite(h.min_step_rad, "safety.hold_fold.min_step_rad");
+            validatePositiveFinite(h.max_step_m, "safety.hold_fold.max_step_m");
+            validatePositiveFinite(h.max_step_rad, "safety.hold_fold.max_step_rad");
+            if (h.max_step_m <= h.min_step_m || h.max_step_rad <= h.min_step_rad) {
+                throw std::runtime_error(
+                    "safety.hold_fold: max_step must exceed min_step - the fold needs a band "
+                    "between the noise floor and the snap cap");
             }
         }
         if (has(sec, "reach_constraint")) {

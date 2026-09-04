@@ -805,6 +805,11 @@ private:
         bool valid = false;
     };
     std::array<PendingCollisionFold, 2> pending_collision_fold_{};
+    // THE HOLD FOLD (2026-09-05): the plan pose each arm's follower stage emitted
+    // this tick (pre force-compose), for applySafety to measure the shortfall
+    // against the sent joints. nullopt = not on an active, un-paused follower.
+    std::array<std::optional<Pose6D>, 2> hold_fold_emitted_pose_{};
+    std::array<uint64_t, 2> hold_fold_capped_log_ns_{};
     std::array<bool, 2> collision_fold_active_{};
     std::array<uint64_t, 2> collision_fold_count_{};
     std::array<double, 2> collision_fold_total_m_{};

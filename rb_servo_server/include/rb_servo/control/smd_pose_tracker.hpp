@@ -50,6 +50,10 @@ public:
     explicit SmdPoseTracker(const PoseTrackSmdConfig& config);
 
     bool active() const { return active_; }
+    // The profile this tracker was built with. A Hold command carries the DEFAULT
+    // profile, not the one the arm was streaming on, so the release brake must read
+    // its caps and enable from here, not from the command's profile.
+    const PoseTrackSmdConfig& config() const { return config_; }
 
     // Initialize the filter and the goal integrator at `pose` with zero
     // velocity. The next updateGoalFromCommand() call only latches the

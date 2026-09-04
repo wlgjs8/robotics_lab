@@ -693,7 +693,8 @@ void ServoLogger::writeHeader() {
              ",projection_ceiling_clamped,projection_min_margin_m,selfcol_verdict_age_ms"
              ",projection_min_headroom_m,projection_min_headroom_d_hard_m"
              ",projection_min_headroom_class,projection_min_headroom_pair"
-             ",left_plan_gate,right_plan_gate";
+             ",left_plan_gate,right_plan_gate"
+             ",left_hold_fold_m,right_hold_fold_m,left_hold_fold_capped,right_hold_fold_capped";
     // Monitor liveness + class minima every tick, solver convergence, the
     // gripper<->gripper exclusion state and the collision "blocked" counter
     // (2026-09-04). `selfcol_verdict_age_ms` above is now filled on every tick
@@ -1475,7 +1476,11 @@ void ServoLogger::writeSample(const ServoSample& sample) {
           << ',' << csvEscape(sample.safety_projection.min_headroom_class)
           << ',' << csvEscape(sample.safety_projection.min_headroom_pair)
           << ',' << sample.safety_projection.left_plan_gate
-          << ',' << sample.safety_projection.right_plan_gate;
+          << ',' << sample.safety_projection.right_plan_gate
+          << ',' << sample.safety_projection.left_hold_fold_m
+          << ',' << sample.safety_projection.right_hold_fold_m
+          << ',' << sample.safety_projection.left_hold_fold_capped
+          << ',' << sample.safety_projection.right_hold_fold_capped;
     file_ << ',' << sample.safety_projection.selfcol_eval_ms
           << ',' << sample.safety_projection.selfcol_near_count
           << ',' << sample.safety_projection.selfcol_near_band_count

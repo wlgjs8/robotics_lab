@@ -825,6 +825,22 @@ struct PoseTrackWallFoldConfig {
     double standoff_m = 0.002;
 };
 
+// THE HOLD FOLD ON THE CHUNK-FOLLOWER PATH (2026-09-05). While a projection row
+// (self-collision, ROI, reach, floor) or the IK branch-jump throttle holds an arm,
+// the WHOLE shortfall between the emitted plan pose and the pose the arm was
+// actually commanded to is booked into the plan every tick (absorbOffset +
+// output-SMD shift), so the plan never runs ahead of the arm. See
+// control/hold_fold.hpp for the measurement. Replaces the collision-rows-only
+// booking of 2026-09-04 am when enabled; disabled = that legacy booking.
+struct HoldFoldConfig {
+    bool enable = false;
+    double min_step_m = 1e-5;      // below: IK residual noise, nothing booked
+    double min_step_rad = 1e-5;
+    double max_step_m = 0.03;      // above: not a hold, a snap - declined and logged
+    double max_step_rad = 0.2;
+    bool on_ik_throttle = true;    // also fold while the IK branch-jump throttle holds
+};
+
 // Stand-frame USER-defined tilted floor plane (half-space): the TCP of either arm
 // — and each configured TCP-frame offset point — must satisfy
 // n . (p_stand - point_m) >= margin_m, where n is a unit normal pointing into the
@@ -1203,6 +1219,7 @@ struct SafetyConfig {
     RoiBoxConfig roi_box;
     ReachConstraintConfig reach_constraint;
     PoseTrackWallFoldConfig pose_track_wall_fold;
+    HoldFoldConfig hold_fold;
     UserFloorConstraintConfig user_floor_constraint;
     JointTargetSmdConfig joint_target_smd;
     InitMotionPlannerConfig init_motion_planner;

@@ -249,6 +249,23 @@ safety:
   pose_track_wall_fold:
     enable: true
     standoff_m: 0.002
+  # THE HOLD FOLD ON THE CHUNK-FOLLOWER PATH (2026-09-05). While a projection row
+  # (self-collision, ROI face, reach shell, floor) or the IK branch-jump throttle
+  # holds an arm, book the WHOLE shortfall between the emitted plan pose and the
+  # pose the arm was actually commanded to into the plan every tick. MEASURED on
+  # the bimanual rollouts of 2026-09-04 23:40-23:54: the am collision fold booked
+  # only what the rows removed, the velocity/acceleration clamps' share stayed
+  # unbooked, the plan ran 12-39 mm ahead of the arm, and the IK's
+  # branch_jump_rate_limited tick on that runaway target was a 7.1-12.0k deg/s^2
+  # kick in 11 of 11 episodes (every episode with a gap under 1 mm stayed under
+  # 850). Above max_step the shortfall is a snap, not a hold: declined and logged.
+  hold_fold:
+    enable: true
+    min_step_m: 1.0e-5
+    min_step_rad: 1.0e-5
+    max_step_m: 0.03
+    max_step_rad: 0.2
+    on_ik_throttle: true
   user_floor_constraint:
     # DISABLED TO MATCH stack_real.yaml (operator, 2026-09-03), together with the stand
     # floor above. This is the viser-fitted TILTED plane; it is independent of and
@@ -316,14 +333,19 @@ safety:
         - ["*left*link4*", "*left*link6*"]
         - ["*right*link4*", "*right*link6*"]
       viz_near_pairs_m: 0.06   # GUI-only: show witness tubes within 60mm (decoupled from d_slow)
-      d_hard_m: 0.025   # hard floor (25 mm since 2026-06-19; the old "5mm -> 15mm" note was stale)
+      # 2026-09-05: arm<->arm and arm<->gripper floor 25 -> 40 mm, band 67 -> 90 mm
+      # (operator request after the bimanual runs of 2026-09-04: the links came to
+      # the 25 mm floor, measured min 24.7 mm). gripper_gripper below keeps the OLD
+      # 25/67 explicitly so handovers do not tighten with this. Braking:
+      # sqrt(2 * 3.0 * 0.050) = 0.55 m/s of closing speed, above the TCP ceiling.
+      d_hard_m: 0.040
       # Slow-zone must satisfy d_slow >= d_hard + v_max^2/(2*a_brake) so the barrier
       # can brake a head-on approach at the command ceiling before the hard floor.
       # v_max(max_linear_velocity)=0.32, a_brake=4.0 -> d_hard+0.0128=0.0278; 0.035
       # leaves a ~20mm slow zone (stoppable up to ~0.4 m/s). (Stage 0c)
       # 2026-09-04: 0.030 -> 0.067, same braking invariant as stack_real (the loader
       # now REFUSES d_slow < d_hard + v_max^2/(2 a_brake); v_max 0.50 m/s -> 0.0667).
-      d_slow_m: 0.067
+      d_slow_m: 0.090
       a_brake_m_s2: 3.0  # softer braking ramp near collision boundary
       hyst_m: 0.010      # 2026-06-19 anti-chatter: 0.005→0.010 (break on/off limit-cycle toggle)
       latency_s: 0.003   # small cushion for verdict/telemetry jitter without aggressive chatter
@@ -363,6 +385,15 @@ safety:
       # inside the floor that means no deeper, opening free -- never a latch.
       gripper_gripper:
         exclude_when_force_covered: true
+        # 2026-09-05: pinned at the pre-2026-09-05 self values (they used to inherit
+        # 25/67). NOT tightened to "exact" yet: seven real gripper-gripper contacts on
+        # 2026-09-04 (mirror F/T forces, cos 0.89-1.00) happened while THIS model
+        # reported 18-29 mm of clearance, so the model's relative gripper pose is
+        # off by ~20 mm at the rail ends and an exact check would let them touch.
+        d_hard_m: 0.025
+        d_slow_m: 0.067
+        a_brake_m_s2: 3.0
+        hyst_m: 0.010
       # 항목 6: URDF에 없는 collision geometry(손목 카메라/케이블/작업 테이블)를
       # 추가 검사. 팔 프레임에 붙이면 그 팔로 자동 분류(좌/우), stand/world면 정적
       # 장애물로 양팔과 페어링. shape: box|sphere|capsule|cylinder.
