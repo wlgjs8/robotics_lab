@@ -89,6 +89,19 @@ LEASE_RETRY_BACKOFF_SEC = 2.0
 DEFAULT_GRIPPER_CLOSE_BIAS_LEFT = 0.0
 DEFAULT_GRIPPER_CLOSE_BIAS_RIGHT = 0.0
 
+# ABSOLUTE close-snap deadzone (opening percent): any commanded opening STRICTLY
+# BELOW this collapses to 0 (fully closed).
+#
+# OFF (2026-09-05). It was 15.0, sized for the 2026-07-30 pi05 checkpoints, which
+# floored their gripper channel around 2-12% and never commanded a full close on
+# their own. On boltv2 a 5-15% opening already clamps a bolt, so that band IS the
+# grasp and squashing it costs real resolution: measured on
+# outputs/sweep/20260904_235947, 19.1% (left) / 23.0% (right) of published gripper
+# rows fell in (0,15) -- the model asks for p50 7.6% / 5.5% there -- and every one
+# of them was binarised to 0. Re-enable per-run for a checkpoint that cannot close
+# on its own; --gripper-close-snap-percent is unchanged and still honoured.
+DEFAULT_GRIPPER_CLOSE_SNAP_PERCENT = 0.0
+
 
 def resolve_gripper_close_bias(args: object) -> tuple[float, float, float]:
     """(shared, left, right) ABSOLUTE gripper close-bias in opening percent.
@@ -1886,17 +1899,21 @@ def _main_with_subcommands(argv: list[str]) -> int:
     flow_infer.add_argument(
         "--gripper-close-snap-percent",
         type=float,
-        default=15.0,
+        default=DEFAULT_GRIPPER_CLOSE_SNAP_PERCENT,
         help="ABSOLUTE close-snap deadzone (opening percent): after mapping, any gripper opening "
              "STRICTLY BELOW this snaps to 0 (fully closed), so small policy jitter near the closed "
              "end does not leave the jaw cracked open. E.g. 10 -> any commanded opening <10%% closes "
-             "fully. Clamped to [0,100]; DEFAULT 15.0, and 0 turns the snap OFF. Turning it off is "
-             "load-bearing, not cosmetic: the deployed pi05 checkpoints floor their gripper channel "
-             "around 2-12%% opening and never command a full close on their own, so --gripper-close-"
-             "snap-percent 0 leaves the jaw cracked open at every grasp and NO pick can succeed "
-             "(measured 2026-07-30: 0/8 snap-off runs closed past 2.2%%, vs 5 successful picks with "
-             "the default). Absolute mode only (no effect in delta; binary already snaps to "
-             "--gripper-close-percent).",
+             "fully. Clamped to [0,100]; DEFAULT 0.0 = OFF. Absolute mode only (no effect in delta; "
+             "binary already snaps to --gripper-close-percent). "
+             "OFF BY DEFAULT SINCE 2026-09-05: a 5-15%% opening already clamps a bolt, so that band "
+             "is the grasp itself, not jitter to be squashed. The old 15.0 default was sized for the "
+             "pi05 checkpoints of 2026-07-30, which floored their gripper channel around 2-12%% and "
+             "never commanded a full close (0/8 snap-off runs closed past 2.2%%); boltv2 does not "
+             "need it. It was not free: measured on outputs/sweep/20260904_235947, 19.1%% (left) / "
+             "23.0%% (right) of published gripper rows fell in (0,15) and were binarised to 0 -- the "
+             "model asks for p50 7.6%% / 5.5%% there, so the whole 0-15%% band of grasp force was "
+             "being collapsed onto one value. Re-enable it per-run if a checkpoint cannot close on "
+             "its own.",
     )
     flow_infer.add_argument(
         "--gripper-command-deadband-percent",
@@ -3171,14 +3188,18 @@ def _main_with_subcommands(argv: list[str]) -> int:
                 _lb = float(getattr(source, "gripper_close_bias_left", 0.0) or 0.0)
                 _rb = float(getattr(source, "gripper_close_bias_right", 0.0) or 0.0)
                 detail = f", close-bias L={_lb:g}%/R={_rb:g}%" if (_lb or _rb) else ""
-                # Announce close-snap in BOTH states. It used to print only when
-                # non-zero, so `--gripper-close-snap-percent 0` looked identical to
-                # the default in the banner while silently making every grasp
-                # impossible (the checkpoints never command a full close on their own).
+                # Announce close-snap in BOTH states: the two behave very
+                # differently near the closed end and a log that omits the state
+                # cannot be read after the fact. ON is now the non-default, so it
+                # is the one that gets the warning -- it binarises the whole band
+                # below the threshold, which on boltv2 is where the grasp lives.
                 if source.gripper_close_snap_percent:
-                    detail += f", close-snap<{source.gripper_close_snap_percent:g}%"
+                    detail += (
+                        f", close-snap<{source.gripper_close_snap_percent:g}% "
+                        "(EVERY opening below that is forced to 0 -- no grasp-force resolution there)"
+                    )
                 else:
-                    detail += ", close-snap OFF (policy must command full close itself)"
+                    detail += ", close-snap OFF (the policy's own opening is commanded as-is)"
             else:
                 detail = ""
             print(

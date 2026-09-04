@@ -24,6 +24,7 @@ from policy_runner.config import config_from_mapping, load_config
 from policy_runner.main import (
     DEFAULT_GRIPPER_CLOSE_BIAS_LEFT,
     DEFAULT_GRIPPER_CLOSE_BIAS_RIGHT,
+    DEFAULT_GRIPPER_CLOSE_SNAP_PERCENT,
     LEASE_READBACK_TIMEOUT_EXIT_CODE,
     STARTUP_TIMEOUT_EXIT_CODE,
     _TickPacer,
@@ -462,6 +463,13 @@ class GripperCloseBiasResolutionTest(unittest.TestCase):
         self.assertEqual(
             resolve_gripper_close_bias(self._args(left=-5.0, right=250.0)), (0.0, 0.0, 100.0)
         )
+
+    def test_close_snap_is_off_by_default(self):
+        # A 5-15% opening already clamps a bolt, so that band is the grasp itself.
+        # The old 15.0 default binarised 19-23% of the published gripper rows to 0
+        # (measured on outputs/sweep/20260904_235947), which is the whole grasp-force
+        # range for this task. --gripper-close-snap-percent still turns it back on.
+        self.assertEqual(DEFAULT_GRIPPER_CLOSE_SNAP_PERCENT, 0.0)
 
 
 class PolicyRunnerContractTest(unittest.TestCase):
