@@ -135,6 +135,7 @@ from .scene import (
     update_user_floor_plane,
     update_user_floor_capture_points,
     update_self_collision_check_geom,
+    ensure_calibrated_arm_urdfs,
     update_self_collision_near_pairs,
     update_self_collision_overlay,
     update_scene_markers,
@@ -6304,6 +6305,9 @@ def update_gui(
         latest,
         show=bool(getattr(_floor_points_toggle, "value", False)),
     )
+    # The real server publishes calibrated per-arm URDFs (box DH) in its manifest:
+    # swap the drawn arms to them once (no-op on sim / before the first state).
+    ensure_calibrated_arm_urdfs(handles.get("scene", {}), latest)
     # After markers: the collision overlay may override ghost/solid visibility.
     update_self_collision_overlay(handles.get("scene", {}), latest)
     toggle = handles.get("self_collision_capsules_toggle")

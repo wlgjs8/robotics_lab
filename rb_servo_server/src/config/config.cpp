@@ -4626,8 +4626,62 @@ DualArmConfig loadConfigFromYaml(const std::string& path) {
             "q_units",
             "publish_tcp",
             "ik",
+            "calibration",
         }, "kinematics");
+        if (has(sec, "calibration")) {
+            const YAML::Node c = sec["calibration"];
+            validateAllowedKeys(c, {
+                "source", "output_dir", "probe_timeout_sec", "max_abs_delta_mm", "max_abs_delta_deg",
+                "oracle_max_mm", "oracle_fatal", "box_tool_offset_mm", "gui_arm_urdf",
+            }, "kinematics.calibration");
+            if (has(c, "gui_arm_urdf")) {
+                cfg.kinematics.calibration.gui_arm_urdf =
+                    resolvePathForConfig(asString(c["gui_arm_urdf"], "kinematics.calibration.gui_arm_urdf"), path);
+            }
+            KinematicsCalibrationConfig& k = cfg.kinematics.calibration;
+            if (has(c, "source")) k.source = lower(asString(c["source"], "kinematics.calibration.source"));
+            if (k.source != "nominal" && k.source != "box") {
+                throw std::runtime_error("kinematics.calibration.source must be \"nominal\" or \"box\" (got \"" +
+                                         k.source + "\")");
+            }
+            if (has(c, "output_dir")) k.output_dir = asString(c["output_dir"], "kinematics.calibration.output_dir");
+            if (k.output_dir.empty()) throw std::runtime_error("kinematics.calibration.output_dir must not be empty");
+            if (has(c, "probe_timeout_sec")) k.probe_timeout_sec = asDouble(c["probe_timeout_sec"], "kinematics.calibration.probe_timeout_sec");
+            if (has(c, "max_abs_delta_mm")) k.max_abs_delta_mm = asDouble(c["max_abs_delta_mm"], "kinematics.calibration.max_abs_delta_mm");
+            if (has(c, "max_abs_delta_deg")) k.max_abs_delta_deg = asDouble(c["max_abs_delta_deg"], "kinematics.calibration.max_abs_delta_deg");
+            if (has(c, "oracle_max_mm")) k.oracle_max_mm = asDouble(c["oracle_max_mm"], "kinematics.calibration.oracle_max_mm");
+            if (has(c, "oracle_fatal")) k.oracle_fatal = asBool(c["oracle_fatal"], "kinematics.calibration.oracle_fatal");
+            validatePositiveFinite(k.probe_timeout_sec, "kinematics.calibration.probe_timeout_sec");
+            validatePositiveFinite(k.max_abs_delta_mm, "kinematics.calibration.max_abs_delta_mm");
+            validatePositiveFinite(k.max_abs_delta_deg, "kinematics.calibration.max_abs_delta_deg");
+            validatePositiveFinite(k.oracle_max_mm, "kinematics.calibration.oracle_max_mm");
+            if (has(c, "box_tool_offset_mm")) {
+                const YAML::Node o = c["box_tool_offset_mm"];
+                validateAllowedKeys(o, {"left", "right"}, "kinematics.calibration.box_tool_offset_mm");
+                const auto read3 = [&](const char* side, std::array<double, 3>* out, bool* present) {
+                    if (!has(o, side)) return;
+                    const YAML::Node n = o[side];
+                    if (!n.IsSequence() || n.size() != 3) {
+                        throw std::runtime_error(std::string("kinematics.calibration.box_tool_offset_mm.") + side +
+                                                 " must be a sequence of 3 numbers");
+                    }
+                    for (std::size_t i = 0; i < 3; ++i) {
+                        (*out)[i] = asDouble(n[i], std::string("kinematics.calibration.box_tool_offset_mm.") + side);
+                        if (!std::isfinite((*out)[i])) {
+                            throw std::runtime_error(std::string("kinematics.calibration.box_tool_offset_mm.") + side +
+                                                     " must be finite");
+                        }
+                    }
+                    *present = true;
+                };
+                read3("left", &k.box_tool_offset_mm_left, &k.has_box_tool_offset_left);
+                read3("right", &k.box_tool_offset_mm_right, &k.has_box_tool_offset_right);
+            }
+        }
         if (has(sec, "enable")) cfg.kinematics.enable = asBool(sec["enable"], "kinematics.enable");
+        if (cfg.kinematics.calibration.source == "box" && !cfg.kinematics.enable) {
+            throw std::runtime_error("kinematics.calibration.source=box requires kinematics.enable=true");
+        }
         if (has(sec, "provider")) cfg.kinematics.provider = lower(asString(sec["provider"], "kinematics.provider"));
         if (has(sec, "urdf")) {
             cfg.kinematics.urdf = resolvePathForConfig(asString(sec["urdf"], "kinematics.urdf"), path);

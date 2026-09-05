@@ -22,6 +22,11 @@ struct BackendConfig {
     std::string operation_mode = "real";
 
     double command_timeout_sec = 0.2;
+    // RUNTIME-ONLY (set by the box DH calibration stage, never parsed): when true the
+    // backend must read get_link_parameter() at connect and it must equal
+    // `expected_link_parameter` (what the startup stage adopted), else connect fails.
+    bool require_link_parameter = false;
+    std::vector<double> expected_link_parameter;
 
     JointArray initial_q_deg{};
 
@@ -385,6 +390,32 @@ struct IkSolverConfig {
     double pinned_lowpass_release_sec = 0.0;
 };
 
+// THE BOX DH CALIBRATION (2026-09-05). source "box": at startup (make run) read each
+// controller box's calibrated DH via get_link_parameter(), write calibrated runtime
+// URDFs and build IK/FK, the collision monitor and the GUI manifest from them; any
+// failure is fatal. source "nominal": the URDF as shipped (the sim stack).
+// box_tool_offset_mm: where the box's own TCP point sits relative to our tip, in
+// the box TCP axes - lets the loop compare our FK with the box's every tick
+// (RobotState::fk_vs_box_tcp_mm) and at startup (oracle).
+struct KinematicsCalibrationConfig {
+    std::string source = "nominal";
+    std::string output_dir = "logs/stack/runtime_urdf";
+    double probe_timeout_sec = 2.0;
+    double max_abs_delta_mm = 10.0;
+    double max_abs_delta_deg = 2.0;
+    double oracle_max_mm = 0.5;
+    bool oracle_fatal = false;
+    bool has_box_tool_offset_left = false;
+    bool has_box_tool_offset_right = false;
+    std::array<double, 3> box_tool_offset_mm_left{0.0, 0.0, 0.0};
+    std::array<double, 3> box_tool_offset_mm_right{0.0, 0.0, 0.0};
+    // The GUI's arm model (the articulated-gripper URDF). Set -> the calibration stage
+    // also writes a calibrated copy per arm and publishes them in the state manifest
+    // (robot_urdf_left/right), so the viewer draws the calibrated chains; a set path
+    // that is missing is fatal. Empty -> the viewer keeps its nominal asset.
+    std::string gui_arm_urdf;
+};
+
 struct KinematicsConfig {
     bool enable = false;
     std::string provider = "none";
@@ -407,6 +438,15 @@ struct KinematicsConfig {
     std::string q_units = "deg";
     bool publish_tcp = false;
     IkSolverConfig ik;
+    // RUNTIME-ONLY (set by the box DH calibration stage, never parsed): per-arm
+    // calibrated URDFs. Both set -> the loop builds one Pinocchio model per arm
+    // (DualArmKinematics); empty -> `urdf` for both arms as before.
+    std::string urdf_left;
+    std::string urdf_right;
+    // RUNTIME-ONLY: calibrated copies of calibration.gui_arm_urdf, published to the GUI.
+    std::string gui_urdf_left;
+    std::string gui_urdf_right;
+    KinematicsCalibrationConfig calibration;
 };
 
 enum class ControllerSimulationTrackingErrorSource {

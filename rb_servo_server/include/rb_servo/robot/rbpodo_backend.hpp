@@ -123,9 +123,18 @@ public:
 
     BackendResult<RobotState> connect() override;
     // The box's link-parameter (calibrated DH) answer read at connect; empty when
-    // not answered. Logging only (see queryBoxLinkParameter in the .cpp).
+    // not answered. When BackendConfig::require_link_parameter is set (the box DH
+    // calibration stage adopted a table at startup) the read is mandatory and must
+    // match BackendConfig::expected_link_parameter, else connect() fails.
     std::vector<double> boxLinkParameter() const override;
-    void queryBoxLinkParameter();
+    std::optional<BackendError> queryBoxLinkParameter();
+    // STANDALONE PROBE (the box DH calibration stage, before any backend exists):
+    // open a command channel to `config.ip`, ask get_link_parameter(), close. Returns
+    // false with `error` set when the box could not be reached or answered without
+    // numbers (`raw_reply` carries what it said).
+    static bool probeLinkParameter(const BackendConfig& config, double timeout_sec,
+                                   std::vector<double>* values, std::string* raw_reply,
+                                   std::string* error);
     BackendResult<RobotState> initialize() override;
 
     BackendResult<RobotState> readState() override;

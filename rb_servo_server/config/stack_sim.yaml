@@ -552,6 +552,9 @@ kinematics:
   enable: true
   provider: pinocchio
   urdf: "descriptions/urdf/rb5_850e.urdf"
+  # sim: the URDF nominal, no box query (2026-09-05; the real stack reads the box DH).
+  calibration:
+    source: nominal
   base_link: "world"
   tip_link: "tcp"
   joint_names:

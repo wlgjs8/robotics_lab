@@ -1,4 +1,5 @@
 #include "rb_servo/robot/rbpodo_backend.hpp"
+#include "rb_servo/kinematics/dh_calibration.hpp"
 
 #include <algorithm>
 #include <array>
@@ -907,78 +908,144 @@ RbpodoBackend::~RbpodoBackend() = default;
 // arm along its base z). LOGGING ONLY: the server keeps running its URDF; this
 // line plus the box_tcp_* columns are the evidence for deciding whether to adopt
 // it. Cold path (connect), never on a tick.
-void RbpodoBackend::queryBoxLinkParameter() {
 #ifdef RB_SERVO_ENABLE_RBPODO
-    impl_->box_link_parameter.clear();
-    if (!impl_->robot) return;
+namespace {
+// Ask an open command channel for the box's calibrated DH. True when a reply carrying
+// the key arrived; `values` may still be empty (the reply carried no numbers).
+bool evalLinkParameter(rb::podo::Cobot<>& robot, double timeout_sec, std::vector<double>* values,
+                       std::string* payload, std::string* error) {
     static constexpr const char* kKey = "link_parameter";
     const auto has_key = [](const rb::podo::Response& r) {
         return r.raw().find(kKey) != std::string::npos;
     };
-    std::string payload;
     try {
         rb::podo::ResponseCollector responses;
-        const double timeout = std::max(0.2, impl_->config.command_timeout_sec);
-        impl_->robot->eval(responses, "get_link_parameter()", timeout, false);
-        // The value line is an Info response that may land before or after the ack;
-        // wait_until consumes the collector and keeps reading the socket for it.
+        robot.eval(responses, "get_link_parameter()", timeout_sec, false);
         rb::podo::ResponseCollector waited;
         waited.swap_responses(responses);
         waited.set_flag(rb::podo::ResponseCollector::EnableCheckOldResponses);
-        const auto ret = impl_->robot->wait_until(waited, has_key, 0.5, false);
-        (void)ret;
+        (void)robot.wait_until(waited, has_key, timeout_sec, false);
         for (const auto& r : waited) {
-            if (has_key(r)) { payload = r.raw(); break; }
+            if (has_key(r)) { *payload = r.raw(); break; }
         }
     } catch (const std::exception& e) {
-        std::cerr << "[WARN] RbpodoBackend " << impl_->config.name
-                  << ": get_link_parameter() failed (" << e.what() << "); box DH not logged\n";
-        return;
+        if (error) *error = std::string("get_link_parameter() failed: ") + e.what();
+        return false;
     }
-    if (payload.empty()) {
-        std::cerr << "[WARN] RbpodoBackend " << impl_->config.name
-                  << ": no link_parameter reply within 0.5 s; box DH not logged\n";
-        return;
+    if (payload->empty()) {
+        if (error) *error = "no link_parameter reply within " + std::to_string(timeout_sec) + " s";
+        return false;
     }
-    const std::size_t lb = payload.find('[');
-    const std::size_t rb = payload.find(']', lb == std::string::npos ? 0 : lb);
-    const std::string body = (lb != std::string::npos && rb != std::string::npos && rb > lb)
-        ? payload.substr(lb + 1, rb - lb - 1) : payload.substr(payload.find(kKey) + std::strlen(kKey));
-    const char* c = body.c_str();
-    while (*c) {
-        char* e = nullptr;
-        const double v = std::strtod(c, &e);
-        if (e == c) { ++c; continue; }
-        impl_->box_link_parameter.push_back(v);
-        c = e;
+    *values = parseLinkParameterPayload(*payload);
+    return true;
+}
+}  // namespace
+#endif
+
+bool RbpodoBackend::probeLinkParameter(const BackendConfig& config, double timeout_sec,
+                                       std::vector<double>* values, std::string* raw_reply,
+                                       std::string* error) {
+    if (values) values->clear();
+    if (raw_reply) raw_reply->clear();
+#ifndef RB_SERVO_ENABLE_RBPODO
+    (void)config; (void)timeout_sec;
+    if (error) *error = "RB_SERVO_ENABLE_RBPODO=OFF: no rbpodo transport in this build";
+    return false;
+#else
+    if (config.ip.empty()) {
+        if (error) *error = "controller ip is empty";
+        return false;
     }
-    if (impl_->box_link_parameter.empty()) {
-        // The key came back with no numbers (2026-09-04 23:54 session: "(0 values)" on
-        // both boxes). Print the raw reply so the next session can see what the box
-        // actually said instead of guessing at the slot layout.
+    std::vector<double> vals;
+    std::string payload, err;
+    try {
+        rb::podo::Cobot<> robot(config.ip);
+        if (const auto ack_error = configureWaitingAck(robot, config.disable_waiting_ack)) {
+            if (error) *error = ack_error->message;
+            return false;
+        }
+        if (!evalLinkParameter(robot, std::max(0.5, timeout_sec), &vals, &payload, &err)) {
+            if (error) *error = err;
+            return false;
+        }
+    } catch (const std::exception& e) {
+        if (error) *error = std::string("cannot open the command channel: ") + e.what();
+        return false;
+    }
+    if (raw_reply) *raw_reply = payload;
+    if (vals.empty()) {
         std::string raw = payload;
         for (char& ch : raw) if (ch == '\n' || ch == '\r') ch = ' ';
-        std::cerr << "[WARN] RbpodoBackend " << impl_->config.name
-                  << ": get_link_parameter() reply carried no numbers; raw: \"" << raw << "\"\n";
+        if (error) *error = "get_link_parameter() reply carried no numbers; raw: \"" + raw + "\"";
+        return false;
     }
-    std::ostringstream line;
-    line << "[INFO] RbpodoBackend " << impl_->config.name << ": box link_parameter ("
-         << impl_->box_link_parameter.size() << " values):";
-    for (double v : impl_->box_link_parameter) line << ' ' << v;
-    if (impl_->box_link_parameter.size() == 8) {
-        // RB5-850E slot map (controller-manager platforms/chimpanzee/params-presets/models/rb5-850e.yaml).
-        static constexpr const char* kSlot[6] = {"J2.alpha_deg", "J3.alpha_deg", "J1.d_mm",
-                                                 "J2.a_mm", "J3.a_mm", "J4.d_mm"};
-        static constexpr double kUrdfNominal[6] = {0.0, 0.0, 169.20, 425.00, 392.00, -110.70};
-        line << "  | vs URDF nominal:";
-        for (int i = 0; i < 6; ++i) {
-            const double d = impl_->box_link_parameter[static_cast<std::size_t>(i)] - kUrdfNominal[i];
-            if (std::abs(d) > 1e-6) line << ' ' << kSlot[i] << ' ' << std::showpos << d << std::noshowpos;
+    if (values) *values = vals;
+    return true;
+#endif
+}
+
+std::optional<BackendError> RbpodoBackend::queryBoxLinkParameter() {
+#ifndef RB_SERVO_ENABLE_RBPODO
+    return std::nullopt;
+#else
+    impl_->box_link_parameter.clear();
+    const bool required = impl_->config.require_link_parameter;
+    const auto fatal = [&](const std::string& message, const char* code) {
+        return backendError(BackendErrorKind::DependencyUnavailable,
+                            "box DH (link_parameter) " + message, "", code);
+    };
+    if (!impl_->robot) {
+        if (required) return fatal("required but the command channel is not open", "rbpodo_link_parameter_no_channel");
+        return std::nullopt;
+    }
+    std::vector<double> vals;
+    std::string payload, err;
+    const double timeout = std::max(0.5, impl_->config.command_timeout_sec);
+    if (!evalLinkParameter(*impl_->robot, timeout, &vals, &payload, &err)) {
+        if (required) return fatal(err, "rbpodo_link_parameter_unavailable");
+        std::cerr << "[WARN] RbpodoBackend " << impl_->config.name << ": " << err << "; box DH not logged\n";
+        return std::nullopt;
+    }
+    if (vals.empty()) {
+        std::string raw = payload;
+        for (char& ch : raw) if (ch == '\n' || ch == '\r') ch = ' ';
+        const std::string msg = "reply carried no numbers; raw: \"" + raw + "\"";
+        if (required) return fatal(msg, "rbpodo_link_parameter_empty");
+        std::cerr << "[WARN] RbpodoBackend " << impl_->config.name << ": get_link_parameter() " << msg << "\n";
+        return std::nullopt;
+    }
+    impl_->box_link_parameter = vals;
+    {
+        std::ostringstream line;
+        line << "[INFO] RbpodoBackend " << impl_->config.name << ": box link_parameter (" << vals.size()
+             << " values):";
+        for (double v : vals) line << ' ' << v;
+        if (vals.size() == 8) {
+            line << " | RB5-850E slots J2.alpha J3.alpha J1.d J2.a J3.a J4.d 0 0";
+        } else {
+            line << " | not the 8-value RB5-850E layout";
         }
-    } else {
-        line << "  | unknown slot layout (not the 8-value RB5-850E answer) -- values logged only";
+        std::cerr << line.str() << "\n";
     }
-    std::cerr << line.str() << "\n";
+    if (required) {
+        const std::vector<double>& exp = impl_->config.expected_link_parameter;
+        bool same = exp.size() == vals.size();
+        for (std::size_t i = 0; same && i < exp.size(); ++i) {
+            if (std::fabs(exp[i] - vals[i]) > 1e-6) same = false;
+        }
+        if (!same) {
+            std::ostringstream os;
+            os << "at connect differs from the table adopted at startup: startup [";
+            for (std::size_t i = 0; i < exp.size(); ++i) os << (i ? ", " : "") << exp[i];
+            os << "] vs now [";
+            for (std::size_t i = 0; i < vals.size(); ++i) os << (i ? ", " : "") << vals[i];
+            os << "] - the kinematics were built from the startup table; restart";
+            return fatal(os.str(), "rbpodo_link_parameter_mismatch");
+        }
+        std::cerr << "[INFO] RbpodoBackend " << impl_->config.name
+                  << ": box link_parameter matches the table adopted at startup\n";
+    }
+    return std::nullopt;
 #endif
 }
 
@@ -1043,7 +1110,17 @@ BackendResult<RobotState> RbpodoBackend::connect() {
             );
         }
         impl_->connected = true;
-        queryBoxLinkParameter();
+        if (const auto dh_error = queryBoxLinkParameter()) {
+            std::cerr << "[ERROR] RbpodoBackend " << impl_->config.name << ": " << dh_error->message << "\n";
+            impl_->robot.reset();
+            impl_->data_channel.reset();
+            impl_->connected = false;
+            return failedResult<RobotState>(
+                BackendOp::Connect,
+                *dh_error,
+                makeBackendTiming(start, nowSteadyNs())
+            );
+        }
         const RbpodoSystemStateSnapshot snapshot = snapshotFromSystemState(*state);
         RobotState mapped = mapRbpodoSystemStateSnapshot(impl_->arm_id, snapshot, impl_->config);
         mapped.acquisition_sequence = ++impl_->state_acquisition_sequence;

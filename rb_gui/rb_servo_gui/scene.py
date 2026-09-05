@@ -2175,16 +2175,84 @@ def _add_stand_mesh(server: Any, handles: dict[str, Any]) -> None:
         handles["stand_mesh_error"] = _asset_error(f"{type(exc).__name__}: {exc}")
 
 
-def _add_robot_urdfs(server: Any, handles: dict[str, Any]) -> None:
-    urdf_path = _robot_urdf_path()
-    if not urdf_path.exists():
-        handles["urdf_error"] = _asset_error(f"robot URDF not found: {urdf_path}")
-        return
+_ARM_URDF_HANDLE_KEYS = (
+    "left_urdf", "right_urdf", "left_urdf_ref", "right_urdf_ref",
+    "left_urdf_collision", "right_urdf_collision",
+)
+
+
+def _manifest_arm_urdf_paths(manifest: Any) -> tuple[Path, Path] | None:
+    """The calibrated per-arm GUI URDFs the server published (state manifest
+    robot_urdf_left/right, written by its box DH calibration stage), or None when the
+    server did not calibrate or either file is not readable from here."""
+    if not isinstance(manifest, Mapping):
+        return None
+    left = manifest.get("robot_urdf_left")
+    right = manifest.get("robot_urdf_right")
+    if not isinstance(left, str) or not isinstance(right, str) or not left or not right:
+        return None
+    lp, rp = Path(left), Path(right)
+    if not lp.exists() or not rp.exists():
+        return None
+    return lp, rp
+
+
+def _remove_arm_urdfs(handles: dict[str, Any]) -> None:
+    for key in _ARM_URDF_HANDLE_KEYS:
+        handle = handles.pop(key, None)
+        if handle is None:
+            continue
+        try:
+            handle.remove()
+        except Exception as exc:  # pragma: no cover - viser handle already gone
+            handles["urdf_remove_error"] = f"{type(exc).__name__}: {exc}"
+
+
+def ensure_calibrated_arm_urdfs(scene_handles: dict[str, Any], latest: Any) -> bool:
+    """THE BOX DH CALIBRATION IN THE VIEWER (2026-09-05). The real server reads each
+    box's calibrated DH at startup and publishes calibrated copies of the GUI arm
+    URDF (one per arm) in its state manifest. The viewer starts on the nominal asset
+    (no state yet); on the first manifest carrying both paths it swaps its solid,
+    ghost and collision-overlay arms to the calibrated files, so what is drawn is
+    the chain the server actually solves and checks. Returns True when it swapped."""
+    if not isinstance(scene_handles, dict):
+        return False
+    sc = getattr(latest, "self_collision", None) if latest is not None else None
+    manifest = sc.get("manifest") if isinstance(sc, Mapping) else None
+    paths = _manifest_arm_urdf_paths(manifest)
+    if paths is None:
+        return False
+    wanted = (str(paths[0]), str(paths[1]))
+    if scene_handles.get("arm_urdf_paths") == wanted:
+        return False
+    server = scene_handles.get("_server")
+    if server is None:
+        return False
+    _remove_arm_urdfs(scene_handles)
+    _add_robot_urdfs(server, scene_handles, left_path=paths[0], right_path=paths[1])
+    if "urdf_error" in scene_handles:
+        return False
+    scene_handles["arm_urdf_source"] = "box DH calibrated"
+    return True
+
+
+def _add_robot_urdfs(server: Any, handles: dict[str, Any],
+                     left_path: Path | None = None, right_path: Path | None = None) -> None:
+    default_path = _robot_urdf_path() if (left_path is None or right_path is None) else None
+    left_urdf = left_path if left_path is not None else default_path
+    right_urdf = right_path if right_path is not None else default_path
+    for urdf_path in (left_urdf, right_urdf):
+        if not urdf_path.exists():
+            handles["urdf_error"] = _asset_error(f"robot URDF not found: {urdf_path}")
+            return
+    handles.pop("urdf_error", None)
+    handles["arm_urdf_paths"] = (str(left_urdf), str(right_urdf))
+    handles.setdefault("arm_urdf_source", "nominal")
     try:
         from viser.extras import ViserUrdf
 
-        handles["left_urdf"] = ViserUrdf(server, urdf_path, root_node_name="/stand/left_base")
-        handles["right_urdf"] = ViserUrdf(server, urdf_path, root_node_name="/stand/right_base")
+        handles["left_urdf"] = ViserUrdf(server, left_urdf, root_node_name="/stand/left_base")
+        handles["right_urdf"] = ViserUrdf(server, right_urdf, root_node_name="/stand/right_base")
         handles["urdf_joint_names"] = tuple(handles["left_urdf"].get_actuated_joint_names())
         # Translucent reference "ghost" robot following q_ref. In controller (pgmode)
         # simulation the controller does not move q_actual to track streamed servo_j,
@@ -2193,10 +2261,10 @@ def _add_robot_urdfs(server: Any, handles: dict[str, Any]) -> None:
         if _reference_ghost_enabled():
             try:
                 handles["left_urdf_ref"] = ViserUrdf(
-                    server, urdf_path, root_node_name="/stand/left_base_ref",
+                    server, left_urdf, root_node_name="/stand/left_base_ref",
                     mesh_color_override=_REFERENCE_GHOST_RGBA)
                 handles["right_urdf_ref"] = ViserUrdf(
-                    server, urdf_path, root_node_name="/stand/right_base_ref",
+                    server, right_urdf, root_node_name="/stand/right_base_ref",
                     mesh_color_override=_REFERENCE_GHOST_RGBA)
             except Exception as exc:
                 handles["urdf_ref_error"] = f"{type(exc).__name__}: {exc}"
@@ -2205,10 +2273,10 @@ def _add_robot_urdfs(server: Any, handles: dict[str, Any]) -> None:
         # they replace the commanded ghost.
         try:
             handles["left_urdf_collision"] = ViserUrdf(
-                server, urdf_path, root_node_name="/stand/left_base_collision",
+                server, left_urdf, root_node_name="/stand/left_base_collision",
                 mesh_color_override=_SELF_COLLISION_RGBA)
             handles["right_urdf_collision"] = ViserUrdf(
-                server, urdf_path, root_node_name="/stand/right_base_collision",
+                server, right_urdf, root_node_name="/stand/right_base_collision",
                 mesh_color_override=_SELF_COLLISION_RGBA)
         except Exception as exc:
             handles["urdf_collision_error"] = f"{type(exc).__name__}: {exc}"

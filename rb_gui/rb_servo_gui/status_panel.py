@@ -662,6 +662,11 @@ def _format_scene_asset_status(scene_handles: Mapping[str, Any]) -> str:
         if key.endswith("_error") and value:
             errors.append(f"{key}={value}")
     if not errors:
+        # The real server's box DH calibration swaps the drawn arms to calibrated
+        # URDFs (scene.ensure_calibrated_arm_urdfs); say so, so "nominal" is visible too.
+        source = scene_handles.get("arm_urdf_source")
+        if source == "box DH calibrated":
+            return "stand/URDF assets loaded; arms: box DH calibrated"
         return "stand/URDF assets loaded"
     if not any(_ASSET_INSTALL_HINT in item for item in errors):
         errors.append(_ASSET_INSTALL_HINT)

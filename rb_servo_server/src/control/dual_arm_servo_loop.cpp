@@ -1,5 +1,6 @@
 #include "rb_servo/control/dual_arm_servo_loop.hpp"
 #include "rb_servo/control/hold_fold.hpp"
+#include "rb_servo/kinematics/dual_arm_kinematics.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -183,8 +184,24 @@ std::shared_ptr<IKinematics> makeKinematicsProvider(const DualArmConfig& config)
         return nullptr;
     }
     try {
+        // THE BOX DH CALIBRATION (2026-09-05): per-arm calibrated URDFs -> one model per arm.
+        if (!config.kinematics.urdf_left.empty() && !config.kinematics.urdf_right.empty()) {
+            KinematicsConfig left = config.kinematics;
+            left.urdf = config.kinematics.urdf_left;
+            KinematicsConfig right = config.kinematics;
+            right.urdf = config.kinematics.urdf_right;
+            std::cerr << "[INFO] kinematics: per-arm calibrated URDFs left=" << left.urdf
+                      << " right=" << right.urdf << "\n";
+            return std::make_shared<DualArmKinematics>(std::make_shared<PinocchioKinematics>(left),
+                                                       std::make_shared<PinocchioKinematics>(right));
+        }
         return std::make_shared<PinocchioKinematics>(config.kinematics);
     } catch (const std::exception& exc) {
+        if (config.kinematics.calibration.source == "box") {
+            // A calibrated URDF that does not load is not a deferral, it is a broken
+            // calibration stage: refuse to run rather than fall back to nothing.
+            throw std::runtime_error(std::string("box-calibrated kinematics failed to initialize: ") + exc.what());
+        }
         std::cerr << "[WARN] FK TCP publish deferred: failed to initialize kinematics: "
                   << exc.what() << "\n";
         return nullptr;
@@ -2531,6 +2548,7 @@ bool DualArmServoLoop::initializeRobots() {
     RobotState left, right;
     const bool states_read = readRobotStates(left, right);
     const StartupValidationSnapshot startup_validation = validateStartupStates(left, right);
+    if (!checkBoxTcpOracle(left, right)) return false;
     logStartupValidation(startup_validation, left, right);
     if (!states_read || !startupValidationAllowsStart(startup_validation)) {
         return false;
@@ -2580,6 +2598,7 @@ bool DualArmServoLoop::initializeWorkers() {
     while (nowSteadyNs() < deadline_ns) {
         if (readRobotStates(left, right)) {
             const StartupValidationSnapshot startup_validation = validateStartupStates(left, right);
+            if (!checkBoxTcpOracle(left, right)) return false;
             if (!startupValidationAllowsStart(startup_validation)) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
@@ -4409,6 +4428,7 @@ void DualArmServoLoop::populateTcpPose(RobotState& state, const ArmMountConfig& 
         state.has_valid_tcp_pose = true;
         state.tcp_actual_valid = true;
         state.tcp_deferred = false;
+        state.fk_vs_box_tcp_mm = fkVsBoxResidualMm(state);
     } catch (const std::exception& exc) {
         state.fk_duration_us = std::chrono::duration<double, std::micro>(
             std::chrono::steady_clock::now() - started
@@ -8840,6 +8860,60 @@ void DualArmServoLoop::applyPoseTrackWallFold(ArmId arm, SmdPoseTracker* tracker
     } else {
         release();
     }
+}
+
+// THE DH ORACLE (2026-09-05): our FK of the measured joints (tip, base frame) against
+// the box's own TCP report, through the configured box tool offset (the box TCP
+// point relative to our tip, box TCP axes). Measured before the calibration on
+// 2026-09-04: p50 0.6-1.2 mm; a wrong DH slot mapping would show here as mm.
+double DualArmServoLoop::fkVsBoxResidualMm(const RobotState& state) const {
+    const KinematicsCalibrationConfig& cal = config_.kinematics.calibration;
+    const bool left = state.arm_id == ArmId::Left;
+    const bool has = left ? cal.has_box_tool_offset_left : cal.has_box_tool_offset_right;
+    if (!has || !kinematics_ || !state.box_tcp_valid || !isValidJointState(state)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    try {
+        const Pose6D tip = kinematics_->computeTcpBase(state.q_actual_deg);
+        Pose6D box;
+        box.x = state.box_tcp_pos[0] * 1e-3;
+        box.y = state.box_tcp_pos[1] * 1e-3;
+        box.z = state.box_tcp_pos[2] * 1e-3;
+        box.rx = state.box_tcp_pos[3] * M_PI / 180.0;
+        box.ry = state.box_tcp_pos[4] * M_PI / 180.0;
+        box.rz = state.box_tcp_pos[5] * M_PI / 180.0;
+        const math::Matrix3 R = math::rotationFromPose(box);
+        const std::array<double, 3>& c = left ? cal.box_tool_offset_mm_left : cal.box_tool_offset_mm_right;
+        const math::Vector3 predicted_tip =
+            math::Vector3(box.x, box.y, box.z) + R * (math::Vector3(c[0], c[1], c[2]) * 1e-3);
+        const math::Vector3 ours(tip.x, tip.y, tip.z);
+        const double r = (ours - predicted_tip).norm() * 1000.0;
+        return std::isfinite(r) ? r : std::numeric_limits<double>::quiet_NaN();
+    } catch (const std::exception&) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+}
+
+bool DualArmServoLoop::checkBoxTcpOracle(const RobotState& left, const RobotState& right) const {
+    const KinematicsCalibrationConfig& cal = config_.kinematics.calibration;
+    if (cal.source != "box") return true;
+    bool ok = true;
+    for (const RobotState* st : {&left, &right}) {
+        const char* name = st->arm_id == ArmId::Left ? "left" : "right";
+        const double r = fkVsBoxResidualMm(*st);
+        if (!std::isfinite(r)) {
+            std::cerr << "[INFO] box DH oracle " << name << ": not checked (needs "
+                         "kinematics.calibration.box_tool_offset_mm and a box TCP report)\n";
+            continue;
+        }
+        const bool over = r > cal.oracle_max_mm;
+        std::cerr << (over ? (cal.oracle_fatal ? "[ERROR] " : "[WARN] ") : "[INFO] ")
+                  << "box DH oracle " << name << ": FK vs box TCP residual " << r << " mm (limit "
+                  << cal.oracle_max_mm << " mm)" << (over ? " - the calibrated chain does not reproduce the box" : "")
+                  << "\n";
+        if (over && cal.oracle_fatal) ok = false;
+    }
+    return ok;
 }
 
 Pose6D DualArmServoLoop::clampPoseToRoi(const Pose6D& pose) const {

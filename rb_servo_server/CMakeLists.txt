@@ -22,6 +22,8 @@ add_library(rb_servo_core
     src/config/config.cpp
     src/kinematics/ik_solver.cpp
     src/kinematics/pinocchio_kinematics.cpp
+    src/kinematics/dh_calibration.cpp
+    src/kinematics/box_dh_calibration.cpp
     src/robot/mock_backend.cpp
     src/robot/rbpodo_backend.cpp
     src/robot/backend_factory.cpp
@@ -325,6 +327,11 @@ if(BUILD_TESTING)
     add_executable(test_force_control tests/test_force_control.cpp)
     target_link_libraries(test_force_control PRIVATE rb_servo_core)
     add_test(NAME force_control COMMAND test_force_control)
+
+    add_executable(test_dh_calibration tests/test_dh_calibration.cpp)
+    target_link_libraries(test_dh_calibration PRIVATE rb_servo_core)
+    target_compile_definitions(test_dh_calibration PRIVATE RB_SERVO_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME dh_calibration COMMAND test_dh_calibration)
 
     set(RB_GUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../rb_gui")
     find_package(Python3 COMPONENTS Interpreter)

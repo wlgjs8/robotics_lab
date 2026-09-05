@@ -9,6 +9,7 @@
 #include "rb_servo/core/shutdown.hpp"
 #include "rb_servo/control/command_buffer.hpp"
 #include "rb_servo/control/dual_arm_servo_loop.hpp"
+#include "rb_servo/kinematics/box_dh_calibration.hpp"
 #include "rb_servo/logging/servo_logger.hpp"
 #include "rb_servo/network/chunk_frame_receiver.hpp"
 #include "rb_servo/network/command_server.hpp"
@@ -63,6 +64,19 @@ int main(int argc, char** argv) {
             return 0;
         }
 
+        // THE BOX DH CALIBRATION STAGE (2026-09-05): before anything is built. real
+        // (kinematics.calibration.source=box) reads both boxes and rewrites the config
+        // to the calibrated runtime URDFs; any failure ends the process here.
+        {
+            const rb_servo::BoxDhCalibrationResult dh = rb_servo::runBoxDhCalibration(config);
+            if (!dh.ok) {
+                std::cerr << "[FATAL] box DH calibration failed: " << dh.error << "\n"
+                          << "[FATAL] kinematics.calibration.source=box requires the calibrated DH of BOTH "
+                             "boxes; the server will not start on the URDF nominal. Power the boxes, or run "
+                             "the sim stack.\n";
+                return 3;
+            }
+        }
         auto left_robot = rb_servo::BackendFactory::create(
             rb_servo::ArmId::Left,
             config.left_robot

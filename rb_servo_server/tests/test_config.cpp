@@ -230,6 +230,55 @@ bool testHoldFoldConfigParses() {
     return true;
 }
 
+// THE BOX DH CALIBRATION keys: parse, and refuse an unknown source or box without kinematics.
+bool testKinematicsCalibrationConfigParses() {
+    const std::string path = writeTempConfig(
+        "dh-cal",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "kinematics:\n"
+        "  enable: false\n"
+        "  calibration:\n"
+        "    source: nominal\n"
+        "    output_dir: /tmp/rb-servo-runtime-urdf\n"
+        "    max_abs_delta_mm: 5.0\n"
+        "    oracle_fatal: true\n"
+        "    box_tool_offset_mm:\n"
+        "      left: [3.0, -249.7, -251.5]\n"
+        "    gui_arm_urdf: urdf/arm_gui.urdf\n"
+    );
+    const rb_servo::DualArmConfig cfg = rb_servo::loadConfigFromYaml(path);
+    ::unlink(path.c_str());
+    const auto& k = cfg.kinematics.calibration;
+    RB_CHECK(k.source == "nominal");
+    RB_CHECK(k.gui_arm_urdf.size() > std::string("urdf/arm_gui.urdf").size());   // resolved against the config dir
+    RB_CHECK(k.gui_arm_urdf.find("urdf/arm_gui.urdf") != std::string::npos);
+    RB_CHECK(k.output_dir == "/tmp/rb-servo-runtime-urdf");
+    RB_CHECK(near(k.max_abs_delta_mm, 5.0));
+    RB_CHECK(k.oracle_fatal);
+    RB_CHECK(k.has_box_tool_offset_left && !k.has_box_tool_offset_right);
+    RB_CHECK(near(k.box_tool_offset_mm_left[1], -249.7));
+    const std::string bad = writeTempConfig(
+        "dh-cal-bad-source",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "kinematics:\n"
+        "  calibration:\n"
+        "    source: guess\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(bad, "kinematics.calibration.source"));
+    ::unlink(bad.c_str());
+    const std::string bad2 = writeTempConfig(
+        "dh-cal-bad-box",
+        "schema: robotics_lab.rb_servo_server.v1\n"
+        "kinematics:\n"
+        "  enable: false\n"
+        "  calibration:\n"
+        "    source: box\n"
+    );
+    RB_CHECK(loadRejectsWithMessage(bad2, "requires kinematics.enable"));
+    ::unlink(bad2.c_str());
+    return true;
+}
+
 bool testJointWrapConfigParses() {
     const std::string path = writeTempConfig(
         "valid",
@@ -1731,6 +1780,7 @@ bool testFollowerOutputSmdConfig() {
 
 int main() {
     if (!testPoseTrackWallFoldConfigParses()) return 1;
+    if (!testKinematicsCalibrationConfigParses()) return 1;
     if (!testHoldFoldConfigParses()) return 1;
     if (!testPoseTrackReleaseBrakeConfigParses()) return 1;
     if (!testJointWrapConfigParses()) return 1;

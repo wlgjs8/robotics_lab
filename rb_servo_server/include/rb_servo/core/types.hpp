@@ -300,6 +300,10 @@ struct RobotState {
     std::array<double, 6> box_tcp_pos{};
     std::array<double, 6> box_tcp_ref{};
     bool box_tcp_valid = false;
+    // Our FK (tip, base frame) vs the box's own TCP report, once the box tool offset is
+    // configured (kinematics.calibration.box_tool_offset_mm): the DH oracle. NaN = not
+    // computable this tick.
+    double fk_vs_box_tcp_mm = std::numeric_limits<double>::quiet_NaN();
     // The box's link-parameter (calibrated DH) answer, read once at connect and
     // repeated on every state frame (small, fixed size; no allocation). count 0 =
     // not read / not answered. Slot meaning is vendor firmware per kind; the

@@ -289,6 +289,9 @@ private:
     PoseTrackWallState left_pose_track_wall_;
     PoseTrackWallState right_pose_track_wall_;
     void applyPoseTrackWallFold(ArmId arm, SmdPoseTracker* tracker, double dt_sec, ArmCommand* out);
+    // THE DH ORACLE (2026-09-05): our FK vs the box's TCP report; NaN when not computable.
+    double fkVsBoxResidualMm(const RobotState& state) const;
+    bool checkBoxTcpOracle(const RobotState& left, const RobotState& right) const;
 
     // Stand-frame user-defined tilted floor plane (safety.user_floor_constraint):
     // FK the arm's TCP for a candidate joint target and evaluate its signed distance

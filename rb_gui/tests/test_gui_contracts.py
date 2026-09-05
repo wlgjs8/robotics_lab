@@ -172,6 +172,8 @@ from rb_servo_gui.scene import (
     _ik_infeasible_path,
     _reference_ghost_active,
     _robot_urdf_path,
+    _manifest_arm_urdf_paths,
+    ensure_calibrated_arm_urdfs,
     _update_tcp_trail,
     _update_urdf_config,
     set_ik_infeasible_region_visible,
@@ -2511,6 +2513,53 @@ class GuiContractsTest(unittest.TestCase):
                 os.environ.pop("RB_GUI_DESCRIPTIONS_DIR", None)
             else:
                 os.environ["RB_GUI_DESCRIPTIONS_DIR"] = old_value
+
+    def test_manifest_arm_urdf_paths_need_both_existing_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            left = Path(tmpdir) / "left.urdf"
+            right = Path(tmpdir) / "right.urdf"
+            left.write_text("<robot name='l'/>")
+            self.assertIsNone(_manifest_arm_urdf_paths(None))
+            self.assertIsNone(_manifest_arm_urdf_paths({}))
+            self.assertIsNone(_manifest_arm_urdf_paths({"robot_urdf_left": str(left), "robot_urdf_right": ""}))
+            # right missing on disk -> not usable
+            self.assertIsNone(_manifest_arm_urdf_paths({"robot_urdf_left": str(left), "robot_urdf_right": str(right)}))
+            right.write_text("<robot name='r'/>")
+            self.assertEqual(
+                _manifest_arm_urdf_paths({"robot_urdf_left": str(left), "robot_urdf_right": str(right)}),
+                (left, right),
+            )
+
+    def test_per_arm_robot_urdf_paths_report_the_missing_side(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            left = Path(tmpdir) / "left.urdf"
+            left.write_text("<robot name='l'/>")
+            handles: dict[str, object] = {}
+            _add_robot_urdfs(object(), handles, left_path=left, right_path=Path(tmpdir) / "nope.urdf")
+            self.assertIn("urdf_error", handles)
+            self.assertIn("nope.urdf", str(handles["urdf_error"]))
+
+    def test_ensure_calibrated_arm_urdfs_is_a_no_op_without_manifest_or_server(self):
+        class _Latest:
+            self_collision = {"manifest": {"robot_urdf_left": "", "robot_urdf_right": ""}}
+
+        handles: dict[str, object] = {}
+        self.assertFalse(ensure_calibrated_arm_urdfs(handles, _Latest()))
+        self.assertFalse(ensure_calibrated_arm_urdfs(handles, None))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            left = Path(tmpdir) / "left.urdf"
+            right = Path(tmpdir) / "right.urdf"
+            left.write_text("<robot name='l'/>")
+            right.write_text("<robot name='r'/>")
+
+            class _Calibrated:
+                self_collision = {"manifest": {"robot_urdf_left": str(left), "robot_urdf_right": str(right)}}
+
+            # Paths present but no viser server in the scene handles: nothing to swap yet.
+            self.assertFalse(ensure_calibrated_arm_urdfs({}, _Calibrated()))
+            # Already on these paths: no-op.
+            self.assertFalse(ensure_calibrated_arm_urdfs(
+                {"arm_urdf_paths": (str(left), str(right)), "_server": object()}, _Calibrated()))
 
     def test_missing_robot_urdf_reports_clear_error_string(self):
         old_value = os.environ.get("RB_GUI_DESCRIPTIONS_DIR")

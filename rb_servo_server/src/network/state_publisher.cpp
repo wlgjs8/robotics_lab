@@ -474,7 +474,8 @@ nlohmann::json kinematicsSnapshotJson(const KinematicsConfig& config) {
 // geometry build (gripper hull at "<prefix>attachment_site" rotated +90° about Z,
 // STL in mm so scale 0.001). Static (config-derived); the GUI reads it once.
 nlohmann::json selfCollisionManifestJson(
-    const SelfCollisionConfig& sc, const std::vector<std::string>& joint_names) {
+    const SelfCollisionConfig& sc, const std::vector<std::string>& joint_names,
+    const KinematicsConfig& kin) {
     const auto& m = sc.mesh;
     nlohmann::json extra = nlohmann::json::array();
     for (const auto& e : m.extra_collision) {
@@ -492,6 +493,13 @@ nlohmann::json selfCollisionManifestJson(
     return {
         {"schema", "robotics_lab.self_collision_manifest.v1"},
         {"unified_urdf", m.unified_urdf},
+        // THE BOX DH CALIBRATION (2026-09-05): when the server adopted the boxes'
+        // calibrated DH at startup, these are the calibrated copies of the GUI's arm
+        // model (one per arm; absolute paths) and unified_urdf above is the
+        // calibrated dual. The viewer swaps its arms to them (scene.ensure_calibrated_arm_urdfs).
+        {"dh_calibrated", !kin.urdf_left.empty() && !kin.urdf_right.empty()},
+        {"robot_urdf_left", kin.gui_urdf_left},
+        {"robot_urdf_right", kin.gui_urdf_right},
         {"package_dirs", stringArrayJson(m.package_dirs)},
         {"pika_gripper_mesh", m.pika_gripper_mesh},
         // Articulated gripper meshes (when set, the monitor checks a static base hull +
@@ -1857,7 +1865,7 @@ std::string StatePublisher::serializeSnapshot(const ServoSnapshot& snapshot) con
         // hardcoded viewer URDF). Present only when the guard is enabled.
         if (config_.safety.self_collision.enable) {
             self_collision["manifest"] = selfCollisionManifestJson(
-                config_.safety.self_collision, config_.kinematics.joint_names);
+                config_.safety.self_collision, config_.kinematics.joint_names, config_.kinematics);
         } else {
             self_collision["manifest"] = nullptr;
         }

@@ -1685,6 +1685,31 @@ kinematics:
   enable: true
   provider: pinocchio
   urdf: "descriptions/urdf/rb5_850e.urdf"
+  # THE BOX DH CALIBRATION (2026-09-05). At `make run` the server reads each box's
+  # calibrated DH (get_link_parameter: J2.alpha J3.alpha J1.d J2.a J3.a J4.d), writes
+  # calibrated runtime URDFs (logs/stack/runtime_urdf/) and builds IK/FK, the
+  # collision monitor and the GUI manifest from them. ANY failure - box off, a
+  # different value count, a cell beyond the limits, a mismatch at connect - ends
+  # the server (exit 3): real never runs on the URDF nominal. Measured gain vs
+  # nominal: p50 0.6-1.2 mm, 0.1 deg per arm (URDF FK vs box TCP, 2026-09-04).
+  # box_tool_offset_mm = the box's TCP point relative to our fingertip, in the box
+  # TCP axes, fitted on 2026-09-04 against the NOMINAL FK (left/right mirror in x).
+  # Feeds RobotState::fk_vs_box_tcp_mm every tick and the startup oracle; refit
+  # after the first calibrated session, then consider oracle_fatal: true.
+  calibration:
+    source: box
+    output_dir: logs/stack/runtime_urdf
+    probe_timeout_sec: 2.0
+    max_abs_delta_mm: 10.0
+    max_abs_delta_deg: 2.0
+    oracle_max_mm: 0.5
+    oracle_fatal: false
+    box_tool_offset_mm:
+      left:  [3.0, -249.7, -251.5]
+      right: [-3.7, -249.3, -250.7]
+    # The GUI draws its arms from calibrated copies of this file (published in the
+    # state manifest as robot_urdf_left/right); missing = fatal, like everything above.
+    gui_arm_urdf: "descriptions/urdf/rb5_850e_pika_articulated.urdf"
   base_link: "world"
   tip_link: "tcp"
   joint_names:

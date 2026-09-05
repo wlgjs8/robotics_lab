@@ -273,6 +273,11 @@ if [ "$GRIPPER_SERVER_ON" = "1" ]; then
 fi
 
 ensure_rt_caps
+if [ "$MODE" = "real" ]; then
+  echo "[stack] real mode: the server now reads the calibrated DH from BOTH boxes (get_link_parameter)"
+  echo "[stack]            and builds IK/FK, the collision monitor and the GUI model from it."
+  echo "[stack]            If a box is off or answers wrongly the server exits and this stack stops."
+fi
 "$SERVER_BIN" --config "$SERVER_CFG" >"$LOG_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 PIDS+=("$SERVER_PID")
@@ -296,6 +301,10 @@ done
 grep -q "CommandServer listening" "$LOG_DIR/server.log" || {
   echo "[stack] server did not come up in 150s:" >&2; tail -5 "$LOG_DIR/server.log" >&2; exit 1; }
 echo "[stack] server up."
+if [ "$MODE" = "real" ]; then
+  echo "[stack] box DH calibration (from $LOG_DIR/server.log):"
+  grep -h 'box DH calibration\|box link_parameter\|box DH oracle' "$LOG_DIR/server.log" 2>/dev/null | sed 's/^/[stack]   /' | head -20
+fi
 
 GUI_PORT="${RB_GUI_PORT:-8080}"
 echo "[stack] viser GUI: http://127.0.0.1:${GUI_PORT}"

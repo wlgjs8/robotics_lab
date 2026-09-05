@@ -723,6 +723,7 @@ void ServoLogger::writeHeader() {
             file_ << ',' << side << "_box_tcp_ref_" << c;
         }
         file_ << ',' << side << "_box_tcp_valid";
+        file_ << ',' << side << "_fk_vs_box_tcp_mm";
     }
     file_ << ",left_error_code,right_error_code";
     writeCartesianSolveHeader(file_, "left");
@@ -1506,6 +1507,7 @@ void ServoLogger::writeSample(const ServoSample& sample) {
         for (double v : st->box_tcp_pos) file_ << ',' << v;
         for (double v : st->box_tcp_ref) file_ << ',' << v;
         file_ << ',' << st->box_tcp_valid;
+        file_ << ',' << st->fk_vs_box_tcp_mm;
     }
     file_ << ',' << sample.left_state.error_code << ',' << sample.right_state.error_code;
     writeCartesianSolveColumns(file_, sample.left_cartesian_solve);
