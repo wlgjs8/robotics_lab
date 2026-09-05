@@ -125,6 +125,10 @@ public:
     // above its noise floor; a stream flat across the window is unplugged.
     void livenessSample(const Wrench6D& raw_sensor_axes);
     bool livenessDecide();   // -> connected
+    // Only for an externally stepped sensor whose sample sequence/time has been
+    // verified by its transport. A noiseless simulated sensor cannot use RFT's
+    // electrical-noise presence test. Does not grant a tare or validate a wrench.
+    void setExternallyVerifiedConnection(bool connected);
     bool connected() const { return connected_; }
     const std::string& connectReason() const { return connect_reason_; }
     double livenessForcePpN() const { return force_pp_; }

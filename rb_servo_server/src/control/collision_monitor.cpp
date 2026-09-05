@@ -1,4 +1,5 @@
 #include "rb_servo/control/collision_monitor.hpp"
+#include "rb_servo/core/clock.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -41,9 +42,7 @@ namespace {
 constexpr double kDeg2Rad = 3.14159265358979323846 / 180.0;
 
 double nowMonotonicS() {
-    return std::chrono::duration<double>(
-               std::chrono::steady_clock::now().time_since_epoch())
-        .count();
+    return nsToSec(nowSteadyNs());
 }
 
 bool nameContainsAny(const std::string& name, const std::vector<std::string>& subs) {

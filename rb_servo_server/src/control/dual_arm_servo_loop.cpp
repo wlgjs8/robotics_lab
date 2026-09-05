@@ -2435,6 +2435,26 @@ bool DualArmServoLoop::takePlannerResult(
     return false;
 }
 
+void DualArmServoLoop::enableExternalStepping() {
+    if (running_ || workerBackedIoMode() ||
+        !left_robot_ || !right_robot_ ||
+        !left_robot_->supportsExternalStepping() || !right_robot_->supportsExternalStepping()) {
+        throw std::logic_error("external stepping requires stopped direct I/O and hardware-free plants");
+    }
+    external_stepping_ = true;
+    if (collision_monitor_) collision_monitor_->stop();
+}
+
+bool DualArmServoLoop::stepOnce() {
+    std::unique_lock<std::mutex> lock(step_mutex_);
+    if (!external_stepping_ || !running_) return false;
+    const auto seq = ++requested_steps_;
+    step_cv_.notify_all();
+    return step_cv_.wait_for(lock, std::chrono::seconds(10), [&] {
+        return completed_steps_ >= seq || !running_;
+    }) && completed_steps_ >= seq;
+}
+
 bool DualArmServoLoop::start() {
     if (running_) return true;
     if (!initializeRobots()) {
@@ -2470,6 +2490,7 @@ bool DualArmServoLoop::start() {
 
 void DualArmServoLoop::stop() {
     running_ = false;
+    step_cv_.notify_all();
     if (thread_.joinable()) {
         thread_.join();
     }
@@ -2774,6 +2795,12 @@ void DualArmServoLoop::loopMain() {
     }
 
     while (running_) {
+        if (external_stepping_) {
+            std::unique_lock<std::mutex> lock(step_mutex_);
+            step_cv_.wait(lock, [&] { return !running_ || requested_steps_ > completed_steps_; });
+            if (!running_) break;
+            next_tick = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(nowSteadyNs()));
+        }
         // Scheduled wake time of THIS tick = the sleep_until target of the previous
         // iteration (next_tick before the increment below). Same steady epoch as
         // nowSteadyNs().
@@ -4319,6 +4346,12 @@ void DualArmServoLoop::loopMain() {
         async_supervision_degraded_last_tick = async_supervision_degraded_this_tick;
         tracking_error_degraded_prev_tick_ = tracking_error_degraded_this_tick_;
         prev_sleep_enter_ns = nowSteadyNs();
+        if (external_stepping_) {
+            std::lock_guard<std::mutex> lock(step_mutex_);
+            ++completed_steps_;
+            step_cv_.notify_all();
+            continue;
+        }
         if (spin_slack_ns > 0) {
             // Sleep until `slack` before the deadline, then busy-spin the rest so
             // the tick wakes exactly on phase (no C-state/scheduler wake jitter).
@@ -8001,9 +8034,13 @@ ServoTarget DualArmServoLoop::applySafety(
             // candidates), so the seam is already in place when applySafety is
             // split. Behaviourally identical here -- both arms submit in the same
             // tick, and the monitor only evaluates once both have reported.
-            collision_monitor_->submitArmTarget(ArmId::Left, out.left_q_target_deg);
-            collision_monitor_->submitArmTarget(ArmId::Right, out.right_q_target_deg);
-            const CollisionVerdict v = collision_monitor_->latest();
+            if (!external_stepping_) {
+                collision_monitor_->submitArmTarget(ArmId::Left, out.left_q_target_deg);
+                collision_monitor_->submitArmTarget(ArmId::Right, out.right_q_target_deg);
+            }
+            const CollisionVerdict v = external_stepping_
+                ? collision_monitor_->evalOnce(out.left_q_target_deg, out.right_q_target_deg)
+                : collision_monitor_->latest();
             last_collision_verdict_ = v;
             // Ground-truth diagnostic (opt-in via RB_SELF_COLLISION_LOG=1): print the
             // EXACT closest checked pair + clearance the async monitor computes for the
@@ -8052,8 +8089,7 @@ ServoTarget DualArmServoLoop::applySafety(
             const bool hard_breach =
                 gripper_excluded ? v.hard_violation_non_gripper : v.hard_violation;
             if (gripper_excluded) last_self_collision_.violated = v.valid && hard_breach;
-            const double now_s = std::chrono::duration<double>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
+            const double now_s = nsToSec(nowSteadyNs());
             const bool stale =
                 collisionVerdictStale(v, now_s, collision_monitor_cfg_.max_staleness_s);
             if (v.valid) {
@@ -9434,6 +9470,14 @@ bool DualArmServoLoop::stepFtPipeline(ArmId arm, const RobotState& state) {
     // mid-run keeps its "connected" verdict — which is deliberate: the run-time
     // answer to a sensor that stops changing is the staleness of the state stream,
     // not a second liveness test that would flag a genuinely motionless arm.
+    if (external_stepping_) {
+        // This mode is refused unless BOTH backends explicitly support external
+        // stepping. Real/mock backend entry points cannot select it. The pipe
+        // adapter verifies a fresh force sample with every 2 ms plant tick.
+        pipe.setExternallyVerifiedConnection(state.eft_valid &&
+                                             state.host_time_ns == nowSteadyNs());
+        decided = true;
+    }
     if (!decided) {
         pipe.livenessSample(state.eft_wrench);
         const auto need = static_cast<std::uint32_t>(

@@ -2,6 +2,7 @@
 // chunk-overlay packet) + live loopback receive + dedup seq consistency.
 
 #include "rb_servo/network/chunk_frame_receiver.hpp"
+#include "rb_servo/core/clock.hpp"
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
@@ -84,6 +85,26 @@ static std::string asV3WithMetadata(std::string packet, bool proprio_valid) {
 }
 
 int main() {
+  // Embedded ingress shares parsing, timestamps and monotonic receiver IDs
+  // with the UDP path, including concurrent writers.
+  {
+    rb_servo::setExternalSteadyNs(1'000'000'000);
+    ChunkFrameReceiver receiver("");
+    const auto packet = asV3WithMetadata(makePacket(1, 17, true, true), true);
+    auto publish = [&] {
+      for (int i = 0; i < 20; ++i) receiver.acceptPacket(packet.data(), packet.size());
+    };
+    std::thread a(publish), b(publish);
+    a.join(); b.join();
+    ChunkFrameReceiver::Frame frame;
+    check(receiver.copyLatest(&frame), "embedded ingress publishes a complete frame");
+    check(frame.receiver_seq == 40 && receiver.latestSeq() == 40,
+          "embedded concurrent ingress keeps receiver seq consistent");
+    check(frame.recv_steady_sec == 1.0, "embedded frame uses the simulation clock");
+    check(!receiver.acceptPacket("{}", 2) && receiver.latestSeq() == 40,
+          "invalid embedded packet does not advance receiver seq");
+    rb_servo::setExternalSteadyNs(0);
+  }
   // -- Test 1: parsePacket accepts the producer's overlay wire format. --------
   std::printf("Test 1: parsePacket\n");
   {

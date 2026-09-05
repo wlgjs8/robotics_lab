@@ -1,4 +1,5 @@
 #include "rb_servo/network/chunk_frame_receiver.hpp"
+#include "rb_servo/core/clock.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -226,7 +227,7 @@ ChunkFrameReceiver::ChunkFrameReceiver(const std::string& bind_uri) : bind_uri_(
 ChunkFrameReceiver::~ChunkFrameReceiver() { stop(); }
 
 double ChunkFrameReceiver::steadyNowSec() {
-    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    return nsToSec(nowSteadyNs());
 }
 
 bool ChunkFrameReceiver::parsePacket(const char* data, std::size_t size, Frame* out) {
@@ -341,6 +342,25 @@ bool ChunkFrameReceiver::copyLatest(Frame* out) const {
     return true;
 }
 
+bool ChunkFrameReceiver::acceptPacket(const char* data, std::size_t size) {
+    Frame frame;
+    if (!parsePacket(data, size, &frame)) return false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // receiver_seq is assigned UNDER the same lock the reader copies
+        // under, so a copied frame always carries its own consistent seq
+        // (the atomic latest_seq_ is only a cheap "anything new?" gate).
+        frame.receiver_seq = latest_seq_.load(std::memory_order_relaxed) + 1;
+        if (latest_.recv_steady_sec > 0.0 &&
+            frame.recv_steady_sec >= latest_.recv_steady_sec) {
+            frame.interarrival_sec = frame.recv_steady_sec - latest_.recv_steady_sec;
+        }
+        latest_ = frame;
+        latest_seq_.store(frame.receiver_seq, std::memory_order_release);
+    }
+    return true;
+}
+
 void ChunkFrameReceiver::threadMain() {
     std::array<char, 65536> buffer;
     while (running_.load(std::memory_order_acquire)) {
@@ -353,21 +373,7 @@ void ChunkFrameReceiver::threadMain() {
         const ssize_t received = ::recvfrom(
             socket_fd_, buffer.data(), buffer.size() - 1, 0, nullptr, nullptr);
         if (received <= 0) continue;
-        Frame frame;
-        if (!parsePacket(buffer.data(), static_cast<std::size_t>(received), &frame)) continue;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            // receiver_seq is assigned UNDER the same lock the reader copies
-            // under, so a copied frame always carries its own consistent seq
-            // (the atomic latest_seq_ is only a cheap "anything new?" gate).
-            frame.receiver_seq = latest_seq_.load(std::memory_order_relaxed) + 1;
-            if (latest_.recv_steady_sec > 0.0 &&
-                frame.recv_steady_sec >= latest_.recv_steady_sec) {
-                frame.interarrival_sec = frame.recv_steady_sec - latest_.recv_steady_sec;
-            }
-            latest_ = frame;
-        }
-        latest_seq_.fetch_add(1, std::memory_order_acq_rel);
+        acceptPacket(buffer.data(), static_cast<std::size_t>(received));
     }
 }
 

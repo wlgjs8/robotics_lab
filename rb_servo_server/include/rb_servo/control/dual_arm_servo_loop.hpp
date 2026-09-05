@@ -133,6 +133,11 @@ public:
     bool start();
     void stop();
 
+    // Hardware-free embedding: execute the SAME tick body on demand. Must be
+    // selected before start(), with direct I/O and an injected plant backend.
+    void enableExternalStepping();
+    bool stepOnce();
+
     bool isRunning() const;
     ServerMotionState motionState() const;
     bool faultLatched() const;
@@ -155,6 +160,11 @@ public:
     void setChunkFrameReceiver(ChunkFrameReceiver* receiver) { chunk_frame_receiver_ = receiver; }
 
 private:
+    bool external_stepping_ = false;
+    std::mutex step_mutex_;
+    std::condition_variable step_cv_;
+    uint64_t requested_steps_ = 0;
+    uint64_t completed_steps_ = 0;
     // Live gripper open percent per arm and its validity, set by setGripperFeedback
     // and read in the evaluate*Arm safety gates. Default OPEN (100) / invalid so the
     // pre-feedback behavior equals the legacy gripper-open offsets.

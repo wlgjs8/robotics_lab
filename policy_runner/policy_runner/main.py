@@ -378,6 +378,7 @@ def run(
     source: object | None = None,
     sleep_fn=time.sleep,
     monotonic_fn=time.monotonic,
+    pacing_monotonic_fn=None,
     stderr: TextIO = sys.stderr,
     state_sink: Callable[[StateSnapshot], None] | None = None,
     send_commands: bool = True,
@@ -418,7 +419,7 @@ def run(
     lease_retry_after = float("-inf")
     last_motion_intent_time: float | None = None
     period = 1.0 / max(config.command_rate_hz, 1.0)
-    _pacer = _TickPacer(period, sleep_fn)
+    _pacer = _TickPacer(period, sleep_fn, pacing_monotonic_fn or time.monotonic)
     startup_deadline = monotonic_fn() + max(config.runtime.startup_timeout_sec, 0.0)
     # POLICY_RUNNER_TELEOP_DEBUG=1: 1 Hz loop stats (sent/dropped/no-intent + last drop reason).
     teleop_debug = os.environ.get("POLICY_RUNNER_TELEOP_DEBUG", "") == "1"

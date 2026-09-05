@@ -444,6 +444,8 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         rtc_inference_delay: int = 2,
         rtc_prefix_attention_schedule: str = "exp",
         rtc_max_guidance_weight: float = 5.0,
+        clock: Any | None = None,
+        chunk_overlay_endpoint: str | None = None,
         stderr: TextIO = sys.stderr,
     ):
         # Deliberately NOT calling super().__init__: there is no local checkpoint to
@@ -466,6 +468,11 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self._fake_images = os.environ.get(_FAKE_IMAGES_ENV, "") == "1"
 
         self.timeout_sec = float(timeout_sec)
+        # Optional simulator clock: camera, robot state and inference timestamps
+        # share one monotonic domain. Wall-clock defaults remain unchanged.
+        self._external_clock = clock
+        if clock is not None:
+            self._inference_clock_ns = clock.now_ns
         self.camera_client = camera_client
         self.episode_observation_provider = episode_observation_provider
         # A finite saved-episode replay must terminate the server-side preview
@@ -776,7 +783,8 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         self._trk_prev_measured = {"left": None, "right": None}
         self._trk_start_monotonic = 0.0
         self._chunk_overlay_publisher = None
-        _overlay_endpoint = os.environ.get("RB_GUI_CHUNK_OVERLAY_ENDPOINT")
+        _overlay_endpoint = (os.environ.get("RB_GUI_CHUNK_OVERLAY_ENDPOINT")
+                             if chunk_overlay_endpoint is None else chunk_overlay_endpoint)
         if _overlay_endpoint and _overlay_endpoint.strip():
             try:
                 self._chunk_overlay_publisher = ChunkOverlayPublisher(_overlay_endpoint.strip())
@@ -1025,6 +1033,9 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
         Python-side receipt timestamp instead of comparing raw camera time directly
         to robot ``host_time_ns``.
         """
+        clock = getattr(self, "_external_clock", None)
+        if clock is not None:
+            return float(bundle.bundle_time_ns) * 1e-9
         mono_now_sec = time.monotonic()
 
         def fallback_received() -> float | None:
@@ -1228,7 +1239,9 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             seq = 0
         try:
             bundle_time_ns = int(getattr(bundle, "bundle_time_ns", 0) or 0)
-            age_ms = max(0.0, (bundle_clock_ns() - bundle_time_ns) / 1_000_000.0)
+            clock = getattr(self, "_external_clock", None)
+            now_ns = clock.now_ns() if clock is not None else bundle_clock_ns()
+            age_ms = max(0.0, (now_ns - bundle_time_ns) / 1_000_000.0)
         except Exception:  # noqa: BLE001
             age_ms = None
         return bool(fresh and not missing and seq > 0), (seq or None), missing, age_ms
@@ -1772,7 +1785,8 @@ class OpenpiRemoteActionSource(FlowMatchingActionSource):
             self._clear_last_obs_camera_bundle()
             return None, decode_count, max(missing_count, 2 - len(images))
         bundle_seq = 0 if bundle is None else int(getattr(bundle, "bundle_seq", 0) or 0)
-        bundle_now_ns = bundle_clock_ns()
+        clock = getattr(self, "_external_clock", None)
+        bundle_now_ns = clock.now_ns() if clock is not None else bundle_clock_ns()
         bundle_time_ns = 0 if bundle is None else int(getattr(bundle, "bundle_time_ns", 0) or 0)
         bundle_age_ms = (
             max(0.0, (bundle_now_ns - bundle_time_ns) / 1_000_000.0)

@@ -107,6 +107,8 @@ public:
 
     bool start();
     void stop();
+    // Shared validated ingress for hardware-free in-process transports.
+    bool acceptPacket(const char* data, std::size_t size);
 
     // Monotonically bumped on every accepted frame (independent of the producer
     // seq, which may reset when the producer restarts). 0 = none yet.

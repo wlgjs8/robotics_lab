@@ -118,6 +118,9 @@ endif()
 add_executable(rb_servo_server src/main.cpp)
 target_link_libraries(rb_servo_server PRIVATE rb_servo_core)
 
+add_executable(rb_isaac_bridge src/isaac_bridge_main.cpp)
+target_link_libraries(rb_isaac_bridge PRIVATE rb_servo_core)
+
 # config.hpp contains layout-sensitive runtime/safety structs shared across the
 # server. Make every shipped server object depend on it explicitly so an
 # incremental build recompiles the complete ABI surface without deleting the

@@ -35,6 +35,8 @@ public:
     virtual bool isConnected() const = 0;
     virtual ArmId armId() const = 0;
     virtual std::string name() const = 0;
+    // Only an explicitly injected, hardware-free plant can run on manual time.
+    virtual bool supportsExternalStepping() const { return false; }
     virtual std::optional<BackendTransportTelemetry> transportTelemetry() const { return std::nullopt; }
     // The controller's own link-parameter (calibrated DH) table if the backend
     // read one at connect; empty for hardware-free backends. Logging only.

@@ -267,6 +267,12 @@ bool FtPipeline::livenessDecide() {
     return connected_;
 }
 
+void FtPipeline::setExternallyVerifiedConnection(bool connected) {
+    connected_ = connected;
+    connect_reason_ = connected ? "externally stepped sensor: sample sequence/time verified"
+                                : "externally stepped sensor: invalid or stale sample";
+}
+
 void FtPipeline::fillTelemetry(FtTelemetry* out) const {
     if (out == nullptr) return;
     out->enabled = cfg_ != nullptr && cfg_->enable;

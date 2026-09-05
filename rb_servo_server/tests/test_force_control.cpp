@@ -1258,7 +1258,29 @@ bool testPoseTrackGateHoldsStateNotGoal() {
     return true;
 }
 
+bool testExternallyVerifiedSensorDoesNotGrantTareOrAcceptInvalidWrench() {
+    auto cfg = cellConfig();
+    cfg.tool_mass_kg = 0.0;
+    auto pipe = rb_servo::sensor::FtPipeline{};
+    pipe.configure(cfg, 0.002);
+    pipe.setExternallyVerifiedConnection(true);
+    CHECK(pipe.connected());
+    CHECK(!pipe.biasValid());
+    auto in = input(rb_servo::Wrench6D{0,10,0,0,0,0}, rb_servo::math::Matrix3::Identity());
+    CHECK(pipe.step(in));
+    CHECK(near(pipe.rawSensor().fx, 10.0));
+    in.raw_valid = false;
+    CHECK(!pipe.step(in));
+    CHECK(near(pipe.compTcp().fx, 0.0));
+    in.raw_valid = true;
+    pipe.setExternallyVerifiedConnection(false);
+    CHECK(!pipe.step(in));
+    CHECK(!pipe.biasValid());
+    return true;
+}
+
 int main() {
+    testExternallyVerifiedSensorDoesNotGrantTareOrAcceptInvalidWrench();
     testPoseTrackGateHoldsStateNotGoal();
     testSpringUnderTheGateHoldsTheConfiguredForce();
     testStripInvertsCompose();
